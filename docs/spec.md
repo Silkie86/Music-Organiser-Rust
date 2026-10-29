@@ -354,7 +354,7 @@ the same files, and every difference is listed and judged (section 11's "twin te
 - First-made date: event 237, two Delphi doubles.
 - Repair: keep the damaged save's events, finish from the newest older whole save's matching channel; fix the
   channel count word.
-- Reader version (setting `reader_version:FL Studio`), currently 6. **Rule:** bump it whenever what a reader finds
+- Reader version (setting `reader_version:FL Studio`), currently 7. **Rule:** bump it whenever what a reader finds
   changes, so every song is re-read once.
 - **Rule:** read each big file once per job into one reused buffer (C# `ReadOnce`); in Rust, memory-map it.
 

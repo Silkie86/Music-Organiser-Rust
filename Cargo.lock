@@ -2646,6 +2646,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mo-formats"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+]
+
+[[package]]
 name = "mo-ui"
 version = "0.1.0"
 dependencies = [
