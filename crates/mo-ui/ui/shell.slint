@@ -1,0 +1,314 @@
+// The parts of the window shell that sit over every page: activity cards, the key sheet and the F12 note.
+import { Theme, StudioButton, Well, Caps, Groove } from "studio.slint";
+
+export struct CardInfo {
+    id: int,
+    title: string,
+    detail: string,
+    // 0 to 1, or below 0 while the job can't say how far it is.
+    progress: float,
+    // 0 running, 1 done, 2 failed.
+    state: int,
+}
+
+export struct KeyRow {
+    key: string,
+    what: string,
+}
+
+// A small × button, for putting a card away.
+component CloseButton inherits Rectangle {
+    callback clicked;
+    width: 20px;
+    height: 20px;
+    border-radius: Theme.radius;
+    background: touch.has-hover ? Theme.hover : transparent;
+    Text {
+        text: "×";
+        color: Theme.muted;
+        font-size: 15px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+// One job's card: what it is, how far, and how it ended.
+component ActivityCard inherits Rectangle {
+    in property <CardInfo> card;
+    callback dismiss();
+    property <bool> running: card.state == 0;
+    property <color> mark: card.state == 2 ? Theme.missing : card.state == 1 ? Theme.ok : Theme.accent;
+    background: Theme.surface-raised;
+    border-radius: Theme.radius + 2px;
+    border-width: 1px;
+    border-color: card.state == 2 ? Theme.missing.transparentize(50%) : Theme.edge;
+    drop-shadow-blur: 18px;
+    drop-shadow-color: Theme.shadow;
+    drop-shadow-offset-y: 6px;
+    VerticalLayout {
+        padding: 12px;
+        padding-right: 8px;
+        spacing: 6px;
+        HorizontalLayout {
+            spacing: 8px;
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                y: (parent.height - self.height) / 2;
+                border-radius: 4px;
+                background: root.mark;
+            }
+            Text {
+                text: root.card.title;
+                color: Theme.text;
+                font-size: 13px;
+                font-weight: 500;
+                overflow: elide;
+                horizontal-stretch: 1;
+            }
+            CloseButton {
+                clicked => { root.dismiss(); }
+            }
+        }
+        if root.card.detail != "": Text {
+            text: root.card.detail;
+            color: Theme.muted;
+            font-size: 12px;
+            wrap: word-wrap;
+        }
+        if root.running: Rectangle {
+            height: 4px;
+            border-radius: 2px;
+            background: Theme.well;
+            clip: true;
+            // A known amount fills the bar; an unknown one sweeps back and forth.
+            Rectangle {
+                x: root.card.progress >= 0 ? 0 : (parent.width - self.width) * (0.5 + 0.5 * sin(animation-tick() / 900ms * 180deg));
+                width: root.card.progress >= 0 ? parent.width * root.card.progress : parent.width * 0.3;
+                border-radius: 2px;
+                background: Theme.accent;
+                animate width { duration: 200ms; }
+            }
+        }
+    }
+}
+
+// The cards, bottom right, newest at the bottom, with "N running" when some are put away.
+export component ActivityCards inherits VerticalLayout {
+    in property <[CardInfo]> cards;
+    in property <int> put-away;
+    callback dismiss(int);
+    callback bring-back();
+    width: 320px;
+    spacing: 8px;
+    alignment: end;
+    for c in root.cards: ActivityCard {
+        card: c;
+        dismiss => { root.dismiss(c.id); }
+    }
+    if root.put-away > 0: HorizontalLayout {
+        alignment: end;
+        Rectangle {
+            width: label.preferred-width + 24px;
+            height: 26px;
+            border-radius: 13px;
+            background: chip.has-hover ? Theme.hover : Theme.surface-raised;
+            border-width: 1px;
+            border-color: Theme.edge;
+            label := Text {
+                text: root.put-away + " running";
+                color: Theme.text;
+                font-size: 12px;
+                font-weight: 500;
+            }
+            chip := TouchArea {
+                clicked => { root.bring-back(); }
+            }
+        }
+    }
+}
+
+// The dimmed backdrop behind a sheet or dialog. Clicking it closes.
+component Backdrop inherits Rectangle {
+    callback close();
+    background: Theme.scrim;
+    TouchArea {
+        clicked => { root.close(); }
+    }
+}
+
+// F1 or ?: every key in one list, read from the app-wide shortcut list.
+export component KeySheet inherits Rectangle {
+    in property <[KeyRow]> rows;
+    callback close();
+    Backdrop {
+        close => { root.close(); }
+    }
+    Rectangle {
+        width: min(720px, root.width - 80px);
+        height: min(640px, root.height - 80px);
+        background: Theme.surface;
+        border-radius: Theme.radius + 4px;
+        border-width: 1px;
+        border-color: Theme.edge;
+        drop-shadow-blur: 40px;
+        drop-shadow-color: Theme.shadow;
+        // Swallows clicks so they don't reach the backdrop.
+        TouchArea { }
+        VerticalLayout {
+            padding: 20px;
+            spacing: 12px;
+            HorizontalLayout {
+                Text {
+                    text: "Keys";
+                    color: Theme.text;
+                    font-size: 18px;
+                    font-weight: 600;
+                    horizontal-stretch: 1;
+                }
+                CloseButton {
+                    clicked => { root.close(); }
+                }
+            }
+            Caps { text: "EVERYWHERE"; }
+            Groove { }
+            Flickable {
+                VerticalLayout {
+                    for r in root.rows: HorizontalLayout {
+                        padding-top: 5px;
+                        padding-bottom: 5px;
+                        spacing: 16px;
+                        Text {
+                            text: r.what;
+                            color: Theme.text;
+                            font-size: 13px;
+                            horizontal-stretch: 1;
+                            wrap: word-wrap;
+                        }
+                        Rectangle {
+                            width: max(keyText.preferred-width + 14px, 34px);
+                            height: 22px;
+                            border-radius: Theme.radius;
+                            border-width: 1px;
+                            border-color: Theme.stroke;
+                            background: Theme.surface-raised;
+                            keyText := Text {
+                                text: r.key;
+                                color: r.key == "" ? Theme.faint : Theme.muted;
+                                font-family: Theme.number-font;
+                                font-size: 12px;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// F12: a note to Claude about what's on screen.
+export component NoteDialog inherits Rectangle {
+    in-out property <string> text;
+    in property <bool> has-picture;
+    in-out property <bool> include-picture: true;
+    callback edited(string);
+    callback save();
+    // Cancel throws the words away; putting aside (Esc, or a click beside the dialog) keeps them for next time.
+    callback cancel();
+    callback put-aside();
+    forward-focus: input;
+    Backdrop {
+        close => { root.put-aside(); }
+    }
+    Rectangle {
+        width: min(560px, root.width - 80px);
+        height: 340px;
+        background: Theme.surface;
+        border-radius: Theme.radius + 4px;
+        border-width: 1px;
+        border-color: Theme.edge;
+        drop-shadow-blur: 40px;
+        drop-shadow-color: Theme.shadow;
+        TouchArea { }
+        VerticalLayout {
+            padding: 20px;
+            spacing: 12px;
+            Text {
+                text: "Note for Claude";
+                color: Theme.text;
+                font-size: 18px;
+                font-weight: 600;
+            }
+            Text {
+                text: "What did you see, or what should change? It's saved with a picture of the window and the app's last log lines, where Claude can read it.";
+                color: Theme.muted;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
+            Well {
+                vertical-stretch: 1;
+                input := TextInput {
+                    x: 10px;
+                    y: 8px;
+                    width: parent.width - 20px;
+                    height: parent.height - 16px;
+                    text <=> root.text;
+                    color: Theme.text;
+                    font-size: 14px;
+                    wrap: word-wrap;
+                    single-line: false;
+                    selection-background-color: Theme.accent.transparentize(60%);
+                    edited => { root.edited(self.text); }
+                }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                if root.has-picture: Rectangle {
+                    width: pictureLabel.preferred-width + 26px;
+                    Rectangle {
+                        x: 0;
+                        width: 16px;
+                        height: 16px;
+                        border-radius: Theme.radius;
+                        border-width: 1px;
+                        border-color: Theme.stroke;
+                        background: root.include-picture ? Theme.accent : Theme.well;
+                        // The tick is drawn, as the app's fonts have no ✓.
+                        if root.include-picture: Path {
+                            width: 16px;
+                            height: 16px;
+                            viewbox-width: 16;
+                            viewbox-height: 16;
+                            commands: "M 4 8.5 L 7 11.5 L 12.5 5";
+                            stroke: Theme.accent-text;
+                            stroke-width: 2px;
+                        }
+                    }
+                    pictureLabel := Text {
+                        x: 24px;
+                        text: "Include the picture";
+                        color: Theme.text;
+                        font-size: 13px;
+                        vertical-alignment: center;
+                    }
+                    TouchArea {
+                        clicked => { root.include-picture = !root.include-picture; }
+                    }
+                }
+                Rectangle { horizontal-stretch: 1; }
+                StudioButton {
+                    text: "Cancel";
+                    clicked => { root.cancel(); }
+                }
+                StudioButton {
+                    text: "Save note";
+                    main: true;
+                    clicked => { root.save(); }
+                }
+            }
+        }
+    }
+}

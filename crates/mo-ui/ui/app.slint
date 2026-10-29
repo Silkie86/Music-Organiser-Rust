@@ -2,6 +2,7 @@
 // Plugins and Space, with Settings at the bottom.
 import { Theme, RailItem, Groove, Caps } from "studio.slint";
 import { ComingPage } from "pages/coming.slint";
+import { ActivityCards, CardInfo, KeySheet, KeyRow, NoteDialog } from "shell.slint";
 
 import "../fonts/IBMPlexSans-400.ttf";
 import "../fonts/IBMPlexSans-500.ttf";
@@ -18,7 +19,7 @@ import "../fonts/SpaceGrotesk-700.ttf";
 import "../fonts/SpaceMono-400.ttf";
 import "../fonts/SpaceMono-700.ttf";
 
-export { Theme }
+export { Theme, CardInfo, KeyRow }
 
 export struct PlaceInfo {
     name: string,
@@ -44,9 +45,43 @@ export component AppWindow inherits Window {
     // A key press, with its modifiers, for the app-wide shortcut list in mo-app. Returns whether it was used.
     callback key(string, bool, bool, bool, bool) -> bool;
 
+    // Activity cards, bottom right.
+    in property <[CardInfo]> cards;
+    in property <int> put-away;
+    callback dismiss-card(int);
+    callback bring-back-cards();
+    // Settings' "Try an activity card", until real jobs exist.
+    callback try-job();
+
+    // The key sheet (F1 or ?).
+    in property <[KeyRow]> key-rows;
+    in-out property <bool> sheet-open;
+
+    // The F12 note.
+    in-out property <bool> note-open;
+    in-out property <string> note-text;
+    in property <bool> note-has-picture;
+    in-out property <bool> note-include-picture: true;
+    callback note-edited(string);
+    callback note-save();
+    callback note-cancel();
+    callback note-put-aside();
+
     forward-focus: keys;
     keys := FocusScope {
         key-pressed(event) => {
+            if (event.text == Key.Escape && (root.sheet-open || root.note-open)) {
+                if (root.note-open) {
+                    root.note-put-aside();
+                }
+                root.sheet-open = false;
+                keys.focus();
+                return accept;
+            }
+            // While the note is open, keys are for typing: no shortcut runs behind it.
+            if (root.note-open) {
+                return reject;
+            }
             if (root.key(event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt, event.modifiers.meta)) {
                 return accept;
             }
@@ -104,7 +139,47 @@ export component AppWindow inherits Window {
             ComingPage {
                 title: root.places[root.place].name;
                 coming: root.places[root.place].coming;
+                can-try-job: root.place == root.settings-place;
+                try-job => { root.try-job(); }
             }
+        }
+
+        ActivityCards {
+            x: parent.width - self.width - 20px;
+            y: parent.height - self.height - 20px;
+            height: self.preferred-height;
+            cards: root.cards;
+            put-away: root.put-away;
+            dismiss(id) => { root.dismiss-card(id); }
+            bring-back => { root.bring-back-cards(); }
+        }
+
+        if root.sheet-open: KeySheet {
+            rows: root.key-rows;
+            close => {
+                root.sheet-open = false;
+                keys.focus();
+            }
+        }
+
+        if root.note-open: note := NoteDialog {
+            text <=> root.note-text;
+            has-picture: root.note-has-picture;
+            include-picture <=> root.note-include-picture;
+            edited(t) => { root.note-edited(t); }
+            save => {
+                root.note-save();
+                keys.focus();
+            }
+            cancel => {
+                root.note-cancel();
+                keys.focus();
+            }
+            put-aside => {
+                root.note-put-aside();
+                keys.focus();
+            }
+            init => { self.focus(); }
         }
     }
 }

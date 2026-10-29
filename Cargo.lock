@@ -2641,6 +2641,7 @@ dependencies = [
 name = "mo-app"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "serde_json",
 ]
 
@@ -2648,6 +2649,7 @@ dependencies = [
 name = "mo-ui"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "image",
  "mo-app",
  "slint",

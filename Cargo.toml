@@ -12,6 +12,7 @@ publish = false
 mo-app = { path = "crates/mo-app" }
 slint = "1.18"
 slint-build = "1.18"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 [workspace.lints.rust]
