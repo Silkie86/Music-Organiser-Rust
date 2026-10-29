@@ -200,8 +200,13 @@ fn reads_fl_9_step_sequencer_drums_as_notes() {
     let flp = events::load(&bytes).expect("an FL project");
     let made: Vec<_> = flp.events.iter().filter(|e| e.offset.is_none()).collect();
     assert_eq!(made.len(), 1);
-    let notes: Vec<(u32, u8)> =
-        made[0].data.chunks_exact(24).map(|n| (u32::from_le_bytes([n[0], n[1], n[2], n[3]]), n[21])).collect();
+    let notes: Vec<(u32, u8)> = made[0]
+        .data
+        .as_chunks::<24>()
+        .0
+        .iter()
+        .map(|n| (u32::from_le_bytes([n[0], n[1], n[2], n[3]]), n[21]))
+        .collect();
     assert_eq!(notes, [(0, 100), (123, 52), (183, 100)]);
 }
 

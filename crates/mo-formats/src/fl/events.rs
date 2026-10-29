@@ -123,7 +123,7 @@ impl Flp<'_> {
     /// A text event's text.
     pub fn text(&self, data: &[u8]) -> String {
         let text = if self.utf16 {
-            let units: Vec<u16> = data.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+            let units: Vec<u16> = data.as_chunks::<2>().0.iter().map(|&c| u16::from_le_bytes(c)).collect();
             String::from_utf16_lossy(&units)
         } else {
             data.iter().map(|&b| b as char).collect()
