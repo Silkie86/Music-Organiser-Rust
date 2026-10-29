@@ -717,7 +717,8 @@ Each phase ends with something you can open and try. The C# app stays your daily
 15. One app-wide shortcut list; every menu line shows its key.
 16. One shared style; reuse the main control for smaller lists.
 17. Crashes always log; F12 notes keep their draft through restarts.
-18. Merging needs your yes every time; don't push to the build you're testing without asking.
+18. Claude merges a PR itself once its code review's points are fixed and CI is green (changed 2026-10-29); don't push
+    to the build you're testing without asking.
 19. A quick code review on each pull request before you test it; after a batch merges (at the latest each phase), an
     ultracode code review of the whole app on `main`, then fixes.
 20. Claude sets the right effort level itself for each task and review (your rule, 2026-10-29): higher for file
