@@ -5,6 +5,7 @@
 
 pub mod events;
 mod notes;
+pub mod presets;
 pub mod song;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -33,7 +34,7 @@ pub(crate) const VST_VENDOR: u32 = 56;
 /// The wrapper's kind (record 50) for a VST3.
 pub(crate) const KIND_VST3: u8 = 8;
 
-const CHANNEL_TYPE_INSTRUMENT: u32 = 2;
+pub(crate) const CHANNEL_TYPE_INSTRUMENT: u32 = 2;
 pub(crate) const WRAPPER: &str = "Fruity Wrapper";
 
 /// FL's own instruments: a native plugin with one of these names is an instrument wherever it sits.
@@ -85,7 +86,7 @@ const NATIVE_GENERATORS: &[&str] = &[
     "Fruity Kick",
 ];
 
-fn is_native_generator(name: &str) -> bool {
+pub(crate) fn is_native_generator(name: &str) -> bool {
     NATIVE_GENERATORS.iter().any(|g| g.eq_ignore_ascii_case(name))
 }
 
@@ -222,7 +223,7 @@ pub fn read_bytes(raw: &[u8]) -> ProjectInfo {
     info.details.insert("Channels".into(), info.tracks.len().to_string());
     info.details.insert("Patterns".into(), patterns.to_string());
     info.details.insert("Notes".into(), notes.to_string());
-    note_unplayed(&song::read_song(&flp), &mut info);
+    note_unplayed(&song::read_song_with(&flp, false), &mut info);
     align_unplayed(info.dedupe())
 }
 
@@ -259,6 +260,11 @@ impl Rack {
     /// The channel the event belongs to: none for the mixer's events, or before the first channel.
     pub fn channel(&self) -> Option<u32> {
         self.channel.filter(|_| !self.in_mixer)
+    }
+
+    /// The mixer's events have started (and no channel's since).
+    pub fn in_mixer(&self) -> bool {
+        self.in_mixer
     }
 }
 

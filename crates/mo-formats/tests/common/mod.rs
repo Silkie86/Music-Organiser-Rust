@@ -325,6 +325,26 @@ pub fn fl_vst2_state(chunk: &[u8], program: u32) -> Vec<u8> {
     b
 }
 
+/// FL's VST2 state for a plugin without chunks that has several programs, as FL 10 and 21 save Tone2's FireBird: the
+/// 21-byte header with the selected program, every program's values one after another, then u32 the number of programs
+/// and their names, 25 bytes apart.
+pub fn fl_vst2_param_bank(programs: &[&[f32]], names: &[&str], selected: i32) -> Vec<u8> {
+    let mut b = vec![0u8; 21];
+    b[..4].copy_from_slice(&(-9i32).to_le_bytes());
+    b[4] = 0x05;
+    b[5..9].copy_from_slice(&(-2i32).to_le_bytes());
+    b[17..21].copy_from_slice(&selected.to_le_bytes());
+    b.extend((programs.iter().map(|p| p.len()).sum::<usize>() as u32).to_le_bytes());
+    b.extend(programs.iter().flat_map(|p| p.iter()).flat_map(|v| v.to_le_bytes()));
+    b.extend((programs.len() as u32).to_le_bytes());
+    for n in names {
+        let mut name = [0u8; 25];
+        name[..n.len()].copy_from_slice(n.as_bytes());
+        b.extend(name);
+    }
+    b
+}
+
 /// FL's VST2 state for a plugin without chunks: the 21-byte header (chunk length 0, flags without 0x08), the
 /// parameter count and values, then u32 1 and the program name.
 pub fn fl_vst2_param_state(values: &[f32], program: &str) -> Vec<u8> {

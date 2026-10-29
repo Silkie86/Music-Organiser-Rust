@@ -6,12 +6,14 @@ use std::path::Path;
 
 use super::events::*;
 use super::notes;
+use super::presets::{vst3_parameter_ids, wrapper_preset};
 use super::{
     KIND_VST3, Rack, UserData, VST_CLASS_ID, VST_FOUR_CC, VST_KIND, VST_NAME, VST_PATH, VST_STATE, VST_VENDOR, WRAPPER,
     saved_nothing, wrapper_fields, wrapper_text,
 };
 use crate::model::{MidiChannel, MidiClip, NoteEvent};
 use crate::plugins;
+use crate::presets::PresetBlob;
 
 const EV_CHANNEL_ON: u8 = 0;
 /// The mixer insert a channel is routed to (older versions).
@@ -56,6 +58,10 @@ pub struct FlPlugin {
     pub path: String,
     /// The plugin gave FL nothing when the project was saved, so it opens at its default sound.
     pub nothing_saved: bool,
+    /// Its settings as a file the plugin can load (.fxp or .vstpreset), when there is one.
+    pub state: Option<PresetBlob>,
+    /// A VST3's own ids for its settings, in FL's order: FL automates setting n, other DAWs `parameter_ids[n]`.
+    pub parameter_ids: Option<Vec<u32>>,
 }
 
 impl FlPlugin {
@@ -513,7 +519,9 @@ pub fn class_id_string(tuid: &[u8; 16]) -> String {
     b.iter().map(|x| format!("{x:02X}")).collect()
 }
 
-fn song_plugin(internal: &str, data: &[u8]) -> FlPlugin {
+/// The plugin a channel or slot holds. `shown` is the name the project gives it; with `sounds` false its settings
+/// (which can be megabytes) are left out, for a quick look at what plays.
+fn song_plugin(internal: &str, data: &[u8], shown: &str, sounds: bool) -> FlPlugin {
     if !internal.eq_ignore_ascii_case(WRAPPER) {
         return FlPlugin {
             name: internal.to_owned(),
@@ -522,6 +530,8 @@ fn song_plugin(internal: &str, data: &[u8]) -> FlPlugin {
             device_id: String::new(),
             path: String::new(),
             nothing_saved: false,
+            state: None,
+            parameter_ids: None,
         };
     }
     let f = wrapper_fields(data);
@@ -539,7 +549,14 @@ fn song_plugin(internal: &str, data: &[u8]) -> FlPlugin {
             .map(|c| i32::from_le_bytes(c).to_string())
             .unwrap_or_default()
     };
+    let raw = f.get(&VST_STATE).copied().filter(|s| sounds && !s.is_empty());
     let nothing_saved = !vst3 && f.get(&VST_STATE).is_some_and(|s| saved_nothing(s));
+    let state = raw
+        .filter(|_| !nothing_saved)
+        .map(|s| wrapper_preset(&f, s, if shown.is_empty() { &name } else { shown }, &name))
+        // Raw states other DAWs can't load are left out.
+        .filter(|p| matches!(p.extension, ".fxp" | ".vstpreset"));
+    let parameter_ids = raw.filter(|_| vst3).and_then(vst3_parameter_ids);
     FlPlugin {
         name,
         vendor: wrapper_text(&f, VST_VENDOR),
@@ -547,6 +564,8 @@ fn song_plugin(internal: &str, data: &[u8]) -> FlPlugin {
         device_id,
         path,
         nothing_saved,
+        state,
+        parameter_ids,
     }
 }
 
@@ -571,6 +590,11 @@ pub fn resolve_channel_samples(channels: &mut [MidiChannel], project: &Path) {
 /// Reads the song: channels, what plays them, and their notes and audio clips where the playlist puts them. Sample
 /// paths are as FL wrote them; [`FlSong::resolve_samples`] finds those under FL's user data folder.
 pub fn read_song(flp: &Flp<'_>) -> FlSong {
+    read_song_with(flp, true)
+}
+
+/// [`read_song`], with `sounds` false to leave each plugin's settings out (listing a project only asks what plays).
+pub fn read_song_with(flp: &Flp<'_>, sounds: bool) -> FlSong {
     let mut title = String::new();
     let mut tempo: Option<f64> = None;
     let mut order: Vec<u32> = Vec::new();
@@ -593,6 +617,7 @@ pub fn read_song(flp: &Flp<'_>) -> FlSong {
     let mut rack = Rack::default();
     let mut pattern: Option<u32> = None;
     let mut pending_internal = String::new();
+    let mut plugin_name = String::new();
 
     for e in &flp.events {
         tracks.read(e, flp);
@@ -619,10 +644,16 @@ pub fn read_song(flp: &Flp<'_>) -> FlSong {
                 }
             }
             EV_PLAYLIST if playlist.is_none() => playlist = Some(&e.data),
-            EV_PLUGIN_INTERNAL => pending_internal = flp.text(&e.data),
+            EV_PLUGIN_INTERNAL => {
+                pending_internal = flp.text(&e.data);
+                plugin_name.clear();
+            }
+            EV_PLUGIN_NAME => plugin_name = flp.text(&e.data),
             EV_PLUGIN_STATE if !e.data.is_empty() && !pending_internal.is_empty() => {
                 if let Some(c) = channel {
-                    instruments.entry(c).or_insert_with(|| song_plugin(&pending_internal, &e.data));
+                    instruments
+                        .entry(c)
+                        .or_insert_with(|| song_plugin(&pending_internal, &e.data, &plugin_name, sounds));
                 }
                 pending_internal.clear();
             }
