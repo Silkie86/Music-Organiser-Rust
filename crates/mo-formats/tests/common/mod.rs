@@ -141,18 +141,176 @@ pub fn note(pos: u32, channel: u16, length: u32, key: u16, velocity: u8) -> Vec<
     b
 }
 
-/// An FL 25 playlist item (80 bytes).
+/// An FL 25 playlist item (80 bytes) on track slot 499 (track 1 of 500), not muted, not trimmed.
 pub fn playlist_item_25(pos: u32, index: u16, length: u32) -> Vec<u8> {
+    playlist_item_25_on(pos, index, length, 499, false)
+}
+
+/// An FL 25 playlist item (80 bytes): index 20480 + n is pattern n, a smaller index a channel's clip; `track` is the
+/// slot FL saves (499 is track 1 of 500).
+pub fn playlist_item_25_on(pos: u32, index: u16, length: u32, track: u16, muted: bool) -> Vec<u8> {
     let mut b = vec![0u8; 80];
     b[..4].copy_from_slice(&pos.to_le_bytes());
     b[4..6].copy_from_slice(&20480u16.to_le_bytes());
     b[6..8].copy_from_slice(&index.to_le_bytes());
     b[8..12].copy_from_slice(&length.to_le_bytes());
-    b[12..14].copy_from_slice(&499u16.to_le_bytes());
-    b[18..20].copy_from_slice(&0x0040u16.to_le_bytes());
+    b[12..14].copy_from_slice(&track.to_le_bytes());
+    b[18..20].copy_from_slice(&(if muted { 0x2040u16 } else { 0x0040 }).to_le_bytes());
     b[24..28].copy_from_slice(&(-1f32).to_le_bytes());
     b[28..32].copy_from_slice(&(-1f32).to_le_bytes());
     b
+}
+
+/// An FL 20 playlist item (32 bytes) placing a pattern; offset -1 = from its start.
+pub fn playlist_item(pos: u32, pattern: u16, length: u32, offset: i32) -> Vec<u8> {
+    let mut b = vec![0u8; 32];
+    b[..4].copy_from_slice(&pos.to_le_bytes());
+    b[4..6].copy_from_slice(&20480u16.to_le_bytes());
+    b[6..8].copy_from_slice(&(20480 + pattern).to_le_bytes());
+    b[8..12].copy_from_slice(&length.to_le_bytes());
+    b[24..28].copy_from_slice(&offset.to_le_bytes());
+    b[28..32].copy_from_slice(&(-1i32).to_le_bytes());
+    b
+}
+
+/// An FL 25 playlist track's settings (event 238, 70 bytes): its number (1 at the top), colour, icon, then 1 at byte
+/// 12 when it plays, 0 when it's muted.
+pub fn playlist_track(number: u32, muted: bool) -> Vec<u8> {
+    let mut b = vec![0u8; 70];
+    b[..4].copy_from_slice(&number.to_le_bytes());
+    b[4..8].copy_from_slice(&0x485156u32.to_le_bytes());
+    b[12] = if muted { 0 } else { 1 };
+    b[13..17].copy_from_slice(&1f32.to_le_bytes());
+    b
+}
+
+/// A channel's levels (event 219): pan and volume out of 12800 (128 before FL 6), pitch in cents.
+pub fn levels(pan: i32, volume: i32, pitch_cents: i32) -> Vec<u8> {
+    let mut b = vec![0u8; 24];
+    b[..4].copy_from_slice(&pan.to_le_bytes());
+    b[4..8].copy_from_slice(&volume.to_le_bytes());
+    b[8..12].copy_from_slice(&pitch_cents.to_le_bytes());
+    b[12..16].copy_from_slice(&256i32.to_le_bytes());
+    b
+}
+
+/// A sampler's settings (event 215) as FL 25 writes them, with its time stretching.
+pub fn channel_params(time: i32, cents: i32, multiplier: i32, mode: i32) -> Vec<u8> {
+    let v: [i32; 42] = [
+        140, 0, 1, -1, 60, 1065353216, 1065353216, 1065353216, 1065353216, 1065353216, 0, 3, 0, 1024, 48, 65536, 1447,
+        0, 256, 0, 16777216, 0, 0, 1, time, cents, multiplier, mode, 2, -2, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    v.iter().flat_map(|x| x.to_le_bytes()).collect()
+}
+
+/// Like the C# tests' FL 25 header: version, build, and the 3-byte event 172.
+fn fl_25() -> Flp {
+    Flp::new()
+        .ascii(199, "25.2.5.5319")
+        .dword(159, 5319)
+        .byte(28, 1)
+        .raw(&[172, 1, 1, 0])
+        .text(192, "FL Studio 25.2.5.5319")
+}
+
+/// Three sampler channels: "Snare" playing in pattern 1 (in the playlist), "Kick" with no notes at all, and "Hat"
+/// playing in pattern 2, whose only clip in the playlist is muted unless `hat_plays`.
+pub fn fl_studio_25_unplayed(hat_plays: bool) -> Vec<u8> {
+    let playlist = [playlist_item_25(0, 20481, 384), playlist_item_25_on(384, 20482, 384, 499, !hat_plays)].concat();
+    fl_25()
+        .dword(156, 140_000)
+        .word(65, 1)
+        .text(193, "Snares")
+        .data(224, &note(0, 0, 48, 60, 100))
+        .word(65, 2)
+        .text(193, "Hats")
+        .data(224, &note(0, 2, 48, 60, 100))
+        .word(64, 0)
+        .byte(21, 0)
+        .text(201, "")
+        .text(203, "Snare")
+        .text(196, r"C:\Samples\Snare 01.wav")
+        .word(64, 1)
+        .byte(21, 0)
+        .text(201, "")
+        .text(203, "Kick")
+        .text(196, r"C:\Samples\Kick 01.wav")
+        .word(64, 2)
+        .byte(21, 0)
+        .text(201, "")
+        .text(203, "Hat")
+        .text(196, r"C:\Samples\Hat 01.wav")
+        .data(233, &playlist)
+        .build()
+}
+
+/// Solomon's "civil_18" laid out small: tracks 2 ("Acapellas") and 4 muted in the first arrangement, track 1 in the
+/// second; samplers Snare, Hat (switched off) and Pad, and audio clip channels Acapella and Vox (Vox switched off).
+pub fn fl_studio_25_muted_tracks() -> Vec<u8> {
+    let playlist = [
+        playlist_item_25(0, 20481, 384),
+        playlist_item_25_on(384, 20481, 384, 498, false),
+        playlist_item_25_on(0, 2, 768, 498, false),
+        playlist_item_25_on(768, 2, 384, 496, false),
+        playlist_item_25(0, 3, 384),
+        playlist_item_25_on(192, 3, 384, 497, false),
+        playlist_item_25_on(768, 20482, 384, 496, false),
+    ]
+    .concat();
+    let verse = [note(0, 0, 96, 60, 100), note(0, 1, 48, 66, 100)].concat();
+    let mut b = fl_25()
+        .dword(156, 120_000)
+        .byte(0, 0)
+        .word(65, 1)
+        .text(193, "Verse")
+        .data(224, &verse)
+        .word(65, 2)
+        .text(193, "Pad")
+        .data(224, &note(0, 4, 192, 64, 100))
+        .word(64, 0)
+        .byte(21, 0)
+        .text(201, "")
+        .text(203, "Snare")
+        .byte(0, 1)
+        .text(196, r"C:\Samples\Snare 01.wav")
+        .word(64, 1)
+        .byte(21, 0)
+        .text(201, "")
+        .text(203, "Hat")
+        .byte(0, 0)
+        .text(196, r"C:\Samples\Hat 01.wav")
+        .word(64, 2)
+        .byte(21, 4)
+        .byte(0, 1)
+        .data(215, &channel_params(0, 0, 0, 1))
+        .text(203, "Acapella")
+        .text(196, r"C:\Samples\Acapella.wav")
+        .word(64, 3)
+        .byte(21, 4)
+        .byte(0, 0)
+        .data(215, &channel_params(0, 0, 0, 1))
+        .text(203, "Vox")
+        .text(196, r"C:\Samples\Vox.wav")
+        .word(64, 4)
+        .byte(21, 0)
+        .text(201, "")
+        .text(203, "Pad")
+        .byte(0, 1)
+        .text(196, r"C:\Samples\Pad.wav")
+        .word(99, 0)
+        .text(241, "Arrangement")
+        .data(233, &playlist);
+    for n in 1..=500 {
+        b = b.data(238, &playlist_track(n, n == 2 || n == 4));
+        if n == 2 {
+            b = b.text(239, "Acapellas");
+        }
+    }
+    b = b.word(99, 1).text(241, "Arrangement 2").data(233, &playlist_item_25(0, 20481, 384));
+    for n in 1..=500 {
+        b = b.data(238, &playlist_track(n, n == 1));
+    }
+    b.build()
 }
 
 /// FL's VST2 state: a 21-byte header in front of the plugin's own chunk.
@@ -225,8 +383,13 @@ pub fn fl_vst3_state(component: &[u8], controller: &[u8], parameter_ids: &[u32])
 /// Three channels (Serum VST on "Lead", a sampler "Kick", native 3x Osc "Bass"), two patterns with notes, and a mixer
 /// with Fruity Limiter and a Pro-Q 3 VST. The C# tests' "Night Drive".
 pub fn fl_studio_project() -> Vec<u8> {
+    fl_studio_project_with(None)
+}
+
+/// [`fl_studio_project`] with a playlist.
+pub fn fl_studio_project_with(playlist: Option<&[u8]>) -> Vec<u8> {
     let notes: Vec<u8> = [note(0, 0, 96, 60, 100), note(96, 0, 96, 64, 128), note(0, 1, 24, 36, 100)].concat();
-    Flp::new()
+    let b = Flp::new()
         .ascii(199, "21.2.3.4004")
         .dword(156, 128_000)
         .text(194, "Night Drive (title)")
@@ -259,8 +422,11 @@ pub fn fl_studio_project() -> Vec<u8> {
         .word(98, 0)
         .text(201, "Fruity Wrapper")
         .data(213, &Wrapper::new("Pro-Q 3", r"C:\VstPlugins\FabFilter Pro-Q 3.dll", "FabFilter", &[7, 7]).build())
-        .word(98, 1)
-        .build()
+        .word(98, 1);
+    match playlist {
+        Some(p) => b.data(233, p).build(),
+        None => b.build(),
+    }
 }
 
 /// Like Solomon's funk step_8 (FL 9.0.0, 2010): channel "Cell" plays KORG LegacyCell, whose chunk sits behind FL 9's

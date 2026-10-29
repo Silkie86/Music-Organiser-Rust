@@ -7,4 +7,4 @@ pub mod fl;
 mod model;
 pub mod plugins;
 
-pub use model::{Confidence, PluginKind, PluginRef, ProjectInfo, SampleUse};
+pub use model::{Confidence, MidiChannel, MidiClip, NoteEvent, PluginKind, PluginRef, ProjectInfo, SampleUse};

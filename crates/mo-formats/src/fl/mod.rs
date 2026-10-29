@@ -4,13 +4,15 @@
 //! to FL 26). See [`events`] for how the file is laid out.
 
 pub mod events;
+mod notes;
+pub mod song;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use chrono::{NaiveDate, NaiveDateTime, TimeDelta};
 
-use crate::model::{Confidence, PluginKind, PluginRef, ProjectInfo};
+use crate::model::{Confidence, PluginKind, PluginRef, ProjectInfo, SampleUse};
 use crate::plugins;
 use events::*;
 
@@ -27,7 +29,7 @@ const VST_PATH: u32 = 55;
 const VST_VENDOR: u32 = 56;
 
 const CHANNEL_TYPE_INSTRUMENT: u32 = 2;
-const WRAPPER: &str = "Fruity Wrapper";
+pub(crate) const WRAPPER: &str = "Fruity Wrapper";
 
 /// FL's own instruments: a native plugin with one of these names is an instrument wherever it sits.
 const NATIVE_GENERATORS: &[&str] = &[
@@ -88,7 +90,11 @@ fn is_native_generator(name: &str) -> bool {
 pub fn read(path: &Path) -> std::io::Result<ProjectInfo> {
     let raw = std::fs::read(path)?;
     let mut info = read_bytes(&raw);
-    resolve_user_data(&mut info.samples, path);
+    let mut user_data = UserData::new(path);
+    for sample in &mut info.samples {
+        *sample = user_data.resolve(sample);
+    }
+    info.unplayed = std::mem::take(&mut info.unplayed).into_iter().map(|(s, u)| (user_data.resolve(&s), u)).collect();
     Ok(info.dedupe())
 }
 
@@ -146,7 +152,7 @@ pub fn read_bytes(raw: &[u8]) -> ProjectInfo {
             EV_PATTERN_NEW => patterns += 1,
             EV_MIXER_SLOT | EV_INSERT_FLAGS => in_mixer = true,
             EV_SAMPLE_PATH => info.samples.push(flp.text(&e.data)),
-            EV_PATTERN_NOTES => notes += e.data.len() / note_size(&e.data, flp.major, e.offset.is_none()),
+            EV_PATTERN_NOTES => notes += e.data.len() / notes::note_size(&e.data, flp.major, e.offset.is_none(), None),
             EV_PROJECT_TIME if e.data.len() >= 16 => {
                 let (created, spent) = project_time(&e.data);
                 info.created = created;
@@ -228,41 +234,37 @@ pub fn read_bytes(raw: &[u8]) -> ProjectInfo {
     info.details.insert("Channels".into(), info.tracks.len().to_string());
     info.details.insert("Patterns".into(), patterns.to_string());
     info.details.insert("Notes".into(), notes.to_string());
+    note_unplayed(&song::read_song(&flp), &mut info);
     info.dedupe()
 }
 
-/// The size of the note records in an event, by FL's version (rule 9): 24 bytes from FL 9, 20 bytes in FL 4 to 8.
-/// Notes the reader made from old step sequencer dots are always 24. Without a version, or in an FL 4 to 8 save whose
-/// notes don't divide into 20 bytes, the size is told from the notes themselves.
-fn note_size(data: &[u8], major: u32, made_here: bool) -> usize {
-    match major {
-        _ if made_here => 24,
-        9.. => 24,
-        1.. if data.len().is_multiple_of(20) => 20,
-        _ => size_from_notes(data),
+/// The samples this save holds but doesn't play, and why: on a channel with nothing in the playlist, or muted (the
+/// channel switched off, or every clip of it muted or on a muted playlist track). A sample on several channels plays
+/// when any of them does. Letter case aside, each sample once, under the first channel's spelling.
+fn note_unplayed(song: &song::FlSong, info: &mut ProjectInfo) {
+    let mut by_sample: Vec<(String, Vec<&song::FlChannel>)> = Vec::new();
+    for c in song.channels.iter().filter(|c| !c.sample.is_empty()) {
+        match by_sample.iter_mut().find(|(s, _)| s.to_lowercase() == c.sample.to_lowercase()) {
+            Some((_, channels)) => channels.push(c),
+            None => by_sample.push((c.sample.clone(), vec![c])),
+        }
     }
-}
-
-/// The record size for notes from a file with no FL version: the size that reads them in time order (as FL keeps
-/// them), else the one that divides them, 24 when both or neither do.
-fn size_from_notes(data: &[u8]) -> usize {
-    let in_order = |size: usize| {
-        !data.is_empty()
-            && data.len().is_multiple_of(size)
-            && data.chunks_exact(size).map(|r| u32::from_le_bytes([r[0], r[1], r[2], r[3]])).is_sorted()
-    };
-    if in_order(24) {
-        24
-    } else if in_order(20) || (data.len().is_multiple_of(20) && !data.len().is_multiple_of(24)) {
-        20
-    } else {
-        24
+    for (sample, channels) in by_sample {
+        let plays = |c: &&song::FlChannel| {
+            c.enabled && (!c.notes.is_empty() || c.audio_clips.iter().any(|a| !a.muted && !a.on_muted_track))
+        };
+        let placed =
+            |c: &&song::FlChannel| c.clips.iter().any(|clip| !clip.notes.is_empty()) || !c.audio_clips.is_empty();
+        if !channels.iter().any(plays) {
+            let why = if channels.iter().any(placed) { SampleUse::Muted } else { SampleUse::NoNotes };
+            info.unplayed.insert(sample, why);
+        }
     }
 }
 
 /// The Fruity Wrapper's records by id, each a slice of the event rather than a copy (a plugin's state can be
 /// megabytes). A record that runs past the end stops the reading; a later record with the same id wins.
-fn wrapper_fields(blob: &[u8]) -> BTreeMap<u32, &[u8]> {
+pub(crate) fn wrapper_fields(blob: &[u8]) -> BTreeMap<u32, &[u8]> {
     let mut fields = BTreeMap::new();
     if blob.len() < 4 {
         return fields;
@@ -285,7 +287,7 @@ fn wrapper_fields(blob: &[u8]) -> BTreeMap<u32, &[u8]> {
     fields
 }
 
-fn wrapper_text(fields: &BTreeMap<u32, &[u8]>, id: u32) -> String {
+pub(crate) fn wrapper_text(fields: &BTreeMap<u32, &[u8]>, id: u32) -> String {
     fields.get(&id).map_or_else(String::new, |b| String::from_utf8_lossy(b).trim_end_matches('\0').to_owned())
 }
 
@@ -338,26 +340,45 @@ pub fn project_time(data: &[u8]) -> (Option<NaiveDateTime>, Option<String>) {
 
 /// FL writes paths under its user data folder as `%FLStudioUserData%\...`, the folder that holds the Projects folder.
 /// It's found from where the project lives: `I:\FL Studio Data\FL Studio\Projects\Song.flp` gives
-/// `I:\FL Studio Data\FL Studio`. Samples no folder above the project fits stay as FL wrote them. Each folder name
-/// is looked for once, however many samples share it.
+/// `I:\FL Studio Data\FL Studio`. Samples no folder above the project fits stay as FL wrote them.
 pub fn resolve_user_data(samples: &mut [String], project: &Path) {
-    let full = std::path::absolute(project).unwrap_or_else(|_| project.to_path_buf());
-    // The first folder (or the file, for a sample right in the user data folder) by name: the folder above the
-    // project that has it, if any.
-    let mut found: HashMap<(bool, String), Option<PathBuf>> = HashMap::new();
-    for sample in samples.iter_mut() {
-        let Some(rest) = after_user_data(sample) else { continue };
+    let mut user_data = UserData::new(project);
+    for sample in samples {
+        *sample = user_data.resolve(sample);
+    }
+}
+
+/// Finds samples under FL's user data folder for one project, looking for each folder name once however many samples
+/// share it.
+pub struct UserData {
+    project: PathBuf,
+    /// The first folder (or the file, for a sample right in the user data folder) by name: the folder above the
+    /// project that has it, if any.
+    found: HashMap<(bool, String), Option<PathBuf>>,
+}
+
+impl UserData {
+    pub fn new(project: &Path) -> UserData {
+        let project = std::path::absolute(project).unwrap_or_else(|_| project.to_path_buf());
+        UserData { project, found: HashMap::new() }
+    }
+
+    /// The sample's full path, or the path as FL wrote it when it isn't under the user data folder or no folder fits.
+    pub fn resolve(&mut self, sample: &str) -> String {
+        let Some(rest) = after_user_data(sample) else { return sample.to_owned() };
         let parts: Vec<&str> = rest.split(['\\', '/']).collect();
         let nested = parts.len() > 1;
-        let dir = found.entry((nested, parts[0].to_lowercase())).or_insert_with(|| {
-            full.ancestors().skip(1).filter(|d| !d.as_os_str().is_empty()).find_map(|dir| {
+        let project = &self.project;
+        let dir = self.found.entry((nested, parts[0].to_lowercase())).or_insert_with(|| {
+            project.ancestors().skip(1).filter(|d| !d.as_os_str().is_empty()).find_map(|dir| {
                 let there = dir.join(parts[0]);
                 let fits = if nested { there.is_dir() } else { there.is_file() };
                 fits.then(|| dir.to_path_buf())
             })
         });
-        if let Some(dir) = dir {
-            *sample = parts.iter().fold(dir.clone(), |p, part| p.join(part)).to_string_lossy().into_owned();
+        match dir {
+            Some(dir) => parts.iter().fold(dir.clone(), |p, part| p.join(part)).to_string_lossy().into_owned(),
+            None => sample.to_owned(),
         }
     }
 }
