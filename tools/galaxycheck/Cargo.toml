@@ -1,0 +1,23 @@
+[package]
+name = "galaxycheck"
+description = "Phase 0 check: can Slint show 300,000 stars drawn with wgpu at 60 frames a second?"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "galaxy-check"
+path = "src/main.rs"
+
+[dependencies]
+mo-app.workspace = true
+chrono.workspace = true
+# The galaxy draws with wgpu into a texture Slint shows (spec section 11). Only this tool turns it on for now, so the
+# app itself still builds without wgpu.
+slint = { workspace = true, features = ["unstable-wgpu-30", "renderer-femtovg-wgpu"] }
+
+[build-dependencies]
+slint-build.workspace = true
+
+[lints]
+workspace = true
