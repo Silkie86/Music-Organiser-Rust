@@ -5,7 +5,7 @@
 
 pub mod events;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use chrono::{NaiveDate, NaiveDateTime, TimeDelta};
@@ -16,8 +16,8 @@ use events::*;
 
 pub const DAW: &str = "FL Studio";
 /// Goes up by one whenever the reader finds more (or different) things in the same files, so a scan reads every FL
-/// project again (rule 7). Kept at the C# reader's version until the Rust reader is the one the library uses.
-pub const VERSION: u32 = 7;
+/// project again (rule 7). The C# reader is at 7; 8 is what the Rust reader finds differently (DIFFERENCES.md).
+pub const VERSION: u32 = 8;
 pub const EXTENSIONS: [&str; 1] = ["flp"];
 
 /// The Fruity Wrapper (FL's VST host) keeps a VST's details as records: u32 version, then (u32 id, u64 size, data).
@@ -83,14 +83,18 @@ fn is_native_generator(name: &str) -> bool {
 }
 
 /// Reads what's in an FL Studio project. A file that isn't one is listed with what's wrong with it, not an error;
-/// only a file that can't be read from disk is.
+/// only a file that can't be read from disk is. Samples saved under FL's user data folder are found from where the
+/// project lives.
 pub fn read(path: &Path) -> std::io::Result<ProjectInfo> {
     let raw = std::fs::read(path)?;
-    Ok(read_bytes(&raw, path))
+    let mut info = read_bytes(&raw);
+    resolve_user_data(&mut info.samples, path);
+    Ok(info.dedupe())
 }
 
-/// [`read`] for a file already in memory; `path` is where it lives, for samples saved relative to FL's folders.
-pub fn read_bytes(raw: &[u8], path: &Path) -> ProjectInfo {
+/// [`read`] for a file already in memory. It never looks at the disk, so samples under FL's user data folder stay as
+/// FL wrote them (`%FLStudioUserData%\...`); [`resolve_user_data`] finds them.
+pub fn read_bytes(raw: &[u8]) -> ProjectInfo {
     let mut info = ProjectInfo::new(DAW);
     let flp = match events::load(raw) {
         Ok(flp) => flp,
@@ -141,8 +145,8 @@ pub fn read_bytes(raw: &[u8], path: &Path) -> ProjectInfo {
             }
             EV_PATTERN_NEW => patterns += 1,
             EV_MIXER_SLOT | EV_INSERT_FLAGS => in_mixer = true,
-            EV_SAMPLE_PATH => info.samples.push(resolve_sample_path(&flp.text(&e.data), path)),
-            EV_PATTERN_NOTES => notes += e.data.len() / note_size(&e.data, flp.major(), e.offset.is_none()),
+            EV_SAMPLE_PATH => info.samples.push(flp.text(&e.data)),
+            EV_PATTERN_NOTES => notes += e.data.len() / note_size(&e.data, flp.major, e.offset.is_none()),
             EV_PROJECT_TIME if e.data.len() >= 16 => {
                 let (created, spent) = project_time(&e.data);
                 info.created = created;
@@ -227,17 +231,16 @@ pub fn read_bytes(raw: &[u8], path: &Path) -> ProjectInfo {
     info.dedupe()
 }
 
-/// The size of the note records in an event: 24 bytes from FL 9, 20 bytes in FL 4 to 8. Notes the reader made from
-/// old step sequencer dots are always 24. Without a version, or when the version's size doesn't divide the data, the
-/// size is told from the notes themselves.
+/// The size of the note records in an event, by FL's version (rule 9): 24 bytes from FL 9, 20 bytes in FL 4 to 8.
+/// Notes the reader made from old step sequencer dots are always 24. Without a version, or in an FL 4 to 8 save whose
+/// notes don't divide into 20 bytes, the size is told from the notes themselves.
 fn note_size(data: &[u8], major: u32, made_here: bool) -> usize {
-    let size = match major {
+    match major {
         _ if made_here => 24,
         9.. => 24,
-        1.. => 20,
-        0 => 0,
-    };
-    if size != 0 && data.len().is_multiple_of(size) { size } else { size_from_notes(data) }
+        1.. if data.len().is_multiple_of(20) => 20,
+        _ => size_from_notes(data),
+    }
 }
 
 /// The record size for notes from a file with no FL version: the size that reads them in time order (as FL keeps
@@ -293,7 +296,7 @@ fn wrapper_text(fields: &BTreeMap<u32, &[u8]>, id: u32) -> String {
 /// u32 0, u32 program, so 21 bytes. FL 9 (wrapper version 6) has no -2 or 0: i32 -9, u8 flags, u32 chunk length,
 /// u32 program, so 13 bytes.
 pub(crate) fn vst2_header(state: &[u8]) -> Option<(usize, u32, u32)> {
-    let i32_at = |at: usize| i32::from_le_bytes(state[at..at + 4].try_into().expect("4 bytes"));
+    let i32_at = |at| events::i32_at(state, at);
     if state.len() < 13 || i32_at(0) != -9 {
         return None;
     }
@@ -311,6 +314,9 @@ fn saved_nothing(state: &[u8]) -> bool {
 /// Event 237: the day the project was first made (a Delphi date: days since 30 Dec 1899) and how long FL Studio has
 /// had it open, in days. Saving again, even in a newer FL, keeps the date. Dates out of range are left out.
 pub fn project_time(data: &[u8]) -> (Option<NaiveDateTime>, Option<String>) {
+    if data.len() < 16 {
+        return (None, None);
+    }
     let made = f64::from_le_bytes(data[..8].try_into().expect("8 bytes"));
     let open = f64::from_le_bytes(data[8..16].try_into().expect("8 bytes"));
     // 1995 to 2119.
@@ -319,7 +325,8 @@ pub fn project_time(data: &[u8]) -> (Option<NaiveDateTime>, Option<String>) {
         start + TimeDelta::milliseconds((made * 86_400_000.0).round() as i64)
     });
     let spent = (open.is_finite() && open > 0.0 && open < 3650.0).then(|| {
-        let minutes = (open * 24.0 * 60.0) as i64;
+        // To the millisecond first, so 13 minutes saved as 0.009027... days isn't 12.99999 minutes.
+        let minutes = (open * 86_400_000.0).round() as i64 / 60_000;
         if minutes >= 60 {
             format!("{} h {} min", minutes / 60, minutes % 60)
         } else {
@@ -331,25 +338,33 @@ pub fn project_time(data: &[u8]) -> (Option<NaiveDateTime>, Option<String>) {
 
 /// FL writes paths under its user data folder as `%FLStudioUserData%\...`, the folder that holds the Projects folder.
 /// It's found from where the project lives: `I:\FL Studio Data\FL Studio\Projects\Song.flp` gives
-/// `I:\FL Studio Data\FL Studio`. Left as written when no folder above the project fits.
-pub fn resolve_sample_path(sample: &str, project: &Path) -> String {
-    const USER_DATA: &str = "%FLStudioUserData%";
-    if sample.len() < USER_DATA.len()
-        || !sample.is_char_boundary(USER_DATA.len())
-        || !sample[..USER_DATA.len()].eq_ignore_ascii_case(USER_DATA)
-    {
-        return sample.to_owned();
-    }
-    let rest = sample[USER_DATA.len()..].trim_start_matches(['\\', '/']);
-    let parts: Vec<&str> = rest.split(['\\', '/']).collect();
-    let nested = parts.len() > 1;
+/// `I:\FL Studio Data\FL Studio`. Samples no folder above the project fits stay as FL wrote them. Each folder name
+/// is looked for once, however many samples share it.
+pub fn resolve_user_data(samples: &mut [String], project: &Path) {
     let full = std::path::absolute(project).unwrap_or_else(|_| project.to_path_buf());
-    for dir in full.ancestors().skip(1).filter(|d| !d.as_os_str().is_empty()) {
-        let candidate: PathBuf = parts.iter().fold(dir.to_path_buf(), |p, part| p.join(part));
-        let fits = if nested { dir.join(parts[0]).is_dir() } else { candidate.is_file() };
-        if fits {
-            return candidate.to_string_lossy().into_owned();
+    // The first folder (or the file, for a sample right in the user data folder) by name: the folder above the
+    // project that has it, if any.
+    let mut found: HashMap<(bool, String), Option<PathBuf>> = HashMap::new();
+    for sample in samples.iter_mut() {
+        let Some(rest) = after_user_data(sample) else { continue };
+        let parts: Vec<&str> = rest.split(['\\', '/']).collect();
+        let nested = parts.len() > 1;
+        let dir = found.entry((nested, parts[0].to_lowercase())).or_insert_with(|| {
+            full.ancestors().skip(1).filter(|d| !d.as_os_str().is_empty()).find_map(|dir| {
+                let there = dir.join(parts[0]);
+                let fits = if nested { there.is_dir() } else { there.is_file() };
+                fits.then(|| dir.to_path_buf())
+            })
+        });
+        if let Some(dir) = dir {
+            *sample = parts.iter().fold(dir.clone(), |p, part| p.join(part)).to_string_lossy().into_owned();
         }
     }
-    sample.to_owned()
+}
+
+/// What follows `%FLStudioUserData%` (letter case aside) and its slash, for a path that starts with it.
+fn after_user_data(sample: &str) -> Option<&str> {
+    const USER_DATA: &str = "%FLStudioUserData%";
+    plugins::starts_with_ignore_case(sample, USER_DATA)
+        .then(|| sample[USER_DATA.len()..].trim_start_matches(['\\', '/']))
 }

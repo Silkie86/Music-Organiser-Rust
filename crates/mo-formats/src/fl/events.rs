@@ -14,6 +14,8 @@ pub const STOPPED_PART_WAY: &str = "FL Studio stopped part-way through writing t
 /// The warning for a save whose data header FL didn't finish writing, though everything after it is there.
 pub const GARBLED_HEADER: &str =
     "Saved by an old FL Studio that garbled the start of its data; everything after it was read as usual.";
+/// The warning for a save that ends part-way through an event, or before its data does (cut short, or damaged).
+pub const CUT_SHORT: &str = "This save ends part-way through (the file is shorter than it says, or damaged there); everything before that was read.";
 
 pub const EV_SHUFFLE: u8 = 11;
 pub const EV_CHANNEL_TYPE: u8 = 21;
@@ -83,6 +85,8 @@ pub struct Flp<'a> {
     pub ppq: u16,
     /// FL's version as the file writes it ("21.2.3.4004"), or "" when it doesn't say.
     pub version: String,
+    /// FL's major version (21 for "21.2.3.4004"), or 0 when the project doesn't say.
+    pub major: u32,
     /// Text is UTF-16 from FL 11.5, one byte a letter before that.
     pub utf16: bool,
     pub events: Vec<Event<'a>>,
@@ -102,11 +106,11 @@ impl std::fmt::Display for Damaged {
 
 impl std::error::Error for Damaged {}
 
-fn u16_at(d: &[u8], at: usize) -> u16 {
+pub(crate) fn u16_at(d: &[u8], at: usize) -> u16 {
     u16::from_le_bytes([d[at], d[at + 1]])
 }
 
-fn i32_at(d: &[u8], at: usize) -> i32 {
+pub(crate) fn i32_at(d: &[u8], at: usize) -> i32 {
     i32::from_le_bytes([d[at], d[at + 1], d[at + 2], d[at + 3]])
 }
 
@@ -116,11 +120,6 @@ fn major_of(version: &str) -> u32 {
 }
 
 impl Flp<'_> {
-    /// FL's major version, or 0 when the project doesn't say.
-    pub fn major(&self) -> u32 {
-        major_of(&self.version)
-    }
-
     /// A text event's text.
     pub fn text(&self, data: &[u8]) -> String {
         let text = if self.utf16 {
@@ -133,7 +132,8 @@ impl Flp<'_> {
     }
 }
 
-/// Reads the events of an FL Studio project. A file cut short or damaged part-way is read up to where it goes wrong.
+/// Reads the events of an FL Studio project. A file cut short or damaged part-way is read up to where it goes wrong,
+/// with a warning.
 pub fn load(raw: &[u8]) -> Result<Flp<'_>, Damaged> {
     if raw.len() < 22 || &raw[..4] != b"FLhd" {
         return Err(Damaged);
@@ -142,11 +142,16 @@ pub fn load(raw: &[u8]) -> Result<Flp<'_>, Damaged> {
     if header_len < 0 || header_len as i64 > raw.len() as i64 - 16 {
         return Err(Damaged);
     }
-    let mut flp = Flp { ppq: u16_at(raw, 12), version: String::new(), utf16: true, events: Vec::new(), warning: None };
+    let mut flp =
+        Flp { ppq: u16_at(raw, 12), version: String::new(), major: 0, utf16: true, events: Vec::new(), warning: None };
     let dt = 8 + header_len as usize;
     let mut pos = dt + 8;
     let end = if &raw[dt..dt + 4] == b"FLdt" {
-        (pos as i64 + i32_at(raw, dt + 4) as i64).clamp(0, raw.len() as i64) as usize
+        let said = pos as i64 + i32_at(raw, dt + 4) as i64;
+        if said > raw.len() as i64 {
+            flp.warning = Some(CUT_SHORT);
+        }
+        said.clamp(pos as i64, raw.len() as i64) as usize
     } else {
         // Some FL Studio 4 to 7 saves have junk (what looks like a leftover memory address and a size) where the FLdt
         // chunk's name and length belong. Their events follow it as usual, to the end of the file.
@@ -184,7 +189,10 @@ pub fn load(raw: &[u8]) -> Result<Flp<'_>, Damaged> {
             }
         };
         // A file cut short or damaged: keep what's been read.
-        let Some(size) = size.filter(|&s| s <= end - pos) else { break };
+        let Some(size) = size.filter(|&s| s <= end - pos) else {
+            flp.warning.get_or_insert(CUT_SHORT);
+            break;
+        };
         let data = &raw[pos..pos + size];
         if id == EV_VERSION && major == 0 {
             major = major_of(&String::from_utf8_lossy(data));
@@ -193,23 +201,29 @@ pub fn load(raw: &[u8]) -> Result<Flp<'_>, Damaged> {
         pos += size;
     }
 
-    // A save FL stopped writing before the mixer and playlist won't open in FL.
-    if flp.warning.is_some() && !flp.events.iter().any(|e| e.id == EV_INSERT_FLAGS || e.id == EV_PLAYLIST) {
+    // A save with a garbled header that FL stopped writing before the mixer and playlist won't open in FL.
+    if flp.warning == Some(GARBLED_HEADER) && !flp.events.iter().any(|e| e.id == EV_INSERT_FLAGS || e.id == EV_PLAYLIST)
+    {
         flp.warning = Some(STOPPED_PART_WAY);
     }
     let version = flp.events.iter().find(|e| e.id == EV_VERSION).map(|e| String::from_utf8_lossy(&e.data).into_owned());
     match version {
         Some(v) => {
             flp.version = v.trim_end_matches('\0').to_owned();
-            let parts: Vec<&str> = flp.version.split('.').collect();
-            if let (true, Some(Ok(minor))) = (major > 0, parts.get(1).map(|m| m.parse::<u32>())) {
+            if major == 0 {
+                major = major_of(&flp.version);
+            }
+            if major > 0 {
+                // "11" alone is 11.0.
+                let minor: u32 = flp.version.split('.').nth(1).and_then(|m| m.parse().ok()).unwrap_or(0);
                 flp.utf16 = major > 11 || (major == 11 && minor >= 5);
             }
         }
         // Without the FLdt chunk to go by, only events that include FL's version show it's really a project.
-        None if flp.warning.is_some() => return Err(Damaged),
+        None if matches!(flp.warning, Some(GARBLED_HEADER | STOPPED_PART_WAY)) => return Err(Damaged),
         None => {}
     }
+    flp.major = major;
     if (1..12).contains(&major) {
         steps_as_notes(&mut flp);
     }

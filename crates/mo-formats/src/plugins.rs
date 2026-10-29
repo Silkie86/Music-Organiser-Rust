@@ -9,7 +9,7 @@ fn ends_with_ignore_case(s: &str, end: &str) -> bool {
         && s[s.len() - end.len()..].eq_ignore_ascii_case(end)
 }
 
-fn starts_with_ignore_case(s: &str, start: &str) -> bool {
+pub(crate) fn starts_with_ignore_case(s: &str, start: &str) -> bool {
     s.len() >= start.len() && s.is_char_boundary(start.len()) && s[..start.len()].eq_ignore_ascii_case(start)
 }
 

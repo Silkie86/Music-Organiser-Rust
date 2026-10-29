@@ -4,14 +4,13 @@
 mod common;
 
 use std::collections::BTreeMap;
-use std::path::Path;
 
 use common::*;
 use mo_formats::fl::{self, events};
 use mo_formats::{Confidence, PluginKind, PluginRef, ProjectInfo};
 
 fn read(bytes: &[u8]) -> ProjectInfo {
-    fl::read_bytes(bytes, Path::new("Song.flp"))
+    fl::read_bytes(bytes)
 }
 
 fn by_name(info: &ProjectInfo) -> BTreeMap<String, PluginRef> {
@@ -120,11 +119,19 @@ fn a_garbled_save_fl_stopped_writing_before_the_mixer_says_so() {
 }
 
 #[test]
-fn survives_truncated_files() {
+fn survives_truncated_files_and_says_so() {
     let bytes = fl_studio_project();
     let info = read(&bytes[..bytes.len() - 30]);
     assert_eq!(info.tempo, Some(128.0));
     assert_eq!(info.confidence, Confidence::Full);
+    assert_eq!(info.warnings, [events::CUT_SHORT]);
+
+    // An event whose size never ends is damage too.
+    let damaged =
+        Flp::new().ascii(199, "21.0.0").dword(156, 120_000).raw(&[213, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]).build();
+    let info = read(&damaged);
+    assert_eq!(info.tempo, Some(120.0));
+    assert_eq!(info.warnings, [events::CUT_SHORT]);
 }
 
 #[test]
@@ -158,12 +165,25 @@ fn resolves_the_user_data_folder_from_the_projects_location() {
     std::fs::write(&path, fl_studio_25_project()).expect("write the project");
 
     let info = fl::read(&path).expect("the file is there");
-    let sample = projects.join("Snare 01.wav");
-    assert_eq!(info.samples, [sample.to_string_lossy()]);
+    assert_eq!(info.samples, [projects.join("Snare 01.wav").to_string_lossy()]);
+    // Without the disk, it stays as FL wrote it.
+    assert_eq!(read(&fl_studio_25_project()).samples, [r"%FLStudioUserData%\Projects\Snare 01.wav"]);
 
-    // Somewhere no folder above it fits, the path stays as FL wrote it.
-    let elsewhere = fl::read_bytes(&fl_studio_25_project(), Path::new("/nowhere/at/all/Shuffle.flp"));
-    assert_eq!(elsewhere.samples, [r"%FLStudioUserData%\Projects\Snare 01.wav"]);
+    // A folder no folder above the project has: left as written. (A made-up name, so no real folder can fit.)
+    let mut samples = vec![
+        r"%FLStudioUserData%\MO Test Nowhere 5c1e\Kick.wav".to_owned(),
+        r"%flstudiouserdata%/Projects/Snare 01.wav".to_owned(),
+        r"C:\Samples\Hat.wav".to_owned(),
+    ];
+    fl::resolve_user_data(&mut samples, &path);
+    assert_eq!(
+        samples,
+        [
+            r"%FLStudioUserData%\MO Test Nowhere 5c1e\Kick.wav".to_owned(),
+            projects.join("Snare 01.wav").to_string_lossy().into_owned(),
+            r"C:\Samples\Hat.wav".to_owned(),
+        ]
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -209,6 +229,12 @@ fn reads_when_the_project_was_made_and_how_long_it_was_open() {
     let info = read(&Flp::new().ascii(199, "21.0.0").data(237, &time).build());
     assert_eq!(info.created.map(|c| c.to_string()).as_deref(), Some("2023-03-15 12:00:00"));
     assert_eq!(info.details["Time spent"], "2 h 24 min");
+    // 13 minutes is 0.00902777... days, which times 1440 is 12.999999...
+    assert_eq!(
+        fl::project_time(&[45_000f64.to_le_bytes(), (13.0f64 / 1440.0).to_le_bytes()].concat()).1.as_deref(),
+        Some("13 min")
+    );
+    assert_eq!(fl::project_time(&[1, 2, 3]), (None, None), "too short to hold the two dates");
 
     // Out of range: left out.
     let mut odd = 1.0f64.to_le_bytes().to_vec();
@@ -223,4 +249,7 @@ fn text_before_fl_11_5_is_one_byte_a_letter() {
     assert_eq!(read(&old).title, "Cé");
     let new = Flp::new().ascii(199, "11.5.0").text(194, "Café").build();
     assert_eq!(read(&new).title, "Café");
+    // A version with no minor part: FL 9 is one byte a letter all the same.
+    let bare = Flp::new().ascii(199, "9").ascii(194, "Kick").build();
+    assert_eq!(read(&bare).title, "Kick");
 }
