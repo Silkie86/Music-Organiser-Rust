@@ -178,8 +178,8 @@ impl StarPainter {
         let grow = 0.6 + 0.4 * (view.zoom + 1.0).log2();
         let camera: [f32; 8] = [view.x, view.y, scale[0], scale[1], pixel[0], pixel[1], grow, 0.0];
         let mut bytes = [0u8; 32];
-        for (chunk, f) in bytes.chunks_exact_mut(4).zip(camera) {
-            chunk.copy_from_slice(&f.to_le_bytes());
+        for (i, f) in camera.iter().enumerate() {
+            bytes[i * 4..i * 4 + 4].copy_from_slice(&f.to_le_bytes());
         }
         self.queue.write_buffer(&self.camera, 0, &bytes);
 
