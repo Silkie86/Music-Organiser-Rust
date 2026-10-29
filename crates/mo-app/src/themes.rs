@@ -204,7 +204,7 @@ pub fn theme_named(name: &str) -> Option<Theme> {
 /// "#RRGGBB" (or "#AARRGGBB", alpha ignored) to 0xRRGGBB.
 pub fn parse_hex(s: &str) -> Option<u32> {
     let h = s.trim().trim_start_matches('#');
-    if !(h.len() == 6 || h.len() == 8) {
+    if !(h.len() == 6 || h.len() == 8) || !h.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     u32::from_str_radix(&h[h.len() - 6..], 16).ok()
@@ -237,6 +237,8 @@ mod tests {
         let violet = Look::from_settings(None, Some("#8B7CF6"));
         assert_eq!(violet.accent_text, 0xFFFFFF);
         assert_eq!(Look::from_settings(None, Some("")).accent, 0x3DDC97);
+        assert_eq!(Look::from_settings(None, Some("#+12345")).accent, 0x3DDC97);
+        assert_eq!(Look::from_settings(None, Some("aéééb")).accent, 0x3DDC97);
     }
 
     #[test]

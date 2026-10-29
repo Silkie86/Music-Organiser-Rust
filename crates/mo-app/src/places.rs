@@ -44,9 +44,10 @@ impl Place {
         }
     }
 
-    /// The place's position on the rail, which is also how the screens refer to it.
+    /// The place's position on the rail, which is also how the screens refer to it. `ALL` is in the enum's order
+    /// (the round-trip test checks it).
     pub fn index(self) -> usize {
-        Place::ALL.iter().position(|p| *p == self).unwrap_or(0)
+        self as usize
     }
 
     pub fn from_index(i: usize) -> Option<Place> {
@@ -87,6 +88,8 @@ mod tests {
             assert_eq!(Place::from_index(p.index()), Some(p));
         }
         assert_eq!(Place::from_index(Place::ALL.len()), None);
+        // The rail shows every place before Settings, and Settings apart at the bottom.
+        assert_eq!(Place::ALL.last(), Some(&Place::Settings));
     }
 
     #[test]

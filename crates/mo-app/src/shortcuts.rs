@@ -57,17 +57,40 @@ pub const APP_ACTIONS: &[Action] = &[
 ];
 
 /// The keys in use: the defaults with your changes on top.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Shortcuts {
     changed: HashMap<String, String>,
+    /// Each key in use, written by `normalise`, to the action it runs. Built once, not on every key press.
+    by_key: HashMap<String, &'static str>,
+}
+
+impl Default for Shortcuts {
+    fn default() -> Shortcuts {
+        Shortcuts::with_changes(HashMap::new())
+    }
 }
 
 impl Shortcuts {
     /// Reads the `shortcuts` setting. A missing or unreadable value means "all defaults", never an error, so a bad
     /// setting can't stop the app opening.
     pub fn from_setting(json: Option<&str>) -> Shortcuts {
-        let changed = json.and_then(|j| serde_json::from_str(j).ok()).unwrap_or_default();
-        Shortcuts { changed }
+        Shortcuts::with_changes(json.and_then(|j| serde_json::from_str(j).ok()).unwrap_or_default())
+    }
+
+    fn with_changes(changed: HashMap<String, String>) -> Shortcuts {
+        let mut by_key = HashMap::new();
+        // A key you gave an action takes it over from whichever action has it by default.
+        for a in APP_ACTIONS {
+            if let Some(k) = changed.get(a.id).filter(|k| !k.is_empty()) {
+                by_key.insert(normalise(k), a.id);
+            }
+        }
+        for a in APP_ACTIONS {
+            if !changed.contains_key(a.id) && !a.default_key.is_empty() {
+                by_key.entry(normalise(a.default_key)).or_insert(a.id);
+            }
+        }
+        Shortcuts { changed, by_key }
     }
 
     /// The key an action has now, or "" for none.
@@ -79,17 +102,68 @@ impl Shortcuts {
     }
 
     /// The app-wide action a key press stands for, if any. `key` is written like the list ("Ctrl+1").
+    ///
+    /// Like the C# app, a press that matches nothing is tried again without Shift, and Ctrl with the + key counts as
+    /// Ctrl+=: keyboards differ in whether Shift shows in a symbol ("?" is Shift+/ on most of them).
     pub fn action_for(&self, key: &str) -> Option<&'static str> {
         if key.is_empty() {
             return None;
         }
         let key = normalise(key);
-        APP_ACTIONS.iter().map(|a| a.id).find(|id| normalise(self.key_of(id)) == key)
+        let unshifted = key.replacen("Shift+", "", 1);
+        let plus_as_equals = match unshifted.strip_suffix('+') {
+            Some(mods) if mods.ends_with('+') => format!("{mods}="),
+            _ => String::new(),
+        };
+        [&key, &unshifted, &plus_as_equals].into_iter().find_map(|k| self.by_key.get(k.as_str()).copied())
     }
 }
 
+/// Keys with names rather than one character, in the spelling the list uses.
+const NAMED_KEYS: &[&str] = &[
+    "F1",
+    "F2",
+    "F3",
+    "F4",
+    "F5",
+    "F6",
+    "F7",
+    "F8",
+    "F9",
+    "F10",
+    "F11",
+    "F12",
+    "F13",
+    "F14",
+    "F15",
+    "F16",
+    "F17",
+    "F18",
+    "F19",
+    "F20",
+    "F21",
+    "F22",
+    "F23",
+    "F24",
+    "PageUp",
+    "PageDown",
+    "Left",
+    "Right",
+    "Up",
+    "Down",
+    "Home",
+    "End",
+    "Insert",
+    "Delete",
+    "Backspace",
+    "Esc",
+    "Tab",
+    "Enter",
+    "Space",
+];
+
 /// Puts a key in one standard spelling so "shift+ctrl+e" and "Ctrl+Shift+E" match: modifiers in the order Ctrl, Shift,
-/// Alt, Meta, then the key itself (letters upper case).
+/// Alt, Meta, then the key itself (letters upper case, named keys as `NAMED_KEYS` spells them).
 pub fn normalise(key: &str) -> String {
     if key == "+" {
         return key.to_owned();
@@ -115,10 +189,12 @@ pub fn normalise(key: &str) -> String {
             out.push('+');
         }
     }
-    if last.chars().count() == 1 {
-        out.push_str(&last.to_uppercase());
+    if let Some(named) = NAMED_KEYS.iter().find(|n| n.eq_ignore_ascii_case(last)) {
+        out.push_str(named);
+    } else if last.eq_ignore_ascii_case("escape") {
+        out.push_str("Esc");
     } else {
-        out.push_str(last);
+        out.push_str(&last.to_uppercase());
     }
     out
 }
@@ -174,5 +250,25 @@ mod tests {
         assert_eq!(normalise("Ctrl++"), "Ctrl++");
         assert_eq!(normalise("F11"), "F11");
         assert_eq!(normalise("Alt+Left"), "Alt+Left");
+        assert_eq!(normalise("ctrl+pagedown"), "Ctrl+PageDown");
+        assert_eq!(normalise("f11"), "F11");
+    }
+
+    #[test]
+    fn a_changed_key_takes_over_from_a_default() {
+        // The C# app saves only what you changed, so Ctrl+3 is still Playground's default here.
+        let s = Shortcuts::from_setting(Some(r#"{"app.goPlugins":"Ctrl+3","app.goSounds":""}"#));
+        assert_eq!(s.action_for("Ctrl+3"), Some("app.goPlugins"));
+        assert_eq!(s.action_for("Ctrl+4"), None);
+        assert_eq!(s.action_for("Ctrl+2"), None);
+    }
+
+    #[test]
+    fn shift_and_plus_fall_back_like_the_csharp_app() {
+        let s = Shortcuts::default();
+        assert_eq!(s.action_for("Shift+?"), Some("app.help"));
+        assert_eq!(s.action_for("Ctrl+Shift++"), Some("app.sizeUp"));
+        assert_eq!(s.action_for("Ctrl++"), Some("app.sizeUp"));
+        assert_eq!(s.action_for("Ctrl+Shift+Delete"), Some("app.recycleBin"));
     }
 }

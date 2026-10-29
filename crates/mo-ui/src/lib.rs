@@ -15,7 +15,10 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place) -> Result<AppWin
     apply_look(&app, look);
     let places: Vec<PlaceInfo> =
         Place::ALL.iter().map(|p| PlaceInfo { name: p.name().into(), coming: coming(*p).into() }).collect();
+    let settings = Place::Settings.index();
+    app.set_rail(ModelRc::new(VecModel::from(places[..settings].to_vec())));
     app.set_places(ModelRc::new(VecModel::from(places)));
+    app.set_settings_place(settings as i32);
     app.set_place(start.index() as i32);
 
     let weak = app.as_weak();
@@ -124,6 +127,8 @@ pub fn key_name(text: &str, ctrl: bool, shift: bool, alt: bool, meta: bool) -> S
         (Key::Return, "Enter"),
         (Key::Home, "Home"),
         (Key::End, "End"),
+        (Key::Insert, "Insert"),
+        (Key::Backspace, "Backspace"),
     ];
     let name = match named.iter().find(|(k, _)| char::from(*k) == c) {
         Some((_, n)) => (*n).to_owned(),
@@ -132,8 +137,6 @@ pub fn key_name(text: &str, ctrl: bool, shift: bool, alt: bool, meta: bool) -> S
         None if c.is_control() || ('\u{F700}'..='\u{F8FF}').contains(&c) => return String::new(),
         None => c.to_uppercase().collect(),
     };
-    // A symbol typed with Shift ("?" is Shift+/ on most keyboards) is its own key.
-    let shift = shift && !(name.chars().count() == 1 && !c.is_alphanumeric());
     let mut out = String::new();
     for (on, m) in [(ctrl, "Ctrl+"), (shift, "Shift+"), (alt, "Alt+"), (meta, "Meta+")] {
         if on {
@@ -152,7 +155,7 @@ mod tests {
     fn keys_are_named_like_the_shortcut_list() {
         assert_eq!(key_name("1", true, false, false, false), "Ctrl+1");
         assert_eq!(key_name("k", true, false, false, false), "Ctrl+K");
-        assert_eq!(key_name("?", false, true, false, false), "?");
+        assert_eq!(key_name("?", false, true, false, false), "Shift+?");
         assert_eq!(key_name("E", true, true, false, false), "Ctrl+Shift+E");
         assert_eq!(key_name(&char::from(Key::F11).to_string(), false, false, false, false), "F11");
         assert_eq!(key_name(&char::from(Key::LeftArrow).to_string(), false, false, true, false), "Alt+Left");
