@@ -15,8 +15,20 @@ fn main() -> Result<(), slint::PlatformError> {
     log_crashes();
     let feed = Feed::default();
     // The settings come from library.db once mo-library exists (phase 2); until then the app opens in its defaults.
-    let app =
-        mo_ui::new_app(&Look::from_settings(None, None), Shortcuts::from_setting(None), Place::Songs, feed.clone())?;
+    let app = match mo_ui::new_app(
+        &Look::from_settings(None, None),
+        Shortcuts::from_setting(None),
+        Place::Songs,
+        feed.clone(),
+    ) {
+        Ok(app) => app,
+        Err(e) => {
+            // Rule 17: the reason the window couldn't open reaches the log too.
+            log::error("App", &format!("The window couldn't open: {e}"));
+            session.close();
+            return Err(e);
+        }
+    };
     app.window().set_maximized(true);
     // The watchdog starts once the window is up, so opening it doesn't count as a freeze.
     let watched = feed.clone();
@@ -28,6 +40,7 @@ fn main() -> Result<(), slint::PlatformError> {
         log::error("App", &format!("The window stopped with an error: {e}"));
     }
     // A note left open keeps its draft for next time, but the launcher shouldn't wait on it any more.
+    mo_ui::note::wait_for_saves();
     mo_ui::note::finish_up();
     session.close();
     ran

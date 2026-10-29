@@ -86,7 +86,8 @@ part: kept, folded into something else, or rethought.
 ### 3.1 The window
 
 - Left rail: **Projects, Sound Lab, MIDI, Playground, Plugins**, Settings at the bottom (Ctrl+1 to 5, Ctrl+,).
-  Agreed but not built yet: a **Space** page (Ctrl+6), and folding the MIDI page into the Playground.
+  Agreed but not built yet: a **Space** page (Ctrl+6), and folding the MIDI page into the Playground (superseded on
+  2026-10-29: MIDI stays a page and the Playground becomes its own app, see 3A).
 - **"In your DAWs"** rows on the sidebar: the project open in Bitwig or FL right now; click to reveal it.
 - **Activity cards** bottom right, one per job: started, progress, finished or failed. A running card can be put away;
   "N running" brings them back. Every job reports through this.
@@ -258,7 +259,7 @@ logs). **Rule:** a page's numbers are options on its own tab.
 
 ### 3.10 Diagnostics (for testing at home)
 
-- Session log `logs\session-*.log` with the build/commit Version line, pages, warnings, errors, `[Freeze]` lines
+- Session log `logs\session-*.log` (the Rust app writes `logs\rust-session-*.log`, so each app keeps its own 30) with the build/commit Version line, pages, warnings, errors, `[Freeze]` lines
   (UI stall over 250 ms with the page and running jobs), `[Job]` lines, `[Facts]`, `[Sweep]`.
 - `audio.log`, F12 notes, self-check reports, live-test reports, duplicate-match CSVs.
 - **Rule:** crashes always log; a log that stops after its header means the app was killed from outside.
@@ -582,7 +583,7 @@ How the hard parts work in Slint:
 - Lots of feedback: hover and press transitions, spinners, cards sliding in, page cross-fades.
 - One `PlayIcon` for every play/stop button (never typed ▶ or ■).
 - **Shortcuts**: one app-wide list with ids (`app.*`, `playground.*`…), defaults, only changed keys saved under
-  `shortcuts`, Settings › Shortcuts to change them, the key sheet. Ctrl+1..5 pages, Ctrl+, Settings, Ctrl+F search,
+  `shortcuts`, Settings › Shortcuts to change them, the key sheet. Ctrl+1..6 pages, Ctrl+, Settings, Ctrl+F search,
   Ctrl+Up/Down step the list, Ctrl+Left/Right tabs, Space plays, F1/? keys, F5 rescan, F11, F12 note, Ctrl+B Bitwig,
   Ctrl+Shift+E Explorer, Ctrl+Shift+C copy path. A page's own key beats an app-wide one; in text boxes only Ctrl and
   F-keys count. **Rule:** every menu line shows its key, and every action can take one.
@@ -690,8 +691,8 @@ Each phase ends with something you can open and try. The C# app stays your daily
   its fixes, so bugs are caught before they cost you a test round. The ultracode review above then catches what only
   shows when the PRs meet.
 - Each page starts with a short question round and mock-ups (keep, fold, rethink), then gets built.
-- Each phase lands as small PRs from fresh branches off `main`; you test at home with the launcher; nothing merges
-  without your yes, batched so the app restarts once.
+- Each phase lands as small PRs from fresh branches off `main`; you test at home with the launcher; Claude
+  merges each PR once its code review's points are fixed and CI is green (rule 18, changed 2026-10-29).
 - A Rust page writes to the shared databases only after its twin tests pass and you've tried it.
 - Anything that changes files on disk (Fix, folder moves, clean-ups) is tried on copies first and keeps the C# safety
   rules (copy, check, then rename; never delete samples; "(fixed)" copies; Keep or Delete).

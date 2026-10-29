@@ -14,7 +14,27 @@ Thumbs.db
 *.mp3
 *.flac
 *.onnx
+*.onnx_data
+*.safetensors
+*.pt
 *.sf2
+*.mid
+*.midi
+*.ogg
+*.m4a
+*.aac
+*.wv
+*.rx2
+*.rex
+*.fxp
+*.fxb
+*.fst
+*.vstpreset
+*.bwpreset
+*.bwclip
+*.dawproject
+*.jar
+*.zip
 
 # Small made-up test files are fine
 !**/fixtures/**

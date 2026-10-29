@@ -3,11 +3,14 @@
 //! crashes first), and saving happens off the window's thread, ending in an activity card that says where it went.
 //!
 //! Only the Cancel button throws the words away. Esc or a click beside the dialog just puts the note aside: the next
-//! F12 offers it back.
+//! F12 offers it back. After Save, the draft and `writing.lock` stay until the note is really on disk, and the app
+//! waits a few seconds for a save still going before it closes.
 
 use std::cell::RefCell;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use mo_app::activity::Feed;
 use mo_app::{log, note};
@@ -25,6 +28,11 @@ struct Picture {
 /// Typed but not yet in the draft file.
 static UNSAVED: Mutex<Option<String>> = Mutex::new(None);
 const DRAFT_PAUSE: Duration = Duration::from_millis(300);
+/// Counts the notes opened, so a save that ends after a new note was opened leaves that note's draft and lock alone.
+static OPENED: AtomicU64 = AtomicU64::new(0);
+/// Saves still going.
+static SAVING: AtomicUsize = AtomicUsize::new(0);
+static SAVES: Mutex<Vec<JoinHandle<()>>> = Mutex::new(Vec::new());
 
 thread_local! {
     static PICTURE: RefCell<Option<Picture>> = const { RefCell::new(None) };
@@ -47,7 +55,10 @@ pub fn open_note(app: &AppWindow) {
     app.set_note_include_picture(picture.is_some());
     PICTURE.with(|p| *p.borrow_mut() = picture);
     let folder = note::notes_dir();
-    app.set_note_text(note::read_draft(&folder).unwrap_or_default().into());
+    OPENED.fetch_add(1, Ordering::AcqRel);
+    // While a save is still going, the draft is the note being saved, not one to offer back.
+    let draft = if SAVING.load(Ordering::Acquire) > 0 { None } else { note::read_draft(&folder) };
+    app.set_note_text(draft.unwrap_or_default().into());
     note::writing(&folder, true);
     app.set_note_open(true);
 }
@@ -78,7 +89,12 @@ pub fn connect(app: &AppWindow, feed: &Feed) {
         let Some(app) = weak.upgrade() else { return };
         let text = app.get_note_text().to_string();
         let picture = PICTURE.with(|p| p.borrow_mut().take()).filter(|_| app.get_note_include_picture());
-        close(&app, true);
+        // The words stay in the draft, and the lock stays up, until the save has finished.
+        DRAFT_TIMER.with(Timer::stop);
+        UNSAVED.lock().unwrap_or_else(|e| e.into_inner()).take();
+        note::keep_draft(&note::notes_dir(), &text);
+        app.set_note_open(false);
+        app.set_note_text("".into());
         save_in_background(&feed, text, picture);
     });
 }
@@ -95,8 +111,24 @@ fn keep_unsaved() {
     }
 }
 
-/// For the app closing or crashing: keeps a note that's open as a draft, and takes down `writing.lock` so the launcher
-/// doesn't wait for it.
+/// For the app closing: waits up to a few seconds for notes still being saved.
+pub fn wait_for_saves() {
+    let until = Instant::now() + Duration::from_secs(5);
+    let saves = std::mem::take(&mut *SAVES.lock().unwrap_or_else(|e| e.into_inner()));
+    for save in saves {
+        while !save.is_finished() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if save.is_finished() {
+            let _ = save.join();
+        } else {
+            log::warning("Note", "A note was still being saved when the app closed; its words are kept as the draft.");
+        }
+    }
+}
+
+/// For the app closing or crashing: keeps a note that's open as a draft, and takes down this app's `writing.lock` so
+/// the launcher doesn't wait for it.
 pub fn finish_up() {
     keep_unsaved();
     note::writing(&note::notes_dir(), false);
@@ -120,9 +152,11 @@ fn close(app: &AppWindow, done_with: bool) {
 
 fn save_in_background(feed: &Feed, text: String, picture: Option<Picture>) {
     let page = crate::page_name();
+    let opened = OPENED.load(Ordering::Acquire);
     let job = feed.start("Saving your note", "");
     // If the saving can't even start, the words still reach the log.
     let words = text.clone();
+    SAVING.fetch_add(1, Ordering::AcqRel);
     let spawned = std::thread::Builder::new().name("Note".into()).spawn(move || {
         let png = picture.and_then(|p| match encode_png(&p) {
             Ok(png) => Some(png),
@@ -141,21 +175,37 @@ fn save_in_background(feed: &Feed, text: String, picture: Option<Picture>) {
             recent_log: &recent,
             picture: png.as_deref(),
         };
-        match note::save(&note::notes_dir(), &n, chrono::Local::now()) {
+        let folder = note::notes_dir();
+        let saved = note::save(&folder, &n, chrono::Local::now());
+        // Only when no new note was opened meanwhile: that one owns the draft and the lock now.
+        let still_ours = OPENED.load(Ordering::Acquire) == opened;
+        match saved {
             Ok(path) => {
+                if still_ours {
+                    note::clear_draft(&folder);
+                }
                 let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 log::info("Note", &format!("Saved {name}"));
                 job.done(&format!("Saved as {name}"));
             }
             Err(e) => {
-                // The words go into the log, so they're not lost even when the folder can't be written.
+                // The words stay in the draft and go into the log, so they're not lost when the folder can't be written.
                 log::error("Note", &format!("Couldn't save the note: {e}\n{text}"));
-                job.failed(&format!("Couldn't save it: {e}"));
+                job.failed(&format!("Couldn't save it: {e}. Your words are kept for the next F12."));
             }
         }
+        if still_ours {
+            note::writing(&folder, false);
+        }
+        SAVING.fetch_sub(1, Ordering::AcqRel);
     });
-    if let Err(e) = spawned {
-        log::error("Note", &format!("Couldn't start saving the note: {e}\n{words}"));
+    match spawned {
+        Ok(handle) => SAVES.lock().unwrap_or_else(|e| e.into_inner()).push(handle),
+        Err(e) => {
+            SAVING.fetch_sub(1, Ordering::AcqRel);
+            note::writing(&note::notes_dir(), false);
+            log::error("Note", &format!("Couldn't start saving the note: {e}\n{words}"));
+        }
     }
 }
 
