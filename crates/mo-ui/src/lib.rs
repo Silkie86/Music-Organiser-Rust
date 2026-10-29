@@ -113,7 +113,13 @@ fn coming(place: Place) -> &'static str {
         Place::Sounds => {
             "Every sound as Tiles, a List or the Galaxy, with the kit builder beside them. Built in phase 3."
         }
-        Place::Playground => "The small MIDI DAW, with the MIDI browser folded in. Built in phase 6.",
+        Place::Presets => {
+            "Every sound you made inside your songs, and your preset files, with a guess at each one's part (bass, lead, \
+             chords, drums) from the notes it played. Built in phase 5."
+        }
+        Place::Midi => {
+            "Your MIDI packs and the parts in your songs: search, play and drag into a DAW. Built in phase 6."
+        }
         Place::Plugins => "Every plugin your songs use, and what to install to open more of them. Built in phase 4.",
         Place::Space => {
             "The biggest ways to free disk space, across plugins, songs, spare copies and duplicates. Built in phase 4."
