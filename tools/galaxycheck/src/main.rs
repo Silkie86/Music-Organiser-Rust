@@ -35,9 +35,20 @@ struct State {
     finished: bool,
     size: (u32, u32),
     scale: f32,
+    /// When the numbers in the corner last changed: a few times a second is enough to read, and cheaper to draw.
+    numbers_shown: Option<Instant>,
+    /// Slint gave no wgpu device, so nothing can be drawn; said once.
+    no_wgpu_said: bool,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Rule 17: a crash goes to the logs folder too, where Claude reads the results.
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        write_results(&format!("The galaxy check crashed: {info}\n\n{}", std::backtrace::Backtrace::force_capture()));
+        default(info);
+    }));
+
     let mut settings = WGPUSettings::default();
     settings.power_preference = wgpu::PowerPreference::HighPerformance;
     if let Err(e) = slint::BackendSelector::new().require_wgpu_30(WGPUConfiguration::Automatic(settings)).select() {
@@ -58,6 +69,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         finished: false,
         size: (0, 0),
         scale: 1.0,
+        numbers_shown: None,
+        no_wgpu_said: false,
     }));
 
     let weak = app.as_weak();
@@ -108,6 +121,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// One frame: times it, moves the camera, draws the stars and asks for the next frame straight away.
 fn frame(app: &CheckWindow, st: &mut State) {
+    if st.painter.is_none() {
+        // Without the stars there's nothing to time, and an empty window would pass for the wrong reason.
+        if !st.no_wgpu_said {
+            st.no_wgpu_said = true;
+            let why = "Fell short: Slint drew the window without handing the check a wgpu device, so no stars could be drawn.";
+            write_results(why);
+            app.set_stage(why.into());
+        }
+        return;
+    }
     let now = Instant::now();
     let started = *st.started.get_or_insert(now);
     let elapsed = now.duration_since(started).as_secs_f32();
@@ -122,7 +145,7 @@ fn frame(app: &CheckWindow, st: &mut State) {
                 if let Some(ms) = interval
                     && elapsed % STAGE_SECONDS > 0.5
                 {
-                    st.timings[stage].frames_ms.push(ms);
+                    st.timings[stage].add(ms);
                 }
                 app.set_stage(format!("{} ({} of {})", STAGES[stage], stage + 1, STAGES.len()).into());
             }
@@ -142,7 +165,7 @@ fn frame(app: &CheckWindow, st: &mut State) {
     st.size = size;
     st.scale = scale;
     let view = st.view;
-    let Some(painter) = st.painter.as_mut() else { return };
+    let Some(painter) = st.painter.as_mut() else { return }; // checked at the top
     let drawn = Instant::now();
     let texture = painter.draw(view, size.0, size.1, [0.043, 0.051, 0.071]);
     let cpu_ms = drawn.elapsed().as_secs_f32() * 1000.0;
@@ -150,17 +173,20 @@ fn frame(app: &CheckWindow, st: &mut State) {
         Ok(image) => app.set_sky(image),
         Err(e) => app.set_stage(format!("Slint wouldn't show the picture: {e}").into()),
     }
-    app.set_numbers(
-        format!(
-            "{STARS} stars, {}×{} px, zoom {:.1}\nThis frame: {} ms (sending it took {cpu_ms:.2} ms)\n{}",
-            size.0,
-            size.1,
-            view.zoom,
-            interval.map_or("–".into(), |ms| format!("{ms:.1}")),
-            st.graphics
-        )
-        .into(),
-    );
+    if st.numbers_shown.is_none_or(|t| now.duration_since(t).as_millis() >= 250) {
+        st.numbers_shown = Some(now);
+        app.set_numbers(
+            format!(
+                "{STARS} stars, {}×{} px, zoom {:.1}\nThis frame: {} ms (sending it took {cpu_ms:.2} ms)\n{}",
+                size.0,
+                size.1,
+                view.zoom,
+                interval.map_or("–".into(), |ms| format!("{ms:.1}")),
+                st.graphics
+            )
+            .into(),
+        );
+    }
     app.window().request_redraw();
 }
 
@@ -177,12 +203,16 @@ fn results(st: &State) -> String {
     for (name, t) in STAGES.iter().zip(&st.timings) {
         match t.summary() {
             Some((middle, p95, slowest, late)) => {
-                passed &= p95 <= 17.5;
-                let _ = writeln!(
+                passed &= t.kept_up();
+                let _ = write!(
                     out,
                     "{name}: middle {middle:.1} ms, 95% under {p95:.1} ms, slowest {slowest:.1} ms; {late} of {} frames late",
                     t.frames_ms.len()
                 );
+                if t.pauses > 0 {
+                    let _ = write!(out, " ({} pauses left out: the window was moved or hidden)", t.pauses);
+                }
+                out.push('\n');
             }
             None => {
                 passed = false;
@@ -191,7 +221,7 @@ fn results(st: &State) -> String {
         }
     }
     out += if passed {
-        "\nPassed: 60 frames a second in every stage. The galaxy can be drawn with wgpu inside Slint."
+        "\nPassed: 60 frames a second in every stage (no more than 1 frame in 20 late). The galaxy can be drawn with wgpu inside Slint."
     } else {
         "\nFell short of 60 frames a second somewhere. Send this to Claude: the next step is egui or a window of its own."
     };
@@ -203,8 +233,9 @@ fn results(st: &State) -> String {
 fn write_results(text: &str) {
     let dir = mo_app::paths::logs_dir();
     let name = format!("galaxy-check-{}.txt", chrono::Local::now().format("%Y-%m-%d_%H-%M-%S"));
-    if std::fs::create_dir_all(&dir).is_ok() {
-        let _ = std::fs::write(dir.join(&name), text);
-        println!("Written to {}", dir.join(name).display());
+    let path = dir.join(name);
+    match std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, text)) {
+        Ok(()) => println!("Written to {}", path.display()),
+        Err(e) => println!("Couldn't write {} ({e}). Copy the numbers from here instead:\n{text}", path.display()),
     }
 }

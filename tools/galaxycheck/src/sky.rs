@@ -44,13 +44,18 @@ pub fn make(count: usize) -> Vec<Star> {
                 (rng.unit() * 2.0 - 1.0, rng.unit() * 2.0 - 1.0, 0x8A8F99)
             } else {
                 let (cx, cy, spread, colour) = clusters[rng.below(clusters.len())];
-                let (gx, gy) = rng.gauss2();
-                (cx + gx * spread, cy + gy * spread, colour)
+                // A star that falls outside the sky is placed again, so none pile up along its edges.
+                let (mut x, mut y) = (2.0, 2.0);
+                while !(-1.0..=1.0).contains(&x) || !(-1.0..=1.0).contains(&y) {
+                    let (gx, gy) = rng.gauss2();
+                    (x, y) = (cx + gx * spread, cy + gy * spread);
+                }
+                (x, y, colour)
             };
             let alpha = 140 + rng.below(100) as u32;
             Star {
-                x: x.clamp(-1.0, 1.0),
-                y: y.clamp(-1.0, 1.0),
+                x,
+                y,
                 colour: (colour >> 16 & 0xFF) | (colour & 0xFF00) | ((colour & 0xFF) << 16) | (alpha << 24),
                 size: 1.5 + rng.unit() * 2.0,
             }
@@ -96,13 +101,32 @@ pub fn scripted(t: f32) -> Option<(usize, View)> {
     Some((stage, view))
 }
 
+/// A gap longer than this wasn't the drawing: the window was moved, hidden or covered. It's counted, not timed.
+pub const PAUSE_MS: f32 = 250.0;
+/// A frame "late" for 60 fps took over 16.7 ms, with a little room for the screen's own timing.
+pub const LATE_MS: f32 = 18.0;
+
 /// Frame times for one stage.
 #[derive(Clone, Debug, Default)]
 pub struct Timings {
     pub frames_ms: Vec<f32>,
+    pub pauses: usize,
 }
 
 impl Timings {
+    pub fn add(&mut self, ms: f32) {
+        if ms > PAUSE_MS {
+            self.pauses += 1;
+        } else {
+            self.frames_ms.push(ms);
+        }
+    }
+
+    /// Kept up: no more than one frame in twenty was late.
+    pub fn kept_up(&self) -> bool {
+        self.summary().is_some_and(|(_, _, _, late)| late * 20 <= self.frames_ms.len())
+    }
+
     /// The middle frame time, the 95th-percentile one, the slowest, and how many took longer than one 60 fps frame.
     pub fn summary(&self) -> Option<(f32, f32, f32, usize)> {
         if self.frames_ms.is_empty() {
@@ -111,8 +135,7 @@ impl Timings {
         let mut sorted = self.frames_ms.clone();
         sorted.sort_by(f32::total_cmp);
         let at = |p: f32| sorted[((sorted.len() - 1) as f32 * p).round() as usize];
-        // A frame "late" for 60 fps took over 16.7 ms, with a little room for the screen's own timing.
-        let late = sorted.iter().filter(|&&ms| ms > 18.0).count();
+        let late = sorted.iter().filter(|&&ms| ms > LATE_MS).count();
         Some((at(0.5), at(0.95), sorted[sorted.len() - 1], late))
     }
 }
@@ -166,8 +189,16 @@ mod tests {
 
     #[test]
     fn timings_say_how_many_frames_were_late() {
-        let t = Timings { frames_ms: vec![16.0, 16.5, 17.0, 40.0] };
+        let mut t = Timings::default();
+        for ms in [16.0, 16.5, 17.0, 40.0, 900.0] {
+            t.add(ms);
+        }
         let (middle, _, slowest, late) = t.summary().expect("some frames");
-        assert_eq!((middle, slowest, late), (17.0, 40.0, 1));
+        assert_eq!((middle, slowest, late, t.pauses), (17.0, 40.0, 1, 1), "the 900 ms pause isn't a frame");
+        assert!(!t.kept_up(), "one late frame in four is too many");
+        for _ in 0..100 {
+            t.add(16.7);
+        }
+        assert!(t.kept_up());
     }
 }

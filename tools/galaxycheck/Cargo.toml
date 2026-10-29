@@ -1,23 +1,32 @@
+# A workspace of its own: Cargo mixes the features of everything built together, so inside the app's workspace the
+# check's wgpu would end up in the app's build too. Its own build folder also means it never waits on the launcher's.
+[workspace]
+
 [package]
 name = "galaxycheck"
 description = "Phase 0 check: can Slint show 300,000 stars drawn with wgpu at 60 frames a second?"
-version.workspace = true
-edition.workspace = true
-publish.workspace = true
+version = "0.1.0"
+edition = "2024"
+publish = false
 
 [[bin]]
 name = "galaxy-check"
 path = "src/main.rs"
 
 [dependencies]
-mo-app.workspace = true
-chrono.workspace = true
-# The galaxy draws with wgpu into a texture Slint shows (spec section 11). Only this tool turns it on for now, so the
-# app itself still builds without wgpu.
-slint = { workspace = true, features = ["unstable-wgpu-30", "renderer-femtovg-wgpu"] }
+mo-app = { path = "../../crates/mo-app" }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# The galaxy draws with wgpu into a texture Slint shows (spec section 11).
+slint = { version = "1.18", features = ["unstable-wgpu-30", "renderer-femtovg-wgpu"] }
 
 [build-dependencies]
-slint-build.workspace = true
+slint-build = "1.18"
 
-[lints]
-workspace = true
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.dev.package."*"]
+opt-level = 2
