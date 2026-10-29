@@ -1,11 +1,15 @@
 //! The song an FL project holds: its channels, what plays each one, and the notes and audio clips it plays where the
 //! playlist puts them. This is what the MIDI page, the Overview and converting to another DAW are built on.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::Path;
 
 use super::events::*;
 use super::notes;
-use super::{WRAPPER, vst2_header, wrapper_fields, wrapper_text};
+use super::{
+    KIND_VST3, Rack, UserData, VST_CLASS_ID, VST_FOUR_CC, VST_KIND, VST_NAME, VST_PATH, VST_STATE, VST_VENDOR, WRAPPER,
+    saved_nothing, wrapper_fields, wrapper_text,
+};
 use crate::model::{MidiChannel, MidiClip, NoteEvent};
 use crate::plugins;
 
@@ -207,16 +211,16 @@ impl PlaylistTracks {
 
     /// The track a clip is on, from the slot FL saves with it, which counts down from the first track (499 is track 1
     /// of 500), and whether that track is muted.
-    pub fn at(&self, slot: u32) -> Option<&(FlTrack, bool)> {
-        (self.tracks.len() as i64 - slot as i64).try_into().ok().and_then(|n: u32| self.tracks.get(&n))
+    pub fn at(&self, slot: i64) -> Option<&(FlTrack, bool)> {
+        u32::try_from(self.tracks.len() as i64 - slot).ok().and_then(|n| self.tracks.get(&n))
     }
 
     /// The number of the track a clip's slot is, or 0 when the file doesn't say.
-    pub fn number(&self, slot: u32) -> u32 {
+    pub fn number(&self, slot: i64) -> u32 {
         self.at(slot).map_or(0, |t| t.0.number)
     }
 
-    fn muted(&self, slot: u32) -> bool {
+    fn muted(&self, slot: i64) -> bool {
         self.at(slot).is_some_and(|t| t.1)
     }
 }
@@ -231,15 +235,8 @@ pub(super) struct PlaylistItem {
     pub length: i64,
     pub offset: f64,
     pub muted: bool,
-    pub slot: u32,
-}
-
-fn u16_at(d: &[u8], at: usize) -> u16 {
-    u16::from_le_bytes([d[at], d[at + 1]])
-}
-
-fn u32_at(d: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes([d[at], d[at + 1], d[at + 2], d[at + 3]])
+    /// Can go below 0 in an old save with more than 500 patterns placed; no track is there.
+    pub slot: i64,
 }
 
 /// A clip's start offset, written as a float or an integer depending on FL's version; none is 0.
@@ -270,7 +267,7 @@ pub(super) fn playlist_items(d: &[u8]) -> Vec<PlaylistItem> {
             length: u32_at(r, 8) as i64,
             offset: item_offset(&r[24..]),
             muted: u16_at(r, 18) & 0x2000 != 0,
-            slot: u16_at(r, 12) as u32,
+            slot: u16_at(r, 12) as i64,
         }));
         break;
     }
@@ -292,13 +289,12 @@ pub(super) fn playlist_items(d: &[u8]) -> Vec<PlaylistItem> {
                 length: u32_at(r, 8) as i64,
                 offset: item_offset(&r[24..]),
                 muted: u16_at(r, 18) & 0x2000 != 0,
-                slot: row,
+                slot: row as i64,
             });
         }
-        let order: Vec<u32> =
-            items.iter().map(|i| i.index).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+        let order: Vec<u32> = items.iter().map(|i| i.index).collect::<BTreeSet<_>>().into_iter().collect();
         for item in &mut items {
-            item.slot = 499 - order.binary_search(&item.index).expect("listed above") as u32;
+            item.slot = 499 - order.binary_search(&item.index).expect("listed above") as i64;
         }
     }
     // FL 6 to 8: 28-byte items laid out like FL 9's, but with the start offset at 20 (a float, −1 = none) and rows
@@ -334,9 +330,9 @@ pub(super) fn playlist_items(d: &[u8]) -> Vec<PlaylistItem> {
                 },
             )
             .collect();
-        let order: Vec<u32> = keys.iter().copied().collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+        let order: Vec<u32> = keys.iter().copied().collect::<BTreeSet<_>>().into_iter().collect();
         for (item, key) in items.iter_mut().zip(keys) {
-            item.slot = 499 - order.binary_search(&key).expect("listed above") as u32;
+            item.slot = 499 - order.binary_search(&key).expect("listed above") as i64;
         }
     }
     items
@@ -348,7 +344,7 @@ pub(super) fn playlist_items(d: &[u8]) -> Vec<PlaylistItem> {
 fn place_clips(
     flp: &Flp<'_>,
     raw_notes: &[(u32, &Event<'_>)],
-    playlist: Option<&[u8]>,
+    items: &[PlaylistItem],
     tracks: &PlaylistTracks,
     known: &HashSet<u32>,
     pattern_names: &HashMap<u32, String>,
@@ -391,8 +387,7 @@ fn place_clips(
         }
     };
 
-    let mut items: Vec<PlaylistItem> =
-        playlist.map(playlist_items).unwrap_or_default().into_iter().filter(|i| i.index > PATTERN_BASE).collect();
+    let mut items: Vec<&PlaylistItem> = items.iter().filter(|i| i.index > PATTERN_BASE).collect();
     if !items.is_empty() {
         items.sort_by_key(|i| i.at);
         for i in items {
@@ -428,16 +423,13 @@ fn place_clips(
 /// Audio clips in the playlist (the first arrangement), by channel: items whose index is a channel. An audio clip's
 /// start offset is in milliseconds of the sample, as FL 25 saves it.
 fn place_audio_clips(
-    playlist: Option<&[u8]>,
+    items: &[PlaylistItem],
     tracks: &PlaylistTracks,
     channels: &HashSet<u32>,
 ) -> BTreeMap<u32, Vec<FlAudioClip>> {
     let mut clips: BTreeMap<u32, Vec<FlAudioClip>> = BTreeMap::new();
-    let Some(playlist) = playlist else { return clips };
-    let mut items: Vec<PlaylistItem> = playlist_items(playlist)
-        .into_iter()
-        .filter(|i| i.index < PATTERN_BASE && channels.contains(&i.index) && i.length > 0)
-        .collect();
+    let mut items: Vec<&PlaylistItem> =
+        items.iter().filter(|i| i.index < PATTERN_BASE && channels.contains(&i.index) && i.length > 0).collect();
     items.sort_by_key(|i| i.at);
     for i in items {
         clips.entry(i.index).or_default().push(FlAudioClip {
@@ -521,15 +513,6 @@ pub fn class_id_string(tuid: &[u8; 16]) -> String {
     b.iter().map(|x| format!("{x:02X}")).collect()
 }
 
-const VST_KIND: u32 = 50;
-const VST_FOUR_CC: u32 = 51;
-const VST_CLASS_ID: u32 = 52;
-const VST_STATE: u32 = 53;
-const VST_NAME: u32 = 54;
-const VST_PATH: u32 = 55;
-const VST_VENDOR: u32 = 56;
-const KIND_VST3: u8 = 8;
-
 fn song_plugin(internal: &str, data: &[u8]) -> FlPlugin {
     if !internal.eq_ignore_ascii_case(WRAPPER) {
         return FlPlugin {
@@ -556,8 +539,7 @@ fn song_plugin(internal: &str, data: &[u8]) -> FlPlugin {
             .map(|c| i32::from_le_bytes(c).to_string())
             .unwrap_or_default()
     };
-    let nothing_saved =
-        !vst3 && f.get(&VST_STATE).is_some_and(|s| matches!(vst2_header(s), Some((_, 0, _))) && s[4] & 0x08 != 0);
+    let nothing_saved = !vst3 && f.get(&VST_STATE).is_some_and(|s| saved_nothing(s));
     FlPlugin {
         name,
         vendor: wrapper_text(&f, VST_VENDOR),
@@ -568,8 +550,26 @@ fn song_plugin(internal: &str, data: &[u8]) -> FlPlugin {
     }
 }
 
-/// Reads the song: channels, what plays them, and their notes and audio clips where the playlist puts them.
-/// Sample paths are as FL wrote them (see [`super::resolve_user_data`]).
+impl FlSong {
+    /// Finds samples saved under FL's user data folder from where the project lives (see [`super::resolve_user_data`]).
+    pub fn resolve_samples(&mut self, project: &Path) {
+        let mut user_data = UserData::new(project);
+        for c in &mut self.channels {
+            c.sample = user_data.resolve(&c.sample);
+        }
+    }
+}
+
+/// Finds the channels' samples saved under FL's user data folder from where the project lives.
+pub fn resolve_channel_samples(channels: &mut [MidiChannel], project: &Path) {
+    let mut user_data = UserData::new(project);
+    for c in channels {
+        c.sample_path = user_data.resolve(&c.sample_path);
+    }
+}
+
+/// Reads the song: channels, what plays them, and their notes and audio clips where the playlist puts them. Sample
+/// paths are as FL wrote them; [`FlSong::resolve_samples`] finds those under FL's user data folder.
 pub fn read_song(flp: &Flp<'_>) -> FlSong {
     let mut title = String::new();
     let mut tempo: Option<f64> = None;
@@ -590,114 +590,22 @@ pub fn read_song(flp: &Flp<'_>) -> FlSong {
     let mut pattern_names: HashMap<u32, String> = HashMap::new();
     let mut playlist: Option<&[u8]> = None;
     let mut tracks = PlaylistTracks::default();
-    let (mut channel, mut pattern): (Option<u32>, Option<u32>) = (None, None);
-    let mut in_mixer = false;
-    let mut channel_has_plugin = false;
+    let mut rack = Rack::default();
+    let mut pattern: Option<u32> = None;
     let mut pending_internal = String::new();
 
     for e in &flp.events {
         tracks.read(e, flp);
-        // Most of a channel's events only count while its events are going (not in the mixer's).
-        let on_channel = channel.filter(|_| !in_mixer);
+        rack.step(e);
+        let channel = rack.channel();
         match e.id {
             EV_TEMPO => tempo = Some(e.int() as f64 / 1000.0),
             EV_TEMPO_COARSE if tempo.is_none() => tempo = Some(e.int() as f64),
             EV_TITLE => title = flp.text(&e.data),
             EV_CHANNEL_NEW => {
-                let c = e.int();
-                channel = Some(c);
-                in_mixer = false;
-                channel_has_plugin = false;
-                if !order.contains(&c) {
-                    order.push(c);
+                if !order.contains(&e.int()) {
+                    order.push(e.int());
                 }
-            }
-            EV_CHANNEL_ON => {
-                if let Some(c) = on_channel {
-                    if e.int() == 0 {
-                        off.insert(c)
-                    } else {
-                        off.remove(&c)
-                    };
-                }
-            }
-            EV_CHANNEL_INSERT | EV_CHANNEL_ROUTE => {
-                if let Some(c) = on_channel {
-                    routes.insert(c, e.int());
-                }
-            }
-            EV_CHANNEL_TYPE => {
-                if let Some(c) = on_channel {
-                    types.insert(c, e.int());
-                }
-            }
-            EV_ROOT_NOTE => {
-                if let Some(c) = on_channel.filter(|_| e.int() <= 127) {
-                    roots.insert(c, e.int() as u8);
-                }
-            }
-            EV_CHANNEL_LEVELS => {
-                if let (Some(c), Some(lv)) = (on_channel, levels(&e.data, flp.major)) {
-                    levels_of.insert(c, lv);
-                }
-            }
-            EV_ENVELOPE => {
-                if let Some(c) = on_channel {
-                    // The second of a channel's envelopes is its volume's.
-                    let seen = envelopes.entry(c).or_default();
-                    if *seen == 1
-                        && let Some(env) = envelope(&e.data)
-                    {
-                        volume_envelopes.insert(c, env);
-                    }
-                    *seen += 1;
-                }
-            }
-            EV_CHANNEL_PARAMS => {
-                if let (Some(c), Some(s)) = (on_channel, stretch(&e.data)) {
-                    stretches.insert(c, s);
-                }
-            }
-            EV_CHANNEL_FX => {
-                if let Some(c) = on_channel {
-                    if e.int() & 0x2 != 0 {
-                        reversed.insert(c)
-                    } else {
-                        reversed.remove(&c)
-                    };
-                }
-            }
-            EV_CHANNEL_NAME_OLD => {
-                if let Some(c) = on_channel {
-                    names.entry(c).or_insert_with(|| flp.text(&e.data));
-                }
-            }
-            EV_SAMPLE_PATH => {
-                if let Some(c) = on_channel {
-                    let sample = flp.text(&e.data);
-                    if !sample.is_empty() {
-                        samples.insert(c, sample);
-                    }
-                }
-            }
-            EV_INSERT_FLAGS | EV_MIXER_SLOT => in_mixer = true,
-            EV_PLUGIN_INTERNAL => {
-                pending_internal = flp.text(&e.data);
-                if channel_has_plugin {
-                    in_mixer = true;
-                }
-                channel_has_plugin = true;
-            }
-            EV_PLUGIN_NAME => {
-                if let Some(c) = on_channel {
-                    names.entry(c).or_insert_with(|| flp.text(&e.data));
-                }
-            }
-            EV_PLUGIN_STATE if !e.data.is_empty() && !pending_internal.is_empty() => {
-                if let Some(c) = channel.filter(|_| !in_mixer) {
-                    instruments.entry(c).or_insert_with(|| song_plugin(&pending_internal, &e.data));
-                }
-                pending_internal.clear();
             }
             EV_PATTERN_NEW => pattern = Some(e.int()),
             EV_PATTERN_NAME => {
@@ -711,15 +619,60 @@ pub fn read_song(flp: &Flp<'_>) -> FlSong {
                 }
             }
             EV_PLAYLIST if playlist.is_none() => playlist = Some(&e.data),
+            EV_PLUGIN_INTERNAL => pending_internal = flp.text(&e.data),
+            EV_PLUGIN_STATE if !e.data.is_empty() && !pending_internal.is_empty() => {
+                if let Some(c) = channel {
+                    instruments.entry(c).or_insert_with(|| song_plugin(&pending_internal, &e.data));
+                }
+                pending_internal.clear();
+            }
+            _ => {}
+        }
+        // The rest are a channel's own events.
+        let Some(c) = channel else { continue };
+        match e.id {
+            EV_CHANNEL_ON => _ = if e.int() == 0 { off.insert(c) } else { off.remove(&c) },
+            EV_CHANNEL_INSERT | EV_CHANNEL_ROUTE => _ = routes.insert(c, e.int()),
+            EV_CHANNEL_TYPE => _ = types.insert(c, e.int()),
+            EV_ROOT_NOTE if e.int() <= 127 => _ = roots.insert(c, e.int() as u8),
+            EV_CHANNEL_LEVELS => {
+                if let Some(lv) = levels(&e.data, flp.major) {
+                    levels_of.insert(c, lv);
+                }
+            }
+            EV_ENVELOPE => {
+                // The second of a channel's envelopes is its volume's.
+                let seen = envelopes.entry(c).or_default();
+                if *seen == 1
+                    && let Some(env) = envelope(&e.data)
+                {
+                    volume_envelopes.insert(c, env);
+                }
+                *seen += 1;
+            }
+            EV_CHANNEL_PARAMS => {
+                if let Some(s) = stretch(&e.data) {
+                    stretches.insert(c, s);
+                }
+            }
+            EV_CHANNEL_FX => _ = if e.int() & 0x2 != 0 { reversed.insert(c) } else { reversed.remove(&c) },
+            EV_CHANNEL_NAME_OLD | EV_PLUGIN_NAME => _ = names.entry(c).or_insert_with(|| flp.text(&e.data)),
+            EV_SAMPLE_PATH => {
+                let sample = flp.text(&e.data);
+                if !sample.is_empty() {
+                    samples.insert(c, sample);
+                }
+            }
             _ => {}
         }
     }
 
+    let items = playlist.map(playlist_items).unwrap_or_default();
     let known: HashSet<u32> = order.iter().copied().collect();
-    let mut clips = place_clips(flp, &raw_notes, playlist, &tracks, &known, &pattern_names);
+    let mut clips = place_clips(flp, &raw_notes, &items, &tracks, &known, &pattern_names);
     let playing: HashSet<u32> =
         order.iter().copied().filter(|c| types.get(c) != Some(&CHANNEL_TYPE_AUTOMATION)).collect();
-    let mut audio_clips = place_audio_clips(playlist, &tracks, &playing);
+    let mut audio_clips = place_audio_clips(&items, &tracks, &playing);
     let channels = order
         .iter()
         .copied()
@@ -749,17 +702,15 @@ pub fn read_song(flp: &Flp<'_>) -> FlSong {
             }
         })
         .collect();
-    let mut muted_tracks: Vec<FlTrack> = playlist
-        .map(playlist_items)
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|i| tracks.at(i.slot))
-        .filter(|(_, muted)| *muted)
-        .map(|(t, _)| t.clone())
-        .collect();
-    muted_tracks.sort();
-    muted_tracks.dedup();
-    FlSong { title, ppq: flp.ppq, tempo: tempo.unwrap_or(140.0), channels, muted_tracks }
+    let muted_tracks: BTreeSet<FlTrack> =
+        items.iter().filter_map(|i| tracks.at(i.slot)).filter(|(_, muted)| *muted).map(|(t, _)| t.clone()).collect();
+    FlSong {
+        title,
+        ppq: flp.ppq,
+        tempo: tempo.unwrap_or(140.0),
+        channels,
+        muted_tracks: muted_tracks.into_iter().collect(),
+    }
 }
 
 /// One clip per pattern (in pattern order), one track in it per channel with notes in that pattern. Muted notes are
@@ -768,17 +719,13 @@ pub fn extract_midi(flp: &Flp<'_>) -> Vec<MidiClip> {
     let mut channel_names: HashMap<u32, String> = HashMap::new();
     let mut pattern_names: HashMap<u32, String> = HashMap::new();
     let mut pattern_notes: BTreeMap<u32, Vec<(u32, NoteEvent)>> = BTreeMap::new();
-    let (mut channel, mut pattern): (Option<u32>, Option<u32>) = (None, None);
-    let mut in_mixer = false;
+    let mut rack = Rack::default();
+    let mut pattern: Option<u32> = None;
     for e in &flp.events {
+        rack.step(e);
         match e.id {
-            EV_CHANNEL_NEW => {
-                channel = Some(e.int());
-                in_mixer = false;
-            }
-            EV_MIXER_SLOT | EV_INSERT_FLAGS => in_mixer = true,
-            EV_PLUGIN_NAME | EV_CHANNEL_NAME_OLD if !in_mixer => {
-                if let Some(c) = channel {
+            EV_PLUGIN_NAME | EV_CHANNEL_NAME_OLD => {
+                if let Some(c) = rack.channel() {
                     channel_names.entry(c).or_insert_with(|| flp.text(&e.data));
                 }
             }
@@ -791,10 +738,8 @@ pub fn extract_midi(flp: &Flp<'_>) -> Vec<MidiClip> {
             EV_PATTERN_NOTES => {
                 if let Some(p) = pattern {
                     let size = notes::note_size(&e.data, flp.major, e.offset.is_none(), None);
-                    pattern_notes
-                        .entry(p)
-                        .or_default()
-                        .extend(notes::decode(&e.data, size).into_iter().filter(|(_, n)| !n.muted));
+                    let unmuted = notes::decode(&e.data, size).into_iter().filter(|(_, n)| !n.muted);
+                    pattern_notes.entry(p).or_default().extend(unmuted);
                 }
             }
             _ => {}
@@ -817,7 +762,9 @@ pub fn extract_midi(flp: &Flp<'_>) -> Vec<MidiClip> {
 }
 
 /// Each channel's notes across the song, where the playlist puts them (a song with nothing in the playlist gets its
-/// patterns one after another), with what plays it. Sample paths are as FL wrote them.
+/// patterns one after another), with what plays it. Unlike [`read_song`], automation clip channels and switched off
+/// channels are kept, as the C# reader keeps them. Sample paths are as FL wrote them; [`resolve_channel_samples`]
+/// finds those under FL's user data folder.
 pub fn extract_channels(flp: &Flp<'_>) -> Vec<MidiChannel> {
     let mut names: HashMap<u32, String> = HashMap::new();
     let mut sources: HashMap<u32, String> = HashMap::new();
@@ -830,37 +777,28 @@ pub fn extract_channels(flp: &Flp<'_>) -> Vec<MidiChannel> {
     let mut pattern_names: HashMap<u32, String> = HashMap::new();
     let mut playlist: Option<&[u8]> = None;
     let mut tracks = PlaylistTracks::default();
-    let (mut channel, mut pattern): (Option<u32>, Option<u32>) = (None, None);
-    let mut in_mixer = false;
-    let mut channel_has_plugin = false;
+    let mut rack = Rack::default();
+    let mut pattern: Option<u32> = None;
     let mut pending_internal = String::new();
 
     for e in &flp.events {
         tracks.read(e, flp);
-        let on_channel = channel.filter(|_| !in_mixer);
+        rack.step(e);
+        let channel = rack.channel();
         match e.id {
             EV_CHANNEL_NEW => {
-                let c = e.int();
-                channel = Some(c);
-                in_mixer = false;
-                channel_has_plugin = false;
-                if !order.contains(&c) {
-                    order.push(c);
+                if !order.contains(&e.int()) {
+                    order.push(e.int());
                 }
             }
-            EV_MIXER_SLOT | EV_INSERT_FLAGS => in_mixer = true,
             EV_PLUGIN_NAME | EV_CHANNEL_NAME_OLD => {
-                if let Some(c) = on_channel {
+                if let Some(c) = channel {
                     names.entry(c).or_insert_with(|| flp.text(&e.data));
                 }
             }
             EV_PLUGIN_INTERNAL => {
                 pending_internal = flp.text(&e.data);
-                if channel_has_plugin {
-                    in_mixer = true;
-                }
-                channel_has_plugin = true;
-                if let Some(c) = channel.filter(|_| !in_mixer)
+                if let Some(c) = channel
                     && !pending_internal.is_empty()
                     && !pending_internal.eq_ignore_ascii_case(WRAPPER)
                 {
@@ -869,7 +807,7 @@ pub fn extract_channels(flp: &Flp<'_>) -> Vec<MidiChannel> {
                 }
             }
             EV_PLUGIN_STATE if pending_internal.eq_ignore_ascii_case(WRAPPER) => {
-                if let Some(c) = on_channel {
+                if let Some(c) = channel {
                     let f = wrapper_fields(&e.data);
                     let vst = match wrapper_text(&f, VST_NAME) {
                         n if n.is_empty() => plugins::name_from_path(&wrapper_text(&f, VST_PATH)),
@@ -883,7 +821,7 @@ pub fn extract_channels(flp: &Flp<'_>) -> Vec<MidiChannel> {
                 }
             }
             EV_SAMPLE_PATH => {
-                if let Some(c) = on_channel {
+                if let Some(c) = channel {
                     let sample = flp.text(&e.data);
                     if !sample.is_empty() {
                         sources.insert(c, sample.rsplit(['\\', '/']).next().unwrap_or("").to_owned());
@@ -892,12 +830,12 @@ pub fn extract_channels(flp: &Flp<'_>) -> Vec<MidiChannel> {
                 }
             }
             EV_ROOT_NOTE => {
-                if let Some(c) = on_channel.filter(|_| e.int() <= 127) {
+                if let Some(c) = channel.filter(|_| e.int() <= 127) {
                     roots.insert(c, e.int() as u8);
                 }
             }
             EV_CHANNEL_LEVELS => {
-                if let (Some(c), Some((_, _, pitch))) = (on_channel, levels(&e.data, flp.major)) {
+                if let (Some(c), Some((_, _, pitch))) = (channel, levels(&e.data, flp.major)) {
                     pitches.insert(c, pitch);
                 }
             }
@@ -917,8 +855,9 @@ pub fn extract_channels(flp: &Flp<'_>) -> Vec<MidiChannel> {
         }
     }
 
+    let items = playlist.map(playlist_items).unwrap_or_default();
     let known: HashSet<u32> = order.iter().copied().collect();
-    let notes: BTreeMap<u32, Vec<NoteEvent>> = place_clips(flp, &raw_notes, playlist, &tracks, &known, &pattern_names)
+    let notes: BTreeMap<u32, Vec<NoteEvent>> = place_clips(flp, &raw_notes, &items, &tracks, &known, &pattern_names)
         .into_iter()
         .map(|(c, clips)| (c, audible(&clips)))
         .filter(|(_, notes)| !notes.is_empty())

@@ -4,6 +4,7 @@
 
 use std::collections::HashSet;
 
+use super::events::{u16_at, u32_at};
 use crate::model::NoteEvent;
 
 /// The size of the note records in an event, by FL's version (rule 9): 24 bytes from FL 9, 20 bytes in FL 4 to 8.
@@ -36,14 +37,6 @@ fn size_from_notes(data: &[u8], channels: Option<&HashSet<u32>>) -> usize {
     } else {
         24
     }
-}
-
-fn u16_at(d: &[u8], at: usize) -> u16 {
-    u16::from_le_bytes([d[at], d[at + 1]])
-}
-
-fn u32_at(d: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes([d[at], d[at + 1], d[at + 2], d[at + 3]])
 }
 
 /// The notes in an event, each with its channel. A note muted in the piano roll (24-byte records: bit 0x20 of byte 19)

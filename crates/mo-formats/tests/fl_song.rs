@@ -205,3 +205,43 @@ fn class_ids_are_written_in_windows_guid_order() {
     let tuid = [0x41, 0x54, 0x53, 0x56, 0x43, 0x52, 0x61, 0x44, 0x72, 0x63, 0x61, 0x64, 0x65, 0, 0, 0];
     assert_eq!(song::class_id_string(&tuid), "56535441524344617263616465000000");
 }
+
+#[test]
+fn an_old_playlist_with_more_patterns_than_tracks_still_reads() {
+    // FL 9 rows go down to 1, so up to 999 patterns; newer FL has 500 tracks, so the last ones have no track.
+    let items: Vec<u8> = (0..600u32)
+        .flat_map(|n| {
+            let mut item = vec![0u8; 32];
+            item[..4].copy_from_slice(&(n * 384).to_le_bytes());
+            item[6..8].copy_from_slice(&0x6000u16.to_le_bytes());
+            item[8..12].copy_from_slice(&384u32.to_le_bytes());
+            item[12..14].copy_from_slice(&(999 - n as u16).to_le_bytes());
+            item
+        })
+        .collect();
+    let bytes = Flp::new()
+        .ascii(199, "9.0.0")
+        .word(64, 0)
+        .ascii(192, "Kick")
+        .word(65, 599)
+        .data(224, &common::note(0, 0, 96, 60, 100))
+        .data(233, &items)
+        .build();
+    let song = read_song(&bytes);
+    assert_eq!(song.channels[0].clips.len(), 1);
+    assert_eq!(song.channels[0].clips[0].start, 599 * 384);
+    assert_eq!(fl::read_bytes(&bytes).details["Notes"], "1");
+}
+
+#[test]
+fn a_songs_samples_under_fls_user_data_folder_are_found() {
+    let dir = test_dir("song-user-data");
+    let projects = dir.join("FL Studio").join("Projects");
+    std::fs::create_dir_all(&projects).expect("make the folders");
+    let path = projects.join("Shuffle.flp");
+    let bytes = fl_studio_25_project();
+    let mut song = read_song(&bytes);
+    song.resolve_samples(&path);
+    assert_eq!(song.channels[0].sample, projects.join("Snare 01.wav").to_string_lossy());
+    let _ = std::fs::remove_dir_all(dir);
+}

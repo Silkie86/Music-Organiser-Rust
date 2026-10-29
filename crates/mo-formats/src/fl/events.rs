@@ -110,6 +110,10 @@ pub(crate) fn u16_at(d: &[u8], at: usize) -> u16 {
     u16::from_le_bytes([d[at], d[at + 1]])
 }
 
+pub(crate) fn u32_at(d: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes([d[at], d[at + 1], d[at + 2], d[at + 3]])
+}
+
 pub(crate) fn i32_at(d: &[u8], at: usize) -> i32 {
     i32::from_le_bytes([d[at], d[at + 1], d[at + 2], d[at + 3]])
 }
