@@ -4,6 +4,10 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
+use super::automation::{
+    FlAutomation, FlControl, FlPoint, MixerSettings, OnOff, TARGET_INSERT_PAN, TARGET_INSERT_VOLUME,
+    TARGET_SLOT_ON_OFF, automation_points, place_automation,
+};
 use super::events::*;
 use super::notes;
 use super::presets::{vst3_parameter_ids, wrapper_preset};
@@ -26,6 +30,12 @@ const EV_ARRANGEMENT_NEW: u8 = 99;
 const EV_CHANNEL_ROUTE: u8 = 104;
 /// The channel's root key as a MIDI note; absent when it's C5 (60).
 const EV_ROOT_NOTE: u8 = 135;
+/// The mixer's settings, 12 bytes each.
+const EV_MIXER_SETTINGS: u8 = 225;
+/// Which control an automation clip moves.
+const EV_AUTOMATION_LINK: u8 = 227;
+/// An automation clip's points.
+const EV_AUTOMATION_POINTS: u8 = 234;
 /// The sampler's settings, its time stretching among them.
 const EV_CHANNEL_PARAMS: u8 = 215;
 /// An envelope and LFO, one each for pan, volume, mod X, mod Y and pitch.
@@ -40,7 +50,7 @@ const EV_TRACK_NAME: u8 = 239;
 const CHANNEL_TYPE_AUTOMATION: u32 = 5;
 const LEVELS_FULL: f64 = 12800.0;
 /// A playlist item's index above this is a pattern (index − base); at or below, a channel's clip.
-const PATTERN_BASE: u32 = 20480;
+pub(super) const PATTERN_BASE: u32 = 20480;
 
 /// FL's default channel volume, 78% (10000 of 12800).
 pub const DEFAULT_VOLUME: f64 = 10000.0 / LEVELS_FULL;
@@ -62,6 +72,10 @@ pub struct FlPlugin {
     pub state: Option<PresetBlob>,
     /// A VST3's own ids for its settings, in FL's order: FL automates setting n, other DAWs `parameter_ids[n]`.
     pub parameter_ids: Option<Vec<u32>>,
+    /// An effect's slot in its mixer insert, from 0 at the top; `None` for an instrument, or when the file doesn't say.
+    pub slot: Option<u32>,
+    /// False for an effect switched off in its mixer slot (its green light is off).
+    pub enabled: bool,
 }
 
 impl FlPlugin {
@@ -126,6 +140,8 @@ pub struct FlAudioClip {
     pub muted: bool,
     pub track: u32,
     pub on_muted_track: bool,
+    /// Automation switches its channel off part of the way through it.
+    pub partly_off: bool,
 }
 
 /// A playlist track, numbered from 1 at the top, with its name when it was given one.
@@ -171,8 +187,35 @@ pub struct FlChannel {
     /// An audio clip channel's clips in the playlist, muted ones included, in order.
     pub audio_clips: Vec<FlAudioClip>,
     pub stretch: FlStretch,
-    /// False when it's switched off in the Channel Rack (its green light is off), so it plays nothing.
+    /// False when it's switched off in the Channel Rack (its green light is off), so it plays nothing. A channel whose
+    /// light is automated (`switched_by`) counts as on: what it plays while it's off is muted instead.
     pub enabled: bool,
+    /// The automation clips that switch it on and off. Its clips that are off all the way through are muted, as are
+    /// the notes in its other clips that start while it's off.
+    pub switched_by: Vec<String>,
+}
+
+/// A mixer insert (0 is the master) and its effects in slot order.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FlInsert {
+    pub index: u32,
+    pub name: String,
+    pub effects: Vec<FlPlugin>,
+    /// FL's fader value, when the file says: [`INSERT_FADER_DEFAULT`] where FL leaves it (how it maps to gain isn't
+    /// worked out).
+    pub fader: Option<i32>,
+    /// FL's pan value, when the file says: 0 is the centre.
+    pub pan: Option<i32>,
+}
+
+/// A mixer insert's fader where FL leaves it.
+pub const INSERT_FADER_DEFAULT: i32 = 12800;
+
+impl FlInsert {
+    /// The fader or pan isn't where FL leaves it.
+    pub fn moved(&self) -> bool {
+        self.fader.is_some_and(|f| f != INSERT_FADER_DEFAULT) || self.pan.is_some_and(|p| p != 0)
+    }
 }
 
 /// An FL project's song.
@@ -182,8 +225,13 @@ pub struct FlSong {
     pub ppq: u16,
     pub tempo: f64,
     pub channels: Vec<FlChannel>,
-    /// Muted playlist tracks that have something on them.
+    pub inserts: Vec<FlInsert>,
+    pub automation: Vec<FlAutomation>,
+    /// Muted playlist tracks that have something on them: their clips are on a muted track, and their automation is
+    /// left out.
     pub muted_tracks: Vec<FlTrack>,
+    /// Each automation clip's own curve by its channel, in beats from the clip's start, before it's placed.
+    pub curves: BTreeMap<u32, Vec<FlPoint>>,
 }
 
 /// The first arrangement's playlist tracks and which are muted. FL saves every track, used or not, after its
@@ -445,6 +493,7 @@ fn place_audio_clips(
             muted: i.muted,
             track: tracks.number(i.slot),
             on_muted_track: tracks.muted(i.slot),
+            partly_off: false,
         });
     }
     clips
@@ -532,6 +581,8 @@ fn song_plugin(internal: &str, data: &[u8], shown: &str, sounds: bool) -> FlPlug
             nothing_saved: false,
             state: None,
             parameter_ids: None,
+            slot: None,
+            enabled: true,
         };
     }
     let f = wrapper_fields(data);
@@ -566,6 +617,8 @@ fn song_plugin(internal: &str, data: &[u8], shown: &str, sounds: bool) -> FlPlug
         nothing_saved,
         state,
         parameter_ids,
+        slot: None,
+        enabled: true,
     }
 }
 
@@ -618,6 +671,15 @@ pub fn read_song_with(flp: &Flp<'_>, sounds: bool) -> FlSong {
     let mut pattern: Option<u32> = None;
     let mut pending_internal = String::new();
     let mut plugin_name = String::new();
+    let mut insert: i64 = -1;
+    let mut insert_names: BTreeMap<u32, String> = BTreeMap::new();
+    let mut next_insert_name = String::new();
+    let mut effects: BTreeMap<u32, Vec<FlPlugin>> = BTreeMap::new();
+    // The effect added last, until its slot's closing event says which slot it's in.
+    let mut unslotted: Option<(u32, usize)> = None;
+    let mut mixer_settings: Option<&[u8]> = None;
+    let mut links: Vec<(u32, u32)> = Vec::new();
+    let mut curves: HashMap<u32, Vec<FlPoint>> = HashMap::new();
 
     for e in &flp.events {
         tracks.read(e, flp);
@@ -654,8 +716,34 @@ pub fn read_song_with(flp: &Flp<'_>, sounds: bool) -> FlSong {
                     instruments
                         .entry(c)
                         .or_insert_with(|| song_plugin(&pending_internal, &e.data, &plugin_name, sounds));
+                } else if rack.in_mixer()
+                    && let Ok(at) = u32::try_from(insert)
+                {
+                    let list = effects.entry(at).or_default();
+                    list.push(song_plugin(&pending_internal, &e.data, &plugin_name, sounds));
+                    unslotted = Some((at, list.len() - 1));
                 }
                 pending_internal.clear();
+            }
+            EV_INSERT_FLAGS => {
+                insert += 1;
+                if !next_insert_name.is_empty() {
+                    insert_names.insert(insert as u32, std::mem::take(&mut next_insert_name));
+                }
+            }
+            // An insert's name (with its colour and icon) comes just before the flags that start it.
+            EV_INSERT_NAME => next_insert_name = flp.text(&e.data),
+            EV_MIXER_SLOT => {
+                // An effect's events come before the event that closes its slot, which holds the slot's number.
+                if let Some((at, index)) = unslotted.take()
+                    && let Some(fx) = effects.get_mut(&at).and_then(|l| l.get_mut(index))
+                {
+                    fx.slot = Some(e.int());
+                }
+            }
+            EV_MIXER_SETTINGS => mixer_settings = Some(&e.data),
+            EV_AUTOMATION_LINK if e.data.len() >= 12 => {
+                links.push((u16_at(&e.data, 2) as u32, u32_at(&e.data, 8)));
             }
             _ => {}
         }
@@ -687,6 +775,7 @@ pub fn read_song_with(flp: &Flp<'_>, sounds: bool) -> FlSong {
                 }
             }
             EV_CHANNEL_FX => _ = if e.int() & 0x2 != 0 { reversed.insert(c) } else { reversed.remove(&c) },
+            EV_AUTOMATION_POINTS => _ = curves.insert(c, automation_points(&e.data)),
             EV_CHANNEL_NAME_OLD | EV_PLUGIN_NAME => _ = names.entry(c).or_insert_with(|| flp.text(&e.data)),
             EV_SAMPLE_PATH => {
                 let sample = flp.text(&e.data);
@@ -699,6 +788,31 @@ pub fn read_song_with(flp: &Flp<'_>, sounds: bool) -> FlSong {
     }
 
     let items = playlist.map(playlist_items).unwrap_or_default();
+    let mixer = MixerSettings::new(mixer_settings);
+    // An automation clip switched off in the Channel Rack doesn't play, like a muted one.
+    links.retain(|(clip, _)| !off.contains(clip));
+    let automation = place_automation(&links, &curves, &names, &items, &tracks, &mixer, flp.ppq);
+    // A channel whose on/off is automated plays only while it's on. When several clips switch it, it follows each in
+    // turn: where one clip ends and another starts, the one starting there has the last word.
+    // Per channel: the clips' names, and their points with the tick each is on and where its clip starts.
+    type Switching = (Vec<String>, Vec<(i64, f64, FlPoint)>);
+    let mut switching: BTreeMap<u32, Switching> = BTreeMap::new();
+    for a in automation.iter().filter(|a| a.control == FlControl::OnOff) {
+        let Some(c) = a.channel else { continue };
+        let (names, points) = switching.entry(c).or_default();
+        if !names.contains(&a.name) {
+            names.push(a.name.clone());
+        }
+        let ppq = flp.ppq as f64;
+        points.extend(a.points.iter().map(|&p| ((p.beat * ppq).round_ties_even() as i64, a.start_of(p), p)));
+    }
+    let switching: BTreeMap<u32, (Vec<String>, OnOff)> = switching
+        .into_iter()
+        .map(|(c, (names, mut points))| {
+            points.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+            (c, (names, OnOff::new(points.into_iter().map(|p| p.2).collect(), flp.ppq)))
+        })
+        .collect();
     let known: HashSet<u32> = order.iter().copied().collect();
     let mut clips = place_clips(flp, &raw_notes, &items, &tracks, &known, &pattern_names);
     let playing: HashSet<u32> =
@@ -710,7 +824,13 @@ pub fn read_song_with(flp: &Flp<'_>, sounds: bool) -> FlSong {
         .filter(|c| playing.contains(c))
         .map(|c| {
             let (pan, volume, pitch_cents) = levels_of.get(&c).copied().unwrap_or((0.5, DEFAULT_VOLUME, 0));
-            let placed = clips.remove(&c).unwrap_or_default();
+            let mut placed = clips.remove(&c).unwrap_or_default();
+            let mut placed_audio = audio_clips.remove(&c).unwrap_or_default();
+            let switched = switching.get(&c);
+            if let Some((_, on_off)) = switched {
+                placed = placed.into_iter().map(|clip| on_off.mute(clip)).collect();
+                placed_audio = placed_audio.into_iter().map(|clip| on_off.mute_audio(clip)).collect();
+            }
             FlChannel {
                 index: c,
                 name: names.get(&c).cloned().unwrap_or_else(|| format!("Channel {}", c + 1)),
@@ -724,23 +844,58 @@ pub fn read_song_with(flp: &Flp<'_>, sounds: bool) -> FlSong {
                 pan,
                 clips: placed,
                 volume_envelope: volume_envelopes.get(&c).copied(),
-                audio_clips: audio_clips.remove(&c).unwrap_or_default(),
+                audio_clips: placed_audio,
                 stretch: FlStretch {
                     reversed: reversed.contains(&c),
                     ..stretches.get(&c).copied().unwrap_or_default()
                 },
-                enabled: !off.contains(&c),
+                enabled: !off.contains(&c) || switched.is_some(),
+                switched_by: switched.map(|s| s.0.clone()).unwrap_or_default(),
             }
         })
-        .collect();
+        .collect::<Vec<_>>();
     let muted_tracks: BTreeSet<FlTrack> =
         items.iter().filter_map(|i| tracks.at(i.slot)).filter(|(_, muted)| *muted).map(|(t, _)| t.clone()).collect();
+    // An effect whose slot is switched on and off by automation stays on, as a channel whose light is automated does.
+    let switched_slots: HashSet<(u32, u32)> = automation
+        .iter()
+        .filter(|a| a.control == FlControl::InsertSlotOnOff)
+        .filter_map(|a| Some((a.insert?, a.slot?)))
+        .collect();
+    let numbers: BTreeSet<u32> =
+        effects.keys().chain(insert_names.keys()).copied().chain(channels.iter().map(|c| c.insert)).collect();
+    let inserts = numbers
+        .into_iter()
+        .map(|i| FlInsert {
+            index: i,
+            name: insert_names.get(&i).cloned().unwrap_or_default(),
+            effects: effects
+                .remove(&i)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|mut fx| {
+                    if let Some(slot) = fx.slot
+                        && mixer.value(i, slot, TARGET_SLOT_ON_OFF) == Some(0)
+                        && !switched_slots.contains(&(i, slot))
+                    {
+                        fx.enabled = false;
+                    }
+                    fx
+                })
+                .collect(),
+            fader: mixer.value(i, 0, TARGET_INSERT_VOLUME),
+            pan: mixer.value(i, 0, TARGET_INSERT_PAN),
+        })
+        .collect();
     FlSong {
         title,
         ppq: flp.ppq,
         tempo: tempo.unwrap_or(140.0),
         channels,
+        inserts,
+        automation,
         muted_tracks: muted_tracks.into_iter().collect(),
+        curves: curves.into_iter().collect(),
     }
 }
 
