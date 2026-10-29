@@ -69,6 +69,8 @@ export component AppWindow inherits Window {
 
     forward-focus: keys;
     keys := FocusScope {
+        // Tab moves between the note's parts and never lands on this invisible scope, where typing would vanish.
+        focus-on-tab-navigation: false;
         key-pressed(event) => {
             if (event.text == Key.Escape && (root.sheet-open || root.note-open)) {
                 if (root.note-open) {
@@ -78,12 +80,8 @@ export component AppWindow inherits Window {
                 keys.focus();
                 return accept;
             }
-            // While the note is open, keys are for typing: no shortcut runs behind it, and Tab doesn't move the focus
-            // out of the note to the window behind it.
+            // While the note is open, keys are for typing: no shortcut runs behind it.
             if (root.note-open) {
-                if (event.text == Key.Tab || event.text == Key.Backtab) {
-                    return accept;
-                }
                 return reject;
             }
             if (root.key(event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt, event.modifiers.meta)) {

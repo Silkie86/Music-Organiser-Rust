@@ -157,8 +157,12 @@ fn run(id: &str, weak: &Weak<AppWindow>) -> bool {
             let w = app.window();
             w.set_fullscreen(!w.is_fullscreen());
         }
-        _ => return false,
+        _ => {
+            debug_assert!(!HANDLED.contains(&id), "{id} is in HANDLED but run() doesn't do it");
+            return false;
+        }
     }
+    debug_assert!(handles(id), "run() does {id}: add it to HANDLED so the key sheet doesn't say (coming)");
     true
 }
 

@@ -192,7 +192,14 @@ function Save-LocalChanges {
 Save-LocalChanges
 
 & $GitExe -C $Repo show-ref --verify --quiet "refs/heads/$Branch"
-if ($LASTEXITCODE -eq 0) { Git switch --quiet $Branch } else { Git switch --quiet --track -c $Branch "origin/$Branch" }
+if ($LASTEXITCODE -eq 0) { Git switch --quiet $Branch }
+else {
+    & $GitExe -C $Repo show-ref --verify --quiet "refs/remotes/origin/$Branch"
+    if ($LASTEXITCODE -ne 0) {
+        Stop-WithMessage "'$Branch' isn't in this copy yet and GitHub can't be reached. Try again when the internet is back, or pick main."
+    }
+    Git switch --quiet --track -c $Branch "origin/$Branch"
+}
 
 function Update-ToRemote {
     # Moves the branch to GitHub's version. Normally that's a fast-forward; if the branch was rewritten on GitHub,

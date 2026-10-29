@@ -73,7 +73,15 @@ pub fn save(folder: &Path, note: &Note, now: DateTime<Local>) -> std::io::Result
     std::io::Write::write_all(&mut file, md.as_bytes())?;
     file.sync_all()?;
     if let Some(png) = note.picture {
-        std::fs::write(folder.join(format!("{name}.png")), png)?;
+        let picture = folder.join(format!("{name}.png"));
+        if let Err(e) = std::fs::write(&picture, png) {
+            // The note stands without its picture: say so in it rather than name a file that isn't there.
+            let _ = std::fs::remove_file(&picture);
+            let without =
+                md.replace(&format!("- Picture: {name}.png\n"), &format!("- Picture: couldn't be saved ({e})\n"));
+            std::fs::write(folder.join(format!("{name}.md")), without)?;
+            crate::log::warning("Note", &format!("Saved {name}.md without its picture: {e}"));
+        }
     }
     Ok(folder.join(format!("{name}.md")))
 }
