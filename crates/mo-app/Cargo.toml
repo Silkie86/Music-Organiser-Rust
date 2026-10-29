@@ -1,0 +1,12 @@
+[package]
+name = "mo-app"
+description = "Every screen's logic and state, with no UI framework in it, so it can be tested without a window."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde_json = "1"
