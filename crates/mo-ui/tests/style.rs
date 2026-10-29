@@ -66,6 +66,9 @@ fn launcher_scripts_are_plain_ascii() {
     let mut checked = 0;
     for entry in std::fs::read_dir(&dev).expect("tools/dev is there") {
         let path = entry.expect("listable").path();
+        if path.is_dir() {
+            continue;
+        }
         let text = std::fs::read(&path).expect("readable");
         if let Some(at) = text.iter().position(|b| !b.is_ascii()) {
             panic!("{} has a non-ASCII byte at {at}", path.display());

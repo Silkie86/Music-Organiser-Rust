@@ -62,7 +62,11 @@ if (-not $GitExe -and $OnWindows) {
     $GitExe = Get-ChildItem -Path "$env:ProgramFiles\Microsoft Visual Studio\*\*\Common7\IDE\CommonExtensions\Microsoft\TeamFoundation\Team Explorer\Git\cmd\git.exe" -ErrorAction SilentlyContinue |
         Select-Object -First 1 -ExpandProperty FullName
 }
-if (-not $GitExe) {
+if ($GitExe) {
+    # On the PATH for the build too: it reads the commit with git, for the version line in the log and in F12 notes.
+    $env:PATH = (Split-Path $GitExe) + [IO.Path]::PathSeparator + $env:PATH
+}
+else {
     Stop-WithMessage 'Git isn''t installed. Get it from https://git-scm.com/download/win (the standard choices are fine), then run this again.'
 }
 # Cargo: on the PATH, or where rustup puts it (a window opened before Rust was installed doesn't have it on the PATH).
@@ -148,7 +152,8 @@ if (-not $Branch) {
     }
     $choices += [pscustomobject]@{ Branch = 'main'; Label = 'main  (only work that has been merged)'; Updated = $null }
 
-    $default = 1
+    # Enter picks the version used last time, or main when that one isn't open any more (merged, say).
+    $default = $choices.Count
     for ($i = 0; $i -lt $choices.Count; $i++) { if ($choices[$i].Branch -eq $remembered) { $default = $i + 1 } }
 
     Say ''
@@ -177,11 +182,13 @@ Say ''
 Say "Getting the latest '$Branch' from GitHub..." 'Cyan'
 Git fetch --quiet --prune origin
 
-# This copy is only for running the app, so anything changed in it is put aside, not lost.
-if (& $GitExe -C $Repo status --porcelain) {
-    Git stash push --quiet --include-untracked -m "Put aside by Run latest, $(Get-Date -Format 'yyyy-MM-dd HH:mm')"
-    Say "Changes in $Repo were put aside (git stash list shows them)." 'Yellow'
+function Save-LocalChanges {
+    # This copy is only for running the app, so anything changed in it is put aside, not lost.
+    if (-not (& $GitExe -C $Repo status --porcelain)) { return }
+    & $GitExe -C $Repo stash push --quiet --include-untracked -m "Put aside by Run latest, $(Get-Date -Format 'yyyy-MM-dd HH:mm')"
+    if ($LASTEXITCODE -eq 0) { Say "Changes in $Repo were put aside (git stash list shows them)." 'Yellow' }
 }
+Save-LocalChanges
 
 & $GitExe -C $Repo show-ref --verify --quiet "refs/heads/$Branch"
 if ($LASTEXITCODE -eq 0) { Git switch --quiet $Branch } else { Git switch --quiet --track -c $Branch "origin/$Branch" }
@@ -192,8 +199,7 @@ function Update-ToRemote {
     & $GitExe -C $Repo merge --ff-only --quiet "origin/$Branch" 2>$null | Out-Null
     if ($LASTEXITCODE -eq 0) { return $true }
     if (& $GitExe -C $Repo status --porcelain) {
-        & $GitExe -C $Repo stash push --quiet --include-untracked -m "Put aside by Run latest, $(Get-Date -Format 'yyyy-MM-dd HH:mm')" 2>$null | Out-Null
-        Say "Changes in $Repo were put aside (git stash list shows them)." 'Yellow'
+        Save-LocalChanges
         & $GitExe -C $Repo merge --ff-only --quiet "origin/$Branch" 2>$null | Out-Null
         if ($LASTEXITCODE -eq 0) { return $true }
     }
@@ -225,12 +231,12 @@ if ((Test-Path $newer) -and (Test-Path $Installed) -and $PSCommandPath -eq $Inst
 function Build-App {
     # Builds while the app (if any) stays open, then copies the new app into run\ under a new name. Returns its path,
     # or $null when the build failed (what cargo said is shown).
+    # What cargo says is shown as it goes, so a long first build doesn't look stuck, and a failure shows its cause.
     Say "$(Get-Date -Format 'HH:mm:ss')  Building..." 'DarkGray'
-    $out = @(& $CargoExe build --manifest-path (Join-Path $Repo 'Cargo.toml') --bin $AppName --color never 2>&1)
+    & $CargoExe build --manifest-path (Join-Path $Repo 'Cargo.toml') --bin $AppName --color never 2>&1 |
+        ForEach-Object { Say "  $_" 'DarkGray' }
     if ($LASTEXITCODE -ne 0) {
-        $out | Where-Object { "$_" -match '^(error|warning: unused)|^\s+-->|^\s*\|' } | Select-Object -First 30 |
-            ForEach-Object { Say "  $_" 'Red' }
-        Say 'The build failed (above). The app keeps the version it has; the next push is tried again.' 'Red'
+        Say 'The build failed (what cargo said is above). The app keeps the version it has; the next push is tried again.' 'Red'
         return $null
     }
     $built = Join-Path (Join-Path (Join-Path $Repo 'target') 'debug') $Exe
@@ -247,8 +253,11 @@ function Remove-OldBuilds([string]$Keep) {
 }
 
 function Start-App([string]$Path) {
-    $env:MO_WATCH = '1'   # the app's log then says it was started by the launcher
+    # The app's log then says the launcher is keeping it up to date.
+    if (-not $NoWatch -and $PullEvery -gt 0) { $env:MO_WATCH = '1' }
     # In this window, so what the app prints (a test build's panics, say) shows here, not in a window of its own.
+    # Ctrl+C here closes the app at once, without its "Closed" log line; the note draft is already kept as it's typed,
+    # and a writing.lock left behind is seen through by its process id.
     $p = Start-Process -FilePath $Path -WorkingDirectory $Repo -NoNewWindow -PassThru
     $null = $p.Handle     # keeps its exit code readable after it ends
     $p
@@ -304,6 +313,8 @@ if ($NoWatch -or $PullEvery -le 0) {
 
 try {
     $saidClosed = $false
+    $saidGone = $false
+    $couldntTake = ''   # a GitHub version that couldn't be brought in: not tried again until GitHub moves on
     $next = (Get-Date).AddSeconds($PullEvery)
     while ($true) {
         Start-Sleep -Milliseconds 500
@@ -316,13 +327,21 @@ try {
         $next = (Get-Date).AddSeconds($PullEvery)
 
         & $GitExe -C $Repo fetch --quiet origin $Branch 2>$null
-        if ($LASTEXITCODE -ne 0) { continue }   # offline for a moment: try again next time
+        if ($LASTEXITCODE -ne 0) {
+            # Offline for a moment (try again next time), or the branch is gone from GitHub (merged and deleted).
+            & $GitExe -C $Repo ls-remote --exit-code --heads origin $Branch 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 2 -and -not $saidGone) {
+                $saidGone = $true
+                Say "'$Branch' isn't on GitHub any more (merged, perhaps). The app stays as it is; start the shortcut again and pick main for the merged work." 'Yellow'
+            }
+            continue
+        }
         $here = (& $GitExe -C $Repo rev-parse HEAD).Trim()
         $there = (& $GitExe -C $Repo rev-parse "origin/$Branch").Trim()
-        if ($here -eq $there) { continue }
+        if ($here -eq $there -or $there -eq $couldntTake) { continue }
 
         $news = @(& $GitExe -C $Repo log --format='  %h %s' "$here..$there")
-        if (-not (Update-ToRemote)) { continue }
+        if (-not (Update-ToRemote)) { $couldntTake = $there; continue }
         Say ''
         Say "$(Get-Date -Format 'HH:mm:ss')  New from GitHub ($($news.Count) change(s)):" 'Green'
         $news | ForEach-Object { Say $_ 'Green' }
