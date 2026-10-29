@@ -1,0 +1,19 @@
+/target/
+**/*.rs.bk
+.DS_Store
+Thumbs.db
+
+# Never commit these (CLAUDE.md rule 4)
+*.flp
+*.bwproject
+*.song
+*.wav
+*.aif
+*.aiff
+*.mp3
+*.flac
+*.onnx
+*.sf2
+
+# Small made-up test files are fine
+!**/fixtures/**
