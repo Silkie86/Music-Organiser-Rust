@@ -56,7 +56,7 @@ pub fn open_note(app: &AppWindow) {
     app.set_note_has_picture(picture.is_some());
     app.set_note_include_picture(picture.is_some());
     PICTURE.with(|p| *p.borrow_mut() = picture);
-    app.set_note_text(note::read_draft(&note::notes_dir()).unwrap_or_default().into());
+    app.set_note_text(starting_text().into());
     OPEN.store(true, Ordering::Release);
     update_lock();
     app.set_note_open(true);
@@ -158,13 +158,37 @@ impl Drop for SaveDone {
     }
 }
 
-/// A save that fails puts its words back as the draft, unless a newer draft is there already. Either way they're in
-/// the log too.
+/// Words from saves that failed, waiting for the next F12. A file of their own, so a note open meanwhile (whose draft
+/// is written and cleared as usual) can't overwrite them.
+const FAILED_FILE: &str = "unsaved.txt";
+
+/// A save that fails keeps its words for the next F12 (and they're in the log too).
 fn keep_failed_words(text: &str) {
+    use std::io::Write;
     let folder = note::notes_dir();
-    if note::read_draft(&folder).is_none() {
-        note::keep_draft(&folder, text);
+    let kept = std::fs::create_dir_all(&folder).and_then(|()| {
+        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(folder.join(FAILED_FILE))?;
+        writeln!(f, "{}\n", text.trim_end())
+    });
+    if let Err(e) = kept {
+        log::warning("Note", &format!("Couldn't keep the words of a note that failed to save: {e}"));
     }
+}
+
+/// The note's starting text: words from saves that failed (taken back once shown), then the draft.
+fn starting_text() -> String {
+    let folder = note::notes_dir();
+    let failed = std::fs::read_to_string(folder.join(FAILED_FILE)).unwrap_or_default();
+    let draft = note::read_draft(&folder).unwrap_or_default();
+    if failed.trim().is_empty() {
+        return draft;
+    }
+    // Into the draft first, so taking the file away can't lose them.
+    let text =
+        if draft.is_empty() { failed.trim_end().to_owned() } else { format!("{}\n\n{draft}", failed.trim_end()) };
+    note::keep_draft(&folder, &text);
+    let _ = std::fs::remove_file(folder.join(FAILED_FILE));
+    text
 }
 
 /// Saves the note on a thread of its own. `SAVING` already counts it.
