@@ -16,9 +16,24 @@ From the repo folder:
 | Command | What it does |
 |---|---|
 | `cargo run` | Builds and opens the app. The first build takes a few minutes; after that, a few seconds. |
-| `cargo watch -x run` | Rebuilds and reopens the app every time the code changes (a pulled branch, or an edit). |
+| `cargo watch -x run` | Rebuilds and reopens the app every time you edit the code yourself. |
 | `cargo run --bin mo-screens` | Draws every page into `screenshots\` without opening the app. |
 | `cargo test` | Runs every test. |
+
+## The launcher: test a pull request without typing anything
+
+`tools\dev\Run latest.cmd` does what the C# app's launcher does, for the Rust app. Double-click it once (from a
+download of this repo, or GitHub's "Download raw file" on both files in `tools\dev`), and it puts **Music Organiser
+Rust (latest)** on your Desktop. From then on:
+
+1. Double-click the shortcut and pick a pull request, or main (Enter picks the last one).
+2. It downloads that version into its own folder (`%LOCALAPPDATA%\MusicOrganiser\run-latest-rust`), builds it and
+   opens the app. The first build takes a few minutes; after that, under a minute.
+3. Leave its window open. Every 20 seconds it checks GitHub; when Claude pushes, it builds the new code while the app
+   stays open, then swaps the app for the new build. A build that fails is shown in the window and the app keeps
+   running as it was. An open F12 note is never closed: the swap waits until it's saved or cancelled.
+
+It never touches the C# launcher or its folder, so both can be used side by side.
 
 ## See a screen change as it's written
 

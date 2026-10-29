@@ -58,3 +58,19 @@ fn raw_colours_are_spotted() {
     assert!(!has_raw_colour("// #121212 in a comment"));
     assert!(!has_raw_colour("text: \"#1 hit\";"));
 }
+
+/// The launcher is read by Windows PowerShell 5.1, which misreads anything but plain ASCII in a file without a BOM.
+#[test]
+fn launcher_scripts_are_plain_ascii() {
+    let dev = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/dev");
+    let mut checked = 0;
+    for entry in std::fs::read_dir(&dev).expect("tools/dev is there") {
+        let path = entry.expect("listable").path();
+        let text = std::fs::read(&path).expect("readable");
+        if let Some(at) = text.iter().position(|b| !b.is_ascii()) {
+            panic!("{} has a non-ASCII byte at {at}", path.display());
+        }
+        checked += 1;
+    }
+    assert!(checked >= 2);
+}
