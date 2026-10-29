@@ -73,8 +73,14 @@ fn go_to(app: &AppWindow, index: i32) {
 
 /// The key sheet's lines: every app-wide action with the key it has now, and F12, which the app keeps for itself.
 fn key_rows(shortcuts: &Shortcuts) -> Vec<KeyRow> {
-    let mut rows: Vec<KeyRow> =
-        APP_ACTIONS.iter().map(|a| KeyRow { key: shortcuts.key_of(a.id).into(), what: a.what.into() }).collect();
+    // Keys whose action isn't built yet say so, rather than looking broken.
+    let mut rows: Vec<KeyRow> = APP_ACTIONS
+        .iter()
+        .map(|a| {
+            let what = if handles(a.id) { a.what.to_owned() } else { format!("{} (coming)", a.what) };
+            KeyRow { key: shortcuts.key_of(a.id).into(), what: what.into() }
+        })
+        .collect();
     rows.push(KeyRow { key: "F12".into(), what: "Write a note for Claude about what's on screen".into() });
     rows
 }
@@ -128,6 +134,13 @@ fn coming(place: Place) -> &'static str {
     }
 }
 
+/// The app-wide actions `run` does something for so far (besides going to a place).
+const HANDLED: [&str; 5] = ["app.prevPage", "app.nextPage", "app.help", "app.helpF1", "app.fullScreen"];
+
+fn handles(id: &str) -> bool {
+    HANDLED.contains(&id) || Place::ALL.iter().any(|p| p.shortcut_id() == id)
+}
+
 /// Runs an app-wide action. Returns whether it did anything, so an unused key can go on to the page.
 fn run(id: &str, weak: &Weak<AppWindow>) -> bool {
     let Some(app) = weak.upgrade() else { return false };
@@ -144,8 +157,12 @@ fn run(id: &str, weak: &Weak<AppWindow>) -> bool {
             let w = app.window();
             w.set_fullscreen(!w.is_fullscreen());
         }
-        _ => return false,
+        _ => {
+            debug_assert!(!HANDLED.contains(&id), "{id} is in HANDLED but run() doesn't do it");
+            return false;
+        }
     }
+    debug_assert!(handles(id), "run() does {id}: add it to HANDLED so the key sheet doesn't say (coming)");
     true
 }
 
@@ -201,6 +218,13 @@ pub fn key_name(text: &str, ctrl: bool, shift: bool, alt: bool, meta: bool) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_handled_action_is_on_the_list() {
+        for id in HANDLED {
+            assert!(APP_ACTIONS.iter().any(|a| a.id == id), "{id} isn't in the shortcut list");
+        }
+    }
 
     #[test]
     fn keys_are_named_like_the_shortcut_list() {

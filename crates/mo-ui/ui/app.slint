@@ -69,6 +69,8 @@ export component AppWindow inherits Window {
 
     forward-focus: keys;
     keys := FocusScope {
+        // Tab moves between the note's parts and never lands on this invisible scope, where typing would vanish.
+        focus-on-tab-navigation: false;
         key-pressed(event) => {
             if (event.text == Key.Escape && (root.sheet-open || root.note-open)) {
                 if (root.note-open) {

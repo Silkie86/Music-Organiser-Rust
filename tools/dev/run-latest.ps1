@@ -32,7 +32,7 @@ param(
 )
 
 # Raised whenever this script changes, so an older branch's copy never replaces a newer installed one.
-$LauncherVersion = 1
+$LauncherVersion = 2
 
 $ErrorActionPreference = 'Continue'   # git and cargo write progress to stderr, which Windows PowerShell treats as failure
 $GitHubRepo = 'Silkie86/Music-Organiser-Rust'
@@ -180,7 +180,8 @@ Set-Content -Path $LastChoice -Value $Branch
 # --- Bring it down ----------------------------------------------------------------------------------------------
 Say ''
 Say "Getting the latest '$Branch' from GitHub..." 'Cyan'
-Git fetch --quiet --prune origin
+& $GitExe -C $Repo fetch --quiet --prune origin
+if ($LASTEXITCODE -ne 0) { Say "Couldn't reach GitHub; running the version already here." 'Yellow' }
 
 function Save-LocalChanges {
     # This copy is only for running the app, so anything changed in it is put aside, not lost.
@@ -191,7 +192,14 @@ function Save-LocalChanges {
 Save-LocalChanges
 
 & $GitExe -C $Repo show-ref --verify --quiet "refs/heads/$Branch"
-if ($LASTEXITCODE -eq 0) { Git switch --quiet $Branch } else { Git switch --quiet --track -c $Branch "origin/$Branch" }
+if ($LASTEXITCODE -eq 0) { Git switch --quiet $Branch }
+else {
+    & $GitExe -C $Repo show-ref --verify --quiet "refs/remotes/origin/$Branch"
+    if ($LASTEXITCODE -ne 0) {
+        Stop-WithMessage "'$Branch' isn't in this copy yet and GitHub can't be reached. Try again when the internet is back, or pick main."
+    }
+    Git switch --quiet --track -c $Branch "origin/$Branch"
+}
 
 function Update-ToRemote {
     # Moves the branch to GitHub's version. Normally that's a fast-forward; if the branch was rewritten on GitHub,
@@ -233,16 +241,23 @@ function Build-App {
     # or $null when the build failed (what cargo said is shown).
     # What cargo says is shown as it goes, so a long first build doesn't look stuck, and a failure shows its cause.
     Say "$(Get-Date -Format 'HH:mm:ss')  Building..." 'DarkGray'
-    & $CargoExe build --manifest-path (Join-Path $Repo 'Cargo.toml') --bin $AppName --color never 2>&1 |
+    # The build folder is named, so a CARGO_TARGET_DIR set on the PC can't move the app somewhere this doesn't look.
+    $targetDir = Join-Path $Repo 'target'
+    & $CargoExe build --manifest-path (Join-Path $Repo 'Cargo.toml') --target-dir $targetDir --bin $AppName --color never 2>&1 |
         ForEach-Object { Say "  $_" 'DarkGray' }
     if ($LASTEXITCODE -ne 0) {
         Say 'The build failed (what cargo said is above). The app keeps the version it has; the next push is tried again.' 'Red'
         return $null
     }
-    $built = Join-Path (Join-Path (Join-Path $Repo 'target') 'debug') $Exe
+    $built = Join-Path (Join-Path $targetDir 'debug') $Exe
     $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
     $copy = Join-Path $RunDir $(if ($OnWindows) { "$AppName-$stamp.exe" } else { "$AppName-$stamp" })
-    Copy-Item -Force $built $copy
+    # A copy that fails (a full disk, antivirus holding the file) counts as a failed build: the open app stays as it is.
+    try { Copy-Item -Force $built $copy -ErrorAction Stop }
+    catch {
+        Say "Couldn't copy the new build ($($_.Exception.Message)). The app keeps the version it has." 'Red'
+        return $null
+    }
     $copy
 }
 

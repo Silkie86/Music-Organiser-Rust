@@ -57,8 +57,7 @@ pub fn save(folder: &Path, note: &Note, now: DateTime<Local>) -> std::io::Result
     if let Some(p) = note.log_path {
         md += &format!("- Log: {}\n", p.display());
     }
-    if let Some(png) = note.picture {
-        std::fs::write(folder.join(format!("{name}.png")), png)?;
+    if note.picture.is_some() {
         md += &format!("- Picture: {name}.png\n");
     }
     if !note.recent_log.is_empty() {
@@ -70,7 +69,20 @@ pub fn save(folder: &Path, note: &Note, now: DateTime<Local>) -> std::io::Result
         }
         md += "```\n";
     }
+    // The words go down first, so a save cut short (the app closing, a full disk) still leaves them, not an empty file.
     std::io::Write::write_all(&mut file, md.as_bytes())?;
+    file.sync_all()?;
+    if let Some(png) = note.picture {
+        let picture = folder.join(format!("{name}.png"));
+        if let Err(e) = std::fs::write(&picture, png) {
+            // The note stands without its picture: say so in it rather than name a file that isn't there.
+            let _ = std::fs::remove_file(&picture);
+            let without =
+                md.replace(&format!("- Picture: {name}.png\n"), &format!("- Picture: couldn't be saved ({e})\n"));
+            std::fs::write(folder.join(format!("{name}.md")), without)?;
+            crate::log::warning("Note", &format!("Saved {name}.md without its picture: {e}"));
+        }
+    }
     Ok(folder.join(format!("{name}.md")))
 }
 
@@ -91,14 +103,16 @@ pub fn clear_draft(folder: &Path) {
     let _ = std::fs::remove_file(folder.join(DRAFT_FILE));
 }
 
-/// Puts up or takes down `writing.lock` (holding the app's process id) while a note is open.
+/// Puts up or takes down `writing.lock` (holding the app's process id) while a note is open. Only this app's own lock
+/// is taken down: the folder is shared with the C# app, which may have a note open too.
 pub fn writing(folder: &Path, open: bool) {
     let lock = folder.join(WRITING_FILE);
+    let me = std::process::id().to_string();
     if open {
         if std::fs::create_dir_all(folder).is_ok() {
-            let _ = std::fs::write(lock, std::process::id().to_string());
+            let _ = std::fs::write(lock, me);
         }
-    } else {
+    } else if std::fs::read_to_string(&lock).is_ok_and(|held| held.trim() == me) {
         let _ = std::fs::remove_file(lock);
     }
 }
@@ -151,6 +165,10 @@ mod tests {
         assert!(dir.join(WRITING_FILE).exists());
         writing(&dir, false);
         assert!(!dir.join(WRITING_FILE).exists());
+        // Another app's lock is left alone.
+        std::fs::write(dir.join(WRITING_FILE), "1").expect("writable");
+        writing(&dir, false);
+        assert!(dir.join(WRITING_FILE).exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

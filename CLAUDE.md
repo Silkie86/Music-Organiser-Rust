@@ -51,5 +51,7 @@ This repo is the Rust rebuild of the C# app. The plan, the inventory of today's 
 - Twin tests are a guide, not a cage: where Rust reads a file differently from C#, list the difference and judge it
   (better, or a bug).
 - Tests that scan sounds use the fixtures folder, never a random temp name.
-- Before pushing: `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`.
+- Before pushing (what CI runs): `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+  `cargo test --workspace`; and the same with `--manifest-path tools/galaxycheck/Cargo.toml` when the galaxy check
+  or `mo-app` changes (the galaxy check is a workspace of its own).
 - Write for Solomon in plain words: Solomon is new to Rust.

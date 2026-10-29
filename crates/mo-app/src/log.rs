@@ -17,6 +17,9 @@ use std::thread::JoinHandle;
 
 use chrono::{DateTime, Local};
 
+/// This app's logs start with this. The C# app's are `session-…` and it prunes those by itself, so each app keeps
+/// its own 30 and the launcher's many restarts never push out the C# app's logs (or a C# log still being written).
+pub const PREFIX: &str = "rust-session-";
 /// How many runs' logs are kept.
 pub const KEPT: usize = 30;
 /// A run that writes this much stops writing (and says so).
@@ -202,7 +205,7 @@ fn create_file(folder: &Path, start: DateTime<Local>) -> Option<(PathBuf, File)>
     let stamp = start.format("%Y-%m-%d_%H-%M-%S");
     // Two runs started in the same second (tests, or a quick restart) each get their own file.
     for n in 1..100 {
-        let name = if n == 1 { format!("session-{stamp}.log") } else { format!("session-{stamp}-{n}.log") };
+        let name = if n == 1 { format!("{PREFIX}{stamp}.log") } else { format!("{PREFIX}{stamp}-{n}.log") };
         let path = folder.join(name);
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(f) => return Some((path, f)),
@@ -248,19 +251,20 @@ fn write_queued(file: File, rx: Receiver<Msg>) {
     let _ = out.flush();
 }
 
-/// Deletes all but the newest `keep` session logs. Their names sort by time.
+/// Deletes all but the newest `keep` of this app's session logs, newest by when they were last written.
 fn prune(folder: &Path, keep: usize) {
     let Ok(entries) = std::fs::read_dir(folder) else { return };
     let mut logs: Vec<PathBuf> = entries
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| {
-            p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("session-") && n.ends_with(".log"))
+            p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with(PREFIX) && n.ends_with(".log"))
         })
         .collect();
     if logs.len() <= keep {
         return;
     }
-    logs.sort();
+    // Names alone put "…-05-2.log" before "…-05.log", so the time each was last written decides.
+    logs.sort_by_cached_key(|p| (std::fs::metadata(p).and_then(|m| m.modified()).ok(), p.clone()));
     for old in &logs[..logs.len() - keep] {
         let _ = std::fs::remove_file(old);
     }
@@ -320,12 +324,20 @@ mod tests {
         assert_ne!(a.path(), b.path());
         a.close();
         b.close();
+        let long_ago = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(946_684_800);
         for i in 0..40 {
-            std::fs::write(dir.join(format!("session-2000-01-01_00-00-{i:02}.log")), "old").expect("writable");
+            let old = dir.join(format!("{PREFIX}2000-01-01_00-00-{i:02}.log"));
+            std::fs::write(&old, "old").expect("writable");
+            let f = File::options().write(true).open(&old).expect("openable");
+            f.set_modified(long_ago + std::time::Duration::from_secs(i)).expect("settable");
+        }
+        // The C# app's logs in the same folder are left alone.
+        for i in 0..5 {
+            std::fs::write(dir.join(format!("session-2000-01-01_00-00-{i:02}.log")), "c#").expect("writable");
         }
         prune(&dir, KEPT);
         let left = std::fs::read_dir(&dir).expect("listable").count();
-        assert_eq!(left, KEPT);
+        assert_eq!(left, KEPT + 5);
         assert!(a.path().is_some_and(|p| p.exists()), "the newest logs stay");
         let _ = std::fs::remove_dir_all(&dir);
     }

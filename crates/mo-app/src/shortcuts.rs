@@ -30,7 +30,7 @@ const fn action(id: &'static str, what: &'static str, default_key: &'static str)
 pub const APP_ACTIONS: &[Action] = &[
     action("app.help", "Show the keys for this page", "?"),
     action("app.helpF1", "Show the keys for this page (the help key)", "F1"),
-    action("app.jump", "Jump to anything: songs, sounds, MIDI parts, ideas, plugins, settings", "Ctrl+K"),
+    action("app.jump", "Jump to anything: songs, sounds, presets, MIDI parts, plugins, settings", "Ctrl+K"),
     action("app.goProjects", "Go to Songs", "Ctrl+1"),
     action("app.goSounds", "Go to Sounds", "Ctrl+2"),
     action("app.goPresets", "Go to Presets", "Ctrl+3"),
@@ -99,7 +99,12 @@ impl Shortcuts {
         if let Some(k) = self.changed.get(id) {
             return k;
         }
-        APP_ACTIONS.iter().find(|a| a.id == id).map_or("", |a| a.default_key)
+        // A default key that another action has taken over is no longer this one's.
+        APP_ACTIONS
+            .iter()
+            .find(|a| a.id == id)
+            .filter(|a| self.by_key.get(&normalise(a.default_key)) == Some(&a.id))
+            .map_or("", |a| a.default_key)
     }
 
     /// The app-wide action a key press stands for, if any. `key` is written like the list ("Ctrl+1").
@@ -262,6 +267,10 @@ mod tests {
         assert_eq!(s.action_for("Ctrl+3"), Some("app.goPlugins"));
         assert_eq!(s.action_for("Ctrl+5"), None);
         assert_eq!(s.action_for("Ctrl+2"), None);
+        // The key sheet then shows Ctrl+3 once: for Plugins, not also for Presets.
+        assert_eq!(s.key_of("app.goPlugins"), "Ctrl+3");
+        assert_eq!(s.key_of("app.goPresets"), "");
+        assert_eq!(s.key_of("app.goMidi"), "Ctrl+4");
     }
 
     #[test]
