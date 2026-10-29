@@ -8,7 +8,9 @@ pub fn version() -> String {
 /// The session log's first lines, like the C# app's.
 pub fn log_header(start: chrono::DateTime<chrono::Local>) -> String {
     let build = if cfg!(debug_assertions) { "Debug" } else { "Release" };
-    let watched = if std::env::var_os("CARGO_WATCH_COMMAND").is_some() || std::env::var_os("MO_WATCH").is_some() {
+    let watched = if std::env::var_os("MO_WATCH").is_some() {
+        "the launcher (rebuilds and restarts on every push)"
+    } else if std::env::var_os("CARGO_WATCH_COMMAND").is_some() {
         "cargo watch (rebuilds and restarts on every change)"
     } else {
         "nothing"
