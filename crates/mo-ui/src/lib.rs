@@ -3,14 +3,31 @@
 
 slint::include_modules!();
 
+pub mod cards;
+mod note;
+pub mod watchdog;
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use mo_app::activity::Feed;
+use mo_app::log;
 use mo_app::places::Place;
-use mo_app::shortcuts::Shortcuts;
+use mo_app::shortcuts::{APP_ACTIONS, Shortcuts};
 use mo_app::themes::Look;
+use note::open_note;
 use slint::platform::Key;
 use slint::{Color, ComponentHandle, ModelRc, VecModel, Weak};
 
-/// Builds the main window in a look, opening on a place.
-pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place) -> Result<AppWindow, slint::PlatformError> {
+/// The place on show, kept where the freeze watchdog can read it without asking the window.
+static PAGE: AtomicUsize = AtomicUsize::new(0);
+
+/// The name of the place on show, safe to read from any thread.
+pub fn page_name() -> &'static str {
+    Place::from_index(PAGE.load(Ordering::Relaxed)).map_or("?", Place::name)
+}
+
+/// Builds the main window in a look, opening on a place. Jobs report to `feed`, and its cards show bottom right.
+pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> Result<AppWindow, slint::PlatformError> {
     let app = AppWindow::new()?;
     apply_look(&app, look);
     let places: Vec<PlaceInfo> =
@@ -19,20 +36,47 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place) -> Result<AppWin
     app.set_rail(ModelRc::new(VecModel::from(places[..settings].to_vec())));
     app.set_places(ModelRc::new(VecModel::from(places)));
     app.set_settings_place(settings as i32);
-    app.set_place(start.index() as i32);
+    go_to(&app, start.index() as i32);
+    app.set_key_rows(ModelRc::new(VecModel::from(key_rows(&shortcuts))));
 
     let weak = app.as_weak();
     app.on_place_chosen(move |i| {
         if let Some(app) = weak.upgrade() {
-            app.set_place(i);
+            go_to(&app, i);
         }
     });
     let weak = app.as_weak();
     app.on_key(move |text, ctrl, shift, alt, meta| {
         let key = key_name(&text, ctrl, shift, alt, meta);
+        if key == "F12" {
+            return weak.upgrade().is_some_and(|app| {
+                open_note(&app);
+                true
+            });
+        }
         shortcuts.action_for(&key).is_some_and(|id| run(id, &weak))
     });
+
+    cards::connect(&app, &feed);
+    note::connect(&app, &feed);
     Ok(app)
+}
+
+/// Shows a place, and notes it for the log and the watchdog.
+fn go_to(app: &AppWindow, index: i32) {
+    let Some(place) = usize::try_from(index).ok().and_then(Place::from_index) else { return };
+    if PAGE.swap(place.index(), Ordering::Relaxed) != place.index() || app.get_place() != index {
+        log::info("Page", place.name());
+    }
+    app.set_place(index);
+}
+
+/// The key sheet's lines: every app-wide action with the key it has now, and F12, which the app keeps for itself.
+fn key_rows(shortcuts: &Shortcuts) -> Vec<KeyRow> {
+    let mut rows: Vec<KeyRow> =
+        APP_ACTIONS.iter().map(|a| KeyRow { key: shortcuts.key_of(a.id).into(), what: a.what.into() }).collect();
+    rows.push(KeyRow { key: "F12".into(), what: "Write a note for Claude about what's on screen".into() });
+    rows
 }
 
 /// Puts a look's colours and fonts into the screens' `Theme` tokens.
@@ -82,13 +126,14 @@ fn coming(place: Place) -> &'static str {
 fn run(id: &str, weak: &Weak<AppWindow>) -> bool {
     let Some(app) = weak.upgrade() else { return false };
     if let Some(p) = Place::ALL.into_iter().find(|p| p.shortcut_id() == id) {
-        app.set_place(p.index() as i32);
+        go_to(&app, p.index() as i32);
         return true;
     }
     let n = Place::ALL.len() as i32;
     match id {
-        "app.prevPage" => app.set_place((app.get_place() + n - 1) % n),
-        "app.nextPage" => app.set_place((app.get_place() + 1) % n),
+        "app.prevPage" => go_to(&app, (app.get_place() + n - 1) % n),
+        "app.nextPage" => go_to(&app, (app.get_place() + 1) % n),
+        "app.help" | "app.helpF1" => app.set_sheet_open(!app.get_sheet_open()),
         "app.fullScreen" => {
             let w = app.window();
             w.set_fullscreen(!w.is_fullscreen());

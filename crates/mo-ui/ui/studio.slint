@@ -26,6 +26,14 @@ export global Theme {
     out property <color> shine: light ? #ffffff80 : #ffffff12;
     out property <length> radius: square ? 1px : 4px;
 
+    // How things went, the same in every theme: missing or failed, a warning, all good.
+    out property <color> missing: #F0616D;
+    out property <color> warning: #F2B33D;
+    out property <color> ok: #4ACB8B;
+    // Shadows under cards and dialogs, and the dimming behind a dialog.
+    out property <color> shadow: #00000080;
+    out property <color> scrim: #00000099;
+
     // The DAWs' own colours, the same in every theme.
     out property <color> fl-studio: #5EA8FF;
     out property <color> bitwig: #F2994A;

@@ -1,9 +1,12 @@
 // A place that isn't built yet: its name and what's coming, so the shell can be tried before the pages exist.
-import { Theme, Well } from "../studio.slint";
+import { Theme, Well, StudioButton } from "../studio.slint";
 
 export component ComingPage inherits Rectangle {
     in property <string> title;
     in property <string> coming;
+    // Shown on Settings until real jobs exist, to see an activity card.
+    in property <bool> can-try-job;
+    callback try-job();
     VerticalLayout {
         padding: 28px;
         spacing: 16px;
@@ -24,6 +27,14 @@ export component ComingPage inherits Rectangle {
                     font-size: 14px;
                     horizontal-alignment: center;
                     wrap: word-wrap;
+                }
+                if root.can-try-job: HorizontalLayout {
+                    alignment: center;
+                    padding-top: 16px;
+                    StudioButton {
+                        text: "Try an activity card";
+                        clicked => { root.try-job(); }
+                    }
                 }
             }
         }

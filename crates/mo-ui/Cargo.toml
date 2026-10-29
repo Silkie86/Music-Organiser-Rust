@@ -18,6 +18,7 @@ path = "src/bin/mo-screens.rs"
 mo-app.workspace = true
 slint.workspace = true
 image.workspace = true
+chrono.workspace = true
 
 [build-dependencies]
 slint-build.workspace = true
