@@ -1,0 +1,418 @@
+//! Made-up project files for the tests, built byte by byte the way each DAW writes them (none of Solomon's files are
+//! in the repo). Each one copies the C# tests' file of the same name, so the twin test can compare them.
+
+#![allow(dead_code)]
+
+use std::path::PathBuf;
+
+/// A folder of its own for one test, emptied first.
+pub fn test_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("mo-formats-test-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("make the test folder");
+    dir
+}
+
+/// Builds an FL Studio project's events, then the file around them.
+pub struct Flp {
+    events: Vec<u8>,
+    pub ppq: u16,
+}
+
+impl Flp {
+    pub fn new() -> Flp {
+        Flp { events: Vec::new(), ppq: 96 }
+    }
+
+    pub fn byte(mut self, id: u8, v: u8) -> Flp {
+        self.events.extend([id, v]);
+        self
+    }
+
+    pub fn word(mut self, id: u8, v: u16) -> Flp {
+        self.events.push(id);
+        self.events.extend(v.to_le_bytes());
+        self
+    }
+
+    pub fn dword(mut self, id: u8, v: u32) -> Flp {
+        self.events.push(id);
+        self.events.extend(v.to_le_bytes());
+        self
+    }
+
+    pub fn raw(mut self, bytes: &[u8]) -> Flp {
+        self.events.extend(bytes);
+        self
+    }
+
+    pub fn data(mut self, id: u8, data: &[u8]) -> Flp {
+        self.events.push(id);
+        let mut n = data.len();
+        loop {
+            let b = (n & 0x7F) as u8;
+            n >>= 7;
+            if n == 0 {
+                self.events.push(b);
+                break;
+            }
+            self.events.push(b | 0x80);
+        }
+        self.events.extend(data);
+        self
+    }
+
+    /// Text as FL 11.5 and later write it: UTF-16, ending in a zero.
+    pub fn text(self, id: u8, s: &str) -> Flp {
+        let bytes: Vec<u8> = s.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect();
+        self.data(id, &bytes)
+    }
+
+    /// Text as older FL writes it: a byte a letter, ending in a zero.
+    pub fn ascii(self, id: u8, s: &str) -> Flp {
+        let mut bytes = s.as_bytes().to_vec();
+        bytes.push(0);
+        self.data(id, &bytes)
+    }
+
+    pub fn build(&self) -> Vec<u8> {
+        let mut b = b"FLhd".to_vec();
+        b.extend(6i32.to_le_bytes());
+        b.extend(0i16.to_le_bytes());
+        b.extend(3u16.to_le_bytes());
+        b.extend(self.ppq.to_le_bytes());
+        b.extend(b"FLdt");
+        b.extend((self.events.len() as i32).to_le_bytes());
+        b.extend(&self.events);
+        b
+    }
+}
+
+/// The Fruity Wrapper's records for a VST.
+pub struct Wrapper<'a> {
+    pub name: &'a str,
+    pub path: &'a str,
+    pub vendor: &'a str,
+    pub state: Vec<u8>,
+    pub version: u32,
+    pub kind: Option<u8>,
+    pub four_cc: Option<&'a str>,
+    pub class_id: Option<[u8; 16]>,
+}
+
+impl<'a> Wrapper<'a> {
+    pub fn new(name: &'a str, path: &'a str, vendor: &'a str, state: &[u8]) -> Wrapper<'a> {
+        Wrapper { name, path, vendor, state: state.to_vec(), version: 10, kind: None, four_cc: None, class_id: None }
+    }
+
+    pub fn build(&self) -> Vec<u8> {
+        let mut b = self.version.to_le_bytes().to_vec();
+        let mut field = |id: u32, data: &[u8]| {
+            b.extend(id.to_le_bytes());
+            b.extend((data.len() as u64).to_le_bytes());
+            b.extend(data);
+        };
+        if let Some(k) = self.kind {
+            field(50, &[k, 0, 0, 0]);
+        }
+        if let Some(cc) = self.four_cc {
+            field(51, cc.as_bytes());
+        }
+        if let Some(id) = self.class_id {
+            field(52, &id);
+        }
+        field(54, self.name.as_bytes());
+        field(55, self.path.as_bytes());
+        field(56, self.vendor.as_bytes());
+        field(53, &self.state);
+        b
+    }
+}
+
+/// A 24-byte note record.
+pub fn note(pos: u32, channel: u16, length: u32, key: u16, velocity: u8) -> Vec<u8> {
+    let mut b = vec![0u8; 24];
+    b[..4].copy_from_slice(&pos.to_le_bytes());
+    b[4..6].copy_from_slice(&0x4000u16.to_le_bytes());
+    b[6..8].copy_from_slice(&channel.to_le_bytes());
+    b[8..12].copy_from_slice(&length.to_le_bytes());
+    b[12..14].copy_from_slice(&key.to_le_bytes());
+    b[21] = velocity;
+    b
+}
+
+/// An FL 25 playlist item (80 bytes).
+pub fn playlist_item_25(pos: u32, index: u16, length: u32) -> Vec<u8> {
+    let mut b = vec![0u8; 80];
+    b[..4].copy_from_slice(&pos.to_le_bytes());
+    b[4..6].copy_from_slice(&20480u16.to_le_bytes());
+    b[6..8].copy_from_slice(&index.to_le_bytes());
+    b[8..12].copy_from_slice(&length.to_le_bytes());
+    b[12..14].copy_from_slice(&499u16.to_le_bytes());
+    b[18..20].copy_from_slice(&0x0040u16.to_le_bytes());
+    b[24..28].copy_from_slice(&(-1f32).to_le_bytes());
+    b[28..32].copy_from_slice(&(-1f32).to_le_bytes());
+    b
+}
+
+/// FL's VST2 state: a 21-byte header in front of the plugin's own chunk.
+pub fn fl_vst2_state(chunk: &[u8], program: u32) -> Vec<u8> {
+    let mut b = vec![0u8; 21];
+    b[..4].copy_from_slice(&(-9i32).to_le_bytes());
+    b[4] = 0x0d;
+    b[5..9].copy_from_slice(&(-2i32).to_le_bytes());
+    b[9..13].copy_from_slice(&(chunk.len() as u32).to_le_bytes());
+    b[17..21].copy_from_slice(&program.to_le_bytes());
+    b.extend(chunk);
+    b
+}
+
+/// FL's VST2 state for a plugin without chunks: the 21-byte header (chunk length 0, flags without 0x08), the
+/// parameter count and values, then u32 1 and the program name.
+pub fn fl_vst2_param_state(values: &[f32], program: &str) -> Vec<u8> {
+    let mut b = vec![0u8; 21];
+    b[..4].copy_from_slice(&(-9i32).to_le_bytes());
+    b[4] = 0x05;
+    b[5..9].copy_from_slice(&(-2i32).to_le_bytes());
+    b.extend((values.len() as u32).to_le_bytes());
+    b.extend(values.iter().flat_map(|v| v.to_le_bytes()));
+    b.extend(1u32.to_le_bytes());
+    let mut name = [0u8; 24];
+    name[..program.len()].copy_from_slice(program.as_bytes());
+    b.extend(name);
+    b
+}
+
+/// FL 9's VST2 state: a 13-byte header (i32 -9, flags, u32 chunk length, u32 program) in front of the plugin's chunk,
+/// or for a plugin without chunks, length 0 and its parameters as in [`fl_vst2_param_state`].
+pub fn fl_vst2_state_fl9(chunk: &[u8], program: u32, values: Option<&[f32]>, name: &str) -> Vec<u8> {
+    let mut b = (-9i32).to_le_bytes().to_vec();
+    b.push(if values.is_none() { 0x0d } else { 0x05 });
+    b.extend((chunk.len() as u32).to_le_bytes());
+    b.extend(program.to_le_bytes());
+    b.extend(chunk);
+    if let Some(values) = values {
+        b.extend((values.len() as u32).to_le_bytes());
+        b.extend(values.iter().flat_map(|v| v.to_le_bytes()));
+        b.extend(1u32.to_le_bytes());
+        let mut text = [0u8; 24];
+        text[..name.len()].copy_from_slice(name.as_bytes());
+        b.extend(text);
+    }
+    b
+}
+
+/// FL's VST3 state: version 1, then records 1 (settings), 3 (component), 2 (controller) and 4 (parameter ids).
+pub fn fl_vst3_state(component: &[u8], controller: &[u8], parameter_ids: &[u32]) -> Vec<u8> {
+    let mut b = 1u32.to_le_bytes().to_vec();
+    let mut rec = |id: u32, data: &[u8]| {
+        b.extend(id.to_le_bytes());
+        b.extend((data.len() as u64).to_le_bytes());
+        b.extend(data);
+    };
+    rec(1, &[0; 64]);
+    rec(3, component);
+    rec(2, controller);
+    let ids: Vec<u8> = (parameter_ids.len() as u32)
+        .to_le_bytes()
+        .into_iter()
+        .chain(parameter_ids.iter().flat_map(|i| i.to_le_bytes()))
+        .collect();
+    rec(4, &ids);
+    b
+}
+
+/// Three channels (Serum VST on "Lead", a sampler "Kick", native 3x Osc "Bass"), two patterns with notes, and a mixer
+/// with Fruity Limiter and a Pro-Q 3 VST. The C# tests' "Night Drive".
+pub fn fl_studio_project() -> Vec<u8> {
+    let notes: Vec<u8> = [note(0, 0, 96, 60, 100), note(96, 0, 96, 64, 128), note(0, 1, 24, 36, 100)].concat();
+    Flp::new()
+        .ascii(199, "21.2.3.4004")
+        .dword(156, 128_000)
+        .text(194, "Night Drive (title)")
+        .word(64, 0)
+        .byte(21, 2)
+        .text(201, "Fruity Wrapper")
+        .text(203, "Lead")
+        .data(
+            213,
+            &Wrapper::new("Serum", r"C:\Program Files\VstPlugins\Serum_x64.dll", "Xfer Records", &[1, 2, 3, 4]).build(),
+        )
+        .word(64, 1)
+        .byte(21, 0)
+        .text(203, "Kick")
+        .text(196, r"C:\Samples\Drums\Kick 01.wav")
+        .word(64, 2)
+        .byte(21, 2)
+        .text(201, "3x Osc")
+        .text(203, "Bass")
+        .data(213, &[9, 9, 9])
+        .word(65, 1)
+        .text(193, "Intro")
+        .data(224, &notes)
+        .word(65, 2)
+        .text(193, "Drop")
+        .data(224, &note(0, 2, 192, 41, 64))
+        .data(236, &[0, 0, 0, 0])
+        .text(201, "Fruity Limiter")
+        .data(213, &[5, 5])
+        .word(98, 0)
+        .text(201, "Fruity Wrapper")
+        .data(213, &Wrapper::new("Pro-Q 3", r"C:\VstPlugins\FabFilter Pro-Q 3.dll", "FabFilter", &[7, 7]).build())
+        .word(98, 1)
+        .build()
+}
+
+/// Like Solomon's funk step_8 (FL 9.0.0, 2010): channel "Cell" plays KORG LegacyCell, whose chunk sits behind FL 9's
+/// shorter header with program 42, and the mixer has Fruity Compressor saved as parameters. FL 9 keeps no plugin path
+/// or vendor, and its text is one byte a letter.
+pub fn fl_studio_9_project(chunk: &[u8]) -> Vec<u8> {
+    let cell = Wrapper {
+        version: 6,
+        kind: Some(0),
+        four_cc: Some("VCLK"),
+        ..Wrapper::new("LegacyCell", "", "", &fl_vst2_state_fl9(chunk, 42, None, ""))
+    };
+    let compressor = Wrapper {
+        version: 6,
+        kind: Some(0),
+        four_cc: Some("CFfU"),
+        ..Wrapper::new("Fruity Compressor", "", "", &fl_vst2_state_fl9(&[], 0, Some(&[0.5, 0.02, 0.5]), "Full Reset"))
+    };
+    Flp::new()
+        .ascii(199, "9.0.0")
+        .dword(156, 98_000)
+        .word(64, 0)
+        .byte(21, 2)
+        .ascii(201, "Fruity Wrapper")
+        .ascii(203, "Cell")
+        .data(213, &cell.build())
+        .data(236, &[0, 0, 0, 0])
+        .ascii(201, "Fruity Wrapper")
+        .data(213, &compressor.build())
+        .word(98, 0)
+        .build()
+}
+
+/// Like funk step_8's drums (FL 9.0.0): shuffle 36, and sampler "Kick" with step sequencer dots in pattern 1 kept in
+/// its channel events: steps 0, 5 (volume 52) and 7 (shifted 24). The playlist (FL 9's 32-byte items, row 999 - n for
+/// pattern n) plays pattern 1 from beat 8, one bar long.
+pub fn fl_studio_9_steps() -> Vec<u8> {
+    let mut item = vec![0u8; 32];
+    item[..4].copy_from_slice(&768u32.to_le_bytes());
+    item[6..8].copy_from_slice(&0x6000u16.to_le_bytes());
+    item[8..12].copy_from_slice(&384u32.to_le_bytes());
+    item[12..14].copy_from_slice(&998u16.to_le_bytes());
+    item[24..28].copy_from_slice(&(-1f32).to_le_bytes());
+    item[28..32].copy_from_slice(&(-1f32).to_le_bytes());
+    Flp::new()
+        .ascii(199, "9.0.0")
+        .byte(11, 36)
+        .dword(156, 140_000)
+        .word(64, 0)
+        .byte(21, 0)
+        .ascii(192, "Kick")
+        .ascii(196, r"C:\Samples\Kick.wav")
+        .word(65, 1)
+        .word(72, 5 | 52 << 8)
+        .word(91, 0x100)
+        .word(91, 0x105)
+        .word(92, 7 | 24 << 8)
+        .word(91, 0x107)
+        .data(233, &item)
+        .build()
+}
+
+/// Like Solomon's funk step_9 (funk step_8 saved again in FL 25.2.5): KORG LegacyCell on "Cell" gave FL an empty
+/// chunk, so its state is FL's 21-byte header with chunk length 0, then 8 zero bytes. A pattern plays it in bar 1.
+pub fn fl_studio_25_nothing_saved() -> Vec<u8> {
+    let cell = Wrapper {
+        version: 12,
+        kind: Some(4),
+        four_cc: Some("VCLK"),
+        ..Wrapper::new(
+            "LegacyCell",
+            r"C:\Program Files\VstPlugins\KORG\LegacyCell.dll",
+            "KORG",
+            &[fl_vst2_state(&[], 0), vec![0; 8]].concat(),
+        )
+    };
+    Flp::new()
+        .ascii(199, "25.2.5.5319")
+        .dword(159, 5319)
+        .byte(28, 1)
+        .raw(&[172, 1, 1, 0])
+        .text(192, "FL Studio 25.2.5.5319")
+        .dword(156, 98_000)
+        .word(65, 1)
+        .data(224, &note(0, 0, 96, 60, 100))
+        .word(64, 0)
+        .byte(21, 2)
+        .text(201, "Fruity Wrapper")
+        .text(203, "Cell")
+        .data(213, &cell.build())
+        .data(233, &playlist_item_25(0, 20481, 384))
+        .build()
+}
+
+/// An FL Studio 25 project for `<dir>/FL Studio/Projects/Shuffle.flp`: wrapper state version 12 with a VST2 (Serum), a
+/// VST3 (Arcade) and a VST2 saved as parameters (Predator 2), and a sample under `%FLStudioUserData%`.
+pub fn fl_studio_25_project() -> Vec<u8> {
+    let arcade_id = [0x41, 0x54, 0x53, 0x56, 0x43, 0x52, 0x61, 0x44, 0x72, 0x63, 0x61, 0x64, 0x65, 0, 0, 0];
+    let serum = Wrapper {
+        version: 12,
+        kind: Some(4),
+        four_cc: Some("XsfX"),
+        ..Wrapper::new(
+            "Serum",
+            r"C:\Program Files\VstPlugins\Xfer\Serum_x64.dll",
+            "Xfer Records",
+            &fl_vst2_state(&[1, 2, 3], 0),
+        )
+    };
+    let arcade = Wrapper {
+        version: 12,
+        kind: Some(8),
+        class_id: Some(arcade_id),
+        ..Wrapper::new(
+            "Arcade",
+            r"C:\Program Files\Common Files\VST3\Arcade.vst3",
+            "Output",
+            &fl_vst3_state(&[7, 7, 7], &[8], &[10, 20, 2000003]),
+        )
+    };
+    let predator = Wrapper {
+        version: 12,
+        kind: Some(0),
+        four_cc: Some("2drP"),
+        ..Wrapper::new(
+            "Predator 2",
+            r"C:\VstPlugins\Predator2.dll",
+            "Rob Papen",
+            &fl_vst2_param_state(&[0.25, 1.0, 0.5], "arp- sine beat"),
+        )
+    };
+    Flp::new()
+        .ascii(199, "25.1.0.4868")
+        .dword(156, 126_000)
+        .word(64, 0)
+        .byte(21, 0)
+        .text(203, "Snare")
+        .text(196, r"%FLStudioUserData%\Projects\Snare 01.wav")
+        .word(64, 1)
+        .byte(21, 2)
+        .text(201, "Fruity Wrapper")
+        .text(203, "Lead")
+        .data(213, &serum.build())
+        .word(64, 2)
+        .byte(21, 2)
+        .text(201, "Fruity Wrapper")
+        .text(203, "Keys")
+        .data(213, &arcade.build())
+        .word(64, 3)
+        .byte(21, 2)
+        .text(201, "Fruity Wrapper")
+        .text(203, "Arp")
+        .data(213, &predator.build())
+        .build()
+}
