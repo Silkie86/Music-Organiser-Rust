@@ -1,0 +1,108 @@
+// The window shell: the rail on the left and the page on show. Agreed map (2026-10-29): Songs, Sounds, Playground,
+// Plugins and Space, with Settings at the bottom.
+import { Theme, RailItem, Groove, Caps } from "studio.slint";
+import { ComingPage } from "pages/coming.slint";
+
+import "../fonts/IBMPlexSans-400.ttf";
+import "../fonts/IBMPlexSans-500.ttf";
+import "../fonts/IBMPlexSans-600.ttf";
+import "../fonts/IBMPlexSans-700.ttf";
+import "../fonts/IBMPlexMono-400.ttf";
+import "../fonts/IBMPlexMono-500.ttf";
+import "../fonts/IBMPlexMono-600.ttf";
+import "../fonts/IBMPlexMono-700.ttf";
+import "../fonts/SpaceGrotesk-400.ttf";
+import "../fonts/SpaceGrotesk-500.ttf";
+import "../fonts/SpaceGrotesk-600.ttf";
+import "../fonts/SpaceGrotesk-700.ttf";
+import "../fonts/SpaceMono-400.ttf";
+import "../fonts/SpaceMono-700.ttf";
+
+export { Theme }
+
+export struct PlaceInfo {
+    name: string,
+    coming: string,
+}
+
+export component AppWindow inherits Window {
+    title: "Music Organiser";
+    preferred-width: 1440px;
+    preferred-height: 900px;
+    min-width: 900px;
+    min-height: 600px;
+    background: Theme.background;
+    default-font-family: Theme.text-font;
+
+    // Every place in rail order; the last one is Settings, which sits at the bottom.
+    in property <[PlaceInfo]> places;
+    in-out property <int> place: 0;
+    callback place-chosen(int);
+    // A key press, with its modifiers, for the app-wide shortcut list in mo-app. Returns whether it was used.
+    callback key(string, bool, bool, bool, bool) -> bool;
+
+    forward-focus: keys;
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (root.key(event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt, event.modifiers.meta)) {
+                return accept;
+            }
+            reject
+        }
+
+        HorizontalLayout {
+            // The rail.
+            Rectangle {
+                width: 208px;
+                background: Theme.sidebar;
+                VerticalLayout {
+                    padding: 10px;
+                    padding-top: 16px;
+                    spacing: 4px;
+                    Text {
+                        text: "Music Organiser";
+                        font-size: 15px;
+                        font-weight: 600;
+                        color: Theme.text;
+                        height: 36px;
+                        x: 10px;
+                    }
+                    for p[i] in root.places: RailItem {
+                        visible: i < root.places.length - 1;
+                        height: self.visible ? 36px : 0;
+                        text: p.name;
+                        selected: root.place == i;
+                        clicked => { root.place-chosen(i); }
+                    }
+                    Rectangle { height: 10px; }
+                    Groove { }
+                    Rectangle { height: 6px; }
+                    Caps { text: "IN YOUR DAWS"; x: 10px; }
+                    Text {
+                        x: 10px;
+                        text: "Nothing open";
+                        color: Theme.faint;
+                        font-size: 12px;
+                    }
+                    Rectangle { }
+                    RailItem {
+                        text: root.places.length > 0 ? root.places[root.places.length - 1].name : "Settings";
+                        selected: root.place == root.places.length - 1;
+                        clicked => { root.place-chosen(root.places.length - 1); }
+                    }
+                }
+                // The seam between the rail and the page.
+                Rectangle {
+                    x: parent.width - 1px;
+                    width: 1px;
+                    background: Theme.edge;
+                }
+            }
+            // The page on show.
+            ComingPage {
+                title: root.places[root.place].name;
+                coming: root.places[root.place].coming;
+            }
+        }
+    }
+}

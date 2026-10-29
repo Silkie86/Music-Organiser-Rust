@@ -1,0 +1,31 @@
+// A place that isn't built yet: its name and what's coming, so the shell can be tried before the pages exist.
+import { Theme, Well } from "../studio.slint";
+
+export component ComingPage inherits Rectangle {
+    in property <string> title;
+    in property <string> coming;
+    VerticalLayout {
+        padding: 28px;
+        spacing: 16px;
+        Text {
+            text: root.title;
+            font-size: 24px;
+            font-weight: 600;
+            color: Theme.text;
+            vertical-stretch: 0;
+        }
+        Well {
+            vertical-stretch: 1;
+            VerticalLayout {
+                alignment: center;
+                Text {
+                    text: root.coming;
+                    color: Theme.muted;
+                    font-size: 14px;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
+}

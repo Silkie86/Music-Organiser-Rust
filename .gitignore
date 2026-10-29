@@ -17,3 +17,6 @@ Thumbs.db
 
 # Small made-up test files are fine
 !**/fixtures/**
+
+# Pictures drawn by mo-screens
+/screenshots/

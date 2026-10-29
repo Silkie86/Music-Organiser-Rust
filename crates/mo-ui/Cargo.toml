@@ -1,0 +1,26 @@
+[package]
+name = "mo-ui"
+description = "The Slint screens, the window shell and main()."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+default-run = "music-organiser"
+
+[[bin]]
+name = "music-organiser"
+path = "src/main.rs"
+
+[[bin]]
+name = "mo-screens"
+path = "src/bin/mo-screens.rs"
+
+[dependencies]
+mo-app.workspace = true
+slint.workspace = true
+image.workspace = true
+
+[build-dependencies]
+slint-build.workspace = true
+
+[lints]
+workspace = true
