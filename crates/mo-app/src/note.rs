@@ -32,13 +32,17 @@ pub struct Note<'a> {
 pub fn save(folder: &Path, note: &Note, now: DateTime<Local>) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(folder)?;
     let stamp = now.format("%Y-%m-%d_%H-%M-%S");
-    let mut name = format!("note-{stamp}");
-    for n in 2.. {
-        if !folder.join(format!("{name}.md")).exists() {
-            break;
-        }
-        name = format!("note-{stamp}-{n}");
-    }
+    // Claims the name by creating the file, so two notes saved in the same second can't take the same one.
+    let (name, mut file) = (1..1000)
+        .find_map(|n| {
+            let name = if n == 1 { format!("note-{stamp}") } else { format!("note-{stamp}-{n}") };
+            match std::fs::OpenOptions::new().write(true).create_new(true).open(folder.join(format!("{name}.md"))) {
+                Ok(f) => Some(Ok((name, f))),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => None,
+                Err(e) => Some(Err(e)),
+            }
+        })
+        .unwrap_or_else(|| Err(std::io::Error::other("no free note name")))?;
     let words = note.text.trim();
     let words = if !words.is_empty() {
         words
@@ -66,9 +70,8 @@ pub fn save(folder: &Path, note: &Note, now: DateTime<Local>) -> std::io::Result
         }
         md += "```\n";
     }
-    let path = folder.join(format!("{name}.md"));
-    std::fs::write(&path, md)?;
-    Ok(path)
+    std::io::Write::write_all(&mut file, md.as_bytes())?;
+    Ok(folder.join(format!("{name}.md")))
 }
 
 /// The note typed so far that was never saved, if any.

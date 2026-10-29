@@ -65,16 +65,22 @@ export component AppWindow inherits Window {
     callback note-edited(string);
     callback note-save();
     callback note-cancel();
+    callback note-put-aside();
 
     forward-focus: keys;
     keys := FocusScope {
         key-pressed(event) => {
             if (event.text == Key.Escape && (root.sheet-open || root.note-open)) {
                 if (root.note-open) {
-                    root.note-cancel();
+                    root.note-put-aside();
                 }
                 root.sheet-open = false;
+                keys.focus();
                 return accept;
+            }
+            // While the note is open, keys are for typing: no shortcut runs behind it.
+            if (root.note-open) {
+                return reject;
             }
             if (root.key(event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt, event.modifiers.meta)) {
                 return accept;
@@ -167,6 +173,10 @@ export component AppWindow inherits Window {
             }
             cancel => {
                 root.note-cancel();
+                keys.focus();
+            }
+            put-aside => {
+                root.note-put-aside();
                 keys.focus();
             }
             init => { self.focus(); }

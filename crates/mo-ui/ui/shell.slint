@@ -216,10 +216,12 @@ export component NoteDialog inherits Rectangle {
     in-out property <bool> include-picture: true;
     callback edited(string);
     callback save();
+    // Cancel throws the words away; putting aside (Esc, or a click beside the dialog) keeps them for next time.
     callback cancel();
+    callback put-aside();
     forward-focus: input;
     Backdrop {
-        close => { root.cancel(); }
+        close => { root.put-aside(); }
     }
     Rectangle {
         width: min(560px, root.width - 80px);

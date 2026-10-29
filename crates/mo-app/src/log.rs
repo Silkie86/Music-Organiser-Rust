@@ -3,7 +3,7 @@
 //! Claude can read what happened on Solomon's PC straight from the folder. Nothing of the music is in it, only what
 //! the app did.
 //!
-//! Writing never waits on the disk: lines go to a writer thread at below-normal priority. A message that keeps coming
+//! Writing never waits on the disk: lines go to a writer thread of their own. A message that keeps coming
 //! is written three times and then only counted (at 10, 100, 1000…), and a run stops writing at 5 MB, so a runaway
 //! warning can't fill the disk. The newest 30 runs' logs are kept.
 
@@ -23,6 +23,8 @@ pub const KEPT: usize = 30;
 const MAX_BYTES: u64 = 5 * 1024 * 1024;
 /// The same message more often than this is counted, not written again.
 const REPEATS_WRITTEN: u32 = 3;
+/// How many different messages are counted for repeats before the count starts again, so it can't grow all day.
+const SEEN_MAX: usize = 2000;
 /// How many recent lines are kept for an F12 note.
 const RECENT: usize = 60;
 
@@ -138,6 +140,9 @@ impl SessionLog {
         let key = format!("{}\u{1}{area}\u{1}{message}", level.name());
         let line = {
             let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if st.seen.len() >= SEEN_MAX && !st.seen.contains_key(&key) {
+                st.seen.clear();
+            }
             let times = st.seen.entry(key).or_insert(0);
             *times += 1;
             let times = *times;

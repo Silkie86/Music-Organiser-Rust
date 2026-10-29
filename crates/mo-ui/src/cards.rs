@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use mo_app::activity::{Card, Feed, State};
-use slint::{ComponentHandle, ModelRc, Timer, TimerMode, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, Timer, TimerMode, VecModel};
 
 use crate::{AppWindow, CardInfo};
 
@@ -40,16 +40,17 @@ pub fn connect(app: &AppWindow, feed: &Feed) {
     let f = feed.clone();
     app.on_try_job(move || try_job(&f));
 
-    // Finished cards stay a few seconds, then go by themselves.
+    // Finished cards stay a few seconds, then go by themselves; and progress held back by the 250 ms limit is shown.
     let weak = app.as_weak();
     let f = feed.clone();
     let tidy = Timer::default();
-    tidy.start(TimerMode::Repeated, Duration::from_secs(1), move || {
+    tidy.start(TimerMode::Repeated, mo_app::activity::PROGRESS_EVERY, move || {
         if f.tidy(Instant::now())
             && let Some(app) = weak.upgrade()
         {
             refresh(&app, &f);
         }
+        f.send_held_progress();
     });
     // The timer lives as long as the app: it stops when dropped, so it's let go of on purpose.
     std::mem::forget(tidy);
@@ -57,10 +58,24 @@ pub fn connect(app: &AppWindow, feed: &Feed) {
     refresh(app, feed);
 }
 
-/// Puts the feed's cards on screen now. Call on the window's thread.
+/// Puts the feed's cards on screen now. Call on the window's thread. When the same cards are on screen, only their
+/// rows change, so the cards aren't rebuilt and their progress bars glide.
 pub fn refresh(app: &AppWindow, feed: &Feed) {
     let cards: Vec<CardInfo> = feed.visible(Instant::now()).iter().map(card_info).collect();
-    app.set_cards(ModelRc::new(VecModel::from(cards)));
+    let shown = app.get_cards();
+    let same_cards = shown.row_count() == cards.len()
+        && cards.iter().enumerate().all(|(i, c)| shown.row_data(i).is_some_and(|s| s.id == c.id));
+    match shown.as_any().downcast_ref::<VecModel<CardInfo>>() {
+        Some(model) if same_cards => {
+            for (i, c) in cards.into_iter().enumerate() {
+                if model.row_data(i).as_ref() != Some(&c) {
+                    model.set_row_data(i, c);
+                }
+            }
+        }
+        Some(model) => model.set_vec(cards),
+        None => app.set_cards(ModelRc::new(VecModel::from(cards))),
+    }
     app.set_put_away(feed.put_away() as i32);
 }
 

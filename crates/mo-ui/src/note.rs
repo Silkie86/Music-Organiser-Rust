@@ -1,8 +1,12 @@
 //! F12: the note to Claude. The picture is taken before the dialog opens, so it shows the page, not the dialog. What's
-//! typed is kept in the draft file half a second after each pause in typing, and saving happens off the window's
-//! thread, ending in an activity card that says where the note went.
+//! typed is kept in the draft file a moment after each pause in typing (and straight away if the app closes or
+//! crashes first), and saving happens off the window's thread, ending in an activity card that says where it went.
+//!
+//! Only the Cancel button throws the words away. Esc or a click beside the dialog just puts the note aside: the next
+//! F12 offers it back.
 
 use std::cell::RefCell;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use mo_app::activity::Feed;
@@ -17,6 +21,10 @@ struct Picture {
     height: u32,
     rgba: Vec<u8>,
 }
+
+/// Typed but not yet in the draft file.
+static UNSAVED: Mutex<Option<String>> = Mutex::new(None);
+const DRAFT_PAUSE: Duration = Duration::from_millis(300);
 
 thread_local! {
     static PICTURE: RefCell<Option<Picture>> = const { RefCell::new(None) };
@@ -46,18 +54,21 @@ pub fn open_note(app: &AppWindow) {
 
 pub fn connect(app: &AppWindow, feed: &Feed) {
     app.on_note_edited(|text| {
-        let text = text.to_string();
-        DRAFT_TIMER.with(|t| {
-            t.start(slint::TimerMode::SingleShot, Duration::from_millis(500), move || {
-                note::keep_draft(&note::notes_dir(), &text);
-            })
-        });
+        *UNSAVED.lock().unwrap_or_else(|e| e.into_inner()) = Some(text.to_string());
+        DRAFT_TIMER.with(|t| t.start(slint::TimerMode::SingleShot, DRAFT_PAUSE, keep_unsaved));
     });
 
     let weak = app.as_weak();
     app.on_note_cancel(move || {
         if let Some(app) = weak.upgrade() {
-            close(&app);
+            close(&app, true);
+        }
+    });
+
+    let weak = app.as_weak();
+    app.on_note_put_aside(move || {
+        if let Some(app) = weak.upgrade() {
+            close(&app, false);
         }
     });
 
@@ -67,17 +78,41 @@ pub fn connect(app: &AppWindow, feed: &Feed) {
         let Some(app) = weak.upgrade() else { return };
         let text = app.get_note_text().to_string();
         let picture = PICTURE.with(|p| p.borrow_mut().take()).filter(|_| app.get_note_include_picture());
-        close(&app);
+        close(&app, true);
         save_in_background(&feed, text, picture);
     });
 }
 
-/// Closes the note, saved or cancelled. Either way the draft has done its job.
-fn close(app: &AppWindow) {
+/// Writes what's typed but not yet kept. Safe from any thread, and from a crash: it never waits for the lock.
+fn keep_unsaved() {
+    let text = match UNSAVED.try_lock() {
+        Ok(mut t) => t.take(),
+        Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner().take(),
+        Err(std::sync::TryLockError::WouldBlock) => None,
+    };
+    if let Some(text) = text {
+        note::keep_draft(&note::notes_dir(), &text);
+    }
+}
+
+/// For the app closing or crashing: keeps a note that's open as a draft, and takes down `writing.lock` so the launcher
+/// doesn't wait for it.
+pub fn finish_up() {
+    keep_unsaved();
+    note::writing(&note::notes_dir(), false);
+}
+
+/// Closes the note. Saved or cancelled, the draft has done its job; put aside, it stays for next time.
+fn close(app: &AppWindow, done_with: bool) {
     DRAFT_TIMER.with(Timer::stop);
     PICTURE.with(|p| p.borrow_mut().take());
     let folder = note::notes_dir();
-    note::clear_draft(&folder);
+    if done_with {
+        UNSAVED.lock().unwrap_or_else(|e| e.into_inner()).take();
+        note::clear_draft(&folder);
+    } else {
+        keep_unsaved();
+    }
     note::writing(&folder, false);
     app.set_note_open(false);
     app.set_note_text("".into());

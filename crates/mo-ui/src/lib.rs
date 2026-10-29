@@ -4,7 +4,7 @@
 slint::include_modules!();
 
 pub mod cards;
-mod note;
+pub mod note;
 pub mod watchdog;
 
 use std::sync::atomic::{AtomicUsize, Ordering};

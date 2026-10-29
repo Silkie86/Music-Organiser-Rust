@@ -4,10 +4,10 @@
 use std::io::Write;
 
 use mo_app::activity::Feed;
+use mo_app::log;
 use mo_app::places::Place;
 use mo_app::shortcuts::Shortcuts;
 use mo_app::themes::Look;
-use mo_app::{log, note};
 use slint::ComponentHandle;
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -28,7 +28,7 @@ fn main() -> Result<(), slint::PlatformError> {
         log::error("App", &format!("The window stopped with an error: {e}"));
     }
     // A note left open keeps its draft for next time, but the launcher shouldn't wait on it any more.
-    note::writing(&note::notes_dir(), false);
+    mo_ui::note::finish_up();
     session.close();
     ran
 }
@@ -43,6 +43,7 @@ fn log_crashes() {
         let text =
             format!("Music Organiser {} crashed on thread {thread}\n{info}\n\n{trace}\n", mo_app::version::version());
         log::error("Crash", &text);
+        mo_ui::note::finish_up();
         if let Some(l) = log::current() {
             l.flush();
         }

@@ -44,7 +44,10 @@ type Notify = Box<dyn Fn() + Send + Sync>;
 struct Inner {
     cards: Vec<Card>,
     notify: Option<Arc<Notify>>,
+    /// One clock for every job, so the window redraws at most four times a second however many jobs run.
     last_progress: Instant,
+    /// Progress came in too soon after the last redraw and hasn't been shown yet.
+    unsent: bool,
 }
 
 /// Every job's card. Cheap to clone; clones share the cards.
@@ -61,6 +64,7 @@ impl Default for Feed {
                 cards: Vec::new(),
                 notify: None,
                 last_progress: Instant::now() - PROGRESS_EVERY,
+                unsent: false,
             })),
             next_id: Arc::new(AtomicU64::new(1)),
         }
@@ -147,13 +151,26 @@ impl Feed {
         before != inner.cards.len()
     }
 
+    /// Passes on progress held back by the 250 ms limit. The window calls it on a timer, so the newest numbers always
+    /// show even when a job goes quiet after them.
+    pub fn send_held_progress(&self) {
+        let held = std::mem::take(&mut self.lock().unsent);
+        if held {
+            self.changed();
+        }
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Tells the window, outside the lock, so its callback can read the cards.
     fn changed(&self) {
-        let notify = self.lock().notify.clone();
+        let notify = {
+            let mut inner = self.lock();
+            inner.unsent = false;
+            inner.notify.clone()
+        };
         if let Some(f) = notify {
             f();
         }
@@ -189,6 +206,8 @@ impl Job {
             let due = now.duration_since(inner.last_progress) >= PROGRESS_EVERY;
             if due {
                 inner.last_progress = now;
+            } else {
+                inner.unsent = true;
             }
             due
         };
@@ -317,8 +336,13 @@ mod tests {
             job.progress(i as f32 / 1000.0, None);
         }
         assert!(calls.load(Ordering::Relaxed) - after_start <= 1, "progress flooded the window");
-        // The newest number is still kept, ready for the next redraw.
+        // The newest number is still kept, and the window's timer passes it on.
         assert_eq!(feed.visible(Instant::now())[0].progress, Some(0.999));
+        let before = calls.load(Ordering::Relaxed);
+        feed.send_held_progress();
+        assert_eq!(calls.load(Ordering::Relaxed), before + 1);
+        feed.send_held_progress();
+        assert_eq!(calls.load(Ordering::Relaxed), before + 1, "only once");
         job.done("");
     }
 }
