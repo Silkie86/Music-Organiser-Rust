@@ -35,6 +35,14 @@ Rust (latest)** on your Desktop. From then on:
 
 It never touches the C# launcher or its folder, so both can be used side by side.
 
+## The galaxy check (phase 0, once)
+
+Before the galaxy is built, this checks that a Slint window can draw 300,000 stars with the graphics card at 60
+frames a second. After the launcher has run once (any version from now on has it), close the launcher's window and open `%LOCALAPPDATA%\MusicOrganiser\run-latest-rust\app\tools\dev`
+and double-click **Galaxy check.cmd**. It builds (a few minutes the first time), then flies a route for 18 seconds and
+shows the numbers. They're also saved as `galaxy-check-<time>.txt` in the app's `logs` folder, where Claude can read
+them. Afterwards you can drag and scroll the sky by hand; close the window when you're done.
+
 ## See a screen change as it's written
 
 Open any file in `crates/mo-ui/ui/` in VS Code and click **Show Preview** above the component (the Slint

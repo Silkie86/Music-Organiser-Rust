@@ -1,0 +1,77 @@
+// The galaxy check's one screen: the sky, filling the window, with the numbers in a corner. Not part of the app, so it
+// keeps its own few colours instead of the app's Theme.
+export component CheckWindow inherits Window {
+    title: "Galaxy check: 300,000 stars";
+    preferred-width: 1440px;
+    preferred-height: 900px;
+    background: #0B0D12;
+
+    in property <image> sky;
+    in property <string> stage;
+    in property <string> numbers;
+    in property <string> results;
+    out property <length> sky-width: picture.width;
+    out property <length> sky-height: picture.height;
+    callback dragged(length, length);
+    callback scrolled(length);
+
+    picture := Image {
+        width: parent.width;
+        height: parent.height;
+        source: root.sky;
+        image-fit: fill;
+    }
+
+    touch := TouchArea {
+        property <length> last-x;
+        property <length> last-y;
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down) {
+                self.last-x = self.mouse-x;
+                self.last-y = self.mouse-y;
+            }
+        }
+        moved => {
+            if (self.pressed) {
+                root.dragged(self.mouse-x - self.last-x, self.mouse-y - self.last-y);
+                self.last-x = self.mouse-x;
+                self.last-y = self.mouse-y;
+            }
+        }
+        scroll-event(e) => {
+            root.scrolled(e.delta-y);
+            accept
+        }
+    }
+
+    Rectangle {
+        x: 16px;
+        y: 16px;
+        width: 460px;
+        height: panel.preferred-height;
+        background: #000000B0;
+        border-radius: 8px;
+        panel := VerticalLayout {
+            padding: 14px;
+            spacing: 6px;
+            Text {
+                text: root.stage;
+                color: #FFFFFF;
+                font-size: 16px;
+                font-weight: 600;
+            }
+            Text {
+                text: root.numbers;
+                color: #C8CCD4;
+                font-size: 13px;
+                wrap: word-wrap;
+            }
+            if root.results != "": Text {
+                text: root.results;
+                color: #E8EAEE;
+                font-size: 13px;
+                wrap: word-wrap;
+            }
+        }
+    }
+}

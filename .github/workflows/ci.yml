@@ -45,6 +45,13 @@ jobs:
         run: cargo clippy --workspace --all-targets
       - name: Tests
         run: cargo test --workspace
+      # The galaxy check is a workspace of its own (so its wgpu stays out of the app); checked on Windows, where it runs.
+      - name: Galaxy check
+        if: runner.os == 'Windows'
+        working-directory: tools/galaxycheck
+        run: |
+          cargo clippy --all-targets
+          cargo test
 
   screenshots:
     name: Screenshots
