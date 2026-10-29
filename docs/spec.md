@@ -167,7 +167,7 @@ part: kept, folded into something else, or rethought.
 - Playback: choose the sound output (or follow Windows' default), survive the output disappearing (DAW grabbing the
   interface) by reopening, about 20 ms output delay.
 
-### 3.4 MIDI page (to be folded into the Playground)
+### 3.4 MIDI page (stays a page; the Playground becomes its own app)
 
 - Index of MIDI folders plus MIDI inside every project (FL, Bitwig; Studio One not yet), newest save of each song
   only (setting), failed files listed with retry. Files are only read.
@@ -179,7 +179,27 @@ part: kept, folded into something else, or rethought.
 - Editable roll, GM playback through a SoundFont (GeneralUser GS or any .sf2), octave, tempo, mute, Send to Bitwig,
   drag out.
 
-### 3.5 Playground (a small MIDI DAW)
+### 3.4a Presets page (new, agreed 2026-10-29)
+
+- One list of every sound you made inside your songs (each plugin's saved state, by song and channel or track) plus
+  preset files on disk (`.fxp`/`.fxb`, `.vstpreset`, `.bwpreset`), searchable by plugin, synth or effect, and song.
+- Export (the old Presets window's choices: all, third-party, FL-native, synths or effects, one plugin) and Send to
+  Bitwig. Serum 1 → Serum 2 stays out (see Leave out).
+- **Part guess**: each preset gets a role from the notes it played in its song: one note at a time and low = bass,
+  higher = lead; several at once = chords or pad (long notes) or stabs/plucks (short); fast even single notes over
+  chord tones = arp; a few pitches repeated on the grid = drums; very few or long notes = FX. Channel/track names and
+  the plugin add clues; effects take the role of the track they sit on. Shown as a guess with its reason on hover, and
+  one click fixes it (your fix always wins). Thresholds from counts and averages of your MIDI only (rule 5).
+- The guess uses the **real pitch** the listener hears: the written note plus FL's channel root note and pitch knob
+  (the wrapper's transpose), Bitwig Note Transpose devices before the instrument, and the plugin's own octave or
+  coarse tune where its state can be read. When the plugin's state can't be read, the guess says the octave wasn't
+  checked.
+
+### 3.5 Playground (a small MIDI DAW; to become an app of its own)
+
+Agreed 2026-10-29: too big to be one page of this app. It becomes a second app in the same Cargo workspace, sharing
+the look, shortcuts, log, F12 notes and the harmony code, and keeping `playground\` so old ideas still open. What it
+does stays as listed here.
 
 - One timeline of clips on tracks; drag, slide, right edge repeats, left edge trims; new track; resizable panes.
 - **Chord lane / chord track**: chords are heard from the chord and bass clips, not typed (double-click adds one);
@@ -274,11 +294,11 @@ sessions) settles that page's map, with mock-ups first.
 
 | Today | Becomes |
 |---|---|
-| Rail of Projects, Sound Lab, MIDI, Playground, Plugins (+ planned Space) | Four places: **Songs**, **Sounds**, **Playground**, **Plugins**, plus Settings. **Ctrl+K** jumps to anything (songs, sounds, MIDI parts, plugins, ideas) from anywhere. |
-| MIDI page | Folded into the Playground as its Browse side (as you already chose). |
-| MIDI window and Presets window | Tabs on the song panel, not separate windows. |
+| Rail of Projects, Sound Lab, MIDI, Playground, Plugins (+ planned Space) | Six places: **Songs**, **Sounds**, **Presets**, **MIDI**, **Plugins**, **Space**, plus Settings (Ctrl+1 to 6, Ctrl+,). **Ctrl+K** jumps to anything (songs, sounds, presets, MIDI parts, plugins) from anywhere. Agreed 2026-10-29: the **Playground becomes an app of its own**, so MIDI stays a page here, and a new **Presets** page joins. |
+| MIDI page | Stays its own page, the browse side only (the Playground's editing goes with it to its own app). |
+| MIDI window and Presets window | Tabs on the song panel, not separate windows. The song's Presets tab is the Presets page filtered to that song. |
 | Fix, Check with the DAW, Repair, missing lists | One **Health** strip on a song: what's wrong, one Fix button, what was done. |
-| Plugin space, song Space tab, app files card, duplicates, planned Space page | One **Space** view (a mode of Plugins, or its own page): biggest wins first across plugins, songs, spare copies, duplicate sounds, app files. |
+| Plugin space, song Space tab, app files card, duplicates, planned Space page | One **Space** page (its own page, agreed 2026-10-29): biggest wins first across plugins, songs, spare copies, duplicate sounds, app files. |
 | Sound Lab tabs (In your projects, Teach, Duplicates, Rediscover, Kit builder, Galaxy) | One sounds list with view switches (Tiles, List, Galaxy) and filter chips ("used in my songs", "unused"); Rediscover is a sort; Kit builder is a side panel; Teach becomes fixing a label right where you see it. |
 | Settings: 9 tabs | Fewer: **General** (look, size, pace, sound output), **Folders** (projects, samples, MIDI, plugin data), **DAWs**, **Shortcuts**, **Developer**. Each page's numbers live in a small options popover on that page. |
 | DAW link set-up by hand | Set up on first run, with a status dot in the sidebar; Settings only when something's wrong. |
@@ -654,9 +674,10 @@ Each phase ends with something you can open and try. The C# app stays your daily
 | **2. Projects** | `mo-work`, `mo-library` (read-only first, then writing), scanner, sample locator, song versions, Projects page with song panel, Overview arrangement, Saves, Plugins/Samples tabs, search and filters, folder watch. | Finding and opening old projects every day. |
 | **3. Sound Lab** | `mo-audio`, `mo-sounds`: playback with output choice and reconnect, tiles/list/history, analysis, classifier, tags, Rediscover, kits, Detect notes, CLAP, duplicates, then the galaxy on the GPU. | Browsing and sweeping all 357k sounds. |
 | **4. Plugins and space** | Plugins page, `mo-scan` hookup, sizes, clean up, spare copies, uninstall, folder moves with junctions and admin steps, the agreed Space page. | Plugin lists and freeing space (tried on a test folder first). |
-| **5. DAW links and converting** | `mo-dawlink`: Bitwig and FL links, watch, checks, sends, live tests; Fix; FL → Bitwig writer; DAWproject, MIDI and preset export; FL repair. | Fix and Open in Bitwig on real songs, live tests. |
-| **6. MIDI and Playground** | `mo-harmony`, `mo-midi`, `mo-playground`; the Playground with the MIDI page folded in (as agreed), CLaMP 3 search, GM sound, and the agreed Notes menu, velocity lane, Ideas list. | Writing ideas and sending them to Bitwig. |
+| **5. DAW links, converting and Presets** | `mo-dawlink`: Bitwig and FL links, watch, checks, sends, live tests; Fix; FL → Bitwig writer; DAWproject, MIDI and preset export; FL repair; the **Presets page** with the part guess. | Fix and Open in Bitwig on real songs, live tests, finding old sounds. |
+| **6. MIDI** | `mo-harmony`, `mo-midi`; the MIDI page: index, parts, harmony fit, CLaMP 3 search, GM sound, send and drag out. | Finding MIDI parts and sending them to a DAW. |
 | **7. Switch** | Settings complete, every remaining agreed feature (Ctrl+K finder, first-run steps, "Fits the open song"), installer, a final whole-app review, then the default launcher entry becomes Rust. Retiring the C# code is your call. | The Rust app as your daily app. |
+| **Later. Playground app** | `mo-playground` and its own window, built on the shared crates: timeline, chord lane, suggestions, Reharm, Bitwig link, the agreed Notes menu, velocity lane, Ideas list. | Writing ideas and sending them to Bitwig. |
 | **8. Optional** | Port `mo-scan` and MO Probe to Rust (`clap-sys`, `vst3`), FL live tests, Studio One MIDI and export. | |
 
 **Rules for every phase**
@@ -696,7 +717,8 @@ Each phase ends with something you can open and try. The C# app stays your daily
 15. One app-wide shortcut list; every menu line shows its key.
 16. One shared style; reuse the main control for smaller lists.
 17. Crashes always log; F12 notes keep their draft through restarts.
-18. Merging needs your yes every time; don't push to the build you're testing without asking.
+18. Claude merges a PR itself once its code review's points are fixed and CI is green (changed 2026-10-29); don't push
+    to the build you're testing without asking.
 19. A quick code review on each pull request before you test it; after a batch merges (at the latest each phase), an
     ultracode code review of the whole app on `main`, then fixes.
 20. Claude sets the right effort level itself for each task and review (your rule, 2026-10-29): higher for file

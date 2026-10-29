@@ -1,5 +1,6 @@
-//! The places on the left-hand rail. Agreed with Solomon on 2026-10-29: Songs, Sounds, Playground, Plugins and Space,
-//! with Settings at the bottom. Ctrl+K jumps to anything from anywhere, so the rail stays short.
+//! The places on the left-hand rail. Agreed with Solomon on 2026-10-29: Songs, Sounds, Presets, MIDI, Plugins and
+//! Space, with Settings at the bottom. The Playground becomes an app of its own. Ctrl+K jumps to anything from
+//! anywhere, so the rail stays short.
 
 /// The `start_page` setting's value that means "open on the page I last used".
 pub const LAST_PAGE_CHOICE: &str = "Last page I used";
@@ -9,7 +10,8 @@ pub const LAST_PAGE_CHOICE: &str = "Last page I used";
 pub enum Place {
     Songs,
     Sounds,
-    Playground,
+    Presets,
+    Midi,
     Plugins,
     Space,
     Settings,
@@ -17,14 +19,15 @@ pub enum Place {
 
 impl Place {
     /// Every place, top to bottom. Settings sits apart at the bottom of the rail.
-    pub const ALL: [Place; 6] =
-        [Place::Songs, Place::Sounds, Place::Playground, Place::Plugins, Place::Space, Place::Settings];
+    pub const ALL: [Place; 7] =
+        [Place::Songs, Place::Sounds, Place::Presets, Place::Midi, Place::Plugins, Place::Space, Place::Settings];
 
     pub fn name(self) -> &'static str {
         match self {
             Place::Songs => "Songs",
             Place::Sounds => "Sounds",
-            Place::Playground => "Playground",
+            Place::Presets => "Presets",
+            Place::Midi => "MIDI",
             Place::Plugins => "Plugins",
             Place::Space => "Space",
             Place::Settings => "Settings",
@@ -37,7 +40,8 @@ impl Place {
             // The C# app's ids, so keys you changed there still work here.
             Place::Songs => "app.goProjects",
             Place::Sounds => "app.goSounds",
-            Place::Playground => "app.goPlayground",
+            Place::Presets => "app.goPresets",
+            Place::Midi => "app.goMidi",
             Place::Plugins => "app.goPlugins",
             Place::Space => "app.goSpace",
             Place::Settings => "app.goSettings",
@@ -56,7 +60,7 @@ impl Place {
 
     /// The place the app opens on, from the `start_page` setting and, for "Last page I used", `last_page`. The C#
     /// app wrote these names, so they're read as they are: its Projects and Sound Lab pages open as Songs and Sounds,
-    /// and its MIDI page lives in the Playground now.
+    /// and its Playground (an app of its own now) opens MIDI.
     pub fn start_place(start_page: Option<&str>, last_page: Option<&str>) -> Place {
         match start_page {
             Some(LAST_PAGE_CHOICE) => Place::from_page_name(last_page.unwrap_or_default()),
@@ -69,7 +73,8 @@ impl Place {
     pub fn from_page_name(value: &str) -> Place {
         match value {
             "Sounds" | "Sound Lab" | "Samples" => Place::Sounds,
-            "Playground" | "MIDI" => Place::Playground,
+            "Presets" => Place::Presets,
+            "MIDI" | "Playground" => Place::Midi,
             "Plugins" => Place::Plugins,
             "Space" => Place::Space,
             "Settings" => Place::Settings,
@@ -97,7 +102,8 @@ mod tests {
         assert_eq!(Place::start_place(Some("Projects"), None), Place::Songs);
         assert_eq!(Place::start_place(Some("Sound Lab"), None), Place::Sounds);
         assert_eq!(Place::start_place(Some("Samples"), None), Place::Sounds);
-        assert_eq!(Place::start_place(Some("MIDI"), None), Place::Playground);
+        assert_eq!(Place::start_place(Some("MIDI"), None), Place::Midi);
+        assert_eq!(Place::start_place(Some("Playground"), None), Place::Midi);
         assert_eq!(Place::start_place(None, None), Place::Songs);
     }
 

@@ -33,9 +33,10 @@ pub const APP_ACTIONS: &[Action] = &[
     action("app.jump", "Jump to anything: songs, sounds, MIDI parts, ideas, plugins, settings", "Ctrl+K"),
     action("app.goProjects", "Go to Songs", "Ctrl+1"),
     action("app.goSounds", "Go to Sounds", "Ctrl+2"),
-    action("app.goPlayground", "Go to the Playground", "Ctrl+3"),
-    action("app.goPlugins", "Go to Plugins", "Ctrl+4"),
-    action("app.goSpace", "Go to Space", "Ctrl+5"),
+    action("app.goPresets", "Go to Presets", "Ctrl+3"),
+    action("app.goMidi", "Go to MIDI", "Ctrl+4"),
+    action("app.goPlugins", "Go to Plugins", "Ctrl+5"),
+    action("app.goSpace", "Go to Space", "Ctrl+6"),
     action("app.goSettings", "Go to Settings", "Ctrl+,"),
     action("app.prevPage", "The place above on the rail", "Ctrl+PageUp"),
     action("app.nextPage", "The place below on the rail", "Ctrl+PageDown"),
@@ -232,7 +233,7 @@ mod tests {
             assert!(APP_ACTIONS.iter().any(|a| a.id == p.shortcut_id()), "{:?} has no action", p);
             assert_eq!(s.action_for(s.key_of(p.shortcut_id())), Some(p.shortcut_id()));
         }
-        assert_eq!(s.action_for("Ctrl+5"), Some("app.goSpace"));
+        assert_eq!(s.action_for("Ctrl+6"), Some("app.goSpace"));
     }
 
     #[test]
@@ -256,10 +257,10 @@ mod tests {
 
     #[test]
     fn a_changed_key_takes_over_from_a_default() {
-        // The C# app saves only what you changed, so Ctrl+3 is still Playground's default here.
+        // The C# app saves only what you changed, so Ctrl+3 is still Presets' default here.
         let s = Shortcuts::from_setting(Some(r#"{"app.goPlugins":"Ctrl+3","app.goSounds":""}"#));
         assert_eq!(s.action_for("Ctrl+3"), Some("app.goPlugins"));
-        assert_eq!(s.action_for("Ctrl+4"), None);
+        assert_eq!(s.action_for("Ctrl+5"), None);
         assert_eq!(s.action_for("Ctrl+2"), None);
     }
 

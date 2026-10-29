@@ -32,7 +32,8 @@ This repo is the Rust rebuild of the C# app. The plan, the inventory of today's 
 15. One app-wide shortcut list; every menu line shows its key.
 16. One shared style; reuse the main control for smaller lists.
 17. Crashes always log; F12 notes keep their draft through restarts.
-18. Merging needs Solomon's yes every time; don't push to the build Solomon is testing without asking.
+18. Claude merges a PR itself once its code review's points are fixed and CI is green (Solomon, 2026-10-29); don't
+    push to the build Solomon is testing without asking.
 19. A quick code review on each pull request before it is tested; after a batch merges (at the latest each phase), an
     ultracode code review of the whole app on `main`, then fixes.
 20. Claude sets the right effort level itself for each task and review: higher for file formats, data safety and
