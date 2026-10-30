@@ -2696,6 +2696,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mo-formatlab"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "mo-formats",
+ "rayon",
+ "serde",
+ "serde_json",
+ "zip",
+]
+
+[[package]]
 name = "mo-formats"
 version = "0.1.0"
 dependencies = [
