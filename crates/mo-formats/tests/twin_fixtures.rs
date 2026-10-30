@@ -1,6 +1,9 @@
 //! Writes the made-up project files to a folder, so the twin test can read them with both apps (CI runs this with
 //! `MO_TWIN_FIXTURES` set). Without it, it only checks that every file still builds.
 
+// Test files may unwrap: a test that stops there has failed, which is what it should do.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 mod common;
 
 use common::bitwig::*;

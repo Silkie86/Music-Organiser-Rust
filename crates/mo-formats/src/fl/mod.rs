@@ -366,7 +366,7 @@ pub(crate) fn records(blob: &[u8]) -> (BTreeMap<u32, &[u8]>, bool) {
     let mut pos = 4;
     while pos + 12 <= blob.len() {
         let id = u32_at(blob, pos);
-        let size = u64::from_le_bytes(blob[pos + 4..pos + 12].try_into().expect("8 bytes"));
+        let size = u64_at(blob, pos + 4).unwrap_or(u64::MAX);
         pos += 12;
         if size > (blob.len() - pos) as u64 {
             return (records, false);
@@ -430,16 +430,12 @@ pub(crate) fn saved_nothing(state: &[u8]) -> bool {
 /// Event 237: the day the project was first made (a Delphi date: days since 30 Dec 1899) and how long FL Studio has
 /// had it open, in days. Saving again, even in a newer FL, keeps the date. Dates out of range are left out.
 pub fn project_time(data: &[u8]) -> (Option<NaiveDateTime>, Option<String>) {
-    if data.len() < 16 {
-        return (None, None);
-    }
-    let made = f64::from_le_bytes(data[..8].try_into().expect("8 bytes"));
-    let open = f64::from_le_bytes(data[8..16].try_into().expect("8 bytes"));
-    // 1995 to 2119.
-    let created = (made.is_finite() && made > 35_000.0 && made < 80_000.0).then(|| {
-        let start = NaiveDate::from_ymd_opt(1899, 12, 30).expect("a real date").and_hms_opt(0, 0, 0).expect("midnight");
-        start + TimeDelta::milliseconds((made * 86_400_000.0).round() as i64)
-    });
+    let (Some(made), Some(open)) = (f64_at(data, 0), f64_at(data, 8)) else { return (None, None) };
+    let created = NaiveDate::from_ymd_opt(1899, 12, 30)
+        .and_then(|day| day.and_hms_opt(0, 0, 0))
+        // 1995 to 2119.
+        .filter(|_| made.is_finite() && made > 35_000.0 && made < 80_000.0)
+        .map(|start| start + TimeDelta::milliseconds((made * 86_400_000.0).round() as i64));
     let spent = (open.is_finite() && open > 0.0 && open < 3650.0).then(|| {
         // To the millisecond first, so 13 minutes saved as 0.009027... days isn't 12.99999 minutes.
         let minutes = (open * 86_400_000.0).round() as i64 / 60_000;

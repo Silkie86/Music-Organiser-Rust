@@ -86,12 +86,11 @@ pub(super) fn automation_points(d: &[u8]) -> Vec<FlPoint> {
     if d.len() < 21 {
         return points;
     }
-    let count = (u32_at(d, 17) as usize).min((d.len() - 21) / 24);
+    let count = u32_at(d, 17) as usize;
     let mut beat = 0.0;
-    for k in 0..count {
-        let p = &d[21 + k * 24..];
-        beat += f64::from_le_bytes(p[..8].try_into().expect("8 bytes"));
-        let value = f64::from_le_bytes(p[8..16].try_into().expect("8 bytes"));
+    for p in d.get(21..).unwrap_or_default().as_chunks::<24>().0.iter().take(count) {
+        let (Some(step), Some(value)) = (f64_at(p, 0), f64_at(p, 8)) else { break };
+        beat += step;
         if !beat.is_finite() || beat < 0.0 || !value.is_finite() {
             break;
         }

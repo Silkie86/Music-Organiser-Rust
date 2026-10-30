@@ -1,0 +1,45 @@
+# cargo deny: checks every library the app uses, before it's built (CI runs it).
+# - advisories: no library with a known security hole, or one its makers have given up on.
+# - licenses: only licences that let the app be shared as it is.
+# - bans: no library given as "any version".
+# - sources: libraries come only from crates.io.
+
+[advisories]
+version = 2
+yanked = "deny"
+# Given up on by its makers: checked for the libraries the app asks for itself. Slint's own (font and Linux
+# accessibility parts) are Slint's to change.
+unmaintained = "workspace"
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+# The app's own parts aren't published, so they need no licence of their own here.
+private = { ignore = true }
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "CC0-1.0",
+    "Unlicense",
+    "Unicode-3.0",
+    # Slint, the screens: free for a desktop app as long as the app says it's made with Slint (Solomon chose this
+    # over GPL-3.0, 2026-10-30; the credit goes in the About box).
+    "LicenseRef-Slint-Royalty-free-2.0",
+]
+
+[bans]
+# Slint and its window libraries bring some libraries in two versions; that only costs build time.
+multiple-versions = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

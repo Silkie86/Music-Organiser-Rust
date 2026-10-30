@@ -1,6 +1,9 @@
 //! Bitwig's file format: decoding ends at the zip, and encoding writes a decoded file back byte for byte, edited or
 //! not. The C# `BitwigWriterTests`, on the same made-up files.
 
+// Test files may unwrap: a test that stops there has failed, which is what it should do.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 mod common;
 
 use common::bitwig::*;

@@ -351,7 +351,7 @@ pub(super) fn playlist_items(d: &[u8]) -> Vec<PlaylistItem> {
         }
         let order: Vec<u32> = items.iter().map(|i| i.index).collect::<BTreeSet<_>>().into_iter().collect();
         for item in &mut items {
-            item.slot = 499 - order.binary_search(&item.index).expect("listed above") as i64;
+            item.slot = 499 - order.partition_point(|&i| i < item.index) as i64;
         }
     }
     // FL 6 to 8: 28-byte items laid out like FL 9's, but with the start offset at 20 (a float, −1 = none) and rows
@@ -389,7 +389,7 @@ pub(super) fn playlist_items(d: &[u8]) -> Vec<PlaylistItem> {
             .collect();
         let order: Vec<u32> = keys.iter().copied().collect::<BTreeSet<_>>().into_iter().collect();
         for (item, key) in items.iter_mut().zip(keys) {
-            item.slot = 499 - order.binary_search(&key).expect("listed above") as i64;
+            item.slot = 499 - order.partition_point(|&k| k < key) as i64;
         }
     }
     items
@@ -431,20 +431,20 @@ fn place_clips(
         // In file order again: channels in the order their first note appears, as the C# reader groups them.
         let mut hits: Vec<usize> = starts[first..end.max(first)].iter().map(|&(_, i)| i).collect();
         hits.sort_unstable();
-        let mut by_channel: BTreeMap<u32, Vec<NoteEvent>> = BTreeMap::new();
-        let mut order = Vec::new();
+        let mut groups: Vec<(u32, Vec<NoteEvent>)> = Vec::new();
+        let mut group_of: HashMap<u32, usize> = HashMap::new();
         for &(channel, n) in hits.into_iter().map(|i| &in_pattern[i]) {
-            if !by_channel.contains_key(&channel) {
-                order.push(channel);
-            }
-            by_channel.entry(channel).or_default().push(NoteEvent {
+            let g = *group_of.entry(channel).or_insert_with(|| {
+                groups.push((channel, Vec::new()));
+                groups.len() - 1
+            });
+            groups[g].1.push(NoteEvent {
                 start: n.start - from,
-                length: n.length.min(from + length - n.start),
+                length: n.length.min(from.saturating_add(length) - n.start),
                 ..n
             });
         }
-        for channel in order {
-            let mut notes = by_channel.remove(&channel).expect("grouped above");
+        for (channel, mut notes) in groups {
             notes.sort_by_key(|n| (n.start, n.key));
             clips.entry(channel).or_default().push(FlClip {
                 name: name_of(pattern),

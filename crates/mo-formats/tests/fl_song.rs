@@ -1,6 +1,9 @@
 //! The song in an FL project: notes, the playlist, channels and audio clips. The C# reader tests for `ExtractMidi`,
 //! `ExtractChannels` and `ReadSong`, on the same made-up files.
 
+// Test files may unwrap: a test that stops there has failed, which is what it should do.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 mod common;
 
 use std::collections::BTreeMap;

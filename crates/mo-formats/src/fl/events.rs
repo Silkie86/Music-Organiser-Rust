@@ -114,6 +114,16 @@ pub(crate) fn u32_at(d: &[u8], at: usize) -> u32 {
     u32::from_le_bytes([d[at], d[at + 1], d[at + 2], d[at + 3]])
 }
 
+/// The double at `at`, if the bytes are there.
+pub(crate) fn f64_at(d: &[u8], at: usize) -> Option<f64> {
+    d.get(at..)?.first_chunk().map(|b| f64::from_le_bytes(*b))
+}
+
+/// The 64-bit number at `at`, if the bytes are there.
+pub(crate) fn u64_at(d: &[u8], at: usize) -> Option<u64> {
+    d.get(at..)?.first_chunk().map(|b| u64::from_le_bytes(*b))
+}
+
 pub(crate) fn i32_at(d: &[u8], at: usize) -> i32 {
     i32::from_le_bytes([d[at], d[at + 1], d[at + 2], d[at + 3]])
 }

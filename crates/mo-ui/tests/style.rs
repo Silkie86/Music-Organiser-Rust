@@ -1,6 +1,9 @@
 //! The style check (spec 11.2): pages use the shared style in `studio.slint` and never set a raw colour or draw their
 //! own play and stop signs. Only `studio.slint` may hold colour values.
 
+// Test files may unwrap: a test that stops there has failed, which is what it should do.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::path::{Path, PathBuf};
 
 fn slint_files(dir: &Path, out: &mut Vec<PathBuf>) {

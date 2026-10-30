@@ -1,6 +1,9 @@
 //! Plugin states taken out of FL projects as preset files: the C# `ExtractPresets` tests and the FL 9 and FL 25 ones
 //! on plugin states, on the same made-up files.
 
+// Test files may unwrap: a test that stops there has failed, which is what it should do.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 mod common;
 
 use common::*;

@@ -1,0 +1,3 @@
+# Tests may unwrap: a test that stops there has failed, which is what it should do.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
