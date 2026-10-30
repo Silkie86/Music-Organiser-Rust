@@ -431,21 +431,20 @@ fn place_clips(
         // In file order again: channels in the order their first note appears, as the C# reader groups them.
         let mut hits: Vec<usize> = starts[first..end.max(first)].iter().map(|&(_, i)| i).collect();
         hits.sort_unstable();
-        let mut by_channel: BTreeMap<u32, Vec<NoteEvent>> = BTreeMap::new();
-        let mut order = Vec::new();
+        let mut groups: Vec<(u32, Vec<NoteEvent>)> = Vec::new();
+        let mut group_of: HashMap<u32, usize> = HashMap::new();
         for &(channel, n) in hits.into_iter().map(|i| &in_pattern[i]) {
-            if !by_channel.contains_key(&channel) {
-                order.push(channel);
-            }
-            by_channel.entry(channel).or_default().push(NoteEvent {
+            let g = *group_of.entry(channel).or_insert_with(|| {
+                groups.push((channel, Vec::new()));
+                groups.len() - 1
+            });
+            groups[g].1.push(NoteEvent {
                 start: n.start - from,
-                length: n.length.min(from + length - n.start),
+                length: n.length.min(from.saturating_add(length) - n.start),
                 ..n
             });
         }
-        for channel in order {
-            // Every channel in the order was grouped above.
-            let Some(mut notes) = by_channel.remove(&channel) else { continue };
+        for (channel, mut notes) in groups {
             notes.sort_by_key(|n| (n.start, n.key));
             clips.entry(channel).or_default().push(FlClip {
                 name: name_of(pattern),

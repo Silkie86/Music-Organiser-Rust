@@ -4,9 +4,6 @@
 # - bans: no library given as "any version".
 # - sources: libraries come only from crates.io.
 
-[graph]
-all-features = false
-
 [advisories]
 version = 2
 yanked = "deny"

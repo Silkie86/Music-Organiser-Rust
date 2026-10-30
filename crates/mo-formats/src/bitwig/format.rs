@@ -643,7 +643,7 @@ impl<'a> Reader<'a> {
                         self.objects[id.0 as usize].fields = std::mem::take(fields);
                         self.depth -= 1;
                         stack.pop();
-                        deliver(&mut stack, Slot::Obj(id));
+                        deliver(&mut stack, Slot::Obj(id))?;
                         continue;
                     }
                     let ty = self.byte(*p)?;
@@ -671,7 +671,7 @@ impl<'a> Reader<'a> {
                     None => {
                         let parent = *parent;
                         if let Some(s) = self.start_slot(p, parent, &mut stack)? {
-                            deliver(&mut stack, s);
+                            deliver(&mut stack, s)?;
                         }
                         continue;
                     }
@@ -683,7 +683,7 @@ impl<'a> Reader<'a> {
                     } else {
                         let parent = *parent;
                         if let Some(s) = self.start_slot(p, parent, &mut stack)? {
-                            deliver(&mut stack, s);
+                            deliver(&mut stack, s)?;
                         }
                         continue;
                     }
@@ -694,7 +694,7 @@ impl<'a> Reader<'a> {
                         *key = Some(self.text(p)?);
                         let parent = *parent;
                         if let Some(s) = self.start_slot(p, parent, &mut stack)? {
-                            deliver(&mut stack, s);
+                            deliver(&mut stack, s)?;
                         }
                         continue;
                     }
@@ -709,7 +709,7 @@ impl<'a> Reader<'a> {
                     None => {
                         let parent = *parent;
                         if let Some(s) = self.start_slot(p, parent, &mut stack)? {
-                            deliver(&mut stack, s);
+                            deliver(&mut stack, s)?;
                         }
                         continue;
                     }
@@ -836,15 +836,18 @@ fn field(frame: &mut Frame, id: u32, value: Value) {
 }
 
 /// An object slot read (an object finished, a reference or none), into what's on top.
-fn deliver(stack: &mut [Frame], s: Slot) {
+fn deliver(stack: &mut [Frame], s: Slot) -> R<()> {
     match stack.last_mut() {
         Some(Frame::Obj { fields, pending, .. }) => fields.push(Field { id: *pending, value: Value::Obj(s) }),
         Some(Frame::Single { slot, .. } | Frame::Named { slot, .. }) => *slot = Some(s),
         Some(Frame::List { items, .. }) => items.push(s),
-        // A map's key is always read before its object.
-        Some(Frame::Map { items, key, .. }) => items.extend(key.take().map(|k| (k, s))),
+        Some(Frame::Map { items, key, .. }) => match key.take() {
+            Some(k) => items.push((k, s)),
+            None => return Err("a map's object came before its key".into()),
+        },
         None => {}
     }
+    Ok(())
 }
 
 #[cfg(test)]

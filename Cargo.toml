@@ -24,7 +24,8 @@ unsafe_code = "deny"
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 # A file the app reads can be damaged in any way, so nothing outside tests may stop the app with unwrap or expect: say
-# what's wrong instead (clippy.toml lets tests use them).
+# what's wrong instead. Tests may: clippy.toml allows them in #[test] functions and test modules, and each file in a
+# crate's tests folder allows them at its top.
 unwrap_used = "deny"
 expect_used = "deny"
 
