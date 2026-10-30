@@ -631,7 +631,7 @@ pub fn extract_presets(doc: &Document, names: &TrackNames) -> Vec<PresetBlob> {
         if entry.read_to_end(&mut data).is_err() {
             continue;
         }
-        let name = full.rsplit(['/', if cfg!(windows) { '\\' } else { '/' }]).next().unwrap_or(full);
+        let name = paths::entry_name(full);
         let ext = paths::extension(name).to_owned();
         let stem = paths::stem(name);
         let owner = owners.get(&name.to_lowercase()).or_else(|| owners.get(&stem.to_lowercase()));

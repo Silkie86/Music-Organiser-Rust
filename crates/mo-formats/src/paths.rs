@@ -21,6 +21,12 @@ pub fn is_absolute(p: &str) -> bool {
         || matches!(p.as_bytes(), [d, b':', b'\\' | b'/', ..] if d.is_ascii_alphabetic())
 }
 
+/// A zip entry's own name, without its folders (.NET's `ZipArchiveEntry.Name`): after its last `/`, or `\` on
+/// Windows.
+pub fn entry_name(full: &str) -> &str {
+    full.rsplit(is_separator).next().unwrap_or(full)
+}
+
 /// The last part of a path written with either separator.
 pub fn file_name(p: &str) -> &str {
     p.rsplit(['\\', '/']).next().unwrap_or(p)

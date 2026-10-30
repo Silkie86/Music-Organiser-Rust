@@ -16,4 +16,4 @@ zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 # Studio One's songs are zips of XML: read with a small, strict parser, after its undeclared "x:" prefixes are taken
 # out with two patterns, as the C# reader does.
 regex = { version = "1", default-features = false, features = ["std", "unicode"] }
-roxmltree = "0.20"
+roxmltree = "0.21"

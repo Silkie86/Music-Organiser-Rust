@@ -38,6 +38,8 @@ const MIDI_PPQ: u16 = 960;
 pub struct Song<'a> {
     zip: zip::ZipArchive<Cursor<&'a [u8]>>,
     names: Vec<String>,
+    /// The XML files that are there but wouldn't come out of the zip whole.
+    unreadable: Vec<String>,
 }
 
 /// Reads what's in a Studio One song. A file that isn't a zip can't be read and says so.
@@ -53,15 +55,22 @@ impl<'a> Song<'a> {
         let names = (0..zip.len())
             .map(|i| zip.name_for_index(i).and_then(Result::ok).unwrap_or_default().into_owned())
             .collect();
-        Ok(Song { zip, names })
+        Ok(Song { zip, names, unreadable: Vec::new() })
     }
 
     /// One of the song's XML files as text, with the undeclared `x:` prefixes taken out so it parses (`None` when
-    /// it isn't there). The first file of that name, as .NET's zip finds it.
+    /// it isn't there, or won't come out whole). Where a damaged zip names two files the same, the zip reader keeps
+    /// the last one's bytes (.NET's takes the first).
     fn xml(&mut self, name: &str) -> Option<String> {
         let i = self.names.iter().position(|n| n == name)?;
         let mut bytes = Vec::new();
-        self.zip.by_index(i).ok()?.read_to_end(&mut bytes).ok()?;
+        let whole = self.zip.by_index(i).is_ok_and(|mut entry| entry.read_to_end(&mut bytes).is_ok());
+        if !whole {
+            if !self.unreadable.iter().any(|n| n == name) {
+                self.unreadable.push(name.to_owned());
+            }
+            return None;
+        }
         Some(without_prefixes(&text_of(&bytes)))
     }
 
@@ -102,7 +111,7 @@ impl<'a> Song<'a> {
         for entry in devices {
             let Some(text) = self.xml(&entry) else { continue };
             let Ok(doc) = parse(&text) else { continue };
-            let kind = if entry_name(&entry).to_lowercase().contains("synth") {
+            let kind = if paths::entry_name(&entry).to_lowercase().contains("synth") {
                 PluginKind::Instrument
             } else {
                 PluginKind::Effect
@@ -155,6 +164,13 @@ impl<'a> Song<'a> {
             }
             _ => info.warnings.push("Song/song.xml is missing or unreadable.".into()),
         }
+        // The C# reader can't read the song at all then; this reads the rest and says what was left out.
+        for name in self.unreadable.iter().filter(|n| *n != "Song/song.xml") {
+            info.warnings.push(format!("{name} won't come out of the zip whole; what's in it is left out."));
+        }
+        if self.zip.has_duplicate_names() {
+            info.warnings.push("The zip names two files the same; only one of each is read.".into());
+        }
         info.dedupe()
     }
 
@@ -162,9 +178,12 @@ impl<'a> Song<'a> {
     /// format is seconds, when the song's tempo turns them into beats. Studio One has changed this between versions,
     /// so the app calls Studio One's MIDI export experimental.
     pub fn midi(&mut self) -> Vec<MidiClip> {
-        let tempo = self.tempo();
+        let from_meta = self.meta_tempo();
         let Some(text) = self.xml("Song/song.xml") else { return Vec::new() };
         let Ok(song) = parse(&text) else { return Vec::new() };
+        // The song's tempo as the project list reads it: the metainfo's, the song's own after that, or 120.
+        let tempo =
+            from_meta.or_else(|| elements(song.root_element()).find_map(|e| num(attr(e, "tempo")))).unwrap_or(120.0);
         let mut clips = Vec::new();
         for track in elements(song.root_element()).filter(|e| e.tag_name().name() == "MusicTrack") {
             let track_name = match attr(track, "name") {
@@ -187,11 +206,12 @@ impl<'a> Song<'a> {
                     let length = num(attr(ev, "length")).unwrap_or(0.25);
                     let key = num(attr(ev, "pitch")).unwrap_or(60.0) as i32;
                     let vel = num(attr(ev, "velocity")).unwrap_or(0.8);
-                    // 0 to 1 in newer songs, MIDI 1.0's 0 to 127 in older ones; kept in MIDI 2.0's 16 bits.
-                    let velocity = if vel <= 1.0 {
-                        velocity::from_unit(vel)
-                    } else {
+                    // 0 to 1 in newer songs, MIDI 1.0's 0 to 127 in older ones; kept in MIDI 2.0's 16 bits. "NaN" is
+                    // the quietest (MIDI 1.0's 1), as in the C# app.
+                    let velocity = if vel > 1.0 {
                         velocity::from_7(vel.round_ties_even().min(127.0) as u8)
+                    } else {
+                        velocity::from_unit(vel)
                     };
                     notes.push(NoteEvent {
                         start: (beats(start) * MIDI_PPQ as f64).round_ties_even() as i64,
@@ -210,46 +230,35 @@ impl<'a> Song<'a> {
         clips
     }
 
-    /// The song's tempo as the project list reads it, or 120.
-    fn tempo(&mut self) -> f64 {
-        let meta = self.xml("metainfo.xml");
-        let meta = meta.as_deref().and_then(|t| parse(t).ok());
-        // The last tempo the metainfo gives, if it reads as a number; the song's own after that.
-        let from_meta = meta.and_then(|m| {
-            elements(m.root_element())
-                .skip(1)
-                .filter(|e| id(*e) == "Media:Tempo")
-                .last()
-                .and_then(|e| num(attr(e, "value")))
-        });
-        if let Some(tempo) = from_meta {
-            return tempo;
-        }
-        let song = self.xml("Song/song.xml");
-        let song = song.as_deref().and_then(|t| parse(t).ok());
-        song.and_then(|s| elements(s.root_element()).find_map(|e| num(attr(e, "tempo")))).unwrap_or(120.0)
+    /// The last tempo the metainfo gives, if it reads as a number.
+    fn meta_tempo(&mut self) -> Option<f64> {
+        let meta = self.xml("metainfo.xml")?;
+        let meta = parse(&meta).ok()?;
+        elements(meta.root_element())
+            .skip(1)
+            .filter(|e| id(*e) == "Media:Tempo")
+            .last()
+            .and_then(|e| num(attr(e, "value")))
     }
 
     /// The stored plugin states, each named after its file and the folder it's in (the plugin's name). A state whose
     /// bytes don't come out whole is left out, not the rest with it.
     pub fn presets(&mut self) -> Vec<PresetBlob> {
         let mut presets = Vec::new();
-        for i in 0..self.names.len() {
-            let Some(full) = self.names.get(i) else { continue };
-            let name = entry_name(full);
+        for (i, full) in self.names.iter().enumerate() {
+            let name = paths::entry_name(full);
             let ext = paths::extension(name);
             if !PRESET_EXTENSIONS.iter().any(|x| x.eq_ignore_ascii_case(ext)) {
                 continue;
             }
-            let parts: Vec<&str> = full.split('/').collect();
-            let folder = if parts.len() > 1 { parts.get(parts.len() - 2).copied().unwrap_or_default() } else { "" };
-            let (stem, ext, folder) = (paths::stem(name).to_owned(), ext.to_owned(), folder.to_owned());
+            // The folder it's in, the one before its name ("" at the top).
+            let folder = full.rsplit('/').nth(1).unwrap_or_default();
             let mut data = Vec::new();
             let Ok(mut entry) = self.zip.by_index(i) else { continue };
             if entry.read_to_end(&mut data).is_err() {
                 continue;
             }
-            presets.push(PresetBlob::new(&stem, &folder, ext, data));
+            presets.push(PresetBlob::new(paths::stem(name), folder, ext.to_owned(), data));
         }
         presets
     }
@@ -258,11 +267,6 @@ impl<'a> Song<'a> {
 /// Whether a zip entry is a stored plugin state, by its ending.
 fn is_preset(name: &str) -> bool {
     PRESET_EXTENSIONS.iter().any(|x| plugins::ends_with_ignore_case(name, x))
-}
-
-/// A zip entry's own name, without its folders (as .NET's `ZipArchiveEntry.Name`).
-fn entry_name(full: &str) -> &str {
-    full.rsplit(['/', if cfg!(windows) { '\\' } else { '/' }]).next().unwrap_or(full)
 }
 
 /// A plugin from Studio One's note of it, with its id as the plugin scanner writes it.
@@ -321,8 +325,10 @@ fn format_of(e: Node<'_, '_>, vendor: &str) -> &'static str {
     if vendor.to_lowercase().contains("presonus") { "Native" } else { "" }
 }
 
+/// The XML parsed, a DOCTYPE allowed as .NET's `XElement.Parse` allows it (roxmltree would refuse the whole file).
 fn parse(text: &str) -> Result<roxmltree::Document<'_>, roxmltree::Error> {
-    roxmltree::Document::parse(text)
+    let options = roxmltree::ParsingOptions { allow_dtd: true, ..roxmltree::ParsingOptions::default() };
+    roxmltree::Document::parse_with_options(text, options)
 }
 
 /// An element and every element inside it, in the order they're written.
@@ -450,6 +456,17 @@ mod tests {
             without_prefixes(r#"<x:Song><Attributes x:id="a" name="b"/></x:Song>"#),
             r#"<Song><Attributes x_id="a" name="b"/></Song>"#
         );
+    }
+
+    #[test]
+    fn a_doctype_doesnt_stop_the_xml_parsing() {
+        assert!(parse(r#"<?xml version="1.0"?><!DOCTYPE Song><Song/>"#).is_ok());
+    }
+
+    #[test]
+    fn a_vst2_id_is_read_from_hex_digits_only() {
+        assert_eq!(plugins::vst2_id_in("5653544651327066616266696C746572").as_deref(), Some("FQ2p"));
+        assert_eq!(plugins::vst2_id_in("565354+51327066616266696C7465721"), None);
     }
 
     #[test]
