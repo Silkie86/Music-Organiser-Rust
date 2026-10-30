@@ -31,13 +31,15 @@ jobs:
       - name: Linux libraries for the window
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libwayland-dev
-      - name: Launcher script parses in Windows PowerShell 5.1
+      - name: Launcher scripts parse in Windows PowerShell 5.1
         if: runner.os == 'Windows'
         shell: powershell
         run: |
           $errors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile("$PWD\tools\dev\run-latest.ps1", [ref]$null, [ref]$errors) | Out-Null
-          if ($errors) { $errors | ForEach-Object { Write-Host $_ }; exit 1 }
+          foreach ($script in 'run-latest.ps1', 'twin-test.ps1') {
+            [System.Management.Automation.Language.Parser]::ParseFile("$PWD\tools\dev\$script", [ref]$null, [ref]$errors) | Out-Null
+            if ($errors) { $errors | ForEach-Object { Write-Host $_ }; exit 1 }
+          }
       - name: Format
         if: runner.os == 'Linux'
         run: |
@@ -71,3 +73,30 @@ jobs:
         with:
           name: screenshots
           path: screenshots/*.png
+
+  # The twin test (spec 11.2): the C# app's readers, built from Silkie86/Music-Organiser, and the Rust ones read the
+  # test files; any difference not already judged in crates/mo-formats/DIFFERENCES.md (tools/twin/expected.txt) fails.
+  twin:
+    name: Twin test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: Silkie86/Music-Organiser
+          # The C# app as the Rust readers were last measured against; moved on purpose, with expected.txt.
+          ref: 4515ce8533eabff9669719d784834f0d1f77d59a
+          path: old
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Write the test files
+        run: MO_TWIN_FIXTURES="$RUNNER_TEMP/twin" cargo test -p mo-formats --test twin_fixtures
+      - name: Build the C# half
+        run: >
+          dotnet build tools/twin/cs -c Release -o "$RUNNER_TEMP/twin-cs" -p:MoOldRepo="$GITHUB_WORKSPACE/old"
+          -p:MoBuildNative=false -p:MoBuildBitwig=false
+      - name: Both apps read the test files
+        run: cargo run -p mo-twin -- run --cs "$RUNNER_TEMP/twin-cs/twin-cs.dll" "$RUNNER_TEMP/twin" --expect tools/twin/expected.txt

@@ -3,6 +3,9 @@
 The C# readers are the guide, not the answer (CLAUDE.md). Each difference found is listed here and judged: **better**
 (the Rust reader is right and C# was wrong), **not yet** (still to port) or **bug** (to fix in Rust).
 
+The twin test (`tools/twin`) finds them: CI runs it on the test files, and `tools\dev\Twin test.cmd` on the whole
+library.
+
 ## FL Studio
 
 | What | C# | Rust | Judged |
