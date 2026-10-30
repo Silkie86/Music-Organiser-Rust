@@ -161,9 +161,15 @@ impl Clip {
                     0xc => self.program(key.0, key.1, ((w1 >> 24) & 0x7f) as u8),
                     _ => {
                         let index = (w0 & 0xff) as u8;
+                        // The registered and assignable controllers carry a bank and an index where a note has its key.
+                        let bank_index = (((w0 >> 8) & 0x7f) as u8, (w0 & 0x7f) as u8);
                         let kind = match status {
                             0x0 => ControllerKind::NoteRegistered(key.2, index),
                             0x1 => ControllerKind::NoteAssignable(key.2, index),
+                            0x2 => ControllerKind::Registered(bank_index.0, bank_index.1),
+                            0x3 => ControllerKind::Assignable(bank_index.0, bank_index.1),
+                            0x4 => ControllerKind::RelativeRegistered(bank_index.0, bank_index.1),
+                            0x5 => ControllerKind::RelativeAssignable(bank_index.0, bank_index.1),
                             0x6 => ControllerKind::NotePitchBend(key.2),
                             0xa => ControllerKind::KeyPressure(key.2),
                             0xb => ControllerKind::Control(key.2),

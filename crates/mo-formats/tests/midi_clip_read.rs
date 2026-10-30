@@ -167,6 +167,16 @@ fn controllers_pitch_bend_and_pressure_are_kept_at_32_bits_with_the_channels_not
     b.extend([0x4060_0000 | 60 << 8, 0x9000_0000]);
     b.push(dc(0));
     b.extend([0x4000_0000 | 60 << 8 | 3, 0xffff_ffff]);
+    // MIDI 2.0's registered and assignable controllers: a pitch bend range of 12 (bank 0, index 0), an assignable
+    // one, and a step down of 1 to each.
+    b.push(dc(0));
+    b.extend([0x4020_0000, 12 << 25]);
+    b.push(dc(0));
+    b.extend([0x4030_0000 | 5 << 8 | 9, 0x4000_0000]);
+    b.push(dc(0));
+    b.extend([0x4040_0000 | 1 << 8 | 2, u32::MAX]);
+    b.push(dc(0));
+    b.extend([0x4050_0000 | 3 << 8 | 4, u32::MAX]);
     // MIDI 1.0: pitch bend all the way up, a mod wheel at 64 and channel pressure, scaled up by MIDI 2.0's rule.
     b.push(dc(10));
     b.push(midi1(0, 0xe0, 0x7f, 0x7f));
@@ -188,6 +198,10 @@ fn controllers_pitch_bend_and_pressure_are_kept_at_32_bits_with_the_channels_not
             c(10, ControllerKind::Control(74), 0x1234_5678),
             c(20, ControllerKind::NotePitchBend(60), 0x9000_0000),
             c(20, ControllerKind::NoteRegistered(60, 3), 0xffff_ffff),
+            c(20, ControllerKind::Registered(0, 0), 12 << 25),
+            c(20, ControllerKind::Assignable(5, 9), 0x4000_0000),
+            c(20, ControllerKind::RelativeRegistered(1, 2), u32::MAX),
+            c(20, ControllerKind::RelativeAssignable(3, 4), u32::MAX),
             c(30, ControllerKind::PitchBend, u32::MAX),
             c(30, ControllerKind::Control(1), 0x8000_0000),
             c(30, ControllerKind::ChannelPressure, scale_up(100, 7, 32)),
@@ -201,7 +215,8 @@ fn midi_2_scaling_keeps_the_bottom_middle_and_top_and_gives_each_value_back() {
         assert_eq!(scale_up(0, bits, to), 0);
         assert_eq!(scale_up(1 << (bits - 1), bits, to), 1 << (to - 1));
         assert_eq!(u64::from(scale_up((1 << bits) - 1, bits, to)), (1u64 << to) - 1);
-        for v in 0..(1u32 << bits).min(1 << 14) {
+        // Every value, both sides of the middle, where the bits are repeated.
+        for v in 0..1u32 << bits {
             assert_eq!(scale_up(v, bits, to) >> (to - bits), v);
         }
     }

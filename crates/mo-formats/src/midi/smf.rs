@@ -5,6 +5,7 @@ use std::io;
 use std::path::Path;
 
 use super::{Held, MidiPart};
+use crate::case::eq_ignore_case;
 use crate::fl::events::byte_at as byte;
 use crate::model::{NoteAttribute, NoteEvent, velocity};
 use crate::paths;
@@ -239,27 +240,6 @@ fn text(b: &[u8]) -> String {
 
 fn i32_at(d: &[u8], at: usize) -> i32 {
     i32::from_be_bytes([byte(d, at), byte(d, at + 1), byte(d, at + 2), byte(d, at + 3)])
-}
-
-/// Equal letter case aside, as .NET's `OrdinalIgnoreCase` compares: letter by letter, each by its one-letter capital
-/// (Unicode's simple mapping, where Rust's `to_uppercase` gives the full one).
-fn eq_ignore_case(a: &str, b: &str) -> bool {
-    let upper = |c: char| match c {
-        // .NET keeps these two as they are, where Unicode makes them I and S.
-        '\u{131}' | '\u{17f}' => c,
-        // Greek small letters with an iota below: their one-letter capital is 8 on (9 for the three on their own),
-        // where the full capital is two letters.
-        '\u{1f80}'..='\u{1faf}' if u32::from(c) & 8 == 0 => char::from_u32(u32::from(c) + 8).unwrap_or(c),
-        '\u{1fb3}' | '\u{1fc3}' | '\u{1ff3}' => char::from_u32(u32::from(c) + 9).unwrap_or(c),
-        _ => {
-            let mut u = c.to_uppercase();
-            match (u.next(), u.next()) {
-                (Some(one), None) => one,
-                _ => c,
-            }
-        }
-    };
-    a.chars().map(upper).eq(b.chars().map(upper))
 }
 
 #[cfg(test)]
