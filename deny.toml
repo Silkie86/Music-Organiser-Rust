@@ -29,8 +29,8 @@ allow = [
     "CC0-1.0",
     "Unlicense",
     "Unicode-3.0",
-    # Slint, the screens: free for a desktop app as long as the app says it's made with Slint (still to settle with
-    # Solomon; the other choice is GPL-3.0).
+    # Slint, the screens: free for a desktop app as long as the app says it's made with Slint (Solomon chose this
+    # over GPL-3.0, 2026-10-30; the credit goes in the About box).
     "LicenseRef-Slint-Royalty-free-2.0",
 ]
 
