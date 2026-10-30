@@ -554,7 +554,7 @@ pub fn extract_midi(doc: &Document, names: &TrackNames) -> Vec<MidiClip> {
                 start: (start.max(0.0) * ppq).round_ties_even() as i64,
                 length: ((length * ppq).round_ties_even() as i64).max(1),
                 key: (pitch as i32).clamp(0, 127) as u8,
-                velocity: ((velocity * 127.0).round_ties_even() as i32).clamp(1, 127) as u8,
+                velocity: crate::model::velocity::from_unit(velocity),
                 muted: false,
                 step: false,
             });

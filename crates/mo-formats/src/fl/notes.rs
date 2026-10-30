@@ -5,7 +5,7 @@
 use std::collections::HashSet;
 
 use super::events::{u16_at, u32_at};
-use crate::model::NoteEvent;
+use crate::model::{NoteEvent, velocity};
 
 /// The size of the note records in an event, by FL's version (rule 9): 24 bytes from FL 9, 20 bytes in FL 4 to 8.
 /// Notes the reader made from old step sequencer dots are always 24. Without a version, or in an FL 4 to 8 save whose
@@ -46,8 +46,8 @@ pub fn decode(data: &[u8], size: usize) -> Vec<(u32, NoteEvent)> {
     data.chunks_exact(size)
         .map(|r| {
             let length = u32_at(r, 8);
-            // FL's velocity is 0 to 128 (100 by default); MIDI's 1 to 127.
-            let velocity = (r[velocity_at] as f64 * 127.0 / 128.0).round_ties_even().clamp(1.0, 127.0) as u8;
+            // FL's velocity is 0 to 128 (100 by default), kept in MIDI 2.0's 16 bits.
+            let velocity = velocity::from_unit(r[velocity_at] as f64 / 128.0);
             let note = NoteEvent {
                 start: u32_at(r, 0) as i64,
                 length: length.max(1) as i64,
@@ -102,8 +102,9 @@ mod tests {
         let mut data = note(0, 2, 0, 0x80 | 64, 128, 24);
         data[19] = 0x20;
         let (channel, n) = decode(&data, 24)[0];
-        assert_eq!((channel, n.key, n.velocity, n.length, n.step, n.muted), (2, 64, 127, 1, true, true));
-        assert_eq!(decode(&note(0, 0, 10, 60, 64, 24), 24)[0].1.velocity, 64, "63.5 rounds to the even 64");
-        assert_eq!(decode(&note(0, 0, 10, 60, 0, 24), 24)[0].1.velocity, 1);
+        assert_eq!((channel, n.key, n.velocity7(), n.length, n.step, n.muted), (2, 64, 127, 1, true, true));
+        assert_eq!(decode(&note(0, 0, 10, 60, 64, 24), 24)[0].1.velocity, 32768, "half of 128 is half of 16 bits");
+        assert_eq!(decode(&note(0, 0, 10, 60, 64, 24), 24)[0].1.velocity7(), 64, "63.5 rounds to the even 64");
+        assert_eq!(decode(&note(0, 0, 10, 60, 0, 24), 24)[0].1.velocity7(), 1);
     }
 }

@@ -109,19 +109,59 @@ impl ProjectInfo {
     }
 }
 
-/// A note, in ticks at its clip's or song's PPQ.
+/// A note, in ticks at its clip's or song's PPQ. Its velocity is MIDI 2.0's (rule 22): see [`velocity`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NoteEvent {
     pub start: i64,
     pub length: i64,
     /// MIDI key, 0 to 127 (60 is C5 in FL, C4 elsewhere).
     pub key: u8,
-    /// 1 to 127.
-    pub velocity: u8,
+    /// MIDI 2.0's 16-bit velocity, 0 to 65535. [`NoteEvent::velocity7`] is MIDI 1.0's.
+    pub velocity: u16,
     /// Muted in the piano roll, so it doesn't play (FL Studio).
     pub muted: bool,
     /// Entered in FL's step sequencer: it has no length of its own and FL plays it until its sound ends.
     pub step: bool,
+}
+
+impl NoteEvent {
+    /// The velocity as MIDI 1.0 has it, 1 to 127: only for a MIDI 1.0 file, port or DAW, at the last step.
+    pub fn velocity7(&self) -> u8 {
+        velocity::to_7(self.velocity)
+    }
+}
+
+/// Note velocities in MIDI 2.0's 16 bits (rule 22), and to and from MIDI 1.0's 7.
+pub mod velocity {
+    /// The loudest velocity.
+    pub const MAX: u16 = u16::MAX;
+
+    /// A velocity given as a share of the loudest (Bitwig's 0 to 1, FL's 0 to 128 over 128).
+    pub fn from_unit(share: f64) -> u16 {
+        (share * MAX as f64).round_ties_even().clamp(0.0, MAX as f64) as u16
+    }
+
+    /// A MIDI 1.0 velocity in 16 bits, by MIDI 2.0's rule (the Universal MIDI Packet spec's "min-center-max"
+    /// scaling): 0 stays 0, 64 is the middle, 127 is the loudest, and every value comes back from [`to_7`] as it was.
+    pub fn from_7(v: u8) -> u16 {
+        let v = v.min(127) as u16;
+        let mut out = v << 9;
+        if v <= 64 {
+            return out;
+        }
+        // Above the middle, the low six bits are repeated down into the new ones.
+        let mut repeat = (v & 0x3f) << 3;
+        while repeat != 0 {
+            out |= repeat;
+            repeat >>= 6;
+        }
+        out
+    }
+
+    /// The MIDI 1.0 velocity nearest a 16-bit one, never 0 (which MIDI 1.0 reads as the note ending).
+    pub fn to_7(v: u16) -> u8 {
+        ((v as f64 * 127.0 / MAX as f64).round_ties_even() as u8).max(1)
+    }
 }
 
 /// A clip of notes, by track (or channel) name in the order they first appear.
@@ -169,6 +209,21 @@ pub struct MidiChannel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn midi_1_velocities_come_back_from_16_bits_as_they_were() {
+        for v in 1..=127u8 {
+            assert_eq!(velocity::to_7(velocity::from_7(v)), v);
+        }
+        assert_eq!((velocity::from_7(0), velocity::from_7(64), velocity::from_7(127)), (0, 32768, 65535));
+        assert_eq!(velocity::to_7(0), 1);
+        assert_eq!((velocity::from_unit(1.0), velocity::from_unit(1.5), velocity::from_unit(-1.0)), (65535, 65535, 0));
+        // FL's 0 to 128 gives the same MIDI 1.0 velocity the C# app gives, through 16 bits.
+        for raw in 0..=128u32 {
+            let csharp = (raw as f64 * 127.0 / 128.0).round_ties_even().clamp(1.0, 127.0) as u8;
+            assert_eq!(velocity::to_7(velocity::from_unit(raw as f64 / 128.0)), csharp, "{raw}");
+        }
+    }
 
     #[test]
     fn dedupe_keeps_the_first_of_each_and_drops_blanks() {

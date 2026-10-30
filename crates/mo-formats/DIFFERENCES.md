@@ -37,3 +37,4 @@ tests don't have.
 | A folder beside the project that can't be opened (in `samples`, say) | The whole project fails to read. | That folder is skipped. | Better |
 | A folder linked into `samples` that links back to itself | Can go round it again and again. | Each folder is listed once, wherever the links lead. | Better |
 | The order of hardware names | .NET's culture-aware order (which differs between Windows and Linux). | Close to it: spaces and punctuation before digits, digits before letters, letter case aside. Only names that differ just in punctuation could come out in another order. | Same for real names |
+| A note's velocity as a MIDI 1.0 value (0 to 127) | Bitwig's 0-to-1 velocity rounded straight to 0 to 127. | Kept at MIDI 2.0's 16 bits, then rounded to 0 to 127 when a MIDI 1.0 value is wanted. About 3 in 10,000 velocities come out 1 apart (rounding twice); Bitwig's own whole-step velocities are the same. | Better (rule 22) |

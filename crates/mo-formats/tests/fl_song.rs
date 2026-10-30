@@ -9,7 +9,9 @@ use common::*;
 use mo_formats::fl::{self, events, song};
 use mo_formats::{MidiChannel, NoteEvent, SampleUse};
 
-fn note(start: i64, length: i64, key: u8, velocity: u8) -> NoteEvent {
+/// A note as read from FL, its velocity as FL writes it (0 to 128).
+fn note(start: i64, length: i64, key: u8, fl_velocity: u8) -> NoteEvent {
+    let velocity = mo_formats::velocity::from_unit(fl_velocity as f64 / 128.0);
     NoteEvent { start, length, key, velocity, muted: false, step: false }
 }
 
@@ -30,7 +32,7 @@ fn extracts_patterns_as_midi_clips() {
     let intro = &clips[0];
     assert_eq!(intro.ppq, 96);
     assert_eq!(intro.tracks.iter().map(|t| t.0.as_str()).collect::<Vec<_>>(), ["Lead", "Kick"]);
-    assert_eq!(intro.tracks[0].1[1], note(96, 96, 64, 127));
+    assert_eq!(intro.tracks[0].1[1], note(96, 96, 64, 128));
     assert_eq!(clips[1].tracks.len(), 1);
     assert_eq!(clips[1].tracks[0].0, "Bass");
 }
@@ -57,7 +59,7 @@ fn places_patterns_where_the_playlist_puts_them() {
     let playlist = [playlist_item(0, 2, 384, -1), playlist_item(768, 1, 192, 96)].concat();
     let channels = channels(&fl_studio_project_with(Some(&playlist)));
     assert_eq!(channels["Bass"].notes.iter().map(|n| n.start).collect::<Vec<_>>(), [0]);
-    assert_eq!(channels["Lead"].notes, [note(768, 96, 64, 127)]);
+    assert_eq!(channels["Lead"].notes, [note(768, 96, 64, 128)]);
     assert!(!channels.contains_key("Kick"), "its note sits before the offset");
 }
 
@@ -152,7 +154,7 @@ fn reads_fl_8_and_older_20_byte_notes_when_the_pattern_is_also_a_whole_number_of
         let clips = song::extract_midi(&flp);
         let kick = &clips[0].tracks[0].1;
         assert_eq!(kick.iter().map(|n| n.start).collect::<Vec<_>>(), [0, 24, 48, 72, 96, 120], "{version:?}");
-        assert!(kick.iter().all(|n| (n.length, n.velocity) == (24, 127)), "{version:?}");
+        assert!(kick.iter().all(|n| (n.length, n.velocity7()) == (24, 127)), "{version:?}");
         assert_eq!(kick.iter().map(|n| n.key).collect::<Vec<_>>(), [36, 37, 38, 39, 40, 41]);
         assert_eq!(song::read_song(&flp).channels[0].notes.len(), 6);
         assert_eq!(fl::read_bytes(&bytes).details["Notes"], "6", "{version:?}");
