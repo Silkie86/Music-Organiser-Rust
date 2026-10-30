@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 
-use super::events::{u16_at, u32_at};
+use super::events::{byte_at, u16_at, u32_at};
 use crate::model::{NoteEvent, velocity};
 
 /// The size of the note records in an event, by FL's version (rule 9): 24 bytes from FL 9, 20 bytes in FL 4 to 8.
@@ -47,13 +47,13 @@ pub fn decode(data: &[u8], size: usize) -> Vec<(u32, NoteEvent)> {
         .map(|r| {
             let length = u32_at(r, 8);
             // FL's velocity is 0 to 128 (100 by default), kept in MIDI 2.0's 16 bits.
-            let velocity = velocity::from_unit(r[velocity_at] as f64 / 128.0);
+            let velocity = velocity::from_unit(byte_at(r, velocity_at) as f64 / 128.0);
             let note = NoteEvent {
                 start: u32_at(r, 0) as i64,
                 length: length.max(1) as i64,
                 key: (u16_at(r, 12) & 0x7F) as u8,
                 velocity,
-                muted: size == 24 && r[19] & 0x20 != 0,
+                muted: size == 24 && byte_at(r, 19) & 0x20 != 0,
                 step: length == 0,
             };
             (u16_at(r, 6) as u32, note)

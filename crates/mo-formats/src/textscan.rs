@@ -23,31 +23,18 @@ pub fn is_plugin_path(s: &str) -> bool {
 pub fn strings(data: &[u8]) -> Vec<String> {
     let readable = |b: u8| (0x20..=0x7e).contains(&b);
     let mut out = Vec::new();
-    let mut run = 0;
-    for (i, &b) in data.iter().enumerate() {
-        if readable(b) {
-            run += 1;
-            continue;
-        }
-        if run >= 4 {
-            out.push(String::from_utf8_lossy(&data[i - run..i]).into_owned());
-        }
-        run = 0;
-    }
-    if run >= 4 {
-        out.push(String::from_utf8_lossy(&data[data.len() - run..]).into_owned());
-    }
+    out.extend(
+        data.split(|&b| !readable(b)).filter(|run| run.len() >= 4).map(|run| String::from_utf8_lossy(run).into_owned()),
+    );
 
     // A letter then a zero, four or more times, starting anywhere (even an odd byte).
     let mut i = 0;
-    while i + 1 < data.len() {
-        let mut end = i;
-        while end + 1 < data.len() && readable(data[end]) && data[end + 1] == 0 {
-            end += 2;
-        }
-        if end - i >= 8 {
-            out.push(data[i..end].iter().step_by(2).map(|&b| b as char).collect());
-            i = end;
+    while let Some(rest) = data.get(i..).filter(|rest| rest.len() > 1) {
+        let pairs = rest.as_chunks::<2>().0;
+        let n = pairs.iter().take_while(|&&[b, zero]| readable(b) && zero == 0).count();
+        if n >= 4 {
+            out.push(pairs.iter().take(n).map(|&[b, _]| b as char).collect());
+            i += 2 * n;
         } else {
             i += 1;
         }

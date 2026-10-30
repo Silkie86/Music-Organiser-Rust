@@ -45,7 +45,7 @@ pub fn encode(doc: &Document, zip: Option<&[u8]>) -> Result<Vec<u8>, String> {
 
     let zip = match zip {
         Some(z) => z,
-        None if doc.has_zip => &doc.raw[doc.zip_offset..],
+        None if doc.has_zip => doc.raw.get(doc.zip_offset..).unwrap_or_default(),
         None => &[],
     };
     let body_offset = HEADER + meta.len();
@@ -126,7 +126,8 @@ impl<'a> Writer<'a> {
                 return Err("objects nested too deeply".into());
             }
             self.count += 1;
-            self.numbers[o.0 as usize] = self.count;
+            *self.numbers.get_mut(o.0 as usize).ok_or_else(|| format!("an object that isn't there: {o:?}"))? =
+                self.count;
             // A bare reference to an object not reached yet (its first home was edited away) is where it's written
             // now. Last first, so the first comes off the list next.
             let start = todo.len();
@@ -138,7 +139,9 @@ impl<'a> Writer<'a> {
                     }
                 }
             }
-            todo[start..].reverse();
+            if let Some(added) = todo.get_mut(start..) {
+                added.reverse();
+            }
         }
         Ok(())
     }
@@ -386,18 +389,17 @@ impl Copying<'_> {
     fn copy(&mut self, doc: &mut Document, original: ObjId) -> ObjId {
         let mut todo = Vec::new();
         let first = self.start(doc, original, &mut todo);
-        while let Some(o) = todo.pop() {
+        while let Some((o, copy)) = todo.pop() {
             let fields = doc.obj(o).fields.clone();
             let fields =
                 fields.into_iter().map(|f| Field { id: f.id, value: self.value(doc, f.value, &mut todo) }).collect();
-            let copy = self.copies[&o];
             doc.obj_mut(copy).fields = fields;
         }
         first
     }
 
     /// The copy of `o`, made empty the first time and filled in when it comes off `todo`.
-    fn start(&mut self, doc: &mut Document, o: ObjId, todo: &mut Vec<ObjId>) -> ObjId {
+    fn start(&mut self, doc: &mut Document, o: ObjId, todo: &mut Vec<(ObjId, ObjId)>) -> ObjId {
         if let Some(&done) = self.copies.get(&o) {
             return done;
         }
@@ -405,11 +407,11 @@ impl Copying<'_> {
         let parent = doc.obj(o).parent.and_then(|(p, f)| self.copies.get(&p).map(|&c| (c, f)));
         let copy = doc.add(Object { parent, ..Object::new(doc.obj(o).class) });
         self.copies.insert(o, copy);
-        todo.push(o);
+        todo.push((o, copy));
         copy
     }
 
-    fn slot(&mut self, doc: &mut Document, s: Slot, todo: &mut Vec<ObjId>) -> Slot {
+    fn slot(&mut self, doc: &mut Document, s: Slot, todo: &mut Vec<(ObjId, ObjId)>) -> Slot {
         match doc.resolve(s) {
             None => s,
             Some(t) if self.owned.contains(&t) => Slot::Obj(self.start(doc, t, todo)),
@@ -417,7 +419,7 @@ impl Copying<'_> {
         }
     }
 
-    fn value(&mut self, doc: &mut Document, v: Value, todo: &mut Vec<ObjId>) -> Value {
+    fn value(&mut self, doc: &mut Document, v: Value, todo: &mut Vec<(ObjId, ObjId)>) -> Value {
         match v {
             Value::Obj(s) => Value::Obj(self.slot(doc, s, todo)),
             Value::BareRef(s) => Value::BareRef(self.slot(doc, s, todo)),

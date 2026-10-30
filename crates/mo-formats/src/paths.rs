@@ -10,17 +10,15 @@ fn is_separator(c: char) -> bool {
 
 /// Rooted on this OS (.NET's `Path.IsPathRooted`): `/x` everywhere, and `\x` or `C:x` on Windows.
 pub fn is_rooted(p: &str) -> bool {
-    let b = p.as_bytes();
     p.starts_with('/')
-        || (cfg!(windows) && (p.starts_with('\\') || (b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':')))
+        || (cfg!(windows) && (p.starts_with('\\') || matches!(p.as_bytes(), [d, b':', ..] if d.is_ascii_alphabetic())))
 }
 
 /// Rooted on this OS, or a Windows drive or network path, wherever this runs (the files come from Windows).
 pub fn is_absolute(p: &str) -> bool {
-    let b = p.as_bytes();
     is_rooted(p)
         || p.starts_with(r"\\")
-        || (b.len() > 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/'))
+        || matches!(p.as_bytes(), [d, b':', b'\\' | b'/', ..] if d.is_ascii_alphabetic())
 }
 
 /// The last part of a path written with either separator.

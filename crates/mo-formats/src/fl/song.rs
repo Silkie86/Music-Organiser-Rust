@@ -254,7 +254,7 @@ impl PlaylistTracks {
             EV_TRACK_DATA if self.arrangements <= 1 => {
                 self.last = (e.data.len() > 12).then(|| e.int());
                 if let Some(n) = self.last {
-                    self.tracks.insert(n, (FlTrack { number: n, name: String::new() }, e.data[12] == 0));
+                    self.tracks.insert(n, (FlTrack { number: n, name: String::new() }, byte_at(&e.data, 12) == 0));
                 }
             }
             EV_TRACK_NAME if self.arrangements <= 1 => {
@@ -296,13 +296,13 @@ pub(super) struct PlaylistItem {
     pub slot: i64,
 }
 
-/// A clip's start offset, written as a float or an integer depending on FL's version; none is 0.
-fn item_offset(d: &[u8]) -> f64 {
-    let f = f32::from_le_bytes([d[0], d[1], d[2], d[3]]);
+/// A clip's start offset at `at`, written as a float or an integer depending on FL's version; none is 0.
+fn item_offset(d: &[u8], at: usize) -> f64 {
+    let f = f32_at(d, at);
     if (1.0..1e9).contains(&f) {
         return f as f64;
     }
-    let i = i32_at(d, 0);
+    let i = i32_at(d, at);
     if i > 0 && i < 1_000_000_000 { i as f64 } else { 0.0 }
 }
 
@@ -322,7 +322,7 @@ pub(super) fn playlist_items(d: &[u8]) -> Vec<PlaylistItem> {
             index: u16_at(r, 6) as u32,
             at: u32_at(r, 0) as i64,
             length: u32_at(r, 8) as i64,
-            offset: item_offset(&r[24..]),
+            offset: item_offset(r, 24),
             muted: u16_at(r, 18) & 0x2000 != 0,
             slot: u16_at(r, 12) as i64,
         }));
@@ -344,7 +344,7 @@ pub(super) fn playlist_items(d: &[u8]) -> Vec<PlaylistItem> {
                 index: PATTERN_BASE + 999 - row,
                 at: u32_at(r, 0) as i64,
                 length: u32_at(r, 8) as i64,
-                offset: item_offset(&r[24..]),
+                offset: item_offset(r, 24),
                 muted: u16_at(r, 18) & 0x2000 != 0,
                 slot: row as i64,
             });
@@ -372,7 +372,7 @@ pub(super) fn playlist_items(d: &[u8]) -> Vec<PlaylistItem> {
                 index,
                 at: u32_at(r, 0) as i64,
                 length: u32_at(r, 8) as i64,
-                offset: item_offset(&r[20..]),
+                offset: item_offset(r, 20),
                 muted: false,
                 slot: 0,
             });
@@ -429,20 +429,23 @@ fn place_clips(
         let first = starts.partition_point(|&(start, _)| start < from);
         let end = starts.partition_point(|&(start, _)| start < from.saturating_add(length));
         // In file order again: channels in the order their first note appears, as the C# reader groups them.
-        let mut hits: Vec<usize> = starts[first..end.max(first)].iter().map(|&(_, i)| i).collect();
+        let mut hits: Vec<usize> =
+            starts.get(first..end.max(first)).unwrap_or_default().iter().map(|&(_, i)| i).collect();
         hits.sort_unstable();
         let mut groups: Vec<(u32, Vec<NoteEvent>)> = Vec::new();
         let mut group_of: HashMap<u32, usize> = HashMap::new();
-        for &(channel, n) in hits.into_iter().map(|i| &in_pattern[i]) {
+        for &(channel, n) in hits.into_iter().filter_map(|i| in_pattern.get(i)) {
             let g = *group_of.entry(channel).or_insert_with(|| {
                 groups.push((channel, Vec::new()));
                 groups.len() - 1
             });
-            groups[g].1.push(NoteEvent {
-                start: n.start - from,
-                length: n.length.min(from.saturating_add(length) - n.start),
-                ..n
-            });
+            if let Some((_, notes)) = groups.get_mut(g) {
+                notes.push(NoteEvent {
+                    start: n.start - from,
+                    length: n.length.min(from.saturating_add(length) - n.start),
+                    ..n
+                });
+            }
         }
         for (channel, mut notes) in groups {
             notes.sort_by_key(|n| (n.start, n.key));
