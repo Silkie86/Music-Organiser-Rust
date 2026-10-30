@@ -20,6 +20,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
+use mo_formats::midi::smf;
 use rayon::prelude::*;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -98,7 +99,9 @@ fn run(args: &[String]) -> Result<bool, String> {
     files.sort();
     files.dedup();
     if files.is_empty() {
-        return Err("No FL Studio, Bitwig or Studio One projects (.flp, .bwproject, .song) there.".into());
+        return Err(
+            "No FL Studio, Bitwig or Studio One projects or MIDI files (.flp, .bwproject, .song, .mid) there.".into()
+        );
     }
 
     let helper = o.cs.clone().ok_or("Say where the C# helper is (--cs).")?;
@@ -162,9 +165,10 @@ fn run(args: &[String]) -> Result<bool, String> {
 
     let count = |ext: &str| files.iter().filter(|f| f.extension().is_some_and(|e| e.eq_ignore_ascii_case(ext))).count();
     let (bitwig, studio_one) = (count("bwproject"), count("song"));
+    let midi = files.iter().filter(|f| smf::is_midi_path(&f.to_string_lossy())).count();
     println!(
-        "Twin test: {} FL Studio, {bitwig} Bitwig and {studio_one} Studio One project(s).",
-        files.len() - bitwig - studio_one
+        "Twin test: {} FL Studio, {bitwig} Bitwig and {studio_one} Studio One project(s), {midi} MIDI file(s).",
+        files.len() - bitwig - studio_one - midi
     );
     println!("  {same} read the same in both apps.");
     println!("  {} differ. Kinds of difference, by how many projects have each:", files.len() - same);
@@ -199,14 +203,16 @@ fn run(args: &[String]) -> Result<bool, String> {
     Ok(new.is_empty() && gone.is_empty())
 }
 
-/// The FL Studio, Bitwig and Studio One projects in a folder (and the folders in it), or the file itself.
+/// The FL Studio, Bitwig and Studio One projects and MIDI files in a folder (and the folders in it), or the file itself.
 fn collect(path: &Path, out: &mut Vec<PathBuf>) {
     if path.is_dir() {
         let Ok(entries) = std::fs::read_dir(path) else { return };
         for entry in entries.flatten() {
             collect(&entry.path(), out);
         }
-    } else if path.extension().is_some_and(|e| ["flp", "bwproject", "song"].iter().any(|x| e.eq_ignore_ascii_case(x))) {
+    } else if path.extension().is_some_and(|e| ["flp", "bwproject", "song"].iter().any(|x| e.eq_ignore_ascii_case(x)))
+        || smf::is_midi_path(&path.to_string_lossy())
+    {
         out.push(path.to_path_buf());
     }
 }

@@ -1,12 +1,12 @@
 <#
-  The twin test on the whole library (spec section 11.2): every FL Studio, Bitwig and Studio One project in the app's folders is
-  read by the C# app's readers and the Rust ones, and every difference is listed. It only reads: no project, sample or database
-  is changed, and nothing leaves this PC.
+  The twin test on the whole library (spec section 11.2): every FL Studio, Bitwig and Studio One project and MIDI file
+  in the app's folders is read by the C# app's readers and the Rust ones, and every difference is listed. It only
+  reads: no project, sample, MIDI file or database is changed, and nothing leaves this PC.
 
   It needs both apps' code, as the launchers keep it:
     %LOCALAPPDATA%\MusicOrganiser\run-latest\app        the C# app (Run latest)
     %LOCALAPPDATA%\MusicOrganiser\run-latest-rust\app   the Rust app (this script's own copy)
-  and the folders come from the C# app's library (library.db, opened read-only).
+  and the folders come from the C# app's library and its MIDI page (library.db, opened read-only).
 
   It writes to %LOCALAPPDATA%\MusicOrganiser\logs:
     twin-test-<date>.txt     the summary: counts and field names only, safe to share with Claude
@@ -43,7 +43,7 @@ if (-not $Folders) {
 $Stamp = Get-Date -Format 'yyyy-MM-dd-HHmm'
 $Summary = Join-Path $Logs "twin-test-$Stamp.txt"
 $Report = Join-Path $Logs "twin-report-$Stamp.txt"
-Write-Host "Reading every FL Studio, Bitwig and Studio One project in $($Folders.Count) folder(s) with both apps..."
+Write-Host "Reading every FL Studio, Bitwig and Studio One project and MIDI file in $($Folders.Count) folder(s) with both apps..."
 Push-Location $Rust
 # Cargo writes its progress to stderr, which Windows PowerShell 5.1 takes as an error under 'Stop'.
 $ErrorActionPreference = 'Continue'

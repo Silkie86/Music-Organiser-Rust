@@ -1,5 +1,5 @@
 // The C# half of the twin test. Reads each file named on its input (one path a line) with the C# app's FL Studio,
-// Bitwig or Studio One reader, unchanged, and writes what it finds as one JSON a line, in the same shape as tools/twin/src/rust_side.rs.
+// Bitwig, Studio One or MIDI file reader, unchanged, and writes what it finds as one JSON a line, in the same shape as tools/twin/src/rust_side.rs.
 // Files are read on every core; the lines come out in whatever order they finish, each naming its file.
 // With --roots it lists the library's folders instead (below).
 
@@ -7,7 +7,8 @@ using System.Security.Cryptography;
 using System.Text.Json.Nodes;
 using MusicOrganiser.Core.Parsers;
 
-// `twin-cs --roots <library.db>`: the library's folders, one a line, from the app's database opened read-only.
+// `twin-cs --roots <library.db>`: the library's folders and the MIDI page's, one a line, from the app's database
+// opened read-only.
 if (args is ["--roots", var db])
 {
     using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={db};Mode=ReadOnly");
@@ -18,6 +19,11 @@ if (args is ["--roots", var db])
     // UTF-8 whatever the console's code page, so a folder named in any language comes through whole.
     using var roots = new StreamWriter(Console.OpenStandardOutput(), new System.Text.UTF8Encoding(false));
     while (rows.Read()) roots.WriteLine(rows.GetString(0));
+    rows.Close();
+    // And the MIDI page's folders (a JSON list in the settings), so the MIDI files are read too.
+    command.CommandText = "SELECT value FROM settings WHERE key = 'midi_folders'";
+    if (command.ExecuteScalar() is string json)
+        foreach (var folder in System.Text.Json.JsonSerializer.Deserialize<List<string>>(json) ?? []) roots.WriteLine(folder);
     return;
 }
 
@@ -44,8 +50,26 @@ static JsonObject Dump(string path) => Path.GetExtension(path).ToLowerInvariant(
 {
     ".bwproject" => DumpBitwig(path),
     ".song" => DumpStudioOne(path),
+    _ when MusicOrganiser.Core.Midi.MidiFileReader.IsMidiPath(path) => DumpMidi(path),
     _ => DumpFl(path),
 };
+
+// A MIDI file's parts. A file that isn't one says just "unreadable" in both apps.
+static JsonObject DumpMidi(string path)
+{
+    var o = new JsonObject { ["file"] = path };
+    try
+    {
+        o["parts"] = new JsonArray(MusicOrganiser.Core.Midi.MidiFileReader.Read(path).Select(p => (JsonNode?)new JsonObject
+        {
+            ["name"] = p.Name, ["ppq"] = p.Ppq, ["notes"] = Notes(p.Notes), ["drums"] = p.Drums, ["tempo"] = p.Tempo,
+            ["program"] = p.Program, ["track_name"] = p.TrackName,
+        }).ToArray());
+    }
+    catch (InvalidDataException) { o["error"] = "unreadable"; }
+    catch (Exception e) { o["error"] = $"{e.GetType().Name}: {e.Message}"; }
+    return o;
+}
 
 // What the project list shows, the note clips and the plugin states. A file that isn't a zip can't be read; the two
 // apps word that differently, so both say just "unreadable".
