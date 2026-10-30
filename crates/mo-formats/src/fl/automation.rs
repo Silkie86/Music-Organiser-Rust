@@ -91,7 +91,9 @@ pub(super) fn automation_points(d: &[u8]) -> Vec<FlPoint> {
     for p in d.get(21..).unwrap_or_default().as_chunks::<24>().0.iter().take(count) {
         let (Some(step), Some(value)) = (f64_at(p, 0), f64_at(p, 8)) else { break };
         beat += step;
-        if !beat.is_finite() || beat < 0.0 || !value.is_finite() {
+        // A step back in time is damage, as an endless or unreadable number is: the points before it are kept, so a
+        // curve always runs forward (placing it relies on that).
+        if !beat.is_finite() || beat < 0.0 || step < 0.0 || !value.is_finite() {
             break;
         }
         points.push(FlPoint { beat, value: value.clamp(0.0, 1.0) });
@@ -243,10 +245,12 @@ pub(super) fn place_automation(
     tracks: &PlaylistTracks,
     mixer: &MixerSettings,
     ppq: u16,
-) -> Vec<FlAutomation> {
+) -> (Vec<FlAutomation>, bool) {
     let mut result = Vec::new();
+    let mut cut = false;
+    let mut placed_points = 0usize;
     if ppq == 0 {
-        return result;
+        return (result, cut);
     }
     let ppq = ppq as f64;
     let mut items: Vec<PlaylistItem> = items
@@ -269,6 +273,12 @@ pub(super) fn place_automation(
         let mut placed: Vec<FlPoint> = Vec::new();
         let mut starts = Vec::new();
         for item in placements.get(&clip).into_iter().flatten() {
+            // Each placement is a copy of the curve's points, so a clip placed very many times stops at the limit.
+            placed_points = placed_points.saturating_add(curve.len());
+            if placed_points > super::song::MAX_PLACED_NOTES {
+                cut = true;
+                break;
+            }
             let mut part = cut_curve(
                 curve,
                 item.at as f64 / ppq,
@@ -281,13 +291,22 @@ pub(super) fn place_automation(
             // A clip placed over an earlier placement takes over from where it starts to where it ends; if the
             // earlier one runs on past that, it carries on from there.
             let mut rest = Vec::new();
-            if let (Some(p0), Some(pl)) = (placed.first().copied(), placed.last().copied())
+            if let Some(pl) = placed.last().copied()
                 && pl.beat > first.beat + SAME_BEAT
             {
+                // Only the end of the curve so far is cut again, so a clip placed over and over costs what it
+                // replaces, not the whole curve each time. The curve runs forward, so the points before that end are
+                // the same either way.
                 if pl.beat > last.beat + SAME_BEAT {
-                    rest = cut_curve(&placed, last.beat, last.beat, pl.beat - last.beat, hold);
+                    let tail = placed.get(tail_from(&placed, last.beat)..).unwrap_or_default();
+                    rest = cut_curve(tail, last.beat, last.beat, pl.beat - last.beat, hold);
                 }
-                placed = cut_curve(&placed, p0.beat, p0.beat, first.beat - p0.beat, hold);
+                let k = keep_up_to(&placed, first.beat);
+                let tail = placed.get(k..).unwrap_or_default();
+                let from = tail.first().map_or(first.beat, |p| p.beat);
+                let kept = cut_curve(tail, from, from, first.beat - from, hold);
+                placed.truncate(k);
+                placed.extend(kept);
             }
             // Between clips FL holds the value the last one ended on, then jumps to where the next starts.
             if let Some(&pl) = placed.last()
@@ -315,7 +334,23 @@ pub(super) fn place_automation(
             result.push(FlAutomation { starts, ..moves(&name, target, mixer, placed) });
         }
     }
-    result
+    (result, cut)
+}
+
+/// Where to start cutting a forward-running curve again so that what's found at `beat` is what cutting all of it
+/// finds: the last point well before it (or the start).
+fn tail_from(curve: &[FlPoint], beat: f64) -> usize {
+    curve.partition_point(|p| p.beat < beat - SAME_BEAT).saturating_sub(1)
+}
+
+/// Where to cut a forward-running curve that a clip placed at `beat` takes over from: a point well before it with no
+/// other point on its beat after it (so cutting again from there starts on that same point), or the start.
+fn keep_up_to(curve: &[FlPoint], beat: f64) -> usize {
+    let mut k = tail_from(curve, beat);
+    while k > 0 && curve.get(k + 1).is_some_and(|next| curve.get(k).is_some_and(|p| next.beat <= p.beat + SAME_BEAT)) {
+        k -= 1;
+    }
+    k
 }
 
 /// A channel's on/off (its Channel Rack light) as automation switches it: each point's value holds until the next,
@@ -330,17 +365,26 @@ impl OnOff {
         OnOff { points, ppq: ppq.max(1) as f64 }
     }
 
+    /// How many points come at or before a beat, counting from the first while they do. The points are sorted by the
+    /// tick each is on, so a search skips those on earlier ticks rather than walking every point for every note.
+    fn upto(&self, beat: f64) -> usize {
+        let tick = |b: f64| (b * self.ppq).round_ties_even();
+        let start = self.points.partition_point(|p| tick(p.beat) < tick(beat));
+        let rest = self.points.get(start..).unwrap_or_default();
+        start + rest.iter().take_while(|p| p.beat <= beat + SAME_BEAT).count()
+    }
+
     fn on(&self, beat: f64) -> bool {
         // The last point at or before the beat; before the first, the first. With no points at all, it stays on.
-        let at = self.points.iter().take_while(|p| p.beat <= beat + SAME_BEAT).last().or(self.points.first());
+        let at = self.upto(beat).checked_sub(1).and_then(|i| self.points.get(i)).or(self.points.first());
         at.is_none_or(|p| p.value >= 0.5)
     }
 
     /// Whether it's `on` (or off) all the way from one tick to another.
     fn throughout(&self, from: i64, to: i64, on: bool) -> bool {
         let (a, b) = (from as f64 / self.ppq, to as f64 / self.ppq);
-        self.on(a) == on
-            && self.points.iter().all(|p| p.beat <= a + SAME_BEAT || p.beat >= b - SAME_BEAT || (p.value >= 0.5) == on)
+        let inside = self.points.get(self.upto(a)..).unwrap_or_default();
+        self.on(a) == on && inside.iter().take_while(|p| p.beat < b - SAME_BEAT).all(|p| (p.value >= 0.5) == on)
     }
 
     /// A clip muted when the channel is off all the way through it, else with the notes that start while it's off
@@ -386,6 +430,85 @@ mod tests {
         let jump = [p(0.0, 0.0), p(2.0, 0.5), p(2.0, 1.0)];
         assert_eq!(cut_curve(&jump, 0.0, 0.0, 2.0, false), [p(0.0, 0.0), p(2.0, 0.5), p(2.0, 1.0)]);
         assert!(cut_curve(&curve, 0.0, 0.0, 0.0, false).is_empty());
+    }
+
+    /// How clips placed over each other were joined before only the end of the curve was cut again: the whole curve
+    /// so far was cut each time.
+    fn place_whole(curve: &[FlPoint], parts: &[(f64, f64, f64)], hold: bool) -> Vec<FlPoint> {
+        let mut placed: Vec<FlPoint> = Vec::new();
+        for &(at, from, length) in parts {
+            let mut part = cut_curve(curve, at, from, length, hold);
+            let (Some(&first), Some(&last)) = (part.first(), part.last()) else { continue };
+            let mut rest = Vec::new();
+            if let (Some(&p0), Some(&pl)) = (placed.first(), placed.last())
+                && pl.beat > first.beat + SAME_BEAT
+            {
+                if pl.beat > last.beat + SAME_BEAT {
+                    rest = cut_curve(&placed, last.beat, last.beat, pl.beat - last.beat, hold);
+                }
+                placed = cut_curve(&placed, p0.beat, p0.beat, first.beat - p0.beat, hold);
+            }
+            if let Some(&pl) = placed.last()
+                && pl.beat < first.beat - SAME_BEAT
+                && pl.value != first.value
+            {
+                placed.push(FlPoint { beat: first.beat, value: pl.value });
+            }
+            if let Some(&pl) = placed.last()
+                && (pl.beat - first.beat).abs() <= SAME_BEAT
+                && pl.value == first.value
+            {
+                part.remove(0);
+            }
+            placed.extend(part);
+            if let (Some(r), Some(pl)) = (rest.first(), placed.last())
+                && r.value == pl.value
+            {
+                rest.remove(0);
+            }
+            placed.extend(rest);
+        }
+        placed
+    }
+
+    #[test]
+    fn cutting_only_the_end_again_places_clips_as_cutting_the_whole_curve_did() {
+        let curve = [p(0.0, 0.0), p(1.0, 1.0), p(1.0, 0.25), p(2.5, 0.75), p(4.0, 0.5)];
+        let ppq = 96u16;
+        for hold in [false, true] {
+            // A spread of placements over and inside each other, at whole and half beats.
+            let mut items = Vec::new();
+            for i in 0..40i64 {
+                let at = (i * 37 % 23) * 48;
+                let length = (1 + i * 13 % 7) * 48;
+                let offset = (i * 5 % 4) as f64 * 48.0;
+                items.push(PlaylistItem { index: 0, at, length, offset, muted: false, slot: 0 });
+            }
+            let mut sorted = items.clone();
+            sorted.sort_by_key(|i| i.at);
+            let parts: Vec<(f64, f64, f64)> =
+                sorted.iter().map(|i| (i.at as f64 / 96.0, i.offset / 96.0, i.length as f64 / 96.0)).collect();
+            let expected = place_whole(&curve, &parts, hold);
+            let name = if hold { "Mute" } else { "Volume" };
+            let target = if hold { TARGET_SLOT_ON_OFF } else { TARGET_INSERT_VOLUME };
+            let mixer = MixerSettings::new(None);
+            let held = matches!(
+                moves(name, target, &mixer, Vec::new()).control,
+                FlControl::OnOff | FlControl::InsertSlotOnOff
+            );
+            let (placed, cut) = place_automation(
+                &[(0, target)],
+                &HashMap::from([(0, curve.to_vec())]),
+                &HashMap::from([(0, name.to_owned())]),
+                &items,
+                &PlaylistTracks::default(),
+                &mixer,
+                ppq,
+            );
+            assert!(!cut);
+            let expected = if held == hold { expected } else { place_whole(&curve, &parts, held) };
+            assert_eq!(placed[0].points, expected, "hold {held}");
+        }
     }
 
     #[test]

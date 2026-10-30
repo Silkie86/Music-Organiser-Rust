@@ -9,13 +9,15 @@ use crate::model::{NoteAttribute, NoteEvent, velocity};
 
 /// The size of the note records in an event, by FL's version (rule 9): 24 bytes from FL 9, 20 bytes in FL 4 to 8.
 /// Notes the reader made from old step sequencer dots are always 24. Without a version, or in an FL 4 to 8 save whose
-/// notes don't divide into 20 bytes, the size is told from the notes themselves; `channels` are the song's channels,
+/// notes divide into 24 bytes but not 20, the size is told from the notes themselves; `channels` are the song's channels,
 /// when known, which a right reading only ever names.
 pub fn note_size(data: &[u8], major: u32, made_here: bool, channels: Option<&HashSet<u32>>) -> usize {
     match major {
         _ if made_here => 24,
         9.. => 24,
         1.. if data.len().is_multiple_of(20) => 20,
+        // Damaged notes that divide by neither size are read at the version's size, up to the damage.
+        1.. if !data.len().is_multiple_of(24) => 20,
         _ => size_from_notes(data, channels),
     }
 }
@@ -88,6 +90,15 @@ mod tests {
         );
         // Without a version, time order tells: read as 24 bytes these would jump about.
         assert_eq!(note_size(&data, 0, false, Some(&HashSet::from([0]))), 20);
+    }
+
+    #[test]
+    fn a_damaged_fl_4_to_8_event_is_still_read_as_20_byte_notes() {
+        // 130 bytes: six 20-byte notes and the start of a seventh.
+        let mut data: Vec<u8> = (0..6).flat_map(|i| note(i * 96, 0, 96, 60, 100, 20)).collect();
+        data.extend([0; 10]);
+        assert_eq!(note_size(&data, 7, false, None), 20);
+        assert_eq!(decode(&data, 20).len(), 6);
     }
 
     #[test]
