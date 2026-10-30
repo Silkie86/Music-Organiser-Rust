@@ -2,7 +2,7 @@
 //! classes and fields. Ranked by how many projects use each, it says what's worth decoding next. It keeps only ids
 //! and counts, nothing of the music.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -58,40 +58,81 @@ pub struct Census {
     pub unreadable_count: usize,
 }
 
-/// A project the census counts, by its ending.
+/// A project the census counts: an .flp or .bwproject, leaving out macOS "._" shadows and DAW autosaves, as the C#
+/// app's library scan does.
 pub fn is_project(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("flp") || e.eq_ignore_ascii_case("bwproject"))
+    let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let ending = path.extension().and_then(|e| e.to_str()).unwrap_or_default();
+    (ending.eq_ignore_ascii_case("flp") || ending.eq_ignore_ascii_case("bwproject"))
+        && !name.starts_with("._")
+        && !name.contains(" (autosave)")
+        && !name.contains(" (overwritten at ")
 }
 
-/// Every project under `folders`, in name order, and the project files named straight out.
+/// A folder the C# app's library scan leaves out: hidden ones, the system's, DAW autosaves and backups, and the demo
+/// songs, tutorials and templates that came with a DAW (old FL keeps loop packs in Data\Patches).
+fn skip_folder(name: &str, parent: &str) -> bool {
+    const SKIPPED: [&str; 17] = [
+        "$recycle.bin",
+        "system volume information",
+        "__macosx",
+        "node_modules",
+        "auto-backups",
+        "backup",
+        "backups",
+        "history",
+        "autosave",
+        "autosaves",
+        "cool stuff",
+        "demo songs",
+        "product demos",
+        "templates",
+        "template",
+        "tutorial",
+        "tutorials",
+    ];
+    let name = name.to_lowercase();
+    name.starts_with('.')
+        || SKIPPED.contains(&name.as_str())
+        || (name == "patches" && parent.eq_ignore_ascii_case("data"))
+}
+
+/// Every project under `paths` that are folders, and those of `paths` that are projects themselves, sorted by path
+/// (letter case aside). Linked folders are followed, each real folder once.
 pub fn find_projects(paths: &[PathBuf]) -> Vec<PathBuf> {
-    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
-        let mut entries: Vec<_> = entries.filter_map(Result::ok).collect();
-        entries.sort_by_key(|e| e.file_name());
-        for e in entries {
-            let Ok(kind) = e.file_type() else { continue };
-            let path = e.path();
-            // Links are left alone, so a link back up the tree can't send the walk round in circles.
-            if kind.is_dir() {
-                walk(&path, out);
-            } else if kind.is_file() && is_project(&path) {
-                out.push(path);
-            }
-        }
-    }
+    let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    let mut todo = VecDeque::new();
     for p in paths {
         if p.is_dir() {
-            walk(p, &mut out);
+            todo.push_back(p.clone());
         } else if p.is_file() && is_project(p) {
             out.push(p.clone());
         }
     }
-    let mut seen = std::collections::HashSet::new();
-    out.retain(|p| seen.insert(p.clone()));
+    while let Some(dir) = todo.pop_front() {
+        // Where it really is, so a link back to a folder already listed isn't listed again.
+        if !seen.insert(std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone())) {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let parent = name(&dir);
+        for entry in entries.flatten() {
+            let path = entry.path();
+            match entry.file_type() {
+                Ok(t) if t.is_dir() || (t.is_symlink() && path.is_dir()) => {
+                    if !skip_folder(&name(&path), &parent) {
+                        todo.push_back(path);
+                    }
+                }
+                Ok(_) if is_project(&path) => out.push(path),
+                _ => {}
+            }
+        }
+    }
+    out.sort_by_cached_key(|p| p.to_string_lossy().to_lowercase());
+    out.dedup_by(|a, b| a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase());
     out
 }
 
@@ -116,13 +157,21 @@ impl Census {
                     a
                 })
         };
-        // All cores but one, so the computer stays usable while it counts.
+        // All cores but one, at low priority, so the computer (and a DAW open on it) stays quick while it counts.
         let threads = std::thread::available_parallelism().map_or(1, |n| n.get().saturating_sub(1).max(1));
-        let census = match rayon::ThreadPoolBuilder::new().num_threads(threads).build() {
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).start_handler(|_| {
+            // Counting at normal priority is still counting, so a system that won't lower it isn't stopped.
+            let _ = thread_priority::set_current_thread_priority(thread_priority::ThreadPriority::Min);
+        });
+        let census = match pool.build() {
             Ok(pool) => pool.install(count),
             Err(_) => count(),
         };
-        progress(done.load(Ordering::Relaxed));
+        // The last count, unless it was just said.
+        let n = done.load(Ordering::Relaxed);
+        if !n.is_multiple_of(100) {
+            progress(n);
+        }
         census
     }
 
@@ -159,7 +208,7 @@ impl Census {
     }
 
     fn add_bitwig(&mut self, raw: &[u8]) -> Result<(), String> {
-        let doc = mo_formats::bitwig::decode(raw.to_vec()).map_err(|_| "This isn't a Bitwig file".to_owned())?;
+        let doc = mo_formats::bitwig::decode(raw).map_err(|_| "This isn't a Bitwig file".to_owned())?;
         let v = doc.meta_str("application_version_name");
         let major_minor: Vec<&str> = v.split(['.', ' ']).take(2).collect();
         let version = match major_minor.join(".") {

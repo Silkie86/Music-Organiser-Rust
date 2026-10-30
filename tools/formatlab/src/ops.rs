@@ -204,11 +204,16 @@ fn nearest_order(key: &str, b: &HashMap<&str, usize>, fallback: usize) -> usize 
         .unwrap_or(fallback)
 }
 
+/// The same value: what's shown, and what it holds too, since what's shown is cut short (a list's first 32 values, a
+/// text's first 300 letters, a look at the start of some bytes). Floats count as the same when their bits are, so a
+/// NaN isn't news.
 fn same(x: &Item, y: &Item) -> bool {
+    let floats = |p: &[f64], q: &[f64]| p.len() == q.len() && p.iter().zip(q).all(|(a, b)| a.to_bits() == b.to_bits());
     x.value == y.value
         && match (&x.data, &y.data) {
-            (Data::Bytes(p), Data::Bytes(q)) => p == q,
-            _ => true,
+            (Data::Float(a), Data::Float(b)) => a.to_bits() == b.to_bits(),
+            (Data::Floats(p), Data::Floats(q)) => floats(p, q),
+            (p, q) => p == q,
         }
 }
 
@@ -301,8 +306,8 @@ type Found = (usize, Hit, Option<(usize, usize)>);
 const TIMES: usize = 10;
 
 /// Everywhere the file holds `query`: as text (ignoring case), and, when it's a number, as a number in any field, or in
-/// any data as a 32-bit integer, a 32- or 64-bit float (either byte order). Text is also looked for inside data, as
-/// UTF-8 and UTF-16. Bytes that a part of the data found on its own (a record, or a number in it) aren't listed again
+/// any data as a 32-bit integer, a 32- or 64-bit float (either byte order). The query is also looked for inside data
+/// as text, UTF-8 and UTF-16, number or not. Bytes that a part of the data found on its own (a record, or a number in it) aren't listed again
 /// for the data around it.
 pub fn find(f: &LabFile, query: &str, text_only: bool) -> Vec<Hit> {
     if query.is_empty() {
@@ -399,8 +404,8 @@ fn close(a: f64, b: f64) -> bool {
 
 fn patterns(query: &str, number: Option<f64>) -> Vec<(&'static str, Vec<u8>)> {
     let mut p = Vec::new();
-    match number {
-        Some(n) => {
+    if let Some(n) = number {
+        {
             if n == n.floor() && n >= f64::from(i32::MIN) && n <= f64::from(u32::MAX) && n.abs() >= 2.0 {
                 let b = if n <= f64::from(i32::MAX) { (n as i32).to_le_bytes() } else { (n as u32).to_le_bytes() };
                 p.push(("32-bit integer", b.to_vec()));
@@ -413,12 +418,11 @@ fn patterns(query: &str, number: Option<f64>) -> Vec<(&'static str, Vec<u8>)> {
             p.push(("64-bit float", d.to_vec()));
             p.push(("64-bit float, big-endian", d.iter().rev().copied().collect()));
         }
-        None => {
-            p.push(("UTF-8 text", query.as_bytes().to_vec()));
-            p.push(("UTF-16 text", query.encode_utf16().flat_map(u16::to_le_bytes).collect()));
-            p.push(("UTF-16 text, big-endian", query.encode_utf16().flat_map(u16::to_be_bytes).collect()));
-        }
     }
+    // Text too, for a number as well ("808" in a preset called "808 Kick").
+    p.push(("UTF-8 text", query.as_bytes().to_vec()));
+    p.push(("UTF-16 text", query.encode_utf16().flat_map(u16::to_le_bytes).collect()));
+    p.push(("UTF-16 text, big-endian", query.encode_utf16().flat_map(u16::to_be_bytes).collect()));
     p
 }
 

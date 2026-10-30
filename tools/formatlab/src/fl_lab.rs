@@ -15,6 +15,8 @@ use crate::registry::{self, Entry, LayoutField, Number};
 /// The Fruity Wrapper's record that says what kind of plugin it holds, the one with the plugin's own state, and the
 /// kind that's a VST3.
 const WRAPPER_FORMAT: u32 = 50;
+/// Starts an arrangement (FL 12.9 onwards), with its number.
+const EV_NEW_ARRANGEMENT: u8 = 99;
 const WRAPPER_STATE: u32 = 53;
 const FORMAT_VST3: u8 = 8;
 
@@ -93,8 +95,8 @@ pub fn read(raw: &[u8], name: &str) -> Result<LabFile, String> {
     })
 }
 
-/// Which part of the project each event belongs to. Channels and patterns start with their own events (64, 65) and
-/// the arrangement with the playlist (233). A mixer insert starts with its flags (236), its name just before them; a
+/// Which part of the project each event belongs to. Channels and patterns start with their own events (64, 65), an
+/// arrangement with its own (99, from FL 12.9) or, before that, with the playlist (233). A mixer insert starts with its flags (236), its name just before them; a
 /// slot's events end with the slot's number (98), so they're only known to be the slot's once that comes.
 fn scopes(events: &[&Event]) -> Vec<String> {
     let mut scopes = vec![String::new(); events.len()];
@@ -110,11 +112,14 @@ fn scopes(events: &[&Event]) -> Vec<String> {
     };
     for (i, e) in events.iter().enumerate() {
         match e.id {
-            EV_CHANNEL_NEW | EV_PATTERN_NEW | EV_PLAYLIST => {
+            // The playlist of an arrangement that 99 started is part of it.
+            EV_PLAYLIST if current.starts_with("arrangement") => {}
+            EV_CHANNEL_NEW | EV_PATTERN_NEW | EV_NEW_ARRANGEMENT | EV_PLAYLIST => {
                 release(&mut held, &mut scopes, &current);
                 current = match e.id {
                     EV_CHANNEL_NEW => format!("channel {}", e.int()),
                     EV_PATTERN_NEW => format!("pattern {}", e.int()),
+                    EV_NEW_ARRANGEMENT => format!("arrangement {}", e.int()),
                     _ => "arrangement".to_owned(),
                 };
                 insert = None;

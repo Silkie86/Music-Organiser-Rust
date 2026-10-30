@@ -100,12 +100,23 @@ impl LabFile {
 }
 
 /// A number as .NET's round-trip format writes it, which the C# app's Format Lab used: the shortest text that reads
-/// back as the same number.
+/// back as the same number, with an exponent from 1E+15 up and below 0.0001 ("1E-05").
 pub fn float(d: f64) -> String {
     if d.is_infinite() {
         return if d > 0.0 { "Infinity".into() } else { "-Infinity".into() };
     }
-    format!("{d}")
+    if d.is_nan() || d == 0.0 {
+        return format!("{d}");
+    }
+    // Rust's shortest digits, as "1.2345e-5".
+    let sci = format!("{d:e}");
+    let (mantissa, exp) = sci.split_once('e').unwrap_or((&sci, "0"));
+    let exp: i32 = exp.parse().unwrap_or(0);
+    if (-4..15).contains(&exp) {
+        format!("{d}")
+    } else {
+        format!("{mantissa}E{}{:02}", if exp < 0 { '-' } else { '+' }, exp.abs())
+    }
 }
 
 /// A count with its thousands marked: 1,234.

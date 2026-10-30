@@ -15,7 +15,7 @@ const F_ID: u32 = 0xf;
 const SHOWN: usize = 32;
 
 pub fn read(raw: &[u8], name: &str) -> Result<LabFile, String> {
-    let doc = decode(raw.to_vec()).map_err(|_| format!("{name} isn't a Bitwig file"))?;
+    let doc = decode(raw).map_err(|_| format!("{name} isn't a Bitwig file"))?;
     let mut items = Vec::new();
     Walker { doc: &doc, items: &mut items, paths: HashMap::new() }.all("", "", 0);
     zip(&doc, &mut items);
@@ -89,7 +89,7 @@ impl Walker<'_> {
         if let Value::Blob(blob) = value {
             let bytes = blob.bytes();
             if is_bitwig(bytes)
-                && let Ok(inner) = decode(bytes.to_vec())
+                && let Ok(inner) = decode(bytes)
             {
                 // A Bitwig document of its own, like the summary of the project's tracks.
                 let shown = format!("<{} bytes, a Bitwig document>", lab::count(bytes.len()));

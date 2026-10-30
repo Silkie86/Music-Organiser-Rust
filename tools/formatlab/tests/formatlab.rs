@@ -259,6 +259,43 @@ fn shows_only_what_is_in_the_file_and_says_what_was_off() {
     assert!(ops::diff_text(&cut, &fl(&raw), &[]).contains("Warning about test.flp: "));
 }
 
+#[test]
+fn an_arrangement_starts_with_its_own_event() {
+    let playlist = common::playlist_item(0, 1, 384, -1);
+    let raw = with_events(
+        &common::fl_studio_project(),
+        &Flp::new().word(99, 0).text(241, "Arrangement").data(233, &playlist).build()[22..],
+    );
+    let f = fl(&raw);
+    for key in ["arrangement 0/99", "arrangement 0/241", "arrangement 0/233"] {
+        assert!(f.items.iter().any(|i| i.key == key), "{key} isn't in\n{}", ops::tree(&f, 1));
+    }
+    // Without event 99 (before FL 12.9), the playlist starts it.
+    assert!(fl(&common::fl_studio_project_with(Some(&playlist))).items.iter().any(|i| i.key == "arrangement/233"));
+}
+
+#[test]
+fn find_looks_for_a_number_as_text_in_data_too() {
+    // Data the registry doesn't know, holding "808 Kick" among bytes that aren't text.
+    let more = Flp::new().data(250, b"\x01\x02808 Kick\x03").build();
+    let f = fl(&with_events(&common::fl_studio_project(), &more[22..]));
+    let hits = ops::find(&f, "808", false);
+    assert!(hits.iter().any(|h| h.how == "UTF-8 text at byte 2" && h.path == "insert 0 › 250"), "{hits:?}");
+}
+
+#[test]
+fn numbers_are_written_as_the_c_sharp_tool_wrote_them() {
+    use mo_formatlab::lab::float;
+    assert_eq!(
+        [float(128.5), float(133.0), float(-0.0), float(0.0001), float(1e-5), float(1.5e-7), float(1e14), float(1e15)],
+        ["128.5", "133", "-0", "0.0001", "1E-05", "1.5E-07", "100000000000000", "1E+15"]
+    );
+    assert_eq!(
+        [float(f64::INFINITY), float(f64::NAN), float(f64::from(0.1f32))],
+        ["Infinity", "NaN", "0.10000000149011612"]
+    );
+}
+
 // ---- Bitwig ----
 
 #[test]
@@ -298,6 +335,32 @@ fn bitwig_diff_finds_a_changed_tempo() {
 }
 
 #[test]
+fn diff_sees_a_change_past_what_is_shown() {
+    let file = |last: f64| {
+        let values: Vec<f64> = (0..40).map(|i| if i == 39 { last } else { i as f64 }).collect();
+        common::bitwig::BwWriter::file(
+            |m| {
+                m.meta_entry("application_version_name", 0x08);
+                m.str_val("6.1.3");
+            },
+            |b| {
+                b.begin(0x2e);
+                b.doubles(0x123, &values);
+                b.end();
+            },
+            None,
+        )
+    };
+    let (before, after) =
+        (LabFile::read(&file(1.0), "a.bwproject").unwrap(), LabFile::read(&file(2.0), "b.bwproject").unwrap());
+    let changes = ops::diff(&before, &after);
+    // Only the first 32 of the 40 numbers are shown, the same in both.
+    let [change] = changes.as_slice() else { panic!("{changes:?}") };
+    assert_eq!(change.before, change.after);
+    assert!(ops::diff(&before, &LabFile::read(&file(1.0), "c.bwproject").unwrap()).is_empty());
+}
+
+#[test]
 fn refuses_files_from_other_apps() {
     assert!(LabFile::read(b"RIFF....WAVE", "kick.wav").is_err());
     assert!(LabFile::read(b"FLhd", "short.flp").is_err());
@@ -314,6 +377,13 @@ fn census_counts_what_the_registry_does_not_know() {
     bitwig_project(&dir, "Loop Idea");
     write(&dir, "Broken.flp", &[1, 2, 3]);
     write(&dir, "notes.txt", b"not a project");
+    // Left out, as the C# app's library scan leaves them out.
+    write(&dir, "._Night Drive.flp", &[0, 5, 22, 7]);
+    write(&dir, "Night Drive (autosave).flp", &common::fl_studio_project());
+    for folder in ["Backup", ".hidden", "Templates"] {
+        std::fs::create_dir_all(dir.join(folder)).unwrap();
+        write(&dir.join(folder), "Night Drive.flp", &common::fl_studio_project());
+    }
 
     let files = mo_formatlab::census::find_projects(&[dir]);
     let census = Census::run(&files, |_| {});

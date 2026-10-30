@@ -27,8 +27,8 @@ MO Probe (`probe`) and the live tests (`live`) come with the DAW links in phase 
 
 ## Where it differs from the C# Format Lab
 
-Checked by running both on every twin-test file: `tree`, `diff`, `find` (nine values each), `census` and `fields` give
-the same text, apart from these.
+Checked by running both on every twin-test file: `tree`, `diff`, `find` (several values each), `census` and `fields`
+give the same text, apart from these.
 
 | What | C# | Rust | Judged |
 |---|---|---|---|
@@ -37,4 +37,8 @@ the same text, apart from these.
 | A Bitwig list of 64-bit floats (type 0x18) | Shown as "System.Double[]". | Shown as its numbers, and found by `find`. | Better |
 | A metadata key or map key written twice in a Bitwig file | The last value shown, in the first one's place. | Each shown where it is. | Better |
 | A reference to a Bitwig file's top object | "object #1". | "body". | Better |
+| An FL arrangement (FL 12.9 onwards) | Starts at its playlist, so its number and name (events 99 and 241) sit under the last channel. | Starts at event 99, as "arrangement 0", "arrangement 1" and so on. | Better |
+| `diff` of a long list or text that changes past what's shown (32 values, 300 letters) | "No differences." | Listed as changed. | Better |
+| `find` with a number | Looks for it in data only as numbers. | As text too ("808" in a preset called "808 Kick"). | Better |
+| `census` | Leaves out the same folders and files as the library scan. | The same rules, and at low priority on all cores but one. | Same |
 | Text cut at 300 letters | Counts UTF-16 units, so an emoji counts as two. | Counts letters. | Same for nearly all text |
