@@ -11,6 +11,34 @@ pub(crate) fn ends_with_ignore_case(s: &str, end: &str) -> bool {
         && s[s.len() - end.len()..].eq_ignore_ascii_case(end)
 }
 
+/// A VST3 class id as the plugin scanner writes it: 32 hex digits in capitals, without braces or dashes; "" when the
+/// text isn't one.
+pub fn class_id(text: &str) -> String {
+    let hex: String = text.trim().trim_matches(['{', '}']).chars().filter(|&c| c != '-').collect();
+    if hex.len() == 32 && hex.bytes().all(|b| b.is_ascii_hexdigit()) { hex.to_ascii_uppercase() } else { String::new() }
+}
+
+/// A VST2's id the way the plugin scanner writes it: its four letters ("FQ2p"), or the number when they aren't all
+/// letters.
+pub fn vst2_id(id: i32) -> String {
+    let bytes = id.to_be_bytes();
+    if bytes.iter().all(|b| (0x20..=0x7E).contains(b)) {
+        bytes.iter().map(|&b| b as char).collect()
+    } else {
+        id.to_string()
+    }
+}
+
+/// The VST2 id inside a class id a host made for a VST2 ("565354" for "VST", then its four letters in hex).
+pub fn vst2_id_in(class_id: &str) -> Option<String> {
+    let hex = class_id.get(6..14).filter(|_| class_id.len() == 32)?;
+    if !class_id.get(..6)?.eq_ignore_ascii_case("565354") {
+        return None;
+    }
+    // As .NET reads hex into an int: eight digits can be "negative".
+    u32::from_str_radix(hex, 16).ok().map(|id| vst2_id(id as i32))
+}
+
 pub(crate) fn starts_with_ignore_case(s: &str, start: &str) -> bool {
     s.len() >= start.len() && s.is_char_boundary(start.len()) && s[..start.len()].eq_ignore_ascii_case(start)
 }

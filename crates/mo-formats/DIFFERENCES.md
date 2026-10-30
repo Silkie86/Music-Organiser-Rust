@@ -38,3 +38,13 @@ tests don't have.
 | A folder linked into `samples` that links back to itself | Can go round it again and again. | Each folder is listed once, wherever the links lead. | Better |
 | The order of hardware names | .NET's culture-aware order (which differs between Windows and Linux). | Close to it: spaces and punctuation before digits, digits before letters, letter case aside. Only names that differ just in punctuation could come out in another order. | Same for real names |
 | A note's velocity as a MIDI 1.0 value (0 to 127) | Bitwig's 0-to-1 velocity rounded straight to 0 to 127. | Kept at MIDI 2.0's 16 bits, then rounded to 0 to 127 when a MIDI 1.0 value is wanted. About 3 in 10,000 velocities come out 1 apart (rounding twice); Bitwig's own whole-step velocities are the same. | Better (rule 22) |
+
+## Studio One
+
+On the test files the two read the same; these are the places the Rust reader was written to differ, for files the
+tests don't have.
+
+| What | C# | Rust | Judged |
+|---|---|---|---|
+| A plugin state in the song's zip that won't come out whole | No presets at all from the song. | That one preset is left out; the rest are taken out. | Better |
+| A note's velocity | Rounded to MIDI 1.0's 0 to 127 as it's read. | Kept at MIDI 2.0's 16 bits (a 0-to-127 velocity from an older song by MIDI 2.0's own scaling), rounded to 0 to 127 only when a MIDI 1.0 value is wanted. As with Bitwig, a few in 10,000 of the 0-to-1 velocities come out 1 apart. | Better (rule 22) |

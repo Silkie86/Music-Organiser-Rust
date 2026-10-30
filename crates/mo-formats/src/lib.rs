@@ -14,6 +14,7 @@ mod model;
 mod paths;
 pub mod plugins;
 pub mod presets;
+pub mod studio_one;
 pub mod textscan;
 
 pub use model::{

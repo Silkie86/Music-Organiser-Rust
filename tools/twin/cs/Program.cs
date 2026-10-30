@@ -1,5 +1,5 @@
-// The C# half of the twin test. Reads each file named on its input (one path a line) with the C# app's FL Studio or
-// Bitwig reader, unchanged, and writes what it finds as one JSON a line, in the same shape as tools/twin/src/rust_side.rs.
+// The C# half of the twin test. Reads each file named on its input (one path a line) with the C# app's FL Studio,
+// Bitwig or Studio One reader, unchanged, and writes what it finds as one JSON a line, in the same shape as tools/twin/src/rust_side.rs.
 // Files are read on every core; the lines come out in whatever order they finish, each naming its file.
 // With --roots it lists the library's folders instead (below).
 
@@ -40,8 +40,31 @@ Parallel.ForEach(files, file =>
 });
 output.Flush();
 
-static JsonObject Dump(string path) =>
-    Path.GetExtension(path).Equals(".bwproject", StringComparison.OrdinalIgnoreCase) ? DumpBitwig(path) : DumpFl(path);
+static JsonObject Dump(string path) => Path.GetExtension(path).ToLowerInvariant() switch
+{
+    ".bwproject" => DumpBitwig(path),
+    ".song" => DumpStudioOne(path),
+    _ => DumpFl(path),
+};
+
+// What the project list shows, the note clips and the plugin states. A file that isn't a zip can't be read; the two
+// apps word that differently, so both say just "unreadable".
+static JsonObject DumpStudioOne(string path)
+{
+    var reader = new StudioOneReader();
+    var o = new JsonObject { ["file"] = path };
+    try { o["info"] = Info(reader.Read(path)); }
+    catch (InvalidDataException) { o["info"] = new JsonObject { ["error"] = "unreadable" }; }
+    catch (Exception e) { o["info"] = new JsonObject { ["error"] = e.Message }; }
+    try
+    {
+        o["midi"] = new JsonArray(reader.ExtractMidi(path).Select(Clip).ToArray<JsonNode?>());
+        o["presets"] = new JsonArray(reader.ExtractPresets(path).Select(Preset).ToArray<JsonNode?>());
+    }
+    catch (InvalidDataException) { o["error_more"] = "unreadable"; }
+    catch (Exception e) { o["error_more"] = $"{e.GetType().Name}: {e.Message}"; }
+    return o;
+}
 
 // What the project list shows, the note clips and the plugin states.
 static JsonObject DumpBitwig(string path)

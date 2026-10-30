@@ -7,6 +7,7 @@
 mod common;
 
 use common::bitwig::*;
+use common::studio_one::*;
 use common::*;
 
 fn fixtures() -> Vec<(&'static str, Vec<u8>)> {
@@ -75,10 +76,25 @@ fn bitwig_fixtures() -> Vec<(&'static str, Vec<u8>)> {
     ]
 }
 
+/// The Studio One songs: one with notes, samples and plugins, one with each kind of insert, a song missing its song
+/// file and a file that isn't a zip.
+fn studio_one_fixtures() -> Vec<(&'static str, Vec<u8>)> {
+    let song = studio_one_song_bytes();
+    let no_song_file = stored_zip(&[("metainfo.xml", br#"<M><Attribute id="Media:Tempo" value="96"/></M>"#)]);
+    vec![
+        ("studio one/Groove/Groove.song", song.clone()),
+        ("studio one/Inserts/Inserts.song", studio_one_inserts_bytes()),
+        ("studio one/no song file.song", no_song_file),
+        ("studio one/not a zip.song", b"not a zip".to_vec()),
+        ("studio one/cut short.song", song[..song.len() / 2].to_vec()),
+    ]
+}
+
 #[test]
 fn writes_the_twin_test_files() {
     let mut files = fixtures();
     files.extend(bitwig_fixtures());
+    files.extend(studio_one_fixtures());
     assert!(files.iter().all(|(_, bytes)| !bytes.is_empty()));
     let Some(dir) = std::env::var_os("MO_TWIN_FIXTURES") else { return };
     for (name, bytes) in files {
