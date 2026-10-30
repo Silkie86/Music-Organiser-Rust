@@ -6,7 +6,9 @@
 pub mod bitwig;
 pub mod fl;
 mod model;
+mod paths;
 pub mod plugins;
 pub mod presets;
+pub mod textscan;
 
 pub use model::{Confidence, MidiChannel, MidiClip, NoteEvent, PluginKind, PluginRef, ProjectInfo, SampleUse};

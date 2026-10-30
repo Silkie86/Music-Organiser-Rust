@@ -1,6 +1,8 @@
 //! Plugin presets as files a plugin (or another DAW) can load: VST2 `.fxp` programs and `.fxb` banks, and VST3
 //! `.vstpreset` files.
 
+use std::borrow::Cow;
+
 use crate::model::PluginKind;
 
 /// A plugin's saved settings, taken out of a project.
@@ -9,8 +11,9 @@ pub struct PresetBlob {
     /// What the project called it: the channel's or slot's name, else the plugin's.
     pub name: String,
     pub plugin: String,
-    /// ".fxp", ".vstpreset", ".flstate" (FL's own plugins), or ".vst3state" when a VST3's state isn't laid out as known.
-    pub extension: &'static str,
+    /// ".fxp", ".vstpreset", ".flstate" (FL's own plugins), or ".vst3state" when a VST3's state isn't laid out as known;
+    /// Bitwig's are whatever its file in the project is called (".vstpreset", ".fxb"...).
+    pub extension: Cow<'static, str>,
     pub data: Vec<u8>,
     /// Instrument or effect, where the project says.
     pub kind: PluginKind,
@@ -25,11 +28,11 @@ pub struct PresetBlob {
 }
 
 impl PresetBlob {
-    pub fn new(name: &str, plugin: &str, extension: &'static str, data: Vec<u8>) -> PresetBlob {
+    pub fn new(name: &str, plugin: &str, extension: impl Into<Cow<'static, str>>, data: Vec<u8>) -> PresetBlob {
         PresetBlob {
             name: name.to_owned(),
             plugin: plugin.to_owned(),
-            extension,
+            extension: extension.into(),
             data,
             kind: PluginKind::Unknown,
             native: false,

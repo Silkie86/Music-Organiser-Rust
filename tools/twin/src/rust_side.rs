@@ -3,6 +3,7 @@
 
 use std::path::Path;
 
+use mo_formats::bitwig;
 use mo_formats::fl::automation::{FlAutomation, FlPoint};
 use mo_formats::fl::song::{self, FlChannel, FlInsert, FlPlugin, FlSong};
 use mo_formats::fl::{self, events, presets};
@@ -17,6 +18,9 @@ pub fn dump(path: &Path) -> Value {
         Ok(raw) => raw,
         Err(e) => return json!({ "file": path.to_string_lossy(), "error": e.to_string() }),
     };
+    if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("bwproject")) {
+        return bitwig_dump(path, &raw);
+    }
     // Read from disk once; the project list's reading takes the same bytes.
     let mut out = json!({ "file": path.to_string_lossy(), "info": info_json(&fl::read_from(&raw, path)) });
     // The C# readers throw on a damaged file where the project list only warns; so does this.
@@ -33,6 +37,24 @@ pub fn dump(path: &Path) -> Value {
     out["presets"] = presets::extract_presets(&flp).iter().map(preset_json).collect();
     out["song"] = song_json(&read);
     out
+}
+
+/// A Bitwig project: what the project list shows, its note clips and its plugin states. A file that isn't Bitwig's
+/// has none of either, as in the C# reader.
+fn bitwig_dump(path: &Path, raw: &[u8]) -> Value {
+    // Decoded once for all three.
+    let doc = bitwig::decode(raw).ok();
+    let info = bitwig::read_document(doc.as_ref(), raw, path, &mo_formats::plugins::is_always_known);
+    let (midi, presets) = match &doc {
+        Some(d) => (bitwig::extract_midi(d), bitwig::extract_presets(d)),
+        None => (Vec::new(), Vec::new()),
+    };
+    json!({
+        "file": path.to_string_lossy(),
+        "info": info_json(&info),
+        "midi": midi.iter().map(clip_json).collect::<Vec<_>>(),
+        "presets": presets.iter().map(preset_json).collect::<Vec<_>>(),
+    })
 }
 
 fn info_json(i: &ProjectInfo) -> Value {

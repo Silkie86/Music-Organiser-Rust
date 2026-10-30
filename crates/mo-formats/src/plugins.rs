@@ -1,5 +1,7 @@
 //! What a plugin's file path and name say about it.
 
+use crate::model::PluginKind;
+
 /// The file endings plugins have.
 pub const PLUGIN_EXTENSIONS: [&str; 6] = [".vst3", ".dll", ".clap", ".component", ".vst", ".aaxplugin"];
 
@@ -128,6 +130,43 @@ fn in_fl_studio_plugin_folder(path: &str) -> bool {
         let rest = &path[at + m.len()..];
         rest.find('\\').is_some_and(|slash| rest[slash..].starts_with(r"\plugins\"))
     })
+}
+
+/// Elektron's Overbridge plugins, by how the boxes show up inside projects, and the box each one is.
+const ELEKTRON_OVERBRIDGE: [(&str, &str); 9] = [
+    ("Analog Rytm MKII", "Analog Rytm MKII"),
+    ("Analog Rytm", "Analog Rytm MKII"),
+    ("Digitakt II", "Digitakt II"),
+    ("Digitakt", "Digitakt"),
+    ("Syntakt", "Syntakt"),
+    ("Analog Four MKII", "Analog Four MKII"),
+    ("Analog Heat MKII", "Analog Heat MKII"),
+    ("Digitone", "Digitone"),
+    ("Digitone II", "Digitone II"),
+];
+
+/// Plugin names known on every PC, installed or not: the Overbridge ones, which a text scan can trust as plugins.
+pub fn is_always_known(name: &str) -> bool {
+    ELEKTRON_OVERBRIDGE.iter().any(|(n, _)| n.eq_ignore_ascii_case(name))
+}
+
+/// The Elektron box a plugin's name refers to, if any.
+pub fn elektron_device(name: &str) -> Option<&'static str> {
+    let lower = name.to_lowercase();
+    let bare = lower.replace("overbridge", "");
+    let bare = bare.trim_matches([' ', '-', '_']);
+    if let Some((_, device)) = ELEKTRON_OVERBRIDGE.iter().find(|(n, _)| n.to_lowercase() == bare) {
+        return Some(device);
+    }
+    // The longest name it holds, so "Digitakt II" isn't taken for "Digitakt".
+    let mut by_length = ELEKTRON_OVERBRIDGE;
+    by_length.sort_by_key(|(n, _)| std::cmp::Reverse(n.len()));
+    by_length.iter().find(|(n, _)| lower.contains(&n.to_lowercase())).map(|(_, device)| *device)
+}
+
+/// What a plugin is from its name alone: an instrument when it's an Elektron box, otherwise not known.
+pub fn kind_of(name: &str) -> PluginKind {
+    if elektron_device(name).is_some() { PluginKind::Instrument } else { PluginKind::Unknown }
 }
 
 #[cfg(test)]
