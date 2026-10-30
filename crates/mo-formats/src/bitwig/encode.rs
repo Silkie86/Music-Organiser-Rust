@@ -45,7 +45,7 @@ pub fn encode(doc: &Document, zip: Option<&[u8]>) -> Result<Vec<u8>, String> {
 
     let zip = match zip {
         Some(z) => z,
-        None if doc.has_zip => doc.raw.get(doc.zip_offset..).unwrap_or_default(),
+        None if doc.has_zip => doc.raw.get(doc.zip_offset..).ok_or("the zip starts past the end of the file")?,
         None => &[],
     };
     let body_offset = HEADER + meta.len();

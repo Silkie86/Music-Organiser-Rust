@@ -331,9 +331,9 @@ impl OnOff {
     }
 
     fn on(&self, beat: f64) -> bool {
-        // The last point at or before the beat; before the first, the first.
+        // The last point at or before the beat; before the first, the first. With no points at all, it stays on.
         let at = self.points.iter().take_while(|p| p.beat <= beat + SAME_BEAT).last().or(self.points.first());
-        at.is_some_and(|p| p.value >= 0.5)
+        at.is_none_or(|p| p.value >= 0.5)
     }
 
     /// Whether it's `on` (or off) all the way from one tick to another.

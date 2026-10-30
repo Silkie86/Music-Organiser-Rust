@@ -106,6 +106,13 @@ impl std::fmt::Display for Damaged {
 
 impl std::error::Error for Damaged {}
 
+/// The `N` bytes at `at`, or zeros past the end. Callers check the length first, so a test run stops on one that
+/// forgot (a 0 read from nothing would look like channel 0 or insert 0); a release build reads on.
+fn zero_filled<const N: usize>(d: &[u8], at: usize) -> [u8; N] {
+    debug_assert!(at.checked_add(N).is_some_and(|end| end <= d.len()), "{N} bytes at {at} of {}", d.len());
+    bytes_at(d, at).unwrap_or([0; N])
+}
+
 /// The `N` bytes at `at`, if they're all there.
 pub(crate) fn bytes_at<const N: usize>(d: &[u8], at: usize) -> Option<[u8; N]> {
     d.get(at..)?.first_chunk().copied()
@@ -116,14 +123,14 @@ pub(crate) fn byte_at(d: &[u8], at: usize) -> u8 {
     d.get(at).copied().unwrap_or(0)
 }
 
-/// The number at `at`; bytes past the end read as 0 (callers check the length first wherever that matters).
+/// The number at `at` (see [`zero_filled`] for past the end).
 pub(crate) fn u16_at(d: &[u8], at: usize) -> u16 {
-    u16::from_le_bytes(bytes_at(d, at).unwrap_or_default())
+    u16::from_le_bytes(zero_filled(d, at))
 }
 
-/// The number at `at`; bytes past the end read as 0.
+/// The number at `at` (see [`zero_filled`] for past the end).
 pub(crate) fn u32_at(d: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes(bytes_at(d, at).unwrap_or_default())
+    u32::from_le_bytes(zero_filled(d, at))
 }
 
 /// The double at `at`, if the bytes are there.
@@ -136,14 +143,14 @@ pub(crate) fn u64_at(d: &[u8], at: usize) -> Option<u64> {
     bytes_at(d, at).map(u64::from_le_bytes)
 }
 
-/// The number at `at`; bytes past the end read as 0.
+/// The number at `at` (see [`zero_filled`] for past the end).
 pub(crate) fn i32_at(d: &[u8], at: usize) -> i32 {
-    i32::from_le_bytes(bytes_at(d, at).unwrap_or_default())
+    i32::from_le_bytes(zero_filled(d, at))
 }
 
-/// The float at `at`; bytes past the end read as 0.
+/// The float at `at` (see [`zero_filled`] for past the end).
 pub(crate) fn f32_at(d: &[u8], at: usize) -> f32 {
-    f32::from_le_bytes(bytes_at(d, at).unwrap_or_default())
+    f32::from_le_bytes(zero_filled(d, at))
 }
 
 /// The number before the first dot of a version, or 0.
