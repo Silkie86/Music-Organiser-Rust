@@ -461,7 +461,11 @@ impl TrackNames {
     /// Names a track, or renames it in its place when it's named already.
     fn set(&mut self, t: ObjId, name: String) {
         match self.at.get(&t) {
-            Some(&i) => self.names[i].1 = name,
+            Some(&i) => {
+                if let Some((_, named)) = self.names.get_mut(i) {
+                    *named = name;
+                }
+            }
             None => {
                 self.at.insert(t, self.names.len());
                 self.names.push((t, name));
@@ -471,7 +475,9 @@ impl TrackNames {
 
     /// The name of the track `o` is on, or "Project".
     fn of(&self, doc: &Document, o: ObjId) -> &str {
-        doc.ancestor(o, |p, _| self.at.contains_key(&p)).map_or("Project", |t| &self.names[self.at[&t]].1)
+        doc.ancestor(o, |p, _| self.at.contains_key(&p))
+            .and_then(|t| self.names.get(*self.at.get(&t)?))
+            .map_or("Project", |(_, name)| name)
     }
 }
 
@@ -505,7 +511,7 @@ pub fn track_names(doc: &Document) -> TrackNames {
         let display = display.filter(|d| d.len() == tracks.len());
         for (i, &t) in tracks.iter().enumerate() {
             let own = doc.obj(t).str(F_TRACK_NAME);
-            let name = match display.map(|d| d[i].as_str()) {
+            let name = match display.and_then(|d| d.get(i)).map(String::as_str) {
                 Some(shown) if !shown.is_empty() => shown.to_owned(),
                 _ if !own.is_empty() => own.to_owned(),
                 _ => match device_names.get(&t) {
@@ -541,6 +547,7 @@ pub fn extract_midi(doc: &Document, names: &TrackNames) -> Vec<MidiClip> {
             clips.push((names.of(doc, lane).to_owned(), Vec::new()));
             clips.len() - 1
         });
+        let Some((_, notes)) = clips.get_mut(at) else { continue };
         for note in doc.field_list(lane, F_NOTES) {
             let n = doc.obj(note);
             if n.class != CLS_NOTE {
@@ -550,7 +557,7 @@ pub fn extract_midi(doc: &Document, names: &TrackNames) -> Vec<MidiClip> {
             let length = n.num(F_DURATION).unwrap_or(0.25);
             let velocity = n.num(F_VELOCITY).unwrap_or(0.8);
             let ppq = PPQ as f64;
-            clips[at].1.push(NoteEvent {
+            notes.push(NoteEvent {
                 start: (start.max(0.0) * ppq).round_ties_even() as i64,
                 length: ((length * ppq).round_ties_even() as i64).max(1),
                 key: (pitch as i32).clamp(0, 127) as u8,
@@ -610,8 +617,8 @@ pub fn extract_presets(doc: &Document, names: &TrackNames) -> Vec<PresetBlob> {
     }
 
     let mut presets = Vec::new();
-    for i in 0..zip.names.len() {
-        if !zip.names[i].starts_with(STATES) {
+    for (i, full) in zip.names.iter().enumerate() {
+        if !full.starts_with(STATES) {
             continue;
         }
         let Ok(mut entry) = zip.archive.by_index(i) else { continue };
@@ -624,7 +631,6 @@ pub fn extract_presets(doc: &Document, names: &TrackNames) -> Vec<PresetBlob> {
         if entry.read_to_end(&mut data).is_err() {
             continue;
         }
-        let full = &zip.names[i];
         let name = full.rsplit(['/', if cfg!(windows) { '\\' } else { '/' }]).next().unwrap_or(full);
         let ext = paths::extension(name).to_owned();
         let stem = paths::stem(name);
@@ -773,8 +779,7 @@ fn is_version(s: &str) -> bool {
 /// file name: those name the sounds inside a multisample or a Grid's sample list, not files on disk.
 fn scanned_path(s: &str) -> Option<&str> {
     let b = s.as_bytes();
-    let drive = (0..b.len().saturating_sub(2))
-        .find(|&i| b[i].is_ascii_alphabetic() && b[i + 1] == b':' && matches!(b[i + 2], b'\\' | b'/'));
+    let drive = b.windows(3).position(|w| matches!(w, [d, b':', b'\\' | b'/'] if d.is_ascii_alphabetic()));
     let s = match drive {
         Some(i) if i > 0 => &s[i..],
         _ => {
@@ -785,7 +790,8 @@ fn scanned_path(s: &str) -> Option<&str> {
                 || rest.starts_with(r"\\")
                 || PROJECT_FOLDERS.iter().any(|f| {
                     let r = rest.as_bytes();
-                    r.len() > f.len() && r[f.len()] == b'/' && r[..f.len()].eq_ignore_ascii_case(f.as_bytes())
+                    r.get(f.len()) == Some(&b'/')
+                        && r.get(..f.len()).is_some_and(|p| p.eq_ignore_ascii_case(f.as_bytes()))
                 });
             if first_is_length && looks_like_path { rest } else { s }
         }
@@ -800,18 +806,14 @@ fn scan_strings(blob: &[u8]) -> Vec<String> {
     let mut bytes = blob.to_vec();
     let mut wide = Vec::new();
     let mut i = 0;
-    while i + 4 <= bytes.len() {
-        if bytes[i] != 0x80 || bytes[i + 1] != 0 {
+    while let Some(&[top, zero, high, low]) = bytes.get(i..).and_then(|b| b.first_chunk::<4>()) {
+        let chars = (high as usize) << 8 | low as usize;
+        let text = bytes.get(i + 4..i + 4 + 2 * chars);
+        let Some(text) = text.filter(|_| top == 0x80 && zero == 0 && (4..=4096).contains(&chars)) else {
             i += 1;
             continue;
-        }
-        let chars = (bytes[i + 2] as usize) << 8 | bytes[i + 3] as usize;
-        if !(4..=4096).contains(&chars) || i + 4 + 2 * chars > bytes.len() {
-            i += 1;
-            continue;
-        }
-        let units: Vec<u16> =
-            bytes[i + 4..i + 4 + 2 * chars].as_chunks::<2>().0.iter().map(|&c| u16::from_be_bytes(c)).collect();
+        };
+        let units: Vec<u16> = text.as_chunks::<2>().0.iter().map(|&c| u16::from_be_bytes(c)).collect();
         let s: String = char::decode_utf16(units.iter().copied()).map(|c| c.unwrap_or('\u{FFFD}')).collect();
         let ascii = units.iter().filter(|&&u| u < 0x80).count();
         if s.chars().any(|c| c.is_control() || c == '\u{FFFD}')
@@ -821,7 +823,9 @@ fn scan_strings(blob: &[u8]) -> Vec<String> {
             continue;
         }
         wide.push(s);
-        bytes[i..i + 4 + 2 * chars].fill(0);
+        if let Some(read) = bytes.get_mut(i..i + 4 + 2 * chars) {
+            read.fill(0);
+        }
         i += 4 + 2 * chars;
     }
     let mut out = textscan::strings(&bytes);
@@ -836,13 +840,15 @@ fn each_blob(raw: &[u8], mut scan: impl FnMut(&[u8])) {
     scan(raw);
     let mut attempts = 0;
     let mut i = 0;
-    while i + 2 < raw.len() && attempts < 200 {
+    while let Some(rest) = raw.get(i..).filter(|r| r.len() > 2 && attempts < 200) {
         // A zlib header: 0x78, and the two bytes as a number divisible by 31.
-        if raw[i] == 0x78 && (0x7800 | raw[i + 1] as u32).is_multiple_of(31) {
+        if let [0x78, second, ..] = *rest
+            && (0x7800 | second as u32).is_multiple_of(31)
+        {
             attempts += 1;
             let mut inflated = Vec::new();
             // Random bytes that happen to look like a zlib header fail in several ways; those are skipped.
-            let read = flate2::read::ZlibDecoder::new(&raw[i..]).take(MOST).read_to_end(&mut inflated);
+            let read = flate2::read::ZlibDecoder::new(rest).take(MOST).read_to_end(&mut inflated);
             if read.is_ok() && inflated.len() >= 8 {
                 scan(&inflated);
             }

@@ -326,18 +326,20 @@ fn align_unplayed(mut info: ProjectInfo) -> ProjectInfo {
 /// channel switched off, or every clip of it muted or on a muted playlist track). A sample on several channels plays
 /// when any of them does. Letter case aside, each sample once, under the first channel's spelling.
 fn note_unplayed(song: &song::FlSong, resolve: &mut dyn FnMut(&str) -> String, info: &mut ProjectInfo) {
-    let mut order: Vec<String> = Vec::new();
-    let mut by_sample: HashMap<String, (String, Vec<&song::FlChannel>)> = HashMap::new();
+    // In the order each sample first appears.
+    let mut by_sample: Vec<(String, Vec<&song::FlChannel>)> = Vec::new();
+    let mut index: HashMap<String, usize> = HashMap::new();
     for c in song.channels.iter().filter(|c| !c.sample.is_empty()) {
         let sample = resolve(&c.sample);
-        let key = sample.to_lowercase();
-        if !by_sample.contains_key(&key) {
-            order.push(key.clone());
+        let i = *index.entry(sample.to_lowercase()).or_insert_with(|| {
+            by_sample.push((sample, Vec::new()));
+            by_sample.len() - 1
+        });
+        if let Some((_, channels)) = by_sample.get_mut(i) {
+            channels.push(c);
         }
-        by_sample.entry(key).or_insert_with(|| (sample, Vec::new())).1.push(c);
     }
-    for key in order {
-        let (sample, channels) = &by_sample[&key];
+    for (sample, channels) in &by_sample {
         let plays = |c: &&song::FlChannel| {
             c.enabled && (!c.notes.is_empty() || c.audio_clips.iter().any(|a| !a.muted && !a.on_muted_track))
         };
@@ -368,11 +370,11 @@ pub(crate) fn records(blob: &[u8]) -> (BTreeMap<u32, &[u8]>, bool) {
         let id = u32_at(blob, pos);
         let size = u64_at(blob, pos + 4).unwrap_or(u64::MAX);
         pos += 12;
-        if size > (blob.len() - pos) as u64 {
+        let Some(data) = usize::try_from(size).ok().and_then(|n| blob.get(pos..pos.checked_add(n)?)) else {
             return (records, false);
-        }
-        records.insert(id, &blob[pos..pos + size as usize]);
-        pos += size as usize;
+        };
+        records.insert(id, data);
+        pos += data.len();
     }
     (records, true)
 }
@@ -424,7 +426,7 @@ pub(crate) fn vst2_header(state: &[u8]) -> Option<(usize, u32, u32)> {
 
 /// A VST2 that saves its sound as a chunk but gave FL an empty one, so FL kept none of it.
 pub(crate) fn saved_nothing(state: &[u8]) -> bool {
-    matches!(vst2_header(state), Some((_, 0, _))) && state[4] & 0x08 != 0
+    matches!(vst2_header(state), Some((_, 0, _))) && byte_at(state, 4) & 0x08 != 0
 }
 
 /// Event 237: the day the project was first made (a Delphi date: days since 30 Dec 1899) and how long FL Studio has
@@ -472,10 +474,12 @@ impl UserData {
         let Some(rest) = after_user_data(sample) else { return sample.to_owned() };
         let parts: Vec<&str> = rest.split(['\\', '/']).collect();
         let nested = parts.len() > 1;
+        // Splitting always gives at least one part.
+        let first = parts.first().copied().unwrap_or_default();
         let project = &self.project;
-        let dir = self.found.entry((nested, parts[0].to_lowercase())).or_insert_with(|| {
+        let dir = self.found.entry((nested, first.to_lowercase())).or_insert_with(|| {
             project.ancestors().skip(1).filter(|d| !d.as_os_str().is_empty()).find_map(|dir| {
-                let there = dir.join(parts[0]);
+                let there = dir.join(first);
                 let fits = if nested { there.is_dir() } else { there.is_file() };
                 fits.then(|| dir.to_path_buf())
             })

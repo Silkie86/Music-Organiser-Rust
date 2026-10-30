@@ -31,7 +31,7 @@ pub(super) fn wrapper_preset(f: &BTreeMap<u32, &[u8]>, state: &[u8], name: &str,
     if let Some((start, length, current)) = vst2_header(state) {
         selected = current;
         if length == 0
-            && state[4] & 0x08 == 0
+            && byte_at(state, 4) & 0x08 == 0
             && let Some((values, program)) = param_state(state, start, current)
         {
             let shown = if program.is_empty() { plugin } else { &program };
@@ -40,8 +40,8 @@ pub(super) fn wrapper_preset(f: &BTreeMap<u32, &[u8]>, state: &[u8], name: &str,
                 ..PresetBlob::new(name, plugin, ".fxp", fxp::wrap_params(&values, shown, id))
             };
         }
-        if start as u64 + length as u64 <= state.len() as u64 {
-            chunk = &state[start..start + length as usize];
+        if let Some(c) = start.checked_add(length as usize).and_then(|end| state.get(start..end)) {
+            chunk = c;
         }
     }
     PresetBlob { program: selected, ..PresetBlob::new(name, plugin, ".fxp", fxp::wrap_chunk(chunk, plugin, id)) }
@@ -69,16 +69,15 @@ fn param_state(state: &[u8], start: usize, current: u32) -> Option<(Vec<f32>, St
     let values = (0..count)
         .map(|i| {
             let p = start + 4 + 4 * (from * count + i);
-            f32::from_le_bytes([state[p], state[p + 1], state[p + 2], state[p + 3]])
+            f32_at(state, p)
         })
         .collect();
     let mut program = String::new();
     if programs >= 1 && at + 4 < state.len() && (bank || programs == 1) {
         let begin = at + 4 + NAME_SPACING * from;
         let len = (if bank { NAME_SPACING } else { 28 }).min(state.len() - begin);
-        let text = &state[begin..begin + len];
-        let end = text.iter().position(|&b| b == 0).unwrap_or(text.len());
-        program = text[..end].iter().map(|&b| b as char).collect::<String>().trim().to_owned();
+        let text = state.get(begin..begin + len).unwrap_or_default();
+        program = text.iter().take_while(|&&b| b != 0).map(|&b| b as char).collect::<String>().trim().to_owned();
     }
     Some((values, program))
 }

@@ -106,26 +106,51 @@ impl std::fmt::Display for Damaged {
 
 impl std::error::Error for Damaged {}
 
-pub(crate) fn u16_at(d: &[u8], at: usize) -> u16 {
-    u16::from_le_bytes([d[at], d[at + 1]])
+/// The `N` bytes at `at`, or zeros past the end. Callers check the length first, so a test run stops on one that
+/// forgot (a 0 read from nothing would look like channel 0 or insert 0); a release build reads on.
+fn zero_filled<const N: usize>(d: &[u8], at: usize) -> [u8; N] {
+    debug_assert!(at.checked_add(N).is_some_and(|end| end <= d.len()), "{N} bytes at {at} of {}", d.len());
+    bytes_at(d, at).unwrap_or([0; N])
 }
 
+/// The `N` bytes at `at`, if they're all there.
+pub(crate) fn bytes_at<const N: usize>(d: &[u8], at: usize) -> Option<[u8; N]> {
+    d.get(at..)?.first_chunk().copied()
+}
+
+/// The byte at `at`, or 0 past the end.
+pub(crate) fn byte_at(d: &[u8], at: usize) -> u8 {
+    d.get(at).copied().unwrap_or(0)
+}
+
+/// The number at `at` (see [`zero_filled`] for past the end).
+pub(crate) fn u16_at(d: &[u8], at: usize) -> u16 {
+    u16::from_le_bytes(zero_filled(d, at))
+}
+
+/// The number at `at` (see [`zero_filled`] for past the end).
 pub(crate) fn u32_at(d: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes([d[at], d[at + 1], d[at + 2], d[at + 3]])
+    u32::from_le_bytes(zero_filled(d, at))
 }
 
 /// The double at `at`, if the bytes are there.
 pub(crate) fn f64_at(d: &[u8], at: usize) -> Option<f64> {
-    d.get(at..)?.first_chunk().map(|b| f64::from_le_bytes(*b))
+    bytes_at(d, at).map(f64::from_le_bytes)
 }
 
 /// The 64-bit number at `at`, if the bytes are there.
 pub(crate) fn u64_at(d: &[u8], at: usize) -> Option<u64> {
-    d.get(at..)?.first_chunk().map(|b| u64::from_le_bytes(*b))
+    bytes_at(d, at).map(u64::from_le_bytes)
 }
 
+/// The number at `at` (see [`zero_filled`] for past the end).
 pub(crate) fn i32_at(d: &[u8], at: usize) -> i32 {
-    i32::from_le_bytes([d[at], d[at + 1], d[at + 2], d[at + 3]])
+    i32::from_le_bytes(zero_filled(d, at))
+}
+
+/// The float at `at` (see [`zero_filled`] for past the end).
+pub(crate) fn f32_at(d: &[u8], at: usize) -> f32 {
+    f32::from_le_bytes(zero_filled(d, at))
 }
 
 /// The number before the first dot of a version, or 0.
@@ -149,7 +174,7 @@ impl Flp<'_> {
 /// Reads the events of an FL Studio project. A file cut short or damaged part-way is read up to where it goes wrong,
 /// with a warning.
 pub fn load(raw: &[u8]) -> Result<Flp<'_>, Damaged> {
-    if raw.len() < 22 || &raw[..4] != b"FLhd" {
+    if raw.len() < 22 || !raw.starts_with(b"FLhd") {
         return Err(Damaged);
     }
     let header_len = i32_at(raw, 4);
@@ -160,7 +185,7 @@ pub fn load(raw: &[u8]) -> Result<Flp<'_>, Damaged> {
         Flp { ppq: u16_at(raw, 12), version: String::new(), major: 0, utf16: true, events: Vec::new(), warning: None };
     let dt = 8 + header_len as usize;
     let mut pos = dt + 8;
-    let end = if &raw[dt..dt + 4] == b"FLdt" {
+    let end = if raw.get(dt..dt + 4) == Some(b"FLdt") {
         let said = pos as i64 + i32_at(raw, dt + 4) as i64;
         if said > raw.len() as i64 {
             flp.warning = Some(CUT_SHORT);
@@ -174,8 +199,7 @@ pub fn load(raw: &[u8]) -> Result<Flp<'_>, Damaged> {
     };
 
     let mut major = 0;
-    while pos < end {
-        let id = raw[pos];
+    while let Some(&id) = raw.get(pos).filter(|_| pos < end) {
         pos += 1;
         let size = match id {
             0..64 => Some(1),
@@ -189,8 +213,7 @@ pub fn load(raw: &[u8]) -> Result<Flp<'_>, Damaged> {
                 let mut size = None;
                 let mut n = 0usize;
                 let mut shift = 0;
-                while shift < 35 && pos < end {
-                    let b = raw[pos];
+                while let Some(&b) = raw.get(pos).filter(|_| shift < 35 && pos < end) {
                     pos += 1;
                     n |= ((b & 0x7F) as usize) << shift;
                     if b & 0x80 == 0 {
@@ -203,11 +226,11 @@ pub fn load(raw: &[u8]) -> Result<Flp<'_>, Damaged> {
             }
         };
         // A file cut short or damaged: keep what's been read.
-        let Some(size) = size.filter(|&s| s <= end - pos) else {
+        let Some(data) = size.filter(|&s| s <= end - pos).and_then(|s| raw.get(pos..pos + s)) else {
             flp.warning.get_or_insert(CUT_SHORT);
             break;
         };
-        let data = &raw[pos..pos + size];
+        let size = data.len();
         if id == EV_VERSION && major == 0 {
             major = major_of(&String::from_utf8_lossy(data));
         }

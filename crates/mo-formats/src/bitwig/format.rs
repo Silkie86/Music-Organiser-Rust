@@ -92,7 +92,8 @@ impl Blob {
     }
 
     pub fn bytes(&self) -> &[u8] {
-        &self.data[self.start..self.start + self.len]
+        // Its bounds were checked against the file when it was read.
+        self.data.get(self.start..self.start + self.len).unwrap_or_default()
     }
 }
 
@@ -329,11 +330,15 @@ pub fn is_bitwig(raw: &[u8]) -> bool {
 pub struct NotBitwig;
 
 impl Document {
-    /// The object with this id.
+    /// The object with this id. Ids come from the document itself (each reference is checked as it's read), so one
+    /// that isn't there is a mistake in the app's code, not a damaged file.
+    #[allow(clippy::indexing_slicing)]
     pub fn obj(&self, id: ObjId) -> &Object {
         &self.objects[id.0 as usize]
     }
 
+    /// As [`Document::obj`], to change it.
+    #[allow(clippy::indexing_slicing)]
     pub fn obj_mut(&mut self, id: ObjId) -> &mut Object {
         &mut self.objects[id.0 as usize]
     }
@@ -418,10 +423,13 @@ pub fn decode(raw: impl Into<Arc<[u8]>>) -> Result<Document, NotBitwig> {
     if !is_bitwig(&raw) {
         return Err(NotBitwig);
     }
-    let mut header = [0u8; 38];
-    header.copy_from_slice(&raw[4..HEADER]);
+    let Some(&header) = raw.get(4..).and_then(|h| h.first_chunk::<{ HEADER - 4 }>()) else { return Err(NotBitwig) };
     let hex = |range: std::ops::Range<usize>| {
-        std::str::from_utf8(&header[range]).ok().and_then(|s| u64::from_str_radix(s, 16).ok()).unwrap_or(0)
+        header
+            .get(range)
+            .and_then(|h| std::str::from_utf8(h).ok())
+            .and_then(|s| u64::from_str_radix(s, 16).ok())
+            .unwrap_or(0)
     };
     let body = hex(12..20) as usize;
     let in_header = hex(20..36) as usize;
@@ -633,14 +641,15 @@ impl<'a> Reader<'a> {
         };
         let mut stack = vec![bottom];
         loop {
-            let top = stack.len() - 1;
+            // The stack is never empty here: the bottom frame finishing returns.
+            let Some(top) = stack.len().checked_sub(1) else { return Err(LOST.into()) };
             // What the frame on top does next: wait for an object it started, or finish with a value.
-            let done: Option<Value> = match &mut stack[top] {
+            let done: Option<Value> = match on(&mut stack, top)? {
                 Frame::Obj { id, fields, pending } => {
                     let (id, fid) = (*id, self.u32(*p)?);
                     *p += 4;
                     if fid == 0 {
-                        self.objects[id.0 as usize].fields = std::mem::take(fields);
+                        self.objects.get_mut(id.0 as usize).ok_or(LOST)?.fields = std::mem::take(fields);
                         self.depth -= 1;
                         stack.pop();
                         deliver(&mut stack, Slot::Obj(id))?;
@@ -653,7 +662,7 @@ impl<'a> Reader<'a> {
                         0x09 => {
                             *pending = fid;
                             if let Some(slot) = self.start_slot(p, inside, &mut stack)? {
-                                field(&mut stack[top], fid, Value::Obj(slot));
+                                field(on(&mut stack, top)?, fid, Value::Obj(slot));
                             }
                         }
                         0x12 => stack.push(Frame::List { parent: inside, items: Vec::new() }),
@@ -661,7 +670,7 @@ impl<'a> Reader<'a> {
                         0x1a => stack.push(Frame::Named { parent: inside, slot: None }),
                         _ => {
                             let value = self.plain(p, ty)?;
-                            field(&mut stack[top], fid, value);
+                            field(on(&mut stack, top)?, fid, value);
                         }
                     }
                     continue;
@@ -717,7 +726,7 @@ impl<'a> Reader<'a> {
             };
             // Each frame above either goes on or finishes, so these are always there.
             let (Some(value), Some(finished)) = (done, stack.pop()) else {
-                return Err(format!("lost its place at 0x{:x}", *p));
+                return Err(format!("{LOST} at 0x{:x}", *p));
             };
             match stack.last_mut() {
                 None => return Ok(value),
@@ -833,6 +842,14 @@ fn field(frame: &mut Frame, id: u32, value: Value) {
     if let Frame::Obj { fields, .. } = frame {
         fields.push(Field { id, value });
     }
+}
+
+/// What decoding says if its own bookkeeping goes wrong (never from a damaged file).
+const LOST: &str = "lost its place";
+
+/// The frame at `at` in the stack.
+fn on(stack: &mut [Frame], at: usize) -> R<&mut Frame> {
+    stack.get_mut(at).ok_or_else(|| LOST.to_owned())
 }
 
 /// An object slot read (an object finished, a reference or none), into what's on top.

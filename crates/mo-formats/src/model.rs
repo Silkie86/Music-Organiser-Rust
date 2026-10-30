@@ -176,6 +176,8 @@ pub struct MidiClip {
 
 impl MidiClip {
     /// The track's notes, adding the track if it isn't there yet.
+    // `at` is where the track was just found or added.
+    #[allow(clippy::indexing_slicing)]
     pub fn track(&mut self, name: &str) -> &mut Vec<NoteEvent> {
         let at = match self.tracks.iter().position(|(n, _)| n == name) {
             Some(at) => at,

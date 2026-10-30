@@ -150,15 +150,18 @@ fn cut_curve(curve: &[FlPoint], at: f64, from: f64, length: f64, hold: bool) -> 
         return Vec::new();
     }
     let value_at = |beat: f64, arriving: bool| {
-        let first = curve.iter().position(|p| p.beat >= beat - SAME_BEAT);
+        let first = curve.iter().find(|p| p.beat >= beat - SAME_BEAT);
         if arriving
             && let Some(f) = first
-            && curve[f].beat <= beat + SAME_BEAT
+            && f.beat <= beat + SAME_BEAT
         {
-            return curve[f].value;
+            return f.value;
         }
-        let Some(last) = curve.iter().rposition(|p| p.beat <= beat + SAME_BEAT) else { return curve[0].value };
-        let a = curve[last];
+        // Before the first point, the curve starts at its value.
+        let Some(last) = curve.iter().rposition(|p| p.beat <= beat + SAME_BEAT) else {
+            return curve.first().map_or(0.0, |p| p.value);
+        };
+        let Some(&a) = curve.get(last) else { return 0.0 };
         match curve.get(last + 1) {
             Some(b) if !hold && a.beat < beat - SAME_BEAT => {
                 a.value + (b.value - a.value) * (beat - a.beat) / (b.beat - a.beat)
@@ -328,15 +331,9 @@ impl OnOff {
     }
 
     fn on(&self, beat: f64) -> bool {
-        let mut at = self.points[0];
-        for &p in &self.points {
-            if p.beat <= beat + SAME_BEAT {
-                at = p;
-            } else {
-                break;
-            }
-        }
-        at.value >= 0.5
+        // The last point at or before the beat; before the first, the first. With no points at all, it stays on.
+        let at = self.points.iter().take_while(|p| p.beat <= beat + SAME_BEAT).last().or(self.points.first());
+        at.is_none_or(|p| p.value >= 0.5)
     }
 
     /// Whether it's `on` (or off) all the way from one tick to another.
