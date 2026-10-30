@@ -10,11 +10,19 @@ use std::collections::HashMap;
 use common::studio_one::*;
 use common::test_dir;
 use mo_formats::studio_one::{self, Song};
-use mo_formats::{NoteEvent, PluginKind, velocity};
+use mo_formats::{NoteAttribute, NoteEvent, PluginKind, velocity};
 
 /// A note as Studio One writes it, its velocity 0 to 1.
 fn note(start: i64, length: i64, key: u8, studio_one_velocity: f64) -> NoteEvent {
-    NoteEvent { start, length, key, velocity: velocity::from_unit(studio_one_velocity), muted: false, step: false }
+    NoteEvent {
+        start,
+        length,
+        key,
+        velocity: velocity::from_unit(studio_one_velocity),
+        muted: false,
+        step: false,
+        attribute: NoteAttribute::NONE,
+    }
 }
 
 #[test]

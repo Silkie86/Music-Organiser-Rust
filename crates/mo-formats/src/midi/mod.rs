@@ -1,10 +1,32 @@
 //! MIDI files from the MIDI library (loop packs, sketches): read only, never changed. Standard MIDI Files are read
 //! here as the C# app's `MidiFileReader` reads them; each track (or each channel of a track holding several) becomes
-//! a part.
+//! a part. MIDI 2.0's Clip Files are read too ([`clip`]), a part for each channel with notes.
 
+pub mod clip;
 pub mod smf;
 
+use std::collections::{HashMap, VecDeque};
+use std::hash::Hash;
+use std::io;
+use std::path::Path;
+
 use crate::model::NoteEvent;
+
+/// Whether the MIDI library reads a path: a Standard MIDI File or a MIDI Clip File, by its ending.
+pub fn is_midi_path(path: &str) -> bool {
+    smf::is_midi_path(path) || clip::is_clip_path(path)
+}
+
+/// Reads a MIDI file's bytes, already read from `path`: a MIDI Clip File when it starts as one (whatever its
+/// ending), a Standard MIDI File otherwise.
+pub fn read_from(raw: &[u8], path: &Path) -> io::Result<Vec<MidiPart>> {
+    if raw.starts_with(clip::MAGIC) { clip::read_bytes(raw) } else { smf::read_from(raw, path) }
+}
+
+/// Reads a MIDI file from disk, as [`read_from`].
+pub fn read(path: &Path) -> io::Result<Vec<MidiPart>> {
+    read_from(&std::fs::read(path)?, path)
+}
 
 /// One part found in a MIDI file: a track, or one MIDI channel of a track that holds several, with its notes.
 #[derive(Clone, Debug, PartialEq)]
@@ -23,4 +45,72 @@ pub struct MidiPart {
     pub program: Option<u8>,
     /// The track's own name, kept even where `name` leaves it out.
     pub track_name: String,
+    /// The channel's controllers, pitch bend and pressure, in order, at MIDI 2.0's 32 bits (rule 22). Read from MIDI
+    /// Clip Files; a Standard MIDI File's are left out, as in the C# app.
+    pub controllers: Vec<Controller>,
+}
+
+/// A controller, pitch bend or pressure moving, at MIDI 2.0's 32 bits (a MIDI 1.0 value scaled up by MIDI 2.0's
+/// rule, [`crate::scale_up`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Controller {
+    /// When, in ticks at the part's PPQ.
+    pub tick: i64,
+    pub kind: ControllerKind,
+    /// 0 to `u32::MAX`; pitch bend's middle (no bend) is `0x8000_0000`.
+    pub value: u32,
+}
+
+/// What a [`Controller`] moves. The per-note ones (MIDI 2.0's) name their key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ControllerKind {
+    /// A control change, by its number (0 to 127).
+    Control(u8),
+    PitchBend,
+    ChannelPressure,
+    /// Polyphonic (per-key) pressure.
+    KeyPressure(u8),
+    /// MIDI 2.0's per-note pitch bend, by key.
+    NotePitchBend(u8),
+    /// MIDI 2.0's registered per-note controller: key, then the controller's number.
+    NoteRegistered(u8, u8),
+    /// MIDI 2.0's assignable per-note controller: key, then the controller's number.
+    NoteAssignable(u8, u8),
+}
+
+/// Notes still held, by key (a channel and a note), with what each was struck with; in the order the keys were first
+/// struck, so notes never released end in the same order every time (and as in the C# app).
+pub(crate) struct Held<K, V> {
+    index: HashMap<K, usize>,
+    keys: Vec<(K, VecDeque<V>)>,
+}
+
+impl<K, V> Default for Held<K, V> {
+    fn default() -> Self {
+        Held { index: HashMap::new(), keys: Vec::new() }
+    }
+}
+
+impl<K: Hash + Eq + Copy, V> Held<K, V> {
+    /// A key struck. Struck again before it's released, it stacks: each release ends the earliest.
+    pub(crate) fn strike(&mut self, key: K, struck: V) {
+        let i = *self.index.entry(key).or_insert_with(|| {
+            self.keys.push((key, VecDeque::new()));
+            self.keys.len() - 1
+        });
+        if let Some((_, queue)) = self.keys.get_mut(i) {
+            queue.push_back(struck);
+        }
+    }
+
+    /// A key released: the earliest of its notes still held, if any (a release of a key never struck starts nothing).
+    pub(crate) fn release(&mut self, key: K) -> Option<V> {
+        let i = *self.index.get(&key)?;
+        self.keys.get_mut(i)?.1.pop_front()
+    }
+
+    /// Every note still held, key by key in the order the keys were first struck.
+    pub(crate) fn into_held(self) -> impl Iterator<Item = (K, V)> {
+        self.keys.into_iter().flat_map(|(k, q)| q.into_iter().map(move |v| (k, v)))
+    }
 }

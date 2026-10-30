@@ -122,6 +122,22 @@ pub struct NoteEvent {
     pub muted: bool,
     /// Entered in FL's step sequencer: it has no length of its own and FL plays it until its sound ends.
     pub step: bool,
+    /// MIDI 2.0's note attribute (an articulation, or a pitch in 7.9 form) when the file gives one (rule 22);
+    /// [`NoteAttribute::NONE`] when it doesn't. Kept without an `Option`, so a note stays 24 bytes.
+    pub attribute: NoteAttribute,
+}
+
+/// A MIDI 2.0 note's attribute: its type (0 none, 1 the maker's own, 2 a profile's, 3 a pitch in 7.9 form) and 16
+/// bits of data.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NoteAttribute {
+    pub kind: u8,
+    pub data: u16,
+}
+
+impl NoteAttribute {
+    /// No attribute: type 0, as MIDI 2.0 writes it.
+    pub const NONE: NoteAttribute = NoteAttribute { kind: 0, data: 0 };
 }
 
 impl NoteEvent {
@@ -129,6 +145,26 @@ impl NoteEvent {
     pub fn velocity7(&self) -> u8 {
         velocity::to_7(self.velocity)
     }
+}
+
+/// MIDI 2.0's rule for giving a value more bits (the Universal MIDI Packet spec's "min-center-max" scaling): 0 stays
+/// 0, the middle stays the middle, the top becomes the top, and cutting the bits off again gives the value back.
+pub fn scale_up(value: u32, from_bits: u32, to_bits: u32) -> u32 {
+    let shift = to_bits - from_bits;
+    let value = value & ((1u64 << from_bits) - 1) as u32;
+    let mut out = value << shift;
+    if value <= 1 << (from_bits - 1) {
+        return out;
+    }
+    // Above the middle, the bits below the top one are repeated down into the new ones.
+    let repeat_bits = from_bits - 1;
+    let mut repeat = value & ((1 << repeat_bits) - 1);
+    repeat = if shift > repeat_bits { repeat << (shift - repeat_bits) } else { repeat >> (repeat_bits - shift) };
+    while repeat != 0 {
+        out |= repeat;
+        repeat >>= repeat_bits;
+    }
+    out
 }
 
 /// Note velocities in MIDI 2.0's 16 bits (rule 22), and to and from MIDI 1.0's 7.

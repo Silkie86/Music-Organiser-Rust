@@ -5,7 +5,7 @@
 use std::collections::HashSet;
 
 use super::events::{byte_at, u16_at, u32_at};
-use crate::model::{NoteEvent, velocity};
+use crate::model::{NoteAttribute, NoteEvent, velocity};
 
 /// The size of the note records in an event, by FL's version (rule 9): 24 bytes from FL 9, 20 bytes in FL 4 to 8.
 /// Notes the reader made from old step sequencer dots are always 24. Without a version, or in an FL 4 to 8 save whose
@@ -55,6 +55,7 @@ pub fn decode(data: &[u8], size: usize) -> Vec<(u32, NoteEvent)> {
                 velocity,
                 muted: size == 24 && byte_at(r, 19) & 0x20 != 0,
                 step: length == 0,
+                attribute: NoteAttribute::NONE,
             };
             (u16_at(r, 6) as u32, note)
         })

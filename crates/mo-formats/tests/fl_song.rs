@@ -10,12 +10,12 @@ use std::collections::BTreeMap;
 
 use common::*;
 use mo_formats::fl::{self, events, song};
-use mo_formats::{MidiChannel, NoteEvent, SampleUse};
+use mo_formats::{MidiChannel, NoteAttribute, NoteEvent, SampleUse};
 
 /// A note as read from FL, its velocity as FL writes it (0 to 128).
 fn note(start: i64, length: i64, key: u8, fl_velocity: u8) -> NoteEvent {
     let velocity = mo_formats::velocity::from_unit(fl_velocity as f64 / 128.0);
-    NoteEvent { start, length, key, velocity, muted: false, step: false }
+    NoteEvent { start, length, key, velocity, muted: false, step: false, attribute: NoteAttribute::NONE }
 }
 
 fn channels(bytes: &[u8]) -> BTreeMap<String, MidiChannel> {

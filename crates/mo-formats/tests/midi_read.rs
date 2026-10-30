@@ -8,11 +8,19 @@ mod common;
 
 use common::midi::*;
 use mo_formats::midi::smf::{self, read_bytes};
-use mo_formats::{NoteEvent, velocity};
+use mo_formats::{NoteAttribute, NoteEvent, velocity};
 
 /// A note as a MIDI 1.0 file writes it.
 fn note(start: i64, length: i64, key: u8, vel: u8) -> NoteEvent {
-    NoteEvent { start, length, key, velocity: velocity::from_7(vel), muted: false, step: false }
+    NoteEvent {
+        start,
+        length,
+        key,
+        velocity: velocity::from_7(vel),
+        muted: false,
+        step: false,
+        attribute: NoteAttribute::NONE,
+    }
 }
 
 #[test]

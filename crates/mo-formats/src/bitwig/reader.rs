@@ -11,7 +11,7 @@ use std::io::Read;
 use std::path::Path;
 
 use super::format::{Document, ObjId, Value, decode};
-use crate::model::{Confidence, MidiClip, NoteEvent, PluginKind, PluginRef, ProjectInfo};
+use crate::model::{Confidence, MidiClip, NoteAttribute, NoteEvent, PluginKind, PluginRef, ProjectInfo};
 use crate::paths;
 use crate::plugins;
 use crate::presets::PresetBlob;
@@ -564,6 +564,7 @@ pub fn extract_midi(doc: &Document, names: &TrackNames) -> Vec<MidiClip> {
                 velocity: crate::model::velocity::from_unit(velocity),
                 muted: false,
                 step: false,
+                attribute: NoteAttribute::NONE,
             });
         }
     }
