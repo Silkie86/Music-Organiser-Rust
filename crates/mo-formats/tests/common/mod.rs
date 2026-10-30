@@ -141,18 +141,176 @@ pub fn note(pos: u32, channel: u16, length: u32, key: u16, velocity: u8) -> Vec<
     b
 }
 
-/// An FL 25 playlist item (80 bytes).
+/// An FL 25 playlist item (80 bytes) on track slot 499 (track 1 of 500), not muted, not trimmed.
 pub fn playlist_item_25(pos: u32, index: u16, length: u32) -> Vec<u8> {
+    playlist_item_25_on(pos, index, length, 499, false)
+}
+
+/// An FL 25 playlist item (80 bytes): index 20480 + n is pattern n, a smaller index a channel's clip; `track` is the
+/// slot FL saves (499 is track 1 of 500).
+pub fn playlist_item_25_on(pos: u32, index: u16, length: u32, track: u16, muted: bool) -> Vec<u8> {
     let mut b = vec![0u8; 80];
     b[..4].copy_from_slice(&pos.to_le_bytes());
     b[4..6].copy_from_slice(&20480u16.to_le_bytes());
     b[6..8].copy_from_slice(&index.to_le_bytes());
     b[8..12].copy_from_slice(&length.to_le_bytes());
-    b[12..14].copy_from_slice(&499u16.to_le_bytes());
-    b[18..20].copy_from_slice(&0x0040u16.to_le_bytes());
+    b[12..14].copy_from_slice(&track.to_le_bytes());
+    b[18..20].copy_from_slice(&(if muted { 0x2040u16 } else { 0x0040 }).to_le_bytes());
     b[24..28].copy_from_slice(&(-1f32).to_le_bytes());
     b[28..32].copy_from_slice(&(-1f32).to_le_bytes());
     b
+}
+
+/// An FL 20 playlist item (32 bytes) placing a pattern; offset -1 = from its start.
+pub fn playlist_item(pos: u32, pattern: u16, length: u32, offset: i32) -> Vec<u8> {
+    let mut b = vec![0u8; 32];
+    b[..4].copy_from_slice(&pos.to_le_bytes());
+    b[4..6].copy_from_slice(&20480u16.to_le_bytes());
+    b[6..8].copy_from_slice(&(20480 + pattern).to_le_bytes());
+    b[8..12].copy_from_slice(&length.to_le_bytes());
+    b[24..28].copy_from_slice(&offset.to_le_bytes());
+    b[28..32].copy_from_slice(&(-1i32).to_le_bytes());
+    b
+}
+
+/// An FL 25 playlist track's settings (event 238, 70 bytes): its number (1 at the top), colour, icon, then 1 at byte
+/// 12 when it plays, 0 when it's muted.
+pub fn playlist_track(number: u32, muted: bool) -> Vec<u8> {
+    let mut b = vec![0u8; 70];
+    b[..4].copy_from_slice(&number.to_le_bytes());
+    b[4..8].copy_from_slice(&0x485156u32.to_le_bytes());
+    b[12] = if muted { 0 } else { 1 };
+    b[13..17].copy_from_slice(&1f32.to_le_bytes());
+    b
+}
+
+/// A channel's levels (event 219): pan and volume out of 12800 (128 before FL 6), pitch in cents.
+pub fn levels(pan: i32, volume: i32, pitch_cents: i32) -> Vec<u8> {
+    let mut b = vec![0u8; 24];
+    b[..4].copy_from_slice(&pan.to_le_bytes());
+    b[4..8].copy_from_slice(&volume.to_le_bytes());
+    b[8..12].copy_from_slice(&pitch_cents.to_le_bytes());
+    b[12..16].copy_from_slice(&256i32.to_le_bytes());
+    b
+}
+
+/// A sampler's settings (event 215) as FL 25 writes them, with its time stretching.
+pub fn channel_params(time: i32, cents: i32, multiplier: i32, mode: i32) -> Vec<u8> {
+    let v: [i32; 42] = [
+        140, 0, 1, -1, 60, 1065353216, 1065353216, 1065353216, 1065353216, 1065353216, 0, 3, 0, 1024, 48, 65536, 1447,
+        0, 256, 0, 16777216, 0, 0, 1, time, cents, multiplier, mode, 2, -2, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    v.iter().flat_map(|x| x.to_le_bytes()).collect()
+}
+
+/// Like the C# tests' FL 25 header: version, build, and the 3-byte event 172.
+fn fl_25() -> Flp {
+    Flp::new()
+        .ascii(199, "25.2.5.5319")
+        .dword(159, 5319)
+        .byte(28, 1)
+        .raw(&[172, 1, 1, 0])
+        .text(192, "FL Studio 25.2.5.5319")
+}
+
+/// Three sampler channels: "Snare" playing in pattern 1 (in the playlist), "Kick" with no notes at all, and "Hat"
+/// playing in pattern 2, whose only clip in the playlist is muted unless `hat_plays`.
+pub fn fl_studio_25_unplayed(hat_plays: bool) -> Vec<u8> {
+    let playlist = [playlist_item_25(0, 20481, 384), playlist_item_25_on(384, 20482, 384, 499, !hat_plays)].concat();
+    fl_25()
+        .dword(156, 140_000)
+        .word(65, 1)
+        .text(193, "Snares")
+        .data(224, &note(0, 0, 48, 60, 100))
+        .word(65, 2)
+        .text(193, "Hats")
+        .data(224, &note(0, 2, 48, 60, 100))
+        .word(64, 0)
+        .byte(21, 0)
+        .text(201, "")
+        .text(203, "Snare")
+        .text(196, r"C:\Samples\Snare 01.wav")
+        .word(64, 1)
+        .byte(21, 0)
+        .text(201, "")
+        .text(203, "Kick")
+        .text(196, r"C:\Samples\Kick 01.wav")
+        .word(64, 2)
+        .byte(21, 0)
+        .text(201, "")
+        .text(203, "Hat")
+        .text(196, r"C:\Samples\Hat 01.wav")
+        .data(233, &playlist)
+        .build()
+}
+
+/// Solomon's "civil_18" laid out small: tracks 2 ("Acapellas") and 4 muted in the first arrangement, track 1 in the
+/// second; samplers Snare, Hat (switched off) and Pad, and audio clip channels Acapella and Vox (Vox switched off).
+pub fn fl_studio_25_muted_tracks() -> Vec<u8> {
+    let playlist = [
+        playlist_item_25(0, 20481, 384),
+        playlist_item_25_on(384, 20481, 384, 498, false),
+        playlist_item_25_on(0, 2, 768, 498, false),
+        playlist_item_25_on(768, 2, 384, 496, false),
+        playlist_item_25(0, 3, 384),
+        playlist_item_25_on(192, 3, 384, 497, false),
+        playlist_item_25_on(768, 20482, 384, 496, false),
+    ]
+    .concat();
+    let verse = [note(0, 0, 96, 60, 100), note(0, 1, 48, 66, 100)].concat();
+    let mut b = fl_25()
+        .dword(156, 120_000)
+        .byte(0, 0)
+        .word(65, 1)
+        .text(193, "Verse")
+        .data(224, &verse)
+        .word(65, 2)
+        .text(193, "Pad")
+        .data(224, &note(0, 4, 192, 64, 100))
+        .word(64, 0)
+        .byte(21, 0)
+        .text(201, "")
+        .text(203, "Snare")
+        .byte(0, 1)
+        .text(196, r"C:\Samples\Snare 01.wav")
+        .word(64, 1)
+        .byte(21, 0)
+        .text(201, "")
+        .text(203, "Hat")
+        .byte(0, 0)
+        .text(196, r"C:\Samples\Hat 01.wav")
+        .word(64, 2)
+        .byte(21, 4)
+        .byte(0, 1)
+        .data(215, &channel_params(0, 0, 0, 1))
+        .text(203, "Acapella")
+        .text(196, r"C:\Samples\Acapella.wav")
+        .word(64, 3)
+        .byte(21, 4)
+        .byte(0, 0)
+        .data(215, &channel_params(0, 0, 0, 1))
+        .text(203, "Vox")
+        .text(196, r"C:\Samples\Vox.wav")
+        .word(64, 4)
+        .byte(21, 0)
+        .text(201, "")
+        .text(203, "Pad")
+        .byte(0, 1)
+        .text(196, r"C:\Samples\Pad.wav")
+        .word(99, 0)
+        .text(241, "Arrangement")
+        .data(233, &playlist);
+    for n in 1..=500 {
+        b = b.data(238, &playlist_track(n, n == 2 || n == 4));
+        if n == 2 {
+            b = b.text(239, "Acapellas");
+        }
+    }
+    b = b.word(99, 1).text(241, "Arrangement 2").data(233, &playlist_item_25(0, 20481, 384));
+    for n in 1..=500 {
+        b = b.data(238, &playlist_track(n, n == 1));
+    }
+    b.build()
 }
 
 /// FL's VST2 state: a 21-byte header in front of the plugin's own chunk.
@@ -164,6 +322,26 @@ pub fn fl_vst2_state(chunk: &[u8], program: u32) -> Vec<u8> {
     b[9..13].copy_from_slice(&(chunk.len() as u32).to_le_bytes());
     b[17..21].copy_from_slice(&program.to_le_bytes());
     b.extend(chunk);
+    b
+}
+
+/// FL's VST2 state for a plugin without chunks that has several programs, as FL 10 and 21 save Tone2's FireBird: the
+/// 21-byte header with the selected program, every program's values one after another, then u32 the number of programs
+/// and their names, 25 bytes apart.
+pub fn fl_vst2_param_bank(programs: &[&[f32]], names: &[&str], selected: i32) -> Vec<u8> {
+    let mut b = vec![0u8; 21];
+    b[..4].copy_from_slice(&(-9i32).to_le_bytes());
+    b[4] = 0x05;
+    b[5..9].copy_from_slice(&(-2i32).to_le_bytes());
+    b[17..21].copy_from_slice(&selected.to_le_bytes());
+    b.extend((programs.iter().map(|p| p.len()).sum::<usize>() as u32).to_le_bytes());
+    b.extend(programs.iter().flat_map(|p| p.iter()).flat_map(|v| v.to_le_bytes()));
+    b.extend((programs.len() as u32).to_le_bytes());
+    for n in names {
+        let mut name = [0u8; 25];
+        name[..n.len()].copy_from_slice(n.as_bytes());
+        b.extend(name);
+    }
     b
 }
 
@@ -225,8 +403,13 @@ pub fn fl_vst3_state(component: &[u8], controller: &[u8], parameter_ids: &[u32])
 /// Three channels (Serum VST on "Lead", a sampler "Kick", native 3x Osc "Bass"), two patterns with notes, and a mixer
 /// with Fruity Limiter and a Pro-Q 3 VST. The C# tests' "Night Drive".
 pub fn fl_studio_project() -> Vec<u8> {
+    fl_studio_project_with(None)
+}
+
+/// [`fl_studio_project`] with a playlist.
+pub fn fl_studio_project_with(playlist: Option<&[u8]>) -> Vec<u8> {
     let notes: Vec<u8> = [note(0, 0, 96, 60, 100), note(96, 0, 96, 64, 128), note(0, 1, 24, 36, 100)].concat();
-    Flp::new()
+    let b = Flp::new()
         .ascii(199, "21.2.3.4004")
         .dword(156, 128_000)
         .text(194, "Night Drive (title)")
@@ -259,8 +442,11 @@ pub fn fl_studio_project() -> Vec<u8> {
         .word(98, 0)
         .text(201, "Fruity Wrapper")
         .data(213, &Wrapper::new("Pro-Q 3", r"C:\VstPlugins\FabFilter Pro-Q 3.dll", "FabFilter", &[7, 7]).build())
-        .word(98, 1)
-        .build()
+        .word(98, 1);
+    match playlist {
+        Some(p) => b.data(233, p).build(),
+        None => b.build(),
+    }
 }
 
 /// Like Solomon's funk step_8 (FL 9.0.0, 2010): channel "Cell" plays KORG LegacyCell, whose chunk sits behind FL 9's
@@ -414,5 +600,308 @@ pub fn fl_studio_25_project() -> Vec<u8> {
         .text(201, "Fruity Wrapper")
         .text(203, "Arp")
         .data(213, &predator.build())
+        .build()
+}
+
+/// An automation clip's points (event 234), each (beats since the previous point, value).
+pub fn automation_points(points: &[(f64, f64)]) -> Vec<u8> {
+    let mut b = vec![0u8; 21];
+    b[..4].copy_from_slice(&1u32.to_le_bytes());
+    b[4..8].copy_from_slice(&64u32.to_le_bytes());
+    b[9..13].copy_from_slice(&4u32.to_le_bytes());
+    b[13..17].copy_from_slice(&3u32.to_le_bytes());
+    b[17..21].copy_from_slice(&(points.len() as u32).to_le_bytes());
+    for &(step, value) in points {
+        b.extend(step.to_le_bytes());
+        b.extend(value.to_le_bytes());
+        b.extend([0; 8]);
+    }
+    b
+}
+
+/// The mixer's settings (event 225): u32 0, u32 target, i32 value for each.
+pub fn mixer_settings(settings: &[(u32, i32)]) -> Vec<u8> {
+    settings.iter().flat_map(|&(t, v)| [0u32.to_le_bytes(), t.to_le_bytes(), v.to_le_bytes()].concat()).collect()
+}
+
+/// What an automation clip moves (event 227): its channel, and the target (channel << 16 | control).
+pub fn automation_link(clip: u16, target: u32) -> Vec<u8> {
+    let mut b = vec![0u8; 20];
+    b[2..4].copy_from_slice(&clip.to_le_bytes());
+    b[8..12].copy_from_slice(&target.to_le_bytes());
+    b[12..16].copy_from_slice(&8u32.to_le_bytes());
+    b
+}
+
+/// An FL 25 song at 132 bpm: a sampler "Snare" (root key A4, pitch -2 semitones, pan 25%, volume 100%) with an
+/// automation clip on its volume in bar 2, and a Serum VST (root key E5) with an automation clip on parameter 205 in
+/// bar 1. The pattern sits in bar 2. The volume's clip can be switched off in the Channel Rack.
+pub fn fl_studio_25_automation(volume_placed_twice: bool, volume_off: bool) -> Vec<u8> {
+    let serum = Wrapper {
+        version: 12,
+        kind: Some(4),
+        four_cc: Some("XfsX"),
+        ..Wrapper::new("Serum", r"C:\VstPlugins\Serum_x64.dll", "Xfer Records", &fl_vst2_state(&[1, 2, 3], 0))
+    };
+    let mut playlist = [
+        playlist_item_25(384, 20481, 384),
+        playlist_item_25_on(384, 1, 384, 498, false),
+        playlist_item_25_on(0, 3, 384, 497, false),
+    ]
+    .concat();
+    if volume_placed_twice {
+        playlist.extend(playlist_item_25_on(1152, 1, 384, 498, false));
+    }
+    fl_25()
+        .dword(156, 132_000)
+        .word(65, 1)
+        .data(224, &[note(0, 0, 48, 72, 100), note(0, 2, 96, 60, 100)].concat())
+        .data(227, &automation_link(1, 0))
+        .data(227, &automation_link(3, 2 << 16 | 0x80cd))
+        .word(64, 0)
+        .byte(21, 0)
+        .text(201, "")
+        .text(203, "Snare")
+        .dword(135, 57)
+        .data(219, &levels(3200, 12800, -200))
+        .text(196, r"C:\Samples\Snare 01.wav")
+        .word(64, 1)
+        .byte(21, 5)
+        .text(201, "")
+        .text(203, "Snare - Channel volume")
+        .byte(0, if volume_off { 0 } else { 1 })
+        .data(219, &levels(0, 12800, 0))
+        .data(234, &automation_points(&[(0.0, 0.0), (4.0, 1.0)]))
+        .word(64, 2)
+        .byte(21, 2)
+        .text(201, "Fruity Wrapper")
+        .text(203, "Serum")
+        .data(213, &serum.build())
+        .dword(135, 64)
+        .word(64, 3)
+        .byte(21, 5)
+        .text(201, "")
+        .text(203, "Serum - Cutoff")
+        .data(234, &automation_points(&[(0.0, 0.2), (2.0, 1.0), (2.0, 0.5)]))
+        .data(233, &playlist)
+        .build()
+}
+
+/// Like Solomon's civil_18 and its Serum: an FL 25 song at 120 bpm whose "Bass" (Serum, routed to insert 1) is
+/// switched off in the Channel Rack, but an automation clip switches it: off for beats 0-4, on 4-8, off 8-12, then
+/// on, its last points a few millionths of a beat past the clip's end as FL saves them. Pattern "Bass" (notes on beats
+/// 1 and 3) plays at beats 0, 4 and 10. The "Vox" audio clip channel is switched off from beat 2 by another, and plays
+/// clips at beats 0-4 and 4-6. Insert 1 has Pro-Q 3 in slot 0 and WOW2, switched off, in slot 1; its fader is moved.
+/// Automation clips also move Pro-Q 3's fourth setting, the tempo and insert 1's fader. FL 25 numbers its mixer
+/// settings from 0x7000. With `more`: a second clip switches the bass off at beat 16 and on at 20 (the pattern plays
+/// at 16 and 20 too), another switches WOW2 on and off, and the bass volume rises 0 to 1 over beats 0-4 and jumps back
+/// to 0 at the clip's end, placed twice in a row; and playlist track 3, the vox's, is muted.
+pub fn fl_studio_25_switched_and_mixer(more: bool) -> Vec<u8> {
+    const INSERT1: u32 = 0x7040 << 16;
+    let wrapper = |name: &'static str, path: &'static str, vendor: &'static str, state: u8, four_cc: &'static str| {
+        Wrapper {
+            version: 12,
+            kind: Some(4),
+            four_cc: Some(four_cc),
+            ..Wrapper::new(name, path, vendor, &fl_vst2_state(&[state], 0))
+        }
+        .build()
+    };
+    let serum = Wrapper {
+        version: 12,
+        kind: Some(4),
+        four_cc: Some("XfsX"),
+        ..Wrapper::new("Serum", r"C:\VstPlugins\Serum_x64.dll", "Xfer Records", &fl_vst2_state(&[1, 2, 3], 0))
+    };
+    let mut b = fl_25()
+        .dword(156, 120_000)
+        .word(65, 1)
+        .text(193, "Bass")
+        .data(224, &[note(0, 0, 48, 36, 100), note(192, 0, 48, 38, 100)].concat())
+        .data(227, &automation_link(1, 7))
+        .data(227, &automation_link(3, 2 << 16 | 7))
+        .data(227, &automation_link(4, INSERT1 | 0x8003))
+        .data(227, &automation_link(5, 0x40000005))
+        .data(227, &automation_link(6, INSERT1 | 0x1fc0));
+    if more {
+        b = b
+            .data(227, &automation_link(7, 7))
+            .data(227, &automation_link(8, 0x7041 << 16 | 0x1f00))
+            .data(227, &automation_link(9, 0));
+    }
+    let clip = |b: Flp, n: u16, name: &str, points: &[(f64, f64)]| {
+        b.word(64, n).byte(21, 5).byte(0, 1).text(201, "").text(203, name).data(234, &automation_points(points))
+    };
+    b = b
+        .word(64, 0)
+        .byte(21, 2)
+        .byte(0, 0)
+        .word(104, 1)
+        .text(201, "Fruity Wrapper")
+        .text(203, "Bass")
+        .data(213, &serum.build());
+    b = clip(b, 1, "Bass - Mute / solo", &[(0.0, 0.0), (4.0, 1.0), (4.0, 0.0), (4.000008, 0.0), (0.0, 0.97)]);
+    b = b
+        .word(64, 2)
+        .byte(21, 4)
+        .byte(0, 1)
+        .data(215, &channel_params(0, 0, 0, 1))
+        .text(203, "Vox")
+        .text(196, r"C:\Samples\Vox.wav");
+    b = clip(b, 3, "Vox - Mute / solo", &[(0.0, 1.0), (2.0, 0.0)]);
+    b = clip(b, 4, "Pro-Q 3 - Gain", &[(0.0, 0.25), (4.0, 0.75)]);
+    b = clip(b, 5, "Tempo", &[(0.0, 0.5), (4.0, 1.0)]);
+    b = clip(b, 6, "Insert 1 - Volume", &[(0.0, 0.8), (4.0, 0.2)]);
+    if more {
+        b = clip(b, 7, "Bass - Mute / solo #2", &[(0.0, 0.0), (4.0, 1.0)]);
+        b = clip(b, 8, "WOW2 - On", &[(0.0, 1.0), (8.0, 0.0)]);
+        b = clip(b, 9, "Bass - Volume", &[(0.0, 0.0), (4.0, 1.0), (0.0, 0.0)]);
+    }
+    let mut playlist = vec![
+        playlist_item_25(0, 20481, 384),
+        playlist_item_25(384, 20481, 384),
+        playlist_item_25(960, 20481, 384),
+        playlist_item_25_on(0, 1, 1152, 498, false),
+        playlist_item_25_on(0, 2, 384, 497, false),
+        playlist_item_25_on(384, 2, 192, 497, false),
+        playlist_item_25_on(0, 3, 768, 496, false),
+        playlist_item_25_on(0, 4, 384, 495, false),
+        playlist_item_25_on(0, 5, 384, 494, false),
+        playlist_item_25_on(0, 6, 384, 493, false),
+    ];
+    if more {
+        playlist.extend([
+            playlist_item_25(1536, 20481, 384),
+            playlist_item_25(1920, 20481, 384),
+            playlist_item_25_on(1536, 7, 768, 492, false),
+            playlist_item_25_on(0, 8, 1536, 491, false),
+            playlist_item_25_on(0, 9, 384, 490, false),
+            playlist_item_25_on(384, 9, 384, 490, false),
+        ]);
+    }
+    b = b
+        .data(236, &[0, 0, 0, 0])
+        .data(236, &[0, 0, 0, 0])
+        .text(201, "Fruity Wrapper")
+        .data(213, &wrapper("Pro-Q 3", r"C:\VstPlugins\FabFilter Pro-Q 3.dll", "FabFilter", 4, "FQ3p"))
+        .word(98, 0)
+        .text(201, "Fruity Wrapper")
+        .data(213, &wrapper("WOW2", r"C:\VstPlugins\WOW2.dll", "Sugar Bytes", 5, "SBw2"))
+        .word(98, 1)
+        .data(236, &[0, 0, 0, 0])
+        .data(
+            225,
+            &mixer_settings(&[
+                (0x40000000, 12800),
+                (0x7000 << 16 | 0x1fc0, 12800),
+                (0x7000 << 16 | 0x1fc1, 0),
+                (INSERT1 | 0x1fc0, 9600),
+                (INSERT1 | 0x1fc1, 0),
+                (INSERT1 | 0x1f00, 1),
+                (0x7041 << 16 | 0x1f00, 0),
+                (0x7080 << 16 | 0x1fc0, 12800),
+                (0x7080 << 16 | 0x1fc1, 0),
+            ]),
+        )
+        .data(233, &playlist.concat());
+    if more {
+        for n in 1..=500 {
+            b = b.data(238, &playlist_track(n, n == 3));
+        }
+    }
+    b.build()
+}
+
+/// An FL 25 song whose "Kick" pattern plays in bars 1, 2 and 3 while two clips switch the kick, back to back: "Kick
+/// off" (off throughout) in bars 1 and 3, "Kick on" (on throughout) in bar 2. `on_linked_first` swaps the order of
+/// their links in the file. "Kick - Volume" (a rise from 0 to 1 over 8 beats) is placed at beat 0 and again at beat
+/// 4, over the first one's second half. "Kick - Pan" (the same rise) is placed at beats 0-8, then again at 2-4 inside
+/// it; "Kick - Pitch" (the same rise) at 0-8, then again at 0-4.
+pub fn fl_studio_25_back_to_back(on_linked_first: bool) -> Vec<u8> {
+    let (off, on) = (automation_link(1, 7), automation_link(2, 7));
+    let mut b = fl_25()
+        .dword(156, 120_000)
+        .word(65, 1)
+        .text(193, "Kick")
+        .data(224, &note(0, 0, 48, 36, 100))
+        .data(227, if on_linked_first { &on } else { &off })
+        .data(227, if on_linked_first { &off } else { &on })
+        .data(227, &automation_link(3, 0))
+        .data(227, &automation_link(4, 1))
+        .data(227, &automation_link(5, 4))
+        .word(64, 0)
+        .byte(21, 0)
+        .text(201, "")
+        .text(203, "Kick")
+        .byte(0, 1)
+        .text(196, r"C:\Samples\Kick.wav");
+    for (n, name, points) in [
+        (1, "Kick off", [(0.0, 0.0), (4.0, 0.0)]),
+        (2, "Kick on", [(0.0, 1.0), (4.0, 1.0)]),
+        (3, "Kick - Volume", [(0.0, 0.0), (8.0, 1.0)]),
+        (4, "Kick - Pan", [(0.0, 0.0), (8.0, 1.0)]),
+        (5, "Kick - Pitch", [(0.0, 0.0), (8.0, 1.0)]),
+    ] {
+        b = b.word(64, n).byte(21, 5).byte(0, 1).text(201, "").text(203, name).data(234, &automation_points(&points));
+    }
+    let playlist = [
+        playlist_item_25(0, 20481, 384),
+        playlist_item_25(384, 20481, 384),
+        playlist_item_25(768, 20481, 384),
+        playlist_item_25_on(0, 1, 384, 498, false),
+        playlist_item_25_on(384, 2, 384, 498, false),
+        playlist_item_25_on(768, 1, 384, 498, false),
+        playlist_item_25_on(0, 3, 768, 497, false),
+        playlist_item_25_on(384, 3, 768, 496, false),
+        playlist_item_25_on(0, 4, 768, 495, false),
+        playlist_item_25_on(192, 4, 192, 494, false),
+        playlist_item_25_on(0, 5, 768, 493, false),
+        playlist_item_25_on(0, 5, 384, 492, false),
+    ]
+    .concat();
+    b.data(233, &playlist).build()
+}
+
+/// One snare written two ways: channel 0 plays it as `%FLStudioUserData%\Projects\Snare 01.wav`, channel 1 (no
+/// notes) has it as `full`.
+pub fn fl_studio_25_one_sample_two_ways(full: &str) -> Vec<u8> {
+    fl_25()
+        .word(65, 1)
+        .data(224, &note(0, 0, 48, 60, 100))
+        .word(64, 0)
+        .byte(21, 0)
+        .text(201, "")
+        .text(203, "Snare")
+        .text(196, r"%FLStudioUserData%\Projects\Snare 01.wav")
+        .word(64, 1)
+        .byte(21, 0)
+        .text(201, "")
+        .text(203, "Snare too")
+        .text(196, full)
+        .data(233, &playlist_item_25(0, 20481, 384))
+        .build()
+}
+
+/// A song made of one audio clip (channel 1, "Vox"), with a leftover pattern of notes for "Snare" never placed. Insert
+/// 1 is named "Drums"; insert 2's name event holds only its end (two zero bytes).
+pub fn fl_studio_25_audio_only() -> Vec<u8> {
+    fl_25()
+        .word(65, 1)
+        .data(224, &note(0, 0, 48, 60, 100))
+        .word(64, 0)
+        .byte(21, 0)
+        .text(201, "")
+        .text(203, "Snare")
+        .text(196, r"C:\Samples\Snare 01.wav")
+        .word(64, 1)
+        .byte(21, 4)
+        .text(203, "Vox")
+        .text(196, r"C:\Samples\Vox.wav")
+        .data(233, &playlist_item_25(0, 1, 384))
+        .data(236, &[0, 0, 0, 0])
+        .text(204, "Drums")
+        .data(236, &[0, 0, 0, 0])
+        .data(204, &[0, 0])
+        .data(236, &[0, 0, 0, 0])
         .build()
 }

@@ -165,17 +165,23 @@ fn resolves_the_user_data_folder_from_the_projects_location() {
     std::fs::write(&path, fl_studio_25_project()).expect("write the project");
 
     let info = fl::read(&path).expect("the file is there");
-    assert_eq!(info.samples, [projects.join("Snare 01.wav").to_string_lossy()]);
+    let snare = projects.join("Snare 01.wav").to_string_lossy().into_owned();
+    assert_eq!(info.samples, [snare.as_str()]);
+    // The snare has no notes: what's said of it is under the same full path.
+    assert_eq!(info.unplayed.keys().collect::<Vec<_>>(), [&snare]);
     // Without the disk, it stays as FL wrote it.
     assert_eq!(read(&fl_studio_25_project()).samples, [r"%FLStudioUserData%\Projects\Snare 01.wav"]);
 
     // A folder no folder above the project has: left as written. (A made-up name, so no real folder can fit.)
-    let mut samples = vec![
-        r"%FLStudioUserData%\MO Test Nowhere 5c1e\Kick.wav".to_owned(),
-        r"%flstudiouserdata%/Projects/Snare 01.wav".to_owned(),
-        r"C:\Samples\Hat.wav".to_owned(),
-    ];
-    fl::resolve_user_data(&mut samples, &path);
+    let mut user_data = fl::UserData::new(&path);
+    let samples: Vec<String> = [
+        r"%FLStudioUserData%\MO Test Nowhere 5c1e\Kick.wav",
+        r"%flstudiouserdata%/Projects/Snare 01.wav",
+        r"C:\Samples\Hat.wav",
+    ]
+    .iter()
+    .map(|s| user_data.resolve(s))
+    .collect();
     assert_eq!(
         samples,
         [
@@ -184,6 +190,23 @@ fn resolves_the_user_data_folder_from_the_projects_location() {
             r"C:\Samples\Hat.wav".to_owned(),
         ]
     );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn one_sample_written_two_ways_plays_once() {
+    let dir = test_dir("two-ways");
+    let projects = dir.join("FL Studio").join("Projects");
+    std::fs::create_dir_all(&projects).expect("make the folders");
+    std::fs::write(projects.join("Snare 01.wav"), [0]).expect("write the sample");
+    let snare = projects.join("Snare 01.wav").to_string_lossy().into_owned();
+    let path = projects.join("Two ways.flp");
+    std::fs::write(&path, fl_studio_25_one_sample_two_ways(&snare)).expect("write the project");
+
+    let info = fl::read(&path).expect("the file is there");
+    assert_eq!(info.samples, [snare.as_str()]);
+    // Channel 0 plays it, so it isn't unplayed though channel 1 has no notes.
+    assert!(info.unplayed.is_empty(), "{:?}", info.unplayed);
     let _ = std::fs::remove_dir_all(dir);
 }
 

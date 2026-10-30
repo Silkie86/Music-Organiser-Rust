@@ -109,6 +109,63 @@ impl ProjectInfo {
     }
 }
 
+/// A note, in ticks at its clip's or song's PPQ.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NoteEvent {
+    pub start: i64,
+    pub length: i64,
+    /// MIDI key, 0 to 127 (60 is C5 in FL, C4 elsewhere).
+    pub key: u8,
+    /// 1 to 127.
+    pub velocity: u8,
+    /// Muted in the piano roll, so it doesn't play (FL Studio).
+    pub muted: bool,
+    /// Entered in FL's step sequencer: it has no length of its own and FL plays it until its sound ends.
+    pub step: bool,
+}
+
+/// A clip of notes, by track (or channel) name in the order they first appear.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MidiClip {
+    pub name: String,
+    pub ppq: u16,
+    pub tracks: Vec<(String, Vec<NoteEvent>)>,
+    /// Where the clip ends, in ticks, when it goes on past its last note (a loop with empty beats at its end).
+    pub end: Option<i64>,
+}
+
+impl MidiClip {
+    /// The track's notes, adding the track if it isn't there yet.
+    pub fn track(&mut self, name: &str) -> &mut Vec<NoteEvent> {
+        let at = match self.tracks.iter().position(|(n, _)| n == name) {
+            Some(at) => at,
+            None => {
+                self.tracks.push((name.to_owned(), Vec::new()));
+                self.tracks.len() - 1
+            }
+        };
+        &mut self.tracks[at].1
+    }
+}
+
+/// One channel's (FL Studio) or track's notes across the whole song, with what plays them, in song ticks.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MidiChannel {
+    pub name: String,
+    /// What to show for what plays it: the sample's file name for a channel that has one, else the plugin.
+    pub source: String,
+    pub ppq: u16,
+    pub notes: Vec<NoteEvent>,
+    pub plugin: String,
+    /// The channel's sample, in full, when it plays one.
+    pub sample_path: String,
+    /// The key the sample sounds at its own pitch on, shifted by `pitch_cents`.
+    pub root_key: u8,
+    pub pitch_cents: i32,
+    /// FL Studio: the channel's place in the channel rack, from 0.
+    pub channel: Option<u32>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
