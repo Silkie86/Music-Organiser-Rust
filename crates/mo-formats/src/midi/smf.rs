@@ -1,11 +1,10 @@
 //! Standard MIDI Files (.mid, types 0, 1 and 2, and .rmi's RIFF wrapping), as the C# app's `MidiFileReader` reads them.
 //! Velocities are scaled up to MIDI 2.0's 16 bits by its own rule (rule 22), so each comes back as it was written.
 
-use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::path::Path;
 
-use super::MidiPart;
+use super::{Held, MidiPart};
 use crate::fl::events::byte_at as byte;
 use crate::model::{NoteEvent, velocity};
 use crate::paths;
@@ -128,38 +127,11 @@ struct Track {
 /// When a held note started, and how hard (MIDI 1.0's velocity).
 type Struck = (i64, u8);
 
-/// Notes still held, by (channel, key), with when each started and how hard; in the order the keys were first
-/// struck, so notes never released end in the same order as in the C# app.
-#[derive(Default)]
-struct Held {
-    index: HashMap<(u8, u8), usize>,
-    keys: Vec<((u8, u8), VecDeque<Struck>)>,
-}
-
-impl Held {
-    /// A key struck: its queue, started when it's the first time.
-    fn strike(&mut self, key: (u8, u8), start: i64, vel: u8) {
-        let i = *self.index.entry(key).or_insert_with(|| {
-            self.keys.push((key, VecDeque::new()));
-            self.keys.len() - 1
-        });
-        if let Some((_, queue)) = self.keys.get_mut(i) {
-            queue.push_back((start, vel));
-        }
-    }
-
-    /// A key released: the earliest of its notes still held, if any (a release of a key never struck starts nothing).
-    fn release(&mut self, key: (u8, u8)) -> Option<Struck> {
-        let i = *self.index.get(&key)?;
-        self.keys.get_mut(i)?.1.pop_front()
-    }
-}
-
 fn read_track(s: &[u8], tempo: &mut Option<f64>, programs: &mut [Option<u8>; CHANNELS]) -> Track {
     let mut name = String::new();
     let mut by_channel: [Vec<NoteEvent>; CHANNELS] = Default::default();
     // A key struck again before it's released stacks, so each release ends the earliest one.
-    let mut held = Held::default();
+    let mut held: Held<(u8, u8), Struck> = Held::default();
     let mut tick: i64 = 0;
     let mut i = 0;
     let (mut status, mut running) = (0u8, 0u8);
@@ -172,6 +144,7 @@ fn read_track(s: &[u8], tempo: &mut Option<f64>, programs: &mut [Option<u8>; CHA
             velocity: velocity::from_7(vel.clamp(1, 127)),
             muted: false,
             step: false,
+            attribute: None,
         });
     };
     while i < s.len() {
@@ -227,7 +200,7 @@ fn read_track(s: &[u8], tempo: &mut Option<f64>, programs: &mut [Option<u8>; CHA
                 *program = Some(d1 & 0x7f);
             }
         } else if kind == 0x90 && d2 > 0 {
-            held.strike((channel, d1), tick, d2);
+            held.strike((channel, d1), (tick, d2));
         } else if (kind == 0x80 || kind == 0x90)
             && let Some((start, vel)) = held.release((channel, d1))
         {
@@ -235,10 +208,8 @@ fn read_track(s: &[u8], tempo: &mut Option<f64>, programs: &mut [Option<u8>; CHA
         }
     }
     // Notes never released end with the track.
-    for ((channel, key), queue) in held.keys {
-        for (start, vel) in queue {
-            add(&mut by_channel, channel, start, tick, key, vel);
-        }
+    for ((channel, key), (start, vel)) in held.into_held() {
+        add(&mut by_channel, channel, start, tick, key, vel);
     }
     Track { name: name.trim().to_owned(), by_channel }
 }

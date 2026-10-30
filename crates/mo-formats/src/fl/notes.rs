@@ -55,6 +55,7 @@ pub fn decode(data: &[u8], size: usize) -> Vec<(u32, NoteEvent)> {
                 velocity,
                 muted: size == 24 && byte_at(r, 19) & 0x20 != 0,
                 step: length == 0,
+                attribute: None,
             };
             (u16_at(r, 6) as u32, note)
         })

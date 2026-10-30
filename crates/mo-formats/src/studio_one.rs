@@ -220,6 +220,7 @@ impl<'a> Song<'a> {
                         velocity,
                         muted: false,
                         step: false,
+                        attribute: None,
                     });
                 }
                 if !notes.is_empty() {

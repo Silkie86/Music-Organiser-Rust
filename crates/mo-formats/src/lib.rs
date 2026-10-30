@@ -19,5 +19,6 @@ pub mod studio_one;
 pub mod textscan;
 
 pub use model::{
-    Confidence, MidiChannel, MidiClip, NoteEvent, PluginKind, PluginRef, ProjectInfo, SampleUse, velocity,
+    Confidence, MidiChannel, MidiClip, NoteAttribute, NoteEvent, PluginKind, PluginRef, ProjectInfo, SampleUse,
+    velocity,
 };

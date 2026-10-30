@@ -14,7 +14,15 @@ use mo_formats::{NoteEvent, PluginKind, velocity};
 
 /// A note as Studio One writes it, its velocity 0 to 1.
 fn note(start: i64, length: i64, key: u8, studio_one_velocity: f64) -> NoteEvent {
-    NoteEvent { start, length, key, velocity: velocity::from_unit(studio_one_velocity), muted: false, step: false }
+    NoteEvent {
+        start,
+        length,
+        key,
+        velocity: velocity::from_unit(studio_one_velocity),
+        muted: false,
+        step: false,
+        attribute: None,
+    }
 }
 
 #[test]

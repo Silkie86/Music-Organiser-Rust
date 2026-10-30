@@ -20,7 +20,7 @@ fn decoded(path: &Path) -> Project {
 /// A note as read from Bitwig, its velocity as Bitwig writes it (0 to 1).
 fn note(start: i64, length: i64, key: u8, bitwig_velocity: f64) -> NoteEvent {
     let velocity = mo_formats::velocity::from_unit(bitwig_velocity);
-    NoteEvent { start, length, key, velocity, muted: false, step: false }
+    NoteEvent { start, length, key, velocity, muted: false, step: false, attribute: None }
 }
 
 /// The samples a test expects, in the order the C# tests compare them (ordinal).

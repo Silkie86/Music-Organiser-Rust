@@ -564,6 +564,7 @@ pub fn extract_midi(doc: &Document, names: &TrackNames) -> Vec<MidiClip> {
                 velocity: crate::model::velocity::from_unit(velocity),
                 muted: false,
                 step: false,
+                attribute: None,
             });
         }
     }

@@ -122,6 +122,16 @@ pub struct NoteEvent {
     pub muted: bool,
     /// Entered in FL's step sequencer: it has no length of its own and FL plays it until its sound ends.
     pub step: bool,
+    /// MIDI 2.0's note attribute (an articulation, or a pitch in 7.9 form), when the file gives one (rule 22).
+    pub attribute: Option<NoteAttribute>,
+}
+
+/// A MIDI 2.0 note's attribute: its type (1 is the maker's own, 2 a profile's, 3 a pitch in 7.9 form) and 16 bits
+/// of data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NoteAttribute {
+    pub kind: u8,
+    pub data: u16,
 }
 
 impl NoteEvent {

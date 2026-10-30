@@ -60,3 +60,4 @@ tests don't have.
 |---|---|---|---|
 | A header or track length so damaged it points before the file's start, or past what a whole number holds | Stops with an error that isn't "not a MIDI file", so the file counts as failed. | Reads the tracks before the damage and stops there. | Better |
 | A note's velocity | MIDI 1.0's 0 to 127. | Kept in MIDI 2.0's 16 bits, scaled up by MIDI 2.0's own rule, so each comes back as it was written. | Same values (rule 22) |
+| MIDI 2.0 Clip Files (`.midi2`) | Not read. | Read: a part for each group and channel with notes, keeping MIDI 2.0's 16-bit velocities and note attributes. No twin to compare with, so the tests follow the MIDI Clip File and Universal MIDI Packet specifications. | New (rule 22) |

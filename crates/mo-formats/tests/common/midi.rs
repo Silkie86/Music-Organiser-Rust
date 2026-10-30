@@ -79,3 +79,114 @@ pub fn stacked_and_unreleased() -> Vec<u8> {
     ];
     smf(96, &[&t])
 }
+
+/// A MIDI Clip File: `SMF2CLIP`, then its messages' words high byte first.
+pub fn clip_file(words: &[u32]) -> Vec<u8> {
+    let mut out = b"SMF2CLIP".to_vec();
+    for w in words {
+        out.extend(w.to_be_bytes());
+    }
+    out
+}
+
+/// Delta Clockstamp: the ticks before the next message.
+pub fn dc(ticks: u32) -> u32 {
+    0x0040_0000 | ticks
+}
+
+/// Delta Clockstamp Ticks Per Quarter Note.
+pub fn dctpq(ppq: u16) -> u32 {
+    0x0030_0000 | u32::from(ppq)
+}
+
+pub const NOOP: u32 = 0;
+pub const START_OF_CLIP: [u32; 4] = [0xf020_0000, 0, 0, 0];
+pub const END_OF_CLIP: [u32; 4] = [0xf021_0000, 0, 0, 0];
+
+/// Flex Data Set Tempo, in beats a minute.
+pub fn set_tempo(bpm: f64) -> [u32; 4] {
+    [0xd010_0000, (6_000_000_000.0 / bpm).round() as u32, 0, 0]
+}
+
+/// Flex Data's clip name (metadata text, status 3), in as many parts of 12 letters as it takes.
+pub fn clip_name(name: &str) -> Vec<u32> {
+    let parts: Vec<&[u8]> = name.as_bytes().chunks(12).collect();
+    let mut out = Vec::new();
+    for (i, part) in parts.iter().enumerate() {
+        let format: u32 = match (parts.len(), i) {
+            (1, _) => 0,
+            (_, 0) => 1,
+            (n, i) if i == n - 1 => 3,
+            _ => 2,
+        };
+        let mut bytes = [0u8; 12];
+        bytes[..part.len()].copy_from_slice(part);
+        out.push(0xd010_0103 | format << 22);
+        for w in bytes.chunks(4) {
+            out.push(u32::from_be_bytes([w[0], w[1], w[2], w[3]]));
+        }
+    }
+    out
+}
+
+/// A MIDI 2.0 note on: group, channel, key, 16-bit velocity, and an attribute (type, data).
+pub fn note_on2(group: u8, channel: u8, key: u8, velocity: u16, attribute: (u8, u16)) -> [u32; 2] {
+    let w0 = 0x4090_0000 | u32::from(group) << 24 | u32::from(channel) << 16 | u32::from(key) << 8;
+    [w0 | u32::from(attribute.0), u32::from(velocity) << 16 | u32::from(attribute.1)]
+}
+
+/// A MIDI 2.0 note off.
+pub fn note_off2(group: u8, channel: u8, key: u8) -> [u32; 2] {
+    [0x4080_0000 | u32::from(group) << 24 | u32::from(channel) << 16 | u32::from(key) << 8, 0]
+}
+
+/// A MIDI 2.0 program change.
+pub fn program2(group: u8, channel: u8, program: u8) -> [u32; 2] {
+    [0x40c0_0000 | u32::from(group) << 24 | u32::from(channel) << 16, u32::from(program) << 24]
+}
+
+/// A MIDI 1.0 message in a packet: group, status byte and its two data bytes.
+pub fn midi1(group: u8, status: u8, d1: u8, d2: u8) -> u32 {
+    0x2000_0000 | u32::from(group) << 24 | u32::from(status) << 16 | u32::from(d1) << 8 | u32::from(d2)
+}
+
+/// A clip: the configuration header (ticks a quarter note, tempo, name), then its messages between Start and End of
+/// Clip; `body` is the clip's words with their Delta Clockstamps.
+pub fn clip(ppq: u16, bpm: f64, name: &str, body: &[u32], end_after: u32) -> Vec<u8> {
+    let mut w = vec![dc(0), dctpq(ppq), dc(0)];
+    w.extend(set_tempo(bpm));
+    for part in clip_name(name).chunks(4) {
+        w.push(dc(0));
+        w.extend(part);
+    }
+    w.push(dc(0));
+    w.extend(START_OF_CLIP);
+    w.extend(body);
+    w.push(dc(end_after));
+    w.extend(END_OF_CLIP);
+    clip_file(&w)
+}
+
+/// A clip of one bar at 480 a beat: a MIDI 2.0 chord on channel 1 (one note with a pitch attribute), a MIDI 1.0
+/// bass on channel 2 of group 2, and a kick on channel 10.
+pub fn clip_two_groups() -> Vec<u8> {
+    let mut b = vec![dc(0)];
+    b.extend(program2(0, 0, 4));
+    b.push(dc(0));
+    b.extend(note_on2(0, 0, 60, 0xc000, (0, 0)));
+    b.push(dc(0));
+    b.extend(note_on2(0, 0, 64, 0x8000, (3, 64 << 9)));
+    b.push(dc(0));
+    b.push(midi1(1, 0x91, 36, 100));
+    b.push(dc(0));
+    b.extend(note_on2(0, 9, 36, 0xffff, (0, 0)));
+    b.push(dc(120));
+    b.extend(note_off2(0, 9, 36));
+    b.push(dc(360));
+    b.extend(note_off2(0, 0, 60));
+    b.push(dc(0));
+    b.extend(note_off2(0, 0, 64));
+    b.push(dc(480));
+    b.push(midi1(1, 0x91, 36, 0));
+    clip(480, 92.5, "Night Drive Verse Chords", &b, 960)
+}
