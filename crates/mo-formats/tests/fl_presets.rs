@@ -128,7 +128,7 @@ fn exports_vst3_as_vstpreset() {
     let song = song::read_song(&events::load(&fl_studio_25_project()).expect("an FL project"));
     let arcade = song.channels.iter().find(|c| c.name == "Keys").and_then(|c| c.instrument.clone()).expect("Arcade");
     assert_eq!(arcade.parameter_ids, Some(vec![10, 20, 2000003]));
-    assert_eq!(arcade.state.map(|s| s.extension), Some(".vstpreset"));
+    assert_eq!(arcade.state.as_ref().map(|s| &*s.extension), Some(".vstpreset"));
 }
 
 #[test]

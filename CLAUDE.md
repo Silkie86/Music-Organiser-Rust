@@ -38,6 +38,9 @@ This repo is the Rust rebuild of the C# app. The plan, the inventory of today's 
     ultracode code review of the whole app on `main`, then fixes.
 20. Claude sets the right effort level itself for each task and review: higher for file formats, data safety and
     whole-app reviews, lower for small fixes. No need to ask first; say which level was used.
+21. Highly multithreaded where it helps (rayon), at low priority, never on the UI thread.
+22. MIDI 2.0 ready: notes and controllers keep MIDI 2.0 resolution (16-bit velocity, 32-bit controllers, per-note
+    controllers, MIDI Clip Files, UMP ports); only a MIDI 1.0 file, port or DAW gets 7-bit values (spec section 4.4).
 
 ## How work is done
 

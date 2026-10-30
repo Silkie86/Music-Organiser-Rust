@@ -229,7 +229,7 @@ pub fn stored_zip(files: &[(&str, &[u8])]) -> Vec<u8> {
         central.extend_from_slice(b"PK\x01\x02");
         central.extend_from_slice(&20u16.to_le_bytes()); // made by
         common(&mut central);
-        central.extend_from_slice(&[0; 8]); // comment, disk, attributes
+        central.extend_from_slice(&[0; 6]); // comment length, disk, internal attributes
         central.extend_from_slice(&0u32.to_le_bytes()); // external attributes
         central.extend_from_slice(&offset.to_le_bytes());
         central.extend_from_slice(name.as_bytes());
@@ -429,6 +429,121 @@ pub fn bitwig_project(dir: &Path, name: &str) -> PathBuf {
     let path = project.join(format!("{name}.bwproject"));
     std::fs::write(&path, bitwig_project_bytes()).expect("write the project");
     path
+}
+
+/// The bytes of [`bitwig_undecodable`]: a project whose header has no offsets and whose body isn't Bitwig's objects,
+/// only readable text (some of it in a zlib stream), for the reader's text scan.
+pub fn bitwig_undecodable_bytes(name: &str) -> Vec<u8> {
+    use std::io::Write;
+    let mut ms = b"BtWg00010001".to_vec();
+    ms.extend_from_slice(&[0, 1, 2, 0xFF, 0x10]);
+    ms.extend_from_slice(b"application_version_name\0\0\x055.2.4");
+    ms.extend_from_slice(&[0, 0, 0x07]);
+    ms.extend_from_slice(b"Polymer");
+    ms.extend_from_slice(&[0, 0, 0x03]);
+    ms.extend_from_slice(b"Delay+");
+    ms.extend_from_slice(&[0, 0x10]);
+    ms.extend("Analog Rytm MKII".encode_utf16().flat_map(|u| u.to_le_bytes()));
+    ms.extend_from_slice(&[0, 0, 0x22]);
+    ms.extend_from_slice(br"C:\Program Files\Common Files\VST3\Valhalla Room.vst3");
+    ms.extend_from_slice(&[0, 0, 0x05]);
+    ms.extend_from_slice(b"Serum");
+    ms.extend_from_slice(&[0, 0]);
+    // Bitwig writes a string's length just before it, and a length that is a readable letter joins the text: ">" (62)
+    // before this drive path, "-" (45) before the path in the project folder. A bare name is a sound inside a
+    // multisample or a Grid's sample list.
+    let recording = format!(r"F:\Bitwig Studio\Projects\{name}\recordings\Syntakt 2-1.wav");
+    for text in [
+        recording.as_str(),
+        "recordings/Untitled Project [0m27s-1m22s].wav",
+        "BASSDRUM_0002 from the Kick Selector.wav",
+    ] {
+        ms.extend_from_slice(&[0, 0, 0, text.len() as u8]);
+        ms.extend_from_slice(text.as_bytes());
+    }
+    ms.extend_from_slice(&[0, 0]);
+    // A compressed section, as some Bitwig versions store parts of the project that way.
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+    z.write_all(b"\0\0\x15D:\\Splice\\Snare 808.wav\0\0").expect("compress");
+    ms.extend_from_slice(&z.finish().expect("compress"));
+    ms.extend_from_slice(&[0, 0, 0, 0]);
+    ms
+}
+
+/// [`bitwig_undecodable_bytes`] in its own project folder, with a `samples` folder beside it.
+pub fn bitwig_undecodable(dir: &Path, name: &str) -> PathBuf {
+    let project = dir.join(name);
+    std::fs::create_dir_all(project.join("samples")).expect("make the project folder");
+    std::fs::write(project.join("samples").join("Recorded Bass.wav"), [0]).expect("write a sample");
+    let path = project.join(format!("{name}.bwproject"));
+    std::fs::write(&path, bitwig_undecodable_bytes(name)).expect("write the project");
+    path
+}
+
+/// Paths [`bitwig_scan_paths_bytes`] holds: one with an accent, a network one, one in Cyrillic and one in Japanese.
+pub const SCANNED_PATHS: [&str; 4] = [
+    r"F:\Samples\Beyoncé Acapellas\Vocal Chop 03.wav",
+    r"\\NAS\Samples\Breaks\Amen Break 136bpm.wav",
+    r"D:\Музыка\Сэмплы\Ударные\Бочка\Kick 01.wav",
+    r"D:\音楽\サンプル\ドラム\キック.wav",
+];
+
+/// A project ("Song") whose metadata reads but whose body doesn't (a value of a kind this app doesn't know, as 6.1's
+/// lists of doubles were), holding [`SCANNED_PATHS`] and a recording that was collected into the project.
+pub fn bitwig_scan_paths_bytes() -> Vec<u8> {
+    let [accented, network, cyrillic, japanese] = SCANNED_PATHS;
+    BwWriter::file(
+        |m| {
+            m.meta_entry("used_files", 0x19);
+            m.u32(1);
+            m.str_val("recordings/BD 1-2.wav");
+        },
+        |b| {
+            b.begin(0x2e);
+            // Bitwig writes a string's length before it: 42 is "*", which joins the network path's text.
+            for s in [r"F:\Bitwig Studio\Projects\Song\recordings\BD 1-2.wav", network, r"F:\Samples\Drums\Kick 01.wav"]
+            {
+                b.str(0x2b9, s);
+            }
+            // As Bitwig writes any text with a letter outside ASCII, even when most of it is.
+            for s in [accented, cyrillic, japanese] {
+                b.str_utf16(0x2b9, s);
+            }
+            b.u32(0x123);
+            b.s.push(0x7e);
+        },
+        None,
+    )
+}
+
+/// A project that collected Kick-01 and Snare (as "Snare-2", the name being taken) into its folder, and still uses
+/// Kick-02 from the same pack where it is. When not `decodable`, its body ends in a value of a kind this app doesn't
+/// know.
+pub fn bitwig_collected_bytes(decodable: bool) -> Vec<u8> {
+    BwWriter::file(
+        |m| {
+            m.meta_entry("used_files", 0x19);
+            m.u32(2);
+            m.str_val("samples/Kick-01.wav");
+            m.str_val("samples/Snare-2.wav");
+        },
+        |b| {
+            b.begin(0x2e);
+            let files = [r"D:\Packs\Drums\Kick-01.wav", r"D:\Packs\Drums\Kick-02.wav", r"D:\Packs\Drums\Snare.wav"];
+            for (id, file) in (0x4100..).zip(files) {
+                b.obj(id);
+                b.begin(0x2a);
+                b.str(0x3b, file);
+                b.end();
+            }
+            if !decodable {
+                b.u32(0x123);
+                b.s.push(0x7e);
+            }
+            b.end();
+        },
+        None,
+    )
 }
 
 /// What [`bitwig_template`] holds, as the C# test's options.

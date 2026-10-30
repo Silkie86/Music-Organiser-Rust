@@ -617,7 +617,7 @@ fn song_plugin(internal: &str, data: &[u8], shown: &str, sounds: bool) -> FlPlug
         .filter(|_| !nothing_saved)
         .map(|s| wrapper_preset(&f, s, if shown.is_empty() { &name } else { shown }, &name))
         // Raw states other DAWs can't load are left out.
-        .filter(|p| matches!(p.extension, ".fxp" | ".vstpreset"));
+        .filter(|p| matches!(&*p.extension, ".fxp" | ".vstpreset"));
     let parameter_ids = raw.filter(|_| vst3).and_then(vst3_parameter_ids);
     FlPlugin {
         name,

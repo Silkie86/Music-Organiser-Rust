@@ -3,6 +3,7 @@
 
 mod common;
 
+use common::bitwig::*;
 use common::*;
 
 fn fixtures() -> Vec<(&'static str, Vec<u8>)> {
@@ -49,13 +50,37 @@ fn fixtures() -> Vec<(&'static str, Vec<u8>)> {
     ]
 }
 
+/// The Bitwig files, each in a project folder of its own where Bitwig keeps it so (its audio is in the folders beside
+/// it), and the audio files in those folders.
+fn bitwig_fixtures() -> Vec<(&'static str, Vec<u8>)> {
+    let project = bitwig_project_bytes();
+    let master_plugin = Template { master_plugin: true, ..Template::default() };
+    vec![
+        ("bitwig/Loop Idea/Loop Idea.bwproject", project.clone()),
+        ("bitwig/Loop Idea/samples/Recorded Bass.wav", vec![0]),
+        ("bitwig/Loop Idea/samples/Drums/Hat.wav", vec![0]),
+        ("bitwig/Loop Idea/bounce/Loop Idea.wav", vec![0]),
+        ("bitwig/Undecodable/Undecodable.bwproject", bitwig_undecodable_bytes("Undecodable")),
+        ("bitwig/Undecodable/recordings/Syntakt 2-1.wav", vec![0]),
+        ("bitwig/Song/Song.bwproject", bitwig_scan_paths_bytes()),
+        ("bitwig/Collected/Collected.bwproject", bitwig_collected_bytes(true)),
+        ("bitwig/Collected damaged/Collected damaged.bwproject", bitwig_collected_bytes(false)),
+        ("bitwig/cut short.bwproject", project[..project.len() / 2].to_vec()),
+        ("bitwig/template.bwproject", bitwig_template(Template::default())),
+        ("bitwig/template with master plugin.bwproject", bitwig_template(master_plugin)),
+        ("bitwig/not bitwig.bwproject", b"Polymer\0\0C:\\Samples\\Kick.wav\0".to_vec()),
+    ]
+}
+
 #[test]
 fn writes_the_twin_test_files() {
-    let files = fixtures();
+    let mut files = fixtures();
+    files.extend(bitwig_fixtures());
     assert!(files.iter().all(|(_, bytes)| !bytes.is_empty()));
     let Some(dir) = std::env::var_os("MO_TWIN_FIXTURES") else { return };
-    std::fs::create_dir_all(&dir).expect("make the folder");
     for (name, bytes) in files {
-        std::fs::write(std::path::Path::new(&dir).join(name), bytes).expect("write a test file");
+        let path = std::path::Path::new(&dir).join(name);
+        std::fs::create_dir_all(path.parent().expect("in a folder")).expect("make the folder");
+        std::fs::write(path, bytes).expect("write a test file");
     }
 }
