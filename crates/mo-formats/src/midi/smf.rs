@@ -6,23 +6,35 @@ use std::io;
 use std::path::Path;
 
 use super::MidiPart;
+use crate::fl::events::byte_at as byte;
 use crate::model::{NoteEvent, velocity};
 use crate::paths;
 
-/// The endings the MIDI library looks for.
-pub const EXTENSIONS: [&str; 4] = [".mid", ".midi", ".smf", ".kar"];
+/// Goes up by one whenever the reader finds more (or different) things in the same files, so every MIDI file is read
+/// again (rule 7). 1 is what the C# reader finds; 2 reads a file whose header length is damaged up to the damage
+/// (DIFFERENCES.md).
+pub const VERSION: u32 = 2;
+/// The endings the MIDI library looks for, without their dot, as the other readers give theirs.
+pub const EXTENSIONS: [&str; 4] = ["mid", "midi", "smf", "kar"];
+
+/// MIDI 1.0's 16 channels, which a Standard MIDI File's notes are on.
+const CHANNELS: usize = 16;
 
 /// Whether a path ends in one of [`EXTENSIONS`], letter case aside.
 pub fn is_midi_path(path: &str) -> bool {
-    let ext = paths::extension(path);
+    let ext = paths::extension(path).strip_prefix('.').unwrap_or_default();
     EXTENSIONS.iter().any(|x| x.eq_ignore_ascii_case(ext))
 }
 
 /// Reads a MIDI file from disk. Its parts are named against the file's own name (a track named after the file isn't
 /// named again).
 pub fn read(path: &Path) -> io::Result<Vec<MidiPart>> {
-    let raw = std::fs::read(path)?;
-    read_bytes(&raw, paths::stem(&path.to_string_lossy()))
+    read_from(&std::fs::read(path)?, path)
+}
+
+/// Reads a MIDI file's bytes, already read from `path`, naming its parts against the file's own name as [`read`] does.
+pub fn read_from(raw: &[u8], path: &Path) -> io::Result<Vec<MidiPart>> {
+    read_bytes(raw, paths::stem(&path.to_string_lossy()))
 }
 
 /// The parts in a MIDI file's bytes. Bytes that aren't a MIDI file are an error; a file damaged part-way is read up
@@ -52,7 +64,7 @@ pub fn read_bytes(data: &[u8], file_name: &str) -> io::Result<Vec<MidiPart>> {
 
     let mut tracks = Vec::new();
     // A channel's sound is usually set once, in whichever track: the first program change for each channel counts.
-    let mut programs = HashMap::new();
+    let mut programs = [None; CHANNELS];
     let mut tempo = None;
     // Where the next chunk starts, as a wider number so a damaged length can't wrap it round.
     let mut pos = 8 + i64::from(header_length);
@@ -71,13 +83,12 @@ pub fn read_bytes(data: &[u8], file_name: &str) -> io::Result<Vec<MidiPart>> {
         }
     }
 
-    let named = tracks.iter().filter(|t| !t.by_channel.is_empty()).count();
+    let channels_used = |t: &Track| t.by_channel.iter().filter(|n| !n.is_empty()).count();
+    let named = tracks.iter().filter(|t| channels_used(t) > 0).count();
     let mut parts = Vec::new();
     for track in tracks {
-        let mut channels: Vec<(u8, Vec<NoteEvent>)> = track.by_channel.into_iter().collect();
-        channels.sort_by_key(|(c, _)| *c);
-        let split = channels.len() > 1;
-        for (channel, mut notes) in channels {
+        let split = channels_used(&track) > 1;
+        for (channel, mut notes) in (0u8..).zip(track.by_channel) {
             if notes.is_empty() {
                 continue;
             }
@@ -100,7 +111,7 @@ pub fn read_bytes(data: &[u8], file_name: &str) -> io::Result<Vec<MidiPart>> {
                 notes,
                 drums: channel == 9,
                 tempo,
-                program: programs.get(&channel).copied(),
+                program: programs.get(usize::from(channel)).copied().flatten(),
                 track_name: track.name.clone(),
             });
         }
@@ -108,10 +119,10 @@ pub fn read_bytes(data: &[u8], file_name: &str) -> io::Result<Vec<MidiPart>> {
     Ok(parts)
 }
 
-/// A track's name and its notes by channel.
+/// A track's name and its notes, by channel.
 struct Track {
     name: String,
-    by_channel: HashMap<u8, Vec<NoteEvent>>,
+    by_channel: [Vec<NoteEvent>; CHANNELS],
 }
 
 /// When a held note started, and how hard (MIDI 1.0's velocity).
@@ -144,16 +155,17 @@ impl Held {
     }
 }
 
-fn read_track(s: &[u8], tempo: &mut Option<f64>, programs: &mut HashMap<u8, u8>) -> Track {
+fn read_track(s: &[u8], tempo: &mut Option<f64>, programs: &mut [Option<u8>; CHANNELS]) -> Track {
     let mut name = String::new();
-    let mut by_channel: HashMap<u8, Vec<NoteEvent>> = HashMap::new();
+    let mut by_channel: [Vec<NoteEvent>; CHANNELS] = Default::default();
     // A key struck again before it's released stacks, so each release ends the earliest one.
     let mut held = Held::default();
     let mut tick: i64 = 0;
     let mut i = 0;
     let (mut status, mut running) = (0u8, 0u8);
-    let add = |by_channel: &mut HashMap<u8, Vec<NoteEvent>>, channel: u8, start: i64, end: i64, key: u8, vel: u8| {
-        by_channel.entry(channel).or_default().push(NoteEvent {
+    let add = |by_channel: &mut [Vec<NoteEvent>; CHANNELS], channel: u8, start: i64, end: i64, key: u8, vel: u8| {
+        let Some(notes) = by_channel.get_mut(usize::from(channel)) else { return };
+        notes.push(NoteEvent {
             start,
             length: (end - start).max(1),
             key: key & 0x7f,
@@ -211,7 +223,9 @@ fn read_track(s: &[u8], tempo: &mut Option<f64>, programs: &mut HashMap<u8, u8>)
         let (d1, d2) = (byte(d, 0), if data_bytes == 2 { byte(d, 1) } else { 0 });
         i += data_bytes;
         if kind == 0xc0 {
-            programs.entry(channel).or_insert(d1 & 0x7f);
+            if let Some(program @ None) = programs.get_mut(usize::from(channel)) {
+                *program = Some(d1 & 0x7f);
+            }
         } else if kind == 0x90 && d2 > 0 {
             held.strike((channel, d1), tick, d2);
         } else if (kind == 0x80 || kind == 0x90)
@@ -252,22 +266,48 @@ fn text(b: &[u8]) -> String {
     s.trim_matches(['\0', ' ']).to_owned()
 }
 
-fn byte(d: &[u8], at: usize) -> u8 {
-    d.get(at).copied().unwrap_or(0)
-}
-
 fn i32_at(d: &[u8], at: usize) -> i32 {
     i32::from_be_bytes([byte(d, at), byte(d, at + 1), byte(d, at + 2), byte(d, at + 3)])
 }
 
-/// Equal letter case aside, as .NET's `OrdinalIgnoreCase` compares: letter by letter, each by its one-letter capital.
+/// Equal letter case aside, as .NET's `OrdinalIgnoreCase` compares: letter by letter, each by its one-letter capital
+/// (Unicode's simple mapping, where Rust's `to_uppercase` gives the full one).
 fn eq_ignore_case(a: &str, b: &str) -> bool {
-    let upper = |c: char| {
-        let mut u = c.to_uppercase();
-        match (u.next(), u.next()) {
-            (Some(one), None) => one,
-            _ => c,
+    let upper = |c: char| match c {
+        // .NET keeps these two as they are, where Unicode makes them I and S.
+        '\u{131}' | '\u{17f}' => c,
+        // Greek small letters with an iota below: their one-letter capital is 8 on (9 for the three on their own),
+        // where the full capital is two letters.
+        '\u{1f80}'..='\u{1faf}' if u32::from(c) & 8 == 0 => char::from_u32(u32::from(c) + 8).unwrap_or(c),
+        '\u{1fb3}' | '\u{1fc3}' | '\u{1ff3}' => char::from_u32(u32::from(c) + 9).unwrap_or(c),
+        _ => {
+            let mut u = c.to_uppercase();
+            match (u.next(), u.next()) {
+                (Some(one), None) => one,
+                _ => c,
+            }
         }
     };
     a.chars().map(upper).eq(b.chars().map(upper))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn letter_case_is_compared_as_dotnet_does() {
+        assert!(eq_ignore_case("Loop One", "loop one"));
+        // .NET doesn't take a dotless i for an I, nor a long s for an S.
+        assert!(!eq_ignore_case("\u{131}ntro", "Intro"));
+        assert!(!eq_ignore_case("ba\u{17f}s", "BASS"));
+        // A Greek letter with an iota below and its one-letter capital.
+        assert!(eq_ignore_case("\u{1f80}\u{1fb3}", "\u{1f88}\u{1fbc}"));
+        assert!(!eq_ignore_case("\u{1f88}", "\u{1f80}\u{399}"));
+    }
+
+    #[test]
+    fn endings_are_known_with_or_without_folders() {
+        assert!(is_midi_path("Idea.MIDI") && is_midi_path("a/b.kar") && !is_midi_path("mid") && !is_midi_path("a."));
+    }
 }

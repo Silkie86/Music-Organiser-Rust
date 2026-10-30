@@ -84,8 +84,7 @@ fn studio_one_dump(path: &Path, raw: &[u8]) -> Value {
 
 /// A MIDI file's parts. A file that isn't one says just "unreadable" in both apps.
 fn midi_dump(path: &Path, raw: &[u8]) -> Value {
-    let stem = path.file_stem().map(|s| s.to_string_lossy()).unwrap_or_default();
-    match smf::read_bytes(raw, &stem) {
+    match smf::read_from(raw, path) {
         Ok(parts) => {
             json!({ "file": path.to_string_lossy(), "parts": parts.iter().map(part_json).collect::<Vec<_>>() })
         }
