@@ -6,20 +6,17 @@ use std::collections::BTreeMap;
 use super::events::*;
 use super::song::class_id_string;
 use super::{
-    CHANNEL_TYPE_INSTRUMENT, KIND_VST3, Rack, VST_CLASS_ID, VST_FOUR_CC, VST_KIND, VST_NAME, VST_PATH, VST_STATE,
-    WRAPPER, is_native_generator, saved_nothing, vst2_header, wrapper_fields, wrapper_text,
+    CHANNEL_TYPE_INSTRUMENT, Rack, VST_STATE, WRAPPER, is_native_generator, saved_nothing, vst2_header,
+    wrapper_class_id, wrapper_fields, wrapper_four_cc, wrapper_is_vst3, wrapper_plugin_name,
 };
 use crate::model::PluginKind;
-use crate::plugins;
 use crate::presets::{PresetBlob, fxp, vstpreset};
 
 /// A Fruity Wrapper plugin's state as a file the plugin can load: .fxp for a VST2, .vstpreset for a VST3 (or the raw
 /// state, as .vst3state, when it isn't laid out as known).
 pub(super) fn wrapper_preset(f: &BTreeMap<u32, &[u8]>, state: &[u8], name: &str, plugin: &str) -> PresetBlob {
-    let vst3 = f.get(&VST_KIND).and_then(|k| k.first()) == Some(&KIND_VST3)
-        || wrapper_text(f, VST_PATH).to_lowercase().ends_with(".vst3");
-    if vst3 {
-        if let Some(class_id) = f.get(&VST_CLASS_ID).and_then(|c| <&[u8; 16]>::try_from(*c).ok())
+    if wrapper_is_vst3(f) {
+        if let Some(class_id) = wrapper_class_id(f)
             && let Some((component, controller)) = vst3_state(state)
         {
             let data = vstpreset::build(&class_id_string(class_id), component, controller);
@@ -28,7 +25,7 @@ pub(super) fn wrapper_preset(f: &BTreeMap<u32, &[u8]>, state: &[u8], name: &str,
         return PresetBlob::new(name, plugin, ".vst3state", state.to_vec());
     }
 
-    let id = f.get(&VST_FOUR_CC).and_then(|c| <[u8; 4]>::try_from(*c).ok()).map_or(0, i32::from_le_bytes);
+    let id = wrapper_four_cc(f).unwrap_or(0);
     let mut chunk = state;
     let mut selected = 0;
     if let Some((start, length, current)) = vst2_header(state) {
@@ -130,11 +127,9 @@ pub fn extract_presets(flp: &Flp<'_>) -> Vec<PresetBlob> {
     let mut rack = Rack::default();
     let mut pending_internal = String::new();
     let mut current_name = String::new();
-    let mut insert: i64 = -1;
-    let mut insert_names: BTreeMap<i64, String> = BTreeMap::new();
-    let mut next_insert_name = String::new();
+    let mut insert_names: BTreeMap<u32, String> = BTreeMap::new();
     // Preset index → mixer insert.
-    let mut preset_insert: BTreeMap<usize, i64> = BTreeMap::new();
+    let mut preset_insert: BTreeMap<usize, u32> = BTreeMap::new();
     for e in &flp.events {
         rack.step(e);
         match e.id {
@@ -144,12 +139,10 @@ pub fn extract_presets(flp: &Flp<'_>) -> Vec<PresetBlob> {
                 }
             }
             EV_INSERT_FLAGS => {
-                insert += 1;
-                if !next_insert_name.is_empty() {
-                    insert_names.insert(insert, std::mem::take(&mut next_insert_name));
+                if let (Some(at), Some(name)) = (rack.insert(), rack.insert_name(e)) {
+                    insert_names.insert(at, flp.text(name));
                 }
             }
-            EV_INSERT_NAME => next_insert_name = flp.text(&e.data),
             EV_PLUGIN_INTERNAL => {
                 pending_internal = flp.text(&e.data);
                 current_name.clear();
@@ -157,16 +150,11 @@ pub fn extract_presets(flp: &Flp<'_>) -> Vec<PresetBlob> {
             EV_PLUGIN_NAME => current_name = flp.text(&e.data),
             EV_PLUGIN_STATE if !e.data.is_empty() => {
                 let on_channel = rack.channel().filter(|c| channel_types.get(c) == Some(&CHANNEL_TYPE_INSTRUMENT));
-                if rack.in_mixer() && insert >= 0 {
-                    preset_insert.insert(presets.len(), insert);
-                }
+                let pushed_before = presets.len();
                 let kind = |instrument: bool| if instrument { PluginKind::Instrument } else { PluginKind::Effect };
                 if pending_internal.eq_ignore_ascii_case(WRAPPER) {
                     let f = wrapper_fields(&e.data);
-                    let plugin = match wrapper_text(&f, VST_NAME) {
-                        n if n.is_empty() => plugins::name_from_path(&wrapper_text(&f, VST_PATH)),
-                        n => n,
-                    };
+                    let plugin = wrapper_plugin_name(&f);
                     let name = if current_name.is_empty() { plugin.clone() } else { current_name.clone() };
                     if let Some(state) = f.get(&VST_STATE).filter(|s| !s.is_empty() && !saved_nothing(s)) {
                         presets.push(PresetBlob {
@@ -183,6 +171,13 @@ pub fn extract_presets(flp: &Flp<'_>) -> Vec<PresetBlob> {
                         channel: on_channel,
                         ..PresetBlob::new(name, &pending_internal, ".flstate", e.data.to_vec())
                     });
+                }
+                // Only a plugin that gave a preset is placed, so one that saved nothing can't pass its insert on.
+                if presets.len() > pushed_before
+                    && rack.in_mixer()
+                    && let Some(at) = rack.insert()
+                {
+                    preset_insert.insert(pushed_before, at);
                 }
                 pending_internal.clear();
             }

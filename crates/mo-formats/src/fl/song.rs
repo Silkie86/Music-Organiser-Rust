@@ -12,11 +12,10 @@ use super::events::*;
 use super::notes;
 use super::presets::{vst3_parameter_ids, wrapper_preset};
 use super::{
-    KIND_VST3, Rack, UserData, VST_CLASS_ID, VST_FOUR_CC, VST_KIND, VST_NAME, VST_PATH, VST_STATE, VST_VENDOR, WRAPPER,
-    saved_nothing, wrapper_fields, wrapper_text,
+    Rack, UserData, VST_PATH, VST_STATE, VST_VENDOR, WRAPPER, channels as known_channels, saved_nothing,
+    wrapper_class_id, wrapper_fields, wrapper_four_cc, wrapper_is_vst3, wrapper_plugin_name, wrapper_text,
 };
 use crate::model::{MidiChannel, MidiClip, NoteEvent};
-use crate::plugins;
 use crate::presets::PresetBlob;
 
 const EV_CHANNEL_ON: u8 = 0;
@@ -408,15 +407,29 @@ fn place_clips(
         let size = notes::note_size(&e.data, flp.major, e.offset.is_none(), Some(known));
         patterns.entry(pattern).or_default().extend(notes::decode(&e.data, size));
     }
+    // Each pattern's notes by start (with their place in the file), so a clip finds its part of the pattern without
+    // looking at every note: a drum pattern placed hundreds of times is read once.
+    let by_start: HashMap<u32, Vec<(i64, usize)>> = patterns
+        .iter()
+        .map(|(&p, notes)| {
+            let mut starts: Vec<(i64, usize)> = notes.iter().enumerate().map(|(i, (_, n))| (n.start, i)).collect();
+            starts.sort_unstable();
+            (p, starts)
+        })
+        .collect();
     let name_of = |p: u32| pattern_names.get(&p).cloned().unwrap_or_else(|| format!("Pattern {p}"));
 
     let mut clips: BTreeMap<u32, Vec<FlClip>> = BTreeMap::new();
     let mut place = |pattern: u32, at: i64, from: i64, length: i64, muted: bool, track: u32, on_muted_track: bool| {
-        let Some(in_pattern) = patterns.get(&pattern) else { return };
+        let (Some(in_pattern), Some(starts)) = (patterns.get(&pattern), by_start.get(&pattern)) else { return };
+        let first = starts.partition_point(|&(start, _)| start < from);
+        let end = starts.partition_point(|&(start, _)| start < from.saturating_add(length));
+        // In file order again: channels in the order their first note appears, as the C# reader groups them.
+        let mut hits: Vec<usize> = starts[first..end.max(first)].iter().map(|&(_, i)| i).collect();
+        hits.sort_unstable();
         let mut by_channel: BTreeMap<u32, Vec<NoteEvent>> = BTreeMap::new();
-        // Channels in the order their first note appears, as the C# reader groups them.
         let mut order = Vec::new();
-        for &(channel, n) in in_pattern.iter().filter(|(_, n)| n.start >= from && n.start < from + length) {
+        for &(channel, n) in hits.into_iter().map(|i| &in_pattern[i]) {
             if !by_channel.contains_key(&channel) {
                 order.push(channel);
             }
@@ -587,18 +600,12 @@ fn song_plugin(internal: &str, data: &[u8], shown: &str, sounds: bool) -> FlPlug
     }
     let f = wrapper_fields(data);
     let path = wrapper_text(&f, VST_PATH);
-    let name = match wrapper_text(&f, VST_NAME) {
-        n if n.is_empty() => plugins::name_from_path(&path),
-        n => n,
-    };
-    let vst3 = f.get(&VST_KIND).and_then(|k| k.first()) == Some(&KIND_VST3) || path.to_lowercase().ends_with(".vst3");
+    let name = wrapper_plugin_name(&f);
+    let vst3 = wrapper_is_vst3(&f);
     let device_id = if vst3 {
-        f.get(&VST_CLASS_ID).and_then(|c| <&[u8; 16]>::try_from(*c).ok()).map(class_id_string).unwrap_or_default()
+        wrapper_class_id(&f).map(class_id_string).unwrap_or_default()
     } else {
-        f.get(&VST_FOUR_CC)
-            .and_then(|c| <[u8; 4]>::try_from(*c).ok())
-            .map(|c| i32::from_le_bytes(c).to_string())
-            .unwrap_or_default()
+        wrapper_four_cc(&f).map(|c| c.to_string()).unwrap_or_default()
     };
     let raw = f.get(&VST_STATE).copied().filter(|s| sounds && !s.is_empty());
     let nothing_saved = !vst3 && f.get(&VST_STATE).is_some_and(|s| saved_nothing(s));
@@ -623,7 +630,7 @@ fn song_plugin(internal: &str, data: &[u8], shown: &str, sounds: bool) -> FlPlug
 }
 
 impl FlSong {
-    /// Finds samples saved under FL's user data folder from where the project lives (see [`super::resolve_user_data`]).
+    /// Finds samples saved under FL's user data folder from where the project lives (see [`UserData`]).
     pub fn resolve_samples(&mut self, project: &Path) {
         let mut user_data = UserData::new(project);
         for c in &mut self.channels {
@@ -671,9 +678,7 @@ pub fn read_song_with(flp: &Flp<'_>, sounds: bool) -> FlSong {
     let mut pattern: Option<u32> = None;
     let mut pending_internal = String::new();
     let mut plugin_name = String::new();
-    let mut insert: i64 = -1;
     let mut insert_names: BTreeMap<u32, String> = BTreeMap::new();
-    let mut next_insert_name = String::new();
     let mut effects: BTreeMap<u32, Vec<FlPlugin>> = BTreeMap::new();
     // The effect added last, until its slot's closing event says which slot it's in.
     let mut unslotted: Option<(u32, usize)> = None;
@@ -717,7 +722,7 @@ pub fn read_song_with(flp: &Flp<'_>, sounds: bool) -> FlSong {
                         .entry(c)
                         .or_insert_with(|| song_plugin(&pending_internal, &e.data, &plugin_name, sounds));
                 } else if rack.in_mixer()
-                    && let Ok(at) = u32::try_from(insert)
+                    && let Some(at) = rack.insert()
                 {
                     let list = effects.entry(at).or_default();
                     list.push(song_plugin(&pending_internal, &e.data, &plugin_name, sounds));
@@ -726,13 +731,10 @@ pub fn read_song_with(flp: &Flp<'_>, sounds: bool) -> FlSong {
                 pending_internal.clear();
             }
             EV_INSERT_FLAGS => {
-                insert += 1;
-                if !next_insert_name.is_empty() {
-                    insert_names.insert(insert as u32, std::mem::take(&mut next_insert_name));
+                if let (Some(at), Some(name)) = (rack.insert(), rack.insert_name(e)) {
+                    insert_names.insert(at, flp.text(name));
                 }
             }
-            // An insert's name (with its colour and icon) comes just before the flags that start it.
-            EV_INSERT_NAME => next_insert_name = flp.text(&e.data),
             EV_MIXER_SLOT => {
                 // An effect's events come before the event that closes its slot, which holds the slot's number.
                 if let Some((at, index)) = unslotted.take()
@@ -902,6 +904,7 @@ pub fn read_song_with(flp: &Flp<'_>, sounds: bool) -> FlSong {
 /// One clip per pattern (in pattern order), one track in it per channel with notes in that pattern. Muted notes are
 /// left out: MIDI has none.
 pub fn extract_midi(flp: &Flp<'_>) -> Vec<MidiClip> {
+    let known = known_channels(flp);
     let mut channel_names: HashMap<u32, String> = HashMap::new();
     let mut pattern_names: HashMap<u32, String> = HashMap::new();
     let mut pattern_notes: BTreeMap<u32, Vec<(u32, NoteEvent)>> = BTreeMap::new();
@@ -923,7 +926,7 @@ pub fn extract_midi(flp: &Flp<'_>) -> Vec<MidiClip> {
             }
             EV_PATTERN_NOTES => {
                 if let Some(p) = pattern {
-                    let size = notes::note_size(&e.data, flp.major, e.offset.is_none(), None);
+                    let size = notes::note_size(&e.data, flp.major, e.offset.is_none(), Some(&known));
                     let unmuted = notes::decode(&e.data, size).into_iter().filter(|(_, n)| !n.muted);
                     pattern_notes.entry(p).or_default().extend(unmuted);
                 }
@@ -994,11 +997,7 @@ pub fn extract_channels(flp: &Flp<'_>) -> Vec<MidiChannel> {
             }
             EV_PLUGIN_STATE if pending_internal.eq_ignore_ascii_case(WRAPPER) => {
                 if let Some(c) = channel {
-                    let f = wrapper_fields(&e.data);
-                    let vst = match wrapper_text(&f, VST_NAME) {
-                        n if n.is_empty() => plugins::name_from_path(&wrapper_text(&f, VST_PATH)),
-                        n => n,
-                    };
+                    let vst = wrapper_plugin_name(&wrapper_fields(&e.data));
                     if !vst.is_empty() {
                         sources.entry(c).or_insert_with(|| vst.clone());
                         players.entry(c).or_insert(vst);

@@ -194,6 +194,23 @@ fn resolves_the_user_data_folder_from_the_projects_location() {
 }
 
 #[test]
+fn one_sample_written_two_ways_plays_once() {
+    let dir = test_dir("two-ways");
+    let projects = dir.join("FL Studio").join("Projects");
+    std::fs::create_dir_all(&projects).expect("make the folders");
+    std::fs::write(projects.join("Snare 01.wav"), [0]).expect("write the sample");
+    let snare = projects.join("Snare 01.wav").to_string_lossy().into_owned();
+    let path = projects.join("Two ways.flp");
+    std::fs::write(&path, fl_studio_25_one_sample_two_ways(&snare)).expect("write the project");
+
+    let info = fl::read(&path).expect("the file is there");
+    assert_eq!(info.samples, [snare.as_str()]);
+    // Channel 0 plays it, so it isn't unplayed though channel 1 has no notes.
+    assert!(info.unplayed.is_empty(), "{:?}", info.unplayed);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn reads_fl_9_step_sequencer_drums_as_notes() {
     let bytes = fl_studio_9_steps();
     let info = read(&bytes);

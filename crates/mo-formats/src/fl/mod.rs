@@ -20,8 +20,9 @@ use events::*;
 
 pub const DAW: &str = "FL Studio";
 /// Goes up by one whenever the reader finds more (or different) things in the same files, so a scan reads every FL
-/// project again (rule 7). The C# reader is at 7; 8 is what the Rust reader finds differently (DIFFERENCES.md).
-pub const VERSION: u32 = 8;
+/// project again (rule 7). The C# reader is at 7; 8 is what the Rust reader finds differently (DIFFERENCES.md); 9 adds
+/// the samples a song holds but doesn't play.
+pub const VERSION: u32 = 9;
 pub const EXTENSIONS: [&str; 1] = ["flp"];
 
 /// The Fruity Wrapper (FL's VST host) keeps a VST's details as records: u32 version, then (u32 id, u64 size, data).
@@ -96,12 +97,19 @@ pub(crate) fn is_native_generator(name: &str) -> bool {
 /// project lives.
 pub fn read(path: &Path) -> std::io::Result<ProjectInfo> {
     let raw = std::fs::read(path)?;
-    Ok(resolve_user_data(read_bytes(&raw), path))
+    let mut user_data = UserData::new(path);
+    Ok(read_with(&raw, &mut |s| user_data.resolve(s)))
 }
 
 /// [`read`] for a file already in memory. It never looks at the disk, so samples under FL's user data folder stay as
-/// FL wrote them (`%FLStudioUserData%\...`); [`resolve_user_data`] finds them.
+/// FL wrote them (`%FLStudioUserData%\...`); [`UserData`] finds them.
 pub fn read_bytes(raw: &[u8]) -> ProjectInfo {
+    read_with(raw, &mut |s| s.to_owned())
+}
+
+/// Reads the project, with `resolve` giving each sample's path. Samples are resolved before anything is said about
+/// them, so one file written two ways counts once, and plays if either channel plays it.
+fn read_with(raw: &[u8], resolve: &mut dyn FnMut(&str) -> String) -> ProjectInfo {
     let mut info = ProjectInfo::new(DAW);
     let flp = match events::load(raw) {
         Ok(flp) => flp,
@@ -146,7 +154,7 @@ pub fn read_bytes(raw: &[u8]) -> ProjectInfo {
                 }
             }
             EV_PATTERN_NEW => patterns += 1,
-            EV_SAMPLE_PATH => info.samples.push(flp.text(&e.data)),
+            EV_SAMPLE_PATH => info.samples.push(resolve(&flp.text(&e.data))),
             EV_PATTERN_NOTES => {
                 notes += e.data.len() / notes::note_size(&e.data, flp.major, e.offset.is_none(), Some(&known))
             }
@@ -179,12 +187,11 @@ pub fn read_bytes(raw: &[u8]) -> ProjectInfo {
             EV_PLUGIN_STATE if pending_internal.eq_ignore_ascii_case(WRAPPER) => {
                 pending_internal.clear();
                 let f = wrapper_fields(&e.data);
-                let name = wrapper_text(&f, VST_NAME);
-                let vst_path = wrapper_text(&f, VST_PATH);
-                if name.is_empty() && vst_path.is_empty() {
+                let shown = wrapper_plugin_name(&f);
+                if shown.is_empty() {
                     continue;
                 }
-                let shown = if name.is_empty() { plugins::name_from_path(&vst_path) } else { name };
+                let vst_path = wrapper_text(&f, VST_PATH);
                 if f.get(&VST_STATE).is_some_and(|s| saved_nothing(s)) {
                     nothing_saved.entry(shown.to_uppercase()).or_insert_with(|| shown.clone());
                 }
@@ -224,18 +231,24 @@ pub fn read_bytes(raw: &[u8]) -> ProjectInfo {
     info.details.insert("Channels".into(), info.tracks.len().to_string());
     info.details.insert("Patterns".into(), patterns.to_string());
     info.details.insert("Notes".into(), notes.to_string());
-    note_unplayed(&song::read_song_with(&flp, false), &mut info);
+    note_unplayed(&song::read_song_with(&flp, false), resolve, &mut info);
     align_unplayed(info.dedupe())
 }
 
 /// Follows which channel the events belong to. A channel's events start at event 64; the mixer's at an insert (236),
 /// a slot's end (98), or a second plugin on one channel (a channel hosts one generator, so a second plugin before the
 /// next channel is the mixer's first effect). Every reader walks the events with one, so they all agree.
+///
+/// It also counts the mixer's inserts: each starts at its flags (event 236), from 0 (the master), and its name comes
+/// just before them.
 #[derive(Default)]
 pub(crate) struct Rack {
     channel: Option<u32>,
     in_mixer: bool,
     has_plugin: bool,
+    insert: Option<u32>,
+    next_insert_name: Option<Vec<u8>>,
+    insert_name: Option<Vec<u8>>,
 }
 
 impl Rack {
@@ -247,7 +260,13 @@ impl Rack {
                 self.in_mixer = false;
                 self.has_plugin = false;
             }
-            EV_MIXER_SLOT | EV_INSERT_FLAGS => self.in_mixer = true,
+            EV_MIXER_SLOT => self.in_mixer = true,
+            EV_INSERT_FLAGS => {
+                self.in_mixer = true;
+                self.insert = Some(self.insert.map_or(0, |i| i + 1));
+                self.insert_name = self.next_insert_name.take().filter(|n| !n.is_empty());
+            }
+            EV_INSERT_NAME => self.next_insert_name = Some(e.data.to_vec()),
             EV_PLUGIN_INTERNAL => {
                 if self.has_plugin {
                     self.in_mixer = true;
@@ -266,6 +285,16 @@ impl Rack {
     /// The mixer's events have started (and no channel's since).
     pub fn in_mixer(&self) -> bool {
         self.in_mixer
+    }
+
+    /// The mixer insert whose events these are, once the first has started.
+    pub fn insert(&self) -> Option<u32> {
+        self.insert
+    }
+
+    /// At an insert's flags: the name it was given (as saved), if any.
+    pub fn insert_name(&self, e: &Event<'_>) -> Option<&[u8]> {
+        self.insert_name.as_deref().filter(|_| e.id == EV_INSERT_FLAGS)
     }
 }
 
@@ -288,15 +317,16 @@ fn align_unplayed(mut info: ProjectInfo) -> ProjectInfo {
 /// The samples this save holds but doesn't play, and why: on a channel with nothing in the playlist, or muted (the
 /// channel switched off, or every clip of it muted or on a muted playlist track). A sample on several channels plays
 /// when any of them does. Letter case aside, each sample once, under the first channel's spelling.
-fn note_unplayed(song: &song::FlSong, info: &mut ProjectInfo) {
+fn note_unplayed(song: &song::FlSong, resolve: &mut dyn FnMut(&str) -> String, info: &mut ProjectInfo) {
     let mut order: Vec<String> = Vec::new();
     let mut by_sample: HashMap<String, (String, Vec<&song::FlChannel>)> = HashMap::new();
     for c in song.channels.iter().filter(|c| !c.sample.is_empty()) {
-        let key = c.sample.to_lowercase();
+        let sample = resolve(&c.sample);
+        let key = sample.to_lowercase();
         if !by_sample.contains_key(&key) {
             order.push(key.clone());
         }
-        by_sample.entry(key).or_insert_with(|| (c.sample.clone(), Vec::new())).1.push(c);
+        by_sample.entry(key).or_insert_with(|| (sample, Vec::new())).1.push(c);
     }
     for key in order {
         let (sample, channels) = &by_sample[&key];
@@ -339,6 +369,30 @@ pub(crate) fn wrapper_fields(blob: &[u8]) -> BTreeMap<u32, &[u8]> {
 
 pub(crate) fn wrapper_text(fields: &BTreeMap<u32, &[u8]>, id: u32) -> String {
     fields.get(&id).map_or_else(String::new, |b| String::from_utf8_lossy(b).trim_end_matches('\0').to_owned())
+}
+
+/// The plugin's name: the one the wrapper keeps, else its file's name ("" when it has neither).
+pub(crate) fn wrapper_plugin_name(fields: &BTreeMap<u32, &[u8]>) -> String {
+    match wrapper_text(fields, VST_NAME) {
+        n if n.is_empty() => plugins::name_from_path(&wrapper_text(fields, VST_PATH)),
+        n => n,
+    }
+}
+
+/// A VST3, by the wrapper's kind or its file's ending.
+pub(crate) fn wrapper_is_vst3(fields: &BTreeMap<u32, &[u8]>) -> bool {
+    fields.get(&VST_KIND).and_then(|k| k.first()) == Some(&KIND_VST3)
+        || wrapper_text(fields, VST_PATH).to_lowercase().ends_with(".vst3")
+}
+
+/// A VST2's four letters, as a number.
+pub(crate) fn wrapper_four_cc(fields: &BTreeMap<u32, &[u8]>) -> Option<i32> {
+    fields.get(&VST_FOUR_CC).and_then(|c| <[u8; 4]>::try_from(*c).ok()).map(i32::from_le_bytes)
+}
+
+/// A VST3's class id.
+pub(crate) fn wrapper_class_id<'a>(fields: &BTreeMap<u32, &'a [u8]>) -> Option<&'a [u8; 16]> {
+    fields.get(&VST_CLASS_ID).and_then(|c| <&[u8; 16]>::try_from(*c).ok())
 }
 
 /// Where the plugin's own state starts after the header FL puts in front of a VST2's state, its length, and the
@@ -388,19 +442,10 @@ pub fn project_time(data: &[u8]) -> (Option<NaiveDateTime>, Option<String>) {
     (created, spent)
 }
 
-/// FL writes paths under its user data folder as `%FLStudioUserData%\...`, the folder that holds the Projects folder.
-/// It's found from where the project lives: `I:\FL Studio Data\FL Studio\Projects\Song.flp` gives
-/// `I:\FL Studio Data\FL Studio`. Samples no folder above the project fits stay as FL wrote them. Both `samples` and
-/// `unplayed` are changed, so they still match.
-pub fn resolve_user_data(mut info: ProjectInfo, project: &Path) -> ProjectInfo {
-    let mut user_data = UserData::new(project);
-    for sample in &mut info.samples {
-        *sample = user_data.resolve(sample);
-    }
-    info.unplayed = std::mem::take(&mut info.unplayed).into_iter().map(|(s, u)| (user_data.resolve(&s), u)).collect();
-    align_unplayed(info.dedupe())
-}
-
+/// FL writes paths under its user data folder as `%FLStudioUserData%\...`, the folder that holds the Projects
+/// folder. It's found from where the project lives: `I:\FL Studio Data\FL Studio\Projects\Song.flp` gives
+/// `I:\FL Studio Data\FL Studio`. Samples no folder above the project fits stay as FL wrote them.
+///
 /// Finds samples under FL's user data folder for one project, looking for each folder name once however many samples
 /// share it.
 pub struct UserData {

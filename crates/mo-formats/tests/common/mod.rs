@@ -861,3 +861,23 @@ pub fn fl_studio_25_back_to_back(on_linked_first: bool) -> Vec<u8> {
     .concat();
     b.data(233, &playlist).build()
 }
+
+/// One snare written two ways: channel 0 plays it as `%FLStudioUserData%\Projects\Snare 01.wav`, channel 1 (no
+/// notes) has it as `full`.
+pub fn fl_studio_25_one_sample_two_ways(full: &str) -> Vec<u8> {
+    fl_25()
+        .word(65, 1)
+        .data(224, &note(0, 0, 48, 60, 100))
+        .word(64, 0)
+        .byte(21, 0)
+        .text(201, "")
+        .text(203, "Snare")
+        .text(196, r"%FLStudioUserData%\Projects\Snare 01.wav")
+        .word(64, 1)
+        .byte(21, 0)
+        .text(201, "")
+        .text(203, "Snare too")
+        .text(196, full)
+        .data(233, &playlist_item_25(0, 20481, 384))
+        .build()
+}
