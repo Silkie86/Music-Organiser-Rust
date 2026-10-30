@@ -385,6 +385,18 @@ the same files, and every difference is listed and judged (section 11's "twin te
 ### 4.4 Other formats
 
 - **MIDI files**: read SMF 0/1; write one file per channel, **no tempo event** (keep the ReaderTests no-tempo test).
+- **MIDI 2.0 ready** (Solomon, 2026-10-30; rule 22): nothing is cut down to MIDI 1.0 inside the app.
+  - Notes keep MIDI 2.0's resolution: 16-bit velocity, plus the note's attribute (articulation) and per-note
+    controllers (pitch bend, pressure, timbre, pan) when the source has them. Bitwig's note expressions and float
+    velocities fit this; FL's 7-bit velocities are scaled up by the MIDI 2.0 rule (min, centre and max kept).
+  - Controllers, pitch bend and pressure are 32-bit, and channels are 16 groups of 16.
+  - Read and write **MIDI Clip Files** (SMF2, the UMP-based file from the MIDI Association), beside SMF 1.
+  - MIDI ports speak UMP where the OS does (Windows MIDI Services, CoreMIDI, ALSA), and MIDI 1.0 elsewhere; values
+    are only cut to 7 bits at the last step, for a MIDI 1.0 file, port or DAW.
+  - The MIDI page and its index store the full values; search and the harmony engine read them through one 7-bit view
+    where they need MIDI 1.0 numbers.
+  - Phase 1 changes the note model (`NoteEvent`) to this before the MIDI reader is built, so no reader has to change
+    again later.
 - **DAWproject**: zip with `project.xml` and `metadata.xml`, plugin states under `plugins/`.
 - **Presets**: `.fxp`/`.fxb` (chunk `FPCh` or parameter `FxCk`), `.vstpreset`, Bitwig `.bwpreset` (Drum Machine UUID
   learned from your files).
@@ -724,6 +736,9 @@ Each phase ends with something you can open and try. The C# app stays your daily
     ultracode code review of the whole app on `main`, then fixes.
 20. Claude sets the right effort level itself for each task and review (your rule, 2026-10-29): higher for file
     formats, data safety and whole-app reviews, lower for small fixes. No need to ask you first; say which level was used.
+21. Highly multithreaded where it helps (rayon), at low priority, never on the UI thread.
+22. MIDI 2.0 ready: notes and controllers keep MIDI 2.0 resolution everywhere; only a MIDI 1.0 file, port or DAW gets
+    7-bit values (section 4.4).
 
 ---
 
