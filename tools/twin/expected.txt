@@ -1,0 +1,11 @@
+# The twin test's differences on the test files, each judged in crates/mo-formats/DIFFERENCES.md.
+# A file name, a tab, then the kind of difference. Written by `twin run ... --write-expect`.
+cut short.flp	info.warnings.len
+fl 25 audio only.flp	channels.len
+fl 25 audio only.flp	info.unplayed{}
+fl 25 audio only.flp	song.channels[].clips.len
+fl 25 audio only.flp	song.channels[].notes.len
+fl 7 garbled header.flp	info.details.Notes
+fl 7.flp	info.details.Notes
+version 9 bare.flp	info.title
+version 9 bare.flp	song.title

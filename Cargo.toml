@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+members = ["crates/*", "tools/twin"]
 # The galaxy check is a workspace of its own, so its wgpu never gets mixed into the app's build.
 exclude = ["tools/galaxycheck"]
 

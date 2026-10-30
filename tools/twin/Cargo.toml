@@ -1,0 +1,19 @@
+[package]
+name = "mo-twin"
+description = "The twin test: reads the same project files with the C# app's readers and the Rust ones, and lists every difference."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "twin"
+path = "src/main.rs"
+
+[dependencies]
+mo-formats = { path = "../../crates/mo-formats" }
+rayon = "1.10"
+serde_json = "1.0"
+sha2 = "0.10"
