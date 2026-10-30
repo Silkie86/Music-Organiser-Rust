@@ -31,7 +31,8 @@ pub fn vst2_id(id: i32) -> String {
 
 /// The VST2 id inside a class id a host made for a VST2 ("565354" for "VST", then its four letters in hex).
 pub fn vst2_id_in(class_id: &str) -> Option<String> {
-    let hex = class_id.get(6..14).filter(|_| class_id.len() == 32)?;
+    // All hex digits: .NET's hex reading takes no sign, where Rust's would take a "+".
+    let hex = class_id.get(6..14).filter(|h| class_id.len() == 32 && h.bytes().all(|b| b.is_ascii_hexdigit()))?;
     if !class_id.get(..6)?.eq_ignore_ascii_case("565354") {
         return None;
     }
