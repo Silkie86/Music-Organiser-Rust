@@ -9,11 +9,11 @@ mod common;
 use std::path::Path;
 
 use common::midi::*;
-use mo_formats::midi::{self, clip};
-use mo_formats::{NoteAttribute, NoteEvent, velocity};
+use mo_formats::midi::{self, Controller, ControllerKind, clip};
+use mo_formats::{NoteAttribute, NoteEvent, scale_up, velocity};
 
 fn note(start: i64, length: i64, key: u8, velocity: u16) -> NoteEvent {
-    NoteEvent { start, length, key, velocity, muted: false, step: false, attribute: None }
+    NoteEvent { start, length, key, velocity, muted: false, step: false, attribute: NoteAttribute::NONE }
 }
 
 #[test]
@@ -26,7 +26,7 @@ fn a_clip_reads_its_ppq_tempo_name_and_each_channels_notes_at_midi_2_resolution(
     assert!(parts.iter().all(|p| p.ppq == 480 && p.tempo == Some(92.5) && p.track_name == "Night Drive Verse Chords"));
 
     let chords = &parts[0];
-    let pitched = NoteEvent { attribute: Some(NoteAttribute { kind: 3, data: 64 << 9 }), ..note(0, 480, 64, 0x8000) };
+    let pitched = NoteEvent { attribute: NoteAttribute { kind: 3, data: 64 << 9 }, ..note(0, 480, 64, 0x8000) };
     assert_eq!(chords.notes, [note(0, 480, 60, 0xc000), pitched]);
     assert_eq!(chords.program, Some(4));
     assert!(!chords.drums);
@@ -141,4 +141,72 @@ fn the_midi_library_reads_either_kind_by_how_it_starts() {
     let path = dir.join("Verse.midi2");
     std::fs::write(&path, clip_two_groups()).unwrap();
     assert_eq!(midi::read(&path).unwrap(), clip_parts);
+}
+
+#[test]
+fn the_clips_time_starts_at_start_of_clip() {
+    // A header whose Delta Clockstamps aren't 0 (the spec writes 0 there): the clip's notes still start at 0.
+    let mut words = vec![dc(0), dctpq(96), dc(200)];
+    words.extend(START_OF_CLIP);
+    words.push(dc(0));
+    words.extend(note_on2(0, 0, 60, 0x8000, (0, 0)));
+    words.push(dc(96));
+    words.extend(note_off2(0, 0, 60));
+    let parts = clip::read_bytes(&clip_file(&words)).unwrap();
+    assert_eq!(parts[0].notes, [note(0, 96, 60, 0x8000)]);
+}
+
+#[test]
+fn controllers_pitch_bend_and_pressure_are_kept_at_32_bits_with_the_channels_notes() {
+    let mut b = vec![dc(0)];
+    b.extend(note_on2(0, 0, 60, 0x8000, (0, 0)));
+    // MIDI 2.0: a control change, per-note pitch bend and a per-note controller, each at 32 bits.
+    b.push(dc(10));
+    b.extend([0x40b0_0000 | 74 << 8, 0x1234_5678]);
+    b.push(dc(10));
+    b.extend([0x4060_0000 | 60 << 8, 0x9000_0000]);
+    b.push(dc(0));
+    b.extend([0x4000_0000 | 60 << 8 | 3, 0xffff_ffff]);
+    // MIDI 1.0: pitch bend all the way up, a mod wheel at 64 and channel pressure, scaled up by MIDI 2.0's rule.
+    b.push(dc(10));
+    b.push(midi1(0, 0xe0, 0x7f, 0x7f));
+    b.push(dc(0));
+    b.push(midi1(0, 0xb0, 1, 64));
+    b.push(dc(0));
+    b.push(midi1(0, 0xd0, 100, 0));
+    b.push(dc(10));
+    b.extend(note_off2(0, 0, 60));
+    // A controller on a channel with no notes makes no part.
+    b.push(dc(0));
+    b.push(midi1(0, 0xb3, 7, 100));
+    let parts = clip::read_bytes(&clip(96, 120.0, "", &b, 0)).unwrap();
+    assert_eq!(parts.len(), 1);
+    let c = |tick, kind, value| Controller { tick, kind, value };
+    assert_eq!(
+        parts[0].controllers,
+        [
+            c(10, ControllerKind::Control(74), 0x1234_5678),
+            c(20, ControllerKind::NotePitchBend(60), 0x9000_0000),
+            c(20, ControllerKind::NoteRegistered(60, 3), 0xffff_ffff),
+            c(30, ControllerKind::PitchBend, u32::MAX),
+            c(30, ControllerKind::Control(1), 0x8000_0000),
+            c(30, ControllerKind::ChannelPressure, scale_up(100, 7, 32)),
+        ]
+    );
+}
+
+#[test]
+fn midi_2_scaling_keeps_the_bottom_middle_and_top_and_gives_each_value_back() {
+    for (bits, to) in [(7, 16), (7, 32), (14, 32), (16, 32)] {
+        assert_eq!(scale_up(0, bits, to), 0);
+        assert_eq!(scale_up(1 << (bits - 1), bits, to), 1 << (to - 1));
+        assert_eq!(u64::from(scale_up((1 << bits) - 1, bits, to)), (1u64 << to) - 1);
+        for v in 0..(1u32 << bits).min(1 << 14) {
+            assert_eq!(scale_up(v, bits, to) >> (to - bits), v);
+        }
+    }
+    // The same as the velocities' own rule.
+    for v in 0..=127u8 {
+        assert_eq!(scale_up(v.into(), 7, 16), u32::from(velocity::from_7(v)));
+    }
 }

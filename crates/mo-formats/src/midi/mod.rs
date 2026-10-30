@@ -45,6 +45,37 @@ pub struct MidiPart {
     pub program: Option<u8>,
     /// The track's own name, kept even where `name` leaves it out.
     pub track_name: String,
+    /// The channel's controllers, pitch bend and pressure, in order, at MIDI 2.0's 32 bits (rule 22). Read from MIDI
+    /// Clip Files; a Standard MIDI File's are left out, as in the C# app.
+    pub controllers: Vec<Controller>,
+}
+
+/// A controller, pitch bend or pressure moving, at MIDI 2.0's 32 bits (a MIDI 1.0 value scaled up by MIDI 2.0's
+/// rule, [`crate::scale_up`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Controller {
+    /// When, in ticks at the part's PPQ.
+    pub tick: i64,
+    pub kind: ControllerKind,
+    /// 0 to `u32::MAX`; pitch bend's middle (no bend) is `0x8000_0000`.
+    pub value: u32,
+}
+
+/// What a [`Controller`] moves. The per-note ones (MIDI 2.0's) name their key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ControllerKind {
+    /// A control change, by its number (0 to 127).
+    Control(u8),
+    PitchBend,
+    ChannelPressure,
+    /// Polyphonic (per-key) pressure.
+    KeyPressure(u8),
+    /// MIDI 2.0's per-note pitch bend, by key.
+    NotePitchBend(u8),
+    /// MIDI 2.0's registered per-note controller: key, then the controller's number.
+    NoteRegistered(u8, u8),
+    /// MIDI 2.0's assignable per-note controller: key, then the controller's number.
+    NoteAssignable(u8, u8),
 }
 
 /// Notes still held, by key (a channel and a note), with what each was struck with; in the order the keys were first

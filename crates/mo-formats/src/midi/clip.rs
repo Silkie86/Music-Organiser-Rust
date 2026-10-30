@@ -7,13 +7,14 @@
 //! after the one before it comes.
 //!
 //! Notes keep MIDI 2.0's 16-bit velocity and their attribute; a MIDI 1.0 message in the clip is scaled up by MIDI
-//! 2.0's own rule (rule 22). Notes come from each of the 16 groups' 16 channels: a part per channel that has notes.
+//! 2.0's own rule (rule 22). Notes come from each of the 16 groups' 16 channels: a part per channel that has notes,
+//! with that channel's controllers, pitch bend and pressure at 32 bits (per-note ones too).
 
 use std::io;
 use std::path::Path;
 
-use super::{Held, MidiPart};
-use crate::model::{NoteAttribute, NoteEvent, velocity};
+use super::{Controller, ControllerKind, Held, MidiPart};
+use crate::model::{NoteAttribute, NoteEvent, scale_up, velocity};
 use crate::paths;
 
 /// Goes up by one whenever the reader finds more (or different) things in the same files (rule 7).
@@ -27,8 +28,7 @@ pub const DEFAULT_PPQ: u16 = 96;
 
 /// Whether a path ends in `.midi2`, letter case aside.
 pub fn is_clip_path(path: &str) -> bool {
-    let ext = paths::extension(path).strip_prefix('.').unwrap_or_default();
-    EXTENSIONS.iter().any(|x| x.eq_ignore_ascii_case(ext))
+    paths::has_extension(path, &EXTENSIONS)
 }
 
 /// Reads a MIDI Clip File from disk.
@@ -37,7 +37,7 @@ pub fn read(path: &Path) -> io::Result<Vec<MidiPart>> {
 }
 
 /// A note still held: when it started, its velocity and its attribute.
-type Struck = (i64, u16, Option<NoteAttribute>);
+type Struck = (i64, u16, NoteAttribute);
 
 /// Where a note is played: its group, channel and key.
 type Key = (u8, u8, u8);
@@ -78,7 +78,6 @@ enum Step {
     End,
 }
 
-#[derive(Default)]
 struct Clip {
     /// Where the clip is, in ticks.
     tick: i64,
@@ -91,8 +90,31 @@ struct Clip {
     name_done: bool,
     held: Held<Key, Struck>,
     /// Notes by group and channel: 16 of each.
-    notes: Vec<Vec<NoteEvent>>,
-    programs: Vec<Option<u8>>,
+    notes: [Vec<NoteEvent>; SLOTS],
+    /// Each group and channel's first program change.
+    programs: [Option<u8>; SLOTS],
+    /// Each group and channel's controllers, pitch bend and pressure, in order.
+    controllers: [Vec<Controller>; SLOTS],
+}
+
+/// MIDI 2.0's 16 groups of 16 channels.
+const SLOTS: usize = 16 * 16;
+
+impl Default for Clip {
+    fn default() -> Self {
+        Clip {
+            tick: 0,
+            delta: 0,
+            ppq: None,
+            tempo: None,
+            name: Vec::new(),
+            name_done: false,
+            held: Held::default(),
+            notes: std::array::from_fn(|_| Vec::new()),
+            programs: [None; SLOTS],
+            controllers: std::array::from_fn(|_| Vec::new()),
+        }
+    }
 }
 
 impl Clip {
@@ -117,7 +139,9 @@ impl Clip {
         self.tick = self.tick.saturating_add(self.delta);
         self.delta = 0;
         match kind {
-            // UMP Stream: End of Clip ends it (Start of Clip just starts the notes, where the clock already is).
+            // UMP Stream: Start of Clip is where the clip's own time starts (the header before it takes none), and
+            // End of Clip ends it.
+            0xf if (w0 >> 16) & 0x3ff == 0x20 => self.tick = 0,
             0xf if (w0 >> 16) & 0x3ff == 0x21 => return Step::End,
             // Flex Data: the tempo and the clip's name.
             0xd => self.flex(m),
@@ -128,24 +152,45 @@ impl Clip {
                     // A MIDI 2.0 note on is a note at any velocity, even 0 (unlike MIDI 1.0's).
                     0x9 => {
                         let attribute = match (w0 & 0xff) as u8 {
-                            0 => None,
-                            kind => Some(NoteAttribute { kind, data: (w1 & 0xffff) as u16 }),
+                            0 => NoteAttribute::NONE,
+                            kind => NoteAttribute { kind, data: (w1 & 0xffff) as u16 },
                         };
                         self.held.strike(key, (self.tick, (w1 >> 16) as u16, attribute));
                     }
                     0x8 => self.release(key),
                     0xc => self.program(key.0, key.1, ((w1 >> 24) & 0x7f) as u8),
-                    _ => {}
+                    _ => {
+                        let index = (w0 & 0xff) as u8;
+                        let kind = match status {
+                            0x0 => ControllerKind::NoteRegistered(key.2, index),
+                            0x1 => ControllerKind::NoteAssignable(key.2, index),
+                            0x6 => ControllerKind::NotePitchBend(key.2),
+                            0xa => ControllerKind::KeyPressure(key.2),
+                            0xb => ControllerKind::Control(key.2),
+                            0xd => ControllerKind::ChannelPressure,
+                            0xe => ControllerKind::PitchBend,
+                            _ => return Step::On,
+                        };
+                        self.controller(key.0, key.1, kind, w1);
+                    }
                 }
             }
             // MIDI 1.0 channel voice messages, in a packet.
             0x2 => {
                 let (d1, d2) = (((w0 >> 8) & 0x7f) as u8, (w0 & 0x7f) as u8);
-                let key = (group(w0), ((w0 >> 16) & 0xf) as u8, d1);
-                match (w0 >> 20) & 0xf {
-                    0x9 if d2 > 0 => self.held.strike(key, (self.tick, velocity::from_7(d2), None)),
+                let key = (group(w0), channel(w0), d1);
+                match status {
+                    0x9 if d2 > 0 => self.held.strike(key, (self.tick, velocity::from_7(d2), NoteAttribute::NONE)),
                     0x8 | 0x9 => self.release(key),
                     0xc => self.program(key.0, key.1, d1),
+                    // Controllers and pressure scaled up from 7 bits, pitch bend from 14, by MIDI 2.0's rule.
+                    0xa => self.controller(key.0, key.1, ControllerKind::KeyPressure(d1), scale_up(d2.into(), 7, 32)),
+                    0xb => self.controller(key.0, key.1, ControllerKind::Control(d1), scale_up(d2.into(), 7, 32)),
+                    0xd => self.controller(key.0, key.1, ControllerKind::ChannelPressure, scale_up(d1.into(), 7, 32)),
+                    0xe => {
+                        let bend = u32::from(d2) << 7 | u32::from(d1);
+                        self.controller(key.0, key.1, ControllerKind::PitchBend, scale_up(bend, 14, 32));
+                    }
                     _ => {}
                 }
             }
@@ -185,24 +230,23 @@ impl Clip {
     }
 
     fn add(&mut self, (group, channel, key): Key, (start, velocity, attribute): Struck, end: i64) {
-        let slot = usize::from(group) * 16 + usize::from(channel);
-        if self.notes.len() <= slot {
-            self.notes.resize_with(slot + 1, Vec::new);
-        }
         let note =
             NoteEvent { start, length: (end - start).max(1), key, velocity, muted: false, step: false, attribute };
-        if let Some(notes) = self.notes.get_mut(slot) {
+        if let Some(notes) = self.notes.get_mut(slot(group, channel)) {
             notes.push(note);
+        }
+    }
+
+    fn controller(&mut self, group: u8, channel: u8, kind: ControllerKind, value: u32) {
+        let tick = self.tick;
+        if let Some(list) = self.controllers.get_mut(slot(group, channel)) {
+            list.push(Controller { tick, kind, value });
         }
     }
 
     /// A channel's first program change counts.
     fn program(&mut self, group: u8, channel: u8, program: u8) {
-        let slot = usize::from(group) * 16 + usize::from(channel);
-        if self.programs.len() <= slot {
-            self.programs.resize(slot + 1, None);
-        }
-        if let Some(p @ None) = self.programs.get_mut(slot) {
+        if let Some(p @ None) = self.programs.get_mut(slot(group, channel)) {
             *p = Some(program);
         }
     }
@@ -213,10 +257,10 @@ impl Clip {
         for (key, struck) in std::mem::take(&mut self.held).into_held() {
             self.add(key, struck, end);
         }
-        let name = String::from_utf8_lossy(&self.name).trim().to_owned();
-        let ppq = self.ppq.unwrap_or(DEFAULT_PPQ);
-        let used: Vec<(usize, Vec<NoteEvent>)> =
-            std::mem::take(&mut self.notes).into_iter().enumerate().filter(|(_, n)| !n.is_empty()).collect();
+        let Clip { notes, programs, mut controllers, tempo, name, ppq, .. } = self;
+        let name = String::from_utf8_lossy(&name).trim().to_owned();
+        let ppq = ppq.unwrap_or(DEFAULT_PPQ);
+        let used: Vec<(usize, Vec<NoteEvent>)> = notes.into_iter().enumerate().filter(|(_, n)| !n.is_empty()).collect();
         let groups = used.iter().any(|(slot, _)| *slot >= 16);
         let split = used.len() > 1;
         used.into_iter()
@@ -233,13 +277,19 @@ impl Clip {
                     ppq,
                     notes,
                     drums: channel == 9,
-                    tempo: self.tempo,
-                    program: self.programs.get(slot).copied().flatten(),
+                    tempo,
+                    program: programs.get(slot).copied().flatten(),
                     track_name: name.clone(),
+                    controllers: controllers.get_mut(slot).map(std::mem::take).unwrap_or_default(),
                 }
             })
             .collect()
     }
+}
+
+/// Where a group and channel's notes and program are kept.
+fn slot(group: u8, channel: u8) -> usize {
+    usize::from(group) * 16 + usize::from(channel)
 }
 
 fn group(w0: u32) -> u8 {

@@ -6,7 +6,7 @@ use std::path::Path;
 
 use super::{Held, MidiPart};
 use crate::fl::events::byte_at as byte;
-use crate::model::{NoteEvent, velocity};
+use crate::model::{NoteAttribute, NoteEvent, velocity};
 use crate::paths;
 
 /// Goes up by one whenever the reader finds more (or different) things in the same files, so every MIDI file is read
@@ -21,8 +21,7 @@ const CHANNELS: usize = 16;
 
 /// Whether a path ends in one of [`EXTENSIONS`], letter case aside.
 pub fn is_midi_path(path: &str) -> bool {
-    let ext = paths::extension(path).strip_prefix('.').unwrap_or_default();
-    EXTENSIONS.iter().any(|x| x.eq_ignore_ascii_case(ext))
+    paths::has_extension(path, &EXTENSIONS)
 }
 
 /// Reads a MIDI file from disk. Its parts are named against the file's own name (a track named after the file isn't
@@ -112,6 +111,7 @@ pub fn read_bytes(data: &[u8], file_name: &str) -> io::Result<Vec<MidiPart>> {
                 tempo,
                 program: programs.get(usize::from(channel)).copied().flatten(),
                 track_name: track.name.clone(),
+                controllers: Vec::new(),
             });
         }
     }
@@ -144,7 +144,7 @@ fn read_track(s: &[u8], tempo: &mut Option<f64>, programs: &mut [Option<u8>; CHA
             velocity: velocity::from_7(vel.clamp(1, 127)),
             muted: false,
             step: false,
-            attribute: None,
+            attribute: NoteAttribute::NONE,
         });
     };
     while i < s.len() {

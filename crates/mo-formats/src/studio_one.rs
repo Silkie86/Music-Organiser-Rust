@@ -18,7 +18,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 use roxmltree::Node;
 
-use crate::model::{Confidence, MidiClip, NoteEvent, PluginKind, PluginRef, ProjectInfo, velocity};
+use crate::model::{Confidence, MidiClip, NoteAttribute, NoteEvent, PluginKind, PluginRef, ProjectInfo, velocity};
 use crate::paths;
 use crate::plugins;
 use crate::presets::PresetBlob;
@@ -220,7 +220,7 @@ impl<'a> Song<'a> {
                         velocity,
                         muted: false,
                         step: false,
-                        attribute: None,
+                        attribute: NoteAttribute::NONE,
                     });
                 }
                 if !notes.is_empty() {

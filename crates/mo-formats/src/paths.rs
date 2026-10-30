@@ -46,6 +46,12 @@ pub fn extension(name: &str) -> &str {
     }
 }
 
+/// Whether a path's ending is one of `extensions` (given without their dot), letter case aside.
+pub fn has_extension(path: &str, extensions: &[&str]) -> bool {
+    let ext = extension(path).strip_prefix('.').unwrap_or_default();
+    extensions.iter().any(|x| x.eq_ignore_ascii_case(ext))
+}
+
 /// The file's name without its ending (.NET's `Path.GetFileNameWithoutExtension`).
 pub fn stem(path: &str) -> &str {
     let start = path.rfind(is_separator).map_or(0, |i| i + 1);
