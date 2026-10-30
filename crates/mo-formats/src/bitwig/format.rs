@@ -497,12 +497,23 @@ impl<'a> Reader<'a> {
         Ok(b)
     }
 
+    /// `N` bytes at `p`, moving `p` past them.
+    fn take_n<const N: usize>(&self, p: &mut usize) -> R<[u8; N]> {
+        Ok(*self.take(p, N)?.first_chunk().ok_or(PAST_END)?)
+    }
+
+    /// The byte at `p`, moving `p` past it.
+    fn byte_at(&self, p: &mut usize) -> R<u8> {
+        let [b] = self.take_n(p)?;
+        Ok(b)
+    }
+
     fn byte(&self, p: usize) -> R<u8> {
         self.d.get(p).copied().ok_or_else(|| PAST_END.to_owned())
     }
 
     fn u32(&self, p: usize) -> R<u32> {
-        Ok(u32::from_be_bytes(self.at(p, 4)?.try_into().expect("4 bytes")))
+        Ok(u32::from_be_bytes(*self.at(p, 4)?.first_chunk().ok_or(PAST_END)?))
     }
 
     fn text(&mut self, p: &mut usize) -> R<Text> {
@@ -704,8 +715,10 @@ impl<'a> Reader<'a> {
                     }
                 },
             };
-            let value = done.expect("each frame above either goes on or finishes");
-            let finished = stack.pop().expect("a frame");
+            // Each frame above either goes on or finishes, so these are always there.
+            let (Some(value), Some(finished)) = (done, stack.pop()) else {
+                return Err(format!("lost its place at 0x{:x}", *p));
+            };
             match stack.last_mut() {
                 None => return Ok(value),
                 Some(below) => {
@@ -725,13 +738,13 @@ impl<'a> Reader<'a> {
     #[inline(never)]
     fn plain(&mut self, p: &mut usize, ty: u8) -> R<Value> {
         Ok(match ty {
-            0x01 => Value::U8(self.take(p, 1)?[0]),
-            0x05 => Value::Bool(self.take(p, 1)?[0]),
-            0x02 => Value::I16(i16::from_be_bytes(self.take(p, 2)?.try_into().expect("2"))),
-            0x03 => Value::I32(i32::from_be_bytes(self.take(p, 4)?.try_into().expect("4"))),
-            0x04 => Value::I64(i64::from_be_bytes(self.take(p, 8)?.try_into().expect("8"))),
-            0x06 => Value::F32(f32::from_be_bytes(self.take(p, 4)?.try_into().expect("4"))),
-            0x07 => Value::F64(f64::from_be_bytes(self.take(p, 8)?.try_into().expect("8"))),
+            0x01 => Value::U8(self.byte_at(p)?),
+            0x05 => Value::Bool(self.byte_at(p)?),
+            0x02 => Value::I16(i16::from_be_bytes(self.take_n(p)?)),
+            0x03 => Value::I32(i32::from_be_bytes(self.take_n(p)?)),
+            0x04 => Value::I64(i64::from_be_bytes(self.take_n(p)?)),
+            0x06 => Value::F32(f32::from_be_bytes(self.take_n(p)?)),
+            0x07 => Value::F64(f64::from_be_bytes(self.take_n(p)?)),
             0x08 => Value::Str(self.text(p)?),
             0x0a => Value::Null,
             0x0b => {
@@ -751,10 +764,13 @@ impl<'a> Reader<'a> {
                 *p += 4 + 4 * n;
                 Value::Ints(a)
             }
-            0x15 => Value::Uuid(self.take(p, 16)?.try_into().expect("16")),
+            0x15 => Value::Uuid(self.take_n(p)?),
             0x16 => {
-                let b = self.take(p, 16)?;
-                Value::Color(std::array::from_fn(|i| f32::from_be_bytes(b[4 * i..4 * i + 4].try_into().expect("4"))))
+                let mut color = [0.0; 4];
+                for c in &mut color {
+                    *c = f32::from_be_bytes(self.take_n(p)?);
+                }
+                Value::Color(color)
             }
             0x17 => {
                 let n = self.count(*p, 4, "float list")?;
@@ -825,7 +841,8 @@ fn deliver(stack: &mut [Frame], s: Slot) {
         Some(Frame::Obj { fields, pending, .. }) => fields.push(Field { id: *pending, value: Value::Obj(s) }),
         Some(Frame::Single { slot, .. } | Frame::Named { slot, .. }) => *slot = Some(s),
         Some(Frame::List { items, .. }) => items.push(s),
-        Some(Frame::Map { items, key, .. }) => items.push((key.take().expect("a key before its object"), s)),
+        // A map's key is always read before its object.
+        Some(Frame::Map { items, key, .. }) => items.extend(key.take().map(|k| (k, s))),
         None => {}
     }
 }

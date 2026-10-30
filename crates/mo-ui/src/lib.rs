@@ -1,7 +1,13 @@
 //! The window shell and its screens. The screens themselves are in `ui/*.slint`; this file fills them from `mo-app`
 //! (the look, the places, the shortcut list) and passes clicks and keys back.
 
-slint::include_modules!();
+// The code Slint writes for the screens unwraps freely, so it's kept apart from the rule against it (rule 17's crash
+// log still catches anything).
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod screens {
+    slint::include_modules!();
+}
+pub use screens::*;
 
 pub mod cards;
 pub mod note;

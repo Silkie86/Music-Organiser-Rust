@@ -101,7 +101,7 @@ fn run(args: &[String]) -> Result<bool, String> {
         return Err("No FL Studio or Bitwig projects (.flp, .bwproject) there.".into());
     }
 
-    let helper = o.cs.clone().expect("checked in options");
+    let helper = o.cs.clone().ok_or("Say where the C# helper is (--cs).")?;
     let mut report_file = match &o.report {
         Some(path) => Some(std::io::BufWriter::new(
             std::fs::File::create(path).map_err(|e| format!("Couldn't write the report: {e}"))?,
@@ -222,12 +222,12 @@ fn run_helper(helper: &Path, files: &[PathBuf]) -> Result<HashMap<String, Value>
         .stdout(Stdio::piped())
         .spawn()
         .map_err(|e| format!("Couldn't start the C# helper ({}): {e}", helper.display()))?;
-    let mut stdin = child.stdin.take().expect("piped");
+    let mut stdin = child.stdin.take().ok_or("The C# helper has no input.")?;
     let list: String = files.iter().map(|f| format!("{}\n", f.to_string_lossy())).collect();
     // Written from its own thread, so a long list can't stall both sides.
     let writer = std::thread::spawn(move || stdin.write_all(list.as_bytes()));
     let mut readings = HashMap::new();
-    for line in BufReader::new(child.stdout.take().expect("piped")).lines() {
+    for line in BufReader::new(child.stdout.take().ok_or("The C# helper has no output.")?).lines() {
         let line = line.map_err(|e| format!("Couldn't read the C# helper's answer: {e}"))?;
         let v: Value =
             serde_json::from_str(&line).map_err(|e| format!("The C# helper wrote something odd ({e}): {line}"))?;

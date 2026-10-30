@@ -59,6 +59,18 @@ jobs:
         working-directory: tools/galaxycheck
         run: cargo test
 
+  # Every library the app uses (deny.toml): no known security holes, only licences that let the app be shared, and
+  # only from crates.io. The galaxy check's libraries too.
+  deny:
+    name: Libraries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: tools/galaxycheck/Cargo.toml
+
   screenshots:
     name: Screenshots
     runs-on: ubuntu-latest

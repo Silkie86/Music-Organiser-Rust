@@ -1,5 +1,8 @@
 //! Automation clips and the mixer in FL projects: the C# `ReadSong` tests for them, on the same made-up files.
 
+// Test files may unwrap: a test that stops there has failed, which is what it should do.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 mod common;
 
 use common::*;

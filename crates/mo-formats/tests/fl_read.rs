@@ -1,6 +1,9 @@
 //! What the FL Studio reader finds in a project: the C# `FlStudioTests`, `FlStudio25Tests` and `FlStudio9Tests` that
 //! cover reading a project's facts, on the same made-up files.
 
+// Test files may unwrap: a test that stops there has failed, which is what it should do.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 mod common;
 
 use std::collections::BTreeMap;

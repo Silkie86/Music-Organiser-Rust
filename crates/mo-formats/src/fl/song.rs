@@ -351,7 +351,7 @@ pub(super) fn playlist_items(d: &[u8]) -> Vec<PlaylistItem> {
         }
         let order: Vec<u32> = items.iter().map(|i| i.index).collect::<BTreeSet<_>>().into_iter().collect();
         for item in &mut items {
-            item.slot = 499 - order.binary_search(&item.index).expect("listed above") as i64;
+            item.slot = 499 - order.partition_point(|&i| i < item.index) as i64;
         }
     }
     // FL 6 to 8: 28-byte items laid out like FL 9's, but with the start offset at 20 (a float, −1 = none) and rows
@@ -389,7 +389,7 @@ pub(super) fn playlist_items(d: &[u8]) -> Vec<PlaylistItem> {
             .collect();
         let order: Vec<u32> = keys.iter().copied().collect::<BTreeSet<_>>().into_iter().collect();
         for (item, key) in items.iter_mut().zip(keys) {
-            item.slot = 499 - order.binary_search(&key).expect("listed above") as i64;
+            item.slot = 499 - order.partition_point(|&k| k < key) as i64;
         }
     }
     items
@@ -444,7 +444,8 @@ fn place_clips(
             });
         }
         for channel in order {
-            let mut notes = by_channel.remove(&channel).expect("grouped above");
+            // Every channel in the order was grouped above.
+            let Some(mut notes) = by_channel.remove(&channel) else { continue };
             notes.sort_by_key(|n| (n.start, n.key));
             clips.entry(channel).or_default().push(FlClip {
                 name: name_of(pattern),

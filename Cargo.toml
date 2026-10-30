@@ -23,6 +23,14 @@ unsafe_code = "deny"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+# A file the app reads can be damaged in any way, so nothing outside tests may stop the app with unwrap or expect: say
+# what's wrong instead (clippy.toml lets tests use them).
+unwrap_used = "deny"
+expect_used = "deny"
+
+# Release builds stop on arithmetic that overflows, as test builds do, rather than going on with a wrong number.
+[profile.release]
+overflow-checks = true
 
 # Dependencies get optimised once and then cached, so the app stays quick to rebuild but doesn't crawl when run.
 [profile.dev.package."*"]
