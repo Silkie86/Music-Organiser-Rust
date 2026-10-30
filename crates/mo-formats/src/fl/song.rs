@@ -231,7 +231,19 @@ pub struct FlSong {
     pub muted_tracks: Vec<FlTrack>,
     /// Each automation clip's own curve by its channel, in beats from the clip's start, before it's placed.
     pub curves: BTreeMap<u32, Vec<FlPoint>>,
+    /// Said when the song places more notes ([`TOO_MANY_NOTES`]) or automation points ([`TOO_MANY_POINTS`]) than can
+    /// be held: those up to there are kept.
+    pub warning: Option<&'static str>,
 }
+
+/// How many notes the playlist may place in all: a pattern placed many times is a copy of its notes each time, so a
+/// damaged or made-up file could otherwise ask for more memory than the computer has.
+pub const MAX_PLACED_NOTES: usize = 4_000_000;
+
+pub const TOO_MANY_NOTES: &str = "This song places more notes than the app holds (4 million), so only the song's \
+     start was read: the clips after that are left out.";
+pub const TOO_MANY_POINTS: &str = "This song's automation clips hold more points than the app holds (4 million), so \
+     some of its automation is left out.";
 
 /// The first arrangement's playlist tracks and which are muted. FL saves every track, used or not, after its
 /// arrangement's playlist (500 from FL 12.9), so their count is how many the playlist has. A track's settings (event
@@ -244,11 +256,16 @@ pub(super) struct PlaylistTracks {
     /// The track a name that follows is for: none after settings too short to read, so the name isn't put on the
     /// track before.
     last: Option<u32>,
+    /// From FL 12.9.1 every playlist has 500 tracks, so the first is 500 whatever a save cut short kept of them.
+    tracks_by_version: Option<i64>,
 }
 
 impl PlaylistTracks {
     /// Takes in the event if it's one of the first arrangement's tracks (or starts an arrangement).
     pub fn read(&mut self, e: &Event<'_>, flp: &Flp<'_>) {
+        if self.tracks_by_version.is_none() && from_12_9_1(&flp.version) {
+            self.tracks_by_version = Some(500);
+        }
         match e.id {
             EV_ARRANGEMENT_NEW => self.arrangements += 1,
             EV_TRACK_DATA if self.arrangements <= 1 => {
@@ -269,7 +286,8 @@ impl PlaylistTracks {
     /// The track a clip is on, from the slot FL saves with it, which counts down from the first track (499 is track 1
     /// of 500), and whether that track is muted.
     pub fn at(&self, slot: i64) -> Option<&(FlTrack, bool)> {
-        u32::try_from(self.tracks.len() as i64 - slot).ok().and_then(|n| self.tracks.get(&n))
+        let count = self.tracks_by_version.unwrap_or(self.tracks.len() as i64);
+        u32::try_from(count - slot).ok().and_then(|n| self.tracks.get(&n))
     }
 
     /// The number of the track a clip's slot is, or 0 when the file doesn't say.
@@ -280,6 +298,13 @@ impl PlaylistTracks {
     fn muted(&self, slot: i64) -> bool {
         self.at(slot).is_some_and(|t| t.1)
     }
+}
+
+/// Whether FL's version ("25.1.0.4868") is 12.9.1 or later, when FL started saving 500 playlist tracks.
+fn from_12_9_1(version: &str) -> bool {
+    let mut parts = version.split('.').map(|p| p.trim().parse::<u32>().ok());
+    let mut next = || parts.next().flatten().unwrap_or(0);
+    (next(), next(), next()) >= (12, 9, 1)
 }
 
 /// A clip in the playlist, in ticks. `index` above 20480 is a pattern (index − 20480); otherwise a channel's clip.
@@ -405,7 +430,7 @@ fn place_clips(
     tracks: &PlaylistTracks,
     known: &HashSet<u32>,
     pattern_names: &HashMap<u32, String>,
-) -> BTreeMap<u32, Vec<FlClip>> {
+) -> (BTreeMap<u32, Vec<FlClip>>, bool) {
     let mut patterns: BTreeMap<u32, Vec<(u32, NoteEvent)>> = BTreeMap::new();
     for &(pattern, e) in raw_notes {
         let size = notes::note_size(&e.data, flp.major, e.offset.is_none(), Some(known));
@@ -424,10 +449,17 @@ fn place_clips(
     let name_of = |p: u32| pattern_names.get(&p).cloned().unwrap_or_else(|| format!("Pattern {p}"));
 
     let mut clips: BTreeMap<u32, Vec<FlClip>> = BTreeMap::new();
+    let mut placed_notes = 0usize;
+    let mut cut = false;
     let mut place = |pattern: u32, at: i64, from: i64, length: i64, muted: bool, track: u32, on_muted_track: bool| {
         let (Some(in_pattern), Some(starts)) = (patterns.get(&pattern), by_start.get(&pattern)) else { return };
         let first = starts.partition_point(|&(start, _)| start < from);
         let end = starts.partition_point(|&(start, _)| start < from.saturating_add(length));
+        placed_notes = placed_notes.saturating_add(end.saturating_sub(first));
+        if cut || placed_notes > MAX_PLACED_NOTES {
+            cut = true;
+            return;
+        }
         // In file order again: channels in the order their first note appears, as the C# reader groups them.
         let mut hits: Vec<usize> =
             starts.get(first..end.max(first)).unwrap_or_default().iter().map(|&(_, i)| i).collect();
@@ -491,7 +523,7 @@ fn place_clips(
             at += length;
         }
     }
-    clips
+    (clips, cut)
 }
 
 /// Audio clips in the playlist (the first arrangement), by channel: items whose index is a channel. An audio clip's
@@ -665,6 +697,7 @@ pub fn read_song_with(flp: &Flp<'_>, sounds: bool) -> FlSong {
     let mut title = String::new();
     let mut tempo: Option<f64> = None;
     let mut order: Vec<u32> = Vec::new();
+    let mut seen_channels: HashSet<u32> = HashSet::new();
     let mut names: HashMap<u32, String> = HashMap::new();
     let mut samples: HashMap<u32, String> = HashMap::new();
     let mut routes: HashMap<u32, u32> = HashMap::new();
@@ -702,7 +735,7 @@ pub fn read_song_with(flp: &Flp<'_>, sounds: bool) -> FlSong {
             EV_TEMPO_COARSE if tempo.is_none() => tempo = Some(e.int() as f64),
             EV_TITLE => title = flp.text(&e.data),
             EV_CHANNEL_NEW => {
-                if !order.contains(&e.int()) {
+                if seen_channels.insert(e.int()) {
                     order.push(e.int());
                 }
             }
@@ -802,7 +835,7 @@ pub fn read_song_with(flp: &Flp<'_>, sounds: bool) -> FlSong {
     let mixer = MixerSettings::new(mixer_settings);
     // An automation clip switched off in the Channel Rack doesn't play, like a muted one.
     links.retain(|(clip, _)| !off.contains(clip));
-    let automation = place_automation(&links, &curves, &names, &items, &tracks, &mixer, flp.ppq);
+    let (automation, too_many_points) = place_automation(&links, &curves, &names, &items, &tracks, &mixer, flp.ppq);
     // A channel whose on/off is automated plays only while it's on. When several clips switch it, it follows each in
     // turn: where one clip ends and another starts, the one starting there has the last word.
     // Per channel: the clips' names, and their points with the tick each is on and where its clip starts.
@@ -824,8 +857,8 @@ pub fn read_song_with(flp: &Flp<'_>, sounds: bool) -> FlSong {
             (c, (names, OnOff::new(points.into_iter().map(|p| p.2).collect(), flp.ppq)))
         })
         .collect();
-    let known: HashSet<u32> = order.iter().copied().collect();
-    let mut clips = place_clips(flp, &raw_notes, &items, &tracks, &known, &pattern_names);
+    let known = seen_channels;
+    let (mut clips, too_many) = place_clips(flp, &raw_notes, &items, &tracks, &known, &pattern_names);
     let playing: HashSet<u32> =
         order.iter().copied().filter(|c| types.get(c) != Some(&CHANNEL_TYPE_AUTOMATION)).collect();
     let mut audio_clips = place_audio_clips(&items, &tracks, &playing);
@@ -907,6 +940,7 @@ pub fn read_song_with(flp: &Flp<'_>, sounds: bool) -> FlSong {
         automation,
         muted_tracks: muted_tracks.into_iter().collect(),
         curves: curves.into_iter().collect(),
+        warning: if too_many { Some(TOO_MANY_NOTES) } else { too_many_points.then_some(TOO_MANY_POINTS) },
     }
 }
 
@@ -951,8 +985,17 @@ pub fn extract_midi(flp: &Flp<'_>) -> Vec<MidiClip> {
                 ppq: flp.ppq,
                 ..MidiClip::default()
             };
+            // Each channel's track found once, not once per note: a pattern can hold millions of notes.
+            let mut track_of: HashMap<u32, usize> = HashMap::new();
             for (c, note) in notes {
-                clip.track(&channel_names.get(&c).cloned().unwrap_or_else(|| format!("Channel {}", c + 1))).push(note);
+                let at = *track_of.entry(c).or_insert_with(|| {
+                    let name = channel_names.get(&c).cloned().unwrap_or_else(|| format!("Channel {}", c + 1));
+                    clip.track(&name);
+                    clip.tracks.iter().position(|(n, _)| *n == name).unwrap_or(0)
+                });
+                if let Some((_, track)) = clip.tracks.get_mut(at) {
+                    track.push(note);
+                }
             }
             (!clip.tracks.is_empty()).then_some(clip)
         })
@@ -962,7 +1005,8 @@ pub fn extract_midi(flp: &Flp<'_>) -> Vec<MidiClip> {
 /// Each channel's notes across the song, where the playlist puts them (a song with nothing in the playlist gets its
 /// patterns one after another), with what plays it. Unlike [`read_song`], automation clip channels and switched off
 /// channels are kept, as the C# reader keeps them. Sample paths are as FL wrote them; [`resolve_channel_samples`]
-/// finds those under FL's user data folder.
+/// finds those under FL's user data folder. A song that places more than [`MAX_PLACED_NOTES`] notes has the notes up to
+/// there ([`read_song`] says so in its warning).
 pub fn extract_channels(flp: &Flp<'_>) -> Vec<MidiChannel> {
     let mut names: HashMap<u32, String> = HashMap::new();
     let mut sources: HashMap<u32, String> = HashMap::new();
@@ -971,6 +1015,7 @@ pub fn extract_channels(flp: &Flp<'_>) -> Vec<MidiChannel> {
     let mut roots: HashMap<u32, u8> = HashMap::new();
     let mut pitches: HashMap<u32, i32> = HashMap::new();
     let mut order: Vec<u32> = Vec::new();
+    let mut seen_channels: HashSet<u32> = HashSet::new();
     let mut raw_notes: Vec<(u32, &Event<'_>)> = Vec::new();
     let mut pattern_names: HashMap<u32, String> = HashMap::new();
     let mut playlist: Option<&[u8]> = None;
@@ -985,7 +1030,7 @@ pub fn extract_channels(flp: &Flp<'_>) -> Vec<MidiChannel> {
         let channel = rack.channel();
         match e.id {
             EV_CHANNEL_NEW => {
-                if !order.contains(&e.int()) {
+                if seen_channels.insert(e.int()) {
                     order.push(e.int());
                 }
             }
@@ -1050,8 +1095,9 @@ pub fn extract_channels(flp: &Flp<'_>) -> Vec<MidiChannel> {
     }
 
     let items = playlist.map(playlist_items).unwrap_or_default();
-    let known: HashSet<u32> = order.iter().copied().collect();
+    let known = seen_channels;
     let notes: BTreeMap<u32, Vec<NoteEvent>> = place_clips(flp, &raw_notes, &items, &tracks, &known, &pattern_names)
+        .0
         .into_iter()
         .map(|(c, clips)| (c, audible(&clips)))
         .filter(|(_, notes)| !notes.is_empty())
@@ -1076,4 +1122,35 @@ pub fn extract_channels(flp: &Flp<'_>) -> Vec<MidiChannel> {
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fl_12_9_1_and_later_save_500_tracks() {
+        assert!(from_12_9_1("12.9.1"));
+        assert!(from_12_9_1("25.1.0.4868"));
+        assert!(from_12_9_1("20.8"));
+        assert!(!from_12_9_1("12.9.0.123"));
+        assert!(!from_12_9_1("12.5.1"));
+        assert!(!from_12_9_1(""));
+        assert!(!from_12_9_1("garbled"));
+    }
+
+    #[test]
+    fn a_save_cut_short_in_its_track_list_still_finds_the_first_track() {
+        // Only tracks 1 and 2 of 500 were kept: slot 499 is still track 1.
+        let mut tracks = PlaylistTracks { tracks_by_version: Some(500), ..PlaylistTracks::default() };
+        for n in [1, 2] {
+            tracks.tracks.insert(n, (FlTrack { number: n, name: String::new() }, false));
+        }
+        assert_eq!(tracks.number(499), 1);
+        assert_eq!(tracks.number(498), 2);
+        assert_eq!(tracks.number(1), 0, "track 499 wasn't kept");
+        // An older save counts down from the tracks it has.
+        tracks.tracks_by_version = None;
+        assert_eq!(tracks.number(1), 1);
+    }
 }

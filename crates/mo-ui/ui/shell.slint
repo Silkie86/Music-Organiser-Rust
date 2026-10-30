@@ -1,5 +1,5 @@
 // The parts of the window shell that sit over every page: activity cards, the key sheet and the F12 note.
-import { Theme, StudioButton, Well, Caps, Groove } from "studio.slint";
+import { Theme, StudioButton, Well, Caps, Groove, CloseButton, Chip, TickBox } from "studio.slint";
 
 export struct CardInfo {
     id: int,
@@ -14,25 +14,6 @@ export struct CardInfo {
 export struct KeyRow {
     key: string,
     what: string,
-}
-
-// A small × button, for putting a card away.
-component CloseButton inherits Rectangle {
-    callback clicked;
-    width: 20px;
-    height: 20px;
-    border-radius: Theme.radius;
-    background: touch.has-hover ? Theme.hover : transparent;
-    Text {
-        text: "×";
-        color: Theme.muted;
-        font-size: 15px;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-    }
-    touch := TouchArea {
-        clicked => { root.clicked(); }
-    }
 }
 
 // One job's card: what it is, how far, and how it ended.
@@ -111,22 +92,9 @@ export component ActivityCards inherits VerticalLayout {
     }
     if root.put-away > 0: HorizontalLayout {
         alignment: end;
-        Rectangle {
-            width: label.preferred-width + 24px;
-            height: 26px;
-            border-radius: 13px;
-            background: chip.has-hover ? Theme.hover : Theme.surface-raised;
-            border-width: 1px;
-            border-color: Theme.edge;
-            label := Text {
-                text: root.put-away + " running";
-                color: Theme.text;
-                font-size: 12px;
-                font-weight: 500;
-            }
-            chip := TouchArea {
-                clicked => { root.bring-back(); }
-            }
+        Chip {
+            text: root.put-away + " running";
+            clicked => { root.bring-back(); }
         }
     }
 }
@@ -266,37 +234,9 @@ export component NoteDialog inherits Rectangle {
             }
             HorizontalLayout {
                 spacing: 8px;
-                if root.has-picture: Rectangle {
-                    width: pictureLabel.preferred-width + 26px;
-                    Rectangle {
-                        x: 0;
-                        width: 16px;
-                        height: 16px;
-                        border-radius: Theme.radius;
-                        border-width: 1px;
-                        border-color: Theme.stroke;
-                        background: root.include-picture ? Theme.accent : Theme.well;
-                        // The tick is drawn, as the app's fonts have no ✓.
-                        if root.include-picture: Path {
-                            width: 16px;
-                            height: 16px;
-                            viewbox-width: 16;
-                            viewbox-height: 16;
-                            commands: "M 4 8.5 L 7 11.5 L 12.5 5";
-                            stroke: Theme.accent-text;
-                            stroke-width: 2px;
-                        }
-                    }
-                    pictureLabel := Text {
-                        x: 24px;
-                        text: "Include the picture";
-                        color: Theme.text;
-                        font-size: 13px;
-                        vertical-alignment: center;
-                    }
-                    TouchArea {
-                        clicked => { root.include-picture = !root.include-picture; }
-                    }
+                if root.has-picture: TickBox {
+                    text: "Include the picture";
+                    checked <=> root.include-picture;
                 }
                 Rectangle { horizontal-stretch: 1; }
                 StudioButton {

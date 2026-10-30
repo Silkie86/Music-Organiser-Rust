@@ -97,7 +97,7 @@ fn card_info(c: &Card) -> CardInfo {
 /// seen before any real job exists. It can't say how far it is for its first second, like a real scan starting up.
 fn try_job(feed: &Feed) {
     let job = feed.start("Trying an activity card", "Getting ready");
-    let spawned = std::thread::Builder::new().name("Pretend job".into()).spawn(move || {
+    let spawned = mo_app::background::spawn("Pretend job", move || {
         std::thread::sleep(Duration::from_secs(1));
         const STEPS: u32 = 30;
         for i in 1..=STEPS {

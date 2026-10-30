@@ -113,6 +113,7 @@ impl SessionLog {
         let (tx, writer) = match file {
             Some((_, f)) => {
                 let (tx, rx) = channel();
+                // At normal priority, unlike other background work: a crash waits for it to write the crash out.
                 let handle = std::thread::Builder::new().name("Session log".into()).spawn(move || write_queued(f, rx));
                 match handle {
                     Ok(h) => (Some(tx), Some(h)),
@@ -147,7 +148,7 @@ impl SessionLog {
                 st.seen.clear();
             }
             let times = st.seen.entry(key).or_insert(0);
-            *times += 1;
+            *times = times.saturating_add(1);
             let times = *times;
             let message = if times > REPEATS_WRITTEN {
                 if !is_power_of_ten(times) {

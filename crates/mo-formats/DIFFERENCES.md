@@ -37,6 +37,8 @@ tests don't have.
 | A folder beside the project that can't be opened (in `samples`, say) | The whole project fails to read. | That folder is skipped. | Better |
 | A folder linked into `samples` that links back to itself | Can go round it again and again. | Each folder is listed once, wherever the links lead. | Better |
 | The order of hardware names | .NET's culture-aware order (which differs between Windows and Linux). | Close to it: spaces and punctuation before digits, digits before letters, letter case aside. Only names that differ just in punctuation could come out in another order. | Same for real names |
+| A plugin state the zip says unpacks to more than 256 MB (a damaged or made-up zip) | Unpacked whole, however big, which can use up the memory. | Left out, like a state that won't come out whole. | Better |
+| A reference to object 0, or to an object not read yet (a damaged file: Bitwig defines each object where it's first used) | Kept, and looked up once the whole body is read, or skipped. | The body isn't trusted past it: the project is read by the text scan, with a warning, so it has no MIDI. | Safer: a body that's wrong there is likely wrong after it too |
 | A note's velocity as a MIDI 1.0 value (0 to 127) | Bitwig's 0-to-1 velocity rounded straight to 0 to 127. | Kept at MIDI 2.0's 16 bits, then rounded to 0 to 127 when a MIDI 1.0 value is wanted. About 3 in 10,000 velocities come out 1 apart (rounding twice); Bitwig's own whole-step velocities are the same. | Better (rule 22) |
 
 ## Studio One
@@ -48,6 +50,8 @@ tests don't have.
 |---|---|---|---|
 | A plugin state in the song's zip that won't come out whole | No presets at all from the song. | That one preset is left out; the rest are taken out. | Better |
 | An XML file in the song's zip that won't come out whole | The song can't be read. | The rest is read, with a warning naming the file left out. | Better |
+| A file in the song's zip that unpacks to more than 256 MB (a damaged or made-up zip) | Unpacked whole, however big. | Left out, as a file that won't come out whole is. | Better |
+| XML whose DOCTYPE declares its own entities (`<!ENTITY`; Studio One never writes them) | Expanded, up to 10 million letters. | The file is refused as unreadable: a few KB of entities can stand for gigabytes. | Safer |
 | A damaged zip that names two files the same | Reads the first of them, and lists (and counts) every copy's presets. | The zip reader keeps only the last one's bytes, and the song says so in a warning. | Same for real songs |
 | A note's velocity | Rounded to MIDI 1.0's 0 to 127 as it's read. | Kept at MIDI 2.0's 16 bits (a 0-to-127 velocity from an older song by MIDI 2.0's own scaling), rounded to 0 to 127 only when a MIDI 1.0 value is wanted. As with Bitwig, a few in 10,000 of the 0-to-1 velocities come out 1 apart. | Better (rule 22) |
 

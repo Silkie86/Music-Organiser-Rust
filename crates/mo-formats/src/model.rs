@@ -99,12 +99,12 @@ impl ProjectInfo {
     }
 
     /// Leaves out blank names, a plugin listed twice with the same role, and a sample listed twice (letter case
-    /// aside), keeping the first of each.
+    /// aside, as the C# app compares them), keeping the first of each.
     pub fn dedupe(mut self) -> ProjectInfo {
         let mut seen = HashSet::new();
-        self.plugins.retain(|p| !p.name.trim().is_empty() && seen.insert((p.name.to_lowercase(), p.kind)));
+        self.plugins.retain(|p| !p.name.trim().is_empty() && seen.insert((crate::case::to_lower(&p.name), p.kind)));
         let mut seen = HashSet::new();
-        self.samples.retain(|s| !s.trim().is_empty() && seen.insert(s.to_lowercase()));
+        self.samples.retain(|s| !s.trim().is_empty() && seen.insert(crate::case::key(s)));
         self
     }
 }

@@ -21,8 +21,9 @@ use events::*;
 pub const DAW: &str = "FL Studio";
 /// Goes up by one whenever the reader finds more (or different) things in the same files, so a scan reads every FL
 /// project again (rule 7). The C# reader is at 7; 8 is what the Rust reader finds differently (DIFFERENCES.md); 9 adds
-/// the samples a song holds but doesn't play.
-pub const VERSION: u32 = 9;
+/// the samples a song holds but doesn't play; 10 reads damaged FL 4 to 8 notes at their version's size, finds the track
+/// of a clip in a save cut short in its track list, and warns about a song too big to place.
+pub const VERSION: u32 = 10;
 pub const EXTENSIONS: [&str; 1] = ["flp"];
 
 /// The Fruity Wrapper (FL's VST host) keeps a VST's details as records: u32 version, then (u32 id, u64 size, data).
@@ -238,7 +239,14 @@ fn read_with(raw: &[u8], resolve: &mut dyn FnMut(&str) -> String) -> ProjectInfo
     info.details.insert("Notes".into(), notes.to_string());
     // Only a song with samples has any to leave unplayed.
     if !info.samples.is_empty() {
-        note_unplayed(&song::read_song_with(&flp, false), resolve, &mut info);
+        let song = song::read_song_with(&flp, false);
+        if let Some(w) = song.warning {
+            info.warnings.push(w.to_owned());
+        }
+        // A song cut short would list samples played only after the cut as unplayed: none are listed instead.
+        if song.warning != Some(song::TOO_MANY_NOTES) {
+            note_unplayed(&song, resolve, &mut info);
+        }
     }
     align_unplayed(info.dedupe())
 }

@@ -13,11 +13,14 @@ use crate::registry;
 const F_ID: u32 = 0xf;
 /// How many of a list's numbers or texts are shown.
 const SHOWN: usize = 32;
+/// How deep a Bitwig document inside a metadata blob is decoded too ("structure" is one level). A damaged or made-up
+/// file could nest them thousands deep; deeper ones are shown as bytes.
+const NESTED: usize = 4;
 
 pub fn read(raw: &[u8], name: &str) -> Result<LabFile, String> {
     let doc = decode(raw).map_err(|_| format!("{name} isn't a Bitwig file"))?;
     let mut items = Vec::new();
-    Walker { doc: &doc, items: &mut items, paths: HashMap::new() }.all("", "", 0);
+    Walker { doc: &doc, items: &mut items, paths: HashMap::new(), nested: 0 }.all("", "", 0);
     zip(&doc, &mut items);
     Ok(LabFile {
         name: name.to_owned(),
@@ -57,12 +60,23 @@ struct Walker<'a> {
     items: &'a mut Vec<Item>,
     /// Where each object was shown, for the references to it.
     paths: HashMap<ObjId, String>,
+    /// How many documents this one is inside.
+    nested: usize,
+}
+
+/// A key and a label's ending for the `n`th copy of something written more than once ("#2"), so each copy can be
+/// told apart when two saves are compared; none for the first.
+fn again(n: usize) -> (String, String) {
+    if n > 1 { (format!("#{n}"), format!(" #{n}")) } else { (String::new(), String::new()) }
 }
 
 impl Walker<'_> {
     fn all(&mut self, key_prefix: &str, path_prefix: &str, depth: usize) {
+        let mut seen: HashMap<&str, usize> = HashMap::new();
         for (key, value) in &self.doc.meta {
-            self.meta(key.as_str(), value, key_prefix, path_prefix, depth);
+            let n = seen.entry(key.as_str()).or_default();
+            *n += 1;
+            self.meta(key.as_str(), again(*n), value, key_prefix, path_prefix, depth);
         }
         if let Some(root) = self.doc.root {
             let key = format!("{key_prefix}body");
@@ -79,22 +93,31 @@ impl Walker<'_> {
         }
     }
 
-    fn meta(&mut self, key: &str, value: &Value, key_prefix: &str, path_prefix: &str, depth: usize) {
+    fn meta(
+        &mut self,
+        key: &str,
+        (key_again, again): (String, String),
+        value: &Value,
+        key_prefix: &str,
+        path_prefix: &str,
+        depth: usize,
+    ) {
         let entry = registry::bitwig().meta_key(key);
-        let k = format!("{key_prefix}meta/{key}");
+        let k = format!("{key_prefix}meta/{key}{key_again}");
         let (label, path) = match entry {
-            Some(e) => (format!("meta {key} ({})", e.name), join(path_prefix, &e.name)),
-            None => (format!("meta {key}"), join(path_prefix, &format!("meta {key}"))),
+            Some(e) => (format!("meta {key} ({}){again}", e.name), join(path_prefix, &format!("{}{again}", e.name))),
+            None => (format!("meta {key}{again}"), join(path_prefix, &format!("meta {key}{again}"))),
         };
         if let Value::Blob(blob) = value {
             let bytes = blob.bytes();
-            if is_bitwig(bytes)
+            if self.nested < NESTED
+                && is_bitwig(bytes)
                 && let Ok(inner) = decode(bytes)
             {
                 // A Bitwig document of its own, like the summary of the project's tracks.
                 let shown = format!("<{} bytes, a Bitwig document>", lab::count(bytes.len()));
                 self.items.push(Item::group(k.clone(), path.clone(), depth, label, shown));
-                Walker { doc: &inner, items: self.items, paths: HashMap::new() }.all(
+                Walker { doc: &inner, items: self.items, paths: HashMap::new(), nested: self.nested + 1 }.all(
                     &format!("{k}/"),
                     &path,
                     depth + 1,
@@ -110,8 +133,7 @@ impl Walker<'_> {
         for field in &self.doc.obj(o).fields {
             let n = seen.entry(field.id).or_default();
             *n += 1;
-            let (key_again, again) =
-                if *n > 1 { (format!("#{n}"), format!(" #{n}")) } else { (String::new(), String::new()) };
+            let (key_again, again) = again(*n);
             self.value(
                 &field.value,
                 format!("{key}/0x{:x}{key_again}", field.id),
@@ -183,9 +205,19 @@ impl Walker<'_> {
             }
             Value::Map(map) => {
                 self.items.push(Item::group(key.clone(), path.clone(), depth, label, format!("map of {}", map.len())));
+                let mut seen: HashMap<&str, usize> = HashMap::new();
                 for (k, s) in map {
                     let k = k.as_str();
-                    self.slot(*s, format!("{key}/{{{k}}}"), format!("{path}{{{k}}}"), depth + 1, format!("{{{k}}}"));
+                    let n = seen.entry(k).or_default();
+                    *n += 1;
+                    let (key_again, again) = again(*n);
+                    self.slot(
+                        *s,
+                        format!("{key}/{{{k}}}{key_again}"),
+                        format!("{path}{{{k}}}{again}"),
+                        depth + 1,
+                        format!("{{{k}}}{again}"),
+                    );
                 }
                 return;
             }

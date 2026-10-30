@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use mo_app::activity::Feed;
 use mo_app::log;
 use mo_app::places::Place;
-use mo_app::shortcuts::{APP_ACTIONS, Shortcuts};
+use mo_app::shortcuts::{APP_ACTIONS, Shortcuts, repeats};
 use mo_app::themes::Look;
 use note::open_note;
 use slint::platform::Key;
@@ -52,15 +52,22 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> R
         }
     });
     let weak = app.as_weak();
-    app.on_key(move |text, ctrl, shift, alt, meta| {
+    app.on_key(move |text, ctrl, shift, alt, meta, repeat| {
         let key = key_name(&text, ctrl, shift, alt, meta);
         if key == "F12" {
             return weak.upgrade().is_some_and(|app| {
-                open_note(&app);
+                if !repeat {
+                    open_note(&app);
+                }
                 true
             });
         }
-        shortcuts.action_for(&key).is_some_and(|id| run(id, &weak))
+        let Some(id) = shortcuts.action_for(&key) else { return false };
+        // A key held down did its job once (unless it's one that steps), and the page behind doesn't get it either.
+        if repeat && !repeats(id) {
+            return handles(id);
+        }
+        run(id, &weak)
     });
 
     cards::connect(&app, &feed);

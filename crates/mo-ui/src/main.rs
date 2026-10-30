@@ -56,7 +56,8 @@ fn log_crashes() {
         let text =
             format!("Music Organiser {} crashed on thread {thread}\n{info}\n\n{trace}\n", mo_app::version::version());
         log::error("Crash", &text);
-        mo_ui::note::finish_up();
+        // The window runs on the main thread: only a crash there ends the app.
+        mo_ui::note::after_crash(std::thread::current().name() == Some("main"));
         if let Some(l) = log::current() {
             l.flush();
         }

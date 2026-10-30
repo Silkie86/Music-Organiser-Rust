@@ -11,7 +11,8 @@
 //! tolerant, as the C# reader's is: it looks for known attribute names anywhere in the tree.
 
 use std::borrow::Cow;
-use std::io::{Cursor, Read};
+use std::collections::{BTreeSet, HashMap};
+use std::io::Cursor;
 use std::path::Path;
 use std::sync::LazyLock;
 
@@ -27,8 +28,9 @@ use crate::textscan;
 pub const DAW: &str = "Studio One";
 /// Goes up by one whenever the reader finds more (or different) things in the same files (rule 7). 2 is the C#
 /// reader's: each insert's plugin by its own name and id, not the name the insert shows; Studio One's own effects
-/// and Note FX.
-pub const VERSION: u32 = 2;
+/// and Note FX. 3 is what the Rust reader finds differently (DIFFERENCES.md): a song with a file that won't come out
+/// of the zip whole is read on, with a warning.
+pub const VERSION: u32 = 3;
 pub const EXTENSIONS: [&str; 1] = ["song"];
 
 const PRESET_EXTENSIONS: [&str; 6] = [".vstpreset", ".fxp", ".fxb", ".aupreset", ".preset", ".multipreset"];
@@ -38,8 +40,10 @@ const MIDI_PPQ: u16 = 960;
 pub struct Song<'a> {
     zip: zip::ZipArchive<Cursor<&'a [u8]>>,
     names: Vec<String>,
-    /// The XML files that are there but wouldn't come out of the zip whole.
-    unreadable: Vec<String>,
+    /// Where each name is in `names` (the first, where a damaged zip names two files the same).
+    index: HashMap<String, usize>,
+    /// The XML files that are there but wouldn't come out of the zip whole, by where they are in `names`.
+    unreadable: BTreeSet<usize>,
 }
 
 /// Reads what's in a Studio One song. A file that isn't a zip can't be read and says so.
@@ -52,25 +56,25 @@ impl<'a> Song<'a> {
     /// The file's bytes, opened as the zip a song is.
     pub fn open(raw: &'a [u8]) -> std::io::Result<Song<'a>> {
         let zip = zip::ZipArchive::new(Cursor::new(raw)).map_err(std::io::Error::other)?;
-        let names = (0..zip.len())
+        let names: Vec<String> = (0..zip.len())
             .map(|i| zip.name_for_index(i).and_then(Result::ok).unwrap_or_default().into_owned())
             .collect();
-        Ok(Song { zip, names, unreadable: Vec::new() })
+        let mut index = HashMap::new();
+        for (i, name) in names.iter().enumerate() {
+            index.entry(name.clone()).or_insert(i);
+        }
+        Ok(Song { zip, names, index, unreadable: BTreeSet::new() })
     }
 
     /// One of the song's XML files as text, with the undeclared `x:` prefixes taken out so it parses (`None` when
     /// it isn't there, or won't come out whole). Where a damaged zip names two files the same, the zip reader keeps
     /// the last one's bytes (.NET's takes the first).
     fn xml(&mut self, name: &str) -> Option<String> {
-        let i = self.names.iter().position(|n| n == name)?;
-        let mut bytes = Vec::new();
-        let whole = self.zip.by_index(i).is_ok_and(|mut entry| entry.read_to_end(&mut bytes).is_ok());
-        if !whole {
-            if !self.unreadable.iter().any(|n| n == name) {
-                self.unreadable.push(name.to_owned());
-            }
+        let i = *self.index.get(name)?;
+        let Some(bytes) = self.zip.by_index(i).ok().and_then(crate::zipped::read_whole) else {
+            self.unreadable.insert(i);
             return None;
-        }
+        };
         Some(without_prefixes(&text_of(&bytes)))
     }
 
@@ -116,6 +120,8 @@ impl<'a> Song<'a> {
             } else {
                 PluginKind::Effect
             };
+            // Whether an element has an insert's note of its plugin somewhere below it, worked out once for each.
+            let mut has_class: HashMap<roxmltree::NodeId, bool> = HashMap::new();
             for e in elements(doc.root_element()) {
                 let name = attr(e, "name").trim();
                 if name.is_empty() {
@@ -128,7 +134,11 @@ impl<'a> Song<'a> {
                 if let Some(class_id) = e.attribute("classID") {
                     info.plugins.push(plugin(e, name, class_id, kind));
                 } else if id(e) == "deviceData"
-                    && !e.parent_element().is_some_and(|p| elements(p).skip(1).any(|d| d.has_attribute("classID")))
+                    && !e.parent_element().is_some_and(|p| {
+                        *has_class
+                            .entry(p.id())
+                            .or_insert_with(|| elements(p).skip(1).any(|d| d.has_attribute("classID")))
+                    })
                 {
                     let uid = e
                         .parent_element()
@@ -165,8 +175,11 @@ impl<'a> Song<'a> {
             _ => info.warnings.push("Song/song.xml is missing or unreadable.".into()),
         }
         // The C# reader can't read the song at all then; this reads the rest and says what was left out.
-        for name in self.unreadable.iter().filter(|n| *n != "Song/song.xml") {
-            info.warnings.push(format!("{name} won't come out of the zip whole; what's in it is left out."));
+        let unreadable = self.unreadable.iter().filter_map(|&i| self.names.get(i));
+        for name in unreadable.filter(|n| *n != "Song/song.xml") {
+            info.warnings.push(format!(
+                "{name} won't come out of the zip whole (or says it's bigger than any song's); what's in it is left out."
+            ));
         }
         if self.zip.has_duplicate_names() {
             info.warnings.push("The zip names two files the same; only one of each is read.".into());
@@ -254,11 +267,8 @@ impl<'a> Song<'a> {
             }
             // The folder it's in, the one before its name ("" at the top).
             let folder = full.rsplit('/').nth(1).unwrap_or_default();
-            let mut data = Vec::new();
-            let Ok(mut entry) = self.zip.by_index(i) else { continue };
-            if entry.read_to_end(&mut data).is_err() {
-                continue;
-            }
+            let Ok(entry) = self.zip.by_index(i) else { continue };
+            let Some(data) = crate::zipped::read_whole(entry) else { continue };
             presets.push(PresetBlob::new(paths::stem(name), folder, ext.to_owned(), data));
         }
         presets
@@ -326,10 +336,19 @@ fn format_of(e: Node<'_, '_>, vendor: &str) -> &'static str {
     if vendor.to_lowercase().contains("presonus") { "Native" } else { "" }
 }
 
-/// The XML parsed, a DOCTYPE allowed as .NET's `XElement.Parse` allows it (roxmltree would refuse the whole file).
+/// The XML parsed, a DOCTYPE allowed as .NET's `XElement.Parse` allows it (roxmltree would refuse the whole file). One
+/// that names its own text (`<!ENTITY`) is refused: Studio One never writes one, and a few KB of them can stand for
+/// gigabytes of text.
 fn parse(text: &str) -> Result<roxmltree::Document<'_>, roxmltree::Error> {
-    let options = roxmltree::ParsingOptions { allow_dtd: true, ..roxmltree::ParsingOptions::default() };
+    let options =
+        roxmltree::ParsingOptions { allow_dtd: !declares_entities(text), ..roxmltree::ParsingOptions::default() };
     roxmltree::Document::parse_with_options(text, options)
+}
+
+/// Whether the XML may declare entities: it has a DOCTYPE and `<!ENTITY` anywhere (looking only inside what seems to
+/// be the DOCTYPE could be fooled by a comment).
+fn declares_entities(text: &str) -> bool {
+    text.contains("<!DOCTYPE") && text.contains("<!ENTITY")
 }
 
 /// An element and every element inside it, in the order they're written.

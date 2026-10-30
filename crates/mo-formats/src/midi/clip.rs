@@ -17,8 +17,9 @@ use super::{Controller, ControllerKind, Held, MidiPart};
 use crate::model::{NoteAttribute, NoteEvent, scale_up, velocity};
 use crate::paths;
 
-/// Goes up by one whenever the reader finds more (or different) things in the same files (rule 7).
-pub const VERSION: u32 = 1;
+/// Goes up by one whenever the reader finds more (or different) things in the same files (rule 7). 2 keeps the
+/// registered and assignable controllers (RPN and NRPN) and their relative steps.
+pub const VERSION: u32 = 2;
 /// The ending the MIDI Association gives clip files, without its dot.
 pub const EXTENSIONS: [&str; 1] = ["midi2"];
 /// What a clip file starts with.
@@ -161,9 +162,15 @@ impl Clip {
                     0xc => self.program(key.0, key.1, ((w1 >> 24) & 0x7f) as u8),
                     _ => {
                         let index = (w0 & 0xff) as u8;
+                        // The registered and assignable controllers carry a bank and an index where a note has its key.
+                        let bank_index = (((w0 >> 8) & 0x7f) as u8, (w0 & 0x7f) as u8);
                         let kind = match status {
                             0x0 => ControllerKind::NoteRegistered(key.2, index),
                             0x1 => ControllerKind::NoteAssignable(key.2, index),
+                            0x2 => ControllerKind::Registered(bank_index.0, bank_index.1),
+                            0x3 => ControllerKind::Assignable(bank_index.0, bank_index.1),
+                            0x4 => ControllerKind::RelativeRegistered(bank_index.0, bank_index.1),
+                            0x5 => ControllerKind::RelativeAssignable(bank_index.0, bank_index.1),
                             0x6 => ControllerKind::NotePitchBend(key.2),
                             0xa => ControllerKind::KeyPressure(key.2),
                             0xb => ControllerKind::Control(key.2),

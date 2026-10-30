@@ -134,3 +134,79 @@ export component Well inherits Rectangle {
     border-width: 1px;
     border-color: Theme.edge;
 }
+
+// A small × button, for putting a card away.
+export component CloseButton inherits Rectangle {
+    callback clicked;
+    width: 20px;
+    height: 20px;
+    border-radius: Theme.radius;
+    background: touch.has-hover ? Theme.hover : transparent;
+    Text {
+        text: "×";
+        color: Theme.muted;
+        font-size: 15px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+// A rounded chip that does something when clicked, like "2 running" under the activity cards.
+export component Chip inherits Rectangle {
+    in property <string> text;
+    callback clicked;
+    width: label.preferred-width + 24px;
+    height: 26px;
+    border-radius: 13px;
+    background: touch.has-hover ? Theme.hover : Theme.surface-raised;
+    border-width: 1px;
+    border-color: Theme.edge;
+    label := Text {
+        text: root.text;
+        color: Theme.text;
+        font-size: 12px;
+        font-weight: 500;
+    }
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+// A tick box with its words beside it. Clicking either ticks or unticks it.
+export component TickBox inherits Rectangle {
+    in property <string> text;
+    in-out property <bool> checked;
+    width: label.preferred-width + 26px;
+    Rectangle {
+        x: 0;
+        width: 16px;
+        height: 16px;
+        border-radius: Theme.radius;
+        border-width: 1px;
+        border-color: Theme.stroke;
+        background: root.checked ? Theme.accent : Theme.well;
+        // The tick is drawn, as the app's fonts have no ✓.
+        if root.checked: Path {
+            width: 16px;
+            height: 16px;
+            viewbox-width: 16;
+            viewbox-height: 16;
+            commands: "M 4 8.5 L 7 11.5 L 12.5 5";
+            stroke: Theme.accent-text;
+            stroke-width: 2px;
+        }
+    }
+    label := Text {
+        x: 24px;
+        text: root.text;
+        color: Theme.text;
+        font-size: 13px;
+        vertical-alignment: center;
+    }
+    TouchArea {
+        clicked => { root.checked = !root.checked; }
+    }
+}

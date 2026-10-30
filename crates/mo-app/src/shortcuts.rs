@@ -109,20 +109,28 @@ impl Shortcuts {
 
     /// The app-wide action a key press stands for, if any. `key` is written like the list ("Ctrl+1").
     ///
-    /// Like the C# app, a press that matches nothing is tried again without Shift, and Ctrl with the + key counts as
-    /// Ctrl+=: keyboards differ in whether Shift shows in a symbol ("?" is Shift+/ on most of them).
+    /// As in the C# app, only two keys are tried again another way, because keyboards differ in whether Shift shows
+    /// in a symbol: "?" (Shift+/ on most of them), and Ctrl with the + key, which counts as Ctrl+=. Any other key with
+    /// Shift is its own key: Shift+F11 isn't F11.
     pub fn action_for(&self, key: &str) -> Option<&'static str> {
         if key.is_empty() {
             return None;
         }
         let key = normalise(key);
-        let unshifted = key.replacen("Shift+", "", 1);
-        let plus_as_equals = match unshifted.strip_suffix('+') {
-            Some(mods) if mods.ends_with('+') => format!("{mods}="),
-            _ => String::new(),
+        let other = match key.as_str() {
+            "Shift+?" | "Shift+/" => "?",
+            "Ctrl+Shift++" | "Ctrl+Shift+=" | "Ctrl++" => "Ctrl+=",
+            _ => "",
         };
-        [&key, &unshifted, &plus_as_equals].into_iter().find_map(|k| self.by_key.get(k.as_str()).copied())
+        [key.as_str(), other].into_iter().find_map(|k| self.by_key.get(k).copied())
     }
+}
+
+/// Whether an action does its job again and again while its key is held: stepping through a list and moving an
+/// octave (as in the C# app). Every other key does its job once however long it's held, so holding F11 doesn't flick
+/// full screen on and off.
+pub fn repeats(id: &str) -> bool {
+    matches!(id, "app.prevItem" | "app.nextItem" | "midi.octaveUp" | "midi.octaveDown")
 }
 
 /// Keys with names rather than one character, in the spelling the list uses.
@@ -280,5 +288,9 @@ mod tests {
         assert_eq!(s.action_for("Ctrl+Shift++"), Some("app.sizeUp"));
         assert_eq!(s.action_for("Ctrl++"), Some("app.sizeUp"));
         assert_eq!(s.action_for("Ctrl+Shift+Delete"), Some("app.recycleBin"));
+        // Any other key with Shift is a key of its own.
+        assert_eq!(s.action_for("Shift+F11"), None);
+        assert_eq!(s.action_for("Shift+F1"), None);
+        assert_eq!(s.action_for("Ctrl+Shift+PageDown"), None);
     }
 }

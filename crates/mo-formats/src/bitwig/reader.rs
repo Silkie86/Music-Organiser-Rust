@@ -20,8 +20,9 @@ use crate::textscan;
 pub const DAW: &str = "Bitwig Studio";
 /// Goes up by one whenever the reader finds more (or different) things in the same files, so a scan reads every
 /// Bitwig project again (rule 7). 2 is the C# reader's: Bitwig 6.1's Sampler analysis decoded, and a collected sample
-/// counted once.
-pub const VERSION: u32 = 2;
+/// counted once. 3 is what the Rust reader finds differently (DIFFERENCES.md): damaged files read further, and a
+/// plugin state too big to be real left out.
+pub const VERSION: u32 = 3;
 pub const EXTENSIONS: [&str; 1] = ["bwproject"];
 
 // Classes.
@@ -176,7 +177,7 @@ impl Project {
         Project { doc, names }
     }
 
-    /// The file's bytes, a project or not: decoded when it's Bitwig's (moved, not copied).
+    /// The file's bytes, a project or not: decoded when it's Bitwig's (moved into the document, not copied).
     pub fn open(raw: Vec<u8>) -> Result<Project, Vec<u8>> {
         if !super::is_bitwig(&raw) {
             return Err(raw);
@@ -626,12 +627,9 @@ pub fn extract_presets(doc: &Document, names: &TrackNames) -> Vec<PresetBlob> {
         if entry.size() == 0 {
             continue;
         }
-        // Not sized by what the zip says it holds: a damaged zip can claim gigabytes.
-        let mut data = Vec::new();
-        // A state whose bytes don't come out whole is left out, not the rest with it.
-        if entry.read_to_end(&mut data).is_err() {
-            continue;
-        }
+        // A state whose bytes don't come out whole, or that a damaged zip says is gigabytes, is left out, not the
+        // rest with it.
+        let Some(data) = crate::zipped::read_whole(&mut entry) else { continue };
         let name = paths::entry_name(full);
         let ext = paths::extension(name).to_owned();
         let stem = paths::stem(name);
@@ -803,9 +801,14 @@ fn scanned_path(s: &str) -> Option<&str> {
 /// The text in a blob. Bitwig writes a string with a character outside ASCII ("Beyoncé") as UTF-16 (big-endian), with
 /// the top bit of its length set; those are read whole first and blanked out, so the plain scan doesn't find pieces of
 /// them.
+///
+/// Each possible string is checked on its bytes, and only one that's kept is made into text. Bytes made to look like
+/// one string header after another would still have each checked whole, so the checking stops after a few times the
+/// blob's size; any wide strings after that are left to the plain scan.
 fn scan_strings(blob: &[u8]) -> Vec<String> {
     let mut bytes = blob.to_vec();
     let mut wide = Vec::new();
+    let mut budget = blob.len().saturating_mul(4).saturating_add(1 << 20);
     let mut i = 0;
     while let Some(&[top, zero, high, low]) = bytes.get(i..).and_then(|b| b.first_chunk::<4>()) {
         let chars = (high as usize) << 8 | low as usize;
@@ -814,15 +817,22 @@ fn scan_strings(blob: &[u8]) -> Vec<String> {
             i += 1;
             continue;
         };
-        let units: Vec<u16> = text.as_chunks::<2>().0.iter().map(|&c| u16::from_be_bytes(c)).collect();
-        let s: String = char::decode_utf16(units.iter().copied()).map(|c| c.unwrap_or('\u{FFFD}')).collect();
-        let ascii = units.iter().filter(|&&u| u < 0x80).count();
-        if s.chars().any(|c| c.is_control() || c == '\u{FFFD}')
-            || (ascii * 2 < units.len() && !textscan::is_audio_path(&s) && !textscan::is_plugin_path(&s))
-        {
+        let Some(left) = budget.checked_sub(chars) else { break };
+        budget = left;
+        let units = || text.as_chunks::<2>().0.iter().map(|&c| u16::from_be_bytes(c));
+        // Mostly ASCII, or else a sample's or plugin's path (told by its ending), and nothing unreadable in it.
+        let ascii = units().filter(|&u| u < 0x80).count();
+        let path_end = || {
+            let tail: String =
+                char::decode_utf16(units().skip(chars.saturating_sub(32))).map(|c| c.unwrap_or('\u{FFFD}')).collect();
+            textscan::is_audio_path(&tail) || textscan::is_plugin_path(&tail)
+        };
+        let readable = || char::decode_utf16(units()).all(|c| c.is_ok_and(|c| !c.is_control() && c != '\u{FFFD}'));
+        if (ascii * 2 < chars && !path_end()) || !readable() {
             i += 1;
             continue;
         }
+        let s: String = char::decode_utf16(units()).map(|c| c.unwrap_or('\u{FFFD}')).collect();
         wide.push(s);
         if let Some(read) = bytes.get_mut(i..i + 4 + 2 * chars) {
             read.fill(0);
@@ -838,10 +848,12 @@ fn scan_strings(blob: &[u8]) -> Vec<String> {
 /// compressed), one at a time, so only one stream is unpacked in memory at once.
 fn each_blob(raw: &[u8], mut scan: impl FnMut(&[u8])) {
     const MOST: u64 = 200_000_000;
+    // All the streams together: made-up streams that each unpack to the most would be 40 GB to scan.
+    let mut left: u64 = 512_000_000;
     scan(raw);
     let mut attempts = 0;
     let mut i = 0;
-    while let Some(rest) = raw.get(i..).filter(|r| r.len() > 2 && attempts < 200) {
+    while let Some(rest) = raw.get(i..).filter(|r| r.len() > 2 && attempts < 200 && left > 0) {
         // A zlib header: 0x78, and the two bytes as a number divisible by 31.
         if let [0x78, second, ..] = *rest
             && (0x7800 | second as u32).is_multiple_of(31)
@@ -849,7 +861,8 @@ fn each_blob(raw: &[u8], mut scan: impl FnMut(&[u8])) {
             attempts += 1;
             let mut inflated = Vec::new();
             // Random bytes that happen to look like a zlib header fail in several ways; those are skipped.
-            let read = flate2::read::ZlibDecoder::new(rest).take(MOST).read_to_end(&mut inflated);
+            let read = flate2::read::ZlibDecoder::new(rest).take(MOST.min(left)).read_to_end(&mut inflated);
+            left = left.saturating_sub(inflated.len() as u64);
             if read.is_ok() && inflated.len() >= 8 {
                 scan(&inflated);
             }
@@ -861,6 +874,37 @@ fn each_blob(raw: &[u8], mut scan: impl FnMut(&[u8])) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wide(s: &str) -> Vec<u8> {
+        let units: Vec<u16> = s.encode_utf16().collect();
+        let mut b = vec![0x80, 0, (units.len() >> 8) as u8, units.len() as u8];
+        b.extend(units.iter().flat_map(|u| u.to_be_bytes()));
+        b
+    }
+
+    #[test]
+    fn the_text_scan_finds_wide_strings_and_leaves_out_unreadable_ones() {
+        let mut blob = b"junk".to_vec();
+        blob.extend(wide(r"C:\Samples\Beyonc\u{e9}.wav"));
+        blob.extend(wide("\u{3042}\u{3044}\u{3046}\u{3048}"));
+        blob.extend(wide("bad\u{1}text"));
+        let found = scan_strings(&blob);
+        assert!(found.iter().any(|s| s == r"C:\Samples\Beyonc\u{e9}.wav"));
+        assert!(!found.iter().any(|s| s.contains('\u{3042}')), "mostly not ASCII and not a path");
+        assert!(!found.iter().any(|s| s.contains('\u{1}')));
+        // A wide path that's mostly not ASCII is kept by its ending.
+        assert!(
+            scan_strings(&wide("\u{3042}\u{3044}\u{3046}.wav")).iter().any(|s| s == "\u{3042}\u{3044}\u{3046}.wav")
+        );
+    }
+
+    #[test]
+    fn bytes_made_of_string_headers_are_scanned_quickly() {
+        let blob: Vec<u8> = [0x80u8, 0, 0x10, 0].repeat(2_000_000);
+        let started = std::time::Instant::now();
+        scan_strings(&blob);
+        assert!(started.elapsed().as_secs() < 10, "{:?}", started.elapsed());
+    }
 
     #[test]
     fn a_collected_file_had_its_own_name_and_each_shorter_one() {

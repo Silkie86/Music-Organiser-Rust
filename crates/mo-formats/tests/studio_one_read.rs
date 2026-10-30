@@ -102,3 +102,64 @@ fn a_song_without_its_song_file_says_so() {
     assert_eq!(info.warnings, ["Song/song.xml is missing or unreadable."]);
     assert!(!info.details.contains_key("Notes"));
 }
+
+/// The zip with one byte of `text` changed where it's stored, so that file no longer matches its checksum.
+fn damage(mut raw: Vec<u8>, text: &[u8]) -> Vec<u8> {
+    let at = raw.windows(text.len()).position(|w| w == text).expect("the text is in the zip");
+    raw[at] ^= 0x20;
+    raw
+}
+
+#[test]
+fn an_xml_file_that_wont_come_out_whole_is_left_out_and_the_rest_read() {
+    let raw = damage(studio_one_song_bytes(), b"Pro-C 2");
+    let info = Song::open(&raw).expect("a zip").info();
+    assert_eq!(
+        info.warnings,
+        [
+            "Devices/audiomixer.xml won't come out of the zip whole (or says it's bigger than any song's); what's in it is \
+          left out."
+        ]
+    );
+    assert!(info.plugins.iter().any(|p| p.name == "Diva"));
+    assert!(!info.plugins.iter().any(|p| p.name.contains("Pro-C")));
+    assert_eq!(info.tracks, ["Keys", "Vocals"]);
+    assert_eq!(info.tempo, Some(92.0));
+}
+
+#[test]
+fn only_the_damaged_plugin_state_is_left_out() {
+    let raw = common::bitwig::stored_zip(&[
+        ("Presets/Synths/Diva/Inst 1.vstpreset", b"first state"),
+        ("Presets/Synths/Serum/Inst 2.vstpreset", b"second state"),
+        ("Presets/Synths/Pigments/Inst 3.vstpreset", b"third state"),
+    ]);
+    let raw = damage(raw, b"second state");
+    let presets = Song::open(&raw).expect("a zip").presets();
+    assert_eq!(presets.iter().map(|p| p.plugin.as_str()).collect::<Vec<_>>(), ["Diva", "Pigments"]);
+}
+
+#[test]
+fn a_zip_naming_two_files_the_same_says_so() {
+    let meta = br#"<M><Attribute id="Media:Tempo" value="120"/></M>"#;
+    let raw = common::bitwig::stored_zip(&[("metainfo.xml", meta), ("metainfo.xml", meta)]);
+    let info = Song::open(&raw).expect("a zip").info();
+    assert!(info.warnings.iter().any(|w| w == "The zip names two files the same; only one of each is read."));
+}
+
+#[test]
+fn xml_that_declares_its_own_text_is_refused_quickly() {
+    // A few KB that would stand for gigabytes once each reference was filled in.
+    let big = "x".repeat(10_000);
+    let refs = "&b;".repeat(10_000);
+    let song = format!("<?xml version=\"1.0\"?><!DOCTYPE Song [<!ENTITY b \"{big}\">]><Song name=\"{refs}\"/>");
+    let raw = common::bitwig::stored_zip(&[("Song/song.xml", song.as_bytes())]);
+    let started = std::time::Instant::now();
+    let info = Song::open(&raw).expect("a zip").info();
+    assert_eq!(info.warnings, ["Song/song.xml is missing or unreadable."]);
+    assert!(started.elapsed().as_secs() < 5);
+    // A DOCTYPE with no entities is still read, as the C# app reads it.
+    let song = br#"<?xml version="1.0"?><!DOCTYPE Song><Song><Tracks><AudioTrack name="Vocals"/></Tracks></Song>"#;
+    let raw = common::bitwig::stored_zip(&[("Song/song.xml", song)]);
+    assert_eq!(Song::open(&raw).expect("a zip").info().tracks, ["Vocals"]);
+}

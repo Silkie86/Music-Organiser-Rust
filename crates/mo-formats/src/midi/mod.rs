@@ -76,6 +76,14 @@ pub enum ControllerKind {
     NoteRegistered(u8, u8),
     /// MIDI 2.0's assignable per-note controller: key, then the controller's number.
     NoteAssignable(u8, u8),
+    /// MIDI 2.0's registered controller (MIDI 1.0's RPN, such as pitch bend range): bank, then index.
+    Registered(u8, u8),
+    /// MIDI 2.0's assignable controller (MIDI 1.0's NRPN): bank, then index.
+    Assignable(u8, u8),
+    /// A step up or down to a registered controller: bank, then index. The value is a signed step, as its bits.
+    RelativeRegistered(u8, u8),
+    /// A step up or down to an assignable controller: bank, then index. The value is a signed step, as its bits.
+    RelativeAssignable(u8, u8),
 }
 
 /// Notes still held, by key (a channel and a note), with what each was struck with; in the order the keys were first

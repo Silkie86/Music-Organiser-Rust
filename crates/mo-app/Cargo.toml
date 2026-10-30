@@ -11,3 +11,4 @@ workspace = true
 [dependencies]
 serde_json = "1"
 chrono.workspace = true
+thread-priority.workspace = true

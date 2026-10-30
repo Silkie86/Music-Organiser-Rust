@@ -80,7 +80,7 @@ impl std::fmt::Debug for Text {
 /// value when the value is copied into another document.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Blob {
-    data: Arc<[u8]>,
+    data: Arc<Vec<u8>>,
     start: usize,
     len: usize,
 }
@@ -88,7 +88,7 @@ pub struct Blob {
 impl Blob {
     /// Bytes made in code.
     pub fn new(bytes: &[u8]) -> Blob {
-        Blob { data: bytes.into(), start: 0, len: bytes.len() }
+        Blob { data: Arc::new(bytes.to_vec()), start: 0, len: bytes.len() }
     }
 
     pub fn bytes(&self) -> &[u8] {
@@ -190,25 +190,40 @@ impl Value {
     }
 
     /// A number as the same kind of number as `like` (a float as a float, a switch as a switch), so a field changed in
-    /// code keeps the type Bitwig wrote it with. Anything else is left as it is.
+    /// code keeps the type Bitwig wrote it with. A whole number stays exact, and a float put in a whole-number field
+    /// is rounded (half to even, as the C# app's Convert does) rather than cut; a number too big for the field is held
+    /// at its largest. Anything else is left as it is.
     pub fn same_kind_as(self, like: &Value) -> Value {
+        enum Number {
+            Whole(i64),
+            Float(f64),
+        }
         let n = match self {
-            Value::U8(v) | Value::Bool(v) => v as f64,
-            Value::I16(v) => v as f64,
-            Value::I32(v) => v as f64,
-            Value::I64(v) => v as f64,
-            Value::F32(v) => v as f64,
-            Value::F64(v) => v,
+            Value::U8(v) | Value::Bool(v) => Number::Whole(v.into()),
+            Value::I16(v) => Number::Whole(v.into()),
+            Value::I32(v) => Number::Whole(v.into()),
+            Value::I64(v) => Number::Whole(v),
+            Value::F32(v) => Number::Float(v.into()),
+            Value::F64(v) => Number::Float(v),
             v => return v,
         };
+        // `as` from a float holds at the type's ends and gives 0 for NaN.
+        let whole = |n: &Number| match *n {
+            Number::Whole(v) => v,
+            Number::Float(f) => f.round_ties_even() as i64,
+        };
+        let float = |n: &Number| match *n {
+            Number::Whole(v) => v as f64,
+            Number::Float(f) => f,
+        };
         match like {
-            Value::U8(_) => Value::U8(n as u8),
-            Value::Bool(_) => Value::Bool(n as u8),
-            Value::I16(_) => Value::I16(n as i16),
-            Value::I32(_) => Value::I32(n as i32),
-            Value::I64(_) => Value::I64(n as i64),
-            Value::F32(_) => Value::F32(n as f32),
-            Value::F64(_) => Value::F64(n),
+            Value::U8(_) => Value::U8(whole(&n).clamp(0, u8::MAX.into()) as u8),
+            Value::Bool(_) => Value::Bool(whole(&n).clamp(0, u8::MAX.into()) as u8),
+            Value::I16(_) => Value::I16(whole(&n).clamp(i16::MIN.into(), i16::MAX.into()) as i16),
+            Value::I32(_) => Value::I32(whole(&n).clamp(i32::MIN.into(), i32::MAX.into()) as i32),
+            Value::I64(_) => Value::I64(whole(&n)),
+            Value::F32(_) => Value::F32(float(&n) as f32),
+            Value::F64(_) => Value::F64(float(&n)),
             _ => self,
         }
     }
@@ -297,7 +312,7 @@ impl Object {
 #[derive(Clone, Debug)]
 pub struct Document {
     /// The file as it was read.
-    pub raw: Arc<[u8]>,
+    pub raw: Arc<Vec<u8>>,
     /// The 38 characters after "BtWg".
     pub header: [u8; 38],
     /// The metadata, in file order.
@@ -374,9 +389,9 @@ impl Document {
         }
     }
 
-    /// A metadata value by key.
+    /// A metadata value by key: the last, where a damaged file writes a key twice (as the C# app's dictionary keeps).
     pub fn meta(&self, key: &str) -> Option<&Value> {
-        self.meta.iter().find(|(k, _)| k.as_str() == key).map(|(_, v)| v)
+        self.meta.iter().rev().find(|(k, _)| k.as_str() == key).map(|(_, v)| v)
     }
 
     /// A metadata text, or "".
@@ -416,10 +431,40 @@ impl Document {
     }
 }
 
+/// A file's bytes as [`decode`] takes them. A `Vec` is moved in, not copied, so a big project isn't held twice; a slice
+/// is copied.
+pub trait FileBytes {
+    fn shared(self) -> Arc<Vec<u8>>;
+}
+
+impl FileBytes for Vec<u8> {
+    fn shared(self) -> Arc<Vec<u8>> {
+        Arc::new(self)
+    }
+}
+
+impl FileBytes for Arc<Vec<u8>> {
+    fn shared(self) -> Arc<Vec<u8>> {
+        self
+    }
+}
+
+impl FileBytes for &[u8] {
+    fn shared(self) -> Arc<Vec<u8>> {
+        Arc::new(self.to_vec())
+    }
+}
+
+impl FileBytes for &Vec<u8> {
+    fn shared(self) -> Arc<Vec<u8>> {
+        Arc::new(self.clone())
+    }
+}
+
 /// Decodes a file. A file that isn't Bitwig's is an error; one that is but whose body can't be read is a document
 /// with [`Document::body_error`] set (and the metadata as far as it went).
-pub fn decode(raw: impl Into<Arc<[u8]>>) -> Result<Document, NotBitwig> {
-    let raw: Arc<[u8]> = raw.into();
+pub fn decode(raw: impl FileBytes) -> Result<Document, NotBitwig> {
+    let raw = raw.shared();
     if !is_bitwig(&raw) {
         return Err(NotBitwig);
     }
@@ -483,7 +528,7 @@ const SHORT_STRING: usize = 64;
 struct Reader<'a> {
     d: &'a [u8],
     /// The same bytes, shared with each blob.
-    file: &'a Arc<[u8]>,
+    file: &'a Arc<Vec<u8>>,
     objects: Vec<Object>,
     strings: HashMap<&'a [u8], Text>,
     depth: usize,
@@ -876,5 +921,16 @@ mod tests {
         // A big project holds millions of fields; the C# reader's memory once paused the app.
         assert!(size_of::<Value>() <= 32, "{}", size_of::<Value>());
         assert!(size_of::<Field>() <= 40, "{}", size_of::<Field>());
+    }
+
+    #[test]
+    fn a_number_set_on_a_field_keeps_its_value() {
+        let big = 9_007_199_254_740_993i64;
+        assert!(matches!(Value::I64(big).same_kind_as(&Value::I64(0)), Value::I64(v) if v == big));
+        assert!(matches!(Value::F64(63.9999).same_kind_as(&Value::U8(0)), Value::U8(64)));
+        assert!(matches!(Value::F64(2.5).same_kind_as(&Value::I32(0)), Value::I32(2)), "half to even");
+        assert!(matches!(Value::I32(300).same_kind_as(&Value::U8(0)), Value::U8(255)));
+        assert!(matches!(Value::I32(-1).same_kind_as(&Value::Bool(1)), Value::Bool(0)));
+        assert!(matches!(Value::U8(3).same_kind_as(&Value::F32(0.0)), Value::F32(3.0)));
     }
 }
