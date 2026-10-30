@@ -3,6 +3,8 @@
 
 #![allow(dead_code)]
 
+pub mod bitwig;
+
 use std::path::PathBuf;
 
 /// A folder of its own for one test, emptied first.

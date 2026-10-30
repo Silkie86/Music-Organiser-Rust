@@ -3,6 +3,7 @@
 //!
 //! Every reader works on the file's bytes, read once, and never changes the file.
 
+pub mod bitwig;
 pub mod fl;
 mod model;
 pub mod plugins;
