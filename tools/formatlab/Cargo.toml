@@ -1,0 +1,26 @@
+[package]
+name = "mo-formatlab"
+description = "Format Lab: looks inside Bitwig and FL Studio files (tree, diff, find, census), to learn how each DAW saves things."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "formatlab"
+path = "src/main.rs"
+
+[dependencies]
+mo-formats = { path = "../../crates/mo-formats" }
+rayon = "1.10"
+# The census counts at low priority, so the computer stays quick while it runs (rule 21).
+thread-priority = "3.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
+
+[dev-dependencies]
+# mo-formats' test files, which the tests share, make a zlib stream for one of them.
+flate2 = "1"
