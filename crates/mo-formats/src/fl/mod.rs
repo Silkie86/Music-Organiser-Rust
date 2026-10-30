@@ -243,7 +243,10 @@ fn read_with(raw: &[u8], resolve: &mut dyn FnMut(&str) -> String) -> ProjectInfo
         if let Some(w) = song.warning {
             info.warnings.push(w.to_owned());
         }
-        note_unplayed(&song, resolve, &mut info);
+        // A song cut short would list samples played only after the cut as unplayed: none are listed instead.
+        if song.warning != Some(song::TOO_MANY_NOTES) {
+            note_unplayed(&song, resolve, &mut info);
+        }
     }
     align_unplayed(info.dedupe())
 }

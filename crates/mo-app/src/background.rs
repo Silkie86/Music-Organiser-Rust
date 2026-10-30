@@ -5,7 +5,8 @@ use std::io;
 use std::thread::JoinHandle;
 
 /// Starts `work` on a thread of its own called `name`, at low priority. Only the watchdog, which must notice the
-/// window freezing however busy the computer is, starts its thread another way.
+/// window freezing however busy the computer is, and the session log's writer, which a crash waits for, start their
+/// threads another way.
 pub fn spawn<T: Send + 'static>(name: &str, work: impl FnOnce() -> T + Send + 'static) -> io::Result<JoinHandle<T>> {
     std::thread::Builder::new().name(name.to_owned()).spawn(move || {
         lower_priority();

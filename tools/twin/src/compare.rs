@@ -1,6 +1,7 @@
 //! Compares what the two apps found in a file, field by field.
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 /// One place where the two differ: where (`info.samples[2]`), and what each app found there.
 #[derive(Debug, PartialEq)]
@@ -76,10 +77,25 @@ fn walk(at: &Place, cs: &Value, rust: &Value, out: &mut Vec<Difference>) {
                 walk(&at.then(&format!("[{i}]"), "[]"), x, y, out);
             }
             if a.len() != b.len() {
-                // What the longer list has beyond the other is part of what's compared, so a change to it shows.
+                // What the longer list has beyond the other is part of what's compared, so a change to it shows: a few
+                // are written out, and many by a fingerprint, so the report stays readable.
                 let extra = |list: &[Value]| {
-                    let more: Vec<String> = list.iter().skip(a.len().min(b.len())).map(Value::to_string).collect();
-                    if more.is_empty() { list.len().to_string() } else { format!("{} {}", list.len(), more.join(" ")) }
+                    let more = list.get(a.len().min(b.len())..).unwrap_or_default();
+                    match more.len() {
+                        0 => list.len().to_string(),
+                        1..=3 => {
+                            let shown: Vec<String> = more.iter().map(Value::to_string).collect();
+                            format!("{} {}", list.len(), shown.join(" "))
+                        }
+                        n => {
+                            let mut hash = Sha256::new();
+                            for v in more {
+                                hash.update(v.to_string());
+                            }
+                            let hash: String = hash.finalize().iter().take(4).map(|b| format!("{b:02x}")).collect();
+                            format!("{} ({n} more, fingerprint {hash})", list.len())
+                        }
+                    }
                 };
                 out.push(at.then(".len", ".len").differs(extra(a), extra(b)));
             }

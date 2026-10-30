@@ -113,7 +113,8 @@ impl SessionLog {
         let (tx, writer) = match file {
             Some((_, f)) => {
                 let (tx, rx) = channel();
-                let handle = crate::background::spawn("Session log", move || write_queued(f, rx));
+                // At normal priority, unlike other background work: a crash waits for it to write the crash out.
+                let handle = std::thread::Builder::new().name("Session log".into()).spawn(move || write_queued(f, rx));
                 match handle {
                     Ok(h) => (Some(tx), Some(h)),
                     Err(_) => (None, None),

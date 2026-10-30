@@ -273,12 +273,6 @@ pub(super) fn place_automation(
         let mut placed: Vec<FlPoint> = Vec::new();
         let mut starts = Vec::new();
         for item in placements.get(&clip).into_iter().flatten() {
-            // Each placement is a copy of the curve's points, so a clip placed very many times stops at the limit.
-            placed_points = placed_points.saturating_add(curve.len());
-            if placed_points > super::song::MAX_PLACED_NOTES {
-                cut = true;
-                break;
-            }
             let mut part = cut_curve(
                 curve,
                 item.at as f64 / ppq,
@@ -287,6 +281,13 @@ pub(super) fn place_automation(
                 hold,
             );
             let (Some(&first), Some(&last)) = (part.first(), part.last()) else { continue };
+            // Each placement keeps a copy of its part of the curve, so a clip placed very many times stops at the
+            // limit (shared by all the song's automation, as it's all held at once).
+            placed_points = placed_points.saturating_add(part.len());
+            if placed_points > super::song::MAX_PLACED_NOTES {
+                cut = true;
+                break;
+            }
             starts.push(first.beat);
             // A clip placed over an earlier placement takes over from where it starts to where it ends; if the
             // earlier one runs on past that, it carries on from there.

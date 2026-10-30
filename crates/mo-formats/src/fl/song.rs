@@ -231,8 +231,8 @@ pub struct FlSong {
     pub muted_tracks: Vec<FlTrack>,
     /// Each automation clip's own curve by its channel, in beats from the clip's start, before it's placed.
     pub curves: BTreeMap<u32, Vec<FlPoint>>,
-    /// Said when the song places more notes or automation points than can be held ([`TOO_MANY_NOTES`]): those up to
-    /// there are kept.
+    /// Said when the song places more notes ([`TOO_MANY_NOTES`]) or automation points ([`TOO_MANY_POINTS`]) than can
+    /// be held: those up to there are kept.
     pub warning: Option<&'static str>,
 }
 
@@ -240,8 +240,10 @@ pub struct FlSong {
 /// damaged or made-up file could otherwise ask for more memory than the computer has.
 pub const MAX_PLACED_NOTES: usize = 4_000_000;
 
-pub const TOO_MANY_NOTES: &str = "This song places more notes or automation points than the app holds (4 million \
-     of each), so only the song's start was read: the clips after that are left out.";
+pub const TOO_MANY_NOTES: &str = "This song places more notes than the app holds (4 million), so only the song's \
+     start was read: the clips after that are left out.";
+pub const TOO_MANY_POINTS: &str = "This song's automation clips hold more points than the app holds (4 million), so \
+     some of its automation is left out.";
 
 /// The first arrangement's playlist tracks and which are muted. FL saves every track, used or not, after its
 /// arrangement's playlist (500 from FL 12.9), so their count is how many the playlist has. A track's settings (event
@@ -938,7 +940,7 @@ pub fn read_song_with(flp: &Flp<'_>, sounds: bool) -> FlSong {
         automation,
         muted_tracks: muted_tracks.into_iter().collect(),
         curves: curves.into_iter().collect(),
-        warning: (too_many || too_many_points).then_some(TOO_MANY_NOTES),
+        warning: if too_many { Some(TOO_MANY_NOTES) } else { too_many_points.then_some(TOO_MANY_POINTS) },
     }
 }
 
@@ -1003,7 +1005,8 @@ pub fn extract_midi(flp: &Flp<'_>) -> Vec<MidiClip> {
 /// Each channel's notes across the song, where the playlist puts them (a song with nothing in the playlist gets its
 /// patterns one after another), with what plays it. Unlike [`read_song`], automation clip channels and switched off
 /// channels are kept, as the C# reader keeps them. Sample paths are as FL wrote them; [`resolve_channel_samples`]
-/// finds those under FL's user data folder.
+/// finds those under FL's user data folder. A song that places more than [`MAX_PLACED_NOTES`] notes has the notes up to
+/// there ([`read_song`] says so in its warning).
 pub fn extract_channels(flp: &Flp<'_>) -> Vec<MidiChannel> {
     let mut names: HashMap<u32, String> = HashMap::new();
     let mut sources: HashMap<u32, String> = HashMap::new();

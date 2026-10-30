@@ -345,12 +345,10 @@ fn parse(text: &str) -> Result<roxmltree::Document<'_>, roxmltree::Error> {
     roxmltree::Document::parse_with_options(text, options)
 }
 
-/// Whether the XML's DOCTYPE declares any entities.
+/// Whether the XML may declare entities: it has a DOCTYPE and `<!ENTITY` anywhere (looking only inside what seems to
+/// be the DOCTYPE could be fooled by a comment).
 fn declares_entities(text: &str) -> bool {
-    let Some(start) = text.find("<!DOCTYPE") else { return false };
-    let doctype = text.get(start..).unwrap_or_default();
-    let end = doctype.find("]>").unwrap_or(doctype.len());
-    doctype.get(..end).is_some_and(|d| d.contains("<!ENTITY"))
+    text.contains("<!DOCTYPE") && text.contains("<!ENTITY")
 }
 
 /// An element and every element inside it, in the order they're written.

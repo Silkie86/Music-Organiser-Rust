@@ -38,6 +38,11 @@ const DRAFT_PAUSE: Duration = Duration::from_millis(300);
 static OPEN: AtomicBool = AtomicBool::new(false);
 /// Saves still going.
 static SAVING: AtomicUsize = AtomicUsize::new(0);
+/// How many times a note has been opened, so the text from before reaches only the note it was read for.
+static OPENINGS: AtomicUsize = AtomicUsize::new(0);
+/// The open note shows the text from before (the draft and the words of failed saves), or there was none. Until then,
+/// what's typed is kept with that text rather than over it.
+static FILLED: AtomicBool = AtomicBool::new(true);
 /// How long the app waits for them when it closes.
 const SAVE_WAIT: Duration = Duration::from_secs(5);
 
@@ -51,8 +56,10 @@ enum FileJob {
     Lock,
     /// Keeps the words of a note that failed to save, for the next F12.
     KeepFailed(String),
-    /// Reads the note's starting text and puts it in the open note.
-    Fill(slint::Weak<AppWindow>),
+    /// Reads the note's starting text and puts it in the note opened that time (by `OPENINGS`).
+    Fill(slint::Weak<AppWindow>, usize),
+    /// The words of failed saves are in the draft now: their own file goes.
+    ForgetFailed,
     /// The app is closing: keeps the draft, takes the lock down and says so.
     Finish(Sender<()>),
 }
@@ -82,40 +89,45 @@ fn on_files(job: FileJob) {
 
 fn do_file_jobs(jobs: &Receiver<FileJob>) {
     for job in jobs {
-        do_file_job(job);
+        // One job going wrong (it's logged as a crash) mustn't lose the jobs after it.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| do_file_job(job)));
     }
 }
 
 fn do_file_job(job: FileJob) {
     match job {
         FileJob::KeepDraft => keep_unsaved(),
-        FileJob::ClearDraft => note::clear_draft(&note::notes_dir()),
+        // A draft from before that wasn't shown yet wasn't seen, so it isn't thrown away.
+        FileJob::ClearDraft if FILLED.load(Ordering::Acquire) => note::clear_draft(&note::notes_dir()),
+        FileJob::ClearDraft => {}
         FileJob::Lock => {
             let busy = OPEN.load(Ordering::Acquire) || SAVING.load(Ordering::Acquire) > 0;
             note::writing(&note::notes_dir(), busy);
         }
         FileJob::KeepFailed(text) => keep_failed_words(&text),
-        FileJob::Fill(weak) => {
+        FileJob::Fill(weak, opening) => {
             let text = starting_text();
             if text.is_empty() {
+                FILLED.store(true, Ordering::Release);
                 return;
             }
             let _ = weak.upgrade_in_event_loop(move |app| {
-                if !app.get_note_open() {
-                    // Put aside before it arrived: it's still the draft, for next time.
+                if !app.get_note_open() || OPENINGS.load(Ordering::Acquire) != opening {
+                    // Put aside before it arrived: it's still on disk, for next time.
                     return;
                 }
                 let typed = app.get_note_text();
-                if typed.is_empty() {
-                    app.set_note_text(text.into());
-                } else {
-                    // Typed straight away: the draft goes first, and the whole is what's kept.
-                    let whole = format!("{text}\n\n{typed}");
-                    app.set_note_text(whole.clone().into());
-                    *UNSAVED.lock().unwrap_or_else(|e| e.into_inner()) = Some(whole);
-                    on_files(FileJob::KeepDraft);
-                }
+                // Typed straight away: the draft goes first.
+                let whole = if typed.is_empty() { text } else { format!("{text}\n\n{typed}") };
+                app.set_note_text(whole.as_str().into());
+                FILLED.store(true, Ordering::Release);
+                *UNSAVED.lock().unwrap_or_else(|e| e.into_inner()) = Some(whole);
+                on_files(FileJob::KeepDraft);
+                on_files(FileJob::ForgetFailed);
             });
+        }
+        FileJob::ForgetFailed => {
+            let _ = std::fs::remove_file(note::notes_dir().join(FAILED_FILE));
         }
         FileJob::Finish(done) => {
             keep_unsaved();
@@ -146,10 +158,12 @@ pub fn open_note(app: &AppWindow) {
     app.set_note_include_picture(picture.is_some());
     PICTURE.with(|p| *p.borrow_mut() = picture);
     app.set_note_text("".into());
+    FILLED.store(false, Ordering::Release);
+    let opening = OPENINGS.fetch_add(1, Ordering::AcqRel) + 1;
     OPEN.store(true, Ordering::Release);
     update_lock();
     app.set_note_open(true);
-    on_files(FileJob::Fill(app.as_weak()));
+    on_files(FileJob::Fill(app.as_weak(), opening));
 }
 
 pub fn connect(app: &AppWindow, feed: &Feed) {
@@ -192,9 +206,22 @@ fn keep_unsaved() {
         Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner().take(),
         Err(std::sync::TryLockError::WouldBlock) => None,
     };
-    if let Some(text) = text {
-        note::keep_draft(&note::notes_dir(), &text);
+    let Some(text) = text else { return };
+    let folder = note::notes_dir();
+    if FILLED.load(Ordering::Acquire) {
+        note::keep_draft(&folder, &text);
+        return;
     }
+    // Typed before the text from before was shown: kept with it, not over it, and from now on it's all one draft.
+    let before = starting_text();
+    let whole = match (before.is_empty(), text.is_empty()) {
+        (true, _) => text,
+        (false, true) => before,
+        (false, false) => format!("{before}\n\n{text}"),
+    };
+    note::keep_draft(&folder, &whole);
+    let _ = std::fs::remove_file(folder.join(FAILED_FILE));
+    FILLED.store(true, Ordering::Release);
 }
 
 /// `writing.lock` is up while a note is open or still being saved.
@@ -281,20 +308,16 @@ fn keep_failed_words(text: &str) {
     }
 }
 
-/// The note's starting text: words from saves that failed (taken back once shown), then the draft.
+/// The note's starting text: words from saves that failed, then the draft. Only read: the files change once it's shown.
 fn starting_text() -> String {
     let folder = note::notes_dir();
     let failed = std::fs::read_to_string(folder.join(FAILED_FILE)).unwrap_or_default();
     let draft = note::read_draft(&folder).unwrap_or_default();
-    if failed.trim().is_empty() {
-        return draft;
+    match (failed.trim().is_empty(), draft.is_empty()) {
+        (true, _) => draft,
+        (false, true) => failed.trim_end().to_owned(),
+        (false, false) => format!("{}\n\n{draft}", failed.trim_end()),
     }
-    // Into the draft first, so taking the file away can't lose them.
-    let text =
-        if draft.is_empty() { failed.trim_end().to_owned() } else { format!("{}\n\n{draft}", failed.trim_end()) };
-    note::keep_draft(&folder, &text);
-    let _ = std::fs::remove_file(folder.join(FAILED_FILE));
-    text
 }
 
 /// Saves the note on a thread of its own. `SAVING` already counts it.
