@@ -8,6 +8,7 @@ use mo_formats::fl::automation::{FlAutomation, FlPoint};
 use mo_formats::fl::song::{self, FlChannel, FlInsert, FlPlugin, FlSong};
 use mo_formats::fl::{self, events, presets};
 use mo_formats::presets::PresetBlob;
+use mo_formats::studio_one;
 use mo_formats::{MidiChannel, MidiClip, NoteEvent, ProjectInfo};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -20,6 +21,9 @@ pub fn dump(path: &Path) -> Value {
     };
     if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("bwproject")) {
         return bitwig_dump(path, raw);
+    }
+    if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("song")) {
+        return studio_one_dump(path, &raw);
     }
     // Read from disk once; the project list's reading takes the same bytes.
     let mut out = json!({ "file": path.to_string_lossy(), "info": info_json(&fl::read_from(&raw, path)) });
@@ -54,6 +58,24 @@ fn bitwig_dump(path: &Path, raw: Vec<u8>) -> Value {
         "midi": midi.iter().map(clip_json).collect::<Vec<_>>(),
         "presets": presets.iter().map(preset_json).collect::<Vec<_>>(),
     })
+}
+
+/// A Studio One song: what the project list shows, its note clips and its plugin states. A file that isn't a zip
+/// can't be read; the two apps word that differently, so both say just "unreadable".
+fn studio_one_dump(path: &Path, raw: &[u8]) -> Value {
+    let mut out = json!({ "file": path.to_string_lossy() });
+    match studio_one::Song::open(raw) {
+        Ok(mut song) => {
+            out["info"] = info_json(&song.info());
+            out["midi"] = song.midi().iter().map(clip_json).collect();
+            out["presets"] = song.presets().iter().map(preset_json).collect();
+        }
+        Err(_) => {
+            out["info"] = json!({ "error": "unreadable" });
+            out["error_more"] = json!("unreadable");
+        }
+    }
+    out
 }
 
 fn info_json(i: &ProjectInfo) -> Value {

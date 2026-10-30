@@ -98,7 +98,7 @@ fn run(args: &[String]) -> Result<bool, String> {
     files.sort();
     files.dedup();
     if files.is_empty() {
-        return Err("No FL Studio or Bitwig projects (.flp, .bwproject) there.".into());
+        return Err("No FL Studio, Bitwig or Studio One projects (.flp, .bwproject, .song) there.".into());
     }
 
     let helper = o.cs.clone().ok_or("Say where the C# helper is (--cs).")?;
@@ -160,8 +160,12 @@ fn run(args: &[String]) -> Result<bool, String> {
         f.flush().map_err(|e| format!("Couldn't write the report: {e}"))?;
     }
 
-    let bitwig = files.iter().filter(|f| f.extension().is_some_and(|e| e.eq_ignore_ascii_case("bwproject"))).count();
-    println!("Twin test: {} FL Studio and {bitwig} Bitwig project(s).", files.len() - bitwig);
+    let count = |ext: &str| files.iter().filter(|f| f.extension().is_some_and(|e| e.eq_ignore_ascii_case(ext))).count();
+    let (bitwig, studio_one) = (count("bwproject"), count("song"));
+    println!(
+        "Twin test: {} FL Studio, {bitwig} Bitwig and {studio_one} Studio One project(s).",
+        files.len() - bitwig - studio_one
+    );
     println!("  {same} read the same in both apps.");
     println!("  {} differ. Kinds of difference, by how many projects have each:", files.len() - same);
     let mut by_count: Vec<(&String, &usize)> = kinds.iter().collect();
@@ -195,14 +199,14 @@ fn run(args: &[String]) -> Result<bool, String> {
     Ok(new.is_empty() && gone.is_empty())
 }
 
-/// The FL Studio and Bitwig projects in a folder (and the folders in it), or the file itself.
+/// The FL Studio, Bitwig and Studio One projects in a folder (and the folders in it), or the file itself.
 fn collect(path: &Path, out: &mut Vec<PathBuf>) {
     if path.is_dir() {
         let Ok(entries) = std::fs::read_dir(path) else { return };
         for entry in entries.flatten() {
             collect(&entry.path(), out);
         }
-    } else if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("flp") || e.eq_ignore_ascii_case("bwproject")) {
+    } else if path.extension().is_some_and(|e| ["flp", "bwproject", "song"].iter().any(|x| e.eq_ignore_ascii_case(x))) {
         out.push(path.to_path_buf());
     }
 }

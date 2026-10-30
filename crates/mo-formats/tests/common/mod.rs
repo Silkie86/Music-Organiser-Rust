@@ -4,6 +4,7 @@
 #![allow(dead_code)]
 
 pub mod bitwig;
+pub mod studio_one;
 
 use std::path::PathBuf;
 
