@@ -20,7 +20,7 @@ pub fn encode(doc: &Document, zip: Option<&[u8]>) -> Result<Vec<u8>, String> {
         (Some(root), None) => root,
         _ => return Err("Only a cleanly decoded document can be written back".into()),
     };
-    let mut w = Writer { doc, numbers: HashMap::new(), written: 0, out: Vec::new() };
+    let mut w = Writer { doc, numbers: vec![0; doc.objects.len()], count: 0, written: 0, depth: 0, out: Vec::new() };
 
     // Documents nested in metadata (Bitwig's "structure") have no metadata of their own.
     if doc.meta_end > HEADER {
@@ -41,10 +41,9 @@ pub fn encode(doc: &Document, zip: Option<&[u8]>) -> Result<Vec<u8>, String> {
     w.inline(root)?;
     let body = w.out;
 
-    let had_zip = std::str::from_utf8(&doc.header[20..36]).ok().and_then(|s| u64::from_str_radix(s, 16).ok());
     let zip = match zip {
         Some(z) => z,
-        None if had_zip.unwrap_or(0) > 0 => &doc.raw[doc.zip_offset..],
+        None if doc.has_zip => &doc.raw[doc.zip_offset..],
         None => &[],
     };
     let body_offset = HEADER + meta.len();
@@ -63,12 +62,20 @@ pub fn encode(doc: &Document, zip: Option<&[u8]>) -> Result<Vec<u8>, String> {
 
 struct Writer<'a> {
     doc: &'a Document,
-    /// Each object's number, in the order it's written.
-    numbers: HashMap<ObjId, u32>,
+    /// Each object's number, in the order it's written; 0 for one not reached.
+    numbers: Vec<u32>,
+    /// How many objects are numbered so far.
+    count: u32,
     /// How many objects are written so far.
     written: u32,
+    /// How deep the object being numbered or written is.
+    depth: usize,
     out: Vec<u8>,
 }
+
+/// Objects can be nested no deeper than a file can have them (see [`super::format`]), so a tree built in code can't
+/// run the thread out of stack either.
+const MAX_DEPTH: usize = 512;
 
 impl Writer<'_> {
     fn u32(&mut self, v: u32) {
@@ -76,18 +83,22 @@ impl Writer<'_> {
     }
 
     fn text(&mut self, t: &Text) {
-        if let Some(raw) = &t.raw {
-            let n = if t.wide { 0x8000_0000 | (raw.len() / 2) as u32 } else { raw.len() as u32 };
+        if let Some(raw) = t.raw() {
+            let n = if t.wide() { 0x8000_0000 | (raw.len() / 2) as u32 } else { raw.len() as u32 };
             self.u32(n);
             self.out.extend_from_slice(raw);
-        } else if t.wide {
-            let units: Vec<u16> = t.text.encode_utf16().collect();
+        } else if t.wide() {
+            let units: Vec<u16> = t.as_str().encode_utf16().collect();
             self.u32(0x8000_0000 | units.len() as u32);
             self.out.extend(units.iter().flat_map(|u| u.to_be_bytes()));
         } else {
-            self.u32(t.text.len() as u32);
-            self.out.extend_from_slice(t.text.as_bytes());
+            self.u32(t.as_str().len() as u32);
+            self.out.extend_from_slice(t.as_str().as_bytes());
         }
+    }
+
+    fn number_of(&self, o: ObjId) -> u32 {
+        self.numbers.get(o.0 as usize).copied().unwrap_or(0)
     }
 
     fn target(&self, s: Slot) -> Result<ObjId, String> {
@@ -95,33 +106,38 @@ impl Writer<'_> {
     }
 
     fn is_written(&self, s: Slot) -> bool {
-        self.doc.resolve(s).and_then(|t| self.numbers.get(&t)).is_some_and(|&n| n <= self.written)
+        self.doc.resolve(s).is_some_and(|t| matches!(self.number_of(t), n if n > 0 && n <= self.written))
+    }
+
+    fn deeper(&mut self) -> Result<(), String> {
+        self.depth += 1;
+        if self.depth > MAX_DEPTH { Err("objects nested too deeply".into()) } else { Ok(()) }
     }
 
     /// Numbers every object in the order it will be written: in full where it's first reached through an object
     /// slot, by reference after that.
     fn number(&mut self, o: ObjId) -> Result<(), String> {
-        self.numbers.insert(o, self.numbers.len() as u32 + 1);
+        self.deeper()?;
+        self.count += 1;
+        self.numbers[o.0 as usize] = self.count;
         let doc = self.doc;
         for f in &doc.obj(o).fields {
             // A bare reference to an object not reached yet (its first home was edited away) is where it's written now.
-            let slots = match &f.value {
-                Value::BareRef(s) => vec![*s],
-                v => v.slots(),
-            };
-            for s in slots.into_iter().filter(|s| *s != Slot::Null) {
+            for s in f.value.targets().filter(|s| *s != Slot::Null) {
                 let t = self.target(s)?;
-                if !self.numbers.contains_key(&t) {
+                if self.number_of(t) == 0 {
                     self.number(t)?;
                 }
             }
         }
+        self.depth -= 1;
         Ok(())
     }
 
     fn inline(&mut self, o: ObjId) -> Result<(), String> {
+        self.deeper()?;
         self.written += 1;
-        if self.numbers.get(&o) != Some(&self.written) {
+        if self.number_of(o) != self.written {
             return Err("objects written out of order".into());
         }
         let doc = self.doc;
@@ -140,6 +156,7 @@ impl Writer<'_> {
             self.value(ty, &f.value)?;
         }
         self.u32(0);
+        self.depth -= 1;
         Ok(())
     }
 
@@ -149,8 +166,8 @@ impl Writer<'_> {
             return Ok(());
         }
         let t = self.target(s)?;
-        match self.numbers.get(&t) {
-            Some(&n) if n <= self.written => {
+        match self.number_of(t) {
+            n if n > 0 && n <= self.written => {
                 self.u32(1);
                 self.u32(n);
                 Ok(())
@@ -169,13 +186,16 @@ impl Writer<'_> {
             (_, Value::F64(x)) => self.out.extend_from_slice(&x.to_be_bytes()),
             (_, Value::Str(t)) => self.text(t),
             (0x0b, Value::Obj(s) | Value::BareRef(s)) => {
-                let n = self.numbers.get(&self.target(*s)?).copied().filter(|&n| n <= self.written);
-                self.u32(n.ok_or("reference to an object that isn't written before it")?);
+                let n = self.number_of(self.target(*s)?);
+                if n == 0 || n > self.written {
+                    return Err("reference to an object that isn't written before it".into());
+                }
+                self.u32(n);
             }
             (_, Value::Obj(s) | Value::BareRef(s)) => self.slot(*s)?,
             (_, Value::Null) => {}
             (_, Value::Blob(b)) => {
-                let bytes = self.doc.blob(b);
+                let bytes = b.bytes();
                 self.u32(bytes.len() as u32);
                 self.out.extend_from_slice(bytes);
             }
@@ -222,14 +242,6 @@ impl Writer<'_> {
     }
 }
 
-/// Every object a value points at: what it holds, lists, maps or refers to, a named object, or a bare reference.
-fn targets(v: &Value) -> Vec<Slot> {
-    match v {
-        Value::BareRef(s) => vec![*s],
-        v => v.slots(),
-    }
-}
-
 /// Field 0x99 is a device's type: copies of a device keep it, while every other id they carry gets a fresh one.
 const DEVICE_TYPE: u32 = 0x99;
 
@@ -259,13 +271,16 @@ impl Copier {
 
     /// A copy of `original` and everything only it reaches. References inside the copy point at the copied objects;
     /// ids (instances, tracks, chains, not device types) get fresh values, and other fields holding the same ids follow.
+    ///
+    /// `original` must not be shared: an object still in the tree is copied only by a copier made with it as
+    /// `besides` (or use [`clone_object`]). Otherwise everything in it would be linked, not copied, and the two would
+    /// share devices and ids.
     pub fn copy(&self, doc: &mut Document, original: ObjId) -> ObjId {
+        assert!(!self.shares(original), "copying an object the rest of the document still reaches");
         let mut owned = HashSet::new();
         reach(doc, original, &mut owned, |o| self.shared.contains(&o));
         let mut ids: HashMap<[u8; 16], [u8; 16]> = HashMap::new();
-        let mut sorted: Vec<ObjId> = owned.iter().copied().collect();
-        sorted.sort();
-        for &o in &sorted {
+        for &o in &owned {
             for f in &doc.obj(o).fields {
                 if let Value::Uuid(g) = f.value
                     && f.id != DEVICE_TYPE
@@ -292,7 +307,7 @@ fn reach(doc: &Document, start: ObjId, seen: &mut HashSet<ObjId>, stop: impl Fn(
             continue;
         }
         for f in &doc.obj(o).fields {
-            todo.extend(targets(&f.value).into_iter().filter_map(|s| doc.resolve(s)));
+            todo.extend(f.value.targets().filter_map(|s| doc.resolve(s)));
         }
     }
 }
@@ -308,7 +323,9 @@ impl Copying<'_> {
         if let Some(&done) = self.copies.get(&o) {
             return done;
         }
-        let copy = doc.add(Object::new(doc.obj(o).class));
+        // Inside the copy of what it was inside, if that's copied too.
+        let parent = doc.obj(o).parent.and_then(|(p, f)| self.copies.get(&p).map(|&c| (c, f)));
+        let copy = doc.add(Object { parent, ..Object::new(doc.obj(o).class) });
         self.copies.insert(o, copy);
         let fields = doc.obj(o).fields.clone();
         let fields = fields.into_iter().map(|f| Field { id: f.id, value: self.value(doc, f.value) }).collect();

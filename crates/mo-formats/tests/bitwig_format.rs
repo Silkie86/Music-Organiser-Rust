@@ -70,12 +70,12 @@ fn decoding_ends_at_the_zip_and_reads_the_metadata() {
 fn the_structure_summary_is_a_document_of_its_own() {
     let doc = decode(&bitwig_project_bytes());
     let Some(Value::Blob(b)) = doc.meta("structure") else { panic!("no structure") };
-    let inner = decode(doc.blob(b));
+    let inner = decode(b.bytes());
     assert_eq!(inner.body_error, None);
     let project = inner.field_obj(root(&inner), 0xad2).expect("the project");
     let tracks = inner.field_list(project, 0xace);
     assert_eq!(inner.obj(tracks[0]).str(0xad1), "Keys Display");
-    assert_eq!(bitwig::encode(&inner, None).expect("written"), doc.blob(b));
+    assert_eq!(bitwig::encode(&inner, None).expect("written"), b.bytes());
 }
 
 #[test]
@@ -304,4 +304,112 @@ fn damaged_files_never_stop_the_reader() {
             assert_eq!(decode(&again).body_error, None, "byte {at}");
         }
     }
+}
+
+/// A file of `depth` objects, each in a field of the one before.
+fn nested(depth: usize) -> Vec<u8> {
+    BwWriter::file(
+        |_| {},
+        |b| {
+            for _ in 1..depth {
+                b.begin(0x2e);
+                b.obj(0x10);
+            }
+            b.begin(0x2e);
+            for _ in 0..depth {
+                b.end();
+            }
+        },
+        None,
+    )
+}
+
+#[test]
+fn deeply_nested_files_never_run_out_of_stack() {
+    // On a thread with 1 MB of stack (the Windows main thread's), in a debug build: as deep as the reader goes reads
+    // and writes back, and deeper is an error, not a crash.
+    let worker = std::thread::Builder::new().stack_size(1 << 20).spawn(|| {
+        let raw = nested(512);
+        let doc = decode(&raw);
+        assert_eq!(doc.body_error, None);
+        assert_eq!(bitwig::encode(&doc, None).expect("written"), raw);
+        assert_eq!(decode(&nested(513)).body_error.as_deref(), Some("objects nested too deeply"));
+        assert_eq!(decode(&nested(100_000)).body_error.as_deref(), Some("objects nested too deeply"));
+    });
+    worker.expect("a thread").join().expect("no stack overflow");
+}
+
+#[test]
+fn a_reference_to_an_object_not_read_yet_isnt_trusted() {
+    let bare = BwWriter::file(
+        |_| {},
+        |b| {
+            b.begin(0x2e);
+            b.bare_ref(0x10, 99);
+            b.end();
+        },
+        None,
+    );
+    assert!(decode(&bare).body_error.is_some_and(|e| e.contains("to object 99")));
+    let zero = BwWriter::file(
+        |_| {},
+        |b| {
+            b.begin(0x2e);
+            b.list(0x10);
+            b.list_ref(0);
+            b.end_list();
+            b.end();
+        },
+        None,
+    );
+    assert!(decode(&zero).body_error.is_some_and(|e| e.contains("to object 0")));
+}
+
+#[test]
+fn metadata_read_before_a_damaged_entry_stays() {
+    let raw = BwWriter::file(
+        |m| {
+            m.meta_entry("application_version_name", 0x08);
+            m.str_val("5.2.4");
+            m.meta_entry("broken", 0x99);
+        },
+        |b| {
+            b.begin(0x2e);
+            b.end();
+        },
+        None,
+    );
+    let doc = decode(&raw);
+    assert!(doc.body_error.as_ref().is_some_and(|e| e.starts_with("metadata: unknown value type 0x99")));
+    assert_eq!(doc.meta_str("application_version_name"), "5.2.4");
+}
+
+#[test]
+fn a_changed_number_keeps_the_kind_bitwig_wrote() {
+    let mut doc = decode(&bitwig_template(Template::default()));
+    let r = root(&doc);
+    let tempo = doc.field_obj(r, 0x29a6).expect("tempo");
+    doc.obj_mut(tempo).set(0x2c8, Value::I32(140));
+    assert_eq!(doc.obj(tempo).get(0x2c8), Some(&Value::F64(140.0)));
+    let back = decode(&bitwig::encode(&doc, None).expect("written"));
+    let tempo = back.field_obj(root(&back), 0x29a6).expect("tempo");
+    assert_eq!(back.obj(tempo).num(0x2c8), Some(140.0));
+}
+
+#[test]
+fn a_copy_knows_what_its_parts_are_inside() {
+    let mut doc = decode(&bitwig_project_bytes());
+    let track = doc.field_list(group(&doc), 0x4de)[0];
+    let copy = bitwig::clone_object(&mut doc, track);
+    let device = doc.field_list(copy, 0x4ba)[0];
+    assert_eq!(doc.obj(device).str(0x9a), "Keyscape");
+    assert_eq!(doc.ancestor(device, |o| o.class == 0x90), Some(copy));
+}
+
+#[test]
+#[should_panic(expected = "copying an object the rest of the document still reaches")]
+fn copying_a_track_still_in_the_tree_needs_it_named() {
+    let mut doc = decode(&bitwig_project_bytes());
+    let track = doc.field_list(group(&doc), 0x4de)[0];
+    bitwig::Copier::new(&doc, None).copy(&mut doc, track);
 }
