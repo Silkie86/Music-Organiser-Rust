@@ -14,6 +14,6 @@
     <MoOldRepo Condition="'$(MoOldRepo)' == ''">$(MSBuildThisFileDirectory)../../../../Music-Organiser</MoOldRepo>
   </PropertyGroup>
   <ItemGroup>
-    <ProjectReference Include="$(MoOldRepo)/cs/src/MusicOrganiser.Core/MusicOrganiser.Core.csproj" />
+    <ProjectReference Include="$(MoOldRepo)/src/MusicOrganiser.Core/MusicOrganiser.Core.csproj" />
   </ItemGroup>
 </Project>

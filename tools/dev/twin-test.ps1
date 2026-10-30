@@ -26,7 +26,7 @@ $Logs = Join-Path $Data 'logs'
 $Helper = Join-Path $Data 'twin\cs'
 New-Item -ItemType Directory -Force -Path $Logs | Out-Null
 
-if (-not (Test-Path (Join-Path $Cs 'cs'))) { throw "The C# app's code isn't in $Cs. Run the C# launcher (Run latest) once first." }
+if (-not (Test-Path (Join-Path $Cs 'src\MusicOrganiser.Core'))) { throw "The C# app's code isn't in $Cs. Run the C# launcher (Run latest) once first." }
 if (-not (Test-Path (Join-Path $Rust 'Cargo.toml'))) { throw "The Rust app's code isn't in $Rust. Run the Rust launcher once first." }
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH" }
 
