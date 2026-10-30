@@ -13,3 +13,7 @@ chrono.workspace = true
 # Bitwig keeps plugin states in a zip at the end of its projects, and some of its older files hold zlib streams.
 flate2 = "1"
 zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
+# Studio One's songs are zips of XML: read with a small, strict parser, after its undeclared "x:" prefixes are taken
+# out with two patterns, as the C# reader does.
+regex = { version = "1", default-features = false, features = ["std", "unicode"] }
+roxmltree = "0.20"

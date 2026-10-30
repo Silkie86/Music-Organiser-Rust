@@ -1,8 +1,8 @@
 # Twin test
 
-Both apps read the same FL Studio and Bitwig projects, and every place where they read them differently is listed (spec
-section 11.2). The C# app's readers run unchanged, through the small C# helper in `cs/`. Each difference gets judged
-in `crates/mo-formats/DIFFERENCES.md`: the Rust reader is better, or it's a bug to fix.
+Both apps read the same FL Studio, Bitwig and Studio One projects, and every place where they read them differently is
+listed (spec section 11.2). The C# app's readers run unchanged, through the small C# helper in `cs/`. Each difference
+gets judged in `crates/mo-formats/DIFFERENCES.md`: the Rust reader is better, or it's a bug to fix.
 
 ## At home, on the whole library
 
