@@ -523,7 +523,7 @@ in CI on a fake library and on your PC with the real one.
 
 | Option | Verdict |
 |---|---|
-| **Slint** | **Pick.** A markup language (`.slint` files) for screens, with Rust code behind them, very like Avalonia's `.axaml` + view models. Live preview while you edit a screen (the nearest thing to Hot Reload). Themes through global colour tokens, so the 9 themes and accents carry over. Virtualised lists. Windows, macOS and Linux. Free for desktop apps under its royalty-free licence (it asks for a small credit) or GPLv3. |
+| **Slint** | **Pick.** A markup language (`.slint` files) for screens, with Rust code behind them, very like Avalonia's `.axaml` + view models. Live preview while you edit a screen (the nearest thing to Hot Reload). Themes through global colour tokens, so the 9 themes and accents carry over. Virtualised lists. Windows, macOS and Linux. Free for desktop apps under its royalty-free licence (it asks for a small credit) or GPLv3. **Chosen: royalty-free** (Solomon, 2026-10-30): the Settings page's About part shows the "Made with Slint" credit. |
 | egui | Runner-up. Easiest for hand-drawn views (piano roll, timeline, galaxy) and very fast, but it redraws everything every frame and looks like a tool, not a polished product. Harder to make your shaded, joined, pressed-in look. |
 | iced | Good, but its Elm-style code is harder to follow for a beginner, and theming is more work. |
 | GPUI (Zed's) | Very fast, but thin docs and young on Windows. |
