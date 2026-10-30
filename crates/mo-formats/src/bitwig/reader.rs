@@ -164,27 +164,65 @@ fn is_instrument_category(category: &str) -> bool {
     INSTRUMENT_CATEGORIES.iter().any(|c| c.eq_ignore_ascii_case(category))
 }
 
+/// A decoded project, with its tracks' names worked out once for everything read from it.
+pub struct Project {
+    pub doc: Document,
+    names: TrackNames,
+}
+
+impl Project {
+    pub fn new(doc: Document) -> Project {
+        let names = track_names(&doc);
+        Project { doc, names }
+    }
+
+    /// The file's bytes, a project or not: decoded when it's Bitwig's (moved, not copied).
+    pub fn open(raw: Vec<u8>) -> Result<Project, Vec<u8>> {
+        if !super::is_bitwig(&raw) {
+            return Err(raw);
+        }
+        Ok(Project::new(decode(raw).map_err(|_| Vec::new())?))
+    }
+
+    /// The note clips: see [`extract_midi`].
+    pub fn midi(&self) -> Vec<MidiClip> {
+        extract_midi(&self.doc, &self.names)
+    }
+
+    /// The plugin states: see [`extract_presets`].
+    pub fn presets(&self) -> Vec<PresetBlob> {
+        extract_presets(&self.doc, &self.names)
+    }
+}
+
 /// Reads what's in a Bitwig project. A file that isn't one is listed with what's wrong with it, not an error; only a
-/// file that can't be read from disk is.
+/// file that can't be read from disk is. The file is held in memory once.
 pub fn read(path: &Path) -> std::io::Result<ProjectInfo> {
-    Ok(read_from(&std::fs::read(path)?, path))
+    let info = match Project::open(std::fs::read(path)?) {
+        Ok(project) => read_project(Some(&project), &project.doc.raw, path, &plugins::is_always_known),
+        Err(raw) => read_project(None, &raw, path, &plugins::is_always_known),
+    };
+    Ok(info)
 }
 
 /// [`read`] for a file already in memory that lives at `path` (the folders beside it hold its audio).
 pub fn read_from(raw: &[u8], path: &Path) -> ProjectInfo {
-    read_document(decode(raw).ok().as_ref(), raw, path, &plugins::is_always_known)
+    let project = decode(raw).ok().map(Project::new);
+    read_project(project.as_ref(), raw, path, &plugins::is_always_known)
 }
 
-/// [`read_from`] for a file already decoded (`None` when it isn't Bitwig's). `known` says whether a name is a plugin
-/// installed on this PC: only the text scan needs it, as it can't tell a plugin's name from any other text otherwise.
-pub fn read_document(doc: Option<&Document>, raw: &[u8], path: &Path, known: &dyn Fn(&str) -> bool) -> ProjectInfo {
+/// [`read_from`] for a project already decoded (`None` when the file isn't Bitwig's); `raw` is the file's bytes.
+/// `known` says whether a name is a plugin installed on this PC: only the text scan needs it, as it can't tell a
+/// plugin's name from any other text otherwise.
+pub fn read_project(project: Option<&Project>, raw: &[u8], path: &Path, known: &dyn Fn(&str) -> bool) -> ProjectInfo {
+    let doc = project.map(|p| &p.doc);
     let mut info = ProjectInfo::new(DAW);
     let dir = path.parent().unwrap_or(Path::new("."));
     let used_files = doc.map(|d| d.meta_strings("used_files")).unwrap_or_default();
     let collected = || used_files.iter().flat_map(|f| collected_names(f)).map(|n| n.to_lowercase()).collect();
 
-    match doc {
-        Some(d) if d.root.is_some() && d.body_error.is_none() => read_decoded(d, &collected(), &mut info),
+    match project {
+        Some(p) if p.doc.root.is_some() && p.doc.body_error.is_none() => read_decoded(p, &collected(), &mut info),
         _ => {
             let collected = doc.map(|_| collected());
             text_scan(raw, dir, &mut info, doc.and_then(|d| d.body_error.as_deref()), collected.as_ref(), known)
@@ -199,7 +237,7 @@ pub fn read_document(doc: Option<&Document>, raw: &[u8], path: &Path, known: &dy
             info.title = d.meta_str("title").to_owned();
         }
         for f in &used_files {
-            if textscan::is_audio_path(f) || ends_with_ignore_case(f, ".multisample") {
+            if textscan::is_audio_path(f) || plugins::ends_with_ignore_case(f, ".multisample") {
                 info.samples.push(paths::full_path(dir, f));
             }
         }
@@ -209,13 +247,8 @@ pub fn read_document(doc: Option<&Document>, raw: &[u8], path: &Path, known: &dy
     info.dedupe()
 }
 
-fn ends_with_ignore_case(s: &str, end: &str) -> bool {
-    s.len() >= end.len()
-        && s.is_char_boundary(s.len() - end.len())
-        && s[s.len() - end.len()..].eq_ignore_ascii_case(end)
-}
-
-/// The object a field holds (following a reference), as the C# reader's `Obj`: not a named one.
+/// The object a field holds (following a reference), as the C# reader's `Obj`: not a named one, as
+/// [`Document::field_obj`] also gives.
 fn field_obj(doc: &Document, of: ObjId, id: u32) -> Option<ObjId> {
     match doc.obj(of).get(id)? {
         Value::Obj(s) | Value::BareRef(s) => doc.resolve(*s),
@@ -223,29 +256,18 @@ fn field_obj(doc: &Document, of: ObjId, id: u32) -> Option<ObjId> {
     }
 }
 
-/// The nearest object `of` is inside (through its parents) that `matches`.
-fn ancestor(doc: &Document, of: ObjId, matches: impl Fn(ObjId) -> bool) -> Option<ObjId> {
-    let mut at = doc.obj(of).parent;
-    // No more steps than there are objects, whatever objects made in code say about their parents.
-    for _ in 0..doc.objects.len() {
-        let (p, _) = at?;
-        if matches(p) {
-            return Some(p);
-        }
-        at = doc.obj(p).parent;
-    }
-    None
-}
-
 fn ids(doc: &Document) -> impl Iterator<Item = ObjId> + '_ {
     (0..doc.objects.len() as u32).map(ObjId)
 }
 
-fn read_decoded(doc: &Document, collected: &HashSet<String>, info: &mut ProjectInfo) {
+fn read_decoded(project: &Project, collected: &HashSet<String>, info: &mut ProjectInfo) {
+    let doc = &project.doc;
     info.confidence = Confidence::Partial;
 
     let file_refs = || ids(doc).filter(|&o| doc.obj(o).class == CLS_FILE_REF).map(|o| doc.obj(o).str(F_FILE_PATH));
-    let plugin_paths: Vec<&str> = file_refs().filter(|p| textscan::is_plugin_path(p)).collect();
+    // Each plugin file with the plugin's name from it.
+    let plugin_paths: Vec<(String, &str)> =
+        file_refs().filter(|p| textscan::is_plugin_path(p)).map(|p| (plugins::name_from_path(p), p)).collect();
 
     for o in &doc.objects {
         if o.class == CLS_TEMPO
@@ -267,8 +289,7 @@ fn read_decoded(doc: &Document, collected: &HashSet<String>, info: &mut ProjectI
             let kind = bitwig_kind(name, o.str(F_DEVICE_CATEGORY));
             info.plugins.push(plugin(name, "Bitwig", kind, "Native", ""));
         } else if matches!(o.class, CLS_VST3_PLUGIN | CLS_VST2_PLUGIN) || o.has(F_PLUGIN_STATE) {
-            let file = plugin_paths.iter().find(|p| plugins::name_from_path(p).eq_ignore_ascii_case(name)).copied();
-            let file = file.unwrap_or("");
+            let file = plugin_paths.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map_or("", |(_, p)| *p);
             let format = match o.class {
                 CLS_VST3_PLUGIN => "VST3",
                 CLS_VST2_PLUGIN => "VST2",
@@ -283,12 +304,14 @@ fn read_decoded(doc: &Document, collected: &HashSet<String>, info: &mut ProjectI
         }
     }
 
-    info.tracks.extend(tracks(doc));
+    let names = &project.names;
+    info.tracks.extend(names.names.iter().filter(|(t, _)| Some(*t) != names.master).map(|(_, n)| n.clone()));
 
     let mut hardware: Vec<String> = Vec::new();
+    let mut seen = HashSet::new();
     for o in doc.objects.iter().filter(|o| o.class == CLS_HARDWARE_IO) {
         let name = o.str(F_HARDWARE_NAME);
-        if !name.is_empty() && !hardware.iter().any(|h| h.to_lowercase() == name.to_lowercase()) {
+        if !name.is_empty() && seen.insert(name.to_lowercase()) {
             hardware.push(name.to_owned());
         }
     }
@@ -332,10 +355,21 @@ fn plugin(name: &str, vendor: &str, kind: PluginKind, format: &str, path: &str) 
     }
 }
 
-/// Text in the order .NET's default comparer puts it (as the C# app sorts hardware names): letters before their
-/// case, so "analog" and "Analog" sit together, small before capital.
+/// Text in about the order .NET's default comparer puts it (as the C# app sorts hardware names): spaces and
+/// punctuation before digits, digits before letters, and letters whatever their case. (Names differing only in case
+/// are listed once.)
 fn culture_order(a: &str, b: &str) -> std::cmp::Ordering {
-    a.to_lowercase().cmp(&b.to_lowercase()).then_with(|| b.cmp(a))
+    let key = |s: &str| -> Vec<(u8, char)> {
+        s.chars()
+            .flat_map(char::to_lowercase)
+            .map(|c| match c {
+                c if c.is_alphabetic() => (2, c),
+                c if c.is_numeric() => (1, c),
+                c => (0, c),
+            })
+            .collect()
+    };
+    key(a).cmp(&key(b)).then_with(|| b.cmp(a))
 }
 
 /// The names a file collected into the project can have had before: its own, and its name without each "-2" style
@@ -417,7 +451,7 @@ fn structure_names(doc: &Document) -> Option<TrackTree<String>> {
 }
 
 /// Names for tracks, groups, effect tracks and the master, in the order they're named.
-struct TrackNames {
+pub struct TrackNames {
     names: Vec<(ObjId, String)>,
     at: HashMap<ObjId, usize>,
     master: Option<ObjId>,
@@ -437,13 +471,13 @@ impl TrackNames {
 
     /// The name of the track `o` is on, or "Project".
     fn of(&self, doc: &Document, o: ObjId) -> &str {
-        ancestor(doc, o, |p| self.at.contains_key(&p)).map_or("Project", |t| &self.names[self.at[&t]].1)
+        doc.ancestor(o, |p, _| self.at.contains_key(&p)).map_or("Project", |t| &self.names[self.at[&t]].1)
     }
 }
 
 /// Display names for tracks, groups, effect tracks and the master. Uses Bitwig's own names when the structure
 /// metadata lines up; otherwise the track's name, else (as Bitwig does) its first device's preset or the device itself.
-fn track_names(doc: &Document) -> TrackNames {
+pub fn track_names(doc: &Document) -> TrackNames {
     let (body, master) = body_tracks(doc);
     let shown = structure_names(doc);
     let all: HashSet<ObjId> = body.tracks.iter().chain(&body.effect_tracks).chain(&master).copied().collect();
@@ -455,7 +489,7 @@ fn track_names(doc: &Document) -> TrackNames {
         {
             continue;
         }
-        let Some(track) = ancestor(doc, o, |p| all.contains(&p)) else { continue };
+        let Some(track) = doc.ancestor(o, |p, _| all.contains(&p)) else { continue };
         if device_names.contains_key(&track) {
             continue;
         }
@@ -490,25 +524,18 @@ fn track_names(doc: &Document) -> TrackNames {
     names
 }
 
-/// Tracks, groups and effect tracks as Bitwig lists them (the master isn't listed).
-fn tracks(doc: &Document) -> Vec<String> {
-    let names = track_names(doc);
-    names.names.iter().filter(|(t, _)| Some(*t) != names.master).map(|(_, n)| n.clone()).collect()
-}
-
 /// One MIDI clip per Bitwig note clip, named after its track ("Bass 1", "Bass 2"...). Nothing for a file that didn't
 /// decode cleanly.
-pub fn extract_midi(doc: &Document) -> Vec<MidiClip> {
+pub fn extract_midi(doc: &Document, names: &TrackNames) -> Vec<MidiClip> {
     if doc.root.is_none() || doc.body_error.is_some() {
         return Vec::new();
     }
-    let names = track_names(doc);
     // Each clip's track and notes, in the order the clips are first reached.
     let mut clips: Vec<(String, Vec<NoteEvent>)> = Vec::new();
     let mut clip_at: HashMap<ObjId, usize> = HashMap::new();
     for lane in ids(doc).filter(|&o| doc.obj(o).class == CLS_KEY_LANE) {
         let Some(pitch) = doc.obj(lane).num(F_PITCH) else { continue };
-        let clip = ancestor(doc, lane, |a| doc.obj(a).class == CLS_CLIP).or(doc.obj(lane).parent.map(|(p, _)| p));
+        let clip = doc.ancestor(lane, |_, a| a.class == CLS_CLIP).or(doc.obj(lane).parent.map(|(p, _)| p));
         let Some(clip) = clip else { continue };
         let at = *clip_at.entry(clip).or_insert_with(|| {
             clips.push((names.of(doc, lane).to_owned(), Vec::new()));
@@ -571,9 +598,8 @@ fn zip_entries(doc: &Document) -> Option<Zip<'_>> {
 /// The plugin states in the project's zip. Bitwig stores them as ordinary preset files (.vstpreset for a VST3, .fxb
 /// or .fxp for a VST2), so they load straight into the plugin. Each is named after its track and its preset (or its
 /// plugin). Read even from a file whose objects didn't all decode, as far as they did.
-pub fn extract_presets(doc: &Document) -> Vec<PresetBlob> {
+pub fn extract_presets(doc: &Document, names: &TrackNames) -> Vec<PresetBlob> {
     let Some(mut zip) = zip_entries(doc) else { return Vec::new() };
-    let names = track_names(doc);
     // The device each state belongs to, by its file's name (letter case aside): the first that names it.
     let mut owners: HashMap<String, ObjId> = HashMap::new();
     for o in ids(doc) {
@@ -592,7 +618,8 @@ pub fn extract_presets(doc: &Document) -> Vec<PresetBlob> {
         if entry.size() == 0 {
             continue;
         }
-        let mut data = Vec::with_capacity(entry.size().min(1 << 30) as usize);
+        // Not sized by what the zip says it holds: a damaged zip can claim gigabytes.
+        let mut data = Vec::new();
         // A state whose bytes don't come out whole is left out, not the rest with it.
         if entry.read_to_end(&mut data).is_err() {
             continue;
@@ -630,16 +657,23 @@ fn add_project_folder_audio(dir: &Path, info: &mut ProjectInfo) {
 }
 
 /// Every file in a folder and the folders inside it, a folder's own files before what's in its folders (as .NET lists
-/// them). Nothing for a folder that isn't there or can't be read.
+/// them). Folders linked in (a shortcut folder, a junction) are gone into too, each once, however they link back.
+/// Nothing for a folder that isn't there or can't be read.
 fn files_under(dir: &Path) -> Vec<String> {
     let mut out = Vec::new();
+    let mut seen = HashSet::new();
     let mut todo = std::collections::VecDeque::from([dir.to_path_buf()]);
     while let Some(d) = todo.pop_front() {
+        // Where it really is, so a link back to a folder already listed isn't listed again.
+        if !seen.insert(std::fs::canonicalize(&d).unwrap_or_else(|_| d.clone())) {
+            continue;
+        }
         let Ok(entries) = std::fs::read_dir(&d) else { continue };
         for entry in entries.flatten() {
+            let path = entry.path();
             match entry.file_type() {
-                Ok(t) if t.is_dir() => todo.push_back(entry.path()),
-                Ok(_) => out.push(entry.path().to_string_lossy().into_owned()),
+                Ok(t) if t.is_dir() || (t.is_symlink() && path.is_dir()) => todo.push_back(path),
+                Ok(_) => out.push(path.to_string_lossy().into_owned()),
                 Err(_) => {}
             }
         }
@@ -670,9 +704,9 @@ fn text_scan(
          file. MIDI and preset extraction aren't available for it."
     ));
 
-    for blob in blobs(raw) {
+    each_blob(raw, |blob| {
         let mut expect_version = false;
-        for found in scan_strings(&blob) {
+        for found in scan_strings(blob) {
             let s = found.trim_matches(['\0', ' ']);
             // The version follows its key, either in the same run of text or as the next one.
             if let Some(v) = version_after_key(s) {
@@ -703,7 +737,7 @@ fn text_scan(
                 info.plugins.push(plugin(s, "Bitwig", PluginKind::NoteEffect, "Native", ""));
             }
         }
-    }
+    });
 }
 
 /// "1.2.3", or "5" (`application_version_name\W+(\d+(?:\.\d+)*)`): the version after the key, with something that
@@ -795,10 +829,11 @@ fn scan_strings(blob: &[u8]) -> Vec<String> {
     out
 }
 
-/// The raw file, then each zlib stream inside it (some Bitwig versions keep parts of a project compressed).
-fn blobs(raw: &[u8]) -> Vec<std::borrow::Cow<'_, [u8]>> {
+/// Hands over the raw file, then each zlib stream inside it (some Bitwig versions keep parts of a project
+/// compressed), one at a time, so only one stream is unpacked in memory at once.
+fn each_blob(raw: &[u8], mut scan: impl FnMut(&[u8])) {
     const MOST: u64 = 200_000_000;
-    let mut out = vec![std::borrow::Cow::Borrowed(raw)];
+    scan(raw);
     let mut attempts = 0;
     let mut i = 0;
     while i + 2 < raw.len() && attempts < 200 {
@@ -809,12 +844,11 @@ fn blobs(raw: &[u8]) -> Vec<std::borrow::Cow<'_, [u8]>> {
             // Random bytes that happen to look like a zlib header fail in several ways; those are skipped.
             let read = flate2::read::ZlibDecoder::new(&raw[i..]).take(MOST).read_to_end(&mut inflated);
             if read.is_ok() && inflated.len() >= 8 {
-                out.push(std::borrow::Cow::Owned(inflated));
+                scan(&inflated);
             }
         }
         i += 1;
     }
-    out
 }
 
 #[cfg(test)]
@@ -826,6 +860,13 @@ mod tests {
         assert_eq!(collected_names("samples/Snare-2.wav"), ["Snare-2.wav", "Snare.wav"]);
         assert_eq!(collected_names("samples/Kick-01-2.wav"), ["Kick-01-2.wav", "Kick-01.wav", "Kick.wav"]);
         assert_eq!(collected_names("Pad-.wav"), ["Pad-.wav"]);
+    }
+
+    #[test]
+    fn hardware_names_sort_about_as_dotnet_sorts_them() {
+        let mut names = ["Box1", "analog", "Box_1", "Zebra", "box 2", "Analog Heat"];
+        names.sort_by(|a, b| culture_order(a, b));
+        assert_eq!(names, ["analog", "Analog Heat", "box 2", "Box_1", "Box1", "Zebra"]);
     }
 
     #[test]

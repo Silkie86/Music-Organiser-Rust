@@ -397,10 +397,12 @@ impl Document {
     }
 
     /// The object a parent field holds it in, walking up: the first one that `matches`.
-    pub fn ancestor(&self, of: ObjId, matches: impl Fn(&Object) -> bool) -> Option<ObjId> {
+    pub fn ancestor(&self, of: ObjId, matches: impl Fn(ObjId, &Object) -> bool) -> Option<ObjId> {
         let mut at = self.obj(of).parent;
-        while let Some((p, _)) = at {
-            if matches(self.obj(p)) {
+        // No more steps than there are objects, whatever objects made in code say about their parents.
+        for _ in 0..self.objects.len() {
+            let (p, _) = at?;
+            if matches(p, self.obj(p)) {
                 return Some(p);
             }
             at = self.obj(p).parent;

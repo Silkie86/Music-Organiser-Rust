@@ -7,11 +7,11 @@ use std::path::Path;
 
 use common::bitwig::*;
 use common::test_dir;
-use mo_formats::bitwig::{self, Document};
+use mo_formats::bitwig::{self, Project};
 use mo_formats::{Confidence, NoteEvent, PluginKind};
 
-fn decoded(path: &Path) -> Document {
-    bitwig::decode(std::fs::read(path).expect("read the file")).expect("a Bitwig file")
+fn decoded(path: &Path) -> Project {
+    Project::open(std::fs::read(path).expect("read the file")).unwrap_or_else(|_| panic!("not a Bitwig file"))
 }
 
 fn note(start: i64, length: i64, key: u8, velocity: u8) -> NoteEvent {
@@ -67,7 +67,7 @@ fn finds_samples() {
 #[test]
 fn extracts_note_clips() {
     let path = bitwig_project(&test_dir("bitwig-read-midi"), "Loop Idea");
-    let clips = bitwig::extract_midi(&decoded(&path));
+    let clips = decoded(&path).midi();
     assert_eq!(clips.len(), 1);
     let mut clip = clips[0].clone();
     assert_eq!((clip.name.as_str(), clip.ppq), ("Keys Display 1", 960));
@@ -77,7 +77,7 @@ fn extracts_note_clips() {
 #[test]
 fn extracts_plugin_states_named_by_track() {
     let path = bitwig_project(&test_dir("bitwig-read-presets"), "Loop Idea");
-    let presets = bitwig::extract_presets(&decoded(&path));
+    let presets = decoded(&path).presets();
     let by_plugin: HashMap<&str, _> = presets.iter().map(|p| (p.plugin.as_str(), p)).collect();
     let keys = by_plugin["Keyscape"];
     assert_eq!((keys.name.as_str(), &*keys.extension), ("Keys Display - Keyscape", ".vstpreset"));
@@ -107,11 +107,10 @@ fn falls_back_to_a_text_scan_when_the_file_cant_be_decoded() {
     assert!(!info.samples.iter().any(|s| s.contains("BASSDRUM")));
     assert!(info.samples.iter().all(|s| s.starts_with("D:") || s.starts_with("F:") || Path::new(s).is_absolute()));
     assert!(!info.can_extract_midi);
-    assert!(bitwig::extract_midi(&decoded(&path)).is_empty());
+    assert!(decoded(&path).midi().is_empty());
 
-    let raw = std::fs::read(&path).expect("read");
-    let doc = bitwig::decode(raw.clone()).ok();
-    let known = bitwig::read_document(doc.as_ref(), &raw, &path, &|s| s.eq_ignore_ascii_case("Serum"));
+    let project = decoded(&path);
+    let known = bitwig::read_project(Some(&project), &project.doc.raw, &path, &|s| s.eq_ignore_ascii_case("Serum"));
     assert!(known.plugins.iter().any(|p| p.name == "Serum"));
 }
 
@@ -173,4 +172,21 @@ fn a_file_that_isnt_bitwigs_is_scanned_and_says_so() {
     assert!(info.warnings[0].contains("doesn't start with Bitwig's header"));
     assert_eq!(info.samples, [r"C:\Samples\Kick.wav"]);
     assert_eq!(info.plugins[0].name, "Polymer");
+}
+
+#[cfg(unix)]
+#[test]
+fn audio_in_a_linked_folder_beside_the_project_is_found_once_however_it_links_back() {
+    let dir = test_dir("bitwig-read-linked");
+    let path = bitwig_project(&dir, "Loop Idea");
+    let library = dir.join("Sample library");
+    std::fs::create_dir_all(&library).expect("make the folder");
+    std::fs::write(library.join("Clap.wav"), [0]).expect("write a sample");
+    let samples = dir.join("Loop Idea").join("samples");
+    std::os::unix::fs::symlink(&library, samples.join("Library")).expect("link the library in");
+    // A link back up, which would go round for ever.
+    std::os::unix::fs::symlink(&samples, library.join("Back")).expect("link back");
+    let found = bitwig::read(&path).expect("read").samples;
+    assert_eq!(found.iter().filter(|s| s.ends_with("Clap.wav")).count(), 1, "{found:?}");
+    assert_eq!(found.iter().filter(|s| s.ends_with("Recorded Bass.wav")).count(), 1, "{found:?}");
 }

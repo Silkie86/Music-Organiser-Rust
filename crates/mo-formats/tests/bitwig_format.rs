@@ -415,7 +415,7 @@ fn a_copy_knows_what_its_parts_are_inside() {
     let copy = bitwig::clone_object(&mut doc, track);
     let device = doc.field_list(copy, 0x4ba)[0];
     assert_eq!(doc.obj(device).str(0x9a), "Keyscape");
-    assert_eq!(doc.ancestor(device, |o| o.class == 0x90), Some(copy));
+    assert_eq!(doc.ancestor(device, |_, o| o.class == 0x90), Some(copy));
 }
 
 #[test]

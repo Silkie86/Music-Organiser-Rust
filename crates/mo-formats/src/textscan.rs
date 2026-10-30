@@ -1,17 +1,11 @@
 //! What readable text in a file says, for formats (or damaged files) the readers can't decode: audio and plugin paths,
 //! and the runs of letters inside binary data. The C# app's `TextScan`.
 
-use crate::plugins::PLUGIN_EXTENSIONS;
+use crate::plugins::{PLUGIN_EXTENSIONS, ends_with_ignore_case};
 
 /// The file endings audio has.
 pub const AUDIO_EXTENSIONS: [&str; 10] =
     [".wav", ".aif", ".aiff", ".flac", ".mp3", ".ogg", ".rx2", ".rex", ".wv", ".m4a"];
-
-fn ends_with_ignore_case(s: &str, end: &str) -> bool {
-    s.len() >= end.len()
-        && s.is_char_boundary(s.len() - end.len())
-        && s[s.len() - end.len()..].eq_ignore_ascii_case(end)
-}
 
 /// Whether text names an audio file (zeros and spaces after it aside).
 pub fn is_audio_path(s: &str) -> bool {

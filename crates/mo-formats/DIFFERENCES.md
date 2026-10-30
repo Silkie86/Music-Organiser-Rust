@@ -35,4 +35,5 @@ tests don't have.
 | A group of tracks listed inside itself (a damaged file) | Walks round it for ever, until the app runs out of stack and closes. | Lists each track once. | Better |
 | A plugin state in the project's zip that won't come out whole | No presets at all from the project. | That one preset is left out; the rest are taken out. | Better |
 | A folder beside the project that can't be opened (in `samples`, say) | The whole project fails to read. | That folder is skipped. | Better |
-| The order of hardware names | .NET's culture-aware order. | Close to it (small letters before capitals, letter case aside otherwise); only names that differ in letter case or punctuation could come out in another order. | Same for real names |
+| A folder linked into `samples` that links back to itself | Can go round it again and again. | Each folder is listed once, wherever the links lead. | Better |
+| The order of hardware names | .NET's culture-aware order (which differs between Windows and Linux). | Close to it: spaces and punctuation before digits, digits before letters, letter case aside. Only names that differ just in punctuation could come out in another order. | Same for real names |

@@ -5,7 +5,7 @@ use crate::model::PluginKind;
 /// The file endings plugins have.
 pub const PLUGIN_EXTENSIONS: [&str; 6] = [".vst3", ".dll", ".clap", ".component", ".vst", ".aaxplugin"];
 
-fn ends_with_ignore_case(s: &str, end: &str) -> bool {
+pub(crate) fn ends_with_ignore_case(s: &str, end: &str) -> bool {
     s.len() >= end.len()
         && s.is_char_boundary(s.len() - end.len())
         && s[s.len() - end.len()..].eq_ignore_ascii_case(end)
@@ -132,17 +132,18 @@ fn in_fl_studio_plugin_folder(path: &str) -> bool {
     })
 }
 
-/// Elektron's Overbridge plugins, by how the boxes show up inside projects, and the box each one is.
+/// Elektron's Overbridge plugins, by how the boxes show up inside projects, and the box each one is. Longest first,
+/// so a name holding "Digitakt II" is never taken for "Digitakt" (and in the C# app's order where they're as long).
 const ELEKTRON_OVERBRIDGE: [(&str, &str); 9] = [
     ("Analog Rytm MKII", "Analog Rytm MKII"),
-    ("Analog Rytm", "Analog Rytm MKII"),
-    ("Digitakt II", "Digitakt II"),
-    ("Digitakt", "Digitakt"),
-    ("Syntakt", "Syntakt"),
     ("Analog Four MKII", "Analog Four MKII"),
     ("Analog Heat MKII", "Analog Heat MKII"),
-    ("Digitone", "Digitone"),
+    ("Analog Rytm", "Analog Rytm MKII"),
+    ("Digitakt II", "Digitakt II"),
     ("Digitone II", "Digitone II"),
+    ("Digitakt", "Digitakt"),
+    ("Digitone", "Digitone"),
+    ("Syntakt", "Syntakt"),
 ];
 
 /// Plugin names known on every PC, installed or not: the Overbridge ones, which a text scan can trust as plugins.
@@ -152,16 +153,15 @@ pub fn is_always_known(name: &str) -> bool {
 
 /// The Elektron box a plugin's name refers to, if any.
 pub fn elektron_device(name: &str) -> Option<&'static str> {
-    let lower = name.to_lowercase();
-    let bare = lower.replace("overbridge", "");
-    let bare = bare.trim_matches([' ', '-', '_']);
-    if let Some((_, device)) = ELEKTRON_OVERBRIDGE.iter().find(|(n, _)| n.to_lowercase() == bare) {
-        return Some(device);
+    let holds = |n: &str| name.as_bytes().windows(n.len()).any(|w| w.eq_ignore_ascii_case(n.as_bytes()));
+    // Most names hold none of them: those are done with here, without making any text.
+    if !ELEKTRON_OVERBRIDGE.iter().any(|(n, _)| holds(n)) {
+        return None;
     }
-    // The longest name it holds, so "Digitakt II" isn't taken for "Digitakt".
-    let mut by_length = ELEKTRON_OVERBRIDGE;
-    by_length.sort_by_key(|(n, _)| std::cmp::Reverse(n.len()));
-    by_length.iter().find(|(n, _)| lower.contains(&n.to_lowercase())).map(|(_, device)| *device)
+    let bare = name.to_lowercase().replace("overbridge", "");
+    let bare = bare.trim_matches([' ', '-', '_']);
+    let exact = ELEKTRON_OVERBRIDGE.iter().find(|(n, _)| n.eq_ignore_ascii_case(bare));
+    exact.or_else(|| ELEKTRON_OVERBRIDGE.iter().find(|(n, _)| holds(n))).map(|(_, device)| *device)
 }
 
 /// What a plugin is from its name alone: an instrument when it's an Elektron box, otherwise not known.
@@ -172,6 +172,16 @@ pub fn kind_of(name: &str) -> PluginKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn knows_the_elektron_box_a_plugin_name_means() {
+        assert_eq!(elektron_device("Digitakt II Overbridge"), Some("Digitakt II"));
+        assert_eq!(elektron_device("Overbridge - analog rytm"), Some("Analog Rytm MKII"));
+        assert_eq!(elektron_device("My Digitone II rig"), Some("Digitone II"));
+        assert_eq!(elektron_device("Serum"), None);
+        assert_eq!(kind_of("Syntakt"), PluginKind::Instrument);
+        assert!(is_always_known("analog rytm mkii") && !is_always_known("Serum"));
+    }
 
     #[test]
     fn a_plugins_name_and_format_come_from_its_file() {
