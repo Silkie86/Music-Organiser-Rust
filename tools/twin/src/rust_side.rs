@@ -81,7 +81,8 @@ fn info_json(i: &ProjectInfo) -> Value {
 
 /// A note as [start, length, key, velocity, muted, step]: short, as a song can have thousands.
 fn note_json(n: &NoteEvent) -> Value {
-    json!([n.start, n.length, n.key, n.velocity, n.muted, n.step])
+    // MIDI 1.0's velocity, as the C# app has only that.
+    json!([n.start, n.length, n.key, n.velocity7(), n.muted, n.step])
 }
 
 fn notes_json(notes: &[NoteEvent]) -> Value {

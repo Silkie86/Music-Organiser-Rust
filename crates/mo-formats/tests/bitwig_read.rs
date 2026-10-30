@@ -14,7 +14,9 @@ fn decoded(path: &Path) -> Project {
     Project::open(std::fs::read(path).expect("read the file")).unwrap_or_else(|_| panic!("not a Bitwig file"))
 }
 
-fn note(start: i64, length: i64, key: u8, velocity: u8) -> NoteEvent {
+/// A note as read from Bitwig, its velocity as Bitwig writes it (0 to 1).
+fn note(start: i64, length: i64, key: u8, bitwig_velocity: f64) -> NoteEvent {
+    let velocity = mo_formats::velocity::from_unit(bitwig_velocity);
     NoteEvent { start, length, key, velocity, muted: false, step: false }
 }
 
@@ -71,7 +73,10 @@ fn extracts_note_clips() {
     assert_eq!(clips.len(), 1);
     let mut clip = clips[0].clone();
     assert_eq!((clip.name.as_str(), clip.ppq), ("Keys Display 1", 960));
-    assert_eq!(*clip.track("Keys Display"), [note(0, 960, 60, 64), note(1440, 480, 60, 127), note(1920, 960, 64, 102)]);
+    let notes = clip.track("Keys Display").clone();
+    assert_eq!(notes, [note(0, 960, 60, 0.5), note(1440, 480, 60, 1.0), note(1920, 960, 64, 0.8)]);
+    // As MIDI 1.0 velocities, what the C# app gives.
+    assert_eq!(notes.iter().map(NoteEvent::velocity7).collect::<Vec<_>>(), [64, 127, 102]);
 }
 
 #[test]
