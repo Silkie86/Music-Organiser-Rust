@@ -30,7 +30,9 @@ pub fn encode(doc: &Document, zip: Option<&[u8]>) -> Result<Vec<u8>, String> {
             w.u32(1);
             w.text(key);
             w.out.push(value.type_byte());
-            w.value(value.type_byte(), value)?;
+            let mut stack = Vec::new();
+            w.value(value.type_byte(), value, &mut stack)?;
+            w.finish(&mut stack)?;
         }
     }
     // The end marker and padding, as they were.
@@ -77,7 +79,7 @@ struct Writer<'a> {
 /// run the thread out of stack either.
 const MAX_DEPTH: usize = 512;
 
-impl Writer<'_> {
+impl<'a> Writer<'a> {
     fn u32(&mut self, v: u32) {
         self.out.extend_from_slice(&v.to_be_bytes());
     }
@@ -109,58 +111,119 @@ impl Writer<'_> {
         self.doc.resolve(s).is_some_and(|t| matches!(self.number_of(t), n if n > 0 && n <= self.written))
     }
 
-    fn deeper(&mut self) -> Result<(), String> {
-        self.depth += 1;
-        if self.depth > MAX_DEPTH { Err("objects nested too deeply".into()) } else { Ok(()) }
-    }
-
     /// Numbers every object in the order it will be written: in full where it's first reached through an object
-    /// slot, by reference after that.
-    fn number(&mut self, o: ObjId) -> Result<(), String> {
-        self.deeper()?;
-        self.count += 1;
-        self.numbers[o.0 as usize] = self.count;
+    /// slot, by reference after that. Done with a list of what's left rather than by calling itself, so no depth of
+    /// nesting runs the thread out of stack; the order is the same as going depth first.
+    fn number(&mut self, root: ObjId) -> Result<(), String> {
         let doc = self.doc;
-        for f in &doc.obj(o).fields {
-            // A bare reference to an object not reached yet (its first home was edited away) is where it's written now.
-            for s in f.value.targets().filter(|s| *s != Slot::Null) {
-                let t = self.target(s)?;
-                if self.number_of(t) == 0 {
-                    self.number(t)?;
+        let mut todo = vec![(root, 1)];
+        while let Some((o, depth)) = todo.pop() {
+            // Reached again before its turn came: it's numbered (and written) where it was reached first.
+            if self.number_of(o) != 0 {
+                continue;
+            }
+            if depth > MAX_DEPTH {
+                return Err("objects nested too deeply".into());
+            }
+            self.count += 1;
+            self.numbers[o.0 as usize] = self.count;
+            // A bare reference to an object not reached yet (its first home was edited away) is where it's written
+            // now. Last first, so the first comes off the list next.
+            let start = todo.len();
+            for f in &doc.obj(o).fields {
+                for s in f.value.targets().filter(|s| *s != Slot::Null) {
+                    let t = self.target(s)?;
+                    if self.number_of(t) == 0 {
+                        todo.push((t, depth + 1));
+                    }
                 }
             }
+            todo[start..].reverse();
         }
-        self.depth -= 1;
         Ok(())
     }
 
-    fn inline(&mut self, o: ObjId) -> Result<(), String> {
-        self.deeper()?;
+    /// Writes `root` and everything inside it, with a stack of what's half written rather than by calling itself.
+    fn inline(&mut self, root: ObjId) -> Result<(), String> {
+        let mut stack = Vec::new();
+        self.open(root, &mut stack)?;
+        self.finish(&mut stack)
+    }
+
+    /// Starts writing an object: its class here, its fields as [`Writer::finish`] reaches them.
+    fn open(&mut self, o: ObjId, stack: &mut Vec<Frame<'a>>) -> Result<(), String> {
+        self.depth += 1;
+        if self.depth > MAX_DEPTH {
+            return Err("objects nested too deeply".into());
+        }
         self.written += 1;
         if self.number_of(o) != self.written {
             return Err("objects written out of order".into());
         }
-        let doc = self.doc;
-        let object = doc.obj(o);
+        let object = self.doc.obj(o);
         self.u32(object.class);
-        for f in &object.fields {
-            self.u32(f.id);
-            let ty = match &f.value {
-                // First reached here, so written in full, as Bitwig does.
-                Value::BareRef(s) if *s != Slot::Null && !self.is_written(*s) => 0x09,
-                // Already written: a bare reference, never a class 1 one in a single-object field.
-                Value::Obj(s @ Slot::Obj(_)) if self.is_written(*s) => 0x0b,
-                v => v.type_byte(),
-            };
-            self.out.push(ty);
-            self.value(ty, &f.value)?;
-        }
-        self.u32(0);
-        self.depth -= 1;
+        stack.push(Frame::Obj(&object.fields));
         Ok(())
     }
 
-    fn slot(&mut self, s: Slot) -> Result<(), String> {
+    /// Writes whatever is half written, innermost first, until nothing is.
+    fn finish(&mut self, stack: &mut Vec<Frame<'a>>) -> Result<(), String> {
+        while let Some(frame) = stack.last_mut() {
+            match frame {
+                Frame::Obj(fields) => match fields.split_first() {
+                    Some((f, rest)) => {
+                        *fields = rest;
+                        self.u32(f.id);
+                        let ty = match &f.value {
+                            // First reached here, so written in full, as Bitwig does.
+                            Value::BareRef(s) if *s != Slot::Null && !self.is_written(*s) => 0x09,
+                            // Already written: a bare reference, never a class 1 one in a single-object field.
+                            Value::Obj(s @ Slot::Obj(_)) if self.is_written(*s) => 0x0b,
+                            v => v.type_byte(),
+                        };
+                        self.out.push(ty);
+                        self.value(ty, &f.value, stack)?;
+                    }
+                    None => {
+                        stack.pop();
+                        self.u32(0);
+                        self.depth -= 1;
+                    }
+                },
+                Frame::List(slots) => match slots.split_first() {
+                    Some((&s, rest)) => {
+                        *slots = rest;
+                        self.slot(s, stack)?;
+                    }
+                    None => {
+                        stack.pop();
+                        self.u32(3);
+                    }
+                },
+                Frame::Map(entries) => match entries.split_first() {
+                    Some(((key, s), rest)) => {
+                        let s = *s;
+                        *entries = rest;
+                        self.out.push(1);
+                        self.text(key);
+                        self.slot(s, stack)?;
+                    }
+                    None => {
+                        stack.pop();
+                        self.out.push(0);
+                    }
+                },
+                Frame::Name(t) => {
+                    let t = *t;
+                    stack.pop();
+                    self.text(t);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn slot(&mut self, s: Slot, stack: &mut Vec<Frame<'a>>) -> Result<(), String> {
         if s == Slot::Null {
             self.u32(0);
             return Ok(());
@@ -172,11 +235,12 @@ impl Writer<'_> {
                 self.u32(n);
                 Ok(())
             }
-            _ => self.inline(t),
+            _ => self.open(t, stack),
         }
     }
 
-    fn value(&mut self, ty: u8, v: &Value) -> Result<(), String> {
+    /// Writes a value, or starts to: what holds objects is left on `stack` for [`Writer::finish`].
+    fn value(&mut self, ty: u8, v: &'a Value, stack: &mut Vec<Frame<'a>>) -> Result<(), String> {
         match (ty, v) {
             (_, Value::U8(b) | Value::Bool(b)) => self.out.push(*b),
             (_, Value::I16(x)) => self.out.extend_from_slice(&x.to_be_bytes()),
@@ -192,7 +256,7 @@ impl Writer<'_> {
                 }
                 self.u32(n);
             }
-            (_, Value::Obj(s) | Value::BareRef(s)) => self.slot(*s)?,
+            (_, Value::Obj(s) | Value::BareRef(s)) => self.slot(*s, stack)?,
             (_, Value::Null) => {}
             (_, Value::Blob(b)) => {
                 let bytes = b.bytes();
@@ -203,20 +267,8 @@ impl Writer<'_> {
                 self.u32(a.len() as u32);
                 self.out.extend(a.iter().flat_map(|x| x.to_be_bytes()));
             }
-            (_, Value::List(l)) => {
-                for s in l {
-                    self.slot(*s)?;
-                }
-                self.u32(3);
-            }
-            (_, Value::Map(m)) => {
-                for (key, s) in m {
-                    self.out.push(1);
-                    self.text(key);
-                    self.slot(*s)?;
-                }
-                self.out.push(0);
-            }
+            (_, Value::List(l)) => stack.push(Frame::List(l)),
+            (_, Value::Map(m)) => stack.push(Frame::Map(m)),
             (_, Value::Uuid(g)) => self.out.extend_from_slice(g),
             (_, Value::Color(c)) => self.out.extend(c.iter().flat_map(|x| x.to_be_bytes())),
             (_, Value::Floats(f)) => {
@@ -234,12 +286,22 @@ impl Writer<'_> {
                 }
             }
             (_, Value::Named(s, t)) => {
-                self.slot(*s)?;
-                self.text(t);
+                // The object, then its name after it.
+                stack.push(Frame::Name(t));
+                self.slot(*s, stack)?;
             }
         }
         Ok(())
     }
+}
+
+/// What [`Writer::finish`] has half written: the fields, list entries or map entries still to go, or the name that
+/// follows a named object.
+enum Frame<'a> {
+    Obj(&'a [Field]),
+    List(&'a [Slot]),
+    Map(&'a [(Text, Slot)]),
+    Name(&'a Text),
 }
 
 /// Field 0x99 is a device's type: copies of a device keep it, while every other id they carry gets a fresh one.
@@ -319,7 +381,23 @@ struct Copying<'a> {
 }
 
 impl Copying<'_> {
-    fn copy(&mut self, doc: &mut Document, o: ObjId) -> ObjId {
+    /// Copies `original` and what it owns, with a list of copies still to fill in rather than by calling itself, so no
+    /// depth of nesting runs the thread out of stack.
+    fn copy(&mut self, doc: &mut Document, original: ObjId) -> ObjId {
+        let mut todo = Vec::new();
+        let first = self.start(doc, original, &mut todo);
+        while let Some(o) = todo.pop() {
+            let fields = doc.obj(o).fields.clone();
+            let fields =
+                fields.into_iter().map(|f| Field { id: f.id, value: self.value(doc, f.value, &mut todo) }).collect();
+            let copy = self.copies[&o];
+            doc.obj_mut(copy).fields = fields;
+        }
+        first
+    }
+
+    /// The copy of `o`, made empty the first time and filled in when it comes off `todo`.
+    fn start(&mut self, doc: &mut Document, o: ObjId, todo: &mut Vec<ObjId>) -> ObjId {
         if let Some(&done) = self.copies.get(&o) {
             return done;
         }
@@ -327,27 +405,25 @@ impl Copying<'_> {
         let parent = doc.obj(o).parent.and_then(|(p, f)| self.copies.get(&p).map(|&c| (c, f)));
         let copy = doc.add(Object { parent, ..Object::new(doc.obj(o).class) });
         self.copies.insert(o, copy);
-        let fields = doc.obj(o).fields.clone();
-        let fields = fields.into_iter().map(|f| Field { id: f.id, value: self.value(doc, f.value) }).collect();
-        doc.obj_mut(copy).fields = fields;
+        todo.push(o);
         copy
     }
 
-    fn slot(&mut self, doc: &mut Document, s: Slot) -> Slot {
+    fn slot(&mut self, doc: &mut Document, s: Slot, todo: &mut Vec<ObjId>) -> Slot {
         match doc.resolve(s) {
             None => s,
-            Some(t) if self.owned.contains(&t) => Slot::Obj(self.copy(doc, t)),
+            Some(t) if self.owned.contains(&t) => Slot::Obj(self.start(doc, t, todo)),
             Some(t) => Slot::Obj(t),
         }
     }
 
-    fn value(&mut self, doc: &mut Document, v: Value) -> Value {
+    fn value(&mut self, doc: &mut Document, v: Value, todo: &mut Vec<ObjId>) -> Value {
         match v {
-            Value::Obj(s) => Value::Obj(self.slot(doc, s)),
-            Value::BareRef(s) => Value::BareRef(self.slot(doc, s)),
-            Value::List(l) => Value::List(l.into_iter().map(|s| self.slot(doc, s)).collect()),
-            Value::Map(m) => Value::Map(m.into_iter().map(|(k, s)| (k, self.slot(doc, s))).collect()),
-            Value::Named(s, t) => Value::Named(self.slot(doc, s), t),
+            Value::Obj(s) => Value::Obj(self.slot(doc, s, todo)),
+            Value::BareRef(s) => Value::BareRef(self.slot(doc, s, todo)),
+            Value::List(l) => Value::List(l.into_iter().map(|s| self.slot(doc, s, todo)).collect()),
+            Value::Map(m) => Value::Map(m.into_iter().map(|(k, s)| (k, self.slot(doc, s, todo))).collect()),
+            Value::Named(s, t) => Value::Named(self.slot(doc, s, todo), t),
             Value::Uuid(g) => Value::Uuid(self.ids.get(&g).copied().unwrap_or(g)),
             v => v,
         }

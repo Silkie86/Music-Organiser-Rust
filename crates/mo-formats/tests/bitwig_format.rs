@@ -326,13 +326,25 @@ fn nested(depth: usize) -> Vec<u8> {
 
 #[test]
 fn deeply_nested_files_never_run_out_of_stack() {
-    // On a thread with 1 MB of stack (the Windows main thread's), in a debug build: as deep as the reader goes reads
-    // and writes back, and deeper is an error, not a crash.
-    let worker = std::thread::Builder::new().stack_size(1 << 20).spawn(|| {
+    // On a thread with a quarter of the Windows main thread's 1 MB of stack, in a debug build: as deep as the reader
+    // goes reads, copies and writes back, and deeper is an error, not a crash. (Reading, copying and writing keep
+    // their place on the heap, so the stack a thread has doesn't matter; macOS's frames are bigger than Linux's.)
+    let worker = std::thread::Builder::new().stack_size(1 << 18).spawn(|| {
         let raw = nested(512);
-        let doc = decode(&raw);
+        let mut doc = decode(&raw);
         assert_eq!(doc.body_error, None);
         assert_eq!(bitwig::encode(&doc, None).expect("written"), raw);
+        let root = doc.root.expect("a root");
+        let Value::Obj(inside) = doc.obj(root).fields[0].value else { panic!("an object inside") };
+        let inside = doc.resolve(inside).expect("there");
+        let copy = bitwig::clone_object(&mut doc, inside);
+        let mut depth = 1;
+        let mut at = copy;
+        while let Some(Value::Obj(s)) = doc.obj(at).fields.first().map(|f| f.value.clone()) {
+            at = doc.resolve(s).expect("copied");
+            depth += 1;
+        }
+        assert_eq!(depth, 511);
         assert_eq!(decode(&nested(513)).body_error.as_deref(), Some("objects nested too deeply"));
         assert_eq!(decode(&nested(100_000)).body_error.as_deref(), Some("objects nested too deeply"));
     });
