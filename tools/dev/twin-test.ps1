@@ -45,6 +45,8 @@ $Summary = Join-Path $Logs "twin-test-$Stamp.txt"
 $Report = Join-Path $Logs "twin-report-$Stamp.txt"
 Write-Host "Reading every FL Studio, Bitwig and Studio One project and MIDI file in $($Folders.Count) folder(s) with both apps..."
 Push-Location $Rust
+# Below normal priority (rule 21): the twin and the C# helper it starts take it on, so a DAW open meanwhile stays quick.
+try { (Get-Process -Id $PID).PriorityClass = 'BelowNormal' } catch { }
 # Cargo writes its progress to stderr, which Windows PowerShell 5.1 takes as an error under 'Stop'.
 $ErrorActionPreference = 'Continue'
 try {

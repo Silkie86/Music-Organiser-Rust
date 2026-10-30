@@ -15,7 +15,7 @@
 mod compare;
 mod rust_side;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
@@ -92,12 +92,7 @@ fn options(args: &[String]) -> Result<Options, String> {
 /// Runs the twin test. `Ok(false)` when `--expect` found differences not on its list (or some gone from it).
 fn run(args: &[String]) -> Result<bool, String> {
     let o = options(args)?;
-    let mut files = Vec::new();
-    for input in &o.inputs {
-        collect(input, &mut files);
-    }
-    files.sort();
-    files.dedup();
+    let files = collect(&o.inputs);
     if files.is_empty() {
         return Err(
             "No FL Studio, Bitwig or Studio One projects or MIDI files (.flp, .bwproject, .song, .mid) there.".into()
@@ -116,13 +111,22 @@ fn run(args: &[String]) -> Result<bool, String> {
     let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
     let mut found: BTreeSet<String> = BTreeSet::new();
     let mut same = 0;
+    // All cores but one, at low priority (rule 21), so the computer (and a DAW open on it) stays quick.
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get().saturating_sub(1).max(1));
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .start_handler(|_| {
+            let _ = thread_priority::set_current_thread_priority(thread_priority::ThreadPriority::Min);
+        })
+        .build()
+        .map_err(|e| format!("Couldn't start the threads that read: {e}"))?;
     // A few hundred files at a time, so a big library's readings never all sit in memory at once.
     for chunk in files.chunks(CHUNK) {
         // The C# helper reads in its own process while the Rust readers read here, on every core.
         let cs_files = chunk.to_vec();
         let helper = helper.clone();
         let cs = std::thread::spawn(move || run_helper(&helper, &cs_files));
-        let rust: Vec<Value> = chunk.par_iter().map(|f| rust_side::dump(f)).collect();
+        let rust: Vec<Value> = pool.install(|| chunk.par_iter().map(|f| rust_side::dump(f)).collect());
         let cs = cs.join().map_err(|_| "The C# helper's reader thread stopped.".to_owned())??;
 
         let mut part = String::new();
@@ -203,18 +207,48 @@ fn run(args: &[String]) -> Result<bool, String> {
     Ok(new.is_empty() && gone.is_empty())
 }
 
-/// The FL Studio, Bitwig and Studio One projects and MIDI files in a folder (and the folders in it), or the file itself.
-fn collect(path: &Path, out: &mut Vec<PathBuf>) {
-    if path.is_dir() {
-        let Ok(entries) = std::fs::read_dir(path) else { return };
-        for entry in entries.flatten() {
-            collect(&entry.path(), out);
+/// The FL Studio, Bitwig and Studio One projects and MIDI files in the folders given (and the folders in them), and
+/// those given that are files themselves, sorted. Linked folders are followed, each real folder once, so a link back
+/// to a folder above can't send the walk round for ever; a file reached twice (or, on Windows, named twice in other
+/// letter case) is read once.
+fn collect(inputs: &[PathBuf]) -> Vec<PathBuf> {
+    let wanted = |p: &Path| {
+        p.extension().is_some_and(|e| ["flp", "bwproject", "song"].iter().any(|x| e.eq_ignore_ascii_case(x)))
+            || smf::is_midi_path(&p.to_string_lossy())
+    };
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    let mut todo: VecDeque<PathBuf> = VecDeque::new();
+    for p in inputs {
+        if p.is_dir() {
+            todo.push_back(p.clone());
+        } else if wanted(p) {
+            out.push(p.clone());
         }
-    } else if path.extension().is_some_and(|e| ["flp", "bwproject", "song"].iter().any(|x| e.eq_ignore_ascii_case(x)))
-        || smf::is_midi_path(&path.to_string_lossy())
-    {
-        out.push(path.to_path_buf());
     }
+    while let Some(dir) = todo.pop_front() {
+        if !seen.insert(std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone())) {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                todo.push_back(path);
+            } else if wanted(&path) {
+                out.push(path);
+            }
+        }
+    }
+    // The same file by its real place, letter case aside where the system ignores it.
+    let real = |p: &PathBuf| {
+        let r = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()).to_string_lossy().into_owned();
+        if cfg!(windows) { r.to_lowercase() } else { r }
+    };
+    let mut files_seen = HashSet::new();
+    out.retain(|p| files_seen.insert(real(p)));
+    out.sort();
+    out
 }
 
 /// Runs the C# helper on the files (one path a line on its input) and takes its readings (one JSON a line), by file.

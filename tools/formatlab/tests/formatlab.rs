@@ -105,14 +105,22 @@ fn every_id_the_fl_reader_uses_is_in_the_registry() {
     for file in std::fs::read_dir(folder).unwrap() {
         let code = std::fs::read_to_string(file.unwrap().path()).unwrap();
         for line in code.lines() {
-            let Some(rest) =
-                line.trim_start().strip_prefix("pub const ").or(line.trim_start().strip_prefix("pub(crate) const "))
+            // Private or public alike.
+            let line = line.trim_start();
+            let Some(rest) = ["const ", "pub const ", "pub(crate) const ", "pub(super) const "]
+                .iter()
+                .find_map(|p| line.strip_prefix(p))
+                .filter(|r| r.starts_with("EV_") || r.starts_with("VST_"))
             else {
                 continue;
             };
-            let Some((name, value)) = rest.split_once(':') else { continue };
-            let Some(value) = value.split('=').nth(1).map(|v| v.trim().trim_end_matches(';')) else { continue };
-            let Ok(value) = value.parse::<u32>() else { continue };
+            let (name, value) = rest.split_once(':').unwrap();
+            let value = value.split('=').nth(1).map(|v| v.trim().trim_end_matches(';')).unwrap();
+            let value = match value.strip_prefix("0x") {
+                Some(hex) => u32::from_str_radix(&hex.replace('_', ""), 16),
+                None => value.replace('_', "").parse::<u32>(),
+            }
+            .unwrap_or_else(|_| panic!("{name}'s value {value} isn't a number this test reads"));
             let camel: String =
                 name.split('_').map(|p| p[..1].to_owned() + &p[1..].to_lowercase()).collect::<Vec<_>>().concat();
             let entry = if name.starts_with("EV_") {
@@ -449,4 +457,56 @@ fn says_what_went_wrong() {
     let (code, _, err) = run(&["explode"]);
     assert_eq!(code, 2);
     assert!(err.contains("there's no command \"explode\""), "{err}");
+}
+
+/// A Bitwig file whose metadata holds `meta` and a version.
+fn bitwig_with_meta(meta: impl FnOnce(&mut common::bitwig::BwWriter)) -> Vec<u8> {
+    common::bitwig::BwWriter::file(
+        |m| {
+            m.meta_entry("application_version_name", 0x08);
+            m.str_val("6.1.3");
+            meta(m);
+        },
+        |b| {
+            b.begin(0x2e);
+            b.end();
+        },
+        None,
+    )
+}
+
+#[test]
+fn documents_nested_deep_in_metadata_are_shown_as_bytes() {
+    // Each document is a metadata blob inside the one before: 50 deep.
+    let mut raw = bitwig_with_meta(|_| {});
+    for _ in 0..50 {
+        let inner = raw.clone();
+        raw = bitwig_with_meta(|m| {
+            m.meta_entry("structure", 0x0d);
+            m.u32(inner.len() as u32);
+            m.s.extend_from_slice(&inner);
+        });
+    }
+    let f = LabFile::read(&raw, "nested.bwproject").unwrap();
+    let documents = f.items.iter().filter(|i| i.value.ends_with("a Bitwig document>")).count();
+    assert_eq!(documents, 4);
+    assert!(f.items.iter().any(|i| matches!(i.data, Data::Bytes(_)) && i.label.starts_with("meta structure")));
+}
+
+#[test]
+fn diff_sees_a_change_in_a_metadata_key_written_twice() {
+    let file = |second: &str| {
+        bitwig_with_meta(|m| {
+            m.meta_entry("creator", 0x08);
+            m.str_val("Solomon");
+            m.meta_entry("creator", 0x08);
+            m.str_val(second);
+        })
+    };
+    let (before, after) =
+        (LabFile::read(&file("Sol"), "a.bwproject").unwrap(), LabFile::read(&file("Sal"), "b.bwproject").unwrap());
+    let changes = ops::diff(&before, &after);
+    let [change] = changes.as_slice() else { panic!("{changes:?}") };
+    assert_eq!((change.before.as_deref(), change.after.as_deref()), (Some("\"Sol\""), Some("\"Sal\"")));
+    assert!(change.path.ends_with("#2"), "{}", change.path);
 }

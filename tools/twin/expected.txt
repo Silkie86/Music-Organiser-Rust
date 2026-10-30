@@ -1,11 +1,11 @@
 # The twin test's differences on the test files, each judged in crates/mo-formats/DIFFERENCES.md.
 # A file name, the kind of difference, and a fingerprint of what both apps found there, apart by tabs.
 # Written by `twin run ... --write-expect`.
-cut short.flp	info.warnings.len	61c1e151
-fl 25 audio only.flp	channels.len	a3f4147a
+cut short.flp	info.warnings.len	c030a85a
+fl 25 audio only.flp	channels.len	e949ff46
 fl 25 audio only.flp	info.unplayed{}	9ec94ce1
-fl 25 audio only.flp	song.channels[].clips.len	665d14b5
-fl 25 audio only.flp	song.channels[].notes.len	512f799c
+fl 25 audio only.flp	song.channels[].clips.len	b93e191a
+fl 25 audio only.flp	song.channels[].notes.len	fb11dd7c
 fl 7 garbled header.flp	info.details.Notes	8317528c
 fl 7.flp	info.details.Notes	8317528c
 version 9 bare.flp	info.title	d915282b

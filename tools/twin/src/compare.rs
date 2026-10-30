@@ -8,30 +8,16 @@ pub struct Difference {
     pub path: String,
     pub cs: String,
     pub rust: String,
+    /// The place with the list positions and map keys taken out: see [`Difference::kind`].
+    kind: String,
 }
 
 impl Difference {
     /// The place with the list positions and map keys taken out (`song.channels[].name`, `info.unplayed{}`), so the
     /// same kind of difference in many files counts together. It holds no names or notes, so it's safe to paste into a
-    /// conversation.
+    /// conversation: it's made as the readings are walked, so a sample named "Kick [808].wav" can't show through.
     pub fn kind(&self) -> String {
-        let mut out = String::new();
-        let mut in_brackets = false;
-        for c in self.path.chars() {
-            match c {
-                '[' | '{' => {
-                    in_brackets = true;
-                    out.push(c);
-                }
-                ']' | '}' => {
-                    in_brackets = false;
-                    out.push(c);
-                }
-                _ if in_brackets => {}
-                _ => out.push(c),
-            }
-        }
-        out
+        self.kind.clone()
     }
 }
 
@@ -43,41 +29,59 @@ const CLOSE: f64 = 1e-6;
 /// whose keys [`Difference::kind`] leaves out.
 pub fn differences(cs: &Value, rust: &Value) -> Vec<Difference> {
     let mut out = Vec::new();
-    walk("", cs, rust, &mut out);
+    walk(&Place::default(), cs, rust, &mut out);
     out
 }
 
-fn walk(path: &str, cs: &Value, rust: &Value, out: &mut Vec<Difference>) {
+/// Where the walk is: the path, and the same with positions and map keys taken out.
+#[derive(Clone, Default)]
+struct Place {
+    path: String,
+    kind: String,
+}
+
+impl Place {
+    fn then(&self, path: &str, kind: &str) -> Place {
+        Place { path: format!("{}{path}", self.path), kind: format!("{}{kind}", self.kind) }
+    }
+
+    fn differs(&self, cs: String, rust: String) -> Difference {
+        Difference { path: self.path.clone(), cs, rust, kind: self.kind.clone() }
+    }
+}
+
+fn walk(at: &Place, cs: &Value, rust: &Value, out: &mut Vec<Difference>) {
     match (cs, rust) {
         (Value::Object(a), Value::Object(b)) => {
             // Maps keyed by a song's own sample paths or channels.
-            let named = matches!(path.rsplit('.').next(), Some("unplayed" | "curves"));
+            let named = matches!(at.kind.rsplit('.').next(), Some("unplayed" | "curves"));
             let mut keys: Vec<&String> = a.keys().chain(b.keys().filter(|k| !a.contains_key(*k))).collect();
             keys.sort();
             for key in keys {
                 let here = if named {
-                    format!("{path}{{{key}}}")
-                } else if path.is_empty() {
-                    key.clone()
+                    at.then(&format!("{{{key}}}"), "{}")
+                } else if at.path.is_empty() {
+                    at.then(key, key)
                 } else {
-                    format!("{path}.{key}")
+                    at.then(&format!(".{key}"), &format!(".{key}"))
                 };
                 match (a.get(key), b.get(key)) {
                     (Some(x), Some(y)) => walk(&here, x, y, out),
-                    (x, y) => out.push(Difference { path: here, cs: shown(x), rust: shown(y) }),
+                    (x, y) => out.push(here.differs(shown(x), shown(y))),
                 }
             }
         }
         (Value::Array(a), Value::Array(b)) => {
             for (i, (x, y)) in a.iter().zip(b).enumerate() {
-                walk(&format!("{path}[{i}]"), x, y, out);
+                walk(&at.then(&format!("[{i}]"), "[]"), x, y, out);
             }
             if a.len() != b.len() {
-                out.push(Difference {
-                    path: format!("{path}.len"),
-                    cs: a.len().to_string(),
-                    rust: b.len().to_string(),
-                });
+                // What the longer list has beyond the other is part of what's compared, so a change to it shows.
+                let extra = |list: &[Value]| {
+                    let more: Vec<String> = list.iter().skip(a.len().min(b.len())).map(Value::to_string).collect();
+                    if more.is_empty() { list.len().to_string() } else { format!("{} {}", list.len(), more.join(" ")) }
+                };
+                out.push(at.then(".len", ".len").differs(extra(a), extra(b)));
             }
         }
         (Value::Number(a), Value::Number(b)) => {
@@ -93,10 +97,10 @@ fn walk(path: &str, cs: &Value, rust: &Value, out: &mut Vec<Difference>) {
                 }
             };
             if differ {
-                out.push(Difference { path: path.to_owned(), cs: cs.to_string(), rust: rust.to_string() });
+                out.push(at.differs(cs.to_string(), rust.to_string()));
             }
         }
-        _ if cs != rust => out.push(Difference { path: path.to_owned(), cs: cs.to_string(), rust: rust.to_string() }),
+        _ if cs != rust => out.push(at.differs(cs.to_string(), rust.to_string())),
         _ => {}
     }
 }
@@ -140,7 +144,8 @@ mod tests {
             ["song.channels[1].name", "song.channels.len"]
         );
         assert_eq!(d[0].kind(), "song.channels[].name");
-        assert_eq!((d[1].cs.as_str(), d[1].rust.as_str()), ("2", "3"));
+        // The extra channel is part of it, so a change there shows.
+        assert_eq!((d[1].cs.as_str(), d[1].rust.as_str()), ("2", r#"3 {"name":"Pad"}"#));
     }
 
     #[test]
@@ -152,5 +157,13 @@ mod tests {
         assert_eq!(d[0].kind(), "info.unplayed{}");
         assert_eq!(d[0].cs, "\"NoNotes\"");
         assert_eq!(d[0].rust, "(none)");
+    }
+
+    #[test]
+    fn a_sample_named_with_brackets_stays_out_of_the_kind() {
+        let cs = json!({ "info": { "unplayed": { "C:\\Samples\\Kick [808] {x}.wav": "NoNotes" } } });
+        let rust = json!({ "info": { "unplayed": { "C:\\Samples\\Kick [808] {x}.wav": "Muted" } } });
+        let d = differences(&cs, &rust);
+        assert_eq!(d[0].kind(), "info.unplayed{}");
     }
 }
