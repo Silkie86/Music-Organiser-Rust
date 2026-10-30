@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use super::events::*;
 use super::song::class_id_string;
 use super::{
-    CHANNEL_TYPE_INSTRUMENT, Rack, VST_STATE, WRAPPER, is_native_generator, saved_nothing, vst2_header,
+    CHANNEL_TYPE_INSTRUMENT, Rack, VST_STATE, WRAPPER, is_native_generator, records, saved_nothing, vst2_header,
     wrapper_class_id, wrapper_fields, wrapper_four_cc, wrapper_is_vst3, wrapper_plugin_name,
 };
 use crate::model::PluginKind;
@@ -85,19 +85,8 @@ fn param_state(state: &[u8], start: usize, current: u32) -> Option<(Vec<f32>, St
 
 /// FL's VST3 state: u32 version, then records of (u32 id, u64 size, data); `None` when one runs past the end.
 fn vst3_records(state: &[u8]) -> Option<BTreeMap<u32, &[u8]>> {
-    let mut records = BTreeMap::new();
-    let mut pos = 4;
-    while pos + 12 <= state.len() {
-        let id = u32_at(state, pos);
-        let size = u64::from_le_bytes(state[pos + 4..pos + 12].try_into().expect("8 bytes"));
-        pos += 12;
-        if size > (state.len() - pos) as u64 {
-            return None;
-        }
-        records.insert(id, &state[pos..pos + size as usize]);
-        pos += size as usize;
-    }
-    Some(records)
+    let (records, whole) = records(state);
+    whole.then_some(records)
 }
 
 /// Record 3 is the component (processor) state, 2 the controller state.
@@ -139,8 +128,10 @@ pub fn extract_presets(flp: &Flp<'_>) -> Vec<PresetBlob> {
                 }
             }
             EV_INSERT_FLAGS => {
-                if let (Some(at), Some(name)) = (rack.insert(), rack.insert_name(e)) {
-                    insert_names.insert(at, flp.text(name));
+                if let (Some(at), Some(name)) = (rack.insert(), rack.insert_name(e).map(|n| flp.text(n)))
+                    && !name.is_empty()
+                {
+                    insert_names.insert(at, name);
                 }
             }
             EV_PLUGIN_INTERNAL => {

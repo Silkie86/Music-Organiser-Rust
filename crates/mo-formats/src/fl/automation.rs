@@ -253,13 +253,20 @@ pub(super) fn place_automation(
         .map(|&i| PlaylistItem { muted: i.muted || tracks.at(i.slot).is_some_and(|t| t.1), ..i })
         .collect();
     items.sort_by_key(|i| i.at);
+    // Each clip's placements, in time order.
+    let mut placements: HashMap<u32, Vec<PlaylistItem>> = HashMap::new();
+    for i in items.into_iter().filter(|i| !i.muted) {
+        placements.entry(i.index).or_default().push(i);
+    }
     for &(clip, target) in links {
         let Some(curve) = curves.get(&clip).filter(|c| !c.is_empty()) else { continue };
         let name = names.get(&clip).cloned().unwrap_or_else(|| format!("Automation {}", clip + 1));
-        let hold = moves(&name, target, mixer, Vec::new()).control == FlControl::OnOff;
+        // Switches jump between on and off rather than slide.
+        let hold =
+            matches!(moves(&name, target, mixer, Vec::new()).control, FlControl::OnOff | FlControl::InsertSlotOnOff);
         let mut placed: Vec<FlPoint> = Vec::new();
         let mut starts = Vec::new();
-        for item in items.iter().filter(|i| i.index == clip && !i.muted) {
+        for item in placements.get(&clip).into_iter().flatten() {
             let mut part = cut_curve(
                 curve,
                 item.at as f64 / ppq,

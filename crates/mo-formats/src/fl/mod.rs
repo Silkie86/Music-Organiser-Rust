@@ -231,7 +231,10 @@ fn read_with(raw: &[u8], resolve: &mut dyn FnMut(&str) -> String) -> ProjectInfo
     info.details.insert("Channels".into(), info.tracks.len().to_string());
     info.details.insert("Patterns".into(), patterns.to_string());
     info.details.insert("Notes".into(), notes.to_string());
-    note_unplayed(&song::read_song_with(&flp, false), resolve, &mut info);
+    // Only a song with samples has any to leave unplayed.
+    if !info.samples.is_empty() {
+        note_unplayed(&song::read_song_with(&flp, false), resolve, &mut info);
+    }
     align_unplayed(info.dedupe())
 }
 
@@ -345,26 +348,28 @@ fn note_unplayed(song: &song::FlSong, resolve: &mut dyn FnMut(&str) -> String, i
 /// The Fruity Wrapper's records by id, each a slice of the event rather than a copy (a plugin's state can be
 /// megabytes). A record that runs past the end stops the reading; a later record with the same id wins.
 pub(crate) fn wrapper_fields(blob: &[u8]) -> BTreeMap<u32, &[u8]> {
-    let mut fields = BTreeMap::new();
-    if blob.len() < 4 {
-        return fields;
+    if blob.len() < 4 || !(1..=64).contains(&u32_at(blob, 0)) {
+        return BTreeMap::new();
     }
-    let version = u32::from_le_bytes([blob[0], blob[1], blob[2], blob[3]]);
-    if version == 0 || version > 64 {
-        return fields;
-    }
+    records(blob).0
+}
+
+/// Records after a u32 version: (u32 id, u64 size, data), by id, a later one with the same id winning. Says whether
+/// they all fit; a record that runs past the end stops the reading.
+pub(crate) fn records(blob: &[u8]) -> (BTreeMap<u32, &[u8]>, bool) {
+    let mut records = BTreeMap::new();
     let mut pos = 4;
     while pos + 12 <= blob.len() {
-        let id = u32::from_le_bytes(blob[pos..pos + 4].try_into().expect("4 bytes"));
+        let id = u32_at(blob, pos);
         let size = u64::from_le_bytes(blob[pos + 4..pos + 12].try_into().expect("8 bytes"));
         pos += 12;
         if size > (blob.len() - pos) as u64 {
-            break;
+            return (records, false);
         }
-        fields.insert(id, &blob[pos..pos + size as usize]);
+        records.insert(id, &blob[pos..pos + size as usize]);
         pos += size as usize;
     }
-    fields
+    (records, true)
 }
 
 pub(crate) fn wrapper_text(fields: &BTreeMap<u32, &[u8]>, id: u32) -> String {

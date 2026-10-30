@@ -245,3 +245,16 @@ fn a_songs_samples_under_fls_user_data_folder_are_found() {
     assert_eq!(song.channels[0].sample, projects.join("Snare 01.wav").to_string_lossy());
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn a_pattern_not_in_a_playlist_of_audio_clips_does_not_play() {
+    // The playlist has an audio clip, so it isn't empty: patterns don't play one after another.
+    let song = read_song(&fl_studio_25_audio_only());
+    let snare = song.channels.iter().find(|c| c.name == "Snare").expect("the snare channel");
+    assert!(snare.notes.is_empty() && snare.clips.is_empty());
+    let info = fl::read_bytes(&fl_studio_25_audio_only());
+    assert_eq!(info.unplayed.get(r"C:\Samples\Snare 01.wav"), Some(&SampleUse::NoNotes));
+    // An insert name that's only its end isn't a name, so insert 2 isn't listed (the master is: the channels go to it).
+    let names: Vec<(u32, &str)> = song.inserts.iter().map(|i| (i.index, i.name.as_str())).collect();
+    assert_eq!(names, [(0, ""), (1, "Drums")]);
+}

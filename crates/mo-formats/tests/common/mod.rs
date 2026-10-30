@@ -881,3 +881,27 @@ pub fn fl_studio_25_one_sample_two_ways(full: &str) -> Vec<u8> {
         .data(233, &playlist_item_25(0, 20481, 384))
         .build()
 }
+
+/// A song made of one audio clip (channel 1, "Vox"), with a leftover pattern of notes for "Snare" never placed. Insert
+/// 1 is named "Drums"; insert 2's name event holds only its end (two zero bytes).
+pub fn fl_studio_25_audio_only() -> Vec<u8> {
+    fl_25()
+        .word(65, 1)
+        .data(224, &note(0, 0, 48, 60, 100))
+        .word(64, 0)
+        .byte(21, 0)
+        .text(201, "")
+        .text(203, "Snare")
+        .text(196, r"C:\Samples\Snare 01.wav")
+        .word(64, 1)
+        .byte(21, 4)
+        .text(203, "Vox")
+        .text(196, r"C:\Samples\Vox.wav")
+        .data(233, &playlist_item_25(0, 1, 384))
+        .data(236, &[0, 0, 0, 0])
+        .text(204, "Drums")
+        .data(236, &[0, 0, 0, 0])
+        .data(204, &[0, 0])
+        .data(236, &[0, 0, 0, 0])
+        .build()
+}

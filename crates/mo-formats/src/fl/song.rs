@@ -241,7 +241,9 @@ pub struct FlSong {
 pub(super) struct PlaylistTracks {
     tracks: HashMap<u32, (FlTrack, bool)>,
     arrangements: u32,
-    last: u32,
+    /// The track a name that follows is for: none after settings too short to read, so the name isn't put on the
+    /// track before.
+    last: Option<u32>,
 }
 
 impl PlaylistTracks {
@@ -249,12 +251,14 @@ impl PlaylistTracks {
     pub fn read(&mut self, e: &Event<'_>, flp: &Flp<'_>) {
         match e.id {
             EV_ARRANGEMENT_NEW => self.arrangements += 1,
-            EV_TRACK_DATA if self.arrangements <= 1 && e.data.len() > 12 => {
-                self.last = e.int();
-                self.tracks.insert(self.last, (FlTrack { number: self.last, name: String::new() }, e.data[12] == 0));
+            EV_TRACK_DATA if self.arrangements <= 1 => {
+                self.last = (e.data.len() > 12).then(|| e.int());
+                if let Some(n) = self.last {
+                    self.tracks.insert(n, (FlTrack { number: n, name: String::new() }, e.data[12] == 0));
+                }
             }
             EV_TRACK_NAME if self.arrangements <= 1 => {
-                if let Some(t) = self.tracks.get_mut(&self.last) {
+                if let Some(t) = self.last.and_then(|n| self.tracks.get_mut(&n)) {
                     t.0.name = flp.text(&e.data);
                 }
             }
@@ -392,8 +396,8 @@ pub(super) fn playlist_items(d: &[u8]) -> Vec<PlaylistItem> {
 }
 
 /// Each channel's clips across the song: one per pattern placed in the playlist (the first arrangement), holding the
-/// channel's notes in that part of the pattern, timed from the clip's start. With nothing in the playlist, patterns
-/// play one after another, each rounded up to whole bars.
+/// channel's notes in that part of the pattern, timed from the clip's start. With nothing in the playlist (no pattern,
+/// audio or automation clip), patterns play one after another, each rounded up to whole bars.
 fn place_clips(
     flp: &Flp<'_>,
     raw_notes: &[(u32, &Event<'_>)],
@@ -454,10 +458,10 @@ fn place_clips(
         }
     };
 
-    let mut items: Vec<&PlaylistItem> = items.iter().filter(|i| i.index > PATTERN_BASE).collect();
     if !items.is_empty() {
-        items.sort_by_key(|i| i.at);
-        for i in items {
+        let mut patterns_placed: Vec<&PlaylistItem> = items.iter().filter(|i| i.index > PATTERN_BASE).collect();
+        patterns_placed.sort_by_key(|i| i.at);
+        for i in patterns_placed {
             place(
                 i.index - PATTERN_BASE,
                 i.at,
@@ -731,8 +735,10 @@ pub fn read_song_with(flp: &Flp<'_>, sounds: bool) -> FlSong {
                 pending_internal.clear();
             }
             EV_INSERT_FLAGS => {
-                if let (Some(at), Some(name)) = (rack.insert(), rack.insert_name(e)) {
-                    insert_names.insert(at, flp.text(name));
+                if let (Some(at), Some(name)) = (rack.insert(), rack.insert_name(e).map(|n| flp.text(n)))
+                    && !name.is_empty()
+                {
+                    insert_names.insert(at, name);
                 }
             }
             EV_MIXER_SLOT => {
