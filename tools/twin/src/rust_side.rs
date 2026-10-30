@@ -17,8 +17,8 @@ pub fn dump(path: &Path) -> Value {
         Ok(raw) => raw,
         Err(e) => return json!({ "file": path.to_string_lossy(), "error": e.to_string() }),
     };
-    let info = fl::read(path).map(|i| info_json(&i)).unwrap_or_else(|e| json!({ "error": e.to_string() }));
-    let mut out = json!({ "file": path.to_string_lossy(), "info": info });
+    // Read from disk once; the project list's reading takes the same bytes.
+    let mut out = json!({ "file": path.to_string_lossy(), "info": info_json(&fl::read_from(&raw, path)) });
     // The C# readers throw on a damaged file where the project list only warns; so does this.
     let Ok(flp) = events::load(&raw) else {
         out["error_more"] = json!("damaged");

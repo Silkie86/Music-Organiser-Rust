@@ -84,6 +84,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: Silkie86/Music-Organiser
+          # The C# app as the Rust readers were last measured against; moved on purpose, with expected.txt.
+          ref: 4515ce8533eabff9669719d784834f0d1f77d59a
           path: old
       - uses: actions/setup-dotnet@v4
         with:

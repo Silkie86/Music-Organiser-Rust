@@ -11,20 +11,21 @@ pub struct Difference {
 }
 
 impl Difference {
-    /// The place with the list positions taken out (`song.channels[].name`), so the same kind of difference in many
-    /// files counts together. It holds no names or notes, so it's safe to paste into a conversation.
+    /// The place with the list positions and map keys taken out (`song.channels[].name`, `info.unplayed{}`), so the
+    /// same kind of difference in many files counts together. It holds no names or notes, so it's safe to paste into a
+    /// conversation.
     pub fn kind(&self) -> String {
         let mut out = String::new();
         let mut in_brackets = false;
         for c in self.path.chars() {
             match c {
-                '[' => {
+                '[' | '{' => {
                     in_brackets = true;
-                    out.push('[');
+                    out.push(c);
                 }
-                ']' => {
+                ']' | '}' => {
                     in_brackets = false;
-                    out.push(']');
+                    out.push(c);
                 }
                 _ if in_brackets => {}
                 _ => out.push(c),
@@ -37,9 +38,9 @@ impl Difference {
 /// Numbers this close count as the same: the two apps print floats a little differently.
 const CLOSE: f64 = 1e-6;
 
-/// Every difference between the C# app's reading and the Rust one's. Objects' keys are written into the path as they
-/// are, except the keys of maps keyed by a sample's path or a channel, which are written `{}` so the path stays free of
-/// names.
+/// Every difference between the C# app's reading and the Rust one's. Objects' keys are written into the path as
+/// fields (`info.title`), except in the maps keyed by a sample's path or a channel (`info.unplayed{C:\Kick.wav}`),
+/// whose keys [`Difference::kind`] leaves out.
 pub fn differences(cs: &Value, rust: &Value) -> Vec<Difference> {
     let mut out = Vec::new();
     walk("", cs, rust, &mut out);
@@ -49,13 +50,13 @@ pub fn differences(cs: &Value, rust: &Value) -> Vec<Difference> {
 fn walk(path: &str, cs: &Value, rust: &Value, out: &mut Vec<Difference>) {
     match (cs, rust) {
         (Value::Object(a), Value::Object(b)) => {
-            // Maps whose keys are a song's own names (samples, channels, details) go in as `{}` with the key after it.
+            // Maps keyed by a song's own sample paths or channels.
             let named = matches!(path.rsplit('.').next(), Some("unplayed" | "curves"));
             let mut keys: Vec<&String> = a.keys().chain(b.keys().filter(|k| !a.contains_key(*k))).collect();
             keys.sort();
             for key in keys {
                 let here = if named {
-                    format!("{path}{{}}")
+                    format!("{path}{{{key}}}")
                 } else if path.is_empty() {
                     key.clone()
                 } else {
@@ -63,7 +64,7 @@ fn walk(path: &str, cs: &Value, rust: &Value, out: &mut Vec<Difference>) {
                 };
                 match (a.get(key), b.get(key)) {
                     (Some(x), Some(y)) => walk(&here, x, y, out),
-                    (x, y) => out.push(Difference { path: here, cs: shown(x, key, named), rust: shown(y, key, named) }),
+                    (x, y) => out.push(Difference { path: here, cs: shown(x), rust: shown(y) }),
                 }
             }
         }
@@ -80,8 +81,18 @@ fn walk(path: &str, cs: &Value, rust: &Value, out: &mut Vec<Difference>) {
             }
         }
         (Value::Number(a), Value::Number(b)) => {
-            let (x, y) = (a.as_f64().unwrap_or(f64::NAN), b.as_f64().unwrap_or(f64::NAN));
-            if (x - y).abs() > CLOSE * x.abs().max(1.0) {
+            // Whole numbers (ticks, ids, counts) must match exactly; only fractions get the tolerance. (C# writes a
+            // fraction that happens to be whole, such as a tempo of 140, without its ".0": that one is compared as a
+            // fraction, since the Rust side writes it with one.)
+            let whole = |n: &serde_json::Number| n.as_i64().map(i128::from).or(n.as_u64().map(i128::from));
+            let differ = match (whole(a), whole(b)) {
+                (Some(x), Some(y)) => x != y,
+                _ => {
+                    let (x, y) = (a.as_f64().unwrap_or(f64::NAN), b.as_f64().unwrap_or(f64::NAN));
+                    (x - y).abs() > CLOSE * x.abs().max(1.0)
+                }
+            };
+            if differ {
                 out.push(Difference { path: path.to_owned(), cs: cs.to_string(), rust: rust.to_string() });
             }
         }
@@ -91,12 +102,8 @@ fn walk(path: &str, cs: &Value, rust: &Value, out: &mut Vec<Difference>) {
 }
 
 /// What one side has at a key the other side doesn't.
-fn shown(v: Option<&Value>, key: &str, named: bool) -> String {
-    match v {
-        None => "(none)".into(),
-        Some(v) if named => format!("{key}: {v}"),
-        Some(v) => v.to_string(),
-    }
+fn shown(v: Option<&Value>) -> String {
+    v.map_or_else(|| "(none)".into(), Value::to_string)
 }
 
 #[cfg(test)]
@@ -117,6 +124,13 @@ mod tests {
     }
 
     #[test]
+    fn whole_numbers_must_match_exactly() {
+        assert_eq!(differences(&json!({ "start": 1_152_000 }), &json!({ "start": 1_152_001 })).len(), 1);
+        assert_eq!(differences(&json!({ "id": 3_000_000_000u64 }), &json!({ "id": 3_000_001_000u64 })).len(), 1);
+        assert_eq!(differences(&json!({ "id": 3_000_000_000u64 }), &json!({ "id": -1 })).len(), 1);
+    }
+
+    #[test]
     fn lists_where_they_differ() {
         let cs = json!({ "song": { "channels": [{ "name": "Kick" }, { "name": "Snare" }] } });
         let rust = json!({ "song": { "channels": [{ "name": "Kick" }, { "name": "Hat" }, { "name": "Pad" }] } });
@@ -134,8 +148,9 @@ mod tests {
         let cs = json!({ "info": { "unplayed": { "C:\\Kick.wav": "NoNotes" } } });
         let rust = json!({ "info": { "unplayed": {} } });
         let d = differences(&cs, &rust);
+        assert_eq!(d[0].path, "info.unplayed{C:\\Kick.wav}");
         assert_eq!(d[0].kind(), "info.unplayed{}");
-        assert_eq!(d[0].cs, "C:\\Kick.wav: \"NoNotes\"");
+        assert_eq!(d[0].cs, "\"NoNotes\"");
         assert_eq!(d[0].rust, "(none)");
     }
 }

@@ -4,7 +4,6 @@
 // With --roots it lists the library's folders instead (below).
 
 using System.Security.Cryptography;
-using System.Text.Json;
 using System.Text.Json.Nodes;
 using MusicOrganiser.Core.Parsers;
 
@@ -16,19 +15,26 @@ if (args is ["--roots", var db])
     using var command = connection.CreateCommand();
     command.CommandText = "SELECT path FROM roots ORDER BY path";
     using var rows = command.ExecuteReader();
-    while (rows.Read()) Console.WriteLine(rows.GetString(0));
+    // UTF-8 whatever the console's code page, so a folder named in any language comes through whole.
+    using var roots = new StreamWriter(Console.OpenStandardOutput(), new System.Text.UTF8Encoding(false));
+    while (rows.Read()) roots.WriteLine(rows.GetString(0));
     return;
 }
 
+// The Rust side writes the paths as UTF-8; read them so, not in the console's code page.
 var files = new List<string>();
-for (string? line; (line = Console.In.ReadLine()) != null;)
-    if (line.Length > 0) files.Add(line);
+using (var input = new StreamReader(Console.OpenStandardInput(), new System.Text.UTF8Encoding(false)))
+    for (string? line; (line = input.ReadLine()) != null;)
+        if (line.Length > 0) files.Add(line);
 
 var output = Console.OpenStandardOutput();
 var gate = new object();
 Parallel.ForEach(files, file =>
 {
-    var json = Dump(file).ToJsonString(new JsonSerializerOptions { WriteIndented = false });
+    string json;
+    // One odd value (JSON has no NaN) loses that file's reading, not the whole run.
+    try { json = Dump(file).ToJsonString(); }
+    catch (Exception e) { json = new JsonObject { ["file"] = file, ["error_more"] = $"couldn't write it: {e.Message}" }.ToJsonString(); }
     var bytes = System.Text.Encoding.UTF8.GetBytes(json + "\n");
     lock (gate) output.Write(bytes);
 });

@@ -22,6 +22,7 @@ use std::process::{Command, ExitCode, Stdio};
 
 use rayon::prelude::*;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -47,10 +48,16 @@ const USAGE: &str =
     "twin run --cs <helper> <folder or file>... [--report <file>] [--expect <file>] [--write-expect <file>]
 twin dump <file>";
 
+/// How many files are read (by both apps) before their readings are compared and let go.
+const CHUNK: usize = 256;
+/// A file the C# helper said nothing about, which counts as a difference.
+const NO_CS: &str = "(no C# reading)";
+
 /// The top of an `--expect` list.
 const EXPECT_HEADER: &str =
     "# The twin test's differences on the test files, each judged in crates/mo-formats/DIFFERENCES.md.
-# A file name, a tab, then the kind of difference. Written by `twin run ... --write-expect`.
+# A file name, the kind of difference, and a fingerprint of what both apps found there, apart by tabs.
+# Written by `twin run ... --write-expect`.
 ";
 
 #[derive(Default)]
@@ -94,41 +101,63 @@ fn run(args: &[String]) -> Result<bool, String> {
         return Err("No FL Studio projects (.flp) there.".into());
     }
 
-    // The C# helper reads in its own process while the Rust readers read here, on every core.
-    let cs_files = files.clone();
     let helper = o.cs.clone().expect("checked in options");
-    let cs = std::thread::spawn(move || run_helper(&helper, &cs_files));
-    let rust: Vec<Value> = files.par_iter().map(|f| rust_side::dump(f)).collect();
-    let cs = cs.join().map_err(|_| "The C# helper's reader thread stopped.".to_owned())??;
-
+    let mut report_file = match &o.report {
+        Some(path) => Some(std::io::BufWriter::new(
+            std::fs::File::create(path).map_err(|e| format!("Couldn't write the report: {e}"))?,
+        )),
+        None => None,
+    };
+    // Kept only when there's no report file to write to (CI prints it).
     let mut report = String::new();
     let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
     let mut found: BTreeSet<String> = BTreeSet::new();
     let mut same = 0;
-    for (file, rust) in files.iter().zip(&rust) {
-        let key = file.to_string_lossy().into_owned();
-        let Some(cs) = cs.get(&key) else {
-            report += &format!("{key}\n  the C# helper said nothing about it\n\n");
-            *kinds.entry("(no C# reading)".into()).or_default() += 1;
-            continue;
-        };
-        let diffs = compare::differences(cs, rust);
-        if diffs.is_empty() {
-            same += 1;
-            continue;
+    // A few hundred files at a time, so a big library's readings never all sit in memory at once.
+    for chunk in files.chunks(CHUNK) {
+        // The C# helper reads in its own process while the Rust readers read here, on every core.
+        let cs_files = chunk.to_vec();
+        let helper = helper.clone();
+        let cs = std::thread::spawn(move || run_helper(&helper, &cs_files));
+        let rust: Vec<Value> = chunk.par_iter().map(|f| rust_side::dump(f)).collect();
+        let cs = cs.join().map_err(|_| "The C# helper's reader thread stopped.".to_owned())??;
+
+        let mut part = String::new();
+        for (file, rust) in chunk.iter().zip(&rust) {
+            let key = file.to_string_lossy().into_owned();
+            let name = file.file_name().map_or(key.clone(), |n| n.to_string_lossy().into_owned());
+            let Some(cs) = cs.get(&key) else {
+                part += &format!("{key}\n  the C# helper said nothing about it\n\n");
+                found.insert(format!("{name}\t{NO_CS}"));
+                *kinds.entry(NO_CS.into()).or_default() += 1;
+                continue;
+            };
+            let diffs = compare::differences(cs, rust);
+            if diffs.is_empty() {
+                same += 1;
+                continue;
+            }
+            part += &format!("{key}\n");
+            // Each kind of difference with what both sides had, so the list in --expect notices a value changing.
+            let mut file_kinds: BTreeMap<String, Sha256> = BTreeMap::new();
+            for d in &diffs {
+                part += &format!("  {}\n    C#:   {}\n    Rust: {}\n", d.path, d.cs, d.rust);
+                file_kinds.entry(d.kind()).or_default().update(format!("{}\t{}\t{}\n", d.path, d.cs, d.rust));
+            }
+            part += "\n";
+            for (k, hash) in file_kinds {
+                let hash: String = hash.finalize().iter().take(4).map(|b| format!("{b:02x}")).collect();
+                found.insert(format!("{name}\t{k}\t{hash}"));
+                *kinds.entry(k).or_default() += 1;
+            }
         }
-        report += &format!("{key}\n");
-        let mut file_kinds = BTreeSet::new();
-        for d in &diffs {
-            report += &format!("  {}\n    C#:   {}\n    Rust: {}\n", d.path, d.cs, d.rust);
-            file_kinds.insert(d.kind());
+        match &mut report_file {
+            Some(f) => f.write_all(part.as_bytes()).map_err(|e| format!("Couldn't write the report: {e}"))?,
+            None => report += &part,
         }
-        report += "\n";
-        let name = file.file_name().map_or(key.clone(), |n| n.to_string_lossy().into_owned());
-        for k in file_kinds {
-            found.insert(format!("{name}\t{k}"));
-            *kinds.entry(k).or_default() += 1;
-        }
+    }
+    if let Some(mut f) = report_file {
+        f.flush().map_err(|e| format!("Couldn't write the report: {e}"))?;
     }
 
     println!("Twin test: {} FL Studio project(s).", files.len());
@@ -140,7 +169,6 @@ fn run(args: &[String]) -> Result<bool, String> {
         println!("  {n:>7}  {kind}");
     }
     if let Some(path) = &o.report {
-        std::fs::write(path, &report).map_err(|e| format!("Couldn't write the report: {e}"))?;
         println!("Every difference, file by file: {}", path.display());
     }
     if let Some(path) = &o.write_expect {

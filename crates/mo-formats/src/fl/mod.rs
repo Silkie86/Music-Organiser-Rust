@@ -96,9 +96,14 @@ pub(crate) fn is_native_generator(name: &str) -> bool {
 /// only a file that can't be read from disk is. Samples saved under FL's user data folder are found from where the
 /// project lives.
 pub fn read(path: &Path) -> std::io::Result<ProjectInfo> {
-    let raw = std::fs::read(path)?;
+    Ok(read_from(&std::fs::read(path)?, path))
+}
+
+/// [`read`] for a file already in memory that lives at `path`: samples under FL's user data folder are found from
+/// there, as [`read`] finds them.
+pub fn read_from(raw: &[u8], path: &Path) -> ProjectInfo {
     let mut user_data = UserData::new(path);
-    Ok(read_with(&raw, &mut |s| user_data.resolve(s)))
+    read_with(raw, &mut |s| user_data.resolve(s))
 }
 
 /// [`read`] for a file already in memory. It never looks at the disk, so samples under FL's user data folder stay as

@@ -17,6 +17,8 @@
 param([string[]]$Folders)
 
 $ErrorActionPreference = 'Stop'
+# The C# helper and the twin write UTF-8; read them so, whatever the console's code page.
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $Data = Join-Path $env:LOCALAPPDATA 'MusicOrganiser'
 $Rust = Join-Path $Data 'run-latest-rust\app'
 $Cs = Join-Path $Data 'run-latest\app'
@@ -43,12 +45,17 @@ $Summary = Join-Path $Logs "twin-test-$Stamp.txt"
 $Report = Join-Path $Logs "twin-report-$Stamp.txt"
 Write-Host "Reading every FL Studio project in $($Folders.Count) folder(s) with both apps..."
 Push-Location $Rust
+# Cargo writes its progress to stderr, which Windows PowerShell 5.1 takes as an error under 'Stop'.
+$ErrorActionPreference = 'Continue'
 try {
   # Set-Content rather than Tee-Object, which writes UTF-16 in Windows PowerShell 5.1.
   $Out = cargo run --release -q -p mo-twin -- run --cs $Dll @Folders --report $Report
-  $Out | Set-Content -Encoding UTF8 -Path $Summary
-  $Out | Write-Host
+  $Code = $LASTEXITCODE
 } finally { Pop-Location }
+$ErrorActionPreference = 'Stop'
+if ($Code -ne 0) { throw "The twin test stopped (exit code $Code); its summary wasn't written." }
+$Out | Set-Content -Encoding UTF8 -Path $Summary
+$Out | Write-Host
 Write-Host ''
 Write-Host "Summary (safe to share): $Summary"
 Write-Host "Every difference (stays here): $Report"
