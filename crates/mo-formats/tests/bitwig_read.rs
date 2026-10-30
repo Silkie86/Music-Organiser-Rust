@@ -102,7 +102,7 @@ fn falls_back_to_a_text_scan_when_the_file_cant_be_decoded() {
     assert!(info.samples.iter().any(|s| s.ends_with("Recorded Bass.wav")));
     // What the text scan reads next to a path doesn't stick to it, and bare names aren't files.
     assert!(info.samples.contains(&r"F:\Bitwig Studio\Projects\Loop Idea\recordings\Syntakt 2-1.wav".to_owned()));
-    let recorded = path.parent().expect("a folder").join("recordings/Untitled Project [0m27s-1m22s].wav");
+    let recorded = path.parent().expect("a folder").join("recordings").join("Untitled Project [0m27s-1m22s].wav");
     assert!(info.samples.contains(&recorded.to_string_lossy().into_owned()), "{:?}", info.samples);
     assert!(!info.samples.iter().any(|s| s.contains("BASSDRUM")));
     assert!(info.samples.iter().all(|s| s.starts_with("D:") || s.starts_with("F:") || Path::new(s).is_absolute()));
