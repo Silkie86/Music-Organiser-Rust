@@ -7,6 +7,7 @@ use mo_formats::bitwig;
 use mo_formats::fl::automation::{FlAutomation, FlPoint};
 use mo_formats::fl::song::{self, FlChannel, FlInsert, FlPlugin, FlSong};
 use mo_formats::fl::{self, events, presets};
+use mo_formats::midi::{MidiPart, smf};
 use mo_formats::presets::PresetBlob;
 use mo_formats::studio_one;
 use mo_formats::{MidiChannel, MidiClip, NoteEvent, ProjectInfo};
@@ -24,6 +25,9 @@ pub fn dump(path: &Path) -> Value {
     }
     if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("song")) {
         return studio_one_dump(path, &raw);
+    }
+    if smf::is_midi_path(&path.to_string_lossy()) {
+        return midi_dump(path, &raw);
     }
     // Read from disk once; the project list's reading takes the same bytes.
     let mut out = json!({ "file": path.to_string_lossy(), "info": info_json(&fl::read_from(&raw, path)) });
@@ -76,6 +80,23 @@ fn studio_one_dump(path: &Path, raw: &[u8]) -> Value {
         }
     }
     out
+}
+
+/// A MIDI file's parts. A file that isn't one says just "unreadable" in both apps.
+fn midi_dump(path: &Path, raw: &[u8]) -> Value {
+    match smf::read_from(raw, path) {
+        Ok(parts) => {
+            json!({ "file": path.to_string_lossy(), "parts": parts.iter().map(part_json).collect::<Vec<_>>() })
+        }
+        Err(_) => json!({ "file": path.to_string_lossy(), "error": "unreadable" }),
+    }
+}
+
+fn part_json(p: &MidiPart) -> Value {
+    json!({
+        "name": p.name, "ppq": p.ppq, "notes": notes_json(&p.notes), "drums": p.drums, "tempo": p.tempo,
+        "program": p.program, "track_name": p.track_name,
+    })
 }
 
 fn info_json(i: &ProjectInfo) -> Value {

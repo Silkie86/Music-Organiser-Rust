@@ -10,6 +10,7 @@
 
 pub mod bitwig;
 pub mod fl;
+pub mod midi;
 mod model;
 mod paths;
 pub mod plugins;

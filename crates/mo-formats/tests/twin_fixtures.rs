@@ -7,6 +7,7 @@
 mod common;
 
 use common::bitwig::*;
+use common::midi::*;
 use common::studio_one::*;
 use common::*;
 
@@ -90,11 +91,46 @@ fn studio_one_fixtures() -> Vec<(&'static str, Vec<u8>)> {
     ]
 }
 
+/// The MIDI files: the same as the MIDI reader's tests, and some damaged ones.
+fn midi_fixtures() -> Vec<(&'static str, Vec<u8>)> {
+    let two = two_tracks();
+    let keys = track_with_program(0, Some(1), "Keys");
+    let bass = track_with_program(1, Some(33), "Bass");
+    let mut odd_chunk = smf(96, &[&keys, &bass]);
+    odd_chunk.splice(14..14, chunk(b"XFIH", b"made by something"));
+    let mut rmi = b"RIFF".to_vec();
+    rmi.extend(((two.len() + 12) as u32).to_le_bytes());
+    rmi.extend(b"RMIDdata");
+    rmi.extend((two.len() as u32).to_le_bytes());
+    rmi.extend(&two);
+    let smpte = i16::from_be_bytes([(-25i8) as u8, 40]);
+    let mut latin_1 = vec![0x00, 0xff, 0x03, 5, b'C', 0xe9, b'l', b'l', b'o', 0x00, 0x90, 60, 80, 0x60, 0x80, 60, 0];
+    latin_1.extend(END);
+    vec![
+        ("midi/Idea.mid", two.clone()),
+        ("midi/Idea cut short.mid", two[..two.len() - 8].to_vec()),
+        ("midi/Idea cut in its header.mid", two[..20].to_vec()),
+        ("midi/Idea.rmi.mid", rmi),
+        ("midi/Loop One.mid", one_track_two_channels("Loop One")),
+        ("midi/Pads.midi", one_track_two_channels("Pads")),
+        ("midi/Bass.MID", smf(96, &[&track_with_program(0, Some(38), "")])),
+        ("midi/Night drive.kar", smf(96, &[&track_with_program(0, None, "Keyscape")])),
+        ("midi/Drums.smf", smf(96, &[&track_with_program(9, Some(0), "Drums")])),
+        ("midi/stacked.mid", stacked_and_unreleased()),
+        ("midi/odd chunk.mid", odd_chunk),
+        ("midi/smpte.mid", smf(smpte, &[&keys])),
+        ("midi/latin 1.mid", smf(96, &[&latin_1, &bass])),
+        ("midi/not midi.mid", b"RIFF0000WAVE".to_vec()),
+        ("midi/._Idea.mid", [&[0u8, 5, 22, 7, 0, 2, 0, 0][..], &[0; 200]].concat()),
+    ]
+}
+
 #[test]
 fn writes_the_twin_test_files() {
     let mut files = fixtures();
     files.extend(bitwig_fixtures());
     files.extend(studio_one_fixtures());
+    files.extend(midi_fixtures());
     assert!(files.iter().all(|(_, bytes)| !bytes.is_empty()));
     let Some(dir) = std::env::var_os("MO_TWIN_FIXTURES") else { return };
     for (name, bytes) in files {

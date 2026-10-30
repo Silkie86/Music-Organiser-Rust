@@ -50,3 +50,13 @@ tests don't have.
 | An XML file in the song's zip that won't come out whole | The song can't be read. | The rest is read, with a warning naming the file left out. | Better |
 | A damaged zip that names two files the same | Reads the first of them, and lists (and counts) every copy's presets. | The zip reader keeps only the last one's bytes, and the song says so in a warning. | Same for real songs |
 | A note's velocity | Rounded to MIDI 1.0's 0 to 127 as it's read. | Kept at MIDI 2.0's 16 bits (a 0-to-127 velocity from an older song by MIDI 2.0's own scaling), rounded to 0 to 127 only when a MIDI 1.0 value is wanted. As with Bitwig, a few in 10,000 of the 0-to-1 velocities come out 1 apart. | Better (rule 22) |
+
+## MIDI files
+
+On the test files the two read the same; these are the places the Rust reader was written to differ, for files the
+tests don't have.
+
+| What | C# | Rust | Judged |
+|---|---|---|---|
+| A header or track length so damaged it points before the file's start, or past what a whole number holds | Stops with an error that isn't "not a MIDI file", so the file counts as failed. | Reads the tracks before the damage and stops there. | Better |
+| A note's velocity | MIDI 1.0's 0 to 127. | Kept in MIDI 2.0's 16 bits, scaled up by MIDI 2.0's own rule, so each comes back as it was written. | Same values (rule 22) |
