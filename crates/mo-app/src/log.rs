@@ -113,7 +113,7 @@ impl SessionLog {
         let (tx, writer) = match file {
             Some((_, f)) => {
                 let (tx, rx) = channel();
-                let handle = std::thread::Builder::new().name("Session log".into()).spawn(move || write_queued(f, rx));
+                let handle = crate::background::spawn("Session log", move || write_queued(f, rx));
                 match handle {
                     Ok(h) => (Some(tx), Some(h)),
                     Err(_) => (None, None),
@@ -147,7 +147,7 @@ impl SessionLog {
                 st.seen.clear();
             }
             let times = st.seen.entry(key).or_insert(0);
-            *times += 1;
+            *times = times.saturating_add(1);
             let times = *times;
             let message = if times > REPEATS_WRITTEN {
                 if !is_power_of_ten(times) {

@@ -2,6 +2,7 @@
 //! without opening a window. The Slint screens in `mo-ui` only show what this crate decides.
 
 pub mod activity;
+pub mod background;
 pub mod log;
 pub mod note;
 pub mod paths;
