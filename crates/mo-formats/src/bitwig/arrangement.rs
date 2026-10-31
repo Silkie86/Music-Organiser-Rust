@@ -11,7 +11,9 @@ use super::reader::{
     F_START, F_TEMPO, F_VELOCITY, bitwig_kind, field_obj, is_instrument_category, track_names,
 };
 use crate::PluginKind;
-use crate::arrangement::{Arrangement, AudioPart, LaneKind, PreviewClip, PreviewLane, PreviewNote};
+use crate::arrangement::{
+    Arrangement, AudioPart, LaneKind, MOST_NOTES, NoteBudget, PreviewClip, PreviewLane, PreviewNote, TOO_MANY_NOTES,
+};
 use crate::velocity;
 
 pub const VIEW: &str = "Bitwig arranger";
@@ -63,6 +65,7 @@ pub fn read(doc: &Document) -> Arrangement {
         .unwrap_or(120.0);
 
     let mut lanes = Vec::new();
+    let mut budget = NoteBudget::new();
     // Each track's launcher slots, the first clip in each (read only when nothing is on the timeline).
     let mut launcher: Vec<Vec<Option<ObjId>>> = Vec::new();
     let mut seen = HashSet::new();
@@ -87,7 +90,7 @@ pub fn read(doc: &Document) -> Arrangement {
             .map(|l| doc.field_list(l, F_ITEMS))
             .unwrap_or_default()
             .into_iter()
-            .filter_map(|c| clip(doc, c))
+            .filter_map(|c| clip(doc, c, &mut budget))
             .collect();
         let kind = if !children.is_empty() {
             LaneKind::Group
@@ -116,8 +119,10 @@ pub fn read(doc: &Document) -> Arrangement {
     let mut notes = Vec::new();
     if !lanes.is_empty() && lanes.iter().all(|l| l.clips.is_empty()) {
         // Nothing on the timeline: lay the clip launcher's scenes end to end instead, each as long as its longest clip.
-        let slots: Vec<Vec<Option<PreviewClip>>> =
-            launcher.iter().map(|row| row.iter().map(|c| c.and_then(|c| clip(doc, c))).collect()).collect();
+        let slots: Vec<Vec<Option<PreviewClip>>> = launcher
+            .iter()
+            .map(|row| row.iter().map(|c| c.and_then(|c| clip(doc, c, &mut budget))).collect())
+            .collect();
         let scenes = slots.iter().map(Vec::len).max().unwrap_or(0);
         let mut at = 0.0;
         let mut placed: Vec<Vec<PreviewClip>> = vec![Vec::new(); lanes.len()];
@@ -144,6 +149,9 @@ pub fn read(doc: &Document) -> Arrangement {
         } else {
             notes.push("Nothing is on the arrangement timeline or in the clip launcher yet.".into());
         }
+    }
+    if budget.ran_out {
+        notes.push(TOO_MANY_NOTES.to_owned());
     }
     Arrangement { view: VIEW, tempo, beats_per_bar: 4, lanes, markers: Vec::new(), notes }
 }
@@ -237,10 +245,11 @@ fn colour(value: Option<&Value>) -> Option<u32> {
 
 /// An arrangement clip: where it is, and what of its content plays. The content has its own timeline; the clip plays
 /// it from its play start, and when looping is on, goes back to the loop range's start each time it reaches its end.
-fn clip(doc: &Document, clip: ObjId) -> Option<PreviewClip> {
+fn clip(doc: &Document, clip: ObjId, budget: &mut NoteBudget) -> Option<PreviewClip> {
     let c = doc.obj(clip);
     let (start, length) = (c.num(F_START)?, c.num(F_DURATION)?);
-    if length.is_nan() || length <= 0.0 {
+    // A damaged file can say anything: a clip with no length, or one that goes on for ever, isn't drawn.
+    if !start.is_finite() || !length.is_finite() || length <= 0.0 {
         return None;
     }
     let muted = c.num(F_MUTED).is_some_and(|m| m > 0.0);
@@ -274,7 +283,9 @@ fn clip(doc: &Document, clip: ObjId) -> Option<PreviewClip> {
             return out;
         }
         let mut pass = loop_end - offset + (at - loop_start);
-        while pass < length {
+        // However short the loop, no more passes than the notes an arrangement holds (and one more, so the budget
+        // sees it ran out).
+        while pass < length && out.len() <= MOST_NOTES {
             out.push(pass);
             pass += pass_length;
         }
@@ -344,8 +355,11 @@ fn clip(doc: &Document, clip: ObjId) -> Option<PreviewClip> {
             }
             let at = n.num(F_START).unwrap_or(0.0);
             let duration = n.num(F_DURATION).unwrap_or(0.25);
-            let velocity = velocity::from_unit(n.num(F_VELOCITY).unwrap_or(0.8)).max(velocity::from_7(1));
+            let velocity = velocity::from_unit(n.num(F_VELOCITY).unwrap_or(0.8));
             for placed in placements(at) {
+                if !budget.take() {
+                    break;
+                }
                 notes.push(PreviewNote {
                     start: placed,
                     length: duration.min(length - placed),

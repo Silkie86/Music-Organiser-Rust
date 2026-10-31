@@ -151,3 +151,42 @@ fn markers_colours_and_the_time_signature() {
     assert_eq!(playlist.bars(), 2.0);
     assert_eq!(playlist.seconds(), 4.0);
 }
+
+#[test]
+fn a_track_name_after_settings_too_short_to_read_isnt_put_on_the_track_before() {
+    let bytes = Flp::new()
+        .ascii(199, "24.1.1.4234")
+        .word(65, 1)
+        .data(224, &note(0, 0, 96, 48, 100))
+        .word(64, 0)
+        .byte(21, 2)
+        .text(201, "3x Osc")
+        .text(203, "Bass")
+        .data(213, &[9])
+        .word(99, 0)
+        .data(
+            233,
+            &[playlist_item_25_on(0, 20481, 96, 499, false), playlist_item_25_on(0, 20481, 96, 498, false)].concat(),
+        )
+        .data(238, &playlist_track(1, false))
+        .text(239, "Bass line")
+        .data(238, &[2, 0, 0])
+        .text(239, "Lost")
+        .build();
+    let [playlist, bitwig] = read(&bytes);
+    assert_eq!(playlist.lanes.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), ["Bass line", "Track 2"]);
+    // Both views agree on what plays.
+    assert_eq!(playlist.note_count(), 2);
+    assert_eq!(bitwig.note_count(), 2);
+}
+
+#[test]
+fn clips_on_a_muted_track_dont_play_as_it_opens_in_bitwig_either() {
+    let [playlist, bitwig] = read(&fl_studio_25_muted_tracks());
+    // The Pad's only clip is on muted track 4; the Snare's second is on muted track 2.
+    assert_eq!(playlist.note_count(), bitwig.note_count());
+    let pad = bitwig.lanes.iter().find(|l| l.name == "Pad").unwrap();
+    assert!(pad.clips.iter().all(|c| c.muted));
+    let acapella = bitwig.lanes.iter().find(|l| l.name == "Acapella").unwrap();
+    assert!(acapella.clips.iter().all(|c| c.muted), "both its clips are on muted tracks");
+}

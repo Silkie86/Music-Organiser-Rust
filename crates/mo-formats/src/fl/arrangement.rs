@@ -11,13 +11,15 @@ use super::events::{
 use super::notes;
 use super::song::{
     CHANNEL_TYPE_AUTOMATION, EV_ARRANGEMENT_NEW, EV_TRACK_DATA, EV_TRACK_NAME, FlChannel, FlSong, FlStretch,
-    PATTERN_BASE, from_12_9_1, playlist_items, read_song_with,
+    PATTERN_BASE, playlist_items, read_song_with, top_slot,
 };
 use super::{Rack, channels as known_channels};
 use crate::arrangement::{
-    Arrangement, AudioPart, LaneKind, PreviewClip, PreviewLane, PreviewMarker, PreviewNote, PreviewPoint,
+    Arrangement, AudioPart, LaneKind, NoteBudget, PreviewClip, PreviewLane, PreviewMarker, PreviewNote, PreviewPoint,
+    TOO_MANY_NOTES,
 };
-use crate::fl::automation::FlPoint;
+use crate::fl::automation::{FlPoint, cut_curve};
+use crate::paths::file_name;
 
 pub const PLAYLIST_VIEW: &str = "FL Studio playlist";
 pub const BITWIG_VIEW: &str = "As it opens in Bitwig";
@@ -64,7 +66,7 @@ struct Track {
     muted: bool,
 }
 
-/// A pattern: its name, colour (when it has one) and its notes, by channel.
+/// A pattern: its name, colour (when it has one) and its notes, by channel, in time order.
 struct Pattern {
     name: String,
     colour: Option<u32>,
@@ -94,19 +96,6 @@ struct Playlist {
     channel_colours: HashMap<u32, u32>,
     channel_names: HashMap<u32, String>,
     automation_channels: HashSet<u32>,
-}
-
-/// What FL saves for the first playlist track: tracks count down from it. From FL 12.9.1 (500 tracks) the first is
-/// 499; before that 198 (199 tracks), though a 2012 song with all its clips on tracks 1 to 4 counted down from 98, so
-/// an older song whose slots all fit under 99 is read that way.
-fn top_slot(version: &str, highest: i64) -> i64 {
-    if from_12_9_1(version) || highest > 198 {
-        499
-    } else if highest > 98 {
-        198
-    } else {
-        98
-    }
 }
 
 fn read_playlist(flp: &Flp<'_>) -> Playlist {
@@ -166,9 +155,9 @@ fn read_playlist(flp: &Flp<'_>) -> Playlist {
             }
             EV_ARRANGEMENT_NEW => arrangements += 1,
             EV_PLAYLIST if playlist.is_none() => playlist = Some(&e.data),
-            EV_TRACK_DATA if first && e.data.len() >= 8 => {
-                let number = u32_at(&e.data, 0);
-                track = number.checked_sub(1);
+            EV_TRACK_DATA if first => {
+                // Settings too short to read: the name that follows isn't put on the track before.
+                track = if e.data.len() >= 8 { u32_at(&e.data, 0).checked_sub(1) } else { None };
                 if let Some(t) = track {
                     // The byte at 12 is 1 when the track plays and 0 when it's muted.
                     let muted = e.data.len() > 12 && byte_at(&e.data, 12) == 0;
@@ -192,7 +181,9 @@ fn read_playlist(flp: &Flp<'_>) -> Playlist {
 
     let mut patterns: BTreeMap<u32, Pattern> = raw_notes
         .into_iter()
-        .map(|(p, notes)| {
+        .map(|(p, mut notes)| {
+            // In time order, so each placement finds its notes by a search, not by looking at every one.
+            notes.sort_by_key(|(_, n)| n.start);
             let name = pattern_names.get(&p).cloned().unwrap_or_else(|| format!("Pattern {p}"));
             (p, Pattern { name, colour: pattern_colours.get(&p).copied(), notes })
         })
@@ -264,6 +255,7 @@ fn playlist_view(song: &FlSong, pl: &Playlist, tempo: f64) -> Arrangement {
     let last = by_track.keys().next_back().copied();
     let mut lanes = Vec::new();
     let mut notes = Vec::new();
+    let mut budget = NoteBudget::new();
 
     // Every track up to the last with a clip on it; named tracks below that too.
     let numbers: BTreeSet<u32> = by_track
@@ -285,9 +277,13 @@ fn playlist_view(song: &FlSong, pl: &Playlist, tempo: f64) -> Arrangement {
                 let end = from.saturating_add(item.length);
                 let in_clip = pattern
                     .map(|pat| {
+                        let first = pat.notes.partition_point(|(_, n)| n.start < from);
                         pat.notes
+                            .get(first..)
+                            .unwrap_or_default()
                             .iter()
-                            .filter(|(_, n)| n.start >= from && n.start < end)
+                            .take_while(|(_, n)| n.start < end)
+                            .take_while(|_| budget.take())
                             .map(|(_, n)| PreviewNote {
                                 start: beats((n.start - from) as f64),
                                 length: beats(n.length.max(1).min(end - n.start) as f64),
@@ -354,6 +350,9 @@ fn playlist_view(song: &FlSong, pl: &Playlist, tempo: f64) -> Arrangement {
         lane.clips = clips;
         lanes.push(lane);
     }
+    if budget.ran_out {
+        notes.push(TOO_MANY_NOTES.to_owned());
+    }
     if pl.items.iter().all(|i| i.pattern.is_none()) && pl.patterns.values().any(|p| !p.notes.is_empty()) {
         notes.push(
             "No patterns are in the playlist: FL Studio plays them in pattern mode. \"As it opens in Bitwig\" lays \
@@ -390,11 +389,6 @@ fn describe(clips: &[PreviewClip]) -> String {
     }
 }
 
-/// The file name at the end of a saved path, whichever slashes it uses.
-fn file_name(path: &str) -> &str {
-    path.rsplit(['\\', '/']).next().unwrap_or(path)
-}
-
 fn by_channel(song: &FlSong, pl: &Playlist, tempo: f64) -> Arrangement {
     let beats = |ticks: i64| ticks as f64 / ppq(song.ppq);
     let mut lanes = Vec::new();
@@ -421,7 +415,8 @@ fn by_channel(song: &FlSong, pl: &Playlist, tempo: f64) -> Arrangement {
                     name: k.name.clone(),
                     start: beats(k.start),
                     length: beats(k.length),
-                    muted: k.muted,
+                    // On a muted playlist track it doesn't play either.
+                    muted: k.muted || k.on_muted_track,
                     notes: k
                         .notes
                         .iter()
@@ -453,7 +448,7 @@ fn by_channel(song: &FlSong, pl: &Playlist, tempo: f64) -> Arrangement {
                     name: c.name.clone(),
                     start: beats(k.start),
                     length: beats(k.length),
-                    muted: k.muted,
+                    muted: k.muted || k.on_muted_track,
                     audio: if c.sample.is_empty() { Vec::new() } else { vec![part(c, beats(k.length), k.from, tempo)] },
                     ..PreviewClip::default()
                 })
@@ -507,34 +502,16 @@ fn part(c: &FlChannel, beats: f64, from: f64, tempo: f64) -> AudioPart {
 }
 
 /// The points of a song-long curve between `start` and `start + length`, timed from `start`, with the value at each
-/// end.
+/// end: the automation reader's own cut, sliding between points, so jumps come out as the song plays them. A jump right
+/// at the end is what's held after the clip, so the clip doesn't draw it.
 fn cut(curve: &[FlPoint], start: f64, length: f64) -> Vec<PreviewPoint> {
-    let (Some(first), Some(last)) = (curve.first(), curve.last()) else { return Vec::new() };
-    let at = |beat: f64| -> f64 {
-        if beat <= first.beat {
-            return first.value;
-        }
-        for pair in curve.windows(2) {
-            let [a, b] = pair else { continue };
-            if beat <= b.beat {
-                return if b.beat - a.beat < 1e-9 {
-                    b.value
-                } else {
-                    a.value + (b.value - a.value) * (beat - a.beat) / (b.beat - a.beat)
-                };
-            }
-        }
-        last.value
-    };
-    let mut points = vec![PreviewPoint { beat: 0.0, value: at(start) }];
-    points.extend(
-        curve
-            .iter()
-            .filter(|p| p.beat > start && p.beat < start + length)
-            .map(|p| PreviewPoint { beat: p.beat - start, value: p.value }),
-    );
-    points.push(PreviewPoint { beat: length, value: at(start + length) });
-    points
+    let mut points = cut_curve(curve, 0.0, start, length, false);
+    if let [.., a, b] = points.as_slice()
+        && a.beat == b.beat
+    {
+        points.pop();
+    }
+    points.into_iter().map(|p| PreviewPoint { beat: p.beat, value: p.value }).collect()
 }
 
 #[cfg(test)]
@@ -549,15 +526,6 @@ mod tests {
     fn colours_come_out_as_rgb() {
         assert_eq!(rgb(0x0033_2211), 0x11_22_33);
         assert_eq!(rgb(0xFF00_00FF), 0xFF_00_00, "the top byte isn't a colour");
-    }
-
-    #[test]
-    fn counts_tracks_down_from_the_top_slot_the_version_saves() {
-        assert_eq!(top_slot("20.8.4.2576", 5), 499);
-        assert_eq!(top_slot("12.9.1", 0), 499);
-        assert_eq!(top_slot("12.5.1", 198), 198);
-        assert_eq!(top_slot("11.0.0", 98), 98, "a 2012 song with its clips on tracks 1 to 4");
-        assert_eq!(top_slot("9.0.0", 300), 499);
     }
 
     #[test]
@@ -583,12 +551,5 @@ mod tests {
         assert_eq!(describe(&[]), "");
         assert_eq!(describe(&[clip("Drums"), clip("Drums")]), "Drums");
         assert_eq!(describe(&[clip("Drums"), clip("Bass"), clip("Drums"), clip("Lead")]), "Drums + 2 more");
-    }
-
-    #[test]
-    fn file_names_from_either_slash() {
-        assert_eq!(file_name(r"C:\Samples\Kick.wav"), "Kick.wav");
-        assert_eq!(file_name("/Users/s/Kick.wav"), "Kick.wav");
-        assert_eq!(file_name("Kick.wav"), "Kick.wav");
     }
 }

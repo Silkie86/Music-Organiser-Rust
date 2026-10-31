@@ -140,10 +140,11 @@ impl Arrangement {
         self.lanes.iter().map(|l| l.clips.len()).sum()
     }
 
-    /// The notes that play: none in muted clips, no muted notes.
+    /// The notes that play: none on muted lanes or in muted clips, no muted notes.
     pub fn note_count(&self) -> usize {
         self.lanes
             .iter()
+            .filter(|l| !l.muted)
             .flat_map(|l| &l.clips)
             .filter(|c| !c.muted)
             .map(|c| c.notes.iter().filter(|n| !n.muted).count())
@@ -152,6 +153,35 @@ impl Arrangement {
 
     pub fn seconds(&self) -> f64 {
         if self.tempo > 0.0 { self.length() * 60.0 / self.tempo } else { 0.0 }
+    }
+}
+
+/// The most notes an arrangement holds, as the song readers' limit: a damaged file can loop a clip millions of times.
+pub const MOST_NOTES: usize = 4_000_000;
+/// Said when an arrangement reaches [`MOST_NOTES`].
+pub const TOO_MANY_NOTES: &str =
+    "This project has more notes than the preview holds (4 million), so only the first are drawn.";
+
+/// What's left of an arrangement's [`MOST_NOTES`], spent as notes are placed.
+#[derive(Debug)]
+pub(crate) struct NoteBudget {
+    left: usize,
+    pub ran_out: bool,
+}
+
+impl NoteBudget {
+    pub fn new() -> NoteBudget {
+        NoteBudget { left: MOST_NOTES, ran_out: false }
+    }
+
+    /// Takes one note from the budget: false when there are none left.
+    pub fn take(&mut self) -> bool {
+        if self.left == 0 {
+            self.ran_out = true;
+            return false;
+        }
+        self.left -= 1;
+        true
     }
 }
 

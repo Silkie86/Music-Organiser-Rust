@@ -45,6 +45,11 @@ const CLIP: u32 = 0x47;
 
 /// A note clip `length` beats long at `start`, playing a 4-beat loop of a kick on beat 1 and a long one on beat 4.
 fn note_clip(b: &mut BwWriter, start: f64, length: f64, looping: bool) {
+    note_clip_looping(b, start, length, looping, 4.0);
+}
+
+/// [`note_clip`] with a loop `loop_beats` long.
+fn note_clip_looping(b: &mut BwWriter, start: f64, length: f64, looping: bool, loop_beats: f64) {
     b.begin(CLIP);
     b.f64(START, start);
     b.f64(DURATION, length);
@@ -78,7 +83,7 @@ fn note_clip(b: &mut BwWriter, start: f64, length: f64, looping: bool) {
     b.obj(0x992);
     b.begin(0x504);
     b.f64(START, 0.0);
-    b.f64(DURATION, 4.0);
+    b.f64(DURATION, loop_beats);
     b.end();
     b.end();
     b.end();
@@ -348,4 +353,56 @@ fn studio_one_tracks_folders_parts_patterns_audio_and_markers() {
         (92.0, ["Nothing is on this song's timeline yet.".to_owned()].as_slice())
     );
     assert_eq!(read("x.song", b"not a zip").notes, ["This song couldn't be read in enough detail to draw."]);
+}
+
+#[test]
+fn a_damaged_project_cant_loop_a_clip_for_ever() {
+    // A clip that goes on for ever isn't drawn; a tiny loop in a long clip stops at the notes the preview holds.
+    let bytes = bitwig_project(|b| {
+        track(
+            b,
+            "Beat",
+            None,
+            |b| {
+                b.obj(ARRANGER);
+                b.begin(0x511);
+                b.list(ITEMS);
+                note_clip(b, 0.0, f64::INFINITY, true);
+                note_clip_looping(b, 0.0, 1e12, true, 1e-6);
+                b.end_list();
+                b.end();
+            },
+            |_| {},
+        )
+    });
+    let a = read("Damaged.bwproject", &bytes);
+    assert_eq!(a.clip_count(), 1);
+    assert_eq!(a.lanes[0].clips[0].notes.len(), arrangement::MOST_NOTES);
+    assert_eq!(a.notes, [arrangement::TOO_MANY_NOTES]);
+
+    let song = r#"<Song><List x:id="Tracks"><MediaTrack name="Drums" mediaType="Music"><List x:id="Events">
+        <MusicPatternPart start="0" length="1e300" clipID="{P1}"/>
+        <MusicPatternPart start="0" length="1e400" clipID="{P1}"/>
+    </List></MediaTrack></List></Song>"#;
+    let pool = r#"<MediaPool><MusicClip mediaID="{P1}"><Url url="media:///Beat.pattern"/></MusicClip></MediaPool>"#;
+    let pattern = r#"<Pattern><PatternPerformance stepLength="0.25" stepCount="1"><PatternStep start="0" pitch="36"/></PatternPerformance></Pattern>"#;
+    let bytes = stored_zip(&[
+        ("Song/song.xml", song.as_bytes()),
+        ("Song/mediapool.xml", pool.as_bytes()),
+        ("Beat.pattern", pattern.as_bytes()),
+    ]);
+    let a = read("Damaged.song", &bytes);
+    assert_eq!(a.lanes[0].clips.iter().map(|c| c.notes.len()).collect::<Vec<_>>(), [arrangement::MOST_NOTES, 0]);
+    assert!(a.notes.contains(&arrangement::TOO_MANY_NOTES.to_owned()));
+}
+
+#[test]
+fn notes_on_muted_tracks_dont_count_as_playing() {
+    let song = r#"<Song><List x:id="Tracks">
+        <MediaTrack name="On" mediaType="Music"><List x:id="Events"><MusicPart start="0" length="4"><NoteEvent start="0" pitch="60"/></MusicPart></List></MediaTrack>
+        <MediaTrack name="Off" mediaType="Music" mute="1"><List x:id="Events"><MusicPart start="0" length="4"><NoteEvent start="0" pitch="60"/><NoteEvent start="1" pitch="62"/></MusicPart></List></MediaTrack>
+    </List></Song>"#;
+    let a = read("Muted.song", &stored_zip(&[("Song/song.xml", song.as_bytes())]));
+    assert_eq!(a.lanes.iter().map(|l| l.muted).collect::<Vec<_>>(), [false, true]);
+    assert_eq!(a.note_count(), 1);
 }

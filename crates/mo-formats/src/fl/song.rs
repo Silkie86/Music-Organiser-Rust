@@ -266,7 +266,8 @@ pub(super) struct PlaylistTracks {
     /// The track a name that follows is for: none after settings too short to read, so the name isn't put on the
     /// track before.
     last: Option<u32>,
-    /// From FL 12.9.1 every playlist has 500 tracks, so the first is 500 whatever a save cut short kept of them.
+    /// How many tracks the playlist has, which a clip's slot counts down from (see [`top_slot`]): from FL 12.9.1
+    /// always 500, whatever a save cut short kept of them; before that, told from the slots the clips are on.
     tracks_by_version: Option<i64>,
 }
 
@@ -293,10 +294,19 @@ impl PlaylistTracks {
         }
     }
 
+    /// Works out how many tracks a save from before FL 12.9.1 has, from the slots its clips are on: it doesn't keep
+    /// every track (Solomon's FL 11 "Fuego96" keeps 35, with its clips on slots 189 to 198, tracks 1 to 10).
+    pub fn count_from(&mut self, items: &[PlaylistItem], version: &str) {
+        if self.tracks_by_version.is_none() {
+            let highest = items.iter().map(|i| i.slot).max().unwrap_or(0);
+            self.tracks_by_version = Some(top_slot(version, highest) + 1);
+        }
+    }
+
     /// The track a clip is on, from the slot FL saves with it, which counts down from the first track (499 is track 1
     /// of 500), and whether that track is muted.
     pub fn at(&self, slot: i64) -> Option<&(FlTrack, bool)> {
-        let count = self.tracks_by_version.unwrap_or(self.tracks.len() as i64);
+        let count = self.tracks_by_version.unwrap_or(500);
         u32::try_from(count - slot).ok().and_then(|n| self.tracks.get(&n))
     }
 
@@ -307,6 +317,20 @@ impl PlaylistTracks {
 
     fn muted(&self, slot: i64) -> bool {
         self.at(slot).is_some_and(|t| t.1)
+    }
+}
+
+/// What FL saves for the first playlist track: tracks count down from it. From FL 12.9.1 (500 tracks) the first is
+/// 499; before that 198 (199 tracks), though a 2012 song with all its clips on tracks 1 to 4 counted down from 98, so
+/// an older song whose slots all fit under 99 is read that way (the C# app's arrangement preview, checked on Solomon's
+/// saves from FL 9 to 12).
+pub(super) fn top_slot(version: &str, highest: i64) -> i64 {
+    if from_12_9_1(version) || highest > 198 {
+        499
+    } else if highest > 98 {
+        198
+    } else {
+        98
     }
 }
 
@@ -842,6 +866,7 @@ pub fn read_song_with(flp: &Flp<'_>, sounds: bool) -> FlSong {
     }
 
     let items = playlist.map(playlist_items).unwrap_or_default();
+    tracks.count_from(&items, &flp.version);
     let mixer = MixerSettings::new(mixer_settings);
     // An automation clip switched off in the Channel Rack doesn't play, like a muted one.
     links.retain(|(clip, _)| !off.contains(clip));
@@ -1105,6 +1130,7 @@ pub fn extract_channels(flp: &Flp<'_>) -> Vec<MidiChannel> {
     }
 
     let items = playlist.map(playlist_items).unwrap_or_default();
+    tracks.count_from(&items, &flp.version);
     let known = seen_channels;
     let notes: BTreeMap<u32, Vec<NoteEvent>> = place_clips(flp, &raw_notes, &items, &tracks, &known, &pattern_names)
         .0
@@ -1159,8 +1185,20 @@ mod tests {
         assert_eq!(tracks.number(499), 1);
         assert_eq!(tracks.number(498), 2);
         assert_eq!(tracks.number(1), 0, "track 499 wasn't kept");
-        // An older save counts down from the tracks it has.
+        // An older save counts down from where its clips' slots say the first track is, however many it kept.
         tracks.tracks_by_version = None;
-        assert_eq!(tracks.number(1), 1);
+        let item = |slot| PlaylistItem { index: 1, at: 0, length: 96, offset: 0.0, muted: false, slot };
+        tracks.count_from(&[item(198), item(197)], "11.0.3");
+        assert_eq!(tracks.number(198), 1);
+        assert_eq!(tracks.number(197), 2);
+    }
+
+    #[test]
+    fn counts_tracks_down_from_the_top_slot_the_version_saves() {
+        assert_eq!(top_slot("20.8.4.2576", 5), 499);
+        assert_eq!(top_slot("12.9.1", 0), 499);
+        assert_eq!(top_slot("12.5.1", 198), 198);
+        assert_eq!(top_slot("11.0.0", 98), 98, "a 2012 song with its clips on tracks 1 to 4");
+        assert_eq!(top_slot("9.0.0", 300), 499);
     }
 }

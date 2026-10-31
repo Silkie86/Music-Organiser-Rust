@@ -11,7 +11,9 @@ use std::collections::HashMap;
 use roxmltree::Node;
 
 use super::{Song, attr, elements, id, num, parse, unescape, url_to_path};
-use crate::arrangement::{Arrangement, AudioPart, LaneKind, PreviewClip, PreviewLane, PreviewMarker, PreviewNote};
+use crate::arrangement::{
+    Arrangement, AudioPart, LaneKind, NoteBudget, PreviewClip, PreviewLane, PreviewMarker, PreviewNote, TOO_MANY_NOTES,
+};
 use crate::{paths, velocity};
 
 pub const VIEW: &str = "Studio One arrangement";
@@ -58,6 +60,7 @@ impl Song<'_> {
         let in_seconds = |e: Node<'_, '_>| attr(e, "timeFormat") == "0";
 
         let mut lanes = Vec::new();
+        let mut budget = NoteBudget::new();
         let top = elements(song)
             .find(|l| l.tag_name().name() == "List" && id(*l) == "Tracks")
             .or_else(|| song.children().find(|c| c.is_element() && c.tag_name().name() == "Tracks"));
@@ -142,6 +145,7 @@ impl Song<'_> {
                             .iter()
                             .filter(from_offset)
                             .filter(|n| n.start < offset + length)
+                            .take_while(|_| budget.take())
                             .map(|n| PreviewNote {
                                 start: n.start - offset,
                                 length: n.length.min(offset + length - n.start),
@@ -165,15 +169,19 @@ impl Song<'_> {
                             None => (Vec::new(), 0.0),
                         };
                         let mut notes = Vec::new();
-                        if loop_beats > 0.0 {
+                        if loop_beats > 0.0 && length.is_finite() {
                             let mut at = 0.0;
-                            while at < length - 1e-9 {
-                                notes.extend(
-                                    steps
-                                        .iter()
-                                        .filter(|n| at + n.start < length)
-                                        .map(|n| PreviewNote { start: at + n.start, ..*n }),
-                                );
+                            // Stops when the arrangement holds all the notes it can, however short the loop.
+                            'passes: while at < length - 1e-9 {
+                                for n in steps.iter().filter(|n| at + n.start < length) {
+                                    if !budget.take() {
+                                        break 'passes;
+                                    }
+                                    notes.push(PreviewNote { start: at + n.start, ..*n });
+                                }
+                                if steps.is_empty() {
+                                    break;
+                                }
                                 at += loop_beats;
                             }
                         }
@@ -223,6 +231,9 @@ impl Song<'_> {
         let mut notes = Vec::new();
         if lanes.iter().all(|l| l.clips.is_empty()) {
             notes.push("Nothing is on this song's timeline yet.".to_owned());
+        }
+        if budget.ran_out {
+            notes.push(TOO_MANY_NOTES.to_owned());
         }
         Arrangement { view: VIEW, tempo, beats_per_bar, lanes, markers, notes }
     }
@@ -333,13 +344,14 @@ fn colour(argb: &str) -> Option<u32> {
     rgb.bytes().all(|b| b.is_ascii_hexdigit()).then(|| u32::from_str_radix(rgb, 16).ok()).flatten()
 }
 
-/// A velocity as Studio One saves it: 0 to 1 in newer songs, MIDI 1.0's 0 to 127 in older ones; never silent.
+/// A velocity as Studio One saves it, as the song reader reads it: 0 to 1 in newer songs, kept in MIDI 2.0's 16 bits
+/// (rule 22), or MIDI 1.0's 0 to 127 in older ones. "NaN" is the quietest (MIDI 1.0's 1), as in the C# app.
 fn velocity_of(v: Option<f64>) -> u16 {
-    let v = v.unwrap_or(0.8);
-    let seven = if v <= 1.0 { v * 127.0 } else { v };
-    // "NaN" is the quietest, as in the C# app.
-    let seven = if seven.is_nan() { 1.0 } else { seven.round_ties_even().clamp(1.0, 127.0) };
-    velocity::from_7(seven as u8)
+    match v.unwrap_or(0.8) {
+        v if v.is_nan() => velocity::from_7(1),
+        v if v > 1.0 => velocity::from_7(v.round_ties_even().min(127.0) as u8),
+        v => velocity::from_unit(v),
+    }
 }
 
 /// Notes written straight into a part (as some older songs, and the tests, do).
@@ -480,9 +492,10 @@ mod tests {
         assert_eq!(colour("FF3366CC"), Some(0x33_66CC));
         assert_eq!(colour("3366CC"), None);
         assert_eq!(colour("FF3366ZZ"), None);
-        assert_eq!(velocity::to_7(velocity_of(Some(1.0))), 127);
-        assert_eq!(velocity::to_7(velocity_of(Some(100.0))), 100);
-        assert_eq!(velocity::to_7(velocity_of(Some(0.0))), 1, "never silent");
-        assert_eq!(velocity::to_7(velocity_of(None)), 102);
+        assert_eq!(velocity_of(Some(1.0)), velocity::from_unit(1.0));
+        assert_eq!(velocity_of(Some(0.503)), velocity::from_unit(0.503), "16 bits kept");
+        assert_eq!(velocity_of(Some(100.0)), velocity::from_7(100));
+        assert_eq!(velocity_of(Some(f64::NAN)), velocity::from_7(1));
+        assert_eq!(velocity_of(None), velocity::from_unit(0.8));
     }
 }
