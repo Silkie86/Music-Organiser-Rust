@@ -34,6 +34,9 @@ const LONGEST_FILE_NAME: usize = 120;
 const TAKEN_HEADER: &str =
     "Sounds this save lost (the plugin gave FL Studio none), taken from an older save of the song:";
 
+/// The heading for samples found somewhere else (new in the Rust app).
+const FOUND_HEADER: &str = "Samples that weren't where FL Studio saved them, found somewhere else and used from there:";
+
 /// .NET's ticks (100 ns) at 1970-01-01, so [`written`] reads the same as the C# app's in the shared settings.
 const TICKS_AT_1970: u128 = 621_355_968_000_000_000;
 
@@ -202,19 +205,24 @@ pub fn bitwig_from_fl(
     let name = safe_file_name(name);
     let notes_file = dir.join(format!("{name} - not carried over.txt"));
     // The notes go first, so a failure there leaves the earlier convert as it was.
+    // As the C# app lays it out: the list with a blank line under its heading, then each further section under its
+    // own heading, a blank line between.
     let sections = [
-        (format!("What didn't come across from FL Studio to Bitwig for {name}\r\n"), &converted.notes),
-        (TAKEN_HEADER.to_owned(), &taken),
-        ("Samples found somewhere else, and used from there:".to_owned(), &found),
+        (format!("What didn't come across from FL Studio to Bitwig for {name}"), true, &converted.notes),
+        (TAKEN_HEADER.to_owned(), false, &taken),
+        (FOUND_HEADER.to_owned(), false, &found),
     ];
-    let has_notes = sections.iter().any(|(_, lines)| !lines.is_empty());
+    let has_notes = sections.iter().any(|(_, _, lines)| !lines.is_empty());
     if has_notes {
         let mut text = String::new();
-        for (header, lines) in sections.iter().filter(|(_, lines)| !lines.is_empty()) {
+        for (header, blank, lines) in sections.iter().filter(|(_, _, lines)| !lines.is_empty()) {
             if !text.is_empty() {
                 text.push_str("\r\n");
             }
             text.push_str(&format!("{header}\r\n"));
+            if *blank {
+                text.push_str("\r\n");
+            }
             for n in lines.iter() {
                 text.push_str(&format!("  {n}\r\n"));
             }

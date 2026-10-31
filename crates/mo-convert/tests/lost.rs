@@ -60,3 +60,34 @@ fn a_song_that_lost_nothing_reads_no_other_save() {
     assert!(from_older_saves(&mut lost, &path).is_empty());
     assert!(lost.channels[0].instrument.as_ref().unwrap().nothing_saved);
 }
+
+#[test]
+fn the_convert_says_which_sounds_it_took_and_from_where() {
+    use common::bitwig::{Template, bitwig_template};
+    let dir = folder("lost sounds convert");
+    std::fs::write(dir.join("funk step_8.flp"), common::fl_studio_9_project(b"CELL")).unwrap();
+    // Fix's copy of the same save counts as that save, and the save itself is used first.
+    std::fs::write(dir.join("funk step_8 (fixed).flp"), common::fl_studio_9_project(b"FIXED")).unwrap();
+    let path = dir.join("funk step_9.flp");
+    std::fs::write(&path, common::fl_studio_25_nothing_saved()).unwrap();
+    let template = bitwig_template(Template::default());
+    let saved = mo_convert::save::bitwig_from_fl(
+        &path,
+        &dir.join("Exports"),
+        &template,
+        "funk step_9",
+        None,
+        mo_convert::Options::default(),
+        &|_| None,
+    )
+    .unwrap();
+    assert_eq!(saved.taken, ["Cell: LegacyCell's sound, from funk step_8"]);
+    let list = std::fs::read_to_string(saved.file.with_file_name("funk step_9 - not carried over.txt")).unwrap();
+    assert!(
+        list.contains(
+            "Sounds this save lost (the plugin gave FL Studio none), taken from an older save of the song:\r\n  Cell: \
+             LegacyCell's sound, from funk step_8\r\n"
+        ),
+        "{list}"
+    );
+}
