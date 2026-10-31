@@ -3,9 +3,10 @@
 //! background thread when the song is picked (rule 12). As the C# app's panel, less what needs writing (song fields
 //! stay read-only until the Rust app's database is trusted).
 
+use mo_formats::paths::file_name;
 use mo_library::{PluginKind, ProjectPlugin, ProjectSample, Save, SaveDetail};
 
-use crate::songs::{SongRow, tempo_text, thousands};
+use crate::songs::{SongRow, plural, tempo_text, thousands};
 
 /// The line above the name: "124 BPM · First made 3 Mar 2019 · saved 27 Oct 2026", or "Saved 27 Oct 2026" when it
 /// was all one day.
@@ -37,11 +38,6 @@ pub fn saves_text(row: &SongRow) -> String {
     text
 }
 
-/// "Night Drive_77.flp": the last part of a path, whichever way its slashes lean.
-pub fn file_name(path: &str) -> &str {
-    path.rsplit(['\\', '/']).next().unwrap_or(path)
-}
-
 /// The folder part of a path: everything before its file name.
 pub fn folder_of(path: &str) -> &str {
     let name = file_name(path);
@@ -50,11 +46,7 @@ pub fn folder_of(path: &str) -> &str {
 
 /// "No plugins", "1 plugin", "1,234 plugins".
 pub fn count_of(n: usize, thing: &str) -> String {
-    match n {
-        0 => format!("No {thing}s"),
-        1 => format!("1 {thing}"),
-        _ => format!("{} {thing}s", thousands(n)),
-    }
+    if n == 0 { format!("No {thing}s") } else { plural(n, thing) }
 }
 
 /// Overview's line of counts, each one opening its own tab.
@@ -95,9 +87,9 @@ impl Tab {
 }
 
 /// "9 plugins (1 missing) · 31 samples (3 missing) · 77 saves · 14 channels". Until the save's record is read, the
-/// counts the list already has stand in.
+/// counts the list already has stand in; then all of them come from the record, read in one go.
 pub fn counts(row: &SongRow, detail: Option<&SaveDetail>) -> Vec<Count> {
-    let l = &row.song.latest;
+    let l = detail.map_or(&row.song.latest, |d| &d.save);
     let plugins = detail.map_or(l.plugin_count as usize, |d| d.plugins.len());
     let samples = detail.map_or(l.sample_count as usize, |d| d.samples.len());
     let missing = |n: u32| if n > 0 { format!("{} missing", thousands(n as usize)) } else { String::new() };
@@ -106,9 +98,10 @@ pub fn counts(row: &SongRow, detail: Option<&SaveDetail>) -> Vec<Count> {
         Count { text: count_of(samples, "sample"), missing: missing(l.missing_samples), tab: Tab::Samples },
         Count { text: count_of(row.song.save_count(), "save"), missing: String::new(), tab: Tab::Saves },
     ];
-    let tracks = detail.map(|d| d.tracks.len()).or_else(|| usize::try_from(l.track_count).ok());
+    // A record without its track names (an older scan) keeps the count the list has.
+    let tracks = detail.map(|d| d.tracks.len()).filter(|n| *n > 0).or_else(|| usize::try_from(l.track_count).ok());
     if let Some(n) = tracks {
-        out.push(Count { text: count_of(n, track_word(l)), missing: String::new(), tab: Tab::Details });
+        out.push(Count { text: count_of(n, track_word(&row.song.latest)), missing: String::new(), tab: Tab::Details });
     }
     out
 }
@@ -142,13 +135,13 @@ impl PluginLine {
 }
 
 /// "Plugins (12, 1 missing)".
-pub fn plugins_heading(row: &SongRow, detail: &SaveDetail) -> String {
-    heading("Plugins", detail.plugins.len(), row.song.latest.missing_plugins)
+pub fn plugins_heading(detail: &SaveDetail) -> String {
+    heading("Plugins", detail.plugins.len(), detail.save.missing_plugins)
 }
 
 /// "Samples (31, 3 missing)".
-pub fn samples_heading(row: &SongRow, detail: &SaveDetail) -> String {
-    heading("Samples", detail.samples.len(), row.song.latest.missing_samples)
+pub fn samples_heading(detail: &SaveDetail) -> String {
+    heading("Samples", detail.samples.len(), detail.save.missing_samples)
 }
 
 fn heading(what: &str, n: usize, missing: u32) -> String {
@@ -197,8 +190,22 @@ pub fn save_lines(row: &SongRow) -> Vec<SaveLine> {
     let mut out = Vec::with_capacity(saves.len() + row.runs.len());
     let mut run_at = None;
     for s in saves {
-        // Runs are oldest first and don't overlap; a save belongs to the one its date falls in.
-        let run = row.runs.iter().rposition(|r| r.start <= s.modified && s.modified <= r.end);
+        // A save belongs to the run its date falls in. A moved file isn't in any run (runs only count files still
+        // there), so it goes with the run nearest its date.
+        let run = row
+            .runs
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, r)| {
+                if s.modified < r.start {
+                    r.start - s.modified
+                } else if s.modified > r.end {
+                    s.modified - r.end
+                } else {
+                    chrono::TimeDelta::zero()
+                }
+            })
+            .map(|(i, _)| i);
         if row.runs.len() > 1
             && run.is_some()
             && run != run_at
@@ -206,10 +213,7 @@ pub fn save_lines(row: &SongRow) -> Vec<SaveLine> {
         {
             out.push(SaveLine::Run { label: r.label(), details: r.details() });
         }
-        // A moved file isn't in any run (runs only count files still there): it stays under the heading above it.
-        if run.is_some() {
-            run_at = run;
-        }
+        run_at = run;
         out.push(SaveLine::Save {
             name: s.name.clone(),
             date: s.modified.format("%-d %b %Y").to_string(),
@@ -277,13 +281,18 @@ mod tests {
             track_count: 14,
             ..save("A_2", day(2025, 2, 1))
         };
-        let r = row(&[newest, save("A", day(2025, 1, 1))]);
+        let r = row(&[newest.clone(), save("A", day(2025, 1, 1))]);
         let texts = |c: Vec<Count>| {
             c.into_iter().map(|c| format!("{} {}", c.text, c.missing).trim().to_owned()).collect::<Vec<_>>()
         };
         assert_eq!(texts(counts(&r, None)), ["9 plugins", "31 samples 3 missing", "2 saves", "14 channels"]);
-        let detail = SaveDetail { tracks: vec!["Kick".into()], ..SaveDetail::default() };
-        assert_eq!(texts(counts(&r, Some(&detail))), ["No plugins", "No samples 3 missing", "2 saves", "1 channel"]);
+        // Once read, the record's own counts are used, the missing ones too.
+        let reread = Save { missing_samples: 0, ..newest };
+        let detail = SaveDetail { tracks: vec!["Kick".into()], save: reread.clone(), ..SaveDetail::default() };
+        assert_eq!(texts(counts(&r, Some(&detail))), ["No plugins", "No samples", "2 saves", "1 channel"]);
+        // A record without track names keeps the list's count.
+        let no_tracks = SaveDetail { save: reread, ..SaveDetail::default() };
+        assert_eq!(texts(counts(&r, Some(&no_tracks)))[3], "14 channels");
         let unknown = row(&[save("B", day(2025, 1, 1))]);
         assert_eq!(counts(&unknown, None).len(), 3);
     }
@@ -295,6 +304,7 @@ mod tests {
             save("Didums_3", day(2024, 8, 1)),
             save("Didums_2", day(2019, 1, 20)),
             Save { file_missing: true, ..save("Didums", day(2019, 1, 10)) },
+            Save { file_missing: true, ..save("Didums_1", day(2020, 1, 1)) },
         ]);
         let lines: Vec<String> = save_lines(&r)
             .into_iter()
@@ -316,11 +326,13 @@ mod tests {
                 "Didums_4 3 Aug 2024 newest",
                 "Didums_3 1 Aug 2024",
                 "# 2019 original (Didums_2 · 20 Jan 2019)",
+                // Moved, and nearer the 2019 run than the 2024 one.
+                "Didums_1 1 Jan 2020 missing",
                 "Didums_2 20 Jan 2019",
                 "Didums 10 Jan 2019 missing",
             ]
         );
-        assert_eq!(saves_heading(&r), "4 saves, newest first");
+        assert_eq!(saves_heading(&r), "5 saves, newest first");
         // One run needs no heading.
         let one = row(&[save("X_2", day(2024, 8, 3)), save("X", day(2024, 8, 1))]);
         assert!(save_lines(&one).iter().all(|l| matches!(l, SaveLine::Save { .. })));

@@ -223,7 +223,8 @@ pub fn tempo_text(t: f64) -> String {
     s.trim_end_matches('0').trim_end_matches('.').to_owned()
 }
 
-fn plural(n: usize, what: &str) -> String {
+/// "1 song", "16,000 songs".
+pub fn plural(n: usize, what: &str) -> String {
     if n == 1 { format!("1 {what}") } else { format!("{} {what}s", thousands(n)) }
 }
 

@@ -127,12 +127,18 @@ pub fn connect(app: &AppWindow, path: std::path::PathBuf) {
     let db = path.clone();
     let mut library: Option<Library> = None;
     let reader = Newest::start("Song panel", move |(asked, id): (u64, i64)| {
-        if library.is_none() {
-            library = Library::open_read_only(&db).ok();
-        }
-        let read = match &library {
-            Some(lib) => lib.detail(id).map_err(|e| e.to_string()),
-            None => Err("The library can't be opened.".to_owned()),
+        // Opened at the first pick and kept; tried again at the next pick if it couldn't be.
+        let opened = match library.take() {
+            Some(lib) => Ok(lib),
+            None => Library::open_read_only(&db),
+        };
+        let read = match opened {
+            Ok(lib) => {
+                let read = lib.detail(id).map_err(|e| e.to_string());
+                library = Some(lib);
+                read
+            }
+            Err(e) => Err(format!("the library can't be opened ({e})")),
         };
         let _ = weak.upgrade_in_event_loop(move |app| arrived(&app, asked, read));
     });
@@ -254,6 +260,10 @@ fn pick(app: &AppWindow, row: Option<usize>) {
     let (row, id) = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         let row = row.filter(|r| *r < p.songs.rows.len());
+        if row.is_some() && row == p.picked {
+            // Already open: keep its tab and what has been read.
+            return (row, None);
+        }
         p.picked = row;
         p.asked += 1;
         p.detail = None;
@@ -288,22 +298,16 @@ fn arrived(app: &AppWindow, asked: u64, read: Result<Option<SaveDetail>, String>
             data.set_detail_message(format!("Couldn't read this save's details: {e}").into());
         }
     }
-    fill_panel(app);
+    fill_detail(app);
 }
 
-/// Puts the picked song in the panel, with its record when it has been read.
+/// Puts the picked song in the panel: what the list knows, then [`fill_detail`].
 fn fill_panel(app: &AppWindow) {
     let data = app.global::<SongsData>();
     PAGE.with(|p| {
         let p = p.borrow();
         let Some(r) = p.picked.and_then(|i| p.songs.rows.get(i)) else { return };
         data.set_song(panel_song(r));
-        let detail = p.detail.as_ref();
-        data.set_counts(model(panel::counts(r, detail).into_iter().map(|c| CountLine {
-            text: c.text.into(),
-            missing: c.missing.into(),
-            tab: c.tab.index() as i32,
-        })));
         data.set_runs(model(
             r.runs.iter().rev().map(|run| SharedString::from(format!("{} · {}", run.label(), run.details()))),
         ));
@@ -322,14 +326,30 @@ fn fill_panel(app: &AppWindow) {
                 newest,
             },
         })));
+    });
+    fill_detail(app);
+}
+
+/// The parts of the panel that come from the newest save's record: empty until it has been read.
+fn fill_detail(app: &AppWindow) {
+    let data = app.global::<SongsData>();
+    PAGE.with(|p| {
+        let p = p.borrow();
+        let Some(r) = p.picked.and_then(|i| p.songs.rows.get(i)) else { return };
+        let detail = p.detail.as_ref();
+        data.set_counts(model(panel::counts(r, detail).into_iter().map(|c| CountLine {
+            text: c.text.into(),
+            missing: c.missing.into(),
+            tab: c.tab.index() as i32,
+        })));
         let empty = SaveDetail::default();
         let d = detail.unwrap_or(&empty);
-        data.set_plugins_heading(panel::plugins_heading(r, d).into());
+        data.set_plugins_heading(panel::plugins_heading(d).into());
         data.set_plugins(model(d.plugins.iter().map(|pl| {
             let l = panel::PluginLine::new(pl);
             PluginLine { name: l.name.into(), about: l.about.into(), installed: l.installed }
         })));
-        data.set_samples_heading(panel::samples_heading(r, d).into());
+        data.set_samples_heading(panel::samples_heading(d).into());
         data.set_samples(model(d.samples.iter().map(|sm| {
             let l = panel::SampleLine::new(sm);
             SampleLine {

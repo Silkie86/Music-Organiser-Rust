@@ -262,6 +262,12 @@ component SongPanel inherits Rectangle {
                         }
                     }
                 }
+                if SongsData.detail-message != "": Text {
+                    text: SongsData.detail-message;
+                    color: Theme.muted;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
                 if SongsData.runs.length > 1: Caps {
                     text: "RUNS";
                 }
@@ -534,7 +540,7 @@ export component SongsPage inherits Rectangle {
                 height: parent.height;
                 width: SongsData.selected >= 0 ? max(380px, (parent.width - 16px) / 3) : parent.width;
                 // Narrow beside the panel: what's missing and the status make room for the name.
-                property <bool> wide: self.width > 640px;
+                property <bool> wide: SongsData.selected < 0 || self.width > 640px;
                 if SongsData.message != "": Text {
                     text: SongsData.message;
                     color: Theme.muted;
