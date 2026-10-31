@@ -3,6 +3,7 @@
 //! The format isn't published, but it's well worked out (the C# app's reader, PyFLP, and Solomon's saves from FL 4
 //! to FL 26). See [`events`] for how the file is laid out.
 
+pub mod arrangement;
 pub mod automation;
 pub mod events;
 mod notes;

@@ -24,7 +24,7 @@ const EV_CHANNEL_INSERT: u8 = 22;
 /// Sample flags; 0x2 plays it backwards (PyFLP's reading, not yet seen in a save).
 const EV_CHANNEL_FX: u8 = 70;
 /// Starts an arrangement (FL 12.9 onwards); its name, playlist and tracks follow.
-const EV_ARRANGEMENT_NEW: u8 = 99;
+pub(super) const EV_ARRANGEMENT_NEW: u8 = 99;
 /// The mixer insert a channel is routed to (seen from FL 20 to 25).
 const EV_CHANNEL_ROUTE: u8 = 104;
 /// The channel's root key as a MIDI note; absent when it's C5 (60).
@@ -42,11 +42,11 @@ const EV_ENVELOPE: u8 = 218;
 /// i32 pan (0..12800), volume (0..12800) and pitch in cents; pan and volume to 128 before FL 6.
 const EV_CHANNEL_LEVELS: u8 = 219;
 /// A playlist track's settings.
-const EV_TRACK_DATA: u8 = 238;
+pub(super) const EV_TRACK_DATA: u8 = 238;
 /// A playlist track's name, after its settings (only when it was named).
-const EV_TRACK_NAME: u8 = 239;
+pub(super) const EV_TRACK_NAME: u8 = 239;
 
-const CHANNEL_TYPE_AUTOMATION: u32 = 5;
+pub(super) const CHANNEL_TYPE_AUTOMATION: u32 = 5;
 const LEVELS_FULL: f64 = 12800.0;
 /// A playlist item's index above this is a pattern (index − base); at or below, a channel's clip.
 pub(super) const PATTERN_BASE: u32 = 20480;
@@ -94,6 +94,16 @@ pub struct FlStretch {
     /// Stretches it to a length first, in FL's units of 768 a bar; 0 when off.
     pub time: i32,
     pub reversed: bool,
+}
+
+impl FlStretch {
+    /// How long the sample plays, in seconds, given its own length and the song's tempo: stretched to a length first
+    /// when Time is set (FL counts 192 to a beat), then by Mul, then (when resampling) shortened as the pitch goes up.
+    pub fn played_seconds(&self, seconds: f64, tempo: f64) -> f64 {
+        let length = if self.time > 0 && tempo > 0.0 { self.time as f64 / 192.0 * 60.0 / tempo } else { seconds };
+        let length = length * self.multiplier;
+        if self.mode == 0 { length / 2f64.powf(self.pitch_cents as f64 / 1200.0) } else { length }
+    }
 }
 
 impl Default for FlStretch {
@@ -301,7 +311,7 @@ impl PlaylistTracks {
 }
 
 /// Whether FL's version ("25.1.0.4868") is 12.9.1 or later, when FL started saving 500 playlist tracks.
-fn from_12_9_1(version: &str) -> bool {
+pub(super) fn from_12_9_1(version: &str) -> bool {
     let mut parts = version.split('.').map(|p| p.trim().parse::<u32>().ok());
     let mut next = || parts.next().flatten().unwrap_or(0);
     (next(), next(), next()) >= (12, 9, 1)
