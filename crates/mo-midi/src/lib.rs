@@ -6,12 +6,16 @@
 //! (CLAUDE.md, "How work is done"). Keys and chords are read by `mo-harmony` once it's built (phase 6): until then a
 //! part's key and chords are the ones the C# app stored.
 
+pub mod analyser;
 pub mod catalogue;
 pub mod chord;
+pub mod extract;
 pub mod index;
+pub mod indexer;
 pub mod instruments;
 pub mod member;
 pub mod roles;
+pub mod store;
 
 pub use catalogue::{Catalogue, Entry, From, Hit, Query};
 pub use chord::PhraseChord;
