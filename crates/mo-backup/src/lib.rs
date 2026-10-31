@@ -7,5 +7,7 @@
 //! Nothing here ever changes, moves or deletes anything in your music folders: they're only read.
 //!
 //! - [`plan`]: what goes, what's left out and why, and how big each is.
+//! - [`copy`]: copying it, each file under a temporary name, checked, then renamed; older versions of small files.
 
+pub mod copy;
 pub mod plan;
