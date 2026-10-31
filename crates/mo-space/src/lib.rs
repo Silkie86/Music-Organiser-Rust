@@ -8,6 +8,7 @@
 //! - [`plugin_space`]: each installed plugin's room on disk, its data folders guessed by name and maker.
 //! - [`plugin_clean`]: which of a plugin's preset and sound folders may go, and sending them to the Recycle Bin.
 //! - [`spare`]: plugin copies in a format no project uses (or AAX without Pro Tools).
+//! - [`uninstallers`]: a plugin's own uninstaller from the programs Windows lists, and running it.
 //!
 //! Nothing here touches the window or a database: the app reads what it needs from the library and hands it in, and
 //! every walk is spread over the cores of the pool it's called in (call it in the app's low-priority pool).
@@ -22,6 +23,7 @@ pub mod plugins;
 pub mod size;
 pub mod song;
 pub mod spare;
+pub mod uninstallers;
 
 pub use size::{Measured, Stopped, size_text};
 

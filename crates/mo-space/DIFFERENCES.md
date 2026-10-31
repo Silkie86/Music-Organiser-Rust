@@ -56,9 +56,17 @@ listed with a verdict: **better** (on purpose), **same idea, new shape**, or **n
 | Undo | Recycle Bin by hand | the same `Done` list and `undo` as songs | better |
 | Administrator step | yes, one question for files Windows guards | not yet (Program Files never goes in a clean-up; ProgramData folders that need it say so) | not yet |
 
+## Uninstallers
+
+| What | C# | Rust | Verdict |
+|---|---|---|---|
+| Which programs, which first | Windows' list of installed programs (both hives, 64- and 32-bit), matched by family, maker and version; a DAW's never; another version's last | the same, checked on the C# app's own test cases | same |
+| Starting one | .NET's shell start, so Windows asks its administrator question when the uninstaller needs it | PowerShell's `Start-Process`, which does the same; the program and what's passed to it go in as settings, never as script, so nothing in them can run as a command; it waits until the uninstaller ends | same idea, new shape |
+| Saying no to Windows' question | told | told | same |
+
 ## Not yet
 
-- Uninstallers, moving plugin data to another drive with a link in its place, the administrator step.
+- Moving plugin data to another drive with a link in its place, the administrator step.
 - Keeping measured sizes between runs. The C# app keeps them in `library.db` (`plugin_space`, `folder_space`); how the
   Rust library keeps them is for the library's database design (rule 23: each fact once, nothing stored that's quick
   to work out).
