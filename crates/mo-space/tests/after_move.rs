@@ -14,7 +14,7 @@ use mo_space::after_move::{
     old_homes_json, only_in_old_home, parse_old_homes, real_place, remove_old_home, replaced, repoint,
 };
 use mo_space::clean::{Bin, Problem, Removed};
-use mo_space::folder_move::{Drives, MovedFolder, move_folder};
+use mo_space::folder_move::{CantMove, Drives, MovedFolder, move_folder};
 use mo_space::key;
 use mo_space::plugin_space::{PluginSpace, SpaceFolder, SpaceKind};
 
@@ -137,7 +137,8 @@ fn a_folder_an_update_made_where_the_link_was_is_linked_again() {
     let stop = AtomicBool::new(false);
     // One set aside before keeps its name: this one gets a number.
     fs::create_dir_all(c.join("STEAM (after update)")).unwrap();
-    let home = link_again(&moved, &all, 5, false, &OtherDrive, &nothing, &stop).unwrap();
+    let linked = link_again(&moved, &all, 5, false, &OtherDrive, &nothing, &stop).unwrap();
+    let home = linked.set_aside.clone();
     assert_eq!(home.path, s(&c.join("STEAM (after update 2)")));
     assert_eq!(home.note, "left by an update");
     assert_eq!(home.copy, moved.to);
@@ -147,17 +148,34 @@ fn a_folder_an_update_made_where_the_link_was_is_linked_again() {
     assert_eq!(read(&steam.join("Update.db")), "new");
     assert_eq!(read(&steam.join("User.db")), "mine");
     assert_eq!(read(&steam.join("Old.db")), "old from the update");
-    // The copy's own newer Old.db was kept beside it, not replaced.
-    assert_eq!(read(&PathBuf::from(format!("{}{KEPT_BEFORE_SUFFIX}", moved.to)).join("Old.db")), "old, changed");
+    // Every file of the copy that was replaced is kept beside it first: the newer Old.db, and Pad.db too.
+    let kept_in = PathBuf::from(format!("{}{KEPT_BEFORE_SUFFIX}", moved.to));
+    assert_eq!(linked.replaced, ["Old.db", "Pad.db"]);
+    assert_eq!(read(&kept_in.join("Old.db")), "old, changed");
+    assert_eq!(read(&kept_in.join("Pad.db")), "pad");
+    assert!(!kept_in.join("User.db").exists());
+    let kept = linked.kept.clone().unwrap();
+    assert_eq!(kept.path, s(&kept_in));
+    assert_eq!(kept.note, "replaced by linking again");
     assert!(copy.join("Pad.db").exists());
 
     // The folder set aside goes once nothing is only in it.
     assert!(old_home_can_go(&home, &all));
-    assert_eq!(only_in_old_home(&home, &stop).unwrap(), Vec::<String>::new());
+    assert_eq!(only_in_old_home(&home, &stop).unwrap(), Some(Vec::new()));
     let bin = bin(&dir);
     let done = remove_old_home(&home, &all, false, &bin, &stop);
     assert!(done.problems.is_empty(), "{:?}", done.problems);
     assert!(!Path::new(&home.path).exists());
+    // The files kept from before have nothing to check against: they go only once you're sure.
+    assert_eq!(only_in_old_home(&kept, &stop).unwrap(), None);
+    let stays = remove_old_home(&kept, &all, false, &bin, &stop);
+    assert!(stays.removed.is_empty() && stays.problems[0].why.contains("sure"));
+    assert_eq!(remove_old_home(&kept, &all, true, &bin, &stop).removed.len(), 1);
+    assert!(!kept_in.exists());
+
+    // Linking again when it isn't needed is refused, and touches nothing.
+    assert!(link_again(&moved, &all, 5, false, &OtherDrive, &nothing, &stop).is_err());
+    assert!(is_link(&steam));
 }
 
 #[test]
@@ -173,20 +191,47 @@ fn a_lost_link_and_a_home_moved_by_hand_are_found_and_pointed_again() {
     let all = vec![steam.clone(), kontakt.clone()];
     assert_eq!(home_of(&steam), s(&data));
 
+    // A folder left behind in there, and one elsewhere.
+    fs::create_dir_all(data.join("Kontakt (after update)")).unwrap();
+    let homes = [
+        OldHome {
+            path: s(&data.join("Kontakt (after update)")),
+            bytes: 1,
+            note: "left by an update".to_owned(),
+            copy: kontakt.to.clone(),
+            kind: 2,
+        },
+        OldHome { path: s(&c.join("Old")), bytes: 1, note: "its old place".to_owned(), copy: String::new(), kind: 2 },
+    ];
+
     // Plugin Data renamed by hand: both links lead nowhere.
-    fs::rename(&data, d.join("Data")).unwrap();
+    let by_hand = d.join("Data");
+    fs::rename(&data, &by_hand).unwrap();
     assert_eq!(lost(&all).len(), 2);
-    // Kontakt's link was replaced by a real folder meanwhile: it's left alone.
+    // Kontakt's link was replaced by a real folder meanwhile: it's left alone, but its record follows the copy, so it
+    // shows as replaced by an update.
     unlink(&c.join("Kontakt"));
     write(&c, "Kontakt/b.nki", "b");
-    let (now, problems) = repoint(&s(&data), &s(&d.join("Data")), &all);
-    assert!(lost(&now).is_empty());
+    let now = repoint(&s(&data), &s(&by_hand), &all, &homes);
+    assert!(now.problems.is_empty(), "{:?}", now.problems);
+    assert!(now.old_home.is_none());
+    assert!(lost(&now.moved).is_empty());
     assert_eq!(read(&c.join("STEAM/Pad.db")), "pad");
-    assert_eq!(now[0].to, s(&d.join("Data").join("STEAM")));
-    assert_eq!(problems.len(), 1);
-    assert_eq!(problems[0].path, kontakt.from);
-    assert_eq!(now[1].to, kontakt.to);
+    assert_eq!(now.moved[0].to, s(&by_hand.join("STEAM")));
+    assert_eq!(now.moved[1].to, s(&by_hand.join("Kontakt")));
+    assert_eq!(replaced(&now.moved), [&now.moved[1]]);
+    assert!(!is_link(&c.join("Kontakt")));
     assert_eq!(read(&c.join("Kontakt/b.nki")), "b");
+    // The folder left behind in there follows too; the other stays as it was.
+    assert_eq!(now.old_homes[0].path, s(&by_hand.join("Kontakt (after update)")));
+    assert_eq!(now.old_homes[0].copy, s(&by_hand.join("Kontakt")));
+    assert_eq!(now.old_homes[1], homes[1]);
+
+    // A copy that isn't at the new place is named, and its link left as it was.
+    fs::rename(by_hand.join("STEAM"), d.join("STEAM elsewhere")).unwrap();
+    let again = repoint(&s(&by_hand), &s(&data), &now.moved, &now.old_homes);
+    assert_eq!(again.problems.len(), 2);
+    assert_eq!(again.moved, now.moved);
 }
 
 #[test]
@@ -209,7 +254,7 @@ fn the_folder_moved_folders_live_in_moves_as_a_whole() {
     fs::rename(data.join("Reaktor"), d.join("Reaktor elsewhere")).unwrap();
 
     let stop = AtomicBool::new(false);
-    let done = move_home(&s(&data), &s(&e), &all, 3, &OtherDrive, &nothing, &stop).unwrap();
+    let done = move_home(&s(&data), &s(&e), &all, &[], 3, &OtherDrive, &nothing, &stop).unwrap();
     let new_home = e.join("Plugin Data");
     assert_eq!(read(&new_home.join("notes.txt")), "mine");
     assert_eq!(real(&c.join("STEAM")), real(&new_home.join("STEAM")));
@@ -227,10 +272,10 @@ fn the_folder_moved_folders_live_in_moves_as_a_whole() {
     // Once that's sorted (Reaktor's record gone, say), it can go, and nothing is only in it.
     let sorted: Vec<MovedFolder> = done.moved[..2].to_vec();
     assert!(old_home_can_go(&old, &sorted));
-    assert_eq!(only_in_old_home(&old, &stop).unwrap(), Vec::<String>::new());
+    assert_eq!(only_in_old_home(&old, &stop).unwrap(), Some(Vec::new()));
     // Something saved there after the move is named first.
     write(&data, "late.txt", "late");
-    assert_eq!(only_in_old_home(&old, &stop).unwrap(), ["late.txt"]);
+    assert_eq!(only_in_old_home(&old, &stop).unwrap(), Some(vec!["late.txt".to_owned()]));
     let kept = remove_old_home(&old, &sorted, false, &bin, &stop);
     assert!(kept.removed.is_empty() && kept.problems[0].why.contains("late.txt"));
     assert_eq!(remove_old_home(&old, &sorted, true, &bin, &stop).removed.len(), 1);
@@ -245,12 +290,58 @@ fn on_the_same_drive_the_home_is_renamed() {
     fs::create_dir_all(&data).unwrap();
     fs::create_dir_all(d.join("Elsewhere")).unwrap();
     let all = vec![move_it(&c.join("STEAM"), &data, &[])];
+    fs::create_dir_all(data.join("STEAM (after update)")).unwrap();
+    let homes = [OldHome {
+        path: s(&data.join("STEAM (after update)")),
+        bytes: 1,
+        note: "left by an update".to_owned(),
+        copy: all[0].to.clone(),
+        kind: 2,
+    }];
     let stop = AtomicBool::new(false);
-    let done = move_home(&s(&data), &s(&d.join("Elsewhere")), &all, 3, &SameDrive, &nothing, &stop).unwrap();
+    let done = move_home(&s(&data), &s(&d.join("Elsewhere")), &all, &homes, 3, &SameDrive, &nothing, &stop).unwrap();
     assert!(done.problems.is_empty() && done.old_home.is_none());
     assert!(!data.exists());
+    let new_home = d.join("Elsewhere").join("Plugin Data");
     assert_eq!(read(&c.join("STEAM/Pad.db")), "pad");
-    assert_eq!(done.moved[0].to, s(&d.join("Elsewhere").join("Plugin Data").join("STEAM")));
+    assert_eq!(real(&c.join("STEAM")), real(&new_home.join("STEAM")));
+    assert_eq!(done.moved[0].to, s(&new_home.join("STEAM")));
+    assert_eq!(done.old_homes[0].path, s(&new_home.join("STEAM (after update)")));
+    assert_eq!(done.old_homes[0].copy, done.moved[0].to);
+}
+
+/// When a link won't change (here a folder the test can't write in, standing in for one Windows won't let go of), the
+/// links changed are put back and nothing moves. Root can write anywhere, so it's only checked as a normal user (as CI
+/// runs).
+#[cfg(unix)]
+#[test]
+fn on_the_same_drive_a_link_that_wont_change_puts_it_all_back() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = fixtures("mo-space-after-rename-back");
+    let (c, locked, d) = (dir.join("C"), dir.join("Locked"), dir.join("D"));
+    write(&c, "STEAM/Pad.db", "pad");
+    write(&locked, "Kontakt/a.nki", "a");
+    let data = d.join("Plugin Data");
+    fs::create_dir_all(&data).unwrap();
+    fs::create_dir_all(d.join("Elsewhere")).unwrap();
+    let steam = move_it(&c.join("STEAM"), &data, &[]);
+    let kontakt = move_it(&locked.join("Kontakt"), &data, std::slice::from_ref(&steam));
+    let all = vec![steam, kontakt];
+    let lock = |mode: u32| fs::set_permissions(&locked, fs::Permissions::from_mode(mode)).unwrap();
+    lock(0o555);
+    if fs::write(locked.join("probe"), "x").is_ok() {
+        // Running as root: nothing stops it.
+        let _ = fs::remove_file(locked.join("probe"));
+        lock(0o755);
+        return;
+    }
+    let stop = AtomicBool::new(false);
+    let done = move_home(&s(&data), &s(&d.join("Elsewhere")), &all, &[], 3, &SameDrive, &nothing, &stop);
+    lock(0o755);
+    assert!(matches!(done, Err(CantMove::Failed(_))), "{done:?}");
+    assert!(data.is_dir() && !d.join("Elsewhere").join("Plugin Data").exists());
+    assert_eq!(real(&c.join("STEAM")), real(&data.join("STEAM")));
+    assert_eq!(real(&locked.join("Kontakt")), real(&data.join("Kontakt")));
 }
 
 #[test]
@@ -286,7 +377,7 @@ fn a_second_copy_a_later_move_made_is_found_and_linked_again() {
     // The plugin saved into the second copy since.
     write(&ni, "Reaktor 6/new.ens", "new");
     let stop = AtomicBool::new(false);
-    let home = link_again(&inner, &all, 1, true, &OtherDrive, &nothing, &stop).unwrap();
+    let home = link_again(&inner, &all, 1, true, &OtherDrive, &nothing, &stop).unwrap().set_aside;
     assert_eq!(home.path, s(&e.join("NI").join("Reaktor 6 (second copy)")));
     assert_eq!(home.note, "a second copy");
     assert!(is_link(&e.join("NI").join("Reaktor 6")));

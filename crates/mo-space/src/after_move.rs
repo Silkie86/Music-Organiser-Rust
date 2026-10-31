@@ -1,7 +1,7 @@
 //! What can happen to moved folders afterwards, and putting it right: the C# app's checks on moved folders (lost,
-//! replaced by an update, doubled by a later move), linking again, and moving the folder the moved folders live in
-//! ("Plugin Data") as a whole. Like the move itself, nothing here deletes anything of yours: what's set aside goes only
-//! when you say, and only to the Recycle Bin.
+//! replaced by an update, doubled), linking again, and moving the folder the moved folders live in ("Plugin Data") as
+//! a whole. Like the move itself, nothing here deletes anything of yours: what's set aside goes only when you say, and
+//! only to the Recycle Bin, and a link is only ever changed, never a real folder.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -11,10 +11,11 @@ use mo_formats::paths::file_name;
 use mo_library::scan::is_inside;
 use serde::{Deserialize, Serialize};
 
-use crate::clean::{Bin, Done, Problem, What, on_network, send};
+use crate::clean::{Bin, Done, Problem, What, send};
 use crate::folder_move::{
-    CantMove, Drives, Fill, HEADROOM, MovedFolder, Tree, check_rename, clear_failed_link, copy_tree, denied,
-    inside_moved, link, only_in, remove_copy, remove_link, swap, target,
+    CantMove, Drives, Fill, MovedFolder, Tree, check_rename, clear_failed_link, copy_fresh, copy_tree, denied,
+    destination_problem, fresh_name, inside_moved, leads_to, link, link_reaches, listed, only_in, remove_link,
+    rest_after, room_for, swap, target,
 };
 use crate::plugin_space::{PluginSpace, SpaceKind};
 use crate::size::{self, is_link};
@@ -26,29 +27,50 @@ pub const UPDATE_SUFFIX: &str = " (after update)";
 /// The second copy a later move of the folder around it made, once it's set aside and the link is back.
 pub const SECOND_SUFFIX: &str = " (second copy)";
 
-/// Where linking again keeps the copy's own files that were newer than the ones replacing them, beside the copy.
-pub const KEPT_BEFORE_SUFFIX: &str = " (newer files from before)";
+/// Where linking again keeps the files in the copy that it replaces, beside the copy.
+pub const KEPT_BEFORE_SUFFIX: &str = " (kept from before)";
 
 /// A folder left behind for you to delete once the plugins open fine: the old place of the folder the moved folders
-/// live in, after it moved to another drive, or the folder an update made where the link was (or a second copy a later
-/// move made there), once its files joined the moved copy. Kept as the C# app keeps it (`library.db` setting
-/// `space_old_homes`).
+/// live in, after it moved to another drive; the folder an update made where the link was (or a second copy a later
+/// move made there), once its files joined the moved copy; or the files linking again replaced. Kept as the C# app keeps
+/// it (`library.db` setting `space_old_homes`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct OldHome {
     pub path: String,
     pub bytes: u64,
-    /// What it is ("its old place", "left by an update", "a second copy").
+    /// What it is ("its old place", "left by an update", "a second copy", "replaced by linking again").
     #[serde(default = "its_old_place")]
     pub note: String,
-    /// Where its files went, to check nothing is only in it before it goes. Rust only: the C# app leaves it out (and
-    /// drops it when it saves the list), and then there's nothing to check it against.
+    /// Where its files went, to check nothing is only in it before it goes. Rust only (the C# app leaves it out, and
+    /// drops it when it saves the list): without it there's nothing to check against, so it goes only once you're sure.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub copy: String,
+    /// What it holds, as [`MovedFolder::kind`] numbers it (Rust only; sounds when it isn't said).
+    #[serde(default = "sounds_number", skip_serializing_if = "is_sounds")]
+    pub kind: u8,
 }
 
 fn its_old_place() -> String {
     "its old place".to_owned()
+}
+
+fn sounds_number() -> u8 {
+    2
+}
+
+fn is_sounds(kind: &u8) -> bool {
+    *kind == 2
+}
+
+impl OldHome {
+    fn space_kind(&self) -> SpaceKind {
+        match self.kind {
+            0 => SpaceKind::Program,
+            1 => SpaceKind::Presets,
+            _ => SpaceKind::Sounds,
+        }
+    }
 }
 
 /// The folders left behind, kept as the C# app keeps them, or none when they can't be read.
@@ -79,10 +101,10 @@ pub fn replaced(moved: &[MovedFolder]) -> Vec<&MovedFolder> {
     moved.iter().filter(|m| real_again(m) && inside_moved(&m.from, moved).is_none()).collect()
 }
 
-/// The moved folders that were inside a folder moved after them by the C# app before it kept links inside a folder as
-/// links (F12 note, 27 Oct: Reaktor 6, then Native Instruments around it). That move copied what their links led to,
-/// so the other drive has two copies: the plugin uses the one inside the later move, and the folder's own copy is left
-/// out of date. Each comes with the moved folder around it. The Rust move keeps links as links, so it never makes these.
+/// The moved folders with a real folder where their link was, inside a folder moved after them, each with that moved
+/// folder. Mostly a second copy the C# app's older move made (before it kept links inside a folder as links, F12 note,
+/// 27 Oct: Reaktor 6, then Native Instruments around it), so the plugin uses that one and the folder's own copy is left
+/// out of date; it can also be an update that replaced the link in there. Either way [`link_again`] puts it right.
 pub fn doubled(moved: &[MovedFolder]) -> Vec<(&MovedFolder, String)> {
     moved.iter().filter(|m| real_again(m)).filter_map(|m| Some((m, inside_moved(&m.from, moved)?.to_owned()))).collect()
 }
@@ -96,15 +118,16 @@ fn is_dir(path: &str) -> bool {
     fs::metadata(path).is_ok_and(|m| m.is_dir())
 }
 
+fn text(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
 /// Where a path inside a moved folder really is (Reaktor 6's second copy, inside Native Instruments, is on the other
 /// drive), so what's set aside in there goes to that drive's Recycle Bin.
 pub fn real_place(path: &str, moved: &[MovedFolder]) -> String {
     let Some(outer) = inside_moved(path, moved) else { return path.to_owned() };
     let Some(m) = moved.iter().find(|m| key(&m.from) == key(outer)) else { return path.to_owned() };
-    match path.get(outer.trim_end_matches(['/', '\\']).len()..) {
-        Some(rest) => Path::new(&m.to).join(rest.trim_start_matches(['/', '\\'])).to_string_lossy().into_owned(),
-        None => path.to_owned(),
-    }
+    rest_after(path, outer).map_or_else(|| path.to_owned(), |rest| text(&Path::new(&m.to).join(rest)))
 }
 
 /// Fills in the other plugins each moved folder was shared with, for moves made before that was kept (F12 note, 27
@@ -132,12 +155,26 @@ pub fn find_sharers(moved: &[MovedFolder], spaces: &[PluginSpace]) -> (Vec<Moved
     (now, stale)
 }
 
+/// What linking again did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkedAgain {
+    /// The folder set aside, at its real place, to delete once the plugin opens fine.
+    pub set_aside: OldHome,
+    /// Files in the copy that were replaced (paths inside it), kept in `kept`.
+    pub replaced: Vec<String>,
+    /// Where they're kept, beside the copy, when any were: for you to look at, and delete once you're happy.
+    pub kept: Option<OldHome>,
+    /// Links in the copy where the folder had a file or folder (paths inside it): left as they were.
+    pub links_left: Vec<String>,
+}
+
 /// After an update replaced the link with a real folder (or, with `second`, a later move left a second copy where the
-/// link was): the folder's new files, and files that differ, join the copy on the other drive (the copy's own newer
-/// files are kept beside it in "… (newer files from before)"), then it's set aside as "… (after update)" (or "… (second
-/// copy)") and the link goes back. Only with room for it on the other drive. Returns the folder set aside, at its real
-/// place, to delete once the plugin opens fine. `all` is every moved folder. Close the DAW first. Call it away from the
+/// link was): the folder's new files, and files that differ, join the copy on the other drive, then it's set aside as
+/// "… (after update)" (or "… (second copy)") and the link goes back. Every file in the copy it replaces is kept first in
+/// "… (kept from before)" beside the copy (the update's file may be the newer one, but yours was the one in use). Only
+/// with room for it on the other drive. `all` is every moved folder. Close the DAW first. Call it away from the
 /// window's thread.
+#[allow(clippy::too_many_arguments)]
 pub fn link_again(
     moved: &MovedFolder,
     all: &[MovedFolder],
@@ -146,7 +183,7 @@ pub fn link_again(
     drives: &dyn Drives,
     progress: &(dyn Fn(u64) + Sync),
     stop: &AtomicBool,
-) -> Result<OldHome, CantMove> {
+) -> Result<LinkedAgain, CantMove> {
     let from = moved.from.trim_end_matches(['/', '\\']);
     let to = Path::new(&moved.to);
     if !is_dir(&moved.to) {
@@ -155,30 +192,59 @@ pub fn link_again(
     if is_link(Path::new(from)) || !is_dir(from) {
         return Err(CantMove::Failed(format!("{from} isn't a real folder now, so it was left alone.")));
     }
-    let suffix = if second { SECOND_SUFFIX } else { UPDATE_SUFFIX };
-    let mut aside = format!("{from}{suffix}");
-    let mut n = 2;
-    while fs::symlink_metadata(&aside).is_ok() {
-        aside = format!("{from}{} {n})", suffix.trim_end_matches(')'));
-        n += 1;
-    }
+    let aside = fresh_name(from, if second { SECOND_SUFFIX } else { UPDATE_SUFFIX });
     // Find out before copying whether Windows lets the folder be renamed.
     check_rename(from)?;
-    let kept_in = PathBuf::from(format!("{}{KEPT_BEFORE_SUFFIX}", moved.to));
-    let tree = Tree { from: Path::new(from), to, settled: to, keep_in: Some(&kept_in), leave_out: &[] };
-    let needs = copy_tree(&tree, Fill::Count, &|_| {}, stop)?.bytes;
-    if let Some(free) = drives.free(to).filter(|&free| free < needs.saturating_add(HEADROOM)) {
-        return Err(CantMove::NoRoom { free, needs });
-    }
-    let first = copy_tree(&tree, Fill::Freshen, progress, stop)?;
+    let kept_in = PathBuf::from(fresh_name(&moved.to, KEPT_BEFORE_SUFFIX));
+    let tree = Tree { keep_in: Some(&kept_in), keep_all: true, ..Tree::new(Path::new(from), to, to) };
+    room_for(&tree, to, drives, stop)?;
+    // From here on the copy changes: a stop or a failure says so.
+    let partly = |why: CantMove| match why {
+        CantMove::LeftHalfway(_) => why,
+        other => {
+            let said = if other == CantMove::Stopped { "Stopped.".to_owned() } else { other.text() };
+            let kept = if kept_in.exists() {
+                format!(", and the ones they replaced are kept in {}", text(&kept_in))
+            } else {
+                String::new()
+            };
+            CantMove::LeftHalfway(format!(
+                "{} Some of its files may be in {} already{kept}. The folder here is as it was, so it's safe to try \
+                 again once the DAW is closed.",
+                said.trim_end_matches("Nothing was moved.").trim_end(),
+                moved.to
+            ))
+        }
+    };
+    let first = copy_tree(&tree, Fill::Freshen, progress, stop).map_err(partly)?;
     // What the plugin saved meanwhile.
-    copy_tree(&tree, Fill::Freshen, &|n| progress(first.bytes + n), stop)?;
-    swap(from, to, &aside)?;
-    Ok(OldHome {
-        path: real_place(&aside, all),
-        bytes,
-        note: if second { "a second copy" } else { "left by an update" }.to_owned(),
-        copy: moved.to.clone(),
+    let again = copy_tree(&tree, Fill::Freshen, &|n| progress(first.bytes + n), stop).map_err(partly)?;
+    swap(from, to, &aside).map_err(partly)?;
+    let shown = |paths: Vec<PathBuf>| -> Vec<String> {
+        let mut shown: Vec<String> = paths.iter().map(|p| text(p)).collect();
+        shown.sort();
+        shown.dedup();
+        shown
+    };
+    let replaced = shown([first.kept, again.kept].concat());
+    let kept = (!replaced.is_empty()).then(|| OldHome {
+        path: text(&kept_in),
+        bytes: size::measure(&kept_in, stop).map_or(0, |m| m.bytes),
+        note: "replaced by linking again".to_owned(),
+        copy: String::new(),
+        kind: moved.kind,
+    });
+    Ok(LinkedAgain {
+        set_aside: OldHome {
+            path: real_place(&aside, all),
+            bytes,
+            note: if second { "a second copy" } else { "left by an update" }.to_owned(),
+            copy: moved.to.clone(),
+            kind: moved.kind,
+        },
+        replaced,
+        kept,
+        links_left: shown([first.links_left, again.links_left].concat()),
     })
 }
 
@@ -188,73 +254,84 @@ pub fn old_home_can_go(home: &OldHome, moved: &[MovedFolder]) -> bool {
     is_dir(&home.path) && !moved.iter().any(|m| is_inside(&m.to, &home.path) || is_inside(&m.from, &home.path))
 }
 
-/// What's in a folder left behind but not where its files went, or newer in it, as paths inside it. Nothing when it
-/// doesn't say where its files went (one the C# app kept). Reads both folders: call it away from the window's thread.
-pub fn only_in_old_home(home: &OldHome, stop: &AtomicBool) -> Result<Vec<String>, CantMove> {
+/// What's in a folder left behind but not where its files went, or newer in it, as paths inside it; `None` when it
+/// doesn't say where its files went (the C# app's, or the files linking again replaced), so it can't be told. Reads
+/// both folders: call it away from the window's thread.
+pub fn only_in_old_home(home: &OldHome, stop: &AtomicBool) -> Result<Option<Vec<String>>, CantMove> {
     if home.copy.is_empty() {
-        return Ok(Vec::new());
+        return Ok(None);
     }
     if !is_dir(&home.copy) {
-        return Ok(vec![home.copy.clone()]);
+        return Ok(Some(vec![home.copy.clone()]));
     }
-    only_in(Path::new(&home.path), Path::new(&home.copy), stop)
+    only_in(Path::new(&home.path), Path::new(&home.copy), stop).map(Some)
 }
 
 /// Sends a folder left behind to the Recycle Bin, once [`old_home_can_go`] says it may, and, unless you're `sure`, only
-/// when nothing is only in it ([`only_in_old_home`]: the app shows that list first). [`crate::clean::undo`] puts it
-/// back.
+/// when nothing is only in it ([`only_in_old_home`]: the app shows that list first; one it can't tell goes only once
+/// you're sure). [`crate::clean::undo`] puts it back.
 pub fn remove_old_home(home: &OldHome, moved: &[MovedFolder], sure: bool, bin: &dyn Bin, stop: &AtomicBool) -> Done {
     let stays = |why: &str| Done {
         problems: vec![Problem { path: home.path.clone(), why: why.to_owned() }],
         ..Done::default()
     };
+    if !is_dir(&home.path) {
+        return stays("It isn't there any more.");
+    }
     if !old_home_can_go(home, moved) {
         return stays("A moved folder, or its link, is still in it, so it stays.");
     }
     if !sure {
         match only_in_old_home(home, stop) {
             Err(_) => return stays("Stopped before it was all checked, so it stays."),
-            Ok(only) if !only.is_empty() => {
-                let first: Vec<&str> = only.iter().take(5).map(String::as_str).collect();
-                let more = if only.len() > first.len() {
-                    format!(" and {} more", only.len() - first.len())
-                } else {
-                    String::new()
-                };
+            Ok(None) => {
+                return stays(
+                    "There's nothing to check it against, so it goes only once you've looked in it and say you're \
+                     sure.",
+                );
+            }
+            Ok(Some(only)) if !only.is_empty() => {
                 return stays(&format!(
-                    "Some of it isn't where its files went, or is newer here: {}{more}. Look before deleting it.",
-                    first.join(", ")
+                    "Some of it isn't where its files went, or is newer here: {}. Look before deleting it.",
+                    listed(&only)
                 ));
             }
-            Ok(_) => {}
+            Ok(Some(_)) => {}
         }
     }
     let mut done = Done::default();
     let real = real_path(&home.path).unwrap_or_else(|| home.path.clone());
-    send(&home.path, real, home.bytes, What::Plugin(SpaceKind::Sounds), bin, &mut done);
+    send(&home.path, real, home.bytes, What::Plugin(home.space_kind()), bin, &mut done);
     let not_found = bin.find(&mut done.removed);
     done.problems.extend(not_found);
     done
 }
 
-/// What moving the folder the moved folders live in did.
+/// What moving the folder the moved folders live in (or pointing links at it after you moved it) did.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct HomeMoved {
-    /// The moved folders as they are now (the ones that lived there, at their new place).
+    /// The moved folders as they are now: the ones whose copy is at the new place point there.
     pub moved: Vec<MovedFolder>,
-    /// Links that couldn't be pointed at the new place (where the link is, and why): they still lead to the old one.
+    /// The folders left behind as they are now: the ones that were in it are at the new place.
+    pub old_homes: Vec<OldHome>,
+    /// Links that couldn't be pointed at the new place (where the link is, and why), and moved folders whose copy
+    /// isn't there: they're as they were.
     pub problems: Vec<Problem>,
     /// Its old place, when it was copied to another drive: left for you to delete once the plugins open fine.
     pub old_home: Option<OldHome>,
 }
 
 /// Moves the folder the moved folders live in (all of it, other files too) and points every link at the new place. On
-/// the same drive it's renamed; to another drive it's copied and checked, and the old one stays for you to delete. The
-/// app keeps the moves it returns. Close the DAW first. Call it away from the window's thread.
+/// the same drive it's one rename, with the links pointed at the new place just before (if any won't change, or the
+/// rename fails, they're put back and nothing moves). To another drive it's copied and checked, and the old one stays
+/// for you to delete. `homes` is every folder left behind. The app keeps the moves and homes it returns. Close the DAW
+/// first. Call it away from the window's thread.
+#[allow(clippy::too_many_arguments)]
 pub fn move_home(
     home: &str,
     destination: &str,
     moved: &[MovedFolder],
+    homes: &[OldHome],
     bytes: u64,
     drives: &dyn Drives,
     progress: &(dyn Fn(u64) + Sync),
@@ -268,103 +345,182 @@ pub fn move_home(
     if !is_dir(home) {
         return Err(CantMove::Gone);
     }
-    let real_home = real_path(home).unwrap_or_else(|| home.to_owned());
-    let real_destination = real_path(destination).unwrap_or_else(|| destination.to_owned());
-    if is_inside(destination, home) || is_inside(&real_destination, &real_home) {
-        return Err(CantMove::DestinationInside);
-    }
-    if on_network(destination) || on_network(&real_destination) {
-        return Err(CantMove::NetworkDrive);
-    }
-    if !is_dir(destination) {
-        return Err(CantMove::DestinationGone);
-    }
-    let to = target(home, destination);
-    if fs::symlink_metadata(&to).is_ok() {
-        return Err(CantMove::TargetThere(to.to_string_lossy().into_owned()));
-    }
-    let new_home = to.to_string_lossy().into_owned();
-    if drives.same(home_path, Path::new(destination)) {
-        // One rename: nothing is copied, and nothing is left behind.
-        check_rename(home)?;
-        fs::rename(home, &to)
-            .map_err(|e| if denied(&e) { CantMove::NeedsAdmin } else { CantMove::InUse(e.to_string()) })?;
-        let (moved, problems) = repoint(home, &new_home, moved);
-        return Ok(HomeMoved { moved, problems, old_home: None });
-    }
-    match size::has_online_only(home_path, stop) {
-        Ok(true) => return Err(CantMove::OnlineOnly),
-        Ok(false) => {}
-        Err(_) => return Err(CantMove::Stopped),
-    }
-    if let Some(free) = drives.free(Path::new(destination)).filter(|&free| free < bytes.saturating_add(HEADROOM)) {
-        return Err(CantMove::NoRoom { free, needs: bytes });
-    }
-    fs::create_dir(&to).map_err(|e| CantMove::Failed(format!("Couldn't make {new_home} ({e}).")))?;
-    let tree = Tree { from: home_path, to: &to, settled: &to, keep_in: None, leave_out: &[] };
-    let copied = copy_tree(&tree, Fill::New, progress, stop)
-        .and_then(|first| copy_tree(&tree, Fill::Freshen, &|n| progress(first.bytes + n), stop));
-    if let Err(why) = copied {
-        remove_copy(&to);
+    if let Some(why) = destination_problem(home, destination, bytes, drives, true, stop) {
         return Err(why);
     }
-    let (moved, problems) = repoint(home, &new_home, moved);
-    let old_home = OldHome { path: home.to_owned(), bytes, note: its_old_place(), copy: new_home };
-    Ok(HomeMoved { moved, problems, old_home: Some(old_home) })
+    let to = target(home, destination);
+    let new_home = text(&to);
+    if drives.same(home_path, Path::new(destination)) {
+        check_rename(home)?;
+        return rename_home(home, &to, moved, homes);
+    }
+    copy_fresh(&Tree::new(home_path, &to, &to), progress, stop)?;
+    let now = repoint(home, &new_home, moved, homes);
+    let old_home = OldHome { path: home.to_owned(), bytes, note: its_old_place(), copy: new_home, kind: 2 };
+    Ok(HomeMoved { old_home: Some(old_home), ..now })
 }
 
-/// "I moved it myself": points the link of every moved folder that lived in `old_home` at the same folder in
-/// `new_home`, where it's found. Returns the moves as they are now, and the links that couldn't be pointed there
-/// (they're left as they were). Only ever changes links, never a real folder.
-pub fn repoint(old_home: &str, new_home: &str, moved: &[MovedFolder]) -> (Vec<MovedFolder>, Vec<Problem>) {
-    let old_home = old_home.trim_end_matches(['/', '\\']);
-    let mut problems = Vec::new();
-    let mut links: Vec<(usize, PathBuf)> = Vec::new();
-    for (i, m) in moved.iter().enumerate() {
-        if !is_inside(&m.to, old_home) {
-            continue;
-        }
-        let Some(rest) = m.to.get(old_home.len()..) else { continue };
-        let to = Path::new(new_home).join(rest.trim_start_matches(['/', '\\']));
-        if is_dir(&to.to_string_lossy()) {
-            links.push((i, to));
-        } else {
-            problems.push(Problem { path: m.from.clone(), why: format!("{} isn't in {new_home}.", file_name(&m.to)) });
-        }
-    }
-    // Outer links first: a moved folder inside another (Reaktor 6 in Native Instruments) is reached through the outer
-    // link, so it's pointed at the new place only once the outer one is.
+/// The moved folders whose copy is in `old_home`, with where it is in `new_home`.
+fn living_in(old_home: &str, new_home: &str, moved: &[MovedFolder]) -> Vec<(usize, PathBuf)> {
+    moved
+        .iter()
+        .enumerate()
+        .filter_map(|(i, m)| Some((i, Path::new(new_home).join(rest_after(&m.to, old_home)?))))
+        .collect()
+}
+
+/// The order to change links in: outer ones first, since a moved folder inside another (Reaktor 6 in Native
+/// Instruments) is reached through the outer link.
+fn outer_first(links: &[(usize, PathBuf)], moved: &[MovedFolder]) -> Vec<usize> {
     let around = |at: &str| {
         links.iter().filter(|(o, _)| key(&moved[*o].from) != key(at) && is_inside(at, &moved[*o].from)).count()
     };
     let mut order: Vec<(usize, usize)> =
         links.iter().enumerate().map(|(n, (i, _))| (around(&moved[*i].from), n)).collect();
     order.sort();
+    order.into_iter().map(|(_, n)| n).collect()
+}
+
+/// The folders left behind that were in `old_home`, at their place in `new_home` when they're there.
+fn follow_homes(old_home: &str, new_home: &str, homes: &[OldHome]) -> Vec<OldHome> {
+    let moved_to = |path: &str| {
+        rest_after(path, old_home)
+            .map(|rest| text(&Path::new(new_home).join(rest)))
+            .filter(|p| fs::symlink_metadata(p).is_ok())
+    };
+    homes
+        .iter()
+        .map(|h| OldHome {
+            path: moved_to(&h.path).unwrap_or_else(|| h.path.clone()),
+            copy: moved_to(&h.copy).unwrap_or_else(|| h.copy.clone()),
+            ..h.clone()
+        })
+        .collect()
+}
+
+/// The same-drive move: links first, to where the copies will be, then one rename. If a link won't change, or the
+/// rename fails, the links changed are put back and nothing has moved.
+fn rename_home(home: &str, to: &Path, moved: &[MovedFolder], homes: &[OldHome]) -> Result<HomeMoved, CantMove> {
+    let new_home = text(to);
+    // Only working links are changed: one that leads nowhere, or a real folder, is left as it is.
+    let links: Vec<(usize, PathBuf)> =
+        living_in(home, &new_home, moved).into_iter().filter(|(i, _)| link_reaches(&moved[*i])).collect();
+    let mut changed: Vec<usize> = Vec::new();
+    let put_back = |changed: &[usize]| -> String {
+        let mut stuck = Vec::new();
+        for &n in changed.iter().rev() {
+            let m = &moved[links[n].0];
+            if relink(&m.from, Path::new(&m.to), true).is_err() {
+                stuck.push(format!("make a link at {} to {}", m.from, m.to));
+            }
+        }
+        if stuck.is_empty() {
+            String::new()
+        } else {
+            format!(" Some links couldn't be put back: {}.", stuck.join("; "))
+        }
+    };
+    for n in outer_first(&links, moved) {
+        let (i, new_to) = &links[n];
+        if let Err(why) = relink(&moved[*i].from, new_to, false) {
+            let stuck = put_back(&changed);
+            return Err(CantMove::Failed(format!(
+                "The link at {} couldn't be pointed at the new place: {why}{stuck}",
+                moved[*i].from
+            )));
+        }
+        changed.push(n);
+    }
+    if let Err(e) = fs::rename(home, to) {
+        let stuck = put_back(&changed);
+        if !stuck.is_empty() {
+            return Err(CantMove::LeftHalfway(format!(
+                "Windows wouldn't rename {home} ({e}), so it stays where it was.{stuck}"
+            )));
+        }
+        return Err(if denied(&e) { CantMove::NeedsAdmin } else { CantMove::InUse(e.to_string()) });
+    }
+    // Every link changed reaches the folder at its new place, or it all goes back.
+    if let Some(&n) = changed.iter().find(|&&n| !leads_to(&moved[links[n].0].from, &links[n].1)) {
+        let back = fs::rename(to, home);
+        let stuck = put_back(&changed);
+        let at = &moved[links[n].0].from;
+        return match back {
+            Ok(()) if stuck.is_empty() => Err(CantMove::Failed(format!(
+                "The link at {at} didn't reach the folder at its new place, so it was all put back."
+            ))),
+            Ok(()) => Err(CantMove::LeftHalfway(format!(
+                "The link at {at} didn't reach the folder at its new place, so the folder went back.{stuck}"
+            ))),
+            Err(e) => Err(CantMove::LeftHalfway(format!(
+                "The link at {at} didn't reach the folder at its new place, and Windows wouldn't rename it back \
+                 ({e}): rename {new_home} to {home} yourself.{stuck}"
+            ))),
+        };
+    }
+    // Every moved folder whose copy moved with it follows, the ones whose link wasn't changed too.
     let mut now = moved.to_vec();
-    for (_, n) in order {
-        let (i, to) = &links[n];
-        match relink(&moved[*i].from, to) {
-            Ok(()) => now[*i].to = to.to_string_lossy().into_owned(),
+    let mut problems = Vec::new();
+    for (i, new_to) in living_in(home, &new_home, moved) {
+        if is_dir(&text(&new_to)) {
+            now[i].to = text(&new_to);
+        } else {
+            problems.push(Problem { path: moved[i].from.clone(), why: format!("{} isn't there.", moved[i].to) });
+        }
+    }
+    Ok(HomeMoved { moved: now, old_homes: follow_homes(home, &new_home, homes), problems, old_home: None })
+}
+
+/// "I moved it myself" (or the copy step of [`move_home`]): points the link of every moved folder that lived in
+/// `old_home` at the same folder in `new_home`, where it's found. A real folder where a link was is left alone, but its
+/// move follows its copy (so it shows as replaced). A link that won't change is left as it was. `homes` is every
+/// folder left behind. Only ever changes links, never a real folder.
+pub fn repoint(old_home: &str, new_home: &str, moved: &[MovedFolder], homes: &[OldHome]) -> HomeMoved {
+    let old_home = old_home.trim_end_matches(['/', '\\']);
+    let mut problems = Vec::new();
+    let mut now = moved.to_vec();
+    let mut links = Vec::new();
+    for (i, new_to) in living_in(old_home, new_home, moved) {
+        let m = &moved[i];
+        if !is_dir(&text(&new_to)) {
+            problems.push(Problem { path: m.from.clone(), why: format!("{} isn't in {new_home}.", file_name(&m.to)) });
+        } else if !is_link(Path::new(&m.from)) && is_dir(&m.from) {
+            now[i].to = text(&new_to);
+        } else {
+            links.push((i, new_to));
+        }
+    }
+    for n in outer_first(&links, moved) {
+        let (i, new_to) = &links[n];
+        match relink(&moved[*i].from, new_to, true) {
+            Ok(()) => now[*i].to = text(new_to),
             Err(why) => problems.push(Problem { path: moved[*i].from.clone(), why }),
         }
     }
-    (now, problems)
+    HomeMoved { moved: now, old_homes: follow_homes(old_home, new_home, homes), problems, old_home: None }
 }
 
-/// Swaps the link at `at` for one to `target`; makes one where there's nothing. Never touches a real folder. If the new
-/// link doesn't take, the old one goes back.
-fn relink(at: &str, target: &Path) -> Result<(), String> {
+/// Swaps the link at `at` for one to `target`; makes one where there's nothing. Never touches a real folder. With
+/// `check`, the target must be there and the new link must reach it. If the new link doesn't take, the old one goes
+/// back.
+fn relink(at: &str, target: &Path, check: bool) -> Result<(), String> {
     let at_path = Path::new(at);
-    if !is_dir(&target.to_string_lossy()) {
-        return Err(format!("{} isn't there.", target.to_string_lossy()));
+    if check && !is_dir(&text(target)) {
+        return Err(format!("{} isn't there.", text(target)));
     }
+    let reaches = || !check || leads_to(at, target);
     if !is_link(at_path) {
         if fs::symlink_metadata(at_path).is_ok() {
             return Err(format!("{at} is a real folder now, not a link, so it was left alone."));
         }
-        return link(at_path, target).map_err(|e| {
-            clear_failed_link(at_path);
-            format!("Windows wouldn't make the link ({e}).")
+        let made = link(at_path, target);
+        if made.is_ok() && reaches() {
+            return Ok(());
+        }
+        clear_failed_link(at_path);
+        return Err(match made {
+            Err(e) => format!("Windows wouldn't make the link ({e})."),
+            Ok(()) => format!("The link was made but doesn't reach {}.", text(target)),
         });
     }
     let was = fs::read_link(at_path).ok();
@@ -376,16 +532,19 @@ fn relink(at: &str, target: &Path) -> Result<(), String> {
             format!("Windows wouldn't change the link ({e}).")
         }
     })?;
-    let Err(e) = link(at_path, target) else { return Ok(()) };
+    let made = link(at_path, target);
+    if made.is_ok() && reaches() {
+        return Ok(());
+    }
     clear_failed_link(at_path);
+    let why = match made {
+        Err(e) => format!("Windows wouldn't make the link ({e})"),
+        Ok(()) => format!("The link was made but doesn't reach {}", text(target)),
+    };
     // The old link goes back, so the plugin finds what it found before.
-    let back = was.is_some_and(|was| link(at_path, &was).is_ok());
-    if back {
-        Err(format!("Windows wouldn't make the link ({e}), so the old one is back."))
+    if was.is_some_and(|was| link(at_path, &was).is_ok()) {
+        Err(format!("{why}, so the old one is back."))
     } else {
-        Err(format!(
-            "Windows wouldn't make the link ({e}), nor put the old one back: make a link at {at} to {} yourself.",
-            target.to_string_lossy()
-        ))
+        Err(format!("{why}, nor could the old one be put back: make a link at {at} to {} yourself.", text(target)))
     }
 }
