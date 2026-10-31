@@ -9,7 +9,7 @@
 #![cfg_attr(not(test), deny(clippy::indexing_slicing))]
 
 pub mod bitwig;
-mod case;
+pub mod case;
 pub mod fl;
 pub mod midi;
 mod model;
