@@ -76,8 +76,17 @@ listed with a verdict: **better** (on purpose), **same idea, new shape**, or **n
 | A network drive picked | refused on Windows, by the drive's type | refused on every system, also when the folder picked leads there through a link | better |
 | The folder picked isn't there | made | refused, so a mistyped folder isn't made | better |
 | A folder of that name appears while copying | copied into | the copy is made as a new folder first, so it stops instead | better |
+| Files saved while it copies | only those in folders not yet copied go across | a second pass after the copy takes what was added or changed meanwhile | better |
+| Two names that differ only in capitals, to a drive that doesn't tell them apart | the second one stops the copy | the same | same |
 | A link inside worded from where it sits ("..\Shared") | kept as worded, so on Mac it would lead somewhere else from the other drive | made again leading to the same real place | better |
-| A folder Windows guards (needs administrator rights) | asks Windows' administrator question and does that one step as administrator | says so and moves nothing; the administrator step comes later | not yet |
+| A link inside leading to another place in the moved folder | made again to the old place, so after moving back it can lead to the other drive | leads to the same place in the copy, wherever the copy ends up | better |
+| A link inside that leads nowhere now (a drive not plugged in) | made again | made again | same |
+| Deleting the old copy | when the link reaches the copy | also only when nothing is only in the old copy, or newer there (`only_in_old_copy`, which the app shows first; you can still say you're sure), and when the old copies of folders moved from inside it earlier still have working links | better |
+| Moving back with the old copy there | copies files that are newer on the other drive into it | copies files that are new or differ in size or time (an update can bring an older time), each under a temporary name first, so one that fails leaves the old file whole | better |
+| Moving back once the old copy is deleted | copies the folder back | also checks this drive has room for it plus 2 GB, and that the link still leads to the copy the move made | better |
+| Moving a folder whose link an update replaced with a real folder | moves it again, and the first copy is forgotten | refused until linking again comes (later) | better |
+| A folder Windows won't rename (access denied) | asks Windows' administrator question and does that one step as administrator | says to close the DAW, the plugin and any window showing the folder, and moves nothing; the administrator step comes later | not yet |
+| Something fails half-way and the folder can't get its name back | can say nothing was moved while the folder is left as "… (old copy)" or without its link | says what to rename back, and keeps every copy that holds the files | better |
 
 ## Not yet
 
