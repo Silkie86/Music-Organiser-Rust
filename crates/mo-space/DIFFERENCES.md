@@ -67,9 +67,32 @@ listed with a verdict: **better** (on purpose), **same idea, new shape**, or **n
 | `%ProgramFiles%` in the command | filled in as Windows' list is read | the same | same |
 | Saying no to Windows' question | told | told, in any language Windows speaks | same |
 
+## Moving plugin data to another drive
+
+| What | C# | Rust | Verdict |
+|---|---|---|---|
+| How | copy, check every file's size, rename the original to "… (old copy)", a junction in its place; undo freshens the old copy and swaps back | the same steps, and the same checks before (gone, a link already, inside a moved folder, old copy there, inside the one moved, same drive, name taken, OneDrive files only online, room plus 2 GB) | same |
+| Where moves are kept | `library.db` setting `space_moved_folders` (JSON) | the same JSON, read and written by `parse_moved` and `moved_json`, so moves made by either app are known to both | same |
+| A network drive picked | refused on Windows, by the drive's type | refused on every system, also when the folder picked leads there through a link | better |
+| The folder picked isn't there | made | refused, so a mistyped folder isn't made | better |
+| A folder of that name appears while copying | copied into | the copy is made as a new folder first, so it stops instead | better |
+| Files saved while it copies | only those in folders not yet copied go across | a second pass after the copy takes what was added or changed meanwhile | better |
+| A file that goes while it copies (a plugin's lock file) | stops the move | passed over | better |
+| Two names that differ only in capitals, to a drive that doesn't tell them apart | the second one stops the copy | the same | same |
+| A link inside worded from where it sits ("..\Shared") | kept as worded, so on Mac it would lead somewhere else from the other drive | made again leading to the same real place | better |
+| A link inside leading to another place in the moved folder | made again to the old place, so after moving back it can lead to the other drive | leads to the same place in the copy, wherever the copy ends up | better |
+| A link inside that leads nowhere now (a drive not plugged in) | made again | made again | same |
+| Deleting the old copy | when the link reaches the copy | also only when nothing is only in the old copy, or newer there (`only_in_old_copy`, which the app shows first; you can still say you're sure), and when the old copies of folders moved from inside it earlier still have working links | better |
+| Moving back with the old copy there | copies files that are newer on the other drive into it | copies files that are new or differ in size or time (an update can bring an older time), each under a temporary name first, so one that fails leaves the old file whole; the old copy's own newer files are kept in "… (newer files from the old copy)" beside the folder, never replaced; a second pass takes what was saved meanwhile; only with room for it plus 2 GB | better |
+| Moving back once the old copy is deleted | copies the folder back | also checks this drive has room for it plus 2 GB, and that the link still leads to the copy the move made | better |
+| Moving a folder whose link an update replaced with a real folder | moves it again, and the first copy is forgotten | refused until linking again comes (later) | better |
+| A folder Windows won't rename (access denied) | asks Windows' administrator question and does that one step as administrator | says to close the DAW, the plugin and any window showing the folder, and moves nothing; the administrator step comes later | not yet |
+| Something fails half-way and the folder can't get its name back | can say nothing was moved while the folder is left as "… (old copy)" or without its link | says what to rename back, and keeps every copy that holds the files | better |
+
 ## Not yet
 
-- Moving plugin data to another drive with a link in its place, the administrator step.
+- The administrator step for moving a folder Windows guards, and the moved-folder checks that come after a move:
+  lost, replaced or doubled moves, linking again after an update, moving home, repointing to another drive.
 - Keeping measured sizes between runs. The C# app keeps them in `library.db` (`plugin_space`, `folder_space`); how the
   Rust library keeps them is for the library's database design (rule 23: each fact once, nothing stored that's quick
   to work out).
