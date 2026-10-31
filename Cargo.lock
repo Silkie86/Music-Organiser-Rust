@@ -2885,6 +2885,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "mo-formats",
+ "mo-library",
  "regex",
  "rusqlite",
  "serde",
