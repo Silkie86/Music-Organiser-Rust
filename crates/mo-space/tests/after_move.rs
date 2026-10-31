@@ -549,3 +549,24 @@ impl Bin for FolderBin {
         Vec::new()
     }
 }
+
+/// Whichever clean-up sends it, something on a network drive never reaches the bin, even a folder left behind that
+/// you're sure about (on Linux, `//` at the start of a path is the same as `/`, so a real folder can be written as if
+/// on a server).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_folder_left_behind_on_a_network_drive_stays() {
+    let dir = fixtures("mo-space-old-home-network");
+    write(&dir, "Old Spectrasonics/Pad.db", "pad");
+    let home = OldHome {
+        path: format!("/{}", s(&dir.join("Old Spectrasonics"))),
+        bytes: 3,
+        note: "its old place".to_owned(),
+        copy: String::new(),
+        kind: 2,
+    };
+    let done = remove_old_home(&home, &[], true, &bin(&dir), &AtomicBool::new(false));
+    assert!(done.removed.is_empty());
+    assert_eq!(done.problems[0].why, "It's on a network drive, which has no Recycle Bin.");
+    assert!(dir.join("Old Spectrasonics/Pad.db").exists());
+}

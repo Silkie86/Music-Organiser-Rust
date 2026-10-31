@@ -592,4 +592,43 @@ mod guarded {
         assert!(said.contains("rename the folder in File Explorer"), "{said}");
         assert!(home.join("Spectrasonics/Pad.db").exists());
     }
+
+    #[test]
+    fn spare_plugin_copies_in_program_files_go_in_one_step() {
+        use mo_space::spare::{SpareCopy, Why, look, remove};
+
+        let dir = fixtures("mo-space-admin-spare");
+        if !locking_works(&dir) {
+            return;
+        }
+        let program_files = dir.join("Program Files");
+        write(&program_files, "VST2/Serum_x64.dll", "serum");
+        write(&program_files, "VST2/Massive.dll", "massive");
+        write(&program_files, "VST3/Serum.vst3", "serum");
+        let copy = |name: &str| {
+            let path = s(&program_files.join("VST2").join(name));
+            let (bytes, stamp) = look(&path, &AtomicBool::new(false));
+            let used_copies = vec![s(&program_files.join("VST3/Serum.vst3"))];
+            SpareCopy {
+                name: name.to_owned(),
+                format: "VST2".to_owned(),
+                path,
+                bytes,
+                stamp,
+                why: Why::OtherFormatsUsed { used: vec!["VST3".to_owned()], projects: 1, used_copies },
+            }
+        };
+        let picked = vec![copy("Serum_x64.dll"), copy("Massive.dll")];
+        let vst2 = program_files.join("VST2");
+        lock(&vst2, true);
+        let mut bin = FolderBin::new(&dir);
+        bin.admin = Some(Box::new(Unlock { bin: Some(bin.twin()), ..Unlock::new(&[&vst2]) }));
+        let done = remove(&picked, &picked, &bin, &AtomicBool::new(false));
+        lock(&vst2, false);
+        assert!(done.problems.is_empty(), "{:?}", done.problems);
+        assert_eq!(done.removed.len(), 2);
+        assert!(done.removed.iter().all(|r| r.bin_id.is_some()));
+        assert_eq!(bin.admin.as_deref().map(Unlock::asked), Some(1));
+        assert!(!vst2.join("Serum_x64.dll").exists() && !vst2.join("Massive.dll").exists());
+    }
 }
