@@ -1,7 +1,7 @@
 // The Songs page: one line per song, newest save first, under time headings, with search, filter chips and a year
 // scrubber, and the picked song's panel beside it. Agreed with Solomon on 2026-10-31.
 import { ListView } from "std-widgets.slint";
-import { Theme, Type, Space, Well, SearchBox, ToggleChip, MenuChip, ListLine, Stars, YearMark, Caps, Heart, CloseButton, TabBar, LinkText, StudioButton } from "../studio.slint";
+import { Theme, Type, Space, Well, SearchBox, ToggleChip, MenuChip, ListLine, Stars, YearMark, Caps, Heart, CloseButton, TabBar, LinkText, StudioButton, ActionKey, MenuLine, Groove } from "../studio.slint";
 
 // One line of the list: a heading ("This week", "2019") when `heading` isn't empty, else a song.
 export struct SongLine {
@@ -55,6 +55,12 @@ export struct SaveLine {
     path: string,
     missing: bool,
     newest: bool,
+}
+
+// One line of the song panel's Older saves menu: clicking it opens `path`.
+export struct OlderLine {
+    text: string,
+    path: string,
 }
 
 // One line of the song's Health strip, with its button when `action` isn't empty.
@@ -121,6 +127,12 @@ export global SongsData {
     in property <[SampleLine]> samples;
     in property <string> saves-heading;
     in property <[SaveLine]> saves;
+    // The Older saves menu: "VERSIONS" or "RECENT SAVES", its lines, and "See all 12 saves". No lines, no button.
+    in property <string> older-heading;
+    in property <[OlderLine]> older;
+    in property <string> older-see-all;
+    // Where the Saves tab is in `tabs`, for "See all".
+    in property <int> saves-tab;
     in property <string> tracks;
     in property <[DetailPair]> details;
     in property <[string]> warnings;
@@ -134,6 +146,10 @@ export global SongsData {
     callback toggle(string);
     callback clear();
     callback select(int);
+    // The buttons' tooltips and keys, from the shortcut list.
+    in property <ActionKey> open-key;
+    in property <ActionKey> reveal-key;
+    in property <ActionKey> copy-key;
     // Opens the picked song's newest save in its DAW.
     callback open();
     // Opens one save of the picked song, by its path.
@@ -162,7 +178,7 @@ component SongPanel inherits Rectangle {
             vertical-stretch: 0;
             Text {
                 text: SongsData.song.daw;
-                color: SongsData.song.daw == "FL Studio" ? Theme.fl-studio : SongsData.song.daw == "Bitwig" || SongsData.song.daw == "Bitwig Studio" ? Theme.bitwig : SongsData.song.daw == "Studio One" ? Theme.studio-one : Theme.muted;
+                color: Theme.daw(SongsData.song.daw);
                 font-size: Type.meta;
                 font-weight: 600;
                 vertical-alignment: center;
@@ -250,14 +266,60 @@ component SongPanel inherits Rectangle {
             StudioButton {
                 text: "Open in " + SongsData.song.daw;
                 main: true;
+                tip: SongsData.open-key.what;
+                key: SongsData.open-key.key;
                 clicked => { SongsData.open(); }
+            }
+            if SongsData.older.length > 0: HorizontalLayout {
+                older-button := StudioButton {
+                    text: "Older saves";
+                    menu: true;
+                    clicked => { older-menu.show(); }
+                }
+                older-menu := PopupWindow {
+                    x: 0;
+                    y: older-button.height + Space.xs;
+                    width: max(older-button.width, 320px);
+                    Rectangle {
+                        background: Theme.surface-raised;
+                        border-radius: Theme.radius;
+                        border-width: 1px;
+                        border-color: Theme.edge;
+                        drop-shadow-color: Theme.shadow;
+                        drop-shadow-blur: 12px;
+                        VerticalLayout {
+                            padding: Space.xs;
+                            HorizontalLayout {
+                                padding-left: Space.sm;
+                                Caps {
+                                    text: SongsData.older-heading;
+                                    height: self.preferred-height + Space.sm;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            for line in SongsData.older: MenuLine {
+                                text: line.text;
+                                clicked => { SongsData.open-save(line.path); }
+                            }
+                            Groove { }
+                            MenuLine {
+                                text: SongsData.older-see-all;
+                                clicked => { SongsData.tab = SongsData.saves-tab; }
+                            }
+                        }
+                    }
+                }
             }
             StudioButton {
                 text: "Show in folder";
+                tip: SongsData.reveal-key.what;
+                key: SongsData.reveal-key.key;
                 clicked => { SongsData.reveal(); }
             }
             StudioButton {
                 text: "Copy path";
+                tip: SongsData.copy-key.what;
+                key: SongsData.copy-key.key;
                 clicked => { SongsData.copy-path(); }
             }
         }
@@ -674,11 +736,23 @@ export component SongsPage inherits Rectangle {
                                 x: Space.xs;
                                 width: parent.width - 2 * Space.xs;
                                 selected: line.row == SongsData.selected;
+                                // The date's tooltip, over the date at the right.
+                                tip: line.date-tip;
+                                tip-from: self.width - Space.md - 90px;
                                 clicked => { SongsData.select(line.row); }
-                            double-clicked => {
-                                SongsData.select(line.row);
-                                SongsData.open();
-                            }
+                                double-clicked => {
+                                    SongsData.select(line.row);
+                                    SongsData.open();
+                                }
+                                // The DAW's colour, as a thin bar at the left (the design system's song row).
+                                Rectangle {
+                                    x: Space.xs + 2px;
+                                    y: (parent.height - self.height) / 2;
+                                    width: 3px;
+                                    height: parent.height - 2 * Space.md;
+                                    border-radius: 1.5px;
+                                    background: Theme.daw(line.daw);
+                                }
                                 HorizontalLayout {
                                     padding-left: Space.md;
                                     padding-right: Space.md;

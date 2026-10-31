@@ -1,0 +1,18 @@
+[package]
+name = "mo-midi"
+description = "The MIDI page's backend: the index of MIDI parts (read-only from the C# app's midi.db for now), what kind of part each is, and searching them. No UI in it."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mo-formats = { path = "../mo-formats" }
+mo-library = { path = "../mo-library" }
+rayon.workspace = true
+regex = { version = "1", default-features = false, features = ["std", "unicode", "perf"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
+# The note hash, as the C# app makes it.
+sha2 = "0.10"
