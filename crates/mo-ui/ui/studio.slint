@@ -430,3 +430,58 @@ export component Heart inherits Path {
     stroke: on ? Theme.accent : Theme.faint;
     stroke-width: 0.8px;
 }
+
+// A row of tabs over a panel: the picked one is underlined in the accent colour.
+export component TabBar inherits HorizontalLayout {
+    in property <[string]> tabs;
+    in-out property <int> current;
+    spacing: 4px;
+    alignment: start;
+    for name[i] in root.tabs: Rectangle {
+        width: label.preferred-width + 20px;
+        height: 32px;
+        border-radius: Theme.radius;
+        background: touch.has-hover && i != root.current ? Theme.hover : transparent;
+        label := Text {
+            text: name;
+            color: i == root.current ? Theme.text : Theme.muted;
+            font-size: 13px;
+            font-weight: 500;
+        }
+        Rectangle {
+            y: parent.height - 2px;
+            height: 2px;
+            x: 8px;
+            width: parent.width - 16px;
+            background: i == root.current ? Theme.accent : transparent;
+        }
+        touch := TouchArea {
+            clicked => { root.current = i; }
+        }
+    }
+}
+
+// Words that do something when clicked, like "9 plugins" opening the Plugins tab: underlined under the mouse.
+export component LinkText inherits Rectangle {
+    in property <string> text;
+    in property <color> tint: Theme.text;
+    in property <length> font-size: 13px;
+    callback clicked;
+    width: label.preferred-width;
+    height: label.preferred-height;
+    label := Text {
+        text: root.text;
+        color: root.tint;
+        font-size: root.font-size;
+        vertical-alignment: center;
+    }
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: touch.has-hover ? root.tint : transparent;
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}

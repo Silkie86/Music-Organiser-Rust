@@ -1,19 +1,23 @@
 //! Fills the Songs page from mo-app's song list and answers its search box and chips. The library is read on a
 //! background thread (rule 12); searching and filtering then walk the rows already made, and a line's text is only
-//! made when the list draws that line.
+//! made when the list draws that line. Picking a song opens its panel at once with what the list knows; the newest
+//! save's plugins, samples and details follow from a background thread that only reads the last song picked.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use chrono::{Local, NaiveDateTime};
-use mo_app::background;
+use mo_app::background::{self, Newest};
 use mo_app::log;
-use mo_app::songs::{Entry, Filters, Songs, View};
+use mo_app::song_panel::{self as panel, SaveLine as PanelSaveLine, Tab};
+use mo_app::songs::{Entry, Filters, SongRow, Songs, View};
 use mo_library::songs::DEFAULT_RUN_GAP_MONTHS;
-use mo_library::{Library, STATUSES};
+use mo_library::{Library, STATUSES, SaveDetail};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel};
 
-use crate::{AppWindow, SongLine, SongsData, YearStart};
+use crate::{
+    AppWindow, CountLine, DetailPair, PanelSong, PluginLine, SampleLine, SaveLine, SongLine, SongsData, YearStart,
+};
 
 /// The page's rows, filters and what they let through, kept on the window's thread.
 struct Page {
@@ -22,6 +26,12 @@ struct Page {
     view: View,
     /// When the view was made, for "This week" and the short dates.
     now: NaiveDateTime,
+    /// The song whose panel is open: its place in `songs.rows`.
+    picked: Option<usize>,
+    /// Counts the songs picked, so a save's record that arrives after another song was picked is dropped.
+    asked: u64,
+    /// The picked song's newest save, as the library records it, once read.
+    detail: Option<SaveDetail>,
 }
 
 impl Default for Page {
@@ -31,6 +41,9 @@ impl Default for Page {
             filters: Filters::default(),
             view: View::default(),
             now: Local::now().naive_local(),
+            picked: None,
+            asked: 0,
+            detail: None,
         }
     }
 }
@@ -38,6 +51,8 @@ impl Default for Page {
 thread_local! {
     static PAGE: Rc<RefCell<Page>> = Rc::default();
     static LINES: Rc<Lines> = PAGE.with(|p| Rc::new(Lines { page: p.clone(), notify: ModelNotify::default() }));
+    /// Reads a save's record for the panel, one at a time, newest ask first.
+    static READER: RefCell<Option<Newest<(u64, i64)>>> = const { RefCell::new(None) };
 }
 
 /// The list's lines, made from the page's view one at a time as the list draws them, so a new search doesn't build
@@ -98,9 +113,33 @@ pub fn connect(app: &AppWindow, path: std::path::PathBuf) {
     let weak = app.as_weak();
     data.on_select(move |row| {
         if let Some(app) = weak.upgrade() {
-            app.global::<SongsData>().set_selected(row);
+            pick(&app, usize::try_from(row).ok());
         }
     });
+    let weak = app.as_weak();
+    data.on_close_panel(move || {
+        if let Some(app) = weak.upgrade() {
+            pick(&app, None);
+        }
+    });
+
+    let weak = app.as_weak();
+    let db = path.clone();
+    let mut library: Option<Library> = None;
+    let reader = Newest::start("Song panel", move |(asked, id): (u64, i64)| {
+        if library.is_none() {
+            library = Library::open_read_only(&db).ok();
+        }
+        let read = match &library {
+            Some(lib) => lib.detail(id).map_err(|e| e.to_string()),
+            None => Err("The library can't be opened.".to_owned()),
+        };
+        let _ = weak.upgrade_in_event_loop(move |app| arrived(&app, asked, read));
+    });
+    match reader {
+        Ok(r) => READER.with(|slot| *slot.borrow_mut() = Some(r)),
+        Err(e) => log::error("Songs", &format!("Couldn't start the song panel's reader: {e}")),
+    }
 
     let weak = app.as_weak();
     let started = background::spawn("Songs", move || {
@@ -124,10 +163,12 @@ pub fn connect(app: &AppWindow, path: std::path::PathBuf) {
 /// Puts a freshly read list on the page, keeping the filters as they are.
 pub fn show(app: &AppWindow, songs: Songs) {
     let data = app.global::<SongsData>();
+    data.set_tabs(strings(Tab::ALL.iter().map(|t| t.name())));
     data.set_daws(strings(songs.daws().iter().map(String::as_str)));
     data.set_tags(strings(songs.tags.iter().map(String::as_str)));
     data.set_message(if songs.rows.is_empty() { "No songs in the library yet.".into() } else { SharedString::new() });
     PAGE.with(|p| p.borrow_mut().songs = songs);
+    pick(app, None);
     data.set_lines(LINES.with(|l| ModelRc::from(l.clone() as Rc<dyn Model<Data = SongLine>>)));
     refresh(app);
 }
@@ -205,4 +246,133 @@ fn line(songs: &Songs, entry: &Entry, now: NaiveDateTime) -> SongLine {
 
 fn strings<'a>(items: impl Iterator<Item = &'a str>) -> ModelRc<SharedString> {
     ModelRc::new(VecModel::from(items.map(SharedString::from).collect::<Vec<_>>()))
+}
+
+/// Opens the panel on the song at `row` of the page's rows, or closes it.
+fn pick(app: &AppWindow, row: Option<usize>) {
+    let data = app.global::<SongsData>();
+    let (row, id) = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let row = row.filter(|r| *r < p.songs.rows.len());
+        p.picked = row;
+        p.asked += 1;
+        p.detail = None;
+        (row, row.and_then(|r| p.songs.rows.get(r)).map(|r| (p.asked, r.song.latest.id)))
+    });
+    data.set_selected(row.map_or(-1, |r| i32::try_from(r).unwrap_or(-1)));
+    let Some((asked, id)) = id else { return };
+    data.set_tab(Tab::Overview.index() as i32);
+    data.set_detail_message("Reading…".into());
+    fill_panel(app);
+    READER.with(|slot| {
+        if let Some(reader) = slot.borrow().as_ref() {
+            reader.ask((asked, id));
+        }
+    });
+}
+
+/// A save's record has been read: shown if it's still the picked song's.
+fn arrived(app: &AppWindow, asked: u64, read: Result<Option<SaveDetail>, String>) {
+    let data = app.global::<SongsData>();
+    if PAGE.with(|p| p.borrow().asked != asked) {
+        return;
+    }
+    match read {
+        Ok(Some(detail)) => {
+            PAGE.with(|p| p.borrow_mut().detail = Some(detail));
+            data.set_detail_message(SharedString::new());
+        }
+        Ok(None) => data.set_detail_message("This save isn't in the library any more.".into()),
+        Err(e) => {
+            log::warning("Songs", &e);
+            data.set_detail_message(format!("Couldn't read this save's details: {e}").into());
+        }
+    }
+    fill_panel(app);
+}
+
+/// Puts the picked song in the panel, with its record when it has been read.
+fn fill_panel(app: &AppWindow) {
+    let data = app.global::<SongsData>();
+    PAGE.with(|p| {
+        let p = p.borrow();
+        let Some(r) = p.picked.and_then(|i| p.songs.rows.get(i)) else { return };
+        data.set_song(panel_song(r));
+        let detail = p.detail.as_ref();
+        data.set_counts(model(panel::counts(r, detail).into_iter().map(|c| CountLine {
+            text: c.text.into(),
+            missing: c.missing.into(),
+            tab: c.tab.index() as i32,
+        })));
+        data.set_runs(model(
+            r.runs.iter().rev().map(|run| SharedString::from(format!("{} · {}", run.label(), run.details()))),
+        ));
+        data.set_saves_heading(panel::saves_heading(r).into());
+        data.set_saves(model(panel::save_lines(r).into_iter().map(|l| match l {
+            PanelSaveLine::Run { label, details } => {
+                SaveLine { run: label.into(), details: details.into(), ..SaveLine::default() }
+            }
+            PanelSaveLine::Save { name, date, path, missing, newest } => SaveLine {
+                run: SharedString::new(),
+                details: SharedString::new(),
+                name: name.into(),
+                date: date.into(),
+                path: path.into(),
+                missing,
+                newest,
+            },
+        })));
+        let empty = SaveDetail::default();
+        let d = detail.unwrap_or(&empty);
+        data.set_plugins_heading(panel::plugins_heading(r, d).into());
+        data.set_plugins(model(d.plugins.iter().map(|pl| {
+            let l = panel::PluginLine::new(pl);
+            PluginLine { name: l.name.into(), about: l.about.into(), installed: l.installed }
+        })));
+        data.set_samples_heading(panel::samples_heading(r, d).into());
+        data.set_samples(model(d.samples.iter().map(|sm| {
+            let l = panel::SampleLine::new(sm);
+            SampleLine {
+                name: l.name.into(),
+                folder: l.folder.into(),
+                path: l.path.into(),
+                missing: l.missing,
+                unplayed: l.unplayed,
+            }
+        })));
+        data.set_tracks(d.tracks.join(", ").into());
+        data.set_details(model(
+            d.details.iter().map(|(n, v)| DetailPair { name: n.as_str().into(), value: v.as_str().into() }),
+        ));
+        data.set_warnings(model(d.warnings.iter().map(|w| SharedString::from(w.as_str()))));
+    });
+}
+
+fn panel_song(r: &SongRow) -> PanelSong {
+    PanelSong {
+        daw: r.song.latest.daw.as_str().into(),
+        facts: panel::facts(r).into(),
+        name: r.song.name.as_str().into(),
+        saves: panel::saves_text(r).into(),
+        status: r.status.as_str().into(),
+        rating: r.rating,
+        favourite: r.favourite,
+        key: r.key().into(),
+        key_heard: r.musical_key.trim().is_empty() && !r.key().is_empty(),
+        tags: r.tags.join(", ").into(),
+        notes: r.notes.as_str().into(),
+    }
+}
+
+fn model<T: Clone + 'static>(items: impl Iterator<Item = T>) -> ModelRc<T> {
+    ModelRc::new(VecModel::from(items.collect::<Vec<_>>()))
+}
+
+/// Opens the panel on the song at `row` with `detail` as its newest save's record, without reading the library: for
+/// the screenshots.
+pub fn show_picked(app: &AppWindow, row: usize, detail: SaveDetail, tab: Tab) {
+    pick(app, Some(row));
+    let asked = PAGE.with(|p| p.borrow().asked);
+    arrived(app, asked, Ok(Some(detail)));
+    app.global::<SongsData>().set_tab(tab.index() as i32);
 }

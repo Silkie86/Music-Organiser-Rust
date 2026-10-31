@@ -11,6 +11,7 @@ use std::time::Duration;
 use mo_app::activity::Feed;
 use mo_app::places::Place;
 use mo_app::shortcuts::Shortcuts;
+use mo_app::song_panel::Tab;
 use mo_app::themes::{Look, THEMES};
 use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
 use slint::platform::{Platform, WindowAdapter};
@@ -54,6 +55,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     mo_ui::apply_look(&app, &graphite);
+
+    // The song panel, on the first song, on Overview and on Plugins.
+    for tab in [Tab::Overview, Tab::Plugins, Tab::Saves] {
+        mo_ui::songs::show_picked(&app, 0, sample_detail(), tab);
+        shots.push((format!("song-panel-{}.png", slug(tab.name())), capture(&window)));
+    }
+    app.global::<mo_ui::SongsData>().invoke_close_panel();
 
     // Activity cards: one going, one that can't say how far it is yet, one done and one failed, plus one put away.
     let going = feed.start("Reading new FL saves", "");
@@ -136,6 +144,35 @@ fn sample_songs() -> mo_app::songs::Songs {
     saves.sort_by_key(|s| std::cmp::Reverse(s.modified));
     let tags = vec!["dark".into(), "live set".into()];
     mo_app::songs::Songs::from_saves(&saves, &mo_library::SongChoices::default(), tags, 3)
+}
+
+/// A made-up record for the first sample song's newest save.
+fn sample_detail() -> mo_library::SaveDetail {
+    use mo_library::{PluginKind, ProjectPlugin, ProjectSample};
+    let plugin = |name: &str, vendor: &str, kind: PluginKind, installed: bool| ProjectPlugin {
+        name: name.into(),
+        vendor: vendor.into(),
+        kind,
+        format: "VST3".into(),
+        path: String::new(),
+        installed,
+    };
+    let sample = |path: &str, found: bool, unplayed: bool| ProjectSample { path: path.into(), found, unplayed };
+    mo_library::SaveDetail {
+        plugins: vec![
+            plugin("Night Pad", "Made Up Audio", PluginKind::Instrument, true),
+            plugin("Glass Bass", "Pretend Instruments", PluginKind::Instrument, false),
+            plugin("Room Echo", "Made Up Audio", PluginKind::Effect, true),
+        ],
+        samples: vec![
+            sample(r"D:\Samples\Kicks\Kick 01.wav", false, false),
+            sample(r"D:\Samples\Snares\Snare Tight.wav", true, false),
+            sample(r"D:\Samples\FX\Riser Long.wav", true, true),
+        ],
+        tracks: vec!["Kick".into(), "Snare".into(), "Night Pad".into(), "Glass Bass".into()],
+        details: vec![("Time signature".into(), "4/4".into()), ("FL Studio version".into(), "21.2.3".into())],
+        ..mo_library::SaveDetail::default()
+    }
 }
 
 /// Lets hover and slide-in animations finish, then draws the window.
