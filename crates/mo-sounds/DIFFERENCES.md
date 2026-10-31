@@ -26,3 +26,16 @@ measure that differs.
 | The chroma's lowest bin at a sample rate over 400 kHz | Read one place before the start, and failed. | Starts one bin higher. | Better (no real file has that rate) |
 | Where pitch is looked for in a long, high-rate sound with a long silent start (192 kHz, ~56 s of silence) | Worked out in 32-bit whole numbers, which wrapped, so it looked in the wrong place. | Worked out in 64-bit, so it looks just after the silence. | Better |
 | A damaged header with a sample rate under 60 | YIN read past its buffer and the analysis failed. | No pitch is looked for; the rest is measured. | Better |
+
+## Type classifier
+
+`classify` is a step-for-step port of the C# `SoundClassifier.cs`, down to .NET's seeded `Random` (for the balancing
+and the training order) and single-precision sums. The twin test (`twin sounds`) has both apps train on the same
+made-up examples, compares every weight, then has Rust read the C# model and judge the same probes.
+
+| What | C# | Rust | Judged |
+|---|---|---|---|
+| The order of the types in a model | Sorted by the current culture's rules. | Sorted ignoring case, then lower case first. The same for every type name the app uses; a home-made name that differs only in punctuation could sort differently, which changes nothing but the order they're stored in. | Same in practice |
+| Training on vectors of different lengths | Stopped with an error, or quietly used the first part of the longer ones. | Refused with a clear reason. | Better (never happens: one space at a time) |
+| A saved model whose sizes don't fit together | Read, then failed when used. | Treated as no model. | Better |
+| When it was trained | A local time. | Kept as the text .NET wrote, and written the same way. | Same |

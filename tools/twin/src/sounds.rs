@@ -2,6 +2,8 @@
 //! that differs is listed. The C# analyser runs unchanged through the helper's `--sounds`; the Rust one is
 //! `mo_sounds::analyse`. The sounds go in a new folder of their own inside the one given, removed afterwards.
 //!
+//! The type classifier is checked in the same folder (`classify.rs`).
+//!
 //! Finding a key and chords in the audio is left to the harmony engine (phase 6), so where the C# app found those
 //! itself, they're counted as judged and not compared (see crates/mo-sounds/DIFFERENCES.md).
 
@@ -123,7 +125,7 @@ fn close(a: f64, b: f64) -> bool {
     (a - b).abs() <= 1e-6 * a.abs().max(b.abs()).max(1.0)
 }
 
-fn same(cs: &Value, rust: &Value) -> bool {
+pub(crate) fn same(cs: &Value, rust: &Value) -> bool {
     match (cs, rust) {
         (Value::Number(a), Value::Number(b)) => close(a.as_f64().unwrap_or(f64::NAN), b.as_f64().unwrap_or(f64::NAN)),
         (Value::Array(a), Value::Array(b)) => a.len() == b.len() && a.iter().zip(b).all(|(a, b)| same(a, b)),
@@ -134,13 +136,20 @@ fn same(cs: &Value, rust: &Value) -> bool {
     }
 }
 
-/// Runs the sounds twin into `dir`. `Ok(false)` when a measure differs that isn't judged.
+/// Runs the sounds twin (and the classifier twin) into `dir`. `Ok(false)` when a measure differs that isn't judged.
 pub fn run(helper: &Path, parent: &Path) -> Result<bool, String> {
     let dir = parent.join(OWN_FOLDER);
     // A new folder only, so a test sound can never land on (or beside) a real sample. One left from a run that was
     // stopped is reported, not removed: the tool removes only a folder it has just made.
     std::fs::create_dir(&dir).map_err(|e| format!("Couldn't make a new folder {}: {e}", dir.display()))?;
-    let outcome = write_sounds(&dir).and_then(|files| compare(helper, &files));
+    let outcome = write_sounds(&dir).and_then(|files| compare(helper, &files)).and_then(|sounds_same| {
+        let differences = crate::classify::compare(helper, &dir)?;
+        println!("Classifier twin: {} differences in training and judging.", differences.len());
+        for d in &differences {
+            println!("  {d}");
+        }
+        Ok(sounds_same && differences.is_empty())
+    });
     let _ = std::fs::remove_dir_all(&dir);
     outcome
 }
