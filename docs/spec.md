@@ -668,6 +668,7 @@ music-organiser-rs/
     mo-formats     FL, Bitwig, Studio One, MIDI, DAWproject, presets, registry   (no UI, no database)
     mo-library     databases, scanner, sample locator, song versions, fixer, watch
     mo-space       sizes, song Compact and Thin, clean-ups (Recycle Bin, undo), app files, plugin space
+    mo-backup      a lean mirror of your music on another drive (what goes, copy with a check, older versions)
     mo-work        background slots, pace, newest-wins jobs, progress, activity model
     mo-audio       decode, resample, playback, output choice, previews
     mo-sounds      analysis, ONNX models, classifier, duplicates, galaxy layout, kits, rediscover

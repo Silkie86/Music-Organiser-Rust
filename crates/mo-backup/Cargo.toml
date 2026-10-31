@@ -1,0 +1,17 @@
+[package]
+name = "mo-backup"
+description = "Backup: a lean mirror of your music on another drive. Works out what goes (and what's left out, and why), then copies with a check. Never changes your music folders. No UI in it."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mo-formats = { path = "../mo-formats" }
+# Sizes, folder walks that leave links alone, and the song Compact list the lean rules come from.
+mo-space = { path = "../mo-space" }
+
+[dev-dependencies]
+chrono.workspace = true
