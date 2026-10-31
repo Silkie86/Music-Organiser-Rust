@@ -197,7 +197,8 @@ pub fn remove_copies(fixed: &FixedProject<'_>, bin: &dyn Bin, stop: &AtomicBool)
                 continue;
             }
         };
-        let real = real_path(&text(copy)).unwrap_or_else(|| text(&checked.real));
+        // Where it really is, as a plain path (not Windows' long-path form).
+        let real = real_path(&text(copy)).unwrap_or_else(|| text(copy));
         sent.extend(real_before.into_iter().chain([checked.real]).map(|r| (r, copy.as_path())));
         sending.send(&text(copy), real, checked.bytes, What::BitwigCopy, &mut done, move || check().map(|_| ()));
     }
@@ -251,7 +252,9 @@ fn still_a_copy(
     if !real_folder.is_some_and(|f| real.starts_with(f)) {
         return stays("It isn't in the fixed project's own multi-samples folder, so it stays.");
     }
-    if let Some(why) = cant_keep(copy_text, &text(&real), stop) {
+    // As a plain path: Windows' long-path form (`\\?\C:\…`) would read as a server's name.
+    let real_text = real_path(copy_text).ok_or_else(|| "It can't be looked at now, so it stays.".to_owned())?;
+    if let Some(why) = cant_keep(copy_text, &real_text, stop) {
         return stays(why);
     }
     let Some(real_library) = fs::canonicalize(library).ok().filter(|l| l.is_file()) else {
