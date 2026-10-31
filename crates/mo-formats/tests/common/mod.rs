@@ -177,12 +177,12 @@ pub fn playlist_item(pos: u32, pattern: u16, length: u32, offset: i32) -> Vec<u8
     b
 }
 
-/// An FL 25 playlist track's settings (event 238, 70 bytes): its number (1 at the top), colour, icon, then 1 at byte
-/// 12 when it plays, 0 when it's muted.
+/// An FL 25 playlist track's settings (event 238, 70 bytes): its number (1 at the top), colour (FL's default grey,
+/// 0x00BBGGRR as Solomon's saves have it), icon, then 1 at byte 12 when it plays, 0 when it's muted.
 pub fn playlist_track(number: u32, muted: bool) -> Vec<u8> {
     let mut b = vec![0u8; 70];
     b[..4].copy_from_slice(&number.to_le_bytes());
-    b[4..8].copy_from_slice(&0x485156u32.to_le_bytes());
+    b[4..8].copy_from_slice(&0x565148u32.to_le_bytes());
     b[12] = if muted { 0 } else { 1 };
     b[13..17].copy_from_slice(&1f32.to_le_bytes());
     b

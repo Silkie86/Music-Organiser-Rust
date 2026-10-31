@@ -2866,6 +2866,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mo-sounds"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "mo-formats",
+ "regex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "mo-theorybench"
 version = "0.1.0"
 dependencies = [
