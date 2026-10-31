@@ -463,6 +463,7 @@ The Rust app uses the **same folder and the same databases**, so you can go back
 | `library.db` | settings, roots, projects, plugins, samples, tags, song_choices, installed_plugins, sample_index, plugin_scans, scanned_plugins, plugin_ids, plugin_space, folder_space |
 | `sounds.db` | settings, sounds, sound_tags, sound_events, sound_maps, sound_prints, sound_matches, sound_hidden |
 | `midi.db` | sources, phrases, your_roles, clamp, your_octaves |
+| `presets.db` (Rust app only, new) | your_preset_roles: your fixes to the Presets page's part guess, by a fingerprint of the sound and the notes it plays |
 | `playground\current.json`, `playground\ideas\` | Playground ideas |
 | `models\clap`, `models\clamp3`, SoundFont | downloaded models |
 | `logs\`, `notes\`, `reports\` (live, checks, bitwig, duplicates), `probe\` | diagnostics |

@@ -9,6 +9,7 @@ mod screens {
 }
 pub use screens::*;
 
+pub mod arrangement;
 pub mod cards;
 pub mod note;
 pub mod songs;
@@ -42,6 +43,7 @@ pub fn page_name() -> &'static str {
 /// Builds the main window in a look, opening on a place. Jobs report to `feed`, and its cards show bottom right.
 pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> Result<AppWindow, slint::PlatformError> {
     let app = AppWindow::new()?;
+    arrangement::connect(&app);
     apply_look(&app, look);
     let places: Vec<PlaceInfo> = Place::ALL
         .iter()
@@ -158,6 +160,7 @@ pub fn apply_look(app: &AppWindow, look: &Look) {
     t.set_square(th.square);
     t.set_text_font(th.font.text_family().into());
     t.set_number_font(th.font.number_family().into());
+    arrangement::set_look(app, look);
 }
 
 fn rgb(c: u32) -> Color {

@@ -26,34 +26,34 @@ pub const VERSION: u32 = 3;
 pub const EXTENSIONS: [&str; 1] = ["bwproject"];
 
 // Classes.
-const CLS_BITWIG_DEVICE: u32 = 0x40;
-const CLS_VST3_PLUGIN: u32 = 0x728;
-const CLS_VST2_PLUGIN: u32 = 0x1a5;
-const CLS_TEMPO: u32 = 0x4c1;
-const CLS_CLIP: u32 = 0x47;
+pub(super) const CLS_BITWIG_DEVICE: u32 = 0x40;
+pub(super) const CLS_VST3_PLUGIN: u32 = 0x728;
+pub(super) const CLS_VST2_PLUGIN: u32 = 0x1a5;
+pub(super) const CLS_TEMPO: u32 = 0x4c1;
+pub(super) const CLS_CLIP: u32 = 0x47;
 const CLS_KEY_LANE: u32 = 0x42;
-const CLS_NOTE: u32 = 0x66;
+pub(super) const CLS_NOTE: u32 = 0x66;
 const CLS_FILE_REF: u32 = 0x2a;
 const CLS_HARDWARE_IO: u32 = 0x461;
 // Fields.
-const F_DEVICE_NAME: u32 = 0x9a;
+pub(super) const F_DEVICE_NAME: u32 = 0x9a;
 const F_DEVICE_VENDOR: u32 = 0x9b;
-const F_DEVICE_CATEGORY: u32 = 0x9c;
-const F_DEVICE_PRESET: u32 = 0x12de;
+pub(super) const F_DEVICE_CATEGORY: u32 = 0x9c;
+pub(super) const F_DEVICE_PRESET: u32 = 0x12de;
 const F_PLUGIN_STATE: u32 = 0xbe5;
-const F_TEMPO: u32 = 0x2c8;
+pub(super) const F_TEMPO: u32 = 0x2c8;
 const F_TRACK_NAME: u32 = 0x15b;
-const F_START: u32 = 0x2af;
-const F_DURATION: u32 = 0x26;
-const F_VELOCITY: u32 = 0xef;
-const F_PITCH: u32 = 0xee;
-const F_NOTES: u32 = 0x21f;
-const F_FILE_PATH: u32 = 0x3b;
+pub(super) const F_START: u32 = 0x2af;
+pub(super) const F_DURATION: u32 = 0x26;
+pub(super) const F_VELOCITY: u32 = 0xef;
+pub(super) const F_PITCH: u32 = 0xee;
+pub(super) const F_NOTES: u32 = 0x21f;
+pub(super) const F_FILE_PATH: u32 = 0x3b;
 const F_HARDWARE_NAME: u32 = 0x11a7;
 // The track tree: the root's project group holds tracks (and groups of tracks) in one list, effect tracks in another
 // and the master in a third field. The "structure" metadata mirrors it with the names Bitwig shows.
-const F_PROJECT_GROUP: u32 = 0x4dd;
-const F_GROUP_TRACKS: u32 = 0x4de;
+pub(super) const F_PROJECT_GROUP: u32 = 0x4dd;
+pub(super) const F_GROUP_TRACKS: u32 = 0x4de;
 const F_GROUP_EFFECT_TRACKS: u32 = 0x4df;
 const F_MASTER_TRACK: u32 = 0x4e0;
 const F_STRUCT_ROOT: u32 = 0xad2;
@@ -161,7 +161,7 @@ const NOTE_EFFECTS: &[&str] = &[
 const INSTRUMENT_CATEGORIES: &[&str] =
     &["Synth", "Instrument", "Drum Kit", "Drum", "Drums", "Sampler", "Organ", "Piano", "Hardware"];
 
-fn is_instrument_category(category: &str) -> bool {
+pub(super) fn is_instrument_category(category: &str) -> bool {
     INSTRUMENT_CATEGORIES.iter().any(|c| c.eq_ignore_ascii_case(category))
 }
 
@@ -250,7 +250,7 @@ pub fn read_project(project: Option<&Project>, raw: &[u8], path: &Path, known: &
 
 /// The object a field holds (following a reference), as the C# reader's `Obj`: not a named one, as
 /// [`Document::field_obj`] also gives.
-fn field_obj(doc: &Document, of: ObjId, id: u32) -> Option<ObjId> {
+pub(super) fn field_obj(doc: &Document, of: ObjId, id: u32) -> Option<ObjId> {
     match doc.obj(of).get(id)? {
         Value::Obj(s) | Value::BareRef(s) => doc.resolve(*s),
         _ => None,
@@ -391,7 +391,7 @@ fn collected_names(copy: &str) -> Vec<String> {
     out
 }
 
-fn bitwig_kind(name: &str, category: &str) -> PluginKind {
+pub(super) fn bitwig_kind(name: &str, category: &str) -> PluginKind {
     if INSTRUMENTS.contains(&name) || is_instrument_category(category) {
         PluginKind::Instrument
     } else if NOTE_EFFECTS.contains(&name) || category.eq_ignore_ascii_case("Note FX") {
@@ -472,6 +472,11 @@ impl TrackNames {
                 self.names.push((t, name));
             }
         }
+    }
+
+    /// A track's name, when it has one.
+    pub(super) fn get(&self, t: ObjId) -> Option<&str> {
+        self.names.get(*self.at.get(&t)?).map(|(_, name)| name.as_str())
     }
 
     /// The name of the track `o` is on, or "Project".

@@ -37,6 +37,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     slint::platform::set_platform(Box::new(Headless(window.clone())))
         .map_err(|e| format!("couldn't set up drawing without a window: {e}"))?;
 
+    // No event loop here to post background work back to, so the arrangement is read and drawn in place.
+    mo_ui::arrangement::draw_here();
     let graphite = Look::from_settings(None, None);
     let feed = Feed::default();
     let app = mo_ui::new_app(&graphite, Shortcuts::default(), Place::Songs, feed.clone())?;
@@ -59,8 +61,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The song panel, on the first song, on Overview and on Plugins.
     for tab in [Tab::Overview, Tab::Plugins, Tab::Saves] {
         mo_ui::songs::show_picked(&app, 0, sample_detail(), tab);
+        mo_ui::arrangement::show_preview(&app, mo_ui::arrangement::sample_preview());
         shots.push((format!("song-panel-{}.png", slug(tab.name())), capture(&window)));
     }
+    // The arrangement: the mouse on a clip, zoomed in about the mouse, the Bitwig view, and in a light theme.
+    app.global::<mo_ui::SongsData>().set_tab(Tab::Overview.index() as i32);
+    let arrangement = app.global::<mo_ui::ArrangementData>();
+    arrangement.invoke_moved(ARRANGEMENT_CLIP.0, ARRANGEMENT_CLIP.1);
+    shots.push(("arrangement-hover.png".into(), capture(&window)));
+    arrangement.invoke_wheel(ARRANGEMENT_CLIP.0, 0.0, 4.0, true, false);
+    shots.push(("arrangement-zoomed.png".into(), capture(&window)));
+    arrangement.invoke_left();
+    arrangement.invoke_double_clicked();
+    arrangement.invoke_pick_view(1);
+    shots.push(("arrangement-bitwig-view.png".into(), capture(&window)));
+    mo_ui::apply_look(&app, &Look::from_settings(Some("Paper"), None));
+    mo_ui::arrangement::show_preview(&app, mo_ui::arrangement::sample_preview());
+    shots.push(("arrangement-light.png".into(), capture(&window)));
+    mo_ui::apply_look(&app, &graphite);
     // A song with things to look at, its Health strip open.
     mo_ui::songs::show_picked(&app, 1, sample_detail(), Tab::Overview);
     app.global::<mo_ui::SongsData>().set_health_open(true);
@@ -83,6 +101,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Tooltips: the mouse resting on a rail line, the song panel's Show in folder button and a song's date.
     mo_ui::songs::show_picked(&app, 0, sample_detail(), Tab::Overview);
+    mo_ui::arrangement::show_preview(&app, mo_ui::arrangement::sample_preview());
     for (name, x, y) in [
         ("tip-rail.png", 60.0, 125.0),
         ("tip-button.png", SHOW_BUTTON.0, SHOW_BUTTON.1),
@@ -213,6 +232,8 @@ fn sample_detail() -> mo_library::SaveDetail {
 /// the tooltip and menu shots come out the same as the plain panel, and mo-screens stops with an error.
 const SHOW_BUTTON: (f32, f32) = (1000.0, 328.0);
 const OLDER_BUTTON: (f32, f32) = (865.0, 328.0);
+/// A point on a clip in the arrangement, from the view's top left, for the hover and zoom shots.
+const ARRANGEMENT_CLIP: (f32, f32) = (480.0, 180.0);
 
 /// Moves the mouse to a point in the window (a point outside it moves it away).
 fn hover(window: &MinimalSoftwareWindow, x: f32, y: f32) {

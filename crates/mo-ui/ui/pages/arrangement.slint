@@ -1,0 +1,202 @@
+// The arrangement at the top of a song's Overview: the project drawn as its DAW shows it. mo-app draws the shapes into
+// a picture on a background thread (mo-ui's arrangement.rs); the words are laid on top here, in the app's own fonts,
+// each clipped to its strip: track names on the left, the ruler along the top, clip names on the timeline.
+import { Theme, Type, Space, ToggleChip, PointerPad, HoverNote } from "../studio.slint";
+
+// How a label on the picture looks.
+export enum ArrKind {
+    // A track's name, a group's, an automation lane's, and what plays a track under its name.
+    lane, group, automation, detail,
+    // The view's name at the ruler's left, a bar number, a marker on its flag.
+    head, bar, marker,
+    // A clip's name on its title bar, and "muted" and other small notes.
+    clip, small,
+}
+
+// Words to lay on the picture. `x` and `y` are from the view's top left; `width` is the room there is.
+export struct ArrLabel {
+    x: length,
+    y: length,
+    width: length,
+    height: length,
+    text: string,
+    kind: ArrKind,
+    muted: bool,
+}
+
+// What the preview shows and what it reports, filled and answered by mo-ui's arrangement.rs.
+export global ArrangementData {
+    // The project's views ("FL Studio playlist", "As it opens in Bitwig"); chips only when there's more than one.
+    in property <[string]> views;
+    in-out property <int> view;
+    // "140 BPM · 64 bars · 2:44 · 12 tracks · 80 clips · 2,400 notes"
+    in property <string> summary;
+    in property <[string]> notes;
+    // Shown instead of the picture while it's read, or when there's nothing to draw.
+    in property <string> message: "Reading the arrangement…";
+    in property <image> picture;
+    in property <length> header-width: 172px;
+    in property <length> ruler-height: 24px;
+    in property <[ArrLabel]> header-labels;
+    in property <[ArrLabel]> timeline-labels;
+    in property <[ArrLabel]> ruler-labels;
+    in property <string> hover-text;
+    in property <length> hover-x;
+    in property <length> hover-y;
+    in property <bool> dragging;
+
+    callback pick-view(int);
+    callback resized(length, length);
+    // The wheel, in notches (positive away from you), with Ctrl and Shift.
+    callback wheel(length, float, float, bool, bool);
+    callback grab(length, length);
+    callback moved(length, length);
+    callback let-go();
+    callback double-clicked();
+    callback left();
+}
+
+component Words inherits Rectangle {
+    in property <[ArrLabel]> labels;
+    // Where this strip is in the view, so a label's place in the view becomes its place in the strip.
+    in property <length> from-x;
+    in property <length> from-y;
+    clip: true;
+    for l in labels: Text {
+        x: l.x - root.from-x;
+        y: l.y - root.from-y;
+        width: l.width;
+        height: l.height;
+        text: l.text;
+        overflow: elide;
+        vertical-alignment: center;
+        font-family: l.kind == ArrKind.bar ? Theme.number-font : Theme.text-font;
+        font-size: l.kind == ArrKind.lane || l.kind == ArrKind.group ? Type.meta
+            : l.kind == ArrKind.clip || l.kind == ArrKind.small ? Type.tiny : Type.small;
+        font-weight: l.kind == ArrKind.group || l.kind == ArrKind.head ? 600
+            : l.kind == ArrKind.lane || l.kind == ArrKind.clip ? 500 : 400;
+        letter-spacing: l.kind == ArrKind.head ? 0.8px : 0px;
+        color: l.muted ? Theme.faint
+            : l.kind == ArrKind.lane || l.kind == ArrKind.group || l.kind == ArrKind.clip ? Theme.text
+            : l.kind == ArrKind.marker ? Theme.on-warning
+            : l.kind == ArrKind.small ? Theme.faint
+            : Theme.muted;
+    }
+}
+
+// The drawn arrangement, with its view chips, summary and notes above it.
+export component ArrangementPreview inherits VerticalLayout {
+    spacing: Space.sm;
+    HorizontalLayout {
+        spacing: Space.sm;
+        vertical-stretch: 0;
+        if ArrangementData.views.length > 1: HorizontalLayout {
+            spacing: Space.xs;
+            for v[i] in ArrangementData.views: ToggleChip {
+                text: v;
+                on: i == ArrangementData.view;
+                clicked => { ArrangementData.pick-view(i); }
+            }
+        }
+        Text {
+            horizontal-stretch: 1;
+            text: ArrangementData.summary;
+            color: Theme.muted;
+            font-size: Type.meta;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+    for n in ArrangementData.notes: Text {
+        text: n;
+        color: Theme.muted;
+        font-size: Type.meta;
+        wrap: word-wrap;
+    }
+    Rectangle {
+        vertical-stretch: 1;
+        min-height: 160px;
+        border-radius: Theme.radius;
+        border-width: 1px;
+        border-color: Theme.stroke;
+        background: Theme.surface;
+        clip: true;
+        if ArrangementData.message != "": Text {
+            text: ArrangementData.message;
+            color: Theme.muted;
+            font-size: Type.body;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            wrap: word-wrap;
+            width: parent.width - 2 * Space.lg;
+        }
+        canvas := Rectangle {
+            x: 1px;
+            y: 1px;
+            width: parent.width - 2px;
+            height: parent.height - 2px;
+            visible: ArrangementData.message == "";
+            init => { ArrangementData.resized(self.width, self.height); }
+            changed width => { ArrangementData.resized(self.width, self.height); }
+            changed height => { ArrangementData.resized(self.width, self.height); }
+            Image {
+                width: parent.width;
+                height: parent.height;
+                source: ArrangementData.picture;
+                image-fit: fill;
+            }
+            // The line under the mouse, drawn here so moving the mouse doesn't need a new picture.
+            if ArrangementData.hover-text != "": Rectangle {
+                x: ArrangementData.hover-x;
+                y: ArrangementData.ruler-height;
+                width: 1px;
+                height: max(0px, parent.height - ArrangementData.ruler-height);
+                background: Theme.muted;
+            }
+            Words {
+                x: 0;
+                y: ArrangementData.ruler-height;
+                width: ArrangementData.header-width;
+                height: max(0px, parent.height - ArrangementData.ruler-height);
+                from-x: self.x;
+                from-y: self.y;
+                labels: ArrangementData.header-labels;
+            }
+            Words {
+                x: ArrangementData.header-width;
+                y: ArrangementData.ruler-height;
+                width: max(0px, parent.width - ArrangementData.header-width);
+                height: max(0px, parent.height - ArrangementData.ruler-height);
+                from-x: self.x;
+                from-y: self.y;
+                labels: ArrangementData.timeline-labels;
+            }
+            Words {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: ArrangementData.ruler-height;
+                from-x: 0;
+                from-y: 0;
+                labels: ArrangementData.ruler-labels;
+            }
+            PointerPad {
+                grabbing: ArrangementData.dragging;
+                down(x, y) => { ArrangementData.grab(x, y); }
+                move(x, y) => { ArrangementData.moved(x, y); }
+                up => { ArrangementData.let-go(); }
+                double => { ArrangementData.double-clicked(); }
+                wheel(x, across, down, ctrl, shift) => { ArrangementData.wheel(x, across, down, ctrl, shift); }
+                gone => { ArrangementData.left(); }
+            }
+            // What's under the mouse, beside it.
+            if ArrangementData.hover-text != "": HoverNote {
+                text: ArrangementData.hover-text;
+                at-x: ArrangementData.hover-x;
+                at-y: ArrangementData.hover-y;
+                room-width: parent.width;
+                room-height: parent.height;
+            }
+        }
+    }
+}

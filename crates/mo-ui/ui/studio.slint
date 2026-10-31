@@ -30,6 +30,8 @@ export global Theme {
     out property <color> missing: #F0616D;
     out property <color> warning: #F2B33D;
     out property <color> ok: #4ACB8B;
+    // Words on something coloured `warning`, like a marker's flag.
+    out property <color> on-warning: #1A1208;
     // Shadows under cards and dialogs, and the dimming behind a dialog.
     out property <color> shadow: #00000080;
     out property <color> scrim: #00000099;
@@ -70,6 +72,10 @@ export global Type {
     out property <length> meta: 13px;
     // Group headings in capitals.
     out property <length> caps: 12px;
+    // Words laid on a drawn view where room is tight: bar numbers, markers, track details.
+    out property <length> small: 12px;
+    // The smallest: a clip's name on its title bar in a drawn view.
+    out property <length> tiny: 11px;
 }
 
 // Gaps and padding, on a 4px grid. Pages use these, never a gap of their own.
@@ -693,5 +699,67 @@ export component LinkText inherits Rectangle {
     touch := TouchArea {
         mouse-cursor: pointer;
         clicked => { root.clicked(); }
+    }
+}
+
+// The mouse on a drawn view (arrangement, piano roll, galaxy): where it moves, a left press and its letting go, a
+// double-click, the wheel in notches (positive away from you) and leaving. Fills its parent.
+export component PointerPad inherits TouchArea {
+    in property <bool> grabbing;
+    callback down(length, length);
+    callback move(length, length);
+    callback up();
+    callback double();
+    callback wheel(length, float, float, bool, bool);
+    callback gone();
+    mouse-cursor: grabbing ? MouseCursor.grabbing : MouseCursor.default;
+    pointer-event(e) => {
+        if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+            root.down(self.mouse-x, self.mouse-y);
+        } else if (e.kind == PointerEventKind.up && e.button == PointerEventButton.left) || e.kind == PointerEventKind.cancel {
+            root.up();
+        } else if e.kind == PointerEventKind.move {
+            root.move(self.mouse-x, self.mouse-y);
+        }
+    }
+    double-clicked => { root.double(); }
+    scroll-event(e) => {
+        // A wheel notch comes as 60px.
+        root.wheel(self.mouse-x, e.delta-x / 60px, e.delta-y / 60px, e.modifiers.control, e.modifiers.shift);
+        accept
+    }
+    changed has-hover => {
+        if !self.has-hover {
+            root.gone();
+        }
+    }
+}
+
+// What's under the mouse on a drawn view, shown at once beside it (a tooltip waits; this follows the mouse). Put it in
+// the view with the mouse's place; it keeps inside the view.
+export component HoverNote inherits Rectangle {
+    in property <string> text;
+    in property <length> at-x;
+    in property <length> at-y;
+    in property <length> room-width;
+    in property <length> room-height;
+    x: max(0px, min(at-x + 14px, room-width - self.width - Space.xs));
+    y: at-y + 18px + self.height > room-height ? max(0px, at-y - self.height - Space.sm) : at-y + 18px;
+    width: min(line.preferred-width + 2 * Space.sm, room-width - 2 * Space.xs);
+    height: line.preferred-height + 2 * Space.xs;
+    background: Theme.surface-raised;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: Theme.edge;
+    drop-shadow-blur: 8px;
+    drop-shadow-color: Theme.shadow;
+    line := Text {
+        x: Space.sm;
+        width: parent.width - 2 * Space.sm;
+        text: root.text;
+        color: Theme.text;
+        font-size: Type.meta;
+        vertical-alignment: center;
+        overflow: elide;
     }
 }

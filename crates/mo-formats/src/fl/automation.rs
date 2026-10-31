@@ -147,7 +147,7 @@ impl MixerSettings {
 /// share a beat (a jump), the part starts from the value after the jump and ends on the value before it; a jump right
 /// at its end is kept as a second point there, so what's held after the clip is where the curve ends (FL saves a
 /// clip's last points at its very end).
-fn cut_curve(curve: &[FlPoint], at: f64, from: f64, length: f64, hold: bool) -> Vec<FlPoint> {
+pub(super) fn cut_curve(curve: &[FlPoint], at: f64, from: f64, length: f64, hold: bool) -> Vec<FlPoint> {
     if length <= 0.0 || curve.is_empty() {
         return Vec::new();
     }

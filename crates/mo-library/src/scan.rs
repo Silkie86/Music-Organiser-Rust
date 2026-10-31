@@ -97,13 +97,18 @@ pub fn is_ignored(path: &str, roots: &[String]) -> bool {
     let Some(root) = roots.iter().filter(|r| is_inside(path, r)).max_by_key(|r| parts(r).count()) else {
         return false;
     };
+    below_skipped(path, root, &skip_dir)
+}
+
+/// Whether `path` (inside `root`) is in a folder below `root` that `skip` leaves out.
+fn below_skipped(path: &str, root: &str, skip: &dyn Fn(&str, &str) -> bool) -> bool {
     // The folders between the root and the file, counted by name rather than by letters, so a root written in
     // another case or with other slashes still lines up.
     let folders: Vec<&str> = parts(path).collect();
     let below = folders.get(parts(root).count()..folders.len().saturating_sub(1)).unwrap_or_default();
     let mut parent = parts(root).last().unwrap_or_default();
     for name in below {
-        if skip_dir(name, parent) {
+        if skip(name, parent) {
             return true;
         }
         parent = name;
@@ -126,7 +131,8 @@ pub fn looks_like_folder(path: &str) -> bool {
         || !ext.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
-/// A project file found in a folder, with the size and modified time (Unix seconds) the folder listing gave.
+/// A file found in a folder (a project, or a sound for the Sounds page), with the size and modified time (Unix seconds)
+/// the folder listing gave.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FoundFile {
     pub path: String,
@@ -134,12 +140,12 @@ pub struct FoundFile {
     pub mtime: i64,
 }
 
-/// What [`find_projects`] found.
+/// What [`find_projects`] or [`find_files`] found.
 #[derive(Clone, Debug, Default)]
 pub struct Found {
     /// Sorted by path, ignoring case; each file once.
     pub files: Vec<FoundFile>,
-    /// Folders that couldn't be read this time (busy, or their permissions changing): their projects stay as they were.
+    /// Folders that couldn't be read this time (busy, or their permissions changing): their files stay as they were.
     pub unreadable: Vec<String>,
 }
 
@@ -151,6 +157,18 @@ const DEEPEST: usize = 64;
 /// that isn't there (an unplugged drive) is counted as unreadable, so its saves stay as they were; a root inside
 /// another is walked once, as part of the outer one.
 pub fn find_projects(roots: &[String]) -> Found {
+    find_files(roots, &is_project_file, &skip_dir)
+}
+
+/// Every file under `roots` that `wanted` keeps, leaving out folders `skip` names (it's given the folder's name and its
+/// parent's), walked as [`find_projects`] walks: a level of folders at a time on every core of the current rayon pool,
+/// a root that isn't there counted as unreadable, a root inside another walked once. The Sounds and MIDI pages walk
+/// their folders with it too.
+pub fn find_files(
+    roots: &[String],
+    wanted: &(dyn Fn(&str) -> bool + Sync),
+    skip: &(dyn Fn(&str, &str) -> bool + Sync),
+) -> Found {
     let mut found = Found::default();
     let keys: Vec<String> = roots.iter().map(|r| path_key(r)).collect();
     let mut level: Vec<String> = Vec::new();
@@ -162,7 +180,7 @@ pub fn find_projects(roots: &[String]) -> Found {
             j != i
                 && key_inside(key, k)
                 && (k != key || j < i)
-                && roots.get(j).is_none_or(|outer| !is_ignored(&format!("{root}/x.flp"), std::slice::from_ref(outer)))
+                && roots.get(j).is_none_or(|outer| !below_skipped(&format!("{root}/x"), outer, skip))
         });
         if inner {
             continue;
@@ -182,7 +200,7 @@ pub fn find_projects(roots: &[String]) -> Found {
         if level.is_empty() {
             break;
         }
-        let read: Vec<Listing> = level.par_iter().map(|dir| list(dir)).collect();
+        let read: Vec<Listing> = level.par_iter().map(|dir| list(dir, wanted, skip)).collect();
         level = Vec::new();
         for l in read {
             found.files.extend(l.files);
@@ -202,7 +220,7 @@ pub fn find_projects(roots: &[String]) -> Found {
     found
 }
 
-/// What one folder holds: its project files, the folders in it to walk next, the folder links in it with where they
+/// What one folder holds: the files it wants, the folders in it to walk next, the folder links in it with where they
 /// really go, and what couldn't be read (the folder itself, or an entry in it that couldn't be looked at).
 #[derive(Default)]
 struct Listing {
@@ -213,7 +231,7 @@ struct Listing {
 }
 
 /// Lists one folder.
-fn list(dir: &str) -> Listing {
+fn list(dir: &str, wanted: &(dyn Fn(&str) -> bool + Sync), skip: &(dyn Fn(&str, &str) -> bool + Sync)) -> Listing {
     let mut out = Listing::default();
     let Ok(entries) = fs::read_dir(dir) else {
         out.unreadable.push(dir.to_owned());
@@ -238,19 +256,19 @@ fn list(dir: &str) -> Listing {
             // points nowhere is left out.
             let Ok(meta) = fs::metadata(&path) else { continue };
             if meta.is_dir() {
-                if !skip_dir(file_name(&path), parent)
+                if !skip(file_name(&path), parent)
                     && let Some(real) = fs::canonicalize(&path).ok().and_then(|r| r.to_str().map(path_key))
                 {
                     out.links.push((path, real));
                 }
-            } else if is_project_file(&path) {
+            } else if wanted(&path) {
                 out.files.push(FoundFile { size: size(&meta), mtime: mtime(&meta), path });
             }
         } else if kind.is_dir() {
-            if !skip_dir(file_name(&path), parent) {
+            if !skip(file_name(&path), parent) {
                 out.dirs.push(path);
             }
-        } else if is_project_file(&path) {
+        } else if wanted(&path) {
             // On Windows the size and date come with the listing itself, so this doesn't ask the disk again.
             match entry.metadata() {
                 Ok(meta) => out.files.push(FoundFile { size: size(&meta), mtime: mtime(&meta), path }),
@@ -268,9 +286,17 @@ fn size(meta: &fs::Metadata) -> i64 {
     i64::try_from(meta.len()).unwrap_or(i64::MAX)
 }
 
-/// When a file was last written, in Unix seconds, as the library keeps it.
+/// When a file was last written, in Unix seconds, as the library keeps it. A date before 1970 is a whole number of
+/// seconds below zero, rounded down, as the C# app's `ToUnixTimeSeconds` gives it, so the two apps agree on it.
 pub fn mtime(meta: &fs::Metadata) -> i64 {
-    meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs() as i64)
+    let Ok(t) = meta.modified() else { return 0 };
+    match t.duration_since(UNIX_EPOCH) {
+        Ok(d) => i64::try_from(d.as_secs()).unwrap_or(i64::MAX),
+        Err(e) => {
+            let d = e.duration();
+            -i64::try_from(d.as_secs()).unwrap_or(i64::MAX) - i64::from(d.subsec_nanos() > 0)
+        }
+    }
 }
 
 /// A save as the library last read it, for working out what needs reading again.

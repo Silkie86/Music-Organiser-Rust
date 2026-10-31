@@ -25,6 +25,8 @@ use crate::plugins;
 use crate::presets::PresetBlob;
 use crate::textscan;
 
+pub mod arrangement;
+
 pub const DAW: &str = "Studio One";
 /// Goes up by one whenever the reader finds more (or different) things in the same files (rule 7). 2 is the C#
 /// reader's: each insert's plugin by its own name and id, not the name the insert shows; Studio One's own effects
