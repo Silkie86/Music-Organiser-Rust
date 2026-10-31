@@ -8,6 +8,7 @@
 mod db;
 pub mod scan;
 pub mod songs;
+pub mod watch;
 
 pub use db::{Library, LibraryError, PathSet, ProjectPlugin, ProjectSample, SaveDetail};
 pub use mo_formats::{Confidence, PluginKind};
