@@ -201,6 +201,46 @@ pub fn calibration_error(answers: &[(Option<f64>, bool)]) -> Option<f64> {
     (n > 0.0).then(|| bins.iter().filter(|b| b.0 > 0.0).map(|(_, conf, hits)| (hits - conf).abs() / n).sum::<f64>())
 }
 
+/// The same, with bins of equal size instead of equal width (`bins` of them, the most confident last): every bin has
+/// enough answers to say something, so a finder whose answers bunch up at one confidence can't hide in an empty bin.
+pub fn calibration_error_equal_mass(answers: &[(Option<f64>, bool)], bins: usize) -> Option<f64> {
+    let mut sure: Vec<(f64, bool)> = answers.iter().filter_map(|&(c, r)| c.map(|c| (c.clamp(0.0, 1.0), r))).collect();
+    if sure.is_empty() || bins == 0 {
+        return None;
+    }
+    sure.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let n = sure.len();
+    let mut error = 0.0;
+    for b in 0..bins {
+        let Some(bin) = sure.get(b * n / bins..(b + 1) * n / bins) else { continue };
+        if bin.is_empty() {
+            continue;
+        }
+        let conf: f64 = bin.iter().map(|(c, _)| c).sum();
+        let hits = bin.iter().filter(|(_, r)| *r).count() as f64;
+        error += (hits - conf).abs() / n as f64;
+    }
+    Some(error)
+}
+
+/// The area under the risk-coverage curve: answering only the k surest cases, for every k, the average share wrong.
+/// 0 is a finder whose wrong answers are all less sure than its right ones and that is never wrong; lower is better.
+/// Cases with no answer count as wrong and least sure.
+pub fn risk_coverage_area(answers: &[(Option<f64>, bool)]) -> Option<f64> {
+    if answers.is_empty() {
+        return None;
+    }
+    let mut sure: Vec<(f64, bool)> =
+        answers.iter().map(|&(c, r)| (c.unwrap_or(f64::NEG_INFINITY), r && c.is_some())).collect();
+    sure.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let (mut wrong, mut area) = (0.0, 0.0);
+    for (k, (_, right)) in sure.iter().enumerate() {
+        wrong += f64::from(u8::from(!right));
+        area += wrong / (k + 1) as f64;
+    }
+    Some(area / sure.len() as f64)
+}
+
 /// "78.2%".
 pub fn pct(x: f64) -> String {
     format!("{:.1}%", 100.0 * x)
@@ -266,5 +306,18 @@ mod tests {
         let over: Vec<(Option<f64>, bool)> = (0..10).map(|i| (Some(0.9), i % 2 == 0)).collect();
         assert!(calibration_error(&over).is_some_and(|e| (e - 0.4).abs() < 1e-9));
         assert_eq!(calibration_error(&[(None, true)]), None);
+        // Equal-size bins agree on honest answers, and find the same 0.4 when always 90% sure.
+        assert!(calibration_error_equal_mass(&answers, 2).is_some_and(|e| e < 1e-9));
+        assert!(calibration_error_equal_mass(&over, 5).is_some_and(|e| (e - 0.4).abs() < 1e-9));
+    }
+
+    #[test]
+    fn risk_falls_when_the_wrong_answers_are_the_least_sure() {
+        let honest = [(Some(0.9), true), (Some(0.8), true), (Some(0.2), false)];
+        let backwards = [(Some(0.9), false), (Some(0.8), true), (Some(0.2), true)];
+        // Honest: 0, 0, then 1/3 wrong: a ninth on average. Backwards: 1, 1/2, 1/3.
+        assert!(risk_coverage_area(&honest).is_some_and(|a| (a - 1.0 / 9.0).abs() < 1e-12));
+        assert!(risk_coverage_area(&backwards).is_some_and(|a| (a - (1.0 + 0.5 + 1.0 / 3.0) / 3.0).abs() < 1e-12));
+        assert_eq!(risk_coverage_area(&[]), None);
     }
 }

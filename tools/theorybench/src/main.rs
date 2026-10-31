@@ -6,8 +6,10 @@
 
 mod baseline;
 mod chords;
+mod fit;
 mod harte;
 mod item;
+mod keyfit;
 mod keys;
 mod metrics;
 mod profiles;
@@ -15,12 +17,21 @@ mod profiles;
 use std::process::ExitCode;
 
 const USAGE: &str = "theorybench keys <labelled.jsonl>... [--part <role>] [--aligned] [--bars <lengths>]
+theorybench keyfit <labelled.jsonl>... [--aligned] [--bars <lengths>] [--lambda-delta <x>|inf] [--inputs <kinds>]
+                   [--picks <n>] [--final | --write <weights.rs>]
 theorybench chords <labelled.jsonl>... --answers <name>=<answers.jsonl> [--answers ...] [--dump <file>]
 
   keys       how often each key finder names the labelled key, on whole songs and on clips (8 bars long unless --bars
              gives other lengths, such as 1,2,4,8,16)
   --part     hear only the parts with this role (melody, accompaniment, bass, chords); all pitched parts when left out
   --aligned  only songs with four beats a bar whose labelled bar lines fall on the MIDI's grid (the C# bench's songs)
+  keyfit     fits mo-harmony's key finder on folds 1 to 4 of the songs (each fold scored by a fit on the others)
+             and measures it beside the C# app: whole songs, stretches and openings of 1 to 16 bars (--bars)
+  --lambda-delta  how hard the per-note corrections are pulled to 0 (1e-4; inf fits the counted tables alone)
+  --inputs   the kinds of input heard: full,tune,upper,bass,piano (all)
+  --picks    stretches of each length fitted on from each song (8)
+  --final    fits on folds 1 to 4 and scores the kept-back fold 0, once, logging the run in test-runs.md
+  --write    fits on every song and writes the weights file
   chords     how often each chord reader names the labelled chord, scored as mir_eval scores it
   --answers  the chords an engine read in each piece, as the C# helper in cs/ writes them; the first is the baseline
   --dump     write every piece's labels, chords read and scores to a file, for convert/check_mir_eval.py";
@@ -30,6 +41,7 @@ fn main() -> ExitCode {
     low_priority_threads();
     let result = match args.first().map(String::as_str) {
         Some("keys") => keys::run(&args[1..]),
+        Some("keyfit") => keyfit::run(&args[1..]),
         Some("chords") => chords::run(&args[1..]),
         _ => Err(USAGE.to_owned()),
     };
