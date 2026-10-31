@@ -18,6 +18,8 @@ md-5 = "0.10"
 rayon.workspace = true
 # Which saves are older saves of the same song (the C# `SongVersions`).
 mo-library = { path = "../mo-library" }
+# Looking through a project's bytes for a multisample copy's name, quickly.
+memchr = "2"
 
 [dev-dependencies]
 # The made-up Bitwig files shared from mo-formats' tests use it.

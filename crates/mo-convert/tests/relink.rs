@@ -26,7 +26,7 @@ fn text(id: u32, t: &str) -> Field {
 
 /// A project whose root holds a multisample reference laid out as Solomon's are: the copy's name, its relative and
 /// absolute paths, and a child naming the Library file it came from (gone since).
-fn project_with_copy(dir: &Path, copy: &str, also: Option<&str>) -> PathBuf {
+fn project_with_copy(dir: &Path, copy: &str) -> PathBuf {
     let mut doc = bitwig::decode(fixtures::bitwig_template(fixtures::Template::default())).unwrap();
     let mut origin = Object::new(0x7f01);
     origin.fields.push(text(
@@ -41,9 +41,6 @@ fn project_with_copy(dir: &Path, copy: &str, also: Option<&str>) -> PathBuf {
     let folder = dir.file_name().unwrap().to_string_lossy();
     file.fields.push(text(0x7f05, &format!(r"I:\Bitwig Studio\Projects\{folder}\multi-samples\{copy}")));
     file.fields.push(Field { id: 0x7f06, value: Value::Obj(Slot::Obj(origin)) });
-    if let Some(other) = also {
-        file.fields.push(text(0x7f07, other));
-    }
     let file = doc.add(file);
     doc.objects[origin.0 as usize].parent = Some((file, 0x7f06));
     // Bitwig lists the files a project uses in its metadata.
@@ -99,7 +96,7 @@ const COPY: &str = "Kicks 1 Select-3-2-2.multisample";
 #[test]
 fn every_reference_to_a_copy_points_at_the_library_file() {
     let dir = folder("relink");
-    let project = project_with_copy(&dir, COPY, None);
+    let project = project_with_copy(&dir, COPY);
     let before = std::fs::read(&project).unwrap();
     let library = library(&dir, "Kicks 1 Select.multisample");
     let relinks = [relink(&dir, COPY, &library)];
@@ -129,7 +126,7 @@ fn every_reference_to_a_copy_points_at_the_library_file() {
 fn a_copy_still_named_elsewhere_isnt_offered_for_the_bin() {
     let dir = folder("relink kept");
     // A plugin keeping the copy's name in its own settings, where this doesn't change it.
-    let project = project_with_copy(&dir, COPY, None);
+    let project = project_with_copy(&dir, COPY);
     let mut doc = bitwig::decode(std::fs::read(&project).unwrap()).unwrap();
     let root = doc.root.unwrap();
     let settings: Vec<u8> = format!("path={COPY}").encode_utf16().flat_map(u16::to_be_bytes).collect();
@@ -145,20 +142,24 @@ fn a_copy_still_named_elsewhere_isnt_offered_for_the_bin() {
 #[test]
 fn a_copy_another_project_in_the_folder_uses_is_kept() {
     let dir = folder("relink sibling");
-    let project = project_with_copy(&dir, COPY, None);
+    let project = project_with_copy(&dir, COPY);
     std::fs::copy(&project, dir.join("Song older.bwproject")).unwrap();
     let relinks = [relink(&dir, COPY, &library(&dir, "Kicks 1 Select.multisample"))];
     // The fixed project is still written (it plays from the Library), but the copy isn't offered for the bin.
     let fixed = fix_bitwig_project(&project, &relinks).unwrap();
     assert!(fixed.changed.is_empty());
-    assert!(fixed.left[0].contains("Song older.bwproject in the same folder may still use it"), "{:?}", fixed.left);
+    assert!(
+        fixed.left[0].contains("Song older.bwproject in the project's folder may still use it"),
+        "{:?}",
+        fixed.left
+    );
 }
 
 #[test]
 fn a_copy_named_as_its_library_file_is_matched_by_its_folder() {
     let dir = folder("relink same name");
     let name = "Kicks 1 Select.multisample";
-    let project = project_with_copy(&dir, name, None);
+    let project = project_with_copy(&dir, name);
     let library = library(&dir, name);
     let fixed = fix_bitwig_project(&project, &[relink(&dir, name, &library)]).unwrap();
     assert_eq!(fixed.changed.len(), 1, "{:?}", fixed.left);
@@ -170,15 +171,76 @@ fn a_copy_named_as_its_library_file_is_matched_by_its_folder() {
 #[test]
 fn bad_lists_and_unused_copies_write_nothing() {
     let dir = folder("relink none");
-    let project = project_with_copy(&dir, "Kicks 1 Select-3.multisample", None);
+    let project = project_with_copy(&dir, "Kicks 1 Select-3.multisample");
     let library = library(&dir, "Other.multisample");
+    let err = |relinks: &[Relink]| fix_bitwig_project(&project, relinks).unwrap_err();
     // Not used by this project.
-    assert!(fix_bitwig_project(&project, &[relink(&dir, "Other-2.multisample", &library)]).is_err());
-    // No name, somewhere else, or a Library file that isn't there.
-    assert!(fix_bitwig_project(&project, &[relink(&dir, "", &library)]).is_err());
+    std::fs::write(dir.join("multi-samples").join("Other-2.multisample"), b"<multisample/>").unwrap();
+    assert!(err(&[relink(&dir, "Other-2.multisample", &library)]).contains("uses none"));
+    // Somewhere else, or a Library file that isn't there.
     let elsewhere = Relink { copy: dir.join("Kicks 1 Select-3.multisample"), library: library.clone() };
-    assert!(fix_bitwig_project(&project, &[elsewhere]).is_err());
+    assert!(err(&[elsewhere]).contains("isn't in this project's multi-samples folder"));
     let missing = dir.join("Library").join("Gone.multisample");
-    assert!(fix_bitwig_project(&project, &[relink(&dir, "Kicks 1 Select-3.multisample", &missing)]).is_err());
+    assert!(err(&[relink(&dir, "Kicks 1 Select-3.multisample", &missing)]).contains("isn't a Library file"));
+    assert!(!dir.join("Song (fixed).bwproject").exists());
+}
+
+/// A zip with one deflated file in it, as Bitwig keeps plugin settings.
+fn zip_with(name: &str, data: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut out = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    out.start_file(name, options).unwrap();
+    out.write_all(data).unwrap();
+    out.finish().unwrap().into_inner()
+}
+
+#[test]
+fn a_copy_named_in_packed_plugin_settings_or_an_auto_backup_is_kept() {
+    let dir = folder("relink zip");
+    let project = project_with_copy(&dir, COPY);
+    let doc = bitwig::decode(std::fs::read(&project).unwrap()).unwrap();
+    let state: Vec<u8> = COPY.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    std::fs::write(&project, bitwig::encode(&doc, Some(&zip_with("plugin-states/1.state", &state))).unwrap()).unwrap();
+    let relinks = [relink(&dir, COPY, &library(&dir, "Kicks 1 Select.multisample"))];
+    let err = fix_bitwig_project(&project, &relinks).unwrap_err();
+    assert!(err.contains("still names it"), "{err}");
+
+    // An auto-backup in a folder below names it too.
+    let dir = folder("relink backup");
+    let project = project_with_copy(&dir, COPY);
+    std::fs::create_dir_all(dir.join("auto-backups")).unwrap();
+    std::fs::copy(&project, dir.join("auto-backups").join("Song-1.bwproject")).unwrap();
+    let relinks = [relink(&dir, COPY, &library(&dir, "Kicks 1 Select.multisample"))];
+    let fixed = fix_bitwig_project(&project, &relinks).unwrap();
+    assert!(fixed.changed.is_empty());
+    assert!(fixed.left[0].contains("Song-1.bwproject"), "{:?}", fixed.left);
+}
+
+#[test]
+fn an_accented_copy_is_found_in_any_letter_case() {
+    let dir = folder("relink accents");
+    let copy = "Über Bass-2.multisample";
+    let project = project_with_copy(&dir, copy);
+    // Another project names it in capitals.
+    let mut doc = bitwig::decode(std::fs::read(&project).unwrap()).unwrap();
+    let root = doc.root.unwrap();
+    doc.obj_mut(root).fields.push(Field { id: 0x7f21, value: Value::Str(Text::new(&copy.to_uppercase())) });
+    std::fs::write(dir.join("Other.bwproject"), bitwig::encode(&doc, None).unwrap()).unwrap();
+    let relinks = [relink(&dir, copy, &library(&dir, "Über Bass.multisample"))];
+    let fixed = fix_bitwig_project(&project, &relinks).unwrap();
+    assert!(fixed.changed.is_empty(), "{:?}", fixed.left);
+    assert!(fixed.left[0].contains("Other.bwproject"), "{:?}", fixed.left);
+    assert!(!texts(&fixed.file).iter().any(|t| t.contains("-2")), "the fixed project itself points at the Library");
+}
+
+#[test]
+fn an_edited_copy_is_left_alone() {
+    let dir = folder("relink edited");
+    let project = project_with_copy(&dir, COPY);
+    let library = library(&dir, "Kicks 1 Select.multisample");
+    std::fs::write(dir.join("multi-samples").join(COPY), b"<multisample edited/>").unwrap();
+    let err = fix_bitwig_project(&project, &[relink(&dir, COPY, &library)]).unwrap_err();
+    assert!(err.contains("isn't the same as its Library file"), "{err}");
     assert!(!dir.join("Song (fixed).bwproject").exists());
 }
