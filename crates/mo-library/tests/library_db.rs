@@ -239,3 +239,16 @@ fn knows_the_installed_plugins() {
     assert!(installed.names.contains("pro-q 3"));
     assert_eq!(installed.ids.iter().collect::<Vec<_>>(), ["ABCDEF"]);
 }
+
+#[test]
+fn copies_the_library_without_changing_it() {
+    let path = make("copy-from.db", true);
+    let to = path.with_file_name("copy-to.db");
+    let _ = std::fs::remove_file(&to);
+    let lib = Library::open_read_only(&path).unwrap();
+    lib.copy_to(&to).unwrap();
+    let copy = Library::open_read_only(&to).unwrap();
+    assert_eq!(copy.saves().unwrap().len(), lib.saves().unwrap().len());
+    // A copy is never written over.
+    assert!(lib.copy_to(&to).is_err());
+}

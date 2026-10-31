@@ -48,6 +48,9 @@ $Stamp = Get-Date -Format 'yyyy-MM-dd-HHmm'
 $Summary = Join-Path $Logs "twin-test-$Stamp.txt"
 $Report = Join-Path $Logs "twin-report-$Stamp.txt"
 $SongsReport = Join-Path $Logs "twin-songs-$Stamp.txt"
+# Below normal priority (rule 21): the build, the twin and the C# helper it starts take it on, so a DAW open meanwhile
+# stays quick.
+try { (Get-Process -Id $PID).PriorityClass = 'BelowNormal' } catch { }
 Write-Host 'Building the Rust half (a few minutes the first time)...'
 Push-Location $Rust
 $ErrorActionPreference = 'Continue'
@@ -56,8 +59,6 @@ $ErrorActionPreference = 'Stop'
 if ($Code -ne 0) { throw 'The Rust half did not build.' }
 Write-Host "Reading every FL Studio, Bitwig and Studio One project and MIDI file in $($Folders.Count) folder(s) with both apps..."
 Push-Location $Rust
-# Below normal priority (rule 21): the twin and the C# helper it starts take it on, so a DAW open meanwhile stays quick.
-try { (Get-Process -Id $PID).PriorityClass = 'BelowNormal' } catch { }
 # Cargo writes its progress to stderr, which Windows PowerShell 5.1 takes as an error under 'Stop'.
 $ErrorActionPreference = 'Continue'
 try {
@@ -69,7 +70,8 @@ try {
     # Exit code 1 means some songs are grouped differently for a reason other than copied folders: still a summary.
     $Out += ''
     $Out += cargo run --release -q -p mo-twin -- songs --cs $Dll (Join-Path $Data 'library.db') --report $SongsReport
-    if ($LASTEXITCODE -gt 1) { $Code = $LASTEXITCODE }
+    # A songs step that stops doesn't lose the file twin's summary: it's noted in it instead.
+    if ($LASTEXITCODE -gt 1) { $Out += "The songs twin test stopped (exit code $LASTEXITCODE): its message is above." }
   }
 } finally { Pop-Location }
 $ErrorActionPreference = 'Stop'

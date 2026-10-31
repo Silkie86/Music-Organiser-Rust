@@ -12,8 +12,8 @@
 //! to paste into a conversation; every difference, file by file, goes in the report. `--expect` checks the differences
 //! against a list of the ones already judged and fails on any new one (CI uses it on the test files); `--write-expect`
 //! writes that list. `dump` prints what the Rust readers find in one file. `songs` groups the library into songs both
-//! ways and sorts the differences by cause (see `songs.rs`); the C# helper works on a copy of the library, made
-//! beside it and deleted afterwards.
+//! ways and sorts the differences by cause (see `songs.rs`); both sides read one copy of the library, made beside the
+//! helper and deleted afterwards.
 
 mod compare;
 mod rust_side;
@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
 use mo_formats::midi::smf;
+use mo_library::songs::thousands;
 use rayon::prelude::*;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -93,19 +94,6 @@ fn options(args: &[String]) -> Result<Options, String> {
         return Err(USAGE.to_owned());
     }
     Ok(o)
-}
-
-/// "16,424".
-fn thousands(n: usize) -> String {
-    let digits = n.to_string();
-    let mut out = String::new();
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
 }
 
 /// Runs the songs twin. `Ok(false)` when a difference isn't one the copied folders explain.

@@ -582,9 +582,23 @@ struct FileId {
     created: Option<NaiveDateTime>,
 }
 
-/// Whether two saves are the same file in two places, as [`group_songs`] judges it.
-pub fn same_file_as(a: &Save, b: &Save) -> bool {
-    same_file(a).is_some_and(|x| same_file(b).is_some_and(|y| x == y))
+/// What [`group_songs`] knows a save's file by: two saves with equal ones are the same file in two places. A save it
+/// can't tell apart has none.
+pub fn file_id(s: &Save) -> Option<impl Eq + std::hash::Hash + use<>> {
+    same_file(s)
+}
+
+/// "16,000".
+pub fn thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 fn same_file(s: &Save) -> Option<FileId> {

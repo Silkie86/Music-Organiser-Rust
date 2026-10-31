@@ -228,18 +228,7 @@ pub fn plural(n: usize, what: &str) -> String {
     if n == 1 { format!("1 {what}") } else { format!("{} {what}s", thousands(n)) }
 }
 
-/// "16,000".
-pub fn thousands(n: usize) -> String {
-    let digits = n.to_string();
-    let mut out = String::new();
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
-}
+pub use mo_library::songs::thousands;
 
 /// The list's time headings: "This week", "This month", "Earlier in 2026", then one per year.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

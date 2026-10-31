@@ -27,18 +27,11 @@ if (args is ["--roots", var db])
     return;
 }
 
-// `twin-cs --songs <library.db> <copy>`: how the C# app's Projects page groups the library into songs, one save a line
+// `twin-cs --songs <copy>`: how the C# app's Projects page groups the library into songs, one save a line
 // ({"path", "key", "latest"}). The C# library opens its database to write (it adds tables and columns it's missing),
-// so it's given a copy, made from a read-only connection and deleted afterwards: the real library is only read.
-if (args is ["--songs", var library, var copy])
+// so it's given a copy of the library: the Rust side makes it (and reads the same one) and deletes it afterwards.
+if (args is ["--songs", var copy])
 {
-    using (var from = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={library};Mode=ReadOnly;Pooling=False"))
-    using (var to = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={copy};Pooling=False"))
-    {
-        from.Open();
-        to.Open();
-        from.BackupDatabase(to);
-    }
     try
     {
         using var lib = new MusicOrganiser.Core.Library.LibraryDb(copy);
@@ -52,8 +45,8 @@ if (args is ["--songs", var library, var copy])
     }
     finally
     {
+        // Lets go of the copy so the Rust side can delete it.
         Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
-        foreach (var f in new[] { copy, copy + "-wal", copy + "-shm" }) File.Delete(f);
     }
     return;
 }
