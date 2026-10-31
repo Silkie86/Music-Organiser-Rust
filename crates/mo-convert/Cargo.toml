@@ -14,6 +14,8 @@ mo-formats = { path = "../mo-formats" }
 zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 # Bitwig recognises a sample file by its MD5.
 md-5 = "0.10"
+# Samples are read and hashed on every core (rule 21; the app runs this on its low-priority pool).
+rayon.workspace = true
 
 [dev-dependencies]
 # The made-up Bitwig files shared from mo-formats' tests use it.

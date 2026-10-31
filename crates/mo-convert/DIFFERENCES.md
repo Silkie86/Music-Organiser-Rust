@@ -20,3 +20,8 @@ does something else on purpose, it's listed here and judged.
 | A VST2 program that can't be turned into a bank | Saved as `.fxb` anyway, so Bitwig can't load it | Kept as `.fxp` | Better |
 | A VST2 with no id saved | Kept the template plugin's id under the new name | Id 0 | Better: Bitwig never loads the template's plugin by mistake |
 | A template whose Sampler has no sample, or whose patterns share a track | Failed on the first song | Turned down when it's chosen | Better |
+| MP3, OGG and M4A samples, and compressed WAVs | Length read through Windows' decoders | Left for Bitwig, which asks where they are (WAV, RF64, AIFF and FLAC are timed from their headers) | To do: when mo-audio decodes them, the convert uses it |
+| A WAV whose header says more audio than the file holds | Cut to the file | Same | Same |
+| A damaged FL save read on, or one too big to read whole | Converted without saying | Said first in the notes | Better (rule 9) |
+| Samples | Read one after another | Read on every core, after the template is checked | Faster; a bad template is said straight away |
+| An earlier convert saved in Bitwig while samples were read | Replaced | Asked again just before saving, so it's kept | Better |
