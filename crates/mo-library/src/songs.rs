@@ -100,6 +100,9 @@ pub struct Song {
     pub older: Vec<Save>,
     /// The song's key (see [`key`] and [`SongChoices`]), for joining it to another.
     pub key: String,
+    /// The same files found somewhere else as well (a project folder copied to another drive): hidden, never deleted
+    /// (rule 2). Each is the same save as one in `latest` or `older`.
+    pub copies: Vec<Save>,
 }
 
 impl Song {
@@ -113,7 +116,7 @@ impl Song {
     }
 }
 
-/// Two songs that may be saves of one: their names are close but not close enough to be sure.
+/// Two songs that may be saves of one: their names (or what's in them) are close but not close enough to be sure.
 #[derive(Clone, Debug)]
 pub struct SongDoubt {
     pub a: Song,
@@ -475,7 +478,9 @@ fn folder_of_song(folder: &str, song: &str) -> String {
     if case::eq_ignore_case(&split(own).0, song) { parent.to_owned() } else { trimmed.to_owned() }
 }
 
-/// One group per song, in the order their first save comes in `saves` (newest first, as the library lists them). The
+/// One group per song, in the order their first save comes in `saves` (newest first, as the library lists them).
+/// Beyond the C# app, the same file found in two places (a copied project folder) is one save, so their songs are one,
+/// and the extra copy is kept aside in [`Song::copies`]. The
 /// save a song opens is the highest-numbered file still on disk (ties go to the most recently saved); folder copies
 /// reset dates, numbers survive. `choices` win over the guess.
 pub fn group_songs(saves: &[Save], choices: &SongChoices) -> Vec<Song> {
@@ -490,6 +495,16 @@ pub fn group_songs(saves: &[Save], choices: &SongChoices) -> Vec<Song> {
                 Vec::new()
             })
             .push(s);
+    }
+    // The same file in two places is one save, so their songs are one (unless you said otherwise).
+    let joined_to = copied_groups(&order, &by_key, choices);
+    for (k, to) in order.iter().zip(&joined_to) {
+        if to != k
+            && let Some(moved) = by_key.remove(k)
+            && let Some(into) = by_key.get_mut(to)
+        {
+            into.extend(moved);
+        }
     }
     order
         .into_iter()
@@ -510,11 +525,68 @@ pub fn group_songs(saves: &[Save], choices: &SongChoices) -> Vec<Song> {
                 )
             });
             let name = song_name(&k, &g);
-            let mut saves = g.into_iter().cloned();
-            let latest = saves.next()?;
-            Some(Song { name, latest, older: saves.collect(), key: k })
+            // The first of the same file stays; the others are its copies.
+            let mut seen = HashSet::new();
+            let (mut kept, mut copies) = (Vec::new(), Vec::new());
+            for s in g {
+                if same_file(s).is_some_and(|id| !seen.insert(id)) {
+                    copies.push(s.clone())
+                } else {
+                    kept.push(s.clone())
+                }
+            }
+            let mut kept = kept.into_iter();
+            let latest = kept.next()?;
+            Some(Song { name, latest, older: kept.collect(), key: k, copies })
         })
         .collect()
+}
+
+/// What makes two saves the same file in two places: the same name, DAW and size, and the same counts of notes and
+/// channels. `None` for a save that's gone or empty, which can't be told apart.
+fn same_file(s: &Save) -> Option<(String, &str, i64, i32, i32)> {
+    (!s.file_missing && s.size > 0).then(|| (case::key(&s.name), s.daw.as_str(), s.size, s.note_count, s.track_count))
+}
+
+/// For each group in `order`, the group it goes into: itself, or the first group (newest first) that holds the same
+/// file. A save you split off stays on its own, and songs you kept apart stay apart.
+fn copied_groups(order: &[String], by_key: &HashMap<String, Vec<&Save>>, choices: &SongChoices) -> Vec<String> {
+    let mut first_with: HashMap<(String, &str, i64, i32, i32), usize> = HashMap::new();
+    let mut into: Vec<usize> = (0..order.len()).collect();
+    let root = |into: &[usize], mut i: usize| {
+        while let Some(&up) = into.get(i) {
+            if up == i {
+                break;
+            }
+            i = up;
+        }
+        i
+    };
+    for (i, k) in order.iter().enumerate() {
+        if k.starts_with("save:") {
+            continue;
+        }
+        for s in by_key.get(k).into_iter().flatten() {
+            let Some(id) = same_file(s) else { continue };
+            match first_with.get(&id) {
+                None => {
+                    first_with.insert(id, i);
+                }
+                Some(&j) => {
+                    let (a, b) = (root(&into, i), root(&into, j));
+                    let keys = (order.get(a), order.get(b));
+                    if let (Some(ka), Some(kb)) = keys
+                        && a != b
+                        && !choices.apart(ka, kb)
+                        && let Some(slot) = into.get_mut(a.max(b))
+                    {
+                        *slot = a.min(b);
+                    }
+                }
+            }
+        }
+    }
+    (0..order.len()).map(|i| order.get(root(&into, i)).cloned().unwrap_or_default()).collect()
 }
 
 /// A group's name: the name of the song the others were joined to (one of its own saves names it), else the newest's.
@@ -530,7 +602,9 @@ fn song_name(key_: &str, ordered: &[&Save]) -> String {
 /// Songs that may be saves of one song, for you to say: in the same folder and DAW, names that differ by a short word
 /// or a letter or two once numbers, spaces and marks are left out ("track nd 1" and "track 2", "Sunrise" and
 /// "Sunrize"); with `across_folders` also the same name in different folders; and saves a mark put with their song.
-/// Pairs you said are different aren't asked again. Newest first, at most `most`.
+/// Beyond the C# app: songs in one folder with nearly the same plugins, channels and tempo (a save renamed), and the
+/// same name in two folders that hold copies of the same file. Pairs you said are different aren't asked again. Newest
+/// first, at most `most`.
 pub fn doubts(songs: &[Song], choices: &SongChoices, across_folders: bool, most: usize) -> Vec<SongDoubt> {
     /// A doubt before its songs are copied out: the two songs by place in `songs`, or for a marked save, the song and
     /// the save's place in it.
@@ -573,11 +647,62 @@ pub fn doubts(songs: &[Song], choices: &SongChoices, across_folders: bool, most:
             }
         }
     }
-    if across_folders {
+    // Renamed saves ("Untitled_5" saved as "Sunset"): songs in one folder that use nearly the same plugins, channels
+    // and tempo. Only songs with the same tempo are compared, which keeps it quick in a big folder.
+    let by_content: Vec<(usize, HashSet<String>)> = songs
+        .iter()
+        .enumerate()
+        .filter(|(_, g)| g.latest.tempo.is_some() && g.latest.track_count >= 0)
+        .map(|(i, g)| (i, g.latest.plugin_names.iter().map(|p| plugin_family(p)).collect::<HashSet<_>>()))
+        .filter(|(_, plugins)| plugins.len() >= 3)
+        .collect();
+    let tempo = |i: usize| songs.get(i).and_then(|g| g.latest.tempo).map_or(0, |t| (t * 2.0).round() as i64);
+    let skeletons: HashMap<usize, &Vec<u16>> = named.iter().map(|(i, s)| (*i, s)).collect();
+    for bucket in buckets(&by_content, |(i, _)| (folder(*i), daw(*i), tempo(*i))) {
+        for (n, (a, pa)) in bucket.iter().enumerate() {
+            for (b, pb) in bucket.iter().skip(n + 1) {
+                let (Some(ga), Some(gb)) = (songs.get(*a), songs.get(*b)) else { continue };
+                // Names that are close were asked about above.
+                let named_alike = match (skeletons.get(a), skeletons.get(b)) {
+                    (Some(sa), Some(sb)) => sa == sb || close(sa, sb).is_some(),
+                    _ => false,
+                };
+                let shared = pa.intersection(pb).count();
+                if !named_alike
+                    && shared * 5 >= pa.union(pb).count() * 4
+                    && ga.latest.track_count.abs_diff(gb.latest.track_count) <= 1
+                {
+                    add(*a, *b, "They use nearly the same plugins, channels and tempo".into());
+                }
+            }
+        }
+    }
+    // Folders that hold the same file are copies of each other: songs of the same name in them are asked about.
+    let mut copied: HashSet<(String, String)> = HashSet::new();
+    for g in songs {
+        for c in &g.copies {
+            let id = same_file(c);
+            if let Some(kept) = g.saves().find(|s| same_file(s) == id) {
+                let (x, y) = (
+                    case::to_lower(&song_folder(&c.folder, &c.name)),
+                    case::to_lower(&song_folder(&kept.folder, &kept.name)),
+                );
+                copied.insert((x.clone(), y.clone()));
+                copied.insert((y, x));
+            }
+        }
+    }
+    if across_folders || !copied.is_empty() {
         for bucket in buckets(&named, |(i, s)| (daw(*i), s.clone())) {
             for (n, (a, _)) in bucket.iter().enumerate() {
                 for (b, _) in bucket.iter().skip(n + 1) {
-                    if folder(*a) != folder(*b) {
+                    let (fa, fb) = (folder(*a), folder(*b));
+                    if fa == fb {
+                        continue;
+                    }
+                    if copied.contains(&(fa.to_owned(), fb.to_owned())) {
+                        add(*a, *b, "Same name in a copied folder".into());
+                    } else if across_folders {
                         add(*a, *b, "Same name in different folders".into());
                     }
                 }
@@ -623,6 +748,7 @@ pub fn doubts(songs: &[Song], choices: &SongChoices, across_folders: bool, most:
                     latest: save.clone(),
                     older: Vec::new(),
                     key: split_key(&save.path),
+                    copies: Vec::new(),
                 };
                 Some(SongDoubt { a: g.clone(), b, why, one_save: true })
             }
