@@ -9,7 +9,7 @@ This repo is the Rust rebuild of the C# app. The plan, the inventory of today's 
 - **The old C# app:** `Silkie86/Music-Organiser` is the reference. It is public: read it from a read-only clone in a
   scratch folder. Never push to it, never open PRs on it from here. Its C# readers and the format registry
   (`Core/Formats/Registry/*.json`) are the source of truth for file formats.
-- **Layout (spec section 12):** one Cargo workspace, `crates/mo-*` (formats, library, space, work, audio, sounds, harmony,
+- **Layout (spec section 12):** one Cargo workspace, `crates/mo-*` (formats, library, space, backup, work, audio, sounds, harmony,
   midi, playground, dawlink, convert, app, ui) and `tools/` (formatlab, theorybench). UI is Slint; screen logic lives in
   `mo-app` so it can be tested without a window.
 
