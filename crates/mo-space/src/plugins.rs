@@ -179,6 +179,11 @@ pub(crate) fn is_plugin_file(path: &str) -> bool {
     plugin_file(path).is_some()
 }
 
+/// A plugin file's format ("VST3"), when it is one.
+pub(crate) fn format_of(path: &str) -> Option<String> {
+    plugin_file(path).map(|(_, format)| format)
+}
+
 /// A plugin file's name and format. On Linux a VST2 plugin is a `.so` file (in ~/.vst and the like).
 fn plugin_file(path: &str) -> Option<(String, String)> {
     if is_plugin_path(path) {

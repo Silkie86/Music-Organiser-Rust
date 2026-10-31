@@ -4,13 +4,20 @@
 //! Plugin installers often put the same plugin in every format: VST2, VST3, CLAP and AAX. A copy is spare when no
 //! project uses that format and a format they do use stays installed; AAX copies are spare when Pro Tools, the only
 //! DAW that loads them, isn't on the computer. When a project's format isn't known ("VST" from an old FL Studio save),
-//! every copy of that plugin counts as used. Nothing here removes anything.
+//! every copy of that plugin counts as used. [`remove`] sends the ones you pick to the Recycle Bin, each checked again
+//! just before.
 
 use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use mo_formats::case;
 
-use crate::plugins::{InstalledPlugin, family, is_waves};
+use crate::clean::{Bin, Done, Problem, Sending, What};
+use crate::plugin_space::SpaceKind;
+use crate::plugins::{InstalledPlugin, family, format_of, is_waves};
+use crate::size::{is_link, measure};
+use crate::{key, real_path};
 
 /// A plugin file in a format none of your projects use, while the format they do use is installed too.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -132,6 +139,62 @@ pub fn find(
     }
     spare.sort_by_key(|s| std::cmp::Reverse(s.bytes));
     spare
+}
+
+/// Sends the spare copies you picked to the Recycle Bin. Each is checked again just before it goes: it must still be
+/// spare in `now` (found again just now, against your projects as they are now: a song saved since may use its
+/// format), still a plugin file or bundle of that format and not a link, and the same size as when it was found (an
+/// update since makes it stay). Copies Windows guards (Program Files) all go in one administrator step at the end, so
+/// Windows asks once, and each is checked again just before it asks.
+pub fn remove(picked: &[SpareCopy], now: &[SpareCopy], bin: &dyn Bin, stop: &AtomicBool) -> Done {
+    let mut done = Done::default();
+    let mut sending = Sending::new(bin);
+    let mut seen = Vec::new();
+    for copy in picked {
+        if seen.contains(&key(&copy.path)) {
+            continue;
+        }
+        seen.push(key(&copy.path));
+        let check = move || -> Result<(), String> {
+            if stop.load(Ordering::Relaxed) {
+                return Err("Stopped before it went.".to_owned());
+            }
+            if !now.iter().any(|n| key(&n.path) == key(&copy.path)) {
+                return Err(format!(
+                    "It isn't spare now (a project saved since may use its {}), so it stays.",
+                    copy.format
+                ));
+            }
+            still_the_copy(copy, stop)
+        };
+        if let Err(why) = check() {
+            done.problems.push(Problem { path: copy.path.clone(), why });
+            continue;
+        }
+        let real = real_path(&copy.path).unwrap_or_else(|| copy.path.clone());
+        sending.send(&copy.path, real, copy.bytes, What::Plugin(SpaceKind::Program), &mut done, check);
+    }
+    sending.finish(&mut done);
+    done
+}
+
+/// The copy is still what was found: a plugin file or bundle of its format, not a link, the same size.
+fn still_the_copy(copy: &SpareCopy, stop: &AtomicBool) -> Result<(), String> {
+    let path = Path::new(&copy.path);
+    if is_link(path) {
+        return Err("It's a link now, so it stays.".to_owned());
+    }
+    if !path.exists() {
+        return Err("It isn't there any more.".to_owned());
+    }
+    if !format_of(&copy.path).is_some_and(|f| case::key(&f) == case::key(&copy.format)) {
+        return Err(format!("It isn't a {} plugin, so it stays.", copy.format));
+    }
+    match measure(path, stop) {
+        Err(_) => Err("Stopped before it went.".to_owned()),
+        Ok(m) if m.bytes != copy.bytes => Err("It changed since it was found (an update?), so it stays.".to_owned()),
+        Ok(_) => Ok(()),
+    }
 }
 
 /// Whether two families are the same plugin: equal, or one with its maker in front of the other ("fabfilterproq" and

@@ -42,6 +42,7 @@ listed with a verdict: **better** (on purpose), **same idea, new shape**, or **n
 | Documents | Windows' own Documents, wherever it's moved | the same (Windows' known folders) | same |
 | Spare copies: same plugin? | one family anywhere inside the other ("Serum FX" took Serum's projects) | equal, or one with its maker in front ("FabFilter Pro-Q 3" and "Pro-Q 3") | better |
 | Spare copies' reason | text stored with each copy | a `Why` worked out into text when shown | same idea, new shape |
+| Removing spare copies | found again against your projects as they are now, then to the Recycle Bin, Windows asking once for Program Files | the same, and each is also checked just before it goes: still a plugin file or bundle of its format, not a link, and the same size as when found (an update since keeps it); the ones Windows guards are checked again just before it asks, and once more by the administrator step | better |
 
 ## Plugin clean-up
 
