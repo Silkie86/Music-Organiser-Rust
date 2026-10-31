@@ -1,6 +1,7 @@
 // The C# half of the twin test. Reads each file named on its input (one path a line) with the C# app's FL Studio,
-// Bitwig, Studio One or MIDI file reader (or with --sounds, its sound analyser), unchanged, and writes what it finds
-// as one JSON a line, in the same shape as tools/twin/src/rust_side.rs (sounds.rs for sounds).
+// Bitwig, Studio One or MIDI file reader (or with --sounds, its sound analyser; with --classify, its type classifier),
+// unchanged, and writes what it finds as one JSON a line, in the same shape as tools/twin/src/rust_side.rs (sounds.rs
+// for sounds, classify.rs for the classifier).
 // Files are read on every core; the lines come out in whatever order they finish, each naming its file.
 // With --roots it lists the library's folders instead (below).
 
@@ -60,13 +61,15 @@ using (var input = new StreamReader(Console.OpenStandardInput(), new System.Text
 
 // `twin-cs --sounds`: each file is a sound, analysed by the C# Sound Lab's analyser instead of read as a project.
 var sounds = args is ["--sounds"];
+// `twin-cs --classify`: each file is a classifier case (examples, options, probes) made by tools/twin/src/classify.rs.
+var classify = args is ["--classify"];
 var output = Console.OpenStandardOutput();
 var gate = new object();
 Parallel.ForEach(files, file =>
 {
     string json;
     // One odd value (JSON has no NaN) loses that file's reading, not the whole run.
-    try { json = (sounds ? DumpSound(file) : Dump(file)).ToJsonString(); }
+    try { json = (sounds ? DumpSound(file) : classify ? DumpClassify(file) : Dump(file)).ToJsonString(); }
     catch (Exception e) { json = new JsonObject { ["file"] = file, ["error_more"] = $"couldn't write it: {e.Message}" }.ToJsonString(); }
     var bytes = System.Text.Encoding.UTF8.GetBytes(json + "\n");
     lock (gate) output.Write(bytes);
@@ -78,6 +81,46 @@ static JsonObject DumpSound(string path)
 {
     var o = new JsonObject { ["file"] = path };
     try { o["analysis"] = System.Text.Json.JsonSerializer.SerializeToNode(MusicOrganiser.Core.Sounds.SoundAnalyzer.Analyse(path)); }
+    catch (Exception e) { o["error"] = $"{e.GetType().Name}: {e.Message}"; }
+    return o;
+}
+
+// The C# app's type classifier trained on one case: the model as sounds.db would hold it (text), and what it says of
+// each probe, then what the model Rust trained says of them once C# has read it. A case it won't train on gives the
+// reason.
+static JsonObject DumpClassify(string path)
+{
+    var o = new JsonObject { ["file"] = path };
+    try
+    {
+        var c = JsonNode.Parse(File.ReadAllText(path))!;
+        var opt = c["Options"]!;
+        var options = new MusicOrganiser.Core.Sounds.SoundClassifier.Options(
+            opt["Epochs"]!.GetValue<int>(), opt["LearningRate"]!.GetValue<double>(), opt["L2"]!.GetValue<double>(),
+            opt["MaxPerClass"]!.GetValue<int>(), opt["Seed"]!.GetValue<int>());
+        static float[] Vector(JsonNode? v) => v!.AsArray().Select(n => n!.GetValue<float>()).ToArray();
+        var examples = c["Examples"]!.AsArray()
+            .Select(e => new MusicOrganiser.Core.Sounds.TrainingExample(Vector(e!["X"]), e["Label"]!.GetValue<string>(), e["Weight"]!.GetValue<float>()))
+            .ToList();
+        MusicOrganiser.Core.Sounds.SoundClassifier model;
+        try { model = MusicOrganiser.Core.Sounds.SoundClassifier.Train(examples, c["Space"]!.GetValue<string>(), options); }
+        catch (InvalidOperationException e) { o["refused"] = e.Message; return o; }
+        o["model"] = model.ToJson();
+        var predictions = new JsonArray();
+        foreach (var p in c["Probes"]!.AsArray())
+            predictions.Add(new JsonArray(model.Predict(Vector(p))
+                .Select(t => (JsonNode)new JsonObject { ["Label"] = t.Label, ["P"] = t.P }).ToArray()));
+        o["predictions"] = predictions;
+        // The model the Rust app trained, read back as the C# app reads it from sounds.db.
+        if (MusicOrganiser.Core.Sounds.SoundClassifier.FromJson(c["RustModel"]?.GetValue<string>()) is { } rust)
+        {
+            var fromRust = new JsonArray();
+            foreach (var p in c["Probes"]!.AsArray())
+                fromRust.Add(new JsonArray(rust.Predict(Vector(p))
+                    .Select(t => (JsonNode)new JsonObject { ["Label"] = t.Label, ["P"] = t.P }).ToArray()));
+            o["rust_model_predictions"] = fromRust;
+        }
+    }
     catch (Exception e) { o["error"] = $"{e.GetType().Name}: {e.Message}"; }
     return o;
 }

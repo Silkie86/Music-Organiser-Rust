@@ -15,8 +15,9 @@
 //! writes that list. `dump` prints what the Rust readers find in one file. `songs` groups the library into songs both
 //! ways and sorts the differences by cause (see `songs.rs`); both sides read one copy of the library, made beside the
 //! helper and deleted afterwards. `sounds` makes test sounds in the folder and has both apps analyse them (see
-//! `sounds.rs`).
+//! `sounds.rs`), then has both train the sound type classifier on made-up examples (`classify.rs`).
 
+mod classify;
 mod compare;
 mod rust_side;
 mod songs;

@@ -69,7 +69,7 @@ pub fn analyse_file(path: &Path) -> Result<Analysed, AudioError> {
 }
 
 /// Rounds as C#'s `Math.Round(value, digits)`: halves to even, by scaling by a power of ten.
-fn round_to(v: f64, digits: i32) -> f64 {
+pub(crate) fn round_to(v: f64, digits: i32) -> f64 {
     if v.abs() >= 1e16 {
         return v;
     }
