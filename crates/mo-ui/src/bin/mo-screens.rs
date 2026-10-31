@@ -81,16 +81,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.set_cards(Default::default());
     app.set_put_away(0);
 
-    // Tooltips: the mouse resting on a rail line, the song panel's Open button and a song's date.
+    // Tooltips: the mouse resting on a rail line, the song panel's Show in folder button and a song's date.
     mo_ui::songs::show_picked(&app, 0, sample_detail(), Tab::Overview);
     for (name, x, y) in [
         ("tip-rail.png", 60.0, 125.0),
-        ("tip-button.png", OPEN_BUTTON.0, OPEN_BUTTON.1),
+        ("tip-button.png", SHOW_BUTTON.0, SHOW_BUTTON.1),
         ("tip-date.png", 530.0, 222.0),
     ] {
         hover(&window, x, y);
         shots.push((name.into(), capture_after(&window, Duration::from_millis(900))));
     }
+    // The Older saves menu, opened.
+    click(&window, OLDER_BUTTON.0, OLDER_BUTTON.1);
+    shots.push(("older-saves.png".into(), capture(&window)));
+    click(&window, 300.0, 880.0);
     hover(&window, -1.0, -1.0);
     app.global::<mo_ui::SongsData>().invoke_close_panel();
 
@@ -195,8 +199,9 @@ fn sample_detail() -> mo_library::SaveDetail {
 }
 
 /// Lets hover and slide-in animations finish, then draws the window.
-/// Where the song panel's Open button is in the shots, for its tooltip.
-const OPEN_BUTTON: (f32, f32) = (868.0, 328.0);
+/// Where the song panel's Show in folder and Older saves buttons are in the shots.
+const SHOW_BUTTON: (f32, f32) = (1000.0, 328.0);
+const OLDER_BUTTON: (f32, f32) = (865.0, 328.0);
 
 /// Moves the mouse to a point in the window (a point outside it moves it away).
 fn hover(window: &MinimalSoftwareWindow, x: f32, y: f32) {
@@ -207,6 +212,14 @@ fn hover(window: &MinimalSoftwareWindow, x: f32, y: f32) {
         slint::platform::WindowEvent::PointerMoved { position }
     };
     window.dispatch_event(event);
+}
+
+/// A left click at a point in the window.
+fn click(window: &MinimalSoftwareWindow, x: f32, y: f32) {
+    let position = slint::LogicalPosition::new(x, y);
+    let button = slint::platform::PointerEventButton::Left;
+    window.dispatch_event(slint::platform::WindowEvent::PointerPressed { position, button });
+    window.dispatch_event(slint::platform::WindowEvent::PointerReleased { position, button });
 }
 
 fn capture(window: &MinimalSoftwareWindow) -> Vec<u8> {

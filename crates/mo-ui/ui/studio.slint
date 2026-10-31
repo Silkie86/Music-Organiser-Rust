@@ -216,8 +216,10 @@ export component StudioButton inherits Rectangle {
     // The tooltip and the key from the shortcut list, if it has one.
     in property <string> tip;
     in property <string> key;
+    // Opens a menu: a small arrow after the words.
+    in property <bool> menu;
     callback clicked;
-    min-width: label.preferred-width + 24px;
+    min-width: label.preferred-width + (menu ? 38px : 24px);
     height: 32px;
     border-radius: Theme.radius;
     border-width: 1px;
@@ -235,12 +237,24 @@ export component StudioButton inherits Rectangle {
         background: touch.pressed ? transparent : Theme.shine;
     }
     label := Text {
+        x: (parent.width - self.width - (root.menu ? 14px : 0px)) / 2;
         text: root.text;
         color: !root.enabled ? Theme.faint : root.main ? Theme.accent-text : Theme.text;
         font-size: Type.body;
         font-weight: 500;
         vertical-alignment: center;
         horizontal-alignment: center;
+    }
+    if root.menu: Path {
+        x: label.x + label.width + 6px;
+        y: (parent.height - 6px) / 2;
+        width: 8px;
+        height: 6px;
+        viewbox-width: 8;
+        viewbox-height: 6;
+        commands: "M 1 1 L 4 4.5 L 7 1";
+        stroke: label.color;
+        stroke-width: 1.5px;
     }
     touch := TouchArea {
         enabled: root.enabled;

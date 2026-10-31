@@ -24,8 +24,8 @@ use mo_library::{Library, STATUSES, SaveDetail};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel};
 
 use crate::{
-    AppWindow, CountLine, DetailPair, HealthLine, PanelSong, PluginLine, SampleLine, SaveLine, SongLine, SongsData,
-    YearStart,
+    AppWindow, CountLine, DetailPair, HealthLine, OlderLine, PanelSong, PluginLine, SampleLine, SaveLine, SongLine,
+    SongsData, YearStart,
 };
 
 /// The page's rows, filters and what they let through, kept on the window's thread.
@@ -318,6 +318,7 @@ fn show_again(app: &AppWindow, songs: Songs) {
 pub fn show(app: &AppWindow, songs: Songs) {
     let data = app.global::<SongsData>();
     data.set_tabs(strings(Tab::ALL.iter().map(|t| t.name())));
+    data.set_saves_tab(Tab::Saves.index() as i32);
     data.set_daws(strings(songs.daws().iter().map(String::as_str)));
     data.set_tags(strings(songs.tags.iter().map(String::as_str)));
     data.set_message(if songs.rows.is_empty() { NO_SONGS.into() } else { SharedString::new() });
@@ -483,6 +484,12 @@ fn fill_panel(app: &AppWindow) {
             r.runs.iter().rev().map(|run| SharedString::from(format!("{} · {}", run.label(), run.details()))),
         ));
         data.set_saves_heading(panel::saves_heading(r).into());
+        let older = panel::older_saves(r);
+        data.set_older_heading(older.as_ref().map_or("", |o| o.heading).into());
+        data.set_older_see_all(older.as_ref().map(|o| o.see_all.as_str()).unwrap_or_default().into());
+        data.set_older(model(
+            older.into_iter().flat_map(|o| o.lines).map(|l| OlderLine { text: l.text.into(), path: l.path.into() }),
+        ));
         data.set_saves(model(panel::save_lines(r).into_iter().map(|l| match l {
             PanelSaveLine::Run { label, details } => {
                 SaveLine { run: label.into(), details: details.into(), ..SaveLine::default() }

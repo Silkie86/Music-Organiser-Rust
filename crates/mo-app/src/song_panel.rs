@@ -220,6 +220,54 @@ pub fn save_lines(row: &SongRow) -> Vec<SaveLine> {
     out
 }
 
+/// The song panel's "Older saves" menu, as the C# app's (`OpenMenu.FillOlderSaves`): the song's versions when it has
+/// several (saves months apart), otherwise its newest older saves, then a line that shows every save.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OlderSaves {
+    /// "VERSIONS" or "RECENT SAVES".
+    pub heading: &'static str,
+    pub lines: Vec<OlderSave>,
+    /// "See all 12 saves".
+    pub see_all: String,
+}
+
+/// One line of the Older saves menu: clicking it opens `path`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OlderSave {
+    pub text: String,
+    pub path: String,
+}
+
+/// How many older saves the menu lists when the song has no versions (the C# app's `OlderSavesShown`).
+pub const OLDER_SAVES_SHOWN: usize = 8;
+
+/// The menu, or none for a song with only one save.
+pub fn older_saves(row: &SongRow) -> Option<OlderSaves> {
+    let count = row.song.save_count();
+    if count < 2 {
+        return None;
+    }
+    let see_all = format!("See all {} saves", thousands(count));
+    if row.runs.len() > 1 {
+        // Newest version first; each opens the last save of its run.
+        let lines = row
+            .runs
+            .iter()
+            .rev()
+            .map(|r| OlderSave { text: format!("{} · {}", r.label(), r.details()), path: r.last.path.clone() })
+            .collect();
+        return Some(OlderSaves { heading: "VERSIONS", lines, see_all });
+    }
+    let mut older: Vec<&Save> = row.song.saves().filter(|s| s.path != row.song.latest.path).collect();
+    older.sort_by_key(|s| std::cmp::Reverse(s.modified));
+    let lines = older
+        .into_iter()
+        .take(OLDER_SAVES_SHOWN)
+        .map(|s| OlderSave { text: format!("{} · {}", s.name, s.modified.format("%-d %b %Y")), path: s.path.clone() })
+        .collect();
+    Some(OlderSaves { heading: "RECENT SAVES", lines, see_all })
+}
+
 /// "77 saves, newest first", or "1 save".
 pub fn saves_heading(row: &SongRow) -> String {
     match row.song.save_count() {
@@ -395,6 +443,35 @@ mod tests {
         assert_eq!(texts(counts(&r, Some(&no_tracks)))[3], "14 channels");
         let unknown = row(&[save("B", day(2025, 1, 1))]);
         assert_eq!(counts(&unknown, None).len(), 3);
+    }
+
+    #[test]
+    fn the_older_saves_menu_lists_versions_or_the_newest_older_saves() {
+        assert_eq!(older_saves(&row(&[save("Solo", day(2025, 1, 1))])), None);
+
+        let versions = older_saves(&row(&[
+            save("Didums_4", day(2024, 8, 3)),
+            save("Didums_3", day(2024, 8, 1)),
+            save("Didums_2", day(2019, 1, 20)),
+            save("Didums", day(2019, 1, 10)),
+        ]))
+        .unwrap();
+        assert_eq!(versions.heading, "VERSIONS");
+        assert_eq!(versions.see_all, "See all 4 saves");
+        let texts: Vec<&str> = versions.lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            ["2024 re-save · Didums_4 · 3 Aug 2024 · 2 saves", "2019 original · Didums_2 · 20 Jan 2019 · 2 saves"]
+        );
+        assert_eq!(versions.lines[0].path, r"C:\beats\Didums_4.flp");
+
+        // One run: the newest older saves, at most eight, never the newest save itself.
+        let saves: Vec<Save> = (1..=12).map(|n| save(&format!("Loop_{n}"), day(2025, 3, n))).collect();
+        let recent = older_saves(&row(&saves)).unwrap();
+        assert_eq!(recent.heading, "RECENT SAVES");
+        assert_eq!(recent.lines.len(), OLDER_SAVES_SHOWN);
+        assert_eq!(recent.lines[0].text, "Loop_11 · 11 Mar 2025");
+        assert_eq!(recent.see_all, "See all 12 saves");
     }
 
     #[test]
