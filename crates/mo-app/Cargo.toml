@@ -11,4 +11,6 @@ workspace = true
 [dependencies]
 serde_json = "1"
 chrono.workspace = true
+mo-formats = { path = "../mo-formats" }
+mo-library = { path = "../mo-library" }
 thread-priority.workspace = true

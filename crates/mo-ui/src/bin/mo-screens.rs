@@ -40,6 +40,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let feed = Feed::default();
     let app = mo_ui::new_app(&graphite, Shortcuts::default(), Place::Songs, feed.clone())?;
     app.show()?;
+    mo_ui::songs::show(&app, sample_songs());
 
     let mut shots = Vec::new();
     for place in Place::ALL {
@@ -84,6 +85,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("{}", path.display());
     }
     Ok(())
+}
+
+/// A made-up library for the Songs page: names, plugins and dates invented here, none of Solomon's (rule 4).
+fn sample_songs() -> mo_app::songs::Songs {
+    use chrono::{Duration as Days, Local};
+    use mo_library::Save;
+    let now = Local::now().naive_local();
+    let ago = |days: i64| now - Days::days(days);
+    let save = |name: &str, daw: &str, days: i64| Save {
+        name: name.into(),
+        daw: daw.into(),
+        folder: format!(r"C:\Music\{daw}"),
+        path: format!(r"C:\Music\{daw}\{name}"),
+        modified: ago(days),
+        size: 1,
+        ..Save::default()
+    };
+    let mut saves = vec![
+        Save {
+            tempo: Some(140.0),
+            detected_key: "G minor".into(),
+            rating: 4,
+            favourite: true,
+            ..save("Night Drive_14", "FL Studio", 1)
+        },
+        save("Night Drive_13", "FL Studio", 3),
+        save("Night Drive_2", "FL Studio", 40),
+        Save {
+            tempo: Some(122.0),
+            missing_samples: 3,
+            status: "Mixing".into(),
+            ..save("Glass Harbour", "Bitwig Studio", 4)
+        },
+        Save { tempo: Some(92.5), musical_key: "D major".into(), rating: 3, ..save("Slow Orbit v3", "Studio One", 12) },
+        save("Slow Orbit v2", "Studio One", 20),
+        Save { tempo: Some(128.0), missing_plugins: 1, ..save("Copper Lines", "FL Studio", 70) },
+        Save { tempo: Some(174.0), rating: 5, status: "Finished".into(), ..save("Paper Moons_31", "FL Studio", 200) },
+        Save { tempo: Some(110.0), ..save("Low Tide", "Bitwig Studio", 420) },
+        Save {
+            tempo: Some(136.0),
+            status: "Released".into(),
+            rating: 5,
+            favourite: true,
+            ..save("Fieldwork_9", "FL Studio", 800)
+        },
+        Save { tempo: Some(100.0), ..save("Untitled_4", "FL Studio", 1300) },
+        Save { tempo: Some(85.0), ..save("Old Tapes", "FL Studio", 2200) },
+    ];
+    saves.sort_by_key(|s| std::cmp::Reverse(s.modified));
+    let tags = vec!["dark".into(), "live set".into()];
+    mo_app::songs::Songs::from_saves(&saves, &mo_library::SongChoices::default(), tags, 3)
 }
 
 /// Lets hover and slide-in animations finish, then draws the window.

@@ -2,6 +2,7 @@
 // Plugins and Space, with Settings at the bottom.
 import { Theme, RailItem, Groove, Caps } from "studio.slint";
 import { ComingPage } from "pages/coming.slint";
+import { SongsPage, SongsData, SongLine, YearStart } from "pages/songs.slint";
 import { ActivityCards, CardInfo, KeySheet, KeyRow, NoteDialog } from "shell.slint";
 
 import "../fonts/IBMPlexSans-400.ttf";
@@ -19,7 +20,7 @@ import "../fonts/SpaceGrotesk-700.ttf";
 import "../fonts/SpaceMono-400.ttf";
 import "../fonts/SpaceMono-700.ttf";
 
-export { Theme, CardInfo, KeyRow }
+export { Theme, CardInfo, KeyRow, SongsData, SongLine, YearStart }
 
 export struct PlaceInfo {
     name: string,
@@ -40,6 +41,8 @@ export component AppWindow inherits Window {
     // The places on the rail itself: every place before Settings.
     in property <[PlaceInfo]> rail;
     in property <int> settings-place;
+    // The places that have pages of their own so far (the rest show what's coming).
+    in property <int> songs-place: 0;
     in-out property <int> place: 0;
     callback place-chosen(int);
     // A key press, with its modifiers and whether it's the key held down, for the app-wide shortcut list in mo-app.
@@ -139,7 +142,11 @@ export component AppWindow inherits Window {
                 }
             }
             // The page on show.
-            ComingPage {
+            if root.place == root.songs-place: SongsPage {
+                horizontal-stretch: 1;
+            }
+            if root.place != root.songs-place: ComingPage {
+                horizontal-stretch: 1;
                 title: root.places[root.place].name;
                 coming: root.places[root.place].coming;
                 can-try-job: root.place == root.settings-place;

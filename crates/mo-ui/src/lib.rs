@@ -11,6 +11,7 @@ pub use screens::*;
 
 pub mod cards;
 pub mod note;
+pub mod songs;
 pub mod watchdog;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -42,6 +43,7 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> R
     app.set_rail(ModelRc::new(VecModel::from(places[..settings].to_vec())));
     app.set_places(ModelRc::new(VecModel::from(places)));
     app.set_settings_place(settings as i32);
+    app.set_songs_place(Place::Songs.index() as i32);
     go_to(&app, start.index() as i32);
     app.set_key_rows(ModelRc::new(VecModel::from(key_rows(&shortcuts))));
 
