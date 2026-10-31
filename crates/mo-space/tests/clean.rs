@@ -1,0 +1,290 @@
+//! Clean up: preview, removing to a bin and putting back. The bin here is a folder in the test build's own fixtures
+//! folder, never the computer's Recycle Bin, and every file is made there under a fixed name.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use std::cell::RefCell;
+use std::collections::HashSet;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use mo_space::clean::{Bin, Guard, Problem, Refused, Removed, apply, preview, undo};
+use mo_space::key;
+use mo_space::song::{CompactItem, CompactKind};
+
+fn fixtures(name: &str) -> PathBuf {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn write(dir: &Path, rel: &str, bytes: &[u8]) -> String {
+    let p = dir.join(rel);
+    fs::create_dir_all(p.parent().unwrap()).unwrap();
+    fs::write(&p, bytes).unwrap();
+    p.to_string_lossy().into_owned()
+}
+
+fn line(kind: CompactKind, path: &str) -> CompactItem {
+    CompactItem {
+        kind,
+        path: path.to_owned(),
+        bytes: fs::metadata(path).map_or(0, |m| m.len()),
+        modified: None,
+        same_as: None,
+    }
+}
+
+fn copy_of(path: &str, twin: &str) -> CompactItem {
+    CompactItem { same_as: Some(twin.to_owned()), ..line(CompactKind::SameSave, path) }
+}
+
+/// A bin that's a folder: each thing goes in under a number, and comes back if nothing has its name.
+struct FolderBin {
+    dir: PathBuf,
+    held: RefCell<Vec<(String, PathBuf)>>,
+}
+
+impl FolderBin {
+    fn new(dir: PathBuf) -> FolderBin {
+        fs::create_dir_all(&dir).unwrap();
+        FolderBin { dir, held: RefCell::new(Vec::new()) }
+    }
+}
+
+impl Bin for FolderBin {
+    fn send(&self, path: &Path) -> Result<(), String> {
+        let mut held = self.held.borrow_mut();
+        let to = self.dir.join(held.len().to_string());
+        fs::rename(path, &to).map_err(|e| e.to_string())?;
+        held.push((path.to_string_lossy().into_owned(), to));
+        Ok(())
+    }
+
+    fn put_back(&self, removed: &[Removed]) -> Vec<Problem> {
+        let held = self.held.borrow();
+        let mut problems = Vec::new();
+        for r in removed {
+            let Some((_, at)) = held.iter().rev().find(|(p, _)| key(p) == key(&r.path)) else {
+                problems.push(Problem { path: r.path.clone(), why: "not in the bin".into() });
+                continue;
+            };
+            if Path::new(&r.path).exists() {
+                problems.push(Problem { path: r.path.clone(), why: "something has its name".into() });
+                continue;
+            }
+            fs::rename(at, &r.path).unwrap();
+        }
+        problems
+    }
+}
+
+struct Library {
+    roots: Vec<String>,
+    samples: Vec<String>,
+    keep: HashSet<String>,
+}
+
+fn no_sample_in_use(_: &str) -> bool {
+    false
+}
+
+#[test]
+fn the_preview_refuses_what_must_stay_and_changes_nothing() {
+    let dir = fixtures("mo-space-clean-preview");
+    let projects = dir.join("Projects");
+    let song = projects.join("Glass Harbor");
+    let newest = write(&song, "Glass Harbor v3.bwproject", b"3");
+    let copy = write(&song, "Glass Harbor v1.bwproject", b"same");
+    let twin = write(&song, "Glass Harbor v2.bwproject", b"same");
+    let auto = write(&song, "auto-backups/Glass Harbor 0.bwproject", b"auto");
+    let not_auto = write(&song, "Glass Harbor old.bwproject", b"old");
+    let sample = write(&song, "Kit/Kick.wav", b"kick");
+    let used = write(&song, "Snare.wav", b"snare");
+    let unused = write(&song, "Bounce.wav", b"bounce");
+    let readme = write(&song, "readme.txt", b"txt");
+    let outside = write(&dir, "Elsewhere/Thing.bwproject", b"x");
+    let gone = song.join("Gone.bwproject").to_string_lossy().into_owned();
+    let lib = Library {
+        roots: vec![projects.to_string_lossy().into_owned()],
+        samples: vec![song.join("Kit").to_string_lossy().into_owned()],
+        keep: [key(&newest)].into(),
+    };
+    let in_use = |name: &str| name.eq_ignore_ascii_case("snare.wav");
+    let guard =
+        Guard { project_roots: &lib.roots, sample_folders: &lib.samples, keep: &lib.keep, sample_in_use: &in_use };
+
+    let picked = [
+        line(CompactKind::ThinnedSave, &newest),
+        copy_of(&copy, &twin),
+        line(CompactKind::Backup, &auto),
+        line(CompactKind::Backup, &auto),
+        line(CompactKind::Backup, &not_auto),
+        line(CompactKind::UnusedAudio, &sample),
+        line(CompactKind::UnusedAudio, &used),
+        line(CompactKind::UnusedAudio, &unused),
+        line(CompactKind::UnusedAudio, &readme),
+        line(CompactKind::ThinnedSave, &readme),
+        line(CompactKind::ThinnedSave, &outside),
+        line(CompactKind::ThinnedSave, &gone),
+        line(CompactKind::Cache, &song.to_string_lossy()),
+        line(CompactKind::Cache, &lib.roots[0]),
+    ];
+    let plan = preview(&picked, &guard);
+    let going: Vec<&str> = plan.lines.iter().map(|l| l.item.path.as_str()).collect();
+    assert_eq!(going, [copy.as_str(), auto.as_str(), unused.as_str()]);
+    assert_eq!(plan.bytes(), 4 + 4 + 6);
+    let refused: Vec<(&str, Refused)> = plan.refused.iter().map(|(i, why)| (i.path.as_str(), *why)).collect();
+    let song_folder = song.to_string_lossy();
+    assert_eq!(
+        refused,
+        [
+            (newest.as_str(), Refused::KeptSave),
+            (not_auto.as_str(), Refused::NotAnAutosave),
+            (sample.as_str(), Refused::InSampleFolder),
+            (used.as_str(), Refused::SampleInUse),
+            (readme.as_str(), Refused::NotAudio),
+            (outside.as_str(), Refused::OutsideProjects),
+            (gone.as_str(), Refused::Gone),
+            // The song's folder holds the sample folder, and isn't a cache anyway.
+            (&*song_folder, Refused::InSampleFolder),
+            (lib.roots[0].as_str(), Refused::ProjectFolder),
+        ]
+    );
+    // Nothing moved.
+    for p in [&newest, &copy, &twin, &auto, &not_auto, &sample, &used, &unused, &readme, &outside] {
+        assert!(Path::new(p).exists(), "{p}");
+    }
+}
+
+#[test]
+fn a_copy_stays_when_its_twin_goes_too_or_has_changed() {
+    let dir = fixtures("mo-space-clean-twins");
+    let projects = dir.join("Projects");
+    let a = write(&projects, "Song/A.flp", b"same");
+    let b = write(&projects, "Song/B.flp", b"same");
+    let c = write(&projects, "Song/C.flp", b"same");
+    let lib =
+        Library { roots: vec![projects.to_string_lossy().into_owned()], samples: Vec::new(), keep: HashSet::new() };
+    let guard = Guard {
+        project_roots: &lib.roots,
+        sample_folders: &lib.samples,
+        keep: &lib.keep,
+        sample_in_use: &no_sample_in_use,
+    };
+
+    // A copy of B, and B (picked as thinned) going too: A stays, so what they held isn't lost.
+    let plan = preview(&[copy_of(&a, &b), line(CompactKind::ThinnedSave, &b)], &guard);
+    assert_eq!(plan.lines.len(), 1);
+    assert_eq!(plan.refused, [(copy_of(&a, &b), Refused::TwinGoesToo)]);
+
+    // C is a copy of B, but B changes before the clean-up runs: C stays.
+    let plan = preview(&[copy_of(&c, &b)], &guard);
+    assert_eq!(plan.lines.len(), 1);
+    fs::write(&b, b"SAME").unwrap();
+    let bin = FolderBin::new(dir.join("bin"));
+    let done = apply(&plan, &guard, &bin);
+    assert!(done.removed.is_empty());
+    assert_eq!(done.problems, [Problem { path: c.clone(), why: Refused::NotACopyNow.text().into() }]);
+    assert!(Path::new(&c).exists());
+}
+
+#[test]
+fn removing_goes_to_the_bin_and_undo_puts_it_back() {
+    let dir = fixtures("mo-space-clean-undo");
+    let projects = dir.join("Projects");
+    let song = projects.join("Slow Orbit");
+    write(&song, "Slow Orbit.song", b"song");
+    let cache = song.join("Cache");
+    write(&cache, "a.peak", b"peak");
+    let inside_cache = write(&cache, "b.peak", b"peak2");
+    let auto = write(&song, "History/Slow Orbit (1).song", b"old");
+    let changing = write(&song, "History/Slow Orbit (2).song", b"old");
+    let lib =
+        Library { roots: vec![projects.to_string_lossy().into_owned()], samples: Vec::new(), keep: HashSet::new() };
+    let guard = Guard {
+        project_roots: &lib.roots,
+        sample_folders: &lib.samples,
+        keep: &lib.keep,
+        sample_in_use: &no_sample_in_use,
+    };
+    let cache_line = CompactItem { bytes: 9, ..line(CompactKind::Cache, &cache.to_string_lossy()) };
+    let plan = preview(
+        &[
+            cache_line,
+            // A file in the cache isn't a cache folder of its own.
+            line(CompactKind::Cache, &inside_cache),
+            line(CompactKind::Backup, &auto),
+            line(CompactKind::Backup, &changing),
+        ],
+        &guard,
+    );
+    assert_eq!(plan.lines.len(), 3);
+    fs::write(&changing, b"newer and longer").unwrap();
+
+    let bin = FolderBin::new(dir.join("bin"));
+    let done = apply(&plan, &guard, &bin);
+    assert_eq!(done.removed.len(), 2);
+    assert_eq!(done.bytes(), 9 + 3);
+    assert_eq!(done.problems, [Problem { path: changing.clone(), why: Refused::Changed.text().into() }]);
+    assert!(!cache.exists() && !Path::new(&auto).exists() && Path::new(&changing).exists());
+
+    // What was removed is kept by the app as it is, to undo after a restart.
+    let kept: mo_space::clean::Done = serde_json::from_str(&serde_json::to_string(&done).unwrap()).unwrap();
+    assert_eq!(kept, done);
+
+    // Something new has the autosave's name now: it stays in the bin; the cache comes back.
+    write(&song, "History/Slow Orbit (1).song", b"new");
+    let problems = undo(&kept, &bin);
+    assert_eq!(problems.len(), 1);
+    assert_eq!(problems[0].path, auto);
+    assert!(Path::new(&inside_cache).exists());
+    assert_eq!(fs::read(&auto).unwrap(), b"new");
+}
+
+#[test]
+fn a_project_folder_called_backup_doesnt_make_its_songs_autosaves() {
+    let dir = fixtures("mo-space-clean-backup-root");
+    let root = dir.join("Backup");
+    let song = write(&root, "Song.flp", b"song");
+    let real = write(&root, "Song/Backup/Song (autosave).flp", b"auto");
+    let named = write(&root, "Song (overwritten at 2213h05).flp", b"auto");
+    let lib = Library { roots: vec![root.to_string_lossy().into_owned()], samples: Vec::new(), keep: HashSet::new() };
+    let guard = Guard {
+        project_roots: &lib.roots,
+        sample_folders: &lib.samples,
+        keep: &lib.keep,
+        sample_in_use: &no_sample_in_use,
+    };
+    let plan = preview(
+        &[line(CompactKind::Backup, &song), line(CompactKind::Backup, &real), line(CompactKind::Backup, &named)],
+        &guard,
+    );
+    let going: Vec<&str> = plan.lines.iter().map(|l| l.item.path.as_str()).collect();
+    assert_eq!(going, [real.as_str(), named.as_str()]);
+    assert_eq!(plan.refused[0].1, Refused::NotAnAutosave);
+}
+
+#[cfg(unix)]
+#[test]
+fn links_are_never_followed_or_removed() {
+    let dir = fixtures("mo-space-clean-links");
+    let projects = dir.join("Projects");
+    let real = write(&dir, "Samples/Kick.wav", b"kick");
+    fs::create_dir_all(&projects).unwrap();
+    let link = projects.join("Kick.wav");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let lib =
+        Library { roots: vec![projects.to_string_lossy().into_owned()], samples: Vec::new(), keep: HashSet::new() };
+    let guard = Guard {
+        project_roots: &lib.roots,
+        sample_folders: &lib.samples,
+        keep: &lib.keep,
+        sample_in_use: &no_sample_in_use,
+    };
+    let plan = preview(&[line(CompactKind::UnusedAudio, &link.to_string_lossy())], &guard);
+    assert_eq!(plan.refused[0].1, Refused::Link);
+    // And a size walk doesn't count what a link points to.
+    let measured = mo_space::size::measure(&projects, &std::sync::atomic::AtomicBool::new(false)).unwrap();
+    assert_eq!(measured, mo_space::Measured::default());
+}
