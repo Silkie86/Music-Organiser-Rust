@@ -2806,6 +2806,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "mo-audio"
+version = "0.1.0"
+
+[[package]]
 name = "mo-formatlab"
 version = "0.1.0"
 dependencies = [

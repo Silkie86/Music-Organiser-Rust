@@ -1,0 +1,11 @@
+[package]
+name = "mo-audio"
+description = "Sound files: reads WAV and AIFF (with their ACID and sampler notes) and writes WAV, as the C# app does. Other formats, resampling and playback come next. No UI in it."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
