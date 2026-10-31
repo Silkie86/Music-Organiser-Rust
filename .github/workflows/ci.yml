@@ -63,7 +63,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      # The galaxy check is a workspace of its own with its own target folder: cache both, or Windows builds wgpu
+      # from scratch every time (about 17 of its 20 minutes).
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            tools/galaxycheck -> target
       - name: Linux libraries for the window
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libwayland-dev
