@@ -241,3 +241,19 @@ fn decodes_mp3_flac_m4a_ogg_and_aac() {
     assert_eq!(a.file_seconds, 0.5);
     assert!(read_from(&tone("tone.mp3"), 60.0, 10).unwrap_err().to_string().contains("only read from the start"));
 }
+
+#[test]
+fn a_cut_short_mp3_flac_or_ogg_is_damage_not_a_read_failure() {
+    let cut = |name: &str, keep: fn(usize) -> usize| {
+        let bytes = std::fs::read(tone(name)).unwrap();
+        read(&fixture(&format!("cut-{name}"), &bytes[..keep(bytes.len())]), 60.0)
+    };
+    // An MP3 cut part way: the part that's there.
+    let a = cut("tone.mp3", |n| n / 2).unwrap();
+    assert!(!a.is_empty() && a.channels.iter().all(|c| c.len() == a.len()));
+    // Ones symphonia can't open cut short: a damaged file, not a drive or lock problem.
+    for name in ["tone.flac", "tone.ogg"] {
+        let e = cut(name, |n| n / 2).unwrap_err();
+        assert!(matches!(e, AudioError::Format(_)), "{name}: {e:?}");
+    }
+}

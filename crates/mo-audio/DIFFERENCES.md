@@ -14,3 +14,5 @@ yet** or **bug**.
 | MP3, FLAC, M4A, OGG, AAC | Windows' decoders (Media Foundation), Windows only. | symphonia, on every system. Lengths can differ by an encoder's padding (a few ms), as each decoder trims it its own way. | Better (Mac and Linux read them) |
 | WMA | Windows' decoders. | Not read (no Rust decoder). | Not yet |
 | A written WAV whose samples take an odd number of bytes (mono 24-bit, odd length) | No pad byte after the data, which RIFF requires. | Pads it, as RIFF says. | Better |
+| An M4A or AAC file's whole length | Windows' decoder trims the encoder's padding. | symphonia's AAC decoder doesn't, so a whole read counts ~10 ms more than a partial one. | Bug, small (fix with a padding-aware AAC path later) |
+| A FLAC or OGG file cut short | Windows read the part that's there. | Says the file is cut short or damaged (MP3 gives the part that's there). | Not yet |

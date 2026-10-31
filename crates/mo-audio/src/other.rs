@@ -2,6 +2,7 @@
 //! decoders for these, so a Mac or Linux left them out.
 
 use std::fs::File;
+use std::io::ErrorKind;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 
@@ -19,9 +20,7 @@ pub const OTHER_EXTENSIONS: [&str; 5] = ["mp3", "flac", "m4a", "ogg", "aac"];
 
 /// Whether this file is one of [`OTHER_EXTENSIONS`] (ignoring case).
 pub fn is_other(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| OTHER_EXTENSIONS.iter().any(|o| o.eq_ignore_ascii_case(e)))
+    crate::read::has_extension(path, &OTHER_EXTENSIONS)
 }
 
 /// Up to `max_seconds` from the start of an MP3, FLAC, M4A, OGG or AAC file. A damaged stretch part way in ends the
@@ -34,7 +33,10 @@ pub fn read_other(path: &Path, max_seconds: f64) -> Result<AudioData, AudioError
 
 fn decode(file: File, path: &Path, max_seconds: f64) -> Result<AudioData, AudioError> {
     let format_error = |e: Error| match e {
-        Error::IoError(e) => AudioError::Io(e),
+        // symphonia gives an I/O error for a file that ends too soon or a bitstream that runs out: that's a damaged
+        // file, not a drive or lock problem (as the WAV reader says it).
+        Error::IoError(e) if e.kind() != ErrorKind::UnexpectedEof && e.kind() != ErrorKind::Other => AudioError::Io(e),
+        Error::IoError(_) => AudioError::Format("The file is cut short or damaged".into()),
         Error::Unsupported(what) => AudioError::NotSupported(format!("Not supported: {what}")),
         other => AudioError::Format(other.to_string()),
     };
@@ -69,8 +71,10 @@ fn decode(file: File, path: &Path, max_seconds: f64) -> Result<AudioData, AudioE
         let packet = match format.next_packet() {
             Ok(Some(p)) => p,
             Ok(None) => break,
-            // A damaged or cut-short stretch: keep what came before it.
-            Err(Error::IoError(_) | Error::DecodeError(_)) if !channels.is_empty() => break,
+            // A damaged or cut-short stretch: keep what came before it. A real read failure (a drive gone) still
+            // says so, rather than passing a part off as the whole file.
+            Err(Error::DecodeError(_)) if !channels.is_empty() => break,
+            Err(Error::IoError(e)) if !channels.is_empty() && e.kind() == ErrorKind::UnexpectedEof => break,
             Err(e) => return Err(format_error(e)),
         };
         if packet.track_id != track_id {
@@ -78,18 +82,28 @@ fn decode(file: File, path: &Path, max_seconds: f64) -> Result<AudioData, AudioE
         }
         let buf = match decoder.decode(&packet) {
             Ok(buf) => buf,
-            // One damaged frame is skipped, as players do.
-            Err(Error::DecodeError(_)) => continue,
+            // One damaged frame is skipped, as players do. A frame whose bits run out comes as an I/O error: the
+            // packet is already in memory, so that's damage too.
+            Err(Error::DecodeError(_) | Error::IoError(_)) => continue,
             Err(e) => return Err(format_error(e)),
         };
+        let spec = buf.spec();
         if rate == 0 {
-            rate = buf.spec().rate();
-            let want = max_seconds * f64::from(rate);
-            wanted = if want.is_nan() { 0 } else { want as usize };
+            rate = spec.rate();
+            let count = spec.channels().count().max(1);
+            // `as` saturates: NaN and anything below zero give 0, infinity gives every frame. Never more than one
+            // read may hold, as the WAV reader.
+            let most = usize::try_from(crate::read::MOST_BYTES).unwrap_or(usize::MAX) / (4 * count);
+            wanted = ((max_seconds * f64::from(rate)) as usize).min(most);
+            let room = known_frames.map_or(0, |k| usize::try_from(k).unwrap_or(usize::MAX)).min(wanted);
+            channels = (0..count).map(|_| Vec::with_capacity(room)).collect();
+        } else if spec.rate() != rate {
+            // The sound changes part way (a chained stream): keep the part that matches.
+            break;
         }
         buf.copy_to_vecs_planar(&mut scratch);
-        if channels.is_empty() {
-            channels = vec![Vec::new(); scratch.len()];
+        if scratch.len() != channels.len() {
+            break;
         }
         let have = channels.first().map_or(0, Vec::len);
         let room = wanted.saturating_sub(have);

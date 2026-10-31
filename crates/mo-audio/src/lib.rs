@@ -75,7 +75,7 @@ pub enum AudioError {
     Io(std::io::Error),
     /// It isn't a sound file the app reads, or its header is damaged: says what's wrong.
     Format(String),
-    /// A kind of sound this reader doesn't decode ("WAV format 2 isn't PCM", "MP3 files"…).
+    /// A kind of sound this reader doesn't decode ("WAV format 2 isn't PCM", "WMA files"…).
     NotSupported(String),
 }
 

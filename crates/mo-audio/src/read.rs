@@ -10,13 +10,16 @@ use crate::{AudioData, AudioError};
 pub const MAX_SECONDS: f64 = 60.0;
 
 /// The most bytes one read decodes, as .NET's largest array: past it a file is decoded only so far.
-const MOST_BYTES: u64 = 0x7FFF_FFC7;
+pub(crate) const MOST_BYTES: u64 = 0x7FFF_FFC7;
+
+/// Whether the file's extension is one of `list` (ignoring case).
+pub(crate) fn has_extension(path: &Path, list: &[&str]) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| list.iter().any(|w| w.eq_ignore_ascii_case(e)))
+}
 
 /// Whether [`read_from`] can start part way into this file: WAV and AIFF (by the extension, ignoring case).
 pub fn can_read_from(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| ["wav", "aif", "aiff", "aifc"].iter().any(|w| w.eq_ignore_ascii_case(e)))
+    has_extension(path, &["wav", "aif", "aiff", "aifc"])
 }
 
 /// Up to `max_seconds` of a sound file from its start.
