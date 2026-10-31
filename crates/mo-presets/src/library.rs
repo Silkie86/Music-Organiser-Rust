@@ -196,7 +196,8 @@ pub fn default_folders() -> Vec<PathBuf> {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Source {
     /// A sound inside a song's save. `key` says which sound it is within its save ([`SongPreset::place_key`]), so it
-    /// can be found again to export it or keep a fix to its part: two FL channels of one plugin share a name and place.
+    /// can be found again to export it: two FL channels of one plugin share a name and place. (A fix to its part is
+    /// kept by [`PresetRow::hash`] instead.)
     Song { save: String, key: String },
     /// A preset file on disk.
     File { path: String },
@@ -219,6 +220,10 @@ pub struct PresetRow {
     /// category or name gives a clue.
     pub guess: Guess,
     pub plays_nothing: bool,
+    /// The sound's fingerprint, which a fix to its part is kept by; empty for a preset file (not fixable yet).
+    pub hash: String,
+    /// The part you set, which wins over [`PresetRow::guess`].
+    pub fixed: Option<crate::role::Role>,
 }
 
 impl PresetRow {
@@ -243,6 +248,8 @@ pub fn rows(saves: &[SaveSounds], found: &[FoundPreset]) -> Vec<PresetRow> {
             extension: p.blob.extension.to_string(),
             guess: p.guess.clone(),
             plays_nothing: p.plays_nothing,
+            hash: p.hash.clone(),
+            fixed: p.fixed,
         }));
     }
     for f in found {
@@ -273,6 +280,8 @@ pub fn rows(saves: &[SaveSounds], found: &[FoundPreset]) -> Vec<PresetRow> {
             extension: ext,
             guess,
             plays_nothing: false,
+            hash: String::new(),
+            fixed: None,
         });
     }
     out

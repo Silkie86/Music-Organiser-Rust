@@ -277,8 +277,6 @@ pub enum Basis {
     Name,
     /// The part of the track it sits on (an effect).
     Track,
-    /// You set it: it always wins.
-    Fixed,
 }
 
 /// The guess for one sound, with why.
@@ -300,11 +298,6 @@ impl Guess {
     /// No guess, and why.
     pub fn none(reason: impl Into<String>) -> Guess {
         Guess { role: None, basis: Basis::Notes, reason: reason.into(), octave_checked: true, weak: true }
-    }
-
-    /// The role you set: it always wins over a guess.
-    pub fn fixed(role: Role) -> Guess {
-        Guess { role: Some(role), basis: Basis::Fixed, reason: "Set by you".into(), octave_checked: true, weak: false }
     }
 }
 
