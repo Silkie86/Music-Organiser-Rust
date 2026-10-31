@@ -27,6 +27,37 @@ if (args is ["--roots", var db])
     return;
 }
 
+// `twin-cs --songs <library.db> <copy>`: how the C# app's Projects page groups the library into songs, one save a line
+// ({"path", "key", "latest"}). The C# library opens its database to write (it adds tables and columns it's missing),
+// so it's given a copy, made from a read-only connection and deleted afterwards: the real library is only read.
+if (args is ["--songs", var library, var copy])
+{
+    using (var from = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={library};Mode=ReadOnly;Pooling=False"))
+    using (var to = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={copy};Pooling=False"))
+    {
+        from.Open();
+        to.Open();
+        from.BackupDatabase(to);
+    }
+    try
+    {
+        using var lib = new MusicOrganiser.Core.Library.LibraryDb(copy);
+        // As ProjectsViewModel.Load: Fix's copies waiting for Keep are left out.
+        var pending = lib.PendingFixes();
+        var projects = lib.Projects().Where(p => !pending.Contains(p.Path)).ToList();
+        using var songs = new StreamWriter(Console.OpenStandardOutput(), new System.Text.UTF8Encoding(false));
+        foreach (var g in MusicOrganiser.Core.Library.SongVersions.Group(projects, lib.SongChoices()))
+            foreach (var p in g.Older.Prepend(g.Latest))
+                songs.WriteLine(new JsonObject { ["path"] = p.Path, ["key"] = g.Key, ["latest"] = ReferenceEquals(p, g.Latest) }.ToJsonString());
+    }
+    finally
+    {
+        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+        foreach (var f in new[] { copy, copy + "-wal", copy + "-shm" }) File.Delete(f);
+    }
+    return;
+}
+
 // The Rust side writes the paths as UTF-8; read them so, not in the console's code page.
 var files = new List<string>();
 using (var input = new StreamReader(Console.OpenStandardInput(), new System.Text.UTF8Encoding(false)))

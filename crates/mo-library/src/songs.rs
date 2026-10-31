@@ -582,6 +582,11 @@ struct FileId {
     created: Option<NaiveDateTime>,
 }
 
+/// Whether two saves are the same file in two places, as [`group_songs`] judges it.
+pub fn same_file_as(a: &Save, b: &Save) -> bool {
+    same_file(a).is_some_and(|x| same_file(b).is_some_and(|y| x == y))
+}
+
 fn same_file(s: &Save) -> Option<FileId> {
     if s.file_missing || s.size <= 0 || s.note_count < 0 || s.track_count < 0 || is_daw_default(split(&s.name).0.trim())
     {

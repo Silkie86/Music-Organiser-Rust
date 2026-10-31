@@ -2827,6 +2827,7 @@ name = "mo-twin"
 version = "0.1.0"
 dependencies = [
  "mo-formats",
+ "mo-library",
  "rayon",
  "serde_json",
  "sha2",

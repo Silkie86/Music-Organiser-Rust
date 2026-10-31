@@ -409,6 +409,12 @@ the same files, and every difference is listed and judged (section 11's "twin te
 
 ### 5.1 Harmony engine (`Midi/Jazz`, used everywhere)
 
+> **Rethought (Solomon, 2026-10):** the old engine was the weakest part of the C# app. `mo-harmony` is planned again
+> from the ground up in phase 6, once the MIDI packs are read, with the research and the review done at the highest
+> effort (multi-agent). The list below is the old engine's inventory: keep only clear easy wins from it. One engine:
+> reading keys and chords has no style; suggestions take a style (jazz, gospel, pop, classical...) as a set of weights.
+> It is the base the Playground builds on, so it must be very precise and measured against your library.
+
 - **ChordReader** (one chord reader for the whole app): beat by beat, dynamic programming over spans, pushes count on
   the beat, approach notes ×0.25, bass only when low/alone/a 5th below the next; ChordSpeller names every chord and
   spells by key; slash chords keep their bass.

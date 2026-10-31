@@ -8,9 +8,13 @@
     %LOCALAPPDATA%\MusicOrganiser\run-latest-rust\app   the Rust app (this script's own copy)
   and the folders come from the C# app's library and its MIDI page (library.db, opened read-only).
 
+  Then it groups the library into songs both ways (the C# half works on a copy of library.db, deleted afterwards)
+  and sorts every difference by its cause.
+
   It writes to %LOCALAPPDATA%\MusicOrganiser\logs:
     twin-test-<date>.txt     the summary: counts and field names only, safe to share with Claude
     twin-report-<date>.txt   every difference, file by file (song names and paths: it stays on this PC)
+    twin-songs-<date>.txt    every song grouped differently (song names and paths: it stays on this PC)
 
   Folders can be given instead of the library's: .\twin-test.ps1 "D:\Music\FL Projects" "E:\Old saves"
 #>
@@ -43,6 +47,13 @@ if (-not $Folders) {
 $Stamp = Get-Date -Format 'yyyy-MM-dd-HHmm'
 $Summary = Join-Path $Logs "twin-test-$Stamp.txt"
 $Report = Join-Path $Logs "twin-report-$Stamp.txt"
+$SongsReport = Join-Path $Logs "twin-songs-$Stamp.txt"
+Write-Host 'Building the Rust half (a few minutes the first time)...'
+Push-Location $Rust
+$ErrorActionPreference = 'Continue'
+try { cargo build --release -p mo-twin; $Code = $LASTEXITCODE } finally { Pop-Location }
+$ErrorActionPreference = 'Stop'
+if ($Code -ne 0) { throw 'The Rust half did not build.' }
 Write-Host "Reading every FL Studio, Bitwig and Studio One project and MIDI file in $($Folders.Count) folder(s) with both apps..."
 Push-Location $Rust
 # Below normal priority (rule 21): the twin and the C# helper it starts take it on, so a DAW open meanwhile stays quick.
@@ -51,8 +62,15 @@ try { (Get-Process -Id $PID).PriorityClass = 'BelowNormal' } catch { }
 $ErrorActionPreference = 'Continue'
 try {
   # Set-Content rather than Tee-Object, which writes UTF-16 in Windows PowerShell 5.1.
-  $Out = cargo run --release -q -p mo-twin -- run --cs $Dll @Folders --report $Report
+  $Out = @(cargo run --release -q -p mo-twin -- run --cs $Dll @Folders --report $Report)
   $Code = $LASTEXITCODE
+  if ($Code -eq 0) {
+    Write-Host 'Grouping the library into songs both ways...'
+    # Exit code 1 means some songs are grouped differently for a reason other than copied folders: still a summary.
+    $Out += ''
+    $Out += cargo run --release -q -p mo-twin -- songs --cs $Dll (Join-Path $Data 'library.db') --report $SongsReport
+    if ($LASTEXITCODE -gt 1) { $Code = $LASTEXITCODE }
+  }
 } finally { Pop-Location }
 $ErrorActionPreference = 'Stop'
 if ($Code -ne 0) { throw "The twin test stopped (exit code $Code); its summary wasn't written." }
@@ -61,3 +79,4 @@ $Out | Write-Host
 Write-Host ''
 Write-Host "Summary (safe to share): $Summary"
 Write-Host "Every difference (stays here): $Report"
+Write-Host "Every song grouped differently (stays here): $SongsReport"
