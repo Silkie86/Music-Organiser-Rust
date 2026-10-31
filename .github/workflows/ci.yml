@@ -7,10 +7,11 @@ on:
   # Started by hand (Actions, CI, Run workflow) before an ultracode review: checks everything.
   workflow_dispatch:
 
-# One run per PR push; a newer push cancels the run it replaces.
+# One run per PR push; a newer push cancels the run it replaces. Runs on main (a merge, or a full run started by hand)
+# are never cancelled, so each one's result can be read.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -39,7 +40,7 @@ jobs:
           BASE: ${{ github.base_ref }}
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            git diff --name-only "origin/$BASE...HEAD" | python3 tools/dev/ci_scope.py
+            git diff --name-only --no-renames "origin/$BASE...HEAD" | python3 tools/dev/ci_scope.py
           else
             python3 tools/dev/ci_scope.py --full < /dev/null
           fi
@@ -47,12 +48,17 @@ jobs:
   check:
     name: ${{ matrix.os }}
     needs: scope
+    # Runs even when the scope job failed, and then fails itself, so a broken scope never shows as skipped (green).
+    if: ${{ !cancelled() }}
     strategy:
       fail-fast: false
       matrix:
         os: [windows-latest, macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
+      - name: Stop if working out what changed failed
+        if: needs.scope.result != 'success'
+        run: exit 1
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -78,9 +84,13 @@ jobs:
       - name: Clippy
         if: needs.scope.outputs.rust == 'true'
         run: cargo clippy ${{ needs.scope.outputs.check }} --all-targets
+      # Linux also runs the tests of every crate that uses a changed one; Windows and Mac only the changed crates'.
       - name: Tests
-        if: needs.scope.outputs.test != ''
+        if: needs.scope.outputs.test != '' && runner.os != 'Linux'
         run: cargo test ${{ needs.scope.outputs.test }}
+      - name: Tests (and the crates that use them)
+        if: needs.scope.outputs.rust == 'true' && runner.os == 'Linux'
+        run: cargo test ${{ needs.scope.outputs.check }}
       # The galaxy check is a workspace of its own (so its wgpu stays out of the app); checked on Windows, where it runs.
       - name: Galaxy check clippy
         if: runner.os == 'Windows' && needs.scope.outputs.galaxy == 'true'
@@ -106,9 +116,12 @@ jobs:
   screenshots:
     name: Screenshots
     needs: scope
-    if: needs.scope.outputs.ui == 'true'
+    if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.ui == 'true') }}
     runs-on: ubuntu-latest
     steps:
+      - name: Stop if working out what changed failed
+        if: needs.scope.result != 'success'
+        run: exit 1
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -125,9 +138,12 @@ jobs:
   twin:
     name: Twin test
     needs: scope
-    if: needs.scope.outputs.formats == 'true'
+    if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.formats == 'true') }}
     runs-on: ubuntu-latest
     steps:
+      - name: Stop if working out what changed failed
+        if: needs.scope.result != 'success'
+        run: exit 1
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
         with:
