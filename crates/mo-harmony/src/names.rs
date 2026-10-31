@@ -4,6 +4,7 @@
 //! choices, used where nothing says otherwise.
 
 use crate::pitch::PitchClass;
+use crate::spell::Tpc;
 
 /// Flats for the black notes except F♯: how jazz charts write a chord's root when no key says otherwise.
 pub const FLATS_BUT_F_SHARP: [&str; 12] = ["C", "Db", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"];
@@ -21,36 +22,10 @@ pub fn name(table: &'static [&'static str; 12], pc: PitchClass) -> &'static str 
 
 /// Reads a note name at the start of `text`: a letter A to G (either case) and up to two sharps or flats ("#", "b",
 /// "♯", "♭"). Gives the pitch class and how many bytes of `text` the name took, or `None` when it doesn't start
-/// with a note. A "b" after the letter always flattens: "Bb" is B flat, and "Bbm" is B flat minor.
+/// with a note. A "b" after the letter always flattens: "Bb" is B flat, and "Bbm" is B flat minor. To keep the
+/// spelling too, see [`crate::spell::Tpc::parse`].
 pub fn parse_note(text: &str) -> Option<(PitchClass, usize)> {
-    let mut chars = text.char_indices();
-    let (_, letter) = chars.next()?;
-    let mut pc = match letter.to_ascii_uppercase() {
-        'C' => 0,
-        'D' => 2,
-        'E' => 4,
-        'F' => 5,
-        'G' => 7,
-        'A' => 9,
-        'B' => 11,
-        _ => return None,
-    };
-    let mut used = letter.len_utf8();
-    let mut accidentals = 0;
-    for (at, c) in chars {
-        let step = match c {
-            '#' | '♯' => 1,
-            'b' | '♭' => -1,
-            _ => break,
-        };
-        pc += step;
-        used = at + c.len_utf8();
-        accidentals += 1;
-        if accidentals == 2 {
-            break;
-        }
-    }
-    Some((PitchClass::new(pc), used))
+    Tpc::parse(text).map(|(note, used)| (note.pitch_class(), used))
 }
 
 #[cfg(test)]

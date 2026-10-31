@@ -2,14 +2,17 @@
 //! "G13(b9)", "Bbmaj9/D", "F#m7b5", "C#dim7" and "Ab7alt" all come out right. A chord is made from a typed name
 //! ([`Chord::parse`]) or by the chord reader from notes.
 //!
-//! The names follow the C# app's, which Solomon has used and checked (its tests are carried over below): flats for
-//! black-note roots except F♯, sharps for diminished chords (which usually climb to the next chord), and bracketed
-//! tensions after the chord's own name.
+//! The names follow the C# app's, which Solomon has used and checked (its tests are carried over below), with
+//! bracketed tensions after the chord's own name. A chord here is its pitch classes; how its notes are spelled (C♯ or
+//! D♭) is [`crate::spell`]'s job: each note is written by its degree above the root ([`Chord::degree`]), so the root
+//! is the only note whose spelling is chosen. With no key, roots are written as the C# app wrote them (flats for black
+//! notes except F♯, sharps for diminished chords), and the bass by its degree: A7/C#, where the C# app wrote A7/Db.
 
 use std::fmt;
 
-use crate::names::{self, FLATS, FLATS_BUT_F_SHARP, SHARPS, parse_note};
+use crate::names::parse_note;
 use crate::pitch::{PcSet, PitchClass};
+use crate::spell::{Degree, Spelled, Tpc};
 
 /// What sort of chord it is, which decides how it behaves: what it resolves to and which notes sit on it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -63,6 +66,98 @@ impl Family {
         } else {
             Family::Power
         }
+    }
+}
+
+/// Whether a dominant chord is an altered one (7alt): a major third and flat seventh, no perfect fifth, no natural 9
+/// or 13, a ♭9 or ♯9, and a ♯11 or ♭13. With a perfect fifth it's written out instead: C7(b9,b13).
+pub const fn is_altered(intervals: PcSet) -> bool {
+    intervals.has(4)
+        && intervals.has(10)
+        && !intervals.has(7)
+        && !intervals.has(2)
+        && !intervals.has(9)
+        && (intervals.has(1) || intervals.has(3))
+        && (intervals.has(6) || intervals.has(8))
+}
+
+/// How the note `interval` semitones above the root is written in a chord of this family with these intervals: its
+/// degree, as the chord's name has it. Three semitones are a ♭3, or a ♯9 beside a major third; six a ♭5 in a
+/// diminished chord or a dominant with no fifth (C7(b5)), else a ♯11; eight a ♯5 in an augmented chord or a dominant
+/// with no fifth (C7(#5)), else a ♭13; nine a 𝄫7 in a diminished seventh, a 13 over a seventh, else a 6. In an altered
+/// chord they're its ♯11 and ♭13. In a sus chord, two and five semitones are its 2 and 4.
+pub const fn degree(intervals: PcSet, family: Family, interval: i32) -> Degree {
+    let no_fifth_dominant = matches!(family, Family::Dominant) && !intervals.has(7) && !is_altered(intervals);
+    match PitchClass::new(interval).number() {
+        0 => Degree::ROOT,
+        1 => Degree::FLAT_NINTH,
+        2 => {
+            if matches!(family, Family::Sus) && !intervals.has(5) {
+                Degree::SECOND
+            } else {
+                Degree::NINTH
+            }
+        }
+        3 => {
+            if intervals.has(4) {
+                Degree::SHARP_NINTH
+            } else {
+                Degree::MINOR_THIRD
+            }
+        }
+        4 => Degree::MAJOR_THIRD,
+        5 => {
+            if matches!(family, Family::Sus) {
+                Degree::FOURTH
+            } else {
+                Degree::ELEVENTH
+            }
+        }
+        6 => {
+            if matches!(family, Family::Diminished | Family::HalfDiminished) || no_fifth_dominant {
+                Degree::FLAT_FIFTH
+            } else {
+                Degree::SHARP_ELEVENTH
+            }
+        }
+        7 => Degree::FIFTH,
+        8 => {
+            if matches!(family, Family::Augmented) || no_fifth_dominant {
+                Degree::SHARP_FIFTH
+            } else {
+                Degree::FLAT_THIRTEENTH
+            }
+        }
+        9 => {
+            if matches!(family, Family::Diminished) {
+                Degree::DIMINISHED_SEVENTH
+            } else if intervals.has(10) || intervals.has(11) {
+                Degree::THIRTEENTH
+            } else {
+                Degree::SIXTH
+            }
+        }
+        10 => Degree::MINOR_SEVENTH,
+        _ => Degree::MAJOR_SEVENTH,
+    }
+}
+
+/// How a bass that isn't one of the chord's own notes is written above the root: within the octave, on the plain
+/// side (the C under D/C is its ♭7, the G under F/G its 2, the F♯ under C/F♯ its ♯4).
+const fn bass_only_degree(interval: u8) -> Degree {
+    match interval {
+        0 => Degree::ROOT,
+        1 => Degree::new(2, -1),
+        2 => Degree::new(2, 0),
+        3 => Degree::new(3, -1),
+        4 => Degree::new(3, 0),
+        5 => Degree::new(4, 0),
+        6 => Degree::new(4, 1),
+        7 => Degree::new(5, 0),
+        8 => Degree::new(6, -1),
+        9 => Degree::new(6, 0),
+        10 => Degree::new(7, -1),
+        _ => Degree::new(7, 0),
     }
 }
 
@@ -214,40 +309,55 @@ impl Chord {
         role(self.intervals(), self.family(), interval)
     }
 
+    /// The degree the note `interval` semitones above the root has in this chord: [`degree`].
+    pub const fn degree(self, interval: i32) -> Degree {
+        degree(self.intervals(), self.family(), interval)
+    }
+
+    /// The chord's own notes by degree, from the root up: Cmaj9 is 1 3 5 7 9.
+    pub fn degrees(self) -> Vec<Degree> {
+        let (intervals, family) = (self.intervals(), self.family());
+        let mut all: Vec<Degree> =
+            (0..12).filter(|&i| intervals.has(i)).map(|i| degree(intervals, family, i)).collect();
+        all.sort_unstable();
+        all
+    }
+
+    /// The bass's degree above the root: its own degree when it's one of the chord's notes (the 3 of A7/C#), else a
+    /// plain one within the octave (the ♭7 of D/C).
+    pub const fn bass_degree(self) -> Degree {
+        let interval = self.bass.above(self.root);
+        if self.notes.contains(self.bass) { self.degree(interval as i32) } else { bass_only_degree(interval) }
+    }
+
     /// The quality written after the root: "maj9", "m7b5", "13(#11)", "7alt", "9sus4".
     pub fn quality(self) -> String {
         quality_of(self.intervals(), self.family())
     }
 
     /// The root as [`Chord::name`] writes it: sharp for a diminished chord, else flat except F#.
-    pub fn root_name(self) -> &'static str {
-        names::name(if self.family() == Family::Diminished { &SHARPS } else { &FLATS_BUT_F_SHARP }, self.root)
+    pub fn root_name(self) -> String {
+        Spelled::plain(self).root().name()
     }
 
-    /// The bass under a slash ("" when the root is in the bass).
-    pub fn bass_name(self) -> &'static str {
-        if self.bass == self.root { "" } else { names::name(&FLATS_BUT_F_SHARP, self.bass) }
+    /// The bass under a slash ("" when the root is in the bass), spelled by its degree.
+    pub fn bass_name(self) -> String {
+        if self.bass == self.root { String::new() } else { Spelled::plain(self).bass().without_doubles().name() }
     }
 
-    /// "Dm9", "G13(b9)", "Cmaj7/E".
+    /// "Dm9", "G13(b9)", "Cmaj7/E", "A7/C#": written as charts write it when no key says otherwise. In a key, see
+    /// [`crate::spell::spell_in_key`].
     pub fn name(self) -> String {
-        self.spelled(if self.family() == Family::Diminished { &SHARPS } else { &FLATS_BUT_F_SHARP }, &FLATS_BUT_F_SHARP)
-    }
-
-    /// The name with its root and bass written from these tables.
-    pub fn spelled(self, roots: &'static [&'static str; 12], basses: &'static [&'static str; 12]) -> String {
-        let mut name = String::from(names::name(roots, self.root));
-        name.push_str(&self.quality());
-        if self.bass != self.root {
-            name.push('/');
-            name.push_str(names::name(basses, self.bass));
-        }
-        name
+        Spelled::plain(self).name()
     }
 
     /// Every way the name is written, for searching: "C#m7" and "Dbm7".
     pub fn spellings(self) -> Vec<String> {
-        let mut all = vec![self.name(), self.spelled(&SHARPS, &SHARPS), self.spelled(&FLATS, &FLATS)];
+        let mut all = vec![self.name()];
+        // All sharps (F up to A#), then all flats (Gb up to B).
+        for lowest in [-1, -6] {
+            all.push(Spelled::new(self, Tpc::in_window(self.root, lowest)).name());
+        }
         let mut seen = std::collections::HashSet::new();
         all.retain(|n| seen.insert(n.clone()));
         all
@@ -397,7 +507,7 @@ pub fn quality_of(intervals: PcSet, family: Family) -> String {
             q
         }
         Family::Dominant => {
-            // An altered dominant: two or more altered tensions and no natural 9 or 13.
+            // An altered dominant (no fifth, no natural 9 or 13) is 7alt; otherwise the alterations are written out.
             let mut alterations = Vec::new();
             if b9 {
                 alterations.push("b9");
@@ -411,7 +521,7 @@ pub fn quality_of(intervals: PcSet, family: Family) -> String {
             if b13 {
                 alterations.push(if p5 { "b13" } else { "#5" });
             }
-            if alterations.len() >= 2 && !n9 && !n13 && (b9 || s9) && (b13 || s11) {
+            if is_altered(intervals) {
                 return "7alt".into();
             }
             let q = if n13 {
@@ -804,6 +914,53 @@ mod tests {
                 ),
                 name
             );
+        }
+    }
+
+    #[test]
+    fn an_altered_dominant_has_no_fifth() {
+        let c = |iv: &[i32]| Chord::of(PitchClass::C, PcSet::of(iv)).name();
+        assert_eq!(c(&[0, 4, 10, 1, 8]), "C7alt");
+        assert_eq!(c(&[0, 4, 10, 3, 6]), "C7alt");
+        // With the fifth sounding, the alterations are written out.
+        assert_eq!(c(&[0, 4, 7, 10, 1, 8]), "C7(b9,b13)");
+        assert_eq!(c(&[0, 4, 7, 10, 3, 6]), "C7(#9,#11)");
+    }
+
+    #[test]
+    fn every_note_is_spelled_as_the_name_says() {
+        // For every set of notes on a root, the degree each note gets agrees with what the name shows.
+        for bits in (1..4096u16).step_by(2) {
+            let c = Chord::of(PitchClass::C, PcSet::from_bits(bits));
+            let q = c.quality();
+            for i in 0..12 {
+                if c.has(i) {
+                    assert_eq!(c.degree(i).interval(), i, "{} {i}", c.name());
+                }
+            }
+            let says = |what: &str| q.contains(what);
+            if says("alt") || (says("#11") && !says("b5")) {
+                assert_eq!(c.degree(6), Degree::SHARP_ELEVENTH, "{}", c.name());
+            } else if says("b5") {
+                assert_eq!(c.degree(6), Degree::FLAT_FIFTH, "{}", c.name());
+            }
+            if says("alt") || (says("b13") && !says("#5")) {
+                assert_eq!(c.degree(8), Degree::FLAT_THIRTEENTH, "{}", c.name());
+            } else if says("#5") || q.starts_with('+') {
+                assert_eq!(c.degree(8), Degree::SHARP_FIFTH, "{}", c.name());
+            }
+            if says("#9") {
+                assert_eq!(c.degree(3), Degree::SHARP_NINTH, "{}", c.name());
+            }
+            if says("dim7") {
+                assert_eq!(c.degree(9), Degree::DIMINISHED_SEVENTH, "{}", c.name());
+            }
+            if q.starts_with('6') || q.starts_with("m6") {
+                assert_eq!(c.degree(9), Degree::SIXTH, "{}", c.name());
+            }
+            if q.starts_with("13") || q.starts_with("m13") || q.starts_with("maj13") {
+                assert_eq!(c.degree(9), Degree::THIRTEENTH, "{}", c.name());
+            }
         }
     }
 

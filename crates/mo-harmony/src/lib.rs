@@ -16,7 +16,9 @@ pub mod chord;
 pub mod key;
 pub mod names;
 pub mod pitch;
+pub mod spell;
 
 pub use chord::{Chord, Family, ToneRole};
 pub use key::{Key, KeyRelation, Mode};
 pub use pitch::{PcSet, PerPitch, PitchClass};
+pub use spell::{Degree, Spelled, Tpc};

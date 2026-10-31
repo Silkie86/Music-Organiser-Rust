@@ -4,6 +4,7 @@ use std::fmt;
 
 use crate::names::parse_note;
 use crate::pitch::{PcSet, PitchClass};
+use crate::spell::Tpc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Mode {
@@ -17,11 +18,6 @@ pub struct Key {
     pub tonic: PitchClass,
     pub mode: Mode,
 }
-
-/// How a key's tonic is written: flat keys with flats (Eb major, Bb minor), as charts and pack names write them, and
-/// the six-sharp or six-flat ones as Gb major and Eb minor.
-const MAJOR_TONICS: [&str; 12] = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"];
-const MINOR_TONICS: [&str; 12] = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "G#", "A", "Bb", "B"];
 
 /// How one key stands to another, as key-finding contests score a wrong answer (see [`Key::mirex_score`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -95,14 +91,38 @@ impl Key {
         steps.on(self.tonic)
     }
 
-    /// The tonic's name as the key is written: "Eb" for Eb major, "C#" for C# minor.
-    // A pitch class is always 0 to 11.
-    #[allow(clippy::indexing_slicing)]
-    pub fn tonic_name(self) -> &'static str {
+    /// The tonic as the key is written: with the fewest sharps or flats (Db major, not C# major with seven sharps;
+    /// C# minor, not Db minor with eight flats), and the two keys with six either way as Gb major and Eb minor, so a
+    /// key and its relative are both written with flats.
+    pub const fn spelled_tonic(self) -> Tpc {
         match self.mode {
-            Mode::Major => MAJOR_TONICS[self.tonic.index()],
-            Mode::Minor => MINOR_TONICS[self.tonic.index()],
+            // From Gb (six flats) to B (five sharps).
+            Mode::Major => Tpc::in_window(self.tonic, -6),
+            // From Eb minor (six flats) to G# minor (five sharps).
+            Mode::Minor => Tpc::in_window(self.tonic, -3),
         }
+    }
+
+    /// The tonic of the major key on the same notes, spelled: C for A minor, Gb for Eb minor, and the key's own tonic
+    /// for a major key.
+    pub const fn major_tonic(self) -> Tpc {
+        match self.mode {
+            Mode::Major => self.spelled_tonic(),
+            Mode::Minor => Tpc::new(self.spelled_tonic().fifths() - 3),
+        }
+    }
+
+    /// Whether the key's scale has this spelled note: the major scale, or in a minor key the natural minor scale and
+    /// its raised sixth and seventh (F# and G# in A minor). Ab is in C minor, G# isn't.
+    pub const fn has(self, note: Tpc) -> bool {
+        let t = self.major_tonic().fifths();
+        let f = note.fifths();
+        (f >= t - 1 && f <= t + 5) || (matches!(self.mode, Mode::Minor) && (f == t + 6 || f == t + 8))
+    }
+
+    /// The tonic's name as the key is written: "Eb" for Eb major, "C#" for C# minor.
+    pub fn tonic_name(self) -> String {
+        self.spelled_tonic().name()
     }
 
     /// "Eb major", "C# minor".
@@ -228,6 +248,18 @@ mod tests {
         for text in ["", "H", "minor", "C dorian", "D mixolydian", "7"] {
             assert_eq!(Key::parse(text), None, "{text}");
         }
+    }
+
+    #[test]
+    fn keys_know_their_spelled_scales() {
+        let note = |n: &str| Tpc::parse(n).map(|(t, _)| t).unwrap();
+        assert_eq!(key("Am").major_tonic(), Tpc::C);
+        assert_eq!(key("Ebm").major_tonic().name(), "Gb");
+        assert_eq!(key("F#").spelled_tonic().name(), "Gb");
+        assert!(key("Cm").has(note("Ab")) && !key("Cm").has(note("G#")));
+        assert!(key("Am").has(note("F#")) && key("Am").has(note("G#")) && key("Am").has(note("G")));
+        assert!(!key("Am").has(note("C#")) && !key("C").has(note("F#")));
+        assert!(key("Gb").has(note("Cb")) && key("F#m").has(note("E#")) && !key("E").has(note("E#")));
     }
 
     #[test]
