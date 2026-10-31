@@ -1,7 +1,7 @@
 // The Songs page: one line per song, newest save first, under time headings, with search, filter chips and a year
 // scrubber, and the picked song's panel beside it. Agreed with Solomon on 2026-10-31.
 import { ListView } from "std-widgets.slint";
-import { Theme, Well, SearchBox, ToggleChip, MenuChip, ListLine, Stars, YearMark, Caps, Heart, CloseButton, TabBar, LinkText, StudioButton } from "../studio.slint";
+import { Theme, Type, Space, Well, SearchBox, ToggleChip, MenuChip, ListLine, Stars, YearMark, Caps, Heart, CloseButton, TabBar, LinkText, StudioButton } from "../studio.slint";
 
 // One line of the list: a heading ("This week", "2019") when `heading` isn't empty, else a song.
 export struct SongLine {
@@ -142,8 +142,8 @@ export global SongsData {
     callback copy-path();
     callback close-panel();
     // Every line is one of two heights, so a year's place in the list can be worked out.
-    out property <length> heading-height: 34px;
-    out property <length> song-height: 54px;
+    out property <length> heading-height: 38px;
+    out property <length> song-height: 62px;
 }
 
 // The picked song: what it is, its counts and its tabs. Read-only until the Rust app's database is trusted.
@@ -154,23 +154,23 @@ component SongPanel inherits Rectangle {
     border-color: Theme.edge;
 
     VerticalLayout {
-        padding: 20px;
-        padding-bottom: 12px;
-        spacing: 6px;
+        padding: Space.lg;
+        padding-bottom: Space.md;
+        spacing: Space.sm;
         HorizontalLayout {
-            spacing: 10px;
+            spacing: Space.sm;
             vertical-stretch: 0;
             Text {
                 text: SongsData.song.daw;
                 color: SongsData.song.daw == "FL Studio" ? Theme.fl-studio : SongsData.song.daw == "Bitwig" || SongsData.song.daw == "Bitwig Studio" ? Theme.bitwig : SongsData.song.daw == "Studio One" ? Theme.studio-one : Theme.muted;
-                font-size: 12px;
+                font-size: Type.meta;
                 font-weight: 600;
                 vertical-alignment: center;
             }
             Text {
                 text: SongsData.song.facts;
                 color: Theme.muted;
-                font-size: 12px;
+                font-size: Type.meta;
                 vertical-alignment: center;
                 horizontal-stretch: 1;
                 overflow: elide;
@@ -182,26 +182,26 @@ component SongPanel inherits Rectangle {
         Text {
             text: SongsData.song.name;
             color: Theme.text;
-            font-size: 22px;
+            font-size: Type.panel-title;
             font-weight: 600;
             overflow: elide;
         }
         if SongsData.song.saves != "": Text {
             text: SongsData.song.saves;
             color: Theme.muted;
-            font-size: 12px;
+            font-size: Type.meta;
             overflow: elide;
         }
         HorizontalLayout {
-            spacing: 14px;
+            spacing: Space.md;
             alignment: start;
-            padding-top: 4px;
-            padding-bottom: 6px;
+            padding-top: Space.xs;
+            padding-bottom: Space.sm;
             vertical-stretch: 0;
             Text {
                 text: SongsData.song.status;
                 color: Theme.text;
-                font-size: 13px;
+                font-size: Type.body;
                 vertical-alignment: center;
             }
             if SongsData.song.rating > 0: VerticalLayout {
@@ -209,7 +209,7 @@ component SongPanel inherits Rectangle {
                 Stars { rating: SongsData.song.rating; }
             }
             if SongsData.song.favourite: HorizontalLayout {
-                spacing: 5px;
+                spacing: Space.xs;
                 VerticalLayout {
                     alignment: center;
                     Heart { }
@@ -217,12 +217,12 @@ component SongPanel inherits Rectangle {
                 Text {
                     text: "Favourite";
                     color: Theme.muted;
-                    font-size: 13px;
+                    font-size: Type.body;
                     vertical-alignment: center;
                 }
             }
             if SongsData.song.key != "": HorizontalLayout {
-                spacing: 6px;
+                spacing: Space.sm;
                 Caps {
                     text: "KEY";
                     vertical-alignment: center;
@@ -230,23 +230,23 @@ component SongPanel inherits Rectangle {
                 Text {
                     text: SongsData.song.key + (SongsData.song.key-heard ? " (from the notes)" : "");
                     color: Theme.text;
-                    font-size: 13px;
+                    font-size: Type.body;
                     vertical-alignment: center;
                 }
             }
             if SongsData.song.tags != "": Text {
                 text: SongsData.song.tags;
                 color: Theme.muted;
-                font-size: 13px;
+                font-size: Type.body;
                 vertical-alignment: center;
                 overflow: elide;
             }
         }
         HorizontalLayout {
-            spacing: 8px;
+            spacing: Space.sm;
             alignment: start;
             vertical-stretch: 0;
-            padding-bottom: 4px;
+            padding-bottom: Space.xs;
             StudioButton {
                 text: "Open in " + SongsData.song.daw;
                 main: true;
@@ -269,42 +269,42 @@ component SongPanel inherits Rectangle {
             background: Theme.warning.transparentize(92%);
             height: strip.preferred-height;
             strip := VerticalLayout {
-                padding: 10px;
-                padding-left: 12px;
-                spacing: 6px;
+                padding: Space.sm;
+                padding-left: Space.md;
+                spacing: Space.sm;
                 HorizontalLayout {
-                    spacing: 8px;
+                    spacing: Space.sm;
                     Text {
                         text: SongsData.health-summary;
                         color: Theme.warning;
-                        font-size: 13px;
+                        font-size: Type.body;
                         font-weight: 500;
                     }
                     Rectangle { horizontal-stretch: 1; }
                     LinkText {
                         text: SongsData.health-open ? "Hide" : "Show";
                         tint: Theme.muted;
-                        font-size: 12px;
+                        font-size: Type.meta;
                         clicked => { SongsData.health-open = !SongsData.health-open; }
                     }
                 }
                 if SongsData.health-open: VerticalLayout {
-                    spacing: 6px;
+                    spacing: Space.sm;
                     for h[i] in SongsData.health: HorizontalLayout {
-                        spacing: 10px;
+                        spacing: Space.sm;
                         VerticalLayout {
                             horizontal-stretch: 1;
                             alignment: center;
                             Text {
                                 text: h.text;
                                 color: Theme.text;
-                                font-size: 13px;
+                                font-size: Type.body;
                                 wrap: word-wrap;
                             }
                             if h.why != "": Text {
                                 text: h.why;
                                 color: Theme.muted;
-                                font-size: 12px;
+                                font-size: Type.meta;
                                 wrap: word-wrap;
                             }
                         }
@@ -322,7 +322,7 @@ component SongPanel inherits Rectangle {
         if SongsData.song.notes != "": Text {
             text: SongsData.song.notes;
             color: Theme.muted;
-            font-size: 13px;
+            font-size: Type.body;
             wrap: word-wrap;
             max-height: 60px;
             overflow: elide;
@@ -336,18 +336,18 @@ component SongPanel inherits Rectangle {
             vertical-stretch: 1;
             // Overview: the counts, each opening its tab, then the song's runs.
             if SongsData.tab == 0: VerticalLayout {
-                padding: 16px;
-                spacing: 10px;
+                padding: Space.lg;
+                spacing: Space.sm;
                 alignment: start;
                 HorizontalLayout {
-                    spacing: 6px;
+                    spacing: Space.sm;
                     alignment: start;
                     for c[i] in SongsData.counts: HorizontalLayout {
-                        spacing: 6px;
+                        spacing: Space.sm;
                         if i > 0: Text {
                             text: "·";
                             color: Theme.faint;
-                            font-size: 13px;
+                            font-size: Type.body;
                         }
                         LinkText {
                             text: c.text;
@@ -363,7 +363,7 @@ component SongPanel inherits Rectangle {
                 if SongsData.detail-message != "": Text {
                     text: SongsData.detail-message;
                     color: Theme.muted;
-                    font-size: 12px;
+                    font-size: Type.meta;
                     wrap: word-wrap;
                 }
                 if SongsData.runs.length > 1: Caps {
@@ -372,36 +372,36 @@ component SongPanel inherits Rectangle {
                 for run in SongsData.runs.length > 1 ? SongsData.runs : []: Text {
                     text: run;
                     color: Theme.text;
-                    font-size: 13px;
+                    font-size: Type.body;
                 }
                 for w in SongsData.warnings: Text {
                     text: w;
                     color: Theme.warning;
-                    font-size: 12px;
+                    font-size: Type.meta;
                     wrap: word-wrap;
                 }
             }
             if SongsData.tab == 1: VerticalLayout {
-                padding: 12px;
-                spacing: 6px;
+                padding: Space.md;
+                spacing: Space.sm;
                 Caps { text: SongsData.saves-heading; }
                 ListView {
                     for line in SongsData.saves: Rectangle {
                         height: line.run != "" ? 40px : 30px;
                         if line.run != "": HorizontalLayout {
-                            padding-top: 12px;
-                            spacing: 10px;
+                            padding-top: Space.md;
+                            spacing: Space.sm;
                             Text {
                                 text: line.run;
                                 color: Theme.text;
-                                font-size: 13px;
+                                font-size: Type.body;
                                 font-weight: 600;
                                 vertical-alignment: center;
                             }
                             Text {
                                 text: line.details;
                                 color: Theme.muted;
-                                font-size: 12px;
+                                font-size: Type.meta;
                                 vertical-alignment: center;
                                 overflow: elide;
                             }
@@ -410,21 +410,21 @@ component SongPanel inherits Rectangle {
                         if line.run == "": ListLine {
                           double-clicked => { SongsData.open-save(line.path); }
                           HorizontalLayout {
-                            padding-left: 8px;
-                            spacing: 12px;
+                            padding-left: Space.sm;
+                            spacing: Space.md;
                             Text {
                                 text: line.date;
                                 width: 96px;
                                 color: Theme.muted;
                                 font-family: Theme.number-font;
-                                font-size: 12px;
+                                font-size: Type.meta;
                                 vertical-alignment: center;
                             }
                             Text {
                                 text: line.name;
                                 color: line.newest ? Theme.text : Theme.muted;
                                 font-weight: line.newest ? 600 : 400;
-                                font-size: 13px;
+                                font-size: Type.body;
                                 vertical-alignment: center;
                                 overflow: elide;
                                 horizontal-stretch: 1;
@@ -432,7 +432,7 @@ component SongPanel inherits Rectangle {
                             if line.missing: Text {
                                 text: "File moved";
                                 color: Theme.missing;
-                                font-size: 12px;
+                                font-size: Type.meta;
                                 vertical-alignment: center;
                             }
                           }
@@ -441,102 +441,102 @@ component SongPanel inherits Rectangle {
                 }
             }
             if SongsData.tab == 2: VerticalLayout {
-                padding: 12px;
-                spacing: 6px;
+                padding: Space.md;
+                spacing: Space.sm;
                 Caps { text: SongsData.detail-message != "" ? SongsData.detail-message : SongsData.plugins-heading; }
                 ListView {
                     for p in SongsData.plugins: HorizontalLayout {
-                        height: 44px;
-                        padding-left: 8px;
-                        padding-right: 8px;
-                        spacing: 12px;
+                        height: 48px;
+                        padding-left: Space.sm;
+                        padding-right: Space.sm;
+                        spacing: Space.md;
                         VerticalLayout {
                             alignment: center;
-                            spacing: 2px;
+                            spacing: Space.xs;
                             horizontal-stretch: 1;
                             Text {
                                 text: p.name;
                                 color: Theme.text;
-                                font-size: 13px;
+                                font-size: Type.body;
                                 overflow: elide;
                             }
                             Text {
                                 text: p.about;
                                 color: Theme.muted;
-                                font-size: 12px;
+                                font-size: Type.meta;
                                 overflow: elide;
                             }
                         }
                         if !p.installed: Text {
                             text: "Not installed";
                             color: Theme.missing;
-                            font-size: 12px;
+                            font-size: Type.meta;
                             vertical-alignment: center;
                         }
                     }
                 }
             }
             if SongsData.tab == 3: VerticalLayout {
-                padding: 12px;
-                spacing: 6px;
+                padding: Space.md;
+                spacing: Space.sm;
                 Caps { text: SongsData.detail-message != "" ? SongsData.detail-message : SongsData.samples-heading; }
                 ListView {
                     for sm in SongsData.samples: HorizontalLayout {
-                        height: 44px;
-                        padding-left: 8px;
-                        padding-right: 8px;
-                        spacing: 12px;
+                        height: 48px;
+                        padding-left: Space.sm;
+                        padding-right: Space.sm;
+                        spacing: Space.md;
                         VerticalLayout {
                             alignment: center;
-                            spacing: 2px;
+                            spacing: Space.xs;
                             horizontal-stretch: 1;
                             Text {
                                 text: sm.name;
                                 color: Theme.text;
-                                font-size: 13px;
+                                font-size: Type.body;
                                 overflow: elide;
                             }
                             Text {
                                 text: sm.folder;
                                 color: Theme.muted;
-                                font-size: 12px;
+                                font-size: Type.meta;
                                 overflow: elide;
                             }
                         }
                         if sm.missing || sm.unplayed: Text {
                             text: sm.missing ? "Can't be found" : "Loaded, never played";
                             color: sm.missing ? Theme.missing : Theme.faint;
-                            font-size: 12px;
+                            font-size: Type.meta;
                             vertical-alignment: center;
                         }
                     }
                 }
             }
             if SongsData.tab == 4: VerticalLayout {
-                padding: 16px;
-                spacing: 8px;
+                padding: Space.lg;
+                spacing: Space.sm;
                 alignment: start;
                 if SongsData.detail-message != "": Caps { text: SongsData.detail-message; }
                 if SongsData.tracks != "": Caps { text: "TRACKS"; }
                 if SongsData.tracks != "": Text {
                     text: SongsData.tracks;
                     color: Theme.text;
-                    font-size: 13px;
+                    font-size: Type.body;
                     wrap: word-wrap;
                 }
                 if SongsData.details.length > 0: Caps { text: "FROM THE FILE"; }
                 for d in SongsData.details: HorizontalLayout {
-                    spacing: 12px;
+                    spacing: Space.md;
                     Text {
                         text: d.name;
                         width: 160px;
                         color: Theme.muted;
-                        font-size: 13px;
+                        font-size: Type.body;
                     }
                     Text {
                         text: d.value;
                         color: Theme.text;
-                        font-size: 13px;
+                        font-size: Type.body;
                         wrap: word-wrap;
                         horizontal-stretch: 1;
                     }
@@ -550,15 +550,15 @@ export component SongsPage inherits Rectangle {
     forward-focus: search-box;
 
     VerticalLayout {
-        padding: 28px;
-        padding-bottom: 16px;
-        spacing: 12px;
+        padding: Space.xl;
+        padding-bottom: Space.lg;
+        spacing: Space.md;
         HorizontalLayout {
-            spacing: 14px;
+            spacing: Space.md;
             vertical-stretch: 0;
             Text {
                 text: "Songs";
-                font-size: 24px;
+                font-size: Type.page-title;
                 font-weight: 600;
                 color: Theme.text;
                 vertical-alignment: center;
@@ -566,7 +566,7 @@ export component SongsPage inherits Rectangle {
             Text {
                 text: SongsData.count;
                 color: Theme.muted;
-                font-size: 13px;
+                font-size: Type.body;
                 vertical-alignment: center;
                 horizontal-stretch: 1;
             }
@@ -590,7 +590,7 @@ export component SongsPage inherits Rectangle {
             }
         }
         HorizontalLayout {
-            spacing: 8px;
+            spacing: Space.sm;
             alignment: start;
             vertical-stretch: 0;
             MenuChip {
@@ -646,7 +646,7 @@ export component SongsPage inherits Rectangle {
                 if SongsData.message != "": Text {
                     text: SongsData.message;
                     color: Theme.muted;
-                    font-size: 14px;
+                    font-size: Type.body;
                     horizontal-alignment: center;
                     vertical-alignment: center;
                     wrap: word-wrap;
@@ -666,13 +666,13 @@ export component SongsPage inherits Rectangle {
                         for line in SongsData.lines: Rectangle {
                             height: line.heading != "" ? SongsData.heading-height : SongsData.song-height;
                             if line.heading != "": Caps {
-                                x: 16px;
-                                y: parent.height - self.height - 6px;
+                                x: Space.lg;
+                                y: parent.height - self.height - Space.sm;
                                 text: line.heading;
                             }
                             if line.heading == "": ListLine {
-                                x: 4px;
-                                width: parent.width - 8px;
+                                x: Space.xs;
+                                width: parent.width - 2 * Space.xs;
                                 selected: line.row == SongsData.selected;
                                 clicked => { SongsData.select(line.row); }
                             double-clicked => {
@@ -680,20 +680,20 @@ export component SongsPage inherits Rectangle {
                                 SongsData.open();
                             }
                                 HorizontalLayout {
-                                    padding-left: 14px;
-                                    padding-right: 14px;
-                                    spacing: 12px;
+                                    padding-left: Space.md;
+                                    padding-right: Space.md;
+                                    spacing: Space.md;
                                     VerticalLayout {
                                         alignment: center;
-                                        spacing: 3px;
+                                        spacing: Space.xs;
                                         horizontal-stretch: 1;
                                         HorizontalLayout {
-                                            spacing: 8px;
+                                            spacing: Space.sm;
                                             alignment: start;
                                             Text {
                                                 text: line.name;
                                                 color: Theme.text;
-                                                font-size: 14px;
+                                                font-size: Type.row-title;
                                                 font-weight: 500;
                                                 overflow: elide;
                                             }
@@ -702,37 +702,37 @@ export component SongsPage inherits Rectangle {
                                         Text {
                                             text: line.details;
                                             color: Theme.muted;
-                                            font-size: 12px;
+                                            font-size: Type.meta;
                                             overflow: elide;
                                         }
                                     }
                                     if list-well.wide: VerticalLayout {
                                         alignment: center;
-                                        spacing: 4px;
+                                        spacing: Space.xs;
                                         width: 150px;
                                         Text {
                                             text: line.missing;
                                             color: Theme.missing;
-                                            font-size: 12px;
+                                            font-size: Type.meta;
                                             horizontal-alignment: right;
                                             overflow: elide;
                                         }
                                         if line.status != "": Text {
                                             text: line.status;
                                             color: Theme.muted;
-                                            font-size: 12px;
+                                            font-size: Type.meta;
                                             horizontal-alignment: right;
                                         }
                                     }
                                     VerticalLayout {
                                         alignment: center;
-                                        spacing: 4px;
+                                        spacing: Space.xs;
                                         width: 90px;
                                         Text {
                                             text: line.date;
                                             color: Theme.muted;
                                             font-family: Theme.number-font;
-                                            font-size: 12px;
+                                            font-size: Type.meta;
                                             horizontal-alignment: right;
                                         }
                                         if line.rating > 0: HorizontalLayout {
@@ -747,8 +747,8 @@ export component SongsPage inherits Rectangle {
                     // The year scrubber: jump to the first song of a year.
                     if SongsData.years.length > 1: VerticalLayout {
                         width: 52px;
-                        padding: 6px;
-                        spacing: 2px;
+                        // No gap between the marks, so as many years fit as before the bigger text.
+                        padding: Space.xs;
                         alignment: start;
                         for y in SongsData.years: YearMark {
                             text: y.year;

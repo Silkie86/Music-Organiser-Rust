@@ -596,7 +596,7 @@ How the hard parts work in Slint:
 - **Your style, one shared styles file**: shaded top-lit buttons, joined button groups, pressed-in fields, small
   corners, two-tone grooved separators, flat shaded clips, little text with tooltips. Bitwig is an example, never a
   copy. In Slint this becomes one `studio.slint` library of components (Group, Panel, Lcd, Groove, Caps, PlayIcon…)
-  that every page uses, plus a test that fails if a page sets a raw colour or its own button look.
+  that every page uses, plus a test that fails if a page sets a raw colour, size or gap, or its own button look.
 - DAW colours: FL #5EA8FF, Bitwig #F2994A, Studio One #4ACB8B. Sound tiles coloured by type.
 - Lots of feedback: hover and press transitions, spinners, cards sliding in, page cross-fades.
 - One `PlayIcon` for every play/stop button (never typed ▶ or ■).
@@ -641,7 +641,8 @@ files, plus native tests and the stand-in DAWs.
 - **Stand-in DAWs**: `fake-bitwig.js`, `serve.js`, `fake_fl.py`, `serve.py` keep working against the Rust link code.
   **Rule:** tests never touch a real DAW, its folders or a real MIDI port.
 - **Responsiveness tests**: the UI thread is never blocked by a job (port ResponsivenessTests).
-- **Style check**: no raw colours or own button looks on a page; no typed ▶ or ■.
+- **Style check**: no raw colours, text sizes, gaps or padding (they come from `Theme`, `Type` and `Space` in
+  `studio.slint`) or own button looks on a page; no typed ▶ or ■.
 - **Test data rules**: tests that scan sounds use the fixtures folder, never a random temp name (it can spell
   "snare"). Never commit your project files, samples, MIDI packs, Bitwig template or Bitwig binaries.
 

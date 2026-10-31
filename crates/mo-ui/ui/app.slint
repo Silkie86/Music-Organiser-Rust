@@ -1,6 +1,6 @@
 // The window shell: the rail on the left and the page on show. Agreed map (2026-10-29): Songs, Sounds, Presets, MIDI,
 // Plugins and Space, with Settings at the bottom.
-import { Theme, RailItem, Groove, Caps } from "studio.slint";
+import { Theme, Type, Space, RailItem, Groove, Caps } from "studio.slint";
 import { ComingPage } from "pages/coming.slint";
 import { SongsPage, SongsData, SongLine, YearStart, PanelSong, CountLine, PluginLine, SampleLine, SaveLine, DetailPair, HealthLine } from "pages/songs.slint";
 import { ActivityCards, CardInfo, KeySheet, KeyRow, NoteDialog } from "shell.slint";
@@ -100,15 +100,15 @@ export component AppWindow inherits Window {
                 width: 208px;
                 background: Theme.sidebar;
                 VerticalLayout {
-                    padding: 10px;
-                    padding-top: 16px;
-                    spacing: 4px;
+                    padding: Space.sm;
+                    padding-top: Space.lg;
+                    spacing: Space.xs;
                     Text {
                         text: "Music Organiser";
-                        font-size: 15px;
+                        font-size: Type.row-title;
                         font-weight: 600;
                         color: Theme.text;
-                        height: 36px;
+                        height: 40px;
                         x: 10px;
                     }
                     // The rail's places are the first ones in `places`; Settings sits apart at the bottom.
@@ -125,7 +125,7 @@ export component AppWindow inherits Window {
                         x: 10px;
                         text: "Nothing open";
                         color: Theme.faint;
-                        font-size: 12px;
+                        font-size: Type.meta;
                     }
                     Rectangle { }
                     RailItem {

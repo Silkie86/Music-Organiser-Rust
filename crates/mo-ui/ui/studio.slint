@@ -40,6 +40,38 @@ export global Theme {
     out property <color> studio-one: #4ACB8B;
 }
 
+// Text sizes (the agreed scale, nearer the C# app at 125%). Pages use these, never a size of their own.
+export global Type {
+    // A page's name, top left.
+    out property <length> page-title: 28px;
+    // The song's name in the song panel.
+    out property <length> panel-title: 26px;
+    // A dialog's or a card's title.
+    out property <length> heading: 20px;
+    // A name in a list, rail lines.
+    out property <length> row-title: 16px;
+    // Buttons, tabs, Health lines, panel text.
+    out property <length> body: 15px;
+    // Second lines under a name, chips, counts, dates.
+    out property <length> meta: 13px;
+    // Group headings in capitals.
+    out property <length> caps: 12px;
+}
+
+// Gaps and padding, on a 4px grid. Pages use these, never a gap of their own.
+export global Space {
+    // Between a name and its second line; inside small chips.
+    out property <length> xs: 4px;
+    // Between chips, buttons and tabs in a row.
+    out property <length> sm: 8px;
+    // Inside rows and buttons; between rows of controls.
+    out property <length> md: 12px;
+    // Inside panels and the Health strip.
+    out property <length> lg: 16px;
+    // Between the big parts of a page; the page's own margin.
+    out property <length> xl: 24px;
+}
+
 // A two-tone grooved line: a dark line with a faint light one under it, like a panel seam.
 export component Groove inherits VerticalLayout {
     Rectangle {
@@ -54,7 +86,7 @@ export component Groove inherits VerticalLayout {
 
 // A small heading in capitals, for groups like "In your DAWs".
 export component Caps inherits Text {
-    font-size: 11px;
+    font-size: Type.caps;
     font-weight: 500;
     color: Theme.muted;
     letter-spacing: 0.8px;
@@ -67,7 +99,7 @@ export component StudioButton inherits Rectangle {
     in property <bool> enabled: true;
     callback clicked;
     min-width: label.preferred-width + 24px;
-    height: 30px;
+    height: 32px;
     border-radius: Theme.radius;
     border-width: 1px;
     border-color: Theme.edge;
@@ -86,7 +118,7 @@ export component StudioButton inherits Rectangle {
     label := Text {
         text: root.text;
         color: !root.enabled ? Theme.faint : root.main ? Theme.accent-text : Theme.text;
-        font-size: 13px;
+        font-size: Type.body;
         font-weight: 500;
         vertical-alignment: center;
         horizontal-alignment: center;
@@ -102,7 +134,7 @@ export component RailItem inherits Rectangle {
     in property <string> text;
     in property <bool> selected;
     callback clicked;
-    height: 36px;
+    height: 40px;
     border-radius: Theme.radius;
     background: selected ? Theme.surface-raised : touch.has-hover ? Theme.hover : transparent;
     animate background { duration: 120ms; }
@@ -117,7 +149,7 @@ export component RailItem inherits Rectangle {
         x: 12px;
         text: root.text;
         color: root.selected ? Theme.text : Theme.muted;
-        font-size: 14px;
+        font-size: Type.row-title;
         font-weight: 500;
         vertical-alignment: center;
         height: parent.height;
@@ -145,7 +177,7 @@ export component CloseButton inherits Rectangle {
     Text {
         text: "×";
         color: Theme.muted;
-        font-size: 15px;
+        font-size: Type.body;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
@@ -159,15 +191,15 @@ export component Chip inherits Rectangle {
     in property <string> text;
     callback clicked;
     width: label.preferred-width + 24px;
-    height: 26px;
-    border-radius: 13px;
+    height: 28px;
+    border-radius: 14px;
     background: touch.has-hover ? Theme.hover : Theme.surface-raised;
     border-width: 1px;
     border-color: Theme.edge;
     label := Text {
         text: root.text;
         color: Theme.text;
-        font-size: 12px;
+        font-size: Type.meta;
         font-weight: 500;
     }
     touch := TouchArea {
@@ -203,7 +235,7 @@ export component TickBox inherits Rectangle {
         x: 24px;
         text: root.text;
         color: Theme.text;
-        font-size: 13px;
+        font-size: Type.body;
         vertical-alignment: center;
     }
     TouchArea {
@@ -219,7 +251,7 @@ export component SearchBox inherits Rectangle {
     // Down, Enter and Esc go to the page first; it returns true when it used the key.
     callback key(string) -> bool;
     forward-focus: input;
-    height: 32px;
+    height: 36px;
     border-radius: Theme.radius;
     border-width: 1px;
     border-color: input.has-focus ? Theme.accent : Theme.edge;
@@ -229,7 +261,7 @@ export component SearchBox inherits Rectangle {
         text: root.hint;
         visible: input.text == "";
         color: Theme.faint;
-        font-size: 13px;
+        font-size: Type.body;
         vertical-alignment: center;
         height: parent.height;
     }
@@ -238,7 +270,7 @@ export component SearchBox inherits Rectangle {
         width: parent.width - 20px;
         height: parent.height;
         color: Theme.text;
-        font-size: 13px;
+        font-size: Type.body;
         vertical-alignment: center;
         single-line: true;
         selection-background-color: Theme.accent.transparentize(60%);
@@ -260,15 +292,15 @@ export component ToggleChip inherits Rectangle {
     in property <bool> on;
     callback clicked;
     width: label.preferred-width + 24px;
-    height: 26px;
-    border-radius: 13px;
+    height: 28px;
+    border-radius: 14px;
     border-width: 1px;
     border-color: on ? Theme.accent : Theme.edge;
     background: on ? Theme.accent.transparentize(80%) : touch.has-hover ? Theme.hover : Theme.surface-raised;
     label := Text {
         text: root.text;
         color: root.on ? Theme.text : Theme.muted;
-        font-size: 12px;
+        font-size: Type.meta;
         font-weight: 500;
     }
     touch := TouchArea {
@@ -281,14 +313,14 @@ export component MenuLine inherits Rectangle {
     in property <string> text;
     in property <bool> on;
     callback clicked;
-    height: 28px;
+    height: 32px;
     border-radius: Theme.radius;
     background: touch.has-hover ? Theme.hover : transparent;
     Text {
         x: 10px;
         text: root.text;
         color: root.on ? Theme.accent : Theme.text;
-        font-size: 13px;
+        font-size: Type.body;
         vertical-alignment: center;
         height: parent.height;
     }
@@ -304,8 +336,8 @@ export component MenuChip inherits Rectangle {
     in property <[string]> choices;
     callback picked(string);
     width: label.preferred-width + 34px;
-    height: 26px;
-    border-radius: 13px;
+    height: 28px;
+    border-radius: 14px;
     border-width: 1px;
     border-color: value != "" ? Theme.accent : Theme.edge;
     background: value != "" ? Theme.accent.transparentize(80%) : touch.has-hover ? Theme.hover : Theme.surface-raised;
@@ -313,7 +345,7 @@ export component MenuChip inherits Rectangle {
         x: 12px;
         text: root.value == "" ? root.name : root.name + ": " + root.value;
         color: root.value != "" ? Theme.text : Theme.muted;
-        font-size: 12px;
+        font-size: Type.meta;
         font-weight: 500;
         vertical-alignment: center;
         height: parent.height;
@@ -344,7 +376,7 @@ export component MenuChip inherits Rectangle {
             drop-shadow-color: Theme.shadow;
             drop-shadow-blur: 12px;
             VerticalLayout {
-                padding: 4px;
+                padding: Space.xs;
                 MenuLine {
                     text: "Any";
                     on: root.value == "";
@@ -407,7 +439,7 @@ export component YearMark inherits Rectangle {
         text: root.text;
         color: touch.has-hover ? Theme.text : Theme.faint;
         font-family: Theme.number-font;
-        font-size: 11px;
+        font-size: Type.caps;
         horizontal-alignment: center;
         vertical-alignment: center;
         width: parent.width;
@@ -435,17 +467,17 @@ export component Heart inherits Path {
 export component TabBar inherits HorizontalLayout {
     in property <[string]> tabs;
     in-out property <int> current;
-    spacing: 4px;
+    spacing: Space.xs;
     alignment: start;
     for name[i] in root.tabs: Rectangle {
         width: label.preferred-width + 20px;
-        height: 32px;
+        height: 36px;
         border-radius: Theme.radius;
         background: touch.has-hover && i != root.current ? Theme.hover : transparent;
         label := Text {
             text: name;
             color: i == root.current ? Theme.text : Theme.muted;
-            font-size: 13px;
+            font-size: Type.body;
             font-weight: 500;
         }
         Rectangle {
@@ -465,7 +497,7 @@ export component TabBar inherits HorizontalLayout {
 export component LinkText inherits Rectangle {
     in property <string> text;
     in property <color> tint: Theme.text;
-    in property <length> font-size: 13px;
+    in property <length> font-size: Type.body;
     callback clicked;
     width: label.preferred-width;
     height: label.preferred-height;
