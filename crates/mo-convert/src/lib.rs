@@ -12,6 +12,8 @@ pub mod bitwig;
 pub mod clips;
 pub mod notes;
 pub mod plan;
+pub mod sample;
+pub mod save;
 
 pub use plan::{
     AudioClip, Device, Lane, LanePoint, Options, Plan, Role, SampleFile, Target, Track, TrackKind, TrackRef, from_fl,

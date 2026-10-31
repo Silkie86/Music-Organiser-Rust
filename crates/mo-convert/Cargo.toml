@@ -12,6 +12,8 @@ workspace = true
 mo-formats = { path = "../mo-formats" }
 # Bitwig keeps plugin settings in a zip at the end of its projects (as mo-formats reads them).
 zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
+# Bitwig recognises a sample file by its MD5.
+md-5 = "0.10"
 
 [dev-dependencies]
 # The made-up Bitwig files shared from mo-formats' tests use it.
