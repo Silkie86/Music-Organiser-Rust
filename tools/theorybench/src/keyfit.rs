@@ -18,7 +18,6 @@
 //! - **Calibration.** How sure a reading may be is fitted on scores of songs held out of the fit: a curve over how many
 //!   bars differ, offsets for the kind of input, a curve a loop adds and an offset for a song (`Calibration` in the
 //!   crate).
-//!
 //! - **Answers.** Each reading is also graded as the app shows it (one key, a key or its relative, a home note, no
 //!   clear key: `keyfind::grade`), and the report says how often each kind is given and how often it's right. The
 //!   chance each kind needs at each length, and the share of notes in one scale a key needs, are fitted on the
@@ -719,8 +718,9 @@ fn fit_answers(cases: &[Case], chances: &[Option<[f64; 24]>], keep: impl Fn(&Cas
 
 fn print_answers(title: &str, fitted: &Fitted) {
     println!("{title}:");
-    for line in &fitted.lines {
-        println!("  {line}");
+    println!("  {}", fitted.scale_line);
+    for line in &fitted.knot_lines {
+        println!("    {line}");
     }
 }
 
@@ -738,11 +738,18 @@ fn answers_of<'a>(
     cases
         .par_iter()
         .zip(chances)
-        .map(|(c, chances)| {
-            let fitted = answers_of(c)?;
-            Some(graded_answer(c, chances.as_ref()?, &fitted.thresholds, fitted.not_tonal_below))
-        })
+        .map(|(c, chances)| Some(graded_answer(c, chances.as_ref()?, answers_of(c)?)))
         .collect()
+}
+
+/// For each fold, the thresholds fitted on the other folds' chances (of those `folds` lists), to grade it with.
+fn fitted_per_fold(
+    cases: &[Case],
+    chances: &[Option<[f64; 24]>],
+    folds: &[usize],
+    fold: &(dyn Fn(&Case) -> usize + Sync),
+) -> HashMap<usize, Fitted> {
+    folds.iter().map(|&f| (f, fit_answers(cases, chances, |c| fold(c) != f && folds.contains(&fold(c))))).collect()
 }
 
 pub fn run(args: &[String]) -> Result<(), String> {
@@ -851,8 +858,12 @@ pub fn run(args: &[String]) -> Result<(), String> {
         let chances: Held =
             cases.par_iter().zip(&held).map(|(c, h)| h.as_ref().map(|s| chances_of(c, s, &calibration))).collect();
         let fitted_answers = fit_answers(&cases, &chances, |_| true);
-        print_answers("Answers", &fitted_answers);
-        let answers = answers_of(&cases, &chances, |_| Some(&fitted_answers));
+        print_answers(
+            "Answers (the ones written; each fold below is graded with those fitted on the others)",
+            &fitted_answers,
+        );
+        let per_fold = fitted_per_fold(&cases, &chances, &every, &fold);
+        let answers = answers_of(&cases, &chances, |c| per_fold.get(&fold(c)));
         let summary = report(&cases, &chances, &answers, &songs, |_| true, &inputs);
         log_run("--write", &summary, &opts)?;
         let (model, fitted, n) = fit_model(&cases, &songs, &|_| true, &opts)?;
@@ -885,14 +896,17 @@ pub fn run(args: &[String]) -> Result<(), String> {
             .zip(&held)
             .map(|(c, h)| Some(chances_of(c, h.as_ref()?, calibrations.get(&fold(c))?)))
             .collect();
-        // Each fold is graded with the thresholds fitted on the other folds' chances.
-        let mut fitted_answers = HashMap::new();
-        for &f in &design {
-            fitted_answers.insert(f, fit_answers(&cases, &chances, |c| fold(c) != f && design.contains(&fold(c))));
-        }
+        // Each fold is graded with the thresholds fitted on the other folds' chances. Those printed are fitted on
+        // all four folds' chances from the calibration printed above, as `--write` fits them.
+        let fitted_answers = fitted_per_fold(&cases, &chances, &design, &fold);
+        let chances_all: Held = cases
+            .par_iter()
+            .zip(&held)
+            .map(|(c, h)| design.contains(&fold(c)).then(|| Some(chances_of(c, h.as_ref()?, &all))).flatten())
+            .collect();
         print_answers(
             "Answers (fitted on all four folds; each fold is graded with those fitted on the other three)",
-            &fit_answers(&cases, &chances, |c| design.contains(&fold(c))),
+            &fit_answers(&cases, &chances_all, |c| design.contains(&fold(c))),
         );
         let answers = answers_of(&cases, &chances, |c| fitted_answers.get(&fold(c)));
         report(&cases, &chances, &answers, &songs, |c| design.contains(&fold(c)), &inputs);
@@ -1040,21 +1054,16 @@ fn report(
     summary
 }
 
-/// A case's answer as the app would show it, graded with these thresholds and share of notes in one scale, and the
-/// chance shown with it.
-fn graded_answer(
-    case: &Case,
-    chances: &[f64; 24],
-    thresholds: &keyfind::Thresholds,
-    not_tonal_below: f64,
-) -> (KeyAnswer, f64) {
+/// A case's answer as the app would show it, graded with these fitted thresholds, and the chance shown with it.
+fn graded_answer(case: &Case, chances: &[f64; 24], answers: &Fitted) -> (KeyAnswer, f64) {
     let grading = keyfind::Grading {
         bars_heard: case.ev.bars,
         notes: case.ev.notes,
         diatonic_fit: case.ev.diatonic_fit,
         span: case.cut.span(),
     };
-    keyfind::grade(chances, grading, &keyfind::Model { thresholds, not_tonal_below, ..keyfind::SHIPPED })
+    // Only the thresholds and the share of notes in one scale grade; the weights are the ones built in.
+    keyfind::grade(chances, grading, &finder(keyfind::SHIPPED.weights, keyfind::SHIPPED.calibration, answers))
 }
 
 /// How the answers would be shown (one key, a key or its relative, a home note, no clear key), how often each kind is
@@ -1264,8 +1273,8 @@ fn weights_file(
         "/// How likely each kind of answer must be (see `Thresholds`) at 1, 2, 4, 8, 16 and 32 bars, fitted on the chances\n",
     );
     out.push_str("/// of songs held out (`theorybench` `answerfit`):\n");
-    for line in &answers.lines {
-        let _ = writeln!(out, "/// {}", line.trim_start());
+    for line in &answers.knot_lines {
+        let _ = writeln!(out, "/// - {line}");
     }
     let t = &answers.thresholds;
     let _ = writeln!(
@@ -1279,6 +1288,7 @@ fn weights_file(
     out.push_str(
         "/// Notes with less than this share of their time inside one scale have no key (see `Why::NotTonal`).\n",
     );
+    let _ = writeln!(out, "/// {}", answers.scale_line);
     let _ = writeln!(out, "pub(super) const NOT_TONAL_BELOW: f64 = {:?};", answers.not_tonal_below);
     // The hash of every number, and the version they were first given with: the next one when any number changed.
     let hash = keyfind::numbers_hash(&finder(&model.weights, calibration, answers));
@@ -1380,14 +1390,16 @@ mod tests {
         let answers = Fitted {
             thresholds: *keyfind::SHIPPED.thresholds,
             not_tonal_below: keyfind::SHIPPED.not_tonal_below,
-            lines: vec!["  1 bar (10 cases): one key from 0.85.".into()],
+            scale_line: "Notes in one scale a key needs: 0.750.".into(),
+            knot_lines: vec!["1 bar (10 cases): one key from 0.85.".into()],
         };
         let file = |weights: [f64; FEATURES]| {
             weights_file(&Model { weights }, &calibration, &answers, &opts, &["x"], &summary)
         };
         // The numbers built in: the hash and version built in.
         let same = file(*keyfind::SHIPPED.weights);
-        assert!(same.contains("/// 1 bar (10 cases): one key from 0.85.\n"), "{same}");
+        assert!(same.contains("/// - 1 bar (10 cases): one key from 0.85.\n"), "{same}");
+        assert!(same.contains("/// Notes in one scale a key needs: 0.750.\npub(super) const NOT_TONAL_BELOW"));
         let (hash, version) = keyfind::SHIPPED_HASH;
         assert!(same.contains(&format!("SHIPPED_HASH: u64 = {hash:#018x};")), "{same}");
         assert!(same.contains(&format!("HASH_VERSION: u32 = {version};")));
