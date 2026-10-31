@@ -205,4 +205,19 @@ fn a_library_missing_later_tables_reads_them_as_empty() {
     assert!(lib.pending_fixes().unwrap().is_empty() && lib.setting("x").unwrap().is_none());
     let d = lib.detail(1).unwrap().unwrap();
     assert!(d.plugins.is_empty() && d.samples.is_empty());
+    let known = lib.known_files().unwrap();
+    assert_eq!((known[0].size, known[0].mtime, known[0].missing, known[0].reread), (0, 5, false, true));
+}
+
+#[test]
+fn knows_each_files_size_and_date_for_a_scan() {
+    let lib = Library::open_read_only(&make("known.db", true)).unwrap();
+    let mut known = lib.known_files().unwrap();
+    known.sort_by_key(|k| k.id);
+    assert_eq!((known[0].size, known[0].mtime, known[0].missing), (1000, 1_500_000_000, false));
+    // No key worked out yet: read again whatever its date.
+    assert!(known[0].reread && known[1].reread);
+    // A library made before the key and note columns reads everything again.
+    let older = Library::open_read_only(&make("known-older.db", false)).unwrap();
+    assert!(older.known_files().unwrap().iter().all(|k| k.reread));
 }

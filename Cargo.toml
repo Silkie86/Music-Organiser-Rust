@@ -17,6 +17,7 @@ slint-build = "1.18"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 thread-priority = "3.1"
+rayon = "1.11"
 
 [workspace.lints.rust]
 # Deny, not forbid: the code Slint generates allows it locally.

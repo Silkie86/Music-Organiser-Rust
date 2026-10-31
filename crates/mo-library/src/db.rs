@@ -11,6 +11,7 @@ use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, Statement};
 use serde::de::{Deserializer, MapAccess, Visitor};
 
+use crate::scan::KnownFile;
 use crate::songs::SongChoices;
 use crate::{Confidence, PluginKind, STATUSES, Save};
 
@@ -109,6 +110,8 @@ pub struct Library {
     tables: HashSet<String>,
     /// The list query, naming the columns this library has (all but the big `info`, which only the detail needs).
     summaries: String,
+    /// The columns `projects` has: an older C# app's lacks some.
+    columns: HashSet<String>,
 }
 
 impl Library {
@@ -133,7 +136,8 @@ impl Library {
         }
         let columns = names("SELECT name FROM pragma_table_info('projects')").map_err(|e| open_error(e.to_string()))?;
         let summaries = summaries_query(&columns, &tables);
-        Ok(Library { conn, path: path.to_owned(), tables, summaries })
+        let columns = columns.into_iter().collect();
+        Ok(Library { conn, path: path.to_owned(), tables, summaries, columns })
     }
 
     pub fn path(&self) -> &Path {
@@ -142,6 +146,37 @@ impl Library {
 
     fn has(&self, table: &str) -> bool {
         self.tables.contains(table)
+    }
+
+    /// Every save's file as the library last read it, for a scan to tell what's new or changed. As the C# app, a save
+    /// whose key or notes were never worked out, or whose file was missing, is read again whatever its date.
+    pub fn known_files(&self) -> Result<Vec<KnownFile>, LibraryError> {
+        let has = |c: &str| self.columns.contains(c);
+        // A column the library doesn't have reads as nothing, so its files are read again.
+        let or_zero = |c: &str| if has(c) { format!("COALESCE({c}, 0)") } else { "0".to_owned() };
+        let reread = if has("detected_key") && has("note_count") && has("file_missing") {
+            "(detected_key IS NULL OR note_count IS NULL OR file_missing = 1)"
+        } else {
+            "1"
+        };
+        let sql = format!(
+            "SELECT id, path, {}, {}, {}, {reread} FROM projects",
+            or_zero("size"),
+            or_zero("mtime"),
+            or_zero("file_missing")
+        );
+        let mut st = self.conn.prepare(&sql)?;
+        let rows = st.query_map([], |r| {
+            Ok(KnownFile {
+                id: r.get(0)?,
+                path: r.get(1)?,
+                size: r.get(2)?,
+                mtime: r.get(3)?,
+                missing: r.get::<_, i64>(4)? != 0,
+                reread: r.get::<_, i64>(5)? != 0,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     /// Every save, the most recently written first.
