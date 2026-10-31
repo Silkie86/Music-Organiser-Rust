@@ -20,6 +20,8 @@ mo-library = { path = "../mo-library" }
 slint.workspace = true
 image.workspace = true
 chrono.workspace = true
+# The clipboard, for Copy path. Slint already brings it in for its text boxes.
+arboard = { version = "3.7", default-features = false }
 
 [build-dependencies]
 slint-build.workspace = true

@@ -2781,6 +2781,7 @@ dependencies = [
 name = "mo-ui"
 version = "0.1.0"
 dependencies = [
+ "arboard",
  "chrono",
  "image",
  "mo-app",

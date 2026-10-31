@@ -7,6 +7,7 @@ pub mod log;
 pub mod note;
 pub mod paths;
 pub mod places;
+pub mod shell;
 pub mod shortcuts;
 pub mod song_panel;
 pub mod songs;

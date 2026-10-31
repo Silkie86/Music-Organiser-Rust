@@ -14,12 +14,13 @@ pub mod note;
 pub mod songs;
 pub mod watchdog;
 
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use mo_app::activity::Feed;
 use mo_app::log;
 use mo_app::places::Place;
-use mo_app::shortcuts::{APP_ACTIONS, Shortcuts, repeats};
+use mo_app::shortcuts::{APP_ACTIONS, Action, SONGS_ACTIONS, Shortcuts, repeats};
 use mo_app::themes::Look;
 use note::open_note;
 use slint::platform::Key;
@@ -27,6 +28,11 @@ use slint::{Color, ComponentHandle, ModelRc, VecModel, Weak};
 
 /// The place on show, kept where the freeze watchdog can read it without asking the window.
 static PAGE: AtomicUsize = AtomicUsize::new(0);
+
+thread_local! {
+    /// The keys in use, for the key sheet, which changes with the page.
+    static KEYS: RefCell<Option<Shortcuts>> = const { RefCell::new(None) };
+}
 
 /// The name of the place on show, safe to read from any thread.
 pub fn page_name() -> &'static str {
@@ -44,8 +50,8 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> R
     app.set_places(ModelRc::new(VecModel::from(places)));
     app.set_settings_place(settings as i32);
     app.set_songs_place(Place::Songs.index() as i32);
+    KEYS.with(|k| *k.borrow_mut() = Some(shortcuts.clone()));
     go_to(&app, start.index() as i32);
-    app.set_key_rows(ModelRc::new(VecModel::from(key_rows(&shortcuts))));
 
     let weak = app.as_weak();
     app.on_place_chosen(move |i| {
@@ -63,6 +69,14 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> R
                 }
                 true
             });
+        }
+        // A page's own key beats an app-wide one, when there's something for it to do; otherwise the key goes on.
+        if let Some(app) = weak.upgrade()
+            && app.get_place() == Place::Songs.index() as i32
+            && let Some(id) = shortcuts.page_action_for(&key, SONGS_ACTIONS)
+            && songs::has_pick()
+        {
+            return repeat || songs::run_action(&app, id);
         }
         let Some(id) = shortcuts.action_for(&key) else { return false };
         // A key held down did its job once (unless it's one that steps), and the page behind doesn't get it either.
@@ -84,18 +98,24 @@ fn go_to(app: &AppWindow, index: i32) {
         log::info("Page", place.name());
     }
     app.set_place(index);
+    KEYS.with(|k| {
+        if let Some(shortcuts) = k.borrow().as_ref() {
+            app.set_key_rows(ModelRc::new(VecModel::from(key_rows(shortcuts, place))));
+        }
+    });
 }
 
-/// The key sheet's lines: every app-wide action with the key it has now, and F12, which the app keeps for itself.
-fn key_rows(shortcuts: &Shortcuts) -> Vec<KeyRow> {
+/// The key sheet's lines: the page's own actions, then every app-wide action, with the key each has now, and F12,
+/// which the app keeps for itself.
+fn key_rows(shortcuts: &Shortcuts, place: Place) -> Vec<KeyRow> {
+    let page: &[Action] = if place == Place::Songs { SONGS_ACTIONS } else { &[] };
+    let mut rows: Vec<KeyRow> =
+        page.iter().map(|a| KeyRow { key: shortcuts.key_of(a.id).into(), what: a.what.into() }).collect();
     // Keys whose action isn't built yet say so, rather than looking broken.
-    let mut rows: Vec<KeyRow> = APP_ACTIONS
-        .iter()
-        .map(|a| {
-            let what = if handles(a.id) { a.what.to_owned() } else { format!("{} (coming)", a.what) };
-            KeyRow { key: shortcuts.key_of(a.id).into(), what: what.into() }
-        })
-        .collect();
+    rows.extend(APP_ACTIONS.iter().map(|a| {
+        let what = if handles(a.id) { a.what.to_owned() } else { format!("{} (coming)", a.what) };
+        KeyRow { key: shortcuts.key_of(a.id).into(), what: what.into() }
+    }));
     rows.push(KeyRow { key: "F12".into(), what: "Write a note for Claude about what's on screen".into() });
     rows
 }

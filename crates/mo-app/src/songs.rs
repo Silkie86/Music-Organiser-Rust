@@ -5,12 +5,14 @@
 //! Reading the library and grouping happen once per load, off the window's thread; searching and filtering then only
 //! walk the rows already made, so typing in the search box stays quick over 16,000 songs (rule 12).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use chrono::{Datelike, Days, NaiveDateTime};
 use mo_formats::case;
 use mo_library::songs::{self, SaveRun, Song};
 use mo_library::{Library, LibraryError, STATUSES, Save, SongChoices};
+
+use crate::shell;
 
 /// The status the Hide archived chip hides.
 pub const ARCHIVED: &str = STATUSES[6];
@@ -286,6 +288,8 @@ pub struct Songs {
     pub saves: usize,
     /// The tags in use, for the Tag chip.
     pub tags: Vec<String>,
+    /// The program picked in Settings for each DAW that has one (the C# app's `daw_exe:` settings), for Open.
+    pub daw_exes: HashMap<String, String>,
 }
 
 impl Songs {
@@ -299,7 +303,13 @@ impl Songs {
         }
         let choices = library.song_choices()?;
         let tags = library.all_tags()?.into_iter().map(|(t, _)| t).collect();
-        Ok(Songs::from_saves(&saves, &choices, tags, gap_months))
+        let mut songs = Songs::from_saves(&saves, &choices, tags, gap_months);
+        for daw in songs.daws() {
+            if let Some(exe) = library.setting(&shell::daw_exe_key(&daw))?.filter(|e| !e.trim().is_empty()) {
+                songs.daw_exes.insert(daw, exe);
+            }
+        }
+        Ok(songs)
     }
 
     /// Groups the saves into songs and puts them in order, last saved first.
@@ -309,7 +319,7 @@ impl Songs {
         // Stable, so songs saved at the same moment keep the order they were grouped in.
         rows.sort_by_key(|r| std::cmp::Reverse(r.saved));
         let saves = rows.iter().map(|r| r.song.save_count()).sum();
-        Songs { rows, saves, tags }
+        Songs { rows, saves, tags, daw_exes: HashMap::new() }
     }
 
     /// The DAWs the songs come from, for the DAW chip, in order.
