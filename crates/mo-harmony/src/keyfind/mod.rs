@@ -37,9 +37,10 @@ pub use version::{SHIPPED_HASH, numbers_hash};
 use crate::key::Key;
 use crate::notes::{Grid, Part};
 
-/// Bumped whenever the finder can give a different answer for the same notes (new weights, new evidence), so the
-/// answers the app keeps (the MIDI page's index) know to be worked out again.
-pub const KEY_FINDER_VERSION: u32 = 1;
+/// Bumped whenever the finder can give a different answer for the same notes (new weights, new evidence, a new way of
+/// giving the answer), so the answers the app keeps (the MIDI page's index) know to be worked out again. Version 2 gives
+/// the graded answer with its colours and checks hints.
+pub const KEY_FINDER_VERSION: u32 = 2;
 
 /// What the notes are, as cut from the music: it says what their first and last bass mean.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

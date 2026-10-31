@@ -101,15 +101,15 @@ fn features(heard: &Heard, key: Key, span: Span) -> Vec<(usize, f64)> {
 }
 
 /// Weights with no musical sense but no pattern either, for the rules that hold whatever the weights are.
-fn odd_weights() -> [f64; FEATURES] {
+pub(super) fn odd_weights() -> [f64; FEATURES] {
     std::array::from_fn(|i| ((i * 7919 % 1013) as f64 / 1013.0 - 0.5) * 4.0)
 }
 
-const ODD_CALIBRATION: Calibration =
+pub(super) const ODD_CALIBRATION: Calibration =
     Calibration([0.6, 0.8, 1.1, 1.3, 1.6, -0.2, -0.3, -0.1, 0.4, 0.2, 0.1, -0.1, -0.2, 0.3]);
 
 /// A model with these weights, the odd calibration, and the shipped thresholds.
-fn odd_model(weights: &[f64; FEATURES]) -> Model<'_> {
+pub(super) fn odd_model(weights: &[f64; FEATURES]) -> Model<'_> {
     Model { weights, calibration: &ODD_CALIBRATION, ..SHIPPED }
 }
 
@@ -404,13 +404,13 @@ fn moving_the_notes_moves_everything_exactly() {
         assert_eq!(sizes(&moved), sizes(&heard));
         for span in Span::ALL {
             for key in Key::ALL {
-                let up = Key { tonic: key.tonic.up(s), mode: key.mode };
+                let up = key.up(s);
                 assert_eq!(features(&moved, up, span), features(&heard, key, span), "moved {s}, {key:?}, {span:?}");
             }
             // The chances turn with the keys, to the last bit.
             let (before, after) = (odd_chances(&heard, span), odd_chances(&moved, span));
             for key in Key::ALL {
-                let up = Key { tonic: key.tonic.up(s), mode: key.mode };
+                let up = key.up(s);
                 assert_eq!(after[up.index()].to_bits(), before[key.index()].to_bits(), "moved {s}, {key:?}");
             }
         }

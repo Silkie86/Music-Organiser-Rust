@@ -4,7 +4,7 @@
 use crate::key::{Key, Mode};
 use crate::pitch::PitchClass;
 
-use super::{Colours, KeyAnswer, KeyReading, Why};
+use super::{Colours, KeyAnswer, KeyReading, Why, ranked};
 
 /// A reading in eight bytes:
 ///
@@ -44,14 +44,16 @@ impl KeyFact {
                 leaning,
             ),
         };
+        // The best key and the runner-up as `KeyReading::best` and `runner_up` give them, ranked once.
+        let ([(_, best), (second, _), ..], clear) = ranked(&reading.chances);
         let shown = (reading.shown_chance.clamp(0.0, 1.0) * 65_535.0).round() as u16;
-        let best = (reading.best().1.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let best = (best.clamp(0.0, 1.0) * 255.0).round() as u8;
         let [high, low] = shown.to_be_bytes();
         KeyFact([
             KeyFact::LAYOUT,
             kind,
             index(key),
-            index(reading.runner_up().map(|(k, _)| k)),
+            index(clear.then_some(second)),
             high,
             low,
             best,

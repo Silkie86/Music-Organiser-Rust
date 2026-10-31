@@ -74,6 +74,11 @@ impl Key {
         }
     }
 
+    /// The key this many semitones up (down when negative), in the same mode: D minor for C minor moved up 2.
+    pub const fn up(self, semitones: i32) -> Key {
+        Key { tonic: self.tonic.up(semitones), mode: self.mode }
+    }
+
     /// The key on the same tonic in the other mode: C minor for C major.
     pub const fn parallel(self) -> Key {
         match self.mode {

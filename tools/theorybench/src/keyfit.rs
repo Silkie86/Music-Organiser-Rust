@@ -1054,7 +1054,9 @@ fn hand_cases(models: &[(String, keyfind::Model)]) -> Result<bool, String> {
     );
     let mut every = true;
     let mut broken = Vec::new();
-    for case in 1..=31u8 {
+    // Every case the hand cases judge (each model judges the same ones).
+    let cases: Vec<u8> = judged.first().map(|(_, vs)| vs.iter().map(|v| v.case).collect()).unwrap_or_default();
+    for case in cases {
         let verdicts: Vec<(&str, &Verdict)> =
             judged.iter().filter_map(|(name, vs)| vs.iter().find(|v| v.case == case).map(|v| (*name, v))).collect();
         let Some((_, first)) = verdicts.first() else { continue };

@@ -2,9 +2,10 @@
 //! notes could get a different answer, so the MIDI page knows to read them again. Two tests make sure it does:
 //!
 //! - a hash over every number the finder is built from ([`numbers_hash`]): `weights.rs` keeps the hash it was written
-//!   with and the version it belongs to, and the test fails when either is out of date;
-//! - a hash of the hand cases' readings, kept for each version, so a change to the code that moves an answer fails
-//!   too.
+//!   with and the version those numbers were first given with, and the test fails when the hash is out of date or
+//!   that version is newer than [`super::KEY_FINDER_VERSION`];
+//! - a hash of the hand cases' readings, with the shipped model and with one whose weights have no pattern, kept for
+//!   each version, so a change to the code that moves an answer fails too.
 
 use super::colour::{COLOUR_NOTE, I7_SHARE, LEADING_NOTE, NO_SIXTH_BELOW};
 use super::{LEAST_SHARPNESS, MIN_NOTES, Model, heard, weights};
@@ -66,6 +67,6 @@ pub fn numbers_hash(model: &Model) -> u64 {
     h.finish()
 }
 
-/// The hash `weights.rs` was written with, and the version of the finder it belongs to. `theorybench keyfit --write`
-/// keeps the version when the hash is the same, and writes the next one when it isn't.
+/// The hash `weights.rs` was written with, and the version of the finder its numbers were first given with.
+/// `theorybench keyfit --write` keeps the version when the hash is the same, and writes the next one when it isn't.
 pub const SHIPPED_HASH: (u64, u32) = (weights::SHIPPED_HASH, weights::HASH_VERSION);

@@ -2,7 +2,7 @@
 //! fact, and checking a key someone gave.
 
 use super::*;
-use crate::key::Mode;
+use crate::key::{KeyRelation, Mode};
 use crate::pitch::{PerPitch, PitchClass};
 
 fn pc(n: i32) -> PitchClass {
@@ -30,27 +30,13 @@ fn grading(bars: u32) -> Grading {
     Grading { bars_heard: bars, notes: 20, diatonic_fit: 0.95, span: Span::Window }
 }
 
-fn up(key: Key, semitones: i32) -> Key {
-    Key { tonic: key.tonic.up(semitones), mode: key.mode }
-}
-
 /// The chances of notes moved up this many semitones.
 fn turned(chances: &[f64; 24], semitones: i32) -> [f64; 24] {
     let mut out = [0.0; 24];
     for k in Key::ALL {
-        out[up(k, semitones).index()] = chances[k.index()];
+        out[k.up(semitones).index()] = chances[k.index()];
     }
     out
-}
-
-/// The answer for notes moved up this many semitones.
-fn moved(answer: KeyAnswer, semitones: i32) -> KeyAnswer {
-    match answer {
-        KeyAnswer::Key(k) => KeyAnswer::Key(up(k, semitones)),
-        KeyAnswer::OrRelative(k) => KeyAnswer::OrRelative(up(k, semitones)),
-        KeyAnswer::HomeNote { tonic, leaning } => KeyAnswer::HomeNote { tonic: tonic.up(semitones), leaning },
-        KeyAnswer::Unclear { why, leaning } => KeyAnswer::Unclear { why, leaning: leaning.map(|k| up(k, semitones)) },
-    }
 }
 
 // Thresholds.
@@ -96,7 +82,7 @@ fn keys_are_ranked_by_chance_then_by_their_place_above_the_first() {
         let (moved, clear) = super::ranked(&turned(&c, s));
         assert!(clear);
         for (a, b) in moved.iter().zip(&ranked) {
-            assert_eq!(a.0, up(b.0, s), "moved {s}");
+            assert_eq!(a.0, b.0.up(s), "moved {s}");
             assert_eq!(a.1.to_bits(), b.1.to_bits());
         }
     }
@@ -108,11 +94,11 @@ fn a_tie_for_the_first_is_clear_only_between_a_relative_or_parallel_pair() {
         // C major and A minor as likely: C major first, whatever key it's moved to.
         let (r, clear) = ranked(&turned(&chances_with(&[(C_MAJOR, 0.45), (A_MINOR, 0.45)]), s));
         assert!(clear);
-        assert_eq!((r[0].0, r[1].0), (up(C_MAJOR, s), up(A_MINOR, s)), "moved {s}");
+        assert_eq!((r[0].0, r[1].0), (C_MAJOR.up(s), A_MINOR.up(s)), "moved {s}");
         // C minor and C major: the major first.
         let (r, clear) = ranked(&turned(&chances_with(&[(C_MINOR, 0.45), (C_MAJOR, 0.45)]), s));
         assert!(clear);
-        assert_eq!((r[0].0, r[1].0), (up(C_MAJOR, s), up(C_MINOR, s)));
+        assert_eq!((r[0].0, r[1].0), (C_MAJOR.up(s), C_MINOR.up(s)));
         // C major and G major: no way to choose that moves with the notes.
         let (_, clear) = ranked(&turned(&chances_with(&[(C_MAJOR, 0.45), (G_MAJOR, 0.45)]), s));
         assert!(!clear);
@@ -197,7 +183,7 @@ fn every_answer_moves_with_the_notes() {
             let (answer, chance) = grade(&c, grading(bars), &SHIPPED);
             for s in 1..12 {
                 let (a, p) = grade(&turned(&c, s), grading(bars), &SHIPPED);
-                assert_eq!(a, moved(answer, s), "{answer:?} moved {s}");
+                assert_eq!(a, answer.up(s), "{answer:?} moved {s}");
                 assert_eq!(p.to_bits(), chance.to_bits());
             }
         }
@@ -288,7 +274,7 @@ fn colours_move_with_the_notes_and_only_a_clear_answer_has_them() {
     for s in 0..12 {
         let mut moved = Heard::default();
         moved.harmony = PerPitch(std::array::from_fn(|i| dorian.harmony[pc(i as i32 - s)]));
-        assert_eq!(colour::of_key(&moved, up(C_MINOR, s)), Colours::DORIAN, "moved {s}");
+        assert_eq!(colour::of_key(&moved, C_MINOR.up(s)), Colours::DORIAN, "moved {s}");
     }
     let none = Heard::default();
     assert_eq!(colour::of_key(&none, C_MAJOR), Colours::NONE);
@@ -416,13 +402,20 @@ fn a_hint_against_each_kind_of_answer() {
     assert_eq!(check(pair, EB_MAJOR), InAnswer);
     assert_eq!(check(pair, C_MAJOR), Parallel);
     assert_eq!(check(pair, Key::minor(PitchClass::G)), Fifth);
+    // The pair's second key counts as much as its first: Bb major is a fifth above Eb major, Eb minor its parallel.
+    assert_eq!(check(pair, Key::major(PitchClass::new(10))), Fifth);
+    assert_eq!(check(pair, Key::minor(PitchClass::new(3))), Parallel);
+    assert_eq!(check(pair, Key::major(PitchClass::D)), Disagrees);
 
     let home = KeyAnswer::HomeNote { tonic: PitchClass::C, leaning: Some(Mode::Minor) };
     assert_eq!((check(home, C_MAJOR), check(home, C_MINOR)), (InAnswer, InAnswer));
     assert_eq!(check(home, EB_MAJOR), Relative);
+    // Both modes count, whichever it leans to: A minor is C major's relative.
+    assert_eq!(check(home, A_MINOR), Relative);
     let even = KeyAnswer::HomeNote { tonic: PitchClass::C, leaning: None };
-    assert_eq!(check(even, A_MINOR), Relative);
-    assert_eq!(check(even, EB_MAJOR), Disagrees);
+    assert_eq!((check(even, A_MINOR), check(even, EB_MAJOR)), (Relative, Relative));
+    assert_eq!((check(even, G_MAJOR), check(even, Key::minor(PitchClass::F))), (Fifth, Fifth));
+    assert_eq!(check(even, Key::major(PitchClass::D)), Disagrees);
 
     let leaning = KeyAnswer::Unclear { why: Why::Spread, leaning: Some(G_MAJOR) };
     assert_eq!(check(leaning, G_MAJOR), InAnswer);
@@ -434,7 +427,23 @@ fn a_hint_against_each_kind_of_answer() {
     for s in 0..12 {
         for hint in Key::ALL {
             for answer in [key, pair, home, even, leaning] {
-                assert_eq!(moved(answer, s).check_hint(up(hint, s), Name), answer.check_hint(hint, Name));
+                assert_eq!(answer.up(s).check_hint(hint.up(s), Name), answer.check_hint(hint, Name));
+            }
+        }
+    }
+}
+
+#[test]
+fn no_hint_stands_near_two_keys_of_an_answer_in_two_ways() {
+    // check_hint takes the first key a hint stands near, so that must never depend on which key comes first.
+    let near = |hint: Key, key: Key| !matches!(hint.relation_to(key), KeyRelation::Same | KeyRelation::Other);
+    for k in Key::ALL {
+        for answer in [KeyAnswer::OrRelative(k), KeyAnswer::HomeNote { tonic: k.tonic, leaning: None }] {
+            let [Some(a), Some(b)] = answer.keys() else { panic!("{answer:?} gives two keys") };
+            for hint in Key::ALL {
+                if hint != a && hint != b {
+                    assert!(!(near(hint, a) && near(hint, b)), "{hint:?} near both of {answer:?}");
+                }
             }
         }
     }

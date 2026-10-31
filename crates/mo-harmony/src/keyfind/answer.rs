@@ -70,6 +70,32 @@ impl KeyAnswer {
             KeyAnswer::Unclear { .. } => false,
         }
     }
+
+    /// Every key the answer gives or leans to, the likelier first: the key; a pair's two keys; a home note in the mode
+    /// it leans to, then the other (major first when it leans to neither); the key no clear key leans to.
+    pub fn keys(self) -> [Option<Key>; 2] {
+        match self {
+            KeyAnswer::Key(k) => [Some(k), None],
+            KeyAnswer::OrRelative(k) => [Some(k), Some(k.relative())],
+            KeyAnswer::HomeNote { tonic, leaning } => {
+                let first = Key { tonic, mode: leaning.unwrap_or(Mode::Major) };
+                [Some(first), Some(first.parallel())]
+            }
+            KeyAnswer::Unclear { leaning, .. } => [leaning, None],
+        }
+    }
+
+    /// The answer for the same notes moved this many semitones up (down when negative).
+    pub fn up(self, semitones: i32) -> KeyAnswer {
+        match self {
+            KeyAnswer::Key(k) => KeyAnswer::Key(k.up(semitones)),
+            KeyAnswer::OrRelative(k) => KeyAnswer::OrRelative(k.up(semitones)),
+            KeyAnswer::HomeNote { tonic, leaning } => KeyAnswer::HomeNote { tonic: tonic.up(semitones), leaning },
+            KeyAnswer::Unclear { why, leaning } => {
+                KeyAnswer::Unclear { why, leaning: leaning.map(|k| k.up(semitones)) }
+            }
+        }
+    }
 }
 
 /// Knots of the thresholds: 1, 2, 4, 8, 16 and 32 bars heard (flat past 32). A song takes the last knot's values.

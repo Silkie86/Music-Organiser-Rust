@@ -3,6 +3,7 @@
 //! bumped when an answer can change.
 
 use super::cases::{Book, HandCase, hand_cases};
+use super::tests::{ODD_CALIBRATION, odd_model, odd_weights};
 use super::version::Fnv;
 use super::*;
 use crate::notes::{Note, Role};
@@ -15,28 +16,85 @@ const A_MINOR: Key = Key::minor(PitchClass::A);
 
 /// The hand cases' readings at each version of the finder, as a hash ([`readings_hash`]). A change that moves any of
 /// them needs `KEY_FINDER_VERSION` bumped, and a line added here.
-const READINGS: &[(u32, u64)] = &[(1, 0xe4a5_05c2_3ac2_57d6)];
+const READINGS: &[(u32, u64)] = &[(2, 0x6a1f_32df_22b2_bfb4)];
 
-/// A hash of every hand case's reading: its fact (answer, keys, chances shown, colours), each key's chance to nine
-/// places (so a last-bit difference in a maths library on another machine doesn't count), and what was heard.
-fn readings_hash(book: &Book) -> u64 {
+/// A hash of the readings an answer can change with: every hand case's reading with the shipped model, and with the
+/// odd one made four times as sharp (weights with no pattern: its answers are keys alone with their colours as well
+/// as no clear key, even while the shipped weights are the placeholder); and the answers to chances made by hand,
+/// graded with the shipped thresholds (a key or its relative, a home note, ties). A reading counts by its fact (answer,
+/// keys, chances shown, colours), each key's chance to six places, and what was heard.
+///
+/// The hand cases' chances come through `exp`, whose last bit can differ from one machine's maths library to
+/// another's. Rounding to six places makes that very unlikely to tip a number over; CI runs this on Windows, macOS and
+/// Linux, so if it ever does, CI says so on that machine and the rounding can be made coarser.
+fn readings_hash() -> u64 {
+    let odd = odd_weights();
+    let sharp = Calibration(ODD_CALIBRATION.0.map(|c| c * 4.0));
     let mut h = Fnv::new();
-    for (case, read) in &book.readings {
-        h.bytes(case.name.as_bytes());
-        match read {
-            None => h.bytes(&[0]),
-            Some((_, r)) => {
-                h.bytes(&r.fact().0);
-                for p in r.chances {
-                    h.number((p * 1e9).round() as i128);
-                }
-                h.number(i128::from(r.bars_heard));
-                h.number(i128::from(r.notes));
-                h.number((r.diatonic_fit * 1e9).round() as i128);
+    for model in [SHIPPED, Model { weights: &odd, calibration: &sharp, ..SHIPPED }] {
+        for (case, read) in &Book::read(&model).unwrap().readings {
+            h.bytes(case.name.as_bytes());
+            match read {
+                None => h.bytes(&[0]),
+                Some((_, r)) => add_reading(&mut h, r),
             }
         }
     }
+    for r in made_readings() {
+        add_reading(&mut h, &r);
+    }
     h.finish()
+}
+
+/// Readings of chances made by hand: C major, A minor and C minor with chances from 0 to 0.95, the rest shared out
+/// evenly, at 1 to 40 bars of each span.
+fn made_readings() -> Vec<KeyReading> {
+    let steps = [0.0, 0.04, 0.1, 0.3, 0.42, 0.5, 0.62, 0.8, 0.88, 0.95];
+    let mut readings = Vec::new();
+    for c in steps {
+        for am in steps {
+            for cm in steps.into_iter().filter(|cm| c + am + cm <= 1.0) {
+                for bars in [1, 3, 8, 40] {
+                    for span in Span::ALL {
+                        readings.push(made_reading(c, am, cm, bars, span));
+                    }
+                }
+            }
+        }
+    }
+    readings
+}
+
+fn add_reading(h: &mut Fnv, r: &KeyReading) {
+    h.bytes(&r.fact().0);
+    for p in r.chances {
+        h.number((p * 1e6).round() as i128);
+    }
+    h.number(i128::from(r.bars_heard));
+    h.number(i128::from(r.notes));
+    h.number((r.diatonic_fit * 1e6).round() as i128);
+}
+
+/// A reading of chances made by hand: C major, A minor and C minor with these, the other keys sharing the rest evenly,
+/// graded with the shipped thresholds.
+fn made_reading(c: f64, am: f64, cm: f64, bars: u32, span: Span) -> KeyReading {
+    let rest = ((1.0 - c - am - cm) / 21.0).max(0.0);
+    let mut chances = [rest; 24];
+    for (key, p) in [(C_MAJOR, c), (A_MINOR, am), (C_MINOR, cm)] {
+        chances[key.index()] = p;
+    }
+    let grading = Grading { bars_heard: bars, notes: 20, diatonic_fit: 0.9, span };
+    let (answer, shown_chance) = grade(&chances, grading, &SHIPPED);
+    KeyReading {
+        chances,
+        answer,
+        shown_chance,
+        colours: Colours::NONE,
+        bars_heard: bars,
+        config: Config::Full,
+        diatonic_fit: 0.9,
+        notes: 20,
+    }
 }
 
 fn reading<'a>(book: &'a Book, name: &str) -> &'a (Heard, KeyReading) {
@@ -112,16 +170,11 @@ fn read(reader: &mut KeyReader, case: &HandCase, parts: &[(Role, Vec<Note>)], mo
     reader.hear(&parts, case.grid).map(|heard| read_heard(&heard, case.span, model))
 }
 
-fn up(key: Key, semitones: i32) -> Key {
-    Key { tonic: key.tonic.up(semitones), mode: key.mode }
-}
-
 #[test]
 fn every_hand_case_moves_and_keeps_exactly() {
     // The design's case 32, with weights that have no pattern: the rules hold for any weights.
-    let weights: [f64; FEATURES] = std::array::from_fn(|i| ((i * 7919 % 1013) as f64 / 1013.0 - 0.5) * 4.0);
-    let calibration = Calibration([0.6, 0.8, 1.1, 1.3, 1.6, -0.2, -0.3, -0.1, 0.4, 0.2, 0.1, -0.1, -0.2, 0.3]);
-    let model = Model { weights: &weights, calibration: &calibration, ..SHIPPED };
+    let weights = odd_weights();
+    let model = odd_model(&weights);
     let mut reader = KeyReader::new();
     let bits = |r: &KeyReading| r.chances.map(f64::to_bits);
     for case in hand_cases().unwrap() {
@@ -136,16 +189,10 @@ fn every_hand_case_moves_and_keeps_exactly() {
             let moved = each_note(&case.parts, |n| Note { key: (i32::from(n.key) + s) as u8, ..n });
             let r = read(&mut reader, &case, &moved, &model).unwrap();
             for k in Key::ALL {
-                assert_eq!(r.chance(up(k, s)).to_bits(), base.chance(k).to_bits(), "{name} moved {s}");
+                assert_eq!(r.chance(k.up(s)).to_bits(), base.chance(k).to_bits(), "{name} moved {s}");
             }
-            let answer = match base.answer {
-                KeyAnswer::Key(k) => KeyAnswer::Key(up(k, s)),
-                KeyAnswer::OrRelative(k) => KeyAnswer::OrRelative(up(k, s)),
-                KeyAnswer::HomeNote { tonic, leaning } => KeyAnswer::HomeNote { tonic: tonic.up(s), leaning },
-                KeyAnswer::Unclear { why, leaning } => KeyAnswer::Unclear { why, leaning: leaning.map(|k| up(k, s)) },
-            };
-            assert_eq!(r.answer, answer, "{name} moved {s}");
-            assert_eq!(r.runner_up().map(|(k, _)| k), base.runner_up().map(|(k, _)| up(k, s)), "{name} moved {s}");
+            assert_eq!(r.answer, base.answer.up(s), "{name} moved {s}");
+            assert_eq!(r.runner_up().map(|(k, _)| k), base.runner_up().map(|(k, _)| k.up(s)), "{name} moved {s}");
             assert_eq!((r.colours, r.shown_chance.to_bits()), (base.colours, base.shown_chance.to_bits()));
         }
         // Each part backwards; each part split in two of its kind; a drum part added; every velocity halved; a ghost
@@ -250,7 +297,11 @@ fn the_version_is_bumped_when_a_number_changes() {
          keyfind/weights.rs, and bump KEY_FINDER_VERSION in keyfind/mod.rs to match",
         KEY_FINDER_VERSION + 1
     );
-    assert_eq!(version, KEY_FINDER_VERSION, "weights.rs was written for version {version}: bump KEY_FINDER_VERSION");
+    // The version the numbers were first given with; a bump for a change to the code alone leaves it behind.
+    assert!(
+        version <= KEY_FINDER_VERSION,
+        "weights.rs was written for version {version}: bump KEY_FINDER_VERSION in keyfind/mod.rs to {version}"
+    );
     // Every number counts: the smallest change to any one of them changes the hash.
     let nudge = |x: f64| f64::from_bits(x.to_bits() + 1);
     let mut weights = *SHIPPED.weights;
@@ -271,7 +322,7 @@ fn the_version_is_bumped_when_a_number_changes() {
 
 #[test]
 fn a_change_that_moves_an_answer_bumps_the_version() {
-    let now = readings_hash(&Book::read(&SHIPPED).unwrap());
+    let now = readings_hash();
     let kept = READINGS.iter().find(|(v, _)| *v == KEY_FINDER_VERSION).map(|(_, h)| *h);
     assert_eq!(
         kept,
@@ -281,4 +332,11 @@ fn a_change_that_moves_an_answer_bumps_the_version() {
         KEY_FINDER_VERSION + 1
     );
     assert!(READINGS.windows(2).all(|w| w[0].0 < w[1].0), "versions only go up");
+    // The hash covers every kind of answer: the hand cases give no clear key for each reason, the chances made by hand
+    // every other kind, ties included.
+    let mut kinds: Vec<u8> = made_readings().iter().map(|r| r.fact().0[1]).collect();
+    kinds.sort_unstable();
+    kinds.dedup();
+    assert_eq!(kinds, [0, 1, 2, 5, 6], "one key, a pair, a home note leaning or not, spread");
+    assert!(made_readings().iter().any(|r| r.answer == KeyAnswer::Unclear { why: Why::Spread, leaning: None }));
 }

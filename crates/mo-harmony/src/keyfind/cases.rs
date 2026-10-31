@@ -327,7 +327,8 @@ pub fn describe(answer: KeyAnswer) -> String {
         KeyAnswer::Key(k) => k.name(),
         KeyAnswer::OrRelative(k) => format!("{k} or {}", k.relative()),
         KeyAnswer::HomeNote { tonic, leaning } => {
-            format!("home note {}{}", Key::major(tonic).tonic_name(), mode(leaning))
+            // Spelled as the key it leans to would be: "F# minor", so "home note F#".
+            format!("home note {}{}", Key { tonic, mode: leaning.unwrap_or(Mode::Major) }.tonic_name(), mode(leaning))
         }
         KeyAnswer::Unclear { why, leaning } => {
             let why = match why {

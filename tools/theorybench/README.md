@@ -103,8 +103,8 @@ sure; below, not sure enough.
   The report says how many models keep each case's gate and meet its target, and what broke a gate. `--write` won't
   write weights that break one.
 - **What `--write` writes.** The weights and the calibration; the thresholds and the share of notes in one scale a
-  key needs, as they are (they aren't fitted yet); and a hash of every number with the finder version it belongs to.
-  When any number changed, that's the next version, so the tests fail until `KEY_FINDER_VERSION` in
+  key needs, as they are (they aren't fitted yet); and a hash of every number with the finder version those numbers
+  were first given with. When any number changed, that's the next version, so the tests fail until `KEY_FINDER_VERSION` in
   `keyfind/mod.rs` is bumped to match and the hand cases' readings are recorded for it (`hand_case_tests.rs`): the
   MIDI page then knows to read every part again.
 
