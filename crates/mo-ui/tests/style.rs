@@ -67,8 +67,8 @@ fn own_size(code: &str) -> Option<&'static str> {
     let what = props.iter().find(|(p, _)| *p == name.trim())?.1;
     // A number with a unit; "0" (no gap) and tokens are fine.
     let value = value.trim().trim_end_matches(';').trim();
-    let raw = value.chars().next().is_some_and(|c| c.is_ascii_digit()) && value.trim_start_matches(['0', '.']) != "";
-    raw.then_some(what)
+    let number: String = value.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+    number.parse::<f64>().is_ok_and(|n| n > 0.0).then_some(what)
 }
 
 #[test]
@@ -78,6 +78,7 @@ fn a_size_of_its_own_is_found() {
     assert_eq!(own_size("padding-left: 14px;"), Some("padding"));
     assert_eq!(own_size("font-size: Type.body;"), None);
     assert_eq!(own_size("padding: 0;"), None);
+    assert_eq!(own_size("padding: 0px;"), None);
     assert_eq!(own_size("letter-spacing: 0.8px;"), None);
     assert_eq!(own_size("width: 20px;"), None);
 }
