@@ -41,3 +41,18 @@ fn finds_samples_beside_in_the_tree_and_in_the_daws_folders() {
     assert!(!locator.found("/old/missing.wav", &project));
     assert!(!locator.found("", &project));
 }
+
+#[cfg(unix)]
+#[test]
+fn folder_links_back_up_the_tree_are_walked_once() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mo-library-samples-links");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join("Song/deep")).unwrap();
+    fs::write(dir.join("Song/deep/vox.wav"), b"x").unwrap();
+    std::os::unix::fs::symlink(dir.join("Song"), dir.join("Song/deep/a")).unwrap();
+    std::os::unix::fs::symlink(dir.join("Song"), dir.join("Song/deep/b")).unwrap();
+    let project = dir.join("Song/Song.flp").to_str().unwrap().to_owned();
+    let locator = SampleLocator::new(Box::new(|_| Vec::new()));
+    assert!(locator.found("/old/vox.wav", &project));
+    assert!(!locator.found("/old/gone.wav", &project));
+}

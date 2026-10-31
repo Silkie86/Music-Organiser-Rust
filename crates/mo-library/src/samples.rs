@@ -42,10 +42,13 @@ const MOST_TREES: usize = 4096;
 /// Where the DAW's own content folders are for a project, by its path.
 type ContentFolders = dyn Fn(&str) -> Vec<String> + Send + Sync;
 
+/// A folder tree's index, read the first time it's wanted.
+type Tree = Arc<OnceLock<FolderIndex>>;
+
 /// Finds samples, reading each folder tree once. Shared between the threads of one scan.
 pub struct SampleLocator {
     content: Box<ContentFolders>,
-    trees: Mutex<HashMap<String, Arc<OnceLock<FolderIndex>>>>,
+    trees: Mutex<HashMap<(String, usize), Tree>>,
 }
 
 impl Default for SampleLocator {
@@ -61,7 +64,7 @@ impl SampleLocator {
     }
 
     /// Whether this sample is on this computer, by the rules above. FL Studio's own content
-    /// ("%FLStudioFactoryData%…") always is.
+    /// ("%FLStudioFactoryData%…") always is; as in the C# app, so is any path that starts with a "%" setting.
     pub fn found(&self, sample: &str, project: &str) -> bool {
         sample.starts_with('%') || self.locate(sample, project).is_some()
     }
@@ -83,9 +86,10 @@ impl SampleLocator {
                 return near.to_str().map(str::to_owned);
             }
         }
-        // A project kept at the top of a drive: only the files beside it, not the whole drive.
+        // A project kept at the top of a drive or a network share: only the files beside it, not the whole drive.
         let dir = project_dir.to_str()?;
-        let at_top = !split(dir).0.is_empty() && split(dir).1.is_empty();
+        let (root, folders) = split(dir);
+        let at_top = !root.is_empty() && folders.len() <= if root == r"\\" { 2 } else { 0 };
         if let Some(found) = self.find_in(dir, if at_top { 0 } else { usize::MAX }, name, None) {
             return Some(found);
         }
@@ -99,14 +103,17 @@ impl SampleLocator {
         self.tree(root, depth).get()?.find(name, folder)
     }
 
-    fn tree(&self, folder: &str, depth: usize) -> Arc<OnceLock<FolderIndex>> {
-        let key = case::key(folder.trim_end_matches(['\\', '/']));
+    fn tree(&self, folder: &str, depth: usize) -> Tree {
+        // By depth too: the top of a drive read for the files beside a project isn't the whole drive.
+        let key = (case::key(folder.trim_end_matches(['\\', '/'])), depth);
         let slot = {
             let Ok(mut trees) = self.trees.lock() else { return Arc::new(OnceLock::new()) };
+            let slot = trees.entry(key.clone()).or_default().clone();
+            // Too many kept: let the rest go, as the C# app does, keeping the one being read.
             if trees.len() > MOST_TREES {
                 trees.retain(|k, _| *k == key);
             }
-            trees.entry(key).or_default().clone()
+            slot
         };
         // Read outside the lock, once: another thread wanting the same tree waits for this read.
         slot.get_or_init(|| FolderIndex::read(folder, depth));
@@ -125,6 +132,9 @@ impl FolderIndex {
         let mut index = FolderIndex::default();
         let mut files = 0;
         let mut todo: Vec<(PathBuf, usize)> = vec![(PathBuf::from(root), 0)];
+        // Where linked folders really go, so a link back up the tree, or two links to one folder, is walked once.
+        let real_root = fs::canonicalize(root).ok();
+        let mut linked: HashSet<PathBuf> = HashSet::new();
         while let Some((dir, level)) = todo.pop() {
             if files >= MOST_FILES {
                 break;
@@ -134,8 +144,22 @@ impl FolderIndex {
             for entry in entries.flatten() {
                 let path = entry.path();
                 let Some(p) = path.to_str() else { continue };
+                let Ok(kind) = entry.file_type() else { continue };
                 // A link is looked at as what it points to, as Windows' own listing does.
-                let is_dir = fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false);
+                let is_dir = if kind.is_symlink() {
+                    let Ok(real) = fs::canonicalize(&path) else { continue };
+                    if real.is_dir() {
+                        let inside = real_root.as_ref().is_some_and(|r| real.starts_with(r));
+                        if inside || !linked.insert(real) {
+                            continue;
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    kind.is_dir()
+                };
                 if is_dir {
                     let name = file_name(p);
                     if level < depth
@@ -269,7 +293,21 @@ pub fn daw_content_folders(project: &str) -> Vec<String> {
     folders
 }
 
+/// The fixed folders, worked out once for each kind of project: they don't change while the app runs.
 fn fixed_content_folders(ext: &str) -> Vec<String> {
+    static KNOWN: OnceLock<Mutex<HashMap<String, Vec<String>>>> = OnceLock::new();
+    let known = KNOWN.get_or_init(Mutex::default);
+    if let Some(f) = known.lock().ok().and_then(|k| k.get(ext).cloned()) {
+        return f;
+    }
+    let found = look_for_content_folders(ext);
+    if let Ok(mut k) = known.lock() {
+        k.insert(ext.to_owned(), found.clone());
+    }
+    found
+}
+
+fn look_for_content_folders(ext: &str) -> Vec<String> {
     let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty()).map(PathBuf::from);
     let home = env(if cfg!(windows) { "USERPROFILE" } else { "HOME" });
     // Windows and a Mac keep the DAWs' user folders in Documents; on Linux they sit in the home folder.
