@@ -72,6 +72,108 @@ export global Space {
     out property <length> xl: 24px;
 }
 
+// What a button does and its key, from the app-wide shortcut list (rule 15), for its tooltip.
+export struct ActionKey {
+    what: string,
+    key: string,
+}
+
+// The tooltip on show, if any: one for the whole window, drawn by `TipLayer` over everything. A `Tip` in a control
+// fills it in. Drawn in the window itself, not as a popup, so it never takes the mouse: a click while it shows still
+// reaches the control under it.
+export global TipState {
+    in-out property <string> text;
+    in-out property <string> key;
+    // Its top left in the window.
+    in-out property <length> x;
+    in-out property <length> y;
+    in-out property <bool> shown;
+}
+
+// The one tooltip (rules 15 and 16): after the mouse rests on a control for a moment, says what it does and shows its
+// key. Put it in a control with `hovering` from the control's TouchArea; `at-x`/`at-y` is where its top left goes, in
+// the control's own space.
+export component Tip {
+    in property <string> text;
+    in property <string> key;
+    in property <bool> hovering;
+    in property <length> at-x;
+    in property <length> at-y;
+    x: 0;
+    y: 0;
+    width: 0;
+    height: 0;
+    property <bool> wanted: hovering && (text != "" || key != "");
+    property <bool> mine;
+    Timer {
+        interval: 600ms;
+        running: root.wanted && !root.mine;
+        triggered => {
+            root.mine = true;
+            TipState.text = root.text;
+            TipState.key = root.key;
+            TipState.x = root.absolute-position.x + root.at-x;
+            TipState.y = root.absolute-position.y + root.at-y;
+            TipState.shown = true;
+        }
+    }
+    changed wanted => {
+        // Only put away the tip if it's still this one (the mouse may already rest on the next control).
+        if (!root.wanted && root.mine) {
+            root.mine = false;
+            if (TipState.text == root.text && TipState.key == root.key) {
+                TipState.shown = false;
+            }
+        }
+    }
+}
+
+// Draws the tooltip on show. Goes last in the window, so it's over everything; kept inside the window's edges.
+export component TipLayer {
+    if TipState.shown: Rectangle {
+        x: max(0px, min(TipState.x, root.width - self.width - Space.xs));
+        y: TipState.y + self.height > root.height ? max(0px, TipState.y - self.height - Space.xl - Space.xs) : TipState.y;
+        width: line.preferred-width;
+        height: line.preferred-height;
+        background: Theme.surface-raised;
+        border-radius: Theme.radius;
+        border-width: 1px;
+        border-color: Theme.edge;
+        drop-shadow-blur: 8px;
+        drop-shadow-color: Theme.shadow;
+        line := HorizontalLayout {
+            padding-left: Space.sm;
+            padding-right: Space.sm;
+            padding-top: Space.xs;
+            padding-bottom: Space.xs;
+            spacing: Space.sm;
+            if TipState.text != "": Text {
+                text: TipState.text;
+                color: Theme.text;
+                font-size: Type.meta;
+                vertical-alignment: center;
+            }
+            if TipState.key != "": Rectangle {
+                border-radius: Theme.radius;
+                border-width: 1px;
+                border-color: Theme.stroke;
+                background: Theme.well;
+                HorizontalLayout {
+                    padding-left: Space.xs;
+                    padding-right: Space.xs;
+                    Text {
+                        text: TipState.key;
+                        color: Theme.muted;
+                        font-family: Theme.number-font;
+                        font-size: Type.meta;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+}
+
 // A two-tone grooved line: a dark line with a faint light one under it, like a panel seam.
 export component Groove inherits VerticalLayout {
     Rectangle {
@@ -97,6 +199,9 @@ export component StudioButton inherits Rectangle {
     in property <string> text;
     in property <bool> main: false;
     in property <bool> enabled: true;
+    // The tooltip and the key from the shortcut list, if it has one.
+    in property <string> tip;
+    in property <string> key;
     callback clicked;
     min-width: label.preferred-width + 24px;
     height: 32px;
@@ -127,12 +232,20 @@ export component StudioButton inherits Rectangle {
         enabled: root.enabled;
         clicked => { root.clicked(); }
     }
+    Tip {
+        text: root.tip;
+        key: root.key;
+        hovering: touch.has-hover && !touch.pressed;
+        at-y: root.height + Space.xs;
+    }
 }
 
 // One line on the left-hand rail.
 export component RailItem inherits Rectangle {
     in property <string> text;
     in property <bool> selected;
+    // The key that goes here, from the shortcut list.
+    in property <string> key;
     callback clicked;
     height: 40px;
     border-radius: Theme.radius;
@@ -156,6 +269,13 @@ export component RailItem inherits Rectangle {
     }
     touch := TouchArea {
         clicked => { root.clicked(); }
+    }
+    Tip {
+        text: "Go to " + root.text;
+        key: root.key;
+        hovering: touch.has-hover && !touch.pressed;
+        at-x: root.width + Space.xs;
+        at-y: Space.xs;
     }
 }
 
@@ -395,6 +515,9 @@ export component MenuChip inherits Rectangle {
 // A line of a list that can be picked: the shared look for every list's rows (rule 16).
 export component ListLine inherits Rectangle {
     in property <bool> selected;
+    // A tooltip for the part of the line right of `tip-from` (a date, say), shown by the mouse.
+    in property <string> tip;
+    in property <length> tip-from;
     callback clicked;
     callback double-clicked;
     border-radius: Theme.radius;
@@ -409,6 +532,12 @@ export component ListLine inherits Rectangle {
     touch := TouchArea {
         clicked => { root.clicked(); }
         double-clicked => { root.double-clicked(); }
+    }
+    Tip {
+        text: root.tip;
+        hovering: touch.has-hover && !touch.pressed && touch.mouse-x >= root.tip-from;
+        at-x: touch.mouse-x;
+        at-y: touch.mouse-y + Space.xl;
     }
 }
 
