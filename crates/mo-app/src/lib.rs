@@ -3,6 +3,7 @@
 
 pub mod activity;
 pub mod background;
+pub mod live;
 pub mod log;
 pub mod note;
 pub mod paths;
