@@ -2811,6 +2811,7 @@ dependencies = [
  "rayon",
  "serde_json",
  "thread-priority",
+ "tiny-skia 0.12.0",
 ]
 
 [[package]]
