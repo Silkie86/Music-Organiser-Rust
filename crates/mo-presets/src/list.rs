@@ -28,11 +28,22 @@ pub struct SongPreset {
     /// with FL synths nobody played).
     pub plays_nothing: bool,
     pub guess: Guess,
+    /// The fingerprint a fix to its part is kept by ([`crate::fixes::fix_key`]: the plugin, its settings and the notes
+    /// it plays), kept when the bytes are let go.     /// fix to its part is kept by it, so it holds for every copy of the sound in every save.
+    pub hash: String,
+    /// The part you set, which wins over [`SongPreset::guess`]; the guess stays, so taking the fix away shows it again.
+    pub fixed: Option<Role>,
 }
 
 impl SongPreset {
-    fn new(blob: PresetBlob, track: String, plays_nothing: bool, guess: Guess) -> SongPreset {
-        SongPreset { size: blob.data.len(), blob, track, plays_nothing, guess }
+    fn new(blob: PresetBlob, track: String, plays_nothing: bool, guess: Guess, parts: &[&[NoteEvent]]) -> SongPreset {
+        let hash = crate::fixes::fix_key(&blob.plugin, &blob.data, parts);
+        SongPreset { size: blob.data.len(), blob, track, plays_nothing, guess, hash, fixed: None }
+    }
+
+    /// The part shown: yours when you set one, else the guess.
+    pub fn role(&self) -> Option<Role> {
+        self.fixed.or(self.guess.role)
     }
 
     /// Lets go of the settings' bytes, keeping everything the list shows.
@@ -45,10 +56,10 @@ impl SongPreset {
         self.blob.native
     }
 
-    /// What says which preset this is within its song, so a fix to its part can be kept and found again: the place
-    /// it sits and the plugin. Two copies of one plugin on one track share it, and share the fix.
+    /// What says which preset this is within its save, so it can be found again there (to export it): the place it
+    /// sits and the plugin.
     /// An FL instrument's channel number goes in too: FL names a new channel after its plugin, so two "Serum"
-    /// channels are common and each needs its own fix.
+    /// channels are common and each must be told apart. (A fix to its part is kept by [`SongPreset::hash`], not this.)
     pub fn place_key(&self) -> String {
         let place = if self.blob.place.is_empty() { &self.track } else { &self.blob.place };
         let channel = self.blob.channel.map(|c| format!("#{c}")).unwrap_or_default();
@@ -78,6 +89,7 @@ fn insert_of(place: &str) -> Option<u32> {
 pub fn from_fl(song: &FlSong, presets: Vec<PresetBlob>, limits: &Thresholds) -> Vec<SongPreset> {
     // Each channel's guess, once.
     let mut by_channel: BTreeMap<u32, (Guess, usize, &str)> = BTreeMap::new();
+    let mut notes_of: BTreeMap<u32, &[NoteEvent]> = BTreeMap::new();
     for c in &song.channels {
         let preset_name = c.instrument.as_ref().and_then(|i| i.state.as_ref()).map_or("", |s| s.name.as_str());
         let plugin = c.instrument.as_ref().map_or("", |i| i.name.as_str());
@@ -87,6 +99,7 @@ pub fn from_fl(song: &FlSong, presets: Vec<PresetBlob>, limits: &Thresholds) -> 
         let part = Part { notes, ppq: song.ppq, shift: Shift::fl_channel(c.root_key, c.pitch_cents), names: &names };
         let playing = notes.iter().filter(|n| !n.muted).count();
         by_channel.insert(c.index, (guess(&part, limits), playing, c.name.as_str()));
+        notes_of.insert(c.index, notes);
     }
 
     presets
@@ -98,9 +111,20 @@ pub fn from_fl(song: &FlSong, presets: Vec<PresetBlob>, limits: &Thresholds) -> 
                     .map(|(g, p, n)| (g.clone(), *p, (*n).to_owned()))
                     .unwrap_or_else(|| (Guess::none("Its channel wasn't found"), 0, blob.name.clone()));
                 let plays_nothing = playing == 0;
-                return SongPreset::new(blob, name, plays_nothing, g);
+                let notes = notes_of.get(&ch).copied().unwrap_or_default();
+                return SongPreset::new(blob, name, plays_nothing, g, &[notes]);
             }
             let insert = insert_of(&blob.place);
+            // What it hears: the notes of every channel feeding its insert (none for the master).
+            let heard: Vec<&[NoteEvent]> = match insert {
+                Some(at) if at > 0 => song
+                    .channels
+                    .iter()
+                    .filter(|c| c.insert == at)
+                    .filter_map(|c| notes_of.get(&c.index).copied())
+                    .collect(),
+                _ => Vec::new(),
+            };
             let g = match insert {
                 Some(0) => Guess::none("On the master, so it hears the whole song"),
                 Some(at) => {
@@ -116,7 +140,7 @@ pub fn from_fl(song: &FlSong, presets: Vec<PresetBlob>, limits: &Thresholds) -> 
             };
             let track = if blob.place.is_empty() { blob.name.clone() } else { blob.place.clone() };
             // An effect plays no notes of its own, so it's never "unused".
-            SongPreset::new(blob, track, false, g)
+            SongPreset::new(blob, track, false, g, &heard)
         })
         .collect()
 }
@@ -216,17 +240,16 @@ pub fn from_bitwig_parts(presets: Vec<PresetBlob>, clips: &[MidiClip], limits: &
             // Only an instrument can be unused; the Bitwig reader doesn't say which presets are instruments yet, so an
             // effect on an audio track isn't taken for an unused synth.
             let plays_nothing = blob.kind == mo_formats::PluginKind::Instrument && notes.iter().all(|n| n.muted);
-            SongPreset::new(blob, track_name, plays_nothing, g)
+            SongPreset::new(blob, track_name, plays_nothing, g, &[notes])
         })
         .collect()
 }
 
-/// Your fixes win over every guess: `fixes` maps [`SongPreset::place_key`] to the part you set.
-pub fn apply_fixes(presets: &mut [SongPreset], fixes: &BTreeMap<String, Role>) {
+/// Your fixes win over every guess: `fixes` maps a [`SongPreset::hash`] to the part you set (see
+/// [`crate::fixes::RoleFixes`]). A sound with no fix there loses any fix it had, so this also shows a cleared one.
+pub fn apply_fixes(presets: &mut [SongPreset], fixes: &std::collections::HashMap<String, Role>) {
     for p in presets {
-        if let Some(&role) = fixes.get(&p.place_key()) {
-            p.guess = Guess::fixed(role);
-        }
+        p.fixed = fixes.get(&p.hash).copied();
     }
 }
 

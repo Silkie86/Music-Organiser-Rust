@@ -15,6 +15,10 @@ The Presets page's engine (spec section 3.4a). No UI, no database, no writing ye
   insert, master effects get none) and Bitwig (every preset on a track shares the track's part).
 - **Choices** (`filter`): maker and type with counts (the C# `PresetFilter`), load hints, details line, search.
 
+- **The whole list** (`library`): many saves and preset folders at once, over every core, as the page's rows.
+- **Your fixes** (`fixes`): `presets.db` (`your_preset_roles`), kept by a fingerprint of the plugin, its settings
+  and the notes it plays (agreed with the readers thread, like the C# `midi.db`'s `your_roles`).
+
 ## To check on Solomon's files
 
 - `.bwpreset` metadata keys (`device_name`, `device_type`, `creator`, `preset_category`, `tags`) are from Bitwig's
@@ -25,10 +29,7 @@ The Presets page's engine (spec section 3.4a). No UI, no database, no writing ye
 
 ## Next
 
-- Library-wide list: every song's newest save (on low-priority threads, rule 21) plus preset folders on disk.
 - Plugin octave from saved state (Serum first, the C# app reads Serum's state), and Bitwig Note Transpose devices
   (needs the Bitwig reader to say which devices come before an instrument).
-- Keeping fixes: where they're stored is the library's call (Solomon's storage rule: one small table, each fact
-  stored once).
 - Bitwig: the reader doesn't say which presets are instruments, so no Bitwig synth is marked unused yet.
 - Export and Send to Bitwig (`.bwpreset` from a template Bitwig saved, as the C# `BitwigPreset`), copy-check-rename.

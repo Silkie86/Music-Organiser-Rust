@@ -2874,6 +2874,9 @@ name = "mo-presets"
 version = "0.1.0"
 dependencies = [
  "mo-formats",
+ "rayon",
+ "rusqlite",
+ "sha2",
  "zip",
 ]
 
@@ -2883,6 +2886,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "mo-formats",
+ "mo-library",
  "regex",
  "rusqlite",
  "serde",
