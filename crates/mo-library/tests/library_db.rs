@@ -40,7 +40,7 @@ ALTER TABLE samples ADD COLUMN unplayed INTEGER NOT NULL DEFAULT 0;
 
 const ROWS: &str = r#"
 INSERT INTO roots VALUES ('C:\beats');
-INSERT INTO settings VALUES ('fix_check:1', 'C:\beats\Didums_2 (fixed).flp'), ('fix_check:2', ''), ('sample_folders', '["D:\\Samples","E:\\More"]');
+INSERT INTO settings VALUES ('fix_check:1', 'C:\beats\Didums_2 (fixed).flp'), ('fix_check:2', ''), ('unset', NULL), ('sample_folders', '["D:\\Samples","E:\\More"]');
 INSERT INTO song_choices VALUES ('join', 'a', 'b'), ('split', 'C:\BEATS\Odd.flp', '');
 INSERT INTO projects (id, path, name, daw, folder, size, mtime, tempo, version, title, confidence, can_midi, info, hardware, status, rating, favourite, musical_key, notes, last_opened)
   VALUES (1, 'C:\beats\Didums.flp', 'Didums', 'FL Studio', 'C:\beats', 1000, 1500000000, 140.0, '20.8', 'Didums!', 0, 1,
@@ -144,9 +144,13 @@ fn reads_one_saves_detail() {
 fn reads_settings_roots_choices_and_tags() {
     let lib = Library::open_read_only(&make("settings.db", true)).unwrap();
     assert_eq!(lib.roots().unwrap(), [r"C:\beats"]);
-    assert_eq!(lib.pending_fixes().unwrap(), [r"C:\beats\Didums_2 (fixed).flp"]);
+    let fixes = lib.pending_fixes().unwrap();
+    assert_eq!(fixes.len(), 1);
+    // Matched ignoring case, as the library matches paths.
+    assert!(fixes.contains(r"c:\BEATS\didums_2 (FIXED).flp"));
     assert_eq!(lib.list_setting("sample_folders").unwrap(), [r"D:\Samples", r"E:\More"]);
     assert_eq!(lib.setting("nothing").unwrap(), None);
+    assert_eq!(lib.setting("unset").unwrap(), None);
     assert_eq!(lib.all_tags().unwrap(), [("dark".to_owned(), 2), ("techno".to_owned(), 1)]);
     let choices = lib.song_choices().unwrap();
     assert_eq!(choices.follow("a"), "b");
@@ -158,13 +162,15 @@ fn reads_settings_roots_choices_and_tags() {
 #[test]
 fn nothing_can_write_to_the_library_and_a_missing_one_isnt_made() {
     let path = make("readonly.db", true);
-    let lib = Library::open_read_only(&path).unwrap();
-    drop(lib);
     let before = std::fs::read(&path).unwrap();
-    // The same flags the library opens with: a write is refused by SQLite itself.
+    let lib = Library::open_read_only(&path).unwrap();
+    assert_eq!(lib.saves().unwrap().len(), 2);
+    lib.detail(1).unwrap();
+    // A write is refused by SQLite itself, even through the library's own connection settings.
     let c = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
     assert!(c.execute("UPDATE projects SET rating = 5", []).is_err());
     drop(c);
+    drop(lib);
     assert_eq!(std::fs::read(&path).unwrap(), before);
 
     let missing = path.with_file_name("not-there.db");
@@ -176,4 +182,27 @@ fn nothing_can_write_to_the_library_and_a_missing_one_isnt_made() {
     Connection::open(&not_a_library).unwrap().execute_batch("CREATE TABLE x (y)").unwrap();
     let err = Library::open_read_only(&not_a_library).err().unwrap().to_string();
     assert!(err.contains("isn't a Music Organiser library"), "{err}");
+}
+
+#[test]
+fn a_library_missing_later_tables_reads_them_as_empty() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mo-library");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("bare.db");
+    let _ = std::fs::remove_file(&path);
+    let c = Connection::open(&path).unwrap();
+    c.execute_batch(
+        "CREATE TABLE projects (id INTEGER PRIMARY KEY, path TEXT, name TEXT, daw TEXT, mtime INTEGER);
+         INSERT INTO projects VALUES (1, 'C:\\a\\Song.flp', 'Song', 'FL Studio', 5);",
+    )
+    .unwrap();
+    drop(c);
+    let lib = Library::open_read_only(&path).unwrap();
+    let saves = lib.saves().unwrap();
+    assert_eq!((saves.len(), saves[0].plugin_count, saves[0].tags.len()), (1, 0, 0));
+    assert!(lib.song_choices().unwrap().is_empty());
+    assert!(lib.roots().unwrap().is_empty() && lib.all_tags().unwrap().is_empty());
+    assert!(lib.pending_fixes().unwrap().is_empty() && lib.setting("x").unwrap().is_none());
+    let d = lib.detail(1).unwrap().unwrap();
+    assert!(d.plugins.is_empty() && d.samples.is_empty());
 }

@@ -11,8 +11,8 @@ workspace = true
 [dependencies]
 chrono.workspace = true
 mo-formats = { path = "../mo-formats" }
-regex = { version = "1", default-features = false, features = ["std", "unicode"] }
+regex = { version = "1", default-features = false, features = ["std", "unicode", "perf"] }
 # SQLite, built into the app, so nothing has to be installed beside it.
 rusqlite = { version = "0.41", features = ["bundled"] }
-# preserve_order: a save's details keep the order its reader found them in.
-serde_json = { version = "1", features = ["preserve_order"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -8,7 +8,7 @@
 mod db;
 pub mod songs;
 
-pub use db::{Library, LibraryError, ProjectPlugin, ProjectSample, SaveDetail};
+pub use db::{Library, LibraryError, PathSet, ProjectPlugin, ProjectSample, SaveDetail};
 pub use mo_formats::{Confidence, PluginKind};
 pub use songs::{SaveRun, Song, SongChoices, SongDoubt};
 

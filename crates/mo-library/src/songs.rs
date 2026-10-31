@@ -1,6 +1,7 @@
 //! Saves grouped into songs: `Song.flp`, `Song_2.flp` … `Song_77.flp` in one folder are one song, with the runs it was
 //! worked on in and the songs that may be one. The C# app's `SongVersions` and `SongChoices`, rule for rule.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
@@ -263,6 +264,33 @@ fn is_song(rest: &str) -> bool {
 /// "Song v2.1", "Song take 4", "Song final" (the last save), and copies, side saves and dates, which keep the number of
 /// what's left. A DAW's own name for a new project is never cut down to.
 pub fn split(name: &str) -> (String, i32) {
+    let (song, number, _) = worked_out(name);
+    (song, number)
+}
+
+/// A name's song, its number and its song by the plain rule alone, worked out once per name on each thread: every
+/// grouping, key and sort asks for them many times per save, and the patterns are the slow part (as the C# app's
+/// `SplitCache`).
+fn worked_out(name: &str) -> (String, i32, String) {
+    thread_local! {
+        static KNOWN: RefCell<HashMap<String, (String, i32, String)>> = RefCell::new(HashMap::new());
+    }
+    if let Some(known) = KNOWN.with(|k| k.borrow().get(name).cloned()) {
+        return known;
+    }
+    let (song, number) = split_uncached(name);
+    let found = (song, number, plain_song_uncached(name));
+    KNOWN.with(|k| {
+        let mut k = k.borrow_mut();
+        if k.len() > 200_000 {
+            k.clear();
+        }
+        k.insert(name.to_owned(), found.clone());
+    });
+    found
+}
+
+fn split_uncached(name: &str) -> (String, i32) {
     let mut name = without_fixed(name);
     let mut found = None;
     // Marks stack ("Song v2 final", "Song_3 - Copy"): take them off from the end, keeping the first number found.
@@ -311,6 +339,10 @@ fn unmark(name: &str) -> Option<(String, Option<i32>)> {
 /// The song a name is a numbered save of by the plain rule alone (a number on the end), leaving save marks such as
 /// "final", "copy", "v2" or a date in the name.
 fn plain_song(name: &str) -> String {
+    worked_out(name).2
+}
+
+fn plain_song_uncached(name: &str) -> String {
     let name = without_fixed(name);
     if let Some(m) = NUMBERED.captures(&name)
         && !group(&m, 1).trim().is_empty()
@@ -326,7 +358,8 @@ fn plain_song(name: &str) -> String {
 
 /// Whether a save mark ("final", "copy", "wip", "v2", a date) put this save with its song: a guess, so the app asks.
 pub fn marked(name: &str) -> bool {
-    !case::eq_ignore_case(&plain_song(name), &split(name).0)
+    let (song, _, plain) = worked_out(name);
+    !case::eq_ignore_case(&plain, &song)
 }
 
 /// Whether a song's saves aren't all one name numbered (a marked save, or songs you joined). Their numbers then don't
@@ -423,17 +456,23 @@ pub fn plugin_family(name: &str) -> String {
 
 /// Saves of the same song share a key: same folder (see [`song_folder`]), same DAW, same name before the number.
 pub fn key(folder: &str, daw: &str, name: &str) -> String {
-    case::to_lower(&format!("{}\u{1f}{daw}\u{1f}{}", song_folder(folder, name), split(name).0))
+    let song = split(name).0;
+    case::to_lower(&format!("{}\u{1f}{daw}\u{1f}{song}", folder_of_song(folder, &song)))
 }
 
 /// The folder a song's saves sit in. Bitwig keeps each project in a folder named after it, so a folder named like the
 /// song counts as the folder it's in: Projects\bored_58\bored_58.bwproject and Projects\bored_57\bored_57.bwproject
 /// are one song. Always without a closing separator, so a drive's root reads "C:".
 pub fn song_folder(folder: &str, name: &str) -> String {
+    folder_of_song(folder, &split(name).0)
+}
+
+/// [`song_folder`] for a save whose song is already known.
+fn folder_of_song(folder: &str, song: &str) -> String {
     let trimmed = folder.trim_end_matches(['\\', '/']);
     let Some(cut) = trimmed.rfind(['\\', '/']) else { return trimmed.to_owned() };
     let (parent, own) = (trimmed.get(..cut).unwrap_or(""), trimmed.get(cut + 1..).unwrap_or(""));
-    if case::eq_ignore_case(&split(own).0, &split(name).0) { parent.to_owned() } else { trimmed.to_owned() }
+    if case::eq_ignore_case(&split(own).0, song) { parent.to_owned() } else { trimmed.to_owned() }
 }
 
 /// One group per song, in the order their first save comes in `saves` (newest first, as the library lists them). The
@@ -493,14 +532,25 @@ fn song_name(key_: &str, ordered: &[&Save]) -> String {
 /// "Sunrize"); with `across_folders` also the same name in different folders; and saves a mark put with their song.
 /// Pairs you said are different aren't asked again. Newest first, at most `most`.
 pub fn doubts(songs: &[Song], choices: &SongChoices, across_folders: bool, most: usize) -> Vec<SongDoubt> {
-    let named: Vec<(&Song, Vec<u16>)> = songs
+    /// A doubt before its songs are copied out: the two songs by place in `songs`, or for a marked save, the song and
+    /// the save's place in it.
+    enum Pair {
+        Songs(usize, usize),
+        Save(usize, usize),
+    }
+    // Each song's folder and skeleton, worked out once rather than for every pair.
+    let folders: Vec<String> =
+        songs.iter().map(|g| case::to_lower(&song_folder(&g.latest.folder, &g.latest.name))).collect();
+    let named: Vec<(usize, Vec<u16>)> = songs
         .iter()
-        .filter(|g| !is_daw_default(g.name.trim()))
-        .map(|g| (g, skeleton(&g.name)))
+        .enumerate()
+        .filter(|(_, g)| !is_daw_default(g.name.trim()))
+        .map(|(i, g)| (i, skeleton(&g.name)))
         .filter(|(_, s)| s.len() >= 3)
         .collect();
-    let mut out = Vec::new();
-    let mut add = |a: &Song, b: &Song, why: String| {
+    let mut found: Vec<(NaiveDateTime, Pair, String)> = Vec::new();
+    let mut add = |i: usize, j: usize, why: String| {
+        let (Some(a), Some(b)) = (songs.get(i), songs.get(j)) else { return };
         if a.key != b.key && !choices.apart(&a.key, &b.key) {
             // The newer song first (its name is the first offered), or the one with more saves.
             let a_first = if a.latest.modified != b.latest.modified {
@@ -508,26 +558,27 @@ pub fn doubts(songs: &[Song], choices: &SongChoices, across_folders: bool, most:
             } else {
                 a.save_count() >= b.save_count()
             };
-            let (a, b) = if a_first { (a, b) } else { (b, a) };
-            out.push(SongDoubt { a: a.clone(), b: b.clone(), why, one_save: false });
+            let (i, j, newer) = if a_first { (i, j, a) } else { (j, i, b) };
+            found.push((newer.latest.modified, Pair::Songs(i, j), why));
         }
     };
-    let folder_of = |g: &Song| song_folder(&g.latest.folder, &g.latest.name);
-    for bucket in buckets(&named, |(g, _)| (case::to_lower(&folder_of(g)), g.latest.daw.clone())) {
-        for (i, (a, sa)) in bucket.iter().enumerate() {
-            for (b, sb) in bucket.iter().skip(i + 1) {
+    let folder = |i: usize| folders.get(i).map_or("", String::as_str);
+    let daw = |i: usize| songs.get(i).map_or("", |g| g.latest.daw.as_str());
+    for bucket in buckets(&named, |(i, _)| (folder(*i), daw(*i))) {
+        for (n, (a, sa)) in bucket.iter().enumerate() {
+            for (b, sb) in bucket.iter().skip(n + 1) {
                 if let Some(why) = close(sa, sb) {
-                    add(a, b, why);
+                    add(*a, *b, why);
                 }
             }
         }
     }
     if across_folders {
-        for bucket in buckets(&named, |(g, s)| (g.latest.daw.clone(), String::from_utf16_lossy(s))) {
-            for (i, (a, _)) in bucket.iter().enumerate() {
-                for (b, _) in bucket.iter().skip(i + 1) {
-                    if !case::eq_ignore_case(&folder_of(a), &folder_of(b)) {
-                        add(a, b, "Same name in different folders".into());
+        for bucket in buckets(&named, |(i, s)| (daw(*i), s.clone())) {
+            for (n, (a, _)) in bucket.iter().enumerate() {
+                for (b, _) in bucket.iter().skip(n + 1) {
+                    if folder(*a) != folder(*b) {
+                        add(*a, *b, "Same name in different folders".into());
                     }
                 }
             }
@@ -535,14 +586,12 @@ pub fn doubts(songs: &[Song], choices: &SongChoices, across_folders: bool, most:
     }
     // Saves a mark put with their song ("Night Drive final" with Night Drive_2 … _14): asked once each. A song whose
     // saves all carry the same mark ("Night Drive v2", "v3") has nothing to ask.
-    for g in songs.iter().filter(|g| g.save_count() > 1) {
-        let saves: Vec<&Save> = g.saves().collect();
-        let plain: Vec<String> = saves.iter().map(|s| case::key(&plain_song(&s.name))).collect();
-        for (save, p) in saves.iter().zip(&plain) {
-            let own = split_key(&save.path);
+    for (gi, g) in songs.iter().enumerate().filter(|(_, g)| g.save_count() > 1) {
+        let plain: Vec<String> = g.saves().map(|s| case::key(&plain_song(&s.name))).collect();
+        for (si, (save, p)) in g.saves().zip(&plain).enumerate() {
             if !marked(&save.name)
                 || choices.is_split(&save.path)
-                || choices.apart(&g.key, &own)
+                || choices.apart(&g.key, &split_key(&save.path))
                 || plain.iter().all(|q| q == p)
             {
                 continue;
@@ -554,13 +603,31 @@ pub fn doubts(songs: &[Song], choices: &SongChoices, across_folders: bool, most:
             } else {
                 format!("It was put with {} because its name adds \"{mark}\"", g.name)
             };
-            let b = Song { name: save.name.clone(), latest: (*save).clone(), older: Vec::new(), key: own };
-            out.push(SongDoubt { a: g.clone(), b, why, one_save: true });
+            found.push((g.latest.modified, Pair::Save(gi, si), why));
         }
     }
-    out.sort_by_key(|d| std::cmp::Reverse(d.a.latest.modified));
-    out.truncate(most);
-    out
+    found.sort_by_key(|(newest, _, _)| std::cmp::Reverse(*newest));
+    found.truncate(most);
+    // Only the doubts kept are copied out.
+    found
+        .into_iter()
+        .filter_map(|(_, pair, why)| match pair {
+            Pair::Songs(i, j) => {
+                Some(SongDoubt { a: songs.get(i)?.clone(), b: songs.get(j)?.clone(), why, one_save: false })
+            }
+            Pair::Save(gi, si) => {
+                let g = songs.get(gi)?;
+                let save = g.saves().nth(si)?;
+                let b = Song {
+                    name: save.name.clone(),
+                    latest: save.clone(),
+                    older: Vec::new(),
+                    key: split_key(&save.path),
+                };
+                Some(SongDoubt { a: g.clone(), b, why, one_save: true })
+            }
+        })
+        .collect()
 }
 
 /// Items grouped by a key, each group in the order its first item comes, the groups in that order too.
@@ -595,9 +662,15 @@ fn after_prefix<'a>(name: &'a str, prefix: &str) -> Option<&'a str> {
     (units == target && case::eq_ignore_case(head, prefix)).then_some(rest)
 }
 
-/// A song's name with only its letters, lower case: "Track nd" is "tracknd" (as UTF-16 units, which .NET counts).
+/// A song's name with only its letters, lower case: "Track nd" is "tracknd" (as UTF-16 units, which .NET counts). As
+/// in .NET, which looks at one UTF-16 unit at a time, a letter beyond the first 65,536 characters doesn't count.
 fn skeleton(song: &str) -> Vec<u16> {
-    let letters: String = LETTER.find_iter(song).flat_map(|m| m.as_str().chars()).map(case::lower).collect();
+    let letters: String = LETTER
+        .find_iter(song)
+        .flat_map(|m| m.as_str().chars())
+        .filter(|c| c.len_utf16() == 1)
+        .map(case::lower)
+        .collect();
     letters.encode_utf16().collect()
 }
 
