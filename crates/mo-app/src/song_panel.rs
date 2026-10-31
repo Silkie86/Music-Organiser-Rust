@@ -7,7 +7,7 @@ use mo_formats::paths::file_name;
 use mo_library::{PluginKind, ProjectPlugin, ProjectSample, Save, SaveDetail};
 
 use crate::shell::folder_of;
-use crate::songs::{SongRow, plural, tempo_text, thousands};
+use crate::songs::{SongRow, Songs, plural, tempo_text, thousands};
 
 /// The line above the name: "124 BPM · First made 3 Mar 2019 · saved 27 Oct 2026", or "Saved 27 Oct 2026" when it
 /// was all one day.
@@ -228,6 +228,109 @@ pub fn saves_heading(row: &SongRow) -> String {
     }
 }
 
+/// One line of the song's Health strip: something to look at, and where to look.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HealthItem {
+    pub text: String,
+    /// Why, in a few words, or "".
+    pub why: String,
+    pub go: Go,
+}
+
+/// Where a Health line's button takes you.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Go {
+    /// Nothing to show yet: the fix comes with a later step.
+    Nowhere,
+    Tab(Tab),
+    /// The other song, by its place in [`Songs::rows`].
+    Song(usize),
+}
+
+impl Go {
+    /// The button's words, or "" for none.
+    pub fn label(self) -> &'static str {
+        match self {
+            Go::Nowhere => "",
+            Go::Tab(Tab::Plugins) => "See plugins",
+            Go::Tab(Tab::Samples) => "See samples",
+            Go::Tab(Tab::Saves) => "See saves",
+            Go::Tab(_) => "See",
+            Go::Song(_) => "Show it",
+        }
+    }
+}
+
+/// The song's Health strip, worst first: a file that can't be read or has gone, what's missing, then the questions
+/// about songs that may be saves of one. Answering those (Join, Keep apart) and Fix need the app to keep its own
+/// library, so for now the strip shows where to look.
+pub fn health(songs: &Songs, row: usize) -> Vec<HealthItem> {
+    let Some(r) = songs.rows.get(row) else { return Vec::new() };
+    let l = &r.song.latest;
+    let mut out = Vec::new();
+    if let Some(e) = l.error.as_deref().filter(|e| !e.trim().is_empty()) {
+        out.push(HealthItem { text: "The newest save couldn't be read".into(), why: e.to_owned(), go: Go::Nowhere });
+    }
+    if l.file_missing {
+        out.push(HealthItem {
+            text: "The newest save's file has moved or gone".into(),
+            why: "since the library last looked".into(),
+            go: Go::Nowhere,
+        });
+    }
+    if l.missing_plugins > 0 {
+        let n = l.missing_plugins as usize;
+        out.push(HealthItem {
+            text: format!(
+                "{} not installed",
+                if n == 1 { "1 plugin is".to_owned() } else { format!("{} plugins are", thousands(n)) }
+            ),
+            why: String::new(),
+            go: Go::Tab(Tab::Plugins),
+        });
+    }
+    if l.missing_samples > 0 {
+        let n = l.missing_samples as usize;
+        out.push(HealthItem {
+            text: format!(
+                "{} can't be found",
+                if n == 1 { "1 sample".to_owned() } else { format!("{} samples", thousands(n)) }
+            ),
+            why: String::new(),
+            go: Go::Tab(Tab::Samples),
+        });
+    }
+    for d in songs.doubts_of(row) {
+        let item = match d.b {
+            None => HealthItem {
+                text: format!("{} might be a song of its own", d.save),
+                why: d.why.clone(),
+                go: Go::Tab(Tab::Saves),
+            },
+            Some(b) => {
+                let other = if b == row { d.a } else { b };
+                let name = songs.rows.get(other).map_or("", |o| o.song.name.as_str());
+                HealthItem {
+                    text: format!("Might be the same song as {name}"),
+                    why: d.why.clone(),
+                    go: Go::Song(other),
+                }
+            }
+        };
+        out.push(item);
+    }
+    out
+}
+
+/// The strip's folded line: "Health · 3 things to look at", or "" when there's nothing.
+pub fn health_summary(items: &[HealthItem]) -> String {
+    match items.len() {
+        0 => String::new(),
+        1 => "Health · 1 thing to look at".to_owned(),
+        n => format!("Health · {n} things to look at"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,7 +354,7 @@ mod tests {
     }
 
     fn row(saves: &[Save]) -> SongRow {
-        Songs::from_saves(saves, &SongChoices::default(), Vec::new(), 3).rows.remove(0)
+        Songs::from_saves(saves, &SongChoices::default(), Vec::new(), 3, Some(false)).rows.remove(0)
     }
 
     #[test]
@@ -331,6 +434,50 @@ mod tests {
         // One run needs no heading.
         let one = row(&[save("X_2", day(2024, 8, 3)), save("X", day(2024, 8, 1))]);
         assert!(save_lines(&one).iter().all(|l| matches!(l, SaveLine::Save { .. })));
+    }
+
+    #[test]
+    fn health_lists_problems_then_questions() {
+        let broken =
+            Save { missing_plugins: 1, missing_samples: 3, file_missing: true, ..save("Sunrise", day(2025, 2, 1)) };
+        let s = Songs::from_saves(
+            &[broken, save("Sunrize", day(2025, 1, 1))],
+            &SongChoices::default(),
+            Vec::new(),
+            3,
+            Some(false),
+        );
+        let sunrise = s.rows.iter().position(|r| r.song.name == "Sunrise").unwrap();
+        let sunrize = s.rows.iter().position(|r| r.song.name == "Sunrize").unwrap();
+        let items = health(&s, sunrise);
+        let texts: Vec<&str> = items.iter().map(|i| i.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            [
+                "The newest save's file has moved or gone",
+                "1 plugin is not installed",
+                "3 samples can't be found",
+                "Might be the same song as Sunrize",
+            ]
+        );
+        assert_eq!(items[3].go, Go::Song(sunrize));
+        assert_eq!(
+            (items[1].go.label(), items[2].go.label(), items[3].go.label()),
+            ("See plugins", "See samples", "Show it")
+        );
+        // The other song asks the same question the other way round.
+        assert_eq!(health(&s, sunrize)[0].text, "Might be the same song as Sunrise");
+        assert_eq!(health_summary(&items), "Health · 4 things to look at");
+        assert_eq!(health_summary(&[]), "");
+        // Not asked when Settings turned the questions off.
+        let quiet = Songs::from_saves(
+            &[save("Sunrise", day(2025, 2, 1)), save("Sunrize", day(2025, 1, 1))],
+            &SongChoices::default(),
+            Vec::new(),
+            3,
+            None,
+        );
+        assert!(quiet.doubts.is_empty());
     }
 
     #[test]

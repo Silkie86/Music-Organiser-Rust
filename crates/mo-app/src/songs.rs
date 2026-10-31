@@ -290,7 +290,29 @@ pub struct Songs {
     pub tags: Vec<String>,
     /// The program picked in Settings for each DAW that has one (the C# app's `daw_exe:` settings), for Open.
     pub daw_exes: HashMap<String, String>,
+    /// Songs that may be saves of one, for the Health strip, newest first.
+    pub doubts: Vec<Doubt>,
 }
+
+/// Two songs that may be saves of one: the app asks rather than guessing (the C# app's question).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Doubt {
+    /// The song asked about, by its place in [`Songs::rows`].
+    pub a: usize,
+    /// The other song, or `None` when it's one save inside `a` that a mark put there ("final", "v2", a date).
+    pub b: Option<usize>,
+    /// The other song's newest save, or that one save: its name.
+    pub save: String,
+    pub why: String,
+    pub one_save: bool,
+}
+
+/// The settings that turn the questions off, or on across folders: the C# app's.
+pub const ASK_DOUBTS: &str = "ask_song_doubts";
+pub const DOUBTS_ACROSS_FOLDERS: &str = "song_doubts_across_folders";
+
+/// At most this many questions, as the C# app.
+const MOST_DOUBTS: usize = 200;
 
 impl Songs {
     /// Reads the saves and groups them into songs. Fix's copies still waiting for Keep or Delete are left out: until
@@ -303,7 +325,11 @@ impl Songs {
         }
         let choices = library.song_choices()?;
         let tags = library.all_tags()?.into_iter().map(|(t, _)| t).collect();
-        let mut songs = Songs::from_saves(&saves, &choices, tags, gap_months);
+        // As the C# app: asked unless Settings turned it off; across folders only when turned on.
+        let asking = (library.setting(ASK_DOUBTS)?.as_deref() != Some("0"))
+            .then(|| library.setting(DOUBTS_ACROSS_FOLDERS).map(|v| v.as_deref() == Some("1")))
+            .transpose()?;
+        let mut songs = Songs::from_saves(&saves, &choices, tags, gap_months, asking);
         for daw in songs.daws() {
             if let Some(exe) = library.setting(&shell::daw_exe_key(&daw))?.filter(|e| !e.trim().is_empty()) {
                 songs.daw_exes.insert(daw, exe);
@@ -312,14 +338,36 @@ impl Songs {
         Ok(songs)
     }
 
-    /// Groups the saves into songs and puts them in order, last saved first.
-    pub fn from_saves(saves: &[Save], choices: &SongChoices, tags: Vec<String>, gap_months: u32) -> Songs {
-        let mut rows: Vec<SongRow> =
-            songs::group_songs(saves, choices).into_iter().map(|g| SongRow::new(g, gap_months)).collect();
+    /// Groups the saves into songs and puts them in order, last saved first. `asking` is whether to look for songs
+    /// that may be saves of one (`Some`), and then whether also across folders.
+    pub fn from_saves(
+        saves: &[Save],
+        choices: &SongChoices,
+        tags: Vec<String>,
+        gap_months: u32,
+        asking: Option<bool>,
+    ) -> Songs {
+        let groups = songs::group_songs(saves, choices);
+        let found = asking.map(|across| songs::doubts(&groups, choices, across, MOST_DOUBTS)).unwrap_or_default();
+        let mut rows: Vec<SongRow> = groups.into_iter().map(|g| SongRow::new(g, gap_months)).collect();
         // Stable, so songs saved at the same moment keep the order they were grouped in.
         rows.sort_by_key(|r| std::cmp::Reverse(r.saved));
+        let at: HashMap<&str, usize> = rows.iter().enumerate().map(|(i, r)| (r.song.key.as_str(), i)).collect();
+        let doubts = found
+            .into_iter()
+            .filter_map(|d| {
+                let a = *at.get(d.a.key.as_str())?;
+                let b = if d.one_save { None } else { Some(*at.get(d.b.key.as_str())?) };
+                Some(Doubt { a, b, save: d.b.latest.name, why: d.why, one_save: d.one_save })
+            })
+            .collect();
         let saves = rows.iter().map(|r| r.song.save_count()).sum();
-        Songs { rows, saves, tags, daw_exes: HashMap::new() }
+        Songs { rows, saves, tags, daw_exes: HashMap::new(), doubts }
+    }
+
+    /// The questions about the song at `row`.
+    pub fn doubts_of(&self, row: usize) -> impl Iterator<Item = &Doubt> {
+        self.doubts.iter().filter(move |d| d.a == row || d.b == Some(row))
     }
 
     /// The DAWs the songs come from, for the DAW chip, in order.
@@ -443,7 +491,7 @@ mod tests {
     }
 
     fn songs(saves: &[Save]) -> Songs {
-        Songs::from_saves(saves, &SongChoices::default(), Vec::new(), 3)
+        Songs::from_saves(saves, &SongChoices::default(), Vec::new(), 3, Some(false))
     }
 
     #[test]

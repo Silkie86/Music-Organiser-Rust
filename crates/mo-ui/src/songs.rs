@@ -12,14 +12,15 @@ use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
 use mo_app::log;
 use mo_app::shell;
-use mo_app::song_panel::{self as panel, SaveLine as PanelSaveLine, Tab};
+use mo_app::song_panel::{self as panel, Go, SaveLine as PanelSaveLine, Tab};
 use mo_app::songs::{Entry, Filters, SongRow, Songs, View};
 use mo_library::songs::DEFAULT_RUN_GAP_MONTHS;
 use mo_library::{Library, STATUSES, SaveDetail};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel};
 
 use crate::{
-    AppWindow, CountLine, DetailPair, PanelSong, PluginLine, SampleLine, SaveLine, SongLine, SongsData, YearStart,
+    AppWindow, CountLine, DetailPair, HealthLine, PanelSong, PluginLine, SampleLine, SaveLine, SongLine, SongsData,
+    YearStart,
 };
 
 /// The page's rows, filters and what they let through, kept on the window's thread.
@@ -133,6 +134,20 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
     data.on_select(move |row| {
         if let Some(app) = weak.upgrade() {
             pick(&app, usize::try_from(row).ok());
+        }
+    });
+    let weak = app.as_weak();
+    data.on_health_go(move |i| {
+        let Some(app) = weak.upgrade() else { return };
+        let go = PAGE.with(|p| {
+            let p = p.borrow();
+            let picked = p.picked?;
+            panel::health(&p.songs, picked).get(usize::try_from(i).ok()?).map(|h| h.go)
+        });
+        match go {
+            Some(Go::Tab(t)) => app.global::<SongsData>().set_tab(t.index() as i32),
+            Some(Go::Song(row)) => pick(&app, Some(row)),
+            _ => {}
         }
     });
     let weak = app.as_weak();
@@ -327,6 +342,13 @@ fn fill_panel(app: &AppWindow) {
         let p = p.borrow();
         let Some(r) = p.picked.and_then(|i| p.songs.rows.get(i)) else { return };
         data.set_song(panel_song(r));
+        let health = p.picked.map(|i| panel::health(&p.songs, i)).unwrap_or_default();
+        data.set_health_summary(panel::health_summary(&health).into());
+        data.set_health(model(health.into_iter().map(|h| HealthLine {
+            text: h.text.into(),
+            why: h.why.into(),
+            action: h.go.label().into(),
+        })));
         data.set_runs(model(
             r.runs.iter().rev().map(|run| SharedString::from(format!("{} · {}", run.label(), run.details()))),
         ));

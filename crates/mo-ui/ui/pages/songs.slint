@@ -57,6 +57,13 @@ export struct SaveLine {
     newest: bool,
 }
 
+// One line of the song's Health strip, with its button when `action` isn't empty.
+export struct HealthLine {
+    text: string,
+    why: string,
+    action: string,
+}
+
 export struct DetailPair {
     name: string,
     value: string,
@@ -114,6 +121,11 @@ export global SongsData {
     in property <string> tracks;
     in property <[DetailPair]> details;
     in property <[string]> warnings;
+    // The Health strip: folded to its summary line until opened.
+    in property <string> health-summary;
+    in property <[HealthLine]> health;
+    in-out property <bool> health-open;
+    callback health-go(int);
     callback search-edited(string);
     callback pick(string, string);
     callback toggle(string);
@@ -244,6 +256,64 @@ component SongPanel inherits Rectangle {
             StudioButton {
                 text: "Copy path";
                 clicked => { SongsData.copy-path(); }
+            }
+        }
+        if SongsData.health-summary != "": Rectangle {
+            vertical-stretch: 0;
+            border-radius: Theme.radius;
+            border-width: 1px;
+            border-color: Theme.warning.transparentize(60%);
+            background: Theme.warning.transparentize(92%);
+            height: strip.preferred-height;
+            strip := VerticalLayout {
+                padding: 10px;
+                padding-left: 12px;
+                spacing: 6px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: SongsData.health-summary;
+                        color: Theme.warning;
+                        font-size: 13px;
+                        font-weight: 500;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    LinkText {
+                        text: SongsData.health-open ? "Hide" : "Show";
+                        tint: Theme.muted;
+                        font-size: 12px;
+                        clicked => { SongsData.health-open = !SongsData.health-open; }
+                    }
+                }
+                if SongsData.health-open: VerticalLayout {
+                    spacing: 6px;
+                    for h[i] in SongsData.health: HorizontalLayout {
+                        spacing: 10px;
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            alignment: center;
+                            Text {
+                                text: h.text;
+                                color: Theme.text;
+                                font-size: 13px;
+                                wrap: word-wrap;
+                            }
+                            if h.why != "": Text {
+                                text: h.why;
+                                color: Theme.muted;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+                        }
+                        if h.action != "": VerticalLayout {
+                            alignment: center;
+                            StudioButton {
+                                text: h.action;
+                                clicked => { SongsData.health-go(i); }
+                            }
+                        }
+                    }
+                }
             }
         }
         if SongsData.song.notes != "": Text {
