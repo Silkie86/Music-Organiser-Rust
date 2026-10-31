@@ -438,8 +438,8 @@ impl Tables {
                     Stream::Tune,
                     Stream::Harmony,
                     Stream::Bass,
-                    Stream::MajorOnBass,
-                    Stream::MinorOnBass,
+                    Stream::MajorChords,
+                    Stream::MinorChords,
                     Stream::FirstBassSong,
                     Stream::LastBassSong,
                 ],
@@ -1444,7 +1444,10 @@ fn weights_file(
     sources.dedup();
     let penalty = opts.lambda_delta.map_or("none fitted".to_owned(), |l| format!("penalty {l}"));
     let mut out = String::new();
-    out.push_str("//! The key finder's weights. Made by `theorybench keyfit`; don't edit by hand.\n//!\n");
+    out.push_str(
+        "//! The key finder's weights. Made by `theorybench keyfit`; don't edit by hand, except the last two lines when\n\
+         //! a test asks (another number the finder is built from changed).\n//!\n",
+    );
     let _ = writeln!(
         out,
         "//! Fitted on: {} (trust weights penalty {LAMBDA_W}, corrections {penalty}).",

@@ -2,8 +2,9 @@
 //! grid.
 //!
 //! - How long each note sounds in the tune, and in the other parts.
-//! - The bass of each beat (its "anchor"), weighted by where the beat falls in its bar, and the major and minor
-//!   chords standing on it.
+//! - The bass of each beat (its "anchor"), weighted by where the beat falls in its bar.
+//! - The major and minor chords of each beat, by their root, weighted the same way, and twice when they stand on the
+//!   beat's bass.
 //! - The bass on the first bar line that has one, and on the last.
 //! - Which bars differ, so a loop written out four times, or a chord held for four bars, counts as what it is.
 //!
@@ -40,9 +41,20 @@ const ANCHOR_GAP: u16 = 5;
 /// one bar's notes say less than a song's.
 const HALF_SIZE: u64 = 4;
 
+/// How many times a chord standing on the beat's bass counts, against once for a chord over another bass (C over E)
+/// or with no bass under it: the chord over its own root says most about home.
+const ON_BASS: u64 = 2;
+
 /// The numbers above, for the finder's version hash (`numbers_hash`): changing one can change answers.
-pub(super) const NUMBERS: [i128; 6] =
-    [MOST_BEATS as i128, MOST_BAR_BEATS as i128, REACH_BARS, REACH_BEATS, ANCHOR_GAP as i128, HALF_SIZE as i128];
+pub(super) const NUMBERS: [i128; 7] = [
+    MOST_BEATS as i128,
+    MOST_BAR_BEATS as i128,
+    REACH_BARS,
+    REACH_BEATS,
+    ANCHOR_GAP as i128,
+    HALF_SIZE as i128,
+    ON_BASS as i128,
+];
 
 /// Which kinds of part were heard: a bit for each [`Role`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -98,11 +110,13 @@ pub struct Heard {
     /// The bass of each beat, weighted by where the beat falls in its bar: 4 for a bar's first beat, 2 for its
     /// middle (the third beat of 4/4, every third beat of 6/8, 9/8 and 12/8), 1 for the rest.
     pub bass: PerPitch<u64>,
-    /// The same weights, for the beats where a major chord stands on the bass (its third and fifth sound over it), by
-    /// the bass note. A minor third sounding too is heard as a sharp ninth, so C7♯9 still counts as C major.
-    pub major_on_bass: PerPitch<u64>,
-    /// The beats where a minor chord stands on the bass (minor third and fifth, no major third).
-    pub minor_on_bass: PerPitch<u64>,
+    /// The major chords of each beat (a root with its major third and fifth), by their root, with the same weights,
+    /// twice when the root is the beat's bass. A minor third sounding too is heard as a sharp ninth, so C7♯9 still
+    /// counts as C major. Every chord in the beat counts: C7♯9 holds an E♭ major chord too (E♭ G B♭), counted once.
+    pub major_chords: PerPitch<u64>,
+    /// The minor chords of each beat (a root with its minor third and fifth, and no major third), counted the same
+    /// way.
+    pub minor_chords: PerPitch<u64>,
     /// The beats where the bass's minor seventh sounds over it (for the colour of a key, not the key).
     pub flat7_on_bass: PerPitch<u64>,
     /// The bass on the first bar line that has one, and on the last.
@@ -187,8 +201,8 @@ impl Heard {
             (&mut self.tune, &later.tune),
             (&mut self.harmony, &later.harmony),
             (&mut self.bass, &later.bass),
-            (&mut self.major_on_bass, &later.major_on_bass),
-            (&mut self.minor_on_bass, &later.minor_on_bass),
+            (&mut self.major_chords, &later.major_chords),
+            (&mut self.minor_chords, &later.minor_chords),
             (&mut self.flat7_on_bass, &later.flat7_on_bass),
         ];
         for (mine, theirs) in pairs {
@@ -232,8 +246,8 @@ impl Heard {
             Stream::Tune => Some(&self.tune),
             Stream::Harmony => Some(&self.harmony),
             Stream::Bass => Some(&self.bass),
-            Stream::MajorOnBass => Some(&self.major_on_bass),
-            Stream::MinorOnBass => Some(&self.minor_on_bass),
+            Stream::MajorChords => Some(&self.major_chords),
+            Stream::MinorChords => Some(&self.minor_chords),
             Stream::FirstBassLoop | Stream::FirstBassSong | Stream::LastBassSong => None,
         }
     }
@@ -255,8 +269,8 @@ impl Heard {
             (Stream::Tune, &self.tune, tune),
             (Stream::Harmony, &self.harmony, others),
             (Stream::Bass, &self.bass, others),
-            (Stream::MajorOnBass, &self.major_on_bass, others),
-            (Stream::MinorOnBass, &self.minor_on_bass, others),
+            (Stream::MajorChords, &self.major_chords, others),
+            (Stream::MinorChords, &self.minor_chords, others),
         ];
         for (stream, counts, weight) in counted {
             let all = total(counts);
@@ -326,6 +340,16 @@ impl BeatFacts {
         } else {
             None
         }
+    }
+
+    /// The roots of the major and of the minor chords sounding in the beat. A root with its fifth and its major third
+    /// is major, even with a minor third too, which is heard as a sharp ninth (C7♯9 is C major); with its fifth and a
+    /// minor third and no major third, minor.
+    fn chords(self) -> (PcSet, PcSet) {
+        let below = |semitones: i32| self.chord.transposed(-semitones);
+        let roots = self.chord.intersection(below(7));
+        let major = roots.intersection(below(4));
+        (major, roots.intersection(below(3)).difference(major))
     }
 }
 
@@ -601,17 +625,19 @@ impl KeyReader {
             for (place, facts) in self.beats.get(from..to).unwrap_or_default().iter().enumerate() {
                 tune_beats += u32::from(facts.sounding & 1);
                 accompaniment_beats += u32::from(facts.sounding >> 1 & 1);
-                let Some(root) = facts.anchor() else { continue };
                 let weight = metrical_weight(place, layout.bar_beats);
-                let has = |up: i32| facts.chord.contains(root.up(up));
+                let anchor = facts.anchor();
+                let (major, minor) = facts.chords();
+                for (roots, counts) in [(major, &mut heard.major_chords), (minor, &mut heard.minor_chords)] {
+                    for root in roots.iter() {
+                        let times = if anchor == Some(root) { ON_BASS } else { 1 };
+                        counts[root] = counts[root].saturating_add(weight.saturating_mul(times));
+                    }
+                }
+                let Some(root) = anchor else { continue };
                 let add = |counts: &mut PerPitch<u64>| counts[root] = counts[root].saturating_add(weight);
                 add(&mut heard.bass);
-                if has(4) && has(7) {
-                    add(&mut heard.major_on_bass);
-                } else if has(3) && has(7) {
-                    add(&mut heard.minor_on_bass);
-                }
-                if has(10) {
+                if facts.chord.contains(root.up(10)) {
                     add(&mut heard.flat7_on_bass);
                 }
                 if place == 0 {
