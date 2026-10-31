@@ -1,6 +1,6 @@
 [package]
 name = "mo-presets"
-description = "The Presets page's engine: every sound made inside a song plus preset files on disk, what each is, and a guess at the part it plays (bass, lead, chords...). No UI and no database in it."
+description = "The Presets page's engine: every sound made inside a song plus preset files on disk, what each is, and a guess at the part it plays (bass, lead, chords...). No UI in it; its only file is presets.db, your part fixes."
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -10,6 +10,11 @@ workspace = true
 
 [dependencies]
 mo-formats = { path = "../mo-formats" }
+rayon.workspace = true
+# presets.db: your fixes to the part guess (the same SQLite, built in, as mo-library).
+rusqlite = { version = "0.41", features = ["bundled"] }
+# A sound's fingerprint, the same on every computer and in every version.
+sha2 = "0.10"
 # A Bitwig preset keeps its plugin's settings in a zip at its end (the same crate and features as mo-formats).
 zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 

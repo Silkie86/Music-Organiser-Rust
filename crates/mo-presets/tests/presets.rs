@@ -331,12 +331,31 @@ fn an_fl_songs_sounds_get_their_channels_parts_and_effects_their_inserts() {
     assert_eq!(role(&out[6]), None, "only a channel with no notes feeds insert 3");
 
     assert!(out[7].plays_nothing && out[7].guess.role.is_none(), "{}", out[7].guess.reason);
-    assert_ne!(out[0].place_key(), out[7].place_key(), "two Serum channels keep their own fixes");
+    assert_ne!(out[0].place_key(), out[7].place_key(), "two Serum channels are told apart in their save");
 
-    // A fix wins, kept by where the preset sits.
-    let fixes = BTreeMap::from([(out[2].place_key(), Role::Pad)]);
+    // A fix wins, and is kept by the plugin, its settings and the notes it plays. These made-up presets all have
+    // the same settings, so only the plugin and the notes tell them apart.
+    assert_ne!(out[0].hash, out[2].hash, "another plugin");
+    assert_ne!(out[1].hash, out[3].hash, "other notes");
+    assert_ne!(out[4].hash, out[6].hash, "the same effect on inserts fed by other notes");
+    let fixes = std::collections::HashMap::from([(out[2].hash.clone(), Role::Pad)]);
     list::apply_fixes(&mut out, &fixes);
-    assert_eq!((role(&out[2]), out[2].guess.basis), (Some(Role::Pad), Basis::Fixed));
+    assert_eq!(
+        (out[2].role(), out[2].fixed, role(&out[2])),
+        (Some(Role::Pad), Some(Role::Pad), None),
+        "the guess stays"
+    );
+    assert_eq!(out[0].role(), Some(Role::Bass));
+    // The same sound playing the same notes in another copy of the save takes the fix.
+    let again = list::from_fl(
+        &song,
+        vec![blob("Spare", "3x Osc", PluginKind::Instrument, Some(2), "", true)],
+        &Thresholds::default(),
+    );
+    assert_eq!(again[0].hash, out[2].hash);
+    // Taken away: the guess shows again.
+    list::apply_fixes(&mut out, &std::collections::HashMap::new());
+    assert_eq!(out[2].role(), None);
 
     out[0].forget_data();
     assert_eq!((out[0].blob.data.len(), out[0].size), (0, 3));
