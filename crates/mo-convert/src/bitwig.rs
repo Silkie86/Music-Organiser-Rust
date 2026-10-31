@@ -15,6 +15,8 @@ use std::io::{Cursor, Read, Write};
 use mo_formats::bitwig::{self, Blob, Copier, Document, ObjId, Object, Slot, Text, Value};
 use mo_formats::fl::song::FlPlugin;
 use mo_formats::paths;
+// Moved to mo-formats with the presets; kept here under its old name.
+pub use mo_formats::presets::fxp_to_bank;
 
 use crate::plan::{AudioClip, Device, Lane, Plan, Role, SampleFile, Target, Track, TrackKind, TrackRef};
 
@@ -1141,75 +1143,9 @@ fn uuid_text(b: &[u8; 16]) -> String {
     format!("{}-{}-{}-{}-{}", part(0..8), part(8..12), part(12..16), part(16..20), part(20..32))
 }
 
-/// A VST2 program as a bank, the form Bitwig writes and reads back: an 'FPCh' chunk program becomes an 'FBCh' bank
-/// with `program` as the plugin's selected program (Bitwig selects it again after loading the chunk, as FL does; KORG's
-/// M1 plays that program); an 'FxCk' parameter program goes inside a one-program 'FxBk' bank. Anything else comes back
-/// as it was. (The C# reader's `ToBank`. It belongs with the presets in mo-formats; it moves there when the preset
-/// export needs it too, as the readers are another thread's.)
-pub fn fxp_to_bank(fxp: &[u8], program: u32) -> Vec<u8> {
-    // CcnK, size, magic, version, id, plugin version, count, name[28], then a chunk's size.
-    const PROGRAM_HEADER: usize = 60;
-    if fxp.len() < PROGRAM_HEADER - 4 || !fxp.starts_with(b"CcnK") {
-        return fxp.to_vec();
-    }
-    let chunk = fxp.get(8..12) == Some(b"FPCh");
-    if !chunk && fxp.get(8..12) != Some(b"FxCk") {
-        return fxp.to_vec();
-    }
-    let body = if chunk {
-        let size = fxp.get(PROGRAM_HEADER - 4..PROGRAM_HEADER).and_then(|b| <[u8; 4]>::try_from(b).ok());
-        let size = size.map(i32::from_be_bytes);
-        match fxp.get(PROGRAM_HEADER..) {
-            Some(body) if size.and_then(|s| usize::try_from(s).ok()) == Some(body.len()) => body,
-            _ => return fxp.to_vec(),
-        }
-    } else {
-        fxp
-    };
-    let program = if chunk { program } else { 0 };
-    let Ok(body_len) = u32::try_from(body.len()) else { return fxp.to_vec() };
-    let size = (4 + 20 + 124 + if chunk { 4 } else { 0 }) as u32 + body_len;
-    let mut out = Vec::with_capacity(body.len() + 160);
-    out.extend_from_slice(b"CcnK");
-    out.extend_from_slice(&size.to_be_bytes());
-    out.extend_from_slice(if chunk { b"FBCh" } else { b"FxBk" });
-    out.extend_from_slice(&2u32.to_be_bytes());
-    // The plugin's id and version, as the program had them.
-    out.extend_from_slice(fxp.get(16..24).unwrap_or(&[0; 8]));
-    out.extend_from_slice(&program.saturating_add(1).to_be_bytes());
-    out.extend_from_slice(&program.to_be_bytes());
-    out.extend_from_slice(&[0; 124]);
-    if chunk {
-        out.extend_from_slice(&body_len.to_be_bytes());
-    }
-    out.extend_from_slice(body);
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_chunk_program_becomes_a_bank_naming_its_selected_program() {
-        let mut fxp = b"CcnK\0\0\0\0FPCh\0\0\0\x01ABCD\0\0\0\x02".to_vec();
-        fxp.resize(56, 0);
-        fxp.extend_from_slice(&3u32.to_be_bytes());
-        fxp.extend_from_slice(b"xyz");
-        let bank = fxp_to_bank(&fxp, 5);
-        assert_eq!(&bank[8..12], b"FBCh");
-        assert_eq!(&bank[16..24], b"ABCD\0\0\0\x02");
-        assert_eq!(
-            (
-                u32::from_be_bytes(bank[24..28].try_into().unwrap()),
-                u32::from_be_bytes(bank[28..32].try_into().unwrap())
-            ),
-            (6, 5)
-        );
-        assert_eq!(&bank[156..160], &3u32.to_be_bytes());
-        assert_eq!(&bank[160..], b"xyz");
-        assert_eq!(fxp_to_bank(b"nonsense", 0), b"nonsense");
-    }
 
     #[test]
     fn ids_read_and_write_as_bitwig_spells_them() {

@@ -32,6 +32,9 @@ allow = [
     # Slint, the screens: free for a desktop app as long as the app says it's made with Slint (Solomon chose this
     # over GPL-3.0, 2026-10-30; the credit goes in the About box).
     "LicenseRef-Slint-Royalty-free-2.0",
+    # symphonia, the MP3/FLAC/M4A/OGG decoder (spec section 9.2): file-level copyleft, so only changes made to its own
+    # files would have to be shared; using it as it is keeps the app's own code free.
+    "MPL-2.0",
 ]
 
 [bans]
