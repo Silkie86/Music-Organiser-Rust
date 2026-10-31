@@ -25,3 +25,4 @@ does something else on purpose, it's listed here and judged.
 | A damaged FL save read on, or one too big to read whole | Converted without saying | Said first in the notes | Better (rule 9) |
 | Samples | Read one after another | Read on every core, after the template is checked | Faster; a bad template is said straight away |
 | An earlier convert saved in Bitwig while samples were read | Replaced | Asked again just before saving, so it's kept | Better |
+| A sample that is not where FL saved it | Bitwig asks where it is | Looked for first in the project's and the DAW's folders (rule 13), and used where found, with a note | Better |
