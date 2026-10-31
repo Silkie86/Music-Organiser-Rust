@@ -43,14 +43,21 @@ pub fn page_name() -> &'static str {
 pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> Result<AppWindow, slint::PlatformError> {
     let app = AppWindow::new()?;
     apply_look(&app, look);
-    let places: Vec<PlaceInfo> =
-        Place::ALL.iter().map(|p| PlaceInfo { name: p.name().into(), coming: coming(*p).into() }).collect();
+    let places: Vec<PlaceInfo> = Place::ALL
+        .iter()
+        .map(|p| PlaceInfo {
+            name: p.name().into(),
+            coming: coming(*p).into(),
+            key: shortcuts.key_of(p.shortcut_id()).into(),
+        })
+        .collect();
     let settings = Place::Settings.index();
     app.set_rail(ModelRc::new(VecModel::from(places[..settings].to_vec())));
     app.set_places(ModelRc::new(VecModel::from(places)));
     app.set_settings_place(settings as i32);
     app.set_songs_place(Place::Songs.index() as i32);
     KEYS.with(|k| *k.borrow_mut() = Some(shortcuts.clone()));
+    show_button_keys(&app, &shortcuts);
     go_to(&app, start.index() as i32);
 
     let weak = app.as_weak();
@@ -89,6 +96,18 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> R
     cards::connect(&app, &feed);
     note::connect(&app, &feed);
     Ok(app)
+}
+
+/// The Songs page's buttons' tooltips: what each does and its key, from the one shortcut list (rule 15).
+fn show_button_keys(app: &AppWindow, shortcuts: &Shortcuts) {
+    let action = |id: &str| ActionKey {
+        what: SONGS_ACTIONS.iter().find(|a| a.id == id).map_or("", |a| a.what).into(),
+        key: shortcuts.key_of(id).into(),
+    };
+    let data = app.global::<SongsData>();
+    data.set_open_key(action("projects.open"));
+    data.set_reveal_key(action("projects.reveal"));
+    data.set_copy_key(action("projects.copyPath"));
 }
 
 /// Shows a place, and notes it for the log and the watchdog.
