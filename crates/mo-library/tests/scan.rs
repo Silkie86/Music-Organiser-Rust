@@ -73,6 +73,16 @@ fn a_missing_root_keeps_its_saves_and_an_inner_root_is_walked_once() {
     assert!(plan(&found, &[gone], &[root, unplugged], &|_| false, false).gone.is_empty());
 }
 
+#[test]
+fn a_root_inside_a_skipped_folder_is_walked_on_its_own() {
+    let dir = folder("mo-library-scan-skipped-root");
+    let root = dir.to_str().unwrap().to_owned();
+    let backup = dir.join("Night Drive").join("Backup").to_str().unwrap().to_owned();
+    let found = find_projects(&[root, backup]);
+    assert_eq!(found.files.len(), 5);
+    assert!(found.files.iter().any(|f| f.path.ends_with("Night Drive_13.flp")));
+}
+
 #[cfg(unix)]
 #[test]
 fn a_folder_link_back_up_its_own_tree_is_walked_once() {

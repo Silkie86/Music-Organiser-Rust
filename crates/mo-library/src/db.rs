@@ -189,7 +189,7 @@ impl Library {
             let rows: Vec<(String, String)> =
                 st.query_map([], |r| Ok((text(r, "name"), text(r, "name_key"))))?.collect::<Result<_, _>>()?;
             for (name, key) in rows {
-                installed.names.insert(name.to_lowercase());
+                installed.names.insert(case::to_lower(&name));
                 installed.keys.insert(key);
             }
         }

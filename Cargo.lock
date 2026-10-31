@@ -2778,6 +2778,7 @@ dependencies = [
  "chrono",
  "mo-formats",
  "mo-library",
+ "rayon",
  "serde_json",
  "thread-priority",
 ]

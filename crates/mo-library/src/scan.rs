@@ -156,8 +156,14 @@ pub fn find_projects(roots: &[String]) -> Found {
     let mut level: Vec<String> = Vec::new();
     let mut outer: Vec<String> = Vec::new();
     for (i, (root, key)) in roots.iter().zip(&keys).enumerate() {
-        // Inside another root, or the same root again (only the first of those is kept).
-        let inner = keys.iter().enumerate().any(|(j, k)| j != i && key_inside(key, k) && (k != key || j < i));
+        // Inside another root, or the same root again (only the first of those is kept). A root inside a folder the
+        // outer one's walk skips (K:\Music\Old\Backup inside K:\Music) is walked on its own.
+        let inner = keys.iter().enumerate().any(|(j, k)| {
+            j != i
+                && key_inside(key, k)
+                && (k != key || j < i)
+                && roots.get(j).is_none_or(|outer| !is_ignored(&format!("{root}/x.flp"), std::slice::from_ref(outer)))
+        });
         if inner {
             continue;
         }

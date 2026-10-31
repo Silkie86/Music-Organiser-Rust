@@ -8,6 +8,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::LazyLock;
 
+use mo_formats::case;
 use mo_formats::paths::{file_name, stem};
 use mo_formats::plugins::{self, elektron_device, is_fl_studio_bundled, vst2_id_in};
 use mo_formats::{PluginKind, PluginRef, ProjectInfo, SampleUse, bitwig, fl, studio_one};
@@ -28,7 +29,7 @@ pub fn name_key(name: &str) -> String {
         )
         .ok()
     });
-    let n = name.to_lowercase();
+    let n = case::to_lower(name);
     let n = match NOISE.as_ref() {
         Some(re) => re.replace_all(&n, |c: &regex::Captures| c.name("letter").map_or("", |l| l.as_str()).to_owned()),
         None => n.as_str().into(),
@@ -37,8 +38,13 @@ pub fn name_key(name: &str) -> String {
 }
 
 fn is_waves(name: &str, path: &str) -> bool {
-    let lower = name.to_lowercase();
-    lower.starts_with("waves ") || lower.starts_with("waveshell") || path.to_lowercase().contains("waveshell")
+    let lower = case::to_lower(name);
+    lower.starts_with("waves ") || lower.starts_with("waveshell") || case::to_lower(path).contains("waveshell")
+}
+
+/// The VST2 id a plugin id stands for: the four letters inside a 32-character VST3 id, or the id itself.
+fn vst2_of(id: &str) -> Option<String> {
+    if id.len() == 32 { vst2_id_in(id) } else { Some(id.to_owned()) }
 }
 
 /// The plugins on this computer, as the library last found them.
@@ -60,8 +66,7 @@ impl Installed {
     pub fn with_scans(mut self, scans: impl IntoIterator<Item = (String, String)>) -> Installed {
         for (id, path) in scans.into_iter().filter(|(id, _)| !id.is_empty()) {
             if is_waves("", &path) {
-                let vst2 = if id.len() == 32 { vst2_id_in(&id) } else { Some(id.clone()) };
-                self.waves.extend(vst2);
+                self.waves.extend(vst2_of(&id));
             }
             self.ids.insert(id);
         }
@@ -69,9 +74,7 @@ impl Installed {
     }
 
     fn has_id(&self, id: &str) -> bool {
-        self.ids.contains(id)
-            || (if id.len() == 32 { vst2_id_in(id) } else { Some(id.to_owned()) })
-                .is_some_and(|v| self.waves.contains(&v))
+        self.ids.contains(id) || vst2_of(id).is_some_and(|v| self.waves.contains(&v))
     }
 
     /// Whether the plugin is on this computer, by the C# app's rules: the DAW's own, its file there, part of FL
@@ -123,7 +126,7 @@ pub fn read_save(path: &str, installed: &Installed, samples: &SampleLocator) -> 
     };
     // As the C# scanner: the installed plugins' names count as known to Bitwig's text search, beside the ones
     // every Bitwig has.
-    let known = |name: &str| plugins::is_always_known(name) || installed.names.contains(&name.to_lowercase());
+    let known = |name: &str| plugins::is_always_known(name) || installed.names.contains(&case::to_lower(name));
     let file = Path::new(path);
     // One file that can't be read must never stop a scan: a reader that trips over a damaged file is caught here
     // and the file listed with what went wrong.
@@ -168,7 +171,7 @@ fn fill(mut save: Save, info: ProjectInfo, installed: &Installed, samples: &Samp
         })
         .collect();
     // Instruments first, then by name, as the library lists them.
-    plugins.sort_by_cached_key(|p| (p.kind != PluginKind::Instrument, p.name.to_lowercase()));
+    plugins.sort_by_cached_key(|p| (p.kind != PluginKind::Instrument, case::to_lower(&p.name)));
     let mut found: Vec<ProjectSample> = info
         .samples
         .iter()
@@ -181,7 +184,7 @@ fn fill(mut save: Save, info: ProjectInfo, installed: &Installed, samples: &Samp
         })
         .collect();
     // Missing ones first, then by path.
-    found.sort_by_cached_key(|s| (s.found, s.path.to_lowercase()));
+    found.sort_by_cached_key(|s| (s.found, case::to_lower(&s.path)));
     let mut hardware: Vec<String> = info
         .plugins
         .iter()

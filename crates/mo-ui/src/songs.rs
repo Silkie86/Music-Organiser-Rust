@@ -219,6 +219,12 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
 /// wait).
 const WATCH_QUIET: Duration = Duration::from_secs(3);
 
+/// How long after a save couldn't be read it's tried again.
+const RETRY_AFTER: Duration = Duration::from_secs(5);
+
+/// What the page says when the library has no songs.
+const NO_SONGS: &str = "No songs in the library yet.";
+
 /// Watches the project folders while the app is open and keeps the list up to date, on this background thread: each
 /// time saves change, the list is made again and put on the page with a card.
 fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
@@ -236,7 +242,16 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
             return;
         }
     };
-    while let Ok(changes) = rx.recv() {
+    loop {
+        // A save that couldn't be read (still being written, or locked) is tried again after a quiet moment.
+        let changes = match rx.recv_timeout(RETRY_AFTER) {
+            Ok(changes) => changes,
+            Err(mpsc::RecvTimeoutError::Timeout) => match live.retries() {
+                Some(changes) => changes,
+                None => continue,
+            },
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
         let updated = live.update(&changes);
         if updated.is_empty() {
             continue;
@@ -244,8 +259,9 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
         log::info(
             "Watch",
             &format!(
-                "Project folders: {} read, {} gone ({} changes seen)",
+                "Project folders: {} read, {} moved, {} gone ({} changes seen)",
                 updated.read.len(),
+                updated.moved.len(),
                 updated.gone,
                 changes.files.len()
             ),
@@ -273,6 +289,7 @@ fn show_again(app: &AppWindow, songs: Songs) {
     });
     data.set_daws(strings(songs.daws().iter().map(String::as_str)));
     data.set_tags(strings(songs.tags.iter().map(String::as_str)));
+    data.set_message(if songs.rows.is_empty() { NO_SONGS.into() } else { SharedString::new() });
     let row = key.and_then(|k| songs.rows.iter().position(|r| r.song.key == k));
     // Read again only when the picked song's newest save changed: a save of another song leaves its panel as it is.
     let same = PAGE.with(|p| {
@@ -303,7 +320,7 @@ pub fn show(app: &AppWindow, songs: Songs) {
     data.set_tabs(strings(Tab::ALL.iter().map(|t| t.name())));
     data.set_daws(strings(songs.daws().iter().map(String::as_str)));
     data.set_tags(strings(songs.tags.iter().map(String::as_str)));
-    data.set_message(if songs.rows.is_empty() { "No songs in the library yet.".into() } else { SharedString::new() });
+    data.set_message(if songs.rows.is_empty() { NO_SONGS.into() } else { SharedString::new() });
     PAGE.with(|p| p.borrow_mut().songs = songs);
     pick(app, None);
     data.set_lines(LINES.with(|l| ModelRc::from(l.clone() as Rc<dyn Model<Data = SongLine>>)));
