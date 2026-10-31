@@ -14,10 +14,11 @@ mod profiles;
 
 use std::process::ExitCode;
 
-const USAGE: &str = "theorybench keys <labelled.jsonl>... [--part <role>] [--aligned]
+const USAGE: &str = "theorybench keys <labelled.jsonl>... [--part <role>] [--aligned] [--bars <lengths>]
 theorybench chords <labelled.jsonl>... --answers <name>=<answers.jsonl> [--answers ...]
 
-  keys       how often each key finder names the labelled key, on whole songs and on 8-bar clips
+  keys       how often each key finder names the labelled key, on whole songs and on clips (8 bars long unless --bars
+             gives other lengths, such as 1,2,4,8,16)
   --part     hear only the parts with this role (melody, accompaniment, bass, chords); all pitched parts when left out
   --aligned  only songs with four beats a bar whose labelled bar lines fall on the MIDI's grid (the C# bench's songs)
   chords     how often each chord reader names the labelled chord, scored as mir_eval scores it

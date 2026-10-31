@@ -52,8 +52,8 @@ struct Case {
 /// The fewest notes a case needs: the C# bench's rule (its finder gives no key below it either).
 const MIN_NOTES: usize = 8;
 
-/// How long a clip is, in bars.
-const CLIP_BARS: i64 = 8;
+/// How long the clips are, in bars, unless `--bars` says otherwise.
+const CLIP_BARS: [i64; 1] = [8];
 
 /// Which parts' notes the finders hear.
 enum Parts {
@@ -76,11 +76,20 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let mut files = Vec::new();
     let mut parts = Parts::Pitched;
     let mut aligned_only = false;
+    let mut lengths = CLIP_BARS.to_vec();
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--part" => parts = Parts::Role(args.next().ok_or("--part needs a role, such as melody")?.clone()),
             "--aligned" => aligned_only = true,
+            "--bars" => {
+                let list = args.next().ok_or("--bars needs clip lengths, such as 1,2,4,8,16")?;
+                lengths = list
+                    .split(',')
+                    .map(|b| b.trim().parse::<i64>().ok().filter(|&b| b > 0))
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or_else(|| format!("--bars {list}: give whole numbers of bars, such as 1,2,4,8,16"))?;
+            }
             a if a.starts_with("--") => return Err(format!("Unknown option {a}.\n\n{}", crate::USAGE)),
             a => files.push(PathBuf::from(a)),
         }
@@ -111,43 +120,48 @@ pub fn run(args: &[String]) -> Result<(), String> {
         println!("Only the {r} parts are heard.");
     }
 
-    let (one_key, changing, clips) = cases(&items, &parts);
+    let (one_key, changing) = whole_songs(&items, &parts);
     let finders = finders();
     report("Whole songs with one key", "the labelled key", &one_key, &finders);
     report("Whole songs that change key", "the key labelled for the longest time", &changing, &finders);
-    report(&format!("{CLIP_BARS}-bar clips"), "the key labelled at the middle of the clip", &clips, &finders);
+    for bars in lengths {
+        let clips = all_clips(&items, &parts, bars);
+        report(&format!("{bars}-bar clips"), "the key labelled at the middle of the clip", &clips, &finders);
+    }
     Ok(())
 }
 
-/// The cases: whole songs with one key, whole songs that change key, and clips.
-fn cases(items: &[Item], parts: &Parts) -> (Vec<Case>, Vec<Case>, Vec<Case>) {
-    let per_song: Vec<(Option<Case>, Vec<Case>)> = items
+/// The whole songs as cases: those with one key, and those that change key.
+fn whole_songs(items: &[Item], parts: &Parts) -> (Vec<Case>, Vec<Case>) {
+    let per_song: Vec<Option<Case>> = items
         .par_iter()
         .enumerate()
         .map(|(song, item)| {
             let notes = item.notes_of(|role| parts.keeps(role));
-            let whole = item.main_key().filter(|_| notes.len() >= MIN_NOTES).map(|truth| Case {
-                song,
-                ppq: item.ppq,
-                truth,
-                notes: notes.clone(),
-            });
-            (whole, clips(item, song, &notes))
+            item.main_key().filter(|_| notes.len() >= MIN_NOTES).map(|truth| Case { song, ppq: item.ppq, truth, notes })
         })
         .collect();
-    let (mut one_key, mut changing, mut clips) = (Vec::new(), Vec::new(), Vec::new());
-    for ((whole, c), item) in per_song.into_iter().zip(items) {
+    let (mut one_key, mut changing) = (Vec::new(), Vec::new());
+    for (whole, item) in per_song.into_iter().zip(items) {
         if let Some(w) = whole {
             if item.one_key() { one_key.push(w) } else { changing.push(w) }
         }
-        clips.extend(c);
     }
-    (one_key, changing, clips)
+    (one_key, changing)
 }
 
-/// The song cut into clips along its bar lines, each with the key labelled at its middle.
-fn clips(item: &Item, song: usize, notes: &[Note]) -> Vec<Case> {
-    let length = CLIP_BARS * item.bar();
+/// Every song cut into clips of `bars` bars.
+fn all_clips(items: &[Item], parts: &Parts, bars: i64) -> Vec<Case> {
+    items
+        .par_iter()
+        .enumerate()
+        .flat_map_iter(|(song, item)| clips(item, song, &item.notes_of(|role| parts.keeps(role)), bars))
+        .collect()
+}
+
+/// The song cut into clips of `bars` bars along its bar lines, each with the key labelled at its middle.
+fn clips(item: &Item, song: usize, notes: &[Note], bars: i64) -> Vec<Case> {
+    let length = bars * item.bar();
     let mut out = Vec::new();
     let mut at = item.grid_origin();
     while at + length <= item.length {
@@ -172,6 +186,11 @@ struct Answer {
 impl Answer {
     fn right(&self) -> bool {
         self.found.is_some_and(|(k, _)| k == self.truth)
+    }
+
+    /// The right home note, major or minor either way.
+    fn tonic_right(&self) -> bool {
+        self.found.is_some_and(|(k, _)| k.tonic == self.truth.tonic)
     }
 
     fn relation(&self) -> Option<KeyRelation> {
@@ -202,10 +221,10 @@ fn report(title: &str, truth: &str, cases: &[Case], finders: &[Finder]) {
 
     println!();
     println!(
-        "{:<28} {:<24} {:>6} {:>8} {:>10} {:>8} {:>8} {:>9}",
-        "", "right (likely range)", "MIREX", "shown", "right when", "major", "minor", "µs a case"
+        "{:<28} {:<24} {:>6} {:>6} {:>8} {:>10} {:>8} {:>8} {:>6} {:>9}",
+        "", "right (likely range)", "home", "MIREX", "shown", "right when", "major", "minor", "ECE", "µs a case"
     );
-    println!("{:<28} {:<24} {:>6} {:>8} {:>10}", "", "", "", "", "shown");
+    println!("{:<28} {:<24} {:>6} {:>6} {:>8} {:>10}", "", "", "note", "", "", "shown");
     for (f, answers, micros) in &runs {
         let right: Vec<bool> = answers.iter().map(Answer::right).collect();
         let mirex: Vec<f64> =
@@ -220,15 +239,18 @@ fn report(title: &str, truth: &str, cases: &[Case], finders: &[Finder]) {
                 pct(these.iter().filter(|a| a.right()).count() as f64 / these.len() as f64)
             }
         };
+        let sure: Vec<(Option<f64>, bool)> = answers.iter().map(|a| (a.found.map(|(_, c)| c), a.right())).collect();
         println!(
-            "{:<28} {:<24} {:>6.1} {:>8} {:>10} {:>8} {:>8} {:>9.1}",
+            "{:<28} {:<24} {:>6} {:>6.1} {:>8} {:>10} {:>8} {:>8} {:>6} {:>9.1}",
             f.name,
             pct_range(metrics::share(&right, &song)),
+            pct(answers.iter().filter(|a| a.tonic_right()).count() as f64 / answers.len() as f64),
             100.0 * mirex.iter().sum::<f64>() / mirex.len() as f64,
             pct(shown.len() as f64 / answers.len() as f64),
             if shown.is_empty() { "-".to_owned() } else { pct(right_shown as f64 / shown.len() as f64) },
             of_mode(false),
             of_mode(true),
+            metrics::calibration_error(&sure).map_or("-".to_owned(), |e| format!("{:.3}", e)),
             micros
         );
     }

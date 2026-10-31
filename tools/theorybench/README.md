@@ -24,7 +24,7 @@ python3 -I tools/theorybench/convert/pop909.py path/to/pop909/POP909 path/to/ben
 ## Keys
 
 ```
-cargo run -p mo-theorybench --release -- keys path/to/bench/pop909.jsonl [--part melody] [--aligned]
+cargo run -p mo-theorybench --release -- keys path/to/bench/pop909.jsonl [--part melody] [--aligned] [--bars 1,2,4,8,16]
 ```
 
 It finds the key of whole songs (those with one key, and those that change key, against the key labelled for the
@@ -34,15 +34,19 @@ For each it prints:
 
 - **right**: the share of exact answers (no answer counts as wrong), with the range it most likely lies in. The
   ranges come from drawing whole songs again at random, because the clips of one song aren't independent.
+- **home note**: the right tonic, major or minor either way.
 - **MIREX**: the contest score (1 exact, 0.5 a fifth up, 0.3 the relative key, 0.2 the parallel key).
 - **shown** and **right when shown**: how often the confidence clears the app's cut, and how often it's right then.
 - **major** and **minor**: right, split by the labelled mode.
+- **ECE**: how far the confidence is from a chance of being right (0 is "80% sure" right 80% of the time). The C#
+  app's confidence was never meant as a chance, so its number shows how much a calibrated one would add.
 - what the wrong answers were (a fifth up or down, the relative or parallel key, another key, no key);
 - how often it's right when it answers only its surest cases (if its confidence means anything, this rises);
 - against the first finder: the difference in points, with its range, and McNemar's test.
 
 `--part` hears only the parts with that role; `--aligned` keeps only the songs the C# bench used (four beats a bar,
-labelled bar lines on the MIDI's grid: 387 of POP909's songs).
+labelled bar lines on the MIDI's grid: 387 of POP909's songs); `--bars` sets the clip lengths (a MIDI pack's loop is
+often 1 to 4 bars).
 
 ## Chords
 

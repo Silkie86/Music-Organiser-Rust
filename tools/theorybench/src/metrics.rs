@@ -180,6 +180,27 @@ pub fn right_when_most_sure(answers: &[(Option<f64>, bool)], coverage: f64) -> O
     Some(kept.iter().filter(|(_, r)| *r).count() as f64 / keep as f64)
 }
 
+/// How far the confidences are from being chances: the answers are put in ten bins by confidence, and each bin's
+/// share right is compared with its average confidence (expected calibration error, weighted by the bin's size). 0 is
+/// a confidence that means exactly what it says ("80% sure" right 80% of the time); a finder with no answers gives
+/// `None`. Cases with no answer are left out.
+pub fn calibration_error(answers: &[(Option<f64>, bool)]) -> Option<f64> {
+    let mut bins = [(0.0f64, 0.0f64, 0.0f64); 10];
+    let mut n = 0.0;
+    for &(sure, right) in answers {
+        let Some(c) = sure else { continue };
+        let c = c.clamp(0.0, 1.0);
+        let b = ((c * 10.0) as usize).min(9);
+        if let Some((count, conf, hits)) = bins.get_mut(b) {
+            *count += 1.0;
+            *conf += c;
+            *hits += f64::from(u8::from(right));
+        }
+        n += 1.0;
+    }
+    (n > 0.0).then(|| bins.iter().filter(|b| b.0 > 0.0).map(|(_, conf, hits)| (hits - conf).abs() / n).sum::<f64>())
+}
+
 /// "78.2%".
 pub fn pct(x: f64) -> String {
     format!("{:.1}%", 100.0 * x)
@@ -230,5 +251,20 @@ mod tests {
         assert_eq!(right_when_most_sure(&answers, 0.75), Some(2.0 / 3.0));
         // More cases than it answered: no figure.
         assert_eq!(right_when_most_sure(&answers, 1.0), None);
+    }
+
+    #[test]
+    fn confidence_that_means_what_it_says_has_no_calibration_error() {
+        // Ten answers 80% sure, eight right; ten 30% sure, three right.
+        let mut answers = Vec::new();
+        for i in 0..10 {
+            answers.push((Some(0.8), i < 8));
+            answers.push((Some(0.3), i < 3));
+        }
+        assert!(calibration_error(&answers).is_some_and(|e| e < 1e-9));
+        // Always 90% sure, right half the time: 0.4 off.
+        let over: Vec<(Option<f64>, bool)> = (0..10).map(|i| (Some(0.9), i % 2 == 0)).collect();
+        assert!(calibration_error(&over).is_some_and(|e| (e - 0.4).abs() < 1e-9));
+        assert_eq!(calibration_error(&[(None, true)]), None);
     }
 }
