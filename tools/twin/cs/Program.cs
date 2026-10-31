@@ -1,5 +1,6 @@
 // The C# half of the twin test. Reads each file named on its input (one path a line) with the C# app's FL Studio,
-// Bitwig, Studio One or MIDI file reader, unchanged, and writes what it finds as one JSON a line, in the same shape as tools/twin/src/rust_side.rs.
+// Bitwig, Studio One or MIDI file reader (or with --sounds, its sound analyser), unchanged, and writes what it finds
+// as one JSON a line, in the same shape as tools/twin/src/rust_side.rs (sounds.rs for sounds).
 // Files are read on every core; the lines come out in whatever order they finish, each naming its file.
 // With --roots it lists the library's folders instead (below).
 
@@ -57,18 +58,29 @@ using (var input = new StreamReader(Console.OpenStandardInput(), new System.Text
     for (string? line; (line = input.ReadLine()) != null;)
         if (line.Length > 0) files.Add(line);
 
+// `twin-cs --sounds`: each file is a sound, analysed by the C# Sound Lab's analyser instead of read as a project.
+var sounds = args is ["--sounds"];
 var output = Console.OpenStandardOutput();
 var gate = new object();
 Parallel.ForEach(files, file =>
 {
     string json;
     // One odd value (JSON has no NaN) loses that file's reading, not the whole run.
-    try { json = Dump(file).ToJsonString(); }
+    try { json = (sounds ? DumpSound(file) : Dump(file)).ToJsonString(); }
     catch (Exception e) { json = new JsonObject { ["file"] = file, ["error_more"] = $"couldn't write it: {e.Message}" }.ToJsonString(); }
     var bytes = System.Text.Encoding.UTF8.GetBytes(json + "\n");
     lock (gate) output.Write(bytes);
 });
 output.Flush();
+
+// A sound's analysis, as the C# app stores it in sounds.db (the analysis JSON, which holds the features too).
+static JsonObject DumpSound(string path)
+{
+    var o = new JsonObject { ["file"] = path };
+    try { o["analysis"] = System.Text.Json.JsonSerializer.SerializeToNode(MusicOrganiser.Core.Sounds.SoundAnalyzer.Analyse(path)); }
+    catch (Exception e) { o["error"] = $"{e.GetType().Name}: {e.Message}"; }
+    return o;
+}
 
 static JsonObject Dump(string path) => Path.GetExtension(path).ToLowerInvariant() switch
 {

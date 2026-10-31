@@ -10,6 +10,8 @@ workspace = true
 
 [dependencies]
 chrono.workspace = true
+# Without playing sounds: reading and analysing them needs no sound output.
+mo-audio = { path = "../mo-audio", default-features = false }
 mo-formats = { path = "../mo-formats" }
 mo-library = { path = "../mo-library" }
 regex = { version = "1", default-features = false, features = ["std", "unicode", "perf"] }

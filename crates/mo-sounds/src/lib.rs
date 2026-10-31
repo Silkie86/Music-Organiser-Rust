@@ -12,6 +12,7 @@
 //! - [`music`]: note and key names, and Camelot codes.
 //! - [`scan`]: finding the sounds in your sample folders, and what a scan has to do (listen, follow moves, forget).
 
+pub mod analyse;
 mod analysis;
 mod db;
 pub mod music;

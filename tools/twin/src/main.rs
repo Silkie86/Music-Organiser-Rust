@@ -6,6 +6,7 @@
 //! twin run --cs <helper> <folder or file>... [--report <file>] [--expect <file>] [--write-expect <file>]
 //! twin dump <file>
 //! twin songs --cs <helper> <library.db> [--report <file>]
+//! twin sounds --cs <helper> <folder>
 //! ```
 //!
 //! `run` prints a summary that holds only counts and field names (no names, paths or notes from the songs), so it's safe
@@ -13,11 +14,13 @@
 //! against a list of the ones already judged and fails on any new one (CI uses it on the test files); `--write-expect`
 //! writes that list. `dump` prints what the Rust readers find in one file. `songs` groups the library into songs both
 //! ways and sorts the differences by cause (see `songs.rs`); both sides read one copy of the library, made beside the
-//! helper and deleted afterwards.
+//! helper and deleted afterwards. `sounds` makes test sounds in the folder and has both apps analyse them (see
+//! `sounds.rs`).
 
 mod compare;
 mod rust_side;
 mod songs;
+mod sounds;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Write};
@@ -39,6 +42,7 @@ fn main() -> ExitCode {
         }
         Some("run") => run(&args[1..]),
         Some("songs") => run_songs(&args[1..]),
+        Some("sounds") => run_sounds(&args[1..]),
         _ => Err(USAGE.to_owned()),
     };
     match result {
@@ -54,7 +58,8 @@ fn main() -> ExitCode {
 const USAGE: &str =
     "twin run --cs <helper> <folder or file>... [--report <file>] [--expect <file>] [--write-expect <file>]
 twin dump <file>
-twin songs --cs <helper> <library.db> [--report <file>]";
+twin songs --cs <helper> <library.db> [--report <file>]
+twin sounds --cs <helper> <folder> (makes and removes its own test-sound folder inside it)";
 
 /// How many files are read (by both apps) before their readings are compared and let go.
 const CHUNK: usize = 256;
@@ -108,6 +113,16 @@ fn run_songs(args: &[String]) -> Result<bool, String> {
         None => print!("{}", outcome.report),
     }
     Ok(outcome.same)
+}
+
+/// Runs the sounds twin. `Ok(false)` when a measure differs that isn't judged.
+fn run_sounds(args: &[String]) -> Result<bool, String> {
+    let o = options(args)?;
+    if o.report.is_some() || o.expect.is_some() || o.write_expect.is_some() {
+        return Err(format!("sounds takes only --cs and a folder: it prints every difference.\n{USAGE}"));
+    }
+    let (Some(helper), [dir]) = (&o.cs, o.inputs.as_slice()) else { return Err(USAGE.to_owned()) };
+    sounds::run(helper, dir)
 }
 
 /// Runs the twin test. `Ok(false)` when `--expect` found differences not on its list (or some gone from it).
@@ -280,6 +295,11 @@ fn collect(inputs: &[PathBuf]) -> Vec<PathBuf> {
 /// Runs the C# helper on the files (one path a line on its input) and takes its readings (one JSON a line), by file.
 /// A helper ending in `.dll` is run with `dotnet`.
 fn run_helper(helper: &Path, files: &[PathBuf]) -> Result<HashMap<String, Value>, String> {
+    run_helper_with(helper, &[], files)
+}
+
+/// [`run_helper`] with the helper's own arguments first (`--sounds`).
+fn run_helper_with(helper: &Path, args: &[&str], files: &[PathBuf]) -> Result<HashMap<String, Value>, String> {
     let mut command = if helper.extension().is_some_and(|e| e.eq_ignore_ascii_case("dll")) {
         let mut c = Command::new("dotnet");
         c.arg(helper);
@@ -288,6 +308,7 @@ fn run_helper(helper: &Path, files: &[PathBuf]) -> Result<HashMap<String, Value>
         Command::new(helper)
     };
     let mut child = command
+        .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()

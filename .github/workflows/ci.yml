@@ -170,3 +170,6 @@ jobs:
           -p:MoBuildNative=false -p:MoBuildBitwig=false
       - name: Both apps read the test files
         run: cargo run -p mo-twin -- run --cs "$RUNNER_TEMP/twin-cs/twin-cs.dll" "$RUNNER_TEMP/twin" --expect tools/twin/expected.txt
+      # The sound analysers: test sounds made by the twin tool (none is anyone's sample), analysed by both apps.
+      - name: Both apps analyse the test sounds
+        run: cargo run -p mo-twin -- sounds --cs "$RUNNER_TEMP/twin-cs/twin-cs.dll" "$RUNNER_TEMP"

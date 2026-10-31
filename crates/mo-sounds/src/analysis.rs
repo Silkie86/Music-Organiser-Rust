@@ -1,11 +1,11 @@
 //! What the C# analyser stored for each sound: the `analysis` column of `sounds`, as JSON with the C# property names.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::music;
 
 /// A stretch of a sound that plays one chord.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "PascalCase", default)]
 pub struct ChordSpan {
     /// Seconds from the start.
@@ -18,7 +18,7 @@ pub struct ChordSpan {
 ///
 /// The features vector isn't kept here: the database holds it again in the `features` column, which
 /// [`crate::SoundsDb::vectors`] reads.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "PascalCase", default)]
 pub struct SoundAnalysis {
     pub seconds: f64,

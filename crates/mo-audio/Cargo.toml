@@ -10,6 +10,12 @@ workspace = true
 
 [dependencies]
 # Sound output on every system (WASAPI on Windows, Core Audio on a Mac, ALSA on Linux). Apache-2.0.
-cpal = "0.18"
+cpal = { version = "0.18", optional = true }
 # MP3, FLAC, M4A (AAC), OGG (Vorbis) and AAC, decoded in Rust on every system (the C# app needed Windows for these).
 symphonia = { version = "0.6", default-features = false, features = ["mp3", "flac", "isomp4", "aac", "ogg", "vorbis"] }
+
+[features]
+# Playing sounds (`play`). Crates that only read or analyse sounds leave it out, so they don't need the system's sound
+# libraries to build (ALSA's headers on Linux).
+default = ["play"]
+play = ["dep:cpal"]

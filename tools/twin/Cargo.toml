@@ -1,6 +1,6 @@
 [package]
 name = "mo-twin"
-description = "The twin test: reads the same project files with the C# app's readers and the Rust ones, and lists every difference."
+description = "The twin test: reads the same project files with the C# app's readers and the Rust ones (and analyses the same sounds), and lists every difference."
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -13,8 +13,10 @@ name = "twin"
 path = "src/main.rs"
 
 [dependencies]
+mo-audio = { path = "../../crates/mo-audio", default-features = false }
 mo-formats = { path = "../../crates/mo-formats" }
 mo-library = { path = "../../crates/mo-library" }
+mo-sounds = { path = "../../crates/mo-sounds" }
 rayon = "1.10"
 thread-priority.workspace = true
 serde_json = "1.0"
