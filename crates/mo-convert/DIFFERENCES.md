@@ -26,3 +26,5 @@ does something else on purpose, it's listed here and judged.
 | Samples | Read one after another | Read on every core, after the template is checked | Faster; a bad template is said straight away |
 | An earlier convert saved in Bitwig while samples were read | Replaced | Asked again just before saving, so it's kept | Better |
 | A sample that is not where FL saved it | Bitwig asks where it is | Looked for first in the project's and the DAW's folders (rule 13), and used where found, with a note | Better |
+| Plugin sounds a save lost | Taken from the newest older save that has them, matched by id | Same, but matched by name when one save has no id (FL 9 may not save it), and a save before Fix's copy of it | Better |
+| Samples found somewhere else | (not looked for) | Listed under their own heading beside the project | New |

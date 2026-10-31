@@ -10,6 +10,7 @@
 
 pub mod bitwig;
 pub mod clips;
+pub mod lost;
 pub mod notes;
 pub mod plan;
 pub mod sample;
