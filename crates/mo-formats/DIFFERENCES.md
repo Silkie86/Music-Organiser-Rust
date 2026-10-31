@@ -22,6 +22,8 @@ library.
 | A song whose playlist has only audio or automation clips | Played every pattern one after another, as if the playlist were empty, so patterns never placed had notes. | Patterns play one after another only when the playlist is empty. | Better |
 | An effect slot switched on and off by automation | Its curve slid between on and off. | Held, jumping between on and off as a channel's on/off does. | Better |
 | MIDI clips in a save with no version | Picked each pattern's note size without the song's channels, so it could differ from the song's reading. | The same size the song uses. | Better |
+| Notes in FL 4 to 8 patterns, in the MIDI, the channels and the song (about 3,600 of Solomon's old saves) | Reads the 20-byte notes as 24-byte ones, so most come out impossible: keys and velocities over 127, positions in the billions, clip lengths of 2 billion ticks, and a made-up channel ("Channel 32897") that pushes every channel after it along by one. | Reads them at their true size: every value in range (checked on 5 saves from FL 4 to 8, 2026-10-31). | Better |
+| An effect slot switched on and off by a curve that ramps (a few of Solomon's FL 11 saves) | The ramp, as saved. | Each point held until the next, so a ramp that ends a clip above halfway reads as off. FL switches a slot on at half the curve: check that the held value then is right. | To check |
 | Samples on the channels inside a Layer channel | Counted as not played when only the Layer has notes. | The same, until the Layer's children are read (needs one of Solomon's saves with a Layer). | Not yet |
 | Songs arranged in a later arrangement (FL 12.9 on) | Only the first arrangement is read. | The same: the twin test will show whether any of Solomon's songs need more. | Not yet |
 
@@ -48,6 +50,7 @@ tests don't have.
 
 | What | C# | Rust | Judged |
 |---|---|---|---|
+| A song whose mixer has an FX Chain with a splitter (`AudioFXGraph::SplitterNode` in `Devices/audiomixer.xml`) | Its fix for Studio One's `x:` prefix turns the name into `<:SplitterNode`, so the whole mixer fails to read and no mixer effect is listed (679 of Solomon's songs). | Reads the mixer and lists every effect. | Better |
 | A plugin state in the song's zip that won't come out whole | No presets at all from the song. | That one preset is left out; the rest are taken out. | Better |
 | An XML file in the song's zip that won't come out whole | The song can't be read. | The rest is read, with a warning naming the file left out. | Better |
 | A file in the song's zip that unpacks to more than 256 MB (a damaged or made-up zip) | Unpacked whole, however big. | Left out, as a file that won't come out whole is. | Better |
