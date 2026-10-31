@@ -7,7 +7,7 @@ use mo_formats::paths::file_name;
 use mo_library::{PluginKind, ProjectPlugin, ProjectSample, Save, SaveDetail};
 
 use crate::shell::folder_of;
-use crate::songs::{SongRow, Songs, plural, tempo_text, thousands};
+use crate::songs::{Other, SongRow, Songs, plural, tempo_text, thousands};
 
 /// The line above the name: "124 BPM · First made 3 Mar 2019 · saved 27 Oct 2026", or "Saved 27 Oct 2026" when it
 /// was all one day.
@@ -255,7 +255,8 @@ impl Go {
             Go::Tab(Tab::Plugins) => "See plugins",
             Go::Tab(Tab::Samples) => "See samples",
             Go::Tab(Tab::Saves) => "See saves",
-            Go::Tab(_) => "See",
+            Go::Tab(Tab::Overview) => "See overview",
+            Go::Tab(Tab::Details) => "See details",
             Go::Song(_) => "Show it",
         }
     }
@@ -263,10 +264,11 @@ impl Go {
 
 /// The song's Health strip, worst first: a file that can't be read or has gone, what's missing, then the questions
 /// about songs that may be saves of one. Answering those (Join, Keep apart) and Fix need the app to keep its own
-/// library, so for now the strip shows where to look.
-pub fn health(songs: &Songs, row: usize) -> Vec<HealthItem> {
+/// library, so for now the strip shows where to look. The counts come from the save as just read when there is one
+/// (`detail`), so they agree with the tabs.
+pub fn health(songs: &Songs, row: usize, detail: Option<&SaveDetail>) -> Vec<HealthItem> {
     let Some(r) = songs.rows.get(row) else { return Vec::new() };
-    let l = &r.song.latest;
+    let l = detail.map_or(&r.song.latest, |d| &d.save);
     let mut out = Vec::new();
     if let Some(e) = l.error.as_deref().filter(|e| !e.trim().is_empty()) {
         out.push(HealthItem { text: "The newest save couldn't be read".into(), why: e.to_owned(), go: Go::Nowhere });
@@ -301,14 +303,14 @@ pub fn health(songs: &Songs, row: usize) -> Vec<HealthItem> {
         });
     }
     for d in songs.doubts_of(row) {
-        let item = match d.b {
-            None => HealthItem {
-                text: format!("{} might be a song of its own", d.save),
+        let item = match &d.other {
+            Other::Save(name) => HealthItem {
+                text: format!("{name} might be a song of its own"),
                 why: d.why.clone(),
                 go: Go::Tab(Tab::Saves),
             },
-            Some(b) => {
-                let other = if b == row { d.a } else { b };
+            Other::Song(b) => {
+                let other = if *b == row { d.a } else { *b };
                 let name = songs.rows.get(other).map_or("", |o| o.song.name.as_str());
                 HealthItem {
                     text: format!("Might be the same song as {name}"),
@@ -449,7 +451,7 @@ mod tests {
         );
         let sunrise = s.rows.iter().position(|r| r.song.name == "Sunrise").unwrap();
         let sunrize = s.rows.iter().position(|r| r.song.name == "Sunrize").unwrap();
-        let items = health(&s, sunrise);
+        let items = health(&s, sunrise, None);
         let texts: Vec<&str> = items.iter().map(|i| i.text.as_str()).collect();
         assert_eq!(
             texts,
@@ -466,7 +468,7 @@ mod tests {
             ("See plugins", "See samples", "Show it")
         );
         // The other song asks the same question the other way round.
-        assert_eq!(health(&s, sunrize)[0].text, "Might be the same song as Sunrise");
+        assert_eq!(health(&s, sunrize, None)[0].text, "Might be the same song as Sunrise");
         assert_eq!(health_summary(&items), "Health · 4 things to look at");
         assert_eq!(health_summary(&[]), "");
         // Not asked when Settings turned the questions off.

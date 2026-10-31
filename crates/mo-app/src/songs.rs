@@ -299,20 +299,26 @@ pub struct Songs {
 pub struct Doubt {
     /// The song asked about, by its place in [`Songs::rows`].
     pub a: usize,
-    /// The other song, or `None` when it's one save inside `a` that a mark put there ("final", "v2", a date).
-    pub b: Option<usize>,
-    /// The other song's newest save, or that one save: its name.
-    pub save: String,
+    pub other: Other,
     pub why: String,
-    pub one_save: bool,
+}
+
+/// What a [`Doubt`] asks `a` about.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Other {
+    /// Another song, by its place in [`Songs::rows`].
+    Song(usize),
+    /// One save inside `a` that a mark put there ("final", "v2", a date): its name.
+    Save(String),
 }
 
 /// The settings that turn the questions off, or on across folders: the C# app's.
 pub const ASK_DOUBTS: &str = "ask_song_doubts";
 pub const DOUBTS_ACROSS_FOLDERS: &str = "song_doubts_across_folders";
 
-/// At most this many questions, as the C# app.
-const MOST_DOUBTS: usize = 200;
+/// At most this many questions. The C# app stopped at 200, which in a big library left songs with no question; the
+/// questions are only places and a line each, so far more fit without a cost.
+const MOST_DOUBTS: usize = 5000;
 
 impl Songs {
     /// Reads the saves and groups them into songs. Fix's copies still waiting for Keep or Delete are left out: until
@@ -348,17 +354,28 @@ impl Songs {
         asking: Option<bool>,
     ) -> Songs {
         let groups = songs::group_songs(saves, choices);
-        let found = asking.map(|across| songs::doubts(&groups, choices, across, MOST_DOUBTS)).unwrap_or_default();
-        let mut rows: Vec<SongRow> = groups.into_iter().map(|g| SongRow::new(g, gap_months)).collect();
+        let found = asking.map(|across| songs::doubt_pairs(&groups, choices, across, MOST_DOUBTS)).unwrap_or_default();
+        let mut rows: Vec<(usize, SongRow)> =
+            groups.into_iter().map(|g| SongRow::new(g, gap_months)).enumerate().collect();
         // Stable, so songs saved at the same moment keep the order they were grouped in.
-        rows.sort_by_key(|r| std::cmp::Reverse(r.saved));
-        let at: HashMap<&str, usize> = rows.iter().enumerate().map(|(i, r)| (r.song.key.as_str(), i)).collect();
+        rows.sort_by_key(|(_, r)| std::cmp::Reverse(r.saved));
+        // Where each group ended up in the list.
+        let mut at = vec![0; rows.len()];
+        for (place, (group, _)) in rows.iter().enumerate() {
+            if let Some(a) = at.get_mut(*group) {
+                *a = place;
+            }
+        }
+        let rows: Vec<SongRow> = rows.into_iter().map(|(_, r)| r).collect();
         let doubts = found
             .into_iter()
-            .filter_map(|d| {
-                let a = *at.get(d.a.key.as_str())?;
-                let b = if d.one_save { None } else { Some(*at.get(d.b.key.as_str())?) };
-                Some(Doubt { a, b, save: d.b.latest.name, why: d.why, one_save: d.one_save })
+            .filter_map(|(pair, why)| match pair {
+                songs::Pair::Songs(a, b) => Some(Doubt { a: *at.get(a)?, other: Other::Song(*at.get(b)?), why }),
+                songs::Pair::Save(a, save) => {
+                    let row = rows.get(*at.get(a)?)?;
+                    let name = row.song.saves().nth(save)?.name.clone();
+                    Some(Doubt { a: *at.get(a)?, other: Other::Save(name), why })
+                }
             })
             .collect();
         let saves = rows.iter().map(|r| r.song.save_count()).sum();
@@ -367,7 +384,7 @@ impl Songs {
 
     /// The questions about the song at `row`.
     pub fn doubts_of(&self, row: usize) -> impl Iterator<Item = &Doubt> {
-        self.doubts.iter().filter(move |d| d.a == row || d.b == Some(row))
+        self.doubts.iter().filter(move |d| d.a == row || d.other == Other::Song(row))
     }
 
     /// The DAWs the songs come from, for the DAW chip, in order.
