@@ -148,7 +148,7 @@ pub fn run(helper: &Path, parent: &Path) -> Result<bool, String> {
 fn compare(helper: &Path, files: &[PathBuf]) -> Result<bool, String> {
     let cs = crate::run_helper_with(helper, &["--sounds"], files)?;
     let mut differences = Vec::new();
-    let mut judged = 0usize;
+    let mut judged = Vec::new();
     for file in files {
         let key = file.to_string_lossy().into_owned();
         let name = file.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
@@ -186,19 +186,26 @@ fn compare(helper: &Path, files: &[PathBuf]) -> Result<bool, String> {
                 continue;
             }
             if harmony {
-                judged += 1;
+                judged.push(format!("{name}: {field}: C# {cs_value}, Rust {rust_value}"));
                 continue;
             }
             differences.push(format!("{name}: {field}: C# {cs_value}, Rust {rust_value}"));
         }
     }
     println!(
-        "Sounds twin: {} test sounds, {} differences, {judged} left to the harmony engine (key and chords found in the audio).",
+        "Sounds twin: {} test sounds, {} differences, {} left to the harmony engine (key and chords found in the audio).",
         files.len(),
-        differences.len()
+        differences.len(),
+        judged.len()
     );
     for d in &differences {
         println!("  {d}");
+    }
+    if !judged.is_empty() {
+        println!("Left to the harmony engine:");
+        for j in &judged {
+            println!("  {j}");
+        }
     }
     Ok(differences.is_empty())
 }
