@@ -1,5 +1,6 @@
 //! Fills the Songs page from mo-app's song list and answers its search box and chips. The library is read on a
-//! background thread (rule 12); searching and filtering then walk the rows already made.
+//! background thread (rule 12); searching and filtering then walk the rows already made, and a line's text is only
+//! made when the list draws that line.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -7,22 +8,60 @@ use std::rc::Rc;
 use chrono::{Local, NaiveDateTime};
 use mo_app::background;
 use mo_app::log;
-use mo_app::songs::{Entry, Filters, Songs};
+use mo_app::songs::{Entry, Filters, Songs, View};
 use mo_library::songs::DEFAULT_RUN_GAP_MONTHS;
 use mo_library::{Library, STATUSES};
-use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
+use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel};
 
 use crate::{AppWindow, SongLine, SongsData, YearStart};
 
-/// The page's rows and filters, kept on the window's thread.
-#[derive(Default)]
+/// The page's rows, filters and what they let through, kept on the window's thread.
 struct Page {
     songs: Songs,
     filters: Filters,
+    view: View,
+    /// When the view was made, for "This week" and the short dates.
+    now: NaiveDateTime,
+}
+
+impl Default for Page {
+    fn default() -> Page {
+        Page {
+            songs: Songs::default(),
+            filters: Filters::default(),
+            view: View::default(),
+            now: Local::now().naive_local(),
+        }
+    }
 }
 
 thread_local! {
     static PAGE: Rc<RefCell<Page>> = Rc::default();
+    static LINES: Rc<Lines> = PAGE.with(|p| Rc::new(Lines { page: p.clone(), notify: ModelNotify::default() }));
+}
+
+/// The list's lines, made from the page's view one at a time as the list draws them, so a new search doesn't build
+/// 16,000 lines nobody sees.
+struct Lines {
+    page: Rc<RefCell<Page>>,
+    notify: ModelNotify,
+}
+
+impl Model for Lines {
+    type Data = SongLine;
+
+    fn row_count(&self) -> usize {
+        self.page.borrow().view.entries.len()
+    }
+
+    fn row_data(&self, row: usize) -> Option<SongLine> {
+        let p = self.page.borrow();
+        p.view.entries.get(row).map(|e| line(&p.songs, e, p.now))
+    }
+
+    fn model_tracker(&self) -> &dyn ModelTracker {
+        &self.notify
+    }
 }
 
 /// Wires the page's search box and chips, and starts reading the library at `path` in the background.
@@ -89,6 +128,7 @@ pub fn show(app: &AppWindow, songs: Songs) {
     data.set_tags(strings(songs.tags.iter().map(String::as_str)));
     data.set_message(if songs.rows.is_empty() { "No songs in the library yet.".into() } else { SharedString::new() });
     PAGE.with(|p| p.borrow_mut().songs = songs);
+    data.set_lines(LINES.with(|l| ModelRc::from(l.clone() as Rc<dyn Model<Data = SongLine>>)));
     refresh(app);
 }
 
@@ -99,32 +139,34 @@ fn change(weak: &slint::Weak<AppWindow>, f: impl FnOnce(&mut Filters)) {
     refresh(&app);
 }
 
-/// Builds the lines the list shows from the rows and filters.
+/// Works out what the rows and filters let through and shows it.
 fn refresh(app: &AppWindow) {
     let data = app.global::<SongsData>();
-    let now = Local::now().naive_local();
     let heading = data.get_heading_height();
     let song = data.get_song_height();
     PAGE.with(|p| {
-        let p = p.borrow();
-        let view = p.songs.view(&p.filters, now);
-        let lines: Vec<SongLine> = view.entries.iter().map(|e| line(&p.songs, e, now)).collect();
-        // Where each line starts, for the year scrubber.
-        let mut y = 0.0;
-        let mut starts = Vec::with_capacity(view.entries.len());
-        for e in &view.entries {
-            starts.push(y);
-            y += if matches!(e, Entry::Heading(_)) { heading } else { song };
+        {
+            let mut p = p.borrow_mut();
+            p.now = Local::now().naive_local();
+            p.view = p.songs.view(&p.filters, p.now);
         }
-        let years: Vec<YearStart> = view
-            .years
-            .iter()
-            .map(|(year, at)| YearStart { year: year.to_string().into(), y: starts.get(*at).copied().unwrap_or(0.0) })
-            .collect();
+        LINES.with(|l| l.notify.reset());
+        let p = p.borrow();
+        let view = &p.view;
+        // Where each year's heading starts, for the year scrubber: every line is one of two heights.
+        let mut y = 0.0;
+        let mut at = 0;
+        let mut years = Vec::with_capacity(view.years.len());
+        for (year, start) in &view.years {
+            for e in view.entries.get(at..*start).unwrap_or_default() {
+                y += if matches!(e, Entry::Heading(_)) { heading } else { song };
+            }
+            at = *start;
+            years.push(YearStart { year: year.to_string().into(), y });
+        }
         let f = &p.filters;
-        data.set_lines(ModelRc::new(VecModel::from(lines)));
         data.set_years(ModelRc::new(VecModel::from(years)));
-        data.set_count(view.count.into());
+        data.set_count(view.count.as_str().into());
         data.set_daw(f.daw.clone().unwrap_or_default().into());
         data.set_status(f.status.clone().unwrap_or_default().into());
         data.set_tag(f.tag.clone().unwrap_or_default().into());
@@ -140,7 +182,7 @@ fn refresh(app: &AppWindow) {
 
 fn line(songs: &Songs, entry: &Entry, now: NaiveDateTime) -> SongLine {
     match entry {
-        Entry::Heading(h) => SongLine { heading: h.as_str().into(), row: -1, ..SongLine::default() },
+        Entry::Heading(h) => SongLine { heading: h.to_string().into(), row: -1, ..SongLine::default() },
         Entry::Song(i) => {
             let Some(r) = songs.rows.get(*i) else { return SongLine::default() };
             SongLine {
@@ -153,7 +195,8 @@ fn line(songs: &Songs, entry: &Entry, now: NaiveDateTime) -> SongLine {
                 missing: r.missing_text().into(),
                 rating: r.rating,
                 favourite: r.favourite,
-                status: r.status.as_str().into(),
+                // The first status ("Idea") is every song's to begin with, so it isn't shown.
+                status: if r.status == STATUSES[0] { SharedString::new() } else { r.status.as_str().into() },
                 daw: r.song.latest.daw.as_str().into(),
             }
         }

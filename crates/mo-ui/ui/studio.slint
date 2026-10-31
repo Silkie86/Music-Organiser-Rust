@@ -216,7 +216,7 @@ export component SearchBox inherits Rectangle {
     in property <string> hint: "Search";
     in-out property <string> text <=> input.text;
     callback edited(string);
-    // Down, Enter and Esc go to the page (to move into the list, open, or clear).
+    // Down, Enter and Esc go to the page first; it returns true when it used the key.
     callback key(string) -> bool;
     forward-focus: input;
     height: 32px;

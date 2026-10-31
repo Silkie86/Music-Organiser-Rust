@@ -10,12 +10,19 @@ use std::collections::BTreeSet;
 use chrono::{Datelike, Days, NaiveDateTime};
 use mo_formats::case;
 use mo_library::songs::{self, SaveRun, Song};
-use mo_library::{Library, LibraryError, STATUSES};
+use mo_library::{Library, LibraryError, STATUSES, Save, SongChoices};
+
+/// The status the Hide archived chip hides.
+pub const ARCHIVED: &str = STATUSES[6];
 
 /// One song in the list, with the fields that belong to the song (rule 14).
 #[derive(Clone, Debug)]
 pub struct SongRow {
     pub song: Song,
+    /// When it was last saved: its newest save's date. The list is in this order and its headings and dates use it.
+    /// It isn't always `song.latest`'s date: the save with the highest number is the song's latest even when an
+    /// older-numbered one was saved after it.
+    pub saved: NaiveDateTime,
     /// When the song was first made: its oldest save, or the date its file keeps, whichever is earlier.
     pub made: NaiveDateTime,
     /// Its working periods, oldest first.
@@ -34,6 +41,7 @@ pub struct SongRow {
 
 impl SongRow {
     pub fn new(song: Song, gap_months: u32) -> SongRow {
+        let saved = song.saves().map(|s| s.modified).max().unwrap_or(song.latest.modified);
         let made = songs::first_made(song.saves()).unwrap_or(song.latest.modified);
         let runs = songs::runs(song.saves(), gap_months);
         let mut earlier: Vec<&mo_library::Save> = song.older.iter().collect();
@@ -56,6 +64,7 @@ impl SongRow {
             earlier.iter().find(|s| s.rating > 0).map_or(0, |s| s.rating)
         };
         let mut row = SongRow {
+            saved,
             made,
             runs,
             status,
@@ -63,7 +72,11 @@ impl SongRow {
             favourite: latest.favourite || earlier.iter().any(|s| s.favourite),
             musical_key: pick(&latest.musical_key, |s| &s.musical_key),
             notes: pick(&latest.notes, |s| &s.notes),
-            tags: latest.tags.clone(),
+            tags: if latest.tags.is_empty() {
+                earlier.iter().find(|s| !s.tags.is_empty()).map_or_else(Vec::new, |s| s.tags.clone())
+            } else {
+                latest.tags.clone()
+            },
             find: String::new(),
             song,
         };
@@ -87,18 +100,12 @@ impl SongRow {
 
     /// The newest run, when it's a rework: quite different from how the song first ended up.
     pub fn rework(&self) -> Option<&SaveRun> {
-        self.runs.last().filter(|r| self.runs.len() > 1 && r.reworked)
-    }
-
-    /// The folder the song's newest save is in, without the path to it.
-    pub fn folder_name(&self) -> &str {
-        let f = self.song.latest.folder.trim_end_matches(['\\', '/']);
-        f.rsplit(['\\', '/']).next().unwrap_or(f)
+        self.runs.last().filter(|r| r.reworked)
     }
 
     /// When it was last saved: "3 Aug" this year, "3 Aug 2019" before.
     pub fn short_date(&self, now: NaiveDateTime) -> String {
-        let saved = self.song.latest.modified;
+        let saved = self.saved;
         if saved.year() == now.year() {
             saved.format("%-d %b").to_string()
         } else {
@@ -108,7 +115,7 @@ impl SongRow {
 
     /// The date's tooltip: when it was last saved, and when it was first made if that's another day.
     pub fn date_tip(&self) -> String {
-        let saved = self.song.latest.modified;
+        let saved = self.saved;
         if self.made.date() == saved.date() {
             format!("Made {}", saved.format("%-d %b %Y"))
         } else {
@@ -157,23 +164,56 @@ impl SongRow {
         l.missing_plugins + l.missing_samples > 0 || l.file_missing
     }
 
-    /// Whether the search box's text finds this song. Several words must each match something, in any order, so
-    /// "serum dark" finds a song using Serum with "dark" in its name or notes; a year such as 2019 also finds songs
-    /// saved or made that year; a key ("G minor") must match whole.
-    pub fn matches(&self, text: &str) -> bool {
-        let text = text.trim();
-        if text.is_empty() || self.matches_word(text) {
-            return true;
-        }
-        let words: Vec<&str> = text.split(' ').filter(|w| !w.is_empty()).collect();
-        words.len() > 1 && words.iter().all(|w| self.matches_word(w))
+    /// Whether the search finds this song. Several words must each match something, in any order, so "serum dark"
+    /// finds a song using Serum with "dark" in its name or notes; a year such as 2019 also finds songs saved or made
+    /// that year; a key ("G minor") must match whole.
+    pub fn matches(&self, search: &Search) -> bool {
+        let Some(whole) = &search.whole else { return true };
+        self.matches_word(whole) || (search.words.len() > 1 && search.words.iter().all(|w| self.matches_word(w)))
     }
 
-    fn matches_word(&self, word: &str) -> bool {
-        self.find.contains(&case::key(word))
-            || case::eq_ignore_case(self.key(), word)
-            || (word.len() == 4
-                && word.parse::<i32>().is_ok_and(|y| y == self.song.latest.modified.year() || y == self.made.year()))
+    fn matches_word(&self, word: &Word) -> bool {
+        self.find.contains(&word.key)
+            || case::eq_ignore_case(self.key(), &word.text)
+            || word.year.is_some_and(|y| y == self.saved.year() || y == self.made.year())
+    }
+}
+
+/// The search box's text, made ready once for every row it is tried on.
+#[derive(Clone, Debug, Default)]
+pub struct Search {
+    /// All of it, when there is any.
+    whole: Option<Word>,
+    /// Each word on its own.
+    words: Vec<Word>,
+}
+
+#[derive(Clone, Debug)]
+struct Word {
+    text: String,
+    /// Upper case, as the rows' search text is.
+    key: String,
+    /// The year it names, when it's four digits.
+    year: Option<i32>,
+}
+
+impl Word {
+    fn new(text: &str) -> Word {
+        let year = if text.len() == 4 { text.parse().ok() } else { None };
+        Word { text: text.to_owned(), key: case::key(text), year }
+    }
+}
+
+impl Search {
+    pub fn new(text: &str) -> Search {
+        let text = text.trim();
+        if text.is_empty() {
+            return Search::default();
+        }
+        Search {
+            whole: Some(Word::new(text)),
+            words: text.split(' ').filter(|w| !w.is_empty()).map(Word::new).collect(),
+        }
     }
 }
 
@@ -200,27 +240,48 @@ pub fn thousands(n: usize) -> String {
     out
 }
 
-/// The list's time heading for a save made on `saved`: "This week", "This month", "Earlier in 2026", then one per
-/// year.
-pub fn when_group(saved: NaiveDateTime, now: NaiveDateTime) -> String {
-    let week_ago = now.date().checked_sub_days(Days::new(7)).unwrap_or(now.date());
-    if saved.date() > week_ago {
-        "This week".to_owned()
-    } else if saved.year() == now.year() && saved.month() == now.month() {
-        "This month".to_owned()
-    } else if saved.year() == now.year() {
-        format!("Earlier in {}", now.year())
-    } else {
-        saved.year().to_string()
+/// The list's time headings: "This week", "This month", "Earlier in 2026", then one per year.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum When {
+    ThisWeek,
+    ThisMonth,
+    EarlierIn(i32),
+    Year(i32),
+}
+
+impl When {
+    /// The heading a song last saved on `saved` goes under.
+    pub fn of(saved: NaiveDateTime, now: NaiveDateTime) -> When {
+        let week_ago = now.date().checked_sub_days(Days::new(7)).unwrap_or(now.date());
+        if saved.date() > week_ago {
+            When::ThisWeek
+        } else if saved.year() == now.year() && saved.month() == now.month() {
+            When::ThisMonth
+        } else if saved.year() == now.year() {
+            When::EarlierIn(now.year())
+        } else {
+            When::Year(saved.year())
+        }
+    }
+}
+
+impl std::fmt::Display for When {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            When::ThisWeek => f.write_str("This week"),
+            When::ThisMonth => f.write_str("This month"),
+            When::EarlierIn(y) => write!(f, "Earlier in {y}"),
+            When::Year(y) => write!(f, "{y}"),
+        }
     }
 }
 
 /// Everything the page reads from the library in one go, on a background thread.
 #[derive(Clone, Debug, Default)]
 pub struct Songs {
-    /// Newest save first.
+    /// Last saved first.
     pub rows: Vec<SongRow>,
-    /// How many saves the rows hold.
+    /// How many saves the rows hold, leaving out the same file found again elsewhere.
     pub saves: usize,
     /// The tags in use, for the Tag chip.
     pub tags: Vec<String>,
@@ -236,9 +297,18 @@ impl Songs {
             saves.retain(|s| !pending.contains(&s.path));
         }
         let choices = library.song_choices()?;
-        let rows = songs::group_songs(&saves, &choices).into_iter().map(|g| SongRow::new(g, gap_months)).collect();
         let tags = library.all_tags()?.into_iter().map(|(t, _)| t).collect();
-        Ok(Songs { rows, saves: saves.len(), tags })
+        Ok(Songs::from_saves(&saves, &choices, tags, gap_months))
+    }
+
+    /// Groups the saves into songs and puts them in order, last saved first.
+    pub fn from_saves(saves: &[Save], choices: &SongChoices, tags: Vec<String>, gap_months: u32) -> Songs {
+        let mut rows: Vec<SongRow> =
+            songs::group_songs(saves, choices).into_iter().map(|g| SongRow::new(g, gap_months)).collect();
+        // Stable, so songs saved at the same moment keep the order they were grouped in.
+        rows.sort_by_key(|r| std::cmp::Reverse(r.saved));
+        let saves = rows.iter().map(|r| r.song.save_count()).sum();
+        Songs { rows, saves, tags }
     }
 
     /// The DAWs the songs come from, for the DAW chip, in order.
@@ -250,17 +320,18 @@ impl Songs {
     /// The rows the filters let through, under their headings, with where each year starts for the scrubber.
     pub fn view(&self, filters: &Filters, now: NaiveDateTime) -> View {
         let mut view = View::default();
-        let mut heading = String::new();
+        let mut heading = None;
         let mut shown = 0;
-        for (i, row) in self.rows.iter().enumerate().filter(|(_, r)| filters.allows(r)) {
-            let h = when_group(row.song.latest.modified, now);
-            if h != heading {
-                let year = row.song.latest.modified.year();
+        let search = Search::new(&filters.search);
+        for (i, row) in self.rows.iter().enumerate().filter(|(_, r)| filters.allows(r, &search)) {
+            let h = When::of(row.saved, now);
+            if heading != Some(h) {
+                let year = row.saved.year();
                 if view.years.last().is_none_or(|(y, _)| *y != year) {
                     view.years.push((year, view.entries.len()));
                 }
-                view.entries.push(Entry::Heading(h.clone()));
-                heading = h;
+                view.entries.push(Entry::Heading(h));
+                heading = Some(h);
             }
             view.entries.push(Entry::Song(i));
             shown += 1;
@@ -280,7 +351,7 @@ impl Songs {
 /// One line of the list: a heading, or a song (its place in [`Songs::rows`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Entry {
-    Heading(String),
+    Heading(When),
     Song(usize),
 }
 
@@ -311,14 +382,15 @@ pub struct Filters {
 }
 
 impl Filters {
-    pub fn allows(&self, r: &SongRow) -> bool {
+    /// Whether the song gets through; `search` is [`Search::new`] of this `search` text, made once for every row.
+    pub fn allows(&self, r: &SongRow, search: &Search) -> bool {
         let l = &r.song.latest;
         if self.daw.as_ref().is_some_and(|d| *d != l.daw) {
             return false;
         }
         match &self.status {
             Some(s) if *s != r.status => return false,
-            None if self.hide_archived && r.status == "Archived" => return false,
+            None if self.hide_archived && r.status == ARCHIVED => return false,
             _ => {}
         }
         if self.tag.as_ref().is_some_and(|t| !r.tags.contains(t)) {
@@ -330,7 +402,7 @@ impl Filters {
         if self.missing && !r.has_missing() {
             return false;
         }
-        r.matches(&self.search)
+        r.matches(search)
     }
 
     /// Whether any filter is set (the Clear button shows).
@@ -343,7 +415,6 @@ impl Filters {
 mod tests {
     use super::*;
     use chrono::NaiveDate;
-    use mo_library::{Save, SongChoices};
 
     fn day(y: i32, m: u32, d: u32) -> NaiveDateTime {
         NaiveDate::from_ymd_opt(y, m, d).unwrap().and_hms_opt(12, 0, 0).unwrap()
@@ -361,17 +432,16 @@ mod tests {
     }
 
     fn songs(saves: &[Save]) -> Songs {
-        let rows = songs::group_songs(saves, &SongChoices::default()).into_iter().map(|g| SongRow::new(g, 3)).collect();
-        Songs { rows, saves: saves.len(), tags: Vec::new() }
+        Songs::from_saves(saves, &SongChoices::default(), Vec::new(), 3)
     }
 
     #[test]
     fn headings_follow_the_newest_save() {
         let now = day(2026, 10, 31);
-        assert_eq!(when_group(day(2026, 10, 28), now), "This week");
-        assert_eq!(when_group(day(2026, 10, 2), now), "This month");
-        assert_eq!(when_group(day(2026, 3, 1), now), "Earlier in 2026");
-        assert_eq!(when_group(day(2019, 3, 1), now), "2019");
+        assert_eq!(When::of(day(2026, 10, 28), now).to_string(), "This week");
+        assert_eq!(When::of(day(2026, 10, 2), now).to_string(), "This month");
+        assert_eq!(When::of(day(2026, 3, 1), now).to_string(), "Earlier in 2026");
+        assert_eq!(When::of(day(2019, 3, 1), now).to_string(), "2019");
 
         let s = songs(&[
             save("Didums_77", day(2026, 10, 30)),
@@ -395,6 +465,39 @@ mod tests {
     }
 
     #[test]
+    fn a_song_goes_by_its_last_saved_date_whichever_save_that_is() {
+        let now = day(2026, 10, 31);
+        // Didums_5 was opened and saved again this year, after Didums_77 was last touched.
+        let s = songs(&[
+            save("Alpha", day(2026, 6, 1)),
+            save("Didums_5", day(2026, 5, 1)),
+            save("Charlie", day(2026, 4, 1)),
+            save("Didums_77", day(2019, 1, 1)),
+        ]);
+        let v = s.view(&Filters::default(), now);
+        let names: Vec<String> = v
+            .entries
+            .iter()
+            .map(|e| match e {
+                Entry::Heading(h) => format!("# {h}"),
+                Entry::Song(i) => s.rows[*i].song.name.clone(),
+            })
+            .collect();
+        assert_eq!(names, ["# Earlier in 2026", "Alpha", "Didums", "Charlie"]);
+        assert_eq!(v.years, [(2026, 0)]);
+        assert_eq!(s.rows[1].short_date(now), "1 May");
+    }
+
+    #[test]
+    fn tags_come_from_the_newest_save_that_has_them() {
+        let older = Save { tags: vec!["dark".into()], ..save("Didums_76", day(2025, 1, 1)) };
+        let s = songs(&[save("Didums_77", day(2025, 2, 1)), older]);
+        let f = Filters { tag: Some("dark".into()), ..Filters::default() };
+        assert_eq!(s.view(&f, day(2026, 1, 1)).shown, 1);
+        assert_eq!(s.view(&Filters { search: "dark".into(), ..Filters::default() }, day(2026, 1, 1)).shown, 1);
+    }
+
+    #[test]
     fn search_finds_words_in_any_order_a_year_and_a_whole_key() {
         let mut dark = save("Dark Matter", day(2019, 5, 1));
         dark.plugin_names = vec!["Serum".into()];
@@ -402,7 +505,7 @@ mod tests {
         let s = songs(&[dark, save("Sunrise", day(2024, 1, 1))]);
         let found = |text: &str| -> Vec<String> {
             let f = Filters { search: text.into(), ..Filters::default() };
-            s.rows.iter().filter(|r| f.allows(r)).map(|r| r.song.name.clone()).collect()
+            s.rows.iter().filter(|r| f.allows(r, &Search::new(text))).map(|r| r.song.name.clone()).collect()
         };
         assert_eq!(found("serum dark"), ["Dark Matter"]);
         assert_eq!(found("MATTER"), ["Dark Matter"]);
@@ -470,7 +573,6 @@ mod tests {
         assert_eq!(r.short_date(day(2024, 12, 1)), "3 Aug");
         assert_eq!(r.short_date(day(2026, 1, 1)), "3 Aug 2024");
         assert_eq!(r.date_tip(), "Last saved 3 Aug 2024. First made 10 Jan 2019.");
-        assert_eq!(r.folder_name(), "beats");
         assert_eq!(
             (tempo_text(92.5), tempo_text(128.25), thousands(16000), thousands(999)),
             ("92.5".into(), "128.25".into(), "16,000".into(), "999".into())

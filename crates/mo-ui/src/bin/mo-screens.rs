@@ -134,11 +134,8 @@ fn sample_songs() -> mo_app::songs::Songs {
         Save { tempo: Some(85.0), ..save("Old Tapes", "FL Studio", 2200) },
     ];
     saves.sort_by_key(|s| std::cmp::Reverse(s.modified));
-    let rows = mo_library::songs::group_songs(&saves, &mo_library::SongChoices::default())
-        .into_iter()
-        .map(|g| mo_app::songs::SongRow::new(g, 3))
-        .collect();
-    mo_app::songs::Songs { rows, saves: saves.len(), tags: vec!["dark".into(), "live set".into()] }
+    let tags = vec!["dark".into(), "live set".into()];
+    mo_app::songs::Songs::from_saves(&saves, &mo_library::SongChoices::default(), tags, 3)
 }
 
 /// Lets hover and slide-in animations finish, then draws the window.
