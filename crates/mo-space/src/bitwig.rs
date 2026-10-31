@@ -4,10 +4,12 @@
 //! simply go: a "(fixed)" project that points at the Library file is written first (by the converter), and only the
 //! copies it changed are offered for the Recycle Bin.
 //!
-//! This finds the copies that are the same as a Library file byte for byte. Nothing here changes anything.
+//! [`LibraryIndex::copies_in`] finds the copies that are the same as a Library file byte for byte, and changes nothing.
+//! [`remove_copies`] sends the copies a "(fixed)" project no longer uses to the Recycle Bin, once you've opened it.
 
 use std::collections::HashMap;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,6 +17,7 @@ use std::time::SystemTime;
 
 use rayon::prelude::*;
 
+use crate::clean::{Bin, Done, Problem, STOPPED, Sending, What, cant_keep};
 use crate::size::{Stopped, file_hash, is_link, walk};
 use crate::{real_path, text};
 
@@ -37,7 +40,7 @@ pub struct LibraryCopy {
 /// project, so a Library file is read once, and again only if it changed since (rule 12).
 pub struct LibraryIndex {
     by_size: HashMap<u64, Vec<PathBuf>>,
-    known: Mutex<HashMap<PathBuf, Known>>,
+    prints: Prints,
 }
 
 /// A Library file's fingerprint, with the size and time it had when it was read: used again only while they still
@@ -76,7 +79,7 @@ impl LibraryIndex {
         for (size, path) in kept {
             by_size.entry(size).or_default().push(path);
         }
-        Ok(LibraryIndex { by_size, known: Mutex::new(HashMap::new()) })
+        Ok(LibraryIndex { by_size, prints: Prints::default() })
     }
 
     /// The copies in one project folder that are the same as a Library file. A copy that's a link, or that isn't the
@@ -99,7 +102,7 @@ impl LibraryIndex {
         wanted.sort_unstable();
         wanted.dedup();
         let prints: HashMap<&PathBuf, [u8; 32]> =
-            wanted.into_par_iter().filter_map(|l| self.print_of(l, stop).map(|print| (l, print))).collect();
+            wanted.into_par_iter().filter_map(|l| self.prints.of(l, stop).map(|print| (l, print))).collect();
         let copies: Vec<Option<LibraryCopy>> = found
             .par_iter()
             .map(|(path, bytes)| {
@@ -117,10 +120,18 @@ impl LibraryIndex {
         copies.sort_by(|a, b| a.in_project.cmp(&b.in_project));
         Ok(copies)
     }
+}
 
-    /// A Library file's fingerprint: the one kept while its size and time are as they were, or read now. One that
-    /// can't be read now isn't kept (Bitwig may have it open): it's tried again next time.
-    fn print_of(&self, path: &Path, stop: &AtomicBool) -> Option<[u8; 32]> {
+/// Fingerprints of files once read, used again only while each file's size and time are as they were.
+#[derive(Default)]
+struct Prints {
+    known: Mutex<HashMap<PathBuf, Known>>,
+}
+
+impl Prints {
+    /// A file's fingerprint: the one kept while its size and time are as they were, or read now. One that can't be
+    /// read now isn't kept (Bitwig may have it open): it's tried again next time.
+    fn of(&self, path: &Path, stop: &AtomicBool) -> Option<[u8; 32]> {
         let meta = fs::metadata(path).ok()?;
         let (len, modified) = (meta.len(), meta.modified().ok());
         let kept = self.known.lock().ok()?.get(path).copied();
@@ -132,6 +143,163 @@ impl LibraryIndex {
         self.known.lock().ok()?.insert(path.to_path_buf(), Known { len, modified, print });
         Some(print)
     }
+}
+
+/// A "(fixed)" project the converter wrote, and what it changed.
+pub struct FixedProject<'a> {
+    /// The "(fixed)" project, beside the original in the project folder.
+    pub file: &'a Path,
+    /// What it changed: each copy in the project's `multi-samples` folder, and the Library file it uses instead.
+    pub changed: &'a [(PathBuf, PathBuf)],
+    /// Bitwig's Library folders: the file used instead must be in one of them.
+    pub library_folders: &'a [PathBuf],
+    /// Why a copy (and the Library file used instead) is still named by a Bitwig file in the project folder or below
+    /// it (the fixed project, other saves, autosaves, templates), apart from the original project; `None` when nothing
+    /// else names it. The app passes the converter's own check (`mo_convert::relink::still_named`), so it's read again
+    /// just before the copy goes.
+    pub still_named: &'a (dyn Fn(&Path, &Path) -> Option<String> + Sync),
+}
+
+/// Sends the copies a "(fixed)" project no longer uses to the Recycle Bin. This is the one place Space removes samples,
+/// an exception to rule 2 that Solomon chose (31 Oct 2026): a copy goes only while the same sound stays in the
+/// Library. The app calls it only after you've opened the fixed project and checked it plays, and says first that
+/// the original project can't find these copies once they've gone.
+///
+/// Each is checked again just before it goes: the fixed project is there and is a "(fixed)" one; the copy is a
+/// multisample file (not a link) in that project's own `multi-samples` folder (not a link either), on a drive with a
+/// Recycle Bin; the file used instead is in a Library folder, isn't a project's copy and isn't the same file on disk;
+/// no other Bitwig file in the project folder names the copy ([`FixedProject::still_named`]); and the two are still
+/// the same byte for byte (each Library file read once). Any that Windows guards go in one administrator step at the
+/// end, checked again just before it asks.
+pub fn remove_copies(fixed: &FixedProject<'_>, bin: &dyn Bin, stop: &AtomicBool) -> Done {
+    let mut done = Done::default();
+    let prints = Prints::default();
+    let libraries: Vec<PathBuf> = fixed.library_folders.iter().filter_map(|f| fs::canonicalize(f).ok()).collect();
+    let (prints, libraries) = (&prints, &libraries);
+    let mut sending = Sending::new(bin);
+    // Each file once, by where it really is (worked out before any goes): the first path sent for it, by that place.
+    // One whose first path stayed is still checked by the next.
+    let reals: Vec<Option<PathBuf>> = fixed.changed.iter().map(|(copy, _)| fs::canonicalize(copy).ok()).collect();
+    let mut sent: HashMap<PathBuf, &Path> = HashMap::new();
+    for ((copy, library), real_before) in fixed.changed.iter().zip(reals) {
+        if let Some(first) = real_before.as_ref().and_then(|r| sent.get(r)) {
+            if *first != copy.as_path() {
+                let why = format!("It's the same file as {}, given another way, so it's only sent once.", text(first));
+                done.problems.push(Problem { path: text(copy), why });
+            }
+            continue;
+        }
+        let check = move || still_a_copy(fixed, libraries, prints, copy, library, stop);
+        let checked = match check() {
+            Ok(checked) => checked,
+            Err(why) => {
+                done.problems.push(Problem { path: text(copy), why });
+                continue;
+            }
+        };
+        // Where it really is, as a plain path (not Windows' long-path form).
+        let real = real_path(&text(copy)).unwrap_or_else(|| text(copy));
+        sent.extend(real_before.into_iter().chain([checked.real]).map(|r| (r, copy.as_path())));
+        sending.send(&text(copy), real, checked.bytes, What::BitwigCopy, &mut done, move || check().map(|_| ()));
+    }
+    sending.finish(&mut done);
+    done
+}
+
+/// A copy that may go: where it really is, and its size.
+struct Checked {
+    real: PathBuf,
+    bytes: u64,
+}
+
+/// Whether a copy may still go (see [`remove_copies`]). The cheap checks come first, so nothing is read for nothing.
+fn still_a_copy(
+    fixed: &FixedProject<'_>,
+    libraries: &[PathBuf],
+    prints: &Prints,
+    copy: &Path,
+    library: &Path,
+    stop: &AtomicBool,
+) -> Result<Checked, String> {
+    let stays = |why: &str| Err(why.to_owned());
+    if stop.load(Ordering::Relaxed) {
+        return stays(STOPPED);
+    }
+    let fixed_name = fixed.file.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    if !fixed_name.contains("(fixed") || !fixed_name.ends_with(')') {
+        return stays("The project given isn't a \"(fixed)\" one, so its copies stay.");
+    }
+    if !fs::metadata(fixed.file).is_ok_and(|m| m.is_file()) {
+        return stays("The fixed project isn't there now, so the copies it was made for stay.");
+    }
+    // What's checked is what goes: a name that can't be written as text could reach the bin as another name.
+    let Some(copy_text) = copy.to_str() else {
+        return stays("Its name can't be read as text, so it stays.");
+    };
+    let meta = match fs::symlink_metadata(copy) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == ErrorKind::NotFound => return stays("It isn't there any more."),
+        Err(_) => return stays("It can't be looked at now, so it stays."),
+    };
+    if meta.file_type().is_symlink() || !meta.is_file() || !is_multisample(copy) {
+        return stays("It isn't a multisample file of the project's own, so it stays.");
+    }
+    // In the fixed project's own multi-samples folder, where both really are (letter case as on the drive).
+    let folder = fixed.file.parent().map(|p| p.join(PROJECT_FOLDER)).unwrap_or_default();
+    let real_folder =
+        fs::symlink_metadata(&folder).ok().filter(|m| m.is_dir()).and_then(|_| fs::canonicalize(&folder).ok());
+    let real = fs::canonicalize(copy).map_err(|_| "It can't be looked at now, so it stays.".to_owned())?;
+    if !real_folder.is_some_and(|f| real.starts_with(f)) {
+        return stays("It isn't in the fixed project's own multi-samples folder, so it stays.");
+    }
+    // As a plain path: Windows' long-path form (`\\?\C:\…`) would read as a server's name.
+    let real_text = real_path(copy_text).ok_or_else(|| "It can't be looked at now, so it stays.".to_owned())?;
+    if let Some(why) = cant_keep(copy_text, &real_text, stop) {
+        return stays(why);
+    }
+    let Some(real_library) = fs::canonicalize(library).ok().filter(|l| l.is_file()) else {
+        return stays("The Library file the fixed project uses isn't there now, so the copy stays.");
+    };
+    if !libraries.iter().any(|l| real_library.starts_with(l)) {
+        return stays("What the fixed project uses instead isn't in the Library, so the copy stays.");
+    }
+    if in_a_project(&real_library) {
+        return stays("What the fixed project uses instead is a project's copy too, so this one stays.");
+    }
+    let library_meta =
+        fs::metadata(&real_library).map_err(|_| "The Library file can't be looked at now.".to_owned())?;
+    if same_file(&meta, &library_meta) {
+        return stays("It's the Library file itself (a hard link to it), so removing it frees nothing. It stays.");
+    }
+    if library_meta.len() != meta.len() {
+        return stays("It isn't the same as the Library file now, so it stays.");
+    }
+    if let Some(why) = (fixed.still_named)(copy, library) {
+        return Err(why);
+    }
+    let (copy_print, library_print) = (file_hash(copy, stop), prints.of(&real_library, stop));
+    if stop.load(Ordering::Relaxed) {
+        return stays(STOPPED);
+    }
+    match (copy_print, library_print) {
+        (Some(a), Some(b)) if a == b => Ok(Checked { real, bytes: meta.len() }),
+        (Some(_), Some(_)) => stays("It isn't the same as the Library file now, so it stays."),
+        _ => stays("It or the Library file couldn't be read whole to compare them, so it stays."),
+    }
+}
+
+/// Whether two looks are at one file on disk (hard links to it). Only a Mac or Linux can tell here.
+#[cfg(unix)]
+fn same_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    a.dev() == b.dev() && a.ino() == b.ino()
+}
+
+/// Windows' file numbers aren't readable from here yet: a hard link counts as a copy (it goes to the bin, and the
+/// Library file stays).
+#[cfg(not(unix))]
+fn same_file(_a: &fs::Metadata, _b: &fs::Metadata) -> bool {
+    false
 }
 
 /// A Bitwig multisample file.

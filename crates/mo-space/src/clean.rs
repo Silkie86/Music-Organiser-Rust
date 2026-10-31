@@ -387,6 +387,8 @@ pub enum What {
     Song(CompactKind),
     /// Something of a plugin's: its presets or sounds folder, or a plugin file or bundle (a spare copy).
     Plugin(SpaceKind),
+    /// A Bitwig project's copy of a Library multisample, once a "(fixed)" project points at the Library file.
+    BitwigCopy,
 }
 
 /// A line that couldn't go (or come back), and why.
