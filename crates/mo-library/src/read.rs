@@ -6,36 +6,18 @@
 
 use std::collections::HashSet;
 use std::path::Path;
-use std::sync::LazyLock;
 
 use mo_formats::case;
 use mo_formats::paths::{file_name, stem};
 use mo_formats::plugins::{self, elektron_device, is_fl_studio_bundled, vst2_id_in};
 use mo_formats::{PluginKind, PluginRef, ProjectInfo, SampleUse, bitwig, fl, studio_one};
-use regex::Regex;
 
 use crate::samples::SampleLocator;
 use crate::scan::{daw_of, mtime};
 use crate::{ProjectPlugin, ProjectSample, Save, SaveDetail};
 
-/// A plugin's name as the library matches names: lower-case letters and digits only, without the common endings, so
-/// "Serum (x64)" matches "Serum" (the C# app's `NameKey`).
-pub fn name_key(name: &str) -> String {
-    // One pass, as the C# pattern runs. Its last part, "x64" straight after a letter ("Serumx64"), needs a look back
-    // the regex crate doesn't have: the letter is matched too and put back.
-    static NOISE: LazyLock<Option<Regex>> = LazyLock::new(|| {
-        Regex::new(
-            r"\((x64|x86|64[- ]?bit|32[- ]?bit|vst3?|clap|au|mono|stereo|automap)\)|\b(x64|x86|vst3?|clap)\b|\bvst_(x64|x86)\b|_(x64|x86|64)\b|(?P<letter>[a-z])x64\b",
-        )
-        .ok()
-    });
-    let n = case::to_lower(name);
-    let n = match NOISE.as_ref() {
-        Some(re) => re.replace_all(&n, |c: &regex::Captures| c.name("letter").map_or("", |l| l.as_str()).to_owned()),
-        None => n.as_str().into(),
-    };
-    n.chars().filter(|c| c.is_ascii_lowercase() || c.is_ascii_digit()).collect()
-}
+// Moved to mo-formats so the preset export can use it without the library; kept here under its old name.
+pub use mo_formats::plugins::name_key;
 
 fn is_waves(name: &str, path: &str) -> bool {
     let lower = case::to_lower(name);
@@ -217,15 +199,6 @@ fn fill(mut save: Save, info: ProjectInfo, installed: &Installed, samples: &Samp
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn plugin_names_match_without_their_endings() {
-        assert_eq!(name_key("Serum (x64)"), "serum");
-        assert_eq!(name_key("Serum_x64"), "serum");
-        assert_eq!(name_key("Serumx64"), "serum");
-        assert_eq!(name_key("Pro-Q 3 (VST3)"), "proq3");
-        assert_eq!(name_key("Kontakt 7"), "kontakt7");
-    }
 
     fn plugin(name: &str) -> PluginRef {
         PluginRef { name: name.into(), format: "VST3".into(), ..PluginRef::default() }

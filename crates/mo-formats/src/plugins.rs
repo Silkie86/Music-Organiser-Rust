@@ -1,5 +1,10 @@
 //! What a plugin's file path and name say about it.
 
+use std::sync::LazyLock;
+
+use regex::Regex;
+
+use crate::case;
 use crate::model::PluginKind;
 
 /// The file endings plugins have.
@@ -198,9 +203,37 @@ pub fn kind_of(name: &str) -> PluginKind {
     if elektron_device(name).is_some() { PluginKind::Instrument } else { PluginKind::Unknown }
 }
 
+/// A plugin's name as the library matches names: lower-case letters and digits only, without the common endings, so
+/// "Serum (x64)" matches "Serum" (the C# app's `NameKey`).
+pub fn name_key(name: &str) -> String {
+    // One pass, as the C# pattern runs. Its last part, "x64" straight after a letter ("Serumx64"), needs a look back
+    // the regex crate doesn't have: the letter is matched too and put back.
+    static NOISE: LazyLock<Option<Regex>> = LazyLock::new(|| {
+        Regex::new(
+            r"\((x64|x86|64[- ]?bit|32[- ]?bit|vst3?|clap|au|mono|stereo|automap)\)|\b(x64|x86|vst3?|clap)\b|\bvst_(x64|x86)\b|_(x64|x86|64)\b|(?P<letter>[a-z])x64\b",
+        )
+        .ok()
+    });
+    let n = case::to_lower(name);
+    let n = match NOISE.as_ref() {
+        Some(re) => re.replace_all(&n, |c: &regex::Captures| c.name("letter").map_or("", |l| l.as_str()).to_owned()),
+        None => n.as_str().into(),
+    };
+    n.chars().filter(|c| c.is_ascii_lowercase() || c.is_ascii_digit()).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plugin_names_match_without_their_endings() {
+        assert_eq!(name_key("Serum (x64)"), "serum");
+        assert_eq!(name_key("Serum_x64"), "serum");
+        assert_eq!(name_key("Serumx64"), "serum");
+        assert_eq!(name_key("Pro-Q 3 (VST3)"), "proq3");
+        assert_eq!(name_key("Kontakt 7"), "kontakt7");
+    }
 
     #[test]
     fn knows_the_elektron_box_a_plugin_name_means() {
