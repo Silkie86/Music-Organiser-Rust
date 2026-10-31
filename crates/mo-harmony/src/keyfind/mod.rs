@@ -187,6 +187,10 @@ pub struct Model<'a> {
 /// The finder built into the app.
 pub const SHIPPED: Model<'static> = Model { weights: &weights::WEIGHTS, calibration: &weights::CALIBRATION };
 
+/// Whether the built-in weights were fitted yet. Until they are, every key scores the same, and every reading is
+/// C major at one chance in 24.
+pub const FITTED: bool = weights::FITTED;
+
 /// A key's score: how well what was heard fits it, before the scores become chances. Summed in the order
 /// [`Heard::features`] gives, so it's the same to the last bit for notes moved to another key.
 pub fn score(heard: &Heard, key: Key, span: Span, weights: &[f64]) -> f64 {
@@ -208,6 +212,18 @@ pub fn chances(z: [f64; 24]) -> [f64; 24] {
     sorted.sort_by(f64::total_cmp);
     let total: f64 = sorted.iter().sum();
     if total > 0.0 && total.is_finite() { raised.map(|r| r / total) } else { [1.0 / 24.0; 24] }
+}
+
+/// The likeliest key in a list of 24 chances (in the order of [`Key::ALL`]) and its chance; ties go to the key first
+/// in [`Key::ALL`].
+pub fn best(chances: &[f64; 24]) -> (Key, f64) {
+    let mut best = (Key::major(PitchClass::C), f64::NEG_INFINITY);
+    for (k, p) in Key::ALL.iter().zip(chances) {
+        if *p > best.1 {
+            best = (*k, *p);
+        }
+    }
+    if best.1.is_finite() { best } else { (best.0, 0.0) }
 }
 
 /// The finder's answer: a chance for every key, and what it heard.
@@ -256,9 +272,9 @@ impl KeyReading {
         all
     }
 
-    /// The likeliest key and its chance.
+    /// The likeliest key and its chance (ties go to the key first in [`Key::ALL`]).
     pub fn best(&self) -> (Key, f64) {
-        self.ranked().first().copied().unwrap_or((Key::major(PitchClass::C), 0.0))
+        best(&self.chances)
     }
 
     /// The answer to show, and the chance that it's right.

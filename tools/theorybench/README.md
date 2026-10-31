@@ -75,12 +75,12 @@ notes.
 - **Folds.** Each song goes to one of five folds by a hash of its name (`pop909/001`, so POP909 and POP909-CL agree),
   and songs with the same notes in another key share a fold. Fold 0 is kept back: every choice is made on folds 1 to
   4, each scored by a finder fitted on the other three. `--final` fits on folds 1 to 4, scores fold 0 once, and adds
-  a line to `test-runs.md`, so how often fold 0 was looked at is on record. `--write` fits on every song and writes
-  `crates/mo-harmony/src/keyfind/weights.rs`.
+  a line to `test-runs.md`, so how often fold 0 was looked at is on record. `--write` comes last: it scores every
+  fold (fold 0 included, so it's logged too), fits on every song and writes `crates/mo-harmony/src/keyfind/weights.rs`.
 - **Cases.** Whole songs (heard as songs), stretches of 1 to 16 bars cut along the bar lines (heard as windows, and
   scored against the key at their middle, as the C# bench did) and each song's first bars (heard as loops). Each is
   heard five ways: the full mix, the tune alone, the piano's upper notes, the bass line taken from the piano, and the
-  piano. Only stretches inside one key region are fitted on, at most `--picks` a song for each length; all are scored.
+  piano (the parts under the tune, each with its role: a dataset's bass part stays a bass part). Only stretches inside one key region are fitted on, at most `--picks` a song for each length; all are scored.
 - **Model.** Each stream's weights are a counted table (the average share of each note above the labelled tonic) times
   one trust weight, plus a correction for each note held near 0 by `--lambda-delta` (`inf`: the tables alone). The
   tables a song is fitted with are counted without its own fifth of the songs.

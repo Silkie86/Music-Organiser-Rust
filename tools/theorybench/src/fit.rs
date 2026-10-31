@@ -44,7 +44,9 @@ pub fn choice_scores<C: Choice + ?Sized>(case: &C, w: &[f64]) -> Vec<f64> {
         .collect()
 }
 
-/// Softmax of scores, computed without overflow.
+/// Softmax of scores, computed without overflow. (The key finder's own, `keyfind::chances`, adds its terms in order
+/// of size so that scores moved round the keys give the same chances moved round; the fit doesn't need that, and this
+/// is quicker.)
 pub fn softmax(scores: &[f64]) -> Vec<f64> {
     let top = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let e: Vec<f64> = scores.iter().map(|s| (s - top).exp()).collect();
@@ -76,69 +78,21 @@ fn penalty(w: &[f64], l2: &[f64]) -> f64 {
 /// The loss, its gradient and its Hessian (row by row) at `w`, all including the penalty.
 fn loss_and_slopes<C: Choice>(cases: &[C], features: usize, w: &[f64], l2: &[f64]) -> (f64, Vec<f64>, Vec<f64>) {
     let f = features;
-    let blocks: Vec<(f64, f64, Vec<f64>, Vec<f64>)> = cases
-        .par_chunks(BLOCK)
-        .map(|block| {
-            let (mut weight, mut loss) = (0.0, 0.0);
-            let mut grad = vec![0.0; f];
-            let mut hess = vec![0.0; f * f];
-            let mut mean = vec![0.0; f];
-            let mut row: Vec<(usize, f64)> = Vec::new();
-            for case in block {
-                let cw = case.weight();
-                let s = choice_scores(case, w);
-                let p = softmax(&s);
-                weight += cw;
-                loss += cw * surprise(&s, case.truth());
-                mean.iter_mut().for_each(|m| *m = 0.0);
-                for (k, pk) in p.iter().enumerate() {
-                    row.clear();
-                    case.features(k, &mut |i, v| {
-                        if i < f {
-                            row.push((i, v));
-                        }
-                    });
-                    for &(i, v) in &row {
-                        mean[i] += pk * v;
-                    }
-                    // E[x xᵀ], upper triangle; the lower half is mirrored at the end.
-                    for &(a, va) in &row {
-                        let va = pk * va * cw;
-                        for &(b, vb) in &row {
-                            if b >= a {
-                                hess[a * f + b] += va * vb;
-                            }
-                        }
-                    }
-                }
-                case.features(case.truth(), &mut |i, v| {
-                    if i < f {
-                        grad[i] -= cw * v;
-                    }
-                });
-                let used: Vec<usize> = (0..f).filter(|&i| mean[i] != 0.0).collect();
-                for &a in &used {
-                    grad[a] += cw * mean[a];
-                    let ma = mean[a] * cw;
-                    for &b in &used {
-                        if b >= a {
-                            hess[a * f + b] -= ma * mean[b];
-                        }
-                    }
-                }
-            }
-            (weight, loss, grad, hess)
-        })
-        .collect();
     let mut weight = 0.0;
     let mut loss = 0.0;
     let mut grad = vec![0.0; f];
     let mut hess = vec![0.0; f * f];
-    for (bw, bl, bg, bh) in blocks {
-        weight += bw;
-        loss += bl;
-        grad.iter_mut().zip(&bg).for_each(|(g, v)| *g += v);
-        hess.iter_mut().zip(&bh).for_each(|(h, v)| *h += v);
+    // A few blocks at a time, so only that many Hessians are held at once; the blocks are still added in order, so
+    // the sums are the same to the last bit however many threads there are.
+    for batch in cases.chunks(BLOCK * BLOCKS_AT_ONCE) {
+        let blocks: Vec<(f64, f64, Vec<f64>, Vec<f64>)> =
+            batch.par_chunks(BLOCK).map(|b| block_slopes(b, f, w)).collect();
+        for (bw, bl, bg, bh) in blocks {
+            weight += bw;
+            loss += bl;
+            grad.iter_mut().zip(&bg).for_each(|(g, v)| *g += v);
+            hess.iter_mut().zip(&bh).for_each(|(h, v)| *h += v);
+        }
     }
     let weight = if weight > 0.0 { weight } else { 1.0 };
     let loss = loss / weight + penalty(w, l2);
@@ -153,6 +107,62 @@ fn loss_and_slopes<C: Choice>(cases: &[C], features: usize, w: &[f64], l2: &[f64
         }
     }
     (loss, grad, hess)
+}
+
+/// Blocks summed at once by [`loss_and_slopes`].
+const BLOCKS_AT_ONCE: usize = 32;
+
+/// One block's weight, weighted loss, gradient and Hessian (upper triangle), before the penalty.
+fn block_slopes<C: Choice>(block: &[C], f: usize, w: &[f64]) -> (f64, f64, Vec<f64>, Vec<f64>) {
+    let (mut weight, mut loss) = (0.0, 0.0);
+    let mut grad = vec![0.0; f];
+    let mut hess = vec![0.0; f * f];
+    let mut mean = vec![0.0; f];
+    let mut row: Vec<(usize, f64)> = Vec::new();
+    for case in block {
+        let cw = case.weight();
+        let s = choice_scores(case, w);
+        let p = softmax(&s);
+        weight += cw;
+        loss += cw * surprise(&s, case.truth());
+        mean.iter_mut().for_each(|m| *m = 0.0);
+        for (k, pk) in p.iter().enumerate() {
+            row.clear();
+            case.features(k, &mut |i, v| {
+                if i < f {
+                    row.push((i, v));
+                }
+            });
+            for &(i, v) in &row {
+                mean[i] += pk * v;
+            }
+            // E[x xᵀ], upper triangle; the lower half is mirrored at the end.
+            for &(a, va) in &row {
+                let va = pk * va * cw;
+                for &(b, vb) in &row {
+                    if b >= a {
+                        hess[a * f + b] += va * vb;
+                    }
+                }
+            }
+        }
+        case.features(case.truth(), &mut |i, v| {
+            if i < f {
+                grad[i] -= cw * v;
+            }
+        });
+        let used: Vec<usize> = (0..f).filter(|&i| mean[i] != 0.0).collect();
+        for &a in &used {
+            grad[a] += cw * mean[a];
+            let ma = mean[a] * cw;
+            for &b in &used {
+                if b >= a {
+                    hess[a * f + b] -= ma * mean[b];
+                }
+            }
+        }
+    }
+    (weight, loss, grad, hess)
 }
 
 /// The penalised loss alone.
@@ -214,31 +224,49 @@ pub fn fit<C: Choice>(cases: &[C], features: usize, l2: &[f64]) -> Result<Fitted
     loop {
         let (loss, grad, hess) = loss_and_slopes(cases, features, &w, l2);
         let largest = grad.iter().fold(0.0f64, |m, g| m.max(g.abs()));
-        if largest < 1e-10 || steps >= 100 {
+        if largest < 1e-10 {
             return Ok(Fitted { weights: w, loss, steps });
+        }
+        if steps >= MOST_STEPS {
+            return Err(format!("the fit didn't settle in {MOST_STEPS} Newton steps (largest slope {largest:e})"));
         }
         let minus: Vec<f64> = grad.iter().map(|g| -g).collect();
         let step = solve(&hess, &minus).ok_or("the Hessian isn't positive definite")?;
         let slope: f64 = grad.iter().zip(&step).map(|(g, d)| g * d).sum();
-        // Backtracking: halve the step until the loss drops enough.
+        // Backtracking: halve the step until the loss drops enough. A step that never does is never taken.
         let mut t = 1.0;
         let next = loop {
             let tried: Vec<f64> = w.iter().zip(&step).map(|(a, d)| a + t * d).collect();
             let tried_loss = loss_at(cases, &tried, l2);
-            if tried_loss <= loss + 1e-4 * t * slope || t < 1e-10 {
-                break (tried, tried_loss);
+            if tried_loss <= loss + 1e-4 * t * slope {
+                break Some((tried, tried_loss));
+            }
+            if t < 1e-10 {
+                break None;
             }
             t /= 2.0;
         };
+        let Some((tried, tried_loss)) = next else {
+            // Nothing lowers the loss any more. That's the best when the slopes are as small as rounding leaves them;
+            // otherwise the fit is stuck, and its numbers mustn't be used.
+            return if largest < 1e-6 {
+                Ok(Fitted { weights: w, loss, steps })
+            } else {
+                Err(format!("the fit got stuck after {steps} Newton steps (largest slope {largest:e})"))
+            };
+        };
         steps += 1;
-        let gain = loss - next.1;
-        w = next.0;
-        if gain.abs() <= 1e-15 * loss.abs().max(1.0) {
+        let gain = loss - tried_loss;
+        w = tried;
+        if gain <= 1e-15 * loss.abs().max(1.0) {
             let (loss, _, _) = loss_and_slopes(cases, features, &w, l2);
             return Ok(Fitted { weights: w, loss, steps });
         }
     }
 }
+
+/// Newton steps a fit may take: a well-posed one settles in about ten.
+const MOST_STEPS: usize = 100;
 
 /// One case held out of a fit, for calibrating: its candidates' scores, the right one, how much it counts, and what
 /// each of the calibration's numbers is multiplied by for it (the key finder's `Calibration::terms`).

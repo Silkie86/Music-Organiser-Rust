@@ -58,7 +58,10 @@ pub fn cs_finder() -> Finder {
 
 /// Every finder the bench compares, the C# app's first: the others are measured against it.
 pub fn finders() -> Vec<Finder> {
-    let mut all = vec![cs_finder(), harmony_finder()];
+    let mut all = vec![cs_finder()];
+    if mo_harmony::keyfind::FITTED {
+        all.push(harmony_finder());
+    }
     for (which, (name, _, _)) in profiles::PROFILES.iter().enumerate() {
         all.push(Finder {
             name: (*name).into(),
@@ -130,9 +133,9 @@ pub fn role(name: &str) -> Role {
     }
 }
 
-/// A MIDI 1.0 velocity in MIDI 2.0's sixteen bits (the top bits).
+/// A MIDI 1.0 velocity in MIDI 2.0's sixteen bits, by the rule the app's readers use (rule 22).
 pub fn velocity16(v: u8) -> u16 {
-    u16::from(v.min(127)) << 9
+    mo_formats::velocity::from_7(v)
 }
 
 /// The options both `keys` and `keyfit` take, and the files read.
@@ -207,7 +210,12 @@ pub fn setup(args: &[String], own: &[&str], flags: &[&str], lengths: &[i64]) -> 
 
 pub fn run(args: &[String]) -> Result<(), String> {
     let setup = setup(args, &[], &[], &CLIP_BARS)?;
-    if setup.items.iter().any(|i| i.source.starts_with("pop909")) {
+    if !mo_harmony::keyfind::FITTED {
+        println!(
+            "mo-harmony is left out: its weights aren't fitted yet, so every key scores the same. `theorybench \
+             keyfit` measures it."
+        );
+    } else if setup.items.iter().any(|i| i.source.starts_with("pop909")) {
         println!(
             "mo-harmony's weights were fitted on these songs, so its numbers here flatter it: `theorybench keyfit` \
              gives the fair ones, from songs held out of the fit."
@@ -225,50 +233,68 @@ pub fn run(args: &[String]) -> Result<(), String> {
 /// Every set of cases the bench scores: whole songs with one key, whole songs that change key, and the clips of each
 /// length, each with its title and what it's measured against.
 pub fn all_cases(items: &[Item], parts: &Parts, lengths: &[i64]) -> Vec<(String, String, Vec<Case>)> {
-    let (one_key, changing) = whole_songs(items, parts);
+    let songs: Vec<SongNotes> = items.par_iter().map(|item| SongNotes::of(item, parts)).collect();
+    let (one_key, changing) = whole_songs(items, &songs);
     let mut out = vec![
         ("Whole songs with one key".to_owned(), "the labelled key".to_owned(), one_key),
         ("Whole songs that change key".to_owned(), "the key labelled for the longest time".to_owned(), changing),
     ];
     for &bars in lengths {
-        let clips = all_clips(items, parts, bars);
+        let clips = all_clips(items, &songs, bars);
         out.push((format!("{bars}-bar clips"), "the key labelled at the middle of the clip".to_owned(), clips));
     }
     out
 }
 
-/// One song's notes, all together and part by part, from `from` for `length` ticks (the whole song when `None`),
-/// moved to start at 0 when cut.
-fn heard(item: &Item, parts: &Parts, cut: Option<(i64, i64)>) -> (Vec<Note>, Vec<(Role, Vec<mo_harmony::Note>)>) {
-    let merged = item.notes_of(|r| parts.keeps(r));
-    let merged = match cut {
-        Some((from, length)) => item::cut(&merged, from, length),
-        None => merged,
-    };
-    let by_part = item
-        .parts
-        .iter()
-        .filter(|p| parts.keeps(&p.role))
-        .map(|p| {
-            let mut notes: Vec<Note> =
-                p.notes.iter().map(|&(start, length, key, velocity)| Note { start, length, key, velocity }).collect();
-            notes.sort_by_key(|n| (n.start, n.key));
-            if let Some((from, length)) = cut {
-                notes = item::cut(&notes, from, length);
-            }
-            let notes = notes
-                .iter()
-                .map(|n| mo_harmony::Note {
-                    start: n.start,
-                    length: n.length,
-                    key: n.key,
-                    velocity: velocity16(n.velocity),
-                })
-                .collect();
-            (role(&p.role), notes)
-        })
-        .collect();
-    (merged, by_part)
+/// One song's notes as the finders hear them: all together, and part by part with each part's role, each in order of
+/// start. Sorted once a song, then cut for each clip.
+struct SongNotes {
+    merged: Vec<Note>,
+    parts: Vec<(Role, Vec<Note>)>,
+}
+
+impl SongNotes {
+    fn of(item: &Item, parts: &Parts) -> SongNotes {
+        let merged = item.notes_of(|r| parts.keeps(r));
+        let parts = item
+            .parts
+            .iter()
+            .filter(|p| parts.keeps(&p.role))
+            .map(|p| {
+                let mut notes: Vec<Note> = p
+                    .notes
+                    .iter()
+                    .map(|&(start, length, key, velocity)| Note { start, length, key, velocity })
+                    .collect();
+                notes.sort_by_key(|n| (n.start, n.key));
+                (role(&p.role), notes)
+            })
+            .collect();
+        SongNotes { merged, parts }
+    }
+
+    /// The notes from `from` for `length` ticks (the whole song when `None`), moved to start at 0 when cut: all
+    /// together, and part by part as mo-harmony takes them.
+    fn heard(&self, cut: Option<(i64, i64)>) -> (Vec<Note>, Vec<(Role, Vec<mo_harmony::Note>)>) {
+        let take = |notes: &[Note]| cut.map_or_else(|| notes.to_vec(), |(from, length)| item::cut(notes, from, length));
+        let by_part = self
+            .parts
+            .iter()
+            .map(|(role, notes)| {
+                let notes = take(notes)
+                    .iter()
+                    .map(|n| mo_harmony::Note {
+                        start: n.start,
+                        length: n.length,
+                        key: n.key,
+                        velocity: velocity16(n.velocity),
+                    })
+                    .collect();
+                (*role, notes)
+            })
+            .collect();
+        (take(&self.merged), by_part)
+    }
 }
 
 /// The song's grid: its beat and bar, with a bar line where the labels put one (or at 0 for a clip, which is cut
@@ -282,12 +308,13 @@ pub fn grid_of(item: &Item, clip: bool) -> Grid {
 }
 
 /// The whole songs as cases: those with one key, and those that change key.
-fn whole_songs(items: &[Item], parts: &Parts) -> (Vec<Case>, Vec<Case>) {
+fn whole_songs(items: &[Item], songs: &[SongNotes]) -> (Vec<Case>, Vec<Case>) {
     let per_song: Vec<Option<Case>> = items
         .par_iter()
+        .zip(songs)
         .enumerate()
-        .map(|(song, item)| {
-            let (notes, by_part) = heard(item, parts, None);
+        .map(|(song, (item, notes))| {
+            let (notes, by_part) = notes.heard(None);
             item.main_key().filter(|_| notes.len() >= MIN_NOTES).map(|truth| Case {
                 song,
                 ppq: item.ppq,
@@ -309,18 +336,23 @@ fn whole_songs(items: &[Item], parts: &Parts) -> (Vec<Case>, Vec<Case>) {
 }
 
 /// Every song cut into clips of `bars` bars.
-fn all_clips(items: &[Item], parts: &Parts, bars: i64) -> Vec<Case> {
-    items.par_iter().enumerate().flat_map_iter(|(song, item)| clips(item, song, parts, bars)).collect()
+fn all_clips(items: &[Item], songs: &[SongNotes], bars: i64) -> Vec<Case> {
+    items
+        .par_iter()
+        .zip(songs)
+        .enumerate()
+        .flat_map_iter(|(song, (item, notes))| clips(item, song, notes, bars))
+        .collect()
 }
 
 /// The song cut into clips of `bars` bars along its bar lines, each with the key labelled at its middle.
-fn clips(item: &Item, song: usize, parts: &Parts, bars: i64) -> Vec<Case> {
+fn clips(item: &Item, song: usize, notes: &SongNotes, bars: i64) -> Vec<Case> {
     let length = bars * item.bar();
     let mut out = Vec::new();
     let mut at = item.grid_origin();
     while at + length <= item.length {
         if let Some(truth) = item.key_at(at + length / 2) {
-            let (notes, by_part) = heard(item, parts, Some((at, length)));
+            let (notes, by_part) = notes.heard(Some((at, length)));
             if notes.len() >= MIN_NOTES {
                 out.push(Case {
                     song,

@@ -4,8 +4,9 @@
 //! - **Folds.** Each song goes to one of five folds by a hash of its name (`pop909/001`), so POP909 and POP909-CL put
 //!   a song in the same fold and every run splits the songs the same way; songs whose notes are the same, moved to
 //!   another key, share a fold. Fold 0 is kept back. Every choice (evidence, penalties, calibration) is made on folds
-//!   1 to 4, each scored by a finder fitted on the other three. Only `--final` scores fold 0, with what was chosen,
-//!   and it adds a line to `test-runs.md`, so how often fold 0 was looked at is on record.
+//!   1 to 4, each scored by a finder fitted on the other three. `--final` scores fold 0 on its own, with what was
+//!   chosen, and adds a line to `test-runs.md`, so how often fold 0 was looked at is on record. `--write`, the last
+//!   step, scores every fold before it writes the weights, so it adds a line too.
 //! - **Cases.** Whole songs (read as songs); stretches of 1 to 16 bars cut along the bar lines (read as windows, and
 //!   scored against the key labelled at their middle, as the C# bench did); and each song's first bars from its first
 //!   bar with notes (read as loops, standing in for a pack's loops). Each is also heard as four other kinds of input:
@@ -56,7 +57,8 @@ const LAMBDA_W: f64 = 1e-4;
 /// The penalty on the corrections unless `--lambda-delta` says otherwise.
 const LAMBDA_DELTA: f64 = 1e-4;
 
-/// FNV-1a, 64 bits: the fold hash, the same on every computer.
+/// FNV-1a, 64 bits: the fold hash, the same on every computer. The finder hashes bars with FNV-1a too, but this is
+/// its own copy: the folds must never move, even if how the finder tells bars apart changes.
 pub fn fnv1a(bytes: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in bytes {
@@ -238,7 +240,9 @@ fn songs_of(items: &[Item]) -> Vec<Song> {
 /// A song's notes as each kind of input hears them, each list in order of start.
 struct Voices {
     tune: Vec<Note>,
-    piano: Vec<Note>,
+    /// The parts under the tune, by role: a dataset's bass part is heard as a bass part.
+    others: Vec<(Role, Vec<Note>)>,
+    /// The parts under the tune split into the bass line and the rest, as if they were one piano part.
     upper: Vec<Note>,
     bass: Vec<Note>,
     all: Vec<Note>,
@@ -247,20 +251,33 @@ struct Voices {
 impl Voices {
     fn of(item: &Item) -> Voices {
         let tune = item.notes_of(|r| r == "melody");
+        let mut others: Vec<(Role, Vec<Note>)> = Vec::new();
+        for part in item.parts.iter().filter(|p| p.role != "melody" && p.role != "drums") {
+            let role = keys::role(&part.role);
+            let notes = part.notes.iter().map(|&(start, length, key, velocity)| Note { start, length, key, velocity });
+            match others.iter_mut().find(|(r, _)| *r == role) {
+                Some((_, list)) => list.extend(notes),
+                None => others.push((role, notes.collect())),
+            }
+        }
+        for (_, list) in &mut others {
+            list.sort_by_key(|n| (n.start, n.key));
+        }
         let piano = item.notes_of(|r| r != "melody" && r != "drums");
         let (bass, upper) = split_bass(&piano);
         let all = item.notes_of(|r| r != "drums");
-        Voices { tune, piano, upper, bass, all }
+        Voices { tune, others, upper, bass, all }
     }
 
     /// The parts of one kind of input, cut to a stretch (moved to start at 0) when one is given.
     fn parts(&self, input: Input, cut: Option<(i64, i64)>) -> Vec<(Role, Vec<Note>)> {
+        let others = self.others.iter().map(|(role, notes)| (*role, notes));
         let lists: Vec<(Role, &Vec<Note>)> = match input {
-            Input::Full => vec![(Role::Melody, &self.tune), (Role::Harmony, &self.piano)],
+            Input::Full => std::iter::once((Role::Melody, &self.tune)).chain(others).collect(),
             Input::Tune => vec![(Role::Melody, &self.tune)],
             Input::Upper => vec![(Role::Harmony, &self.upper)],
             Input::Bass => vec![(Role::Bass, &self.bass)],
-            Input::Piano => vec![(Role::Harmony, &self.piano)],
+            Input::Piano => others.collect(),
         };
         lists
             .into_iter()
@@ -650,17 +667,6 @@ fn chances_of(case: &Case, scores: &[f64; 24], calibration: &Calibration) -> [f6
     keyfind::chances(scores.map(|s| s * sharp))
 }
 
-/// The likeliest key and its chance (ties to the first in `Key::ALL`).
-fn best(chances: &[f64; 24]) -> (Key, f64) {
-    let mut best = (Key::major(PitchClass::C), f64::NEG_INFINITY);
-    for (k, p) in Key::ALL.iter().zip(chances) {
-        if *p > best.1 {
-            best = (*k, *p);
-        }
-    }
-    best
-}
-
 fn print_calibration(title: &str, c: &Calibration) {
     let n = |i: usize| c.0.get(i).copied().unwrap_or(0.0);
     println!(
@@ -765,7 +771,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             .map(|c| (fold(c) == FROZEN).then(|| chances_of(c, &model.scores(&c.ev), &calibration)))
             .collect();
         let summary = report(&cases, &chances, &songs, |c| fold(c) == FROZEN, &inputs);
-        log_final(&summary, &opts)?;
+        log_run("--final", &summary, &opts)?;
     } else if let Some(path) = write {
         println!("Every fold held out in turn (fold {FROZEN} included: these weights are the ones that ship):");
         let held = cross_validate(&cases, &songs, &every, &opts)?;
@@ -774,6 +780,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         let chances: Held =
             cases.par_iter().zip(&held).map(|(c, h)| h.as_ref().map(|s| chances_of(c, s, &calibration))).collect();
         let summary = report(&cases, &chances, &songs, |_| true, &inputs);
+        log_run("--write", &summary, &opts)?;
         let (model, fitted, n) = fit_model(&cases, &songs, &|_| true, &opts)?;
         println!();
         println!("Fitted on every song: {n} cases, {} Newton steps.", fitted.steps);
@@ -866,7 +873,7 @@ fn report(
                 .map(|&i| Answer {
                     truth: cases[i].truth,
                     found: chances[i].map(|c| {
-                        let (key, sure) = best(&c);
+                        let (key, sure) = keyfind::best(&c);
                         Found { key, sure, chances: Some(c) }
                     }),
                 })
@@ -1000,7 +1007,9 @@ fn today() -> String {
 }
 
 /// Adds a line to `test-runs.md` for a run that scored the kept-back fold.
-fn log_final(summary: &Summary, opts: &Options) -> Result<(), String> {
+/// Adds a line to `test-runs.md` for a run that showed fold 0: `--final`, or `--write` (which scores every fold
+/// before it writes the weights).
+fn log_run(run: &str, summary: &Summary, opts: &Options) -> Result<(), String> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-runs.md");
     let commit = std::process::Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
@@ -1009,15 +1018,21 @@ fn log_final(summary: &Summary, opts: &Options) -> Result<(), String> {
         .filter(|o| o.status.success())
         .map_or("unknown".to_owned(), |o| String::from_utf8_lossy(&o.stdout).trim().to_owned());
     let mut text = std::fs::read_to_string(&path).unwrap_or_else(|_| {
-        "# Runs on the kept-back fold\n\nEvery `theorybench keyfit --final` run adds a line here: fold 0 is only \
-         looked at this way, so this is how often it was.\n\n| Date | Finder version | Commit | Corrections penalty \
-         | Full mix: mo-harmony (C# app) |\n|---|---|---|---|---|\n"
+        "# Runs on the kept-back fold\n\nEvery `theorybench keyfit --final` or `--write` run adds a line here: \
+         fold 0 is only looked at these ways (`--final` scores it alone; `--write` scores every fold, fold 0 \
+         included, before it writes the weights that ship), so this is how often it was.\n\n| Date | Run | Finder \
+         version | Commit | Corrections penalty | Full mix: mo-harmony (C# app) |\n|---|---|---|---|---|---|\n"
             .to_owned()
     });
     let results: Vec<String> =
         summary.full.iter().map(|(t, r, c)| format!("{t} {:.1}% ({:.1}%)", 100.0 * r, 100.0 * c)).collect();
     let penalty = opts.lambda_delta.map_or("inf".to_owned(), |l| format!("{l}"));
-    let _ = writeln!(text, "| {} | {KEY_FINDER_VERSION} | {commit} | {penalty} | {} |", today(), results.join("; "));
+    let _ = writeln!(
+        text,
+        "| {} | {run} | {KEY_FINDER_VERSION} | {commit} | {penalty} | {} |",
+        today(),
+        results.join("; ")
+    );
     std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
     println!();
     println!("Logged in {}.", path.display());
@@ -1051,6 +1066,7 @@ fn weights_file(
         let _ = writeln!(out, "//! - {line}");
     }
     out.push_str("\nuse super::{Calibration, FEATURES};\n\n");
+    out.push_str("/// Whether these weights were fitted (`false` for the placeholder).\npub(super) const FITTED: bool = true;\n\n");
     out.push_str(
         "/// One weight per feature (see `Heard::features`): for each stream, twelve for the notes above a major\n",
     );

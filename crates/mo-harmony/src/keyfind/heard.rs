@@ -18,8 +18,8 @@ use crate::pitch::{PcSet, PerPitch, PitchClass};
 
 use super::{Config, MINOR, Span, Stream};
 
-/// The most beats heard, from the bar line at or before the first note (about nine hours at 120 beats a minute). A
-/// note past them can only come from a damaged file, and is left out.
+/// The most beats heard, from the bar line at or before the first note (about nine hours at 120 beats a minute). Only
+/// a damaged file has notes further apart: then the stretch holding the most notes is heard, and the rest left out.
 pub const MOST_BEATS: usize = 1 << 16;
 
 /// The longest bar heard, in beats. Music has bars of a few beats (12 in 12/8); a longer one comes from a damaged
@@ -290,9 +290,9 @@ const NO_KEY: u16 = u16::MAX;
 struct BeatFacts {
     /// The notes under the tune sounding for at least a quarter of the beat.
     chord: PcSet,
-    /// The lowest key of a bass part sounding in the beat's first half.
+    /// The lowest of those notes from a bass part that start before the beat's middle.
     bass: u16,
-    /// The lowest two different keys of the other parts under the tune sounding in the beat's first half.
+    /// The lowest two different keys of those notes from the other parts under the tune.
     low: u16,
     next: u16,
     /// Bit 0: the tune sounds in the beat; bit 1: another part does.
@@ -368,7 +368,7 @@ fn note_print(stream: u8, offset: i128, key: u8, length: i128) -> u64 {
 
 /// How long a note sounds, in ticks: at least 1.
 fn length(note: &Note) -> i128 {
-    i128::from(note.length).max(1)
+    i128::from(note.duration())
 }
 
 /// Where the beats lie, from one pass over the notes.
@@ -397,6 +397,7 @@ pub struct KeyReader {
     /// Ticks of each note in the tune and in the other parts: one pair for the whole, or one for each bar.
     ticks: Vec<[PerPitch<u64>; 2]>,
     velocities: Vec<u16>,
+    starts: Vec<i64>,
 }
 
 impl KeyReader {
@@ -442,6 +443,27 @@ impl KeyReader {
         u32::from(*v)
     }
 
+    /// The start of the stretch `span` ticks long that holds the most notes (the earliest, if two hold as many):
+    /// where the music is, when a damaged file has notes far before or after it.
+    fn busiest(&mut self, parts: &[Part], ghost: &impl Fn(&Note, bool) -> bool, span: i128) -> Option<i128> {
+        self.starts.clear();
+        for part in parts.iter().filter(|p| p.role.pitched()) {
+            let tune = part.role == Role::Melody;
+            self.starts.extend(part.notes.iter().filter(|n| !ghost(n, tune)).map(|n| n.start));
+        }
+        self.starts.sort_unstable();
+        let (mut best, mut most, mut end) = (None, 0, 0);
+        for (i, &s) in self.starts.iter().enumerate() {
+            while self.starts.get(end).is_some_and(|&t| i128::from(t) - i128::from(s) < span) {
+                end += 1;
+            }
+            if end - i > most {
+                (best, most) = (Some(i128::from(s)), end - i);
+            }
+        }
+        best
+    }
+
     /// One pass over the notes: fills the beats, the bars and the ticks.
     fn listen(&mut self, parts: &[Part], grid: Grid, by_bar: bool) -> Option<Layout> {
         let beat = i128::from(grid.beat());
@@ -457,6 +479,8 @@ impl KeyReader {
             length(note) * 8 < beat && u32::from(note.velocity) * 8 < if tune { loud[0] } else { loud[1] }
         };
 
+        // Where the music starts: the first note, or, when the notes lie further apart than the finder hears (only
+        // a damaged file's do), the first note of the stretch that holds the most of them.
         let mut first: Option<i128> = None;
         let mut last = i128::MIN;
         for part in parts.iter().filter(|p| p.role.pitched()) {
@@ -467,9 +491,25 @@ impl KeyReader {
                 last = last.max(start + length(note).min(reach));
             }
         }
-        let first = first?;
+        let mut first = first?;
+        let hearing = MOST_BEATS as i128 * beat;
+        if last - first > hearing - bar {
+            first = self.busiest(parts, &ghost, hearing - bar).unwrap_or(first);
+        }
         let bar_line = i128::from(grid.bar_line);
         let origin = bar_line + (first - bar_line).div_euclid(bar) * bar;
+        if last - origin > hearing {
+            last = i128::MIN;
+            for part in parts.iter().filter(|p| p.role.pitched()) {
+                let tune = part.role == Role::Melody;
+                for note in part.notes.iter().filter(|n| !ghost(n, tune)) {
+                    let start = i128::from(note.start);
+                    if (origin..origin + hearing).contains(&start) {
+                        last = last.max(start + length(note).min(reach));
+                    }
+                }
+            }
+        }
         let beats = usize::try_from((last - origin + beat - 1) / beat).unwrap_or(MOST_BEATS).clamp(1, MOST_BEATS);
         let layout = Layout { origin, beats, bar_beats: usize::try_from(bar_beats).unwrap_or(1).max(1) };
 
@@ -487,7 +527,7 @@ impl KeyReader {
                 let start = i128::from(note.start) - origin;
                 let heard = length(note).min(reach);
                 let end = start + heard;
-                let Ok(first_beat) = usize::try_from(start / beat) else { continue };
+                let Ok(first_beat) = usize::try_from(start.div_euclid(beat)) else { continue };
                 if first_beat >= beats {
                     continue;
                 }
@@ -512,14 +552,14 @@ impl KeyReader {
                     }
                     let Some(facts) = self.beats.get_mut(j) else { continue };
                     facts.sounding |= 1 << stream;
-                    if tune {
+                    // Under the tune, a note is in the beat's chord when it sounds for at least a quarter of the
+                    // beat, and can be its bass when it also starts before the beat's middle: a note pushed ahead
+                    // of the beat and held over it counts on the beat, as it's heard, but the last moment of a note
+                    // held into the beat (played legato) doesn't.
+                    if tune || overlap * 4 < beat {
                         continue;
                     }
-                    if overlap * 4 >= beat {
-                        facts.chord = facts.chord.with(pc);
-                    }
-                    // In the bass of this beat if it sounds in the beat's first half: a note pushed ahead of the
-                    // beat and held over it counts on the beat, as it's heard.
+                    facts.chord = facts.chord.with(pc);
                     if start < at + half {
                         let key = u16::from(note.key);
                         if part.role == Role::Bass {

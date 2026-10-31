@@ -214,7 +214,7 @@ fn the_bass_of_a_beat() {
 }
 
 #[test]
-fn a_bass_note_counts_on_the_beats_it_sounds_in_the_first_half_of() {
+fn a_bass_note_counts_on_the_beats_it_starts_or_is_held_into() {
     let bass_part = |notes: &[Note]| bass_of(&[Part { role: Role::Bass, notes }]);
     // Pushed ahead of the second beat and held over it: it's the second beat's bass (weight 1), not the first's.
     assert_eq!(bass_part(&[note(0.75, 1.25, 36)]), [(PitchClass::C, 1)]);
@@ -222,6 +222,11 @@ fn a_bass_note_counts_on_the_beats_it_sounds_in_the_first_half_of() {
     assert_eq!(bass_part(&[note(0.5, 0.5, 36)]), []);
     // A note starting a quarter of the way in: the first beat's bass.
     assert_eq!(bass_part(&[note(0.25, 0.25, 36)]), [(PitchClass::C, 4)]);
+    // Played legato, a bass note held a moment into the next beat isn't that beat's bass: the next note is.
+    assert_eq!(bass_part(&[note(0.0, 1.0625, 36), note(1.0, 1.0, 40)]), [(PitchClass::C, 4), (PitchClass::E, 1)]);
+    // Nor is the last moment of a low chord note the next chord's bass.
+    let legato = [note(0.0, 1.0625, 36), note(1.0, 1.0, 43), note(1.0, 1.0, 55)];
+    assert_eq!(bass_of(&[Part { role: Role::Harmony, notes: &legato }]), [(PitchClass::C, 4), (PitchClass::G, 1)]);
 }
 
 #[test]
@@ -575,6 +580,27 @@ fn damaged_notes_and_grids_give_an_answer_without_a_crash() {
             }
         }
     }
+}
+
+#[test]
+fn a_stray_note_far_from_the_music_is_left_out() {
+    let piece = c_minor();
+    let heard = piece.heard();
+    let most = MOST_BEATS as i64 * BEAT;
+    for start in [i64::MIN / 2, -1_000_000 * BEAT, -most, most + 7 * BEAT, i64::MAX / 2] {
+        let mut damaged = piece.clone();
+        damaged.harmony.push(Note { start, length: BEAT, key: 61, velocity: LOUD });
+        assert_eq!(damaged.heard(), heard, "a note at {start}");
+        let mut reader = KeyReader::new();
+        let (first_bar, bars) = reader.hear_bars(&damaged.parts(), Grid::four_four(TPB)).unwrap();
+        let mut sum = Heard::default();
+        bars.iter().for_each(|b| sum.merge(b));
+        assert_eq!((first_bar, sum), (0, heard.clone()), "a note at {start}, bar by bar");
+    }
+    // A note far away but within the hearing is heard.
+    let mut far = piece.clone();
+    far.harmony.push(Note { start: most / 2, length: BEAT, key: 61, velocity: LOUD });
+    assert_eq!(far.heard().notes, heard.notes + 1);
 }
 
 // Calibration and chances.

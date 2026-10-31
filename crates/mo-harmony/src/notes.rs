@@ -22,9 +22,14 @@ impl Note {
         PitchClass::of_key(self.key)
     }
 
+    /// How long it sounds, in ticks: at least 1 (a damaged file's note of no length still sounds for a tick).
+    pub const fn duration(self) -> i64 {
+        if self.length > 0 { self.length } else { 1 }
+    }
+
     /// Where it stops sounding.
     pub const fn end(self) -> i64 {
-        self.start.saturating_add(if self.length > 0 { self.length } else { 1 })
+        self.start.saturating_add(self.duration())
     }
 }
 
@@ -48,11 +53,6 @@ impl Role {
     /// Whether the part's notes are heard at all.
     pub const fn pitched(self) -> bool {
         !matches!(self, Role::Drums)
-    }
-
-    /// Whether the part can hold the bass: anything pitched but the melody.
-    pub const fn under_the_melody(self) -> bool {
-        !matches!(self, Role::Melody | Role::Drums)
     }
 }
 
