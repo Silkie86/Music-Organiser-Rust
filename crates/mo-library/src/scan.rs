@@ -232,10 +232,10 @@ fn list(dir: &str) -> Listing {
             // points nowhere is left out.
             let Ok(meta) = fs::metadata(&path) else { continue };
             if meta.is_dir() {
-                if !skip_dir(file_name(&path), parent) {
-                    if let Some(real) = fs::canonicalize(&path).ok().and_then(|r| r.to_str().map(path_key)) {
-                        out.links.push((path, real));
-                    }
+                if !skip_dir(file_name(&path), parent)
+                    && let Some(real) = fs::canonicalize(&path).ok().and_then(|r| r.to_str().map(path_key))
+                {
+                    out.links.push((path, real));
                 }
             } else if is_project_file(&path) {
                 out.files.push(FoundFile { size: size(&meta), mtime: mtime(&meta), path });

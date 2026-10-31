@@ -61,7 +61,7 @@ fn a_missing_root_keeps_its_saves_and_an_inner_root_is_walked_once() {
     let inner = dir.join("Night Drive").to_str().unwrap().to_owned();
     let found = find_projects(&[inner, root.clone(), unplugged.clone()]);
     assert_eq!(found.files.len(), 4);
-    assert_eq!(found.unreadable, [unplugged.clone()]);
+    assert_eq!(found.unreadable, std::slice::from_ref(&unplugged));
     let gone = mo_library::scan::KnownFile {
         id: 1,
         path: format!("{unplugged}/Song.flp"),
