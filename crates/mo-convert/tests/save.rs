@@ -127,10 +127,10 @@ fn a_sample_that_moved_is_found_and_used() {
     let saved =
         bitwig_from_fl(&song, &dir.join("Exports"), &template, "civil_18", None, Options::default(), &find).unwrap();
     assert_eq!(*asked.lock().unwrap(), [r"C:\Samples\Snare 01.wav"], "only missing samples are looked for, once");
-    assert!(
-        saved.notes.iter().any(|n| n == &format!(r"Snare: C:\Samples\Snare 01.wav wasn't there, so {found} is used"))
-    );
+    assert_eq!(saved.found, [format!(r"Snare: C:\Samples\Snare 01.wav wasn't there, so {found} is used")]);
     assert!(!saved.notes.iter().any(|n| n.contains("couldn't read")), "{:?}", saved.notes);
+    let list = std::fs::read_to_string(saved.file.with_file_name("civil_18 - not carried over.txt")).unwrap();
+    assert!(list.contains("Samples found somewhere else"), "{list}");
     // The Bitwig project points at where it was found.
     let bytes = std::fs::read(&saved.file).unwrap();
     assert!(bytes.windows(found.len()).any(|w| w == found.as_bytes()));

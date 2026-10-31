@@ -8,8 +8,9 @@
 //! it since ([`can_save_over`], asked again just before the rename); one saved in Bitwig, or another song's with the
 //! same name, is kept and the caller picks the next name ([`bitwig_name`]).
 //!
-//! A sample that isn't where FL saved it is looked for (rule 13) by the finder the app passes in (mo-library's
-//! `SampleLocator`: the project's folders, then the DAW's), and the Bitwig project points at where it was found.
+//! A sample that can't be read where FL saved it is looked for (rule 13) by the finder the caller passes in (for the
+//! app, mo-library's `SampleLocator`: the project's folders, then the DAW's), and the Bitwig project points at where
+//! it was found. The convert page, when it's built, passes the locator.
 //!
 //! Not here yet (a later piece): plugin sounds a save lost, taken from older saves (the C# `LostSounds`).
 
@@ -23,7 +24,7 @@ use mo_formats::paths;
 use rayon::prelude::*;
 
 use crate::bitwig;
-use crate::plan::{Options, from_fl};
+use crate::plan::{Options, SampleFile, from_fl};
 use crate::sample::read_sample;
 
 /// The longest file name the app makes (as the C# app's).
@@ -38,6 +39,8 @@ pub struct Saved {
     pub file: PathBuf,
     /// What couldn't come across (also saved beside it).
     pub notes: Vec<String>,
+    /// Samples that weren't where FL saved them, and where they were found and used (also saved beside it).
+    pub found: Vec<String>,
     /// What to remember about it, so a later convert can tell whether it may replace it ([`can_save_over`]).
     pub written: String,
 }
@@ -148,25 +151,40 @@ pub fn bitwig_from_fl(
     let flp = events::load(&raw).map_err(|_| format!("{} is empty or damaged", project.display()))?;
     let mut song = song::read_song(&flp);
     song.resolve_samples(project);
-    // Samples that aren't where FL saved them, looked for once each, all at the same time (rules 13 and 21).
-    let missing: BTreeSet<&str> =
-        song.channels.iter().map(|c| c.sample.as_str()).filter(|p| !p.is_empty() && !Path::new(p).is_file()).collect();
-    let found: HashMap<String, String> =
-        missing.into_par_iter().filter_map(|p| find_sample(p).map(|f| (p.to_owned(), f))).collect();
-    let mut moved: Vec<String> = Vec::new();
+    // Each sample read once, all at the same time (rule 21). One that can't be read where FL saved it is looked for
+    // (rule 13), and used where it's found if it reads there. FL's own content ("%FLStudioFactoryData%…") is
+    // FL's to find, never another file with its name.
+    let wanted: BTreeSet<&str> = song.channels.iter().map(|c| c.sample.as_str()).filter(|p| !p.is_empty()).collect();
+    let read: HashMap<String, (Option<String>, Option<SampleFile>)> = wanted
+        .into_par_iter()
+        .map(|p| {
+            let here = read_sample(Path::new(p));
+            let moved = || {
+                let f = find_sample(p).filter(|f| f != p)?;
+                read_sample(Path::new(&f)).map(|s| (Some(f), Some(s)))
+            };
+            let got = match here {
+                Some(s) => (None, Some(s)),
+                None if p.starts_with('%') => (None, None),
+                None => moved().unwrap_or((None, None)),
+            };
+            (p.to_owned(), got)
+        })
+        .collect();
+    let mut found: Vec<String> = Vec::new();
     for c in &mut song.channels {
-        if let Some(f) = found.get(&c.sample) {
-            moved.push(format!("{}: {} wasn't there, so {f} is used", c.name, c.sample));
+        if let Some((Some(f), _)) = read.get(&c.sample) {
+            found.push(format!("{}: {} wasn't there, so {f} is used", c.name, c.sample));
             c.sample = f.clone();
         }
     }
-    // Each sample read once, all at the same time (rule 21).
-    let wanted: BTreeSet<&str> = song.channels.iter().map(|c| c.sample.as_str()).filter(|p| !p.is_empty()).collect();
-    let mut samples: HashMap<&str, _> = wanted.into_par_iter().map(|p| (p, read_sample(Path::new(p)))).collect();
-    let plan = from_fl(&song, options, &mut |p| samples.remove(p).flatten().or_else(|| read_sample(Path::new(p))));
+    let samples: HashMap<String, Option<SampleFile>> =
+        read.into_iter().map(|(p, (f, s))| (f.unwrap_or(p), s)).collect();
+    let plan = from_fl(&song, options, &mut |p| match samples.get(p) {
+        Some(s) => s.clone(),
+        None => read_sample(Path::new(p)),
+    });
     let mut converted = bitwig::write(&plan, template)?;
-    // Where moved samples were found comes first, so Bitwig asking about none of them makes sense.
-    converted.notes.splice(0..0, moved);
     // A damaged save, or one too big to read whole, is converted as far as it goes, and that's said first (rule 9).
     for warning in [song.warning, flp.warning].into_iter().flatten() {
         converted.notes.insert(0, format!("The FL project: {warning}"));
@@ -177,10 +195,23 @@ pub fn bitwig_from_fl(
     let name = safe_file_name(name);
     let notes_file = dir.join(format!("{name} - not carried over.txt"));
     // The notes go first, so a failure there leaves the earlier convert as it was.
-    if !converted.notes.is_empty() {
-        let mut text = format!("What didn't come across from FL Studio to Bitwig for {name}\r\n\r\n");
-        for n in &converted.notes {
-            text.push_str(&format!("  {n}\r\n"));
+    let has_notes = !converted.notes.is_empty() || !found.is_empty();
+    if has_notes {
+        let mut text = String::new();
+        if !converted.notes.is_empty() {
+            text.push_str(&format!("What didn't come across from FL Studio to Bitwig for {name}\r\n\r\n"));
+            for n in &converted.notes {
+                text.push_str(&format!("  {n}\r\n"));
+            }
+        }
+        if !found.is_empty() {
+            if !text.is_empty() {
+                text.push_str("\r\n");
+            }
+            text.push_str("Samples found somewhere else, and used from there\r\n\r\n");
+            for n in &found {
+                text.push_str(&format!("  {n}\r\n"));
+            }
         }
         save_checked(&notes_file, text.as_bytes(), |_| None)?;
     }
@@ -195,10 +226,10 @@ pub fn bitwig_from_fl(
     let written = written(project, &file).map_err(|e| e.to_string())?;
     // This convert's own folder: an older list would be wrong now. The project is saved, so a list that can't be
     // removed is only left behind.
-    if converted.notes.is_empty() && notes_file.exists() {
+    if !has_notes && notes_file.exists() {
         let _ = std::fs::remove_file(&notes_file);
     }
-    Ok(Saved { file, notes: converted.notes, written })
+    Ok(Saved { file, notes: converted.notes, found, written })
 }
 
 /// Writes `bytes` under a temporary name beside `file`, flushes it to the disk, reads it back and checks it (the same
