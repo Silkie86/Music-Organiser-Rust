@@ -21,7 +21,7 @@ use mo_formats::textscan::is_audio_path;
 use mo_library::scan::is_inside;
 use rayon::prelude::*;
 
-use crate::clean::{Bin, Done, Problem, What, both, on_network, parts, send};
+use crate::clean::{Bin, Done, Problem, What, both, on_network, parts, send, send_guarded};
 use crate::plugin_space::{PluginSpace, SpaceFolder, SpaceKind, data_roots, is_install_folder};
 use crate::plugins::is_plugin_file;
 use crate::size::{DEEPEST, Measured, Stopped, is_online_only, is_sound};
@@ -587,6 +587,7 @@ pub fn apply(
     // Outer folders first, so one inside a folder that goes is seen to have gone with it.
     order.sort_by_key(|l| parts(&l.folder.path).count());
     let mut gone: Vec<&str> = Vec::new();
+    let mut guarded = Vec::new();
     for line in order {
         let path = line.folder.path.as_str();
         if let Some(outer) = gone.iter().find(|g| is_inside(path, g)) {
@@ -612,10 +613,22 @@ pub fn apply(
             continue;
         }
         let real = real_path(path).unwrap_or_else(|| path.to_owned());
-        let sent = done.removed.len();
-        send(path, real, line.look.measured.bytes, What::Plugin(line.folder.kind), bin, &mut done);
-        if done.removed.len() > sent {
+        let (sent, waiting) = (done.removed.len(), guarded.len());
+        send(path, real, line.look.measured.bytes, What::Plugin(line.folder.kind), bin, &mut done, &mut guarded);
+        // One waiting for the administrator step counts as going; the ones inside it are checked again below.
+        if done.removed.len() > sent || guarded.len() > waiting {
             gone.push(path);
+        }
+    }
+    send_guarded(guarded, bin, &mut done);
+    // A folder that would have gone with one that stayed after all (you said no to Windows' question) stays too.
+    let went_with = std::mem::take(&mut done.went_with);
+    for (inner, outer) in went_with {
+        if done.removed.iter().any(|r| key(&r.path) == key(&outer)) {
+            done.went_with.push((inner, outer));
+        } else {
+            let why = format!("It's inside {outer}, which stayed.");
+            done.problems.push(Problem { path: inner, why });
         }
     }
     let not_found = bin.find(&mut done.removed);

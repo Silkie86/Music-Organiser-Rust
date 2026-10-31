@@ -11,11 +11,12 @@ use mo_formats::paths::file_name;
 use mo_library::scan::is_inside;
 use serde::{Deserialize, Serialize};
 
-use crate::clean::{Bin, Done, Problem, What, send};
+use crate::admin::{Admin, Outcome, Step, ask_for};
+use crate::clean::{Bin, Done, Problem, What, send, send_guarded};
 use crate::folder_move::{
-    CantMove, Drives, Fill, MovedFolder, Tree, check_rename, clear_failed_link, copy_fresh, copy_tree, denied,
-    destination_problem, fresh_name, inside_moved, leads_to, link, link_reaches, listed, only_in, remove_link,
-    rest_after, room_for, shown, swap, target,
+    CantMove, Drives, Fill, MovedFolder, Tree, check_rename, check_rename_or_ask, clear_failed_link, copy_fresh,
+    copy_tree, denied, destination_problem, fresh_name, inside_moved, leads_to, link, link_reaches, listed, only_in,
+    remove_link, rest_after, room_for, shown, swap_or_ask, target,
 };
 use crate::plugin_space::{PluginSpace, SpaceKind};
 use crate::size::{self, is_link};
@@ -194,7 +195,7 @@ pub fn link_again(
     }
     let aside = fresh_name(from, if second { SECOND_SUFFIX } else { UPDATE_SUFFIX });
     // Find out before copying whether Windows lets the folder be renamed.
-    check_rename(from)?;
+    check_rename_or_ask(from, drives.admin())?;
     let kept_in = PathBuf::from(fresh_name(&moved.to, KEPT_BEFORE_SUFFIX));
     let tree = Tree { keep_in: Some(&kept_in), keep_all: true, ..Tree::new(Path::new(from), to, to) };
     room_for(&tree, to, drives, stop)?;
@@ -229,7 +230,7 @@ pub fn link_again(
     ours.sort();
     let again = copy_tree(&Tree { ours: &ours, ..tree }, Fill::Freshen, &|n| progress(first.bytes + n), stop)
         .map_err(partly)?;
-    swap(from, to, &aside).map_err(partly)?;
+    swap_or_ask(from, to, &aside, drives.admin()).map_err(partly)?;
     let replaced = shown(&[first.kept, again.kept].concat());
     let kept = (!replaced.is_empty()).then(|| OldHome {
         path: text(&kept_in),
@@ -341,7 +342,9 @@ pub fn remove_old_home(home: &OldHome, moved: &[MovedFolder], sure: bool, bin: &
     }
     let mut done = Done::default();
     let real = real_path(&home.path).unwrap_or_else(|| home.path.clone());
-    send(&home.path, real, home.bytes, What::Plugin(home.space_kind()), bin, &mut done);
+    let mut guarded = Vec::new();
+    send(&home.path, real, home.bytes, What::Plugin(home.space_kind()), bin, &mut done, &mut guarded);
+    send_guarded(guarded, bin, &mut done);
     let not_found = bin.find(&mut done.removed);
     done.problems.extend(not_found);
     done
@@ -395,7 +398,7 @@ pub fn move_home(
         return rename_home(home, &to, moved, homes);
     }
     copy_fresh(&Tree::new(home_path, &to, &to), progress, stop)?;
-    let now = repoint(home, &new_home, moved, homes);
+    let now = repoint(home, &new_home, moved, homes, drives.admin());
     let old_home = OldHome { path: home.to_owned(), bytes, note: its_old_place(), copy: new_home, kind: 2 };
     Ok(HomeMoved { old_home: Some(old_home), ..now })
 }
@@ -409,16 +412,27 @@ fn living_in(old_home: &str, new_home: &str, moved: &[MovedFolder]) -> Vec<(usiz
         .collect()
 }
 
-/// The order to change links in: outer ones first, since a moved folder inside another (Reaktor 6 in Native
-/// Instruments) is reached through the outer link.
-fn outer_first(links: &[(usize, PathBuf)], moved: &[MovedFolder]) -> Vec<usize> {
+/// The links (by their place in `links`) level by level, outer ones first: a moved folder inside another (Reaktor 6 in
+/// Native Instruments) is reached through the outer link.
+fn levels(links: &[(usize, PathBuf)], moved: &[MovedFolder]) -> Vec<Vec<usize>> {
     let around = |at: &str| {
         links.iter().filter(|(o, _)| key(&moved[*o].from) != key(at) && is_inside(at, &moved[*o].from)).count()
     };
-    let mut order: Vec<(usize, usize)> =
-        links.iter().enumerate().map(|(n, (i, _))| (around(&moved[*i].from), n)).collect();
-    order.sort();
-    order.into_iter().map(|(_, n)| n).collect()
+    let mut levels: Vec<Vec<usize>> = Vec::new();
+    for (n, (i, _)) in links.iter().enumerate() {
+        let level = around(&moved[*i].from);
+        if levels.len() <= level {
+            levels.resize_with(level + 1, Vec::new);
+        }
+        levels[level].push(n);
+    }
+    levels.retain(|l| !l.is_empty());
+    levels
+}
+
+/// The order to change links in: outer ones first.
+fn outer_first(links: &[(usize, PathBuf)], moved: &[MovedFolder]) -> Vec<usize> {
+    levels(links, moved).concat()
 }
 
 /// The folders left behind that were in `old_home`, at their place in `new_home` when they're there.
@@ -469,8 +483,14 @@ fn rename_home(home: &str, to: &Path, moved: &[MovedFolder], homes: &[OldHome]) 
         let (i, new_to) = &links[n];
         if let Err(not) = relink(&moved[*i].from, new_to, false) {
             let stuck = put_back(&changed);
-            let said =
-                format!("The link at {} couldn't be pointed at the new place: {}{stuck}", moved[*i].from, not.why);
+            let why = if not.guarded {
+                "Windows guards it. Rename the folder in File Explorer instead, then point the links at it there (the \
+                 app asks Windows' administrator question for the ones it guards)."
+                    .to_owned()
+            } else {
+                not.why
+            };
+            let said = format!("The link at {} couldn't be pointed at the new place: {why}{stuck}", moved[*i].from);
             return Err(if not.gone || !stuck.is_empty() {
                 CantMove::LeftHalfway(format!("{said} The folder hasn't moved."))
             } else {
@@ -525,9 +545,16 @@ fn rename_home(home: &str, to: &Path, moved: &[MovedFolder], homes: &[OldHome]) 
 
 /// "I moved it myself" (or the copy step of [`move_home`]): points the link of every moved folder that lived in
 /// `old_home` at the same folder in `new_home`, where it's found. A real folder where a link was is left alone, but its
-/// move follows its copy (so it shows as replaced). A link that won't change is left as it was. `homes` is every
-/// folder left behind. Only ever changes links, never a real folder.
-pub fn repoint(old_home: &str, new_home: &str, moved: &[MovedFolder], homes: &[OldHome]) -> HomeMoved {
+/// move follows its copy (so it shows as replaced). A link that won't change is left as it was; the ones Windows guards
+/// are changed as administrator, Windows asking you once (`admin`: the app passes [`crate::admin::AsAdmin`]). `homes`
+/// is every folder left behind. Only ever changes links, never a real folder.
+pub fn repoint(
+    old_home: &str,
+    new_home: &str,
+    moved: &[MovedFolder],
+    homes: &[OldHome],
+    admin: &dyn Admin,
+) -> HomeMoved {
     let old_home = old_home.trim_end_matches(['/', '\\']);
     let mut problems = Vec::new();
     let mut now = moved.to_vec();
@@ -541,38 +568,69 @@ pub fn repoint(old_home: &str, new_home: &str, moved: &[MovedFolder], homes: &[O
         }
     }
     // Outer links first: one inside another moved folder is only reached once the outer link leads somewhere again.
-    for n in outer_first(&links, moved) {
-        let (i, new_to) = &links[n];
-        let from = &moved[*i].from;
-        if !is_link(Path::new(from)) && is_dir(from) {
-            now[*i].to = text(new_to);
+    // So the ones Windows guards are changed level by level too, before the next level is looked at.
+    for level in levels(&links, moved) {
+        let mut guarded: Vec<usize> = Vec::new();
+        for n in level {
+            let (i, new_to) = &links[n];
+            let from = &moved[*i].from;
+            if !is_link(Path::new(from)) && is_dir(from) {
+                now[*i].to = text(new_to);
+                continue;
+            }
+            match relink(from, new_to, true) {
+                Ok(()) => now[*i].to = text(new_to),
+                Err(not) if not.guarded && !not.gone && admin.can_ask() => guarded.push(n),
+                Err(not) => problems.push(Problem { path: from.clone(), why: not.why }),
+            }
+        }
+        if guarded.is_empty() {
             continue;
         }
-        match relink(from, new_to, true) {
-            Ok(()) => now[*i].to = text(new_to),
-            Err(not) => problems.push(Problem { path: from.clone(), why: not.why }),
+        let lines: Vec<Vec<String>> =
+            guarded.iter().map(|&n| vec![moved[links[n].0].from.clone(), text(&links[n].1)]).collect();
+        let said = ask_for(admin, Step::Relink, &lines);
+        for (k, &n) in guarded.iter().enumerate() {
+            let (i, new_to) = &links[n];
+            let from = &moved[*i].from;
+            // What's there now decides, whatever the step said.
+            if leads_to(from, new_to) {
+                now[*i].to = text(new_to);
+                continue;
+            }
+            let why = match said.as_ref().map(|s| s.get(k)) {
+                Err(why) => why.clone(),
+                Ok(Some(Outcome::Kept(why) | Outcome::Halfway(why))) => why.clone(),
+                Ok(_) => format!("After the administrator step, the link still doesn't lead to {}.", text(new_to)),
+            };
+            problems.push(Problem { path: from.clone(), why });
         }
     }
     HomeMoved { moved: now, old_homes: follow_homes(old_home, new_home, homes), problems, old_home: None }
 }
 
 /// Why a link wasn't pointed at the new place.
-struct NotRelinked {
-    why: String,
+pub(crate) struct NotRelinked {
+    pub(crate) why: String,
     /// The old link couldn't be put back either: there's no link there now.
-    gone: bool,
+    pub(crate) gone: bool,
+    /// Windows guards it: it needs administrator rights to change. The old link (or nothing) is still there.
+    pub(crate) guarded: bool,
 }
 
 impl NotRelinked {
     fn kept(why: String) -> Self {
-        NotRelinked { why, gone: false }
+        NotRelinked { why, gone: false, guarded: false }
     }
 }
+
+/// What a link Windows guards says, where its administrator question can't be asked.
+const GUARDED: &str = "Windows said no: the link needs administrator rights to change.";
 
 /// Swaps the link at `at` for one to `target`; makes one where there's nothing. Never touches a real folder. With
 /// `check`, the target must be there and the new link must reach it. If the new link doesn't take, the old one goes
 /// back.
-fn relink(at: &str, target: &Path, check: bool) -> Result<(), NotRelinked> {
+pub(crate) fn relink(at: &str, target: &Path, check: bool) -> Result<(), NotRelinked> {
     let at_path = Path::new(at);
     if check && !is_dir(&text(target)) {
         return Err(NotRelinked::kept(format!("{} isn't there.", text(target))));
@@ -587,19 +645,24 @@ fn relink(at: &str, target: &Path, check: bool) -> Result<(), NotRelinked> {
             return Ok(());
         }
         clear_failed_link(at_path);
-        return Err(NotRelinked::kept(match made {
-            Err(e) => format!("Windows wouldn't make the link ({e})."),
-            Ok(()) => format!("The link was made but doesn't reach {}.", text(target)),
-        }));
+        let guarded = made.as_ref().is_err_and(denied);
+        return Err(NotRelinked {
+            why: match made {
+                Err(_) if guarded => GUARDED.to_owned(),
+                Err(e) => format!("Windows wouldn't make the link ({e})."),
+                Ok(()) => format!("The link was made but doesn't reach {}.", text(target)),
+            },
+            gone: false,
+            guarded,
+        });
     }
     let was = fs::read_link(at_path).ok();
     remove_link(at_path).map_err(|e| {
-        NotRelinked::kept(if denied(&e) {
-            "Windows said no: the link needs administrator rights to change, which this version can't ask for yet."
-                .to_owned()
+        if denied(&e) {
+            NotRelinked { why: GUARDED.to_owned(), gone: false, guarded: true }
         } else {
-            format!("Windows wouldn't change the link ({e}).")
-        })
+            NotRelinked::kept(format!("Windows wouldn't change the link ({e})."))
+        }
     })?;
     let made = link(at_path, target);
     if made.is_ok() && reaches() {
@@ -619,5 +682,6 @@ fn relink(at: &str, target: &Path, check: bool) -> Result<(), NotRelinked> {
     Err(NotRelinked {
         why: format!("{why}, nor could the old one be put back: make a link at {at} to {lead} yourself."),
         gone: true,
+        guarded: false,
     })
 }

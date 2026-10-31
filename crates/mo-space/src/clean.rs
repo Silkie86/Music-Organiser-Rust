@@ -28,6 +28,7 @@ use mo_formats::textscan::is_audio_path;
 use mo_library::scan::{daw_of, is_autosave_dir, is_autosave_file, is_inside, is_project_file};
 use serde::{Deserialize, Serialize};
 
+use crate::admin::{Admin, AsAdmin, NoAdmin, Outcome, Step, ask_for};
 use crate::plugin_space::SpaceKind;
 use crate::song::{CompactItem, CompactKind, has_studio_one_song, parent};
 use crate::{key, real_path};
@@ -411,10 +412,19 @@ impl Done {
     }
 }
 
+/// What [`Bin::send`] says when Windows wants administrator rights to remove something (files of a plugin's in a
+/// folder it guards). The clean-ups then send all of those in one administrator step ([`Bin::admin`]).
+pub const NEEDS_ADMIN: &str = "Windows needs administrator rights to remove this; remove it in Explorer instead.";
+
 /// Where removed things go. The app uses [`SystemBin`]; tests use a folder of their own.
 pub trait Bin {
-    /// Puts a file or folder in the bin, or says what stopped it.
+    /// Puts a file or folder in the bin, or says what stopped it ([`NEEDS_ADMIN`] when Windows wants administrator
+    /// rights for it).
     fn send(&self, path: &Path) -> Result<(), String>;
+    /// Windows' administrator question, for what it guards: the app's bin asks it; by default nothing is asked.
+    fn admin(&self) -> &dyn Admin {
+        &NoAdmin
+    }
     /// After a clean-up: finds each removed thing in the bin and notes what the bin calls it, so it can be put back.
     /// Says which aren't there (removed for good when Windows asked about something too big for the bin).
     fn find(&self, removed: &mut [Removed]) -> Vec<Problem>;
@@ -426,6 +436,7 @@ pub trait Bin {
 /// refuses, stays. A copy only goes while the save it copies is still there and still the same.
 pub fn apply(plan: &Plan, guard: &Guard<'_>, bin: &dyn Bin) -> Done {
     let mut done = Done::default();
+    let mut guarded = Vec::new();
     for line in &plan.lines {
         let item = &line.item;
         let real = match guard.check(item) {
@@ -440,19 +451,55 @@ pub fn apply(plan: &Plan, guard: &Guard<'_>, bin: &dyn Bin) -> Done {
                 continue;
             }
         };
-        send(&item.path, real, item.bytes, What::Song(item.kind), bin, &mut done);
+        send(&item.path, real, item.bytes, What::Song(item.kind), bin, &mut done, &mut guarded);
     }
+    send_guarded(guarded, bin, &mut done);
     let not_found = bin.find(&mut done.removed);
     done.problems.extend(not_found);
     done
 }
 
-/// Sends one checked thing to the bin and notes how it went.
-pub(crate) fn send(path: &str, real: String, bytes: u64, what: What, bin: &dyn Bin, done: &mut Done) {
+/// Sends one checked thing to the bin and notes how it went. One Windows guards waits in `guarded`, so they all go in
+/// one administrator step afterwards ([`send_guarded`]): one question for all of them.
+pub(crate) fn send(
+    path: &str,
+    real: String,
+    bytes: u64,
+    what: What,
+    bin: &dyn Bin,
+    done: &mut Done,
+    guarded: &mut Vec<Removed>,
+) {
     let when = now_seconds();
+    let removed = Removed { path: path.to_owned(), real, bytes, what, when, bin_id: None };
     match bin.send(Path::new(path)) {
-        Ok(()) => done.removed.push(Removed { path: path.to_owned(), real, bytes, what, when, bin_id: None }),
+        Ok(()) => done.removed.push(removed),
+        Err(why) if why == NEEDS_ADMIN && bin.admin().can_ask() => guarded.push(removed),
         Err(why) => done.problems.push(Problem { path: path.to_owned(), why }),
+    }
+}
+
+/// Sends what Windows guards to the bin in one administrator step (Windows asks you once). Each one that's gone
+/// afterwards counts as removed; the rest stay, with why.
+pub(crate) fn send_guarded(guarded: Vec<Removed>, bin: &dyn Bin, done: &mut Done) {
+    if guarded.is_empty() {
+        return;
+    }
+    let when = now_seconds();
+    let lines: Vec<Vec<String>> = guarded.iter().map(|g| vec![g.path.clone()]).collect();
+    let said = ask_for(bin.admin(), Step::Bin, &lines);
+    for (n, g) in guarded.into_iter().enumerate() {
+        // What's there now decides, whatever the step said.
+        if fs::symlink_metadata(&g.path).is_err() {
+            done.removed.push(Removed { when, ..g });
+            continue;
+        }
+        let why = match said.as_ref().map(|s| s.get(n)) {
+            Err(why) => why.clone(),
+            Ok(Some(Outcome::Kept(why) | Outcome::Halfway(why))) => why.clone(),
+            Ok(_) => "It's still there: a program may be using some of it.".to_owned(),
+        };
+        done.problems.push(Problem { path: g.path, why });
     }
 }
 
@@ -469,6 +516,10 @@ fn now_seconds() -> i64 {
 pub struct SystemBin;
 
 impl Bin for SystemBin {
+    fn admin(&self) -> &dyn Admin {
+        &AsAdmin
+    }
+
     fn send(&self, path: &Path) -> Result<(), String> {
         // The library behind this can stop the thread when Windows won't start its file operations; that's a problem
         // for this line, not a crash.
@@ -495,9 +546,7 @@ impl Bin for SystemBin {
 fn bin_problem(e: &trash::Error) -> String {
     match e {
         // HRESULTs from Windows: access denied, file in use.
-        trash::Error::Os { code, .. } if code & 0xFFFF == 5 || code & 0xFFFF == 0x78 => {
-            "Windows needs administrator rights to remove this; remove it in Explorer instead.".to_owned()
-        }
+        trash::Error::Os { code, .. } if code & 0xFFFF == 5 || code & 0xFFFF == 0x78 => NEEDS_ADMIN.to_owned(),
         trash::Error::Os { code, .. } if code & 0xFFFF == 32 => {
             "A program is using it. Close your DAW and try again.".to_owned()
         }
