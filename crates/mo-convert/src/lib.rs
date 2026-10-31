@@ -4,10 +4,11 @@
 //! The work is in two steps, so each can be tested on its own:
 //! 1. [`plan`]: what the song becomes, in no DAW's terms: the tracks, what's on each one, its clips, its automation,
 //!    and a note for everything that can't come across. Every choice about the song is made here.
-//! 2. A writer (the Bitwig one comes next) that only fills a copy of a template the DAW saved with that plan.
+//! 2. A writer ([`bitwig`] for Bitwig) that only fills a copy of a template the DAW saved with that plan.
 //!
 //! Nothing here changes the song it reads. A writer only ever writes a new file (rule 3).
 
+pub mod bitwig;
 pub mod clips;
 pub mod notes;
 pub mod plan;

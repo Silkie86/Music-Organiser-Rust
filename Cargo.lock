@@ -2787,7 +2787,9 @@ dependencies = [
 name = "mo-convert"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "mo-formats",
+ "zip",
 ]
 
 [[package]]
