@@ -30,6 +30,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::admin::{Admin, AsAdmin, NoAdmin, Step, ask_for, reason, stamp};
 use crate::plugin_space::SpaceKind;
+use crate::size::is_online_only;
 use crate::song::{CompactItem, CompactKind, has_studio_one_song, parent};
 use crate::{key, not_there, real_path};
 
@@ -383,7 +384,7 @@ pub struct Removed {
 pub enum What {
     /// A line of a song's Compact list.
     Song(CompactKind),
-    /// A plugin's presets or sounds folder.
+    /// Something of a plugin's: its presets or sounds folder, or a plugin file or bundle (a spare copy).
     Plugin(SpaceKind),
 }
 
@@ -458,6 +459,20 @@ pub fn apply(plan: &Plan, guard: &Guard<'_>, bin: &dyn Bin) -> Done {
     done
 }
 
+/// What's said of something that's only online in OneDrive (all of it, or some of what's inside).
+pub(crate) const ONLINE_ONLY: &str = "It's only online in OneDrive (all of it or some of it), so it can't go to the \
+                                      Recycle Bin: removing it would delete it from OneDrive everywhere. It stays.";
+
+/// Why the Recycle Bin couldn't keep something, so removing it would delete it for good: it's on a network drive, which
+/// has no Recycle Bin, or it's a OneDrive file that's only online. Each clean-up checks this itself first (inside a
+/// folder too, where it can say more); [`Sending::send`] checks it once more for all of them.
+fn cant_keep(path: &str, real: &str) -> Option<&'static str> {
+    if on_network(path) || on_network(real) {
+        return Some(Refused::NetworkDrive.text());
+    }
+    fs::symlink_metadata(path).is_ok_and(|m| is_online_only(&m)).then_some(ONLINE_ONLY)
+}
+
 /// What [`Bin::find`] says of something that went but isn't in the bin.
 pub(crate) const NOT_IN_BIN: &str = "It isn't in the Recycle Bin, so it may have been removed for good.";
 
@@ -503,6 +518,11 @@ impl<'a> Sending<'a> {
         done: &mut Done,
         again: impl Fn() -> Result<(), String> + 'a,
     ) -> Sent {
+        // Whichever clean-up it's from: what the Recycle Bin can't keep stays, as removing it would delete it for good.
+        if let Some(why) = cant_keep(path, &real) {
+            done.problems.push(Problem { path: path.to_owned(), why: why.to_owned() });
+            return Sent::Stays;
+        }
         let removed = Removed { path: path.to_owned(), real, bytes, what, when: now_seconds(), bin_id: None };
         let why = match self.bin.send(Path::new(path)) {
             Ok(()) => {

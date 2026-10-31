@@ -7,7 +7,8 @@
 //! - [`plugins`]: the plugin files installed on this computer.
 //! - [`plugin_space`]: each installed plugin's room on disk, its data folders guessed by name and maker.
 //! - [`plugin_clean`]: which of a plugin's preset and sound folders may go, and sending them to the Recycle Bin.
-//! - [`spare`]: plugin copies in a format no project uses (or AAX without Pro Tools).
+//! - [`spare`]: plugin copies in a format no project uses (or AAX without Pro Tools), and sending the ones you pick to
+//!   the Recycle Bin.
 //! - [`uninstallers`]: a plugin's own uninstaller from the programs Windows lists, and running it.
 //! - [`folder_move`]: moving a plugin's sounds or presets to another drive with a link in their place, and back.
 //! - [`after_move`]: what can happen to a moved folder later (lost links, updates), and putting it right.
