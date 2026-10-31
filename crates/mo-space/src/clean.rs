@@ -130,9 +130,31 @@ pub(crate) fn both(folder: &str) -> (&str, String) {
     (folder, real_path(folder).unwrap_or_else(|| folder.to_owned()))
 }
 
-/// Whether a path written with a network server's name (`\\server\share`).
+/// Whether a path is on a network drive: written with a server's name (`\\server\share`, what a mapped drive letter
+/// really is), or on a Mac or Linux, on a network share mounted into a folder (`/Volumes/Share`, `/mnt/nas`).
 pub(crate) fn on_network(path: &str) -> bool {
-    path.starts_with(r"\\") || path.starts_with("//")
+    path.starts_with(r"\\") || path.starts_with("//") || network_mount(path)
+}
+
+/// A Mac says which drives are its own: any other is on the network.
+#[cfg(target_os = "macos")]
+fn network_mount(path: &str) -> bool {
+    const MNT_LOCAL: u32 = 0x1000;
+    rustix::fs::statfs(path).is_ok_and(|s| s.f_flags & MNT_LOCAL == 0)
+}
+
+/// Linux says what kind of drive a folder is on: NFS, Windows shares (SMB, CIFS), AFS, Coda, NetWare, 9P.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn network_mount(path: &str) -> bool {
+    use rustix::fs::FsWord;
+    const NETWORK: [u32; 8] = [0x6969, 0x517B, 0xFF53_4D42, 0xFE53_4D42, 0x5346_414F, 0x7375_7245, 0x564C, 0x0102_1997];
+    rustix::fs::statfs(path).is_ok_and(|s| NETWORK.iter().any(|&m| s.f_type == m as FsWord))
+}
+
+/// Elsewhere only the path tells.
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "android")))]
+fn network_mount(_path: &str) -> bool {
+    false
 }
 
 impl Guard<'_> {
@@ -224,7 +246,7 @@ fn same_time(meta: &Metadata, measured: Option<NaiveDateTime>) -> bool {
 }
 
 /// The names in a path, whichever way its slashes lean.
-fn parts(path: &str) -> impl Iterator<Item = &str> {
+pub(crate) fn parts(path: &str) -> impl Iterator<Item = &str> {
     path.split(['\\', '/']).filter(|d| !d.is_empty())
 }
 

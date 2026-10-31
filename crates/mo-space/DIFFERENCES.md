@@ -17,7 +17,7 @@ listed with a verdict: **better** (on purpose), **same idea, new shape**, or **n
 
 | What | C# | Rust | Verdict |
 |---|---|---|---|
-| Checking before removing | the list was trusted as measured | every picked line is checked by a guard at the preview **and again** just before it goes: inside a project folder, not a project folder itself, not in or holding a sample folder, not a sound any project uses by name, not a song's newest save, really the kind the line says (a save, an autosave below the project folder, Studio One's Cache folder, audio), not a link, not on a network drive (no Recycle Bin) | better |
+| Checking before removing | the list was trusted as measured | every picked line is checked by a guard at the preview **and again** just before it goes: inside a project folder, not a project folder itself, not in or holding a sample folder, not a sound any project uses by name, not a song's newest save, really the kind the line says (a save, an autosave below the project folder, Studio One's Cache folder, audio), not a link, not on a network drive (no Recycle Bin; on a Mac or Linux, network shares mounted into a folder too) | better |
 | A copy and its twin | the measure never lists both | a copy whose twin is also picked stays; at clean-up a copy only goes while its twin is still byte for byte the same | better |
 | Changed since you looked | removed anyway | a file whose size or time isn't what the list measured stays, and so does anything that changed between the preview and the clean-up | better |
 | Links | the path as written | paths are checked as written and as they really are (links, `..` and mapped drives worked out): a link out of the project folder, into a sample folder, or a copy whose twin is a link to it, stays; a song folder that's a link isn't the song's own | better |
@@ -49,8 +49,10 @@ listed with a verdict: **better** (on purpose), **same idea, new shape**, or **n
 |---|---|---|---|
 | Which folders may go | the card's rules: never Program Files, your folders, a folder with a sample a project uses (by path, then by name), OneDrive online-only files, shared with a used plugin, sounds while a project uses the plugin, a still-used plugin, a folder holding one that stays | the same rules, worked out in the backend (`plugin_clean::lines`) | same idea, new shape |
 | A plugin the library doesn't know | counted as having no projects when shared, as used when held | counted as used everywhere | better (safer) |
-| More reasons to stay | none | a link (or reached through one), a network drive, a drive, your home folder or a folder Windows keeps (Documents, AppData…) or one holding it, any plugin file inside (not only listed ones) | better |
-| Checked again before it goes | the card's look again (samples, OneDrive) | every rule again, and the folder must hold just what it held when you looked | better |
+| More reasons to stay | none | a link (or reached through one), a network drive (a Mac's or Linux's network shares too), a drive, your home folder or a folder the computer keeps (Documents, Music, Desktop, Downloads, AppData, OneDrive…) or one holding it, found by where they really are; any plugin file or bundle inside (not only listed ones, and a Mac's bundles are folders); a part of it that can't be read | better |
+| Checked again before it goes | the card's look again (samples, OneDrive) | every rule again, against the plugin's folders as they are now, and the folder must hold just what it held when you looked: the same files, sizes and times (a preset renamed or saved again at the same size counts) | better |
+| A folder inside another you picked | n/a (one folder at a time) | goes with it, once; the room freed counts everything inside | better |
+| Why a folder holding another plugin's stays | "used by" the card's plugin | names the plugin that keeps it ("Sounds stay while a project uses Omnisphere") | better |
 | Undo | Recycle Bin by hand | the same `Done` list and `undo` as songs | better |
 | Administrator step | yes, one question for files Windows guards | not yet (Program Files never goes in a clean-up; ProgramData folders that need it say so) | not yet |
 

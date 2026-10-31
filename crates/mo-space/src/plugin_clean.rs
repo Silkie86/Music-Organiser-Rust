@@ -8,19 +8,22 @@
 //! [`lines`] says, for each of a plugin's folders, whether it may go and why not; nothing changes. [`apply`] checks
 //! each picked folder again just before it goes and sends it to the Recycle Bin, as [`crate::clean`] does for songs.
 
-use std::collections::HashMap;
-use std::fs;
-use std::path::Path;
-use std::sync::atomic::AtomicBool;
+use std::collections::{HashMap, HashSet};
+use std::fs::{self, Metadata};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::UNIX_EPOCH;
 
 use mo_formats::paths::file_name;
 use mo_formats::textscan::is_audio_path;
 use mo_library::scan::is_inside;
+use rayon::prelude::*;
+use sha2::{Digest, Sha256};
 
-use crate::clean::{Bin, Done, Problem, What, both, on_network, send};
+use crate::clean::{Bin, Done, Problem, What, both, on_network, parts, send};
 use crate::plugin_space::{PluginSpace, SpaceFolder, SpaceKind, data_roots, is_install_folder};
 use crate::plugins::is_plugin_file;
-use crate::size::{self, Measured, Stopped};
+use crate::size::{DEEPEST, Measured, Stopped, is_online_only, is_sound};
 use crate::{key, real_path};
 
 /// How your projects use a plugin.
@@ -37,31 +40,35 @@ pub struct PluginUse {
 pub enum Stays {
     /// It's under Program Files: Uninstall removes it.
     InstallFolder,
-    /// It's part of one of your project or sample folders, or holds one.
-    YourFolder(String),
+    /// It's inside one of your project or sample folders.
+    InYourFolder(String),
+    /// It holds one of your project or sample folders.
+    HoldsYourFolder(String),
     /// A project uses a sample in it (one of its files' names).
     SampleInUse(String),
     /// Some of its files are only online in OneDrive: they can't go to the Recycle Bin.
     OnlineOnly,
-    /// It's shared with these plugins (name keys), and your projects use one of them.
+    /// It's shared with these plugins (name keys), which your projects use.
     SharedWithUsed(Vec<String>),
-    /// It's sounds, and projects use the plugin (or one it shares the folder with).
+    /// It's sounds, and projects use the plugin.
     SoundsInUse { projects: u32 },
     /// Your projects still use the plugin.
     StillUsed,
-    /// It holds a plugin file: Uninstall removes that.
+    /// It holds a plugin file (or bundle): Uninstall removes that.
     HoldsPluginFile(String),
-    /// It holds another plugin's folder that stays.
-    Holds { folder: String, why: Box<Stays> },
+    /// It holds another plugin's folder that stays: that folder, its plugin (name key), and why it stays.
+    Holds { folder: String, plugin: String, why: Box<Stays> },
     /// It's a link to another place, or reached through one.
     Link,
     /// It's on a network drive, which has no Recycle Bin.
     NetworkDrive,
-    /// It's a drive, your home folder, or a folder Windows keeps (Documents, AppData…), or holds one.
+    /// It's a drive, your home folder, or a folder the computer keeps (Documents, Music, AppData…), or holds one.
     SystemFolder,
+    /// Part of it can't be read (or is too deep to), so what's in it can't be checked.
+    Unreadable(String),
     /// It isn't there any more.
     Gone,
-    /// It changed since you looked.
+    /// It changed since you looked (what's in it, or what the plugin's folders are).
     Changed,
 }
 
@@ -70,7 +77,8 @@ impl Stays {
     pub fn text(&self, name: &str, names: &dyn Fn(&str) -> String) -> String {
         match self {
             Stays::InstallFolder => "Inside Program Files: Uninstall removes this.".to_owned(),
-            Stays::YourFolder(f) => format!("Part of your folder {f}."),
+            Stays::InYourFolder(f) => format!("Part of your folder {f}."),
+            Stays::HoldsYourFolder(f) => format!("It holds your folder {f}."),
             Stays::SampleInUse(s) => format!("A project uses a sample in it ({s})."),
             Stays::OnlineOnly => "Some of its files are only online in OneDrive. They can't go to the Recycle Bin: \
                                   removing them deletes them from OneDrive everywhere."
@@ -87,14 +95,48 @@ impl Stays {
             }
             Stays::StillUsed => format!("Your projects still use {name}."),
             Stays::HoldsPluginFile(f) => format!("It holds {}, a plugin file: Uninstall removes that.", file_name(f)),
-            Stays::Holds { folder, why } => {
-                format!("It holds {}, which stays. {}", file_name(folder), why.text(name, names))
+            Stays::Holds { folder, plugin, why } => {
+                format!("It holds {}, which stays. {}", file_name(folder), why.text(&names(plugin), names))
             }
             Stays::Link => "It's a link to another place, or reached through one.".to_owned(),
             Stays::NetworkDrive => "It's on a network drive, which has no Recycle Bin.".to_owned(),
             Stays::SystemFolder => "It's one of the computer's own folders, or holds one.".to_owned(),
+            Stays::Unreadable(p) => format!("Part of it ({}) can't be read, so it can't be checked.", file_name(p)),
             Stays::Gone => "It isn't there any more.".to_owned(),
             Stays::Changed => "It changed since you looked, so it stays.".to_owned(),
+        }
+    }
+}
+
+/// What a folder held when it was looked at: its size, and a stamp of everything in it (where, how big, when written)
+/// to see just before it goes whether anything in it changed, even a file renamed or saved again at the same size.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Look {
+    measured: Measured,
+    stamp: [u64; 4],
+}
+
+impl Look {
+    fn add(&mut self, other: &Look) {
+        self.measured = self.measured + other.measured;
+        for (a, b) in self.stamp.iter_mut().zip(other.stamp) {
+            *a = a.wrapping_add(b);
+        }
+    }
+
+    /// Adds one file or folder to the stamp. Adding up each one's SHA-256 makes the stamp the same whatever order the
+    /// walk met them in.
+    fn note(&mut self, path: &str, meta: &Metadata) {
+        let when = meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
+        let digest = Sha256::new()
+            .chain_update(path.as_bytes())
+            .chain_update([0, u8::from(meta.is_dir())])
+            .chain_update(meta.len().to_le_bytes())
+            .chain_update(when.to_le_bytes())
+            .finalize();
+        let (chunks, _) = digest.as_chunks::<8>();
+        for (a, chunk) in self.stamp.iter_mut().zip(chunks) {
+            *a = a.wrapping_add(u64::from_le_bytes(*chunk));
         }
     }
 }
@@ -107,13 +149,23 @@ pub struct CleanLine {
     /// Ticked for you: sounds that may go. Presets wait for you to tick them.
     pub ticked: bool,
     /// What the folder held when it was looked at, to see at the end whether it changed.
-    measured: Measured,
+    look: Look,
+}
+
+impl CleanLine {
+    /// The room it frees if it goes: the whole folder with everything in it (a maker's folder holds its plugins'
+    /// folders too, though each plugin's size counts them once). For a folder that stays, the folder's own size.
+    pub fn bytes(&self) -> u64 {
+        if self.stays.is_none() { self.look.measured.bytes } else { self.folder.bytes }
+    }
 }
 
 /// What the library knows that Clean up must respect.
 pub struct Library<'a> {
     /// Your project and sample folders.
     pub protected_roots: &'a [String],
+    /// The computer's own folders ([`system_folders`], worked out once).
+    pub system_folders: &'a [String],
     /// How your projects use each plugin, by name key. A plugin missing here counts as used.
     pub uses: &'a HashMap<String, PluginUse>,
     /// A sample a project uses that's stored inside this folder (by path), if any.
@@ -129,15 +181,16 @@ impl Library<'_> {
         self.uses.get(key).is_some_and(|u| u.projects == 0)
     }
 
-    /// Why a folder stays because of how projects use the plugins it belongs to.
+    /// Why a folder stays because of how projects use the plugins it belongs to. A plugin the library doesn't know
+    /// counts as used.
     fn in_use(&self, f: &SpaceFolder, plugin: &str) -> Option<Stays> {
-        let use_ = self.uses.get(plugin).copied();
-        let shared_used = !f.shared_with.iter().all(|k| self.no_projects(k));
-        if f.shared() && shared_used {
-            return Some(Stays::SharedWithUsed(f.shared_with.clone()));
+        let used: Vec<String> = f.shared_with.iter().filter(|k| !self.no_projects(k)).cloned().collect();
+        if !used.is_empty() {
+            return Some(Stays::SharedWithUsed(used));
         }
+        let use_ = self.uses.get(plugin).copied();
         let projects = use_.map_or(0, |u| u.projects);
-        if f.kind == SpaceKind::Sounds && (projects > 0 || shared_used) {
+        if f.kind == SpaceKind::Sounds && projects > 0 {
             return Some(Stays::SoundsInUse { projects });
         }
         if !use_.is_some_and(|u| u.unused) {
@@ -145,22 +198,205 @@ impl Library<'_> {
         }
         None
     }
+}
 
-    /// Why a folder stays because of the folders listed inside it: removing it removes them.
-    fn holds(&self, f: &SpaceFolder, all: &[PluginSpace]) -> Option<Stays> {
-        for s in all {
-            for g in s.folders.iter().filter(|g| is_inside(&g.path, &f.path) && !is_inside(&f.path, &g.path)) {
-                if g.kind == SpaceKind::Program {
-                    return Some(Stays::HoldsPluginFile(g.path.clone()));
-                }
-                // A plugin the library doesn't know counts as used.
-                let why = if self.uses.contains_key(&s.key) { self.in_use(g, &s.key) } else { Some(Stays::StillUsed) };
-                if let Some(why) = why {
-                    return Some(Stays::Holds { folder: g.path.clone(), why: Box::new(why) });
-                }
-            }
+/// The computer's own folders: your home folder and the folders in it the system keeps (Documents, Music, Desktop,
+/// AppData…), the program and system folders, and where plugins keep their things. A clean-up never takes one, nor a
+/// folder holding one. Work it out once (on Windows it asks the system) and pass it in [`Library`].
+pub fn system_folders() -> Vec<String> {
+    let env = |name: &str| std::env::var_os(name).map(PathBuf::from);
+    let home = env("HOME").or_else(|| env("USERPROFILE"));
+    let mut out: Vec<PathBuf> = data_roots();
+    out.extend(home.clone());
+    if cfg!(windows) {
+        out.extend(windows_system_folders());
+    } else if cfg!(target_os = "macos") {
+        out.extend(
+            ["/Applications", "/Library", "/System", "/Users", "/Volumes", "/usr", "/opt", "/private"]
+                .map(PathBuf::from),
+        );
+        out.extend(
+            ["/Library/Application Support", "/Library/Audio", "/Library/Audio/Presets", "/Library/Audio/Plug-Ins"]
+                .map(PathBuf::from),
+        );
+        if let Some(h) = &home {
+            out.extend(
+                [
+                    "Desktop",
+                    "Documents",
+                    "Downloads",
+                    "Music",
+                    "Movies",
+                    "Pictures",
+                    "Public",
+                    "Library",
+                    "Library/Application Support",
+                    "Library/Audio",
+                    "Library/Audio/Presets",
+                    "Library/Audio/Plug-Ins",
+                    "Library/Preferences",
+                ]
+                .map(|p| h.join(p)),
+            );
         }
-        None
+    } else {
+        out.extend(
+            ["/usr", "/opt", "/etc", "/home", "/mnt", "/media", "/var", "/tmp", "/srv", "/run"].map(PathBuf::from),
+        );
+        if let Some(h) = &home {
+            out.extend(
+                [
+                    "Desktop",
+                    "Documents",
+                    "Downloads",
+                    "Music",
+                    "Pictures",
+                    "Videos",
+                    "Public",
+                    "Templates",
+                    ".config",
+                    ".local",
+                    ".local/share",
+                    ".cache",
+                ]
+                .map(|p| h.join(p)),
+            );
+        }
+        out.extend(["XDG_DATA_HOME", "XDG_CONFIG_HOME"].iter().filter_map(|v| env(v)));
+    }
+    let mut seen = HashSet::new();
+    out.into_iter().map(|p| p.to_string_lossy().into_owned()).filter(|p| !p.is_empty() && seen.insert(key(p))).collect()
+}
+
+/// The folders Windows keeps, wherever you've moved them.
+#[cfg(windows)]
+fn windows_system_folders() -> Vec<PathBuf> {
+    use known_folders::{KnownFolder, get_known_folder_path};
+    [
+        KnownFolder::Profile,
+        KnownFolder::UserProfiles,
+        KnownFolder::Desktop,
+        KnownFolder::Documents,
+        KnownFolder::Downloads,
+        KnownFolder::Music,
+        KnownFolder::Pictures,
+        KnownFolder::Videos,
+        KnownFolder::SavedGames,
+        KnownFolder::OneDrive,
+        KnownFolder::SkyDrive,
+        KnownFolder::Public,
+        KnownFolder::PublicDocuments,
+        KnownFolder::PublicMusic,
+        KnownFolder::RoamingAppData,
+        KnownFolder::LocalAppData,
+        KnownFolder::ProgramData,
+        KnownFolder::ProgramFiles,
+        KnownFolder::ProgramFilesX86,
+        KnownFolder::ProgramFilesCommon,
+        KnownFolder::ProgramFilesCommonX86,
+        KnownFolder::Windows,
+        KnownFolder::System,
+        KnownFolder::Fonts,
+    ]
+    .into_iter()
+    .filter_map(get_known_folder_path)
+    .collect()
+}
+
+#[cfg(not(windows))]
+fn windows_system_folders() -> Vec<PathBuf> {
+    Vec::new()
+}
+
+/// Whether a folder is the top of a drive: another drive than the folder it's in (a disk mounted there), or the top
+/// of the computer's own.
+#[cfg(unix)]
+fn is_drive(path: &str) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let p = Path::new(path);
+    match (fs::metadata(p), p.parent().map(fs::metadata)) {
+        (Ok(here), Some(Ok(up))) => here.dev() != up.dev(),
+        _ => true,
+    }
+}
+
+/// On Windows a drive is a letter (`D:\`); a drive put into a folder is a link, which stays anyway.
+#[cfg(not(unix))]
+fn is_drive(_path: &str) -> bool {
+    false
+}
+
+/// Something in a folder that keeps it, met on the walk.
+enum Found {
+    Plugin(String),
+    Sample(String),
+    Online,
+    Unreadable(String),
+}
+
+impl Found {
+    /// Which to tell first: a plugin file (Uninstall's), then a used sample, then OneDrive, then a part that can't be
+    /// read; for the same kind, the first by name, so two looks say the same.
+    fn order(&self) -> (u8, &str) {
+        match self {
+            Found::Plugin(p) => (0, p),
+            Found::Sample(s) => (1, s),
+            Found::Online => (2, ""),
+            Found::Unreadable(p) => (3, p),
+        }
+    }
+
+    fn stays(self) -> Stays {
+        match self {
+            Found::Plugin(p) => Stays::HoldsPluginFile(p),
+            Found::Sample(s) => Stays::SampleInUse(s),
+            Found::Online => Stays::OnlineOnly,
+            Found::Unreadable(p) => Stays::Unreadable(p),
+        }
+    }
+}
+
+/// What one folder holds, as the walk reads it.
+#[derive(Default)]
+struct Read {
+    look: Look,
+    found: Vec<Found>,
+    dirs: Vec<PathBuf>,
+}
+
+/// The checks for one card or clean-up, with the folders they compare against worked out once.
+struct Checker<'a> {
+    library: &'a Library<'a>,
+    all: &'a [PluginSpace],
+    /// Your project and sample folders, as written and as they really are.
+    protected: Vec<(String, String)>,
+    /// The computer's own folders, as written and as they really are.
+    system: Vec<(String, String)>,
+}
+
+impl<'a> Checker<'a> {
+    fn new(library: &'a Library<'a>, all: &'a [PluginSpace]) -> Self {
+        let pairs = |folders: &[String]| -> Vec<(String, String)> {
+            folders
+                .iter()
+                .filter(|f| !f.is_empty())
+                .map(|f| {
+                    let (written, real) = both(f);
+                    (written.to_owned(), real)
+                })
+                .collect()
+        };
+        Checker { library, all, protected: pairs(library.protected_roots), system: pairs(library.system_folders) }
+    }
+
+    /// Why a folder stays, if it must, and what it holds now. Where it is and how its plugins are used come first;
+    /// only a folder that passes those is read.
+    fn check(&self, f: &SpaceFolder, plugin: &str, stop: &AtomicBool) -> Result<(Option<Stays>, Look), Stopped> {
+        let why = self.place(&f.path).or_else(|| self.library.in_use(f, plugin)).or_else(|| self.holds(f));
+        if why.is_some() {
+            return Ok((why, Look::default()));
+        }
+        self.survey(&f.path, stop)
     }
 
     /// Why a folder stays for what it is and where it is.
@@ -176,55 +412,125 @@ impl Library<'_> {
         if is_install_folder(path) || is_install_folder(&real) {
             return Some(Stays::InstallFolder);
         }
-        for (root, real_root) in self.protected_roots.iter().map(|r| both(r)) {
-            if is_inside(path, root)
-                || is_inside(root, path)
-                || is_inside(&real, &real_root)
-                || is_inside(&real_root, &real)
-            {
-                return Some(Stays::YourFolder(root.to_owned()));
+        for (root, real_root) in &self.protected {
+            if is_inside(path, root) || is_inside(&real, real_root) {
+                return Some(Stays::InYourFolder(root.clone()));
+            }
+            if is_inside(root, path) || is_inside(real_root, &real) {
+                return Some(Stays::HoldsYourFolder(root.clone()));
             }
         }
         // Reached through a link: what's removed isn't where it seems.
         if key(&real) != key(path) {
             return Some(Stays::Link);
         }
-        // A drive, your home folder, or a folder Windows keeps (Documents, AppData, Program Files…), or one holding one.
-        let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default();
-        let system = data_roots().into_iter().map(|r| r.to_string_lossy().into_owned()).chain([home]);
-        let parts = path.split(['\\', '/']).filter(|d| !d.is_empty()).count();
-        if parts < 2 || system.filter(|f| !f.is_empty()).any(|f| is_inside(&f, path) || is_inside(&f, &real)) {
+        let holds_system = self.system.iter().any(|(f, real_f)| is_inside(f, path) || is_inside(real_f, &real));
+        if parts(path).count() < 2 || is_drive(&real) || holds_system {
             return Some(Stays::SystemFolder);
         }
-        (self.sample_at)(path).map(Stays::SampleInUse)
+        (self.library.sample_at)(path).map(Stays::SampleInUse)
     }
 
-    /// Why a folder stays for what's in it: a sample a project uses by name, a plugin file, a file only online.
-    fn contents(&self, path: &str, stop: &AtomicBool) -> Result<Option<Stays>, Stopped> {
-        enum Found {
-            Sample(String),
-            Plugin(String),
-            Online,
-        }
-        let found = size::walk(Path::new(path), true, stop, |p, meta| {
-            let text = p.to_string_lossy();
-            if size::is_online_only(meta) {
-                Some(Found::Online)
-            } else if is_plugin_file(&text) {
-                Some(Found::Plugin(text.into_owned()))
-            } else if is_audio_path(&text) && (self.sample_named)(file_name(&text)) {
-                Some(Found::Sample(file_name(&text).to_owned()))
-            } else {
-                None
+    /// Why a folder stays because of the plugins' folders listed inside it: removing it removes them.
+    fn holds(&self, f: &SpaceFolder) -> Option<Stays> {
+        for s in self.all {
+            for g in s.folders.iter().filter(|g| is_inside(&g.path, &f.path) && !is_inside(&f.path, &g.path)) {
+                if g.kind == SpaceKind::Program {
+                    return Some(Stays::HoldsPluginFile(g.path.clone()));
+                }
+                if let Some(why) = self.library.in_use(g, &s.key) {
+                    return Some(Stays::Holds { folder: g.path.clone(), plugin: s.key.clone(), why: Box::new(why) });
+                }
             }
-        })?;
-        // A plugin file first (Uninstall's), then a used sample, then OneDrive.
-        let plugin = found.iter().find_map(|f| if let Found::Plugin(p) = f { Some(p.clone()) } else { None });
-        let sample = found.iter().find_map(|f| if let Found::Sample(s) = f { Some(s.clone()) } else { None });
-        Ok(plugin
-            .map(Stays::HoldsPluginFile)
-            .or(sample.map(Stays::SampleInUse))
-            .or(found.iter().any(|f| matches!(f, Found::Online)).then_some(Stays::OnlineOnly)))
+        }
+        None
+    }
+
+    /// Reads everything in a folder, a level at a time over every core: what it holds now, and why it stays for
+    /// what's in it (a plugin file or bundle, a sample a project uses by name, a OneDrive file that's only online, a
+    /// part that can't be read). It stops at the first level where it finds one.
+    fn survey(&self, folder: &str, stop: &AtomicBool) -> Result<(Option<Stays>, Look), Stopped> {
+        let mut look = Look::default();
+        let mut level = vec![PathBuf::from(folder)];
+        for _ in 0..DEEPEST {
+            if level.is_empty() {
+                break;
+            }
+            if stop.load(Ordering::Relaxed) {
+                return Err(Stopped);
+            }
+            let reads: Vec<Read> = level.par_iter().map(|d| self.read_folder(d, stop)).collect();
+            if stop.load(Ordering::Relaxed) {
+                return Err(Stopped);
+            }
+            level = Vec::new();
+            let mut found = Vec::new();
+            for r in reads {
+                look.add(&r.look);
+                found.extend(r.found);
+                level.extend(r.dirs);
+            }
+            if let Some(first) = found.into_iter().min_by(|a, b| a.order().cmp(&b.order())) {
+                return Ok((Some(first.stays()), look));
+            }
+        }
+        // Deeper than any real folder: what's down there isn't checked, so it stays.
+        if let Some(deep) = level.first() {
+            return Ok((Some(Stays::Unreadable(deep.to_string_lossy().into_owned())), look));
+        }
+        Ok((None, look))
+    }
+
+    /// One folder's files and folders, for [`Checker::survey`]. A link is noted (it goes with the folder; what it
+    /// leads to stays where it is) but not followed, unless it's to a plugin.
+    fn read_folder(&self, dir: &Path, stop: &AtomicBool) -> Read {
+        let mut read = Read::default();
+        let here = dir.to_string_lossy();
+        let Ok(entries) = fs::read_dir(dir) else {
+            read.found.push(Found::Unreadable(here.into_owned()));
+            return read;
+        };
+        for (n, entry) in entries.enumerate() {
+            if n % 1024 == 1023 && stop.load(Ordering::Relaxed) {
+                break;
+            }
+            let Ok(entry) = entry else {
+                read.found.push(Found::Unreadable(here.clone().into_owned()));
+                continue;
+            };
+            let path = entry.path();
+            let text = path.to_string_lossy().into_owned();
+            // On Windows these come from the folder listing itself, so a file that's only online isn't opened.
+            let (Ok(kind), Ok(meta)) = (entry.file_type(), entry.metadata()) else {
+                read.found.push(Found::Unreadable(text));
+                continue;
+            };
+            read.look.note(&text, &meta);
+            // A plugin's file, or its bundle (a folder on a Mac, and a .vst3 on Windows), or a link to one.
+            if is_plugin_file(&text) {
+                read.found.push(Found::Plugin(text));
+                continue;
+            }
+            if kind.is_symlink() {
+                continue;
+            }
+            if kind.is_dir() {
+                read.dirs.push(path);
+                continue;
+            }
+            if is_online_only(&meta) {
+                read.found.push(Found::Online);
+                continue;
+            }
+            let name = file_name(&text);
+            if is_audio_path(&text) && (self.library.sample_named)(name) {
+                read.found.push(Found::Sample(name.to_owned()));
+            }
+            let len = meta.len();
+            let sound_bytes = if is_sound(&text, len) { len } else { 0 };
+            read.look.measured = read.look.measured + Measured { bytes: len, sound_bytes, files: 1 };
+        }
+        read
     }
 }
 
@@ -237,29 +543,22 @@ pub fn lines(
     library: &Library<'_>,
     stop: &AtomicBool,
 ) -> Result<Vec<CleanLine>, Stopped> {
+    let checker = Checker::new(library, all);
     let mut folders: Vec<&SpaceFolder> = space.folders.iter().filter(|f| f.kind != SpaceKind::Program).collect();
     folders.sort_by_key(|f| std::cmp::Reverse(f.bytes));
     let mut out = Vec::new();
     for f in folders {
-        let mut stays =
-            library.place(&f.path).or_else(|| library.in_use(f, &space.key)).or_else(|| library.holds(f, all));
-        if stays.is_none() {
-            stays = library.contents(&f.path, stop)?;
-        }
-        let measured = if stays.is_none() { size::measure(Path::new(&f.path), stop)? } else { Measured::default() };
-        out.push(CleanLine {
-            ticked: stays.is_none() && f.kind == SpaceKind::Sounds,
-            folder: f.clone(),
-            stays,
-            measured,
-        });
+        let (stays, look) = checker.check(f, &space.key, stop)?;
+        out.push(CleanLine { ticked: stays.is_none() && f.kind == SpaceKind::Sounds, folder: f.clone(), stays, look });
     }
     Ok(out)
 }
 
-/// Sends the picked lines that may go to the Recycle Bin, checking each again just before: where it is, what's in it,
-/// and that it holds what it held when you looked. Lines that must stay are never sent. `space` is the plugin's
-/// measured space and `all` every plugin's, as given to [`lines`].
+/// Sends the picked lines that may go to the Recycle Bin, checking each again just before: where it is, how the
+/// plugins are used now, what's in it, and that it holds just what it held when you looked. Lines that must stay are
+/// never sent. `space` is the plugin's measured space and `all` every plugin's, as new as you have them: a line that
+/// isn't one of `space`'s folders any more stays. A line picked twice counts once, and a folder inside one that goes
+/// goes with it.
 pub fn apply(
     picked: &[CleanLine],
     space: &PluginSpace,
@@ -268,46 +567,56 @@ pub fn apply(
     bin: &dyn Bin,
     stop: &AtomicBool,
 ) -> Done {
+    let checker = Checker::new(library, all);
     let mut done = Done::default();
-    for line in picked {
+    let mut seen = HashSet::new();
+    let mut order: Vec<&CleanLine> = picked.iter().filter(|l| seen.insert(key(&l.folder.path))).collect();
+    // Outer folders first, so one inside a folder that goes is seen to have gone with it.
+    order.sort_by_key(|l| parts(&l.folder.path).count());
+    let mut gone: Vec<&str> = Vec::new();
+    for line in order {
         let path = line.folder.path.as_str();
-        let stays = match line.stays.clone() {
-            Some(why) => Some(why),
-            None => {
-                let again = library
-                    .place(path)
-                    .or_else(|| library.in_use(&line.folder, &space.key))
-                    .or_else(|| library.holds(&line.folder, all));
-                match again {
-                    Some(why) => Some(why),
-                    None => match library.contents(path, stop) {
-                        Ok(Some(why)) => Some(why),
-                        Ok(None) => match size::measure(Path::new(path), stop) {
-                            Ok(m) if m == line.measured => None,
-                            Ok(_) => Some(Stays::Changed),
-                            Err(Stopped) => {
-                                done.problems
-                                    .push(Problem { path: path.to_owned(), why: "Stopped before it went.".into() });
-                                continue;
-                            }
-                        },
-                        Err(Stopped) => {
-                            done.problems
-                                .push(Problem { path: path.to_owned(), why: "Stopped before it went.".into() });
-                            continue;
-                        }
-                    },
+        if gone.iter().any(|g| is_inside(path, g)) {
+            continue;
+        }
+        let now = space.folders.iter().find(|f| key(&f.path) == key(path) && f.kind == line.folder.kind);
+        let why = match (&line.stays, now) {
+            (Some(why), _) => Some(why.clone()),
+            (None, None) => Some(Stays::Changed),
+            (None, Some(now)) => match checker.check(now, &space.key, stop) {
+                Err(Stopped) => {
+                    done.problems.push(Problem { path: path.to_owned(), why: "Stopped before it went.".into() });
+                    continue;
                 }
-            }
+                Ok((Some(why), _)) => Some(why),
+                Ok((None, look)) if look == line.look => None,
+                Ok((None, _)) => Some(Stays::Changed),
+            },
         };
-        if let Some(why) = stays {
+        if let Some(why) = why {
             done.problems.push(Problem { path: path.to_owned(), why: why.text(&space.name, library.names) });
             continue;
         }
         let real = real_path(path).unwrap_or_else(|| path.to_owned());
-        send(path, real, line.folder.bytes, What::Plugin(line.folder.kind), bin, &mut done);
+        let sent = done.removed.len();
+        send(path, real, line.look.measured.bytes, What::Plugin(line.folder.kind), bin, &mut done);
+        if done.removed.len() > sent {
+            gone.push(path);
+        }
     }
     let not_found = bin.find(&mut done.removed);
     done.problems.extend(not_found);
     done
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::clean::on_network;
+
+    #[test]
+    fn a_server_path_is_on_the_network() {
+        assert!(on_network(r"\\nas\music\Kontakt"));
+        assert!(on_network("//nas/music/Kontakt"));
+        assert!(!on_network(env!("CARGO_MANIFEST_DIR")));
+    }
 }

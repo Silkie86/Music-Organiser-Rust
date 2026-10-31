@@ -26,5 +26,9 @@ fs4 = "1.1"
 [target.'cfg(windows)'.dependencies]
 known-folders = "1.4"
 
+# Whether a folder is on a network share (Mac, Linux). Already used by fs4.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs"] }
+
 [dev-dependencies]
 serde_json = "1"
