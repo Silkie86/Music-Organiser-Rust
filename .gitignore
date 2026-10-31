@@ -36,8 +36,15 @@ Thumbs.db
 *.jar
 *.zip
 
+# The theory bench's labelled music, made from datasets and Solomon's files: kept outside the repository
+*.jsonl
+
 # Small made-up test files are fine
 !**/fixtures/**
 
 # Pictures drawn by mo-screens
 /screenshots/
+
+# What the C# helpers build
+**/cs/bin/
+**/cs/obj/

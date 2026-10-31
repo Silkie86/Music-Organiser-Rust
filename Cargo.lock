@@ -2811,6 +2811,7 @@ dependencies = [
  "flate2",
  "md-5",
  "mo-formats",
+ "mo-library",
  "rayon",
  "zip",
 ]
@@ -2838,6 +2839,10 @@ dependencies = [
  "roxmltree",
  "zip",
 ]
+
+[[package]]
+name = "mo-harmony"
+version = "0.1.0"
 
 [[package]]
 name = "mo-library"
@@ -2915,6 +2920,17 @@ dependencies = [
  "serde_json",
  "sha2",
  "trash",
+]
+
+[[package]]
+name = "mo-theorybench"
+version = "0.1.0"
+dependencies = [
+ "mo-harmony",
+ "rayon",
+ "serde",
+ "serde_json",
+ "thread-priority",
 ]
 
 [[package]]

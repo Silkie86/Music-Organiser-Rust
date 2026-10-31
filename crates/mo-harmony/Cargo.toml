@@ -1,0 +1,11 @@
+[package]
+name = "mo-harmony"
+description = "The harmony engine: keys, chords and what notes do over them, read from notes. No UI, no files, no database in it."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

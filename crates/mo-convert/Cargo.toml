@@ -16,6 +16,8 @@ zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 md-5 = "0.10"
 # Samples are read and hashed on every core (rule 21; the app runs this on its low-priority pool).
 rayon.workspace = true
+# Which saves are older saves of the same song (the C# `SongVersions`).
+mo-library = { path = "../mo-library" }
 
 [dev-dependencies]
 # The made-up Bitwig files shared from mo-formats' tests use it.
