@@ -16,6 +16,7 @@
 //! Rules kept from the C# app: samples are never removed (rule 2), a song's newest save always stays, and nothing is
 //! ever deleted for good.
 
+pub mod after_move;
 pub mod app_files;
 pub mod clean;
 pub mod folder_move;
