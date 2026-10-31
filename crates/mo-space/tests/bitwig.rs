@@ -8,6 +8,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::{Duration, SystemTime};
 
 use mo_space::bitwig::{LibraryCopy, LibraryIndex};
+use mo_space::key;
 
 fn fixtures(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
@@ -24,6 +25,11 @@ fn write(dir: &Path, rel: &str, bytes: &[u8]) {
 
 fn s(p: &Path) -> String {
     p.to_string_lossy().into_owned()
+}
+
+/// A found copy with its paths as Space compares them (on Windows, a path written with `/` is found with `\`).
+fn keyed(c: &LibraryCopy) -> (String, String, u64) {
+    (key(&c.in_project), key(&c.library_file), c.bytes)
 }
 
 #[test]
@@ -52,12 +58,12 @@ fn a_projects_copy_is_found_only_when_its_the_same_as_a_library_file_byte_for_by
     let index = LibraryIndex::new(&[dir.join("Library")], &stop).unwrap();
     let copies = index.copies_in(&project, &stop).unwrap();
     assert_eq!(
-        copies,
-        [LibraryCopy {
+        copies.iter().map(keyed).collect::<Vec<_>>(),
+        [keyed(&LibraryCopy {
             in_project: s(&project.join("multi-samples/Kicks 1 Select-3-2-2-3-2-2-2-2-2.multisample")),
             library_file: s(&library.join("Kicks 1 Select.multisample")),
             bytes: 4096,
-        }]
+        })]
     );
 
     // A project without the folder has none.
@@ -76,7 +82,7 @@ fn a_copy_named_otherwise_takes_the_library_file_with_the_shortest_name() {
     let stop = AtomicBool::new(false);
     let copies = LibraryIndex::new(std::slice::from_ref(&library), &stop).unwrap().copies_in(&project, &stop).unwrap();
     assert_eq!(copies.len(), 1);
-    assert_eq!(copies[0].library_file, s(&library.join("Deep/Down/Here/Bass.multisample")));
+    assert_eq!(key(&copies[0].library_file), key(&s(&library.join("Deep/Down/Here/Bass.multisample"))));
 }
 
 #[test]
