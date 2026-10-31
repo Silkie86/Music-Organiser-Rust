@@ -1,0 +1,18 @@
+[package]
+name = "mo-library"
+description = "The library of songs: reads the C# app's library.db (read-only until it's trusted) and groups saves into songs. No UI in it."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+chrono.workspace = true
+mo-formats = { path = "../mo-formats" }
+regex = { version = "1", default-features = false, features = ["std", "unicode", "perf"] }
+# SQLite, built into the app, so nothing has to be installed beside it.
+rusqlite = { version = "0.41", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
