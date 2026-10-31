@@ -1,0 +1,20 @@
+[package]
+name = "mo-theorybench"
+description = "The theory bench: measures the harmony engine (keys, chords) on labelled music, against the C# app's engine as it was."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "theorybench"
+path = "src/main.rs"
+
+[dependencies]
+mo-harmony = { path = "../../crates/mo-harmony" }
+rayon.workspace = true
+thread-priority.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

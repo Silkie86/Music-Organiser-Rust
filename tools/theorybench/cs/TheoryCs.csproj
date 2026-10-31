@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    The C# half of the theory bench: runs the C# app's chord reader, unchanged, on the bench's labelled music and writes
+    the chords it reads as JSON, so the Rust bench can score both engines on the same notes.
+    It builds against a read-only clone of Silkie86/Music-Organiser; say where it is with -p:MoOldRepo=<folder>:
+    dotnet build tools/theorybench/cs -c Release -p:MoOldRepo=<folder> -p:MoBuildNative=false -p:MoBuildBitwig=false
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>theorybench-cs</AssemblyName>
+    <MoOldRepo Condition="'$(MoOldRepo)' == ''">$(MSBuildThisFileDirectory)../../../../Music-Organiser</MoOldRepo>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="$(MoOldRepo)/src/MusicOrganiser.Core/MusicOrganiser.Core.csproj" />
+  </ItemGroup>
+</Project>
