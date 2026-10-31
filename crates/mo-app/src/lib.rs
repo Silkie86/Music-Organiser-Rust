@@ -8,6 +8,7 @@ pub mod note;
 pub mod paths;
 pub mod places;
 pub mod shortcuts;
+pub mod song_panel;
 pub mod songs;
 pub mod themes;
 pub mod version;

@@ -13,7 +13,7 @@ pub mod case;
 pub mod fl;
 pub mod midi;
 mod model;
-mod paths;
+pub mod paths;
 pub mod plugins;
 pub mod presets;
 pub mod studio_one;
