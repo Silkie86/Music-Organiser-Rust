@@ -646,7 +646,7 @@ export component SongsPage inherits Rectangle {
                 if SongsData.message != "": Text {
                     text: SongsData.message;
                     color: Theme.muted;
-                    font-size: Type.row-title;
+                    font-size: Type.body;
                     horizontal-alignment: center;
                     vertical-alignment: center;
                     wrap: word-wrap;
@@ -666,13 +666,13 @@ export component SongsPage inherits Rectangle {
                         for line in SongsData.lines: Rectangle {
                             height: line.heading != "" ? SongsData.heading-height : SongsData.song-height;
                             if line.heading != "": Caps {
-                                x: 16px;
-                                y: parent.height - self.height - 6px;
+                                x: Space.lg;
+                                y: parent.height - self.height - Space.sm;
                                 text: line.heading;
                             }
                             if line.heading == "": ListLine {
-                                x: 4px;
-                                width: parent.width - 8px;
+                                x: Space.xs;
+                                width: parent.width - 2 * Space.xs;
                                 selected: line.row == SongsData.selected;
                                 clicked => { SongsData.select(line.row); }
                             double-clicked => {
@@ -747,8 +747,8 @@ export component SongsPage inherits Rectangle {
                     // The year scrubber: jump to the first song of a year.
                     if SongsData.years.length > 1: VerticalLayout {
                         width: 52px;
-                        padding: Space.sm;
-                        spacing: Space.xs;
+                        // No gap between the marks, so as many years fit as before the bigger text.
+                        padding: Space.xs;
                         alignment: start;
                         for y in SongsData.years: YearMark {
                             text: y.year;
