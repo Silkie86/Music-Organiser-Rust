@@ -1,6 +1,6 @@
 # mo-presets: what's done and what's next
 
-The Presets page's engine (spec section 3.4a). No UI, no database, no writing yet.
+The Presets page's engine (spec section 3.4a). No UI. It writes only `presets.db` and the export folder.
 
 ## Done
 
@@ -21,12 +21,19 @@ The Presets page's engine (spec section 3.4a). No UI, no database, no writing ye
 
 - **Export** (`export`): a save's sounds as preset files in `<export folder>\<save>\Presets`, copy-check-rename, each
   sound keeping its name whichever are exported; one bad preset is reported, not stopping the rest.
+- **Send to Bitwig** (`bitwig`): a `.bwpreset` beside each exported sound whose plugin has a preset Bitwig saved
+  (the newest one per plugin and VST2/VST3, found among the presets the page already lists). The template is decoded,
+  its settings file and preset name changed field by field, written with `mo_formats::bitwig::encode`, read back and
+  checked; a sound whose settings are for another plugin (by id) is refused. VST2 programs go in as one-program banks.
 
 ## To check on Solomon's files
 
 - `.bwpreset` metadata keys (`device_name`, `device_type`, `creator`, `preset_category`, `tags`) are from Bitwig's
   usual layout, not yet seen in one of Solomon's presets. When a key is missing the reader falls back to the device
   object (fields 0x9a, 0x12de, 0xbe5, as the C# `BitwigPreset.Inspect` reads them), so a wrong key costs only the extras.
+- Send to Bitwig's templates: a preset with another device beside its plugin (a chain) isn't used, and devices inside
+  the plugin's device (modulators) are allowed. Check on a few of Solomon's own Bitwig presets that a plain one-plugin
+  preset passes, and that one made with Send to Bitwig opens in Bitwig with its sound.
 - The thresholds in `role::Thresholds` are starting points. Rule 5: set them from counts and averages of Solomon's MIDI
   (`role::NoteStats` is that summary), for example with a census in the twin tool.
 
@@ -36,6 +43,9 @@ The Presets page's engine (spec section 3.4a). No UI, no database, no writing ye
   when only that plays; Serum 2's CBOR state next), and Bitwig Note Transpose devices (needs the Bitwig reader to say which devices come
   before an instrument).
 - Bitwig: the reader doesn't say which presets are instruments, so no Bitwig synth is marked unused yet.
-- Send to Bitwig: a `.bwpreset` beside each export, from a template Bitwig saved (the C# `BitwigPreset`).
+- Send to Bitwig reads each template again when the page lists them (they were read once by the list); the list
+  could keep what a template needs instead.
+- A sound's Bitwig preset name is kept for it in the export names, so two plugins with one sound name ("Pad.fxp",
+  "Pad.vstpreset") now give "Pad 2.vstpreset" for the second, where the C# app gave "Pad.vstpreset".
 - Export: half-written `.part-*` files left by a crash aren't cleared yet; names are cut by UTF-16 units as the C#
   app does, not by Linux's 255-byte limit.

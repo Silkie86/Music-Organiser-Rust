@@ -7,11 +7,15 @@
 //! file (the C# app named only what was exported, so it did).
 //!
 //! Each file is written beside its place under a name of its own, made sure of on the disk, read back and checked, then
-//! renamed into place (copy, check, rename), so a half-written preset never sits under the real name. A preset that
+//! renamed into place (copy, check, rename), so a half-written preset never sits under the real name.
+//!
+//! Given Bitwig templates ([`crate::bitwig`]), a sound whose plugin has one also gets a Bitwig preset beside its
+//! plugin preset ("Serum - Wobble.bwpreset"), as the C# export does. Each sound's `.bwpreset` name is kept for it
+//! whether or not one is made, so names never shift when a template is added. A preset that
 //! can't be written is listed with why, and the others still go. Nothing here touches a project or a preset you made:
 //! only the export folder is written to.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,10 +23,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use mo_formats::paths;
 use mo_formats::presets::PresetBlob;
 
-use crate::names;
-
+use crate::bitwig::{self, Templates};
 use crate::files;
 use crate::filter::Choice;
+use crate::names;
 use crate::role::Thresholds;
 
 /// A preset's file name without its extension: "Plugin - Name", or the name alone when it's the plugin's, then where
@@ -44,6 +48,8 @@ fn safe_extension(ext: &str) -> String {
 
 /// Each preset's file name, in order: "label.ext", then "label 2.ext", "label 3.ext"... for later ones whose name is
 /// taken. Letter case aside, as Windows and .NET's `OrdinalIgnoreCase` see names (both by capitals, so "ı" is "i").
+/// Each name's Bitwig preset ([`bitwig_name`]) is kept for it too, so "Pad.fxp" and "Pad.vstpreset" never share
+/// "Pad.bwpreset".
 pub fn file_names(presets: &[PresetBlob]) -> Vec<String> {
     let mut used: HashSet<String> = HashSet::new();
     presets
@@ -53,13 +59,24 @@ pub fn file_names(presets: &[PresetBlob]) -> Vec<String> {
             let ext = safe_extension(&p.extension);
             let mut name = format!("{label}{ext}");
             let mut n = 2;
-            while !used.insert(name.to_uppercase()) {
+            loop {
+                let keys = [name.to_uppercase(), bitwig_name(&name, &ext).to_uppercase()];
+                if keys.iter().all(|k| !used.contains(k)) {
+                    used.extend(keys);
+                    break;
+                }
                 name = format!("{label} {n}{ext}");
                 n += 1;
             }
             name
         })
         .collect()
+}
+
+/// The Bitwig preset's name beside an exported preset, from its name and (safe) ending: "Serum - Wobble.fxp" gives
+/// "Serum - Wobble.bwpreset". Only the ending is taken off, never what's after a dot in the sound's own name.
+fn bitwig_name(file_name: &str, extension: &str) -> String {
+    format!("{}.bwpreset", file_name.strip_suffix(extension).unwrap_or(file_name))
 }
 
 /// What an export wrote.
@@ -79,10 +96,17 @@ pub fn folder_for(export_root: &Path, save: &str) -> PathBuf {
     export_root.join(names::safe_file_name(paths::stem(paths::file_name(save)))).join("Presets")
 }
 
-/// Writes presets for the save at `save` (its path, for the folder's name) into the export folder. A preset that
-/// can't be written is listed in [`Exported::failed`] and the rest still go; it's an error when none could be.
-pub fn export(presets: &[PresetBlob], save: &str, export_root: &Path) -> io::Result<Exported> {
-    write_all(presets.iter().zip(file_names(presets)).collect(), Vec::new(), save, export_root)
+/// Writes presets for the save at `save` (its path, for the folder's name) into the export folder, each with a Bitwig
+/// preset beside it when `templates` has one for its plugin ([`bitwig::templates`]; `None` when Send to Bitwig is
+/// off). A preset that can't be written is listed in
+/// [`Exported::failed`] and the rest still go; it's an error when none could be.
+pub fn export(
+    presets: &[PresetBlob],
+    save: &str,
+    export_root: &Path,
+    templates: Option<&Templates>,
+) -> io::Result<Exported> {
+    write_all(presets.iter().zip(file_names(presets)).collect(), Vec::new(), save, export_root, templates)
 }
 
 /// Writes each preset under its name, after `failed` (what was missed before writing). An export that wrote nothing
@@ -92,6 +116,7 @@ fn write_all(
     mut failed: Vec<String>,
     save: &str,
     export_root: &Path,
+    templates: Option<&Templates>,
 ) -> io::Result<Exported> {
     if chosen.is_empty() && !failed.is_empty() {
         return Err(io::Error::other(failed.join("; ")));
@@ -99,6 +124,8 @@ fn write_all(
     let folder = folder_for(export_root, save);
     std::fs::create_dir_all(&folder)?;
     let mut files = Vec::new();
+    // Each template's file, read once for the whole export.
+    let mut template_bytes: HashMap<PathBuf, Result<Vec<u8>, String>> = HashMap::new();
     for (p, name) in chosen {
         // Settings let go once listed (`SongPreset::forget_data`) are never written as an empty file over the last
         // export: a reader never gives a sound with none.
@@ -108,7 +135,39 @@ fn write_all(
             write_checked(&folder.join(&name), &p.data)
         };
         match written {
-            Ok(()) => files.push(name),
+            Ok(()) => {
+                let bw = bitwig_name(&name, &safe_extension(&p.extension));
+                files.push(name);
+                // Send to Bitwig: only beside a plugin preset that was written.
+                let Some(templates) = templates else { continue };
+                let made = match bitwig::template_for(p, templates) {
+                    Some(template) => {
+                        let raw = template_bytes
+                            .entry(template.path.clone())
+                            .or_insert_with(|| {
+                                std::fs::read(&template.path).map_err(|e| format!("its template couldn't be read: {e}"))
+                            })
+                            .as_deref()
+                            .map_err(|e| e.clone());
+                        // A template changed since it was found could trip the reader: that's this one's failure.
+                        let built = raw.and_then(|raw| {
+                            std::panic::catch_unwind(|| bitwig::build(raw, &template.path, p, &p.name))
+                                .unwrap_or_else(|_| Err("its template stopped the reader".into()))
+                        });
+                        Some(built.map_err(io::Error::other).and_then(|b| write_checked(&folder.join(&bw), &b)))
+                    }
+                    None => None,
+                };
+                match made {
+                    Some(Ok(())) => files.push(bw),
+                    Some(Err(e)) => failed.push(stale(&folder, &bw, &e.to_string())),
+                    // No template for its plugin now, but one was made last time: it no longer matches.
+                    None if folder.join(&bw).exists() => {
+                        failed.push(stale(&folder, &bw, "no preset Bitwig saved for its plugin was found"))
+                    }
+                    None => {}
+                }
+            }
             Err(e) => failed.push(format!("{name}: {e}")),
         }
     }
@@ -116,6 +175,15 @@ fn write_all(
         return Err(io::Error::other(failed.join("; ")));
     }
     Ok(Exported { folder, files, failed, warning: None })
+}
+
+/// Why a Bitwig preset wasn't made, saying when one from an earlier export is still there with older settings.
+fn stale(folder: &Path, bw: &str, why: &str) -> String {
+    if folder.join(bw).exists() {
+        format!("{bw}: {why} (the one from an earlier export is still there, with the settings it had then)")
+    } else {
+        format!("{bw}: {why}")
+    }
 }
 
 /// Writes `data` to `path` under a name of its own first, makes sure it's on the disk, reads it back, checks it's the
@@ -160,6 +228,7 @@ pub fn export_from_save(
     choice: Choice,
     only: Option<&[String]>,
     export_root: &Path,
+    templates: Option<&Templates>,
 ) -> io::Result<Exported> {
     let raw = std::fs::read(save)?;
     // Read as the page lists it, so the keys match; a damaged save gives nothing to write.
@@ -190,7 +259,7 @@ pub fn export_from_save(
         })
         .map(|(chosen, _)| chosen)
         .collect();
-    let mut exported = write_all(chosen, failed, save, export_root)?;
+    let mut exported = write_all(chosen, failed, save, export_root, templates)?;
     exported.warning = warning.map(str::to_owned);
     Ok(exported)
 }
