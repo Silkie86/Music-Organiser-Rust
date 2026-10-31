@@ -10,6 +10,8 @@ workspace = true
 
 [dependencies]
 mo-formats = { path = "../mo-formats" }
+# Serum keeps its settings zlib-packed (the same crate as mo-formats).
+flate2 = "1"
 rayon.workspace = true
 # presets.db: your fixes to the part guess (the same SQLite, built in, as mo-library).
 rusqlite = { version = "0.41", features = ["bundled"] }

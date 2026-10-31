@@ -2872,6 +2872,7 @@ dependencies = [
 name = "mo-presets"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "mo-formats",
  "rayon",
  "rusqlite",

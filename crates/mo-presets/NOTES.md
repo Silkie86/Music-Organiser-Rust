@@ -29,7 +29,8 @@ The Presets page's engine (spec section 3.4a). No UI, no database, no writing ye
 
 ## Next
 
-- Plugin octave from saved state (Serum first, the C# app reads Serum's state), and Bitwig Note Transpose devices
-  (needs the Bitwig reader to say which devices come before an instrument).
+- More plugins' own octave (`octave`: Serum 1 is read, from the C# `Serum1State` offsets, with its sub oscillator
+  when only that plays; Serum 2's CBOR state next), and Bitwig Note Transpose devices (needs the Bitwig reader to say which devices come
+  before an instrument).
 - Bitwig: the reader doesn't say which presets are instruments, so no Bitwig synth is marked unused yet.
 - Export and Send to Bitwig (`.bwpreset` from a template Bitwig saved, as the C# `BitwigPreset`), copy-check-rename.
