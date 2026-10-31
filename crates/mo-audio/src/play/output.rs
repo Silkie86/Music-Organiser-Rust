@@ -8,8 +8,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// Fills a buffer of frames (`channels` samples each, one after another) at the output's `rate`.
 pub type Render = Box<dyn FnMut(&mut [f32], u32, usize) + Send>;
 
-/// Called, from any thread, when the output has stopped working (unplugged, or a DAW took the interface), with why.
-pub type Lost = Box<dyn Fn(String) + Send + Sync>;
+/// What an open output says while it plays.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Event {
+    /// It has stopped working (unplugged, or a DAW took the interface), and why.
+    Lost(String),
+    /// The system moved the sound to the new default output by itself; it plays on.
+    Moved,
+}
+
+/// Called, from any thread, with what an open output says. It must not wait.
+pub type Events = Box<dyn Fn(Event) + Send + Sync>;
 
 /// An output that's open and playing what its [`Render`] gives. Dropping it closes the output.
 pub struct Opened {
@@ -30,7 +39,7 @@ pub trait Outputs: Send {
     /// The computer's default output's name now.
     fn default_name(&mut self) -> Option<String>;
     /// Opens the output named (`None`: the default) and starts it, rendering with `render`.
-    fn open(&mut self, name: Option<&str>, render: Render, lost: Lost) -> Result<Opened, String>;
+    fn open(&mut self, name: Option<&str>, render: Render, events: Events) -> Result<Opened, String>;
 }
 
 /// The real outputs, through cpal.
@@ -74,7 +83,7 @@ impl Outputs for SystemOutputs {
         self.host.default_output_device().as_ref().and_then(name_of)
     }
 
-    fn open(&mut self, name: Option<&str>, render: Render, lost: Lost) -> Result<Opened, String> {
+    fn open(&mut self, name: Option<&str>, render: Render, events: Events) -> Result<Opened, String> {
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
         let device = match name {
             None => self.host.default_output_device(),
@@ -90,7 +99,7 @@ impl Outputs for SystemOutputs {
         let rate = supported.sample_rate();
         let channels = supported.channels();
         let delay = Arc::new(AtomicU64::new(0));
-        let lost = Arc::new(lost);
+        let events = Arc::new(events);
         let mut config = supported.config();
         // About 10 ms a buffer, inside what the output allows: sweeping through sounds wants them heard at once.
         if let cpal::SupportedBufferSize::Range { min, max } = *supported.buffer_size() {
@@ -100,14 +109,14 @@ impl Outputs for SystemOutputs {
         let mut render = Some(render);
         let mut build = |config: cpal::StreamConfig| -> Result<cpal::Stream, String> {
             let Some(r) = render.take() else { return Err("The output couldn't be opened".into()) };
-            let (delay, lost) = (Arc::clone(&delay), Arc::clone(&lost));
+            let (delay, events) = (Arc::clone(&delay), Arc::clone(&events));
             match format {
-                cpal::SampleFormat::F32 => stream::<f32>(&device, config, r, delay, lost),
-                cpal::SampleFormat::F64 => stream::<f64>(&device, config, r, delay, lost),
-                cpal::SampleFormat::I16 => stream::<i16>(&device, config, r, delay, lost),
-                cpal::SampleFormat::I24 => stream::<cpal::I24>(&device, config, r, delay, lost),
-                cpal::SampleFormat::I32 => stream::<i32>(&device, config, r, delay, lost),
-                cpal::SampleFormat::U16 => stream::<u16>(&device, config, r, delay, lost),
+                cpal::SampleFormat::F32 => stream::<f32>(&device, config, r, delay, events),
+                cpal::SampleFormat::F64 => stream::<f64>(&device, config, r, delay, events),
+                cpal::SampleFormat::I16 => stream::<i16>(&device, config, r, delay, events),
+                cpal::SampleFormat::I24 => stream::<cpal::I24>(&device, config, r, delay, events),
+                cpal::SampleFormat::I32 => stream::<i32>(&device, config, r, delay, events),
+                cpal::SampleFormat::U16 => stream::<u16>(&device, config, r, delay, events),
                 other => Err((format!("The output wants {other} samples, which the app doesn't make"), Some(r))),
             }
             .map_err(|(e, r)| {
@@ -141,7 +150,7 @@ fn stream<T>(
     config: cpal::StreamConfig,
     render: Render,
     delay: Arc<AtomicU64>,
-    lost: Arc<Lost>,
+    events: Arc<Events>,
 ) -> Result<cpal::Stream, (String, Option<Render>)>
 where
     T: cpal::SizedSample + cpal::FromSample<f32>,
@@ -153,7 +162,9 @@ where
     // the stream runs, so the lock never waits.
     let shared = Arc::new(std::sync::Mutex::new(Some(render)));
     let in_callback = Arc::clone(&shared);
-    let mut mixed: Vec<f32> = vec![0.0; 4096 * channels.max(1)];
+    // Room for 16,384 frames a call, far more than any output asks for at once, so the output's thread doesn't take
+    // memory while it plays (it would only grow for an output asking for more).
+    let mut mixed: Vec<f32> = vec![0.0; 16_384 * channels.max(1)];
     let built = device.build_output_stream::<T, _, _>(
         config,
         move |out: &mut [T], info: &cpal::OutputCallbackInfo| {
@@ -174,9 +185,10 @@ where
             }
         },
         move |e: cpal::Error| match e.kind() {
-            // A glitch, a refused priority, or the system moving the sound for us: it plays on.
-            cpal::ErrorKind::Xrun | cpal::ErrorKind::RealtimeDenied | cpal::ErrorKind::DeviceChanged => {}
-            _ => lost(e.to_string()),
+            // A glitch, or a refused priority: it plays on.
+            cpal::ErrorKind::Xrun | cpal::ErrorKind::RealtimeDenied => {}
+            cpal::ErrorKind::DeviceChanged => events(Event::Moved),
+            _ => events(Event::Lost(e.to_string())),
         },
         None,
     );

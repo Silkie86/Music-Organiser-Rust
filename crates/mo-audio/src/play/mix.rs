@@ -1,6 +1,7 @@
 //! The part of the player that runs on the sound output's own thread: it takes the newest sound to play, changes its
 //! rate and channels to the output's, and fades between sounds so a sweep doesn't click. It never waits, never reads a
-//! file and never frees a sound (it hands old ones back to be freed elsewhere).
+//! file, and hands old sounds back to be freed elsewhere. Orders come through a fixed-size channel, so taking them
+//! never takes or frees memory.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering, fence};
@@ -91,10 +92,10 @@ struct Voice {
     target: f32,
 }
 
-/// Mixes the sound playing (and the one fading out) into the output's buffers.
 /// How the mixer tells the player something; it must not wait.
 pub(crate) type Tell = Box<dyn FnMut(FromMixer) + Send>;
 
+/// Mixes the sound playing (and the one fading out) into the output's buffers.
 pub(crate) struct Mixer {
     from_player: Receiver<ToMixer>,
     to_player: Tell,

@@ -10,10 +10,12 @@ struct Fake {
     names: Vec<String>,
     /// When set, nothing opens.
     broken: bool,
+    /// Outputs that are listed but won't open (a DAW has them).
+    taken: Vec<String>,
     /// What each open was asked for (`None`: the default).
     asked: Vec<Option<String>>,
     render: Option<Render>,
-    lost: Option<Lost>,
+    events: Option<Events>,
     rate: u32,
 }
 
@@ -29,11 +31,14 @@ impl Outputs for FakeOutputs {
         lock(&self.0).names.first().cloned()
     }
 
-    fn open(&mut self, name: Option<&str>, render: Render, lost: Lost) -> Result<Opened, String> {
+    fn open(&mut self, name: Option<&str>, render: Render, events: Events) -> Result<Opened, String> {
         let mut f = lock(&self.0);
         f.asked.push(name.map(str::to_owned));
         if f.broken {
             return Err("The output is busy".into());
+        }
+        if let Some(n) = name.filter(|n| f.taken.iter().any(|t| t == n)) {
+            return Err(format!("{n} is in use by another program"));
         }
         let name = match name {
             Some(n) if f.names.iter().any(|x| x == n) => n.to_owned(),
@@ -41,7 +46,7 @@ impl Outputs for FakeOutputs {
             None => f.names.first().cloned().ok_or("There's no sound output")?,
         };
         f.render = Some(render);
-        f.lost = Some(lost);
+        f.events = Some(events);
         Ok(Opened {
             name,
             sample_rate: f.rate,
@@ -74,8 +79,17 @@ impl FakeOutputs {
 
     fn lose(&self) {
         let f = lock(&self.0);
-        if let Some(lost) = &f.lost {
-            lost("The device was unplugged".into());
+        if let Some(events) = &f.events {
+            events(Event::Lost("The device was unplugged".into()));
+        }
+    }
+
+    fn moved(&self, to: &str) {
+        let mut f = lock(&self.0);
+        f.names.retain(|n| n != to);
+        f.names.insert(0, to.to_owned());
+        if let Some(events) = &f.events {
+            events(Event::Moved);
         }
     }
 
@@ -183,7 +197,7 @@ fn a_lost_output_is_opened_again_and_the_sound_carries_on() {
 #[test]
 fn an_output_that_keeps_going_is_given_up_on() {
     let outputs = FakeOutputs::new(&["Speakers"]);
-    let (player, _ended) = player(&outputs);
+    let (player, ended) = player(&outputs);
     player.play(ramp(), "a", 0.0);
     settle(&player);
     for _ in 0..5 {
@@ -192,6 +206,9 @@ fn an_output_that_keeps_going_is_given_up_on() {
     }
     assert_eq!(outputs.asked().len(), 1 + MAX_REOPENS as usize);
     assert_eq!(player.info().problem.as_deref(), Some("The device was unplugged"));
+    // The sound stops, and the app is told, rather than showing as playing for ever.
+    assert_eq!(ended.try_recv().as_deref(), Ok("a"));
+    assert_eq!(player.playing(), None);
     // The next sound tries again.
     player.play(ramp(), "b", 0.0);
     settle(&player);
@@ -273,4 +290,82 @@ fn a_move_just_as_the_sound_ends_still_ends_it() {
     settle(&player);
     assert_eq!(ended.try_recv().as_deref(), Ok("a"));
     assert_eq!(player.playing(), None);
+}
+
+#[test]
+fn a_chosen_output_thats_listed_but_taken_doesnt_cut_the_sound_on_the_default() {
+    let outputs = FakeOutputs::new(&["Speakers", "Focusrite"]);
+    lock(&outputs.0).taken.push("Focusrite".into());
+    let (player, _ended) = player(&outputs);
+    player.choose(Some("Focusrite".into()));
+    player.play(ramp(), "a", 0.0);
+    settle(&player);
+    assert_eq!(player.info().name.as_deref(), Some("Speakers"));
+    outputs.pull(500);
+    player.check();
+    settle(&player);
+    // It tried the chosen one without closing the default first, so the sound carries on uncut.
+    assert_eq!(outputs.asked(), vec![Some("Focusrite".into()), None, Some("Focusrite".into())]);
+    let info = player.info();
+    assert_eq!(info.name.as_deref(), Some("Speakers"));
+    assert_eq!(info.problem.as_deref(), Some("Focusrite is in use by another program, so sound stays on Speakers"));
+}
+
+#[test]
+fn when_nothing_opens_the_problem_says_so() {
+    let outputs = FakeOutputs::new(&[]);
+    let (player, _ended) = player(&outputs);
+    player.choose(Some("Focusrite".into()));
+    player.play(ramp(), "a", 0.0);
+    settle(&player);
+    let info = player.info();
+    assert_eq!(info.name, None);
+    assert_eq!(
+        info.problem.as_deref(),
+        Some("Focusrite isn't connected, and the default output wouldn't open either: There's no sound output")
+    );
+}
+
+#[test]
+fn check_and_choosing_the_same_output_open_and_cut_nothing() {
+    let outputs = FakeOutputs::new(&["Speakers"]);
+    let (player, _ended) = player(&outputs);
+    player.check();
+    settle(&player);
+    assert!(outputs.asked().is_empty());
+    player.play(ramp(), "a", 0.0);
+    player.choose(None);
+    player.check();
+    settle(&player);
+    assert_eq!(outputs.asked(), vec![None]);
+}
+
+#[test]
+fn when_the_system_moves_the_sound_to_a_new_default_the_name_follows() {
+    let outputs = FakeOutputs::new(&["Speakers", "Headphones"]);
+    let (player, _ended) = player(&outputs);
+    player.play(ramp(), "a", 0.0);
+    settle(&player);
+    outputs.moved("Headphones");
+    settle(&player);
+    assert_eq!(player.info().name.as_deref(), Some("Headphones"));
+    assert_eq!(outputs.asked(), vec![None]);
+}
+
+#[test]
+fn dropping_the_player_when_a_sound_ends_doesnt_hang() {
+    let outputs = FakeOutputs::new(&["Speakers"]);
+    let slot: Arc<Mutex<Option<Player>>> = Arc::default();
+    let in_end = Arc::clone(&slot);
+    let (done, rx) = channel();
+    let player = Player::with_outputs(Box::new(outputs.clone()), move |_| {
+        drop(lock(&in_end).take());
+        let _ = done.send(());
+    });
+    let short = Arc::new(AudioData { sample_rate: 1000, channels: vec![vec![0.5; 10]], ..AudioData::default() });
+    player.play(short, "a", 0.0);
+    settle(&player);
+    *lock(&slot) = Some(player);
+    outputs.pull(20);
+    assert!(rx.recv_timeout(Duration::from_secs(5)).is_ok());
 }
