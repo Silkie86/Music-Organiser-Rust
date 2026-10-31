@@ -1,5 +1,5 @@
 // The parts of the window shell that sit over every page: activity cards, the key sheet and the F12 note.
-import { Theme, StudioButton, Well, Caps, Groove, CloseButton, Chip, TickBox } from "studio.slint";
+import { Theme, Type, Space, StudioButton, Well, Caps, Groove, CloseButton, Chip, TickBox } from "studio.slint";
 
 export struct CardInfo {
     id: int,
@@ -30,11 +30,11 @@ component ActivityCard inherits Rectangle {
     drop-shadow-color: Theme.shadow;
     drop-shadow-offset-y: 6px;
     VerticalLayout {
-        padding: 12px;
-        padding-right: 8px;
-        spacing: 6px;
+        padding: Space.md;
+        padding-right: Space.sm;
+        spacing: Space.sm;
         HorizontalLayout {
-            spacing: 8px;
+            spacing: Space.sm;
             Rectangle {
                 width: 8px;
                 height: 8px;
@@ -45,7 +45,7 @@ component ActivityCard inherits Rectangle {
             Text {
                 text: root.card.title;
                 color: Theme.text;
-                font-size: 13px;
+                font-size: Type.body;
                 font-weight: 500;
                 overflow: elide;
                 horizontal-stretch: 1;
@@ -57,7 +57,7 @@ component ActivityCard inherits Rectangle {
         if root.card.detail != "": Text {
             text: root.card.detail;
             color: Theme.muted;
-            font-size: 12px;
+            font-size: Type.meta;
             wrap: word-wrap;
         }
         if root.running: Rectangle {
@@ -84,7 +84,7 @@ export component ActivityCards inherits VerticalLayout {
     callback dismiss(int);
     callback bring-back();
     width: 320px;
-    spacing: 8px;
+    spacing: Space.sm;
     alignment: end;
     for c in root.cards: ActivityCard {
         card: c;
@@ -127,13 +127,13 @@ export component KeySheet inherits Rectangle {
         // Swallows clicks so they don't reach the backdrop.
         TouchArea { }
         VerticalLayout {
-            padding: 20px;
-            spacing: 12px;
+            padding: Space.lg;
+            spacing: Space.md;
             HorizontalLayout {
                 Text {
                     text: "Keys";
                     color: Theme.text;
-                    font-size: 18px;
+                    font-size: Type.heading;
                     font-weight: 600;
                     horizontal-stretch: 1;
                 }
@@ -146,13 +146,13 @@ export component KeySheet inherits Rectangle {
             Flickable {
                 VerticalLayout {
                     for r in root.rows: HorizontalLayout {
-                        padding-top: 5px;
-                        padding-bottom: 5px;
-                        spacing: 16px;
+                        padding-top: Space.xs;
+                        padding-bottom: Space.xs;
+                        spacing: Space.lg;
                         Text {
                             text: r.what;
                             color: Theme.text;
-                            font-size: 13px;
+                            font-size: Type.body;
                             horizontal-stretch: 1;
                             wrap: word-wrap;
                         }
@@ -167,7 +167,7 @@ export component KeySheet inherits Rectangle {
                                 text: r.key;
                                 color: r.key == "" ? Theme.faint : Theme.muted;
                                 font-family: Theme.number-font;
-                                font-size: 12px;
+                                font-size: Type.meta;
                             }
                         }
                     }
@@ -202,18 +202,18 @@ export component NoteDialog inherits Rectangle {
         drop-shadow-color: Theme.shadow;
         TouchArea { }
         VerticalLayout {
-            padding: 20px;
-            spacing: 12px;
+            padding: Space.lg;
+            spacing: Space.md;
             Text {
                 text: "Note for Claude";
                 color: Theme.text;
-                font-size: 18px;
+                font-size: Type.heading;
                 font-weight: 600;
             }
             Text {
                 text: "What did you see, or what should change? It's saved with a picture of the window and the app's last log lines, where Claude can read it.";
                 color: Theme.muted;
-                font-size: 12px;
+                font-size: Type.meta;
                 wrap: word-wrap;
             }
             Well {
@@ -225,7 +225,7 @@ export component NoteDialog inherits Rectangle {
                     height: parent.height - 16px;
                     text <=> root.text;
                     color: Theme.text;
-                    font-size: 14px;
+                    font-size: Type.row-title;
                     wrap: word-wrap;
                     single-line: false;
                     selection-background-color: Theme.accent.transparentize(60%);
@@ -233,7 +233,7 @@ export component NoteDialog inherits Rectangle {
                 }
             }
             HorizontalLayout {
-                spacing: 8px;
+                spacing: Space.sm;
                 if root.has-picture: TickBox {
                     text: "Include the picture";
                     checked <=> root.include-picture;

@@ -1,5 +1,5 @@
-//! The style check (spec 11.2): pages use the shared style in `studio.slint` and never set a raw colour, give a button
-//! a look of its own or draw their own play and stop signs. Only `studio.slint` may hold colour values and the looks
+//! The style check (spec 11.2): pages use the shared style in `studio.slint` and never set a raw colour, a text size,
+//! gap or padding of their own, give a button a look of its own or draw their own play and stop signs. Only `studio.slint` may hold colour values and the looks
 //! that change under the mouse.
 
 // Test files may unwrap: a test that stops there has failed, which is what it should do.
@@ -50,6 +50,38 @@ fn has_raw_colour(line: &str) -> bool {
     })
 }
 
+/// A text size, gap or padding set as a number ("font-size: 13px", "spacing: 6px") rather than a shared token. Gives
+/// what it is.
+fn own_size(code: &str) -> Option<&'static str> {
+    let props: [(&str, &'static str); 7] = [
+        ("font-size", "text size"),
+        ("spacing", "gap"),
+        ("padding", "padding"),
+        ("padding-left", "padding"),
+        ("padding-right", "padding"),
+        ("padding-top", "padding"),
+        ("padding-bottom", "padding"),
+    ];
+    let code = code.trim_start();
+    let (name, value) = code.split_once(':')?;
+    let what = props.iter().find(|(p, _)| *p == name.trim())?.1;
+    // A number with a unit; "0" (no gap) and tokens are fine.
+    let value = value.trim().trim_end_matches(';').trim();
+    let raw = value.chars().next().is_some_and(|c| c.is_ascii_digit()) && value.trim_start_matches(['0', '.']) != "";
+    raw.then_some(what)
+}
+
+#[test]
+fn a_size_of_its_own_is_found() {
+    assert_eq!(own_size("    font-size: 13px;"), Some("text size"));
+    assert_eq!(own_size("spacing: 6px;"), Some("gap"));
+    assert_eq!(own_size("padding-left: 14px;"), Some("padding"));
+    assert_eq!(own_size("font-size: Type.body;"), None);
+    assert_eq!(own_size("padding: 0;"), None);
+    assert_eq!(own_size("letter-spacing: 0.8px;"), None);
+    assert_eq!(own_size("width: 20px;"), None);
+}
+
 #[test]
 fn pages_use_the_shared_style() {
     let ui = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui");
@@ -69,6 +101,9 @@ fn pages_use_the_shared_style() {
             let code = code_of(line);
             if !shared && (code.contains("has-hover") || code.contains(".pressed")) {
                 problems.push(format!("{at}: a button look of its own; use or add a shared part in studio.slint"));
+            }
+            if !shared && let Some(what) = own_size(&code) {
+                problems.push(format!("{at}: a {what} of its own; use a Type or Space token from studio.slint"));
             }
             if line.contains('▶') || line.contains('■') {
                 problems.push(format!("{at}: a typed play or stop sign; use the shared PlayIcon"));
