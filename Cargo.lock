@@ -2898,6 +2898,7 @@ version = "0.1.0"
 dependencies = [
  "flate2",
  "mo-formats",
+ "mo-library",
  "rayon",
  "rusqlite",
  "sha2",
