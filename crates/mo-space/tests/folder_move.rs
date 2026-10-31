@@ -10,8 +10,8 @@ use std::time::{Duration, SystemTime};
 
 use mo_space::clean::{Bin, Problem, Removed, undo};
 use mo_space::folder_move::{
-    CantMove, Drives, MovedFolder, OLD_SUFFIX, move_back, move_folder, moved_json, old_copy_can_go, only_in_old_copy,
-    parse_moved, problem, remove_old_copy,
+    CantMove, Drives, KEPT_SUFFIX, MovedFolder, OLD_SUFFIX, move_back, move_folder, moved_json, old_copy_can_go,
+    only_in_old_copy, parse_moved, problem, remove_old_copy,
 };
 use mo_space::key;
 use mo_space::plugin_space::SpaceKind;
@@ -145,6 +145,9 @@ fn a_folder_moves_to_the_other_drive_and_back_with_what_was_saved_meanwhile() {
     // One worded from where it sits still reaches the same place from the other drive.
     #[cfg(unix)]
     std::os::unix::fs::symlink("../../../../Elsewhere", steam.join("Keys/Near")).unwrap();
+    // And so does one worded that way that leads nowhere now.
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("../../../../Away", steam.join("Keys/Away")).unwrap();
     // A library's own read-only samples copy too, with their time.
     let locked = steam.join("Keys").join("Locked.db");
     fs::write(&locked, "").unwrap();
@@ -182,6 +185,8 @@ fn a_folder_moves_to_the_other_drive_and_back_with_what_was_saved_meanwhile() {
     assert_eq!(real(&copy.join("Shortcut")), real(&copy.join("Keys")));
     #[cfg(unix)]
     assert_eq!(fs::read_to_string(copy.join("Keys/Near/big.wav")).unwrap(), "big");
+    #[cfg(unix)]
+    assert_eq!(fs::read_link(copy.join("Keys/Away")).unwrap(), dir.join("Away"));
     assert!(fs::metadata(copy.join("Keys/Locked.db")).unwrap().permissions().readonly());
     assert!(moved.has_old_copy() && old_copy_can_go(&moved));
     let old = PathBuf::from(&moved.old_copy);
@@ -196,11 +201,19 @@ fn a_folder_moves_to_the_other_drive_and_back_with_what_was_saved_meanwhile() {
     // The old copy's Pad.db looks newer, so it's named before the old copy could go.
     assert_eq!(only_in_old_copy(&moved, std::slice::from_ref(&moved), &stop).unwrap(), ["Pad.db"]);
 
-    // The move is undone: what changed on the other drive comes back, whatever its time.
-    move_back(&moved, &ROOMY, &nothing, &stop).unwrap();
+    // Moving back needs room on this drive for what changed (New.db and Pad.db).
+    let full = OtherDrive { free: Some(1) };
+    assert_eq!(move_back(&moved, &full, &nothing, &stop), Err(CantMove::NoRoom { free: 1, needs: 9 }));
+    assert!(is_link(&steam));
+    // The move is undone: what changed on the other drive comes back, whatever its time, and the old copy's newer
+    // Pad.db is kept beside the folder rather than replaced.
+    let back = move_back(&moved, &ROOMY, &nothing, &stop).unwrap();
     assert!(!is_link(&steam));
     assert_eq!(fs::read_to_string(steam.join("New.db")).unwrap(), "new");
     assert_eq!(fs::read_to_string(steam.join("Pad.db")).unwrap(), "pad v2");
+    assert_eq!(back.kept, ["Pad.db"]);
+    assert_eq!(back.kept_in, format!("{from}{KEPT_SUFFIX}"));
+    assert_eq!(fs::read_to_string(Path::new(&back.kept_in).join("Pad.db")).unwrap(), "pad");
     assert_eq!(fs::read_to_string(steam.join("Keys/Rhodes.db")).unwrap(), "rhodes");
     assert!(part_files(&steam).is_empty());
     assert!(!moved.has_old_copy());
@@ -298,6 +311,34 @@ fn a_stopped_move_leaves_everything_as_it_was() {
 }
 
 #[test]
+fn a_file_that_goes_while_the_folder_copies_is_passed_over() {
+    let dir = fixtures("mo-space-move-lock-files");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    let library = c.join("Library");
+    for n in 0..10 {
+        write(&library, &format!("{n}.wav"), "x");
+        write(&library, &format!("{n}.lock"), "x");
+    }
+    fs::create_dir_all(&d).unwrap();
+    let stop = AtomicBool::new(false);
+    // The plugin removes its lock files as the copy starts.
+    let removed = AtomicBool::new(false);
+    let progress = |_| {
+        if !removed.swap(true, Ordering::Relaxed) {
+            for n in 0..10 {
+                let _ = fs::remove_file(library.join(format!("{n}.lock")));
+            }
+        }
+    };
+    let moved = move_folder(&s(&library), &s(&d), 20, whose(), &ROOMY, &[], &progress, &stop).unwrap();
+    assert!(is_link(&library));
+    for n in 0..10 {
+        assert!(d.join("Library").join(format!("{n}.wav")).exists());
+    }
+    assert!(moved.has_old_copy());
+}
+
+#[test]
 fn an_old_copy_stays_while_it_is_the_only_copy_the_plugin_could_use() {
     let dir = fixtures("mo-space-move-old-copy");
     let (c, d) = (dir.join("C"), dir.join("D"));
@@ -359,6 +400,11 @@ fn an_old_copy_holding_an_earlier_moves_old_copy_waits_for_its_link() {
     assert!(!e.join("NI").join("Reaktor 6 (old copy)").exists());
     assert_eq!(fs::read_to_string(ni.join("Reaktor 6/r.ens")).unwrap(), "r");
     assert_eq!(only_in_old_copy(&outer, &all, &stop).unwrap(), Vec::<String>::new());
+    // What's only in Reaktor 6's old copy is named too.
+    fs::rename(d.join("Reaktor 6/r.ens"), d.join("r.ens")).unwrap();
+    let only = s(&Path::new("Reaktor 6 (old copy)").join("r.ens"));
+    assert_eq!(only_in_old_copy(&outer, &all, &stop).unwrap(), [only]);
+    fs::rename(d.join("r.ens"), d.join("Reaktor 6/r.ens")).unwrap();
 
     // Reaktor 6's copy went missing: its old copy is the only one left, so the outer old copy stays.
     fs::rename(d.join("Reaktor 6"), d.join("Reaktor 6 renamed")).unwrap();
