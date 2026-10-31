@@ -2926,6 +2926,7 @@ version = "0.1.0"
 dependencies = [
  "flate2",
  "md-5",
+ "memchr",
  "mo-formats",
  "mo-library",
  "rayon",

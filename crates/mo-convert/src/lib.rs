@@ -13,6 +13,7 @@ pub mod clips;
 pub mod lost;
 pub mod notes;
 pub mod plan;
+pub mod relink;
 pub mod sample;
 pub mod save;
 

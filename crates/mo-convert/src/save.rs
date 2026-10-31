@@ -248,14 +248,31 @@ pub fn bitwig_from_fl(
 
 /// Writes `bytes` under a temporary name beside `file`, flushes it to the disk, reads it back and checks it (the same
 /// bytes, and `problem` finds nothing wrong), then renames it into place.
-fn save_checked(file: &Path, bytes: &[u8], problem: impl Fn(&[u8]) -> Option<String>) -> Result<(), String> {
+pub(crate) fn save_checked(file: &Path, bytes: &[u8], problem: impl Fn(&[u8]) -> Option<String>) -> Result<(), String> {
+    save(file, bytes, problem, true).map(|_| ())
+}
+
+/// [`save_checked`], but never over a file that's there, even one that appears while this saves: false when `file`
+/// is taken, and nothing was written.
+pub(crate) fn save_checked_new(
+    file: &Path,
+    bytes: &[u8],
+    problem: impl Fn(&[u8]) -> Option<String>,
+) -> Result<bool, String> {
+    save(file, bytes, problem, false)
+}
+
+fn save(file: &Path, bytes: &[u8], problem: impl Fn(&[u8]) -> Option<String>, replace: bool) -> Result<bool, String> {
+    if !replace && file.exists() {
+        return Ok(false);
+    }
     // Unique to this save, even with two converts running at once.
     static SAVES: AtomicU64 = AtomicU64::new(0);
     let name = file.file_name().ok_or("no file name")?.to_string_lossy();
     let count = SAVES.fetch_add(1, Ordering::Relaxed);
     let temporary = file.with_file_name(format!("{name}.{}-{count}.saving", std::process::id()));
+    let saving = |e: std::io::Error| format!("Couldn't save {}: {e}", file.display());
     let result = (|| {
-        let saving = |e: std::io::Error| format!("Couldn't save {}: {e}", file.display());
         let mut out = std::fs::File::create(&temporary).map_err(saving)?;
         out.write_all(bytes).map_err(saving)?;
         out.sync_all().map_err(saving)?;
@@ -267,9 +284,26 @@ fn save_checked(file: &Path, bytes: &[u8], problem: impl Fn(&[u8]) -> Option<Str
         if let Some(p) = problem(&back) {
             return Err(format!("{} came out wrong ({p}), so it's left as it was", file.display()));
         }
-        std::fs::rename(&temporary, file).map_err(saving)
+        if replace {
+            return std::fs::rename(&temporary, file).map(|_| true).map_err(saving);
+        }
+        // A second name for the checked file fails when the name is taken, so nothing is ever replaced. A drive with
+        // no second names (FAT) gets the name claimed first instead: an empty file, made only if nothing's there.
+        match std::fs::hard_link(&temporary, file) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+            Err(_) => match std::fs::OpenOptions::new().write(true).create_new(true).open(file) {
+                Ok(_) => std::fs::rename(&temporary, file).map(|_| true).map_err(|e| {
+                    let _ = std::fs::remove_file(file);
+                    saving(e)
+                }),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+                Err(e) => Err(saving(e)),
+            },
+        }
     })();
-    if result.is_err() {
+    // The temporary file goes either way (after a second name, the saved file keeps the bytes).
+    if temporary.exists() {
         let _ = std::fs::remove_file(&temporary);
     }
     result
