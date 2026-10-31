@@ -350,7 +350,12 @@ struct BarScratch {
 }
 
 /// A note's fingerprint, from the stream it's in, where in its bar it starts, its key and how long it's heard: FNV-1a
-/// over those bytes. A bar's fingerprint is the sum of its notes', which doesn't depend on their order.
+/// over those bytes, then mixed (MurmurHash3's last step). A bar's fingerprint is the sum of its notes', which doesn't
+/// depend on their order.
+///
+/// FNV-1a alone isn't enough for a sum: notes that differ only in their key differ in a few low bits that its last
+/// steps barely spread, so two bars of the same rhythm could add up the same (C Bb F C moved down a tone was heard
+/// as two bars, not three). The mixing spreads every bit over all 64.
 fn note_print(stream: u8, offset: i128, key: u8, length: i128) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     let mut eat = |bytes: &[u8]| {
@@ -363,7 +368,11 @@ fn note_print(stream: u8, offset: i128, key: u8, length: i128) -> u64 {
     eat(&offset.to_le_bytes());
     eat(&[key]);
     eat(&length.to_le_bytes());
-    h
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    h ^ (h >> 33)
 }
 
 /// How long a note sounds, in ticks: at least 1.

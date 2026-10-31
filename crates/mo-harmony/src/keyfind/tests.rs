@@ -661,3 +661,42 @@ fn chances_add_up_and_turn_with_the_keys() {
     wild[4] = f64::NEG_INFINITY;
     assert!(chances(wild).iter().all(|p| p.is_finite()));
 }
+
+#[test]
+fn bars_that_differ_are_told_apart() {
+    // Every major and minor triad a bar each, in every key: 24 bars that differ, each heard once. A bar's print is
+    // the sum of its notes' prints, so a note print with too little mixing can let two bars of the same rhythm add up
+    // the same: C Bb F C moved down a tone was once heard as two bars, not three.
+    let roots = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"];
+    let names: Vec<String> = roots.iter().flat_map(|r| [(*r).to_owned(), format!("{r}m")]).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let piece = Piece::new(&names, &[]);
+    for s in 0..12 {
+        assert_eq!(piece.transposed(s).heard().bars_heard(), 24, "moved {s}");
+    }
+    // Whole notes, a bass under each chord: C Bb F C, moved to every key, is three bars.
+    let whole = |chords: &[(u8, [u8; 3])], s: i32| -> Heard {
+        let at = |bar: usize| (bar as i64) * 4 * BEAT;
+        let k = |key: u8| (i32::from(key) + s) as u8;
+        let harmony: Vec<Note> = chords
+            .iter()
+            .enumerate()
+            .flat_map(|(bar, (_, keys))| {
+                keys.map(|key| Note { start: at(bar), length: 4 * BEAT, key: k(key), velocity: LOUD })
+            })
+            .collect();
+        let bass: Vec<Note> = chords
+            .iter()
+            .enumerate()
+            .map(|(bar, (root, _))| Note { start: at(bar), length: 4 * BEAT, key: k(*root), velocity: LOUD })
+            .collect();
+        hear(
+            &[Part { role: Role::Harmony, notes: &harmony }, Part { role: Role::Bass, notes: &bass }],
+            Grid::four_four(TPB),
+        )
+    };
+    let vamp = [(36, [60, 64, 67]), (46, [62, 65, 70]), (41, [60, 65, 69]), (36, [60, 64, 67])];
+    for s in -6..=5 {
+        assert_eq!(whole(&vamp, s).bars_heard(), 3, "moved {s}");
+    }
+}
