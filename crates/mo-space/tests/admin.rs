@@ -631,4 +631,48 @@ mod guarded {
         assert_eq!(bin.admin.as_deref().map(Unlock::asked), Some(1));
         assert!(!vst2.join("Serum_x64.dll").exists() && !vst2.join("Massive.dll").exists());
     }
+
+    #[test]
+    fn bitwig_copies_windows_guards_go_in_one_step_and_are_checked_again_before_it_asks() {
+        use mo_space::bitwig::{FixedProject, remove_copies};
+
+        let dir = fixtures("mo-space-admin-bitwig");
+        if !locking_works(&dir) {
+            return;
+        }
+        let library = dir.join("Library");
+        let project = dir.join("Project");
+        write(&library, "Kicks.multisample", "kicks");
+        write(&project, "P (fixed).bwproject", "fixed");
+        write(&project, "multi-samples/Kicks-2.multisample", "kicks");
+        let ms = project.join("multi-samples");
+        let changed = [(ms.join("Kicks-2.multisample"), library.join("Kicks.multisample"))];
+        let libraries = [library.clone()];
+        let file = project.join("P (fixed).bwproject");
+        let go = |still_named: &(dyn Fn(&Path, &Path) -> Option<String> + Sync)| {
+            let fix = FixedProject { file: &file, changed: &changed, library_folders: &libraries, still_named };
+            lock(&ms, true);
+            let mut bin = FolderBin::new(&dir);
+            bin.admin = Some(Box::new(Unlock { bin: Some(bin.twin()), ..Unlock::new(&[&ms]) }));
+            let done = remove_copies(&fix, &bin, &AtomicBool::new(false));
+            lock(&ms, false);
+            (done, bin.admin.as_deref().map(Unlock::asked))
+        };
+        // A save made while the other lines were checked names it: it stays, and Windows isn't asked.
+        let calls = AtomicUsize::new(0);
+        let named_later = |_: &Path, _: &Path| {
+            (calls.fetch_add(1, Ordering::SeqCst) > 0).then(|| "A save made since uses it.".to_owned())
+        };
+        let (done, asked) = go(&named_later);
+        assert!(done.removed.is_empty());
+        assert_eq!(done.problems[0].why, "A save made since uses it.");
+        assert_eq!(asked, Some(0));
+        assert!(ms.join("Kicks-2.multisample").exists());
+        // Otherwise it goes, Windows asked once.
+        let (done, asked) = go(&|_: &Path, _: &Path| None);
+        assert!(done.problems.is_empty(), "{:?}", done.problems);
+        assert_eq!(done.removed.len(), 1);
+        assert_eq!(asked, Some(1));
+        assert!(!ms.join("Kicks-2.multisample").exists() && library.join("Kicks.multisample").exists());
+    }
 }

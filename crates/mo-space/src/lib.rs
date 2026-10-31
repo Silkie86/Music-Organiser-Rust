@@ -13,12 +13,14 @@
 //! - [`folder_move`]: moving a plugin's sounds or presets to another drive with a link in their place, and back.
 //! - [`after_move`]: what can happen to a moved folder later (lost links, updates), and putting it right.
 //! - [`admin`]: the administrator step, for folders, links and files Windows guards.
-//! - [`bitwig`]: Bitwig's copies of Library multisamples inside projects, found byte for byte.
+//! - [`bitwig`]: Bitwig's copies of Library multisamples inside projects, found byte for byte, and binned once a
+//!   "(fixed)" project uses the Library file instead.
 //!
 //! Nothing here touches the window or a database: the app reads what it needs from the library and hands it in, and
 //! every walk is spread over the cores of the pool it's called in (call it in the app's low-priority pool).
 //! Rules kept from the C# app: samples are never removed (rule 2), a song's newest save always stays, and nothing is
-//! ever deleted for good.
+//! ever deleted for good. The one exception to rule 2, Solomon's choice (31 Oct 2026): a Bitwig project's copy of a
+//! Library multisample, once a "(fixed)" project uses the Library file instead ([`bitwig::remove_copies`]).
 
 pub mod admin;
 pub mod after_move;
