@@ -508,11 +508,6 @@ export component SongsPage inherits Rectangle {
                     SongsData.search-edited("");
                     return true;
                 }
-                // Enter opens the picked song.
-                if (k == Key.Return && SongsData.selected >= 0) {
-                    SongsData.open();
-                    return true;
-                }
                 // With the search already empty, Esc puts the song panel away.
                 if (k == Key.Escape && SongsData.selected >= 0) {
                     SongsData.close-panel();

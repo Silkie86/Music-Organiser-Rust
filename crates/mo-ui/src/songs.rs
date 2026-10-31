@@ -56,8 +56,10 @@ thread_local! {
     static LINES: Rc<Lines> = PAGE.with(|p| Rc::new(Lines { page: p.clone(), notify: ModelNotify::default() }));
     /// Reads a save's record for the panel, one at a time, newest ask first.
     static READER: RefCell<Option<Newest<(u64, i64)>>> = const { RefCell::new(None) };
-    /// The library's file, for the DAW picked in Settings, and the activity cards, for Open.
-    static OPENER: RefCell<Option<(PathBuf, Feed)>> = const { RefCell::new(None) };
+    /// The activity cards, for Open, Show in folder and Copy path.
+    static FEED: RefCell<Option<Feed>> = const { RefCell::new(None) };
+    /// The clipboard, kept open: on Linux what's copied only stays while it is.
+    static CLIPBOARD: RefCell<Option<arboard::Clipboard>> = const { RefCell::new(None) };
 }
 
 /// The list's lines, made from the page's view one at a time as the list draws them, so a new search doesn't build
@@ -88,17 +90,17 @@ impl Model for Lines {
 /// folder and Copy path report on `feed`'s cards.
 pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
     let data = app.global::<SongsData>();
-    OPENER.with(|o| *o.borrow_mut() = Some((path.clone(), feed)));
-    data.on_open(|| with_picked(|r| open_save(&r.song.latest.path, &r.song.latest.daw, &r.song.latest.name)));
+    FEED.with(|f| *f.borrow_mut() = Some(feed));
+    data.on_open(|| with_picked(|p, r| open_save(p, &r.song.latest)));
     data.on_open_save(|path| {
-        with_picked(|r| {
+        with_picked(|p, r| {
             if let Some(s) = r.song.saves().find(|s| s.path == path.as_str()) {
-                open_save(&s.path, &s.daw, &s.name);
+                open_save(p, s);
             }
         });
     });
-    data.on_reveal(|| with_picked(|r| reveal(&r.song.latest.path)));
-    data.on_copy_path(|| with_picked(|r| copy_path(&r.song.latest.path)));
+    data.on_reveal(|| with_picked(|_, r| reveal(&r.song.latest)));
+    data.on_copy_path(|| with_picked(|_, r| copy_path(&r.song.latest.path)));
     data.set_statuses(strings(STATUSES.iter().copied()));
     let weak = app.as_weak();
     data.on_search_edited(move |text| {
@@ -418,7 +420,7 @@ pub fn show_picked(app: &AppWindow, row: usize, detail: SaveDetail, tab: Tab) {
 /// anything, so an unused key goes on.
 pub fn run_action(app: &AppWindow, id: &str) -> bool {
     let data = app.global::<SongsData>();
-    if data.get_selected() < 0 {
+    if !has_pick() {
         return false;
     }
     match id {
@@ -430,31 +432,35 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
     true
 }
 
-/// Does `f` with the picked song's row, when a song is picked.
-fn with_picked(f: impl FnOnce(&SongRow)) {
+/// Does `f` with the page and the picked song's row, when a song is picked.
+fn with_picked(f: impl FnOnce(&Page, &SongRow)) {
     PAGE.with(|p| {
         let p = p.borrow();
         if let Some(r) = p.picked.and_then(|i| p.songs.rows.get(i)) {
-            f(r);
+            f(&p, r);
         }
     });
+}
+
+/// Whether a song is picked, for the page's keys.
+pub fn has_pick() -> bool {
+    PAGE.with(|p| p.borrow().picked.is_some())
 }
 
 /// Opens a save in its DAW: the one picked in Settings (shared with the C# app), else whatever opens its kind of
 /// file. Off the window's thread: handing a file to a DAW that's already running can keep the system busy for
 /// seconds. The library is read-only for now, so the save's "last opened" isn't noted yet.
-fn open_save(path: &str, daw: &str, name: &str) {
-    let Some((db, feed)) = OPENER.with(|o| o.borrow().clone()) else { return };
-    let (path, daw, name) = (path.to_owned(), daw.to_owned(), name.to_owned());
+fn open_save(page: &Page, save: &mo_library::Save) {
+    let Some(feed) = FEED.with(|f| f.borrow().clone()) else { return };
+    let exe = page.songs.daw_exes.get(&save.daw).cloned();
+    let (path, daw, name) = (save.path.clone(), save.daw.clone(), save.name.clone());
     let started = background::spawn("Open", move || {
         if !shell::exists(&path) {
             feed.start(&format!("Can't find {name}"), "")
                 .failed("It has moved or been deleted since the library last looked. Rescan to update the library.");
             return;
         }
-        let exe =
-            Library::open_read_only(&db).ok().and_then(|lib| lib.setting(&shell::daw_exe_key(&daw)).ok().flatten());
-        let exe = exe.filter(|e| shell::exists(e) || e.ends_with(".app"));
+        let exe = exe.filter(|e| shell::usable_exe(e));
         let job = feed.start(&format!("Opening {name}"), "");
         match shell::run(&shell::open(&path, exe.as_deref(), shell::Os::THIS)) {
             Ok(()) => job.done(&format!("Sent to {daw}. It opens there in a moment.")),
@@ -470,11 +476,11 @@ fn open_save(path: &str, daw: &str, name: &str) {
 }
 
 /// Shows the file picked in its folder, or the folder when the file has gone.
-fn reveal(path: &str) {
-    let Some((_, feed)) = OPENER.with(|o| o.borrow().clone()) else { return };
-    let path = path.to_owned();
+fn reveal(save: &mo_library::Save) {
+    let Some(feed) = FEED.with(|f| f.borrow().clone()) else { return };
+    let (path, folder) = (save.path.clone(), save.folder.clone());
     let started = background::spawn("Show in folder", move || {
-        let launch = shell::reveal(&path, shell::exists(&path), shell::Os::THIS);
+        let launch = shell::reveal(&path, &folder, shell::exists(&path), shell::Os::THIS);
         if let Err(e) = shell::run(&launch) {
             log::warning("Show in folder", &format!("{path}: {e}"));
             feed.start("Couldn't show the file", "").failed(&e.to_string());
@@ -487,8 +493,17 @@ fn reveal(path: &str) {
 
 /// Puts the file's path on the clipboard.
 fn copy_path(path: &str) {
-    let copied = arboard::Clipboard::new().and_then(|mut c| c.set_text(path.to_owned()));
-    let Some((_, feed)) = OPENER.with(|o| o.borrow().clone()) else { return };
+    let copied = CLIPBOARD.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.is_none() {
+            *c = Some(arboard::Clipboard::new()?);
+        }
+        match c.as_mut() {
+            Some(clip) => clip.set_text(path.to_owned()),
+            None => Ok(()),
+        }
+    });
+    let Some(feed) = FEED.with(|f| f.borrow().clone()) else { return };
     match copied {
         Ok(()) => feed.start("Copied the path", "").done(path),
         Err(e) => {
