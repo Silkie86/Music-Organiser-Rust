@@ -166,7 +166,7 @@ component SongPanel inherits Rectangle {
             vertical-stretch: 0;
             Text {
                 text: SongsData.song.daw;
-                color: SongsData.song.daw == "FL Studio" ? Theme.fl-studio : SongsData.song.daw == "Bitwig" || SongsData.song.daw == "Bitwig Studio" ? Theme.bitwig : SongsData.song.daw == "Studio One" ? Theme.studio-one : Theme.muted;
+                color: Theme.daw(SongsData.song.daw);
                 font-size: Type.meta;
                 font-weight: 600;
                 vertical-alignment: center;
@@ -688,10 +688,19 @@ export component SongsPage inherits Rectangle {
                                 tip: line.date-tip;
                                 tip-from: self.width - Space.md - 90px;
                                 clicked => { SongsData.select(line.row); }
-                            double-clicked => {
-                                SongsData.select(line.row);
-                                SongsData.open();
-                            }
+                                double-clicked => {
+                                    SongsData.select(line.row);
+                                    SongsData.open();
+                                }
+                                // The DAW's colour, as a thin bar at the left (the design system's song row).
+                                Rectangle {
+                                    x: Space.xs + 2px;
+                                    y: (parent.height - self.height) / 2;
+                                    width: 3px;
+                                    height: parent.height - 2 * Space.md;
+                                    border-radius: 1.5px;
+                                    background: Theme.daw(line.daw);
+                                }
                                 HorizontalLayout {
                                     padding-left: Space.md;
                                     padding-right: Space.md;

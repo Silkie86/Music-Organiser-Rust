@@ -38,6 +38,20 @@ export global Theme {
     out property <color> fl-studio: #5EA8FF;
     out property <color> bitwig: #F2994A;
     out property <color> studio-one: #4ACB8B;
+
+    // A DAW's colour from its name as the library writes it, or `muted` for one without a colour of its own.
+    public pure function daw(name: string) -> color {
+        if (name == "FL Studio") {
+            return fl-studio;
+        }
+        if (name == "Bitwig" || name == "Bitwig Studio") {
+            return bitwig;
+        }
+        if (name == "Studio One") {
+            return studio-one;
+        }
+        return muted;
+    }
 }
 
 // Text sizes (the agreed scale, nearer the C# app at 125%). Pages use these, never a size of their own.
