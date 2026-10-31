@@ -4,28 +4,32 @@
 //!
 //! 1. [`preview`] checks every picked line against the [`Guard`] and says what would go and what wouldn't (and why).
 //!    Nothing on disk changes.
-//! 2. [`apply`] checks each line again (a file changed since the preview stays) and sends it to the Recycle Bin (the
-//!    Trash on a Mac or Linux). Nothing is ever deleted for good here. It returns a [`Done`] list.
+//! 2. [`apply`] checks each line again just before it goes (one that changed since it was measured stays) and sends it
+//!    to the Recycle Bin (the Trash on a Mac or Linux). Nothing is ever deleted for good here. Then it finds each one
+//!    in the bin, so it can be put back, and returns a [`Done`] list.
 //! 3. [`undo`] puts the [`Done`] list back from the bin, where it was.
 //!
 //! The guard keeps the C# app's rules: samples in your sample folders and audio any project uses never go (rule 2),
 //! every song's newest save stays, a save that's a copy only goes while the save it copies is still there and still
-//! the same, and only things inside your project folders are touched at all.
+//! the same, and only things inside your project folders are touched at all. Paths are checked as written and as they
+//! really are on disk, so a link can't lead a clean-up out of your project folders or into a sample folder.
 
 use std::collections::HashSet;
 use std::fs::{self, Metadata};
+use std::io::Read;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use chrono::{DateTime, Local, NaiveDateTime};
 use mo_formats::case;
-use mo_formats::paths::{extension, file_name};
+use mo_formats::paths::file_name;
 use mo_formats::textscan::is_audio_path;
 use mo_library::scan::{daw_of, is_autosave_dir, is_autosave_file, is_inside, is_project_file};
 use serde::{Deserialize, Serialize};
 
-use crate::key;
-use crate::song::{CompactItem, CompactKind, parent};
+use crate::song::{CompactItem, CompactKind, has_studio_one_song, parent};
+use crate::{key, real_path};
 
 /// Why a picked line won't go.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -34,13 +38,15 @@ pub enum Refused {
     Gone,
     /// It's a link to another place: removing it wouldn't free anything.
     Link,
+    /// It's reached through a link that leads out of your project folder.
+    ThroughLink,
     /// It isn't inside any of your project folders.
     OutsideProjects,
     /// It's one of your project folders, or holds one.
     ProjectFolder,
     /// It's on a network drive, which has no Recycle Bin.
     NetworkDrive,
-    /// It's in one of your sample folders.
+    /// It's in one of your sample folders, or holds one.
     InSampleFolder,
     /// A project uses an audio file of this name.
     SampleInUse,
@@ -58,7 +64,7 @@ pub enum Refused {
     NotACopyNow,
     /// The line is a copy of a save that's going too: one of them has to stay.
     TwinGoesToo,
-    /// It changed since the preview.
+    /// It changed since it was measured.
     Changed,
 }
 
@@ -68,6 +74,7 @@ impl Refused {
         match self {
             Refused::Gone => "It isn't there any more.",
             Refused::Link => "It's a link to another place, so removing it frees nothing.",
+            Refused::ThroughLink => "It's reached through a link to another place, outside your project folder.",
             Refused::OutsideProjects => "It isn't in one of your project folders.",
             Refused::ProjectFolder => "It's one of your project folders.",
             Refused::NetworkDrive => "It's on a network drive, which has no Recycle Bin.",
@@ -111,29 +118,55 @@ impl Stamp {
     }
 }
 
+/// A line the guard let through: what it looked like, and where it really is.
+struct Checked {
+    stamp: Stamp,
+    real: String,
+}
+
+/// A folder as written, and where it really is (as written when that can't be read).
+fn both(folder: &str) -> (&str, String) {
+    (folder, real_path(folder).unwrap_or_else(|| folder.to_owned()))
+}
+
+/// Whether a path written with a network server's name (`\\server\share`).
+fn on_network(path: &str) -> bool {
+    path.starts_with(r"\\") || path.starts_with("//")
+}
+
 impl Guard<'_> {
     /// Whether a line may go, and what it looks like now.
-    fn check(&self, item: &CompactItem) -> Result<Stamp, Refused> {
+    fn check(&self, item: &CompactItem) -> Result<Checked, Refused> {
         let path = item.path.as_str();
         let meta = fs::symlink_metadata(path).map_err(|_| Refused::Gone)?;
         if meta.file_type().is_symlink() {
             return Err(Refused::Link);
         }
-        if path.starts_with(r"\\") || path.starts_with("//") {
+        // Where it really is: a mapped network drive reads as a server's name here.
+        let real = real_path(path).ok_or(Refused::Gone)?;
+        if on_network(path) || on_network(&real) {
             return Err(Refused::NetworkDrive);
         }
-        if self.project_roots.iter().any(|r| is_inside(r, path)) {
+        let roots: Vec<(&str, String)> = self.project_roots.iter().map(|r| both(r)).collect();
+        if roots.iter().any(|(r, real_r)| is_inside(r, path) || is_inside(real_r, &real)) {
             return Err(Refused::ProjectFolder);
         }
         // The innermost project folder it's in, to read the folders below it.
-        let Some(root) = self.project_roots.iter().filter(|r| is_inside(path, r)).max_by_key(|r| parts(r).count())
+        let Some((root, real_root)) =
+            roots.iter().filter(|(r, _)| is_inside(path, r)).max_by_key(|(r, _)| parts(r).count())
         else {
             return Err(Refused::OutsideProjects);
         };
-        if self.sample_folders.iter().any(|f| is_inside(path, f) || is_inside(f, path)) {
+        if !is_inside(&real, real_root) {
+            return Err(Refused::ThroughLink);
+        }
+        let in_samples = self.sample_folders.iter().map(|f| both(f)).any(|(f, real_f)| {
+            is_inside(path, f) || is_inside(f, path) || is_inside(&real, &real_f) || is_inside(&real_f, &real)
+        });
+        if in_samples {
             return Err(Refused::InSampleFolder);
         }
-        if self.keep.contains(&key(path)) {
+        if self.keep.contains(&key(path)) || self.keep.contains(&key(&real)) {
             return Err(Refused::KeptSave);
         }
         let name = file_name(path);
@@ -144,6 +177,8 @@ impl Guard<'_> {
                 }
             }
             CompactKind::Backup => {
+                // Only the folders below the project folder count: a project folder called "Backup" doesn't make every
+                // song in it an autosave.
                 let all: Vec<&str> = parts(path).collect();
                 let below_root = all.get(parts(root).count()..all.len().saturating_sub(1)).unwrap_or_default();
                 let autosave = is_autosave_file(name) || below_root.iter().any(|d| is_autosave_dir(d));
@@ -152,7 +187,10 @@ impl Guard<'_> {
                 }
             }
             CompactKind::Cache => {
-                if !meta.is_dir() || !case::eq_ignore_case(name, "Cache") || !beside_a_studio_one_song(path) {
+                if !meta.is_dir()
+                    || !case::eq_ignore_case(name, "Cache")
+                    || !has_studio_one_song(Path::new(&parent(path)))
+                {
                     return Err(Refused::NotACache);
                 }
             }
@@ -165,8 +203,23 @@ impl Guard<'_> {
                 }
             }
         }
-        Ok(Stamp::of(&meta))
+        // A file that isn't as it was measured (written again since) stays. A folder's size is what it holds, so only
+        // a file's is compared.
+        if meta.is_file() && (meta.len() != item.bytes || !same_time(&meta, item.modified)) {
+            return Err(Refused::Changed);
+        }
+        if item.kind == CompactKind::SameSave && !still_same(item, &real) {
+            return Err(Refused::NotACopyNow);
+        }
+        Ok(Checked { stamp: Stamp::of(&meta), real })
     }
+}
+
+/// Whether a file was last written when the line says (to the second, either way), or the line doesn't say.
+fn same_time(meta: &Metadata, measured: Option<NaiveDateTime>) -> bool {
+    let Some(measured) = measured else { return true };
+    let Ok(modified) = meta.modified() else { return false };
+    (DateTime::<Local>::from(modified).naive_local() - measured).num_milliseconds().abs() < 2000
 }
 
 /// The names in a path, whichever way its slashes lean.
@@ -174,14 +227,36 @@ fn parts(path: &str) -> impl Iterator<Item = &str> {
     path.split(['\\', '/']).filter(|d| !d.is_empty())
 }
 
-/// Whether the folder beside `cache` holds a Studio One song.
-fn beside_a_studio_one_song(cache: &str) -> bool {
-    fs::read_dir(parent(cache)).is_ok_and(|entries| {
-        entries.flatten().any(|e| {
-            e.file_type().is_ok_and(|t| t.is_file())
-                && case::eq_ignore_case(extension(&e.file_name().to_string_lossy()), ".song")
-        })
-    })
+/// Whether a copy's twin is still there, a file of its own (not a link, not the copy itself), and still byte for byte
+/// the same.
+fn still_same(item: &CompactItem, real: &str) -> bool {
+    let Some(twin) = item.same_as.as_deref() else { return false };
+    let twin_is_a_file = fs::symlink_metadata(twin).is_ok_and(|m| m.is_file());
+    let Some(real_twin) = real_path(twin) else { return false };
+    if !twin_is_a_file || key(&real_twin) == key(real) {
+        return false;
+    }
+    same_bytes(Path::new(&item.path), Path::new(twin)).unwrap_or(false)
+}
+
+/// Whether two files hold the same bytes, read side by side in pieces.
+fn same_bytes(a: &Path, b: &Path) -> std::io::Result<bool> {
+    let (mut fa, mut fb) = (fs::File::open(a)?, fs::File::open(b)?);
+    if fa.metadata()?.len() != fb.metadata()?.len() {
+        return Ok(false);
+    }
+    let (mut ba, mut bb) = (vec![0u8; 1 << 20], vec![0u8; 1 << 20]);
+    loop {
+        let n = fa.read(&mut ba)?;
+        if n == 0 {
+            // The first has ended: the same only if the second has too.
+            return Ok(fb.read(&mut bb)? == 0);
+        }
+        let (Some(want), Some(got)) = (ba.get(..n), bb.get_mut(..n)) else { return Ok(false) };
+        if fb.read_exact(got).is_err() || want != &*got {
+            return Ok(false);
+        }
+    }
 }
 
 /// A line that will go, and what it looked like when checked.
@@ -215,7 +290,7 @@ pub fn preview(picked: &[CompactItem], guard: &Guard<'_>) -> Plan {
             continue;
         }
         match guard.check(item) {
-            Ok(stamp) => plan.lines.push(PlanLine { item: item.clone(), stamp }),
+            Ok(checked) => plan.lines.push(PlanLine { item: item.clone(), stamp: checked.stamp }),
             Err(why) => plan.refused.push((item.clone(), why)),
         }
     }
@@ -234,11 +309,16 @@ pub fn preview(picked: &[CompactItem], guard: &Guard<'_>) -> Plan {
 /// Something that went to the Recycle Bin: enough to put it back.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Removed {
+    /// Where it was, as the line had it.
     pub path: String,
+    /// Where it really was (links worked out): what the bin keeps.
+    pub real: String,
     pub bytes: u64,
     pub kind: CompactKind,
-    /// When it went (Unix seconds), so the right one is put back when the bin holds several of the same name.
+    /// When it went (Unix seconds, taken just before).
     pub when: i64,
+    /// What the bin calls it, once found there.
+    pub bin_id: Option<String>,
 }
 
 /// A line that couldn't go (or come back), and why.
@@ -266,68 +346,52 @@ impl Done {
 pub trait Bin {
     /// Puts a file or folder in the bin, or says what stopped it.
     fn send(&self, path: &Path) -> Result<(), String>;
+    /// After a clean-up: finds each removed thing in the bin and notes what the bin calls it, so it can be put back.
+    /// Says which aren't there (removed for good when Windows asked about something too big for the bin).
+    fn find(&self, removed: &mut [Removed]) -> Vec<Problem>;
     /// Puts things back from the bin where they were; says what couldn't come back.
     fn put_back(&self, removed: &[Removed]) -> Vec<Problem>;
 }
 
-/// Sends each line of the plan to the bin, checking each again first: one that changed since the preview, or that the
-/// guard now refuses, stays. A copy only goes while the save it copies is still there and still the same.
+/// Sends each line of the plan to the bin, checking each again just before: one that changed, or that the guard now
+/// refuses, stays. A copy only goes while the save it copies is still there and still the same.
 pub fn apply(plan: &Plan, guard: &Guard<'_>, bin: &dyn Bin) -> Done {
     let mut done = Done::default();
     for line in &plan.lines {
         let item = &line.item;
-        let stays = match guard.check(item) {
-            Err(why) => Some(why),
-            Ok(now) if now != line.stamp => Some(Refused::Changed),
-            Ok(_) if item.kind == CompactKind::SameSave && !still_same(item) => Some(Refused::NotACopyNow),
-            Ok(_) => None,
+        let real = match guard.check(item) {
+            Err(why) => Err(why),
+            Ok(now) if now.stamp != line.stamp => Err(Refused::Changed),
+            Ok(now) => Ok(now.real),
         };
-        if let Some(why) = stays {
-            done.problems.push(Problem { path: item.path.clone(), why: why.text().to_owned() });
-            continue;
-        }
+        let real = match real {
+            Ok(real) => real,
+            Err(why) => {
+                done.problems.push(Problem { path: item.path.clone(), why: why.text().to_owned() });
+                continue;
+            }
+        };
         let when = now_seconds();
         match bin.send(Path::new(&item.path)) {
-            Ok(()) => done.removed.push(Removed { path: item.path.clone(), bytes: item.bytes, kind: item.kind, when }),
+            Ok(()) => done.removed.push(Removed {
+                path: item.path.clone(),
+                real,
+                bytes: item.bytes,
+                kind: item.kind,
+                when,
+                bin_id: None,
+            }),
             Err(why) => done.problems.push(Problem { path: item.path.clone(), why }),
         }
     }
+    let not_found = bin.find(&mut done.removed);
+    done.problems.extend(not_found);
     done
 }
 
 /// Puts back what a clean-up removed.
 pub fn undo(done: &Done, bin: &dyn Bin) -> Vec<Problem> {
     bin.put_back(&done.removed)
-}
-
-/// Whether a copy's twin is still there and still byte for byte the same.
-fn still_same(item: &CompactItem) -> bool {
-    let Some(twin) = item.same_as.as_deref() else { return false };
-    if key(twin) == key(&item.path) {
-        return false;
-    }
-    same_bytes(Path::new(&item.path), Path::new(twin)).unwrap_or(false)
-}
-
-/// Whether two files hold the same bytes, read side by side in pieces.
-fn same_bytes(a: &Path, b: &Path) -> std::io::Result<bool> {
-    use std::io::Read;
-    let (mut fa, mut fb) = (fs::File::open(a)?, fs::File::open(b)?);
-    if fa.metadata()?.len() != fb.metadata()?.len() {
-        return Ok(false);
-    }
-    let (mut ba, mut bb) = (vec![0u8; 1 << 20], vec![0u8; 1 << 20]);
-    loop {
-        let n = fa.read(&mut ba)?;
-        if n == 0 {
-            // The first has ended: the same only if the second has too.
-            return Ok(fb.read(&mut bb)? == 0);
-        }
-        let (Some(want), Some(got)) = (ba.get(..n), bb.get_mut(..n)) else { return Ok(false) };
-        if fb.read_exact(got).is_err() || want != &*got {
-            return Ok(false);
-        }
-    }
 }
 
 fn now_seconds() -> i64 {
@@ -352,6 +416,10 @@ impl Bin for SystemBin {
         }
     }
 
+    fn find(&self, removed: &mut [Removed]) -> Vec<Problem> {
+        find_in_system_bin(removed)
+    }
+
     fn put_back(&self, removed: &[Removed]) -> Vec<Problem> {
         put_back_from_system_bin(removed)
     }
@@ -372,32 +440,69 @@ fn bin_problem(e: &trash::Error) -> String {
     }
 }
 
+/// Whether a bin item is the one removed: from the same place, and gone to the bin at or after the moment it was sent
+/// (a couple of seconds' leeway for the clock).
+#[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+fn is_the_one(item: &trash::TrashItem, r: &Removed) -> bool {
+    key(&item.original_path().to_string_lossy()) == key(&r.real) && item.time_deleted >= r.when - 2
+}
+
+#[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+fn bin_items() -> Option<Vec<trash::TrashItem>> {
+    match catch_unwind(trash::os_limited::list) {
+        Ok(Ok(items)) => Some(items),
+        _ => None,
+    }
+}
+
+#[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+fn find_in_system_bin(removed: &mut [Removed]) -> Vec<Problem> {
+    let Some(items) = bin_items() else {
+        return removed
+            .iter()
+            .map(|r| Problem {
+                path: r.path.clone(),
+                why: "The Recycle Bin couldn't be read to check it's there.".into(),
+            })
+            .collect();
+    };
+    let mut taken: HashSet<&std::ffi::OsStr> = HashSet::new();
+    let mut problems = Vec::new();
+    for r in removed.iter_mut() {
+        // The first to go there after it was sent is this one.
+        let found = items
+            .iter()
+            .filter(|i| !taken.contains(i.id.as_os_str()) && is_the_one(i, r))
+            .min_by_key(|i| i.time_deleted);
+        match found {
+            Some(item) => {
+                taken.insert(item.id.as_os_str());
+                r.bin_id = item.id.to_str().map(str::to_owned);
+            }
+            None => problems.push(Problem {
+                path: r.path.clone(),
+                why: "It isn't in the Recycle Bin, so it may have been removed for good.".into(),
+            }),
+        }
+    }
+    problems
+}
+
 #[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
 fn put_back_from_system_bin(removed: &[Removed]) -> Vec<Problem> {
-    use trash::os_limited::{list, restore_all};
-
     let problem = |r: &Removed, why: &str| Problem { path: r.path.clone(), why: why.to_owned() };
-    let in_bin = match catch_unwind(list) {
-        Ok(Ok(items)) => items,
-        _ => return removed.iter().map(|r| problem(r, "The Recycle Bin couldn't be read.")).collect(),
+    let Some(items) = bin_items() else {
+        return removed.iter().map(|r| problem(r, "The Recycle Bin couldn't be read.")).collect();
     };
     let mut problems = Vec::new();
-    let mut used: HashSet<std::ffi::OsString> = HashSet::new();
     for r in removed {
-        let at = bin_time(r.when);
-        // The one of this name that went then (a minute either way); of several, the latest.
-        let item = in_bin
-            .iter()
-            .filter(|i| !used.contains(&i.id))
-            .filter(|i| key(&i.original_path().to_string_lossy()) == key(&r.path))
-            .filter(|i| (i.time_deleted - at).abs() <= 60)
-            .max_by_key(|i| i.time_deleted);
+        let by_id = r.bin_id.as_deref().and_then(|id| items.iter().find(|i| i.id.to_str() == Some(id)));
+        let item = by_id.or_else(|| items.iter().filter(|i| is_the_one(i, r)).min_by_key(|i| i.time_deleted));
         let Some(item) = item else {
             problems.push(problem(r, "It isn't in the Recycle Bin any more."));
             continue;
         };
-        used.insert(item.id.clone());
-        match catch_unwind(AssertUnwindSafe(|| restore_all([item.clone()]))) {
+        match catch_unwind(AssertUnwindSafe(|| trash::os_limited::restore_all([item.clone()]))) {
             Ok(Ok(())) => {}
             Ok(Err(trash::Error::RestoreCollision { .. })) => {
                 problems.push(problem(r, "Something new has its name now, so it's left in the Recycle Bin."))
@@ -408,18 +513,10 @@ fn put_back_from_system_bin(removed: &[Removed]) -> Vec<Problem> {
     problems
 }
 
-/// When the bin says something went: Windows says it in Unix seconds; the Linux bin writes local time, which the
-/// library reads as if it were UTC.
-#[cfg(windows)]
-fn bin_time(when: i64) -> i64 {
-    when
-}
-
-#[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
-fn bin_time(when: i64) -> i64 {
-    use chrono::{Local, TimeZone};
-    let offset = Local.timestamp_opt(when, 0).single().map_or(0, |t| t.offset().local_minus_utc());
-    when + i64::from(offset)
+/// A Mac's Trash can't be read by a program: nothing to check.
+#[cfg(not(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))))]
+fn find_in_system_bin(_removed: &mut [Removed]) -> Vec<Problem> {
+    Vec::new()
 }
 
 /// A Mac's Trash can't be asked to put things back by a program: Finder's Put Back does it.

@@ -17,12 +17,30 @@ pub mod song;
 
 pub use size::{Measured, Stopped, size_text};
 
-/// A path as Space compares paths: forward slashes, no slash at the end, and ignoring letter case (as Windows and the
-/// library do).
+/// A path as Space compares paths: forward slashes, no slash at the end, ignoring letter case (as Windows and the
+/// library do), and without Windows' long-path prefix (`\\?\C:\…` is `C:\…`, `\\?\UNC\server\…` is `\\server\…`).
 pub fn key(path: &str) -> String {
-    let key = mo_formats::case::key(&path.replace('\\', "/"));
+    let slashes = path.replace('\\', "/");
+    let plain = match (slashes.strip_prefix("//?/UNC/"), slashes.strip_prefix("//?/")) {
+        (Some(network), _) => format!("//{network}"),
+        (None, Some(local)) => local.to_owned(),
+        (None, None) => slashes,
+    };
+    let key = mo_formats::case::key(&plain);
     match key.trim_end_matches('/') {
         "" => "/".to_owned(),
         trimmed => trimmed.to_owned(),
     }
+}
+
+/// Where a file or folder really is, links and `..` worked out (a mapped network drive comes out as `\\server\…`), as
+/// a plain path without Windows' long-path prefix; `None` when it isn't there.
+pub fn real_path(path: &str) -> Option<String> {
+    let real = std::fs::canonicalize(path).ok()?;
+    let real = real.to_string_lossy();
+    Some(match (real.strip_prefix(r"\\?\UNC\"), real.strip_prefix(r"\\?\")) {
+        (Some(network), _) => format!(r"\\{network}"),
+        (None, Some(local)) => local.to_owned(),
+        (None, None) => real.into_owned(),
+    })
 }

@@ -665,7 +665,8 @@ the old repo too, to build the C# `formatlab` for the twin tests.
 music-organiser-rs/
   crates/
     mo-formats     FL, Bitwig, Studio One, MIDI, DAWproject, presets, registry   (no UI, no database)
-    mo-library     databases, scanner, sample locator, song versions, fixer, watch, space
+    mo-library     databases, scanner, sample locator, song versions, fixer, watch
+    mo-space       sizes, song Compact and Thin, clean-ups (Recycle Bin, undo), app files, plugin space
     mo-work        background slots, pace, newest-wins jobs, progress, activity model
     mo-audio       decode, resample, playback, output choice, previews
     mo-sounds      analysis, ONNX models, classifier, duplicates, galaxy layout, kits, rediscover

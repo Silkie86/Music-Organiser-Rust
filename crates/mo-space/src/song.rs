@@ -140,7 +140,7 @@ pub struct CompactSettings {
 
 impl Default for CompactSettings {
     fn default() -> CompactSettings {
-        CompactSettings { keep_backups: DEFAULT_KEEP_BACKUPS, sitting_hours: 0 }
+        CompactSettings { keep_backups: DEFAULT_KEEP_BACKUPS, sitting_hours: DEFAULT_SITTING_HOURS }
     }
 }
 
@@ -186,12 +186,7 @@ pub fn measure(
 
     if own {
         let dir = Path::new(&folder);
-        let studio_one = fs::read_dir(dir).is_ok_and(|entries| {
-            entries.flatten().any(|e| {
-                e.file_type().is_ok_and(|t| t.is_file())
-                    && case::eq_ignore_case(extension(&e.file_name().to_string_lossy()), ".song")
-            })
-        });
+        let studio_one = has_studio_one_song(dir);
         for f in size::files(dir, stop)? {
             let path = f.path.to_string_lossy().into_owned();
             let path_key = key(&path);
@@ -220,11 +215,11 @@ pub fn measure(
                 report.other += f.size;
             }
         }
-    } else {
-        for s in saves {
-            if seen.insert(key(&s.path)) {
-                report.saves += fs::metadata(&s.path).map_or(s.size, |m| m.len());
-            }
+    }
+    // Saves outside the folder (or all of them, when the song shares its folder) count on their own.
+    for s in saves {
+        if seen.insert(key(&s.path)) {
+            report.saves += fs::metadata(&s.path).map_or(s.size, |m| m.len());
         }
     }
 
@@ -255,7 +250,7 @@ pub fn measure(
     if stop.load(Ordering::Relaxed) {
         return Err(Stopped);
     }
-    let same = same_saves(saves, newest);
+    let same = same_saves(saves, newest, stop)?;
     // Neither a copy nor the save it's a copy of is thinned: removing both would lose what they held (the last save
     // of a sitting, kept as a later identical save).
     let copies: HashSet<String> =
@@ -311,6 +306,16 @@ fn newest(saves: &[SongSave]) -> Option<&SongSave> {
     })
 }
 
+/// Whether a folder holds a Studio One song (a `.song` file right in it).
+pub(crate) fn has_studio_one_song(dir: &Path) -> bool {
+    fs::read_dir(dir).is_ok_and(|entries| {
+        entries.flatten().any(|e| {
+            e.file_type().is_ok_and(|t| t.is_file())
+                && case::eq_ignore_case(extension(&e.file_name().to_string_lossy()), ".song")
+        })
+    })
+}
+
 /// The folder a path is in, or "" for none.
 pub(crate) fn parent(path: &str) -> String {
     Path::new(path).parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default()
@@ -325,11 +330,13 @@ fn relative_parts(dir: &Path, path: &Path) -> Vec<String> {
 
 /// The saves thinning would remove (Solomon's F12 note, 26 Oct: "thin the older saves so the first one and the most
 /// important ones are kept, the ones after a flurry of saves"). Saves less than `sitting_hours` apart make one
-/// sitting; the last save of each sitting stays, as do the very first save and the newest.
+/// sitting; the last save of each sitting stays, as do the very first save and the newest (the one [`measure`] keeps,
+/// even when another was written at the same moment).
 pub fn thin(saves: &[SongSave], sitting_hours: u32) -> Vec<&SongSave> {
     if sitting_hours == 0 || saves.len() < 3 {
         return Vec::new();
     }
+    let newest = newest(saves).map(|n| key(&n.path)).unwrap_or_default();
     let mut ordered: Vec<&SongSave> = saves.iter().collect();
     // Stable, as .NET's OrderBy: saves written at the same moment keep their order.
     ordered.sort_by_key(|s| s.modified);
@@ -338,7 +345,7 @@ pub fn thin(saves: &[SongSave], sitting_hours: u32) -> Vec<&SongSave> {
         .windows(2)
         .skip(1)
         .filter_map(|w| match w {
-            [a, b] if b.modified - a.modified < gap => Some(*a),
+            [a, b] if b.modified - a.modified < gap && key(&a.path) != newest => Some(*a),
             _ => None,
         })
         .collect()
@@ -353,7 +360,10 @@ pub fn owns_folder(
     roots: &[String],
     stop: &AtomicBool,
 ) -> Result<bool, Stopped> {
-    if folder.is_empty() || !Path::new(folder).is_dir() {
+    // A link to another place isn't walked, so it can't be shown to hold only the song's saves; nor can a folder that
+    // can't be read.
+    let real_folder = fs::symlink_metadata(folder).is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink());
+    if folder.is_empty() || !real_folder || fs::read_dir(folder).is_err() {
         return Ok(false);
     }
     // A project folder, or one holding it.
@@ -440,13 +450,14 @@ fn fl_backups(
 /// Saves that are exact copies of another save in the same folder (a DAW saving with nothing changed). Of each set
 /// the newest stays, so the save you'd open is never on the list. Only files of the same size are read, to compare
 /// them, each once and at the same time.
-fn same_saves(saves: &[SongSave], newest: &SongSave) -> Vec<CompactItem> {
-    // By folder and size, in the order the saves come.
+fn same_saves(saves: &[SongSave], newest: &SongSave, stop: &AtomicBool) -> Result<Vec<CompactItem>, Stopped> {
+    // By folder and size, in the order the saves come. Links aren't compared (a link to the save beside it would be
+    // "the same"), and nor are OneDrive files that are only online (reading one downloads it).
     let mut sets: Vec<((String, u64), Vec<&SongSave>)> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for s in saves {
-        let Ok(meta) = fs::metadata(&s.path) else { continue };
-        if !meta.is_file() || !seen.insert(key(&s.path)) {
+        let Ok(meta) = fs::symlink_metadata(&s.path) else { continue };
+        if !meta.is_file() || size::is_online_only(&meta) || !seen.insert(key(&s.path)) {
             continue;
         }
         let set_key = (key(&parent(&s.path)), meta.len());
@@ -457,6 +468,9 @@ fn same_saves(saves: &[SongSave], newest: &SongSave) -> Vec<CompactItem> {
     }
     let mut items = Vec::new();
     for ((_, bytes), set) in sets.into_iter().filter(|(_, set)| set.len() > 1) {
+        if stop.load(Ordering::Relaxed) {
+            return Err(Stopped);
+        }
         let hashes: Vec<Option<[u8; 32]>> = set.par_iter().map(|s| hash(Path::new(&s.path)).ok()).collect();
         let mut groups: Vec<([u8; 32], Vec<&SongSave>)> = Vec::new();
         for (s, h) in set.iter().zip(hashes) {
@@ -486,7 +500,7 @@ fn same_saves(saves: &[SongSave], newest: &SongSave) -> Vec<CompactItem> {
             }
         }
     }
-    items
+    Ok(items)
 }
 
 fn newest_of<'a>(saves: &[&'a SongSave]) -> Option<&'a SongSave> {

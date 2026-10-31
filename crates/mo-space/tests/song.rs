@@ -276,3 +276,51 @@ fn file_times_read_back_as_written() {
     let t = DateTime::<Local>::from(fs::metadata(&p).unwrap().modified().unwrap()).naive_local();
     assert!((t - (day() + TimeDelta::hours(2))).abs() < TimeDelta::seconds(2), "{t}");
 }
+
+#[test]
+fn the_newest_save_is_never_thinned_even_sharing_its_moment() {
+    let at = |h: i64| day() + TimeDelta::hours(h);
+    let saves = [
+        SongSave { path: "C:/Song/X.flp".into(), size: 1, modified: at(10) },
+        SongSave { path: "C:/Song/Y.flp".into(), size: 1, modified: at(10) },
+        SongSave { path: "C:/Song/W.flp".into(), size: 1, modified: at(4) },
+        SongSave { path: "C:/Song/V.flp".into(), size: 1, modified: at(6) },
+        SongSave { path: "C:/Song/U.flp".into(), size: 1, modified: at(5) },
+    ];
+    // X is the newest (listed first of the two at 10:00); sorted, it comes before Y, as if from the middle of a sitting.
+    let thinned: Vec<&str> = thin(&saves, 3).iter().map(|s| s.path.as_str()).collect();
+    assert_eq!(thinned, ["C:/Song/U.flp"]);
+}
+
+#[test]
+fn saves_outside_the_songs_folder_still_count() {
+    let root = fixtures("mo-space-saves-elsewhere");
+    let old = write(&root, "Old/Song v1.bwproject", b"old!", 0);
+    let new = write(&root, "Song/Song v2.bwproject", b"new", 1);
+    let report = measure(
+        &[save(&old, 0), save(&new, 1)],
+        &[s(&root)],
+        &[],
+        CompactSettings::default(),
+        None,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert!(report.own_folder);
+    assert_eq!(report.saves, 7);
+    assert_eq!(report.bytes, 7);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_song_folder_that_is_a_link_isnt_its_own() {
+    let root = fixtures("mo-space-linked-folder");
+    write(&root, "Moved/Song.bwproject", b"1", 0);
+    std::os::unix::fs::symlink(root.join("Moved"), root.join("Projects")).unwrap();
+    let through = root.join("Projects/Song.bwproject").to_string_lossy().into_owned();
+    let report =
+        measure(&[save(&through, 0)], &[s(&root)], &[], CompactSettings::default(), None, &AtomicBool::new(false))
+            .unwrap();
+    assert!(!report.own_folder);
+    assert_eq!(report.bytes, 1);
+}

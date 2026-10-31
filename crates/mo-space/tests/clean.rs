@@ -61,11 +61,20 @@ impl Bin for FolderBin {
         Ok(())
     }
 
+    fn find(&self, removed: &mut [Removed]) -> Vec<Problem> {
+        let held = self.held.borrow();
+        for r in removed {
+            r.bin_id =
+                held.iter().rev().find(|(p, _)| key(p) == key(&r.real)).map(|(_, at)| at.to_string_lossy().into());
+        }
+        Vec::new()
+    }
+
     fn put_back(&self, removed: &[Removed]) -> Vec<Problem> {
         let held = self.held.borrow();
         let mut problems = Vec::new();
         for r in removed {
-            let Some((_, at)) = held.iter().rev().find(|(p, _)| key(p) == key(&r.path)) else {
+            let Some((_, at)) = held.iter().find(|(_, at)| r.bin_id.as_deref() == at.to_str()) else {
                 problems.push(Problem { path: r.path.clone(), why: "not in the bin".into() });
                 continue;
             };
@@ -287,4 +296,90 @@ fn links_are_never_followed_or_removed() {
     // And a size walk doesn't count what a link points to.
     let measured = mo_space::size::measure(&projects, &std::sync::atomic::AtomicBool::new(false)).unwrap();
     assert_eq!(measured, mo_space::Measured::default());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_link_into_a_sample_folder_cant_lead_a_clean_up_there() {
+    let dir = fixtures("mo-space-clean-through-link");
+    let projects = dir.join("Projects");
+    let loop_wav = write(&dir, "Samples/Loops/Song/Loop.wav", b"loop");
+    fs::create_dir_all(&projects).unwrap();
+    std::os::unix::fs::symlink(dir.join("Samples/Loops"), projects.join("Shared")).unwrap();
+    let through = projects.join("Shared/Song/Loop.wav").to_string_lossy().into_owned();
+    // Even with no sample folders given, the link leads out of the project folder.
+    let lib =
+        Library { roots: vec![projects.to_string_lossy().into_owned()], samples: Vec::new(), keep: HashSet::new() };
+    let guard = Guard {
+        project_roots: &lib.roots,
+        sample_folders: &lib.samples,
+        keep: &lib.keep,
+        sample_in_use: &no_sample_in_use,
+    };
+    let plan = preview(&[line(CompactKind::UnusedAudio, &through)], &guard);
+    assert_eq!(plan.refused[0].1, Refused::ThroughLink);
+    // And a sample folder reached by its real path through a link from the project folder is still a sample folder.
+    let samples_via_link = vec![projects.join("Shared").to_string_lossy().into_owned()];
+    let roots = vec![dir.to_string_lossy().into_owned()];
+    let guard = Guard {
+        project_roots: &roots,
+        sample_folders: &samples_via_link,
+        keep: &lib.keep,
+        sample_in_use: &no_sample_in_use,
+    };
+    let plan = preview(&[line(CompactKind::UnusedAudio, &loop_wav)], &guard);
+    assert_eq!(plan.refused[0].1, Refused::InSampleFolder);
+    assert!(Path::new(&loop_wav).exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_copy_whose_twin_is_a_link_to_it_stays() {
+    let dir = fixtures("mo-space-clean-link-twin");
+    let projects = dir.join("Projects");
+    let a = write(&projects, "Song/A.flp", b"same");
+    let b = projects.join("Song/B.flp");
+    std::os::unix::fs::symlink(&a, &b).unwrap();
+    let lib =
+        Library { roots: vec![projects.to_string_lossy().into_owned()], samples: Vec::new(), keep: HashSet::new() };
+    let guard = Guard {
+        project_roots: &lib.roots,
+        sample_folders: &lib.samples,
+        keep: &lib.keep,
+        sample_in_use: &no_sample_in_use,
+    };
+    let plan = preview(&[copy_of(&a, &b.to_string_lossy())], &guard);
+    assert_eq!(plan.refused[0].1, Refused::NotACopyNow);
+}
+
+#[test]
+fn a_file_written_again_since_it_was_measured_stays() {
+    let dir = fixtures("mo-space-clean-measured");
+    let projects = dir.join("Projects");
+    let auto = write(&projects, "Song/Backup/Song (autosave).flp", b"auto");
+    let lib =
+        Library { roots: vec![projects.to_string_lossy().into_owned()], samples: Vec::new(), keep: HashSet::new() };
+    let guard = Guard {
+        project_roots: &lib.roots,
+        sample_folders: &lib.samples,
+        keep: &lib.keep,
+        sample_in_use: &no_sample_in_use,
+    };
+    let measured = line(CompactKind::Backup, &auto);
+    fs::write(&auto, b"autosaved again").unwrap();
+    let plan = preview(std::slice::from_ref(&measured), &guard);
+    assert_eq!(plan.refused, [(measured, Refused::Changed)]);
+    // A line whose time is an hour off is another version too.
+    let stale = CompactItem {
+        modified: Some(chrono::Local::now().naive_local() - chrono::TimeDelta::hours(1)),
+        ..line(CompactKind::Backup, &auto)
+    };
+    assert_eq!(preview(std::slice::from_ref(&stale), &guard).refused[0].1, Refused::Changed);
+}
+
+#[test]
+fn paths_compare_whichever_way_they_are_written() {
+    assert_eq!(key(r"\\?\C:\Music\Song.flp"), key("c:/music/song.FLP"));
+    assert_eq!(key(r"\\?\UNC\nas\music\Song.flp"), key(r"\\NAS\Music\Song.flp"));
+    assert_eq!(key("C:/Music/"), key(r"C:\Music"));
 }

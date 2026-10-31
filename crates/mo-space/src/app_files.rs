@@ -73,8 +73,9 @@ pub fn measure(folder: &Path, databases: &[AppDatabase], stop: &AtomicBool) -> R
             }
         }
     }
-    let Ok(entries) = fs::read_dir(folder) else { return Ok(Vec::new()) };
-    for entry in entries.flatten() {
+    // A folder that can't be read still leaves the databases' sizes.
+    let entries = fs::read_dir(folder).into_iter().flatten().flatten();
+    for entry in entries {
         if stop.load(Ordering::Relaxed) {
             return Err(Stopped);
         }
