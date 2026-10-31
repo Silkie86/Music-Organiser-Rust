@@ -13,6 +13,7 @@ chrono.workspace = true
 mo-formats = { path = "../mo-formats" }
 mo-library = { path = "../mo-library" }
 rayon.workspace = true
+regex = { version = "1", default-features = false, features = ["std", "unicode", "perf"] }
 serde = { version = "1", features = ["derive"] }
 # Saves that are byte-for-byte copies are found by their SHA-256, as the C# app finds them.
 sha2 = "0.10"

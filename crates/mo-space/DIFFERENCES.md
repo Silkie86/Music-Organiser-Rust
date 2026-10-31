@@ -26,9 +26,21 @@ listed with a verdict: **better** (on purpose), **same idea, new shape**, or **n
 | Removing for good | never: Recycle Bin only, Windows asks before deleting anything too big for it | the same (the `trash` library sets the same Windows flags) | same |
 | Administrator step for Program Files | yes (plugin clean-up) | not yet: song clean-up never touches Program Files; it comes with plugin clean-up | not yet |
 
+## Plugins
+
+| What | C# | Rust | Verdict |
+|---|---|---|---|
+| Plugin files under linked folders | .NET's walk goes through links | the same, each real folder once, so a link back up can't loop | same |
+| A family's letters | .NET `char.IsLetterOrDigit` | Rust's alphabetic or numeric: the same for every name seen; a few rare scripts' marks count as letters too | same idea, new shape |
+| Folders in a data root, order | as the folder lists them | by name, so two runs give the same order | better |
+| Measured when | stored with each plugin | not kept here: the caller knows when it measured (rule 23) | same idea, new shape |
+| "Serum 2 Presets" | the comment says Serum 2's alone, but `Family` strips the version, so Serum and Serum 2 share it | the same as C# for now (twin); worth a look with Solomon's folders | to judge |
+| Spare copies' reason | text stored with each copy | a `Why` worked out into text when shown | same idea, new shape |
+
 ## Not yet
 
-- Plugin sizes (folder guessing), spare plugin copies, uninstallers, moving plugin data to another drive.
+- Plugin clean-up (which plugin folders may go, with the C# rules: sounds only when no project uses the plugin,
+  presets when unused N years, never Program Files), uninstallers, moving plugin data to another drive.
 - Keeping measured sizes between runs. The C# app keeps them in `library.db` (`plugin_space`, `folder_space`); how the
   Rust library keeps them is for the library's database design (rule 23: each fact once, nothing stored that's quick
   to work out).

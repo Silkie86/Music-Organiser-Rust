@@ -2916,6 +2916,7 @@ dependencies = [
  "mo-formats",
  "mo-library",
  "rayon",
+ "regex",
  "serde",
  "serde_json",
  "sha2",
