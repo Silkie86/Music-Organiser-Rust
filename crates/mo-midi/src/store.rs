@@ -5,16 +5,18 @@
 //! - `files`: which file the index read, when it was last changed, its size, and what read it, so it's only read again
 //!   when one of those changes. Nothing else about a project: its name, folder, DAW and tempo are in `library.db`,
 //!   joined by path (letter case aside), never by the library's save id, which the C# app's scans can change.
-//! - `notes`: each set of notes once, by its hash, with the facts that come from the notes alone (how many, bars,
-//!   lowest and highest, pitch-class shares, shape). A pattern kept through 36 saves of a song is stored once, where
-//!   the C# `midi.db` stores it 36 times. Velocities keep MIDI 2.0's 16 bits (rule 22).
+//! - `notes`: each set of notes once, with the facts that come from the notes alone (how many, bars, lowest and
+//!   highest, pitch-class shares, shape). A pattern kept through 36 saves of a song is stored once, where the C#
+//!   `midi.db` stores it 36 times. Notes keep MIDI 2.0's 16-bit velocity and their attribute (rule 22), so two files
+//!   with the same notes played harder are two rows (`sound`), which share the C# app's note `hash` (timing and keys
+//!   only), by which the page groups copies and your corrections hold.
 //! - `parts`: where each set of notes was found and what its names say: one row per part per file.
 //! - `harmony`: the key and chords `mo-harmony` reads from a set of notes, with the version that read them, so they're
 //!   read again when it gets better (rule 7). Empty until `mo-harmony`'s key finder lands.
 //! - `your_roles`, `your_octaves`: what you said about a set of notes in the Rust app. Until the Rust MIDI page is
 //!   trusted, the C# app's `midi.db` is still where you correct parts day to day, so its two tables are read live
-//!   (read-only) and only corrections made in the Rust app are kept here, winning over the C# ones. They're copied over
-//!   once, when the Rust app takes over.
+//!   (read-only) and only corrections made in the Rust app are kept here, winning over the C# ones (a row with no value
+//!   says "back to the app's guess", which wins too). They're copied over once, when the Rust app takes over.
 //!
 //! Writes happen on one connection, in batches, from the indexer's one saving thread; the page reads on its own
 //! connections, so neither waits (rule 12).
@@ -24,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use mo_formats::{NoteAttribute, NoteEvent, case, paths};
+use mo_formats::{NoteAttribute, NoteEvent, case};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use crate::analyser;
@@ -32,6 +34,9 @@ use crate::extract::Found;
 use crate::index::{Key, MidiError, Source, SourceKind, StoredPhrase};
 use crate::member::PhraseMember;
 use crate::roles::Role;
+
+/// Marks a file as `midi-index.db` ("MOMI"), so the C# `midi.db` or another app's database is never taken for it.
+const APPLICATION_ID: i64 = 0x4D4F_4D49;
 
 const SCHEMA: &str = "
     PRAGMA journal_mode = WAL;
@@ -46,19 +51,22 @@ const SCHEMA: &str = "
         error TEXT                      -- why it couldn't be read, or NULL
     );
     CREATE TABLE IF NOT EXISTS notes (
-        hash TEXT PRIMARY KEY,
-        data BLOB NOT NULL,             -- 11 bytes a note: start, length (i32), key, velocity (u16), little-endian
+        id INTEGER PRIMARY KEY,
+        sound TEXT NOT NULL UNIQUE,     -- the hash of `data`: these exact notes, velocities and all
+        hash TEXT NOT NULL,             -- the C# app's note hash: timing and keys only
         count INTEGER NOT NULL,
         bars INTEGER NOT NULL,
         lowest INTEGER NOT NULL,
         highest INTEGER NOT NULL,
         chroma BLOB NOT NULL,           -- 12 bytes, the strongest 255
-        features BLOB NOT NULL          -- 48 bytes, 0 to 1 as 0 to 255
-    ) WITHOUT ROWID;
+        features BLOB NOT NULL,         -- 48 bytes, 0 to 1 as 0 to 255
+        data BLOB NOT NULL              -- last, so the list reads the small facts without the notes (NOTE_BYTES each)
+    );
+    CREATE INDEX IF NOT EXISTS ix_notes_hash ON notes(hash);
     CREATE TABLE IF NOT EXISTS parts (
         id INTEGER PRIMARY KEY,
         file INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
-        hash TEXT NOT NULL,
+        notes INTEGER NOT NULL REFERENCES notes(id),
         part TEXT NOT NULL,
         clip TEXT NOT NULL,
         role INTEGER NOT NULL,          -- Role::code
@@ -69,18 +77,23 @@ const SCHEMA: &str = "
         members TEXT                    -- PhraseMember::encode, for a phrase joined from clips
     );
     CREATE INDEX IF NOT EXISTS ix_parts_file ON parts(file);
-    CREATE INDEX IF NOT EXISTS ix_parts_hash ON parts(hash);
+    CREATE INDEX IF NOT EXISTS ix_parts_notes ON parts(notes);
     CREATE TABLE IF NOT EXISTS harmony (
-        hash TEXT PRIMARY KEY,
+        hash TEXT PRIMARY KEY,          -- the note hash: velocities don't change the harmony
         version INTEGER NOT NULL,       -- mo-harmony's version that read it
         key_tonic INTEGER,              -- 0 to 11, or NULL for no clear key
         key_mode INTEGER,               -- 0 major, 1 minor, NULL unclear
         confidence REAL,
         chords BLOB
     ) WITHOUT ROWID;
-    CREATE TABLE IF NOT EXISTS your_roles (hash TEXT PRIMARY KEY, role INTEGER NOT NULL) WITHOUT ROWID;
-    CREATE TABLE IF NOT EXISTS your_octaves (hash TEXT PRIMARY KEY, octaves INTEGER NOT NULL) WITHOUT ROWID;
+    -- NULL: back to the app's guess (which wins over the C# app's correction too).
+    CREATE TABLE IF NOT EXISTS your_roles (hash TEXT PRIMARY KEY, role INTEGER) WITHOUT ROWID;
+    CREATE TABLE IF NOT EXISTS your_octaves (hash TEXT PRIMARY KEY, octaves INTEGER) WITHOUT ROWID;
 ";
+
+/// Bytes a note takes in `notes.data`: start and length (i32), key, velocity (u16), attribute kind and data (u16),
+/// little-endian.
+pub const NOTE_BYTES: usize = 14;
 
 impl Role {
     /// The number `midi-index.db` keeps a role as.
@@ -152,6 +165,16 @@ impl MidiStore {
         }
         let conn = Connection::open(path).map_err(|e| open_error(e.to_string()))?;
         conn.busy_timeout(Duration::from_secs(5)).map_err(|e| open_error(e.to_string()))?;
+        // Never another database: the C# app's midi.db (phrases, sources) or anything not made here.
+        let id: i64 =
+            conn.pragma_query_value(None, "application_id", |r| r.get(0)).map_err(|e| open_error(e.to_string()))?;
+        let tables: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'", [], |r| r.get(0))
+            .map_err(|e| open_error(e.to_string()))?;
+        if id != APPLICATION_ID && (id != 0 || tables > 0) {
+            return Err(open_error("it isn't the Rust app's MIDI index, so it's left as it is".into()));
+        }
+        conn.pragma_update(None, "application_id", APPLICATION_ID).map_err(|e| open_error(e.to_string()))?;
         conn.execute_batch(SCHEMA).map_err(|e| open_error(e.to_string()))?;
         Ok(MidiStore { conn, path: path.to_owned() })
     }
@@ -163,6 +186,11 @@ impl MidiStore {
         let conn = Connection::open_with_flags(path, flags).map_err(|e| open_error(e.to_string()))?;
         conn.busy_timeout(Duration::from_secs(2)).map_err(|e| open_error(e.to_string()))?;
         conn.pragma_update(None, "query_only", true).map_err(|e| open_error(e.to_string()))?;
+        let id: i64 =
+            conn.pragma_query_value(None, "application_id", |r| r.get(0)).map_err(|e| open_error(e.to_string()))?;
+        if id != APPLICATION_ID {
+            return Err(open_error("it isn't the Rust app's MIDI index".into()));
+        }
         Ok(MidiStore { conn, path: path.to_owned() })
     }
 
@@ -170,21 +198,22 @@ impl MidiStore {
         &self.path
     }
 
-    /// Every file read so far, by path (letter case aside).
-    pub fn stamps(&self) -> Result<HashMap<String, Stamp>, MidiError> {
+    /// A way to stop this index's current read from another thread (a newer read is wanted, rule 12).
+    pub fn stopper(&self) -> crate::index::Stopper {
+        crate::index::Stopper(self.conn.get_interrupt_handle())
+    }
+
+    /// Every file read so far.
+    pub fn stamps(&self) -> Result<Vec<Stamp>, MidiError> {
         let mut st = self.conn.prepare("SELECT path, mtime, size, version, error IS NOT NULL FROM files")?;
         let rows = st.query_map([], |r| {
-            let path: String = r.get(0)?;
-            Ok((
-                case::key(&path),
-                Stamp {
-                    path,
-                    mtime: r.get(1)?,
-                    size: r.get(2)?,
-                    version: u32::try_from(r.get::<_, i64>(3)?).unwrap_or(0),
-                    failed: r.get(4)?,
-                },
-            ))
+            Ok(Stamp {
+                path: r.get(0)?,
+                mtime: r.get(1)?,
+                size: r.get(2)?,
+                version: u32::try_from(r.get::<_, i64>(3)?).unwrap_or(0),
+                failed: r.get(4)?,
+            })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
@@ -206,15 +235,17 @@ impl MidiStore {
                  ON CONFLICT(path) DO UPDATE SET error = ?4",
             )?;
             let mut clear = tx.prepare_cached("DELETE FROM parts WHERE file = ?1")?;
+            // The same notes found again (another file, or read again): the row there is kept; a newer analysis's
+            // facts replace the old.
             let mut note = tx.prepare_cached(
-                // A newer analysis may find more in the same notes: what it found replaces the old.
-                "INSERT INTO notes (hash, data, count, bars, lowest, highest, chroma, features)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                 ON CONFLICT(hash) DO UPDATE SET data = ?2, count = ?3, bars = ?4, lowest = ?5, highest = ?6,
-                     chroma = ?7, features = ?8",
+                "INSERT INTO notes (sound, hash, count, bars, lowest, highest, chroma, features, data)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT(sound) DO UPDATE SET hash = ?2, count = ?3, bars = ?4, lowest = ?5, highest = ?6,
+                     chroma = ?7, features = ?8
+                 RETURNING id",
             )?;
             let mut part = tx.prepare_cached(
-                "INSERT INTO parts (file, hash, part, clip, role, why, drums, program, track_name, members)
+                "INSERT INTO parts (file, notes, part, clip, role, why, drums, program, track_name, members)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             )?;
             for f in batch {
@@ -237,20 +268,25 @@ impl MidiStore {
                         clear.execute([id])?;
                         for p in found {
                             let a = &p.analysis;
-                            note.execute(params![
-                                a.hash,
-                                encode_notes(&p.notes),
-                                p.notes.len() as i64,
-                                a.bars,
-                                a.lowest,
-                                a.highest,
-                                analyser::bytes(&a.chroma, true),
-                                analyser::bytes(&a.features, false),
-                            ])?;
+                            let data = encode_notes(&p.notes);
+                            let notes: i64 = note.query_row(
+                                params![
+                                    sound_of(&data),
+                                    a.hash,
+                                    p.notes.len() as i64,
+                                    a.bars,
+                                    a.lowest,
+                                    a.highest,
+                                    analyser::bytes(&a.chroma, true),
+                                    analyser::bytes(&a.features, false),
+                                    data,
+                                ],
+                                |r| r.get(0),
+                            )?;
                             let members = (!p.members.is_empty()).then(|| PhraseMember::encode(&p.members));
                             part.execute(params![
                                 id,
-                                a.hash,
+                                notes,
                                 p.part,
                                 p.clip,
                                 a.role.code(),
@@ -288,7 +324,7 @@ impl MidiStore {
     pub fn tidy(&mut self) -> Result<usize, MidiError> {
         let tx = self.conn.transaction()?;
         let n =
-            tx.execute("DELETE FROM notes WHERE NOT EXISTS (SELECT 1 FROM parts p WHERE p.hash = notes.hash)", [])?;
+            tx.execute("DELETE FROM notes WHERE NOT EXISTS (SELECT 1 FROM parts p WHERE p.notes = notes.id)", [])?;
         tx.execute("DELETE FROM harmony WHERE NOT EXISTS (SELECT 1 FROM notes n WHERE n.hash = harmony.hash)", [])?;
         tx.commit()?;
         Ok(n)
@@ -318,12 +354,13 @@ impl MidiStore {
         cs_octaves: &HashMap<String, i32>,
     ) -> Result<Vec<StoredPhrase>, MidiError> {
         let mut st = self.conn.prepare(
-            "SELECT p.id, f.id, f.path, f.kind, f.mtime, f.size, p.part, p.clip, p.role, p.why, y.role, p.hash,
+            "SELECT p.id, f.id, f.path, f.kind, f.mtime, f.size, p.part, p.clip, p.role, p.why, y.role, n.hash,
                     n.count, n.bars, n.lowest, n.highest, n.chroma, n.features, p.members, o.octaves, p.program,
-                    p.drums, p.track_name, h.key_tonic, h.key_mode, h.confidence
-             FROM parts p JOIN files f ON f.id = p.file JOIN notes n ON n.hash = p.hash
-                  LEFT JOIN your_roles y ON y.hash = p.hash LEFT JOIN your_octaves o ON o.hash = p.hash
-                  LEFT JOIN harmony h ON h.hash = p.hash
+                    p.drums, p.track_name, h.key_tonic, h.key_mode, h.confidence, y.hash IS NOT NULL,
+                    o.hash IS NOT NULL
+             FROM parts p JOIN files f ON f.id = p.file JOIN notes n ON n.id = p.notes
+                  LEFT JOIN your_roles y ON y.hash = n.hash LEFT JOIN your_octaves o ON o.hash = n.hash
+                  LEFT JOIN harmony h ON h.hash = n.hash
              ORDER BY f.mtime DESC, p.id",
         )?;
         let mut rows = st.query([])?;
@@ -363,11 +400,17 @@ impl MidiStore {
                 }),
                 _ => None,
             };
-            let your_role = r.get::<_, Option<i64>>(10)?.map(Role::from_code).or_else(|| cs_roles.get(&hash).copied());
-            let your_octave = r
-                .get::<_, Option<i64>>(19)?
-                .map(|o| o.clamp(-10, 10) as i32)
-                .or_else(|| cs_octaves.get(&hash).copied());
+            // A Rust row (even one saying "back to the guess") wins; with none, the C# app's correction counts.
+            let your_role = if r.get::<_, bool>(26)? {
+                r.get::<_, Option<i64>>(10)?.map(Role::from_code)
+            } else {
+                cs_roles.get(&hash).copied()
+            };
+            let your_octave = if r.get::<_, bool>(27)? {
+                r.get::<_, Option<i64>>(19)?.map(|o| o.clamp(-10, 10) as i32)
+            } else {
+                cs_octaves.get(&hash).copied()
+            };
             list.push(StoredPhrase {
                 id: r.get(0)?,
                 source,
@@ -398,57 +441,70 @@ impl MidiStore {
 
     /// Says what kind of part this is (every copy with the same notes), or `None` to go back to the app's guess.
     pub fn set_your_role(&mut self, hash: &str, role: Option<Role>) -> Result<(), MidiError> {
-        match role {
-            Some(r) => self.conn.execute(
-                "INSERT INTO your_roles (hash, role) VALUES (?1, ?2) ON CONFLICT(hash) DO UPDATE SET role = ?2",
-                params![hash, r.code()],
-            )?,
-            None => self.conn.execute("DELETE FROM your_roles WHERE hash = ?1", [hash])?,
-        };
+        // None is kept as a row too, so it wins over a correction made in the C# app.
+        self.conn.execute(
+            "INSERT INTO your_roles (hash, role) VALUES (?1, ?2) ON CONFLICT(hash) DO UPDATE SET role = ?2",
+            params![hash, role.map(Role::code)],
+        )?;
         Ok(())
     }
 
     /// Remembers the octaves you moved these notes by (every copy), or `None` to let the app pick again.
     pub fn set_your_octave(&mut self, hash: &str, octaves: Option<i32>) -> Result<(), MidiError> {
-        match octaves {
-            Some(o) => self.conn.execute(
-                "INSERT INTO your_octaves (hash, octaves) VALUES (?1, ?2) ON CONFLICT(hash) DO UPDATE SET octaves = ?2",
-                params![hash, o],
-            )?,
-            None => self.conn.execute("DELETE FROM your_octaves WHERE hash = ?1", [hash])?,
-        };
+        self.conn.execute(
+            "INSERT INTO your_octaves (hash, octaves) VALUES (?1, ?2) ON CONFLICT(hash) DO UPDATE SET octaves = ?2",
+            params![hash, octaves],
+        )?;
         Ok(())
     }
 
-    /// A set of notes, at [`crate::PPQ`], or none when no file has them any more.
-    pub fn notes(&self, hash: &str) -> Result<Vec<NoteEvent>, MidiError> {
-        let data: Option<Vec<u8>> =
-            self.conn.query_row("SELECT data FROM notes WHERE hash = ?1", [hash], |r| r.get(0)).optional()?;
+    /// A part's notes, at [`crate::PPQ`]: the part's own (`id`, while its `hash` still matches, as ids of a file
+    /// read again go to new parts), else any copy with the same `hash`; none when no file has them any more.
+    pub fn notes(&self, id: i64, hash: &str) -> Result<Vec<NoteEvent>, MidiError> {
+        let own: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT n.data FROM parts p JOIN notes n ON n.id = p.notes WHERE p.id = ?1 AND n.hash = ?2",
+                params![id, hash],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let data = match own {
+            Some(d) => Some(d),
+            None => self
+                .conn
+                .query_row("SELECT data FROM notes WHERE hash = ?1 LIMIT 1", [hash], |r| r.get(0))
+                .optional()?,
+        };
         Ok(data.map(|d| decode_notes(&d)).unwrap_or_default())
     }
 }
 
-/// What a project's DAW is, from its ending; "MIDI" for a `.mid` file.
+/// What a file's DAW is, as the library names it ("Bitwig Studio"); "MIDI" for a `.mid` file.
 pub fn daw_of(path: &str, kind: SourceKind) -> &'static str {
-    if kind == SourceKind::File {
-        return "MIDI";
-    }
-    match case::to_lower(paths::extension(paths::file_name(path))).as_str() {
-        ".flp" => "FL Studio",
-        ".bwproject" => "Bitwig",
-        ".song" => "Studio One",
-        _ => "",
+    match kind {
+        SourceKind::File => "MIDI",
+        SourceKind::Project => mo_library::scan::daw_of(path).unwrap_or(""),
     }
 }
 
-/// 11 bytes a note: start and length (32-bit, little-endian, held to what fits), key, and the 16-bit velocity.
+/// The hash of a set of notes exactly as stored, velocities and attributes too: 16 capital hex letters.
+fn sound_of(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(data).iter().take(8).map(|b| format!("{b:02X}")).collect()
+}
+
+/// [`NOTE_BYTES`] a note: start and length (32-bit, held to what fits), key, the 16-bit velocity and the MIDI 2.0
+/// attribute, little-endian.
 pub fn encode_notes(notes: &[NoteEvent]) -> Vec<u8> {
-    let mut data = Vec::with_capacity(notes.len() * 11);
+    let mut data = Vec::with_capacity(notes.len() * NOTE_BYTES);
     for n in notes {
         data.extend(clamp32(n.start).to_le_bytes());
         data.extend(clamp32(n.length).to_le_bytes());
         data.push(n.key);
         data.extend(n.velocity.to_le_bytes());
+        data.push(n.attribute.kind);
+        data.extend(n.attribute.data.to_le_bytes());
     }
     data
 }
@@ -459,17 +515,42 @@ fn clamp32(v: i64) -> i32 {
 
 /// The notes [`encode_notes`] wrote. A short piece at the end (a damaged row) is left out.
 pub fn decode_notes(data: &[u8]) -> Vec<NoteEvent> {
-    let (notes, _damaged) = data.as_chunks::<11>();
+    let (notes, _damaged) = data.as_chunks::<NOTE_BYTES>();
     notes
         .iter()
-        .map(|&[s0, s1, s2, s3, l0, l1, l2, l3, key, v0, v1]| NoteEvent {
+        .map(|&[s0, s1, s2, s3, l0, l1, l2, l3, key, v0, v1, kind, d0, d1]| NoteEvent {
             start: i64::from(i32::from_le_bytes([s0, s1, s2, s3])),
             length: i64::from(i32::from_le_bytes([l0, l1, l2, l3])),
             key,
             velocity: u16::from_le_bytes([v0, v1]),
             muted: false,
             step: false,
-            attribute: NoteAttribute::NONE,
+            attribute: NoteAttribute { kind, data: u16::from_le_bytes([d0, d1]) },
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn notes_keep_midi_2_resolution() {
+        let n = NoteEvent {
+            start: -48,
+            length: i64::MAX,
+            key: 131,
+            velocity: 40_000,
+            muted: false,
+            step: false,
+            attribute: NoteAttribute { kind: 3, data: 0x3C80 },
+        };
+        let data = encode_notes(&[n]);
+        assert_eq!(data.len(), NOTE_BYTES);
+        let back = decode_notes(&data);
+        assert_eq!(back, [NoteEvent { length: i64::from(i32::MAX), ..n }]);
+        // The same notes played softer are another sound.
+        let soft = encode_notes(&[NoteEvent { velocity: 1000, ..n }]);
+        assert_ne!(sound_of(&data), sound_of(&soft));
+    }
 }

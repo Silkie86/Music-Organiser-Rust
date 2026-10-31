@@ -50,7 +50,7 @@ impl From<rusqlite::Error> for MidiError {
 
 /// Stops what a [`MidiIndex`] is reading, from another thread: when a newer read is wanted, the older one ends at
 /// once, even while SQLite is still sorting (rule 12, newest wins). The read then ends with [`MidiError::Stopped`].
-pub struct Stopper(InterruptHandle);
+pub struct Stopper(pub(crate) InterruptHandle);
 
 impl Stopper {
     pub fn stop(&self) {

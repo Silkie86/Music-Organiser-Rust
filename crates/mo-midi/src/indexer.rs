@@ -50,20 +50,51 @@ pub struct Plan {
     pub forget: Vec<String>,
 }
 
+/// Whether a file found in a MIDI folder is worth reading: not shorter than a single note needs (an empty or
+/// never-finished download, skipped rather than failed), and not a "._" copy a Mac leaves beside each file.
+pub fn worth_reading(path: &str, size: i64) -> bool {
+    size >= extract::MIN_MIDI_BYTES as i64 && !mo_formats::paths::file_name(path).starts_with("._")
+}
+
 /// Works out what to read and what to forget. `away` are folders that can't be reached now (a drive not plugged in):
-/// what was read from them is kept, not forgotten, since reading all of it again when it's back would take hours.
-pub fn plan(wanted: &[Wanted], stamps: &HashMap<String, Stamp>, away: &[String], retry_failed: bool) -> Plan {
-    let keys: HashSet<String> = wanted.iter().map(|w| case::key(&w.path)).collect();
-    let forget = stamps
+/// what was read from them is kept, not forgotten, since reading all of it again when it's back would take hours. A
+/// file listed twice (folders inside each other, or two spellings) is read once.
+pub fn plan(wanted: &[Wanted], stamps: &[Stamp], away: &[String], retry_failed: bool) -> Plan {
+    // Wanted, once each, letter case aside.
+    let mut seen = HashSet::new();
+    let wanted: Vec<&Wanted> = wanted
         .iter()
-        .filter(|(k, s)| !keys.contains(*k) && !away.iter().any(|f| mo_library::scan::is_inside(&s.path, f)))
-        .map(|(_, s)| s.path.clone())
+        .filter(|w| w.kind == SourceKind::Project || worth_reading(&w.path, w.size))
+        .filter(|w| seen.insert(case::key(&w.path)))
         .collect();
+    let wanted_keys: HashMap<String, &str> = wanted.iter().map(|w| (case::key(&w.path), w.path.as_str())).collect();
+    // What the index holds, one row per file: where two rows are one file (a name whose letters changed case beyond
+    // what SQLite folds), the one spelled as wanted stays and the other goes.
+    let mut known: HashMap<String, &Stamp> = HashMap::new();
+    let mut forget = Vec::new();
+    for s in stamps {
+        let key = case::key(&s.path);
+        let away_now = away.iter().any(|f| mo_library::scan::is_inside(&s.path, f));
+        match wanted_keys.get(&key) {
+            None if !away_now => forget.push(s.path.clone()),
+            None => {}
+            Some(spelled) => match known.get(&key) {
+                Some(other) if other.path == *spelled => forget.push(s.path.clone()),
+                Some(other) => {
+                    forget.push(other.path.clone());
+                    known.insert(key, s);
+                }
+                None => {
+                    known.insert(key, s);
+                }
+            },
+        }
+    }
     let mut todo: Vec<Wanted> = wanted
-        .iter()
+        .into_iter()
         .filter(|w| {
             let Some(version) = w.version() else { return false };
-            match stamps.get(&case::key(&w.path)) {
+            match known.get(&case::key(&w.path)) {
                 None => true,
                 Some(s) => s.mtime != w.mtime || s.size != w.size || s.version != version || (retry_failed && s.failed),
             }
@@ -89,17 +120,26 @@ pub struct Summary {
 const SAVE_EVERY: Duration = Duration::from_secs(1);
 const SAVE_FILES: usize = 100;
 
-/// Carries out a [`plan`]: reads the files on `pool`'s threads and saves what they hold. `progress` hears how many
-/// files are done, of how many, and the last one's path. `stop` set (by a newer run) ends it at the next file; what's
-/// been read so far is saved.
+/// Carries out a [`plan`]: reads the files with `readers` threads of `pool` and saves what they hold. `progress` hears
+/// how many files are done, of how many, and the last one's path. `stop` set (by a newer run) ends it at the next
+/// file; what's been read so far is saved.
+///
+/// Called from a thread that isn't one of `pool`'s (it waits for them while it saves).
 pub fn run(
     store: &mut MidiStore,
     plan: &Plan,
     midi_folders: &[String],
     pool: &rayon::ThreadPool,
+    readers: usize,
     stop: &AtomicBool,
     progress: &dyn Fn(usize, usize, &str),
 ) -> Result<Summary, MidiError> {
+    if pool.current_thread_index().is_some() {
+        return Err(MidiError::Open {
+            path: store.path().to_owned(),
+            why: "the indexer was started on one of its own reading threads".into(),
+        });
+    }
     let mut summary =
         Summary { forgotten: store.forget(plan.forget.iter().map(String::as_str))?, ..Summary::default() };
     let total = plan.todo.len();
@@ -107,21 +147,23 @@ pub fn run(
         store.tidy()?;
         return Ok(summary);
     }
-    // A bounded queue: readers wait when the saver is behind, so read files never pile up in memory.
-    let (tx, rx) = sync_channel::<FileRead>(256);
+    // A small bounded queue: readers wait when the saver is behind, so read files never pile up in memory.
+    let (tx, rx) = sync_channel::<FileRead>(16);
     let next = AtomicUsize::new(0);
-    let threads = pool.current_num_threads().max(1);
+    let readers = readers.clamp(1, pool.current_num_threads().max(1));
+    // A save that failed stops the readers too; the caller's `stop` is only read.
+    let failed = AtomicBool::new(false);
     let mut saved: Result<(), MidiError> = Ok(());
     std::thread::scope(|scope| {
-        let next = &next;
+        let (next, failed) = (&next, &failed);
         let todo = &plan.todo;
         scope.spawn(move || {
             pool.scope(|s| {
-                for _ in 0..threads {
+                for _ in 0..readers {
                     let tx = tx.clone();
                     // Each thread takes the next file in order, so the newest are read first.
                     s.spawn(move |_| {
-                        while !stop.load(Ordering::Relaxed) {
+                        while !stop.load(Ordering::Relaxed) && !failed.load(Ordering::Relaxed) {
                             let Some(w) = todo.get(next.fetch_add(1, Ordering::Relaxed)) else { break };
                             let outcome = match extract::read(Path::new(&w.path), midi_folders) {
                                 Ok(found) => Outcome::Parts(found),
@@ -160,7 +202,7 @@ pub fn run(
             if batch.len() >= SAVE_FILES || last.elapsed() >= SAVE_EVERY {
                 if let Err(e) = store.save(&batch) {
                     saved = Err(e);
-                    stop.store(true, Ordering::Relaxed);
+                    failed.store(true, Ordering::Relaxed);
                     break;
                 }
                 batch.clear();

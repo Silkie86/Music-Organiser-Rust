@@ -21,8 +21,9 @@ use crate::member::PhraseMember;
 /// The analysis's own version; raised when what it finds changes, so every file is read again once. It follows the C#
 /// `MidiIndexer.Version` (9) it was ported from.
 pub const VERSION: u32 = 9;
-/// What a `.mid` file was read with: the analysis and the MIDI file reader.
-pub const FILE_VERSION: u32 = VERSION * 100 + midi::smf::VERSION;
+/// What a `.mid` file was read with: the analysis and both MIDI file readers (a file is read as a Clip File when it
+/// starts as one, whatever its ending).
+pub const FILE_VERSION: u32 = VERSION * 10_000 + midi::smf::VERSION * 100 + midi::clip::VERSION;
 
 /// Shorter than a MIDI file's header (14 bytes) and one empty track (8): an empty or never-finished download, skipped
 /// as empty rather than failed.
