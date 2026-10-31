@@ -67,6 +67,22 @@ impl SongPreset {
     }
 }
 
+/// Each sound's key within its save: its [`SongPreset::place_key`], with "~2", "~3"... after the second and later of
+/// sounds that share one (two Fruity Limiters on one insert), in the order the save has them. So a key always names
+/// exactly one sound, and the same one each time the save is read.
+pub fn place_keys(sounds: &[SongPreset]) -> Vec<String> {
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    sounds
+        .iter()
+        .map(|s| {
+            let key = s.place_key();
+            let n = seen.entry(key.clone()).or_insert(0);
+            *n += 1;
+            if *n == 1 { key } else { format!("{key}~{n}") }
+        })
+        .collect()
+}
+
 /// The sounds in an FL Studio project's bytes, with their parts guessed. `None` when it isn't an FL project.
 pub fn read_fl(raw: &[u8], limits: &Thresholds) -> Option<Vec<SongPreset>> {
     let flp = events::load(raw).ok()?;
@@ -90,13 +106,18 @@ pub fn from_fl(song: &FlSong, presets: Vec<PresetBlob>, limits: &Thresholds) -> 
     // Each channel's guess, once.
     let mut by_channel: BTreeMap<u32, (Guess, usize, &str)> = BTreeMap::new();
     let mut notes_of: BTreeMap<u32, &[NoteEvent]> = BTreeMap::new();
+    // How far each channel's instrument moves its notes, where its settings say (see `crate::octave`).
+    let plugin_shift: BTreeMap<u32, f64> =
+        presets.iter().filter_map(|b| Some((b.channel?, crate::octave::plugin_shift(&b.plugin, &b.data)?))).collect();
     for c in &song.channels {
         let preset_name = c.instrument.as_ref().and_then(|i| i.state.as_ref()).map_or("", |s| s.name.as_str());
         let plugin = c.instrument.as_ref().map_or("", |i| i.name.as_str());
         let names = [c.name.as_str(), preset_name, plugin];
         // A channel switched off in the Channel Rack plays nothing, whatever its clips hold.
         let notes: &[NoteEvent] = if c.enabled { &c.notes } else { &[] };
-        let part = Part { notes, ppq: song.ppq, shift: Shift::fl_channel(c.root_key, c.pitch_cents), names: &names };
+        let shift =
+            Shift { plugin: plugin_shift.get(&c.index).copied(), ..Shift::fl_channel(c.root_key, c.pitch_cents) };
+        let part = Part { notes, ppq: song.ppq, shift, names: &names };
         let playing = notes.iter().filter(|n| !n.muted).count();
         by_channel.insert(c.index, (guess(&part, limits), playing, c.name.as_str()));
         notes_of.insert(c.index, notes);
@@ -217,18 +238,39 @@ pub fn from_bitwig_parts(presets: Vec<PresetBlob>, clips: &[MidiClip], limits: &
     let mut by_length: Vec<usize> = (0..tracks.len()).collect();
     by_length.sort_by_key(|&i| std::cmp::Reverse(tracks.get(i).map_or(0, |t| t.0.len())));
 
+    // Each preset's track, by name, found once.
+    let track_of: Vec<Option<&(String, Vec<NoteEvent>, u16)>> = presets
+        .iter()
+        .map(|blob| {
+            by_length
+                .iter()
+                .filter_map(|&i| tracks.get(i))
+                .find(|(name, _, _)| blob.name.strip_prefix(name.as_str()).is_some_and(|r| r.starts_with(" - ")))
+        })
+        .collect();
+    // How far each track's instrument moves its notes, where a plugin's settings on it say (see `crate::octave`).
+    let mut plugin_shift: BTreeMap<&str, f64> = BTreeMap::new();
+    for (blob, track) in presets.iter().zip(&track_of) {
+        if let Some((name, _, _)) = track
+            && let Some(semitones) = crate::octave::plugin_shift(&blob.plugin, &blob.data)
+        {
+            plugin_shift.entry(name.as_str()).or_insert(semitones);
+        }
+    }
+
     let mut guesses: BTreeMap<String, Guess> = BTreeMap::new();
     presets
         .into_iter()
-        .map(|blob| {
-            let track = by_length
-                .iter()
-                .filter_map(|&i| tracks.get(i))
-                .find(|(name, _, _)| blob.name.strip_prefix(name.as_str()).is_some_and(|r| r.starts_with(" - ")));
-            let shift = Shift { semitones: 0.0, plugin: None, transpose_checked: false };
+        .zip(track_of)
+        .map(|(blob, track)| {
             let (track_name, notes, ppq) = match track {
                 Some((name, notes, ppq)) => (name.clone(), notes.as_slice(), *ppq),
                 None => (blob.name.split(" - ").next().unwrap_or_default().to_owned(), &[][..], 960),
+            };
+            let shift = Shift {
+                semitones: 0.0,
+                plugin: plugin_shift.get(track_name.as_str()).copied(),
+                transpose_checked: false,
             };
             let g = guesses
                 .entry(track_name.clone())

@@ -1,6 +1,6 @@
 [package]
 name = "mo-presets"
-description = "The Presets page's engine: every sound made inside a song plus preset files on disk, what each is, and a guess at the part it plays (bass, lead, chords...). No UI in it; its only file is presets.db, your part fixes."
+description = "The Presets page's engine: every sound made inside a song plus preset files on disk, what each is, and a guess at the part it plays (bass, lead, chords...). No UI in it; it writes only presets.db (your part fixes) and exported presets in the export folder."
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -10,6 +10,8 @@ workspace = true
 
 [dependencies]
 mo-formats = { path = "../mo-formats" }
+# Serum keeps its settings zlib-packed (the same crate as mo-formats).
+flate2 = "1"
 rayon.workspace = true
 # presets.db: your fixes to the part guess (the same SQLite, built in, as mo-library).
 rusqlite = { version = "0.41", features = ["bundled"] }

@@ -45,13 +45,31 @@ fn daw_of(path: &str) -> Option<&'static str> {
 
 /// Reads one save's sounds. `None` for a save whose DAW's projects don't keep readable settings (Studio One).
 pub fn read_save(path: &str, limits: &Thresholds) -> Option<SaveSounds> {
-    let daw = daw_of(path)?;
+    daw_of(path)?;
     let failed =
         |error: String| SaveSounds { path: path.to_owned(), sounds: Vec::new(), error: Some(error), warning: None };
     let raw = match std::fs::read(path) {
         Ok(raw) => raw,
         Err(e) => return Some(failed(e.to_string())),
     };
+    Some(match sounds_in(path, raw, limits) {
+        Ok((mut sounds, warning)) => {
+            sounds.iter_mut().for_each(SongPreset::forget_data);
+            SaveSounds { path: path.to_owned(), sounds, error: None, warning: warning.map(str::to_owned) }
+        }
+        Err(e) => failed(e),
+    })
+}
+
+/// A save's sounds from its bytes, their settings kept, with the warning for a save that was still read (an FL save cut
+/// short: rule 9); or what went wrong. Exporting reads a save through this too, so it finds the sounds (and their
+/// [`crate::list::place_keys`]) the page listed.
+pub(crate) fn sounds_in(
+    path: &str,
+    raw: Vec<u8>,
+    limits: &Thresholds,
+) -> Result<(Vec<SongPreset>, Option<&'static str>), String> {
+    let daw = daw_of(path).ok_or_else(|| "only FL Studio and Bitwig saves keep their plugins' settings".to_owned())?;
     // A reader that trips over a damaged file is caught here, as the library's scanner does.
     let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match daw {
         // As `list::read_fl`, keeping the reader's own words for a damaged save and its warning for one read on.
@@ -64,14 +82,7 @@ pub fn read_save(path: &str, limits: &Thresholds) -> Option<SaveSounds> {
             Err(_) => Err("it isn't a Bitwig project that can be decoded".to_owned()),
         },
     }));
-    Some(match read {
-        Ok(Ok((mut sounds, warning))) => {
-            sounds.iter_mut().for_each(SongPreset::forget_data);
-            SaveSounds { path: path.to_owned(), sounds, error: None, warning: warning.map(str::to_owned) }
-        }
-        Ok(Err(e)) => failed(e),
-        Err(_) => failed("the reader stopped on something it didn't expect in this file".into()),
-    })
+    read.unwrap_or_else(|_| Err("the reader stopped on something it didn't expect in this file".into()))
 }
 
 /// Reads many saves at once, in the order given; saves of other DAWs are left out.
@@ -195,7 +206,7 @@ pub fn default_folders() -> Vec<PathBuf> {
 /// Where a row on the page comes from.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Source {
-    /// A sound inside a song's save. `key` says which sound it is within its save ([`SongPreset::place_key`]), so it
+    /// A sound inside a song's save. `key` says which sound it is within its save ([`crate::list::place_keys`]), so it
     /// can be found again to export it: two FL channels of one plugin share a name and place. (A fix to its part is
     /// kept by [`PresetRow::hash`] instead.)
     Song { save: String, key: String },
@@ -238,8 +249,9 @@ impl PresetRow {
 pub fn rows(saves: &[SaveSounds], found: &[FoundPreset]) -> Vec<PresetRow> {
     let mut out = Vec::new();
     for s in saves {
-        out.extend(s.sounds.iter().map(|p| PresetRow {
-            source: Source::Song { save: s.path.clone(), key: p.place_key() },
+        let keys = crate::list::place_keys(&s.sounds);
+        out.extend(s.sounds.iter().zip(keys).map(|(p, key)| PresetRow {
+            source: Source::Song { save: s.path.clone(), key },
             name: p.blob.name.clone(),
             plugin: p.blob.plugin.clone(),
             kind: p.blob.kind,

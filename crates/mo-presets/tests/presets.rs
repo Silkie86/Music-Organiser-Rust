@@ -332,6 +332,17 @@ fn an_fl_songs_sounds_get_their_channels_parts_and_effects_their_inserts() {
 
     assert!(out[7].plays_nothing && out[7].guess.role.is_none(), "{}", out[7].guess.reason);
     assert_ne!(out[0].place_key(), out[7].place_key(), "two Serum channels are told apart in their save");
+    // Two of one effect on one insert: numbered, so each key names one sound.
+    let twice = list::from_fl(
+        &song,
+        vec![
+            blob("Fruity Limiter", "Fruity Limiter", PluginKind::Effect, None, "Insert 3", true),
+            blob("Fruity Limiter", "Fruity Limiter", PluginKind::Effect, None, "Insert 3", true),
+        ],
+        &Thresholds::default(),
+    );
+    let keys = list::place_keys(&twice);
+    assert_eq!(keys[1], format!("{}~2", keys[0]));
 
     // A fix wins, and is kept by the plugin, its settings and the notes it plays. These made-up presets all have
     // the same settings, so only the plugin and the notes tell them apart.
@@ -405,4 +416,43 @@ fn reads_a_vst3_preset_from_disk_when_its_list_runs_past_the_first_part() {
     let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("edge.vstpreset");
     std::fs::write(&path, &raw).unwrap();
     assert_eq!(files::read(&path).unwrap().unwrap().plugin, "Pigments");
+}
+
+/// A made-up Serum 1 state: oscillator A on and following the keys, at this octave knob (0 to 1 over -4 to +4),
+/// everything else in the middle.
+fn serum_state(octave: f32) -> Vec<u8> {
+    use std::io::Write;
+    let mut raw = vec![0u8; 172_736];
+    for (i, v) in [(212usize, 1.0f32), (164, 1.0), (1, 0.75), (3, octave), (4, 0.5), (10, 0.5)] {
+        raw[13_408 + 4 * i..13_408 + 4 * i + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+    z.write_all(&raw).unwrap();
+    fxp::wrap_chunk(&z.finish().unwrap(), "Serum", four_cc(b"XfsX"))
+}
+
+#[test]
+fn serums_own_octave_counts_in_the_guess() {
+    let song = |root_key| FlSong {
+        title: "Test".into(),
+        ppq: 96,
+        tempo: 140.0,
+        channels: vec![channel(0, "Synth", "Serum", 1, root_key, line(&[60, 62, 67]))],
+        inserts: Vec::new(),
+        automation: Vec::new(),
+        muted_tracks: Vec::new(),
+        curves: BTreeMap::new(),
+        warning: None,
+    };
+    let serum = |octave| PresetBlob {
+        data: serum_state(octave),
+        ..blob("Synth", "Serum", PluginKind::Instrument, Some(0), "", false)
+    };
+    // Written around C4, but Serum's oscillator two octaves down: heard as a bass, and the octave was checked.
+    let out = list::from_fl(&song(60), vec![serum(0.25)], &Thresholds::default());
+    assert_eq!(out[0].guess.role, Some(Role::Bass), "{}", out[0].guess.reason);
+    assert!(out[0].guess.octave_checked && !out[0].guess.reason.contains("checked"));
+    // FL's root key two octaves up moves it down; Serum two octaves up brings it back: a lead.
+    let out = list::from_fl(&song(84), vec![serum(0.75)], &Thresholds::default());
+    assert_eq!(out[0].guess.role, Some(Role::Lead), "{}", out[0].guess.reason);
 }

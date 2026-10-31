@@ -19,6 +19,9 @@ The Presets page's engine (spec section 3.4a). No UI, no database, no writing ye
 - **Your fixes** (`fixes`): `presets.db` (`your_preset_roles`), kept by a fingerprint of the plugin, its settings
   and the notes it plays (agreed with the readers thread, like the C# `midi.db`'s `your_roles`).
 
+- **Export** (`export`): a save's sounds as preset files in `<export folder>\<save>\Presets`, copy-check-rename, each
+  sound keeping its name whichever are exported; one bad preset is reported, not stopping the rest.
+
 ## To check on Solomon's files
 
 - `.bwpreset` metadata keys (`device_name`, `device_type`, `creator`, `preset_category`, `tags`) are from Bitwig's
@@ -29,7 +32,10 @@ The Presets page's engine (spec section 3.4a). No UI, no database, no writing ye
 
 ## Next
 
-- Plugin octave from saved state (Serum first, the C# app reads Serum's state), and Bitwig Note Transpose devices
-  (needs the Bitwig reader to say which devices come before an instrument).
+- More plugins' own octave (`octave`: Serum 1 is read, from the C# `Serum1State` offsets, with its sub oscillator
+  when only that plays; Serum 2's CBOR state next), and Bitwig Note Transpose devices (needs the Bitwig reader to say which devices come
+  before an instrument).
 - Bitwig: the reader doesn't say which presets are instruments, so no Bitwig synth is marked unused yet.
-- Export and Send to Bitwig (`.bwpreset` from a template Bitwig saved, as the C# `BitwigPreset`), copy-check-rename.
+- Send to Bitwig: a `.bwpreset` beside each export, from a template Bitwig saved (the C# `BitwigPreset`).
+- Export: half-written `.part-*` files left by a crash aren't cleared yet; names are cut by UTF-16 units as the C#
+  app does, not by Linux's 255-byte limit.
