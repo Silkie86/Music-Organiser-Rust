@@ -15,7 +15,7 @@ use crate::clean::{Bin, Done, Problem, What, send};
 use crate::folder_move::{
     CantMove, Drives, Fill, MovedFolder, Tree, check_rename, clear_failed_link, copy_fresh, copy_tree, denied,
     destination_problem, fresh_name, inside_moved, leads_to, link, link_reaches, listed, only_in, remove_link,
-    rest_after, room_for, swap, target,
+    rest_after, room_for, shown, swap, target,
 };
 use crate::plugin_space::{PluginSpace, SpaceKind};
 use crate::size::{self, is_link};
@@ -202,7 +202,14 @@ pub fn link_again(
     let partly = |why: CantMove| match why {
         CantMove::LeftHalfway(_) => why,
         other => {
-            let said = if other == CantMove::Stopped { "Stopped.".to_owned() } else { other.text() };
+            let said = match other {
+                CantMove::Stopped => "Stopped.".to_owned(),
+                // A folder took the name it was to be set aside under meanwhile.
+                CantMove::OldCopyThere => {
+                    format!("There's a folder called {} beside it now: rename or delete it.", file_name(&aside))
+                }
+                other => other.text(),
+            };
             let kept = if kept_in.exists() {
                 format!(", and the ones they replaced are kept in {}", text(&kept_in))
             } else {
@@ -217,16 +224,13 @@ pub fn link_again(
         }
     };
     let first = copy_tree(&tree, Fill::Freshen, progress, stop).map_err(partly)?;
-    // What the plugin saved meanwhile.
-    let again = copy_tree(&tree, Fill::Freshen, &|n| progress(first.bytes + n), stop).map_err(partly)?;
+    // What the plugin saved meanwhile. What the first pass wrote is the update's, not yours: it isn't kept again.
+    let mut ours = first.written.clone();
+    ours.sort();
+    let again = copy_tree(&Tree { ours: &ours, ..tree }, Fill::Freshen, &|n| progress(first.bytes + n), stop)
+        .map_err(partly)?;
     swap(from, to, &aside).map_err(partly)?;
-    let shown = |paths: Vec<PathBuf>| -> Vec<String> {
-        let mut shown: Vec<String> = paths.iter().map(|p| text(p)).collect();
-        shown.sort();
-        shown.dedup();
-        shown
-    };
-    let replaced = shown([first.kept, again.kept].concat());
+    let replaced = shown(&[first.kept, again.kept].concat());
     let kept = (!replaced.is_empty()).then(|| OldHome {
         path: text(&kept_in),
         bytes: size::measure(&kept_in, stop).map_or(0, |m| m.bytes),
@@ -244,8 +248,44 @@ pub fn link_again(
         },
         replaced,
         kept,
-        links_left: shown([first.links_left, again.links_left].concat()),
+        links_left: shown(&[first.links_left, again.links_left].concat()),
     })
+}
+
+/// The folders of files linking again kept from before ("… (kept from before)", beside each moved folder's copy) that
+/// aren't in `homes`: one a try that stopped partway left is found too, so none of your files are where the app doesn't
+/// show them. Measures them: call it away from the window's thread.
+pub fn kept_beside(moved: &[MovedFolder], homes: &[OldHome], stop: &AtomicBool) -> Vec<OldHome> {
+    let known = |path: &Path| homes.iter().any(|h| key(&h.path) == key(&text(path)));
+    let mut found: Vec<OldHome> = Vec::new();
+    for m in moved {
+        let to = Path::new(&m.to);
+        let (Some(parent), Some(name)) = (to.parent(), to.file_name()) else { continue };
+        let start = format!("{}{}", name.to_string_lossy(), KEPT_BEFORE_SUFFIX.trim_end_matches(')'));
+        let Ok(entries) = fs::read_dir(parent) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let entry_name = entry.file_name().to_string_lossy().into_owned();
+            let numbered = entry_name.strip_prefix(&start).and_then(|rest| rest.strip_suffix(')')).is_some_and(|n| {
+                n.is_empty()
+                    || n.strip_prefix(' ').is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+            });
+            if !numbered || !is_dir(&text(&path)) || is_link(&path) || known(&path) {
+                continue;
+            }
+            if found.iter().any(|h| key(&h.path) == key(&text(&path))) {
+                continue;
+            }
+            found.push(OldHome {
+                path: text(&path),
+                bytes: size::measure(&path, stop).map_or(0, |m| m.bytes),
+                note: "replaced by linking again".to_owned(),
+                copy: String::new(),
+                kind: m.kind,
+            });
+        }
+    }
+    found
 }
 
 /// Whether a folder left behind can go: it's there, and no moved folder (or its link) is still in it. After the folder
@@ -406,6 +446,7 @@ fn rename_home(home: &str, to: &Path, moved: &[MovedFolder], homes: &[OldHome]) 
     let links: Vec<(usize, PathBuf)> =
         living_in(home, &new_home, moved).into_iter().filter(|(i, _)| link_reaches(&moved[*i])).collect();
     let mut changed: Vec<usize> = Vec::new();
+    // Put back in the opposite order, so an outer link leads to its folder again before the links inside it change.
     let put_back = |changed: &[usize]| -> String {
         let mut stuck = Vec::new();
         for &n in changed.iter().rev() {
@@ -420,14 +461,21 @@ fn rename_home(home: &str, to: &Path, moved: &[MovedFolder], homes: &[OldHome]) 
             format!(" Some links couldn't be put back: {}.", stuck.join("; "))
         }
     };
-    for n in outer_first(&links, moved) {
+    // Inner links first: while the folder is still where it was, a link inside another moved folder (Reaktor 6 in
+    // Native Instruments) is only reached through the outer link as it is now.
+    let mut order = outer_first(&links, moved);
+    order.reverse();
+    for n in order {
         let (i, new_to) = &links[n];
-        if let Err(why) = relink(&moved[*i].from, new_to, false) {
+        if let Err(not) = relink(&moved[*i].from, new_to, false) {
             let stuck = put_back(&changed);
-            return Err(CantMove::Failed(format!(
-                "The link at {} couldn't be pointed at the new place: {why}{stuck}",
-                moved[*i].from
-            )));
+            let said =
+                format!("The link at {} couldn't be pointed at the new place: {}{stuck}", moved[*i].from, not.why);
+            return Err(if not.gone || !stuck.is_empty() {
+                CantMove::LeftHalfway(format!("{said} The folder hasn't moved."))
+            } else {
+                CantMove::Failed(said)
+            });
         }
         changed.push(n);
     }
@@ -442,21 +490,25 @@ fn rename_home(home: &str, to: &Path, moved: &[MovedFolder], homes: &[OldHome]) 
     }
     // Every link changed reaches the folder at its new place, or it all goes back.
     if let Some(&n) = changed.iter().find(|&&n| !leads_to(&moved[links[n].0].from, &links[n].1)) {
-        let back = fs::rename(to, home);
-        let stuck = put_back(&changed);
         let at = &moved[links[n].0].from;
-        return match back {
-            Ok(()) if stuck.is_empty() => Err(CantMove::Failed(format!(
-                "The link at {at} didn't reach the folder at its new place, so it was all put back."
-            ))),
-            Ok(()) => Err(CantMove::LeftHalfway(format!(
-                "The link at {at} didn't reach the folder at its new place, so the folder went back.{stuck}"
-            ))),
-            Err(e) => Err(CantMove::LeftHalfway(format!(
+        if let Err(e) = fs::rename(to, home) {
+            // It stays at the new place, and so do the links that reach it there.
+            return Err(CantMove::LeftHalfway(format!(
                 "The link at {at} didn't reach the folder at its new place, and Windows wouldn't rename it back \
-                 ({e}): rename {new_home} to {home} yourself.{stuck}"
-            ))),
-        };
+                 ({e}). It's at {new_home} now, with the links pointed there: its moved folders show as lost until \
+                 they're pointed at it there."
+            )));
+        }
+        let stuck = put_back(&changed);
+        return Err(if stuck.is_empty() {
+            CantMove::Failed(format!(
+                "The link at {at} didn't reach the folder at its new place, so it was all put back."
+            ))
+        } else {
+            CantMove::LeftHalfway(format!(
+                "The link at {at} didn't reach the folder at its new place, so the folder went back.{stuck}"
+            ))
+        });
     }
     // Every moved folder whose copy moved with it follows, the ones whose link wasn't changed too.
     let mut now = moved.to_vec();
@@ -482,55 +534,72 @@ pub fn repoint(old_home: &str, new_home: &str, moved: &[MovedFolder], homes: &[O
     let mut links = Vec::new();
     for (i, new_to) in living_in(old_home, new_home, moved) {
         let m = &moved[i];
-        if !is_dir(&text(&new_to)) {
-            problems.push(Problem { path: m.from.clone(), why: format!("{} isn't in {new_home}.", file_name(&m.to)) });
-        } else if !is_link(Path::new(&m.from)) && is_dir(&m.from) {
-            now[i].to = text(&new_to);
-        } else {
+        if is_dir(&text(&new_to)) {
             links.push((i, new_to));
+        } else {
+            problems.push(Problem { path: m.from.clone(), why: format!("{} isn't in {new_home}.", file_name(&m.to)) });
         }
     }
+    // Outer links first: one inside another moved folder is only reached once the outer link leads somewhere again.
     for n in outer_first(&links, moved) {
         let (i, new_to) = &links[n];
-        match relink(&moved[*i].from, new_to, true) {
+        let from = &moved[*i].from;
+        if !is_link(Path::new(from)) && is_dir(from) {
+            now[*i].to = text(new_to);
+            continue;
+        }
+        match relink(from, new_to, true) {
             Ok(()) => now[*i].to = text(new_to),
-            Err(why) => problems.push(Problem { path: moved[*i].from.clone(), why }),
+            Err(not) => problems.push(Problem { path: from.clone(), why: not.why }),
         }
     }
     HomeMoved { moved: now, old_homes: follow_homes(old_home, new_home, homes), problems, old_home: None }
 }
 
+/// Why a link wasn't pointed at the new place.
+struct NotRelinked {
+    why: String,
+    /// The old link couldn't be put back either: there's no link there now.
+    gone: bool,
+}
+
+impl NotRelinked {
+    fn kept(why: String) -> Self {
+        NotRelinked { why, gone: false }
+    }
+}
+
 /// Swaps the link at `at` for one to `target`; makes one where there's nothing. Never touches a real folder. With
 /// `check`, the target must be there and the new link must reach it. If the new link doesn't take, the old one goes
 /// back.
-fn relink(at: &str, target: &Path, check: bool) -> Result<(), String> {
+fn relink(at: &str, target: &Path, check: bool) -> Result<(), NotRelinked> {
     let at_path = Path::new(at);
     if check && !is_dir(&text(target)) {
-        return Err(format!("{} isn't there.", text(target)));
+        return Err(NotRelinked::kept(format!("{} isn't there.", text(target))));
     }
     let reaches = || !check || leads_to(at, target);
     if !is_link(at_path) {
         if fs::symlink_metadata(at_path).is_ok() {
-            return Err(format!("{at} is a real folder now, not a link, so it was left alone."));
+            return Err(NotRelinked::kept(format!("{at} is a real folder now, not a link, so it was left alone.")));
         }
         let made = link(at_path, target);
         if made.is_ok() && reaches() {
             return Ok(());
         }
         clear_failed_link(at_path);
-        return Err(match made {
+        return Err(NotRelinked::kept(match made {
             Err(e) => format!("Windows wouldn't make the link ({e})."),
             Ok(()) => format!("The link was made but doesn't reach {}.", text(target)),
-        });
+        }));
     }
     let was = fs::read_link(at_path).ok();
     remove_link(at_path).map_err(|e| {
-        if denied(&e) {
+        NotRelinked::kept(if denied(&e) {
             "Windows said no: the link needs administrator rights to change, which this version can't ask for yet."
                 .to_owned()
         } else {
             format!("Windows wouldn't change the link ({e}).")
-        }
+        })
     })?;
     let made = link(at_path, target);
     if made.is_ok() && reaches() {
@@ -542,9 +611,13 @@ fn relink(at: &str, target: &Path, check: bool) -> Result<(), String> {
         Ok(()) => format!("The link was made but doesn't reach {}", text(target)),
     };
     // The old link goes back, so the plugin finds what it found before.
-    if was.is_some_and(|was| link(at_path, &was).is_ok()) {
-        Err(format!("{why}, so the old one is back."))
-    } else {
-        Err(format!("{why}, nor could the old one be put back: make a link at {at} to {} yourself.", text(target)))
+    if was.as_ref().is_some_and(|was| link(at_path, was).is_ok()) {
+        return Err(NotRelinked::kept(format!("{why}, so the old one is back.")));
     }
+    // Where a link there should lead: the new place when the folder is there, or else where it led before.
+    let lead = if is_dir(&text(target)) { text(target) } else { was.as_deref().map_or_else(|| text(target), text) };
+    Err(NotRelinked {
+        why: format!("{why}, nor could the old one be put back: make a link at {at} to {lead} yourself."),
+        gone: true,
+    })
 }

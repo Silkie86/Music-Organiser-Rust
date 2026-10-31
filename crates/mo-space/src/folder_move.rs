@@ -465,13 +465,9 @@ pub fn move_back(
         )));
     }
     // The whole folder comes back onto the drive the move freed.
-    if let Some(free) = drives.free(here) {
-        let needs = size::measure(to, stop).map_err(|_| CantMove::Stopped)?.bytes;
-        if free < needs.saturating_add(HEADROOM) {
-            return Err(CantMove::NoRoom { free, needs });
-        }
-    }
-    let (first, again) = copy_fresh(&Tree::new(to, Path::new(&back), settled), progress, stop)?;
+    let tree = Tree::new(to, Path::new(&back), settled);
+    room_for(&tree, here, drives, stop)?;
+    let (first, again) = copy_fresh(&tree, progress, stop)?;
     if let Err(why) = unswap(from, &back, to) {
         if link_reaches(moved) {
             // As it was: the plugin still uses the other drive, so the copy made to come back goes.
@@ -523,11 +519,13 @@ pub(crate) fn fresh_name(base: &str, suffix: &str) -> String {
     name
 }
 
-/// What's left of `path` after `folder`, compared part by part whichever way the slashes lean and ignoring case, or
-/// `None` when it isn't inside.
+/// What's left of `path` after `folder`, compared part by part whichever way the slashes lean, ignoring case and
+/// Windows' long-path prefix (`\\?\`), or `None` when it isn't inside.
 pub(crate) fn rest_after(path: &str, folder: &str) -> Option<PathBuf> {
     let parts = |p: &str| -> Vec<String> {
-        p.split(['/', '\\']).filter(|s| !s.is_empty() && *s != ".").map(str::to_owned).collect()
+        let slashes = p.replace('\\', "/");
+        let plain = slashes.strip_prefix("//?/UNC/").or_else(|| slashes.strip_prefix("//?/")).unwrap_or(&slashes);
+        plain.split('/').filter(|s| !s.is_empty() && *s != ".").map(str::to_owned).collect()
     };
     let (path_parts, folder_parts) = (parts(path), parts(folder));
     if folder_parts.len() > path_parts.len() || !folder_parts.iter().zip(&path_parts).all(|(a, b)| key(a) == key(b)) {
@@ -546,7 +544,7 @@ pub(crate) fn listed(only: &[String]) -> String {
 }
 
 /// Paths inside the folder, once each, in order.
-fn shown(paths: &[PathBuf]) -> Vec<String> {
+pub(crate) fn shown(paths: &[PathBuf]) -> Vec<String> {
     let mut shown: Vec<String> = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
     shown.sort();
     shown.dedup();
@@ -907,6 +905,9 @@ pub(crate) struct Tree<'a> {
     pub(crate) keep_in: Option<&'a Path>,
     /// With `keep_in`: every file in `to` that's replaced is kept there first, not only newer ones.
     pub(crate) keep_all: bool,
+    /// With `keep_in`: files an earlier pass wrote into `to` (paths inside it, sorted). They're the copy's own work,
+    /// not yours, so they're replaced without being kept.
+    pub(crate) ours: &'a [PathBuf],
     /// Folders not copied (keys).
     pub(crate) leave_out: &'a [String],
 }
@@ -914,7 +915,7 @@ pub(crate) struct Tree<'a> {
 impl<'a> Tree<'a> {
     /// `from` copied into `to`, which ends up as `settled`; nothing kept aside or left out.
     pub(crate) fn new(from: &'a Path, to: &'a Path, settled: &'a Path) -> Self {
-        Tree { from, to, settled, keep_in: None, keep_all: false, leave_out: &[] }
+        Tree { from, to, settled, keep_in: None, keep_all: false, ours: &[], leave_out: &[] }
     }
 }
 
@@ -924,6 +925,8 @@ pub(crate) struct Copied {
     pub(crate) bytes: u64,
     pub(crate) kept: Vec<PathBuf>,
     pub(crate) links_left: Vec<PathBuf>,
+    /// With `keep_in`, freshening: the files it wrote (paths inside the copy), for [`Tree::ours`] in the next pass.
+    pub(crate) written: Vec<PathBuf>,
 }
 
 /// Copies a folder into another one, file by file, keeping each file's time and checking its size once written. A link
@@ -1022,13 +1025,13 @@ pub(crate) fn copy_tree(
                 copied.bytes += meta.len();
                 continue;
             }
-            if let (Some(m), Some(keep_in)) = (&there, tree.keep_in)
-                && (tree.keep_all || newer(m, &meta))
-            {
-                // Yours, and newer than the one coming in (or any, with `keep_all`): kept aside, never replaced.
+            if let (Some(m), Some(keep_in)) = (&there, tree.keep_in) {
                 let rest = inside(&copy);
-                keep_aside(&copy, &keep_in.join(&rest))?;
-                copied.kept.push(rest);
+                // Yours, and newer than the one coming in (or any, with `keep_all`): kept aside, never replaced.
+                if (tree.keep_all || newer(m, &meta)) && tree.ours.binary_search(&rest).is_err() {
+                    keep_aside(&copy, &keep_in.join(&rest))?;
+                    copied.kept.push(rest);
+                }
             }
             match copy_file(&source, &copy, &meta, fill == Fill::Freshen) {
                 Err(_) if gone(&source) => {
@@ -1038,6 +1041,9 @@ pub(crate) fn copy_tree(
                     continue;
                 }
                 other => other?,
+            }
+            if tree.keep_in.is_some() && fill == Fill::Freshen {
+                copied.written.push(inside(&copy));
             }
             copied.bytes += meta.len();
             progress(copied.bytes);
@@ -1246,5 +1252,25 @@ fn copy_dangling(kind: &fs::FileType, to: &Path, copy: &Path) -> io::Result<()> 
     } else {
         let _ = std::os::windows::fs::symlink_file(to, copy);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::rest_after;
+
+    #[test]
+    fn the_rest_of_a_path_is_found_part_by_part() {
+        let rest = |path: &str, folder: &str| rest_after(path, folder).map(|p| p.to_string_lossy().replace('\\', "/"));
+        assert_eq!(rest(r"D:\Plugin Data\NI\Reaktor 6", r"d:/plugin data"), Some("NI/Reaktor 6".to_owned()));
+        // Windows' long-path way of writing it.
+        assert_eq!(rest(r"\\?\D:\Plugin Data\NI", r"D:\Plugin Data\"), Some("NI".to_owned()));
+        assert_eq!(rest(r"\\server\share\Data\NI", r"\\?\UNC\server\share\Data"), Some("NI".to_owned()));
+        assert_eq!(rest_after(r"D:\Plugin Data", r"D:\Plugin Data"), Some(PathBuf::new()));
+        // A name that only starts the same isn't inside.
+        assert_eq!(rest_after(r"D:\Plugin Data 2\NI", r"D:\Plugin Data"), None);
+        assert_eq!(rest_after(r"D:\Plugin", r"D:\Plugin Data"), None);
     }
 }

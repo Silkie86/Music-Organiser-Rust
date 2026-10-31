@@ -10,8 +10,8 @@ use std::sync::atomic::AtomicBool;
 use std::time::{Duration, SystemTime};
 
 use mo_space::after_move::{
-    KEPT_BEFORE_SUFFIX, OldHome, doubled, find_sharers, home_of, link_again, lost, move_home, old_home_can_go,
-    old_homes_json, only_in_old_home, parse_old_homes, real_place, remove_old_home, replaced, repoint,
+    KEPT_BEFORE_SUFFIX, OldHome, doubled, find_sharers, home_of, kept_beside, link_again, lost, move_home,
+    old_home_can_go, old_homes_json, only_in_old_home, parse_old_homes, real_place, remove_old_home, replaced, repoint,
 };
 use mo_space::clean::{Bin, Problem, Removed};
 use mo_space::folder_move::{CantMove, Drives, MovedFolder, move_folder};
@@ -158,6 +158,11 @@ fn a_folder_an_update_made_where_the_link_was_is_linked_again() {
     assert_eq!(kept.path, s(&kept_in));
     assert_eq!(kept.note, "replaced by linking again");
     assert!(copy.join("Pad.db").exists());
+    // Folders of kept files are found beside the copy even when nothing listed them (a try that stopped partway); a
+    // folder that only looks like one isn't.
+    fs::create_dir_all(d.join("STEAM (kept from before x)")).unwrap();
+    assert_eq!(kept_beside(&all, &[], &stop), std::slice::from_ref(&kept));
+    assert!(kept_beside(&all, &[home.clone(), kept.clone()], &stop).is_empty());
 
     // The folder set aside goes once nothing is only in it.
     assert!(old_home_can_go(&home, &all));
@@ -289,7 +294,12 @@ fn on_the_same_drive_the_home_is_renamed() {
     let data = d.join("Plugin Data");
     fs::create_dir_all(&data).unwrap();
     fs::create_dir_all(d.join("Elsewhere")).unwrap();
-    let all = vec![move_it(&c.join("STEAM"), &data, &[])];
+    write(&c, "NI/Reaktor 6/r.ens", "r");
+    write(&c, "NI/k.nki", "k");
+    let mut all = vec![move_it(&c.join("STEAM"), &data, &[])];
+    // A moved folder inside another: Reaktor 6 first, then Native Instruments around it (its link stays a link).
+    all.push(move_it(&c.join("NI").join("Reaktor 6"), &data, &all));
+    all.push(move_it(&c.join("NI"), &data, &all));
     fs::create_dir_all(data.join("STEAM (after update)")).unwrap();
     let homes = [OldHome {
         path: s(&data.join("STEAM (after update)")),
@@ -306,6 +316,12 @@ fn on_the_same_drive_the_home_is_renamed() {
     assert_eq!(read(&c.join("STEAM/Pad.db")), "pad");
     assert_eq!(real(&c.join("STEAM")), real(&new_home.join("STEAM")));
     assert_eq!(done.moved[0].to, s(&new_home.join("STEAM")));
+    assert_eq!(read(&c.join("NI/Reaktor 6/r.ens")), "r");
+    assert_eq!(real(&c.join("NI").join("Reaktor 6")), real(&new_home.join("Reaktor 6")));
+    assert_eq!(real(&c.join("NI")), real(&new_home.join("NI")));
+    assert_eq!(done.moved[1].to, s(&new_home.join("Reaktor 6")));
+    assert_eq!(done.moved[2].to, s(&new_home.join("NI")));
+    assert!(lost(&done.moved).is_empty() && doubled(&done.moved).is_empty());
     assert_eq!(done.old_homes[0].path, s(&new_home.join("STEAM (after update)")));
     assert_eq!(done.old_homes[0].copy, done.moved[0].to);
 }
@@ -324,9 +340,10 @@ fn on_the_same_drive_a_link_that_wont_change_puts_it_all_back() {
     let data = d.join("Plugin Data");
     fs::create_dir_all(&data).unwrap();
     fs::create_dir_all(d.join("Elsewhere")).unwrap();
-    let steam = move_it(&c.join("STEAM"), &data, &[]);
-    let kontakt = move_it(&locked.join("Kontakt"), &data, std::slice::from_ref(&steam));
-    let all = vec![steam, kontakt];
+    let kontakt = move_it(&locked.join("Kontakt"), &data, &[]);
+    let steam = move_it(&c.join("STEAM"), &data, std::slice::from_ref(&kontakt));
+    // STEAM's link is changed first, then Kontakt's won't: STEAM's goes back.
+    let all = vec![kontakt, steam];
     let lock = |mode: u32| fs::set_permissions(&locked, fs::Permissions::from_mode(mode)).unwrap();
     lock(0o555);
     if fs::write(locked.join("probe"), "x").is_ok() {
@@ -384,6 +401,71 @@ fn a_second_copy_a_later_move_made_is_found_and_linked_again() {
     assert_eq!(read(&ni.join("Reaktor 6/new.ens")), "new");
     assert_eq!(read(&d.join("Reaktor 6").join("new.ens")), "new");
     assert!(doubled(&all).is_empty());
+}
+
+#[test]
+fn a_second_copy_behind_a_lost_link_is_found_once_the_link_is_pointed_again() {
+    let dir = fixtures("mo-space-after-doubled-lost");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    let ni = c.join("NI");
+    write(&ni, "Reaktor 6/r.ens", "r");
+    write(&ni, "k.nki", "k");
+    let data = d.join("Plugin Data");
+    fs::create_dir_all(&data).unwrap();
+    let inner = move_it(&ni.join("Reaktor 6"), &data, &[]);
+    // The C# app's older move of the folder around it, into the same place: a second copy of Reaktor 6 inside.
+    copy_all(&ni, &data.join("NI"));
+    fs::rename(&ni, c.join("NI (old copy)")).unwrap();
+    folder_link(&data.join("NI"), &ni);
+    let outer = MovedFolder {
+        from: s(&ni),
+        to: s(&data.join("NI")),
+        old_copy: s(&c.join("NI (old copy)")),
+        bytes: 2,
+        moved: "2026-10-27T10:00:00.0000000+00:00".to_owned(),
+        key: "kontakt".to_owned(),
+        kind: 2,
+        shared_with: Vec::new(),
+    };
+    let all = vec![inner, outer];
+    assert_eq!(doubled(&all).len(), 1);
+
+    // Plugin Data renamed by hand: the second copy can't be seen until Native Instruments' link leads somewhere.
+    let by_hand = d.join("Data");
+    fs::rename(&data, &by_hand).unwrap();
+    let now = repoint(&s(&data), &s(&by_hand), &all, &[]);
+    assert!(now.problems.is_empty(), "{:?}", now.problems);
+    assert_eq!(now.moved[1].to, s(&by_hand.join("NI")));
+    // The second copy is left alone, and Reaktor 6's record follows its copy, so it shows as doubled.
+    assert_eq!(now.moved[0].to, s(&by_hand.join("Reaktor 6")));
+    assert!(!is_link(&ni.join("Reaktor 6")));
+    assert_eq!(doubled(&now.moved), [(&now.moved[0], s(&ni))]);
+}
+
+/// What the plugin saves while linking again copies is the update's, not yours: it goes in without being kept again.
+#[test]
+fn a_file_saved_while_linking_again_goes_in_once() {
+    let dir = fixtures("mo-space-after-saved");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    let steam = c.join("STEAM");
+    write(&steam, "Pad.db", "pad");
+    fs::create_dir_all(&d).unwrap();
+    let moved = move_it(&steam, &d, &[]);
+    let all = vec![moved.clone()];
+    unlink(&steam);
+    write(&steam, "Pad.db", "pad 2");
+    let stop = AtomicBool::new(false);
+    let saved = AtomicBool::new(false);
+    let save = |_: u64| {
+        if !saved.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            write(&steam, "Pad.db", "pad, saved meanwhile");
+        }
+    };
+    let linked = link_again(&moved, &all, 5, false, &OtherDrive, &save, &stop).unwrap();
+    assert!(saved.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(read(&steam.join("Pad.db")), "pad, saved meanwhile");
+    assert_eq!(linked.replaced, ["Pad.db"]);
+    assert_eq!(read(&PathBuf::from(&linked.kept.unwrap().path).join("Pad.db")), "pad");
 }
 
 #[test]
