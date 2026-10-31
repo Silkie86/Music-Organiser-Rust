@@ -17,10 +17,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::LazyLock;
 
-use mo_formats::{NoteEvent, case, paths};
+use mo_formats::{NoteEvent, case};
 use mo_midi::analyser::{self, Analysis};
 use mo_midi::index::{SourceKind, StoredPhrase};
-use mo_midi::{MidiIndex, instruments};
+use mo_midi::{MidiIndex, extract};
 use rayon::prelude::*;
 use regex::Regex;
 
@@ -153,6 +153,36 @@ fn run() -> Result<(), String> {
     }
     eprintln!("\r  {done} of {} parts worked out.", phrases.len());
 
+    // Then each file read again from disk, as the Rust indexer reads it: the same sets of notes must come out (the
+    // splitting into phrases checked too). Phrases joined from clips are left out: the Rust indexer doesn't join yet.
+    let mut by_file: BTreeMap<&str, (i64, Vec<&str>)> = BTreeMap::new();
+    for p in phrases.iter().filter(|p| p.members.is_empty()) {
+        by_file.entry(p.source.path.as_str()).or_insert((p.source.mtime, Vec::new())).1.push(p.hash.as_str());
+    }
+    let files: Vec<(&str, i64, &Vec<&str>)> =
+        by_file.iter().map(|(path, (mtime, hashes))| (*path, *mtime, hashes)).collect();
+    eprintln!("  Reading {} files again...", files.len());
+    let read: Vec<(&str, FileCheck)> = pool.install(|| {
+        files.par_iter().map(|(path, mtime, hashes)| (*path, check_file(path, *mtime, hashes, &folders))).collect()
+    });
+    let mut file_counts: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut file_examples: Vec<String> = Vec::new();
+    for (path, check) in &read {
+        let (kind, detail) = match check {
+            FileCheck::Same => ("same", String::new()),
+            FileCheck::Gone => ("not on disk now", String::new()),
+            FileCheck::Changed => ("changed since the C# app read it", String::new()),
+            FileCheck::Unread(why) => ("couldn't read", why.clone()),
+            FileCheck::Differ { missing, extra } => {
+                ("differ", format!("{missing} part(s) only in midi.db, {extra} only in Rust"))
+            }
+        };
+        *file_counts.entry(kind).or_default() += 1;
+        if !detail.is_empty() && file_examples.len() < EXAMPLES * 2 {
+            file_examples.push(format!("  {path}: {kind}: {detail}"));
+        }
+    }
+
     let mut summary = String::new();
     let _ = writeln!(
         summary,
@@ -175,7 +205,17 @@ fn run() -> Result<(), String> {
             let _ = writeln!(summary, "  {pair}: {n}");
         }
     }
+    let _ = writeln!(summary, "Files read again ({}):", read.len());
+    for (kind, n) in &file_counts {
+        let _ = writeln!(summary, "  {kind}: {n}");
+    }
     let mut report = String::new();
+    if !file_examples.is_empty() {
+        let _ = writeln!(report, "Files read again:");
+        for line in &file_examples {
+            let _ = writeln!(report, "{line}");
+        }
+    }
     for (field, list) in &examples {
         let _ = writeln!(report, "{field} ({} listed of {}):", list.len(), counts.get(field).copied().unwrap_or(0));
         for line in list {
@@ -185,7 +225,7 @@ fn run() -> Result<(), String> {
     write_or_print(a.summary.as_ref(), &summary)?;
     match &a.report {
         Some(path) => std::fs::write(path, report).map_err(|e| format!("Couldn't write {}: {e}", path.display()))?,
-        None if !examples.is_empty() => println!("{report}"),
+        None if !report.is_empty() => println!("{report}"),
         None => {}
     }
     Ok(())
@@ -230,6 +270,32 @@ fn compare(p: &StoredPhrase, notes: &[NoteEvent], folders: &[String]) -> Vec<Dif
     diffs
 }
 
+/// What reading a file again found.
+enum FileCheck {
+    Same,
+    Gone,
+    Changed,
+    Unread(String),
+    Differ { missing: usize, extra: usize },
+}
+
+fn check_file(path: &str, mtime: i64, hashes: &[&str], folders: &[String]) -> FileCheck {
+    let on_disk = std::path::Path::new(path);
+    let Ok(meta) = std::fs::metadata(on_disk) else { return FileCheck::Gone };
+    if mo_library::scan::mtime(&meta) != mtime {
+        return FileCheck::Changed;
+    }
+    let found = match extract::read(on_disk, folders) {
+        Ok(found) => found,
+        Err(extract::Unread::InUse(why) | extract::Unread::Failed(why)) => return FileCheck::Unread(why),
+    };
+    let rust: std::collections::HashSet<&str> = found.iter().map(|f| f.analysis.hash.as_str()).collect();
+    let cs: std::collections::HashSet<&str> = hashes.iter().copied().collect();
+    let missing = cs.difference(&rust).count();
+    let extra = rust.difference(&cs).count();
+    if missing == 0 && extra == 0 { FileCheck::Same } else { FileCheck::Differ { missing, extra } }
+}
+
 /// A place a piece of a longer part sits: "bar 3", "bars 9–16".
 static PLACE: LazyLock<Option<Regex>> = LazyLock::new(|| Regex::new("^bars? [0-9]+(–[0-9]+)?$").ok());
 
@@ -249,31 +315,8 @@ fn hints(p: &StoredPhrase, folders: &[String]) -> String {
                     _ => p.clip.as_str(),
                 }
             };
-            format!("{} {}", p.part, if clip.is_empty() { p.part.as_str() } else { clip })
+            extract::project_hints(&p.part, if clip.is_empty() { &p.part } else { clip })
         }
-        SourceKind::File => {
-            let path = p.source.path.as_str();
-            let name = paths::stem(paths::file_name(path));
-            let dir = path.rfind(['\\', '/']).and_then(|c| path.get(..c)).unwrap_or("");
-            // The folders below the MIDI folder it's in (the longest that holds it), the last three. Letter case
-            // aside as .NET's OrdinalIgnoreCase (by capitals, a letter for a letter), so the root is cut off by letters.
-            let upper = case::key(dir);
-            let root = folders
-                .iter()
-                .map(|r| case::key(r))
-                .filter(|r| case::key(path).starts_with(r.as_str()))
-                .max_by_key(|r| r.chars().count())
-                .map_or(0, |r| r.chars().count());
-            let rest: String = dir.chars().skip(root.min(upper.chars().count())).collect();
-            let below: Vec<&str> = rest.split(['\\', '/']).filter(|s| !s.is_empty()).collect();
-            let last = below.get(below.len().saturating_sub(3)..).unwrap_or(&[]).join(" ");
-            let sound = match p.program {
-                Some(program) if (1..128).contains(&program) && !p.drums => {
-                    format!(" {}", instruments::general_midi(program))
-                }
-                _ => String::new(),
-            };
-            format!("{} {name} {last}{sound}", p.part)
-        }
+        SourceKind::File => extract::file_hints(&p.source.path, &p.part, p.program, p.drums, folders),
     }
 }
