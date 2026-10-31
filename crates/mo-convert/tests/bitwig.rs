@@ -466,3 +466,42 @@ fn converting_twice_gives_fresh_ids_and_never_touches_the_template() {
     let id = |doc: &Document| doc.obj(tracks(doc).1[0]).get(0xa51).cloned();
     assert_ne!(id(&a), id(&b));
 }
+
+#[test]
+fn audio_clips_are_listed_when_the_template_has_no_audio_track_and_the_rest_converts() {
+    let mut s = song();
+    let mut vox = channel(2, "Vox", None, r"C:\Samples\Snare 01.wav");
+    vox.notes.clear();
+    vox.clips.clear();
+    vox.audio_clips = vec![FlAudioClip {
+        start: 0,
+        length: 96,
+        from: 0.0,
+        muted: false,
+        track: 2,
+        on_muted_track: false,
+        partly_off: false,
+    }];
+    s.channels.push(vox);
+    s.automation.push(automation("Vox volume", 2, FlControl::Volume, 0, &[(0.0, 0.5)]));
+    let no_audio = Template { audio_track: false, ..Template::default() };
+    let (doc, notes, _) = convert(&s, &bitwig_template(no_audio));
+    let names: Vec<_> = tracks(&doc).1.iter().map(|&t| doc.obj(t).str(0x15b).to_owned()).collect();
+    assert_eq!(names, ["Snare", "Serum"]);
+    assert!(notes.iter().any(|n| n.starts_with("Vox: its audio clips are left out (the Bitwig template has no audio")));
+}
+
+#[test]
+fn a_vst2_program_that_cant_become_a_bank_keeps_its_own_ending_and_a_missing_id_isnt_the_templates() {
+    let mut s = song();
+    s.channels.remove(0);
+    s.automation.clear();
+    let synth = s.channels[0].instrument.as_mut().unwrap();
+    synth.device_id = String::new();
+    synth.state.as_mut().unwrap().data = b"CcnK damaged".to_vec();
+    let (doc, _, _) = convert(&s, &bitwig_template(Template::default()));
+    let serum = *chain(&doc, tracks(&doc).1[0]).last().unwrap();
+    let d = doc.obj(def(&doc, serum));
+    assert!(d.str(0xbe5).ends_with(".fxp"), "{}", d.str(0xbe5));
+    assert_eq!(d.num(0xce4), Some(0.0), "not Drumazon's id");
+}

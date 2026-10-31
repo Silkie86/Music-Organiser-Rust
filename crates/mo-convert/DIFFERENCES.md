@@ -16,3 +16,7 @@ does something else on purpose, it's listed here and judged.
 | A channel with both notes and audio clips | Two tracks with the same name | "Vox" and "Vox 2" | Better |
 | A sample shared by several channels | Read (hashed) once per channel | Read once | Better (rule 12) |
 | An unreadable sample stretched to a set length (FL's Time knob) | Length guessed ignoring the Time knob | Guessed as playing at its own speed over that length | Better |
+| Audio clips when the template has no audio track | Listed, the rest converted | Same (the writer lists them) | Same |
+| A VST2 program that can't be turned into a bank | Saved as `.fxb` anyway, so Bitwig can't load it | Kept as `.fxp` | Better |
+| A VST2 with no id saved | Kept the template plugin's id under the new name | Id 0 | Better: Bitwig never loads the template's plugin by mistake |
+| A template whose Sampler has no sample, or whose patterns share a track | Failed on the first song | Turned down when it's chosen | Better |

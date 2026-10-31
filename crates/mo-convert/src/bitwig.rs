@@ -14,6 +14,7 @@ use std::io::{Cursor, Read, Write};
 
 use mo_formats::bitwig::{self, Blob, Copier, Document, ObjId, Object, Slot, Text, Value};
 use mo_formats::fl::song::FlPlugin;
+use mo_formats::paths;
 
 use crate::plan::{AudioClip, Device, Lane, Plan, Role, SampleFile, Target, Track, TrackKind, TrackRef};
 
@@ -49,16 +50,26 @@ pub fn write(plan: &Plan, template: &[u8]) -> Result<Converted, String> {
     let mut t = Template::new(template)?;
     let mut w = Writing { notes: plan.notes.clone(), states: Vec::new() };
 
-    // Each plan track as a Bitwig track, and each plan device as its object, by place.
-    let mut tracks: Vec<(ObjId, Vec<Option<ObjId>>)> = Vec::with_capacity(plan.tracks.len());
+    // Each plan track as a Bitwig track, and each plan device as its object, by place. An audio track the template
+    // can't make is left out and said.
+    let mut tracks: Vec<Option<(ObjId, Vec<Option<ObjId>>)>> = Vec::with_capacity(plan.tracks.len());
     for track in &plan.tracks {
-        tracks.push(w.track(&mut t, track, plan.ppq)?);
+        if track.kind == TrackKind::Audio && t.audio.is_none() {
+            w.notes.push(format!(
+                "{}: its audio clips are left out (the Bitwig template has no audio track with an audio clip on it that \
+                 can be copied; it can't be in a group)",
+                track.name
+            ));
+            tracks.push(None);
+            continue;
+        }
+        tracks.push(Some(w.track(&mut t, track, plan.ppq)?));
     }
     let master = t.master;
     let mut master_devices = Vec::with_capacity(plan.master_effects.len());
     let mut chain = t.chain(master);
     for device in &plan.master_effects {
-        let made = w.device(&mut t, device, &plan.title)?;
+        let made = w.device(&mut t, device)?;
         if let Some(d) = made {
             chain.push(d);
         }
@@ -72,8 +83,9 @@ pub fn write(plan: &Plan, template: &[u8]) -> Result<Converted, String> {
         let (track, devices) = match lane.track {
             TrackRef::Master => (master, &master_devices),
             TrackRef::Track(i) => match tracks.get(i) {
-                Some((track, devices)) => (*track, devices),
-                None => continue,
+                Some(Some((track, devices))) => (*track, devices),
+                // Its track is left out, and said.
+                _ => continue,
             },
         };
         if let Some(why) = t.add_lane(track, devices, lane) {
@@ -83,7 +95,7 @@ pub fn write(plan: &Plan, template: &[u8]) -> Result<Converted, String> {
         }
     }
 
-    let made: Vec<ObjId> = tracks.iter().map(|(t, _)| *t).collect();
+    let made: Vec<ObjId> = tracks.iter().flatten().map(|(t, _)| *t).collect();
     let bytes = t.finish(&made, plan.tempo, &w.states)?;
     let mut seen = HashSet::new();
     let notes = w.notes.into_iter().filter(|n| seen.insert(n.clone())).collect();
@@ -120,7 +132,7 @@ impl Writing {
                     t.sampler(s, sample, info.as_ref(), *root_key, *tune)?;
                     Some(s)
                 }
-                _ => self.device(t, device, &plan.name)?,
+                _ => self.device(t, device)?,
             };
             if let Some(d) = made {
                 chain.push(d);
@@ -146,7 +158,7 @@ impl Writing {
 
     /// A transpose or plugin as a Bitwig device. A plugin is a copy of the template's VST3 or VST2 device with this
     /// plugin's identity and settings; an effect switched off in FL is switched off here too.
-    fn device(&mut self, t: &mut Template, device: &Device, track: &str) -> Result<Option<ObjId>, String> {
+    fn device(&mut self, t: &mut Template, device: &Device) -> Result<Option<ObjId>, String> {
         match device {
             Device::Sampler { .. } => Ok(None),
             Device::Transpose { octaves, semitones } => {
@@ -169,10 +181,9 @@ impl Writing {
                     if t.doc.obj(def).has(0xa3) {
                         put(t.doc.obj_mut(def), 0xa3, Value::Bool(0));
                     } else {
-                        let on = if insert.is_empty() { track.to_owned() } else { insert.clone() };
                         self.notes.push(format!(
-                            "{} on {on}: switched off in FL Studio, but on here (the Bitwig template's plugin has no \
-                             on/off to copy)",
+                            "{} on {insert}: switched off in FL Studio, but on here (the Bitwig template's plugin has \
+                             no on/off to copy)",
                             plugin.name
                         ));
                     }
@@ -202,8 +213,10 @@ impl Writing {
             }
             if vst3 {
                 put(o, 0xce4, text(&p.device_id));
-            } else if let Ok(id) = p.device_id.parse::<i64>() {
-                put(o, 0xce4, int(id));
+            } else {
+                // A VST2's id is a number; with none saved, 0 rather than the template plugin's, so Bitwig never loads
+                // that plugin under this one's name.
+                put(o, 0xce4, int(p.device_id.parse::<i64>().unwrap_or(0)));
             }
             if !same_plugin && o.has(0xc5e) {
                 // Another plugin than the template's: its version and outputs aren't known, Bitwig reads them on load.
@@ -232,10 +245,11 @@ impl Writing {
         }
         let mut state = String::new();
         if let Some(s) = &p.state {
-            let (data, extension) = if !vst3 && s.extension == ".fxp" {
-                (fxp_to_bank(&s.data, s.program), ".fxb".to_owned())
-            } else {
-                (s.data.clone(), s.extension.to_string())
+            let bank = (!vst3 && s.extension == ".fxp").then(|| fxp_to_bank(&s.data, s.program));
+            // Saved as a bank only when it became one: a program Bitwig reads as a bank wouldn't load.
+            let (data, extension) = match bank {
+                Some(bank) if bank != s.data => (bank, ".fxb".to_owned()),
+                _ => (s.data.clone(), s.extension.to_string()),
             };
             state = format!("{}{extension}", uuid_text(&bitwig::encode::fresh_id()));
             self.states.push((state.clone(), data));
@@ -344,6 +358,30 @@ impl Template {
         };
         let vst3_device = chain(&doc, vst3_track).into_iter().find(|&d| vst(&doc, d, VST3)).ok_or("no VST3")?;
         let vst2_device = chain(&doc, vst2_track).into_iter().find(|&d| vst(&doc, d, VST2)).ok_or("no VST2")?;
+        if sampler_track == vst3_track || sampler_track == vst2_track || vst3_track == vst2_track {
+            return Err(
+                "The Bitwig template needs its Sampler, VST3 and VST2 instruments on tracks of their own".into()
+            );
+        }
+        for tr in [sampler_track, vst3_track, vst2_track] {
+            if doc.field_obj(tr, 0x2bf8).and_then(|a| doc.field_obj(a, 0x2d8e)).is_none() {
+                return Err(format!(
+                    "The Bitwig template's track \"{}\" has no arrangement to put clips in",
+                    doc.obj(tr).str(0x15b)
+                ));
+            }
+        }
+        let first_sampler = chain(&doc, sampler_track).into_iter().find(|&d| bitwig_id(&doc, d) == Some(sampler));
+        let sample_zone = first_sampler
+            .and_then(|d| def(&doc, d))
+            .and_then(|d| doc.field_obj(d, 0xa4))
+            .and_then(|c| doc.field_list(c, 0x20c).into_iter().find(|&p| doc.obj(p).str(0x2b9) == "SAMPLE"))
+            .and_then(|p| doc.field_obj(p, 0x74c))
+            .and_then(|z| doc.field_obj(z, 0x4112))
+            .and_then(|s| doc.field_obj(s, 0x748));
+        if !sample_zone.is_some_and(|s| doc.obj(s).has(0x129e)) {
+            return Err("The Bitwig template's Sampler has no sample in it".into());
+        }
         let key_lane = key_lanes(&doc, clip)
             .into_iter()
             .find(|&l| !doc.field_list(l, 0x21f).is_empty())
@@ -364,10 +402,11 @@ impl Template {
         let mut mixer_lane = lanes.iter().copied().find(|&l| target(&doc, l).is_some_and(|t| t.has(0x41)));
         let mut plugin_lane =
             lanes.iter().copied().find(|&l| target(&doc, l).is_some_and(|t| t.has(0xec) && t.has(0xed)));
-        let point = lanes.iter().flat_map(|&l| reachable(&doc, l)).find(|&o| {
-            let o = doc.obj(o);
-            o.has(0x2af) && o.has(0x28f)
-        });
+        let point = lanes
+            .iter()
+            .filter_map(|&l| doc.field_obj(l, 0x2d8c).and_then(|a| doc.field_obj(a, 0x35ac)))
+            .flat_map(|points| doc.field_list(points, 0x21f))
+            .find(|&o| doc.obj(o).has(0x2af) && doc.obj(o).has(0x28f));
         if point.is_none() {
             (mixer_lane, plugin_lane) = (None, None);
         }
@@ -419,10 +458,10 @@ impl Template {
                 }
             }
         }
-        let first_sampler = chain(&doc, sampler_track).into_iter().find(|&d| bitwig_id(&doc, d) == Some(sampler));
         set_chain_of(&mut doc, sampler_track, &first_sampler.into_iter().collect::<Vec<_>>());
-        set_chain_of(&mut doc, vst3_track, &[vst3_device]);
-        set_chain_of(&mut doc, vst2_track, &[vst2_device]);
+        // The plugin devices are kept apart and copied as each track needs them, so the tracks hold none.
+        set_chain_of(&mut doc, vst3_track, &[]);
+        set_chain_of(&mut doc, vst2_track, &[]);
         if let Some(a) = &audio {
             set_chain_of(&mut doc, a.track, &[]);
         }
@@ -430,6 +469,7 @@ impl Template {
         let kept: Vec<ObjId> =
             [Some(sampler_track), Some(vst3_track), Some(vst2_track), audio.as_ref().map(|a| a.track)]
                 .into_iter()
+                .chain([Some(vst3_device), Some(vst2_device)])
                 .flatten()
                 .flat_map(|tr| reachable(&doc, tr))
                 .collect();
@@ -494,9 +534,10 @@ impl Template {
 
         let copier = Copier::new(&doc, None);
         let patterns =
-            [Some(sampler_track), Some(vst3_track), Some(vst2_track), Some(note_transpose), Some(clip), mixer_lane]
+            [sampler_track, vst3_track, vst2_track, vst3_device, vst2_device, note_transpose, clip, key_lane, note]
                 .into_iter()
-                .chain([plugin_lane, point, setting]);
+                .map(Some)
+                .chain([mixer_lane, plugin_lane, point, setting]);
         if patterns.flatten().any(|o| copier.shares(o)) {
             return Err("The Bitwig template refers to its tracks from somewhere this app doesn't know to clear".into());
         }
@@ -562,8 +603,7 @@ impl Template {
         tune: f64,
     ) -> Result<(), String> {
         let def = self.def(sampler).ok_or("The template's Sampler has no settings")?;
-        let name = file_name(path);
-        let stem = name.rsplit_once('.').map_or(name, |(s, _)| s).to_owned();
+        let stem = paths::stem(paths::file_name(path)).to_owned();
         self.doc.obj_mut(def).set(0x12de, text(&stem));
         self.doc.obj_mut(sampler).set(0x199, text(&stem));
         if let Some(p) = self.param(def, "TRANSPOSE") {
@@ -591,7 +631,7 @@ impl Template {
     /// a sample.
     fn sample_is(&mut self, sample: ObjId, path: &str, info: Option<&SampleFile>) -> bool {
         let Some(file) = self.doc.field_obj(sample, 0x129e) else { return false };
-        let name = file_name(path).to_owned();
+        let name = paths::file_name(path).to_owned();
         self.doc.obj_mut(sample).set(0x129f, text(&name));
         self.doc.obj_mut(file).set(0x512, text(&name));
         if let Some(location) = self.doc.field_obj(file, 0xd3b) {
@@ -650,15 +690,14 @@ impl Template {
         if let Some(range) = self.doc.field_obj(clip, 0x2adb) {
             self.set_range(range, 0.0, length);
         }
-        let mut keys: Vec<u8> = fl.notes.iter().map(|n| n.key.min(127)).collect();
-        keys.sort_unstable_by(|a, b| b.cmp(a));
-        keys.dedup();
-        let mut lanes = Vec::with_capacity(keys.len());
-        for key in keys {
+        // Highest key first, each key's notes in time order (a stable sort, so notes on one tick keep theirs).
+        let mut sorted: Vec<_> = fl.notes.iter().collect();
+        sorted.sort_by_key(|n| (std::cmp::Reverse(n.key.min(127)), n.start));
+        let mut lanes = Vec::new();
+        for on_key in sorted.chunk_by(|a, b| a.key.min(127) == b.key.min(127)) {
+            let Some(key) = on_key.first().map(|n| n.key.min(127)) else { continue };
             let lane = self.copy(self.key_lane);
             put(self.doc.obj_mut(lane), 0xee, Value::U8(key));
-            let mut on_key: Vec<_> = fl.notes.iter().filter(|n| n.key.min(127) == key).collect();
-            on_key.sort_by_key(|n| n.start);
             let mut notes = Vec::with_capacity(on_key.len());
             for n in on_key {
                 let note = self.copy(self.note);
@@ -963,6 +1002,9 @@ impl Template {
         summary.obj_mut(project).set(0xace, Value::List(Vec::new()));
         summary.obj_mut(project).set(0xacf, Value::List(Vec::new()));
         let copier = Copier::new(&summary, None);
+        if copier.shares(track_entry) || copier.shares(audio_entry) {
+            return None;
+        }
         let mut list = Vec::with_capacity(tracks.len());
         for &t in tracks {
             let e = copier.copy(&mut summary, if self.audio_tracks.contains(&t) { audio_entry } else { track_entry });
@@ -1083,10 +1125,6 @@ fn value_text(v: &Value) -> String {
     }
 }
 
-fn file_name(path: &str) -> &str {
-    path.rsplit(['\\', '/']).next().unwrap_or(path)
-}
-
 fn uuid_bytes(s: &str) -> [u8; 16] {
     let hex: Vec<u8> = s.bytes().filter(|b| b.is_ascii_hexdigit()).collect();
     let mut out = [0u8; 16];
@@ -1106,7 +1144,8 @@ fn uuid_text(b: &[u8; 16]) -> String {
 /// A VST2 program as a bank, the form Bitwig writes and reads back: an 'FPCh' chunk program becomes an 'FBCh' bank
 /// with `program` as the plugin's selected program (Bitwig selects it again after loading the chunk, as FL does; KORG's
 /// M1 plays that program); an 'FxCk' parameter program goes inside a one-program 'FxBk' bank. Anything else comes back
-/// as it was. (The C# reader's `ToBank`.)
+/// as it was. (The C# reader's `ToBank`. It belongs with the presets in mo-formats; it moves there when the preset
+/// export needs it too, as the readers are another thread's.)
 pub fn fxp_to_bank(fxp: &[u8], program: u32) -> Vec<u8> {
     // CcnK, size, magic, version, id, plugin version, count, name[28], then a chunk's size.
     const PROGRAM_HEADER: usize = 60;
