@@ -2815,6 +2815,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "mo-harmony"
+version = "0.1.0"
+
+[[package]]
 name = "mo-library"
 version = "0.1.0"
 dependencies = [
