@@ -10,7 +10,7 @@ use std::collections::{BTreeSet, HashMap};
 use chrono::{Datelike, Days, NaiveDateTime};
 use mo_formats::case;
 use mo_library::songs::{self, SaveRun, Song};
-use mo_library::{Library, LibraryError, STATUSES, Save, SongChoices};
+use mo_library::{STATUSES, Save, SongChoices};
 
 /// The status the Hide archived chip hides.
 pub const ARCHIVED: &str = STATUSES[6];
@@ -319,12 +319,6 @@ pub const DOUBTS_ACROSS_FOLDERS: &str = "song_doubts_across_folders";
 const MOST_DOUBTS: usize = 5000;
 
 impl Songs {
-    /// Reads the saves and groups them into songs. Fix's copies still waiting for Keep or Delete are left out: until
-    /// Keep, the song opens its original. `gap_months` splits a song's saves into runs.
-    pub fn load(library: &Library, gap_months: u32) -> Result<Songs, LibraryError> {
-        Ok(crate::live::Live::load(library, gap_months, crate::live::LiveDetails::default())?.songs())
-    }
-
     /// Groups the saves into songs and puts them in order, last saved first. `asking` is whether to look for songs
     /// that may be saves of one (`Some`), and then whether also across folders.
     pub fn from_saves(

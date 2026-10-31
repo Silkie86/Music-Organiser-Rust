@@ -251,6 +251,11 @@ fn group<'h>(c: &regex::Captures<'h>, i: usize) -> &'h str {
     c.get(i).map_or("", |m| m.as_str())
 }
 
+/// Whether a name is one of Fix's copies: "Didums_70 (fixed)".
+pub fn is_fixed_copy(name: &str) -> bool {
+    FIXED_TAIL.is_match(name)
+}
+
 fn without_fixed(name: &str) -> String {
     FIXED_TAIL.replace(name, "").into_owned()
 }

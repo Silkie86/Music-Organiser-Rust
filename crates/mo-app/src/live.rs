@@ -3,24 +3,28 @@
 //! again. When the folder watch can't name every file, the folders it names are walked with the scanner instead.
 //!
 //! Until the library is trusted the app doesn't write it (CLAUDE.md), so what's read here is held in memory: the list
-//! shows it, and the C# app's next scan puts the same saves in the library. Saves read here get ids below zero, so
-//! the song panel knows to take their details from here rather than from the library.
+//! shows it, and the C# app's next scan puts the same saves in the library. A save read again keeps its id; a new one
+//! gets an id after the library's. The song panel takes the details of either from here rather than from the library.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use mo_formats::case;
+use mo_formats::{case, paths};
 use mo_library::read::{Installed, read_save};
 use mo_library::samples::SampleLocator;
 use mo_library::scan::{self, KnownFile};
+use mo_library::songs;
 use mo_library::watch::Changes;
 use mo_library::{Library, LibraryError, Save, SaveDetail, SongChoices};
 
 use crate::shell;
 use crate::songs::{ASK_DOUBTS, DOUBTS_ACROSS_FOLDERS, Songs};
 
-/// The details of the saves read here, by their ids (below zero), shared with the song panel's reader.
+/// The details of the saves read here, by their ids, shared with the song panel's reader.
 pub type LiveDetails = Arc<Mutex<HashMap<i64, SaveDetail>>>;
+
+/// The DAWs the scanner reads, so a song from one the library has no save of yet still opens in yours.
+const DAWS: [&str; 3] = ["Bitwig Studio", "FL Studio", "Studio One"];
 
 /// Everything the Songs list is made from, kept so it can be made again when a save changes.
 pub struct Live {
@@ -82,12 +86,13 @@ impl Live {
             .then(|| library.setting(DOUBTS_ACROSS_FOLDERS).map(|v| v.as_deref() == Some("1")))
             .transpose()?;
         let mut daw_exes = HashMap::new();
-        let daws: std::collections::BTreeSet<String> = saves.iter().map(|s| s.daw.clone()).collect();
+        let daws: BTreeSet<String> = saves.iter().map(|s| s.daw.clone()).chain(DAWS.map(String::from)).collect();
         for daw in daws {
             if let Some(exe) = library.setting(&shell::daw_exe_key(&daw))?.filter(|e| !e.trim().is_empty()) {
                 daw_exes.insert(daw, exe);
             }
         }
+        let next_id = saves.iter().map(|s| s.id).max().unwrap_or(0) + 1;
         Ok(Live {
             saves,
             choices: library.song_choices()?,
@@ -97,7 +102,7 @@ impl Live {
             daw_exes,
             roots: library.roots()?,
             installed: library.installed()?,
-            next_id: -1,
+            next_id,
             details,
         })
     }
@@ -118,6 +123,7 @@ impl Live {
     /// folders it couldn't name each file in are walked with the scanner. Asks the disk, so never on the window's
     /// thread.
     pub fn update(&mut self, changes: &Changes) -> Updated {
+        let mut done = Updated::default();
         let mut paths: Vec<String> = changes.files.clone();
         if !changes.overflowed.is_empty() {
             let found = scan::find_projects(&changes.overflowed);
@@ -130,32 +136,47 @@ impl Live {
                     size: s.size,
                     mtime: s.mtime,
                     missing: s.file_missing,
-                    reread: false,
+                    // A missing save whose file is back is read again, even unchanged.
+                    reread: s.file_missing,
                 })
                 .collect();
             let plan = scan::plan(&found, &known, &changes.overflowed, &|_| false, false);
             paths.extend(plan.read.into_iter().map(|f| f.path));
-            let gone: std::collections::HashSet<i64> = plan.gone.into_iter().collect();
+            let gone: HashSet<i64> = plan.gone.into_iter().collect();
             paths.extend(self.saves.iter().filter(|s| gone.contains(&s.id)).map(|s| s.path.clone()));
+            // Saves the scan leaves out now (an autosave, or in a folder it skips) go, as the C# scan drops them.
+            if !plan.dropped.is_empty() {
+                let dropped: HashSet<i64> = plan.dropped.into_iter().collect();
+                self.saves.retain(|s| !dropped.contains(&s.id));
+                if let Ok(mut d) = self.details.lock() {
+                    d.retain(|id, _| !dropped.contains(id));
+                }
+                done.gone += dropped.len();
+            }
         }
-        let mut done = Updated::default();
-        let samples = SampleLocator::default();
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = HashSet::new();
+        paths.retain(|p| seen.insert(case::key(p)) && scan::is_project_file(p) && !scan::is_ignored(p, &self.roots));
         let mut index: HashMap<String, usize> =
             self.saves.iter().enumerate().map(|(i, s)| (case::key(&s.path), i)).collect();
+
+        // Gone files first, so a file moved in the same moment is found below as the save it was.
+        let mut here = Vec::new();
         for path in paths {
-            if !seen.insert(case::key(&path)) || !scan::is_project_file(&path) || scan::is_ignored(&path, &self.roots) {
-                continue;
-            }
             let at = index.get(&case::key(&path)).copied();
-            let Ok(meta) = std::fs::metadata(&path) else {
-                // Gone: it stays listed, marked missing, as in the C# app.
-                if let Some(s) = at.and_then(|i| self.saves.get_mut(i)).filter(|s| !s.file_missing) {
-                    s.file_missing = true;
-                    done.gone += 1;
+            match std::fs::metadata(&path) {
+                Ok(meta) => here.push((path, at, meta)),
+                Err(_) => {
+                    // It stays listed, marked missing, as in the C# app.
+                    if let Some(s) = at.and_then(|i| self.saves.get_mut(i)).filter(|s| !s.file_missing) {
+                        s.file_missing = true;
+                        done.gone += 1;
+                    }
                 }
-                continue;
-            };
+            }
+        }
+
+        let samples = SampleLocator::default();
+        for (path, at, meta) in here {
             if let Some(s) = at.and_then(|i| self.saves.get(i))
                 && !s.file_missing
                 && s.mtime == scan::mtime(&meta)
@@ -163,27 +184,94 @@ impl Live {
             {
                 continue;
             }
-            // Still being written, or locked: the next change gets it.
+            // A new "(fixed)" copy is Fix's, waiting for Keep or Delete: left out, as when the list is loaded.
+            if at.is_none() && songs::is_fixed_copy(paths::stem(&path)) {
+                continue;
+            }
             let Some(mut detail) = read_save(&path, &self.installed, &samples) else { continue };
-            if let Some(old) = at.and_then(|i| self.saves.get(i)) {
-                keep_your_fields(&mut detail.save, old);
+            // Still being written, or locked: the save read before stays until the next change.
+            if detail.save.error.is_some()
+                && at.and_then(|i| self.saves.get(i)).is_some_and(|s| s.error.is_none() && !s.file_missing)
+            {
+                continue;
             }
-            detail.save.id = self.next_id;
-            self.next_id -= 1;
-            done.read.push(detail.save.name.clone());
-            let save = detail.save.clone();
-            if let Ok(mut d) = self.details.lock() {
-                d.insert(save.id, detail);
-            }
-            match at.and_then(|i| self.saves.get_mut(i)) {
-                Some(s) => *s = save,
-                None => {
-                    index.insert(case::key(&save.path), self.saves.len());
-                    self.saves.push(save);
+            match at.or_else(|| self.moved_from(&detail.save)) {
+                Some(i) => {
+                    // Read again, or the same file moved here: it carries on as that save, with what you gave it.
+                    let old = &self.saves[i];
+                    keep_your_fields(&mut detail.save, old);
+                    detail.save.id = old.id;
+                    if at.is_none() {
+                        index.remove(&case::key(&old.path));
+                        index.insert(case::key(&detail.save.path), i);
+                    }
+                    self.saves[i] = detail.save.clone();
                 }
+                None => {
+                    detail.save.id = self.next_id;
+                    self.next_id += 1;
+                    self.inherit(&mut detail.save);
+                    index.insert(case::key(&detail.save.path), self.saves.len());
+                    self.saves.push(detail.save.clone());
+                }
+            }
+            done.read.push(detail.save.name.clone());
+            if let Ok(mut d) = self.details.lock() {
+                d.insert(detail.save.id, detail);
             }
         }
         done
+    }
+
+    /// The save marked missing that this new file is, moved: the one missing save of the same DAW with the same file
+    /// name, size and modified time (a move keeps those). None when there's none, or more than one to choose from.
+    /// As the C# library's MovedFrom.
+    fn moved_from(&self, new: &Save) -> Option<usize> {
+        let name = case::key(&new.name);
+        let mut found = self.saves.iter().enumerate().filter(|(_, s)| {
+            s.file_missing
+                && s.daw == new.daw
+                && s.size == new.size
+                && s.mtime == new.mtime
+                && case::key(&s.name) == name
+        });
+        let first = found.next().map(|(i, _)| i);
+        if found.next().is_some() { None } else { first }
+    }
+
+    /// A new save of a song (Song_12 next to Song_11) takes over the status, rating, notes and tags you gave the song,
+    /// from the save just before it: the highest number below its own, else the last one saved. Tags the scan put on
+    /// for that save's hardware aren't carried over. As the C# library's InheritFromEarlierSave.
+    fn inherit(&self, new: &mut Save) {
+        let song = self.choices.key_of(&new.path, &new.folder, &new.daw, &new.name);
+        let root = case::key(&songs::song_folder(&new.folder, &new.name));
+        let number = songs::split(&new.name).1;
+        let inside = |folder: &str| {
+            let f = case::key(folder);
+            f == root || f.strip_prefix(root.as_str()).is_some_and(|rest| rest.starts_with(['\\', '/']))
+        };
+        let candidates: Vec<&Save> = self
+            .saves
+            .iter()
+            .filter(|s| s.daw == new.daw && s.id != new.id && inside(&s.folder))
+            .filter(|s| self.choices.key_of(&s.path, &s.folder, &s.daw, &s.name) == song)
+            .collect();
+        let before = candidates
+            .iter()
+            .filter(|s| songs::split(&s.name).1 < number)
+            .max_by_key(|s| (songs::split(&s.name).1, s.mtime));
+        let Some(from) = before.or_else(|| candidates.iter().max_by_key(|s| s.mtime)) else { return };
+        new.status = from.status.clone();
+        new.rating = from.rating;
+        new.favourite = from.favourite;
+        new.musical_key = from.musical_key.clone();
+        new.notes = from.notes.clone();
+        let hardware: HashSet<String> = from.hardware.iter().map(|h| case::to_lower(h)).collect();
+        for tag in from.tags.iter().filter(|t| !hardware.contains(t.as_str())) {
+            if !new.tags.contains(tag) {
+                new.tags.push(tag.clone());
+            }
+        }
     }
 }
 
@@ -206,6 +294,34 @@ fn keep_your_fields(new: &mut Save, old: &Save) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn live(saves: Vec<Save>) -> Live {
+        Live {
+            saves,
+            choices: SongChoices::default(),
+            tags: Vec::new(),
+            gap_months: 6,
+            asking: None,
+            daw_exes: HashMap::new(),
+            roots: Vec::new(),
+            installed: Installed::default(),
+            next_id: 100,
+            details: LiveDetails::default(),
+        }
+    }
+
+    fn save(id: i64, folder: &str, name: &str) -> Save {
+        Save {
+            id,
+            path: format!("{folder}\\{name}.flp"),
+            name: name.into(),
+            daw: "FL Studio".into(),
+            folder: folder.into(),
+            size: 1000,
+            mtime: 1_700_000_000 + id,
+            ..Save::default()
+        }
+    }
 
     #[test]
     fn the_card_says_what_changed() {
@@ -235,5 +351,35 @@ mod tests {
         keep_your_fields(&mut new, &old);
         assert_eq!((new.status.as_str(), new.rating, new.favourite, new.note_count), ("Mixing", 4, true, 512));
         assert_eq!((new.tags.len(), new.tempo), (1, Some(140.0)));
+    }
+
+    #[test]
+    fn a_new_save_takes_over_the_song_s_fields() {
+        let mut eleven = save(1, "C:\\Music\\Night", "Night_11");
+        eleven.status = "Mixing".into();
+        eleven.rating = 3;
+        eleven.tags = vec!["dark".into(), "digitakt".into()];
+        eleven.hardware = vec!["Digitakt".into()];
+        let mut ten = save(2, "C:\\Music\\Night", "Night_10");
+        ten.rating = 1;
+        let other = Save { rating: 5, ..save(3, "C:\\Music\\Night", "Day_40") };
+        let live = live(vec![eleven, ten, other]);
+        let mut twelve = save(100, "C:\\Music\\Night", "Night_12");
+        live.inherit(&mut twelve);
+        assert_eq!((twelve.status.as_str(), twelve.rating), ("Mixing", 3));
+        assert_eq!(twelve.tags, vec!["dark".to_owned()]);
+    }
+
+    #[test]
+    fn a_moved_file_is_the_missing_save_it_was() {
+        let mut old = save(7, "C:\\Music\\Old", "Night_11");
+        old.file_missing = true;
+        let live = live(vec![old.clone(), save(8, "C:\\Music\\Old", "Night_10")]);
+        let moved = Save { path: "D:\\Night_11.flp".into(), folder: "D:".into(), ..old.clone() };
+        assert_eq!(live.moved_from(&moved), Some(0));
+        assert_eq!(live.moved_from(&Save { size: 2, ..moved.clone() }), None);
+        // Two to choose from: neither.
+        let twice = self::live(vec![old.clone(), Save { id: 9, ..old }]);
+        assert_eq!(twice.moved_from(&moved), None);
     }
 }

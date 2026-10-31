@@ -167,10 +167,9 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
     let details = LiveDetails::default();
     let live_details = details.clone();
     let reader = Newest::start("Song panel", move |(asked, id): (u64, i64)| {
-        // A save read while the app was open has its details here, not in the library.
-        if id < 0 {
-            let read = Ok(live_details.lock().ok().and_then(|d| d.get(&id).cloned()));
-            let _ = weak.upgrade_in_event_loop(move |app| arrived(&app, asked, read));
+        // A save read while the app was open has its details here, newer than the library's.
+        if let Some(detail) = live_details.lock().ok().and_then(|d| d.get(&id).cloned()) {
+            let _ = weak.upgrade_in_event_loop(move |app| arrived(&app, asked, Ok(Some(detail))));
             return;
         }
         // Opened at the first pick and kept; tried again at the next pick if it couldn't be.
@@ -275,14 +274,22 @@ fn show_again(app: &AppWindow, songs: Songs) {
     data.set_daws(strings(songs.daws().iter().map(String::as_str)));
     data.set_tags(strings(songs.tags.iter().map(String::as_str)));
     let row = key.and_then(|k| songs.rows.iter().position(|r| r.song.key == k));
-    PAGE.with(|p| {
+    // Read again only when the picked song's newest save changed: a save of another song leaves its panel as it is.
+    let same = PAGE.with(|p| {
         let mut p = p.borrow_mut();
+        let old = p.picked.and_then(|i| p.songs.rows.get(i)).map(|r| &r.song.latest);
+        let new = row.and_then(|i| songs.rows.get(i)).map(|r| &r.song.latest);
+        let same = matches!((old, new), (Some(a), Some(b)) if a.id == b.id && a.mtime == b.mtime && a.size == b.size
+            && a.file_missing == b.file_missing);
         p.songs = songs;
-        // The picked song's place may have moved: picked again below, which reads its newest save again.
-        p.picked = None;
+        p.picked = if same { row } else { None };
+        same
     });
     refresh(app);
-    if let Some(row) = row {
+    if same {
+        data.set_selected(row.map_or(-1, |r| i32::try_from(r).unwrap_or(-1)));
+        fill_panel(app);
+    } else if let Some(row) = row {
         pick(app, Some(row));
         data.set_tab(tab);
     } else {
