@@ -248,7 +248,7 @@ pub fn bitwig_from_fl(
 
 /// Writes `bytes` under a temporary name beside `file`, flushes it to the disk, reads it back and checks it (the same
 /// bytes, and `problem` finds nothing wrong), then renames it into place.
-fn save_checked(file: &Path, bytes: &[u8], problem: impl Fn(&[u8]) -> Option<String>) -> Result<(), String> {
+pub(crate) fn save_checked(file: &Path, bytes: &[u8], problem: impl Fn(&[u8]) -> Option<String>) -> Result<(), String> {
     // Unique to this save, even with two converts running at once.
     static SAVES: AtomicU64 = AtomicU64::new(0);
     let name = file.file_name().ok_or("no file name")?.to_string_lossy();
