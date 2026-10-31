@@ -7,6 +7,7 @@
 //! gets an id after the library's. The song panel takes the details of either from here rather than from the library.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -49,6 +50,8 @@ pub struct Live {
     details: LiveDetails,
     /// The folders read for the last saves' samples, and when.
     samples: Option<(Instant, Arc<SampleLocator>)>,
+    /// The Sounds page's database, where missing samples are looked for last; none in tests.
+    sounds_db: Option<PathBuf>,
     /// Saves whose read failed, to try again, with how many tries are left.
     retry: HashMap<String, u8>,
 }
@@ -128,8 +131,15 @@ impl Live {
             next_id,
             details,
             samples: None,
+            sounds_db: None,
             retry: HashMap::new(),
         })
+    }
+
+    /// Looks for missing samples in the Sounds library at `sounds_db` too (rule 13).
+    pub fn with_sounds(mut self, sounds_db: PathBuf) -> Live {
+        self.sounds_db = Some(sounds_db);
+        self
     }
 
     /// The project folders, for the folder watch.
@@ -306,7 +316,7 @@ impl Live {
         match &self.samples {
             Some((at, locator)) if at.elapsed() < SAMPLES_FRESH => locator.clone(),
             _ => {
-                let locator = Arc::new(SampleLocator::default());
+                let locator = Arc::new(crate::sound_library::locator(self.sounds_db.as_deref()));
                 self.samples = Some((Instant::now(), locator.clone()));
                 locator
             }
@@ -409,6 +419,7 @@ mod tests {
             next_id: 100,
             details: LiveDetails::default(),
             samples: None,
+            sounds_db: None,
             retry: HashMap::new(),
         }
     }
