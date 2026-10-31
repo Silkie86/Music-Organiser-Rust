@@ -2,13 +2,15 @@
 //!
 //! WAV and AIFF are read here, byte for byte as the C# app's `Sounds/AudioFile.cs` reads them, with the notes some
 //! sample packs keep inside them (an ACID chunk's tempo and loop flag, a sampler chunk's root note). MP3, FLAC, M4A,
-//! OGG and AAC, resampling and playback come next.
+//! OGG and AAC are decoded with symphonia, on every system. Resampling and playback come next.
 //!
 //! Every read is bounded: a damaged or cut-short file gives an error or the part that's there, never a crash.
 
+mod other;
 mod read;
 mod write;
 
+pub use other::OTHER_EXTENSIONS;
 pub use read::{MAX_SECONDS, can_read_from, read, read_from};
 pub use write::write_wav;
 

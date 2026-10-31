@@ -11,5 +11,6 @@ yet** or **bug**.
 | AIFF `COMM` chunk shorter than 18 bytes | Stopped with an out-of-range error. | Says the chunk is cut short. | Same result, clearer |
 | AIFF with a bit depth of 0 | Divided by zero. | Says the bit depth isn't supported. | Same result, clearer |
 | Writing a WAV (kit export) | Wrote straight to the final name. | Writes beside it as `.wav.part`, then renames; a failed write removes the `.part` file, so a stopped export leaves no half file. | Better |
-| MP3, FLAC, M4A, OGG, AAC | Windows' decoders. | Not yet: symphonia comes in the next part. | Not yet |
+| MP3, FLAC, M4A, OGG, AAC | Windows' decoders (Media Foundation), Windows only. | symphonia, on every system. Lengths can differ by an encoder's padding (a few ms), as each decoder trims it its own way. | Better (Mac and Linux read them) |
+| WMA | Windows' decoders. | Not read (no Rust decoder). | Not yet |
 | A written WAV whose samples take an odd number of bytes (mono 24-bit, odd length) | No pad byte after the data, which RIFF requires. | Pads it, as RIFF says. | Better |

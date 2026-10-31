@@ -169,7 +169,8 @@ fn reads_aiff_and_aifc() {
 #[test]
 fn says_what_it_cannot_read() {
     let e = |name: &str, bytes: &[u8]| read(&fixture(name, bytes), 60.0).unwrap_err();
-    assert!(matches!(e("x.mp3", b"ID3"), AudioError::NotSupported(_)));
+    assert!(matches!(e("x.wma", b"0&"), AudioError::NotSupported(_)));
+    assert!(!e("x.mp3", b"not an mp3 at all").to_string().is_empty());
     assert!(e("text.wav", b"hello there").to_string().contains("Not a WAV or AIFF"));
     assert!(e("empty.wav", b"").to_string().contains("Not a WAV or AIFF"));
     assert!(e("no-data.wav", &riff(&[fmt(1, 1, 10, 16)])).to_string().contains("no audio data"));
@@ -214,4 +215,29 @@ fn an_odd_length_wav_is_padded() {
     assert_eq!(bytes.len(), 44 + 3 + 1);
     assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize, bytes.len() - 8);
     assert_eq!(read(&path, 60.0).unwrap().channels, [vec![(0.5f32 * 8_388_607.0).round_ties_even() / 8_388_608.0]]);
+}
+
+/// The tones in tests/fixtures, made with ffmpeg (see its README).
+fn tone(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)
+}
+
+#[test]
+fn decodes_mp3_flac_m4a_ogg_and_aac() {
+    for name in ["tone.flac", "tone.mp3", "tone.m4a", "tone.ogg", "tone.aac"] {
+        let a = read(&tone(name), 60.0).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(a.sample_rate, 22050, "{name}");
+        assert_eq!(a.channels.len(), 2, "{name}");
+        // Half a second, give or take an encoder's padding.
+        assert!((a.seconds() - 0.5).abs() < 0.06, "{name}: {}", a.seconds());
+        assert!((a.file_seconds - 0.5).abs() < 0.06, "{name}: {}", a.file_seconds);
+        // A tone, not silence (ffmpeg makes it at an eighth of full level).
+        let peak = a.mono().iter().fold(0f32, |m, s| m.max(s.abs()));
+        assert!(peak > 0.05, "{name}: {peak}");
+    }
+    // Only so long, and the whole length still known.
+    let a = read(&tone("tone.flac"), 0.1).unwrap();
+    assert_eq!(a.len(), 2205);
+    assert_eq!(a.file_seconds, 0.5);
+    assert!(read_from(&tone("tone.mp3"), 60.0, 10).unwrap_err().to_string().contains("only read from the start"));
 }

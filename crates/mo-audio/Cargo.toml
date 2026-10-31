@@ -9,3 +9,5 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+# MP3, FLAC, M4A (AAC), OGG (Vorbis) and AAC, decoded in Rust on every system (the C# app needed Windows for these).
+symphonia = { version = "0.6", default-features = false, features = ["mp3", "flac", "isomp4", "aac", "ogg", "vorbis"] }
