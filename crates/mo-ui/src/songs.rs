@@ -12,14 +12,15 @@ use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
 use mo_app::log;
 use mo_app::shell;
-use mo_app::song_panel::{self as panel, SaveLine as PanelSaveLine, Tab};
+use mo_app::song_panel::{self as panel, Go, SaveLine as PanelSaveLine, Tab};
 use mo_app::songs::{Entry, Filters, SongRow, Songs, View};
 use mo_library::songs::DEFAULT_RUN_GAP_MONTHS;
 use mo_library::{Library, STATUSES, SaveDetail};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel};
 
 use crate::{
-    AppWindow, CountLine, DetailPair, PanelSong, PluginLine, SampleLine, SaveLine, SongLine, SongsData, YearStart,
+    AppWindow, CountLine, DetailPair, HealthLine, PanelSong, PluginLine, SampleLine, SaveLine, SongLine, SongsData,
+    YearStart,
 };
 
 /// The page's rows, filters and what they let through, kept on the window's thread.
@@ -35,6 +36,8 @@ struct Page {
     asked: u64,
     /// The picked song's newest save, as the library records it, once read.
     detail: Option<SaveDetail>,
+    /// Where each line of the Health strip's buttons goes, as shown.
+    health: Vec<Go>,
 }
 
 impl Default for Page {
@@ -47,6 +50,7 @@ impl Default for Page {
             picked: None,
             asked: 0,
             detail: None,
+            health: Vec::new(),
         }
     }
 }
@@ -136,6 +140,16 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
         }
     });
     let weak = app.as_weak();
+    data.on_health_go(move |i| {
+        let Some(app) = weak.upgrade() else { return };
+        let go = PAGE.with(|p| p.borrow().health.get(usize::try_from(i).ok()?).copied());
+        match go {
+            Some(Go::Tab(t)) => app.global::<SongsData>().set_tab(t.index() as i32),
+            Some(Go::Song(row)) => show_song(&app, row),
+            _ => {}
+        }
+    });
+    let weak = app.as_weak();
     data.on_close_panel(move || {
         if let Some(app) = weak.upgrade() {
             pick(&app, None);
@@ -203,6 +217,28 @@ fn change(weak: &slint::Weak<AppWindow>, f: impl FnOnce(&mut Filters)) {
     let Some(app) = weak.upgrade() else { return };
     PAGE.with(|p| f(&mut p.borrow_mut().filters));
     refresh(&app);
+}
+
+/// Picks the song at `row` and brings it into view in the list, clearing the filters first when they hide it.
+fn show_song(app: &AppWindow, row: usize) {
+    let hidden = PAGE.with(|p| !p.borrow().view.entries.contains(&Entry::Song(row)));
+    if hidden {
+        PAGE.with(|p| p.borrow_mut().filters = Filters::default());
+        refresh(app);
+    }
+    let data = app.global::<SongsData>();
+    let (heading, song) = (data.get_heading_height(), data.get_song_height());
+    let y = PAGE.with(|p| {
+        let p = p.borrow();
+        let at = p.view.entries.iter().position(|e| *e == Entry::Song(row))?;
+        let before = p.view.entries.get(..at).unwrap_or_default();
+        Some(before.iter().map(|e| if matches!(e, Entry::Heading(_)) { heading } else { song }).sum::<f32>())
+    });
+    if let Some(y) = y {
+        data.set_show_y(y);
+        data.set_show_ask(data.get_show_ask().wrapping_add(1));
+    }
+    pick(app, Some(row));
 }
 
 /// Works out what the rows and filters let through and shows it.
@@ -291,6 +327,7 @@ fn pick(app: &AppWindow, row: Option<usize>) {
     data.set_selected(row.map_or(-1, |r| i32::try_from(r).unwrap_or(-1)));
     let Some((asked, id)) = id else { return };
     data.set_tab(Tab::Overview.index() as i32);
+    data.set_health_open(false);
     data.set_detail_message("Reading…".into());
     fill_panel(app);
     READER.with(|slot| {
@@ -349,12 +386,22 @@ fn fill_panel(app: &AppWindow) {
     fill_detail(app);
 }
 
-/// The parts of the panel that come from the newest save's record: empty until it has been read.
+/// The parts of the panel that come from the newest save's record: what the list knows until it has been read.
 fn fill_detail(app: &AppWindow) {
     let data = app.global::<SongsData>();
     PAGE.with(|p| {
-        let p = p.borrow();
-        let Some(r) = p.picked.and_then(|i| p.songs.rows.get(i)) else { return };
+        let mut p = p.borrow_mut();
+        let Some(picked) = p.picked else { return };
+        let health = panel::health(&p.songs, picked, p.detail.as_ref());
+        p.health = health.iter().map(|h| h.go).collect();
+        data.set_health_summary(panel::health_summary(&health).into());
+        data.set_health(model(health.into_iter().map(|h| HealthLine {
+            text: h.text.into(),
+            why: h.why.into(),
+            action: h.go.label().into(),
+        })));
+        let p = &*p;
+        let Some(r) = p.songs.rows.get(picked) else { return };
         let detail = p.detail.as_ref();
         data.set_counts(model(panel::counts(r, detail).into_iter().map(|c| CountLine {
             text: c.text.into(),

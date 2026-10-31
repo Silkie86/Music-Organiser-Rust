@@ -678,12 +678,38 @@ fn song_name(key_: &str, ordered: &[&Save]) -> String {
 /// same name in two folders that hold copies of the same file. Pairs you said are different aren't asked again. Newest
 /// first, at most `most`.
 pub fn doubts(songs: &[Song], choices: &SongChoices, across_folders: bool, most: usize) -> Vec<SongDoubt> {
-    /// A doubt before its songs are copied out: the two songs by place in `songs`, or for a marked save, the song and
-    /// the save's place in it.
-    enum Pair {
-        Songs(usize, usize),
-        Save(usize, usize),
-    }
+    doubt_pairs(songs, choices, across_folders, most)
+        .into_iter()
+        .filter_map(|(pair, why)| match pair {
+            Pair::Songs(i, j) => {
+                Some(SongDoubt { a: songs.get(i)?.clone(), b: songs.get(j)?.clone(), why, one_save: false })
+            }
+            Pair::Save(gi, si) => {
+                let g = songs.get(gi)?;
+                let save = g.saves().nth(si)?;
+                let b = Song {
+                    name: save.name.clone(),
+                    latest: save.clone(),
+                    older: Vec::new(),
+                    key: split_key(&save.path),
+                    copies: Vec::new(),
+                };
+                Some(SongDoubt { a: g.clone(), b, why, one_save: true })
+            }
+        })
+        .collect()
+}
+
+/// A doubt by place, without copying its songs: the two songs by place in the list (the newer first), or for a marked
+/// save, the song and the save's place in [`Song::saves`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pair {
+    Songs(usize, usize),
+    Save(usize, usize),
+}
+
+/// [`doubts`] by place: the same questions, in the same order, with why each is asked.
+pub fn doubt_pairs(songs: &[Song], choices: &SongChoices, across_folders: bool, most: usize) -> Vec<(Pair, String)> {
     // Each song's folder and skeleton, worked out once rather than for every pair.
     let folders: Vec<String> =
         songs.iter().map(|g| case::to_lower(&song_folder(&g.latest.folder, &g.latest.name))).collect();
@@ -822,27 +848,7 @@ pub fn doubts(songs: &[Song], choices: &SongChoices, across_folders: bool, most:
     }
     found.sort_by_key(|(newest, _, _)| std::cmp::Reverse(*newest));
     found.truncate(most);
-    // Only the doubts kept are copied out.
-    found
-        .into_iter()
-        .filter_map(|(_, pair, why)| match pair {
-            Pair::Songs(i, j) => {
-                Some(SongDoubt { a: songs.get(i)?.clone(), b: songs.get(j)?.clone(), why, one_save: false })
-            }
-            Pair::Save(gi, si) => {
-                let g = songs.get(gi)?;
-                let save = g.saves().nth(si)?;
-                let b = Song {
-                    name: save.name.clone(),
-                    latest: save.clone(),
-                    older: Vec::new(),
-                    key: split_key(&save.path),
-                    copies: Vec::new(),
-                };
-                Some(SongDoubt { a: g.clone(), b, why, one_save: true })
-            }
-        })
-        .collect()
+    found.into_iter().map(|(_, pair, why)| (pair, why)).collect()
 }
 
 /// Items grouped by a key, each group in the order its first item comes, the groups in that order too.

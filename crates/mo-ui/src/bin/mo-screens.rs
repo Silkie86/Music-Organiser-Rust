@@ -61,6 +61,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         mo_ui::songs::show_picked(&app, 0, sample_detail(), tab);
         shots.push((format!("song-panel-{}.png", slug(tab.name())), capture(&window)));
     }
+    // A song with things to look at, its Health strip open.
+    mo_ui::songs::show_picked(&app, 1, sample_detail(), Tab::Overview);
+    app.global::<mo_ui::SongsData>().set_health_open(true);
+    shots.push(("song-panel-health.png".into(), capture(&window)));
+    app.global::<mo_ui::SongsData>().set_health_open(false);
     app.global::<mo_ui::SongsData>().invoke_close_panel();
 
     // Activity cards: one going, one that can't say how far it is yet, one done and one failed, plus one put away.
@@ -126,6 +131,7 @@ fn sample_songs() -> mo_app::songs::Songs {
             status: "Mixing".into(),
             ..save("Glass Harbour", "Bitwig Studio", 4)
         },
+        save("Glass Harbor", "Bitwig Studio", 300),
         Save { tempo: Some(92.5), musical_key: "D major".into(), rating: 3, ..save("Slow Orbit v3", "Studio One", 12) },
         save("Slow Orbit v2", "Studio One", 20),
         Save { tempo: Some(128.0), missing_plugins: 1, ..save("Copper Lines", "FL Studio", 70) },
@@ -143,7 +149,7 @@ fn sample_songs() -> mo_app::songs::Songs {
     ];
     saves.sort_by_key(|s| std::cmp::Reverse(s.modified));
     let tags = vec!["dark".into(), "live set".into()];
-    mo_app::songs::Songs::from_saves(&saves, &mo_library::SongChoices::default(), tags, 3)
+    mo_app::songs::Songs::from_saves(&saves, &mo_library::SongChoices::default(), tags, 3, Some(false))
 }
 
 /// A made-up record for the first sample song's newest save.
