@@ -111,8 +111,11 @@ fn cases() -> Vec<Case> {
     ]
 }
 
-fn case_json(c: &Case) -> Value {
+/// A case for the C# helper; `rust_model` is the model Rust trained, saved as it would go in `sounds.db`, for C# to
+/// read back and judge the probes with.
+fn case_json(c: &Case, rust_model: Option<&str>) -> Value {
     json!({
+        "RustModel": rust_model,
         "Space": c.space,
         "Options": {
             "Epochs": c.options.epochs,
@@ -132,26 +135,27 @@ const MODEL_FIELDS: [&str; 8] = ["Classes", "Mean", "Scale", "W", "B", "Space", 
 /// Writes the cases into `dir` (the twin's own new folder), has both apps train on them, and gives every difference.
 pub fn compare(helper: &Path, dir: &Path) -> Result<Vec<String>, String> {
     let cases = cases();
+    let trained: Vec<_> = cases.iter().map(|c| train(&c.examples, c.space, &c.options)).collect();
     let mut files = Vec::new();
-    for (i, c) in cases.iter().enumerate() {
+    for (i, (c, rust)) in cases.iter().zip(&trained).enumerate() {
         let path: PathBuf = dir.join(format!("classify-{i}.json"));
-        std::fs::write(&path, case_json(c).to_string())
+        let saved = rust.as_ref().ok().and_then(Classifier::to_json);
+        std::fs::write(&path, case_json(c, saved.as_deref()).to_string())
             .map_err(|e| format!("Couldn't write a classifier case: {e}"))?;
         files.push(path);
     }
     let cs = crate::run_helper_with(helper, &["--classify"], &files)?;
     let mut differences = Vec::new();
-    for (c, file) in cases.iter().zip(&files) {
+    for ((c, file), rust) in cases.iter().zip(&files).zip(trained) {
         let name = c.name;
         let Some(cs) = cs.get(file.to_string_lossy().as_ref()) else {
             differences.push(format!("classifier, {name}: no C# answer"));
             continue;
         };
-        if let Some(e) = cs.get("error") {
+        if let Some(e) = cs.get("error").or_else(|| cs.get("error_more")) {
             differences.push(format!("classifier, {name}: the C# helper failed: {e}"));
             continue;
         }
-        let rust = train(&c.examples, c.space, &c.options);
         let (cs_model, rust_model) = match (cs.get("refused").and_then(Value::as_str), rust) {
             (Some(cs_why), Err(rust_why)) => {
                 if cs_why != rust_why.to_string() {
@@ -178,6 +182,23 @@ pub fn compare(helper: &Path, dir: &Path) -> Result<Vec<String>, String> {
                 differences.push(format!("classifier, {name}: {field} differs: C# {}, Rust {}", short(a), short(b)));
             }
         }
+        // The model Rust trained, saved and read back by the C# app as it would be from sounds.db, judging the probes.
+        match cs.get("rust_model_predictions").and_then(Value::as_array) {
+            None => differences.push(format!("classifier, {name}: C# couldn't read the model Rust saved")),
+            Some(cs_read) => {
+                for (i, probe) in c.probes.iter().enumerate() {
+                    let rust_says = says(&rust_model, probe);
+                    let cs_one = cs_read.get(i).unwrap_or(&Value::Null);
+                    if !same(cs_one, &rust_says) {
+                        differences.push(format!(
+                            "classifier, {name}: probe {i} with the Rust model: C# {}, Rust {}",
+                            short(cs_one),
+                            short(&rust_says)
+                        ));
+                    }
+                }
+            }
+        }
         // The model C# trained, read as the Rust app reads it from sounds.db, judging the same probes.
         let Some(read) = Classifier::from_json(Some(cs_model)) else {
             differences.push(format!("classifier, {name}: Rust couldn't read the C# model"));
@@ -185,8 +206,7 @@ pub fn compare(helper: &Path, dir: &Path) -> Result<Vec<String>, String> {
         };
         let cs_says = cs.get("predictions").and_then(Value::as_array).cloned().unwrap_or_default();
         for (i, probe) in c.probes.iter().enumerate() {
-            let rust_says: Value =
-                read.predict(probe).into_iter().map(|(label, p)| json!({ "Label": label, "P": p })).collect();
+            let rust_says = says(&read, probe);
             let cs_one = cs_says.get(i).unwrap_or(&Value::Null);
             if !same(cs_one, &rust_says) {
                 differences.push(format!(
@@ -198,6 +218,11 @@ pub fn compare(helper: &Path, dir: &Path) -> Result<Vec<String>, String> {
         }
     }
     Ok(differences)
+}
+
+/// What `model` says of `probe`, in the helper's shape.
+fn says(model: &Classifier, probe: &[f32]) -> Value {
+    model.predict(probe).into_iter().map(|(label, p)| json!({ "Label": label, "P": p })).collect()
 }
 
 /// A value for a message, cut short: weights run to hundreds of numbers.

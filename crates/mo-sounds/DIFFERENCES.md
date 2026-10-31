@@ -39,3 +39,4 @@ made-up examples, compares every weight, then has Rust read the C# model and jud
 | Training on vectors of different lengths | Stopped with an error, or quietly used the first part of the longer ones. | Refused with a clear reason. | Better (never happens: one space at a time) |
 | A saved model whose sizes don't fit together | Read, then failed when used. | Treated as no model. | Better |
 | When it was trained | A local time. | Kept as the text .NET wrote, and written the same way. | Same |
+| A model with a number that isn't finite (from a sound whose analysis went wrong) | Its writer refused, so the old model stayed. | Not saved, so the old model stays. | Same |

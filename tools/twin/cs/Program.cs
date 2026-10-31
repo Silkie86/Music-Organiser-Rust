@@ -86,7 +86,8 @@ static JsonObject DumpSound(string path)
 }
 
 // The C# app's type classifier trained on one case: the model as sounds.db would hold it (text), and what it says of
-// each probe. A case it won't train on gives the reason.
+// each probe, then what the model Rust trained says of them once C# has read it. A case it won't train on gives the
+// reason.
 static JsonObject DumpClassify(string path)
 {
     var o = new JsonObject { ["file"] = path };
@@ -110,6 +111,15 @@ static JsonObject DumpClassify(string path)
             predictions.Add(new JsonArray(model.Predict(Vector(p))
                 .Select(t => (JsonNode)new JsonObject { ["Label"] = t.Label, ["P"] = t.P }).ToArray()));
         o["predictions"] = predictions;
+        // The model the Rust app trained, read back as the C# app reads it from sounds.db.
+        if (MusicOrganiser.Core.Sounds.SoundClassifier.FromJson(c["RustModel"]?.GetValue<string>()) is { } rust)
+        {
+            var fromRust = new JsonArray();
+            foreach (var p in c["Probes"]!.AsArray())
+                fromRust.Add(new JsonArray(rust.Predict(Vector(p))
+                    .Select(t => (JsonNode)new JsonObject { ["Label"] = t.Label, ["P"] = t.P }).ToArray()));
+            o["rust_model_predictions"] = fromRust;
+        }
     }
     catch (Exception e) { o["error"] = $"{e.GetType().Name}: {e.Message}"; }
     return o;

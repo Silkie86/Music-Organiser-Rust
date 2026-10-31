@@ -70,7 +70,7 @@ impl std::fmt::Display for TrainError {
 impl std::error::Error for TrainError {}
 
 /// A trained classifier, in the shape the C# app saves it (JSON with these names in `sounds.db`).
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
 pub struct Classifier {
     pub classes: Vec<String>,
@@ -91,6 +91,24 @@ pub struct Classifier {
     pub trained: String,
 }
 
+/// As C#'s defaults: a model with no `Space` was trained on features, and a new one was trained now (an empty time
+/// would make the C# app unable to read it).
+impl Default for Classifier {
+    fn default() -> Classifier {
+        Classifier {
+            classes: Vec::new(),
+            mean: Vec::new(),
+            scale: Vec::new(),
+            w: Vec::new(),
+            b: Vec::new(),
+            space: "features".to_owned(),
+            examples: 0,
+            held_out_accuracy: None,
+            trained: dotnet_now(),
+        }
+    }
+}
+
 impl Classifier {
     /// Reads a saved model; `None` when there's none or it can't be read. A model whose sizes don't fit together is
     /// treated as unreadable (the C# app would have stopped with an error when using it).
@@ -103,9 +121,20 @@ impl Classifier {
         fits.then_some(c)
     }
 
-    pub fn to_json(&self) -> String {
-        // Every field is a plain list, number or text, so this can't fail.
-        serde_json::to_string(self).unwrap_or_default()
+    /// The model as JSON, as the C# app saves it; `None` when a number in it isn't finite (from a sound whose
+    /// analysis went wrong). JSON has no such numbers, so neither app could read it back: the old model is kept
+    /// instead, as the C# app did when its writer refused.
+    pub fn to_json(&self) -> Option<String> {
+        let finite = |v: &[f32]| v.iter().all(|x| x.is_finite());
+        let ok = finite(&self.mean)
+            && finite(&self.scale)
+            && finite(&self.w)
+            && finite(&self.b)
+            && self.held_out_accuracy.is_none_or(f64::is_finite);
+        if !ok {
+            return None;
+        }
+        serde_json::to_string(self).ok()
     }
 
     fn dim(&self) -> usize {
@@ -204,16 +233,16 @@ pub fn train(all: &[Example], space: &str, o: &Options) -> Result<Classifier, Tr
     let data: Vec<&Example> = order.into_iter().map(|i| kept[i]).collect();
 
     let Some(first) = data.first() else { return Err(TrainError::Nothing) };
-    if data.iter().any(|e| e.x.len() != first.x.len()) {
-        return Err(TrainError::MixedLengths);
-    }
-    let mut classes: Vec<String> = data.iter().map(|e| e.label.clone()).collect();
+    // Every type with a kept example (all of them, unless the cap is 0, when nothing is kept).
+    let mut classes: Vec<String> = groups.iter().map(|g| g.0.to_owned()).collect();
     // C#'s `Order()` on text: by the current culture's rules. Labels are type names (plain letters), where that is
     // ordinal order once case is set aside; ties in case go lower-case first, as .NET's invariant culture does.
-    classes.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()).then_with(|| b.cmp(a)));
-    classes.dedup();
+    classes.sort_by_cached_key(|c| (c.to_lowercase(), std::cmp::Reverse(c.clone())));
     if classes.len() < 2 {
         return Err(TrainError::OneKind);
+    }
+    if data.iter().any(|e| e.x.len() != first.x.len()) {
+        return Err(TrainError::MixedLengths);
     }
 
     let (model, accuracy) = rayon::join(
@@ -471,8 +500,16 @@ mod tests {
         assert_eq!(p[0].0, "Kick");
         let expect = 1.0 / (1.0 + (-1.75f64).exp());
         assert!((p[0].1 - expect).abs() < 1e-12);
-        assert_eq!(Classifier::from_json(Some(&m.to_json())), Some(m.clone()));
-        assert!(m.to_json().contains("\"HeldOutAccuracy\":null"));
+        let back = m.to_json().unwrap();
+        assert_eq!(Classifier::from_json(Some(&back)), Some(m.clone()));
+        assert!(back.contains("\"HeldOutAccuracy\":null"));
+        // No Space: trained on features, as C# reads it.
+        assert_eq!(
+            Classifier::from_json(Some(&json.replace("\"Space\":\"features\",", ""))).unwrap().space,
+            "features"
+        );
+        // A number that isn't finite can't be saved.
+        assert_eq!(Classifier { w: vec![f32::NAN, 0.0, 0.0, 0.0], ..m }.to_json(), None);
         assert!(Classifier::from_json(None).is_none());
         assert!(Classifier::from_json(Some("")).is_none());
         assert!(Classifier::from_json(Some("not json")).is_none());

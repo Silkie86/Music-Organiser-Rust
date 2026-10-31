@@ -114,6 +114,13 @@ mod tests {
     }
 
     #[test]
+    fn it_gives_the_numbers_dotnet_gives() {
+        // `new Random(0).Next()`, three times, in .NET.
+        let mut r = DotnetRandom::new(0);
+        assert_eq!([r.next(), r.next(), r.next()], [1_559_595_546, 1_755_192_844, 1_649_316_166]);
+    }
+
+    #[test]
     fn a_shuffle_keeps_every_value() {
         let mut v: Vec<usize> = (0..100).collect();
         DotnetRandom::new(7).shuffle(&mut v);
