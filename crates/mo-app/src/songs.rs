@@ -228,18 +228,7 @@ pub fn plural(n: usize, what: &str) -> String {
     if n == 1 { format!("1 {what}") } else { format!("{} {what}s", thousands(n)) }
 }
 
-/// "16,000".
-pub fn thousands(n: usize) -> String {
-    let digits = n.to_string();
-    let mut out = String::new();
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
-}
+pub use mo_library::songs::thousands;
 
 /// The list's time headings: "This week", "This month", "Earlier in 2026", then one per year.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -284,6 +273,8 @@ pub struct Songs {
     pub rows: Vec<SongRow>,
     /// How many saves the rows hold, leaving out the same file found again elsewhere.
     pub saves: usize,
+    /// How many saves are the same file found again elsewhere (a copied project folder): hidden, never deleted.
+    pub copies: usize,
     /// The tags in use, for the Tag chip.
     pub tags: Vec<String>,
     /// The program picked in Settings for each DAW that has one (the C# app's `daw_exe:` settings), for Open.
@@ -354,7 +345,8 @@ impl Songs {
             })
             .collect();
         let saves = rows.iter().map(|r| r.song.save_count()).sum();
-        Songs { rows, saves, tags, daw_exes: HashMap::new(), doubts }
+        let copies = rows.iter().map(|r| r.song.copies.len()).sum();
+        Songs { rows, saves, copies, tags, daw_exes: HashMap::new(), doubts }
     }
 
     /// The questions about the song at `row`.
@@ -390,8 +382,14 @@ impl Songs {
         let all = self.rows.len();
         let mut count =
             if shown == all { plural(all, "song") } else { format!("{} of {}", thousands(shown), plural(all, "song")) };
-        if self.saves > all {
-            count.push_str(&format!(" ({} saves)", thousands(self.saves)));
+        // The C# app counts a copied folder's files again: saying how many are hidden keeps the two counts adding up.
+        match (self.saves > all, self.copies) {
+            (true, 0) => count.push_str(&format!(" ({} saves)", thousands(self.saves))),
+            (true, c) => {
+                count.push_str(&format!(" ({} saves, {} hidden as copies)", thousands(self.saves), thousands(c)))
+            }
+            (false, 0) => {}
+            (false, c) => count.push_str(&format!(" ({} hidden as copies)", thousands(c))),
         }
         view.count = count;
         view.shown = shown;
@@ -513,6 +511,8 @@ mod tests {
         assert_eq!(lines, ["# This week", "Didums", "# Earlier in 2026", "Night", "# 2019", "Old", "# 2017", "Older"]);
         assert_eq!(v.years, [(2026, 0), (2019, 4), (2017, 6)]);
         assert_eq!(v.count, "4 songs (5 saves)");
+        let copied = Songs { copies: 2, ..s.clone() };
+        assert_eq!(copied.view(&Filters::default(), now).count, "4 songs (5 saves, 2 hidden as copies)");
     }
 
     #[test]

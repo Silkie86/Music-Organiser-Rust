@@ -5,15 +5,19 @@
 //! ```text
 //! twin run --cs <helper> <folder or file>... [--report <file>] [--expect <file>] [--write-expect <file>]
 //! twin dump <file>
+//! twin songs --cs <helper> <library.db> [--report <file>]
 //! ```
 //!
 //! `run` prints a summary that holds only counts and field names (no names, paths or notes from the songs), so it's safe
 //! to paste into a conversation; every difference, file by file, goes in the report. `--expect` checks the differences
 //! against a list of the ones already judged and fails on any new one (CI uses it on the test files); `--write-expect`
-//! writes that list. `dump` prints what the Rust readers find in one file.
+//! writes that list. `dump` prints what the Rust readers find in one file. `songs` groups the library into songs both
+//! ways and sorts the differences by cause (see `songs.rs`); both sides read one copy of the library, made beside the
+//! helper and deleted afterwards.
 
 mod compare;
 mod rust_side;
+mod songs;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Write};
@@ -21,6 +25,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
 use mo_formats::midi::smf;
+use mo_library::songs::thousands;
 use rayon::prelude::*;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -33,6 +38,7 @@ fn main() -> ExitCode {
             Ok(true)
         }
         Some("run") => run(&args[1..]),
+        Some("songs") => run_songs(&args[1..]),
         _ => Err(USAGE.to_owned()),
     };
     match result {
@@ -47,7 +53,8 @@ fn main() -> ExitCode {
 
 const USAGE: &str =
     "twin run --cs <helper> <folder or file>... [--report <file>] [--expect <file>] [--write-expect <file>]
-twin dump <file>";
+twin dump <file>
+twin songs --cs <helper> <library.db> [--report <file>]";
 
 /// How many files are read (by both apps) before their readings are compared and let go.
 const CHUNK: usize = 256;
@@ -89,6 +96,20 @@ fn options(args: &[String]) -> Result<Options, String> {
     Ok(o)
 }
 
+/// Runs the songs twin. `Ok(false)` when a difference isn't one the copied folders explain.
+fn run_songs(args: &[String]) -> Result<bool, String> {
+    let o = options(args)?;
+    let (Some(helper), [library]) = (&o.cs, o.inputs.as_slice()) else { return Err(USAGE.to_owned()) };
+    let copy = helper.with_file_name("library-copy.db");
+    let outcome = songs::run(helper, library, &copy)?;
+    print!("{}", outcome.summary);
+    match &o.report {
+        Some(path) => std::fs::write(path, &outcome.report).map_err(|e| format!("Couldn't write the report: {e}"))?,
+        None => print!("{}", outcome.report),
+    }
+    Ok(outcome.same)
+}
+
 /// Runs the twin test. `Ok(false)` when `--expect` found differences not on its list (or some gone from it).
 fn run(args: &[String]) -> Result<bool, String> {
     let o = options(args)?;
@@ -121,7 +142,11 @@ fn run(args: &[String]) -> Result<bool, String> {
         .build()
         .map_err(|e| format!("Couldn't start the threads that read: {e}"))?;
     // A few hundred files at a time, so a big library's readings never all sit in memory at once.
+    let mut done = 0;
     for chunk in files.chunks(CHUNK) {
+        // How far it's got, on the screen only (stderr): the summary stays as it was.
+        eprint!("\r  {} of {} files read...", thousands(done), thousands(files.len()));
+        done += chunk.len();
         // The C# helper reads in its own process while the Rust readers read here, on every core.
         let cs_files = chunk.to_vec();
         let helper = helper.clone();
@@ -163,6 +188,7 @@ fn run(args: &[String]) -> Result<bool, String> {
             None => report += &part,
         }
     }
+    eprintln!("\r  {} of {} files read.   ", thousands(done), thousands(files.len()));
     if let Some(mut f) = report_file {
         f.flush().map_err(|e| format!("Couldn't write the report: {e}"))?;
     }

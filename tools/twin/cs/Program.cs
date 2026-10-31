@@ -27,6 +27,30 @@ if (args is ["--roots", var db])
     return;
 }
 
+// `twin-cs --songs <copy>`: how the C# app's Projects page groups the library into songs, one save a line
+// ({"path", "key", "latest"}). The C# library opens its database to write (it adds tables and columns it's missing),
+// so it's given a copy of the library: the Rust side makes it (and reads the same one) and deletes it afterwards.
+if (args is ["--songs", var copy])
+{
+    try
+    {
+        using var lib = new MusicOrganiser.Core.Library.LibraryDb(copy);
+        // As ProjectsViewModel.Load: Fix's copies waiting for Keep are left out.
+        var pending = lib.PendingFixes();
+        var projects = lib.Projects().Where(p => !pending.Contains(p.Path)).ToList();
+        using var songs = new StreamWriter(Console.OpenStandardOutput(), new System.Text.UTF8Encoding(false));
+        foreach (var g in MusicOrganiser.Core.Library.SongVersions.Group(projects, lib.SongChoices()))
+            foreach (var p in g.Older.Prepend(g.Latest))
+                songs.WriteLine(new JsonObject { ["path"] = p.Path, ["key"] = g.Key, ["latest"] = ReferenceEquals(p, g.Latest) }.ToJsonString());
+    }
+    finally
+    {
+        // Lets go of the copy so the Rust side can delete it.
+        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+    }
+    return;
+}
+
 // The Rust side writes the paths as UTF-8; read them so, not in the console's code page.
 var files = new List<string>();
 using (var input = new StreamReader(Console.OpenStandardInput(), new System.Text.UTF8Encoding(false)))

@@ -141,6 +141,27 @@ impl Library {
         Ok(Library { conn, path: path.to_owned(), tables, summaries, columns })
     }
 
+    /// Copies the library, as it is at this moment, to a new file at `to` (which mustn't exist yet). The copy is one
+    /// consistent snapshot, even while the C# app is saving; the library itself is only read.
+    pub fn copy_to(&self, to: &Path) -> Result<(), LibraryError> {
+        let error = |why: String| LibraryError::Open { path: to.to_owned(), why };
+        if to.exists() {
+            return Err(error("a file is already there".into()));
+        }
+        let mut copy = Connection::open(to).map_err(|e| error(e.to_string()))?;
+        let done = rusqlite::backup::Backup::new(&self.conn, &mut copy)
+            .and_then(|b| b.run_to_completion(1024, Duration::ZERO, None));
+        drop(copy);
+        if let Err(e) = done {
+            // A half-made copy holds the library's names and paths: it doesn't stay.
+            for f in [to.to_owned(), to.with_extension("db-journal")] {
+                let _ = std::fs::remove_file(f);
+            }
+            return Err(error(e.to_string()));
+        }
+        Ok(())
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }
