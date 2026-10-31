@@ -57,4 +57,7 @@ This repo is the Rust rebuild of the C# app. The plan, the inventory of today's 
 - Before pushing (what CI runs): `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
   `cargo test --workspace`; and the same with `--manifest-path tools/galaxycheck/Cargo.toml` when the galaxy check
   or `mo-app` changes (the galaxy check is a workspace of its own).
+- CI on a pull request only tests the crates it changes and clippy-checks the crates that use them
+  (`tools/dev/ci_scope.py`); pushes to `main` check everything. Before an ultracode review, start a full run by hand
+  (Actions, CI, Run workflow on `main`) and make sure it's green.
 - Write for Solomon in plain words: Solomon is new to Rust.

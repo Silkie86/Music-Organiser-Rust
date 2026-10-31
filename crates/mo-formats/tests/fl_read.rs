@@ -253,6 +253,16 @@ fn says_when_a_plugin_gave_fl_nothing_to_save() {
 }
 
 #[test]
+fn the_day_a_project_was_made_is_cut_to_the_millisecond_as_the_c_sharp_app_cuts_it() {
+    // 1.2346 seconds after midnight: the C# app (.NET's AddDays) shows .234, not .235.
+    let mut time = (45_000.0f64 + 1_234.6 / 86_400_000.0).to_le_bytes().to_vec();
+    time.extend(0.1f64.to_le_bytes());
+    let info = read(&Flp::new().ascii(199, "21.0.0").data(237, &time).build());
+    let shown = info.created.map(|c| c.format("%H:%M:%S%.3f").to_string());
+    assert_eq!(shown.as_deref(), Some("00:00:01.234"));
+}
+
+#[test]
 fn reads_when_the_project_was_made_and_how_long_it_was_open() {
     // 45,000 days after 30 Dec 1899 is 15 Mar 2023; 0.1 of a day open is 2 h 24 min.
     let mut time = 45_000.5f64.to_le_bytes().to_vec();

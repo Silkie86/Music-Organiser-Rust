@@ -22,8 +22,9 @@ pub const DAW: &str = "FL Studio";
 /// Goes up by one whenever the reader finds more (or different) things in the same files, so a scan reads every FL
 /// project again (rule 7). The C# reader is at 7; 8 is what the Rust reader finds differently (DIFFERENCES.md); 9 adds
 /// the samples a song holds but doesn't play; 10 reads damaged FL 4 to 8 notes at their version's size, finds the track
-/// of a clip in a save cut short in its track list, and warns about a song too big to place.
-pub const VERSION: u32 = 10;
+/// of a clip in a save cut short in its track list, and warns about a song too big to place; 11 keeps the day a
+/// project was made to the tick, as the C# app does.
+pub const VERSION: u32 = 11;
 pub const EXTENSIONS: [&str; 1] = ["flp"];
 
 /// The Fruity Wrapper (FL's VST host) keeps a VST's details as records: u32 version, then (u32 id, u64 size, data).
@@ -445,7 +446,13 @@ pub fn project_time(data: &[u8]) -> (Option<NaiveDateTime>, Option<String>) {
         .and_then(|day| day.and_hms_opt(0, 0, 0))
         // 1995 to 2119.
         .filter(|_| made.is_finite() && made > 35_000.0 && made < 80_000.0)
-        .map(|start| start + TimeDelta::milliseconds((made * 86_400_000.0).round() as i64));
+        // As .NET's AddDays (the C# app): the whole days, then the rest of the day to the 100 ns tick, cut, not
+        // rounded, so both apps show the same millisecond.
+        .map(|start| {
+            let days = made.trunc();
+            let ticks = ((made - days) * 864_000_000_000.0) as i64;
+            start + TimeDelta::days(days as i64) + TimeDelta::nanoseconds(ticks * 100)
+        });
     let spent = (open.is_finite() && open > 0.0 && open < 3650.0).then(|| {
         // To the millisecond first, so 13 minutes saved as 0.009027... days isn't 12.99999 minutes.
         let minutes = (open * 86_400_000.0).round() as i64 / 60_000;
