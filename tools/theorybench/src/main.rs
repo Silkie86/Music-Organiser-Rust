@@ -4,6 +4,7 @@
 //! The labelled music is made from public datasets by the scripts in `convert/` and stays outside the repository;
 //! nothing from it goes into the app.
 
+mod answerfit;
 mod baseline;
 mod chords;
 mod fit;
