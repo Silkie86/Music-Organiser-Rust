@@ -11,9 +11,11 @@ pub mod catalogue;
 pub mod chord;
 pub mod extract;
 pub mod index;
+pub mod indexer;
 pub mod instruments;
 pub mod member;
 pub mod roles;
+pub mod store;
 
 pub use catalogue::{Catalogue, Entry, From, Hit, Query};
 pub use chord::PhraseChord;
