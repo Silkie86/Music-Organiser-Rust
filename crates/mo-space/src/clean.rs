@@ -143,12 +143,45 @@ fn network_mount(path: &str) -> bool {
     rustix::fs::statfs(path).is_ok_and(|s| s.f_flags & MNT_LOCAL == 0)
 }
 
-/// Linux says what kind of drive a folder is on: NFS, Windows shares (SMB, CIFS), AFS, Coda, NetWare, 9P.
+/// Linux says what kind of drive a folder is on: NFS, Windows shares (SMB, CIFS), AFS, Coda, NetWare, 9P, Ceph. A FUSE
+/// drive (sshfs, rclone, the Files app's shares) counts as network unless it's a disk (`fuseblk`: NTFS, exFAT).
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn network_mount(path: &str) -> bool {
     use rustix::fs::FsWord;
-    const NETWORK: [u32; 8] = [0x6969, 0x517B, 0xFF53_4D42, 0xFE53_4D42, 0x5346_414F, 0x7375_7245, 0x564C, 0x0102_1997];
-    rustix::fs::statfs(path).is_ok_and(|s| NETWORK.iter().any(|&m| s.f_type == m as FsWord))
+    const NETWORK: [u32; 10] = [
+        0x6969,
+        0x517B,
+        0xFF53_4D42,
+        0xFE53_4D42,
+        0x5346_414F,
+        0x6B41_4653,
+        0x7375_7245,
+        0x564C,
+        0x0102_1997,
+        0x00C3_6400,
+    ];
+    const FUSE: u32 = 0x6573_5546;
+    let Ok(s) = rustix::fs::statfs(path) else { return false };
+    NETWORK.iter().any(|&m| s.f_type == m as FsWord) || (s.f_type == FUSE as FsWord && !fuse_disk(path))
+}
+
+/// Whether the FUSE drive a folder is on is a disk, from the system's list of drives (the innermost one holding it).
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn fuse_disk(path: &str) -> bool {
+    let Ok(table) = fs::read_to_string("/proc/self/mounts") else { return false };
+    let real = real_path(path).unwrap_or_else(|| path.to_owned());
+    table
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split(' ');
+            let _device = fields.next()?;
+            // Spaces in a folder's name are written \040.
+            let at = fields.next()?.replace("\\040", " ");
+            Some((at, fields.next()?.to_owned()))
+        })
+        .filter(|(at, _)| is_inside(&real, at))
+        .max_by_key(|(at, _)| at.len())
+        .is_some_and(|(_, kind)| kind == "fuseblk")
 }
 
 /// Elsewhere only the path tells.
@@ -365,6 +398,10 @@ pub struct Problem {
 pub struct Done {
     pub removed: Vec<Removed>,
     pub problems: Vec<Problem>,
+    /// Picked folders that went inside another picked folder (where it was, the folder it went with): they come back
+    /// with it.
+    #[serde(default)]
+    pub went_with: Vec<(String, String)>,
 }
 
 impl Done {
@@ -559,4 +596,17 @@ fn put_back_from_system_bin(removed: &[Removed]) -> Vec<Problem> {
             why: "Put it back from the Trash: select it there and choose Put Back.".to_owned(),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::on_network;
+
+    #[test]
+    fn a_server_path_is_on_the_network() {
+        assert!(on_network(r"\\nas\music\Kontakt"));
+        assert!(on_network("//nas/music/Kontakt"));
+        // A folder that isn't there can't be asked about: only its path tells.
+        assert!(!on_network("no such folder/Kontakt"));
+    }
 }

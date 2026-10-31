@@ -88,8 +88,7 @@ pub struct Installed {
 
 /// Where plugins keep presets, settings and sound libraries on this operating system (the ones that are there).
 pub fn data_roots() -> Vec<PathBuf> {
-    let env = |name: &str| std::env::var_os(name).map(PathBuf::from);
-    let home = env("HOME").or_else(|| env("USERPROFILE"));
+    let home = crate::home_folder();
     let roots: Vec<PathBuf> = if cfg!(windows) {
         windows_data_roots()
     } else if cfg!(target_os = "macos") {

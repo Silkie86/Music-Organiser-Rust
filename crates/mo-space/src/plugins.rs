@@ -56,7 +56,7 @@ pub fn is_waves(name: &str, path: &str) -> bool {
 
 /// The standard plugin folders for this operating system.
 pub fn default_folders() -> Vec<PathBuf> {
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from);
+    let home = crate::home_folder();
     let mut out = Vec::new();
     if cfg!(target_os = "macos") {
         let mut roots = vec![PathBuf::from("/Library/Audio/Plug-Ins")];

@@ -10,7 +10,7 @@ use std::sync::atomic::AtomicBool;
 
 use mo_space::clean::{Bin, Problem, Removed, What, undo};
 use mo_space::key;
-use mo_space::plugin_clean::{Library, PluginUse, Stays, apply, lines};
+use mo_space::plugin_clean::{Library, PluginUse, Stays, apply, freed, lines};
 use mo_space::plugin_space::{PluginSpace, SpaceFolder, SpaceKind};
 
 fn fixtures(name: &str) -> PathBuf {
@@ -118,7 +118,7 @@ fn only_what_no_project_needs_may_go_and_sounds_only_when_no_project_uses_the_pl
     let names = |k: &str| if k == "nerve" { "Nerve".to_owned() } else { k.to_owned() };
     let library = Library {
         protected_roots: &protected,
-        system_folders: &[],
+        kept_folders: &[],
         uses: &uses,
         sample_at: &sample_at,
         sample_named: &sample_named,
@@ -188,7 +188,7 @@ fn a_plugin_the_library_doesnt_know_counts_as_used() {
     let names = |k: &str| k.to_owned();
     let library = Library {
         protected_roots: &[],
-        system_folders: &[],
+        kept_folders: &[],
         uses: &uses,
         sample_at: &none,
         sample_named: &no,
@@ -217,7 +217,7 @@ fn a_folder_reached_through_a_link_stays() {
     let names = |k: &str| k.to_owned();
     let library = Library {
         protected_roots: &[],
-        system_folders: &[],
+        kept_folders: &[],
         uses: &uses,
         sample_at: &none,
         sample_named: &no,
@@ -255,10 +255,10 @@ fn no_sample_named(_: &str) -> bool {
     false
 }
 
-fn library<'a>(protected: &'a [String], system: &'a [String], uses: &'a HashMap<String, PluginUse>) -> Library<'a> {
+fn library<'a>(protected: &'a [String], kept: &'a [String], uses: &'a HashMap<String, PluginUse>) -> Library<'a> {
     Library {
         protected_roots: protected,
-        system_folders: system,
+        kept_folders: kept,
         uses,
         sample_at: &no_sample_at,
         sample_named: &no_sample_named,
@@ -285,8 +285,9 @@ fn a_folder_inside_one_that_goes_goes_with_it_and_a_line_picked_twice_counts_onc
     let stop = AtomicBool::new(false);
     let card = lines(&serum, std::slice::from_ref(&serum), &library, &stop).unwrap();
     assert!(card.iter().all(|l| l.stays.is_none()));
-    // The maker's folder frees what's in it too.
+    // The maker's folder frees what's in it too, and the two together free it once.
     assert_eq!(card.iter().map(|l| l.bytes()).collect::<Vec<_>>(), [100, 130]);
+    assert_eq!(freed(&card), 130);
 
     // The inner folder first, and picked twice: the maker's folder still goes whole, once.
     let picked = vec![card[0].clone(), card[1].clone(), card[0].clone()];
@@ -296,6 +297,7 @@ fn a_folder_inside_one_that_goes_goes_with_it_and_a_line_picked_twice_counts_onc
     assert_eq!(done.removed.len(), 1);
     assert!(done.removed[0].path.ends_with("Xfer"));
     assert_eq!(done.removed[0].bytes, 130);
+    assert_eq!(done.went_with, [(card[0].folder.path.clone(), card[1].folder.path.clone())]);
     assert!(!docs.join("Xfer").exists());
     assert!(undo(&done, &bin).is_empty());
     assert!(docs.join("Xfer/Serum Presets/Lead.fxp").exists());
@@ -402,6 +404,9 @@ fn a_file_saved_again_at_the_same_size_or_renamed_counts_as_a_change() {
     lead.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000)).unwrap();
     drop(lead);
     fs::rename(docs.join("Thing Sounds/a.wav"), docs.join("Thing Sounds/b.wav")).unwrap();
+    // Opening a folder in Finder or Explorer isn't a change.
+    write(&docs, "Thing More/.DS_Store", 6);
+    write(&docs, "Thing More/desktop.ini", 6);
 
     let bin = FolderBin { dir: dir.join("bin"), held: RefCell::new(Vec::new()) };
     let done = apply(&card, &thing, std::slice::from_ref(&thing), &library, &bin, &stop);
@@ -424,7 +429,7 @@ fn your_folders_and_the_computers_own_are_known_by_where_they_really_are() {
     symlink(dir.join("Area/Samples"), dir.join("Elsewhere/Samples Link")).unwrap();
     symlink(dir.join("Home/Music"), dir.join("Elsewhere/Music Link")).unwrap();
     let protected = vec![s(&dir.join("Elsewhere/Samples Link"))];
-    let system = vec![s(&dir.join("Elsewhere/Music Link"))];
+    let kept = vec![s(&dir.join("Elsewhere/Music Link"))];
     let thing = plugin(
         "thing",
         "Thing",
@@ -438,7 +443,7 @@ fn your_folders_and_the_computers_own_are_known_by_where_they_really_are() {
         ],
     );
     let uses = uses(&[("thing", 0, true)]);
-    let library = library(&protected, &system, &uses);
+    let library = library(&protected, &kept, &uses);
     let card = lines(&thing, std::slice::from_ref(&thing), &library, &AtomicBool::new(false)).unwrap();
     let stays: Vec<Option<Stays>> = card.into_iter().map(|l| l.stays).collect();
     assert_eq!(

@@ -41,6 +41,11 @@ pub fn key(path: &str) -> String {
     }
 }
 
+/// Your home folder (`HOME`, or `USERPROFILE` on Windows).
+pub(crate) fn home_folder() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(std::path::PathBuf::from)
+}
+
 /// Where a file or folder really is, links and `..` worked out (a mapped network drive comes out as `\\server\…`), as
 /// a plain path without Windows' long-path prefix; `None` when it isn't there.
 pub fn real_path(path: &str) -> Option<String> {

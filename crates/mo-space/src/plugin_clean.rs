@@ -8,8 +8,10 @@
 //! [`lines`] says, for each of a plugin's folders, whether it may go and why not; nothing changes. [`apply`] checks
 //! each picked folder again just before it goes and sends it to the Recycle Bin, as [`crate::clean`] does for songs.
 
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, Metadata};
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::UNIX_EPOCH;
@@ -18,13 +20,12 @@ use mo_formats::paths::file_name;
 use mo_formats::textscan::is_audio_path;
 use mo_library::scan::is_inside;
 use rayon::prelude::*;
-use sha2::{Digest, Sha256};
 
 use crate::clean::{Bin, Done, Problem, What, both, on_network, parts, send};
 use crate::plugin_space::{PluginSpace, SpaceFolder, SpaceKind, data_roots, is_install_folder};
 use crate::plugins::is_plugin_file;
 use crate::size::{DEEPEST, Measured, Stopped, is_online_only, is_sound};
-use crate::{key, real_path};
+use crate::{home_folder, key, real_path};
 
 /// How your projects use a plugin.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -110,35 +111,37 @@ impl Stays {
 
 /// What a folder held when it was looked at: its size, and a stamp of everything in it (where, how big, when written)
 /// to see just before it goes whether anything in it changed, even a file renamed or saved again at the same size.
+/// Files Finder and Explorer make by themselves when you open a folder (`.DS_Store`, `desktop.ini`, thumbnails) don't
+/// count, and a folder counts by its name only (opening it can change its time).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Look {
     measured: Measured,
-    stamp: [u64; 4],
+    stamp: u64,
 }
 
 impl Look {
     fn add(&mut self, other: &Look) {
         self.measured = self.measured + other.measured;
-        for (a, b) in self.stamp.iter_mut().zip(other.stamp) {
-            *a = a.wrapping_add(b);
-        }
+        self.stamp = self.stamp.wrapping_add(other.stamp);
     }
 
-    /// Adds one file or folder to the stamp. Adding up each one's SHA-256 makes the stamp the same whatever order the
-    /// walk met them in.
+    /// Adds one file or folder to the stamp. Adding up each one's hash makes the stamp the same whatever order the
+    /// walk met them in. The stamp is only compared within one run of the app, so Rust's own hash does.
     fn note(&mut self, path: &str, meta: &Metadata) {
-        let when = meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
-        let digest = Sha256::new()
-            .chain_update(path.as_bytes())
-            .chain_update([0, u8::from(meta.is_dir())])
-            .chain_update(meta.len().to_le_bytes())
-            .chain_update(when.to_le_bytes())
-            .finalize();
-        let (chunks, _) = digest.as_chunks::<8>();
-        for (a, chunk) in self.stamp.iter_mut().zip(chunks) {
-            *a = a.wrapping_add(u64::from_le_bytes(*chunk));
+        let mut h = DefaultHasher::new();
+        path.hash(&mut h);
+        if !meta.is_dir() {
+            meta.len().hash(&mut h);
+            meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).hash(&mut h);
         }
+        self.stamp = self.stamp.wrapping_add(h.finish());
     }
+}
+
+/// Files the computer makes in a folder by itself when you look at it (Finder, Explorer).
+fn made_by_the_system(name: &str) -> bool {
+    const NAMES: [&str; 5] = [".DS_Store", "desktop.ini", "Thumbs.db", "ehthumbs.db", "Icon\r"];
+    NAMES.iter().any(|n| n.eq_ignore_ascii_case(name)) || name.starts_with("._")
 }
 
 /// One of a plugin's folders on the Clean up card: whether it may go (and why not), and whether it's ticked at first.
@@ -153,19 +156,37 @@ pub struct CleanLine {
 }
 
 impl CleanLine {
-    /// The room it frees if it goes: the whole folder with everything in it (a maker's folder holds its plugins'
-    /// folders too, though each plugin's size counts them once). For a folder that stays, the folder's own size.
+    /// The room this line frees if it goes: the whole folder with everything in it (a maker's folder holds its
+    /// plugins' folders too, though each plugin's size counts them once). For a folder that stays, the folder's own
+    /// size. For what several lines free together, see [`freed`].
     pub fn bytes(&self) -> u64 {
         if self.stays.is_none() { self.look.measured.bytes } else { self.folder.bytes }
     }
+}
+
+/// The room the picked lines free together: each folder that may go once, and one inside another that goes counts
+/// with it, as [`apply`] removes them.
+pub fn freed(picked: &[CleanLine]) -> u64 {
+    let mut seen = HashSet::new();
+    let going: Vec<&CleanLine> =
+        picked.iter().filter(|l| l.stays.is_none() && seen.insert(key(&l.folder.path))).collect();
+    going
+        .iter()
+        .filter(|l| {
+            !going
+                .iter()
+                .any(|o| key(&o.folder.path) != key(&l.folder.path) && is_inside(&l.folder.path, &o.folder.path))
+        })
+        .map(|l| l.bytes())
+        .sum()
 }
 
 /// What the library knows that Clean up must respect.
 pub struct Library<'a> {
     /// Your project and sample folders.
     pub protected_roots: &'a [String],
-    /// The computer's own folders ([`system_folders`], worked out once).
-    pub system_folders: &'a [String],
+    /// More folders that never go, nor any folder holding one, besides the computer's own (always kept).
+    pub kept_folders: &'a [String],
     /// How your projects use each plugin, by name key. A plugin missing here counts as used.
     pub uses: &'a HashMap<String, PluginUse>,
     /// A sample a project uses that's stored inside this folder (by path), if any.
@@ -201,74 +222,48 @@ impl Library<'_> {
 }
 
 /// The computer's own folders: your home folder and the folders in it the system keeps (Documents, Music, Desktop,
-/// AppData…), the program and system folders, and where plugins keep their things. A clean-up never takes one, nor a
-/// folder holding one. Work it out once (on Windows it asks the system) and pass it in [`Library`].
-pub fn system_folders() -> Vec<String> {
-    let env = |name: &str| std::env::var_os(name).map(PathBuf::from);
-    let home = env("HOME").or_else(|| env("USERPROFILE"));
+/// AppData…), the program and system folders, and where plugins keep their things ([`data_roots`]). A clean-up never
+/// takes one, nor a folder holding one. On Windows it asks the system, once for each card or clean-up.
+fn system_folders() -> Vec<String> {
+    let home = home_folder();
     let mut out: Vec<PathBuf> = data_roots();
     out.extend(home.clone());
-    if cfg!(windows) {
+    let in_home: &[&str] = if cfg!(windows) {
         out.extend(windows_system_folders());
+        &[]
     } else if cfg!(target_os = "macos") {
         out.extend(
             ["/Applications", "/Library", "/System", "/Users", "/Volumes", "/usr", "/opt", "/private"]
                 .map(PathBuf::from),
         );
-        out.extend(
-            ["/Library/Application Support", "/Library/Audio", "/Library/Audio/Presets", "/Library/Audio/Plug-Ins"]
-                .map(PathBuf::from),
-        );
-        if let Some(h) = &home {
-            out.extend(
-                [
-                    "Desktop",
-                    "Documents",
-                    "Downloads",
-                    "Music",
-                    "Movies",
-                    "Pictures",
-                    "Public",
-                    "Library",
-                    "Library/Application Support",
-                    "Library/Audio",
-                    "Library/Audio/Presets",
-                    "Library/Audio/Plug-Ins",
-                    "Library/Preferences",
-                ]
-                .map(|p| h.join(p)),
-            );
-        }
+        out.extend(["/Library/Audio", "/Library/Audio/Plug-Ins"].map(PathBuf::from));
+        &[
+            "Desktop",
+            "Downloads",
+            "Movies",
+            "Pictures",
+            "Public",
+            "Library",
+            "Library/Audio",
+            "Library/Audio/Plug-Ins",
+            "Library/Preferences",
+        ]
     } else {
         out.extend(
             ["/usr", "/opt", "/etc", "/home", "/mnt", "/media", "/var", "/tmp", "/srv", "/run"].map(PathBuf::from),
         );
-        if let Some(h) = &home {
-            out.extend(
-                [
-                    "Desktop",
-                    "Documents",
-                    "Downloads",
-                    "Music",
-                    "Pictures",
-                    "Videos",
-                    "Public",
-                    "Templates",
-                    ".config",
-                    ".local",
-                    ".local/share",
-                    ".cache",
-                ]
-                .map(|p| h.join(p)),
-            );
-        }
-        out.extend(["XDG_DATA_HOME", "XDG_CONFIG_HOME"].iter().filter_map(|v| env(v)));
+        out.extend(["XDG_DATA_HOME", "XDG_CONFIG_HOME"].iter().filter_map(std::env::var_os).map(PathBuf::from));
+        &["Desktop", "Downloads", "Music", "Pictures", "Videos", "Public", "Templates", ".local", ".cache"]
+    };
+    if let Some(h) = &home {
+        out.extend(in_home.iter().map(|p| h.join(p)));
     }
     let mut seen = HashSet::new();
     out.into_iter().map(|p| p.to_string_lossy().into_owned()).filter(|p| !p.is_empty() && seen.insert(key(p))).collect()
 }
 
-/// The folders Windows keeps, wherever you've moved them.
+/// The folders Windows keeps besides [`data_roots`]' (Documents, AppData, ProgramData, Program Files), wherever
+/// you've moved them.
 #[cfg(windows)]
 fn windows_system_folders() -> Vec<PathBuf> {
     use known_folders::{KnownFolder, get_known_folder_path};
@@ -276,7 +271,6 @@ fn windows_system_folders() -> Vec<PathBuf> {
         KnownFolder::Profile,
         KnownFolder::UserProfiles,
         KnownFolder::Desktop,
-        KnownFolder::Documents,
         KnownFolder::Downloads,
         KnownFolder::Music,
         KnownFolder::Pictures,
@@ -285,15 +279,7 @@ fn windows_system_folders() -> Vec<PathBuf> {
         KnownFolder::OneDrive,
         KnownFolder::SkyDrive,
         KnownFolder::Public,
-        KnownFolder::PublicDocuments,
         KnownFolder::PublicMusic,
-        KnownFolder::RoamingAppData,
-        KnownFolder::LocalAppData,
-        KnownFolder::ProgramData,
-        KnownFolder::ProgramFiles,
-        KnownFolder::ProgramFilesX86,
-        KnownFolder::ProgramFilesCommon,
-        KnownFolder::ProgramFilesCommonX86,
         KnownFolder::Windows,
         KnownFolder::System,
         KnownFolder::Fonts,
@@ -326,11 +312,26 @@ fn is_drive(_path: &str) -> bool {
     false
 }
 
+/// The drive a folder is on (Unix), to see a drive mounted inside a folder.
+#[cfg(unix)]
+fn device(meta: &Metadata) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    Some(meta.dev())
+}
+
+/// On Windows a drive put into a folder is a link, which isn't followed.
+#[cfg(not(unix))]
+fn device(_meta: &Metadata) -> Option<u64> {
+    None
+}
+
 /// Something in a folder that keeps it, met on the walk.
 enum Found {
     Plugin(String),
     Sample(String),
     Online,
+    /// Another drive mounted in it (a disk or a network share): removing the folder would take what's on it.
+    Drive,
     Unreadable(String),
 }
 
@@ -342,7 +343,8 @@ impl Found {
             Found::Plugin(p) => (0, p),
             Found::Sample(s) => (1, s),
             Found::Online => (2, ""),
-            Found::Unreadable(p) => (3, p),
+            Found::Drive => (3, ""),
+            Found::Unreadable(p) => (4, p),
         }
     }
 
@@ -351,6 +353,7 @@ impl Found {
             Found::Plugin(p) => Stays::HoldsPluginFile(p),
             Found::Sample(s) => Stays::SampleInUse(s),
             Found::Online => Stays::OnlineOnly,
+            Found::Drive => Stays::SystemFolder,
             Found::Unreadable(p) => Stays::Unreadable(p),
         }
     }
@@ -386,7 +389,9 @@ impl<'a> Checker<'a> {
                 })
                 .collect()
         };
-        Checker { library, all, protected: pairs(library.protected_roots), system: pairs(library.system_folders) }
+        let mut system = system_folders();
+        system.extend(library.kept_folders.iter().cloned());
+        Checker { library, all, protected: pairs(library.protected_roots), system: pairs(&system) }
     }
 
     /// Why a folder stays, if it must, and what it holds now. Where it is and how its plugins are used come first;
@@ -486,10 +491,11 @@ impl<'a> Checker<'a> {
     fn read_folder(&self, dir: &Path, stop: &AtomicBool) -> Read {
         let mut read = Read::default();
         let here = dir.to_string_lossy();
-        let Ok(entries) = fs::read_dir(dir) else {
+        let (Ok(entries), Ok(dir_meta)) = (fs::read_dir(dir), fs::metadata(dir)) else {
             read.found.push(Found::Unreadable(here.into_owned()));
             return read;
         };
+        let drive = device(&dir_meta);
         for (n, entry) in entries.enumerate() {
             if n % 1024 == 1023 && stop.load(Ordering::Relaxed) {
                 break;
@@ -505,6 +511,9 @@ impl<'a> Checker<'a> {
                 read.found.push(Found::Unreadable(text));
                 continue;
             };
+            if kind.is_file() && made_by_the_system(file_name(&text)) {
+                continue;
+            }
             read.look.note(&text, &meta);
             // A plugin's file, or its bundle (a folder on a Mac, and a .vst3 on Windows), or a link to one.
             if is_plugin_file(&text) {
@@ -515,7 +524,11 @@ impl<'a> Checker<'a> {
                 continue;
             }
             if kind.is_dir() {
-                read.dirs.push(path);
+                if device(&meta) != drive {
+                    read.found.push(Found::Drive);
+                } else {
+                    read.dirs.push(path);
+                }
                 continue;
             }
             if is_online_only(&meta) {
@@ -576,7 +589,8 @@ pub fn apply(
     let mut gone: Vec<&str> = Vec::new();
     for line in order {
         let path = line.folder.path.as_str();
-        if gone.iter().any(|g| is_inside(path, g)) {
+        if let Some(outer) = gone.iter().find(|g| is_inside(path, g)) {
+            done.went_with.push((path.to_owned(), (*outer).to_owned()));
             continue;
         }
         let now = space.folders.iter().find(|f| key(&f.path) == key(path) && f.kind == line.folder.kind);
@@ -607,16 +621,4 @@ pub fn apply(
     let not_found = bin.find(&mut done.removed);
     done.problems.extend(not_found);
     done
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::clean::on_network;
-
-    #[test]
-    fn a_server_path_is_on_the_network() {
-        assert!(on_network(r"\\nas\music\Kontakt"));
-        assert!(on_network("//nas/music/Kontakt"));
-        assert!(!on_network(env!("CARGO_MANIFEST_DIR")));
-    }
 }
