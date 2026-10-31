@@ -59,6 +59,7 @@ tests don't have.
 | XML whose DOCTYPE declares its own entities (`<!ENTITY`; Studio One never writes them) | Expanded, up to 10 million letters. | The file is refused as unreadable: a few KB of entities can stand for gigabytes. | Safer |
 | A damaged zip that names two files the same | Reads the first of them, and lists (and counts) every copy's presets. | The zip reader keeps only the last one's bytes, and the song says so in a warning. | Same for real songs |
 | A note's velocity | Rounded to MIDI 1.0's 0 to 127 as it's read. | Kept at MIDI 2.0's 16 bits (a 0-to-127 velocity from an older song by MIDI 2.0's own scaling), rounded to 0 to 127 only when a MIDI 1.0 value is wanted. As with Bitwig, a few in 10,000 of the 0-to-1 velocities come out 1 apart. | Better (rule 22) |
+| The arrangement preview of a song that isn't a zip, or is cut short (checked against the C# reader on the test files and 007jah's 640 clips, 2026-10-31) | Stops with an error. | Shows an empty arrangement that says the song couldn't be read well enough to draw, as a Bitwig project or a song without its song.xml already does. Everything else matches. | Better |
 
 ## MIDI files
 

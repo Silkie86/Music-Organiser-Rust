@@ -5,6 +5,8 @@
 //! Times are in beats from the song's start (a clip's notes and points from the clip's start). The readers never look
 //! at the disk: an audio part keeps the path the project saved, and the app finds the file.
 
+use std::path::Path;
+
 /// What a lane holds, which decides how its clips are drawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LaneKind {
@@ -150,5 +152,44 @@ impl Arrangement {
 
     pub fn seconds(&self) -> f64 {
         if self.tempo > 0.0 { self.length() * 60.0 / self.tempo } else { 0.0 }
+    }
+}
+
+/// The project's arrangement views, read from its bytes by its ending: FL Studio has two (its playlist, and the tracks
+/// it becomes in Bitwig), Bitwig and Studio One one each. None for a file of another kind; a project too damaged to
+/// draw gives a view that says so.
+pub fn read_bytes(path: &Path, raw: &[u8]) -> Vec<Arrangement> {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_lowercase();
+    match ext.as_str() {
+        "flp" => match crate::fl::events::load(raw) {
+            Ok(flp) => crate::fl::arrangement::read(&flp),
+            Err(_) => vec![unreadable(crate::fl::arrangement::PLAYLIST_VIEW, "This project")],
+        },
+        "bwproject" => match crate::bitwig::decode(raw) {
+            Ok(doc) => vec![crate::bitwig::arrangement::read(&doc)],
+            Err(_) => vec![unreadable(crate::bitwig::arrangement::VIEW, "This project")],
+        },
+        "song" => match crate::studio_one::Song::open(raw) {
+            Ok(mut song) => vec![song.arrangement()],
+            Err(_) => vec![unreadable(crate::studio_one::arrangement::VIEW, "This song")],
+        },
+        _ => Vec::new(),
+    }
+}
+
+/// [`read_bytes`] for a file on disk, read once.
+pub fn read(path: &Path) -> std::io::Result<Vec<Arrangement>> {
+    Ok(read_bytes(path, &std::fs::read(path)?))
+}
+
+/// An empty view saying the project couldn't be read well enough to draw.
+pub(crate) fn unreadable(view: &'static str, what: &str) -> Arrangement {
+    Arrangement {
+        view,
+        tempo: 120.0,
+        beats_per_bar: 4,
+        lanes: Vec::new(),
+        markers: Vec::new(),
+        notes: vec![format!("{what} couldn't be read in enough detail to draw.")],
     }
 }
