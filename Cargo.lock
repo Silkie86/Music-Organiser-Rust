@@ -3080,6 +3080,7 @@ dependencies = [
  "mo-app",
  "mo-formats",
  "mo-library",
+ "mo-space",
  "slint",
  "slint-build",
 ]

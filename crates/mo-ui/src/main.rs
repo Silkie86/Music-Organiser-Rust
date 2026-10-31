@@ -11,6 +11,11 @@ use mo_app::themes::Look;
 use slint::ComponentHandle;
 
 fn main() -> Result<(), slint::PlatformError> {
+    // Started by the Space page as the administrator step: do it and stop, before any window, log or setting. This also
+    // tells the Space page it may ask Windows for administrator rights.
+    if mo_space::admin::run_step(&std::env::args().skip(1).collect::<Vec<_>>()) {
+        return Ok(());
+    }
     let session = log::start_session();
     log_crashes();
     let feed = Feed::default();
