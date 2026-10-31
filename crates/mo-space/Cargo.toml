@@ -13,6 +13,7 @@ chrono.workspace = true
 mo-formats = { path = "../mo-formats" }
 mo-library = { path = "../mo-library" }
 rayon.workspace = true
+regex = { version = "1", default-features = false, features = ["std", "unicode", "perf"] }
 serde = { version = "1", features = ["derive"] }
 # Saves that are byte-for-byte copies are found by their SHA-256, as the C# app finds them.
 sha2 = "0.10"
@@ -20,6 +21,14 @@ sha2 = "0.10"
 trash = "5.2"
 # How much room a drive has left.
 fs4 = "1.1"
+
+# Where Windows keeps Documents, ProgramData and the rest, even when you've moved them.
+[target.'cfg(windows)'.dependencies]
+known-folders = "1.4"
+
+# Whether a folder is on a network share (Mac, Linux). Already used by fs4.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs"] }
 
 [dev-dependencies]
 serde_json = "1"

@@ -17,7 +17,7 @@ listed with a verdict: **better** (on purpose), **same idea, new shape**, or **n
 
 | What | C# | Rust | Verdict |
 |---|---|---|---|
-| Checking before removing | the list was trusted as measured | every picked line is checked by a guard at the preview **and again** just before it goes: inside a project folder, not a project folder itself, not in or holding a sample folder, not a sound any project uses by name, not a song's newest save, really the kind the line says (a save, an autosave below the project folder, Studio One's Cache folder, audio), not a link, not on a network drive (no Recycle Bin) | better |
+| Checking before removing | the list was trusted as measured | every picked line is checked by a guard at the preview **and again** just before it goes: inside a project folder, not a project folder itself, not in or holding a sample folder, not a sound any project uses by name, not a song's newest save, really the kind the line says (a save, an autosave below the project folder, Studio One's Cache folder, audio), not a link, not on a network drive (no Recycle Bin; on a Mac or Linux, network shares mounted into a folder too) | better |
 | A copy and its twin | the measure never lists both | a copy whose twin is also picked stays; at clean-up a copy only goes while its twin is still byte for byte the same | better |
 | Changed since you looked | removed anyway | a file whose size or time isn't what the list measured stays, and so does anything that changed between the preview and the clean-up | better |
 | Links | the path as written | paths are checked as written and as they really are (links, `..` and mapped drives worked out): a link out of the project folder, into a sample folder, or a copy whose twin is a link to it, stays; a song folder that's a link isn't the song's own | better |
@@ -26,9 +26,39 @@ listed with a verdict: **better** (on purpose), **same idea, new shape**, or **n
 | Removing for good | never: Recycle Bin only, Windows asks before deleting anything too big for it | the same (the `trash` library sets the same Windows flags) | same |
 | Administrator step for Program Files | yes (plugin clean-up) | not yet: song clean-up never touches Program Files; it comes with plugin clean-up | not yet |
 
+## Plugins
+
+| What | C# | Rust | Verdict |
+|---|---|---|---|
+| Plugin files under linked folders | .NET's walk goes through links | the same, each real folder once, so a link back up can't loop | same |
+| A family's letters | .NET `char.IsLetterOrDigit` | Rust's alphabetic or numeric: the same for every name seen; a few rare scripts' marks count as letters too | same idea, new shape |
+| Folders in a data root, order | as the folder lists them | by name, so two runs give the same order | better |
+| Measured when | stored with each plugin | not kept here: the caller knows when it measured (rule 23) | same idea, new shape |
+| A folder naming a version | the comment says "Serum 2 Presets" is Serum 2's alone, but `Family` strips the version, so Serum and Serum 2 shared it | a folder naming a version ("Kontakt 8 Library", "Serum 2 Presets") is that version's alone; one naming none ("Kontakt Library") stays shared | better |
+| A folder you added | counted for you, and for any other plugin whose guess took it too | yours alone: no other plugin's guess takes it | better |
+| A plugin folder ruled out inside a maker's folder | still taken off the maker's folder, so counted nowhere | stays part of the maker's folder | better |
+| A plugin file that's a link | measured as the link (nothing) | measured where it really is | better |
+| Linux VST2 plugins | `.so` files not found | found | better |
+| Documents | Windows' own Documents, wherever it's moved | the same (Windows' known folders) | same |
+| Spare copies: same plugin? | one family anywhere inside the other ("Serum FX" took Serum's projects) | equal, or one with its maker in front ("FabFilter Pro-Q 3" and "Pro-Q 3") | better |
+| Spare copies' reason | text stored with each copy | a `Why` worked out into text when shown | same idea, new shape |
+
+## Plugin clean-up
+
+| What | C# | Rust | Verdict |
+|---|---|---|---|
+| Which folders may go | the card's rules: never Program Files, your folders, a folder with a sample a project uses (by path, then by name), OneDrive online-only files, shared with a used plugin, sounds while a project uses the plugin, a still-used plugin, a folder holding one that stays | the same rules, worked out in the backend (`plugin_clean::lines`) | same idea, new shape |
+| A plugin the library doesn't know | counted as having no projects when shared, as used when held | counted as used everywhere | better (safer) |
+| More reasons to stay | none | a link (or reached through one), a network drive (a Mac's or Linux's network shares too), a drive or one with another drive mounted inside, your home folder or a folder the computer keeps (Documents, Music, Desktop, Downloads, AppData, OneDrive…) or one holding it, found by where they really are; any plugin file or bundle inside (not only listed ones, and a Mac's bundles are folders); a part of it that can't be read | better |
+| Checked again before it goes | the card's look again (samples, OneDrive) | every rule again, against the plugin's folders as they are now, and the folder must hold just what it held when you looked: the same files, sizes and times (a preset renamed or saved again at the same size counts; the files Finder and Explorer make by themselves don't) | better |
+| A folder inside another you picked | n/a (one folder at a time) | goes with it, once, and is listed as gone with it; the room freed (`freed`, and what the clean-up reports) counts everything inside once | better |
+| Why a folder holding another plugin's stays | "used by" the card's plugin | names the plugin that keeps it ("Sounds stay while a project uses Omnisphere") | better |
+| Undo | Recycle Bin by hand | the same `Done` list and `undo` as songs | better |
+| Administrator step | yes, one question for files Windows guards | not yet (Program Files never goes in a clean-up; ProgramData folders that need it say so) | not yet |
+
 ## Not yet
 
-- Plugin sizes (folder guessing), spare plugin copies, uninstallers, moving plugin data to another drive.
+- Uninstallers, moving plugin data to another drive with a link in its place, the administrator step.
 - Keeping measured sizes between runs. The C# app keeps them in `library.db` (`plugin_space`, `folder_space`); how the
   Rust library keeps them is for the library's database design (rule 23: each fact once, nothing stored that's quick
   to work out).

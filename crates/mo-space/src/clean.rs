@@ -28,6 +28,7 @@ use mo_formats::textscan::is_audio_path;
 use mo_library::scan::{daw_of, is_autosave_dir, is_autosave_file, is_inside, is_project_file};
 use serde::{Deserialize, Serialize};
 
+use crate::plugin_space::SpaceKind;
 use crate::song::{CompactItem, CompactKind, has_studio_one_song, parent};
 use crate::{key, real_path};
 
@@ -125,13 +126,68 @@ struct Checked {
 }
 
 /// A folder as written, and where it really is (as written when that can't be read).
-fn both(folder: &str) -> (&str, String) {
+pub(crate) fn both(folder: &str) -> (&str, String) {
     (folder, real_path(folder).unwrap_or_else(|| folder.to_owned()))
 }
 
-/// Whether a path written with a network server's name (`\\server\share`).
-fn on_network(path: &str) -> bool {
-    path.starts_with(r"\\") || path.starts_with("//")
+/// Whether a path is on a network drive: written with a server's name (`\\server\share`, what a mapped drive letter
+/// really is), or on a Mac or Linux, on a network share mounted into a folder (`/Volumes/Share`, `/mnt/nas`).
+pub(crate) fn on_network(path: &str) -> bool {
+    path.starts_with(r"\\") || path.starts_with("//") || network_mount(path)
+}
+
+/// A Mac says which drives are its own: any other is on the network.
+#[cfg(target_os = "macos")]
+fn network_mount(path: &str) -> bool {
+    const MNT_LOCAL: u32 = 0x1000;
+    rustix::fs::statfs(path).is_ok_and(|s| s.f_flags & MNT_LOCAL == 0)
+}
+
+/// Linux says what kind of drive a folder is on: NFS, Windows shares (SMB, CIFS), AFS, Coda, NetWare, 9P, Ceph. A FUSE
+/// drive (sshfs, rclone, the Files app's shares) counts as network unless it's a disk (`fuseblk`: NTFS, exFAT).
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn network_mount(path: &str) -> bool {
+    use rustix::fs::FsWord;
+    const NETWORK: [u32; 10] = [
+        0x6969,
+        0x517B,
+        0xFF53_4D42,
+        0xFE53_4D42,
+        0x5346_414F,
+        0x6B41_4653,
+        0x7375_7245,
+        0x564C,
+        0x0102_1997,
+        0x00C3_6400,
+    ];
+    const FUSE: u32 = 0x6573_5546;
+    let Ok(s) = rustix::fs::statfs(path) else { return false };
+    NETWORK.iter().any(|&m| s.f_type == m as FsWord) || (s.f_type == FUSE as FsWord && !fuse_disk(path))
+}
+
+/// Whether the FUSE drive a folder is on is a disk, from the system's list of drives (the innermost one holding it).
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn fuse_disk(path: &str) -> bool {
+    let Ok(table) = fs::read_to_string("/proc/self/mounts") else { return false };
+    let real = real_path(path).unwrap_or_else(|| path.to_owned());
+    table
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split(' ');
+            let _device = fields.next()?;
+            // Spaces in a folder's name are written \040.
+            let at = fields.next()?.replace("\\040", " ");
+            Some((at, fields.next()?.to_owned()))
+        })
+        .filter(|(at, _)| is_inside(&real, at))
+        .max_by_key(|(at, _)| at.len())
+        .is_some_and(|(_, kind)| kind == "fuseblk")
+}
+
+/// Elsewhere only the path tells.
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "android")))]
+fn network_mount(_path: &str) -> bool {
+    false
 }
 
 impl Guard<'_> {
@@ -223,7 +279,7 @@ fn same_time(meta: &Metadata, measured: Option<NaiveDateTime>) -> bool {
 }
 
 /// The names in a path, whichever way its slashes lean.
-fn parts(path: &str) -> impl Iterator<Item = &str> {
+pub(crate) fn parts(path: &str) -> impl Iterator<Item = &str> {
     path.split(['\\', '/']).filter(|d| !d.is_empty())
 }
 
@@ -314,11 +370,20 @@ pub struct Removed {
     /// Where it really was (links worked out): what the bin keeps.
     pub real: String,
     pub bytes: u64,
-    pub kind: CompactKind,
+    pub what: What,
     /// When it went (Unix seconds, taken just before).
     pub when: i64,
     /// What the bin calls it, once found there.
     pub bin_id: Option<String>,
+}
+
+/// What something removed was.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum What {
+    /// A line of a song's Compact list.
+    Song(CompactKind),
+    /// A plugin's presets or sounds folder.
+    Plugin(SpaceKind),
 }
 
 /// A line that couldn't go (or come back), and why.
@@ -333,6 +398,10 @@ pub struct Problem {
 pub struct Done {
     pub removed: Vec<Removed>,
     pub problems: Vec<Problem>,
+    /// Picked folders that went inside another picked folder (where it was, the folder it went with): they come back
+    /// with it.
+    #[serde(default)]
+    pub went_with: Vec<(String, String)>,
 }
 
 impl Done {
@@ -371,22 +440,20 @@ pub fn apply(plan: &Plan, guard: &Guard<'_>, bin: &dyn Bin) -> Done {
                 continue;
             }
         };
-        let when = now_seconds();
-        match bin.send(Path::new(&item.path)) {
-            Ok(()) => done.removed.push(Removed {
-                path: item.path.clone(),
-                real,
-                bytes: item.bytes,
-                kind: item.kind,
-                when,
-                bin_id: None,
-            }),
-            Err(why) => done.problems.push(Problem { path: item.path.clone(), why }),
-        }
+        send(&item.path, real, item.bytes, What::Song(item.kind), bin, &mut done);
     }
     let not_found = bin.find(&mut done.removed);
     done.problems.extend(not_found);
     done
+}
+
+/// Sends one checked thing to the bin and notes how it went.
+pub(crate) fn send(path: &str, real: String, bytes: u64, what: What, bin: &dyn Bin, done: &mut Done) {
+    let when = now_seconds();
+    match bin.send(Path::new(path)) {
+        Ok(()) => done.removed.push(Removed { path: path.to_owned(), real, bytes, what, when, bin_id: None }),
+        Err(why) => done.problems.push(Problem { path: path.to_owned(), why }),
+    }
 }
 
 /// Puts back what a clean-up removed.
@@ -529,4 +596,17 @@ fn put_back_from_system_bin(removed: &[Removed]) -> Vec<Problem> {
             why: "Put it back from the Trash: select it there and choose Put Back.".to_owned(),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::on_network;
+
+    #[test]
+    fn a_server_path_is_on_the_network() {
+        assert!(on_network(r"\\nas\music\Kontakt"));
+        assert!(on_network("//nas/music/Kontakt"));
+        // A folder that isn't there can't be asked about: only its path tells.
+        assert!(!on_network("no such folder/Kontakt"));
+    }
 }

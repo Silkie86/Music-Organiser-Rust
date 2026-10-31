@@ -2495,6 +2495,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
+name = "known-folders"
+version = "1.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7a1886916523694cd6ea3d175f03a1e5010699a2a4cc13696d83d7bea1d80638"
+dependencies = [
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "kqueue"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2913,9 +2922,12 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "fs4",
+ "known-folders",
  "mo-formats",
  "mo-library",
  "rayon",
+ "regex",
+ "rustix 1.1.6",
  "serde",
  "serde_json",
  "sha2",

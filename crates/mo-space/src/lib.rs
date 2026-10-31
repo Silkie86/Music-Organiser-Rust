@@ -4,6 +4,10 @@
 //! - [`song`]: a song's room on disk and its Compact list (copies, old autosaves, caches, thinning, unused audio).
 //! - [`clean`]: removing what you picked: a preview first, then only ever to the Recycle Bin, and undo.
 //! - [`app_files`]: the app's own databases and folders, and whether their drive is nearly full.
+//! - [`plugins`]: the plugin files installed on this computer.
+//! - [`plugin_space`]: each installed plugin's room on disk, its data folders guessed by name and maker.
+//! - [`plugin_clean`]: which of a plugin's preset and sound folders may go, and sending them to the Recycle Bin.
+//! - [`spare`]: plugin copies in a format no project uses (or AAX without Pro Tools).
 //!
 //! Nothing here touches the window or a database: the app reads what it needs from the library and hands it in, and
 //! every walk is spread over the cores of the pool it's called in (call it in the app's low-priority pool).
@@ -12,8 +16,12 @@
 
 pub mod app_files;
 pub mod clean;
+pub mod plugin_clean;
+pub mod plugin_space;
+pub mod plugins;
 pub mod size;
 pub mod song;
+pub mod spare;
 
 pub use size::{Measured, Stopped, size_text};
 
@@ -31,6 +39,11 @@ pub fn key(path: &str) -> String {
         "" => "/".to_owned(),
         trimmed => trimmed.to_owned(),
     }
+}
+
+/// Your home folder (`HOME`, or `USERPROFILE` on Windows).
+pub(crate) fn home_folder() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(std::path::PathBuf::from)
 }
 
 /// Where a file or folder really is, links and `..` worked out (a mapped network drive comes out as `\\server\…`), as

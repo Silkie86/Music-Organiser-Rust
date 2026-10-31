@@ -126,7 +126,7 @@ struct Listing<T> {
 }
 
 /// How deep a walk goes: far deeper than any real folder. Deeper folders are left out.
-const DEEPEST: usize = 128;
+pub(crate) const DEEPEST: usize = 128;
 
 /// Walks a folder and its folders a level at a time on every core of the current rayon pool (call it inside the app's
 /// low-priority pool, never on the window's thread). Links aren't followed and folders that can't be read are left
