@@ -97,13 +97,18 @@ pub fn is_ignored(path: &str, roots: &[String]) -> bool {
     let Some(root) = roots.iter().filter(|r| is_inside(path, r)).max_by_key(|r| parts(r).count()) else {
         return false;
     };
+    below_skipped(path, root, &skip_dir)
+}
+
+/// Whether `path` (inside `root`) is in a folder below `root` that `skip` leaves out.
+fn below_skipped(path: &str, root: &str, skip: &dyn Fn(&str, &str) -> bool) -> bool {
     // The folders between the root and the file, counted by name rather than by letters, so a root written in
     // another case or with other slashes still lines up.
     let folders: Vec<&str> = parts(path).collect();
     let below = folders.get(parts(root).count()..folders.len().saturating_sub(1)).unwrap_or_default();
     let mut parent = parts(root).last().unwrap_or_default();
     for name in below {
-        if skip_dir(name, parent) {
+        if skip(name, parent) {
             return true;
         }
         parent = name;
@@ -151,6 +156,18 @@ const DEEPEST: usize = 64;
 /// that isn't there (an unplugged drive) is counted as unreadable, so its saves stay as they were; a root inside
 /// another is walked once, as part of the outer one.
 pub fn find_projects(roots: &[String]) -> Found {
+    find_files(roots, &is_project_file, &skip_dir)
+}
+
+/// Every file under `roots` that `wanted` keeps, leaving out folders `skip` names (it's given the folder's name and its
+/// parent's), walked as [`find_projects`] walks: a level of folders at a time on every core of the current rayon pool,
+/// a root that isn't there counted as unreadable, a root inside another walked once. The Sounds and MIDI pages walk
+/// their folders with it too.
+pub fn find_files(
+    roots: &[String],
+    wanted: &(dyn Fn(&str) -> bool + Sync),
+    skip: &(dyn Fn(&str, &str) -> bool + Sync),
+) -> Found {
     let mut found = Found::default();
     let keys: Vec<String> = roots.iter().map(|r| path_key(r)).collect();
     let mut level: Vec<String> = Vec::new();
@@ -162,7 +179,7 @@ pub fn find_projects(roots: &[String]) -> Found {
             j != i
                 && key_inside(key, k)
                 && (k != key || j < i)
-                && roots.get(j).is_none_or(|outer| !is_ignored(&format!("{root}/x.flp"), std::slice::from_ref(outer)))
+                && roots.get(j).is_none_or(|outer| !below_skipped(&format!("{root}/x"), outer, skip))
         });
         if inner {
             continue;
@@ -182,7 +199,7 @@ pub fn find_projects(roots: &[String]) -> Found {
         if level.is_empty() {
             break;
         }
-        let read: Vec<Listing> = level.par_iter().map(|dir| list(dir)).collect();
+        let read: Vec<Listing> = level.par_iter().map(|dir| list(dir, wanted, skip)).collect();
         level = Vec::new();
         for l in read {
             found.files.extend(l.files);
@@ -213,7 +230,7 @@ struct Listing {
 }
 
 /// Lists one folder.
-fn list(dir: &str) -> Listing {
+fn list(dir: &str, wanted: &(dyn Fn(&str) -> bool + Sync), skip: &(dyn Fn(&str, &str) -> bool + Sync)) -> Listing {
     let mut out = Listing::default();
     let Ok(entries) = fs::read_dir(dir) else {
         out.unreadable.push(dir.to_owned());
@@ -238,19 +255,19 @@ fn list(dir: &str) -> Listing {
             // points nowhere is left out.
             let Ok(meta) = fs::metadata(&path) else { continue };
             if meta.is_dir() {
-                if !skip_dir(file_name(&path), parent)
+                if !skip(file_name(&path), parent)
                     && let Some(real) = fs::canonicalize(&path).ok().and_then(|r| r.to_str().map(path_key))
                 {
                     out.links.push((path, real));
                 }
-            } else if is_project_file(&path) {
+            } else if wanted(&path) {
                 out.files.push(FoundFile { size: size(&meta), mtime: mtime(&meta), path });
             }
         } else if kind.is_dir() {
-            if !skip_dir(file_name(&path), parent) {
+            if !skip(file_name(&path), parent) {
                 out.dirs.push(path);
             }
-        } else if is_project_file(&path) {
+        } else if wanted(&path) {
             // On Windows the size and date come with the listing itself, so this doesn't ask the disk again.
             match entry.metadata() {
                 Ok(meta) => out.files.push(FoundFile { size: size(&meta), mtime: mtime(&meta), path }),

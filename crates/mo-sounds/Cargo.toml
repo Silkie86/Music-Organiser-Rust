@@ -11,6 +11,7 @@ workspace = true
 [dependencies]
 chrono.workspace = true
 mo-formats = { path = "../mo-formats" }
+mo-library = { path = "../mo-library" }
 regex = { version = "1", default-features = false, features = ["std", "unicode", "perf"] }
 # SQLite, built into the app, so nothing has to be installed beside it.
 rusqlite = { version = "0.41", features = ["bundled"] }
