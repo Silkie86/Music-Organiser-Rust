@@ -90,11 +90,23 @@ notes.
   songs as a full mix count 5. Counting every case the same instead lets the many one-bar windows outvote the rest: on
   folds 1 to 4 that gave one-bar windows 46.2% (against 42.3%), but songs that change key 72.0% (against 79.6%).
 
-The report's last table gives, for each set, how sure the finder was on average ("sure"): above its share right, it
-was too sure; below, not sure enough.
+The report gives the full mix set by set as `keys` does, then a table of every kind of input against the C# app on
+the same notes. Its last column ("sure") is how sure the finder was on average: above its share right, it was too
+sure; below, not sure enough.
 
-The report gives the full mix set by set as `keys` does, how the answers would be shown, and a table of every kind of
-input against the C# app on the same notes.
+- **Shown as.** Each answer graded as the app shows it (`keyfind::grade`, with the thresholds built in): one key, a
+  key or its relative, a home note, or no clear key (and why). Beside each kind: how often it's right (a pair when the
+  labelled key is either of the two, a home note when it's the tonic) and the chance shown with it on average. The
+  "shown" and "right when shown" columns count only the answers given as one key.
+- **Hand cases.** Every model fitted (each fold's, the one `--final` tests, the one `--write` writes) is read on the
+  design's hand cases (`keyfind::cases`: a relative-key loop, a blues, a Dorian vamp, whole-tone scales and so on).
+  The report says how many models keep each case's gate and meet its target, and what broke a gate. `--write` won't
+  write weights that break one.
+- **What `--write` writes.** The weights and the calibration; the thresholds and the share of notes in one scale a
+  key needs, as they are (they aren't fitted yet); and a hash of every number with the finder version those numbers
+  were first given with. When any number changed, that's the next version, so the tests fail until `KEY_FINDER_VERSION` in
+  `keyfind/mod.rs` is bumped to match and the hand cases' readings are recorded for it (`hand_case_tests.rs`): the
+  MIDI page then knows to read every part again.
 
 ## Chords
 

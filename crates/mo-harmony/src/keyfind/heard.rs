@@ -40,6 +40,10 @@ const ANCHOR_GAP: u16 = 5;
 /// one bar's notes say less than a song's.
 const HALF_SIZE: u64 = 4;
 
+/// The numbers above, for the finder's version hash (`numbers_hash`): changing one can change answers.
+pub(super) const NUMBERS: [i128; 6] =
+    [MOST_BEATS as i128, MOST_BAR_BEATS as i128, REACH_BARS, REACH_BEATS, ANCHOR_GAP as i128, HALF_SIZE as i128];
+
 /// Which kinds of part were heard: a bit for each [`Role`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct RoleSet(u8);

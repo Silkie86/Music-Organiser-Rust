@@ -74,6 +74,11 @@ impl Key {
         }
     }
 
+    /// The key this many semitones up (down when negative), in the same mode: D minor for C minor moved up 2.
+    pub const fn up(self, semitones: i32) -> Key {
+        Key { tonic: self.tonic.up(semitones), mode: self.mode }
+    }
+
     /// The key on the same tonic in the other mode: C minor for C major.
     pub const fn parallel(self) -> Key {
         match self.mode {
@@ -179,29 +184,24 @@ impl Key {
 
     /// Reads a key as people and packs write it: "C", "F#m", "Bb minor", "A min", "Ebmin", "F#maj", "C Major",
     /// "C-Major", "Gb:maj", "c#:min". A tonic with nothing after it, "maj", "major" or a capital "M" is major; "m",
-    /// "min", "minor", or a minus with nothing after it ("C-", as jazz charts write it), is minor. `None` when it
-    /// isn't a key.
+    /// "min", "minor", or a minus with nothing after it ("C-", as jazz charts write it), is minor. The word after the
+    /// tonic must be one of those exactly, so a word from a file name that only starts like a key ("Ambient",
+    /// "Emotional", "Dmitri") or a chord ("Cmaj7", "Am7") isn't read as one. `None` when it isn't a key.
     pub fn parse(text: &str) -> Option<Key> {
         let text = text.trim();
         let (tonic, used) = parse_note(text)?;
         let after = text.get(used..)?;
         let rest = after.trim_start_matches([' ', ':', '_', '-']);
-        let minor = if rest.is_empty() {
+        let minor = match rest {
             // "C" is major, "C-" minor.
-            after.contains('-')
-        } else if rest == "M" {
+            "" => after.contains('-'),
             // A capital M alone is major ("CM"), as in chord names; a small one minor.
-            false
-        } else {
-            let rest = rest.to_ascii_lowercase();
-            if rest.starts_with("maj") {
-                false
-            } else if rest.starts_with('m') && !rest.starts_with("mix") {
-                // "m", "min", "minor", but not "major" (taken above) or "mixolydian".
-                true
-            } else {
-                return None;
-            }
+            "M" => false,
+            _ => match rest.to_ascii_lowercase().as_str() {
+                "maj" | "major" => false,
+                "m" | "min" | "minor" => true,
+                _ => return None,
+            },
         };
         Some(if minor { Key::minor(tonic) } else { Key::major(tonic) })
     }
@@ -262,6 +262,25 @@ mod tests {
         for text in ["", "H", "minor", "C dorian", "D mixolydian", "7"] {
             assert_eq!(Key::parse(text), None, "{text}");
         }
+        // Words from file names that only start like a key, and chords, aren't keys.
+        for text in [
+            "Ambient",
+            "Emotional",
+            "Amazing",
+            "Dmitri",
+            "Bass",
+            "Fmix",
+            "Cmaj7",
+            "Am7",
+            "Ebmin7",
+            "Cm-",
+            "A Minor key",
+        ] {
+            assert_eq!(Key::parse(text), None, "{text}");
+        }
+        // But a capital "MAJOR" or "Minor" still is.
+        assert_eq!(Key::parse("A Minor"), Some(key("Am")));
+        assert_eq!(Key::parse("EbMAJOR"), Some(key("Eb")));
     }
 
     #[test]
