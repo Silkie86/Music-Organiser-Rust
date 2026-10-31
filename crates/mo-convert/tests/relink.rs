@@ -10,7 +10,7 @@ mod fixtures;
 
 use std::path::{Path, PathBuf};
 
-use mo_convert::relink::{Relink, fix_bitwig_project, fixed_file};
+use mo_convert::relink::{Relink, fix_bitwig_project, fixed_file, still_named};
 use mo_formats::bitwig::{self, Blob, Field, Object, Slot, Text, Value};
 
 fn folder(name: &str) -> PathBuf {
@@ -245,4 +245,21 @@ fn an_edited_copy_is_left_alone() {
     let err = fix_bitwig_project(&project, &[relink(&dir, COPY, &library)]).unwrap_err();
     assert!(err.contains("isn't the same as its Library file"), "{err}");
     assert!(!dir.join("Song (fixed).bwproject").exists());
+}
+
+#[test]
+fn a_copy_is_asked_about_again_before_the_bin() {
+    let dir = folder("relink still named");
+    let project = project_with_copy(&dir, COPY);
+    let relink = relink(&dir, COPY, &library(&dir, "Kicks 1 Select.multisample"));
+    let fixed = fix_bitwig_project(&project, std::slice::from_ref(&relink)).unwrap();
+    assert_eq!(still_named(&project, &relink), None, "only the original names it");
+    // Saved again in Bitwig since, and the new save uses the copy again.
+    std::fs::copy(&project, &fixed.file).unwrap();
+    let why = still_named(&project, &relink).unwrap();
+    assert!(why.starts_with("Song (fixed).bwproject still uses Kicks 1 Select-3-2-2.multisample"), "{why}");
+    // The Library file gone: the copy stays.
+    std::fs::write(&fixed.file, b"").unwrap();
+    std::fs::remove_file(&relink.library).unwrap();
+    assert!(still_named(&project, &relink).unwrap().contains("isn't a Library file"));
 }

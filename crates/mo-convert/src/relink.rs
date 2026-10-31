@@ -433,6 +433,37 @@ pub fn fix_bitwig_project(project: &Path, relinks: &[Relink]) -> Result<Fixed, S
     Ok(Fixed { file, changed, left })
 }
 
+/// Asked again just before a copy goes to the Recycle Bin (Solomon may have saved new versions since the fixed project
+/// was written): why `relink.copy` is still needed, in plain words, or None when nothing but `original` names it. Every
+/// Bitwig file in the project's folder and below it is looked through (the fixed projects and auto-backups too); one
+/// that can't be read, a folder that can't be listed, or a Library file that's gone keeps the copy.
+pub fn still_named(original: &Path, relink: &Relink) -> Option<String> {
+    let dir = match original.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let shown = relink.copy.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let listed = match listed(&dir, std::slice::from_ref(relink)) {
+        Ok(l) => l,
+        Err(e) => return Some(format!("{shown} stays: {e}.")),
+    };
+    let others = match other_bitwig_files(original, &dir) {
+        Ok(o) => o,
+        Err(e) => return Some(format!("{shown} stays: {e}.")),
+    };
+    others.par_iter().find_map_first(|p| {
+        let named = match std::fs::read(p) {
+            Ok(raw) if raw.is_empty() => false,
+            Ok(raw) => named_in(&raw, &listed)[0],
+            Err(_) => true,
+        };
+        named.then(|| {
+            let other = p.strip_prefix(&dir).unwrap_or(p).to_string_lossy().into_owned();
+            format!("{other} still uses {shown}, so it stays.")
+        })
+    })
+}
+
 /// The other Bitwig files in the project's folder and below it (Bitwig's auto-backups, an earlier fixed project, clips
 /// and presets saved there), leaving out the project itself and a Mac's "._" shadow files. A folder that can't be
 /// listed is said, since a copy can't be offered for the bin without looking.
