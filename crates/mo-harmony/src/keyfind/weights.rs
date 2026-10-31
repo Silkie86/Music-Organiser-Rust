@@ -21,5 +21,5 @@ pub(super) const NOT_TONAL_BELOW: f64 = 0.75;
 /// The hash of every number the finder is built from (see `numbers_hash`) when this file was written, and the version
 /// of the finder these numbers were first given with: a test checks both, so changing any number fails until the
 /// version is bumped.
-pub(super) const SHIPPED_HASH: u64 = 0xecd0_a4bc_f916_885b;
-pub(super) const HASH_VERSION: u32 = 2;
+pub(super) const SHIPPED_HASH: u64 = 0x1380_78d5_25cd_f699;
+pub(super) const HASH_VERSION: u32 = 3;

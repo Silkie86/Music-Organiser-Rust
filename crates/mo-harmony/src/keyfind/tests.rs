@@ -146,8 +146,9 @@ fn a_held_chord_is_heard_beat_by_beat() {
     // The chord's three notes held for 4 beats, and the bass's C on each beat.
     assert_eq!((heard.harmony[c], heard.harmony[e], heard.harmony[g]), (768, 384, 384));
     assert_eq!(heard.tune, PerPitch([0; 12]));
-    // The bass on each beat, weighted 4, 1, 2, 1 by its place in the bar, with a C major chord standing on it.
-    assert_eq!((heard.bass[c], heard.major_on_bass[c], heard.minor_on_bass[c], heard.flat7_on_bass[c]), (8, 8, 0, 0));
+    // The bass on each beat, weighted 4, 1, 2, 1 by its place in the bar, and the C major chord standing on it, which
+    // counts twice.
+    assert_eq!((heard.bass[c], heard.major_chords[c], heard.minor_chords[c], heard.flat7_on_bass[c]), (8, 16, 0, 0));
     assert_eq!((heard.first_bass, heard.last_bass), (Some(c), Some(c)));
     assert_eq!((heard.notes, heard.bars_heard(), heard.tune_beats(), heard.accompaniment_beats()), (7, 1, 0, 4));
     assert!(heard.roles.has(Role::Harmony) && heard.roles.has(Role::Bass) && !heard.roles.has(Role::Melody));
@@ -235,8 +236,8 @@ fn a_bass_note_counts_on_the_beats_it_starts_or_is_held_into() {
 }
 
 #[test]
-fn chords_standing_on_the_bass() {
-    // Whole notes in a bar of 4/4: bass weights 4 + 1 + 2 + 1.
+fn chords_count_twice_when_they_stand_on_the_bass() {
+    // Whole notes in a bar of 4/4: weights 4 + 1 + 2 + 1.
     let heard = |bass: u8, chord: &[u8]| {
         let bass = [note(0.0, 4.0, bass)];
         let chord: Vec<Note> = chord.iter().map(|&k| note(0.0, 4.0, k)).collect();
@@ -246,25 +247,32 @@ fn chords_standing_on_the_bass() {
         )
     };
     let c = PitchClass::C;
-    // C7♯9: the minor third over a major third is a sharp ninth, so C major stands on the bass, and its flat 7th.
+    // C7♯9: the minor third over a major third is a sharp ninth, so C major stands on the bass, with its flat 7th.
+    // The E♭ G B♭ inside it is an E♭ major chord too, over another bass, so it counts once.
     let h = heard(36, &[64, 67, 70, 75]);
-    assert_eq!((h.major_on_bass[c], h.minor_on_bass[c], h.flat7_on_bass[c]), (8, 0, 8));
+    assert_eq!((h.major_chords[c], h.major_chords[c.up(3)], h.minor_chords[c], h.flat7_on_bass[c]), (16, 8, 0, 8));
     let h = heard(36, &[63, 67]);
-    assert_eq!((h.major_on_bass[c], h.minor_on_bass[c], h.flat7_on_bass[c]), (0, 8, 0));
-    // C over E: no chord stands on E.
+    assert_eq!((h.major_chords[c], h.minor_chords[c], h.flat7_on_bass[c]), (0, 16, 0));
+    // C over E: the C major chord counts once, as it doesn't stand on the bass, and no chord stands on E.
     let h = heard(40, &[60, 64, 67]);
-    assert_eq!((h.bass[PitchClass::E], h.major_on_bass, h.minor_on_bass), (8, PerPitch([0; 12]), PerPitch([0; 12])));
+    let mut once = PerPitch([0; 12]);
+    once[c] = 8;
+    assert_eq!((h.bass[PitchClass::E], h.major_chords, h.minor_chords), (8, once, PerPitch([0; 12])));
+    // Close chords with nothing standing apart below them have no bass: the chord counts once.
+    let close: Vec<Note> = [60, 64, 67].iter().map(|&k| note(0.0, 4.0, k)).collect();
+    let h = hear(&[Part { role: Role::Harmony, notes: &close }], Grid::four_four(TPB));
+    assert_eq!((h.bass, h.major_chords, h.minor_chords), (PerPitch([0; 12]), once, PerPitch([0; 12])));
     // A chord note counts when it sounds for at least a quarter of the beat.
     let bass = [note(0.0, 4.0, 36)];
     let mut chord = vec![note(0.0, 4.0, 67)];
     chord.extend((0..4).map(|b| Note { start: b * BEAT, length: BEAT / 4, key: 64, velocity: LOUD }));
     let parts = [Part { role: Role::Harmony, notes: &chord }, Part { role: Role::Bass, notes: &bass }];
-    assert_eq!(hear(&parts, Grid::four_four(TPB)).major_on_bass[c], 8);
+    assert_eq!(hear(&parts, Grid::four_four(TPB)).major_chords[c], 16);
     for n in chord.iter_mut().skip(1) {
         n.length = BEAT / 4 - 1;
     }
     let parts = [Part { role: Role::Harmony, notes: &chord }, Part { role: Role::Bass, notes: &bass }];
-    assert_eq!(hear(&parts, Grid::four_four(TPB)).major_on_bass[c], 0);
+    assert_eq!(hear(&parts, Grid::four_four(TPB)).major_chords[c], 0);
 }
 
 #[test]
@@ -273,8 +281,8 @@ fn a_held_note_counts_for_two_bars_and_one_bar_heard() {
     let heard = hear(&[Part { role: Role::Harmony, notes: &held }], Grid::four_four(TPB));
     let (c, e, g) = (PitchClass::C, PitchClass::E, PitchClass::G);
     assert_eq!((heard.harmony[c], heard.harmony[e], heard.harmony[g]), (768, 768, 768));
-    // C3 stands apart below E4 and G4: it's the bass of the 8 beats it's heard in.
-    assert_eq!((heard.bass[c], heard.major_on_bass[c]), (16, 16));
+    // C3 stands apart below E4 and G4: it's the bass of the 8 beats it's heard in, under its own chord (counted twice).
+    assert_eq!((heard.bass[c], heard.major_chords[c]), (16, 32));
     // One bar has notes starting in it, so one bar heard, of 4 beats.
     assert_eq!((heard.bars_heard(), heard.accompaniment_beats()), (1, 4));
 }
@@ -392,8 +400,8 @@ fn moving_the_notes_moves_everything_exactly() {
             (&heard.tune, &moved.tune),
             (&heard.harmony, &moved.harmony),
             (&heard.bass, &moved.bass),
-            (&heard.major_on_bass, &moved.major_on_bass),
-            (&heard.minor_on_bass, &moved.minor_on_bass),
+            (&heard.major_chords, &moved.major_chords),
+            (&heard.minor_chords, &moved.minor_chords),
             (&heard.flat7_on_bass, &moved.flat7_on_bass),
         ] {
             assert_eq!(moved_counts.rotated(pc(s)), *counts, "moved {s}");

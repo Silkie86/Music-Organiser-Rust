@@ -1,8 +1,9 @@
 //! The key of some notes: a part, a loop, a pack's clip or a whole song (spec section 5.1, part 2 of the engine).
 //!
 //! The finder first hears the notes ([`KeyReader::hear`]), beat by beat on the grid, as whole-number counts
-//! ([`Heard`]): how long each note sounds in the tune and in the other parts, the bass of each beat and the chords
-//! standing on it, and where the bass starts and ends. Each of these is a "stream" of evidence ([`Stream`]).
+//! ([`Heard`]): how long each note sounds in the tune and in the other parts, the bass of each beat, the major and
+//! minor chords heard (twice when they stand on the bass), and where the bass starts and ends. Each of these is a
+//! "stream" of evidence ([`Stream`]).
 //!
 //! Then each of the 24 keys is scored by how the counts sit in it: a weight for each note counted up from the tonic,
 //! in major and in minor, for each stream. The weights are the same for every key, so moving the notes up a semitone
@@ -39,8 +40,9 @@ use crate::notes::{Grid, Part};
 
 /// Bumped whenever the finder can give a different answer for the same notes (new weights, new evidence, a new way of
 /// giving the answer), so the answers the app keeps (the MIDI page's index) know to be worked out again. Version 2 gives
-/// the graded answer with its colours and checks hints.
-pub const KEY_FINDER_VERSION: u32 = 2;
+/// the graded answer with its colours and checks hints; version 3 counts every major and minor chord heard, not only
+/// those standing on the bass.
+pub const KEY_FINDER_VERSION: u32 = 3;
 
 /// What the notes are, as cut from the music: it says what their first and last bass mean.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -85,10 +87,11 @@ pub enum Stream {
     /// The bass of each beat, weighted by where the beat falls in the bar: home is where the bass sits on strong
     /// beats.
     Bass,
-    /// Major chords standing on the bass, by the bass note: the home chord over its own root.
-    MajorOnBass,
-    /// Minor chords standing on the bass.
-    MinorOnBass,
+    /// Major chords, by their root, counted twice when they stand on the bass: the home chord, most of all over its
+    /// own root.
+    MajorChords,
+    /// Minor chords, counted the same way.
+    MinorChords,
     /// A loop's first bass: where a loop really starts.
     FirstBassLoop,
     /// A song's first bass.
@@ -102,8 +105,8 @@ impl Stream {
         Stream::Tune,
         Stream::Harmony,
         Stream::Bass,
-        Stream::MajorOnBass,
-        Stream::MinorOnBass,
+        Stream::MajorChords,
+        Stream::MinorChords,
         Stream::FirstBassLoop,
         Stream::FirstBassSong,
         Stream::LastBassSong,
