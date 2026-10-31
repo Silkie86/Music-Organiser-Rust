@@ -296,3 +296,33 @@ fn a_marked_save_goes_at_any_level() {
     let p = plan(vec![file("/music/Song 2.flp", 50 * MB)], &songs, &Used::default(), nowhere(), Rules::default());
     assert!(goes(&p, "/music/Song 2.flp"));
 }
+
+#[test]
+fn big_changes_are_where_the_song_grew_or_lost_a_lot() {
+    use mo_backup::plan::{SaveShape, big_changes};
+    let shape = |n: i64, tracks: u32, samples: u32, beats: Option<f64>| SaveShape {
+        path: format!("/s/{n}.flp"),
+        modified: NaiveDate::from_ymd_opt(2026, 3, 14).unwrap().and_hms_opt(12, 0, 0).unwrap()
+            + chrono::TimeDelta::hours(n),
+        tracks,
+        plugins: 4,
+        samples,
+        length_beats: beats,
+    };
+    let saves = [
+        shape(0, 4, 10, Some(64.0)),
+        shape(1, 5, 11, Some(64.0)),  // small tweaks
+        shape(2, 9, 11, Some(64.0)),  // four tracks added: big
+        shape(3, 9, 11, Some(128.0)), // twice as long: big
+        shape(4, 9, 12, Some(136.0)), // 8 beats more: small
+        shape(5, 9, 2, Some(136.0)),  // ten samples taken away: the save before keeps them
+        shape(6, 9, 2, None),         // length not known: no change counted
+    ];
+    let mut got = big_changes(&saves);
+    got.sort();
+    assert_eq!(got, ["/s/2.flp", "/s/3.flp", "/s/4.flp"]);
+
+    // Up a lot, then down a lot: the save in the middle once.
+    let up_down = [shape(0, 4, 10, None), shape(1, 9, 10, None), shape(2, 2, 10, None)];
+    assert_eq!(big_changes(&up_down), ["/s/1.flp"]);
+}
