@@ -480,9 +480,7 @@ fn fill_panel(app: &AppWindow) {
         let p = p.borrow();
         let Some(r) = p.picked.and_then(|i| p.songs.rows.get(i)) else { return };
         data.set_song(panel_song(r));
-        data.set_runs(model(
-            r.runs.iter().rev().map(|run| SharedString::from(format!("{} · {}", run.label(), run.details()))),
-        ));
+        data.set_runs(model(r.runs.iter().rev().map(|run| SharedString::from(panel::run_line(run)))));
         data.set_saves_heading(panel::saves_heading(r).into());
         let older = panel::older_saves(r);
         data.set_older_heading(older.as_ref().map_or("", |o| o.heading).into());

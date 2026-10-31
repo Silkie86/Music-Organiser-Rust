@@ -289,11 +289,13 @@ component SongPanel inherits Rectangle {
                         drop-shadow-blur: 12px;
                         VerticalLayout {
                             padding: Space.xs;
-                            Caps {
-                                text: SongsData.older-heading;
-                                height: self.preferred-height + Space.sm;
-                                vertical-alignment: center;
-                                x: Space.sm;
+                            HorizontalLayout {
+                                padding-left: Space.sm;
+                                Caps {
+                                    text: SongsData.older-heading;
+                                    height: self.preferred-height + Space.sm;
+                                    vertical-alignment: center;
+                                }
                             }
                             for line in SongsData.older: MenuLine {
                                 text: line.text;

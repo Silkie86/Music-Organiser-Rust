@@ -1,6 +1,6 @@
 // The window shell: the rail on the left and the page on show. Agreed map (2026-10-29): Songs, Sounds, Presets, MIDI,
 // Plugins and Space, with Settings at the bottom.
-import { Theme, Type, Space, RailItem, Groove, Caps, ActionKey, TipLayer } from "studio.slint";
+import { Theme, Type, Space, RailItem, Groove, Caps, ActionKey, TipLayer, TipState } from "studio.slint";
 import { ComingPage } from "pages/coming.slint";
 import { SongsPage, SongsData, SongLine, YearStart, PanelSong, CountLine, PluginLine, SampleLine, SaveLine, DetailPair, HealthLine, OlderLine } from "pages/songs.slint";
 import { ActivityCards, CardInfo, KeySheet, KeyRow, NoteDialog } from "shell.slint";
@@ -78,6 +78,7 @@ export component AppWindow inherits Window {
         // Tab moves between the note's parts and never lands on this invisible scope, where typing would vanish.
         focus-on-tab-navigation: false;
         key-pressed(event) => {
+            TipState.hide();
             if (event.text == Key.Escape && (root.sheet-open || root.note-open)) {
                 if (root.note-open) {
                     root.note-put-aside();

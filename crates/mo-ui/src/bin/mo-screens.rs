@@ -89,11 +89,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("tip-date.png", 530.0, 222.0),
     ] {
         hover(&window, x, y);
-        shots.push((name.into(), capture_after(&window, Duration::from_millis(900))));
+        // Before the tip's wait is over, then after: if nothing came up, the mouse missed what it was meant to rest on.
+        let before = capture_after(&window, Duration::from_millis(150));
+        let after = capture_after(&window, Duration::from_millis(750));
+        if before == after {
+            return Err(format!("{name}: no tooltip came up at {x}, {y}; has the layout moved?").into());
+        }
+        shots.push((name.into(), after));
     }
     // The Older saves menu, opened.
+    let before = capture(&window);
     click(&window, OLDER_BUTTON.0, OLDER_BUTTON.1);
-    shots.push(("older-saves.png".into(), capture(&window)));
+    let after = capture(&window);
+    if before == after {
+        return Err("older-saves.png: the menu didn't open; has the Older saves button moved?".into());
+    }
+    shots.push(("older-saves.png".into(), after));
     click(&window, 300.0, 880.0);
     hover(&window, -1.0, -1.0);
     app.global::<mo_ui::SongsData>().invoke_close_panel();
@@ -198,8 +209,8 @@ fn sample_detail() -> mo_library::SaveDetail {
     }
 }
 
-/// Lets hover and slide-in animations finish, then draws the window.
-/// Where the song panel's Show in folder and Older saves buttons are in the shots.
+/// Where the song panel's Show in folder and Older saves buttons are in the shots. If the panel's layout moves them,
+/// the tooltip and menu shots come out the same as the plain panel, and mo-screens stops with an error.
 const SHOW_BUTTON: (f32, f32) = (1000.0, 328.0);
 const OLDER_BUTTON: (f32, f32) = (865.0, 328.0);
 
@@ -222,6 +233,7 @@ fn click(window: &MinimalSoftwareWindow, x: f32, y: f32) {
     window.dispatch_event(slint::platform::WindowEvent::PointerReleased { position, button });
 }
 
+/// Lets hover and slide-in animations finish, then draws the window.
 fn capture(window: &MinimalSoftwareWindow) -> Vec<u8> {
     capture_after(window, Duration::from_millis(400))
 }

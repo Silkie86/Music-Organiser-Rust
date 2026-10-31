@@ -4,7 +4,7 @@
 //! stay read-only until the Rust app's database is trusted).
 
 use mo_formats::paths::file_name;
-use mo_library::{PluginKind, ProjectPlugin, ProjectSample, Save, SaveDetail};
+use mo_library::{PluginKind, ProjectPlugin, ProjectSample, Save, SaveDetail, SaveRun};
 
 use crate::shell::folder_of;
 use crate::songs::{Other, SongRow, Songs, plural, tempo_text, thousands};
@@ -220,6 +220,11 @@ pub fn save_lines(row: &SongRow) -> Vec<SaveLine> {
     out
 }
 
+/// A version's line, in the Overview's list and the Older saves menu: "2024 rework · Didums_77 · 3 Aug 2024 · 12 saves".
+pub fn run_line(run: &SaveRun) -> String {
+    format!("{} · {}", run.label(), run.details())
+}
+
 /// The song panel's "Older saves" menu, as the C# app's (`OpenMenu.FillOlderSaves`): the song's versions when it has
 /// several (saves months apart), otherwise its newest older saves, then a line that shows every save.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -250,12 +255,7 @@ pub fn older_saves(row: &SongRow) -> Option<OlderSaves> {
     let see_all = format!("See all {} saves", thousands(count));
     if row.runs.len() > 1 {
         // Newest version first; each opens the last save of its run.
-        let lines = row
-            .runs
-            .iter()
-            .rev()
-            .map(|r| OlderSave { text: format!("{} · {}", r.label(), r.details()), path: r.last.path.clone() })
-            .collect();
+        let lines = row.runs.iter().rev().map(|r| OlderSave { text: run_line(r), path: r.last.path.clone() }).collect();
         return Some(OlderSaves { heading: "VERSIONS", lines, see_all });
     }
     let mut older: Vec<&Save> = row.song.saves().filter(|s| s.path != row.song.latest.path).collect();

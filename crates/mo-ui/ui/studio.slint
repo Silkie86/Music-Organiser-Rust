@@ -98,21 +98,28 @@ export struct ActionKey {
 export global TipState {
     in-out property <string> text;
     in-out property <string> key;
-    // Its top left in the window.
+    // Its top left in the window, and where its bottom goes instead when there's no room below.
     in-out property <length> x;
     in-out property <length> y;
+    in-out property <length> above-y;
     in-out property <bool> shown;
+
+    // Puts the tooltip away: a key was pressed, which can change the page under a resting mouse.
+    public function hide() {
+        shown = false;
+    }
 }
 
 // The one tooltip (rules 15 and 16): after the mouse rests on a control for a moment, says what it does and shows its
 // key. Put it in a control with `hovering` from the control's TouchArea; `at-x`/`at-y` is where its top left goes, in
-// the control's own space.
+// the control's own space, and `above-y` where its bottom goes when there's no room below.
 export component Tip {
     in property <string> text;
     in property <string> key;
     in property <bool> hovering;
     in property <length> at-x;
     in property <length> at-y;
+    in property <length> above-y: -Space.xs;
     x: 0;
     y: 0;
     width: 0;
@@ -128,12 +135,25 @@ export component Tip {
             TipState.key = root.key;
             TipState.x = root.absolute-position.x + root.at-x;
             TipState.y = root.absolute-position.y + root.at-y;
+            TipState.above-y = root.absolute-position.y + root.above-y;
             TipState.shown = true;
         }
     }
     changed wanted => {
-        // Only put away the tip if it's still this one (the mouse may already rest on the next control).
-        if (!root.wanted && root.mine) {
+        if (!root.wanted) {
+            root.put-away();
+        }
+    }
+    // A list line reused for another song while its tip shows: the old words would stay, so put them away.
+    changed text => {
+        root.put-away();
+    }
+    changed key => {
+        root.put-away();
+    }
+    // Only puts away the tip if it's still this one (the mouse may already rest on the next control).
+    function put-away() {
+        if (root.mine) {
             root.mine = false;
             if (TipState.text == root.text && TipState.key == root.key) {
                 TipState.shown = false;
@@ -146,7 +166,7 @@ export component Tip {
 export component TipLayer {
     if TipState.shown: Rectangle {
         x: max(0px, min(TipState.x, root.width - self.width - Space.xs));
-        y: TipState.y + self.height > root.height ? max(0px, TipState.y - self.height - Space.xl - Space.xs) : TipState.y;
+        y: TipState.y + self.height > root.height ? max(0px, TipState.above-y - self.height) : TipState.y;
         width: line.preferred-width;
         height: line.preferred-height;
         background: Theme.surface-raised;
@@ -566,6 +586,7 @@ export component ListLine inherits Rectangle {
         hovering: touch.has-hover && !touch.pressed && touch.mouse-x >= root.tip-from;
         at-x: touch.mouse-x;
         at-y: touch.mouse-y + Space.xl;
+        above-y: touch.mouse-y - Space.sm;
     }
 }
 
