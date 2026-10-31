@@ -24,7 +24,7 @@ const EV_CHANNEL_INSERT: u8 = 22;
 /// Sample flags; 0x2 plays it backwards (PyFLP's reading, not yet seen in a save).
 const EV_CHANNEL_FX: u8 = 70;
 /// Starts an arrangement (FL 12.9 onwards); its name, playlist and tracks follow.
-const EV_ARRANGEMENT_NEW: u8 = 99;
+pub(super) const EV_ARRANGEMENT_NEW: u8 = 99;
 /// The mixer insert a channel is routed to (seen from FL 20 to 25).
 const EV_CHANNEL_ROUTE: u8 = 104;
 /// The channel's root key as a MIDI note; absent when it's C5 (60).
@@ -42,11 +42,11 @@ const EV_ENVELOPE: u8 = 218;
 /// i32 pan (0..12800), volume (0..12800) and pitch in cents; pan and volume to 128 before FL 6.
 const EV_CHANNEL_LEVELS: u8 = 219;
 /// A playlist track's settings.
-const EV_TRACK_DATA: u8 = 238;
+pub(super) const EV_TRACK_DATA: u8 = 238;
 /// A playlist track's name, after its settings (only when it was named).
-const EV_TRACK_NAME: u8 = 239;
+pub(super) const EV_TRACK_NAME: u8 = 239;
 
-const CHANNEL_TYPE_AUTOMATION: u32 = 5;
+pub(super) const CHANNEL_TYPE_AUTOMATION: u32 = 5;
 const LEVELS_FULL: f64 = 12800.0;
 /// A playlist item's index above this is a pattern (index − base); at or below, a channel's clip.
 pub(super) const PATTERN_BASE: u32 = 20480;
@@ -94,6 +94,16 @@ pub struct FlStretch {
     /// Stretches it to a length first, in FL's units of 768 a bar; 0 when off.
     pub time: i32,
     pub reversed: bool,
+}
+
+impl FlStretch {
+    /// How long the sample plays, in seconds, given its own length and the song's tempo: stretched to a length first
+    /// when Time is set (FL counts 192 to a beat), then by Mul, then (when resampling) shortened as the pitch goes up.
+    pub fn played_seconds(&self, seconds: f64, tempo: f64) -> f64 {
+        let length = if self.time > 0 && tempo > 0.0 { self.time as f64 / 192.0 * 60.0 / tempo } else { seconds };
+        let length = length * self.multiplier;
+        if self.mode == 0 { length / 2f64.powf(self.pitch_cents as f64 / 1200.0) } else { length }
+    }
 }
 
 impl Default for FlStretch {
@@ -256,7 +266,8 @@ pub(super) struct PlaylistTracks {
     /// The track a name that follows is for: none after settings too short to read, so the name isn't put on the
     /// track before.
     last: Option<u32>,
-    /// From FL 12.9.1 every playlist has 500 tracks, so the first is 500 whatever a save cut short kept of them.
+    /// How many tracks the playlist has, which a clip's slot counts down from (see [`top_slot`]): from FL 12.9.1
+    /// always 500, whatever a save cut short kept of them; before that, told from the slots the clips are on.
     tracks_by_version: Option<i64>,
 }
 
@@ -283,10 +294,19 @@ impl PlaylistTracks {
         }
     }
 
+    /// Works out how many tracks a save from before FL 12.9.1 has, from the slots its clips are on: it doesn't keep
+    /// every track (Solomon's FL 11 "Fuego96" keeps 35, with its clips on slots 189 to 198, tracks 1 to 10).
+    pub fn count_from(&mut self, items: &[PlaylistItem], version: &str) {
+        if self.tracks_by_version.is_none() {
+            let highest = items.iter().map(|i| i.slot).max().unwrap_or(0);
+            self.tracks_by_version = Some(top_slot(version, highest) + 1);
+        }
+    }
+
     /// The track a clip is on, from the slot FL saves with it, which counts down from the first track (499 is track 1
     /// of 500), and whether that track is muted.
     pub fn at(&self, slot: i64) -> Option<&(FlTrack, bool)> {
-        let count = self.tracks_by_version.unwrap_or(self.tracks.len() as i64);
+        let count = self.tracks_by_version.unwrap_or(500);
         u32::try_from(count - slot).ok().and_then(|n| self.tracks.get(&n))
     }
 
@@ -300,8 +320,22 @@ impl PlaylistTracks {
     }
 }
 
+/// What FL saves for the first playlist track: tracks count down from it. From FL 12.9.1 (500 tracks) the first is
+/// 499; before that 198 (199 tracks), though a 2012 song with all its clips on tracks 1 to 4 counted down from 98, so
+/// an older song whose slots all fit under 99 is read that way (the C# app's arrangement preview, checked on Solomon's
+/// saves from FL 9 to 12).
+pub(super) fn top_slot(version: &str, highest: i64) -> i64 {
+    if from_12_9_1(version) || highest > 198 {
+        499
+    } else if highest > 98 {
+        198
+    } else {
+        98
+    }
+}
+
 /// Whether FL's version ("25.1.0.4868") is 12.9.1 or later, when FL started saving 500 playlist tracks.
-fn from_12_9_1(version: &str) -> bool {
+pub(super) fn from_12_9_1(version: &str) -> bool {
     let mut parts = version.split('.').map(|p| p.trim().parse::<u32>().ok());
     let mut next = || parts.next().flatten().unwrap_or(0);
     (next(), next(), next()) >= (12, 9, 1)
@@ -832,6 +866,7 @@ pub fn read_song_with(flp: &Flp<'_>, sounds: bool) -> FlSong {
     }
 
     let items = playlist.map(playlist_items).unwrap_or_default();
+    tracks.count_from(&items, &flp.version);
     let mixer = MixerSettings::new(mixer_settings);
     // An automation clip switched off in the Channel Rack doesn't play, like a muted one.
     links.retain(|(clip, _)| !off.contains(clip));
@@ -1095,6 +1130,7 @@ pub fn extract_channels(flp: &Flp<'_>) -> Vec<MidiChannel> {
     }
 
     let items = playlist.map(playlist_items).unwrap_or_default();
+    tracks.count_from(&items, &flp.version);
     let known = seen_channels;
     let notes: BTreeMap<u32, Vec<NoteEvent>> = place_clips(flp, &raw_notes, &items, &tracks, &known, &pattern_names)
         .0
@@ -1149,8 +1185,20 @@ mod tests {
         assert_eq!(tracks.number(499), 1);
         assert_eq!(tracks.number(498), 2);
         assert_eq!(tracks.number(1), 0, "track 499 wasn't kept");
-        // An older save counts down from the tracks it has.
+        // An older save counts down from where its clips' slots say the first track is, however many it kept.
         tracks.tracks_by_version = None;
-        assert_eq!(tracks.number(1), 1);
+        let item = |slot| PlaylistItem { index: 1, at: 0, length: 96, offset: 0.0, muted: false, slot };
+        tracks.count_from(&[item(198), item(197)], "11.0.3");
+        assert_eq!(tracks.number(198), 1);
+        assert_eq!(tracks.number(197), 2);
+    }
+
+    #[test]
+    fn counts_tracks_down_from_the_top_slot_the_version_saves() {
+        assert_eq!(top_slot("20.8.4.2576", 5), 499);
+        assert_eq!(top_slot("12.9.1", 0), 499);
+        assert_eq!(top_slot("12.5.1", 198), 198);
+        assert_eq!(top_slot("11.0.0", 98), 98, "a 2012 song with its clips on tracks 1 to 4");
+        assert_eq!(top_slot("9.0.0", 300), 499);
     }
 }

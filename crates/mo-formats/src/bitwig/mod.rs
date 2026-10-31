@@ -1,5 +1,6 @@
 //! Bitwig Studio's files: `.bwproject`, and `.bwpreset` and `.bwclip`, which are laid out the same.
 
+pub mod arrangement;
 pub mod encode;
 pub mod format;
 pub mod reader;

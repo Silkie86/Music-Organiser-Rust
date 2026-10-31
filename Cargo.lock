@@ -2868,6 +2868,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "mo-presets"
+version = "0.1.0"
+dependencies = [
+ "mo-formats",
+ "zip",
+]
+
+[[package]]
+name = "mo-sounds"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "mo-formats",
+ "regex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "mo-twin"
 version = "0.1.0"
 dependencies = [

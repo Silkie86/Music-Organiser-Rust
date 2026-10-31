@@ -3,6 +3,7 @@
 //! The format isn't published, but it's well worked out (the C# app's reader, PyFLP, and Solomon's saves from FL 4
 //! to FL 26). See [`events`] for how the file is laid out.
 
+pub mod arrangement;
 pub mod automation;
 pub mod events;
 mod notes;
@@ -23,8 +24,9 @@ pub const DAW: &str = "FL Studio";
 /// project again (rule 7). The C# reader is at 7; 8 is what the Rust reader finds differently (DIFFERENCES.md); 9 adds
 /// the samples a song holds but doesn't play; 10 reads damaged FL 4 to 8 notes at their version's size, finds the track
 /// of a clip in a save cut short in its track list, and warns about a song too big to place; 11 keeps the day a
-/// project was made to the tick, as the C# app does.
-pub const VERSION: u32 = 11;
+/// project was made to the tick, as the C# app does; 12 finds the playlist track of a clip in a save from before FL
+/// 12.9.1 by its slot, as the arrangement preview does, so mutes on those tracks count.
+pub const VERSION: u32 = 12;
 pub const EXTENSIONS: [&str; 1] = ["flp"];
 
 /// The Fruity Wrapper (FL's VST host) keeps a VST's details as records: u32 version, then (u32 id, u64 size, data).
