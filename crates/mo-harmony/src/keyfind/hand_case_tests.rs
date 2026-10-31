@@ -288,12 +288,16 @@ fn the_gates_can_fail() {
 
 #[test]
 fn case_5_checks_a_name_against_every_key_the_answer_gives() {
-    // "loop_Cmaj" beside case 2: some other key than Eb major alone, the parallel of C minor when the answer is a
-    // pair, and never taken as agreeing.
+    // "loop_Cmaj" beside case 2: some other key than Eb major alone, the parallel of C minor when the answer gives C
+    // minor too (a pair, or no clear key leaning to it), and never taken as agreeing.
     let eb_major = Key::major(PitchClass::new(3));
-    for (answer, keeps) in
-        [(KeyAnswer::Key(eb_major), true), (KeyAnswer::OrRelative(eb_major), true), (KeyAnswer::Key(C_MAJOR), false)]
-    {
+    let leaning = KeyAnswer::Unclear { why: Why::Spread, leaning: Some(C_MINOR) };
+    for (answer, keeps) in [
+        (KeyAnswer::Key(eb_major), true),
+        (KeyAnswer::OrRelative(eb_major), true),
+        (leaning, true),
+        (KeyAnswer::Key(C_MAJOR), false),
+    ] {
         let mut book = Book::read(&SHIPPED).unwrap();
         for (case, read) in &mut book.readings {
             match (case.name, read.as_mut()) {

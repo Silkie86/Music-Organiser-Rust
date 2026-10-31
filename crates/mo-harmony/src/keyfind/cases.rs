@@ -510,9 +510,10 @@ impl Book {
                         format!("5: a C major key signature is ignored, not {event:?}")
                     });
                     // A name is checked against every key the answer gives: C major is some other key than Eb
-                    // major, and the parallel of C minor when the answer is "Eb major or C minor".
+                    // major, and the parallel of C minor when the answer gives C minor too ("Eb major or C minor").
                     let named = Key::parse("Cmaj").map(|k| two.check_hint(k, HintSource::Name));
-                    let expected = if two.answer.names(C_MINOR) { HintCheck::Parallel } else { HintCheck::Disagrees };
+                    let pair = two.answer.keys().contains(&Some(C_MINOR));
+                    let expected = if pair { HintCheck::Parallel } else { HintCheck::Disagrees };
                     m.gate(named == Some(expected), || {
                         format!("5: \"loop_Cmaj\" beside case 2 is {expected:?}, not {named:?}; {}", said(two))
                     });

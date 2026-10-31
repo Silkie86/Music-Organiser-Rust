@@ -132,8 +132,9 @@ cargo run -p mo-theorybench --release -- keyfit path/to/bench/pop909cl.jsonl --a
 `--dump` writes how each case came out (right or not, and its log-loss). `--against` pairs each case with itself in
 that file and prints, for every set and kind of input, the share right and the log-loss before and now, each
 difference with its likely range (the songs drawn again, so a song's stretches stay together), and every set that got
-worse beyond its range. The two runs must cut the same cases (the same `--bars`, `--picks` and `--inputs`); a dump made
-otherwise is refused. `--hand` prints each fold's model's reading of the hand cases named, to see how near a gate is.
+worse beyond its range. The two runs must cut the same cases (the same `--bars` and `--inputs`; `--picks` only changes
+which are fitted on): a dump made otherwise is refused, and cases missing from it are named rather than skipped. A run
+can write its own dump to the file it's compared against. `--hand` prints each fold's model's reading of the hand cases named, to see how near a gate is.
 
 The design keeps a change only if, on folds 1 to 4, 8-bar accuracy rises with its range above 0 (or, for a choice of
 shape or calibration, log-loss falls by at least 0.01 while accuracy falls no more than 0.3 points); no set gets worse

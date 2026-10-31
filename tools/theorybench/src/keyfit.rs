@@ -807,6 +807,13 @@ pub fn run(args: &[String]) -> Result<(), String> {
             "--dump and --against compare runs on folds 1 to 4, for choosing; not with --final or --write".into()
         );
     }
+    // Read before this run writes its own dump, which may go to the same file.
+    let before = before
+        .map(|path| {
+            let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            Ok::<_, String>((path.display().to_string(), text))
+        })
+        .transpose()?;
     let mut lengths = setup.lengths.clone();
     lengths.sort_unstable();
     lengths.dedup();
@@ -926,24 +933,23 @@ pub fn run(args: &[String]) -> Result<(), String> {
         );
         let answers = answers_of(&cases, &chances, |c| fitted_answers.get(&fold(c)));
         report(&cases, &chances, &answers, &songs, |c| design.contains(&fold(c)), &inputs);
+        if let Some((name, text)) = &before {
+            let was = read_dump(name, text, &cases, &songs)?;
+            let worse = against(&cases, &chances, |c| design.contains(&fold(c)), &inputs, &was);
+            if worse.is_empty() {
+                println!("No set got worse beyond its range.");
+            } else {
+                println!("Worse beyond its range, or not comparable:");
+                for line in worse {
+                    println!("  {line}");
+                }
+            }
+        }
         if let Some(path) = &dump {
             std::fs::write(path, dump_text(&cases, &chances, &songs, |c| design.contains(&fold(c))))
                 .map_err(|e| format!("{}: {e}", path.display()))?;
             println!();
             println!("Each case's outcome written to {}.", path.display());
-        }
-        if let Some(path) = &before {
-            let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-            let was = read_dump(&path.display().to_string(), &text, &cases, &songs)?;
-            let worse = against(&cases, &chances, |c| design.contains(&fold(c)), &inputs, &was);
-            if worse.is_empty() {
-                println!("No set got worse beyond its range.");
-            } else {
-                println!("Worse beyond its range:");
-                for line in worse {
-                    println!("  {line}");
-                }
-            }
         }
         let finders: Vec<(String, keyfind::Model)> = models
             .iter()
@@ -1001,7 +1007,7 @@ fn dump_text(cases: &[Case], chances: &[Option<[f64; 24]>], songs: &[Song], keep
 }
 
 /// A run's outcomes read back from its dump (`--against`), by place in this run; refused if the dump's cases aren't
-/// this run's (other --bars, --picks or --inputs, or other music).
+/// this run's (other --bars or --inputs, or other music). Cases missing from it are named by the comparison.
 struct Dump {
     name: String,
     outcomes: Vec<Option<Outcome>>,
@@ -1009,7 +1015,7 @@ struct Dump {
 
 fn read_dump(name: &str, text: &str, cases: &[Case], songs: &[Song]) -> Result<Dump, String> {
     let mut outcomes = vec![None; cases.len()];
-    for (n, line) in text.lines().enumerate().filter(|(_, l)| !l.starts_with('#')) {
+    for (n, line) in text.lines().enumerate().filter(|(_, l)| !l.trim().is_empty() && !l.starts_with('#')) {
         let bad = || format!("{name} line {}: not a line --dump writes", n + 1);
         let fields: Vec<&str> = line.split('\t').collect();
         let [i, song, cut, input, right, nll] = fields.as_slice() else { return Err(bad()) };
@@ -1017,7 +1023,7 @@ fn read_dump(name: &str, text: &str, cases: &[Case], songs: &[Song]) -> Result<D
         let case = cases.get(i).ok_or_else(|| format!("{name}: case {i} isn't in this run"))?;
         if identity(case, songs) != format!("{song}\t{cut}\t{input}") {
             return Err(format!(
-                "{name}: case {i} is {song}, {cut}, {input} there but {} here; was it made with other options?",
+                "{name}: case {i} is {song}, {cut}, {input} there but {} here; was it made with other --bars or --inputs?",
                 identity(case, songs).replace('\t', ", ")
             ));
         }
@@ -1027,8 +1033,9 @@ fn read_dump(name: &str, text: &str, cases: &[Case], songs: &[Song]) -> Result<D
             _ => return Err(bad()),
         };
         let nll: f64 = nll.parse().map_err(|_| bad())?;
-        if let Some(slot) = outcomes.get_mut(i) {
-            *slot = Some(Outcome { right, nll });
+        match outcomes.get_mut(i) {
+            Some(slot @ None) => *slot = Some(Outcome { right, nll }),
+            _ => return Err(format!("{name} line {}: case {i} is there twice", n + 1)),
         }
     }
     Ok(Dump { name: name.to_owned(), outcomes })
@@ -1045,7 +1052,10 @@ fn against(
     was: &Dump,
 ) -> Vec<String> {
     println!();
-    println!("=== Against {} (each case paired with itself there; ranges with the songs drawn again) ===", was.name);
+    println!(
+        "=== Against {} (each case in both runs paired with itself; ranges with the songs drawn again) ===",
+        was.name
+    );
     println!(
         "{:<30} {:<20} {:>7} {:>7} {:>7}   {:<22} {:>7} {:>7}   difference (range)",
         "", "", "cases", "before", "now", "difference (range)", "NLL was", "now"
@@ -1053,14 +1063,26 @@ fn against(
     let mut worse = Vec::new();
     for (cut, one_key) in sets(cases, &keep) {
         for &input in inputs {
-            let pairs: Vec<(usize, Outcome, Outcome)> = members(cases, &keep, cut, one_key, input)
-                .into_iter()
-                .filter_map(|i| {
+            let members = members(cases, &keep, cut, one_key, input);
+            let pairs: Vec<(usize, Outcome, Outcome)> = members
+                .iter()
+                .filter_map(|&i| {
                     let case = cases.get(i)?;
                     let now = Outcome::of(case, chances.get(i)?.as_ref()?);
                     Some((case.song, was.outcomes.get(i).copied().flatten()?, now))
                 })
                 .collect();
+            let title = set_title(cut, one_key);
+            // A case with an outcome in only one run (a dump cut short, or a finder that now has no chances there)
+            // can't be paired: say so, rather than compare the rest as if they were all.
+            if pairs.len() < members.len() {
+                worse.push(format!(
+                    "{title}, {}: {} of {} cases not in both runs, left out",
+                    input.name(),
+                    members.len() - pairs.len(),
+                    members.len()
+                ));
+            }
             if pairs.is_empty() {
                 continue;
             }
@@ -1072,7 +1094,6 @@ fn against(
             let nll = |f: fn(&(usize, Outcome, Outcome)) -> f64| pairs.iter().map(f).sum::<f64>() / pairs.len() as f64;
             let diff: Vec<f64> = pairs.iter().map(|(_, b, n)| n.nll - b.nll).collect();
             let d = metrics::mean(&diff, &song);
-            let title = set_title(cut, one_key);
             println!(
                 "{:<30} {:<20} {:>7} {:>6.1}% {:>6.1}%   {:<22} {:>7.3} {:>7.3}   {:+.3} ({:+.3} to {:+.3})",
                 title,
@@ -1201,11 +1222,9 @@ fn report(
             let mo_right: Vec<bool> = mo.iter().map(Answer::right).collect();
             let p = metrics::paired(&cs_right, &mo_right, &song);
             let sure: Vec<(Option<f64>, bool)> = mo.iter().map(|a| (a.found.map(|f| f.sure), a.right())).collect();
-            let nll = mo
-                .iter()
-                .filter_map(|a| a.found.and_then(|f| f.chances).map(|c| -c[a.truth.index()].max(1e-12).ln()))
-                .sum::<f64>()
-                / mo.len().max(1) as f64;
+            let nll =
+                members.iter().filter_map(|&i| Some(Outcome::of(&cases[i], chances[i].as_ref()?).nll)).sum::<f64>()
+                    / mo.len().max(1) as f64;
             let mean_sure = sure.iter().filter_map(|s| s.0).sum::<f64>() / mo.len().max(1) as f64;
             compact.push(format!(
                 "{:<30} {:<20} {:>7} {:>7.1}% {:>7.1}% {:>+6.1} ({:+.1} to {:+.1}) {:>5.1}% {:>6.3} {:>6.3} {:>6.3}",
@@ -1595,6 +1614,10 @@ mod tests {
         let refused = read_dump("before.tsv", &text, &other, &songs).err().unwrap();
         assert!(refused.contains("tune only here"), "{refused}");
         assert!(read_dump("before.tsv", "0\tpop909/000\tWhole songs\tfull mix\t2\t0.1\n", &cases, &songs).is_err());
+        // Blank lines are skipped; a case written twice is refused.
+        assert!(read_dump("before.tsv", &format!("\n{text}\n\n"), &cases, &songs).is_ok());
+        let twice = read_dump("before.tsv", &format!("{text}{text}"), &cases, &songs).err().unwrap();
+        assert!(twice.contains("case 0 is there twice"), "{twice}");
     }
 
     #[test]
@@ -1611,6 +1634,12 @@ mod tests {
         assert_eq!(named.len(), 2, "{named:?}");
         assert!(named[0].starts_with("Whole songs with one key, full mix: -33.3 points right"), "{named:?}");
         assert!(named[1].contains("log-loss +"), "{named:?}");
+        // A dump cut short: the cases it lacks are named, not quietly left out.
+        let short: String =
+            dump_text(&cases, &sure, &songs, |_| true).lines().take(41).map(|l| format!("{l}\n")).collect();
+        let was = read_dump("before.tsv", &short, &cases, &songs).unwrap();
+        let named = against(&cases, &sure, |_| true, &[Input::Full], &was);
+        assert_eq!(named, ["Whole songs with one key, full mix: 20 of 60 cases not in both runs, left out"]);
     }
 
     #[test]
