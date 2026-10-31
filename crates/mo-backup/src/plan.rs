@@ -179,7 +179,7 @@ impl Used {
 pub struct SongInfo<'a> {
     pub report: &'a SongSpaceReport,
     pub saves: &'a [SongSave],
-    /// More milestone saves on top of those found here (ones you've marked, ones where the song changed a lot).
+    /// More milestone saves on top of those found here: ones you've marked, and [`big_changes`].
     pub milestones: &'a [String],
 }
 
@@ -216,6 +216,65 @@ pub fn milestones(saves: &[SongSave], more: &[String]) -> HashSet<String> {
         last_of_day.insert(day, s);
     }
     out.extend(last_of_day.values().map(|s| key(&s.path)));
+    out
+}
+
+/// What a save holds, as the readers count it: enough to tell when a song changed a lot between two saves.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SaveShape {
+    pub path: String,
+    pub modified: chrono::NaiveDateTime,
+    pub tracks: u32,
+    pub plugins: u32,
+    pub samples: u32,
+    /// How long the arrangement runs, in beats, when the reader knows.
+    pub length_beats: Option<f64>,
+}
+
+/// Tracks or plugins added (or taken away) in one go that make a big change.
+const BIG_STEP: u32 = 3;
+/// Samples added or taken away in one go that make a big change.
+const BIG_SAMPLE_STEP: u32 = 5;
+/// The arrangement growing or shrinking by this share, and by at least [`BIG_LENGTH_BEATS`], is a big change.
+const BIG_LENGTH_SHARE: f64 = 0.25;
+/// Four bars of 4/4: a smaller change in length is never a big one.
+const BIG_LENGTH_BEATS: f64 = 16.0;
+
+/// The saves where the song changed a lot from the save before it (Solomon, 31 Oct 2026: milestones are the last save
+/// of each day plus big changes). A save that grew a lot is a milestone; when a lot was taken away, the save before
+/// (the last one that still had it) is the milestone, so what was cut can be found again. Give each save of one song;
+/// each path comes back once, in time order.
+pub fn big_changes(shapes: &[SaveShape]) -> Vec<String> {
+    let mut ordered: Vec<&SaveShape> = shapes.iter().collect();
+    ordered.sort_by_key(|s| s.modified);
+    let mut out = Vec::new();
+    for pair in ordered.windows(2) {
+        let (before, after) = (pair[0], pair[1]);
+        let grew = |a: u32, b: u32, step: u32| b >= a.saturating_add(step);
+        let length = match (before.length_beats, after.length_beats) {
+            (Some(a), Some(b)) => Some((a, b)),
+            _ => None,
+        };
+        let longer = length.is_some_and(|(a, b)| b - a >= BIG_LENGTH_BEATS && b - a >= a * BIG_LENGTH_SHARE);
+        let shorter = length.is_some_and(|(a, b)| a - b >= BIG_LENGTH_BEATS && a - b >= a * BIG_LENGTH_SHARE);
+        if grew(before.tracks, after.tracks, BIG_STEP)
+            || grew(before.plugins, after.plugins, BIG_STEP)
+            || grew(before.samples, after.samples, BIG_SAMPLE_STEP)
+            || longer
+        {
+            out.push(after.path.clone());
+        }
+        if grew(after.tracks, before.tracks, BIG_STEP)
+            || grew(after.plugins, before.plugins, BIG_STEP)
+            || grew(after.samples, before.samples, BIG_SAMPLE_STEP)
+            || shorter
+        {
+            out.push(before.path.clone());
+        }
+    }
+    // A save can be both a big step up and the last before a big cut: it's one milestone.
+    let mut seen: HashSet<String> = HashSet::new();
+    out.retain(|p| seen.insert(key(p)));
     out
 }
 
