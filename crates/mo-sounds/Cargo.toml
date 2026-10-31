@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 chrono.workspace = true
+mo-audio = { path = "../mo-audio" }
 mo-formats = { path = "../mo-formats" }
 mo-library = { path = "../mo-library" }
 regex = { version = "1", default-features = false, features = ["std", "unicode", "perf"] }

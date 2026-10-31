@@ -2995,6 +2995,7 @@ name = "mo-sounds"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "mo-audio",
  "mo-formats",
  "mo-library",
  "regex",
@@ -3036,8 +3037,10 @@ dependencies = [
 name = "mo-twin"
 version = "0.1.0"
 dependencies = [
+ "mo-audio",
  "mo-formats",
  "mo-library",
+ "mo-sounds",
  "rayon",
  "serde_json",
  "sha2",

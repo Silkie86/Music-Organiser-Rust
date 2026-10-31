@@ -157,6 +157,8 @@ jobs:
           # The C# app as the Rust readers were last measured against; moved on purpose, with expected.txt.
           ref: 4515ce8533eabff9669719d784834f0d1f77d59a
           path: old
+      # The twin tool uses mo-audio, whose sound output needs ALSA's headers on Linux.
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
@@ -170,3 +172,6 @@ jobs:
           -p:MoBuildNative=false -p:MoBuildBitwig=false
       - name: Both apps read the test files
         run: cargo run -p mo-twin -- run --cs "$RUNNER_TEMP/twin-cs/twin-cs.dll" "$RUNNER_TEMP/twin" --expect tools/twin/expected.txt
+      # The sound analysers: test sounds made by the twin tool (none is anyone's sample), analysed by both apps.
+      - name: Both apps analyse the test sounds
+        run: cargo run -p mo-twin -- sounds --cs "$RUNNER_TEMP/twin-cs/twin-cs.dll" "$RUNNER_TEMP/twin-sounds"

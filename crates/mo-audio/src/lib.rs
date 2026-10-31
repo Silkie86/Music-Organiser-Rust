@@ -7,6 +7,7 @@
 //!
 //! Every read is bounded: a damaged or cut-short file gives an error or the part that's there, never a crash.
 
+pub mod dsp;
 mod other;
 pub mod play;
 mod read;

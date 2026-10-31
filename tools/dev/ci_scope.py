@@ -8,8 +8,8 @@ Reads the files the PR changes (one per line, on stdin) and writes GitHub Action
 - check:     "-p a -p b": those crates and every crate that uses them, however far up. Clippy checks them all, and
              Linux runs all their tests, so a change that breaks a crate further up still fails the PR.
 - ui:        "true" when the screens could look different (mo-ui, mo-app or what they use): the screenshots run.
-- formats:   "true" when what the readers find could change (mo-formats, mo-library or the twin tool): the twin
-             test runs.
+- formats:   "true" when what the readers find could change (mo-formats, mo-library, the sound analyser in mo-audio
+             and mo-sounds, or the twin tool): the twin test runs.
 - galaxy:    "true" when the galaxy check (a workspace of its own), mo-app or what mo-app uses changed.
 - launcher:  "true" when the PowerShell launcher scripts changed.
 - rust:      "true" when any crate is to be checked at all (a PR of only notes checks none).
@@ -73,7 +73,7 @@ def scope(changed, crates, full=False):
                 grew = True
 
     result["ui"] = bool(check & {"mo-ui", "mo-app"})
-    result["formats"] = bool(result["test"] & {"mo-formats", "mo-library", "mo-twin"})
+    result["formats"] = bool(result["test"] & {"mo-formats", "mo-library", "mo-audio", "mo-sounds", "mo-twin"})
     result["galaxy"] = result["galaxy"] or "mo-app" in check
     result["check"] = check
     if result["full"]:
