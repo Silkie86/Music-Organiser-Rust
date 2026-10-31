@@ -1021,7 +1021,10 @@ fn graded(cases: &[(&Case, Option<[f64; 24]>)]) -> String {
         .iter()
         .zip(&tally)
         .map(|(name, &(n, right, said))| {
-            let of = n.max(1) as f64;
+            if n == 0 {
+                return format!("{name} 0%");
+            }
+            let of = n as f64;
             format!("{name} {:.1}% ({:.1}% right, said {:.1}%)", share(n, total), share(right, of), 100.0 * said / of)
         })
         .collect();

@@ -23,7 +23,8 @@ pub mod spell;
 pub use chord::{Chord, Family, ToneRole};
 pub use key::{Key, KeyRelation, Mode};
 pub use keyfind::{
-    Colours, Heard, HintCheck, HintSource, KEY_FINDER_VERSION, KeyAnswer, KeyFact, KeyReader, KeyReading, Span, find_key,
+    Colours, Heard, HintCheck, HintSource, KEY_FINDER_VERSION, KeyAnswer, KeyFact, KeyReader, KeyReading, Span,
+    find_key,
 };
 pub use notes::{Grid, Note, Part, Role};
 pub use pitch::{PcSet, PerPitch, PitchClass};
