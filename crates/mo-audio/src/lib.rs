@@ -2,11 +2,13 @@
 //!
 //! WAV and AIFF are read here, byte for byte as the C# app's `Sounds/AudioFile.cs` reads them, with the notes some
 //! sample packs keep inside them (an ACID chunk's tempo and loop flag, a sampler chunk's root note). MP3, FLAC, M4A,
-//! OGG and AAC are decoded with symphonia, on every system. Resampling and playback come next.
+//! OGG and AAC are decoded with symphonia, on every system. [`play::Player`] plays one sound at a time through the
+//! output chosen, and carries on when that output goes and comes back.
 //!
 //! Every read is bounded: a damaged or cut-short file gives an error or the part that's there, never a crash.
 
 mod other;
+pub mod play;
 mod read;
 mod write;
 
