@@ -14,3 +14,5 @@ mo-library = { path = "../mo-library" }
 rayon.workspace = true
 regex = { version = "1", default-features = false, features = ["std", "unicode", "perf"] }
 rusqlite = { version = "0.41", features = ["bundled"] }
+# The note hash, as the C# app makes it.
+sha2 = "0.10"

@@ -50,7 +50,7 @@ impl From<rusqlite::Error> for MidiError {
 
 /// Stops what a [`MidiIndex`] is reading, from another thread: when a newer read is wanted, the older one ends at
 /// once, even while SQLite is still sorting (rule 12, newest wins). The read then ends with [`MidiError::Stopped`].
-pub struct Stopper(InterruptHandle);
+pub struct Stopper(pub(crate) InterruptHandle);
 
 impl Stopper {
     pub fn stop(&self) {
@@ -316,6 +316,26 @@ impl MidiIndex {
             list.push(phrase_of(r, source)?);
         }
         Ok(list)
+    }
+
+    /// What you said each set of notes is, in the C# app, by note hash.
+    pub fn your_roles(&self) -> Result<HashMap<String, Role>, MidiError> {
+        if !self.has_roles {
+            return Ok(HashMap::new());
+        }
+        let mut st = self.conn.prepare("SELECT hash, role FROM your_roles")?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, Role::from_name(&r.get::<_, String>(1)?))))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The octaves you moved each set of notes by, in the C# app, by note hash.
+    pub fn your_octaves(&self) -> Result<HashMap<String, i32>, MidiError> {
+        if !self.has_octaves {
+            return Ok(HashMap::new());
+        }
+        let mut st = self.conn.prepare("SELECT hash, octaves FROM your_octaves")?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?.clamp(-10, 10) as i32)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// A part's notes, at [`crate::PPQ`]. A file read again gets new ids, so while the list shown still has the old

@@ -1,0 +1,21 @@
+[package]
+name = "mo-miditwin"
+description = "The MIDI twin test: works out every part in the C# app's midi.db again with the Rust analyser, and lists every difference."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "midi-twin"
+path = "src/main.rs"
+
+[dependencies]
+mo-formats = { path = "../../crates/mo-formats" }
+mo-library = { path = "../../crates/mo-library" }
+mo-midi = { path = "../../crates/mo-midi" }
+rayon.workspace = true
+regex = { version = "1", default-features = false, features = ["std", "unicode", "perf"] }
+thread-priority.workspace = true
