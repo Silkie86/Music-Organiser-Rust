@@ -67,6 +67,22 @@ impl SongPreset {
     }
 }
 
+/// Each sound's key within its save: its [`SongPreset::place_key`], with "~2", "~3"... after the second and later of
+/// sounds that share one (two Fruity Limiters on one insert), in the order the save has them. So a key always names
+/// exactly one sound, and the same one each time the save is read.
+pub fn place_keys(sounds: &[SongPreset]) -> Vec<String> {
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    sounds
+        .iter()
+        .map(|s| {
+            let key = s.place_key();
+            let n = seen.entry(key.clone()).or_insert(0);
+            *n += 1;
+            if *n == 1 { key } else { format!("{key}~{n}") }
+        })
+        .collect()
+}
+
 /// The sounds in an FL Studio project's bytes, with their parts guessed. `None` when it isn't an FL project.
 pub fn read_fl(raw: &[u8], limits: &Thresholds) -> Option<Vec<SongPreset>> {
     let flp = events::load(raw).ok()?;

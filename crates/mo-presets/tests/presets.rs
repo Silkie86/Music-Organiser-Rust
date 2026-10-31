@@ -332,6 +332,17 @@ fn an_fl_songs_sounds_get_their_channels_parts_and_effects_their_inserts() {
 
     assert!(out[7].plays_nothing && out[7].guess.role.is_none(), "{}", out[7].guess.reason);
     assert_ne!(out[0].place_key(), out[7].place_key(), "two Serum channels are told apart in their save");
+    // Two of one effect on one insert: numbered, so each key names one sound.
+    let twice = list::from_fl(
+        &song,
+        vec![
+            blob("Fruity Limiter", "Fruity Limiter", PluginKind::Effect, None, "Insert 3", true),
+            blob("Fruity Limiter", "Fruity Limiter", PluginKind::Effect, None, "Insert 3", true),
+        ],
+        &Thresholds::default(),
+    );
+    let keys = list::place_keys(&twice);
+    assert_eq!(keys[1], format!("{}~2", keys[0]));
 
     // A fix wins, and is kept by the plugin, its settings and the notes it plays. These made-up presets all have
     // the same settings, so only the plugin and the notes tell them apart.
