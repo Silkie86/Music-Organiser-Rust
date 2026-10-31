@@ -6,6 +6,7 @@
 use mo_formats::paths::file_name;
 use mo_library::{PluginKind, ProjectPlugin, ProjectSample, Save, SaveDetail};
 
+use crate::shell::folder_of;
 use crate::songs::{SongRow, plural, tempo_text, thousands};
 
 /// The line above the name: "124 BPM · First made 3 Mar 2019 · saved 27 Oct 2026", or "Saved 27 Oct 2026" when it
@@ -36,12 +37,6 @@ pub fn saves_text(row: &SongRow) -> String {
         text.push_str(&format!(" · runs: {}", runs.join(", ")));
     }
     text
-}
-
-/// The folder part of a path: everything before its file name.
-pub fn folder_of(path: &str) -> &str {
-    let name = file_name(path);
-    path.get(..path.len() - name.len()).unwrap_or_default().trim_end_matches(['\\', '/'])
 }
 
 /// "No plugins", "1 plugin", "1,234 plugins".

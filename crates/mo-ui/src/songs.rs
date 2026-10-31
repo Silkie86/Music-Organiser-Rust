@@ -4,11 +4,14 @@
 //! save's plugins, samples and details follow from a background thread that only reads the last song picked.
 
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use chrono::{Local, NaiveDateTime};
+use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
 use mo_app::log;
+use mo_app::shell;
 use mo_app::song_panel::{self as panel, SaveLine as PanelSaveLine, Tab};
 use mo_app::songs::{Entry, Filters, SongRow, Songs, View};
 use mo_library::songs::DEFAULT_RUN_GAP_MONTHS;
@@ -53,6 +56,8 @@ thread_local! {
     static LINES: Rc<Lines> = PAGE.with(|p| Rc::new(Lines { page: p.clone(), notify: ModelNotify::default() }));
     /// Reads a save's record for the panel, one at a time, newest ask first.
     static READER: RefCell<Option<Newest<(u64, i64)>>> = const { RefCell::new(None) };
+    /// The library's file, for the DAW picked in Settings, and the activity cards, for Open.
+    static OPENER: RefCell<Option<(PathBuf, Feed)>> = const { RefCell::new(None) };
 }
 
 /// The list's lines, made from the page's view one at a time as the list draws them, so a new search doesn't build
@@ -79,9 +84,21 @@ impl Model for Lines {
     }
 }
 
-/// Wires the page's search box and chips, and starts reading the library at `path` in the background.
-pub fn connect(app: &AppWindow, path: std::path::PathBuf) {
+/// Wires the page's search box and chips, and starts reading the library at `path` in the background. Open, Show in
+/// folder and Copy path report on `feed`'s cards.
+pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
     let data = app.global::<SongsData>();
+    OPENER.with(|o| *o.borrow_mut() = Some((path.clone(), feed)));
+    data.on_open(|| with_picked(|r| open_save(&r.song.latest.path, &r.song.latest.daw, &r.song.latest.name)));
+    data.on_open_save(|path| {
+        with_picked(|r| {
+            if let Some(s) = r.song.saves().find(|s| s.path == path.as_str()) {
+                open_save(&s.path, &s.daw, &s.name);
+            }
+        });
+    });
+    data.on_reveal(|| with_picked(|r| reveal(&r.song.latest.path)));
+    data.on_copy_path(|| with_picked(|r| copy_path(&r.song.latest.path)));
     data.set_statuses(strings(STATUSES.iter().copied()));
     let weak = app.as_weak();
     data.on_search_edited(move |text| {
@@ -395,4 +412,88 @@ pub fn show_picked(app: &AppWindow, row: usize, detail: SaveDetail, tab: Tab) {
     let asked = PAGE.with(|p| p.borrow().asked);
     arrived(app, asked, Ok(Some(detail)));
     app.global::<SongsData>().set_tab(tab.index() as i32);
+}
+
+/// Runs one of the Songs page's own shortcuts ([`mo_app::shortcuts::SONGS_ACTIONS`]). Returns whether it did
+/// anything, so an unused key goes on.
+pub fn run_action(app: &AppWindow, id: &str) -> bool {
+    let data = app.global::<SongsData>();
+    if data.get_selected() < 0 {
+        return false;
+    }
+    match id {
+        "projects.open" => data.invoke_open(),
+        "projects.reveal" => data.invoke_reveal(),
+        "projects.copyPath" => data.invoke_copy_path(),
+        _ => return false,
+    }
+    true
+}
+
+/// Does `f` with the picked song's row, when a song is picked.
+fn with_picked(f: impl FnOnce(&SongRow)) {
+    PAGE.with(|p| {
+        let p = p.borrow();
+        if let Some(r) = p.picked.and_then(|i| p.songs.rows.get(i)) {
+            f(r);
+        }
+    });
+}
+
+/// Opens a save in its DAW: the one picked in Settings (shared with the C# app), else whatever opens its kind of
+/// file. Off the window's thread: handing a file to a DAW that's already running can keep the system busy for
+/// seconds. The library is read-only for now, so the save's "last opened" isn't noted yet.
+fn open_save(path: &str, daw: &str, name: &str) {
+    let Some((db, feed)) = OPENER.with(|o| o.borrow().clone()) else { return };
+    let (path, daw, name) = (path.to_owned(), daw.to_owned(), name.to_owned());
+    let started = background::spawn("Open", move || {
+        if !shell::exists(&path) {
+            feed.start(&format!("Can't find {name}"), "")
+                .failed("It has moved or been deleted since the library last looked. Rescan to update the library.");
+            return;
+        }
+        let exe =
+            Library::open_read_only(&db).ok().and_then(|lib| lib.setting(&shell::daw_exe_key(&daw)).ok().flatten());
+        let exe = exe.filter(|e| shell::exists(e) || e.ends_with(".app"));
+        let job = feed.start(&format!("Opening {name}"), "");
+        match shell::run(&shell::open(&path, exe.as_deref(), shell::Os::THIS)) {
+            Ok(()) => job.done(&format!("Sent to {daw}. It opens there in a moment.")),
+            Err(e) => {
+                log::warning("Open", &format!("{path}: {e}"));
+                job.failed(&format!("Couldn't open it in {daw}: {e}"));
+            }
+        }
+    });
+    if let Err(e) = started {
+        log::error("Open", &format!("Couldn't start opening a save: {e}"));
+    }
+}
+
+/// Shows the file picked in its folder, or the folder when the file has gone.
+fn reveal(path: &str) {
+    let Some((_, feed)) = OPENER.with(|o| o.borrow().clone()) else { return };
+    let path = path.to_owned();
+    let started = background::spawn("Show in folder", move || {
+        let launch = shell::reveal(&path, shell::exists(&path), shell::Os::THIS);
+        if let Err(e) = shell::run(&launch) {
+            log::warning("Show in folder", &format!("{path}: {e}"));
+            feed.start("Couldn't show the file", "").failed(&e.to_string());
+        }
+    });
+    if let Err(e) = started {
+        log::error("Show in folder", &format!("Couldn't start: {e}"));
+    }
+}
+
+/// Puts the file's path on the clipboard.
+fn copy_path(path: &str) {
+    let copied = arboard::Clipboard::new().and_then(|mut c| c.set_text(path.to_owned()));
+    let Some((_, feed)) = OPENER.with(|o| o.borrow().clone()) else { return };
+    match copied {
+        Ok(()) => feed.start("Copied the path", "").done(path),
+        Err(e) => {
+            log::warning("Copy path", &e.to_string());
+            feed.start("Couldn't copy the path", "").failed(&e.to_string());
+        }
+    }
 }

@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use mo_app::activity::Feed;
 use mo_app::log;
 use mo_app::places::Place;
-use mo_app::shortcuts::{APP_ACTIONS, Shortcuts, repeats};
+use mo_app::shortcuts::{APP_ACTIONS, SONGS_ACTIONS, Shortcuts, repeats};
 use mo_app::themes::Look;
 use note::open_note;
 use slint::platform::Key;
@@ -64,6 +64,13 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> R
                 true
             });
         }
+        // A page's own key beats an app-wide one.
+        if let Some(app) = weak.upgrade()
+            && app.get_place() == Place::Songs.index() as i32
+            && let Some(id) = shortcuts.page_action_for(&key, SONGS_ACTIONS)
+        {
+            return repeat || songs::run_action(&app, id);
+        }
         let Some(id) = shortcuts.action_for(&key) else { return false };
         // A key held down did its job once (unless it's one that steps), and the page behind doesn't get it either.
         if repeat && !repeats(id) {
@@ -96,6 +103,11 @@ fn key_rows(shortcuts: &Shortcuts) -> Vec<KeyRow> {
             KeyRow { key: shortcuts.key_of(a.id).into(), what: what.into() }
         })
         .collect();
+    rows.extend(
+        SONGS_ACTIONS
+            .iter()
+            .map(|a| KeyRow { key: shortcuts.key_of(a.id).into(), what: format!("Songs: {}", a.what).into() }),
+    );
     rows.push(KeyRow { key: "F12".into(), what: "Write a note for Claude about what's on screen".into() });
     rows
 }

@@ -1,7 +1,7 @@
 // The Songs page: one line per song, newest save first, under time headings, with search, filter chips and a year
 // scrubber, and the picked song's panel beside it. Agreed with Solomon on 2026-10-31.
 import { ListView } from "std-widgets.slint";
-import { Theme, Well, SearchBox, ToggleChip, MenuChip, ListLine, Stars, YearMark, Caps, Heart, CloseButton, TabBar, LinkText } from "../studio.slint";
+import { Theme, Well, SearchBox, ToggleChip, MenuChip, ListLine, Stars, YearMark, Caps, Heart, CloseButton, TabBar, LinkText, StudioButton } from "../studio.slint";
 
 // One line of the list: a heading ("This week", "2019") when `heading` isn't empty, else a song.
 export struct SongLine {
@@ -119,6 +119,12 @@ export global SongsData {
     callback toggle(string);
     callback clear();
     callback select(int);
+    // Opens the picked song's newest save in its DAW.
+    callback open();
+    // Opens one save of the picked song, by its path.
+    callback open-save(string);
+    callback reveal();
+    callback copy-path();
     callback close-panel();
     // Every line is one of two heights, so a year's place in the list can be worked out.
     out property <length> heading-height: 34px;
@@ -221,6 +227,25 @@ component SongPanel inherits Rectangle {
                 overflow: elide;
             }
         }
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            vertical-stretch: 0;
+            padding-bottom: 4px;
+            StudioButton {
+                text: "Open in " + SongsData.song.daw;
+                main: true;
+                clicked => { SongsData.open(); }
+            }
+            StudioButton {
+                text: "Show in folder";
+                clicked => { SongsData.reveal(); }
+            }
+            StudioButton {
+                text: "Copy path";
+                clicked => { SongsData.copy-path(); }
+            }
+        }
         if SongsData.song.notes != "": Text {
             text: SongsData.song.notes;
             color: Theme.muted;
@@ -308,7 +333,10 @@ component SongPanel inherits Rectangle {
                                 overflow: elide;
                             }
                         }
-                        if line.run == "": HorizontalLayout {
+                        // Double-click a save to open it.
+                        if line.run == "": ListLine {
+                          double-clicked => { SongsData.open-save(line.path); }
+                          HorizontalLayout {
                             padding-left: 8px;
                             spacing: 12px;
                             Text {
@@ -334,6 +362,7 @@ component SongPanel inherits Rectangle {
                                 font-size: 12px;
                                 vertical-alignment: center;
                             }
+                          }
                         }
                     }
                 }
@@ -479,6 +508,11 @@ export component SongsPage inherits Rectangle {
                     SongsData.search-edited("");
                     return true;
                 }
+                // Enter opens the picked song.
+                if (k == Key.Return && SongsData.selected >= 0) {
+                    SongsData.open();
+                    return true;
+                }
                 // With the search already empty, Esc puts the song panel away.
                 if (k == Key.Escape && SongsData.selected >= 0) {
                     SongsData.close-panel();
@@ -564,6 +598,10 @@ export component SongsPage inherits Rectangle {
                                 width: parent.width - 8px;
                                 selected: line.row == SongsData.selected;
                                 clicked => { SongsData.select(line.row); }
+                            double-clicked => {
+                                SongsData.select(line.row);
+                                SongsData.open();
+                            }
                                 HorizontalLayout {
                                     padding-left: 14px;
                                     padding-right: 14px;

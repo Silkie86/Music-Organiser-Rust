@@ -57,12 +57,25 @@ pub const APP_ACTIONS: &[Action] = &[
     action("app.sizeReset", "This page back to the size of the rest", "Ctrl+0"),
 ];
 
+/// The Songs page's own actions. The ids are the C# app's Projects page's, so a key changed in either app carries
+/// across.
+pub const SONGS_ACTIONS: &[Action] = &[
+    action("projects.open", "Open the picked song in its DAW", "Ctrl+O"),
+    action("projects.reveal", "Show the picked song's file in its folder", "Ctrl+Shift+E"),
+    action("projects.copyPath", "Copy where the picked song's file is", "Ctrl+Shift+C"),
+];
+
+/// Every page's own list. A page's keys only work on that page, so two pages may share a key.
+pub const PAGE_ACTIONS: &[&[Action]] = &[SONGS_ACTIONS];
+
 /// The keys in use: the defaults with your changes on top.
 #[derive(Clone, Debug)]
 pub struct Shortcuts {
     changed: HashMap<String, String>,
-    /// Each key in use, written by `normalise`, to the action it runs. Built once, not on every key press.
+    /// Each key in use, written by `normalise`, to the app-wide action it runs. Built once, not on every key press.
     by_key: HashMap<String, &'static str>,
+    /// The same for each page's own list: the key to the page actions that have it, one per page.
+    page_keys: HashMap<String, Vec<&'static str>>,
 }
 
 impl Default for Shortcuts {
@@ -91,7 +104,25 @@ impl Shortcuts {
                 by_key.entry(normalise(a.default_key)).or_insert(a.id);
             }
         }
-        Shortcuts { changed, by_key }
+        // The same for each page, among that page's own actions.
+        let mut page_keys: HashMap<String, Vec<&'static str>> = HashMap::new();
+        for page in PAGE_ACTIONS {
+            let mut mine: HashMap<String, &'static str> = HashMap::new();
+            for a in page.iter() {
+                if let Some(k) = changed.get(a.id).filter(|k| !k.is_empty()) {
+                    mine.insert(normalise(k), a.id);
+                }
+            }
+            for a in page.iter() {
+                if !changed.contains_key(a.id) && !a.default_key.is_empty() {
+                    mine.entry(normalise(a.default_key)).or_insert(a.id);
+                }
+            }
+            for (k, id) in mine {
+                page_keys.entry(k).or_default().push(id);
+            }
+        }
+        Shortcuts { changed, by_key, page_keys }
     }
 
     /// The key an action has now, or "" for none.
@@ -100,11 +131,24 @@ impl Shortcuts {
             return k;
         }
         // A default key that another action has taken over is no longer this one's.
-        APP_ACTIONS
+        if let Some(a) = APP_ACTIONS.iter().find(|a| a.id == id) {
+            return if self.by_key.get(&normalise(a.default_key)) == Some(&a.id) { a.default_key } else { "" };
+        }
+        PAGE_ACTIONS
             .iter()
+            .flat_map(|page| page.iter())
             .find(|a| a.id == id)
-            .filter(|a| self.by_key.get(&normalise(a.default_key)) == Some(&a.id))
+            .filter(|a| self.page_keys.get(&normalise(a.default_key)).is_some_and(|ids| ids.contains(&a.id)))
             .map_or("", |a| a.default_key)
+    }
+
+    /// The action of `page` (one of [`PAGE_ACTIONS`]) a key press stands for, if any. A page's own key beats an
+    /// app-wide one, so this is asked first.
+    pub fn page_action_for(&self, key: &str, page: &[Action]) -> Option<&'static str> {
+        if key.is_empty() {
+            return None;
+        }
+        self.page_keys.get(&normalise(key))?.iter().copied().find(|id| page.iter().any(|a| a.id == *id))
     }
 
     /// The app-wide action a key press stands for, if any. `key` is written like the list ("Ctrl+1").
@@ -220,10 +264,41 @@ mod tests {
 
     #[test]
     fn ids_are_unique() {
-        let mut ids: Vec<_> = APP_ACTIONS.iter().map(|a| a.id).collect();
+        let all: Vec<_> = APP_ACTIONS.iter().chain(PAGE_ACTIONS.iter().flat_map(|p| p.iter())).map(|a| a.id).collect();
+        let mut ids = all.clone();
         ids.sort();
         ids.dedup();
-        assert_eq!(ids.len(), APP_ACTIONS.len());
+        assert_eq!(ids.len(), all.len());
+    }
+
+    #[test]
+    fn page_keys_work_on_their_page_and_carry_changes() {
+        let s = Shortcuts::default();
+        assert_eq!(s.page_action_for("Ctrl+O", SONGS_ACTIONS), Some("projects.open"));
+        assert_eq!(s.page_action_for("ctrl+shift+e", SONGS_ACTIONS), Some("projects.reveal"));
+        assert_eq!(s.page_action_for("Ctrl+O", &[]), None);
+        assert_eq!(s.key_of("projects.copyPath"), "Ctrl+Shift+C");
+        // A key changed in the C# app's Projects page carries across.
+        let s = Shortcuts::from_setting(Some(r#"{"projects.open":"Enter","projects.reveal":"Ctrl+O"}"#));
+        assert_eq!(s.page_action_for("Enter", SONGS_ACTIONS), Some("projects.open"));
+        assert_eq!(s.page_action_for("Ctrl+O", SONGS_ACTIONS), Some("projects.reveal"));
+        assert_eq!(s.key_of("projects.reveal"), "Ctrl+O");
+        assert_eq!(s.page_action_for("Ctrl+Shift+E", SONGS_ACTIONS), None);
+    }
+
+    #[test]
+    fn page_keys_are_unique_on_their_page_and_not_kept() {
+        for page in PAGE_ACTIONS {
+            let mut keys: Vec<_> =
+                page.iter().map(|a| a.default_key).filter(|k| !k.is_empty()).map(normalise).collect();
+            for k in &keys {
+                assert!(!KEPT.contains(&k.as_str()), "{k} is kept by the app");
+            }
+            let n = keys.len();
+            keys.sort();
+            keys.dedup();
+            assert_eq!(keys.len(), n, "two actions on one page share a default key");
+        }
     }
 
     #[test]
