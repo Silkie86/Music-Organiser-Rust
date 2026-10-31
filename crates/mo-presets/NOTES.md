@@ -43,9 +43,6 @@ The Presets page's engine (spec section 3.4a). No UI. It writes only `presets.db
   when only that plays; Serum 2's CBOR state next), and Bitwig Note Transpose devices (needs the Bitwig reader to say which devices come
   before an instrument).
 - Bitwig: the reader doesn't say which presets are instruments, so no Bitwig synth is marked unused yet.
-- Shared code to move once its owners agree: `to_bank` uses the converter's `fxp_to_bank` and `bitwig::key` the
-  library's `name_key`; both belong in mo-formats (the readers thread's), so mo-presets needn't depend on mo-convert
-  and mo-library.
 - Send to Bitwig reads each template again when the page lists them (they were read once by the list); the list
   could keep what a template needs instead.
 - A sound's Bitwig preset name is kept for it in the export names, so two plugins with one sound name ("Pad.fxp",

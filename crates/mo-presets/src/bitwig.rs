@@ -61,7 +61,7 @@ pub fn state_format(extension: &str) -> &'static str {
 /// The lookup key for a plugin and format, so "Serum_x64" finds a template saved for "Serum" (the library's name
 /// key), or `None` when the name has nothing to match by (no letters or digits), so it never matches another such.
 pub fn key(plugin: &str, format: &str) -> Option<String> {
-    let name = mo_library::read::name_key(plugin);
+    let name = mo_formats::plugins::name_key(plugin);
     (!name.is_empty() && !format.is_empty()).then(|| format!("{name}|{format}"))
 }
 
@@ -154,11 +154,11 @@ pub fn template_for<'a>(preset: &PresetBlob, templates: &'a Templates) -> Option
 
 /// A VST2 program (`.fxp`) as a one-program bank (`.fxb`), the form Bitwig saves VST2 settings in and loads back
 /// (it loaded a plugin's defaults from a `.fxp`), keeping the program the plugin had selected. `None` when it isn't a
-/// program that can be one. (The converter's `fxp_to_bank`, so there's one of it.)
+/// program that can be one. (mo-formats' `fxp_to_bank`, shared with the converter.)
 pub fn to_bank(fxp: &[u8], program: u32) -> Option<Vec<u8>> {
     // The bank's counts are signed: a damaged save's program past them is taken as the first.
     let program = if program >= i32::MAX as u32 { 0 } else { program };
-    let bank = mo_convert::bitwig::fxp_to_bank(fxp, program);
+    let bank = mo_formats::presets::fxp_to_bank(fxp, program);
     (bank != fxp).then_some(bank)
 }
 

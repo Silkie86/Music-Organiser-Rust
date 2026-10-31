@@ -10,10 +10,6 @@ workspace = true
 
 [dependencies]
 mo-formats = { path = "../mo-formats" }
-# The library's name key, so "Serum_x64" finds a Bitwig template saved for "Serum".
-mo-library = { path = "../mo-library" }
-# The converter's VST2 program-to-bank, so there's one of it (it moves to mo-formats with the presets).
-mo-convert = { path = "../mo-convert" }
 # Serum keeps its settings zlib-packed (the same crate as mo-formats).
 flate2 = "1"
 rayon.workspace = true
