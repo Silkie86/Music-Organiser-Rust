@@ -19,7 +19,7 @@ use std::process::ExitCode;
 
 const USAGE: &str = "theorybench keys <labelled.jsonl>... [--part <role>] [--aligned] [--bars <lengths>]
 theorybench keyfit <labelled.jsonl>... [--aligned] [--bars <lengths>] [--lambda-delta <x>|inf] [--inputs <kinds>]
-                   [--picks <n>] [--final | --write <weights.rs>]
+                   [--picks <n>] [--dump <file>] [--against <file>] [--hand <cases>] [--final | --write <weights.rs>]
 theorybench chords <labelled.jsonl>... --answers <name>=<answers.jsonl> [--answers ...] [--dump <file>]
 
   keys       how often each key finder names the labelled key, on whole songs and on clips (8 bars long unless --bars
@@ -31,6 +31,10 @@ theorybench chords <labelled.jsonl>... --answers <name>=<answers.jsonl> [--answe
   --lambda-delta  how hard the per-note corrections are pulled to 0 (1e-4; inf fits the counted tables alone)
   --inputs   the kinds of input heard: full,tune,upper,bass,piano (all)
   --picks    stretches of each length fitted on from each song (8)
+  --dump     writes how each case of folds 1 to 4 came out, to compare a later run with (--against)
+  --against  compares this run with one dumped before, case by case: each set's share right and log-loss, the
+             differences with their likely ranges, and every set that got worse beyond its range
+  --hand     prints each fitted model's reading of these hand cases (such as 13,14,16)
   --final    fits on folds 1 to 4 and scores the kept-back fold 0, once, logging the run in test-runs.md
   --write    fits on every song and writes the weights file
   chords     how often each chord reader names the labelled chord, scored as mir_eval scores it

@@ -287,6 +287,27 @@ fn the_gates_can_fail() {
 }
 
 #[test]
+fn case_5_checks_a_name_against_every_key_the_answer_gives() {
+    // "loop_Cmaj" beside case 2: some other key than Eb major alone, the parallel of C minor when the answer is a
+    // pair, and never taken as agreeing.
+    let eb_major = Key::major(PitchClass::new(3));
+    for (answer, keeps) in
+        [(KeyAnswer::Key(eb_major), true), (KeyAnswer::OrRelative(eb_major), true), (KeyAnswer::Key(C_MAJOR), false)]
+    {
+        let mut book = Book::read(&SHIPPED).unwrap();
+        for (case, read) in &mut book.readings {
+            match (case.name, read.as_mut()) {
+                ("1", Some((_, r))) => r.answer = KeyAnswer::Key(C_MINOR),
+                ("2", Some((_, r))) => r.answer = answer,
+                _ => {}
+            }
+        }
+        let five = book.verdicts().into_iter().find(|v| v.case == 5).unwrap();
+        assert_eq!(five.passes_gate(), keeps, "{answer:?}: {:?}", five.broken());
+    }
+}
+
+#[test]
 fn the_version_is_bumped_when_a_number_changes() {
     let (hash, version) = SHIPPED_HASH;
     let now = numbers_hash(&SHIPPED);
