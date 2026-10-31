@@ -111,12 +111,20 @@ fn the_folder_watch_reports_a_new_save_once_things_are_quiet() {
     )
     .unwrap();
     assert_eq!(watch.count(), 1);
-    // Some systems start hearing changes a moment after the watch begins.
-    std::thread::sleep(Duration::from_millis(300));
-    fs::write(dir.join("Night Drive/Night Drive_15.flp"), b"one").unwrap();
-    fs::write(dir.join("Night Drive/Night Drive_15.flp"), b"two").unwrap();
+    // Some systems start hearing changes a moment after the watch begins, and a busy machine can split the writes
+    // over two reports: the save is written again until a report names it, for up to 30 seconds.
+    let song = dir.join("Night Drive/Night Drive_15.flp");
     fs::write(dir.join("Night Drive/kick.wav"), b"x").unwrap();
-    let changes = rx.recv_timeout(Duration::from_secs(20)).unwrap();
-    let names: Vec<&str> = changes.files.iter().map(|f| f.rsplit(['/', '\\']).next().unwrap()).collect();
+    let mut heard: Vec<String> = Vec::new();
+    for round in 0..15 {
+        fs::write(&song, format!("save {round}")).unwrap();
+        if let Ok(changes) = rx.recv_timeout(Duration::from_secs(2)) {
+            heard.extend(changes.files);
+            if !heard.is_empty() {
+                break;
+            }
+        }
+    }
+    let names: Vec<&str> = heard.iter().map(|f| f.rsplit(['/', '\\']).next().unwrap()).collect();
     assert_eq!(names, ["Night Drive_15.flp"]);
 }

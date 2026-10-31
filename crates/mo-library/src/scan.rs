@@ -69,7 +69,7 @@ pub fn is_project_file(path: &str) -> bool {
 
 /// A path as the library compares paths: forward slashes, no slash at the end, and ignoring case (the library keeps
 /// each path once whatever its case, as Windows does).
-fn path_key(path: &str) -> String {
+pub(crate) fn path_key(path: &str) -> String {
     let key = case::key(&path.replace('\\', "/"));
     match key.trim_end_matches('/') {
         "" => "/".to_owned(),
@@ -78,7 +78,7 @@ fn path_key(path: &str) -> String {
 }
 
 /// [`is_inside`] on paths already made into [`path_key`]s.
-fn key_inside(path: &str, folder: &str) -> bool {
+pub(crate) fn key_inside(path: &str, folder: &str) -> bool {
     path == folder || path.strip_prefix(folder).is_some_and(|rest| rest.starts_with('/') || folder.ends_with('/'))
 }
 
