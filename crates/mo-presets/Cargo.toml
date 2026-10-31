@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 mo-formats = { path = "../mo-formats" }
+rayon.workspace = true
 # A Bitwig preset keeps its plugin's settings in a zip at its end (the same crate and features as mo-formats).
 zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 

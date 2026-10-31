@@ -4,6 +4,7 @@
 //! - [`files`]: preset files on disk (`.fxp`, `.fxb`, `.vstpreset`, `.bwpreset`), read as far as their header.
 //! - [`role`]: the part guess (bass, lead, chords, pad, stabs, arp, drums, FX) from the notes as the listener hears them.
 //! - [`list`]: one song's sounds, with their parts guessed (FL Studio and Bitwig).
+//! - [`library`]: many saves and preset folders at once, over every core, as the page's rows.
 //! - [`filter`]: the page's choices and counts.
 //!
 //! No UI, no database and no writing here: the screen logic goes in `mo-app`, and keeping your fixes to a guess waits
@@ -14,6 +15,7 @@
 
 pub mod files;
 pub mod filter;
+pub mod library;
 pub mod list;
 pub mod role;
 
