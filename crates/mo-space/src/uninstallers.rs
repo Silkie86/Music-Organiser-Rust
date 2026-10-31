@@ -6,6 +6,7 @@ use std::path::Path;
 use std::process::Command;
 
 use mo_formats::case;
+use mo_formats::paths::is_rooted;
 
 use crate::plugins::{family, norm};
 
@@ -45,7 +46,8 @@ fn registry() -> Vec<Uninstaller> {
             if name.is_empty() || app.get_u32("SystemComponent").is_ok_and(|v| v == 1) {
                 continue;
             }
-            let Ok(command) = app.get_string("UninstallString") else { continue };
+            // Often written with %ProgramFiles% and the like (REG_EXPAND_SZ), which .NET fills in as it reads.
+            let Ok(command) = app.get_string("UninstallString").map(|c| expand(&c)) else { continue };
             // Left behind by a program that's gone (I:\Current\unins000.exe on Solomon's PC): there's nothing to run.
             if command.is_empty() || !can_run(&command) {
                 continue;
@@ -75,12 +77,15 @@ pub fn for_plugin(plugin: &str, vendor: &str, all: &[Uninstaller], installed: &[
         return Vec::new();
     }
     let (maker, full) = (norm(vendor), norm(plugin));
-    let mut found: Vec<(&Uninstaller, u32)> =
-        all.iter().map(|u| (u, score(u, &fam, &maker, &full))).filter(|(_, s)| *s > 0).collect();
-    found.sort_by_key(|(u, s)| {
-        (is_other_version(plugin, u, installed), std::cmp::Reverse(*s), u.name.encode_utf16().count())
-    });
-    found.into_iter().map(|(u, _)| u.clone()).collect()
+    let mut found: Vec<(bool, std::cmp::Reverse<u32>, usize, &Uninstaller)> = all
+        .iter()
+        .map(|u| (u, score(u, &fam, &maker, &full)))
+        .filter(|(_, s)| *s > 0)
+        .map(|(u, s)| (is_other_version(plugin, u, installed), std::cmp::Reverse(s), u.name.encode_utf16().count(), u))
+        .collect();
+    // Stable, as .NET's OrderBy is: uninstallers that tie keep Windows' order.
+    found.sort_by_key(|(other, s, len, _)| (*other, *s, *len));
+    found.into_iter().map(|(.., u)| u.clone()).collect()
 }
 
 /// Whether the program's name gives another version than the plugin's: "iZotope Ozone 11" for Ozone 9. Running it
@@ -173,14 +178,8 @@ fn is_daw(name: &str) -> bool {
 
 /// Whether the command's program is there: a full path must exist; a bare name (`MsiExec.exe`) is found by Windows.
 pub fn can_run(command: &str) -> bool {
-    let (file, _) = split(command);
-    !is_rooted(&file) || Path::new(&expand(&file)).is_file()
-}
-
-/// Whether a path starts at a drive or the top of one (`C:\…`, `\…`, `/…`), as .NET's `Path.IsPathRooted` says.
-fn is_rooted(path: &str) -> bool {
-    let b = path.as_bytes();
-    path.starts_with(['\\', '/']) || (b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':')
+    let file = expand(&split(command).0);
+    !is_rooted(&file) || Path::new(&file).is_file()
 }
 
 /// `%Name%` replaced with the setting of that name (`%ProgramFiles%`), as Windows does; one that isn't set stays.
@@ -221,21 +220,23 @@ pub fn split(command: &str) -> (String, String) {
     }
 }
 
-/// What Windows said when you turned down its administrator question (`ERROR_CANCELLED`).
-const SAID_NO: i32 = 1223;
-
 /// The command that starts an uninstaller the way Settings, Apps does: in its own window, which asks its own questions
-/// (and Windows' administrator question when it needs one), then waits for it to finish. PowerShell's `Start-Process`
-/// does what Explorer does; the program and what's passed to it reach it as settings, never as part of the script, so
-/// nothing in them can run as a command.
+/// (and Windows' administrator question when it needs one), then waits for it and what it starts to finish (many copy
+/// themselves to Temp, start the copy and end). PowerShell's `Start-Process` does what Explorer does; the program and
+/// what's passed to it reach it as settings, never as part of the script, so nothing in them can run as a command. It
+/// says how it went on one line: `ended N` with the uninstaller's exit code, `said no`, or `not started: why`.
 fn command_for(u: &Uninstaller) -> Command {
-    const SCRIPT: &str = "try { $a = @{ FilePath = $env:MO_UNINSTALL_FILE; PassThru = $true; ErrorAction = 'Stop' }; \
+    const SCRIPT: &str = "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; \
+        try { $a = @{ FilePath = $env:MO_UNINSTALL_FILE; PassThru = $true; Wait = $true; ErrorAction = 'Stop' }; \
         if ($env:MO_UNINSTALL_ARGS) { $a.ArgumentList = $env:MO_UNINSTALL_ARGS }; \
-        $p = Start-Process @a; $p.WaitForExit(); exit 0 } \
-        catch [System.InvalidOperationException] { [Console]::Error.WriteLine($_.Exception.Message); exit 1223 } \
-        catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }";
+        $p = Start-Process @a; if ($p) { 'ended ' + $p.ExitCode } else { 'ended 0' } } \
+        catch { $e = $_.Exception; $no = $false; \
+        while ($e) { if ($e.NativeErrorCode -eq 1223) { $no = $true }; $e = $e.InnerException }; \
+        if ($no) { 'said no' } else { 'not started: ' + $_.Exception.Message } }";
     let (file, args) = split(&u.command);
-    let mut cmd = Command::new("powershell.exe");
+    // Windows' own PowerShell, never one that happens to sit beside the app or earlier on the PATH.
+    let windows = std::env::var_os("SystemRoot").map_or_else(|| "C:\\Windows".into(), std::path::PathBuf::from);
+    let mut cmd = Command::new(windows.join(r"System32\WindowsPowerShell\v1.0\powershell.exe"));
     cmd.args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", SCRIPT])
         .env("MO_UNINSTALL_FILE", file)
         .env("MO_UNINSTALL_ARGS", args);
@@ -249,9 +250,31 @@ fn command_for(u: &Uninstaller) -> Command {
     cmd
 }
 
+/// What the command says about how it went, as the app says it.
+fn outcome(said: &str) -> Result<(), String> {
+    let line = said.lines().rev().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default();
+    if line == "said no" {
+        return Err("You said no to Windows' administrator question, so nothing changed.".to_owned());
+    }
+    if let Some(why) = line.strip_prefix("not started: ") {
+        return Err(format!("It didn't start: {why}"));
+    }
+    match line.strip_prefix("ended ").and_then(|c| c.trim().parse::<i64>().ok()) {
+        // Done, or done once Windows restarts (Windows Installer's 3010 and 1641).
+        Some(0 | 3010 | 1641) => Ok(()),
+        // Windows Installer's "cancelled".
+        Some(1602) => Err("It was cancelled, so the plugin is still installed.".to_owned()),
+        Some(code) => Err(format!(
+            "It ended with code {code}, so it may not have finished. The plugin list is checked again anyway."
+        )),
+        None => Err("It didn't say how it went. The plugin list is checked again anyway.".to_owned()),
+    }
+}
+
 /// Runs a plugin's uninstaller and waits until it's finished (it asks its own questions in its own window). Call it
-/// away from the window's thread. Says why when it couldn't start, or when you said no to Windows' administrator
-/// question.
+/// away from the window's thread. Anything it leaves running (a web page it opens in a browser that wasn't open) is
+/// waited for too, so the app shouldn't hold anything else up meanwhile. Says why when it couldn't start, when you said no to Windows' administrator
+/// question, or when it ended without finishing.
 pub fn run(u: &Uninstaller) -> Result<(), String> {
     if !cfg!(windows) {
         return Err("Only Windows lists uninstallers: on this computer, remove the plugin's files.".to_owned());
@@ -260,21 +283,7 @@ pub fn run(u: &Uninstaller) -> Result<(), String> {
         return Err("Its uninstaller isn't there any more.".to_owned());
     }
     let out = command_for(u).output().map_err(|e| format!("Windows couldn't start it: {e}"))?;
-    match out.status.code() {
-        Some(0) => Ok(()),
-        Some(code) => {
-            let said = String::from_utf8_lossy(&out.stderr).trim().to_owned();
-            // Start-Process says "canceled by the user" when you turn down the administrator question.
-            if code == SAID_NO && said.to_ascii_lowercase().contains("cancel") {
-                Err("You said no to Windows' administrator question, so nothing changed.".to_owned())
-            } else if said.is_empty() {
-                Err("It didn't start.".to_owned())
-            } else {
-                Err(said)
-            }
-        }
-        None => Err("It was stopped.".to_owned()),
-    }
+    outcome(&String::from_utf8_lossy(&out.stdout))
 }
 
 #[cfg(test)]
@@ -298,6 +307,17 @@ mod tests {
             .collect();
         assert!(envs.contains(&("MO_UNINSTALL_FILE".into(), r"C:\Program Files\X\unins000.exe".into())));
         assert!(envs.contains(&("MO_UNINSTALL_ARGS".into(), r"/SILENT; Remove-Item C:\".into())));
+    }
+
+    #[test]
+    fn how_it_went_is_told_plainly() {
+        assert_eq!(outcome("ended 0\r\n"), Ok(()));
+        assert_eq!(outcome("ended 3010"), Ok(()));
+        assert!(outcome("said no").unwrap_err().starts_with("You said no"));
+        assert!(outcome("ended 1602").unwrap_err().contains("cancelled"));
+        assert!(outcome("ended 2").unwrap_err().contains("code 2"));
+        assert_eq!(outcome("not started: Datei nicht gefunden"), Err("It didn't start: Datei nicht gefunden".into()));
+        assert!(outcome("").is_err());
     }
 
     #[test]

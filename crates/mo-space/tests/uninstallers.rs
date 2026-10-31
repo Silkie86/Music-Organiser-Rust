@@ -31,8 +31,11 @@ fn uninstallers_are_matched_by_name_and_never_a_daws() {
     assert_eq!(names(&for_plugin("Serum", "Xfer Records", &all, &[])), ["Serum", "Xfer Serum 2"]);
     assert_eq!(for_plugin("Serum 2", "Xfer Records", &all, &[])[0].name, "Xfer Serum 2");
     assert!(for_plugin("Fruity Reverb", "Image-Line", &all, &[]).is_empty());
-    // Two letters: only a program named exactly that.
+    // A family shorter than two letters ("M1" is "m") finds nothing.
     assert!(for_plugin("M1", "KORG", &all, &[]).is_empty());
+    // Three letters: only a program named exactly that.
+    let vox = [u("Vox Continental", "Arturia", "a.exe"), u("Vox", "Someone", "b.exe")];
+    assert_eq!(names(&for_plugin("Vox", "Someone", &vox, &[])), ["Vox"]);
     assert_eq!(split(&all[0].command), (r"C:\Program Files\Xfer\unins2.exe".into(), String::new()));
     assert_eq!(split("MsiExec.exe /X{1234}"), ("MsiExec.exe".into(), "/X{1234}".into()));
     assert_eq!(

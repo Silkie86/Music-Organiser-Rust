@@ -61,8 +61,11 @@ listed with a verdict: **better** (on purpose), **same idea, new shape**, or **n
 | What | C# | Rust | Verdict |
 |---|---|---|---|
 | Which programs, which first | Windows' list of installed programs (both hives, 64- and 32-bit), matched by family, maker and version; a DAW's never; another version's last | the same, checked on the C# app's own test cases | same |
-| Starting one | .NET's shell start, so Windows asks its administrator question when the uninstaller needs it | PowerShell's `Start-Process`, which does the same; the program and what's passed to it go in as settings, never as script, so nothing in them can run as a command; it waits until the uninstaller ends | same idea, new shape |
-| Saying no to Windows' question | told | told | same |
+| Starting one | .NET's shell start, so Windows asks its administrator question when the uninstaller needs it | PowerShell's `Start-Process` (Windows' own copy), which does the same; the program and what's passed to it go in as settings, never as script, so nothing in them can run as a command | same idea, new shape |
+| Waiting for it | waits for the program started; one that copies itself to Temp and starts the copy (NSIS) seems done at once | waits for it and what it starts (so also for a browser it opens, if the browser wasn't open) | better |
+| How it went | not told | told: done, cancelled, or ended with a code (so it may not have finished); the plugin list is checked again either way | better |
+| `%ProgramFiles%` in the command | filled in as Windows' list is read | the same | same |
+| Saying no to Windows' question | told | told, in any language Windows speaks | same |
 
 ## Not yet
 
