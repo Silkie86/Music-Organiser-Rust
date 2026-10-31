@@ -2831,6 +2831,19 @@ dependencies = [
  "rayon",
  "regex",
  "rusqlite",
+ "sha2",
+]
+
+[[package]]
+name = "mo-miditwin"
+version = "0.1.0"
+dependencies = [
+ "mo-formats",
+ "mo-library",
+ "mo-midi",
+ "rayon",
+ "regex",
+ "thread-priority",
 ]
 
 [[package]]
