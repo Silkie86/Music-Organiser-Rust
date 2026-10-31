@@ -11,6 +11,7 @@ use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, Statement};
 use serde::de::{Deserializer, MapAccess, Visitor};
 
+use crate::read::Installed;
 use crate::scan::KnownFile;
 use crate::songs::SongChoices;
 use crate::{Confidence, PluginKind, STATUSES, Save};
@@ -177,6 +178,23 @@ impl Library {
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// The plugins on this computer as the C# app last found them: their names, and the ids its plugin scanner found
+    /// inside plugin files. Empty when it hasn't looked yet.
+    pub fn installed(&self) -> Result<Installed, LibraryError> {
+        let mut installed = Installed::default();
+        if self.has("installed_plugins") {
+            let mut st = self.conn.prepare("SELECT name_key FROM installed_plugins")?;
+            installed.keys = st.query_map([], |r| Ok(text(r, "name_key")))?.collect::<Result<_, _>>()?;
+        }
+        if self.has("scanned_plugins") {
+            let mut st = self.conn.prepare("SELECT id, path FROM scanned_plugins WHERE id != ''")?;
+            let rows: Vec<(String, String)> =
+                st.query_map([], |r| Ok((text(r, "id"), text(r, "path"))))?.collect::<Result<_, _>>()?;
+            installed = installed.with_scans(rows);
+        }
+        Ok(installed)
     }
 
     /// Every save, the most recently written first.

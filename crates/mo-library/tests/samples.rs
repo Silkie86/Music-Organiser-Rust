@@ -56,3 +56,23 @@ fn folder_links_back_up_the_tree_are_walked_once() {
     assert!(locator.found("/old/vox.wav", &project));
     assert!(!locator.found("/old/gone.wav", &project));
 }
+
+#[test]
+fn reads_a_project_file_into_a_save() {
+    use mo_library::read::{Installed, read_save};
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mo-library-read");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("Night Drive_15.flp");
+    // Not a real FL Studio file: it's listed with what's wrong, as the C# app lists one.
+    fs::write(&path, b"not an flp").unwrap();
+    let path = path.to_str().unwrap();
+    let (save, detail) = read_save(path, &Installed::default(), &SampleLocator::default()).unwrap();
+    assert_eq!((save.name.as_str(), save.daw.as_str(), save.size), ("Night Drive_15", "FL Studio", 10));
+    assert_eq!(save.folder, dir.to_str().unwrap());
+    assert!(save.mtime > 0 && save.id == 0);
+    assert!(save.error.is_some() || !detail.warnings.is_empty());
+    assert!(
+        read_save(dir.join("kick.wav").to_str().unwrap(), &Installed::default(), &SampleLocator::default()).is_none()
+    );
+}

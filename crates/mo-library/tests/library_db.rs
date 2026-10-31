@@ -221,3 +221,9 @@ fn knows_each_files_size_and_date_for_a_scan() {
     let older = Library::open_read_only(&make("known-older.db", false)).unwrap();
     assert!(older.known_files().unwrap().iter().all(|k| k.reread));
 }
+
+#[test]
+fn knows_the_installed_plugins() {
+    let lib = Library::open_read_only(&make("installed.db", true)).unwrap();
+    assert!(lib.installed().unwrap().keys.is_empty());
+}
