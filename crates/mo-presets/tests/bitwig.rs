@@ -31,7 +31,7 @@ fn saved_in_bitwig(dir: &Path, file: &str, plugin: &str, preset: &str, entry: &s
         preset,
         entry,
         entry,
-        b"CcnK bank from Bitwig",
+        &send::to_bank(&fxp::wrap_chunk(&[9], "Init", i32::from_be_bytes(*b"XfsX")), 0).unwrap(),
         &[("preview.png", b"png")],
     );
     let path = dir.join(format!("{file}.bwpreset"));
@@ -52,7 +52,12 @@ fn zip_file(doc: &bitwig::Document, name: &str) -> Option<Vec<u8>> {
 }
 
 fn one(t: send::Template) -> Templates {
-    Templates::from([(send::key(&t.plugin, t.format()), t)])
+    Templates::from([(send::key(&t.plugin, t.format()).unwrap(), t)])
+}
+
+/// A Bitwig preset of `sound` from the template, read from its file.
+fn build(t: &send::Template, sound: &PresetBlob, name: &str) -> Result<Vec<u8>, String> {
+    send::build(&std::fs::read(&t.path).unwrap(), &t.path, sound, name)
 }
 
 #[test]
@@ -67,7 +72,7 @@ fn builds_a_bitwig_preset_from_one_saved_for_the_same_plugin() {
     let templates = one(t.clone());
     assert_eq!(send::template_for(&sound, &templates), Some(&t));
 
-    let doc = bitwig::decode(send::build(&t, &sound, "Big Bass").unwrap()).unwrap();
+    let doc = bitwig::decode(build(&t, &sound, "Big Bass").unwrap()).unwrap();
     assert_eq!(doc.body_error, None);
     assert_eq!(doc.meta_str("preset_name"), "Big Bass");
     assert_eq!(doc.meta_str("creator"), "silkie86");
@@ -85,7 +90,7 @@ fn the_settings_file_is_renamed_when_its_type_changes() {
     let dir = folder("rename");
     // A template that keeps its plugin's settings as a program; the new sound goes in as a bank.
     let t = send::inspect(&saved_in_bitwig(&dir, "Init", "Serum", "Init", "c3.fxp")).unwrap();
-    let doc = bitwig::decode(send::build(&t, &serum_sound("Pad", "Serum"), "Pad").unwrap()).unwrap();
+    let doc = bitwig::decode(build(&t, &serum_sound("Pad", "Serum"), "Pad").unwrap()).unwrap();
     let device = doc.objects.iter().find(|o| !o.str(0xbe5).is_empty()).unwrap();
     assert_eq!(device.str(0xbe5), "c3.fxb");
     assert!(zip_file(&doc, "plugin-states/c3.fxp").is_none());
@@ -97,7 +102,7 @@ fn never_renames_the_plugin_itself() {
     // A preset simply called "Serum" must not turn the device into a different plugin.
     let dir = folder("plugin-name");
     let t = send::inspect(&saved_in_bitwig(&dir, "Serum", "Serum", "Serum", "a.fxb")).unwrap();
-    let doc = bitwig::decode(send::build(&t, &serum_sound("Pad", "Serum"), "Pad").unwrap()).unwrap();
+    let doc = bitwig::decode(build(&t, &serum_sound("Pad", "Serum"), "Pad").unwrap()).unwrap();
     let device = doc.objects.iter().find(|o| !o.str(0xbe5).is_empty()).unwrap();
     assert_eq!(device.str(0x9a), "Serum");
 }
@@ -167,8 +172,35 @@ fn a_template_that_cant_be_used_still_leaves_the_plugin_preset() {
 }
 
 #[test]
+fn a_sound_for_another_plugin_is_refused() {
+    // Named "Serum", but its settings are Diva's.
+    let dir = folder("other-plugin");
+    let t = send::inspect(&saved_in_bitwig(&dir, "Init", "Serum", "Init", "a.fxb")).unwrap();
+    assert_eq!(t.plugin_id, "XfsX");
+    let diva = PresetBlob::new("Pad", "Serum", ".fxp", fxp::wrap_chunk(&[1], "Pad", i32::from_be_bytes(*b"DiVa")));
+    let e = build(&t, &diva, "Pad").unwrap_err();
+    assert!(e.contains("DiVa"), "{e}");
+}
+
+#[test]
 fn a_bitwig_name_is_kept_for_each_sound_whether_or_not_one_is_made() {
     // Two plugins sharing a sound's name would share its Bitwig preset's name.
     let pad = |ext: &'static str| PresetBlob::new("Pad", "Pad", ext, vec![1]);
     assert_eq!(export::file_names(&[pad(".fxp"), pad(".vstpreset")]), ["Pad.fxp", "Pad 2.vstpreset"]);
+    // Only the ending is taken off: "Lead 1.1" and "Lead 1.2" with no ending don't share "Lead 1.bwpreset".
+    let lead = |name: &str| PresetBlob::new(name, "", "", vec![1]);
+    assert_eq!(export::file_names(&[lead("Lead 1.1"), lead("Lead 1.2")]), ["Lead 1.1", "Lead 1.2"]);
+}
+
+#[test]
+fn an_old_bitwig_preset_left_from_an_earlier_export_is_told() {
+    let dir = folder("stale");
+    let t = send::inspect(&saved_in_bitwig(&dir, "Init", "Serum", "Init", "a.fxb")).unwrap();
+    let out = dir.join("out");
+    export::export(&[serum_sound("Lead", "Serum")], "Song.flp", &out, Some(&one(t))).unwrap();
+    // Exported again with no template for Serum now.
+    let again = export::export(&[serum_sound("Lead", "Serum")], "Song.flp", &out, Some(&Templates::new())).unwrap();
+    assert_eq!(again.files, ["Serum - Lead.fxp"]);
+    assert_eq!(again.failed.len(), 1);
+    assert!(again.failed[0].contains("earlier export is still there"), "{:?}", again.failed);
 }

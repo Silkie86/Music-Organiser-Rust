@@ -15,7 +15,7 @@
 //! can't be written is listed with why, and the others still go. Nothing here touches a project or a preset you made:
 //! only the export folder is written to.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -60,7 +60,7 @@ pub fn file_names(presets: &[PresetBlob]) -> Vec<String> {
             let mut name = format!("{label}{ext}");
             let mut n = 2;
             loop {
-                let keys = [name.to_uppercase(), bitwig_name(&name).to_uppercase()];
+                let keys = [name.to_uppercase(), bitwig_name(&name, &ext).to_uppercase()];
                 if keys.iter().all(|k| !used.contains(k)) {
                     used.extend(keys);
                     break;
@@ -73,9 +73,10 @@ pub fn file_names(presets: &[PresetBlob]) -> Vec<String> {
         .collect()
 }
 
-/// The Bitwig preset's name beside an exported preset: "Serum - Wobble.fxp" gives "Serum - Wobble.bwpreset".
-pub fn bitwig_name(file_name: &str) -> String {
-    format!("{}.bwpreset", paths::stem(file_name))
+/// The Bitwig preset's name beside an exported preset, from its name and (safe) ending: "Serum - Wobble.fxp" gives
+/// "Serum - Wobble.bwpreset". Only the ending is taken off, never what's after a dot in the sound's own name.
+fn bitwig_name(file_name: &str, extension: &str) -> String {
+    format!("{}.bwpreset", file_name.strip_suffix(extension).unwrap_or(file_name))
 }
 
 /// What an export wrote.
@@ -96,15 +97,16 @@ pub fn folder_for(export_root: &Path, save: &str) -> PathBuf {
 }
 
 /// Writes presets for the save at `save` (its path, for the folder's name) into the export folder, each with a Bitwig
-/// preset beside it when `bitwig` has a template for its plugin. A preset that can't be written is listed in
+/// preset beside it when `templates` has one for its plugin ([`bitwig::templates`]; `None` when Send to Bitwig is
+/// off). A preset that can't be written is listed in
 /// [`Exported::failed`] and the rest still go; it's an error when none could be.
 pub fn export(
     presets: &[PresetBlob],
     save: &str,
     export_root: &Path,
-    bitwig: Option<&Templates>,
+    templates: Option<&Templates>,
 ) -> io::Result<Exported> {
-    write_all(presets.iter().zip(file_names(presets)).collect(), Vec::new(), save, export_root, bitwig)
+    write_all(presets.iter().zip(file_names(presets)).collect(), Vec::new(), save, export_root, templates)
 }
 
 /// Writes each preset under its name, after `failed` (what was missed before writing). An export that wrote nothing
@@ -114,7 +116,7 @@ fn write_all(
     mut failed: Vec<String>,
     save: &str,
     export_root: &Path,
-    bitwig: Option<&Templates>,
+    templates: Option<&Templates>,
 ) -> io::Result<Exported> {
     if chosen.is_empty() && !failed.is_empty() {
         return Err(io::Error::other(failed.join("; ")));
@@ -122,6 +124,8 @@ fn write_all(
     let folder = folder_for(export_root, save);
     std::fs::create_dir_all(&folder)?;
     let mut files = Vec::new();
+    // Each template's file, read once for the whole export.
+    let mut template_bytes: HashMap<PathBuf, Result<Vec<u8>, String>> = HashMap::new();
     for (p, name) in chosen {
         // Settings let go once listed (`SongPreset::forget_data`) are never written as an empty file over the last
         // export: a reader never gives a sound with none.
@@ -132,15 +136,36 @@ fn write_all(
         };
         match written {
             Ok(()) => {
-                let bw = bitwig_name(&name);
+                let bw = bitwig_name(&name, &safe_extension(&p.extension));
                 files.push(name);
-                // Send to Bitwig: only beside a plugin preset that was written, so the two always match.
-                if let Some(template) = bitwig.and_then(|t| bitwig::template_for(p, t)) {
-                    let made = bitwig::build(template, p, &p.name).map_err(io::Error::other);
-                    match made.and_then(|bytes| write_checked(&folder.join(&bw), &bytes)) {
-                        Ok(()) => files.push(bw),
-                        Err(e) => failed.push(format!("{bw}: {e}")),
+                // Send to Bitwig: only beside a plugin preset that was written.
+                let Some(templates) = templates else { continue };
+                let made = match bitwig::template_for(p, templates) {
+                    Some(template) => {
+                        let raw = template_bytes
+                            .entry(template.path.clone())
+                            .or_insert_with(|| {
+                                std::fs::read(&template.path).map_err(|e| format!("its template couldn't be read: {e}"))
+                            })
+                            .as_deref()
+                            .map_err(|e| e.clone());
+                        // A template changed since it was found could trip the reader: that's this one's failure.
+                        let built = raw.and_then(|raw| {
+                            std::panic::catch_unwind(|| bitwig::build(raw, &template.path, p, &p.name))
+                                .unwrap_or_else(|_| Err("its template stopped the reader".into()))
+                        });
+                        Some(built.map_err(io::Error::other).and_then(|b| write_checked(&folder.join(&bw), &b)))
                     }
+                    None => None,
+                };
+                match made {
+                    Some(Ok(())) => files.push(bw),
+                    Some(Err(e)) => failed.push(stale(&folder, &bw, &e.to_string())),
+                    // No template for its plugin now, but one was made last time: it no longer matches.
+                    None if folder.join(&bw).exists() => {
+                        failed.push(stale(&folder, &bw, "no preset Bitwig saved for its plugin was found"))
+                    }
+                    None => {}
                 }
             }
             Err(e) => failed.push(format!("{name}: {e}")),
@@ -150,6 +175,15 @@ fn write_all(
         return Err(io::Error::other(failed.join("; ")));
     }
     Ok(Exported { folder, files, failed, warning: None })
+}
+
+/// Why a Bitwig preset wasn't made, saying when one from an earlier export is still there with older settings.
+fn stale(folder: &Path, bw: &str, why: &str) -> String {
+    if folder.join(bw).exists() {
+        format!("{bw}: {why} (the one from an earlier export is still there, with the settings it had then)")
+    } else {
+        format!("{bw}: {why}")
+    }
 }
 
 /// Writes `data` to `path` under a name of its own first, makes sure it's on the disk, reads it back, checks it's the
@@ -194,7 +228,7 @@ pub fn export_from_save(
     choice: Choice,
     only: Option<&[String]>,
     export_root: &Path,
-    bitwig: Option<&Templates>,
+    templates: Option<&Templates>,
 ) -> io::Result<Exported> {
     let raw = std::fs::read(save)?;
     // Read as the page lists it, so the keys match; a damaged save gives nothing to write.
@@ -225,7 +259,7 @@ pub fn export_from_save(
         })
         .map(|(chosen, _)| chosen)
         .collect();
-    let mut exported = write_all(chosen, failed, save, export_root, bitwig)?;
+    let mut exported = write_all(chosen, failed, save, export_root, templates)?;
     exported.warning = warning.map(str::to_owned);
     Ok(exported)
 }

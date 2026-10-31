@@ -2897,6 +2897,7 @@ name = "mo-presets"
 version = "0.1.0"
 dependencies = [
  "flate2",
+ "mo-convert",
  "mo-formats",
  "mo-library",
  "rayon",

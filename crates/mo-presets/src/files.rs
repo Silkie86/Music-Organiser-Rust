@@ -304,12 +304,12 @@ fn kind_of_vst3_category(category: &str) -> PluginKind {
 
 // Bitwig's fields, as `mo_formats::bitwig::reader` names them (the C# BitwigPreset's FDeviceName, FDevicePreset,
 // FPluginState).
-const F_DEVICE_NAME: u32 = 0x9a;
-const F_DEVICE_PRESET: u32 = 0x12de;
-const F_PLUGIN_STATE: u32 = 0xbe5;
+pub(crate) const F_DEVICE_NAME: u32 = 0x9a;
+pub(crate) const F_DEVICE_PRESET: u32 = 0x12de;
+pub(crate) const F_PLUGIN_STATE: u32 = 0xbe5;
 
 /// Where Bitwig keeps plugin states in a file's zip.
-const STATES: &str = "plugin-states/";
+pub(crate) const STATES: &str = "plugin-states/";
 
 /// A Bitwig preset: the device it loads (from its metadata, else its first named device), what it is, and for a
 /// plugin, the plugin's id from its settings file in the zip.
@@ -384,18 +384,27 @@ const STATE_HEAD: u64 = 64 * 1024;
 /// state field to its file: by the file's name, else by its name without the extension (letter case aside).
 fn zip_entry(zip: Option<&[u8]>, state: &str) -> Option<(Vec<u8>, String)> {
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip?)).ok()?;
+    let (index, full) = state_file(&archive, state)?;
+    let entry = archive.by_index(index).ok()?;
+    let mut out = Vec::new();
+    entry.take(STATE_HEAD).read_to_end(&mut out).ok()?;
+    Some((out, paths::entry_name(&full).to_owned()))
+}
+
+/// The file in a Bitwig zip that a device's state field names, and its full name in the zip: by the file's name, else
+/// by its name without the extension (letter case aside), as the Bitwig reader matches them.
+pub(crate) fn state_file<R: std::io::Read + std::io::Seek>(
+    archive: &zip::ZipArchive<R>,
+    state: &str,
+) -> Option<(usize, String)> {
     let names: Vec<(usize, String)> = (0..archive.len())
         .filter_map(|i| Some((i, archive.name_for_index(i).and_then(Result::ok)?.into_owned())))
         .filter(|(_, n)| n.starts_with(STATES))
         .collect();
-    let (index, full) = names
-        .iter()
-        .find(|(_, n)| paths::entry_name(n).eq_ignore_ascii_case(state))
-        .or_else(|| names.iter().find(|(_, n)| paths::stem(paths::entry_name(n)).eq_ignore_ascii_case(state)))?;
-    let entry = archive.by_index(*index).ok()?;
-    let mut out = Vec::new();
-    entry.take(STATE_HEAD).read_to_end(&mut out).ok()?;
-    Some((out, paths::entry_name(full).to_owned()))
+    let by_name = names.iter().find(|(_, n)| paths::entry_name(n).eq_ignore_ascii_case(state));
+    by_name
+        .or_else(|| names.iter().find(|(_, n)| paths::stem(paths::entry_name(n)).eq_ignore_ascii_case(state)))
+        .cloned()
 }
 
 #[cfg(test)]
