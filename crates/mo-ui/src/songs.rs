@@ -194,7 +194,10 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
 
     let weak = app.as_weak();
     let started = background::spawn("Songs", move || {
-        let read = Library::open_read_only(&path).and_then(|lib| Live::load(&lib, DEFAULT_RUN_GAP_MONTHS, details));
+        let read = Library::open_read_only(&path)
+            .and_then(|lib| Live::load(&lib, DEFAULT_RUN_GAP_MONTHS, details))
+            // Missing samples are looked for in the Sounds library beside it last (rule 13).
+            .map(|live| live.with_sounds(path.with_file_name("sounds.db")));
         let mut live = match read {
             Ok(live) => live,
             Err(e) => {
