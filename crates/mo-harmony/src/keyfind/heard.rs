@@ -341,6 +341,16 @@ impl BeatFacts {
             None
         }
     }
+
+    /// The roots of the major and of the minor chords sounding in the beat. A root with its fifth and its major third
+    /// is major, even with a minor third too, which is heard as a sharp ninth (C7♯9 is C major); with its fifth and a
+    /// minor third and no major third, minor.
+    fn chords(self) -> (PcSet, PcSet) {
+        let below = |semitones: i32| self.chord.transposed(-semitones);
+        let roots = self.chord.intersection(below(7));
+        let major = roots.intersection(below(4));
+        (major, roots.intersection(below(3)).difference(major))
+    }
 }
 
 /// How much a beat counts by where it falls in its bar: 4 for the first beat; 2 for the middle beat of a bar of 4 or
@@ -617,26 +627,17 @@ impl KeyReader {
                 accompaniment_beats += u32::from(facts.sounding >> 1 & 1);
                 let weight = metrical_weight(place, layout.bar_beats);
                 let anchor = facts.anchor();
-                for root in PitchClass::ALL {
-                    let has = |up: i32| facts.chord.contains(root.up(up));
-                    if !(has(0) && has(7)) {
-                        continue;
+                let (major, minor) = facts.chords();
+                for (roots, counts) in [(major, &mut heard.major_chords), (minor, &mut heard.minor_chords)] {
+                    for root in roots.iter() {
+                        let times = if anchor == Some(root) { ON_BASS } else { 1 };
+                        counts[root] = counts[root].saturating_add(weight.saturating_mul(times));
                     }
-                    let counts = if has(4) {
-                        &mut heard.major_chords
-                    } else if has(3) {
-                        &mut heard.minor_chords
-                    } else {
-                        continue;
-                    };
-                    let times = if anchor == Some(root) { ON_BASS } else { 1 };
-                    counts[root] = counts[root].saturating_add(weight.saturating_mul(times));
                 }
                 let Some(root) = anchor else { continue };
-                let has = |up: i32| facts.chord.contains(root.up(up));
                 let add = |counts: &mut PerPitch<u64>| counts[root] = counts[root].saturating_add(weight);
                 add(&mut heard.bass);
-                if has(10) {
+                if facts.chord.contains(root.up(10)) {
                     add(&mut heard.flat7_on_bass);
                 }
                 if place == 0 {

@@ -1,4 +1,5 @@
-//! The key finder's weights. Made by `theorybench keyfit`; don't edit by hand.
+//! The key finder's weights. Made by `theorybench keyfit`; don't edit by hand, except the last two lines when
+//! a test asks (another number the finder is built from changed).
 //!
 //! Placeholder until the first fit: every key scores the same.
 
