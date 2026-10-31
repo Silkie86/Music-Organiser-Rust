@@ -3,7 +3,12 @@
 //! The caller walks your music folders with [`mo_space::size::files`] (which leaves links alone, so a folder moved to
 //! another drive is backed up once, from where it really is: put the moved folder's new place in the list of folders),
 //! measures each song with [`mo_space::song::measure`], and gathers every sample path your projects use. [`plan`] then
-//! sorts each file:
+//! sorts each file by the [`Level`] you pick:
+//!
+//! - **Full:** everything goes, every save (caches too).
+//! - **Essentials:** each song's saves are only its [`milestones`] (any size); everything else as Slim. Measure songs
+//!   with `keep_backups` 0 for it, so every autosave is on the Compact list and stays out.
+//! - **Slim** (the first choice):
 //!
 //! - **Left out, whatever its size:** a save that's byte for byte the same as another save of the song, a DAW
 //!   autosave older than the newest few, and caches the DAW makes again (Studio One's Cache folder).
@@ -13,7 +18,7 @@
 //!   audio beside a save or in a song's own folder (bounces, stems, recordings), anything in a folder you mark
 //!   "always", sample libraries (unless you choose to leave unused ones out), presets, MIDI and the rest.
 //!
-//! Your newest save of each song always goes.
+//! Your newest save of each song, and any save you mark as a milestone, always goes.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -43,9 +48,24 @@ pub enum BigSaves {
     NewestOnly,
 }
 
-/// How lean the backup is (Settings).
+/// How much of your music a backup takes (Solomon, 31 Oct 2026: a choice on the backup screen).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Level {
+    /// Everything in your folders, every save.
+    Full,
+    /// Lean: big unused audio and big mid-sitting saves stay out (the module's notes list every rule).
+    #[default]
+    Slim,
+    /// Only each song's milestone saves (any size); every other file as Slim. [`BigSaves`] and the copy rule don't
+    /// apply to milestones: each one goes.
+    Essentials,
+}
+
+/// How lean the backup is: the level is picked on the backup screen and remembered; the sizes are in Settings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rules {
+    /// Full, Slim or Essentials.
+    pub level: Level,
     /// Sound files at least this big that no project uses stay out.
     pub big_unused: u64,
     /// Saves at least this big are big saves.
@@ -59,6 +79,7 @@ pub struct Rules {
 impl Default for Rules {
     fn default() -> Rules {
         Rules {
+            level: Level::default(),
             big_unused: DEFAULT_BIG_UNUSED,
             big_save: DEFAULT_BIG_SAVE,
             big_saves: BigSaves::default(),
@@ -82,6 +103,8 @@ pub enum LeftOut {
     OlderBigSave,
     /// A big sound file no project uses.
     UnusedSound,
+    /// A save that isn't one of the song's milestones ([`Level::Essentials`]).
+    NotMilestone,
 }
 
 impl LeftOut {
@@ -94,6 +117,7 @@ impl LeftOut {
             LeftOut::MidSittingSave => "Big save from the middle of a sitting",
             LeftOut::OlderBigSave => "Older big save",
             LeftOut::UnusedSound => "Big sound no project uses",
+            LeftOut::NotMilestone => "Not one of the song's milestones",
         }
     }
 }
@@ -155,6 +179,44 @@ impl Used {
 pub struct SongInfo<'a> {
     pub report: &'a SongSpaceReport,
     pub saves: &'a [SongSave],
+    /// More milestone saves on top of those found here (ones you've marked, ones where the song changed a lot).
+    pub milestones: &'a [String],
+}
+
+/// A song's milestone saves, as keys: its first and newest, the last save of each day it was worked on, and any the
+/// caller adds (`more`). Days follow sittings (saves less than [`mo_space::song::DEFAULT_SITTING_HOURS`] apart): a
+/// sitting that runs past midnight counts for the day it began, so only its last save is a milestone, never one from
+/// its middle.
+pub fn milestones(saves: &[SongSave], more: &[String]) -> HashSet<String> {
+    let mut out: HashSet<String> = more.iter().map(|m| key(m)).collect();
+    if let Some(n) = newest_save(saves) {
+        out.insert(key(&n.path));
+    }
+    let mut ordered: Vec<&SongSave> = saves.iter().collect();
+    // Stable: saves written at the same moment keep their order, so the first listed counts as the first.
+    ordered.sort_by_key(|s| s.modified);
+    if let Some(first) = ordered.first() {
+        out.insert(key(&first.path));
+    }
+    let gap = chrono::TimeDelta::hours(i64::from(mo_space::song::DEFAULT_SITTING_HOURS));
+    // The last save of each sitting, with the day the sitting began.
+    let mut ends: Vec<(chrono::NaiveDate, &SongSave)> = Vec::new();
+    let mut began = ordered.first().map(|s| s.modified.date());
+    for (i, s) in ordered.iter().enumerate() {
+        let next = ordered.get(i + 1);
+        if next.is_none_or(|n| n.modified - s.modified >= gap) {
+            if let Some(day) = began {
+                ends.push((day, s));
+            }
+            began = next.map(|n| n.modified.date());
+        }
+    }
+    let mut last_of_day: HashMap<chrono::NaiveDate, &SongSave> = HashMap::new();
+    for (day, s) in ends {
+        last_of_day.insert(day, s);
+    }
+    out.extend(last_of_day.values().map(|s| key(&s.path)));
+    out
 }
 
 /// Folders the backup treats in a special way.
@@ -176,7 +238,14 @@ pub fn plan(files: Vec<FileEntry>, songs: &[SongInfo<'_>], used: &Used, folders:
     // Audio beside a save, or anywhere in a song's own folder, is the song's (a bounce, a stem, a recording): it goes.
     let mut beside_saves: HashSet<String> = HashSet::new();
     let mut song_folders: HashSet<String> = HashSet::new();
+    let mut milestone_saves: HashSet<String> = HashSet::new();
     for song in songs {
+        if rules.level == Level::Essentials {
+            milestone_saves.extend(milestones(song.saves, song.milestones));
+        } else {
+            // Saves you mark always go, whatever the level.
+            milestone_saves.extend(song.milestones.iter().map(|m| key(m)));
+        }
         if let Some(n) = newest_save(song.saves) {
             newest.insert(key(&n.path));
         }
@@ -204,7 +273,7 @@ pub fn plan(files: Vec<FileEntry>, songs: &[SongInfo<'_>], used: &Used, folders:
             }
         }
     }
-    let ctx = Context { compact, caches, newest, saves, beside_saves, song_folders, used, rules };
+    let ctx = Context { compact, caches, newest, saves, milestone_saves, beside_saves, song_folders, used, rules };
     let backup = key(&folders.backup.to_string_lossy());
 
     let mut seen: HashSet<String> = HashSet::new();
@@ -234,6 +303,7 @@ struct Context<'a> {
     caches: HashSet<String>,
     newest: HashSet<String>,
     saves: HashSet<String>,
+    milestone_saves: HashSet<String>,
     beside_saves: HashSet<String>,
     song_folders: HashSet<String>,
     used: &'a Used,
@@ -243,6 +313,14 @@ struct Context<'a> {
 impl Context<'_> {
     fn left_out(&self, k: &str, path: &str, size: u64) -> Option<LeftOut> {
         let rules = self.rules;
+        if rules.level == Level::Full || self.milestone_saves.contains(k) {
+            return None;
+        }
+        // Essentials: a song's saves are its milestones, whatever their size (a milestone that's a byte copy of
+        // another save still goes: the save it copies may not be one).
+        if rules.level == Level::Essentials && self.saves.contains(k) {
+            return Some(LeftOut::NotMilestone);
+        }
         let big_save = size >= rules.big_save;
         match self.compact.get(k) {
             Some(CompactKind::SameSave) => return Some(LeftOut::SameSave),
