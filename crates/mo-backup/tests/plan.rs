@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use chrono::NaiveDate;
-use mo_backup::plan::{BigSaves, Folders, LeftOut, Rules, SongInfo, Used, place_on_backup, plan};
+use mo_backup::plan::{BigSaves, Folders, LeftOut, Level, Rules, SongInfo, Used, place_on_backup, plan};
 use mo_space::size::FileEntry;
 use mo_space::song::{CompactItem, CompactKind, SongSave, SongSpaceReport};
 
@@ -67,7 +67,7 @@ fn big_saves_from_the_middle_of_a_sitting_stay_out_small_ones_go() {
         file("/music/Song/Song 3.flp", MB),
         file("/music/Song/Song 4.flp", 6 * MB),
     ];
-    let songs = [SongInfo { report: &report, saves: &saves }];
+    let songs = [SongInfo { report: &report, saves: &saves, milestones: &[] }];
     let p = plan(files.clone(), &songs, &Used::default(), nowhere(), Rules::default());
     assert!(goes(&p, "/music/Song/Song.flp"), "the first save goes");
     assert_eq!(why(&p, "/music/Song/Song 2.flp"), Some(LeftOut::MidSittingSave));
@@ -101,7 +101,13 @@ fn copies_old_autosaves_and_caches_stay_out_at_any_size() {
         file("/music/S1/Cache/waves/a.cache", 100),
         file("/music/S1/Cachet.txt", 100),
     ];
-    let p = plan(files, &[SongInfo { report: &report, saves: &saves }], &Used::default(), nowhere(), Rules::default());
+    let p = plan(
+        files,
+        &[SongInfo { report: &report, saves: &saves, milestones: &[] }],
+        &Used::default(),
+        nowhere(),
+        Rules::default(),
+    );
     assert_eq!(why(&p, "/music/S1/Tune copy.song"), Some(LeftOut::SameSave));
     assert_eq!(why(&p, "/music/Backup/Tune overwritten at 1.flp"), Some(LeftOut::OldAutosave));
     assert_eq!(why(&p, "/music/S1/Cache/waves/a.cache"), Some(LeftOut::Cache));
@@ -148,7 +154,7 @@ fn a_songs_own_audio_goes_even_when_no_project_names_it() {
         file("/projects/Samples/Unused.wav", 40 * MB),
         file("/exports/Old master.wav", 40 * MB),
     ];
-    let songs = [SongInfo { report: &report, saves: &saves }];
+    let songs = [SongInfo { report: &report, saves: &saves, milestones: &[] }];
     let p = plan(files.clone(), &songs, &Used::default(), nowhere(), Rules::default());
     assert!(goes(&p, "/music/Song/Bounces/Final.wav"));
     assert!(goes(&p, "/projects/Other mixdown.wav"), "right beside a save");
@@ -175,7 +181,10 @@ fn the_newest_save_goes_whatever_another_songs_list_says() {
     };
     let a_saves = [save("/music/Song.flp", 5)];
     let b_saves = [save("/music/Song.flp", 5), save("/music/Song 9.flp", 9)];
-    let songs = [SongInfo { report: &a, saves: &a_saves }, SongInfo { report: &b, saves: &b_saves }];
+    let songs = [
+        SongInfo { report: &a, saves: &a_saves, milestones: &[] },
+        SongInfo { report: &b, saves: &b_saves, milestones: &[] },
+    ];
     let p = plan(vec![file("/music/Song.flp", 50 * MB)], &songs, &Used::default(), nowhere(), Rules::default());
     assert!(goes(&p, "/music/Song.flp"));
 }
@@ -218,4 +227,72 @@ fn place_on_backup_keeps_the_path_under_the_drive() {
     );
     assert_eq!(place_on_backup(Path::new("/backup"), Path::new("relative/x.flp")), None);
     assert_eq!(place_on_backup(Path::new("/backup"), Path::new("/a/../b")), None);
+}
+
+#[test]
+fn essentials_keeps_only_milestone_saves_and_full_keeps_everything() {
+    let report = SongSpaceReport {
+        items: vec![
+            item(CompactKind::ThinnedSave, "/music/Song/Song 2.flp"),
+            item(CompactKind::Backup, "/music/Backup/Song old.flp"),
+        ],
+        ..SongSpaceReport::default()
+    };
+    // Day 1: saves at 0 h, 1 h, 2 h; day 2 (24 h on): 25 h and 26 h; the newest at 50 h.
+    let saves = [
+        save("/music/Song/Song.flp", 0),
+        save("/music/Song/Song 2.flp", 1),
+        save("/music/Song/Song 3.flp", 2),
+        save("/music/Song/Song 4.flp", 25),
+        save("/music/Song/Song 5.flp", 26),
+        save("/music/Song/Song 6.flp", 50),
+    ];
+    let marked = ["/music/Song/Song 4.flp".to_owned()];
+    let mut files: Vec<FileEntry> = saves.iter().map(|s| file(&s.path, MB)).collect();
+    files.push(file("/music/Backup/Song old.flp", MB));
+    files.push(file("/samples/Unused.wav", 50 * MB));
+    let songs = [SongInfo { report: &report, saves: &saves, milestones: &marked }];
+
+    let essentials = Rules { level: Level::Essentials, ..Rules::default() };
+    let p = plan(files.clone(), &songs, &Used::default(), nowhere(), essentials);
+    for kept in ["Song.flp", "Song 3.flp", "Song 4.flp", "Song 5.flp", "Song 6.flp"] {
+        assert!(goes(&p, &format!("/music/Song/{kept}")), "{kept}: first, last of each day, marked, newest");
+    }
+    assert_eq!(why(&p, "/music/Song/Song 2.flp"), Some(LeftOut::NotMilestone), "even a small save");
+    assert_eq!(why(&p, "/music/Backup/Song old.flp"), Some(LeftOut::OldAutosave));
+    assert_eq!(why(&p, "/samples/Unused.wav"), Some(LeftOut::UnusedSound));
+
+    let full = Rules { level: Level::Full, ..Rules::default() };
+    let p = plan(files, &songs, &Used::default(), nowhere(), full);
+    assert!(p.left_out.is_empty());
+    assert_eq!(p.copy.len(), 8);
+}
+
+#[test]
+fn a_sitting_past_midnight_gives_one_milestone() {
+    // Noon + 11.5 h = 23:30, then 23:50, 00:10 and 01:00: one sitting, so only 01:00 (and the first save) count.
+    let at = |m: i64| SongSave {
+        path: format!("/s/{m}.flp"),
+        size: 0,
+        modified: NaiveDate::from_ymd_opt(2026, 3, 14).unwrap().and_hms_opt(12, 0, 0).unwrap()
+            + chrono::TimeDelta::minutes(m),
+    };
+    let saves = [at(0), at(690), at(710), at(730), at(780)];
+    let m = mo_backup::plan::milestones(&saves, &[]);
+    let mut got: Vec<&str> = m.iter().map(String::as_str).collect();
+    got.sort();
+    assert_eq!(got, ["/S/0.FLP", "/S/780.FLP"]);
+}
+
+#[test]
+fn a_marked_save_goes_at_any_level() {
+    let report = SongSpaceReport {
+        items: vec![item(CompactKind::ThinnedSave, "/music/Song 2.flp")],
+        ..SongSpaceReport::default()
+    };
+    let saves = [save("/music/Song.flp", 0), save("/music/Song 2.flp", 1), save("/music/Song 3.flp", 2)];
+    let marked = ["/music/Song 2.flp".to_owned()];
+    let songs = [SongInfo { report: &report, saves: &saves, milestones: &marked }];
+    let p = plan(vec![file("/music/Song 2.flp", 50 * MB)], &songs, &Used::default(), nowhere(), Rules::default());
+    assert!(goes(&p, "/music/Song 2.flp"));
 }
