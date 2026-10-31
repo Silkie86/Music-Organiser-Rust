@@ -6,6 +6,7 @@
 //! reads your library as the C# one does (CLAUDE.md, "How work is done").
 
 mod db;
+pub mod samples;
 pub mod scan;
 pub mod songs;
 pub mod watch;
