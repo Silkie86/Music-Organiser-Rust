@@ -123,6 +123,13 @@ ever starts itself, so the two don't need to share the shape of these.
 | A line it didn't get to | "skipped" | stays, and says the step didn't get to it | same |
 | Binned as another account | Windows asks a standard account for an administrator's password, and the step's files go to that account's Recycle Bin: "may have been removed for good" | says it went to the Recycle Bin as administrator and may be in that account's bin | better |
 
+## Bitwig's multisample copies
+
+| What | C# | Rust | Verdict |
+|---|---|---|---|
+| Finding them | not done | each project's `multi-samples` copies that are the same as a Library multisample byte for byte (SHA-256; only same-size files are read, a Library file once, and again only when its size or time changed; one that can't be read is tried again next time). Names only break ties, never decide: the Library can hold a "-2" copy that differs. A copy that's a link, or a `multi-samples` folder that's a link, is left out; a project's or template's own copies (anything in a `multi-samples` folder, also through a link) never count as Library files, so a copy is never pointed at another project's copy or at itself | new (Solomon, 31 Oct 2026) |
+| What happens to them | not done | nothing here: a "(fixed)" project pointing at the Library file is written first (the converter), and only the copies it changed are offered for the Recycle Bin, after you've opened the fixed project | new |
+
 ## Not yet
 
 - Undo of something the administrator step binned: `undo` can only put it back where Windows lets you write, so it says

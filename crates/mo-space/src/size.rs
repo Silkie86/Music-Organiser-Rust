@@ -6,6 +6,7 @@
 //! downloads).
 
 use std::fs::{self, Metadata};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -13,6 +14,7 @@ use chrono::{DateTime, Local, NaiveDateTime};
 use mo_formats::paths::extension;
 use mo_formats::{case, textscan};
 use rayon::prelude::*;
+use sha2::{Digest, Sha256};
 
 /// A walk was stopped part way (the stop flag was set): what it found so far is dropped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -227,6 +229,33 @@ pub fn measure(path: &Path, stop: &AtomicBool) -> Result<Measured, Stopped> {
         Some(Measured { bytes: len, sound_bytes: if is_sound(&p.to_string_lossy(), len) { len } else { 0 }, files: 1 })
     })?;
     Ok(sizes.into_iter().fold(Measured::default(), |a, b| a + b))
+}
+
+/// A file's SHA-256, read once in large pieces; `None` when it can't be read whole, changed while it was read, or when
+/// stopped.
+pub fn file_hash(path: &Path, stop: &AtomicBool) -> Option<[u8; 32]> {
+    let mut file = fs::File::open(path).ok()?;
+    let before = file.metadata().ok()?;
+    let mut hash = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    let mut read = 0u64;
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return None;
+        }
+        match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                hash.update(buf.get(..n).unwrap_or_default());
+                read += n as u64;
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => return None,
+        }
+    }
+    let after = fs::metadata(path).ok()?;
+    let same = read == before.len() && after.len() == before.len() && after.modified().ok() == before.modified().ok();
+    same.then(|| hash.finalize().into())
 }
 
 /// Whether any file in a folder or its folders is a OneDrive file that's only online, which the size walks leave out
