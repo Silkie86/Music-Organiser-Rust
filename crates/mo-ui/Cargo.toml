@@ -17,6 +17,7 @@ path = "src/bin/mo-screens.rs"
 [dependencies]
 mo-app.workspace = true
 mo-library = { path = "../mo-library" }
+mo-formats = { path = "../mo-formats" }
 slint.workspace = true
 image.workspace = true
 chrono.workspace = true

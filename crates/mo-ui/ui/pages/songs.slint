@@ -1,6 +1,7 @@
 // The Songs page: one line per song, newest save first, under time headings, with search, filter chips and a year
 // scrubber, and the picked song's panel beside it. Agreed with Solomon on 2026-10-31.
 import { ListView } from "std-widgets.slint";
+import { ArrangementPreview } from "arrangement.slint";
 import { Theme, Type, Space, Well, SearchBox, ToggleChip, MenuChip, ListLine, Stars, YearMark, Caps, Heart, CloseButton, TabBar, LinkText, StudioButton, ActionKey, MenuLine, Groove } from "../studio.slint";
 
 // One line of the list: a heading ("This week", "2019") when `heading` isn't empty, else a song.
@@ -396,12 +397,12 @@ component SongPanel inherits Rectangle {
         }
         Well {
             vertical-stretch: 1;
-            // Overview: the counts, each opening its tab, then the song's runs.
+            // Overview: the counts, each opening its tab, the arrangement, then the song's runs.
             if SongsData.tab == 0: VerticalLayout {
                 padding: Space.lg;
                 spacing: Space.sm;
-                alignment: start;
                 HorizontalLayout {
+                    vertical-stretch: 0;
                     spacing: Space.sm;
                     alignment: start;
                     for c[i] in SongsData.counts: HorizontalLayout {
@@ -427,6 +428,9 @@ component SongPanel inherits Rectangle {
                     color: Theme.muted;
                     font-size: Type.meta;
                     wrap: word-wrap;
+                }
+                ArrangementPreview {
+                    vertical-stretch: 1;
                 }
                 if SongsData.runs.length > 1: Caps {
                     text: "RUNS";

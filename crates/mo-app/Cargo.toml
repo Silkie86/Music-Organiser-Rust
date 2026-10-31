@@ -15,3 +15,4 @@ mo-formats = { path = "../mo-formats" }
 mo-library = { path = "../mo-library" }
 thread-priority.workspace = true
 rayon.workspace = true
+tiny-skia.workspace = true

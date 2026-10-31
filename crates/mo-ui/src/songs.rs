@@ -441,11 +441,15 @@ fn pick(app: &AppWindow, row: Option<usize>) {
         (row, row.and_then(|r| p.songs.rows.get(r)).map(|r| (p.asked, r.song.latest.id)))
     });
     data.set_selected(row.map_or(-1, |r| i32::try_from(r).unwrap_or(-1)));
+    if row.is_none() {
+        crate::arrangement::show_song(app, None, false);
+    }
     let Some((asked, id)) = id else { return };
     data.set_tab(Tab::Overview.index() as i32);
     data.set_health_open(false);
     data.set_detail_message("Reading…".into());
     fill_panel(app);
+    with_picked(|_, r| crate::arrangement::show_song(app, Some(&r.song.latest.path), r.song.latest.file_missing));
     READER.with(|slot| {
         if let Some(reader) = slot.borrow().as_ref() {
             reader.ask((asked, id));

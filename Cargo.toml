@@ -18,6 +18,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 image = { version = "0.25", default-features = false, features = ["png"] }
 thread-priority = "3.1"
 rayon = "1.11"
+# Draws the custom views (arrangement, later the piano roll and waveforms) on the CPU.
+tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
 
 [workspace.lints.rust]
 # Deny, not forbid: the code Slint generates allows it locally.
