@@ -21,7 +21,7 @@ use mo_formats::textscan::is_audio_path;
 use mo_library::scan::is_inside;
 use rayon::prelude::*;
 
-use crate::clean::{Bin, Done, Problem, What, both, on_network, parts, send};
+use crate::clean::{Bin, Done, Problem, Sending, Sent, What, both, on_network, parts};
 use crate::plugin_space::{PluginSpace, SpaceFolder, SpaceKind, data_roots, is_install_folder};
 use crate::plugins::is_plugin_file;
 use crate::size::{DEEPEST, Measured, Stopped, is_online_only, is_sound};
@@ -139,7 +139,7 @@ impl Look {
 }
 
 /// Files the computer makes in a folder by itself when you look at it (Finder, Explorer).
-fn made_by_the_system(name: &str) -> bool {
+pub(crate) fn made_by_the_system(name: &str) -> bool {
     const NAMES: [&str; 5] = [".DS_Store", "desktop.ini", "Thumbs.db", "ehthumbs.db", "Icon\r"];
     NAMES.iter().any(|n| n.eq_ignore_ascii_case(name)) || name.starts_with("._")
 }
@@ -583,42 +583,65 @@ pub fn apply(
     let checker = Checker::new(library, all);
     let mut done = Done::default();
     let mut seen = HashSet::new();
-    let mut order: Vec<&CleanLine> = picked.iter().filter(|l| seen.insert(key(&l.folder.path))).collect();
+    let mut todo: Vec<&CleanLine> = picked.iter().filter(|l| seen.insert(key(&l.folder.path))).collect();
     // Outer folders first, so one inside a folder that goes is seen to have gone with it.
-    order.sort_by_key(|l| parts(&l.folder.path).count());
-    let mut gone: Vec<&str> = Vec::new();
-    for line in order {
+    todo.sort_by_key(|l| parts(&l.folder.path).count());
+    // Every check again, as just before it goes: why it stays, if it does.
+    let check = |line: &CleanLine| -> Result<(), String> {
         let path = line.folder.path.as_str();
-        if let Some(outer) = gone.iter().find(|g| is_inside(path, g)) {
-            done.went_with.push((path.to_owned(), (*outer).to_owned()));
-            continue;
-        }
         let now = space.folders.iter().find(|f| key(&f.path) == key(path) && f.kind == line.folder.kind);
         let why = match (&line.stays, now) {
-            (Some(why), _) => Some(why.clone()),
-            (None, None) => Some(Stays::Changed),
+            (Some(why), _) => why.clone(),
+            (None, None) => Stays::Changed,
             (None, Some(now)) => match checker.check(now, &space.key, stop) {
-                Err(Stopped) => {
-                    done.problems.push(Problem { path: path.to_owned(), why: "Stopped before it went.".into() });
-                    continue;
-                }
-                Ok((Some(why), _)) => Some(why),
-                Ok((None, look)) if look == line.look => None,
-                Ok((None, _)) => Some(Stays::Changed),
+                Err(Stopped) => return Err("Stopped before it went.".to_owned()),
+                Ok((Some(why), _)) => why,
+                Ok((None, look)) if look == line.look => return Ok(()),
+                Ok((None, _)) => Stays::Changed,
             },
         };
-        if let Some(why) = why {
-            done.problems.push(Problem { path: path.to_owned(), why: why.text(&space.name, library.names) });
-            continue;
+        Err(why.text(&space.name, library.names))
+    };
+    let check = &check;
+    let mut sending = Sending::new(bin);
+    // Rounds: a folder inside one waiting for Windows' administrator question waits for how that goes. If the outer one
+    // goes, it went with it; if it stays (you said no), it's tried on its own in the next round, and if Windows guards
+    // it too it stays as well: Windows isn't asked twice in one clean-up.
+    while !todo.is_empty() {
+        let (mut went, mut waits): (Vec<&str>, Vec<&str>) = (Vec::new(), Vec::new());
+        let mut inside_waiting = Vec::new();
+        for line in todo {
+            let path = line.folder.path.as_str();
+            if let Some(outer) = went.iter().find(|g| is_inside(path, g)) {
+                done.went_with.push((path.to_owned(), (*outer).to_owned()));
+                continue;
+            }
+            if let Some(outer) = waits.iter().find(|g| is_inside(path, g)) {
+                inside_waiting.push((line, *outer));
+                continue;
+            }
+            if let Err(why) = check(line) {
+                done.problems.push(Problem { path: path.to_owned(), why });
+                continue;
+            }
+            let real = real_path(path).unwrap_or_else(|| path.to_owned());
+            let kind = What::Plugin(line.folder.kind);
+            match sending.send(path, real, line.look.measured.bytes, kind, &mut done, move || check(line)) {
+                Sent::Went => went.push(path),
+                Sent::Waits => waits.push(path),
+                Sent::Stays => {}
+            }
         }
-        let real = real_path(path).unwrap_or_else(|| path.to_owned());
-        let sent = done.removed.len();
-        send(path, real, line.look.measured.bytes, What::Plugin(line.folder.kind), bin, &mut done);
-        if done.removed.len() > sent {
-            gone.push(path);
+        sending.flush(&mut done);
+        todo = Vec::new();
+        for (line, outer) in inside_waiting {
+            if done.removed.iter().any(|r| key(&r.path) == key(outer)) {
+                done.went_with.push((line.folder.path.clone(), outer.to_owned()));
+            } else {
+                todo.push(line);
+            }
         }
     }
-    let not_found = bin.find(&mut done.removed);
-    done.problems.extend(not_found);
+    sending.finish(&mut done);
     done
 }

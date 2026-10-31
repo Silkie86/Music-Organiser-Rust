@@ -18,10 +18,11 @@ use mo_formats::paths::file_name;
 use mo_library::scan::is_inside;
 use serde::{Deserialize, Serialize};
 
-use crate::clean::{Bin, Done, Problem, What, on_network, send};
+use crate::admin::{Admin, AsAdmin, NoAdmin, Outcome, Step, ask_for, real_spot, reason};
+use crate::clean::{Bin, Done, Problem, Sending, What, on_network};
 use crate::plugin_space::SpaceKind;
 use crate::size::{self, is_link, is_online_only, size_text};
-use crate::{key, real_path};
+use crate::{key, not_there, real_folder, real_path, text};
 
 /// What the original is called while its link stands in for it.
 pub const OLD_SUFFIX: &str = " (old copy)";
@@ -111,12 +112,18 @@ pub fn moved_json(moved: &[MovedFolder]) -> String {
     serde_json::to_string(moved).unwrap_or_else(|_| "[]".to_owned())
 }
 
-/// Which drive things are on and how much room it has. The app uses [`SystemDrives`]; tests stand in a second drive.
+/// Which drive things are on and how much room it has, and how to ask for administrator rights on one. The app uses
+/// [`SystemDrives`]; tests stand in a second drive.
 pub trait Drives: Sync {
     /// Whether two folders are on the same drive.
     fn same(&self, a: &Path, b: &Path) -> bool;
     /// How much room a drive has left, if it can be told.
     fn free(&self, path: &Path) -> Option<u64>;
+    /// Windows' administrator question, for a folder or link it guards: the app's drives ask it; by default nothing is
+    /// asked.
+    fn admin(&self) -> &dyn Admin {
+        &NoAdmin
+    }
 }
 
 /// The computer's own drives.
@@ -128,6 +135,9 @@ impl Drives for SystemDrives {
     }
     fn free(&self, path: &Path) -> Option<u64> {
         fs4::available_space(path).ok()
+    }
+    fn admin(&self) -> &dyn Admin {
+        &AsAdmin
     }
 }
 
@@ -249,8 +259,8 @@ impl CantMove {
                 size_text(*needs)
             ),
             CantMove::NeedsAdmin => "Windows said no. Close your DAW, the plugin and any window showing the folder, \
-                                     then try again. If Windows still says no, the folder needs administrator rights, \
-                                     which this version can't ask for yet. Nothing was moved."
+                                     then try again. If Windows still says no, the folder needs administrator rights. \
+                                     Nothing was moved."
                 .to_owned(),
             CantMove::InUse(why) => format!(
                 "Windows wouldn't rename the folder ({why}). Close your DAW and the plugin, then try again. Nothing \
@@ -368,8 +378,9 @@ pub fn move_folder(
         return Err(why);
     }
     let to = target(&from, destination);
-    // Find out before copying whether Windows lets the folder be renamed, rather than after an hour of copying.
-    check_rename(&from)?;
+    // Find out before copying whether Windows lets the folder be renamed, rather than after an hour of copying. One it
+    // guards is swapped as administrator: Windows asks then.
+    check_rename_or_ask(&from, drives.admin())?;
     // The old copies of folders moved from inside it before (Reaktor 6's inside Native Instruments) aren't copied:
     // they stay in its own old copy, which can't go while their links don't reach their copies.
     let leave_out: Vec<String> =
@@ -377,8 +388,12 @@ pub fn move_folder(
     let tree = Tree { leave_out: &leave_out, ..Tree::new(Path::new(&from), &to, &to) };
     copy_fresh(&tree, progress, stop)?;
     let aside = format!("{from}{OLD_SUFFIX}");
-    if let Err(why) = swap(&from, &to, &aside) {
-        remove_copy(&to);
+    if let Err(why) = swap_or_ask(&from, &to, &aside, drives.admin()) {
+        // The copy goes only while nothing leads into it and the original is still there (where it was, or set
+        // aside): otherwise it may be the copy the plugin uses, or the only one.
+        if !is_link(Path::new(&from)) && (real_folder(&from) || real_folder(&aside)) {
+            remove_copy(&to);
+        }
         return Err(why);
     }
     Ok(MovedFolder {
@@ -450,7 +465,7 @@ pub fn move_back(
         let first = copy_tree(&tree, Fill::Freshen, progress, stop)?;
         // What the plugin saved through the link meanwhile.
         let again = copy_tree(&tree, Fill::Freshen, &|n| progress(first.bytes + n), stop)?;
-        unswap(from, &moved.old_copy, to)?;
+        unswap_or_ask(from, &moved.old_copy, to, drives.admin())?;
         return Ok(MovedBack {
             kept: shown(&[first.kept, again.kept].concat()),
             kept_in: kept_in.to_string_lossy().into_owned(),
@@ -468,7 +483,7 @@ pub fn move_back(
     let tree = Tree::new(to, Path::new(&back), settled);
     room_for(&tree, here, drives, stop)?;
     let (first, again) = copy_fresh(&tree, progress, stop)?;
-    if let Err(why) = unswap(from, &back, to) {
+    if let Err(why) = unswap_or_ask(from, &back, to, drives.admin()) {
         if link_reaches(moved) {
             // As it was: the plugin still uses the other drive, so the copy made to come back goes.
             remove_copy(Path::new(&back));
@@ -715,9 +730,10 @@ pub fn remove_old_copy(moved: &MovedFolder, all: &[MovedFolder], sure: bool, bin
     }
     let mut done = Done::default();
     let real = real_path(&moved.old_copy).unwrap_or_else(|| moved.old_copy.clone());
-    send(&moved.old_copy, real, moved.bytes, What::Plugin(moved.space_kind()), bin, &mut done);
-    let not_found = bin.find(&mut done.removed);
-    done.problems.extend(not_found);
+    // Checked just now; one Windows guards is checked again by the administrator step, against what it held now.
+    let mut sending = Sending::new(bin);
+    sending.send(&moved.old_copy, real, moved.bytes, What::Plugin(moved.space_kind()), &mut done, || Ok(()));
+    sending.finish(&mut done);
     done
 }
 
@@ -729,6 +745,15 @@ fn stays(moved: &MovedFolder, why: &str) -> Done {
 /// Whether Windows said no because of rights (access denied), rather than something having the folder open.
 pub(crate) fn denied(e: &io::Error) -> bool {
     e.kind() == io::ErrorKind::PermissionDenied
+}
+
+/// [`check_rename`], except that a folder Windows guards is fine when `admin` can ask: the swap is done as
+/// administrator then.
+pub(crate) fn check_rename_or_ask(from: &str, admin: &dyn Admin) -> Result<(), CantMove> {
+    match check_rename(from) {
+        Err(CantMove::NeedsAdmin) if admin.can_ask() => Ok(()),
+        other => other,
+    }
 }
 
 /// Renames the folder and straight back, to learn whether the swap will work.
@@ -797,9 +822,74 @@ pub(crate) fn swap(from: &str, to: &Path, aside: &str) -> Result<(), CantMove> {
     }
 }
 
+/// [`swap`], as administrator when Windows guards the folder (Windows asks you then). What's there afterwards decides
+/// how it went: swapped, as it was, or neither, in which case it says what to look at.
+pub(crate) fn swap_or_ask(from: &str, to: &Path, aside: &str, admin: &dyn Admin) -> Result<(), CantMove> {
+    match swap(from, to, aside) {
+        Err(CantMove::NeedsAdmin) if admin.can_ask() => {}
+        other => return other,
+    }
+    let said = ask_for(admin, Step::Swap, &[vec![real_spot(from), text(to), real_spot(aside)]]);
+    if is_link(Path::new(from)) && leads_to(from, to) && real_folder(aside) {
+        return Ok(());
+    }
+    if real_folder(from) && not_there(Path::new(aside)) {
+        return Err(as_it_was(said, "The administrator step finished, but the folder wasn't swapped."));
+    }
+    Err(not_as_expected(
+        said,
+        format!(
+            "After the administrator step, {from} should be a link to {} and the original folder should be called \
+             \"{}\", but it isn't quite: look at both before trying again.",
+            text(to),
+            file_name(aside)
+        ),
+    ))
+}
+
+/// [`unswap`], as administrator when Windows guards the link or the folder (Windows asks you then). What's there
+/// afterwards decides how it went.
+pub(crate) fn unswap_or_ask(from: &str, restore: &str, to: &Path, admin: &dyn Admin) -> Result<(), CantMove> {
+    match unswap(from, restore, to) {
+        Err(CantMove::NeedsAdmin) if admin.can_ask() => {}
+        other => return other,
+    }
+    let said = ask_for(admin, Step::Unswap, &[vec![real_spot(from), real_spot(restore), text(to)]]);
+    if real_folder(from) && not_there(Path::new(restore)) {
+        return Ok(());
+    }
+    if is_link(Path::new(from)) && leads_to(from, to) && real_folder(restore) {
+        return Err(as_it_was(said, "The administrator step finished, but the folder wasn't put back."));
+    }
+    Err(not_as_expected(
+        said,
+        format!(
+            "After the administrator step, \"{}\" should be called \"{}\" again, in place of the link, but it isn't \
+             quite: look at both before trying again. The plugin's files are in {} too.",
+            file_name(restore),
+            file_name(from),
+            text(to)
+        ),
+    ))
+}
+
+/// Nothing changed: why, as the administrator step (or the question) said it.
+fn as_it_was(said: Result<Vec<Outcome>, String>, otherwise: &str) -> CantMove {
+    CantMove::Failed(reason(&said, 0, otherwise))
+}
+
+/// Things changed, but not as they should have: what the step said about it, or what to look at. Unlike [`reason`],
+/// only a step's "halfway" says what's where; why it kept something, or why it didn't run, wouldn't explain a change.
+fn not_as_expected(said: Result<Vec<Outcome>, String>, otherwise: String) -> CantMove {
+    match said.map(|s| s.into_iter().next()) {
+        Ok(Some(Outcome::Halfway(what))) => CantMove::LeftHalfway(what),
+        _ => CantMove::LeftHalfway(otherwise),
+    }
+}
+
 /// The link goes and `restore` takes its name. If that fails, the link to `to` goes back; if even that fails, says
 /// what to rename.
-fn unswap(from: &str, restore: &str, to: &Path) -> Result<(), CantMove> {
+pub(crate) fn unswap(from: &str, restore: &str, to: &Path) -> Result<(), CantMove> {
     match remove_link(Path::new(from)) {
         Ok(()) => {}
         Err(e) if denied(&e) => return Err(CantMove::NeedsAdmin),

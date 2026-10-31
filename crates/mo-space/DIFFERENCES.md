@@ -24,7 +24,7 @@ listed with a verdict: **better** (on purpose), **same idea, new shape**, or **n
 | Undo | find it in the Recycle Bin yourself | after a clean-up each thing is found in the bin (one that isn't is reported: Windows removes for good, after asking, what's too big for its bin); the `Done` list, kept by the app, is what `undo` puts back; on a Mac, Finder's Put Back | better |
 | Thinning, default | the setting's default is 3 hours | the same; and the newest save is never thinned even when another was written at the same moment (C# could thin it) | better |
 | Removing for good | never: Recycle Bin only, Windows asks before deleting anything too big for it | the same (the `trash` library sets the same Windows flags) | same |
-| Administrator step for Program Files | yes (plugin clean-up) | not yet: song clean-up never touches Program Files; it comes with plugin clean-up | not yet |
+| Files Windows guards | binned in one administrator step (plugin clean-up), as listed | the same for songs and plugins: one administrator step at the end for all of them, so Windows asks once. Each is checked again just before Windows asks, and the step leaves anything that changed while it asked; what's gone afterwards is what counts as removed (see [Administrator step](#administrator-step)) | better |
 
 ## Plugins
 
@@ -54,7 +54,7 @@ listed with a verdict: **better** (on purpose), **same idea, new shape**, or **n
 | A folder inside another you picked | n/a (one folder at a time) | goes with it, once, and is listed as gone with it; the room freed (`freed`, and what the clean-up reports) counts everything inside once | better |
 | Why a folder holding another plugin's stays | "used by" the card's plugin | names the plugin that keeps it ("Sounds stay while a project uses Omnisphere") | better |
 | Undo | Recycle Bin by hand | the same `Done` list and `undo` as songs | better |
-| Administrator step | yes, one question for files Windows guards | not yet (Program Files never goes in a clean-up; ProgramData folders that need it say so) | not yet |
+| Administrator step | yes, one question for files Windows guards | the same, one question; Program Files still never goes in a clean-up (the card's rules), so it's for folders Windows guards elsewhere, such as ProgramData. A picked folder inside one that waits for the question goes with it, or, if that one stays after all (you said no), is tried on its own | same |
 
 ## Uninstallers
 
@@ -86,7 +86,7 @@ listed with a verdict: **better** (on purpose), **same idea, new shape**, or **n
 | Moving back with the old copy there | copies files that are newer on the other drive into it | copies files that are new or differ in size or time (an update can bring an older time), each under a temporary name first, so one that fails leaves the old file whole; the old copy's own newer files are kept in "… (newer files from the old copy)" beside the folder, never replaced; a second pass takes what was saved meanwhile; only with room for it plus 2 GB | better |
 | Moving back once the old copy is deleted | copies the folder back | also checks this drive has room for it plus 2 GB, and that the link still leads to the copy the move made | better |
 | Moving a folder whose link an update replaced with a real folder | moves it again, and the first copy is forgotten | refused until linking again comes (later) | better |
-| A folder Windows won't rename (access denied) | asks Windows' administrator question and does that one step as administrator | says to close the DAW, the plugin and any window showing the folder, and moves nothing; the administrator step comes later | not yet |
+| A folder Windows won't rename (access denied) | asks Windows' administrator question and does that one step as administrator; if even that's refused, "Windows wouldn't allow it even as administrator" | the same: the copy is made as you, then Windows asks once for the swap (and again for moving back); if you say no, the copy goes and nothing has moved. If even the administrator is refused, it says that something is probably using it and to close the DAW, the plugin and any window showing it (Windows refuses for that too). On a Mac or Linux (no question to ask) it says so before copying anything | same, and clearer |
 | Something fails half-way and the folder can't get its name back | can say nothing was moved while the folder is left as "… (old copy)" or without its link | says what to rename back, and keeps every copy that holds the files | better |
 
 ## After a move
@@ -100,12 +100,31 @@ listed with a verdict: **better** (on purpose), **same idea, new shape**, or **n
 | Deleting a folder left behind | when no moved folder or link is still in it | the same, and only when nothing is only in it, or newer there (`only_in_old_home`, shown first; you can still say you're sure) | better |
 | Moving the folder the moved folders live in | renamed on the same drive, then every link pointed at the new place, outer ones first; copied and checked to another drive | to another drive the same, with the checks a move has (a link, inside itself, network drive, name taken, OneDrive, room) and a second pass. On the same drive the working links are pointed first (inner ones first, while they can still be reached), then one rename, then each is checked: if a link won't change, the rename fails or a link doesn't reach, it's all put back and nothing has moved. Folders left behind that were in it follow it | better |
 | Pointing links after you moved it yourself | each link pointed at the new place; a real folder where a link was is a problem, and its record stays at the old place | the same, but a real folder's record follows its copy, so it shows as replaced by an update and linking again puts it right (and the old place isn't held up by it). Folders left behind that were in it follow it | better |
-| Pointing a link again that won't change | asks Windows' administrator question | says so; the old link stays, or, if even that fails, says which link to make | not yet |
+| Pointing a link again that won't change | asks Windows' administrator question, once for each level of links (outer ones first) | the same; if even that fails, says so, and the old link stays (or it says which link to make). Moving the folder they live in on the same drive doesn't ask: when Windows won't rename it, or a link it guards would stop it, nothing moves and it says to rename it in File Explorer and then point the links at it here | same |
+
+## Administrator step
+
+The app starts itself again as administrator for one step and waits, as the C# app's `AdminStep` does: `--move-folder
+swap|unswap|relink` and `--recycle-bin`, with a list in Temp, a result file and the list's fingerprint. Each app only
+ever starts itself, so the two don't need to share the shape of these.
+
+| What | C# | Rust | Verdict |
+|---|---|---|---|
+| Starting it | .NET's shell start with `runas` | PowerShell's `Start-Process -Verb RunAs` (Windows' own copy), the program and what's passed to it going in as settings, never as script. Windows is only asked once the app's start-up has run `run_step`, so the copy started as administrator can't be the whole app, hidden | same idea, new shape |
+| Saying no | told | told, recognised by Windows' own wording of "cancelled" in whatever language it speaks (Windows PowerShell passes it on only as text; the uninstaller had the same slip, now fixed too) | same |
+| Quoting what it's started with | each part put in quotes, so a path ending in `\` ran into the part after it | Windows' own rules (backslashes before a quote doubled) | better |
+| Swapping a folder and swapping it back | the paths on the step's command line | in a list with its fingerprint, as links and bins are | same idea, new shape |
+| The list | written over whatever was there | written only as a new file, and read once; a list that doesn't match its fingerprint, isn't text, or a result file already there does nothing | better |
+| What it's handed | the paths as the app has them | each path's folder as it really is (a move recorded through a link to ProgramData is handed the real ProgramData), and the Temp folder by its real name, not Windows' short one | better |
+| Before each line | binned, swapped or relinked as listed (a link's target checked) | checked again: a path reached through a link is left alone (so a link put in meanwhile can't steer it), and so is a result file; a link isn't binned; something to bin must still hold just what it held when the app checked it, just before Windows asked (each file inside, its size and time); a swap only while the folder is still a real folder and the copy a folder, an unswap only while the link still leads to the copy, and the "(old copy)" always beside the folder | better |
+| How it went | the step's word for a link or a bin; the folder looked at for a swap | what's there afterwards for all of them: the link leads to the copy and the old copy is a real folder, the link leads to the new place, the file is gone; anything else says what's where | better |
+| A line it didn't get to | "skipped" | stays, and says the step didn't get to it | same |
+| Binned as another account | Windows asks a standard account for an administrator's password, and the step's files go to that account's Recycle Bin: "may have been removed for good" | says it went to the Recycle Bin as administrator and may be in that account's bin | better |
 
 ## Not yet
 
-- The administrator step, for moving a folder Windows guards or changing a link it guards. It needs the app's start-up
-  to run one step as administrator, as the C# app's `--move-folder` does.
+- Undo of something the administrator step binned: `undo` can only put it back where Windows lets you write, so it says
+  it couldn't; Explorer's Restore asks Windows' question itself.
 - Keeping measured sizes between runs. The C# app keeps them in `library.db` (`plugin_space`, `folder_space`); how the
   Rust library keeps them is for the library's database design (rule 23: each fact once, nothing stored that's quick
   to work out).

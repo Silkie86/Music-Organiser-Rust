@@ -28,9 +28,10 @@ use mo_formats::textscan::is_audio_path;
 use mo_library::scan::{daw_of, is_autosave_dir, is_autosave_file, is_inside, is_project_file};
 use serde::{Deserialize, Serialize};
 
+use crate::admin::{Admin, AsAdmin, NoAdmin, Step, ask_for, reason, stamp};
 use crate::plugin_space::SpaceKind;
 use crate::song::{CompactItem, CompactKind, has_studio_one_song, parent};
-use crate::{key, real_path};
+use crate::{key, not_there, real_path};
 
 /// Why a picked line won't go.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -411,10 +412,19 @@ impl Done {
     }
 }
 
+/// What [`Bin::send`] says when Windows wants administrator rights to remove something (files of a plugin's in a
+/// folder it guards). The clean-ups then send all of those in one administrator step ([`Bin::admin`]).
+pub const NEEDS_ADMIN: &str = "Windows needs administrator rights to remove this; remove it in Explorer instead.";
+
 /// Where removed things go. The app uses [`SystemBin`]; tests use a folder of their own.
 pub trait Bin {
-    /// Puts a file or folder in the bin, or says what stopped it.
+    /// Puts a file or folder in the bin, or says what stopped it ([`NEEDS_ADMIN`] when Windows wants administrator
+    /// rights for it).
     fn send(&self, path: &Path) -> Result<(), String>;
+    /// Windows' administrator question, for what it guards: the app's bin asks it; by default nothing is asked.
+    fn admin(&self) -> &dyn Admin {
+        &NoAdmin
+    }
     /// After a clean-up: finds each removed thing in the bin and notes what the bin calls it, so it can be put back.
     /// Says which aren't there (removed for good when Windows asked about something too big for the bin).
     fn find(&self, removed: &mut [Removed]) -> Vec<Problem>;
@@ -426,33 +436,146 @@ pub trait Bin {
 /// refuses, stays. A copy only goes while the save it copies is still there and still the same.
 pub fn apply(plan: &Plan, guard: &Guard<'_>, bin: &dyn Bin) -> Done {
     let mut done = Done::default();
+    let mut sending = Sending::new(bin);
     for line in &plan.lines {
         let item = &line.item;
-        let real = match guard.check(item) {
+        let check = || match guard.check(item) {
             Err(why) => Err(why),
             Ok(now) if now.stamp != line.stamp => Err(Refused::Changed),
             Ok(now) => Ok(now.real),
         };
-        let real = match real {
+        let real = match check() {
             Ok(real) => real,
             Err(why) => {
                 done.problems.push(Problem { path: item.path.clone(), why: why.text().to_owned() });
                 continue;
             }
         };
-        send(&item.path, real, item.bytes, What::Song(item.kind), bin, &mut done);
+        let again = move || check().map(|_| ()).map_err(|why| why.text().to_owned());
+        sending.send(&item.path, real, item.bytes, What::Song(item.kind), &mut done, again);
     }
-    let not_found = bin.find(&mut done.removed);
-    done.problems.extend(not_found);
+    sending.finish(&mut done);
     done
 }
 
-/// Sends one checked thing to the bin and notes how it went.
-pub(crate) fn send(path: &str, real: String, bytes: u64, what: What, bin: &dyn Bin, done: &mut Done) {
-    let when = now_seconds();
-    match bin.send(Path::new(path)) {
-        Ok(()) => done.removed.push(Removed { path: path.to_owned(), real, bytes, what, when, bin_id: None }),
-        Err(why) => done.problems.push(Problem { path: path.to_owned(), why }),
+/// What [`Bin::find`] says of something that went but isn't in the bin.
+pub(crate) const NOT_IN_BIN: &str = "It isn't in the Recycle Bin, so it may have been removed for good.";
+
+/// Sends checked things to the bin one at a time. Anything Windows guards waits, and all of it goes in one
+/// administrator step ([`Sending::flush`]), so Windows asks once. [`Sending::finish`] sends what waits and then finds
+/// everything removed in the bin: a clean-up ends with it, so nothing waiting can be left out of what it says.
+pub(crate) struct Sending<'a> {
+    bin: &'a dyn Bin,
+    waiting: Vec<(Removed, Again<'a>)>,
+    /// Where things the administrator step sent were (keys), for what's said when the bin doesn't have them.
+    by_admin: Vec<String>,
+    /// Set once Windows has been asked (it asks at most once in a clean-up): why anything else Windows guards stays.
+    not_asked: Option<String>,
+}
+
+/// Checks something waiting for the administrator step again just before Windows asks: why it stays, if it does.
+type Again<'a> = Box<dyn Fn() -> Result<(), String> + 'a>;
+
+/// How sending one thing went.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Sent {
+    /// It's in the bin.
+    Went,
+    /// Windows guards it: it waits for the administrator step.
+    Waits,
+    /// It stays, and `done` says why.
+    Stays,
+}
+
+impl<'a> Sending<'a> {
+    pub(crate) fn new(bin: &'a dyn Bin) -> Self {
+        Sending { bin, waiting: Vec::new(), by_admin: Vec::new(), not_asked: None }
+    }
+
+    /// Sends one checked thing to the bin and notes how it went in `done`. One Windows guards waits for the
+    /// administrator step, and `again` checks it again just before Windows asks (the other lines, and you, take time).
+    pub(crate) fn send(
+        &mut self,
+        path: &str,
+        real: String,
+        bytes: u64,
+        what: What,
+        done: &mut Done,
+        again: impl Fn() -> Result<(), String> + 'a,
+    ) -> Sent {
+        let removed = Removed { path: path.to_owned(), real, bytes, what, when: now_seconds(), bin_id: None };
+        let why = match self.bin.send(Path::new(path)) {
+            Ok(()) => {
+                done.removed.push(removed);
+                return Sent::Went;
+            }
+            Err(why) if why == NEEDS_ADMIN && self.bin.admin().can_ask() => match &self.not_asked {
+                Some(no) => no.clone(),
+                None => {
+                    self.waiting.push((removed, Box::new(again)));
+                    return Sent::Waits;
+                }
+            },
+            Err(why) => why,
+        };
+        done.problems.push(Problem { path: path.to_owned(), why });
+        Sent::Stays
+    }
+
+    /// Sends what waits to the bin in one administrator step (Windows asks you once). Each is checked again first, and
+    /// its [`stamp`] taken, which the step checks once more before binning it. What's gone afterwards counts as removed;
+    /// the rest stays, with why.
+    pub(crate) fn flush(&mut self, done: &mut Done) {
+        let mut lines = Vec::new();
+        let mut sent = Vec::new();
+        for (r, again) in std::mem::take(&mut self.waiting) {
+            let stamped = again().and_then(|()| {
+                stamp(Path::new(&r.real))
+                    .ok_or_else(|| "It couldn't all be read to check it again, so it stays.".to_owned())
+            });
+            match stamped {
+                Ok(stamp) => {
+                    lines.push(vec![r.real.clone(), stamp]);
+                    sent.push(r);
+                }
+                Err(why) => done.problems.push(Problem { path: r.path, why }),
+            }
+        }
+        if sent.is_empty() {
+            return;
+        }
+        let when = now_seconds();
+        let said = ask_for(self.bin.admin(), Step::Bin, &lines);
+        self.not_asked = Some(match &said {
+            Err(why) => why.clone(),
+            Ok(_) => "Windows guards this too, and was asked once already in this clean-up: clean up again to be \
+                      asked about it."
+                .to_owned(),
+        });
+        for (n, r) in sent.into_iter().enumerate() {
+            // What's there now decides, whatever the step said.
+            if not_there(Path::new(&r.real)) {
+                self.by_admin.push(key(&r.real));
+                done.removed.push(Removed { when, ..r });
+            } else {
+                let why = reason(&said, n, "It's still there: a program may be using some of it.");
+                done.problems.push(Problem { path: r.path, why });
+            }
+        }
+    }
+
+    /// Sends what waits ([`Sending::flush`]), then finds everything removed in the bin, so it can be put back.
+    pub(crate) fn finish(mut self, done: &mut Done) {
+        self.flush(done);
+        for mut problem in self.bin.find(&mut done.removed) {
+            let as_admin = |r: &Removed| key(&r.path) == key(&problem.path) && self.by_admin.contains(&key(&r.real));
+            if problem.why == NOT_IN_BIN && done.removed.iter().any(as_admin) {
+                problem.why = "It went to the Recycle Bin as administrator but isn't in yours: if Windows asked for \
+                               another account's password, it's in that account's Recycle Bin."
+                    .to_owned();
+            }
+            done.problems.push(problem);
+        }
     }
 }
 
@@ -469,6 +592,10 @@ fn now_seconds() -> i64 {
 pub struct SystemBin;
 
 impl Bin for SystemBin {
+    fn admin(&self) -> &dyn Admin {
+        &AsAdmin
+    }
+
     fn send(&self, path: &Path) -> Result<(), String> {
         // The library behind this can stop the thread when Windows won't start its file operations; that's a problem
         // for this line, not a crash.
@@ -495,9 +622,7 @@ impl Bin for SystemBin {
 fn bin_problem(e: &trash::Error) -> String {
     match e {
         // HRESULTs from Windows: access denied, file in use.
-        trash::Error::Os { code, .. } if code & 0xFFFF == 5 || code & 0xFFFF == 0x78 => {
-            "Windows needs administrator rights to remove this; remove it in Explorer instead.".to_owned()
-        }
+        trash::Error::Os { code, .. } if code & 0xFFFF == 5 || code & 0xFFFF == 0x78 => NEEDS_ADMIN.to_owned(),
         trash::Error::Os { code, .. } if code & 0xFFFF == 32 => {
             "A program is using it. Close your DAW and try again.".to_owned()
         }
@@ -546,10 +671,7 @@ fn find_in_system_bin(removed: &mut [Removed]) -> Vec<Problem> {
                 taken.insert(item.id.as_os_str());
                 r.bin_id = item.id.to_str().map(str::to_owned);
             }
-            None => problems.push(Problem {
-                path: r.path.clone(),
-                why: "It isn't in the Recycle Bin, so it may have been removed for good.".into(),
-            }),
+            None => problems.push(Problem { path: r.path.clone(), why: NOT_IN_BIN.into() }),
         }
     }
     problems

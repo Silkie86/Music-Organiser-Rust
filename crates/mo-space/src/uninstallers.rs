@@ -224,14 +224,18 @@ pub fn split(command: &str) -> (String, String) {
 /// (and Windows' administrator question when it needs one), then waits for it and what it starts to finish (many copy
 /// themselves to Temp, start the copy and end). PowerShell's `Start-Process` does what Explorer does; the program and
 /// what's passed to it reach it as settings, never as part of the script, so nothing in them can run as a command. It
-/// says how it went on one line: `ended N` with the uninstaller's exit code, `said no`, or `not started: why`.
+/// says how it went on one line: `ended N` with the uninstaller's exit code, `said no`, or `not started: why`. Windows
+/// PowerShell's `Start-Process` passes on Windows' "cancelled by the user" only as text, so that's recognised by
+/// Windows' own wording of it, in whatever language Windows speaks.
 fn command_for(u: &Uninstaller) -> Command {
     const SCRIPT: &str = "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; \
         try { $a = @{ FilePath = $env:MO_UNINSTALL_FILE; PassThru = $true; Wait = $true; ErrorAction = 'Stop' }; \
         if ($env:MO_UNINSTALL_ARGS) { $a.ArgumentList = $env:MO_UNINSTALL_ARGS }; \
         $p = Start-Process @a; if ($p) { 'ended ' + $p.ExitCode } else { 'ended 0' } } \
         catch { $e = $_.Exception; $no = $false; \
-        while ($e) { if ($e.NativeErrorCode -eq 1223) { $no = $true }; $e = $e.InnerException }; \
+        $c = (New-Object System.ComponentModel.Win32Exception 1223).Message; \
+        while ($e) { if ($e.NativeErrorCode -eq 1223 -or $e.Message.Contains($c)) { $no = $true }; \
+        $e = $e.InnerException }; \
         if ($no) { 'said no' } else { 'not started: ' + $_.Exception.Message } }";
     let (file, args) = split(&u.command);
     // Windows' own PowerShell, never one that happens to sit beside the app or earlier on the PATH.

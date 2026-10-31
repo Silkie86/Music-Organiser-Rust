@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, SystemTime};
 
+use mo_space::admin::NoAdmin;
 use mo_space::after_move::{
     KEPT_BEFORE_SUFFIX, OldHome, doubled, find_sharers, home_of, kept_beside, link_again, lost, move_home,
     old_home_can_go, old_homes_json, only_in_old_home, parse_old_homes, real_place, remove_old_home, replaced, repoint,
@@ -217,7 +218,7 @@ fn a_lost_link_and_a_home_moved_by_hand_are_found_and_pointed_again() {
     // shows as replaced by an update.
     unlink(&c.join("Kontakt"));
     write(&c, "Kontakt/b.nki", "b");
-    let now = repoint(&s(&data), &s(&by_hand), &all, &homes);
+    let now = repoint(&s(&data), &s(&by_hand), &all, &homes, &NoAdmin);
     assert!(now.problems.is_empty(), "{:?}", now.problems);
     assert!(now.old_home.is_none());
     assert!(lost(&now.moved).is_empty());
@@ -234,7 +235,7 @@ fn a_lost_link_and_a_home_moved_by_hand_are_found_and_pointed_again() {
 
     // A copy that isn't at the new place is named, and its link left as it was.
     fs::rename(by_hand.join("STEAM"), d.join("STEAM elsewhere")).unwrap();
-    let again = repoint(&s(&by_hand), &s(&data), &now.moved, &now.old_homes);
+    let again = repoint(&s(&by_hand), &s(&data), &now.moved, &now.old_homes, &NoAdmin);
     assert_eq!(again.problems.len(), 2);
     assert_eq!(again.moved, now.moved);
 }
@@ -435,7 +436,7 @@ fn a_second_copy_behind_a_lost_link_is_found_once_the_link_is_pointed_again() {
     // Plugin Data renamed by hand: the second copy can't be seen until Native Instruments' link leads somewhere.
     let by_hand = d.join("Data");
     fs::rename(&data, &by_hand).unwrap();
-    let now = repoint(&s(&data), &s(&by_hand), &all, &[]);
+    let now = repoint(&s(&data), &s(&by_hand), &all, &[], &NoAdmin);
     assert!(now.problems.is_empty(), "{:?}", now.problems);
     assert_eq!(now.moved[1].to, s(&by_hand.join("NI")));
     // The second copy is left alone, and Reaktor 6's record follows its copy, so it shows as doubled.

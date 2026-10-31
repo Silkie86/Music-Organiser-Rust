@@ -10,12 +10,15 @@
 //! - [`spare`]: plugin copies in a format no project uses (or AAX without Pro Tools).
 //! - [`uninstallers`]: a plugin's own uninstaller from the programs Windows lists, and running it.
 //! - [`folder_move`]: moving a plugin's sounds or presets to another drive with a link in their place, and back.
+//! - [`after_move`]: what can happen to a moved folder later (lost links, updates), and putting it right.
+//! - [`admin`]: the administrator step, for folders, links and files Windows guards.
 //!
 //! Nothing here touches the window or a database: the app reads what it needs from the library and hands it in, and
 //! every walk is spread over the cores of the pool it's called in (call it in the app's low-priority pool).
 //! Rules kept from the C# app: samples are never removed (rule 2), a song's newest save always stays, and nothing is
 //! ever deleted for good.
 
+pub mod admin;
 pub mod after_move;
 pub mod app_files;
 pub mod clean;
@@ -44,6 +47,27 @@ pub fn key(path: &str) -> String {
         "" => "/".to_owned(),
         trimmed => trimmed.to_owned(),
     }
+}
+
+/// A path as text (anything that isn't Unicode shown as �).
+pub(crate) fn text(path: &std::path::Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+/// A folder is there (a link to one counts).
+pub(crate) fn is_dir(path: &str) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| m.is_dir())
+}
+
+/// A real folder is there, not a link.
+pub(crate) fn real_folder(path: &str) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir())
+}
+
+/// Nothing is there at all, not even a link leading nowhere. A path that can't be looked at isn't counted as gone: it
+/// may well still be there.
+pub(crate) fn not_there(path: &std::path::Path) -> bool {
+    std::fs::symlink_metadata(path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
 }
 
 /// Your home folder (`HOME`, or `USERPROFILE` on Windows).
