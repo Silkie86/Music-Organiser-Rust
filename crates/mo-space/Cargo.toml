@@ -25,6 +25,8 @@ fs4 = "1.1"
 # Where Windows keeps Documents, ProgramData and the rest, even when you've moved them.
 [target.'cfg(windows)'.dependencies]
 known-folders = "1.4"
+# The list of installed programs and their uninstallers (Settings, Apps).
+windows-registry = "0.6"
 
 # Whether a folder is on a network share (Mac, Linux). Already used by fs4.
 [target.'cfg(unix)'.dependencies]

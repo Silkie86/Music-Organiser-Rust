@@ -56,9 +56,20 @@ listed with a verdict: **better** (on purpose), **same idea, new shape**, or **n
 | Undo | Recycle Bin by hand | the same `Done` list and `undo` as songs | better |
 | Administrator step | yes, one question for files Windows guards | not yet (Program Files never goes in a clean-up; ProgramData folders that need it say so) | not yet |
 
+## Uninstallers
+
+| What | C# | Rust | Verdict |
+|---|---|---|---|
+| Which programs, which first | Windows' list of installed programs (both hives, 64- and 32-bit), matched by family, maker and version; a DAW's never; another version's last | the same, checked on the C# app's own test cases | same |
+| Starting one | .NET's shell start, so Windows asks its administrator question when the uninstaller needs it | PowerShell's `Start-Process` (Windows' own copy), which does the same; the program and what's passed to it go in as settings, never as script, so nothing in them can run as a command | same idea, new shape |
+| Waiting for it | waits for the program started; one that copies itself to Temp and starts the copy (NSIS) seems done at once | waits for it and what it starts (so also for a browser it opens, if the browser wasn't open) | better |
+| How it went | not told | told: done, cancelled, or ended with a code (so it may not have finished); the plugin list is checked again either way | better |
+| `%ProgramFiles%` in the command | filled in as Windows' list is read | the same | same |
+| Saying no to Windows' question | told | told, in any language Windows speaks | same |
+
 ## Not yet
 
-- Uninstallers, moving plugin data to another drive with a link in its place, the administrator step.
+- Moving plugin data to another drive with a link in its place, the administrator step.
 - Keeping measured sizes between runs. The C# app keeps them in `library.db` (`plugin_space`, `folder_space`); how the
   Rust library keeps them is for the library's database design (rule 23: each fact once, nothing stored that's quick
   to work out).
