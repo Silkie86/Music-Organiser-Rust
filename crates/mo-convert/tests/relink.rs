@@ -33,6 +33,8 @@ fn project_with_copy(dir: &Path, copy: &str) -> PathBuf {
         0x7f02,
         r"C:\Users\someone\Documents\Bitwig Studio\Library\Multisamples\Kicks 1 Select.multisample",
     ));
+    // The same copy in another project it was copied from (gone since), as Bitwig keeps it beside the copy.
+    origin.fields.push(text(0x7f08, &format!(r"Q:\Bitwig Studio\Projects\jingle garage\multi-samples\{copy}")));
     let origin = doc.add(origin);
     let mut file = Object::new(0x7f00);
     file.fields.push(text(0x7f03, copy));
@@ -111,8 +113,8 @@ fn every_reference_to_a_copy_points_at_the_library_file() {
     assert!(t.contains(&"Kicks 1 Select.multisample".to_owned()));
     assert_eq!(
         t.iter().filter(|x| **x == full).count(),
-        4,
-        "relative, absolute, the old Library path and the used files list: {t:?}"
+        5,
+        "relative, absolute, the old Library path, the other project's copy and the used files list: {t:?}"
     );
     assert!(!t.iter().any(|x| x.contains("-3-2-2")), "{t:?}");
     // Asked again: the first fixed project is kept, the new one is numbered, and the copy is still free to go.

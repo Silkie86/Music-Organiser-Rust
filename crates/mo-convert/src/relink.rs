@@ -208,7 +208,8 @@ fn relink_listed(raw: &[u8], project_dir: &Path, listed: &[Listed]) -> Result<(V
             held.push((ObjId(i as u32), here));
         }
     }
-    // Beside each: the old Library path its copy came from, if it's gone, names that copy's Library file now.
+    // Beside each: where its copy came from (the old Library path, or the same copy in another project or template it
+    // was copied from), if that's gone, names that copy's Library file now.
     let children = children(&doc);
     let mut on_disk: HashMap<String, bool> = HashMap::new();
     for (id, copies) in held {
@@ -216,8 +217,10 @@ fn relink_listed(raw: &[u8], project_dir: &Path, listed: &[Listed]) -> Result<(V
             for field in &mut doc.obj_mut(near).fields {
                 let Value::Str(t) = &mut field.value else { continue };
                 let s = t.as_str();
-                let Some(c) = copies.iter().map(|&c| &listed[c]).find(|c| key(file_name(s)) == key(&c.library_name))
-                else {
+                let Some(c) = copies.iter().map(|&c| &listed[c]).find(|c| {
+                    let name = key(file_name(s));
+                    name == key(&c.library_name) || name == c.name
+                }) else {
                     continue;
                 };
                 if !s.contains(['/', '\\']) || key(s) == key(&c.full) {
