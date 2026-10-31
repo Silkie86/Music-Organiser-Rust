@@ -89,10 +89,21 @@ listed with a verdict: **better** (on purpose), **same idea, new shape**, or **n
 | A folder Windows won't rename (access denied) | asks Windows' administrator question and does that one step as administrator | says to close the DAW, the plugin and any window showing the folder, and moves nothing; the administrator step comes later | not yet |
 | Something fails half-way and the folder can't get its name back | can say nothing was moved while the folder is left as "… (old copy)" or without its link | says what to rename back, and keeps every copy that holds the files | better |
 
+## After a move
+
+| What | C# | Rust | Verdict |
+|---|---|---|---|
+| Lost, replaced by an update, doubled by a later move | found the same way | the same (`lost`, `replaced`, `doubled`); the Rust move keeps links inside as links, so it never makes doubled ones itself | same |
+| Folders left behind | `library.db` setting `space_old_homes` (JSON) | the same JSON (`parse_old_homes`, `old_homes_json`), plus where its files went (`Copy`), which the C# app skips over when it reads | same, and more |
+| Linking again after an update | new and newer files join the copy on the other drive, then the folder is set aside and the link goes back | files that are new or differ join it, each under a temporary name first; the copy's own newer files are kept in "… (newer files from before)" rather than replaced; a second pass takes what was saved meanwhile; only with room for it | better |
+| Deleting a folder left behind | when no moved folder or link is still in it | the same, and only when nothing is only in it, or newer there (`only_in_old_home`, shown first; you can still say you're sure) | better |
+| Moving the folder the moved folders live in | renamed on the same drive, copied and checked to another; every link pointed at the new place, outer ones first | the same, with the checks a move has (a link, inside itself, network drive, name taken, OneDrive, room), a second pass, and a rename tried first on the same drive | better |
+| Pointing a link again that won't change | asks Windows' administrator question | says so; the old link stays, or, if even that fails, says which link to make | not yet |
+
 ## Not yet
 
-- The administrator step for moving a folder Windows guards, and the moved-folder checks that come after a move:
-  lost, replaced or doubled moves, linking again after an update, moving home, repointing to another drive.
+- The administrator step, for moving a folder Windows guards or changing a link it guards. It needs the app's start-up
+  to run one step as administrator, as the C# app's `--move-folder` does.
 - Keeping measured sizes between runs. The C# app keeps them in `library.db` (`plugin_space`, `folder_space`); how the
   Rust library keeps them is for the library's database design (rule 23: each fact once, nothing stored that's quick
   to work out).

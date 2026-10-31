@@ -484,12 +484,12 @@ fn shown(paths: &[PathBuf]) -> Vec<String> {
 }
 
 /// Whether the link where the folder was leads to the copy on the other drive, and that copy is there.
-fn link_reaches(moved: &MovedFolder) -> bool {
+pub(crate) fn link_reaches(moved: &MovedFolder) -> bool {
     is_link(Path::new(&moved.from)) && leads_to(&moved.from, Path::new(&moved.to))
 }
 
 /// Whether a path ends up at a folder that's there, following any links on the way.
-fn leads_to(path: &str, to: &Path) -> bool {
+pub(crate) fn leads_to(path: &str, to: &Path) -> bool {
     match (real_path(path), real_path(&to.to_string_lossy())) {
         (Some(a), Some(b)) => key(&a) == key(&b) && fs::metadata(to).is_ok_and(|m| m.is_dir()),
         _ => false,
@@ -533,24 +533,33 @@ fn all_held<'a>(old: &Path, moved: &'a MovedFolder, all: &'a [MovedFolder], foun
 /// it before are checked against their own copies. Reads both folders: call it away from the window's thread.
 pub fn only_in_old_copy(moved: &MovedFolder, all: &[MovedFolder], stop: &AtomicBool) -> Result<Vec<String>, CantMove> {
     let mut only = Vec::new();
-    differences(Path::new(&moved.old_copy), moved, all, Path::new(""), &mut only, stop)?;
+    let old = Path::new(&moved.old_copy);
+    differences((old, Path::new(&moved.to)), held(old, moved, all), all, Path::new(""), &mut only, stop)?;
     only.sort();
     Ok(only)
 }
 
-/// Adds what's in `old` (where `moved`'s old copy sits now) but not in its copy, as paths under `shown_as`.
+/// What's in `old` but not in `copy`, or newer in `old`, as paths inside it.
+pub(crate) fn only_in(old: &Path, copy: &Path, stop: &AtomicBool) -> Result<Vec<String>, CantMove> {
+    let mut only = Vec::new();
+    differences((old, copy), Vec::new(), &[], Path::new(""), &mut only, stop)?;
+    only.sort();
+    Ok(only)
+}
+
+/// Adds what's in `old` but not in `copy`, or newer in `old`, as paths under `shown_as`. `inner` holds the old copies
+/// of folders moved from inside it before, as they sit in `old`: each is checked against its own copy.
 fn differences(
-    old: &Path,
-    moved: &MovedFolder,
+    (old, copy): (&Path, &Path),
+    inner: Vec<(PathBuf, &MovedFolder)>,
     all: &[MovedFolder],
     shown_as: &Path,
     only: &mut Vec<String>,
     stop: &AtomicBool,
 ) -> Result<(), CantMove> {
-    let inner = held(old, moved, all);
     let skip: Vec<String> = inner.iter().map(|(at, _)| key(&at.to_string_lossy())).collect();
     let show = |p: &Path| shown_as.join(p.strip_prefix(old).unwrap_or(p)).to_string_lossy().into_owned();
-    let mut folders = vec![(old.to_path_buf(), PathBuf::from(&moved.to))];
+    let mut folders = vec![(old.to_path_buf(), copy.to_path_buf())];
     while let Some((old_dir, copy_dir)) = folders.pop() {
         let Ok(entries) = fs::read_dir(&old_dir) else {
             only.push(show(&old_dir));
@@ -594,7 +603,7 @@ fn differences(
     }
     for (at, m) in inner {
         let rest = at.strip_prefix(old).unwrap_or(&at).to_path_buf();
-        differences(&at, m, all, &shown_as.join(rest), only, stop)?;
+        differences((&at, Path::new(&m.to)), held(&at, m, all), all, &shown_as.join(rest), only, stop)?;
     }
     Ok(())
 }
@@ -659,12 +668,12 @@ fn stays(moved: &MovedFolder, why: &str) -> Done {
 }
 
 /// Whether Windows said no because of rights (access denied), rather than something having the folder open.
-fn denied(e: &io::Error) -> bool {
+pub(crate) fn denied(e: &io::Error) -> bool {
     e.kind() == io::ErrorKind::PermissionDenied
 }
 
 /// Renames the folder and straight back, to learn whether the swap will work.
-fn check_rename(from: &str) -> Result<(), CantMove> {
+pub(crate) fn check_rename(from: &str) -> Result<(), CantMove> {
     let check = format!("{from}{CHECK_SUFFIX}");
     if fs::symlink_metadata(&check).is_ok() {
         return Err(CantMove::Failed(format!("There's a folder called {} beside it.", file_name(&check))));
@@ -701,7 +710,7 @@ fn rename_back(from: &str, to: &str) -> io::Result<()> {
 
 /// The original becomes "… (old copy)" and a link to the copy takes its name. If the link doesn't take, the original
 /// gets its name back.
-fn swap(from: &str, to: &Path, aside: &str) -> Result<(), CantMove> {
+pub(crate) fn swap(from: &str, to: &Path, aside: &str) -> Result<(), CantMove> {
     if fs::symlink_metadata(aside).is_ok() {
         return Err(CantMove::OldCopyThere);
     }
@@ -754,7 +763,7 @@ fn unswap(from: &str, restore: &str, to: &Path) -> Result<(), CantMove> {
 }
 
 /// A junction on Windows (no administrator rights or developer mode needed), a symbolic link elsewhere.
-fn link(at: &Path, target: &Path) -> io::Result<()> {
+pub(crate) fn link(at: &Path, target: &Path) -> io::Result<()> {
     #[cfg(windows)]
     {
         junction::create(target, at)
@@ -789,7 +798,7 @@ fn file_link(target: &Path, at: &Path) -> io::Result<()> {
 
 /// Clears what a link that didn't take left: the link, or the empty folder Windows makes a junction from. Only ever an
 /// empty folder: one with anything in it stays.
-fn clear_failed_link(at: &Path) {
+pub(crate) fn clear_failed_link(at: &Path) {
     if is_link(at) {
         let _ = remove_link(at);
     } else if fs::symlink_metadata(at).is_ok_and(|m| m.is_dir()) {
@@ -798,7 +807,7 @@ fn clear_failed_link(at: &Path) {
 }
 
 /// Removes a link only, never what it leads to.
-fn remove_link(at: &Path) -> io::Result<()> {
+pub(crate) fn remove_link(at: &Path) -> io::Result<()> {
     if !is_link(at) {
         return Err(io::Error::other("not a link"));
     }
@@ -807,7 +816,7 @@ fn remove_link(at: &Path) -> io::Result<()> {
 }
 
 /// Removes a copy the move made itself, when the move stops: never a link, never the original.
-fn remove_copy(path: &Path) {
+pub(crate) fn remove_copy(path: &Path) {
     if fs::symlink_metadata(path).is_ok_and(|m| m.is_dir()) && !is_link(path) {
         let _ = fs::remove_dir_all(path);
     }
@@ -815,7 +824,7 @@ fn remove_copy(path: &Path) {
 
 /// How [`copy_tree`] treats what's in the copy already.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Fill {
+pub(crate) enum Fill {
     /// The copy was just made, so anything there already is a second file of the same name but for capitals, on a
     /// drive that doesn't tell them apart: the copy stops.
     New,
@@ -827,30 +836,35 @@ enum Fill {
 }
 
 /// A folder to copy, and where.
-struct Tree<'a> {
-    from: &'a Path,
-    to: &'a Path,
+pub(crate) struct Tree<'a> {
+    pub(crate) from: &'a Path,
+    pub(crate) to: &'a Path,
     /// Where `to` ends up once everything's done: links leading inside `from` lead to the same place inside it.
-    settled: &'a Path,
+    pub(crate) settled: &'a Path,
     /// Where files in `to` that are newer than the ones replacing them go first (by their paths inside `to`), when
     /// `to` is yours; without it they're replaced (a copy the move made).
-    keep_in: Option<&'a Path>,
+    pub(crate) keep_in: Option<&'a Path>,
     /// Folders not copied (keys).
-    leave_out: &'a [String],
+    pub(crate) leave_out: &'a [String],
 }
 
 /// What a copy did: bytes copied (or that would be, counting), and what it kept aside or left (paths inside the copy).
 #[derive(Default)]
-struct Copied {
-    bytes: u64,
-    kept: Vec<PathBuf>,
-    links_left: Vec<PathBuf>,
+pub(crate) struct Copied {
+    pub(crate) bytes: u64,
+    pub(crate) kept: Vec<PathBuf>,
+    pub(crate) links_left: Vec<PathBuf>,
 }
 
 /// Copies a folder into another one, file by file, keeping each file's time and checking its size once written. A link
 /// inside is made again as a link, never followed. A file or folder that goes while it's read (a plugin's lock file)
 /// is passed over. One file at a time: a move usually goes to a spinning drive, where several at once is slower.
-fn copy_tree(tree: &Tree, fill: Fill, progress: &(dyn Fn(u64) + Sync), stop: &AtomicBool) -> Result<Copied, CantMove> {
+pub(crate) fn copy_tree(
+    tree: &Tree,
+    fill: Fill,
+    progress: &(dyn Fn(u64) + Sync),
+    stop: &AtomicBool,
+) -> Result<Copied, CantMove> {
     let source_real = fs::canonicalize(tree.from).map_err(|e| failed(tree.from, &e))?;
     let inside = |copy: &Path| copy.strip_prefix(tree.to).unwrap_or(copy).to_path_buf();
     let mut copied = Copied::default();
@@ -968,7 +982,7 @@ fn gone(path: &Path) -> bool {
 }
 
 /// What a copy that went wrong says.
-fn failed(path: &Path, e: &io::Error) -> CantMove {
+pub(crate) fn failed(path: &Path, e: &io::Error) -> CantMove {
     CantMove::Failed(format!("Copying stopped at {} ({e}).", path.to_string_lossy()))
 }
 
