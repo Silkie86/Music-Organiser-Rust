@@ -1,0 +1,244 @@
+// The Songs page: one line per song, newest save first, under time headings, with search, filter chips and a year
+// scrubber. Agreed with Solomon on 2026-10-31. The song panel comes next.
+import { ListView } from "std-widgets.slint";
+import { Theme, Well, SearchBox, ToggleChip, MenuChip, ListLine, Stars, YearMark, Caps, Heart } from "../studio.slint";
+
+// One line of the list: a heading ("This week", "2019") when `heading` isn't empty, else a song.
+export struct SongLine {
+    heading: string,
+    // Where the song is in the page's rows (mo-app's `Songs::rows`), for picking it.
+    row: int,
+    name: string,
+    details: string,
+    date: string,
+    date-tip: string,
+    missing: string,
+    rating: int,
+    favourite: bool,
+    status: string,
+    daw: string,
+}
+
+// Where a year starts in the list, for the scrubber.
+export struct YearStart {
+    year: string,
+    y: length,
+}
+
+// What the page shows and what it reports, filled and answered by mo-ui's songs.rs.
+export global SongsData {
+    in property <[SongLine]> lines;
+    in property <[YearStart]> years;
+    in property <string> count;
+    // Shown instead of the list while it loads, or when the library can't be read.
+    in property <string> message: "Reading your library…";
+    in-out property <string> search;
+    in property <[string]> daws;
+    in property <[string]> statuses;
+    in property <[string]> tags;
+    in property <string> daw;
+    in property <string> status;
+    in property <string> tag;
+    in property <bool> favourites;
+    in property <bool> missing;
+    in property <bool> hide-archived;
+    in property <bool> any-filter;
+    in property <int> selected: -1;
+    callback search-edited(string);
+    callback pick(string, string);
+    callback toggle(string);
+    callback clear();
+    callback select(int);
+    callback open(int);
+    // Every line is one of two heights, so a year's place in the list can be worked out.
+    out property <length> heading-height: 34px;
+    out property <length> song-height: 54px;
+}
+
+export component SongsPage inherits Rectangle {
+    forward-focus: search-box;
+
+    VerticalLayout {
+        padding: 28px;
+        padding-bottom: 16px;
+        spacing: 12px;
+        HorizontalLayout {
+            spacing: 14px;
+            vertical-stretch: 0;
+            Text {
+                text: "Songs";
+                font-size: 24px;
+                font-weight: 600;
+                color: Theme.text;
+                vertical-alignment: center;
+            }
+            Text {
+                text: SongsData.count;
+                color: Theme.muted;
+                font-size: 13px;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+        }
+        search-box := SearchBox {
+            hint: "Search songs, plugins, tags, notes, a key or a year";
+            text <=> SongsData.search;
+            edited(t) => { SongsData.search-edited(t); }
+            key(k) => {
+                if (k == Key.Escape && SongsData.search != "") {
+                    SongsData.search = "";
+                    SongsData.search-edited("");
+                    return true;
+                }
+                false
+            }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            vertical-stretch: 0;
+            MenuChip {
+                name: "DAW";
+                value: SongsData.daw;
+                choices: SongsData.daws;
+                picked(v) => { SongsData.pick("daw", v); }
+            }
+            MenuChip {
+                name: "Status";
+                value: SongsData.status;
+                choices: SongsData.statuses;
+                picked(v) => { SongsData.pick("status", v); }
+            }
+            MenuChip {
+                name: "Tag";
+                value: SongsData.tag;
+                choices: SongsData.tags;
+                picked(v) => { SongsData.pick("tag", v); }
+            }
+            ToggleChip {
+                text: "Favourites";
+                on: SongsData.favourites;
+                clicked => { SongsData.toggle("favourites"); }
+            }
+            ToggleChip {
+                text: "Missing something";
+                on: SongsData.missing;
+                clicked => { SongsData.toggle("missing"); }
+            }
+            ToggleChip {
+                text: "Hide archived";
+                on: SongsData.hide-archived;
+                clicked => { SongsData.toggle("hide-archived"); }
+            }
+            if SongsData.any-filter: ToggleChip {
+                text: "Clear";
+                on: false;
+                clicked => { SongsData.clear(); }
+            }
+        }
+        Well {
+            vertical-stretch: 1;
+            if SongsData.message != "": Text {
+                text: SongsData.message;
+                color: Theme.muted;
+                font-size: 14px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                wrap: word-wrap;
+            }
+            if SongsData.message == "": HorizontalLayout {
+                list := ListView {
+                    horizontal-stretch: 1;
+                    for line in SongsData.lines: Rectangle {
+                        height: line.heading != "" ? SongsData.heading-height : SongsData.song-height;
+                        if line.heading != "": Caps {
+                            x: 16px;
+                            y: parent.height - self.height - 6px;
+                            text: line.heading;
+                        }
+                        if line.heading == "": ListLine {
+                            x: 4px;
+                            width: parent.width - 8px;
+                            selected: line.row == SongsData.selected;
+                            clicked => { SongsData.select(line.row); }
+                            double-clicked => { SongsData.open(line.row); }
+                            HorizontalLayout {
+                                padding-left: 14px;
+                                padding-right: 14px;
+                                spacing: 12px;
+                                VerticalLayout {
+                                    alignment: center;
+                                    spacing: 3px;
+                                    horizontal-stretch: 1;
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        alignment: start;
+                                        Text {
+                                            text: line.name;
+                                            color: Theme.text;
+                                            font-size: 14px;
+                                            font-weight: 500;
+                                            overflow: elide;
+                                        }
+                                        if line.favourite: Heart { y: (parent.height - self.height) / 2; }
+                                    }
+                                    Text {
+                                        text: line.details;
+                                        color: Theme.muted;
+                                        font-size: 12px;
+                                        overflow: elide;
+                                    }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    spacing: 4px;
+                                    width: 150px;
+                                    Text {
+                                        text: line.missing;
+                                        color: Theme.missing;
+                                        font-size: 12px;
+                                        horizontal-alignment: right;
+                                        overflow: elide;
+                                    }
+                                    if line.status != "Idea": Text {
+                                        text: line.status;
+                                        color: Theme.muted;
+                                        font-size: 12px;
+                                        horizontal-alignment: right;
+                                    }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    spacing: 4px;
+                                    width: 90px;
+                                    Text {
+                                        text: line.date;
+                                        color: Theme.muted;
+                                        font-family: Theme.number-font;
+                                        font-size: 12px;
+                                        horizontal-alignment: right;
+                                    }
+                                    if line.rating > 0: HorizontalLayout {
+                                        alignment: end;
+                                        Stars { rating: line.rating; }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // The year scrubber: jump to the first song of a year.
+                if SongsData.years.length > 1: VerticalLayout {
+                    width: 52px;
+                    padding: 6px;
+                    spacing: 2px;
+                    alignment: start;
+                    for y in SongsData.years: YearMark {
+                        text: y.year;
+                        clicked => { list.viewport-y = -y.y; }
+                    }
+                }
+            }
+        }
+    }
+}

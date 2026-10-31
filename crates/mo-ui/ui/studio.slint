@@ -210,3 +210,223 @@ export component TickBox inherits Rectangle {
         clicked => { root.checked = !root.checked; }
     }
 }
+
+// The search box: a pressed-in field with its hint shown until something is typed.
+export component SearchBox inherits Rectangle {
+    in property <string> hint: "Search";
+    in-out property <string> text <=> input.text;
+    callback edited(string);
+    // Down, Enter and Esc go to the page (to move into the list, open, or clear).
+    callback key(string) -> bool;
+    forward-focus: input;
+    height: 32px;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: input.has-focus ? Theme.accent : Theme.edge;
+    background: Theme.well;
+    Text {
+        x: 10px;
+        text: root.hint;
+        visible: input.text == "";
+        color: Theme.faint;
+        font-size: 13px;
+        vertical-alignment: center;
+        height: parent.height;
+    }
+    input := TextInput {
+        x: 10px;
+        width: parent.width - 20px;
+        height: parent.height;
+        color: Theme.text;
+        font-size: 13px;
+        vertical-alignment: center;
+        single-line: true;
+        selection-background-color: Theme.accent.transparentize(60%);
+        edited => { root.edited(self.text); }
+        key-pressed(event) => {
+            if (event.text == Key.DownArrow || event.text == Key.Return || event.text == Key.Escape) {
+                if (root.key(event.text)) {
+                    return accept;
+                }
+            }
+            reject
+        }
+    }
+}
+
+// A chip that's on or off, like "Favourites".
+export component ToggleChip inherits Rectangle {
+    in property <string> text;
+    in property <bool> on;
+    callback clicked;
+    width: label.preferred-width + 24px;
+    height: 26px;
+    border-radius: 13px;
+    border-width: 1px;
+    border-color: on ? Theme.accent : Theme.edge;
+    background: on ? Theme.accent.transparentize(80%) : touch.has-hover ? Theme.hover : Theme.surface-raised;
+    label := Text {
+        text: root.text;
+        color: root.on ? Theme.text : Theme.muted;
+        font-size: 12px;
+        font-weight: 500;
+    }
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+// One line of a drop-down menu.
+export component MenuLine inherits Rectangle {
+    in property <string> text;
+    in property <bool> on;
+    callback clicked;
+    height: 28px;
+    border-radius: Theme.radius;
+    background: touch.has-hover ? Theme.hover : transparent;
+    Text {
+        x: 10px;
+        text: root.text;
+        color: root.on ? Theme.accent : Theme.text;
+        font-size: 13px;
+        vertical-alignment: center;
+        height: parent.height;
+    }
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+// A chip that picks one of a list, like "DAW: FL Studio". "Any" clears it.
+export component MenuChip inherits Rectangle {
+    in property <string> name;
+    in property <string> value;
+    in property <[string]> choices;
+    callback picked(string);
+    width: label.preferred-width + 34px;
+    height: 26px;
+    border-radius: 13px;
+    border-width: 1px;
+    border-color: value != "" ? Theme.accent : Theme.edge;
+    background: value != "" ? Theme.accent.transparentize(80%) : touch.has-hover ? Theme.hover : Theme.surface-raised;
+    label := Text {
+        x: 12px;
+        text: root.value == "" ? root.name : root.name + ": " + root.value;
+        color: root.value != "" ? Theme.text : Theme.muted;
+        font-size: 12px;
+        font-weight: 500;
+        vertical-alignment: center;
+        height: parent.height;
+    }
+    Path {
+        x: parent.width - 18px;
+        y: (parent.height - 6px) / 2;
+        width: 8px;
+        height: 6px;
+        viewbox-width: 8;
+        viewbox-height: 6;
+        commands: "M 1 1 L 4 4.5 L 7 1";
+        stroke: Theme.muted;
+        stroke-width: 1.5px;
+    }
+    touch := TouchArea {
+        clicked => { menu.show(); }
+    }
+    menu := PopupWindow {
+        x: 0;
+        y: root.height + 4px;
+        width: max(root.width, 180px);
+        Rectangle {
+            background: Theme.surface-raised;
+            border-radius: Theme.radius;
+            border-width: 1px;
+            border-color: Theme.edge;
+            drop-shadow-color: Theme.shadow;
+            drop-shadow-blur: 12px;
+            VerticalLayout {
+                padding: 4px;
+                MenuLine {
+                    text: "Any";
+                    on: root.value == "";
+                    clicked => { root.picked(""); }
+                }
+                for c in root.choices: MenuLine {
+                    text: c;
+                    on: root.value == c;
+                    clicked => { root.picked(c); }
+                }
+            }
+        }
+    }
+}
+
+// A line of a list that can be picked: the shared look for every list's rows (rule 16).
+export component ListLine inherits Rectangle {
+    in property <bool> selected;
+    callback clicked;
+    callback double-clicked;
+    border-radius: Theme.radius;
+    background: selected ? Theme.surface-raised : touch.has-hover ? Theme.hover : transparent;
+    // The accent bar on the picked line.
+    Rectangle {
+        x: 0;
+        width: root.selected ? 2px : 0;
+        background: Theme.accent;
+    }
+    @children
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+        double-clicked => { root.double-clicked(); }
+    }
+}
+
+// A star rating out of five, drawn.
+export component Stars inherits HorizontalLayout {
+    in property <int> rating;
+    spacing: 1px;
+    for i in 5: Path {
+        width: 10px;
+        height: 10px;
+        viewbox-width: 10;
+        viewbox-height: 10;
+        commands: "M 5 0.5 L 6.3 3.6 L 9.6 3.8 L 7.1 6 L 7.9 9.3 L 5 7.5 L 2.1 9.3 L 2.9 6 L 0.4 3.8 L 3.7 3.6 Z";
+        fill: i < root.rating ? Theme.warning : transparent;
+        stroke: i < root.rating ? Theme.warning : Theme.faint;
+        stroke-width: 0.8px;
+    }
+}
+
+// One year on a scrubber beside a long list: click to jump to it.
+export component YearMark inherits Rectangle {
+    in property <string> text;
+    callback clicked;
+    height: 20px;
+    border-radius: Theme.radius;
+    background: touch.has-hover ? Theme.hover : transparent;
+    Text {
+        text: root.text;
+        color: touch.has-hover ? Theme.text : Theme.faint;
+        font-family: Theme.number-font;
+        font-size: 11px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        width: parent.width;
+        height: parent.height;
+    }
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+// A small heart, for a favourite.
+export component Heart inherits Path {
+    in property <bool> on: true;
+    width: 11px;
+    height: 10px;
+    viewbox-width: 11;
+    viewbox-height: 10;
+    commands: "M 5.5 9.3 L 1.2 5.1 C -0.4 3.4 0.6 0.5 3 0.5 C 4.2 0.5 5 1.2 5.5 2 C 6 1.2 6.8 0.5 8 0.5 C 10.4 0.5 11.4 3.4 9.8 5.1 Z";
+    fill: on ? Theme.accent : transparent;
+    stroke: on ? Theme.accent : Theme.faint;
+    stroke-width: 0.8px;
+}
