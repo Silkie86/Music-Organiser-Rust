@@ -28,6 +28,7 @@ use mo_formats::textscan::is_audio_path;
 use mo_library::scan::{daw_of, is_autosave_dir, is_autosave_file, is_inside, is_project_file};
 use serde::{Deserialize, Serialize};
 
+use crate::plugin_space::SpaceKind;
 use crate::song::{CompactItem, CompactKind, has_studio_one_song, parent};
 use crate::{key, real_path};
 
@@ -125,12 +126,12 @@ struct Checked {
 }
 
 /// A folder as written, and where it really is (as written when that can't be read).
-fn both(folder: &str) -> (&str, String) {
+pub(crate) fn both(folder: &str) -> (&str, String) {
     (folder, real_path(folder).unwrap_or_else(|| folder.to_owned()))
 }
 
 /// Whether a path written with a network server's name (`\\server\share`).
-fn on_network(path: &str) -> bool {
+pub(crate) fn on_network(path: &str) -> bool {
     path.starts_with(r"\\") || path.starts_with("//")
 }
 
@@ -314,11 +315,20 @@ pub struct Removed {
     /// Where it really was (links worked out): what the bin keeps.
     pub real: String,
     pub bytes: u64,
-    pub kind: CompactKind,
+    pub what: What,
     /// When it went (Unix seconds, taken just before).
     pub when: i64,
     /// What the bin calls it, once found there.
     pub bin_id: Option<String>,
+}
+
+/// What something removed was.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum What {
+    /// A line of a song's Compact list.
+    Song(CompactKind),
+    /// A plugin's presets or sounds folder.
+    Plugin(SpaceKind),
 }
 
 /// A line that couldn't go (or come back), and why.
@@ -371,22 +381,20 @@ pub fn apply(plan: &Plan, guard: &Guard<'_>, bin: &dyn Bin) -> Done {
                 continue;
             }
         };
-        let when = now_seconds();
-        match bin.send(Path::new(&item.path)) {
-            Ok(()) => done.removed.push(Removed {
-                path: item.path.clone(),
-                real,
-                bytes: item.bytes,
-                kind: item.kind,
-                when,
-                bin_id: None,
-            }),
-            Err(why) => done.problems.push(Problem { path: item.path.clone(), why }),
-        }
+        send(&item.path, real, item.bytes, What::Song(item.kind), bin, &mut done);
     }
     let not_found = bin.find(&mut done.removed);
     done.problems.extend(not_found);
     done
+}
+
+/// Sends one checked thing to the bin and notes how it went.
+pub(crate) fn send(path: &str, real: String, bytes: u64, what: What, bin: &dyn Bin, done: &mut Done) {
+    let when = now_seconds();
+    match bin.send(Path::new(path)) {
+        Ok(()) => done.removed.push(Removed { path: path.to_owned(), real, bytes, what, when, bin_id: None }),
+        Err(why) => done.problems.push(Problem { path: path.to_owned(), why }),
+    }
 }
 
 /// Puts back what a clean-up removed.

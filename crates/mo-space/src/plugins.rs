@@ -174,6 +174,11 @@ fn list_plugins(dir: &Path) -> (Vec<InstalledPlugin>, Vec<PathBuf>) {
     (plugins, dirs)
 }
 
+/// Whether a file is a plugin (a plugin file's ending, or a `.so` on Linux).
+pub(crate) fn is_plugin_file(path: &str) -> bool {
+    plugin_file(path).is_some()
+}
+
 /// A plugin file's name and format. On Linux a VST2 plugin is a `.so` file (in ~/.vst and the like).
 fn plugin_file(path: &str) -> Option<(String, String)> {
     if is_plugin_path(path) {

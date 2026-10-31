@@ -6,6 +6,7 @@
 //! - [`app_files`]: the app's own databases and folders, and whether their drive is nearly full.
 //! - [`plugins`]: the plugin files installed on this computer.
 //! - [`plugin_space`]: each installed plugin's room on disk, its data folders guessed by name and maker.
+//! - [`plugin_clean`]: which of a plugin's preset and sound folders may go, and sending them to the Recycle Bin.
 //! - [`spare`]: plugin copies in a format no project uses (or AAX without Pro Tools).
 //!
 //! Nothing here touches the window or a database: the app reads what it needs from the library and hands it in, and
@@ -15,6 +16,7 @@
 
 pub mod app_files;
 pub mod clean;
+pub mod plugin_clean;
 pub mod plugin_space;
 pub mod plugins;
 pub mod size;

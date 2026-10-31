@@ -20,7 +20,7 @@ use crate::size::{self, Measured, Stopped};
 use crate::{key, real_path};
 
 /// What a plugin's room on disk is: the plugin itself, its presets and settings, or its sounds.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum SpaceKind {
     Program,
     Presets,

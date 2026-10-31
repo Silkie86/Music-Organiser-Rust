@@ -43,10 +43,20 @@ listed with a verdict: **better** (on purpose), **same idea, new shape**, or **n
 | Spare copies: same plugin? | one family anywhere inside the other ("Serum FX" took Serum's projects) | equal, or one with its maker in front ("FabFilter Pro-Q 3" and "Pro-Q 3") | better |
 | Spare copies' reason | text stored with each copy | a `Why` worked out into text when shown | same idea, new shape |
 
+## Plugin clean-up
+
+| What | C# | Rust | Verdict |
+|---|---|---|---|
+| Which folders may go | the card's rules: never Program Files, your folders, a folder with a sample a project uses (by path, then by name), OneDrive online-only files, shared with a used plugin, sounds while a project uses the plugin, a still-used plugin, a folder holding one that stays | the same rules, worked out in the backend (`plugin_clean::lines`) | same idea, new shape |
+| A plugin the library doesn't know | counted as having no projects when shared, as used when held | counted as used everywhere | better (safer) |
+| More reasons to stay | none | a link (or reached through one), a network drive, a drive, your home folder or a folder Windows keeps (Documents, AppData…) or one holding it, any plugin file inside (not only listed ones) | better |
+| Checked again before it goes | the card's look again (samples, OneDrive) | every rule again, and the folder must hold just what it held when you looked | better |
+| Undo | Recycle Bin by hand | the same `Done` list and `undo` as songs | better |
+| Administrator step | yes, one question for files Windows guards | not yet (Program Files never goes in a clean-up; ProgramData folders that need it say so) | not yet |
+
 ## Not yet
 
-- Plugin clean-up (which plugin folders may go, with the C# rules: sounds only when no project uses the plugin,
-  presets when unused N years, never Program Files), uninstallers, moving plugin data to another drive.
+- Uninstallers, moving plugin data to another drive with a link in its place, the administrator step.
 - Keeping measured sizes between runs. The C# app keeps them in `library.db` (`plugin_space`, `folder_space`); how the
   Rust library keeps them is for the library's database design (rule 23: each fact once, nothing stored that's quick
   to work out).
