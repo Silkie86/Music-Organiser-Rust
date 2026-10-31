@@ -15,6 +15,7 @@ mo-library = { path = "../mo-library" }
 rayon.workspace = true
 regex = { version = "1", default-features = false, features = ["std", "unicode", "perf"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 # Saves that are byte-for-byte copies are found by their SHA-256, as the C# app finds them.
 sha2 = "0.10"
 # The Recycle Bin (Windows), the Trash (Mac, Linux): removing to it, and putting things back from it.
@@ -27,10 +28,10 @@ fs4 = "1.1"
 known-folders = "1.4"
 # The list of installed programs and their uninstallers (Settings, Apps).
 windows-registry = "0.6"
+# A junction: the link a moved folder leaves in its place (no administrator rights needed, unlike a symbolic link).
+junction = "1.2"
 
 # Whether a folder is on a network share (Mac, Linux). Already used by fs4.
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["fs"] }
 
-[dev-dependencies]
-serde_json = "1"

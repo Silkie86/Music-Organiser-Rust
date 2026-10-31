@@ -67,9 +67,22 @@ listed with a verdict: **better** (on purpose), **same idea, new shape**, or **n
 | `%ProgramFiles%` in the command | filled in as Windows' list is read | the same | same |
 | Saying no to Windows' question | told | told, in any language Windows speaks | same |
 
+## Moving plugin data to another drive
+
+| What | C# | Rust | Verdict |
+|---|---|---|---|
+| How | copy, check every file's size, rename the original to "… (old copy)", a junction in its place; undo freshens the old copy and swaps back | the same steps, and the same checks before (gone, a link already, inside a moved folder, old copy there, inside the one moved, same drive, name taken, OneDrive files only online, room plus 2 GB) | same |
+| Where moves are kept | `library.db` setting `space_moved_folders` (JSON) | the same JSON, read and written by `parse_moved` and `moved_json`, so moves made by either app are known to both | same |
+| A network drive picked | refused on Windows, by the drive's type | refused on every system, also when the folder picked leads there through a link | better |
+| The folder picked isn't there | made | refused, so a mistyped folder isn't made | better |
+| A folder of that name appears while copying | copied into | the copy is made as a new folder first, so it stops instead | better |
+| A link inside worded from where it sits ("..\Shared") | kept as worded, so on Mac it would lead somewhere else from the other drive | made again leading to the same real place | better |
+| A folder Windows guards (needs administrator rights) | asks Windows' administrator question and does that one step as administrator | says so and moves nothing; the administrator step comes later | not yet |
+
 ## Not yet
 
-- Moving plugin data to another drive with a link in its place, the administrator step.
+- The administrator step for moving a folder Windows guards, and the moved-folder checks that come after a move:
+  lost, replaced or doubled moves, linking again after an update, moving home, repointing to another drive.
 - Keeping measured sizes between runs. The C# app keeps them in `library.db` (`plugin_space`, `folder_space`); how the
   Rust library keeps them is for the library's database design (rule 23: each fact once, nothing stored that's quick
   to work out).
