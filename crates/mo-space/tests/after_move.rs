@@ -14,7 +14,7 @@ use mo_space::after_move::{
     old_home_can_go, old_homes_json, only_in_old_home, parse_old_homes, real_place, remove_old_home, replaced, repoint,
 };
 use mo_space::clean::{Bin, Problem, Removed};
-use mo_space::folder_move::{CantMove, Drives, MovedFolder, move_folder};
+use mo_space::folder_move::{Drives, MovedFolder, move_folder};
 use mo_space::key;
 use mo_space::plugin_space::{PluginSpace, SpaceFolder, SpaceKind};
 
@@ -333,6 +333,8 @@ fn on_the_same_drive_the_home_is_renamed() {
 #[test]
 fn on_the_same_drive_a_link_that_wont_change_puts_it_all_back() {
     use std::os::unix::fs::PermissionsExt;
+
+    use mo_space::folder_move::CantMove;
     let dir = fixtures("mo-space-after-rename-back");
     let (c, locked, d) = (dir.join("C"), dir.join("Locked"), dir.join("D"));
     write(&c, "STEAM/Pad.db", "pad");
