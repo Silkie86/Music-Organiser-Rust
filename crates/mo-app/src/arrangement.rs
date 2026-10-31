@@ -15,7 +15,6 @@ use std::sync::Arc;
 use mo_formats::arrangement::{Arrangement, AudioPart, LaneKind, PreviewClip, PreviewLane};
 use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
 
-use mo_library::samples::SampleLocator;
 use mo_library::songs::thousands;
 
 use crate::themes::Look;
@@ -29,11 +28,11 @@ pub struct Preview {
 }
 
 /// Reads a project's arrangement and looks for its audio files the way the Samples tab does (rule 13: the project's
-/// folders first, then the DAW's own). Reads the disk, so never on the window's thread. An error is the message to
+/// folders first, then the DAW's own, then the Sounds library at `sounds_db` when given). Reads the disk, so never on the window's thread. An error is the message to
 /// show instead.
-pub fn read(project: &Path) -> Result<Preview, String> {
+pub fn read(project: &Path, sounds_db: Option<&Path>) -> Result<Preview, String> {
     let views = mo_formats::arrangement::read(project).map_err(|e| format!("Couldn't read the arrangement: {e}."))?;
-    let locator = SampleLocator::default();
+    let locator = crate::sound_library::locator(sounds_db);
     let project_path = project.to_string_lossy();
     let mut found = HashMap::new();
     let mut looked = HashSet::new();

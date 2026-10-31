@@ -11,7 +11,13 @@
 //! 5. anywhere in the project's folder tree with the same file name (Bitwig's bounce, multi-samples and recordings
 //!    folders, FL Studio's Audio and Samples folders);
 //! 6. in the DAW's own content folders (its factory packs, user library and installed sound packages), where the
-//!    folder it's in must have the same name too, since those folders hold thousands of sounds.
+//!    folder it's in must have the same name too, since those folders hold thousands of sounds;
+//! 7. in the Sounds library (the folders the Sounds page scans, as `sounds.db` lists them), when the locator is given
+//!    it: a file with the same name in a folder with the same name, or else the same name anywhere when every sound of
+//!    that name is the same size (copies of one sound, so whichever is found is the right one). Solomon, 2026-10-31:
+//!    old saves point at drives long gone ("D:\harrys samples\…"), and their samples may be in the library now.
+//!    No DAW saves a sample's file size (FL Studio keeps only the path; Studio One its length in frames), so the size
+//!    checked is the library's own.
 //!
 //! Each folder tree is read once by a locator. A scan uses one locator and lets it go when it's done, so the next scan
 //! sees samples put back since, and the trees aren't kept between scans. It asks the disk, so never on the window's
@@ -49,6 +55,7 @@ type Tree = Arc<OnceLock<FolderIndex>>;
 pub struct SampleLocator {
     content: Box<ContentFolders>,
     trees: Mutex<HashMap<(String, usize), Tree>>,
+    library: Option<Arc<SoundLibrary>>,
 }
 
 impl Default for SampleLocator {
@@ -60,7 +67,13 @@ impl Default for SampleLocator {
 impl SampleLocator {
     /// A locator that looks in `content` for a DAW's own folders (tests give their own).
     pub fn new(content: Box<ContentFolders>) -> SampleLocator {
-        SampleLocator { content, trees: Mutex::new(HashMap::new()) }
+        SampleLocator { content, trees: Mutex::new(HashMap::new()), library: None }
+    }
+
+    /// The same locator, looking in the Sounds library last (rule 7 above).
+    pub fn with_library(mut self, library: Arc<SoundLibrary>) -> SampleLocator {
+        self.library = Some(library);
+        self
     }
 
     /// Whether this sample is on this computer, by the rules above. FL Studio's own content
@@ -94,7 +107,10 @@ impl SampleLocator {
             return Some(found);
         }
         let folder = parts.len().checked_sub(2).and_then(|i| parts.get(i)).copied();
-        (self.content)(project).iter().find_map(|c| self.find_in(c, usize::MAX, name, folder))
+        (self.content)(project)
+            .iter()
+            .find_map(|c| self.find_in(c, usize::MAX, name, folder))
+            .or_else(|| self.library.as_ref()?.find(name, folder))
     }
 
     /// A file called `name` in the tree under `root` (in a folder called `folder`, when given), reading the tree the
@@ -193,6 +209,64 @@ impl FolderIndex {
                 folder.is_none_or(|want| same(parent, want)) && Path::new(f.as_str()).is_file()
             })
             .cloned()
+    }
+}
+
+/// The sounds the Sounds page knows, by file name, with their sizes: read once from `sounds.db`, never written.
+#[derive(Default)]
+pub struct SoundLibrary {
+    by_name: HashMap<String, Vec<(String, i64)>>,
+}
+
+impl SoundLibrary {
+    /// The sounds in the Sounds page's database, opened read-only. An empty library when it can't be read (no
+    /// database yet, or one in use in a way that stops reading): samples are then looked for as before.
+    pub fn read(sounds_db: &Path) -> SoundLibrary {
+        let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let Ok(conn) = rusqlite::Connection::open_with_flags(sounds_db, flags) else { return SoundLibrary::default() };
+        let Ok(mut st) = conn.prepare("SELECT path, COALESCE(size, 0) FROM sounds") else {
+            return SoundLibrary::default();
+        };
+        let Ok(rows) = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))) else {
+            return SoundLibrary::default();
+        };
+        SoundLibrary::from_files(rows.flatten())
+    }
+
+    /// A library of these files and sizes (tests give their own).
+    pub fn from_files(files: impl IntoIterator<Item = (String, i64)>) -> SoundLibrary {
+        let mut library = SoundLibrary::default();
+        for (path, size) in files {
+            library.by_name.entry(case::key(file_name(&path))).or_default().push((path, size));
+        }
+        library
+    }
+
+    /// How many sounds it knows.
+    pub fn len(&self) -> usize {
+        self.by_name.values().map(Vec::len).sum()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_name.is_empty()
+    }
+
+    /// A sound called `name` that's still there: in a folder called `folder` first, or else anywhere when every
+    /// sound of that name is the same size, so they're copies of one sound and not different sounds sharing a name.
+    fn find(&self, name: &str, folder: Option<&str>) -> Option<String> {
+        let all = self.by_name.get(&case::key(name))?;
+        let there = |p: &&(String, i64)| Path::new(p.0.as_str()).is_file();
+        if let Some(want) = folder {
+            let parent = |p: &str| split(p).1.iter().rev().nth(1).is_some_and(|f| same(f, want));
+            if let Some((p, _)) = all.iter().filter(|(p, _)| parent(p)).find(there) {
+                return Some(p.clone());
+            }
+        }
+        let size = all.first()?.1;
+        if size <= 0 || all.iter().any(|(_, s)| *s != size) {
+            return None;
+        }
+        all.iter().find(there).map(|(p, _)| p.clone())
     }
 }
 

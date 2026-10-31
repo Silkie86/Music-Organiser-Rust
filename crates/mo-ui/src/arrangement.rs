@@ -101,7 +101,7 @@ pub fn connect(app: &AppWindow) {
 
     let weak = app.as_weak();
     let reader = Newest::start("Arrangement", move |(asked, path): (u64, PathBuf)| {
-        let read = arr::read(&path);
+        let read = arr::read(&path, Some(&mo_app::paths::data_dir().join("sounds.db")));
         let _ = weak.upgrade_in_event_loop(move |app| arrived(&app, asked, read));
     });
     match reader {
@@ -151,7 +151,8 @@ pub fn show_song(app: &AppWindow, path: Option<&str>, missing: bool) {
     data.set_message(READING.into());
     let path = PathBuf::from(path);
     if here {
-        arrived(app, asked, arr::read(&path));
+        // The screenshots: their made-up songs, without the real Sounds library.
+        arrived(app, asked, arr::read(&path, None));
         return;
     }
     READER.with(|slot| {

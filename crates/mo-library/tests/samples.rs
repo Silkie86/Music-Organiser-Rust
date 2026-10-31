@@ -4,7 +4,9 @@
 use std::fs;
 use std::path::PathBuf;
 
-use mo_library::samples::SampleLocator;
+use std::sync::Arc;
+
+use mo_library::samples::{SampleLocator, SoundLibrary};
 
 #[test]
 fn finds_samples_beside_in_the_tree_and_in_the_daws_folders() {
@@ -40,6 +42,48 @@ fn finds_samples_beside_in_the_tree_and_in_the_daws_folders() {
     assert!(locator.found("%FLStudioFactoryData%/Data/Patches/Packs/x.wav", &project));
     assert!(!locator.found("/old/missing.wav", &project));
     assert!(!locator.found("", &project));
+}
+
+#[test]
+fn missing_samples_are_found_in_the_sounds_library() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mo-library-samples-library");
+    let _ = fs::remove_dir_all(&dir);
+    let files = [
+        ("Sounds/Neptunian Drumz 2/N4K1.wav", 4),
+        ("Sounds/Kits/kick.wav", 3),
+        ("Sounds/Other Kit/kick.wav", 5),
+        ("Sounds/A/clap verb 1.wav", 6),
+        ("Sounds/B/clap verb 1.wav", 6),
+        ("Sounds/Gone/N6P20.wav", 2),
+    ];
+    let mut known = Vec::new();
+    for (f, size) in files {
+        let p = dir.join(f);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        if !f.contains("Gone") {
+            fs::write(&p, vec![0u8; size]).unwrap();
+        }
+        known.push((p.to_str().unwrap().to_owned(), size as i64));
+    }
+    fs::create_dir_all(dir.join("Projects")).unwrap();
+    let project = dir.join("Projects/jazzy.flp").to_str().unwrap().to_owned();
+    let plain = SampleLocator::new(Box::new(|_| Vec::new()));
+    let library = Arc::new(SoundLibrary::from_files(known));
+    assert_eq!(library.len(), 6);
+    let locator = SampleLocator::new(Box::new(|_| Vec::new())).with_library(library);
+    let n4k1 = r"D:\harrys samples\nept2\Neptunian Drumz 2\N4K1.wav";
+    assert!(!plain.found(n4k1, &project));
+    // The same name in a folder of the same name.
+    assert_eq!(locator.locate(n4k1, &project), Some(dir.join(files[0].0).to_str().unwrap().to_owned()));
+    // The same name in a folder of the same name, though two sounds share the name.
+    assert!(locator.locate(r"D:\old\Kits\kick.wav", &project).unwrap().contains("Kits"));
+    // Two different sounds share the name and neither folder matches: not a guess.
+    assert!(!locator.found(r"D:\old\Drums\kick.wav", &project));
+    // Two copies of one sound (the same size) in other folders: either is it.
+    assert!(locator.found(r"C:\Desktop\Kit Samples\clap verb 1.wav", &project));
+    // In the library, but no longer on the disk.
+    assert!(!locator.found(r"D:\old\Gone\N6P20.wav", &project));
+    assert!(SoundLibrary::read(&dir.join("no such.db")).is_empty());
 }
 
 #[cfg(unix)]
