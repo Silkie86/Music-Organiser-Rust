@@ -94,7 +94,17 @@ The report gives the full mix set by set as `keys` does, then a table of every k
 the same notes. Its last column ("sure") is how sure the finder was on average: above its share right, it was too
 sure; below, not sure enough.
 
-- **Shown as.** Each answer graded as the app shows it (`keyfind::grade`, with the thresholds built in): one key, a
+- **Answers.** How sure each kind of answer must be at 1, 2, 4, 8, 16 and 32 bars (whole songs take the last) is
+  fitted on held-out chances (`answerfit.rs`): the smallest chance at which the answers of that kind, given by at least
+  30 songs, are wrong no more often than the design's target (one key 15% at 1 and 2 bars, 10% at 4 and 8, 8% at 16,
+  5% for songs; a pair or a home note 10%), never rising with more music. A case is fitted at the knot at or above its
+  length (a 3-bar case at 4 bars): the app draws a straight line between knots, never below the knot above, so it's
+  at least as strict as the fit at every length. Each fold is graded with the thresholds fitted on the other folds'
+  chances, so the thresholds never saw the songs they're graded on (the calibration behind those chances saw a little
+  of every fold, so it isn't quite a clean hold-out). `--write` grades its report the same way. The report prints the
+  thresholds fitted on all four folds, with how many answers each gives at each length, how many of those were wrong
+  and the upper end of that share's likely range.
+- **Shown as.** Each answer graded as the app shows it (`keyfind::grade`, with the fitted thresholds): one key, a
   key or its relative, a home note, or no clear key (and why). Beside each kind: how often it's right (a pair when the
   labelled key is either of the two, a home note when it's the tonic) and the chance shown with it on average. The
   "shown" and "right when shown" columns count only the answers given as one key.
@@ -102,11 +112,11 @@ sure; below, not sure enough.
   design's hand cases (`keyfind::cases`: a relative-key loop, a blues, a Dorian vamp, whole-tone scales and so on).
   The report says how many models keep each case's gate and meet its target, and what broke a gate. `--write` won't
   write weights that break one.
-- **What `--write` writes.** The weights and the calibration; the thresholds and the share of notes in one scale a
-  key needs, as they are (they aren't fitted yet); and a hash of every number with the finder version those numbers
-  were first given with. When any number changed, that's the next version, so the tests fail until `KEY_FINDER_VERSION` in
-  `keyfind/mod.rs` is bumped to match and the hand cases' readings are recorded for it (`hand_case_tests.rs`): the
-  MIDI page then knows to read every part again.
+- **What `--write` writes.** The weights and the calibration; the thresholds, fitted on every fold's held-out
+  chances; the share of notes in one scale a key needs, as built in (0.75); and a hash of every number with the
+  finder version those numbers were first given with. When any number changed, that's the next version, so the tests
+  fail until `KEY_FINDER_VERSION` in `keyfind/mod.rs` is bumped to match and the hand cases' readings are recorded for
+  it (`hand_case_tests.rs`): the MIDI page then knows to read every part again.
 
 ## Chords
 

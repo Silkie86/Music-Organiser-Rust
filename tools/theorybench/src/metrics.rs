@@ -241,6 +241,31 @@ pub fn risk_coverage_area(answers: &[(Option<f64>, bool)]) -> Option<f64> {
     Some(area / sure.len() as f64)
 }
 
+/// The upper end of the likely range (95%) of an error share, from each song's cases and errors. It's a Wilson bound
+/// on the share with the cases counted as fewer when a song's cases go wrong together (the design effect, from how
+/// far each song's errors stray from the share), and as no more than the songs when there's no error to measure that
+/// by: a share measured on a few songs is never taken as sure. 1 when there are no cases.
+pub fn error_upper(per_song: &[(f64, f64)]) -> f64 {
+    let songs = per_song.iter().filter(|(n, _)| *n > 0.0).count() as f64;
+    let (n, errors) = per_song.iter().fold((0.0, 0.0), |(a, b), (n, e)| (a + n, b + e));
+    if n <= 0.0 {
+        return 1.0;
+    }
+    let p = errors / n;
+    let n_eff = if p > 0.0 && p < 1.0 && songs > 1.0 {
+        let spread: f64 = per_song.iter().map(|(ns, es)| (es - p * ns).powi(2)).sum();
+        let variance = spread / (n * n) * songs / (songs - 1.0);
+        let design_effect = variance / (p * (1.0 - p) / n);
+        n / design_effect.max(1.0)
+    } else {
+        songs.min(n)
+    };
+    let z2 = 1.96f64 * 1.96;
+    let centre = p + z2 / (2.0 * n_eff);
+    let half = (z2 * (p * (1.0 - p) / n_eff + z2 / (4.0 * n_eff * n_eff))).sqrt();
+    ((centre + half) / (1.0 + z2 / n_eff)).min(1.0)
+}
+
 /// "78.2%".
 pub fn pct(x: f64) -> String {
     format!("{:.1}%", 100.0 * x)
@@ -254,6 +279,22 @@ pub fn pct_range(s: Share) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_error_share_on_few_songs_is_never_sure() {
+        // No errors on 1,000 cases from 2 songs: as unsure as 2 cases (3.84 / 5.84), not 1,000.
+        assert!((error_upper(&[(500.0, 0.0), (500.0, 0.0)]) - 3.8416 / 5.8416).abs() < 1e-12);
+        // The same on 1,000 songs, one case each: about 0.4%.
+        let many = vec![(1.0, 0.0); 1000];
+        assert!((error_upper(&many) - 3.8416 / 1003.8416).abs() < 1e-12);
+        // 10% wrong, spread evenly over 100 songs of 10 cases: the plain Wilson bound on 1,000 cases (about 12.0%).
+        let even = vec![(10.0, 1.0); 100];
+        assert!((error_upper(&even) - 0.1203).abs() < 1e-3, "{}", error_upper(&even));
+        // 10% wrong, but all of it in 10 songs: far less sure (the cases count as about 100).
+        let bunched: Vec<(f64, f64)> = (0..100).map(|i| (10.0, if i < 10 { 10.0 } else { 0.0 })).collect();
+        assert!(error_upper(&bunched) > 0.16, "{}", error_upper(&bunched));
+        assert_eq!(error_upper(&[]), 1.0);
+    }
 
     #[test]
     fn mcnemar_matches_the_binomial_by_hand() {
