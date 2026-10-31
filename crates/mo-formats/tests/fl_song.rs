@@ -239,6 +239,31 @@ fn an_old_playlist_with_more_patterns_than_tracks_still_reads() {
 }
 
 #[test]
+fn an_fl_6_0_playlist_is_read() {
+    // FL 6.0 writes 0x5000 where FL 6.0.4 to 8 write 0x6000; both keep 28-byte items with pattern n on row 30951 - n.
+    for mark in [0x5000u16, 0x6000] {
+        let mut item = vec![0u8; 28];
+        item[..4].copy_from_slice(&768u32.to_le_bytes());
+        item[6..8].copy_from_slice(&mark.to_le_bytes());
+        item[8..12].copy_from_slice(&384u32.to_le_bytes());
+        item[12..14].copy_from_slice(&30950u16.to_le_bytes());
+        item[20..24].copy_from_slice(&(-1f32).to_le_bytes());
+        item[24..28].copy_from_slice(&(-1f32).to_le_bytes());
+        let bytes = Flp::new()
+            .ascii(199, "6.0.0")
+            .word(64, 0)
+            .ascii(192, "Kick")
+            .word(65, 1)
+            .data(224, &common::note(0, 0, 96, 60, 100))
+            .data(233, &item)
+            .build();
+        let song = read_song(&bytes);
+        assert_eq!(song.channels[0].clips.len(), 1, "mark {mark:#x}");
+        assert_eq!(song.channels[0].clips[0].start, 768);
+    }
+}
+
+#[test]
 fn a_songs_samples_under_fls_user_data_folder_are_found() {
     let dir = test_dir("song-user-data");
     let projects = dir.join("FL Studio").join("Projects");

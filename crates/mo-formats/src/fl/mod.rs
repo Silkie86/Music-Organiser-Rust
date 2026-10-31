@@ -25,8 +25,9 @@ pub const DAW: &str = "FL Studio";
 /// the samples a song holds but doesn't play; 10 reads damaged FL 4 to 8 notes at their version's size, finds the track
 /// of a clip in a save cut short in its track list, and warns about a song too big to place; 11 keeps the day a
 /// project was made to the tick, as the C# app does; 12 finds the playlist track of a clip in a save from before FL
-/// 12.9.1 by its slot, as the arrangement preview does, so mutes on those tracks count.
-pub const VERSION: u32 = 12;
+/// 12.9.1 by its slot, as the arrangement preview does, so mutes on those tracks count; 13 reads the playlist of an
+/// FL 6.0 save, which marks its pattern clips differently from FL 6.0.4 to 8.
+pub const VERSION: u32 = 13;
 pub const EXTENSIONS: [&str; 1] = ["flp"];
 
 /// The Fruity Wrapper (FL's VST host) keeps a VST's details as records: u32 version, then (u32 id, u64 size, data).

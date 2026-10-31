@@ -422,7 +422,8 @@ pub(super) fn playlist_items(d: &[u8]) -> Vec<PlaylistItem> {
         let mut rows = Vec::new();
         for r in d.as_chunks::<28>().0 {
             let (kind, mut index, row) = (u16_at(r, 4) as u32, u16_at(r, 6) as u32, u16_at(r, 12) as u32);
-            if kind == 0 && index == 0x6000 && row > FL8_ROWS && row < FL8_ROWS + 999 {
+            // FL 6.0 writes 0x5000 where FL 6.0.4 to 8 write 0x6000 (checked on Solomon's 2006 saves).
+            if kind == 0 && (index == 0x5000 || index == 0x6000) && row > FL8_ROWS && row < FL8_ROWS + 999 {
                 index = PATTERN_BASE + FL8_ROWS + 999 - row;
             } else if kind != PATTERN_BASE || index >= PATTERN_BASE {
                 return Vec::new();
