@@ -390,10 +390,10 @@ fn sized(name: &str, folder: &str, size: i64, saved: NaiveDateTime) -> Save {
 #[test]
 fn the_same_file_in_a_copied_folder_is_one_save_kept_aside_not_a_second_song() {
     let saves = [
-        sized("Didums_3", r"D:\Backup\dub", 300, day(2025, 5, 1)),
-        sized("Didums_3", r"C:\dub", 300, day(2025, 4, 1)),
-        sized("Didums_2", r"C:\dub", 200, day(2025, 3, 1)),
-        sized("Didums_2", r"D:\Backup\dub", 200, day(2025, 5, 1)),
+        Save { id: 5, ..sized("Didums_3", r"D:\Backup\dub", 300, day(2025, 5, 1)) },
+        Save { id: 1, ..sized("Didums_3", r"C:\dub", 300, day(2025, 4, 1)) },
+        Save { id: 2, ..sized("Didums_2", r"C:\dub", 200, day(2025, 3, 1)) },
+        Save { id: 6, ..sized("Didums_2", r"D:\Backup\dub", 200, day(2025, 5, 1)) },
         // Same name, but a different file: still a save of its own folder's song.
         sized("Other", r"C:\dub", 10, day(2025, 1, 1)),
         sized("Other", r"D:\Backup\dub", 11, day(2025, 1, 1)),
@@ -403,37 +403,90 @@ fn the_same_file_in_a_copied_folder_is_one_save_kept_aside_not_a_second_song() {
     assert_eq!(didums.len(), 1);
     let d = didums[0];
     assert_eq!((d.save_count(), d.copies.len()), (2, 2));
-    assert_eq!((d.latest.name.as_str(), d.latest.folder.as_str()), ("Didums_3", r"D:\Backup\dub"));
+    // The one the library found first stays, though the backup's copy is dated later.
+    assert_eq!((d.latest.name.as_str(), d.latest.folder.as_str()), ("Didums_3", r"C:\dub"));
     assert_eq!(groups.iter().filter(|g| g.name == "Other").count(), 2);
 
     // The two "Other" songs sit in folders that are copies of each other, so the app asks about them.
     let asked = songs::doubts(&groups, &SongChoices::default(), false, 200);
     assert_eq!(asked.len(), 1);
     assert_eq!((asked[0].a.name.as_str(), asked[0].why.as_str()), ("Other", "Same name in a copied folder"));
+}
 
-    // A file that's gone, or empty, can't be told apart: no joining on it.
-    let gone = [
+#[test]
+fn the_save_you_organised_is_the_one_kept() {
+    let saves = [
+        Save { id: 1, ..sized("Didums_3", r"C:\dub", 300, day(2025, 4, 1)) },
+        Save { id: 9, rating: 4, ..sized("Didums_3", r"D:\Backup\dub", 300, day(2025, 4, 1)) },
+    ];
+    let groups = group(&saves);
+    assert_eq!(groups.len(), 1);
+    assert_eq!((groups[0].latest.rating, groups[0].copies.len()), (4, 1));
+}
+
+#[test]
+fn files_that_cant_be_told_apart_never_join() {
+    let saves = [
+        // Gone, empty, not read, or a DAW's name for a new project (one template, many songs).
         Save { file_missing: true, ..sized("Song", r"C:\a", 5, day(2025, 1, 1)) },
         sized("Song", r"C:\b", 5, day(2025, 1, 1)),
         sized("Tune", r"C:\a", 0, day(2025, 1, 1)),
         sized("Tune", r"C:\b", 0, day(2025, 1, 1)),
+        Save { note_count: -1, ..sized("Beat", r"C:\a", 7, day(2025, 1, 1)) },
+        Save { note_count: -1, ..sized("Beat", r"C:\b", 7, day(2025, 1, 1)) },
+        sized("Untitled", r"C:\a", 9, day(2025, 1, 1)),
+        sized("Untitled", r"C:\b", 9, day(2025, 1, 1)),
+        // Same name and size, but another tempo: not the same file.
+        Save { tempo: Some(120.0), ..sized("Loop", r"C:\a", 3, day(2025, 1, 1)) },
+        Save { tempo: Some(121.0), ..sized("Loop", r"C:\b", 3, day(2025, 1, 1)) },
     ];
-    assert_eq!(group(&gone).len(), 4);
-
-    // Songs you kept apart stay apart.
-    let keys: Vec<String> = group(&saves[..2]).iter().map(|g| g.key.clone()).collect();
-    assert_eq!(keys.len(), 1);
-    let (a, b) =
-        (songs::key(r"D:\Backup\dub", "FL Studio", "Didums_3"), songs::key(r"C:\dub", "FL Studio", "Didums_3"));
-    let apart = songs::pair(&a, &b);
-    assert_eq!(songs::group_songs(&saves[..2], &SongChoices::from_rows([("apart", apart.as_str(), "")])).len(), 2);
+    assert_eq!(group(&saves).len(), 10);
 }
 
 #[test]
-fn a_renamed_save_is_asked_about_when_its_plugins_channels_and_tempo_match() {
+fn your_choices_win_over_copies() {
+    let saves = [
+        sized("Didums_3", r"C:\dub", 300, day(2025, 4, 1)),
+        sized("Didums_2", r"C:\dub", 200, day(2025, 3, 1)),
+        sized("Didums_3", r"D:\Backup\dub", 300, day(2025, 5, 1)),
+        sized("Didums_2", r"D:\Backup\dub", 200, day(2025, 5, 1)),
+    ];
+    // A save split off takes its copy with it, rather than the copy going back into the song.
+    let split = SongChoices::from_rows([("split", r"C:\dub\Didums_3.flp", "")]);
+    let groups = songs::group_songs(&saves, &split);
+    assert_eq!(groups.len(), 2);
+    let own_key = songs::split_key(r"C:\dub\Didums_3.flp");
+    let own = groups.iter().find(|g| g.key == own_key).unwrap();
+    assert_eq!((own.save_count(), own.copies.len()), (1, 1));
+    let rest = groups.iter().find(|g| g.key != own_key).unwrap();
+    assert!(rest.saves().chain(&rest.copies).all(|s| s.name == "Didums_2"));
+
+    // Songs kept apart stay apart, even through a third that holds copies of both.
+    let e = r"E:\Old\dub";
+    let three = [
+        sized("Didums_3", r"C:\dub", 300, day(2025, 4, 1)),
+        sized("Didums_3", r"D:\Backup\dub", 300, day(2025, 5, 1)),
+        sized("Didums_2", r"D:\Backup\dub", 200, day(2025, 5, 1)),
+        sized("Didums_2", e, 200, day(2025, 6, 1)),
+    ];
+    let (c, e) = (songs::key(r"C:\dub", "FL Studio", "Didums"), songs::key(e, "FL Studio", "Didums"));
+    assert_eq!(group(&three).len(), 1);
+    let apart = songs::pair(&c, &e);
+    let groups = songs::group_songs(&three, &SongChoices::from_rows([("apart", apart.as_str(), "")]));
+    assert_eq!(groups.len(), 2);
+    assert!(
+        groups
+            .iter()
+            .all(|g| !(g.saves().any(|s| s.folder == r"C:\dub") && g.saves().any(|s| s.folder == r"E:\Old\dub")))
+    );
+}
+
+#[test]
+fn a_renamed_save_is_asked_about_when_its_plugins_channels_tempo_and_notes_match() {
     let with = |name: &str, d: u32, tempo: f64, tracks: i32, plugins: &[&str]| Save {
         tempo: Some(tempo),
         track_count: tracks,
+        note_count: 300,
         plugin_names: plugins.iter().map(|p| (*p).to_owned()).collect(),
         ..song(name, r"C:\beats", d)
     };
@@ -448,5 +501,13 @@ fn a_renamed_save_is_asked_about_when_its_plugins_channels_and_tempo_match() {
     let asked = songs::doubts(&groups, &SongChoices::default(), false, 200);
     assert_eq!(asked.len(), 1);
     assert_eq!((asked[0].a.name.as_str(), asked[0].b.name.as_str()), ("Sunset", "Untitled"));
-    assert_eq!(asked[0].why, "They use nearly the same plugins, channels and tempo");
+    assert_eq!(asked[0].why, "They use nearly the same plugins, channels, tempo and notes");
+
+    // Songs made from one template look alike in a crowd: not asked about.
+    let template: Vec<Save> = ["Alpha", "Bravo", "Charlie", "Delta", "Echo"]
+        .iter()
+        .enumerate()
+        .map(|(i, n)| with(n, i as u32 + 1, 140.0, 8, &kit))
+        .collect();
+    assert!(songs::doubts(&group(&template), &SongChoices::default(), false, 200).is_empty());
 }
