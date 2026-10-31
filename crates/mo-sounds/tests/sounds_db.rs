@@ -178,11 +178,23 @@ fn an_older_library_reads_with_what_it_has() {
 #[test]
 fn never_changes_the_library() {
     let path = full("unchanged.db");
+    let before = std::fs::read(&path).unwrap();
     let db = SoundsDb::open_read_only(&path).unwrap();
-    // SQLite itself refuses: the connection is read-only.
+    // Everything SoundsDb reads, read through its own connection: the file stays byte for byte as it was.
+    db.all(now()).unwrap();
+    db.activity(now()).unwrap();
+    db.history(10).unwrap();
+    db.map("features").unwrap();
+    db.vectors("clap").unwrap();
+    db.tag_counts().unwrap();
+    db.matches().unwrap();
+    db.known_files().unwrap();
+    db.setting("galaxy_basis").unwrap();
+    // SQLite itself refuses a write through a read-only connection.
     let err = db_write(&path);
     assert!(err.is_some());
     drop(db);
+    assert!(std::fs::read(&path).unwrap() == before, "reading changed the library");
     let missing = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mo-sounds").join("missing.db");
     assert!(SoundsDb::open_read_only(&missing).is_err());
     assert!(!missing.exists(), "opening never makes a library");
@@ -194,4 +206,31 @@ fn never_changes_the_library() {
 fn db_write(path: &std::path::Path) -> Option<rusqlite::Error> {
     let c = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
     c.execute("DELETE FROM sounds", []).err()
+}
+
+#[test]
+fn a_damaged_row_reads_as_the_csharp_app_reads_it() {
+    let path = make("damaged.db", SCHEMA);
+    let c = Connection::open(&path).unwrap();
+    c.execute_batch(
+        "INSERT INTO sounds (id, path, mtime, favourite, rating, plays, type, features)
+             VALUES (1, 'D:\\x.wav', 'soon', 'yes', 'five', 'lots', 7, 'not a blob');
+         INSERT INTO sounds (id, path, plays) VALUES (2, '\\\\server\\share\\Kicks\\k.wav', 1);
+         INSERT INTO sound_matches VALUES (1, 2, 'Mystery', 1, 0, NULL, NULL);",
+    )
+    .unwrap();
+    drop(c);
+    let db = SoundsDb::open_read_only(&path).unwrap();
+    let all = db.all(now()).unwrap();
+    let x = all.iter().find(|s| s.id == 1).unwrap();
+    assert!(!x.favourite);
+    assert_eq!((x.rating, x.plays), (0, 0));
+    assert_eq!(x.sound_type, "7", "a number in a text column is stored as text");
+    // A file at the top of a drive has no folder, as in the C# app.
+    assert_eq!(x.folder(), "");
+    let k = all.iter().find(|s| s.id == 2).unwrap();
+    assert_eq!(k.folder(), "Kicks");
+    assert_eq!(k.activity.plays, 1);
+    assert!(db.vectors("features").unwrap().is_empty());
+    assert_eq!(db.matches().unwrap()[0].kind, "Converted");
 }

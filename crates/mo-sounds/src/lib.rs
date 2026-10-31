@@ -20,6 +20,7 @@ pub use analysis::{ChordSpan, SoundAnalysis};
 pub use db::{KnownSound, SoundMatch, SoundsDb, SoundsError, StarPoint, TagCount};
 
 use chrono::NaiveDateTime;
+pub(crate) use mo_formats::paths::file_name;
 
 /// One sample in your sound library, as the list shows it.
 #[derive(Clone, Debug)]
@@ -59,13 +60,18 @@ impl Sound {
         stem(file_name(&self.path))
     }
 
-    /// The name of the folder the file is in: "Kicks".
+    /// The name of the folder the file is in: "Kicks". Empty for a file at the top of a drive or share ("D:\\x.wav"),
+    /// as .NET's `GetFileName(GetDirectoryName(path))` gives it.
     pub fn folder(&self) -> &str {
         let p = self.path.trim_end_matches(['\\', '/']);
-        match p.rfind(['\\', '/']) {
-            Some(i) => file_name(p.get(..i).unwrap_or("")),
-            None => "",
-        }
+        let Some(dir) = p.rfind(['\\', '/']).and_then(|i| p.get(..i)) else {
+            return "";
+        };
+        let is_drive = matches!(dir.as_bytes(), [d, b':'] if d.is_ascii_alphabetic());
+        // "\\server\share": a share's root, with no folder of its own.
+        let is_share =
+            dir.starts_with(r"\\") && dir.get(2..).is_some_and(|rest| rest.matches(['\\', '/']).count() <= 1);
+        if is_drive || is_share { "" } else { file_name(dir) }
     }
 
     /// The length in seconds (0 until analysed).
@@ -118,11 +124,6 @@ pub struct SoundActivity {
     pub older_drags: i32,
     pub sends: i32,
     pub older_sends: i32,
-}
-
-/// The last part of a path, after its last `\` or `/`.
-pub(crate) fn file_name(path: &str) -> &str {
-    path.rsplit(['\\', '/']).next().unwrap_or(path)
 }
 
 /// A file name without its extension, as .NET's `GetFileNameWithoutExtension` cuts it: everything before the last dot

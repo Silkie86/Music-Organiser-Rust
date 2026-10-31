@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chrono::{Local, NaiveDateTime};
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use rusqlite::types::ValueRef;
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
 
 use crate::{Sound, SoundActivity, SoundAnalysis, event, types};
 
@@ -95,14 +96,13 @@ impl SoundsDb {
         // The C# app may be saving a scan while this reads: wait a little for it rather than fail.
         conn.busy_timeout(Duration::from_secs(2)).map_err(|e| open_error(e.to_string()))?;
         conn.pragma_update(None, "query_only", true).map_err(|e| open_error(e.to_string()))?;
-        let tables = {
+        let tables: HashSet<String> = {
             let mut st = conn
                 .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
                 .map_err(|e| open_error(format!("it isn't a Music Organiser sound library ({e})")))?;
             let names = st.query_map([], |r| r.get::<_, String>(0)).and_then(|rows| rows.collect());
             names.map_err(|e: rusqlite::Error| open_error(e.to_string()))?
         };
-        let tables: HashSet<String> = tables;
         if !tables.contains("sounds") {
             return Err(open_error("it isn't a Music Organiser sound library (it has no sounds table)".into()));
         }
@@ -151,7 +151,10 @@ impl SoundsDb {
     /// Every sound, ordered by path ignoring letter case (as the C# app lists them), with its tags, activity and
     /// whether you've hidden it as a duplicate. `now` sets what counts as recent activity: the year before it.
     pub fn all(&self, now: NaiveDateTime) -> Result<Vec<Sound>, SoundsError> {
-        let activity = self.activity(now)?;
+        // One read transaction, so every query below sees the library as it was at one moment, even while the C# app
+        // saves a scan or hides a batch of copies in between.
+        let snapshot = self.conn.unchecked_transaction()?;
+        let mut activity = self.dated_activity(now)?;
         let mut tags: HashMap<i64, Vec<String>> = HashMap::new();
         if self.has("sound_tags") {
             let mut st = self.conn.prepare("SELECT sound_id, tag FROM sound_tags ORDER BY tag")?;
@@ -168,24 +171,24 @@ impl SoundsDb {
                     favourite, rating, plays
              FROM sounds ORDER BY path",
         )?;
+        // Every column but the id and path is read as the C# app reads it: a value of an unexpected kind in a damaged
+        // row reads as none (or 0) rather than stopping the whole list.
         let rows = st.query_map([], |r| {
-            let id: i64 = r.get(0)?;
-            let analysis: Option<String> = r.get(4)?;
             Ok(Sound {
-                id,
+                id: r.get(0)?,
                 path: r.get(1)?,
-                added: local(r.get::<_, Option<i64>>(2)?.unwrap_or(0)),
-                error: r.get(3)?,
+                added: local(int_at(r, 2).unwrap_or(0)),
+                error: text_at(r, 3),
                 // An analysis that can't be read shows as none, as in the C# app.
-                analysis: analysis.as_deref().and_then(SoundAnalysis::from_json),
-                name_type: r.get(5)?,
-                user_type: r.get(6)?,
-                sound_type: r.get::<_, Option<String>>(7)?.unwrap_or_else(|| types::UNKNOWN.to_owned()),
-                type_source: r.get::<_, Option<String>>(8)?.unwrap_or_default(),
-                type_confidence: r.get::<_, Option<f64>>(9)?.unwrap_or(0.0),
-                favourite: r.get::<_, Option<i64>>(10)? == Some(1),
-                rating: int(r.get(11)?),
-                plays: int(r.get(12)?),
+                analysis: text_at(r, 4).as_deref().and_then(SoundAnalysis::from_json),
+                name_type: text_at(r, 5),
+                user_type: text_at(r, 6),
+                sound_type: text_at(r, 7).unwrap_or_else(|| types::UNKNOWN.to_owned()),
+                type_source: text_at(r, 8).unwrap_or_default(),
+                type_confidence: real_at(r, 9).unwrap_or(0.0),
+                favourite: int_at(r, 10) == Some(1),
+                rating: int(int_at(r, 11)),
+                plays: int(int_at(r, 12)),
                 tags: Vec::new(),
                 hidden: false,
                 activity: SoundActivity::default(),
@@ -196,15 +199,32 @@ impl SoundsDb {
             let mut s = row?;
             s.tags = tags.remove(&s.id).unwrap_or_default();
             s.hidden = hidden.contains(&s.id);
-            s.activity = activity.get(&s.id).copied().unwrap_or_default();
+            let mut a = activity.remove(&s.id).unwrap_or_default();
+            add_undated_plays(&mut a, s.plays);
+            s.activity = a;
             sounds.push(s);
         }
+        drop(st);
+        snapshot.finish()?;
         Ok(sounds)
     }
 
     /// What's been done with each sound in the year before `now` and before that: deliberate plays, drags out of the
     /// app and sends into a DAW. Plays counted before the app kept dates count as recent, as in the C# app.
     pub fn activity(&self, now: NaiveDateTime) -> Result<HashMap<i64, SoundActivity>, SoundsError> {
+        let mut result = self.dated_activity(now)?;
+        // Plays counted on the sound before each one was dated: those beyond the dated ones count as recent.
+        let mut st = self.conn.prepare("SELECT id, plays FROM sounds WHERE plays > 0")?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, int(int_at(r, 1)))))?;
+        for row in rows {
+            let (id, plays) = row?;
+            add_undated_plays(result.entry(id).or_default(), plays);
+        }
+        Ok(result)
+    }
+
+    /// The dated part of [`SoundsDb::activity`]: what `sound_events` holds, without the plays counted before then.
+    fn dated_activity(&self, now: NaiveDateTime) -> Result<HashMap<i64, SoundActivity>, SoundsError> {
         let cutoff = unix(year_before(now));
         let mut result: HashMap<i64, SoundActivity> = HashMap::new();
         if self.has("sound_events") {
@@ -231,15 +251,6 @@ impl SoundsDb {
                     _ => {}
                 }
             }
-        }
-        // Plays counted on the sound before each one was dated: those beyond the dated ones count as recent.
-        let mut st = self.conn.prepare("SELECT id, plays FROM sounds WHERE plays > 0")?;
-        let rows = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
-        for row in rows {
-            let (id, plays) = row?;
-            let a = result.entry(id).or_default();
-            let dated = a.plays.saturating_add(a.older_plays);
-            a.plays = a.plays.saturating_add(int(Some(plays)).saturating_sub(dated).max(0));
         }
         Ok(result)
     }
@@ -275,12 +286,14 @@ impl SoundsDb {
     pub fn vectors(&self, space: &str) -> Result<HashMap<i64, Vec<f32>>, SoundsError> {
         let column = if space == "clap" { "clap" } else { "features" };
         let mut st = self.conn.prepare(&format!("SELECT id, {column} FROM sounds WHERE {column} IS NOT NULL"))?;
-        let rows = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))?;
+        let mut rows = st.query([])?;
         let mut out = HashMap::new();
-        for row in rows {
-            let (id, blob) = row?;
-            if let Some(v) = floats(&blob) {
-                out.insert(id, v);
+        while let Some(r) = rows.next()? {
+            // Anything but a blob of whole floats is left out, as the C# app leaves it out.
+            if let ValueRef::Blob(blob) = r.get_ref(1)?
+                && let Some(v) = floats(blob)
+            {
+                out.insert(r.get::<_, i64>(0)?, v);
             }
         }
         Ok(out)
@@ -332,7 +345,7 @@ impl SoundsDb {
             Ok(SoundMatch {
                 a: r.get(0)?,
                 b: r.get(1)?,
-                kind: r.get(2)?,
+                kind: copy_kind(text_at(r, 2).as_deref()).to_owned(),
                 score: r.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
                 offset: r.get::<_, Option<f64>>(4)?.unwrap_or(0.0),
                 apart: r.get(5)?,
@@ -348,13 +361,53 @@ fn int(n: Option<i64>) -> i32 {
     n.unwrap_or(0).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
 }
 
+/// A whole number, or `None` for NULL or a value of another kind (the C# app's `Long` reads those as 0).
+fn int_at(r: &Row<'_>, i: usize) -> Option<i64> {
+    match r.get_ref(i) {
+        Ok(ValueRef::Integer(n)) => Some(n),
+        _ => None,
+    }
+}
+
+/// A number, or `None` for NULL or a value of another kind.
+fn real_at(r: &Row<'_>, i: usize) -> Option<f64> {
+    match r.get_ref(i) {
+        Ok(ValueRef::Real(x)) => Some(x),
+        Ok(ValueRef::Integer(n)) => Some(n as f64),
+        _ => None,
+    }
+}
+
+/// Text, or `None` for NULL or a value of another kind (the C# app's `as string`).
+fn text_at(r: &Row<'_>, i: usize) -> Option<String> {
+    match r.get_ref(i) {
+        Ok(ValueRef::Text(t)) => Some(String::from_utf8_lossy(t).into_owned()),
+        _ => None,
+    }
+}
+
+/// Adds the plays counted on a sound before each one was dated: those beyond the dated ones count as recent.
+fn add_undated_plays(a: &mut SoundActivity, plays: i32) {
+    let dated = a.plays.saturating_add(a.older_plays);
+    a.plays = a.plays.saturating_add(plays.saturating_sub(dated).max(0));
+}
+
+/// A copy's kind as the C# app reads it: one it doesn't know reads as "Converted".
+fn copy_kind(kind: Option<&str>) -> &'static str {
+    match kind {
+        Some("Exact") => "Exact",
+        Some("Trimmed") => "Trimmed",
+        _ => "Converted",
+    }
+}
+
 /// Floats stored as the C# app stores them: little-endian 4-byte floats, one after another. `None` when the length
 /// isn't a whole number of floats.
 fn floats(blob: &[u8]) -> Option<Vec<f32>> {
     if blob.is_empty() || !blob.len().is_multiple_of(4) {
         return None;
     }
-    Some(blob.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
+    Some(blob.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect())
 }
 
 /// Unix seconds as local time; a time out of range reads as the start of 1970.
