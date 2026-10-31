@@ -131,7 +131,8 @@ pub fn looks_like_folder(path: &str) -> bool {
         || !ext.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
-/// A project file found in a folder, with the size and modified time (Unix seconds) the folder listing gave.
+/// A file found in a folder (a project, or a sound for the Sounds page), with the size and modified time (Unix seconds)
+/// the folder listing gave.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FoundFile {
     pub path: String,
@@ -139,12 +140,12 @@ pub struct FoundFile {
     pub mtime: i64,
 }
 
-/// What [`find_projects`] found.
+/// What [`find_projects`] or [`find_files`] found.
 #[derive(Clone, Debug, Default)]
 pub struct Found {
     /// Sorted by path, ignoring case; each file once.
     pub files: Vec<FoundFile>,
-    /// Folders that couldn't be read this time (busy, or their permissions changing): their projects stay as they were.
+    /// Folders that couldn't be read this time (busy, or their permissions changing): their files stay as they were.
     pub unreadable: Vec<String>,
 }
 
@@ -219,7 +220,7 @@ pub fn find_files(
     found
 }
 
-/// What one folder holds: its project files, the folders in it to walk next, the folder links in it with where they
+/// What one folder holds: the files it wants, the folders in it to walk next, the folder links in it with where they
 /// really go, and what couldn't be read (the folder itself, or an entry in it that couldn't be looked at).
 #[derive(Default)]
 struct Listing {
@@ -285,9 +286,17 @@ fn size(meta: &fs::Metadata) -> i64 {
     i64::try_from(meta.len()).unwrap_or(i64::MAX)
 }
 
-/// When a file was last written, in Unix seconds, as the library keeps it.
+/// When a file was last written, in Unix seconds, as the library keeps it. A date before 1970 is a whole number of
+/// seconds below zero, rounded down, as the C# app's `ToUnixTimeSeconds` gives it, so the two apps agree on it.
 pub fn mtime(meta: &fs::Metadata) -> i64 {
-    meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs() as i64)
+    let Ok(t) = meta.modified() else { return 0 };
+    match t.duration_since(UNIX_EPOCH) {
+        Ok(d) => i64::try_from(d.as_secs()).unwrap_or(i64::MAX),
+        Err(e) => {
+            let d = e.duration();
+            -i64::try_from(d.as_secs()).unwrap_or(i64::MAX) - i64::from(d.subsec_nanos() > 0)
+        }
+    }
 }
 
 /// A save as the library last read it, for working out what needs reading again.

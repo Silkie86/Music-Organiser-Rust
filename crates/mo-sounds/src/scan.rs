@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use mo_formats::case;
-use mo_formats::paths::file_name;
+use mo_formats::paths::{file_name, has_extension};
 use mo_library::scan::{Found, FoundFile, find_files, is_inside};
 
 use crate::KnownSound;
@@ -23,14 +23,7 @@ pub const AUDIO_EXTENSIONS: [&str; 9] = ["wav", "aif", "aiff", "aifc", "mp3", "f
 
 /// Whether the app reads this kind of sound file (by its extension, ignoring case).
 pub fn can_read(path: &str) -> bool {
-    let name = file_name(path);
-    match name.rfind('.') {
-        Some(i) => {
-            let ext = name.get(i + 1..).unwrap_or("");
-            AUDIO_EXTENSIONS.iter().any(|e| e.eq_ignore_ascii_case(ext))
-        }
-        None => false,
-    }
+    has_extension(file_name(path), &AUDIO_EXTENSIONS)
 }
 
 /// A Mac's "._" shadow file, which holds no sound.
@@ -71,31 +64,45 @@ pub struct ScanPlan {
 ///
 /// As the C# app: a folder on an unplugged drive, or one that couldn't be read this time, keeps its sounds; so does a
 /// file still there that the app can't read. Only files really gone are forgotten.
+///
+/// Unlike the C# app, a sound outside every listed folder is never forgotten (the C# app forgot it): a folder taken
+/// off the list for a while, or a list that failed to load, mustn't wipe the tags, stars and plays you gave its sounds.
+/// The page shows only sounds under the listed folders.
 pub fn plan(found: &Found, known: &[KnownSound], folders: &[String]) -> ScanPlan {
-    let known_by_key: HashMap<String, &KnownSound> = known.iter().map(|k| (case::key(&k.path), k)).collect();
-    let present: HashSet<String> = found.files.iter().map(|f| case::key(&f.path)).collect();
-
-    // The folder listing already gave each file's size and time, so unchanged sounds cost no trips to the disk.
-    let mut listen: Vec<FoundFile> = found
-        .files
-        .iter()
-        .filter(|f| known_by_key.get(&case::key(&f.path)).is_none_or(|k| k.mtime != f.mtime || k.size != f.size))
-        .cloned()
-        .collect();
+    // Each path's key is worked out once: with hundreds of thousands of sounds, every extra pass is that many strings.
+    let known_keys: Vec<String> = known.iter().map(|k| case::key(&k.path)).collect();
+    let known_by_key: HashMap<&str, &KnownSound> = known_keys.iter().map(String::as_str).zip(known).collect();
+    let mut present: HashSet<String> = HashSet::with_capacity(found.files.len());
+    let mut listen: Vec<FoundFile> = Vec::new();
+    // Files the library has never seen, as (path, size, mtime): some may be gone sounds renamed or moved.
+    let mut added: Vec<(&str, i64, i64)> = Vec::new();
+    for f in &found.files {
+        let key = case::key(&f.path);
+        // The folder listing already gave each file's size and time, so unchanged sounds cost no trips to the disk.
+        match known_by_key.get(key.as_str()) {
+            None => {
+                added.push((f.path.as_str(), f.size, f.mtime));
+                listen.push(f.clone());
+            }
+            Some(k) if k.mtime != f.mtime || k.size != f.size => listen.push(f.clone()),
+            Some(_) => {}
+        }
+        present.insert(key);
+    }
 
     let away: Vec<&String> =
         folders.iter().filter(|f| !Path::new(f.as_str()).is_dir()).chain(found.unreadable.iter()).collect();
     let kept = |p: &str| {
-        away.iter().any(|a| is_inside(p, a))
+        !folders.iter().any(|f| is_inside(p, f))
+            || away.iter().any(|a| is_inside(p, a))
             || (!can_read(p) && folders.iter().any(|f| is_inside(p, f)) && Path::new(p).is_file())
     };
 
-    let gone: Vec<&KnownSound> =
-        known.iter().filter(|k| !present.contains(&case::key(&k.path)) && !kept(&k.path)).collect();
-    let added: Vec<(&str, i64, i64)> = listen
+    let gone: Vec<&KnownSound> = known
         .iter()
-        .filter(|f| !known_by_key.contains_key(&case::key(&f.path)))
-        .map(|f| (f.path.as_str(), f.size, f.mtime))
+        .zip(&known_keys)
+        .filter(|(k, key)| !present.contains(*key) && !kept(&k.path))
+        .map(|(k, _)| k)
         .collect();
     let moves = moves(gone.iter().map(|k| (k.path.as_str(), k.size, k.mtime)), added);
 

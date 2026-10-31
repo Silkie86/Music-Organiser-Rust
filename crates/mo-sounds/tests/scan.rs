@@ -70,6 +70,8 @@ fn plans_what_to_listen_to_follow_and_forget() {
         known(at("Song.wma"), (8, 1)),
         // On a drive that isn't plugged in: kept.
         known(format!(r"{unplugged}\Far.wav"), (1, 1)),
+        // Outside every listed folder: kept, unlike the C# app.
+        known(r"Q:\Elsewhere\Kick.wav".to_owned(), (4, 4)),
     ];
     let p = plan(&found, &known, &[root.clone(), unplugged]);
     let listen: Vec<String> = p.listen.iter().map(|f| rel(&root, &f.path)).collect();
