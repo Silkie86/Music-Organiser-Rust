@@ -42,10 +42,13 @@ def score(reference, estimate):
         comparison = getattr(mir_eval.chord, theirs)(ref_lab, est_lab)
         valid = comparison >= 0
         out[ours] = (float(np.sum(durations[valid] * comparison[valid])), float(np.sum(durations[valid])))
-    total = float(np.sum(merged_ref[:, 1] - merged_ref[:, 0]))
-    over = mir_eval.chord.directional_hamming_distance(merged_ref, merged_est) * total
-    under = mir_eval.chord.directional_hamming_distance(merged_est, merged_ref) * total
-    return out, over, under, total
+    # directional_hamming_distance divides by its first argument's stretch (first start to last end, gaps and all);
+    # multiplying back gives the length lost, so songs can be pooled the way the bench pools them.
+    over_total = float(merged_ref[-1, 1] - merged_ref[0, 0])
+    under_total = float(merged_est[-1, 1] - merged_est[0, 0])
+    over = mir_eval.chord.directional_hamming_distance(merged_ref, merged_est) * over_total
+    under = mir_eval.chord.directional_hamming_distance(merged_est, merged_ref) * under_total
+    return out, (over, over_total, under, under_total)
 
 
 def main():
@@ -53,9 +56,9 @@ def main():
     worst = []
     for line in open(sys.argv[1], encoding='utf-8'):
         d = json.loads(line)
-        theirs, over, under, total = score(d['reference'], d['estimate'])
+        theirs, theirs_seg = score(d['reference'], d['estimate'])
         ours = dict((name, (right, scored)) for name, (right, scored) in d['measures'])
-        p = pooled.setdefault(d['engine'], {m: [0.0, 0.0, 0.0, 0.0] for m in MEASURES} | {'seg': [0.0] * 6})
+        p = pooled.setdefault(d['engine'], {m: [0.0, 0.0, 0.0, 0.0] for m in MEASURES} | {'seg': [0.0] * 8})
         for m in MEASURES:
             p[m][0] += ours[m][0]
             p[m][1] += ours[m][1]
@@ -64,17 +67,17 @@ def main():
             a = ours[m][0] / ours[m][1] if ours[m][1] else 0.0
             b = theirs[m][0] / theirs[m][1] if theirs[m][1] else 0.0
             worst.append((abs(a - b), d['engine'], d['id'], m, a, b))
-        lost_over, total_over, lost_under, total_under = d['segmentation']
-        for i, v in enumerate([lost_over, total_over, lost_under, over, under, total]):
+        # Lost and total, over-cut then under-cut: the bench's four numbers, then mir_eval's.
+        for i, v in enumerate(list(d['segmentation']) + list(theirs_seg)):
             p['seg'][i] += v
     for engine, p in pooled.items():
         print(engine)
         for m in MEASURES:
             r, t, mr, mt = p[m]
             print(f'  {m:12} bench {100 * r / t:7.3f}%   mir_eval {100 * mr / mt:7.3f}%   (time scored {t:.0f} / {mt:.0f})')
-        lo, to, lu, mo, mu, mt = p['seg']
-        print(f'  over-cut     bench {100 * lo / to:7.3f}    mir_eval {100 * mo / mt:7.3f}')
-        print(f'  under-cut    bench {100 * lu / to:7.3f}    mir_eval {100 * mu / mt:7.3f}')
+        lo, to, lu, tu, mo, mto, mu, mtu = p['seg']
+        print(f'  over-cut     bench {100 * lo / to:7.3f}    mir_eval {100 * mo / mto:7.3f}')
+        print(f'  under-cut    bench {100 * lu / tu:7.3f}    mir_eval {100 * mu / mtu:7.3f}')
     worst.sort(reverse=True)
     print('Largest differences in one piece:')
     for diff, engine, sid, m, a, b in worst[:10]:

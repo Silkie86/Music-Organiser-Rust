@@ -178,25 +178,31 @@ impl Key {
     }
 
     /// Reads a key as people and packs write it: "C", "F#m", "Bb minor", "A min", "Ebmin", "F#maj", "C Major",
-    /// "Gb:maj", "c#:min". A tonic with nothing after it, or "maj"/"major", is major; "m", "min", "minor" or "-" is
-    /// minor. `None` when it isn't a key.
+    /// "C-Major", "Gb:maj", "c#:min". A tonic with nothing after it, "maj", "major" or a capital "M" is major; "m",
+    /// "min", "minor", or a minus with nothing after it ("C-", as jazz charts write it), is minor. `None` when it
+    /// isn't a key.
     pub fn parse(text: &str) -> Option<Key> {
         let text = text.trim();
         let (tonic, used) = parse_note(text)?;
-        let rest = text.get(used..)?.trim_start_matches([' ', ':', '_', '-']).to_ascii_lowercase();
-        let minor = if rest.is_empty() || rest.starts_with("maj") {
+        let after = text.get(used..)?;
+        let rest = after.trim_start_matches([' ', ':', '_', '-']);
+        let minor = if rest.is_empty() {
+            // "C" is major, "C-" minor.
+            after.contains('-')
+        } else if rest == "M" {
+            // A capital M alone is major ("CM"), as in chord names; a small one minor.
             false
-        } else if rest.starts_with('m') {
-            // "m", "min", "minor", but not "major" (taken above) or "mixolydian".
-            if rest.starts_with("mix") {
+        } else {
+            let rest = rest.to_ascii_lowercase();
+            if rest.starts_with("maj") {
+                false
+            } else if rest.starts_with('m') && !rest.starts_with("mix") {
+                // "m", "min", "minor", but not "major" (taken above) or "mixolydian".
+                true
+            } else {
                 return None;
             }
-            true
-        } else {
-            return None;
         };
-        // A minus straight after the tonic ("C-") is minor too.
-        let minor = minor || text.get(used..).is_some_and(|r| r.starts_with('-'));
         Some(if minor { Key::minor(tonic) } else { Key::major(tonic) })
     }
 }
@@ -241,7 +247,15 @@ mod tests {
             ("Gb:maj", "Gb major"),
             ("c#:min", "C# minor"),
             ("C-", "C minor"),
+            ("C -", "C minor"),
             (" g minor ", "G minor"),
+            // A minus before a word only joins them, and a capital M is major.
+            ("C-Major", "C major"),
+            ("Bb-major", "Bb major"),
+            ("A-minor", "A minor"),
+            ("CM", "C major"),
+            ("F#M", "Gb major"),
+            ("Cm", "C minor"),
         ] {
             assert_eq!(Key::parse(text).map(|k| k.name()).as_deref(), Some(name), "{text}");
         }

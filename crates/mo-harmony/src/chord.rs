@@ -61,7 +61,7 @@ impl Family {
             if a5 && !p5 { Family::Augmented } else { Family::Major }
         } else if m3 {
             if d5 && !p5 { if b7 { Family::HalfDiminished } else { Family::Diminished } } else { Family::Minor }
-        } else if intervals.has(5) || (intervals.has(2) && (p5 || b7)) {
+        } else if intervals.has(5) || intervals.has(2) {
             Family::Sus
         } else {
             Family::Power
@@ -69,14 +69,17 @@ impl Family {
     }
 }
 
-/// Whether a dominant chord is an altered one (7alt): a major third and flat seventh, no perfect fifth, no natural 9
-/// or 13, a ♭9 or ♯9, and a ♯11 or ♭13. With a perfect fifth it's written out instead: C7(b9,b13).
+/// Whether a dominant chord is an altered one (7alt): a major third and flat seventh, no perfect fifth, no natural 9,
+/// 11 or 13 and no major seventh (none of them is in the altered scale), a ♭9 or ♯9, and a ♯11 or ♭13. With a
+/// perfect fifth it's written out instead: C7(b9,b13).
 pub const fn is_altered(intervals: PcSet) -> bool {
     intervals.has(4)
         && intervals.has(10)
         && !intervals.has(7)
         && !intervals.has(2)
+        && !intervals.has(5)
         && !intervals.has(9)
+        && !intervals.has(11)
         && (intervals.has(1) || intervals.has(3))
         && (intervals.has(6) || intervals.has(8))
 }
@@ -425,7 +428,49 @@ impl fmt::Display for Chord {
 }
 
 /// The quality as written after the root, for a chord of this family with these intervals above its root.
+///
+/// Every note the chord has is in its name: a note the usual name doesn't cover is written after it, as its degree
+/// ("C(addb13)", "C7(maj7)", "Cdim7(9)"). The name may still stand for notes the chord leaves out, as charts do: the
+/// fifth, the 9 under an 11 or 13, the 11 of a minor 13, and the alterations of a 7alt.
 pub fn quality_of(intervals: PcSet, family: Family) -> String {
+    let mut q = usual_quality(intervals, family);
+    let left = intervals.difference(intervals_of(&q).unwrap_or_default());
+    // Added notes take "add" when the chord has no seventh, as in "C(add#11)" beside "Cmaj7(#11)".
+    let add = !(intervals.has(10) || intervals.has(11) || (matches!(family, Family::Diminished) && intervals.has(9)));
+    let extra: Vec<&str> =
+        left.iter().filter_map(|pc| extra_tone(intervals, family, pc.number().into(), add)).collect();
+    if !extra.is_empty() {
+        q.push('(');
+        q.push_str(&extra.join(","));
+        q.push(')');
+    }
+    q
+}
+
+/// How a note the usual name leaves out is written after it, so that reading the name back gives the note: its degree
+/// ([`degree`]), with "add" in front of a tension when `add`. `None` for the root, the thirds and the fifth, which
+/// every usual name covers.
+fn extra_tone(intervals: PcSet, family: Family, interval: i32, add: bool) -> Option<&'static str> {
+    let tension = |with_add: &'static str, plain: &'static str| Some(if add { with_add } else { plain });
+    match interval {
+        1 => tension("addb9", "b9"),
+        2 => tension("add9", "9"),
+        // A minor third that isn't the chord's third is a #9.
+        3 => tension("add#9", "#9"),
+        5 => tension("add11", "11"),
+        6 if degree(intervals, family, 6).alter() < 0 => Some("b5"),
+        6 => tension("add#11", "#11"),
+        8 if degree(intervals, family, 8).alter() > 0 => Some("#5"),
+        8 => tension("addb13", "b13"),
+        9 => tension("add6", "13"),
+        10 => Some("b7"),
+        11 => Some("maj7"),
+        _ => None,
+    }
+}
+
+/// The usual name of the quality, from the notes that decide it; [`quality_of`] adds what it leaves out.
+fn usual_quality(intervals: PcSet, family: Family) -> String {
     let has = |i| intervals.has(i);
     let (b9, n9, s9, n11, s11, b13, n13) = (has(1), has(2), has(3), has(5), has(6), has(8), has(9));
     let (p5, b7, maj7) = (has(7), has(10), has(11));
@@ -494,7 +539,7 @@ pub fn quality_of(intervals: PcSet, family: Family) -> String {
                     (false, false) => "m",
                 }
             });
-            if b13 && p5 {
+            if b13 {
                 // A seventh of either kind makes the b13 a tension, not an added note.
                 q.push_str(if b7 || maj7 { "(b13)" } else { "(addb13)" });
             }
@@ -575,6 +620,9 @@ pub fn quality_of(intervals: PcSet, family: Family) -> String {
             }
             q
         }
+        // A seventh over a bare fifth: "C7(no3)", as rock charts write it.
+        Family::Power if b7 => "7(no3)".into(),
+        Family::Power if maj7 => "maj7(no3)".into(),
         Family::Power => "5".into(),
     }
 }
@@ -594,8 +642,12 @@ pub fn intervals_of(quality: &str) -> Option<PcSet> {
     let mut iv = PcSet::of(&[0, 4, 7]);
     let set = |iv: &mut PcSet, i: &[i32]| *iv = iv.union(PcSet::of(i));
     let clear = |iv: &mut PcSet, i: &[i32]| *iv = iv.difference(PcSet::of(i));
-    // 9, 11 and 13 bring the notes below them (an 11 chord leaves the third out, as players do; a 13 leaves the 11).
-    let extend = |iv: &mut PcSet, n: u32, major7: bool| {
+    // 9, 11 and 13 bring the notes below them (an 11 chord leaves the third out, as players do; a 13 leaves the 11,
+    // except on a minor chord, where the 11 doesn't clash). Any other number after a seventh chord's quality is a typo.
+    let extend = |iv: &mut PcSet, n: u32, major7: bool| -> Option<()> {
+        if !matches!(n, 7 | 9 | 11 | 13) {
+            return None;
+        }
         set(iv, &[if major7 { 11 } else { 10 }]);
         if n >= 9 {
             set(iv, &[2]);
@@ -603,17 +655,22 @@ pub fn intervals_of(quality: &str) -> Option<PcSet> {
         if n >= 11 {
             set(iv, &[5]);
         }
-        if n >= 13 {
+        if n == 13 {
             set(iv, &[9]);
-            if n == 13 {
+            if !iv.has(3) {
                 clear(iv, &[5]);
             }
         }
+        Some(())
     };
 
     if read.take("maj") || read.take("Maj") || read.take("M") {
-        let n = read.number();
-        extend(&mut iv, if n == 0 { 7 } else { n }, true);
+        match read.number() {
+            // "Cmaj6" and "CM6" are plain 6 chords, as "Cmaj6/9" is a 6/9.
+            6 => set(&mut iv, &[9]),
+            0 => extend(&mut iv, 7, true)?,
+            n => extend(&mut iv, n, true)?,
+        }
     } else if read.take("m7b5") || read.take("ø") || read.take("-7b5") || read.take("min7b5") {
         iv = PcSet::of(&[0, 3, 6, 10]);
         read.take("7");
@@ -625,9 +682,9 @@ pub fn intervals_of(quality: &str) -> Option<PcSet> {
     } else if read.take("aug") || read.take("+") {
         clear(&mut iv, &[7]);
         set(&mut iv, &[8]);
-        let n = read.number();
-        if n >= 7 {
-            extend(&mut iv, n, false);
+        match read.number() {
+            0 => {}
+            n => extend(&mut iv, n, false)?,
         }
     } else if read.take("min") || read.take("mi") || read.take("m") || read.take("-") {
         clear(&mut iv, &[4]);
@@ -635,33 +692,32 @@ pub fn intervals_of(quality: &str) -> Option<PcSet> {
         // "Cm(maj7)".
         read.take("(");
         if read.take("maj") || read.take("M") {
-            let n = read.number();
-            extend(&mut iv, if n == 0 { 7 } else { n }, true);
-        } else {
-            let n = read.number();
-            if n == 6 {
-                set(&mut iv, &[9]);
-            } else if n >= 7 {
-                extend(&mut iv, n, false);
+            match read.number() {
+                0 => extend(&mut iv, 7, true)?,
+                n => extend(&mut iv, n, true)?,
             }
-            if n == 11 {
-                clear(&mut iv, &[9]);
+        } else {
+            match read.number() {
+                0 => {}
+                6 => set(&mut iv, &[9]),
+                n => extend(&mut iv, n, false)?,
             }
         }
     } else {
-        let n = read.number();
-        match n {
+        match read.number() {
+            0 => {}
             5 => iv = PcSet::of(&[0, 7]),
             6 => set(&mut iv, &[9]),
             2 => set(&mut iv, &[2]),
-            7.. => {
-                extend(&mut iv, n, false);
+            // "C4" is a sus4, as some charts write it.
+            4 => iv = PcSet::of(&[0, 5, 7]),
+            n => {
+                extend(&mut iv, n, false)?;
                 // "C11" is a sus chord with a 9: C, F, Bb, D.
                 if n == 11 {
                     clear(&mut iv, &[4]);
                 }
             }
-            _ => {}
         }
     }
     // Then any of: 6/9, sus, sus2, sus4, add9, alt, b9, #9, #11, b13, b5, #5, 11, 13, omit3.
@@ -694,13 +750,17 @@ pub fn intervals_of(quality: &str) -> Option<PcSet> {
             };
             set(&mut iv, &[added]);
         } else if read.take("alt") {
+            // Every alteration: b9, #9, #11 and b13.
             clear(&mut iv, &[7, 2, 9]);
-            set(&mut iv, &[10, 1, 3, 8]);
+            set(&mut iv, &[10, 1, 3, 6, 8]);
         } else if read.take("maj7") || read.take("maj") {
             // "dim(maj7)", "dim7(maj7)", as the app names them.
             set(&mut iv, &[11]);
         } else if read.take("b9") {
             set(&mut iv, &[1]);
+        } else if read.take("b7") {
+            // A flat seventh beside a major one, as "Cm(maj7)(b7)" has it.
+            set(&mut iv, &[10]);
         } else if read.take("#9") {
             set(&mut iv, &[3]);
         } else if read.take("#11") {
@@ -925,6 +985,49 @@ mod tests {
         // With the fifth sounding, the alterations are written out.
         assert_eq!(c(&[0, 4, 7, 10, 1, 8]), "C7(b9,b13)");
         assert_eq!(c(&[0, 4, 7, 10, 3, 6]), "C7(#9,#11)");
+        // A natural 11 isn't in the altered scale, so it's written out too.
+        assert_eq!(c(&[0, 4, 10, 1, 8, 5]), "C7(b9,#5,11)");
+        // Typed, 7alt stands for every alteration.
+        assert_eq!(chord("C7alt").notes(), PcSet::of(&[0, 4, 10, 1, 3, 6, 8]));
+    }
+
+    #[test]
+    fn every_note_is_in_the_name() {
+        // For every set of notes on a root, reading its name back gives every note in it. The name may stand for a
+        // few notes the chord leaves out, as charts do: the fifth, the 9 under an 11 or 13, the 11 of a minor 13, and
+        // the alterations of a 7alt; never a third or a seventh the chord doesn't have.
+        for bits in (1..4096u16).step_by(2) {
+            let c = Chord::of(PitchClass::C, PcSet::from_bits(bits));
+            let name = c.name();
+            let back = chord(&name);
+            assert!(c.notes().difference(back.notes()).is_empty(), "{name} leaves out some of {}", c.notes());
+            let may_add = if name.contains("alt") { PcSet::of(&[2, 7, 1, 3, 6, 8]) } else { PcSet::of(&[2, 5, 7]) };
+            let added = back.notes().difference(c.notes());
+            assert!(added.difference(may_add).is_empty(), "{name} adds {added} to {}", c.notes());
+        }
+        let c = |iv: &[i32]| Chord::of(PitchClass::C, PcSet::of(iv)).name();
+        assert_eq!(c(&[0, 4, 7, 8]), "C(addb13)");
+        assert_eq!(c(&[0, 4, 7, 11, 8]), "Cmaj7(b13)");
+        assert_eq!(c(&[0, 4, 10, 11]), "C7(maj7)");
+        assert_eq!(c(&[0, 3, 8]), "Cm(addb13)");
+        assert_eq!(c(&[0, 3, 7, 10, 11]), "Cm(maj7)(b7)");
+        assert_eq!(c(&[0, 3, 5, 9]), "Cm6(add11)");
+        assert_eq!(c(&[0, 3, 10, 2, 5, 9]), "Cm13");
+        assert_eq!(c(&[0, 3, 6, 9, 2]), "Cdim7(9)");
+        assert_eq!(c(&[0, 3, 6, 10, 1]), "Cm7b5(b9)");
+        assert_eq!(c(&[0, 4, 8, 2]), "C+(add9)");
+        assert_eq!(c(&[0, 7, 10]), "C7(no3)");
+        assert_eq!(c(&[0, 2]), "Csus2");
+    }
+
+    #[test]
+    fn numbers_a_chord_cant_have_are_refused() {
+        for (typed, name) in [("CM6", "C6"), ("Cmaj6", "C6"), ("Cmaj6/9", "C6/9"), ("C4", "Csus4"), ("C2", "Cadd9")] {
+            assert_eq!(chord(typed).name(), name, "{typed}");
+        }
+        for typed in ["C1", "C3", "C8", "C10", "Cmaj2", "Cmaj5", "Cm5", "Cm8", "C+5", "Cm(maj6)"] {
+            assert_eq!(Chord::parse(typed), None, "{typed}");
+        }
     }
 
     #[test]

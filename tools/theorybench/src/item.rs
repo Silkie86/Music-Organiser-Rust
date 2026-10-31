@@ -6,6 +6,7 @@ use std::path::Path;
 
 use mo_harmony::Key;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 
 /// One piece: its notes by part, its bar grid, and the keys and chords someone (or some program) labelled.
 #[derive(Clone, Debug, Deserialize)]
@@ -130,14 +131,19 @@ pub fn cut(notes: &[Note], from: i64, length: i64) -> Vec<Note> {
 
 /// Reads every item in a JSON-lines file.
 pub fn read(path: &Path) -> Result<Vec<Item>, String> {
+    read_lines(path)
+}
+
+/// Reads a file of one JSON object a line (blank lines skipped); an error names the file and the line.
+pub fn read_lines<T: DeserializeOwned>(path: &Path) -> Result<Vec<T>, String> {
     let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let mut items = Vec::new();
+    let mut out = Vec::new();
     for (n, line) in BufReader::new(file).lines().enumerate() {
         let line = line.map_err(|e| format!("{}: {e}", path.display()))?;
         if line.trim().is_empty() {
             continue;
         }
-        items.push(serde_json::from_str(&line).map_err(|e| format!("{} line {}: {e}", path.display(), n + 1))?);
+        out.push(serde_json::from_str(&line).map_err(|e| format!("{} line {}: {e}", path.display(), n + 1))?);
     }
-    Ok(items)
+    Ok(out)
 }

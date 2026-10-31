@@ -80,4 +80,4 @@ its most common miss is the relative key (13.3% of clips). Whole songs with one 
 profile gets 66.0% of the clips, as the C# bench measured. Melody alone 71.9%, accompaniment alone 69.6%.
 
 Chords, accompaniment part, all 909 songs: root 88.5%, majmin 81.5%, sevenths 79.4%, mirex 82.1%, bass 90.7%;
-segmentation 91.1, 1.36 chord changes a bar (the labels change 1.47 times a bar).
+segmentation 91.2, 1.36 chord changes a bar (the labels change 1.47 times a bar).

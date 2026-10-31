@@ -3,7 +3,6 @@
 //! segmentation score for where the chords change.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use mo_harmony::{Chord, PcSet, PitchClass};
@@ -33,24 +32,20 @@ struct Engine {
 }
 
 fn load(name: &str, path: &Path) -> Result<Engine, String> {
-    let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let mut read = HashMap::new();
-    for (n, line) in BufReader::new(file).lines().enumerate() {
-        let line = line.map_err(|e| format!("{}: {e}", path.display()))?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let a: Answers = serde_json::from_str(&line).map_err(|e| format!("{} line {}: {e}", path.display(), n + 1))?;
-        let chords = a
-            .chords
-            .iter()
-            .map(|&(start, end, _, root, bass, pcs)| {
-                let root = PitchClass::new(i32::from(root));
-                (start, end, Chord::new(root, PcSet::from_bits(pcs).with(root), PitchClass::new(i32::from(bass))))
-            })
-            .collect();
-        read.insert((a.source, a.id), chords);
-    }
+    let read = item::read_lines::<Answers>(path)?
+        .into_iter()
+        .map(|a| {
+            let chords = a
+                .chords
+                .iter()
+                .map(|&(start, end, _, root, bass, pcs)| {
+                    let root = PitchClass::new(i32::from(root));
+                    (start, end, Chord::new(root, PcSet::from_bits(pcs).with(root), PitchClass::new(i32::from(bass))))
+                })
+                .collect();
+            ((a.source, a.id), chords)
+        })
+        .collect();
     Ok(Engine { name: name.to_owned(), read })
 }
 
@@ -110,16 +105,19 @@ pub fn run(args: &[String]) -> Result<(), String> {
     }
     println!();
     for (e, s) in engines.iter().zip(&scores) {
+        let shares: Vec<_> = (0..Measure::ALL.len())
+            .map(|i| {
+                let (right, total) = columns(s, i);
+                metrics::ratio(&right, &total, &song)
+            })
+            .collect();
         print!("{:<28}", e.name);
-        for (i, _) in Measure::ALL.iter().enumerate() {
-            let (right, total) = columns(s, i);
-            print!(" {:>11}", pct(metrics::ratio(&right, &total, &song).value));
+        for r in &shares {
+            print!(" {:>11}", pct(r.value));
         }
         println!();
         print!("{:<28}", "");
-        for (i, _) in Measure::ALL.iter().enumerate() {
-            let (right, total) = columns(s, i);
-            let r = metrics::ratio(&right, &total, &song);
+        for r in &shares {
             print!(" {:>11}", format!("{:.1}-{:.1}", 100.0 * r.low, 100.0 * r.high));
         }
         println!();
@@ -242,7 +240,7 @@ fn score(item: &Item, read: Option<&Vec<Read>>) -> Score {
             .map(|(s, e, l)| (*s, *e, harte::parse_for_joining(l).unwrap_or(Label::UNKNOWN)))
             .collect::<Vec<_>>(),
     );
-    let (from, to) = (reference.first().map_or(0, |r| r.0), reference.last().map_or(0, |r| r.1));
+    let (from, to) = harte::stretch(&reference).unwrap_or_default();
     let whole: Vec<(i64, i64, Option<Chord>)> = read.iter().map(|&(s, e, c)| (s, e, Some(c))).collect();
     let joined_estimate = harte::join(&harte::adjust(from, to, &whole, None));
     let (over_lost, over_total) = harte::hamming_parts(&joined_reference, &joined_estimate);

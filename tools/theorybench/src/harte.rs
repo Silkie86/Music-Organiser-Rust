@@ -422,15 +422,24 @@ pub fn adjust<K: Copy>(from: i64, to: i64, estimate: &[(i64, i64, K)], none: K) 
     est
 }
 
+/// The labelled stretch: from the earliest start to the latest end, as mir_eval's `evaluate` takes it
+/// (`ref_intervals.min()` and `.max()`), so labels out of order or overlapping give the same stretch. `None` when
+/// nothing is labelled.
+pub fn stretch<K>(spans: &[(i64, i64, K)]) -> Option<(i64, i64)> {
+    let from = spans.iter().map(|s| s.0.min(s.1)).min()?;
+    let to = spans.iter().map(|s| s.0.max(s.1)).max()?;
+    Some((from, to))
+}
+
 /// The chords read laid against the labelled ones over the labelled stretch, as mir_eval's `evaluate` does: the
 /// chords read are cut to the stretch and padded with no chord ([`adjust`]); then the stretch is cut wherever either
 /// changes, and in a gap between two chords read the one before goes on. Each piece: its length, the label, the
 /// chord read.
 pub fn line_up(reference: &[Span], estimate: &[Span]) -> Vec<(i64, Label, Label)> {
-    let (Some(first), Some(last)) = (reference.first(), reference.last()) else {
+    let Some((from, to)) = stretch(reference) else {
         return Vec::new();
     };
-    let est = adjust(first.0, last.1, estimate, Label::NO_CHORD);
+    let est = adjust(from, to, estimate, Label::NO_CHORD);
     let mut cuts: Vec<i64> = reference.iter().chain(&est).flat_map(|s| [s.0, s.1]).collect();
     cuts.sort_unstable();
     cuts.dedup();
@@ -459,18 +468,22 @@ pub fn join<K: PartialEq + Copy>(spans: &[(i64, i64, K)]) -> Vec<(i64, i64)> {
 
 #[cfg(test)]
 /// mir_eval's `directional_hamming_distance`: for each reference span, the part not covered by the largest piece the
-/// estimate's boundaries cut it into, summed, over the total length. 0 when every reference span is whole.
+/// estimate's boundaries cut it into, summed, over the reference's stretch. 0 when every reference span is whole.
 pub fn directional_hamming(reference: &[(i64, i64)], estimate: &[(i64, i64)]) -> f64 {
     let (lost, total) = hamming_parts(reference, estimate);
     if total <= 0 { 0.0 } else { lost as f64 / total as f64 }
 }
 
-/// The two numbers [`directional_hamming`] divides: the length lost, and the reference's whole length.
+/// The two numbers [`directional_hamming`] divides: the length lost, and the reference's stretch, from its first
+/// start to its last end, gaps and all (mir_eval's `reference_intervals[-1, 1] - reference_intervals[0, 0]`).
 pub fn hamming_parts(reference: &[(i64, i64)], estimate: &[(i64, i64)]) -> (i64, i64) {
     let mut cuts: Vec<i64> = estimate.iter().flat_map(|&(s, e)| [s, e]).collect();
     cuts.sort_unstable();
     cuts.dedup();
-    let total: i64 = reference.iter().map(|(s, e)| e - s).sum();
+    let total = match (reference.first(), reference.last()) {
+        (Some(first), Some(last)) => last.1 - first.0,
+        _ => 0,
+    };
     let mut lost = 0;
     for &(start, end) in reference {
         let mut points = vec![start];
@@ -576,5 +589,14 @@ mod tests {
         assert_eq!(directional_hamming(&[(0, 10), (10, 20)], &[(0, 5), (5, 20)]), 0.25);
         assert_eq!(directional_hamming(&[(0, 20)], &[(0, 20)]), 0.0);
         assert_eq!(join(&[(0, 4, c), (4, 8, c), (8, 9, g)]), vec![(0, 8), (8, 9)]);
+        // A gap counts in the length divided by, as mir_eval counts it: 5 lost of the 40 from 0 to 40, not of 30.
+        assert_eq!(hamming_parts(&[(0, 10), (10, 20), (30, 40)], &[(0, 5), (5, 40)]), (5, 40));
+        // Labels out of order give the same stretch as in order.
+        assert_eq!(stretch(&[(10, 20, c), (0, 10, g)]), Some((0, 20)));
+        assert_eq!(
+            line_up(&[(10, 20, g), (0, 10, c)], &[(0, 20, c)]).iter().map(|l| l.0).sum::<i64>(),
+            line_up(&[(0, 10, c), (10, 20, g)], &[(0, 20, c)]).iter().map(|l| l.0).sum::<i64>()
+        );
+        assert_eq!(stretch::<Label>(&[]), None);
     }
 }
