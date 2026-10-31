@@ -2823,6 +2823,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mo-midi"
+version = "0.1.0"
+dependencies = [
+ "mo-formats",
+ "mo-library",
+ "rayon",
+ "regex",
+ "rusqlite",
+]
+
+[[package]]
 name = "mo-sounds"
 version = "0.1.0"
 dependencies = [
