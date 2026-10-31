@@ -8,10 +8,9 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::LazyLock;
 
-use chrono::{DateTime, Local};
 use mo_formats::paths::{file_name, stem};
-use mo_formats::plugins::{elektron_device, is_fl_studio_bundled, vst2_id_in};
-use mo_formats::{PluginKind, PluginRef, ProjectInfo, bitwig, fl, studio_one};
+use mo_formats::plugins::{self, elektron_device, is_fl_studio_bundled, vst2_id_in};
+use mo_formats::{PluginKind, PluginRef, ProjectInfo, SampleUse, bitwig, fl, studio_one};
 use regex::Regex;
 
 use crate::samples::SampleLocator;
@@ -21,22 +20,19 @@ use crate::{ProjectPlugin, ProjectSample, Save, SaveDetail};
 /// A plugin's name as the library matches names: lower-case letters and digits only, without the common endings, so
 /// "Serum (x64)" matches "Serum" (the C# app's `NameKey`).
 pub fn name_key(name: &str) -> String {
+    // One pass, as the C# pattern runs. Its last part, "x64" straight after a letter ("Serumx64"), needs a look back
+    // the regex crate doesn't have: the letter is matched too and put back.
     static NOISE: LazyLock<Option<Regex>> = LazyLock::new(|| {
         Regex::new(
-            r"\((x64|x86|64[- ]?bit|32[- ]?bit|vst3?|clap|au|mono|stereo|automap)\)|\b(x64|x86|vst3?|clap)\b|\bvst_(x64|x86)\b|_(x64|x86|64)\b",
+            r"\((x64|x86|64[- ]?bit|32[- ]?bit|vst3?|clap|au|mono|stereo|automap)\)|\b(x64|x86|vst3?|clap)\b|\bvst_(x64|x86)\b|_(x64|x86|64)\b|(?P<letter>[a-z])x64\b",
         )
         .ok()
     });
-    // The C# pattern's last part, "x64" straight after a letter ("Serumx64"), needs a look back the regex crate
-    // doesn't have: the letter is kept and put back.
-    static GLUED: LazyLock<Option<Regex>> = LazyLock::new(|| Regex::new(r"([a-z])x64\b").ok());
-    let mut n = name.to_lowercase();
-    if let Some(re) = NOISE.as_ref() {
-        n = re.replace_all(&n, "").into_owned();
-    }
-    if let Some(re) = GLUED.as_ref() {
-        n = re.replace_all(&n, "$1").into_owned();
-    }
+    let n = name.to_lowercase();
+    let n = match NOISE.as_ref() {
+        Some(re) => re.replace_all(&n, |c: &regex::Captures| c.name("letter").map_or("", |l| l.as_str()).to_owned()),
+        None => n.as_str().into(),
+    };
     n.chars().filter(|c| c.is_ascii_lowercase() || c.is_ascii_digit()).collect()
 }
 
@@ -50,6 +46,9 @@ fn is_waves(name: &str, path: &str) -> bool {
 pub struct Installed {
     /// Each installed plugin's [`name_key`].
     pub keys: HashSet<String>,
+    /// Each installed plugin's name, in lower case: a Bitwig project's text is searched for them when it can't be
+    /// read in full.
+    pub names: HashSet<String>,
     /// The ids the plugin scanner found inside plugin files.
     pub ids: HashSet<String>,
     /// The VST2 ids inside Waves shells, which a project may save by its four letters.
@@ -107,12 +106,11 @@ impl Installed {
 /// Reads the project at `path` into a save and its detail, with `installed` saying which plugins are here and
 /// `samples` finding its samples. A file no reader knows gives `None`; one that can't be read gives a save that says
 /// why, as the C# app lists it. Asks the disk, so never on the window's thread.
-pub fn read_save(path: &str, installed: &Installed, samples: &SampleLocator) -> Option<(Save, SaveDetail)> {
+pub fn read_save(path: &str, installed: &Installed, samples: &SampleLocator) -> Option<SaveDetail> {
     let daw = daw_of(path)?;
     let meta = std::fs::metadata(path).ok()?;
     let seconds = mtime(&meta);
-    let modified =
-        DateTime::from_timestamp(seconds, 0).map(|t| t.with_timezone(&Local).naive_local()).unwrap_or_default();
+    let modified = crate::db::local(seconds).unwrap_or_default();
     let mut save = Save {
         path: path.to_owned(),
         name: stem(file_name(path)).to_owned(),
@@ -123,23 +121,35 @@ pub fn read_save(path: &str, installed: &Installed, samples: &SampleLocator) -> 
         mtime: seconds,
         ..Save::default()
     };
-    let read = match daw {
-        "FL Studio" => fl::read(Path::new(path)),
-        "Bitwig Studio" => bitwig::read(Path::new(path)),
-        _ => studio_one::read(Path::new(path)),
-    };
+    // As the C# scanner: the installed plugins' names count as known to Bitwig's text search, beside the ones
+    // every Bitwig has.
+    let known = |name: &str| plugins::is_always_known(name) || installed.names.contains(&name.to_lowercase());
+    let file = Path::new(path);
+    // One file that can't be read must never stop a scan: a reader that trips over a damaged file is caught here
+    // and the file listed with what went wrong.
+    let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match daw {
+        "FL Studio" => fl::read(file),
+        "Bitwig Studio" => std::fs::read(file).map(|raw| match bitwig::Project::open(raw) {
+            Ok(project) => bitwig::read_project(Some(&project), &project.doc.raw, file, &known),
+            Err(raw) => bitwig::read_project(None, &raw, file, &known),
+        }),
+        _ => studio_one::read(file),
+    }));
     let info = match read {
-        Ok(info) => info.dedupe(),
-        Err(e) => {
-            save.error = Some(format!("{e}"));
-            return Some((save.clone(), SaveDetail { save, ..SaveDetail::default() }));
+        Ok(Ok(info)) => info.dedupe(),
+        Ok(Err(e)) => {
+            save.error = Some(e.to_string());
+            return Some(SaveDetail { save, ..SaveDetail::default() });
+        }
+        Err(_) => {
+            save.error = Some("the reader stopped on something it didn't expect in this file".into());
+            return Some(SaveDetail { save, ..SaveDetail::default() });
         }
     };
-    let detail = fill(&mut save, info, installed, samples);
-    Some((save, detail))
+    Some(fill(save, info, installed, samples))
 }
 
-fn fill(save: &mut Save, info: ProjectInfo, installed: &Installed, samples: &SampleLocator) -> SaveDetail {
+fn fill(mut save: Save, info: ProjectInfo, installed: &Installed, samples: &SampleLocator) -> SaveDetail {
     save.tempo = info.tempo;
     save.version = info.version.clone();
     save.confidence = info.confidence;
@@ -165,7 +175,9 @@ fn fill(save: &mut Save, info: ProjectInfo, installed: &Installed, samples: &Sam
         .map(|s| ProjectSample {
             path: s.clone(),
             found: samples.found(s, &save.path),
-            unplayed: info.unplayed.contains_key(s),
+            // Only a sample with no notes at all is "unplayed", as the library keeps it; one whose notes are all
+            // muted still counts as played.
+            unplayed: info.unplayed.get(s) == Some(&SampleUse::NoNotes),
         })
         .collect();
     // Missing ones first, then by path.
@@ -187,7 +199,7 @@ fn fill(save: &mut Save, info: ProjectInfo, installed: &Installed, samples: &Sam
     save.plugin_names = plugins.iter().map(|p| p.name.clone()).collect();
     save.hardware = hardware;
     SaveDetail {
-        save: save.clone(),
+        save,
         title: info.title,
         plugins,
         samples: found,
@@ -227,5 +239,34 @@ mod tests {
         assert!(some.has(&PluginRef { id: "ABCD".into(), ..plugin("Something Else") }));
         assert!(some.has(&PluginRef { format: "Native".into(), ..plugin("Fruity Reverb 2") }));
         assert!(!some.has(&plugin("Gone Synth")));
+    }
+
+    #[test]
+    fn fills_the_save_from_what_the_reader_found() {
+        let mut info = ProjectInfo::new("FL Studio");
+        info.tempo = Some(140.0);
+        info.version = "24.1".into();
+        info.tracks = vec!["Kick".into(), "Bass".into()];
+        info.plugins = vec![
+            PluginRef { kind: PluginKind::Effect, ..plugin("Pro-Q 3") },
+            PluginRef { kind: PluginKind::Instrument, ..plugin("Gone Synth") },
+            PluginRef { kind: PluginKind::Instrument, ..plugin("Digitakt") },
+        ];
+        info.samples = vec!["/nowhere/a.wav".into(), "%FLStudioFactoryData%/b.wav".into(), "/nowhere/c.wav".into()];
+        info.unplayed.insert("/nowhere/a.wav".into(), SampleUse::NoNotes);
+        info.unplayed.insert("/nowhere/c.wav".into(), SampleUse::Muted);
+        let installed = Installed { keys: ["fabfilterproq3".into(), "digitakt".into()].into(), ..Installed::default() };
+        let save = Save { path: "/nowhere/Song.flp".into(), ..Save::default() };
+        let d = fill(save, info, &installed, &SampleLocator::new(Box::new(|_| Vec::new())));
+        assert_eq!((d.save.tempo, d.save.version.as_str(), d.save.track_count), (Some(140.0), "24.1", 2));
+        assert_eq!((d.save.plugin_count, d.save.missing_plugins), (3, 1));
+        assert_eq!((d.save.sample_count, d.save.missing_samples), (3, 2));
+        // Instruments first, then by name; missing samples first.
+        assert_eq!(d.save.plugin_names, ["Digitakt", "Gone Synth", "Pro-Q 3"]);
+        assert_eq!(
+            d.samples.iter().map(|s| (s.found, s.unplayed)).collect::<Vec<_>>(),
+            [(false, true), (false, false), (true, false)]
+        );
+        assert_eq!(d.save.hardware, ["Digitakt"]);
     }
 }

@@ -185,11 +185,16 @@ impl Library {
     pub fn installed(&self) -> Result<Installed, LibraryError> {
         let mut installed = Installed::default();
         if self.has("installed_plugins") {
-            let mut st = self.conn.prepare("SELECT name_key FROM installed_plugins")?;
-            installed.keys = st.query_map([], |r| Ok(text(r, "name_key")))?.collect::<Result<_, _>>()?;
+            let mut st = self.conn.prepare("SELECT name, name_key FROM installed_plugins")?;
+            let rows: Vec<(String, String)> =
+                st.query_map([], |r| Ok((text(r, "name"), text(r, "name_key"))))?.collect::<Result<_, _>>()?;
+            for (name, key) in rows {
+                installed.names.insert(name.to_lowercase());
+                installed.keys.insert(key);
+            }
         }
         if self.has("scanned_plugins") {
-            let mut st = self.conn.prepare("SELECT id, path FROM scanned_plugins WHERE id != ''")?;
+            let mut st = self.conn.prepare("SELECT id, path FROM scanned_plugins")?;
             let rows: Vec<(String, String)> =
                 st.query_map([], |r| Ok((text(r, "id"), text(r, "path"))))?.collect::<Result<_, _>>()?;
             installed = installed.with_scans(rows);
@@ -363,7 +368,7 @@ fn int(r: &Row<'_>, col: &str) -> Option<i64> {
 }
 
 /// Unix seconds as local time, as the C# app shows them.
-fn local(seconds: i64) -> Option<NaiveDateTime> {
+pub(crate) fn local(seconds: i64) -> Option<NaiveDateTime> {
     chrono::DateTime::from_timestamp(seconds, 0).map(|t| t.with_timezone(&Local).naive_local())
 }
 

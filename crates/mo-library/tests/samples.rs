@@ -67,7 +67,8 @@ fn reads_a_project_file_into_a_save() {
     // Not a real FL Studio file: it's listed with what's wrong, as the C# app lists one.
     fs::write(&path, b"not an flp").unwrap();
     let path = path.to_str().unwrap();
-    let (save, detail) = read_save(path, &Installed::default(), &SampleLocator::default()).unwrap();
+    let detail = read_save(path, &Installed::default(), &SampleLocator::default()).unwrap();
+    let save = &detail.save;
     assert_eq!((save.name.as_str(), save.daw.as_str(), save.size), ("Night Drive_15", "FL Studio", 10));
     assert_eq!(save.folder, dir.to_str().unwrap());
     assert!(save.mtime > 0 && save.id == 0);

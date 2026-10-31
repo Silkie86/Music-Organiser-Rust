@@ -224,6 +224,18 @@ fn knows_each_files_size_and_date_for_a_scan() {
 
 #[test]
 fn knows_the_installed_plugins() {
-    let lib = Library::open_read_only(&make("installed.db", true)).unwrap();
-    assert!(lib.installed().unwrap().keys.is_empty());
+    let path = make("installed.db", true);
+    assert!(Library::open_read_only(&path).unwrap().installed().unwrap().keys.is_empty());
+    let c = Connection::open(&path).unwrap();
+    c.execute_batch(
+        "INSERT INTO installed_plugins VALUES ('Serum', 'serum'), ('Pro-Q 3', 'proq3');
+         CREATE TABLE scanned_plugins (path TEXT, id TEXT, name TEXT);
+         INSERT INTO scanned_plugins VALUES ('C:\\VST\\Renamed.vst3', 'ABCDEF', 'Renamed'), ('C:\\VST\\x.dll', '', 'x');",
+    )
+    .unwrap();
+    drop(c);
+    let installed = Library::open_read_only(&path).unwrap().installed().unwrap();
+    assert_eq!(installed.keys.len(), 2);
+    assert!(installed.names.contains("pro-q 3"));
+    assert_eq!(installed.ids.iter().collect::<Vec<_>>(), ["ABCDEF"]);
 }
