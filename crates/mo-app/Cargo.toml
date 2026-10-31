@@ -14,3 +14,4 @@ chrono.workspace = true
 mo-formats = { path = "../mo-formats" }
 mo-library = { path = "../mo-library" }
 thread-priority.workspace = true
+rayon.workspace = true

@@ -15,6 +15,24 @@ pub fn spawn<T: Send + 'static>(name: &str, work: impl FnOnce() -> T + Send + 's
     })
 }
 
+/// Runs `work` on the app's pool of low-priority threads, one per core (rule 21), so what it spreads over every core
+/// (rayon's `par_iter`: walking folders, reading many projects) runs there rather than on rayon's own pool at normal
+/// priority. Waits for it, so never call it on the window's thread.
+pub fn on_pool<T: Send>(work: impl FnOnce() -> T + Send) -> T {
+    static POOL: std::sync::LazyLock<Option<rayon::ThreadPool>> = std::sync::LazyLock::new(|| {
+        rayon::ThreadPoolBuilder::new()
+            .thread_name(|i| format!("Background {i}"))
+            .start_handler(|_| lower_priority())
+            .build()
+            .ok()
+    });
+    match POOL.as_ref() {
+        Some(pool) => pool.install(work),
+        // The system wouldn't start the threads: done here instead, still away from the window.
+        None => work(),
+    }
+}
+
 /// Lowers the priority of the thread it's called on. Where the system won't (some Linux set-ups), the thread runs on
 /// as it is.
 pub fn lower_priority() {

@@ -10,9 +10,7 @@ use std::collections::{BTreeSet, HashMap};
 use chrono::{Datelike, Days, NaiveDateTime};
 use mo_formats::case;
 use mo_library::songs::{self, SaveRun, Song};
-use mo_library::{Library, LibraryError, STATUSES, Save, SongChoices};
-
-use crate::shell;
+use mo_library::{STATUSES, Save, SongChoices};
 
 /// The status the Hide archived chip hides.
 pub const ARCHIVED: &str = STATUSES[6];
@@ -321,29 +319,6 @@ pub const DOUBTS_ACROSS_FOLDERS: &str = "song_doubts_across_folders";
 const MOST_DOUBTS: usize = 5000;
 
 impl Songs {
-    /// Reads the saves and groups them into songs. Fix's copies still waiting for Keep or Delete are left out: until
-    /// Keep, the song opens its original. `gap_months` splits a song's saves into runs.
-    pub fn load(library: &Library, gap_months: u32) -> Result<Songs, LibraryError> {
-        let pending = library.pending_fixes()?;
-        let mut saves = library.saves()?;
-        if !pending.is_empty() {
-            saves.retain(|s| !pending.contains(&s.path));
-        }
-        let choices = library.song_choices()?;
-        let tags = library.all_tags()?.into_iter().map(|(t, _)| t).collect();
-        // As the C# app: asked unless Settings turned it off; across folders only when turned on.
-        let asking = (library.setting(ASK_DOUBTS)?.as_deref() != Some("0"))
-            .then(|| library.setting(DOUBTS_ACROSS_FOLDERS).map(|v| v.as_deref() == Some("1")))
-            .transpose()?;
-        let mut songs = Songs::from_saves(&saves, &choices, tags, gap_months, asking);
-        for daw in songs.daws() {
-            if let Some(exe) = library.setting(&shell::daw_exe_key(&daw))?.filter(|e| !e.trim().is_empty()) {
-                songs.daw_exes.insert(daw, exe);
-            }
-        }
-        Ok(songs)
-    }
-
     /// Groups the saves into songs and puts them in order, last saved first. `asking` is whether to look for songs
     /// that may be saves of one (`Some`), and then whether also across folders.
     pub fn from_saves(

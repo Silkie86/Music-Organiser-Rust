@@ -6,15 +6,20 @@
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::mpsc;
+use std::time::Duration;
 
 use chrono::{Local, NaiveDateTime};
 use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
+use mo_app::live::{Live, LiveDetails};
 use mo_app::log;
 use mo_app::shell;
 use mo_app::song_panel::{self as panel, Go, SaveLine as PanelSaveLine, Tab};
 use mo_app::songs::{Entry, Filters, SongRow, Songs, View};
+use mo_library::scan::is_project_file;
 use mo_library::songs::DEFAULT_RUN_GAP_MONTHS;
+use mo_library::watch::{Changes, FolderWatch};
 use mo_library::{Library, STATUSES, SaveDetail};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel};
 
@@ -159,7 +164,14 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
     let weak = app.as_weak();
     let db = path.clone();
     let mut library: Option<Library> = None;
+    let details = LiveDetails::default();
+    let live_details = details.clone();
     let reader = Newest::start("Song panel", move |(asked, id): (u64, i64)| {
+        // A save read while the app was open has its details here, newer than the library's.
+        if let Some(detail) = live_details.lock().ok().and_then(|d| d.get(&id).cloned()) {
+            let _ = weak.upgrade_in_event_loop(move |app| arrived(&app, asked, Ok(Some(detail))));
+            return;
+        }
         // Opened at the first pick and kept; tried again at the next pick if it couldn't be.
         let opened = match library.take() {
             Some(lib) => Ok(lib),
@@ -182,20 +194,123 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
 
     let weak = app.as_weak();
     let started = background::spawn("Songs", move || {
-        let read = Library::open_read_only(&path).and_then(|lib| Songs::load(&lib, DEFAULT_RUN_GAP_MONTHS));
-        let _ = weak.upgrade_in_event_loop(move |app| match read {
-            Ok(songs) => {
-                log::info("Songs", &format!("{} songs from {} saves", songs.rows.len(), songs.saves));
-                show(&app, songs);
-            }
+        let read = Library::open_read_only(&path).and_then(|lib| Live::load(&lib, DEFAULT_RUN_GAP_MONTHS, details));
+        let mut live = match read {
+            Ok(live) => live,
             Err(e) => {
                 log::warning("Songs", &e.to_string());
-                app.global::<SongsData>().set_message(format!("{e}").into());
+                let _ = weak.upgrade_in_event_loop(move |app| {
+                    app.global::<SongsData>().set_message(format!("{e}").into());
+                });
+                return;
             }
-        });
+        };
+        let songs = live.songs();
+        log::info("Songs", &format!("{} songs from {} saves", songs.rows.len(), songs.saves));
+        let _ = weak.upgrade_in_event_loop(move |app| show(&app, songs));
+        watch(&mut live, &weak);
     });
     if let Err(e) = started {
         log::error("Songs", &format!("Couldn't start reading the library: {e}"));
+    }
+}
+
+/// How long the project folders must be quiet before what changed is read: a DAW saves in several steps (the C# app's
+/// wait).
+const WATCH_QUIET: Duration = Duration::from_secs(3);
+
+/// How long after a save couldn't be read it's tried again.
+const RETRY_AFTER: Duration = Duration::from_secs(5);
+
+/// What the page says when the library has no songs.
+const NO_SONGS: &str = "No songs in the library yet.";
+
+/// Watches the project folders while the app is open and keeps the list up to date, on this background thread: each
+/// time saves change, the list is made again and put on the page with a card.
+fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
+    let (tx, rx) = mpsc::channel::<Changes>();
+    let watching = FolderWatch::start(live.roots(), is_project_file, WATCH_QUIET, move |c| {
+        let _ = tx.send(c);
+    });
+    let _watch = match watching {
+        Ok(w) => {
+            log::info("Songs", &format!("Watching {} project folders", w.count()));
+            w
+        }
+        Err(e) => {
+            log::warning("Songs", &format!("Can't watch the project folders: {e}"));
+            return;
+        }
+    };
+    loop {
+        // A save that couldn't be read (still being written, or locked) is tried again after a quiet moment.
+        let changes = match rx.recv_timeout(RETRY_AFTER) {
+            Ok(changes) => changes,
+            Err(mpsc::RecvTimeoutError::Timeout) => match live.retries() {
+                Some(changes) => changes,
+                None => continue,
+            },
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        let updated = live.update(&changes);
+        if updated.is_empty() {
+            continue;
+        }
+        log::info(
+            "Watch",
+            &format!(
+                "Project folders: {} read, {} moved, {} gone ({} changes seen)",
+                updated.read.len(),
+                updated.moved.len(),
+                updated.gone,
+                changes.files.len()
+            ),
+        );
+        let songs = live.songs();
+        let _ = weak.upgrade_in_event_loop(move |app| {
+            show_again(&app, songs);
+            let (title, line) = updated.card();
+            FEED.with(|f| {
+                if let Some(feed) = f.borrow().as_ref() {
+                    feed.start(&title, "").done(&line);
+                }
+            });
+        });
+    }
+}
+
+/// Puts a list made again on the page, keeping the filters, the song picked and its tab.
+fn show_again(app: &AppWindow, songs: Songs) {
+    let data = app.global::<SongsData>();
+    let tab = data.get_tab();
+    let key = PAGE.with(|p| {
+        let p = p.borrow();
+        p.picked.and_then(|i| p.songs.rows.get(i)).map(|r| r.song.key.clone())
+    });
+    data.set_daws(strings(songs.daws().iter().map(String::as_str)));
+    data.set_tags(strings(songs.tags.iter().map(String::as_str)));
+    data.set_message(if songs.rows.is_empty() { NO_SONGS.into() } else { SharedString::new() });
+    let row = key.and_then(|k| songs.rows.iter().position(|r| r.song.key == k));
+    // Read again only when the picked song's newest save changed: a save of another song leaves its panel as it is.
+    let same = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let old = p.picked.and_then(|i| p.songs.rows.get(i)).map(|r| &r.song.latest);
+        let new = row.and_then(|i| songs.rows.get(i)).map(|r| &r.song.latest);
+        let same = matches!((old, new), (Some(a), Some(b)) if a.id == b.id && a.mtime == b.mtime && a.size == b.size
+            && a.file_missing == b.file_missing);
+        p.songs = songs;
+        p.picked = if same { row } else { None };
+        same
+    });
+    refresh(app);
+    if same {
+        data.set_selected(row.map_or(-1, |r| i32::try_from(r).unwrap_or(-1)));
+        fill_panel(app);
+    } else if let Some(row) = row {
+        pick(app, Some(row));
+        data.set_tab(tab);
+    } else {
+        pick(app, None);
     }
 }
 
@@ -205,7 +320,7 @@ pub fn show(app: &AppWindow, songs: Songs) {
     data.set_tabs(strings(Tab::ALL.iter().map(|t| t.name())));
     data.set_daws(strings(songs.daws().iter().map(String::as_str)));
     data.set_tags(strings(songs.tags.iter().map(String::as_str)));
-    data.set_message(if songs.rows.is_empty() { "No songs in the library yet.".into() } else { SharedString::new() });
+    data.set_message(if songs.rows.is_empty() { NO_SONGS.into() } else { SharedString::new() });
     PAGE.with(|p| p.borrow_mut().songs = songs);
     pick(app, None);
     data.set_lines(LINES.with(|l| ModelRc::from(l.clone() as Rc<dyn Model<Data = SongLine>>)));
