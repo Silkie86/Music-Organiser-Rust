@@ -34,7 +34,11 @@ pub fn read_from(path: &Path, max_seconds: f64, from_frame: u64) -> Result<Audio
     let mut f = File::open(path)?;
     let len = f.metadata()?.len();
     let mut magic = [0u8; 4];
-    f.read_exact(&mut magic).map_err(|_| AudioError::Format("Not a WAV or AIFF file".into()))?;
+    // Too short to say what it is: not a sound file. Any other failure (locked, a drive gone) stays a read error.
+    f.read_exact(&mut magic).map_err(|e| match e.kind() {
+        std::io::ErrorKind::UnexpectedEof => AudioError::Format("Not a WAV or AIFF file".into()),
+        _ => AudioError::Io(e),
+    })?;
     f.seek(SeekFrom::Start(0))?;
     match &magic {
         b"RIFF" | b"RF64" => read_wav(&mut f, len, max_seconds, from_frame),
@@ -100,6 +104,11 @@ fn read_wav(f: &mut File, len: u64, max_seconds: f64, from_frame: u64) -> Result
             }
             b"acid" if size >= 24 => {
                 let b = take(f, 24)?;
+                // A chunk the file cuts short is left out rather than read as zeros (which would say "a loop").
+                if b.len() < 24 {
+                    pos = next;
+                    continue;
+                }
                 let flags = u32_le(&b, 0).unwrap_or(0);
                 let root_note = u16_le(&b, 4).unwrap_or(0);
                 let t = f64::from(f32::from_le_bytes(b.get(20..24).and_then(|s| s.try_into().ok()).unwrap_or([0; 4])));
@@ -135,13 +144,15 @@ fn read_wav(f: &mut File, len: u64, max_seconds: f64, from_frame: u64) -> Result
     if format != 1 && !float {
         return Err(AudioError::NotSupported(format!("WAV format {format} isn't PCM")));
     }
+    // Checked before reading, so a kind of sample this can't decode never reads the file's audio first.
+    let sample = sample_reader(bytes, float, false)?;
     let channels = usize::from(channels);
     let frame_bytes = (bytes * channels) as u64;
     let total = length / frame_bytes;
-    let raw = read_frames(f, start_byte, total, from_frame, max_seconds * f64::from(rate), frame_bytes)?;
+    let raw = read_frames(f, len, start_byte, total, from_frame, max_seconds * f64::from(rate), frame_bytes)?;
     Ok(AudioData {
         sample_rate: rate,
-        channels: decode(&raw, channels, bytes, float, false)?,
+        channels: decode(&raw, channels, bytes, sample),
         file_seconds: total as f64 / f64::from(rate),
         embedded_tempo: tempo,
         embedded_root_note: root,
@@ -212,13 +223,14 @@ fn read_aiff(f: &mut File, len: u64, max_seconds: f64, from_frame: u64) -> Resul
     if bytes == 0 {
         return Err(AudioError::NotSupported("Unsupported AIFF bit depth".into()));
     }
+    let sample = sample_reader(bytes, float, !little)?;
     let channels = usize::try_from(channels).unwrap_or(0);
     let frame_bytes = (bytes * channels) as u64;
-    let raw = read_frames(f, start_byte, total, from_frame, max_seconds * rate, frame_bytes)?;
+    let raw = read_frames(f, len, start_byte, total, from_frame, max_seconds * rate, frame_bytes)?;
     Ok(AudioData {
         // C# rounds half to even (Math.Round).
         sample_rate: rate.round_ties_even().min(f64::from(u32::MAX)) as u32,
-        channels: decode(&raw, channels, bytes, float, !little)?,
+        channels: decode(&raw, channels, bytes, sample),
         file_seconds: total as f64 / rate,
         embedded_root_note: root,
         ..AudioData::default()
@@ -242,10 +254,12 @@ fn extended80(b: &[u8]) -> f64 {
 
 // ---- samples ------------------------------------------------------------------------------------------------------
 
-/// Reads the frames to decode: from `from_frame` of `total`, up to `wanted` (truncated, as C# casts it), never more
-/// than [`MOST_BYTES`]. A file that ends early gives the whole frames that are there.
+/// Reads the frames to decode: from `from_frame` of `total`, up to `wanted` (truncated, as C# casts it: below zero or
+/// not a number gives none, endless gives all), never more than [`MOST_BYTES`]. A file that ends early gives the whole
+/// frames that are there.
 fn read_frames(
     f: &mut File,
+    len: u64,
     start_byte: u64,
     total: u64,
     from_frame: u64,
@@ -253,25 +267,30 @@ fn read_frames(
     frame_bytes: u64,
 ) -> Result<Vec<u8>, AudioError> {
     let first = from_frame.min(total);
-    let wanted = if wanted.is_finite() && wanted > 0.0 { wanted as u64 } else { 0 };
+    // `as` saturates: NaN and anything below zero give 0, infinity gives every frame.
+    let wanted = wanted as u64;
     let frames = (total - first).min(wanted).min(MOST_BYTES / frame_bytes);
-    f.seek(SeekFrom::Start(start_byte.saturating_add(first.saturating_mul(frame_bytes))))?;
-    let mut raw = take(f, frames * frame_bytes)?;
+    let at = start_byte.saturating_add(first.saturating_mul(frame_bytes));
+    f.seek(SeekFrom::Start(at))?;
+    let want = frames * frame_bytes;
+    // Room for it all at once (no more than the file holds), so a big read isn't copied as it grows.
+    let mut raw = Vec::with_capacity(usize::try_from(want.min(len.saturating_sub(at))).unwrap_or(0));
+    f.by_ref().take(want).read_to_end(&mut raw)?;
     raw.truncate(raw.len() - raw.len() % frame_bytes as usize);
     Ok(raw)
 }
 
 /// Splits interleaved samples into one list per channel.
-fn decode(raw: &[u8], channels: usize, bytes: usize, float: bool, big: bool) -> Result<Vec<Vec<f32>>, AudioError> {
+fn decode(raw: &[u8], channels: usize, bytes: usize, sample: fn(&[u8]) -> f32) -> Vec<Vec<f32>> {
     let frames = raw.len() / (bytes * channels).max(1);
-    let mut out = vec![Vec::with_capacity(frames); channels];
-    let sample = sample_reader(bytes, float, big)?;
+    // One `with_capacity` each: `vec![v; n]` clones, and a clone doesn't keep the room set aside.
+    let mut out: Vec<Vec<f32>> = (0..channels).map(|_| Vec::with_capacity(frames)).collect();
     for frame in raw.chunks_exact(bytes * channels) {
         for (ch, s) in out.iter_mut().zip(frame.chunks_exact(bytes)) {
             ch.push(sample(s));
         }
     }
-    Ok(out)
+    out
 }
 
 /// How one sample of `bytes` bytes turns into a float from -1 to 1.
