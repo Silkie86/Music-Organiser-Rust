@@ -3039,6 +3039,7 @@ dependencies = [
 name = "mo-theorybench"
 version = "0.1.0"
 dependencies = [
+ "mo-formats",
  "mo-harmony",
  "rayon",
  "serde",

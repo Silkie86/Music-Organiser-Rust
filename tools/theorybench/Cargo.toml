@@ -13,6 +13,7 @@ name = "theorybench"
 path = "src/main.rs"
 
 [dependencies]
+mo-formats = { path = "../../crates/mo-formats" }
 mo-harmony = { path = "../../crates/mo-harmony" }
 rayon.workspace = true
 thread-priority.workspace = true
