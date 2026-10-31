@@ -2800,6 +2800,7 @@ dependencies = [
  "flate2",
  "md-5",
  "mo-formats",
+ "mo-library",
  "rayon",
  "zip",
 ]
