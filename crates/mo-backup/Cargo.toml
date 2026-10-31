@@ -12,6 +12,9 @@ workspace = true
 mo-formats = { path = "../mo-formats" }
 # Sizes, folder walks that leave links alone, and the song Compact list the lean rules come from.
 mo-space = { path = "../mo-space" }
+rayon.workspace = true
+# Each copy is read back and its SHA-256 checked against what was read from your folder.
+sha2 = "0.10"
 
 [dev-dependencies]
 chrono.workspace = true

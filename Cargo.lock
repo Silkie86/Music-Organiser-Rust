@@ -2916,6 +2916,8 @@ dependencies = [
  "chrono",
  "mo-formats",
  "mo-space",
+ "rayon",
+ "sha2",
 ]
 
 [[package]]
