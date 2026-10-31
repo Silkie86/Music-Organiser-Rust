@@ -13,6 +13,7 @@
 //! - [`folder_move`]: moving a plugin's sounds or presets to another drive with a link in their place, and back.
 //! - [`after_move`]: what can happen to a moved folder later (lost links, updates), and putting it right.
 //! - [`admin`]: the administrator step, for folders, links and files Windows guards.
+//! - [`bitwig`]: Bitwig's copies of Library multisamples inside projects, found byte for byte.
 //!
 //! Nothing here touches the window or a database: the app reads what it needs from the library and hands it in, and
 //! every walk is spread over the cores of the pool it's called in (call it in the app's low-priority pool).
@@ -22,6 +23,7 @@
 pub mod admin;
 pub mod after_move;
 pub mod app_files;
+pub mod bitwig;
 pub mod clean;
 pub mod folder_move;
 pub mod plugin_clean;

@@ -5,8 +5,7 @@
 //! [`crate::clean`], which checks every line again and only ever sends things to the Recycle Bin.
 
 use std::collections::HashSet;
-use std::fs::{self, File};
-use std::io::{self, Read};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -17,7 +16,6 @@ use mo_formats::textscan::is_audio_path;
 use mo_library::scan::{daw_of, is_autosave_dir, is_autosave_file, is_inside, is_project_file};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::key;
 use crate::size::{self, Stopped};
@@ -471,7 +469,10 @@ fn same_saves(saves: &[SongSave], newest: &SongSave, stop: &AtomicBool) -> Resul
         if stop.load(Ordering::Relaxed) {
             return Err(Stopped);
         }
-        let hashes: Vec<Option<[u8; 32]>> = set.par_iter().map(|s| hash(Path::new(&s.path)).ok()).collect();
+        let hashes: Vec<Option<[u8; 32]>> = set.par_iter().map(|s| size::file_hash(Path::new(&s.path), stop)).collect();
+        if stop.load(Ordering::Relaxed) {
+            return Err(Stopped);
+        }
         let mut groups: Vec<([u8; 32], Vec<&SongSave>)> = Vec::new();
         for (s, h) in set.iter().zip(hashes) {
             let Some(h) = h else { continue };
@@ -508,19 +509,4 @@ fn newest_of<'a>(saves: &[&'a SongSave]) -> Option<&'a SongSave> {
         Some(b) if b.modified >= s.modified => Some(b),
         _ => Some(s),
     })
-}
-
-/// A file's SHA-256, read once in large pieces.
-fn hash(path: &Path) -> io::Result<[u8; 32]> {
-    let mut file = File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 1 << 20];
-    loop {
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(buf.get(..n).unwrap_or_default());
-    }
-    Ok(hasher.finalize().into())
 }
