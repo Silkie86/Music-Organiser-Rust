@@ -2795,6 +2795,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mo-audio"
+version = "0.1.0"
+dependencies = [
+ "symphonia",
+]
+
+[[package]]
 name = "mo-convert"
 version = "0.1.0"
 dependencies = [
@@ -2803,13 +2810,6 @@ dependencies = [
  "mo-formats",
  "rayon",
  "zip",
-]
-
-[[package]]
-name = "mo-audio"
-version = "0.1.0"
-dependencies = [
- "symphonia",
 ]
 
 [[package]]
