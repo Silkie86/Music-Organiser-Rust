@@ -12,11 +12,12 @@
 //! the step's word for it.
 //!
 //! The app's start-up hands what it was started with to [`run_step`] before anything else, and stops when it says so.
+//! Until it does, Windows is never asked: the copy started as administrator wouldn't know the step.
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
@@ -24,8 +25,8 @@ use sha2::{Digest, Sha256};
 use crate::after_move::relink;
 use crate::clean::{Bin, NEEDS_ADMIN, SystemBin};
 use crate::folder_move::{CantMove, leads_to, swap, unswap};
-use crate::key;
 use crate::size::is_link;
+use crate::{is_dir, key, not_there, real_path, text};
 
 /// The flag the app is started with to rename or link a folder Windows guards: `--move-folder swap|unswap|relink
 /// <list> <result> <fingerprint>`.
@@ -35,8 +36,14 @@ pub const MOVE_FOLDER: &str = "--move-folder";
 /// <fingerprint>`.
 pub const RECYCLE_BIN: &str = "--recycle-bin";
 
-/// What the step says when even administrator rights weren't enough.
-const EVEN_AS_ADMIN: &str = "Windows wouldn't allow it even as administrator.";
+/// What the step says when even administrator rights weren't enough. Windows says no to administrators too while a
+/// program has something inside open, so that's the likely reason.
+const EVEN_AS_ADMIN: &str = "Windows said no even as administrator, so something is probably using it: close your DAW, \
+                             the plugin and any window showing it, then try again.";
+
+/// Set once the app's start-up has handed what it was started with to [`run_step`]. Only then would the copy started
+/// as administrator do the step (rather than open the whole app, hidden), so only then is Windows asked.
+static READY: AtomicBool = AtomicBool::new(false);
 
 /// Windows' administrator question. The app uses [`AsAdmin`]; tests stand in one that doesn't ask anybody.
 pub trait Admin: Sync {
@@ -52,12 +59,15 @@ pub struct AsAdmin;
 
 impl Admin for AsAdmin {
     fn can_ask(&self) -> bool {
-        cfg!(windows)
+        cfg!(windows) && READY.load(Ordering::Relaxed)
     }
 
     fn ask(&self, args: &[String]) -> Result<(), String> {
         if !cfg!(windows) {
             return Err("Only Windows has this administrator step.".to_owned());
+        }
+        if !READY.load(Ordering::Relaxed) {
+            return Err("The app's start-up doesn't run the administrator step, so Windows wasn't asked.".to_owned());
         }
         let exe = std::env::current_exe().map_err(|_| "The app couldn't find itself to ask Windows.".to_owned())?;
         let out = ask_command(&exe, args)
@@ -83,13 +93,16 @@ impl Admin for NoAdmin {
 /// The command that starts the app again as administrator and waits for it: PowerShell's `Start-Process -Verb RunAs`,
 /// which asks Windows' question the way Explorer does. The program and what it's started with reach it as settings,
 /// never as part of the script, so nothing in them can run as a command. It says how it went on one line: `ended`,
-/// `said no`, or `not started: why`.
+/// `said no`, or `not started: why`. Windows PowerShell's `Start-Process` passes on Windows' "cancelled by the user"
+/// only as text, so that's recognised by Windows' own wording of it, in whatever language Windows speaks.
 fn ask_command(exe: &Path, args: &[String]) -> std::process::Command {
     const SCRIPT: &str = "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; \
         try { Start-Process -FilePath $env:MO_ADMIN_FILE -ArgumentList $env:MO_ADMIN_ARGS -Verb RunAs \
         -WindowStyle Hidden -Wait -ErrorAction Stop; 'ended' } \
         catch { $e = $_.Exception; $no = $false; \
-        while ($e) { if ($e.NativeErrorCode -eq 1223) { $no = $true }; $e = $e.InnerException }; \
+        $c = (New-Object System.ComponentModel.Win32Exception 1223).Message; \
+        while ($e) { if ($e.NativeErrorCode -eq 1223 -or $e.Message.Contains($c)) { $no = $true }; \
+        $e = $e.InnerException }; \
         if ($no) { 'said no' } else { 'not started: ' + $_.Exception.Message } }";
     // Windows' own PowerShell, never one that happens to sit beside the app or earlier on the PATH.
     let windows = std::env::var_os("SystemRoot").map_or_else(|| PathBuf::from("C:\\Windows"), PathBuf::from);
@@ -158,18 +171,25 @@ pub(crate) enum Step {
     Unswap,
     /// `at`, `target`: the link at `at` leads to `target` instead.
     Relink,
-    /// `path`: it goes to the Recycle Bin.
+    /// `path`, `stamp`: it goes to the Recycle Bin, if it still holds what it did when the app checked it ([`stamp`]).
     Bin,
 }
 
 impl Step {
+    const ALL: [Step; 4] = [Step::Swap, Step::Unswap, Step::Relink, Step::Bin];
+
+    /// What the app is started with for this step, before the list, the result and the fingerprint.
+    fn flags(self) -> &'static [&'static str] {
+        match self {
+            Step::Swap => &[MOVE_FOLDER, "swap"],
+            Step::Unswap => &[MOVE_FOLDER, "unswap"],
+            Step::Relink => &[MOVE_FOLDER, "relink"],
+            Step::Bin => &[RECYCLE_BIN],
+        }
+    }
+
     fn args(self, list: &Path, result: &Path, fingerprint: String) -> Vec<String> {
-        let mut args = match self {
-            Step::Swap => vec![MOVE_FOLDER.to_owned(), "swap".to_owned()],
-            Step::Unswap => vec![MOVE_FOLDER.to_owned(), "unswap".to_owned()],
-            Step::Relink => vec![MOVE_FOLDER.to_owned(), "relink".to_owned()],
-            Step::Bin => vec![RECYCLE_BIN.to_owned()],
-        };
+        let mut args: Vec<String> = self.flags().iter().map(|f| (*f).to_owned()).collect();
         args.extend([text(list), text(result), fingerprint]);
         args
     }
@@ -183,6 +203,26 @@ pub(crate) enum Outcome {
     Kept(String),
     /// Something changed part way and things aren't as they were: what to do about it.
     Halfway(String),
+}
+
+/// Why line `n` of a step isn't as asked: what the step said of it, why the step didn't run (you said no), or
+/// `otherwise`. Callers look at what's there first: this is only for saying why.
+pub(crate) fn reason(said: &Result<Vec<Outcome>, String>, n: usize, otherwise: &str) -> String {
+    match said.as_ref().map(|s| s.get(n)) {
+        Err(why) => why.clone(),
+        Ok(Some(Outcome::Kept(why) | Outcome::Halfway(why))) => why.clone(),
+        Ok(_) => otherwise.to_owned(),
+    }
+}
+
+/// A path with its folder's links worked out (not a link it is itself): what the step is handed, so that its check
+/// that nothing on the way is a link holds for the folder you meant, even one you reach through a link.
+pub(crate) fn real_spot(path: &str) -> String {
+    let p = Path::new(path);
+    match (p.parent().and_then(|f| real_path(&text(f))), p.file_name()) {
+        (Some(folder), Some(name)) => text(&Path::new(&folder).join(name)),
+        _ => path.to_owned(),
+    }
 }
 
 /// Runs a step as administrator for `lines` (each a list of fields) and says how each went, in the same order. Writes
@@ -215,22 +255,27 @@ pub(crate) fn ask_for(admin: &dyn Admin, step: Step, lines: &[Vec<String>]) -> R
         .collect())
 }
 
-/// A list and a result file in your Temp folder, under names no other run uses.
+/// A list and a result file in your Temp folder, under names no other run uses. The folder is named as it really is
+/// (Windows can give Temp's short name, `JOSMIT~1`), as the step checks there's no link on the way to the result.
 fn temp_names() -> (PathBuf, PathBuf) {
     static COUNT: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
     let name = format!("mo-admin-{}-{nanos}-{}", std::process::id(), COUNT.fetch_add(1, Ordering::Relaxed));
     let temp = std::env::temp_dir();
+    let temp = real_path(&text(&temp)).map_or(temp, PathBuf::from);
     (temp.join(format!("{name}.txt")), temp.join(format!("{name}-result.txt")))
 }
 
 /// Writes the list of what the step is to do, as a new file (never over one), and returns its fingerprint to start
-/// the step with.
+/// the step with. A list that couldn't be written whole doesn't stay.
 pub fn write_list(path: &Path, lines: &[String]) -> io::Result<String> {
     let bytes: Vec<u8> = lines.iter().flat_map(|l| l.bytes().chain(std::iter::once(b'\n'))).collect();
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
-    file.write_all(&bytes)?;
-    file.sync_all()?;
+    if let Err(e) = file.write_all(&bytes).and_then(|()| file.sync_all()) {
+        drop(file);
+        let _ = fs::remove_file(path);
+        return Err(e);
+    }
     Ok(fingerprint(&bytes))
 }
 
@@ -245,7 +290,40 @@ pub fn read_list(path: &Path, fingerprint_was: &str) -> io::Result<Option<Vec<St
 }
 
 fn fingerprint(bytes: &[u8]) -> String {
-    Sha256::digest(bytes).iter().map(|b| format!("{b:02X}")).collect()
+    hex(&Sha256::digest(bytes))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02X}")).collect()
+}
+
+/// What a file or folder holds now, as a fingerprint: for a folder each file, folder and link inside it (by name, with
+/// each file's size and time and where each link leads), for a file its size and time. The app takes it just before
+/// Windows asks and the step takes it again before binning, so what goes is what the app checked. `None` when some of
+/// it can't be read.
+pub(crate) fn stamp(path: &Path) -> Option<String> {
+    let mut hash = Sha256::new();
+    let mut todo = vec![(path.to_path_buf(), String::new())];
+    while let Some((at, rel)) = todo.pop() {
+        let meta = fs::symlink_metadata(&at).ok()?;
+        if meta.file_type().is_symlink() {
+            hash.update(format!("link\t{rel}\t{}\n", text(&fs::read_link(&at).ok()?)));
+        } else if meta.is_dir() {
+            hash.update(format!("folder\t{rel}\n"));
+            let mut names =
+                fs::read_dir(&at).ok()?.map(|e| e.map(|e| e.file_name())).collect::<io::Result<Vec<_>>>().ok()?;
+            // Last first, so they're taken in name order.
+            names.sort_unstable_by(|a, b| b.cmp(a));
+            for name in names {
+                let inner = format!("{rel}/{}", name.to_string_lossy());
+                todo.push((at.join(name), inner));
+            }
+        } else {
+            let time = meta.modified().ok()?.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+            hash.update(format!("file\t{rel}\t{}\t{time}\n", meta.len()));
+        }
+    }
+    Some(hex(&hash.finalize()))
 }
 
 /// One line of how the step went: the line's first field, then `done`, `kept` or `halfway`, then what it said.
@@ -276,26 +354,24 @@ fn read_outcome(line: &str) -> Option<(String, Outcome)> {
 /// starts as usual). It never shows a window. Started with the flag but not as the app starts it, or with a list that
 /// was changed, it does nothing at all.
 pub fn run_step(args: &[String]) -> bool {
+    READY.store(true, Ordering::Relaxed);
     run_step_with(args, &SystemBin)
 }
 
 /// [`run_step`], with the bin files go to (tests stand in a folder for the Recycle Bin).
 pub fn run_step_with(args: &[String], bin: &dyn Bin) -> bool {
-    let (step, rest) = match args {
-        [flag, rest @ ..] if flag == RECYCLE_BIN => (Step::Bin, rest),
-        [flag, name, rest @ ..] if flag == MOVE_FOLDER => match name.as_str() {
-            "swap" => (Step::Swap, rest),
-            "unswap" => (Step::Unswap, rest),
-            "relink" => (Step::Relink, rest),
-            _ => return true,
-        },
-        [flag, ..] if flag == MOVE_FOLDER => return true,
-        _ => return false,
-    };
-    let [list, result, fingerprint_was] = rest else { return true };
+    if !args.first().is_some_and(|a| a == MOVE_FOLDER || a == RECYCLE_BIN) {
+        return false;
+    }
+    let starts = |flags: &[&str]| args.len() >= flags.len() && args.iter().zip(flags).all(|(a, f)| a == f);
+    let Some(step) = Step::ALL.into_iter().find(|s| starts(s.flags())) else { return true };
+    let [list, result, fingerprint_was] = &args[step.flags().len()..] else { return true };
     let Ok(Some(lines)) = read_list(Path::new(list), fingerprint_was) else { return true };
-    // How it went goes only into a new file. The file is made before anything is done, so when it can't be (something
-    // is there already), nothing is.
+    // How it went goes only into a new file, and not through a link (as administrator, that could be anywhere). The
+    // file is made before anything is done, so when it can't be (something is there already), nothing is.
+    if plain(result).is_err() {
+        return true;
+    }
     let Ok(file) = OpenOptions::new().write(true).create_new(true).open(result) else { return true };
     let mut out = BufWriter::new(file);
     for line in &lines {
@@ -313,7 +389,7 @@ fn do_line(step: Step, fields: &[&str], bin: &dyn Bin) -> Outcome {
         (Step::Swap, [from, to, aside]) => swap_here(from, to, aside),
         (Step::Unswap, [from, restore, to]) => unswap_here(from, restore, to),
         (Step::Relink, [at, target]) => relink_here(at, target),
-        (Step::Bin, [path]) => bin_here(path, bin),
+        (Step::Bin, [path, stamp]) => bin_here(path, stamp, bin),
         _ => Err("The list wasn't as the app writes it.".to_owned()),
     };
     checked.unwrap_or_else(Outcome::Kept)
@@ -353,13 +429,17 @@ fn relink_here(at: &str, target: &str) -> Result<Outcome, String> {
     })
 }
 
-fn bin_here(path: &str, bin: &dyn Bin) -> Result<Outcome, String> {
+fn bin_here(path: &str, stamp_was: &str, bin: &dyn Bin) -> Result<Outcome, String> {
     plain(path)?;
-    match fs::symlink_metadata(path) {
+    if not_there(Path::new(path)) {
         // Gone already: nothing to do.
-        Err(_) => return Ok(Outcome::Done),
-        Ok(m) if m.file_type().is_symlink() => return Err(format!("{path} is a link now, so it was left alone.")),
-        Ok(_) => {}
+        return Ok(Outcome::Done);
+    }
+    if is_link(Path::new(path)) {
+        return Err(format!("{path} is a link now, so it was left alone."));
+    }
+    if stamp(Path::new(path)).as_deref() != Some(stamp_was) {
+        return Err(format!("{path} isn't as it was when the app checked it, so it was left alone."));
     }
     Ok(match bin.send(Path::new(path)) {
         Ok(()) => Outcome::Done,
@@ -396,14 +476,6 @@ fn beside(path: &str, beside: &str) -> Result<(), String> {
         (Some(a), Some(b)) if a == b => Ok(()),
         _ => Err(format!("{path} isn't beside {beside}, so it was left alone.")),
     }
-}
-
-fn is_dir(path: &str) -> bool {
-    fs::metadata(path).is_ok_and(|m| m.is_dir())
-}
-
-fn text(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
 }
 
 #[cfg(test)]

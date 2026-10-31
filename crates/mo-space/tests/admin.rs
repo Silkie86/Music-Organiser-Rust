@@ -119,6 +119,14 @@ fn a_path_reached_through_a_link_is_left_alone() {
     assert_eq!(real(&through), real(&a));
     let said = fs::read_to_string(&result).unwrap();
     assert!(said.contains("\tkept\t") && said.contains("reached through a link"), "{said}");
+
+    // Where it says how it went is reached through a link: nothing is done, and nothing written there.
+    let (list, through_result) = (dir.join("list 2.txt"), dir.join("Plugins").join("result.txt"));
+    let at = real_folder.join("Link");
+    let fingerprint = write_list(&list, &[format!("{}\t{}", s(&at), s(&b))]).unwrap();
+    assert!(run_step(&strings(&[MOVE_FOLDER, "relink", &s(&list), &s(&through_result), &fingerprint])));
+    assert!(!through_result.exists());
+    assert_eq!(real(&at), real(&a));
 }
 
 /// Folders Windows guards, stood in for by folders the test locks (only Unix has the locks the test uses).
@@ -200,6 +208,8 @@ mod guarded {
         asked: AtomicUsize,
         no: bool,
         bin: Option<FolderBin>,
+        /// A file something saves while Windows asks.
+        saved_meanwhile: Option<PathBuf>,
     }
 
     impl Unlock {
@@ -209,6 +219,7 @@ mod guarded {
                 asked: AtomicUsize::new(0),
                 no: false,
                 bin: None,
+                saved_meanwhile: None,
             }
         }
 
@@ -225,6 +236,9 @@ mod guarded {
             self.asked.fetch_add(1, Ordering::SeqCst);
             if self.no {
                 return Err("You said no to Windows' administrator question.".to_owned());
+            }
+            if let Some(saved) = &self.saved_meanwhile {
+                fs::write(saved, "saved meanwhile").unwrap();
             }
             self.locked.iter().for_each(|d| lock(d, false));
             let ran = match &self.bin {
@@ -265,6 +279,18 @@ mod guarded {
         }
         fn admin(&self) -> &dyn Admin {
             self.0
+        }
+    }
+
+    /// The same drive.
+    struct SameDrive;
+
+    impl Drives for SameDrive {
+        fn same(&self, _a: &Path, _b: &Path) -> bool {
+            true
+        }
+        fn free(&self, _path: &Path) -> Option<u64> {
+            None
         }
     }
 
@@ -348,6 +374,15 @@ mod guarded {
         let said = move_it(&OtherDrive(&NoAdmin)).unwrap_err();
         assert_eq!(said, mo_space::folder_move::CantMove::NeedsAdmin);
         assert!(!d.join("Spectrasonics").exists());
+
+        // Allowed, but Windows says no even then (the DAW has a file in it open): it says to close it.
+        let in_use = Unlock::new(&[]);
+        let said = move_it(&OtherDrive(&in_use)).unwrap_err().text();
+        assert!(said.contains("even as administrator") && said.contains("close your DAW"), "{said}");
+        assert!(said.ends_with("Nothing was moved."), "{said}");
+        assert_eq!(in_use.asked(), 1);
+        assert!(!d.join("Spectrasonics").exists());
+        assert_eq!(fs::read_to_string(from.join("Pad.db")).unwrap(), "pad");
         lock(&guarded, false);
     }
 
@@ -362,11 +397,15 @@ mod guarded {
         write(&data, "Spectrasonics/Pad.db", "pad");
         write(&data, "Toontrack/Kit.db", "kit");
         fs::create_dir_all(&guarded).unwrap();
+        // Toontrack's move was made through a link to the folder Windows guards: the step is handed the real place.
+        let through = dir.join("PD");
+        folder_link(&guarded, &through);
         let mut all = Vec::new();
         for name in ["Spectrasonics", "Toontrack"] {
             folder_link(&data.join(name), &guarded.join(name));
+            let from = if name == "Toontrack" { through.join(name) } else { guarded.join(name) };
             all.push(mo_space::folder_move::MovedFolder {
-                from: s(&guarded.join(name)),
+                from: s(&from),
                 to: s(&data.join(name)),
                 old_copy: s(&guarded.join(format!("{name} (old copy)"))),
                 bytes: 3,
@@ -423,6 +462,17 @@ mod guarded {
         assert_eq!(kept.problems[0].why, "You said no to Windows' administrator question.");
         assert!(old_copy.exists());
 
+        // Something saves into it while Windows asks: the step sees it isn't what was checked, and leaves it.
+        let saved = old_copy.join("User.db");
+        let meanwhile =
+            Unlock { bin: Some(bin.twin()), saved_meanwhile: Some(saved.clone()), ..Unlock::new(&[&guarded]) };
+        bin.admin = Some(Box::new(meanwhile));
+        let kept = mo_space::folder_move::remove_old_copy(&moved, &all, true, &bin, &stop);
+        assert!(kept.removed.is_empty());
+        assert!(kept.problems[0].why.contains("isn't as it was when the app checked it"), "{:?}", kept.problems);
+        assert!(saved.exists());
+        fs::remove_file(&saved).unwrap();
+
         // Asked and allowed: it goes to the bin, and the bin knows it.
         bin.admin = Some(Box::new(Unlock { bin: Some(bin.twin()), ..Unlock::new(&[&guarded]) }));
         let done = mo_space::folder_move::remove_old_copy(&moved, &all, false, &bin, &stop);
@@ -432,5 +482,98 @@ mod guarded {
         assert!(!old_copy.exists());
         assert_eq!(bin.admin.as_deref().map(Unlock::asked), Some(1));
         lock(&guarded, false);
+    }
+
+    #[test]
+    fn a_folder_inside_one_that_stays_after_all_is_tried_on_its_own() {
+        use mo_space::plugin_clean::{Library, PluginUse, apply, lines};
+        use mo_space::plugin_space::{PluginSpace, SpaceFolder, SpaceKind};
+        use std::collections::HashMap;
+
+        let dir = fixtures("mo-space-admin-plugin-clean");
+        if !locking_works(&dir) {
+            return;
+        }
+        // Xfer can't be moved by you (its folder is guarded); Serum Presets, inside it, can.
+        let docs = dir.join("Docs");
+        let make = || {
+            write(&docs, "Xfer/Settings.xml", "x");
+            write(&docs, "Xfer/Serum Presets/Lead.fxp", "lead");
+        };
+        make();
+        let folder = |rel: &str, bytes| SpaceFolder {
+            path: s(&docs.join(rel)),
+            kind: SpaceKind::Presets,
+            bytes,
+            shared_with: Vec::new(),
+            added: false,
+        };
+        let serum = PluginSpace {
+            key: "serum".into(),
+            name: "Serum".into(),
+            vendor: String::new(),
+            folders: vec![folder("Xfer", 1), folder("Xfer/Serum Presets", 4)],
+        };
+        let uses: HashMap<String, PluginUse> =
+            [("serum".to_owned(), PluginUse { projects: 0, unused: true })].into_iter().collect();
+        let names = |k: &str| k.to_owned();
+        let library = Library {
+            protected_roots: &[],
+            kept_folders: &[],
+            uses: &uses,
+            sample_at: &|_| None,
+            sample_named: &|_| false,
+            names: &names,
+        };
+        let stop = AtomicBool::new(false);
+        let all = std::slice::from_ref(&serum);
+
+        // You say no: Xfer stays, and Serum Presets, which would have gone with it, goes on its own.
+        let card = lines(&serum, all, &library, &stop).unwrap();
+        lock(&docs, true);
+        let mut bin = FolderBin::new(&dir);
+        bin.admin = Some(Box::new(Unlock { no: true, ..Unlock::new(&[&docs]) }));
+        let done = apply(&card, &serum, all, &library, &bin, &stop);
+        lock(&docs, false);
+        assert_eq!(done.removed.len(), 1, "{done:?}");
+        assert!(done.removed[0].path.ends_with("Serum Presets"));
+        assert_eq!(done.problems.len(), 1);
+        assert!(done.problems[0].path.ends_with("Xfer"));
+        assert_eq!(done.problems[0].why, "You said no to Windows' administrator question.");
+        assert!(done.went_with.is_empty());
+        assert!(docs.join("Xfer/Settings.xml").exists());
+
+        // You say yes: Xfer goes as administrator, and Serum Presets with it.
+        make();
+        let card = lines(&serum, all, &library, &stop).unwrap();
+        lock(&docs, true);
+        let mut bin = FolderBin::new(&dir.join("second"));
+        bin.admin = Some(Box::new(Unlock { bin: Some(bin.twin()), ..Unlock::new(&[&docs]) }));
+        let done = apply(&card, &serum, all, &library, &bin, &stop);
+        lock(&docs, false);
+        assert!(done.problems.is_empty(), "{:?}", done.problems);
+        assert_eq!(done.removed.len(), 1);
+        assert!(done.removed[0].path.ends_with("Xfer"));
+        assert_eq!(done.went_with.len(), 1);
+        assert!(!docs.join("Xfer").exists());
+        assert_eq!(bin.admin.as_deref().map(Unlock::asked), Some(1));
+    }
+
+    #[test]
+    fn the_folder_moved_folders_live_in_says_to_rename_it_in_file_explorer_when_windows_says_no() {
+        let dir = fixtures("mo-space-admin-home");
+        if !locking_works(&dir) {
+            return;
+        }
+        let guarded = dir.join("Guarded");
+        write(&guarded, "Plugin Data/Spectrasonics/Pad.db", "pad");
+        lock(&guarded, true);
+        let stop = AtomicBool::new(false);
+        let home = guarded.join("Plugin Data");
+        let said = mo_space::after_move::move_home(&s(&home), &s(&dir), &[], &[], 3, &SameDrive, &nothing, &stop);
+        lock(&guarded, false);
+        let said = said.unwrap_err().text();
+        assert!(said.contains("rename the folder in File Explorer"), "{said}");
+        assert!(home.join("Spectrasonics/Pad.db").exists());
     }
 }

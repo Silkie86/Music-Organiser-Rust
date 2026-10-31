@@ -11,8 +11,8 @@ use mo_formats::paths::file_name;
 use mo_library::scan::is_inside;
 use serde::{Deserialize, Serialize};
 
-use crate::admin::{Admin, Outcome, Step, ask_for};
-use crate::clean::{Bin, Done, Problem, What, send, send_guarded};
+use crate::admin::{Admin, Step, ask_for, real_spot, reason};
+use crate::clean::{Bin, Done, Problem, Sending, What};
 use crate::folder_move::{
     CantMove, Drives, Fill, MovedFolder, Tree, check_rename, check_rename_or_ask, clear_failed_link, copy_fresh,
     copy_tree, denied, destination_problem, fresh_name, inside_moved, leads_to, link, link_reaches, listed, only_in,
@@ -20,7 +20,7 @@ use crate::folder_move::{
 };
 use crate::plugin_space::{PluginSpace, SpaceKind};
 use crate::size::{self, is_link};
-use crate::{key, real_path};
+use crate::{is_dir, key, real_path, text};
 
 /// The folder a plugin update made where the link was, once it's set aside and the link is back.
 pub const UPDATE_SUFFIX: &str = " (after update)";
@@ -113,14 +113,6 @@ pub fn doubled(moved: &[MovedFolder]) -> Vec<(&MovedFolder, String)> {
 /// A real folder where the link was, and the copy still there.
 fn real_again(m: &MovedFolder) -> bool {
     is_dir(&m.from) && !is_link(Path::new(&m.from)) && is_dir(&m.to)
-}
-
-fn is_dir(path: &str) -> bool {
-    fs::metadata(path).is_ok_and(|m| m.is_dir())
-}
-
-fn text(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
 }
 
 /// Where a path inside a moved folder really is (Reaktor 6's second copy, inside Native Instruments, is on the other
@@ -342,11 +334,10 @@ pub fn remove_old_home(home: &OldHome, moved: &[MovedFolder], sure: bool, bin: &
     }
     let mut done = Done::default();
     let real = real_path(&home.path).unwrap_or_else(|| home.path.clone());
-    let mut guarded = Vec::new();
-    send(&home.path, real, home.bytes, What::Plugin(home.space_kind()), bin, &mut done, &mut guarded);
-    send_guarded(guarded, bin, &mut done);
-    let not_found = bin.find(&mut done.removed);
-    done.problems.extend(not_found);
+    // Checked just now; one Windows guards is checked again by the administrator step, against what it held now.
+    let mut sending = Sending::new(bin);
+    sending.send(&home.path, real, home.bytes, What::Plugin(home.space_kind()), &mut done, || Ok(()));
+    sending.finish(&mut done);
     done
 }
 
@@ -394,13 +385,26 @@ pub fn move_home(
     let to = target(home, destination);
     let new_home = text(&to);
     if drives.same(home_path, Path::new(destination)) {
-        check_rename(home)?;
-        return rename_home(home, &to, moved, homes);
+        check_rename(home).map_err(rename_it_yourself)?;
+        return rename_home(home, &to, moved, homes).map_err(rename_it_yourself);
     }
     copy_fresh(&Tree::new(home_path, &to, &to), progress, stop)?;
     let now = repoint(home, &new_home, moved, homes, drives.admin());
     let old_home = OldHome { path: home.to_owned(), bytes, note: its_old_place(), copy: new_home, kind: 2 };
     Ok(HomeMoved { old_home: Some(old_home), ..now })
+}
+
+/// Renaming the folder the moved folders live in isn't done as administrator (it's yours, on your drive, so Windows
+/// rarely guards it): when Windows says no, File Explorer can do it, and then the links are pointed at it here.
+fn rename_it_yourself(why: CantMove) -> CantMove {
+    match why {
+        CantMove::NeedsAdmin => CantMove::Failed(
+            "Windows said no to renaming it. Close your DAW, the plugins and any window showing the folder, then try \
+             again. If Windows still says no, rename the folder in File Explorer, then point the links at it here."
+                .to_owned(),
+        ),
+        other => other,
+    }
 }
 
 /// The moved folders whose copy is in `old_home`, with where it is in `new_home`.
@@ -588,7 +592,7 @@ pub fn repoint(
             continue;
         }
         let lines: Vec<Vec<String>> =
-            guarded.iter().map(|&n| vec![moved[links[n].0].from.clone(), text(&links[n].1)]).collect();
+            guarded.iter().map(|&n| vec![real_spot(&moved[links[n].0].from), text(&links[n].1)]).collect();
         let said = ask_for(admin, Step::Relink, &lines);
         for (k, &n) in guarded.iter().enumerate() {
             let (i, new_to) = &links[n];
@@ -598,11 +602,8 @@ pub fn repoint(
                 now[*i].to = text(new_to);
                 continue;
             }
-            let why = match said.as_ref().map(|s| s.get(k)) {
-                Err(why) => why.clone(),
-                Ok(Some(Outcome::Kept(why) | Outcome::Halfway(why))) => why.clone(),
-                Ok(_) => format!("After the administrator step, the link still doesn't lead to {}.", text(new_to)),
-            };
+            let otherwise = format!("After the administrator step, the link still doesn't lead to {}.", text(new_to));
+            let why = reason(&said, k, &otherwise);
             problems.push(Problem { path: from.clone(), why });
         }
     }

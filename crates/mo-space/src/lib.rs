@@ -49,6 +49,27 @@ pub fn key(path: &str) -> String {
     }
 }
 
+/// A path as text (anything that isn't Unicode shown as �).
+pub(crate) fn text(path: &std::path::Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+/// A folder is there (a link to one counts).
+pub(crate) fn is_dir(path: &str) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| m.is_dir())
+}
+
+/// A real folder is there, not a link.
+pub(crate) fn real_folder(path: &str) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir())
+}
+
+/// Nothing is there at all, not even a link leading nowhere. A path that can't be looked at isn't counted as gone: it
+/// may well still be there.
+pub(crate) fn not_there(path: &std::path::Path) -> bool {
+    std::fs::symlink_metadata(path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+}
+
 /// Your home folder (`HOME`, or `USERPROFILE` on Windows).
 pub(crate) fn home_folder() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(std::path::PathBuf::from)

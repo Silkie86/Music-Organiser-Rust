@@ -18,11 +18,11 @@ use mo_formats::paths::file_name;
 use mo_library::scan::is_inside;
 use serde::{Deserialize, Serialize};
 
-use crate::admin::{Admin, AsAdmin, NoAdmin, Outcome, Step, ask_for};
-use crate::clean::{Bin, Done, Problem, What, on_network, send, send_guarded};
+use crate::admin::{Admin, AsAdmin, NoAdmin, Outcome, Step, ask_for, real_spot, reason};
+use crate::clean::{Bin, Done, Problem, Sending, What, on_network};
 use crate::plugin_space::SpaceKind;
 use crate::size::{self, is_link, is_online_only, size_text};
-use crate::{key, real_path};
+use crate::{key, not_there, real_folder, real_path, text};
 
 /// What the original is called while its link stands in for it.
 pub const OLD_SUFFIX: &str = " (old copy)";
@@ -730,11 +730,10 @@ pub fn remove_old_copy(moved: &MovedFolder, all: &[MovedFolder], sure: bool, bin
     }
     let mut done = Done::default();
     let real = real_path(&moved.old_copy).unwrap_or_else(|| moved.old_copy.clone());
-    let mut guarded = Vec::new();
-    send(&moved.old_copy, real, moved.bytes, What::Plugin(moved.space_kind()), bin, &mut done, &mut guarded);
-    send_guarded(guarded, bin, &mut done);
-    let not_found = bin.find(&mut done.removed);
-    done.problems.extend(not_found);
+    // Checked just now; one Windows guards is checked again by the administrator step, against what it held now.
+    let mut sending = Sending::new(bin);
+    sending.send(&moved.old_copy, real, moved.bytes, What::Plugin(moved.space_kind()), &mut done, || Ok(()));
+    sending.finish(&mut done);
     done
 }
 
@@ -830,11 +829,11 @@ pub(crate) fn swap_or_ask(from: &str, to: &Path, aside: &str, admin: &dyn Admin)
         Err(CantMove::NeedsAdmin) if admin.can_ask() => {}
         other => return other,
     }
-    let said = ask_for(admin, Step::Swap, &[vec![from.to_owned(), text(to), aside.to_owned()]]);
+    let said = ask_for(admin, Step::Swap, &[vec![real_spot(from), text(to), real_spot(aside)]]);
     if is_link(Path::new(from)) && leads_to(from, to) && real_folder(aside) {
         return Ok(());
     }
-    if real_folder(from) && fs::symlink_metadata(aside).is_err() {
+    if real_folder(from) && not_there(Path::new(aside)) {
         return Err(as_it_was(said, "The administrator step finished, but the folder wasn't swapped."));
     }
     Err(not_as_expected(
@@ -855,8 +854,8 @@ pub(crate) fn unswap_or_ask(from: &str, restore: &str, to: &Path, admin: &dyn Ad
         Err(CantMove::NeedsAdmin) if admin.can_ask() => {}
         other => return other,
     }
-    let said = ask_for(admin, Step::Unswap, &[vec![from.to_owned(), restore.to_owned(), text(to)]]);
-    if real_folder(from) && fs::symlink_metadata(restore).is_err() {
+    let said = ask_for(admin, Step::Unswap, &[vec![real_spot(from), real_spot(restore), text(to)]]);
+    if real_folder(from) && not_there(Path::new(restore)) {
         return Ok(());
     }
     if is_link(Path::new(from)) && leads_to(from, to) && real_folder(restore) {
@@ -876,10 +875,7 @@ pub(crate) fn unswap_or_ask(from: &str, restore: &str, to: &Path, admin: &dyn Ad
 
 /// Nothing changed: why, as the administrator step (or the question) said it.
 fn as_it_was(said: Result<Vec<Outcome>, String>, otherwise: &str) -> CantMove {
-    match said.map(|s| s.into_iter().next()) {
-        Err(why) | Ok(Some(Outcome::Kept(why) | Outcome::Halfway(why))) => CantMove::Failed(why),
-        Ok(_) => CantMove::Failed(otherwise.to_owned()),
-    }
+    CantMove::Failed(reason(&said, 0, otherwise))
 }
 
 /// Things changed, but not as they should have: what the step said about it, or what to look at.
@@ -888,15 +884,6 @@ fn not_as_expected(said: Result<Vec<Outcome>, String>, otherwise: String) -> Can
         Ok(Some(Outcome::Halfway(what))) => CantMove::LeftHalfway(what),
         _ => CantMove::LeftHalfway(otherwise),
     }
-}
-
-/// A real folder there, not a link.
-fn real_folder(path: &str) -> bool {
-    fs::symlink_metadata(path).is_ok_and(|m| m.is_dir())
-}
-
-fn text(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
 }
 
 /// The link goes and `restore` takes its name. If that fails, the link to `to` goes back; if even that fails, says
