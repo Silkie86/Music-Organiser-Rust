@@ -878,7 +878,8 @@ fn as_it_was(said: Result<Vec<Outcome>, String>, otherwise: &str) -> CantMove {
     CantMove::Failed(reason(&said, 0, otherwise))
 }
 
-/// Things changed, but not as they should have: what the step said about it, or what to look at.
+/// Things changed, but not as they should have: what the step said about it, or what to look at. Unlike [`reason`],
+/// only a step's "halfway" says what's where; why it kept something, or why it didn't run, wouldn't explain a change.
 fn not_as_expected(said: Result<Vec<Outcome>, String>, otherwise: String) -> CantMove {
     match said.map(|s| s.into_iter().next()) {
         Ok(Some(Outcome::Halfway(what))) => CantMove::LeftHalfway(what),

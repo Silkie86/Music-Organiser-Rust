@@ -469,7 +469,7 @@ pub(crate) struct Sending<'a> {
     waiting: Vec<(Removed, Again<'a>)>,
     /// Where things the administrator step sent were (keys), for what's said when the bin doesn't have them.
     by_admin: Vec<String>,
-    /// Why the administrator step didn't run (you said no): what's left waiting isn't asked about again.
+    /// Set once Windows has been asked (it asks at most once in a clean-up): why anything else Windows guards stays.
     not_asked: Option<String>,
 }
 
@@ -546,9 +546,12 @@ impl<'a> Sending<'a> {
         }
         let when = now_seconds();
         let said = ask_for(self.bin.admin(), Step::Bin, &lines);
-        if let Err(why) = &said {
-            self.not_asked = Some(why.clone());
-        }
+        self.not_asked = Some(match &said {
+            Err(why) => why.clone(),
+            Ok(_) => "Windows guards this too, and was asked once already in this clean-up: clean up again to be \
+                      asked about it."
+                .to_owned(),
+        });
         for (n, r) in sent.into_iter().enumerate() {
             // What's there now decides, whatever the step said.
             if not_there(Path::new(&r.real)) {

@@ -543,8 +543,24 @@ mod guarded {
         assert!(done.went_with.is_empty());
         assert!(docs.join("Xfer/Settings.xml").exists());
 
-        // You say yes: Xfer goes as administrator, and Serum Presets with it.
+        // You say yes, but even the administrator is refused (the DAW has a file in Xfer open), and Windows guards
+        // Serum Presets too: it stays as well, and Windows isn't asked a second time.
         make();
+        let card = lines(&serum, all, &library, &stop).unwrap();
+        lock(&docs, true);
+        lock(&docs.join("Xfer"), true);
+        let mut bin = FolderBin::new(&dir.join("refused"));
+        bin.admin = Some(Box::new(Unlock { bin: Some(bin.twin()), ..Unlock::new(&[]) }));
+        let done = apply(&card, &serum, all, &library, &bin, &stop);
+        lock(&docs.join("Xfer"), false);
+        lock(&docs, false);
+        assert!(done.removed.is_empty(), "{done:?}");
+        assert_eq!(done.problems.len(), 2);
+        assert!(done.problems[0].why.contains("even as administrator"), "{:?}", done.problems);
+        assert!(done.problems[1].why.contains("asked once already"), "{:?}", done.problems);
+        assert_eq!(bin.admin.as_deref().map(Unlock::asked), Some(1));
+
+        // You say yes: Xfer goes as administrator, and Serum Presets with it.
         let card = lines(&serum, all, &library, &stop).unwrap();
         lock(&docs, true);
         let mut bin = FolderBin::new(&dir.join("second"));

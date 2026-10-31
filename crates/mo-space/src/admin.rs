@@ -14,17 +14,19 @@
 //! The app's start-up hands what it was started with to [`run_step`] before anything else, and stops when it says so.
 //! Until it does, Windows is never asked: the copy started as administrator wouldn't know the step.
 
-use std::fs::{self, OpenOptions};
+use std::fs::{self, Metadata, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
 use crate::after_move::relink;
 use crate::clean::{Bin, NEEDS_ADMIN, SystemBin};
 use crate::folder_move::{CantMove, leads_to, swap, unswap};
+use crate::plugin_clean::made_by_the_system;
 use crate::size::is_link;
 use crate::{is_dir, key, not_there, real_path, text};
 
@@ -299,31 +301,39 @@ fn hex(bytes: &[u8]) -> String {
 
 /// What a file or folder holds now, as a fingerprint: for a folder each file, folder and link inside it (by name, with
 /// each file's size and time and where each link leads), for a file its size and time. The app takes it just before
-/// Windows asks and the step takes it again before binning, so what goes is what the app checked. `None` when some of
-/// it can't be read.
+/// Windows asks and the step takes it again before binning, so what goes is what the app checked. As in the plugin
+/// clean-up's own look, the files Finder and Explorer make by themselves when you open a folder don't count, and a
+/// folder counts by its name only. `None` when some of it can't be read: then it stays, as the step could only check
+/// what the app could.
 pub(crate) fn stamp(path: &Path) -> Option<String> {
+    let meta = fs::symlink_metadata(path).ok()?;
+    Some(hex(&part_stamp(path, "", &meta)?))
+}
+
+/// One file, folder or link's part of a [`stamp`]. A folder's takes in what's inside it in name order, each part
+/// worked out over the cores of the pool it's called in.
+fn part_stamp(path: &Path, rel: &str, meta: &Metadata) -> Option<[u8; 32]> {
     let mut hash = Sha256::new();
-    let mut todo = vec![(path.to_path_buf(), String::new())];
-    while let Some((at, rel)) = todo.pop() {
-        let meta = fs::symlink_metadata(&at).ok()?;
-        if meta.file_type().is_symlink() {
-            hash.update(format!("link\t{rel}\t{}\n", text(&fs::read_link(&at).ok()?)));
-        } else if meta.is_dir() {
-            hash.update(format!("folder\t{rel}\n"));
-            let mut names =
-                fs::read_dir(&at).ok()?.map(|e| e.map(|e| e.file_name())).collect::<io::Result<Vec<_>>>().ok()?;
-            // Last first, so they're taken in name order.
-            names.sort_unstable_by(|a, b| b.cmp(a));
-            for name in names {
-                let inner = format!("{rel}/{}", name.to_string_lossy());
-                todo.push((at.join(name), inner));
-            }
-        } else {
-            let time = meta.modified().ok()?.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-            hash.update(format!("file\t{rel}\t{}\t{time}\n", meta.len()));
-        }
+    if meta.file_type().is_symlink() {
+        hash.update(format!("link\t{rel}\t{}\n", text(&fs::read_link(path).ok()?)));
+    } else if meta.is_dir() {
+        hash.update(format!("folder\t{rel}\n"));
+        // On Windows what each entry is comes with the folder listing itself, so no file is opened.
+        let mut inside = fs::read_dir(path)
+            .ok()?
+            .map(|e| e.and_then(|e| Ok((e.file_name().to_string_lossy().into_owned(), e.path(), e.metadata()?))))
+            .collect::<io::Result<Vec<_>>>()
+            .ok()?;
+        inside.retain(|(name, _, m)| !(m.is_file() && made_by_the_system(name)));
+        inside.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        let parts: Vec<[u8; 32]> =
+            inside.par_iter().map(|(name, p, m)| part_stamp(p, &format!("{rel}/{name}"), m)).collect::<Option<_>>()?;
+        parts.iter().for_each(|part| hash.update(part));
+    } else {
+        let time = meta.modified().ok()?.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        hash.update(format!("file\t{rel}\t{}\t{time}\n", meta.len()));
     }
-    Some(hex(&hash.finalize()))
+    Some(hash.finalize().into())
 }
 
 /// One line of how the step went: the line's first field, then `done`, `kept` or `halfway`, then what it said.

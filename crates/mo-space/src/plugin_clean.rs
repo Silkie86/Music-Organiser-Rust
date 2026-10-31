@@ -139,7 +139,7 @@ impl Look {
 }
 
 /// Files the computer makes in a folder by itself when you look at it (Finder, Explorer).
-fn made_by_the_system(name: &str) -> bool {
+pub(crate) fn made_by_the_system(name: &str) -> bool {
     const NAMES: [&str; 5] = [".DS_Store", "desktop.ini", "Thumbs.db", "ehthumbs.db", "Icon\r"];
     NAMES.iter().any(|n| n.eq_ignore_ascii_case(name)) || name.starts_with("._")
 }
@@ -605,7 +605,8 @@ pub fn apply(
     let check = &check;
     let mut sending = Sending::new(bin);
     // Rounds: a folder inside one waiting for Windows' administrator question waits for how that goes. If the outer one
-    // goes, it went with it; if it stays (you said no), it's tried on its own in the next round.
+    // goes, it went with it; if it stays (you said no), it's tried on its own in the next round, and if Windows guards
+    // it too it stays as well: Windows isn't asked twice in one clean-up.
     while !todo.is_empty() {
         let (mut went, mut waits): (Vec<&str>, Vec<&str>) = (Vec::new(), Vec::new());
         let mut inside_waiting = Vec::new();
