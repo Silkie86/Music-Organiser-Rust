@@ -134,9 +134,11 @@ pub fn find(
     spare
 }
 
-/// Whether two families are the same plugin: equal, or one inside the other when both are at least four letters.
+/// Whether two families are the same plugin: equal, or one with its maker in front of the other ("fabfilterproq" and
+/// "proq") when both are at least four letters. C# took one anywhere inside the other, which gave "Serum FX" Serum's
+/// projects.
 fn close(a: &str, b: &str) -> bool {
-    a == b || (a.chars().count() >= 4 && b.chars().count() >= 4 && (a.contains(b) || b.contains(a)))
+    a == b || (a.chars().count() >= 4 && b.chars().count() >= 4 && (a.ends_with(b) || b.ends_with(a)))
 }
 
 #[cfg(test)]
@@ -184,6 +186,16 @@ mod tests {
         );
         // With Pro Tools, AAX copies are in use.
         assert_eq!(find(&files, &used, true, |_| 0).len(), 2);
+    }
+
+    #[test]
+    fn a_plugin_named_inside_another_isnt_that_one() {
+        let files =
+            [file("Serum FX", "VST2"), file("Serum FX", "VST3"), file("Pro-Q 3", "VST2"), file("Pro-Q 3", "VST3")];
+        let used = used(&[("Serum", &[("VST3", 4)]), ("FabFilter Pro-Q 3", &[("VST3", 2)])]);
+        let spare = find(&files, &used, false, |_| 0);
+        let names: Vec<(&str, &str)> = spare.iter().map(|s| (s.name.as_str(), s.format.as_str())).collect();
+        assert_eq!(names, [("Pro-Q 3", "VST2")]);
     }
 
     #[test]

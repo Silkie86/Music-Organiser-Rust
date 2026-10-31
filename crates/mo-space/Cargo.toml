@@ -22,5 +22,9 @@ trash = "5.2"
 # How much room a drive has left.
 fs4 = "1.1"
 
+# Where Windows keeps Documents, ProgramData and the rest, even when you've moved them.
+[target.'cfg(windows)'.dependencies]
+known-folders = "1.4"
+
 [dev-dependencies]
 serde_json = "1"

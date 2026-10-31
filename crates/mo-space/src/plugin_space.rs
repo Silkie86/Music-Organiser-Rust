@@ -15,9 +15,9 @@ use mo_formats::paths::file_name;
 use mo_library::read::name_key;
 use mo_library::scan::is_inside;
 
-use crate::key;
-use crate::plugins::{InstalledPlugin, family};
+use crate::plugins::{InstalledPlugin, family, norm};
 use crate::size::{self, Measured, Stopped};
+use crate::{key, real_path};
 
 /// What a plugin's room on disk is: the plugin itself, its presets and settings, or its sounds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -91,23 +91,7 @@ pub fn data_roots() -> Vec<PathBuf> {
     let env = |name: &str| std::env::var_os(name).map(PathBuf::from);
     let home = env("HOME").or_else(|| env("USERPROFILE"));
     let roots: Vec<PathBuf> = if cfg!(windows) {
-        let mut r: Vec<PathBuf> = Vec::new();
-        // Documents, wherever it is: OneDrive moves it.
-        r.extend(env("USERPROFILE").map(|h| h.join("Documents")));
-        r.extend(env("OneDrive").map(|o| o.join("Documents")));
-        r.extend(env("PUBLIC").map(|p| p.join("Documents")));
-        for name in [
-            "APPDATA",
-            "LOCALAPPDATA",
-            "ProgramData",
-            "ProgramFiles",
-            "ProgramFiles(x86)",
-            "CommonProgramFiles",
-            "CommonProgramFiles(x86)",
-        ] {
-            r.extend(env(name));
-        }
-        r
+        windows_data_roots()
     } else if cfg!(target_os = "macos") {
         let mut r = vec![PathBuf::from("/Library/Application Support"), PathBuf::from("/Library/Audio/Presets")];
         if let Some(h) = home {
@@ -119,6 +103,32 @@ pub fn data_roots() -> Vec<PathBuf> {
     };
     let mut seen = HashSet::new();
     roots.into_iter().filter(|r| r.is_dir() && seen.insert(key(&r.to_string_lossy()))).collect()
+}
+
+/// Documents (wherever you've moved it), Public Documents, AppData, ProgramData and the program folders, as Windows
+/// says they are.
+#[cfg(windows)]
+fn windows_data_roots() -> Vec<PathBuf> {
+    use known_folders::{KnownFolder, get_known_folder_path};
+    [
+        KnownFolder::Documents,
+        KnownFolder::PublicDocuments,
+        KnownFolder::RoamingAppData,
+        KnownFolder::LocalAppData,
+        KnownFolder::ProgramData,
+        KnownFolder::ProgramFiles,
+        KnownFolder::ProgramFilesX86,
+        KnownFolder::ProgramFilesCommon,
+        KnownFolder::ProgramFilesCommonX86,
+    ]
+    .into_iter()
+    .filter_map(get_known_folder_path)
+    .collect()
+}
+
+#[cfg(not(windows))]
+fn windows_data_roots() -> Vec<PathBuf> {
+    Vec::new()
 }
 
 /// Whether a folder is where programs are installed: those go with Uninstall, never Clean up.
@@ -203,11 +213,6 @@ const ENDINGS: [&str; 20] = [
     "vst3",
 ];
 
-/// A name in small letters with only its letters and digits.
-pub(crate) fn norm(s: &str) -> String {
-    case::to_lower(s).chars().filter(|c| c.is_alphabetic() || c.is_numeric()).collect()
-}
-
 /// Whether a folder's name is a plugin's: the plugin's family (its name without a version), perhaps with a version
 /// number and one of the usual endings. Names under four letters must match exactly ("M1" never takes "M1 Backups").
 pub fn name_matches(folder_name: &str, family: &str) -> bool {
@@ -254,8 +259,14 @@ fn guess(
     protected_roots: &[String],
 ) -> HashMap<String, Vec<Guessed>> {
     let mut result: HashMap<String, Vec<Guessed>> = HashMap::new();
-    let families: Vec<(&str, String)> =
-        plugins.iter().map(|p| (p.key.as_str(), family(&p.name))).filter(|(_, f)| f.chars().count() >= 2).collect();
+    let families: Vec<Fam<'_>> = plugins
+        .iter()
+        .map(|p| {
+            let family = family(&p.name);
+            Fam { key: &p.key, version: version_after(&norm(&p.name), &family), family }
+        })
+        .filter(|f| f.family.chars().count() >= 2)
+        .collect();
     // Makers in the order they first come, each with its plugins.
     let mut makers: Vec<(String, Vec<&str>)> = Vec::new();
     for p in plugins.iter().filter(|p| !p.vendor.is_empty()) {
@@ -272,12 +283,18 @@ fn guess(
         NEVER_NAMES.contains(&norm(file_name(dir)).as_str())
             || plugin_roots.iter().chain(protected_roots).any(|r| is_inside(r, dir) || is_inside(dir, r))
     };
-    // The longest name wins: "Serum 2 Presets" is Serum 2's, not Serum's.
-    let plugins_named = |dir: &str, among: &[(&str, String)]| -> Vec<String> {
+    // The longest name wins. Of plugins with the same name but for their version (Kontakt 7 and Kontakt 8), a folder
+    // naming a version ("Kontakt 8 Library", "Serum 2 Presets") is that version's; one naming none is theirs together.
+    let plugins_named = |dir: &str, among: &[Fam<'_>]| -> Vec<String> {
         let name = file_name(dir);
-        let hits: Vec<&(&str, String)> = among.iter().filter(|(_, f)| name_matches(name, f)).collect();
-        let longest = hits.iter().map(|(_, f)| f.chars().count()).max().unwrap_or(0);
-        hits.iter().filter(|(_, f)| f.chars().count() == longest).map(|(k, _)| (*k).to_owned()).collect()
+        let hits: Vec<&Fam<'_>> = among.iter().filter(|f| name_matches(name, &f.family)).collect();
+        let longest = hits.iter().map(|f| f.family.chars().count()).max().unwrap_or(0);
+        let hits: Vec<&Fam<'_>> = hits.into_iter().filter(|f| f.family.chars().count() == longest).collect();
+        let named_version = hits.first().map(|f| version_after(&norm(name), &f.family)).unwrap_or_default();
+        let that_version: Vec<&Fam<'_>> =
+            hits.iter().copied().filter(|f| !named_version.is_empty() && f.version == named_version).collect();
+        let chosen = if that_version.is_empty() { hits } else { that_version };
+        chosen.iter().map(|f| f.key.to_owned()).collect()
     };
     let mut add = |key: String, g: Guessed| result.entry(key).or_default().push(g);
     for root in data_roots {
@@ -293,8 +310,7 @@ fn guess(
                 continue;
             }
             let Some((_, keys)) = makers.iter().find(|(m, _)| maker_matches(file_name(&dir), m)) else { continue };
-            let theirs: Vec<(&str, String)> =
-                families.iter().filter(|(k, _)| keys.contains(k)).map(|(k, f)| (*k, f.clone())).collect();
+            let theirs: Vec<Fam<'_>> = families.iter().filter(|f| keys.contains(&f.key)).cloned().collect();
             let mut inside = Vec::new();
             for sub in sub_folders(Path::new(&dir)) {
                 if off(&sub) {
@@ -314,6 +330,19 @@ fn guess(
         }
     }
     result
+}
+
+/// A plugin's family, with the version its name gives ("8" for Kontakt 8, "" for Serum).
+#[derive(Clone)]
+struct Fam<'a> {
+    key: &'a str,
+    family: String,
+    version: String,
+}
+
+/// The number right after the family in a name made by [`norm`]: "8" in "kontakt8library" after "kontakt".
+fn version_after(name: &str, family: &str) -> String {
+    name.strip_prefix(family).map(|rest| rest.chars().take_while(char::is_ascii_digit).collect()).unwrap_or_default()
 }
 
 /// The folders in a folder, by name; links to other places left out (a folder moved to another drive isn't guessed
@@ -357,21 +386,35 @@ pub fn measure(
         if let Some(m) = sizes.get(&key(path)) {
             return Ok(*m);
         }
-        let m = size::measure(Path::new(path), stop)?;
+        // A plugin file or bundle that's a link (moved to another drive) is measured where it really is.
+        let real = if size::is_link(Path::new(path)) { real_path(path) } else { None };
+        let m = size::measure(Path::new(real.as_deref().unwrap_or(path)), stop)?;
         sizes.insert(key(path), m);
         Ok(m)
     };
 
-    // Folders you added are the plugin's alone; the ones you ruled out are left out of every guess for it.
+    // Folders you added are the plugin's alone: no other plugin's guess takes them. The ones you ruled out are left out
+    // of every guess for it.
+    let added: HashMap<&str, Vec<String>> = plugins
+        .iter()
+        .map(|p| (p.key.as_str(), (choices.added)(&p.key).into_iter().filter(|a| Path::new(a).is_dir()).collect()))
+        .collect();
+    let added_by: HashMap<String, &str> =
+        added.iter().flat_map(|(k, folders)| folders.iter().map(move |f| (key(f), *k))).collect();
     let mut claimed: HashMap<&str, (Vec<Guessed>, Vec<String>)> = HashMap::new();
     for p in plugins {
         let no: HashSet<String> = (choices.ruled_out)(&p.key).iter().map(|f| key(f)).collect();
         let guessed: Vec<Guessed> = guesses
             .get(&p.key)
-            .map(|g| g.iter().filter(|f| !no.contains(&key(&f.path))).cloned().collect())
+            .map(|g| {
+                g.iter()
+                    .filter(|f| !no.contains(&key(&f.path)))
+                    .filter(|f| added_by.get(&key(&f.path)).is_none_or(|k| *k == p.key))
+                    .cloned()
+                    .collect()
+            })
             .unwrap_or_default();
-        let added: Vec<String> = (choices.added)(&p.key).into_iter().filter(|a| Path::new(a).is_dir()).collect();
-        claimed.insert(&p.key, (guessed, added));
+        claimed.insert(&p.key, (guessed, added.get(p.key.as_str()).cloned().unwrap_or_default()));
     }
     // Who claims each guessed folder, for the shared ones.
     let mut owners: HashMap<String, Vec<&str>> = HashMap::new();
@@ -402,9 +445,10 @@ pub fn measure(
             let m = if g.within.is_empty() {
                 size_of(&g.path)?
             } else {
-                // A maker's folder, less the plugin folders inside it that are counted on their own.
+                // A maker's folder, less the plugin folders inside it that are counted on their own (ones every plugin
+                // ruled out stay part of the maker's folder, so they're counted somewhere).
                 let mut all = size_of(&g.path)?;
-                for w in &g.within {
+                for w in g.within.iter().filter(|w| owners.contains_key(&key(w)) || added_by.contains_key(&key(w))) {
                     let part = size_of(w)?;
                     all = Measured {
                         bytes: all.bytes.saturating_sub(part.bytes),
@@ -482,8 +526,11 @@ pub fn group(files: &[InstalledPlugin], plugin_roots: &[String], vendors: &HashM
 
 /// The folder a plugin sits in right below its plugin folder, when that isn't a plugin itself: its maker.
 fn folder_maker(path: &str, plugin_roots: &[String]) -> String {
-    let Some(root) = plugin_roots.iter().find(|r| is_inside(path, r)) else { return String::new() };
     let parts = |p: &str| p.split(['\\', '/']).filter(|d| !d.is_empty()).map(str::to_owned).collect::<Vec<String>>();
+    // The innermost plugin folder it's in.
+    let Some(root) = plugin_roots.iter().filter(|r| is_inside(path, r)).max_by_key(|r| parts(r).len()) else {
+        return String::new();
+    };
     let all = parts(path);
     let rel = all.get(parts(root).len()..).unwrap_or_default();
     match rel {
@@ -524,5 +571,8 @@ mod tests {
         assert_eq!(folder_maker("C:/VST3/Serum.vst3", &roots), "");
         assert_eq!(folder_maker("C:/VST3/Serum.vst3/Contents/x.vst3", &roots), "");
         assert_eq!(folder_maker("D:/Elsewhere/A/B.vst3", &roots), "");
+        let nested = vec!["D:/Plugins".to_owned(), "D:/Plugins/VST3".to_owned()];
+        assert_eq!(folder_maker("D:/Plugins/VST3/Serum.vst3", &nested), "");
+        assert_eq!(folder_maker("D:/Plugins/VST3/UVI/Falcon.vst3", &nested), "UVI");
     }
 }

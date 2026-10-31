@@ -5,13 +5,17 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use mo_formats::case;
+use mo_formats::paths::{extension, stem};
 use mo_formats::plugins::{format_from_path, name_from_path};
 use mo_formats::textscan::is_plugin_path;
+use rayon::prelude::*;
 use regex::Regex;
 
 use crate::key;
+use crate::size::Stopped;
 
 /// A plugin file on this computer: its name, format ("VST2", "VST3", "CLAP", "AU", "AAX") and where it is.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -36,8 +40,12 @@ pub fn family(name: &str) -> String {
             n = next;
         }
     }
-    // .NET's char.IsLetterOrDigit: letters and decimal digits.
-    case::to_lower(&n).chars().filter(|c| c.is_alphabetic() || c.is_numeric()).collect()
+    norm(&n)
+}
+
+/// A name in small letters with only its letters and digits (as .NET's `char.IsLetterOrDigit` keeps them).
+pub(crate) fn norm(s: &str) -> String {
+    case::to_lower(s).chars().filter(|c| c.is_alphabetic() || c.is_numeric()).collect()
 }
 
 /// Waves plugins all live inside one WaveShell file whose version changes with every update.
@@ -109,55 +117,72 @@ const BUNDLES: [&str; 5] = [".vst3", ".component", ".clap", ".vst", ".aaxplugin"
 const DEEPEST: usize = 32;
 
 /// Every plugin file under the given folders, with its format; each file once. Folders moved to another drive with a
-/// link in their place are followed (their plugins are still installed), each real folder once. Folders that can't be
-/// read are left out.
-pub fn scan_files(folders: &[PathBuf]) -> Vec<InstalledPlugin> {
+/// link in their place are followed (their plugins are still installed), each real folder once, so a link back up
+/// can't go round for ever. Folders that can't be read are left out. A level of folders at a time over every core of
+/// the pool it's called in.
+pub fn scan_files(folders: &[PathBuf], stop: &AtomicBool) -> Result<Vec<InstalledPlugin>, Stopped> {
     let mut found = Vec::new();
     let mut seen_files: HashSet<String> = HashSet::new();
     let mut seen_dirs: HashSet<String> = HashSet::new();
-    for folder in folders {
-        let mut level = vec![folder.clone()];
-        for _ in 0..DEEPEST {
-            let mut next = Vec::new();
-            for dir in level {
-                let real =
-                    fs::canonicalize(&dir).map_or_else(|_| key(&dir.to_string_lossy()), |r| key(&r.to_string_lossy()));
-                if !seen_dirs.insert(real) {
-                    continue;
-                }
-                let Ok(entries) = fs::read_dir(&dir) else { continue };
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    let text = path.to_string_lossy().into_owned();
-                    // The entry itself, or where its link leads.
-                    let is_dir = fs::metadata(&path).is_ok_and(|m| m.is_dir());
-                    if is_plugin_path(&text) {
-                        let name = name_from_path(&text);
-                        // Two letters is a real name: KORG's M1 is M1.vst3 and M1.dll.
-                        if name.chars().count() >= 2 && seen_files.insert(key(&text)) {
-                            found.push(InstalledPlugin {
-                                name,
-                                format: format_from_path(&text).to_owned(),
-                                path: text.clone(),
-                            });
-                        }
-                        // A bundle's insides aren't plugins of their own.
-                        if BUNDLES.iter().any(|b| case::eq_ignore_case(mo_formats::paths::extension(&text), b)) {
-                            continue;
-                        }
-                    }
-                    if is_dir {
-                        next.push(path);
-                    }
-                }
-            }
-            if next.is_empty() {
-                break;
-            }
-            level = next;
+    let mut level: Vec<PathBuf> = folders.to_vec();
+    for _ in 0..DEEPEST {
+        if level.is_empty() {
+            break;
+        }
+        if stop.load(Ordering::Relaxed) {
+            return Err(Stopped);
+        }
+        let real: Vec<String> = level
+            .par_iter()
+            .map(|d| fs::canonicalize(d).map_or_else(|_| key(&d.to_string_lossy()), |r| key(&r.to_string_lossy())))
+            .collect();
+        let todo: Vec<PathBuf> =
+            level.into_iter().zip(real).filter(|(_, r)| seen_dirs.insert(r.clone())).map(|(d, _)| d).collect();
+        let read: Vec<(Vec<InstalledPlugin>, Vec<PathBuf>)> = todo.par_iter().map(|d| list_plugins(d)).collect();
+        level = Vec::new();
+        for (plugins, dirs) in read {
+            found.extend(plugins.into_iter().filter(|p| seen_files.insert(key(&p.path))));
+            level.extend(dirs);
         }
     }
-    found
+    if stop.load(Ordering::Relaxed) { Err(Stopped) } else { Ok(found) }
+}
+
+/// The plugin files in one folder, and the folders in it to look in next (a bundle's insides aren't looked in).
+fn list_plugins(dir: &Path) -> (Vec<InstalledPlugin>, Vec<PathBuf>) {
+    let (mut plugins, mut dirs) = (Vec::new(), Vec::new());
+    let Ok(entries) = fs::read_dir(dir) else { return (plugins, dirs) };
+    for entry in entries.flatten() {
+        let Ok(kind) = entry.file_type() else { continue };
+        let path = entry.path();
+        // A link counts as what it leads to.
+        let is_dir = if kind.is_symlink() { fs::metadata(&path).is_ok_and(|m| m.is_dir()) } else { kind.is_dir() };
+        let text = path.to_string_lossy().into_owned();
+        if let Some((name, format)) = plugin_file(&text) {
+            // Two letters is a real name: KORG's M1 is M1.vst3 and M1.dll.
+            if name.chars().count() >= 2 {
+                plugins.push(InstalledPlugin { name, format, path: text.clone() });
+            }
+            if BUNDLES.iter().any(|b| case::eq_ignore_case(extension(&text), b)) {
+                continue;
+            }
+        }
+        if is_dir {
+            dirs.push(path);
+        }
+    }
+    (plugins, dirs)
+}
+
+/// A plugin file's name and format. On Linux a VST2 plugin is a `.so` file (in ~/.vst and the like).
+fn plugin_file(path: &str) -> Option<(String, String)> {
+    if is_plugin_path(path) {
+        return Some((name_from_path(path), format_from_path(path).to_owned()));
+    }
+    if cfg!(target_os = "linux") && path.ends_with(".so") {
+        return Some((stem(path).to_owned(), "VST2".to_owned()));
+    }
+    None
 }
 
 #[cfg(test)]

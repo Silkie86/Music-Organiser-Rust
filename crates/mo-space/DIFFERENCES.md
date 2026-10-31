@@ -34,7 +34,13 @@ listed with a verdict: **better** (on purpose), **same idea, new shape**, or **n
 | A family's letters | .NET `char.IsLetterOrDigit` | Rust's alphabetic or numeric: the same for every name seen; a few rare scripts' marks count as letters too | same idea, new shape |
 | Folders in a data root, order | as the folder lists them | by name, so two runs give the same order | better |
 | Measured when | stored with each plugin | not kept here: the caller knows when it measured (rule 23) | same idea, new shape |
-| "Serum 2 Presets" | the comment says Serum 2's alone, but `Family` strips the version, so Serum and Serum 2 share it | the same as C# for now (twin); worth a look with Solomon's folders | to judge |
+| A folder naming a version | the comment says "Serum 2 Presets" is Serum 2's alone, but `Family` strips the version, so Serum and Serum 2 shared it | a folder naming a version ("Kontakt 8 Library", "Serum 2 Presets") is that version's alone; one naming none ("Kontakt Library") stays shared | better |
+| A folder you added | counted for you, and for any other plugin whose guess took it too | yours alone: no other plugin's guess takes it | better |
+| A plugin folder ruled out inside a maker's folder | still taken off the maker's folder, so counted nowhere | stays part of the maker's folder | better |
+| A plugin file that's a link | measured as the link (nothing) | measured where it really is | better |
+| Linux VST2 plugins | `.so` files not found | found | better |
+| Documents | Windows' own Documents, wherever it's moved | the same (Windows' known folders) | same |
+| Spare copies: same plugin? | one family anywhere inside the other ("Serum FX" took Serum's projects) | equal, or one with its maker in front ("FabFilter Pro-Q 3" and "Pro-Q 3") | better |
 | Spare copies' reason | text stored with each copy | a `Why` worked out into text when shown | same idea, new shape |
 
 ## Not yet
