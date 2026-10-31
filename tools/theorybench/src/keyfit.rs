@@ -19,6 +19,12 @@
 //!   bars differ, offsets for the kind of input, a curve a loop adds and an offset for a song (`Calibration` in the
 //!   crate).
 //!
+//! - **Answers.** Each reading is also graded as the app shows it (one key, a key or its relative, a home note, no
+//!   clear key: `keyfind::grade`, with the thresholds built in), and the report says how often each kind is given and
+//!   how often it's right.
+//! - **Hand cases.** Every model fitted is read on the design's hand cases (`keyfind::cases`), and the report says how
+//!   many keep each gate and meet each target. `--write` won't write weights that break a gate.
+//!
 //! Only stretches inside one key region are fitted on (at most eight a song for each length); every stretch is
 //! measured, so the numbers stay comparable with the C# app's on the same cases.
 
@@ -26,9 +32,10 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
+use mo_harmony::keyfind::cases::{Book, Verdict};
 use mo_harmony::keyfind::{
-    self, CALIBRATION_TERMS, Calibration, Config, FEATURES, KEY_FINDER_VERSION, KeyReader, KeyReading, MINOR, STREAMS,
-    Span, Stream,
+    self, CALIBRATION_TERMS, Calibration, Config, FEATURES, KEY_FINDER_VERSION, KeyAnswer, KeyReader, MINOR, STREAMS,
+    Span, Stream, Why,
 };
 use mo_harmony::{Grid, Key, PitchClass, Role};
 use rayon::prelude::*;
@@ -615,9 +622,15 @@ fn weighted_surprise(cases: &[Case], scores: &[Option<[f64; 24]>], weights: &[f6
 type Held = Vec<Option<[f64; 24]>>;
 
 /// Each case's scores from a finder fitted without its fold, for the cases in `folds` (fitting on those folds only).
-fn cross_validate(cases: &[Case], songs: &[Song], folds: &[usize], opts: &Options) -> Result<Held, String> {
+fn cross_validate(
+    cases: &[Case],
+    songs: &[Song],
+    folds: &[usize],
+    opts: &Options,
+) -> Result<(Held, Vec<(usize, Model)>), String> {
     let fold = |s: usize| songs.get(s).map_or(usize::MAX, |g| g.fold);
     let mut held: Held = vec![None; cases.len()];
+    let mut models = Vec::with_capacity(folds.len());
     for &f in folds {
         let train = |s: usize| fold(s) != f && folds.contains(&fold(s));
         let (model, fitted, n) = fit_model(cases, songs, &train, opts)?;
@@ -632,8 +645,9 @@ fn cross_validate(cases: &[Case], songs: &[Song], folds: &[usize], opts: &Option
             fitted.loss,
             weighted_surprise(cases, &held, &weights)
         );
+        models.push((f, model));
     }
-    Ok(held)
+    Ok((held, models))
 }
 
 /// The calibration fitted on held-out scores of the one-key cases `keep` takes, each set counting as in the fit.
@@ -757,7 +771,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
 
     if final_run {
         println!("Choosing the calibration on folds 1 to 4:");
-        let held = cross_validate(&cases, &songs, &design, &opts)?;
+        let (held, _) = cross_validate(&cases, &songs, &design, &opts)?;
         let calibration = calibrate(&cases, &held, |c| design.contains(&fold(c)))?;
         print_calibration("Calibration", &calibration);
         let train = |s: usize| songs.get(s).is_some_and(|g| g.fold != FROZEN);
@@ -772,9 +786,11 @@ pub fn run(args: &[String]) -> Result<(), String> {
             .collect();
         let summary = report(&cases, &chances, &songs, |c| fold(c) == FROZEN, &inputs);
         log_run("--final", &summary, &opts)?;
+        let finder = keyfind::Model { weights: &model.weights, calibration: &calibration, ..keyfind::SHIPPED };
+        hand_cases(&[("fitted on folds 1 to 4".to_owned(), finder)])?;
     } else if let Some(path) = write {
         println!("Every fold held out in turn (fold {FROZEN} included: these weights are the ones that ship):");
-        let held = cross_validate(&cases, &songs, &every, &opts)?;
+        let (held, _) = cross_validate(&cases, &songs, &every, &opts)?;
         let calibration = calibrate(&cases, &held, |_| true)?;
         print_calibration("Calibration", &calibration);
         let chances: Held =
@@ -784,13 +800,17 @@ pub fn run(args: &[String]) -> Result<(), String> {
         let (model, fitted, n) = fit_model(&cases, &songs, &|_| true, &opts)?;
         println!();
         println!("Fitted on every song: {n} cases, {} Newton steps.", fitted.steps);
+        let finder = keyfind::Model { weights: &model.weights, calibration: &calibration, ..keyfind::SHIPPED };
+        if !hand_cases(&[("fitted on every song".to_owned(), finder)])? {
+            return Err("these weights break a hand case's gate (above), so they aren't written".into());
+        }
         let sources: Vec<&str> = setup.items.iter().map(|i| i.source.as_str()).collect();
         std::fs::write(&path, weights_file(&model, &calibration, &opts, &sources, &summary))
             .map_err(|e| format!("{}: {e}", path.display()))?;
         println!("Written to {}.", path.display());
     } else {
         println!("Folds 1 to 4, each held out in turn (fold {FROZEN} isn't touched):");
-        let held = cross_validate(&cases, &songs, &design, &opts)?;
+        let (held, models) = cross_validate(&cases, &songs, &design, &opts)?;
         // Each fold's chances come from a calibration fitted on the other folds' held-out scores.
         let mut calibrations = HashMap::new();
         for &f in &design {
@@ -808,6 +828,17 @@ pub fn run(args: &[String]) -> Result<(), String> {
             .map(|(c, h)| Some(chances_of(c, h.as_ref()?, calibrations.get(&fold(c))?)))
             .collect();
         report(&cases, &chances, &songs, |c| design.contains(&fold(c)), &inputs);
+        let finders: Vec<(String, keyfind::Model)> = models
+            .iter()
+            .filter_map(|(f, m)| {
+                let calibration = calibrations.get(f)?;
+                Some((
+                    format!("fold {f} held out"),
+                    keyfind::Model { weights: &m.weights, calibration, ..keyfind::SHIPPED },
+                ))
+            })
+            .collect();
+        hand_cases(&finders)?;
     }
     Ok(())
 }
@@ -874,7 +905,8 @@ fn report(
                     truth: cases[i].truth,
                     found: chances[i].map(|c| {
                         let (key, sure) = keyfind::best(&c);
-                        Found { key, sure, chances: Some(c) }
+                        let alone = Some(matches!(graded_answer(&cases[i], &c).0, KeyAnswer::Key(_)));
+                        Found { key, sure, chances: Some(c), alone }
                     }),
                 })
                 .collect();
@@ -882,7 +914,7 @@ fn report(
                 .iter()
                 .map(|&i| Answer {
                     truth: cases[i].truth,
-                    found: cases[i].cs.map(|(key, sure)| Found { key, sure, chances: None }),
+                    found: cases[i].cs.map(|(key, sure)| Found { key, sure, chances: None, alone: None }),
                 })
                 .collect();
             let title = set_title(cut, one_key);
@@ -891,16 +923,11 @@ fn report(
                 let runs = [
                     Run {
                         name: "C# app (Songs page)".into(),
-                        cut: baseline::SONG_MIN_CONFIDENCE,
+                        cut: Some(baseline::SONG_MIN_CONFIDENCE),
                         answers: cs.clone(),
                         micros: None,
                     },
-                    Run {
-                        name: "mo-harmony (held out)".into(),
-                        cut: keyfind::ONE_KEY,
-                        answers: mo.clone(),
-                        micros: None,
-                    },
+                    Run { name: "mo-harmony (held out)".into(), cut: None, answers: mo.clone(), micros: None },
                 ];
                 keys::report(&title, "the key labelled (at the middle of a stretch)", &song, &runs);
                 println!("{graded}");
@@ -948,46 +975,110 @@ fn report(
     summary
 }
 
-/// How the answers would be shown (one key, a key or its relative, a home note, no clear key) and how often each
-/// kind is right: a key or relative is right when the labelled key is either, a home note when it's the tonic.
+/// A case's answer as the app would show it, graded with the thresholds built in, and the chance shown with it.
+fn graded_answer(case: &Case, chances: &[f64; 24]) -> (KeyAnswer, f64) {
+    let grading = keyfind::Grading {
+        bars_heard: case.ev.bars,
+        notes: case.ev.notes,
+        diatonic_fit: case.ev.diatonic_fit,
+        span: case.cut.span(),
+    };
+    keyfind::grade(chances, grading, &keyfind::SHIPPED)
+}
+
+/// How the answers would be shown (one key, a key or its relative, a home note, no clear key), how often each kind is
+/// right (a pair when the labelled key is either, a home note when it's the tonic), and how sure the finder said it
+/// was (the chance shown, on average): said above right, it was too sure.
 fn graded(cases: &[(&Case, Option<[f64; 24]>)]) -> String {
-    let mut tally = [(0usize, 0usize); 4];
+    // Given, right, chance shown; and for no clear key, why.
+    let mut tally = [(0usize, 0usize, 0.0f64); 4];
+    let mut why = [0usize; 3];
     for (case, chances) in cases {
         let Some(chances) = chances else { continue };
-        let reading = KeyReading {
-            chances: *chances,
-            bars_heard: case.ev.bars,
-            config: case.ev.config,
-            diatonic_fit: case.ev.diatonic_fit,
-            notes: case.ev.notes,
+        let (answer, shown) = graded_answer(case, chances);
+        let kind = match answer {
+            KeyAnswer::Key(_) => 0,
+            KeyAnswer::OrRelative(_) => 1,
+            KeyAnswer::HomeNote { .. } => 2,
+            KeyAnswer::Unclear { why: w, .. } => {
+                why[match w {
+                    Why::Spread => 0,
+                    Why::NotTonal => 1,
+                    Why::TooFewNotes => 2,
+                }] += 1;
+                3
+            }
         };
-        let truth = case.truth;
-        let (kind, right) = match reading.answer().0 {
-            keyfind::KeyAnswer::Key(k) => (0, k == truth),
-            keyfind::KeyAnswer::OrRelative(k) => (1, k == truth || k.relative() == truth),
-            keyfind::KeyAnswer::HomeNote(pc) => (2, pc == truth.tonic),
-            keyfind::KeyAnswer::Unclear => (3, false),
-        };
-        if let Some(t) = tally.get_mut(kind) {
-            t.0 += 1;
-            t.1 += usize::from(right);
-        }
+        let t = &mut tally[kind];
+        t.0 += 1;
+        t.1 += usize::from(answer.names(case.truth));
+        t.2 += shown;
     }
     let total = tally.iter().map(|t| t.0).sum::<usize>().max(1) as f64;
-    let names = ["one key", "key or its relative", "home note", "no clear key"];
-    let parts: Vec<String> = names
+    let share = |n: usize, of: f64| 100.0 * n as f64 / of.max(1.0);
+    let names = ["one key", "key or its relative", "home note"];
+    let mut parts: Vec<String> = names
         .iter()
         .zip(&tally)
-        .map(|(name, (n, right))| {
-            let share = 100.0 * *n as f64 / total;
-            if *name == "no clear key" {
-                format!("{name} {share:.1}%")
-            } else {
-                format!("{name} {share:.1}% ({:.1}% right)", 100.0 * *right as f64 / (*n).max(1) as f64)
-            }
+        .map(|(name, &(n, right, said))| {
+            let of = n.max(1) as f64;
+            format!("{name} {:.1}% ({:.1}% right, said {:.1}%)", share(n, total), share(right, of), 100.0 * said / of)
         })
         .collect();
+    let [spread, not_tonal, few] = why;
+    parts.push(format!(
+        "no clear key {:.1}% (spread {:.1}, not in one scale {:.1}, too few notes {:.1})",
+        share(tally[3].0, total),
+        share(spread, total),
+        share(not_tonal, total),
+        share(few, total)
+    ));
     format!("  Shown as: {}.", parts.join(", "))
+}
+
+/// Reads the design's hand cases with each fitted model and prints how many models keep each case's gate and meet its
+/// target, with what broke a gate. Returns whether every model keeps every gate.
+fn hand_cases(models: &[(String, keyfind::Model)]) -> Result<bool, String> {
+    let judged: Vec<(&str, Vec<Verdict>)> = models
+        .iter()
+        .map(|(name, model)| Ok((name.as_str(), Book::read(model)?.verdicts())))
+        .collect::<Result<_, String>>()?;
+    let n = judged.len();
+    println!();
+    println!(
+        "=== The hand cases: gates (must hold) and targets (to reach), for {n} fitted model{} ===",
+        if n == 1 { "" } else { "s" }
+    );
+    let mut every = true;
+    let mut broken = Vec::new();
+    for case in 1..=31u8 {
+        let verdicts: Vec<(&str, &Verdict)> =
+            judged.iter().filter_map(|(name, vs)| vs.iter().find(|v| v.case == case).map(|v| (*name, v))).collect();
+        let Some((_, first)) = verdicts.first() else { continue };
+        let gates = verdicts.iter().filter(|(_, v)| v.passes_gate()).count();
+        let targets: Vec<bool> = verdicts.iter().filter_map(|(_, v)| v.meets_target()).collect();
+        let has_gate = verdicts.iter().any(|(_, v)| v.gate.is_some());
+        let gate = if has_gate { format!("gate {gates}/{n}") } else { "no gate".to_owned() };
+        let target = if targets.is_empty() {
+            "no target".to_owned()
+        } else {
+            format!("target {}/{n}", targets.iter().filter(|t| **t).count())
+        };
+        println!("{case:>3}  {gate:<10} {target:<11} {}", first.about);
+        if gates < n {
+            every = false;
+            if let Some((name, v)) = verdicts.iter().find(|(_, v)| !v.passes_gate()) {
+                broken.extend(v.broken().iter().map(|g| format!("  {name}: {g}")));
+            }
+        }
+    }
+    if !broken.is_empty() {
+        println!("Gates broken (the first model to break each case):");
+        for line in &broken {
+            println!("{line}");
+        }
+    }
+    Ok(every)
 }
 
 /// Today's date, from the clock (UTC).
@@ -1065,7 +1156,7 @@ fn weights_file(
     for line in &summary.lines {
         let _ = writeln!(out, "//! - {line}");
     }
-    out.push_str("\nuse super::{Calibration, FEATURES};\n\n");
+    out.push_str("\nuse super::{Calibration, FEATURES, Thresholds};\n\n");
     out.push_str("/// Whether these weights were fitted (`false` for the placeholder).\npub(super) const FITTED: bool = true;\n\n");
     out.push_str(
         "/// One weight per feature (see `Heard::features`): for each stream, twelve for the notes above a major\n",
@@ -1092,6 +1183,38 @@ fn weights_file(
         "#[rustfmt::skip]\npub(super) const CALIBRATION: Calibration = Calibration([{}]);",
         numbers.join(", ")
     );
+    // The thresholds and the scale share aren't fitted yet: they're written as they are.
+    let shipped = keyfind::SHIPPED;
+    let knots = |k: &[f64]| k.iter().map(|v| format!("{v:?}")).collect::<Vec<_>>().join(", ");
+    out.push_str(
+        "/// How likely each kind of answer must be (see `Thresholds`) at 1, 2, 4, 8, 16 and 32 bars: the design's starting\n",
+    );
+    out.push_str("/// values, until the bench fits them.\n");
+    let _ = writeln!(
+        out,
+        "#[rustfmt::skip]\npub(super) const THRESHOLDS: Thresholds = Thresholds {{\n    one: [{}],\n    pair: [{}],\n    \
+         home: [{}],\n}};",
+        knots(&shipped.thresholds.one),
+        knots(&shipped.thresholds.pair),
+        knots(&shipped.thresholds.home),
+    );
+    out.push_str(
+        "/// Notes with less than this share of their time inside one scale have no key (see `Why::NotTonal`).\n",
+    );
+    let _ = writeln!(out, "pub(super) const NOT_TONAL_BELOW: f64 = {:?};", shipped.not_tonal_below);
+    // The hash of every number, and the version it belongs to: the next one when any number changed.
+    let finder = keyfind::Model { weights: &model.weights, calibration, ..shipped };
+    let hash = keyfind::numbers_hash(&finder);
+    let (shipped_hash, shipped_version) = keyfind::SHIPPED_HASH;
+    let version = if hash == shipped_hash { shipped_version } else { KEY_FINDER_VERSION + 1 };
+    out.push_str(
+        "/// The hash of every number the finder is built from (see `numbers_hash`) when this file was written, and the version\n",
+    );
+    out.push_str(
+        "/// of the finder it belongs to: a test checks both, so changing any number fails until the version is bumped.\n",
+    );
+    let _ = writeln!(out, "pub(super) const SHIPPED_HASH: u64 = {hash:#018x};");
+    let _ = writeln!(out, "pub(super) const HASH_VERSION: u32 = {version};");
     out
 }
 
@@ -1168,5 +1291,27 @@ mod tests {
     fn dates_are_written_year_first() {
         let today = today();
         assert!(today.len() == 10 && today.starts_with("20") && today.as_bytes()[4] == b'-');
+    }
+
+    #[test]
+    fn the_weights_file_carries_the_version_its_numbers_belong_to() {
+        let opts = Options { lambda_delta: Some(LAMBDA_DELTA), loop_cut: Cut::Opening(1) };
+        let summary =
+            Summary { lines: vec!["Whole songs with one key: 90.0% right (1 cases)".into()], full: Vec::new() };
+        let calibration = *keyfind::SHIPPED.calibration;
+        let file = |weights: [f64; FEATURES]| weights_file(&Model { weights }, &calibration, &opts, &["x"], &summary);
+        // The numbers built in: the hash and version built in.
+        let same = file(*keyfind::SHIPPED.weights);
+        let (hash, version) = keyfind::SHIPPED_HASH;
+        assert!(same.contains(&format!("SHIPPED_HASH: u64 = {hash:#018x};")), "{same}");
+        assert!(same.contains(&format!("HASH_VERSION: u32 = {version};")));
+        assert!(same.contains("pub(super) const THRESHOLDS: Thresholds = Thresholds {"));
+        assert!(same.contains(&format!("NOT_TONAL_BELOW: f64 = {:?};", keyfind::SHIPPED.not_tonal_below)));
+        // Any other number: the next version, so the tests fail until the crate's version is bumped too.
+        let mut weights = *keyfind::SHIPPED.weights;
+        weights[5] += 0.25;
+        let changed = file(weights);
+        assert!(changed.contains(&format!("HASH_VERSION: u32 = {};", KEY_FINDER_VERSION + 1)));
+        assert!(!changed.contains(&format!("{hash:#018x}")));
     }
 }

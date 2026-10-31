@@ -9,17 +9,33 @@
 //! moves the answer up a semitone, exactly. The scores become chances by a softmax over the 24 keys ([`KeyReading`]),
 //! sharpened more the more bars were heard ([`Calibration`]).
 //!
-//! The weights and the calibration were fitted on music people labelled (see `weights.rs`, made by `theorybench
-//! keyfit`), and only change when the bench measures a change as better; each change bumps [`KEY_FINDER_VERSION`].
+//! Last, the chances become the answer a person would give ([`KeyAnswer`]: one key, a key or its relative, a home
+//! note, or no clear key), with the key's colour ([`Colours`]). A reading fits in eight bytes ([`KeyFact`]) for the
+//! MIDI page's index, and a key given in a name or typed in is checked against it ([`KeyAnswer::check_hint`]).
+//!
+//! The weights, the calibration and the thresholds were fitted on music people labelled (see `weights.rs`, made by
+//! `theorybench keyfit`), and only change when the bench measures a change as better; each change bumps
+//! [`KEY_FINDER_VERSION`], and a test makes sure it does.
 
+mod answer;
+#[cfg(any(test, feature = "hand-cases"))]
+pub mod cases;
+mod colour;
+mod fact;
 mod heard;
+mod hint;
+mod version;
 mod weights;
 
+pub use answer::{Grading, KeyAnswer, MIN_NOTES, THRESHOLD_KNOTS, Thresholds, Why, grade, ranked};
+pub use colour::Colours;
+pub use fact::KeyFact;
 pub use heard::{Heard, KeyReader, MOST_BEATS, RoleSet};
+pub use hint::{HintCheck, HintSource};
+pub use version::{SHIPPED_HASH, numbers_hash};
 
 use crate::key::Key;
 use crate::notes::{Grid, Part};
-use crate::pitch::PitchClass;
 
 /// Bumped whenever the finder can give a different answer for the same notes (new weights, new evidence), so the
 /// answers the app keeps (the MIDI page's index) know to be worked out again.
@@ -176,16 +192,24 @@ impl Calibration {
     }
 }
 
-/// A fitted finder: the weights of every feature and the calibration. [`SHIPPED`] is the one built in; the bench
-/// passes the ones it fits.
+/// A fitted finder: the weights of every feature, the calibration, how sure each kind of answer must be, and the
+/// least share of the notes inside one scale for any key ([`Why::NotTonal`]). [`SHIPPED`] is the one built in; the
+/// bench passes the ones it fits.
 #[derive(Clone, Copy, Debug)]
 pub struct Model<'a> {
     pub weights: &'a [f64; FEATURES],
     pub calibration: &'a Calibration,
+    pub thresholds: &'a Thresholds,
+    pub not_tonal_below: f64,
 }
 
 /// The finder built into the app.
-pub const SHIPPED: Model<'static> = Model { weights: &weights::WEIGHTS, calibration: &weights::CALIBRATION };
+pub const SHIPPED: Model<'static> = Model {
+    weights: &weights::WEIGHTS,
+    calibration: &weights::CALIBRATION,
+    thresholds: &weights::THRESHOLDS,
+    not_tonal_below: weights::NOT_TONAL_BELOW,
+};
 
 /// Whether the built-in weights were fitted yet. Until they are, every key scores the same, and every reading is
 /// C major at one chance in 24.
@@ -214,23 +238,25 @@ pub fn chances(z: [f64; 24]) -> [f64; 24] {
     if total > 0.0 && total.is_finite() { raised.map(|r| r / total) } else { [1.0 / 24.0; 24] }
 }
 
-/// The likeliest key in a list of 24 chances (in the order of [`Key::ALL`]) and its chance; ties go to the key first
-/// in [`Key::ALL`].
+/// The likeliest key in a list of 24 chances (in the order of [`Key::ALL`]) and its chance, ties broken as
+/// [`ranked`] breaks them.
 pub fn best(chances: &[f64; 24]) -> (Key, f64) {
-    let mut best = (Key::major(PitchClass::C), f64::NEG_INFINITY);
-    for (k, p) in Key::ALL.iter().zip(chances) {
-        if *p > best.1 {
-            best = (*k, *p);
-        }
-    }
-    if best.1.is_finite() { best } else { (best.0, 0.0) }
+    let ([first, ..], _) = ranked(chances);
+    first
 }
 
-/// The finder's answer: a chance for every key, and what it heard.
+/// What the finder read: a chance for every key, the answer to show, and what it heard.
 #[derive(Clone, Debug, PartialEq)]
 pub struct KeyReading {
     /// The chance of each key, in the order of [`Key::ALL`]; they add up to 1.
     pub chances: [f64; 24],
+    /// The answer to show.
+    pub answer: KeyAnswer,
+    /// The chance that the answer is right ([`grade`]).
+    pub shown_chance: f64,
+    /// The colours of the key the answer gives (a home note leaning to neither mode is read as major); none when no
+    /// key is clear.
+    pub colours: Colours,
     /// How many bars differ in what was heard.
     pub bars_heard: u32,
     pub config: Config,
@@ -240,67 +266,49 @@ pub struct KeyReading {
     pub notes: u32,
 }
 
-/// The answer as a person would give it, from how sure the finder is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum KeyAnswer {
-    /// One key.
-    Key(Key),
-    /// A key or its relative ("C minor or Eb major"), the likelier first: the notes fit both, and which note is home
-    /// isn't clear.
-    OrRelative(Key),
-    /// The home note is clear, major or minor isn't (a vamp that never plays the third, a blues).
-    HomeNote(PitchClass),
-    /// No clear key.
-    Unclear,
-}
-
-/// A key is given alone when it's at least this likely.
-pub const ONE_KEY: f64 = 0.6;
-/// A key and its relative, or a home note in either mode, are given when together they're at least this likely.
-pub const TWO_KEYS: f64 = 0.75;
-
 impl KeyReading {
     /// The chance of one key.
     pub fn chance(&self, key: Key) -> f64 {
         self.chances.get(key.index()).copied().unwrap_or(0.0)
     }
 
-    /// The keys from likeliest down, with their chances (ties go to the key first in [`Key::ALL`]).
-    pub fn ranked(&self) -> Vec<(Key, f64)> {
-        let mut all: Vec<(Key, f64)> = Key::ALL.iter().map(|k| (*k, self.chance(*k))).collect();
-        all.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.index().cmp(&b.0.index())));
-        all
+    /// The keys from likeliest down, with their chances ([`ranked`]).
+    pub fn ranked(&self) -> [(Key, f64); 24] {
+        ranked(&self.chances).0
     }
 
-    /// The likeliest key and its chance (ties go to the key first in [`Key::ALL`]).
+    /// The likeliest key and its chance.
     pub fn best(&self) -> (Key, f64) {
         best(&self.chances)
     }
 
-    /// The answer to show, and the chance that it's right.
-    pub fn answer(&self) -> (KeyAnswer, f64) {
-        let (best, p) = self.best();
-        if p >= ONE_KEY {
-            return (KeyAnswer::Key(best), p);
-        }
-        let pair = p + self.chance(best.relative());
-        let home = self.chance(Key::major(best.tonic)) + self.chance(Key::minor(best.tonic));
-        if pair >= TWO_KEYS && pair >= home {
-            (KeyAnswer::OrRelative(best), pair)
-        } else if home >= TWO_KEYS {
-            (KeyAnswer::HomeNote(best.tonic), home)
-        } else {
-            (KeyAnswer::Unclear, 1.0 - p)
-        }
+    /// The second likeliest key and its chance: `None` when the likeliest isn't clear (it shares its chance with keys
+    /// that aren't its relative or parallel), as the order of those keys says nothing.
+    pub fn runner_up(&self) -> Option<(Key, f64)> {
+        let ([_, second, ..], clear) = ranked(&self.chances);
+        clear.then_some(second)
+    }
+
+    /// How a key someone gave stands to the answer ([`KeyAnswer::check_hint`]).
+    pub fn check_hint(&self, hint: Key, from: HintSource) -> HintCheck {
+        self.answer.check_hint(hint, from)
+    }
+
+    /// The reading in eight bytes, for the MIDI page's index.
+    pub fn fact(&self) -> KeyFact {
+        KeyFact::of(self)
     }
 }
 
 /// Reads the key of what was heard with a model (the bench passes the ones it fits).
 pub fn read_heard(heard: &Heard, span: Span, model: &Model) -> KeyReading {
-    let (bars_heard, config) = (heard.bars_heard(), heard.config());
+    let (bars_heard, config, diatonic_fit) = (heard.bars_heard(), heard.config(), heard.diatonic_fit());
     let sharp = model.calibration.sharpness(bars_heard, config, span);
-    let z = Key::ALL.map(|k| score(heard, k, span, model.weights) * sharp);
-    KeyReading { chances: chances(z), bars_heard, config, diatonic_fit: heard.diatonic_fit(), notes: heard.notes }
+    let chances = chances(Key::ALL.map(|k| score(heard, k, span, model.weights) * sharp));
+    let grading = Grading { bars_heard, notes: heard.notes, diatonic_fit, span };
+    let (answer, shown_chance) = grade(&chances, grading, model);
+    let colours = colour::colours(heard, answer);
+    KeyReading { chances, answer, shown_chance, colours, bars_heard, config, diatonic_fit, notes: heard.notes }
 }
 
 impl KeyReader {
@@ -317,5 +325,9 @@ pub fn find_key(parts: &[Part], grid: Grid, span: Span) -> Option<KeyReading> {
     KeyReader::new().read(parts, grid, span)
 }
 
+#[cfg(test)]
+mod answer_tests;
+#[cfg(test)]
+mod hand_case_tests;
 #[cfg(test)]
 mod tests;

@@ -8,4 +8,8 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# The key finder's hand cases (`keyfind::cases`), for `theorybench keyfit` to check the weights it fits.
+hand-cases = []
+
 [dependencies]

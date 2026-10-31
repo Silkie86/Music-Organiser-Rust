@@ -18,6 +18,9 @@ pub struct Found {
     pub key: Key,
     pub sure: f64,
     pub chances: Option<[f64; 24]>,
+    /// Whether the finder would show this key on its own, for a finder that says so itself (mo-harmony's graded
+    /// answer); `None` when its confidence cut decides.
+    pub alone: Option<bool>,
 }
 
 /// How a key finder is called: a case to its answer, or `None` when it gives none.
@@ -26,8 +29,9 @@ pub type Find = Box<dyn Fn(&Case) -> Option<Found> + Sync>;
 /// A key finder as the bench runs it.
 pub struct Finder {
     pub name: String,
-    /// Below this confidence the app shows no key.
-    pub cut: f64,
+    /// Below this confidence the app shows no key; `None` for a finder that says itself when it shows a key
+    /// ([`Found::alone`]).
+    pub cut: Option<f64>,
     pub find: Find,
 }
 
@@ -35,11 +39,12 @@ pub struct Finder {
 pub fn harmony_finder() -> Finder {
     Finder {
         name: "mo-harmony".into(),
-        cut: mo_harmony::keyfind::ONE_KEY,
+        cut: None,
         find: Box::new(|case| {
             let reading = mo_harmony::find_key(&case.harmony_parts(), case.grid, case.span)?;
             let (key, sure) = reading.best();
-            Some(Found { key, sure, chances: Some(reading.chances) })
+            let alone = Some(matches!(reading.answer, mo_harmony::KeyAnswer::Key(_)));
+            Some(Found { key, sure, chances: Some(reading.chances), alone })
         }),
     }
 }
@@ -48,10 +53,15 @@ pub fn harmony_finder() -> Finder {
 pub fn cs_finder() -> Finder {
     Finder {
         name: "C# app (Songs page)".into(),
-        cut: baseline::SONG_MIN_CONFIDENCE,
+        cut: Some(baseline::SONG_MIN_CONFIDENCE),
         // The C# app counted a bar as four beats, whatever the time signature.
         find: Box::new(|case| {
-            baseline::key(&case.notes, 4 * i64::from(case.ppq)).map(|(key, sure)| Found { key, sure, chances: None })
+            baseline::key(&case.notes, 4 * i64::from(case.ppq)).map(|(key, sure)| Found {
+                key,
+                sure,
+                chances: None,
+                alone: None,
+            })
         }),
     }
 }
@@ -65,12 +75,13 @@ pub fn finders() -> Vec<Finder> {
     for (which, (name, _, _)) in profiles::PROFILES.iter().enumerate() {
         all.push(Finder {
             name: (*name).into(),
-            cut: baseline::SONG_MIN_CONFIDENCE,
+            cut: Some(baseline::SONG_MIN_CONFIDENCE),
             find: Box::new(move |case| {
                 profiles::key(which, &case.notes, 4 * i64::from(case.ppq)).map(|(key, sure)| Found {
                     key,
                     sure,
                     chances: None,
+                    alone: None,
                 })
             }),
         });
@@ -395,6 +406,11 @@ impl Answer {
         self.found.map(|f| f.sure)
     }
 
+    /// Whether the finder would show its key on its own: as it says itself, or by its confidence cut.
+    fn shown(&self, cut: Option<f64>) -> bool {
+        self.found.is_some_and(|f| f.alone.unwrap_or_else(|| cut.is_some_and(|c| f.sure >= c)))
+    }
+
     /// The chance the finder gave the labelled key, when it gives chances.
     fn chance_of_truth(&self) -> Option<f64> {
         self.found.and_then(|f| f.chances).and_then(|c| c.get(self.truth.index()).copied())
@@ -404,7 +420,8 @@ impl Answer {
 /// One finder's answers to a set of cases.
 pub struct Run {
     pub name: String,
-    pub cut: f64,
+    /// The finder's confidence cut ([`Finder::cut`]).
+    pub cut: Option<f64>,
     pub answers: Vec<Answer>,
     /// Microseconds a case, or `None` when the answers were worked out elsewhere.
     pub micros: Option<f64>,
@@ -477,7 +494,7 @@ pub fn report(title: &str, truth: &str, song: &[usize], runs: &[Run]) {
                 answers.iter().map(|a| a.found.map_or(0.0, |f| f.key.mirex_score(a.truth, both_fifths))).sum();
             100.0 * total / answers.len().max(1) as f64
         };
-        let shown: Vec<&Answer> = answers.iter().filter(|a| a.sure().is_some_and(|c| c >= r.cut)).collect();
+        let shown: Vec<&Answer> = answers.iter().filter(|a| a.shown(r.cut)).collect();
         let right_shown = shown.iter().filter(|a| a.right()).count();
         let of_mode = |minor: bool| {
             let these: Vec<&Answer> = answers.iter().filter(|a| a.truth.is_minor() == minor).collect();

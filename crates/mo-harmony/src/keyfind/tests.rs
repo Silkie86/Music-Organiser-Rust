@@ -6,7 +6,7 @@
 use super::*;
 use crate::chord::Chord;
 use crate::notes::{Note, Role};
-use crate::pitch::PerPitch;
+use crate::pitch::{PerPitch, PitchClass};
 
 /// Ticks in a beat, as most DAWs save them.
 const TPB: u32 = 96;
@@ -108,8 +108,13 @@ fn odd_weights() -> [f64; FEATURES] {
 const ODD_CALIBRATION: Calibration =
     Calibration([0.6, 0.8, 1.1, 1.3, 1.6, -0.2, -0.3, -0.1, 0.4, 0.2, 0.1, -0.1, -0.2, 0.3]);
 
+/// A model with these weights, the odd calibration, and the shipped thresholds.
+fn odd_model(weights: &[f64; FEATURES]) -> Model<'_> {
+    Model { weights, calibration: &ODD_CALIBRATION, ..SHIPPED }
+}
+
 fn odd_chances(heard: &Heard, span: Span) -> [f64; 24] {
-    read_heard(heard, span, &Model { weights: &odd_weights(), calibration: &ODD_CALIBRATION }).chances
+    read_heard(heard, span, &odd_model(&odd_weights())).chances
 }
 
 /// A piece with a tune, chords that move and a bass: C minor, with a raised seventh.
@@ -548,7 +553,7 @@ fn a_reader_used_again_hears_the_same() {
 #[test]
 fn damaged_notes_and_grids_give_an_answer_without_a_crash() {
     let weights = odd_weights();
-    let model = Model { weights: &weights, calibration: &ODD_CALIBRATION };
+    let model = odd_model(&weights);
     let notes = [
         Note { start: i64::MIN, length: -5, key: 127, velocity: 0 },
         Note { start: i64::MAX, length: i64::MAX, key: 255, velocity: u16::MAX },
