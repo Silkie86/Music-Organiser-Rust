@@ -200,7 +200,7 @@ impl fmt::Display for PcSet {
 }
 
 /// Twelve values, one for each pitch class, picked by [`PitchClass`] (so a pick can never miss).
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PerPitch<T>(pub [T; 12]);
 
 impl<T> std::ops::Index<PitchClass> for PerPitch<T> {

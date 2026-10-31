@@ -21,6 +21,17 @@ pip install mido
 python3 -I tools/theorybench/convert/pop909.py path/to/pop909/POP909 path/to/bench/pop909.jsonl
 ```
 
+- **POP909-CL** (MIT licence; Yao, Chen, Dubnov and Berg-Kirkpatrick, ICASSP 2026): 906 of the same songs, the same
+  notes, with labels checked by people: expert-reviewed chords (named by triad and seventh templates, so no 9ths or
+  13ths), corrected bar lines and time signatures, and the key changes POP909 missed. It is the better test of the
+  two, and its weights may ship (with credit).
+
+```
+git clone --filter=blob:none --sparse https://github.com/AndyWeasley2004/POP909-CL-Dataset.git pop909cl
+cd pop909cl && git sparse-checkout set --no-cone '/POP909_processed/*' '/POP909_chord_labels/*'
+python3 -I tools/theorybench/convert/pop909cl.py path/to/pop909cl path/to/bench/pop909cl.jsonl
+```
+
 ## Keys
 
 ```
@@ -38,8 +49,11 @@ For each it prints:
 - **MIREX**: the contest score (1 exact, 0.5 a fifth up, 0.3 the relative key, 0.2 the parallel key).
 - **shown** and **right when shown**: how often the confidence clears the app's cut, and how often it's right then.
 - **major** and **minor**: right, split by the labelled mode.
-- **ECE**: how far the confidence is from a chance of being right (0 is "80% sure" right 80% of the time). The C#
-  app's confidence was never meant as a chance, so its number shows how much a calibrated one would add.
+- **ECE**: how far the confidence is from a chance of being right (0 is "80% sure" right 80% of the time), over ten
+  bins of equal width, then fifteen of equal size. The C# app's confidence was never meant as a chance, so its number
+  shows how much a calibrated one would add.
+- **AURC**: answering only the surest cases, for every number of cases, the average share wrong (lower is better).
+- **NLL** and **Brier**, for a finder that gives a chance to every key: how much its chances say about the truth.
 - what the wrong answers were (a fifth up or down, the relative or parallel key, another key, no key);
 - how often it's right when it answers only its surest cases (if its confidence means anything, this rises);
 - against the first finder: the difference in points, with its range, and McNemar's test.
@@ -47,6 +61,40 @@ For each it prints:
 `--part` hears only the parts with that role; `--aligned` keeps only the songs the C# bench used (four beats a bar,
 labelled bar lines on the MIDI's grid: 387 of POP909's songs); `--bars` sets the clip lengths (a MIDI pack's loop is
 often 1 to 4 bars).
+
+## Fitting the key finder
+
+```
+cargo run -p mo-theorybench --release -- keyfit path/to/bench/pop909cl.jsonl [--lambda-delta 1e-4|inf]
+    [--inputs full,tune,upper,bass,piano] [--picks 8] [--bars 1,2,4,8,16] [--final | --write <weights.rs>]
+```
+
+`keyfit` fits mo-harmony's key finder and measures it on songs held out of each fit, beside the C# app on the same
+notes.
+
+- **Folds.** Each song goes to one of five folds by a hash of its name (`pop909/001`, so POP909 and POP909-CL agree),
+  and songs with the same notes in another key share a fold. Fold 0 is kept back: every choice is made on folds 1 to
+  4, each scored by a finder fitted on the other three. `--final` fits on folds 1 to 4, scores fold 0 once, and adds
+  a line to `test-runs.md`, so how often fold 0 was looked at is on record. `--write` fits on every song and writes
+  `crates/mo-harmony/src/keyfind/weights.rs`.
+- **Cases.** Whole songs (heard as songs), stretches of 1 to 16 bars cut along the bar lines (heard as windows, and
+  scored against the key at their middle, as the C# bench did) and each song's first bars (heard as loops). Each is
+  heard five ways: the full mix, the tune alone, the piano's upper notes, the bass line taken from the piano, and the
+  piano. Only stretches inside one key region are fitted on, at most `--picks` a song for each length; all are scored.
+- **Model.** Each stream's weights are a counted table (the average share of each note above the labelled tonic) times
+  one trust weight, plus a correction for each note held near 0 by `--lambda-delta` (`inf`: the tables alone). The
+  tables a song is fitted with are counted without its own fifth of the songs.
+- **Calibration.** How sure a reading may be comes from held-out scores: a curve over the bars heard (1 to 16, flat
+  past 16), offsets for the kind of input, a curve of its own that a loop adds, and an offset for a song.
+- **Weighting.** Each set of cases (a cut and a kind of input) counts 1 in all, however many cases it has, and whole
+  songs as a full mix count 5. Counting every case the same instead lets the many one-bar windows outvote the rest: on
+  folds 1 to 4 that gave one-bar windows 46.2% (against 42.3%), but songs that change key 72.0% (against 79.6%).
+
+The report's last table gives, for each set, how sure the finder was on average ("sure"): above its share right, it
+was too sure; below, not sure enough.
+
+The report gives the full mix set by set as `keys` does, how the answers would be shown, and a table of every kind of
+input against the C# app on the same notes.
 
 ## Chords
 
@@ -81,3 +129,11 @@ profile gets 66.0% of the clips, as the C# bench measured. Melody alone 71.9%, a
 
 Chords, accompaniment part, all 909 songs: root 88.5%, majmin 81.5%, sevenths 79.4%, mirex 82.1%, bass 90.7%;
 segmentation 91.2, 1.36 chord changes a bar (the labels change 1.47 times a bar).
+
+## The C# baseline on POP909-CL (2026-10-31)
+
+Against the keys and chords people checked, the C# app does a little worse than against POP909's own labels, which
+were made by software much like it. Keys: whole songs with one key 87.8% (85.5 to 90.1; the Aarden-Essen profile
+alone gets 87.7%), songs that change key 69.5%; clips of 1, 2, 4 and 8 bars 29.7%, 44.7%, 62.2% and 75.2%, the
+relative key still the most common miss. Chords, accompaniment part, all 906 songs: root 88.0%, majmin 81.7%, sevenths
+77.8%, mirex 82.9%, bass 92.8%; segmentation 93.9 (mir_eval gives the same numbers).
