@@ -10,7 +10,7 @@ This repo is the Rust rebuild of the C# app. The plan, the inventory of today's 
   scratch folder. Never push to it, never open PRs on it from here. Its C# readers and the format registry
   (`Core/Formats/Registry/*.json`) are the source of truth for file formats.
 - **Layout (spec section 12):** one Cargo workspace, `crates/mo-*` (formats, library, work, audio, sounds, harmony,
-  midi, playground, dawlink, app, ui) and `tools/` (formatlab, theorybench). UI is Slint; screen logic lives in
+  midi, playground, dawlink, convert, app, ui) and `tools/` (formatlab, theorybench). UI is Slint; screen logic lives in
   `mo-app` so it can be tested without a window.
 
 ## Rules carried over (spec section 14)
