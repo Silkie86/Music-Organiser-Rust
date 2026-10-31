@@ -66,7 +66,8 @@ often 1 to 4 bars).
 
 ```
 cargo run -p mo-theorybench --release -- keyfit path/to/bench/pop909cl.jsonl [--lambda-delta 1e-4|inf]
-    [--inputs full,tune,upper,bass,piano] [--picks 8] [--bars 1,2,4,8,16] [--final | --write <weights.rs>]
+    [--inputs full,tune,upper,bass,piano] [--picks 8] [--bars 1,2,4,8,16] [--dump <file>] [--against <file>]
+    [--hand 13,14,16] [--final | --write <weights.rs>]
 ```
 
 `keyfit` fits mo-harmony's key finder and measures it on songs held out of each fit, beside the C# app on the same
@@ -117,6 +118,27 @@ sure; below, not sure enough.
   finder version those numbers were first given with. When any number changed, that's the next version, so the tests
   fail until `KEY_FINDER_VERSION` in `keyfind/mod.rs` is bumped to match and the hand cases' readings are recorded for
   it (`hand_case_tests.rs`): the MIDI page then knows to read every part again.
+
+### Trying a change (the design's experiments)
+
+A change to the finder is tried on folds 1 to 4 only, against the run before it:
+
+```
+cargo run -p mo-theorybench --release -- keyfit path/to/bench/pop909cl.jsonl --dump before.tsv
+(make the change)
+cargo run -p mo-theorybench --release -- keyfit path/to/bench/pop909cl.jsonl --against before.tsv --hand 13,14,16
+```
+
+`--dump` writes how each case came out (right or not, and its log-loss). `--against` pairs each case with itself in
+that file and prints, for every set and kind of input, the share right and the log-loss before and now, each
+difference with its likely range (the songs drawn again, so a song's stretches stay together), and every set that got
+worse beyond its range. The two runs must cut the same cases (the same `--bars` and `--inputs`; `--picks` only changes
+which are fitted on): a dump made otherwise is refused, and cases missing from it are named rather than skipped. A run
+can write its own dump to the file it's compared against. `--hand` prints each fold's model's reading of the hand cases named, to see how near a gate is.
+
+The design keeps a change only if, on folds 1 to 4, 8-bar accuracy rises with its range above 0 (or, for a choice of
+shape or calibration, log-loss falls by at least 0.01 while accuracy falls no more than 0.3 points); no set gets worse
+beyond its range; and no hand case's gate breaks.
 
 ## Chords
 

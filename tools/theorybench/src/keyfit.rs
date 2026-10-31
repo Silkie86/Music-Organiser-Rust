@@ -32,7 +32,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use mo_harmony::keyfind::cases::{Book, Verdict};
+use mo_harmony::keyfind::cases::{self, Book, Verdict};
 use mo_harmony::keyfind::{
     self, CALIBRATION_TERMS, Calibration, Config, FEATURES, KEY_FINDER_VERSION, KeyAnswer, KeyReader, MINOR, STREAMS,
     Span, Stream, Why,
@@ -753,7 +753,12 @@ fn fitted_per_fold(
 }
 
 pub fn run(args: &[String]) -> Result<(), String> {
-    let setup = keys::setup(args, &["--lambda-delta", "--write", "--picks", "--inputs"], &["--final"], &LENGTHS)?;
+    let setup = keys::setup(
+        args,
+        &["--lambda-delta", "--write", "--picks", "--inputs", "--dump", "--against", "--hand"],
+        &["--final"],
+        &LENGTHS,
+    )?;
     if !matches!(setup.parts, keys::Parts::Pitched) {
         return Err("keyfit hears every kind of input itself (--inputs); --part is for `keys`".into());
     }
@@ -761,6 +766,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let mut write: Option<PathBuf> = None;
     let mut picks = PICKS;
     let mut inputs = Input::ALL.to_vec();
+    let mut dump: Option<PathBuf> = None;
+    let mut before: Option<PathBuf> = None;
+    let mut show: Vec<String> = Vec::new();
     for pair in setup.rest.chunks(2) {
         match pair {
             [o, v] if o == "--lambda-delta" => {
@@ -773,6 +781,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
             }
             [o, v] if o == "--write" => write = Some(PathBuf::from(v)),
             [o, v] if o == "--picks" => picks = v.parse().map_err(|_| "--picks needs a whole number")?,
+            [o, v] if o == "--dump" => dump = Some(PathBuf::from(v)),
+            [o, v] if o == "--against" => before = Some(PathBuf::from(v)),
+            [o, v] if o == "--hand" => show = v.split(',').map(|n| n.trim().to_owned()).collect(),
             [o, v] if o == "--inputs" => {
                 inputs = v
                     .split(',')
@@ -791,6 +802,18 @@ pub fn run(args: &[String]) -> Result<(), String> {
     if final_run && write.is_some() {
         return Err("--final scores the kept-back fold; --write fits on every song. One at a time.".into());
     }
+    if (final_run || write.is_some()) && (dump.is_some() || before.is_some()) {
+        return Err(
+            "--dump and --against compare runs on folds 1 to 4, for choosing; not with --final or --write".into()
+        );
+    }
+    // Read before this run writes its own dump, which may go to the same file.
+    let before = before
+        .map(|path| {
+            let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            Ok::<_, String>((path.display().to_string(), text))
+        })
+        .transpose()?;
     let mut lengths = setup.lengths.clone();
     lengths.sort_unstable();
     lengths.dedup();
@@ -849,7 +872,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         let summary = report(&cases, &chances, &answers, &songs, |c| fold(c) == FROZEN, &inputs);
         log_run("--final", &summary, &opts)?;
         let finder = finder(&model.weights, &calibration, &fitted_answers);
-        hand_cases(&[("fitted on folds 1 to 4".to_owned(), finder)])?;
+        hand_cases(&[("fitted on folds 1 to 4".to_owned(), finder)], &show)?;
     } else if let Some(path) = write {
         println!("Every fold held out in turn (fold {FROZEN} included: these weights are the ones that ship):");
         let (held, _) = cross_validate(&cases, &songs, &every, &opts)?;
@@ -870,7 +893,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         println!();
         println!("Fitted on every song: {n} cases, {} Newton steps.", fitted.steps);
         let shipped = finder(&model.weights, &calibration, &fitted_answers);
-        if !hand_cases(&[("fitted on every song".to_owned(), shipped)])? {
+        if !hand_cases(&[("fitted on every song".to_owned(), shipped)], &show)? {
             return Err("these weights break a hand case's gate (above), so they aren't written".into());
         }
         let sources: Vec<&str> = setup.items.iter().map(|i| i.source.as_str()).collect();
@@ -910,15 +933,202 @@ pub fn run(args: &[String]) -> Result<(), String> {
         );
         let answers = answers_of(&cases, &chances, |c| fitted_answers.get(&fold(c)));
         report(&cases, &chances, &answers, &songs, |c| design.contains(&fold(c)), &inputs);
+        if let Some((name, text)) = &before {
+            let was = read_dump(name, text, &cases, &songs)?;
+            let worse = against(&cases, &chances, |c| design.contains(&fold(c)), &inputs, &was);
+            if worse.is_empty() {
+                println!("No set got worse beyond its range.");
+            } else {
+                println!("Worse beyond its range, or not comparable:");
+                for line in worse {
+                    println!("  {line}");
+                }
+            }
+        }
+        if let Some(path) = &dump {
+            std::fs::write(path, dump_text(&cases, &chances, &songs, |c| design.contains(&fold(c))))
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+            println!();
+            println!("Each case's outcome written to {}.", path.display());
+        }
         let finders: Vec<(String, keyfind::Model)> = models
             .iter()
             .filter_map(|(f, m)| {
                 Some((format!("fold {f} held out"), finder(&m.weights, calibrations.get(f)?, fitted_answers.get(f)?)))
             })
             .collect();
-        hand_cases(&finders)?;
+        hand_cases(&finders, &show)?;
     }
     Ok(())
+}
+
+/// The cases of one set heard as one kind of input, among those `keep` takes, in the run's order.
+fn members(cases: &[Case], keep: &dyn Fn(&Case) -> bool, cut: Cut, one_key: Option<bool>, input: Input) -> Vec<usize> {
+    cases
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| keep(c) && c.cut == cut && c.input == input && one_key.is_none_or(|o| c.one_key == o))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// How a case came out: whether the likeliest key is the one labelled, and the log-loss (the chance given to the key
+/// labelled, as -ln).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Outcome {
+    right: bool,
+    nll: f64,
+}
+
+impl Outcome {
+    fn of(case: &Case, chances: &[f64; 24]) -> Outcome {
+        let p = chances.get(case.truth.index()).copied().unwrap_or(0.0);
+        Outcome { right: keyfind::best(chances).0 == case.truth, nll: -p.max(1e-12).ln() }
+    }
+}
+
+/// What a case is, as a dump says it: its song, cut and kind of input (with its place in the run, enough to tell a
+/// dump made with other cases).
+fn identity(case: &Case, songs: &[Song]) -> String {
+    let song = songs.get(case.song).map_or("?", |s| s.name.as_str());
+    format!("{song}\t{}\t{}", case.cut.name(), case.input.name())
+}
+
+/// How each case `keep` takes came out, as `--dump` writes it: a line each, with its place in the run and what it is.
+fn dump_text(cases: &[Case], chances: &[Option<[f64; 24]>], songs: &[Song], keep: impl Fn(&Case) -> bool) -> String {
+    let mut out = String::from("# theorybench keyfit --dump: case, song, cut, input, right (1) or not (0), log-loss\n");
+    for (i, (case, chances)) in cases.iter().zip(chances).enumerate() {
+        if let Some(chances) = chances.as_ref().filter(|_| keep(case)) {
+            let o = Outcome::of(case, chances);
+            let _ = writeln!(out, "{i}\t{}\t{}\t{:?}", identity(case, songs), u8::from(o.right), o.nll);
+        }
+    }
+    out
+}
+
+/// A run's outcomes read back from its dump (`--against`), by place in this run; refused if the dump's cases aren't
+/// this run's (other --bars or --inputs, or other music). Cases missing from it are named by the comparison.
+struct Dump {
+    name: String,
+    outcomes: Vec<Option<Outcome>>,
+}
+
+fn read_dump(name: &str, text: &str, cases: &[Case], songs: &[Song]) -> Result<Dump, String> {
+    let mut outcomes = vec![None; cases.len()];
+    for (n, line) in text.lines().enumerate().filter(|(_, l)| !l.trim().is_empty() && !l.starts_with('#')) {
+        let bad = || format!("{name} line {}: not a line --dump writes", n + 1);
+        let fields: Vec<&str> = line.split('\t').collect();
+        let [i, song, cut, input, right, nll] = fields.as_slice() else { return Err(bad()) };
+        let i: usize = i.parse().map_err(|_| bad())?;
+        let case = cases.get(i).ok_or_else(|| format!("{name}: case {i} isn't in this run"))?;
+        if identity(case, songs) != format!("{song}\t{cut}\t{input}") {
+            return Err(format!(
+                "{name}: case {i} is {song}, {cut}, {input} there but {} here; was it made with other --bars or --inputs?",
+                identity(case, songs).replace('\t', ", ")
+            ));
+        }
+        let right = match *right {
+            "1" => true,
+            "0" => false,
+            _ => return Err(bad()),
+        };
+        let nll: f64 = nll.parse().map_err(|_| bad())?;
+        match outcomes.get_mut(i) {
+            Some(slot @ None) => *slot = Some(Outcome { right, nll }),
+            _ => return Err(format!("{name} line {}: case {i} is there twice", n + 1)),
+        }
+    }
+    Ok(Dump { name: name.to_owned(), outcomes })
+}
+
+/// Prints how this run compares with a run dumped before (`--against`), set by set and input by input: the share
+/// right and the log-loss before and now, and each difference with its likely range (each case paired with itself,
+/// songs drawn again). Gives every set that got worse beyond its range, which a change being chosen mustn't do.
+fn against(
+    cases: &[Case],
+    chances: &[Option<[f64; 24]>],
+    keep: impl Fn(&Case) -> bool,
+    inputs: &[Input],
+    was: &Dump,
+) -> Vec<String> {
+    println!();
+    println!(
+        "=== Against {} (each case in both runs paired with itself; ranges with the songs drawn again) ===",
+        was.name
+    );
+    println!(
+        "{:<30} {:<20} {:>7} {:>7} {:>7}   {:<22} {:>7} {:>7}   difference (range)",
+        "", "", "cases", "before", "now", "difference (range)", "NLL was", "now"
+    );
+    let mut worse = Vec::new();
+    for (cut, one_key) in sets(cases, &keep) {
+        for &input in inputs {
+            let members = members(cases, &keep, cut, one_key, input);
+            let pairs: Vec<(usize, Outcome, Outcome)> = members
+                .iter()
+                .filter_map(|&i| {
+                    let case = cases.get(i)?;
+                    let now = Outcome::of(case, chances.get(i)?.as_ref()?);
+                    Some((case.song, was.outcomes.get(i).copied().flatten()?, now))
+                })
+                .collect();
+            let title = set_title(cut, one_key);
+            // A case with an outcome in only one run (a dump cut short, or a finder that now has no chances there)
+            // can't be paired: say so, rather than compare the rest as if they were all.
+            if pairs.len() < members.len() {
+                worse.push(format!(
+                    "{title}, {}: {} of {} cases not in both runs, left out",
+                    input.name(),
+                    members.len() - pairs.len(),
+                    members.len()
+                ));
+            }
+            if pairs.is_empty() {
+                continue;
+            }
+            let song: Vec<usize> = pairs.iter().map(|p| p.0).collect();
+            let right = |f: fn(&(usize, Outcome, Outcome)) -> bool| pairs.iter().map(f).collect::<Vec<bool>>();
+            let (before, now) = (right(|p| p.1.right), right(|p| p.2.right));
+            let share = |r: &[bool]| r.iter().filter(|r| **r).count() as f64 / r.len() as f64;
+            let p = metrics::paired(&before, &now, &song);
+            let nll = |f: fn(&(usize, Outcome, Outcome)) -> f64| pairs.iter().map(f).sum::<f64>() / pairs.len() as f64;
+            let diff: Vec<f64> = pairs.iter().map(|(_, b, n)| n.nll - b.nll).collect();
+            let d = metrics::mean(&diff, &song);
+            println!(
+                "{:<30} {:<20} {:>7} {:>6.1}% {:>6.1}%   {:<22} {:>7.3} {:>7.3}   {:+.3} ({:+.3} to {:+.3})",
+                title,
+                input.name(),
+                pairs.len(),
+                100.0 * share(&before),
+                100.0 * share(&now),
+                format!("{:+.1} ({:+.1} to {:+.1})", 100.0 * p.diff, 100.0 * p.low, 100.0 * p.high),
+                nll(|p| p.1.nll),
+                nll(|p| p.2.nll),
+                d.value,
+                d.low,
+                d.high,
+            );
+            if p.high < 0.0 {
+                worse.push(format!(
+                    "{title}, {}: {:+.1} points right ({:+.1} to {:+.1})",
+                    input.name(),
+                    100.0 * p.diff,
+                    100.0 * p.low,
+                    100.0 * p.high
+                ));
+            }
+            if d.low > 0.0 {
+                worse.push(format!(
+                    "{title}, {}: log-loss {:+.3} ({:+.3} to {:+.3})",
+                    input.name(),
+                    d.value,
+                    d.low,
+                    d.high
+                ));
+            }
+        }
+    }
+    worse
 }
 
 /// The sets a report is made of, in the order it prints them: whole songs in one key, those that change key, then
@@ -968,12 +1178,7 @@ fn report(
     let right = |answers: &[Answer]| answers.iter().filter(|a| a.right()).count() as f64 / answers.len().max(1) as f64;
     for (cut, one_key) in sets(cases, &keep) {
         for &input in inputs {
-            let members: Vec<usize> = cases
-                .iter()
-                .enumerate()
-                .filter(|(_, c)| keep(c) && c.cut == cut && c.input == input && one_key.is_none_or(|o| c.one_key == o))
-                .map(|(i, _)| i)
-                .collect();
+            let members = members(cases, &keep, cut, one_key, input);
             if members.is_empty() {
                 continue;
             }
@@ -1017,11 +1222,9 @@ fn report(
             let mo_right: Vec<bool> = mo.iter().map(Answer::right).collect();
             let p = metrics::paired(&cs_right, &mo_right, &song);
             let sure: Vec<(Option<f64>, bool)> = mo.iter().map(|a| (a.found.map(|f| f.sure), a.right())).collect();
-            let nll = mo
-                .iter()
-                .filter_map(|a| a.found.and_then(|f| f.chances).map(|c| -c[a.truth.index()].max(1e-12).ln()))
-                .sum::<f64>()
-                / mo.len().max(1) as f64;
+            let nll =
+                members.iter().filter_map(|&i| Some(Outcome::of(&cases[i], chances[i].as_ref()?).nll)).sum::<f64>()
+                    / mo.len().max(1) as f64;
             let mean_sure = sure.iter().filter_map(|s| s.0).sum::<f64>() / mo.len().max(1) as f64;
             compact.push(format!(
                 "{:<30} {:<20} {:>7} {:>7.1}% {:>7.1}% {:>+6.1} ({:+.1} to {:+.1}) {:>5.1}% {:>6.3} {:>6.3} {:>6.3}",
@@ -1120,11 +1323,10 @@ fn graded(cases: &[(&Case, Option<(KeyAnswer, f64)>)]) -> String {
 
 /// Reads the design's hand cases with each fitted model and prints how many models keep each case's gate and meet its
 /// target, with what broke a gate. Returns whether every model keeps every gate.
-fn hand_cases(models: &[(String, keyfind::Model)]) -> Result<bool, String> {
-    let judged: Vec<(&str, Vec<Verdict>)> = models
-        .iter()
-        .map(|(name, model)| Ok((name.as_str(), Book::read(model)?.verdicts())))
-        .collect::<Result<_, String>>()?;
+fn hand_cases(models: &[(String, keyfind::Model)], show: &[String]) -> Result<bool, String> {
+    let books: Vec<(&str, Book)> =
+        models.iter().map(|(name, model)| Ok((name.as_str(), Book::read(model)?))).collect::<Result<_, String>>()?;
+    let judged: Vec<(&str, Vec<Verdict>)> = books.iter().map(|(name, book)| (*name, book.verdicts())).collect();
     let n = judged.len();
     println!();
     println!(
@@ -1160,6 +1362,20 @@ fn hand_cases(models: &[(String, keyfind::Model)]) -> Result<bool, String> {
         println!("Gates broken (the first model to break each case):");
         for line in &broken {
             println!("{line}");
+        }
+    }
+    for name in show {
+        println!("Case {name} (--hand):");
+        for (model, book) in &books {
+            let read = book.readings.iter().find(|(c, _)| c.name == name.as_str()).map(|(_, r)| r);
+            match read {
+                None => println!("  {model}: no case of that name"),
+                Some(None) => println!("  {model}: nothing pitched heard"),
+                Some(Some((_, r))) => {
+                    let top: Vec<String> = r.ranked().iter().take(4).map(|(k, p)| format!("{k} {p:.3}")).collect();
+                    println!("  {model}: {}; {}", cases::describe(r.answer), top.join(", "));
+                }
+            }
         }
     }
     Ok(every)
@@ -1365,6 +1581,65 @@ mod tests {
         let (bass, upper) = split_bass(&notes);
         assert_eq!(bass.iter().map(|n| n.key).collect::<Vec<_>>(), [36, 31]);
         assert_eq!(upper.len(), 5);
+    }
+
+    /// A whole song as a full mix, labelled C major, with no evidence (the comparison only reads chances).
+    fn song_case(song: usize) -> Case {
+        let ev = Evidence { x: [[0.0; 12]; STREAMS], bars: 8, config: Config::Full, diatonic_fit: 0.9, notes: 20 };
+        let truth = Key::major(PitchClass::C);
+        Case { song, truth, cut: Cut::Song, input: Input::Full, one_key: true, pick: true, ev, cs: None }
+    }
+
+    /// Chances giving C major `p` and A minor the rest.
+    fn c_or_a(p: f64) -> Option<[f64; 24]> {
+        let mut chances = [0.0; 24];
+        chances[Key::major(PitchClass::C).index()] = p;
+        chances[Key::minor(PitchClass::A).index()] = 1.0 - p;
+        Some(chances)
+    }
+
+    #[test]
+    fn a_dumped_run_is_read_back_case_by_case() {
+        let songs: Vec<Song> = (0..3).map(|i| Song { name: format!("pop909/{i:03}"), fold: 1, inner: 0 }).collect();
+        let cases: Vec<Case> = (0..3).map(song_case).collect();
+        let chances = vec![c_or_a(0.9), c_or_a(0.2), None];
+        let text = dump_text(&cases, &chances, &songs, |_| true);
+        assert!(text.contains("0\tpop909/000\tWhole songs\tfull mix\t1\t"), "{text}");
+        let was = read_dump("before.tsv", &text, &cases, &songs).unwrap();
+        assert_eq!(was.outcomes[0], Some(Outcome { right: true, nll: -(0.9f64.ln()) }));
+        assert_eq!(was.outcomes[1].map(|o| o.right), Some(false));
+        assert_eq!(was.outcomes[2], None, "a case with no chances isn't written");
+        // A dump made with other cases is refused, not compared.
+        let other: Vec<Case> = (0..3).map(|i| Case { input: Input::Tune, ..song_case(i) }).collect();
+        let refused = read_dump("before.tsv", &text, &other, &songs).err().unwrap();
+        assert!(refused.contains("tune only here"), "{refused}");
+        assert!(read_dump("before.tsv", "0\tpop909/000\tWhole songs\tfull mix\t2\t0.1\n", &cases, &songs).is_err());
+        // Blank lines are skipped; a case written twice is refused.
+        assert!(read_dump("before.tsv", &format!("\n{text}\n\n"), &cases, &songs).is_ok());
+        let twice = read_dump("before.tsv", &format!("{text}{text}"), &cases, &songs).err().unwrap();
+        assert!(twice.contains("case 0 is there twice"), "{twice}");
+    }
+
+    #[test]
+    fn a_set_that_got_worse_beyond_its_range_is_named() {
+        let songs: Vec<Song> = (0..60).map(|i| Song { name: format!("pop909/{i:03}"), fold: 1, inner: 0 }).collect();
+        let cases: Vec<Case> = (0..60).map(song_case).collect();
+        let sure: Vec<Option<[f64; 24]>> = (0..60).map(|_| c_or_a(0.9)).collect();
+        let was = read_dump("before.tsv", &dump_text(&cases, &sure, &songs, |_| true), &cases, &songs).unwrap();
+        // The same chances: nothing got worse.
+        assert!(against(&cases, &sure, |_| true, &[Input::Full], &was).is_empty());
+        // A third of the songs now wrong: the share right and the log-loss both got worse beyond their ranges.
+        let worse: Vec<Option<[f64; 24]>> = (0..60).map(|i| c_or_a(if i % 3 == 0 { 0.3 } else { 0.9 })).collect();
+        let named = against(&cases, &worse, |_| true, &[Input::Full], &was);
+        assert_eq!(named.len(), 2, "{named:?}");
+        assert!(named[0].starts_with("Whole songs with one key, full mix: -33.3 points right"), "{named:?}");
+        assert!(named[1].contains("log-loss +"), "{named:?}");
+        // A dump cut short: the cases it lacks are named, not quietly left out.
+        let short: String =
+            dump_text(&cases, &sure, &songs, |_| true).lines().take(41).map(|l| format!("{l}\n")).collect();
+        let was = read_dump("before.tsv", &short, &cases, &songs).unwrap();
+        let named = against(&cases, &sure, |_| true, &[Input::Full], &was);
+        assert_eq!(named, ["Whole songs with one key, full mix: 20 of 60 cases not in both runs, left out"]);
     }
 
     #[test]
