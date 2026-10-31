@@ -20,7 +20,7 @@ measure that differs.
 
 | What | C# | Rust | Judged |
 |---|---|---|---|
-| Key found in the audio (chroma against key profiles) | Done for tonal loops and sounds over 1.5 s with no key in the name. | Waits for the harmony engine (phase 6), which Solomon wants rebuilt rather than copied. Until then such a sound gets its root note's key (one-shots) or none (loops). Sounds already in sounds.db keep the C# key. | Not yet (waiting on Solomon's choice) |
+| Key found in the audio (chroma against key profiles) | Done for tonal loops and sounds over 1.5 s with no key in the name. | Waits for the harmony engine (phase 6), which Solomon wants rebuilt rather than copied. Until then such a sound gets its root note's key (one-shots) or none (loops). Sounds already in sounds.db keep the C# key. | Not yet (Solomon, 2026-10-31: keys from names only until the harmony engine) |
 | Chord name (stabs) and chords over time (loops) | Template matching and a smoothing pass. | Left to the harmony engine, as above. | Not yet |
 | The mel filters for a sample rate | Made once and kept, behind a lock. | The same. | Same |
 | The chroma's lowest bin at a sample rate over 400 kHz | Read one place before the start, and failed. | Starts one bin higher. | Better (no real file has that rate) |
