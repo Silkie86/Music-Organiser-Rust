@@ -59,7 +59,7 @@ const USAGE: &str =
     "twin run --cs <helper> <folder or file>... [--report <file>] [--expect <file>] [--write-expect <file>]
 twin dump <file>
 twin songs --cs <helper> <library.db> [--report <file>]
-twin sounds --cs <helper> <folder to make the test sounds in>";
+twin sounds --cs <helper> <folder> (makes and removes its own test-sound folder inside it)";
 
 /// How many files are read (by both apps) before their readings are compared and let go.
 const CHUNK: usize = 256;
@@ -118,6 +118,9 @@ fn run_songs(args: &[String]) -> Result<bool, String> {
 /// Runs the sounds twin. `Ok(false)` when a measure differs that isn't judged.
 fn run_sounds(args: &[String]) -> Result<bool, String> {
     let o = options(args)?;
+    if o.report.is_some() || o.expect.is_some() || o.write_expect.is_some() {
+        return Err(format!("sounds takes only --cs and a folder: it prints every difference.\n{USAGE}"));
+    }
     let (Some(helper), [dir]) = (&o.cs, o.inputs.as_slice()) else { return Err(USAGE.to_owned()) };
     sounds::run(helper, dir)
 }

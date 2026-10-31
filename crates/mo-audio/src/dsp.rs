@@ -3,10 +3,15 @@
 
 use std::f64::consts::PI;
 
-/// In-place radix-2 complex FFT. `re` and `im` must be the same length, a power of two.
+/// In-place radix-2 complex FFT. `re` and `im` must be the same length, a power of two; anything else is a mistake in
+/// the caller (a debug build stops on it; a release build leaves the numbers as they are).
 pub fn fft(re: &mut [f64], im: &mut [f64]) {
-    let n = re.len().min(im.len());
-    if !n.is_power_of_two() {
+    let n = re.len();
+    debug_assert!(
+        n == im.len() && (n == 0 || n.is_power_of_two()),
+        "fft needs two lists of the same power-of-two length"
+    );
+    if n != im.len() || !n.is_power_of_two() {
         return;
     }
     let mut j = 0usize;
@@ -131,14 +136,13 @@ pub fn mel_to_hz(mel: f64, scale: MelScale) -> f64 {
     }
 }
 
-/// A triangular mel filter bank: for each spectrum bin, its weight in each mel band (Hugging Face `mel_filter_bank`
-/// layout, bins × mels).
+/// A triangular mel filter bank (Hugging Face `mel_filter_bank`): each mel band's weights over the spectrum's bins.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MelFilters {
     pub bins: usize,
     pub mels: usize,
-    /// `bins * mels` weights, bin by bin.
-    pub weights: Vec<f64>,
+    /// For each band, the first bin it covers and its weights from there; the bins outside weigh nothing.
+    pub bands: Vec<(usize, Vec<f64>)>,
 }
 
 impl MelFilters {
@@ -156,35 +160,49 @@ impl MelFilters {
         let freqs: Vec<f64> = (0..mels + 2)
             .map(|i| mel_to_hz(mel_min + (mel_max - mel_min) * i as f64 / (mels + 1) as f64, scale))
             .collect();
-        let mut weights = vec![0.0; bins * mels];
         // C# divides the rate by 2 in whole numbers first.
         let nyquist = f64::from(sample_rate / 2);
-        for k in 0..bins {
-            let f = nyquist * k as f64 / bins.saturating_sub(1).max(1) as f64;
-            for m in 0..mels {
-                let down = (f - freqs[m]) / (freqs[m + 1] - freqs[m]);
-                let up = (freqs[m + 2] - f) / (freqs[m + 2] - freqs[m + 1]);
-                let mut v = down.min(up).max(0.0);
-                if slaney_norm {
-                    v *= 2.0 / (freqs[m + 2] - freqs[m]);
-                }
-                weights[k * mels + m] = v;
-            }
-        }
-        MelFilters { bins, mels, weights }
+        let bands = (0..mels)
+            .map(|m| {
+                let weights: Vec<f64> = (0..bins)
+                    .map(|k| {
+                        let f = nyquist * k as f64 / bins.saturating_sub(1).max(1) as f64;
+                        let down = (f - freqs[m]) / (freqs[m + 1] - freqs[m]);
+                        let up = (freqs[m + 2] - f) / (freqs[m + 2] - freqs[m + 1]);
+                        let v = down.min(up).max(0.0);
+                        if slaney_norm { v * 2.0 / (freqs[m + 2] - freqs[m]) } else { v }
+                    })
+                    .collect();
+                // Kept from the first bin that weighs anything to the last, so applying it skips the rest.
+                let first = weights.iter().position(|w| *w != 0.0).unwrap_or(weights.len());
+                let last = weights.iter().rposition(|w| *w != 0.0).map_or(first, |l| l + 1);
+                (first, weights[first..last].to_vec())
+            })
+            .collect();
+        MelFilters { bins, mels, bands }
     }
 
-    /// Applies the bank to a power spectrogram: one row of `mels` values per frame.
+    /// A bin's weight in a band.
+    pub fn weight(&self, bin: usize, band: usize) -> f64 {
+        self.bands
+            .get(band)
+            .and_then(|(first, w)| bin.checked_sub(*first).and_then(|i| w.get(i)))
+            .copied()
+            .unwrap_or(0.0)
+    }
+
+    /// Applies the bank to a power spectrogram: one row of `mels` values per frame. The bins are added in order and
+    /// the ones weighing nothing skipped, as C# does, so the sums come out the same.
     pub fn apply(&self, spec: &[Vec<f32>]) -> Vec<Vec<f32>> {
         spec.iter()
             .map(|s| {
-                (0..self.mels)
-                    .map(|m| {
+                self.bands
+                    .iter()
+                    .map(|(first, weights)| {
                         let mut acc = 0.0;
-                        for (k, &p) in s.iter().enumerate().take(self.bins) {
-                            let w = self.weights[k * self.mels + m];
-                            if w != 0.0 {
-                                acc += w * f64::from(p);
+                        for (w, p) in weights.iter().zip(s.iter().skip(*first)) {
+                            if *w != 0.0 {
+                                acc += w * f64::from(*p);
                             }
                         }
                         acc as f32
@@ -198,8 +216,12 @@ impl MelFilters {
 /// Band-limited (windowed-sinc) resampling from `from` to `to` samples a second. Good enough for analysis and kit
 /// exports.
 pub fn resample(x: &[f32], from: u32, to: u32) -> Vec<f32> {
-    if from == to || x.is_empty() || from == 0 || to == 0 {
+    if from == to || x.is_empty() {
         return x.to_vec();
+    }
+    // No rate to go to (or from): nothing comes out. C# gives none for `to` 0 too; for `from` 0 it went wrong.
+    if from == 0 || to == 0 {
+        return Vec::new();
     }
     let ratio = f64::from(to) / f64::from(from);
     let out_len = (x.len() as f64 * ratio).ceil() as usize;
@@ -266,13 +288,24 @@ mod tests {
     #[test]
     fn mel_filters_are_triangles_that_cover_the_band() {
         let fb = MelFilters::new(1025, 40, 20.0, 16_000.0, 44_100, MelScale::Slaney, true);
-        assert_eq!(fb.weights.len(), 1025 * 40);
-        assert!(fb.weights.iter().all(|w| *w >= 0.0));
+        assert_eq!(fb.bands.len(), 40);
         for m in 0..40 {
-            assert!((0..1025).any(|k| fb.weights[k * 40 + m] > 0.0), "band {m} is empty");
+            assert!((0..1025).any(|k| fb.weight(k, m) > 0.0), "band {m} is empty");
+            assert!((0..1025).all(|k| fb.weight(k, m) >= 0.0));
         }
-        let spec = vec![vec![1.0f32; 1025]];
-        assert_eq!(fb.apply(&spec)[0].len(), 40);
+        // Applying it is the plain sum over every bin.
+        let spec = vec![(0..1025).map(|k| (k % 7) as f32).collect::<Vec<f32>>()];
+        let got = fb.apply(&spec);
+        for (m, got) in got[0].iter().enumerate() {
+            let mut want = 0.0;
+            for (k, p) in spec[0].iter().enumerate() {
+                let w = fb.weight(k, m);
+                if w != 0.0 {
+                    want += w * f64::from(*p);
+                }
+            }
+            assert_eq!(*got, want as f32);
+        }
     }
 
     #[test]
@@ -282,5 +315,6 @@ mod tests {
         assert_eq!(y.len(), (1000.0f64 * 22_050.0 / 48_000.0).ceil() as usize);
         assert!(y.iter().all(|v| (v - 0.25).abs() < 1e-5));
         assert_eq!(resample(&x, 44_100, 44_100), x);
+        assert!(resample(&x, 44_100, 0).is_empty());
     }
 }

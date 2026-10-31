@@ -31,3 +31,8 @@ The C# `OpenAlPlayer` (OpenAL Soft through Silk.NET) is the guide; `play::Player
 | Noticing outputs come and go | Windows tells it; on a Mac or Linux it looked every few seconds. | When an output goes, cpal says so and the player reopens; when Windows moves the sound to a new default itself, the name shown follows. A new sound looks at most every 3 s whether the chosen output came back or the default moved, and `check()` looks at once. Moving opens the new output before closing the old, so an output that won't open (a DAW has it) doesn't cut the sound. | Same, and better when the chosen output is taken |
 | An output that keeps going | Reopened up to 3 times a sound; after one wouldn't open, a sound tried again 2 s later. | The same. A sound waiting for an output tries again by itself after 2 s, and sounds swept meanwhile don't each try. After the third try the sound stops and the app is told (`on_end`), so it never shows as playing for ever. | Same |
 | Long files | Streamed from the disk as they play. | Plays what's been read into memory; streaming comes with the Sounds page (it's how the page will hand sounds to the player). | Not yet |
+
+## Signal processing (`dsp`)
+
+A step-for-step port of `Dsp.cs`. Resampling to (or from) a rate of 0 gives nothing in Rust; C# gave nothing for a
+target of 0 and went wrong for a source of 0. Judged better; no caller asks for either.

@@ -13,7 +13,7 @@ name = "twin"
 path = "src/main.rs"
 
 [dependencies]
-mo-audio = { path = "../../crates/mo-audio" }
+mo-audio = { path = "../../crates/mo-audio", default-features = false }
 mo-formats = { path = "../../crates/mo-formats" }
 mo-library = { path = "../../crates/mo-library" }
 mo-sounds = { path = "../../crates/mo-sounds" }

@@ -24,3 +24,5 @@ measure that differs.
 | Chord name (stabs) and chords over time (loops) | Template matching and a smoothing pass. | Left to the harmony engine, as above. | Not yet |
 | The mel filters for a sample rate | Made once and kept, behind a lock. | The same. | Same |
 | The chroma's lowest bin at a sample rate over 400 kHz | Read one place before the start, and failed. | Starts one bin higher. | Better (no real file has that rate) |
+| Where pitch is looked for in a long, high-rate sound with a long silent start (192 kHz, ~56 s of silence) | Worked out in 32-bit whole numbers, which wrapped, so it looked in the wrong place. | Worked out in 64-bit, so it looks just after the silence. | Better |
+| A damaged header with a sample rate under 60 | YIN read past its buffer and the analysis failed. | No pitch is looked for; the rest is measured. | Better |

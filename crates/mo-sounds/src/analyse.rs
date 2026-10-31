@@ -160,7 +160,10 @@ pub fn analyse(audio: &AudioData, path: &str) -> Analysed {
     let mut centroids = Vec::with_capacity(active.len());
     let (mut bandwidth_sum, mut rolloff_sum, mut flat_sum, mut flux_sum) = (0.0, 0.0, 0.0, 0.0);
     let mut bands = [0f64; 5];
-    let mut prev_mag: Option<Vec<f32>> = None;
+    // Two buffers of magnitudes, this frame's and the last one's, swapped each frame.
+    let mut mag = vec![0f32; bins];
+    let mut prev_mag = vec![0f32; bins];
+    let mut first = true;
     for &i in &active {
         let f = &spec[i];
         let (mut total, mut weighted) = (0f64, 0f64);
@@ -194,15 +197,18 @@ pub fn analyse(audio: &AudioData, path: &str) -> Analysed {
         }
         let m = (bins - 1) as f64;
         flat_sum += if lin_sum > 0.0 { (log_sum / m).exp() / (lin_sum / m) } else { 0.0 };
-        let mag: Vec<f32> = f.iter().map(|p| f64::from(*p).sqrt() as f32).collect();
-        if let Some(prev) = &prev_mag {
+        for (m, p) in mag.iter_mut().zip(f) {
+            *m = f64::from(*p).sqrt() as f32;
+        }
+        if !first {
             let mut fl = 0f64;
-            for (m, pm) in mag.iter().zip(prev) {
+            for (m, pm) in mag.iter().zip(&prev_mag) {
                 fl += f64::from((m - pm).max(0.0));
             }
             flux_sum += fl / 1e-9f64.max(f64::from(sum_f32(&mag)));
         }
-        prev_mag = Some(mag);
+        first = false;
+        std::mem::swap(&mut mag, &mut prev_mag);
         for (k, &p) in f.iter().enumerate().take(bins).skip(1) {
             let hz = k as f64 * bin_hz;
             let b = if hz < 60.0 {
@@ -384,11 +390,14 @@ fn mel_bank(sr: u32) -> Arc<MelFilters> {
 
 /// MFCCs: an orthonormal DCT-II of the log-mel frame, scaled down to keep the features comparable.
 fn mfcc_of(mel_frame: &[f32]) -> [f64; MFCCS] {
-    let log_mel: Vec<f64> = mel_frame.iter().map(|v| 10.0 * f64::from(*v).max(1e-10).log10()).collect();
+    let mut log_mel = [0f64; MELS];
+    for (l, v) in log_mel.iter_mut().zip(mel_frame) {
+        *l = 10.0 * f64::from(*v).max(1e-10).log10();
+    }
     let mut c = [0f64; MFCCS];
     for (k, ck) in c.iter_mut().enumerate() {
         let mut s = 0.0;
-        for (m, l) in log_mel.iter().enumerate().take(MELS) {
+        for (m, l) in log_mel.iter().enumerate() {
             s += l * (std::f64::consts::PI * k as f64 * (m as f64 + 0.5) / MELS as f64).cos();
         }
         *ck = s * ((if k == 0 { 1.0 } else { 2.0 }) / MELS as f64).sqrt() / 10.0;
@@ -591,6 +600,10 @@ fn autocorr(o: &[f64], lag: f64) -> f64 {
 pub fn yin(x: &[f32], sr: usize, start: usize, f_min: f64, f_max: f64) -> (Option<f64>, f64) {
     let max_lag = (sr as f64 / f_min) as usize;
     let min_lag = ((sr as f64 / f_max) as usize).max(2);
+    // A rate too low to hold the lowest pitch (only a damaged header says so): nothing to find.
+    if max_lag <= min_lag {
+        return (None, 0.0);
+    }
     let w = (max_lag * 2).min(sr / 5);
     let mut results: Vec<(f64, f64)> = Vec::new();
     let mut d = vec![0f64; max_lag + 1];
@@ -770,6 +783,14 @@ mod tests {
             assert_eq!(a.analysis.pitch, None);
         }
         assert_eq!(analyse(&AudioData::default(), "x.wav").analysis.seconds, 0.0);
+    }
+
+    #[test]
+    fn a_damaged_header_with_a_tiny_rate_doesnt_crash() {
+        for rate in [0, 1, 8, 22, 59, 60, 61] {
+            let a = analyse(&audio(rate, vec![noise(5000, 0.5)]), "x.wav");
+            assert!(a.features.iter().all(|f| f.is_finite()), "{rate}");
+        }
     }
 
     #[test]

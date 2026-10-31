@@ -9,6 +9,7 @@
 
 pub mod dsp;
 mod other;
+#[cfg(feature = "play")]
 pub mod play;
 mod read;
 mod write;

@@ -1,6 +1,6 @@
 //! The sounds twin: both apps analyse the same test sounds (made here, so none is anyone's sample) and every measure
 //! that differs is listed. The C# analyser runs unchanged through the helper's `--sounds`; the Rust one is
-//! `mo_sounds::analyse`.
+//! `mo_sounds::analyse`. The sounds go in a new folder of their own inside the one given, removed afterwards.
 //!
 //! Finding a key and chords in the audio is left to the harmony engine (phase 6), so where the C# app found those
 //! itself, they're counted as judged and not compared (see crates/mo-sounds/DIFFERENCES.md).
@@ -99,9 +99,11 @@ fn made() -> Vec<Made> {
     ]
 }
 
-/// Writes the test sounds into `dir` and gives their paths.
+/// The folder made inside the one given for the test sounds; it must not be there already, and it's removed after.
+const OWN_FOLDER: &str = "mo-twin-sounds";
+
+/// Writes the test sounds into `dir` (a folder just made for them) and gives their paths.
 fn write_sounds(dir: &Path) -> Result<Vec<PathBuf>, String> {
-    std::fs::create_dir_all(dir).map_err(|e| format!("Couldn't make {}: {e}", dir.display()))?;
     made()
         .into_iter()
         .map(|m| {
@@ -133,12 +135,21 @@ fn same(cs: &Value, rust: &Value) -> bool {
 }
 
 /// Runs the sounds twin into `dir`. `Ok(false)` when a measure differs that isn't judged.
-pub fn run(helper: &Path, dir: &Path) -> Result<bool, String> {
-    let files = write_sounds(dir)?;
-    let cs = crate::run_helper_with(helper, &["--sounds"], &files)?;
+pub fn run(helper: &Path, parent: &Path) -> Result<bool, String> {
+    let dir = parent.join(OWN_FOLDER);
+    // A new folder only, so a test sound can never land on (or beside) a real sample. One left from a run that was
+    // stopped is reported, not removed: the tool removes only a folder it has just made.
+    std::fs::create_dir(&dir).map_err(|e| format!("Couldn't make a new folder {}: {e}", dir.display()))?;
+    let outcome = write_sounds(&dir).and_then(|files| compare(helper, &files));
+    let _ = std::fs::remove_dir_all(&dir);
+    outcome
+}
+
+fn compare(helper: &Path, files: &[PathBuf]) -> Result<bool, String> {
+    let cs = crate::run_helper_with(helper, &["--sounds"], files)?;
     let mut differences = Vec::new();
     let mut judged = 0usize;
-    for file in &files {
+    for file in files {
         let key = file.to_string_lossy().into_owned();
         let name = file.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
         let Some(cs) = cs.get(&key) else {
@@ -159,7 +170,8 @@ pub fn run(helper: &Path, dir: &Path) -> Result<bool, String> {
             }
         };
         let Some(Value::Object(cs)) = cs.get("analysis") else {
-            differences.push(format!("{name}: C# couldn't analyse it: {}", cs.get("error").unwrap_or(&Value::Null)));
+            let why = cs.get("error").or_else(|| cs.get("error_more")).unwrap_or(&Value::Null);
+            differences.push(format!("{name}: C# couldn't analyse it: {why}"));
             continue;
         };
         let detected_key = cs.get("KeySource").and_then(Value::as_str) == Some("detected");
