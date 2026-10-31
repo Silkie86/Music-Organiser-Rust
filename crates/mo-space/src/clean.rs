@@ -19,6 +19,7 @@ use std::fs::{self, Metadata};
 use std::io::Read;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Local, NaiveDateTime};
@@ -30,7 +31,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::admin::{Admin, AsAdmin, NoAdmin, Step, ask_for, reason, stamp};
 use crate::plugin_space::SpaceKind;
-use crate::size::is_online_only;
+use crate::size::{Stopped, has_online_only, is_online_only};
 use crate::song::{CompactItem, CompactKind, has_studio_one_song, parent};
 use crate::{key, not_there, real_path};
 
@@ -464,14 +465,27 @@ pub(crate) const ONLINE_ONLY: &str = "It's only online in OneDrive (all of it or
                                       Recycle Bin: removing it would delete it from OneDrive everywhere. It stays.";
 
 /// Why the Recycle Bin couldn't keep something, so removing it would delete it for good: it's on a network drive, which
-/// has no Recycle Bin, or it's a OneDrive file that's only online. Each clean-up checks this itself first (inside a
-/// folder too, where it can say more); [`Sending::send`] checks it once more for all of them.
-fn cant_keep(path: &str, real: &str) -> Option<&'static str> {
+/// has no Recycle Bin, or it's a OneDrive file that's only online, or a folder holding one (only Windows has them, so
+/// only there is a folder walked). Each clean-up checks this itself first, where it can say more; [`Sending::send`]
+/// checks it once more for all of them, whichever clean-up they come from.
+pub(crate) fn cant_keep(path: &str, real: &str, stop: &AtomicBool) -> Option<&'static str> {
     if on_network(path) || on_network(real) {
         return Some(Refused::NetworkDrive.text());
     }
-    fs::symlink_metadata(path).is_ok_and(|m| is_online_only(&m)).then_some(ONLINE_ONLY)
+    let meta = fs::symlink_metadata(path).ok()?;
+    let online = if meta.is_dir() {
+        match has_online_only(Path::new(path), stop) {
+            Ok(online) => online,
+            Err(Stopped) => return Some(STOPPED),
+        }
+    } else {
+        is_online_only(&meta)
+    };
+    online.then_some(ONLINE_ONLY)
 }
+
+/// What's said of something that stays because you pressed Stop.
+pub(crate) const STOPPED: &str = "Stopped before it went.";
 
 /// What [`Bin::find`] says of something that went but isn't in the bin.
 pub(crate) const NOT_IN_BIN: &str = "It isn't in the Recycle Bin, so it may have been removed for good.";
@@ -519,7 +533,7 @@ impl<'a> Sending<'a> {
         again: impl Fn() -> Result<(), String> + 'a,
     ) -> Sent {
         // Whichever clean-up it's from: what the Recycle Bin can't keep stays, as removing it would delete it for good.
-        if let Some(why) = cant_keep(path, &real) {
+        if let Some(why) = cant_keep(path, &real, &AtomicBool::new(false)) {
             done.problems.push(Problem { path: path.to_owned(), why: why.to_owned() });
             return Sent::Stays;
         }

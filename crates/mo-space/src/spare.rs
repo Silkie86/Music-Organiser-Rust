@@ -7,7 +7,7 @@
 //! every copy of that plugin counts as used. [`remove`] sends the ones you pick to the Recycle Bin, each checked again
 //! just before.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
@@ -16,10 +16,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use mo_formats::case;
 
 use crate::admin::stamp;
-use crate::clean::{Bin, Done, ONLINE_ONLY, Problem, Refused, Sending, What};
+use crate::clean::{Bin, Done, Problem, Refused, STOPPED, Sending, What, cant_keep};
 use crate::plugin_space::SpaceKind;
 use crate::plugins::{InstalledPlugin, family, format_of, is_waves};
-use crate::size::{has_online_only, is_online_only, measure};
+use crate::size::{Stopped, is_link, measure};
 use crate::{key, real_path};
 
 /// A plugin file in a format none of your projects use, while the format they do use is installed too.
@@ -29,7 +29,9 @@ pub struct SpareCopy {
     pub format: String,
     pub path: String,
     pub bytes: u64,
-    /// What it held when it was found ([`look`]): it only goes while it still holds just that.
+    /// What it held when it was found ([`look`]): it only goes while it still holds just that. `None` when it can't go
+    /// (a link, on a network drive, only online in OneDrive, or some of it couldn't be read): it's listed so you see
+    /// it, but [`SpareCopy::can_remove`] says no.
     pub stamp: Option<String>,
     pub why: Why,
 }
@@ -45,6 +47,11 @@ pub enum Why {
 }
 
 impl SpareCopy {
+    /// Whether [`remove`] may send it to the Recycle Bin (the app greys out picking one that can't go).
+    pub fn can_remove(&self) -> bool {
+        self.stamp.is_some()
+    }
+
     /// What the app says, as the C# app says it.
     pub fn why_text(&self) -> String {
         match &self.why {
@@ -154,9 +161,12 @@ pub fn find(
 }
 
 /// How much room a plugin file or bundle takes here (a link, or a OneDrive file that's only online, takes none) and
-/// what it holds now, for [`SpareCopy::stamp`]. The app passes it to [`find`].
+/// what it holds now, for [`SpareCopy::stamp`] (none for one that can't go). The app passes it to [`find`].
 pub fn look(path: &str, stop: &AtomicBool) -> (u64, Option<String>) {
-    (measure(Path::new(path), stop).map_or(0, |m| m.bytes), stamp_of(path))
+    let Ok(measured) = measure(Path::new(path), stop) else { return (0, None) };
+    let can_go = !is_link(Path::new(path))
+        && real_path(path).is_some_and(|real| cant_keep(path, &real, stop).is_none() && !stop.load(Ordering::Relaxed));
+    (measured.bytes, if can_go { stamp_of(path) } else { None })
 }
 
 /// Where a copy really is and what it holds (each file inside, its size and time): a folder on the way to it that
@@ -167,30 +177,40 @@ fn stamp_of(path: &str) -> Option<String> {
 }
 
 /// Sends the spare copies you picked to the Recycle Bin. Each is checked again just before it goes: it must still be
-/// there, a plugin file or bundle of its format, not a link, not only online in OneDrive, and hold just what it held
-/// when it was found (an update since keeps it); it must still be spare in `now` (found again just now, against your
-/// projects as they are now: a song saved since may use its format, Pro Tools may be installed since); and the copy
-/// your projects use must still be there. Copies Windows guards (Program Files) all go in one administrator step at the
-/// end, so Windows asks once, and each is checked again just before it asks.
+/// there, a plugin file or bundle of its format, not a link, not on a network drive or only online in OneDrive, and
+/// hold just what it held when it was found (an update since keeps it); it must still be spare in `now` (found again
+/// just now, against your projects and Pro Tools as they are now; only its paths and reasons count, so the app can find
+/// it with a look that measures nothing, `|_| (0, None)`); and the copy your projects use must still be there and hold
+/// something. Copies Windows guards (Program Files) all go in one administrator step at the end, so Windows asks once,
+/// and each is checked again just before it asks.
 pub fn remove(picked: &[SpareCopy], now: &[SpareCopy], bin: &dyn Bin, stop: &AtomicBool) -> Done {
     let mut done = Done::default();
     let now: HashMap<String, &SpareCopy> = now.iter().map(|n| (key(&n.path), n)).collect();
     let now = &now;
     let mut sending = Sending::new(bin);
-    let mut seen = HashSet::new();
-    for copy in picked {
-        let copy_key = key(&copy.path);
-        if !seen.insert(copy_key.clone()) {
+    // Each file once, by where it really is (worked out before any goes): the first path picked to it, by that place.
+    let reals: Vec<String> = picked.iter().map(|c| real_path(&c.path).unwrap_or_else(|| c.path.clone())).collect();
+    let mut seen: HashMap<String, &str> = HashMap::new();
+    for (copy, real) in picked.iter().zip(reals) {
+        if let Some(first) = seen.get(&key(&real)) {
+            if key(first) != key(&copy.path) {
+                let why = format!("It's the same file as {first}, reached another way, so it's only sent once.");
+                done.problems.push(Problem { path: copy.path.clone(), why });
+            }
             continue;
         }
+        seen.insert(key(&real), &copy.path);
+        let copy_key = key(&copy.path);
         let check = move || -> Result<(), String> {
             if stop.load(Ordering::Relaxed) {
-                return Err("Stopped before it went.".to_owned());
+                return Err(STOPPED.to_owned());
             }
             still_the_copy(copy, stop)?;
             let Some(found) = now.get(&copy_key) else {
                 return Err(match copy.why {
-                    Why::NoProTools => "Pro Tools is on this computer now, so it stays.".to_owned(),
+                    Why::NoProTools => {
+                        "It isn't spare any more (Pro Tools may be on this computer now), so it stays.".to_owned()
+                    }
                     Why::OtherFormatsUsed { .. } => format!(
                         "It isn't spare any more (a project saved since may use its {}, or the copy your projects use \
                          was removed), so it stays.",
@@ -198,33 +218,37 @@ pub fn remove(picked: &[SpareCopy], now: &[SpareCopy], bin: &dyn Bin, stop: &Ato
                     ),
                 });
             };
-            match &found.why {
-                Why::NoProTools => Ok(()),
-                // A link whose file has gone doesn't count: Windows can't load the plugin from it.
-                Why::OtherFormatsUsed { used, used_copies, .. }
-                    if !used_copies.iter().any(|c| fs::metadata(c).is_ok()) =>
-                {
-                    Err(format!(
-                        "The {} copy your projects use isn't there now, so this one stays.",
-                        used.join(" and ")
-                    ))
+            let Why::OtherFormatsUsed { used, used_copies, .. } = &found.why else { return Ok(()) };
+            for used_copy in used_copies {
+                if usable(used_copy, stop).map_err(|_| STOPPED.to_owned())? {
+                    return Ok(());
                 }
-                Why::OtherFormatsUsed { .. } => Ok(()),
             }
+            Err(format!(
+                "The {} copy your projects use isn't there now (or holds nothing here: empty, or only online in \
+                 OneDrive), so this one stays.",
+                used.join(" and ")
+            ))
         };
         if let Err(why) = check() {
             done.problems.push(Problem { path: copy.path.clone(), why });
             continue;
         }
-        let real = real_path(&copy.path).unwrap_or_else(|| copy.path.clone());
         sending.send(&copy.path, real, copy.bytes, What::Plugin(SpaceKind::Program), &mut done, check);
     }
     sending.finish(&mut done);
     done
 }
 
-/// The copy is still what was found: there, a plugin file or bundle of its format, not a link, not only online, and
-/// holding just what it held then.
+/// Whether a copy your projects use can still be loaded from here: it's there (a link counts when its file is) and
+/// holds something on this computer (not an empty folder left behind, nor only online in OneDrive).
+fn usable(path: &str, stop: &AtomicBool) -> Result<bool, Stopped> {
+    let Some(real) = real_path(path) else { return Ok(false) };
+    Ok(measure(Path::new(&real), stop)?.bytes > 0)
+}
+
+/// The copy is still what was found: there, a plugin file or bundle of its format, not a link, somewhere the Recycle
+/// Bin can keep it, and holding just what it held then.
 fn still_the_copy(copy: &SpareCopy, stop: &AtomicBool) -> Result<(), String> {
     let path = Path::new(&copy.path);
     let meta = match fs::symlink_metadata(path) {
@@ -238,13 +262,10 @@ fn still_the_copy(copy: &SpareCopy, stop: &AtomicBool) -> Result<(), String> {
     if !format_of(&copy.path).is_some_and(|f| case::key(&f) == case::key(&copy.format)) {
         return Err(format!("It isn't a {} plugin, so it stays.", copy.format));
     }
-    let online = if meta.is_dir() {
-        has_online_only(path, stop).map_err(|_| "Stopped before it went.".to_owned())?
-    } else {
-        is_online_only(&meta)
-    };
-    if online {
-        return Err(ONLINE_ONLY.to_owned());
+    // A network drive first, so a bundle there isn't walked for nothing.
+    let real = real_path(&copy.path).ok_or_else(|| "It isn't there any more.".to_owned())?;
+    if let Some(why) = cant_keep(&copy.path, &real, stop) {
+        return Err(why.to_owned());
     }
     match &copy.stamp {
         None => Err("Some of it couldn't be read when it was found, so it can't be checked now. It stays.".to_owned()),

@@ -149,16 +149,23 @@ fn it_stays_when_the_copy_your_projects_use_has_gone() {
     write(&dir, "VST2/Serum_x64.dll", 10);
     let copy = spare(&dir.join("VST2/Serum_x64.dll"), "VST2", &dir.join("VST3/Serum.vst3"));
     let why = remove_one(&copy, &folder_bin(&dir)).unwrap();
-    assert_eq!(why, "The VST3 copy your projects use isn't there now, so this one stays.");
-    // A link to it whose file has gone doesn't count either.
+    assert!(why.starts_with("The VST3 copy your projects use isn't there now"), "{why}");
+    // An empty bundle left behind doesn't count.
+    fs::create_dir_all(dir.join("VST3/Serum.vst3/Contents")).unwrap();
+    let why = remove_one(&copy, &folder_bin(&dir)).unwrap();
+    assert!(why.contains("isn't there now"), "{why}");
+    assert!(dir.join("VST2/Serum_x64.dll").exists());
+    // A link to it whose file has gone doesn't count either, but one whose file is there does.
     #[cfg(unix)]
     {
-        fs::create_dir_all(dir.join("VST3")).unwrap();
+        fs::remove_dir_all(dir.join("VST3/Serum.vst3")).unwrap();
         std::os::unix::fs::symlink(dir.join("Unplugged/Serum.vst3"), dir.join("VST3/Serum.vst3")).unwrap();
         let why = remove_one(&copy, &folder_bin(&dir)).unwrap();
         assert!(why.contains("isn't there now"), "{why}");
+        write(&dir, "Unplugged/Serum.vst3", 10);
+        assert_eq!(remove_one(&copy, &folder_bin(&dir)), None);
+        assert!(!dir.join("VST2/Serum_x64.dll").exists());
     }
-    assert!(dir.join("VST2/Serum_x64.dll").exists());
 }
 
 #[test]
@@ -174,7 +181,10 @@ fn a_copy_thats_gone_or_not_spare_now_says_why() {
     let done = remove(&[aax.clone(), gone.clone()], &[], &bin, &AtomicBool::new(false));
     assert!(done.removed.is_empty());
     let why: Vec<&str> = done.problems.iter().map(|p| p.why.as_str()).collect();
-    assert_eq!(why, ["Pro Tools is on this computer now, so it stays.", "It isn't there any more."]);
+    assert_eq!(
+        why,
+        ["It isn't spare any more (Pro Tools may be on this computer now), so it stays.", "It isn't there any more."]
+    );
 }
 
 #[test]
@@ -198,8 +208,9 @@ fn a_copy_thats_a_link_stays() {
     fs::create_dir_all(dir.join("VST2")).unwrap();
     std::os::unix::fs::symlink(dir.join("Elsewhere/Serum_x64.dll"), dir.join("VST2/Serum_x64.dll")).unwrap();
     let copy = spare(&dir.join("VST2/Serum_x64.dll"), "VST2", &dir.join("VST3/Serum.vst3"));
-    // A link takes no room.
+    // A link takes no room, and it's listed only so you see it.
     assert_eq!(copy.bytes, 0);
+    assert!(!copy.can_remove());
     let why = remove_one(&copy, &folder_bin(&dir)).unwrap();
     assert_eq!(why, "It's a link to another place, so removing it frees nothing. It stays.");
     assert!(dir.join("Elsewhere/Serum_x64.dll").exists());
@@ -236,4 +247,23 @@ fn a_copy_on_a_network_drive_stays() {
     let why = remove_one(&copy, &folder_bin(&dir)).unwrap();
     assert_eq!(why, "It's on a network drive, which has no Recycle Bin.");
     assert!(dir.join("VST2/Serum_x64.dll").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn one_file_picked_by_two_paths_goes_once() {
+    let dir = fixtures("mo-space-spare-two-paths");
+    write(&dir, "VST3/Serum.vst3", 10);
+    write(&dir, "VST2/Serum_x64.dll", 10);
+    std::os::unix::fs::symlink(dir.join("VST2"), dir.join("Old VST2")).unwrap();
+    let used = dir.join("VST3/Serum.vst3");
+    let first = spare(&dir.join("VST2/Serum_x64.dll"), "VST2", &used);
+    let again = spare(&dir.join("Old VST2/Serum_x64.dll"), "VST2", &used);
+    let picked = [first.clone(), again.clone(), first.clone()];
+    let done = remove(&picked, &picked, &folder_bin(&dir), &AtomicBool::new(false));
+    assert_eq!(done.removed.len(), 1);
+    assert_eq!(done.bytes(), 10);
+    assert_eq!(done.problems.len(), 1);
+    assert!(done.problems[0].why.starts_with("It's the same file as "), "{}", done.problems[0].why);
+    assert_eq!(done.problems[0].path, again.path);
 }
