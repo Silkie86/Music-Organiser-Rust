@@ -149,6 +149,8 @@ pub struct LanePoint {
     pub beat: f64,
     pub value: f64,
     pub from: f64,
+    /// The FL automation clip it comes from, by its place in [`Lane::clips`].
+    pub source: usize,
 }
 
 /// An automation lane: every FL clip moving one thing on one track, in song order.
@@ -244,6 +246,8 @@ struct Planner<'a> {
     song: &'a FlSong,
     options: Options,
     read_sample: &'a mut dyn FnMut(&str) -> Option<SampleFile>,
+    /// Each sample read once (rule 12), however many channels play it.
+    samples: HashMap<String, Option<SampleFile>>,
     inserts: HashMap<u32, &'a FlInsert>,
     shared: HashSet<u32>,
     notes: Vec<String>,
@@ -253,6 +257,16 @@ struct Planner<'a> {
 }
 
 impl Planner<'_> {
+    /// What's known of a sample, read once.
+    fn sample(&mut self, path: &str) -> Option<SampleFile> {
+        if let Some(known) = self.samples.get(path) {
+            return known.clone();
+        }
+        let info = (self.read_sample)(path);
+        self.samples.insert(path.to_owned(), info.clone());
+        info
+    }
+
     /// A plugin as a device, when another DAW can load it; what's left out of it goes in `skipped`.
     fn plugin(p: &FlPlugin, role: Role, skipped: &mut Vec<String>) -> Option<Device> {
         if p.native() || !matches!(p.format, "VST2" | "VST3") {
@@ -336,7 +350,7 @@ impl Planner<'_> {
         let mut sample_length: Option<Box<dyn Fn(u8) -> i64>> = None;
         let kind = match &c.instrument {
             None => {
-                let info = (self.read_sample)(&c.sample);
+                let info = self.sample(&c.sample);
                 match &info {
                     None => self
                         .notes
@@ -388,9 +402,9 @@ impl Planner<'_> {
         let track_muted = clips::all_on_muted_tracks(&c.clips);
         let made = clips::of(c, clips::on_muted_tracks(&c.clips, track_muted), song.ppq)
             .into_iter()
-            .map(|clip| FlClip {
-                notes: clips::lengthen(clip.notes.clone(), clip.length, sample_length.as_deref()),
-                ..clip
+            .map(|mut clip| {
+                clip.notes = clips::lengthen(std::mem::take(&mut clip.notes), clip.length, sample_length.as_deref());
+                clip
             })
             .collect();
         let on = c.clips.iter().filter(|x| x.on_muted_track).map(|x| x.track);
@@ -421,10 +435,12 @@ impl Planner<'_> {
 
     /// An audio clip channel's clips in the playlist on audio tracks, stretched and pitched as in FL. Clips that
     /// overlap (on different playlist tracks in FL) play at once, so each goes on the first of its tracks that's free.
-    fn audio_tracks(&mut self, c: &FlChannel, first: usize) -> Vec<Track> {
+    /// `first` is where the first goes in the plan's tracks, and `taken` how many tracks the channel has already (its
+    /// instrument track), so each of its tracks has its own name.
+    fn audio_tracks(&mut self, c: &FlChannel, first: usize, taken: usize) -> Vec<Track> {
         let song = self.song;
         let mut skipped = Vec::new();
-        let info = (self.read_sample)(&c.sample);
+        let info = self.sample(&c.sample);
         let mut sorted: Vec<&FlAudioClip> = c.audio_clips.iter().collect();
         sorted.sort_by_key(|x| x.start);
         let mut lanes: Vec<Vec<FlAudioClip>> = Vec::new();
@@ -442,10 +458,11 @@ impl Planner<'_> {
             let mut lane_skipped = Vec::new();
             let skipped_here = if made.is_empty() { &mut skipped } else { &mut lane_skipped };
             self.insert_effects(c, TrackRef::Track(first + made.len()), &mut devices, skipped_here);
-            let name = if made.is_empty() { c.name.clone() } else { format!("{} {}", c.name, made.len() + 1) };
+            let n = taken + made.len();
+            let name = if n == 0 { c.name.clone() } else { format!("{} {}", c.name, n + 1) };
             // When all its clips are on muted FL playlist tracks, the track is muted rather than its clips.
-            let track_muted = clips::all_audio_on_muted_tracks(clips);
-            let audio_clips = clips::audio_on_muted_tracks(clips, track_muted)
+            let track_muted = clips::all_on_muted_tracks(clips);
+            let audio_clips = clips::on_muted_tracks(clips, track_muted)
                 .iter()
                 .map(|x| audio_clip(c, x, info.as_ref(), song.tempo, song.ppq))
                 .collect();
@@ -511,9 +528,11 @@ fn audio_clip(c: &FlChannel, fl: &FlAudioClip, info: Option<&SampleFile>, tempo:
     let beats = |ticks: i64| ticks as f64 / ppq.max(1) as f64;
     let length = beats(fl.length);
     let beats_per_second = tempo / 60.0;
-    // How long the sample is: when it couldn't be read, a guess that the clip plays to its end.
+    // How long the sample is. When it couldn't be read: stretched to a set length, a guess that it plays at its own
+    // speed over that length; otherwise a guess that the clip plays to its end.
     let seconds = match info {
         Some(i) if i.seconds > 0.0 => i.seconds,
+        _ if c.stretch.time > 0 && tempo > 0.0 => played_seconds(&c.stretch, 0.0, tempo),
         _ => fl.from + length / beats_per_second / played_seconds(&c.stretch, 1.0, 0.0).max(1e-6),
     };
     let played = played_seconds(&c.stretch, seconds, tempo) * beats_per_second;
@@ -531,17 +550,46 @@ fn audio_clip(c: &FlChannel, fl: &FlAudioClip, info: Option<&SampleFile>, tempo:
 
 /// Adds an automation clip's points to the lane for what it moves on a track, making the lane if it's the first.
 fn add_lane(lanes: &mut Vec<Lane>, track: TrackRef, target: Target, a: &FlAutomation, value: impl Fn(f64) -> f64) {
-    let points =
-        a.points.iter().map(|&p: &FlPoint| LanePoint { beat: p.beat, value: value(p.value), from: a.start_of(p) });
-    match lanes.iter_mut().find(|l| l.track == track && l.target.same_as(&target)) {
-        Some(lane) => {
-            lane.points.extend(points);
-            if !lane.clips.contains(&a.name) {
-                lane.clips.push(a.name.clone());
-            }
+    let at = match lanes.iter().position(|l| l.track == track && l.target.same_as(&target)) {
+        Some(at) => at,
+        None => {
+            lanes.push(Lane { clips: Vec::new(), track, target, points: Vec::new() });
+            lanes.len() - 1
         }
-        None => lanes.push(Lane { clips: vec![a.name.clone()], track, target, points: points.collect() }),
+    };
+    let Some(lane) = lanes.get_mut(at) else { return };
+    lane.clips.push(a.name.clone());
+    let source = lane.clips.len() - 1;
+    lane.points.extend(a.points.iter().map(|&p: &FlPoint| LanePoint {
+        beat: p.beat,
+        value: value(p.value),
+        from: a.start_of(p),
+        source,
+    }));
+}
+
+/// How far apart two points can be and still count as on the same beat (as the FL reader counts them).
+const SAME_BEAT: f64 = 1e-4;
+
+/// A lane's points in time order. Where two FL clips meet on a beat, the one starting there goes last, so it has the
+/// last word; where one clip's points stop and another's start later, the value holds until then and jumps, as FL
+/// keeps a setting where the last clip left it (a straight line would slide it).
+fn in_song_order(mut points: Vec<LanePoint>) -> Vec<LanePoint> {
+    points.sort_by(|x, y| {
+        let beat = |p: &LanePoint| (p.beat * 1e4).round_ties_even();
+        beat(x).total_cmp(&beat(y)).then(x.from.total_cmp(&y.from))
+    });
+    let mut out: Vec<LanePoint> = Vec::with_capacity(points.len());
+    for q in points {
+        if let Some(&p) = out.last()
+            && p.source != q.source
+            && q.beat > p.beat + SAME_BEAT
+        {
+            out.push(LanePoint { beat: q.beat, ..p });
+        }
+        out.push(q);
     }
+    out
 }
 
 /// What an FL song becomes. `read_sample` says what's known of a sample file (`None` when it can't be read).
@@ -572,6 +620,7 @@ pub fn from_fl(song: &FlSong, options: Options, read_sample: &mut dyn FnMut(&str
         song,
         options,
         read_sample,
+        samples: HashMap::new(),
         inserts,
         shared,
         notes: Vec::new(),
@@ -609,7 +658,8 @@ pub fn from_fl(song: &FlSong, options: Options, read_sample: &mut dyn FnMut(&str
             ));
         } else if audio.contains(&c.index) {
             let at = first + own.len();
-            own.extend(planner.audio_tracks(c, at));
+            let taken = own.len();
+            own.extend(planner.audio_tracks(c, at, taken));
         }
         if own.is_empty() {
             continue;
@@ -642,6 +692,22 @@ pub fn from_fl(song: &FlSong, options: Options, read_sample: &mut dyn FnMut(&str
     let master_effects = planner.effects(master, TrackRef::Master, 0, &mut master_skipped);
     if !master_skipped.is_empty() {
         planner.notes.push(format!("Master: left out {}", master_skipped.join(", ")));
+    }
+
+    // Effects on inserts no carried channel feeds (a bus fed by sends or by other inserts) aren't carried yet.
+    let fed: HashSet<u32> =
+        placed.keys().filter_map(|i| song.channels.iter().find(|c| c.index == *i)).map(|c| c.insert).collect();
+    for insert in &song.inserts {
+        let third_party: Vec<&str> =
+            insert.effects.iter().filter(|e| matches!(e.format, "VST2" | "VST3")).map(|e| e.name.as_str()).collect();
+        if insert.index != 0 && !fed.contains(&insert.index) && !third_party.is_empty() {
+            planner.notes.push(format!(
+                "{}: its effects ({}) are left out, as no converted channel feeds it directly (sends and routing \
+                 between inserts aren't carried over yet)",
+                notes::insert_label(insert),
+                third_party.join(", ")
+            ));
+        }
     }
 
     // FL's insert faders and pans aren't carried yet (how FL's fader maps to gain isn't worked out).
@@ -735,13 +801,9 @@ pub fn from_fl(song: &FlSong, options: Options, read_sample: &mut dyn FnMut(&str
             _ => {}
         }
     }
-    // Several FL clips moving one thing share a lane, in time order; where two meet on a beat, the one starting there
-    // goes last, so it has the last word.
+    // Several FL clips moving one thing share a lane.
     for lane in &mut lanes {
-        lane.points.sort_by(|x, y| {
-            let beat = |p: &LanePoint| (p.beat * 1e4).round_ties_even();
-            beat(x).total_cmp(&beat(y)).then(x.from.total_cmp(&y.from))
-        });
+        lane.points = in_song_order(std::mem::take(&mut lane.points));
     }
 
     let mut seen = HashSet::new();

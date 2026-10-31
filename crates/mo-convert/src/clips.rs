@@ -47,8 +47,9 @@ pub fn of(channel: &FlChannel, clips: Vec<FlClip>, ppq: u16) -> Vec<FlClip> {
         };
         let mut notes = part(last, last.start);
         notes.extend(part(&clip, last.start));
-        // Unmuted first where two land on one key at one tick, so the one kept plays when either clip plays it.
-        notes.sort_by_key(|n| (n.start, n.key, n.muted));
+        // Unmuted first where two land on one key at one tick, so the one kept plays when either clip plays it, and the
+        // longest of those, so a step in one clip doesn't cut short a held note in the other.
+        notes.sort_by_key(|n| (n.start, n.key, n.muted, std::cmp::Reverse(n.length)));
         notes.dedup_by_key(|n| (n.start, n.key));
         let end = last.start.saturating_add(last.length).max(clip.start.saturating_add(clip.length));
         last.length = end - last.start;
@@ -58,25 +59,50 @@ pub fn of(channel: &FlChannel, clips: Vec<FlClip>, ppq: u16) -> Vec<FlClip> {
     out
 }
 
-/// Whether all of a track's clips sit on muted FL playlist tracks, so the track is muted rather than they are.
-pub fn all_on_muted_tracks(clips: &[FlClip]) -> bool {
-    !clips.is_empty() && clips.iter().all(|x| x.on_muted_track)
+/// A clip in FL's playlist, pattern or audio: whether its playlist track is muted, and muting it.
+pub trait PlaylistClip: Clone {
+    fn on_muted_track(&self) -> bool;
+    fn mute(&mut self);
 }
 
-/// [`all_on_muted_tracks`] for audio clips.
-pub fn all_audio_on_muted_tracks(clips: &[FlAudioClip]) -> bool {
-    !clips.is_empty() && clips.iter().all(|x| x.on_muted_track)
+impl PlaylistClip for FlClip {
+    fn on_muted_track(&self) -> bool {
+        self.on_muted_track
+    }
+
+    fn mute(&mut self) {
+        self.muted = true;
+    }
+}
+
+impl PlaylistClip for FlAudioClip {
+    fn on_muted_track(&self) -> bool {
+        self.on_muted_track
+    }
+
+    fn mute(&mut self) {
+        self.muted = true;
+    }
+}
+
+/// Whether all of a track's clips sit on muted FL playlist tracks, so the track is muted rather than they are.
+pub fn all_on_muted_tracks<C: PlaylistClip>(clips: &[C]) -> bool {
+    !clips.is_empty() && clips.iter().all(C::on_muted_track)
 }
 
 /// A track's clips with those on muted FL playlist tracks muted, unless the track itself is muted for them
 /// (`track_muted`), when they keep only their own mutes.
-pub fn on_muted_tracks(clips: &[FlClip], track_muted: bool) -> Vec<FlClip> {
-    clips.iter().map(|x| FlClip { muted: x.muted || x.on_muted_track && !track_muted, ..x.clone() }).collect()
-}
-
-/// [`on_muted_tracks`] for audio clips.
-pub fn audio_on_muted_tracks(clips: &[FlAudioClip], track_muted: bool) -> Vec<FlAudioClip> {
-    clips.iter().map(|x| FlAudioClip { muted: x.muted || x.on_muted_track && !track_muted, ..x.clone() }).collect()
+pub fn on_muted_tracks<C: PlaylistClip>(clips: &[C], track_muted: bool) -> Vec<C> {
+    clips
+        .iter()
+        .map(|x| {
+            let mut x = x.clone();
+            if x.on_muted_track() && !track_muted {
+                x.mute();
+            }
+            x
+        })
+        .collect()
 }
 
 /// Gives steps from FL's step sequencer, which have no length, the length FL plays them for: FL plays a step until its
@@ -87,8 +113,9 @@ pub fn lengthen(notes: Vec<NoteEvent>, clip_length: i64, longest: Option<&dyn Fn
         return notes;
     }
     // Each key's starts in order, so the next is found by halves: a whole song's steps can all be on one key.
+    // A muted note plays nothing, so it doesn't cut a step short.
     let mut starts: HashMap<u8, Vec<i64>> = HashMap::new();
-    for n in &notes {
+    for n in notes.iter().filter(|n| !n.muted) {
         starts.entry(n.key).or_default().push(n.start);
     }
     for on in starts.values_mut() {
@@ -102,7 +129,6 @@ pub fn lengthen(notes: Vec<NoteEvent>, clip_length: i64, longest: Option<&dyn Fn
                 return n;
             }
             let on = starts.get(&n.key).map(Vec::as_slice).unwrap_or_default();
-            // Always there: it's this note's own start.
             let next = on.partition_point(|&s| s <= n.start);
             let next = on.get(next).copied().unwrap_or(clip_length);
             let mut length = next.min(clip_length).saturating_sub(n.start);
@@ -196,8 +222,27 @@ mod tests {
         let mut on = clip(0, 96, vec![], false);
         on.on_muted_track = true;
         assert!(all_on_muted_tracks(std::slice::from_ref(&on)));
-        assert!(!all_on_muted_tracks(&[]));
+        assert!(!all_on_muted_tracks::<FlClip>(&[]));
         assert!(!on_muted_tracks(std::slice::from_ref(&on), true)[0].muted);
         assert!(on_muted_tracks(std::slice::from_ref(&on), false)[0].muted);
+    }
+
+    #[test]
+    fn a_muted_note_doesnt_cut_a_step_short() {
+        let mut a = note(0, 0, 60);
+        a.step = true;
+        let mut quiet = note(96, 10, 60);
+        quiet.muted = true;
+        assert_eq!(lengthen(vec![a, quiet], 384, None)[0].length, 384);
+    }
+
+    #[test]
+    fn where_overlapping_clips_play_one_key_at_once_the_longer_note_is_kept() {
+        let mut short = note(0, 0, 60);
+        short.step = true;
+        let made =
+            of(&channel(), vec![clip(0, 384, vec![short], false), clip(0, 384, vec![note(0, 192, 60)], false)], 96);
+        assert_eq!(made[0].notes.len(), 1);
+        assert_eq!(made[0].notes[0].length, 192);
     }
 }

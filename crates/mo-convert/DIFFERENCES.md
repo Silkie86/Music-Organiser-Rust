@@ -9,3 +9,10 @@ does something else on purpose, it's listed here and judged.
 | Serum 1 swapped for Serum 2 | Optional, with its sound translated | Left out | Solomon dropped it (2026-10-29) |
 | Notes the template decides (a lane or on/off it can't copy, a track with no fader) | Said while writing | Said by the writer, after the plan's notes | Same notes, the template's ones last |
 | Two FL clips moving one plugin setting under different names | One lane | One lane (named after the first) | Same |
+| Two FL automation clips moving one thing, with a gap between them | A straight line across the gap | The value holds until the next clip, then jumps | Better: FL keeps a setting where the last clip left it |
+| Third-party effects on an insert no converted channel feeds (a bus fed by sends) | Left out silently | Left out with a note | Better |
+| A muted note after a step on the same key | Cuts the step short | Doesn't | Better: a muted note plays nothing in FL |
+| Overlapping clips with a step and a held note on one key at one tick | Keeps whichever came first | Keeps the longer | Better |
+| A channel with both notes and audio clips | Two tracks with the same name | "Vox" and "Vox 2" | Better |
+| A sample shared by several channels | Read (hashed) once per channel | Read once | Better (rule 12) |
+| An unreadable sample stretched to a set length (FL's Time knob) | Length guessed ignoring the Time knob | Guessed as playing at its own speed over that length | Better |

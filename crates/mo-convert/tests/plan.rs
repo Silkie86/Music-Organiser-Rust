@@ -279,7 +279,8 @@ fn volume_and_pan_get_one_lane_each_in_song_order() {
     // FL's 78% fader is a gain of 1 (0 dB); Bitwig's fader is its cube root (the C# test's 0.3571 is cbrt(0.0455)).
     assert_eq!(points(0), [(0.0, 1.0), (1.0, 0.0455), (1.5, 1.2682), (3.25, 0.0498)]);
     assert!((gain(0.1667).cbrt() - 0.3571).abs() < 1e-4);
-    assert_eq!(points(1), [(0.0, -1.0), (4.0, 1.0), (8.0, 0.0), (12.0, -1.0)]);
+    // "Pan first" ends right at 4; "Pan later" starts at 8, so the pan holds until then and jumps (C# slid it).
+    assert_eq!(points(1), [(0.0, -1.0), (4.0, 1.0), (8.0, 1.0), (8.0, 0.0), (12.0, -1.0)]);
     assert_eq!(points(2), [(0.0, 0.25), (2.0, 0.75)]);
     assert!(matches!(p.lanes[2].target, Target::Plugin { device: 0, id: 2_000_003, .. }));
 
@@ -453,4 +454,39 @@ fn an_empty_song_makes_an_empty_plan() {
     let p = plan(&song(vec![], vec![], vec![]));
     assert!(p.tracks.is_empty() && p.lanes.is_empty() && p.notes.is_empty() && p.master_effects.is_empty());
     assert_eq!((p.tempo, p.ppq), (120.0, 96));
+}
+
+#[test]
+fn between_two_clips_moving_one_thing_the_value_holds_then_jumps() {
+    let a = automation("Rise", Some(0), FlControl::Pan, &[(0.0, 0.5), (4.0, 1.0)]);
+    let b =
+        FlAutomation { starts: vec![8.0], ..automation("Drop", Some(0), FlControl::Pan, &[(8.0, 0.0), (12.0, 0.5)]) };
+    let p = plan(&song(vec![channel(0, "Keys", Some(plugin("Keys", "VST2", "1")), "", 0)], vec![], vec![a, b]));
+    let got: Vec<_> = p.lanes[0].points.iter().map(|x| (x.beat, x.value)).collect();
+    assert_eq!(got, [(0.0, 0.0), (4.0, 1.0), (8.0, 1.0), (8.0, -1.0), (12.0, 0.0)]);
+    assert_eq!(p.lanes[0].clips, ["Rise", "Drop"]);
+}
+
+#[test]
+fn effects_on_an_insert_no_converted_channel_feeds_are_listed() {
+    let s = song(
+        vec![channel(0, "Keys", Some(plugin("Keys", "VST2", "1")), "", 1)],
+        vec![insert(1, "", vec![]), insert(10, "Reverb bus", vec![effect("Valhalla", "VST3", 0)])],
+        vec![],
+    );
+    let p = plan(&s);
+    assert!(p.notes.iter().any(|n| n.starts_with("Reverb bus (insert 10): its effects (Valhalla) are left out")));
+}
+
+#[test]
+fn a_channel_with_notes_and_audio_clips_names_each_track_apart() {
+    let mut vox = p_channel_with_audio();
+    vox.instrument = None;
+    let mut reads = 0;
+    let p = from_fl(&song(vec![vox], vec![], vec![]), Options::default(), &mut |path| {
+        reads += 1;
+        snare(path)
+    });
+    assert_eq!(p.tracks.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["Vox", "Vox 2"]);
+    assert_eq!(reads, 1, "the sample is read once");
 }
