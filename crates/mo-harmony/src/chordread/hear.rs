@@ -535,6 +535,28 @@ impl Hearing {
         self.units.get(unit).and_then(|u| u.gap_bass)
     }
 
+    /// The lowest chord or bass note sounding in a unit, for at least a quarter of it (held-over ends left out): unlike
+    /// [`Hearing::lowest`], nothing when none does.
+    pub fn lowest_sounding(&self, unit: usize) -> Option<u8> {
+        self.units.get(unit).and_then(|u| u.lowest)
+    }
+
+    /// Where a unit starts, in ticks from the first unit's start (as [`HeardNote`]s count), from 0 to
+    /// [`Hearing::units`].
+    pub fn offset(&self, unit: usize) -> i64 {
+        self.layout.start(unit.min(self.units.len()))
+    }
+
+    /// The unit a time is in, given in ticks from the first unit's start: 0 before the first, and
+    /// [`Hearing::units`] at or after where the last one ends.
+    pub fn unit_of(&self, from_first: i64) -> usize {
+        let units = self.units.len();
+        if from_first >= self.layout.start(units) {
+            return units;
+        }
+        self.layout.unit_at(from_first.max(0)).min(units)
+    }
+
     fn clamp(&self, units: Range<usize>) -> Range<usize> {
         let end = units.end.min(self.units.len());
         units.start.min(end)..end
