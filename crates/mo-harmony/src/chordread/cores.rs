@@ -326,6 +326,14 @@ impl CoreSet {
         self.0 >> core as u16 & 1 != 0
     }
 
+    pub const fn union(self, other: CoreSet) -> CoreSet {
+        CoreSet(self.0 | other.0)
+    }
+
+    pub const fn difference(self, other: CoreSet) -> CoreSet {
+        CoreSet(self.0 & !other.0)
+    }
+
     /// How many cores are in it.
     pub const fn len(self) -> u32 {
         self.0.count_ones()

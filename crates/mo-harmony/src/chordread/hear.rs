@@ -430,15 +430,30 @@ impl Hearing {
         }
     }
 
+    /// What presence counts of each pitch class over some units, in ticks: twice its ticks in the chords and the bass,
+    /// and its ticks in the tune's held notes (which count half as much).
+    pub fn presence_ticks(&self, units: Range<usize>) -> PerPitch<u64> {
+        let (h, b, m) = (
+            self.mass(units.clone(), Mass::Harmony),
+            self.mass(units.clone(), Mass::Bass),
+            self.mass(units, Mass::HeldMelody),
+        );
+        let mut out = PerPitch::default();
+        for pc in PitchClass::ALL {
+            out[pc] = h[pc].saturating_add(b[pc]).saturating_mul(2).saturating_add(m[pc]);
+        }
+        out
+    }
+
     /// How present each pitch class is over some units, 0 to 1: four times its ticks in the chords and the bass, and
     /// half its ticks in the tune's held notes, over the ticks that sound ([`Hearing::sounding_ticks`]). A note
     /// sounding a quarter of the time is fully present. The same at any resolution, since both sides are ticks.
     pub fn presence(&self, units: Range<usize>) -> PerPitch<f64> {
-        let (h, b, m) = self.presence_masses(units.clone());
+        let ticks = self.presence_ticks(units.clone());
         let s = self.sounding_ticks(units).max(1) as f64;
         let mut out = PerPitch([0.0; 12]);
         for pc in PitchClass::ALL {
-            out[pc] = (4.0 * (h[pc] as f64 + b[pc] as f64 + 0.5 * m[pc] as f64) / s).min(1.0);
+            out[pc] = (2.0 * ticks[pc] as f64 / s).min(1.0);
         }
         out
     }
@@ -446,12 +461,27 @@ impl Hearing {
     /// The notes heard over some units (the design's P): those at least half present, so sounding an eighth of the
     /// time. Worked out in whole numbers, so it never wobbles at the edge.
     pub fn heard(&self, units: Range<usize>) -> PcSet {
-        let (h, b, m) = self.presence_masses(units.clone());
+        let ticks = self.presence_ticks(units.clone());
         let s = u128::from(self.sounding_ticks(units).max(1));
-        PitchClass::ALL
-            .into_iter()
-            .filter(|&pc| 8 * (u128::from(h[pc]) + u128::from(b[pc])) + 4 * u128::from(m[pc]) >= s)
-            .collect()
+        PitchClass::ALL.into_iter().filter(|&pc| 4 * u128::from(ticks[pc]) >= s).collect()
+    }
+
+    /// The lowest chord or bass note sounding in any of some units (for at least a quarter of a unit, held-over ends
+    /// left out): the note ties between readings are broken from, so that they move with the music.
+    pub fn lowest(&self, units: Range<usize>) -> Option<u8> {
+        let units = self.clamp(units);
+        self.units.get(units).unwrap_or_default().iter().filter_map(|u| u.lowest).min()
+    }
+
+    /// The unit start nearest a tick (the music's own ticks), from 0 to [`Hearing::units`] (where the last unit
+    /// ends); halfway between two, the earlier. It lines chords given in ticks up with the units.
+    pub fn nearest_unit(&self, tick: i64) -> usize {
+        let units = self.units.len();
+        let last = self.layout.start(units);
+        let t = ticks((i128::from(tick) - self.layout.origin).clamp(0, i128::from(last)));
+        let unit = self.layout.unit_at(t).min(units);
+        let (from, to) = (self.layout.start(unit), self.layout.start(unit + 1));
+        if unit < units && to - t < t - from { unit + 1 } else { unit }
     }
 
     /// How the bass behaves over some units: held on one pitch class (three quarters of its ticks or more), moving,
@@ -509,14 +539,6 @@ impl Hearing {
     fn clamp(&self, units: Range<usize>) -> Range<usize> {
         let end = units.end.min(self.units.len());
         units.start.min(end)..end
-    }
-
-    fn presence_masses(&self, units: Range<usize>) -> (PerPitch<u64>, PerPitch<u64>, PerPitch<u64>) {
-        (
-            self.mass(units.clone(), Mass::Harmony),
-            self.mass(units.clone(), Mass::Bass),
-            self.mass(units, Mass::HeldMelody),
-        )
     }
 
     fn clear(&mut self) {
@@ -739,6 +761,9 @@ impl Hearing {
                 }
                 if !c.kind.held_over() && c.ticks.saturating_mul(4) >= len {
                     facts.sounding.add(stream, pc);
+                    if stream != Stream::Melody {
+                        facts.lowest = Some(facts.lowest.map_or(c.key, |low| low.min(c.key)));
+                    }
                 }
                 if let Some(at) = c.struck {
                     facts.struck.add(stream, pc);
@@ -1045,6 +1070,8 @@ struct UnitFacts {
     bass_onset: Option<PitchClass>,
     /// In a bar where no bass part plays, the chord note that is the unit's bass.
     gap_bass: Option<u8>,
+    /// The lowest chord or bass note sounding (for at least a quarter of the unit), held-over ends left out.
+    lowest: Option<u8>,
 }
 
 /// The masses of some units, one table of twelve for each [`Mass`].

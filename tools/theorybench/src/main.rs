@@ -7,6 +7,7 @@
 
 mod answerfit;
 mod baseline;
+mod candidates;
 mod chords;
 mod fit;
 mod harte;
@@ -27,6 +28,7 @@ theorybench keyfit <labelled.jsonl>... [--aligned] [--bars <lengths>] [--lambda-
 theorybench packs <folder>... --out <file.jsonl>
 theorybench chords <labelled.jsonl>... --answers <name>=<answers.jsonl> [--answers ...] [--part <role>]
                    [--per-segment] [--by <tag>]... [--dump <file>]
+theorybench candidates <labelled.jsonl>... [--inputs <kinds>] [--misses <file>]
 
   keys       how often each key finder names the labelled key, on whole songs and on clips (8 bars long unless --bars
              gives other lengths, such as 1,2,4,8,16)
@@ -58,7 +60,12 @@ theorybench chords <labelled.jsonl>... --answers <name>=<answers.jsonl> [--answe
   --per-segment  mir_eval's scores per labelled chord too, each counted once
   --by       the chords named whole split by a tag convert/voice.py gives each chord it plays: set, recipe, texture,
              tune, push, chart or quality (and context and role in its sweep); given twice, by both
-  --dump     write every piece's labels, chords read and scores to a file, for convert/check_mir_eval.py";
+  --dump     write every piece's labels, chords read and scores to a file, for convert/check_mir_eval.py
+  candidates how often mo-harmony's chord reader has the labelled chord among the readings it scores (its ceiling),
+             with the labelled ends, and moved by up to a unit
+  --inputs   the parts heard: piano (all but the tune), full, upper (the accompaniment without its bass line); piano,full
+             when left out
+  --misses   write each stretch whose chord is missed even with its ends moved to a file (tab-separated)";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -67,6 +74,7 @@ fn main() -> ExitCode {
         Some("keys") => keys::run(&args[1..]),
         Some("keyfit") => keyfit::run(&args[1..]),
         Some("chords") => chords::run(&args[1..]),
+        Some("candidates") => candidates::run(&args[1..]),
         Some("packs") => packs::run(&args[1..]),
         _ => Err(USAGE.to_owned()),
     };

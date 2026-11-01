@@ -509,7 +509,7 @@ impl Voices {
 /// The piano's bass line and the rest: a note is in the bass line when, as it starts, it's the lowest note the piano
 /// sounds and nothing else sounds within a fourth above it (the key finder's own test for a bass). `notes` must be in
 /// order of start.
-fn split_bass(notes: &[Note]) -> (Vec<Note>, Vec<Note>) {
+pub(crate) fn split_bass(notes: &[Note]) -> (Vec<Note>, Vec<Note>) {
     let (mut bass, mut upper) = (Vec::new(), Vec::new());
     let mut sounding: Vec<Note> = Vec::new();
     let mut i = 0;
