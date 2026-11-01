@@ -37,6 +37,10 @@ pub struct Item {
     pub key_labels: String,
     #[serde(default)]
     pub chord_labels: String,
+    /// The licence the notes and labels come under ("MIT", "CC0", "CC BY 4.0"): keyfit learns only from those whose
+    /// fitted weights may ship ([`Item::may_learn`]) and only measures the rest.
+    #[serde(default)]
+    pub licence: String,
 }
 
 fn four() -> u32 {
@@ -104,6 +108,19 @@ impl Item {
             }
         }
         time.into_iter().max_by_key(|&(k, t)| (t, std::cmp::Reverse(k.index()))).map(|(k, _)| k)
+    }
+
+    /// Whether weights fitted on this piece may ship in the app: its licence is MIT, CC0 or CC BY, without
+    /// NonCommercial, ShareAlike or NoDerivatives terms. Anything else, or no licence given, is only measured.
+    pub fn may_learn(&self) -> bool {
+        let licence = self.licence.to_ascii_uppercase().replace(['-', '_'], " ");
+        let words: Vec<&str> = licence.split_whitespace().collect();
+        match words.as_slice() {
+            ["MIT"] => true,
+            [first, ..] if first.starts_with("CC0") => true,
+            ["CC", "BY", rest @ ..] => !rest.iter().any(|w| matches!(*w, "NC" | "SA" | "ND")),
+            _ => false,
+        }
     }
 
     /// Whether every key label is the same key (no key change).

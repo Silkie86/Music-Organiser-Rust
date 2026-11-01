@@ -175,6 +175,7 @@ def song(root, sid, flagged):
         'chords': regions(chords, chord_end),
         'key_labels': 'human (POP909 keys corrected by the POP909-CL annotators)',
         'chord_labels': 'human (the POP909-CL chord track, named by triad and seventh templates)',
+        'licence': 'MIT',
     }
 
 
