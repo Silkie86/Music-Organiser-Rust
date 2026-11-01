@@ -92,8 +92,8 @@ pub enum Feature {
     /// B9: the same on notes that aren't its own (its tensions too), where they sound on a bar line or the middle of a
     /// bar, or from a note played longer than a felt beat.
     WalkingWrong,
-    /// E1, once: the first bass note struck in the span is its root, the bass moving to it, and it's no walking note
-    /// (one no longer than a felt beat, under chords that strike nothing new).
+    /// E1, once: the first bass note struck in the span's first felt beat is its root, the bass moving to it, and it's
+    /// no walking note (one no longer than a felt beat, under chords that strike nothing new).
     BassStrikesRoot,
     /// E2, once: the share of its own notes heard in the span that are struck where it starts.
     StruckAtStart,
@@ -448,7 +448,10 @@ impl Evidence {
         let struck = hearing.struck_in(sound.clone(), Stream::Harmony);
         let mut first = hearing.struck(u, Stream::Harmony).union(hearing.struck(u, Stream::Bass));
         let mut chords_struck = self.struck_anew(hearing, u);
-        let mut onset = (u..sound.end).find_map(|v| hearing.bass_onset(v..v + 1).map(|pc| (pc, v, false)));
+        // The first bass note struck where the span starts: in its first felt beat (a bass entering later doesn't say
+        // where the chord starts).
+        let first_beat = u..sound.end.min(u + hearing.felt_units().max(1));
+        let mut onset = first_beat.clone().find_map(|v| hearing.bass_onset(v..v + 1).map(|pc| (pc, v, false)));
         if let Some(push) = start {
             let before = push.unit - 1;
             let mut pushed_bass: Option<u8> = None;
@@ -555,8 +558,8 @@ pub struct SpanFacts {
     /// The chord and bass notes struck in its first unit, or pushed into it.
     first_struck: PcSet,
     bass: BassTexture,
-    /// The first bass note struck, and whether it may be the root at a change (E1): the bass moves to it, and it isn't
-    /// a walking note ([`Evidence::facts`]).
+    /// The first bass note struck in its first felt beat (or the pushed chord's bass), and whether it may be the root
+    /// at a change (E1): the bass moves to it, and it isn't a walking note ([`Evidence::facts`]).
     bass_onset: Option<PitchClass>,
     onset_counts: bool,
     /// Whether nothing is struck where the span starts (E3): no chord or bass note, or only walking notes.
@@ -639,6 +642,11 @@ impl SpanFacts {
     /// S: the ticks of its sound in which a chord or bass note sounds.
     pub fn sounding(&self) -> u64 {
         self.sounding
+    }
+
+    /// Whether nothing sounds in it: no chord, bass or tune note, nor what the chords hold over.
+    pub fn silent(&self) -> bool {
+        self.chords_total == 0 && self.held_over_total == 0 && self.tune_total == 0 && self.bass == BassTexture::None
     }
 
     /// b: the felt beats it sounds (S over a felt beat's ticks).

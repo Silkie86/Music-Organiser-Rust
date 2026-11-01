@@ -1,17 +1,20 @@
-//! Tests of the decode ([`super::decode`]): the design's hand cases read whole, rests, pins, pushes, the chances, and
-//! the rules that hold for any music (moved, at another resolution, in another order, read again). Some tools, left
-//! out of the run, print the cases read whole, count the cases other weights fail, explain what ways of reading a case
-//! score, and time a long song.
+//! Tests of the decode ([`super::decode`]): the design's hand cases read whole, rests, pins, pushes, the chances, a
+//! slow way (every way to read some music added up one by one) the fast one must agree with, on the cases and on
+//! random music with random pins, and the rules that hold for any music (moved, at another resolution, in another
+//! order, read again). Some tools, left out of the run, print the cases read whole, count the cases other weights
+//! fail, explain what ways of reading a case score, and time a long song.
 
 use std::ops::Range;
 
-use super::hear_tests::{BAR, BEAT, Music, line, notes};
+use super::decode::{Kind, Lattice};
+use super::hear_tests::{BAR, BEAT, Dice, Music, line, notes, random_music};
 use super::score_tests::{Want, bars, facts_on, hand_cases, label, ranking_by, reads, samples};
 use super::{
-    COUNTED, Chance, Decoder, Decoding, Evidence, Feature, HAND, Hearing, Label, PerFeature, PinnedSpan, SpanFacts,
-    Weights,
+    COUNTED, Chance, Core, Decoder, Decoding, Evidence, Feature, HAND, Hearing, Label, PerFeature, PinnedSpan,
+    SpanFacts, Weights,
 };
 use crate::notes::{Note, Role};
+use crate::pitch::PitchClass;
 
 /// Bars of 4/4 counted in units: bar k is units 8k to 8k + 8, and its third beat is unit 8k + 4.
 const B: usize = 8;
@@ -437,6 +440,44 @@ fn a_bar_or_more_of_silence_is_a_rest_and_less_belongs_to_the_chords_around_it()
 }
 
 #[test]
+fn a_chord_is_held_on_over_a_short_silence_however_long_it_has_sounded() {
+    // C held two bars less half a beat, silent to the third beat of bar 3, then F: C until F.
+    let music = Music::new()
+        .bass([notes("C2", 0, 2 * BAR - BEAT / 2), notes("F2", 2 * BAR + 2 * BEAT, BAR + 2 * BEAT)].concat())
+        .keys(
+            [notes("C4 E4 G4", 0, 2 * BAR - BEAT / 2), notes("F3 A3 C4", 2 * BAR + 2 * BEAT, BAR + 2 * BEAT)].concat(),
+        );
+    let spans = Whole::read(&music, &HAND, &[]).spans();
+    assert_eq!(cuts(&spans), [(0..20, "C"), (20..4 * B, "F")], "read {}", render(&spans));
+}
+
+#[test]
+fn a_chord_struck_off_the_bar_line_is_held_on_as_long_as_it_lasts() {
+    // C struck on the third beat and held three bars, then F: one C, though no place lies two bars after it starts.
+    let music = Music::new()
+        .bass([notes("C2", 2 * BEAT, 3 * BAR), notes("F2", 3 * BAR + 2 * BEAT, BAR)].concat())
+        .keys([notes("C4 E4 G4", 2 * BEAT, 3 * BAR), notes("F3 A3 C4", 3 * BAR + 2 * BEAT, BAR)].concat());
+    let spans = Whole::read(&music, &HAND, &[]).spans();
+    assert_eq!(cuts(&spans), [(0..4, "N"), (4..28, "C"), (28..36, "F")], "read {}", render(&spans));
+}
+
+#[test]
+fn a_stretch_where_only_the_tune_plays_is_read_too() {
+    let tune = |start: i64, bars: i64| line(&"E5 D5 C5 D5 E5 E5 E5 D5 ".repeat(bars as usize), start, BEAT / 2);
+    // Five bars of the tune alone, then C: no chord until C.
+    let intro = Music::new().bass(notes("C2", 5 * BAR, BAR)).keys(notes("C4 E4 G4", 5 * BAR, BAR)).tune(tune(0, 5));
+    let spans = Whole::read(&intro, &HAND, &[]).spans();
+    assert_eq!(cuts(&spans), [(0..5 * B, "N"), (5 * B..6 * B, "C")], "read {}", render(&spans));
+    assert!(!spans[0].rest);
+    // C, then two bars of the tune alone: C, then C held on or no chord, but never a rest.
+    let after = Music::new().bass(notes("C2", 0, BAR)).keys(notes("C4 E4 G4", 0, BAR)).tune(tune(BAR, 2));
+    let spans = Whole::read(&after, &HAND, &[]).spans();
+    assert_eq!((spans[0].units.start, spans[0].label.as_str()), (0, "C"), "read {}", render(&spans));
+    assert!(spans.iter().all(|r| ["C", "N"].contains(&r.label.as_str()) && !r.rest), "read {}", render(&spans));
+    assert_eq!(spans.last().map(|r| r.units.end), Some(3 * B));
+}
+
+#[test]
 fn silence_before_the_music_starts_is_no_chord() {
     // A song is heard from the bar line before its first note: here half a bar, or three beats, before it. The
     // silence is too short to be a rest, but no chord sounds there.
@@ -474,9 +515,11 @@ fn a_pinned_chord_is_read_as_given() {
     assert_eq!(given[1].chances.len(), 1);
     assert!(given[1].chances[0].0 == "Db7" && (given[1].chances[0].1 - 1.0).abs() < 1e-9);
     assert!((given[1].change - 1.0).abs() < 1e-9 && (given[2].change - 1.0).abs() < 1e-9);
-    // A pin of what's read freely is still reported as given, though the same chord goes on after it.
+    // A pin of what's read freely is still reported as given, though the same chord goes on after it: a chord starts
+    // for sure where the pin ends, even the same one.
     let same = read(&[pin(2 * B..3 * B, "Cmaj7")]);
     assert_eq!(cuts(&same), [(0..B, "Dm7"), (B..2 * B, "G7"), (2 * B..3 * B, "Cmaj7"), (3 * B..4 * B, "Cmaj7")]);
+    assert!((same[2].change - 1.0).abs() < 1e-9 && (same[3].change - 1.0).abs() < 1e-9);
     // One that runs past the end is cut short there.
     let past = read(&[pin(3 * B..6 * B, "C6")]);
     assert_eq!(cuts(&past), [(0..B, "Dm7"), (B..2 * B, "G7"), (2 * B..3 * B, "Cmaj7"), (3 * B..4 * B, "C6")]);
@@ -485,6 +528,13 @@ fn a_pinned_chord_is_read_as_given() {
         assert_eq!(cuts(&read(&pins)), cuts(&given));
     }
     assert_eq!(cuts(&read(&[pin(5..5, "E7"), pin(6 * B..7 * B, "E7")])), cuts(&free));
+    // A silence between two pins, which the chords given can't reach over, is no chord.
+    let gap = Music::new()
+        .bass([notes("C2", 0, 2 * BEAT), notes("F2", BAR, BAR)].concat())
+        .keys([notes("C4 E4 G4", 0, 2 * BEAT), notes("F3 A3 C4", BAR, BAR)].concat());
+    let spans = Whole::read(&gap, &HAND, &[pin(0..4, "C"), pin(B..2 * B, "F")]).spans();
+    assert_eq!(cuts(&spans), [(0..4, "C"), (4..B, "N"), (B..2 * B, "F")]);
+    assert!(!spans[1].rest);
 }
 
 #[test]
@@ -659,6 +709,329 @@ fn a_decoder_kept_and_used_again_reads_the_same() {
         assert!(decoder.decode(&hearing, &HAND, &COUNTED, pins, &mut out));
         assert_eq!(everything(&hearing, &decoder, &out, 0), read_all(music, pins));
     }
+}
+
+/// A way to read the music through what a decode kept: each of its steps (a span, and the place of its reading among
+/// those kept there), its score, and the units where it starts a chord.
+#[derive(Clone, Debug, Default)]
+struct Way {
+    steps: Vec<(usize, usize)>,
+    score: f64,
+    starts: Vec<usize>,
+}
+
+/// The pair term between two readings, as the design gives it: nothing into or out of no chord, nor for the same chord.
+fn pair(weights: &Weights, a: Option<Label>, b: Option<Label>) -> f64 {
+    match (a, b) {
+        (Some(a), Some(b)) => weights.pair * COUNTED.pair_prior(a, b),
+        _ => 0.0,
+    }
+}
+
+/// What reading a span as one of its readings (`k`) adds to a way after the step before it, and whether it starts a
+/// chord; none where the rules forbid it. Where the music starts, a reading starts. At a plain place or one a chord
+/// is pushed to, another reading starts, with the pair term; the same reading only goes on held on (scoring nothing
+/// for where a chord starts), after a span as long as a span from its start may be, and never from a place a chord
+/// is pushed to. At a rest's or a pin's edge, any reading starts, even the same. Inside a rest or a pin, only the same
+/// reading goes on, held on.
+fn step(
+    lattice: &Lattice,
+    weights: &Weights,
+    before: Option<(usize, usize)>,
+    s: usize,
+    k: usize,
+) -> Option<(f64, bool)> {
+    let (from, _, _, readings) = &lattice.spans[s];
+    let (_, pushed, kind) = lattice.places[*from];
+    let (label, score, held, _) = readings[k];
+    let before = before.map(|(b, j)| (lattice.spans[b].3[j].0, lattice.spans[b].2));
+    match (kind, before) {
+        (Kind::Start, None) => Some((score, true)),
+        (Kind::Inside, Some((b, full))) => (b == label && full).then_some((held, false)),
+        (Kind::Edge, Some((b, _))) => Some((score + pair(weights, b, label), true)),
+        (Kind::Free, Some((b, full))) if b == label => (full && !pushed).then_some((held, false)),
+        (Kind::Free, Some((b, _))) => Some((score + pair(weights, b, label), true)),
+        _ => None,
+    }
+}
+
+/// Every way to read the music through what the last decode kept, found one by one: the slow way.
+fn every_way(lattice: &Lattice, weights: &Weights) -> Vec<Way> {
+    let mut from: Vec<Vec<usize>> = vec![Vec::new(); lattice.places.len()];
+    for (s, span) in lattice.spans.iter().enumerate() {
+        from[span.0].push(s);
+    }
+    let mut ways = Vec::new();
+    let mut way = Way::default();
+    let mut walk = vec![(0usize, 0usize, 0usize)];
+    // A walk through the places by hand: at each depth, the place, and the span and reading to try next there.
+    while let Some(&mut (place, ref mut next_span, ref mut next_reading)) = walk.last_mut() {
+        let (unit, _, kind) = lattice.places[place];
+        if kind == Kind::End {
+            ways.push(way.clone());
+        }
+        // The next step the rules allow from here.
+        let mut found = None;
+        while let Some(&s) = from[place].get(*next_span) {
+            let k = *next_reading;
+            if k >= lattice.spans[s].3.len() {
+                (*next_span, *next_reading) = (*next_span + 1, 0);
+                continue;
+            }
+            *next_reading += 1;
+            if let Some((term, start)) = step(lattice, weights, way.steps.last().copied(), s, k) {
+                found = Some((s, k, term, start));
+                break;
+            }
+        }
+        match found {
+            Some((s, k, term, start)) => {
+                way.steps.push((s, k));
+                way.score += term;
+                if start {
+                    way.starts.push(unit);
+                }
+                walk.push((lattice.spans[s].1, 0, 0));
+            }
+            None => {
+                // Back a step.
+                walk.pop();
+                if let Some((s, k)) = way.steps.pop() {
+                    let (term, start) = step(lattice, weights, way.steps.last().copied(), s, k).unwrap();
+                    way.score -= term;
+                    if start {
+                        way.starts.pop();
+                    }
+                }
+            }
+        }
+    }
+    ways
+}
+
+/// How many ways there are to read the music through what the last decode kept, counted span by span (so the slow way
+/// is only tried where it's quick).
+fn count_ways(lattice: &Lattice, weights: &Weights) -> f64 {
+    // The spans into each place; a span's index is above those of the spans into its first place.
+    let mut into: Vec<Vec<usize>> = vec![Vec::new(); lattice.places.len()];
+    let mut ways: Vec<Vec<f64>> = Vec::with_capacity(lattice.spans.len());
+    let mut total = 0.0;
+    for (s, (from, to, _, readings)) in lattice.spans.iter().enumerate() {
+        let here: Vec<f64> = (0..readings.len())
+            .map(|k| {
+                let start = step(lattice, weights, None, s, k).map_or(0.0, |_| 1.0);
+                let before = into[*from].iter().flat_map(|&b| (0..lattice.spans[b].3.len()).map(move |j| (b, j)));
+                let allowed = before.filter(|&(b, j)| step(lattice, weights, Some((b, j)), s, k).is_some());
+                start + allowed.map(|(b, j)| ways[b][j]).sum::<f64>()
+            })
+            .collect();
+        if lattice.places[*to].2 == Kind::End {
+            total += here.iter().sum::<f64>();
+        }
+        into[*to].push(s);
+        ways.push(here);
+    }
+    total
+}
+
+/// Checks the last decode of music `units` long against the slow way (every way to read it through what the decode
+/// kept, added up one by one): ln Z, each reading's chance on its span, the chance a chord starts at each unit, and
+/// the best way.
+fn agrees_with_every_way(name: &str, decoder: &Decoder, units: usize) {
+    let lattice = decoder.lattice();
+    let ways = every_way(&lattice, &HAND);
+    assert!(!ways.is_empty() && ways.len() < 1_000_000, "{name}: {} ways", ways.len());
+    // ln Z, as a sum over the ways.
+    let best = ways.iter().map(|w| w.score).fold(f64::NEG_INFINITY, f64::max);
+    let z: f64 = ways.iter().map(|w| (w.score - best).exp()).sum();
+    let total = best + z.ln();
+    assert!(
+        (total - lattice.total).abs() < 1e-9 * total.abs().max(1.0),
+        "{name}: ln Z {} against {total}",
+        lattice.total
+    );
+    // Each reading's chance on its span (μ), and the chance a chord starts at each unit.
+    let mut chance: Vec<Vec<f64>> = lattice.spans.iter().map(|s| vec![0.0; s.3.len()]).collect();
+    let mut change = vec![0.0; units];
+    for way in &ways {
+        let p = (way.score - best).exp() / z;
+        for &(s, k) in &way.steps {
+            chance[s][k] += p;
+        }
+        for &u in &way.starts {
+            change[u] += p;
+        }
+    }
+    for (s, span) in lattice.spans.iter().enumerate() {
+        for (k, reading) in span.3.iter().enumerate() {
+            let (fast, slow) = (reading.3, chance[s][k]);
+            assert!((fast - slow).abs() < 1e-9, "{name}: span {s}, {:?}: {fast} against {slow}", reading.0);
+        }
+    }
+    for (u, slow) in change.iter().enumerate() {
+        let fast = decoder.change(u);
+        assert!((fast - slow.min(1.0)).abs() < 1e-9, "{name}: change at {u}: {fast} against {slow}");
+    }
+    // The best way the fast one finds is a way, from the start to the end, and none scores more.
+    let (mut score, mut before): (f64, Option<(usize, usize)>) = (0.0, None);
+    for &(s, label) in &lattice.best {
+        if let Some((b, _)) = before {
+            assert_eq!(lattice.spans[b].1, lattice.spans[s].0, "{name}: the best way is broken");
+        }
+        let k = lattice.spans[s].3.iter().position(|r| r.0 == label).unwrap();
+        score += step(&lattice, &HAND, before, s, k).expect("a step the rules allow").0;
+        before = Some((s, k));
+    }
+    let first = lattice.best.first().map(|&(s, _)| lattice.spans[s].0);
+    let last = lattice.best.last().map(|&(s, _)| lattice.places[lattice.spans[s].1].2);
+    assert_eq!((first, last), (Some(0), Some(Kind::End)), "{name}");
+    assert!((score - best).abs() < 1e-9 * best.abs().max(1.0), "{name}: the best way scores {score}, not {best}");
+}
+
+#[test]
+fn the_fast_way_agrees_with_adding_up_every_way_one_by_one() {
+    // C held three bars and struck again half a beat before the third, so a chord may be pushed there.
+    let held = Music::new().bass(notes("C2", 0, 3 * BAR)).keys(
+        [notes("C4 E4 G4", 0, 2 * BAR - BEAT / 2), notes("C4 E4 G4", 2 * BAR - BEAT / 2, BAR + BEAT / 2)].concat(),
+    );
+    let rest = Music::new()
+        .bass([notes("C2", 0, BAR), notes("F2", 4 * BAR, BAR)].concat())
+        .keys([notes("C4 E4 G4", 0, BAR), notes("F3 A3 C4", 4 * BAR, BAR)].concat());
+    let gap = Music::new()
+        .bass([notes("C2", 0, 2 * BEAT), notes("F2", BAR, BAR)].concat())
+        .keys([notes("C4 E4 G4", 0, 2 * BEAT), notes("F3 A3 C4", BAR, BAR)].concat());
+    let case = |prefix: &str| whole_cases().into_iter().find(|(name, _, _)| name.starts_with(prefix)).unwrap().1;
+    let ends = PinnedSpan { units: 2 * B..4 * B, label: None };
+    let cases = [
+        ("4", case("4 "), vec![]),
+        ("44", case("44 "), vec![]),
+        ("held over a push", held, vec![]),
+        ("rest", rest, vec![]),
+        ("pins", two_five_one(), vec![pin(B..2 * B, "Db7"), ends]),
+        ("a gap between pins", gap, vec![pin(0..4, "C"), pin(B..2 * B, "F")]),
+    ];
+    for (name, music, pins) in cases {
+        let whole = Whole::read(&music, &HAND, &pins);
+        agrees_with_every_way(name, &whole.decoder, whole.hearing.units());
+    }
+}
+
+/// The pins a decode keeps, as it keeps them: inside what's heard, and none over one before it.
+fn kept_pins(pins: &[PinnedSpan], units: usize) -> Vec<PinnedSpan> {
+    let mut kept: Vec<PinnedSpan> = pins
+        .iter()
+        .map(|pin| {
+            let end = pin.units.end.min(units);
+            PinnedSpan { units: pin.units.start.min(end)..end, label: pin.label }
+        })
+        .filter(|pin| !pin.units.is_empty())
+        .collect();
+    kept.sort_by_key(|pin| (pin.units.start, pin.units.end));
+    let mut end = 0;
+    kept.retain(|pin| {
+        let free = pin.units.start >= end;
+        if free {
+            end = pin.units.end;
+        }
+        free
+    });
+    kept
+}
+
+/// Small random music, with few enough ways to read it to add them up one by one: up to three bars on one of some
+/// grids, sometimes looped, with up to three parts of up to three notes or chords each.
+fn small_music(dice: &mut Dice) -> Music {
+    let (beats, tpb) = dice.pick(&[(4, 480), (3, 480), (6, 240), (2, 96), (4, 1)]);
+    let (beat, bar) = (i64::from(tpb), i64::from(beats) * i64::from(tpb));
+    let length = (1 + dice.below(3) as i64) * bar;
+    let mut music = Music::new().grid(beats, tpb);
+    if dice.below(4) == 0 {
+        music = music.looped();
+    }
+    for _ in 0..1 + dice.below(3) {
+        let role = dice.pick(&[Role::Bass, Role::Harmony, Role::Melody]);
+        let mut notes = Vec::new();
+        for _ in 0..1 + dice.below(3) {
+            let step = (beat / 2).max(1);
+            let start = dice.below(length as u64) as i64 / step * step;
+            let length = dice.pick(&[beat / 2, beat, 2 * beat, bar, bar + beat / 2]).max(1);
+            let root = 36 + dice.below(24) as u8;
+            let chord: &[u8] = dice.pick(&[&[0], &[0, 4, 7], &[0, 3, 7, 10]]);
+            notes.extend(chord.iter().map(|&up| Note { start, length, key: root + up, velocity: 32768 }));
+        }
+        music = music.part(role, notes);
+    }
+    music
+}
+
+#[test]
+fn any_music_with_any_pins_is_read_whole_and_the_fast_way_agrees_with_the_slow_way() {
+    let mut dice = Dice(0x9e37_79b9_7f4a_7c15);
+    let (mut decoder, mut out, mut hearing) = (Decoder::new(), Decoding::new(), Hearing::new());
+    let (mut read, mut slow) = (0, 0);
+    let mut list = Vec::new();
+    for round in 0..400 {
+        let music = if round % 2 == 0 { random_music(&mut dice) } else { small_music(&mut dice) };
+        if !music.hear_into(&mut hearing) {
+            continue;
+        }
+        let (units, bar) = (hearing.units(), hearing.bar_units().max(1));
+        // Up to three pins anywhere (past the end, empty, or over each other too), on a chord or only at their ends.
+        let mut pins = Vec::new();
+        for _ in 0..dice.below(4) {
+            let start = dice.below((units + bar) as u64) as usize;
+            let end = start + dice.below(3 * bar as u64) as usize;
+            let core = dice.pick(&Core::ALL);
+            let label = (dice.below(3) > 0).then(|| Label::new(PitchClass::new(dice.below(12) as i32), core));
+            pins.push(PinnedSpan { units: start..end, label });
+        }
+        let what = format!("round {round}: {music:?}, pins {pins:?}");
+        assert!(decoder.decode(&hearing, &HAND, &COUNTED, &pins, &mut out), "nothing read: {what}");
+        read += 1;
+        // The spans run from the first unit reported to the last, each from where the one before ends.
+        let reported = hearing.reported();
+        let spans = out.spans();
+        assert_eq!(spans.first().map(|s| s.units.start), Some(reported.start), "{what}");
+        assert_eq!(spans.last().map(|s| s.units.end), Some(reported.end), "{what}");
+        assert!(spans.windows(2).all(|w| w[0].units.end == w[1].units.start), "{what}");
+        let fine = |chances: &[Chance]| {
+            let sum: f64 = chances.iter().map(|c| c.chance).sum();
+            let sorted = chances.windows(2).all(|w| w[0].chance >= w[1].chance);
+            (sum - 1.0).abs() < 1e-9 && sorted && chances.iter().all(|c| c.chance > 0.0 && c.chance <= 1.0)
+        };
+        for s in spans {
+            let sound = &s.sound;
+            assert!(!s.units.is_empty() && !sound.is_empty(), "{s:?}: {what}");
+            assert!(reported.start <= sound.start && sound.end <= reported.end, "{s:?}: {what}");
+            let chances = out.chances(s);
+            assert!(fine(chances) && chances.iter().any(|c| c.label == s.label), "{s:?}: {what}");
+            assert!((0.0..=1.0).contains(&s.change), "{s:?}: {what}");
+            assert!(!s.rest || s.label.is_none(), "{s:?}: {what}");
+        }
+        for u in reported.clone() {
+            decoder.chances(&hearing, u..u + 1, &mut list);
+            assert!(fine(&list), "unit {u}: {list:?}: {what}");
+            assert!((0.0..=1.0).contains(&decoder.change(u)), "unit {u}: {what}");
+        }
+        if reported.start == 0 {
+            assert!((decoder.change(0) - 1.0).abs() < 1e-9, "{what}");
+        }
+        // Each pin kept is read as one span, as given.
+        for pin in kept_pins(&pins, units) {
+            let units = pin.units.start.max(reported.start)..pin.units.end;
+            if units.is_empty() {
+                continue;
+            }
+            let span = spans.iter().find(|s| s.units == units);
+            assert!(span.is_some_and(|s| pin.label.is_none_or(|l| s.label == Some(l))), "{pin:?}: {what}");
+        }
+        // And where there are few enough ways to add up one by one, the slow way agrees.
+        if count_ways(&decoder.lattice(), &HAND) <= 20_000.0 {
+            agrees_with_every_way(&what, &decoder, units);
+            slow += 1;
+        }
+    }
+    assert!(read > 350 && slow > 150, "{read} pieces read, {slow} of them the slow way too");
 }
 
 #[test]

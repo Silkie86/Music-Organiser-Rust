@@ -7,14 +7,17 @@
 //! best is reported ([`Decoder`]):
 //!
 //! - **Pass A** scores the readings worth scoring on each span on its own ([`SpanFacts::rank`]) and keeps the best
-//!   eight ([`KEEP`]), the best rootless one, and no chord (N), which scores w_N for each felt beat the span sounds.
+//!   eight ([`KEEP`]), the best rootless one, no chord (N), which scores w_N for each felt beat the span sounds, and
+//!   the readings that may be held on into the span from before it, whatever their rank (held on, a reading scores
+//!   without what counts where a chord starts, which pass A ranks by).
 //! - **Pass B** finds the best way through the whole (Viterbi, exact on what pass A kept), adding the pair term for
 //!   each change of chord ([`Tables::pair_prior`] times its trust): how much likelier the way the root moves is than a
 //!   move picked at random. A move into or out of no chord adds nothing, as a move nothing is known about wouldn't.
-//! - A chord held longer than a span is the same reading again, held on. It may only follow a span of the full two
-//!   bars, so no way of reading the music is counted twice, and it scores only what counts for each felt beat
-//!   ([`SpanFacts::held_score`]): where it starts was counted where it started. So a chord held, or struck again, for
-//!   eight bars is one chord.
+//! - A chord held longer than a span is the same reading again, held on. It may only follow a span as long as a span
+//!   from its start may be (two bars on, or to the last place before that), and never from a place a chord is pushed
+//!   to (that's the same way as holding it on from the plain place), so no way of reading the music is counted twice;
+//!   and it scores only what counts for each felt beat ([`SpanFacts::held_score`]): where it starts was counted where
+//!   it started. So a chord held, or struck again, for eight bars is one chord.
 //! - **Forward-backward** adds up every way, each scored times the sharpness ([`SHARPNESS`]), into each reading's
 //!   chance on each unit and the chance a chord changes at each unit.
 //!
@@ -23,10 +26,11 @@
 //! change between beats E7).
 //!
 //! Silence of a bar or more (nothing in the chords, the bass or the tune) is a rest, read as no chord; a silence
-//! shorter than that belongs to the chords around it, so no chord is only offered on a span that sounds (or on the
-//! silence before the music starts, from the bar line before its first note). Stretches given by the caller
-//! ([`PinnedSpan`]) are read as given: as a chord, or as one chord between the two places given. Every way changes
-//! chord where a rest or a pin starts and ends, so any reading may follow any other there, even the same one.
+//! shorter than that belongs to the chords around it, held on over it, so no chord is only offered on a span that
+//! sounds, where the music starts (on the silence before its first note, from the bar line before it), and next to a
+//! rest's or a pin's edge. Stretches given by the caller ([`PinnedSpan`]) are read as given: as a chord, or as one
+//! chord between the two places given. Every way changes chord where a rest or a pin starts and ends, so any reading
+//! may follow any other there, even the same one.
 //!
 //! The best way is reported with the spans that read the same merged, though never across a rest's or a pin's edge,
 //! each with the chances of its readings (each reading's chance on each of its units, averaged) and the chance a chord
@@ -75,7 +79,8 @@ pub struct DecodedSpan {
     /// Its units, from the first unit heard, inside the units reported ([`Hearing::reported`]).
     pub units: Range<usize>,
     /// The units whose sound is its own: a unit before its first when its chord is pushed, and a unit short when the
-    /// next one is (inside the units reported).
+    /// next one is (inside the units reported: at the first unit reported, a chord pushed there is struck in a loop's
+    /// copied bar, so its sound starts where its units do).
     pub sound: Range<usize>,
     /// Whether its chord is pushed: struck in the unit before its first and held over it, read from its first.
     pub pushed: bool,
@@ -84,7 +89,8 @@ pub struct DecodedSpan {
     /// Whether it's a rest: silent for a bar or more.
     pub rest: bool,
     /// The chance a chord starts where it starts, over every way of reading the music: low where the best way starts
-    /// one but others hold the chord before on.
+    /// one but others hold the chord before on. At the first unit reported of a loop, the chord before is the one in
+    /// its copied bar (where the loop ends), so it's low where the chord goes on round.
     pub change: f64,
     /// Its readings' places in [`Decoding::chances`].
     chances: Range<usize>,
@@ -249,7 +255,7 @@ struct Region {
 
 /// What may happen at a place a chord may change.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Kind {
+pub(super) enum Kind {
     /// Where the music starts: nothing comes before.
     Start,
     /// Anything may change, but the same reading may only follow a span of the full length.
@@ -274,6 +280,9 @@ struct Node {
     /// otherwise anywhere up to there.
     reach: usize,
     exact: bool,
+    /// The furthest unit a span from it may end at (a place's unit, at most `reach`): a span that far is as long as a
+    /// span from it may be.
+    last: usize,
     /// The rest or pin it starts or is inside, when `exact`.
     region: Option<usize>,
     /// The spans that end at it, and the readings they bring here (places in `Decoder::spans` and
@@ -301,7 +310,9 @@ struct Span {
     /// Its first and last places, as places in `Decoder::nodes`.
     from: usize,
     to: usize,
-    /// Whether it's as long as a span may be: then the same reading may follow it.
+    /// Whether it's as long as a span from its start may be, to the furthest place it may end (two bars on, or the last
+    /// place before that): then the same reading may follow it, held on. So a long chord is cut into spans one way
+    /// only, wherever it starts.
     full: bool,
     rest: bool,
     /// Its readings, as places in `Decoder::kept`.
@@ -394,18 +405,22 @@ impl Default for Ready {
 }
 
 /// What the ways that reach a place bring to a reading of a span from it, from the readings there (`entries`, the
-/// first at `first` in `Decoder::entries`).
-fn ready_from(entries: &[Entry], first: usize, id: Id, kind: Kind, moves: &Moves) -> Ready {
+/// first at `first` in `Decoder::entries`). A chord is never held on from a place with a chord pushed to it: that
+/// would be the same way to read the music as holding it on from the plain place.
+fn ready_from(entries: &[Entry], first: usize, id: Id, node: &Node, moves: &Moves) -> Ready {
+    let (kind, pushed) = (node.kind, node.pushed());
     let mut out = Ready::default();
     for (e, entry) in (first..).zip(entries) {
         // The first of equals: the readings come in an order that moves with the music.
         if entry.id == id && kind != Kind::Edge {
             // The same reading held on, after a span of the full length.
-            if entry.best_full > out.held_best {
-                out.held_best = entry.best_full;
-                out.held_from = Some((e, true));
+            if !pushed {
+                if entry.best_full > out.held_best {
+                    out.held_best = entry.best_full;
+                    out.held_from = Some((e, true));
+                }
+                out.held_alpha = add_ln(out.held_alpha, entry.alpha_full);
             }
-            out.held_alpha = add_ln(out.held_alpha, entry.alpha_full);
             continue;
         }
         if kind == Kind::Inside {
@@ -419,7 +434,8 @@ fn ready_from(entries: &[Entry], first: usize, id: Id, kind: Kind, moves: &Moves
             out.from = Some((e, false));
         }
         out.alpha = add_ln(out.alpha, alpha);
-        if entry.id != id {
+        // Every way changes chord at an edge, even to the same reading.
+        if entry.id != id || kind == Kind::Edge {
             out.change = add_ln(out.change, alpha);
         }
     }
@@ -479,6 +495,7 @@ pub struct Decoder {
     after: PerId<f64>,
     after_held: PerId<f64>,
     touched: Vec<Id>,
+    seen: PerId<bool>,
     path: Vec<(usize, Id)>,
 }
 
@@ -667,6 +684,18 @@ impl Decoder {
                 self.nodes.push(Node::at(u, Some(p), kind, reach, region));
             }
         }
+        // The furthest place a span from each may end: the last place up to where it may reach.
+        for i in 0..self.nodes.len() {
+            let Some(&Node { unit, reach, exact, .. }) = self.nodes.get(i) else { break };
+            if exact {
+                continue;
+            }
+            let end = self.nodes.partition_point(|n| n.unit <= reach);
+            let last = end.checked_sub(1).and_then(|k| self.nodes.get(k)).map_or(unit, |n| n.unit);
+            if let Some(node) = self.nodes.get_mut(i) {
+                node.last = last;
+            }
+        }
     }
 
     /// Pass A on every span, and the forward pass of pass B and of forward-backward: for each place in order, the
@@ -694,7 +723,7 @@ impl Decoder {
                 self.keep_on(hearing, weights, tables, &v, &w);
                 let span = self.spans.len();
                 let first = self.kept.len();
-                let full = w.unit - v.unit == self.cap;
+                let full = w.unit == v.last;
                 let rest =
                     v.region.and_then(|r| self.regions.get(r)).is_some_and(|r| r.given == Given::Rest && v.exact);
                 for l in 0..self.labels.len() {
@@ -760,8 +789,8 @@ impl Decoder {
     }
 
     /// The readings pass A keeps on the span from `v` to `w`, with their scores, into `labels`: the given one inside a
-    /// rest or a pin; otherwise the best eight, the best rootless one, and no chord where the span sounds or the
-    /// music starts.
+    /// rest or a pin; otherwise the best eight, the best rootless one, no chord where anything sounds, and the readings
+    /// that may be held on into the span.
     fn keep_on(&mut self, hearing: &Hearing, weights: &Weights, tables: &Tables, v: &Node, w: &Node) {
         let pushes = hearing.pushes();
         let (start, end) = (v.push.and_then(|p| pushes.get(p)), w.push.and_then(|p| pushes.get(p)));
@@ -795,9 +824,39 @@ impl Decoder {
                 self.facts.candidates(&mut self.candidates);
                 self.facts.rank(&self.candidates, weights, tables, &mut self.ranked);
                 keep(&self.ranked, &mut self.labels);
-                if self.facts.sounding() > 0 || v.kind == Kind::Start {
-                    let none = self.facts.none_score(weights);
+                // No chord wherever anything sounds (the tune alone too), where the music starts, and next to a rest's
+                // or a pin's edge, which the chords around a silence can't reach over. A shorter silence anywhere else
+                // belongs to the chords around it, so no chord never slips into one to save them the pair term.
+                let silent = self.facts.silent();
+                let none = self.facts.none_score(weights);
+                if !silent || v.kind == Kind::Start || v.kind == Kind::Edge || w.kind == Kind::Edge {
                     self.labels.push((Id::NONE, none, none));
+                }
+                // The readings that may be held on into the span (those that reach its start by a span as long as a
+                // span may be) are kept too, whatever their rank: held on, a reading scores without what counts where a
+                // chord starts, which pass A ranks by. Over silence, a chord is held on with nothing to weigh.
+                if v.kind == Kind::Free && !v.pushed() {
+                    for entry in self.entries.get(v.entries.clone()).unwrap_or_default() {
+                        let id = entry.id;
+                        if entry.best_full == f64::NEG_INFINITY || self.labels.iter().any(|&(k, _, _)| k == id) {
+                            continue;
+                        }
+                        let ranked =
+                            self.ranked.iter().find(|s| Id::of(Some(s.label)) == id).map(|s| (s.score, s.held));
+                        let scored = match (ranked, id.label()) {
+                            (Some(scored), _) => Some(scored),
+                            (None, None) => Some((none, none)),
+                            (None, Some(label)) if silent => {
+                                self.facts.features(label, tables, &mut self.features);
+                                let held = self.facts.held_score(&self.features, weights);
+                                Some((self.facts.score(&self.features, weights), held))
+                            }
+                            (None, Some(_)) => None,
+                        };
+                        if let Some((score, held)) = scored {
+                            self.labels.push((id, score, held));
+                        }
+                    }
                 }
             }
         }
@@ -818,7 +877,7 @@ impl Decoder {
             Some(node) if node.kind == Kind::Start => Ready { best: 0.0, alpha: 0.0, change: 0.0, ..Ready::default() },
             Some(node) => {
                 let entries = self.entries.get(node.entries.clone()).unwrap_or_default();
-                ready_from(entries, node.entries.start, id, node.kind, &self.moves)
+                ready_from(entries, node.entries.start, id, node, &self.moves)
             }
             None => Ready::default(),
         };
@@ -875,7 +934,8 @@ impl Decoder {
                 }
                 continue;
             }
-            // What follows each reading of a span from here, started here or held on into the span.
+            // What follows each reading of a span from here, started here or held on into the span (`seen` marks the
+            // readings in `touched`, and is cleared again below).
             self.touched.clear();
             let mut changes = 0.0;
             for &s in self.by_start.get(node.out.clone()).unwrap_or_default() {
@@ -884,7 +944,8 @@ impl Decoder {
                     let Some(entry) = kept.entry.and_then(|e| self.entries.get(e)) else { continue };
                     let beta = if span.full { entry.beta_full } else { entry.beta };
                     let (after, held) = (SHARPNESS * kept.score + beta, SHARPNESS * kept.held + beta);
-                    if !self.touched.contains(&kept.id) {
+                    if !self.seen[kept.id] {
+                        self.seen[kept.id] = true;
                         self.touched.push(kept.id);
                         self.after[kept.id] = f64::NEG_INFINITY;
                         self.after_held[kept.id] = f64::NEG_INFINITY;
@@ -898,9 +959,11 @@ impl Decoder {
             if let Some(c) = self.change.get_mut(node.unit) {
                 *c += changes;
             }
-            // The backward mass after each reading that ends here.
+            // The backward mass after each reading that ends here: held on (never from a place with a chord pushed to
+            // it), or moving on.
             for entry in self.entries.get_mut(node.entries.clone()).unwrap_or_default() {
-                let own = if self.touched.contains(&entry.id) { self.after_held[entry.id] } else { f64::NEG_INFINITY };
+                let held = self.seen[entry.id] && !node.pushed();
+                let own = if held { self.after_held[entry.id] } else { f64::NEG_INFINITY };
                 let mut moved = f64::NEG_INFINITY;
                 if node.kind != Kind::Inside {
                     for &next in &self.touched {
@@ -914,6 +977,9 @@ impl Decoder {
                     Kind::Inside => (f64::NEG_INFINITY, own),
                     _ => (moved, add_ln(moved, own)),
                 };
+            }
+            for &id in &self.touched {
+                self.seen[id] = false;
             }
         }
     }
@@ -1020,6 +1086,36 @@ impl Decoder {
 impl Node {
     fn at(unit: usize, push: Option<usize>, kind: Kind, reach: usize, region: Option<usize>) -> Node {
         let exact = region.is_some();
-        Node { unit, push, kind, reach, exact, region, into: 0..0, entries: 0..0, out: 0..0 }
+        Node { unit, push, kind, reach, exact, last: reach, region, into: 0..0, entries: 0..0, out: 0..0 }
+    }
+}
+
+/// What the last decode weighed, for the tests' slow way: each place's unit, whether a chord is pushed to it and what
+/// may happen there; each span's first and last places, whether it's as long as a span from its start may be, and its
+/// readings with their scores, held-on scores and chances; ln Z; and the best way, as spans and readings.
+#[cfg(test)]
+#[derive(Clone, Debug)]
+pub(super) struct Lattice {
+    pub(super) places: Vec<(usize, bool, Kind)>,
+    pub(super) spans: Vec<(usize, usize, bool, Vec<Reading>)>,
+    pub(super) total: f64,
+    pub(super) best: Vec<(usize, Option<Label>)>,
+}
+
+/// A reading kept on a span, for the tests: its label, its score, its held-on score and its chance.
+#[cfg(test)]
+pub(super) type Reading = (Option<Label>, f64, f64, f64);
+
+#[cfg(test)]
+impl Decoder {
+    pub(super) fn lattice(&self) -> Lattice {
+        let places = self.nodes.iter().map(|n| (n.unit, n.pushed(), n.kind)).collect();
+        let kept = |span: &Span| -> Vec<Reading> {
+            let kept = self.kept.get(span.kept.clone()).unwrap_or_default();
+            kept.iter().map(|k| (k.id.label(), k.score, k.held, k.chance)).collect()
+        };
+        let spans = self.spans.iter().map(|s| (s.from, s.to, s.full, kept(s))).collect();
+        let best = self.path.iter().map(|&(s, id)| (s, id.label())).collect();
+        Lattice { places, spans, total: self.total, best }
     }
 }
