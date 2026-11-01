@@ -312,6 +312,26 @@ fn leave_out_measured_twins(items: &mut Vec<Item>) -> HashMap<String, usize> {
     left_out
 }
 
+/// How a source's sets are weighed: "1", "0.25", or each kind of input's ("full 0.5, tune 1, upper 0, ...").
+fn weighing(weights: [f64; 5]) -> String {
+    if weights.iter().all(|w| *w == weights[0]) {
+        format!("{}", weights[0])
+    } else {
+        let each: Vec<String> = Input::ALL.iter().zip(weights).map(|(i, w)| format!("{} {w}", i.short())).collect();
+        each.join(", ")
+    }
+}
+
+/// Who made a source the weights are fitted on, and its licence, for the weights file.
+fn credit(source: &str, licence: &str) -> String {
+    match source {
+        "pop909cl" => "POP909-CL: Yao, Chen, Dubnov and Berg-Kirkpatrick (2026), MIT licence".to_owned(),
+        "pop909" => "POP909: Wang, Chen, Jiang, Zhang, Xu, Dai, Gu and Xia (ISMIR 2020), MIT licence".to_owned(),
+        "billboard" => "The McGill Billboard charts: Burgoyne, Wild and Fujinaga (ISMIR 2011), CC0".to_owned(),
+        _ => format!("{source}: {licence}"),
+    }
+}
+
 /// Stops a run that has nothing to fit the weights on, which would otherwise fit zeros without a word.
 fn check_learning(songs: &[Song]) -> Result<(), String> {
     if !songs.iter().any(|s| s.learn) {
@@ -947,21 +967,30 @@ pub fn run(args: &[String]) -> Result<(), String> {
     }
     let left_out = leave_out_measured_twins(&mut setup.items);
     let songs = songs_of(&setup.items, &sources, &weigh);
+    // How each source was used, for the run log and the weights file ("billboard at 0.25", "rs200 measured only").
+    let mut used: Vec<String> = Vec::new();
+    // Each source learned from, with its credit, for the weights file.
+    let mut credits: Vec<String> = Vec::new();
     for (g, source) in sources.iter().enumerate() {
         let of: Vec<&Song> = songs.iter().filter(|s| s.group == g).collect();
         let learned = of.iter().filter(|s| s.learn).count();
         // A source's songs learned from all weigh the same (`--weigh` names sources), so the first one says.
         let weights = of.iter().find(|s| s.learn).map_or([0.0; 5], |s| s.weight);
         let mut how = if learned == 0 {
+            used.push(format!("{source} measured only"));
             "measured only (its licence doesn't let fitted weights ship)".to_owned()
         } else if weights.iter().all(|w| *w == 0.0) {
+            used.push(format!("{source} in the tables only"));
             "counted in the tables only".to_owned()
-        } else if weights.iter().all(|w| *w == weights[0]) {
-            format!("learned from, its sets counting {}", weights[0])
         } else {
-            let each: Vec<String> = Input::ALL.iter().zip(weights).map(|(i, w)| format!("{} {w}", i.short())).collect();
-            format!("learned from, its sets counting {}", each.join(", "))
+            let counting = weighing(weights);
+            used.push(if counting == "1" { source.clone() } else { format!("{source} at {counting}") });
+            format!("learned from, its sets counting {counting}")
         };
+        if learned > 0 {
+            let licence = setup.items.iter().find(|i| i.source == *source && i.may_learn()).map(|i| i.licence.as_str());
+            credits.push(credit(source, licence.unwrap_or_default()));
+        }
         if learned > 0 && learned < of.len() {
             let _ = write!(how, "; {} of them only measured (their licence doesn't)", of.len() - learned);
         }
@@ -1028,7 +1057,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         for (g, source) in sources.iter().enumerate().skip(1) {
             source_report(source, &cases, &chances, |c| unseen(c) && group(c) == g, &inputs);
         }
-        log_run("--final", &summary, &opts)?;
+        log_run(&format!("--final ({})", used.join("; ")), &summary, &opts)?;
         let finder = finder(&model.weights, &calibration, &fitted_answers);
         hand_cases(&[("fitted on folds 1 to 4".to_owned(), finder)], &show)?;
     } else if let Some(path) = write {
@@ -1049,7 +1078,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         for (g, source) in sources.iter().enumerate().skip(1) {
             source_report(source, &cases, &chances, |c| group(c) == g, &inputs);
         }
-        log_run("--write", &summary, &opts)?;
+        log_run(&format!("--write ({})", used.join("; ")), &summary, &opts)?;
         let (model, fitted, n) = fit_model(&cases, &songs, &learn, &opts)?;
         println!();
         println!("Fitted on every song: {n} cases, {} Newton steps.", fitted.steps);
@@ -1057,9 +1086,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
         if !hand_cases(&[("fitted on every song".to_owned(), shipped)], &show)? {
             return Err("these weights break a hand case's gate (above), so they aren't written".into());
         }
-        let learned: Vec<&str> = setup.items.iter().filter(|i| i.may_learn()).map(|i| i.source.as_str()).collect();
-        std::fs::write(&path, weights_file(&model, &calibration, &fitted_answers, &opts, &learned, &summary))
-            .map_err(|e| format!("{}: {e}", path.display()))?;
+        let learned: Vec<String> = used.iter().filter(|u| !u.ends_with(" measured only")).cloned().collect();
+        let file = weights_file(&model, &calibration, &fitted_answers, &opts, (&learned, &credits), &summary);
+        std::fs::write(&path, file).map_err(|e| format!("{}: {e}", path.display()))?;
         println!("Written to {}.", path.display());
     } else {
         println!("Folds 1 to 4, each held out in turn (fold {FROZEN} isn't touched):");
@@ -1630,9 +1659,8 @@ fn today() -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
-/// Adds a line to `test-runs.md` for a run that scored the kept-back fold.
 /// Adds a line to `test-runs.md` for a run that showed fold 0: `--final`, or `--write` (which scores every fold
-/// before it writes the weights).
+/// before it writes the weights). `run` says which, and what it read.
 fn log_run(run: &str, summary: &Summary, opts: &Options) -> Result<(), String> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-runs.md");
     let commit = std::process::Command::new("git")
@@ -1663,18 +1691,16 @@ fn log_run(run: &str, summary: &Summary, opts: &Options) -> Result<(), String> {
     Ok(())
 }
 
-/// The weights as Rust source for `crates/mo-harmony/src/keyfind/weights.rs`.
+/// The weights as Rust source for `crates/mo-harmony/src/keyfind/weights.rs`, from the sources learned from (each
+/// as it was weighed: "billboard at 0.25") and their credits.
 fn weights_file(
     model: &Model,
     calibration: &Calibration,
     answers: &Fitted,
     opts: &Options,
-    sources: &[&str],
+    (sources, credits): (&[String], &[String]),
     summary: &Summary,
 ) -> String {
-    let mut sources: Vec<&str> = sources.to_vec();
-    sources.sort_unstable();
-    sources.dedup();
     let penalty = opts.lambda_delta.map_or("none fitted".to_owned(), |l| format!("penalty {l}"));
     let mut out = String::new();
     out.push_str(
@@ -1686,9 +1712,10 @@ fn weights_file(
         "//! Fitted on: {} (trust weights penalty {LAMBDA_W}, corrections {penalty}).",
         sources.join(", ")
     );
-    out.push_str(
-        "//! POP909-CL: Yao, Chen, Dubnov and Berg-Kirkpatrick (2026), MIT licence; only these weights come from it.\n",
-    );
+    for credit in credits {
+        let _ = writeln!(out, "//! - {credit}");
+    }
+    out.push_str("//! Only these numbers come from them.\n");
     out.push_str("//!\n//! Right on songs held out of the fit (cross-validation by song, every fold):\n");
     for line in &summary.lines {
         let _ = writeln!(out, "//! - {line}");
@@ -2018,10 +2045,12 @@ mod tests {
             knot_lines: vec!["1 bar (10 cases): one key from 0.85.".into()],
         };
         let file = |weights: [f64; FEATURES]| {
-            weights_file(&Model { weights }, &calibration, &answers, &opts, &["x"], &summary)
+            let (sources, credits) = (["x at 0.5".to_owned()], ["x: CC0".to_owned()]);
+            weights_file(&Model { weights }, &calibration, &answers, &opts, (&sources, &credits), &summary)
         };
         // The numbers built in: the hash and version built in.
         let same = file(*keyfind::SHIPPED.weights);
+        assert!(same.contains("//! Fitted on: x at 0.5 (") && same.contains("//! - x: CC0\n"), "{same}");
         assert!(same.contains("/// - 1 bar (10 cases): one key from 0.85.\n"), "{same}");
         assert!(same.contains("/// Notes in one scale a key needs: 0.750.\npub(super) const NOT_TONAL_BELOW"));
         let (hash, version) = keyfind::SHIPPED_HASH;
