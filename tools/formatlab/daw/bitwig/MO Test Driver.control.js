@@ -35,15 +35,20 @@ var STEPS = [
     { tempo: 100, master: 0.5, volume: 0.7, pan: 0.0, on: true }
 ];
 
-var app, transport, master, cursorTrack, cursorDevice, changes;
+var app, project, transport, master, cursorTrack, cursorDevice, changes;
 var running = false;
+/** Set when Save should run at Bitwig's next flush (Bitwig 6.1.3 only saved for a script from there). */
+var saveAtFlush = false;
 
 function init() {
     app = host.createApplication();
     app.projectName().markInterested();
+    project = host.getProject();
+    project.isModified().markInterested();
     transport = host.createTransport();
     transport.tempo().markInterested();
     transport.isPlaying().markInterested();
+    transport.getPosition().markInterested();
     transport.isArrangerAutomationWriteEnabled().markInterested();
     transport.automationWriteMode().markInterested();
     master = host.createMasterTrack(0);
@@ -138,12 +143,24 @@ function stopAndSave() {
     transport.stop();
     transport.isArrangerAutomationWriteEnabled().set(false);
     host.scheduleTask(function () {
-        if (allowed()) {
-            app.getAction("Save").invoke();
-            say("recorded " + STEPS.length + " steps and saved \"" + PROJECT + "\".");
-        }
-        finish();
+        if (!allowed()) return finish();
+        saveAtFlush = true;
+        host.requestFlush();
+        // Bitwig may not save for a script with no MIDI ports: then it's said, so Ctrl+S saves it by hand.
+        host.scheduleTask(function () {
+            if (project.isModified().get())
+                say("recorded " + STEPS.length + " steps, but Bitwig didn't save: press Ctrl+S to save it.");
+            else
+                say("recorded " + STEPS.length + " steps and saved \"" + PROJECT + "\".");
+            finish();
+        }, 2000);
     }, 1000);
+}
+
+function flush() {
+    if (!saveAtFlush) return;
+    saveAtFlush = false;
+    if (allowed()) app.getAction("Save").invoke();
 }
 
 function finish() {
