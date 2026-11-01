@@ -120,64 +120,68 @@ impl Core {
 
     /// Its own notes, as intervals above the root (bit 0 the root).
     pub const fn intervals(self) -> PcSet {
-        PcSet::of(match self {
-            Core::Major => &[0, 4, 7],
-            Core::Minor => &[0, 3, 7],
-            Core::Dominant7 => &[0, 4, 7, 10],
-            Core::Major7 => &[0, 4, 7, 11],
-            Core::Minor7 => &[0, 3, 7, 10],
-            Core::Major6 => &[0, 4, 7, 9],
-            Core::Minor6 => &[0, 3, 7, 9],
-            Core::MinorMajor7 => &[0, 3, 7, 11],
-            Core::HalfDiminished => &[0, 3, 6, 10],
-            Core::Diminished7 => &[0, 3, 6, 9],
-            Core::Diminished => &[0, 3, 6],
-            Core::Augmented => &[0, 4, 8],
-            Core::Sus4 => &[0, 5, 7],
-            Core::Sus2 => &[0, 2, 7],
-            Core::Dominant7Sus4 => &[0, 5, 7, 10],
-            Core::Power => &[0, 7],
-        })
+        // Each set is worked out when the app is built.
+        match self {
+            Core::Major => const { PcSet::of(&[0, 4, 7]) },
+            Core::Minor => const { PcSet::of(&[0, 3, 7]) },
+            Core::Dominant7 => const { PcSet::of(&[0, 4, 7, 10]) },
+            Core::Major7 => const { PcSet::of(&[0, 4, 7, 11]) },
+            Core::Minor7 => const { PcSet::of(&[0, 3, 7, 10]) },
+            Core::Major6 => const { PcSet::of(&[0, 4, 7, 9]) },
+            Core::Minor6 => const { PcSet::of(&[0, 3, 7, 9]) },
+            Core::MinorMajor7 => const { PcSet::of(&[0, 3, 7, 11]) },
+            Core::HalfDiminished => const { PcSet::of(&[0, 3, 6, 10]) },
+            Core::Diminished7 => const { PcSet::of(&[0, 3, 6, 9]) },
+            Core::Diminished => const { PcSet::of(&[0, 3, 6]) },
+            Core::Augmented => const { PcSet::of(&[0, 4, 8]) },
+            Core::Sus4 => const { PcSet::of(&[0, 5, 7]) },
+            Core::Sus2 => const { PcSet::of(&[0, 2, 7]) },
+            Core::Dominant7Sus4 => const { PcSet::of(&[0, 5, 7, 10]) },
+            Core::Power => const { PcSet::of(&[0, 7]) },
+        }
     }
 
     /// Its third, or the 4th or 2nd of a sus chord, which stands in for it; none for a power chord. (A 7sus4 may also
     /// sound its 2 in place of its 4th: see [`Core::fits`].)
     pub const fn third(self) -> PcSet {
-        PcSet::of(match self {
-            Core::Major | Core::Dominant7 | Core::Major7 | Core::Major6 | Core::Augmented => &[4],
+        // Each set is worked out when the app is built.
+        match self {
+            Core::Major | Core::Dominant7 | Core::Major7 | Core::Major6 | Core::Augmented => const { PcSet::of(&[4]) },
             Core::Minor
             | Core::Minor7
             | Core::Minor6
             | Core::MinorMajor7
             | Core::HalfDiminished
             | Core::Diminished7
-            | Core::Diminished => &[3],
-            Core::Sus4 | Core::Dominant7Sus4 => &[5],
-            Core::Sus2 => &[2],
-            Core::Power => &[],
-        })
+            | Core::Diminished => const { PcSet::of(&[3]) },
+            Core::Sus4 | Core::Dominant7Sus4 => const { PcSet::of(&[5]) },
+            Core::Sus2 => const { PcSet::of(&[2]) },
+            Core::Power => const { PcSet::of(&[]) },
+        }
     }
 
     /// Its seventh, or the sixth of a sixth chord (and the 𝄫7 of a diminished seventh); none for a triad.
     pub const fn seventh(self) -> PcSet {
-        PcSet::of(match self {
-            Core::Dominant7 | Core::Minor7 | Core::HalfDiminished | Core::Dominant7Sus4 => &[10],
-            Core::Major7 | Core::MinorMajor7 => &[11],
-            Core::Major6 | Core::Minor6 | Core::Diminished7 => &[9],
+        // Each set is worked out when the app is built.
+        match self {
+            Core::Dominant7 | Core::Minor7 | Core::HalfDiminished | Core::Dominant7Sus4 => const { PcSet::of(&[10]) },
+            Core::Major7 | Core::MinorMajor7 => const { PcSet::of(&[11]) },
+            Core::Major6 | Core::Minor6 | Core::Diminished7 => const { PcSet::of(&[9]) },
             // The triads and the power chord.
-            _ => &[],
-        })
+            _ => const { PcSet::of(&[]) },
+        }
     }
 
     /// The fifth that says which core it is, so must sound: the ♭5 of the diminished chords, the ♯5 of an augmented
     /// one and a power chord's fifth. Any other chord's plain fifth may be left out, as shells leave it out.
     pub const fn fifth(self) -> PcSet {
-        PcSet::of(match self {
-            Core::HalfDiminished | Core::Diminished7 | Core::Diminished => &[6],
-            Core::Augmented => &[8],
-            Core::Power => &[7],
-            _ => &[],
-        })
+        // Each set is worked out when the app is built.
+        match self {
+            Core::HalfDiminished | Core::Diminished7 | Core::Diminished => const { PcSet::of(&[6]) },
+            Core::Augmented => const { PcSet::of(&[8]) },
+            Core::Power => const { PcSet::of(&[7]) },
+            _ => const { PcSet::of(&[]) },
+        }
     }
 
     /// The notes it can carry ([`ToneClass::Tension`]), as intervals above the root: the 9ths, 11ths and 13ths its
@@ -189,32 +193,33 @@ impl Core {
     /// fifth costs a little: a ♭13 is a minor chord's tension even where it takes the fifth's place (C E♭ A♭ is also
     /// A♭/C, and the bass decides between them).
     pub const fn tensions(self) -> PcSet {
-        PcSet::of(match self {
+        // Each set is worked out when the app is built.
+        match self {
             // 9, ♯11.
-            Core::Major | Core::Major6 => &[2, 6],
+            Core::Major | Core::Major6 => const { PcSet::of(&[2, 6]) },
             // 9, ♯11, and the 7 of Cmaj7♯5.
-            Core::Augmented => &[2, 6, 11],
+            Core::Augmented => const { PcSet::of(&[2, 6, 11]) },
             // 9, 11, ♭13.
-            Core::Minor | Core::HalfDiminished => &[2, 5, 8],
+            Core::Minor | Core::HalfDiminished => const { PcSet::of(&[2, 5, 8]) },
             // 9, 11, ♭13, and the 7 (of Cdim(maj7), and the fourth tension of the diminished scale).
-            Core::Diminished | Core::Diminished7 => &[2, 5, 8, 11],
+            Core::Diminished | Core::Diminished7 => const { PcSet::of(&[2, 5, 8, 11]) },
             // ♭9, 9, ♯9, ♯11, ♭13, 13.
-            Core::Dominant7 => &[1, 2, 3, 6, 8, 9],
+            Core::Dominant7 => const { PcSet::of(&[1, 2, 3, 6, 8, 9]) },
             // 9, ♯11, 13.
-            Core::Major7 => &[2, 6, 9],
+            Core::Major7 => const { PcSet::of(&[2, 6, 9]) },
             // 9, 11, ♭13, 13.
-            Core::Minor7 | Core::MinorMajor7 => &[2, 5, 8, 9],
+            Core::Minor7 | Core::MinorMajor7 => const { PcSet::of(&[2, 5, 8, 9]) },
             // 9, 11.
-            Core::Minor6 => &[2, 5],
+            Core::Minor6 => const { PcSet::of(&[2, 5]) },
             // ♭9, 9, 13, and the 7 of Cmaj7sus4.
-            Core::Sus4 => &[1, 2, 9, 11],
+            Core::Sus4 => const { PcSet::of(&[1, 2, 9, 11]) },
             // ♭9, 9, 13.
-            Core::Dominant7Sus4 => &[1, 2, 9],
+            Core::Dominant7Sus4 => const { PcSet::of(&[1, 2, 9]) },
             // 13 (its 6), and the 7 of Cmaj7sus2.
-            Core::Sus2 => &[9, 11],
+            Core::Sus2 => const { PcSet::of(&[9, 11]) },
             // The ♭7 of C7(no3) and the 7 of Cmaj7(no3).
-            Core::Power => &[10, 11],
-        })
+            Core::Power => const { PcSet::of(&[10, 11]) },
+        }
     }
 
     /// The notes that don't belong, as intervals above the root: every note that is neither its own nor a tension.
@@ -376,6 +381,11 @@ impl CoreSet {
         CoreSet(self.0 & !other.0)
     }
 
+    /// Every core that isn't in it.
+    pub const fn others(self) -> CoreSet {
+        CoreSet(!self.0)
+    }
+
     /// How many cores are in it.
     pub const fn len(self) -> u32 {
         self.0.count_ones()
@@ -392,7 +402,12 @@ impl CoreSet {
 
     /// The cores in it, in order.
     pub fn iter(self) -> impl Iterator<Item = Core> {
-        Core::ALL.into_iter().filter(move |&core| self.contains(core))
+        let mut bits = self.0;
+        std::iter::from_fn(move || {
+            let core = Core::from_index(bits.trailing_zeros() as usize)?;
+            bits &= bits - 1;
+            Some(core)
+        })
     }
 }
 
@@ -780,5 +795,17 @@ mod tests {
         assert_eq!(roots("E Bb D", Dominant7), [0, 6]);
         // A root that sounds is never tried here.
         assert!(rootless("C", "C E Bb D").is_empty());
+    }
+
+    #[test]
+    fn a_set_of_cores_lists_them_in_order() {
+        for bits in 0..=u16::MAX {
+            let set = CoreSet(bits);
+            let listed: Vec<Core> = set.iter().collect();
+            let wanted: Vec<Core> = Core::ALL.into_iter().filter(|&core| set.contains(core)).collect();
+            assert_eq!(listed, wanted);
+            assert_eq!(set.others().bits(), !bits);
+            assert!(Core::ALL.iter().all(|&core| set.contains(core) != set.others().contains(core)));
+        }
     }
 }

@@ -222,3 +222,40 @@ impl Tables {
         (12.0 * share(usize::from(up)) / all).ln()
     }
 }
+
+/// The priors as the scoring reads them for each label ([`super::SpanFacts::features`]), worked out once from some
+/// tables: the same numbers [`Tables::core_prior`] and [`Tables::tension_prior`] give, without working out a logarithm
+/// for each label scored.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Priors {
+    /// ln f_core, by core.
+    core: [f64; CORES],
+    /// By core and interval above the root: what a tension adds when it isn't heard, and when it is.
+    tension: [[[f64; 2]; 12]; CORES],
+}
+
+impl Priors {
+    /// The priors some tables give.
+    pub fn of(tables: &Tables) -> Priors {
+        let mut out = Priors { core: [0.0; CORES], tension: [[[0.0; 2]; 12]; CORES] };
+        for ((core, ln), row) in Core::ALL.into_iter().zip(&mut out.core).zip(&mut out.tension) {
+            *ln = tables.core_prior(core);
+            for (interval, cell) in (0u8..).zip(row.iter_mut()) {
+                *cell = [tables.tension_prior(core, interval, false), tables.tension_prior(core, interval, true)];
+            }
+        }
+        out
+    }
+
+    /// ln f_core ([`Tables::core_prior`]).
+    pub fn core(&self, core: Core) -> f64 {
+        self.core.get(core.index()).copied().unwrap_or(0.0)
+    }
+
+    /// What a tension adds to a core's tension prior ([`Tables::tension_prior`]).
+    pub fn tension(&self, core: Core, interval: u8, heard: bool) -> f64 {
+        let row = self.tension.get(core.index());
+        let cell = row.and_then(|row| row.get(usize::from(interval)));
+        cell.and_then(|cell| cell.get(usize::from(heard))).copied().unwrap_or(0.0)
+    }
+}
