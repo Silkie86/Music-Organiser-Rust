@@ -19,6 +19,10 @@ Nothing in the project changes unless LET_THE_APP_MAKE_CHANGES below is True.
 # True lets the app change plugin parameters. The app keeps this setting when it updates the script.
 LET_THE_APP_MAKE_CHANGES = False
 
+# True measures FL Studio's fader and tempo curves once, in the project "MO Live Test automation" only (see measure()):
+# it moves that project's faders and tempo, renames 122 of its inserts and saves it.
+MEASURE_IN_LIVE_TEST = False
+
 import channels
 import device
 import general
@@ -137,37 +141,62 @@ TEMPO_FIRST = FADER_STEPS + 2
 _measuring = None     # the measurement under way: the step, what was found, and what to put back
 
 
+def in_live_test():
+    """Whether the project open is exactly MEASURE_PROJECT (the title is "<project> - FL Studio ...")."""
+    name = ui.getProgTitle().split(" - ")[0].strip().rstrip("*").strip()
+    return name == MEASURE_PROJECT
+
+
 def measure():
     """
-    Runs once, a step at each idle, when the project open is MEASURE_PROJECT and changes are allowed: sets each
-    insert's fader to a known value and reads the decibels FL Studio shows, then the tempo to known automation
-    values and reads the BPM, writes what it found as the inserts' names, and saves the project, so Format Lab
-    reads the table from the .flp (FL Studio doesn't let scripts write files).
+    Runs once, a step at each idle, when MEASURE_IN_LIVE_TEST is True and the project open is MEASURE_PROJECT: sets
+    each insert's fader to a known value and reads, at the next idle, the decibels FL Studio shows; then the tempo to
+    known automation values and reads the BPM; puts the faders and tempo back, writes what it found as the inserts'
+    names, and saves the project, so Format Lab reads the table from the .flp (FL Studio doesn't let scripts write
+    files).
     """
     global _measuring
-    if not LET_THE_APP_MAKE_CHANGES or _measuring == "done":
+    if not MEASURE_IN_LIVE_TEST or _measuring == "done":
         return
     try:
-        if MEASURE_PROJECT not in ui.getProgTitle():
+        if not in_live_test():
             return
         if _measuring is None:
-            _measuring = {"step": 0, "names": {}, "tempo": tempo()}
+            if mixer.trackCount() - 1 <= TEMPO_FIRST + TEMPO_STEPS:
+                print("Music Organiser: this FL Studio has too few mixer inserts to measure on, so nothing changed.")
+                _measuring = "done"
+                return
+            _measuring = {"step": 0, "names": {}, "tempo": tempo(), "faders": {}, "tempos": []}
             print("Music Organiser: measuring the fader and tempo in " + MEASURE_PROJECT)
         m = _measuring
         step = m["step"]
-        if step <= FADER_STEPS:
-            value = step / float(FADER_STEPS)
-            mixer.setTrackVolume(step + 1, value)
-            m["names"][step + 1] = "v%.2f %sdB" % (value, round(mixer.getTrackVolume(step + 1, 1), 3))
-        elif step <= FADER_STEPS + 1 + 2 * (TEMPO_STEPS + 1):
-            # Set at one idle, read at the next, once FL Studio has moved the tempo.
-            t = step - FADER_STEPS - 1
+        fader_end = 2 * (FADER_STEPS + 1)
+        tempo_end = fader_end + 2 * (TEMPO_STEPS + 1)
+        if step < fader_end:
+            # Set at one idle, read at the next, once FL Studio has moved it.
+            track = step // 2 + 1
+            value = (step // 2) / float(FADER_STEPS)
+            if step % 2 == 0:
+                m["faders"][track] = mixer.getTrackVolume(track)
+                mixer.setTrackVolume(track, value)
+            else:
+                m["names"][track] = "v%.2f %sdB" % (value, round(mixer.getTrackVolume(track, 1), 3))
+        elif step < tempo_end:
+            t = step - fader_end
             value = (t // 2) / float(TEMPO_STEPS)
             if t % 2 == 0:
-                general.processRECEvent(midi.REC_Tempo, int(round(value * midi.FromMIDI_Max)),
-                                        midi.REC_FromMIDI | midi.REC_UpdateValue | midi.REC_UpdateControl)
+                set_tempo(value)
             else:
-                m["names"][TEMPO_FIRST + t // 2] = "t%.2f %sbpm" % (value, round(tempo(), 3))
+                bpm = tempo()
+                m["tempos"].append((value, bpm))
+                m["names"][TEMPO_FIRST + t // 2] = "t%.2f %sbpm" % (value, round(bpm, 3))
+        elif step == tempo_end:
+            # Back as it was: each fader, and the tempo at the automation value that gave it.
+            for track, value in m["faders"].items():
+                mixer.setTrackVolume(track, value)
+            back = value_for(m["tempos"], m["tempo"])
+            if back is not None:
+                set_tempo(back)
         else:
             for track, name in m["names"].items():
                 mixer.setTrackName(track, name)
@@ -179,6 +208,22 @@ def measure():
     except Exception as e:  # never stop FL Studio over a measurement
         print("Music Organiser: measuring stopped: " + str(e))
         _measuring = "done"
+
+
+def set_tempo(value):
+    """The tempo at an automation value (0..1), by the route FL Studio's automation takes."""
+    general.processRECEvent(midi.REC_Tempo, int(round(value * midi.FromMIDI_Max)),
+                            midi.REC_FromMIDI | midi.REC_UpdateValue | midi.REC_UpdateControl)
+
+
+def value_for(pairs, bpm):
+    """The automation value that gives `bpm`, between the measured (value, bpm) pairs, or None."""
+    if bpm is None:
+        return None
+    for (v0, b0), (v1, b1) in zip(pairs, pairs[1:]):
+        if b0 is not None and b1 is not None and min(b0, b1) <= bpm <= max(b0, b1):
+            return v0 if b1 == b0 else v0 + (v1 - v0) * (bpm - b0) / (b1 - b0)
+    return None
 
 
 # The messages

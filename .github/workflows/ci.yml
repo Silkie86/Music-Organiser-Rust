@@ -190,4 +190,7 @@ jobs:
       - name: Bitwig scripts parse and are plain ASCII
         run: |
           for f in tools/formatlab/daw/bitwig/*.js; do node --check "$f"; done
-          ! LC_ALL=C grep -nP '[^\x00-\x7F]' tools/formatlab/daw/bitwig/*.js extensions/fl-studio/device_MusicOrganiser.py
+          # grep finds nothing (1) is the pass; a missing file (2) fails too.
+          set +e
+          LC_ALL=C grep -nP '[^\x00-\x7F]' tools/formatlab/daw/bitwig/*.js extensions/fl-studio/device_MusicOrganiser.py
+          test $? -eq 1

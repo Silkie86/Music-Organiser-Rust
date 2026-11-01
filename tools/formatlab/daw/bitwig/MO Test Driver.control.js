@@ -41,6 +41,8 @@ var app, project, transport, master, cursorTrack, cursorDevice, changes;
 var running = false;
 /** Set when Save should run at Bitwig's next flush (Bitwig 6.1.3 only saved for a script from there). */
 var saveAtFlush = false;
+/** The automation write mode before the run, put back after it. */
+var writeModeBefore = null;
 
 function init() {
     app = host.createApplication();
@@ -106,11 +108,12 @@ function start() {
 
 function record() {
     if (!allowed()) return finish();
-    if (!cursorDevice.exists().get()) {
-        say("the MO Probe didn't appear on the selected track, so nothing was recorded.");
+    if (!cursorDevice.exists().get() || String(cursorDevice.name().get()).indexOf("MO Probe") < 0) {
+        say("the selected device isn't the new MO Probe, so nothing was recorded.");
         return finish();
     }
     say("recording on \"" + cursorTrack.name().get() + "\", device \"" + cursorDevice.name().get() + "\"");
+    writeModeBefore = String(transport.automationWriteMode().get());
     transport.automationWriteMode().set("write");
     transport.isArrangerAutomationWriteEnabled().set(true);
     transport.getPosition().set(0);
@@ -142,8 +145,11 @@ function touchSet(param, set) {
 }
 
 function stopAndSave() {
+    // Another project brought to the front meanwhile is left alone (rule 10).
+    if (!allowed()) return finish();
     transport.stop();
     transport.isArrangerAutomationWriteEnabled().set(false);
+    if (writeModeBefore) transport.automationWriteMode().set(writeModeBefore);
     host.scheduleTask(function () {
         if (!allowed()) return finish();
         saveAtFlush = true;

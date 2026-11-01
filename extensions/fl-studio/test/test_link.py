@@ -348,10 +348,10 @@ if __name__ == "__main__":
 
 
 class Measuring(unittest.TestCase):
-    def run_script(self, title, changes=True, idles=400):
+    def run_script(self, title, changes=True, idles=600):
         studio = fake_fl.night_drive(title=title, mixer=[("Master", {})] + [("Insert", {})] * 125)
         script = fake_fl.compile_script(studio)
-        script.LET_THE_APP_MAKE_CHANGES = changes
+        script.MEASURE_IN_LIVE_TEST = changes
         script.OnInit()
         for _ in range(idles):
             script.OnIdle()
@@ -366,8 +366,12 @@ class Measuring(unittest.TestCase):
         self.assertEqual(studio.names[102], "t0.00 10.0bpm")
         self.assertEqual(studio.names[122], "t1.00 522.0bpm")
         self.assertEqual(len(studio.names), 122)
+        # Everything put back as it was.
+        self.assertEqual(studio.tempo, 124000)
+        self.assertEqual(set(studio.volumes.values()), {0.8})
 
     def test_never_runs_in_another_project_or_with_changes_off(self):
-        for title, changes in (("Night Drive - FL Studio 2025", True), ("MO Live Test automation", False)):
+        for title, changes in (("Night Drive - FL Studio 2025", True), ("MO Live Test automation", False),
+                               ("MO Live Test automation (fixed) - FL Studio 2025", True)):
             studio = self.run_script(title, changes)
             self.assertEqual((studio.saves, studio.names, studio.volumes), (0, {}, {}))
