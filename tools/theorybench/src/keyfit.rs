@@ -76,7 +76,7 @@ const LENGTHS: [i64; 5] = [1, 2, 4, 8, 16];
 /// Folds the songs are split into.
 const FOLDS: u64 = 5;
 /// The fold kept back for `--final`.
-const FROZEN: usize = 0;
+pub(crate) const FROZEN: usize = 0;
 /// Inner folds for counting the tables a song is fitted with.
 const INNER: u64 = 5;
 /// Windows of each length fitted on from each song, unless `--picks` says otherwise.
@@ -329,6 +329,17 @@ fn learns(item: &Item, learning: Learning) -> bool {
         Learning::Licensed => item.may_learn(),
         Learning::Own => item.is_own(),
     }
+}
+
+/// Each piece's fold, as a plain run draws it: other tools that learn from the same pieces keep the same fold back.
+pub(crate) fn folds(items: &[Item]) -> Vec<usize> {
+    let mut sources: Vec<String> = Vec::new();
+    for item in items {
+        if !sources.contains(&item.source) {
+            sources.push(item.source.clone());
+        }
+    }
+    songs_of(items, &sources, &HashMap::new(), Learning::Licensed).iter().map(|s| s.fold).collect()
 }
 
 /// Each song's folds, songs with the same notes in another key going where the first of them by name goes (a pack's

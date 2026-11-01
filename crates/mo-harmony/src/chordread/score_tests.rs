@@ -6,8 +6,8 @@ use std::ops::Range;
 
 use super::hear_tests::{BAR, BEAT, Music, keys_only, line, notes, with_bass};
 use super::{
-    Candidate, Core, EVEN, Evidence, Feature, HAND, Hearing, Label, Mass, PerFeature, Push, Route, Scored, Shape,
-    SpanFacts,
+    COUNTED, COUNTED_FROM, Candidate, Core, EVEN, Evidence, Feature, HAND, Hearing, Label, Mass, PerFeature, Push,
+    Route, Scored, Shape, SpanFacts, Weights,
 };
 use crate::notes::{Note, Role};
 use crate::pitch::PitchClass;
@@ -68,12 +68,17 @@ fn evidence(facts: &SpanFacts, name: &str) -> PerFeature<f64> {
     out
 }
 
-/// The candidates ranked by the hand-set weights.
+/// The candidates ranked by the hand-set weights, on the counted tables (as the reader ranks them).
 fn ranking(facts: &SpanFacts) -> Vec<Scored> {
+    ranking_by(facts, &HAND)
+}
+
+/// The candidates ranked by some weights, on the counted tables.
+fn ranking_by(facts: &SpanFacts, weights: &Weights) -> Vec<Scored> {
     let mut candidates = Vec::new();
     facts.candidates(&mut candidates);
     let mut out = Vec::new();
-    facts.rank(&candidates, &HAND, &EVEN, &mut out);
+    facts.rank(&candidates, weights, &COUNTED, &mut out);
     out
 }
 
@@ -425,6 +430,12 @@ fn the_priors_read_the_counted_tables() {
     facts.features(label("C"), &tables, &mut f);
     assert_eq!(f[CorePrior], 0.5f64.ln());
     assert_eq!(f[TensionPrior], 0.9f64.ln() + 0.8f64.ln());
+    // On even tables, P2 costs ln 2 for each tension a core can carry, heard or not: two for a major triad (its 9 and
+    // ♯11), six for a dominant seventh. So it only leaves the priors out at a trust of 0.
+    for (name, tensions) in [("C", 2.0), ("C7", 6.0)] {
+        facts.features(label(name), &EVEN, &mut f);
+        assert!((f[TensionPrior] - tensions * 0.5f64.ln()).abs() < 1e-12, "{name}");
+    }
     // A D carried in from before, struck for a 32nd of the bar (under an eighth of it), or passing by in a broken
     // chord (the design's case 41, C4 D4 E4 G4 E4 D4 C4 G3 in eighths) isn't heard as the 9.
     let carried = [notes("D5", 2 * BEAT, 6 * BEAT), notes("C4 E4 G4", BAR, BAR)].concat();
@@ -456,13 +467,66 @@ fn the_priors_stay_finite_on_any_table_and_a_trust_of_0_leaves_them_out() {
     }
     facts.features(label("C"), &tables, &mut f);
     assert!(f[CorePrior] < -13.0 && f[TensionPrior] < -13.0);
-    // The hand weights trust neither prior yet, so the ranking is the same as on even tables.
+    // Trusting neither prior, the ranking is the same on any tables; trusting them, it isn't.
     let mut candidates = Vec::new();
     facts.candidates(&mut candidates);
     let (mut even, mut odd) = (Vec::new(), Vec::new());
+    let mut untrusting = HAND;
+    untrusting.features[CorePrior] = 0.0;
+    untrusting.features[TensionPrior] = 0.0;
+    facts.rank(&candidates, &untrusting, &EVEN, &mut even);
+    facts.rank(&candidates, &untrusting, &tables, &mut odd);
+    assert_eq!(even, odd);
     facts.rank(&candidates, &HAND, &EVEN, &mut even);
     facts.rank(&candidates, &HAND, &tables, &mut odd);
-    assert_eq!(even, odd);
+    assert_ne!(even, odd);
+}
+
+#[test]
+fn the_counted_tables_hold_shares_and_say_what_the_labels_say() {
+    use Core::*;
+    // Every cell is a share, never 0 or 1; the cores' shares add up to 1; a note a core can't carry keeps the half it
+    // starts with (the prior never reads it).
+    let cells = || COUNTED.core.iter().chain(COUNTED.tension.iter().flatten());
+    assert!(cells().all(|&f| f > 0.0 && f < 1.0));
+    assert!((COUNTED.core.iter().sum::<f64>() - 1.0).abs() < 1e-9);
+    for core in Core::ALL {
+        for interval in 0..12u8 {
+            if !core.tensions().has(i32::from(interval)) {
+                assert_eq!(COUNTED.tension[core.index()][usize::from(interval)], 0.5, "{core:?} {interval}");
+            }
+        }
+    }
+    // From POP909-CL's and Billboard's labels: major chords most of all, then minor; a 9 on a major seventh far
+    // commoner than a ♭13 on a minor seventh (the design's reason for P2); a 7sus4 named with its 9 more often than
+    // not (the 9sus4 players voice).
+    assert_eq!(COUNTED_FROM, ["billboard", "pop909cl"]);
+    let share = |core: Core| COUNTED.core[core.index()];
+    assert!(
+        Core::ALL.iter().all(|&c| c == Major || c == Minor || share(c) < share(Minor)) && share(Minor) < share(Major)
+    );
+    let ten = |core: Core, interval: usize| COUNTED.tension[core.index()][interval];
+    assert!(ten(Major7, 2) > 100.0 * ten(Minor7, 8) && ten(Dominant7Sus4, 2) > 0.5);
+}
+
+#[test]
+fn trusting_the_counted_tables_settles_near_ties_towards_the_commoner_chord() {
+    use Feature::*;
+    // B D G over a C struck in the bass (the design's case 9 holds it over a pedal): G, a major triad, or Csus2 (C D
+    // G, with B its 7), which labels rarely name. The notes alone lean to Csus2, its root struck in the bass, by under
+    // half a point a beat; trusting the tables, G comes first.
+    let facts = facts_on(&Music::new().looped().bass(bars("C2")).keys(bars("B3 D4 G4")).hear(), bar(0), None);
+    let lead = |weights: &Weights| {
+        let ranked = ranking_by(&facts, weights);
+        let score = |name: &str| ranked.iter().find(|s| s.label == label(name)).map(|s| s.score);
+        (ranked[0].label.to_string(), score("G").zip(score("Csus2")).map(|(g, sus)| (g - sus) / facts.beats()))
+    };
+    let mut untrusting = HAND;
+    untrusting.features[CorePrior] = 0.0;
+    untrusting.features[TensionPrior] = 0.0;
+    let (before, after) = (lead(&untrusting), lead(&HAND));
+    assert_eq!((before.0.as_str(), after.0.as_str()), ("Csus2", "G"));
+    assert!(matches!((before.1, after.1), (Some(b), Some(a)) if b > -0.5 && a > 0.0), "{before:?} {after:?}");
 }
 
 #[test]
@@ -568,9 +632,9 @@ fn everything(hearing: &Hearing, shift: i32) -> Vec<(Label, Route, [u64; Feature
     for (units, push) in spans(hearing) {
         evidence.facts(hearing, units, push.as_ref(), &mut facts);
         facts.candidates(&mut candidates);
-        facts.rank(&candidates, &HAND, &EVEN, &mut ranked);
+        facts.rank(&candidates, &HAND, &COUNTED, &mut ranked);
         for s in &ranked {
-            facts.features(s.label, &EVEN, &mut f);
+            facts.features(s.label, &COUNTED, &mut f);
             let back = Label::new(s.label.root.up(-shift), s.label.core);
             out.push((back, s.route, f.0.map(f64::to_bits), s.score.to_bits()));
         }
@@ -716,7 +780,8 @@ enum Want {
     /// These are the first two readings, or the first two hold the one given.
     TopTwo(&'static [&'static str]),
     /// These are kept for deciding where the chords change: among the best eight, or the best rootless reading. Their
-    /// gates need what decides between neighbouring stretches, or the counted tables.
+    /// gates wait for what decides between neighbouring stretches (the pair term): at no trusts in the counted tables
+    /// (up to 0.5 each) do they reach the top two or three.
     Kept(&'static [&'static str]),
 }
 
@@ -778,8 +843,7 @@ fn hand_cases() -> Vec<(&'static str, Music, Range<usize>, Want)> {
         ("18 G7alt", keys_bass("G2", "B3 F4 Ab4 Bb4 Eb5"), bar(0), First(&["G7"])),
         ("19 Db13", keys_bass("Db2", "F3 B3 Eb4 Bb4"), bar(0), First(&["Db7"])),
         ("19 G7alt", keys_bass("G1", "F3 B3 Eb4 Bb4"), bar(0), First(&["G7"])),
-        // G7alt waits for the counted tables: Abm6, rootless too, explains more of the notes.
-        ("20 no bass", keys("F3 B3 Eb4 Bb4"), bar(0), Kept(&["Db7"])),
+        ("20 no bass", keys("F3 B3 Eb4 Bb4"), bar(0), Kept(&["Db7", "G7"])),
         ("21 Am6", keys_bass("A1", "C4 E4 F#4 A4"), bar(0), First(&["Am6"])),
         ("21 F#m7b5", keys_bass("F#2", "C4 E4 F#4 A4"), bar(0), First(&["F#m7b5"])),
         ("21 D9", keys_bass("D2", "C4 E4 F#4 A4"), bar(0), First(&["D7"])),
@@ -830,13 +894,67 @@ fn the_hand_cases_read_as_a_player_reads_them_one_stretch_at_a_time() {
     }
 }
 
+/// How far a hand case's wanted readings lead the rest, for each felt beat its stretch sounds: the score of the last
+/// wanted reading that must make it to the top (one of the readings allowed for "first", each one given for "top
+/// two") less the score of the best other reading that could take its place. Below 0 the case fails. Kept readings
+/// have no lead.
+fn lead(ranked: &[Scored], want: Want, beats: f64) -> Option<f64> {
+    let (these, need, room) = match want {
+        Want::First(any) => (any, 1, 1),
+        Want::TopTwo(these) => (these, these.len(), 2),
+        Want::Kept(_) => return None,
+    };
+    let (wanted, others): (Vec<&Scored>, Vec<&Scored>) =
+        ranked.iter().partition(|s| these.contains(&s.label.to_string().as_str()));
+    let last = wanted.get(need - 1).map_or(f64::NEG_INFINITY, |s| s.score);
+    let rival = others.get(room - need).map_or(f64::NEG_INFINITY, |s| s.score);
+    Some((last - rival) / beats)
+}
+
 #[test]
-#[ignore = "prints the hand cases' rankings, for tuning the hand-set weights (SHOW=n for more than 6)"]
+#[ignore = "prints the hand cases' rankings and leads, for tuning the hand-set weights (SHOW=n for more than 6)"]
 fn show_the_hand_cases() {
     let most = std::env::var("SHOW").ok().and_then(|n| n.parse().ok()).unwrap_or(6);
-    for (name, music, units, _) in hand_cases() {
-        let ranked = ranking(&facts_on(&music.looped().hear(), units, None));
+    for (name, music, units, want) in hand_cases() {
+        let facts = facts_on(&music.looped().hear(), units, None);
+        let ranked = ranking(&facts);
+        let lead = lead(&ranked, want, facts.beats()).map_or("kept".to_owned(), |lead| format!("{lead:.2}"));
         let top: Vec<String> = ranked.iter().take(most).map(|s| format!("{} {:.2}", s.label, s.score)).collect();
-        println!("{name:<28} {}", top.join(", "));
+        println!("{name:<28} {lead:>6}  {}", top.join(", "));
     }
+}
+
+#[test]
+#[ignore = "prints the hand cases' smallest lead for each pair of trusts in the template priors, for choosing them"]
+fn show_the_trusts() {
+    let cases: Vec<(&str, SpanFacts, Want)> = hand_cases()
+        .into_iter()
+        .map(|(name, music, units, want)| (name, facts_on(&music.looped().hear(), units, None), want))
+        .collect();
+    let smallest = |core: f64, ten: f64| {
+        let mut weights = HAND;
+        weights.features[Feature::CorePrior] = core;
+        weights.features[Feature::TensionPrior] = ten;
+        let leads = cases
+            .iter()
+            .filter_map(|(name, facts, want)| Some((lead(&ranking_by(facts, &weights), *want, facts.beats())?, *name)));
+        leads.min_by(|a, b| a.0.total_cmp(&b.0)).unwrap_or((f64::INFINITY, ""))
+    };
+    let tens: Vec<f64> = (0..=10).map(|k| f64::from(k) / 100.0).collect();
+    println!("{:<16}{}", "t_core, by t_ten", tens.iter().map(|t| format!("{t:>6.2}")).collect::<String>());
+    let mut best = (f64::NEG_INFINITY, 0.0, 0.0, "");
+    for k in 0..=30 {
+        let core = f64::from(k) / 100.0;
+        print!("{core:<16.2}");
+        for &ten in &tens {
+            let (lead, name) = smallest(core, ten);
+            print!("{lead:>6.2}");
+            if lead > best.0 {
+                best = (lead, core, ten, name);
+            }
+        }
+        println!();
+    }
+    let (lead, core, ten, name) = best;
+    println!("the smallest lead is largest at t_core {core:.2}, t_ten {ten:.2}: {lead:.3} a beat (case {name})");
 }

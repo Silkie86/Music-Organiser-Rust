@@ -18,6 +18,7 @@ mod metrics;
 mod naming;
 mod packs;
 mod profiles;
+mod tables;
 
 use std::process::ExitCode;
 
@@ -29,6 +30,7 @@ theorybench packs <folder>... --out <file.jsonl>
 theorybench chords <labelled.jsonl>... --answers <name>=<answers.jsonl> [--answers ...] [--part <role>]
                    [--per-segment] [--by <tag>]... [--dump <file>]
 theorybench candidates <labelled.jsonl>... [--inputs <kinds>] [--misses <file>]
+theorybench tables <labelled.jsonl>... [--write <tables.rs>]
 
   keys       how often each key finder names the labelled key, on whole songs and on clips (8 bars long unless --bars
              gives other lengths, such as 1,2,4,8,16)
@@ -65,7 +67,10 @@ theorybench candidates <labelled.jsonl>... [--inputs <kinds>] [--misses <file>]
              with the labelled ends, and moved by up to a unit
   --inputs   the parts heard: piano (all but the tune), full, upper (the accompaniment without its bass line); piano,full
              when left out
-  --misses   write each stretch whose chord is missed even with its ends moved to a file (tab-separated)";
+  --misses   write each stretch whose chord is missed even with its ends moved to a file (tab-separated)
+  tables     counts how often each core is the labelled chord and each tension is named with it (the chord reader's
+             template priors), from the labels of folds 1 to 4
+  --write    writes them as mo-harmony's counted tables (crates/mo-harmony/src/chordread/tables.rs)";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -76,6 +81,7 @@ fn main() -> ExitCode {
         Some("chords") => chords::run(&args[1..]),
         Some("candidates") => candidates::run(&args[1..]),
         Some("packs") => packs::run(&args[1..]),
+        Some("tables") => tables::run(&args[1..]),
         _ => Err(USAGE.to_owned()),
     };
     match result {

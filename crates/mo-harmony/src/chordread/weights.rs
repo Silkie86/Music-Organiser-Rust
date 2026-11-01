@@ -2,8 +2,9 @@
 //! ([`Tables`]).
 //!
 //! For now the weights are set by hand ([`HAND`]): chosen so the design's hand cases read as a player would read them,
-//! one stretch at a time. The fit (chordfit) will start from them and learn the rest from labelled music, keeping
-//! every rule [`Weights::check`] lists, so no explanation can ever show a chord's own note counting against it.
+//! one stretch at a time, on the tables counted from labelled music ([`COUNTED`](super::COUNTED)). The fit (chordfit)
+//! will start from them and learn the rest from labelled music, keeping every rule [`Weights::check`] lists, so no
+//! explanation can ever show a chord's own note counting against it.
 
 use super::cores::Core;
 use super::score::{Feature, PerFeature};
@@ -35,8 +36,12 @@ pub struct Weights {
 ///   read as Em.
 /// - With no bass, the lowest chord note leans a little towards its own root (E G B D: Em7 rather than G6).
 /// - A chord changing on a bar line costs nothing, on the middle of a bar a little, between beats most.
-/// - The priors and the pair term wait for their counted tables (trust 0). Until then a rootless voicing with no bass
-///   (F A B E for G13) ranks below the readings on a root that's played.
+/// - The template priors are trusted a little, on the counted tables: 0.15 for how common the chord is and 0.04 for
+///   its tensions, a beat. Where the notes leave readings close, the commoner chord wins (B D G over a C struck in the
+///   bass reads G, not Csus2), and a tension labels rarely name costs a little (a ♭13 on a minor seventh more than a
+///   9 on a major seventh). These are the trusts at which the hand cases' smallest lead is largest. The pair term
+///   waits for its table (trust 0), so a rootless voicing with no bass (B E F A for G13) still ranks below the
+///   readings on a root that's played.
 pub const HAND: Weights = Weights {
     features: PerFeature([
         3.0,   // T1: the chords' sound in the label's own notes
@@ -74,8 +79,8 @@ pub const HAND: Weights = Weights {
         -0.5,  // E6: starts on another beat
         -1.0,  // E7: starts between beats
         -0.3,  // E8: starts at a pushed chord
-        0.0,   // P1's trust (t_core)
-        0.0,   // P2's trust (t_ten)
+        0.15,  // P1's trust (t_core)
+        0.04,  // P2's trust (t_ten)
     ]),
     pair: 0.0,
     none: -0.5,
@@ -128,8 +133,8 @@ impl Weights {
 const CORES: usize = Core::ALL.len();
 
 /// The counted tables the template priors read: how often each core is the chord (f_core), and how often each of its
-/// tensions is played with it (f_ten). Until they are counted from labelled music (chordfit), every core is as likely
-/// as any other and each tension is played half the time, so the priors say nothing.
+/// tensions is played with it (f_ten). The reader's are counted from labelled music ([`COUNTED`](super::COUNTED));
+/// [`EVEN`] holds the tables before counting.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Tables {
     /// For each core (in [`Core::ALL`]'s order), the share of chords that are it.
@@ -138,7 +143,8 @@ pub struct Tables {
     pub tension: [[f64; 12]; CORES],
 }
 
-/// The tables before counting: nothing is more likely than anything else.
+/// The tables before counting: every core as likely as any other, and each tension played half the time. P1 is then
+/// the same for every reading; P2 costs ln 2 for each tension the core can carry, heard or not.
 pub const EVEN: Tables = Tables { core: [1.0 / CORES as f64; CORES], tension: [[0.5; 12]; CORES] };
 
 /// The least share a prior reads, and 1 less it the most: a core or a tension never counted (or always played) still
