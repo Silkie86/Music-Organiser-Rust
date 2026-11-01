@@ -9,7 +9,7 @@
 // project, turn on "Let the driver make changes" and press "Record automation test" in the same settings.
 //
 // What it records, from the start of the arrangement, with arranger automation write on:
-//   the tempo, the master track's volume, a new instrument track's volume and pan, and its Sampler's on/off,
+//   the tempo, the master track's volume, a new instrument track's volume and pan, and its MO Probe's on/off,
 //   each set to the values in STEPS, one step a second; then it stops, turns automation write off and saves.
 // The values are written to Bitwig's Controller Script console as they're set, so the saved file can be checked
 // against them.
@@ -21,12 +21,14 @@ host.defineController("Music Organiser", "Test driver", "1.0", "6f0f5d38-7c1e-4b
 host.defineMidiPorts(0, 0);
 
 var PROJECT = "MO Live Test automation";
-var SAMPLER = "468bc14b-b2e7-45a1-9666-e83117fe404e";
+/** MO Probe (the old app's test plugin, installed on Solomon's PC): its report logs each tempo change and whether
+ * Bitwig has it switched on, with positions, a check on what Bitwig recorded beside the saved file. */
+var PROBE = "org.musicorganiser.probe.instrument";
 /** Milliseconds between steps, and before the first. */
 var STEP_MS = 1000;
 /**
  * The values set at each step: tempo in BPM, the others 0..1 as Bitwig's API takes them (pan 0.5 is the middle),
- * and whether the Sampler is on.
+ * and whether the MO Probe is on.
  */
 var STEPS = [
     { tempo: 90, master: 0.6, volume: 0.4, pan: 0.25, on: false },
@@ -93,11 +95,11 @@ function allowed() {
 function start() {
     if (running || !allowed()) return;
     running = true;
-    say("adding an instrument track with a Sampler");
+    say("adding an instrument track with a MO Probe");
     app.createInstrumentTrack(-1);
     host.scheduleTask(function () {
         if (!allowed()) return finish();
-        cursorTrack.endOfDeviceChainInsertionPoint().insertBitwigDevice(java.util.UUID.fromString(SAMPLER));
+        cursorTrack.endOfDeviceChainInsertionPoint().insertCLAPDevice(PROBE);
         host.scheduleTask(record, 1500);
     }, 1500);
 }
@@ -105,7 +107,7 @@ function start() {
 function record() {
     if (!allowed()) return finish();
     if (!cursorDevice.exists().get()) {
-        say("the Sampler didn't appear on the selected track, so nothing was recorded.");
+        say("the MO Probe didn't appear on the selected track, so nothing was recorded.");
         return finish();
     }
     say("recording on \"" + cursorTrack.name().get() + "\", device \"" + cursorDevice.name().get() + "\"");
@@ -129,7 +131,7 @@ function step(i) {
         touchSet(cursorTrack.pan(), function (p) { p.set(s.pan); });
         cursorDevice.isEnabled().set(s.on);
         println("MO test driver: step " + (i + 1) + " at beat " + at.toFixed(3) + ": tempo " + s.tempo + ", master " +
-                s.master + ", volume " + s.volume + ", pan " + s.pan + ", sampler " + (s.on ? "on" : "off"));
+                s.master + ", volume " + s.volume + ", pan " + s.pan + ", probe " + (s.on ? "on" : "off"));
     };
 }
 
