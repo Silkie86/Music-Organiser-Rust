@@ -2,6 +2,7 @@
 // Plugins and Space, with Settings at the bottom.
 import { Theme, Type, Space, RailItem, Groove, Caps, ActionKey, TipLayer, TipState } from "studio.slint";
 import { ComingPage } from "pages/coming.slint";
+import { PartsGallery } from "pages/parts.slint";
 import { SongsPage, SongsData, SongLine, YearStart, PanelSong, CountLine, PluginLine, SampleLine, SaveLine, DetailPair, HealthLine, OlderLine } from "pages/songs.slint";
 import { ArrangementData, ArrLabel, ArrKind } from "pages/arrangement.slint";
 import { ActivityCards, CardInfo, KeySheet, KeyRow, NoteDialog } from "shell.slint";
@@ -46,6 +47,8 @@ export component AppWindow inherits Window {
     in property <int> settings-place;
     // The places that have pages of their own so far (the rest show what's coming).
     in property <int> songs-place: 0;
+    // The shared parts on one page instead of the places, for the screenshots only.
+    in property <bool> parts-gallery;
     in-out property <int> place: 0;
     callback place-chosen(int);
     // A key press, with its modifiers and whether it's the key held down, for the app-wide shortcut list in mo-app.
@@ -100,7 +103,7 @@ export component AppWindow inherits Window {
 
         HorizontalLayout {
             // The rail.
-            Rectangle {
+            rail := Rectangle {
                 width: 208px;
                 background: Theme.sidebar;
                 VerticalLayout {
@@ -158,6 +161,13 @@ export component AppWindow inherits Window {
                 can-try-job: root.place == root.settings-place;
                 try-job => { root.try-job(); }
             }
+        }
+
+        // For the screenshots only: the shared parts on one page, over the page beside the rail.
+        if root.parts-gallery: PartsGallery {
+            x: rail.width;
+            width: parent.width - self.x;
+            height: parent.height;
         }
 
         ActivityCards {

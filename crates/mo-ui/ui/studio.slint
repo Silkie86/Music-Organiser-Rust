@@ -244,8 +244,10 @@ export component StudioButton inherits Rectangle {
     in property <string> key;
     // Opens a menu: a small arrow after the words.
     in property <bool> menu;
+    // A drawn sign instead of words (one of the `Icons`), for a small square button; `tip` then says what it does.
+    in property <string> icon;
     callback clicked;
-    min-width: label.preferred-width + (menu ? 38px : 24px);
+    min-width: icon != "" ? 32px : label.preferred-width + (menu ? 38px : 24px);
     height: 32px;
     border-radius: Theme.radius;
     border-width: 1px;
@@ -264,12 +266,25 @@ export component StudioButton inherits Rectangle {
     }
     label := Text {
         x: (parent.width - self.width - (root.menu ? 14px : 0px)) / 2;
+        // A button with an icon shows only the icon; its words go in `tip`.
+        visible: root.icon == "";
         text: root.text;
         color: !root.enabled ? Theme.faint : root.main ? Theme.accent-text : Theme.text;
         font-size: Type.body;
         font-weight: 500;
         vertical-alignment: center;
         horizontal-alignment: center;
+    }
+    if root.icon != "": Path {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 16px;
+        height: 16px;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: root.icon;
+        stroke: label.color;
+        stroke-width: 1.5px;
     }
     if root.menu: Path {
         x: label.x + label.width + 6px;
@@ -482,24 +497,54 @@ export component ToggleChip inherits Rectangle {
     }
 }
 
-// One line of a drop-down menu.
+// One line of a drop-down or right-click menu, with its key at the right (rule 15: every menu line shows its key).
 export component MenuLine inherits Rectangle {
     in property <string> text;
     in property <bool> on;
+    in property <string> key;
+    in property <bool> enabled: true;
     callback clicked;
     height: 32px;
     border-radius: Theme.radius;
-    background: touch.has-hover ? Theme.hover : transparent;
-    Text {
-        x: 10px;
-        text: root.text;
-        color: root.on ? Theme.accent : Theme.text;
-        font-size: Type.body;
-        vertical-alignment: center;
-        height: parent.height;
+    background: touch.has-hover && root.enabled ? Theme.hover : transparent;
+    HorizontalLayout {
+        padding-left: Space.md;
+        padding-right: Space.md;
+        spacing: Space.xl;
+        Text {
+            text: root.text;
+            color: !root.enabled ? Theme.faint : root.on ? Theme.accent : Theme.text;
+            font-size: Type.body;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+        if root.key != "": Text {
+            text: root.key;
+            color: Theme.faint;
+            font-family: Theme.number-font;
+            font-size: Type.meta;
+            vertical-alignment: center;
+            horizontal-alignment: right;
+        }
     }
     touch := TouchArea {
+        enabled: root.enabled;
         clicked => { root.clicked(); }
+    }
+}
+
+// The card a menu's lines sit on, inside a PopupWindow: raised, with a shadow.
+export component MenuCard inherits Rectangle {
+    background: Theme.surface-raised;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: Theme.edge;
+    drop-shadow-color: Theme.shadow;
+    drop-shadow-blur: 12px;
+    VerticalLayout {
+        padding: Space.xs;
+        @children
     }
 }
 
@@ -542,25 +587,16 @@ export component MenuChip inherits Rectangle {
         x: 0;
         y: root.height + 4px;
         width: max(root.width, 180px);
-        Rectangle {
-            background: Theme.surface-raised;
-            border-radius: Theme.radius;
-            border-width: 1px;
-            border-color: Theme.edge;
-            drop-shadow-color: Theme.shadow;
-            drop-shadow-blur: 12px;
-            VerticalLayout {
-                padding: Space.xs;
-                MenuLine {
-                    text: "Any";
-                    on: root.value == "";
-                    clicked => { root.picked(""); }
-                }
-                for c in root.choices: MenuLine {
-                    text: c;
-                    on: root.value == c;
-                    clicked => { root.picked(c); }
-                }
+        MenuCard {
+            MenuLine {
+                text: "Any";
+                on: root.value == "";
+                clicked => { root.picked(""); }
+            }
+            for c in root.choices: MenuLine {
+                text: c;
+                on: root.value == c;
+                clicked => { root.picked(c); }
             }
         }
     }
@@ -574,6 +610,9 @@ export component ListLine inherits Rectangle {
     in property <length> tip-from;
     callback clicked;
     callback double-clicked;
+    // A right click, after the line is picked, with the mouse's place in the window: the page opens its
+    // `RightClickMenu` there.
+    callback right-clicked(length, length);
     border-radius: Theme.radius;
     background: selected ? Theme.surface-raised : touch.has-hover ? Theme.hover : transparent;
     // The accent bar on the picked line.
@@ -586,6 +625,13 @@ export component ListLine inherits Rectangle {
     touch := TouchArea {
         clicked => { root.clicked(); }
         double-clicked => { root.double-clicked(); }
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down && e.button == PointerEventButton.right {
+                // The menu acts on what's picked, so pick this line first.
+                root.clicked();
+                root.right-clicked(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+        }
     }
     Tip {
         text: root.tip;
@@ -761,5 +807,410 @@ export component HoverNote inherits Rectangle {
         font-size: Type.meta;
         vertical-alignment: center;
         overflow: elide;
+    }
+}
+
+// The drawn signs for small square buttons (`StudioButton { icon: Icons.more; }`), on a 16 by 16 grid.
+export global Icons {
+    // Three dots: more things to do with what's picked.
+    out property <string> more: "M 2.5 8 A 0.75 0.75 0 1 0 4 8 A 0.75 0.75 0 1 0 2.5 8 M 7.25 8 A 0.75 0.75 0 1 0 8.75 8 A 0.75 0.75 0 1 0 7.25 8 M 12 8 A 0.75 0.75 0 1 0 13.5 8 A 0.75 0.75 0 1 0 12 8";
+    // Two sliders: the page's own options.
+    out property <string> options: "M 2 5 L 14 5 M 2 11 L 14 11 M 5.5 3 L 5.5 7 M 10.5 9 L 10.5 13";
+}
+
+// A coloured dot, like a sound's type or a DAW's colour beside a name.
+export component Dot inherits Rectangle {
+    in property <color> tint: Theme.muted;
+    width: 8px;
+    height: 8px;
+    border-radius: self.width / 2;
+    background: tint;
+}
+
+// How far a job on this page has got: a thin bar and a few words, under the page's name. The job's activity card
+// says the same; this keeps it in sight while you work on the page.
+export component ProgressLine inherits HorizontalLayout {
+    in property <string> text;
+    // From 0 to 1.
+    in property <float> done;
+    spacing: Space.sm;
+    alignment: start;
+    VerticalLayout {
+        alignment: center;
+        Rectangle {
+            width: 160px;
+            height: 3px;
+            border-radius: 1.5px;
+            background: Theme.surface-raised;
+            Rectangle {
+                x: 0;
+                width: parent.width * clamp(root.done, 0, 1);
+                border-radius: 1.5px;
+                background: Theme.accent;
+                animate width { duration: 200ms; }
+            }
+        }
+    }
+    Text {
+        text: root.text;
+        color: Theme.muted;
+        font-size: Type.meta;
+        vertical-alignment: center;
+    }
+}
+
+// A page's top: its name, a short summary beside it, and the job working on the page (if any) under them. Every page
+// starts with one, so they all line up.
+export component PageHeader inherits VerticalLayout {
+    in property <string> title;
+    in property <string> summary;
+    // The job working on this page, in words; empty when nothing runs.
+    in property <string> busy;
+    in property <float> done;
+    spacing: Space.xs;
+    vertical-stretch: 0;
+    HorizontalLayout {
+        spacing: Space.md;
+        Text {
+            text: root.title;
+            font-size: Type.page-title;
+            font-weight: 600;
+            color: Theme.text;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.summary;
+            color: Theme.muted;
+            font-size: Type.body;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+    }
+    // Always there, so the page doesn't jump when a job starts or ends; only seen while one runs.
+    ProgressLine {
+        visible: root.busy != "";
+        text: root.busy;
+        done: root.done;
+    }
+}
+
+// Joined buttons where one is picked, like a page's views (Tiles, List, Galaxy, History).
+export component Segmented inherits Rectangle {
+    in property <[string]> choices;
+    // Each choice's tooltip key, from the shortcut list, if it has one.
+    in property <[string]> keys;
+    // The picked one. The page sets it when told of a pick, so a key that changes the view moves it too.
+    in property <int> current;
+    callback picked(int);
+    width: row.preferred-width;
+    height: 32px;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: Theme.edge;
+    clip: true;
+    row := HorizontalLayout {
+        for name[i] in root.choices: Rectangle {
+            width: label.preferred-width + 2 * Space.lg;
+            background: i == root.current ? Theme.accent
+                : touch.pressed ? Theme.well
+                : @linear-gradient(180deg, (touch.has-hover ? Theme.hover : Theme.surface-raised).brighter(8%) 0%, Theme.surface-raised.darker(6%) 100%);
+            animate background { duration: 90ms; }
+            // The seam between two buttons.
+            Rectangle {
+                x: 0;
+                width: i == 0 ? 0 : 1px;
+                background: Theme.edge;
+            }
+            label := Text {
+                text: name;
+                color: i == root.current ? Theme.accent-text : Theme.text;
+                font-size: Type.body;
+                font-weight: 500;
+            }
+            touch := TouchArea {
+                clicked => { root.picked(i); }
+            }
+            Tip {
+                text: name;
+                key: root.keys[i];
+                hovering: touch.has-hover && !touch.pressed;
+                at-y: root.height + Space.xs;
+            }
+        }
+    }
+}
+
+// What a menu offers: what it does, its key from the shortcut list, and the id the page acts on. A line with no words
+// is a groove between groups.
+export struct MenuItem {
+    what: string,
+    key: string,
+    id: string,
+    enabled: bool,
+}
+
+// The lines of a menu, on its card. A click on a line that can't be used does nothing, so the menu around it closes
+// only when a line is chosen (or on a click outside it).
+export component MenuItems inherits MenuCard {
+    in property <[MenuItem]> items;
+    callback chosen(string);
+    for item in root.items: VerticalLayout {
+        if item.what == "": Groove { }
+        if item.what != "": MenuLine {
+            text: item.what;
+            key: item.key;
+            enabled: item.enabled;
+            clicked => { root.chosen(item.id); }
+        }
+    }
+}
+
+// The menu of things to do with what's picked: a small "more" button, the same lines as the right-click menu.
+export component MoreButton inherits StudioButton {
+    in property <[MenuItem]> items;
+    callback chosen(string);
+    icon: Icons.more;
+    tip: "More";
+    clicked => { more-menu.show(); }
+    more-menu := PopupWindow {
+        x: root.width - self.width;
+        y: root.height + Space.xs;
+        width: 280px;
+        close-policy: close-on-click-outside;
+        MenuItems {
+            items: root.items;
+            chosen(id) => {
+                more-menu.close();
+                root.chosen(id);
+            }
+        }
+    }
+}
+
+// A right-click menu: put one on the page and call `open-at` with the mouse's place in the window (as `ListLine`'s
+// `right-clicked` gives it). Placed at 0,0 with no size of its own, so it takes no room and no clicks.
+export component RightClickMenu {
+    in property <[MenuItem]> items;
+    callback chosen(string);
+    x: 0;
+    y: 0;
+    width: 0;
+    height: 0;
+    property <length> at-x;
+    property <length> at-y;
+    public function open-at(x: length, y: length) {
+        root.at-x = x - root.absolute-position.x;
+        root.at-y = y - root.absolute-position.y;
+        menu.show();
+    }
+    menu := PopupWindow {
+        x: root.at-x;
+        y: root.at-y;
+        width: 280px;
+        close-policy: close-on-click-outside;
+        MenuItems {
+            items: root.items;
+            chosen(id) => {
+                menu.close();
+                root.chosen(id);
+            }
+        }
+    }
+}
+
+// The page's own options (its numbers and choices, spec 3A), in a card under a small button at the end of the
+// toolbar. The page's settings go inside it.
+export component OptionsButton inherits StudioButton {
+    in property <length> card-width: 320px;
+    icon: Icons.options;
+    tip: "Options for this page";
+    clicked => { card.show(); }
+    card := PopupWindow {
+        x: root.width - self.width;
+        y: root.height + Space.xs;
+        width: root.card-width;
+        close-policy: close-on-click-outside;
+        MenuCard {
+            VerticalLayout {
+                padding: Space.md;
+                spacing: Space.md;
+                @children
+            }
+        }
+    }
+}
+
+// The picked thing's panel beside a page's list: a raised card with a × to put it away (Esc does too).
+export component SidePanel inherits Rectangle {
+    callback close;
+    background: Theme.surface;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: Theme.edge;
+    VerticalLayout {
+        padding: Space.xl;
+        spacing: Space.md;
+        @children
+    }
+    CloseButton {
+        x: parent.width - self.width - Space.md;
+        y: Space.md;
+        clicked => { root.close(); }
+    }
+}
+
+// The seam between a page's list and its side panel: drag it to give the panel more or less room. The page keeps the
+// panel's width (and saves it, so each page remembers its own); this only reports the drag.
+export component PanelDivider inherits Rectangle {
+    // The panel's width now, and the room the list and panel share.
+    in property <length> panel-width;
+    in property <length> room;
+    in property <length> min-list: 380px;
+    in property <length> min-panel: 320px;
+    // The new width while dragging, and once more when let go (to save it).
+    callback resizing(length);
+    callback resized(length);
+    width: Space.lg;
+    property <length> start-width;
+    // Where the press was, in the window: the seam moves while it's dragged, so its own space won't do.
+    property <length> start-x;
+    property <bool> dragging;
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        width: 2px;
+        height: min(48px, parent.height);
+        y: (parent.height - self.height) / 2;
+        border-radius: 1px;
+        background: touch.pressed ? Theme.accent : touch.has-hover ? Theme.stroke : transparent;
+    }
+    touch := TouchArea {
+        mouse-cursor: MouseCursor.col-resize;
+        pointer-event(e) => {
+            if e.button != PointerEventButton.left {
+                return;
+            }
+            if e.kind == PointerEventKind.down {
+                root.start-width = root.panel-width;
+                root.start-x = self.absolute-position.x + self.mouse-x;
+                root.dragging = false;
+            }
+            // Saved only when the seam really moved.
+            if e.kind == PointerEventKind.up && root.dragging {
+                root.dragging = false;
+                root.resized(root.panel-width);
+            }
+        }
+        moved => {
+            if self.pressed {
+                root.dragging = true;
+                root.resizing(clamp(root.start-width - (self.absolute-position.x + self.mouse-x - root.start-x), root.min-panel,
+                    max(root.min-panel, root.room - root.width - root.min-list)));
+            }
+        }
+    }
+}
+
+// What a list or panel shows when there's nothing in it: what's missing, why, and the one thing to do about it.
+export component EmptyState inherits VerticalLayout {
+    in property <string> title;
+    in property <string> text;
+    in property <string> action;
+    callback act;
+    alignment: center;
+    spacing: Space.sm;
+    Text {
+        text: root.title;
+        color: Theme.text;
+        font-size: Type.heading;
+        font-weight: 600;
+        horizontal-alignment: center;
+        wrap: word-wrap;
+    }
+    if root.text != "": Text {
+        text: root.text;
+        color: Theme.muted;
+        font-size: Type.body;
+        horizontal-alignment: center;
+        wrap: word-wrap;
+    }
+    if root.action != "": HorizontalLayout {
+        alignment: center;
+        padding-top: Space.sm;
+        StudioButton {
+            text: root.action;
+            clicked => { root.act(); }
+        }
+    }
+}
+
+// A sound's shape as bars, from its peaks (0 to 1, a few dozen of them). The part already played is brighter; a click
+// says where, from 0 to 1, to play from.
+export component Waveform inherits Rectangle {
+    in property <[float]> peaks;
+    in property <color> tint: Theme.accent;
+    // How much has played, from 0 to 1.
+    in property <float> played;
+    in property <bool> can-seek;
+    callback seek(float);
+    property <length> step: self.width / max(1, root.peaks.length);
+    for p[i] in root.peaks: Rectangle {
+        x: i * root.step;
+        width: max(1px, root.step - 1px);
+        height: max(1px, root.height * clamp(p, 0, 1));
+        y: (root.height - self.height) / 2;
+        border-radius: 1px;
+        background: (i + 0.5) / root.peaks.length <= root.played ? root.tint : root.tint.transparentize(40%);
+    }
+    if root.can-seek: TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.seek(clamp(self.mouse-x / self.width, 0, 1)); }
+    }
+}
+
+// One folder in a list of folders (backup, sample folders, MIDI folders): its path, its size, a choice of how it's
+// treated (like Whole or Slimmed) when the page gives choices, and a × to take it off the list.
+export component FolderRow inherits Rectangle {
+    in property <string> path;
+    in property <string> size;
+    in property <[string]> modes;
+    // The picked mode; the page sets it when told of a pick.
+    in property <int> mode;
+    callback mode-picked(int);
+    callback remove;
+    height: 44px;
+    HorizontalLayout {
+        padding-left: Space.md;
+        padding-right: Space.sm;
+        spacing: Space.md;
+        Text {
+            text: root.path;
+            color: Theme.text;
+            font-size: Type.body;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+        if root.size != "": Text {
+            text: root.size;
+            color: Theme.muted;
+            font-family: Theme.number-font;
+            font-size: Type.meta;
+            vertical-alignment: center;
+        }
+        if root.modes.length > 0: VerticalLayout {
+            alignment: center;
+            Segmented {
+                choices: root.modes;
+                current: root.mode;
+                picked(i) => { root.mode-picked(i); }
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            CloseButton {
+                clicked => { root.remove(); }
+            }
+        }
     }
 }

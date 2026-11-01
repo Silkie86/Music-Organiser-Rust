@@ -1,0 +1,166 @@
+// Every shared part on one page, for the screenshots (mo-screens): each new part shows here in every theme before any
+// page uses it, so its look can be judged on its own.
+import { Theme, Type, Space, Caps, Well, StudioButton, Dot, PageHeader, Segmented, MoreButton, OptionsButton, MenuItem, MenuItems, SidePanel, PanelDivider, EmptyState, Waveform, FolderRow, TickBox, ToggleChip, ListLine, RightClickMenu } from "../studio.slint";
+
+export component PartsGallery inherits Rectangle {
+    background: Theme.background;
+    property <[float]> peaks: [0.9, 1, 0.8, 0.62, 0.5, 0.41, 0.36, 0.3, 0.27, 0.22, 0.2, 0.17, 0.15, 0.13, 0.12, 0.1, 0.09, 0.08, 0.08, 0.07, 0.06, 0.06, 0.05, 0.05, 0.04, 0.04, 0.03, 0.03, 0.03, 0.02];
+    property <[float]> loop-peaks: [0.5, 0.8, 0.6, 0.9, 0.55, 0.7, 0.85, 0.5, 0.6, 0.95, 0.7, 0.52, 0.8, 0.62, 0.9, 0.58, 0.75, 0.88, 0.5, 0.66, 0.92, 0.6, 0.7, 0.8, 0.54, 0.9, 0.6, 0.78, 0.86, 0.5];
+    property <[MenuItem]> menu: [
+        { what: "Play", key: "Space", id: "play", enabled: true },
+        { what: "To Bitwig", key: "Ctrl+B", id: "bitwig", enabled: true },
+        { what: "Favourite", key: "Ctrl+D", id: "favourite", enabled: true },
+        { what: "", key: "", id: "", enabled: true },
+        { what: "Show in folder", key: "Ctrl+Shift+E", id: "reveal", enabled: true },
+        { what: "Copy path", key: "Ctrl+Shift+C", id: "copy", enabled: false },
+    ];
+    property <length> panel-width: 380px;
+    VerticalLayout {
+        padding: Space.xl;
+        spacing: Space.lg;
+        PageHeader {
+            title: "Shared parts";
+            summary: "Every page is built from these";
+            busy: "Listening to new sounds: 458 of 1,204";
+            done: 0.38;
+        }
+        HorizontalLayout {
+            spacing: Space.sm;
+            alignment: start;
+            vertical-stretch: 0;
+            Segmented {
+                choices: ["Tiles", "List", "Galaxy", "History"];
+                keys: ["", "", "", ""];
+                current: 0;
+            }
+            StudioButton {
+                text: "Order: Shuffled";
+                menu: true;
+            }
+            ToggleChip {
+                text: "Autoplay";
+                on: true;
+            }
+            MoreButton {
+                items: root.menu;
+            }
+            OptionsButton {
+                TickBox {
+                    text: "Look for copies after each scan";
+                }
+            }
+            StudioButton {
+                text: "Play";
+                main: true;
+            }
+        }
+        area := HorizontalLayout {
+            spacing: 0;
+            vertical-stretch: 1;
+            VerticalLayout {
+                spacing: Space.lg;
+                horizontal-stretch: 1;
+                // A menu as it opens, drawn in place (a popup can't be photographed).
+                HorizontalLayout {
+                    spacing: Space.xl;
+                    alignment: start;
+                    vertical-stretch: 0;
+                    VerticalLayout {
+                        width: 280px;
+                        Caps { text: "Right-click menu"; }
+                        MenuItems { items: root.menu; }
+                    }
+                    VerticalLayout {
+                        spacing: Space.sm;
+                        width: 320px;
+                        Caps { text: "Waveforms"; }
+                        Well {
+                            height: 72px;
+                            Waveform {
+                                x: Space.sm;
+                                width: parent.width - 2 * Space.sm;
+                                peaks: root.peaks;
+                                played: 0.3;
+                            }
+                        }
+                        Well {
+                            height: 40px;
+                            Waveform {
+                                x: Space.sm;
+                                width: parent.width - 2 * Space.sm;
+                                peaks: root.loop-peaks;
+                                tint: Theme.fl-studio;
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: Space.sm;
+                            alignment: start;
+                            Dot { tint: Theme.missing; }
+                            Dot { tint: Theme.warning; }
+                            Dot { tint: Theme.ok; }
+                            Dot { tint: Theme.fl-studio; }
+                            Dot { tint: Theme.bitwig; }
+                        }
+                    }
+                }
+                VerticalLayout {
+                    spacing: Space.xs;
+                    vertical-stretch: 0;
+                    Caps { text: "Folder list"; }
+                    FolderRow {
+                        path: "I:\\Fl Studio Data\\FL Studio\\Projects";
+                        size: "412 GB";
+                        modes: ["Whole", "Slimmed"];
+                        mode: 1;
+                    }
+                    FolderRow {
+                        path: "K:\\Bitwig Studio\\Projects";
+                        size: "96 GB";
+                        modes: ["Whole", "Slimmed"];
+                        mode: 0;
+                    }
+                    ListLine {
+                        height: 40px;
+                        selected: true;
+                        Text {
+                            x: Space.md;
+                            text: "A picked line of a list";
+                            color: Theme.text;
+                            font-size: Type.body;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+                Well {
+                    vertical-stretch: 1;
+                    EmptyState {
+                        title: "No sounds here yet";
+                        text: "Add a sample folder and the app listens to every sound in it.";
+                        action: "Add a sample folder";
+                    }
+                }
+            }
+            PanelDivider {
+                panel-width: root.panel-width;
+                room: area.width;
+                resizing(w) => { root.panel-width = w; }
+            }
+            SidePanel {
+                width: root.panel-width;
+                Text {
+                    text: "Side panel";
+                    color: Theme.text;
+                    font-size: Type.panel-title;
+                    font-weight: 600;
+                }
+                Text {
+                    text: "The picked thing: its name, its main button, its facts and its tabs.";
+                    color: Theme.muted;
+                    font-size: Type.body;
+                    wrap: word-wrap;
+                }
+                Rectangle { vertical-stretch: 1; }
+            }
+        }
+    }
+}

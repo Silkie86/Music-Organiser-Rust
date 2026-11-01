@@ -2,7 +2,8 @@
 //! anyone builds it. Uses Slint's software renderer, so it runs the same on a CI machine with no screen.
 //!
 //! `mo-screens [folder]` writes one picture per place in Graphite, then the Songs page in every theme. The folder
-//! defaults to `screenshots`. Then the parts over every page: activity cards, the key sheet and the F12 note.
+//! defaults to `screenshots`. Then the shared parts on one page, and the parts over every page: activity cards, the key
+//! sheet and the F12 note.
 
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -85,6 +86,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     shots.push(("song-panel-health.png".into(), capture(&window)));
     app.global::<mo_ui::SongsData>().set_health_open(false);
     app.global::<mo_ui::SongsData>().invoke_close_panel();
+
+    // The shared parts every page is built from, in Graphite and in a light and a square theme.
+    app.set_parts_gallery(true);
+    shots.push(("parts-graphite.png".into(), capture(&window)));
+    for theme in ["Paper", "Hardware"] {
+        mo_ui::apply_look(&app, &Look::from_settings(Some(theme), None));
+        shots.push((format!("parts-{}.png", slug(theme)), capture(&window)));
+    }
+    mo_ui::apply_look(&app, &graphite);
+    app.set_parts_gallery(false);
 
     // Activity cards: one going, one that can't say how far it is yet, one done and one failed, plus one put away.
     let going = feed.start("Reading new FL saves", "");
