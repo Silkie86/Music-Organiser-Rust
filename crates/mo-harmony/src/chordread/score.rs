@@ -711,12 +711,11 @@ pub struct Scored {
 }
 
 /// The weights and the priors as the quick scoring reads them ([`SpanFacts::score_all`]), worked out once: the
-/// weights and priors themselves, and what depends only on a label's core and the held bass's interval above its root,
-/// weighed.
+/// weights themselves, and what depends only on a label's core and the held bass's interval above its root, weighed
+/// (the priors among it).
 #[derive(Clone, Debug)]
 pub struct Scorer {
     weights: Weights,
-    priors: Priors,
     /// By core, and by the held bass's interval above the root: B1 to B6, weighed.
     held_bass: [[f64; 12]; Core::ALL.len()],
     /// By core: P1 weighed; and by core and tension interval, what P2 adds weighed, not heard and heard.
@@ -739,7 +738,6 @@ impl Scorer {
         let w = &weights.features;
         let mut out = Scorer {
             weights: *weights,
-            priors: *priors,
             held_bass: [[0.0; 12]; Core::ALL.len()],
             core_prior: [0.0; Core::ALL.len()],
             tension_prior: [[[0.0; 2]; 12]; Core::ALL.len()],
@@ -767,14 +765,6 @@ impl Scorer {
             }
         }
         out
-    }
-
-    pub fn weights(&self) -> &Weights {
-        &self.weights
-    }
-
-    pub fn priors(&self) -> &Priors {
-        &self.priors
     }
 }
 
@@ -816,6 +806,8 @@ const fn label_notes() -> [[LabelNotes; 12]; Core::ALL.len()] {
     let mut k = 0;
     while k < Core::ALL.len() {
         let core = Core::ALL[k];
+        // The notes that don't belong to a label are all less its own and its tensions, so none may be both.
+        assert!(core.intervals().intersection(core.tensions()).is_empty(), "a core's tension is one of its own notes");
         let third = match core {
             Core::Dominant7Sus4 => core.third().union(PcSet::of(&[2])),
             _ => core.third(),
@@ -919,6 +911,45 @@ struct PassingBy {
     tune: PerPitch<u64>,
 }
 
+/// The quick scoring of one span's labels ([`SpanFacts::scoring`]), with what depends only on the span worked out once:
+/// to score some labels one at a time, as [`SpanFacts::score_all`] scores them, without working that out again.
+pub struct Scoring<'a> {
+    facts: &'a SpanFacts,
+    scorer: &'a Scorer,
+    quick: Quick,
+}
+
+impl Scoring<'_> {
+    /// A label's score and held-on score.
+    pub fn score(&self, label: Label) -> (f64, f64) {
+        self.with_root(label, self.facts.root_part(label.root, self.scorer))
+    }
+
+    /// A label's score and held-on score, given what depends only on its root ([`SpanFacts::root_part`]).
+    fn with_root(&self, label: Label, (root_beat, root_once): (f64, f64)) -> (f64, f64) {
+        let (per_beat, once) = self.facts.label_part(label, self.scorer, &self.quick);
+        let held = self.facts.beats * (root_beat + per_beat);
+        (held + (self.quick.once + root_once + once), held)
+    }
+}
+
+/// The ticks of the chords and the tune by what each note is to a label, less what only passes by under it
+/// ([`SpanFacts::by_kind`]): its own notes; its tensions struck in the span, and in the tune; the notes that don't
+/// belong, struck in the span, carried in, held over and in the tune; and what passes by, in the chords and in what
+/// they hold over. Whole ticks, divided once each where they're weighed.
+#[derive(Clone, Copy, Debug)]
+struct ByKind {
+    own: Sums,
+    tension: u64,
+    tune_tension: u64,
+    wrong: u64,
+    carried: u64,
+    over: u64,
+    tune_wrong: u64,
+    passing: u64,
+    over_passing: u64,
+}
+
 impl SpanFacts {
     pub fn new() -> SpanFacts {
         SpanFacts::default()
@@ -976,63 +1007,68 @@ impl SpanFacts {
         out
     }
 
+    /// A label's ticks by what each note is to it ([`ByKind`]), from those of its own notes and of its tensions
+    /// (`tensions`, the notes `tension_set`), and what only passes by under it (`by`: none where nothing does). The
+    /// notes that don't belong are all less the other two, so a core's tensions are never its own notes (checked when
+    /// the app is built, in [`label_notes`]).
+    // Inlined, so the quick scoring keeps it all in registers.
+    #[inline(always)]
+    fn by_kind(&self, own: Sums, tensions: Sums, tension_set: PcSet, by: Option<&PassingBy>) -> ByKind {
+        let rest = self.all.less(own).less(tensions);
+        let mut out = ByKind {
+            own,
+            tension: tensions.struck,
+            tune_tension: tensions.tune,
+            wrong: rest.struck,
+            carried: rest.carried,
+            over: rest.held,
+            tune_wrong: rest.tune,
+            passing: 0,
+            over_passing: 0,
+        };
+        for (pc, by) in by.iter().flat_map(|by| by.set.iter().map(move |pc| (pc, by))) {
+            let passes = by.chords[pc].min(self.chords[pc]);
+            let held_passes = by.over[pc].min(self.held_over[pc]);
+            let tune_passes = by.tune[pc].min(self.tune[pc]);
+            out.passing = out.passing.wrapping_add(passes);
+            out.over_passing = out.over_passing.wrapping_add(held_passes);
+            let struck = self.struck.contains(pc);
+            if tension_set.contains(pc) {
+                if struck {
+                    out.tension = out.tension.wrapping_sub(passes);
+                }
+                out.tune_tension = out.tune_tension.wrapping_sub(tune_passes);
+            } else {
+                if struck {
+                    out.wrong = out.wrong.wrapping_sub(passes);
+                } else {
+                    out.carried = out.carried.wrapping_sub(passes);
+                }
+                out.over = out.over.wrapping_sub(held_passes);
+                out.tune_wrong = out.tune_wrong.wrapping_sub(tune_passes);
+            }
+        }
+        out
+    }
+
     /// The evidence about one label.
     pub fn features(&self, label: Label, priors: &Priors, out: &mut PerFeature<f64>) {
         use Feature::*;
         let (root, core) = (label.root, label.core);
         let (tones, tensions) = (label.tones(), label.tensions());
-        // The ticks of each pitch class that only pass by under the label: in the chords, in what they hold over, and
-        // in the tune.
-        let (mut by_chords, mut by_over, mut by_tune) =
-            (PerPitch::<u64>::default(), PerPitch::<u64>::default(), PerPitch::<u64>::default());
-        let mut passing_by = PcSet::EMPTY;
-        for p in self.passers.iter().filter(|p| p.passes_under(tones)) {
-            by_chords[p.pc] = by_chords[p.pc].saturating_add(p.chords);
-            by_over[p.pc] = by_over[p.pc].saturating_add(p.over);
-            by_tune[p.pc] = by_tune[p.pc].saturating_add(p.tune);
-            passing_by = passing_by.with(p.pc);
-        }
-
-        // The chords and the tune, by what each note is to the label: its own notes, its tensions struck in the span,
-        // and the notes that don't belong (all less the other two), each less what only passes by (whole ticks,
-        // divided once).
-        let (own, carried_tensions) = (self.sums(tones), self.sums(tensions));
-        let rest = self.all.less(own).less(carried_tensions);
-        let (mut tension, mut tune_tension) = (carried_tensions.struck, carried_tensions.tune);
-        let (mut wrong, mut carried, mut over, mut tune_wrong) = (rest.struck, rest.carried, rest.held, rest.tune);
-        let (mut passing, mut over_passing) = (0u64, 0u64);
-        for pc in passing_by.iter() {
-            let passes = by_chords[pc].min(self.chords[pc]);
-            let held_passes = by_over[pc].min(self.held_over[pc]);
-            let tune_passes = by_tune[pc].min(self.tune[pc]);
-            passing = passing.wrapping_add(passes);
-            over_passing = over_passing.wrapping_add(held_passes);
-            let struck = self.struck.contains(pc);
-            if tensions.contains(pc) {
-                if struck {
-                    tension = tension.wrapping_sub(passes);
-                }
-                tune_tension = tune_tension.wrapping_sub(tune_passes);
-            } else {
-                if struck {
-                    wrong = wrong.wrapping_sub(passes);
-                } else {
-                    carried = carried.wrapping_sub(passes);
-                }
-                over = over.wrapping_sub(held_passes);
-                tune_wrong = tune_wrong.wrapping_sub(tune_passes);
-            }
-        }
+        // The chords and the tune, by what each note is to the label, each less what only passes by under it.
+        let by = self.passing_by(tones);
+        let kinds = self.by_kind(self.sums(tones), self.sums(tensions), tensions, Some(&by));
         // What the chords hold over counts as a share of the larger of their sound and all they hold over.
         let (d, held) = (self.chords_total, self.chords_total.max(self.held_over_total));
-        out[ChordTones] = share(own.struck.wrapping_add(own.carried), d);
-        out[Tensions] = share(tension, d);
-        out[WrongStruck] = share(wrong, d);
-        out[WrongHeld] = share(carried, d) + share(over, held);
-        out[Passing] = share(passing, d) + share(over_passing, held);
-        out[TuneTones] = share(own.tune, self.tune_total);
-        out[TuneTensions] = share(tune_tension, self.tune_total);
-        out[TuneWrong] = share(tune_wrong, self.tune_total);
+        out[ChordTones] = share(kinds.own.struck.wrapping_add(kinds.own.carried), d);
+        out[Tensions] = share(kinds.tension, d);
+        out[WrongStruck] = share(kinds.wrong, d);
+        out[WrongHeld] = share(kinds.carried, d) + share(kinds.over, held);
+        out[Passing] = share(kinds.passing, d) + share(kinds.over_passing, held);
+        out[TuneTones] = share(kinds.own.tune, self.tune_total);
+        out[TuneTensions] = share(kinds.tune_tension, self.tune_total);
+        out[TuneWrong] = share(kinds.tune_wrong, self.tune_total);
         out[RootSupport] = share(self.leaning[root], d.saturating_mul(10));
 
         // The notes that say which chord it is: how far each is from sounding.
@@ -1108,7 +1144,7 @@ impl SpanFacts {
         for k in core.tensions().iter() {
             let interval = k.number();
             let pc = root.up(i32::from(interval));
-            let unpassed = self.chords[pc] - by_chords[pc].min(self.chords[pc]);
+            let unpassed = self.chords[pc] - by.chords[pc].min(self.chords[pc]);
             let heard = self.struck.contains(pc) && unpassed.saturating_mul(8) >= self.sounding.max(1);
             prior += priors.tension(core, interval, heard);
         }
@@ -1198,43 +1234,17 @@ impl SpanFacts {
         let (tones, tensions) = (notes.tones, notes.tensions);
         // The chords and the tune, by what each note is to the label, less what only passes by, as in `features`.
         let (tone_ticks, tension_ticks) = (self.ticks.sum(tones), self.ticks.sum(tensions));
-        let (own, carried_tensions) = (tone_ticks.sums(), tension_ticks.sums());
-        let rest = self.all.less(own).less(carried_tensions);
-        let (mut tension, mut tune_tension) = (carried_tensions.struck, carried_tensions.tune);
-        let (mut wrong, mut carried, mut over, mut tune_wrong) = (rest.struck, rest.carried, rest.held, rest.tune);
-        let (mut passing, mut over_passing) = (0u64, 0u64);
         let by = (!self.passers.is_empty()).then(|| self.passing_by(tones));
-        for (pc, by) in by.iter().flat_map(|by| by.set.iter().map(move |pc| (pc, by))) {
-            let passes = by.chords[pc].min(self.chords[pc]);
-            let held_passes = by.over[pc].min(self.held_over[pc]);
-            let tune_passes = by.tune[pc].min(self.tune[pc]);
-            passing = passing.wrapping_add(passes);
-            over_passing = over_passing.wrapping_add(held_passes);
-            let struck = self.struck.contains(pc);
-            if tensions.contains(pc) {
-                if struck {
-                    tension = tension.wrapping_sub(passes);
-                }
-                tune_tension = tune_tension.wrapping_sub(tune_passes);
-            } else {
-                if struck {
-                    wrong = wrong.wrapping_sub(passes);
-                } else {
-                    carried = carried.wrapping_sub(passes);
-                }
-                over = over.wrapping_sub(held_passes);
-                tune_wrong = tune_wrong.wrapping_sub(tune_passes);
-            }
-        }
+        let kinds = self.by_kind(tone_ticks.sums(), tension_ticks.sums(), tensions, by.as_ref());
         let (d, held, tune) = (quick.chords, quick.held, quick.tune);
-        let mut per_beat = w[ChordTones] * share_of(own.struck.wrapping_add(own.carried), d)
-            + w[Tensions] * share_of(tension, d)
-            + w[WrongStruck] * share_of(wrong, d)
-            + w[WrongHeld] * (share_of(carried, d) + share_of(over, held))
-            + w[Passing] * (share_of(passing, d) + share_of(over_passing, held))
-            + w[TuneTones] * share_of(own.tune, tune)
-            + w[TuneTensions] * share_of(tune_tension, tune)
-            + w[TuneWrong] * share_of(tune_wrong, tune);
+        let mut per_beat = w[ChordTones] * share_of(kinds.own.struck.wrapping_add(kinds.own.carried), d)
+            + w[Tensions] * share_of(kinds.tension, d)
+            + w[WrongStruck] * share_of(kinds.wrong, d)
+            + w[WrongHeld] * (share_of(kinds.carried, d) + share_of(kinds.over, held))
+            + w[Passing] * (share_of(kinds.passing, d) + share_of(kinds.over_passing, held))
+            + w[TuneTones] * share_of(kinds.own.tune, tune)
+            + w[TuneTensions] * share_of(kinds.tune_tension, tune)
+            + w[TuneWrong] * share_of(kinds.tune_wrong, tune);
 
         // The notes that say which chord it is: how far each is from sounding.
         per_beat += w[NoThird] * quick.missing(notes.third)
@@ -1290,16 +1300,21 @@ impl SpanFacts {
         (per_beat, once)
     }
 
+    /// The quick scoring of the span's labels, with what depends only on the span worked out once ([`Scoring`]).
+    pub fn scoring<'a>(&'a self, scorer: &'a Scorer) -> Scoring<'a> {
+        Scoring { facts: self, scorer, quick: self.quick(scorer) }
+    }
+
     /// Every candidate's score and held-on score, in the candidates' order: the evidence ([`SpanFacts::features`])
     /// weighed ([`SpanFacts::score`], [`SpanFacts::held_score`]), the same up to rounding, worked out quicker. What
     /// depends only on the span is worked out once, and what depends only on the root once for each root.
     pub fn score_all(&self, candidates: &[Candidate], scorer: &Scorer, out: &mut Vec<Scored>) {
         out.clear();
-        let quick = self.quick(scorer);
+        let scoring = self.scoring(scorer);
         let mut by_root: Option<(PitchClass, (f64, f64))> = None;
         for c in candidates {
             let root = c.label.root;
-            let (root_beat, root_once) = match by_root {
+            let root_part = match by_root {
                 Some((r, part)) if r == root => part,
                 _ => {
                     let part = self.root_part(root, scorer);
@@ -1307,20 +1322,14 @@ impl SpanFacts {
                     part
                 }
             };
-            let (per_beat, once) = self.label_part(c.label, scorer, &quick);
-            let held = self.beats * (root_beat + per_beat);
-            let score = held + (quick.once + root_once + once);
+            let (score, held) = scoring.with_root(c.label, root_part);
             out.push(Scored { label: c.label, route: c.route, score, held });
         }
     }
 
     /// One label's score and held-on score, as [`SpanFacts::score_all`] scores it.
     pub fn score_one(&self, label: Label, scorer: &Scorer) -> (f64, f64) {
-        let quick = self.quick(scorer);
-        let (root_beat, root_once) = self.root_part(label.root, scorer);
-        let (per_beat, once) = self.label_part(label, scorer, &quick);
-        let held = self.beats * (root_beat + per_beat);
-        (held + (quick.once + root_once + once), held)
+        self.scoring(scorer).score(label)
     }
 
     /// A label's score from its evidence: each piece weighed, those about the whole span counted for each felt beat it

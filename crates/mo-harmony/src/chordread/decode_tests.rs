@@ -834,12 +834,12 @@ fn count_ways(lattice: &Lattice, weights: &Weights) -> f64 {
     total
 }
 
-/// Checks the last decode of music `units` long against the slow way (every way to read it through what the decode
-/// kept, added up one by one): ln Z, each reading's chance on its span, the chance a chord starts at each unit, and
-/// the best way.
-fn agrees_with_every_way(name: &str, decoder: &Decoder, units: usize) {
+/// Checks the last decode of music `units` long, read with `weights`, against the slow way (every way to read it
+/// through what the decode kept, added up one by one): ln Z, each reading's chance on its span, the chance a chord
+/// starts at each unit, and the best way.
+fn agrees_with_every_way(name: &str, decoder: &Decoder, units: usize, weights: &Weights) {
     let lattice = decoder.lattice();
-    let ways = every_way(&lattice, &HAND);
+    let ways = every_way(&lattice, weights);
     assert!(!ways.is_empty() && ways.len() < 1_000_000, "{name}: {} ways", ways.len());
     // ln Z, as a sum over the ways.
     let best = ways.iter().map(|w| w.score).fold(f64::NEG_INFINITY, f64::max);
@@ -879,7 +879,7 @@ fn agrees_with_every_way(name: &str, decoder: &Decoder, units: usize) {
             assert_eq!(lattice.spans[b].1, lattice.spans[s].0, "{name}: the best way is broken");
         }
         let k = lattice.spans[s].3.iter().position(|r| r.0 == label).unwrap();
-        score += step(&lattice, &HAND, before, s, k).expect("a step the rules allow").0;
+        score += step(&lattice, weights, before, s, k).expect("a step the rules allow").0;
         before = Some((s, k));
     }
     let first = lattice.best.first().map(|&(s, _)| lattice.spans[s].0);
@@ -910,9 +910,19 @@ fn the_fast_way_agrees_with_adding_up_every_way_one_by_one() {
         ("pins", two_five_one(), vec![pin(B..2 * B, "Db7"), ends]),
         ("a gap between pins", gap, vec![pin(0..4, "C"), pin(B..2 * B, "F")]),
     ];
-    for (name, music, pins) in cases {
-        let whole = Whole::read(&music, &HAND, &pins);
-        agrees_with_every_way(name, &whole.decoder, whole.hearing.units());
+    for (name, music, pins) in &cases {
+        let whole = Whole::read(music, &HAND, pins);
+        agrees_with_every_way(name, &whole.decoder, whole.hearing.units(), &HAND);
+    }
+    // Trusting the pair term far more: on the counted tables, from a trust of about 8 a move's factor is too far from 1
+    // for the masses to be added up as masses, and from about 200 past what a float holds, so every sum is added up in
+    // logarithms instead.
+    for trust in [3.0, 40.0, 400.0] {
+        let weights = Weights { pair: trust, ..HAND };
+        for (name, music, pins) in &cases {
+            let whole = Whole::read(music, &weights, pins);
+            agrees_with_every_way(&format!("{name}, trust {trust}"), &whole.decoder, whole.hearing.units(), &weights);
+        }
     }
 }
 
@@ -1034,7 +1044,7 @@ fn any_music_with_any_pins_is_read_whole_and_the_fast_way_agrees_with_the_slow_w
         }
         // And where there are few enough ways to add up one by one, the slow way agrees.
         if count_ways(&decoder.lattice(), &HAND) <= 20_000.0 {
-            agrees_with_every_way(&what, &decoder, units);
+            agrees_with_every_way(&what, &decoder, units, &HAND);
             slow += 1;
         }
     }

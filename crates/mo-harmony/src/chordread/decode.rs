@@ -43,7 +43,7 @@ use std::ops::{Index, IndexMut, Range};
 use super::candidates::{Candidate, Label, Route};
 use super::cores::{Core, Group};
 use super::hear::{Hearing, Level, Mass, Stream};
-use super::score::{Evidence, Scored, Scorer, SpanFacts};
+use super::score::{Evidence, Scored, Scorer, Scoring, SpanFacts};
 use super::weights::{Priors, Tables, Weights};
 use crate::pitch::PitchClass;
 
@@ -188,15 +188,27 @@ struct Moves {
     motion: [[[(f64, f64); 3]; 12]; 3],
     /// Each core's group, by its place in [`Core::ALL`].
     groups: [usize; 16],
+    /// Whether the masses of the ways may be added up as masses ([`ln_of_sum`]): every move's sharpness times its pair
+    /// term is within [`LINEAR_RANGE`] of 0.
+    linear: bool,
 }
+
+/// How far from 0 the sharpness times any move's pair term may be for the masses of the ways to be added up as masses:
+/// then no sum overflows, and a mass too small for a float (under about e^-745) matters to no sum worked out that way
+/// (each at least [`SMALLEST_SUM`], about e^-645), even times the largest factor. Past it (on the counted tables, a
+/// trust in the pair term of about 8 or more), every sum is added up in logarithms.
+const LINEAR_RANGE: f64 = 30.0;
 
 impl Moves {
     fn new(trust: f64, tables: &Tables) -> Moves {
         let mut motion = [[[(0.0, 1.0); 3]; 12]; 3];
+        let mut linear = true;
         for (from, row) in Group::ALL.into_iter().zip(&mut motion) {
             for (up, cell) in (0u8..).zip(row.iter_mut()) {
                 for (to, value) in Group::ALL.into_iter().zip(cell) {
                     let pair = trust * tables.motion_prior(from, up, to);
+                    // False for a pair term that isn't a number too.
+                    linear &= (SHARPNESS * pair).abs() <= LINEAR_RANGE;
                     *value = (pair, (SHARPNESS * pair).exp());
                 }
             }
@@ -205,7 +217,7 @@ impl Moves {
         for (core, group) in Core::ALL.into_iter().zip(&mut groups) {
             *group = core.group().index();
         }
-        Moves { motion, groups }
+        Moves { motion, groups, linear }
     }
 
     /// The pair term for the reading `from` followed by `to`, and e to it times the sharpness: 0 (and 1) for the same
@@ -226,6 +238,17 @@ impl Moves {
 /// The smallest sum of masses, each over the highest, that's worked out by adding them up: a smaller sum has lost bits
 /// (the smallest numbers a float holds have fewer of them), and is added up in logarithms instead.
 const SMALLEST_SUM: f64 = 1e-280;
+
+/// The ln of the sum of the masses of some ways: worked out from that sum taken over the highest mass at the place
+/// (`sum`, over e^`top`) where it can be ([`Moves::linear`], and a sum that keeps its bits and doesn't overflow);
+/// otherwise each way's ln mass (`lns`, made only then) is added up in logarithms. Minus infinity for no way.
+fn ln_of_sum<I: Iterator<Item = f64>>(sum: f64, top: f64, linear: bool, lns: impl FnOnce() -> I) -> f64 {
+    if linear && (SMALLEST_SUM..=f64::MAX).contains(&sum) {
+        top + sum.ln()
+    } else {
+        lns().fold(f64::NEG_INFINITY, add_ln)
+    }
+}
 
 /// e to each of some ln masses less the highest of them (`top`): what they add up as, without a logarithm each.
 fn scale(values: impl Iterator<Item = f64>, top: f64, out: &mut Vec<f64>) {
@@ -461,45 +484,35 @@ impl Default for Ready {
 /// would be the same way to read the music as holding it on from the plain place.
 fn ready_from(slot: &Slot, entries: &[Entry], first: usize, id: Id, node: &Node, moves: &Moves) -> Ready {
     let (kind, pushed) = (node.kind, node.pushed());
+    // Whether a way that reaches the place as `entry` starts the reading there: from another reading, or at a rest's
+    // or a pin's edge, where every way starts a chord, any reading after any span; never inside a rest or a pin.
+    let starts = |entry: &Entry| kind == Kind::Edge || (kind != Kind::Inside && entry.id != id);
     let mut out = Ready::default();
-    // The forward masses of the ways that change chord here, each over the highest at the place.
-    let (mut sum, mut any) = (0.0, false);
+    // The forward masses of the ways that start it here, each over the highest at the place.
+    let mut sum = 0.0;
     for ((e, entry), &scaled) in (first..).zip(entries).zip(&slot.scaled) {
         // The first of equals: the readings come in an order that moves with the music.
-        if entry.id == id && kind != Kind::Edge {
-            // The same reading held on, after a span of the full length (the readings at a place are all different).
-            if !pushed {
-                if entry.best_full > out.held_best {
-                    out.held_best = entry.best_full;
-                    out.held_from = Some((e, true));
-                }
-                out.held_alpha = entry.alpha_full;
+        if starts(entry) {
+            let (pair, factor) = moves.between(entry.id, id);
+            let best = entry.best + pair;
+            if best > out.best {
+                out.best = best;
+                out.from = Some((e, false));
             }
-            continue;
+            sum += scaled * factor;
+        } else if entry.id == id && kind != Kind::Edge && !pushed {
+            // The same reading held on, after a span of the full length (the readings at a place are all different).
+            if entry.best_full > out.held_best {
+                out.held_best = entry.best_full;
+                out.held_from = Some((e, true));
+            }
+            out.held_alpha = entry.alpha_full;
         }
-        if kind == Kind::Inside {
-            continue;
-        }
-        // Another reading, or at a rest's or a pin's edge, where every way starts a chord, any reading after any span.
-        let (pair, factor) = moves.between(entry.id, id);
-        let best = entry.best + pair;
-        if best > out.best {
-            out.best = best;
-            out.from = Some((e, false));
-        }
-        sum += scaled * factor;
-        any = true;
     }
-    out.alpha = match (any, sum >= SMALLEST_SUM) {
-        (false, _) => f64::NEG_INFINITY,
-        (true, true) => slot.top + sum.ln(),
-        (true, false) => entries
-            .iter()
-            .filter(|entry| entry.id != id || kind == Kind::Edge)
-            .fold(f64::NEG_INFINITY, |alpha, entry| {
-                add_ln(alpha, entry.alpha + SHARPNESS * moves.between(entry.id, id).0)
-            }),
-    };
+    out.alpha = ln_of_sum(sum, slot.top, moves.linear, || {
+        let ways = entries.iter().filter(|entry| starts(entry));
+        ways.map(|entry| entry.alpha + SHARPNESS * moves.between(entry.id, id).0)
+    });
     out
 }
 
@@ -920,9 +933,10 @@ impl Decoder {
                 self.labels.push((Id::of(Some(label)), score, held));
             }
             Some((Given::Ends, ids)) => {
+                let scoring = self.facts.scoring(&self.scorer);
                 for &id in self.region_ids.get(ids).unwrap_or_default() {
                     if let Some(label) = id.label() {
-                        let (score, held) = self.facts.score_one(label, &self.scorer);
+                        let (score, held) = scoring.score(label);
                         self.labels.push((id, score, held));
                     }
                 }
@@ -959,6 +973,9 @@ impl Decoder {
                     for &(id, _, _) in &self.labels {
                         self.scored_at[id] = (stamp, kept_at);
                     }
+                    // Over silence nothing is a candidate, so what's held on is scored here (what depends only on the
+                    // span worked out once).
+                    let mut scoring: Option<Scoring> = None;
                     for entry in self.entries.get(v.entries.clone()).unwrap_or_default() {
                         let id = entry.id;
                         let at = Some(self.scored_at[id]).filter(|&(s, _)| s == stamp).map(|(_, i)| i);
@@ -969,7 +986,10 @@ impl Decoder {
                         let scored = match (scored, id.label()) {
                             (Some(scored), _) => Some(scored),
                             (None, None) => Some((none, none)),
-                            (None, Some(label)) if silent => Some(self.facts.score_one(label, &self.scorer)),
+                            (None, Some(label)) if silent => {
+                                let scoring = scoring.get_or_insert_with(|| self.facts.scoring(&self.scorer));
+                                Some(scoring.score(label))
+                            }
                             (None, Some(_)) => None,
                         };
                         if let Some((score, held)) = scored {
@@ -1087,29 +1107,22 @@ impl Decoder {
             self.after_ln.extend(self.touched.iter().map(|&next| self.after[next].ln()));
             let top = self.after_ln.iter().fold(f64::NEG_INFINITY, |top, &after| top.max(after));
             scale(self.after_ln.iter().copied(), top, &mut self.scaled);
+            // Whether a way through the reading `id` here moves on to the reading `next`: to another reading, or at a
+            // rest's or a pin's edge to any; never inside a rest or a pin.
+            let moves_on = |id: Id, next: Id| node.kind == Kind::Edge || (node.kind != Kind::Inside && next != id);
             for entry in self.entries.get_mut(node.entries.clone()).unwrap_or_default() {
                 let held = self.seen[entry.id] && !node.pushed();
                 let own = if held { self.after_held[entry.id].ln() } else { f64::NEG_INFINITY };
-                let (mut sum, mut any) = (0.0, false);
-                if node.kind != Kind::Inside {
-                    for (&next, &scaled) in self.touched.iter().zip(&self.scaled) {
-                        if next != entry.id || node.kind == Kind::Edge {
-                            sum += scaled * self.moves.between(entry.id, next).1;
-                            any = true;
-                        }
+                let mut sum = 0.0;
+                for (&next, &scaled) in self.touched.iter().zip(&self.scaled) {
+                    if moves_on(entry.id, next) {
+                        sum += scaled * self.moves.between(entry.id, next).1;
                     }
                 }
-                let moved = match (any, sum >= SMALLEST_SUM) {
-                    (false, _) => f64::NEG_INFINITY,
-                    (true, true) => top + sum.ln(),
-                    (true, false) => {
-                        let nexts = self.touched.iter().zip(&self.after_ln);
-                        let moves = nexts.filter(|&(&next, _)| next != entry.id || node.kind == Kind::Edge);
-                        moves.fold(f64::NEG_INFINITY, |moved, (&next, &after)| {
-                            add_ln(moved, SHARPNESS * self.moves.between(entry.id, next).0 + after)
-                        })
-                    }
-                };
+                let moved = ln_of_sum(sum, top, self.moves.linear, || {
+                    let nexts = self.touched.iter().zip(&self.after_ln).filter(|&(&next, _)| moves_on(entry.id, next));
+                    nexts.map(|(&next, &after)| SHARPNESS * self.moves.between(entry.id, next).0 + after)
+                });
                 (entry.beta, entry.beta_full) = match node.kind {
                     Kind::Edge => (moved, moved),
                     Kind::Inside => (f64::NEG_INFINITY, own),
@@ -1260,7 +1273,86 @@ impl Decoder {
 
 #[cfg(test)]
 mod tests {
-    use super::{LnSum, add_ln};
+    use super::{Entry, Id, Kind, LnSum, Moves, Node, Slot, add_ln, ln_of_sum, ready_from, scale};
+    use crate::chordread::{COUNTED, Core, HAND, Label};
+    use crate::pitch::PitchClass;
+
+    #[test]
+    fn a_mass_too_small_for_a_float_is_never_one_that_matters() {
+        // Trusting the pair term 160 times over, the best and the worst move into a reading are hundreds apart in their
+        // ln masses. Where the reading the worst move comes from (A) is far likelier than the one the best comes from
+        // (B), B's way can still matter most, though its mass over A's is too small for a float. So with such moves the
+        // masses are added up in logarithms, and B's way counts.
+        let moves = Moves::new(160.0, &COUNTED);
+        assert!(!moves.linear);
+        let ids: Vec<Id> = PitchClass::ALL
+            .into_iter()
+            .flat_map(|root| Core::ALL.map(|core| Id::of(Some(Label::new(root, core)))))
+            .collect();
+        // The reading whose moves in are furthest apart, and the worst and the best of them.
+        let mut found: Option<(f64, Id, Id, Id)> = None;
+        for &to in &ids {
+            let pair = |from: Id| moves.between(from, to).0;
+            let others = || ids.iter().copied().filter(|&from| from != to);
+            let worst = others().min_by(|&a, &b| pair(a).total_cmp(&pair(b)));
+            let best = others().max_by(|&a, &b| pair(a).total_cmp(&pair(b)));
+            if let (Some(worst), Some(best)) = (worst, best) {
+                let gap = pair(best) - pair(worst);
+                if found.is_none_or(|(most, ..)| gap > most) {
+                    found = Some((gap, to, worst, best));
+                }
+            }
+        }
+        let (gap, to, a, b) = found.unwrap();
+        // B's mass over A's is under the smallest float, yet times its move it's far above A's way.
+        assert!(gap > 845.0, "{gap}");
+        let behind = 800.0;
+        let (pair_a, pair_b) = (moves.between(a, to).0, moves.between(b, to).0);
+        assert!(pair_a > -640.0, "A's way alone keeps its bits: {pair_a}");
+        let mut entries = [Entry::new(a), Entry::new(b)];
+        for (entry, alpha) in entries.iter_mut().zip([0.0, -behind]) {
+            (entry.alpha, entry.best) = (alpha, alpha);
+        }
+        let mut slot = Slot { top: 0.0, ..Slot::default() };
+        scale(entries.iter().map(|entry| entry.alpha), slot.top, &mut slot.scaled);
+        assert_eq!(slot.scaled, [1.0, 0.0]);
+        let node = Node {
+            unit: 0,
+            push: None,
+            kind: Kind::Free,
+            reach: 0,
+            exact: false,
+            last: 0,
+            region: None,
+            into: 0..0,
+            entries: 0..2,
+            out: 0..0,
+        };
+        let want = add_ln(pair_a, pair_b - behind);
+        let got = ready_from(&slot, &entries, 0, to, &node, &moves).alpha;
+        assert!((got - want).abs() <= 1e-12 * want.abs(), "{got} {want}");
+        // Added up as masses, B's way would be lost.
+        let lost = ready_from(&slot, &entries, 0, to, &node, &Moves { linear: true, ..moves }).alpha;
+        assert!(lost < want - 40.0, "{lost} {want}");
+    }
+
+    #[test]
+    fn masses_add_up_as_masses_only_while_that_works_out_right() {
+        // The hand trust keeps every move's factor near 1; a trust in the hundreds, or one that isn't a number, doesn't.
+        assert!(Moves::new(HAND.pair, &COUNTED).linear);
+        assert!(!Moves::new(400.0, &COUNTED).linear);
+        assert!(!Moves::new(f64::NAN, &COUNTED).linear);
+        // A sum that keeps its bits is used as it is (the logarithms aren't even made).
+        assert_eq!(ln_of_sum(2.0, 1.0, true, std::iter::empty), 1.0 + 2f64.ln());
+        // One too small, past the largest float, not a number, or with the factors out of range: in logarithms.
+        let lns = || [-3.0, 1.0, 0.5].into_iter();
+        let want = lns().fold(f64::NEG_INFINITY, add_ln);
+        for (sum, linear) in [(1e-300, true), (f64::INFINITY, true), (f64::NAN, true), (2.0, false)] {
+            assert_eq!(ln_of_sum(sum, 1.0, linear, lns), want, "{sum} {linear}");
+        }
+        // No way at all: minus infinity.
+        assert_eq!(ln_of_sum(0.0, 1.0, true, std::iter::empty), f64::NEG_INFINITY);
+    }
 
     #[test]
     fn masses_add_up_without_a_logarithm_each_as_they_do_with_one() {

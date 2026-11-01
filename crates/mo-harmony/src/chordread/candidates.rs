@@ -98,33 +98,42 @@ pub fn allowed(heard: PcSet) -> CoreSet {
 /// lowest note sounding (`lowest`), then to the first core in order ([`Core::ALL`]): the order [`candidates()`] lists
 /// labels in, so the choice moves with the music. `None` when no root sounds or `taken` takes every label.
 pub fn escape(heard: PcSet, ticks: &PerPitch<u64>, lowest: PitchClass, taken: impl Fn(Label) -> bool) -> Option<Label> {
+    let turned_away = |root| {
+        let away = Core::ALL.into_iter().filter(|&core| !taken(Label::new(root, core)));
+        away.fold(CoreSet::EMPTY, CoreSet::with)
+    };
+    most_sounding(heard, ticks, lowest, turned_away)
+}
+
+/// Of the labels on the roots that sound, with the cores `cores` gives each, the one whose own notes have the most
+/// ticks: the first of equals, by root from the lowest note up and then by core ([`Core::ALL`]).
+fn most_sounding(
+    heard: PcSet,
+    ticks: &PerPitch<u64>,
+    lowest: PitchClass,
+    cores: impl Fn(PitchClass) -> CoreSet,
+) -> Option<Label> {
     // Where the ticks all add up to less than the top, any set's add up exactly in three lookups.
     if ticks.total() < u64::MAX {
         let sums = SetSums::new(ticks);
-        return first_most(heard, lowest, taken, |label| sums.sum(label.tones()));
+        first_most(heard, lowest, cores, |label| sums.sum(label.tones()))
+    } else {
+        first_most(heard, lowest, cores, |label| label.tones().iter().map(|pc| u128::from(ticks[pc])).sum::<u128>())
     }
-    first_most(heard, lowest, taken, |label| label.tones().iter().map(|pc| u128::from(ticks[pc])).sum::<u128>())
 }
 
-/// The label that isn't taken whose own notes have the most ticks (`own`), on a root that's heard: the first of equals,
-/// from the lowest note up.
+/// Of the labels on the roots that sound, with the cores `cores` gives each, the one with the most of something
+/// (`own`): the first of equals, by root from the lowest note up and then by core.
 fn first_most<T: PartialOrd>(
     heard: PcSet,
     lowest: PitchClass,
-    taken: impl Fn(Label) -> bool,
+    cores: impl Fn(PitchClass) -> CoreSet,
     own: impl Fn(Label) -> T,
 ) -> Option<Label> {
     let mut best: Option<(T, Label)> = None;
-    for up in 0..12 {
-        let root = lowest.up(up);
-        if !heard.contains(root) {
-            continue;
-        }
-        for core in Core::ALL {
+    for root in heard.above(lowest).iter().map(|up| lowest.up(i32::from(up.number()))) {
+        for core in cores(root).iter() {
             let label = Label::new(root, core);
-            if taken(label) {
-                continue;
-            }
             let own = own(label);
             if best.as_ref().is_none_or(|(most, _)| own > *most) {
                 best = Some((own, label));
@@ -144,23 +153,8 @@ pub fn candidates(heard: PcSet, ticks: &PerPitch<u64>, lowest: PitchClass, out: 
     for root in PitchClass::ALL {
         allowed_on[root] = allowed(heard.above(root));
     }
-    let escape = if ticks.total() < u64::MAX {
-        // The escape as [`escape`] finds it, quicker: from the cores each heard root doesn't let in.
-        let sums = SetSums::new(ticks);
-        let mut best: Option<(u64, Label)> = None;
-        for root in heard.above(lowest).iter().map(|up| lowest.up(i32::from(up.number()))) {
-            for core in allowed_on[root].others().iter() {
-                let label = Label::new(root, core);
-                let own = sums.sum(label.tones());
-                if best.is_none_or(|(most, _)| own > most) {
-                    best = Some((own, label));
-                }
-            }
-        }
-        best.map(|(_, label)| label)
-    } else {
-        escape(heard, ticks, lowest, |label| allowed_on[label.root].contains(label.core))
-    };
+    // The escape, as [`escape`] finds it: from the cores each root that sounds doesn't let in.
+    let escape = most_sounding(heard, ticks, lowest, |root| allowed_on[root].others());
     for up in 0..12 {
         let root = lowest.up(up);
         let (rel, allowed) = (heard.above(root), allowed_on[root]);
