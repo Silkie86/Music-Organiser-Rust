@@ -71,21 +71,34 @@ fn thresholds_fall_with_more_music_and_never_jump() {
 }
 
 #[test]
-fn the_shipped_thresholds_are_chances_that_never_rise_with_more_music() {
-    // Fitted by the bench, they may fall steeply (a key or its relative: never at 2 bars, whenever the relative comes
-    // second at 8), but never rise.
+fn the_shipped_thresholds_are_even_chances_or_more_and_never_rise() {
+    // Fitted by the bench, they may fall steeply between two knots (a key or its relative: never at 2 bars, from an
+    // even chance at 8), but never rise; and nothing is given below an even chance. Between knots the lines are
+    // straight, so the knots say it all.
     let t = SHIPPED.thresholds;
     for knots in [t.one, t.pair, t.home] {
-        assert!(knots.iter().all(|x| (0.0..=1.0).contains(x)), "{knots:?}");
+        assert!(knots.iter().all(|x| (0.5..=1.0).contains(x)), "{knots:?}");
         assert!(knots.windows(2).all(|w| w[1] <= w[0]), "{knots:?}");
     }
-    let mut last = t.at(1, Span::Window);
-    for bars in 2..=64 {
-        let now = t.at(bars, Span::Window);
-        assert!(now.0 <= last.0 && now.1 <= last.1 && now.2 <= last.2, "{bars} bars: {last:?} then {now:?}");
-        last = now;
-    }
-    assert_eq!(t.at(1, Span::Song), t.at(32, Span::Window));
+}
+
+#[test]
+fn a_threshold_of_one_is_never_reached() {
+    // Eb major and C minor share every chance, so the pair's sum is exactly 1, and a threshold of 1 still isn't met.
+    let shared = chances_with(&[(C_MINOR, 0.5), (EB_MAJOR, 0.5)]);
+    let never = Thresholds { one: [1.0; THRESHOLD_KNOTS], pair: [1.0; THRESHOLD_KNOTS], home: [1.0; THRESHOLD_KNOTS] };
+    let model = Model { thresholds: &never, ..MODEL };
+    assert_eq!(grade(&shared, grading(4), &model), (KeyAnswer::Unclear { why: Why::Spread, leaning: None }, 0.0));
+    let almost = Thresholds { pair: [0.99; THRESHOLD_KNOTS], ..never };
+    let model = Model { thresholds: &almost, ..MODEL };
+    assert_eq!(grade(&shared, grading(4), &model), (KeyAnswer::OrRelative(EB_MAJOR), 1.0));
+    // One key with every chance: not given alone, nor as a home note.
+    let sure = chances_with(&[(C_MAJOR, 1.0)]);
+    let model = Model { thresholds: &never, ..MODEL };
+    assert_eq!(
+        grade(&sure, grading(4), &model),
+        (KeyAnswer::Unclear { why: Why::Spread, leaning: Some(C_MAJOR) }, 1.0)
+    );
 }
 
 // Ranking and ties.

@@ -220,6 +220,10 @@ pub const SHIPPED: Model<'static> = Model {
 /// C major at one chance in 24.
 pub const FITTED: bool = weights::FITTED;
 
+/// The sources the built-in weights learned from, by the names `theorybench` gives them: the finder's numbers on those
+/// songs flatter it.
+pub const LEARNED_FROM: &[&str] = weights::LEARNED_FROM;
+
 /// A key's score: how well what was heard fits it, before the scores become chances. Summed in the order
 /// [`Heard::features`] gives, so it's the same to the last bit for notes moved to another key.
 pub fn score(heard: &Heard, key: Key, span: Span, weights: &[f64]) -> f64 {

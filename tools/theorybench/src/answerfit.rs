@@ -2,7 +2,8 @@
 //! share of notes in one scale a key needs.
 //!
 //! - **Thresholds.** At each knot (1, 2, 4, 8, 16 and 32 bars; whole songs take the last), a kind's threshold is the
-//!   smallest chance on a 0.01 grid at which the answers of that kind are wrong no more often than its target: one key
+//!   smallest chance on a 0.01 grid, from an even chance up ([`LEAST`]), at which the answers of that kind are wrong
+//!   no more often than its target: one key
 //!   15% at 1 and 2 bars, 10% at 4 and 8, 8% at 16, 5% at 32 and for songs; a pair, the key labelled outside it, 10%;
 //!   a home note, the wrong tonic, 10%. It's judged on the answers of that kind alone, given by at least
 //!   [`MIN_SONGS`] songs, so a few answers that happen to be right can't set it. One key is fitted first, then the
@@ -34,8 +35,13 @@ pub const PAIR_TARGET: f64 = 0.10;
 pub const HOME_TARGET: f64 = 0.10;
 /// The percentile of the cases' shares of notes in one scale that's printed beside the share a key needs.
 const NOT_TONAL_PERCENTILE: f64 = 0.005;
-/// A threshold no answer can reach: that kind isn't given at that knot.
+/// A threshold no answer can reach (`keyfind::grade` never gives a kind whose threshold is 1): that kind isn't given at
+/// that knot.
 const NEVER: f64 = 1.0;
+/// No kind of answer is given below an even chance: what it names must be likelier than not. Without this floor the
+/// pair's threshold fell to the grid's 0.01 from 8 bars, where nearly every pair the bench sees is right (none of its
+/// pairs is below 0.5); music unlike the songs fitted on could then be shown a pair at, say, 0.3.
+pub const LEAST: f64 = 0.5;
 /// The fewest songs whose answers a threshold may be judged on.
 pub const MIN_SONGS: usize = 30;
 
@@ -103,7 +109,7 @@ impl Seen {
     /// The kind of answer given with these thresholds for one key, a pair and a home note, tried in that order as
     /// `keyfind::grade` tries them; `None` for no clear key.
     fn given(&self, one: f64, pair: f64, home: f64) -> Option<Kind> {
-        let reaches = |kind: Option<(f64, bool)>, t: f64| kind.is_some_and(|(p, _)| p >= t);
+        let reaches = |kind: Option<(f64, bool)>, t: f64| t < NEVER && kind.is_some_and(|(p, _)| p >= t);
         if reaches(self.one, one) {
             Some(Kind::One)
         } else if reaches(self.pair, pair) {
@@ -151,9 +157,9 @@ impl Tally {
     }
 }
 
-/// The smallest threshold on the 0.01 grid at which the answers (each song, chance and whether it's wrong) given at
-/// or above it, by at least [`MIN_SONGS`] songs, are wrong no more often than `target`; [`NEVER`] when none is.
-/// `None` when there's too little to judge by: fewer than [`MIN_SONGS`] songs even with every answer given.
+/// The smallest threshold on the 0.01 grid, [`LEAST`] or more, at which the answers (each song, chance and whether it's
+/// wrong) given at or above it, by at least [`MIN_SONGS`] songs, are wrong no more often than `target`; [`NEVER`] when
+/// none is. `None` when there's too little to judge by: fewer than [`MIN_SONGS`] songs even with every answer given.
 fn smallest(answers: &[(usize, f64, bool)], target: f64) -> Option<f64> {
     let mut sorted: Vec<&(usize, f64, bool)> = answers.iter().collect();
     sorted.sort_by(|a, b| b.1.total_cmp(&a.1));
@@ -162,6 +168,9 @@ fn smallest(answers: &[(usize, f64, bool)], target: f64) -> Option<f64> {
     let mut best = NEVER;
     for step in (1..100).rev() {
         let threshold = f64::from(step) / 100.0;
+        if threshold < LEAST {
+            break;
+        }
         while let Some((song, _, wrong)) = next.next_if(|a| a.1 >= threshold) {
             tally.add(*song, *wrong);
         }
@@ -224,12 +233,12 @@ pub fn fit(cases: &[Graded], not_tonal_below: f64) -> Fitted {
     let one = never_rising(one_raw);
     // The pair is fitted on the cases not given one key, the home note on those given neither.
     let pair_raw: [Option<f64>; THRESHOLD_KNOTS] = std::array::from_fn(|j| {
-        let left = |s: &Seen| s.given(knot(&one, j), NEVER + 1.0, NEVER + 1.0).is_none();
+        let left = |s: &Seen| s.given(knot(&one, j), NEVER, NEVER).is_none();
         smallest(&answers(j, Kind::Pair, &left), PAIR_TARGET)
     });
     let pair = never_rising(pair_raw);
     let home_raw: [Option<f64>; THRESHOLD_KNOTS] = std::array::from_fn(|j| {
-        let left = |s: &Seen| s.given(knot(&one, j), knot(&pair, j), NEVER + 1.0).is_none();
+        let left = |s: &Seen| s.given(knot(&one, j), knot(&pair, j), NEVER).is_none();
         smallest(&answers(j, Kind::Home, &left), HOME_TARGET)
     });
     let home = never_rising(home_raw);
@@ -325,12 +334,29 @@ mod tests {
         let mut cases: Vec<Graded> = (0..MIN_SONGS - 1).map(|s| case(s, 5, C_MAJOR, 0.7)).collect();
         cases.extend((100..400).map(|s| case(s, 3, C_MAJOR, 0.9)));
         let one = fit(&cases, 0.75).thresholds.one;
-        assert_eq!((one[3], one[5]), (0.01, 0.01));
+        assert_eq!((one[3], one[5]), (LEAST, LEAST));
         // With enough songs and the target out of reach, that kind is never given there, nor at shorter lengths.
         let wrong = Key::major(PitchClass::D);
         cases.extend((1000..1100).map(|s| case(s, 5, wrong, 0.95)));
         let one = fit(&cases, 0.75).thresholds.one;
         assert_eq!((one[3], one[5]), (NEVER, NEVER));
+    }
+
+    #[test]
+    fn nothing_is_given_below_an_even_chance() {
+        // Every answer right, at 0.6 or at 0.3: any threshold would do, but none is below 0.5.
+        let mut cases: Vec<Graded> = (0..400).map(|s| case(s, 3, C_MAJOR, 0.6)).collect();
+        cases.extend((400..800).map(|s| case(s, 3, C_MAJOR, 0.3)));
+        let fitted = fit(&cases, 0.75);
+        assert_eq!(fitted.thresholds.one, [LEAST; THRESHOLD_KNOTS]);
+        assert!(
+            fitted.knot_lines.iter().any(|l| l.contains("one key from 0.50: 50.0% given")),
+            "{:?}",
+            fitted.knot_lines
+        );
+        // With nothing as likely as that, the kind is never given.
+        let unsure: Vec<Graded> = (0..400).map(|s| case(s, 3, C_MAJOR, 0.3)).collect();
+        assert_eq!(fit(&unsure, 0.75).thresholds.one, [NEVER; THRESHOLD_KNOTS]);
     }
 
     #[test]

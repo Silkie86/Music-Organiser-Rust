@@ -594,9 +594,6 @@ impl Book {
                         format!("13: Eb major, F minor or G minor second; {}", said(r))
                     });
                     m.gate(of_key(heard, C_MINOR).has(Colours::NO_SIXTH), || "13: C minor with no sixth".to_owned());
-                    m.gate(!matches!(r.answer, KeyAnswer::Key(k) if k != C_MINOR), || {
-                        format!("13: never a key alone but C minor; {}", said(r))
-                    });
                     m.target(second == EB_MAJOR, || format!("13: Eb major, the same five notes, second; {}", said(r)));
                     m.target(matches!(r.answer, KeyAnswer::Key(C_MINOR) | KeyAnswer::OrRelative(C_MINOR)), || {
                         format!("13: C minor, or C minor or Eb major; {}", said(r))

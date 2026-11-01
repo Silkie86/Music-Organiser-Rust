@@ -26,6 +26,9 @@ use super::{Calibration, FEATURES, Thresholds};
 /// Whether these weights were fitted (`false` for the placeholder).
 pub(super) const FITTED: bool = true;
 
+/// The sources learned from, by the names `theorybench` gives them.
+pub(super) const LEARNED_FROM: &[&str] = &["pop909cl", "billboard"];
+
 /// One weight per feature (see `Heard::features`): for each stream, twelve for the notes above a major
 /// key's tonic, then twelve for a minor key's; last, one for minor keys as a whole.
 #[rustfmt::skip]
