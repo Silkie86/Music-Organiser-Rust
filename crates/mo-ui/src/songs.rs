@@ -67,8 +67,6 @@ thread_local! {
     static READER: RefCell<Option<Newest<(u64, i64)>>> = const { RefCell::new(None) };
     /// The activity cards, for Open, Show in folder and Copy path.
     static FEED: RefCell<Option<Feed>> = const { RefCell::new(None) };
-    /// The clipboard, kept open: on Linux what's copied only stays while it is.
-    static CLIPBOARD: RefCell<Option<arboard::Clipboard>> = const { RefCell::new(None) };
 }
 
 /// The list's lines, made from the page's view one at a time as the list draws them, so a new search doesn't build
@@ -664,38 +662,14 @@ fn open_save(page: &Page, save: &mo_library::Save) {
 
 /// Shows the file picked in its folder, or the folder when the file has gone.
 fn reveal(save: &mo_library::Save) {
-    let Some(feed) = FEED.with(|f| f.borrow().clone()) else { return };
-    let (path, folder) = (save.path.clone(), save.folder.clone());
-    let started = background::spawn("Show in folder", move || {
-        let launch = shell::reveal(&path, &folder, shell::exists(&path), shell::Os::THIS);
-        if let Err(e) = shell::run(&launch) {
-            log::warning("Show in folder", &format!("{path}: {e}"));
-            feed.start("Couldn't show the file", "").failed(&e.to_string());
-        }
-    });
-    if let Err(e) = started {
-        log::error("Show in folder", &format!("Couldn't start: {e}"));
+    if let Some(feed) = FEED.with(|f| f.borrow().clone()) {
+        crate::files::reveal(&feed, &save.path, &save.folder);
     }
 }
 
 /// Puts the file's path on the clipboard.
 fn copy_path(path: &str) {
-    let copied = CLIPBOARD.with(|c| {
-        let mut c = c.borrow_mut();
-        if c.is_none() {
-            *c = Some(arboard::Clipboard::new()?);
-        }
-        match c.as_mut() {
-            Some(clip) => clip.set_text(path.to_owned()),
-            None => Ok(()),
-        }
-    });
-    let Some(feed) = FEED.with(|f| f.borrow().clone()) else { return };
-    match copied {
-        Ok(()) => feed.start("Copied the path", "").done(path),
-        Err(e) => {
-            log::warning("Copy path", &e.to_string());
-            feed.start("Couldn't copy the path", "").failed(&e.to_string());
-        }
+    if let Some(feed) = FEED.with(|f| f.borrow().clone()) {
+        crate::files::copy_path(&feed, path);
     }
 }
