@@ -3,7 +3,7 @@
 // and filters over them and the picked sound's panel beside them. Agreed mock-up: the design canvas, 2026-11-01.
 // Read-only for now (favourites, tags and types are shown, not changed), like the C# app's sounds.db until it's trusted.
 import { ListView } from "std-widgets.slint";
-import { Theme, Type, Space, Well, SearchBox, ToggleChip, MenuChip, ListLine, Caps, Heart, StudioButton, Segmented, MoreButton, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader } from "../studio.slint";
+import { Theme, Type, Space, Well, SearchBox, ToggleChip, MenuChip, ListLine, Caps, Heart, StudioButton, CloseButton, Segmented, MoreButton, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader } from "../studio.slint";
 
 // One type chip: the type, how many sounds have it, its colour (a place in Theme.sound-types) and whether it's on.
 export struct TypeChipInfo {
@@ -44,6 +44,18 @@ export struct FolderLine {
     folder: string,
     name: string,
     used: string,
+}
+
+// One pad of the kit builder: its name ("Kick"), and the sound on it with a line about it.
+export struct PadLine {
+    name: string,
+    sound: string,
+    detail: string,
+    colour: int,
+    filled: bool,
+    locked: bool,
+    picked: bool,
+    playing: bool,
 }
 
 // One row of tiles, as many as fit the list's width.
@@ -112,8 +124,8 @@ export global SoundsData {
     in property <string> empty-title;
     in property <string> empty-text;
 
-    // 0 Tiles, 1 List, 2 Galaxy, 3 History, 4 Rediscover.
-    in property <[string]> views: ["Tiles", "List", "Galaxy", "History", "Rediscover"];
+    // 0 Tiles, 1 List, 2 Galaxy, 3 History, 4 Rediscover, 5 Kits.
+    in property <[string]> views: ["Tiles", "List", "Galaxy", "History", "Rediscover", "Kits"];
     in property <int> view;
     callback pick-view(int);
 
@@ -139,6 +151,34 @@ export global SoundsData {
     // Sample folders by how little of them your projects use; a click lists that folder's sounds.
     in property <[FolderLine]> folders;
     callback pick-folder(string);
+
+    // The kit builder: its pads, and how it rolls and exports.
+    in property <[PadLine]> pads;
+    in property <string> kit-status;
+    in property <bool> kit-busy;
+    // "unused", "pack", "elektron", "mono" or "normalise", and whether each is on.
+    callback kit-toggle(string);
+    in property <bool> kit-unused;
+    in property <bool> kit-pack;
+    in property <bool> kit-elektron;
+    in property <bool> kit-mono;
+    in property <bool> kit-normalise;
+    // "key" or "randomness", and the value ("" for any key).
+    callback kit-choose(string, string);
+    in property <string> kit-key;
+    in property <[string]> kit-keys;
+    in property <string> kit-randomness;
+    in property <[string]> kit-randomnesses;
+    in property <[string]> kit-types;
+    callback kit-add(string);
+    callback kit-roll();
+    callback kit-export();
+    // A pad, by its place: pick its sound, play it, lock it, roll it again or take it out.
+    callback pad-pick(int);
+    callback pad-play(int);
+    callback pad-lock(int);
+    callback pad-roll(int);
+    callback pad-remove(int);
 
     in-out property <string> search;
     callback search-edited(string);
@@ -434,6 +474,82 @@ component ListHeading inherits HorizontalLayout {
         min-width: 0px;
         text: root.rediscover ? "WHY" : "FOLDER";
         vertical-alignment: center;
+    }
+}
+
+// One pad of the kit builder.
+component PadLineView inherits ListLine {
+    in property <PadLine> pad;
+    in property <int> place;
+    callback chosen();
+    height: 52px;
+    selected: pad.picked;
+    clicked => {
+        root.chosen();
+        SoundsData.pad-pick(root.place);
+    }
+    double-clicked => { SoundsData.pad-play(root.place); }
+    HorizontalLayout {
+        width: 100%;
+        height: 100%;
+        padding-left: Space.md;
+        padding-right: Space.md;
+        spacing: Space.md;
+        Text {
+            width: 120px;
+            text: root.pad.name;
+            color: Theme.text;
+            font-size: Type.body;
+            font-weight: 600;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        VerticalLayout {
+            alignment: center;
+            Dot { tint: root.pad.filled ? Theme.sound-type(root.pad.colour) : Theme.edge; }
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            preferred-width: 0px;
+            min-width: 0px;
+            alignment: center;
+            Text {
+                text: root.pad.sound;
+                color: root.pad.playing ? Theme.accent : root.pad.filled ? Theme.text : Theme.muted;
+                font-size: Type.body;
+                overflow: elide;
+            }
+            Text {
+                text: root.pad.detail;
+                color: Theme.muted;
+                font-size: Type.meta;
+                overflow: elide;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            ToggleChip {
+                text: "Lock";
+                on: root.pad.locked;
+                clicked => { SoundsData.pad-lock(root.place); }
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 0;
+            StudioButton {
+                horizontal-stretch: 0;
+                text: "Re-roll";
+                tip: "A new sound for just this pad";
+                clicked => { SoundsData.pad-roll(root.place); }
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            CloseButton {
+                clicked => { SoundsData.pad-remove(root.place); }
+            }
+        }
     }
 }
 
@@ -771,6 +887,93 @@ export component SoundsPage inherits Rectangle {
                 }
             }
         }
+        // The kit builder's choices, in place of the filters.
+        if SoundsData.view == 5: HorizontalLayout {
+            spacing: Space.sm;
+            alignment: start;
+            vertical-stretch: 0;
+            VerticalLayout {
+                alignment: center;
+                StudioButton {
+                    horizontal-stretch: 0;
+                    text: SoundsData.kit-busy ? "Rolling…" : "Roll a kit";
+                    main: true;
+                    tip: "Fill every pad that isn't locked";
+                    clicked => { SoundsData.kit-roll(); }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                StudioButton {
+                    horizontal-stretch: 0;
+                    text: "Export kit";
+                    tip: "Copy the pads into a folder of their own, ready for a sampler";
+                    clicked => { SoundsData.kit-export(); }
+                }
+            }
+            ToggleChip {
+                text: "Favour sounds I haven't used";
+                on: SoundsData.kit-unused;
+                clicked => { SoundsData.kit-toggle("unused"); }
+            }
+            ToggleChip {
+                text: "One pack";
+                on: SoundsData.kit-pack;
+                clicked => { SoundsData.kit-toggle("pack"); }
+            }
+            MenuChip {
+                name: "Key for bass";
+                value: SoundsData.kit-key;
+                choices: SoundsData.kit-keys;
+                picked(v) => { SoundsData.kit-choose("key", v); }
+            }
+            MenuChip {
+                name: "Randomness";
+                value: SoundsData.kit-randomness;
+                choices: SoundsData.kit-randomnesses;
+                has-any: false;
+                picked(v) => { SoundsData.kit-choose("randomness", v); }
+            }
+            MenuChip {
+                name: "Add a pad";
+                value: "";
+                choices: SoundsData.kit-types;
+                has-any: false;
+                picked(v) => { SoundsData.kit-add(v); }
+            }
+        }
+        if SoundsData.view == 5: HorizontalLayout {
+            spacing: Space.sm;
+            alignment: start;
+            vertical-stretch: 0;
+            Text {
+                text: "Export as";
+                color: Theme.muted;
+                font-size: Type.meta;
+                vertical-alignment: center;
+            }
+            ToggleChip {
+                text: "Elektron ready (48 kHz, 16-bit WAV)";
+                on: SoundsData.kit-elektron;
+                clicked => { SoundsData.kit-toggle("elektron"); }
+            }
+            ToggleChip {
+                text: "Mono";
+                on: SoundsData.kit-mono;
+                clicked => { SoundsData.kit-toggle("mono"); }
+            }
+            ToggleChip {
+                text: "Normalise";
+                on: SoundsData.kit-normalise;
+                clicked => { SoundsData.kit-toggle("normalise"); }
+            }
+        }
+        if SoundsData.view == 5 && SoundsData.kit-status != "": Text {
+            text: SoundsData.kit-status;
+            color: Theme.muted;
+            font-size: Type.meta;
+            wrap: word-wrap;
+        }
         if SoundsData.view == 4 && SoundsData.re-intro != "": Text {
             text: SoundsData.re-intro;
             color: Theme.muted;
@@ -778,7 +981,7 @@ export component SoundsPage inherits Rectangle {
             wrap: word-wrap;
         }
         // The type chips: every type with its count, most first.
-        if SoundsData.view != 4: HorizontalLayout {
+        if SoundsData.view < 4: HorizontalLayout {
             spacing: Space.sm;
             alignment: start;
             vertical-stretch: 0;
@@ -794,7 +997,7 @@ export component SoundsPage inherits Rectangle {
                 picked(v) => { SoundsData.pick("type", v); }
             }
         }
-        if SoundsData.view != 4: HorizontalLayout {
+        if SoundsData.view < 4: HorizontalLayout {
             spacing: Space.sm;
             alignment: start;
             vertical-stretch: 0;
@@ -888,7 +1091,7 @@ export component SoundsPage inherits Rectangle {
                     reject
                 }
                 Well {
-                    if SoundsData.empty-title != "" || SoundsData.shown == 0: EmptyState {
+                    if SoundsData.empty-title != "" || (SoundsData.shown == 0 && SoundsData.view != 5): EmptyState {
                         title: SoundsData.empty-title != "" ? SoundsData.empty-title
                             : SoundsData.view == 4 ? SoundsData.re-empty-title : "No sounds match";
                         text: SoundsData.empty-title != "" ? SoundsData.empty-text
@@ -934,7 +1137,7 @@ export component SoundsPage inherits Rectangle {
                             }
                         }
                     }
-                    if SoundsData.empty-title == "" && SoundsData.shown > 0 && (SoundsData.view == 1 || SoundsData.view >= 3): VerticalLayout {
+                    if SoundsData.empty-title == "" && SoundsData.shown > 0 && (SoundsData.view == 1 || SoundsData.view == 3 || SoundsData.view == 4): VerticalLayout {
                         ListHeading {
                             history: SoundsData.view == 3;
                             rediscover: SoundsData.view == 4;
@@ -958,6 +1161,13 @@ export component SoundsPage inherits Rectangle {
                                     menu.open-at(x, y);
                                 }
                             }
+                        }
+                    }
+                    if SoundsData.empty-title == "" && SoundsData.view == 5: ListView {
+                        for pad[i] in SoundsData.pads: PadLineView {
+                            pad: pad;
+                            place: i;
+                            chosen => { keys.focus(); }
                         }
                     }
                     if SoundsData.empty-title == "" && SoundsData.shown > 0 && SoundsData.view == 2: EmptyState {
