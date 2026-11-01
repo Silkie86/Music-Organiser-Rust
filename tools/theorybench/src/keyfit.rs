@@ -1718,7 +1718,8 @@ fn weights_file(
     for credit in credits {
         let _ = writeln!(out, "//! - {credit}");
     }
-    out.push_str("//! Only these numbers come from them.\n");
+    // A paragraph of its own: right after the list, it would be read as part of its last line.
+    out.push_str("//!\n//! Only these numbers come from them.\n");
     let _ =
         writeln!(out, "//!\n//! Right on {scored} songs held out of the fit (cross-validation by song, every fold):");
     for line in &summary.lines {
@@ -2054,7 +2055,10 @@ mod tests {
         };
         // The numbers built in: the hash and version built in.
         let same = file(*keyfind::SHIPPED.weights);
-        assert!(same.contains("//! Fitted on: x at 0.5 (") && same.contains("//! - x: CC0\n"), "{same}");
+        assert!(
+            same.contains("//! Fitted on: x at 0.5 (") && same.contains("//! - x: CC0\n//!\n//! Only these"),
+            "{same}"
+        );
         assert!(same.contains("//! Right on x songs held out of the fit (cross-validation by song, every fold):\n"));
         assert!(same.contains("//! - Whole songs with one key: 90.0% right (1 cases)\n"));
         assert!(same.contains("/// - 1 bar (10 cases): one key from 0.85.\n"), "{same}");
