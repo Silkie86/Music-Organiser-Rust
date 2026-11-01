@@ -18,10 +18,16 @@
 //!   [`SpanFacts`]), weighed by hand-set weights ([`HAND`]) and ranked, best first ([`SpanFacts::rank`]);
 //! - the tables the priors read (how often each kind of chord is the labelled one, how often its labels name each
 //!   tension, and how chords move from one to the next), counted from POP909-CL's and the Billboard charts' labels by
-//!   `theorybench tables` ([`COUNTED`]).
+//!   `theorybench tables` ([`COUNTED`]);
+//! - the second step, deciding where the chords change and which chord each stretch is ([`Decoder`]): the best way
+//!   to read the whole, the chance of each reading on each stretch, rests, and stretches given by the caller
+//!   ([`PinnedSpan`]).
 
 mod candidates;
 mod cores;
+mod decode;
+#[cfg(test)]
+mod decode_tests;
 mod hear;
 #[cfg(test)]
 mod hear_tests;
@@ -35,6 +41,7 @@ mod weights;
 
 pub use candidates::{Candidate, Label, Route, allowed, candidates, escape, open_fifth};
 pub use cores::{Core, CoreSet, Group, ToneClass, valid, valid_rootless};
+pub use decode::{Chance, DecodedSpan, Decoder, Decoding, KEEP, PinnedSpan, SHARPNESS, SPAN_BARS};
 pub use hear::{
     BASS_GAP, BassTexture, HeardNote, Hearing, Level, Line, MOST_UNITS, Mass, Push, Shape, Shaped, Stream, Unit,
     heard_in, presence_of,

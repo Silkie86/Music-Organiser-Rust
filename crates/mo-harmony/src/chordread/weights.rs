@@ -2,9 +2,9 @@
 //! ([`Tables`]).
 //!
 //! For now the weights are set by hand ([`HAND`]): chosen so the design's hand cases read as a player would read them,
-//! one stretch at a time, on the tables counted from labelled music ([`COUNTED`](super::COUNTED)). The fit (chordfit)
-//! will start from them and learn the rest from labelled music, keeping every rule [`Weights::check`] lists, so no
-//! explanation can ever show a chord's own note counting against it.
+//! one stretch at a time and read whole, on the tables counted from labelled music ([`COUNTED`](super::COUNTED)). The
+//! fit (chordfit) will start from them and learn the rest from labelled music, keeping every rule [`Weights::check`]
+//! lists, so no explanation can ever show a chord's own note counting against it.
 
 use super::candidates::Label;
 use super::cores::{Core, Group};
@@ -28,21 +28,33 @@ pub struct Weights {
 ///   note that doesn't belong, struck, as much against. Held over or carried in, it costs a third as much; one that
 ///   only passes by costs a sixth.
 /// - A missing third costs most of the missing notes, a missing plain fifth very little (shells leave it out).
-/// - A root heard only in the bass leans a little towards the label (0.4 a beat): a pianist's rootless voicing over
-///   the bass player's root. So D under G C F reads Dm11, while C over G (C/G) stays C: its G is played in the chords
-///   too. Without this, no weights on the notes alone could tell those two apart.
-/// - A held bass leans towards the root (0.9 a beat), less towards the third or seventh, least towards the fifth; a
-///   bass that doesn't belong costs a little: the notes above it still decide, as B D G over a held C is G.
-/// - A bass struck where the stretch starts leans towards its own root once (2), never enough to make C over E (C/E)
-///   read as Em.
+/// - A root heard only in the bass leans towards the label (0.7 a beat): a pianist's rootless voicing or shell over the
+///   bass player's root. So D under G C F reads Dm11, and F C over a walking D F A A♭ reads Dm7, while C over G (C/G)
+///   stays C: its G is played in the chords too. Without this, no weights on the notes alone could tell those apart.
+///   The chords' own leaning towards a root counts 1 a beat, so it settles a voicing with no bass but never outweighs
+///   the bass's root under a shell.
+/// - A held bass leans towards the root (0.9 a beat), half as much towards the third or seventh, least towards the
+///   fifth; a bass that doesn't belong costs a little: the notes above it still decide, as B D G over a held C is G.
+///   The root leans enough more than the third that C E G A over C reads C6 for as long as it's held, not Am7, though
+///   labels name minor sevenths far more often.
+/// - Where a chord starts counts once: the bass moving to its root (2, never enough to make C over E (C/E) read as Em),
+///   and its notes struck there (0.5). Starting where nothing is struck costs 2, and so does starting on a walking
+///   bass note: one no longer than a felt beat, under chords held through it or struck again on the same notes. A
+///   chord changing costs 1 on a bar line, 1.2 on the middle of a bar, 1.5 on another beat and 2 between beats. So a
+///   chord held or struck again stays one chord, and a walking bass under it stays under it (keys in sixteenths over a
+///   bass in eighths too), while chords struck anew change where they're struck.
 /// - With no bass, the lowest chord note leans a little towards its own root (E G B D: Em7 rather than G6).
-/// - A chord changing on a bar line costs nothing, on the middle of a bar a little, between beats most.
-/// - The template priors are trusted a little, on the counted tables: 0.2 for how common the chord is and 0.06 for
+/// - The template priors are trusted a little, on the counted tables: 0.11 for how common the chord is and 0.06 for
 ///   its tensions, a beat. Where the notes leave readings close, the commoner chord wins (B D G over a C struck in the
 ///   bass reads G, not Csus2), and a tension labels rarely name costs a little (a ♭13 on a minor seventh more than a
-///   9 on a major seventh). These are the trusts at which the hand cases' smallest lead is largest. The pair term
-///   waits for its table (trust 0), so a rootless voicing with no bass (B E F A for G13) still ranks below the
-///   readings on a root that's played.
+///   9 on a major seventh). These are the trusts at which the hand cases' smallest lead is largest, every case still
+///   passing a step of 0.01 away.
+/// - The pair term is trusted a quarter: how much likelier the root's move is than one picked at random, between the
+///   two kinds of chord. It holds a ii–V–I over a walking bass to Dm7 G7 Cmaj7 (not F G7 Em) when the other weights
+///   are a step off, and it is the steadiest trust on the hand cases read whole: with the other weights moved about
+///   (`show_the_grid`), every case reads right at more of the points than with any other trust; from 1 it starts to
+///   read some of them wrongly. A rootless voicing with no bass (B E F A for G13) still ranks below the readings on a
+///   root that's played: no trust in the pair term lifts it.
 pub const HAND: Weights = Weights {
     features: PerFeature([
         3.0,   // T1: the chords' sound in the label's own notes
@@ -57,14 +69,14 @@ pub const HAND: Weights = Weights {
         -1.0,  // T10: no seventh or sixth (a four-note chord)
         -1.5,  // T11: no fifth that says which chord it is (a flat or sharp fifth, a power chord's)
         -0.1,  // T12: no plain fifth (one shells leave out)
-        2.0,   // T15: the notes' leaning towards the root
+        1.0,   // T15: the notes' leaning towards the root
         0.0,   // R1: the root played in the chords or the held tune
-        0.4,   // R2: the root only in the bass
+        0.7,   // R2: the root only in the bass
         -0.3,  // R3: no root, over a bass
         -1.0,  // R4: no root and no bass
         0.4,   // L1: no bass, the lowest chord note is the root
         0.9,   // B1: the held bass is the root
-        0.8,   // B2: … the third
+        0.5,   // B2: … the third
         0.2,   // B3: … the fifth
         0.5,   // B4: … the seventh or sixth
         -0.05, // B5: … a tension
@@ -74,16 +86,16 @@ pub const HAND: Weights = Weights {
         -0.5,  // B9: … on a note that isn't its own, on a strong beat or held long
         2.0,   // E1: the first bass note struck is the root
         0.5,   // E2: the chord's notes struck where the stretch starts
-        -1.0,  // E3: nothing struck where the stretch starts
-        0.0,   // E4: starts on a bar line
-        -0.2,  // E5: starts in the middle of a bar
-        -0.5,  // E6: starts on another beat
-        -1.0,  // E7: starts between beats
+        -2.0,  // E3: nothing struck where the stretch starts
+        -1.0,  // E4: starts on a bar line
+        -1.2,  // E5: starts in the middle of a bar
+        -1.5,  // E6: starts on another beat
+        -2.0,  // E7: starts between beats
         -0.3,  // E8: starts at a pushed chord
-        0.2,   // P1's trust (t_core)
+        0.11,  // P1's trust (t_core)
         0.06,  // P2's trust (t_ten)
     ]),
-    pair: 0.0,
+    pair: 0.25,
     none: -0.5,
 };
 
@@ -150,7 +162,7 @@ pub struct Tables {
 
 /// The tables before counting: every core as likely as any other, each tension played half the time, and every way
 /// to move on as likely as any other. P1 is then the same for every reading; P2 costs ln 2 for each tension the core
-/// can carry, heard or not; and P3 costs ln 36 for every change of chord.
+/// can carry, heard or not; and P3 is 0 for every change of chord.
 pub const EVEN: Tables = Tables {
     core: [1.0 / CORES as f64; CORES],
     tension: [[0.5; 12]; CORES],
@@ -161,10 +173,14 @@ pub const EVEN: Tables = Tables {
 /// costs a finite amount, so no score is ever infinite and a trust of 0 always leaves the prior out.
 const FLOOR: f64 = 1e-6;
 
-/// ln of a share, kept between the floor and 1 less it; a share that isn't a number reads as the floor.
+/// A share, kept between the floor and 1 less it; a share that isn't a number reads as the floor.
+fn kept(share: f64) -> f64 {
+    if share >= FLOOR { share.min(1.0 - FLOOR) } else { FLOOR }
+}
+
+/// ln of a share, kept between the floor and 1 less it.
 fn ln_share(share: f64) -> f64 {
-    let kept = if share >= FLOOR { share.min(1.0 - FLOOR) } else { FLOOR };
-    kept.ln()
+    kept(share).ln()
 }
 
 impl Tables {
@@ -181,16 +197,28 @@ impl Tables {
         ln_share(if heard { f } else { 1.0 - f })
     }
 
-    /// What the pair term reads for a chord moving on from `from` to `to`: ln f_motion, by the interval its root moves
-    /// up and the groups of the two ([`Group`]). The same label again is no move but the chord held on, past the
-    /// longest stretch the reader reads at once: 0, as the tables count only changes of chord.
+    /// What the pair term reads for a chord moving on from `from` to `to`: how much likelier the way its root moves is
+    /// than a move picked at random, between chords of the same two groups ([`Group`], [`Tables::motion_prior`]). How
+    /// common each kind of chord is, P1 counts already; this adds only how the root moves. The same label again is no
+    /// move but the chord held on, past the longest stretch the reader reads at once: 0, as the tables count only
+    /// changes of chord.
     pub fn pair_prior(&self, from: Label, to: Label) -> f64 {
         if from == to {
             return 0.0;
         }
-        let row = self.motion.get(from.core.group().index());
-        let cell = row.and_then(|row| row.get(usize::from(to.root.above(from.root))));
-        let share = cell.and_then(|cell| cell.get(to.core.group().index())).copied();
-        ln_share(share.unwrap_or(1.0 / Group::MOVES as f64))
+        self.motion_prior(from.core.group(), to.root.above(from.root), to.core.group())
+    }
+
+    /// ln (12 f_motion(up | from, to)) for one way to move on, from a chord in the group `from`, its root moving `up`
+    /// semitones, to one in the group `to`: the share of that root move among the 12 the tables count between the two
+    /// groups, times 12, so a move likelier than one picked at random reads above 0 and a rarer one below.
+    pub fn motion_prior(&self, from: Group, up: u8, to: Group) -> f64 {
+        let row = self.motion.get(from.index());
+        let share = |up: usize| {
+            let cell = row.and_then(|row| row.get(up));
+            kept(cell.and_then(|cell| cell.get(to.index())).copied().unwrap_or(1.0 / Group::MOVES as f64))
+        };
+        let all: f64 = (0..12).map(share).sum();
+        (12.0 * share(usize::from(up)) / all).ln()
     }
 }

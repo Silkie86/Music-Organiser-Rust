@@ -14,7 +14,7 @@ use crate::pitch::PitchClass;
 
 /// Notes bar by bar: bars split by "|", each a run of notes held the whole bar, or groups of notes each followed by
 /// the beats they sound in brackets (from 1, in 4/4): "C2 (1-2) B1 (3-4) | A1".
-fn bars(text: &str) -> Vec<Note> {
+pub(super) fn bars(text: &str) -> Vec<Note> {
     let mut out = Vec::new();
     for (b, bar) in text.split('|').enumerate() {
         let start = b as i64 * BAR;
@@ -47,17 +47,17 @@ fn all_labels() -> impl Iterator<Item = Label> {
 }
 
 /// A label by its name, as it's written: "C", "F#m7b5", "Bb7sus4".
-fn label(name: &str) -> Label {
+pub(super) fn label(name: &str) -> Label {
     all_labels().find(|l| l.to_string() == name).unwrap_or_else(|| panic!("no label {name}"))
 }
 
 /// What a span holds: `units` counted from the first unit reported (a loop's copied bar left out).
-fn facts_on(hearing: &Hearing, units: Range<usize>, push: Option<&Push>) -> SpanFacts {
+pub(super) fn facts_on(hearing: &Hearing, units: Range<usize>, push: Option<&Push>) -> SpanFacts {
     let mut evidence = Evidence::new();
     evidence.prepare(hearing);
     let first = hearing.reported().start;
     let mut facts = SpanFacts::new();
-    evidence.facts(hearing, first + units.start..first + units.end, push, &mut facts);
+    evidence.facts(hearing, first + units.start..first + units.end, push, None, &mut facts);
     facts
 }
 
@@ -74,7 +74,7 @@ fn ranking(facts: &SpanFacts) -> Vec<Scored> {
 }
 
 /// The candidates ranked by some weights, on the counted tables.
-fn ranking_by(facts: &SpanFacts, weights: &Weights) -> Vec<Scored> {
+pub(super) fn ranking_by(facts: &SpanFacts, weights: &Weights) -> Vec<Scored> {
     let mut candidates = Vec::new();
     facts.candidates(&mut candidates);
     let mut out = Vec::new();
@@ -354,11 +354,16 @@ fn where_a_span_starts() {
     let once = |f: &PerFeature<f64>| {
         [BassStrikesRoot, StruckAtStart, NothingStruck, OnBar, MidBar, OnBeat, OffBeat, Pushed].map(|k| f[k])
     };
-    // D2 struck under G C F (the design's case 33): its first bass note is Dm7's root, not G7sus4's.
-    let music = Music::new().looped().bass(notes("D2", 0, BAR)).keys(notes("G3 C4 F4", 0, BAR));
-    let facts = facts_on(&music.hear(), bar(0), None);
+    // D2 struck under G C F (the design's case 33), after a bar of C: the bass moves to D, Dm7's root, not G7sus4's.
+    let music = Music::new().bass(bars("C2 | D2")).keys(bars("C4 E4 G4 | G3 C4 F4"));
+    let facts = facts_on(&music.hear(), bar(1), None);
     assert_eq!(once(&evidence(&facts, "Dm7")), [1.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0]);
     assert_eq!(once(&evidence(&facts, "G7sus4"))[..2], [0.0, 1.0]);
+    // As a loop of one bar, the bass strikes the D it played as the loop came round: no move, so no root struck at a
+    // change (the chord goes on round the loop).
+    let music = Music::new().looped().bass(notes("D2", 0, BAR)).keys(notes("G3 C4 F4", 0, BAR));
+    let facts = facts_on(&music.hear(), bar(0), None);
+    assert_eq!(once(&evidence(&facts, "Dm7")), [0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0]);
     // A C2 held from bar 1 under the keys' bar 3: no bass struck there.
     let music = Music::new().bass(notes("C2", 0, 4 * BAR)).keys(bars("C4 E4 G4 | C4 F4 A4 | B3 D4 G4"));
     assert_eq!(once(&evidence(&facts_on(&music.hear(), bar(2), None), "Csus2"))[0], 0.0);
@@ -372,6 +377,38 @@ fn where_a_span_starts() {
     assert_eq!(cmaj7(4..8), [0.0, 0.25, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]);
     assert_eq!(cmaj7(2..8), [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
     assert_eq!(cmaj7(1..8), [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+}
+
+#[test]
+fn a_walking_bass_note_is_no_place_a_chord_starts() {
+    use Feature::*;
+    // The design's case 37: D2 E2 F2 G2 in quarters under F A C held. On the bar line, D2 is struck with the chords:
+    // Dm7's root, struck where it starts.
+    let walk = Music::new().bass(line("D2 E2 F2 G2", 0, BEAT)).keys(notes("F3 A3 C4", 0, BAR)).hear();
+    let start = |units: Range<usize>, name: &str| {
+        let f = evidence(&facts_on(&walk, units, None), name);
+        [f[BassStrikesRoot], f[NothingStruck]]
+    };
+    assert_eq!(start(0..8, "Dm7"), [1.0, 0.0]);
+    // From beat 3, F2 is a walking note (a beat long, the chords held through it): not F's root struck where a chord
+    // starts, and the span starts where nothing (but a walking note) is struck.
+    assert_eq!(start(4..8, "F"), [0.0, 1.0]);
+    // A half note is no walking note: C2 then E2 under C E G held, a two-feel. From beat 3, E2 is struck as Em's root,
+    // and something is struck where the span starts (the inversion C/E is the namer's to write).
+    let two_feel = Music::new().bass(bars("C2 (1-2) E2 (3-4)")).keys(notes("C4 E4 G4", 0, BAR)).hear();
+    let f = evidence(&facts_on(&two_feel, 4..8, None), "Em");
+    assert_eq!([f[BassStrikesRoot], f[NothingStruck]], [1.0, 0.0]);
+    // A walking note struck with new notes in the chords is where a chord may start: the same walk, with E added to
+    // F A C on beat 3, the F2 struck there is Fmaj7's root.
+    let keys = [notes("F3 A3 C4", 0, 2 * BEAT), notes("F3 A3 C4 E4", 2 * BEAT, 2 * BEAT)].concat();
+    let added = Music::new().bass(line("D2 E2 F2 G2", 0, BEAT)).keys(keys).hear();
+    let f = evidence(&facts_on(&added, 4..8, None), "Fmaj7");
+    assert_eq!([f[BassStrikesRoot], f[NothingStruck]], [1.0, 0.0]);
+    // But the same chord struck again is nothing new: under F A C struck on each beat, F2 is still a walking note.
+    let keys = (0..4).flat_map(|b| notes("F3 A3 C4", b * BEAT, BEAT)).collect();
+    let again = Music::new().bass(line("D2 E2 F2 G2", 0, BEAT)).keys(keys).hear();
+    let f = evidence(&facts_on(&again, 4..8, None), "F");
+    assert_eq!([f[BassStrikesRoot], f[NothingStruck]], [0.0, 1.0]);
 }
 
 #[test]
@@ -414,6 +451,47 @@ fn a_pushed_chord_counts_as_struck_where_the_span_starts() {
     let push = hearing.pushes().first().cloned().expect("the chord may be pushed");
     let root = |push: Option<&Push>| evidence(&facts_on(&hearing, units.clone(), push), "F")[BassStrikesRoot];
     assert_eq!((root(None), root(Some(&push))), (0.0, 1.0));
+}
+
+#[test]
+fn a_pushed_chords_sound_is_its_own_from_where_it_is_struck() {
+    use Feature::*;
+    // Case 44 again: C E G over C2 in bar 1, then F A C with F2 struck half a beat before bar 2 and held into it.
+    let music = Music::new()
+        .looped()
+        .bass([notes("C2", 0, BAR - BEAT / 2), notes("F2", BAR - BEAT / 2, BAR + BEAT / 2)].concat())
+        .keys([notes("C4 E4 G4", 0, BAR - BEAT / 2), notes("F3 A3 C4", BAR - BEAT / 2, BAR + BEAT / 2)].concat());
+    let hearing = music.hear();
+    let push = hearing.pushes().first().cloned().expect("the chord may be pushed");
+    let mut reader = Evidence::new();
+    reader.prepare(&hearing);
+    let mut facts = SpanFacts::new();
+    // Bar 1 read up to the pushed chord: the unit F A C is struck in is the pushed chord's, so C E G is all it holds.
+    let (bar1, bar2) = (push.unit - 8..push.unit, push.unit..push.unit + 8);
+    reader.facts(&hearing, bar1.clone(), None, Some(&push), &mut facts);
+    assert_eq!((facts.units(), facts.sound()), (bar1.clone(), bar1.start..bar1.end - 1));
+    let c = evidence(&facts, "C");
+    assert_eq!((c[ChordTones], c[WrongStruck]), (1.0, 0.0));
+    let before = facts.sounding();
+    // Read to the bar line, its F and A are wrong notes struck.
+    reader.facts(&hearing, bar1.clone(), None, None, &mut facts);
+    assert_eq!(facts.sound(), bar1.clone());
+    assert!(evidence(&facts, "C")[WrongStruck] > 0.0);
+    // Bar 2 read from the push sounds from that unit: F A C is all it holds, and between them the two stretches hold
+    // the two bars' sound, each unit once.
+    reader.facts(&hearing, bar2.clone(), Some(&push), None, &mut facts);
+    assert_eq!(facts.sound(), bar2.start - 1..bar2.end);
+    let f = evidence(&facts, "F");
+    assert_eq!((f[ChordTones], f[WrongStruck], f[Pushed], f[BassStrikesRoot]), (1.0, 0.0, 1.0, 1.0));
+    assert_eq!(before + facts.sounding(), hearing.sounding_ticks(bar1.start..bar2.end));
+    // A push that isn't where the span ends is left out, as one that isn't where it starts is.
+    reader.facts(&hearing, bar1.start..bar1.end - 1, None, Some(&push), &mut facts);
+    assert_eq!(facts.sound(), bar1.start..bar1.end - 1);
+    // Pushed at both ends, a span gains the unit before its first and loses its last.
+    let mut next = push.clone();
+    next.unit = bar2.end;
+    reader.facts(&hearing, bar2.clone(), Some(&push), Some(&next), &mut facts);
+    assert_eq!(facts.sound(), bar2.start - 1..bar2.end - 1);
 }
 
 #[test]
@@ -522,41 +600,53 @@ fn the_counted_tables_hold_shares_and_say_what_the_labels_say() {
 fn the_pair_prior_reads_how_the_root_moves_and_the_groups_of_the_two_chords() {
     let [dominant, dim_aug, other] = Group::ALL.map(Group::index);
     let pair = |from: &str, to: &str| COUNTED.pair_prior(label(from), label(to));
+    // The share of a root move among the 12 the tables count from one group to another, times 12: above 1 for a move
+    // likelier than one picked at random.
+    let ratio = |from: usize, up: usize, to: usize| {
+        let all: f64 = COUNTED.motion[from].iter().map(|cell| cell[to]).sum();
+        12.0 * COUNTED.motion[from][up][to] / all
+    };
     // G7 to C and to Cmaj7: a dominant up a fourth to another chord; C♯dim7 to Dm, rising a semitone.
-    assert_eq!(pair("G7", "C"), COUNTED.motion[dominant][5][other].ln());
+    assert_eq!(pair("G7", "C"), ratio(dominant, 5, other).ln());
     assert_eq!(pair("G7", "Cmaj7"), pair("G7", "C"));
-    assert_eq!(pair("Dbdim7", "Dm"), COUNTED.motion[dim_aug][1][other].ln());
+    assert_eq!(pair("Dbdim7", "Dm"), ratio(dim_aug, 1, other).ln());
+    assert!(pair("G7", "C") > 1.5 && pair("Dbdim7", "Dm") > 0.5);
     // The same moves on any root read the same; V to I is likelier than V up a semitone, and a diminished seventh
     // rising a semitone likelier than a minor chord doing so.
     for root in PitchClass::ALL {
         let on = |name: &str| Label::new(label(name).root.up(root.number().into()), label(name).core);
         assert_eq!(COUNTED.pair_prior(on("G7"), on("C")), pair("G7", "C"));
     }
-    assert!(pair("G7", "C") > pair("G7", "Ab") && pair("Dbdim7", "Dm") > pair("Dbm", "Dm"));
-    // The same label again is the chord held on, no move: it costs nothing, on any tables, while a move to another
-    // chord on the same root costs what the tables say.
+    assert!(pair("G7", "C") > pair("G7", "Ab") && pair("Dbdim7", "Dm") > pair("Dbm", "Dm") && pair("Dbm", "Dm") < 0.0);
+    // How common each group is, P1 counts: the pair term reads the root's move given both groups, so a move to a
+    // rarer kind of chord costs no more for it (a dominant up a fourth to a diminished chord, rarely labelled, still
+    // reads above 0).
+    assert!(pair("G7", "Cdim") > 0.0);
+    // The same label again is the chord held on, no move: 0 on any tables, while a move to another chord on the same
+    // root reads what the tables say.
     for tables in [COUNTED, EVEN] {
         assert_eq!(
             (tables.pair_prior(label("C"), label("C")), tables.pair_prior(label("G7"), label("G7"))),
             (0.0, 0.0)
         );
     }
-    assert_eq!(pair("C", "C7"), COUNTED.motion[other][0][dominant].ln());
-    // On even tables every move costs the same, ln 36; a share of 0 or not a number reads the floor, never ln 0.
-    assert!((EVEN.pair_prior(label("G7"), label("C")) - (1.0f64 / 36.0).ln()).abs() < 1e-12);
+    assert_eq!(pair("C", "C7"), ratio(other, 0, dominant).ln());
+    // On even tables every move is as likely as any other: 0. A share of 0 or not a number reads the floor, never
+    // ln 0.
+    assert!(EVEN.pair_prior(label("G7"), label("C")).abs() < 1e-12);
     let mut tables = EVEN;
     tables.motion[dominant][5][other] = 0.0;
     tables.motion[other][2][other] = f64::NAN;
     let (never, nan) = (tables.pair_prior(label("G7"), label("C")), tables.pair_prior(label("C"), label("Dm")));
-    assert!(never.is_finite() && never < -13.0 && nan == never);
+    assert!(never.is_finite() && never < -10.0 && nan == never);
 }
 
 #[test]
 fn trusting_the_counted_tables_settles_near_ties_towards_the_commoner_chord() {
     use Feature::*;
     // B D G over a C struck in the bass (the design's case 9 holds it over a pedal): G, a major triad, or Csus2 (C D
-    // G, with B its 7), which labels rarely name. The notes alone lean to Csus2, its root struck in the bass, by under
-    // half a point a beat; trusting the tables, G comes first.
+    // G, with B its 7), which labels rarely name. The notes alone lean to Csus2, its root in the bass, by under a
+    // point a beat; trusting the tables, G comes first.
     let facts = facts_on(&Music::new().looped().bass(bars("C2")).keys(bars("B3 D4 G4")).hear(), bar(0), None);
     let lead = |weights: &Weights| {
         let ranked = ranking_by(&facts, weights);
@@ -568,7 +658,7 @@ fn trusting_the_counted_tables_settles_near_ties_towards_the_commoner_chord() {
     untrusting.features[TensionPrior] = 0.0;
     let (before, after) = (lead(&untrusting), lead(&HAND));
     assert_eq!((before.0.as_str(), after.0.as_str()), ("Csus2", "G"));
-    assert!(matches!((before.1, after.1), (Some(b), Some(a)) if b > -0.5 && a > 0.0), "{before:?} {after:?}");
+    assert!(matches!((before.1, after.1), (Some(b), Some(a)) if b > -1.0 && a > 0.0), "{before:?} {after:?}");
 }
 
 #[test]
@@ -633,7 +723,7 @@ fn equal_scores_keep_the_candidates_order_however_long_the_list() {
 }
 
 /// The sample musics, with pushes and loops: what the rules that hold for any music are checked on.
-fn samples() -> Vec<Music> {
+pub(super) fn samples() -> Vec<Music> {
     let pushed = Music::new()
         .looped()
         .bass([notes("C2", 0, BAR), notes("A1", BAR, BAR)].concat())
@@ -646,19 +736,28 @@ fn samples() -> Vec<Music> {
     vec![with_bass(), keys_only(), with_bass().looped(), pushed, walking]
 }
 
-/// Spans of up to two bars from every unit, in the hearing's own units, and a bar from each push with the push.
-fn spans(hearing: &Hearing) -> Vec<(Range<usize>, Option<Push>)> {
+/// A span's units, and the pushes into its first unit and the unit after its last.
+type PushedSpan = (Range<usize>, Option<Push>, Option<Push>);
+
+/// Spans of up to two bars from every unit, in the hearing's own units; and from each push, a bar with the push, a bar
+/// up to it with the push after, and both.
+fn spans(hearing: &Hearing) -> Vec<PushedSpan> {
     let units = hearing.units();
     let mut out = Vec::new();
     for start in 0..units {
         for length in [1, 2, 3, 4, 6, 8, 12, 16] {
             if start + length <= units {
-                out.push((start..start + length, None));
+                out.push((start..start + length, None, None));
             }
         }
     }
     for push in hearing.pushes() {
-        out.push((push.unit..(push.unit + 8).min(units), Some(push.clone())));
+        let (to, from) = ((push.unit + 8).min(units), push.unit.saturating_sub(8));
+        out.push((push.unit..to, Some(push.clone()), None));
+        out.push((from..push.unit, None, Some(push.clone())));
+        for other in hearing.pushes().iter().filter(|p| p.unit > push.unit && p.unit <= push.unit + 16) {
+            out.push((push.unit..other.unit, Some(push.clone()), Some(other.clone())));
+        }
     }
     out
 }
@@ -671,8 +770,8 @@ fn everything(hearing: &Hearing, shift: i32) -> Vec<(Label, Route, [u64; Feature
     let (mut facts, mut candidates, mut ranked) = (SpanFacts::new(), Vec::<Candidate>::new(), Vec::new());
     let mut f = PerFeature::default();
     let mut out = Vec::new();
-    for (units, push) in spans(hearing) {
-        evidence.facts(hearing, units, push.as_ref(), &mut facts);
+    for (units, start, end) in spans(hearing) {
+        evidence.facts(hearing, units, start.as_ref(), end.as_ref(), &mut facts);
         facts.candidates(&mut candidates);
         facts.rank(&candidates, &HAND, &COUNTED, &mut ranked);
         for s in &ranked {
@@ -735,10 +834,12 @@ fn every_piece_of_evidence_stays_in_its_range_on_any_span() {
         let mut spans = spans(&hearing);
         // Spans past the end, and empty ones, hold nothing.
         let units = hearing.units();
-        spans.extend([(units..units + 8, None), (units + 3..units + 1, None), (5..5, None)]);
-        for (units, push) in spans {
-            evidence.facts(&hearing, units, push.as_ref(), &mut facts);
+        spans.extend([(units..units + 8, None, None), (units + 3..units + 1, None, None), (5..5, None, None)]);
+        for (units, start, end) in spans {
+            evidence.facts(&hearing, units, start.as_ref(), end.as_ref(), &mut facts);
             assert!(facts.beats() >= 0.0 && facts.units().end <= hearing.units());
+            let (sound, units) = (facts.sound(), facts.units());
+            assert!(sound.start <= units.start && sound.end <= units.end && units.start <= sound.start + 1);
             for l in all_labels() {
                 facts.features(l, &EVEN, &mut f);
                 assert!(f.0.iter().all(|v| v.is_finite()));
@@ -757,7 +858,7 @@ fn every_piece_of_evidence_stays_in_its_range_on_any_span() {
     // Nothing heard at all.
     let nothing = Hearing::new();
     evidence.prepare(&nothing);
-    evidence.facts(&nothing, 0..8, None, &mut facts);
+    evidence.facts(&nothing, 0..8, None, None, &mut facts);
     assert_eq!((facts.beats(), facts.units()), (0.0, 0..0));
     let mut candidates = Vec::new();
     facts.candidates(&mut candidates);
@@ -816,7 +917,7 @@ fn the_hand_weights_keep_every_rule_and_broken_ones_are_named() {
 
 /// What a hand case's stretch must read on its own.
 #[derive(Clone, Copy, Debug)]
-enum Want {
+pub(super) enum Want {
     /// The first reading is one of these (the design's gate allows any, or the namer turns it into the name wanted).
     First(&'static [&'static str]),
     /// These are the first two readings, or the first two hold the one given.
@@ -829,7 +930,7 @@ enum Want {
 
 /// The design's hand cases that one stretch read on its own decides, as far as it decides them
 /// (harmony/design/chord-reader-design.md, "Hand cases"): a name, the music, the units, and what it must read.
-fn hand_cases() -> Vec<(&'static str, Music, Range<usize>, Want)> {
+pub(super) fn hand_cases() -> Vec<(&'static str, Music, Range<usize>, Want)> {
     use Want::*;
     let keys_bass = |bass: &str, keys: &str| Music::new().bass(bars(bass)).keys(bars(keys));
     let keys = |keys: &str| Music::new().keys(bars(keys));
@@ -921,30 +1022,40 @@ fn hand_cases() -> Vec<(&'static str, Music, Range<usize>, Want)> {
 fn the_hand_cases_read_as_a_player_reads_them_one_stretch_at_a_time() {
     for (name, music, units, want) in hand_cases() {
         let ranked = ranking(&facts_on(&music.looped().hear(), units, None));
-        let names: Vec<String> = ranked.iter().map(|s| s.label.to_string()).collect();
-        let among = |these: &[&str], most: usize| these.iter().all(|t| names.iter().take(most).any(|n| n == t));
-        let ok = match want {
-            Want::First(any) => any.contains(&names[0].as_str()),
-            Want::TopTwo(these) => among(these, 2),
-            Want::Kept(these) => {
-                let best_rootless = ranked.iter().find(|s| s.route == Route::Rootless).map(|s| s.label.to_string());
-                these.iter().all(|t| among(&[t], 8) || best_rootless.as_deref() == Some(*t))
-            }
-        };
         let read: Vec<String> = ranked.iter().take(8).map(|s| format!("{} {:.2}", s.label, s.score)).collect();
-        assert!(ok, "case {name}: wanted {want:?}, read {}", read.join(", "));
+        assert!(reads(&ranked, want), "case {name}: wanted {want:?}, read {}", read.join(", "));
     }
+}
+
+/// Whether a stretch's ranking reads what a hand case wants.
+pub(super) fn reads(ranked: &[Scored], want: Want) -> bool {
+    let among =
+        |these: &[&str], most: usize| these.iter().all(|t| ranked.iter().take(most).any(|s| s.label.to_string() == *t));
+    match want {
+        Want::First(any) => ranked.first().is_some_and(|s| any.contains(&s.label.to_string().as_str())),
+        Want::TopTwo(these) => among(these, 2),
+        Want::Kept(these) => kept(ranked, these),
+    }
+}
+
+/// Whether each of these readings is kept for deciding where the chords change: among the best eight, or the best
+/// rootless reading.
+fn kept(ranked: &[Scored], these: &[&str]) -> bool {
+    let best_rootless = ranked.iter().find(|s| s.route == Route::Rootless).map(|s| s.label.to_string());
+    these
+        .iter()
+        .all(|t| ranked.iter().take(8).any(|s| s.label.to_string() == *t) || best_rootless.as_deref() == Some(*t))
 }
 
 /// How far a hand case's wanted readings lead the rest, for each felt beat its stretch sounds: the score of the last
 /// wanted reading that must make it to the top (one of the readings allowed for "first", each one given for "top
 /// two") less the score of the best other reading that could take its place. Below 0 the case fails. Kept readings
-/// have no lead.
+/// have no lead: none when they're kept, minus infinity when they aren't.
 fn lead(ranked: &[Scored], want: Want, beats: f64) -> Option<f64> {
     let (these, need, room): (_, usize, usize) = match want {
         Want::First(any) => (any, 1, 1),
         Want::TopTwo(these) => (these, these.len(), 2),
-        Want::Kept(_) => return None,
+        Want::Kept(these) => return (!kept(ranked, these)).then_some(f64::NEG_INFINITY),
     };
     // More readings wanted than there's room for never fit; none wanted always does.
     let Some(place) = room.checked_sub(need) else { return Some(f64::NEG_INFINITY) };
@@ -984,21 +1095,36 @@ fn show_the_trusts() {
             .filter_map(|(name, facts, want)| Some((lead(&ranking_by(facts, &weights), *want, facts.beats())?, *name)));
         leads.min_by(|a, b| a.0.total_cmp(&b.0)).unwrap_or((f64::INFINITY, ""))
     };
-    let tens: Vec<f64> = (0..=10).map(|k| f64::from(k) / 100.0).collect();
-    println!("{:<16}{}", "t_core, by t_ten", tens.iter().map(|t| format!("{t:>6.2}")).collect::<String>());
+    // On a 0.01 grid: t_core from 0 to 0.30, t_ten from 0 to 0.10.
+    let leads: Vec<Vec<(f64, &str)>> =
+        (0..=30).map(|c| (0..=10).map(|t| smallest(f64::from(c) / 100.0, f64::from(t) / 100.0)).collect()).collect();
+    let lead_at = |c: i32, t: i32| {
+        let row = usize::try_from(c).ok().and_then(|c| leads.get(c));
+        row.and_then(|row| usize::try_from(t).ok().and_then(|t| row.get(t))).copied()
+    };
+    println!(
+        "{:<16}{}",
+        "t_core, by t_ten",
+        (0..=10).map(|t| format!("{:>6.2}", f64::from(t) / 100.0)).collect::<String>()
+    );
     let mut best = (f64::NEG_INFINITY, 0.0, 0.0, "");
-    for k in 0..=30 {
-        let core = f64::from(k) / 100.0;
-        print!("{core:<16.2}");
-        for &ten in &tens {
-            let (lead, name) = smallest(core, ten);
+    for c in 0..=30 {
+        print!("{:<16.2}", f64::from(c) / 100.0);
+        for t in 0..=10 {
+            let Some((lead, name)) = lead_at(c, t) else { continue };
             print!("{lead:>6.2}");
-            if lead > best.0 {
-                best = (lead, core, ten, name);
+            // Only where every case also passes a step away (or at the grid's edge).
+            let near = [(c - 1, t), (c + 1, t), (c, t - 1), (c, t + 1)];
+            let steady = near.iter().all(|&(c, t)| lead_at(c, t).is_none_or(|(lead, _)| lead >= 0.0));
+            if steady && lead > best.0 {
+                best = (lead, f64::from(c) / 100.0, f64::from(t) / 100.0, name);
             }
         }
         println!();
     }
     let (lead, core, ten, name) = best;
-    println!("the smallest lead is largest at t_core {core:.2}, t_ten {ten:.2}: {lead:.3} a beat (case {name})");
+    println!(
+        "the smallest lead is largest, every case passing a step away, at t_core {core:.2}, t_ten {ten:.2}: {lead:.3} a \
+         beat (case {name})"
+    );
 }

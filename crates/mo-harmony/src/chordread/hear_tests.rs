@@ -1013,22 +1013,24 @@ fn slow_unit_facts(h: &Hearing) -> Vec<String> {
 }
 
 /// A small random number maker (xorshift), so the random music is the same on every run.
-struct Dice(u64);
+pub(super) struct Dice(pub(super) u64);
 
 impl Dice {
-    fn below(&mut self, n: u64) -> u64 {
+    pub(super) fn below(&mut self, n: u64) -> u64 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;
         self.0 ^= self.0 << 17;
         self.0 % n.max(1)
     }
 
-    fn pick<T: Copy>(&mut self, from: &[T]) -> T {
+    pub(super) fn pick<T: Copy>(&mut self, from: &[T]) -> T {
         from[self.below(from.len() as u64) as usize]
     }
 }
 
-fn random_music(dice: &mut Dice) -> Music {
+/// Random music: on one of some grids (odd ones too), sometimes looped, with up to four parts of random notes of any
+/// length, sometimes with a run of short notes.
+pub(super) fn random_music(dice: &mut Dice) -> Music {
     let (beats, tpb) =
         dice.pick(&[(4, 480), (3, 480), (2, 96), (6, 240), (12, 240), (9, 120), (5, 96), (4, 7), (4, 1)]);
     let (beat, bar) = (i64::from(tpb), i64::from(beats) * i64::from(tpb));
