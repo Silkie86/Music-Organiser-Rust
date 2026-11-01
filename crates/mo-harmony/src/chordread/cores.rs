@@ -334,6 +334,10 @@ impl Group {
     /// Every group, in order.
     pub const ALL: [Group; 3] = [Group::Dominant, Group::DimAug, Group::Other];
 
+    /// How many ways a chord can move on to another, as the pair term tells them apart: its root up one of 12
+    /// intervals (the same root too: C to C7), to a chord in one of the groups.
+    pub const MOVES: usize = 12 * Group::ALL.len();
+
     /// Its place in [`Group::ALL`], from 0 to 2.
     pub const fn index(self) -> usize {
         self as usize

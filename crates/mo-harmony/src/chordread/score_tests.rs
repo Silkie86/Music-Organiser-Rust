@@ -529,13 +529,19 @@ fn the_pair_prior_reads_how_the_root_moves_and_the_groups_of_the_two_chords() {
     // The same moves on any root read the same; V to I is likelier than V up a semitone, and a diminished seventh
     // rising a semitone likelier than a minor chord doing so.
     for root in PitchClass::ALL {
-        let on = |name: &str, up: i32| {
-            let l = label(name);
-            Label::new(l.root.up(root.number().into()).up(up), l.core)
-        };
-        assert_eq!(COUNTED.pair_prior(on("G7", 0), on("C", 0)), pair("G7", "C"));
+        let on = |name: &str| Label::new(label(name).root.up(root.number().into()), label(name).core);
+        assert_eq!(COUNTED.pair_prior(on("G7"), on("C")), pair("G7", "C"));
     }
     assert!(pair("G7", "C") > pair("G7", "Ab") && pair("Dbdim7", "Dm") > pair("Dbm", "Dm"));
+    // The same label again is the chord held on, no move: it costs nothing, on any tables, while a move to another
+    // chord on the same root costs what the tables say.
+    for tables in [COUNTED, EVEN] {
+        assert_eq!(
+            (tables.pair_prior(label("C"), label("C")), tables.pair_prior(label("G7"), label("G7"))),
+            (0.0, 0.0)
+        );
+    }
+    assert_eq!(pair("C", "C7"), COUNTED.motion[other][0][dominant].ln());
     // On even tables every move costs the same, ln 36; a share of 0 or not a number reads the floor, never ln 0.
     assert!((EVEN.pair_prior(label("G7"), label("C")) - (1.0f64 / 36.0).ln()).abs() < 1e-12);
     let mut tables = EVEN;

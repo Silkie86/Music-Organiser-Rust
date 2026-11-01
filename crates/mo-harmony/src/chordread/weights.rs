@@ -134,9 +134,6 @@ impl Weights {
 const CORES: usize = Core::ALL.len();
 const GROUPS: usize = Group::ALL.len();
 
-/// How many ways a chord can move on, by the pair term: 12 roots, each in one of the groups.
-const MOVES: usize = 12 * GROUPS;
-
 /// The counted tables the priors read: how often each core is the chord (f_core), how often each of its tensions is
 /// played with it (f_ten), and how chords move from one to the next (f_motion). The reader's are counted from labelled
 /// music ([`COUNTED`](super::COUNTED)); [`EVEN`] holds the tables before counting.
@@ -157,7 +154,7 @@ pub struct Tables {
 pub const EVEN: Tables = Tables {
     core: [1.0 / CORES as f64; CORES],
     tension: [[0.5; 12]; CORES],
-    motion: [[[1.0 / MOVES as f64; GROUPS]; 12]; GROUPS],
+    motion: [[[1.0 / Group::MOVES as f64; GROUPS]; 12]; GROUPS],
 };
 
 /// The least share a prior reads, and 1 less it the most: a core or a tension never counted (or always played) still
@@ -184,11 +181,16 @@ impl Tables {
         ln_share(if heard { f } else { 1.0 - f })
     }
 
-    /// ln f_motion: how likely a chord moves on from `from` to `to`, by the interval its root moves up and the
-    /// groups of the two ([`Group`]), as the pair term reads it.
+    /// What the pair term reads for a chord moving on from `from` to `to`: ln f_motion, by the interval its root moves
+    /// up and the groups of the two ([`Group`]). The same label again is no move but the chord held on, past the
+    /// longest stretch the reader reads at once: 0, as the tables count only changes of chord.
     pub fn pair_prior(&self, from: Label, to: Label) -> f64 {
+        if from == to {
+            return 0.0;
+        }
         let row = self.motion.get(from.core.group().index());
         let cell = row.and_then(|row| row.get(usize::from(to.root.above(from.root))));
-        ln_share(cell.and_then(|cell| cell.get(to.core.group().index())).copied().unwrap_or(1.0 / MOVES as f64))
+        let share = cell.and_then(|cell| cell.get(to.core.group().index())).copied();
+        ln_share(share.unwrap_or(1.0 / Group::MOVES as f64))
     }
 }

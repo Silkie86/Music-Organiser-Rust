@@ -6,9 +6,11 @@
 //! lets the numbers ship: fold 0 stays kept back, drawn as keyfit draws it. f_core and f_ten are counted in beats,
 //! f_motion in changes of chord. Each source counts as much as any other, and half a beat (or half a change) is added
 //! to each cell, so nothing is ever impossible. A source only counts for what its labels can say: each core is counted
-//! from the sources whose labels name it (POP909-CL has no 6, m6, 7sus4 or power chord), and f_ten from those whose
-//! labels name 9ths as a matter of course. POP909-CL names its chords by triad and seventh templates, so its labels
-//! never say a 9 is played, even where the piano plays one; counting them would say tensions are rarer than they are.
+//! from the sources whose labels name it (POP909-CL has no 6, m6, 7sus4 or power chord), f_ten from those whose
+//! labels name 9ths as a matter of course, and f_motion from those whose labels can name every core. POP909-CL names
+//! its chords by triad and seventh templates, so its labels never say a 9 is played, even where the piano plays one;
+//! counting them would say tensions are rarer than they are. Nor can they say a chord moves to or from a 6 or a 7sus4:
+//! C to C6 reads as no change, and G7sus4 to C as G7 or Gsus4 to C.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -79,15 +81,21 @@ impl Counts {
         self.core.get(core).is_some_and(|&beats| beats > 0.0)
     }
 
+    /// Whether its labels name every core in `cores` (by [`Core::index`]): only such a source says how chords move
+    /// from one to the next, as one that can't name a core reads a change to or from it as another change.
+    fn names_all(&self, cores: &[usize]) -> bool {
+        cores.iter().all(|&core| self.names(core))
+    }
+
     /// Counts a piece's labels. A change of chord is a label read as another root or core than the one before it
     /// (C to C/E or G7 to G9 is no change); no chord, or a label that can't be read, comes between two chords that
-    /// don't count as one moving to the other.
+    /// don't count as one moving to the other. A label that lasts no time is left out.
     fn add(&mut self, item: &Item) {
         self.pieces += 1;
         let ppq = f64::from(item.ppq.max(1));
         let mut before: Option<Label> = None;
-        for (start, end, label) in &item.chords {
-            let beats = (end - start).max(0) as f64 / ppq;
+        for (start, end, label) in item.chords.iter().filter(|(start, end, _)| end > start) {
+            let beats = (end - start) as f64 / ppq;
             let Some((chord, tensions)) = reading(label) else {
                 self.other += beats;
                 before = None;
@@ -129,11 +137,21 @@ fn reading(label: &str) -> Option<(Label, PcSet)> {
 }
 
 /// Each source's weight, so that it counts as much as any other: what it counts (its beats, or its changes of chord)
-/// scaled to the sources' mean.
+/// scaled to the mean of the sources that count any.
 fn weighed<'a>(sources: impl Iterator<Item = &'a Counts>, counted: impl Fn(&Counts) -> f64) -> Vec<(f64, &'a Counts)> {
     let sources: Vec<&Counts> = sources.collect();
-    let mean = sources.iter().map(|&c| counted(c)).sum::<f64>() / sources.len().max(1) as f64;
+    let counting: Vec<f64> = sources.iter().map(|&c| counted(c)).filter(|&n| n > 0.0).collect();
+    let mean = counting.iter().sum::<f64>() / counting.len().max(1) as f64;
     sources.into_iter().map(|c| (if counted(c) > 0.0 { mean / counted(c) } else { 0.0 }, c)).collect()
+}
+
+/// The sources f_motion is counted from: those whose labels name every core any source's labels name (all of them
+/// when none does).
+fn moving(sources: &BTreeMap<String, Counts>) -> Vec<(&String, &Counts)> {
+    let named: Vec<usize> = (0..CORES).filter(|&i| sources.values().any(|c| c.names(i))).collect();
+    let all = sources.iter().filter(|(_, c)| c.names_all(&named));
+    let all: Vec<(&String, &Counts)> = all.collect();
+    if all.is_empty() { sources.iter().collect() } else { all }
 }
 
 /// The tables from each source's counts, each source weighed to count as much as any other, with half a beat (or
@@ -142,7 +160,8 @@ fn weighed<'a>(sources: impl Iterator<Item = &'a Counts>, counted: impl Fn(&Coun
 /// Each core is counted from the sources whose labels name it (from all of them when none does), and the cores'
 /// shares are then scaled to add up to 1: where every source names every core, that changes nothing. f_ten comes from
 /// the sources whose labels name tensions; its cells for notes a core doesn't carry stay at a half (the priors never
-/// read them). f_motion comes from every source, each group of the chord before on its own: its 36 shares add up to 1.
+/// read them). f_motion comes from the sources whose labels name every core ([`moving`]), each group of the chord
+/// before on its own: its 36 shares add up to 1.
 fn tables(sources: &BTreeMap<String, Counts>) -> Tables {
     let mut out = EVEN;
     let all = weighed(sources.values(), Counts::total);
@@ -169,7 +188,7 @@ fn tables(sources: &BTreeMap<String, Counts>) -> Tables {
             }
         }
     }
-    let moving = weighed(sources.values(), Counts::changes);
+    let moving = weighed(moving(sources).into_iter().map(|(_, c)| c), Counts::changes);
     for (g, row) in out.motion.iter_mut().enumerate() {
         let at = |c: &Counts, up: usize, to: usize| {
             c.motion.get(g).and_then(|row| row.get(up)).and_then(|cell| cell.get(to)).copied().unwrap_or(0.0)
@@ -178,7 +197,7 @@ fn tables(sources: &BTreeMap<String, Counts>) -> Tables {
         for (up, cell) in row.iter_mut().enumerate() {
             for (to, share) in cell.iter_mut().enumerate() {
                 let moved: f64 = moving.iter().map(|(w, c)| w * at(c, up, to)).sum();
-                *share = (moved + PRIOR) / (from + PRIOR * (12 * GROUPS) as f64);
+                *share = (moved + PRIOR) / (from + PRIOR * Group::MOVES as f64);
             }
         }
     }
@@ -261,16 +280,19 @@ fn report(sources: &BTreeMap<String, Counts>, out: &Tables) -> String {
             .collect();
         let _ = writeln!(text, "{:<8}{}", name(core), row.join("  "));
     }
-    let changes: Vec<String> = sources.iter().map(|(s, c)| format!("{s} {:.0}", c.changes())).collect();
+    let changes: Vec<String> = moving(sources).iter().map(|(s, c)| format!("{s} {:.0}", c.changes())).collect();
     let _ = writeln!(
         text,
-        "\nf_motion, from the changes of chord labelled ({}), each source counting as much as any other: for each\n\
-         group of the chord before, the share of its changes (%) to a root each interval up, by the next chord's group:\n",
+        "\nf_motion, from the changes of chord labelled by the sources whose labels name every core ({}), each\n\
+         counting as much as any other: for each group of the chord before, the share of its changes (%) to a root\n\
+         each interval up, by the next chord's group:\n",
         changes.join(", ")
     );
     let _ = write!(text, "{:<11}", "root");
     for from in Group::ALL {
-        let _ = write!(text, "{:>30}", format!("from {}", from.name()));
+        let row = |c: &Counts| c.motion.get(from.index()).map_or(0.0, |r| r.iter().flatten().sum::<f64>());
+        let changes: f64 = moving(sources).iter().map(|(_, c)| row(c)).sum();
+        let _ = write!(text, "{:>30}", format!("from {} ({changes:.0})", from.name()));
     }
     let _ = write!(text, "\n{:<11}", "");
     for _ in Group::ALL {
@@ -299,17 +321,21 @@ fn rust_file(sources: &BTreeMap<String, Counts>, out: &Tables) -> String {
         "//! The counted tables the chord reader's priors read: how often each core is the labelled chord, how often a chord\n\
          //! of each core names each tension it can carry, and how the labelled chords move from one to the next. Written by\n\
          //! `theorybench tables --write` from the labels alone (folds 1 to 4; in beats, each core from the sources whose\n\
-         //! labels name it, and in changes of chord; each source counting as much as any other, half a beat or half a\n\
-         //! change added to each cell); don't edit it by hand.\n\nuse super::weights::Tables;\n\n",
+         //! labels name it, and in changes of chord, from the sources whose labels name every core; each source counting\n\
+         //! as much as any other, half a beat or half a change added to each cell); don't edit it by hand.\n\n\
+         use super::weights::Tables;\n\n",
     );
     let names: Vec<String> = sources.keys().map(|s| format!("{s:?}")).collect();
     let naming: Vec<String> =
         sources.iter().filter(|(_, c)| c.names_tensions()).map(|(s, _)| format!("{s:?}")).collect();
+    let moving: Vec<String> = moving(sources).iter().map(|(s, _)| format!("{s:?}")).collect();
     let _ = writeln!(
         text,
         "/// The sources counted, by the names `theorybench` gives them; f_ten is counted from those whose labels name\n\
-         /// tensions ({}).\npub const COUNTED_FROM: &[&str] = &[{}];\n",
+         /// tensions ({}), and f_motion from those whose labels name every core ({}).\n\
+         pub const COUNTED_FROM: &[&str] = &[{}];\n",
         naming.join(", "),
+        moving.join(", "),
         names.join(", ")
     );
     text.push_str("/// The counted tables: f_core for each core; f_ten for each core and interval above its root (a half where the\n");
@@ -396,6 +422,11 @@ mod tests {
         c
     }
 
+    /// Labels with their ends given in beats, as ticks at 480 a beat.
+    fn in_beats<'a>(chords: &[(i64, i64, &'a str)]) -> Vec<(i64, i64, &'a str)> {
+        chords.iter().map(|&(start, end, label)| (start * 480, end * 480, label)).collect()
+    }
+
     /// The core a label is read as, and the tensions it names.
     fn core_of(label: &str) -> Option<(Core, PcSet)> {
         reading(label).map(|(chord, tensions)| (chord.core, tensions))
@@ -435,11 +466,8 @@ mod tests {
     fn each_core_counts_from_the_sources_that_name_it_each_as_much_as_any_other() {
         // a: 30 beats of major and minor triads, from labels that never name a 6 or a minor seventh. b: 10 beats that
         // name them too, with a 9 on one of them.
-        let beats =
-            |chords: &[(i64, i64, &'static str)]| chords.iter().map(|&(s, e, l)| (s * 480, e * 480, l)).collect();
-        let a: Vec<(i64, i64, &str)> = beats(&[(0, 15, "C:maj"), (15, 30, "A:min")]);
-        let b: Vec<(i64, i64, &str)> =
-            beats(&[(0, 3, "C:maj"), (3, 5, "A:min"), (5, 7, "C:maj6"), (7, 9, "D:min7"), (9, 10, "D:min9")]);
+        let a = in_beats(&[(0, 15, "C:maj"), (15, 30, "A:min")]);
+        let b = in_beats(&[(0, 3, "C:maj"), (3, 5, "A:min"), (5, 7, "C:maj6"), (7, 9, "D:min7"), (9, 10, "D:min9")]);
         let mut sources = BTreeMap::new();
         sources.insert("a".to_owned(), counts("a", &a));
         sources.insert("b".to_owned(), counts("b", &b));
@@ -463,8 +491,8 @@ mod tests {
         // Where the sources name the same cores, they pool, and the shares already add up to 1: a, 30 beats of major
         // and minor triads; b, 10.
         let mut pooled = BTreeMap::new();
-        pooled.insert("a".to_owned(), counts("a", &beats(&[(0, 20, "C:maj"), (20, 30, "A:min")])));
-        pooled.insert("b".to_owned(), counts("b", &beats(&[(0, 5, "C:maj"), (5, 10, "A:min")])));
+        pooled.insert("a".to_owned(), counts("a", &in_beats(&[(0, 20, "C:maj"), (20, 30, "A:min")])));
+        pooled.insert("b".to_owned(), counts("b", &in_beats(&[(0, 5, "C:maj"), (5, 10, "A:min")])));
         let t = tables(&pooled);
         let f = |beats: f64| (beats + 0.5) / (40.0 + 8.0);
         assert!(near(t.core[Core::Major.index()], f(20.0 * 2.0 / 3.0 + 10.0)));
@@ -480,6 +508,9 @@ mod tests {
         let t = tables(&sources);
         let file = rust_file(&sources, &t);
         assert!(file.contains("pub const COUNTED_FROM: &[&str] = &[\"billboard\"];"));
+        assert!(file.contains(
+            "tensions (\"billboard\"), and f_motion from those whose labels name every core (\"billboard\")"
+        ));
         assert!(file.contains(&format!("        {:?}, // 7\n", t.core[Core::Dominant7.index()])));
         assert!(file.contains(&format!("{:?}, ", t.tension[Core::Dominant7.index()][2])));
         // G9 to C: from a dominant, up a fourth, to another chord.
@@ -487,15 +518,14 @@ mod tests {
         let moved = t.motion[dominant][5];
         assert!(file.contains(&format!("            [{:?}, {:?}, {:?}], // up 4th\n", moved[0], moved[1], moved[2])));
         assert!(moved[other] > moved[dominant] && file.contains("        [ // from dim/aug\n"));
-        assert_eq!(file.matches(" // ").count(), 2 * CORES + GROUPS + 12 * GROUPS);
+        assert_eq!(file.matches(" // ").count(), 2 * CORES + GROUPS + Group::MOVES);
     }
 
     #[test]
     fn a_change_of_chord_is_counted_by_how_its_root_moves_and_the_groups_of_the_two() {
-        let beats =
-            |chords: &[(i64, i64, &'static str)]| chords.iter().map(|&(s, e, l)| (s * 480, e * 480, l)).collect();
-        let chords: Vec<(i64, i64, &str)> = beats(&[
+        let chords = in_beats(&[
             (0, 1, "G:7"),
+            (1, 1, "D:min"),
             (1, 2, "C:maj"),
             (2, 3, "C:maj/3"),
             (3, 4, "C:maj7"),
@@ -510,31 +540,52 @@ mod tests {
         let c = counts("billboard", &chords);
         let [dominant, dim_aug, other] = Group::ALL.map(Group::index);
         let mut want = [[[0.0; GROUPS]; 12]; GROUPS];
-        // G7 to C and D♭9 to C: a dominant up a fourth, and down a semitone (a tritone sub), to another chord. C to
-        // C/E is no change, C to Cmaj7 another chord on the same root; Dm to C♯dim7 down a semitone to a diminished
-        // seventh, which rises a semitone to Dm7. No chord, and a label that can't be read, break the line.
+        // G7 to C and D♭9 to C: a dominant up a fourth, and down a semitone (a tritone sub), to another chord; the Dm
+        // that lasts no time between G7 and C is left out. C to C/E is no change, C to Cmaj7 another chord on the same
+        // root; Dm to C♯dim7 down a semitone to a diminished seventh, which rises a semitone to Dm7. No chord, and a
+        // label that can't be read, break the line.
         want[dominant][5][other] = 1.0;
         want[dominant][11][other] = 1.0;
         want[other][0][other] = 1.0;
         want[other][11][dim_aug] = 1.0;
         want[dim_aug][1][other] = 1.0;
         assert_eq!(c.motion, want);
-        assert_eq!(c.changes(), 5.0);
-        // Each source counts as much as any other: a, with its one change from a dominant up a fourth, and b, with
-        // three from other chords up a fifth, count one change each over the mean of two. Each group's 36 shares
-        // then add up to 1, with half a change added to each.
-        let mut sources = BTreeMap::new();
-        sources.insert("a".to_owned(), counts("a", &beats(&[(0, 1, "G:7"), (1, 2, "C:maj")])));
-        let fifths = [(0, 1, "C:maj"), (1, 2, "G:maj"), (2, 3, "D:maj"), (3, 4, "A:maj")];
-        sources.insert("b".to_owned(), counts("b", &beats(&fifths)));
+        assert_eq!((c.changes(), c.core[Core::Minor.index()]), (5.0, 1.0));
+    }
+
+    #[test]
+    fn how_chords_move_comes_from_the_sources_that_name_every_core_each_as_much_as_any_other() {
+        let [dominant, dim_aug, other] = Group::ALL.map(Group::index);
+        // a: one change, G7 up a fourth to C. b: four, all up a fifth: C G D A, then E7. Each counts as the mean of
+        // two and a half changes (a's one at 2.5, b's four at 0.625 each); each group's 36 shares then add up to 1,
+        // with half a change added to each.
+        let a = counts("a", &in_beats(&[(0, 1, "G:7"), (1, 2, "C:maj")]));
+        let fifths = [(0, 1, "C:maj"), (1, 2, "G:maj"), (2, 3, "D:maj"), (3, 4, "A:maj"), (4, 5, "E:7")];
+        let b = counts("b", &in_beats(&fifths));
+        let mut sources = BTreeMap::from([("a".to_owned(), a.clone()), ("b".to_owned(), b.clone())]);
         let t = tables(&sources);
         let near = |x: f64, y: f64| (x - y).abs() < 1e-12;
-        assert!(near(t.motion[dominant][5][other], (2.0 + 0.5) / (2.0 + 18.0)));
-        assert!(near(t.motion[dominant][5][dominant], 0.5 / 20.0));
-        assert!(near(t.motion[other][7][other], (2.0 + 0.5) / (2.0 + 18.0)));
+        assert!(near(t.motion[dominant][5][other], (2.5 + 0.5) / (2.5 + 18.0)));
+        assert!(near(t.motion[dominant][5][dominant], 0.5 / 20.5));
+        assert!(near(t.motion[other][7][other], (3.0 * 0.625 + 0.5) / (4.0 * 0.625 + 18.0)));
+        assert!(near(t.motion[other][7][dominant], (0.625 + 0.5) / (4.0 * 0.625 + 18.0)));
         assert!(near(t.motion[dim_aug][1][other], 1.0 / 36.0));
         for group in t.motion {
             assert!(near(group.iter().flatten().sum::<f64>(), 1.0));
         }
+        // c names the same chords but never changes (no chord comes between its two); d can't name a dominant, so it
+        // can't say how chords move to or from one. Neither changes how chords move.
+        sources.insert("c".to_owned(), counts("c", &in_beats(&[(0, 4, "C:maj"), (4, 5, "N"), (5, 9, "G:7")])));
+        sources.insert("d".to_owned(), counts("d", &in_beats(&[(0, 1, "C:maj"), (1, 2, "F:maj"), (2, 3, "G:maj")])));
+        let names = |sources: &BTreeMap<String, Counts>| -> Vec<String> {
+            moving(sources).into_iter().map(|(s, _)| s.clone()).collect()
+        };
+        assert_eq!(names(&sources), ["a", "b", "c"]);
+        assert_eq!(tables(&sources).motion, t.motion);
+        // When no source names every core, they all count: a can't name a minor triad, nor e a dominant.
+        let e = counts("e", &in_beats(&[(0, 1, "A:min"), (1, 2, "D:min")]));
+        let neither = BTreeMap::from([("a".to_owned(), a), ("e".to_owned(), e)]);
+        assert_eq!(names(&neither), ["a", "e"]);
+        assert!(near(tables(&neither).motion[other][5][other], (1.0 + 0.5) / (1.0 + 18.0)));
     }
 }
