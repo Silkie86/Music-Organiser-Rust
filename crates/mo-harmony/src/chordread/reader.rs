@@ -18,6 +18,7 @@ use super::answer::{ChordAnswer, Grading, Texture, Thresholds, grade};
 use super::candidates::Label;
 use super::cores::Core;
 use super::decode::{Decoder, Decoding, PinnedSpan};
+use super::explain::{Explainer, Explanation};
 use super::hear::{Hearing, Unit};
 use super::name::{Namer, Naming, Reading, SpanFlags};
 use super::tables::COUNTED;
@@ -350,6 +351,7 @@ pub struct ChordReader {
     namer: Namer,
     naming: Naming,
     pins: Vec<PinnedSpan>,
+    explainer: Explainer,
 }
 
 impl ChordReader {
@@ -377,9 +379,41 @@ impl ChordReader {
         Some(self.reading(grid, cx, model))
     }
 
-    /// What the last read heard.
+    /// What the last read (or explanation) heard.
     pub fn hearing(&self) -> &Hearing {
         &self.hearing
+    }
+
+    /// Why a stretch of a reading reads as it does ([`Explanation`]): what each note sounding there does, where the
+    /// bass comes from, and the evidence that tells its first reading from the runner-up (the second reading kept, so
+    /// the reading must keep two for there to be one). The notes are heard again, so give the parts, the grid and the
+    /// context the reading was read from. None when the reading isn't of those notes (as far as can be told), when
+    /// there's no such stretch, or when it's a rest.
+    pub fn explain(
+        &mut self,
+        parts: &[Part],
+        grid: Grid,
+        cx: &ChordContext,
+        reading: &ChordReading,
+        span: usize,
+    ) -> Option<Explanation> {
+        self.explain_with(parts, grid, cx, reading, span, &SHIPPED)
+    }
+
+    /// Explains a stretch with a model ([`ChordReader::explain`]): the one the reading was read with.
+    pub fn explain_with(
+        &mut self,
+        parts: &[Part],
+        grid: Grid,
+        cx: &ChordContext,
+        reading: &ChordReading,
+        span: usize,
+        model: &Model,
+    ) -> Option<Explanation> {
+        if !self.hearing.hear(parts, grid, cx.span) {
+            return None;
+        }
+        self.explainer.explain(&self.hearing, grid, reading, span, model)
     }
 
     /// Puts the pins on the units heard: each end at the nearest unit start within the music (a loop's own units,

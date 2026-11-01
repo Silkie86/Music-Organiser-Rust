@@ -26,7 +26,7 @@ pub(super) fn read(music: &Music, pins: &[Pin], readings: u8) -> Option<ChordRea
 }
 
 /// The hand cases, each read as a loop: the decode's, then the namer's.
-fn hand_cases() -> Vec<(&'static str, Music)> {
+pub(super) fn hand_cases() -> Vec<(&'static str, Music)> {
     let whole = whole_cases().into_iter().map(|(name, music, _)| (name, music.looped()));
     whole.chain(named_cases().into_iter().map(|(name, music, _)| (name, music.looped()))).collect()
 }
