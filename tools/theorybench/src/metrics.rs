@@ -96,6 +96,20 @@ pub fn ratio(right: &[f64], total: &[f64], song: &[usize]) -> Share {
     Share { value: if t > 0.0 { r / t } else { 0.0 }, low, high, n: values.len() }
 }
 
+/// Any number made from sums over the cases, such as an F1 score: `f` of the sums of every case's values, with its
+/// range when the songs are drawn again. Two engines' values side by side in each case give their difference.
+pub fn statistic<const N: usize>(values: &[[f64; N]], song: &[usize], f: impl Fn(&[f64; N]) -> f64) -> Share {
+    let mut sum = [0.0; N];
+    for v in values {
+        for (t, x) in sum.iter_mut().zip(v) {
+            *t += x;
+        }
+    }
+    let totals = by_song(values, song);
+    let (low, high) = range(&totals, |_, s| f(s));
+    Share { value: f(&sum), low, high, n: values.len() }
+}
+
 /// Two engines' shares made of sums over the same cases (`total` the same for both): `b`'s minus `a`'s, and the
 /// range that difference most likely lies in when the songs are drawn again.
 pub fn paired_ratio(a: &[f64], b: &[f64], total: &[f64], song: &[usize]) -> (f64, f64, f64) {

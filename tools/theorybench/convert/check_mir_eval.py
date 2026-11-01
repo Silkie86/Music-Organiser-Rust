@@ -6,6 +6,8 @@ Usage: python3 -I check_mir_eval.py <dump.jsonl>
 For every engine and piece it runs mir_eval's own steps (adjust_intervals, merge_labeled_intervals, the comparison
 functions and directional_hamming_distance) on the same labels and chords the bench scored, then prints the pooled
 scores both ways and the pieces where they differ most. Any difference larger than rounding is a bug in the bench.
+The times are in each piece's ticks; songs are pooled in beats (ticks over the piece's ticks a beat), as the bench
+pools them.
 """
 import json
 import sys
@@ -58,23 +60,24 @@ def main():
         d = json.loads(line)
         theirs, theirs_seg = score(d['reference'], d['estimate'])
         ours = dict((name, (right, scored)) for name, (right, scored) in d['measures'])
+        beat = max(1, d.get('ppq', 1))
         p = pooled.setdefault(d['engine'], {m: [0.0, 0.0, 0.0, 0.0] for m in MEASURES} | {'seg': [0.0] * 8})
         for m in MEASURES:
-            p[m][0] += ours[m][0]
-            p[m][1] += ours[m][1]
-            p[m][2] += theirs[m][0]
-            p[m][3] += theirs[m][1]
+            p[m][0] += ours[m][0] / beat
+            p[m][1] += ours[m][1] / beat
+            p[m][2] += theirs[m][0] / beat
+            p[m][3] += theirs[m][1] / beat
             a = ours[m][0] / ours[m][1] if ours[m][1] else 0.0
             b = theirs[m][0] / theirs[m][1] if theirs[m][1] else 0.0
             worst.append((abs(a - b), d['engine'], d['id'], m, a, b))
         # Lost and total, over-cut then under-cut: the bench's four numbers, then mir_eval's.
         for i, v in enumerate(list(d['segmentation']) + list(theirs_seg)):
-            p['seg'][i] += v
+            p['seg'][i] += v / beat
     for engine, p in pooled.items():
         print(engine)
         for m in MEASURES:
             r, t, mr, mt = p[m]
-            print(f'  {m:12} bench {100 * r / t:7.3f}%   mir_eval {100 * mr / mt:7.3f}%   (time scored {t:.0f} / {mt:.0f})')
+            print(f'  {m:12} bench {100 * r / t:7.3f}%   mir_eval {100 * mr / mt:7.3f}%   (beats scored {t:.0f} / {mt:.0f})')
         lo, to, lu, tu, mo, mto, mu, mtu = p['seg']
         print(f'  over-cut     bench {100 * lo / to:7.3f}    mir_eval {100 * mo / mto:7.3f}')
         print(f'  under-cut    bench {100 * lu / tu:7.3f}    mir_eval {100 * mu / mtu:7.3f}')

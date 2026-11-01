@@ -219,31 +219,8 @@ fn encode(text: &str, reduce: bool) -> Option<Label> {
         "X" => return Some(Label::UNKNOWN),
         _ => {}
     }
-    let (chord, bass) = match text.split_once('/') {
-        Some((c, b)) => (c, b),
-        None => (text, "1"),
-    };
-    let (chord, degrees) = match chord.split_once('(') {
-        Some((c, d)) => (c, Some(d.strip_suffix(')')?)),
-        None => (chord, None),
-    };
-    let degrees: Vec<&str> = degrees.map(|d| d.split(',').map(str::trim).collect()).unwrap_or_default();
-    let omission = degrees.iter().any(|d| d.contains('*'));
-    if omission && !chord.contains(':') {
-        return None;
-    }
-    let mut name = if degrees.is_empty() { "maj".to_owned() } else { String::new() };
-    let root_text = match chord.split_once(':') {
-        Some((r, q)) => {
-            if !q.is_empty() {
-                name = q.to_lowercase();
-            }
-            r
-        }
-        None => chord,
-    };
-    let root = root(root_text)?;
-    let mut degrees: Vec<String> = degrees.into_iter().filter(|d| !d.is_empty()).map(str::to_owned).collect();
+    let (root, mut name, degrees, bass) = split(text)?;
+    let mut degrees: Vec<String> = degrees.into_iter().map(str::to_owned).collect();
     if reduce && let Some((_, base, extra)) = REDUX.iter().find(|(q, _, _)| *q == name) {
         name = (*base).to_owned();
         degrees.extend(extra.iter().map(|d| (*d).to_owned()));
@@ -271,6 +248,38 @@ fn encode(text: &str, reduce: bool) -> Option<Label> {
     Some(Label { root: root as i8, semitones, bass: bass as i8 })
 }
 
+/// A label (not "N" or "X") split as mir_eval's `split` and `encode` split it: the root, the quality's name (lower
+/// case; "maj" when the label has neither a quality nor degrees, "" when it has only degrees), the degrees in
+/// brackets (empty ones left out) and the bass degree ("1" when there's no slash). `None` when mir_eval would call it
+/// invalid. [`encode`] and [`whole`] both read labels through it, so they agree on which labels read.
+fn split(text: &str) -> Option<(i32, String, Vec<&str>, &str)> {
+    let (chord, bass) = match text.split_once('/') {
+        Some((c, b)) => (c, b),
+        None => (text, "1"),
+    };
+    let (chord, degrees) = match chord.split_once('(') {
+        Some((c, d)) => (c, Some(d.strip_suffix(')')?)),
+        None => (chord, None),
+    };
+    let degrees: Vec<&str> = degrees.map(|d| d.split(',').map(str::trim).collect()).unwrap_or_default();
+    let omission = degrees.iter().any(|d| d.contains('*'));
+    if omission && !chord.contains(':') {
+        return None;
+    }
+    let mut name = if degrees.is_empty() { "maj".to_owned() } else { String::new() };
+    let root_text = match chord.split_once(':') {
+        Some((r, q)) => {
+            if !q.is_empty() {
+                name = q.to_lowercase();
+            }
+            r
+        }
+        None => chord,
+    };
+    let root = root(root_text)?;
+    Some((root, name, degrees.into_iter().filter(|d| !d.is_empty()).collect(), bass))
+}
+
 /// Reads a label as mir_eval scores it, or `None` when mir_eval would call it invalid.
 pub fn parse(text: &str) -> Option<Label> {
     encode(text, false)
@@ -279,6 +288,91 @@ pub fn parse(text: &str) -> Option<Label> {
 /// Reads a label as mir_eval does when it joins chords in a row that are the same (ninths and so on kept).
 pub fn parse_for_joining(text: &str) -> Option<Label> {
     encode(text, true)
+}
+
+/// A label read whole ([`named`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Named {
+    /// "N": no chord.
+    NoChord,
+    /// "X", or a label mir_eval can't read: left out of every score, as mir_eval leaves it out.
+    Unknown,
+    /// The chord the label names: its root, every note its name says, and the bass. The bass is one of the chord's own
+    /// notes when the label's notes have it ("C:maj7/7" is Cmaj7/B) and only a bass when they don't ("C:maj/7" is C/B).
+    Chord(Chord),
+}
+
+/// Each shorthand's notes in semitones above the root, its ninths, elevenths and thirteenths too (mir_eval scores
+/// only the notes within an octave): Harte's, as `convert/charts.py` plays them, so a 13 has no 11 (players leave the
+/// 11 out of a chord with a 13 in it), and mir_eval's extra "b9", "#9", "#11" and "b13" spelled out the same way.
+const WHOLE: [(&str, &[i32]); 29] = [
+    ("maj", &[0, 4, 7]),
+    ("min", &[0, 3, 7]),
+    ("aug", &[0, 4, 8]),
+    ("dim", &[0, 3, 6]),
+    ("sus4", &[0, 5, 7]),
+    ("sus2", &[0, 2, 7]),
+    ("7", &[0, 4, 7, 10]),
+    ("maj7", &[0, 4, 7, 11]),
+    ("min7", &[0, 3, 7, 10]),
+    ("minmaj7", &[0, 3, 7, 11]),
+    ("maj6", &[0, 4, 7, 9]),
+    ("min6", &[0, 3, 7, 9]),
+    ("dim7", &[0, 3, 6, 9]),
+    ("hdim7", &[0, 3, 6, 10]),
+    ("maj9", &[0, 4, 7, 11, 14]),
+    ("min9", &[0, 3, 7, 10, 14]),
+    ("9", &[0, 4, 7, 10, 14]),
+    ("b9", &[0, 4, 7, 10, 13]),
+    ("#9", &[0, 4, 7, 10, 15]),
+    ("min11", &[0, 3, 7, 10, 14, 17]),
+    ("11", &[0, 4, 7, 10, 14, 17]),
+    ("#11", &[0, 4, 7, 10, 14, 18]),
+    ("maj13", &[0, 4, 7, 11, 14, 21]),
+    ("min13", &[0, 3, 7, 10, 14, 21]),
+    ("13", &[0, 4, 7, 10, 14, 21]),
+    ("b13", &[0, 4, 7, 10, 14, 20]),
+    ("1", &[0]),
+    ("5", &[0, 7]),
+    ("", &[]),
+];
+
+/// Reads a label as the chord a chart names, every note of it. Unlike [`parse`], the ninths, elevenths and
+/// thirteenths a label says, in its shorthand or in brackets, are kept, so extensions can be scored. Otherwise it reads
+/// as mir_eval reads: the root is one of the notes unless "*1" leaves it out, and what mir_eval can't read is
+/// [`Named::Unknown`].
+pub fn named(text: &str) -> Named {
+    match text.trim() {
+        "N" => Named::NoChord,
+        "X" => Named::Unknown,
+        text => whole(text).map_or(Named::Unknown, Named::Chord),
+    }
+}
+
+fn whole(text: &str) -> Option<Chord> {
+    let (root, name, degrees, bass) = split(text)?;
+    let root = PitchClass::new(root);
+    let (_, shorthand) = WHOLE.iter().find(|(q, _)| *q == name)?;
+    // How many times each note above the root is said, as mir_eval counts them: the root always, then the
+    // shorthand's notes, and each degree in brackets adds one ("*" takes one away).
+    let mut said = [0i32; 12];
+    for &s in std::iter::once(&0).chain(shorthand.iter()) {
+        if let Some(n) = said.get_mut(s.rem_euclid(12) as usize) {
+            *n = 1;
+        }
+    }
+    for d in degrees {
+        let (sign, d) = match d.strip_prefix('*') {
+            Some(rest) => (-1, rest.trim_start_matches('*')),
+            None => (1, d),
+        };
+        if let Some(n) = said.get_mut(degree(d)?.rem_euclid(12) as usize) {
+            *n += sign;
+        }
+    }
+    let intervals = (0u16..12).filter(|&i| said.get(usize::from(i)).is_some_and(|&n| n > 0)).fold(0, |b, i| b | 1 << i);
+    let bass = root.up(degree(bass)?);
+    Some(Chord::new(root, PcSet::from_bits(intervals).on(root), bass))
 }
 
 /// The ways mir_eval compares a chord read with the labelled one.
@@ -431,24 +525,39 @@ pub fn stretch<K>(spans: &[(i64, i64, K)]) -> Option<(i64, i64)> {
     Some((from, to))
 }
 
-/// The chords read laid against the labelled ones over the labelled stretch, as mir_eval's `evaluate` does: the
-/// chords read are cut to the stretch and padded with no chord ([`adjust`]); then the stretch is cut wherever either
-/// changes, and in a gap between two chords read the one before goes on. Each piece: its length, the label, the
-/// chord read.
+/// [`line_up_by`] for labels and chords read as mir_eval encodes them: each piece's length, label and chord read.
+#[cfg(test)]
 pub fn line_up(reference: &[Span], estimate: &[Span]) -> Vec<(i64, Label, Label)> {
+    line_up_by(reference, estimate, Label::NO_CHORD)
+        .into_iter()
+        .filter_map(|(length, r, e)| Some((length, reference.get(r)?.2, e)))
+        .collect()
+}
+
+/// The chords read laid against the labelled ones over the labelled stretch, as mir_eval's `evaluate` does: the
+/// chords read are cut to the stretch and padded with `none` ([`adjust`]); then the stretch is cut wherever either
+/// changes, and in a gap between two chords read the one before goes on. Each piece: its length, which label it lies
+/// in (its place in `reference`), and the chord read there.
+pub fn line_up_by<R, E: Copy>(
+    reference: &[(i64, i64, R)],
+    estimate: &[(i64, i64, E)],
+    none: E,
+) -> Vec<(i64, usize, E)> {
     let Some((from, to)) = stretch(reference) else {
         return Vec::new();
     };
-    let est = adjust(from, to, estimate, Label::NO_CHORD);
-    let mut cuts: Vec<i64> = reference.iter().chain(&est).flat_map(|s| [s.0, s.1]).collect();
+    let est = adjust(from, to, estimate, none);
+    let mut cuts: Vec<i64> =
+        reference.iter().map(|s| (s.0, s.1)).chain(est.iter().map(|s| (s.0, s.1))).flat_map(|(a, b)| [a, b]).collect();
     cuts.sort_unstable();
     cuts.dedup();
     // The span starting last at or before a time (mir_eval's searchsorted on the starts).
-    let at = |spans: &[Span], t: i64| spans.iter().rev().find(|s| s.0 <= t).map(|s| s.2);
     cuts.windows(2)
         .filter_map(|w| {
             let (&a, &b) = (w.first()?, w.get(1)?);
-            Some((b - a, at(reference, a)?, at(&est, a)?))
+            let label = reference.iter().rposition(|s| s.0 <= a)?;
+            let read = est.iter().rev().find(|s| s.0 <= a)?.2;
+            Some((b - a, label, read))
         })
         .collect()
 }
@@ -598,5 +707,72 @@ mod tests {
             line_up(&[(0, 10, c), (10, 20, g)], &[(0, 20, c)]).iter().map(|l| l.0).sum::<i64>()
         );
         assert_eq!(stretch::<Label>(&[]), None);
+        // The same, with each piece's label by its place.
+        assert_eq!(
+            line_up_by(&[(0, 10, ()), (10, 20, ())], &[(5, 8, 'g'), (12, 25, 'c')], '-'),
+            vec![(5, 0, '-'), (3, 0, 'g'), (2, 0, 'g'), (2, 1, 'g'), (8, 1, 'c')]
+        );
+    }
+
+    #[test]
+    fn labels_read_whole_keep_their_extensions() {
+        let chord = |text: &str| match named(text) {
+            Named::Chord(c) => c,
+            other => panic!("{text}: {other:?}"),
+        };
+        let notes = |text: &str| {
+            let c = chord(text);
+            (c.root().number(), c.notes().above(c.root()).bits(), c.bass().above(c.root()))
+        };
+        let bits = |intervals: &[i32]| PcSet::of(intervals).bits();
+        assert_eq!(notes("G:13"), (7, bits(&[0, 2, 4, 7, 9, 10]), 0));
+        assert_eq!(notes("C:11"), (0, bits(&[0, 2, 4, 5, 7, 10]), 0));
+        assert_eq!(notes("C:min7(11)"), (0, bits(&[0, 3, 5, 7, 10]), 0));
+        assert_eq!(notes("A:sus4(b7,9)"), (9, bits(&[0, 2, 5, 7, 10]), 0));
+        assert_eq!(notes("Eb:maj6(9)"), (3, bits(&[0, 2, 4, 7, 9]), 0));
+        assert_eq!(notes("C:7(*5,#9)"), (0, bits(&[0, 3, 4, 10]), 0));
+        assert_eq!(notes("C:(1,3,#5,b7)"), (0, bits(&[0, 4, 8, 10]), 0));
+        assert_eq!(notes("C:(3,5)"), (0, bits(&[0, 4, 7]), 0));
+        assert_eq!(notes("C:maj(*1)"), (0, bits(&[4, 7]), 0));
+        assert_eq!(notes("C"), (0, bits(&[0, 4, 7]), 0));
+        // The bass is one of the chord's notes when the label's notes have it, else only a bass.
+        assert_eq!(notes("C:maj7/7"), (0, bits(&[0, 4, 7, 11]), 11));
+        assert_eq!(notes("C:maj/7"), (0, bits(&[0, 4, 7]), 11));
+        assert!(chord("C:maj7/7").notes().contains(chord("C:maj7/7").bass()));
+        assert!(!chord("C:maj/7").notes().contains(chord("C:maj/7").bass()));
+        assert_eq!(notes("C:maj/9"), (0, bits(&[0, 4, 7]), 2));
+        assert_eq!(chord("G:13").name(), "G13");
+        assert_eq!(chord("C:maj7/7").name(), "Cmaj7/B");
+        assert_eq!(chord("C:maj/7").name(), "C/B");
+        assert_eq!(chord("A:min7/b3").name(), "Am7/C");
+        assert_eq!(named("N"), Named::NoChord);
+        for bad in ["X", "H:maj", "C:foo", "C:maj(15)", "C(*5)", ""] {
+            assert_eq!(named(bad), Named::Unknown, "{bad}");
+        }
+        // The whole shorthands are mir_eval's within the octave, and its own extensions above it (a 13 without its 11).
+        for (q, notes) in WHOLE {
+            let within: Vec<i32> = notes.iter().copied().filter(|&n| n < 12).collect();
+            let flags = quality(q).unwrap().map(i32::from);
+            let expected: Vec<i32> = (0..12).filter(|&i| flags[i as usize] > 0).collect();
+            assert_eq!(within, expected, "{q}");
+            let above: Vec<i32> = notes.iter().copied().filter(|&n| n >= 12).collect();
+            let mut redux: Vec<i32> = REDUX
+                .iter()
+                .find(|(r, _, _)| r == &q)
+                .map(|(_, _, extra)| extra.iter().map(|d| degree(d).unwrap()).filter(|&n| n >= 12).collect())
+                .unwrap_or_default();
+            if q.contains("13") {
+                redux.retain(|&n| n != 17);
+            }
+            assert_eq!(above, redux, "{q}");
+        }
+        // Every label mir_eval reads, this reads too, with the same root and the same notes within the octave.
+        for text in
+            ["C:maj9", "D:min9/b7", "F#:hdim7", "Bb:7(b9,#11)", "E:maj13", "A:sus2", "G:5", "C:1(11)", "Db:aug(b7)"]
+        {
+            let (l, c) = (label(text), chord(text));
+            assert_eq!(i32::from(l.root), i32::from(c.root().number()), "{text}");
+            assert_eq!(l.pitch_classes().difference(c.sounding()), PcSet::EMPTY, "{text}");
+        }
     }
 }
