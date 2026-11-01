@@ -3,7 +3,7 @@
 //! segmentation score for where the chords change; then the scores the chord reader's design adds ([`naming`]):
 //! the whole chord with its extensions, the root among the same notes, the bass kind and the readings listed.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use mo_harmony::{Chord, PcSet, PitchClass};
@@ -16,8 +16,8 @@ use crate::metrics::{self, pct};
 use crate::naming::{self, Read, Tally};
 
 /// The chords one engine read in one piece, as the C# helper (`cs/`) writes them: start, end, name, root, bass and
-/// the pitch classes (twelve bits, bit 0 for C), then, when the helper lists them, the other readings of the same
-/// notes (name, root, bass, pitch classes), likeliest first.
+/// the pitch classes heard (twelve bits, bit 0 for C), then, when the helper lists them, the other readings of the
+/// same notes (name, root, bass, pitch classes), likeliest first.
 #[derive(Deserialize)]
 struct Answers {
     source: String,
@@ -28,7 +28,7 @@ struct Answers {
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum Row {
-    Listed(i64, i64, String, u8, u8, u16, Vec<(serde::de::IgnoredAny, u8, u8, u16)>),
+    Listed(i64, i64, String, u8, u8, u16, Vec<(String, u8, u8, u16)>),
     Plain(i64, i64, String, u8, u8, u16),
 }
 
@@ -40,15 +40,48 @@ struct Engine {
     lists: bool,
 }
 
-/// A chord as the C# app writes one: its notes are every pitch class it heard (the bass among them, so a bass is
-/// always one of its notes, as its name has it: D7/C, never D/C) with the root added, as its name says the root.
-fn cs_chord(root: u8, bass: u8, pcs: u16) -> Chord {
+/// How many of an engine's chords there are, and of them how many have a name that doesn't read back on the root and
+/// bass it gives (so they're scored by the notes heard), for a warning.
+#[derive(Default)]
+struct Unread {
+    chords: usize,
+    unread: usize,
+    first: Option<String>,
+}
+
+/// A chord as the C# app shows it: the notes its name says, on the root and over the bass it gives, and the ones its
+/// name stands for without saying they sound ([`naming::may_leave_out`]: the fifth, the 9 under an 11 or 13, the 11 of
+/// a minor 13), which count only where the label has them. So "C7" names the G it may not have, "Gsus4" heard with an
+/// E leaves the E out, as the page shows them, and "Cm13" is right for a minor 13 with no 11. A name that doesn't
+/// read back on that root and bass (none in the bench's sets) falls back to every pitch class heard with the root (the
+/// bass among them, as the C# app's names have it: D7/C, never D/C), and nothing left out.
+fn cs_chord(name: &str, root: u8, bass: u8, pcs: u16) -> (Chord, PcSet) {
     let root = PitchClass::new(i32::from(root));
-    Chord::new(root, PcSet::from_bits(pcs).with(root), PitchClass::new(i32::from(bass)))
+    let bass = PitchClass::new(i32::from(bass));
+    match read_back(name, root, bass) {
+        Some(c) => (c, naming::may_leave_out(c)),
+        None => (Chord::new(root, PcSet::from_bits(pcs).with(root), bass), PcSet::EMPTY),
+    }
+}
+
+/// The C# app's name read with mo-harmony, when it reads back on the root and bass the app gives.
+fn read_back(name: &str, root: PitchClass, bass: PitchClass) -> Option<Chord> {
+    Chord::parse(name).filter(|c| c.root() == root && c.bass() == bass)
 }
 
 fn load(name: &str, path: &Path) -> Result<Engine, String> {
     let mut lists = false;
+    let mut unread = Unread::default();
+    // The chord an engine shows, counting the names that don't read back.
+    let mut shown = |name: &str, root: u8, bass: u8, pcs: u16| {
+        let (chord, optional) = cs_chord(name, root, bass, pcs);
+        unread.chords += 1;
+        if read_back(name, chord.root(), chord.bass()).is_none() {
+            unread.unread += 1;
+            unread.first.get_or_insert_with(|| name.to_owned());
+        }
+        (chord, optional)
+    };
     let read = item::read_lines::<Answers>(path)?
         .into_iter()
         .map(|a| {
@@ -57,18 +90,29 @@ fn load(name: &str, path: &Path) -> Result<Engine, String> {
                 .into_iter()
                 .map(|row| match row {
                     Row::Plain(start, end, name, root, bass, pcs) => {
-                        Read { start, end, chord: cs_chord(root, bass, pcs), name, others: Vec::new() }
+                        let (chord, optional) = shown(&name, root, bass, pcs);
+                        Read { start, end, chord, name, optional, others: Vec::new() }
                     }
                     Row::Listed(start, end, name, root, bass, pcs, others) => {
                         lists = true;
-                        let others = others.into_iter().map(|(_, r, b, p)| cs_chord(r, b, p)).collect();
-                        Read { start, end, chord: cs_chord(root, bass, pcs), name, others }
+                        let others = others.into_iter().map(|(n, r, b, p)| cs_chord(&n, r, b, p).0).collect();
+                        let (chord, optional) = shown(&name, root, bass, pcs);
+                        Read { start, end, chord, name, optional, others }
                     }
                 })
                 .collect();
             ((a.source, a.id), chords)
         })
         .collect();
+    if unread.unread > 0 {
+        eprintln!(
+            "{name}: {} of {} chords have a name that doesn't read back on their root and bass (the first: {}); they are \
+             scored by the notes heard",
+            unread.unread,
+            unread.chords,
+            unread.first.unwrap_or_default()
+        );
+    }
     Ok(Engine { name: name.to_owned(), read, lists })
 }
 
@@ -78,12 +122,14 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let mut dump = None;
     let mut part = None;
     let mut per_chord = false;
+    let mut by = Vec::new();
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--dump" => dump = Some(PathBuf::from(args.next().ok_or("--dump needs a file")?)),
             "--part" => part = Some(args.next().ok_or("--part needs a role")?.clone()),
             "--per-segment" => per_chord = true,
+            "--by" => by.push(args.next().ok_or("--by needs a tag, such as recipe or texture")?.clone()),
             "--answers" => {
                 let spec = args.next().ok_or("--answers needs name=file")?;
                 let (name, path) = spec.split_once('=').ok_or("--answers needs name=file")?;
@@ -182,7 +228,101 @@ pub fn run(args: &[String]) -> Result<(), String> {
         })
         .collect();
     naming::report(&scored, &song);
+    if !by.is_empty() {
+        print_by(&by, &items, &prepared, &engines);
+    }
     Ok(())
+}
+
+/// The chords named whole, split by the tags `convert/voice.py` gives each labelled chord it plays (`--by`): each
+/// group is scored on its own labelled chords alone, the rest of each piece left out.
+fn print_by(by: &[String], items: &[Item], prepared: &[Prepared], engines: &[Engine]) {
+    let groups: Vec<Vec<String>> = items.iter().map(|i| groups_of(i, by)).collect();
+    // Each group and the pieces that have it, so a group is tallied over its own pieces only.
+    let mut members: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (k, g) in groups.iter().enumerate() {
+        for name in g {
+            let pieces = members.entry(name.as_str()).or_default();
+            if pieces.last() != Some(&k) {
+                pieces.push(k);
+            }
+        }
+    }
+    let names: Vec<&str> = members.keys().copied().collect();
+    let pooled: Vec<Vec<naming::Pooled>> = members
+        .par_iter()
+        .map(|(&name, pieces)| {
+            engines
+                .iter()
+                .map(|e| {
+                    let tallies: Vec<Tally> = pieces
+                        .iter()
+                        .filter_map(|&k| Some((items.get(k)?, prepared.get(k)?, groups.get(k)?)))
+                        .map(|(item, p, g)| {
+                            let labels: Vec<(i64, i64, Named)> = p
+                                .named
+                                .iter()
+                                .zip(g)
+                                .map(|(&(s, e, n), x)| (s, e, if x == name { n } else { Named::Unknown }))
+                                .collect();
+                            let read = e.read.get(&key(item)).map_or(&[][..], Vec::as_slice);
+                            naming::tally(&labels, read, &p.played, p.bass_part, item.ppq)
+                        })
+                        .collect();
+                    naming::pool(&tallies)
+                })
+                .collect()
+        })
+        .collect();
+    let total: Vec<f64> =
+        (0..engines.len()).map(|k| pooled.iter().filter_map(|row| row.get(k)).map(|p| p.time).sum()).collect();
+    let cell = |x: Option<f64>| x.map_or("-".to_owned(), pct);
+    println!();
+    println!(
+        "The chords named whole, by {} (each group's share of the chord time; kind: the bass kind right; ext F1: the \
+         macro F1 of the extensions its labels have):",
+        by.join(" and ")
+    );
+    print!("{:<40}", "");
+    for h in ["time", "notes+bass", "name", "event", "lenient", "kind", "ext F1"] {
+        print!(" {h:>10}");
+    }
+    println!();
+    for (name, row) in names.iter().zip(&pooled) {
+        for (k, (e, p)) in engines.iter().zip(row).enumerate() {
+            let label = match (engines.len(), k) {
+                (1, _) => (*name).to_owned(),
+                (_, 0) => format!("{name}: {}", e.name),
+                _ => format!("  {}", e.name),
+            };
+            print!(
+                "{label:<40} {:>10}",
+                total.get(k).filter(|&&t| t > 0.0).map_or("-".to_owned(), |t| pct(p.time / t))
+            );
+            for s in p.scores {
+                print!(" {:>10}", cell(s));
+            }
+            println!(" {:>10} {:>10}", cell(p.kind_right), cell(p.macro_f1));
+        }
+    }
+}
+
+/// Each labelled chord's group for `--by`: the values of the tags asked for, joined by " / " ("-" for a tag it
+/// hasn't, as in a piece voice.py didn't play).
+fn groups_of(item: &Item, by: &[String]) -> Vec<String> {
+    item.chords
+        .iter()
+        .enumerate()
+        .map(|(i, &(s, e, _))| {
+            let tags = item
+                .render
+                .get(i)
+                .filter(|r| r.0 == s && r.1 == e)
+                .or_else(|| item.render.iter().find(|r| r.0 == s && r.1 == e))
+                .map(|r| &r.2);
+            by.iter().map(|b| tags.and_then(|t| t.get(b)).map_or("-", String::as_str)).collect::<Vec<_>>().join(" / ")
+        })
+        .collect()
 }
 
 /// The table of mir_eval's measures, each engine's share right and its range, then each engine against the first.
@@ -280,7 +420,7 @@ fn reference(item: &Item) -> Vec<harte::Span> {
 }
 
 /// What every engine's score on a piece needs, read once: its labels read whole, the pitch classes sounding in each
-/// in the parts heard, and whether those parts have a bass part.
+/// in the parts heard, and whether those parts have a bass part that plays.
 struct Prepared {
     named: Vec<(i64, i64, Named)>,
     played: Vec<PcSet>,
@@ -290,7 +430,8 @@ struct Prepared {
 fn prepare(item: &Item, heard: &impl Fn(&str) -> bool) -> Prepared {
     let named: Vec<(i64, i64, Named)> = item.chords.iter().map(|(s, e, l)| (*s, *e, harte::named(l))).collect();
     let played = played(&named, &item.notes_of(heard));
-    Prepared { named, played, bass_part: item.parts.iter().any(|p| p.role == "bass" && heard(&p.role)) }
+    let bass_part = item.parts.iter().any(|p| p.role == "bass" && heard(&p.role) && !p.notes.is_empty());
+    Prepared { named, played, bass_part }
 }
 
 /// How one engine did on one piece.
@@ -396,6 +537,63 @@ fn played<K>(spans: &[(i64, i64, K)], notes: &[item::Note]) -> Vec<PcSet> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_c_sharp_apps_chords_are_the_notes_its_names_say() {
+        let notes = |c: Chord| c.notes().iter().map(|p| i32::from(p.number())).collect::<Vec<_>>();
+        let left_out =
+            |(_, optional): (Chord, PcSet)| optional.iter().map(|p| i32::from(p.number())).collect::<Vec<_>>();
+        // C7 heard as C E Bb names the G (which it may leave out); Gsus4 heard as G C E (C/G) names the D (its fifth,
+        // which it may leave out) and leaves out the E.
+        assert_eq!(notes(cs_chord("C7", 0, 0, 0b0100_0001_0001).0), vec![0, 4, 7, 10]);
+        assert_eq!(left_out(cs_chord("C7", 0, 0, 0b0100_0001_0001)), vec![7]);
+        assert_eq!(notes(cs_chord("Gsus4", 7, 7, 0b0000_1001_0001).0), vec![0, 2, 7]);
+        assert_eq!(left_out(cs_chord("Gsus4", 7, 7, 0b0000_1001_0001)), vec![2]);
+        // The bass is one of its notes, as its names have it.
+        let (d7, _) = cs_chord("D7/C", 2, 0, 0b0010_0100_0101);
+        assert_eq!((notes(d7), d7.bass().number()), (vec![0, 2, 6, 9], 0));
+        // A minor 13 stands for its 9 and 11 and its fifth.
+        assert_eq!(left_out(cs_chord("Cm13", 0, 0, 0b0110_1000_1001)), vec![2, 5, 7]);
+        // A name that doesn't read back on its root keeps what was heard, with nothing left out.
+        assert_eq!(notes(cs_chord("Q7", 0, 0, 0b0100_0001_0001).0), vec![0, 4, 10]);
+        assert_eq!(
+            cs_chord("D7", 0, 0, 0b0100_0001_0001),
+            (Chord::new(PitchClass::C, PcSet::of(&[0, 4, 10]), PitchClass::C), PcSet::EMPTY)
+        );
+    }
+
+    #[test]
+    fn by_groups_each_labelled_chord_by_the_tags_voice_py_gave_it() {
+        let item: Item = serde_json::from_str(
+            r#"{"source":"x","id":"1","ppq":4,"length":24,"parts":[],
+                "chords":[[0,8,"C:maj"],[8,16,"G:7"],[16,24,"C:maj"]],
+                "render":[[0,8,{"texture":"held","recipe":"close"}],[16,24,{"texture":"walking"}],
+                          [8,16,{"texture":"pedal","recipe":"shell"}]]}"#,
+        )
+        .unwrap();
+        // The tags are found by the chord's span when they aren't at its place; a tag a chord hasn't is "-".
+        let by = |tags: &[&str]| groups_of(&item, &tags.iter().map(|t| (*t).to_owned()).collect::<Vec<_>>());
+        assert_eq!(by(&["texture"]), ["held", "pedal", "walking"]);
+        assert_eq!(by(&["texture", "recipe"]), ["held / close", "pedal / shell", "walking / -"]);
+        // A piece voice.py didn't play has no tags at all.
+        let plain = Item { render: Vec::new(), ..item.clone() };
+        assert_eq!(groups_of(&plain, &["texture".to_owned()]), ["-", "-", "-"]);
+    }
+
+    #[test]
+    fn only_a_bass_part_that_plays_counts_as_one() {
+        let item = |bass: &str| -> Item {
+            serde_json::from_str(&format!(
+                r#"{{"source":"x","id":"1","ppq":4,"length":8,"chords":[[0,8,"C:maj"]],
+                    "parts":[{{"role":"chords","notes":[[0,8,64,90]]}},{{"role":"bass","notes":[{bass}]}}]}}"#
+            ))
+            .unwrap()
+        };
+        let all = |_: &str| true;
+        assert!(prepare(&item("[0,8,36,90]"), &all).bass_part);
+        assert!(!prepare(&item(""), &all).bass_part);
+        assert!(!prepare(&item("[0,8,36,90]"), &|role: &str| role != "bass").bass_part);
+    }
 
     #[test]
     fn the_notes_played_in_each_labelled_span_are_found() {

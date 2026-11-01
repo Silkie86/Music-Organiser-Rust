@@ -252,6 +252,7 @@ fn pieces_of(found: &[Found], id: &str, group: &str, key: Key, from_folder: bool
             licence: item::OWN.to_owned(),
             group: group.to_owned(),
             whole: if f.cut { Whole::Window } else { Whole::Loop },
+            render: Vec::new(),
         });
     }
     (pieces, drums)
