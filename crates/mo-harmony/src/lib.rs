@@ -24,8 +24,9 @@ pub mod spell;
 
 pub use chord::{Chord, Family, ToneRole};
 pub use chordread::{
-    CHORD_READER_VERSION, Choice, ChoiceFrom, ChordAnswer, ChordContext, ChordReader, ChordReading, ChordSpan,
-    NameCheck, NoChord, Pin, Texture, read_chords,
+    CHORD_READER_VERSION, Choice, ChoiceFrom, ChordAnswer, ChordContext, ChordFact, ChordReader, ChordReading,
+    ChordSpan, ChordSummary, Extensions, FactReading, FactSpan, NameCheck, NoChord, Pin, SummaryFlags, Texture,
+    read_chords,
 };
 pub use key::{Key, KeyRelation, Mode};
 pub use keyfind::{

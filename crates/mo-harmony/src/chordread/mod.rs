@@ -31,6 +31,8 @@
 //!   written more than one way, a chord implied by one line, unclear, or no chord), the chart spelled in a key
 //!   ([`ChordReading::names`]), Chord check's choices ([`ChordSpan::choices`]), and names found elsewhere checked
 //!   against it ([`ChordReading::check_names`]);
+//! - what the MIDI page keeps of a reading: its chords in a few bytes a stretch ([`ChordFact`]), and eight bytes for
+//!   its search ([`ChordSummary`]);
 //! - the version ([`CHORD_READER_VERSION`]), with the hash of every number the reader is built from
 //!   ([`numbers_hash`]).
 
@@ -40,6 +42,9 @@ mod cores;
 mod decode;
 #[cfg(test)]
 mod decode_tests;
+mod fact;
+#[cfg(test)]
+mod fact_tests;
 mod hear;
 #[cfg(test)]
 mod hear_tests;
@@ -63,6 +68,7 @@ pub use answer::{ChordAnswer, Grading, NoChord, Texture, Thresholds, grade};
 pub use candidates::{Candidate, Label, Route, allowed, candidates, escape, open_fifth};
 pub use cores::{Core, CoreSet, Group, ToneClass, valid, valid_rootless};
 pub use decode::{Chance, DecodedSpan, Decoder, Decoding, KEEP, PinnedSpan, SHARPNESS, SPAN_BARS};
+pub use fact::{ChordFact, ChordSummary, Extensions, FACT_LAYOUT, FactReading, FactSpan, RunnerUp, SummaryFlags};
 pub use hear::{
     BASS_GAP, BassTexture, HeardNote, Hearing, Level, Line, MOST_UNITS, Mass, Push, Shape, Shaped, Stream, Unit,
     heard_in, played_in, presence_of,
