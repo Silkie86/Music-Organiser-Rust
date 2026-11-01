@@ -390,6 +390,11 @@ mod tests {
     use crate::SoundAnalysis;
     use crate::test_support::sound;
 
+    /// A folder as `pack` spells it on this system (Windows turns `/` into `\`).
+    fn sep(p: &str) -> String {
+        if cfg!(windows) { p.replace('/', "\\") } else { p.to_owned() }
+    }
+
     fn one_shot(id: i64, path: &str, kind: &str) -> Sound {
         let mut s = sound(id, path);
         s.analysis = Some(SoundAnalysis::default());
@@ -453,7 +458,7 @@ mod tests {
         assert_eq!(kit[0].sound, Some(16));
         let by_id: HashMap<i64, &Sound> = sounds.iter().map(|s| (s.id, s)).collect();
         for id in kit.iter().filter_map(|s| s.sound) {
-            assert_eq!(pack(by_id[&id]), "/s/Pack B", "{id}");
+            assert_eq!(pack(by_id[&id]), sep("/s/Pack B"), "{id}");
         }
         // A locked pad keeps its sound even once it's hidden.
         let mut sounds = sounds.clone();
@@ -461,7 +466,7 @@ mod tests {
         roll(&sounds, &HashMap::new(), &SoundIndex::default(), &mut kit, &o);
         assert_eq!(kit[0].sound, Some(16));
         for id in kit.iter().filter_map(|s| s.sound) {
-            assert_eq!(pack(by_id[&id]), "/s/Pack B", "{id}");
+            assert_eq!(pack(by_id[&id]), sep("/s/Pack B"), "{id}");
         }
     }
 
@@ -504,8 +509,8 @@ mod tests {
     #[test]
     fn names_are_made_safe() {
         assert_eq!(safe(" Kick: \"Big\" / 1 "), "Kick- -Big- - 1");
-        assert_eq!(pack(&sound(1, "/s/Pack/Kicks/a.wav")), "/s/Pack");
-        assert_eq!(pack(&sound(1, "/a.wav")), "/");
+        assert_eq!(pack(&sound(1, "/s/Pack/Kicks/a.wav")), sep("/s/Pack"));
+        assert_eq!(pack(&sound(1, "/a.wav")), sep("/"));
         assert_eq!(pack(&sound(1, r"D:\a.wav")), r"D:\");
     }
 }
