@@ -2,7 +2,7 @@
 // scrubber, and the picked song's panel beside it. Agreed with Solomon on 2026-10-31.
 import { ListView } from "std-widgets.slint";
 import { ArrangementPreview } from "arrangement.slint";
-import { Theme, Type, Space, Well, SearchBox, ToggleChip, MenuChip, ListLine, Stars, YearMark, Caps, Heart, CloseButton, TabBar, LinkText, StudioButton, ActionKey, MenuLine, Groove } from "../studio.slint";
+import { Theme, Type, Space, Well, SearchBox, ToggleChip, MenuChip, ListLine, Stars, YearMark, Caps, Heart, CloseButton, TabBar, LinkText, StudioButton, ActionKey, MenuLine, MenuCard, Groove } from "../studio.slint";
 
 // One line of the list: a heading ("This week", "2019") when `heading` isn't empty, else a song.
 export struct SongLine {
@@ -281,32 +281,23 @@ component SongPanel inherits Rectangle {
                     x: 0;
                     y: older-button.height + Space.xs;
                     width: max(older-button.width, 320px);
-                    Rectangle {
-                        background: Theme.surface-raised;
-                        border-radius: Theme.radius;
-                        border-width: 1px;
-                        border-color: Theme.edge;
-                        drop-shadow-color: Theme.shadow;
-                        drop-shadow-blur: 12px;
-                        VerticalLayout {
-                            padding: Space.xs;
-                            HorizontalLayout {
-                                padding-left: Space.sm;
-                                Caps {
-                                    text: SongsData.older-heading;
-                                    height: self.preferred-height + Space.sm;
-                                    vertical-alignment: center;
-                                }
+                    MenuCard {
+                        HorizontalLayout {
+                            padding-left: Space.md;
+                            Caps {
+                                text: SongsData.older-heading;
+                                height: self.preferred-height + Space.sm;
+                                vertical-alignment: center;
                             }
-                            for line in SongsData.older: MenuLine {
-                                text: line.text;
-                                clicked => { SongsData.open-save(line.path); }
-                            }
-                            Groove { }
-                            MenuLine {
-                                text: SongsData.older-see-all;
-                                clicked => { SongsData.tab = SongsData.saves-tab; }
-                            }
+                        }
+                        for line in SongsData.older: MenuLine {
+                            text: line.text;
+                            clicked => { SongsData.open-save(line.path); }
+                        }
+                        Groove { }
+                        MenuLine {
+                            text: SongsData.older-see-all;
+                            clicked => { SongsData.tab = SongsData.saves-tab; }
                         }
                     }
                 }
