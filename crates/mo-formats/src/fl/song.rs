@@ -239,6 +239,9 @@ pub struct FlSong {
     /// insert going to one other insert besides nothing else is a bus; several are sends.
     pub routes: BTreeMap<u32, Vec<u32>>,
     pub automation: Vec<FlAutomation>,
+    /// The patterns holding edit events (knob moves recorded into the pattern, event 223), by number: not decoded
+    /// yet, so a converter can say they're left out.
+    pub edit_events: Vec<u32>,
     /// Muted playlist tracks that have something on them: their clips are on a muted track, and their automation is
     /// left out.
     pub muted_tracks: Vec<FlTrack>,
@@ -754,6 +757,7 @@ pub fn read_song_with(flp: &Flp<'_>, sounds: bool) -> FlSong {
     let mut tracks = PlaylistTracks::default();
     let mut rack = Rack::default();
     let mut pattern: Option<u32> = None;
+    let mut edit_events: BTreeSet<u32> = BTreeSet::new();
     let mut pending_internal = String::new();
     let mut plugin_name = String::new();
     let mut insert_names: BTreeMap<u32, String> = BTreeMap::new();
@@ -787,6 +791,11 @@ pub fn read_song_with(flp: &Flp<'_>, sounds: bool) -> FlSong {
             EV_PATTERN_NOTES => {
                 if let Some(p) = pattern {
                     raw_notes.push((p, e));
+                }
+            }
+            EV_PATTERN_CONTROLLERS if !e.data.is_empty() => {
+                if let Some(p) = pattern {
+                    edit_events.insert(p);
                 }
             }
             EV_PLAYLIST if playlist.is_none() => playlist = Some(&e.data),
@@ -985,6 +994,7 @@ pub fn read_song_with(flp: &Flp<'_>, sounds: bool) -> FlSong {
         inserts,
         routes: insert_routes,
         automation,
+        edit_events: edit_events.into_iter().collect(),
         muted_tracks: muted_tracks.into_iter().collect(),
         curves: curves.into_iter().collect(),
         warning: if too_many { Some(TOO_MANY_NOTES) } else { too_many_points.then_some(TOO_MANY_POINTS) },

@@ -924,6 +924,15 @@ pub fn from_fl(song: &FlSong, options: Options, read_sample: &mut dyn FnMut(&str
     if let Some(moved) = notes::moved_inserts(used.iter().filter_map(|i| planner.inserts.get(i).copied())) {
         planner.notes.push(moved);
     }
+    // Knob moves recorded into patterns (FL's edit events) aren't decoded yet; said, so they don't vanish unseen.
+    if !song.edit_events.is_empty() {
+        let list: Vec<String> = song.edit_events.iter().map(u32::to_string).collect();
+        let s = if list.len() == 1 { "" } else { "s" };
+        planner.notes.push(format!(
+            "Edit events: the knob moves recorded into pattern{s} {} aren't carried over yet",
+            list.join(", ")
+        ));
+    }
 
     // Automation clips as lanes on the track they move: its volume, pan or a setting of its plugin, or a setting of an
     // effect on a mixer insert or the effect's slot switched on and off, on each track that has a copy of it.

@@ -126,6 +126,7 @@ fn song() -> FlSong {
         channels: vec![snare, synth],
         inserts: Vec::new(),
         routes: Default::default(),
+        edit_events: Vec::new(),
         automation: vec![
             automation("Snare volume", 0, FlControl::Volume, 0, &[(0.0, 0.5), (4.0, 1.0)]),
             automation("Serum - Cutoff", 1, FlControl::PluginParameter, 205, &[(0.0, 0.2), (2.0, 1.0), (4.0, 0.5)]),

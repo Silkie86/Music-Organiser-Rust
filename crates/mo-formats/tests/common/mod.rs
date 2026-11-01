@@ -722,6 +722,8 @@ pub fn fl_studio_25_switched_and_mixer(more: bool) -> Vec<u8> {
         .word(65, 1)
         .text(193, "Bass")
         .data(224, &[note(0, 0, 48, 36, 100), note(192, 0, 48, 38, 100)].concat())
+        // An edit event recorded into the pattern (not decoded yet): 12 bytes, as PyFLP has one.
+        .data(223, &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x80, 0x3f])
         .data(227, &automation_link(1, 7))
         .data(227, &automation_link(3, 2 << 16 | 7))
         .data(227, &automation_link(4, INSERT1 | 0x8003))

@@ -96,6 +96,7 @@ fn song(channels: Vec<FlChannel>, inserts: Vec<FlInsert>, automation: Vec<FlAuto
         channels,
         inserts,
         routes: Default::default(),
+        edit_events: Vec::new(),
         automation,
         muted_tracks: Vec::new(),
         curves: Default::default(),
@@ -627,4 +628,16 @@ fn a_bus_fader_reaches_the_channels_routed_to_it_through_other_inserts_but_not_t
     assert!(p.notes.contains(
         &"Bus fader: automation left out on some tracks (Keys reaches it through a send or sidechain)".to_owned()
     ));
+}
+
+#[test]
+fn edit_events_are_listed_as_not_carried() {
+    let mut s = song(vec![channel(0, "Bass", Some(plugin("Bass", "VST2", "1")), "", 0)], vec![], vec![]);
+    s.edit_events = vec![1, 4];
+    let p = plan(&s);
+    assert!(
+        p.notes.contains(&"Edit events: the knob moves recorded into patterns 1, 4 aren't carried over yet".to_owned()),
+        "{:?}",
+        p.notes
+    );
 }
