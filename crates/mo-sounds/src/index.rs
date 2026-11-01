@@ -346,7 +346,7 @@ mod tests {
 
     #[test]
     fn ties_go_by_id_and_odd_scores_go_last() {
-        let mut v = vec![(3, 0.5), (1, f32::NAN), (2, 0.5), (5, -0.0), (4, 0.0), (6, 0.9)];
+        let mut v = [(3, 0.5), (1, f32::NAN), (2, 0.5), (5, -0.0), (4, 0.0), (6, 0.9)];
         v.sort_by(closest_first);
         assert_eq!(v.iter().map(|x| x.0).collect::<Vec<_>>(), [6, 2, 3, 4, 5, 1]);
     }
