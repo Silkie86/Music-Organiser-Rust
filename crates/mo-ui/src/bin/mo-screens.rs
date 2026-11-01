@@ -425,8 +425,8 @@ fn sample_detail() -> mo_library::SaveDetail {
 
 /// Where the song panel's Show in folder and Older saves buttons are in the shots. If the panel's layout moves them,
 /// the tooltip and menu shots come out the same as the plain panel, and mo-screens stops with an error.
-const SHOW_BUTTON: (f32, f32) = (1000.0, 328.0);
-const OLDER_BUTTON: (f32, f32) = (865.0, 328.0);
+const SHOW_BUTTON: (f32, f32) = (1140.0, 328.0);
+const OLDER_BUTTON: (f32, f32) = (1005.0, 328.0);
 /// A point on a clip in the arrangement, from the view's top left, for the hover and zoom shots.
 const ARRANGEMENT_CLIP: (f32, f32) = (480.0, 180.0);
 
