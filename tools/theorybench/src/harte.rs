@@ -219,31 +219,8 @@ fn encode(text: &str, reduce: bool) -> Option<Label> {
         "X" => return Some(Label::UNKNOWN),
         _ => {}
     }
-    let (chord, bass) = match text.split_once('/') {
-        Some((c, b)) => (c, b),
-        None => (text, "1"),
-    };
-    let (chord, degrees) = match chord.split_once('(') {
-        Some((c, d)) => (c, Some(d.strip_suffix(')')?)),
-        None => (chord, None),
-    };
-    let degrees: Vec<&str> = degrees.map(|d| d.split(',').map(str::trim).collect()).unwrap_or_default();
-    let omission = degrees.iter().any(|d| d.contains('*'));
-    if omission && !chord.contains(':') {
-        return None;
-    }
-    let mut name = if degrees.is_empty() { "maj".to_owned() } else { String::new() };
-    let root_text = match chord.split_once(':') {
-        Some((r, q)) => {
-            if !q.is_empty() {
-                name = q.to_lowercase();
-            }
-            r
-        }
-        None => chord,
-    };
-    let root = root(root_text)?;
-    let mut degrees: Vec<String> = degrees.into_iter().filter(|d| !d.is_empty()).map(str::to_owned).collect();
+    let (root, mut name, degrees, bass) = split(text)?;
+    let mut degrees: Vec<String> = degrees.into_iter().map(str::to_owned).collect();
     if reduce && let Some((_, base, extra)) = REDUX.iter().find(|(q, _, _)| *q == name) {
         name = (*base).to_owned();
         degrees.extend(extra.iter().map(|d| (*d).to_owned()));
@@ -269,6 +246,38 @@ fn encode(text: &str, reduce: bool) -> Option<Label> {
         *s = 1;
     }
     Some(Label { root: root as i8, semitones, bass: bass as i8 })
+}
+
+/// A label (not "N" or "X") split as mir_eval's `split` and `encode` split it: the root, the quality's name (lower
+/// case; "maj" when the label has neither a quality nor degrees, "" when it has only degrees), the degrees in
+/// brackets (empty ones left out) and the bass degree ("1" when there's no slash). `None` when mir_eval would call it
+/// invalid. [`encode`] and [`whole`] both read labels through it, so they agree on which labels read.
+fn split(text: &str) -> Option<(i32, String, Vec<&str>, &str)> {
+    let (chord, bass) = match text.split_once('/') {
+        Some((c, b)) => (c, b),
+        None => (text, "1"),
+    };
+    let (chord, degrees) = match chord.split_once('(') {
+        Some((c, d)) => (c, Some(d.strip_suffix(')')?)),
+        None => (chord, None),
+    };
+    let degrees: Vec<&str> = degrees.map(|d| d.split(',').map(str::trim).collect()).unwrap_or_default();
+    let omission = degrees.iter().any(|d| d.contains('*'));
+    if omission && !chord.contains(':') {
+        return None;
+    }
+    let mut name = if degrees.is_empty() { "maj".to_owned() } else { String::new() };
+    let root_text = match chord.split_once(':') {
+        Some((r, q)) => {
+            if !q.is_empty() {
+                name = q.to_lowercase();
+            }
+            r
+        }
+        None => chord,
+    };
+    let root = root(root_text)?;
+    Some((root, name, degrees.into_iter().filter(|d| !d.is_empty()).collect(), bass))
 }
 
 /// Reads a label as mir_eval scores it, or `None` when mir_eval would call it invalid.
@@ -341,26 +350,8 @@ pub fn named(text: &str) -> Named {
 }
 
 fn whole(text: &str) -> Option<Chord> {
-    let (chord, bass) = text.split_once('/').unwrap_or((text, "1"));
-    let (chord, degrees) = match chord.split_once('(') {
-        Some((c, d)) => (c, Some(d.strip_suffix(')')?)),
-        None => (chord, None),
-    };
-    let degrees: Vec<&str> = degrees.map(|d| d.split(',').map(str::trim).collect()).unwrap_or_default();
-    if degrees.iter().any(|d| d.contains('*')) && !chord.contains(':') {
-        return None;
-    }
-    let mut name = if degrees.is_empty() { "maj".to_owned() } else { String::new() };
-    let root_text = match chord.split_once(':') {
-        Some((r, q)) => {
-            if !q.is_empty() {
-                name = q.to_lowercase();
-            }
-            r
-        }
-        None => chord,
-    };
-    let root = PitchClass::new(root(root_text)?);
+    let (root, name, degrees, bass) = split(text)?;
+    let root = PitchClass::new(root);
     let (_, shorthand) = WHOLE.iter().find(|(q, _)| *q == name)?;
     // How many times each note above the root is said, as mir_eval counts them: the root always, then the
     // shorthand's notes, and each degree in brackets adds one ("*" takes one away).
@@ -370,7 +361,7 @@ fn whole(text: &str) -> Option<Chord> {
             *n = 1;
         }
     }
-    for d in degrees.into_iter().filter(|d| !d.is_empty()) {
+    for d in degrees {
         let (sign, d) = match d.strip_prefix('*') {
             Some(rest) => (-1, rest.trim_start_matches('*')),
             None => (1, d),
@@ -757,6 +748,23 @@ mod tests {
         assert_eq!(named("N"), Named::NoChord);
         for bad in ["X", "H:maj", "C:foo", "C:maj(15)", "C(*5)", ""] {
             assert_eq!(named(bad), Named::Unknown, "{bad}");
+        }
+        // The whole shorthands are mir_eval's within the octave, and its own extensions above it (a 13 without its 11).
+        for (q, notes) in WHOLE {
+            let within: Vec<i32> = notes.iter().copied().filter(|&n| n < 12).collect();
+            let flags = quality(q).unwrap().map(i32::from);
+            let expected: Vec<i32> = (0..12).filter(|&i| flags[i as usize] > 0).collect();
+            assert_eq!(within, expected, "{q}");
+            let above: Vec<i32> = notes.iter().copied().filter(|&n| n >= 12).collect();
+            let mut redux: Vec<i32> = REDUX
+                .iter()
+                .find(|(r, _, _)| r == &q)
+                .map(|(_, _, extra)| extra.iter().map(|d| degree(d).unwrap()).filter(|&n| n >= 12).collect())
+                .unwrap_or_default();
+            if q.contains("13") {
+                redux.retain(|&n| n != 17);
+            }
+            assert_eq!(above, redux, "{q}");
         }
         // Every label mir_eval reads, this reads too, with the same root and the same notes within the octave.
         for text in

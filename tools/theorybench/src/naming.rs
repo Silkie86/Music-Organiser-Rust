@@ -18,26 +18,26 @@ use crate::metrics::{self, Share, pct};
 
 /// The scores of the whole chord, in the order [`Tally::right`] keeps them.
 /// - **notes+bass**: every note the label names and the bass, on any root (the design's "exact notes+bass").
-/// - **name**: the same, on the right root: the whole chord.
-/// - **event**: the root, the core ([`core`]) and the bass, tensions left out: what the reader's chances are about.
+/// - **name**: the same on the right root, with the bass of the same kind ([`KINDS`]): the whole chord as written, so
+///   D7/C isn't D/C (the C only a bass) though they sound the same.
+/// - **event**: the root, the core ([`core`]), the bass and its kind, tensions left out: what the reader's chances are
+///   about.
 /// - **lenient**: the event, where a plain major label also takes a maj7 or 6 reading, a minor one an m7 or m6, and a
 ///   sus4 a 7sus4 (POP909-CL labels by triad templates while the piano plays more).
 pub const SCORES: [&str; 4] = ["notes+bass", "name", "event", "lenient"];
 
-/// The extensions scored one at a time: the 6 of a chord with no seventh, and the tensions.
-pub const EXTENSIONS: [(&str, Degree); 8] = [
-    ("6", Degree::SIXTH),
-    ("b9", Degree::FLAT_NINTH),
-    ("9", Degree::NINTH),
-    ("#9", Degree::SHARP_NINTH),
-    ("11", Degree::ELEVENTH),
-    ("#11", Degree::SHARP_ELEVENTH),
-    ("b13", Degree::FLAT_THIRTEENTH),
-    ("13", Degree::THIRTEENTH),
+/// The extensions scored one at a time: the 6 of a chord with no seventh, and the tensions; and whether each is an
+/// altered tone (b9, #9, #11, b13), which are also scored pooled.
+pub const EXTENSIONS: [(&str, Degree, bool); 8] = [
+    ("6", Degree::SIXTH, false),
+    ("b9", Degree::FLAT_NINTH, true),
+    ("9", Degree::NINTH, false),
+    ("#9", Degree::SHARP_NINTH, true),
+    ("11", Degree::ELEVENTH, false),
+    ("#11", Degree::SHARP_ELEVENTH, true),
+    ("b13", Degree::FLAT_THIRTEENTH, true),
+    ("13", Degree::THIRTEENTH, false),
 ];
-
-/// Which of [`EXTENSIONS`] are altered tones (b9, #9, #11, b13), also scored pooled.
-const ALTERED: [bool; 8] = [false, true, false, true, false, true, true, false];
 
 /// How the bass stands to a chord: its root, another of its notes (an inversion, C/E), or only a bass (a slash
 /// chord, D/C).
@@ -59,7 +59,7 @@ pub fn extensions(c: Chord) -> u8 {
     let (intervals, family) = (c.intervals(), c.family());
     (1..12)
         .filter(|&i| intervals.has(i))
-        .filter_map(|i| EXTENSIONS.iter().position(|(_, d)| *d == chord::degree(intervals, family, i)))
+        .filter_map(|i| EXTENSIONS.iter().position(|(_, d, _)| *d == chord::degree(intervals, family, i)))
         .fold(0, |bits, k| bits | 1 << k)
 }
 
@@ -108,10 +108,10 @@ pub fn core(c: Chord) -> Core {
     core
 }
 
-/// Whether `read` is the labelled chord as an event: the same root and bass, and the same core, or with `lenient`
-/// the core a plain triad's label takes ([`SCORES`]).
+/// Whether `read` is the labelled chord as an event: the same root, bass and bass kind, and the same core, or with
+/// `lenient` the core a plain triad's label takes ([`SCORES`]).
 pub fn is_event(label: Chord, read: Chord, lenient: bool) -> bool {
-    if read.root() != label.root() || read.bass() != label.bass() {
+    if read.root() != label.root() || read.bass() != label.bass() || kind(read) != kind(label) {
         return false;
     }
     let (l, r) = (core(label), core(read));
@@ -129,7 +129,7 @@ pub fn is_event(label: Chord, read: Chord, lenient: bool) -> bool {
             }
 }
 
-/// What one engine got right on one piece: time in ticks, over the time the labels name a chord.
+/// What one engine got right on one piece: time in beats, over the time the labels name a chord.
 #[derive(Clone, Debug, Default)]
 pub struct Tally {
     /// The time the labels name a chord.
@@ -160,7 +160,8 @@ pub struct Tally {
 
 /// Scores one engine's chords on one piece. `labels` are the labelled chords, read whole; `played`, for each label,
 /// the pitch classes sounding in its time in the parts the engine heard; `bass_part`, whether those parts have one.
-pub fn tally(labels: &[(i64, i64, Named)], read: &[Read], played: &[PcSet], bass_part: bool) -> Tally {
+/// Times are counted in beats (ticks over `ppq`), so pieces with other ticks a beat count by their length.
+pub fn tally(labels: &[(i64, i64, Named)], read: &[Read], played: &[PcSet], bass_part: bool, ppq: u32) -> Tally {
     let mut t = Tally::default();
     let reads: Vec<(i64, i64, Option<usize>)> =
         read.iter().enumerate().map(|(i, r)| (r.start, r.end, Some(i))).collect();
@@ -170,7 +171,7 @@ pub fn tally(labels: &[(i64, i64, Named)], read: &[Read], played: &[PcSet], bass
         let Some(&(_, _, Named::Chord(label))) = labels.get(l) else {
             continue;
         };
-        let length = length as f64;
+        let length = length as f64 / f64::from(ppq.max(1));
         let reading = r.and_then(|i| read.get(i));
         let chord = reading.map(|r| r.chord);
         t.time += length;
@@ -178,17 +179,14 @@ pub fn tally(labels: &[(i64, i64, Named)], read: &[Read], played: &[PcSet], bass
         let same_notes = chord.is_some_and(|c| named_notes(c) == named_notes(label) && c.bass() == label.bass());
         let rights = [
             same_notes,
-            same_notes && same_root,
+            same_notes && same_root && chord.is_some_and(|c| kind(c) == kind(label)),
             chord.is_some_and(|c| is_event(label, c, false)),
             chord.is_some_and(|c| is_event(label, c, true)),
         ];
-        let mine = per_label.get_mut(l);
-        if let Some(p) = mine {
+        if let Some(p) = per_label.get_mut(l) {
             p[0] += length;
-        }
-        for (k, _) in rights.iter().enumerate().filter(|(_, r)| **r) {
-            t.right[k] += length;
-            if let Some(p) = per_label.get_mut(l) {
+            for (k, _) in rights.iter().enumerate().filter(|(_, r)| **r) {
+                t.right[k] += length;
                 p[k + 1] += length;
             }
         }
@@ -267,8 +265,8 @@ pub fn report(engines: &[Scored], song: &[usize]) {
     let column = |s: &Scored, f: &dyn Fn(&Tally) -> f64| s.tallies.iter().map(f).collect::<Vec<f64>>();
     let time = column(first, &|t| t.time);
     let chords = column(first, &|t| t.chords);
-    let chord_bars = time.iter().sum::<f64>();
-    if chord_bars <= 0.0 {
+    let chord_time = time.iter().sum::<f64>();
+    if chord_time <= 0.0 {
         println!();
         println!("No labelled chords to score the chords named whole on.");
         return;
@@ -311,7 +309,7 @@ pub fn report(engines: &[Scored], song: &[usize]) {
 
     println!();
     let support: Vec<f64> = (0..8)
-        .map(|k| first.tallies.iter().map(|t| t.extensions[k][0] + t.extensions[k][2]).sum::<f64>() / chord_bars)
+        .map(|k| first.tallies.iter().map(|t| t.extensions[k][0] + t.extensions[k][2]).sum::<f64>() / chord_time)
         .collect();
     if support.iter().all(|&s| s <= 0.0) {
         println!("Each extension: the labels here name none, so there's none to score.");
@@ -330,7 +328,7 @@ pub fn report(engines: &[Scored], song: &[usize]) {
             pct(s.value),
             100.0 * s.low,
             100.0 * s.high,
-            pct(notes.iter().sum::<f64>() / chord_bars)
+            pct(notes.iter().sum::<f64>() / chord_time)
         );
         let mut others: HashMap<&(String, String, u8), f64> = HashMap::new();
         for t in &e.tallies {
@@ -347,7 +345,7 @@ pub fn report(engines: &[Scored], song: &[usize]) {
                 if label.is_empty() { "major" } else { label.as_str() },
                 if read.is_empty() { "major" } else { read.as_str() },
                 up,
-                pct(time / chord_bars)
+                pct(time / chord_time)
             );
         }
     }
@@ -362,7 +360,7 @@ pub fn report(engines: &[Scored], song: &[usize]) {
             print!(
                 "{:<28} {:>11}",
                 if row == 0 { format!("{} {kind}", e.name) } else { format!("  {kind}") },
-                pct(total / chord_bars)
+                pct(total / chord_time)
             );
             for c in &cells {
                 print!(" {:>11}", if total > 0.0 { pct(c / total) } else { "-".to_owned() });
@@ -395,7 +393,7 @@ pub fn report(engines: &[Scored], song: &[usize]) {
         let part = |b: usize| {
             let time = column(e, &|t| t.rootless[b][0]);
             let s = metrics::ratio(&column(e, &|t| t.rootless[b][1]), &time, song);
-            let share = time.iter().sum::<f64>() / chord_bars;
+            let share = time.iter().sum::<f64>() / chord_time;
             if share > 0.0 {
                 format!("{} of the time, root right {}", pct(share), pct(s.value))
             } else {
@@ -439,7 +437,7 @@ fn print_extensions(engines: &[Scored], song: &[usize], support: &[f64]) {
          nothing to divide by):"
     );
     print!("{:<28}", "");
-    for (name, _) in EXTENSIONS {
+    for (name, _, _) in EXTENSIONS {
         print!(" {:>9}", name);
     }
     println!(" {:>9} {:>9}", "altered", "macro F1");
@@ -447,7 +445,7 @@ fn print_extensions(engines: &[Scored], song: &[usize], support: &[f64]) {
     for s in support {
         print!(" {:>9}", pct(*s));
     }
-    let altered: f64 = support.iter().zip(ALTERED).filter(|(_, a)| *a).map(|(s, _)| s).sum();
+    let altered: f64 = support.iter().zip(EXTENSIONS).filter(|(_, (_, _, a))| *a).map(|(s, _)| s).sum();
     println!(" {:>9}", pct(altered));
     let counts = |t: &Tally| -> [f64; 24] {
         let mut a = [0.0; 24];
@@ -470,12 +468,14 @@ fn print_extensions(engines: &[Scored], song: &[usize], support: &[f64]) {
             for c in sums.chunks_exact(3) {
                 print!(" {:>9}", cell(score_of(c[0], c[1], c[2], which)));
             }
-            let pooled =
-                |j: usize| sums.chunks_exact(3).zip(ALTERED).filter(|(_, a)| *a).map(|(c, _)| c[j]).sum::<f64>();
+            let pooled = |j: usize| {
+                sums.chunks_exact(3).zip(EXTENSIONS).filter(|(_, (_, _, a))| *a).map(|(c, _)| c[j]).sum::<f64>()
+            };
             print!(" {:>9}", cell(score_of(pooled(0), pooled(1), pooled(2), which)));
             if which == 2 {
+                // The labels have at least one extension here (else this table isn't printed), so it's never None.
                 let m = metrics::statistic(&values, song, |a| macro_f1(a).unwrap_or(0.0));
-                print!(" {:>9}", format!("{} ({:.1}-{:.1})", cell(macro_f1(&sums)), 100.0 * m.low, 100.0 * m.high));
+                print!(" {:>9}", format!("{} ({:.1}-{:.1})", pct(m.value), 100.0 * m.low, 100.0 * m.high));
             }
             println!();
         }
@@ -568,7 +568,7 @@ mod tests {
     }
 
     fn names(bits: u8) -> Vec<&'static str> {
-        EXTENSIONS.iter().enumerate().filter(|(k, _)| bits >> k & 1 == 1).map(|(_, (n, _))| *n).collect()
+        EXTENSIONS.iter().enumerate().filter(|(k, _)| bits >> k & 1 == 1).map(|(_, (n, _, _))| *n).collect()
     }
 
     #[test]
@@ -603,6 +603,10 @@ mod tests {
         assert!(is_event(label("C:maj/3"), chord("C/E"), false));
         assert!(!is_event(label("C:7"), chord("C7(b5)"), false));
         assert!(is_event(label("C:7"), chord("C7(#11)"), false));
+        // A bass that is only a bass isn't one of the chord's notes: D/C isn't D7/C, C/D isn't Cadd9/D.
+        assert!(is_event(label("D:maj/b7"), chord("D/C"), false));
+        assert!(!is_event(label("D:maj/b7"), chord("D7/C"), true));
+        assert!(!is_event(label("C:maj/9"), chord("Cadd9/D"), true));
     }
 
     #[test]
@@ -629,7 +633,7 @@ mod tests {
         // C6 read as Am7/C (the same notes and bass, another root), then G13 read right after a G7 for 5 ticks.
         let reads = [read(0, 10, "Am7/C", &["C6"]), read(10, 25, "G7", &[]), read(25, 40, "G13", &[])];
         let played = [PcSet::of(&[0, 4, 7, 9]), PcSet::EMPTY, PcSet::of(&[5, 9, 11, 4])];
-        let t = tally(&labels, &reads, &played, false);
+        let t = tally(&labels, &reads, &played, false, 1);
         assert_eq!(t.time, 30.0);
         // notes+bass: the 10 of C6 and the 15 of G13; the name only G13's 15; the event the G7's 5 too (tensions
         // left out).
@@ -647,5 +651,21 @@ mod tests {
         assert_eq!(t.kinds[0], [20.0, 10.0, 0.0, 0.0]);
         // C6 is the second reading for its 10; G7 and G13 the first for the 20 after the rest.
         assert_eq!(t.listed[0], [20.0, 30.0, 30.0, 10.0 / 2.0 + 20.0]);
+        // Counted in beats: the same at 2 ticks a beat is half.
+        assert_eq!(tally(&labels, &reads, &played, false, 2).right, [12.5, 7.5, 10.0, 10.0]);
+    }
+
+    #[test]
+    fn a_slash_chord_read_with_its_bass_as_a_chord_note_has_the_notes_but_not_the_name() {
+        let labels = [(0, 8, harte::named("D:maj/b7"))];
+        let read = |c: &str| Read { start: 0, end: 8, chord: chord(c), name: c.to_owned(), others: Vec::new() };
+        let played = [PcSet::of(&[0, 2, 6, 9])];
+        // D7/C: the same four notes over the same bass, but the C written as the chord's seventh.
+        let t = tally(&labels, &[read("D7/C")], &played, true, 1);
+        assert_eq!(t.right, [8.0, 0.0, 0.0, 0.0]);
+        assert_eq!(t.kinds[2], [0.0, 8.0, 0.0, 0.0]);
+        let t = tally(&labels, &[read("D/C")], &played, true, 1);
+        assert_eq!(t.right, [8.0, 8.0, 8.0, 8.0]);
+        assert_eq!(t.kinds[2], [0.0, 0.0, 8.0, 0.0]);
     }
 }

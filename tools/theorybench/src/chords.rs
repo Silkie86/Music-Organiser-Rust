@@ -117,11 +117,20 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let label_changes: usize = items.iter().map(|i| harte::join(&reference(i)).len()).sum();
     println!("The labels change chord {:.2} times a bar.", label_changes as f64 / bars);
 
-    let heard = |role: &str| role != "drums" && part.as_deref().is_none_or(|p| p == role);
+    // The parts the engines heard, as the C# helper picks them: those with the role given, or all but drums.
+    let heard = |role: &str| match part.as_deref() {
+        Some(p) => role == p,
+        None => role != "drums",
+    };
+    let prepared: Vec<Prepared> = items.par_iter().map(|i| prepare(i, &heard)).collect();
     let scores: Vec<Vec<Score>> = engines
         .iter()
         .map(|e| {
-            items.par_iter().map(|i| score(i, e.read.get(&key(i)).map_or(&[][..], Vec::as_slice), &heard)).collect()
+            items
+                .par_iter()
+                .zip(&prepared)
+                .map(|(i, p)| score(i, p, e.read.get(&key(i)).map_or(&[][..], Vec::as_slice)))
+                .collect()
         })
         .collect();
     let song: Vec<usize> = (0..items.len()).collect();
@@ -131,7 +140,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
 
     println!();
     println!("Share of the time right, each way mir_eval scores it (likely range when the songs are drawn again):");
-    print_measures(&engines, &scores, &song, |s, i| s.measures.get(i).copied().unwrap_or_default());
+    print_measures(&engines, &scores, &song, |s, i| {
+        s.measures.get(i).map_or((0.0, 0.0), |&(r, t)| (r as f64 / s.ppq, t as f64 / s.ppq))
+    });
     if per_chord {
         println!();
         println!(
@@ -146,7 +157,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
     );
     println!("{:<28} {:>11} {:>11} {:>11} {:>14}", "", "over-cut", "under-cut", "score", "changes a bar");
     for (e, s) in engines.iter().zip(&scores) {
-        let sum = |f: fn(&Score) -> i64| s.iter().map(f).sum::<i64>() as f64;
+        // In beats, so pieces with other ticks a beat count by their length.
+        let sum = |f: fn(&Score) -> i64| s.iter().map(|x| f(x) as f64 / x.ppq).sum::<f64>();
         let over = sum(|x| x.over_lost) / sum(|x| x.over_total).max(1.0);
         let under = sum(|x| x.under_lost) / sum(|x| x.under_total).max(1.0);
         let changes: usize = s.iter().map(|x| x.changes).sum();
@@ -174,7 +186,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
 }
 
 /// The table of mir_eval's measures, each engine's share right and its range, then each engine against the first.
-/// `cell` gives a piece's right and scored amounts for a measure: time, or labelled chords.
+/// `cell` gives a piece's right and scored amounts for a measure: time in beats, or labelled chords.
 fn print_measures(
     engines: &[Engine],
     scores: &[Vec<Score>],
@@ -208,6 +220,7 @@ fn print_measures(
     if let Some(((first, base), rest)) = engines.iter().zip(scores).collect::<Vec<_>>().split_first()
         && !rest.is_empty()
     {
+        println!();
         println!("Against the {} (points; a range that doesn't cross 0 is a real difference):", first.name);
         for (e, s) in rest {
             let diffs: Vec<(f64, f64, f64)> = (0..Measure::ALL.len())
@@ -240,15 +253,15 @@ fn write_dump(path: &Path, items: &[Item], engines: &[Engine], scores: &[Vec<Sco
     for (e, s) in engines.iter().zip(scores) {
         for (item, score) in items.iter().zip(s) {
             let read = e.read.get(&key(item)).map_or(&[][..], Vec::as_slice);
-            let measures: Vec<(i64, i64)> = score.measures.iter().map(|&(r, t)| (r as i64, t as i64)).collect();
             let line = serde_json::json!({
                 "engine": e.name,
                 "source": item.source,
                 "id": item.id,
+                "ppq": item.ppq,
                 "reference": item.chords,
                 "estimate": read.iter().map(|r| (r.start, r.end, Label::write(r.chord))).collect::<Vec<_>>(),
                 "names": read.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
-                "measures": Measure::ALL.iter().map(|m| m.name()).zip(&measures).collect::<Vec<_>>(),
+                "measures": Measure::ALL.iter().map(|m| m.name()).zip(&score.measures).collect::<Vec<_>>(),
                 "segmentation": [score.over_lost, score.over_total, score.under_lost, score.under_total],
             });
             writeln!(out, "{line}").map_err(|e| format!("{}: {e}", path.display()))?;
@@ -266,10 +279,26 @@ fn reference(item: &Item) -> Vec<harte::Span> {
     item.chords.iter().map(|(s, e, l)| (*s, *e, harte::parse(l).unwrap_or(Label::UNKNOWN))).collect()
 }
 
+/// What every engine's score on a piece needs, read once: its labels read whole, the pitch classes sounding in each
+/// in the parts heard, and whether those parts have a bass part.
+struct Prepared {
+    named: Vec<(i64, i64, Named)>,
+    played: Vec<PcSet>,
+    bass_part: bool,
+}
+
+fn prepare(item: &Item, heard: &impl Fn(&str) -> bool) -> Prepared {
+    let named: Vec<(i64, i64, Named)> = item.chords.iter().map(|(s, e, l)| (*s, *e, harte::named(l))).collect();
+    let played = played(&named, &item.notes_of(heard));
+    Prepared { named, played, bass_part: item.parts.iter().any(|p| p.role == "bass" && heard(&p.role)) }
+}
+
 /// How one engine did on one piece.
 struct Score {
+    /// Ticks a beat: the times below are in ticks (as `--dump` writes them), and pooled in beats.
+    ppq: f64,
     /// For each of [`Measure::ALL`]: the time it got right, and the time scored.
-    measures: Vec<(f64, f64)>,
+    measures: Vec<(i64, i64)>,
     /// For each of [`Measure::ALL`]: the labelled chords it got right for more than half their scored time, and the
     /// labelled chords scored.
     per_chord: Vec<(f64, f64)>,
@@ -283,14 +312,13 @@ struct Score {
     named: Tally,
 }
 
-/// `heard` says which parts' notes the engine heard (by role), for the score of roots no part plays.
-fn score(item: &Item, read: &[Read], heard: &impl Fn(&str) -> bool) -> Score {
+fn score(item: &Item, prepared: &Prepared, read: &[Read]) -> Score {
     let reference = reference(item);
     let indexed: Vec<(i64, i64, Option<usize>)> =
         read.iter().enumerate().map(|(i, r)| (r.start, r.end, Some(i))).collect();
     let labels: Vec<Label> = read.iter().map(|r| Label::of_chord(r.chord)).collect();
     let lined = harte::line_up_by(&reference, &indexed, None);
-    let mut measures = vec![(0.0, 0.0); Measure::ALL.len()];
+    let mut measures = vec![(0, 0); Measure::ALL.len()];
     // For each labelled chord and measure, the time right and the time scored.
     let mut by_label = vec![vec![(0i64, 0i64); Measure::ALL.len()]; reference.len()];
     for &(length, r, e) in &lined {
@@ -300,10 +328,10 @@ fn score(item: &Item, read: &[Read], heard: &impl Fn(&str) -> bool) -> Score {
         let estimate = e.and_then(|e| labels.get(e)).copied().unwrap_or(Label::NO_CHORD);
         for ((m, total), cell) in Measure::ALL.iter().zip(measures.iter_mut()).zip(cells.iter_mut()) {
             if let Some(right) = m.compare(&label.2, &estimate) {
-                total.1 += length as f64;
+                total.1 += length;
                 cell.1 += length;
                 if right {
-                    total.0 += length as f64;
+                    total.0 += length;
                     cell.0 += length;
                 }
             }
@@ -334,12 +362,9 @@ fn score(item: &Item, read: &[Read], heard: &impl Fn(&str) -> bool) -> Score {
     let (under_lost, under_total) = harte::hamming_parts(&joined_estimate, &joined_reference);
     let changes = harte::join(&whole).len();
 
-    let named: Vec<(i64, i64, Named)> = item.chords.iter().map(|(s, e, l)| (*s, *e, harte::named(l))).collect();
-    let notes = item.notes_of(heard);
-    let played = played(&named, &notes);
-    let bass_part = item.parts.iter().any(|p| p.role == "bass" && heard(&p.role));
-    let named = naming::tally(&named, read, &played, bass_part);
-    Score { measures, per_chord, over_lost, over_total, under_lost, under_total, changes, named }
+    let named = naming::tally(&prepared.named, read, &prepared.played, prepared.bass_part, item.ppq);
+    let ppq = f64::from(item.ppq.max(1));
+    Score { ppq, measures, per_chord, over_lost, over_total, under_lost, under_total, changes, named }
 }
 
 /// For each labelled span, the pitch classes of the notes sounding in it. `notes` are in order of start.
