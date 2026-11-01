@@ -13,6 +13,10 @@ use mo_space::key;
 use mo_space::plugin_space::SpaceKind;
 use mo_space::spare::{SpareCopy, Why, look, remove};
 
+mod common;
+
+use common::{folder_link, unlink};
+
 fn fixtures(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     let _ = fs::remove_dir_all(&dir);
@@ -228,20 +232,19 @@ fn a_copy_thats_a_link_stays() {
     assert!(dir.join("Elsewhere/Serum_x64.dll").exists());
 }
 
-#[cfg(unix)]
 #[test]
 fn a_folder_on_the_way_that_leads_elsewhere_now_keeps_it() {
     let dir = fixtures("mo-space-spare-repointed");
     write(&dir, "VST3/Serum.vst3", 10);
     write(&dir, "Mine/Serum_x64.dll", 10);
     write(&dir, "Other rig/Serum_x64.dll", 10);
-    std::os::unix::fs::symlink(dir.join("Mine"), dir.join("VST2")).unwrap();
+    folder_link(&dir.join("Mine"), &dir.join("VST2"));
     let copy = spare(&dir.join("VST2/Serum_x64.dll"), "VST2", &dir.join("VST3/Serum.vst3"));
     // The folder now leads to another rig's copy: the same name, size and time.
     let time = fs::metadata(dir.join("Mine/Serum_x64.dll")).unwrap().modified().unwrap();
     fs::File::options().write(true).open(dir.join("Other rig/Serum_x64.dll")).unwrap().set_modified(time).unwrap();
-    fs::remove_file(dir.join("VST2")).unwrap();
-    std::os::unix::fs::symlink(dir.join("Other rig"), dir.join("VST2")).unwrap();
+    unlink(&dir.join("VST2"));
+    folder_link(&dir.join("Other rig"), &dir.join("VST2"));
     let why = remove_one(&copy, &folder_bin(&dir)).unwrap();
     assert!(why.contains("changed since it was found"), "{why}");
     assert!(dir.join("Other rig/Serum_x64.dll").exists());
@@ -261,13 +264,12 @@ fn a_copy_on_a_network_drive_stays() {
     assert!(dir.join("VST2/Serum_x64.dll").exists());
 }
 
-#[cfg(unix)]
 #[test]
 fn one_file_picked_by_two_paths_goes_once() {
     let dir = fixtures("mo-space-spare-two-paths");
     write(&dir, "VST3/Serum.vst3", 10);
     write(&dir, "VST2/Serum_x64.dll", 10);
-    std::os::unix::fs::symlink(dir.join("VST2"), dir.join("Old VST2")).unwrap();
+    folder_link(&dir.join("VST2"), &dir.join("Old VST2"));
     let used = dir.join("VST3/Serum.vst3");
     let first = spare(&dir.join("VST2/Serum_x64.dll"), "VST2", &used);
     let again = spare(&dir.join("Old VST2/Serum_x64.dll"), "VST2", &used);
@@ -280,13 +282,12 @@ fn one_file_picked_by_two_paths_goes_once() {
     assert_eq!(done.problems[0].path, again.path);
 }
 
-#[cfg(unix)]
 #[test]
 fn a_good_second_path_still_goes_when_the_first_stays() {
     let dir = fixtures("mo-space-spare-second-path");
     write(&dir, "VST3/Serum.vst3", 10);
     write(&dir, "VST2/Serum_x64.dll", 10);
-    std::os::unix::fs::symlink(dir.join("VST2"), dir.join("Old VST2")).unwrap();
+    folder_link(&dir.join("VST2"), &dir.join("Old VST2"));
     let used = dir.join("VST3/Serum.vst3");
     let old = spare(&dir.join("Old VST2/Serum_x64.dll"), "VST2", &used);
     let good = spare(&dir.join("VST2/Serum_x64.dll"), "VST2", &used);

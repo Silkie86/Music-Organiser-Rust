@@ -18,6 +18,10 @@ use mo_space::folder_move::{
 use mo_space::key;
 use mo_space::plugin_space::SpaceKind;
 
+mod common;
+
+use common::{folder_link, is_link, unlink};
+
 fn fixtures(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     writable(&dir);
@@ -52,22 +56,6 @@ fn write(dir: &Path, rel: &str, text: &str) {
 
 fn s(p: &Path) -> String {
     p.to_string_lossy().into_owned()
-}
-
-/// A folder link, as the app makes one.
-fn folder_link(target: &Path, at: &Path) {
-    #[cfg(windows)]
-    junction::create(target, at).unwrap();
-    #[cfg(not(windows))]
-    std::os::unix::fs::symlink(target, at).unwrap();
-}
-
-fn unlink(at: &Path) {
-    if cfg!(windows) { fs::remove_dir(at).unwrap() } else { fs::remove_file(at).unwrap() }
-}
-
-fn is_link(p: &Path) -> bool {
-    fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink())
 }
 
 fn real(p: &Path) -> PathBuf {
@@ -221,6 +209,48 @@ fn a_folder_moves_to_the_other_drive_and_back_with_what_was_saved_meanwhile() {
     assert!(!moved.has_old_copy());
     // The copy on the other drive is left for you.
     assert!(copy.join("Pad.db").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_network_drive_is_never_where_a_folder_moves() {
+    let dir = fixtures("mo-space-move-network");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    write(&c, "Library/a.nki", "a");
+    fs::create_dir_all(&d).unwrap();
+    // Two slashes in front: a network path to Linux (\\server on Windows), though here it reaches the same folder.
+    let network = format!("/{}", s(&d));
+    let stop = AtomicBool::new(false);
+    assert_eq!(problem(&s(&c.join("Library")), &network, 1, &ROOMY, &[], &stop), Some(CantMove::NetworkDrive));
+    let moved = move_folder(&s(&c.join("Library")), &network, 1, whose(), &ROOMY, &[], &nothing, &stop);
+    assert_eq!(moved, Err(CantMove::NetworkDrive));
+    assert!(!d.join("Library").exists() && !is_link(&c.join("Library")));
+}
+
+#[test]
+fn an_old_copy_turned_into_a_link_stays_and_so_does_where_it_leads() {
+    let dir = fixtures("mo-space-move-old-copy-link");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    write(&c, "NI/Kontakt Library/a.nki", "a");
+    fs::create_dir_all(&d).unwrap();
+    let stop = AtomicBool::new(false);
+    let moved =
+        move_folder(&s(&c.join("NI/Kontakt Library")), &s(&d), 1, whose(), &ROOMY, &[], &nothing, &stop).unwrap();
+    // Since it was looked at, the old copy was put elsewhere and a link to it took its place.
+    let old = PathBuf::from(&moved.old_copy);
+    let elsewhere = dir.join("Elsewhere");
+    fs::rename(&old, &elsewhere).unwrap();
+    folder_link(&elsewhere, &old);
+    let bin = FolderBin { dir: dir.join("bin"), held: RefCell::new(Vec::new()) };
+    let done = remove_old_copy(&moved, std::slice::from_ref(&moved), true, &bin, &stop);
+    assert!(done.removed.is_empty());
+    assert_eq!(done.problems.len(), 1);
+    assert_eq!(
+        done.problems[0].why,
+        "It's a link now, not the folder the move set aside, so it stays, and so does where it leads."
+    );
+    assert!(is_link(&old));
+    assert_eq!(fs::read_to_string(elsewhere.join("a.nki")).unwrap(), "a");
 }
 
 #[test]
