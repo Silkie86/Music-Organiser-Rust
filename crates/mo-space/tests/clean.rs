@@ -301,6 +301,19 @@ fn links_are_never_followed_or_removed() {
 
 #[cfg(unix)]
 #[test]
+fn a_file_with_two_names_is_measured_once() {
+    let dir = fixtures("mo-space-clean-hard-link");
+    let song = dir.join("Song");
+    write(&song, "Audio/Take 1.wav", b"take one");
+    write(&song, "Audio/Take 2.wav", b"two");
+    // The same file on disk under a second name (a hard link), as some backup and tidy-up tools leave.
+    fs::hard_link(song.join("Audio/Take 1.wav"), song.join("Bounce.wav")).unwrap();
+    let measured = mo_space::size::measure(&song, &AtomicBool::new(false)).unwrap();
+    assert_eq!(measured, mo_space::Measured { bytes: 11, sound_bytes: 11, files: 2 });
+}
+
+#[cfg(unix)]
+#[test]
 fn a_link_into_a_sample_folder_cant_lead_a_clean_up_there() {
     let dir = fixtures("mo-space-clean-through-link");
     let projects = dir.join("Projects");

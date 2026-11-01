@@ -91,3 +91,8 @@ pub fn real_path(path: &str) -> Option<String> {
         (None, None) => real.into_owned(),
     })
 }
+
+/// [`real_path`] for a path; the path itself when where it really is can't be told (it isn't there yet).
+pub(crate) fn really(path: &std::path::Path) -> std::path::PathBuf {
+    real_path(&path.to_string_lossy()).map_or_else(|| path.to_path_buf(), std::path::PathBuf::from)
+}

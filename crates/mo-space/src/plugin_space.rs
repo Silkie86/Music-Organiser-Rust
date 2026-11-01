@@ -16,7 +16,7 @@ use mo_library::read::name_key;
 use mo_library::scan::is_inside;
 
 use crate::plugins::{InstalledPlugin, family, norm};
-use crate::size::{self, Measured, Stopped};
+use crate::size::{self, Measured, Stopped, total};
 use crate::{key, real_path};
 
 /// What a plugin's room on disk is: the plugin itself, its presets and settings, or its sounds.
@@ -57,7 +57,7 @@ pub struct PluginSpace {
 
 impl PluginSpace {
     fn sum(&self, kind: SpaceKind) -> u64 {
-        self.folders.iter().filter(|f| !f.shared() && f.kind == kind).map(|f| f.bytes).sum()
+        total(self.folders.iter().filter(|f| !f.shared() && f.kind == kind).map(|f| f.bytes))
     }
     pub fn program(&self) -> u64 {
         self.sum(SpaceKind::Program)
@@ -70,10 +70,10 @@ impl PluginSpace {
     }
     /// Its own room: the folders it shares with other plugins left out.
     pub fn bytes(&self) -> u64 {
-        self.program() + self.presets() + self.sounds()
+        total([self.program(), self.presets(), self.sounds()])
     }
     pub fn shared_bytes(&self) -> u64 {
-        self.folders.iter().filter(|f| f.shared()).map(|f| f.bytes).sum()
+        total(self.folders.iter().filter(|f| f.shared()).map(|f| f.bytes))
     }
 }
 
