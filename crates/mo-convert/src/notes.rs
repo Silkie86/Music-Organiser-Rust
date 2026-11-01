@@ -73,9 +73,6 @@ pub fn not_carried(a: &FlAutomation, song: &FlSong) -> String {
         FlControl::MainVolume => "the master volume isn't automated here yet".to_owned(),
         FlControl::InsertVolume => format!("the fader of {insert} isn't automated here yet"),
         FlControl::InsertPan => format!("the pan of {insert} isn't automated here yet"),
-        FlControl::InsertSlotOnOff => {
-            format!("switching an effect on {insert} on and off isn't carried over yet, so it stays on")
-        }
         FlControl::Pitch => "pitch has no equivalent here".to_owned(),
         _ => "this control has no equivalent here".to_owned(),
     }

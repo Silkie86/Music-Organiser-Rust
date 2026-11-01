@@ -374,6 +374,48 @@ fn an_inserts_effects_go_after_the_instrument_and_the_master_inserts_on_the_mast
 }
 
 #[test]
+fn an_effect_slot_switched_on_and_off_is_an_on_off_lane_of_switch_points() {
+    let mut s = song();
+    s.channels.remove(0);
+    s.channels[0].insert = 3;
+    let eq = FlPlugin { name: "Pro-Q 3".into(), device_id: "1".into(), slot: Some(2), ..serum() };
+    s.inserts = vec![FlInsert { index: 3, name: "Keys bus".into(), effects: vec![eq], fader: None, pan: None }];
+    s.automation = vec![FlAutomation {
+        channel: None,
+        insert: Some(3),
+        slot: Some(2),
+        ..automation("EQ on", 0, FlControl::InsertSlotOnOff, 0, &[(0.0, 1.0), (2.0, 0.0), (3.0, 0.0), (4.0, 1.0)])
+    }];
+    let (doc, notes, _) = convert(&s, &bitwig_template(Template::default()));
+    assert!(!notes.iter().any(|n| n.contains("automation")), "{notes:?}");
+    let (_, tracks) = tracks(&doc);
+    let eq = *chain(&doc, tracks[0]).last().unwrap();
+    let lanes = doc.field_list(obj(&doc, tracks[0], &[0x2dc9]), 0x4ba);
+    assert_eq!(lanes.len(), 1);
+    // As Bitwig 6.1.6 saves a device's On/Off lane.
+    let target = obj(&doc, lanes[0], &[0x2a3]);
+    assert_eq!(doc.field_obj(target, 0xec), Some(eq));
+    let t = doc.obj(target);
+    assert_eq!((t.str(0xed), t.str(0x133b), t.str(0x133a)), ("On", "Pro-Q 3", "On/Off"));
+    let switch = doc.obj(obj(&doc, target, &[0xe92]));
+    assert_eq!((switch.class, switch.get(0x1b2d)), (0xc6, Some(&Value::Bool(1))));
+    let list = obj(&doc, lanes[0], &[0x2d8c, 0x35ac]);
+    assert_eq!(doc.obj(list).class, 0xa4);
+    // One point at each change.
+    let points: Vec<_> = doc
+        .field_list(list, 0x21f)
+        .iter()
+        .map(|&p| (doc.obj(p).class, doc.obj(p).num(0x2af).unwrap(), doc.obj(p).get(0x12e).cloned()))
+        .collect();
+    assert_eq!(
+        points,
+        [(0x7d, 0.0, Some(Value::Bool(1))), (0x7d, 2.0, Some(Value::Bool(0))), (0x7d, 4.0, Some(Value::Bool(1)))]
+    );
+    // The setting isn't listed on the plugin as a knob of its own.
+    assert!(doc.field_list(def(&doc, eq), 0x1318).is_empty());
+}
+
+#[test]
 fn audio_clips_come_across_stretched_and_pitched_on_a_copy_of_the_audio_track() {
     let mut vox = channel(0, "Vox", None, r"C:\Samples\Snare 01.wav");
     vox.notes.clear();

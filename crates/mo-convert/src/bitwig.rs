@@ -886,6 +886,28 @@ impl Template {
                     }),
                 )
             }
+            Target::OnOff { device } => {
+                let Some(Some(device)) = devices.get(*device).copied() else {
+                    return Some("its plugin isn't converted");
+                };
+                let plugin_name = self.def(device).map(|d| self.doc.obj(d).str(0x9a).to_owned()).unwrap_or_default();
+                (
+                    self.plugin_lane,
+                    Box::new(move |doc: &mut Document, target: ObjId| {
+                        // As Bitwig 6.1.6 saves a device's On/Off lane: the setting "On", described as a switch.
+                        let mut switch = Object::new(0xc6);
+                        switch.set(0x1293, text(""));
+                        switch.set(0x1b2d, Value::Bool(1));
+                        let switch = doc.add(switch);
+                        let o = doc.obj_mut(target);
+                        put(o, 0xec, Value::Obj(Slot::Obj(device)));
+                        o.set(0xed, text("On"));
+                        o.set(0x133b, text(&plugin_name));
+                        o.set(0x133a, text("On/Off"));
+                        put(o, 0xe92, Value::Obj(Slot::Obj(switch)));
+                    }),
+                )
+            }
         };
         let (Some(pattern), Some(point), Some(lanes)) = (pattern, self.point, lanes) else { return Some(NO_LANE) };
         let made = self.copy(pattern);
@@ -894,6 +916,27 @@ impl Template {
         let Some(list) = self.doc.field_obj(made, 0x2d8c).and_then(|a| self.doc.field_obj(a, 0x35ac)) else {
             return Some(NO_LANE);
         };
+        if let Target::OnOff { .. } = lane.target {
+            // A switch's lane holds a point at each change (class 0x7d: where, and on or off) in its own kind of list
+            // (class 0xa4), as Bitwig 6.1.6 saves one.
+            self.doc.obj_mut(list).class = 0xa4;
+            let mut points = Vec::new();
+            let mut last = None;
+            for p in &lane.points {
+                let on = p.value >= 0.5;
+                if last == Some(on) {
+                    continue;
+                }
+                last = Some(on);
+                let mut o = Object::new(0x7d);
+                o.set(0x2af, Value::F64(p.beat));
+                o.set(0x12e, Value::Bool(on.into()));
+                points.push(Slot::Obj(self.doc.add(o)));
+            }
+            self.doc.obj_mut(list).set(0x21f, Value::List(points));
+            push(self.doc.obj_mut(lanes), 0x4ba, Slot::Obj(made));
+            return None;
+        }
         let mut points = Vec::with_capacity(lane.points.len());
         for p in &lane.points {
             let value = if lane.target == Target::Volume { p.value.cbrt() } else { p.value };
