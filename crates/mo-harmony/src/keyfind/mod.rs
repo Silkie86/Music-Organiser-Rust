@@ -41,8 +41,9 @@ use crate::notes::{Grid, Part};
 /// Bumped whenever the finder can give a different answer for the same notes (new weights, new evidence, a new way of
 /// giving the answer), so the answers the app keeps (the MIDI page's index) know to be worked out again. Version 2 gives
 /// the graded answer with its colours and checks hints; version 3 counts every major and minor chord heard, not only
-/// those standing on the bass.
-pub const KEY_FINDER_VERSION: u32 = 3;
+/// those standing on the bass; version 4 has the first fitted weights (POP909-CL, and the Billboard charts at a quarter
+/// weight), where before every key scored the same.
+pub const KEY_FINDER_VERSION: u32 = 4;
 
 /// What the notes are, as cut from the music: it says what their first and last bass mean.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

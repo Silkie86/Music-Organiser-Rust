@@ -16,7 +16,7 @@ const A_MINOR: Key = Key::minor(PitchClass::A);
 
 /// The hand cases' readings at each version of the finder, as a hash ([`readings_hash`]). A change that moves any of
 /// them needs `KEY_FINDER_VERSION` bumped, and a line added here.
-const READINGS: &[(u32, u64)] = &[(2, 0x6a1f_32df_22b2_bfb4), (3, 0x5648_73ce_4812_981c)];
+const READINGS: &[(u32, u64)] = &[(2, 0x6a1f_32df_22b2_bfb4), (3, 0x5648_73ce_4812_981c), (4, 0x35da_d8ac_7342_6ec8)];
 
 /// A hash of the readings an answer can change with: every hand case's reading with the shipped model, and with the
 /// odd one made four times as sharp (weights with no pattern: its answers are keys alone with their colours as well
@@ -349,13 +349,18 @@ fn the_version_is_bumped_when_a_number_changes() {
 fn a_change_that_moves_an_answer_bumps_the_version() {
     let now = readings_hash();
     let kept = READINGS.iter().find(|(v, _)| *v == KEY_FINDER_VERSION).map(|(_, h)| *h);
-    assert_eq!(
-        kept,
-        Some(now),
-        "the hand cases' readings differ from those kept for version {KEY_FINDER_VERSION}: if the change is meant, \
-         bump KEY_FINDER_VERSION and add ({}, {now:#018x}) to READINGS in keyfind/hand_case_tests.rs",
-        KEY_FINDER_VERSION + 1
-    );
+    // Once KEY_FINDER_VERSION is bumped, its readings only need adding.
+    let fix = match kept {
+        None => format!(
+            "no readings are kept for version {KEY_FINDER_VERSION} yet: add ({KEY_FINDER_VERSION}, {now:#018x})"
+        ),
+        Some(_) => format!(
+            "the hand cases' readings differ from those kept for version {KEY_FINDER_VERSION}: if the change is \
+             meant, bump KEY_FINDER_VERSION and add ({}, {now:#018x})",
+            KEY_FINDER_VERSION + 1
+        ),
+    };
+    assert_eq!(kept, Some(now), "{fix} to READINGS in keyfind/hand_case_tests.rs");
     assert!(READINGS.windows(2).all(|w| w[0].0 < w[1].0), "versions only go up");
     // The hash covers every kind of answer: the hand cases give no clear key for each reason, the chances made by hand
     // every other kind, ties included.
