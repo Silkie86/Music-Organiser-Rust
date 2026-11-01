@@ -144,6 +144,11 @@ fn reads_the_rest() {
     let tags = db.tag_counts().unwrap();
     assert_eq!((tags[0].tag.as_str(), tags[0].yours, tags[0].learned), ("warm", 2, 0));
     assert_eq!((tags[1].tag.as_str(), tags[1].yours, tags[1].learned), ("big", 0, 1));
+    let mut warm = db.tagged("warm", "you").unwrap();
+    warm.sort_unstable();
+    assert_eq!(warm, [1, 2]);
+    assert_eq!(db.tagged("big", "learned").unwrap(), [1]);
+    assert!(db.tagged("big", "you").unwrap().is_empty());
 
     let m = db.matches().unwrap();
     assert_eq!((m[0].a, m[0].b, m[0].kind.as_str(), m[0].apart, m[0].typical), (1, 2, "Converted", Some(1.5), None));
@@ -171,6 +176,7 @@ fn an_older_library_reads_with_what_it_has() {
     assert!(db.history(5).unwrap().is_empty());
     assert!(db.map("features").unwrap().is_empty());
     assert!(db.tag_counts().unwrap().is_empty());
+    assert!(db.tagged("warm", "you").unwrap().is_empty());
     assert_eq!(db.setting("x").unwrap(), None);
     assert_eq!(db.matches().unwrap()[0].apart, None);
 }
@@ -187,6 +193,7 @@ fn never_changes_the_library() {
     db.map("features").unwrap();
     db.vectors("clap").unwrap();
     db.tag_counts().unwrap();
+    db.tagged("warm", "you").unwrap();
     db.matches().unwrap();
     db.known_files().unwrap();
     db.setting("galaxy_basis").unwrap();

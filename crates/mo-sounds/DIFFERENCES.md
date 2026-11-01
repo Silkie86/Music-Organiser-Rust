@@ -40,3 +40,13 @@ made-up examples, compares every weight, then has Rust read the C# model and jud
 | A saved model whose sizes don't fit together | Read, then failed when used. | Treated as no model. | Better |
 | When it was trained | A local time. | Kept as the text .NET wrote, and written the same way. | Same |
 | A model with a number that isn't finite (from a sound whose analysis went wrong) | Its writer refused, so the old model stayed. | Not saved, so the old model stays. | Same |
+
+## Types and tags learned from your library
+
+`learn` ports `UpdateTypes`, `ResolveType`, `Disagreements` and `TrainTags`. They work out what changes and hand it
+back; nothing is saved to `sounds.db` yet.
+
+| What | C# | Rust | Judged |
+|---|---|---|---|
+| A type from CLAP's own words ("model", zero-shot), when the classifier isn't sure | Used once deep listening is installed. | Not yet: needs CLAP in Rust. A sound the C# app typed that way keeps its stored type until the Rust app writes. | Not yet |
+| A tag's model that can't train (vectors of different lengths) | Stopped with an error. | That half suggests nothing. | Better |
