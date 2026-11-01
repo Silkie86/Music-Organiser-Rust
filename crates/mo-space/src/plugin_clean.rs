@@ -24,7 +24,7 @@ use rayon::prelude::*;
 use crate::clean::{Bin, Done, Problem, Sending, Sent, What, both, on_network, parts};
 use crate::plugin_space::{PluginSpace, SpaceFolder, SpaceKind, data_roots, is_install_folder};
 use crate::plugins::is_plugin_file;
-use crate::size::{DEEPEST, Measured, Stopped, is_online_only, is_sound};
+use crate::size::{DEEPEST, Measured, Stopped, is_online_only, is_sound, total};
 use crate::{home_folder, key, real_path};
 
 /// How your projects use a plugin.
@@ -170,15 +170,16 @@ pub fn freed(picked: &[CleanLine]) -> u64 {
     let mut seen = HashSet::new();
     let going: Vec<&CleanLine> =
         picked.iter().filter(|l| l.stays.is_none() && seen.insert(key(&l.folder.path))).collect();
-    going
-        .iter()
-        .filter(|l| {
-            !going
-                .iter()
-                .any(|o| key(&o.folder.path) != key(&l.folder.path) && is_inside(&l.folder.path, &o.folder.path))
-        })
-        .map(|l| l.bytes())
-        .sum()
+    total(
+        going
+            .iter()
+            .filter(|l| {
+                !going
+                    .iter()
+                    .any(|o| key(&o.folder.path) != key(&l.folder.path) && is_inside(&l.folder.path, &o.folder.path))
+            })
+            .map(|l| l.bytes()),
+    )
 }
 
 /// What the library knows that Clean up must respect.
@@ -490,6 +491,10 @@ impl<'a> Checker<'a> {
     /// leads to stays where it is) but not followed, unless it's to a plugin.
     fn read_folder(&self, dir: &Path, stop: &AtomicBool) -> Read {
         let mut read = Read::default();
+        // Stop is looked at before each folder is opened and every 256 entries; the survey then says it stopped.
+        if stop.load(Ordering::Relaxed) {
+            return read;
+        }
         let here = dir.to_string_lossy();
         let (Ok(entries), Ok(dir_meta)) = (fs::read_dir(dir), fs::metadata(dir)) else {
             read.found.push(Found::Unreadable(here.into_owned()));
@@ -497,7 +502,7 @@ impl<'a> Checker<'a> {
         };
         let drive = device(&dir_meta);
         for (n, entry) in entries.enumerate() {
-            if n % 1024 == 1023 && stop.load(Ordering::Relaxed) {
+            if n % 256 == 255 && stop.load(Ordering::Relaxed) {
                 break;
             }
             let Ok(entry) = entry else {

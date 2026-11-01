@@ -37,6 +37,10 @@ pub struct Item {
     pub key_labels: String,
     #[serde(default)]
     pub chord_labels: String,
+    /// The licence the notes and labels come under ("MIT", "CC0", "CC BY 4.0"): keyfit learns only from those whose
+    /// fitted weights may ship ([`Item::may_learn`]) and only measures the rest.
+    #[serde(default)]
+    pub licence: String,
 }
 
 fn four() -> u32 {
@@ -106,6 +110,19 @@ impl Item {
         time.into_iter().max_by_key(|&(k, t)| (t, std::cmp::Reverse(k.index()))).map(|(k, _)| k)
     }
 
+    /// Whether weights fitted on this piece may ship in the app: its licence is MIT, CC0 or CC BY, without
+    /// NonCommercial, ShareAlike or NoDerivatives terms. Anything else, or no licence given, is only measured.
+    pub fn may_learn(&self) -> bool {
+        let licence = self.licence.to_ascii_uppercase().replace(['-', '_'], " ");
+        let words: Vec<&str> = licence.split_whitespace().collect();
+        match words.as_slice() {
+            ["MIT"] | ["MIT", "LICENSE" | "LICENCE"] => true,
+            [first, ..] if first.starts_with("CC0") => true,
+            ["CC", "BY", rest @ ..] => !rest.iter().any(|w| matches!(*w, "NC" | "SA" | "ND")),
+            _ => false,
+        }
+    }
+
     /// Whether every key label is the same key (no key change).
     pub fn one_key(&self) -> bool {
         let mut keys = self.keys.iter().filter_map(|(_, _, k)| Key::parse(k));
@@ -146,4 +163,30 @@ pub fn read_lines<T: DeserializeOwned>(path: &Path) -> Result<Vec<T>, String> {
         out.push(serde_json::from_str(&line).map_err(|e| format!("{} line {}: {e}", path.display(), n + 1))?);
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_licences_that_let_fitted_weights_ship_are_learned_from() {
+        let bare: Item = serde_json::from_str(r#"{"source":"x","id":"1","ppq":96,"length":96,"parts":[]}"#).unwrap();
+        let with = |licence: &str| Item { licence: licence.to_owned(), ..bare.clone() };
+        for yes in ["MIT", "MIT License", "mit licence", "CC0", "CC0-1.0", "CC BY 4.0", "CC-BY-4.0", "cc by"] {
+            assert!(with(yes).may_learn(), "{yes}");
+        }
+        for no in [
+            "",
+            "CC BY-NC-SA 4.0",
+            "CC BY-SA 4.0",
+            "CC BY-ND 4.0",
+            "ODbL",
+            "GPL-3.0",
+            "MIT-0 or GPL",
+            "measuring only (RS200)",
+        ] {
+            assert!(!with(no).may_learn(), "{no}");
+        }
+    }
 }

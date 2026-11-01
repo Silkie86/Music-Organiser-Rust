@@ -12,6 +12,10 @@ use mo_space::bitwig::{FixedProject, LibraryCopy, LibraryIndex, remove_copies};
 use mo_space::clean::{Bin, Problem, Removed, What, undo};
 use mo_space::key;
 
+mod common;
+
+use common::folder_link;
+
 fn fixtures(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     let _ = fs::remove_dir_all(&dir);
@@ -161,6 +165,30 @@ fn a_copy_that_is_a_link_or_a_multisample_folder_that_is_a_link_is_left_out() {
     let index = LibraryIndex::new(&[dir.join("Library")], &stop).unwrap();
     assert!(index.copies_in(&dir.join("Project"), &stop).unwrap().is_empty());
     assert!(index.copies_in(&dir.join("Linked"), &stop).unwrap().is_empty());
+}
+
+#[test]
+fn a_library_folder_moved_away_with_a_link_in_its_place_is_still_read() {
+    let dir = fixtures("mo-space-bitwig-library-moved");
+    let kicks = [4u8; 256];
+    write(&dir, "D/Packages/Kicks.multisample", &kicks);
+    write(&dir, "Projects/Garage/multi-samples/Kicks-2.multisample", &kicks);
+    // The packages folder was moved to another drive, and a link took its place (a junction on Windows, as Space
+    // makes).
+    let (moved, library) = (dir.join("D/Packages"), dir.join("installed-packages"));
+    folder_link(&moved, &library);
+    let stop = AtomicBool::new(false);
+    let index = LibraryIndex::new(std::slice::from_ref(&library), &stop).unwrap();
+    let copies = index.copies_in(&dir.join("Projects/Garage"), &stop).unwrap();
+    // Found, under the path you know, through the link: it stays right if the folder is moved back.
+    assert_eq!(
+        copies.iter().map(keyed).collect::<Vec<_>>(),
+        [keyed(&LibraryCopy {
+            in_project: s(&dir.join("Projects/Garage/multi-samples/Kicks-2.multisample")),
+            library_file: s(&library.join("Kicks.multisample")),
+            bytes: 256,
+        })]
+    );
 }
 
 #[test]
@@ -375,7 +403,6 @@ fn a_link_a_linked_folder_or_a_hard_link_to_the_library_file_stays() {
     assert!(dir.join("Elsewhere/A-2.multisample").exists() && library.join("A.multisample").exists());
 }
 
-#[cfg(unix)]
 #[test]
 fn one_copy_given_two_ways_goes_once_and_a_good_second_way_still_counts() {
     let dir = fixtures("mo-space-bitwig-remove-two-ways");
@@ -384,7 +411,7 @@ fn one_copy_given_two_ways_goes_once_and_a_good_second_way_still_counts() {
     write(&project, "P (fixed).bwproject", b"fixed");
     write(&project, "multi-samples/A-2.multisample", b"a");
     write(&project, "multi-samples/B-2.multisample", b"a");
-    std::os::unix::fs::symlink(project.join("multi-samples"), project.join("Old name")).unwrap();
+    folder_link(&project.join("multi-samples"), &project.join("Old name"));
     let ms = project.join("multi-samples");
     let changed = [
         // B: first with a Library file that isn't there, then as it should be.

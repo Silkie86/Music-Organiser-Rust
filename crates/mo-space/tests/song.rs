@@ -12,6 +12,10 @@ use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, TimeDelta};
 use mo_space::key;
 use mo_space::song::{CompactKind, CompactSettings, Elsewhere, SongSave, measure, thin};
 
+mod common;
+
+use common::folder_link;
+
 fn fixtures(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     let _ = fs::remove_dir_all(&dir);
@@ -311,12 +315,11 @@ fn saves_outside_the_songs_folder_still_count() {
     assert_eq!(report.bytes, 7);
 }
 
-#[cfg(unix)]
 #[test]
 fn a_song_folder_that_is_a_link_isnt_its_own() {
     let root = fixtures("mo-space-linked-folder");
     write(&root, "Moved/Song.bwproject", b"1", 0);
-    std::os::unix::fs::symlink(root.join("Moved"), root.join("Projects")).unwrap();
+    folder_link(&root.join("Moved"), &root.join("Projects"));
     let through = root.join("Projects/Song.bwproject").to_string_lossy().into_owned();
     let report =
         measure(&[save(&through, 0)], &[s(&root)], &[], CompactSettings::default(), None, &AtomicBool::new(false))

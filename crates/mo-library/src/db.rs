@@ -291,6 +291,22 @@ impl Library {
         Ok(Some(d))
     }
 
+    /// Every save's samples as the projects store them (a full path, a relative one, or a file name), by save id: for
+    /// the backup, which takes the samples each song uses along with it.
+    pub fn sample_paths(&self) -> Result<HashMap<i64, Vec<String>>, LibraryError> {
+        let mut out: HashMap<i64, Vec<String>> = HashMap::new();
+        if !self.has("samples") {
+            return Ok(out);
+        }
+        let mut st = self.conn.prepare("SELECT project_id, path FROM samples")?;
+        let rows = st.query_map([], |r| Ok((int(r, "project_id").unwrap_or(0), text(r, "path"))))?;
+        for row in rows {
+            let (project, path) = row?;
+            out.entry(project).or_default().push(path);
+        }
+        Ok(out)
+    }
+
     /// Your say on which saves are one song (table `song_choices`).
     pub fn song_choices(&self) -> Result<SongChoices, LibraryError> {
         if !self.has("song_choices") {

@@ -13,6 +13,10 @@ use mo_space::key;
 use mo_space::plugin_clean::{Library, PluginUse, Stays, apply, freed, lines};
 use mo_space::plugin_space::{PluginSpace, SpaceFolder, SpaceKind};
 
+mod common;
+
+use common::folder_link;
+
 fn fixtures(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     let _ = fs::remove_dir_all(&dir);
@@ -198,13 +202,12 @@ fn a_plugin_the_library_doesnt_know_counts_as_used() {
     assert_eq!(card[0].stays, Some(Stays::StillUsed));
 }
 
-#[cfg(unix)]
 #[test]
 fn a_folder_reached_through_a_link_stays() {
     let dir = fixtures("mo-space-plugin-clean-link");
     write(&dir, "D Drive/Thing Sounds/a.wav", 5);
     fs::create_dir_all(dir.join("Docs")).unwrap();
-    std::os::unix::fs::symlink(dir.join("D Drive"), dir.join("Docs/Moved")).unwrap();
+    folder_link(&dir.join("D Drive"), &dir.join("Docs/Moved"));
     let space = PluginSpace {
         key: "thing".into(),
         name: "Thing".into(),
@@ -379,6 +382,117 @@ fn only_sharers_your_projects_use_keep_a_folder_and_the_plugins_folders_are_chec
 }
 
 #[test]
+fn a_folder_holding_a_sample_a_project_uses_by_path_stays_also_when_found_after_the_look() {
+    let dir = fixtures("mo-space-plugin-clean-sample-at");
+    let docs = dir.join("Docs");
+    // Kontakt's own sample format: not a sound file to the look by name, so only `sample_at` knows a project uses it.
+    write(&docs, "Thing Sounds/Kit/Snare.ncw", 10);
+    write(&docs, "Thing Other/Pad.ncw", 10);
+    let thing = plugin(
+        "thing",
+        "Thing",
+        vec![
+            folder(&docs.join("Thing Sounds"), SpaceKind::Sounds, 10, &[]),
+            folder(&docs.join("Thing Other"), SpaceKind::Sounds, 10, &[]),
+        ],
+    );
+    let uses = uses(&[("thing", 0, true)]);
+    let sounds = s(&docs.join("Thing Sounds"));
+    let used_in = |folder: &str| (key(folder) == key(&sounds)).then(|| "Kit/Snare.ncw".to_owned());
+    let library_using = Library { sample_at: &used_in, ..library(&[], &[], &uses) };
+    let stop = AtomicBool::new(false);
+    let card = lines(&thing, std::slice::from_ref(&thing), &library_using, &stop).unwrap();
+    assert_eq!(card[0].stays, Some(Stays::SampleInUse("Kit/Snare.ncw".into())));
+    assert_eq!(card[1].stays, None);
+
+    // Looked at before a project used it; by the clean-up one does: it stays.
+    let card = lines(&thing, std::slice::from_ref(&thing), &library(&[], &[], &uses), &stop).unwrap();
+    assert!(card.iter().all(|l| l.stays.is_none()));
+    let bin = FolderBin { dir: dir.join("bin"), held: RefCell::new(Vec::new()) };
+    let done = apply(&card, &thing, std::slice::from_ref(&thing), &library_using, &bin, &stop);
+    assert_eq!(done.removed.len(), 1);
+    assert_eq!(
+        done.problems,
+        [Problem { path: sounds.clone(), why: "A project uses a sample in it (Kit/Snare.ncw).".into() }]
+    );
+    assert!(docs.join("Thing Sounds/Kit/Snare.ncw").exists());
+}
+
+#[test]
+fn a_stop_stops_the_look_and_keeps_what_hasnt_gone() {
+    let dir = fixtures("mo-space-plugin-clean-stop");
+    let docs = dir.join("Docs");
+    write(&docs, "Thing Presets/a.fxp", 5);
+    let thing = plugin("thing", "Thing", vec![folder(&docs.join("Thing Presets"), SpaceKind::Presets, 5, &[])]);
+    let uses = uses(&[("thing", 0, true)]);
+    let library = library(&[], &[], &uses);
+    let card = lines(&thing, std::slice::from_ref(&thing), &library, &AtomicBool::new(false)).unwrap();
+    let stopped = AtomicBool::new(true);
+    assert!(lines(&thing, std::slice::from_ref(&thing), &library, &stopped).is_err());
+    let bin = FolderBin { dir: dir.join("bin"), held: RefCell::new(Vec::new()) };
+    let done = apply(&card, &thing, std::slice::from_ref(&thing), &library, &bin, &stopped);
+    assert!(done.removed.is_empty());
+    assert_eq!(
+        done.problems,
+        [Problem { path: s(&docs.join("Thing Presets")), why: "Stopped before it went.".into() }]
+    );
+    assert!(docs.join("Thing Presets/a.fxp").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_folder_on_a_network_drive_stays() {
+    let dir = fixtures("mo-space-plugin-clean-network");
+    write(&dir, "Docs/Thing Presets/a.fxp", 5);
+    // Two slashes in front: a network path to Linux (\\server on Windows), though here it reaches the same folder.
+    let presets = format!("/{}", s(&dir.join("Docs/Thing Presets")));
+    let thing = plugin("thing", "Thing", vec![folder(Path::new(&presets), SpaceKind::Presets, 5, &[])]);
+    let uses = uses(&[("thing", 0, true)]);
+    let card = lines(&thing, std::slice::from_ref(&thing), &library(&[], &[], &uses), &AtomicBool::new(false)).unwrap();
+    assert_eq!(card[0].stays, Some(Stays::NetworkDrive));
+}
+
+#[cfg(windows)]
+#[test]
+fn program_files_never_goes_in_a_clean_up() {
+    use mo_space::plugin_space::is_install_folder;
+    let program_files = std::env::var("ProgramFiles").unwrap();
+    assert!(is_install_folder(&format!(r"{program_files}\Xfer\Serum Presets")));
+    // Written another way, it's still the same place.
+    assert!(is_install_folder(&format!("{}/xfer/Serum Presets", program_files.to_lowercase().replace('\\', "/"))));
+    if let Ok(x86) = std::env::var("ProgramFiles(x86)") {
+        assert!(is_install_folder(&format!(r"{x86}\Xfer\Serum Presets")));
+    }
+    assert!(!is_install_folder(r"C:\Users\Someone\Documents\Xfer\Serum Presets"));
+}
+
+#[test]
+fn a_folder_swapped_for_a_link_after_the_look_stays_and_so_does_where_it_leads() {
+    let dir = fixtures("mo-space-plugin-clean-swapped");
+    let docs = dir.join("Docs");
+    write(&docs, "Thing Presets/a.fxp", 5);
+    write(&dir, "Elsewhere/Thing Presets/a.fxp", 5);
+    let presets = docs.join("Thing Presets");
+    let thing = plugin("thing", "Thing", vec![folder(&presets, SpaceKind::Presets, 5, &[])]);
+    let uses = uses(&[("thing", 0, true)]);
+    let library = library(&[], &[], &uses);
+    let stop = AtomicBool::new(false);
+    let card = lines(&thing, std::slice::from_ref(&thing), &library, &stop).unwrap();
+    assert_eq!(card[0].stays, None);
+    // After the look, the folder is swapped for a link to a copy just like it (the same files, sizes and times).
+    let time = fs::metadata(presets.join("a.fxp")).unwrap().modified().unwrap();
+    let other = dir.join("Elsewhere/Thing Presets/a.fxp");
+    fs::File::options().write(true).open(&other).unwrap().set_modified(time).unwrap();
+    fs::remove_dir_all(&presets).unwrap();
+    folder_link(&dir.join("Elsewhere/Thing Presets"), &presets);
+    let bin = FolderBin { dir: dir.join("bin"), held: RefCell::new(Vec::new()) };
+    let done = apply(&card, &thing, std::slice::from_ref(&thing), &library, &bin, &stop);
+    assert!(done.removed.is_empty());
+    assert_eq!(done.problems[0].why, Stays::Link.text("Thing", &names));
+    assert!(other.exists());
+}
+
+#[test]
 fn a_file_saved_again_at_the_same_size_or_renamed_counts_as_a_change() {
     let dir = fixtures("mo-space-plugin-clean-same-size");
     let docs = dir.join("Docs");
@@ -416,18 +530,16 @@ fn a_file_saved_again_at_the_same_size_or_renamed_counts_as_a_change() {
     assert!(done.problems.iter().all(|p| p.why == "It changed since you looked, so it stays."));
 }
 
-#[cfg(unix)]
 #[test]
 fn your_folders_and_the_computers_own_are_known_by_where_they_really_are() {
-    use std::os::unix::fs::symlink;
     let dir = fixtures("mo-space-plugin-clean-real-paths");
     write(&dir, "Area/Samples/Kit/a.wav", 5);
     write(&dir, "Area/Other/x.fxp", 5);
     write(&dir, "Home/Music/Thing Sounds/a.wav", 5);
     write(&dir, "Home/Stuff/y.fxp", 5);
     fs::create_dir_all(dir.join("Elsewhere")).unwrap();
-    symlink(dir.join("Area/Samples"), dir.join("Elsewhere/Samples Link")).unwrap();
-    symlink(dir.join("Home/Music"), dir.join("Elsewhere/Music Link")).unwrap();
+    folder_link(&dir.join("Area/Samples"), &dir.join("Elsewhere/Samples Link"));
+    folder_link(&dir.join("Home/Music"), &dir.join("Elsewhere/Music Link"));
     let protected = vec![s(&dir.join("Elsewhere/Samples Link"))];
     let kept = vec![s(&dir.join("Elsewhere/Music Link"))];
     let thing = plugin(

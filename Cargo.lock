@@ -2893,10 +2893,13 @@ name = "mo-app"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "mo-backup",
  "mo-formats",
  "mo-library",
  "mo-sounds",
+ "mo-space",
  "rayon",
+ "rusqlite",
  "serde_json",
  "thread-priority",
  "tiny-skia 0.12.0",

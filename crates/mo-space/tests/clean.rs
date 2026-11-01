@@ -7,10 +7,15 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
+use std::time::{Duration, SystemTime};
 
 use mo_space::clean::{Bin, Guard, Problem, Refused, Removed, apply, preview, undo};
 use mo_space::key;
 use mo_space::song::{CompactItem, CompactKind};
+
+mod common;
+
+use common::folder_link;
 
 fn fixtures(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
@@ -230,6 +235,7 @@ fn removing_goes_to_the_bin_and_undo_puts_it_back() {
         &guard,
     );
     assert_eq!(plan.lines.len(), 3);
+    assert_eq!(plan.refused, [(line(CompactKind::Cache, &inside_cache), Refused::NotACache)]);
     fs::write(&changing, b"newer and longer").unwrap();
 
     let bin = FolderBin::new(dir.join("bin"));
@@ -250,6 +256,131 @@ fn removing_goes_to_the_bin_and_undo_puts_it_back() {
     assert_eq!(problems[0].path, auto);
     assert!(Path::new(&inside_cache).exists());
     assert_eq!(fs::read(&auto).unwrap(), b"new");
+}
+
+#[test]
+fn each_kind_of_line_is_only_ever_what_it_says() {
+    let dir = fixtures("mo-space-clean-kinds");
+    let projects = dir.join("Projects");
+    write(&projects, "Slow Orbit/Slow Orbit.song", b"song");
+    write(&projects, "Slow Orbit/Cache/a.peak", b"peak");
+    write(&projects, "Slow Orbit/Audio/Take 1.wav", b"take");
+    write(&projects, "No Song/Cache/a.peak", b"peak");
+    write(&projects, "Third/Third.song", b"song");
+    let lone = write(&projects, "Third/Cache", b"not a folder");
+    let kick = write(&projects, "Beat/Kick.wav", b"kick");
+    let kick_copy = write(&projects, "Beat/Kick copy.wav", b"kick");
+    let notes = write(&projects, "Beat/notes.txt", b"notes");
+    let vocal = write(&projects, "Beat/Backup/Vocal take.wav", b"vocal");
+    let lib =
+        Library { roots: vec![projects.to_string_lossy().into_owned()], samples: Vec::new(), keep: HashSet::new() };
+    let guard = Guard {
+        project_roots: &lib.roots,
+        sample_folders: &lib.samples,
+        keep: &lib.keep,
+        sample_in_use: &no_sample_in_use,
+    };
+    let folder = |rel: &str| line(CompactKind::Cache, &projects.join(rel).to_string_lossy());
+    let picked = [
+        // Studio One's Cache folder, beside its song: the one that goes.
+        folder("Slow Orbit/Cache"),
+        // Recorded takes beside a song, a Cache folder with no song beside it, and a file called Cache.
+        folder("Slow Orbit/Audio"),
+        folder("No Song/Cache"),
+        line(CompactKind::Cache, &lone),
+        // Audio the same as other audio isn't a save, nor are notes; audio in a Backup folder isn't an autosave.
+        copy_of(&kick_copy, &kick),
+        line(CompactKind::ThinnedSave, &notes),
+        line(CompactKind::Backup, &vocal),
+    ];
+    let plan = preview(&picked, &guard);
+    let going: Vec<&str> = plan.lines.iter().map(|l| l.item.path.as_str()).collect();
+    assert_eq!(going, [picked[0].path.as_str()]);
+    let refused: Vec<(&str, Refused)> = plan.refused.iter().map(|(i, why)| (i.path.as_str(), *why)).collect();
+    assert_eq!(
+        refused,
+        [
+            (picked[1].path.as_str(), Refused::NotACache),
+            (picked[2].path.as_str(), Refused::NotACache),
+            (lone.as_str(), Refused::NotACache),
+            (kick_copy.as_str(), Refused::NotASave),
+            (notes.as_str(), Refused::NotASave),
+            (vocal.as_str(), Refused::NotAnAutosave),
+        ]
+    );
+}
+
+#[test]
+fn a_file_written_again_at_the_same_size_after_the_preview_stays() {
+    let dir = fixtures("mo-space-clean-same-size");
+    let projects = dir.join("Projects");
+    let bounce = write(&projects, "Song/Bounce.wav", b"first mix");
+    let lib =
+        Library { roots: vec![projects.to_string_lossy().into_owned()], samples: Vec::new(), keep: HashSet::new() };
+    let guard = Guard {
+        project_roots: &lib.roots,
+        sample_folders: &lib.samples,
+        keep: &lib.keep,
+        sample_in_use: &no_sample_in_use,
+    };
+    // Unused audio is listed without a time, so only the look the preview took can tell.
+    let plan = preview(&[line(CompactKind::UnusedAudio, &bounce)], &guard);
+    assert_eq!(plan.lines.len(), 1);
+    // Bounced again after the preview: the same length, a later time.
+    fs::write(&bounce, b"other mix").unwrap();
+    let later = SystemTime::now() + Duration::from_secs(3600);
+    fs::File::options().write(true).open(&bounce).unwrap().set_modified(later).unwrap();
+    let bin = FolderBin::new(dir.join("bin"));
+    let done = apply(&plan, &guard, &bin, &AtomicBool::new(false));
+    assert!(done.removed.is_empty());
+    assert_eq!(done.problems, [Problem { path: bounce.clone(), why: Refused::Changed.text().into() }]);
+    assert_eq!(fs::read(&bounce).unwrap(), b"other mix");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_line_on_a_network_drive_is_refused_at_the_preview() {
+    let dir = fixtures("mo-space-clean-network");
+    let projects = dir.join("Projects");
+    let auto = write(&projects, "Song/Backup/Song (autosave).flp", b"auto");
+    // Two slashes in front: a network path to Linux (\\server on Windows), though here it reaches the same file.
+    let roots = vec![format!("/{}", projects.to_string_lossy())];
+    let keep = HashSet::new();
+    let guard = Guard { project_roots: &roots, sample_folders: &[], keep: &keep, sample_in_use: &no_sample_in_use };
+    let network = line(CompactKind::Backup, &format!("/{auto}"));
+    let plan = preview(std::slice::from_ref(&network), &guard);
+    assert!(plan.lines.is_empty());
+    assert_eq!(plan.refused, [(network, Refused::NetworkDrive)]);
+}
+
+#[test]
+fn a_folder_swapped_for_a_link_after_the_preview_stays_and_so_does_where_it_leads() {
+    let dir = fixtures("mo-space-clean-swapped");
+    let projects = dir.join("Projects");
+    write(&projects, "Slow Orbit/Slow Orbit.song", b"song");
+    write(&projects, "Slow Orbit/Cache/a.peak", b"peak");
+    write(&dir, "Elsewhere/Cache/a.peak", b"peak");
+    let lib =
+        Library { roots: vec![projects.to_string_lossy().into_owned()], samples: Vec::new(), keep: HashSet::new() };
+    let guard = Guard {
+        project_roots: &lib.roots,
+        sample_folders: &lib.samples,
+        keep: &lib.keep,
+        sample_in_use: &no_sample_in_use,
+    };
+    let cache = projects.join("Slow Orbit/Cache");
+    let plan = preview(&[line(CompactKind::Cache, &cache.to_string_lossy())], &guard);
+    assert_eq!(plan.lines.len(), 1);
+    // After the preview, the Cache folder is swapped for a link to a copy just like it: the same name, size and time.
+    let time = fs::metadata(cache.join("a.peak")).unwrap().modified().unwrap();
+    fs::File::options().write(true).open(dir.join("Elsewhere/Cache/a.peak")).unwrap().set_modified(time).unwrap();
+    fs::remove_dir_all(&cache).unwrap();
+    folder_link(&dir.join("Elsewhere/Cache"), &cache);
+    let bin = FolderBin::new(dir.join("bin"));
+    let done = apply(&plan, &guard, &bin, &AtomicBool::new(false));
+    assert!(done.removed.is_empty());
+    assert_eq!(done.problems[0].why, Refused::Link.text());
+    assert!(dir.join("Elsewhere/Cache/a.peak").exists());
 }
 
 #[test]
@@ -301,12 +432,24 @@ fn links_are_never_followed_or_removed() {
 
 #[cfg(unix)]
 #[test]
+fn a_file_with_two_names_is_measured_once() {
+    let dir = fixtures("mo-space-clean-hard-link");
+    let song = dir.join("Song");
+    write(&song, "Audio/Take 1.wav", b"take one");
+    write(&song, "Audio/Take 2.wav", b"two");
+    // The same file on disk under a second name (a hard link), as some backup and tidy-up tools leave.
+    fs::hard_link(song.join("Audio/Take 1.wav"), song.join("Bounce.wav")).unwrap();
+    let measured = mo_space::size::measure(&song, &AtomicBool::new(false)).unwrap();
+    assert_eq!(measured, mo_space::Measured { bytes: 11, sound_bytes: 11, files: 2 });
+}
+
+#[test]
 fn a_link_into_a_sample_folder_cant_lead_a_clean_up_there() {
     let dir = fixtures("mo-space-clean-through-link");
     let projects = dir.join("Projects");
     let loop_wav = write(&dir, "Samples/Loops/Song/Loop.wav", b"loop");
     fs::create_dir_all(&projects).unwrap();
-    std::os::unix::fs::symlink(dir.join("Samples/Loops"), projects.join("Shared")).unwrap();
+    folder_link(&dir.join("Samples/Loops"), &projects.join("Shared"));
     let through = projects.join("Shared/Song/Loop.wav").to_string_lossy().into_owned();
     // Even with no sample folders given, the link leads out of the project folder.
     let lib =

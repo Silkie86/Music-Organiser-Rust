@@ -101,12 +101,40 @@ pub fn aax_folders() -> Vec<PathBuf> {
     }
 }
 
-/// Whether Pro Tools is installed, so AAX plugins are in use.
+/// Whether Pro Tools is installed, so AAX plugins are in use. On a Mac: a Pro Tools app ("Pro Tools", "Pro Tools
+/// First", …) in the Applications folders, or in folders in them. On Windows: its usual folder, or any Pro Tools among
+/// the installed programs (it can be on another drive, or named otherwise). A Pro Tools left listed after it was
+/// removed still counts: an AAX copy then stays, which is the safe way to be wrong.
 pub fn pro_tools_installed() -> bool {
     if cfg!(target_os = "macos") {
-        return Path::new("/Applications/Pro Tools.app").is_dir();
+        let mine = crate::home_folder().map(|home| home.join("Applications"));
+        return [Some(PathBuf::from("/Applications")), mine].iter().flatten().any(|folder| pro_tools_app_in(folder));
     }
     std::env::var_os("ProgramFiles").is_some_and(|pf| PathBuf::from(pf).join("Avid").join("Pro Tools").is_dir())
+        || crate::uninstallers::all().iter().any(|u| u.name.to_lowercase().contains("pro tools"))
+}
+
+/// Whether a folder (a Mac's Applications folder), or a folder in it up to three down, holds a Pro Tools app. Apps
+/// aren't looked inside.
+pub fn pro_tools_app_in(folder: &Path) -> bool {
+    let mut level = vec![folder.to_path_buf()];
+    for _ in 0..4 {
+        let mut next = Vec::new();
+        for dir in &level {
+            for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+                let name = entry.file_name().to_string_lossy().to_lowercase();
+                if name.ends_with(".app") {
+                    if name.starts_with("pro tools") {
+                        return true;
+                    }
+                } else if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                    next.push(entry.path());
+                }
+            }
+        }
+        level = next;
+    }
+    false
 }
 
 /// Plugin bundles are folders (a .vst3 on Windows; on a Mac .component, .clap and .vst too): what's inside one isn't a

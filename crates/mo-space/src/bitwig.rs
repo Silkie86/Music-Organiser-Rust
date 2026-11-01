@@ -7,7 +7,7 @@
 //! [`LibraryIndex::copies_in`] finds the copies that are the same as a Library file byte for byte, and changes nothing.
 //! [`remove_copies`] sends the copies a "(fixed)" project no longer uses to the Recycle Bin, once you've opened it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -18,8 +18,8 @@ use std::time::SystemTime;
 use rayon::prelude::*;
 
 use crate::clean::{Bin, Done, Problem, STOPPED, Sending, Sent, What, cant_keep};
-use crate::size::{Stopped, file_hash, is_link, walk};
-use crate::{real_path, text};
+use crate::size::{Stopped, file_hash, file_id, is_link, walk};
+use crate::{key, real_path, really, text};
 
 /// The folder in a Bitwig project (or template) its multisample copies are kept in.
 pub const PROJECT_FOLDER: &str = "multi-samples";
@@ -60,24 +60,37 @@ impl LibraryIndex {
     pub fn new(folders: &[PathBuf], stop: &AtomicBool) -> Result<Self, Stopped> {
         let mut listed: Vec<(u64, PathBuf)> = Vec::new();
         for folder in folders {
-            listed.extend(walk(folder, false, stop, |path, meta| {
-                (is_multisample(path) && meta.is_file() && !in_a_project(path))
-                    .then(|| (meta.len(), path.to_path_buf()))
+            // A Library folder moved to another drive with a link in its place (as Space's moves leave one) is read
+            // where it really is, and its files keep the paths you know, through the link: they stay right if the
+            // folder is moved back.
+            let real = really(folder);
+            listed.extend(walk(&real, false, stop, |path, meta| {
+                if !is_multisample(path) || !meta.is_file() || in_a_project(path) {
+                    return None;
+                }
+                Some((meta.len(), folder.join(path.strip_prefix(&real).ok()?)))
             })?);
         }
         // Where each really is, worked out once here rather than for every copy.
         listed.par_sort_unstable();
-        listed.dedup();
-        let kept: Vec<(u64, PathBuf)> = listed
+        let found: Vec<(u64, PathBuf, String)> = listed
             .into_par_iter()
-            .filter(|(_, path)| real_path(&text(path)).is_some_and(|real| !in_a_project(Path::new(&real))))
+            .filter_map(|(size, path)| {
+                let real = real_path(&text(&path))?;
+                (!in_a_project(Path::new(&real))).then(|| (size, path, key(&real)))
+            })
             .collect();
         if stop.load(Ordering::Relaxed) {
             return Err(Stopped);
         }
+        // One file reached two ways (a Library folder given, and a link to it given too) is listed once, so it's read
+        // once and one path is picked for it.
+        let mut seen = HashSet::new();
         let mut by_size: HashMap<u64, Vec<PathBuf>> = HashMap::new();
-        for (size, path) in kept {
-            by_size.entry(size).or_default().push(path);
+        for (size, path, real) in found {
+            if seen.insert(real) {
+                by_size.entry(size).or_default().push(path);
+            }
         }
         Ok(LibraryIndex { by_size, prints: Prints::default() })
     }
@@ -293,18 +306,10 @@ fn still_a_copy(
     }
 }
 
-/// Whether two looks are at one file on disk (hard links to it). Only a Mac or Linux can tell here.
-#[cfg(unix)]
+/// Whether two looks are at one file on disk (hard links to it). Only a Mac or Linux can tell here: on Windows a hard
+/// link counts as a copy (it goes to the bin, and the Library file stays).
 fn same_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    a.dev() == b.dev() && a.ino() == b.ino()
-}
-
-/// Windows' file numbers aren't readable from here yet: a hard link counts as a copy (it goes to the bin, and the
-/// Library file stays).
-#[cfg(not(unix))]
-fn same_file(_a: &fs::Metadata, _b: &fs::Metadata) -> bool {
-    false
+    file_id(a).is_some_and(|id| file_id(b) == Some(id))
 }
 
 /// A Bitwig multisample file.

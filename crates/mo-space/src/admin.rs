@@ -303,20 +303,24 @@ fn hex(bytes: &[u8]) -> String {
 /// each file's size and time and where each link leads), for a file its size and time. The app takes it just before
 /// Windows asks and the step takes it again before binning, so what goes is what the app checked. As in the plugin
 /// clean-up's own look, the files Finder and Explorer make by themselves when you open a folder don't count, and a
-/// folder counts by its name only. `None` when some of it can't be read: then it stays, as the step could only check
-/// what the app could.
+/// folder counts by its name only. `None` when some of it can't be read, or is deeper than the walks go
+/// ([`crate::size::DEEPEST`] folders): then it stays, as the step could only check what the app could.
 pub(crate) fn stamp(path: &Path) -> Option<String> {
     let meta = fs::symlink_metadata(path).ok()?;
-    Some(hex(&part_stamp(path, "", &meta)?))
+    Some(hex(&part_stamp(path, "", &meta, 0)?))
 }
 
-/// One file, folder or link's part of a [`stamp`]. A folder's takes in what's inside it in name order, each part
-/// worked out over the cores of the pool it's called in.
-fn part_stamp(path: &Path, rel: &str, meta: &Metadata) -> Option<[u8; 32]> {
+/// One file, folder or link's part of a [`stamp`], `depth` folders down. A folder's takes in what's inside it in name
+/// order, each part worked out over the cores of the pool it's called in.
+fn part_stamp(path: &Path, rel: &str, meta: &Metadata, depth: usize) -> Option<[u8; 32]> {
     let mut hash = Sha256::new();
     if meta.file_type().is_symlink() {
         hash.update(format!("link\t{rel}\t{}\n", text(&fs::read_link(path).ok()?)));
     } else if meta.is_dir() {
+        // Each level is a call of its own: a folder thousands deep would run out of room for them.
+        if depth >= crate::size::DEEPEST {
+            return None;
+        }
         hash.update(format!("folder\t{rel}\n"));
         // On Windows what each entry is comes with the folder listing itself, so no file is opened.
         let mut inside = fs::read_dir(path)
@@ -326,8 +330,10 @@ fn part_stamp(path: &Path, rel: &str, meta: &Metadata) -> Option<[u8; 32]> {
             .ok()?;
         inside.retain(|(name, _, m)| !(m.is_file() && made_by_the_system(name)));
         inside.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-        let parts: Vec<[u8; 32]> =
-            inside.par_iter().map(|(name, p, m)| part_stamp(p, &format!("{rel}/{name}"), m)).collect::<Option<_>>()?;
+        let parts: Vec<[u8; 32]> = inside
+            .par_iter()
+            .map(|(name, p, m)| part_stamp(p, &format!("{rel}/{name}"), m, depth + 1))
+            .collect::<Option<_>>()?;
         parts.iter().for_each(|part| hash.update(part));
     } else {
         let time = meta.modified().ok()?.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());

@@ -10,6 +10,10 @@ use std::path::{Path, PathBuf};
 
 use mo_space::admin::{MOVE_FOLDER, RECYCLE_BIN, run_step, write_list};
 
+mod common;
+
+use common::{folder_link, is_link, unlink};
+
 fn fixtures(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     if dir.exists() {
@@ -38,13 +42,6 @@ fn unlock_all(dir: &Path) {
 
 fn s(p: &Path) -> String {
     p.to_string_lossy().into_owned()
-}
-
-fn folder_link(target: &Path, at: &Path) {
-    #[cfg(windows)]
-    junction::create(target, at).unwrap();
-    #[cfg(not(windows))]
-    std::os::unix::fs::symlink(target, at).unwrap();
 }
 
 fn real(p: &Path) -> PathBuf {
@@ -127,6 +124,90 @@ fn a_path_reached_through_a_link_is_left_alone() {
     assert!(run_step(&strings(&[MOVE_FOLDER, "relink", &s(&list), &s(&through_result), &fingerprint])));
     assert!(!through_result.exists());
     assert_eq!(real(&at), real(&a));
+}
+
+/// Runs one line of a move step (`swap` or `unswap`) as the app starts it, and says how it went.
+fn move_step(dir: &Path, step: &str, fields: &[&Path]) -> String {
+    let (list, result) = (dir.join(format!("{step} list.txt")), dir.join(format!("{step} result.txt")));
+    let _ = fs::remove_file(&list);
+    let _ = fs::remove_file(&result);
+    let line = fields.iter().map(|f| s(f)).collect::<Vec<_>>().join("\t");
+    let fingerprint = write_list(&list, &[line]).unwrap();
+    assert!(run_step(&strings(&[MOVE_FOLDER, step, &s(&list), &s(&result), &fingerprint])));
+    fs::read_to_string(&result).unwrap()
+}
+
+#[test]
+fn the_swap_is_checked_again_line_by_line_before_it_happens() {
+    let dir = fixtures("mo-space-admin-swap-checks");
+    let (plugins, other) = (dir.join("Plugins"), dir.join("Other"));
+    let (from, to) = (plugins.join("Serum Presets"), dir.join("D").join("Serum Presets"));
+    fs::create_dir_all(from.join("Factory")).unwrap();
+    fs::create_dir_all(&to).unwrap();
+    fs::create_dir_all(&other).unwrap();
+    let aside = plugins.join("Serum Presets (old copy)");
+
+    // Where it's to be set aside isn't beside it.
+    let said = move_step(&dir, "swap", &[&from, &to, &other.join("Serum Presets (old copy)")]);
+    assert!(said.contains("\tkept\t") && said.contains("isn't beside"), "{said}");
+    // It's reached through a link now.
+    folder_link(&plugins, &dir.join("Plugins link"));
+    let through = dir.join("Plugins link").join("Serum Presets");
+    let said = move_step(&dir, "swap", &[&through, &to, &dir.join("Plugins link").join("Serum Presets (old copy)")]);
+    assert!(said.contains("\tkept\t") && said.contains("reached through a link"), "{said}");
+    // The copy it's to lead to isn't there.
+    let said = move_step(&dir, "swap", &[&from, &dir.join("E/Serum Presets"), &aside]);
+    assert!(said.contains("\tkept\t") && said.contains("isn't there"), "{said}");
+    // Nothing moved.
+    assert!(!is_link(&from) && from.join("Factory").is_dir() && !aside.exists());
+
+    // As the app writes it, it swaps.
+    let said = move_step(&dir, "swap", &[&from, &to, &aside]);
+    assert!(said.contains("\tdone\t"), "{said}");
+    assert!(is_link(&from) && real(&from) == real(&to) && aside.join("Factory").is_dir());
+
+    // Asked to swap again, it's a link now, not a real folder: left alone.
+    let said = move_step(&dir, "swap", &[&from, &to, &plugins.join("Serum Presets (old copy 2)")]);
+    assert!(said.contains("\tkept\t") && said.contains("isn't a real folder now"), "{said}");
+    assert!(is_link(&from) && real(&from) == real(&to));
+}
+
+#[test]
+fn putting_a_folder_back_is_checked_again_line_by_line_before_it_happens() {
+    let dir = fixtures("mo-space-admin-unswap-checks");
+    let plugins = dir.join("Plugins");
+    let (from, to, elsewhere) =
+        (plugins.join("Serum Presets"), dir.join("D/Serum Presets"), dir.join("E/Serum Presets"));
+    let restore = plugins.join("Serum Presets (old copy)");
+    fs::create_dir_all(restore.join("Factory")).unwrap();
+    fs::create_dir_all(&to).unwrap();
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::create_dir_all(dir.join("Other")).unwrap();
+    folder_link(&elsewhere, &from);
+
+    // The link leads somewhere else now.
+    let said = move_step(&dir, "unswap", &[&from, &restore, &to]);
+    assert!(said.contains("\tkept\t") && said.contains("isn't the link to"), "{said}");
+    assert_eq!(real(&from), real(&elsewhere));
+    // What's to take its name isn't beside it.
+    unlink(&from);
+    folder_link(&to, &from);
+    let said = move_step(&dir, "unswap", &[&from, &dir.join("Other"), &to]);
+    assert!(said.contains("\tkept\t") && said.contains("isn't beside"), "{said}");
+    // What's to take its name isn't there, or is a link now.
+    let said = move_step(&dir, "unswap", &[&from, &plugins.join("Gone (old copy)"), &to]);
+    assert!(said.contains("\tkept\t") && said.contains("isn't there"), "{said}");
+    let link = plugins.join("Linked (old copy)");
+    folder_link(&restore, &link);
+    let said = move_step(&dir, "unswap", &[&from, &link, &to]);
+    assert!(said.contains("\tkept\t") && said.contains("isn't there"), "{said}");
+    assert!(is_link(&from) && real(&from) == real(&to) && is_link(&link));
+    assert!(restore.join("Factory").is_dir());
+
+    // As the app writes it, the folder comes back.
+    let said = move_step(&dir, "unswap", &[&from, &restore, &to]);
+    assert!(said.contains("\tdone\t"), "{said}");
+    assert!(!is_link(&from) && from.join("Factory").is_dir() && !restore.exists());
 }
 
 /// Folders Windows guards, stood in for by folders the test locks (only Unix has the locks the test uses).

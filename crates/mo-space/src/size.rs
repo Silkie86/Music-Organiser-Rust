@@ -1,14 +1,17 @@
 //! How much room files and folders take, and how to say it ("38.2 GB"). The C# app's `DiskSpace`.
 //!
 //! Every walk here leaves links to other places (junctions, symbolic links) alone, so nothing is counted twice and a
-//! folder moved to another drive isn't counted where its link is. On Windows, a OneDrive file that is only online takes
+//! folder moved to another drive isn't counted where its link is. [`measure`] counts a file with more than one name (a
+//! hard link) once on a Mac or Linux (Windows can't tell from here); the other walks list each name. On Windows, a OneDrive file that is only online takes
 //! no room here, so the size walks leave it out; [`all_files`] still lists it (only its name is read, so nothing
 //! downloads).
 
+use std::collections::HashSet;
 use std::fs::{self, Metadata};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Local, NaiveDateTime};
 use mo_formats::paths::extension;
@@ -94,9 +97,42 @@ pub struct FileEntry {
     pub modified: NaiveDateTime,
 }
 
-/// The local time a file was last written, as the library keeps times.
+/// Adds up sizes. Release builds stop on arithmetic that overflows, so every total of bytes saturates instead (a broken
+/// drive can report any size).
+pub(crate) fn total(sizes: impl IntoIterator<Item = u64>) -> u64 {
+    sizes.into_iter().fold(0, u64::saturating_add)
+}
+
+/// Adds a size to a running total, as [`total`] does.
+pub(crate) fn add(to: &mut u64, bytes: u64) {
+    *to = to.saturating_add(bytes);
+}
+
+/// The local time a file was last written, as the library keeps times (the start of 1970 when it can't be told).
 pub(crate) fn modified_of(meta: &Metadata) -> NaiveDateTime {
-    meta.modified().map(|t| DateTime::<Local>::from(t).naive_local()).unwrap_or_default()
+    meta.modified().ok().and_then(local_time).unwrap_or_default()
+}
+
+/// A file's time as local time; `None` for one outside the years 1 to 9999. Some Linux drives keep any time a broken
+/// archive gives a file, and chrono would stop the program on one far enough out.
+pub(crate) fn local_time(t: SystemTime) -> Option<NaiveDateTime> {
+    const FIRST: i64 = -62_135_596_800;
+    const LAST: i64 = 253_402_300_799;
+    let (secs, nanos) = match t.duration_since(UNIX_EPOCH) {
+        Ok(after) => (i64::try_from(after.as_secs()).ok()?, after.subsec_nanos()),
+        Err(before) => {
+            let before = before.duration();
+            let secs = i64::try_from(before.as_secs()).ok()?;
+            match before.subsec_nanos() {
+                0 => (-secs, 0),
+                n => (-secs - 1, 1_000_000_000 - n),
+            }
+        }
+    };
+    if !(FIRST..=LAST).contains(&secs) {
+        return None;
+    }
+    Some(DateTime::from_timestamp(secs, nanos)?.with_timezone(&Local).naive_local())
 }
 
 /// Windows' "offline" and "recall on data access": a OneDrive file that's only online, so it takes no room here and
@@ -171,9 +207,13 @@ fn list<T>(
     map: &(impl Fn(&Path, &Metadata) -> Option<T> + Sync),
 ) -> Listing<T> {
     let mut listing = Listing { found: Vec::new(), dirs: Vec::new() };
+    // Stop is looked at before each folder is opened (a wide level can hold many thousands) and every 256 entries.
+    if stop.load(Ordering::Relaxed) {
+        return listing;
+    }
     let Ok(entries) = fs::read_dir(dir) else { return listing };
     for (n, entry) in entries.flatten().enumerate() {
-        if n % 1024 == 1023 && stop.load(Ordering::Relaxed) {
+        if n % 256 == 255 && stop.load(Ordering::Relaxed) {
             break;
         }
         // The entry's own type: a link is a link, wherever it points.
@@ -228,9 +268,38 @@ pub fn measure(path: &Path, stop: &AtomicBool) -> Result<Measured, Stopped> {
     }
     let sizes = walk(path, false, stop, |p, meta| {
         let len = meta.len();
-        Some(Measured { bytes: len, sound_bytes: if is_sound(&p.to_string_lossy(), len) { len } else { 0 }, files: 1 })
+        let sound_bytes = if is_sound(&p.to_string_lossy(), len) { len } else { 0 };
+        Some((Measured { bytes: len, sound_bytes, files: 1 }, hard_linked(meta)))
     })?;
-    Ok(sizes.into_iter().fold(Measured::default(), |a, b| a + b))
+    let mut seen = HashSet::new();
+    Ok(sizes
+        .into_iter()
+        .filter(|(_, one_file)| one_file.is_none_or(|id| seen.insert(id)))
+        .fold(Measured::default(), |a, (b, _)| a + b))
+}
+
+/// For a file with more than one name (a hard link): which file on disk it is, so it's measured once.
+fn hard_linked(meta: &Metadata) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    if std::os::unix::fs::MetadataExt::nlink(meta) < 2 {
+        return None;
+    }
+    file_id(meta)
+}
+
+/// Which file on disk this is (its drive and number): two names for one file (hard links) give the same. Only a Mac
+/// or Linux can tell here; Windows' file numbers aren't readable from here yet.
+pub(crate) fn file_id(meta: &Metadata) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some((meta.dev(), meta.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        None
+    }
 }
 
 /// A file's SHA-256, read once in large pieces; `None` when it can't be read whole, changed while it was read, or when
@@ -348,6 +417,24 @@ mod tests {
         assert_eq!(size_text((38.2 * (1u64 << 30) as f64) as u64), "38.2 GB");
         assert_eq!(size_text(1536 << 20), "1.5 GB");
         assert_eq!(size_text(u64::MAX), "16777216 TB");
+    }
+
+    #[test]
+    fn a_time_out_of_range_is_unknown_not_a_crash() {
+        let far = std::time::Duration::from_secs(9_000_000_000_000);
+        // Not every system can hold such a time at all (Windows can't).
+        if let Some(t) = UNIX_EPOCH.checked_add(far) {
+            assert_eq!(local_time(t), None);
+        }
+        if let Some(t) = UNIX_EPOCH.checked_sub(far) {
+            assert_eq!(local_time(t), None);
+        }
+        let t = UNIX_EPOCH + std::time::Duration::from_millis(1_700_000_000_250);
+        let local = local_time(t).unwrap();
+        assert_eq!(local.and_utc().timestamp_subsec_millis(), 250);
+        // A moment before 1970 keeps its part of a second.
+        let before = UNIX_EPOCH - std::time::Duration::from_millis(1_250);
+        assert_eq!(local_time(before).map(|t| t.and_utc().timestamp_subsec_millis()), Some(750));
     }
 
     #[test]

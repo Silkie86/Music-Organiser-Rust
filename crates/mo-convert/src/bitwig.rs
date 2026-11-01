@@ -91,8 +91,10 @@ pub fn write(plan: &Plan, template: &[u8]) -> Result<Converted, String> {
             },
         };
         if let Some(why) = t.add_lane(track, devices, lane) {
+            // FL's reader leaves an effect that's switched on and off switched on.
+            let on = if matches!(lane.target, Target::OnOff { .. }) { ", so the effect stays on" } else { "" };
             for clip in &lane.clips {
-                w.notes.push(format!("{clip}: automation left out ({why})"));
+                w.notes.push(format!("{clip}: automation left out ({why}){on}"));
             }
         }
     }
@@ -264,6 +266,11 @@ impl Writing {
 /// Fills in a new lane's target: what it moves.
 type SetUp = Box<dyn Fn(&mut Document, ObjId)>;
 
+/// The setting a device's On/Off lane moves, as Bitwig names it.
+const ON_OFF_SETTING: &str = "On";
+/// Points closer than this are on the same beat (as in the plan).
+const SAME_BEAT: f64 = 1e-4;
+
 /// The template, with its tracks taken out and kept as patterns to copy.
 struct Template {
     doc: Document,
@@ -402,8 +409,10 @@ impl Template {
             doc.field_obj(l, 0x2a3).map(|t| doc.obj(t))
         }
         let mut mixer_lane = lanes.iter().copied().find(|&l| target(&doc, l).is_some_and(|t| t.has(0x41)));
-        let mut plugin_lane =
-            lanes.iter().copied().find(|&l| target(&doc, l).is_some_and(|t| t.has(0xec) && t.has(0xed)));
+        let mut plugin_lane = lanes.iter().copied().find(|&l| {
+            // Not a device's On/Off lane, whose points are switches rather than numbers.
+            target(&doc, l).is_some_and(|t| t.has(0xec) && t.has(0xed) && t.str(0xed) != ON_OFF_SETTING)
+        });
         let point = lanes
             .iter()
             .filter_map(|&l| doc.field_obj(l, 0x2d8c).and_then(|a| doc.field_obj(a, 0x35ac)))
@@ -846,6 +855,12 @@ impl Template {
         self.doc.add(expression)
     }
 
+    /// A track's device by its place in the plan, and its name, when it's converted.
+    fn lane_device(&self, devices: &[Option<ObjId>], at: usize) -> Option<(ObjId, String)> {
+        let device = devices.get(at).copied().flatten()?;
+        Some((device, self.def(device).map(|d| self.doc.obj(d).str(0x9a).to_owned()).unwrap_or_default()))
+    }
+
     /// Adds an automation lane to a track. `devices` are the track's devices by their place in the plan. Says why when
     /// it can't.
     fn add_lane(&mut self, track: ObjId, devices: &[Option<ObjId>], lane: &Lane) -> Option<&'static str> {
@@ -870,10 +885,9 @@ impl Template {
                 )
             }
             Target::Plugin { device, path, name, .. } => {
-                let Some(Some(device)) = devices.get(*device).copied() else {
+                let Some((device, plugin_name)) = self.lane_device(devices, *device) else {
                     return Some("its plugin isn't converted");
                 };
-                let plugin_name = self.def(device).map(|d| self.doc.obj(d).str(0x9a).to_owned()).unwrap_or_default();
                 let (path, name) = (path.clone(), name.clone());
                 (
                     self.plugin_lane,
@@ -886,31 +900,94 @@ impl Template {
                     }),
                 )
             }
+            Target::OnOff { device } => {
+                let Some((device, plugin_name)) = self.lane_device(devices, *device) else {
+                    return Some("its plugin isn't converted");
+                };
+                (
+                    self.plugin_lane,
+                    Box::new(move |doc: &mut Document, target: ObjId| {
+                        // As Bitwig 6.1.6 saves a device's On/Off lane: the setting "On", described as a switch.
+                        let mut switch = Object::new(0xc6);
+                        switch.set(0x1293, text(""));
+                        switch.set(0x1b2d, Value::Bool(1));
+                        let switch = doc.add(switch);
+                        let o = doc.obj_mut(target);
+                        put(o, 0xec, Value::Obj(Slot::Obj(device)));
+                        o.set(0xed, text(ON_OFF_SETTING));
+                        o.set(0x133b, text(&plugin_name));
+                        o.set(0x133a, text("On/Off"));
+                        put(o, 0xe92, Value::Obj(Slot::Obj(switch)));
+                    }),
+                )
+            }
         };
         let (Some(pattern), Some(point), Some(lanes)) = (pattern, self.point, lanes) else { return Some(NO_LANE) };
         let made = self.copy(pattern);
         let Some(target) = self.doc.field_obj(made, 0x2a3) else { return Some(NO_LANE) };
         set_up(&mut self.doc, target);
-        let Some(list) = self.doc.field_obj(made, 0x2d8c).and_then(|a| self.doc.field_obj(a, 0x35ac)) else {
+        let Some(arrangement) = self.doc.field_obj(made, 0x2d8c) else { return Some(NO_LANE) };
+        if self.doc.field_obj(arrangement, 0x35ac).is_none() {
             return Some(NO_LANE);
-        };
-        let mut points = Vec::with_capacity(lane.points.len());
-        for p in &lane.points {
-            let value = if lane.target == Target::Volume { p.value.cbrt() } else { p.value };
-            let copy = self.copy(point);
-            let o = self.doc.obj_mut(copy);
-            o.set(0x2af, Value::F64(p.beat));
-            o.set(0x28f, Value::F64(value));
-            if o.has(0x359e) {
-                put(o, 0x359e, Value::U8(1));
-            }
-            if o.has(0xba6) {
-                // A straight line to the next point.
-                o.set(0xba6, Value::F64(0.0));
-            }
-            points.push(Slot::Obj(copy));
         }
-        self.doc.obj_mut(list).set(0x21f, Value::List(points));
+        let points = match lane.target {
+            Target::OnOff { .. } => {
+                // A switch's lane holds a point at each change (class 0x7d: where, and on or off) in a list of its own
+                // kind (class 0xa4), as Bitwig 6.1.6 saves one. Where several points share a beat, the last is where
+                // the switch ends up there; an off and on again on one beat would be a click.
+                let mut changes: Vec<(f64, bool)> = Vec::new();
+                for p in &lane.points {
+                    let on = p.value > 0.0;
+                    match changes.last_mut() {
+                        Some(last) if p.beat <= last.0 + SAME_BEAT => last.1 = on,
+                        _ => changes.push((p.beat, on)),
+                    }
+                    let n = changes.len();
+                    if n >= 2 && changes[n - 2].1 == changes[n - 1].1 {
+                        changes.pop();
+                    }
+                }
+                let points = changes
+                    .into_iter()
+                    .map(|(beat, on)| {
+                        let mut o = Object::new(0x7d);
+                        o.set(0x2af, Value::F64(beat));
+                        o.set(0x12e, Value::Bool(on.into()));
+                        Slot::Obj(self.doc.add(o))
+                    })
+                    .collect();
+                let mut list = Object::new(0xa4);
+                list.set(0x1fd, Value::U8(0));
+                list.set(0x21f, Value::List(points));
+                let list = self.doc.add(list);
+                put(self.doc.obj_mut(arrangement), 0x35ac, Value::Obj(Slot::Obj(list)));
+                None
+            }
+            _ => {
+                let mut points = Vec::with_capacity(lane.points.len());
+                for p in &lane.points {
+                    let value = if lane.target == Target::Volume { p.value.cbrt() } else { p.value };
+                    let copy = self.copy(point);
+                    let o = self.doc.obj_mut(copy);
+                    o.set(0x2af, Value::F64(p.beat));
+                    o.set(0x28f, Value::F64(value));
+                    if o.has(0x359e) {
+                        put(o, 0x359e, Value::U8(1));
+                    }
+                    if o.has(0xba6) {
+                        // A straight line to the next point.
+                        o.set(0xba6, Value::F64(0.0));
+                    }
+                    points.push(Slot::Obj(copy));
+                }
+                Some(points)
+            }
+        };
+        if let Some(points) = points
+            && let Some(list) = self.doc.field_obj(arrangement, 0x35ac)
+        {
+            self.doc.obj_mut(list).set(0x21f, Value::List(points));
+        }
         push(self.doc.obj_mut(lanes), 0x4ba, Slot::Obj(made));
 
         // The plugin also lists the setting, as Bitwig saves an automated one.
