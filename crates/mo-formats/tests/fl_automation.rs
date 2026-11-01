@@ -141,6 +141,8 @@ fn reads_mixer_insert_settings_effect_slots_and_what_automation_moves_on_them() 
         song.inserts.iter().map(|i| (i.index, i.fader, i.moved())).collect::<Vec<_>>(),
         [(0, Some(12800), false), (1, Some(9600), true)]
     );
+    // Where each insert goes: insert 1's slots come before its routes, which still belong to it.
+    assert_eq!(song.routes.into_iter().collect::<Vec<_>>(), [(0, vec![]), (1, vec![0, 2]), (2, vec![0])]);
 
     // Automation of a setting of the effect in insert 1's slot 0, of the tempo and of insert 1's fader.
     let moved: Vec<_> = song

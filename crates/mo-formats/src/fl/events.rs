@@ -48,6 +48,10 @@ pub const EV_PLUGIN_STATE: u8 = 213;
 pub const EV_PATTERN_NOTES: u8 = 224;
 /// Playlist items (the arrangement).
 pub const EV_PLAYLIST: u8 = 233;
+/// Where a mixer insert sends its sound, just after its flags and slots: one byte per insert from the master (0), 1
+/// where it goes there. FL 25 trims trailing zeros (so its length varies); older saves have 105 or 127 bytes. Seen
+/// once per insert in 744 of Solomon's projects from FL 12 to 26, every set byte 1.
+pub const EV_INSERT_ROUTES: u8 = 235;
 /// Starts each mixer insert (0 is the master).
 pub const EV_INSERT_FLAGS: u8 = 236;
 /// When the project was made and how long it has been open, as two Delphi dates.

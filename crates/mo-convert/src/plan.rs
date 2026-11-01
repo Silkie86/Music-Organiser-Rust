@@ -167,7 +167,7 @@ pub struct Lane {
     pub target: Target,
     pub points: Vec<LanePoint>,
     /// It comes from an FL mixer insert's fader or pan, not the track's own channel.
-    pub from_insert: bool,
+    pub from_insert: Option<u32>,
 }
 
 /// What the song becomes.
@@ -711,6 +711,34 @@ fn audio_clip(c: &FlChannel, fl: &FlAudioClip, info: Option<&SampleFile>, tempo:
 }
 
 /// Adds an automation clip's points to the lane for what it moves on a track, making the lane if it's the first.
+/// The mixer inserts a channel's sound goes through from `start`: all of it (on through each insert sending only to
+/// one other insert, a bus), and part of it (past an insert sending to several, or to the master and another insert:
+/// a send), the master left out.
+fn sound_path(routes: &BTreeMap<u32, Vec<u32>>, start: u32) -> (Vec<u32>, HashSet<u32>) {
+    let mut whole = vec![start];
+    let mut at = start;
+    let mut part = HashSet::new();
+    loop {
+        match routes.get(&at).map(Vec::as_slice) {
+            Some(&[next]) if next != 0 && !whole.contains(&next) => {
+                whole.push(next);
+                at = next;
+            }
+            Some(to) if to.len() > 1 => {
+                let mut todo: Vec<u32> = to.iter().copied().filter(|&i| i != 0).collect();
+                while let Some(i) = todo.pop() {
+                    if i != 0 && !whole.contains(&i) && part.insert(i) {
+                        todo.extend(routes.get(&i).into_iter().flatten().copied());
+                    }
+                }
+                break;
+            }
+            _ => break,
+        }
+    }
+    (whole, part)
+}
+
 /// Adds an FL clip's points to the lane moving `target` on `track`, starting the lane when there's none; returns the
 /// lane's place.
 fn add_lane(
@@ -723,7 +751,7 @@ fn add_lane(
     let at = match lanes.iter().position(|l| l.track == track && l.target.same_as(&target)) {
         Some(at) => at,
         None => {
-            lanes.push(Lane { clips: Vec::new(), track, target, points: Vec::new(), from_insert: false });
+            lanes.push(Lane { clips: Vec::new(), track, target, points: Vec::new(), from_insert: None });
             lanes.len() - 1
         }
     };
@@ -999,29 +1027,52 @@ pub fn from_fl(song: &FlSong, options: Options, read_sample: &mut dyn FnMut(&str
         let Some(insert) = a.insert else { continue };
         let pan_lane = a.control == FlControl::InsertPan;
         let target = if pan_lane { Target::Pan } else { Target::Volume };
+        let mut left = Vec::new();
         let onto: Vec<TrackRef> = if insert == 0 {
             vec![TrackRef::Master]
         } else {
-            song.channels
-                .iter()
-                .filter(|c| c.insert == insert)
-                .filter_map(|c| placed.get(&c.index))
-                .flat_map(|&(first, count)| (first..first + count).map(TrackRef::Track))
-                .collect()
+            let mut onto = Vec::new();
+            for c in &song.channels {
+                let Some(&(first, count)) = placed.get(&c.index) else { continue };
+                let (whole, part) = sound_path(&song.routes, c.insert);
+                if whole.contains(&insert) {
+                    onto.extend((first..first + count).map(TrackRef::Track));
+                } else if part.contains(&insert) {
+                    left.push(format!(
+                        "{} reaches it through a send",
+                        tracks.get(first).map_or("", |t| t.name.as_str())
+                    ));
+                }
+            }
+            onto
         };
         if onto.is_empty() {
-            planner.notes.push(format!("{}: automation left out (no converted channel feeds it)", a.name));
+            let why = if left.is_empty() { "no converted channel feeds it".to_owned() } else { left.join("; ") };
+            planner.notes.push(format!("{}: automation left out ({why})", a.name));
             continue;
         }
-        let mut left = Vec::new();
         let mut capped = Vec::new();
         let dense = FlAutomation { points: on_fader_curve(a), ..a.clone() };
+        let mut added = false;
         for track in onto {
             let own = match track {
                 TrackRef::Master | TrackRef::Song => None,
                 TrackRef::Track(t) => tracks.get(t),
             };
-            let automated = lanes.iter().any(|l| l.track == track && l.target == target && !l.from_insert);
+            let other = lanes
+                .iter()
+                .find(|l| l.track == track && l.target == target)
+                .and_then(|l| l.from_insert)
+                .filter(|&i| i != insert);
+            if let Some(other) = other {
+                left.push(format!(
+                    "{} already follows insert {other}'s {}",
+                    own.map_or("the master", |t| t.name.as_str()),
+                    if pan_lane { "pan" } else { "fader" }
+                ));
+                continue;
+            }
+            let automated = lanes.iter().any(|l| l.track == track && l.target == target && l.from_insert.is_none());
             if automated {
                 left.push(format!(
                     "{} has its own {} automated",
@@ -1034,6 +1085,7 @@ pub fn from_fl(song: &FlSong, options: Options, read_sample: &mut dyn FnMut(&str
                 left.push(format!("{}'s own pan isn't in the middle", own.map_or("", |t| t.name.as_str())));
                 continue;
             }
+            added = true;
             let at = if pan_lane {
                 add_lane(&mut lanes, track, Target::Pan, a, pan)
             } else {
@@ -1045,11 +1097,12 @@ pub fn from_fl(song: &FlSong, options: Options, read_sample: &mut dyn FnMut(&str
                 add_lane(&mut lanes, track, Target::Volume, &dense, |v| (level * insert_gain(v)).min(MAX_GAIN))
             };
             if let Some(lane) = lanes.get_mut(at) {
-                lane.from_insert = true;
+                lane.from_insert = Some(insert);
             }
         }
         if !left.is_empty() {
-            planner.notes.push(format!("{}: automation left out on some tracks ({})", a.name, left.join("; ")));
+            let some = if added { " on some tracks" } else { "" };
+            planner.notes.push(format!("{}: automation left out{some} ({})", a.name, left.join("; ")));
         }
         if !capped.is_empty() {
             planner.notes.push(format!(

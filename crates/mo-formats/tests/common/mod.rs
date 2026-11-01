@@ -783,8 +783,11 @@ pub fn fl_studio_25_switched_and_mixer(more: bool) -> Vec<u8> {
             playlist_item_25_on(384, 9, 384, 490, false),
         ]);
     }
+    // Where each insert goes (235), after its slots, as FL 25 saves it with trailing zeros trimmed: the master
+    // nowhere, insert 1 to the master and a send to 2, insert 2 to the master.
     b = b
         .data(236, &[0, 0, 0, 0])
+        .data(235, &[0])
         .data(236, &[0, 0, 0, 0])
         .text(201, "Fruity Wrapper")
         .data(213, &wrapper("Pro-Q 3", r"C:\VstPlugins\FabFilter Pro-Q 3.dll", "FabFilter", 4, "FQ3p"))
@@ -792,7 +795,9 @@ pub fn fl_studio_25_switched_and_mixer(more: bool) -> Vec<u8> {
         .text(201, "Fruity Wrapper")
         .data(213, &wrapper("WOW2", r"C:\VstPlugins\WOW2.dll", "Sugar Bytes", 5, "SBw2"))
         .word(98, 1)
+        .data(235, &[1, 0, 1])
         .data(236, &[0, 0, 0, 0])
+        .data(235, &[1])
         .data(
             225,
             &mixer_settings(&[
