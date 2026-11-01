@@ -924,6 +924,11 @@ pub fn from_fl(song: &FlSong, options: Options, read_sample: &mut dyn FnMut(&str
     if let Some(moved) = notes::moved_inserts(used.iter().filter_map(|i| planner.inserts.get(i).copied())) {
         planner.notes.push(moved);
     }
+    // Knob moves recorded into patterns (FL's edit events) that move anything but a plugin's setting aren't carried
+    // yet; said, so they don't vanish unseen.
+    if let Some(note) = notes::edit_events(&song.edit_events) {
+        planner.notes.push(note);
+    }
 
     // Automation clips as lanes on the track they move: its volume, pan or a setting of its plugin, or a setting of an
     // effect on a mixer insert or the effect's slot switched on and off, on each track that has a copy of it.

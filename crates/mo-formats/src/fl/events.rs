@@ -44,6 +44,10 @@ pub const EV_GENRE: u8 = 206;
 pub const EV_ARTISTS: u8 = 207;
 /// A plugin's state; for the Fruity Wrapper, the VST's details and state.
 pub const EV_PLUGIN_STATE: u8 = 213;
+/// A pattern's edit events: knob moves recorded into the pattern (PyFLP's pattern controllers), 12 bytes each: u32
+/// tick in the pattern, u32 target (as an automation link's), f32 value 0..1. Found in 120 of 744 of Solomon's
+/// projects, 12 to 243888 bytes.
+pub const EV_PATTERN_CONTROLLERS: u8 = 223;
 /// Note records.
 pub const EV_PATTERN_NOTES: u8 = 224;
 /// Playlist items (the arrangement).
