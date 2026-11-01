@@ -20,12 +20,8 @@ fn main() -> Result<(), slint::PlatformError> {
     log_crashes();
     let feed = Feed::default();
     // The settings come from library.db once mo-library exists (phase 2); until then the app opens in its defaults.
-    let app = match mo_ui::new_app(
-        &Look::from_settings(None, None),
-        Shortcuts::from_setting(None),
-        Place::Songs,
-        feed.clone(),
-    ) {
+    let shortcuts = Shortcuts::from_setting(None);
+    let app = match mo_ui::new_app(&Look::from_settings(None, None), shortcuts.clone(), Place::Songs, feed.clone()) {
         Ok(app) => app,
         Err(e) => {
             // Rule 17: the reason the window couldn't open reaches the log too.
@@ -36,6 +32,7 @@ fn main() -> Result<(), slint::PlatformError> {
     };
     // The Songs page reads the C# app's library, read-only (CLAUDE.md: until the Rust page is trusted).
     mo_ui::songs::connect(&app, mo_app::paths::data_dir().join("library.db"), feed.clone());
+    mo_ui::sounds::connect(&app, mo_app::paths::data_dir().join("sounds.db"), feed.clone(), &shortcuts);
     app.window().set_maximized(true);
     // The watchdog starts once the window is up, so opening it doesn't count as a freeze.
     let watched = feed.clone();

@@ -14,5 +14,6 @@ pub mod shortcuts;
 pub mod song_panel;
 pub mod songs;
 pub mod sound_library;
+pub mod sounds;
 pub mod themes;
 pub mod version;

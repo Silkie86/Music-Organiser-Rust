@@ -65,8 +65,16 @@ pub const SONGS_ACTIONS: &[Action] = &[
     action("projects.copyPath", "Copy where the picked song's file is", "Ctrl+Shift+C"),
 ];
 
+/// The Sounds page's own actions, with the C# Sound Lab's ids. Favourite, tag and To Bitwig join once the page may
+/// write and the DAW link is in.
+pub const SOUNDS_ACTIONS: &[Action] = &[
+    action("sounds.stop", "Stop the sound playing", "Esc"),
+    action("sounds.reveal", "Show the sound's file in Explorer", "Ctrl+Shift+E"),
+    action("sounds.copyPath", "Copy where the sound's file is", "Ctrl+Shift+C"),
+];
+
 /// Every page's own list. A page's keys only work on that page, so two pages may share a key.
-pub const PAGE_ACTIONS: &[&[Action]] = &[SONGS_ACTIONS];
+pub const PAGE_ACTIONS: &[&[Action]] = &[SONGS_ACTIONS, SOUNDS_ACTIONS];
 
 /// The keys in use: the defaults with your changes on top.
 #[derive(Clone, Debug)]
