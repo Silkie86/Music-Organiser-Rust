@@ -20,6 +20,7 @@
 mod classify;
 mod compare;
 mod rust_side;
+mod similar;
 mod songs;
 mod sounds;
 

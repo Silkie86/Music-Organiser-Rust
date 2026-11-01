@@ -24,7 +24,13 @@ pub type Vectors = HashMap<i64, Vec<f32>>;
 /// The space the app learns in: "clap" once deep listening has heard at least 9 in 10 analysed sounds, else
 /// "features" (the analyser's own numbers).
 pub fn space(clap_vectors: usize, analysed: usize) -> &'static str {
-    if clap_vectors > 0 && clap_vectors as f64 >= analysed as f64 * 0.9 { "clap" } else { "features" }
+    if heard_enough(clap_vectors, analysed) { "clap" } else { "features" }
+}
+
+/// Deep listening has heard enough to be the one to use: at least 9 in 10 of the `analysed` sounds (and any at all).
+/// The one rule for both the learning and the likeness index.
+pub fn heard_enough(clap_vectors: usize, analysed: usize) -> bool {
+    clap_vectors > 0 && clap_vectors as f64 >= analysed as f64 * 0.9
 }
 
 /// A sound's vector, if it has one (an empty one counts as none, as in the C# app).
