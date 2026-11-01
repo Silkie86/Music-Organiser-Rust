@@ -2,6 +2,7 @@
 //! or from Solomon's own MIDI packs by `theorybench packs` on his computer ([`OWN`]). The files stay outside the
 //! repository.
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
@@ -49,6 +50,10 @@ pub struct Item {
     /// How the piece is heard whole: a dataset's song as a song; a pack's part as the MIDI page hears it.
     #[serde(default)]
     pub whole: Whole,
+    /// For a piece `convert/voice.py` played: each labelled chord's start, end and tags (its voicing set, recipe, bass
+    /// texture, tune, push, the chart's own label and the quality played), for `chords --by`. Empty for the rest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub render: Vec<(i64, i64, BTreeMap<String, String>)>,
 }
 
 /// How a piece is heard whole.

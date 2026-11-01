@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 
 use mo_harmony::chord;
-use mo_harmony::{Chord, Degree, PcSet};
+use mo_harmony::{Chord, Degree, Family, PcSet};
 
 use crate::harte::{self, Named};
 use crate::metrics::{self, Share, pct};
@@ -51,6 +51,10 @@ pub struct Read {
     pub chord: Chord,
     /// The engine's own name for it, for `--dump`.
     pub name: String,
+    /// The notes of `chord` its name stands for without saying they sound ([`may_leave_out`]), for a reading scored
+    /// by the name it shows (the C# app's are): they count only where the label has them. Empty for a reading scored
+    /// by its notes.
+    pub optional: PcSet,
     pub others: Vec<Chord>,
 }
 
@@ -67,6 +71,36 @@ pub fn extensions(c: Chord) -> u8 {
 /// voicing leaves it out).
 pub fn named_notes(c: Chord) -> PcSet {
     c.sounding().with(c.root())
+}
+
+/// The notes a chord's name stands for without saying they sound, as charts write names and mo-harmony reads them
+/// (its `every_note_is_in_the_name` test): the plain fifth of a chord with a third or a seventh, the 9 under an 11 or a
+/// 13, and the 11 of a minor 13. So "Cm13" names a minor 13 with no 11 and "Cm11" a minor 7 with an 11 and no 9, as
+/// players read them. A 7alt says it has alterations but not which, so they are no such notes: it is right as the
+/// event, not as the name.
+pub fn may_leave_out(c: Chord) -> PcSet {
+    let degrees = c.degrees();
+    let has = |d: Degree| degrees.contains(&d);
+    let third = has(Degree::MAJOR_THIRD) || has(Degree::MINOR_THIRD);
+    let seventh = has(Degree::MINOR_SEVENTH) || has(Degree::MAJOR_SEVENTH);
+    let mut out = PcSet::EMPTY;
+    if has(Degree::FIFTH) && (third || seventh) {
+        out = out.union(PcSet::of(&[7]));
+    }
+    if has(Degree::NINTH) && (has(Degree::ELEVENTH) || has(Degree::THIRTEENTH)) {
+        out = out.union(PcSet::of(&[2]));
+    }
+    if c.family() == Family::Minor && has(Degree::ELEVENTH) && has(Degree::THIRTEENTH) {
+        out = out.union(PcSet::of(&[5]));
+    }
+    out.on(c.root())
+}
+
+/// The reading as it stands against a label: the notes its name stands for without saying they sound count only
+/// where the label has them (or where one is the bass).
+fn against(r: &Read, label: Chord) -> Chord {
+    let drop = r.optional.difference(named_notes(label)).without(r.chord.bass());
+    if drop.is_empty() { r.chord } else { Chord::new(r.chord.root(), r.chord.notes().difference(drop), r.chord.bass()) }
 }
 
 /// [`KINDS`]: which one a chord's bass is.
@@ -173,7 +207,7 @@ pub fn tally(labels: &[(i64, i64, Named)], read: &[Read], played: &[PcSet], bass
         };
         let length = length as f64 / f64::from(ppq.max(1));
         let reading = r.and_then(|i| read.get(i));
-        let chord = reading.map(|r| r.chord);
+        let chord = reading.map(|r| against(r, label));
         t.time += length;
         let same_root = chord.is_some_and(|c| c.root() == label.root());
         let same_notes = chord.is_some_and(|c| named_notes(c) == named_notes(label) && c.bass() == label.bass());
@@ -537,6 +571,36 @@ fn macro_f1(a: &[f64]) -> Option<f64> {
     (!f1s.is_empty()).then(|| f1s.iter().sum::<f64>() / f1s.len() as f64)
 }
 
+/// Tallies pooled for one row of a split table (`chords --by`): the chord time, each of [`SCORES`]' share of it right,
+/// the bass kind's share right and the macro F1 of the extensions the labels have (`None` where there's nothing to
+/// divide by).
+pub struct Pooled {
+    pub time: f64,
+    pub scores: [Option<f64>; 4],
+    pub kind_right: Option<f64>,
+    pub macro_f1: Option<f64>,
+}
+
+pub fn pool(tallies: &[Tally]) -> Pooled {
+    let time: f64 = tallies.iter().map(|t| t.time).sum();
+    let share = |x: f64| (time > 0.0).then(|| x / time);
+    let mut right = [0.0; 4];
+    let mut extensions = [0.0; 24];
+    let mut kinds = 0.0;
+    for t in tallies {
+        for (sum, x) in right.iter_mut().zip(t.right) {
+            *sum += x;
+        }
+        for (sums, cell) in extensions.as_chunks_mut::<3>().0.iter_mut().zip(&t.extensions) {
+            for (sum, x) in sums.iter_mut().zip(cell) {
+                *sum += x;
+            }
+        }
+        kinds += t.kinds.iter().enumerate().map(|(k, row)| row[k]).sum::<f64>();
+    }
+    Pooled { time, scores: right.map(share), kind_right: share(kinds), macro_f1: macro_f1(&extensions) }
+}
+
 fn print_shares(name: &str, shares: &[Share]) {
     print!("{name:<28}");
     for s in shares {
@@ -639,6 +703,7 @@ mod tests {
             end: e,
             chord: chord(c),
             name: c.to_owned(),
+            optional: PcSet::EMPTY,
             others: others.iter().map(|o| chord(o)).collect(),
         };
         // C6 read as Am7/C (the same notes and bass, another root), then G13 read right after a G7 for 5 ticks.
@@ -669,7 +734,14 @@ mod tests {
     #[test]
     fn a_slash_chord_read_with_its_bass_as_a_chord_note_has_the_notes_but_not_the_name() {
         let labels = [(0, 8, harte::named("D:maj/b7"))];
-        let read = |c: &str| Read { start: 0, end: 8, chord: chord(c), name: c.to_owned(), others: Vec::new() };
+        let read = |c: &str| Read {
+            start: 0,
+            end: 8,
+            chord: chord(c),
+            name: c.to_owned(),
+            optional: PcSet::EMPTY,
+            others: Vec::new(),
+        };
         let played = [PcSet::of(&[0, 2, 6, 9])];
         // D7/C: the same four notes over the same bass, but the C written as the chord's seventh.
         let t = tally(&labels, &[read("D7/C")], &played, true, 1);
@@ -678,5 +750,51 @@ mod tests {
         let t = tally(&labels, &[read("D/C")], &played, true, 1);
         assert_eq!(t.right, [8.0, 8.0, 8.0, 8.0]);
         assert_eq!(t.kinds[2], [0.0, 0.0, 8.0, 0.0]);
+    }
+
+    #[test]
+    fn a_name_stands_for_the_notes_a_chord_may_leave_out_only_where_the_label_has_them() {
+        let left_out = |c: &str| may_leave_out(chord(c)).iter().map(|p| p.number()).collect::<Vec<_>>();
+        assert_eq!(left_out("Cm13"), [2, 5, 7]);
+        assert_eq!(left_out("C13"), [2, 7]);
+        assert_eq!(left_out("Cm11"), [2, 7]);
+        assert_eq!(left_out("Cmaj9"), [7]);
+        assert_eq!(left_out("C7sus4"), [7]);
+        assert_eq!(left_out("Csus4"), Vec::<u8>::new());
+        assert_eq!(left_out("C5"), Vec::<u8>::new());
+        assert_eq!(left_out("C7alt"), Vec::<u8>::new());
+        assert_eq!(left_out("Cm7b5"), Vec::<u8>::new());
+        // On another root: the 9 (F) and fifth (Bb) of Eb13.
+        assert_eq!(left_out("Eb13"), [5, 10]);
+
+        // Scored as the C# app's names are: right only where the name's own notes are the label's.
+        let named = |name: &str| Read {
+            start: 0,
+            end: 4,
+            chord: chord(name),
+            name: name.to_owned(),
+            optional: may_leave_out(chord(name)),
+            others: Vec::new(),
+        };
+        let right =
+            |l: &str, name: &str| tally(&[(0, 4, harte::named(l))], &[named(name)], &[PcSet::EMPTY], true, 1).right;
+        for (l, name) in [("C:min13", "Cm13"), ("C:min7(11)", "Cm11"), ("C:7(13)", "C13"), ("C:7(*5)", "C7")] {
+            assert_eq!(right(l, name), [4.0; 4], "{l} {name}");
+        }
+        // A name's own notes count: the 13 of Cm13 isn't in a min7, nor the 11 of Cm11 in a min9.
+        assert_eq!(right("C:min7", "Cm13"), [0.0, 0.0, 4.0, 4.0]);
+        assert_eq!(right("C:min9", "Cm11"), [0.0, 0.0, 4.0, 4.0]);
+        assert_eq!(right("C:9", "C13"), [0.0, 0.0, 4.0, 4.0]);
+        // A 7alt doesn't say which alterations: the event, not the name.
+        assert_eq!(right("C:7(#9,b13)", "C7alt"), [0.0, 0.0, 4.0, 4.0]);
+        // The extensions it is given are the label's: the 11 of Cm13 is no false 11 on a minor 13 without one.
+        let t = tally(&[(0, 4, harte::named("C:min13"))], &[named("Cm13")], &[PcSet::EMPTY], true, 1);
+        assert_eq!(names(extensions(label("C:min13"))), ["9", "13"]);
+        assert_eq!(t.extensions[4], [0.0, 0.0, 0.0]);
+        // An engine that gives its notes gets nothing left out.
+        let exact = Read { optional: PcSet::EMPTY, ..named("Cm13") };
+        let t = tally(&[(0, 4, harte::named("C:min13"))], &[exact], &[PcSet::EMPTY], true, 1);
+        assert_eq!(t.right, [0.0, 0.0, 4.0, 4.0]);
+        assert_eq!(t.extensions[4], [0.0, 4.0, 0.0]);
     }
 }

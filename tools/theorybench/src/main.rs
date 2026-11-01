@@ -26,7 +26,7 @@ theorybench keyfit <labelled.jsonl>... [--aligned] [--bars <lengths>] [--lambda-
                    [--shipped | --rescale] [--final | --write <weights.rs>]
 theorybench packs <folder>... --out <file.jsonl>
 theorybench chords <labelled.jsonl>... --answers <name>=<answers.jsonl> [--answers ...] [--part <role>]
-                   [--per-segment] [--dump <file>]
+                   [--per-segment] [--by <tag>]... [--dump <file>]
 
   keys       how often each key finder names the labelled key, on whole songs and on clips (8 bars long unless --bars
              gives other lengths, such as 1,2,4,8,16)
@@ -56,6 +56,8 @@ theorybench chords <labelled.jsonl>... --answers <name>=<answers.jsonl> [--answe
   --part     the parts the engines heard (as given to the helper; all but drums when left out), for the roots no
              part plays
   --per-segment  mir_eval's scores per labelled chord too, each counted once
+  --by       the chords named whole split by a tag convert/voice.py gives each chord it plays: set, recipe, texture,
+             tune, push or quality (and context in its sweep); given twice, by both
   --dump     write every piece's labels, chords read and scores to a file, for convert/check_mir_eval.py";
 
 fn main() -> ExitCode {
