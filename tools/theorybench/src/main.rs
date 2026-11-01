@@ -14,6 +14,7 @@ mod item;
 mod keyfit;
 mod keys;
 mod metrics;
+mod naming;
 mod packs;
 mod profiles;
 
@@ -24,7 +25,8 @@ theorybench keyfit <labelled.jsonl>... [--aligned] [--bars <lengths>] [--lambda-
                    [--picks <n>] [--weigh <source>=<w>] [--dump <file>] [--against <file>] [--hand <cases>]
                    [--shipped | --rescale] [--final | --write <weights.rs>]
 theorybench packs <folder>... --out <file.jsonl>
-theorybench chords <labelled.jsonl>... --answers <name>=<answers.jsonl> [--answers ...] [--dump <file>]
+theorybench chords <labelled.jsonl>... --answers <name>=<answers.jsonl> [--answers ...] [--part <role>]
+                   [--per-segment] [--dump <file>]
 
   keys       how often each key finder names the labelled key, on whole songs and on clips (8 bars long unless --bars
              gives other lengths, such as 1,2,4,8,16)
@@ -48,8 +50,12 @@ theorybench chords <labelled.jsonl>... --answers <name>=<answers.jsonl> [--answe
              own pieces alone (rule 5's exception); its thresholds are kept
   packs      Solomon's MIDI packs as labelled music, on his computer: each part of each file whose name gives one key
   --out      where to write them: a .jsonl outside this repository
-  chords     how often each chord reader names the labelled chord, scored as mir_eval scores it
+  chords     how often each chord reader names the labelled chord, scored as mir_eval scores it, then the whole
+             chord: its notes and bass, each extension, the root among the same notes, the bass kind, readings listed
   --answers  the chords an engine read in each piece, as the C# helper in cs/ writes them; the first is the baseline
+  --part     the parts the engines heard (as given to the helper; all but drums when left out), for the roots no
+             part plays
+  --per-segment  mir_eval's scores per labelled chord too, each counted once
   --dump     write every piece's labels, chords read and scores to a file, for convert/check_mir_eval.py";
 
 fn main() -> ExitCode {

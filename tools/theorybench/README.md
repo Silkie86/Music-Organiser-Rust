@@ -229,12 +229,38 @@ C# app (on Ubuntu, `apt-get install dotnet-sdk-10.0`):
 ```
 dotnet build tools/theorybench/cs -c Release -o path/to/helper -p:MoOldRepo=path/to/Music-Organiser -p:MoBuildNative=false -p:MoBuildBitwig=false
 dotnet path/to/helper/theorybench-cs.dll chords path/to/bench/pop909.jsonl --part accompaniment > cs-chords.jsonl
-cargo run -p mo-theorybench --release -- chords path/to/bench/pop909.jsonl --answers "C# app=cs-chords.jsonl"
+cargo run -p mo-theorybench --release -- chords path/to/bench/pop909.jsonl --answers "C# app=cs-chords.jsonl" --part accompaniment
 ```
 
 Each `--answers name=file` is one engine's chords for every piece; the first is the baseline the others are compared
 with. The chords are scored exactly as `mir_eval.chord` scores chord recognition, so the numbers mean what published
-ones mean: each stretch of time weighted by its length, pooled over all the songs.
+ones mean: each stretch of time weighted by its length, pooled over all the songs. `--per-segment` scores them per
+labelled chord too (each counts once, right when right for more than half its time).
+
+The helper also writes, for each chord, the other names the C# app's Playground offers for the same notes (on its
+other roots, at most four), so its pick list can be scored. With `--oracle-cuts` it reads each labelled chord's
+stretch on its own and keeps the chord it read there for longest: its naming when the changes are given, apart from
+where it would change chord. Give the bench the same `--part` as the helper, so it knows which notes were heard.
+
+Then come the scores the chord reader's design adds (harmony/design/chord-reader-design.md), over the time the labels
+name a chord. Each label is read whole, ninths, elevenths and thirteenths and all (mir_eval drops them), as
+`convert/charts.py` plays them (a 13 with no 11):
+
+- **notes+bass**: every note the label names and the bass, on any root. **name**: the same on the right root, the whole
+  chord. **event**: the root, the third, the seventh (or a 6), an altered fifth and the bass, tensions left out.
+  **lenient**: the event, where a plain major label also takes a maj7 or 6, a minor one an m7 or m6 and a sus4 a 7sus4
+  (POP909-CL labels by triad templates while the piano plays more). Each also per labelled chord.
+- **Each extension**: precision, recall and F1 for the 6 (of a chord with no seventh), b9, 9, #9, 11, #11, b13 and 13,
+  wherever they are: a hit is the same degree on the same root, so a reading on a wrong root misses every extension.
+  Also the altered tones pooled, and the F1 averaged over the extensions the labels have (macro F1), with its range.
+- **The root among the same notes**: where the notes and bass were read right, how often the root was too (C6 or Am7,
+  Fmaj7/D or Dm9), and the commonest other roots taken.
+- **The bass kind**: root position, inversion (the bass one of the chord's notes: C/E, G7/F) or slash (only a bass:
+  D/C), the label's against the reading's, with the inversions read in root position.
+- **The root no part plays**: root accuracy where the label's root sounds in none of the parts heard (rootless
+  voicings), with and without a bass part.
+- **Lists**: how often the labelled chord, as an event, is an engine's first reading, among its first two or three, and
+  the mean reciprocal rank.
 
 - **root**: the right root. **majmin**: the right root and major or minor (where the label is major, minor or no
   chord). **thirds**, **triads**, **sevenths**, **tetrads**: more of the chord right each time (tensions like 9ths and
@@ -262,3 +288,25 @@ were made by software much like it. Keys: whole songs with one key 87.8% (85.5 t
 alone gets 87.7%), songs that change key 69.5%; clips of 1, 2, 4 and 8 bars 29.7%, 44.7%, 62.2% and 75.2%, the
 relative key still the most common miss. Chords, accompaniment part, all 906 songs: root 88.0%, majmin 81.7%, sevenths
 77.8%, mirex 82.9%, bass 92.8%; segmentation 93.9 (mir_eval gives the same numbers).
+
+## The C# baseline on the chord scores (2026-11-01)
+
+What Solomon found most wrong in the C# app was chords: extensions, roots and inversions. Measured before any new code:
+
+- **POP909-CL, accompaniment part:** notes+bass 72.2% (71.1 to 73.3), name 70.7%, event 78.6%, lenient 80.4%. With
+  the changes given (`--oracle-cuts`), notes+bass is 3.9 points higher (3.5 to 4.2). Where the notes and bass were
+  right, the root was too 97.9% of the time. Inversions are read in root position 73.0% of their time. Where the
+  label's root sounds in no part (1.5% of the time), the root is right 3.7% of it. The labelled chord is the first
+  reading 78.6% of the time and among the first three 80.1%. Its labels name no extensions. Piano and tune together:
+  notes+bass 52.8% (tune notes go into the names), lenient event 77.3%.
+- **Billboard charts, played as block chords over the label's bass (CC0):** notes+bass 96.4% (95.6 to 97.2), name
+  91.3%, event 91.0%. Extensions, F1: 6 42.7% (precision 28.2%), b9 54.2%, 9 82.4%, #9 99.3%, 11 68.5%, #11 87.6%,
+  b13 27.5% (precision 16.7%), 13 74.8%; altered tones pooled 80.4%; macro F1 67.1% (62.0 to 71.2). Inversions are
+  read in root position 59.7% of their time. Slash chords (2.7% of the time) are never written as slashes: 69.0% are
+  read with the bass as the root and 31.0% as the chord with the bass added (D7/C for D/C). The commonest wrong root
+  among the same notes: C/G read as Gsus4(add6), 1.5% of the chord time.
+- **RS200 rock charts, played the same way (measuring only):** notes+bass 99.7%, name 97.4%; inversions read in root
+  position 49.2% of their time.
+
+The notes+bass and name numbers were checked with a separate Python line-up that reads the labels with `charts.py`
+(the same numbers on all three sets).
