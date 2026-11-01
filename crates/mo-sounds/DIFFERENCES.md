@@ -58,3 +58,13 @@ back; nothing is saved to `sounds.db` yet.
 | What | C# | Rust | Judged |
 |---|---|---|---|
 | A key written with capitals ("Pad C Minor", "Keys Bb MIN") | Read as major: only small "minor"/"min" counted. | Read as minor (found by the harmony thread, 2026-11-01). A lone capital "M" still isn't minor. | Better |
+
+## Sounds like this
+
+`index` ports `VectorIndex` and `SoundOrganiser.Similar`; the twin test (`twin sounds`) has both apps find the
+nearest sounds for the same made-up vectors.
+
+| What | C# | Rust | Judged |
+|---|---|---|---|
+| Vectors of two lengths in equal numbers | Kept whichever length the dictionary listed first. | Keeps the longer (a newer analyser's). | Better (only halfway through analysing again) |
+| Adding up a likeness | Several products at a time (SIMD). | One at a time, so a likeness can differ in the 7th place; the twin allows 1e-5. | Same in practice |

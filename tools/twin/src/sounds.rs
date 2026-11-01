@@ -148,7 +148,12 @@ pub fn run(helper: &Path, parent: &Path) -> Result<bool, String> {
         for d in &differences {
             println!("  {d}");
         }
-        Ok(sounds_same && differences.is_empty())
+        let likeness = crate::similar::compare(helper, &dir)?;
+        println!("Likeness twin: {} differences in the sounds found alike.", likeness.len());
+        for d in &likeness {
+            println!("  {d}");
+        }
+        Ok(sounds_same && differences.is_empty() && likeness.is_empty())
     });
     let _ = std::fs::remove_dir_all(&dir);
     outcome

@@ -1,7 +1,7 @@
 // The C# half of the twin test. Reads each file named on its input (one path a line) with the C# app's FL Studio,
-// Bitwig, Studio One or MIDI file reader (or with --sounds, its sound analyser; with --classify, its type classifier),
-// unchanged, and writes what it finds as one JSON a line, in the same shape as tools/twin/src/rust_side.rs (sounds.rs
-// for sounds, classify.rs for the classifier).
+// Bitwig, Studio One or MIDI file reader (or with --sounds, its sound analyser; with --classify, its type classifier;
+// with --similar, its likeness index), unchanged, and writes what it finds as one JSON a line, in the same shape as
+// tools/twin/src/rust_side.rs (sounds.rs for sounds, classify.rs for the classifier, similar.rs for likeness).
 // Files are read on every core; the lines come out in whatever order they finish, each naming its file.
 // With --roots it lists the library's folders instead (below).
 
@@ -63,13 +63,15 @@ using (var input = new StreamReader(Console.OpenStandardInput(), new System.Text
 var sounds = args is ["--sounds"];
 // `twin-cs --classify`: each file is a classifier case (examples, options, probes) made by tools/twin/src/classify.rs.
 var classify = args is ["--classify"];
+// `twin-cs --similar`: each file is a likeness case (vectors and probes) made by tools/twin/src/similar.rs.
+var similar = args is ["--similar"];
 var output = Console.OpenStandardOutput();
 var gate = new object();
 Parallel.ForEach(files, file =>
 {
     string json;
     // One odd value (JSON has no NaN) loses that file's reading, not the whole run.
-    try { json = (sounds ? DumpSound(file) : classify ? DumpClassify(file) : Dump(file)).ToJsonString(); }
+    try { json = (sounds ? DumpSound(file) : classify ? DumpClassify(file) : similar ? DumpSimilar(file) : Dump(file)).ToJsonString(); }
     catch (Exception e) { json = new JsonObject { ["file"] = file, ["error_more"] = $"couldn't write it: {e.Message}" }.ToJsonString(); }
     var bytes = System.Text.Encoding.UTF8.GetBytes(json + "\n");
     lock (gate) output.Write(bytes);
@@ -120,6 +122,40 @@ static JsonObject DumpClassify(string path)
                     .Select(t => (JsonNode)new JsonObject { ["Label"] = t.Label, ["P"] = t.P }).ToArray()));
             o["rust_model_predictions"] = fromRust;
         }
+    }
+    catch (Exception e) { o["error"] = $"{e.GetType().Name}: {e.Message}"; }
+    return o;
+}
+
+// The C# app's likeness index built from one case's vectors (standardised with chroma counting less, as
+// SoundOrganiser builds the features index, or as they are, as for CLAP), and each probe's nearest sounds.
+static JsonObject DumpSimilar(string path)
+{
+    var o = new JsonObject { ["file"] = path };
+    try
+    {
+        var c = JsonNode.Parse(File.ReadAllText(path))!;
+        var vectors = new Dictionary<long, float[]>();
+        foreach (var e in c["Vectors"]!.AsArray())
+            vectors[e![0]!.GetValue<long>()] = e[1]!.AsArray().Select(n => n!.GetValue<float>()).ToArray();
+        var features = c["Features"]!.GetValue<bool>();
+        static float[] Chroma(int dim)
+        {
+            var w = Enumerable.Repeat(1f, dim).ToArray();
+            for (var i = Math.Max(0, dim - 12); i < dim; i++) w[i] = 0.35f;
+            return w;
+        }
+        var index = MusicOrganiser.Core.Sounds.VectorIndex.Build(vectors, standardise: features, features ? new Func<int, float[]>(Chroma) : null);
+        var max = c["Max"]!.GetValue<int>();
+        var nearest = new JsonArray();
+        foreach (var q in c["Queries"]!.AsArray())
+        {
+            var v = index.Get(q!.GetValue<long>());
+            IReadOnlyList<(long Id, double Score)> found = v is null ? [] : index.Nearest(v, max);
+            nearest.Add(new JsonArray(found
+                .Select(t => (JsonNode)new JsonObject { ["Id"] = t.Id, ["Score"] = t.Score }).ToArray()));
+        }
+        o["nearest"] = nearest;
     }
     catch (Exception e) { o["error"] = $"{e.GetType().Name}: {e.Message}"; }
     return o;
