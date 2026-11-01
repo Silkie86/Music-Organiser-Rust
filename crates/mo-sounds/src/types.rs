@@ -80,8 +80,11 @@ static ONE_SHOT_WORDS: LazyLock<Regex> =
 static LOOP_WORDS: LazyLock<Regex> = LazyLock::new(|| re(r"\bloops?\b|\bbpm\b|\b\d{2,3} ?bpm", false));
 static BPM_TAG: LazyLock<Regex> = LazyLock::new(|| re(r"(\d{2,3}(?:\.\d+)?)\s*-?bpm", true));
 static BARE_NUMBER: LazyLock<Regex> = LazyLock::new(|| re(r"(?:^|[_\s-])(\d{2,3})(?:[_\s-]|$)", false));
-static KEY_TAG: LazyLock<Regex> =
-    LazyLock::new(|| re(r"(?:^|[_\s\-\(\[])([A-G])([#b♯♭]?)\s?(maj(?:or)?|min(?:or)?|m)?(?:[_\s\-\)\]]|$)", false));
+/// A key in a name: a note, then "maj", "major", "min" or "minor" in any case ("C Minor", "F#MAJ"), or a lone small
+/// "m" ("Am"). The C# app only knew the small words, so it read "Pad C Minor" as C major.
+static KEY_TAG: LazyLock<Regex> = LazyLock::new(|| {
+    re(r"(?:^|[_\s\-\(\[])([A-G])([#b♯♭]?)\s?((?i:maj(?:or)?|min(?:or)?)|m)?(?:[_\s\-\)\]]|$)", false)
+});
 
 /// Every type, in the order they're tried.
 pub fn all() -> impl Iterator<Item = &'static str> {
@@ -196,6 +199,11 @@ mod tests {
         assert_eq!(key_from_name(r"D:\x\Stab_Cmaj_.wav"), Some((0, false)));
         assert_eq!(key_from_name(r"D:\x\Stab (Eb).wav"), Some((3, false)));
         assert_eq!(key_from_name(r"D:\x\Bass.wav"), None);
+        // Capital words too (the C# app read these as major); a lone capital M isn't minor.
+        assert_eq!(key_from_name(r"D:\x\Pad C Minor.wav"), Some((0, true)));
+        assert_eq!(key_from_name(r"D:\x\Keys Bb MIN.wav"), Some((10, true)));
+        assert_eq!(key_from_name(r"D:\x\Lead F#Major.wav"), Some((6, false)));
+        assert_eq!(key_from_name(r"D:\x\Pad G Maj.wav"), Some((7, false)));
     }
 
     #[test]
