@@ -14,13 +14,22 @@ pub enum Place {
     Midi,
     Plugins,
     Space,
+    Backup,
     Settings,
 }
 
 impl Place {
     /// Every place, top to bottom. Settings sits apart at the bottom of the rail.
-    pub const ALL: [Place; 7] =
-        [Place::Songs, Place::Sounds, Place::Presets, Place::Midi, Place::Plugins, Place::Space, Place::Settings];
+    pub const ALL: [Place; 8] = [
+        Place::Songs,
+        Place::Sounds,
+        Place::Presets,
+        Place::Midi,
+        Place::Plugins,
+        Place::Space,
+        Place::Backup,
+        Place::Settings,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -30,6 +39,7 @@ impl Place {
             Place::Midi => "MIDI",
             Place::Plugins => "Plugins",
             Place::Space => "Space",
+            Place::Backup => "Backup",
             Place::Settings => "Settings",
         }
     }
@@ -44,6 +54,8 @@ impl Place {
             Place::Midi => "app.goMidi",
             Place::Plugins => "app.goPlugins",
             Place::Space => "app.goSpace",
+            // New in this app: the C# app had no backup page.
+            Place::Backup => "app.goBackup",
             Place::Settings => "app.goSettings",
         }
     }
@@ -77,6 +89,7 @@ impl Place {
             "MIDI" | "Playground" => Place::Midi,
             "Plugins" => Place::Plugins,
             "Space" => Place::Space,
+            "Backup" => Place::Backup,
             "Settings" => Place::Settings,
             _ => Place::Songs,
         }

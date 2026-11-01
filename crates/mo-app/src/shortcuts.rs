@@ -37,6 +37,7 @@ pub const APP_ACTIONS: &[Action] = &[
     action("app.goMidi", "Go to MIDI", "Ctrl+4"),
     action("app.goPlugins", "Go to Plugins", "Ctrl+5"),
     action("app.goSpace", "Go to Space", "Ctrl+6"),
+    action("app.goBackup", "Go to Backup", "Ctrl+7"),
     action("app.goSettings", "Go to Settings", "Ctrl+,"),
     action("app.prevPage", "The place above on the rail", "Ctrl+PageUp"),
     action("app.nextPage", "The place below on the rail", "Ctrl+PageDown"),
@@ -330,6 +331,7 @@ mod tests {
             assert_eq!(s.action_for(s.key_of(p.shortcut_id())), Some(p.shortcut_id()));
         }
         assert_eq!(s.action_for("Ctrl+6"), Some("app.goSpace"));
+        assert_eq!(s.action_for("Ctrl+7"), Some("app.goBackup"));
     }
 
     #[test]

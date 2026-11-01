@@ -155,8 +155,8 @@ pub fn connect(app: &AppWindow, library: PathBuf) {
         });
     });
     show(&app.as_weak());
-    // The app opened on the page (on Space until Backup has its own place in the rail).
-    if app.get_place() == mo_app::places::Place::Space.index() as i32 {
+    // The app opened on the page.
+    if app.get_place() == mo_app::places::Place::Backup.index() as i32 {
         shown();
     }
 }
