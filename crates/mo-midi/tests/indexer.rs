@@ -250,3 +250,57 @@ fn away_folders_are_kept() {
     assert!(indexer::plan(&[], &stamps, &[r"E:\Packs".into()], false).forget.is_empty());
     assert_eq!(indexer::plan(&[], &stamps, &[], false).forget, [r"E:\Packs\a.mid"]);
 }
+
+#[test]
+fn keeps_the_key_and_reads_it_again_when_the_finder_gets_better() {
+    let dir = folder("mo-midi-keys");
+    // A tune around C major, twice through.
+    let tune: Vec<u8> = [60, 64, 67, 72, 71, 67, 65, 64, 62, 59, 60, 67].repeat(2);
+    std::fs::write(dir.join("Tune.mid"), smf(&tune)).unwrap();
+    std::fs::write(dir.join("Pack").join("Basslines").join("Bass.mid"), smf(BASS)).unwrap();
+    let db = dir.join("midi-index.db");
+    let mut store = MidiStore::open(&db).unwrap();
+    let first = run(&mut store, &dir, false);
+    assert_eq!(first.rekeyed, 0, "read with this finder already");
+    let all = store.all(&HashMap::new(), &HashMap::new()).unwrap();
+    let tune_part = all.iter().find(|p| p.clip == "Tune").unwrap();
+    let fact = tune_part.key_fact.expect("the reading is kept");
+    assert_eq!(fact.tonic().map(|t| t.number()), Some(0), "{fact:?}");
+    assert!(all.iter().all(|p| p.key_fact.is_some()));
+
+    // An older finder's readings: read again from the stored notes, to the same answer, without opening the files.
+    let before: Vec<_> = all.iter().map(|p| (p.key_fact, p.features.clone())).collect();
+    rusqlite::Connection::open(&db).unwrap().execute("UPDATE keys SET version = 1, fact = NULL", []).unwrap();
+    std::fs::remove_file(dir.join("Tune.mid")).unwrap();
+    std::fs::write(dir.join("Tune.mid"), b"gone").unwrap();
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+    let again =
+        indexer::run(&mut store, &indexer::Plan::default(), &[], &pool, 2, &AtomicBool::new(false), &|_, _, _| {})
+            .unwrap();
+    assert_eq!(again.rekeyed, 2);
+    let after: Vec<_> =
+        store.all(&HashMap::new(), &HashMap::new()).unwrap().iter().map(|p| (p.key_fact, p.features.clone())).collect();
+    assert_eq!(after, before);
+}
+
+#[test]
+fn an_index_from_before_keys_gets_them() {
+    let dir = folder("mo-midi-upgrade");
+    std::fs::write(dir.join("Tune.mid"), smf(TUNE)).unwrap();
+    let db = dir.join("midi-index.db");
+    let mut store = MidiStore::open(&db).unwrap();
+    run(&mut store, &dir, false);
+    drop(store);
+    // As the first indexes were made: no keys table.
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch("DROP TABLE keys; PRAGMA user_version = 0;").unwrap();
+    drop(conn);
+    // The page can list it before the indexer has opened it.
+    let page = MidiStore::open_read_only(&db).unwrap();
+    assert_eq!(page.all(&HashMap::new(), &HashMap::new()).unwrap()[0].key_fact, None);
+    drop(page);
+    let mut store = MidiStore::open(&db).unwrap();
+    assert_eq!(store.all(&HashMap::new(), &HashMap::new()).unwrap()[0].key_fact, None);
+    assert_eq!(run(&mut store, &dir, false).rekeyed, 1);
+    assert!(store.all(&HashMap::new(), &HashMap::new()).unwrap()[0].key_fact.is_some());
+}

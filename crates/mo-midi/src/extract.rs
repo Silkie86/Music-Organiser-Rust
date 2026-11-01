@@ -49,6 +49,8 @@ pub struct Found {
     pub clip: String,
     /// At [`crate::PPQ`], starting in bar 1.
     pub notes: Vec<NoteEvent>,
+    /// Cut from a longer stretch of music ([`analyser::Piece::cut`]).
+    pub cut: bool,
     pub analysis: Analysis,
     pub drums: bool,
     /// For a phrase joined from clips.
@@ -226,11 +228,13 @@ fn add(
         return;
     }
     for piece in analyser::split(&notes, None) {
-        // Keys and chords come with mo-harmony.
-        let analysis = analyser::analyse(&piece.notes, hints, drums, None, Vec::new());
-        if !seen.insert(analysis.hash.clone()) {
+        // The same notes twice in one file: read once.
+        if !seen.insert(analyser::hash_of(&piece.notes)) {
             continue;
         }
+        // The key from mo-harmony's key finder (chords come with its chord reader).
+        let analysis =
+            crate::keys::with_reader(|r| analyser::analyse_reading(&piece.notes, hints, drums, piece.cut, r));
         let label = match (piece.place.is_empty(), clip.is_empty()) {
             (true, _) => clip.to_owned(),
             (false, true) => piece.place.clone(),
@@ -240,6 +244,7 @@ fn add(
             part: part.to_owned(),
             clip: label,
             notes: piece.notes,
+            cut: piece.cut,
             analysis,
             drums,
             members: Vec::new(),

@@ -447,6 +447,7 @@ mod tests {
             lowest: 40,
             highest: 60,
             key: None,
+            key_fact: None,
             chroma: [0; 12],
             chords: Vec::new(),
             features: vec![0; 48],
