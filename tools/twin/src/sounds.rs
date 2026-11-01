@@ -153,7 +153,12 @@ pub fn run(helper: &Path, parent: &Path) -> Result<bool, String> {
         for d in &likeness {
             println!("  {d}");
         }
-        Ok(sounds_same && differences.is_empty() && likeness.is_empty())
+        let rediscover = crate::rediscover::compare(helper, &dir)?;
+        println!("Rediscover twin: {} differences in the sounds suggested.", rediscover.len());
+        for d in &rediscover {
+            println!("  {d}");
+        }
+        Ok(sounds_same && differences.is_empty() && likeness.is_empty() && rediscover.is_empty())
     });
     let _ = std::fs::remove_dir_all(&dir);
     outcome

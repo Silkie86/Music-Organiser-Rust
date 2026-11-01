@@ -3075,6 +3075,7 @@ dependencies = [
 name = "mo-twin"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "mo-audio",
  "mo-formats",
  "mo-library",
