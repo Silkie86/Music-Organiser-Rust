@@ -259,8 +259,8 @@ pub const MAX_PLACED_NOTES: usize = 4_000_000;
 
 pub const TOO_MANY_NOTES: &str = "This song places more notes than the app holds (4 million), so only the song's \
      start was read: the clips after that are left out.";
-pub const TOO_MANY_POINTS: &str = "This song's automation clips hold more points than the app holds (4 million), so \
-     some of its automation is left out.";
+pub const TOO_MANY_POINTS: &str = "This song's automation (its automation clips and the knob moves recorded into its \
+     patterns) holds more points than the app holds (4 million), so some of it is left out.";
 
 /// The first arrangement's playlist tracks and which are muted. FL saves every track, used or not, after its
 /// arrangement's playlist (500 from FL 12.9), so their count is how many the playlist has. A track's settings (event
@@ -891,11 +891,11 @@ pub fn read_song_with(flp: &Flp<'_>, sounds: bool) -> FlSong {
     let mixer = MixerSettings::new(mixer_settings);
     // An automation clip switched off in the Channel Rack doesn't play, like a muted one.
     links.retain(|(clip, _)| !off.contains(clip));
-    let (mut automation, mut too_many_points) =
+    let (mut automation, mut too_many_points, placed_points) =
         place_automation(&links, &curves, &names, &items, &tracks, &mixer, flp.ppq);
     // Knob moves recorded into patterns play wherever the pattern does, like an automation clip.
     let (recorded, edit_events, too_many_recorded) =
-        place_edit_events(&edit_events, &pattern_names, &names, &items, &tracks, &mixer, flp.ppq);
+        place_edit_events(&edit_events, &names, &items, &tracks, &mixer, flp.ppq, placed_points);
     automation.extend(recorded);
     too_many_points |= too_many_recorded;
     // A channel whose on/off is automated plays only while it's on. When several clips switch it, it follows each in
@@ -921,9 +921,13 @@ pub fn read_song_with(flp: &Flp<'_>, sounds: bool) -> FlSong {
         .collect();
     let known = seen_channels;
     let (mut clips, too_many) = place_clips(flp, &raw_notes, &items, &tracks, &known, &pattern_names);
-    // Only patterns the song plays (all of them where there's no playlist) lose anything.
-    let placed: HashSet<u32> =
-        items.iter().filter(|i| i.index > PATTERN_BASE).map(|i| i.index - PATTERN_BASE).collect();
+    // Only patterns the song plays (all of them where there's no playlist) lose anything: muted placements, and those
+    // on a muted track, don't play.
+    let placed: HashSet<u32> = items
+        .iter()
+        .filter(|i| i.index > PATTERN_BASE && !i.muted && !tracks.at(i.slot).is_some_and(|t| t.1))
+        .map(|i| i.index - PATTERN_BASE)
+        .collect();
     let edit_events: Vec<(u32, String)> = edit_events
         .into_iter()
         .filter(|p| items.is_empty() || placed.contains(p))

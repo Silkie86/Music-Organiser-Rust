@@ -14,6 +14,10 @@ const TARGET_PAN: u32 = 1;
 const TARGET_PITCH: u32 = 4;
 const TARGET_ON_OFF: u32 = 7;
 const TARGET_PLUGIN: u32 = 0x8000;
+/// FL 8 saved an edit event moving a plugin's setting n as 0x2000 + n, rather than 0x8000 + n.
+const FL8_PLUGIN: u32 = 0x2000;
+/// FL 8 saved an edit event's value as a whole number, 2^20 for 1.
+const FL8_ONE: f64 = (1u32 << 20) as f64;
 pub(super) const TARGET_SLOT_ON_OFF: u32 = 0x1f00;
 pub(super) const TARGET_INSERT_VOLUME: u32 = 0x1fc0;
 pub(super) const TARGET_INSERT_PAN: u32 = 0x1fc1;
@@ -245,12 +249,12 @@ pub(super) fn place_automation(
     tracks: &PlaylistTracks,
     mixer: &MixerSettings,
     ppq: u16,
-) -> (Vec<FlAutomation>, bool) {
+) -> (Vec<FlAutomation>, bool, usize) {
     let mut result = Vec::new();
     let mut cut = false;
     let mut placed_points = 0usize;
     if ppq == 0 {
-        return (result, cut);
+        return (result, cut, placed_points);
     }
     let ppq = ppq as f64;
     let mut items: Vec<PlaylistItem> = items
@@ -275,6 +279,7 @@ pub(super) fn place_automation(
             placements.get(&clip).map_or(&[][..], Vec::as_slice),
             ppq,
             hold,
+            false,
             &mut placed_points,
             &mut cut,
         );
@@ -282,26 +287,29 @@ pub(super) fn place_automation(
             result.push(FlAutomation { starts, ..moves(&name, target, mixer, placed) });
         }
     }
-    (result, cut)
+    (result, cut, placed_points)
 }
 
 /// Edit events: knob moves recorded into patterns (event 223), placed where the playlist puts each pattern, as
 /// automation clips are. Each is 12 bytes: u32 the tick in the pattern, u32 what it moves (as an automation link's
 /// target), f32 the value (0..1); worked out from Solomon's sly_15 (FL 25.2.5), where they move LegacyCell's settings
-/// on every tick, and checked against FL's Edit events window for its Encoder1. Only plugin settings are carried, as only they have been seen; the patterns with edit events moving
-/// anything else (or placed nowhere they could be, in a song without a playlist) come back to be listed as left out.
-/// Returns the moves, those patterns, and whether the song held too many points.
+/// on every tick, and checked against FL's Edit events window for its Encoder1. FL 8 saved the same moves with the
+/// target's low word 0x2000 + n and the value as a whole number (2^20 for 1); found in sly_15 saved in FL 8's format,
+/// where each value matched the FL 25 save's. Before a pattern's first edit event its setting is left where it was,
+/// so each placement's part starts there. Only plugin settings are carried, as only they have been seen; the patterns
+/// with edit events moving anything else (or placed nowhere they could be, in a song without a playlist) come back to
+/// be listed as left out. `placed_points` is how many points the automation clips placed already, as the limit is
+/// shared. Returns the moves, those patterns, and whether the song held too many points.
 pub(super) fn place_edit_events(
     raw: &std::collections::BTreeMap<u32, Vec<u8>>,
-    pattern_names: &HashMap<u32, String>,
     channel_names: &HashMap<u32, String>,
     items: &[PlaylistItem],
     tracks: &PlaylistTracks,
     mixer: &MixerSettings,
     ppq: u16,
+    mut placed_points: usize,
 ) -> (Vec<FlAutomation>, Vec<u32>, bool) {
     let (mut result, mut left, mut cut) = (Vec::new(), Vec::new(), false);
-    let mut placed_points = 0usize;
     if ppq == 0 {
         return (result, raw.keys().copied().collect(), cut);
     }
@@ -318,7 +326,12 @@ pub(super) fn place_edit_events(
         let mut moved: Vec<(u32, Vec<FlPoint>)> = Vec::new();
         for r in data.chunks_exact(12) {
             let (Some(tick), Some(target), Some(bits)) = (u32_le(r, 0), u32_le(r, 4), u32_le(r, 8)) else { continue };
-            let value = f32::from_bits(bits) as f64;
+            let (target, value) = match target & 0xFFFF {
+                low @ FL8_PLUGIN..TARGET_PLUGIN => {
+                    (target & 0xFFFF_0000 | (TARGET_PLUGIN + low - FL8_PLUGIN), bits as f64 / FL8_ONE)
+                }
+                _ => (target, f32::from_bits(bits) as f64),
+            };
             if !value.is_finite() {
                 continue;
             }
@@ -328,7 +341,6 @@ pub(super) fn place_edit_events(
                 None => moved.push((target, vec![point])),
             }
         }
-        let pattern_name = pattern_names.get(&pattern).cloned().unwrap_or_else(|| format!("Pattern {pattern}"));
         let mut all_carried = !items.is_empty();
         for (target, mut points) in moved {
             let what = moves("", target, mixer, Vec::new());
@@ -337,12 +349,13 @@ pub(super) fn place_edit_events(
                 continue;
             };
             points.sort_by(|a, b| a.beat.total_cmp(&b.beat));
-            let (placed, starts) = place_curve(&points, &placements, ppq, false, &mut placed_points, &mut cut);
+            let (placed, starts) = place_curve(&points, &placements, ppq, false, true, &mut placed_points, &mut cut);
             if placed.is_empty() {
                 continue;
             }
-            let channel_name = channel_names.get(&channel).cloned().unwrap_or_else(|| format!("Channel {channel}"));
-            let name = format!("{channel_name} - setting {} (edit events in {pattern_name})", what.parameter);
+            let channel_name =
+                channel_names.get(&channel).cloned().unwrap_or_else(|| format!("Channel {}", channel + 1));
+            let name = format!("{channel_name} - setting {} (edit events)", what.parameter);
             result.push(FlAutomation { starts, ..moves(&name, target, mixer, placed) });
         }
         if !all_carried {
@@ -358,12 +371,14 @@ fn u32_le(d: &[u8], at: usize) -> Option<u32> {
 
 /// A curve (in beats from its clip's start) placed at each of `placements`, cut to each one's length, joined: the curve
 /// across the song and the beats where each placement starts. `placed_points` counts the points held across all the
-/// song's automation, and `cut` is set when it passes the limit.
+/// song's automation, and `cut` is set when it passes the limit. With `from_first`, nothing is placed before the
+/// curve's first point (edit events leave a setting alone until the first one), rather than holding its value there.
 fn place_curve(
     curve: &[FlPoint],
     placements: &[PlaylistItem],
     ppq: f64,
     hold: bool,
+    from_first: bool,
     placed_points: &mut usize,
     cut: &mut bool,
 ) -> (Vec<FlPoint>, Vec<f64>) {
@@ -372,6 +387,10 @@ fn place_curve(
     for item in placements {
         let mut part =
             cut_curve(curve, item.at as f64 / ppq, (item.offset as i64) as f64 / ppq, item.length as f64 / ppq, hold);
+        if from_first && let Some(c) = curve.first() {
+            let begins = (item.at as f64 + (c.beat * ppq) - (item.offset as i64) as f64) / ppq;
+            part.retain(|p| p.beat >= begins - SAME_BEAT);
+        }
         let (Some(&first), Some(&last)) = (part.first(), part.last()) else { continue };
         // Each placement keeps a copy of its part of the curve, so a clip placed very many times stops at the
         // limit (shared by all the song's automation, as it's all held at once).
@@ -585,7 +604,7 @@ mod tests {
                 moves(name, target, &mixer, Vec::new()).control,
                 FlControl::OnOff | FlControl::InsertSlotOnOff
             );
-            let (placed, cut) = place_automation(
+            let (placed, cut, _) = place_automation(
                 &[(0, target)],
                 &HashMap::from([(0, curve.to_vec())]),
                 &HashMap::from([(0, name.to_owned())]),
