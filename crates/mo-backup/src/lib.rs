@@ -11,8 +11,10 @@
 //!   files whose bytes are already on the backup share them.
 //! - [`record`]: the backup's own record of what it holds, kept on the backup drive.
 //! - [`pack`]: the other format, one zip per song.
+//! - [`folders`]: backing up a list of folders in one go, each whole or slimmed.
 
 pub mod copy;
+pub mod folders;
 pub mod pack;
 pub mod plan;
 pub mod record;
