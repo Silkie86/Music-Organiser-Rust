@@ -420,6 +420,28 @@ fn the_ranking_is_best_first_and_equal_scores_keep_the_order_from_the_lowest_not
     }
 }
 
+#[test]
+fn equal_scores_keep_the_candidates_order_however_long_the_list() {
+    // All twelve notes held: every label on every root is let in, and each core's readings on the eleven roots above
+    // the lowest note score the same.
+    let keys = notes("C4 C#4 D4 D#4 E4 F4 F#4 G4 G#4 A4 A#4 B4", 0, BAR);
+    let facts = facts_on(&Music::new().looped().keys(keys).hear(), bar(0), None);
+    let mut candidates = Vec::new();
+    facts.candidates(&mut candidates);
+    let ranked = ranking(&facts);
+    assert_eq!((candidates.len(), ranked.len()), (192, 192));
+    let place = |label: Label| candidates.iter().position(|c| c.label == label);
+    let mut ties = 0;
+    for w in ranked.windows(2) {
+        assert!(w[0].score >= w[1].score);
+        if w[0].score == w[1].score {
+            ties += 1;
+            assert!(place(w[0].label) < place(w[1].label), "{} came before {}", w[0].label, w[1].label);
+        }
+    }
+    assert!(ties >= 16 * 10, "{ties} ties");
+}
+
 /// The sample musics, with pushes and loops: what the rules that hold for any music are checked on.
 fn samples() -> Vec<Music> {
     let pushed = Music::new()
