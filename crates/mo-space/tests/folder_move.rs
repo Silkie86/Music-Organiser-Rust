@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
+use mo_space::after_move::kept_beside;
 use mo_space::clean::{Bin, Problem, Removed, undo};
 use mo_space::folder_move::{
     CantMove, Drives, KEPT_SUFFIX, MovedFolder, OLD_SUFFIX, move_back, move_folder, moved_json, old_copy_can_go,
@@ -290,6 +291,48 @@ fn a_folder_only_moves_where_it_makes_sense() {
         problem(&s(&c.join("Other")), &s(&dir), 1, &ROOMY, all, &stop),
         Some(CantMove::MovedBefore(moved.to.clone()))
     );
+}
+
+#[test]
+fn moving_back_stopped_part_way_says_so_and_where_the_old_copys_newer_files_are() {
+    let dir = fixtures("mo-space-move-back-stopped");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    for n in 0..4 {
+        write(&c, &format!("Library/{n}.db"), "first");
+    }
+    fs::create_dir_all(&d).unwrap();
+    let stop = AtomicBool::new(false);
+    let from = s(&c.join("Library"));
+    let moved = move_folder(&from, &s(&d), 20, whose(), &ROOMY, &[], &nothing, &stop).unwrap();
+    // The other drive's files change, but each keeps an older time than the old copy's: the old copy's are newer.
+    let (copy, old) = (d.join("Library"), PathBuf::from(&moved.old_copy));
+    for n in 0..4 {
+        let name = format!("{n}.db");
+        fs::write(copy.join(&name), "update").unwrap();
+        set_time(&copy.join(&name), time(&old.join(&name)) - Duration::from_secs(3600));
+    }
+
+    // Stop is pressed once the first file is in.
+    let result = move_back(&moved, &ROOMY, &|_| stop.store(true, Ordering::Relaxed), &stop);
+    let kept_in = format!("{from}{KEPT_SUFFIX}");
+    let Err(CantMove::LeftHalfway(said)) = result else { panic!("{result:?}") };
+    assert!(said.starts_with("Stopped. The old copy"), "{said}");
+    assert!(said.contains(&format!("its own newer files are kept in {kept_in}")), "{said}");
+    // The link and the other drive are as they were; the kept file is found, so the app can show it.
+    assert!(is_link(Path::new(&from)));
+    assert_eq!(fs::read_dir(&kept_in).unwrap().count(), 1);
+    let found = kept_beside(std::slice::from_ref(&moved), &[], &stop);
+    assert_eq!(found.iter().map(|h| h.path.as_str()).collect::<Vec<_>>(), [kept_in.as_str()]);
+
+    // Tried again, it finishes, and keeps the rest in the same folder.
+    stop.store(false, Ordering::Relaxed);
+    let back = move_back(&moved, &ROOMY, &nothing, &stop).unwrap();
+    assert_eq!(back.kept_in, kept_in);
+    assert_eq!(fs::read_dir(&kept_in).unwrap().count(), 4);
+    for n in 0..4 {
+        assert_eq!(fs::read_to_string(Path::new(&kept_in).join(format!("{n}.db"))).unwrap(), "first");
+        assert_eq!(fs::read_to_string(Path::new(&from).join(format!("{n}.db"))).unwrap(), "update");
+    }
 }
 
 #[test]

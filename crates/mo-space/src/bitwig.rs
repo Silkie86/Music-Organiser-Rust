@@ -176,7 +176,7 @@ pub fn remove_copies(fixed: &FixedProject<'_>, bin: &dyn Bin, stop: &AtomicBool)
     let prints = Prints::default();
     let libraries: Vec<PathBuf> = fixed.library_folders.iter().filter_map(|f| fs::canonicalize(f).ok()).collect();
     let (prints, libraries) = (&prints, &libraries);
-    let mut sending = Sending::new(bin);
+    let mut sending = Sending::new(bin, stop);
     // Each file once, by where it really is (worked out before any goes): the first path sent for it, by that place.
     // One whose first path stayed is still checked by the next.
     let reals: Vec<Option<PathBuf>> = fixed.changed.iter().map(|(copy, _)| fs::canonicalize(copy).ok()).collect();

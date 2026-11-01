@@ -15,7 +15,7 @@ use mo_space::after_move::{
     old_home_can_go, old_homes_json, only_in_old_home, parse_old_homes, real_place, remove_old_home, replaced, repoint,
 };
 use mo_space::clean::{Bin, Problem, Removed};
-use mo_space::folder_move::{Drives, MovedFolder, move_folder};
+use mo_space::folder_move::{CantMove, Drives, MovedFolder, move_folder};
 use mo_space::key;
 use mo_space::plugin_space::{PluginSpace, SpaceFolder, SpaceKind};
 
@@ -325,6 +325,47 @@ fn on_the_same_drive_the_home_is_renamed() {
     assert!(lost(&done.moved).is_empty() && doubled(&done.moved).is_empty());
     assert_eq!(done.old_homes[0].path, s(&new_home.join("STEAM (after update)")));
     assert_eq!(done.old_homes[0].copy, done.moved[0].to);
+}
+
+#[test]
+fn an_old_home_that_is_a_link_now_stays() {
+    let dir = fixtures("mo-space-after-old-home-link");
+    let (d, e) = (dir.join("D"), dir.join("E"));
+    write(&e, "Plugin Data/STEAM/Pad.db", "pad");
+    fs::create_dir_all(&d).unwrap();
+    // You put a link where the old home was, so old paths still work: removing it would take nothing of its own.
+    folder_link(&e.join("Plugin Data"), &d.join("Plugin Data"));
+    let old = OldHome {
+        path: s(&d.join("Plugin Data")),
+        bytes: 3,
+        note: "its old place".to_owned(),
+        copy: s(&e.join("Plugin Data")),
+        kind: 2,
+    };
+    assert!(!old_home_can_go(&old, &[]));
+    let done = remove_old_home(&old, &[], true, &bin(&dir), &AtomicBool::new(false));
+    assert!(done.removed.is_empty());
+    assert_eq!(done.problems[0].why, "It's a link now, so removing it frees nothing.");
+    assert!(is_link(&d.join("Plugin Data")));
+    assert_eq!(read(&e.join("Plugin Data/STEAM/Pad.db")), "pad");
+}
+
+#[test]
+fn on_the_same_drive_a_home_holding_a_moved_folders_link_stays() {
+    let dir = fixtures("mo-space-after-rename-holding");
+    let (d, e) = (dir.join("D"), dir.join("E"));
+    let data = d.join("Plugin Data");
+    write(&data, "Extra/x.db", "x");
+    fs::create_dir_all(d.join("Elsewhere")).unwrap();
+    fs::create_dir_all(&e).unwrap();
+    // A folder in it was moved to another drive: its link and old copy are in it.
+    let all = vec![move_it(&data.join("Extra"), &e, &[])];
+    let stop = AtomicBool::new(false);
+    let result = move_home(&s(&data), &s(&d.join("Elsewhere")), &all, &[], 3, &SameDrive, &nothing, &stop);
+    let Err(CantMove::Failed(why)) = result else { panic!("{result:?}") };
+    assert!(why.contains("Move that folder back first"), "{why}");
+    assert!(is_link(&data.join("Extra")) && all[0].has_old_copy());
+    assert_eq!(read(&data.join("Extra/x.db")), "x");
 }
 
 /// When a link won't change (here a folder the test can't write in, standing in for one Windows won't let go of), the

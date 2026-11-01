@@ -99,14 +99,15 @@ pub(crate) fn modified_of(meta: &Metadata) -> NaiveDateTime {
     meta.modified().map(|t| DateTime::<Local>::from(t).naive_local()).unwrap_or_default()
 }
 
-/// Windows' "offline" and "recall on data access": a OneDrive file that's only online, so it takes no room here and
-/// reading it downloads it.
+/// Windows' "offline", "recall on open" and "recall on data access": a OneDrive file that's only online, so it takes no
+/// room here and reading it downloads it (or a folder whose list of files is still only online).
 #[cfg(windows)]
 pub fn is_online_only(meta: &Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
     const OFFLINE: u32 = 0x1000;
+    const RECALL_ON_OPEN: u32 = 0x0004_0000;
     const RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
-    meta.file_attributes() & (OFFLINE | RECALL_ON_DATA_ACCESS) != 0
+    meta.file_attributes() & (OFFLINE | RECALL_ON_OPEN | RECALL_ON_DATA_ACCESS) != 0
 }
 
 /// Only Windows has files that are only online.
@@ -266,6 +267,67 @@ pub fn has_online_only(folder: &Path, stop: &AtomicBool) -> Result<bool, Stopped
     }
     let online = walk(folder, true, stop, |_, meta| is_online_only(meta).then_some(()))?;
     Ok(!online.is_empty())
+}
+
+/// What a look through a folder for OneDrive files that are only online found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OnlineOnly {
+    No,
+    Yes,
+    /// Some of it couldn't be read (or is deeper than [`DEEPEST`]), so it can't be told.
+    CantTell,
+}
+
+/// Whether anything in a folder is only online in OneDrive: a file, or a folder whose list of files is still only
+/// online. Unlike the size walks, a folder in it that can't be read doesn't count as holding none, as this decides
+/// whether the Recycle Bin can keep it. Only Windows has them.
+pub(crate) fn online_only_in(folder: &Path, stop: &AtomicBool) -> Result<OnlineOnly, Stopped> {
+    if !cfg!(windows) {
+        return Ok(OnlineOnly::No);
+    }
+    let mut level = vec![folder.to_path_buf()];
+    for _ in 0..DEEPEST {
+        if stop.load(Ordering::Relaxed) {
+            return Err(Stopped);
+        }
+        if level.is_empty() {
+            return Ok(OnlineOnly::No);
+        }
+        let read: Vec<Result<Vec<PathBuf>, OnlineOnly>> = level.par_iter().map(|dir| look_in(dir, stop)).collect();
+        level = Vec::new();
+        for r in read {
+            match r {
+                Ok(dirs) => level.extend(dirs),
+                Err(found) => return Ok(found),
+            }
+        }
+    }
+    if stop.load(Ordering::Relaxed) {
+        return Err(Stopped);
+    }
+    Ok(if level.is_empty() { OnlineOnly::No } else { OnlineOnly::CantTell })
+}
+
+/// The folders in one folder, for [`online_only_in`]; what it found instead, if that decides it.
+fn look_in(dir: &Path, stop: &AtomicBool) -> Result<Vec<PathBuf>, OnlineOnly> {
+    let entries = fs::read_dir(dir).map_err(|_| OnlineOnly::CantTell)?;
+    let mut dirs = Vec::new();
+    for entry in entries {
+        // The level ends early, and the walk says it stopped.
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        // On Windows this comes from the folder listing itself, so nothing that's only online is opened.
+        let meta = entry.and_then(|e| e.metadata().map(|m| (e.path(), m))).map_err(|_| OnlineOnly::CantTell)?;
+        let (path, meta) = meta;
+        if is_online_only(&meta) {
+            return Err(OnlineOnly::Yes);
+        }
+        if meta.is_dir() {
+            dirs.push(path);
+        }
+    }
+    Ok(dirs)
 }
 
 #[cfg(test)]

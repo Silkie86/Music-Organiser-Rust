@@ -231,7 +231,8 @@ impl CantMove {
             CantMove::Link => "It's moved already: it points to another place.".to_owned(),
             CantMove::MovedBefore(to) => format!(
                 "It was moved to {to} before, and a real folder is back where its link was (an update may have put it \
-                 there). Linking it again comes in a later version. Nothing was moved."
+                 there). Link it again instead: that brings the update's files into the copy and puts the link back. \
+                 Nothing was moved."
             ),
             CantMove::InsideMoved(outer) => format!(
                 "It's inside {}, which is on another drive already, so moving it frees nothing here.",
@@ -458,14 +459,39 @@ pub fn move_back(
     let settled = Path::new(from);
     let here = settled.parent().unwrap_or(settled);
     if moved.has_old_copy() {
-        let kept_in = PathBuf::from(fresh_name(from, KEPT_SUFFIX));
+        // The folder a try that stopped part way kept files in is used again, so they're all in one place.
+        let kept_first = format!("{from}{KEPT_SUFFIX}");
+        let kept_in = PathBuf::from(if real_folder(&kept_first) { kept_first } else { fresh_name(from, KEPT_SUFFIX) });
         let tree = Tree { keep_in: Some(&kept_in), ..Tree::new(to, Path::new(&moved.old_copy), settled) };
         room_for(&tree, here, drives, stop)?;
+        // From here on the old copy changes: a stop or a failure says so, and where its own newer files are.
+        let partly = |why: CantMove| match why {
+            CantMove::LeftHalfway(_) => why,
+            other => {
+                let said = if matches!(other, CantMove::Stopped) { "Stopped.".to_owned() } else { other.text() };
+                let kept = if kept_in.exists() {
+                    format!(", and its own newer files are kept in {}", text(&kept_in))
+                } else {
+                    String::new()
+                };
+                CantMove::LeftHalfway(format!(
+                    "{} The old copy ({}) was partly brought up to date from {}{kept}. The link and {} are as they \
+                     were, so it's safe to try again once the DAW is closed.",
+                    said.trim_end_matches("Nothing was moved.").trim_end(),
+                    moved.old_copy,
+                    moved.to,
+                    moved.to
+                ))
+            }
+        };
         // New files, and files that differ, go into the old copy; nothing in it is removed.
-        let first = copy_tree(&tree, Fill::Freshen, progress, stop)?;
-        // What the plugin saved through the link meanwhile.
-        let again = copy_tree(&tree, Fill::Freshen, &|n| progress(first.bytes + n), stop)?;
-        unswap_or_ask(from, &moved.old_copy, to, drives.admin())?;
+        let first = copy_tree(&tree, Fill::Freshen, progress, stop).map_err(partly)?;
+        // What the plugin saved through the link meanwhile. What the first pass wrote isn't yours: it isn't kept.
+        let mut ours = first.written.clone();
+        ours.sort();
+        let again = copy_tree(&Tree { ours: &ours, ..tree }, Fill::Freshen, &|n| progress(first.bytes + n), stop)
+            .map_err(partly)?;
+        unswap_or_ask(from, &moved.old_copy, to, drives.admin()).map_err(partly)?;
         return Ok(MovedBack {
             kept: shown(&[first.kept, again.kept].concat()),
             kept_in: kept_in.to_string_lossy().into_owned(),
@@ -729,9 +755,10 @@ pub fn remove_old_copy(moved: &MovedFolder, all: &[MovedFolder], sure: bool, bin
         }
     }
     let mut done = Done::default();
-    let real = real_path(&moved.old_copy).unwrap_or_else(|| moved.old_copy.clone());
+    // The folder itself (it was checked not to be a link), not where a link would lead.
+    let real = real_spot(&moved.old_copy);
     // Checked just now; one Windows guards is checked again by the administrator step, against what it held now.
-    let mut sending = Sending::new(bin);
+    let mut sending = Sending::new(bin, stop);
     sending.send(&moved.old_copy, real, moved.bytes, What::Plugin(moved.space_kind()), &mut done, || Ok(()));
     sending.finish(&mut done);
     done
