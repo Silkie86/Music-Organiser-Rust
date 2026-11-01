@@ -15,6 +15,8 @@ struct Case {
     name: &'static str,
     vectors: Vec<(i64, Vec<f32>)>,
     new: Vec<i64>,
+    /// Compare each step of the layout too, to show where a difference starts.
+    steps: bool,
 }
 
 /// Numbers from a fixed seed: -0.5 up to 0.5.
@@ -58,10 +60,10 @@ fn cases() -> Vec<Case> {
         (40, vec![0.2, 0.9, 0.1]),
     ];
     vec![
-        Case { name: "families", vectors: families(4, 30, 40, 7), new: vec![3, 31, 64, 100, 119, 120] },
-        Case { name: "copies", vectors: copies, new: vec![5, 30] },
-        Case { name: "four sounds", vectors: tiny, new: vec![] },
-        Case { name: "two sounds", vectors: families(1, 3, 5, 9), new: vec![3] },
+        Case { name: "families", vectors: families(4, 30, 40, 7), new: vec![3, 31, 64, 100, 119, 120], steps: true },
+        Case { name: "copies", vectors: copies, new: vec![5, 30], steps: true },
+        Case { name: "four sounds", vectors: tiny, new: vec![], steps: false },
+        Case { name: "two sounds", vectors: families(1, 3, 5, 9), new: vec![3], steps: false },
     ]
 }
 
@@ -113,6 +115,42 @@ fn differences(what: &str, cs: &Value, rust: &Value, out: &mut Vec<String>) {
     }
 }
 
+/// Where a layout first parts from the C# app's, step by step: the biggest gap in each.
+fn steps(c: &Case, cs: &Value, out: &mut Vec<String>) {
+    let all: HashMap<i64, Vec<f32>> = c.vectors.iter().cloned().collect();
+    let get = |id: i64| all[&id].clone();
+    let old: Vec<i64> = c.vectors.iter().map(|(id, _)| *id).filter(|id| !c.new.contains(id)).collect();
+    let (reduced, init, nbr, dist, edges, next) = mo_sounds::galaxy::twin_steps(&old, &get, SEED);
+    let flat = |v: &Value| -> Vec<f64> {
+        let mut o = Vec::new();
+        let mut walk = vec![v];
+        while let Some(x) = walk.pop() {
+            match x {
+                Value::Array(a) => walk.extend(a.iter().rev()),
+                _ => o.push(x.as_f64().unwrap_or(f64::NAN)),
+            }
+        }
+        o
+    };
+    let edges: Vec<Value> = edges.iter().map(|(i, j, w)| json!([i, j, w])).collect();
+    let rust = [json!(reduced), json!(init), json!(nbr), json!(dist), json!(edges), json!(next)];
+    for (name, r) in ["Reduced", "Init", "Nbr", "Dist", "Edges", "Next"].iter().zip(rust) {
+        let (a, b) = (flat(&cs[*name]), flat(&r));
+        let gap = if a.len() == b.len() {
+            a.iter().zip(&b).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max)
+        } else {
+            f64::INFINITY
+        };
+        let first = a.iter().zip(&b).position(|(x, y)| x != y);
+        out.push(format!(
+            "galaxy, {}, step {name}: {} vs {} numbers, biggest gap {gap:.2e}, first different at {first:?}",
+            c.name,
+            a.len(),
+            b.len()
+        ));
+    }
+}
+
 /// Writes the cases into `dir` (the twin's own new folder), has both apps lay them out, and gives every difference.
 pub fn compare(helper: &Path, dir: &Path) -> Result<Vec<String>, String> {
     let cases = cases();
@@ -122,6 +160,7 @@ pub fn compare(helper: &Path, dir: &Path) -> Result<Vec<String>, String> {
         let body = json!({
             "Vectors": c.vectors.iter().map(|(id, v)| json!([id, v])).collect::<Vec<_>>(),
             "New": c.new,
+            "Steps": c.steps,
         });
         std::fs::write(&path, body.to_string()).map_err(|e| format!("Couldn't write a galaxy case: {e}"))?;
         files.push(path);
@@ -140,6 +179,9 @@ pub fn compare(helper: &Path, dir: &Path) -> Result<Vec<String>, String> {
         let (map, placed) = rust_side(c);
         differences(&format!("galaxy, {}, laid out", c.name), &cs["map"], &map, &mut out);
         differences(&format!("galaxy, {}, new sounds placed", c.name), &cs["placed"], &placed, &mut out);
+        if c.steps && !out.is_empty() {
+            steps(c, &cs["steps"], &mut out);
+        }
     }
     Ok(out)
 }

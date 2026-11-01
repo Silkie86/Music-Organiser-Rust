@@ -228,6 +228,28 @@ pub fn layout(
     )
 }
 
+/// The steps of a layout, for the twin test to compare with the C# app's one by one: each sound's squashed
+/// fingerprint, the starting picture, the sound-alikes and their distances, the weighed pairs, and the next number the
+/// random sequence would give. Exact neighbours only. Not for the app.
+#[doc(hidden)]
+#[allow(clippy::type_complexity)]
+pub fn twin_steps(
+    ids: &[i64],
+    vector: &(dyn Fn(i64) -> Vec<f32> + Sync),
+    seed: i32,
+) -> (Vec<Vec<f32>>, Vec<f64>, Vec<Vec<usize>>, Vec<Vec<f32>>, Vec<(usize, usize, f32)>, i32) {
+    let mut order = ids.to_vec();
+    order.sort_unstable();
+    order.dedup();
+    let n = order.len();
+    let mut rng = DotnetRandom::new(seed);
+    let Some((reduced, init)) = pca(&order, vector, &mut rng, &|| false) else { unreachable!("never stopped") };
+    let (nbr, dist) = exact_neighbours(&reduced, n, NEIGHBOURS.min(n.saturating_sub(1)));
+    let edges = edges(&nbr, &dist).into_iter().map(|e| (e.i, e.j, e.w)).collect();
+    let rows = (0..n).map(|i| reduced.row(i).to_vec()).collect();
+    (rows, init, nbr, dist, edges, rng.next())
+}
+
 /// Evens the picture out a little and fits it into 0..1, with one scale both ways and a margin for the labels.
 ///
 /// Evening out is the same in every direction: each star keeps its direction from the middle, but its distance moves
