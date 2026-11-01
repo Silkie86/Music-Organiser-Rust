@@ -874,6 +874,9 @@ export component PointerPad inherits TouchArea {
     callback down(length, length);
     callback move(length, length);
     callback up();
+    // The right or middle button went down, and came up again (a press of the other buttons).
+    callback side-down(length, length);
+    callback side-up();
     // The press was taken away (the window lost the mouse): `up` follows, but it wasn't let go on purpose.
     callback cancelled();
     callback double();
@@ -883,6 +886,10 @@ export component PointerPad inherits TouchArea {
     pointer-event(e) => {
         if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
             root.down(self.mouse-x, self.mouse-y);
+        } else if e.kind == PointerEventKind.down && (e.button == PointerEventButton.right || e.button == PointerEventButton.middle) {
+            root.side-down(self.mouse-x, self.mouse-y);
+        } else if e.kind == PointerEventKind.up && (e.button == PointerEventButton.right || e.button == PointerEventButton.middle) {
+            root.side-up();
         } else if (e.kind == PointerEventKind.up && e.button == PointerEventButton.left) || e.kind == PointerEventKind.cancel {
             if e.kind == PointerEventKind.cancel {
                 root.cancelled();

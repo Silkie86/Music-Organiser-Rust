@@ -9,15 +9,16 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use mo_app::background::{self, Newest};
 use mo_app::galaxy_picture::{Drawn, Hits, Picture};
-use mo_app::galaxy_view::{Moved, View};
+use mo_app::galaxy_view::{Hold, Moved, View};
 use mo_app::log;
 use mo_app::sounds as list;
 use mo_sounds::galaxy::{self, Placing, Step};
 use mo_sounds::{SoundsDb, StarPoint};
-use slint::{ComponentHandle, Image, Model, Rgba8Pixel, SharedPixelBuffer};
+use slint::{ComponentHandle, Image, Model, Rgba8Pixel, SharedPixelBuffer, Timer, TimerMode};
 
 use super::{FEED, HERE, PAGE, pick, play_picked, strings};
 use crate::{AppWindow, SoundsData, Theme};
@@ -59,6 +60,8 @@ pub(super) struct Galaxy {
     drawn_id: u64,
     /// How many stars are on the map.
     count: usize,
+    /// A left-button sweep going on.
+    sweep: Sweep,
 }
 
 impl Default for Galaxy {
@@ -79,6 +82,7 @@ impl Default for Galaxy {
             drawn_scale: 1.0,
             drawn_id: 0,
             count: 0,
+            sweep: Sweep::default(),
         }
     }
 }
@@ -129,14 +133,19 @@ pub(super) fn wire(app: &AppWindow) {
         draw(&app);
     });
     let weak = app.as_weak();
-    data.on_galaxy_down(move |x, y| {
+    data.on_galaxy_down(move |x, y, pan| {
         let Some(app) = weak.upgrade() else { return };
+        // A second button pressed while one is held changes nothing: the first press carries on.
+        if PAGE.with(|p| p.borrow().galaxy.view.pressed()) {
+            return;
+        }
         PAGE.with(|p| {
             let g = &mut p.borrow_mut().galaxy;
-            g.view.press(x, y);
+            g.view.press(x, y, if pan { Hold::Pan } else { Hold::Sweep });
             g.cancelled = false;
+            g.sweep = Sweep::default();
         });
-        app.global::<SoundsData>().set_galaxy_grabbing(true);
+        app.global::<SoundsData>().set_galaxy_grabbing(pan);
     });
     let weak = app.as_weak();
     data.on_galaxy_move(move |x, y| {
@@ -149,6 +158,7 @@ pub(super) fn wire(app: &AppWindow) {
                 draw(&app);
             }
             Moved::Still => {}
+            Moved::Swept(fx, fy) => swept(&app, (fx, fy), (x, y)),
             Moved::Hover => {
                 let found = star_at(x, y);
                 let name = PAGE.with(|p| {
@@ -163,14 +173,30 @@ pub(super) fn wire(app: &AppWindow) {
     });
     data.on_galaxy_cancelled(|| PAGE.with(|p| p.borrow_mut().galaxy.cancelled = true));
     let weak = app.as_weak();
-    data.on_galaxy_up(move || {
+    data.on_galaxy_up(move |side| {
         let Some(app) = weak.upgrade() else { return };
+        // Only the button that started the press ends it (a cancelled press ends whichever it was).
+        let other = PAGE.with(|p| {
+            let g = &p.borrow().galaxy;
+            let held = g.view.holding();
+            held.is_none() || (!g.cancelled && held != Some(if side { Hold::Pan } else { Hold::Sweep }))
+        });
+        if other {
+            return;
+        }
         app.global::<SoundsData>().set_galaxy_grabbing(false);
-        let click = PAGE.with(|p| {
+        let (click, swept) = PAGE.with(|p| {
             let g = &mut p.borrow_mut().galaxy;
             let cancelled = std::mem::take(&mut g.cancelled);
-            g.view.release(cancelled)
+            let swept = g.view.sweeping() && g.sweep.played.is_some();
+            g.sweep = Sweep::default();
+            (g.view.release(cancelled), swept)
         });
+        SWEEP_TIMER.with(Timer::stop);
+        // Let go after sweeping: the sound stops with the mouse.
+        if swept {
+            super::stop(&app);
+        }
         let Some(at) = click.and_then(|(x, y)| star_at(x, y)) else { return };
         pick(&app, at);
         if PAGE.with(|p| p.borrow().autoplay) {
@@ -196,6 +222,99 @@ pub(super) fn wire(app: &AppWindow) {
             app.global::<SoundsData>().set_galaxy_hover_text("".into());
         }
     });
+}
+
+/// How long each star of a sweep plays before the next one may start, so a sweep over a crowded part isn't cut to
+/// clicks (the C# app's 90 ms).
+const SWEEP_GAP: Duration = Duration::from_millis(90);
+/// How far apart (in points) the mouse's path is looked along for stars.
+const SWEEP_STEP: f32 = 3.0;
+
+/// A sweep going on: when the last star started and which it was, and the star the mouse reached since, waiting
+/// for its turn. Only the newest waits, so the sound keeps up with the mouse.
+#[derive(Default)]
+pub(super) struct Sweep {
+    played: Option<(usize, Instant)>,
+    waiting: Option<usize>,
+}
+
+thread_local! {
+    static SWEEP_TIMER: Timer = Timer::default();
+}
+
+/// The mouse swept from `from` to `to`: every star along the way, not just where it landed (a quick sweep moves many
+/// points between two moves), plays in turn.
+fn swept(app: &AppWindow, from: (f32, f32), to: (f32, f32)) {
+    let steps = ((to.0 - from.0).hypot(to.1 - from.1) / SWEEP_STEP).ceil().max(1.0) as usize;
+    let mut passed: Vec<usize> = Vec::new();
+    for i in 0..=steps {
+        let t = i as f32 / steps as f32;
+        if let Some(at) = star_at(from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t)
+            && passed.last() != Some(&at)
+        {
+            passed.push(at);
+        }
+    }
+    let data = app.global::<SoundsData>();
+    data.set_galaxy_mouse_x(to.0);
+    data.set_galaxy_mouse_y(to.1);
+    for at in passed {
+        reached(app, at);
+    }
+}
+
+/// The sweep reached a star: it plays now if the last one has had its moment, otherwise it waits its turn.
+fn reached(app: &AppWindow, at: usize) {
+    let now = Instant::now();
+    let play = PAGE.with(|p| {
+        let g = &mut p.borrow_mut().galaxy;
+        let last = g.sweep.played;
+        if last.is_some_and(|(was, _)| was == at) && g.sweep.waiting.is_none() {
+            return false;
+        }
+        if last.is_none_or(|(_, when)| now.duration_since(when) >= SWEEP_GAP) {
+            g.sweep.waiting = None;
+            g.sweep.played = Some((at, now));
+            true
+        } else {
+            g.sweep.waiting = Some(at);
+            false
+        }
+    });
+    if play {
+        sweep_play(app, at);
+        return;
+    }
+    let weak = app.as_weak();
+    SWEEP_TIMER.with(|t| {
+        if !t.running() {
+            t.start(TimerMode::Repeated, Duration::from_millis(15), move || {
+                let Some(app) = weak.upgrade() else { return };
+                let due = PAGE.with(|p| {
+                    let g = &mut p.borrow_mut().galaxy;
+                    let waiting = g.sweep.waiting?;
+                    let ready = g.sweep.played.is_none_or(|(_, when)| when.elapsed() >= SWEEP_GAP);
+                    ready.then(|| {
+                        g.sweep.waiting = None;
+                        g.sweep.played = Some((waiting, Instant::now()));
+                        waiting
+                    })
+                });
+                match due {
+                    Some(at) => sweep_play(&app, at),
+                    None if PAGE.with(|p| p.borrow().galaxy.sweep.waiting.is_none()) => SWEEP_TIMER.with(Timer::stop),
+                    None => {}
+                }
+            });
+        }
+    });
+}
+
+/// Plays a star the sweep reached, and names it beside the mouse. It isn't picked: a sweep is for listening along.
+fn sweep_play(app: &AppWindow, at: usize) {
+    let name = PAGE.with(|p| p.borrow().list.sound(at).map(|s| format!("{}  ·  {}", s.name(), s.sound_type)));
+    app.global::<SoundsData>().set_galaxy_hover_text(name.unwrap_or_default().into());
+    super::play_sound(app, at, 0.0);
 }
 
 /// The shown star under (`x`, `y`) on the view, in points.

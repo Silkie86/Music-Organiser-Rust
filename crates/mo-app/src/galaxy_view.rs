@@ -30,10 +30,20 @@ struct Press {
     cx: f32,
     cy: f32,
     dragged: bool,
+    hold: Hold,
+}
+
+/// What a held button does as the mouse moves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hold {
+    /// Moves the map (the right or middle button, as in the C# app).
+    Pan,
+    /// Plays each star the mouse passes over (the left button); the map stays still.
+    Sweep,
 }
 
 /// What a mouse move did.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Moved {
     /// Nothing pressed: show what's under the mouse.
     Hover,
@@ -41,6 +51,8 @@ pub enum Moved {
     Still,
     /// The map moved: draw it again.
     Panned,
+    /// Sweeping: the mouse went from here to where it is now, over the stars between.
+    Swept(f32, f32),
 }
 
 impl Default for View {
@@ -86,28 +98,45 @@ impl View {
         }
     }
 
-    pub fn press(&mut self, x: f32, y: f32) {
+    pub fn press(&mut self, x: f32, y: f32, hold: Hold) {
         self.mouse = (x, y);
-        self.press = Some(Press { x, y, cx: self.cx, cy: self.cy, dragged: false });
+        self.press = Some(Press { x, y, cx: self.cx, cy: self.cy, dragged: false, hold });
     }
 
     /// The mouse moved to (`x`, `y`). A press only moves the map once it has gone further than [`STILL`].
     pub fn moved(&mut self, x: f32, y: f32) -> Moved {
-        self.mouse = (x, y);
+        let last = std::mem::replace(&mut self.mouse, (x, y));
         let u = self.unit();
         let Some(p) = &mut self.press else { return Moved::Hover };
         if !p.dragged && (x - p.x).abs() + (y - p.y).abs() <= STILL {
             return Moved::Still;
         }
+        // The first move past STILL sweeps from where the press was, so the star under it plays too.
+        let from = if p.dragged { last } else { (p.x, p.y) };
         p.dragged = true;
-        (self.cx, self.cy) = (p.cx - (x - p.x) / u, p.cy - (y - p.y) / u);
-        Moved::Panned
+        match p.hold {
+            Hold::Pan => {
+                (self.cx, self.cy) = (p.cx - (x - p.x) / u, p.cy - (y - p.y) / u);
+                Moved::Panned
+            }
+            Hold::Sweep => Moved::Swept(from.0, from.1),
+        }
     }
 
     /// The press ended: where it was, when it was a click (not a drag, and not cancelled).
     pub fn release(&mut self, cancelled: bool) -> Option<(f32, f32)> {
         let p = self.press.take()?;
-        (!p.dragged && !cancelled).then_some((p.x, p.y))
+        (!p.dragged && !cancelled && p.hold == Hold::Sweep).then_some((p.x, p.y))
+    }
+
+    /// What the button held down does, if one is.
+    pub fn holding(&self) -> Option<Hold> {
+        self.press.map(|p| p.hold)
+    }
+
+    /// The press going on sweeps and has moved: letting go stops the sound.
+    pub fn sweeping(&self) -> bool {
+        self.press.is_some_and(|p| p.hold == Hold::Sweep && p.dragged)
     }
 
     pub fn pressed(&self) -> bool {
@@ -156,7 +185,7 @@ mod tests {
     #[test]
     fn a_small_wobble_is_a_click_and_moves_nothing() {
         let mut v = view();
-        v.press(100.0, 100.0);
+        v.press(100.0, 100.0, Hold::Sweep);
         assert_eq!(v.moved(102.0, 101.0), Moved::Still);
         assert_eq!((v.cx, v.cy), (0.5, 0.5));
         assert_eq!(v.release(false), Some((100.0, 100.0)));
@@ -166,23 +195,43 @@ mod tests {
     #[test]
     fn a_drag_moves_the_map_and_isnt_a_click() {
         let mut v = view();
-        v.press(100.0, 100.0);
+        v.press(100.0, 100.0, Hold::Pan);
         assert_eq!(v.moved(150.0, 100.0), Moved::Panned);
         assert!(v.cx < 0.5);
         assert_eq!(v.release(false), None);
     }
 
     #[test]
+    fn a_left_drag_sweeps_from_the_press_and_leaves_the_map_still() {
+        let mut v = view();
+        v.press(100.0, 100.0, Hold::Sweep);
+        assert_eq!(v.moved(102.0, 100.0), Moved::Still);
+        assert!(!v.sweeping());
+        assert_eq!(v.moved(110.0, 100.0), Moved::Swept(100.0, 100.0));
+        assert_eq!(v.moved(120.0, 105.0), Moved::Swept(110.0, 100.0));
+        assert!(v.sweeping());
+        assert_eq!((v.cx, v.cy), (0.5, 0.5));
+        assert_eq!(v.release(false), None);
+    }
+
+    #[test]
+    fn a_right_click_without_a_drag_isnt_a_pick() {
+        let mut v = view();
+        v.press(100.0, 100.0, Hold::Pan);
+        assert_eq!(v.release(false), None);
+    }
+
+    #[test]
     fn a_cancelled_press_isnt_a_click() {
         let mut v = view();
-        v.press(100.0, 100.0);
+        v.press(100.0, 100.0, Hold::Sweep);
         assert_eq!(v.release(true), None);
     }
 
     #[test]
     fn zooming_during_a_drag_carries_on_from_where_the_map_is() {
         let mut v = view();
-        v.press(100.0, 100.0);
+        v.press(100.0, 100.0, Hold::Pan);
         v.moved(150.0, 100.0);
         v.zoom_at_mouse(2.0);
         let (cx, cy) = (v.cx, v.cy);
