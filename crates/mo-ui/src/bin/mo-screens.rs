@@ -47,10 +47,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     mo_ui::songs::show(&app, sample_songs());
     // The Sounds page, worked out in place too, from made-up sounds.
     mo_ui::sounds::compute_here();
-    mo_ui::sounds::connect(&app, out.join("no sounds.db"), feed.clone(), &Shortcuts::default());
+    mo_ui::sounds::connect(
+        &app,
+        out.join("no sounds.db"),
+        out.join("no library.db"),
+        feed.clone(),
+        &Shortcuts::default(),
+    );
     app.set_place(Place::Sounds.index() as i32);
     let sounds_empty = capture(&window);
-    mo_ui::sounds::show(&app, sample_sounds(), None, None);
+    mo_ui::sounds::show(&app, sample_sounds(), None, Some("1"));
     // Once to lay the page out (the tiles' width tells the page how many fit in a row), then for real.
     capture(&window);
 
@@ -292,7 +298,17 @@ fn sample_sounds() -> mo_ui::sounds::Library {
         })
         .collect();
     let played = vec![(7, day(31, 22)), (13, day(31, 21)), (2, day(30, 18)), (11, day(28, 9)), (20, day(20, 14))];
-    mo_ui::sounds::Library::new(sounds, played)
+    // A few made-up songs using some of them, for the Used column and Most liked.
+    let usage = (1..=29)
+        .filter(|id| id % 3 != 0)
+        .map(|id: i64| {
+            let projects = (id * 7 % 11) as u32;
+            (id, mo_sounds::usage::Usage { projects, recent: projects / 2, years: vec![2025, 2026] })
+        })
+        .filter(|(_, u)| u.projects > 0)
+        .collect();
+    let weights = mo_sounds::liking::LikedWeights::default();
+    mo_ui::sounds::Library::new(sounds, played, &weights).with_usage(usage, &weights)
 }
 
 /// A made-up library for the Songs page: names, plugins and dates invented here, none of Solomon's (rule 4).

@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 
+use mo_sounds::usage::Usage;
 use mo_sounds::{Sound, music, types};
 use rayon::prelude::*;
 
@@ -95,16 +96,16 @@ impl Filters {
 }
 
 /// Every sound the page can show (hidden copies left out: they only hide in the app, rule 2), with what's worked out
-/// once per sound for searching and sorting.
-#[derive(Default)]
+/// once per sound for searching and sorting. Cloning copies every sound, so it's only done off the window's thread.
+#[derive(Clone, Default)]
 pub struct SoundList {
     sounds: Vec<Sound>,
     /// Lower-cased path, type, tags and character, one per line: what the search words are looked for in.
     hay: Vec<String>,
     /// Lower-cased names, for the name order and every order's tie-break.
     names: Vec<String>,
-    /// How many projects use each sound, by sound id, once known.
-    used: Option<HashMap<i64, u32>>,
+    /// How your projects use each sound, by sound id, once known (sounds no project uses are left out).
+    used: Option<HashMap<i64, Usage>>,
     /// Each sound's Most liked score, in `sounds` order, once known.
     liked: Option<Vec<f64>>,
     /// The best of `liked`, worked out once, as every tile asks for its share of it.
@@ -120,8 +121,9 @@ impl SoundList {
         SoundList { sounds, hay, names, ..SoundList::default() }
     }
 
-    /// How many projects use each sound (by id), for the Used chips and column.
-    pub fn set_used(&mut self, used: HashMap<i64, u32>) {
+    /// How your projects use each sound (by id, as [`mo_sounds::usage::usage`] gives it), for the Used chips and
+    /// column.
+    pub fn set_used(&mut self, used: HashMap<i64, Usage>) {
         self.used = Some(used);
     }
 
@@ -140,6 +142,16 @@ impl SoundList {
         self.sounds.is_empty()
     }
 
+    /// Every sound in the list, in its order.
+    pub fn sounds(&self) -> &[Sound] {
+        &self.sounds
+    }
+
+    /// How your projects use the sound at `i`, if that's known yet (`None` too when none do).
+    pub fn usage(&self, i: usize) -> Option<&Usage> {
+        self.used.as_ref()?.get(&self.sounds.get(i)?.id)
+    }
+
     pub fn sound(&self, i: usize) -> Option<&Sound> {
         self.sounds.get(i)
     }
@@ -152,7 +164,7 @@ impl SoundList {
     /// How many projects use a sound, if that's known yet.
     pub fn used_in(&self, i: usize) -> Option<u32> {
         let used = self.used.as_ref()?;
-        Some(self.sounds.get(i).and_then(|s| used.get(&s.id)).copied().unwrap_or(0))
+        Some(self.sounds.get(i).and_then(|s| used.get(&s.id)).map_or(0, |u| u.projects))
     }
 
     /// The Most liked score, from 0 to 1 against the best liked, if scores are known yet.
@@ -221,7 +233,7 @@ impl SoundList {
             return false;
         }
         if let Some(used) = &self.used {
-            let n = used.get(&s.id).copied().unwrap_or(0);
+            let n = used.get(&s.id).map_or(0, |u| u.projects);
             if (t.unused && n > 0) || (t.used && n == 0) {
                 return false;
             }
@@ -525,7 +537,8 @@ mod tests {
         let mut list = library();
         let f = Filters { unused: true, ..Filters::default() };
         assert_eq!(list.view(&f, Order::Name, 0).len(), 4);
-        list.set_used(HashMap::from([(1, 3), (2, 1)]));
+        let used = |projects| Usage { projects, recent: 0, years: vec![2026] };
+        list.set_used(HashMap::from([(1, used(3)), (2, used(1))]));
         assert_eq!(ids(&list, &list.view(&f, Order::Name, 0)), vec![4, 3]);
         let f = Filters { used: true, ..Filters::default() };
         assert_eq!(ids(&list, &list.view(&f, Order::Name, 0)), vec![1, 2]);

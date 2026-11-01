@@ -3100,6 +3100,7 @@ dependencies = [
  "mo-sounds",
  "mo-space",
  "rfd",
+ "rusqlite",
  "slint",
  "slint-build",
 ]
