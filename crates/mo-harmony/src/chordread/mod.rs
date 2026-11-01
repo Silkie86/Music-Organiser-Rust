@@ -21,7 +21,10 @@
 //!   `theorybench tables` ([`COUNTED`]);
 //! - the second step, deciding where the chords change and which chord each stretch is ([`Decoder`]): the best way
 //!   to read the whole, the chance of each reading on each stretch, rests, and stretches given by the caller
-//!   ([`PinnedSpan`]).
+//!   ([`PinnedSpan`]);
+//! - the third step, naming each chord from the notes really played ([`Namer`]): its extensions, its root and its
+//!   bass ([`BassKind`]), a seventh heard only in the bass, sus chords over a bass, pedals, the roots of diminished
+//!   sevenths and augmented triads, and a chord cut in two where its bass moves to its third or seventh.
 
 mod candidates;
 mod cores;
@@ -31,6 +34,9 @@ mod decode_tests;
 mod hear;
 #[cfg(test)]
 mod hear_tests;
+mod name;
+#[cfg(test)]
+mod name_tests;
 mod score;
 #[cfg(test)]
 mod score_tests;
@@ -46,6 +52,7 @@ pub use hear::{
     BASS_GAP, BassTexture, HeardNote, Hearing, Level, Line, MOST_UNITS, Mass, Push, Shape, Shaped, Stream, Unit,
     heard_in, presence_of,
 };
+pub use name::{BassKind, NamedSpan, Namer, Naming, Reading, SpanFlags};
 pub use score::{Evidence, Feature, PerFeature, Scored, Scorer, Scoring, SpanFacts};
 pub use tables::{COUNTED, COUNTED_FROM};
 pub use weights::{EVEN, HAND, Priors, Tables, Weights};

@@ -99,7 +99,7 @@ fn cuts(spans: &[Read]) -> Vec<(Range<usize>, &str)> {
 
 /// What a case read whole must read, with units counted from the first unit reported.
 #[derive(Clone, Debug)]
-enum Check {
+pub(super) enum Check {
     /// Every span over these units reads one of these (N for no chord).
     Reads(Range<usize>, &'static [&'static str]),
     /// These units are one span.
@@ -159,7 +159,7 @@ fn holds(check: &Check, whole: &Whole, spans: &[Read]) -> Result<(), String> {
 /// name, the music, and what it must read. 12, 13 and 20 have no bass: the design wants their rootless readings among
 /// the best two or three, which no weights reach yet (harmony/design/chord-reader-design.md, "As built"); for now
 /// they must be kept.
-fn whole_cases() -> Vec<(&'static str, Music, Vec<Check>)> {
+pub(super) fn whole_cases() -> Vec<(&'static str, Music, Vec<Check>)> {
     use Check::*;
     let keys_bass = |bass: &str, keys: &str| Music::new().bass(bars(bass)).keys(bars(keys));
     let keys = |keys: &str| Music::new().keys(bars(keys));
@@ -348,7 +348,7 @@ fn whole_cases() -> Vec<(&'static str, Music, Vec<Check>)> {
 
 /// A dense gospel part, so many bars long: Cmaj9, Am11, Dm9 and G13 by turns, a bar each, the chords struck in
 /// sixteenths over a bass moving in eighths.
-fn dense(bars: i64) -> Music {
+pub(super) fn dense(bars: i64) -> Music {
     let (mut bass, mut keys) = (Vec::new(), Vec::new());
     let each = [
         ("C2 G2 C3 G2 E2 G2 C3 B2", "E3 G3 B3 D4"),
@@ -571,7 +571,7 @@ fn a_pushed_chords_sound_starts_where_it_is_struck() {
 /// Music for the rules that hold for any music: the evidence's samples (pushes, loops, a walking bass, a broken bar),
 /// some cases only a whole read decides (passing and symmetric chords, a walk, a push, chords struck again quickly), a
 /// rest, and pins of both kinds.
-fn the_music() -> Vec<(Music, Vec<PinnedSpan>)> {
+pub(super) fn the_music() -> Vec<(Music, Vec<PinnedSpan>)> {
     let mut out: Vec<(Music, Vec<PinnedSpan>)> = samples().into_iter().map(|m| (m, Vec::new())).collect();
     for (name, music, _) in whole_cases() {
         if ["6", "38", "44", "h4", "h6"].contains(&name.split(' ').next().unwrap_or("")) {
@@ -950,7 +950,7 @@ fn kept_pins(pins: &[PinnedSpan], units: usize) -> Vec<PinnedSpan> {
 
 /// Small random music, with few enough ways to read it to add them up one by one: up to three bars on one of some
 /// grids, sometimes looped, with up to three parts of up to three notes or chords each.
-fn small_music(dice: &mut Dice) -> Music {
+pub(super) fn small_music(dice: &mut Dice) -> Music {
     let (beats, tpb) = dice.pick(&[(4, 480), (3, 480), (6, 240), (2, 96), (4, 1)]);
     let (beat, bar) = (i64::from(tpb), i64::from(beats) * i64::from(tpb));
     let length = (1 + dice.below(3) as i64) * bar;
@@ -976,7 +976,7 @@ fn small_music(dice: &mut Dice) -> Music {
 
 /// Up to three pins anywhere in some music heard (past the end, empty, or over each other too), on a chord or only at
 /// their ends.
-fn random_pins(dice: &mut Dice, hearing: &Hearing) -> Vec<PinnedSpan> {
+pub(super) fn random_pins(dice: &mut Dice, hearing: &Hearing) -> Vec<PinnedSpan> {
     let (units, bar) = (hearing.units(), hearing.bar_units().max(1));
     let mut pins = Vec::new();
     for _ in 0..dice.below(4) {
@@ -1208,7 +1208,7 @@ fn explain_the_paths() {
 
 /// 64 bars of a ii V I in four keys, with a walking bass and a tune, the ii pushed into its bar every four bars, and a
 /// bar of rest every sixteen.
-fn song() -> Music {
+pub(super) fn song() -> Music {
     let (mut bass, mut keys, mut tune) = (Vec::new(), Vec::new(), Vec::new());
     for bar in 0..64i64 {
         let start = bar * BAR;

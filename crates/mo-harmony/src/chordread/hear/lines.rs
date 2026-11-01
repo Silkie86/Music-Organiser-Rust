@@ -69,6 +69,23 @@ pub struct Shaped {
     pub end: i64,
 }
 
+impl Shaped {
+    /// The notes it must hang on to pass by under a chord: those it moves between, or none for an anticipation or an
+    /// approach, which hang on the chord after it (so need only not be the chord's own notes).
+    pub const fn hangs_on(&self) -> PcSet {
+        match self.shape {
+            Shape::Anticipation | Shape::Approach => PcSet::EMPTY,
+            Shape::Passing | Shape::Neighbour | Shape::Suspension | Shape::Appoggiatura => self.anchors,
+        }
+    }
+
+    /// Whether it only passes by under a chord whose own notes are `tones`: it isn't one of them, and the notes it
+    /// hangs on are.
+    pub const fn passes_under(&self, tones: PcSet) -> bool {
+        !tones.contains(self.pc) && tones.contains_all(self.hangs_on())
+    }
+}
+
 /// A note of a line, as the shapes see it: as played (a broken chord's pedal left out).
 #[derive(Clone, Copy, Debug)]
 struct Step {
@@ -167,10 +184,8 @@ impl Hearing {
     }
 
     fn step(&self, note: usize, n: &HeardNote) -> Step {
-        let unit = self.layout.unit_at(n.start);
         // Struck a little late (by less than a quarter of a unit) is on the unit's start: that's a player's timing.
-        let on_start = n.start - self.layout.start(unit) < self.together();
-        let weight = if on_start { self.layout.level(unit).weight() } else { 0 };
+        let weight = self.strength_at(n.start).map_or(0, Level::weight);
         let length = n.length.max(1);
         Step { note, key: n.key, start: n.start, end: n.start.saturating_add(length), length, weight, shaped: true }
     }

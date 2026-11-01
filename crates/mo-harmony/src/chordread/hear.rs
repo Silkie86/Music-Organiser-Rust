@@ -403,6 +403,15 @@ impl Hearing {
         self.layout.level(unit)
     }
 
+    /// How strong the place is where a note struck at a tick (from the first unit's start, as [`HeardNote`]s count)
+    /// is struck: its unit's level when it's struck less than a quarter of a unit after the unit starts (a player's
+    /// timing), none between unit starts, which is weaker than any.
+    pub fn strength_at(&self, tick: i64) -> Option<Level> {
+        let unit = self.layout.unit_at(tick.max(0));
+        let late = tick.saturating_sub(self.layout.start(unit));
+        (late < (self.layout.unit_ticks() / 4).max(1)).then(|| self.layout.level(unit))
+    }
+
     /// Whether some notes were left out because they lay further apart than [`MOST_UNITS`] units (a damaged file).
     pub fn truncated(&self) -> bool {
         self.truncated
