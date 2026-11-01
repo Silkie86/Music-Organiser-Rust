@@ -29,6 +29,14 @@ fn s(p: &Path) -> String {
     p.to_string_lossy().into_owned()
 }
 
+/// A folder link, as Windows has them (a junction, as Space makes) or a symbolic link elsewhere.
+fn folder_link(target: &Path, at: &Path) {
+    #[cfg(windows)]
+    junction::create(target, at).unwrap();
+    #[cfg(not(windows))]
+    std::os::unix::fs::symlink(target, at).unwrap();
+}
+
 /// A found copy with its paths as Space compares them (on Windows, a path written with `/` is found with `\`).
 fn keyed(c: &LibraryCopy) -> (String, String, u64) {
     (key(&c.in_project), key(&c.library_file), c.bytes)
@@ -172,10 +180,7 @@ fn a_library_folder_moved_away_with_a_link_in_its_place_is_still_read() {
     // The packages folder was moved to another drive, and a link took its place (a junction on Windows, as Space
     // makes).
     let (moved, library) = (dir.join("D/Packages"), dir.join("installed-packages"));
-    #[cfg(windows)]
-    junction::create(&moved, &library).unwrap();
-    #[cfg(not(windows))]
-    std::os::unix::fs::symlink(&moved, &library).unwrap();
+    folder_link(&moved, &library);
     let stop = AtomicBool::new(false);
     let index = LibraryIndex::new(std::slice::from_ref(&library), &stop).unwrap();
     let copies = index.copies_in(&dir.join("Projects/Garage"), &stop).unwrap();
@@ -402,7 +407,6 @@ fn a_link_a_linked_folder_or_a_hard_link_to_the_library_file_stays() {
     assert!(dir.join("Elsewhere/A-2.multisample").exists() && library.join("A.multisample").exists());
 }
 
-#[cfg(unix)]
 #[test]
 fn one_copy_given_two_ways_goes_once_and_a_good_second_way_still_counts() {
     let dir = fixtures("mo-space-bitwig-remove-two-ways");
@@ -411,7 +415,7 @@ fn one_copy_given_two_ways_goes_once_and_a_good_second_way_still_counts() {
     write(&project, "P (fixed).bwproject", b"fixed");
     write(&project, "multi-samples/A-2.multisample", b"a");
     write(&project, "multi-samples/B-2.multisample", b"a");
-    std::os::unix::fs::symlink(project.join("multi-samples"), project.join("Old name")).unwrap();
+    folder_link(&project.join("multi-samples"), &project.join("Old name"));
     let ms = project.join("multi-samples");
     let changed = [
         // B: first with a Library file that isn't there, then as it should be.

@@ -223,6 +223,44 @@ fn a_folder_moves_to_the_other_drive_and_back_with_what_was_saved_meanwhile() {
     assert!(copy.join("Pad.db").exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn a_network_drive_is_never_where_a_folder_moves() {
+    let dir = fixtures("mo-space-move-network");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    write(&c, "Library/a.nki", "a");
+    fs::create_dir_all(&d).unwrap();
+    // Two slashes in front: a network path to Linux (\\server on Windows), though here it reaches the same folder.
+    let network = format!("/{}", s(&d));
+    let stop = AtomicBool::new(false);
+    assert_eq!(problem(&s(&c.join("Library")), &network, 1, &ROOMY, &[], &stop), Some(CantMove::NetworkDrive));
+    let moved = move_folder(&s(&c.join("Library")), &network, 1, whose(), &ROOMY, &[], &nothing, &stop);
+    assert_eq!(moved, Err(CantMove::NetworkDrive));
+    assert!(!d.join("Library").exists() && !is_link(&c.join("Library")));
+}
+
+#[test]
+fn an_old_copy_turned_into_a_link_stays_and_so_does_where_it_leads() {
+    let dir = fixtures("mo-space-move-old-copy-link");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    write(&c, "NI/Kontakt Library/a.nki", "a");
+    fs::create_dir_all(&d).unwrap();
+    let stop = AtomicBool::new(false);
+    let moved =
+        move_folder(&s(&c.join("NI/Kontakt Library")), &s(&d), 1, whose(), &ROOMY, &[], &nothing, &stop).unwrap();
+    // Since it was looked at, the old copy was put elsewhere and a link to it took its place.
+    let old = PathBuf::from(&moved.old_copy);
+    let elsewhere = dir.join("Elsewhere");
+    fs::rename(&old, &elsewhere).unwrap();
+    folder_link(&elsewhere, &old);
+    let bin = FolderBin { dir: dir.join("bin"), held: RefCell::new(Vec::new()) };
+    let done = remove_old_copy(&moved, std::slice::from_ref(&moved), true, &bin, &stop);
+    assert!(done.removed.is_empty());
+    assert_eq!(done.problems.len(), 1);
+    assert!(is_link(&old));
+    assert_eq!(fs::read_to_string(elsewhere.join("a.nki")).unwrap(), "a");
+}
+
 #[test]
 fn moving_back_once_the_old_copy_is_gone_copies_the_folder_back() {
     let dir = fixtures("mo-space-move-back");

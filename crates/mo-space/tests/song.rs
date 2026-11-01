@@ -46,6 +46,14 @@ fn s(dir: &Path) -> String {
     dir.to_string_lossy().into_owned()
 }
 
+/// A folder link, as Windows has them (a junction, as Space makes) or a symbolic link elsewhere.
+fn folder_link(target: &Path, at: &Path) {
+    #[cfg(windows)]
+    junction::create(target, at).unwrap();
+    #[cfg(not(windows))]
+    std::os::unix::fs::symlink(target, at).unwrap();
+}
+
 #[test]
 fn a_song_with_its_own_folder_lists_copies_old_autosaves_and_unused_audio() {
     let root = fixtures("mo-space-own-folder");
@@ -311,12 +319,11 @@ fn saves_outside_the_songs_folder_still_count() {
     assert_eq!(report.bytes, 7);
 }
 
-#[cfg(unix)]
 #[test]
 fn a_song_folder_that_is_a_link_isnt_its_own() {
     let root = fixtures("mo-space-linked-folder");
     write(&root, "Moved/Song.bwproject", b"1", 0);
-    std::os::unix::fs::symlink(root.join("Moved"), root.join("Projects")).unwrap();
+    folder_link(&root.join("Moved"), &root.join("Projects"));
     let through = root.join("Projects/Song.bwproject").to_string_lossy().into_owned();
     let report =
         measure(&[save(&through, 0)], &[s(&root)], &[], CompactSettings::default(), None, &AtomicBool::new(false))

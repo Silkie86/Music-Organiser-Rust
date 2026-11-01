@@ -70,10 +70,12 @@ impl Bin for StepBin {
     }
 }
 
-/// Windows' administrator question: the step runs here, in this process, with the step's bin.
+/// Windows' administrator question: the step runs here, in this process, with the step's bin. `first` runs once
+/// Windows has asked, before the step starts.
 struct AsAdmin {
     step: StepBin,
     asked: AtomicUsize,
+    first: Box<dyn Fn() + Sync>,
 }
 
 impl Admin for AsAdmin {
@@ -82,6 +84,7 @@ impl Admin for AsAdmin {
     }
     fn ask(&self, args: &[String]) -> Result<(), String> {
         self.asked.fetch_add(1, Ordering::SeqCst);
+        (self.first)();
         assert!(run_step_with(args, &self.step), "the step didn't know {args:?}");
         Ok(())
     }
@@ -97,7 +100,14 @@ struct GuardedBin {
 impl GuardedBin {
     fn new(dir: &Path, meanwhile: impl Fn(&Path) + 'static) -> Self {
         let step = StepBin { dir: dir.join("bin"), held: Held::default() };
-        GuardedBin { admin: AsAdmin { step, asked: AtomicUsize::new(0) }, meanwhile: Box::new(meanwhile) }
+        let admin = AsAdmin { step, asked: AtomicUsize::new(0), first: Box::new(|| {}) };
+        GuardedBin { admin, meanwhile: Box::new(meanwhile) }
+    }
+
+    /// What changes once Windows has asked, before the step starts.
+    fn once_asked(mut self, first: impl Fn() + Sync + 'static) -> Self {
+        self.admin.first = Box::new(first);
+        self
     }
 
     fn asked(&self) -> usize {
@@ -181,6 +191,36 @@ fn what_waits_for_windows_stays_when_a_folder_on_the_way_leads_elsewhere_now() {
     assert_eq!(done.problems.len(), 1);
     assert!(done.problems[0].why.contains("leads somewhere else now"), "{}", done.problems[0].why);
     assert_eq!(bin.asked(), 0);
+    assert_eq!(fs::read_to_string(d.join("Data (aside)/Plugin Data/STEAM/Pad.db")).unwrap(), "pad");
+}
+
+#[test]
+fn the_step_leaves_alone_what_a_link_on_the_way_now_leads_to_even_when_it_holds_the_same() {
+    let dir = fixtures("mo-space-sending-swapped-at-the-step");
+    let (d, e) = (dir.join("D"), dir.join("E"));
+    write(&d, "Data/Plugin Data/STEAM/Pad.db", "pad");
+    write(&e, "Plugin Data/STEAM/Pad.db", "pad");
+    let home = d.join("Data/Plugin Data");
+    let old = OldHome {
+        path: s(&home),
+        bytes: 3,
+        note: "its old place".to_owned(),
+        copy: s(&e.join("Plugin Data")),
+        kind: 2,
+    };
+    // Once Windows has asked, the folder it's in is put aside and a link to it takes its place: the same files, so
+    // what the app checked looks the same, but it isn't where the app checked it.
+    let data = d.join("Data");
+    let bin = GuardedBin::new(&dir, |_| {}).once_asked(move || {
+        let aside = data.with_file_name("Data (aside)");
+        fs::rename(&data, &aside).unwrap();
+        folder_link(&aside, &data);
+    });
+    let done = remove_old_home(&old, &[], true, &bin, &AtomicBool::new(false));
+    assert_eq!(bin.asked(), 1);
+    assert!(done.removed.is_empty());
+    assert_eq!(done.problems.len(), 1);
+    assert!(done.problems[0].why.contains("reached through a link"), "{}", done.problems[0].why);
     assert_eq!(fs::read_to_string(d.join("Data (aside)/Plugin Data/STEAM/Pad.db")).unwrap(), "pad");
 }
 
