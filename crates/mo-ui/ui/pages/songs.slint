@@ -153,8 +153,10 @@ export global SongsData {
     in property <ActionKey> open-key;
     in property <ActionKey> reveal-key;
     in property <ActionKey> copy-key;
-    // Opens the picked song's newest save in its DAW.
+    // Opens the picked song's newest save: FL Studio songs go to Bitwig, the rest to their own DAW.
     callback open();
+    // Opens the picked song's newest save in its own DAW (FL Studio's "Open in FL Studio").
+    callback open-own();
     // Opens one save of the picked song, by its path.
     callback open-save(string);
     callback reveal();
@@ -273,11 +275,16 @@ component SongPanel inherits Rectangle {
             vertical-stretch: 0;
             padding-bottom: Space.xs;
             StudioButton {
-                text: "Open in " + SongsData.song.daw;
+                text: SongsData.song.daw == "FL Studio" ? "Open in Bitwig" : "Open in " + SongsData.song.daw;
                 main: true;
                 tip: SongsData.open-key.what;
                 key: SongsData.open-key.key;
                 clicked => { SongsData.open(); }
+            }
+            if SongsData.song.daw == "FL Studio": StudioButton {
+                text: "Open in FL Studio";
+                tip: "Open the newest save in FL Studio itself";
+                clicked => { SongsData.open-own(); }
             }
             if SongsData.older.length > 0: HorizontalLayout {
                 older-button := StudioButton {
