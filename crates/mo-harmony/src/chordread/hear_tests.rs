@@ -11,12 +11,12 @@ use crate::notes::{Grid, Note, Part, Role};
 use crate::pitch::{PcSet, PerPitch, PitchClass};
 
 const PPQ: i64 = 480;
-const BEAT: i64 = PPQ;
-const BAR: i64 = 4 * PPQ;
-const VELOCITY: u16 = 1 << 15;
+pub(super) const BEAT: i64 = PPQ;
+pub(super) const BAR: i64 = 4 * PPQ;
+pub(super) const VELOCITY: u16 = 1 << 15;
 
 /// The MIDI key of a note's name, C4 being 60: "C4", "Eb3", "F#2".
-fn key(name: &str) -> u8 {
+pub(super) fn key(name: &str) -> u8 {
     let mut chars = name.chars();
     let mut semitones = match chars.next() {
         Some('C') => 0,
@@ -42,18 +42,18 @@ fn key(name: &str) -> u8 {
 }
 
 /// The notes named, all struck at `start` and held `length` ticks.
-fn notes(names: &str, start: i64, length: i64) -> Vec<Note> {
+pub(super) fn notes(names: &str, start: i64, length: i64) -> Vec<Note> {
     names.split_whitespace().map(|n| Note { start, length, key: key(n), velocity: VELOCITY }).collect()
 }
 
 /// The notes named, one after another from `start`, each `step` ticks long.
-fn line(names: &str, start: i64, step: i64) -> Vec<Note> {
+pub(super) fn line(names: &str, start: i64, step: i64) -> Vec<Note> {
     let named = names.split_whitespace().enumerate();
     named.map(|(i, n)| Note { start: start + i as i64 * step, length: step, key: key(n), velocity: VELOCITY }).collect()
 }
 
 /// Pitch classes by name: "C E G".
-fn pcs(names: &str) -> PcSet {
+pub(super) fn pcs(names: &str) -> PcSet {
     names.split_whitespace().map(|n| PitchClass::of_key(key(&format!("{n}4")))).collect()
 }
 
@@ -68,58 +68,58 @@ fn per_pitch(values: &[(PitchClass, u64)]) -> PerPitch<u64> {
 
 /// Some music: parts with their roles, on a grid, heard as a loop, a song or a stretch.
 #[derive(Clone, Debug)]
-struct Music {
-    parts: Vec<(Role, Vec<Note>)>,
-    grid: Grid,
-    span: Span,
+pub(super) struct Music {
+    pub(super) parts: Vec<(Role, Vec<Note>)>,
+    pub(super) grid: Grid,
+    pub(super) span: Span,
 }
 
 impl Music {
     /// 4/4 at 480 ticks a beat, heard as a song.
-    fn new() -> Music {
+    pub(super) fn new() -> Music {
         Music { parts: Vec::new(), grid: Grid::four_four(480), span: Span::Song }
     }
 
-    fn grid(mut self, beats_per_bar: u32, ticks_per_beat: u32) -> Music {
+    pub(super) fn grid(mut self, beats_per_bar: u32, ticks_per_beat: u32) -> Music {
         self.grid = Grid { ticks_per_beat, beats_per_bar, bar_line: 0 };
         self
     }
 
-    fn looped(mut self) -> Music {
+    pub(super) fn looped(mut self) -> Music {
         self.span = Span::Loop;
         self
     }
 
-    fn part(mut self, role: Role, notes: Vec<Note>) -> Music {
+    pub(super) fn part(mut self, role: Role, notes: Vec<Note>) -> Music {
         self.parts.push((role, notes));
         self
     }
 
-    fn bass(self, notes: Vec<Note>) -> Music {
+    pub(super) fn bass(self, notes: Vec<Note>) -> Music {
         self.part(Role::Bass, notes)
     }
 
-    fn keys(self, notes: Vec<Note>) -> Music {
+    pub(super) fn keys(self, notes: Vec<Note>) -> Music {
         self.part(Role::Harmony, notes)
     }
 
-    fn tune(self, notes: Vec<Note>) -> Music {
+    pub(super) fn tune(self, notes: Vec<Note>) -> Music {
         self.part(Role::Melody, notes)
     }
 
-    fn hear_into(&self, hearing: &mut Hearing) -> bool {
+    pub(super) fn hear_into(&self, hearing: &mut Hearing) -> bool {
         let parts: Vec<Part> = self.parts.iter().map(|(role, notes)| Part { role: *role, notes }).collect();
         hearing.hear(&parts, self.grid, self.span)
     }
 
-    fn hear(&self) -> Hearing {
+    pub(super) fn hear(&self) -> Hearing {
         let mut hearing = Hearing::new();
         assert!(self.hear_into(&mut hearing), "nothing heard");
         hearing
     }
 
     /// The same music with every note changed.
-    fn map(&self, change: impl Fn(Note) -> Note) -> Music {
+    pub(super) fn map(&self, change: impl Fn(Note) -> Note) -> Music {
         let parts = self.parts.iter().map(|(role, notes)| (*role, notes.iter().map(|n| change(*n)).collect()));
         Music { parts: parts.collect(), ..self.clone() }
     }
@@ -346,12 +346,13 @@ fn an_arpeggio_is_heard_as_its_chord_and_is_never_the_bass() {
     let h = Music::new().keys(line("C3 E3 G3 C4 E4 C4 G3 E3 F3 A3 C4 F4 A4 F4 C4 A3", 0, BEAT / 2)).hear();
     assert_eq!((h.heard(0..8), h.heard(8..16)), (pcs("C E G"), pcs("F A C")));
     assert_eq!(h.bass(0..16), BassTexture::None);
-    // Each felt beat's first note is held by the pedal to the end of the beat; the second ends there anyway.
+    // Each felt beat's first note is held by the pedal to the end of the beat; the second ends there anyway. Both are
+    // broken, as both are struck as part of the broken chord.
     let first = h.notes().iter().find(|n| n.start == 0).unwrap();
     assert!(first.broken && first.end == BEAT && first.length == BEAT / 2);
     let second = h.notes().iter().find(|n| n.start == BEAT / 2).unwrap();
-    assert!(!second.broken && second.end == BEAT);
-    assert_eq!((h.broken_struck(0), h.broken_struck(1)), (pcs("C"), PcSet::EMPTY));
+    assert!(second.broken && second.end == BEAT);
+    assert_eq!((h.broken_struck(0), h.broken_struck(1)), (pcs("C"), pcs("E")));
     assert_eq!(h.sounding(1, Stream::Harmony), pcs("C E"));
 }
 
@@ -551,7 +552,7 @@ fn a_chord_struck_at_a_loops_end_and_held_to_it_wraps_round() {
 
 /// The music the invariance tests move about: a held and a walking bass, a chord held over, a push, a tune with held
 /// and quick notes, a broken bar and a part of unknown role.
-fn with_bass() -> Music {
+pub(super) fn with_bass() -> Music {
     Music::new()
         .bass([notes("C2", 0, BAR), line("D2 E2 F2 F#2", BAR, BEAT), notes("G2", 2 * BAR, BAR)].concat())
         .keys(
@@ -567,7 +568,7 @@ fn with_bass() -> Music {
 }
 
 /// And music with no bass part: the bass found by the gaps, an Alberti bar, a legato left hand.
-fn keys_only() -> Music {
+pub(super) fn keys_only() -> Music {
     Music::new()
         .keys([notes("D3 C4 F4", 0, BAR), notes("G2 B3 F4", BAR, BAR + 10), notes("C3 B3 E4", 2 * BAR, BAR)].concat())
         .keys(line(&"C3 G3 E3 G3 ".repeat(4), 3 * BAR, BEAT / 4))

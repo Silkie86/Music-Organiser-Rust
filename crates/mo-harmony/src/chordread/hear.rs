@@ -21,6 +21,11 @@
 //!   stream, added up from the first unit (prefix sums), so what sounds in any stretch is a subtraction ([`Mass`]).
 //! - **Loops.** A loop is heard with its last bar copied in front, so its first chord has the one before it, as when
 //!   it goes round; only the loop's own units are reported.
+//! - **Lines and shapes.** The bass, the top line of each tune and of the chords, and each broken chord are lines;
+//!   their notes that move like passing notes, neighbours, approaches, anticipations, suspensions or appoggiaturas
+//!   are marked ([`Shaped`]), with the notes they hang on, for the reader to test against each chord.
+//! - **Pushes.** A chord struck just before a felt beat and held over it, with the bass on the beat (or pushed too, or
+//!   silent), may be counted from the beat ([`Push`]).
 //!
 //! Nothing reads how high a note is, only the gaps between notes, and every count is a whole number. So moving the
 //! notes moves every answer to its new note exactly; the order of the notes, a drum part, or the notes doubled an
@@ -32,6 +37,12 @@ use std::ops::Range;
 use crate::keyfind::Span;
 use crate::notes::{self, Grid, Part, Role};
 use crate::pitch::{PcSet, PerPitch, PitchClass};
+
+mod lines;
+mod push;
+
+pub use lines::{Line, Shape, Shaped};
+pub use push::Push;
 
 /// The most units heard: about an hour of 4/4 at 120 beats a minute. Only a damaged file has notes further apart: then
 /// the stretch with the most notes is heard, by the key finder's rule, and [`Hearing::truncated`] says so.
@@ -170,7 +181,8 @@ pub struct HeardNote {
     pub length: i64,
     /// Where its held-over end starts, when it rings a little past a bar line or the middle of a bar.
     pub held_over: Option<i64>,
-    /// Struck in a felt beat where its part plays a broken chord, and held by the pedal to the end of the felt beat.
+    /// Struck in a felt beat where its part plays a broken chord, and held by the pedal to the end of the felt beat (a
+    /// note held past it, such as a bass under an arpeggio, isn't broken).
     pub broken: bool,
     /// A copy, in the bar copied in front of a loop.
     pub copy: bool,
@@ -202,6 +214,10 @@ pub struct Hearing {
     /// The ticks of the units before each unit in which a chord or bass note sounds, and of all of them last.
     sound: Vec<u64>,
     notes: Vec<HeardNote>,
+    shaped: Vec<Shaped>,
+    pushes: Vec<Push>,
+    /// The notes of the pushes, by their place in `notes`.
+    pushed: Vec<usize>,
     // Working space, kept between calls.
     raw: Vec<Raw>,
     order: Vec<usize>,
@@ -213,6 +229,7 @@ pub struct Hearing {
     velocities: Vec<u16>,
     starts: Vec<i64>,
     bass_bars: Vec<i64>,
+    line_space: lines::LineSpace,
 }
 
 impl Hearing {
@@ -251,13 +268,16 @@ impl Hearing {
 
         // Where the units start and end. A loop runs from the bar line at or before its first note to the bar line
         // after where its last note is played (a note played just before that line is heard on the loop's start, as
-        // the loop goes round), and is heard with its last bar copied in front. Anything else runs to its last note's
-        // end; when its notes lie further apart than the units can hold, the busiest stretch is heard.
+        // the loop goes round); or, when a note is held more than a felt beat past that line, to the bar line at or
+        // after its end. It's heard with its last bar copied in front. Anything else runs to its last note's end; when
+        // its notes lie further apart than the units can hold, the busiest stretch is heard.
         let bar = i128::from(layout.bar);
         let most_bars = i128::from((count(MOST_UNITS) / layout.per_bar).max(1));
         let hearing = most_bars * bar;
         let line = |t: i128| layout.origin + (t - layout.origin).div_euclid(bar) * bar;
-        let loop_end = line(last_played.max(first)) + bar;
+        let after_onsets = line(last_played.max(first)) + bar;
+        let held_on = last_end > after_onsets + i128::from(layout.felt_ticks());
+        let loop_end = if held_on { line(last_end - 1) + bar } else { after_onsets };
         let looped = span == Span::Loop && (loop_end - line(first)) / bar < most_bars;
         let (origin, end) = if looped {
             (line(first) - bar, loop_end)
@@ -314,6 +334,8 @@ impl Hearing {
         }
         self.notes.sort_unstable_by_key(|n| (n.start, n.key, n.end, n.copy, n.part, n.note));
         self.gather();
+        self.find_shapes();
+        self.find_pushes();
         true
     }
 
@@ -499,6 +521,9 @@ impl Hearing {
         self.sums.clear();
         self.sound.clear();
         self.notes.clear();
+        self.shaped.clear();
+        self.pushes.clear();
+        self.pushed.clear();
         self.raw.clear();
         self.order.clear();
         self.held.clear();
@@ -524,7 +549,8 @@ impl Hearing {
     /// - and the part holds nothing through the whole felt beat but the pitch class of its lowest note (a held bass
     ///   under an arpeggio is fine, but a held chord over a moving left hand isn't broken).
     ///
-    /// Each note struck there that ends before the felt beat does is then held to its end.
+    /// Each note struck there that isn't held past the felt beat (a held bass under an arpeggio is) is then broken,
+    /// and held to the felt beat's end.
     ///
     /// The design said this of whole parts. It's worked out felt beat by felt beat instead, so a song's keys part can
     /// play arpeggios in one passage and held chords in another; and the one-note-a-strike test keeps a part repeating
@@ -567,7 +593,7 @@ impl Hearing {
             if broken {
                 for &i in group {
                     if let Some(n) = notes.get_mut(i)
-                        && n.end < through_to
+                        && n.end <= through_to
                     {
                         n.end = through_to;
                         n.broken = true;

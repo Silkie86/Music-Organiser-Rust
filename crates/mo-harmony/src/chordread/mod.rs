@@ -11,12 +11,17 @@
 //!   own notes, a tension it can carry, or a note that doesn't belong: [`ToneClass`]), and which kinds the notes heard
 //!   allow on each root ([`valid`] and [`valid_rootless`]);
 //! - the first step, hearing the notes ([`Hearing`]): the units chords change on, the bass, the chords and the tune,
-//!   broken chords, notes held over a bar line, and how long each note sounds where.
+//!   broken chords, notes held over a bar line, how long each note sounds where, the shapes of the lines' notes
+//!   ([`Shaped`]), and the chords that may be pushed ([`Push`]).
 
 mod cores;
 mod hear;
 #[cfg(test)]
 mod hear_tests;
+#[cfg(test)]
+mod shape_tests;
 
 pub use cores::{Core, CoreSet, ToneClass, valid, valid_rootless};
-pub use hear::{BASS_GAP, BassTexture, HeardNote, Hearing, Level, MOST_UNITS, Mass, Stream, Unit};
+pub use hear::{
+    BASS_GAP, BassTexture, HeardNote, Hearing, Level, Line, MOST_UNITS, Mass, Push, Shape, Shaped, Stream, Unit,
+};
