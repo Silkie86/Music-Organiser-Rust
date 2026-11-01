@@ -27,7 +27,7 @@ use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedSt
 
 use crate::{AppWindow, MenuItem, PickedSound, SoundFact, SoundLine, SoundTile, SoundsData, TileRow, TypeChipInfo};
 
-/// The C# app's settings in `sounds.db` for the view shown last and autoplay, read (not written: it's read-only).
+/// The C# app's settings in `library.db` for the view shown last and autoplay, read (not written: it's read-only).
 const VIEW_KEY: &str = "sounds_view";
 const AUTOPLAY_KEY: &str = "sound_lab_autoplay";
 /// The C# app's Settings in `library.db` for which songs count as using a sound.
@@ -89,7 +89,7 @@ impl Default for Page {
             history: Vec::new(),
             columns: 4,
             picked: None,
-            autoplay: true,
+            autoplay: false,
             asked: 0,
             types: Vec::new(),
             now: Local::now().naive_local(),
@@ -276,28 +276,48 @@ pub fn compute_here() {
     HERE.with(|h| *h.borrow_mut() = true);
 }
 
-/// Wires the page and starts reading the sound library at `sounds_db` in the background, with how much your songs use
-/// each sound from the song library at `library_db` (both read-only). Show in folder and Copy path report on `feed`'s
-/// cards.
+/// Wires the page and starts reading the sound library at `sounds_db` in the background, then how much your songs use
+/// each sound from the song library at `library_db` (both read-only). The sounds show as soon as they're read; the use
+/// counts and Most liked follow when they're worked out, as in the C# app. Show in folder and Copy path report on
+/// `feed`'s cards.
 pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: Feed, shortcuts: &Shortcuts) {
     wire(app, feed, shortcuts);
-    let data = app.global::<SoundsData>();
-    data.set_busy("Reading your sounds".into());
-    if HERE.with(|h| *h.borrow()) {
-        loaded(app, read_library(&sounds_db, &library_db));
-        return;
-    }
+    app.global::<SoundsData>().set_busy("Reading your sounds".into());
+    let here = HERE.with(|h| *h.borrow());
     let weak = app.as_weak();
-    let started = background::spawn("Sounds library", move || {
-        let read = read_library(&sounds_db, &library_db);
+    let send = move |step: Step| {
+        if here {
+            if let Some(app) = weak.upgrade() {
+                arrive(&app, step);
+            }
+            return;
+        }
+        let weak = weak.clone();
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(app) = weak.upgrade() {
-                loaded(&app, read);
+                arrive(&app, step);
             }
         });
-    });
-    if let Err(e) = started {
+    };
+    if here {
+        read_all(&sounds_db, &library_db, send);
+        return;
+    }
+    if let Err(e) = background::spawn("Sounds library", move || read_all(&sounds_db, &library_db, send)) {
         log::error("Sounds", &format!("Couldn't start reading the library: {e}"));
+    }
+}
+
+/// What reading brings back, in two steps: the sounds first, then the list again with how your songs use them.
+enum Step {
+    Read(Result<Read, String>),
+    Used(Arc<SoundList>),
+}
+
+fn arrive(app: &AppWindow, step: Step) {
+    match step {
+        Step::Read(read) => loaded(app, read),
+        Step::Used(list) => use_known(app, list),
     }
 }
 
@@ -311,79 +331,136 @@ struct Read {
 /// The sounds made ready to list, off the window's thread: the list itself, the types with their counts, the tags,
 /// and what was played (as places in the list, newest first, with when).
 pub struct Library {
-    list: SoundList,
+    list: Arc<SoundList>,
     types: Vec<(String, usize)>,
     tags: Vec<String>,
     played: Vec<(usize, NaiveDateTime)>,
 }
 
 impl Library {
-    /// Gets `sounds` ready to list, with what was `played` (id, when), how many songs use each (`usage`, when the
-    /// song library could be read) and how much each sign of liking counts (`weights`). Takes a while for a big
-    /// library, so it's done on a background thread (the screenshots do it in place).
-    pub fn new(
-        sounds: Vec<Sound>,
-        played: Vec<(i64, NaiveDateTime)>,
-        usage: Option<HashMap<i64, Usage>>,
-        weights: LikedWeights,
-    ) -> Library {
+    /// Gets `sounds` ready to list, with what was `played` (id, when) and how much each sign of liking counts
+    /// (`weights`; until the songs' use is known, Most liked counts plays, drags, sends and favourites). Takes a
+    /// while for a big library, so it's done on a background thread (the screenshots do it in place).
+    pub fn new(sounds: Vec<Sound>, played: Vec<(i64, NaiveDateTime)>, weights: &LikedWeights) -> Library {
         let list = background::on_pool(|| {
             let mut list = SoundList::new(sounds);
-            // Most liked counts plays, drags, sends and favourites even when the songs' use isn't known.
-            let none = HashMap::new();
-            let used = usage.as_ref().unwrap_or(&none);
-            list.set_liked(|s| weights.score(s, used.get(&s.id)));
-            if let Some(usage) = &usage {
-                list.set_used(usage.iter().map(|(id, u)| (*id, u.projects)).collect());
-            }
+            list.set_liked(|s| weights.score(s, None));
             list
         });
         let ids: HashMap<i64, usize> = (0..list.len()).filter_map(|i| list.sound(i).map(|s| (s.id, i))).collect();
         let played = played.into_iter().filter_map(|(id, at)| ids.get(&id).map(|&i| (i, at))).collect();
-        Library { types: list.type_counts(), tags: list.tags(), list, played }
+        Library { types: list.type_counts(), tags: list.tags(), list: Arc::new(list), played }
+    }
+
+    /// The same library with how your songs use each sound (by sound id) counted in, for the screenshots.
+    pub fn with_usage(mut self, usage: HashMap<i64, Usage>, weights: &LikedWeights) -> Library {
+        self.list = Arc::new(with_usage(&self.list, usage, weights));
+        self
     }
 }
 
-fn read_library(path: &Path, library_db: &Path) -> Result<Read, String> {
-    if !path.exists() {
-        return Err(String::new());
+/// A copy of `list` with each sound's use in your songs, and Most liked scored with it.
+fn with_usage(list: &SoundList, usage: HashMap<i64, Usage>, weights: &LikedWeights) -> SoundList {
+    background::on_pool(|| {
+        let mut list = list.clone();
+        list.set_liked(|s| weights.score(s, usage.get(&s.id)));
+        list.set_used(usage);
+        list
+    })
+}
+
+/// The C# app's settings the page uses, from the song library (`library.db`): the view and autoplay you had last,
+/// which songs count as using a sound, and the Most liked weights.
+#[derive(Default)]
+struct Settings {
+    view: Option<String>,
+    autoplay: Option<String>,
+    rules: UsageRules,
+    weights: LikedWeights,
+}
+
+impl Settings {
+    fn read(lib: &mo_library::Library) -> Settings {
+        let get = |key: &str| match lib.setting(key) {
+            Ok(v) => v,
+            Err(e) => {
+                log::warning(
+                    "Sounds",
+                    &format!("Couldn't read the setting {key}, so the C# app's default is used: {e}"),
+                );
+                None
+            }
+        };
+        let on = |key: &str| get(key).as_deref() == Some("1");
+        Settings {
+            view: get(VIEW_KEY),
+            autoplay: get(AUTOPLAY_KEY),
+            rules: UsageRules { needs_notes: on(USED_NEEDS_NOTES_KEY), not_muted_in_newest: on(USED_NOT_MUTED_KEY) },
+            weights: LikedWeights::from_json(get(LIKED_WEIGHTS_KEY).as_deref()),
+        }
     }
-    let db = SoundsDb::open_read_only(path).map_err(|e| e.to_string())?;
+}
+
+/// Reads the sounds and sends them, then works out how your songs use them and sends that. Without a song library
+/// the use stays unknown (the Used chips stay hidden).
+fn read_all(sounds_db: &Path, library_db: &Path, send: impl Fn(Step)) {
+    if !sounds_db.exists() {
+        send(Step::Read(Err(String::new())));
+        return;
+    }
+    let lib = library_db.exists().then(|| mo_library::Library::open_read_only(library_db)).and_then(|lib| {
+        lib.map_err(|e| log::warning("Sounds", &format!("Couldn't read the song library for how sounds are used: {e}")))
+            .ok()
+    });
+    let settings = lib.as_ref().map(Settings::read).unwrap_or_default();
     let now = Local::now().naive_local();
-    let sounds = db.all(now).map_err(|e| e.to_string())?;
-    let history = db.history(500).unwrap_or_default();
-    let view = db.setting(VIEW_KEY).ok().flatten();
-    let autoplay = db.setting(AUTOPLAY_KEY).ok().flatten();
-    let (usage, weights) = read_usage(library_db, &sounds, now);
-    Ok(Read { library: Library::new(sounds, history, usage, weights), view, autoplay })
+    let read = (|| {
+        let db = SoundsDb::open_read_only(sounds_db).map_err(|e| e.to_string())?;
+        let sounds = db.all(now).map_err(|e| e.to_string())?;
+        let history = db.history(500).unwrap_or_default();
+        Ok(Library::new(sounds, history, &settings.weights))
+    })();
+    let list = read.as_ref().ok().map(|l: &Library| l.list.clone());
+    send(Step::Read(read.map(|library| Read {
+        library,
+        view: settings.view.clone(),
+        autoplay: settings.autoplay.clone(),
+    })));
+    let (Some(lib), Some(list)) = (lib, list) else { return };
+    let year_ago = now.checked_sub_months(chrono::Months::new(12)).unwrap_or(now);
+    match count_usage(&lib, &list, year_ago, settings.rules) {
+        Ok(usage) => send(Step::Used(Arc::new(with_usage(&list, usage, &settings.weights)))),
+        Err(e) => log::warning("Sounds", &format!("Couldn't count how your songs use sounds: {e}")),
+    }
 }
 
-/// How many of your songs use each sound, by the C# app's Settings (only where the sample has notes, not when muted in
-/// the song's newest save), with "recent" meaning the last year; and the Most liked weights. Without a song library
-/// the use isn't known (the Used chips stay hidden) and the weights are the C# app's starting ones.
-fn read_usage(library_db: &Path, sounds: &[Sound], now: NaiveDateTime) -> (Option<HashMap<i64, Usage>>, LikedWeights) {
-    if !library_db.exists() {
-        return (None, LikedWeights::default());
+/// How your songs use each sound in `list` (by sound id), counting songs saved since `recent_since` as recent.
+fn count_usage(
+    lib: &mo_library::Library,
+    list: &SoundList,
+    recent_since: NaiveDateTime,
+    rules: UsageRules,
+) -> Result<HashMap<i64, Usage>, mo_library::LibraryError> {
+    let uses = lib.sample_usage(recent_since, rules)?;
+    Ok(background::on_pool(|| usage::usage(list.sounds(), &uses)))
+}
+
+/// The use counts arrived: the same sounds in the same order, so what's shown and picked stays as it is.
+fn use_known(app: &AppWindow, list: Arc<SoundList>) {
+    let picked = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        if p.list.len() != list.len() {
+            return None;
+        }
+        p.list = list;
+        Some(p.picked)
+    });
+    let Some(picked) = picked else { return };
+    refresh(app);
+    if let Some(at) = picked {
+        let sound = PAGE.with(|p| picked_sound(&p.borrow(), at));
+        app.global::<SoundsData>().set_picked(sound);
     }
-    let lib = match mo_library::Library::open_read_only(library_db) {
-        Ok(lib) => lib,
-        Err(e) => {
-            log::warning("Sounds", &format!("Couldn't read the song library for how sounds are used: {e}"));
-            return (None, LikedWeights::default());
-        }
-    };
-    let on = |key: &str| lib.setting(key).ok().flatten().as_deref() == Some("1");
-    let rules = UsageRules { needs_notes: on(USED_NEEDS_NOTES_KEY), not_muted_in_newest: on(USED_NOT_MUTED_KEY) };
-    let weights = LikedWeights::from_json(lib.setting(LIKED_WEIGHTS_KEY).ok().flatten().as_deref());
-    let year_ago = now.checked_sub_months(chrono::Months::new(12)).unwrap_or(now);
-    let usage = match lib.sample_usage(year_ago, rules) {
-        Ok(uses) => Some(background::on_pool(|| usage::usage(sounds, &uses))),
-        Err(e) => {
-            log::warning("Sounds", &format!("Couldn't count how your songs use sounds: {e}"));
-            None
-        }
-    };
-    (usage, weights)
 }
 
 fn loaded(app: &AppWindow, read: Result<Read, String>) {
@@ -418,12 +495,11 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
         p.history = library.played;
-        p.list = Arc::new(library.list);
+        p.list = library.list;
         p.types = library.types;
         p.view = view.and_then(|v| VIEWS.iter().position(|n| *n == v)).map_or(TILES, |i| i as i32);
-        if let Some(a) = autoplay {
-            p.autoplay = a != "0" && !a.eq_ignore_ascii_case("false");
-        }
+        // As in the C# app: off unless it was turned on.
+        p.autoplay = autoplay == Some("1");
         p.picked = None;
     });
     refresh(app);
@@ -978,6 +1054,102 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A small song library like the C# app's: two songs, a kick in both, a pad with no notes in one, and settings.
+    fn song_library(name: &str, settings: &[(&str, &str)]) -> PathBuf {
+        let dir = std::env::temp_dir().join("mo-ui-sounds-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join(name);
+        for end in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{end}", path.display()));
+        }
+        let Ok(c) = rusqlite::Connection::open(&path) else { panic!("couldn't make {}", path.display()) };
+        let made = c.execute_batch(
+            "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+             CREATE TABLE song_choices (kind TEXT, a TEXT, b TEXT, PRIMARY KEY (kind, a));
+             CREATE TABLE projects (id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL COLLATE NOCASE, name TEXT NOT NULL,
+                 daw TEXT NOT NULL, folder TEXT, size INTEGER, mtime INTEGER, file_missing INTEGER DEFAULT 0);
+             CREATE TABLE samples (project_id INTEGER, path TEXT, found INTEGER, unplayed INTEGER NOT NULL DEFAULT 0);
+             INSERT INTO projects (id, path, name, daw, folder, mtime) VALUES
+                 (1, 'C:\\beats\\Song.flp', 'Song', 'FL Studio', 'C:\\beats', 1590969600),
+                 (2, 'C:\\beats\\Other.flp', 'Other', 'FL Studio', 'C:\\beats', 1717200000);
+             INSERT INTO samples (project_id, path, found, unplayed) VALUES
+                 (1, 'C:\\s\\kick.wav', 1, 0), (2, 'C:\\s\\kick.wav', 1, 0),
+                 (1, 'C:\\s\\pad.wav', 1, 1), (2, 'C:\\s\\pad.wav', 1, 0);",
+        );
+        assert!(made.is_ok(), "{made:?}");
+        for (k, v) in settings {
+            assert!(c.execute("INSERT INTO settings (key, value) VALUES (?1, ?2)", [k, v]).is_ok());
+        }
+        path
+    }
+
+    fn sound(id: i64, path: &str) -> Sound {
+        Sound {
+            id,
+            path: path.into(),
+            error: None,
+            analysis: None,
+            sound_type: "Kick".into(),
+            type_source: String::new(),
+            type_confidence: 0.0,
+            user_type: None,
+            name_type: None,
+            tags: Vec::new(),
+            favourite: false,
+            hidden: false,
+            rating: 0,
+            plays: 0,
+            added: NaiveDateTime::default(),
+            activity: Default::default(),
+        }
+    }
+
+    #[test]
+    fn songs_use_sounds_by_the_c_sharp_apps_settings() {
+        let list =
+            SoundList::new(vec![sound(1, r"C:\s\kick.wav"), sound(2, r"C:\s\pad.wav"), sound(3, r"C:\s\hat.wav")]);
+        let since =
+            chrono::NaiveDate::from_ymd_opt(2023, 1, 1).and_then(|d| d.and_hms_opt(0, 0, 0)).unwrap_or_default();
+        let read = |name: &str, settings: &[(&str, &str)]| {
+            let path = song_library(name, settings);
+            let Ok(lib) = mo_library::Library::open_read_only(&path) else { panic!("couldn't read {name}") };
+            let s = Settings::read(&lib);
+            let used = count_usage(&lib, &list, since, s.rules).unwrap_or_default();
+            (s, used)
+        };
+        // With nothing set: every song listing a sound uses it; autoplay is off and the weights are the C# app's.
+        let (s, used) = read("plain.db", &[]);
+        assert_eq!(used.get(&1).map(|u| u.projects), Some(2));
+        assert_eq!(used.get(&2).map(|u| (u.projects, u.recent)), Some((2, 1)));
+        assert!(!used.contains_key(&3));
+        assert_eq!((s.view, s.autoplay), (None, None));
+        assert_eq!(s.weights, LikedWeights::default());
+        // "Only where it has notes": the pad isn't played in Song. And the page's own settings come through.
+        let (s, used) = read(
+            "notes.db",
+            &[
+                (USED_NEEDS_NOTES_KEY, "1"),
+                (VIEW_KEY, "List"),
+                (AUTOPLAY_KEY, "1"),
+                (LIKED_WEIGHTS_KEY, r#"{"Project":7}"#),
+            ],
+        );
+        assert_eq!(used.get(&2).map(|u| u.projects), Some(1));
+        assert_eq!((s.view.as_deref(), s.autoplay.as_deref()), (Some("List"), Some("1")));
+        assert_eq!(s.weights, LikedWeights { project: 7.0, ..LikedWeights::default() });
+    }
+
+    #[test]
+    fn use_counts_change_most_liked_but_not_the_order() {
+        let list = SoundList::new(vec![sound(1, "a.wav"), sound(2, "b.wav")]);
+        let w = LikedWeights::default();
+        let used = with_usage(&list, HashMap::from([(2, Usage { projects: 3, recent: 3, years: vec![2026] })]), &w);
+        assert_eq!(used.sounds().iter().map(|s| s.id).collect::<Vec<_>>(), vec![1, 2]);
+        assert_eq!(used.used_in(0), Some(0));
+        assert_eq!(used.used_in(1), Some(3));
+        assert_eq!(used.liked_share(1), Some(1.0));
+    }
 
     #[test]
     fn counts_and_times_read_well() {

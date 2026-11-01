@@ -56,7 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     app.set_place(Place::Sounds.index() as i32);
     let sounds_empty = capture(&window);
-    mo_ui::sounds::show(&app, sample_sounds(), None, None);
+    mo_ui::sounds::show(&app, sample_sounds(), None, Some("1"));
     // Once to lay the page out (the tiles' width tells the page how many fit in a row), then for real.
     capture(&window);
 
@@ -307,7 +307,8 @@ fn sample_sounds() -> mo_ui::sounds::Library {
         })
         .filter(|(_, u)| u.projects > 0)
         .collect();
-    mo_ui::sounds::Library::new(sounds, played, Some(usage), mo_sounds::liking::LikedWeights::default())
+    let weights = mo_sounds::liking::LikedWeights::default();
+    mo_ui::sounds::Library::new(sounds, played, &weights).with_usage(usage, &weights)
 }
 
 /// A made-up library for the Songs page: names, plugins and dates invented here, none of Solomon's (rule 4).
