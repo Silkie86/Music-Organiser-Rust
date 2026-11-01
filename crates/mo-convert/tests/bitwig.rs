@@ -384,7 +384,24 @@ fn an_effect_slot_switched_on_and_off_is_an_on_off_lane_of_switch_points() {
         channel: None,
         insert: Some(3),
         slot: Some(2),
-        ..automation("EQ on", 0, FlControl::InsertSlotOnOff, 0, &[(0.0, 1.0), (2.0, 0.0), (3.0, 0.0), (4.0, 1.0)])
+        ..automation(
+            "EQ on",
+            0,
+            FlControl::InsertSlotOnOff,
+            0,
+            &[
+                (0.0, 1.0),
+                (2.0, 0.0),
+                (3.0, 0.0),
+                (4.0, 1.0),
+                // Off and on again on one beat, where two placements of a clip meet: no click.
+                (6.0, 1.0),
+                (6.0, 0.0),
+                (6.0, 1.0),
+                (8.0, 1.0),
+                (8.0, 0.0),
+            ],
+        )
     }];
     let (doc, notes, _) = convert(&s, &bitwig_template(Template::default()));
     assert!(!notes.iter().any(|n| n.contains("automation")), "{notes:?}");
@@ -409,7 +426,12 @@ fn an_effect_slot_switched_on_and_off_is_an_on_off_lane_of_switch_points() {
         .collect();
     assert_eq!(
         points,
-        [(0x7d, 0.0, Some(Value::Bool(1))), (0x7d, 2.0, Some(Value::Bool(0))), (0x7d, 4.0, Some(Value::Bool(1)))]
+        [
+            (0x7d, 0.0, Some(Value::Bool(1))),
+            (0x7d, 2.0, Some(Value::Bool(0))),
+            (0x7d, 4.0, Some(Value::Bool(1))),
+            (0x7d, 8.0, Some(Value::Bool(0)))
+        ]
     );
     // The setting isn't listed on the plugin as a knob of its own.
     assert!(doc.field_list(def(&doc, eq), 0x1318).is_empty());
