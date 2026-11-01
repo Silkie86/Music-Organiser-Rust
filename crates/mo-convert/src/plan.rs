@@ -1022,11 +1022,9 @@ pub fn from_fl(song: &FlSong, options: Options, read_sample: &mut dyn FnMut(&str
                 ));
                 continue;
             }
-            if pan_lane {
-                if own.is_some_and(|t| t.pan.abs() > 1e-9) {
-                    left.push(format!("{}'s own pan isn't in the middle", own.map_or("", |t| t.name.as_str())));
-                    continue;
-                }
+            if pan_lane && own.is_some_and(|t| t.pan.abs() > 1e-9) {
+                left.push(format!("{}'s own pan isn't in the middle", own.map_or("", |t| t.name.as_str())));
+                continue;
             }
             let at = if pan_lane {
                 add_lane(&mut lanes, track, Target::Pan, a, pan)
