@@ -186,11 +186,12 @@ pub fn link_again(
         return Err(CantMove::Failed(format!("{from} isn't a real folder now, so it was left alone.")));
     }
     let aside = fresh_name(from, if second { SECOND_SUFFIX } else { UPDATE_SUFFIX });
-    // Find out before copying whether Windows lets the folder be renamed.
-    check_rename_or_ask(from, drives.admin())?;
     let kept_in = PathBuf::from(fresh_name(&moved.to, KEPT_BEFORE_SUFFIX));
     let tree = Tree { keep_in: Some(&kept_in), keep_all: true, ..Tree::new(Path::new(from), to, to) };
     room_for(&tree, to, drives, stop)?;
+    // Find out before copying whether Windows lets the folder be renamed (asking you, when it guards the folder), once
+    // there's known to be room: not after an hour of copying, and not for nothing.
+    check_rename_or_ask(from, drives.admin())?;
     // From here on the copy changes: a stop or a failure says so.
     let partly = |why: CantMove| match why {
         CantMove::LeftHalfway(_) => why,

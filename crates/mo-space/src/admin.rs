@@ -1,7 +1,8 @@
 //! The administrator step: one step the app needs administrator rights for (a plugin folder Windows guards, such as
-//! Spectrasonics' in ProgramData, checked before a move and renamed for it; a link it guards pointed somewhere else; a
-//! file it guards sent to the Recycle Bin). The app starts itself again as administrator for just that step, Windows asks you once, and the app
-//! waits for it, the same as Explorer's "You'll need to provide administrator permission". The C# app's `AdminStep`.
+//! Spectrasonics' in ProgramData, checked before a move and renamed for it; a link it guards pointed somewhere else;
+//! a file it guards sent to the Recycle Bin). The app starts itself again as administrator for just that step, Windows
+//! asks you (once for each step: a move asks before copying and again for the swap), and the app waits for it, the
+//! same as Explorer's "You'll need to provide administrator permission". The C# app's `AdminStep`.
 //!
 //! How the two copies of the app talk: the app writes what the step is to do in a list in your Temp folder, and starts
 //! itself again with [`MOVE_FOLDER`] or [`RECYCLE_BIN`], the list, where to write how it went, and the list's
@@ -28,7 +29,7 @@ use crate::clean::{Bin, NEEDS_ADMIN, SystemBin};
 use crate::folder_move::{CantMove, check_rename, leads_to, swap, unswap};
 use crate::plugin_clean::made_by_the_system;
 use crate::size::is_link;
-use crate::{is_dir, key, not_there, real_path, text};
+use crate::{is_dir, key, not_there, real_folder, real_path, text};
 
 /// The flag the app is started with to rename or link a folder Windows guards: `--move-folder
 /// check|swap|unswap|relink <list> <result> <fingerprint>`.
@@ -417,7 +418,7 @@ fn do_line(step: Step, fields: &[&str], bin: &dyn Bin) -> Outcome {
 
 fn check_here(from: &str) -> Result<Outcome, String> {
     plain(from)?;
-    if is_link(Path::new(from)) || !is_dir(from) {
+    if !real_folder(from) {
         return Err(format!("{from} isn't a real folder now, so it was left alone."));
     }
     Ok(check_rename(from).map_or_else(|why| said(&why), |()| Outcome::Done))

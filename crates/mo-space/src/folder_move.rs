@@ -807,8 +807,9 @@ pub(crate) fn denied(e: &io::Error) -> bool {
 }
 
 /// [`check_rename`], as administrator when Windows guards the folder and `admin` can ask (Windows asks you then, and
-/// again for the swap after the copy). So a folder even the administrator can't rename, because the DAW has a file in it
-/// open, is found before copying rather than after. What's there afterwards decides how it went, as for the swap.
+/// again for the swap after the copy). So a folder even the administrator can't rename, because the DAW has a file in
+/// it open, is found before copying rather than after. Unlike the swap, what's there afterwards can't tell "renamed and
+/// back" from "never renamed": the folder must be as it was AND the step must say it renamed it and back.
 pub(crate) fn check_rename_or_ask(from: &str, admin: &dyn Admin) -> Result<(), CantMove> {
     match check_rename(from) {
         Err(CantMove::NeedsAdmin) if admin.can_ask() => {}
@@ -816,11 +817,16 @@ pub(crate) fn check_rename_or_ask(from: &str, admin: &dyn Admin) -> Result<(), C
     }
     let check = format!("{from}{CHECK_SUFFIX}");
     let said = ask_for(admin, Step::Check, &[vec![real_spot(from)]]);
-    if real_folder(from) && not_there(Path::new(&check)) {
+    // The folder is where it was: whatever is called "… (checking)" now (if anything) isn't it.
+    if real_folder(from) {
         return match said {
             Ok(outcomes) if outcomes.first() == Some(&Outcome::Done) => Ok(()),
             other => Err(as_it_was(other, "The administrator step finished, but couldn't check the folder.")),
         };
+    }
+    // Gone, or a link now, and nothing took the check's name: whatever happened, the step didn't do it.
+    if not_there(Path::new(&check)) {
+        return Err(as_it_was(said, &format!("{from} isn't a real folder now, so it was left alone.")));
     }
     Err(not_as_expected(
         said,
