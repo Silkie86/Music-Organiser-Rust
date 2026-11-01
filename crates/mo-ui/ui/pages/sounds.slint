@@ -3,7 +3,7 @@
 // and filters over them and the picked sound's panel beside them. Agreed mock-up: the design canvas, 2026-11-01.
 // Read-only for now (favourites, tags and types are shown, not changed), like the C# app's sounds.db until it's trusted.
 import { ListView } from "std-widgets.slint";
-import { Theme, Type, Space, Well, SearchBox, ToggleChip, MenuChip, ListLine, Caps, Heart, StudioButton, CloseButton, HoverNote, PointerPad, Segmented, MoreButton, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader } from "../studio.slint";
+import { Theme, Type, Space, Well, StudioSlider, SearchBox, ToggleChip, MenuChip, ListLine, Caps, Heart, StudioButton, CloseButton, HoverNote, PointerPad, Segmented, MoreButton, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader } from "../studio.slint";
 
 // One type chip: the type, how many sounds have it, its colour (a place in Theme.sound-types) and whether it's on.
 export struct TypeChipInfo {
@@ -134,12 +134,13 @@ export global SoundsData {
     in property <[string]> re-types;
     in property <string> re-year;
     in property <[string]> re-years;
-    in property <string> re-adventure;
-    in property <[string]> re-adventures;
+    // 0 (close to what you use) to 1 (further afield).
+    in property <float> re-adventure;
+    callback re-adventure-set(float);
     in property <string> re-count;
     in property <[string]> re-counts;
     in property <bool> re-rarely;
-    // "type", "year", "adventure" or "count", and the value ("" for any).
+    // "type", "year" or "count", and the value ("" for any).
     callback re-pick(string, string);
     callback re-toggle-rarely();
     callback re-shuffle();
@@ -191,12 +192,13 @@ export global SoundsData {
     in property <bool> kit-elektron;
     in property <bool> kit-mono;
     in property <bool> kit-normalise;
-    // "key" or "randomness", and the value ("" for any key).
+    // "key", and the value ("" for any key).
     callback kit-choose(string, string);
     in property <string> kit-key;
     in property <[string]> kit-keys;
-    in property <string> kit-randomness;
-    in property <[string]> kit-randomnesses;
+    // 0 (the best fits) to 1 (anything that fits).
+    in property <float> kit-randomness;
+    callback kit-randomness-set(float);
     in property <[string]> kit-types;
     callback kit-add(string);
     callback kit-roll();
@@ -885,12 +887,12 @@ export component SoundsPage inherits Rectangle {
                 choices: SoundsData.re-years;
                 picked(v) => { SoundsData.re-pick("year", v); }
             }
-            MenuChip {
-                name: "Adventurous";
+            StudioSlider {
+                low: "Safe";
+                high: "Adventurous";
+                tip: "Left sticks close to what you already use; right goes further afield";
                 value: SoundsData.re-adventure;
-                choices: SoundsData.re-adventures;
-                has-any: false;
-                picked(v) => { SoundsData.re-pick("adventure", v); }
+                released(v) => { SoundsData.re-adventure-set(v); }
             }
             MenuChip {
                 name: "How many";
@@ -955,12 +957,12 @@ export component SoundsPage inherits Rectangle {
                 choices: SoundsData.kit-keys;
                 picked(v) => { SoundsData.kit-choose("key", v); }
             }
-            MenuChip {
-                name: "Randomness";
+            StudioSlider {
+                low: "Best fits";
+                high: "Random";
+                tip: "Left picks the sounds that fit each pad best; right, anything that fits";
                 value: SoundsData.kit-randomness;
-                choices: SoundsData.kit-randomnesses;
-                has-any: false;
-                picked(v) => { SoundsData.kit-choose("randomness", v); }
+                released(v) => { SoundsData.kit-randomness-set(v); }
             }
             MenuChip {
                 name: "Add a pad";

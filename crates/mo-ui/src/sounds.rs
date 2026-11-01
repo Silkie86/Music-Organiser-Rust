@@ -59,8 +59,6 @@ const EXPORT_FOLDER_KEY: &str = "export_folder";
 /// Rediscover's How many choices (the C# app's), and the one it starts on.
 const COUNTS: [usize; 4] = [30, 60, 120, 250];
 const COUNT: usize = 60;
-/// Rediscover's Adventurous choices, for the C# app's slider from 0 (close to what you use) to 1 (further afield).
-const ADVENTURES: [(&str, f64); 4] = [("Not very", 0.1), ("A little", 0.3), ("Quite", 0.6), ("Very", 0.9)];
 /// How many forgotten folders Rediscover lists, as in the C# app.
 const FOLDERS: usize = 40;
 
@@ -1108,9 +1106,7 @@ fn show_rediscover_chips(app: &AppWindow) {
         data.set_re_types(strings(p.types.iter().map(|t| t.0.as_str())));
         data.set_re_type(p.re.sound_type.clone().unwrap_or_default().into());
         data.set_re_year(p.re.year.map(|y| y.to_string()).unwrap_or_default().into());
-        data.set_re_adventures(strings(ADVENTURES.map(|a| a.0)));
-        let adventure = ADVENTURES.iter().find(|a| a.1 == p.re.adventure).map_or(ADVENTURES[1].0, |a| a.0);
-        data.set_re_adventure(adventure.into());
+        data.set_re_adventure(p.re.adventure as f32);
         data.set_re_counts(strings(COUNTS.map(|c| c.to_string())));
         data.set_re_count(p.re.count.to_string().into());
         data.set_re_rarely(p.re.max_uses > 0);
@@ -1129,11 +1125,6 @@ fn wire_rediscover(app: &AppWindow) {
             match what.as_str() {
                 "type" => p.re.sound_type = (!v.is_empty()).then(|| v.to_owned()),
                 "year" => p.re.year = v.parse().ok(),
-                "adventure" => {
-                    if let Some(a) = ADVENTURES.iter().find(|a| a.0 == v) {
-                        p.re.adventure = a.1;
-                    }
-                }
                 "count" => {
                     if let Some(c) = v.parse().ok().filter(|c| COUNTS.contains(c)) {
                         p.re.count = c;
@@ -1141,6 +1132,20 @@ fn wire_rediscover(app: &AppWindow) {
                 }
                 _ => {}
             }
+            p.re_started
+        });
+        show_rediscover_chips(&app);
+        if again {
+            rediscover_now(&app);
+        }
+    });
+    // The slider picks again once it's let go, not while it moves.
+    let weak = app.as_weak();
+    data.on_re_adventure_set(move |v| {
+        let Some(app) = weak.upgrade() else { return };
+        let again = PAGE.with(|p| {
+            let mut p = p.borrow_mut();
+            p.re.adventure = f64::from(v.clamp(0.0, 1.0));
             p.re_started
         });
         show_rediscover_chips(&app);
