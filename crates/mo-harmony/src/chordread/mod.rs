@@ -33,7 +33,7 @@ pub use candidates::{Candidate, Label, Route, allowed, candidates, escape, open_
 pub use cores::{Core, CoreSet, ToneClass, valid, valid_rootless};
 pub use hear::{
     BASS_GAP, BassTexture, HeardNote, Hearing, Level, Line, MOST_UNITS, Mass, Push, Shape, Shaped, Stream, Unit,
-    heard_in,
+    heard_in, presence_of,
 };
 pub use score::{Evidence, Feature, PerFeature, Scored, SpanFacts};
 pub use weights::{EVEN, HAND, Tables, Weights};

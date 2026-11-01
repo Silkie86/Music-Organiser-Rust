@@ -135,11 +135,6 @@ fn size(beats: u64) -> f64 {
     if beats == 0 { 0.0 } else { beats as f64 / beats.saturating_add(HALF_SIZE) as f64 }
 }
 
-/// All twelve counts added up.
-fn total(counts: &PerPitch<u64>) -> u64 {
-    counts.0.iter().fold(0u64, |t, c| t.saturating_add(*c))
-}
-
 impl Heard {
     /// How many bars differ: a bar is told from another by the notes starting in it (where in the bar, which key, how
     /// long), so a loop written out four times counts its bars once, and a chord held for four bars counts as one bar.
@@ -159,8 +154,8 @@ impl Heard {
 
     /// Which streams have sound: tune and accompaniment, only one of them, or only a bass part.
     pub fn config(&self) -> Config {
-        let tune = total(&self.tune) > 0;
-        let others = total(&self.harmony) > 0;
+        let tune = self.tune.total() > 0;
+        let others = self.harmony.total() > 0;
         if tune && others {
             Config::Full
         } else if tune {
@@ -180,7 +175,7 @@ impl Heard {
         for (pc, c) in self.harmony.iter() {
             notes[pc] = notes[pc].saturating_add(c);
         }
-        let all = total(&notes);
+        let all = notes.total();
         if all == 0 {
             return 0.0;
         }
@@ -273,7 +268,7 @@ impl Heard {
             (Stream::MinorChords, &self.minor_chords, others),
         ];
         for (stream, counts, weight) in counted {
-            let all = total(counts);
+            let all = counts.total();
             if all == 0 || weight == 0.0 {
                 continue;
             }

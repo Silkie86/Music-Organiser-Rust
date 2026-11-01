@@ -481,6 +481,38 @@ fn chords_repeated_in_eighths_are_not_broken() {
 }
 
 #[test]
+fn a_note_is_the_bass_where_the_masses_count_it() {
+    let arpeggio = [notes("C2", 0, BAR), line("E4 G4 C5 G4 E4 G4 C5 G4", 0, BEAT / 2)].concat();
+    let musics = [
+        // A held C2 under eighths with C5 among them (broken, so the chords'), and a tune's C6 (never the bass).
+        Music::new().keys(arpeggio).tune(notes("C6", 0, BAR)),
+        // The left hand's C2 and its octave C3 under a chord, held into the next bar a little: the held-over end isn't
+        // the bass.
+        Music::new()
+            .keys([notes("C2 C3 E4 G4", 0, BAR + BEAT / 2), notes("F2 F3 A4 C5", BAR + BEAT / 2, BAR)].concat()),
+        // A bass part: only its notes.
+        Music::new().bass(notes("C2", 0, BAR)).keys(notes("C3 E4 G4", 0, BAR)),
+    ];
+    for music in musics {
+        let h = music.hear();
+        assert!(h.notes().iter().any(|n| (0..h.units()).any(|u| h.is_bass_in(u, n))));
+        // A broken chord's notes are the chords', on the bass's pitch class too.
+        assert!(h.notes().iter().filter(|n| n.broken).all(|n| (0..h.units()).all(|u| !h.is_bass_in(u, n))));
+        for u in 0..h.units() {
+            let (from, to) = (h.offset(u), h.offset(u + 1));
+            // The longest any one of them sounds in the unit (octave doubles count once), held-over ends left out.
+            let mut bass = PerPitch::<u64>::default();
+            for n in h.notes().iter().filter(|n| h.is_bass_in(u, n)) {
+                let end = n.held_over.unwrap_or(n.end).clamp(n.start, n.end);
+                let ticks = u64::try_from(end.min(to) - n.start.max(from)).unwrap_or(0);
+                bass[n.pitch_class()] = bass[n.pitch_class()].max(ticks);
+            }
+            assert_eq!(bass, h.mass(u..u + 1, Mass::Bass), "unit {u}");
+        }
+    }
+}
+
+#[test]
 fn a_held_note_under_an_arpeggio_is_not_broken() {
     // One part: a held C2, and eighths over it. The eighths are broken; the C2 isn't, and it's the bass.
     let keys = [notes("C2", 0, BAR), line("E4 G4 C5 G4 E4 G4 C5 G4", 0, BEAT / 2)].concat();

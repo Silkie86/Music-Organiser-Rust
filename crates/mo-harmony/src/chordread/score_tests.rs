@@ -6,7 +6,8 @@ use std::ops::Range;
 
 use super::hear_tests::{BAR, BEAT, Music, keys_only, line, notes, with_bass};
 use super::{
-    Candidate, Core, EVEN, Evidence, Feature, HAND, Hearing, Label, Mass, PerFeature, Push, Route, Scored, SpanFacts,
+    Candidate, Core, EVEN, Evidence, Feature, HAND, Hearing, Label, Mass, PerFeature, Push, Route, Scored, Shape,
+    SpanFacts,
 };
 use crate::notes::{Note, Role};
 use crate::pitch::PitchClass;
@@ -167,6 +168,38 @@ fn a_note_passing_by_costs_a_little_under_the_labels_it_passes_between() {
 }
 
 #[test]
+fn a_suspension_held_over_the_bar_line_passes_by() {
+    use Feature::*;
+    // F A C held a beat into the bar of C over its bass, the top F stepping down to E with the rest of C on beat 2: a
+    // suspension from the bar line. What the chords hold over a bar line is smear, which costs more (T4), but the F
+    // only passes by (T5); the A held with it doesn't.
+    let hearing = Music::new()
+        .bass([notes("F2", 0, BAR), notes("C2", BAR, BAR)].concat())
+        .keys([notes("A3 C4 F4", 0, BAR + BEAT), notes("G3 C4 E4", BAR + BEAT, 3 * BEAT)].concat())
+        .hear();
+    assert!(hearing.shaped().iter().any(|s| s.shape == Shape::Suspension && s.pc == PitchClass::F));
+    let facts = facts_on(&hearing, bar(1), None);
+    // A beat each, of the chords' nine beats in the bar (what they hold over is three).
+    let c = evidence(&facts, "C");
+    assert_eq!((c[WrongHeld], c[Passing], c[ChordTones]), (1.0 / 9.0, 1.0 / 9.0, 1.0));
+    // Read as F, nothing passes by: the F is its own, and the A held over too.
+    let f = evidence(&facts, "F");
+    assert_eq!((f[WrongHeld], f[Passing]), (0.0, 0.0));
+    // In the tune, a held-over end counts nowhere: F5 held over the bar line to E5 on beat 2, then F5 played again on
+    // beat 3, which doesn't pass by. Under C, the second F is a third of the tune's sound in its own notes, the E a
+    // third, and the F that passed by takes nothing from the second F's two thirds.
+    let tune = [notes("F5", 2 * BEAT, 3 * BEAT), notes("E5", BAR + BEAT, BEAT), notes("F5", BAR + 2 * BEAT, 2 * BEAT)];
+    let hearing = Music::new()
+        .bass([notes("F2", 0, BAR), notes("C2", BAR, BAR)].concat())
+        .keys([notes("F3 A3 C4", 0, BAR), notes("C4 E4 G4", BAR, BAR)].concat())
+        .tune(tune.concat())
+        .hear();
+    assert!(hearing.shaped().iter().any(|s| s.shape == Shape::Suspension && s.pc == PitchClass::F));
+    let c = evidence(&facts_on(&hearing, bar(1), None), "C");
+    assert_eq!((c[TuneTones], c[TuneTensions], c[TuneWrong]), (1.0 / 3.0, 0.0, 2.0 / 3.0));
+}
+
+#[test]
 fn the_tune_counts_after_its_shapes() {
     use Feature::*;
     // The design's case 48: C2 under E3 G3 B3, with a tune.
@@ -207,14 +240,17 @@ fn the_third_seventh_and_fifths_count_by_how_long_they_sound() {
     // again for presence), so it's half there.
     let facts = keys([notes("C4 G4 Bb4", 0, BAR), notes("E4", 0, BEAT / 2)].concat());
     let c7 = evidence(&facts, "C7");
-    assert_eq!((c7[NoThird], c7[NoSeventh], c7[NoFifth], c7[NoAlteredFifth]), (0.5, 0.0, 0.0, 0.0));
+    assert_eq!((c7[NoThird], c7[NoSeventh], c7[NoPlainFifth], c7[NoCoreFifth]), (0.5, 0.0, 0.0, 0.0));
     // A shell, C E Bb: no fifth. C Eb Bb as a half-diminished chord: no flat fifth (and a plain fifth is no part of
     // it). C E G as Cmaj7: no seventh.
-    assert_eq!(evidence(&keys(notes("C4 E4 Bb4", 0, BAR)), "C7")[NoFifth], 1.0);
+    assert_eq!(evidence(&keys(notes("C4 E4 Bb4", 0, BAR)), "C7")[NoPlainFifth], 1.0);
     let half = evidence(&keys(notes("C4 Eb4 Bb4", 0, BAR)), "Cm7b5");
-    assert_eq!((half[NoAlteredFifth], half[NoFifth]), (1.0, 0.0));
+    assert_eq!((half[NoCoreFifth], half[NoPlainFifth]), (1.0, 0.0));
     assert_eq!(evidence(&keys(notes("C4 E4 G4", 0, BAR)), "Cmaj7")[NoSeventh], 1.0);
-    assert_eq!(evidence(&keys(notes("C4 E4", 0, BAR)), "C+")[NoAlteredFifth], 1.0);
+    assert_eq!(evidence(&keys(notes("C4 E4", 0, BAR)), "C+")[NoCoreFifth], 1.0);
+    // A power chord's fifth says which chord it is, as a flat or sharp fifth does: C held, G an eighth of the bar.
+    let power = evidence(&keys([notes("C4", 0, BAR), notes("G4", 0, BEAT / 2)].concat()), "C5");
+    assert_eq!((power[NoCoreFifth], power[NoPlainFifth]), (0.5, 0.0));
     // A 7sus4 may sound its 2 in place of its 4th; a sus4 triad may not.
     let facts = keys(notes("C4 D4 G4 Bb4", 0, BAR));
     assert_eq!((evidence(&facts, "C7sus4")[NoThird], evidence(&facts, "Csus4")[NoThird]), (0.0, 1.0));
@@ -237,6 +273,17 @@ fn where_the_root_is_heard() {
     assert_eq!(roots(&with_bass("D2", "F3 A3 C4"), "Dm7"), [0.0, 1.0, 0.0, 0.0, 0.0]);
     assert_eq!(roots(&with_bass("C2", "F3 A3 B3 E4"), "G7"), [0.0, 0.0, 1.0, 0.0, 0.0]);
     assert_eq!(roots(&keys("B3 E4 F4 A4"), "G7"), [0.0, 0.0, 0.0, 1.0, 0.0]);
+    // With no bass, the lowest chord note leans towards its own root for as long as it's the lowest: E G B D for two
+    // beats, then G B D E. Over the bar, Em7 and G6 each have half; each half bar adds up to the whole.
+    let voicings = [notes("E3 G3 B3 D4", 0, 2 * BEAT), notes("G3 B3 D4 E4", 2 * BEAT, 2 * BEAT)].concat();
+    let hearing = Music::new().keys(voicings).hear();
+    let lowest = |units: Range<usize>, name: &str| {
+        let facts = facts_on(&hearing, units, None);
+        facts.beats() * evidence(&facts, name)[LowestIsRoot]
+    };
+    for (name, first) in [("Em7", 2.0), ("G6", 0.0)] {
+        assert_eq!((lowest(bar(0), name), lowest(0..4, name), lowest(4..8, name)), (2.0, first, 2.0 - first));
+    }
     // A tune's held note plays the root too.
     let music = Music::new().bass(notes("C2", 0, BAR)).keys(notes("E4 G4", 0, BAR)).tune(notes("C5", 0, BAR));
     assert_eq!(roots(&facts_on(&music.hear(), bar(0), None), "C")[..2], [1.0, 0.0]);
@@ -285,6 +332,15 @@ fn a_moving_bass_leans_by_how_strong_each_beat_is() {
     let music = Music::new().looped().keys([left, notes("F3 A3 C4", 0, BAR)].concat());
     let f = evidence(&facts_on(&music.hear(), bar(0), None), "Dm7");
     assert_eq!([f[WalkingRoot], f[WalkingWrong]], [1680.0 / 3600.0, 1920.0 / 3600.0]);
+    // A long C2 held three quarters of a beat over the bar line, then C3 an eighth between beats and D2 E2 F2 a beat
+    // each. The C2's held-over end is no part of the bass, so the C3 is a short note between beats: under G only the
+    // E2 on the middle of the bar counts against it (720 of the weighed 2640).
+    let bass = [notes("C2", 0, BAR + 3 * BEAT / 4), notes("C3", BAR + BEAT / 2, BEAT / 2)].concat();
+    let music = Music::new()
+        .bass([bass, line("D2 E2 F2", BAR + BEAT, BEAT)].concat())
+        .keys([notes("C4 E4 G4", 0, BAR), notes("G3 B3 D4", BAR, BAR)].concat());
+    let f = evidence(&facts_on(&music.hear(), bar(1), None), "G");
+    assert_eq!(f[WalkingWrong], 720.0 / 2640.0);
 }
 
 #[test]
@@ -379,6 +435,34 @@ fn the_priors_read_the_counted_tables() {
         facts.features(label("C"), &tables, &mut f);
         assert_eq!(f[TensionPrior], (1.0f64 - 0.9).ln() + (1.0f64 - 0.2).ln());
     }
+}
+
+#[test]
+fn the_priors_stay_finite_on_any_table_and_a_trust_of_0_leaves_them_out() {
+    use Feature::*;
+    // No major chord ever counted, its 9 always played and its #11 never, minor's share not a number: the priors
+    // read a floor instead of ln 0, so they cost a lot but never an infinite amount.
+    let mut tables = EVEN;
+    tables.core[Core::Major.index()] = 0.0;
+    tables.core[Core::Minor.index()] = f64::NAN;
+    tables.tension[Core::Major.index()][2] = 1.0;
+    tables.tension[Core::Major.index()][6] = 0.0;
+    let facts = facts_on(&Music::new().keys(notes("C4 E4 G4", 0, BAR)).hear(), bar(0), None);
+    let mut f = PerFeature::default();
+    for name in ["C", "Cm", "Am"] {
+        facts.features(label(name), &tables, &mut f);
+        assert!(f.0.iter().all(|v| v.is_finite()), "{name}");
+        assert!(f[CorePrior] < 0.0 && f[TensionPrior] <= 0.0);
+    }
+    facts.features(label("C"), &tables, &mut f);
+    assert!(f[CorePrior] < -13.0 && f[TensionPrior] < -13.0);
+    // The hand weights trust neither prior yet, so the ranking is the same as on even tables.
+    let mut candidates = Vec::new();
+    facts.candidates(&mut candidates);
+    let (mut even, mut odd) = (Vec::new(), Vec::new());
+    facts.rank(&candidates, &HAND, &EVEN, &mut even);
+    facts.rank(&candidates, &HAND, &tables, &mut odd);
+    assert_eq!(even, odd);
 }
 
 #[test]
@@ -534,8 +618,8 @@ fn the_evidence_is_the_same_at_another_resolution_and_in_another_order() {
 #[test]
 fn every_piece_of_evidence_stays_in_its_range_on_any_span() {
     use Feature::*;
-    let shares = [ChordTones, Tensions, WrongStruck, Passing, TuneTones, TuneTensions, TuneWrong, RootSupport];
-    let flags = [RootPlayed, RootInBass, RootlessOverBass, RootlessNoBass, LowestIsRoot, BassRoot, BassWrong];
+    let shares = [ChordTones, Tensions, WrongStruck, TuneTones, TuneTensions, TuneWrong, RootSupport, LowestIsRoot];
+    let flags = [RootPlayed, RootInBass, RootlessOverBass, RootlessNoBass, BassRoot, BassWrong];
     let mut evidence = Evidence::new();
     let mut facts = SpanFacts::new();
     let mut f = PerFeature::default();
@@ -554,9 +638,12 @@ fn every_piece_of_evidence_stays_in_its_range_on_any_span() {
                 assert!(f.0.iter().all(|v| v.is_finite()));
                 assert!(shares.iter().all(|&k| (0.0..=1.0).contains(&f[k])), "{l} {:?}", f.0);
                 assert!(flags.iter().all(|&k| f[k] == 0.0 || f[k] == 1.0));
-                let chords = f[ChordTones] + f[Tensions] + f[WrongStruck] + f[Passing];
-                assert!(chords <= 1.0 + 1e-12 && f[TuneTones] + f[TuneTensions] + f[TuneWrong] <= 1.0 + 1e-12);
-                assert!(f[WalkingRoot] + f[WalkingTones] <= 1.0 + 1e-12 && (0.0..=2.0).contains(&f[WrongHeld]));
+                // What the chords hold over counts on top of their sound, so T4 and T5 may reach 2 between them.
+                let struck = f[ChordTones] + f[Tensions] + f[WrongStruck];
+                assert!(struck <= 1.0 + 1e-12 && struck + f[WrongHeld] + f[Passing] <= 2.0 + 1e-12);
+                assert!((0.0..=2.0).contains(&f[WrongHeld]) && (0.0..=2.0).contains(&f[Passing]));
+                assert!(f[TuneTones] + f[TuneTensions] + f[TuneWrong] <= 1.0 + 1e-12);
+                assert!(f[WalkingRoot] + f[WalkingTones] <= 1.0 + 1e-12);
                 assert!(f[CorePrior] <= 0.0 && f[TensionPrior] <= 0.0);
             }
         }
@@ -576,7 +663,7 @@ fn the_hand_weights_keep_every_rule_and_broken_ones_are_named() {
     use Feature::*;
     assert_eq!(HAND.check(), Vec::<&str>::new());
     // One weight moved out of its place at a time, and the rules it breaks.
-    let cases: [(Feature, f64, &[&str]); 25] = [
+    let cases: [(Feature, f64, &[&str]); 27] = [
         (ChordTones, -1.0, &["T1 counts for the label", "T2 is between 0 and T1"]),
         (Tensions, 4.0, &["T2 is between 0 and T1"]),
         (WrongStruck, 1.0, &["T3 counts against the label", "T4 is between T3 and 0", "T5 is between T3 and 0"]),
@@ -585,8 +672,10 @@ fn the_hand_weights_keep_every_rule_and_broken_ones_are_named() {
         (TuneTensions, -0.1, &["T6 and T7 count for the label"]),
         (TuneWrong, 0.1, &["T8 counts against the label"]),
         (NoSeventh, 0.1, &["T9 to T11 count against"]),
-        (NoFifth, -3.0, &["T12 is between T9 and 0"]),
+        (NoPlainFifth, -3.0, &["T12 is between T9 and 0"]),
         (RootSupport, -1.0, &["T15 counts for the label"]),
+        (RootPlayed, -0.1, &["R1 and R2 count for the label"]),
+        (RootInBass, -0.1, &["R1 and R2 count for the label"]),
         (RootlessOverBass, -2.0, &["R3 is between R4 and 0"]),
         (LowestIsRoot, -0.1, &["L1 counts for the label"]),
         (BassThird, 2.0, &["B2 is between 0 and B1"]),

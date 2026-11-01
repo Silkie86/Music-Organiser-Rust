@@ -49,8 +49,8 @@ pub const HAND: Weights = Weights {
         -1.0,  // T8: the tune on a note that doesn't belong
         -2.0,  // T9: no third
         -1.0,  // T10: no seventh or sixth (a four-note chord)
-        -1.5,  // T11: no flat or sharp fifth (diminished, half-diminished, augmented)
-        -0.1,  // T12: no plain fifth
+        -1.5,  // T11: no fifth that says which chord it is (a flat or sharp fifth, a power chord's)
+        -0.1,  // T12: no plain fifth (one shells leave out)
         2.0,   // T15: the notes' leaning towards the root
         0.0,   // R1: the root played in the chords or the held tune
         0.4,   // R2: the root only in the bass
@@ -65,7 +65,7 @@ pub const HAND: Weights = Weights {
         -0.1,  // B6: … a note that doesn't belong
         1.0,   // B7: a moving bass on the root
         0.5,   // B8: … on the chord's other notes
-        -0.5,  // B9: … on a note that doesn't belong, on a strong beat or held long
+        -0.5,  // B9: … on a note that isn't its own, on a strong beat or held long
         2.0,   // E1: the first bass note struck is the root
         0.5,   // E2: the chord's notes struck where the stretch starts
         -1.0,  // E3: nothing struck where the stretch starts
@@ -87,7 +87,7 @@ impl Weights {
     pub fn check(&self) -> Vec<&'static str> {
         use Feature::*;
         let w = |f: Feature| self.features[f];
-        let rules: [(bool, &'static str); 26] = [
+        let rules: [(bool, &'static str); 27] = [
             (w(ChordTones) >= 0.0, "T1 counts for the label"),
             ((0.0..=w(ChordTones)).contains(&w(Tensions)), "T2 is between 0 and T1"),
             (w(WrongStruck) <= 0.0, "T3 counts against the label"),
@@ -95,9 +95,10 @@ impl Weights {
             ((w(WrongStruck)..=0.0).contains(&w(Passing)), "T5 is between T3 and 0"),
             (w(TuneTones) >= 0.0 && w(TuneTensions) >= 0.0, "T6 and T7 count for the label"),
             (w(TuneWrong) <= 0.0, "T8 counts against the label"),
-            (w(NoThird) <= 0.0 && w(NoSeventh) <= 0.0 && w(NoAlteredFifth) <= 0.0, "T9 to T11 count against"),
-            ((w(NoThird)..=0.0).contains(&w(NoFifth)), "T12 is between T9 and 0"),
+            (w(NoThird) <= 0.0 && w(NoSeventh) <= 0.0 && w(NoCoreFifth) <= 0.0, "T9 to T11 count against"),
+            ((w(NoThird)..=0.0).contains(&w(NoPlainFifth)), "T12 is between T9 and 0"),
             (w(RootSupport) >= 0.0, "T15 counts for the label"),
+            (w(RootPlayed) >= 0.0 && w(RootInBass) >= 0.0, "R1 and R2 count for the label"),
             ((w(RootlessNoBass)..=0.0).contains(&w(RootlessOverBass)), "R3 is between R4 and 0"),
             (w(LowestIsRoot) >= 0.0, "L1 counts for the label"),
             ((0.0..=w(BassRoot)).contains(&w(BassThird)), "B2 is between 0 and B1"),
@@ -123,28 +124,44 @@ impl Weights {
     }
 }
 
+/// How many cores the tables count.
+const CORES: usize = Core::ALL.len();
+
 /// The counted tables the template priors read: how often each core is the chord (f_core), and how often each of its
 /// tensions is played with it (f_ten). Until they are counted from labelled music (chordfit), every core is as likely
 /// as any other and each tension is played half the time, so the priors say nothing.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Tables {
-    /// For each core, the share of chords that are it.
-    pub core: [f64; 16],
+    /// For each core (in [`Core::ALL`]'s order), the share of chords that are it.
+    pub core: [f64; CORES],
     /// For each core, and each interval above its root, the share of its chords that play that tension.
-    pub tension: [[f64; 12]; 16],
+    pub tension: [[f64; 12]; CORES],
 }
 
 /// The tables before counting: nothing is more likely than anything else.
-pub const EVEN: Tables = Tables { core: [1.0 / 16.0; 16], tension: [[0.5; 12]; 16] };
+pub const EVEN: Tables = Tables { core: [1.0 / CORES as f64; CORES], tension: [[0.5; 12]; CORES] };
+
+/// The least share a prior reads, and 1 less it the most: a core or a tension never counted (or always played) still
+/// costs a finite amount, so no score is ever infinite and a trust of 0 always leaves the prior out.
+const FLOOR: f64 = 1e-6;
+
+/// ln of a share, kept between the floor and 1 less it; a share that isn't a number reads as the floor.
+fn ln_share(share: f64) -> f64 {
+    let kept = if share >= FLOOR { share.min(1.0 - FLOOR) } else { FLOOR };
+    kept.ln()
+}
 
 impl Tables {
     /// ln f_core: how likely the core is, before the notes are heard.
     pub fn core_prior(&self, core: Core) -> f64 {
-        self.core.get(core.index()).map_or(0.0, |f| f.ln())
+        ln_share(self.core.get(core.index()).copied().unwrap_or(1.0 / CORES as f64))
     }
 
-    /// How often a tension (by its interval above the root) is played with a core.
-    pub fn tension(&self, core: Core, interval: u8) -> f64 {
-        self.tension.get(core.index()).and_then(|row| row.get(usize::from(interval))).copied().unwrap_or(0.5)
+    /// What a tension (by its interval above the root) adds to a core's tension prior: ln f_ten when it's heard, and
+    /// ln (1 − f_ten) when it isn't.
+    pub fn tension_prior(&self, core: Core, interval: u8, heard: bool) -> f64 {
+        let row = self.tension.get(core.index());
+        let f = row.and_then(|row| row.get(usize::from(interval))).copied().unwrap_or(0.5);
+        ln_share(if heard { f } else { 1.0 - f })
     }
 }
