@@ -50,8 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     mo_ui::sounds::connect(&app, out.join("no sounds.db"), feed.clone(), &Shortcuts::default());
     app.set_place(Place::Sounds.index() as i32);
     let sounds_empty = capture(&window);
-    let (sounds, played) = sample_sounds();
-    mo_ui::sounds::show(&app, sounds, played, None, None);
+    mo_ui::sounds::show(&app, sample_sounds(), None, None);
     // Once to lay the page out (the tiles' width tells the page how many fit in a row), then for real.
     capture(&window);
 
@@ -169,7 +168,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// A made-up library for the Songs page: names, plugins and dates invented here, none of Solomon's (rule 4).
 /// The Sounds page: a sound picked and playing in its panel, a filter on, the List and History views, and the tiles in
 /// a light theme.
 fn sounds_shots(
@@ -203,7 +201,7 @@ fn sounds_shots(
 }
 
 /// Made-up sounds of many types, with a made-up waveform each, and a few plays for History.
-fn sample_sounds() -> (mo_app::sounds::SoundList, Vec<(i64, chrono::NaiveDateTime)>) {
+fn sample_sounds() -> mo_ui::sounds::Library {
     use mo_sounds::{Sound, SoundAnalysis};
     // (folder, name, type, seconds, tempo, key)
     type Made = (&'static str, &'static str, &'static str, f64, Option<f64>, Option<(i32, bool)>);
@@ -290,9 +288,10 @@ fn sample_sounds() -> (mo_app::sounds::SoundList, Vec<(i64, chrono::NaiveDateTim
         })
         .collect();
     let played = vec![(7, day(31, 22)), (13, day(31, 21)), (2, day(30, 18)), (11, day(28, 9)), (20, day(20, 14))];
-    (mo_app::sounds::SoundList::new(sounds), played)
+    mo_ui::sounds::Library::new(sounds, played)
 }
 
+/// A made-up library for the Songs page: names, plugins and dates invented here, none of Solomon's (rule 4).
 fn sample_songs() -> mo_app::songs::Songs {
     use chrono::{Duration as Days, Local};
     use mo_library::Save;

@@ -6,6 +6,7 @@
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -16,6 +17,7 @@ use mo_app::log;
 use mo_app::shortcuts::Shortcuts;
 use mo_app::sounds::{self as list, Filters, Length, Order, SoundList};
 use mo_audio::play::Player;
+use mo_library::songs::thousands;
 use mo_sounds::{Sound, SoundsDb, music};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, Timer, TimerMode, VecModel};
 
@@ -61,8 +63,8 @@ struct Page {
     autoplay: bool,
     /// Counts the asks for a new list, so an older answer that arrives late is dropped.
     asked: u64,
-    /// The type chips' types, in chip order, then the rest (the More types menu).
-    types: Vec<String>,
+    /// The type chips' types with their counts, in chip order, then the rest (the More types menu).
+    types: Vec<(String, usize)>,
     now: NaiveDateTime,
     /// The sound playing (its place in `list`) and how long the part shown in its waveform lasts.
     playing: Option<(usize, f64)>,
@@ -132,6 +134,9 @@ thread_local! {
 
 /// The one player, made the first time something plays (nothing opens before).
 static PLAYER: OnceLock<Player> = OnceLock::new();
+/// Counts the plays and stops asked for, so a sound that finishes reading after a newer play or a stop stays quiet
+/// (newest wins, rule 12).
+static PLAYS: AtomicU64 = AtomicU64::new(0);
 
 /// The tile rows, made from the page's list one row at a time as the list draws them.
 struct TileRows {
@@ -288,12 +293,32 @@ pub fn connect(app: &AppWindow, sounds_db: PathBuf, feed: Feed, shortcuts: &Shor
     }
 }
 
-/// What reading the library gives: the sounds, what was played, and the view and autoplay you had last.
+/// What reading the library gives: the sounds ready to list, what was played, and the view and autoplay you had last.
 struct Read {
-    sounds: Vec<Sound>,
-    history: Vec<(i64, NaiveDateTime)>,
+    library: Library,
     view: Option<String>,
     autoplay: Option<String>,
+}
+
+/// The sounds made ready to list, off the window's thread: the list itself, the types with their counts, the tags,
+/// and what was played (as places in the list, newest first, with when).
+pub struct Library {
+    list: SoundList,
+    types: Vec<(String, usize)>,
+    tags: Vec<String>,
+    played: Vec<(usize, NaiveDateTime)>,
+}
+
+impl Library {
+    /// Gets `sounds` ready to list, with what was `played` (id, when). Takes a while for a big library, so it's done
+    /// on a background thread (the screenshots do it in place).
+    pub fn new(sounds: Vec<Sound>, played: Vec<(i64, NaiveDateTime)>) -> Library {
+        let list = background::on_pool(|| SoundList::new(sounds));
+        let ids: std::collections::HashMap<i64, usize> =
+            (0..list.len()).filter_map(|i| list.sound(i).map(|s| (s.id, i))).collect();
+        let played = played.into_iter().filter_map(|(id, at)| ids.get(&id).map(|&i| (i, at))).collect();
+        Library { types: list.type_counts(), tags: list.tags(), list, played }
+    }
 }
 
 fn read_library(path: &Path) -> Result<Read, String> {
@@ -306,7 +331,7 @@ fn read_library(path: &Path) -> Result<Read, String> {
     let history = db.history(500).unwrap_or_default();
     let view = db.setting(VIEW_KEY).ok().flatten();
     let autoplay = db.setting(AUTOPLAY_KEY).ok().flatten();
-    Ok(Read { sounds, history, view, autoplay })
+    Ok(Read { library: Library::new(sounds, history), view, autoplay })
 }
 
 fn loaded(app: &AppWindow, read: Result<Read, String>) {
@@ -330,32 +355,24 @@ fn loaded(app: &AppWindow, read: Result<Read, String>) {
             return;
         }
     };
-    show(app, SoundList::new(read.sounds), read.history, read.view.as_deref(), read.autoplay.as_deref());
+    show(app, read.library, read.view.as_deref(), read.autoplay.as_deref());
 }
 
-/// Shows `sounds` on the page, with what was `played` (id, when), opening on the view and autoplay setting given.
-pub fn show(
-    app: &AppWindow,
-    sounds: SoundList,
-    played: Vec<(i64, NaiveDateTime)>,
-    view: Option<&str>,
-    autoplay: Option<&str>,
-) {
+/// Shows a `library` on the page, opening on the view and autoplay setting given.
+pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Option<&str>) {
     let data = app.global::<SoundsData>();
     data.set_empty_title("".into());
+    data.set_tags(strings(&library.tags));
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        let ids: std::collections::HashMap<i64, usize> =
-            (0..sounds.len()).filter_map(|i| sounds.sound(i).map(|s| (s.id, i))).collect();
-        p.history = played.into_iter().filter_map(|(id, at)| ids.get(&id).map(|&i| (i, at))).collect();
-        p.list = Arc::new(sounds);
+        p.history = library.played;
+        p.list = Arc::new(library.list);
+        p.types = library.types;
         p.view = view.and_then(|v| VIEWS.iter().position(|n| *n == v)).map_or(TILES, |i| i as i32);
         if let Some(a) = autoplay {
             p.autoplay = a != "0" && !a.eq_ignore_ascii_case("false");
         }
-        p.types = p.list.type_counts().into_iter().map(|(t, _)| t).collect();
         p.picked = None;
-        data.set_tags(strings(p.list.tags()));
     });
     refresh(app);
 }
@@ -386,7 +403,7 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     let weak = app.as_weak();
     data.on_pick_type(move |i| {
         let Some(app) = weak.upgrade() else { return };
-        let ty = PAGE.with(|p| p.borrow().types.get(i as usize).cloned());
+        let ty = PAGE.with(|p| p.borrow().types.get(i as usize).map(|t| t.0.clone()));
         change(&app.as_weak(), |f| f.sound_type = if f.sound_type == ty { None } else { ty });
     });
     let weak = app.as_weak();
@@ -553,7 +570,7 @@ fn refresh(app: &AppWindow) {
         if w.is_none() {
             let weak = app.as_weak();
             match Newest::start("Sounds list", move |ask: Ask| {
-                let shown = ask.list.view(&ask.filters, ask.order, ask.seed);
+                let shown = background::on_pool(|| ask.list.view(&ask.filters, ask.order, ask.seed));
                 let weak = weak.clone();
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(app) = weak.upgrade() {
@@ -616,7 +633,7 @@ fn show_chips(app: &AppWindow) {
     PAGE.with(|p| {
         let p = p.borrow();
         let f = &p.filters;
-        let counts = p.list.type_counts();
+        let counts = &p.types;
         let chips: Vec<TypeChipInfo> = counts
             .iter()
             .take(TYPE_CHIPS)
@@ -783,9 +800,12 @@ fn play_picked(app: &AppWindow, from: f64) {
     if HERE.with(|h| *h.borrow()) {
         return;
     }
+    let ask = PLAYS.fetch_add(1, Ordering::SeqCst) + 1;
     let weak = app.as_weak();
     let started =
         background::spawn("Read sound", move || match mo_audio::read(Path::new(&path), mo_audio::MAX_SECONDS) {
+            // A newer play or a stop came while this one was reading.
+            _ if PLAYS.load(Ordering::SeqCst) != ask => {}
             Ok(audio) => {
                 let player = PLAYER.get_or_init(|| {
                     Player::new(|key| {
@@ -814,6 +834,7 @@ fn play_picked(app: &AppWindow, from: f64) {
 }
 
 fn stop(app: &AppWindow) {
+    PLAYS.fetch_add(1, Ordering::SeqCst);
     if let Some(player) = PLAYER.get() {
         player.stop();
     }
@@ -823,13 +844,18 @@ fn stop(app: &AppWindow) {
 
 /// A sound played to its end by itself.
 fn ended(key: &str) {
-    PAGE.with(|p| {
+    let ours = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         let ours = p.playing.and_then(|(i, _)| p.list.sound(i)).is_some_and(|s| s.path == key);
         if ours {
             p.playing = None;
         }
+        ours
     });
+    // An older sound, cut off by a newer one that's still reading: the newer one keeps the page.
+    if !ours {
+        return;
+    }
     TICKER.with(Timer::stop);
     redraw();
     // The panel's Play button and waveform follow on the next tick of `playing_changed`'s timer, which has stopped,
@@ -897,28 +923,12 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
     true
 }
 
-/// A count with thousands marked: "357,412".
-fn thousands(n: usize) -> String {
-    let digits = n.to_string();
-    let mut out = String::new();
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn counts_and_times_read_well() {
-        assert_eq!(thousands(7), "7");
-        assert_eq!(thousands(357_412), "357,412");
-        assert_eq!(thousands(1_000_000), "1,000,000");
         let now =
             chrono::NaiveDate::from_ymd_opt(2026, 11, 1).and_then(|d| d.and_hms_opt(12, 0, 0)).unwrap_or_default();
         assert_eq!(when(now - chrono::Duration::minutes(5), now), "11:55");

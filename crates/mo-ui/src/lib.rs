@@ -93,7 +93,7 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> R
         if let Some(app) = weak.upgrade()
             && app.get_place() == Place::Sounds.index() as i32
             && let Some(id) = shortcuts.page_action_for(&key, SOUNDS_ACTIONS)
-            && sounds::run_action(&app, id)
+            && (repeat || sounds::run_action(&app, id))
         {
             return true;
         }

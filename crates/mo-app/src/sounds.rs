@@ -107,6 +107,8 @@ pub struct SoundList {
     used: Option<HashMap<i64, u32>>,
     /// Each sound's Most liked score, in `sounds` order, once known.
     liked: Option<Vec<f64>>,
+    /// The best of `liked`, worked out once, as every tile asks for its share of it.
+    liked_best: f64,
 }
 
 impl SoundList {
@@ -125,7 +127,9 @@ impl SoundList {
 
     /// Each sound's Most liked score, from `score`.
     pub fn set_liked(&mut self, score: impl Fn(&Sound) -> f64 + Sync + Send) {
-        self.liked = Some(self.sounds.par_iter().map(&score).collect());
+        let liked: Vec<f64> = self.sounds.par_iter().map(&score).collect();
+        self.liked_best = liked.iter().copied().fold(0.0, f64::max);
+        self.liked = Some(liked);
     }
 
     pub fn len(&self) -> usize {
@@ -154,7 +158,7 @@ impl SoundList {
     /// The Most liked score, from 0 to 1 against the best liked, if scores are known yet.
     pub fn liked_share(&self, i: usize) -> Option<f64> {
         let liked = self.liked.as_ref()?;
-        let best = liked.iter().copied().fold(0.0, f64::max);
+        let best = self.liked_best;
         Some(if best > 0.0 { liked.get(i).copied().unwrap_or(0.0) / best } else { 0.0 })
     }
 

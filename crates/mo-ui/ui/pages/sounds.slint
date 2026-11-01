@@ -163,6 +163,8 @@ global TileSize {
 
 component SoundTileView inherits Rectangle {
     in property <SoundTile> tile;
+    // A click on it, so the page can take the keys (arrows, Space) from the search box.
+    callback chosen();
     callback right-clicked(length, length);
     height: TileSize.height;
     border-radius: Theme.radius;
@@ -172,6 +174,7 @@ component SoundTileView inherits Rectangle {
     ListLine {
         selected: false;
         clicked => {
+            root.chosen();
             SoundsData.select(root.tile.row);
         }
         double-clicked => { SoundsData.play-row(root.tile.row); }
@@ -232,9 +235,14 @@ component SoundTileView inherits Rectangle {
 component SoundLineView inherits ListLine {
     in property <SoundLine> line;
     in property <bool> history;
+    // A click on it, so the page can take the keys (arrows, Space) from the search box.
+    callback chosen();
     height: 40px;
     selected: line.picked;
-    clicked => { SoundsData.select(root.line.row); }
+    clicked => {
+        root.chosen();
+        SoundsData.select(root.line.row);
+    }
     double-clicked => { SoundsData.play-row(root.line.row); }
     HorizontalLayout {
         width: 100%;
@@ -688,6 +696,7 @@ export component SoundsPage inherits Rectangle {
                             for t in r.tiles: SoundTileView {
                                 width: (tiles.visible-width - Space.sm) / tiles.columns - Space.sm;
                                 tile: t;
+                                chosen => { keys.focus(); }
                                 right-clicked(x, y) => {
                                     keys.focus();
                                     menu.open-at(x, y);
@@ -709,6 +718,7 @@ export component SoundsPage inherits Rectangle {
                             for l in SoundsData.lines: SoundLineView {
                                 line: l;
                                 history: SoundsData.view == 3;
+                                chosen => { keys.focus(); }
                                 right-clicked(x, y) => {
                                     keys.focus();
                                     menu.open-at(x, y);
