@@ -57,6 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.set_place(Place::Sounds.index() as i32);
     let sounds_empty = capture(&window);
     mo_ui::sounds::show(&app, sample_sounds(), None, Some("1"));
+    mo_ui::sounds::index_known(&app, std::sync::Arc::new(sample_fingerprints()));
     // Once to lay the page out (the tiles' width tells the page how many fit in a row), then for real.
     capture(&window);
 
@@ -212,6 +213,18 @@ fn sounds_shots(
     shots.push(("sounds-paper.png".into(), capture(window)));
     mo_ui::apply_look(app, graphite);
     app.set_place(Place::Songs.index() as i32);
+}
+
+/// Made-up fingerprints for the made-up sounds: sounds of a type, and of a length, sit near each other.
+fn sample_fingerprints() -> mo_sounds::index::SoundIndex {
+    let features = (1..=29i64)
+        .map(|id| {
+            let v: Vec<f32> =
+                (0..16).map(|d| ((id * 7 + d * 3) % 5) as f32 + if d == id % 4 { 6.0 } else { 0.0 }).collect();
+            (id, v)
+        })
+        .collect();
+    mo_sounds::index::SoundIndex::build(&features, &Default::default(), 29)
 }
 
 /// Made-up sounds of many types, with a made-up waveform each, and a few plays for History.
