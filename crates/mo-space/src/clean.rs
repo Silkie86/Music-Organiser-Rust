@@ -22,7 +22,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use chrono::{DateTime, Local, NaiveDateTime};
+use chrono::NaiveDateTime;
 use mo_formats::case;
 use mo_formats::paths::file_name;
 use mo_formats::textscan::is_audio_path;
@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::admin::{Admin, AsAdmin, NoAdmin, Step, ask_for, real_spot, reason, stamp};
 use crate::plugin_space::SpaceKind;
-use crate::size::{OnlineOnly, Stopped, is_link, is_online_only, online_only_in};
+use crate::size::{OnlineOnly, Stopped, is_link, is_online_only, local_time, online_only_in};
 use crate::song::{CompactItem, CompactKind, has_studio_one_song, parent};
 use crate::{key, not_there, real_path, text};
 
@@ -319,8 +319,8 @@ impl Guard<'_> {
 /// Whether a file was last written when the line says (to the second, either way), or the line doesn't say.
 fn same_time(meta: &Metadata, measured: Option<NaiveDateTime>) -> bool {
     let Some(measured) = measured else { return true };
-    let Ok(modified) = meta.modified() else { return false };
-    (DateTime::<Local>::from(modified).naive_local() - measured).num_milliseconds().abs() < 2000
+    let Some(modified) = meta.modified().ok().and_then(local_time) else { return false };
+    (modified - measured).num_milliseconds().abs() < 2000
 }
 
 /// The names in a path, whichever way its slashes lean.
@@ -377,7 +377,7 @@ pub struct Plan {
 impl Plan {
     /// How much room the lines that would go take.
     pub fn bytes(&self) -> u64 {
-        self.lines.iter().map(|l| l.item.bytes).sum()
+        self.lines.iter().map(|l| l.item.bytes).fold(0, u64::saturating_add)
     }
 }
 
@@ -454,7 +454,7 @@ pub struct Done {
 impl Done {
     /// How much room was freed.
     pub fn bytes(&self) -> u64 {
-        self.removed.iter().map(|r| r.bytes).sum()
+        self.removed.iter().map(|r| r.bytes).fold(0, u64::saturating_add)
     }
 }
 

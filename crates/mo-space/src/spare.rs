@@ -147,7 +147,8 @@ pub fn find(
             if kept.is_empty() {
                 continue;
             }
-            let projects = kept.iter().map(|f| formats.get(&case::key(f)).copied().unwrap_or(0)).sum();
+            let projects =
+                kept.iter().map(|f| formats.get(&case::key(f)).copied().unwrap_or(0)).fold(0, u32::saturating_add);
             let (bytes, stamp) = look(&copy.path);
             spare.push(SpareCopy {
                 name: copy.name.clone(),

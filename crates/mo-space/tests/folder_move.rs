@@ -5,14 +5,15 @@
 use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
 use mo_space::after_move::kept_beside;
 use mo_space::clean::{Bin, Problem, Removed, undo};
 use mo_space::folder_move::{
-    CantMove, Drives, KEPT_SUFFIX, MovedFolder, OLD_SUFFIX, move_back, move_folder, moved_json, old_copy_can_go,
-    only_in_old_copy, parse_moved, problem, remove_old_copy,
+    CantMove, Drives, HEADROOM, KEPT_SUFFIX, MovedFolder, OLD_SUFFIX, move_back, move_folder, moved_json,
+    old_copy_can_go, only_in_old_copy, parse_moved, problem, remove_old_copy,
 };
 use mo_space::key;
 use mo_space::plugin_space::SpaceKind;
@@ -360,6 +361,96 @@ fn a_stopped_move_leaves_everything_as_it_was() {
     assert!(!is_link(Path::new(&from)));
     assert_eq!(fs::read_dir(&from).unwrap().count(), 5);
     assert!(!c.join("Library (old copy)").exists());
+}
+
+/// A drive that keeps files in pieces of 128 KB, as a big exFAT drive does, with this much room.
+struct BigPieces {
+    free: u64,
+}
+
+impl Drives for BigPieces {
+    fn same(&self, _a: &Path, _b: &Path) -> bool {
+        false
+    }
+    fn free(&self, _path: &Path) -> Option<u64> {
+        Some(self.free)
+    }
+    fn piece(&self, _path: &Path) -> u64 {
+        128 << 10
+    }
+}
+
+#[test]
+fn the_room_a_move_needs_is_counted_as_the_other_drive_keeps_files() {
+    let dir = fixtures("mo-space-move-pieces");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    for n in 0..10 {
+        write(&c, &format!("Presets/{n}.fxp"), "x");
+    }
+    fs::create_dir_all(&d).unwrap();
+    let stop = AtomicBool::new(false);
+    let presets = s(&c.join("Presets"));
+    // Ten files of a byte each take ten pieces of 128 KB there: 1.25 MB, more than the 1 MB left beyond the headroom.
+    let drive = BigPieces { free: HEADROOM + (1 << 20) };
+    assert_eq!(
+        problem(&presets, &s(&d), 10, &drive, &[], &stop),
+        Some(CantMove::NoRoom { free: drive.free, needs: 10 * (128 << 10) })
+    );
+    let moved = move_folder(&presets, &s(&d), 10, whose(), &drive, &[], &nothing, &stop);
+    assert_eq!(moved, Err(CantMove::NoRoom { free: drive.free, needs: 10 * (128 << 10) }));
+    // A size measured earlier that's too small now doesn't count: the folder is counted again.
+    let tight = OtherDrive { free: Some(HEADROOM + 5) };
+    assert_eq!(
+        problem(&presets, &s(&d), 1, &tight, &[], &stop),
+        Some(CantMove::NoRoom { free: HEADROOM + 5, needs: 10 })
+    );
+    assert_eq!(problem(&presets, &s(&d), 1, &OtherDrive { free: Some(HEADROOM + 10) }, &[], &stop), None);
+
+    // Coming back, it's counted as the drive it comes back to keeps files.
+    let moved = move_folder(&presets, &s(&d), 10, whose(), &ROOMY, &[], &nothing, &stop).unwrap();
+    fs::remove_dir_all(&moved.old_copy).unwrap();
+    let back = move_back(&moved, &drive, &nothing, &stop);
+    assert_eq!(back, Err(CantMove::NoRoom { free: drive.free, needs: 10 * (128 << 10) }));
+    assert!(move_back(&moved, &BigPieces { free: HEADROOM + (2 << 20) }, &nothing, &stop).is_ok());
+}
+
+#[test]
+fn a_big_file_is_copied_a_piece_at_a_time_so_stop_doesnt_wait_for_its_end() {
+    let dir = fixtures("mo-space-move-big-file");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    let library = c.join("Library");
+    fs::create_dir_all(&library).unwrap();
+    fs::create_dir_all(&d).unwrap();
+    // 72 MB, like one of Omnisphere's sound sources (theirs run to tens of GB); empty space where the drive allows.
+    let size: u64 = 72 << 20;
+    fs::File::create(library.join("Sound sources.db")).unwrap().set_len(size).unwrap();
+    let from = s(&library);
+    let stop = AtomicBool::new(false);
+    let said = Mutex::new(Vec::new());
+
+    // Stop is pressed the first time the copy says how far it's got: that's after the first 8 MB, not the whole file.
+    let press = |n| {
+        said.lock().unwrap().push(n);
+        stop.store(true, Ordering::Relaxed);
+    };
+    let result = move_folder(&from, &s(&d), size, whose(), &ROOMY, &[], &press, &stop);
+    assert_eq!(result, Err(CantMove::Stopped));
+    assert_eq!(*said.lock().unwrap(), [8 << 20]);
+    assert!(!d.join("Library").exists());
+    assert!(!is_link(&library));
+    assert_eq!(fs::metadata(library.join("Sound sources.db")).unwrap().len(), size);
+
+    // Not stopped, it goes whole, and the bar moves along through the file.
+    stop.store(false, Ordering::Relaxed);
+    said.lock().unwrap().clear();
+    let count = |n| said.lock().unwrap().push(n);
+    let moved = move_folder(&from, &s(&d), size, whose(), &ROOMY, &[], &count, &stop).unwrap();
+    assert_eq!(fs::metadata(d.join("Library/Sound sources.db")).unwrap().len(), size);
+    assert!(is_link(&library));
+    let said = said.into_inner().unwrap();
+    assert!(said.iter().filter(|&&n| n < size).count() >= 8, "{said:?}");
+    assert_eq!(said.iter().max(), Some(&size));
+    assert!(Path::new(&moved.old_copy).exists());
 }
 
 #[test]

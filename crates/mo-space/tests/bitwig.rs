@@ -164,6 +164,33 @@ fn a_copy_that_is_a_link_or_a_multisample_folder_that_is_a_link_is_left_out() {
 }
 
 #[test]
+fn a_library_folder_moved_away_with_a_link_in_its_place_is_still_read() {
+    let dir = fixtures("mo-space-bitwig-library-moved");
+    let kicks = [4u8; 256];
+    write(&dir, "D/Packages/Kicks.multisample", &kicks);
+    write(&dir, "Projects/Garage/multi-samples/Kicks-2.multisample", &kicks);
+    // The packages folder was moved to another drive, and a link took its place (a junction on Windows, as Space
+    // makes).
+    let (moved, library) = (dir.join("D/Packages"), dir.join("installed-packages"));
+    #[cfg(windows)]
+    junction::create(&moved, &library).unwrap();
+    #[cfg(not(windows))]
+    std::os::unix::fs::symlink(&moved, &library).unwrap();
+    let stop = AtomicBool::new(false);
+    let index = LibraryIndex::new(std::slice::from_ref(&library), &stop).unwrap();
+    let copies = index.copies_in(&dir.join("Projects/Garage"), &stop).unwrap();
+    // Found, under the path you know, through the link: it stays right if the folder is moved back.
+    assert_eq!(
+        copies.iter().map(keyed).collect::<Vec<_>>(),
+        [keyed(&LibraryCopy {
+            in_project: s(&dir.join("Projects/Garage/multi-samples/Kicks-2.multisample")),
+            library_file: s(&library.join("Kicks.multisample")),
+            bytes: 256,
+        })]
+    );
+}
+
+#[test]
 fn a_library_folder_inside_the_project_never_counts() {
     let dir = fixtures("mo-space-bitwig-library-in-project");
     let project = dir.join("Projects/Garage");

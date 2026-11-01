@@ -218,8 +218,9 @@ pub fn link_again(
     // What the plugin saved meanwhile. What the first pass wrote is the update's, not yours: it isn't kept again.
     let mut ours = first.written.clone();
     ours.sort();
-    let again = copy_tree(&Tree { ours: &ours, ..tree }, Fill::Freshen, &|n| progress(first.bytes + n), stop)
-        .map_err(partly)?;
+    let again =
+        copy_tree(&Tree { ours: &ours, ..tree }, Fill::Freshen, &|n| progress(first.bytes.saturating_add(n)), stop)
+            .map_err(partly)?;
     swap_or_ask(from, to, &aside, drives.admin()).map_err(partly)?;
     let replaced = shown(&[first.kept, again.kept].concat());
     let kept = (!replaced.is_empty()).then(|| OldHome {

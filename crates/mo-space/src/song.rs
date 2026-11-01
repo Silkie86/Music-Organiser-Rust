@@ -100,12 +100,16 @@ pub struct SongSpaceReport {
 impl SongSpaceReport {
     /// What Compact frees: copies, old autosaves and caches (thinning and unused audio are extra, picked by hand).
     pub fn freeable(&self) -> u64 {
-        self.items.iter().filter(|i| i.can_remove() && i.kind != CompactKind::ThinnedSave).map(|i| i.bytes).sum()
+        self.items
+            .iter()
+            .filter(|i| i.can_remove() && i.kind != CompactKind::ThinnedSave)
+            .map(|i| i.bytes)
+            .fold(0, u64::saturating_add)
     }
 
     /// What thinning older saves could free on top, if you pick it.
     pub fn thinnable(&self) -> u64 {
-        self.items.iter().filter(|i| i.kind == CompactKind::ThinnedSave).map(|i| i.bytes).sum()
+        self.items.iter().filter(|i| i.kind == CompactKind::ThinnedSave).map(|i| i.bytes).fold(0, u64::saturating_add)
     }
 }
 

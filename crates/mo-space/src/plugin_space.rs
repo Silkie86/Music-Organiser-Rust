@@ -57,7 +57,7 @@ pub struct PluginSpace {
 
 impl PluginSpace {
     fn sum(&self, kind: SpaceKind) -> u64 {
-        self.folders.iter().filter(|f| !f.shared() && f.kind == kind).map(|f| f.bytes).sum()
+        self.folders.iter().filter(|f| !f.shared() && f.kind == kind).map(|f| f.bytes).fold(0, u64::saturating_add)
     }
     pub fn program(&self) -> u64 {
         self.sum(SpaceKind::Program)
@@ -70,10 +70,10 @@ impl PluginSpace {
     }
     /// Its own room: the folders it shares with other plugins left out.
     pub fn bytes(&self) -> u64 {
-        self.program() + self.presets() + self.sounds()
+        self.program().saturating_add(self.presets()).saturating_add(self.sounds())
     }
     pub fn shared_bytes(&self) -> u64 {
-        self.folders.iter().filter(|f| f.shared()).map(|f| f.bytes).sum()
+        self.folders.iter().filter(|f| f.shared()).map(|f| f.bytes).fold(0, u64::saturating_add)
     }
 }
 

@@ -199,6 +199,18 @@ fn a_stop_keeps_the_rest() {
     assert_eq!(done.problems[0].why, "Stopped before it went.");
 }
 
+#[test]
+fn a_bundle_deeper_than_the_walks_go_can_t_go() {
+    let dir = fixtures("mo-space-spare-deep");
+    write(&dir, "VST3/Pad.vst3/Contents/x86_64-win/Pad.vst3", 10);
+    // Folders 130 deep inside: more than any walk reads (128), so what's at the bottom can't be checked.
+    let deep: PathBuf = std::iter::repeat_n("d", 130).collect();
+    write(&dir.join("VST3/Deep.vst3/Contents"), &format!("{}/x.bin", s(&deep)), 10);
+    let stop = AtomicBool::new(false);
+    assert!(look(&s(&dir.join("VST3/Pad.vst3")), &stop).1.is_some());
+    assert_eq!(look(&s(&dir.join("VST3/Deep.vst3")), &stop).1, None);
+}
+
 #[cfg(unix)]
 #[test]
 fn a_copy_thats_a_link_stays() {

@@ -19,7 +19,7 @@ use rayon::prelude::*;
 
 use crate::clean::{Bin, Done, Problem, STOPPED, Sending, Sent, What, cant_keep};
 use crate::size::{Stopped, file_hash, is_link, walk};
-use crate::{real_path, text};
+use crate::{real_path, really, text};
 
 /// The folder in a Bitwig project (or template) its multisample copies are kept in.
 pub const PROJECT_FOLDER: &str = "multi-samples";
@@ -60,9 +60,14 @@ impl LibraryIndex {
     pub fn new(folders: &[PathBuf], stop: &AtomicBool) -> Result<Self, Stopped> {
         let mut listed: Vec<(u64, PathBuf)> = Vec::new();
         for folder in folders {
-            listed.extend(walk(folder, false, stop, |path, meta| {
-                (is_multisample(path) && meta.is_file() && !in_a_project(path))
-                    .then(|| (meta.len(), path.to_path_buf()))
+            // A Library folder moved to another drive with a link in its place (as Space's moves leave one) is read
+            // where it really is, and its files keep the paths you know, through the link: they stay right if the
+            // folder is moved back.
+            let real = really(folder);
+            listed.extend(walk(&real, false, stop, |path, meta| {
+                (is_multisample(path) && meta.is_file() && !in_a_project(path)).then(|| {
+                    (meta.len(), path.strip_prefix(&real).map_or_else(|_| path.to_path_buf(), |r| folder.join(r)))
+                })
             })?);
         }
         // Where each really is, worked out once here rather than for every copy.
