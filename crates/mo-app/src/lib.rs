@@ -6,6 +6,7 @@ pub mod arrangement;
 pub mod background;
 pub mod backup;
 pub mod bitwig_convert;
+pub mod galaxy_picture;
 pub mod galaxy_view;
 pub mod live;
 pub mod log;

@@ -155,6 +155,11 @@ export global SoundsData {
 
     // The galaxy: the stars drawn, a word while there's no map, and what the stars are placed by.
     in property <image> galaxy-image;
+    // Where the picture sits on the view: moved and stretched at once while the next one is drawn.
+    in property <length> galaxy-image-x;
+    in property <length> galaxy-image-y;
+    in property <length> galaxy-image-width;
+    in property <length> galaxy-image-height;
     in property <string> galaxy-note;
     in property <bool> galaxy-busy;
     in property <string> galaxy-placing;
@@ -1242,8 +1247,10 @@ export component SoundsPage inherits Rectangle {
                         changed width => { SoundsData.galaxy-resized(self.width, self.height); }
                         changed height => { SoundsData.galaxy-resized(self.width, self.height); }
                         Image {
-                            width: parent.width;
-                            height: parent.height;
+                            x: SoundsData.galaxy-image-x;
+                            y: SoundsData.galaxy-image-y;
+                            width: SoundsData.galaxy-image-width;
+                            height: SoundsData.galaxy-image-height;
                             source: SoundsData.galaxy-image;
                             image-fit: fill;
                         }

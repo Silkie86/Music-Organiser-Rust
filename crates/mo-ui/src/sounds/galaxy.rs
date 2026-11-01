@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use mo_app::background::{self, Newest};
+use mo_app::galaxy_picture::{Drawn, Hits, Picture};
 use mo_app::galaxy_view::{Moved, View};
 use mo_app::log;
 use mo_app::sounds as list;
@@ -26,8 +27,6 @@ const PLACINGS: [(&str, Placing); 3] =
     [("Both", Placing::Both), ("Deep listening", Placing::Clap), ("Measurements", Placing::Own)];
 /// How near the mouse (in the window's points) a star has to be to be the one under it.
 const NEAR: f32 = 8.0;
-/// The grid the drawn stars are sorted into, for finding the one under the mouse (in pixels).
-const CELL: usize = 16;
 
 /// The map as it arrives: every star by its place in the list, and each one's colour.
 type Arrived = Option<(Vec<Option<StarPoint>>, Vec<i32>)>;
@@ -54,6 +53,12 @@ pub(super) struct Galaxy {
     asked: u64,
     /// Where each star was drawn, to find the one under the mouse.
     hits: Option<Arc<Hits>>,
+    /// The view the picture on show was drawn for, its scale and its number.
+    drawn: Option<View>,
+    drawn_scale: f32,
+    drawn_id: u64,
+    /// How many stars are on the map.
+    count: usize,
 }
 
 impl Default for Galaxy {
@@ -70,37 +75,11 @@ impl Default for Galaxy {
             cancelled: false,
             asked: 0,
             hits: None,
+            drawn: None,
+            drawn_scale: 1.0,
+            drawn_id: 0,
+            count: 0,
         }
-    }
-}
-
-/// Where each shown star was drawn, by grid cell, as (place in the list, x, y) in pixels.
-struct Hits {
-    columns: usize,
-    rows: usize,
-    cells: Vec<Vec<(usize, f32, f32)>>,
-}
-
-impl Hits {
-    /// The shown star nearest (`x`, `y`) in pixels, within `near` pixels.
-    fn nearest(&self, x: f32, y: f32, near: f32) -> Option<usize> {
-        let (cx, cy) = ((x / CELL as f32).floor() as isize, (y / CELL as f32).floor() as isize);
-        let reach = (near / CELL as f32).ceil() as isize;
-        let mut best: Option<(f32, usize)> = None;
-        for gy in cy - reach..=cy + reach {
-            for gx in cx - reach..=cx + reach {
-                if gx < 0 || gy < 0 || gx as usize >= self.columns || gy as usize >= self.rows {
-                    continue;
-                }
-                for &(at, sx, sy) in &self.cells[gy as usize * self.columns + gx as usize] {
-                    let d = (sx - x).powi(2) + (sy - y).powi(2);
-                    if d <= near * near && best.is_none_or(|(b, _)| d < b) {
-                        best = Some((d, at));
-                    }
-                }
-            }
-        }
-        best.map(|b| b.1)
     }
 }
 
@@ -224,7 +203,13 @@ fn star_at(x: f32, y: f32) -> Option<usize> {
     PAGE.with(|p| {
         let p = p.borrow();
         let g = &p.galaxy;
-        g.hits.as_ref()?.nearest(x * g.scale, y * g.scale, NEAR * g.scale)
+        // The picture on show may have been drawn for another view (it's moved and stretched until the new one
+        // comes): the mouse is turned into a place on that picture.
+        let drawn = g.drawn?;
+        let (mx, my) = g.view.to_map(x, y);
+        let (px, py) = drawn.to_view(mx, my, g.drawn_scale);
+        let near = NEAR * g.drawn_scale * drawn.zoom / g.view.zoom;
+        g.hits.as_ref()?.nearest(px, py, near)
     })
 }
 
@@ -236,6 +221,10 @@ pub(super) fn forget(g: &mut Galaxy) {
     g.stars = None;
     g.colours = None;
     g.hits = None;
+    g.drawn = None;
+    // A picture of the old library still on its way is too old to show.
+    g.drawn_id = g.asked;
+    g.count = 0;
     g.note = String::new();
 }
 
@@ -348,6 +337,7 @@ fn load(app: &AppWindow, fresh: bool) {
                 };
                 g.stars = Some(Arc::new(stars));
                 g.colours = Some(Arc::new(colours));
+                g.count = n;
             }
             true
         });
@@ -384,93 +374,6 @@ fn show_note(app: &AppWindow) {
     });
 }
 
-/// A picture of the stars: everything its thread needs.
-struct Picture {
-    id: u64,
-    stars: Arc<Vec<Option<StarPoint>>>,
-    /// Each star's place in `palette`.
-    colours: Arc<Vec<i32>>,
-    shown: Arc<Vec<usize>>,
-    /// Every sound type's colour (as `Theme.sound-types`), then grey for a sound with no type.
-    palette: Vec<[u8; 3]>,
-    view: View,
-    scale: f32,
-}
-
-impl Picture {
-    fn draw(self) -> (u64, SharedPixelBuffer<Rgba8Pixel>, Hits) {
-        let (w, h) =
-            ((self.view.width * self.scale).round() as usize, (self.view.height * self.scale).round() as usize);
-        let mut px = SharedPixelBuffer::<Rgba8Pixel>::new(w as u32, h as u32);
-        let columns = w.div_ceil(CELL).max(1);
-        let rows = h.div_ceil(CELL).max(1);
-        let mut hits = Hits { columns, rows, cells: vec![Vec::new(); columns * rows] };
-        let mut on = vec![false; self.stars.len()];
-        for &at in self.shown.iter() {
-            if let Some(o) = on.get_mut(at) {
-                *o = true;
-            }
-        }
-        // A small library gets bigger stars, so a few dozen don't look like dust; and they grow a little as the map is
-        // zoomed in, so a close look shows each one.
-        let n = self.stars.iter().filter(|s| s.is_some()).count().max(1) as f32;
-        let base = (200.0 / n.sqrt()).clamp(1.2, 4.5);
-        let r = self.scale * (base + (self.view.zoom - 1.0).max(0.0).sqrt() * 0.5).min(6.0);
-        let grey = self.palette.last().copied().unwrap_or([128, 128, 128]);
-        let buf = px.make_mut_slice();
-        // The ones the filters leave out first, faint, then the shown ones over them.
-        for pass in [false, true] {
-            for (at, star) in self.stars.iter().enumerate() {
-                let Some(p) = *star else { continue };
-                if on[at] != pass {
-                    continue;
-                }
-                let (x, y) = self.view.to_view(p.x, p.y, self.scale);
-                if x < -r || y < -r || x > w as f32 + r || y > h as f32 + r {
-                    continue;
-                }
-                let colour = self
-                    .colours
-                    .get(at)
-                    .and_then(|&i| usize::try_from(i).ok())
-                    .and_then(|i| self.palette.get(i))
-                    .copied()
-                    .unwrap_or(grey);
-                disc(buf, w, h, x, y, if pass { r } else { r * 0.8 }, colour, if pass { 0.9 } else { 0.14 });
-                if pass && x >= 0.0 && y >= 0.0 {
-                    let (gx, gy) = (x as usize / CELL, y as usize / CELL);
-                    if gx < columns && gy < rows {
-                        hits.cells[gy * columns + gx].push((at, x, y));
-                    }
-                }
-            }
-        }
-        (self.id, px, hits)
-    }
-}
-
-/// Draws a soft-edged dot over what's there (colours premultiplied by their alpha).
-#[allow(clippy::too_many_arguments)]
-fn disc(buf: &mut [Rgba8Pixel], w: usize, h: usize, x: f32, y: f32, r: f32, c: [u8; 3], alpha: f32) {
-    let (x0, x1) = ((x - r - 1.0).floor().max(0.0) as usize, ((x + r + 1.0).ceil() as usize).min(w));
-    let (y0, y1) = ((y - r - 1.0).floor().max(0.0) as usize, ((y + r + 1.0).ceil() as usize).min(h));
-    for py in y0..y1 {
-        for px in x0..x1 {
-            let d = ((px as f32 + 0.5 - x).powi(2) + (py as f32 + 0.5 - y).powi(2)).sqrt();
-            let a = (r + 0.5 - d).clamp(0.0, 1.0) * alpha;
-            if a <= 0.0 {
-                continue;
-            }
-            let o = &mut buf[py * w + px];
-            let keep = 1.0 - a;
-            o.r = (c[0] as f32 * a + o.r as f32 * keep) as u8;
-            o.g = (c[1] as f32 * a + o.g as f32 * keep) as u8;
-            o.b = (c[2] as f32 * a + o.b as f32 * keep) as u8;
-            o.a = (255.0 * a + o.a as f32 * keep) as u8;
-        }
-    }
-}
-
 /// Draws the stars again (the map, the view, the filters or the window's size changed), off the window's thread.
 pub(super) fn draw(app: &AppWindow) {
     let on_show = PAGE.with(|p| {
@@ -494,15 +397,16 @@ pub(super) fn draw(app: &AppWindow) {
             return None;
         }
         g.asked += 1;
-        Some(Picture { id: g.asked, stars, colours, shown, palette, view: g.view, scale: g.scale })
+        Some(Picture { id: g.asked, stars, count: g.count, colours, shown, palette, view: g.view, scale: g.scale })
     });
     let Some(ask) = ask else {
         show_picked(app);
         return;
     };
+    place_picture(app);
     if HERE.with(|h| *h.borrow()) {
-        let (id, px, hits) = ask.draw();
-        drawn(app, id, px, hits);
+        let (d, px) = to_image(ask.draw());
+        drawn(app, d, px);
         return;
     }
     DRAWING.with(|w| {
@@ -510,11 +414,11 @@ pub(super) fn draw(app: &AppWindow) {
         if w.is_none() {
             let weak = app.as_weak();
             match Newest::start("Galaxy picture", move |ask: Picture| {
-                let (id, px, hits) = background::on_pool(|| ask.draw());
+                let (d, px) = to_image(background::on_pool(|| ask.draw()));
                 let weak = weak.clone();
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(app) = weak.upgrade() {
-                        drawn(&app, id, px, hits);
+                        drawn(&app, d, px);
                     }
                 });
             }) {
@@ -528,19 +432,50 @@ pub(super) fn draw(app: &AppWindow) {
     });
 }
 
-fn drawn(app: &AppWindow, id: u64, px: SharedPixelBuffer<Rgba8Pixel>, hits: Hits) {
+/// The picture as the window shows it (copied, off the window's thread), and what else came with it.
+fn to_image(mut d: Drawn) -> (Drawn, SharedPixelBuffer<Rgba8Pixel>) {
+    let mut px = SharedPixelBuffer::<Rgba8Pixel>::new(d.width as u32, d.height as u32);
+    for (to, from) in px.make_mut_slice().iter_mut().zip(&d.pixels) {
+        *to = Rgba8Pixel { r: from.r, g: from.g, b: from.b, a: from.a };
+    }
+    d.pixels = Vec::new();
+    (d, px)
+}
+
+/// A picture came. Any newer than the one on show is shown, even when a newer one still is on its way: while the wheel
+/// keeps turning, each picture that's done is placed where its stars are now, instead of the first one stretching on.
+fn drawn(app: &AppWindow, d: Drawn, px: SharedPixelBuffer<Rgba8Pixel>) {
     let current = PAGE.with(|p| {
         let g = &mut p.borrow_mut().galaxy;
-        if g.asked != id {
+        if d.id <= g.drawn_id || d.id > g.asked {
             return false;
         }
-        g.hits = Some(Arc::new(hits));
+        g.drawn_id = d.id;
+        g.hits = Some(Arc::new(d.hits));
+        g.drawn = Some(d.view);
+        g.drawn_scale = d.scale;
         true
     });
     if current {
         app.global::<SoundsData>().set_galaxy_image(Image::from_rgba8_premultiplied(px));
+        place_picture(app);
         show_picked(app);
     }
+}
+
+/// Moves and stretches the last picture to where its stars are on the view now, at once, so the wheel and a drag
+/// answer straight away; the sharp picture for the new view replaces it when it's drawn.
+fn place_picture(app: &AppWindow) {
+    let place = PAGE.with(|p| {
+        let g = &p.borrow().galaxy;
+        g.drawn.map(|drawn| g.view.place_of(&drawn))
+    });
+    let (x, y, w, h) = place.unwrap_or((0.0, 0.0, 0.0, 0.0));
+    let data = app.global::<SoundsData>();
+    data.set_galaxy_image_x(x);
+    data.set_galaxy_image_y(y);
+    data.set_galaxy_image_width(w);
+    data.set_galaxy_image_height(h);
 }
 
 /// The ring round the picked star, where it is on the view now.
@@ -557,29 +492,5 @@ pub(super) fn show_picked(app: &AppWindow) {
     if let Some((x, y)) = at {
         data.set_galaxy_picked_x(x);
         data.set_galaxy_picked_y(y);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_star_under_the_mouse_is_the_nearest_within_reach() {
-        let mut hits = Hits { columns: 4, rows: 4, cells: vec![Vec::new(); 16] };
-        hits.cells[0].push((1, 5.0, 5.0));
-        hits.cells[1].push((2, 18.0, 5.0));
-        hits.cells[5].push((3, 20.0, 20.0));
-        assert_eq!(hits.nearest(6.0, 5.0, 8.0), Some(1));
-        assert_eq!(hits.nearest(15.0, 5.0, 8.0), Some(2));
-        assert_eq!(hits.nearest(40.0, 40.0, 8.0), None);
-    }
-
-    #[test]
-    fn a_disc_covers_its_middle_and_not_far_away() {
-        let mut buf = vec![Rgba8Pixel::default(); 100];
-        disc(&mut buf, 10, 10, 5.0, 5.0, 1.5, [200, 100, 50], 1.0);
-        assert_eq!(buf[5 * 10 + 5].a, 255);
-        assert_eq!(buf[0].a, 0);
     }
 }

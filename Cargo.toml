@@ -40,3 +40,8 @@ overflow-checks = true
 # Dependencies get optimised once and then cached, so the app stays quick to rebuild but doesn't crawl when run.
 [profile.dev.package."*"]
 opt-level = 2
+
+# The screens' logic too: the launcher runs a debug build, and the Sounds page's galaxy draws half a million stars,
+# which unoptimised code is too slow for. (mo-ui itself stays quick to build: its Slint code is most of the time.)
+[profile.dev.package.mo-app]
+opt-level = 2
