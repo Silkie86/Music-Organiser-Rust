@@ -465,11 +465,17 @@ fn print_extensions(engines: &[Scored], song: &[usize], support: &[f64]) {
         }
         for (row, which) in [("precision", 0), ("recall", 1), ("F1", 2)] {
             print!("{:<28}", if which == 0 { format!("{} {row}", e.name) } else { format!("  {row}") });
-            for c in sums.chunks_exact(3) {
+            for c in sums.as_chunks::<3>().0 {
                 print!(" {:>9}", cell(score_of(c[0], c[1], c[2], which)));
             }
             let pooled = |j: usize| {
-                sums.chunks_exact(3).zip(EXTENSIONS).filter(|(_, (_, _, a))| *a).map(|(c, _)| c[j]).sum::<f64>()
+                sums.as_chunks::<3>()
+                    .0
+                    .iter()
+                    .zip(EXTENSIONS)
+                    .filter(|(_, (_, _, a))| *a)
+                    .map(|(c, _)| c[j])
+                    .sum::<f64>()
             };
             print!(" {:>9}", cell(score_of(pooled(0), pooled(1), pooled(2), which)));
             if which == 2 {
@@ -521,8 +527,13 @@ fn score_of(both: f64, read_only: f64, label_only: f64, which: usize) -> Option<
 /// The F1 averaged over the extensions the labels have, from each one's three times in turn; `None` when the labels
 /// have none.
 fn macro_f1(a: &[f64]) -> Option<f64> {
-    let f1s: Vec<f64> =
-        a.chunks_exact(3).filter(|c| c[0] + c[2] > 0.0).filter_map(|c| score_of(c[0], c[1], c[2], 2)).collect();
+    let f1s: Vec<f64> = a
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .filter(|c| c[0] + c[2] > 0.0)
+        .filter_map(|c| score_of(c[0], c[1], c[2], 2))
+        .collect();
     (!f1s.is_empty()).then(|| f1s.iter().sum::<f64>() / f1s.len() as f64)
 }
 
