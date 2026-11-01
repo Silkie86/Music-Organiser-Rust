@@ -14,13 +14,18 @@ use rayon::prelude::*;
 use crate::learn::Vectors;
 use crate::{Sound, SoundsDb, SoundsError};
 
-/// Unit-length vectors held in memory for fast likeness search.
+/// Unit-length vectors held in memory for fast likeness search: all in one block, a row per sound, in id order.
 #[derive(Clone, Debug, Default)]
 pub struct VectorIndex {
-    unit: HashMap<i64, Vec<f32>>,
-    /// The ids in a fixed order, for searching in parallel.
+    /// How many numbers each vector has.
+    dim: usize,
+    /// The ids, in order; row `i` of `rows` is `ids[i]`'s vector.
     ids: Vec<i64>,
+    rows: Vec<f32>,
 }
+
+/// How many sounds each worker scores before keeping its best: as the C# app's chunks.
+const CHUNK: usize = 4096;
 
 /// The weight of each feature for "sounds like": the last 12 (chroma) count 0.35, the rest 1.
 pub fn chroma_downweight(dim: usize) -> Vec<f32> {
@@ -61,7 +66,10 @@ impl VectorIndex {
         }
         // The most common length; on a tie, the longer (newer analysers give more numbers).
         let dim = lengths.into_iter().max_by_key(|(len, n)| (*n, *len)).map_or(0, |(len, _)| len);
-        let same: Vec<(&i64, &Vec<f32>)> = vectors.iter().filter(|(_, v)| v.len() == dim).collect();
+        // In id order, so the sums below add up the same way every time.
+        let mut same: Vec<(i64, &Vec<f32>)> =
+            vectors.iter().filter(|(_, v)| v.len() == dim).map(|(id, v)| (*id, v)).collect();
+        same.sort_unstable_by_key(|(id, _)| *id);
         let mut mean = vec![0f64; dim];
         let mut sd = vec![0f64; dim];
         if standardise {
@@ -85,29 +93,24 @@ impl VectorIndex {
             }
         }
         let w = weights.map(|f| f(dim));
-        let unit: HashMap<i64, Vec<f32>> = same
-            .par_iter()
-            .map(|(id, v)| {
-                let mut u: Vec<f32> = (0..dim)
-                    .map(|d| {
-                        let x = f64::from(v[d]);
-                        let x = if !standardise {
-                            x
-                        } else if sd[d] > 1e-9 {
-                            (x - mean[d]) / sd[d]
-                        } else {
-                            0.0
-                        };
-                        (x * w.as_ref().map_or(1.0, |w| f64::from(w[d]))) as f32
-                    })
-                    .collect();
-                self::unit(&mut u);
-                (**id, u)
-            })
-            .collect();
-        let mut ids: Vec<i64> = unit.keys().copied().collect();
-        ids.sort_unstable();
-        VectorIndex { unit, ids }
+        let mut rows = vec![0f32; same.len() * dim];
+        if dim > 0 {
+            rows.par_chunks_mut(dim).zip(&same).for_each(|(row, (_, v))| {
+                for (d, out) in row.iter_mut().enumerate() {
+                    let x = f64::from(v[d]);
+                    let x = if !standardise {
+                        x
+                    } else if sd[d] > 1e-9 {
+                        (x - mean[d]) / sd[d]
+                    } else {
+                        0.0
+                    };
+                    *out = (x * w.as_ref().map_or(1.0, |w| f64::from(w[d]))) as f32;
+                }
+                self::unit(row);
+            });
+        }
+        VectorIndex { dim, ids: same.iter().map(|(id, _)| *id).collect(), rows }
     }
 
     /// The features index: standardised, chroma counting less.
@@ -121,45 +124,65 @@ impl VectorIndex {
     }
 
     pub fn len(&self) -> usize {
-        self.unit.len()
+        self.ids.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.unit.is_empty()
+        self.ids.is_empty()
     }
 
     pub fn contains(&self, id: i64) -> bool {
-        self.unit.contains_key(&id)
+        self.ids.binary_search(&id).is_ok()
     }
 
     /// A sound's unit vector, if the index has it.
     pub fn get(&self, id: i64) -> Option<&[f32]> {
-        self.unit.get(&id).map(Vec::as_slice)
+        let i = self.ids.binary_search(&id).ok()?;
+        Some(&self.rows[i * self.dim..(i + 1) * self.dim])
     }
 
     /// The `max` closest sounds to `query`, closest first (ties by id), with their likeness (-1 to 1). Every vector is
     /// compared, in parallel; the query is made unit length first.
     pub fn nearest(&self, query: &[f32], max: usize) -> Vec<(i64, f64)> {
-        if max == 0 || self.unit.is_empty() {
+        if max == 0 || self.ids.is_empty() || self.dim == 0 {
             return Vec::new();
         }
         let mut q = query.to_vec();
         unit(&mut q);
-        let mut scored: Vec<(i64, f32)> = self
-            .ids
-            .par_iter()
-            .map(|id| {
-                let v = &self.unit[id];
-                (*id, v.iter().zip(&q).map(|(a, b)| a * b).sum::<f32>())
+        // Each worker scores a block of sounds and keeps only its best `max`, so a search over a big library never
+        // holds a score for every sound at once.
+        let mut best: Vec<(i64, f32)> = self
+            .rows
+            .par_chunks(CHUNK * self.dim)
+            .zip(self.ids.par_chunks(CHUNK))
+            .flat_map_iter(|(rows, ids)| {
+                let mut scored: Vec<(i64, f32)> = rows
+                    .chunks_exact(self.dim)
+                    .zip(ids)
+                    .map(|(v, id)| (*id, v.iter().zip(&q).map(|(a, b)| a * b).sum::<f32>()))
+                    .collect();
+                keep_best(&mut scored, max);
+                scored
             })
             .collect();
-        let order = |a: &(i64, f32), b: &(i64, f32)| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0));
-        if scored.len() > max {
-            scored.select_nth_unstable_by(max - 1, order);
-            scored.truncate(max);
-        }
-        scored.sort_unstable_by(order);
-        scored.into_iter().map(|(id, s)| (id, f64::from(s))).collect()
+        keep_best(&mut best, max);
+        best.sort_unstable_by(closest_first);
+        best.into_iter().map(|(id, s)| (id, f64::from(s))).collect()
+    }
+}
+
+/// Closest first, then by id. A score that isn't a number counts as the least alike (as .NET sorts them), and -0
+/// counts the same as 0, so equal scores always fall back to the id.
+fn closest_first(a: &(i64, f32), b: &(i64, f32)) -> std::cmp::Ordering {
+    let key = |s: f32| if s.is_nan() { f32::NEG_INFINITY } else { s + 0.0 };
+    key(b.1).total_cmp(&key(a.1)).then(a.0.cmp(&b.0))
+}
+
+/// Cuts `scored` down to its `max` closest, in no particular order.
+fn keep_best(scored: &mut Vec<(i64, f32)>, max: usize) {
+    if scored.len() > max {
+        scored.select_nth_unstable_by(max - 1, closest_first);
+        scored.truncate(max);
     }
 }
 
@@ -179,7 +202,8 @@ impl SoundIndex {
     pub fn build(features: &Vectors, clap: &Vectors, analysed: usize) -> SoundIndex {
         let features = VectorIndex::features(features);
         let clap = (!clap.is_empty()).then(|| VectorIndex::clap(clap));
-        let deep = clap.as_ref().is_some_and(|c| !c.is_empty() && c.len() as f64 >= analysed as f64 * 0.9);
+        // As C#: counts the CLAP vectors the index kept (the most common length).
+        let deep = clap.as_ref().is_some_and(|c| crate::learn::heard_enough(c.len(), analysed));
         SoundIndex { features, clap, deep }
     }
 
@@ -210,15 +234,24 @@ impl SoundIndex {
     ) -> Vec<(i64, f64)> {
         let index = Some(self.active()).filter(|i| i.contains(of.id)).unwrap_or(&self.features);
         let Some(v) = index.get(of.id) else { return Vec::new() };
-        index
-            .nearest(v, max * 3)
-            .into_iter()
-            .filter(|(id, _)| *id != of.id)
-            .filter_map(|(id, score)| get(id).filter(|s| !s.hidden).map(|s| (s, score)))
-            .filter(|(s, _)| !same_type || s.sound_type == of.sound_type)
-            .map(|(s, score)| (s.id, crate::analyse::round_to(score, 3)))
-            .take(max)
-            .collect()
+        // The C# app asks for 3 times as many and stops there; when hidden copies or other types use those up, this
+        // asks for more, so the list is only short when the library has no more.
+        let mut fetch = max.saturating_mul(3);
+        loop {
+            let found: Vec<(i64, f64)> = index
+                .nearest(v, fetch)
+                .into_iter()
+                .filter(|(id, _)| *id != of.id)
+                .filter_map(|(id, score)| get(id).filter(|s| !s.hidden).map(|s| (s, score)))
+                .filter(|(s, _)| !same_type || s.sound_type == of.sound_type)
+                .map(|(s, score)| (s.id, crate::analyse::round_to(score, 3)))
+                .take(max)
+                .collect();
+            if found.len() >= max || fetch >= index.len() {
+                return found;
+            }
+            fetch = fetch.saturating_mul(4);
+        }
     }
 }
 
@@ -289,9 +322,51 @@ mod tests {
         let s = index.similar(&sounds[0], get, 2, false);
         assert_eq!(s.iter().map(|x| x.0).collect::<Vec<_>>(), [3, 4]);
         let same = index.similar(&sounds[0], get, 5, true);
-        assert!(same.iter().all(|x| x.0 != 3 && x.0 != 2 && x.0 != 1));
+        assert_eq!(same.iter().map(|x| x.0).collect::<Vec<_>>(), [4, 5]);
         // A sound the index doesn't have: nothing.
         assert!(index.similar(&sound(9, "9.wav"), get, 5, false).is_empty());
+    }
+
+    #[test]
+    fn similar_asks_for_more_when_hidden_copies_use_up_the_first_ones() {
+        // Ten hidden copies right beside sound 1, then two visible sounds further off.
+        let mut list: Vec<(i64, Vec<f32>)> = (2..12).map(|id| (id, vec![1.0, 0.001 * id as f32])).collect();
+        list.extend([(1, vec![1.0, 0.0]), (20, vec![0.5, 0.5]), (21, vec![0.0, 1.0])]);
+        let v: Vectors = list.into_iter().collect();
+        let mut sounds: Vec<Sound> = v.keys().map(|id| sound(*id, &format!("{id}.wav"))).collect();
+        for s in &mut sounds {
+            s.hidden = (2..12).contains(&s.id);
+        }
+        let by_id: HashMap<i64, &Sound> = sounds.iter().map(|s| (s.id, s)).collect();
+        let index = SoundIndex { features: VectorIndex::clap(&v), clap: None, deep: false };
+        let one = &by_id[&1];
+        let s = index.similar(one, |id| by_id.get(&id).copied(), 2, false);
+        assert_eq!(s.iter().map(|x| x.0).collect::<Vec<_>>(), [20, 21]);
+    }
+
+    #[test]
+    fn ties_go_by_id_and_odd_scores_go_last() {
+        let mut v = vec![(3, 0.5), (1, f32::NAN), (2, 0.5), (5, -0.0), (4, 0.0), (6, 0.9)];
+        v.sort_by(closest_first);
+        assert_eq!(v.iter().map(|x| x.0).collect::<Vec<_>>(), [6, 2, 3, 4, 5, 1]);
+    }
+
+    #[test]
+    fn nearest_over_many_blocks_matches_scoring_every_sound() {
+        // More sounds than one worker's block, so the best of each block are joined.
+        let v: Vectors = (0..(CHUNK as i64 * 2 + 37))
+            .map(|id| (id, vec![(id % 97) as f32 - 48.0, (id % 13) as f32 - 6.0, 1.0]))
+            .collect();
+        let i = VectorIndex::clap(&v);
+        let q = [1.0, 0.5, 0.2];
+        let found = i.nearest(&q, 25);
+        let mut q1 = q.to_vec();
+        unit(&mut q1);
+        let mut all: Vec<(i64, f32)> = (0..i.len() as i64)
+            .map(|id| (id, i.get(id).unwrap().iter().zip(&q1).map(|(a, b)| a * b).sum::<f32>()))
+            .collect();
+        all.sort_by(closest_first);
+        assert_eq!(found.iter().map(|x| x.0).collect::<Vec<_>>(), all[..25].iter().map(|x| x.0).collect::<Vec<_>>());
     }
 
     #[test]

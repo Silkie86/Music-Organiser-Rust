@@ -139,13 +139,12 @@ static JsonObject DumpSimilar(string path)
         foreach (var e in c["Vectors"]!.AsArray())
             vectors[e![0]!.GetValue<long>()] = e[1]!.AsArray().Select(n => n!.GetValue<float>()).ToArray();
         var features = c["Features"]!.GetValue<bool>();
-        static float[] Chroma(int dim)
-        {
-            var w = Enumerable.Repeat(1f, dim).ToArray();
-            for (var i = Math.Max(0, dim - 12); i < dim; i++) w[i] = 0.35f;
-            return w;
-        }
-        var index = MusicOrganiser.Core.Sounds.VectorIndex.Build(vectors, standardise: features, features ? new Func<int, float[]>(Chroma) : null);
+        // The app's own chroma weights (private to SoundOrganiser), so a change there shows up here.
+        var chroma = typeof(MusicOrganiser.Core.Sounds.SoundOrganiser).GetMethod("ChromaDownweight",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)
+            ?? throw new InvalidOperationException("SoundOrganiser.ChromaDownweight is gone");
+        var weights = chroma.CreateDelegate<Func<int, float[]>>();
+        var index = MusicOrganiser.Core.Sounds.VectorIndex.Build(vectors, standardise: features, features ? weights : null);
         var max = c["Max"]!.GetValue<int>();
         var nearest = new JsonArray();
         foreach (var q in c["Queries"]!.AsArray())

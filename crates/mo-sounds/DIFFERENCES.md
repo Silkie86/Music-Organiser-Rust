@@ -68,3 +68,6 @@ nearest sounds for the same made-up vectors.
 |---|---|---|---|
 | Vectors of two lengths in equal numbers | Kept whichever length the dictionary listed first. | Keeps the longer (a newer analyser's). | Better (only halfway through analysing again) |
 | Adding up a likeness | Several products at a time (SIMD). | One at a time, so a likeness can differ in the 7th place; the twin allows 1e-5. | Same in practice |
+| Two sounds exactly as alike at the cut-off (exact copies are common) | Kept whichever each worker met first, which depends on the order the dictionary holds them. | Keeps the lower id, every time. | Better (same list each time) |
+| Standardising | Sums in dictionary order. | Sums in id order, so a rebuild gives the same numbers. | Same in practice |
+| "Sounds like this" when hidden copies or other types fill the first 3 × max | Stops there, so the list can come up short. | Asks for more until the list is full or the library has no more. | Better |
