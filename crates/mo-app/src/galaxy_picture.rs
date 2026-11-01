@@ -2,6 +2,10 @@
 //! view, spread over every core, and where each one landed so the one under the mouse can be found. The page shows
 //! the picture; this is kept here (an optimised crate even in the launcher's debug build) because it draws half a
 //! million stars.
+//!
+//! To look like a galaxy rather than a scatter plot, the stars give off light: each one brightens what's under it
+//! (a "screen" blend, so a crowd of them glows towards white, the way a galaxy's core does), and behind them a soft
+//! cloud of each crowd's colour glows like a nebula, thicker where more sounds are alike.
 
 use std::sync::Arc;
 
@@ -12,6 +16,16 @@ use crate::galaxy_view::View;
 
 /// The grid the drawn stars are sorted into, for finding the one under the mouse (in pixels).
 const CELL: usize = 16;
+/// The nebula's grid, in points: each square gathers the light of the stars in it, then it's blurred and spread.
+const CLOUD: f32 = 5.0;
+/// How far the nebula's light spreads, in squares (each blur pass).
+const CLOUD_BLUR: usize = 3;
+/// How bright the nebula is at its thickest (0 to 1).
+const CLOUD_LIGHT: f32 = 0.3;
+/// How many stars in a square (after the blur) make the nebula about two thirds as thick as it gets.
+const CLOUD_THICK: f32 = 6.0;
+/// Up to about this many stars on show, each shines fully; more and each is dimmed.
+const BRIGHT_CROWD: f32 = 30_000.0;
 
 /// One pixel, its colour premultiplied by its alpha.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -139,6 +153,10 @@ impl Picture {
         let base = (200.0 / n.sqrt()).clamp(1.2, 4.5);
         let r = self.scale * (base + (self.view.zoom - 1.0).max(0.0).sqrt() * 0.5).min(6.0);
         let grey = self.palette.last().copied().unwrap_or([128, 128, 128]);
+        // Light adds up, so when a great many stars are on show each gives off less, or the crowds would all burn
+        // white; zoomed in, fewer are on show and each shines fully.
+        let on_show = n / (self.view.zoom * self.view.zoom);
+        let bright = (0.9 * (BRIGHT_CROWD / on_show).sqrt()).clamp(0.3, 0.9);
         let band_rows = BAND.max((2.0 * r + 4.0).ceil() as usize);
         let bands = h.div_ceil(band_rows).max(1);
         // Every star on the picture with the band its top edge is in; sorted so each band's stars are together, the
@@ -162,13 +180,19 @@ impl Picture {
                     .copied()
                     .unwrap_or(grey);
                 let shown = on[at];
-                let dot =
-                    Dot { x, y, r: if shown { r } else { r * 0.8 }, colour, alpha: if shown { 0.9 } else { 0.14 } };
+                let dot = Dot {
+                    x,
+                    y,
+                    r: if shown { r } else { r * 0.8 },
+                    colour,
+                    alpha: if shown { bright } else { bright * 0.16 },
+                };
                 let band = ((y - dot.r - 1.0).max(0.0) as usize / band_rows).min(bands - 1);
                 Some((band, shown, at, dot))
             })
             .collect();
         placed.par_sort_unstable_by_key(|p| (p.0, p.1, p.2));
+        let cloud = Cloud::new(&placed, w, h, (CLOUD * self.scale).max(2.0));
         // Where each band's stars start, and where its shown ones start.
         let first = |band: usize, shown: bool| placed.partition_point(|p| (p.0, p.1) < (band, shown));
         let ranges: Vec<(usize, usize)> = (0..=bands).map(|b| (first(b, false), first(b, true))).collect();
@@ -176,6 +200,7 @@ impl Picture {
         // draws its own stars and the band above's, faint ones first.
         pixels.par_chunks_mut((w * band_rows).max(1)).enumerate().for_each(|(band, rows)| {
             let y0 = band * band_rows;
+            cloud.light(rows, w, y0);
             let mine = ranges[band];
             let next = ranges[band + 1].0;
             let above = band.checked_sub(1).map(|b| (ranges[b], ranges[b + 1].0));
@@ -226,14 +251,130 @@ fn disc(rows: &mut [Rgba], w: usize, y0: usize, d: &Dot) {
             } else {
                 (r + 0.5 - d2.sqrt()).clamp(0.0, 1.0) * d.alpha
             };
-            let o = &mut rows[py * w + px];
-            let keep = 1.0 - a;
-            o.r = (d.colour[0] as f32 * a + o.r as f32 * keep) as u8;
-            o.g = (d.colour[1] as f32 * a + o.g as f32 * keep) as u8;
-            o.b = (d.colour[2] as f32 * a + o.b as f32 * keep) as u8;
-            o.a = (255.0 * a + o.a as f32 * keep) as u8;
+            screen(&mut rows[py * w + px], d.colour, a);
         }
     }
+}
+
+/// Lights a pixel with `colour` at strength `a` (0 to 1): a "screen" blend, so light only ever adds, and a lot of it
+/// heads for white without spilling over. The picture's alpha follows its brightest colour, so it stays premultiplied.
+fn screen(o: &mut Rgba, colour: [u8; 3], a: f32) {
+    let add = |was: u8, c: u8| {
+        let was = was as f32;
+        (was + (c as f32 * a) * (1.0 - was / 255.0)).round().min(255.0) as u8
+    };
+    o.r = add(o.r, colour[0]);
+    o.g = add(o.g, colour[1]);
+    o.b = add(o.b, colour[2]);
+    o.a = o.a.max(o.r).max(o.g).max(o.b).max(add(o.a, 255));
+}
+
+/// The nebula behind the stars: the light of the stars in each square of a coarse grid, blurred.
+struct Cloud {
+    columns: usize,
+    rows: usize,
+    /// Pixels per square.
+    size: f32,
+    /// Each square's colour (the stars' light, averaged) and how thick it is (0 to `CLOUD_LIGHT`).
+    squares: Vec<([f32; 3], f32)>,
+}
+
+impl Cloud {
+    fn new(placed: &[(usize, bool, usize, Dot)], w: usize, h: usize, size: f32) -> Cloud {
+        let columns = (w as f32 / size).ceil() as usize + 1;
+        let rows = (h as f32 / size).ceil() as usize + 1;
+        let mut sums = vec![[0.0f32; 4]; columns * rows];
+        for (_, shown, _, d) in placed {
+            if d.x < 0.0 || d.y < 0.0 {
+                continue;
+            }
+            let (cx, cy) = ((d.x / size) as usize, (d.y / size) as usize);
+            if cx >= columns || cy >= rows {
+                continue;
+            }
+            // A star the filters leave out still glows a little, as it's drawn faint.
+            let weight = if *shown { 1.0 } else { 0.15 };
+            let s = &mut sums[cy * columns + cx];
+            s[0] += d.colour[0] as f32 * weight;
+            s[1] += d.colour[1] as f32 * weight;
+            s[2] += d.colour[2] as f32 * weight;
+            s[3] += weight;
+        }
+        // Blurred twice each way, which is close to a soft round spread.
+        for _ in 0..2 {
+            sums = blur(&sums, columns, rows, true);
+            sums = blur(&sums, columns, rows, false);
+        }
+        let squares = sums
+            .iter()
+            .map(|s| {
+                if s[3] <= 1e-4 {
+                    return ([0.0; 3], 0.0);
+                }
+                let colour = [s[0] / s[3], s[1] / s[3], s[2] / s[3]];
+                (colour, CLOUD_LIGHT * (1.0 - (-s[3] / CLOUD_THICK).exp()))
+            })
+            .collect();
+        Cloud { columns, rows, size, squares }
+    }
+
+    /// Lights the rows in `rows` (a band `w` pixels wide starting at row `y0`) with the nebula, smoothly between
+    /// the squares' middles.
+    fn light(&self, rows: &mut [Rgba], w: usize, y0: usize) {
+        let at = |x: usize, y: usize| self.squares[y.min(self.rows - 1) * self.columns + x.min(self.columns - 1)];
+        for (i, row) in rows.chunks_mut(w.max(1)).enumerate() {
+            let fy = (((y0 + i) as f32 + 0.5) / self.size - 0.5).max(0.0);
+            let (gy, ty) = (fy as usize, fy.fract());
+            for (x, o) in row.iter_mut().enumerate() {
+                let fx = ((x as f32 + 0.5) / self.size - 0.5).max(0.0);
+                let (gx, tx) = (fx as usize, fx.fract());
+                let corners = [
+                    (at(gx, gy), (1.0 - tx) * (1.0 - ty)),
+                    (at(gx + 1, gy), tx * (1.0 - ty)),
+                    (at(gx, gy + 1), (1.0 - tx) * ty),
+                    (at(gx + 1, gy + 1), tx * ty),
+                ];
+                let mut colour = [0.0f32; 3];
+                let mut thick = 0.0;
+                for ((c, t), k) in corners {
+                    let k = k * t;
+                    thick += k;
+                    for j in 0..3 {
+                        colour[j] += c[j] * k;
+                    }
+                }
+                if thick <= 1e-3 {
+                    continue;
+                }
+                let colour = colour.map(|c| (c / thick).round().min(255.0) as u8);
+                screen(o, colour, thick);
+            }
+        }
+    }
+}
+
+/// One pass of a box blur over a grid of sums, along its rows (`across`) or down its columns.
+fn blur(sums: &[[f32; 4]], columns: usize, rows: usize, across: bool) -> Vec<[f32; 4]> {
+    let r = CLOUD_BLUR as isize;
+    let k = 1.0 / (2 * r + 1) as f32;
+    let mut out = vec![[0.0f32; 4]; sums.len()];
+    for y in 0..rows {
+        for x in 0..columns {
+            let mut acc = [0.0f32; 4];
+            for d in -r..=r {
+                let (sx, sy) = if across { (x as isize + d, y as isize) } else { (x as isize, y as isize + d) };
+                if sx < 0 || sy < 0 || sx as usize >= columns || sy as usize >= rows {
+                    continue;
+                }
+                let s = sums[sy as usize * columns + sx as usize];
+                for j in 0..4 {
+                    acc[j] += s[j];
+                }
+            }
+            out[y * columns + x] = acc.map(|a| a * k);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -268,6 +409,45 @@ mod tests {
     }
 
     #[test]
+    fn light_adds_up_towards_white_and_never_spills_over() {
+        let mut o = Rgba::default();
+        screen(&mut o, [255, 100, 200], 1.0);
+        assert_eq!((o.r, o.g, o.b, o.a), (255, 100, 200, 255));
+        for _ in 0..40 {
+            screen(&mut o, [255, 100, 200], 0.9);
+        }
+        assert!(o.g > 240 && o.b > 250, "a crowd glows white: {o:?}");
+        let mut faint = Rgba::default();
+        screen(&mut faint, [200, 100, 50], 0.2);
+        assert!(faint.a >= faint.r && faint.a >= faint.g && faint.a >= faint.b, "stays premultiplied: {faint:?}");
+    }
+
+    #[test]
+    fn a_crowd_of_stars_glows_round_it_and_empty_sky_stays_dark() {
+        let mut view = View::default();
+        (view.width, view.height) = (200.0, 200.0);
+        let stars: Vec<Option<StarPoint>> =
+            (0..50).map(|i| Some(StarPoint { x: 0.5 + (i % 7) as f32 * 0.002, y: 0.5 })).collect();
+        let n = stars.len();
+        let picture = Picture {
+            id: 1,
+            stars: Arc::new(stars),
+            count: n,
+            colours: Arc::new(vec![0; n]),
+            shown: Arc::new((0..n).collect()),
+            palette: vec![[200, 100, 50], [110, 110, 110]],
+            view,
+            scale: 1.0,
+        };
+        let d = picture.draw();
+        // Beside the crowd, between the stars' own discs, the nebula glows in their colour.
+        let near = d.pixels[(100 + 8) * d.width + 104];
+        assert!(near.r > 3 && near.r > near.b, "{near:?}");
+        // A corner far from it is dark.
+        assert_eq!(d.pixels[5 * d.width + 5], Rgba::default());
+    }
+
+    #[test]
     fn a_big_star_on_a_band_edge_is_drawn_whole() {
         // At a scale of 8 the one star is 72 pixels across, taller than the fewest rows in a band, and it crosses a
         // band edge.
@@ -290,5 +470,74 @@ mod tests {
             assert!(d.pixels[y * w + middle].a > 200, "row {y}");
         }
         assert_eq!(d.hits.nearest(middle as f32, middle as f32, 8.0), Some(0));
+    }
+}
+
+#[cfg(test)]
+mod look {
+    use super::*;
+
+    /// Draws 450,000 made-up stars in clumps to a PPM file named by GALAXY_LOOK, to judge the look by eye.
+    #[test]
+    #[ignore]
+    fn render() {
+        let Ok(out) = std::env::var("GALAXY_LOOK") else { return };
+        let zoom: f32 = std::env::var("GALAXY_ZOOM").ok().and_then(|z| z.parse().ok()).unwrap_or(1.0);
+        let mut seed = 12345u64;
+        let mut rnd = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % 1_000_000) as f32 / 1_000_000.0
+        };
+        let mut stars = Vec::new();
+        let mut colours = Vec::new();
+        let clumps: Vec<(f32, f32, f32, i32)> =
+            (0..40).map(|i| (0.1 + rnd() * 0.8, 0.1 + rnd() * 0.8, 0.01 + rnd() * 0.08, i % 8)).collect();
+        for i in 0..450_000 {
+            let c = clumps[i % clumps.len()];
+            let (a, r) = (rnd() * std::f32::consts::TAU, (-(rnd().max(1e-6)).ln()).sqrt() * c.2);
+            stars.push(Some(StarPoint {
+                x: (c.0 + a.cos() * r).clamp(0.0, 1.0),
+                y: (c.1 + a.sin() * r).clamp(0.0, 1.0),
+            }));
+            colours.push(if rnd() < 0.2 { (rnd() * 8.0) as i32 } else { c.3 });
+        }
+        let n = stars.len();
+        let mut view = View::default();
+        (view.width, view.height, view.zoom) = (1100.0, 800.0, zoom);
+        view.cx = 0.45;
+        view.cy = 0.5;
+        let palette = vec![
+            [242, 120, 180],
+            [120, 170, 255],
+            [255, 190, 80],
+            [120, 220, 170],
+            [190, 140, 255],
+            [255, 120, 90],
+            [100, 210, 230],
+            [220, 220, 110],
+            [110, 110, 110],
+        ];
+        let p = Picture {
+            id: 1,
+            stars: Arc::new(stars),
+            count: n,
+            colours: Arc::new(colours),
+            shown: Arc::new((0..n).collect()),
+            palette,
+            view,
+            scale: 1.0,
+        };
+        let t = std::time::Instant::now();
+        let d = p.draw();
+        eprintln!("drawn in {:?}", t.elapsed());
+        let mut ppm = format!("P6 {} {} 255\n", d.width, d.height).into_bytes();
+        for px in &d.pixels {
+            // Over the page's dark background.
+            let bg = 14.0 * (1.0 - px.a as f32 / 255.0);
+            ppm.extend([px.r as f32 + bg, px.g as f32 + bg, px.b as f32 + bg].map(|v| v.min(255.0) as u8));
+        }
+        std::fs::write(out, ppm).unwrap();
     }
 }

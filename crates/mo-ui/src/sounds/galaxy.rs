@@ -27,7 +27,12 @@ use crate::{AppWindow, SoundsData, Theme};
 const PLACINGS: [(&str, Placing); 3] =
     [("Both", Placing::Both), ("Deep listening", Placing::Clap), ("Measurements", Placing::Own)];
 /// How near the mouse (in the window's points) a star has to be to be the one under it.
-const NEAR: f32 = 8.0;
+const NEAR: f32 = 10.0;
+/// How often a glide moves the view on: about 60 times a second.
+const FRAME: Duration = Duration::from_millis(16);
+/// While the view moves, pictures are drawn at no more than this many pixels per point, so they keep up; the sharp
+/// one follows when it stops.
+const MOVING_SCALE: f32 = 1.0;
 
 /// The map as it arrives: every star by its place in the list, and each one's colour.
 type Arrived = Option<(Vec<Option<StarPoint>>, Vec<i32>)>;
@@ -89,6 +94,33 @@ impl Default for Galaxy {
 
 thread_local! {
     static DRAWING: RefCell<Option<Newest<Picture>>> = const { RefCell::new(None) };
+    /// Moves a glide on a frame at a time, and when it last did.
+    static FLIGHT: Timer = Timer::default();
+    static LAST_FRAME: RefCell<Option<Instant>> = const { RefCell::new(None) };
+}
+
+/// Starts moving a glide on, if it isn't already.
+fn fly(app: &AppWindow) {
+    if FLIGHT.with(Timer::running) {
+        return;
+    }
+    LAST_FRAME.with(|l| *l.borrow_mut() = Some(Instant::now()));
+    let weak = app.as_weak();
+    FLIGHT.with(|t| {
+        t.start(TimerMode::Repeated, FRAME, move || {
+            let Some(app) = weak.upgrade() else { return };
+            let now = Instant::now();
+            let dt = LAST_FRAME.with(|l| l.borrow_mut().replace(now).map_or(FRAME, |was| now - was));
+            let going = PAGE.with(|p| p.borrow_mut().galaxy.view.glide(dt.min(Duration::from_millis(100))));
+            if !going {
+                FLIGHT.with(Timer::stop);
+            }
+            // The picture on show moves at once; a new one is asked for (newest wins, so asks don't pile up), sharp
+            // once the glide has stopped.
+            draw(&app);
+            hover(&app);
+        });
+    });
 }
 
 /// Wires the galaxy's choices and the mouse on the map.
@@ -113,8 +145,8 @@ pub(super) fn wire(app: &AppWindow) {
     let weak = app.as_weak();
     data.on_galaxy_reset(move || {
         let Some(app) = weak.upgrade() else { return };
-        PAGE.with(|p| p.borrow_mut().galaxy.view.whole());
-        draw(&app);
+        PAGE.with(|p| p.borrow_mut().galaxy.view.fly_home());
+        fly(&app);
     });
     let weak = app.as_weak();
     data.on_galaxy_resized(move |w, h| {
@@ -129,8 +161,8 @@ pub(super) fn wire(app: &AppWindow) {
     let weak = app.as_weak();
     data.on_galaxy_wheel(move |notches| {
         let Some(app) = weak.upgrade() else { return };
-        PAGE.with(|p| p.borrow_mut().galaxy.view.zoom_at_mouse(notches));
-        draw(&app);
+        PAGE.with(|p| p.borrow_mut().galaxy.view.fly_at_mouse(notches));
+        fly(&app);
     });
     let weak = app.as_weak();
     data.on_galaxy_down(move |x, y, pan| {
@@ -145,7 +177,9 @@ pub(super) fn wire(app: &AppWindow) {
             g.cancelled = false;
             g.sweep = Sweep::default();
         });
-        app.global::<SoundsData>().set_galaxy_grabbing(pan);
+        let data = app.global::<SoundsData>();
+        data.set_galaxy_grabbing(pan);
+        data.set_galaxy_hover_shown(false);
     });
     let weak = app.as_weak();
     data.on_galaxy_move(move |x, y| {
@@ -155,19 +189,15 @@ pub(super) fn wire(app: &AppWindow) {
         match moved {
             Moved::Panned => {
                 data.set_galaxy_hover_text("".into());
+                data.set_galaxy_hover_shown(false);
                 draw(&app);
             }
             Moved::Still => {}
             Moved::Swept(fx, fy) => swept(&app, (fx, fy), (x, y)),
             Moved::Hover => {
-                let found = star_at(x, y);
-                let name = PAGE.with(|p| {
-                    let p = p.borrow();
-                    found.and_then(|at| p.list.sound(at)).map(|s| format!("{}  ·  {}", s.name(), s.sound_type))
-                });
-                data.set_galaxy_hover_text(name.unwrap_or_default().into());
                 data.set_galaxy_mouse_x(x);
                 data.set_galaxy_mouse_y(y);
+                hover(&app);
             }
         }
     });
@@ -185,14 +215,20 @@ pub(super) fn wire(app: &AppWindow) {
             return;
         }
         app.global::<SoundsData>().set_galaxy_grabbing(false);
-        let (click, swept) = PAGE.with(|p| {
+        let (click, swept, panned) = PAGE.with(|p| {
             let g = &mut p.borrow_mut().galaxy;
             let cancelled = std::mem::take(&mut g.cancelled);
             let swept = g.view.sweeping() && g.sweep.played.is_some();
+            let panned = g.view.panning();
             g.sweep = Sweep::default();
-            (g.view.release(cancelled), swept)
+            (g.view.release(cancelled), swept, panned)
         });
         SWEEP_TIMER.with(Timer::stop);
+        // The drag drew quick pictures: the sharp one now.
+        if panned {
+            draw(&app);
+            hover(&app);
+        }
         // Let go after sweeping: the sound stops with the mouse.
         if swept {
             super::stop(&app);
@@ -219,7 +255,9 @@ pub(super) fn wire(app: &AppWindow) {
     let weak = app.as_weak();
     data.on_galaxy_gone(move || {
         if let Some(app) = weak.upgrade() {
-            app.global::<SoundsData>().set_galaxy_hover_text("".into());
+            let data = app.global::<SoundsData>();
+            data.set_galaxy_hover_text("".into());
+            data.set_galaxy_hover_shown(false);
         }
     });
 }
@@ -317,19 +355,45 @@ fn sweep_play(app: &AppWindow, at: usize) {
     super::play_sound(app, at, 0.0);
 }
 
-/// The shown star under (`x`, `y`) on the view, in points.
-fn star_at(x: f32, y: f32) -> Option<usize> {
-    PAGE.with(|p| {
+/// Names the star under the mouse and rings it, so it's plain which one a click picks.
+fn hover(app: &AppWindow) {
+    let data = app.global::<SoundsData>();
+    let found = PAGE.with(|p| {
         let p = p.borrow();
         let g = &p.galaxy;
-        // The picture on show may have been drawn for another view (it's moved and stretched until the new one
-        // comes): the mouse is turned into a place on that picture.
-        let drawn = g.drawn?;
-        let (mx, my) = g.view.to_map(x, y);
-        let (px, py) = drawn.to_view(mx, my, g.drawn_scale);
-        let near = NEAR * g.drawn_scale * drawn.zoom / g.view.zoom;
-        g.hits.as_ref()?.nearest(px, py, near)
-    })
+        if g.view.pressed() || g.view.flying() {
+            return None;
+        }
+        let (x, y) = g.view.mouse;
+        let at = star_at_in(g, x, y)?;
+        let star = (*g.stars.as_ref()?.get(at)?)?;
+        let name = p.list.sound(at).map(|s| format!("{}  ·  {}", s.name(), s.sound_type)).unwrap_or_default();
+        Some((name, g.view.to_view(star.x, star.y, 1.0)))
+    });
+    data.set_galaxy_hover_shown(found.is_some());
+    match found {
+        Some((name, (x, y))) => {
+            data.set_galaxy_hover_text(name.into());
+            data.set_galaxy_hover_x(x);
+            data.set_galaxy_hover_y(y);
+        }
+        None => data.set_galaxy_hover_text("".into()),
+    }
+}
+
+/// The shown star under (`x`, `y`) on the view, in points.
+fn star_at(x: f32, y: f32) -> Option<usize> {
+    PAGE.with(|p| star_at_in(&p.borrow().galaxy, x, y))
+}
+
+fn star_at_in(g: &Galaxy, x: f32, y: f32) -> Option<usize> {
+    // The picture on show may have been drawn for another view (it's moved and stretched until the new one
+    // comes): the mouse is turned into a place on that picture.
+    let drawn = g.drawn?;
+    let (mx, my) = g.view.to_map(x, y);
+    let (px, py) = drawn.to_view(mx, my, g.drawn_scale);
+    let near = NEAR * g.drawn_scale * drawn.zoom / g.view.zoom;
+    g.hits.as_ref()?.nearest(px, py, near)
 }
 
 /// A new library: its stars are placed afresh (they're kept by place in the list).
@@ -516,7 +580,9 @@ pub(super) fn draw(app: &AppWindow) {
             return None;
         }
         g.asked += 1;
-        Some(Picture { id: g.asked, stars, count: g.count, colours, shown, palette, view: g.view, scale: g.scale })
+        let moving = g.view.flying() || g.view.panning();
+        let scale = if moving { g.scale.min(MOVING_SCALE) } else { g.scale };
+        Some(Picture { id: g.asked, stars, count: g.count, colours, shown, palette, view: g.view, scale })
     });
     let Some(ask) = ask else {
         show_picked(app);

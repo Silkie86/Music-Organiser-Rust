@@ -1,5 +1,11 @@
 //! The Sounds page's galaxy view, without a window: which part of the map is on show, how the wheel zooms round the
 //! mouse, and whether a press was a click or a drag. The page draws what this says.
+//!
+//! The wheel and Whole map don't jump: they set where the view is going ([`View::fly_at_mouse`], [`View::fly_home`])
+//! and the page moves it there a frame at a time ([`View::glide`]), the zoom eased so it feels like flying in and out,
+//! with the point under the mouse kept under it all the way.
+
+use std::time::Duration;
 
 /// How far in the map can be zoomed.
 pub const MOST_ZOOM: f32 = 60.0;
@@ -7,6 +13,10 @@ pub const MOST_ZOOM: f32 = 60.0;
 pub const STILL: f32 = 4.0;
 /// How much of the view's shorter side the whole map fills, so the outer stars aren't on the edge.
 const FILL: f32 = 0.92;
+/// How quickly a glide closes in on where it's going: after this long it has gone about two thirds of the way.
+const GLIDE: f32 = 0.085;
+/// Each wheel notch zooms by this much.
+const NOTCH: f32 = 1.25;
 
 /// The part of the map on show (the map runs from 0 to 1 both ways), and a press on it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -21,6 +31,17 @@ pub struct View {
     /// Where the mouse last was, in points.
     pub mouse: (f32, f32),
     press: Option<Press>,
+    flight: Option<Flight>,
+}
+
+/// Where a glide is going: the zoom and middle it ends on, and the point on the view (the mouse) that stays over the
+/// same map point all the way, if one does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Flight {
+    zoom: f32,
+    cx: f32,
+    cy: f32,
+    anchor: Option<(f32, f32)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -57,7 +78,7 @@ pub enum Moved {
 
 impl Default for View {
     fn default() -> View {
-        View { cx: 0.5, cy: 0.5, zoom: 1.0, width: 0.0, height: 0.0, mouse: (0.0, 0.0), press: None }
+        View { cx: 0.5, cy: 0.5, zoom: 1.0, width: 0.0, height: 0.0, mouse: (0.0, 0.0), press: None, flight: None }
     }
 }
 
@@ -80,9 +101,71 @@ impl View {
         (self.cx + (x - self.width / 2.0) / u, self.cy + (y - self.height / 2.0) / u)
     }
 
-    /// The whole map.
+    /// The whole map, at once.
     pub fn whole(&mut self) {
         (self.cx, self.cy, self.zoom) = (0.5, 0.5, 1.0);
+        self.flight = None;
+    }
+
+    /// Points per map unit at `zoom`.
+    fn unit_at(&self, zoom: f32) -> f32 {
+        self.width.min(self.height).max(1.0) * FILL * zoom
+    }
+
+    /// Glides out to the whole map.
+    pub fn fly_home(&mut self) {
+        self.flight = Some(Flight { zoom: 1.0, cx: 0.5, cy: 0.5, anchor: None });
+    }
+
+    /// Glides in or out by wheel notches (positive in) round the mouse. Notches that come while a glide is going on add
+    /// to where it's going, so a quick spin of the wheel flies further.
+    pub fn fly_at_mouse(&mut self, notches: f32) {
+        let (x, y) = self.mouse;
+        let from = self.flight.map_or(self.zoom, |f| f.zoom);
+        let zoom = (from * NOTCH.powf(notches)).clamp(1.0, MOST_ZOOM);
+        // The map point under the mouse now ends under it too.
+        let (mx, my) = self.to_map(x, y);
+        let u = self.unit_at(zoom);
+        let (cx, cy) = (mx - (x - self.width / 2.0) / u, my - (y - self.height / 2.0) / u);
+        self.flight = Some(Flight { zoom, cx, cy, anchor: Some((x, y)) });
+    }
+
+    /// Whether a glide is going on.
+    pub fn flying(&self) -> bool {
+        self.flight.is_some()
+    }
+
+    /// Moves a glide `dt` further on. Returns whether it's still going (false once it has arrived, or when there's
+    /// none).
+    pub fn glide(&mut self, dt: Duration) -> bool {
+        let Some(f) = self.flight else { return false };
+        let t = 1.0 - (-dt.as_secs_f32() / GLIDE).exp();
+        // The zoom eases evenly in steps of "times as big", so going in from far out doesn't rush the start.
+        let zoom = (self.zoom.ln() + (f.zoom.ln() - self.zoom.ln()) * t).exp();
+        let near = (zoom.ln() - f.zoom.ln()).abs() < 0.002;
+        match f.anchor {
+            Some((x, y)) => {
+                let goal = View { cx: f.cx, cy: f.cy, zoom: f.zoom, ..*self };
+                let (mx, my) = goal.to_map(x, y);
+                let u = self.unit_at(zoom);
+                (self.cx, self.cy) = (mx - (x - self.width / 2.0) / u, my - (y - self.height / 2.0) / u);
+            }
+            None => {
+                self.cx += (f.cx - self.cx) * t;
+                self.cy += (f.cy - self.cy) * t;
+            }
+        }
+        self.zoom = zoom;
+        let arrived = near && (self.cx - f.cx).abs() * self.unit() < 0.5 && (self.cy - f.cy).abs() * self.unit() < 0.5;
+        if arrived {
+            (self.cx, self.cy, self.zoom) = (f.cx, f.cy, f.zoom);
+            self.flight = None;
+        }
+        // A drag going on carries on from here.
+        if let Some(p) = &mut self.press {
+            (p.x, p.y, p.cx, p.cy) = (self.mouse.0, self.mouse.1, self.cx, self.cy);
+        }
+        !arrived
     }
 
     /// Zooms by wheel notches (positive in) round the mouse, so the map point under it stays under it.
@@ -100,6 +183,10 @@ impl View {
 
     pub fn press(&mut self, x: f32, y: f32, hold: Hold) {
         self.mouse = (x, y);
+        // Grabbing the map stops a glide where it is.
+        if hold == Hold::Pan {
+            self.flight = None;
+        }
         self.press = Some(Press { x, y, cx: self.cx, cy: self.cy, dragged: false, hold });
     }
 
@@ -132,6 +219,11 @@ impl View {
     /// What the button held down does, if one is.
     pub fn holding(&self) -> Option<Hold> {
         self.press.map(|p| p.hold)
+    }
+
+    /// The map is being dragged.
+    pub fn panning(&self) -> bool {
+        self.press.is_some_and(|p| p.hold == Hold::Pan && p.dragged)
     }
 
     /// The press going on sweeps and has moved: letting go stops the sound.
@@ -238,6 +330,52 @@ mod tests {
         // A move to where the mouse already is changes nothing.
         v.moved(150.0, 100.0);
         assert!((v.cx - cx).abs() < 1e-6 && (v.cy - cy).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_glide_keeps_the_point_under_the_mouse_all_the_way_and_arrives() {
+        let mut v = view();
+        v.mouse = (300.0, 50.0);
+        let under = v.to_map(300.0, 50.0);
+        v.fly_at_mouse(2.0);
+        assert!(v.flying());
+        assert_eq!(v.zoom, 1.0);
+        let mut frames = 0;
+        let mut last = v.zoom;
+        while v.glide(Duration::from_millis(16)) {
+            frames += 1;
+            assert!(v.zoom > last, "it eases in, a little more each frame");
+            last = v.zoom;
+            let now = v.to_map(300.0, 50.0);
+            assert!((now.0 - under.0).abs() < 1e-4 && (now.1 - under.1).abs() < 1e-4);
+            assert!(frames < 120, "a glide ends");
+        }
+        assert!(frames > 5, "it takes a few frames, not one");
+        assert!((v.zoom - 1.5625).abs() < 1e-5);
+        assert!(!v.flying());
+    }
+
+    #[test]
+    fn notches_during_a_glide_add_up_and_home_flies_back() {
+        let mut v = view();
+        v.mouse = (200.0, 100.0);
+        v.fly_at_mouse(1.0);
+        v.glide(Duration::from_millis(16));
+        v.fly_at_mouse(1.0);
+        while v.glide(Duration::from_millis(16)) {}
+        assert!((v.zoom - 1.5625).abs() < 1e-4);
+        v.fly_home();
+        while v.glide(Duration::from_millis(16)) {}
+        assert_eq!((v.cx, v.cy, v.zoom), (0.5, 0.5, 1.0));
+    }
+
+    #[test]
+    fn grabbing_the_map_stops_a_glide() {
+        let mut v = view();
+        v.fly_at_mouse(3.0);
+        v.press(10.0, 10.0, Hold::Pan);
+        assert!(!v.flying());
+        assert!(!v.glide(Duration::from_millis(16)));
     }
 
     #[test]
