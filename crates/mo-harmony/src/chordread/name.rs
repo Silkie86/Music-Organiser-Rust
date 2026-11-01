@@ -40,10 +40,11 @@
 //! - **A bass that moves to the chord's third or seventh** halfway through it, on a bar line or the middle of a bar,
 //!   each note held two felt beats or more, and steps from there into the next chord's bass, cuts the chord in two: C
 //!   C/E | F, C C/B | Am ([`SpanFlags::SPLIT`]). A bass moving to the fifth (a two-feel) never does.
-//! - **Pins** (a Chord check answer or the user's fix: [`PinnedSpan`]). A pinned stretch is never cut in two, and a
-//!   chord given for it is written as given, whatever is heard ([`SpanFlags::GIVEN`]): D♭7 pinned over C E G is D♭7,
-//!   rootless. Given in root position, it stands over the bass held under it, as any reading does (Am7 given over a
-//!   held C is Am7/C, and that D♭7 over a C bass D♭7/C); given with a bass of its own, it keeps it.
+//! - **Pins** (a Chord check answer or the user's fix: [`super::PinnedSpan`]). A pinned stretch is never cut in two,
+//!   and a chord given for it is written as given, whatever is heard ([`SpanFlags::GIVEN`]): D♭7 pinned over C E G is
+//!   D♭7, rootless. Given in root position, it stands over the bass held under it, as any reading does (Am7 given over
+//!   a held C is Am7/C, and that D♭7 over a C bass D♭7/C); given with a bass of its own, it keeps it. The decode says
+//!   which spans are pinned and the chord given for each ([`DecodedSpan::given`]).
 //!
 //! Over silence (a chord held on over it, or pinned there), a reading is written in full, as the decode read it. Every
 //! reading the decode gave a chance on a span is named the same way, and readings written the same are one reading,
@@ -55,7 +56,7 @@ use std::ops::Range;
 
 use super::candidates::Label;
 use super::cores::Core;
-use super::decode::{Chance, DecodedSpan, Decoder, Decoding, PinnedSpan};
+use super::decode::{Chance, DecodedSpan, Decoder, Decoding};
 use super::hear::{BassTexture, Hearing, Level, Line, Mass, Push, Shaped, Stream, played_in};
 use crate::chord::{Chord, Family, ToneRole, role};
 use crate::pitch::{PcSet, PerPitch, PitchClass};
@@ -334,25 +335,17 @@ impl Namer {
         Namer::default()
     }
 
-    /// Names what the last decode of `hearing` read: `decoder` is what decoded it, `decoding` what it read, and `pins`
-    /// the pins it was given. A pinned stretch is never cut in two, and a pin's chord is written as given. Each span
-    /// gets at most `most` readings (at least one).
-    pub fn name(
-        &mut self,
-        hearing: &Hearing,
-        decoder: &Decoder,
-        decoding: &Decoding,
-        pins: &[PinnedSpan],
-        most: usize,
-        out: &mut Naming,
-    ) {
+    /// Names what the last decode of `hearing` read: `decoder` is what decoded it, and `decoding` what it read. A
+    /// pinned stretch is never cut in two, and a chord given for it is written as given. Each span gets at most `most`
+    /// readings (at least one).
+    pub fn name(&mut self, hearing: &Hearing, decoder: &Decoder, decoding: &Decoding, most: usize, out: &mut Naming) {
         out.clear();
         self.shaped.clear();
         self.shaped.extend_from_slice(hearing.shaped());
         self.shaped.sort_unstable_by_key(|s| (s.start, s.end, s.note));
         self.longest_shaped = self.shaped.iter().map(|s| s.end.saturating_sub(s.start)).max().unwrap_or(0).max(0);
         self.longest_note = hearing.notes().iter().map(|n| n.end.saturating_sub(n.start)).max().unwrap_or(0).max(0);
-        self.find_parts(hearing, decoder, decoding, pins);
+        self.find_parts(hearing, decoder, decoding);
         self.find_pedals();
         for p in 0..self.parts.len() {
             self.name_part(hearing, decoder, decoding, p, most.max(1), out);
@@ -361,7 +354,7 @@ impl Namer {
 
     /// The parts: each decoded span, or its two halves where its bass moves to its third or seventh ([`split_at`]),
     /// unless it's pinned.
-    fn find_parts(&mut self, hearing: &Hearing, decoder: &Decoder, decoding: &Decoding, pins: &[PinnedSpan]) {
+    fn find_parts(&mut self, hearing: &Hearing, decoder: &Decoder, decoding: &Decoding) {
         self.parts.clear();
         let spans = decoding.spans();
         // A loop goes round: its first chord comes after its last.
@@ -381,9 +374,6 @@ impl Namer {
             let struck_at = span.pushed.then(|| push_to(hearing, span.units.start)).flatten().map(|push| push.at);
             let struck = struck_at.map_or(span.sound.start, |at| hearing.unit_of(at).min(span.sound.start));
             let sound = struck..span.sound.end;
-            // A chord given with no core (nothing a decode can read) pins only where it starts and ends.
-            let pin = span.pin.and_then(|i| pins.get(i));
-            let given = pin.filter(|p| p.label().is_some()).and_then(|p| p.chord);
             let part = Part {
                 span: i,
                 units: span.units.clone(),
@@ -394,8 +384,8 @@ impl Namer {
                 rest: span.rest,
                 change: span.change,
                 split: false,
-                pinned: pin.is_some(),
-                given,
+                pinned: span.pinned,
+                given: span.given,
                 bass: hearing.bass(sound),
                 pedal: false,
                 before: root(before),

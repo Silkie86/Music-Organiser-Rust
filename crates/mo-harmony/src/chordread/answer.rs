@@ -27,10 +27,10 @@ pub enum Texture {
     Full,
     /// Chords and a bass part, with no tune.
     Accompaniment,
-    /// Chords alone.
+    /// Chords alone, in one part or more: block chords in a tune or a bass part are chords too.
     HarmonyOnly,
-    /// One line alone: a tune, a bass part, or chords played one note at a time and never together (a lead, never an
-    /// arpeggio: [`Hearing::one_line`]).
+    /// One line alone ([`Hearing::one_line`]): a tune, a bass line, or a lead played one note at a time. An arpeggio
+    /// is chords.
     SingleLine,
 }
 
@@ -42,7 +42,8 @@ impl Texture {
         self as usize
     }
 
-    /// The texture of what was heard: which streams have notes, and for chords alone, whether they're one line.
+    /// The texture of what was heard: which streams have notes, and with a tune or a bass part alone, or chords alone,
+    /// whether the notes are one line.
     pub fn of(hearing: &Hearing) -> Texture {
         let (mut tune, mut bass, mut chords) = (false, false, false);
         for n in hearing.notes() {
@@ -53,11 +54,10 @@ impl Texture {
             }
         }
         match (tune, bass, chords) {
-            (true, false, false) | (false, true, false) => Texture::SingleLine,
-            (true, _, _) => Texture::Full,
+            (true, true, _) | (true, _, true) => Texture::Full,
             (false, true, true) => Texture::Accompaniment,
-            (false, false, _) if hearing.one_line() => Texture::SingleLine,
-            (false, false, _) => Texture::HarmonyOnly,
+            _ if hearing.one_line() => Texture::SingleLine,
+            _ => Texture::HarmonyOnly,
         }
     }
 }

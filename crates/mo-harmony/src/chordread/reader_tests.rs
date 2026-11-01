@@ -7,9 +7,9 @@ use super::hear_tests::{BAR, BEAT, Dice, Music, VELOCITY, line, notes, random_mu
 use super::name_tests::named_cases;
 use super::score_tests::bars;
 use super::{
-    BassKind, CHOICE_FLOOR, CHORD_READER_VERSION, COUNTED, ChoiceFrom, ChordAnswer, ChordContext, ChordReader,
-    ChordReading, ChordSpan, Decoder, Decoding, Grading, HAND, Hearing, MOST_READINGS, Model, NameCheck, Namer, Naming,
-    NoChord, Pin, PinnedSpan, SHIPPED, SHIPPED_HASH, SpanFlags, Texture, Thresholds, grade, numbers_hash, read_chords,
+    BassKind, CHOICE_FLOOR, CHORD_READER_VERSION, ChoiceFrom, ChordAnswer, ChordContext, ChordReader, ChordReading,
+    ChordSpan, Grading, Hearing, MOST_READINGS, Model, NameCheck, NoChord, Pin, PinnedSpan, SHIPPED, SHIPPED_HASH,
+    SpanFlags, Texture, Thresholds, grade, numbers_hash, read_chords,
 };
 use crate::chord::Chord;
 use crate::fnv::Fnv;
@@ -17,9 +17,6 @@ use crate::key::Key;
 use crate::keyfind::Span;
 use crate::notes::{Grid, Note, Part, Role};
 use crate::pitch::{PcSet, PitchClass};
-
-/// Units in a bar of 4/4.
-const B: usize = 8;
 
 /// What some music reads, keeping `readings` readings a span.
 fn read(music: &Music, pins: &[Pin], readings: u8) -> Option<ChordReading> {
@@ -126,6 +123,11 @@ fn a_tune_alone_implies_its_chord_and_one_note_or_none_is_no_chord() {
     let tune = read(&Music::new().tune(line("C4 E4 G4 E4", 0, BEAT)), &[], 2).unwrap();
     assert_eq!(tune.texture, Texture::SingleLine);
     assert_eq!((shown(&tune), answers(&tune)), (vec!["C".to_owned()], vec![ChordAnswer::Implied]), "{}", render(&tune));
+    // The chart shows a chord where the best way reads one, or where one line alone implies it: a tune alone is never
+    // read as a chord for sure, as it's no chord more likely than not. Not sure of it otherwise, the chart shows none.
+    let s = &tune.spans[0];
+    assert!(s.label.is_none() && s.no_chord > s.readings[0].chance, "{s:?}");
+    assert_eq!(ChordSpan { answer: ChordAnswer::Unclear, ..s.clone() }.shown(), None);
     // So does a bass line alone, or keys played one note at a time; and the answer is graded as implied however sure
     // the readings are.
     for music in [Music::new().bass(line("C2 E2 G2 E2", 0, BEAT)), Music::new().keys(line("C4 E4 G4 E4", 0, BEAT))] {
@@ -209,9 +211,16 @@ fn the_texture_is_what_kinds_of_line_are_heard() {
     assert_eq!(hear(Music::new().tune(tune.clone()).keys(held.clone())), Texture::Full);
     assert_eq!(hear(Music::new().tune(tune.clone()).bass(bass.clone())), Texture::Full);
     assert_eq!(hear(Music::new().bass(bass.clone()).keys(held.clone())), Texture::Accompaniment);
-    assert_eq!(hear(Music::new().keys(held)), Texture::HarmonyOnly);
+    assert_eq!(hear(Music::new().keys(held.clone())), Texture::HarmonyOnly);
     assert_eq!(hear(Music::new().tune(tune)), Texture::SingleLine);
     assert_eq!(hear(Music::new().bass(bass)), Texture::SingleLine);
+    // Chords are chords in any part: a triad in the tune, a fifth in the bass part.
+    assert_eq!(hear(Music::new().tune(held.clone())), Texture::HarmonyOnly);
+    assert_eq!(hear(Music::new().bass(notes("C2 G2", 0, BAR))), Texture::HarmonyOnly);
+    // And however short: a stab on every beat, each shorter than a player's timing.
+    let stabs: Vec<Note> = (0..8).flat_map(|beat| notes("C4 E4 G4", beat * BEAT, 20)).collect();
+    assert_eq!(hear(Music::new().keys(stabs.clone())), Texture::HarmonyOnly);
+    assert_eq!(hear(Music::new().tune(stabs)), Texture::HarmonyOnly);
     // Keys played one note at a time are one line, played legato too (each note held a little into the next); but
     // not two notes or more to a beat, which is an arpeggio (broken chords), and not with the pedal held.
     let lead = line("C4 E4 G4 C5 G4 E4 C4 G3", 0, BEAT);
@@ -221,6 +230,13 @@ fn the_texture_is_what_kinds_of_line_are_heard() {
     assert_eq!(hear(Music::new().keys(line("C4 E4 G4 C5 G4 E4 C4 G3", 0, BEAT / 2))), Texture::HarmonyOnly);
     let pedalled: Vec<Note> = lead.iter().map(|n| Note { length: 2 * BAR - n.start, ..*n }).collect();
     assert_eq!(hear(Music::new().keys(pedalled)), Texture::HarmonyOnly);
+    // An octave is one note; and a double stop here and there, one note in ten or fewer, doesn't make chords.
+    let octaves: Vec<Note> = lead.iter().flat_map(|n| [*n, Note { key: n.key + 12, ..*n }]).collect();
+    assert_eq!(hear(Music::new().tune(octaves)), Texture::SingleLine);
+    let long = line(&"C4 E4 G4 C5 G4 E4 C4 G3 ".repeat(3), 0, BEAT);
+    let double = |under: &str| [long.clone(), notes(under, 23 * BEAT, BEAT)].concat();
+    assert_eq!(hear(Music::new().tune(double("E3"))), Texture::SingleLine);
+    assert_eq!(hear(Music::new().tune(double("C3 E3"))), Texture::HarmonyOnly);
 }
 
 #[test]
@@ -249,7 +265,7 @@ fn the_chart_is_spelled_in_the_key() {
         for key in keys {
             let chart = r.names(key);
             for (i, s) in r.spans.iter().enumerate() {
-                let spelled = s.shown().map(|x| r.spell(i, x.chord, key));
+                let spelled = s.shown().map(|x| r.spell(&chart, i, x.chord, key));
                 assert_eq!(spelled, chart[i], "span {i} in {key:?}: {}", render(&r));
                 assert!(chart[i].is_none_or(|c| Some(c.chord()) == s.shown().map(|x| x.chord)));
             }
@@ -319,13 +335,26 @@ fn names_found_elsewhere_are_checked_against_the_reading() {
     // 59: Fm9 | Bb13 | Ebmaj9, in a file named "Fm9 Bb13 Ebmaj9.mid": each agrees. The name is never evidence, so
     // what's read is the same with it or without.
     let music = Music::new().bass(bars("F2 | Bb1 | Eb2")).keys(bars("Ab3 C4 Eb4 G4 | Ab3 C4 D4 G4 | G3 Bb3 D4 F4"));
-    let r = read(&music.looped(), &[], 2).unwrap();
+    let r = read(&music.clone().looped(), &[], 2).unwrap();
     assert_eq!(shown(&r), ["Fm9", "Bb13", "Ebmaj9"], "{}", render(&r));
     assert_eq!(check(&r, &["Fm9", "Bb13", "Ebmaj9"]), [Agrees; 3]);
     // Its tensions may differ, its core and bass may not; and the names go in order.
     assert_eq!(check(&r, &["Fm7", "Bb7(b9)", "Ebmaj7"]), [Agrees; 3]);
     assert_eq!(check(&r, &["F7", "Fm9/Ab", "Bb13sus4", "Ebm9"]), [Disagrees; 4]);
     assert_eq!(check(&r, &["Bb13", "Fm9", "Ebmaj9"]), [Agrees, Disagrees, Agrees]);
+    // Round a loop, the names may start at any of its chords; a song's start at its first.
+    assert_eq!(check(&r, &["Bb13", "Ebmaj9", "Fm9"]), [Agrees; 3]);
+    let song = read(&music, &[], 2).unwrap();
+    assert_eq!(shown(&song), ["Fm9", "Bb13", "Ebmaj9"], "{}", render(&song));
+    assert_eq!(check(&song, &["Bb13", "Ebmaj9", "Fm9"]), [Agrees, Agrees, Disagrees]);
+    // As many names are matched as can be, then as many agree as can: a name that matches only late on doesn't use
+    // the chart up, and a name listed for a chord is matched there when the name after it needs the chord after.
+    assert_eq!(check(&song, &["Ebmaj9", "Fm9", "Bb13"]), [Disagrees, Agrees, Agrees]);
+    let sixth = Music::new().bass(bars("C2 | F2 | A1")).keys(bars("E3 G3 A3 C4 | F3 A3 C4 | E3 G3 A3 C4"));
+    let r = read(&sixth, &[], 2).unwrap();
+    assert_eq!(shown(&r), ["C6", "F", "Am7"], "{}", render(&r));
+    assert_eq!(check(&r, &["Am7", "F"]), [Listed, Agrees], "{}", render(&r));
+    assert_eq!(check(&r, &["Am7", "Am7"]), [Listed, Agrees], "{}", render(&r));
     // Another reading of a chord shown is listed: Am7 for C6 over C, slashed or not.
     let r = case("22 C6");
     let each: Vec<NameCheck> = ["C6", "Am7/C", "Am7", "Am7/E"].iter().flat_map(|&n| check(&r, &[n])).collect();
@@ -398,31 +427,25 @@ fn pins_given_in_ticks_are_read_as_given() {
 }
 
 #[test]
-fn a_pin_over_a_loops_last_bar_is_the_chord_before_its_first() {
+fn a_chord_given_over_a_loops_last_bar_is_the_chord_before_its_first() {
     let music =
         Music::new().bass(bars("C2 | F2 | G2 | G2")).keys(bars("C4 E4 G4 | F3 A3 C4 | G3 B3 D4 | G3 B3 D4")).looped();
     let db7 = Some(chord("Db7"));
+    let free = read(&music, &[], 6).unwrap();
     let r = read(&music, &[Pin { start: 3 * BAR, end: 4 * BAR, chord: db7 }], 6).unwrap();
     assert_eq!(shown(&r), ["C", "F", "G", "Db7/G"], "{}", render(&r));
-    // The first chord is read as the decode reads it with the copy of the last bar heard in front pinned too, not as
-    // with the last bar alone pinned.
-    let hearing = music.hear();
-    let (first, units) = (hearing.reported().start, hearing.units());
-    let first_chance = |pins: &[PinnedSpan]| {
-        let (mut decoder, mut decoding, mut naming) = (Decoder::new(), Decoding::new(), Naming::new());
-        assert!(decoder.decode(&hearing, &HAND, &COUNTED, pins, &mut decoding));
-        Namer::new().name(&hearing, &decoder, &decoding, pins, usize::MAX, &mut naming);
-        let span = naming.spans().first().unwrap();
-        naming.readings(span).first().map(|x| (x.chord, x.chance.to_bits()))
-    };
-    let last = PinnedSpan { units: units - B..units, chord: db7 };
-    let copy = PinnedSpan { units: 0..first, chord: db7 };
-    let read_first = r.spans[0].readings.first().map(|x| (x.chord, x.chance.to_bits()));
-    assert_eq!(read_first, first_chance(&[last.clone(), copy]));
-    assert_ne!(read_first, first_chance(&[last]));
+    // As the loop goes round, its first chord follows Db7, not G; and a chord starts for sure there, where the chord
+    // given ends.
+    let first = |r: &ChordReading| r.spans[0].readings[0].chance.to_bits();
+    assert_ne!(first(&r), first(&free), "{}", render(&r));
+    assert!((r.spans[0].change - 1.0).abs() < 1e-9 && free.spans[0].change < 1.0 - 1e-9, "{}", render(&r));
+    // Given only its ends, the last bar says nothing of the chord before the first.
+    let ends = read(&music, &[Pin { start: 3 * BAR, end: 4 * BAR, chord: None }], 6).unwrap();
+    assert_eq!(shown(&ends), ["C", "F", "G", "G"], "{}", render(&ends));
+    assert!(ends.spans[0].change < 1.0 - 1e-9, "{}", render(&ends));
     // A pin before the loop's start is left out: the copied bar is never pinned on its own.
     let before = read(&music, &[Pin { start: -BAR, end: 0, chord: db7 }], 6).unwrap();
-    assert_eq!(before, read(&music, &[], 6).unwrap());
+    assert_eq!(before, free);
 }
 
 /// Whether a reading keeps the rules that hold for any music, and if not, why: the spans run from the reading's start
@@ -467,7 +490,9 @@ fn keeps_the_rules(hearing: &Hearing, r: &ChordReading, keep: usize) -> Result<(
             ChordAnswer::Unclear => r.texture != Texture::SingleLine && !given,
         };
         check(answer_holds, &why)?;
-        check(s.shown().is_some() == (s.answer.shows_chord() && first.is_some()), &why)?;
+        check(s.label.is_none() || first.map(|x| x.label) == s.label, &why)?;
+        let reads = s.label.is_some() || s.answer == ChordAnswer::Implied;
+        check(s.shown().is_some() == (reads && s.answer.shows_chord() && first.is_some()), &why)?;
         check(chart.get(i).copied().flatten().map(|c| c.chord()) == s.shown().map(|x| x.chord), &why)?;
         let choices = s.choices(3);
         check(choices.first().map(|c| c.chord) == first.map(|x| x.chord) && choices.len() <= 3, &why)?;
@@ -679,10 +704,11 @@ fn damaged_notes_are_read_without_a_panic() {
 
 /// What the hand cases, the tests' music and some music made here read at each version of the reader, as a hash
 /// ([`readings_hash`]). A change that moves any of them needs `CHORD_READER_VERSION` bumped, and a line added here.
-const READINGS: &[(u32, u64)] = &[(1, 0x7993_3db4_5728_0b72)];
+const READINGS: &[(u32, u64)] = &[(1, 0x0ed7_3fed_dfbc_a860)];
 
 /// The music whose readings the hash covers, with its pins: every hand case, the music the rules are checked on, and
-/// music made here so every kind of answer is read (one line, one note, all twelve, a rest, chords given).
+/// music made here so every kind of answer is read (one line, one note, all twelve, a rest, chords given) and what
+/// is one line and what isn't (a triad in a tune part, short stabs, a double stop in a long tune).
 fn hashed_music() -> Vec<(Music, Vec<Pin>)> {
     let mut music = the_music_in_ticks();
     let given = |start: i64, end: i64, name: &str| Pin { start, end, chord: Some(chord(name)) };
@@ -694,6 +720,13 @@ fn hashed_music() -> Vec<(Music, Vec<Pin>)> {
         (two_five_one(), vec![given(BAR, 2 * BAR, "Db7"), Pin { start: 2 * BAR, end: 4 * BAR, chord: None }]),
         (Music::new().bass(bars("C2 | | F2")).keys(bars("C4 E4 G4 | | F3 A3 C4")), vec![given(BAR, 2 * BAR, "Db7")]),
         (two_five_one().looped(), vec![given(3 * BAR, 4 * BAR, "Db7"), Pin { start: 0, end: BAR, chord: None }]),
+        (Music::new().tune(notes("C4 E4 G4", 0, BAR)), Vec::new()),
+        (Music::new().keys((0..8).flat_map(|beat| notes("C4 E4 G4", beat * BEAT, 20)).collect()), Vec::new()),
+        (
+            Music::new()
+                .tune([line(&"C4 E4 G4 C5 G4 E4 C4 G3 ".repeat(3), 0, BEAT), notes("E3", 23 * BEAT, BEAT)].concat()),
+            Vec::new(),
+        ),
     ]);
     music
 }
@@ -713,6 +746,9 @@ fn readings_hash() -> u64 {
         h.number(i128::from(c.bass().number()));
     };
     let mut h = Fnv::new();
+    // The numbers the reader is built from, so a change to one is a change to what the version covers, though no
+    // reading here moves.
+    h.number(i128::from(numbers_hash(&SHIPPED)));
     for (music, pins) in hashed_music() {
         let Some(r) = read(&music, &pins, MOST_READINGS) else {
             h.bytes(&[0]);

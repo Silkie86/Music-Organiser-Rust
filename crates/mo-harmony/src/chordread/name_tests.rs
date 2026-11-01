@@ -63,7 +63,7 @@ impl Named {
         let hearing = music.hear();
         let (mut decoder, mut decoding, mut naming) = (Decoder::new(), Decoding::new(), Naming::new());
         assert!(decoder.decode(&hearing, &HAND, &COUNTED, pins, &mut decoding), "nothing read");
-        Namer::new().name(&hearing, &decoder, &decoding, pins, most, &mut naming);
+        Namer::new().name(&hearing, &decoder, &decoding, most, &mut naming);
         Named { hearing, decoding, naming }
     }
 
@@ -683,9 +683,12 @@ fn keeps_the_rules(
         check(readings.get(1..).unwrap_or_default().windows(2).all(|w| w[0].chance >= w[1].chance), &why)?;
         // A pinned stretch is never cut in two, and a chord given for it (one the decode can read) is its only reading,
         // written as given: in root position over the bass held under it.
-        let pin = decoded.pin.and_then(|i| pins.get(i));
-        check(pin.is_none() || !split, &why)?;
-        let given = pin.filter(|p| p.label().is_some()).and_then(|p| p.chord);
+        // The decode says which: a chord given is one of the pins' (a pin's own, or round a loop, one given over its
+        // last bar).
+        let given = decoded.given;
+        check(!decoded.pinned || !split, &why)?;
+        check(given.is_none() || decoded.pinned, &why)?;
+        check(given.is_none_or(|g| pins.iter().any(|p| p.given() == Some(g))), &why)?;
         check(given.is_some() == s.flags.contains(SpanFlags::GIVEN), &why)?;
         if let Some(given) = given {
             let [r] = readings else { return Err(format!("not one reading: {}", why())) };
@@ -763,7 +766,7 @@ fn any_music_with_any_pins_is_named_by_the_rules() {
         let most = dice.pick(&[0, 1, 3, 6]);
         let what = format!("round {round}: {music:?}, pins {pins:?}, most {most}");
         assert!(decoder.decode(&hearing, &HAND, &COUNTED, &pins, &mut decoding), "nothing read: {what}");
-        namer.name(&hearing, &decoder, &decoding, &pins, most, &mut naming);
+        namer.name(&hearing, &decoder, &decoding, most, &mut naming);
         if let Err(why) = keeps_the_rules(&hearing, &decoding, &pins, &naming, most) {
             panic!("{why}\n{what}");
         }
@@ -867,7 +870,7 @@ fn a_namer_kept_and_used_again_names_the_same() {
     for (music, pins) in music.iter().chain(music.iter().rev()) {
         let hearing = music.hear();
         assert!(decoder.decode(&hearing, &HAND, &COUNTED, pins, &mut decoding));
-        namer.name(&hearing, &decoder, &decoding, pins, 6, &mut naming);
+        namer.name(&hearing, &decoder, &decoding, 6, &mut naming);
         assert_eq!(everything(&naming, 0, 480), everything(&Named::read(music, pins, 6).naming, 0, 480));
     }
 }
@@ -936,7 +939,7 @@ fn damaged_notes_are_named_without_a_panic() {
                 let parts = [Part { role: Role::Harmony, notes: &wild }, Part { role: Role::Bass, notes: &wild[3..] }];
                 assert!(hearing.hear(&parts, grid, span));
                 assert!(decoder.decode(&hearing, &HAND, &COUNTED, &[], &mut decoding));
-                namer.name(&hearing, &decoder, &decoding, &[], 4, &mut naming);
+                namer.name(&hearing, &decoder, &decoding, 4, &mut naming);
                 if let Err(why) = keeps_the_rules(&hearing, &decoding, &[], &naming, 4) {
                     panic!("{why}\n{grid:?} {span:?}");
                 }
@@ -946,7 +949,7 @@ fn damaged_notes_are_named_without_a_panic() {
     // Nothing read: nothing named.
     let nothing = Hearing::new();
     assert!(!decoder.decode(&nothing, &HAND, &COUNTED, &[], &mut decoding));
-    namer.name(&nothing, &decoder, &decoding, &[], 4, &mut naming);
+    namer.name(&nothing, &decoder, &decoding, 4, &mut naming);
     assert!(naming.spans().is_empty());
 }
 
@@ -993,7 +996,7 @@ fn show_the_naming_speed() {
         let mut times = Vec::new();
         for _ in 0..50 {
             let started = std::time::Instant::now();
-            namer.name(&hearing, &decoder, &decoding, &[], 6, &mut naming);
+            namer.name(&hearing, &decoder, &decoding, 6, &mut naming);
             times.push(started.elapsed());
         }
         times.sort();

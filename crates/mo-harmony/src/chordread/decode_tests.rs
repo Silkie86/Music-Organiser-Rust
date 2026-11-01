@@ -564,6 +564,45 @@ fn a_stretch_pinned_at_its_ends_is_read_as_one_chord() {
 }
 
 #[test]
+fn a_chord_given_over_a_loops_last_bar_is_given_for_its_copy_in_front_too() {
+    // The ii V I as a loop: its last bar is copied in front, before the first unit reported.
+    let music = two_five_one().looped();
+    let first = music.hear().reported().start;
+    assert_eq!(first, B);
+    let read = |pins: &[PinnedSpan], units: Range<usize>| {
+        let whole = Whole::read(&music, &HAND, pins);
+        let mut chances = Vec::new();
+        whole.decoder.chances(&whole.hearing, units, &mut chances);
+        let chances: Vec<(String, f64)> = chances.iter().map(|c| (name(c.label), c.chance)).collect();
+        (whole, chances)
+    };
+    // Read for sure: that chord alone, with a chance of 1.
+    let sure = |chances: &[(String, f64)], chord: &str| match chances {
+        [(name, chance)] => name == chord && (chance - 1.0).abs() < 1e-9,
+        _ => false,
+    };
+    // Db7 given over the last bar is given for its copy too, so the loop's first chord follows Db7 as it goes round;
+    // and a chord starts for sure where the copy ends, as where any pin ends.
+    let last = first + 3 * B..first + 4 * B;
+    let (whole, copy) = read(&[pin(last.clone(), "Db7")], 0..first);
+    assert!(sure(&copy, "Db7"), "{copy:?}");
+    let spans = whole.spans();
+    assert_eq!(cuts(&spans), [(0..B, "Dm7"), (B..2 * B, "G7"), (2 * B..3 * B, "Cmaj7"), (3 * B..4 * B, "Db7")]);
+    assert!((spans[0].change - 1.0).abs() < 1e-9, "{}", render(&spans));
+    let given: Vec<(bool, Option<Chord>)> = whole.out.spans().iter().map(|s| (s.pinned, s.given)).collect();
+    let db7 = Some(written(label("Db7")));
+    assert_eq!(given, [(false, None), (false, None), (false, None), (true, db7)]);
+    // Given only its ends, the last bar says nothing of the chord before the first: the copy is read from its notes.
+    let (whole, copy) = read(&[PinnedSpan { units: last.clone(), chord: None }], 0..first);
+    assert!(copy.first().is_some_and(|(name, _)| name == "Cmaj7") && !sure(&copy, "Cmaj7"), "{copy:?}");
+    assert!(whole.spans()[0].change < 1.0 - 1e-9, "{}", render(&whole.spans()));
+    // A pin given in the copied bar itself is kept over a copy that would overlap it.
+    let pins = [pin(2..6, "F"), pin(last.start + 4..last.end, "Db7")];
+    assert!(sure(&read(&pins, 2..6).1, "F"));
+    assert!(!sure(&read(&pins, 6..first).1, "Db7"));
+}
+
+#[test]
 fn a_pushed_chords_sound_starts_where_it_is_struck() {
     // C, then F struck half a beat before the bar line and held over it.
     let music = Music::new()
@@ -1039,15 +1078,23 @@ fn any_music_with_any_pins_is_read_whole_and_the_fast_way_agrees_with_the_slow_w
         if reported.start == 0 {
             assert!((decoder.change(0) - 1.0).abs() < 1e-9, "{what}");
         }
-        // Each pin kept is read as one span, as given.
+        // Each pin kept is read as one span, as given, and no other span is pinned.
+        let mut pinned = 0;
         for pin in kept_pins(&pins, units) {
             let units = pin.units.start.max(reported.start)..pin.units.end;
             if units.is_empty() {
                 continue;
             }
             let span = spans.iter().find(|s| s.units == units);
-            assert!(span.is_some_and(|s| pin.label().is_none_or(|l| s.label == Some(l))), "{pin:?}: {what}");
+            let given = |s: &super::DecodedSpan| s.pinned && s.given == pin.given();
+            assert!(
+                span.is_some_and(|s| given(s) && pin.label().is_none_or(|l| s.label == Some(l))),
+                "{pin:?}: {what}"
+            );
+            pinned += 1;
         }
+        assert_eq!(spans.iter().filter(|s| s.pinned).count(), pinned, "{what}");
+        assert!(spans.iter().all(|s| s.pinned || s.given.is_none()), "{what}");
         // And where there are few enough ways to add up one by one, the slow way agrees.
         if count_ways(&decoder.lattice(), &HAND) <= 20_000.0 {
             agrees_with_every_way(&what, &decoder, units, &HAND);

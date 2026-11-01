@@ -15,6 +15,7 @@
 use std::ops::Range;
 
 use super::answer::{ChordAnswer, Grading, Texture, Thresholds, grade};
+use super::candidates::Label;
 use super::cores::Core;
 use super::decode::{Decoder, Decoding, PinnedSpan};
 use super::hear::{Hearing, Unit};
@@ -25,7 +26,6 @@ use crate::chord::Chord;
 use crate::key::Key;
 use crate::keyfind::Span;
 use crate::notes::{Grid, Part};
-use crate::pitch::PitchClass;
 use crate::spell::{Spelled, root_in_key, spell_in_key};
 
 /// The most readings a span keeps ([`ChordContext::readings`]).
@@ -74,8 +74,9 @@ impl ChordContext<'static> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Pin {
     /// Where it starts and ends, in the music's own ticks: each is moved to the nearest place within the music where
-    /// a chord may change (a unit's start). One that's empty there, or overlaps one before it, is left out. In a loop,
-    /// one over its last bar is the chord before its first too, as the loop goes round.
+    /// a chord may change (a unit's start). One that's empty there, or overlaps one before it, is left out. A chord
+    /// starts for sure where a pin starts and where it ends. In a loop, a chord given over its last bar is the chord
+    /// before its first as the loop goes round, so a chord starts for sure at its first too (the same one or not).
     pub start: i64,
     pub end: i64,
     /// Its chord, written as given (in root position, over the bass held under it). None pins only where it starts
@@ -118,9 +119,13 @@ pub struct ChordSpan {
     pub heard_start: i64,
     /// The chance a chord starts where it starts.
     pub change: f64,
+    /// What the best way reads there: a chord's label (its root and core), or none for no chord (a rest, or notes it
+    /// makes no chord of: then its readings are the chords it might be, and the chart shows none unless one line alone
+    /// implies one).
+    pub label: Option<Label>,
     pub answer: ChordAnswer,
-    /// Its readings, the one the best way reads first, then the others by their chances, each written differently.
-    /// None for a rest.
+    /// Its readings, best first: the one the best way reads (when it reads a chord), then the others by their chances,
+    /// each written differently. None for a rest.
     pub readings: Vec<Reading>,
     /// The chance it's no chord, and the chance it's none of the readings kept (no chord among them).
     pub no_chord: f64,
@@ -161,9 +166,12 @@ pub enum NameCheck {
 }
 
 impl ChordSpan {
-    /// The reading the chart shows for it: the first, unless the answer is no chord.
+    /// The reading the chart shows for it: the first, when the answer gives a chord and the best way reads one there,
+    /// or when one line alone implies it (a tune alone is seldom sure to be a chord, so the chart shows what it
+    /// implies).
     pub fn shown(&self) -> Option<&Reading> {
-        self.readings.first().filter(|_| self.answer.shows_chord())
+        let reads = self.label.is_some() || self.answer == ChordAnswer::Implied;
+        self.readings.first().filter(|_| reads && self.answer.shows_chord())
     }
 
     /// Chord check's choices for it, at most `n`, all different: the first reading; the best reading of its same-notes
@@ -199,8 +207,7 @@ fn tensions_other_way(r: &Reading) -> Option<Chord> {
     if !r.doubtful.is_empty() {
         return Some(Chord::new(c.root(), c.notes().union(r.doubtful), c.bass()));
     }
-    let core = Core::of(c.intervals().with(PitchClass::C))?;
-    let own = core.intervals().on(c.root());
+    let own = Core::of_chord(c)?.intervals().on(c.root());
     let plain = c.notes().intersection(own);
     (plain != c.notes()).then(|| Chord::new(c.root(), plain, c.bass()))
 }
@@ -228,46 +235,91 @@ impl ChordReading {
     }
 
     /// A chord written at a span (one of its readings, or the other way to write one), spelled as the chart spells
-    /// chords there: in `key`, by what the next chord on the chart does ([`ChordReading::names`]).
-    pub fn spell(&self, span: usize, chord: Chord, key: Option<Key>) -> Spelled {
+    /// chords there: in `key`, by what the next chord on the chart does. `chart` is this reading's chart in that key
+    /// ([`ChordReading::names`]), worked out once for every chord spelled.
+    pub fn spell(&self, chart: &[Option<Spelled>], span: usize, chord: Chord, key: Option<Key>) -> Spelled {
         let Some(key) = key else { return Spelled::plain(chord) };
-        let names = self.names(Some(key));
-        let after = names.get(span + 1..).unwrap_or_default().iter().flatten().next();
-        let round = if self.looped { names.iter().flatten().next() } else { None };
+        let after = chart.get(span.saturating_add(1)..).unwrap_or_default().iter().flatten().next();
+        let round = if self.looped { chart.iter().flatten().next() } else { None };
         Spelled::new(chord, root_in_key(chord, key, after.or(round).copied()))
     }
 
-    /// Checks chord names found elsewhere (a file's name: "Fm9 Bb13 Ebmaj9.mid") against the reading, in order: each
-    /// agrees when a chord the chart shows after the last one matched is it, is listed when it's one of the readings
-    /// of one, and disagrees otherwise. A name is a chord when its root is one of the reading's roots (any of a
-    /// diminished seventh's), its core is the same (its tensions may differ), and, when it has a bass of its own (a
-    /// slash), its bass is the same. The names are never evidence.
+    /// Checks chord names found elsewhere (a file's name: "Fm9 Bb13 Ebmaj9.mid") against the reading. The names are
+    /// matched to the chords the chart shows, in order, as many as can be and as well as they can be (round a loop,
+    /// from any of its chords): each agrees when it's the chord shown where it's matched, is listed when it's another
+    /// of the readings kept there (so keeping more can list more), and disagrees when it can't be matched. A name is a
+    /// chord when its root is one of the reading's roots (any of a diminished seventh's), its core is the same (its
+    /// tensions may differ), and, when it has a bass of its own (a slash), its bass is the same. The names are never
+    /// evidence.
     pub fn check_names(&self, names: &[Chord]) -> Vec<NameCheck> {
         let chart: Vec<&ChordSpan> = self.spans.iter().filter(|s| s.shown().is_some()).collect();
-        let mut from = 0;
-        let find = |from: &mut usize, matches: &dyn Fn(&ChordSpan) -> bool| {
-            let k = chart.get(*from..).unwrap_or_default().iter().position(|s| matches(s))?;
-            *from += k + 1;
-            Some(())
-        };
-        names
-            .iter()
-            .map(|&name| {
-                if find(&mut from, &|s| s.readings.first().is_some_and(|r| names_it(r, name))).is_some() {
-                    NameCheck::Agrees
-                } else if find(&mut from, &|s| s.readings.iter().any(|r| names_it(r, name))).is_some() {
-                    NameCheck::Listed
-                } else {
-                    NameCheck::Disagrees
-                }
-            })
-            .collect()
+        let turns = if self.looped { chart.len().max(1) } else { 1 };
+        let mut best: Option<((u32, u32), Vec<NameCheck>)> = None;
+        for turn in 0..turns {
+            let turned: Vec<&ChordSpan> = chart.iter().cycle().skip(turn).take(chart.len()).copied().collect();
+            let (how_well, checks) = match_names(names, &turned);
+            if best.as_ref().is_none_or(|(b, _)| how_well > *b) {
+                best = Some((how_well, checks));
+            }
+        }
+        best.map_or_else(|| vec![NameCheck::Disagrees; names.len()], |(_, checks)| checks)
     }
+}
+
+/// What a name earns matched to a chord the chart shows: one name matched and one that agrees when it's the chord
+/// shown, one matched when it's another of the readings kept there, nothing when it's neither.
+fn earns(span: &ChordSpan, name: Chord) -> Option<(u32, u32)> {
+    let mut readings = span.readings.iter();
+    if readings.next().is_some_and(|r| names_it(r, name)) {
+        Some((1, 1))
+    } else if readings.any(|r| names_it(r, name)) {
+        Some((1, 0))
+    } else {
+        None
+    }
+}
+
+/// The best way to match names to a chart's chords in order, each name to one chord at most and each chord to one
+/// name: the most names matched, then the most that agree, then the earliest names, each on the earliest chord. How
+/// well (names matched, names agreeing), and each name's check.
+fn match_names(names: &[Chord], chart: &[&ChordSpan]) -> ((u32, u32), Vec<NameCheck>) {
+    let add = |(a, b): (u32, u32), (c, d): (u32, u32)| (a.saturating_add(c), b.saturating_add(d));
+    // best[i][j]: the best for the first i names on the first j chords.
+    let mut best = vec![vec![(0u32, 0u32); chart.len() + 1]; names.len() + 1];
+    let at = |best: &[Vec<(u32, u32)>], i: usize, j: usize| best.get(i).and_then(|row| row.get(j)).copied();
+    for (i, &name) in names.iter().enumerate() {
+        for (j, span) in chart.iter().enumerate() {
+            let skip = at(&best, i, j + 1).max(at(&best, i + 1, j)).unwrap_or_default();
+            let matched = earns(span, name).and_then(|e| at(&best, i, j).map(|b| add(b, e)));
+            if let Some(cell) = best.get_mut(i + 1).and_then(|row| row.get_mut(j + 1)) {
+                *cell = matched.map_or(skip, |m| m.max(skip));
+            }
+        }
+    }
+    // Back from the end: a name left unmatched when it can be, then a chord left out, before a match.
+    let mut checks = vec![NameCheck::Disagrees; names.len()];
+    let (mut i, mut j) = (names.len(), chart.len());
+    while i > 0 && j > 0 {
+        let here = at(&best, i, j);
+        if at(&best, i - 1, j) == here {
+            i -= 1;
+        } else if at(&best, i, j - 1) == here {
+            j -= 1;
+        } else {
+            let earned = chart.get(j - 1).zip(names.get(i - 1)).and_then(|(s, &n)| earns(s, n));
+            if let Some(check) = checks.get_mut(i - 1) {
+                *check = if earned == Some((1, 1)) { NameCheck::Agrees } else { NameCheck::Listed };
+            }
+            i -= 1;
+            j -= 1;
+        }
+    }
+    (at(&best, names.len(), chart.len()).unwrap_or_default(), checks)
 }
 
 /// Whether a chord name is a reading: its chord or the other way to write it ([`ChordReading::check_names`]).
 fn names_it(r: &Reading, name: Chord) -> bool {
-    let core = |c: Chord| Core::of(c.intervals().with(PitchClass::C));
+    let core = Core::of_chord;
     let bass = |c: Chord| name.bass() == name.root() || name.bass() == c.bass();
     let chord = r.roots.contains(name.root()) && core(r.chord) == core(name) && bass(r.chord);
     chord || r.also.is_some_and(|c| c.root() == name.root() && core(c) == core(name) && bass(c))
@@ -306,7 +358,7 @@ impl ChordReader {
             return None;
         }
         // Every reading is named and graded, whatever the caller keeps.
-        self.namer.name(&self.hearing, &self.decoder, &self.decoding, &self.pins, usize::MAX, &mut self.naming);
+        self.namer.name(&self.hearing, &self.decoder, &self.decoding, usize::MAX, &mut self.naming);
         Some(self.reading(cx, model))
     }
 
@@ -316,34 +368,13 @@ impl ChordReader {
     }
 
     /// Puts the pins on the units heard: each end at the nearest unit start within the music (a loop's own units,
-    /// never its copied bar), leaving out those empty there and those over one before them. A loop goes round: a pin
-    /// over its last bar pins the copy of that bar heard in front too, so its first chord follows the chord given.
+    /// never its copied bar). The decode leaves out those empty there and those over one before them, and gives a
+    /// chord given over a loop's last bar for the copy of that bar in front too.
     fn pin(&mut self, pins: &[Pin]) {
         let reported = self.hearing.reported();
         let unit = |tick: i64| self.hearing.nearest_unit(tick).max(reported.start);
         self.pins.clear();
         self.pins.extend(pins.iter().map(|p| PinnedSpan { units: unit(p.start)..unit(p.end), chord: p.chord }));
-        self.pins.retain(|p| !p.units.is_empty());
-        self.pins.sort_by_key(|p| (p.units.start, p.units.end));
-        let mut end = 0;
-        self.pins.retain(|p| {
-            let free = p.units.start >= end;
-            if free {
-                end = p.units.end;
-            }
-            free
-        });
-        // The copied bar's units are the last bar's, a loop's length earlier.
-        let length = reported.len();
-        if reported.start > 0 {
-            for i in 0..self.pins.len() {
-                let Some(p) = self.pins.get(i) else { break };
-                let (copy, chord) = (p.units.start.saturating_sub(length)..p.units.end.saturating_sub(length), p.chord);
-                if !copy.is_empty() {
-                    self.pins.push(PinnedSpan { units: copy, chord });
-                }
-            }
-        }
     }
 
     fn reading(&self, cx: &ChordContext, model: &Model) -> ChordReading {
@@ -378,6 +409,7 @@ impl ChordReader {
                     end: s.end,
                     heard_start: s.heard_start,
                     change: s.change,
+                    label: s.label,
                     answer: grade(grading, model.thresholds),
                     readings,
                     no_chord: s.none,

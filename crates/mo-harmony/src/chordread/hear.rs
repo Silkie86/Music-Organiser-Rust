@@ -431,19 +431,40 @@ impl Hearing {
         self.truncated
     }
 
-    /// Whether the notes heard are one line: never two sounding together as they were played (a player's timing
-    /// apart: [`Hearing::strength_at`]'s allowance, so a line played legato is still one), and none in a broken chord.
-    /// A tune, a bass line, or a lead played one note at a time is one line; an arpeggio, a broken chord, isn't.
+    /// Whether the notes heard are one line: a tune, a bass line, or a lead played one note at a time. A note isn't on
+    /// its own when it's in a broken chord (an arpeggio), when a note of another pitch class is struck with it (a
+    /// player's timing apart: [`Hearing::strength_at`]'s allowance), or when one struck before it still sounds more
+    /// than half a unit after it starts (so a line played legato is still one). An octave is one note. The notes are
+    /// one line when at most one in ten isn't on its own: a double stop here and there doesn't make chords, but a stab
+    /// on every bar does, however short.
     pub fn one_line(&self) -> bool {
         let together = self.together();
-        let mut till = i64::MIN;
-        for n in self.notes.iter().filter(|n| !n.copy) {
-            if n.broken || n.start < till.saturating_sub(together) {
-                return false;
+        let half = (self.layout.unit_ticks() / 2).max(1);
+        let notes = || self.notes.iter().filter(|n| !n.copy);
+        // The notes struck within a player's timing of the one looked at, counted by pitch class: those from `behind`
+        // to `ahead`, a window that moves on with it (the notes are in order of where they start).
+        let (mut ahead, mut behind) = (notes().peekable(), notes().peekable());
+        let mut struck: PerPitch<u32> = PerPitch::default();
+        // How long each pitch class sounds, of the notes looked at so far: till where each was played to.
+        let mut till: PerPitch<i64> = PerPitch([i64::MIN; 12]);
+        let (mut all, mut not_alone) = (0usize, 0usize);
+        for n in notes() {
+            while let Some(m) = ahead.next_if(|m| m.start < n.start.saturating_add(together)) {
+                struck[m.pitch_class()] = struck[m.pitch_class()].saturating_add(1);
             }
-            till = till.max(n.start.saturating_add(n.length));
+            while let Some(m) = behind.next_if(|m| m.start <= n.start.saturating_sub(together)) {
+                struck[m.pitch_class()] = struck[m.pitch_class()].saturating_sub(1);
+            }
+            let pc = n.pitch_class();
+            let with_another = struck.iter().any(|(p, count)| p != pc && count > 0);
+            let over = till.iter().any(|(p, t)| p != pc && t > n.start.saturating_add(half));
+            if n.broken || with_another || over {
+                not_alone = not_alone.saturating_add(1);
+            }
+            till[pc] = till[pc].max(n.start.saturating_add(n.length));
+            all = all.saturating_add(1);
         }
-        true
+        not_alone.saturating_mul(10) <= all
     }
 
     /// How many notes were heard, a loop's copies left out.
