@@ -5,10 +5,18 @@
 //! and the tune, and which notes only pass by), decides where the chords change and which chord each stretch is, and
 //! names each chord from the notes it really plays. It is being built in that order, one pull request at a time.
 //!
-//! What is here so far is what every step decides between: the 16 kinds of chord ([`Core`]), what each note is to
-//! each of them (one of its own notes, a tension it can carry, or a note that doesn't belong: [`ToneClass`]), and
-//! which kinds the notes heard allow on each root ([`valid`] and [`valid_rootless`]).
+//! What is here so far:
+//!
+//! - what every step decides between: the 16 kinds of chord ([`Core`]), what each note is to each of them (one of its
+//!   own notes, a tension it can carry, or a note that doesn't belong: [`ToneClass`]), and which kinds the notes heard
+//!   allow on each root ([`valid`] and [`valid_rootless`]);
+//! - the first step, hearing the notes ([`Hearing`]): the units chords change on, the bass, the chords and the tune,
+//!   broken chords, notes held over a bar line, and how long each note sounds where.
 
 mod cores;
+mod hear;
+#[cfg(test)]
+mod hear_tests;
 
 pub use cores::{Core, CoreSet, ToneClass, valid, valid_rootless};
+pub use hear::{BASS_GAP, BassTexture, HeardNote, Hearing, Level, MOST_UNITS, Mass, Stream, Unit};
