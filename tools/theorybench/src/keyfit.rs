@@ -1087,7 +1087,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
             return Err("these weights break a hand case's gate (above), so they aren't written".into());
         }
         let learned: Vec<String> = used.iter().filter(|u| !u.ends_with(" measured only")).cloned().collect();
-        let file = weights_file(&model, &calibration, &fitted_answers, &opts, (&learned, &credits), &summary);
+        // The summary scores the first source read.
+        let scored = sources.first().map_or("", String::as_str);
+        let file = weights_file(&model, &calibration, &fitted_answers, &opts, (&learned, &credits), (scored, &summary));
         std::fs::write(&path, file).map_err(|e| format!("{}: {e}", path.display()))?;
         println!("Written to {}.", path.display());
     } else {
@@ -1692,14 +1694,15 @@ fn log_run(run: &str, summary: &Summary, opts: &Options) -> Result<(), String> {
 }
 
 /// The weights as Rust source for `crates/mo-harmony/src/keyfind/weights.rs`, from the sources learned from (each
-/// as it was weighed: "billboard at 0.25") and their credits.
+/// as it was weighed: "billboard at 0.25") and their credits, and the summary of how often the key was right on the
+/// songs of `scored`.
 fn weights_file(
     model: &Model,
     calibration: &Calibration,
     answers: &Fitted,
     opts: &Options,
     (sources, credits): (&[String], &[String]),
-    summary: &Summary,
+    (scored, summary): (&str, &Summary),
 ) -> String {
     let penalty = opts.lambda_delta.map_or("none fitted".to_owned(), |l| format!("penalty {l}"));
     let mut out = String::new();
@@ -1716,7 +1719,8 @@ fn weights_file(
         let _ = writeln!(out, "//! - {credit}");
     }
     out.push_str("//! Only these numbers come from them.\n");
-    out.push_str("//!\n//! Right on songs held out of the fit (cross-validation by song, every fold):\n");
+    let _ =
+        writeln!(out, "//!\n//! Right on {scored} songs held out of the fit (cross-validation by song, every fold):");
     for line in &summary.lines {
         let _ = writeln!(out, "//! - {line}");
     }
@@ -2046,11 +2050,13 @@ mod tests {
         };
         let file = |weights: [f64; FEATURES]| {
             let (sources, credits) = (["x at 0.5".to_owned()], ["x: CC0".to_owned()]);
-            weights_file(&Model { weights }, &calibration, &answers, &opts, (&sources, &credits), &summary)
+            weights_file(&Model { weights }, &calibration, &answers, &opts, (&sources, &credits), ("x", &summary))
         };
         // The numbers built in: the hash and version built in.
         let same = file(*keyfind::SHIPPED.weights);
         assert!(same.contains("//! Fitted on: x at 0.5 (") && same.contains("//! - x: CC0\n"), "{same}");
+        assert!(same.contains("//! Right on x songs held out of the fit (cross-validation by song, every fold):\n"));
+        assert!(same.contains("//! - Whole songs with one key: 90.0% right (1 cases)\n"));
         assert!(same.contains("/// - 1 bar (10 cases): one key from 0.85.\n"), "{same}");
         assert!(same.contains("/// Notes in one scale a key needs: 0.750.\npub(super) const NOT_TONAL_BELOW"));
         let (hash, version) = keyfind::SHIPPED_HASH;
