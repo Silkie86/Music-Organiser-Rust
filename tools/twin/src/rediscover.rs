@@ -41,7 +41,12 @@ fn library(seed: u64, clap: bool) -> (Vec<Value>, Vec<Value>) {
     for i in 0..160usize {
         let t = i % 4;
         let pack = i / 40;
-        let path = format!("/samples/Pack {pack}/{}/{} {i:03}.wav", TYPES[t], TYPES[t]);
+        // Two snares in different packs share a file name: a project naming just "shared.wav" credits neither.
+        let path = if i == 10 || i == 50 {
+            format!("/samples/Pack {pack}/{}/shared.wav", TYPES[t])
+        } else {
+            format!("/samples/Pack {pack}/{}/{} {i:03}.wav", TYPES[t], TYPES[t])
+        };
         // 2018-07-01 12:00 UTC plus a year a pack.
         let mtime = 1_530_446_400 + pack as i64 * 31_557_600;
         let features: Vec<f32> = centres[t].iter().map(|c| c + (n.next() - 0.5) * 3.0).collect();
@@ -64,7 +69,6 @@ fn library(seed: u64, clap: bool) -> (Vec<Value>, Vec<Value>) {
             uses.push(json!([format!("{} {i:03}.wav", TYPES[t]), 2]));
         }
     }
-    // A file name sounds in two packs share: it names neither.
     uses.push(json!(["shared.wav", 4]));
     (sounds, uses)
 }
@@ -119,7 +123,9 @@ fn rust_side(db: &Path, uses: &[Value]) -> Result<Value, String> {
             })
         })
         .collect();
+    let names: serde_json::Map<String, Value> = sounds.iter().map(|s| (s.id.to_string(), json!(s.name()))).collect();
     Ok(json!({
+        "names": names,
         "answers": answers,
         "years": years(&sounds),
         "folders": folders(&sounds, &usage)
@@ -131,12 +137,17 @@ fn rust_side(db: &Path, uses: &[Value]) -> Result<Value, String> {
 
 /// Suggestions match when the sounds, their order and their reasons are the same, and the scores (to 3 places) are
 /// within one step: the features index's averages are added up in another order, so a score can round the other way.
-fn same_suggestions(cs: &Value, rust: &Value) -> bool {
+/// One known difference (DIFFERENCES.md): C# can give a liked, unused sound as "like" itself; Rust names another.
+fn same_suggestions(cs: &Value, rust: &Value, names: &Value) -> bool {
     let (Some(a), Some(b)) = (cs.as_array(), rust.as_array()) else { return false };
+    let like_itself = |x: &Value| {
+        let name = names[x["Id"].to_string()].as_str().unwrap_or("\u{0}");
+        x["Reason"].as_str().is_some_and(|r| r.contains(&format!("Sounds like {name}, ")))
+    };
     a.len() == b.len()
         && a.iter().zip(b).all(|(x, y)| {
             x["Id"] == y["Id"]
-                && x["Reason"] == y["Reason"]
+                && (x["Reason"] == y["Reason"] || like_itself(x))
                 && (x["Score"].as_f64().unwrap_or(f64::NAN) - y["Score"].as_f64().unwrap_or(0.0)).abs() < 0.0011
         })
 }
@@ -176,7 +187,7 @@ pub fn compare(helper: &Path, dir: &Path) -> Result<Vec<String>, String> {
         let rust = rust_side(&dir.join(format!("rediscover-{i}.db")), uses)?;
         for (q, o) in queries().iter().enumerate() {
             let (a, b) = (&cs["answers"][q], &rust["answers"][q]);
-            if !same_suggestions(&a["Suggestions"], &b["Suggestions"]) {
+            if !same_suggestions(&a["Suggestions"], &b["Suggestions"], &rust["names"]) {
                 differences.push(format!(
                     "Rediscover, {name}, question {q} ({o:?}): C# {}, Rust {}",
                     short(&a["Suggestions"]),

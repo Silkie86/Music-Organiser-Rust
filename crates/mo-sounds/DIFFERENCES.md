@@ -82,3 +82,6 @@ save a made-up library to a new sounds.db, which the Rust app reads, and both an
 | Shuffle (seed 0) | .NET's unseeded random numbers. | The seeded ones, seeded from the clock. | Same in practice (a new list each time) |
 | Sounds analysed but no vectors stored | Says every sound is used already. | Says none have been listened to yet. | Better |
 | Folders of a Mac or Linux path on Windows (and back) | Splits only on that system's separator. | Splits on `\` and `/` everywhere. | Same in practice |
+| Why a starred (or rated, or much played) unused sound is suggested | Can say it "sounds like" itself. | Names the closest other sound you like. | Better (bug in C#) |
+| No sounds of the chosen type in the index yet (deep listening hasn't heard them) | Says every one is used already. | Says they haven't been listened to yet. | Better |
+| Folders on Windows spelt with `/` and `\` | One folder. | One folder too (`/` turned into `\`), spelt with `\`. | Same |

@@ -2,8 +2,8 @@
 //! what you play), then digs out unused sounds close to that taste, kept varied so the list isn't ten copies of one
 //! kick. A port of the C# app's `Rediscover`, checked by the sounds twin test.
 //!
-//! Scoring every unused sound is the long part on a big library (spread over the cores): call it off the window's
-//! thread.
+//! Scoring every unused sound is the long part on a big library (spread over rayon's threads): call it on the app's
+//! low-priority pool (`mo_app::background::on_pool`), never the window's thread.
 
 use std::collections::HashMap;
 
@@ -129,12 +129,18 @@ pub fn suggest(sounds: &[Sound], usage: &HashMap<i64, Usage>, index: &SoundIndex
 
     // Pick for variety (maximal marginal relevance). Each sound's likeness to its closest pick so far is kept up to
     // date as picks are made, rather than compared with every pick each round.
-    let mut pool = scored;
-    // Stable, so equal scores keep the library's order, as in C#.
-    pool.sort_by(|a, b| b.1.total_cmp(&a.1));
-    pool.truncate((o.count * 20).max(200));
+    // The best max(count × 20, 200), best first; equal scores keep the library's order, as C#'s stable sort does.
+    // Only the kept ones are sorted: a big library has hundreds of thousands of scores.
+    let mut pool: Vec<(usize, &Sound, f64)> = scored.into_iter().enumerate().map(|(i, (s, x))| (i, s, x)).collect();
+    let order = |a: &(usize, &Sound, f64), b: &(usize, &Sound, f64)| b.2.total_cmp(&a.2).then(a.0.cmp(&b.0));
+    let keep = o.count.saturating_mul(20).max(200);
+    if pool.len() > keep {
+        pool.select_nth_unstable_by(keep - 1, order);
+        pool.truncate(keep);
+    }
+    pool.sort_unstable_by(order);
     let pool: Vec<(&Sound, f64, &[f32])> =
-        pool.into_iter().map(|(s, score)| (s, score, index.get(s.id).unwrap_or_default())).collect();
+        pool.into_iter().map(|(_, s, score)| (s, score, index.get(s.id).unwrap_or_default())).collect();
     let mut redundancy = vec![0f64; pool.len()];
     let mut taken = vec![false; pool.len()];
     let mut picked: Vec<usize> = Vec::new();
@@ -199,7 +205,8 @@ fn centroid(index: &VectorIndex, items: &[(&Sound, f64)]) -> Vec<f32> {
 fn reason(index: &VectorIndex, usage: &HashMap<i64, Usage>, s: &Sound, v: &[f32], taste: &[(&Sound, f64)]) -> String {
     let mut nearest: Option<(&Sound, f64)> = None;
     for (t, _) in taste {
-        if t.sound_type != s.sound_type {
+        // Not itself: a starred sound you haven't used yet would be "like" itself (C# names it).
+        if t.sound_type != s.sound_type || t.id == s.id {
             continue;
         }
         let Some(tv) = index.get(t.id) else { continue };
@@ -243,7 +250,7 @@ pub fn why_nothing(sounds: &[Sound], index: &SoundIndex, o: &Options) -> String 
                 shuffle again."
             .to_owned();
     }
-    let mut of_type: Vec<&Sound> = match &o.sound_type {
+    let of_type: Vec<&Sound> = match &o.sound_type {
         None => analysed,
         Some(t) => analysed.into_iter().filter(|s| s.sound_type == *t).collect(),
     };
@@ -252,6 +259,14 @@ pub fn why_nothing(sounds: &[Sound], index: &SoundIndex, o: &Options) -> String 
         return format!(
             "No sounds are sorted as {} yet. Pick another type, or Any type.",
             o.sound_type.as_deref().unwrap_or("")
+        );
+    }
+    // Only sounds the index has can be suggested (deep listening may not have heard these yet).
+    let mut of_type: Vec<&Sound> = of_type.into_iter().filter(|s| index.active().contains(s.id)).collect();
+    if of_type.is_empty() {
+        return format!(
+            "None of your {kind}sounds have been listened to yet. Let deep listening or the scan finish, then shuffle \
+             again."
         );
     }
     if let Some(year) = o.year {
@@ -267,7 +282,7 @@ pub fn why_nothing(sounds: &[Sound], index: &SoundIndex, o: &Options) -> String 
     }
 }
 
-/// The folder a file is in, as .NET's `GetDirectoryName` gives it ("D:\" for a file at a drive's top, "/" at the
+/// The folder a file is in, as .NET's `GetDirectoryName` gives it (on Windows, `folders` also turns `/` into `\\`) ("D:\" for a file at a drive's top, "/" at the
 /// top of a Mac or Linux disk).
 fn directory(path: &str) -> &str {
     let Some(i) = path.rfind(['\\', '/']) else { return "" };
@@ -281,13 +296,15 @@ fn directory(path: &str) -> &str {
 
 /// Your sample folders by how little of them your projects use, then the biggest first: find forgotten packs.
 /// Hidden copies are left out. A folder spelt two ways (by case) counts once, under the first spelling met.
+/// As in C#, a project's use of a hidden copy isn't credited to the copy that's shown.
 pub fn folders(sounds: &[Sound], usage: &HashMap<i64, Usage>) -> Vec<FolderUse> {
     let mut at: HashMap<String, usize> = HashMap::new();
     let mut out: Vec<FolderUse> = Vec::new();
     for s in sounds.iter().filter(|s| !s.hidden) {
         let dir = directory(&s.path);
-        let i = *at.entry(case::key(dir)).or_insert_with(|| {
-            out.push(FolderUse { folder: dir.to_owned(), sounds: 0, used: 0, share: 0.0 });
+        let dir = if cfg!(windows) { dir.replace('/', "\\") } else { dir.to_owned() };
+        let i = *at.entry(case::key(&dir)).or_insert_with(|| {
+            out.push(FolderUse { folder: dir.clone(), sounds: 0, used: 0, share: 0.0 });
             out.len() - 1
         });
         out[i].sounds += 1;
@@ -362,6 +379,18 @@ mod tests {
     }
 
     #[test]
+    fn a_starred_unused_sound_is_not_like_itself() {
+        let (mut sounds, _, index) = library();
+        // Sound 12, a hat, starred but never used: the only hat you like.
+        sounds[11].favourite = true;
+        let o = Options { sound_type: Some("Hat".into()), count: 10, seed: 4, ..Options::default() };
+        let s = suggest(&sounds, &HashMap::new(), &index, &o);
+        let twelve = s.iter().find(|x| x.id == 12).unwrap();
+        assert_eq!(twelve.reason, "Never used, from Hats");
+        assert!(s.iter().any(|x| x.reason == "Never used. Sounds like 12, a favourite"), "{s:?}");
+    }
+
+    #[test]
     fn why_nothing_says_what_is_missing() {
         let (mut sounds, usage, index) = library();
         let o = Options { sound_type: Some("Snare".into()), ..Options::default() };
@@ -372,6 +401,11 @@ mod tests {
         );
         let o = Options { year: Some(1999), ..Options::default() };
         assert_eq!(why_nothing(&sounds, &index, &o), "No sounds are dated 1999. Pick another year, or Any year.");
+        // Pads the index hasn't heard yet.
+        sounds.push(analysed(40, r"D:\Packs\Pads\40.wav", "Pad"));
+        let o = Options { sound_type: Some("Pad".into()), ..Options::default() };
+        assert!(suggest(&sounds, &usage, &index, &o).is_empty());
+        assert!(why_nothing(&sounds, &index, &o).starts_with("None of your Pad sounds have been listened to yet"));
         for s in &mut sounds {
             s.hidden = true;
         }
