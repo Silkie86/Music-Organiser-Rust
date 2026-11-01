@@ -1,7 +1,8 @@
-//! The counted tables the chord reader's template priors read: how often each core is the labelled chord, and how
-//! often a chord of each core names each tension it can carry. Written by `theorybench tables --write` from the
-//! labels alone (folds 1 to 4, in beats, each core from the sources whose labels name it, each source counting as
-//! much as any other, half a beat added to each cell); don't edit it by hand.
+//! The counted tables the chord reader's priors read: how often each core is the labelled chord, how often a chord
+//! of each core names each tension it can carry, and how the labelled chords move from one to the next. Written by
+//! `theorybench tables --write` from the labels alone (folds 1 to 4; in beats, each core from the sources whose
+//! labels name it, and in changes of chord; each source counting as much as any other, half a beat or half a
+//! change added to each cell); don't edit it by hand.
 
 use super::weights::Tables;
 
@@ -9,8 +10,9 @@ use super::weights::Tables;
 /// tensions ("billboard").
 pub const COUNTED_FROM: &[&str] = &["billboard", "pop909cl"];
 
-/// The counted tables: f_core for each core, then f_ten for each core and interval above its root (a half where
-/// the core doesn't carry that note: never read).
+/// The counted tables: f_core for each core; f_ten for each core and interval above its root (a half where the
+/// core doesn't carry that note: never read); and f_motion for each group of the chord before, each interval its
+/// root moves up and each group of the next chord.
 #[rustfmt::skip]
 pub const COUNTED: Tables = Tables {
     core: [
@@ -48,5 +50,49 @@ pub const COUNTED: Tables = Tables {
         [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.0014705882352941176, 0.5, 0.0014705882352941176], // sus2
         [0.5, 0.00010343637176238768, 0.676048920232025, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.027410638517032737, 0.5, 0.5], // 7sus4
         [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.14010088272383353, 0.00012610340479192938], // 5
+    ],
+    motion: [
+        [ // from dominant
+            [0.0257560212410585, 0.0011333732799253318, 0.0686840842400163], // same root
+            [0.0038480735734347845, 0.001320233457939741, 0.016915551119893207], // up m2
+            [0.013492864447301219, 0.0008536638698259986, 0.030973047883222624], // up M2
+            [0.004409815821322572, 5.63134001922188e-5, 0.01602883655970819], // up m3
+            [0.0008989267720239002, 0.0009940994317979455, 0.0037111231529965197], // up M3
+            [0.07669002904852187, 0.0007584912100519532, 0.4451166220510892], // up 4th
+            [0.0004776200861080595, 0.0014142444038692257, 0.0034267668875189445], // up tritone
+            [0.048506582280513896, 0.0001967489621641657, 0.09164237236894825], // up 5th
+            [0.001039362333995847, 0.0001967489621641657, 0.015939472469156946], // up m6
+            [0.00824916232445216, 5.63134001922188e-5, 0.026169239867802375], // up M6
+            [0.01747032308471363, 0.0003371845241361126, 0.06136168588211754], // up m7
+            [0.008061140432593192, 0.0003371845241361126, 0.0034766766450950877], // up M7
+        ],
+        [ // from dim/aug
+            [0.007582705553815983, 0.004440066383272288, 0.03014917374020156], // same root
+            [0.017069419405451012, 0.00047501970759020456, 0.15247802791376516], // up m2
+            [0.0028540477129994552, 0.0012680290427266214, 0.02066245988856653], // up M2
+            [0.004028862630703094, 0.016668015042882473, 0.018694635635726476], // up m3
+            [0.00876731986152028, 0.00047501970759020456, 0.021475068003704263], // up M3
+            [0.08111698714148828, 0.0012680290427266214, 0.1581858834997306], // up 4th
+            [0.00521347693840739, 0.0012680290427266214, 0.056210688509696086], // up tritone
+            [0.004821871965839511, 0.0012680290427266214, 0.022610685361405272], // up 5th
+            [0.0012680290427266214, 0.00047501970759020456, 0.10111860953991053], // up m6
+            [0.0012680290427266214, 0.0012680290427266214, 0.008003708696385834], // up M6
+            [0.0083757148889524, 0.0012680290427266214, 0.1033996436453132], // up m7
+            [0.001659634015294501, 0.00047501970759020456, 0.13236898285279405], // up M7
+        ],
+        [ // from other
+            [0.009576306877055258, 0.0008359140254393978, 0.05220762199998739], // same root
+            [0.00012860672015619135, 0.0011196553140869173, 0.023664594021526406], // up m2
+            [0.009183690295709925, 0.0007099387910574293, 0.15544324477777158], // up M2
+            [0.0019199842555207506, 0.0004523098606273597, 0.03363446415268641], // up m3
+            [0.0014055646209032648, 0.0005372408132765527, 0.024868299286711082], // up M3
+            [0.015520417789068486, 7.4795374726343e-5, 0.25397362142533425], // up 4th
+            [0.00023647993138351154, 0.0007976223093999054, 0.001497587333933973], // up tritone
+            [0.010455387268736906, 0.00025725417179281045, 0.15921236906258132], // up 5th
+            [0.0008190614457722917, 0.0001391191005446526, 0.04582692117057263], // up m6
+            [0.0029166214876272505, 0.0013097069122701471, 0.05823067664263145], // up M6
+            [0.0015497285435796648, 8.49737279579729e-5, 0.10183195243170587], // up m7
+            [0.002286986361033306, 0.0015101038772634221, 0.025781177819567874], // up M7
+        ],
     ],
 };

@@ -6,8 +6,8 @@ use std::ops::Range;
 
 use super::hear_tests::{BAR, BEAT, Music, keys_only, line, notes, with_bass};
 use super::{
-    COUNTED, COUNTED_FROM, Candidate, Core, EVEN, Evidence, Feature, HAND, Hearing, Label, Mass, PerFeature, Push,
-    Route, Scored, Shape, SpanFacts, Weights,
+    COUNTED, COUNTED_FROM, Candidate, Core, EVEN, Evidence, Feature, Group, HAND, Hearing, Label, Mass, PerFeature,
+    Push, Route, Scored, Shape, SpanFacts, Weights,
 };
 use crate::notes::{Note, Role};
 use crate::pitch::PitchClass;
@@ -485,11 +485,13 @@ fn the_priors_stay_finite_on_any_table_and_a_trust_of_0_leaves_them_out() {
 #[test]
 fn the_counted_tables_hold_shares_and_say_what_the_labels_say() {
     use Core::*;
-    // Every cell is a share, never 0 or 1; the cores' shares add up to 1; a note a core can't carry keeps the half it
-    // starts with (the prior never reads it).
-    let cells = || COUNTED.core.iter().chain(COUNTED.tension.iter().flatten());
+    // Every cell is a share, never 0 or 1; the cores' shares add up to 1, and each group's ways to move on; a note a
+    // core can't carry keeps the half it starts with (the prior never reads it).
+    let motion = || COUNTED.motion.iter().flatten().flatten();
+    let cells = || COUNTED.core.iter().chain(COUNTED.tension.iter().flatten()).chain(motion());
     assert!(cells().all(|&f| f > 0.0 && f < 1.0));
     assert!((COUNTED.core.iter().sum::<f64>() - 1.0).abs() < 1e-9);
+    assert!(COUNTED.motion.iter().all(|group| (group.iter().flatten().sum::<f64>() - 1.0).abs() < 1e-9));
     for core in Core::ALL {
         for interval in 0..12u8 {
             if !core.tensions().has(i32::from(interval)) {
@@ -507,6 +509,40 @@ fn the_counted_tables_hold_shares_and_say_what_the_labels_say() {
     );
     let ten = |core: Core, interval: usize| COUNTED.tension[core.index()][interval];
     assert!(ten(Major7, 2) > 100.0 * ten(Minor7, 8) && ten(Dominant7Sus4, 2) > 0.5);
+    // A dominant goes up a fourth to another chord (V to I) more often than it moves any other way, nearly half the
+    // time; a diminished or augmented chord rises a semitone to another chord several times as often as any other
+    // chord does.
+    let [dominant, dim_aug, other] = Group::ALL.map(Group::index);
+    let from_dominant = COUNTED.motion[dominant];
+    assert!(motion().take(36).all(|&f| f <= from_dominant[5][other]) && from_dominant[5][other] > 0.4);
+    assert!(COUNTED.motion[dim_aug][1][other] > 5.0 * COUNTED.motion[other][1][other]);
+}
+
+#[test]
+fn the_pair_prior_reads_how_the_root_moves_and_the_groups_of_the_two_chords() {
+    let [dominant, dim_aug, other] = Group::ALL.map(Group::index);
+    let pair = |from: &str, to: &str| COUNTED.pair_prior(label(from), label(to));
+    // G7 to C and to Cmaj7: a dominant up a fourth to another chord; C♯dim7 to Dm, rising a semitone.
+    assert_eq!(pair("G7", "C"), COUNTED.motion[dominant][5][other].ln());
+    assert_eq!(pair("G7", "Cmaj7"), pair("G7", "C"));
+    assert_eq!(pair("Dbdim7", "Dm"), COUNTED.motion[dim_aug][1][other].ln());
+    // The same moves on any root read the same; V to I is likelier than V up a semitone, and a diminished seventh
+    // rising a semitone likelier than a minor chord doing so.
+    for root in PitchClass::ALL {
+        let on = |name: &str, up: i32| {
+            let l = label(name);
+            Label::new(l.root.up(root.number().into()).up(up), l.core)
+        };
+        assert_eq!(COUNTED.pair_prior(on("G7", 0), on("C", 0)), pair("G7", "C"));
+    }
+    assert!(pair("G7", "C") > pair("G7", "Ab") && pair("Dbdim7", "Dm") > pair("Dbm", "Dm"));
+    // On even tables every move costs the same, ln 36; a share of 0 or not a number reads the floor, never ln 0.
+    assert!((EVEN.pair_prior(label("G7"), label("C")) - (1.0f64 / 36.0).ln()).abs() < 1e-12);
+    let mut tables = EVEN;
+    tables.motion[dominant][5][other] = 0.0;
+    tables.motion[other][2][other] = f64::NAN;
+    let (never, nan) = (tables.pair_prior(label("G7"), label("C")), tables.pair_prior(label("C"), label("Dm")));
+    assert!(never.is_finite() && never < -13.0 && nan == never);
 }
 
 #[test]

@@ -309,6 +309,44 @@ impl Core {
             && heard.contains_all(self.fifth())
             && !heard.intersection(self.tensions()).is_empty()
     }
+
+    /// How a chord of this core tends to move on ([`Group`]).
+    pub const fn group(self) -> Group {
+        match self {
+            Core::Dominant7 | Core::Dominant7Sus4 => Group::Dominant,
+            Core::HalfDiminished | Core::Diminished7 | Core::Diminished | Core::Augmented => Group::DimAug,
+            _ => Group::Other,
+        }
+    }
+}
+
+/// How a chord tends to move on to the next, for the pair term (the design's g): a dominant seventh, plain or sus,
+/// goes up a fourth (V to I) or down a semitone (a tritone sub); a diminished or augmented chord, whose altered fifth
+/// says which it is (dim, m7b5, dim7, +), moves by a step (C♯dim7 to Dm); any other chord moves freely.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Group {
+    Dominant,
+    DimAug,
+    Other,
+}
+
+impl Group {
+    /// Every group, in order.
+    pub const ALL: [Group; 3] = [Group::Dominant, Group::DimAug, Group::Other];
+
+    /// Its place in [`Group::ALL`], from 0 to 2.
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+
+    /// Its name in the counted tables: "dominant", "dim/aug", "other".
+    pub const fn name(self) -> &'static str {
+        match self {
+            Group::Dominant => "dominant",
+            Group::DimAug => "dim/aug",
+            Group::Other => "other",
+        }
+    }
 }
 
 /// A set of cores, one bit each (bit `k` for the core whose [`Core::index`] is `k`).
@@ -521,6 +559,28 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_chord_moves_on_as_its_group_does() {
+        for (k, group) in Group::ALL.into_iter().enumerate() {
+            assert_eq!(group.index(), k);
+        }
+        // The dominants are the cores with a major third's ♭7 or a 4th's ♭7; dim/aug those whose altered fifth says
+        // which chord they are (a power chord's fifth is a plain one); every other core moves freely.
+        for core in Core::ALL {
+            let dominant = core.intervals().has(10) && !core.intervals().has(3) && !core.intervals().has(6);
+            let altered = !core.fifth().is_empty() && core != Core::Power;
+            let want = if dominant {
+                Group::Dominant
+            } else if altered {
+                Group::DimAug
+            } else {
+                Group::Other
+            };
+            assert_eq!(core.group(), want, "{core:?}");
+        }
+        assert_eq!(Group::ALL.map(Group::name), ["dominant", "dim/aug", "other"]);
     }
 
     #[test]
