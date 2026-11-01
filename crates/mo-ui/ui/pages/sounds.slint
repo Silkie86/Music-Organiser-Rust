@@ -21,6 +21,8 @@ export struct SoundTile {
     favourite: bool,
     // How liked, from 0 to 1, or below 0 when it isn't known yet.
     liked: float,
+    // Why: "Favourite, in 4 projects, played 12 times".
+    liked-why: string,
     wave: string,
     points: int,
     picked: bool,
@@ -73,6 +75,8 @@ export struct PickedSound {
     favourite: bool,
     // What the analysis says it sounds like ("punchy, bright").
     character: string,
+    // Why it's as liked as it is, once that's known: "Favourite, in 4 projects, played 12 times".
+    liked-why: string,
 }
 
 export global SoundsData {
@@ -173,6 +177,9 @@ component SoundTileView inherits Rectangle {
     background: tile.picked ? Theme.surface-raised : Theme.surface;
     ListLine {
         selected: false;
+        // Why it's as liked as it is, when the mouse rests on the liked bar at the bottom.
+        tip: root.tile.liked-why;
+        tip-below: self.height - Space.md - Space.xs;
         clicked => {
             root.chosen();
             SoundsData.select(root.tile.row);
@@ -215,7 +222,7 @@ component SoundTileView inherits Rectangle {
                 playing: root.tile.playing;
                 played: root.tile.playing ? SoundsData.played : 1;
             }
-            // How liked, as a thin bar (only once the scores are known).
+            // How liked, as a thin bar (only once the scores are known); the tile's bottom strip says why.
             Rectangle {
                 height: 3px;
                 border-radius: 1.5px;
@@ -467,6 +474,16 @@ component SoundPanel inherits SidePanel {
             }
         }
     }
+    if SoundsData.picked.liked-why != "": VerticalLayout {
+        spacing: Space.xs;
+        Caps { text: "LIKED"; }
+        Text {
+            text: SoundsData.picked.liked-why;
+            color: Theme.muted;
+            font-size: Type.meta;
+            wrap: word-wrap;
+        }
+    }
     if SoundsData.picked.character != "": Text {
         text: SoundsData.picked.character;
         color: Theme.muted;
@@ -612,7 +629,7 @@ export component SoundsPage inherits Rectangle {
                 picked(v) => { SoundsData.pick("tag", v); }
             }
             if SoundsData.knows-use: ToggleChip {
-                text: "In my songs";
+                text: "In my projects";
                 on: SoundsData.used;
                 clicked => { SoundsData.toggle("used"); }
             }

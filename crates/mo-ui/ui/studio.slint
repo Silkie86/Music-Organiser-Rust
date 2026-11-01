@@ -622,9 +622,11 @@ export component MenuChip inherits Rectangle {
 // A line of a list that can be picked: the shared look for every list's rows (rule 16).
 export component ListLine inherits Rectangle {
     in property <bool> selected;
-    // A tooltip for the part of the line right of `tip-from` (a date, say), shown by the mouse.
+    // A tooltip for the part of the line right of `tip-from` and below `tip-below` (a date, say, or a tile's
+    // bottom strip), shown by the mouse.
     in property <string> tip;
     in property <length> tip-from;
+    in property <length> tip-below;
     callback clicked;
     callback double-clicked;
     // A right click, after the line is picked, with the mouse's place in the window: the page opens its
@@ -652,7 +654,7 @@ export component ListLine inherits Rectangle {
     }
     Tip {
         text: root.tip;
-        hovering: touch.has-hover && !touch.pressed && touch.mouse-x >= root.tip-from;
+        hovering: touch.has-hover && !touch.pressed && touch.mouse-x >= root.tip-from && touch.mouse-y >= root.tip-below;
         at-x: touch.mouse-x;
         at-y: touch.mouse-y + Space.xl;
         above-y: touch.mouse-y - Space.sm;

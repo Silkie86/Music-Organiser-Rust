@@ -188,6 +188,10 @@ fn sounds_shots(
 ) {
     app.set_place(Place::Sounds.index() as i32);
     let data = app.global::<mo_ui::SoundsData>();
+    // The first tile's liked bar, saying why.
+    hover(window, 350.0, 330.0);
+    shots.push(("sounds-liked-tip.png".into(), capture_after(window, Duration::from_millis(750))));
+    hover(window, -1.0, -1.0);
     // Autoplay is on, so picking a sound plays it.
     data.invoke_select(6);
     data.set_played(0.35);
