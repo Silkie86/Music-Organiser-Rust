@@ -15,6 +15,9 @@ path = "src/main.rs"
 [dependencies]
 mo-formats = { path = "../../crates/mo-formats" }
 mo-harmony = { path = "../../crates/mo-harmony", features = ["hand-cases"] }
+# Solomon's packs are read as the MIDI page reads them (`theorybench packs`).
+mo-library = { path = "../../crates/mo-library" }
+mo-midi = { path = "../../crates/mo-midi" }
 rayon.workspace = true
 thread-priority.workspace = true
 serde = { version = "1", features = ["derive"] }

@@ -1,15 +1,16 @@
-//! The labelled music the bench reads: one JSON object a line, made from a public dataset by a script in `convert/`.
-//! Nothing in it comes from Solomon's own files, and the files stay outside the repository.
+//! The labelled music the bench reads: one JSON object a line, made from a public dataset by a script in `convert/`,
+//! or from Solomon's own MIDI packs by `theorybench packs` on his computer ([`OWN`]). The files stay outside the
+//! repository.
 
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use mo_harmony::Key;
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
 /// One piece: its notes by part, its bar grid, and the keys and chords someone (or some program) labelled.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Item {
     pub source: String,
     pub id: String,
@@ -38,10 +39,36 @@ pub struct Item {
     #[serde(default)]
     pub chord_labels: String,
     /// The licence the notes and labels come under ("MIT", "CC0", "CC BY 4.0"): keyfit learns only from those whose
-    /// fitted weights may ship ([`Item::may_learn`]) and only measures the rest.
+    /// fitted weights may ship ([`Item::may_learn`]) and only measures the rest. Solomon's own music says [`OWN`].
     #[serde(default)]
     pub licence: String,
+    /// Pieces in the same group share a fold: the files of one pack, which one person made alike. Empty for a
+    /// dataset's songs, each its own.
+    #[serde(default)]
+    pub group: String,
+    /// How the piece is heard whole: a dataset's song as a song; a pack's part as the MIDI page hears it.
+    #[serde(default)]
+    pub whole: Whole,
 }
+
+/// How a piece is heard whole.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Whole {
+    /// A song, heard as a song.
+    #[default]
+    Song,
+    /// A part of a pack's file, or a section of one between rests, heard as a loop.
+    Loop,
+    /// A piece the MIDI page cut from a part longer than 16 bars: heard as a window, since it needn't start or end
+    /// where the music does.
+    Window,
+}
+
+/// The licence `theorybench packs` gives Solomon's own music. Rule 5: only counts and averages from it go in code,
+/// and, with his leave (2026-11-01), the key finder's stream weights, minor weight and calibration fitted again
+/// (`keyfit --rescale`). Nothing else is ever learned from it.
+pub const OWN: &str = "Solomon's own (rule 5)";
 
 fn four() -> u32 {
     4
@@ -52,7 +79,7 @@ fn yes() -> bool {
 }
 
 /// One part (a track) and its notes: start, length (ticks), MIDI key, velocity (MIDI 1.0's 0 to 127).
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Part {
     /// "melody", "bass", "chords", "accompaniment", "drums", or "" when the dataset doesn't say.
     #[serde(default)]
@@ -123,6 +150,11 @@ impl Item {
         }
     }
 
+    /// Whether this is Solomon's own music ([`OWN`]).
+    pub fn is_own(&self) -> bool {
+        self.licence == OWN
+    }
+
     /// Whether every key label is the same key (no key change).
     pub fn one_key(&self) -> bool {
         let mut keys = self.keys.iter().filter_map(|(_, _, k)| Key::parse(k));
@@ -185,8 +217,10 @@ mod tests {
             "GPL-3.0",
             "MIT-0 or GPL",
             "measuring only (RS200)",
+            OWN,
         ] {
             assert!(!with(no).may_learn(), "{no}");
         }
+        assert!(with(OWN).is_own() && !with("MIT").is_own());
     }
 }

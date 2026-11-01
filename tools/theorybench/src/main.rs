@@ -1,8 +1,9 @@
 //! The theory bench: runs the harmony engine, and the C# app's engine as it was, over music other people labelled,
 //! and says how often each gets the key and the chords right. See README.md in this folder.
 //!
-//! The labelled music is made from public datasets by the scripts in `convert/` and stays outside the repository;
-//! nothing from it goes into the app.
+//! The labelled music is made from public datasets by the scripts in `convert/`, or from Solomon's own MIDI packs by
+//! `theorybench packs` on his computer. It stays outside the repository; nothing from it goes into the app but the
+//! numbers fitted on it (and from his packs, only those rule 5 allows).
 
 mod answerfit;
 mod baseline;
@@ -13,6 +14,7 @@ mod item;
 mod keyfit;
 mod keys;
 mod metrics;
+mod packs;
 mod profiles;
 
 use std::process::ExitCode;
@@ -20,7 +22,8 @@ use std::process::ExitCode;
 const USAGE: &str = "theorybench keys <labelled.jsonl>... [--part <role>] [--aligned] [--bars <lengths>]
 theorybench keyfit <labelled.jsonl>... [--aligned] [--bars <lengths>] [--lambda-delta <x>|inf] [--inputs <kinds>]
                    [--picks <n>] [--weigh <source>=<w>] [--dump <file>] [--against <file>] [--hand <cases>]
-                   [--final | --write <weights.rs>]
+                   [--shipped | --rescale] [--final | --write <weights.rs>]
+theorybench packs <folder>... --out <file.jsonl>
 theorybench chords <labelled.jsonl>... --answers <name>=<answers.jsonl> [--answers ...] [--dump <file>]
 
   keys       how often each key finder names the labelled key, on whole songs and on clips (8 bars long unless --bars
@@ -40,6 +43,11 @@ theorybench chords <labelled.jsonl>... --answers <name>=<answers.jsonl> [--answe
   --hand     prints each fitted model's reading of these hand cases (such as 13,14,16)
   --final    fits on folds 1 to 4 and scores the kept-back fold 0, once, logging the run in test-runs.md
   --write    fits on every song and writes the weights file
+  --shipped  scores the finder built in, as it is (folds 1 to 4; nothing fitted), to compare a refit with
+  --rescale  fits only each stream's scale, the minor weight and the calibration of the finder built in, on Solomon's
+             own pieces alone (rule 5's exception); its thresholds are kept
+  packs      Solomon's MIDI packs as labelled music, on his computer: each part of each file whose name gives one key
+  --out      where to write them: a .jsonl outside this repository
   chords     how often each chord reader names the labelled chord, scored as mir_eval scores it
   --answers  the chords an engine read in each piece, as the C# helper in cs/ writes them; the first is the baseline
   --dump     write every piece's labels, chords read and scores to a file, for convert/check_mir_eval.py";
@@ -51,6 +59,7 @@ fn main() -> ExitCode {
         Some("keys") => keys::run(&args[1..]),
         Some("keyfit") => keyfit::run(&args[1..]),
         Some("chords") => chords::run(&args[1..]),
+        Some("packs") => packs::run(&args[1..]),
         _ => Err(USAGE.to_owned()),
     };
     match result {

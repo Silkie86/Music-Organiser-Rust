@@ -217,11 +217,14 @@ fn in_one_scale(cases: &[Graded], below: f64) -> (f64, f64) {
     (shares.get(at).copied().unwrap_or(0.0), refused)
 }
 
+/// The cases that may be given a key: enough notes, enough of them in one scale.
+fn seen_of(cases: &[Graded], not_tonal_below: f64) -> Vec<Seen> {
+    cases.iter().filter(|c| c.notes >= MIN_NOTES && c.diatonic_fit >= not_tonal_below).map(seen).collect()
+}
+
 /// Fits the thresholds on these cases; notes with less than `not_tonal_below` of their time in one scale have no key.
 pub fn fit(cases: &[Graded], not_tonal_below: f64) -> Fitted {
-    let (percentile, refused) = in_one_scale(cases, not_tonal_below);
-    let seen: Vec<Seen> =
-        cases.iter().filter(|c| c.notes >= MIN_NOTES && c.diatonic_fit >= not_tonal_below).map(seen).collect();
+    let seen = seen_of(cases, not_tonal_below);
     let at = |j: usize| seen.iter().filter(move |s| s.knot == j);
     // The answers of a kind at a knot, among the cases `left` keeps.
     let answers = |j: usize, kind: Kind, left: &dyn Fn(&Seen) -> bool| -> Vec<(usize, f64, bool)> {
@@ -243,13 +246,38 @@ pub fn fit(cases: &[Graded], not_tonal_below: f64) -> Fitted {
         smallest(&answers(j, Kind::Home, &left), HOME_TARGET)
     });
     let home = never_rising(home_raw);
+    let thresholds = Thresholds { one, pair, home };
+    let knot_lines = lines(&seen, &thresholds, [one_raw, pair_raw, home_raw]);
+    Fitted { thresholds, not_tonal_below, scale_line: scale_line(cases, not_tonal_below), knot_lines }
+}
 
-    let scale_line = format!(
+/// How thresholds chosen already come out on these cases, in the lines [`fit`] gives; nothing is fitted. For a refit
+/// that keeps the thresholds built in (`keyfit --rescale`).
+pub fn kept(cases: &[Graded], thresholds: &Thresholds, not_tonal_below: f64) -> Fitted {
+    let seen = seen_of(cases, not_tonal_below);
+    let knot_lines = lines(&seen, thresholds, [[None; THRESHOLD_KNOTS]; 3]);
+    Fitted { thresholds: *thresholds, not_tonal_below, scale_line: scale_line(cases, not_tonal_below), knot_lines }
+}
+
+/// The line about the share of notes in one scale a key needs.
+fn scale_line(cases: &[Graded], not_tonal_below: f64) -> String {
+    let (percentile, refused) = in_one_scale(cases, not_tonal_below);
+    format!(
         "Notes in one scale a key needs: {not_tonal_below:.3}, as built in; {:.2}% of these cases have less (the {:.1}th \
          percentile is {percentile:.3}).",
         100.0 * refused,
         NOT_TONAL_PERCENTILE * 100.0
-    );
+    )
+}
+
+/// A line for each knot: how often each kind of answer is given with these thresholds and how often it's wrong, and
+/// where a fitted threshold was raised (`raws`: one key, the pair and the home note as fitted, `None` where nothing
+/// was).
+fn lines(seen: &[Seen], thresholds: &Thresholds, raws: [[Option<f64>; THRESHOLD_KNOTS]; 3]) -> Vec<String> {
+    let at = |j: usize| seen.iter().filter(move |s| s.knot == j);
+    let knot = |t: &[f64; THRESHOLD_KNOTS], j: usize| t.get(j).copied().unwrap_or(NEVER);
+    let Thresholds { one, pair, home } = thresholds;
+    let [one_raw, pair_raw, home_raw] = raws;
     let knot_names = ["1 bar", "2 bars", "3 to 4 bars", "5 to 8 bars", "9 to 16 bars", "17 bars or more, and songs"];
     let mut knot_lines = Vec::new();
     for (j, name) in knot_names.iter().enumerate() {
@@ -258,7 +286,7 @@ pub fn fit(cases: &[Graded], not_tonal_below: f64) -> Fitted {
             continue;
         }
         let songs = cases.iter().map(|s| s.song).max().map_or(0, |m| m + 1);
-        let given = |s: &Seen| s.given(knot(&one, j), knot(&pair, j), knot(&home, j));
+        let given = |s: &Seen| s.given(knot(one, j), knot(pair, j), knot(home, j));
         let say = |kind: Kind, t: f64, raw: Option<f64>| {
             if t >= NEVER {
                 return "never".to_owned();
@@ -284,12 +312,12 @@ pub fn fit(cases: &[Graded], not_tonal_below: f64) -> Fitted {
         knot_lines.push(format!(
             "{name} ({} cases): one key {}; key or its relative {}; home note {}.",
             cases.len(),
-            say(Kind::One, knot(&one, j), one_raw.get(j).copied().flatten()),
-            say(Kind::Pair, knot(&pair, j), pair_raw.get(j).copied().flatten()),
-            say(Kind::Home, knot(&home, j), home_raw.get(j).copied().flatten()),
+            say(Kind::One, knot(one, j), one_raw.get(j).copied().flatten()),
+            say(Kind::Pair, knot(pair, j), pair_raw.get(j).copied().flatten()),
+            say(Kind::Home, knot(home, j), home_raw.get(j).copied().flatten()),
         ));
     }
-    Fitted { thresholds: Thresholds { one, pair, home }, not_tonal_below, scale_line, knot_lines }
+    knot_lines
 }
 
 #[cfg(test)]
