@@ -1,6 +1,6 @@
-//! The Backup section of the Space page (Solomon liked the mock-up, 1 Nov 2026): the backup drive and its last run,
-//! How much (Full, Slim, Essentials), the format (plain folders or one zip per song), the list of folders (each whole
-//! or slimmed), and what goes and what's left out, and why.
+//! The Backup page (Solomon liked the mock-up, 1 Nov 2026; a page of its own in the rail): the backup drive and its
+//! last run, How much (Full, Slim, Essentials), the format (plain folders or one zip per song), the list of folders
+//! (each whole or slimmed), and what goes and what's left out, and why.
 //!
 //! Three parts, none of them touching a window:
 //! - [`Settings`]: your choices, kept in `backup.txt` in the app's folder (a file of its own, so the C# app's

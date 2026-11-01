@@ -1,4 +1,4 @@
-//! Fills the Backup section from `mo_app::backup` and answers its buttons. Everything slow (walking the folders,
+//! Fills the Backup page from `mo_app::backup` and answers its buttons. Everything slow (walking the folders,
 //! reading the library, the backup itself) runs on low-priority threads (rule 21); the window only ever shows what
 //! they send back (rule 12). Working out what goes is redone after every change, newest ask first.
 
@@ -20,7 +20,7 @@ use slint::{ComponentHandle, ModelRc, SharedString, VecModel, Weak};
 
 use crate::{AppWindow, BackupData, BackupFolderLine, LeftOutLine};
 
-/// What the section knows, on the window's thread.
+/// What the page knows, on the window's thread.
 #[derive(Default)]
 struct Section {
     settings: Settings,
@@ -38,7 +38,7 @@ struct Section {
     running: Option<Arc<AtomicBool>>,
     /// Stops the plan being worked out when a newer one is asked for.
     plan_stop: Arc<AtomicBool>,
-    /// The section has been shown, so its folders are walked (not before: nobody may open Space).
+    /// The page has been shown, so its folders are walked (not before: nobody may open it).
     shown: bool,
 }
 
@@ -155,13 +155,13 @@ pub fn connect(app: &AppWindow, library: PathBuf) {
         });
     });
     show(&app.as_weak());
-    // The app opened on Space.
+    // The app opened on the page (on Space until Backup has its own place in the rail).
     if app.get_place() == mo_app::places::Place::Space.index() as i32 {
         shown();
     }
 }
 
-/// The section is on show: the first time, its folders are walked to work out what goes.
+/// The page is on show: the first time, its folders are walked to work out what goes.
 pub fn shown() {
     let first = SECTION.with(|s| !std::mem::replace(&mut s.borrow_mut().shown, true));
     if first {
@@ -295,7 +295,7 @@ fn set_busy(weak: &Weak<AppWindow>, text: &str, done: f32) {
     }
 }
 
-/// Puts the section's words on the page.
+/// Puts the words on the page.
 fn show(weak: &Weak<AppWindow>) {
     let Some(app) = weak.upgrade() else { return };
     let lines: PageLines = SECTION.with(|s| {

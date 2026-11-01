@@ -69,7 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Space's Backup section, filled with made-up folders.
     app.set_place(Place::Space.index() as i32);
     mo_ui::backup::show_lines(&app, mo_ui::backup::sample_lines());
-    shots.push(("space-backup.png".into(), capture(&window)));
+    shots.push(("backup.png".into(), capture(&window)));
     app.set_place(Place::Songs.index() as i32);
     for theme in THEMES.iter().skip(1) {
         mo_ui::apply_look(&app, &Look::from_settings(Some(theme.name), None));
