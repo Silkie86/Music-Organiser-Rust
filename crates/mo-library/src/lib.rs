@@ -12,7 +12,7 @@ pub mod scan;
 pub mod songs;
 pub mod watch;
 
-pub use db::{Library, LibraryError, PathSet, ProjectPlugin, ProjectSample, SaveDetail};
+pub use db::{Library, LibraryError, PathSet, ProjectPlugin, ProjectSample, SampleUse, SaveDetail, UsageRules};
 pub use mo_formats::{Confidence, PluginKind};
 pub use songs::{SaveRun, Song, SongChoices, SongDoubt};
 
