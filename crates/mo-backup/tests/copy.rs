@@ -174,3 +174,103 @@ fn a_file_named_like_a_half_copy_is_never_mixed_up_with_one() {
     assert_eq!(of_lines(&lines, "x.flp"), Outcome::New);
     assert!(matches!(of_lines(&lines, "x.flp.mo-part"), Outcome::Failed(_)));
 }
+
+#[test]
+fn the_same_bytes_are_stored_once() {
+    let root = fixtures("backup-copy-share");
+    let music = root.join("music");
+    let backup = root.join("backup");
+    fs::create_dir_all(&backup).unwrap();
+    let kick: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+    write(&music.join("Pack/Kick.wav"), &kick, 300);
+    let stop = AtomicBool::new(false);
+    let report = run(&files(&music, &stop).unwrap(), &backup, &Options::new("x"), &stop).unwrap();
+    assert!(report.record_not_saved.is_none(), "{report:?}");
+
+    // A copied folder with the same kick, saved at another time.
+    write(&music.join("Song/Samples/Kick.wav"), &kick, 100);
+    let lines = run(&files(&music, &stop).unwrap(), &backup, &Options::new("x"), &stop).unwrap().lines;
+    let line = lines.iter().find(|l| l.source.ends_with("Song/Samples/Kick.wav")).unwrap();
+    assert_eq!(line.outcome, Outcome::New);
+    assert_eq!(line.written, 0);
+    // Some drives can't share (FAT, exFAT): the test's own drive can on Linux, Mac and Windows (NTFS).
+    assert!(line.shared, "{line:?}");
+    let copy = place_on_backup(&backup, &music.join("Song/Samples/Kick.wav")).unwrap();
+    assert_eq!(fs::read(&copy).unwrap(), kick);
+
+    // Both are up to date next time, though they share one time between them.
+    let lines = run(&files(&music, &stop).unwrap(), &backup, &Options::new("x"), &stop).unwrap().lines;
+    assert!(lines.iter().all(|l| l.outcome == Outcome::UpToDate && l.written == 0), "{lines:?}");
+
+    // One of them changes: only its place on the backup changes; the other keeps the old bytes.
+    let mut louder = kick.clone();
+    louder[100] = 0xFF;
+    write(&music.join("Song/Samples/Kick.wav"), &louder, 10);
+    run(&files(&music, &stop).unwrap(), &backup, &Options::new("x"), &stop).unwrap();
+    assert_eq!(fs::read(&copy).unwrap(), louder);
+    assert_eq!(fs::read(place_on_backup(&backup, &music.join("Pack/Kick.wav")).unwrap()).unwrap(), kick);
+}
+
+#[test]
+fn a_record_line_that_lies_is_never_used_to_share() {
+    let root = fixtures("backup-copy-record-lies");
+    let music = root.join("music");
+    let backup = root.join("backup");
+    fs::create_dir_all(&backup).unwrap();
+    let bytes: Vec<u8> = (0..100_000u32).map(|i| (i % 7) as u8).collect();
+    write(&music.join("a.wav"), &bytes, 300);
+    let stop = AtomicBool::new(false);
+    run(&files(&music, &stop).unwrap(), &backup, &Options::new("x"), &stop).unwrap();
+    // Someone changes the backup's copy by hand (same size): the record still names its old bytes.
+    let a_copy = place_on_backup(&backup, &music.join("a.wav")).unwrap();
+    fs::write(&a_copy, vec![9u8; bytes.len()]).unwrap();
+    // And a line of nonsense.
+    let record = backup.join(".mo-backup/record.tsv");
+    let mut text = fs::read_to_string(&record).unwrap();
+    text.push_str("not a line\n");
+    fs::write(&record, text).unwrap();
+
+    write(&music.join("b.wav"), &bytes, 100);
+    let lines = run(&files(&music, &stop).unwrap(), &backup, &Options::new("x"), &stop).unwrap().lines;
+    let b = lines.iter().find(|l| l.source.ends_with("b.wav")).unwrap();
+    assert!(b.written == bytes.len() as u64 || b.shared, "{b:?}");
+    assert_eq!(fs::read(place_on_backup(&backup, &music.join("b.wav")).unwrap()).unwrap(), bytes);
+    // The changed copy of a.wav isn't taken as up to date: it's put right.
+    let a = lines.iter().find(|l| l.source.ends_with("a.wav")).unwrap();
+    assert!(matches!(a.outcome, Outcome::Updated { .. }), "{a:?}");
+    assert_eq!(fs::read(&a_copy).unwrap(), bytes);
+}
+
+#[test]
+fn a_lost_record_is_built_again_and_sharing_still_works() {
+    let root = fixtures("backup-copy-lost-record");
+    let music = root.join("music");
+    let backup = root.join("backup");
+    fs::create_dir_all(&backup).unwrap();
+    let bytes: Vec<u8> = (0..100_000u32).map(|i| (i % 13) as u8).collect();
+    write(&music.join("a.wav"), &bytes, 300);
+    let stop = AtomicBool::new(false);
+    run(&files(&music, &stop).unwrap(), &backup, &Options::new("x"), &stop).unwrap();
+    fs::remove_file(backup.join(".mo-backup/record.tsv")).unwrap();
+    // A run with nothing new records what's there again.
+    run(&files(&music, &stop).unwrap(), &backup, &Options::new("x"), &stop).unwrap();
+    write(&music.join("copy/a.wav"), &bytes, 100);
+    let lines = run(&files(&music, &stop).unwrap(), &backup, &Options::new("x"), &stop).unwrap().lines;
+    let copy = lines.iter().find(|l| l.source.ends_with("copy/a.wav")).unwrap();
+    assert!(copy.shared, "{copy:?}");
+}
+
+#[test]
+fn a_record_that_cant_be_read_is_left_alone() {
+    let root = fixtures("backup-copy-unreadable-record");
+    let music = root.join("music");
+    let backup = root.join("backup");
+    // Something that can't be read as a file where the record goes.
+    fs::create_dir_all(backup.join(".mo-backup/record.tsv")).unwrap();
+    write(&music.join("a.mid"), b"notes", 100);
+    let stop = AtomicBool::new(false);
+    let report = run(&files(&music, &stop).unwrap(), &backup, &Options::new("x"), &stop).unwrap();
+    assert_eq!(report.lines[0].outcome, Outcome::New);
+    assert!(report.record_not_saved.is_some());
+    assert!(backup.join(".mo-backup/record.tsv").is_dir());
+}
