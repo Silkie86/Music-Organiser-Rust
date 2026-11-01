@@ -2914,10 +2914,12 @@ name = "mo-backup"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "crc32fast",
  "mo-formats",
  "mo-space",
  "rayon",
  "sha2",
+ "zip",
 ]
 
 [[package]]

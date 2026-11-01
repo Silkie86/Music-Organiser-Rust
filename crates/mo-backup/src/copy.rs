@@ -31,7 +31,7 @@ use mo_space::size::FileEntry;
 pub const OLDER_VERSIONS: &str = "Older versions";
 
 /// What a file being copied is called until it has been checked.
-const PART: &str = ".mo-part";
+pub(crate) const PART: &str = ".mo-part";
 
 /// Times this close count as the same: FAT and exFAT drives (most USB drives) keep times in 2-second or 10 ms steps.
 const SAME_TIME: Duration = Duration::from_secs(2);
@@ -43,7 +43,7 @@ const BIG_COPY: u64 = 64 << 20;
 const SHARE_FROM: u64 = 64 << 10;
 
 /// The most read in one go.
-const BUFFER: usize = 1 << 20;
+pub(crate) const BUFFER: usize = 1 << 20;
 
 /// How a copy runs (Settings).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -102,7 +102,7 @@ pub struct Report {
 }
 
 /// Bigger than a FAT32 drive can hold in one file: a "drive full" for such a file doesn't mean the drive is full.
-const FAT32_LARGEST: u64 = (4 << 30) - 1;
+pub(crate) const FAT32_LARGEST: u64 = (4 << 30) - 1;
 
 /// Why a run couldn't start.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -211,14 +211,14 @@ pub fn run(files: &[FileEntry], backup: &Path, options: &Options, stop: &AtomicB
 
 /// The backup folder as it was when the run began, to notice it going away: a drive unplugged, or (on a Mac or Linux)
 /// unmounted, which leaves an empty folder on the system disk where it was.
-struct Drive<'a> {
+pub(crate) struct Drive<'a> {
     folder: &'a Path,
     #[cfg(unix)]
     device: u64,
 }
 
 impl<'a> Drive<'a> {
-    fn find(folder: &'a Path) -> Option<Drive<'a>> {
+    pub(crate) fn find(folder: &'a Path) -> Option<Drive<'a>> {
         let meta = fs::metadata(folder).ok().filter(|m| m.is_dir())?;
         #[cfg(unix)]
         {
@@ -232,7 +232,7 @@ impl<'a> Drive<'a> {
         }
     }
 
-    fn still_there(&self) -> bool {
+    pub(crate) fn still_there(&self) -> bool {
         let Ok(meta) = fs::metadata(self.folder) else { return false };
         #[cfg(unix)]
         {
@@ -643,7 +643,7 @@ fn buffer_for(size: u64) -> usize {
 
 /// Reads the next piece: `None` at the end. Tries again when the system interrupts a read; gives up with
 /// `Interrupted` when you stop the run.
-fn read_some(file: &mut File, buf: &mut [u8], stop: &AtomicBool) -> io::Result<Option<usize>> {
+pub(crate) fn read_some(file: &mut File, buf: &mut [u8], stop: &AtomicBool) -> io::Result<Option<usize>> {
     loop {
         if stop.load(Ordering::Relaxed) {
             return Err(io::Error::new(io::ErrorKind::Interrupted, "Stopped"));
@@ -667,7 +667,7 @@ fn same_file(a: &Metadata, b: &Metadata) -> bool {
 }
 
 /// Puts a checked copy in place of the file there, a read-only one too (Windows won't replace those otherwise).
-fn put_in_place(part: &Path, dest: &Path) -> io::Result<()> {
+pub(crate) fn put_in_place(part: &Path, dest: &Path) -> io::Result<()> {
     let was_read_only = set_read_only(dest, false);
     fs::rename(part, dest).inspect_err(|_| {
         if was_read_only {
@@ -677,7 +677,7 @@ fn put_in_place(part: &Path, dest: &Path) -> io::Result<()> {
 }
 
 /// Removes a temporary copy, a read-only one too.
-fn remove_part(part: &Path) {
+pub(crate) fn remove_part(part: &Path) {
     set_read_only(part, false);
     let _ = fs::remove_file(part);
 }
