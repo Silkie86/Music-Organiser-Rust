@@ -4,6 +4,8 @@
 //! the list draws them, so 357,000 sounds cost what's on screen. Sounds are read and played off the window's thread.
 //! Rediscover (unused sounds that fit your taste) is dug out on its own low-priority thread too.
 
+mod kit;
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -47,7 +49,10 @@ const TILES: i32 = 0;
 const LIST: i32 = 1;
 const HISTORY: i32 = 3;
 const REDISCOVER: i32 = 4;
-const VIEWS: [&str; 5] = ["Tiles", "List", "Galaxy", "History", "Rediscover"];
+const KITS: i32 = 5;
+const VIEWS: [&str; 6] = ["Tiles", "List", "Galaxy", "History", "Rediscover", "Kits"];
+/// The C# app's export folder setting in `library.db` (kits go in its Kits folder).
+const EXPORT_FOLDER_KEY: &str = "export_folder";
 
 /// Rediscover's How many choices (the C# app's), and the one it starts on.
 const COUNTS: [usize; 4] = [30, 60, 120, 250];
@@ -107,6 +112,8 @@ struct Page {
     re_started: bool,
     /// The answer to Rediscover's newest ask hasn't come yet.
     re_busy: bool,
+    /// The kit builder's pads and choices.
+    kit: kit::Kit,
 }
 
 impl Default for Page {
@@ -133,6 +140,7 @@ impl Default for Page {
             re_asked: 0,
             re_started: false,
             re_busy: false,
+            kit: kit::Kit::default(),
         }
     }
 }
@@ -143,6 +151,7 @@ impl Page {
         match self.view {
             HISTORY => self.history.get(row).map(|h| h.0),
             REDISCOVER => self.rediscover.get(row).map(|r| r.0),
+            KITS => None,
             _ => self.shown.get(row).copied(),
         }
     }
@@ -151,6 +160,7 @@ impl Page {
         match self.view {
             HISTORY => self.history.len(),
             REDISCOVER => self.rediscover.len(),
+            KITS => 0,
             _ => self.shown.len(),
         }
     }
@@ -160,6 +170,7 @@ impl Page {
         match self.view {
             HISTORY => self.history.iter().position(|h| h.0 == at),
             REDISCOVER => self.rediscover.iter().position(|r| r.0 == at),
+            KITS => None,
             _ => self.shown.iter().position(|&i| i == at),
         }
     }
@@ -388,6 +399,7 @@ struct Read {
     library: Library,
     view: Option<String>,
     count: Option<String>,
+    export_folder: Option<String>,
     autoplay: Option<String>,
 }
 
@@ -441,6 +453,8 @@ struct Settings {
     view: Option<String>,
     /// How many sounds Rediscover digs out.
     count: Option<String>,
+    /// Where exports (kits) go.
+    export_folder: Option<String>,
     autoplay: Option<String>,
     rules: UsageRules,
     weights: LikedWeights,
@@ -462,6 +476,7 @@ impl Settings {
         Settings {
             view: get(VIEW_KEY),
             count: get(COUNT_KEY),
+            export_folder: get(EXPORT_FOLDER_KEY),
             autoplay: get(AUTOPLAY_KEY),
             rules: UsageRules { needs_notes: on(USED_NEEDS_NOTES_KEY), not_muted_in_newest: on(USED_NOT_MUTED_KEY) },
             weights: LikedWeights::from_json(get(LIKED_WEIGHTS_KEY).as_deref()),
@@ -499,6 +514,7 @@ fn read_all(sounds_db: &Path, library_db: &Path, send: impl Fn(Step)) {
         library,
         view: settings.view.clone(),
         count: settings.count.clone(),
+        export_folder: settings.export_folder.clone(),
         autoplay: settings.autoplay.clone(),
     })));
     let Some(list) = list else { return };
@@ -680,7 +696,11 @@ fn loaded(app: &AppWindow, read: Result<Read, String>) {
         }
     };
     let count = read.count.and_then(|c| c.parse().ok()).filter(|c| COUNTS.contains(c)).unwrap_or(COUNT);
-    PAGE.with(|p| p.borrow_mut().re.count = count);
+    PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.re.count = count;
+        p.kit.export_folder = read.export_folder;
+    });
     show(app, read.library, read.view.as_deref(), read.autoplay.as_deref());
 }
 
@@ -706,6 +726,7 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
     });
     refresh(app);
     show_rediscover_chips(app);
+    kit::show(app);
     if PAGE.with(|p| p.borrow().view == REDISCOVER) {
         rediscover_now(app);
     }
@@ -812,8 +833,12 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
         if v == REDISCOVER && PAGE.with(|p| !p.borrow().re_started) {
             rediscover_now(&app);
         }
+        if v == KITS {
+            kit::show(&app);
+        }
     });
     wire_rediscover(app);
+    kit::wire(app);
     let weak = app.as_weak();
     data.on_columns_changed(move |n| {
         let Some(app) = weak.upgrade() else { return };
@@ -1224,6 +1249,7 @@ fn show_lists(app: &AppWindow) {
 fn redraw() {
     TILE_ROWS.with(|m| m.notify.reset());
     LINES.with(|m| m.notify.reset());
+    kit::redraw();
 }
 
 fn show_chips(app: &AppWindow) {

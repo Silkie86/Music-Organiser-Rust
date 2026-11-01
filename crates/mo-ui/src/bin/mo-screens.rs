@@ -209,6 +209,10 @@ fn sounds_shots(
     data.invoke_close_panel();
     data.invoke_pick_view(4);
     shots.push(("sounds-rediscover.png".into(), capture(window)));
+    data.invoke_pick_view(5);
+    data.invoke_kit_roll();
+    data.invoke_pad_lock(0);
+    shots.push(("sounds-kits.png".into(), capture(window)));
     data.invoke_pick_view(0);
     mo_ui::apply_look(app, &Look::from_settings(Some("Paper"), None));
     capture(window);
