@@ -1,0 +1,309 @@
+// The Backup section of the Space page (Solomon liked the mock-up, 1 Nov 2026): the backup drive and its last run,
+// How much, the format, the list of folders (each whole or slimmed), and what goes and what's left out, and why.
+// Only shared parts from studio.slint; mo-app decides every word (mo_app::backup), mo-ui/src/backup.rs fills it.
+// The section tabs are a Segmented here so the Space page can lift them into its own frame later.
+import { Theme, Type, Space, StudioButton, Segmented, FolderRow, PageHeader, Caps, Well, Groove, ProgressLine, EmptyState } from "../studio.slint";
+
+export struct BackupFolderLine {
+    path: string,
+    // Its size, or "Not plugged in" when its drive isn't there.
+    size: string,
+    // 0 Whole, 1 Slimmed.
+    mode: int,
+}
+
+export struct LeftOutLine {
+    why: string,
+    note: string,
+    size: string,
+}
+
+export global BackupData {
+    // The backup drive's folder; empty until one is picked.
+    in property <string> drive;
+    // How full the drive is, 0 to 1, and in words.
+    in property <float> drive-fill;
+    in property <string> drive-line;
+    in property <string> last-line;
+    // The run working now, in words; empty when none runs.
+    in property <string> busy;
+    in property <float> done;
+    in property <int> level: 1;
+    in property <string> level-note;
+    in property <int> format;
+    in property <string> format-note;
+    in property <[BackupFolderLine]> folders;
+    // What goes, of everything in the folders, once worked out.
+    in property <string> goes;
+    in property <string> of-all;
+    in property <float> goes-part;
+    in property <[LeftOutLine]> left-out;
+    // Shown instead of the totals while they're worked out, or when they can't be.
+    in property <string> plan-note: "Add a folder to see what goes";
+    callback pick-drive();
+    callback run();
+    callback stop();
+    callback level-picked(int);
+    callback format-picked(int);
+    callback add-folder();
+    callback add-library-folders();
+    callback mode-picked(int, int);
+    callback remove-folder(int);
+}
+
+export component BackupSection inherits Rectangle {
+    Flickable {
+        content-height: page.preferred-height;
+        page := VerticalLayout {
+            padding: Space.xl;
+            spacing: Space.xl;
+            alignment: start;
+            PageHeader {
+                title: "Space";
+                summary: "Backup: a lean copy of your music on another drive";
+                busy: BackupData.busy;
+                done: BackupData.done;
+            }
+            HorizontalLayout {
+                alignment: start;
+                Segmented {
+                    choices: ["Drives", "Clean", "Storage", "Backup"];
+                    current: 3;
+                }
+            }
+
+            // The drive.
+            Rectangle {
+                background: Theme.surface;
+                border-radius: Theme.radius;
+                border-width: 1px;
+                border-color: Theme.stroke;
+                HorizontalLayout {
+                    padding: Space.lg;
+                    spacing: Space.lg;
+                    VerticalLayout {
+                        spacing: Space.xs;
+                        horizontal-stretch: 1;
+                        Caps { text: "BACKUP DRIVE"; }
+                        HorizontalLayout {
+                            spacing: Space.md;
+                            Text {
+                                text: BackupData.drive != "" ? BackupData.drive : "No drive picked yet";
+                                color: BackupData.drive != "" ? Theme.text : Theme.muted;
+                                font-size: Type.row-title;
+                                font-weight: 600;
+                                overflow: elide;
+                            }
+                        }
+                        if BackupData.drive != "": ProgressLine {
+                            text: BackupData.drive-line;
+                            done: BackupData.drive-fill;
+                        }
+                        Text {
+                            text: BackupData.last-line;
+                            color: Theme.muted;
+                            font-size: Type.meta;
+                            wrap: word-wrap;
+                        }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        horizontal-stretch: 0;
+                        HorizontalLayout {
+                            spacing: Space.sm;
+                            alignment: end;
+                            StudioButton {
+                                text: BackupData.drive != "" ? "Change drive…" : "Pick a drive…";
+                                enabled: BackupData.busy == "";
+                                clicked => { BackupData.pick-drive(); }
+                            }
+                            if BackupData.busy == "": StudioButton {
+                                text: "Back up now";
+                                main: true;
+                                // Only once what goes is worked out.
+                                enabled: BackupData.goes != "";
+                                clicked => { BackupData.run(); }
+                            }
+                            if BackupData.busy != "": StudioButton {
+                                text: "Stop";
+                                clicked => { BackupData.stop(); }
+                            }
+                        }
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: Space.xl;
+                // How, and which folders.
+                VerticalLayout {
+                    spacing: Space.lg;
+                    horizontal-stretch: 3;
+                    VerticalLayout {
+                        spacing: Space.sm;
+                        Caps { text: "HOW MUCH"; }
+                        HorizontalLayout {
+                            alignment: start;
+                            Segmented {
+                                choices: ["Full", "Slim", "Essentials"];
+                                current: BackupData.level;
+                                picked(i) => { BackupData.level-picked(i); }
+                            }
+                        }
+                        Text {
+                            text: BackupData.level-note;
+                            color: Theme.muted;
+                            font-size: Type.meta;
+                            wrap: word-wrap;
+                        }
+                    }
+                    VerticalLayout {
+                        spacing: Space.sm;
+                        Caps { text: "FORMAT"; }
+                        HorizontalLayout {
+                            alignment: start;
+                            Segmented {
+                                choices: ["Plain folders", "Zip per song"];
+                                current: BackupData.format;
+                                picked(i) => { BackupData.format-picked(i); }
+                            }
+                        }
+                        Text {
+                            text: BackupData.format-note;
+                            color: Theme.muted;
+                            font-size: Type.meta;
+                            wrap: word-wrap;
+                        }
+                    }
+                    VerticalLayout {
+                        spacing: Space.xs;
+                        HorizontalLayout {
+                            spacing: Space.md;
+                            Caps { text: "FOLDERS"; vertical-alignment: center; }
+                            Text {
+                                text: "All backed up together. Whole: everything goes. Slimmed: How much decides.";
+                                color: Theme.muted;
+                                font-size: Type.meta;
+                                horizontal-stretch: 1;
+                                overflow: elide;
+                            }
+                        }
+                        Rectangle {
+                            background: Theme.surface;
+                            border-radius: Theme.radius;
+                            border-width: 1px;
+                            border-color: Theme.stroke;
+                            VerticalLayout {
+                                padding: Space.xs;
+                                if BackupData.folders.length == 0: EmptyState {
+                                    padding: Space.lg;
+                                    title: "No folders yet";
+                                    text: "Add the folders your music is in. Your DAWs' project folders and sample folders can be added in one go.";
+                                }
+                                for f[i] in BackupData.folders: FolderRow {
+                                    path: f.path;
+                                    size: f.size;
+                                    modes: ["Whole", "Slimmed"];
+                                    mode: f.mode;
+                                    mode-picked(m) => { BackupData.mode-picked(i, m); }
+                                    remove => { BackupData.remove-folder(i); }
+                                }
+                            }
+                        }
+                        HorizontalLayout {
+                            padding-top: Space.xs;
+                            spacing: Space.sm;
+                            alignment: start;
+                            StudioButton {
+                                text: "Add folder…";
+                                clicked => { BackupData.add-folder(); }
+                            }
+                            StudioButton {
+                                text: "Add my DAW and sample folders";
+                                clicked => { BackupData.add-library-folders(); }
+                            }
+                        }
+                    }
+                }
+
+                // What goes.
+                VerticalLayout {
+                    horizontal-stretch: 2;
+                    max-width: 440px;
+                    alignment: start;
+                    Rectangle {
+                    background: Theme.surface;
+                    border-radius: Theme.radius;
+                    border-width: 1px;
+                    border-color: Theme.stroke;
+                    VerticalLayout {
+                        padding: Space.lg;
+                        spacing: Space.md;
+                        alignment: start;
+                        Caps { text: "WHAT GOES"; }
+                        if BackupData.goes == "": Text {
+                            text: BackupData.plan-note;
+                            color: Theme.muted;
+                            font-size: Type.body;
+                            wrap: word-wrap;
+                        }
+                        if BackupData.goes != "": HorizontalLayout {
+                            spacing: Space.sm;
+                            alignment: start;
+                            Text {
+                                text: BackupData.goes;
+                                color: Theme.text;
+                                font-size: Type.panel-title;
+                                font-weight: 600;
+                            }
+                            Text {
+                                text: "of " + BackupData.of-all + " in your folders";
+                                color: Theme.muted;
+                                font-size: Type.meta;
+                                vertical-alignment: bottom;
+                            }
+                        }
+                        if BackupData.goes != "": ProgressLine {
+                            text: "";
+                            done: BackupData.goes-part;
+                        }
+                        if BackupData.left-out.length > 0: Groove { }
+                        if BackupData.left-out.length > 0: Caps { text: "LEFT OUT, AND WHY"; }
+                        for o in BackupData.left-out: HorizontalLayout {
+                            spacing: Space.md;
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                Text {
+                                    text: o.why;
+                                    color: Theme.text;
+                                    font-size: Type.body;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: o.note;
+                                    color: Theme.muted;
+                                    font-size: Type.meta;
+                                    overflow: elide;
+                                }
+                            }
+                            Text {
+                                text: o.size;
+                                color: Theme.muted;
+                                font-family: Theme.number-font;
+                                font-size: Type.meta;
+                                vertical-alignment: center;
+                            }
+                        }
+                        Text {
+                            text: "Your newest save of each song, and any save you mark, always go.";
+                            color: Theme.muted;
+                            font-size: Type.meta;
+                            wrap: word-wrap;
+                        }
+                    }
+                    }
+                }
+            }
+        }
+    }
+}
