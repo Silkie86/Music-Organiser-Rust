@@ -28,14 +28,13 @@ pub fn convert_key(file: &Path) -> String {
     format!("bitwig_convert:{}", file.display())
 }
 
-/// Where converts go: the folder picked in Settings, or "Music Organiser Exports" in Documents, as the C# app.
-pub fn export_root(setting: Option<&str>, home: Option<&Path>) -> PathBuf {
+/// Where converts go: the folder picked in Settings, or "Music Organiser Exports" in Documents in the home folder
+/// (the C# app asks Windows where Documents is, so a Documents moved to OneDrive differs: pick the folder in Settings
+/// there). None when there's neither a folder picked nor a home folder, rather than writing wherever the app started.
+pub fn export_root(setting: Option<&str>, home: Option<&Path>) -> Option<PathBuf> {
     match setting.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(folder) => PathBuf::from(folder),
-        None => {
-            let home = home.map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
-            home.join("Documents").join("Music Organiser Exports")
-        }
+        Some(folder) => Some(PathBuf::from(folder)),
+        None => home.map(|h| h.join("Documents").join("Music Organiser Exports")),
     }
 }
 
@@ -103,10 +102,25 @@ pub fn convert(
     let file = bitwig_file(project, export_root, &name);
     let written_before = written_of(&file);
     let options = Options { steps_until_next_note, ..Options::default() };
-    let Saved { file, notes, written, .. } =
+    let Saved { file, notes, taken, found, written } =
         bitwig_from_fl(project, export_root, &template_bytes, &name, written_before.as_deref(), options, find_sample)?;
-    let message = message(&name, &plain, renamed_kept, &notes);
+    let mut message = message(&name, &plain, renamed_kept, &notes);
+    if !found.is_empty() {
+        message +=
+            &format!(" {} not where FL Studio saved them were found somewhere else and used.", count(found.len()));
+    }
+    if !taken.is_empty() {
+        message += &format!(" {} this save lost were taken from an older save.", sounds(taken.len()));
+    }
     Ok(Converted { file, name, notes, written, message })
+}
+
+fn count(n: usize) -> String {
+    if n == 1 { "1 sample".to_owned() } else { format!("{n} samples") }
+}
+
+fn sounds(n: usize) -> String {
+    if n == 1 { "1 plugin sound".to_owned() } else { format!("{n} plugin sounds") }
 }
 
 /// What the screen says once a song is converted: its name, why it has a new one, and what didn't come across (the
@@ -142,10 +156,12 @@ mod tests {
 
     #[test]
     fn exports_go_where_settings_say_or_in_documents() {
-        assert_eq!(export_root(Some(r"D:\Exports"), None), PathBuf::from(r"D:\Exports"));
+        assert_eq!(export_root(Some(r"D:\Exports"), None), Some(PathBuf::from(r"D:\Exports")));
         let home = Path::new("home");
-        assert_eq!(export_root(Some("  "), Some(home)), home.join("Documents").join("Music Organiser Exports"));
-        assert_eq!(export_root(None, Some(home)), home.join("Documents").join("Music Organiser Exports"));
+        let documents = home.join("Documents").join("Music Organiser Exports");
+        assert_eq!(export_root(Some("  "), Some(home)), Some(documents.clone()));
+        assert_eq!(export_root(None, Some(home)), Some(documents));
+        assert_eq!(export_root(None, None), None);
     }
 
     #[test]
@@ -163,6 +179,7 @@ mod tests {
     #[test]
     fn the_template_is_the_apps_copy_unless_the_picked_one_is_newer() {
         let dir = std::env::temp_dir().join(format!("mo-app-template-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         let folder = dir.join("Bitwig template");
         std::fs::create_dir_all(&folder).unwrap();
         let picked = dir.join("picked.bwproject");
@@ -174,19 +191,24 @@ mod tests {
         let old = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
         std::fs::File::options().write(true).open(&picked).unwrap().set_modified(old).unwrap();
         assert_eq!(template_path(&dir, Some(picked.to_str().unwrap())), Some(mine.clone()));
-        assert_eq!(template_path(&dir, Some("missing.bwproject")), Some(mine));
+        assert_eq!(template_path(&dir, Some("missing.bwproject")), Some(mine.clone()));
+        // Saved after the app's copy: the picked one.
+        let new = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        std::fs::File::options().write(true).open(&picked).unwrap().set_modified(new).unwrap();
+        assert_eq!(template_path(&dir, Some(picked.to_str().unwrap())), Some(picked));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
-    fn a_song_that_cant_be_read_says_so_and_writes_nothing() {
+    fn a_template_that_cant_be_used_says_so_and_writes_nothing() {
         let dir = std::env::temp_dir().join(format!("mo-app-convert-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let template = dir.join("template.bwproject");
         std::fs::write(&template, b"not a project").unwrap();
         let exports = dir.join("exports");
         let r = convert(&dir.join("sly.flp"), &exports, &template, false, &HashSet::new(), &|_| None, &|_| None);
-        assert!(r.is_err());
+        assert!(r.is_err_and(|e| e.contains("template")));
         assert!(!exports.exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
