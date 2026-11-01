@@ -19,6 +19,7 @@ use crate::chord::PhraseChord;
 use crate::index::Key;
 use crate::roles::Role;
 use crate::{BAR, PPQ};
+use mo_harmony::{KeyFact, KeyReader};
 
 /// Parts longer than this are cut into phrases of 4 to 16 bars, where the music breathes.
 pub const MAX_BARS: i64 = 16;
@@ -44,7 +45,10 @@ pub struct Analysis {
     pub bars: i64,
     pub lowest: u8,
     pub highest: u8,
+    /// The key the shape's scale is counted from: the key finder's answer, or the key it leans to.
     pub key: Option<Key>,
+    /// The key finder's whole reading, to keep (none for drums, or without pitched notes).
+    pub key_fact: Option<KeyFact>,
     /// How long each pitch class sounds, as shares adding up to 1.
     pub chroma: [f32; 12],
     pub chords: Vec<PhraseChord>,
@@ -116,6 +120,9 @@ pub struct Piece {
     pub notes: Vec<NoteEvent>,
     /// How far it was moved, in ticks, so what sits in the part can be found in the phrase.
     pub from: i64,
+    /// Cut from the middle of a longer stretch of music (not a whole part or a section between rests): its first and
+    /// last bars needn't be where the music starts and ends, so its key is read as a window, not a loop.
+    pub cut: bool,
 }
 
 /// A part as phrases, with no empty bars before or after any of them. [`GAP_BARS`] or more empty bars split it into
@@ -143,7 +150,8 @@ pub fn split(notes: &[NoteEvent], clip_starts: Option<&HashSet<i64>>) -> Vec<Pie
         let first = head.start / BAR;
         let bars = bars_of(&section) - first;
         let mut pieces: Vec<Vec<NoteEvent>> = Vec::new();
-        if bars <= MAX_BARS {
+        let cut = bars > MAX_BARS;
+        if !cut {
             pieces.push(section);
         } else {
             let mut bounds = vec![first];
@@ -180,7 +188,7 @@ pub fn split(notes: &[NoteEvent], clip_starts: Option<&HashSet<i64>>) -> Vec<Pie
             } else {
                 format!("bars {}–{last_bar}", first_bar + 1)
             };
-            out.push(Piece { place, notes: trimmed, from: first_bar * BAR });
+            out.push(Piece { place, notes: trimmed, from: first_bar * BAR, cut });
         }
     }
     out
@@ -709,13 +717,29 @@ fn from_notes(s: &Shape) -> (Role, &'static str) {
 /// As the C# app, chords are only kept for a part that plays them ([`Analysis::wants_chords`]): a melody's or a
 /// bassline's notes go by one at a time.
 pub fn analyse(notes: &[NoteEvent], hints: &str, drums: bool, key: Option<Key>, chords: Vec<PhraseChord>) -> Analysis {
+    analyse_with(notes, hints, drums, |_| (key, None), chords)
+}
+
+/// [`analyse`], the key read by `mo-harmony`'s key finder once the part's kind is known (the kind says how the notes
+/// are heard: a tune, chords, a bassline). `cut`: a piece cut from a longer stretch ([`Piece::cut`]). `reader` is the
+/// thread's own (it keeps its working space between parts).
+pub fn analyse_reading(notes: &[NoteEvent], hints: &str, drums: bool, cut: bool, reader: &mut KeyReader) -> Analysis {
+    analyse_with(notes, hints, drums, |role| crate::keys::read(reader, notes, role, cut), Vec::new())
+}
+
+fn analyse_with(
+    notes: &[NoteEvent],
+    hints: &str,
+    drums: bool,
+    key_of: impl FnOnce(Role) -> (Option<Key>, Option<KeyFact>),
+    chords: Vec<PhraseChord>,
+) -> Analysis {
     let shape = Shape::of(notes);
     let (role, role_why) = role(&shape, notes, hints, drums);
     let chords = if Analysis::wants_chords(role, &shape) { chords } else { Vec::new() };
     let chroma = chroma_of(notes);
-    // As the C# app: no key for drums, or for fewer than 4 notes or 3 pitch classes.
-    let key =
-        key.filter(|_| role != Role::Drums && notes.len() >= 4 && chroma.iter().filter(|c| **c > 0.0).count() >= 3);
+    let (key, key_fact) = if role == Role::Drums { (None, None) } else { key_of(role) };
+    let (key, features) = scale_and_features(&shape, notes, &chroma, key);
     Analysis {
         role,
         role_why,
@@ -723,11 +747,24 @@ pub fn analyse(notes: &[NoteEvent], hints: &str, drums: bool, key: Option<Key>, 
         lowest: notes.iter().map(|n| n.key).min().unwrap_or(0),
         highest: notes.iter().map(|n| n.key).max().unwrap_or(0),
         key,
+        key_fact,
         chroma,
         chords,
-        features: features(&shape, notes, &chroma, key),
+        features,
         hash: hash_of(notes),
     }
+}
+
+/// The key the shape's scale is counted from (as the C# app, none for fewer than 4 notes or 3 pitch classes) and the
+/// "more like this" numbers counted from it. One place for both the first reading and a key read again later.
+pub fn scale_and_features(
+    shape: &Shape,
+    notes: &[NoteEvent],
+    chroma: &[f32; 12],
+    key: Option<Key>,
+) -> (Option<Key>, [f32; FEATURE_COUNT]) {
+    let key = key.filter(|_| notes.len() >= 4 && chroma.iter().filter(|c| **c > 0.0).count() >= 3);
+    (key, features(shape, notes, chroma, key))
 }
 
 /// How long each pitch class sounds (each note counted from a sixteenth to two bars), as shares adding up to 1. In
@@ -949,6 +986,7 @@ mod tests {
         assert_eq!(pieces.len(), 1);
         assert_eq!(pieces[0].place, "bars 1–8");
         assert_eq!(bars_of(&pieces[0].notes), 8);
+        assert!(pieces[0].cut, "cut from a longer stretch: its key is read as a window");
 
         // Two parts with 4 empty bars between them are two sections.
         let gap: Vec<NoteEvent> = (0..3)
@@ -959,6 +997,7 @@ mod tests {
         assert_eq!(pieces.iter().map(|p| p.place.as_str()).collect::<Vec<_>>(), ["bar 1", "bar 7"]);
         assert_eq!(pieces[1].from, 6 * BAR);
         assert_eq!(pieces[1].notes[0].start, 0);
+        assert!(pieces.iter().all(|p| !p.cut), "a section between rests is heard whole");
 
         // A short part is whole.
         let pieces = split(&gap[..3], None);
