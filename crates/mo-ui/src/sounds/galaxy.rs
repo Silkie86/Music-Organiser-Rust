@@ -53,8 +53,12 @@ pub(super) struct Galaxy {
     asked: u64,
     /// Where each star was drawn, to find the one under the mouse.
     hits: Option<Arc<Hits>>,
-    /// The view the picture on show was drawn for.
+    /// The view the picture on show was drawn for, its scale and its number.
     drawn: Option<View>,
+    drawn_scale: f32,
+    drawn_id: u64,
+    /// How many stars are on the map.
+    count: usize,
 }
 
 impl Default for Galaxy {
@@ -72,6 +76,9 @@ impl Default for Galaxy {
             asked: 0,
             hits: None,
             drawn: None,
+            drawn_scale: 1.0,
+            drawn_id: 0,
+            count: 0,
         }
     }
 }
@@ -196,7 +203,13 @@ fn star_at(x: f32, y: f32) -> Option<usize> {
     PAGE.with(|p| {
         let p = p.borrow();
         let g = &p.galaxy;
-        g.hits.as_ref()?.nearest(x * g.scale, y * g.scale, NEAR * g.scale)
+        // The picture on show may have been drawn for another view (it's moved and stretched until the new one
+        // comes): the mouse is turned into a place on that picture.
+        let drawn = g.drawn?;
+        let (mx, my) = g.view.to_map(x, y);
+        let (px, py) = drawn.to_view(mx, my, g.drawn_scale);
+        let near = NEAR * g.drawn_scale * drawn.zoom / g.view.zoom;
+        g.hits.as_ref()?.nearest(px, py, near)
     })
 }
 
@@ -209,6 +222,9 @@ pub(super) fn forget(g: &mut Galaxy) {
     g.colours = None;
     g.hits = None;
     g.drawn = None;
+    // A picture of the old library still on its way is too old to show.
+    g.drawn_id = g.asked;
+    g.count = 0;
     g.note = String::new();
 }
 
@@ -321,6 +337,7 @@ fn load(app: &AppWindow, fresh: bool) {
                 };
                 g.stars = Some(Arc::new(stars));
                 g.colours = Some(Arc::new(colours));
+                g.count = n;
             }
             true
         });
@@ -380,7 +397,7 @@ pub(super) fn draw(app: &AppWindow) {
             return None;
         }
         g.asked += 1;
-        Some(Picture { id: g.asked, stars, colours, shown, palette, view: g.view, scale: g.scale })
+        Some(Picture { id: g.asked, stars, count: g.count, colours, shown, palette, view: g.view, scale: g.scale })
     });
     let Some(ask) = ask else {
         show_picked(app);
@@ -389,7 +406,7 @@ pub(super) fn draw(app: &AppWindow) {
     place_picture(app);
     if HERE.with(|h| *h.borrow()) {
         let (d, px) = to_image(ask.draw());
-        drawn(app, d.id, d.view, px, d.hits);
+        drawn(app, d, px);
         return;
     }
     DRAWING.with(|w| {
@@ -398,11 +415,10 @@ pub(super) fn draw(app: &AppWindow) {
             let weak = app.as_weak();
             match Newest::start("Galaxy picture", move |ask: Picture| {
                 let (d, px) = to_image(background::on_pool(|| ask.draw()));
-                let (id, view, hits) = (d.id, d.view, d.hits);
                 let weak = weak.clone();
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(app) = weak.upgrade() {
-                        drawn(&app, id, view, px, hits);
+                        drawn(&app, d, px);
                     }
                 });
             }) {
@@ -426,14 +442,18 @@ fn to_image(mut d: Drawn) -> (Drawn, SharedPixelBuffer<Rgba8Pixel>) {
     (d, px)
 }
 
-fn drawn(app: &AppWindow, id: u64, view: View, px: SharedPixelBuffer<Rgba8Pixel>, hits: Hits) {
+/// A picture came. Any newer than the one on show is shown, even when a newer one still is on its way: while the wheel
+/// keeps turning, each picture that's done is placed where its stars are now, instead of the first one stretching on.
+fn drawn(app: &AppWindow, d: Drawn, px: SharedPixelBuffer<Rgba8Pixel>) {
     let current = PAGE.with(|p| {
         let g = &mut p.borrow_mut().galaxy;
-        if g.asked != id {
+        if d.id <= g.drawn_id || d.id > g.asked {
             return false;
         }
-        g.hits = Some(Arc::new(hits));
-        g.drawn = Some(view);
+        g.drawn_id = d.id;
+        g.hits = Some(Arc::new(d.hits));
+        g.drawn = Some(d.view);
+        g.drawn_scale = d.scale;
         true
     });
     if current {

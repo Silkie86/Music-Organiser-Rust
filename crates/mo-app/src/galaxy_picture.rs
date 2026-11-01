@@ -26,6 +26,8 @@ pub struct Rgba {
 pub struct Drawn {
     pub id: u64,
     pub view: View,
+    /// Pixels per point it was drawn at.
+    pub scale: f32,
     pub width: usize,
     pub height: usize,
     pub pixels: Vec<Rgba>,
@@ -48,16 +50,22 @@ impl Hits {
         let cell_of = |&(_, x, y): &(usize, f32, f32)| {
             ((y as usize / CELL).min(rows - 1)) * columns + (x as usize / CELL).min(columns - 1)
         };
-        let mut keyed: Vec<(usize, (usize, f32, f32))> = drawn.into_par_iter().map(|s| (cell_of(&s), s)).collect();
-        keyed.par_sort_unstable_by_key(|k| k.0);
+        // Counted per cell, then each star put straight into its cell's place.
         let mut starts = vec![0; columns * rows + 1];
-        for &(cell, _) in &keyed {
-            starts[cell + 1] += 1;
+        for s in &drawn {
+            starts[cell_of(s) + 1] += 1;
         }
         for i in 1..starts.len() {
             starts[i] += starts[i - 1];
         }
-        Hits { columns, rows, stars: keyed.into_iter().map(|k| k.1).collect(), starts }
+        let mut next = starts.clone();
+        let mut stars = vec![(0, 0.0, 0.0); drawn.len()];
+        for s in drawn {
+            let cell = cell_of(&s);
+            stars[next[cell]] = s;
+            next[cell] += 1;
+        }
+        Hits { columns, rows, stars, starts }
     }
 
     /// The shown star nearest (`x`, `y`) in pixels, within `near` pixels.
@@ -87,6 +95,8 @@ impl Hits {
 pub struct Picture {
     pub id: u64,
     pub stars: Arc<Vec<Option<StarPoint>>>,
+    /// How many stars are on the map (not `None`).
+    pub count: usize,
     /// Each star's place in `palette`.
     pub colours: Arc<Vec<i32>>,
     pub shown: Arc<Vec<usize>>,
@@ -96,8 +106,8 @@ pub struct Picture {
     pub scale: f32,
 }
 
-/// The rows of the picture drawn together on one thread. Taller than the biggest star (6 points across at a scale of up
-/// to 4, and its soft edge), so a star reaches at most into the band below the one its top is in.
+/// The fewest rows of the picture drawn together on one thread. A band is made taller when the stars are big (a high
+/// scale factor), so a star never reaches past the band below the one its top is in.
 const BAND: usize = 64;
 
 /// A star to draw: where (in pixels), its size, colour and strength.
@@ -125,13 +135,15 @@ impl Picture {
         }
         // A small library gets bigger stars, so a few dozen don't look like dust; and they grow a little as the map is
         // zoomed in, so a close look shows each one.
-        let n = self.stars.par_iter().filter(|s| s.is_some()).count().max(1) as f32;
+        let n = self.count.max(1) as f32;
         let base = (200.0 / n.sqrt()).clamp(1.2, 4.5);
         let r = self.scale * (base + (self.view.zoom - 1.0).max(0.0).sqrt() * 0.5).min(6.0);
         let grey = self.palette.last().copied().unwrap_or([128, 128, 128]);
-        let bands = h.div_ceil(BAND).max(1);
+        let band_rows = BAND.max((2.0 * r + 4.0).ceil() as usize);
+        let bands = h.div_ceil(band_rows).max(1);
         // Every star on the picture with the band its top edge is in; sorted so each band's stars are together, the
-        // ones the filters leave out (drawn faint) before the shown ones (drawn over them).
+        // ones the filters leave out (drawn faint) before the shown ones (drawn over them), and otherwise in list
+        // order, so stars that overlap are always drawn the same way round.
         let mut placed: Vec<(usize, bool, usize, Dot)> = self
             .stars
             .par_iter()
@@ -152,34 +164,34 @@ impl Picture {
                 let shown = on[at];
                 let dot =
                     Dot { x, y, r: if shown { r } else { r * 0.8 }, colour, alpha: if shown { 0.9 } else { 0.14 } };
-                let band = ((y - dot.r - 1.0).max(0.0) as usize / BAND).min(bands - 1);
+                let band = ((y - dot.r - 1.0).max(0.0) as usize / band_rows).min(bands - 1);
                 Some((band, shown, at, dot))
             })
             .collect();
-        placed.par_sort_unstable_by_key(|p| (p.0, p.1));
+        placed.par_sort_unstable_by_key(|p| (p.0, p.1, p.2));
         // Where each band's stars start, and where its shown ones start.
         let first = |band: usize, shown: bool| placed.partition_point(|p| (p.0, p.1) < (band, shown));
-        let ranges: Vec<[usize; 3]> = (0..=bands).map(|b| [first(b, false), first(b, true), 0]).collect();
+        let ranges: Vec<(usize, usize)> = (0..=bands).map(|b| (first(b, false), first(b, true))).collect();
         // A star is never taller than a band, so it reaches at most into the band below the one its top is in: each band
         // draws its own stars and the band above's, faint ones first.
-        pixels.par_chunks_mut((w * BAND).max(1)).enumerate().for_each(|(band, rows)| {
-            let y0 = band * BAND;
+        pixels.par_chunks_mut((w * band_rows).max(1)).enumerate().for_each(|(band, rows)| {
+            let y0 = band * band_rows;
             let mine = ranges[band];
-            let next = ranges[band + 1][0];
-            let above = band.checked_sub(1).map(|b| (ranges[b], ranges[b + 1][0]));
+            let next = ranges[band + 1].0;
+            let above = band.checked_sub(1).map(|b| (ranges[b], ranges[b + 1].0));
             let mut draw = |from: usize, to: usize| {
                 for p in &placed[from..to] {
                     disc(rows, w, y0, &p.3);
                 }
             };
             if let Some((a, end)) = above {
-                draw(a[0], a[1]);
-                draw(mine[0], mine[1]);
-                draw(a[1], end);
+                draw(a.0, a.1);
+                draw(mine.0, mine.1);
+                draw(a.1, end);
             } else {
-                draw(mine[0], mine[1]);
+                draw(mine.0, mine.1);
             }
-            draw(mine[1], next);
+            draw(mine.1, next);
         });
         let columns = w.div_ceil(CELL).max(1);
         let rows = h.div_ceil(CELL).max(1);
@@ -188,7 +200,8 @@ impl Picture {
             .filter(|p| p.1 && p.3.x >= 0.0 && p.3.y >= 0.0 && p.3.x < w as f32 && p.3.y < h as f32)
             .map(|p| (p.2, p.3.x, p.3.y))
             .collect();
-        Drawn { id: self.id, view: self.view, width: w, height: h, pixels, hits: Hits::new(columns, rows, drawn) }
+        let hits = Hits::new(columns, rows, drawn);
+        Drawn { id: self.id, view: self.view, scale: self.scale, width: w, height: h, pixels, hits }
     }
 }
 
@@ -252,5 +265,30 @@ mod tests {
         disc(&mut band, 10, 4, &dot);
         assert_eq!(band[10 + 5].a, 255);
         assert_eq!(band[3 * 10 + 5].a, 0);
+    }
+
+    #[test]
+    fn a_big_star_on_a_band_edge_is_drawn_whole() {
+        // At a scale of 8 the one star is 72 pixels across, taller than the fewest rows in a band, and it crosses a
+        // band edge.
+        let mut view = View::default();
+        (view.width, view.height) = (40.0, 40.0);
+        let picture = Picture {
+            id: 1,
+            stars: Arc::new(vec![Some(StarPoint { x: 0.5, y: 0.5 })]),
+            count: 1,
+            colours: Arc::new(vec![0]),
+            shown: Arc::new(vec![0]),
+            palette: vec![[200, 100, 50], [110, 110, 110]],
+            view,
+            scale: 8.0,
+        };
+        let d = picture.draw();
+        let (w, middle) = (d.width, d.width / 2);
+        // The middle column is drawn all the way from a little above the middle to a little below.
+        for y in middle - 30..middle + 30 {
+            assert!(d.pixels[y * w + middle].a > 200, "row {y}");
+        }
+        assert_eq!(d.hits.nearest(middle as f32, middle as f32, 8.0), Some(0));
     }
 }
