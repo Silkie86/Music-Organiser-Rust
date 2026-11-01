@@ -26,7 +26,7 @@ use mo_formats::case;
 use mo_formats::paths::{file_name, stem};
 use mo_library::Library;
 use mo_library::scan::is_inside;
-use mo_library::songs::{group_songs, marked};
+use mo_library::songs::{Song, group_songs, marked};
 use mo_space::size::{FileEntry, size_text};
 use mo_space::song::{CompactSettings, DEFAULT_KEEP_BACKUPS, Elsewhere, SongSave, SongSpaceReport, measure};
 use rayon::prelude::*;
@@ -157,6 +157,111 @@ impl Settings {
     }
 }
 
+/// A song's id on the backup: its first save's id, which stays the same as new saves come. Its zip is known by it,
+/// and so is its line in [`BackedUp`].
+pub fn song_id(song: &Song) -> u64 {
+    let id = song.saves().chain(&song.copies).map(|v| v.id).min().unwrap_or(0);
+    u64::try_from(id).unwrap_or(0)
+}
+
+/// The file that says when each song last reached the backup drive, in the app's folder.
+pub const SONGS_FILE: &str = "backup-songs.txt";
+
+/// When each song's newest save last reached the backup drive, for the song panel's "Backed up" line. Kept by the
+/// app (not read from the drive), so the line shows while the drive is unplugged. A new drive starts it again.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BackedUp {
+    /// The drive the songs went to.
+    pub drive: Option<PathBuf>,
+    /// By song id: the time of the newest save that went, and when it went.
+    pub songs: HashMap<u64, (NaiveDateTime, NaiveDateTime)>,
+}
+
+const TIME: &str = "%Y-%m-%d %H:%M:%S%.f";
+
+impl BackedUp {
+    /// Reads `backup-songs.txt`; none yet (or one that can't be read) is empty. A line that doesn't make sense is
+    /// skipped.
+    pub fn load(path: &Path) -> BackedUp {
+        let Ok(text) = fs::read_to_string(path) else { return BackedUp::default() };
+        let mut b = BackedUp::default();
+        for line in text.lines() {
+            let mut parts = line.splitn(3, '\t');
+            match (parts.next(), parts.next(), parts.next()) {
+                (Some("drive"), Some(d), None) if !d.is_empty() => b.drive = Some(PathBuf::from(d)),
+                (Some(id), Some(save), Some(when)) => {
+                    if let (Ok(id), Ok(save), Ok(when)) = (
+                        id.parse(),
+                        NaiveDateTime::parse_from_str(save, TIME),
+                        NaiveDateTime::parse_from_str(when, TIME),
+                    ) {
+                        b.songs.insert(id, (save, when));
+                    }
+                }
+                _ => {}
+            }
+        }
+        b
+    }
+
+    pub fn to_text(&self) -> String {
+        let mut out = String::new();
+        if let Some(d) = &self.drive {
+            out.push_str(&format!("drive\t{}\n", d.display()));
+        }
+        let mut ids: Vec<&u64> = self.songs.keys().collect();
+        ids.sort();
+        for id in ids {
+            let (save, when) = self.songs[id];
+            out.push_str(&format!("{id}\t{}\t{}\n", save.format(TIME), when.format(TIME)));
+        }
+        out
+    }
+
+    /// Writes `backup-songs.txt`: under a temporary name first, then renamed.
+    pub fn save(&self, path: &Path) -> io::Result<()> {
+        let part = path.with_extension("txt.mo-part");
+        fs::write(&part, self.to_text())?;
+        fs::rename(&part, path).inspect_err(|_| {
+            let _ = fs::remove_file(&part);
+        })
+    }
+
+    /// Notes the songs a run on `drive` took. Songs it didn't reach keep their old lines; a different drive starts
+    /// the list again, since what went to the old one isn't on the new one.
+    pub fn add(&mut self, drive: &Path, went: &[(u64, NaiveDateTime)], when: NaiveDateTime) {
+        if !self.on(Some(drive)) {
+            self.songs.clear();
+            self.drive = Some(drive.to_path_buf());
+        }
+        for (id, save) in went {
+            self.songs.insert(*id, (*save, when));
+        }
+    }
+
+    /// Whether the list is for this drive.
+    fn on(&self, drive: Option<&Path>) -> bool {
+        match (&self.drive, drive) {
+            (Some(a), Some(b)) => case::key(&a.to_string_lossy()) == case::key(&b.to_string_lossy()),
+            _ => false,
+        }
+    }
+
+    /// The song panel's line: "Backed up today 23:40", "Newest save not backed up yet · last backed up 12 Oct
+    /// 23:40" or "Not backed up yet". Empty when no backup drive is picked, so the panel stays quiet until you set
+    /// one up. `id` is the song's ([`song_id`]) and `newest` the time of its newest save.
+    pub fn song_line(&self, drive: Option<&Path>, id: u64, newest: NaiveDateTime, now: NaiveDateTime) -> String {
+        if drive.is_none() {
+            return String::new();
+        }
+        match self.songs.get(&id).filter(|_| self.on(drive)) {
+            None => "Not backed up yet".to_owned(),
+            Some((save, when)) if *save >= newest => format!("Backed up {}", when_text(*when, now)),
+            Some((_, when)) => format!("Newest save not backed up yet · last backed up {}", when_text(*when, now)),
+        }
+    }
+}
+
 /// One song's files, for a zip of its own.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SongFiles {
@@ -181,6 +286,8 @@ pub struct Prepared {
     pub folder_bytes: Vec<Option<u64>>,
     /// The folder list and level it was made for: a plan for other choices isn't shown.
     pub made_for: (Vec<Folder>, Level),
+    /// Each song's id and newest save (its place and time), for the song panel's "Backed up" line.
+    pub newest: Vec<(u64, PathBuf, NaiveDateTime)>,
 }
 
 /// A sample path as a project stores it, made whole: a full path as it is, a relative one from the save's folder.
@@ -284,9 +391,7 @@ pub fn prepare(library: &Library, settings: &Settings, stop: &AtomicBool) -> Res
             let report = measure(&saves, &roots, &used_text, compact, Some(&elsewhere), stop).map_err(|_| ())?;
             // Saves you mark as milestones by their name always go.
             let milestones = picked.iter().filter(|v| marked(&v.name)).map(|v| v.path.clone()).collect();
-            // The song's zip is known by its first save's id, which stays the same as new saves come.
-            let id = song.saves().chain(&song.copies).map(|v| v.id).min().unwrap_or(0);
-            Ok(Measured { saves, report, milestones, used, id: u64::try_from(id).unwrap_or(0) })
+            Ok(Measured { saves, report, milestones, used, id: song_id(song) })
         })
         .collect::<Result<_, ()>>()
         .map_err(|()| "Stopped".to_owned())?;
@@ -345,6 +450,10 @@ pub fn prepare(library: &Library, settings: &Settings, stop: &AtomicBool) -> Res
             }
         }
     }
+    let newest = measured
+        .iter()
+        .filter_map(|m| m.saves.iter().max_by_key(|s| s.modified).map(|s| (m.id, PathBuf::from(&s.path), s.modified)))
+        .collect();
     let song_files = songs
         .iter()
         .zip(&measured)
@@ -382,6 +491,7 @@ pub fn prepare(library: &Library, settings: &Settings, stop: &AtomicBool) -> Res
         all_bytes,
         folder_bytes,
         made_for: (settings.folders.clone(), settings.level),
+        newest,
     })
 }
 
@@ -417,9 +527,36 @@ impl Progress {
     }
 }
 
+/// How a run went, and the songs whose newest save reached the drive in it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ran {
+    pub last: LastRun,
+    /// Each song's id and the time of its newest save that went (or was already there and checked).
+    pub went: Vec<(u64, NaiveDateTime)>,
+}
+
 /// Copies the plan to the drive (or, for the zip format, packs each song and copies the whole folders), and says how
-/// it went. Never on the window's thread.
-pub fn run(prepared: &Prepared, settings: &Settings, stop: &AtomicBool, progress: &dyn Fn(Progress)) -> LastRun {
+/// it went. Never on the window's thread. A run that stops part way still says which songs went before it stopped.
+pub fn run(prepared: &Prepared, settings: &Settings, stop: &AtomicBool, progress: &dyn Fn(Progress)) -> Ran {
+    let mut there: HashSet<String> = HashSet::new();
+    let last = run_on(prepared, settings, stop, progress, &mut there);
+    let went = prepared
+        .newest
+        .iter()
+        .filter(|(_, path, _)| there.contains(&case::key(&path.to_string_lossy())))
+        .map(|(id, _, time)| (*id, *time))
+        .collect();
+    Ran { last, went }
+}
+
+/// The run itself; `there` gathers the files now safely on the drive.
+fn run_on(
+    prepared: &Prepared,
+    settings: &Settings,
+    stop: &AtomicBool,
+    progress: &dyn Fn(Progress),
+    there: &mut HashSet<String>,
+) -> LastRun {
     let when = Local::now().naive_local();
     let Some(backup) = settings.drive.as_deref() else {
         return LastRun { when, ok: false, line: "No backup drive picked".to_owned() };
@@ -456,8 +593,12 @@ pub fn run(prepared: &Prepared, settings: &Settings, stop: &AtomicBool, progress
                         Outcome::New | Outcome::Updated { .. } => {
                             new_or_changed += 1;
                             checked += 1;
+                            there.insert(case::key(&l.source.to_string_lossy()));
                         }
-                        Outcome::UpToDate => checked += 1,
+                        Outcome::UpToDate => {
+                            checked += 1;
+                            there.insert(case::key(&l.source.to_string_lossy()));
+                        }
                         Outcome::Failed(why) => problems.push(format!("{}: {why}", l.source.display())),
                         Outcome::NotReached => {}
                     }
@@ -486,7 +627,11 @@ pub fn run(prepared: &Prepared, settings: &Settings, stop: &AtomicBool, progress
         let names = pack_names(&prepared.songs.iter().map(|s| (s.title.as_str(), s.id)).collect::<Vec<_>>());
         for (i, (song, name)) in prepared.songs.iter().zip(&names).enumerate() {
             progress(Progress::Packing { done: i, of: prepared.songs.len() });
-            match packer.pack_song(&song.files, name, song.id, stop) {
+            let packed = packer.pack_song(&song.files, name, song.id, stop);
+            if packed.is_ok() {
+                there.extend(song.files.iter().map(|p| case::key(&p.to_string_lossy())));
+            }
+            match packed {
                 Ok(Packed::Written { .. }) => {
                     new_or_changed += 1;
                     checked += 1;
@@ -840,6 +985,36 @@ mod tests {
         // A plan made for another folder list isn't shown.
         s.add_folder(PathBuf::from("/more"));
         assert_eq!(page_lines(&s, room, PlanState::Ready(&prepared), now).goes, "");
+    }
+
+    #[test]
+    fn each_song_says_when_it_last_went() {
+        let t = |s: &str| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f").unwrap();
+        let now = t("2026-11-01 12:00:00");
+        let drive = Path::new("E:\\Backup");
+        let mut b = BackedUp::default();
+        b.add(drive, &[(7, t("2026-10-31 22:15:03.250")), (9, t("2026-10-20 10:00:00"))], t("2026-11-01 09:30:00"));
+        let file = std::env::temp_dir().join(format!("mo-backup-songs-{}.txt", std::process::id()));
+        b.save(&file).unwrap();
+        let back = BackedUp::load(&file);
+        let _ = fs::remove_file(&file);
+        assert_eq!(back, b, "the list keeps through its file, to the part of a second");
+
+        let d = Some(drive);
+        assert_eq!(b.song_line(d, 7, t("2026-10-31 22:15:03.250"), now), "Backed up today 09:30");
+        assert_eq!(
+            b.song_line(d, 7, t("2026-11-01 11:00:00"), now),
+            "Newest save not backed up yet · last backed up today 09:30"
+        );
+        assert_eq!(b.song_line(d, 8, now, now), "Not backed up yet");
+        assert_eq!(b.song_line(None, 7, now, now), "", "quiet until a backup drive is picked");
+        assert_eq!(b.song_line(Some(Path::new("F:\\Other")), 7, now, now), "Not backed up yet");
+
+        // A later run that didn't reach song 9 keeps its line; a new drive starts again.
+        b.add(drive, &[(7, t("2026-11-01 11:00:00"))], t("2026-11-01 11:30:00"));
+        assert_eq!(b.songs.len(), 2);
+        b.add(Path::new("F:\\Other"), &[(9, t("2026-10-20 10:00:00"))], t("2026-11-01 11:45:00"));
+        assert_eq!(b.songs.len(), 1);
     }
 
     #[test]

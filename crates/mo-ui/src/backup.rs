@@ -10,7 +10,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use chrono::Local;
 use mo_app::background::{self, Newest};
 use mo_app::backup::{
-    self, DriveRoom, PageLines, PlanState, Prepared, Progress, Settings, level_at, library_folders, page_lines,
+    self, BackedUp, DriveRoom, PageLines, PlanState, Prepared, Progress, Settings, level_at, library_folders,
+    page_lines,
 };
 use mo_app::log;
 use mo_backup::folders::Mode;
@@ -24,6 +25,9 @@ use crate::{AppWindow, BackupData, BackupFolderLine, LeftOutLine};
 struct Section {
     settings: Settings,
     settings_file: PathBuf,
+    /// When each song last reached the drive, and its file.
+    backed: BackedUp,
+    backed_file: PathBuf,
     library: PathBuf,
     /// The drive's room, and the drive it was measured on.
     room: Option<(PathBuf, DriveRoom)>,
@@ -49,10 +53,14 @@ thread_local! {
 pub fn connect(app: &AppWindow, library: PathBuf) {
     let settings_file = mo_app::paths::data_dir().join(backup::SETTINGS_FILE);
     let settings = Settings::load(&settings_file);
+    let backed_file = mo_app::paths::data_dir().join(backup::SONGS_FILE);
+    let backed = BackedUp::load(&backed_file);
     SECTION.with(|s| {
         let mut s = s.borrow_mut();
         s.settings = settings;
         s.settings_file = settings_file;
+        s.backed = backed;
+        s.backed_file = backed_file;
         s.library = library;
     });
     let weak = app.as_weak();
@@ -239,19 +247,32 @@ fn start_run(weak: &Weak<AppWindow>) {
             let weak = progress_weak.clone();
             let _ = slint::invoke_from_event_loop(move || set_busy(&weak, &p.line(), p.done()));
         };
-        let last = background::on_pool(|| backup::run(&prepared, &settings, &stop, &progress));
+        let ran = background::on_pool(|| backup::run(&prepared, &settings, &stop, &progress));
+        let drive = settings.drive.clone();
         let _ = slint::invoke_from_event_loop(move || {
+            let last = ran.last;
             if !last.ok {
                 log::warning("Backup", &last.line);
             }
-            let saved = SECTION.with(|s| {
+            let (saved, backed_saved) = SECTION.with(|s| {
                 let mut s = s.borrow_mut();
                 s.running = None;
+                // The drive the run went to, which may not be the one picked now.
+                let backed_saved = match &drive {
+                    Some(d) if !ran.went.is_empty() => {
+                        s.backed.add(d, &ran.went, last.when);
+                        s.backed.save(&s.backed_file)
+                    }
+                    _ => Ok(()),
+                };
                 s.settings.last_run = Some(last);
-                s.settings.save(&s.settings_file)
+                (s.settings.save(&s.settings_file), backed_saved)
             });
             if let Err(e) = saved {
                 log::warning("Backup", &format!("Couldn't keep the backup settings: {e}"));
+            }
+            if let Err(e) = backed_saved {
+                log::warning("Backup", &format!("Couldn't keep which songs are backed up: {e}"));
             }
             set_busy(&weak, "", 0.0);
             // The drive's room and what's new have changed.
@@ -290,6 +311,16 @@ fn show(weak: &Weak<AppWindow>) {
         page_lines(&s.settings, room, state, Local::now().naive_local())
     });
     show_lines(&app, lines);
+    // The song panel's "Backed up" line follows the drive and the last run.
+    crate::songs::backup_changed(&app);
+}
+
+/// The song panel's "Backed up" line for a song (empty until a backup drive is picked).
+pub fn song_line(song: &mo_library::songs::Song, newest: chrono::NaiveDateTime) -> String {
+    SECTION.with(|s| {
+        let s = s.borrow();
+        s.backed.song_line(s.settings.drive.as_deref(), backup::song_id(song), newest, Local::now().naive_local())
+    })
 }
 
 /// Puts a set of words on the page.
