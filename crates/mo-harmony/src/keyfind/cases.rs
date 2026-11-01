@@ -587,10 +587,17 @@ impl Book {
                 if let Some((heard, r)) = reading("13", &mut m) {
                     let [_, (second, _), ..] = r.ranked();
                     m.gate(top(r) == C_MINOR, || format!("13: C minor on top; {}", said(r)));
-                    m.gate(second == EB_MAJOR || second == G_MINOR, || {
-                        format!("13: Eb major or G minor second; {}", said(r))
+                    // Second, a key next to C minor whose scale holds all five notes: Eb major has the same notes,
+                    // and F minor and G minor are a fifth either side. The design first left F minor out with no
+                    // reason given, though C, the tune's long first and last note, is F minor's fifth (2026-11-01).
+                    m.gate(second == EB_MAJOR || second == F_MINOR || second == G_MINOR, || {
+                        format!("13: Eb major, F minor or G minor second; {}", said(r))
                     });
                     m.gate(of_key(heard, C_MINOR).has(Colours::NO_SIXTH), || "13: C minor with no sixth".to_owned());
+                    m.target(second == EB_MAJOR, || format!("13: Eb major, the same five notes, second; {}", said(r)));
+                    m.target(matches!(r.answer, KeyAnswer::Key(C_MINOR) | KeyAnswer::OrRelative(C_MINOR)), || {
+                        format!("13: C minor, or C minor or Eb major; {}", said(r))
+                    });
                 }
             }
             14 => {

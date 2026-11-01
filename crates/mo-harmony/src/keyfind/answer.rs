@@ -102,7 +102,8 @@ impl KeyAnswer {
 pub const THRESHOLD_KNOTS: usize = 6;
 
 /// How likely each kind of answer must be before it's given, at each knot of bars heard, and straight on a log scale
-/// of bars in between, so one bar more never makes the answer jump.
+/// of bars in between, so a threshold has no steps. Fitted ones never rise with more music, though one can fall
+/// steeply between two knots. A threshold of 1 means that kind is never given, even when its chances add up to 1.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Thresholds {
     /// One key.
@@ -187,16 +188,18 @@ pub fn grade(chances: &[f64; 24], grading: Grading, model: &Model) -> (KeyAnswer
     if !clear {
         return (KeyAnswer::Unclear { why: Why::Spread, leaning: None }, 0.0);
     }
-    if p1 > p2 && p1 >= one {
+    // A threshold of 1 is never reached.
+    let reaches = |chance: f64, threshold: f64| threshold < 1.0 && chance >= threshold;
+    if p1 > p2 && reaches(p1, one) {
         return (KeyAnswer::Key(k1), p1);
     }
     // A pair needs the relative to be the runner-up, so its sum is never below the home note's (the first key and
     // its parallel): when both are likely enough, the pair is given.
-    let pair_sum = if k2 == k1.relative() { p1 + p2 } else { 0.0 };
+    let pair_sum = (k2 == k1.relative()).then_some(p1 + p2);
     let home_sum = p1 + chance(k1.parallel());
-    if pair_sum >= pair {
+    if let Some(pair_sum) = pair_sum.filter(|&sum| reaches(sum, pair)) {
         (KeyAnswer::OrRelative(k1), pair_sum)
-    } else if home_sum >= home {
+    } else if reaches(home_sum, home) {
         let leaning = (p1 > chance(k1.parallel())).then_some(k1.mode);
         (KeyAnswer::HomeNote { tonic: k1.tonic, leaning }, home_sum)
     } else if p1 > p2 {
