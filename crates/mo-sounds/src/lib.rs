@@ -21,6 +21,7 @@ mod analysis;
 pub mod classify;
 mod db;
 mod dotnet_random;
+pub mod duplicates;
 pub mod index;
 pub mod kits;
 pub mod learn;

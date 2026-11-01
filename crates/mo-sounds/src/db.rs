@@ -367,6 +367,29 @@ impl SoundsDb {
     }
 }
 
+impl SoundsDb {
+    /// Sounds whose audio is exactly the same as another's, by the hash the duplicate finder kept (in capitals, as
+    /// SQLite's `hex` gives it). Only hashes that more than one sound has.
+    pub fn exact_copies(&self) -> Result<Vec<(i64, String)>, SoundsError> {
+        if !self.has("sound_prints") {
+            return Ok(Vec::new());
+        }
+        let mut st = self.conn.prepare(
+            "SELECT sound_id, hex(exact) FROM sound_prints
+             WHERE exact IN (SELECT exact FROM sound_prints WHERE exact IS NOT NULL GROUP BY exact HAVING COUNT(*) > 1)",
+        )?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Each sound's file size in bytes (0 when not known).
+    pub fn sizes(&self) -> Result<HashMap<i64, i64>, SoundsError> {
+        let mut st = self.conn.prepare("SELECT id, size FROM sounds")?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, int_at(r, 1).unwrap_or(0))))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+}
+
 /// A stored count as an `i32`, clamped (a damaged row can't wrap it).
 fn int(n: Option<i64>) -> i32 {
     n.unwrap_or(0).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
@@ -405,9 +428,10 @@ fn add_undated_plays(a: &mut SoundActivity, plays: i32) {
 
 /// A copy's kind as the C# app reads it: one it doesn't know reads as "Converted".
 fn copy_kind(kind: Option<&str>) -> &'static str {
+    // As .NET's Enum.TryParse: the name, or the number it stands for.
     match kind {
-        Some("Exact") => "Exact",
-        Some("Trimmed") => "Trimmed",
+        Some("Exact" | "0") => "Exact",
+        Some("Trimmed" | "2") => "Trimmed",
         _ => "Converted",
     }
 }

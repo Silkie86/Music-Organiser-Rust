@@ -176,10 +176,11 @@ static JsonObject DumpRediscover(string path)
         using (var lib = new MusicOrganiser.Core.Sounds.SoundLibrary(db))
         {
             lib.Save(c["Sounds"]!.AsArray().Select(s => new MusicOrganiser.Core.Sounds.SoundLibrary.Analysed(
-                s!["Path"]!.GetValue<string>(), 1000, s["Mtime"]!.GetValue<long>(),
+                s!["Path"]!.GetValue<string>(), s["Size"]!.GetValue<long>(), s["Mtime"]!.GetValue<long>(),
                 s["Features"] is JsonArray f ? new MusicOrganiser.Core.Sounds.SoundAnalysis
                 {
-                    Seconds = 1, Features = f.Select(n => n!.GetValue<float>()).ToArray(),
+                    Seconds = s["Seconds"]!.GetValue<double>(), SampleRate = s["SampleRate"]!.GetValue<int>(),
+                    PeakDb = s["PeakDb"]!.GetValue<double>(), Features = f.Select(n => n!.GetValue<float>()).ToArray(),
                     Pitch = s["Pitch"]?.GetValue<double>(), IsLoop = s["IsLoop"]!.GetValue<bool>(),
                 } : null,
                 null,
@@ -196,6 +197,33 @@ static JsonObject DumpRediscover(string path)
                 if (s["Hidden"]!.GetValue<bool>()) hide.Add(id);
             }
             lib.Hide(hide, "twin");
+            // What the duplicate finder would have found: its tables (made by the library itself), filled in directly.
+            lib.Matches();
+            using (var raw = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={db}"))
+            {
+                raw.Open();
+                foreach (var p in c["Prints"]!.AsArray())
+                {
+                    using var cmd = raw.CreateCommand();
+                    cmd.CommandText = "INSERT INTO sound_prints (sound_id, exact) VALUES ($id, $h)";
+                    cmd.Parameters.AddWithValue("$id", ids[p![0]!.GetValue<string>()]);
+                    cmd.Parameters.AddWithValue("$h", Convert.FromHexString(p[1]!.GetValue<string>()));
+                    cmd.ExecuteNonQuery();
+                }
+                foreach (var m in c["Matches"]!.AsArray())
+                {
+                    using var cmd = raw.CreateCommand();
+                    cmd.CommandText = "INSERT INTO sound_matches (a, b, kind, score, offset, apart, typical) VALUES ($a, $b, $k, $s, $o, $p, $t)";
+                    cmd.Parameters.AddWithValue("$a", ids[m![0]!.GetValue<string>()]);
+                    cmd.Parameters.AddWithValue("$b", ids[m[1]!.GetValue<string>()]);
+                    cmd.Parameters.AddWithValue("$k", m[2]!.GetValue<string>());
+                    cmd.Parameters.AddWithValue("$s", m[3]!.GetValue<double>());
+                    cmd.Parameters.AddWithValue("$o", m[4]!.GetValue<double>());
+                    cmd.Parameters.AddWithValue("$p", m[5] is null ? DBNull.Value : m[5]!.GetValue<double>());
+                    cmd.Parameters.AddWithValue("$t", m[6] is null ? DBNull.Value : m[6]!.GetValue<double>());
+                    cmd.ExecuteNonQuery();
+                }
+            }
             var org = new MusicOrganiser.Core.Sounds.SoundOrganiser(lib);
             org.ApplyUsage(c["Usage"]!.AsArray().Select(u => (u![0]!.GetValue<string>(), u[1]!.GetValue<int>())).ToList());
             var answers = new JsonArray();
@@ -232,6 +260,16 @@ static JsonObject DumpRediscover(string path)
                 });
             }
             o["kits"] = kits;
+            o["duplicates"] = new JsonArray(MusicOrganiser.Core.Sounds.DuplicateFinder.Groups(org).Select(g => (JsonNode)new JsonObject
+            {
+                ["Kind"] = g.Kind.ToString(),
+                ["SpareBytes"] = g.SpareBytes,
+                ["Members"] = new JsonArray(g.Members.Select(m => (JsonNode)new JsonObject
+                {
+                    ["Id"] = m.Sound.Id, ["Size"] = m.Size, ["Keep"] = m.Keep, ["Kind"] = m.Kind?.ToString(),
+                    ["Why"] = m.Why, ["Same"] = m.Same, ["SameSet"] = m.SameSet,
+                }).ToArray()),
+            }).ToArray());
             o["years"] = new JsonArray(MusicOrganiser.Core.Sounds.Rediscover.Years(org).Select(y => (JsonNode)y).ToArray());
             o["folders"] = new JsonArray(MusicOrganiser.Core.Sounds.Rediscover.Folders(org).Select(f => (JsonNode)new JsonObject
                 { ["Folder"] = f.Folder, ["Sounds"] = f.Sounds, ["Used"] = f.Used, ["Share"] = f.Share }).ToArray());

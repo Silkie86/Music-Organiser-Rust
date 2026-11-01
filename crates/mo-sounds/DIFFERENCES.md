@@ -97,3 +97,13 @@ save a made-up library to a new sounds.db, which the Rust app reads, and both an
 | Names on Mac or Linux | Leaves characters only Windows forbids (`<>:"\|?*`). | Turns them into "-" everywhere, so a kit copied to Windows still opens. | Better |
 | Two exports of the same kit at once | Could share one folder. | Each makes its own folder, then fills it. | Better |
 | A copied pad | Not checked. | Checked to be whole and on the disk before it takes its name; a failed one is removed. | Better |
+
+## Duplicates
+
+`duplicates` ports `DuplicateFinder.Groups`: it reads the copies the C# app's duplicate finder found and groups them
+for the Space page. The twin test has the C# app group the same made-up copies in its own sounds.db.
+
+| What | C# | Rust | Judged |
+|---|---|---|---|
+| A trimmed (or only similar) copy alone in its set | Described against itself: always "Longer version (x s)". | Described against the one to keep: "Trimmed: 0.5 s of 2 s". | Better (bug in C#) |
+| A copy kind stored as a number ("1") | Read as that kind. | The same. | Same |
