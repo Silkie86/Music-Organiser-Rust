@@ -14,7 +14,7 @@
 //! whole ([`KeyReader::hear_bars`]).
 
 use crate::key::Key;
-use crate::notes::{Grid, Note, Part, Role};
+use crate::notes::{self, Grid, Note, Part, Role};
 use crate::pitch::{PcSet, PerPitch, PitchClass};
 
 use super::{Config, MINOR, Span, Stream};
@@ -465,19 +465,8 @@ impl KeyReader {
 
     /// The velocity nine in ten of the notes of one stream (the tune, or the other parts) are played at or below.
     fn loudness(&mut self, parts: &[Part], tune: bool) -> u32 {
-        self.velocities.clear();
-        for part in parts.iter().filter(|p| p.role.pitched() && (p.role == Role::Melody) == tune) {
-            self.velocities.extend(part.notes.iter().map(|n| n.velocity));
-        }
-        let n = self.velocities.len();
-        if n == 0 {
-            return 0;
-        }
-        // The smallest velocity with at least 90% of the notes at or below it: ceil(0.9 n) - 1 from the bottom. It
-        // stays put when every note is doubled (an octave up), which a rank like 0.9 (n - 1) doesn't.
-        let rank = (n.saturating_mul(9).saturating_add(9) / 10).saturating_sub(1).min(n - 1);
-        let (_, v, _) = self.velocities.select_nth_unstable(rank);
-        u32::from(*v)
+        let stream = parts.iter().filter(|p| p.role.pitched() && (p.role == Role::Melody) == tune);
+        notes::usual_velocity(stream.flat_map(|p| p.notes.iter()), &mut self.velocities)
     }
 
     /// The start of the stretch `span` ticks long that holds the most notes (the earliest, if two hold as many):
@@ -488,17 +477,7 @@ impl KeyReader {
             let tune = part.role == Role::Melody;
             self.starts.extend(part.notes.iter().filter(|n| !ghost(n, tune)).map(|n| n.start));
         }
-        self.starts.sort_unstable();
-        let (mut best, mut most, mut end) = (None, 0, 0);
-        for (i, &s) in self.starts.iter().enumerate() {
-            while self.starts.get(end).is_some_and(|&t| i128::from(t) - i128::from(s) < span) {
-                end += 1;
-            }
-            if end - i > most {
-                (best, most) = (Some(i128::from(s)), end - i);
-            }
-        }
-        best
+        notes::busiest(&mut self.starts, span)
     }
 
     /// One pass over the notes: fills the beats, the bars and the ticks.
@@ -512,9 +491,7 @@ impl KeyReader {
         // Ghost notes (shorter than an eighth of a beat, and played at under an eighth of their stream's usual
         // velocity) are left out: a stray touch of a key isn't part of the music.
         let loud = [self.loudness(parts, true), self.loudness(parts, false)];
-        let ghost = |note: &Note, tune: bool| {
-            length(note) * 8 < beat && u32::from(note.velocity) * 8 < if tune { loud[0] } else { loud[1] }
-        };
+        let ghost = |note: &Note, tune: bool| notes::is_ghost(note, grid.beat(), if tune { loud[0] } else { loud[1] });
 
         // Where the music starts: the first note, or, when the notes lie further apart than the finder hears (only
         // a damaged file's do), the first note of the stretch that holds the most of them.
