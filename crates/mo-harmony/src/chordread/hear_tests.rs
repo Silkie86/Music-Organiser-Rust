@@ -234,6 +234,72 @@ fn the_tune_counts_half_and_only_its_notes_held_a_felt_beat() {
 }
 
 #[test]
+fn presence_counts_chords_and_bass_twice_and_held_tune_notes_once() {
+    let h = Music::new().bass(notes("C2", 0, BAR)).keys(notes("E4 G4", 0, BEAT)).tune(notes("A5", 0, 960)).hear();
+    let ticks = h.presence_ticks(0..8);
+    assert_eq!((ticks[PitchClass::C], ticks[PitchClass::E], ticks[PitchClass::A]), (3840, 960, 960));
+    assert_eq!(h.presence(0..8)[PitchClass::E], 1.0, "a beat of a bar is a quarter: fully present");
+    assert_eq!(h.presence(0..8)[PitchClass::A], 1.0);
+}
+
+#[test]
+fn the_lowest_note_is_the_lowest_chord_or_bass_note_sounding() {
+    let h = Music::new()
+        .bass(notes("C2", 0, BEAT))
+        .keys(notes("E3 G3", 0, BAR + 100))
+        .keys(notes("D3", 2 * BEAT, 50))
+        .keys(notes("B3 D4", BAR, BAR))
+        .tune(notes("A1", BEAT, BEAT))
+        .hear();
+    assert_eq!(h.lowest(0..1), Some(key("C2")));
+    // The tune isn't a chord note, however low.
+    assert_eq!(h.lowest(2..4), Some(key("E3")));
+    // A note sounding less than a quarter of the unit doesn't count, nor does a held-over end.
+    assert_eq!(h.lowest(4..5), Some(key("E3")));
+    assert_eq!(h.lowest(8..9), Some(key("B3")));
+    assert_eq!(h.lowest(0..8), Some(key("C2")));
+    let (from, to) = (5, 3);
+    assert_eq!((h.lowest(16..17), h.lowest(from..to)), (None, None));
+    // Where no chord or bass note sounds a quarter of a unit, the lowest note sounding at all, of any stream: a tune
+    // alone, or chords too short.
+    let h =
+        Music::new().tune(notes("E5", 0, BAR)).keys(notes("G4 C5", BAR, 50)).keys(notes("A3", BAR + 120, 40)).hear();
+    assert_eq!((h.lowest(0..8), h.lowest(8..9), h.lowest(0..9)), (Some(key("E5")), Some(key("A3")), Some(key("A3"))));
+    assert_eq!(h.heard(0..8), pcs("E"));
+}
+
+#[test]
+fn the_notes_heard_are_those_sounding_an_eighth_of_the_time() {
+    let ticks = per_pitch(&[(PitchClass::C, 3840), (PitchClass::D, 480), (PitchClass::E, 479)]);
+    assert_eq!(super::heard_in(&ticks, 1920), pcs("C D"));
+    // Nothing sounding: any tick is heard (a tune alone).
+    assert_eq!(super::heard_in(&per_pitch(&[(PitchClass::A, 1)]), 0), pcs("A"));
+    assert_eq!(super::heard_in(&PerPitch::default(), 0), PcSet::EMPTY);
+}
+
+#[test]
+fn a_tick_lines_up_with_the_nearest_unit_start() {
+    let h = Music::new().keys(notes("C4 E4 G4", 0, 2 * BAR)).hear();
+    assert_eq!(h.units(), 16);
+    let cases = [(0, 0), (119, 0), (120, 0), (121, 1), (240, 1), (-500, 0), (2 * BAR - 121, 15), (2 * BAR - 120, 15)];
+    for (tick, unit) in cases.into_iter().chain([(2 * BAR - 119, 16), (2 * BAR, 16), (i64::MAX, 16), (i64::MIN, 0)]) {
+        assert_eq!(h.nearest_unit(tick), unit, "{tick}");
+    }
+    // The units start on the music's own bar line.
+    let moved = Music::new().grid(4, 480);
+    let mut moved = moved.keys(notes("C4 E4 G4", 1000, BAR));
+    moved.grid.bar_line = 1000;
+    let h = moved.hear();
+    assert_eq!((h.nearest_unit(1000), h.nearest_unit(1000 + 240), h.nearest_unit(1119)), (0, 1, 0));
+    // Three ticks a beat: units of one tick and two, starting at 0, 1, 3, 4, 6...; halfway goes to the earlier.
+    let h = Music::new().grid(4, 3).keys(notes("C4 E4 G4", 0, 12)).hear();
+    assert_eq!((1..=7).map(|t| h.nearest_unit(t)).collect::<Vec<_>>(), [1, 1, 2, 3, 3, 4, 5]);
+    // A loop's units start with its copied last bar: its own first unit comes after it.
+    let h = Music::new().looped().keys(notes("C4 E4 G4", 0, BAR)).hear();
+    assert_eq!((h.nearest_unit(0), h.nearest_unit(-BAR)), (h.bar_units(), 0));
+}
+
+#[test]
 fn silence_inside_a_stretch_is_free() {
     let h = Music::new().keys(notes("C4 E4 G4", 0, BEAT)).bass(notes("C2", 3 * BEAT, BEAT)).hear();
     assert_eq!(h.sounding_ticks(0..8), 960);
@@ -626,12 +692,13 @@ fn describe(
     broken: PcSet,
     onset: Option<PitchClass>,
     gap: Option<i32>,
+    lowest: Option<i32>,
     masses: [[u64; 12]; 6],
 ) -> String {
     let streams: Vec<String> = streams.iter().map(|(s, c, h)| format!("{s}/{c}/{h}")).collect();
     let masses: Vec<String> = masses.iter().map(|m| format!("{m:?}")).collect();
     format!(
-        "{level:?} S {sound} | {} | broken {broken} | onset {onset:?} | gap {gap:?} | {}",
+        "{level:?} S {sound} | {} | broken {broken} | onset {onset:?} | gap {gap:?} | lowest {lowest:?} | {}",
         streams.join(" | "),
         masses.join(" ")
     )
@@ -654,6 +721,7 @@ fn unit_facts(h: &Hearing, shift: i32, scale: u64) -> Vec<String> {
                 back(h.broken_struck(u)),
                 h.bass_onset(u..u + 1).map(|pc| pc.up(-shift)),
                 h.gap_bass(u).map(|k| i32::from(k) - shift),
+                h.lowest(u..u + 1).map(|k| i32::from(k) - shift),
                 masses,
             )
         })
@@ -854,7 +922,11 @@ fn slow_unit_facts(h: &Hearing) -> Vec<String> {
             let mut streams = [(PcSet::EMPTY, PcSet::EMPTY, PcSet::EMPTY); 3];
             let mut broken = PcSet::EMPTY;
             let mut onset: Option<(i64, u8)> = None;
+            let (mut lowest, mut lowest_any): (Option<u8>, Option<u8>) = (None, None);
             for p in pieces.iter().filter(|p| overlap(p) > 0) {
+                if !p.over {
+                    lowest_any = Some(lowest_any.map_or(p.key, |l| l.min(p.key)));
+                }
                 let ticks = overlap(p) as u64;
                 let to_bass =
                     p.stream == Stream::Harmony && !p.broken && !p.over && gap.is_some_and(|g| g % 12 == p.key % 12);
@@ -879,6 +951,9 @@ fn slow_unit_facts(h: &Hearing) -> Vec<String> {
                 }
                 if !p.over && overlap(p) * 4 >= len {
                     streams[s].2 = streams[s].2.with(pc);
+                    if stream != Stream::Melody {
+                        lowest = Some(lowest.map_or(p.key, |l| l.min(p.key)));
+                    }
                 }
                 if p.onset && (lo..hi).contains(&p.start) {
                     streams[s].0 = streams[s].0.with(pc);
@@ -899,7 +974,8 @@ fn slow_unit_facts(h: &Hearing) -> Vec<String> {
             let (harmony, bass) = (streams[stream_index(Stream::Harmony)].2, streams[stream_index(Stream::Bass)].2);
             let sound = if harmony.union(bass).is_empty() { 0 } else { len as u64 };
             let onset = onset.map(|(_, k)| PitchClass::of_key(k));
-            describe(h.level(u), sound, streams, broken, onset, gap.map(i32::from), masses)
+            let lowest = lowest.or(lowest_any).map(i32::from);
+            describe(h.level(u), sound, streams, broken, onset, gap.map(i32::from), lowest, masses)
         })
         .collect()
 }

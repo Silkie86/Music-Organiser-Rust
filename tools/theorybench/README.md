@@ -285,6 +285,24 @@ texture, tune, push, chart or quality, and context and role in its sweep. Given 
 mir_eval itself on them and prints both sets of numbers (they matched exactly on all 909 POP909 songs, 2026-10-31, and
 on POP909-CL pooled in beats, 2026-11-01).
 
+### The chord reader's candidates
+
+mo-harmony's chord reader scores only the readings the notes let in for each stretch of music (its candidates), so a
+chord missing from them can never be read. `candidates` measures how often the labelled chord is among them:
+
+```
+cargo run -p mo-theorybench --release -- candidates path/to/bench/pop909cl.jsonl --inputs piano,full,upper --misses misses.tsv
+```
+
+Each labelled chord is lined up with the units the reader hears and cut into stretches of at most two bars, the longest
+it scores; a label so short that both its ends land on the same unit start is left out, and the report says how much
+time those take. The rows add the ways in one at a time: the tables (the root played with the notes that say which chord
+it is, or a rootless seventh chord), open fifths (a root heard with its fifth and no third tries the major and the minor
+triad), and the escape (the label whose own notes sound longest of all the rest): the reader's candidates. The last row
+moves the labelled chord's ends by up to a unit (keeping to two bars), as the reader finds its own ends: what's missed
+even then, it can't read, and `--misses` lists those stretches. On POP909-CL the design's accept sets apply (a major
+label also takes a maj7 or 6, and so on, as in **lenient** above).
+
 ## Charts played as music (`convert/voice.py`)
 
 `charts.py` plays Billboard's and RS200's charts as block chords over the label's bass: every note the label names,
@@ -408,3 +426,22 @@ less often than as block chords, and most of the tensions it names aren't in the
     labels write #11, as charts do), minor add 9 3.8% (read as Ebmaj13/C for Cm(add9): the right notes from the wrong
     root, 66.5% notes+bass), 7(#9,b13) and 7(b9,b13) 0.0% (named 7alt, which doesn't say which alterations; the event
     is right 55.8% and 57.8%), and power chords 1.5% (its changes come a bar late, so C5 then F5 is read as Csus4).
+
+## The chord reader's candidates (2026-11-01)
+
+The labelled chord among the reader's candidates, as a share of the time (`candidates`; the experiments behind the
+choice are in harmony/experiments/chord-reader-experiments.md, E0):
+
+| POP909-CL | accompaniment | with the tune | upper part, no bass |
+|---|---|---|---|
+| the tables alone | 89.19 | 91.34 | 84.23 |
+| + open fifths | 95.43 | 96.25 | 89.87 |
+| + the escape: the reader's candidates | 96.99 | 97.43 | 91.48 |
+| the reader's, ends within a unit | 98.89 | 99.07 | 95.97 |
+
+On every set `voice.py` plays (Billboard and RS200, sets A and B, and the sweep), every row is 99.99% or more for the
+accompaniment and with the tune, and 93.6% to 99.3% within a unit for the upper part alone. There are 8 to 15 candidates
+a stretch on average (23 in the sweep's dense chords). Labels too short to place are rare: 20 on POP909-CL, under 0.01%
+of the time, and at most one a set elsewhere. What POP909-CL misses even with the ends moved is mostly a stretch whose
+notes don't hold the chord: one or two notes under a full label, a maj7 label over a plain triad, a sus2 label over an
+open fifth. With no bass part, the chords' roots often aren't played at all: that's most of the upper part's misses.

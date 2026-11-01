@@ -509,7 +509,7 @@ impl Voices {
 /// The piano's bass line and the rest: a note is in the bass line when, as it starts, it's the lowest note the piano
 /// sounds and nothing else sounds within a fourth above it (the key finder's own test for a bass). `notes` must be in
 /// order of start.
-fn split_bass(notes: &[Note]) -> (Vec<Note>, Vec<Note>) {
+pub(crate) fn split_bass(notes: &[Note]) -> (Vec<Note>, Vec<Note>) {
     let (mut bass, mut upper) = (Vec::new(), Vec::new());
     let mut sounding: Vec<Note> = Vec::new();
     let mut i = 0;
@@ -541,20 +541,7 @@ type Heard = (Evidence, Option<(Key, f64)>);
 
 /// Hears one case's parts and asks the C# app too.
 fn hear(reader: &mut KeyReader, parts: &[(Role, Vec<Note>)], grid: Grid, ppq: u32, span: Span) -> Option<Heard> {
-    let notes: Vec<Vec<mo_harmony::Note>> = parts
-        .iter()
-        .map(|(_, notes)| {
-            notes
-                .iter()
-                .map(|n| mo_harmony::Note {
-                    start: n.start,
-                    length: n.length,
-                    key: n.key,
-                    velocity: keys::velocity16(n.velocity),
-                })
-                .collect()
-        })
-        .collect();
+    let notes: Vec<Vec<mo_harmony::Note>> = parts.iter().map(|(_, notes)| keys::harmony_notes(notes)).collect();
     let heard_parts: Vec<mo_harmony::Part> =
         parts.iter().zip(&notes).map(|((role, _), notes)| mo_harmony::Part { role: *role, notes }).collect();
     let heard = reader.hear(&heard_parts, grid)?;
