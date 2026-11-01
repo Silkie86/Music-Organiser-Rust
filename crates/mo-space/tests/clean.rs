@@ -6,6 +6,7 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 
 use mo_space::clean::{Bin, Guard, Problem, Refused, Removed, apply, preview, undo};
 use mo_space::key;
@@ -192,7 +193,7 @@ fn a_copy_stays_when_its_twin_goes_too_or_has_changed() {
     assert_eq!(plan.lines.len(), 1);
     fs::write(&b, b"SAME").unwrap();
     let bin = FolderBin::new(dir.join("bin"));
-    let done = apply(&plan, &guard, &bin);
+    let done = apply(&plan, &guard, &bin, &AtomicBool::new(false));
     assert!(done.removed.is_empty());
     assert_eq!(done.problems, [Problem { path: c.clone(), why: Refused::NotACopyNow.text().into() }]);
     assert!(Path::new(&c).exists());
@@ -232,7 +233,7 @@ fn removing_goes_to_the_bin_and_undo_puts_it_back() {
     fs::write(&changing, b"newer and longer").unwrap();
 
     let bin = FolderBin::new(dir.join("bin"));
-    let done = apply(&plan, &guard, &bin);
+    let done = apply(&plan, &guard, &bin, &AtomicBool::new(false));
     assert_eq!(done.removed.len(), 2);
     assert_eq!(done.bytes(), 9 + 3);
     assert_eq!(done.problems, [Problem { path: changing.clone(), why: Refused::Changed.text().into() }]);
@@ -294,7 +295,7 @@ fn links_are_never_followed_or_removed() {
     let plan = preview(&[line(CompactKind::UnusedAudio, &link.to_string_lossy())], &guard);
     assert_eq!(plan.refused[0].1, Refused::Link);
     // And a size walk doesn't count what a link points to.
-    let measured = mo_space::size::measure(&projects, &std::sync::atomic::AtomicBool::new(false)).unwrap();
+    let measured = mo_space::size::measure(&projects, &AtomicBool::new(false)).unwrap();
     assert_eq!(measured, mo_space::Measured::default());
 }
 

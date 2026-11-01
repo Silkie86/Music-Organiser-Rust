@@ -267,3 +267,22 @@ fn one_file_picked_by_two_paths_goes_once() {
     assert!(done.problems[0].why.starts_with("It's the same file as "), "{}", done.problems[0].why);
     assert_eq!(done.problems[0].path, again.path);
 }
+
+#[cfg(unix)]
+#[test]
+fn a_good_second_path_still_goes_when_the_first_stays() {
+    let dir = fixtures("mo-space-spare-second-path");
+    write(&dir, "VST3/Serum.vst3", 10);
+    write(&dir, "VST2/Serum_x64.dll", 10);
+    std::os::unix::fs::symlink(dir.join("VST2"), dir.join("Old VST2")).unwrap();
+    let used = dir.join("VST3/Serum.vst3");
+    let old = spare(&dir.join("Old VST2/Serum_x64.dll"), "VST2", &used);
+    let good = spare(&dir.join("VST2/Serum_x64.dll"), "VST2", &used);
+    // Found again just now, only the second path is listed: the first stays, as it isn't spare now.
+    let done =
+        remove(&[old.clone(), good.clone()], std::slice::from_ref(&good), &folder_bin(&dir), &AtomicBool::new(false));
+    assert_eq!(done.removed.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(), [good.path.as_str()]);
+    assert_eq!(done.problems.len(), 1);
+    assert_eq!(done.problems[0].path, old.path);
+    assert!(done.problems[0].why.contains("isn't spare any more"), "{}", done.problems[0].why);
+}

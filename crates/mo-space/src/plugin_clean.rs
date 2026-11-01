@@ -603,7 +603,7 @@ pub fn apply(
         Err(why.text(&space.name, library.names))
     };
     let check = &check;
-    let mut sending = Sending::new(bin);
+    let mut sending = Sending::new(bin, stop);
     // Rounds: a folder inside one waiting for Windows' administrator question waits for how that goes. If the outer one
     // goes, it went with it; if it stays (you said no), it's tried on its own in the next round, and if Windows guards
     // it too it stays as well: Windows isn't asked twice in one clean-up.

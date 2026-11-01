@@ -32,6 +32,8 @@ windows-registry = "0.6"
 # 1.4.1 or later: putting a link back reads the old one, which Windows gives as a "\\?\" path, and older versions
 # made a broken junction from that without saying so.
 junction = "1.4.1"
+# Which drives are USB sticks or memory cards: Windows keeps no Recycle Bin on them, so nothing there is removed.
+sysinfo = { version = "0.40", default-features = false, features = ["disk"] }
 
 # Whether a folder is on a network share (Mac, Linux). Already used by fs4.
 [target.'cfg(unix)'.dependencies]

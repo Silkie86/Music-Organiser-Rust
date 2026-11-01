@@ -19,7 +19,7 @@ use std::fs::{self, Metadata};
 use std::io::Read;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Local, NaiveDateTime};
@@ -29,11 +29,11 @@ use mo_formats::textscan::is_audio_path;
 use mo_library::scan::{daw_of, is_autosave_dir, is_autosave_file, is_inside, is_project_file};
 use serde::{Deserialize, Serialize};
 
-use crate::admin::{Admin, AsAdmin, NoAdmin, Step, ask_for, reason, stamp};
+use crate::admin::{Admin, AsAdmin, NoAdmin, Step, ask_for, real_spot, reason, stamp};
 use crate::plugin_space::SpaceKind;
-use crate::size::{Stopped, has_online_only, is_online_only};
+use crate::size::{OnlineOnly, Stopped, is_link, is_online_only, online_only_in};
 use crate::song::{CompactItem, CompactKind, has_studio_one_song, parent};
-use crate::{key, not_there, real_path};
+use crate::{key, not_there, real_path, text};
 
 /// Why a picked line won't go.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -70,6 +70,10 @@ pub enum Refused {
     TwinGoesToo,
     /// It changed since it was measured.
     Changed,
+    /// You pressed Stop before it went.
+    Stopped,
+    /// It's on a USB stick or memory card, which has no Recycle Bin (Windows).
+    RemovableDrive,
 }
 
 impl Refused {
@@ -92,6 +96,10 @@ impl Refused {
             Refused::NotACopyNow => "The save it was a copy of has changed or gone, so it stays.",
             Refused::TwinGoesToo => "The save it's a copy of is going too, so this one stays.",
             Refused::Changed => "It changed since you looked, so it stays.",
+            Refused::Stopped => STOPPED,
+            Refused::RemovableDrive => {
+                "It's on a USB stick or memory card, which has no Recycle Bin: removing it would delete it for good."
+            }
         }
     }
 }
@@ -193,6 +201,37 @@ fn network_mount(_path: &str) -> bool {
     false
 }
 
+/// Whether a file or folder (where it really is) is on a USB stick or memory card. Windows keeps no Recycle Bin on
+/// one, so removing from it deletes for good. (A Mac and Linux keep a Trash on each drive.) The list of drives is read
+/// at most every few seconds, as one look at hundreds of plugins asks about each.
+#[cfg(windows)]
+pub(crate) fn on_removable(real: &str) -> bool {
+    use std::sync::{Mutex, PoisonError};
+    use std::time::{Duration, Instant};
+    /// The drives as last read: where each is, and whether it's removable.
+    type Drives = Vec<(String, bool)>;
+    static READ: Mutex<Option<(Instant, Drives)>> = Mutex::new(None);
+    let mut read = READ.lock().unwrap_or_else(PoisonError::into_inner);
+    let (_, drives) = match read.take() {
+        Some((at, drives)) if at.elapsed() < Duration::from_secs(5) => read.insert((at, drives)),
+        _ => {
+            // A list that can't be read says nothing is removable: as it was before this check.
+            let disks = sysinfo::Disks::new_with_refreshed_list_specifics(sysinfo::DiskRefreshKind::nothing());
+            let drives = disks
+                .map_or_else(|_| Vec::new(), |d| d.iter().map(|d| (text(d.mount_point()), d.is_removable())).collect());
+            read.insert((Instant::now(), drives))
+        }
+    };
+    // The innermost drive holding it decides: a drive can sit in a folder of another.
+    drives.iter().filter(|(at, _)| is_inside(real, at)).max_by_key(|(at, _)| at.len()).is_some_and(|(_, r)| *r)
+}
+
+/// A Mac and Linux keep a Trash on each drive, a USB stick too.
+#[cfg(not(windows))]
+pub(crate) fn on_removable(_real: &str) -> bool {
+    false
+}
+
 impl Guard<'_> {
     /// Whether a line may go, and what it looks like now.
     fn check(&self, item: &CompactItem) -> Result<Checked, Refused> {
@@ -205,6 +244,9 @@ impl Guard<'_> {
         let real = real_path(path).ok_or(Refused::Gone)?;
         if on_network(path) || on_network(&real) {
             return Err(Refused::NetworkDrive);
+        }
+        if on_removable(&real) {
+            return Err(Refused::RemovableDrive);
         }
         let roots: Vec<(&str, String)> = self.project_roots.iter().map(|r| both(r)).collect();
         if roots.iter().any(|(r, real_r)| is_inside(r, path) || is_inside(real_r, &real)) {
@@ -437,16 +479,22 @@ pub trait Bin {
 }
 
 /// Sends each line of the plan to the bin, checking each again just before: one that changed, or that the guard now
-/// refuses, stays. A copy only goes while the save it copies is still there and still the same.
-pub fn apply(plan: &Plan, guard: &Guard<'_>, bin: &dyn Bin) -> Done {
+/// refuses, stays. A copy only goes while the save it copies is still there and still the same. Once you press Stop,
+/// what hasn't gone yet stays.
+pub fn apply(plan: &Plan, guard: &Guard<'_>, bin: &dyn Bin, stop: &AtomicBool) -> Done {
     let mut done = Done::default();
-    let mut sending = Sending::new(bin);
+    let mut sending = Sending::new(bin, stop);
     for line in &plan.lines {
         let item = &line.item;
-        let check = || match guard.check(item) {
-            Err(why) => Err(why),
-            Ok(now) if now.stamp != line.stamp => Err(Refused::Changed),
-            Ok(now) => Ok(now.real),
+        let check = || {
+            if stop.load(Ordering::Relaxed) {
+                return Err(Refused::Stopped);
+            }
+            match guard.check(item) {
+                Err(why) => Err(why),
+                Ok(now) if now.stamp != line.stamp => Err(Refused::Changed),
+                Ok(now) => Ok(now.real),
+            }
         };
         let real = match check() {
             Ok(real) => real,
@@ -466,25 +514,39 @@ pub fn apply(plan: &Plan, guard: &Guard<'_>, bin: &dyn Bin) -> Done {
 pub(crate) const ONLINE_ONLY: &str = "It's only online in OneDrive (all of it or some of it), so it can't go to the \
                                       Recycle Bin: removing it would delete it from OneDrive everywhere. It stays.";
 
-/// Why the Recycle Bin couldn't keep something, so removing it would delete it for good: it's on a network drive, which
-/// has no Recycle Bin, or it's a OneDrive file that's only online, or a folder holding one (only Windows has them, so
-/// only there is a folder walked). Each clean-up checks this itself first, where it can say more; [`Sending::send`]
+/// Why the Recycle Bin couldn't keep something, so removing it would delete it for good: it's on a network drive, or a
+/// USB stick or memory card (Windows), which have no Recycle Bin, or it's a OneDrive file that's only online, or a
+/// folder holding one (only Windows has them, so only there is a folder walked). Each clean-up checks this itself first, where it can say more; [`Sending::send`]
 /// checks it once more for all of them, whichever clean-up they come from.
 pub(crate) fn cant_keep(path: &str, real: &str, stop: &AtomicBool) -> Option<&'static str> {
     if on_network(path) || on_network(real) {
         return Some(Refused::NetworkDrive.text());
     }
-    let meta = fs::symlink_metadata(path).ok()?;
-    let online = if meta.is_dir() {
-        match has_online_only(Path::new(path), stop) {
-            Ok(online) => online,
-            Err(Stopped) => return Some(STOPPED),
-        }
-    } else {
-        is_online_only(&meta)
+    if on_removable(real) {
+        return Some(Refused::RemovableDrive.text());
+    }
+    let meta = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(Refused::Gone.text()),
+        Err(_) => return Some(CANT_LOOK),
     };
-    online.then_some(ONLINE_ONLY)
+    if is_online_only(&meta) {
+        return Some(ONLINE_ONLY);
+    }
+    if !meta.is_dir() {
+        return None;
+    }
+    match online_only_in(Path::new(path), stop) {
+        Ok(OnlineOnly::No) => None,
+        Ok(OnlineOnly::Yes) => Some(ONLINE_ONLY),
+        Ok(OnlineOnly::CantTell) => Some(CANT_LOOK),
+        Err(Stopped) => Some(STOPPED),
+    }
 }
+
+/// What's said of something that couldn't all be looked at to check the Recycle Bin can keep it.
+const CANT_LOOK: &str = "Some of it couldn't be read to check it's all on this computer (not only online in OneDrive), \
+                         so it stays.";
 
 /// What's said of something that stays because you pressed Stop.
 pub(crate) const STOPPED: &str = "Stopped before it went.";
@@ -497,6 +559,8 @@ pub(crate) const NOT_IN_BIN: &str = "It isn't in the Recycle Bin, so it may have
 /// everything removed in the bin: a clean-up ends with it, so nothing waiting can be left out of what it says.
 pub(crate) struct Sending<'a> {
     bin: &'a dyn Bin,
+    /// Stop: what isn't sent yet stays.
+    stop: &'a AtomicBool,
     waiting: Vec<(Removed, Again<'a>)>,
     /// Where things the administrator step sent were (keys), for what's said when the bin doesn't have them.
     by_admin: Vec<String>,
@@ -519,8 +583,8 @@ pub(crate) enum Sent {
 }
 
 impl<'a> Sending<'a> {
-    pub(crate) fn new(bin: &'a dyn Bin) -> Self {
-        Sending { bin, waiting: Vec::new(), by_admin: Vec::new(), not_asked: None }
+    pub(crate) fn new(bin: &'a dyn Bin, stop: &'a AtomicBool) -> Self {
+        Sending { bin, stop, waiting: Vec::new(), by_admin: Vec::new(), not_asked: None }
     }
 
     /// Sends one checked thing to the bin and notes how it went in `done`. One Windows guards waits for the
@@ -534,10 +598,27 @@ impl<'a> Sending<'a> {
         done: &mut Done,
         again: impl Fn() -> Result<(), String> + 'a,
     ) -> Sent {
-        // Whichever clean-up it's from: what the Recycle Bin can't keep stays, as removing it would delete it for good.
-        if let Some(why) = cant_keep(path, &real, &AtomicBool::new(false)) {
-            done.problems.push(Problem { path: path.to_owned(), why: why.to_owned() });
-            return Sent::Stays;
+        let stays = |done: &mut Done, why: String| {
+            done.problems.push(Problem { path: path.to_owned(), why });
+            Sent::Stays
+        };
+        // Whichever clean-up it's from, these hold. A link never goes: the Recycle Bin would take the link, but the
+        // administrator step the place it leads to, which you didn't pick.
+        if is_link(Path::new(path)) {
+            return stays(done, Refused::Link.text().to_owned());
+        }
+        // The same thing reached another way goes once (it may be waiting for the administrator step).
+        let same = |r: &Removed| key(&r.real) == key(&real);
+        if let Some(first) = done.removed.iter().chain(self.waiting.iter().map(|(r, _)| r)).find(|r| same(r)) {
+            let why = format!("It's the same as {}, reached another way, so it's only sent once.", first.path);
+            return stays(done, why);
+        }
+        // What the Recycle Bin can't keep stays, as removing it would delete it for good.
+        if let Some(why) = cant_keep(path, &real, self.stop) {
+            return stays(done, why.to_owned());
+        }
+        if self.stop.load(Ordering::Relaxed) {
+            return stays(done, STOPPED.to_owned());
         }
         let removed = Removed { path: path.to_owned(), real, bytes, what, when: now_seconds(), bin_id: None };
         let why = match self.bin.send(Path::new(path)) {
@@ -554,8 +635,7 @@ impl<'a> Sending<'a> {
             },
             Err(why) => why,
         };
-        done.problems.push(Problem { path: path.to_owned(), why });
-        Sent::Stays
+        stays(done, why)
     }
 
     /// Sends what waits to the bin in one administrator step (Windows asks you once). Each is checked again first, and
@@ -565,7 +645,25 @@ impl<'a> Sending<'a> {
         let mut lines = Vec::new();
         let mut sent = Vec::new();
         for (r, again) in std::mem::take(&mut self.waiting) {
-            let stamped = again().and_then(|()| {
+            // The step is given where it really is: that must still be the very thing picked (in the same real
+            // folder: one on the way may have been swapped for a link meanwhile), and not a link.
+            let still_there = || {
+                if self.stop.load(Ordering::Relaxed) {
+                    return Err(STOPPED.to_owned());
+                }
+                if not_there(Path::new(&r.path)) {
+                    return Err(Refused::Gone.text().to_owned());
+                }
+                if is_link(Path::new(&r.path)) {
+                    return Err(Refused::Link.text().to_owned());
+                }
+                let folder = |p: &str| Path::new(p).parent().map(|f| key(&text(f)));
+                if folder(&real_spot(&r.path)) != folder(&r.real) {
+                    return Err("It's reached through a link that leads somewhere else now, so it stays.".to_owned());
+                }
+                Ok(())
+            };
+            let stamped = still_there().and_then(|()| again()).and_then(|()| {
                 stamp(Path::new(&r.real))
                     .ok_or_else(|| "It couldn't all be read to check it again, so it stays.".to_owned())
             });
@@ -672,7 +770,22 @@ fn bin_problem(e: &trash::Error) -> String {
 /// (a couple of seconds' leeway for the clock).
 #[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
 fn is_the_one(item: &trash::TrashItem, r: &Removed) -> bool {
-    key(&item.original_path().to_string_lossy()) == key(&r.real) && item.time_deleted >= r.when - 2
+    let real = Path::new(&r.real);
+    let same_folder = real.parent().is_some_and(|f| key(&text(f)) == key(&text(&item.original_parent)));
+    same_folder && same_name(item, real) && item.time_deleted >= r.when.saturating_sub(2)
+}
+
+/// Whether a bin item has the name of the file removed. Windows gives the name as Explorer shows it, so with "Hide
+/// extensions for known file types" on (as it is at first) `Kick.wav` is listed as `Kick`: then the file in the bin
+/// (`$R….wav`) has to have the same ending.
+#[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+fn same_name(item: &trash::TrashItem, real: &Path) -> bool {
+    let shown = key(&item.name.to_string_lossy());
+    let ending = |p: &Path| p.extension().map(|e| key(&e.to_string_lossy()));
+    real.file_name().is_some_and(|n| key(&n.to_string_lossy()) == shown)
+        || (real.file_stem().is_some_and(|s| key(&s.to_string_lossy()) == shown)
+            && ending(real).is_some()
+            && ending(Path::new(&item.id)) == ending(real))
 }
 
 #[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
@@ -721,13 +834,22 @@ fn put_back_from_system_bin(removed: &[Removed]) -> Vec<Problem> {
     };
     let mut problems = Vec::new();
     for r in removed {
-        let by_id = r.bin_id.as_deref().and_then(|id| items.iter().find(|i| i.id.to_str() == Some(id)));
-        let item = by_id.or_else(|| items.iter().filter(|i| is_the_one(i, r)).min_by_key(|i| i.time_deleted));
+        // The one found when it went; only one never found then is looked for by place and time (an id that's gone
+        // means it was put back already, and anything there now from that place went later).
+        let item = match r.bin_id.as_deref() {
+            Some(id) => items.iter().find(|i| i.id.to_str() == Some(id)),
+            None => items.iter().filter(|i| is_the_one(i, r)).min_by_key(|i| i.time_deleted),
+        };
         let Some(item) = item else {
             problems.push(problem(r, "It isn't in the Recycle Bin any more."));
             continue;
         };
-        match catch_unwind(AssertUnwindSafe(|| trash::os_limited::restore_all([item.clone()]))) {
+        // It comes back under its own full name, even when Windows listed it without its ending.
+        let mut item = item.clone();
+        if let Some(name) = Path::new(&r.real).file_name().filter(|_| same_name(&item, Path::new(&r.real))) {
+            item.name = name.to_owned();
+        }
+        match catch_unwind(AssertUnwindSafe(|| trash::os_limited::restore_all([item]))) {
             Ok(Ok(())) => {}
             Ok(Err(trash::Error::RestoreCollision { .. })) => {
                 problems.push(problem(r, "Something new has its name now, so it's left in the Recycle Bin."))

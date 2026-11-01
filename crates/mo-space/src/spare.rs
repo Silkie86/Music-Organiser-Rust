@@ -14,11 +14,12 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use mo_formats::case;
+use mo_library::read::name_key;
 
 use crate::admin::stamp;
-use crate::clean::{Bin, Done, Problem, Refused, STOPPED, Sending, What, cant_keep};
+use crate::clean::{Bin, Done, Problem, Refused, STOPPED, Sending, Sent, What, cant_keep};
 use crate::plugin_space::SpaceKind;
-use crate::plugins::{InstalledPlugin, family, format_of, is_waves};
+use crate::plugins::{InstalledPlugin, format_of, is_waves};
 use crate::size::{Stopped, is_link, measure};
 use crate::{key, real_path};
 
@@ -77,14 +78,16 @@ pub fn find(
     pro_tools: bool,
     look: impl Fn(&str) -> (u64, Option<String>),
 ) -> Vec<SpareCopy> {
-    // Each used name by its family ("FabFilter Pro-Q 3" and "Pro-Q 3" are both families of the files' names).
-    let used_families: Vec<(String, &HashMap<String, u32>)> =
-        used.iter().map(|(name, formats)| (family(name), formats)).filter(|(f, _)| f.chars().count() >= 2).collect();
-    // The files by family, in the order their families first come.
+    // Each used name by its name key, as the Plugins page groups plugins: "Serum_x64" and "Diva (x64)" are Serum and
+    // Diva, but Ozone 9 and Ozone 11 are two plugins (a project's Ozone 9 doesn't load Ozone 11). "FabFilter Pro-Q 3"
+    // and "Pro-Q 3" are matched below ([`close`]).
+    let used_keys: Vec<(String, &HashMap<String, u32>)> =
+        used.iter().map(|(name, formats)| (name_key(name), formats)).filter(|(f, _)| f.chars().count() >= 2).collect();
+    // The files by name key, in the order their keys first come.
     let mut groups: Vec<(String, Vec<&InstalledPlugin>)> = Vec::new();
     let mut at: HashMap<String, usize> = HashMap::new();
     for f in files.iter().filter(|f| !is_waves(&f.name, &f.path)) {
-        let fam = family(&f.name);
+        let fam = name_key(&f.name);
         match at.get(&fam) {
             Some(&i) => {
                 if let Some((_, g)) = groups.get_mut(i) {
@@ -104,7 +107,7 @@ pub fn find(
         }
         // Formats by their name in capitals, so "vst3" and "VST3" are one.
         let mut formats: BTreeMap<String, u32> = BTreeMap::new();
-        for (_, f) in used_families.iter().filter(|(u, _)| close(u, &fam)) {
+        for (_, f) in used_keys.iter().filter(|(u, _)| close(u, &fam)) {
             for (format, n) in f.iter() {
                 let entry = formats.entry(case::key(format)).or_insert(0);
                 *entry = entry.saturating_add(*n);
@@ -187,8 +190,8 @@ pub fn remove(picked: &[SpareCopy], now: &[SpareCopy], bin: &dyn Bin, stop: &Ato
     let mut done = Done::default();
     let now: HashMap<String, &SpareCopy> = now.iter().map(|n| (key(&n.path), n)).collect();
     let now = &now;
-    let mut sending = Sending::new(bin);
-    // Each file once, by where it really is (worked out before any goes): the first path picked to it, by that place.
+    let mut sending = Sending::new(bin, stop);
+    // Each file once, by where it really is (worked out before any goes): the first path sent for it, by that place.
     let reals: Vec<String> = picked.iter().map(|c| real_path(&c.path).unwrap_or_else(|| c.path.clone())).collect();
     let mut seen: HashMap<String, &str> = HashMap::new();
     for (copy, real) in picked.iter().zip(reals) {
@@ -199,7 +202,6 @@ pub fn remove(picked: &[SpareCopy], now: &[SpareCopy], bin: &dyn Bin, stop: &Ato
             }
             continue;
         }
-        seen.insert(key(&real), &copy.path);
         let copy_key = key(&copy.path);
         let check = move || -> Result<(), String> {
             if stop.load(Ordering::Relaxed) {
@@ -234,7 +236,14 @@ pub fn remove(picked: &[SpareCopy], now: &[SpareCopy], bin: &dyn Bin, stop: &Ato
             done.problems.push(Problem { path: copy.path.clone(), why });
             continue;
         }
-        sending.send(&copy.path, real, copy.bytes, What::Plugin(SpaceKind::Program), &mut done, check);
+        // Only once it went (or waits for Windows): one whose first path stayed is still tried by the next.
+        let real_key = key(&real);
+        match sending.send(&copy.path, real, copy.bytes, What::Plugin(SpaceKind::Program), &mut done, check) {
+            Sent::Went | Sent::Waits => {
+                seen.insert(real_key, &copy.path);
+            }
+            Sent::Stays => {}
+        }
     }
     sending.finish(&mut done);
     done
@@ -343,6 +352,14 @@ mod tests {
         let spare = find(&files, &used, false, |_| (0, None));
         let names: Vec<(&str, &str)> = spare.iter().map(|s| (s.name.as_str(), s.format.as_str())).collect();
         assert_eq!(names, [("Pro-Q 3", "VST2")]);
+    }
+
+    #[test]
+    fn another_version_of_a_plugin_isnt_the_same_plugin() {
+        // Ozone 9's VST2 was uninstalled: its projects now load the VST3, which Ozone 11's VST2 doesn't replace.
+        let files = [file("Ozone 9", "VST3"), file("Ozone 11", "VST2"), file("TR-808", "VST3"), file("TR-909", "VST2")];
+        let used = used(&[("Ozone 9", &[("VST2", 20)]), ("Ozone 11", &[("VST2", 3)]), ("TR-909", &[("VST2", 1)])]);
+        assert!(find(&files, &used, false, |_| (0, None)).is_empty());
     }
 
     #[test]
