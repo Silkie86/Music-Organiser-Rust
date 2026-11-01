@@ -76,6 +76,7 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> R
     });
     let weak = app.as_weak();
     app.on_key(move |text, ctrl, shift, alt, meta, repeat| {
+        let _doing = watchdog::doing("a key");
         let key = key_name(&text, ctrl, shift, alt, meta);
         if key == "F12" {
             return weak.upgrade().is_some_and(|app| {
@@ -128,6 +129,7 @@ fn show_button_keys(app: &AppWindow, shortcuts: &Shortcuts) {
 /// Shows a place, and notes it for the log and the watchdog.
 fn go_to(app: &AppWindow, index: i32) {
     let Some(place) = usize::try_from(index).ok().and_then(Place::from_index) else { return };
+    let _doing = watchdog::doing("go to a page");
     if PAGE.swap(place.index(), Ordering::Relaxed) != place.index() || app.get_place() != index {
         log::info("Page", place.name());
     }

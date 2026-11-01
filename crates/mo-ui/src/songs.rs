@@ -4,19 +4,22 @@
 //! save's plugins, samples and details follow from a background thread that only reads the last song picked.
 
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::mpsc;
-use std::time::Duration;
+use std::sync::{LazyLock, Mutex, mpsc};
+use std::time::{Duration, Instant};
 
 use chrono::{Local, NaiveDateTime};
 use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
+use mo_app::bitwig_convert::{self as bitwig, Converted};
 use mo_app::live::{Live, LiveDetails};
 use mo_app::log;
 use mo_app::shell;
 use mo_app::song_panel::{self as panel, Go, SaveLine as PanelSaveLine, Tab};
 use mo_app::songs::{Entry, Filters, SongRow, Songs, View};
+use mo_app::{paths, sound_library};
 use mo_library::scan::is_project_file;
 use mo_library::songs::DEFAULT_RUN_GAP_MONTHS;
 use mo_library::watch::{Changes, FolderWatch};
@@ -43,6 +46,8 @@ struct Page {
     detail: Option<SaveDetail>,
     /// Where each line of the Health strip's buttons goes, as shown.
     health: Vec<Go>,
+    /// The library, for Open in Bitwig's settings.
+    db: PathBuf,
 }
 
 impl Default for Page {
@@ -56,6 +61,7 @@ impl Default for Page {
             asked: 0,
             detail: None,
             health: Vec::new(),
+            db: PathBuf::new(),
         }
     }
 }
@@ -98,7 +104,9 @@ impl Model for Lines {
 pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
     let data = app.global::<SongsData>();
     FEED.with(|f| *f.borrow_mut() = Some(feed));
-    data.on_open(|| with_picked(|p, r| open_save(p, &r.song.latest)));
+    PAGE.with(|p| p.borrow_mut().db = path.clone());
+    data.on_open(|| with_picked(|p, r| open_main(p, &r.song.latest)));
+    data.on_open_own(|| with_picked(|p, r| open_save(p, &r.song.latest)));
     data.on_open_save(|path| {
         with_picked(|p, r| {
             if let Some(s) = r.song.saves().find(|s| s.path == path.as_str()) {
@@ -229,6 +237,7 @@ const NO_SONGS: &str = "No songs in the library yet.";
 /// Watches the project folders while the app is open and keeps the list up to date, on this background thread: each
 /// time saves change, the list is made again and put on the page with a card.
 fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
+    let _doing = crate::watchdog::doing("Songs: take in the library's changes");
     let (tx, rx) = mpsc::channel::<Changes>();
     let watching = FolderWatch::start(live.roots(), is_project_file, WATCH_QUIET, move |c| {
         let _ = tx.send(c);
@@ -282,6 +291,7 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
 
 /// Puts a list made again on the page, keeping the filters, the song picked and its tab.
 fn show_again(app: &AppWindow, songs: Songs) {
+    let _doing = crate::watchdog::doing("Songs: show the list again");
     let data = app.global::<SongsData>();
     let tab = data.get_tab();
     let key = PAGE.with(|p| {
@@ -317,6 +327,7 @@ fn show_again(app: &AppWindow, songs: Songs) {
 
 /// Puts a freshly read list on the page, keeping the filters as they are.
 pub fn show(app: &AppWindow, songs: Songs) {
+    let _doing = crate::watchdog::doing("Songs: show the list");
     let data = app.global::<SongsData>();
     data.set_tabs(strings(Tab::ALL.iter().map(|t| t.name())));
     data.set_saves_tab(Tab::Saves.index() as i32);
@@ -331,6 +342,7 @@ pub fn show(app: &AppWindow, songs: Songs) {
 
 /// Changes the filters and shows the list again.
 fn change(weak: &slint::Weak<AppWindow>, f: impl FnOnce(&mut Filters)) {
+    let _doing = crate::watchdog::doing("Songs: search or filter");
     let Some(app) = weak.upgrade() else { return };
     PAGE.with(|p| f(&mut p.borrow_mut().filters));
     refresh(&app);
@@ -338,6 +350,7 @@ fn change(weak: &slint::Weak<AppWindow>, f: impl FnOnce(&mut Filters)) {
 
 /// Picks the song at `row` and brings it into view in the list, clearing the filters first when they hide it.
 fn show_song(app: &AppWindow, row: usize) {
+    let _doing = crate::watchdog::doing("Songs: show a song");
     let hidden = PAGE.with(|p| !p.borrow().view.entries.contains(&Entry::Song(row)));
     if hidden {
         PAGE.with(|p| p.borrow_mut().filters = Filters::default());
@@ -428,6 +441,7 @@ fn strings<'a>(items: impl Iterator<Item = &'a str>) -> ModelRc<SharedString> {
 
 /// Opens the panel on the song at `row` of the page's rows, or closes it.
 fn pick(app: &AppWindow, row: Option<usize>) {
+    let _doing = crate::watchdog::doing("Songs: pick a song");
     let data = app.global::<SongsData>();
     let (row, id) = PAGE.with(|p| {
         let mut p = p.borrow_mut();
@@ -460,6 +474,7 @@ fn pick(app: &AppWindow, row: Option<usize>) {
 
 /// A save's record has been read: shown if it's still the picked song's.
 fn arrived(app: &AppWindow, asked: u64, read: Result<Option<SaveDetail>, String>) {
+    let _doing = crate::watchdog::doing("Songs: show the picked song's details");
     let data = app.global::<SongsData>();
     if PAGE.with(|p| p.borrow().asked != asked) {
         return;
@@ -598,6 +613,20 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
     }
     match id {
         "projects.open" => data.invoke_open(),
+        "projects.openInBitwig" => {
+            let mut done = false;
+            with_picked(|p, r| {
+                let save = &r.song.latest;
+                if save.daw == FL {
+                    open_in_bitwig(p, save);
+                    done = true;
+                } else if save.daw.starts_with(BITWIG) {
+                    open_save(p, save);
+                    done = true;
+                }
+            });
+            return done;
+        }
         "projects.reveal" => data.invoke_reveal(),
         "projects.copyPath" => data.invoke_copy_path(),
         _ => return false,
@@ -658,6 +687,84 @@ fn open_save(page: &Page, save: &mo_library::Save) {
     if let Err(e) = started {
         log::error("Open", &format!("Couldn't start opening a save: {e}"));
     }
+}
+
+/// The library's names for the two DAWs Open in Bitwig is about.
+const FL: &str = "FL Studio";
+const BITWIG: &str = "Bitwig";
+
+/// The names converted and opened in Bitwig while the app runs: Bitwig only brings an open project forward, so a new
+/// convert of the same song takes the next name.
+static OPENED: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Mutex::default);
+
+/// The main Open button: FL Studio songs go to Bitwig (as in the C# app), the rest open in their own DAW.
+fn open_main(page: &Page, save: &mo_library::Save) {
+    if save.daw == FL { open_in_bitwig(page, save) } else { open_save(page, save) }
+}
+
+/// Converts an FL Studio save for Bitwig into the export folder and opens the new project in Bitwig, on a background
+/// thread; the card says how it went. The FL project and the template are only read.
+fn open_in_bitwig(page: &Page, save: &mo_library::Save) {
+    let Some(feed) = FEED.with(|f| f.borrow().clone()) else { return };
+    let exe = page.songs.daw_exes.get(BITWIG).cloned();
+    let (db, path, name) = (page.db.clone(), save.path.clone(), save.name.clone());
+    let started = background::spawn("Convert", move || {
+        if !shell::exists(&path) {
+            feed.start(&format!("Can't find {name}"), "")
+                .failed("It has moved or been deleted since the library last looked. Rescan to update the library.");
+            return;
+        }
+        let job = feed.start(&format!("Converting {name} for Bitwig"), "");
+        let started = Instant::now();
+        match convert_save(&db, Path::new(&path)) {
+            Ok(c) => {
+                log::info("Convert", &format!("{path} became {} in {:.1?}", c.file.display(), started.elapsed()));
+                let exe = exe.filter(|e| shell::usable_exe(e));
+                let file = c.file.to_string_lossy().into_owned();
+                match shell::run(&shell::open(&file, exe.as_deref(), shell::Os::THIS)) {
+                    Ok(()) => {
+                        if let Ok(mut opened) = OPENED.lock() {
+                            opened.insert(c.name);
+                        }
+                        job.done(&c.message);
+                    }
+                    Err(e) => {
+                        log::warning("Convert", &format!("{file}: {e}"));
+                        job.failed(&format!("Converted to {file}, but couldn't open it in Bitwig: {e}"));
+                    }
+                }
+            }
+            Err(e) => {
+                log::warning("Convert", &format!("{path}: {e}"));
+                let more =
+                    if e.starts_with("The Bitwig template") { " Pick another template in Settings." } else { "" };
+                job.failed(&format!("Converting for Bitwig failed: {e}{more}"));
+            }
+        }
+    });
+    if let Err(e) = started {
+        log::error("Convert", &format!("Couldn't start converting a save: {e}"));
+    }
+}
+
+/// Reads the settings (export folder, template, how steps play) and converts `project` on the low-priority pool.
+/// The library stays read-only, so what was written isn't remembered (see [`bitwig_convert`](mo_app::bitwig_convert)).
+fn convert_save(db: &Path, project: &Path) -> Result<Converted, String> {
+    let lib = Library::open_read_only(db).map_err(|e| format!("Couldn't read the library: {e}"))?;
+    let setting = |key: &str| lib.setting(key).map_err(|e| format!("Couldn't read the settings: {e}"));
+    let root = bitwig::export_root(setting(bitwig::EXPORT_FOLDER_KEY)?.as_deref(), bitwig::home().as_deref())
+        .ok_or("There's no export folder to convert into. Pick one in Settings.")?;
+    let template = bitwig::template_path(&paths::data_dir(), setting(bitwig::BITWIG_TEMPLATE_KEY)?.as_deref())
+        .ok_or(bitwig::NO_TEMPLATE)?;
+    let steps = setting(bitwig::STEPS_UNTIL_NEXT_NOTE_KEY)?.as_deref() == Some("1");
+    let opened = OPENED.lock().map(|o| o.clone()).unwrap_or_default();
+    let locator = sound_library::locator(Some(&db.with_file_name("sounds.db")));
+    let at = project.to_string_lossy().into_owned();
+    background::on_pool(move || {
+        let written_of = |file: &Path| lib.setting(&bitwig::convert_key(file)).ok().flatten();
+        let find = |sample: &str| locator.locate(sample, &at);
+        bitwig::convert(project, &root, &template, steps, &opened, &written_of, &find)
+    })
 }
 
 /// Shows the file picked in its folder, or the folder when the file has gone.

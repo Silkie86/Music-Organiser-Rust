@@ -61,7 +61,8 @@ pub const APP_ACTIONS: &[Action] = &[
 /// The Songs page's own actions. The ids are the C# app's Projects page's, so a key changed in either app carries
 /// across.
 pub const SONGS_ACTIONS: &[Action] = &[
-    action("projects.open", "Open the picked song in its DAW", "Ctrl+O"),
+    action("projects.open", "Open the picked song (FL Studio songs go to Bitwig)", "Ctrl+O"),
+    action("projects.openInBitwig", "Open the picked song in Bitwig (FL Studio songs are converted)", "Ctrl+B"),
     action("projects.reveal", "Show the picked song's file in its folder", "Ctrl+Shift+E"),
     action("projects.copyPath", "Copy where the picked song's file is", "Ctrl+Shift+C"),
 ];
