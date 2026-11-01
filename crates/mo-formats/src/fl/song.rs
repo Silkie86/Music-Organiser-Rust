@@ -235,6 +235,9 @@ pub struct FlSong {
     pub tempo: f64,
     pub channels: Vec<FlChannel>,
     pub inserts: Vec<FlInsert>,
+    /// Where each mixer insert sends its sound (event 235), by insert: the inserts it goes to, the master being 0. An
+    /// insert going to one other insert besides nothing else is a bus; several are sends.
+    pub routes: BTreeMap<u32, Vec<u32>>,
     pub automation: Vec<FlAutomation>,
     /// Muted playlist tracks that have something on them: their clips are on a muted track, and their automation is
     /// left out.
@@ -754,6 +757,7 @@ pub fn read_song_with(flp: &Flp<'_>, sounds: bool) -> FlSong {
     let mut pending_internal = String::new();
     let mut plugin_name = String::new();
     let mut insert_names: BTreeMap<u32, String> = BTreeMap::new();
+    let mut insert_routes: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
     let mut effects: BTreeMap<u32, Vec<FlPlugin>> = BTreeMap::new();
     // The effect added last, until its slot's closing event says which slot it's in.
     let mut unslotted: Option<(u32, usize)> = None;
@@ -810,6 +814,12 @@ pub fn read_song_with(flp: &Flp<'_>, sounds: bool) -> FlSong {
                     && !name.is_empty()
                 {
                     insert_names.insert(at, name);
+                }
+            }
+            EV_INSERT_ROUTES if rack.in_mixer() => {
+                if let Some(at) = rack.insert() {
+                    let to = e.data.iter().enumerate().filter(|&(_, &b)| b != 0).map(|(i, _)| i as u32).collect();
+                    insert_routes.insert(at, to);
                 }
             }
             EV_MIXER_SLOT => {
@@ -973,6 +983,7 @@ pub fn read_song_with(flp: &Flp<'_>, sounds: bool) -> FlSong {
         tempo: tempo.unwrap_or(140.0),
         channels,
         inserts,
+        routes: insert_routes,
         automation,
         muted_tracks: muted_tracks.into_iter().collect(),
         curves: curves.into_iter().collect(),

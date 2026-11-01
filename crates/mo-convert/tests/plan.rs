@@ -95,6 +95,7 @@ fn song(channels: Vec<FlChannel>, inserts: Vec<FlInsert>, automation: Vec<FlAuto
         tempo: 120.0,
         channels,
         inserts,
+        routes: Default::default(),
         automation,
         muted_tracks: Vec::new(),
         curves: Default::default(),
@@ -420,7 +421,7 @@ fn an_insert_fader_and_pan_are_automated_on_the_tracks_it_feeds_after_their_own_
     assert_eq!(values(TrackRef::Master, Target::Volume), [insert_gain(1.0)]);
     for note in [
         "Bus fader: automation left out on some tracks (Pad has its own volume automated)",
-        "Keys pan: automation left out on some tracks (Keys's own pan isn't in the middle)",
+        "Keys pan: automation left out (Keys's own pan isn't in the middle)",
         "Nobody: automation left out (no converted channel feeds it)",
         "Loud fader: on Loud the fader and the channel's own level come to more than Bitwig's +6 dB, so the loudest \
          part stays at +6 dB",
@@ -585,4 +586,45 @@ fn a_channel_with_notes_and_audio_clips_names_each_track_apart() {
     });
     assert_eq!(p.tracks.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["Vox", "Vox 2"]);
     assert_eq!(reads, 1, "the sample is read once");
+}
+
+#[test]
+fn a_bus_fader_reaches_the_channels_routed_to_it_through_other_inserts_but_not_through_a_send() {
+    let fader = |name: &str, insert| FlAutomation {
+        insert: Some(insert),
+        ..automation(name, None, FlControl::InsertVolume, &[(0.0, 0.8)])
+    };
+    // Bass goes to insert 2, which goes on to the bus on insert 1, then the master. Keys's insert 3 goes to the master
+    // and is sent to the bus too, so the bus moves only part of its sound.
+    let mut s = song(
+        vec![
+            channel(0, "Bass", Some(plugin("Bass", "VST2", "1")), "", 2),
+            channel(1, "Keys", Some(plugin("Keys", "VST2", "2")), "", 3),
+        ],
+        vec![insert(1, "Bus", vec![]), insert(2, "Bass", vec![]), insert(3, "Keys", vec![])],
+        vec![fader("Bass fader", 2), fader("Bus fader", 1), fader("Keys fader", 3)],
+    );
+    s.routes = [(0, vec![]), (1, vec![0]), (2, vec![1]), (3, vec![0, 1])].into_iter().collect();
+    let p = plan(&s);
+    let lanes: Vec<_> = p.lanes.iter().map(|l| (l.track, l.from_insert)).collect();
+    assert_eq!(lanes, [(TrackRef::Track(0), Some(2)), (TrackRef::Track(1), Some(3))]);
+    // Bass follows its own insert, nearer to it than the bus (Bitwig has one fader), and the bus has only part of Keys.
+    let note = "Bus fader: automation left out (Bass follows insert 2's fader, nearer to it; Keys reaches it through a send or \
+         sidechain)";
+    assert!(p.notes.contains(&note.to_owned()), "{:?}", p.notes);
+    // The same whichever clip comes first.
+    s.automation.reverse();
+    let reversed = plan(&s);
+    let mut lanes: Vec<_> = reversed.lanes.iter().map(|l| (l.track, l.from_insert)).collect();
+    lanes.sort();
+    assert_eq!(lanes, [(TrackRef::Track(0), Some(2)), (TrackRef::Track(1), Some(3))]);
+    assert!(reversed.notes.contains(&note.to_owned()), "{:?}", reversed.notes);
+
+    // On its own, the bus fader goes on Bass.
+    s.automation = vec![fader("Bus fader", 1)];
+    let p = plan(&s);
+    assert_eq!(p.lanes.iter().map(|l| (l.track, l.from_insert)).collect::<Vec<_>>(), [(TrackRef::Track(0), Some(1))]);
+    assert!(p.notes.contains(
+        &"Bus fader: automation left out on some tracks (Keys reaches it through a send or sidechain)".to_owned()
+    ));
 }
