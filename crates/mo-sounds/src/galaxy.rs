@@ -293,7 +293,7 @@ pub fn place_new(
         .par_iter()
         .filter_map(|&id| {
             let v = vector(id);
-            // The 3 best so far, best first; on equal likeness the one met first stays ahead.
+            // The 3 best so far, best first.
             let mut best = [(f64::MIN, -1i64); 3];
             for (m, s) in vectors.iter().map(|w| dot(&v, w)).enumerate() {
                 // As C#: anything not better than the third is passed over (a likeness that isn't a number isn't).
@@ -301,7 +301,12 @@ pub fn place_new(
                     continue;
                 }
                 best[2] = (s, sample[m]);
-                best.sort_by(|p, q| dotnet_cmp(q.0, p.0));
+                // As C#'s Array.Sort of three: three fixed swaps, best first.
+                for (i, j) in [(0, 1), (0, 2), (1, 2)] {
+                    if dotnet_cmp(best[j].0, best[i].0).is_gt() {
+                        best.swap(i, j);
+                    }
+                }
             }
             let near: Vec<&StarPoint> = best.iter().filter(|b| b.1 >= 0).filter_map(|b| map.get(&b.1)).collect();
             if near.is_empty() {
@@ -705,7 +710,7 @@ fn edges(nbr: &[Vec<usize>], dist: &[Vec<f32>]) -> Vec<Edge> {
             }
             nbr.iter().zip(dist).map(move |(&j, &dd)| {
                 let (a, b) = if i < j { (i, j) } else { (j, i) };
-                ((a * n + b) as u64, weight(dd, sigma) as f32)
+                (a as u64 * n as u64 + b as u64, weight(dd, sigma) as f32)
             })
         })
         .collect();
