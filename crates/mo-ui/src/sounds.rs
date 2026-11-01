@@ -101,8 +101,10 @@ struct Page {
     rediscover: Vec<(usize, String)>,
     /// What Rediscover digs out next time.
     re: rediscover::Options,
-    /// Counts Rediscover's asks, so an older answer that arrives late is dropped; 0 until it first runs.
+    /// Counts Rediscover's asks, so an older answer that arrives late is dropped.
     re_asked: u64,
+    /// Rediscover has run on this library (so changing a choice picks again).
+    re_started: bool,
     /// The answer to Rediscover's newest ask hasn't come yet.
     re_busy: bool,
 }
@@ -129,6 +131,7 @@ impl Default for Page {
             rediscover: Vec::new(),
             re: rediscover::Options { count: COUNT, ..rediscover::Options::default() },
             re_asked: 0,
+            re_started: false,
             re_busy: false,
         }
     }
@@ -557,7 +560,7 @@ pub fn index_known(app: &AppWindow, index: Arc<SoundIndex>) {
         find_alike(app, at);
     }
     // Rediscover was waiting on the fingerprints.
-    if PAGE.with(|p| p.borrow().re_asked > 0) {
+    if PAGE.with(|p| p.borrow().re_started) {
         rediscover_now(app);
     }
 }
@@ -646,7 +649,7 @@ fn use_known(app: &AppWindow, list: Arc<SoundList>) {
     let Some(picked) = picked else { return };
     refresh(app);
     // What Rediscover dug out didn't know your taste yet.
-    if PAGE.with(|p| p.borrow().re_asked > 0) {
+    if PAGE.with(|p| p.borrow().re_started) {
         rediscover_now(app);
     }
     if let Some(at) = picked {
@@ -697,7 +700,9 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
         p.autoplay = autoplay == Some("1");
         p.picked = None;
         p.rediscover.clear();
-        p.re_asked = 0;
+        p.re_started = false;
+        // An answer still on its way was for the old list: it's dropped.
+        p.re_asked += 1;
     });
     refresh(app);
     show_rediscover_chips(app);
@@ -804,7 +809,7 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
         show_lists(&app);
         bring_picked_into_view(&app);
         // Rediscover fills itself the first time it's opened, so it never greets you empty (as in the C# app).
-        if v == REDISCOVER && PAGE.with(|p| p.borrow().re_asked == 0) {
+        if v == REDISCOVER && PAGE.with(|p| !p.borrow().re_started) {
             rediscover_now(&app);
         }
     });
@@ -956,6 +961,7 @@ fn rediscover_now(app: &AppWindow) {
             return None;
         }
         p.re_asked += 1;
+        p.re_started = true;
         p.re_busy = true;
         let ask = p.index.clone().map(|index| RediscoverAsk {
             id: p.re_asked,
@@ -1096,7 +1102,7 @@ fn wire_rediscover(app: &AppWindow) {
                 }
                 _ => {}
             }
-            p.re_asked > 0
+            p.re_started
         });
         show_rediscover_chips(&app);
         if again {
@@ -1109,7 +1115,7 @@ fn wire_rediscover(app: &AppWindow) {
         let again = PAGE.with(|p| {
             let mut p = p.borrow_mut();
             p.re.max_uses = if p.re.max_uses == 0 { 1 } else { 0 };
-            p.re_asked > 0
+            p.re_started
         });
         show_rediscover_chips(&app);
         if again {
