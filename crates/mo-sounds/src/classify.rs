@@ -10,6 +10,7 @@
 //! choosing how big each nudge is). Labels come from folder and file names and from your own corrections, which count
 //! three times as much.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
@@ -21,9 +22,10 @@ use crate::dotnet_random::DotnetRandom;
 pub const TYPE_MODEL_KEY: &str = "type_model";
 
 /// One labelled example: a sound's vector, its label, and how much to trust the label (your own labels are 3, names 1).
+/// The vector is usually borrowed from the library's, so training on 357,000 sounds doesn't copy them all.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Example {
-    pub x: Vec<f32>,
+pub struct Example<'a> {
+    pub x: Cow<'a, [f32]>,
     pub label: String,
     pub weight: f32,
 }
@@ -204,12 +206,12 @@ fn dotnet_compare<T: PartialOrd + Copy>(a: T, b: T) -> std::cmp::Ordering {
 /// examples a second model is trained on four fifths of them and tested on the rest, for
 /// [`Classifier::held_out_accuracy`]. The two models train at the same time (on rayon's threads, so call it from a
 /// low-priority pool, never the window's thread).
-pub fn train(all: &[Example], space: &str, o: &Options) -> Result<Classifier, TrainError> {
+pub fn train(all: &[Example<'_>], space: &str, o: &Options) -> Result<Classifier, TrainError> {
     let mut rng = DotnetRandom::new(o.seed);
     // Balance, as C#'s `GroupBy(label).SelectMany(g => g.OrderByDescending(weight).ThenBy(random).Take(cap))
     // .OrderBy(random)`: types in the order they first appear; within each, every example draws its number in turn
     // (all of them, even past the cap, as .NET does), and ties go to the earlier example.
-    let mut groups: Vec<(&str, Vec<&Example>)> = Vec::new();
+    let mut groups: Vec<(&str, Vec<&Example<'_>>)> = Vec::new();
     let mut group_of: HashMap<&str, usize> = HashMap::new();
     for e in all {
         let g = *group_of.entry(&e.label).or_insert_with(|| {
@@ -218,7 +220,7 @@ pub fn train(all: &[Example], space: &str, o: &Options) -> Result<Classifier, Tr
         });
         groups[g].1.push(e);
     }
-    let mut kept: Vec<&Example> = Vec::new();
+    let mut kept: Vec<&Example<'_>> = Vec::new();
     for (_, members) in &groups {
         let draws: Vec<i32> = members.iter().map(|_| rng.next()).collect();
         let mut order: Vec<usize> = (0..members.len()).collect();
@@ -230,7 +232,7 @@ pub fn train(all: &[Example], space: &str, o: &Options) -> Result<Classifier, Tr
     let draws: Vec<i32> = kept.iter().map(|_| rng.next()).collect();
     let mut order: Vec<usize> = (0..kept.len()).collect();
     order.sort_by(|&a, &b| draws[a].cmp(&draws[b]).then(a.cmp(&b)));
-    let data: Vec<&Example> = order.into_iter().map(|i| kept[i]).collect();
+    let data: Vec<&Example<'_>> = order.into_iter().map(|i| kept[i]).collect();
 
     let Some(first) = data.first() else { return Err(TrainError::Nothing) };
     // Every type with a kept example (all of them, unless the cap is 0, when nothing is kept).
@@ -251,8 +253,9 @@ pub fn train(all: &[Example], space: &str, o: &Options) -> Result<Classifier, Tr
             if data.len() < 40 {
                 return None;
             }
-            let test: Vec<&Example> = data.iter().step_by(5).copied().collect();
-            let rest: Vec<&Example> = data.iter().enumerate().filter(|(i, _)| i % 5 != 0).map(|(_, e)| *e).collect();
+            let test: Vec<&Example<'_>> = data.iter().step_by(5).copied().collect();
+            let rest: Vec<&Example<'_>> =
+                data.iter().enumerate().filter(|(i, _)| i % 5 != 0).map(|(_, e)| *e).collect();
             let mut kinds: Vec<&str> = rest.iter().map(|e| e.label.as_str()).collect();
             kinds.sort_unstable();
             kinds.dedup();
@@ -274,7 +277,7 @@ pub fn train(all: &[Example], space: &str, o: &Options) -> Result<Classifier, Tr
 
 /// One model from `data` (already balanced and shuffled), as C#'s `SoundClassifier.Fit`. The arithmetic follows C#'s
 /// exactly, single precision where it used `float`, so the weights come out the same.
-fn fit(data: &[&Example], classes: &[String], space: &str, o: &Options) -> Classifier {
+fn fit(data: &[&Example<'_>], classes: &[String], space: &str, o: &Options) -> Classifier {
     let dim = data[0].x.len();
     let n = data.len();
     let k = classes.len();
@@ -284,7 +287,7 @@ fn fit(data: &[&Example], classes: &[String], space: &str, o: &Options) -> Class
     let mut mean = vec![0f32; dim];
     let mut scale = vec![0f32; dim];
     for e in data {
-        for (m, x) in mean.iter_mut().zip(&e.x) {
+        for (m, x) in mean.iter_mut().zip(e.x.iter()) {
             *m += x;
         }
     }
@@ -292,7 +295,7 @@ fn fit(data: &[&Example], classes: &[String], space: &str, o: &Options) -> Class
         *m /= n as f32;
     }
     for e in data {
-        for ((s, x), m) in scale.iter_mut().zip(&e.x).zip(&mean) {
+        for ((s, x), m) in scale.iter_mut().zip(e.x.iter()).zip(&mean) {
             *s += (x - m) * (x - m);
         }
     }
@@ -415,7 +418,7 @@ mod tests {
     use super::*;
 
     /// Examples in clusters: each type sits around its own point.
-    fn clusters(kinds: &[(&str, usize)], dim: usize) -> Vec<Example> {
+    fn clusters(kinds: &[(&str, usize)], dim: usize) -> Vec<Example<'static>> {
         let mut rng = DotnetRandom::new(1);
         let mut out = Vec::new();
         for (k, (label, count)) in kinds.iter().enumerate() {
@@ -426,7 +429,11 @@ mod tests {
                         centre + (rng.next() as f32 / i32::MAX as f32 - 0.5)
                     })
                     .collect();
-                out.push(Example { x, label: (*label).into(), weight: if i % 7 == 0 { 3.0 } else { 1.0 } });
+                out.push(Example {
+                    x: Cow::Owned(x),
+                    label: (*label).into(),
+                    weight: if i % 7 == 0 { 3.0 } else { 1.0 },
+                });
             }
         }
         out
@@ -473,7 +480,7 @@ mod tests {
         let one = clusters(&[("Kick", 10)], 3);
         assert_eq!(train(&one, "features", &Options::default()), Err(TrainError::OneKind));
         let mut mixed = clusters(&[("Kick", 10), ("Hat", 10)], 3);
-        mixed[4].x.push(1.0);
+        mixed[4].x.to_mut().push(1.0);
         assert_eq!(train(&mixed, "features", &Options::default()), Err(TrainError::MixedLengths));
     }
 
@@ -481,7 +488,7 @@ mod tests {
     fn a_number_that_never_changes_is_left_out() {
         let mut data = clusters(&[("Kick", 20), ("Hat", 20)], 3);
         for e in &mut data {
-            e.x[2] = 5.0;
+            e.x.to_mut()[2] = 5.0;
         }
         let m = train(&data, "features", &Options::default()).unwrap();
         assert_eq!(m.scale[2], 0.0);

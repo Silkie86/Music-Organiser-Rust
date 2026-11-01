@@ -50,3 +50,5 @@ back; nothing is saved to `sounds.db` yet.
 |---|---|---|---|
 | A type from CLAP's own words ("model", zero-shot), when the classifier isn't sure | Used once deep listening is installed. | Not yet: needs CLAP in Rust. A sound the C# app typed that way keeps its stored type until the Rust app writes. | Not yet |
 | A tag's model that can't train (vectors of different lengths) | Stopped with an error. | That half suggests nothing. | Better |
+| The type model can't train (vectors of different lengths, halfway through analysing again) | Stopped with an error, or used part of each vector. | Nothing changes: the saved model and every type stay. | Better |
+| A sound CLAP's words typed ("model") | Worked out again each time. | Kept as stored while the classifier isn't sure (Rust can't work it out yet). | Not yet |

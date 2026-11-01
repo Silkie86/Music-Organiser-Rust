@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use rayon::prelude::*;
 
 use crate::analyse::round_to;
-use crate::classify::{Classifier, Example, Options, train};
+use crate::classify::{Classifier, Example, Options, TrainError, train};
 use crate::dotnet_random::DotnetRandom;
 use crate::types::UNKNOWN;
 use crate::{Sound, TagCount};
@@ -72,38 +72,58 @@ pub struct TypeUpdate {
 
 /// Trains the type classifier on your library and works out every sound's type, as the C# app's `UpdateTypes`
 /// (before it saves): your own labels count three times as much as names. It needs at least 20 labelled sounds of
-/// at least two types.
-pub fn update_types(sounds: &[Sound], vectors: &Vectors, space: &str) -> TypeUpdate {
-    let examples: Vec<Example> = sounds
+/// at least two types. `vectors` must be the ones in `space` (the model is saved with that name, and both apps read
+/// vectors by it).
+///
+/// When training fails (vectors of different lengths, say halfway through analysing again after an analyser
+/// update), the error comes back and nothing should change: the saved model and every type stay as they are.
+///
+/// A type CLAP's own words gave (source "model") is kept while the classifier isn't sure, as Rust can't work those
+/// out yet; the C# app would have worked it out again.
+pub fn update_types(sounds: &[Sound], vectors: &Vectors, space: &str) -> Result<TypeUpdate, TrainError> {
+    let examples: Vec<Example<'_>> = sounds
         .iter()
         .filter_map(|s| {
             let label = s.user_type.as_ref().or(s.name_type.as_ref())?;
             let x = vector(vectors, s.id)?;
-            Some(Example { x: x.to_vec(), label: label.clone(), weight: if s.user_type.is_some() { 3.0 } else { 1.0 } })
+            Some(Example { x: x.into(), label: label.clone(), weight: if s.user_type.is_some() { 3.0 } else { 1.0 } })
         })
         .collect();
     let kinds: HashSet<&str> = examples.iter().map(|e| e.label.as_str()).collect();
-    let model =
-        if examples.len() >= 20 && kinds.len() >= 2 { train(&examples, space, &Options::default()).ok() } else { None };
+    let model = if examples.len() >= 20 && kinds.len() >= 2 {
+        Some(train(&examples, space, &Options::default())?)
+    } else {
+        None
+    };
     let changes = sounds
         .par_iter()
         .filter_map(|s| {
             let c = resolve_type(s, vector(vectors, s.id), model.as_ref());
+            if s.type_source == "model" && c.source.is_empty() {
+                return None;
+            }
             let same = s.sound_type == c.sound_type && s.type_source == c.source && s.type_confidence == c.confidence;
             (!same).then_some((s.id, c))
         })
         .collect();
-    TypeUpdate { model, changes }
+    Ok(TypeUpdate { model, changes })
 }
 
 /// Sounds whose name gives a type but the classifier is at least 70% sure it's another: worth a listen and a
 /// correction. Most sure first, then by id; at most `max`. Hidden copies and sounds you've labelled are left out.
+///
+/// `vectors` are the ones in `space`; a model trained in another space (the C# app's CLAP model while Rust reads
+/// features, say) can't judge them, so nothing comes back: read the vectors in `model.space` instead.
 pub fn disagreements<'a>(
     sounds: &'a [Sound],
     vectors: &Vectors,
+    space: &str,
     model: &Classifier,
     max: usize,
 ) -> Vec<(&'a Sound, String, f64)> {
+    if model.space != space {
+        return Vec::new();
+    }
     let mut found: Vec<(&Sound, String, f64)> = sounds
         .par_iter()
         .filter(|s| !s.hidden && s.user_type.is_none())
@@ -130,20 +150,22 @@ pub struct TagSuggestions {
 
 /// For every tag you've given at least five sounds, learns what those sounds have in common and suggests it for other
 /// sounds that share it, as the C# app's `TrainTags`. `tags` is [`crate::SoundsDb::tag_counts`]; `yours` gives the
-/// ids you tagged with a tag ([`crate::SoundsDb::tagged`]).
+/// ids you tagged with a tag ([`crate::SoundsDb::tagged`]). An error from `yours` stops it and comes back, so a
+/// database that's busy for a moment can't make a tag look untagged (and lose its suggestions).
 ///
 /// Untagged sounds aren't truly "not" the tag, so they're split in two: train against one half, suggest within the
 /// other, then swap. No sound is judged by a model that was told it's a negative.
 ///
 /// Every tag's old suggestions are to be cleared, whether or not it gets new ones; the tags given back are the ones
 /// that were trained.
-pub fn learn_tags(
+pub fn learn_tags<E>(
     tags: &[TagCount],
-    yours: impl Fn(&str) -> Vec<i64>,
+    yours: impl Fn(&str) -> Result<Vec<i64>, E>,
     sounds: &[Sound],
     vectors: &Vectors,
-    space: &str,
-) -> Vec<TagSuggestions> {
+) -> Result<Vec<TagSuggestions>, E> {
+    // The sounds that have a vector, in library order: the same for every tag.
+    let with_vector: Vec<i64> = sounds.iter().map(|s| s.id).filter(|id| vector(vectors, *id).is_some()).collect();
     let known: HashSet<i64> = sounds.iter().map(|s| s.id).collect();
     let mut rng = DotnetRandom::new(11);
     let mut results = Vec::new();
@@ -152,11 +174,10 @@ pub fn learn_tags(
             continue;
         }
         let positives: Vec<i64> =
-            yours(tag).into_iter().filter(|id| known.contains(id) && vector(vectors, *id).is_some()).collect();
+            yours(tag)?.into_iter().filter(|id| known.contains(id) && vector(vectors, *id).is_some()).collect();
         let pos_ids: HashSet<i64> = positives.iter().copied().collect();
         // C#'s `OrderBy(_ => rng.Next())`: each sound draws a number in library order; ties keep that order.
-        let pool: Vec<i64> =
-            sounds.iter().map(|s| s.id).filter(|id| !pos_ids.contains(id) && vector(vectors, *id).is_some()).collect();
+        let pool: Vec<i64> = with_vector.iter().copied().filter(|id| !pos_ids.contains(id)).collect();
         let draws: Vec<i32> = pool.iter().map(|_| rng.next()).collect();
         let mut order: Vec<usize> = (0..pool.len()).collect();
         order.sort_by_key(|&i| draws[i]);
@@ -170,17 +191,18 @@ pub fn learn_tags(
                 unlabelled.iter().enumerate().filter(|(i, _)| i % 2 == fold).map(|(_, id)| *id).collect();
             let negatives: Vec<i64> = neg_pool.take(20.max(positives.len() * 4)).collect();
             let example = |id: &i64, label: &str| Example {
-                x: vector(vectors, *id).unwrap_or_default().to_vec(),
+                x: vector(vectors, *id).unwrap_or_default().into(),
                 label: label.to_owned(),
                 weight: 1.0,
             };
-            let examples: Vec<Example> = positives
+            let examples: Vec<Example<'_>> = positives
                 .iter()
                 .map(|id| example(id, "yes"))
                 .chain(negatives.iter().map(|id| example(id, "no")))
                 .collect();
-            // Two kinds and at least 25 examples, so it always trains (unless the vectors differ in length).
-            let Ok(model) = train(&examples, space, &Options { epochs: 60, ..Options::default() }) else {
+            // Two kinds and at least 10 examples, so it always trains unless the vectors differ in length. The space
+            // only names the model, which is thrown away.
+            let Ok(model) = train(&examples, "features", &Options { epochs: 60, ..Options::default() }) else {
                 return (Vec::new(), None);
             };
             let suggested = to_score
@@ -198,7 +220,7 @@ pub fn learn_tags(
         suggested.truncate(300);
         results.push(TagSuggestions { tag: tag.clone(), suggested, accuracy: first_accuracy.or(second_accuracy) });
     }
-    results
+    Ok(results)
 }
 
 #[cfg(test)]
@@ -284,7 +306,7 @@ mod tests {
     #[test]
     fn types_are_learned_and_only_changes_come_back() {
         let (mut sounds, vectors) = library();
-        let u = update_types(&sounds, &vectors, "features");
+        let u = update_types(&sounds, &vectors, "features").unwrap();
         let model = u.model.expect("enough labelled sounds");
         let by_id: HashMap<i64, &TypeChoice> = u.changes.iter().map(|(id, c)| (*id, c)).collect();
         assert_eq!(by_id[&0].source, "learned");
@@ -300,17 +322,31 @@ mod tests {
                 s.type_confidence = c.confidence;
             }
         }
-        let again = update_types(&sounds, &vectors, "features").changes;
+        let again = update_types(&sounds, &vectors, "features").unwrap().changes;
         assert!(again.is_empty(), "{again:?}");
 
-        let odd = disagreements(&sounds, &vectors, &model, 10);
+        let odd = disagreements(&sounds, &vectors, "features", &model, 10);
+        // A model from another space judges nothing here.
+        assert!(disagreements(&sounds, &vectors, "clap", &model, 10).is_empty());
         assert_eq!(odd.iter().map(|d| (d.0.id, d.1.as_str())).collect::<Vec<_>>(), [(1000, "Hat")]);
+    }
+
+    #[test]
+    fn a_failed_training_changes_nothing_and_clap_types_are_kept() {
+        let (mut sounds, mut vectors) = library();
+        // A type CLAP's words gave, on a sound the classifier can't judge: kept.
+        sounds.push(Sound { type_source: "model".into(), sound_type: "Pad".into(), ..sound(2000, None, None) });
+        let u = update_types(&sounds, &vectors, "features").unwrap();
+        assert!(u.changes.iter().all(|(id, _)| *id != 2000));
+        // Vectors of two lengths (halfway through analysing again): an error, not a cleared model.
+        vectors.get_mut(&2).unwrap().push(1.0);
+        assert_eq!(update_types(&sounds, &vectors, "features").unwrap_err(), TrainError::MixedLengths);
     }
 
     #[test]
     fn too_few_labels_mean_no_model() {
         let (sounds, vectors) = library();
-        let u = update_types(&sounds[..10], &vectors, "features");
+        let u = update_types(&sounds[..10], &vectors, "features").unwrap();
         assert!(u.model.is_none());
         assert!(u.changes.iter().all(|(_, c)| c.source != "learned"));
     }
@@ -330,7 +366,8 @@ mod tests {
             TagCount { tag: "dark".into(), yours: tagged.len() as i64, learned: 0 },
             TagCount { tag: "rare".into(), yours: 2, learned: 0 },
         ];
-        let out = learn_tags(&tags, |t| if t == "dark" { tagged.clone() } else { vec![1, 2] }, &sounds, &vectors, "x");
+        let yours = |t: &str| Ok::<_, ()>(if t == "dark" { tagged.clone() } else { vec![1, 2] });
+        let out = learn_tags(&tags, yours, &sounds, &vectors).unwrap();
         assert_eq!(out.len(), 1, "a tag on fewer than five sounds isn't learned");
         let dark = &out[0];
         let ids: HashSet<i64> = dark.suggested.iter().map(|s| s.0).collect();
@@ -342,7 +379,8 @@ mod tests {
         assert!(dark.suggested.windows(2).all(|w| w[0].1 >= w[1].1));
         assert!(dark.suggested.iter().all(|s| s.1 >= 0.85));
         // The same library gives the same suggestions.
-        let again = learn_tags(&tags, |t| if t == "dark" { tagged.clone() } else { vec![] }, &sounds, &vectors, "x");
-        assert_eq!(again, out);
+        assert_eq!(learn_tags(&tags, yours, &sounds, &vectors).unwrap(), out);
+        // A database error stops it, rather than the tag looking untagged.
+        assert_eq!(learn_tags(&tags, |_| Err("busy"), &sounds, &vectors), Err("busy"));
     }
 }
