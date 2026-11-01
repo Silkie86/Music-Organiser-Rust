@@ -324,7 +324,8 @@ pub(super) fn place_edit_events(
         placements.sort_by_key(|i| i.at);
         // Each thing moved, in the order first met, with its points.
         let mut moved: Vec<(u32, Vec<FlPoint>)> = Vec::new();
-        for r in data.chunks_exact(12) {
+        let (records, _) = data.as_chunks::<12>();
+        for r in records {
             let (Some(tick), Some(target), Some(bits)) = (u32_le(r, 0), u32_le(r, 4), u32_le(r, 8)) else { continue };
             let (target, value) = match target & 0xFFFF {
                 low @ FL8_PLUGIN..TARGET_PLUGIN => {
