@@ -85,3 +85,13 @@ save a made-up library to a new sounds.db, which the Rust app reads, and both an
 | Why a starred (or rated, or much played) unused sound is suggested | Can say it "sounds like" itself. | Names the closest other sound you like. | Better (bug in C#) |
 | No sounds of the chosen type in the index yet (deep listening hasn't heard them) | Says every one is used already. | Says they haven't been listened to yet. | Better |
 | Folders on Windows spelt with `/` and `\` | One folder. | One folder too (`/` turned into `\`), spelt with `\`. | Same |
+
+## Kits
+
+`kits` ports `KitBuilder` (roll and export); the twin test rolls the same seeded kits on the Rediscover library.
+
+| What | C# | Rust | Judged |
+|---|---|---|---|
+| A described vibe | Turned into a vector by deep listening's model inside the roll. | The caller passes the vector (the model lives in the app); not twin-checked. | Same |
+| Export | Copies straight over the pad's name. | Writes beside it (`.part`) and renames, so a stopped export leaves no half pad. | Better |
+| Names on Mac or Linux | Leaves characters only Windows forbids (`<>:"\|?*`). | Turns them into "-" everywhere, so a kit copied to Windows still opens. | Better |

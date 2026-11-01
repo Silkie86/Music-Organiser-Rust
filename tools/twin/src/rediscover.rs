@@ -1,7 +1,8 @@
-//! The Rediscover twin: a made-up sound library (four types in clusters, some used in projects, starred, rated,
+//! The Rediscover and kits twin: a made-up sound library (four types in clusters, some used in projects, starred, rated,
 //! played or hidden) is saved by the C# app's own sound library to a new sounds.db, which the Rust side then reads as
 //! it reads the real one. Both apps answer the same Rediscover questions (seeded, so the "chance" part is the same)
-//! and must suggest the same sounds in the same order, for the same reasons. Run as part of `twin sounds`, in its own
+//! and must suggest the same sounds in the same order, for the same reasons; then both roll the same seeded kits and
+//! must fill the same pads with the same sounds. (A described vibe needs deep listening's model, so it isn't checked.) Run as part of `twin sounds`, in its own
 //! folder: the sounds.db is made there and removed with it.
 
 use std::path::Path;
@@ -10,6 +11,7 @@ use chrono::Local;
 use mo_library::SampleUse;
 use mo_sounds::SoundsDb;
 use mo_sounds::index::SoundIndex;
+use mo_sounds::kits::{Options as KitOptions, default_drum_kit, roll};
 use mo_sounds::rediscover::{Options, folders, suggest, why_nothing, years};
 use mo_sounds::usage::usage;
 use serde_json::{Value, json};
@@ -28,7 +30,7 @@ impl Numbers {
     }
 }
 
-const TYPES: [&str; 4] = ["Kick", "Hat", "Snare", "Pad"];
+const TYPES: [&str; 4] = ["Kick", "Closed hat", "Snare", "808"];
 
 /// The library: 160 sounds, 40 of each type around a point of its own, in packs dated 2018 to 2023 (mid-year, so
 /// the time zone can't move one into another year). With `clap`, deep listening has heard them all.
@@ -57,6 +59,9 @@ fn library(seed: u64, clap: bool) -> (Vec<Value>, Vec<Value>) {
             "Features": features,
             "Clap": if clap { json!(vector) } else { Value::Null },
             "NameType": TYPES[t],
+            // 808s have a pitch (for kits tuned to a key); a few sounds are loops (kits leave them out).
+            "Pitch": if TYPES[t] == "808" { json!(29.0 + (i % 17) as f64 * 0.75) } else { Value::Null },
+            "IsLoop": i % 29 == 11,
             "Favourite": i % 17 == 3,
             "Rating": if i % 13 == 5 { 5 } else if i % 11 == 2 { 2 } else { 0 },
             "Plays": if i % 9 == 4 { 4 } else { (i % 5 == 1) as i32 },
@@ -78,13 +83,45 @@ fn queries() -> Vec<Options> {
     vec![
         Options { seed: 7, count: 10, ..o.clone() },
         Options { sound_type: Some("Kick".into()), count: 5, adventure: 0.0, seed: 3, ..o.clone() },
-        Options { sound_type: Some("Hat".into()), count: 8, adventure: 0.6, seed: 11, max_uses: 1, ..o.clone() },
+        Options { sound_type: Some("Closed hat".into()), count: 8, adventure: 0.6, seed: 11, max_uses: 1, ..o.clone() },
         Options { year: Some(2020), count: 6, seed: 5, ..o.clone() },
-        Options { sound_type: Some("Pad".into()), count: 60, seed: 13, ..o.clone() },
+        Options { sound_type: Some("808".into()), count: 60, seed: 13, ..o.clone() },
         Options { sound_type: Some("Vocal".into()), seed: 2, ..o.clone() },
         Options { year: Some(1999), seed: 2, ..o.clone() },
         Options { sound_type: Some("Snare".into()), year: Some(2018), max_uses: 99, count: 4, seed: 17, ..o },
     ]
+}
+
+/// Kits to roll: whether to prefer unused sounds, one pack, the key (0 = C), the seed, how random, and a sound to lock
+/// on the kick pad (by its path).
+struct Kit {
+    options: KitOptions,
+    lock_kick: Option<&'static str>,
+}
+
+fn kits() -> Vec<Kit> {
+    let o = KitOptions::default();
+    vec![
+        Kit { options: KitOptions { seed: 21, ..o.clone() }, lock_kick: None },
+        Kit { options: KitOptions { seed: 22, randomness: 0.0, prefer_unused: false, ..o.clone() }, lock_kick: None },
+        Kit { options: KitOptions { seed: 23, same_pack: true, randomness: 1.0, ..o.clone() }, lock_kick: None },
+        Kit {
+            options: KitOptions { seed: 24, same_pack: true, key_tonic: Some(5), ..o.clone() },
+            lock_kick: Some("/samples/Pack 2/Kick/Kick 084.wav"),
+        },
+        Kit { options: KitOptions { seed: 25, key_tonic: Some(0), randomness: 0.1, ..o }, lock_kick: None },
+    ]
+}
+
+fn kit_json(k: &Kit) -> Value {
+    json!({
+        "PreferUnused": k.options.prefer_unused,
+        "SamePack": k.options.same_pack,
+        "KeyTonic": k.options.key_tonic,
+        "Seed": k.options.seed,
+        "Randomness": k.options.randomness,
+        "LockKick": k.lock_kick,
+    })
 }
 
 fn query_json(o: &Options) -> Value {
@@ -123,10 +160,23 @@ fn rust_side(db: &Path, uses: &[Value]) -> Result<Value, String> {
             })
         })
         .collect();
+    let kits: Vec<Value> = kits()
+        .iter()
+        .map(|k| {
+            let mut slots = default_drum_kit();
+            if let Some(path) = k.lock_kick {
+                slots[0].sound = sounds.iter().find(|s| s.path == path).map(|s| s.id);
+                slots[0].locked = true;
+            }
+            let seed = roll(&sounds, &usage, &index, &mut slots, &k.options);
+            json!({ "Seed": seed, "Pads": slots.iter().map(|s| s.sound).collect::<Vec<_>>() })
+        })
+        .collect();
     let names: serde_json::Map<String, Value> = sounds.iter().map(|s| (s.id.to_string(), json!(s.name()))).collect();
     Ok(json!({
         "names": names,
         "answers": answers,
+        "kits": kits,
         "years": years(&sounds),
         "folders": folders(&sounds, &usage)
             .iter()
@@ -169,6 +219,7 @@ pub fn compare(helper: &Path, dir: &Path) -> Result<Vec<String>, String> {
             "Sounds": sounds,
             "Usage": uses,
             "Queries": queries().iter().map(query_json).collect::<Vec<_>>(),
+            "Kits": kits().iter().map(kit_json).collect::<Vec<_>>(),
         });
         std::fs::write(&path, body.to_string()).map_err(|e| format!("Couldn't write a Rediscover case: {e}"))?;
         files.push(path);
@@ -201,7 +252,7 @@ pub fn compare(helper: &Path, dir: &Path) -> Result<Vec<String>, String> {
                 ));
             }
         }
-        for part in ["years", "folders"] {
+        for part in ["kits", "years", "folders"] {
             if !same(&cs[part], &rust[part]) {
                 differences.push(format!(
                     "Rediscover, {name}: {part}: C# {}, Rust {}",

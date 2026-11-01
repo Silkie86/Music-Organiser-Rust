@@ -14,7 +14,7 @@ use rayon::prelude::*;
 use crate::dotnet_random::DotnetRandom;
 use crate::index::{SoundIndex, VectorIndex, dot, unit};
 use crate::usage::Usage;
-use crate::{Sound, analyse::round_to};
+use crate::{Sound, analyse::round_to, directory};
 
 /// What to dig out.
 #[derive(Clone, Debug, PartialEq)]
@@ -181,7 +181,7 @@ pub fn suggest(sounds: &[Sound], usage: &HashMap<i64, Usage>, index: &SoundIndex
 }
 
 /// A seed for a new list each time.
-fn fresh_seed() -> i32 {
+pub(crate) fn fresh_seed() -> i32 {
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.subsec_nanos());
     (nanos % i32::MAX as u32) as i32 | 1
 }
@@ -280,18 +280,6 @@ pub fn why_nothing(sounds: &[Sound], index: &SoundIndex, o: &Options) -> String 
     } else {
         format!("Every {kind}sound is used in more than one project already.")
     }
-}
-
-/// The folder a file is in, as .NET's `GetDirectoryName` gives it (on Windows, `folders` also turns `/` into `\\`) ("D:\" for a file at a drive's top, "/" at the
-/// top of a Mac or Linux disk).
-fn directory(path: &str) -> &str {
-    let Some(i) = path.rfind(['\\', '/']) else { return "" };
-    if i == 0 {
-        // "/x.wav": the top folder itself.
-        return &path[..1];
-    }
-    let dir = &path[..i];
-    if matches!(dir.as_bytes(), [d, b':'] if d.is_ascii_alphabetic()) { &path[..=i] } else { dir }
 }
 
 /// Your sample folders by how little of them your projects use, then the biggest first: find forgotten packs.
