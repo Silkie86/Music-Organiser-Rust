@@ -15,6 +15,14 @@ const EB_MAJOR: Key = Key::major(PitchClass::new(3));
 const G_MAJOR: Key = Key::major(PitchClass::G);
 const A_MINOR: Key = Key::minor(PitchClass::A);
 
+/// The design's starting thresholds: one key from 0.85 at a bar down to 0.7 at 32 bars, a key or its relative from
+/// 0.9, a home note from 0.85. The tests of how an answer is given use these, so they hold whatever the bench fits.
+const STARTING: Thresholds =
+    Thresholds { one: [0.85, 0.85, 0.8, 0.8, 0.75, 0.7], pair: [0.9; THRESHOLD_KNOTS], home: [0.85; THRESHOLD_KNOTS] };
+
+/// The shipped finder with the starting thresholds, and no key below 0.75 of the notes in one scale.
+const MODEL: Model<'static> = Model { thresholds: &STARTING, not_tonal_below: 0.75, ..SHIPPED };
+
 /// Chances with these keys at these values, the rest sharing what's left evenly.
 fn chances_with(top: &[(Key, f64)]) -> [f64; 24] {
     let used: f64 = top.iter().map(|(_, p)| p).sum();
@@ -43,7 +51,7 @@ fn turned(chances: &[f64; 24], semitones: i32) -> [f64; 24] {
 
 #[test]
 fn thresholds_fall_with_more_music_and_never_jump() {
-    let t = SHIPPED.thresholds;
+    let t = &STARTING;
     assert_eq!(t.at(1, Span::Window), (0.85, 0.9, 0.85));
     assert_eq!(t.at(4, Span::Window), (0.8, 0.9, 0.85));
     assert_eq!(t.at(32, Span::Window), (0.7, 0.9, 0.85));
@@ -60,11 +68,37 @@ fn thresholds_fall_with_more_music_and_never_jump() {
         }
         last = now;
     }
-    // Every knot of the shipped thresholds is a chance, and none rises with more music.
+}
+
+#[test]
+fn the_shipped_thresholds_are_even_chances_or_more_and_never_rise() {
+    // Fitted by the bench, they may fall steeply between two knots (a key or its relative: never at 2 bars, from an
+    // even chance at 8), but never rise; and nothing is given below an even chance. Between knots the lines are
+    // straight, so the knots say it all.
+    let t = SHIPPED.thresholds;
     for knots in [t.one, t.pair, t.home] {
-        assert!(knots.iter().all(|x| (0.0..=1.0).contains(x)));
+        assert!(knots.iter().all(|x| (0.5..=1.0).contains(x)), "{knots:?}");
         assert!(knots.windows(2).all(|w| w[1] <= w[0]), "{knots:?}");
     }
+}
+
+#[test]
+fn a_threshold_of_one_is_never_reached() {
+    // Eb major and C minor share every chance, so the pair's sum is exactly 1, and a threshold of 1 still isn't met.
+    let shared = chances_with(&[(C_MINOR, 0.5), (EB_MAJOR, 0.5)]);
+    let never = Thresholds { one: [1.0; THRESHOLD_KNOTS], pair: [1.0; THRESHOLD_KNOTS], home: [1.0; THRESHOLD_KNOTS] };
+    let model = Model { thresholds: &never, ..MODEL };
+    assert_eq!(grade(&shared, grading(4), &model), (KeyAnswer::Unclear { why: Why::Spread, leaning: None }, 0.0));
+    let almost = Thresholds { pair: [0.99; THRESHOLD_KNOTS], ..never };
+    let model = Model { thresholds: &almost, ..MODEL };
+    assert_eq!(grade(&shared, grading(4), &model), (KeyAnswer::OrRelative(EB_MAJOR), 1.0));
+    // One key with every chance: not given alone, nor as a home note.
+    let sure = chances_with(&[(C_MAJOR, 1.0)]);
+    let model = Model { thresholds: &never, ..MODEL };
+    assert_eq!(
+        grade(&sure, grading(4), &model),
+        (KeyAnswer::Unclear { why: Why::Spread, leaning: Some(C_MAJOR) }, 1.0)
+    );
 }
 
 // Ranking and ties.
@@ -117,54 +151,54 @@ fn a_tie_for_the_first_is_clear_only_between_a_relative_or_parallel_pair() {
 fn too_few_notes_then_no_scale_come_first() {
     let sure = chances_with(&[(C_MAJOR, 0.99)]);
     let few = Grading { notes: MIN_NOTES - 1, ..grading(4) };
-    assert_eq!(grade(&sure, few, &SHIPPED), (KeyAnswer::Unclear { why: Why::TooFewNotes, leaning: None }, 0.0));
+    assert_eq!(grade(&sure, few, &MODEL), (KeyAnswer::Unclear { why: Why::TooFewNotes, leaning: None }, 0.0));
     for fit in [0.7, 0.0, f64::NAN] {
         let atonal = Grading { diatonic_fit: fit, ..grading(4) };
-        assert_eq!(grade(&sure, atonal, &SHIPPED), (KeyAnswer::Unclear { why: Why::NotTonal, leaning: None }, 0.0));
+        assert_eq!(grade(&sure, atonal, &MODEL), (KeyAnswer::Unclear { why: Why::NotTonal, leaning: None }, 0.0));
     }
     // Exactly enough notes, exactly at the line: a key.
-    let edge = Grading { notes: MIN_NOTES, diatonic_fit: SHIPPED.not_tonal_below, ..grading(4) };
-    assert_eq!(grade(&sure, edge, &SHIPPED).0, KeyAnswer::Key(C_MAJOR));
+    let edge = Grading { notes: MIN_NOTES, diatonic_fit: MODEL.not_tonal_below, ..grading(4) };
+    assert_eq!(grade(&sure, edge, &MODEL).0, KeyAnswer::Key(C_MAJOR));
 }
 
 #[test]
 fn each_kind_of_answer_and_its_chance() {
     // One key at its threshold (0.8 at 4 bars), and just under it.
-    assert_eq!(grade(&chances_with(&[(C_MAJOR, 0.8)]), grading(4), &SHIPPED), (KeyAnswer::Key(C_MAJOR), 0.8));
+    assert_eq!(grade(&chances_with(&[(C_MAJOR, 0.8)]), grading(4), &MODEL), (KeyAnswer::Key(C_MAJOR), 0.8));
     let under = chances_with(&[(C_MAJOR, 0.79)]);
     assert_eq!(
-        grade(&under, grading(4), &SHIPPED),
+        grade(&under, grading(4), &MODEL),
         (KeyAnswer::Unclear { why: Why::Spread, leaning: Some(C_MAJOR) }, 0.79)
     );
     // The same chance is enough for a song (0.7), not for one bar (0.85).
     let c = chances_with(&[(C_MAJOR, 0.75)]);
-    assert_eq!(grade(&c, Grading { span: Span::Song, ..grading(200) }, &SHIPPED).0, KeyAnswer::Key(C_MAJOR));
-    assert_ne!(grade(&c, grading(1), &SHIPPED).0, KeyAnswer::Key(C_MAJOR));
+    assert_eq!(grade(&c, Grading { span: Span::Song, ..grading(200) }, &MODEL).0, KeyAnswer::Key(C_MAJOR));
+    assert_ne!(grade(&c, grading(1), &MODEL).0, KeyAnswer::Key(C_MAJOR));
 
     // A key and its relative: C minor, then Eb major.
     let pair = chances_with(&[(C_MINOR, 0.6), (EB_MAJOR, 0.35)]);
-    let (answer, chance) = grade(&pair, grading(4), &SHIPPED);
+    let (answer, chance) = grade(&pair, grading(4), &MODEL);
     assert_eq!(answer, KeyAnswer::OrRelative(C_MINOR));
     assert_eq!(chance, pair[C_MINOR.index()] + pair[EB_MAJOR.index()]);
     // Not when the runner-up isn't the relative.
     let fifth = chances_with(&[(C_MAJOR, 0.6), (G_MAJOR, 0.35)]);
-    assert_eq!(grade(&fifth, grading(4), &SHIPPED).0, KeyAnswer::Unclear { why: Why::Spread, leaning: Some(C_MAJOR) });
+    assert_eq!(grade(&fifth, grading(4), &MODEL).0, KeyAnswer::Unclear { why: Why::Spread, leaning: Some(C_MAJOR) });
 
     // A home note, leaning major...
     let home = chances_with(&[(C_MAJOR, 0.5), (C_MINOR, 0.4)]);
-    let (answer, chance) = grade(&home, grading(4), &SHIPPED);
+    let (answer, chance) = grade(&home, grading(4), &MODEL);
     assert_eq!(answer, KeyAnswer::HomeNote { tonic: PitchClass::C, leaning: Some(Mode::Major) });
     assert_eq!(chance, 0.5 + 0.4);
     // ...or to neither mode.
     let even = chances_with(&[(C_MINOR, 0.45), (C_MAJOR, 0.45)]);
-    assert_eq!(grade(&even, grading(4), &SHIPPED).0, KeyAnswer::HomeNote { tonic: PitchClass::C, leaning: None });
+    assert_eq!(grade(&even, grading(4), &MODEL).0, KeyAnswer::HomeNote { tonic: PitchClass::C, leaning: None });
 
     // A relative pair as likely: given as the pair, major first.
     let tied = chances_with(&[(A_MINOR, 0.45), (C_MAJOR, 0.45)]);
-    assert_eq!(grade(&tied, grading(4), &SHIPPED).0, KeyAnswer::OrRelative(C_MAJOR));
+    assert_eq!(grade(&tied, grading(4), &MODEL).0, KeyAnswer::OrRelative(C_MAJOR));
     // Two keys that aren't a pair as likely: no clear key, leaning nowhere.
     let split = chances_with(&[(C_MAJOR, 0.45), (G_MAJOR, 0.45)]);
-    assert_eq!(grade(&split, grading(4), &SHIPPED), (KeyAnswer::Unclear { why: Why::Spread, leaning: None }, 0.0));
+    assert_eq!(grade(&split, grading(4), &MODEL), (KeyAnswer::Unclear { why: Why::Spread, leaning: None }, 0.0));
 }
 
 #[test]
@@ -178,11 +212,11 @@ fn every_answer_moves_with_the_notes() {
         chances_with(&[(C_MAJOR, 0.45), (G_MAJOR, 0.45)]),
         chances_with(&[(C_MAJOR, 0.5), (G_MAJOR, 0.3)]),
     ];
-    for c in patterns {
+    for (c, model) in patterns.iter().flat_map(|c| [(c, &MODEL), (c, &SHIPPED)]) {
         for bars in [1, 3, 8, 40] {
-            let (answer, chance) = grade(&c, grading(bars), &SHIPPED);
+            let (answer, chance) = grade(c, grading(bars), model);
             for s in 1..12 {
-                let (a, p) = grade(&turned(&c, s), grading(bars), &SHIPPED);
+                let (a, p) = grade(&turned(c, s), grading(bars), model);
                 assert_eq!(a, answer.up(s), "{answer:?} moved {s}");
                 assert_eq!(p.to_bits(), chance.to_bits());
             }

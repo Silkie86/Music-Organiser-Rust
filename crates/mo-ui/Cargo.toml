@@ -21,11 +21,14 @@ mo-formats = { path = "../mo-formats" }
 mo-space = { path = "../mo-space" }
 mo-sounds = { path = "../mo-sounds" }
 mo-audio = { path = "../mo-audio" }
+mo-backup = { path = "../mo-backup" }
 slint.workspace = true
 image.workspace = true
 chrono.workspace = true
 # The clipboard, for Copy path. Slint already brings it in for its text boxes.
 arboard = { version = "3.7", default-features = false }
+# The system's folder picker (Backup: Add folder, Pick a drive). On Linux through the desktop portal, no GTK needed.
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 
 [build-dependencies]
 slint-build.workspace = true

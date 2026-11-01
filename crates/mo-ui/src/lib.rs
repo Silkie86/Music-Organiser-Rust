@@ -10,6 +10,7 @@ mod screens {
 pub use screens::*;
 
 pub mod arrangement;
+pub mod backup;
 pub mod cards;
 pub mod files;
 pub mod note;
@@ -61,6 +62,7 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> R
     app.set_settings_place(settings as i32);
     app.set_songs_place(Place::Songs.index() as i32);
     app.set_sounds_place(Place::Sounds.index() as i32);
+    app.set_space_place(Place::Space.index() as i32);
     KEYS.with(|k| *k.borrow_mut() = Some(shortcuts.clone()));
     show_button_keys(&app, &shortcuts);
     go_to(&app, start.index() as i32);
@@ -129,6 +131,9 @@ fn go_to(app: &AppWindow, index: i32) {
         log::info("Page", place.name());
     }
     app.set_place(index);
+    if place == Place::Space {
+        backup::shown();
+    }
     KEYS.with(|k| {
         if let Some(shortcuts) = k.borrow().as_ref() {
             app.set_key_rows(ModelRc::new(VecModel::from(key_rows(shortcuts, place))));

@@ -358,7 +358,8 @@ class Measuring(unittest.TestCase):
         return studio
 
     def test_writes_the_fader_and_tempo_tables_as_insert_names_and_saves(self):
-        studio = self.run_script("MO Live Test automation - FL Studio 2025")
+        # FL Studio 2025 shows the file name with ".flp", and a "*" while it has unsaved changes.
+        studio = self.run_script("MO Live Test automation.flp* - FL Studio 2025")
         self.assertEqual(studio.saves, 1)
         self.assertEqual(studio.names[1], "v0.00 -infdB")
         self.assertEqual(studio.names[81], "v0.80 0.0dB")
@@ -370,8 +371,21 @@ class Measuring(unittest.TestCase):
         self.assertEqual(studio.tempo, 124000)
         self.assertEqual(set(studio.volumes.values()), {0.8})
 
+    def test_reads_the_project_name_from_the_title_as_the_app_does(self):
+        script = fake_fl.compile_script(fake_fl.night_drive())
+        for title, name in (
+            ("Night Drive - FL Studio 2025", "Night Drive"),
+            ("Night Drive.flp - FL Studio 2025", "Night Drive"),
+            ("Night Drive.FLP* - FL Studio 2025", "Night Drive"),
+            ("FL Studio 2025 - Night Drive", "Night Drive"),
+            ("Intro - Verse.flp - FL Studio 2025", "Intro - Verse"),
+            ("FL Studio 2025", ""),
+        ):
+            self.assertEqual(script.project_name(title), name, title)
+
     def test_never_runs_in_another_project_or_with_changes_off(self):
         for title, changes in (("Night Drive - FL Studio 2025", True), ("MO Live Test automation", False),
-                               ("MO Live Test automation (fixed) - FL Studio 2025", True)):
+                               ("MO Live Test automation (fixed) - FL Studio 2025", True),
+                               ("MO Live Test automation 2.flp - FL Studio 2025", True)):
             studio = self.run_script(title, changes)
             self.assertEqual((studio.saves, studio.names, studio.volumes), (0, {}, {}))

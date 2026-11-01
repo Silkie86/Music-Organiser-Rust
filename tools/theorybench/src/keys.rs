@@ -226,7 +226,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             "mo-harmony is left out: its weights aren't fitted yet, so every key scores the same. `theorybench \
              keyfit` measures it."
         );
-    } else if setup.items.iter().any(|i| i.source.starts_with("pop909")) {
+    } else if setup.items.iter().any(|i| learned_from(&i.source)) {
         println!(
             "mo-harmony's weights were fitted on these songs, so its numbers here flatter it: `theorybench keyfit` \
              gives the fair ones, from songs held out of the fit."
@@ -239,6 +239,12 @@ pub fn run(args: &[String]) -> Result<(), String> {
         report(&title, &truth, &song, &runs);
     }
     Ok(())
+}
+
+/// Whether mo-harmony's weights learned from this source's songs: a source they name, or one whose name begins (or is
+/// begun by) one they name, as POP909 and POP909-CL are the same songs labelled twice.
+fn learned_from(source: &str) -> bool {
+    mo_harmony::keyfind::LEARNED_FROM.iter().any(|l| l.starts_with(source) || source.starts_with(l))
 }
 
 /// Every set of cases the bench scores: whole songs with one key, whole songs that change key, and the clips of each
@@ -583,5 +589,20 @@ pub fn report(title: &str, truth: &str, song: &[usize], runs: &[Run]) {
                 p.p
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn songs_the_weights_learned_from_are_known_by_their_source() {
+        assert!(mo_harmony::keyfind::LEARNED_FROM.iter().all(|l| learned_from(l)));
+        // POP909-CL relabels POP909's songs; RS200 is only ever measured (its licence doesn't let weights ship).
+        if mo_harmony::keyfind::LEARNED_FROM.contains(&"pop909cl") {
+            assert!(learned_from("pop909"));
+        }
+        assert!(!learned_from("rs200"));
     }
 }

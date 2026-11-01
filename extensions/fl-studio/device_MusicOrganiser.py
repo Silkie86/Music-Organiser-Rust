@@ -141,10 +141,26 @@ TEMPO_FIRST = FADER_STEPS + 2
 _measuring = None     # the measurement under way: the step, what was found, and what to put back
 
 
+def project_name(title):
+    """
+    The project's name in FL Studio's title ("Night Drive.flp - FL Studio 2025" or "FL Studio 2025 - Night Drive"),
+    or "" when it names none; as the C# app's DawWatch.FlProjectName reads it.
+    """
+    parts = [p.strip() for p in title.replace("*", "").strip().split(" - ")]
+    fl = lambda p: p.lower().startswith("fl studio")
+    if len(parts) > 1 and fl(parts[-1]):
+        parts.pop()
+    elif len(parts) > 1 and fl(parts[0]):
+        parts.pop(0)
+    elif len(parts) == 1 and fl(parts[0]):
+        return ""
+    name = " - ".join(parts).strip()
+    return name[:-4].rstrip() if name.lower().endswith(".flp") else name
+
+
 def in_live_test():
-    """Whether the project open is exactly MEASURE_PROJECT (the title is "<project> - FL Studio ...")."""
-    name = ui.getProgTitle().split(" - ")[0].strip().rstrip("*").strip()
-    return name == MEASURE_PROJECT
+    """Whether the project open is exactly MEASURE_PROJECT."""
+    return project_name(ui.getProgTitle()) == MEASURE_PROJECT
 
 
 def measure():

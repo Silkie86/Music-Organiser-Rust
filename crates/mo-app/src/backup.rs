@@ -177,6 +177,10 @@ pub struct Prepared {
     pub missing: Vec<PathBuf>,
     /// Everything in the folders (and the samples outside them the songs use), before anything is left out.
     pub all_bytes: u64,
+    /// Each folder on the list's size, in the list's order; `None` for one that isn't there.
+    pub folder_bytes: Vec<Option<u64>>,
+    /// The folder list and level it was made for: a plan for other choices isn't shown.
+    pub made_for: (Vec<Folder>, Level),
 }
 
 /// A sample path as a project stores it, made whole: a full path as it is, a relative one from the save's folder.
@@ -203,6 +207,18 @@ pub fn prepare(library: &Library, settings: &Settings, stop: &AtomicBool) -> Res
     let roots = library.roots().map_err(|e| e.to_string())?;
     let sample_folders = library.list_setting("sample_folders").map_err(|e| e.to_string())?;
 
+    // Each folder's size, in one pass over the files, matching folders as the walk did.
+    let mut folder_bytes: Vec<Option<u64>> =
+        settings.folders.iter().map(|f| (!gathered.missing.contains(&f.path)).then_some(0)).collect();
+    for e in &gathered.files {
+        for (f, bytes) in settings.folders.iter().zip(folder_bytes.iter_mut()) {
+            if let Some(b) = bytes
+                && folders::within(&e.path, &f.path)
+            {
+                *b = b.saturating_add(e.size);
+            }
+        }
+    }
     let mut files = gathered.files;
     let mut have: HashSet<String> = files.iter().map(|f| case::key(&f.path.to_string_lossy())).collect();
     let all_songs = group_songs(&saves, &choices);
@@ -358,7 +374,15 @@ pub fn prepare(library: &Library, settings: &Settings, stop: &AtomicBool) -> Res
         })
         .filter(|s| !s.files.is_empty())
         .collect();
-    Ok(Prepared { plan, songs: song_files, always: gathered.always, missing: gathered.missing, all_bytes })
+    Ok(Prepared {
+        plan,
+        songs: song_files,
+        always: gathered.always,
+        missing: gathered.missing,
+        all_bytes,
+        folder_bytes,
+        made_for: (settings.folders.clone(), settings.level),
+    })
 }
 
 /// Where a run is, for the page's progress line.
@@ -370,6 +394,14 @@ pub enum Progress {
 }
 
 impl Progress {
+    /// How far along, 0 to 1, when that's known.
+    pub fn done(&self) -> f32 {
+        match self {
+            Progress::Packing { done, of } if *of > 0 => (*done as f64 / *of as f64) as f32,
+            _ => 0.0,
+        }
+    }
+
     pub fn line(&self) -> String {
         match self {
             Progress::Looking => "Looking through your folders and songs…".to_owned(),
@@ -485,6 +517,160 @@ pub fn run(prepared: &Prepared, settings: &Settings, stop: &AtomicBool, progress
         line.push_str(" · the backup's own list couldn't be saved, so next time takes longer");
     }
     LastRun { when, ok: problems.is_empty() && prepared.missing.is_empty(), line }
+}
+
+/// Your DAWs' project folders (the library's roots) and your sample folders, for "Add my DAW and sample folders".
+pub fn library_folders(library: &Library) -> Result<Vec<PathBuf>, mo_library::LibraryError> {
+    let mut out: Vec<PathBuf> = library.roots()?.into_iter().map(PathBuf::from).collect();
+    out.extend(library.list_setting("sample_folders")?.into_iter().map(PathBuf::from));
+    Ok(out)
+}
+
+/// Where working out what goes has got to.
+#[derive(Clone, Copy, Debug)]
+pub enum PlanState<'a> {
+    /// Nothing to work out (no drive or no folders yet).
+    Waiting,
+    Working,
+    Ready(&'a Prepared),
+    Failed(&'a str),
+}
+
+/// The backup drive's room, as the drive card shows it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DriveRoom {
+    pub free: u64,
+    pub total: u64,
+}
+
+/// One folder's line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FolderLine {
+    pub path: String,
+    pub size: String,
+    /// 0 Whole, 1 Slimmed: the order of the switch.
+    pub mode: usize,
+}
+
+/// Everything the Backup section shows, in words.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PageLines {
+    pub drive: String,
+    pub drive_fill: f32,
+    pub drive_line: String,
+    pub last_line: String,
+    /// 0 Full, 1 Slim, 2 Essentials: the order of the switch.
+    pub level: usize,
+    pub level_note: String,
+    /// 0 Plain folders, 1 Zip per song.
+    pub format: usize,
+    pub format_note: String,
+    pub folders: Vec<FolderLine>,
+    /// Empty until worked out; then `plan_note` isn't shown.
+    pub goes: String,
+    pub of_all: String,
+    pub goes_part: f32,
+    /// Why, the note under it, and its size.
+    pub left_out: Vec<(String, String, String)>,
+    pub plan_note: String,
+}
+
+/// The words a left-out reason is shown with on the card.
+pub fn left_out_title(why: LeftOut) -> &'static str {
+    match why {
+        LeftOut::SameSave => "Same save twice",
+        LeftOut::OldAutosave => "Old autosaves",
+        LeftOut::Cache => "Caches",
+        LeftOut::MidSittingSave => "Mid-sitting saves",
+        LeftOut::OlderBigSave => "Older big saves",
+        LeftOut::UnusedSound => "Big unused sounds",
+        LeftOut::NotMilestone => "Not a milestone",
+    }
+}
+
+/// Makes the section's words from the settings, the drive's room and the plan. `prepared` is only used when it was
+/// made for the same folder list.
+pub fn page_lines(settings: &Settings, room: Option<DriveRoom>, plan: PlanState<'_>, now: NaiveDateTime) -> PageLines {
+    let ready = match plan {
+        PlanState::Ready(p)
+            if p.made_for.0 == settings.folders
+                && p.made_for.1 == settings.level
+                && p.folder_bytes.len() == settings.folders.len() =>
+        {
+            Some(p)
+        }
+        _ => None,
+    };
+    let folders = settings
+        .folders
+        .iter()
+        .enumerate()
+        .map(|(i, f)| FolderLine {
+            path: f.path.display().to_string(),
+            size: match ready.map(|p| p.folder_bytes[i]) {
+                Some(Some(b)) => size_text(b),
+                Some(None) => "Not plugged in".to_owned(),
+                None => String::new(),
+            },
+            mode: usize::from(f.mode == Mode::Slimmed),
+        })
+        .collect();
+    let (goes, of_all, goes_part, left_out) = match ready {
+        Some(p) => {
+            let goes = p.plan.copy_bytes();
+            let part = if p.all_bytes == 0 { 0.0 } else { (goes as f64 / p.all_bytes as f64) as f32 };
+            let lines = left_out_lines(&p.plan)
+                .into_iter()
+                .map(|l| {
+                    let note = format!("{} · {}", l.why.note(), crate::song_panel::count_of(l.files, "file"));
+                    (left_out_title(l.why).to_owned(), note, size_text(l.bytes))
+                })
+                .collect();
+            (size_text(goes), size_text(p.all_bytes), part, lines)
+        }
+        None => (String::new(), String::new(), 0.0, Vec::new()),
+    };
+    let plan_note = match plan {
+        _ if settings.folders.is_empty() => "Add a folder to see what goes".to_owned(),
+        _ if settings.drive.is_none() => "Pick a backup drive to see what goes".to_owned(),
+        PlanState::Failed(why) => format!("Couldn't work out what goes: {why}"),
+        _ => "Working out what goes…".to_owned(),
+    };
+    let (drive_fill, drive_line) = match room {
+        Some(r) if r.total > 0 => {
+            ((r.total.saturating_sub(r.free) as f64 / r.total as f64) as f32, drive_line(r.free, r.total))
+        }
+        _ => (0.0, String::new()),
+    };
+    PageLines {
+        drive: settings.drive.as_ref().map(|d| d.display().to_string()).unwrap_or_default(),
+        drive_fill,
+        drive_line,
+        last_line: last_run_line(settings.last_run.as_ref(), now),
+        level: match settings.level {
+            Level::Full => 0,
+            Level::Slim => 1,
+            Level::Essentials => 2,
+        },
+        level_note: level_note(settings.level).to_owned(),
+        format: usize::from(settings.format == Format::Zips),
+        format_note: format_note(settings.format).to_owned(),
+        folders,
+        goes,
+        of_all,
+        goes_part,
+        left_out,
+        plan_note,
+    }
+}
+
+/// The level at a place on the How much switch.
+pub fn level_at(i: usize) -> Level {
+    match i {
+        0 => Level::Full,
+        2 => Level::Essentials,
+        _ => Level::Slim,
+    }
 }
 
 /// One line of "Left out, and why".
@@ -620,6 +806,40 @@ mod tests {
         assert_eq!(sample_file("/s/Kick.wav", "/song"), Some(PathBuf::from("/s/Kick.wav")));
         assert_eq!(sample_file("Samples/Kick.wav", "/song"), Some(Path::new("/song").join("Samples/Kick.wav")));
         assert_eq!(sample_file("Kick.wav", "/song"), None);
+    }
+
+    #[test]
+    fn the_page_says_what_to_do_next_and_what_goes() {
+        let now = NaiveDateTime::default();
+        let mut s = Settings::default();
+        let empty = page_lines(&s, None, PlanState::Waiting, now);
+        assert_eq!(empty.plan_note, "Add a folder to see what goes");
+        assert_eq!((empty.level, empty.format), (1, 0));
+        s.add_folder(PathBuf::from("/music"));
+        s.add_folder(PathBuf::from("/unplugged"));
+        assert_eq!(page_lines(&s, None, PlanState::Waiting, now).plan_note, "Pick a backup drive to see what goes");
+        s.drive = Some(PathBuf::from("/backup"));
+        let file = |p: &str, size| FileEntry { path: PathBuf::from(p), size, modified: now };
+        let prepared = Prepared {
+            plan: Plan {
+                copy: vec![file("/music/a.flp", 300)],
+                left_out: vec![plan::Skipped { file: file("/music/big.wav", 700), why: LeftOut::UnusedSound }],
+            },
+            all_bytes: 1000,
+            folder_bytes: vec![Some(1000), None],
+            made_for: (s.folders.clone(), s.level),
+            ..Prepared::default()
+        };
+        let room = Some(DriveRoom { free: 25, total: 100 });
+        let l = page_lines(&s, room, PlanState::Ready(&prepared), now);
+        assert_eq!(l.goes, "300 bytes");
+        assert!((l.goes_part - 0.3).abs() < 1e-6 && (l.drive_fill - 0.75).abs() < 1e-6);
+        assert_eq!(l.folders[1].size, "Not plugged in");
+        assert_eq!(l.left_out[0].0, "Big unused sounds");
+        assert_eq!(l.left_out[0].1, "Big sound no project uses · 1 file");
+        // A plan made for another folder list isn't shown.
+        s.add_folder(PathBuf::from("/more"));
+        assert_eq!(page_lines(&s, room, PlanState::Ready(&prepared), now).goes, "");
     }
 
     #[test]

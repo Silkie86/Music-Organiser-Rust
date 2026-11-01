@@ -10,23 +10,28 @@
 //
 // What it records, from the start of the arrangement, with arranger automation write on:
 //   the tempo, the master track's volume, a new instrument track's volume and pan, and its MO Probe's on/off,
-//   each set to the values in STEPS, one step every two seconds, each control at its own moment in the step and
-//   touched only while it's set (Bitwig 6.1.6 missed some volume and pan moves made all at once); then it stops,
-//   turns automation write off and saves.
+//   each set to the values in STEPS in touch mode, one step every two seconds after six seconds of playing, each
+//   control at its own moment in the step and touched only while it's set (Bitwig 6.1.6 missed some volume and pan
+//   moves made all at once or soon after it started playing); then it stops, turns automation write off and saves.
 // The values are written to Bitwig's Controller Script console as they're set, so the saved file can be checked
 // against them.
 //
 // Plain ES5 and plain ASCII (rule 11).
 
 loadAPI(18);
-host.defineController("Music Organiser", "Test driver", "1.0", "6f0f5d38-7c1e-4b8e-9d0a-3a8f1c2b7e41", "Music Organiser");
+host.defineController("Music Organiser", "Test driver", "1.2", "6f0f5d38-7c1e-4b8e-9d0a-3a8f1c2b7e41", "Music Organiser");
 host.defineMidiPorts(0, 0);
 
 var PROJECT = "MO Live Test automation";
 /** MO Probe (the old app's test plugin, installed on Solomon's PC): its report logs each tempo change and whether
  * Bitwig has it switched on, with positions, a check on what Bitwig recorded beside the saved file. */
 var PROBE = "org.musicorganiser.probe.instrument";
-/** Milliseconds between steps, and before the first. */
+/**
+ * Milliseconds of playing before the first step: Bitwig 6.1.6 didn't record touched volume and pan moves in the first
+ * four seconds or so after the driver started playing.
+ */
+var LEAD_IN_MS = 6000;
+/** Milliseconds between steps. */
 var STEP_MS = 2000;
 /** Milliseconds between one control's move and the next within a step, and how long each is touched. */
 var CONTROL_MS = 300;
@@ -124,12 +129,13 @@ function record() {
     }
     say("recording on \"" + cursorTrack.name().get() + "\", device \"" + cursorDevice.name().get() + "\"");
     writeModeBefore = String(transport.automationWriteMode().get());
-    transport.automationWriteMode().set("write");
+    // Touch mode records only what the driver touches ("write" also wrote every other track's controls).
+    transport.automationWriteMode().set("touch");
     transport.isArrangerAutomationWriteEnabled().set(true);
     transport.getPosition().set(0);
     transport.play();
-    for (var i = 0; i < STEPS.length; i++) host.scheduleTask(step(i), STEP_MS * (i + 1));
-    host.scheduleTask(stopAndSave, STEP_MS * (STEPS.length + 1));
+    for (var i = 0; i < STEPS.length; i++) host.scheduleTask(step(i), LEAD_IN_MS + STEP_MS * i);
+    host.scheduleTask(stopAndSave, LEAD_IN_MS + STEP_MS * STEPS.length);
 }
 
 /** Sets one step's values, one control at a time, each touched while it's set so Bitwig writes it. */

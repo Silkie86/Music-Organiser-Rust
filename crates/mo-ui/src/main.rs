@@ -33,6 +33,8 @@ fn main() -> Result<(), slint::PlatformError> {
     // The Songs page reads the C# app's library, read-only (CLAUDE.md: until the Rust page is trusted).
     mo_ui::songs::connect(&app, mo_app::paths::data_dir().join("library.db"), feed.clone());
     mo_ui::sounds::connect(&app, mo_app::paths::data_dir().join("sounds.db"), feed.clone(), &shortcuts);
+    // Space, Backup: the backup settings live in a file of their own; the library is only read.
+    mo_ui::backup::connect(&app, mo_app::paths::data_dir().join("library.db"));
     app.window().set_maximized(true);
     // The watchdog starts once the window is up, so opening it doesn't count as a freeze.
     let watched = feed.clone();
