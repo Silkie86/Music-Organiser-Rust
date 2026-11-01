@@ -19,7 +19,8 @@ use std::process::ExitCode;
 
 const USAGE: &str = "theorybench keys <labelled.jsonl>... [--part <role>] [--aligned] [--bars <lengths>]
 theorybench keyfit <labelled.jsonl>... [--aligned] [--bars <lengths>] [--lambda-delta <x>|inf] [--inputs <kinds>]
-                   [--picks <n>] [--dump <file>] [--against <file>] [--hand <cases>] [--final | --write <weights.rs>]
+                   [--picks <n>] [--weigh <source>=<w>] [--dump <file>] [--against <file>] [--hand <cases>]
+                   [--final | --write <weights.rs>]
 theorybench chords <labelled.jsonl>... --answers <name>=<answers.jsonl> [--answers ...] [--dump <file>]
 
   keys       how often each key finder names the labelled key, on whole songs and on clips (8 bars long unless --bars
@@ -31,6 +32,8 @@ theorybench chords <labelled.jsonl>... --answers <name>=<answers.jsonl> [--answe
   --lambda-delta  how hard the per-note corrections are pulled to 0 (1e-4; inf fits the counted tables alone)
   --inputs   the kinds of input heard: full,tune,upper,bass,piano (all)
   --picks    stretches of each length fitted on from each song (8)
+  --weigh    how much a source's sets count in the fit (1; 0 for its tables only); source/input for one kind of
+             input, such as billboard/upper=0. Pieces whose licence isn't MIT, CC0 or CC BY are only measured
   --dump     writes how each case of folds 1 to 4 came out, to compare a later run with (--against)
   --against  compares this run with one dumped before, case by case: each set's share right and log-loss, the
              differences with their likely ranges, and every set that got worse beyond its range

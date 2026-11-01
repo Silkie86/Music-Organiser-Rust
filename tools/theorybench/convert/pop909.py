@@ -10,7 +10,8 @@ the app; the files stay outside the repository.
 Each song becomes one line:
   source, id, ppq, length (ticks), beats_per_bar, first_downbeat (tick of the first labelled bar line), aligned (the
   labelled bar lines fall on the MIDI's bar grid), parts [{name, role, notes: [[start, length, key, velocity], ...]}],
-  keys [[start, end, "Gb:maj"], ...], chords [[start, end, "B:maj"], ...] (Harte labels), key_labels, chord_labels.
+  keys [[start, end, "Gb:maj"], ...], chords [[start, end, "B:maj"], ...] (Harte labels), key_labels, chord_labels,
+  licence (the dataset's, which keyfit reads to tell what it may learn from).
 Label times (seconds) are turned into ticks with the file's tempo map.
 """
 import json
@@ -132,6 +133,7 @@ def song(folder):
         'chords': labels(os.path.join(folder, 'chord_midi.txt'), ppq, tempos),
         'key_labels': 'software (from the audio)',
         'chord_labels': 'software (from the MIDI)',
+        'licence': 'MIT',
     }
 
 
