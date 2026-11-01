@@ -1,7 +1,10 @@
 //! Copying the backup list to the backup drive: each file goes in under a temporary name, is read back and checked
 //! against what was read from your folder, and only then takes its real name. Your music folders are only ever read.
 //!
-//! A file already on the backup with the same size and time (within a drive's clock steps) is left as it is. When a
+//! A file is left as it is when the backup's [record](crate::record) says both it and its copy are unchanged since it
+//! was copied, or when the copy has the same size and time (within a drive's clock steps), or the same bytes. A new
+//! file whose bytes are already on the backup shares them (a hard link: NTFS and most Mac and Linux drives) instead of
+//! taking room again; on a drive that can't (exFAT, FAT32) it's copied as usual. When a
 //! file has changed since the last backup, the copy it replaces is kept in `<backup>\Older versions\<stamp>\…` if it's
 //! small (Solomon, 31 Oct 2026: big files don't pile up old copies), so a small file you overwrote by mistake can still
 //! be found. An old copy that's byte for byte the new one (only its time changed) isn't kept twice.
@@ -13,6 +16,7 @@ use std::collections::HashSet;
 use std::fs::{self, File, Metadata};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
@@ -20,6 +24,7 @@ use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
 use crate::plan::{DEFAULT_BIG_SAVE, place_on_backup};
+use crate::record::{self, Entry, Record};
 use mo_space::size::FileEntry;
 
 /// The folder on the backup drive that keeps replaced copies of small files.
@@ -33,6 +38,9 @@ const SAME_TIME: Duration = Duration::from_secs(2);
 
 /// Files at least this big are copied one at a time: a USB drive copes far better with one big stream than several.
 const BIG_COPY: u64 = 64 << 20;
+
+/// Files smaller than this are copied even when the same bytes are on the backup: sharing them saves almost nothing.
+const SHARE_FROM: u64 = 64 << 10;
 
 /// The most read in one go.
 const BUFFER: usize = 1 << 20;
@@ -74,6 +82,9 @@ pub struct Line {
     pub outcome: Outcome,
     /// Bytes written to the backup drive for it.
     pub written: u64,
+    /// Its bytes were already on the backup (another file with the same contents), so it shares them instead of taking
+    /// room again (NTFS and most Mac and Linux drives; on exFAT or FAT32 it's copied as usual).
+    pub shared: bool,
 }
 
 /// What a run did. Every file in the list has a line, even when the run stopped part way.
@@ -86,6 +97,8 @@ pub struct Report {
     pub full: bool,
     /// The backup drive went away part way (unplugged): the files after that weren't reached.
     pub gone: bool,
+    /// The backup's record of what it holds couldn't be written (the next run reads the files again instead).
+    pub record_not_saved: Option<String>,
 }
 
 /// Bigger than a FAT32 drive can hold in one file: a "drive full" for such a file doesn't mean the drive is full.
@@ -132,34 +145,44 @@ pub fn run(files: &[FileEntry], backup: &Path, options: &Options, stop: &AtomicB
         .collect();
     let full = AtomicBool::new(false);
     let gone = AtomicBool::new(false);
+    // A record that can't be read is left alone: this run works without one and doesn't write over it.
+    let (record, record_trusted) = match Record::load(backup, ignores_case) {
+        Ok(r) => (r, true),
+        Err(_) => (Record::default(), false),
+    };
+    let record = Mutex::new(record);
+    let cant_share = AtomicBool::new(false);
+    let ctx = Ctx { backup, options, stop, record: &record, record_trusted, ignores_case, cant_share: &cant_share };
     let do_one = |(i, f, place): &Work<'_>| -> (usize, Line) {
-        let (outcome, written) =
+        let (outcome, written, shared) =
             if stop.load(Ordering::Relaxed) || full.load(Ordering::Relaxed) || gone.load(Ordering::Relaxed) {
-                (Outcome::NotReached, 0)
+                (Outcome::NotReached, 0, false)
             } else if !drive.still_there() {
                 gone.store(true, Ordering::Relaxed);
-                (Outcome::NotReached, 0)
+                (Outcome::NotReached, 0, false)
             } else {
                 match place {
-                    Err(why) => (Outcome::Failed((*why).to_owned()), 0),
-                    Ok(dest) => match one(f, dest, backup, options, stop) {
-                        Ok(done) => done,
+                    Err(why) => (Outcome::Failed((*why).to_owned()), 0, false),
+                    Ok(dest) => match one(f, dest, &ctx) {
+                        Ok(done) => (done.outcome, done.written, done.shared),
                         Err(e) if e.kind() == io::ErrorKind::Interrupted && stop.load(Ordering::Relaxed) => {
-                            (Outcome::NotReached, 0)
+                            (Outcome::NotReached, 0, false)
                         }
-                        Err(e) if e.kind() == io::ErrorKind::StorageFull && f.size > FAT32_LARGEST => {
-                            (Outcome::Failed("Too big for this drive: a FAT32 drive holds files up to 4 GB".into()), 0)
-                        }
+                        Err(e) if e.kind() == io::ErrorKind::StorageFull && f.size > FAT32_LARGEST => (
+                            Outcome::Failed("Too big for this drive: a FAT32 drive holds files up to 4 GB".into()),
+                            0,
+                            false,
+                        ),
                         Err(e) => {
                             if e.kind() == io::ErrorKind::StorageFull {
                                 full.store(true, Ordering::Relaxed);
                             }
-                            (Outcome::Failed(e.to_string()), 0)
+                            (Outcome::Failed(e.to_string()), 0, false)
                         }
                     },
                 }
             };
-        (*i, Line { source: f.path.clone(), outcome, written })
+        (*i, Line { source: f.path.clone(), outcome, written, shared })
     };
     let (small, big): (Vec<&Work<'_>>, Vec<&Work<'_>>) = work.iter().partition(|(_, f, _)| f.size < BIG_COPY);
     let mut lines: Vec<(usize, Line)> = small.par_iter().map(|w| do_one(w)).collect();
@@ -168,11 +191,21 @@ pub fn run(files: &[FileEntry], backup: &Path, options: &Options, stop: &AtomicB
     let missed = lines.iter().any(|(_, l)| l.outcome == Outcome::NotReached);
     let full = full.load(Ordering::Relaxed);
     let gone = gone.load(Ordering::Relaxed);
+    // A record written to a drive that went away would land on the system disk.
+    let record = record.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let record_not_saved = if gone || !drive.still_there() {
+        Some("The backup drive went away".to_owned())
+    } else if !record_trusted {
+        Some("The backup's record couldn't be read, so it was left as it was".to_owned())
+    } else {
+        record.save(backup).err().map(|e| e.to_string())
+    };
     Ok(Report {
         lines: lines.into_iter().map(|(_, l)| l).collect(),
         stopped: missed && !full && !gone && stop.load(Ordering::Relaxed),
         full,
         gone,
+        record_not_saved,
     })
 }
 
@@ -211,8 +244,64 @@ impl<'a> Drive<'a> {
     }
 }
 
-fn one(f: &FileEntry, dest: &Path, backup: &Path, options: &Options, stop: &AtomicBool) -> io::Result<(Outcome, u64)> {
+/// What every file of a run shares.
+struct Ctx<'a> {
+    backup: &'a Path,
+    options: &'a Options,
+    stop: &'a AtomicBool,
+    record: &'a Mutex<Record>,
+    /// The record was read (or there wasn't one yet), so what's learnt now is kept.
+    record_trusted: bool,
+    ignores_case: bool,
+    /// The backup drive turned out not to share bytes between files (exFAT, FAT32): don't try again this run.
+    cant_share: &'a AtomicBool,
+}
+
+impl Ctx<'_> {
+    fn record(&self) -> std::sync::MutexGuard<'_, Record> {
+        self.record.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Records what's now at `dest`: the source as it was, the copy's own time, and its bytes' hash. Recording is a
+    /// help, not part of the backup: a file that can't be recorded is still backed up, only read again next time.
+    fn note(&self, place: Option<&Place>, source: &Source<'_>, dest: &Path, hash: [u8; 32]) {
+        let Some(place) = place else { return };
+        let Ok(copy_time) = fs::metadata(dest).and_then(|m| m.modified()) else { return };
+        let entry = Entry {
+            path: place.rel.clone(),
+            size: source.size,
+            time: record::nanos(source.time),
+            copy_time: record::nanos(copy_time),
+            hash,
+        };
+        self.record().set(place.key.clone(), entry);
+    }
+}
+
+/// Where a file is on the backup, as the record names it.
+struct Place {
+    rel: String,
+    key: String,
+}
+
+/// What happened to one file that didn't fail.
+struct Done {
+    outcome: Outcome,
+    written: u64,
+    shared: bool,
+}
+
+impl Done {
+    fn up_to_date() -> Done {
+        Done { outcome: Outcome::UpToDate, written: 0, shared: false }
+    }
+}
+
+fn one(f: &FileEntry, dest: &Path, ctx: &Ctx<'_>) -> io::Result<Done> {
     let source_meta = fs::metadata(&f.path)?;
+    let source = Source { path: &f.path, size: source_meta.len(), time: source_meta.modified()? };
+    // A name the record can't hold (a backslash in a Mac or Linux name) is backed up without a record line.
+    let place = record::rel_path(ctx.backup, dest).map(|rel| Place { key: record::fold(&rel, ctx.ignores_case), rel });
     let old = match fs::symlink_metadata(dest) {
         Ok(m) => Some(m),
         Err(e) if e.kind() == io::ErrorKind::NotFound => None,
@@ -223,14 +312,45 @@ fn one(f: &FileEntry, dest: &Path, backup: &Path, options: &Options, stop: &Atom
         if !old.is_file() {
             return Err(io::Error::other("Something that isn't a file is in its place on the backup"));
         }
+        let old_time = record::nanos(old.modified()?);
+        let recorded = place.as_ref().and_then(|p| ctx.record().get(&p.key).cloned());
+        // Both the file and its copy are as the record says (a shared copy can't carry its own file's time).
+        if let Some(e) = &recorded
+            && e.size == source.size
+            && e.time == record::nanos(source.time)
+            && old.len() == source.size
+            && e.copy_time == old_time
+        {
+            return Ok(Done::up_to_date());
+        }
         if same_file(old, &source_meta) {
-            return Ok((Outcome::UpToDate, 0));
+            // Up to date by its time; one not yet recorded (a lost record) is read once so it can be shared. Not when
+            // the record can't be saved (it would be read again every run) or the file is too small to share.
+            if ctx.record_trusted
+                && place.is_some()
+                && source.size >= SHARE_FROM
+                && recorded.is_none_or(|e| e.size != source.size || e.copy_time != old_time)
+            {
+                let hash = hash_file(dest, ctx.stop)?;
+                ctx.note(place.as_ref(), &source, dest, hash);
+            }
+            return Ok(Done::up_to_date());
         }
         // Same size, another time (a clock change shifts every time on a FAT drive; a sync tool touches files):
-        // when the bytes are the same, the copy there just takes the new time. Reading both is cheaper than writing.
-        if old.len() == source_meta.len() && hash_file(dest, stop)? == hash_file(&f.path, stop)? {
-            keep_time(dest, source_meta.modified()?)?;
-            return Ok((Outcome::UpToDate, 0));
+        // when the bytes are the same, the copy there is right. Reading both is cheaper than writing. Its time is
+        // left alone (it may be shared with another file); the record says it's up to date.
+        if old.len() == source.size {
+            let there = hash_file(dest, ctx.stop)?;
+            if there == hash_file(&f.path, ctx.stop)? {
+                // A copy with a name of its own takes the new time, so the next run sees it by its time; a shared
+                // one keeps its time (changing it would change the other file's), and the record says it's up to
+                // date.
+                if own_copy(old, ctx) {
+                    keep_time(dest, source.time)?;
+                }
+                ctx.note(place.as_ref(), &source, dest, there);
+                return Ok(Done::up_to_date());
+            }
         }
     }
     let Some(folder) = dest.parent() else { return Err(io::Error::other("No folder on the backup")) };
@@ -242,8 +362,7 @@ fn one(f: &FileEntry, dest: &Path, backup: &Path, options: &Options, stop: &Atom
         Ok(_) => remove_part(&part),
         Err(_) => {}
     }
-    let source = Source { path: &f.path, size: source_meta.len(), time: source_meta.modified()? };
-    let done = finish(&source, dest, &part, old.as_ref(), backup, options, stop);
+    let done = finish(&source, dest, &part, old.as_ref(), place.as_ref(), ctx);
     if done.is_err() {
         remove_part(&part);
     }
@@ -257,26 +376,36 @@ struct Source<'a> {
     time: SystemTime,
 }
 
-/// Everything after the temporary copy's name is free: copy, check, keep the older version, put in place. The caller
-/// clears the temporary copy away if this fails.
+/// Everything after the temporary copy's name is free: share or copy, check, keep the older version, put in place.
+/// The caller clears the temporary copy away if this fails.
 fn finish(
     source: &Source<'_>,
     dest: &Path,
     part: &Path,
     old: Option<&Metadata>,
-    backup: &Path,
-    options: &Options,
-    stop: &AtomicBool,
-) -> io::Result<(Outcome, u64)> {
-    let written = copy_checked(source, part, stop)?;
+    place: Option<&Place>,
+    ctx: &Ctx<'_>,
+) -> io::Result<Done> {
+    let shared = match place {
+        Some(p) => share(source, part, &p.key, ctx)?,
+        None => None,
+    };
+    let (written, hash, shared) = match shared {
+        Some(hash) => (0, hash, true),
+        None => {
+            let (written, hash) = copy_checked(source, part, ctx.stop)?;
+            (written, hash, false)
+        }
+    };
     let Some(old) = old else {
         put_in_place(part, dest)?;
-        return Ok((Outcome::New, written));
+        ctx.note(place, source, dest, hash);
+        return Ok(Done { outcome: Outcome::New, written, shared });
     };
     let mut kept: Option<PathBuf> = None;
-    if old.len() < options.keep_older_below {
-        let rel = dest.strip_prefix(backup).map_err(io::Error::other)?;
-        let keep = backup.join(OLDER_VERSIONS).join(&options.stamp).join(rel);
+    if old.len() < ctx.options.keep_older_below {
+        let rel_path = dest.strip_prefix(ctx.backup).map_err(io::Error::other)?;
+        let keep = ctx.backup.join(OLDER_VERSIONS).join(&ctx.options.stamp).join(rel_path);
         if let Some(p) = keep.parent() {
             fs::create_dir_all(p)?;
         }
@@ -294,7 +423,150 @@ fn finish(
         }
         return Err(e);
     }
-    Ok((Outcome::Updated { kept_older: kept.is_some() }, written))
+    ctx.note(place, source, dest, hash);
+    Ok(Done { outcome: Outcome::Updated { kept_older: kept.is_some() }, written, shared })
+}
+
+/// The most places of the same size compared before giving up and copying.
+const SHARE_TRIES: usize = 8;
+
+/// When the backup already holds these bytes, makes `part` a second name for them instead of copying: no room taken.
+/// The record only says where files of this size are; each is compared with the source byte for byte (stopping at the
+/// first difference, so a different file costs little), and after sharing, what `part` now holds is read back and
+/// checked. Gives the bytes' hash, or `None` when they have to be copied (nothing the same, or a drive that can't share,
+/// like exFAT).
+fn share(source: &Source<'_>, part: &Path, key: &str, ctx: &Ctx<'_>) -> io::Result<Option<[u8; 32]>> {
+    // Tiny files aren't worth comparing.
+    if source.size < SHARE_FROM || ctx.cant_share.load(Ordering::Relaxed) {
+        return Ok(None);
+    }
+    let candidates = ctx.record().same_size(source.size, key, SHARE_TRIES);
+    for rel in candidates {
+        let Some(there) = record::place(ctx.backup, &rel) else { continue };
+        // A place that can't be read now (moved to Older versions by another file's update, a bad sector) is just
+        // not used.
+        let Ok(Some((hash, seen))) = same_bytes(source.path, &there, ctx.stop) else {
+            if ctx.stop.load(Ordering::Relaxed) {
+                return Err(io::Error::new(io::ErrorKind::Interrupted, "Stopped"));
+            }
+            continue;
+        };
+        if let Err(e) = fs::hard_link(&there, part) {
+            if cant_link_here(&e) {
+                // This drive can't share: copy as usual, and don't try again this run.
+                ctx.cant_share.store(true, Ordering::Relaxed);
+                return Ok(None);
+            }
+            // Too many names already, or the file moved just now: try the next place.
+            continue;
+        }
+        // `part` must be the very file that was compared (another file's update may have put a new one at `there`
+        // in between): same size and time, and on a Mac or Linux the same file number. And the source mustn't have
+        // changed while it was read.
+        let after = fs::metadata(source.path)?;
+        let linked = fs::metadata(part)?;
+        if !seen.is(&linked) || after.len() != source.size || after.modified()? != source.time {
+            remove_part(part);
+            continue;
+        }
+        return Ok(Some(hash));
+    }
+    Ok(None)
+}
+
+/// A file as it was when it was read, to tell later whether a name still leads to it.
+struct Seen {
+    len: u64,
+    modified: Option<SystemTime>,
+    #[cfg(unix)]
+    id: (u64, u64),
+}
+
+impl Seen {
+    fn of(meta: &Metadata) -> Seen {
+        Seen {
+            len: meta.len(),
+            modified: meta.modified().ok(),
+            #[cfg(unix)]
+            id: {
+                use std::os::unix::fs::MetadataExt;
+                (meta.dev(), meta.ino())
+            },
+        }
+    }
+
+    fn is(&self, meta: &Metadata) -> bool {
+        let other = Seen::of(meta);
+        #[cfg(unix)]
+        if self.id != other.id {
+            return false;
+        }
+        self.len == other.len && self.modified.is_some() && self.modified == other.modified
+    }
+}
+
+/// Whether linking failed because this drive can't share files at all (exFAT, FAT32, some network drives), rather
+/// than because of the one file.
+fn cant_link_here(e: &io::Error) -> bool {
+    if e.kind() == io::ErrorKind::Unsupported || e.kind() == io::ErrorKind::CrossesDevices {
+        return true;
+    }
+    match e.raw_os_error() {
+        // EPERM, EXDEV, ENOTSUP/EOPNOTSUPP (Linux 95, Mac 45 and 102).
+        Some(code) if cfg!(unix) => matches!(code, 1 | 18 | 95 | 45 | 102),
+        // ERROR_INVALID_FUNCTION, ERROR_ACCESS_DENIED (FAT), ERROR_NOT_SAME_DEVICE, ERROR_NOT_SUPPORTED.
+        Some(code) if cfg!(windows) => matches!(code, 1 | 5 | 17 | 50),
+        _ => false,
+    }
+}
+
+/// Whether a copy on the backup has a name of its own (changing its time changes no other file). Mac and Linux can
+/// tell; on Windows only a drive that turned out not to share can be sure.
+fn own_copy(meta: &Metadata, ctx: &Ctx<'_>) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let _ = ctx;
+        meta.nlink() == 1
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        ctx.cant_share.load(Ordering::Relaxed)
+    }
+}
+
+/// Compares two files byte for byte, stopping at the first difference. Gives the SHA-256 of their bytes when they're
+/// the same (and how `b` looked when opened), `None` when they differ.
+fn same_bytes(a: &Path, b: &Path, stop: &AtomicBool) -> io::Result<Option<([u8; 32], Seen)>> {
+    let mut fa = File::open(a)?;
+    let mut fb = File::open(b)?;
+    let size = fa.metadata()?.len();
+    let b_meta = fb.metadata()?;
+    if b_meta.len() != size {
+        return Ok(None);
+    }
+    let seen = Seen::of(&b_meta);
+    let mut ba = vec![0u8; buffer_for(size)];
+    let mut bb = vec![0u8; buffer_for(size)];
+    let mut hash = Sha256::new();
+    loop {
+        let Some(n) = read_some(&mut fa, &mut ba, stop)? else {
+            return Ok(read_some(&mut fb, &mut bb, stop)?.is_none().then(|| (hash.finalize().into(), seen)));
+        };
+        // Fill the same length from the other file.
+        let mut got = 0;
+        while got < n {
+            match read_some(&mut fb, &mut bb[got..n], stop)? {
+                Some(m) => got += m,
+                None => return Ok(None),
+            }
+        }
+        if ba[..n] != bb[..n] {
+            return Ok(None);
+        }
+        hash.update(&ba[..n]);
+    }
 }
 
 /// `<name>.mo-part` beside the file.
@@ -323,10 +595,12 @@ fn claim_free_name(path: &Path) -> io::Result<PathBuf> {
 /// Copies the source to `to`, reading it once, then reads `to` back and checks both read the same (after the copy is
 /// flushed to the drive; the read-back may still come from the system's memory cache, so a "Check backup" re-reads
 /// later). Also checks the source wasn't saved again while it was copied (its size and time), and gives `to` the
-/// source's time, so the next backup sees it as up to date. Gives the bytes written.
-fn copy_checked(source: &Source<'_>, to: &Path, stop: &AtomicBool) -> io::Result<u64> {
+/// source's time, so the next backup sees it as up to date. Gives the bytes written and their SHA-256.
+fn copy_checked(source: &Source<'_>, to: &Path, stop: &AtomicBool) -> io::Result<(u64, [u8; 32])> {
     let mut src = File::open(source.path)?;
-    let mut out = File::create(to)?;
+    // A new file only: should `to` still be there (a temporary copy that couldn't be cleared away, perhaps a second
+    // name of another file on the backup), writing into it could change that file.
+    let mut out = File::create_new(to)?;
     let mut hash = Sha256::new();
     let mut buf = vec![0u8; buffer_for(source.size)];
     let mut total: u64 = 0;
@@ -347,7 +621,7 @@ fn copy_checked(source: &Source<'_>, to: &Path, stop: &AtomicBool) -> io::Result
         return Err(io::Error::other("The copy read back differently: the backup drive may be failing"));
     }
     keep_time(to, source.time)?;
-    Ok(total)
+    Ok((total, wrote))
 }
 
 /// A file's SHA-256, read once.
