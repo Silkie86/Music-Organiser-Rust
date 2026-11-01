@@ -18,6 +18,10 @@ use mo_space::folder_move::{
 use mo_space::key;
 use mo_space::plugin_space::SpaceKind;
 
+mod common;
+
+use common::{folder_link, is_link, unlink};
+
 fn fixtures(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     writable(&dir);
@@ -52,22 +56,6 @@ fn write(dir: &Path, rel: &str, text: &str) {
 
 fn s(p: &Path) -> String {
     p.to_string_lossy().into_owned()
-}
-
-/// A folder link, as the app makes one.
-fn folder_link(target: &Path, at: &Path) {
-    #[cfg(windows)]
-    junction::create(target, at).unwrap();
-    #[cfg(not(windows))]
-    std::os::unix::fs::symlink(target, at).unwrap();
-}
-
-fn unlink(at: &Path) {
-    if cfg!(windows) { fs::remove_dir(at).unwrap() } else { fs::remove_file(at).unwrap() }
-}
-
-fn is_link(p: &Path) -> bool {
-    fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink())
 }
 
 fn real(p: &Path) -> PathBuf {
@@ -257,6 +245,10 @@ fn an_old_copy_turned_into_a_link_stays_and_so_does_where_it_leads() {
     let done = remove_old_copy(&moved, std::slice::from_ref(&moved), true, &bin, &stop);
     assert!(done.removed.is_empty());
     assert_eq!(done.problems.len(), 1);
+    assert_eq!(
+        done.problems[0].why,
+        "It's a link now, not the folder the move set aside, so it stays, and so does where it leads."
+    );
     assert!(is_link(&old));
     assert_eq!(fs::read_to_string(elsewhere.join("a.nki")).unwrap(), "a");
 }

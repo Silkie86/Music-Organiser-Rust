@@ -19,6 +19,10 @@ use mo_space::folder_move::{CantMove, Drives, MovedFolder, move_folder};
 use mo_space::key;
 use mo_space::plugin_space::{PluginSpace, SpaceFolder, SpaceKind};
 
+mod common;
+
+use common::{folder_link, is_link, unlink};
+
 fn fixtures(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     let _ = fs::remove_dir_all(&dir);
@@ -38,21 +42,6 @@ fn read(p: &Path) -> String {
 
 fn s(p: &Path) -> String {
     p.to_string_lossy().into_owned()
-}
-
-fn folder_link(target: &Path, at: &Path) {
-    #[cfg(windows)]
-    junction::create(target, at).unwrap();
-    #[cfg(not(windows))]
-    std::os::unix::fs::symlink(target, at).unwrap();
-}
-
-fn unlink(at: &Path) {
-    if cfg!(windows) { fs::remove_dir(at).unwrap() } else { fs::remove_file(at).unwrap() }
-}
-
-fn is_link(p: &Path) -> bool {
-    fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink())
 }
 
 fn real(p: &Path) -> PathBuf {

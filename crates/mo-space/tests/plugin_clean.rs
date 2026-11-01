@@ -13,6 +13,10 @@ use mo_space::key;
 use mo_space::plugin_clean::{Library, PluginUse, Stays, apply, freed, lines};
 use mo_space::plugin_space::{PluginSpace, SpaceFolder, SpaceKind};
 
+mod common;
+
+use common::folder_link;
+
 fn fixtures(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     let _ = fs::remove_dir_all(&dir);
@@ -28,14 +32,6 @@ fn write(dir: &Path, rel: &str, bytes: usize) {
 
 fn s(p: &Path) -> String {
     p.to_string_lossy().into_owned()
-}
-
-/// A folder link, as Windows has them (a junction, as Space makes) or a symbolic link elsewhere.
-fn folder_link(target: &Path, at: &Path) {
-    #[cfg(windows)]
-    junction::create(target, at).unwrap();
-    #[cfg(not(windows))]
-    std::os::unix::fs::symlink(target, at).unwrap();
 }
 
 fn folder(path: &Path, kind: SpaceKind, bytes: u64, shared_with: &[&str]) -> SpaceFolder {

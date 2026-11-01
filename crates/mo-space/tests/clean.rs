@@ -13,6 +13,10 @@ use mo_space::clean::{Bin, Guard, Problem, Refused, Removed, apply, preview, und
 use mo_space::key;
 use mo_space::song::{CompactItem, CompactKind};
 
+mod common;
+
+use common::folder_link;
+
 fn fixtures(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     let _ = fs::remove_dir_all(&dir);
@@ -25,14 +29,6 @@ fn write(dir: &Path, rel: &str, bytes: &[u8]) -> String {
     fs::create_dir_all(p.parent().unwrap()).unwrap();
     fs::write(&p, bytes).unwrap();
     p.to_string_lossy().into_owned()
-}
-
-/// A folder link, as Windows has them (a junction, as Space makes) or a symbolic link elsewhere.
-fn folder_link(target: &Path, at: &Path) {
-    #[cfg(windows)]
-    junction::create(target, at).unwrap();
-    #[cfg(not(windows))]
-    std::os::unix::fs::symlink(target, at).unwrap();
 }
 
 fn line(kind: CompactKind, path: &str) -> CompactItem {
@@ -375,7 +371,9 @@ fn a_folder_swapped_for_a_link_after_the_preview_stays_and_so_does_where_it_lead
     let cache = projects.join("Slow Orbit/Cache");
     let plan = preview(&[line(CompactKind::Cache, &cache.to_string_lossy())], &guard);
     assert_eq!(plan.lines.len(), 1);
-    // After the preview, the Cache folder is swapped for a link to a copy just like it.
+    // After the preview, the Cache folder is swapped for a link to a copy just like it: the same name, size and time.
+    let time = fs::metadata(cache.join("a.peak")).unwrap().modified().unwrap();
+    fs::File::options().write(true).open(dir.join("Elsewhere/Cache/a.peak")).unwrap().set_modified(time).unwrap();
     fs::remove_dir_all(&cache).unwrap();
     folder_link(&dir.join("Elsewhere/Cache"), &cache);
     let bin = FolderBin::new(dir.join("bin"));

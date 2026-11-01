@@ -13,6 +13,10 @@ use mo_space::key;
 use mo_space::plugin_space::SpaceKind;
 use mo_space::spare::{SpareCopy, Why, look, remove};
 
+mod common;
+
+use common::{folder_link, unlink};
+
 fn fixtures(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     let _ = fs::remove_dir_all(&dir);
@@ -28,14 +32,6 @@ fn write(dir: &Path, rel: &str, bytes: usize) {
 
 fn s(p: &Path) -> String {
     p.to_string_lossy().into_owned()
-}
-
-/// A folder link, as Windows has them (a junction, as Space makes) or a symbolic link elsewhere.
-fn folder_link(target: &Path, at: &Path) {
-    #[cfg(windows)]
-    junction::create(target, at).unwrap();
-    #[cfg(not(windows))]
-    std::os::unix::fs::symlink(target, at).unwrap();
 }
 
 struct FolderBin {
@@ -247,11 +243,7 @@ fn a_folder_on_the_way_that_leads_elsewhere_now_keeps_it() {
     // The folder now leads to another rig's copy: the same name, size and time.
     let time = fs::metadata(dir.join("Mine/Serum_x64.dll")).unwrap().modified().unwrap();
     fs::File::options().write(true).open(dir.join("Other rig/Serum_x64.dll")).unwrap().set_modified(time).unwrap();
-    if cfg!(windows) {
-        fs::remove_dir(dir.join("VST2")).unwrap()
-    } else {
-        fs::remove_file(dir.join("VST2")).unwrap()
-    }
+    unlink(&dir.join("VST2"));
     folder_link(&dir.join("Other rig"), &dir.join("VST2"));
     let why = remove_one(&copy, &folder_bin(&dir)).unwrap();
     assert!(why.contains("changed since it was found"), "{why}");

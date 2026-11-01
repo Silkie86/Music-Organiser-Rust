@@ -745,6 +745,12 @@ fn differences(
 /// only in the old copy ([`only_in_old_copy`]): the app shows that list first. `all` is every moved folder.
 /// [`crate::clean::undo`] puts it back.
 pub fn remove_old_copy(moved: &MovedFolder, all: &[MovedFolder], sure: bool, bin: &dyn Bin, stop: &AtomicBool) -> Done {
+    if is_link(Path::new(&moved.old_copy)) {
+        return stays(
+            moved,
+            "It's a link now, not the folder the move set aside, so it stays, and so does where it leads.",
+        );
+    }
     if !old_copy_can_go(moved) {
         return stays(
             moved,

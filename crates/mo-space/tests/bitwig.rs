@@ -12,6 +12,10 @@ use mo_space::bitwig::{FixedProject, LibraryCopy, LibraryIndex, remove_copies};
 use mo_space::clean::{Bin, Problem, Removed, What, undo};
 use mo_space::key;
 
+mod common;
+
+use common::folder_link;
+
 fn fixtures(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     let _ = fs::remove_dir_all(&dir);
@@ -27,14 +31,6 @@ fn write(dir: &Path, rel: &str, bytes: &[u8]) {
 
 fn s(p: &Path) -> String {
     p.to_string_lossy().into_owned()
-}
-
-/// A folder link, as Windows has them (a junction, as Space makes) or a symbolic link elsewhere.
-fn folder_link(target: &Path, at: &Path) {
-    #[cfg(windows)]
-    junction::create(target, at).unwrap();
-    #[cfg(not(windows))]
-    std::os::unix::fs::symlink(target, at).unwrap();
 }
 
 /// A found copy with its paths as Space compares them (on Windows, a path written with `/` is found with `\`).

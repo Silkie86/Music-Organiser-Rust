@@ -12,6 +12,10 @@ use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, TimeDelta};
 use mo_space::key;
 use mo_space::song::{CompactKind, CompactSettings, Elsewhere, SongSave, measure, thin};
 
+mod common;
+
+use common::folder_link;
+
 fn fixtures(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     let _ = fs::remove_dir_all(&dir);
@@ -44,14 +48,6 @@ fn save(path: &str, hours: i64) -> SongSave {
 
 fn s(dir: &Path) -> String {
     dir.to_string_lossy().into_owned()
-}
-
-/// A folder link, as Windows has them (a junction, as Space makes) or a symbolic link elsewhere.
-fn folder_link(target: &Path, at: &Path) {
-    #[cfg(windows)]
-    junction::create(target, at).unwrap();
-    #[cfg(not(windows))]
-    std::os::unix::fs::symlink(target, at).unwrap();
 }
 
 #[test]

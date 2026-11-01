@@ -16,6 +16,10 @@ use mo_space::clean::{Bin, Guard, NEEDS_ADMIN, Problem, Refused, Removed, apply,
 use mo_space::key;
 use mo_space::song::{CompactItem, CompactKind};
 
+mod common;
+
+use common::{folder_link, is_link};
+
 fn fixtures(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     let _ = fs::remove_dir_all(&dir);
@@ -31,17 +35,6 @@ fn write(dir: &Path, rel: &str, text: &str) {
 
 fn s(p: &Path) -> String {
     p.to_string_lossy().into_owned()
-}
-
-fn folder_link(target: &Path, at: &Path) {
-    #[cfg(windows)]
-    junction::create(target, at).unwrap();
-    #[cfg(not(windows))]
-    std::os::unix::fs::symlink(target, at).unwrap();
-}
-
-fn is_link(p: &Path) -> bool {
-    fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink())
 }
 
 /// What went to the bin (where it was, where it is now), seen by both the app and the step.
@@ -70,12 +63,12 @@ impl Bin for StepBin {
     }
 }
 
-/// Windows' administrator question: the step runs here, in this process, with the step's bin. `first` runs once
-/// Windows has asked, before the step starts.
+/// Windows' administrator question: the step runs here, in this process, with the step's bin. `first` runs the first
+/// time Windows asks, before the step starts, and never again.
 struct AsAdmin {
     step: StepBin,
     asked: AtomicUsize,
-    first: Box<dyn Fn() + Sync>,
+    first: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Admin for AsAdmin {
@@ -84,7 +77,10 @@ impl Admin for AsAdmin {
     }
     fn ask(&self, args: &[String]) -> Result<(), String> {
         self.asked.fetch_add(1, Ordering::SeqCst);
-        (self.first)();
+        let first = self.first.lock().unwrap().take();
+        if let Some(first) = first {
+            first();
+        }
         assert!(run_step_with(args, &self.step), "the step didn't know {args:?}");
         Ok(())
     }
@@ -100,13 +96,13 @@ struct GuardedBin {
 impl GuardedBin {
     fn new(dir: &Path, meanwhile: impl Fn(&Path) + 'static) -> Self {
         let step = StepBin { dir: dir.join("bin"), held: Held::default() };
-        let admin = AsAdmin { step, asked: AtomicUsize::new(0), first: Box::new(|| {}) };
+        let admin = AsAdmin { step, asked: AtomicUsize::new(0), first: Mutex::new(None) };
         GuardedBin { admin, meanwhile: Box::new(meanwhile) }
     }
 
-    /// What changes once Windows has asked, before the step starts.
-    fn once_asked(mut self, first: impl Fn() + Sync + 'static) -> Self {
-        self.admin.first = Box::new(first);
+    /// What changes the first time Windows asks, before the step starts.
+    fn once_asked(mut self, first: impl FnOnce() + Send + 'static) -> Self {
+        self.admin.first = Mutex::new(Some(Box::new(first)));
         self
     }
 
