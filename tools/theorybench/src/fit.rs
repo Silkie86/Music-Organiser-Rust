@@ -21,6 +21,11 @@ pub trait Choice: Sync {
     fn weight(&self) -> f64;
     /// Calls `each(feature, value)` for every feature of candidate `k` that isn't 0.
     fn features(&self, k: usize, each: &mut dyn FnMut(usize, f64));
+    /// A part of candidate `k`'s score that isn't fitted: what numbers held as they are give it (0 unless a case says
+    /// otherwise; `keyfit --rescale` holds some).
+    fn offset(&self, _k: usize) -> f64 {
+        0.0
+    }
 }
 
 /// The fitted weights.
@@ -33,11 +38,11 @@ pub struct Fitted {
     pub steps: usize,
 }
 
-/// Each candidate's score `w · x(k)`.
+/// Each candidate's score `w · x(k)`, plus its offset.
 pub fn choice_scores<C: Choice + ?Sized>(case: &C, w: &[f64]) -> Vec<f64> {
     (0..case.candidates())
         .map(|k| {
-            let mut s = 0.0;
+            let mut s = case.offset(k);
             case.features(k, &mut |i, v| s += v * w.get(i).copied().unwrap_or(0.0));
             s
         })
@@ -268,13 +273,15 @@ pub fn fit<C: Choice>(cases: &[C], features: usize, l2: &[f64]) -> Result<Fitted
 /// Newton steps a fit may take: a well-posed one settles in about ten.
 const MOST_STEPS: usize = 100;
 
-/// One case held out of a fit, for calibrating: its candidates' scores, the right one, how much it counts, and what
-/// each of the calibration's numbers is multiplied by for it (the key finder's `Calibration::terms`).
+/// One case held out of a fit, for calibrating: its candidates' scores, the right one, how much it counts, what each
+/// of the calibration's numbers is multiplied by for it (the key finder's `Calibration::terms`), and the sharpness the
+/// numbers held as they are give it (0 when every number is fitted).
 pub struct Scored {
     pub scores: Vec<f64>,
     pub truth: usize,
     pub weight: f64,
     pub terms: Vec<f64>,
+    pub fixed: f64,
 }
 
 impl Choice for Scored {
@@ -299,6 +306,10 @@ impl Choice for Scored {
                 each(i, s * t);
             }
         }
+    }
+
+    fn offset(&self, k: usize) -> f64 {
+        self.fixed * self.scores.get(k).copied().unwrap_or(0.0)
     }
 }
 
@@ -412,6 +423,7 @@ mod tests {
                 truth: c.truth,
                 weight: 1.0,
                 terms: vec![1.0],
+                fixed: 0.0,
             })
             .collect();
         let c = calibration(&cases, 1).unwrap();
@@ -428,10 +440,28 @@ mod tests {
             let too_sure = if small { 3.0 } else { 1.0 };
             let scores = scores(&c.x, 3, &w).iter().map(|s| s * too_sure).collect();
             let terms = if small { vec![1.0, 0.0] } else { vec![0.0, 1.0] };
-            cases.push(Scored { scores, truth: c.truth, weight: 1.0, terms });
+            cases.push(Scored { scores, truth: c.truth, weight: 1.0, terms, fixed: 0.0 });
         }
         let c = calibration(&cases, 2).unwrap();
         assert!((c[0] - 1.0 / 3.0).abs() < 0.05 && (c[1] - 1.0).abs() < 0.1, "{c:?}");
+    }
+
+    #[test]
+    fn numbers_held_as_they_are_still_count() {
+        // The scores three times too sure, with a sharpness of 0.2 held: the number fitted adds what's missing.
+        let w = [1.0, -1.0, 0.5];
+        let cases: Vec<Scored> = drawn(&w, 20_000, 17)
+            .into_iter()
+            .map(|c| Scored {
+                scores: scores(&c.x, 3, &w).iter().map(|s| s * 3.0).collect(),
+                truth: c.truth,
+                weight: 1.0,
+                terms: vec![1.0],
+                fixed: 0.2,
+            })
+            .collect();
+        let c = calibration(&cases, 1).unwrap();
+        assert!((c[0] + 0.2 - 1.0 / 3.0).abs() < 0.03, "{c:?}");
     }
 
     #[test]

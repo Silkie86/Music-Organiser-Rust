@@ -88,7 +88,7 @@ often 1 to 4 bars).
 ```
 cargo run -p mo-theorybench --release -- keyfit path/to/bench/pop909cl.jsonl [more.jsonl...] [--lambda-delta 1e-4|inf]
     [--inputs full,tune,upper,bass,piano] [--picks 8] [--bars 1,2,4,8,16] [--weigh <source>[/<input>]=<w>]
-    [--dump <file>] [--against <file>] [--hand 13,14,16] [--final | --write <weights.rs>]
+    [--dump <file>] [--against <file>] [--hand 13,14,16] [--shipped | --rescale] [--final | --write <weights.rs>]
 ```
 
 `keyfit` fits mo-harmony's key finder and measures it on songs held out of each fit, beside the C# app on the same
@@ -170,6 +170,43 @@ can write its own dump to the file it's compared against. `--hand` prints each f
 The design keeps a change only if, on folds 1 to 4, 8-bar accuracy rises with its range above 0 (or, for a choice of
 shape or calibration, log-loss falls by at least 0.01 while accuracy falls no more than 0.3 points); no set gets worse
 beyond its range; and no hand case's gate breaks.
+
+### Solomon's packs (on his computer only)
+
+Rule 5 lets only counts and averages from Solomon's own MIDI go in code and, by his leave (2026-11-01), about twenty of
+the key finder's numbers fitted on it: each stream's scale, the minor weight and the calibration. This is how, run on
+his computer; his packs, and the file made from them, never leave it.
+
+```
+cargo run -p mo-theorybench --release -- packs "D:\MIDI Packs" [more folders] --out D:\Bench\packs.jsonl
+cargo run -p mo-theorybench --release -- keyfit D:\Bench\packs.jsonl --inputs full --shipped --dump D:\Bench\shipped.tsv
+cargo run -p mo-theorybench --release -- keyfit D:\Bench\packs.jsonl --inputs full --rescale --against D:\Bench\shipped.tsv
+cargo run -p mo-theorybench --release -- keyfit D:\Bench\packs.jsonl --inputs full --rescale --final
+cargo run -p mo-theorybench --release -- keyfit D:\Bench\packs.jsonl --inputs full --rescale --write crates/mo-harmony/src/keyfind/weights.rs
+```
+
+- **`packs`** reads every MIDI file under the folders as the MIDI page does (each part, its role guessed from its notes
+  and names) and keeps a file only when its name gives exactly one key and no other note or chord name ("Loop 3 - C
+  minor", "Keys_90_Ebmaj", "F#m"; not "Fm Bb Eb", which names chords, nor "Stab (Eb)", where a lone note may or may
+  not be the key). A file whose name says nothing about notes takes the key of the nearest folder (up to three up)
+  that names one. Each part is a piece, heard whole as a loop; its pack (the first folder below the one given) is its
+  group, and a pack's files share a fold. Their licence says they're Solomon's own, so a plain keyfit run only
+  measures them. The file can't be written inside a copy of this repository.
+- **`--shipped`** scores the finder built in, as it is, on folds 1 to 4: what a refit has to beat. Its folds are drawn
+  as a refit's are, so `--dump` and `--against` pair the two case by case.
+- **`--rescale`** fits only the allowed numbers, on his pieces alone (anything else read is only measured): the
+  built-in finder's weights for each stream times one number, and the minor weight, then the calibration. The tables
+  and corrections inside those weights, the answers' thresholds and the share of notes in one scale stay as built in.
+  A stream scale or calibration number that fewer than 30 pieces sound keeps its built-in number, and so does the
+  minor weight unless 30 pieces are labelled major and 30 minor. The calibration's curve over bars moves only when 30
+  full mixes (several parts together) have it: a part alone adds its own number to the curve, so parts alone can't
+  tell the two apart, and full mixes (the Songs page) would pay for it. `--write` keeps the credits of the weights it
+  scales, adds the rescale and its scales after them, and adds `packs` to `LEARNED_FROM`. A `--dump` of a run that
+  read his pieces names his files, so it can't be written inside a copy of this repository either.
+- **Keep rule**, as for a design change: on folds 1 to 4 against `--shipped`, the whole loops' accuracy rises with its
+  range above 0, or their log-loss falls by 0.01 or more; no set gets worse beyond its range; no gate breaks. Then
+  `--final` once, and `--write`. Back in the cloud, the public sets are scored with `--shipped` before and after the
+  new weights, to see what the rescale costs songs.
 
 ## Chords
 

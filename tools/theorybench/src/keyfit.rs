@@ -36,6 +36,15 @@
 //!   `--weigh source/input=w` one kind of input's sets (`billboard/upper=0`). The report puts the first file's
 //!   source first, as before, then each other source, with how often the key's tonic was found (chord charts label
 //!   only the tonic).
+//! - **Solomon's packs.** Pieces from `theorybench packs` are his own music ([`item::OWN`]): a plain run only measures
+//!   them, each pack's files in one fold, each file heard whole as a loop. `--shipped` scores the finder built in, as
+//!   it is (folds 1 to 4; nothing fitted), to compare a refit with (`--dump`, then `--against`). `--rescale` fits only
+//!   what rule 5's exception allows (Solomon, 2026-11-01): the built-in finder's weights for each stream scaled by one
+//!   number, the minor weight and the calibration, on his pieces alone (everything else read is only measured); the
+//!   answers' thresholds stay as built in. A number keeps its built-in value unless at least 30 of his pieces
+//!   ([`answerfit::MIN_SONGS`]) have it: a stream they sound, a calibration term they use, and for the minor weight,
+//!   30 labelled major and 30 minor. The calibration's curve over bars moves only with full mixes among them, since a
+//!   part heard alone adds its own offset to it.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -73,6 +82,9 @@ const SONG_WEIGHT: f64 = 5.0;
 const LAMBDA_W: f64 = 1e-4;
 /// The penalty on the corrections unless `--lambda-delta` says otherwise.
 const LAMBDA_DELTA: f64 = 1e-4;
+/// `--rescale` fits a stream's scale, or a calibration number, only when at least this many pieces sound it; with
+/// fewer, it's held at its built-in number (a few pieces would push it anywhere).
+const SUPPORT: usize = answerfit::MIN_SONGS;
 
 /// FNV-1a, 64 bits: the fold hash, the same on every computer. The finder hashes bars with FNV-1a too, but this is
 /// its own copy: the folds must never move, even if how the finder tells bars apart changes.
@@ -127,6 +139,8 @@ impl Input {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum Cut {
     Song,
+    /// A whole loop (a pack's file), heard as a loop.
+    Loop,
     /// A stretch of this many bars along the bar lines.
     Window(i64),
     /// The song's first bars, from its first bar with notes.
@@ -137,6 +151,7 @@ impl Cut {
     fn span(self) -> Span {
         match self {
             Cut::Song => Span::Song,
+            Cut::Loop => Span::Loop,
             Cut::Window(_) => Span::Window,
             Cut::Opening(_) => Span::Loop,
         }
@@ -145,6 +160,7 @@ impl Cut {
     fn name(self) -> String {
         match self {
             Cut::Song => "Whole songs".to_owned(),
+            Cut::Loop => "Whole loops".to_owned(),
             Cut::Window(b) => format!("{b}-bar windows"),
             Cut::Opening(b) => format!("{b}-bar openings"),
         }
@@ -239,10 +255,15 @@ impl Song {
     }
 }
 
-/// The name a song's fold is drawn from: POP909 and POP909-CL share their songs' names.
+/// A song's name: POP909 and POP909-CL share their songs' names.
 fn fold_name(item: &Item) -> String {
     let source = if item.source.starts_with("pop909") { "pop909" } else { item.source.as_str() };
     format!("{source}/{}", item.id)
+}
+
+/// What a song's fold is drawn from: its name, or its group's (a pack's files share a fold).
+fn fold_draw(item: &Item) -> String {
+    if item.group.is_empty() { fold_name(item) } else { format!("{}/{}", item.source, item.group) }
 }
 
 /// A hash of a song's notes that doesn't change when they're all moved up or down: the same song in another key.
@@ -259,23 +280,46 @@ fn shape_of(item: &Item) -> u64 {
     fnv1a(&bytes)
 }
 
-/// Each song's folds, songs with the same notes in another key going where the first of them by name goes. A song
-/// that's only measured goes to one of folds 1 to 4 (never the kept-back fold), so every choosing run measures it.
-fn songs_of(items: &[Item], sources: &[String], weigh: &HashMap<String, f64>) -> Vec<Song> {
+/// Which pieces a run learns from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Learning {
+    /// Those whose licence lets fitted weights ship: a plain run.
+    Licensed,
+    /// Solomon's own alone (`--rescale`), of which nothing else is ever learned.
+    Own,
+    /// Nothing is fitted (`--shipped`), but the folds are drawn as if both kinds were learned from, so its dump pairs
+    /// case by case with a plain run's and with a rescale's.
+    Scored,
+}
+
+/// Whether a run learns from a piece (with `--shipped`, whether its fold is drawn as if it did).
+fn learns(item: &Item, learning: Learning) -> bool {
+    match learning {
+        Learning::Licensed => item.may_learn(),
+        Learning::Own => item.is_own(),
+        Learning::Scored => item.may_learn() || item.is_own(),
+    }
+}
+
+/// Each song's folds, songs with the same notes in another key going where the first of them by name goes (a pack's
+/// files where its first by name goes). A song that's only measured goes to one of folds 1 to 4 (never the kept-back
+/// fold), so every choosing run measures it.
+fn songs_of(items: &[Item], sources: &[String], weigh: &HashMap<String, f64>, learning: Learning) -> Vec<Song> {
     let shapes: Vec<u64> = items.par_iter().map(shape_of).collect();
     let mut first_name: HashMap<u64, String> = HashMap::new();
     for (item, shape) in items.iter().zip(&shapes) {
-        let name = fold_name(item);
-        first_name.entry(*shape).and_modify(|n| *n = n.clone().min(name.clone())).or_insert(name);
+        let draw = fold_draw(item);
+        first_name.entry(*shape).and_modify(|n| *n = n.clone().min(draw.clone())).or_insert(draw);
     }
     items
         .iter()
         .zip(&shapes)
         .map(|(item, shape)| {
             let name = fold_name(item);
-            let drawn = first_name.get(shape).unwrap_or(&name);
+            let own = fold_draw(item);
+            let drawn = first_name.get(shape).unwrap_or(&own);
             let h = fnv1a(drawn.as_bytes());
-            let learn = item.may_learn();
+            let learn = learns(item, learning);
             let fold = if learn { (h % FOLDS) as usize } else { 1 + (h % (FOLDS - 1)) as usize };
             Song {
                 name,
@@ -295,15 +339,15 @@ fn songs_of(items: &[Item], sources: &[String], weigh: &HashMap<String, f64>) ->
 
 /// Leaves out the pieces only measured whose notes, in some key, are also in a piece learned from: they'd measure a
 /// finder on notes it learned. Gives how many each source lost.
-fn leave_out_measured_twins(items: &mut Vec<Item>) -> HashMap<String, usize> {
+fn leave_out_measured_twins(items: &mut Vec<Item>, learning: Learning) -> HashMap<String, usize> {
     let shapes: Vec<u64> = items.par_iter().map(shape_of).collect();
     let learned: HashSet<u64> =
-        items.iter().zip(&shapes).filter(|(item, _)| item.may_learn()).map(|(_, shape)| *shape).collect();
+        items.iter().zip(&shapes).filter(|(item, _)| learns(item, learning)).map(|(_, shape)| *shape).collect();
     let mut left_out: HashMap<String, usize> = HashMap::new();
     // `retain` visits each piece once, in order, so the shapes line up.
     let mut shapes = shapes.into_iter();
     items.retain(|item| {
-        let twin = shapes.next().is_some_and(|shape| !item.may_learn() && learned.contains(&shape));
+        let twin = shapes.next().is_some_and(|shape| !learns(item, learning) && learned.contains(&shape));
         if twin {
             *left_out.entry(item.source.clone()).or_default() += 1;
         }
@@ -328,12 +372,22 @@ fn credit(source: &str, licence: &str) -> String {
         "pop909cl" => "POP909-CL: Yao, Chen, Dubnov and Berg-Kirkpatrick (2026), MIT licence".to_owned(),
         "pop909" => "POP909: Wang, Chen, Jiang, Zhang, Xu, Dai, Gu and Xia (ISMIR 2020), MIT licence".to_owned(),
         "billboard" => "The McGill Billboard charts: Burgoyne, Wild and Fujinaga (ISMIR 2011), CC0".to_owned(),
+        crate::packs::SOURCE => {
+            "Solomon's own MIDI packs, on his computer: only the stream scales, the minor weight and \
+                                 the calibration, by his leave (2026-11-01, rule 5)"
+                .to_owned()
+        }
         _ => format!("{source}: {licence}"),
     }
 }
 
 /// Stops a run that has nothing to fit the weights on, which would otherwise fit zeros without a word.
-fn check_learning(songs: &[Song]) -> Result<(), String> {
+fn check_learning(songs: &[Song], rescale: bool) -> Result<(), String> {
+    if rescale && !songs.iter().any(|s| s.learn) {
+        return Err(
+            "--rescale learns only from Solomon's own pieces (made by `theorybench packs`), and none was read".into()
+        );
+    }
     if !songs.iter().any(|s| s.learn) {
         return Err("no piece read may be learned from: keyfit learns only from pieces whose licence is MIT, CC0 or \
                     CC BY, which each converter writes (files converted before that have none: convert them again)"
@@ -493,7 +547,7 @@ fn song_cases(item: &Item, song: usize, name: &str, cutting: &Cutting) -> Vec<Ca
         }
     };
     if let Some(truth) = item.main_key().filter(|_| voices.all.len() >= MIN_NOTES) {
-        add(Cut::Song, None, truth, item.one_key(), true);
+        add(if item.loops { Cut::Loop } else { Cut::Song }, None, truth, item.one_key(), true);
     }
     let (bar, origin) = (item.bar(), item.grid_origin());
     // The first bar with notes in it, where the openings start.
@@ -571,15 +625,43 @@ impl Tables {
             std::array::from_fn(|m| std::array::from_fn(|d| ((sum[s][m][d] + 2.0 / 12.0) / (songs[s][m] + 2.0)).ln()))
         }))
     }
+
+    /// The built-in finder's weights as tables, each stream's trust and corrections already in them: what
+    /// `--rescale` scales, one number a stream.
+    fn shipped() -> Tables {
+        let w = keyfind::SHIPPED.weights;
+        Tables(std::array::from_fn(|s| {
+            std::array::from_fn(|m| std::array::from_fn(|d| w.get(s * 24 + m * 12 + d).copied().unwrap_or(0.0)))
+        }))
+    }
 }
 
 /// One case as the fitter sees it: a trust weight for each stream (its table times its features), the minor weight,
-/// then a correction for each feature when they're fitted.
+/// then a correction for each feature when they're fitted. A stream `held` keeps a trust of 1: its table times its
+/// features is added to the score as it is; so is the minor weight when it's held (`minor`).
 struct Fitting<'a> {
     case: &'a Case,
     tables: &'a Tables,
     weight: f64,
     corrections: bool,
+    held: [bool; STREAMS],
+    minor: Option<f64>,
+}
+
+impl Fitting<'_> {
+    /// Each stream's table times its features for key `k`; `each` is given every feature for the corrections.
+    fn trust(&self, k: usize, each: &mut dyn FnMut(usize, f64)) -> [f64; STREAMS] {
+        let mut trust = [0.0; STREAMS];
+        let Some(key) = Key::ALL.get(k) else { return trust };
+        self.case.ev.features(*key, &mut |i, v| {
+            if i < MINOR {
+                let (s, m, d) = (i / 24, i % 24 / 12, i % 12);
+                trust[s] += self.tables.0[s][m][d] * v;
+            }
+            each(i, v);
+        });
+        trust
+    }
 }
 
 impl Choice for Fitting<'_> {
@@ -596,24 +678,31 @@ impl Choice for Fitting<'_> {
     }
 
     fn features(&self, k: usize, each: &mut dyn FnMut(usize, f64)) {
-        let Some(key) = Key::ALL.get(k) else { return };
-        let mut trust = [0.0; STREAMS];
-        self.case.ev.features(*key, &mut |i, v| {
+        let trust = self.trust(k, &mut |i, v| {
             if i >= MINOR {
-                each(STREAMS, v);
-                return;
-            }
-            let (s, m, d) = (i / 24, i % 24 / 12, i % 12);
-            trust[s] += self.tables.0[s][m][d] * v;
-            if self.corrections {
+                if self.minor.is_none() {
+                    each(STREAMS, v);
+                }
+            } else if self.corrections {
                 each(STREAMS + 1 + i, v);
             }
         });
-        for (s, t) in trust.iter().enumerate() {
-            if *t != 0.0 {
+        for (s, (t, held)) in trust.iter().zip(self.held).enumerate() {
+            if *t != 0.0 && !held {
                 each(s, *t);
             }
         }
+    }
+
+    fn offset(&self, k: usize) -> f64 {
+        let mut minor = 0.0;
+        let trust = self.trust(k, &mut |i, v| {
+            if i >= MINOR {
+                minor += v;
+            }
+        });
+        let streams: f64 = trust.iter().zip(self.held).filter(|(_, held)| *held).map(|(t, _)| t).sum();
+        streams + self.minor.map_or(0.0, |w| w * minor)
     }
 }
 
@@ -652,11 +741,13 @@ struct Options {
     lambda_delta: Option<f64>,
     /// The shortest opening, whose first bass the loop table is counted from.
     loop_cut: Cut,
+    /// `--rescale`: only the built-in finder's stream scales, minor weight and calibration, on Solomon's own pieces.
+    rescale: bool,
 }
 
 /// How much each set of cases counts in a fit or a calibration, in total.
 fn set_weight(cut: Cut, input: Input) -> f64 {
-    if cut == Cut::Song && input == Input::Full { SONG_WEIGHT } else { 1.0 }
+    if matches!(cut, Cut::Song | Cut::Loop) && input == Input::Full { SONG_WEIGHT } else { 1.0 }
 }
 
 /// Each case's share of its set's weight, over the cases `keep` takes (0 for the rest). Each source has sets of its
@@ -692,6 +783,9 @@ fn fit_model(
     train: Training,
     opts: &Options,
 ) -> Result<(Model, fit::Fitted, usize), String> {
+    if opts.rescale {
+        return rescale(cases, songs, train);
+    }
     let corrections = opts.lambda_delta.is_some();
     let all = Tables::count(cases, opts.loop_cut, train);
     let inner: Vec<Tables> = (0..INNER as usize)
@@ -705,7 +799,7 @@ fn fit_model(
         .filter(|(c, w)| fitted_on(c) && **w > 0.0)
         .filter_map(|(case, &weight)| {
             let tables = inner.get(songs.get(case.song)?.inner)?;
-            Some(Fitting { case, tables, weight, corrections })
+            Some(Fitting { case, tables, weight, corrections, held: [false; STREAMS], minor: None })
         })
         .collect();
     let mut l2 = vec![LAMBDA_W; STREAMS + 1];
@@ -714,6 +808,72 @@ fn fit_model(
     }
     let fitted = fit::fit(&choices, l2.len(), &l2)?;
     Ok((Model::of(&fitted.weights, &all, corrections), fitted, choices.len()))
+}
+
+/// `--rescale`'s fit: the built-in finder's weights for each stream scaled by one number, and the minor weight, fitted
+/// on the songs `train` takes. A stream fewer than [`SUPPORT`] of them sound is held at a scale of 1: left free, a
+/// few pieces could push it anywhere, and none would let its penalty pull it to 0, losing it everywhere. The minor
+/// weight is held at its built-in number unless at least [`SUPPORT`] of them are labelled major and as many minor:
+/// pieces nearly all in one mode would teach the finder to name that mode whatever it hears.
+fn rescale(cases: &[Case], songs: &[Song], train: Training) -> Result<(Model, fit::Fitted, usize), String> {
+    let shipped = Tables::shipped();
+    let fitted_on = |c: &Case| train(c.song) && c.one_key && c.pick;
+    let weights = case_weights(cases, songs, fitted_on);
+    let picked: Vec<(&Case, f64)> =
+        cases.iter().zip(&weights).filter(|(c, w)| fitted_on(c) && **w > 0.0).map(|(c, w)| (c, *w)).collect();
+    let mut heard_in: [HashSet<usize>; STREAMS] = std::array::from_fn(|_| HashSet::new());
+    let mut in_mode: [HashSet<usize>; 2] = std::array::from_fn(|_| HashSet::new());
+    for (c, _) in &picked {
+        for (s, row) in c.ev.x.iter().enumerate() {
+            if row.iter().any(|v| *v != 0.0)
+                && let Some(songs) = heard_in.get_mut(s)
+            {
+                songs.insert(c.song);
+            }
+        }
+        if let Some(songs) = in_mode.get_mut(usize::from(c.truth.is_minor())) {
+            songs.insert(c.song);
+        }
+    }
+    let held: [bool; STREAMS] = std::array::from_fn(|s| heard_in.get(s).is_none_or(|songs| songs.len() < SUPPORT));
+    let built_in_minor = keyfind::SHIPPED.weights.get(MINOR).copied().unwrap_or(0.0);
+    let minor = in_mode.iter().any(|songs| songs.len() < SUPPORT).then_some(built_in_minor);
+    let choices: Vec<Fitting> = picked
+        .into_iter()
+        .map(|(case, weight)| Fitting { case, tables: &shipped, weight, corrections: false, held, minor })
+        .collect();
+    let mut fitted = fit::fit(&choices, STREAMS + 1, &[LAMBDA_W; STREAMS + 1])?;
+    for (scale, held) in fitted.weights.iter_mut().zip(held) {
+        if held {
+            *scale = 1.0;
+        }
+    }
+    if let (Some(w), Some(slot)) = (minor, fitted.weights.get_mut(STREAMS)) {
+        *slot = w;
+    }
+    Ok((Model::of(&fitted.weights, &shipped, false), fitted, choices.len()))
+}
+
+/// Each stream's scale in a rescaled finder: its weights over the built-in ones (1 where they're all 0).
+fn scales_of(model: &Model) -> [f64; STREAMS] {
+    std::array::from_fn(|s| {
+        (0..24)
+            .find_map(|i| {
+                let was = keyfind::SHIPPED.weights.get(s * 24 + i).copied().unwrap_or(0.0);
+                (was != 0.0).then(|| model.weights.get(s * 24 + i).copied().unwrap_or(0.0) / was)
+            })
+            .unwrap_or(1.0)
+    })
+}
+
+/// The stream scales, as a run and the weights file print them: "Tune 1.020, Harmony 0.970, …; minor weight -0.120
+/// (as built in)".
+fn scales_line(model: &Model) -> String {
+    let scales = scales_of(model);
+    let each: Vec<String> = Stream::ALL.iter().zip(scales).map(|(s, v)| format!("{s:?} {v:.3}")).collect();
+    let minor = model.weights.get(MINOR).copied().unwrap_or(0.0);
+    let kept = if Some(minor) == keyfind::SHIPPED.weights.get(MINOR).copied() { " (as built in)" } else { "" };
+    format!("{}; minor weight {minor:.3}{kept}", each.join(", "))
 }
 
 /// The average surprise (negative log-likelihood) of the labelled keys under scores, weighted.
@@ -758,37 +918,70 @@ fn cross_validate(
             fitted.loss,
             weighted_surprise(cases, &held, &weights)
         );
+        if opts.rescale {
+            println!("    scales: {}", scales_line(&model));
+        }
         models.push((f, model));
     }
     Ok((held, models))
 }
 
-/// The calibration fitted on held-out scores of the one-key cases `keep` takes, each set counting as in the fit.
+/// The calibration fitted on held-out scores of the one-key cases `keep` takes, each set counting as in the fit. With
+/// `--rescale`, a number fewer than [`SUPPORT`] of their pieces have (a song's, for loops alone) is held at its
+/// built-in one. The curve over bars counts only full mixes as having it: every other kind of input adds its own
+/// number to the curve, so pieces that are all one part alone (a pack's) can't tell the curve from those numbers, and
+/// would move it for full mixes too.
 fn calibrate(
     cases: &[Case],
     songs: &[Song],
     held: &[Option<[f64; 24]>],
     keep: impl Fn(&Case) -> bool,
+    opts: &Options,
 ) -> Result<Calibration, String> {
     let weights = case_weights(cases, songs, |c| keep(c) && c.one_key);
-    let scored: Vec<Scored> = cases
+    let taken: Vec<(&Case, &[f64; 24], f64)> = cases
         .iter()
         .zip(held)
         .zip(&weights)
         .filter(|(_, w)| **w > 0.0)
-        .filter_map(|((c, s), w)| {
-            Some(Scored {
-                scores: s.as_ref()?.to_vec(),
+        .filter_map(|((c, s), w)| Some((c, s.as_ref()?, *w)))
+        .collect();
+    let terms_of = |c: &Case| Calibration::terms(c.ev.bars, c.ev.config, c.cut.span());
+    let built_in = keyfind::SHIPPED.calibration.0;
+    let mut kept = [false; CALIBRATION_TERMS];
+    if opts.rescale {
+        let mut had: [HashSet<usize>; CALIBRATION_TERMS] = std::array::from_fn(|_| HashSet::new());
+        for (c, _, _) in &taken {
+            let full = c.ev.config == Config::Full;
+            for (t, v) in terms_of(c).iter().enumerate() {
+                if *v != 0.0
+                    && (full || t >= keyfind::KNOTS)
+                    && let Some(songs) = had.get_mut(t)
+                {
+                    songs.insert(c.song);
+                }
+            }
+        }
+        kept = std::array::from_fn(|t| had.get(t).is_none_or(|songs| songs.len() < SUPPORT));
+    }
+    let scored: Vec<Scored> = taken
+        .iter()
+        .map(|(c, s, w)| {
+            let terms = terms_of(c);
+            let fixed = terms.iter().zip(kept).zip(built_in).filter(|((_, k), _)| *k).map(|((t, _), b)| t * b).sum();
+            Scored {
+                scores: s.to_vec(),
                 truth: c.truth.index(),
                 weight: *w,
-                terms: Calibration::terms(c.ev.bars, c.ev.config, c.cut.span()).to_vec(),
-            })
+                terms: terms.iter().zip(kept).map(|(t, k)| if k { 0.0 } else { *t }).collect(),
+                fixed,
+            }
         })
         .collect();
     let numbers = fit::calibration(&scored, CALIBRATION_TERMS)?;
     let mut c = [0.0; CALIBRATION_TERMS];
-    for (slot, v) in c.iter_mut().zip(numbers) {
-        *slot = v;
+    for ((slot, v), (k, b)) in c.iter_mut().zip(numbers).zip(kept.into_iter().zip(built_in)) {
+        *slot = if k { b } else { v };
     }
     Ok(Calibration(c))
 }
@@ -813,9 +1006,9 @@ fn print_calibration(title: &str, c: &Calibration) {
     );
 }
 
-/// The thresholds and the share of notes in one scale fitted on the chances of the one-key cases `keep` takes.
-fn fit_answers(cases: &[Case], chances: &[Option<[f64; 24]>], keep: impl Fn(&Case) -> bool) -> Fitted {
-    let graded: Vec<answerfit::Graded> = cases
+/// The one-key cases `keep` takes that have chances, as the answers are fitted on them.
+fn graded_cases(cases: &[Case], chances: &[Option<[f64; 24]>], keep: impl Fn(&Case) -> bool) -> Vec<answerfit::Graded> {
+    cases
         .iter()
         .zip(chances)
         .filter(|(c, _)| keep(c) && c.one_key)
@@ -829,8 +1022,18 @@ fn fit_answers(cases: &[Case], chances: &[Option<[f64; 24]>], keep: impl Fn(&Cas
                 chances: (*chances)?,
             })
         })
-        .collect();
-    answerfit::fit(&graded, keyfind::SHIPPED.not_tonal_below)
+        .collect()
+}
+
+/// The thresholds and the share of notes in one scale fitted on the chances of the one-key cases `keep` takes; with
+/// `--rescale`, the built-in ones, and how they come out on those cases.
+fn fit_answers(cases: &[Case], chances: &[Option<[f64; 24]>], keep: impl Fn(&Case) -> bool, opts: &Options) -> Fitted {
+    let graded = graded_cases(cases, chances, keep);
+    if opts.rescale {
+        answerfit::kept(&graded, keyfind::SHIPPED.thresholds, keyfind::SHIPPED.not_tonal_below)
+    } else {
+        answerfit::fit(&graded, keyfind::SHIPPED.not_tonal_below)
+    }
 }
 
 fn print_answers(title: &str, fitted: &Fitted) {
@@ -866,10 +1069,11 @@ fn fitted_per_fold(
     folds: &[usize],
     fold: &(dyn Fn(&Case) -> usize + Sync),
     taught: &(dyn Fn(&Case) -> bool + Sync),
+    opts: &Options,
 ) -> HashMap<usize, Fitted> {
     folds
         .iter()
-        .map(|&f| (f, fit_answers(cases, chances, |c| fold(c) != f && folds.contains(&fold(c)) && taught(c))))
+        .map(|&f| (f, fit_answers(cases, chances, |c| fold(c) != f && folds.contains(&fold(c)) && taught(c), opts)))
         .collect()
 }
 
@@ -877,13 +1081,14 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let mut setup = keys::setup(
         args,
         &["--lambda-delta", "--write", "--picks", "--inputs", "--dump", "--against", "--hand", "--weigh"],
-        &["--final"],
+        &["--final", "--rescale", "--shipped"],
         &LENGTHS,
     )?;
     if !matches!(setup.parts, keys::Parts::Pitched) {
         return Err("keyfit hears every kind of input itself (--inputs); --part is for `keys`".into());
     }
     let mut lambda_delta = Some(LAMBDA_DELTA);
+    let mut lambda_given = false;
     let mut write: Option<PathBuf> = None;
     let mut picks = PICKS;
     let mut inputs = Input::ALL.to_vec();
@@ -894,6 +1099,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     for pair in setup.rest.chunks(2) {
         match pair {
             [o, v] if o == "--lambda-delta" => {
+                lambda_given = true;
                 lambda_delta = if v == "inf" {
                     None
                 } else {
@@ -928,13 +1134,28 @@ pub fn run(args: &[String]) -> Result<(), String> {
         }
     }
     let final_run = setup.flags.iter().any(|f| f == "--final");
+    let rescale = setup.flags.iter().any(|f| f == "--rescale");
+    let shipped_run = setup.flags.iter().any(|f| f == "--shipped");
     if final_run && write.is_some() {
         return Err("--final scores the kept-back fold; --write fits on every song. One at a time.".into());
+    }
+    if shipped_run && (final_run || write.is_some() || rescale) {
+        return Err("--shipped scores the finder built in, as it is: not with --final, --write or --rescale".into());
+    }
+    if lambda_given && (rescale || shipped_run) {
+        return Err(
+            "--lambda-delta is for a plain fit: --rescale fits no corrections, and --shipped fits nothing".into()
+        );
     }
     if (final_run || write.is_some()) && (dump.is_some() || before.is_some()) {
         return Err(
             "--dump and --against compare runs on folds 1 to 4, for choosing; not with --final or --write".into()
         );
+    }
+    if let Some(path) = &dump
+        && setup.items.iter().any(Item::is_own)
+    {
+        crate::packs::outside_checkout("--dump", path, "the names of Solomon's files in it")?;
     }
     // Read before this run writes its own dump, which may go to the same file.
     let before = before
@@ -947,7 +1168,12 @@ pub fn run(args: &[String]) -> Result<(), String> {
     lengths.sort_unstable();
     lengths.dedup();
     let loop_cut = Cut::Opening(lengths.first().copied().unwrap_or(1));
-    let opts = Options { lambda_delta, loop_cut };
+    let opts = Options { lambda_delta: if rescale { None } else { lambda_delta }, loop_cut, rescale };
+    let learning = match (rescale, shipped_run) {
+        (true, _) => Learning::Own,
+        (false, true) => Learning::Scored,
+        (false, false) => Learning::Licensed,
+    };
 
     // The sources in the order they were first read: the first file's comes first in the report, as before.
     let mut sources: Vec<String> = Vec::new();
@@ -965,8 +1191,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
             return Err(format!("--weigh {named}: {input}? (full, tune, upper, bass, piano)"));
         }
     }
-    let left_out = leave_out_measured_twins(&mut setup.items);
-    let songs = songs_of(&setup.items, &sources, &weigh);
+    let left_out = leave_out_measured_twins(&mut setup.items, learning);
+    let songs = songs_of(&setup.items, &sources, &weigh, learning);
     // How each source was used, for the run log and the weights file ("billboard at 0.25", "rs200 measured only").
     let mut used: Vec<String> = Vec::new();
     // Each source learned from, for the weights file.
@@ -976,9 +1202,18 @@ pub fn run(args: &[String]) -> Result<(), String> {
         let learned = of.iter().filter(|s| s.learn).count();
         // A source's songs learned from all weigh the same (`--weigh` names sources), so the first one says.
         let weights = of.iter().find(|s| s.learn).map_or([0.0; 5], |s| s.weight);
-        let mut how = if learned == 0 {
+        let own = setup.items.iter().any(|i| i.source == *source && i.is_own());
+        let mut how = if shipped_run {
+            used.push(source.clone());
+            "scored by the finder built in (nothing is fitted)".to_owned()
+        } else if learned == 0 {
             used.push(format!("{source} measured only"));
-            "measured only (its licence doesn't let fitted weights ship)".to_owned()
+            match (rescale, own) {
+                (_, true) => "measured only (Solomon's own: only --rescale learns from it)",
+                (true, false) => "measured only (--rescale learns from Solomon's own pieces alone)",
+                (false, false) => "measured only (its licence doesn't let fitted weights ship)",
+            }
+            .to_owned()
         } else if weights.iter().all(|w| *w == 0.0) {
             used.push(format!("{source} in the tables only"));
             "counted in the tables only".to_owned()
@@ -988,14 +1223,15 @@ pub fn run(args: &[String]) -> Result<(), String> {
             format!("learned from, its sets counting {counting}")
         };
         if learned > 0 {
-            let licence = setup.items.iter().find(|i| i.source == *source && i.may_learn()).map(|i| i.licence.as_str());
+            let licence =
+                setup.items.iter().find(|i| i.source == *source && learns(i, learning)).map(|i| i.licence.as_str());
             learned_from.push(Learned {
                 name: source.clone(),
                 how: used.last().cloned().unwrap_or_default(),
                 credit: credit(source, licence.unwrap_or_default()),
             });
         }
-        if learned > 0 && learned < of.len() {
+        if learned > 0 && learned < of.len() && !shipped_run {
             let _ = write!(how, "; {} of them only measured (their licence doesn't)", of.len() - learned);
         }
         if let Some(n) = left_out.get(source) {
@@ -1003,7 +1239,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
         }
         println!("{source}: {} songs, {how}.", of.len());
     }
-    check_learning(&songs)?;
+    if !shipped_run {
+        check_learning(&songs, rescale)?;
+    }
     if write.is_some() && !songs.iter().any(|s| s.group == 0 && s.learn) {
         return Err(format!(
             "--write: the weights file says how often the first source's songs were right, so read one learned from \
@@ -1028,6 +1266,14 @@ pub fn run(args: &[String]) -> Result<(), String> {
     );
     println!();
     match opts.lambda_delta {
+        _ if shipped_run => println!(
+            "Scoring the finder built in (version {KEY_FINDER_VERSION}), as it is: nothing fitted, its own calibration \
+             and thresholds."
+        ),
+        _ if rescale => println!(
+            "Rescaling the finder built in (version {KEY_FINDER_VERSION}): one scale for each of its {STREAMS} streams \
+             and the minor weight (penalty {LAMBDA_W}), then the calibration; its thresholds kept."
+        ),
         Some(ld) => println!(
             "Fitting {STREAMS} trust weights and the minor weight (penalty {LAMBDA_W}) and {MINOR} corrections \
              (penalty {ld})."
@@ -1043,14 +1289,37 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let design: Vec<usize> = (0..FOLDS as usize).filter(|&f| f != FROZEN).collect();
     let every: Vec<usize> = (0..FOLDS as usize).collect();
 
-    if final_run {
+    // How the run is logged in test-runs.md: a rescale says so.
+    let label = |run: &str| format!("{}{run} ({})", if rescale { "--rescale " } else { "" }, used.join("; "));
+    let in_design = |c: &Case| design.contains(&fold(c));
+
+    if shipped_run {
+        println!("Folds 1 to 4 (fold {FROZEN} isn't touched), scored by the finder built in:");
+        let model = Model { weights: *keyfind::SHIPPED.weights };
+        let calibration = *keyfind::SHIPPED.calibration;
+        let chances: Held =
+            cases.par_iter().map(|c| in_design(c).then(|| chances_of(c, &model.scores(&c.ev), &calibration))).collect();
+        let built_in = answerfit::kept(
+            &graded_cases(&cases, &chances, in_design),
+            keyfind::SHIPPED.thresholds,
+            keyfind::SHIPPED.not_tonal_below,
+        );
+        print_answers("Answers (the thresholds built in, as they come out on these cases)", &built_in);
+        let answers = answers_of(&cases, &chances, |_| Some(&built_in));
+        report(&cases, &chances, &answers, &songs, |c| in_design(c) && group(c) == 0, &inputs);
+        for (g, source) in sources.iter().enumerate().skip(1) {
+            source_report(source, &cases, &chances, |c| in_design(c) && group(c) == g, &inputs);
+        }
+        compare_and_dump(&cases, &chances, &songs, &sources, &in_design, &inputs, before.as_ref(), dump.as_ref())?;
+        hand_cases(&[("built in".to_owned(), keyfind::SHIPPED)], &show)?;
+    } else if final_run {
         println!("Choosing the calibration and the answers' thresholds on folds 1 to 4:");
         let (held, _) = cross_validate(&cases, &songs, &design, &opts)?;
-        let calibration = calibrate(&cases, &songs, &held, |c| design.contains(&fold(c)))?;
+        let calibration = calibrate(&cases, &songs, &held, in_design, &opts)?;
         print_calibration("Calibration", &calibration);
         let design_chances: Held =
             cases.par_iter().zip(&held).map(|(c, h)| h.as_ref().map(|s| chances_of(c, s, &calibration))).collect();
-        let fitted_answers = fit_answers(&cases, &design_chances, |c| design.contains(&fold(c)) && taught(c));
+        let fitted_answers = fit_answers(&cases, &design_chances, |c| in_design(c) && taught(c), &opts);
         print_answers("Answers", &fitted_answers);
         let train = |s: usize| songs.get(s).is_some_and(|g| g.fold != FROZEN && g.learn);
         let (model, fitted, n) = fit_model(&cases, &songs, &train, &opts)?;
@@ -1060,6 +1329,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
             fitted.steps,
             if measured > 0 { format!(", and the {measured} songs only measured") } else { String::new() }
         );
+        if rescale {
+            println!("Scales: {}.", scales_line(&model));
+        }
         let unseen = |c: &Case| songs.get(c.song).is_some_and(Song::unseen_by_final);
         let chances: Held =
             cases.par_iter().map(|c| unseen(c).then(|| chances_of(c, &model.scores(&c.ev), &calibration))).collect();
@@ -1068,22 +1340,24 @@ pub fn run(args: &[String]) -> Result<(), String> {
         for (g, source) in sources.iter().enumerate().skip(1) {
             source_report(source, &cases, &chances, |c| unseen(c) && group(c) == g, &inputs);
         }
-        log_run(&format!("--final ({})", used.join("; ")), &summary, &opts)?;
+        log_run(&label("--final"), &summary, &opts)?;
         let finder = finder(&model.weights, &calibration, &fitted_answers);
         hand_cases(&[("fitted on folds 1 to 4".to_owned(), finder)], &show)?;
     } else if let Some(path) = write {
+        // A rescale keeps the credits of the weights it scales: read them first, so a wrong file stops the run now.
+        let earlier = if rescale { Some(earlier_credits(&path)?) } else { None };
         println!("Every fold held out in turn (fold {FROZEN} included: these weights are the ones that ship):");
         let (held, _) = cross_validate(&cases, &songs, &every, &opts)?;
-        let calibration = calibrate(&cases, &songs, &held, |_| true)?;
+        let calibration = calibrate(&cases, &songs, &held, |_| true, &opts)?;
         print_calibration("Calibration", &calibration);
         let chances: Held =
             cases.par_iter().zip(&held).map(|(c, h)| h.as_ref().map(|s| chances_of(c, s, &calibration))).collect();
-        let fitted_answers = fit_answers(&cases, &chances, taught);
+        let fitted_answers = fit_answers(&cases, &chances, taught, &opts);
         print_answers(
             "Answers (the ones written; each fold below is graded with those fitted on the others)",
             &fitted_answers,
         );
-        let per_fold = fitted_per_fold(&cases, &chances, &every, &fold, &taught);
+        let per_fold = fitted_per_fold(&cases, &chances, &every, &fold, &taught, &opts);
         let answers = answers_of(&cases, &chances, |c| per_fold.get(&fold(c)));
         // The summary scores the first source read, which the weights file names.
         let (first, scored) = (0, sources.first().map_or("", String::as_str));
@@ -1091,15 +1365,26 @@ pub fn run(args: &[String]) -> Result<(), String> {
         for (g, source) in sources.iter().enumerate().skip(1) {
             source_report(source, &cases, &chances, |c| group(c) == g, &inputs);
         }
-        log_run(&format!("--write ({})", used.join("; ")), &summary, &opts)?;
+        log_run(&label("--write"), &summary, &opts)?;
         let (model, fitted, n) = fit_model(&cases, &songs, &learn, &opts)?;
         println!();
         println!("Fitted on every song: {n} cases, {} Newton steps.", fitted.steps);
+        if rescale {
+            println!("Scales: {}.", scales_line(&model));
+        }
         let shipped = finder(&model.weights, &calibration, &fitted_answers);
         if !hand_cases(&[("fitted on every song".to_owned(), shipped)], &show)? {
             return Err("these weights break a hand case's gate (above), so they aren't written".into());
         }
-        let file = weights_file(&model, &calibration, &fitted_answers, &opts, &learned_from, (scored, &summary));
+        let file = weights_file(
+            &model,
+            &calibration,
+            &fitted_answers,
+            &opts,
+            &learned_from,
+            (scored, &summary),
+            earlier.as_deref(),
+        );
         std::fs::write(&path, file).map_err(|e| format!("{}: {e}", path.display()))?;
         println!("Written to {}.", path.display());
     } else {
@@ -1108,10 +1393,10 @@ pub fn run(args: &[String]) -> Result<(), String> {
         // Each fold's chances come from a calibration fitted on the other folds' held-out scores.
         let mut calibrations = HashMap::new();
         for &f in &design {
-            let c = calibrate(&cases, &songs, &held, |c| fold(c) != f && design.contains(&fold(c)))?;
+            let c = calibrate(&cases, &songs, &held, |c| fold(c) != f && in_design(c), &opts)?;
             calibrations.insert(f, c);
         }
-        let all = calibrate(&cases, &songs, &held, |c| design.contains(&fold(c)))?;
+        let all = calibrate(&cases, &songs, &held, in_design, &opts)?;
         print_calibration(
             "Calibration (on all four folds; each fold is scored with one fitted on the other three)",
             &all,
@@ -1123,51 +1408,22 @@ pub fn run(args: &[String]) -> Result<(), String> {
             .collect();
         // Each fold is graded with the thresholds fitted on the other folds' chances. Those printed are fitted on
         // all four folds' chances from the calibration printed above, as `--write` fits them.
-        let fitted_answers = fitted_per_fold(&cases, &chances, &design, &fold, &taught);
+        let fitted_answers = fitted_per_fold(&cases, &chances, &design, &fold, &taught, &opts);
         let chances_all: Held = cases
             .par_iter()
             .zip(&held)
-            .map(|(c, h)| design.contains(&fold(c)).then(|| Some(chances_of(c, h.as_ref()?, &all))).flatten())
+            .map(|(c, h)| in_design(c).then(|| Some(chances_of(c, h.as_ref()?, &all))).flatten())
             .collect();
         print_answers(
             "Answers (fitted on all four folds; each fold is graded with those fitted on the other three)",
-            &fit_answers(&cases, &chances_all, |c| design.contains(&fold(c)) && taught(c)),
+            &fit_answers(&cases, &chances_all, |c| in_design(c) && taught(c), &opts),
         );
         let answers = answers_of(&cases, &chances, |c| fitted_answers.get(&fold(c)));
-        report(&cases, &chances, &answers, &songs, |c| design.contains(&fold(c)) && group(c) == 0, &inputs);
+        report(&cases, &chances, &answers, &songs, |c| in_design(c) && group(c) == 0, &inputs);
         for (g, source) in sources.iter().enumerate().skip(1) {
-            source_report(source, &cases, &chances, |c| design.contains(&fold(c)) && group(c) == g, &inputs);
+            source_report(source, &cases, &chances, |c| in_design(c) && group(c) == g, &inputs);
         }
-        if let Some((name, text)) = &before {
-            let was = read_dump(name, text, &cases, &songs)?;
-            let mut worse = against(&cases, &chances, |c| design.contains(&fold(c)) && group(c) == 0, &inputs, &was);
-            // Another source is compared too when the run dumped before had it.
-            for (g, source) in sources.iter().enumerate().skip(1) {
-                let had = cases.iter().zip(&was.outcomes).any(|(c, o)| group(c) == g && o.is_some());
-                if had {
-                    println!();
-                    println!("({source}:)");
-                    let keep = |c: &Case| design.contains(&fold(c)) && group(c) == g;
-                    worse.extend(
-                        against(&cases, &chances, keep, &inputs, &was).into_iter().map(|w| format!("{source}: {w}")),
-                    );
-                }
-            }
-            if worse.is_empty() {
-                println!("No set got worse beyond its range.");
-            } else {
-                println!("Worse beyond its range, or not comparable:");
-                for line in worse {
-                    println!("  {line}");
-                }
-            }
-        }
-        if let Some(path) = &dump {
-            std::fs::write(path, dump_text(&cases, &chances, &songs, |c| design.contains(&fold(c))))
-                .map_err(|e| format!("{}: {e}", path.display()))?;
-            println!();
-            println!("Each case's outcome written to {}.", path.display());
-        }
+        compare_and_dump(&cases, &chances, &songs, &sources, &in_design, &inputs, before.as_ref(), dump.as_ref())?;
         let finders: Vec<(String, keyfind::Model)> = models
             .iter()
             .filter_map(|(f, m)| {
@@ -1175,6 +1431,50 @@ pub fn run(args: &[String]) -> Result<(), String> {
             })
             .collect();
         hand_cases(&finders, &show)?;
+    }
+    Ok(())
+}
+
+/// Compares this run with one dumped before (`--against`), source by source, and writes this run's outcomes
+/// (`--dump`), both over the cases `keep` takes.
+#[allow(clippy::too_many_arguments)]
+fn compare_and_dump(
+    cases: &[Case],
+    chances: &[Option<[f64; 24]>],
+    songs: &[Song],
+    sources: &[String],
+    keep: &dyn Fn(&Case) -> bool,
+    inputs: &[Input],
+    before: Option<&(String, String)>,
+    dump: Option<&PathBuf>,
+) -> Result<(), String> {
+    let group = |c: &Case| songs.get(c.song).map_or(usize::MAX, |s| s.group);
+    if let Some((name, text)) = before {
+        let was = read_dump(name, text, cases, songs)?;
+        let mut worse = against(cases, chances, |c| keep(c) && group(c) == 0, inputs, &was);
+        // Another source is compared too when the run dumped before had it.
+        for (g, source) in sources.iter().enumerate().skip(1) {
+            let had = cases.iter().zip(&was.outcomes).any(|(c, o)| group(c) == g && o.is_some());
+            if had {
+                println!();
+                println!("({source}:)");
+                let of = |c: &Case| keep(c) && group(c) == g;
+                worse.extend(against(cases, chances, of, inputs, &was).into_iter().map(|w| format!("{source}: {w}")));
+            }
+        }
+        if worse.is_empty() {
+            println!("No set got worse beyond its range.");
+        } else {
+            println!("Worse beyond its range, or not comparable:");
+            for line in worse {
+                println!("  {line}");
+            }
+        }
+    }
+    if let Some(path) = dump {
+        std::fs::write(path, dump_text(cases, chances, songs, keep)).map_err(|e| format!("{}: {e}", path.display()))?;
+        println!();
+        println!("Each case's outcome written to {}.", path.display());
     }
     Ok(())
 }
@@ -1700,7 +2000,11 @@ fn log_run(run: &str, summary: &Summary, opts: &Options) -> Result<(), String> {
     });
     let results: Vec<String> =
         summary.full.iter().map(|(t, r, c)| format!("{t} {:.1}% ({:.1}%)", 100.0 * r, 100.0 * c)).collect();
-    let penalty = opts.lambda_delta.map_or("inf".to_owned(), |l| format!("{l}"));
+    let penalty = match opts.lambda_delta {
+        _ if opts.rescale => "none (rescale)".to_owned(),
+        Some(l) => format!("{l}"),
+        None => "inf".to_owned(),
+    };
     let _ = writeln!(
         text,
         "| {} | {run} | {KEY_FINDER_VERSION} | {commit} | {penalty} | {} |",
@@ -1722,6 +2026,45 @@ struct Learned {
 
 /// The weights as Rust source for `crates/mo-harmony/src/keyfind/weights.rs`, from the sources learned from, and the
 /// summary of how often the key was right on the songs of `scored`.
+/// The lines of the weights file a rescale scales that say what it was fitted on and credit its sources ("//! Fitted
+/// on: …" and the "//! - …" lines after it), from the file at `path`: the one built into this bench, checked by the
+/// hash of its numbers.
+fn earlier_credits(path: &std::path::Path) -> Result<Vec<String>, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("--write {}: {e}", path.display()))?;
+    credits_in(&text, path)
+}
+
+/// [`earlier_credits`] from the file's text.
+fn credits_in(text: &str, path: &std::path::Path) -> Result<Vec<String>, String> {
+    let hash = format!("pub(super) const SHIPPED_HASH: u64 = {:#018x};", keyfind::SHIPPED_HASH.0);
+    if !text.lines().any(|l| l.trim() == hash) {
+        return Err(format!(
+            "--rescale --write {}: that isn't the weights file built into this theorybench (its numbers' hash \
+             differs). Point --write at crates/mo-harmony/src/keyfind/weights.rs, built as it is.",
+            path.display()
+        ));
+    }
+    let lines: Vec<String> = text
+        .lines()
+        .skip_while(|l| !l.starts_with("//! Fitted on:"))
+        .enumerate()
+        .take_while(|(i, l)| *i == 0 || l.starts_with("//! - "))
+        .map(|(_, l)| l.to_owned())
+        .collect();
+    if lines.is_empty() {
+        return Err(format!("--rescale --write {}: it doesn't say what it was fitted on", path.display()));
+    }
+    if text.lines().any(|l| l.starts_with("//! Then rescaled on")) {
+        return Err(format!(
+            "--rescale --write {}: these weights were rescaled already; rescale the ones fitted before",
+            path.display()
+        ));
+    }
+    Ok(lines)
+}
+
+/// The weights file. `earlier` holds, for a rescale, the lines of the file it scales that say what that was fitted on
+/// and credit its sources ([`earlier_credits`]): they stay, and the rescale is told after them.
 fn weights_file(
     model: &Model,
     calibration: &Calibration,
@@ -1729,6 +2072,7 @@ fn weights_file(
     opts: &Options,
     learned: &[Learned],
     (scored, summary): (&str, &Summary),
+    earlier: Option<&[String]>,
 ) -> String {
     let penalty = opts.lambda_delta.map_or("none fitted".to_owned(), |l| format!("penalty {l}"));
     let mut out = String::new();
@@ -1736,24 +2080,58 @@ fn weights_file(
         "//! The key finder's weights. Made by `theorybench keyfit`; don't edit by hand, except the last two lines when\n\
          //! a test asks (another number the finder is built from changed).\n//!\n",
     );
-    let _ = writeln!(
-        out,
-        "//! Fitted on: {} (trust weights penalty {LAMBDA_W}, corrections {penalty}).",
-        learned.iter().map(|l| l.how.as_str()).collect::<Vec<_>>().join(", ")
-    );
-    for l in learned {
-        let _ = writeln!(out, "//! - {}", l.credit);
+    match earlier {
+        Some(lines) => {
+            for line in lines {
+                let _ = writeln!(out, "{line}");
+            }
+        }
+        None => {
+            let _ = writeln!(
+                out,
+                "//! Fitted on: {} (trust weights penalty {LAMBDA_W}, corrections {penalty}).",
+                learned.iter().map(|l| l.how.as_str()).collect::<Vec<_>>().join(", ")
+            );
+            for l in learned {
+                let _ = writeln!(out, "//! - {}", l.credit);
+            }
+        }
     }
     // A paragraph of its own: right after the list, it would be read as part of its last line.
     out.push_str("//!\n//! Only these numbers come from them.\n");
-    let _ =
-        writeln!(out, "//!\n//! Right on {scored} songs held out of the fit (cross-validation by song, every fold):");
+    let (pieces, by) = if earlier.is_some() {
+        let _ = writeln!(
+            out,
+            "//!\n//! Then rescaled on {}: each stream's weights scaled by one number, and the minor weight and the\n\
+             //! calibration fitted again (penalty {LAMBDA_W}); nothing else comes from them. {}.",
+            learned.iter().map(|l| l.how.as_str()).collect::<Vec<_>>().join(", "),
+            learned.iter().map(|l| l.credit.as_str()).collect::<Vec<_>>().join("; ")
+        );
+        let _ = writeln!(out, "//! Scales: {}.", scales_line(model));
+        ("pieces", "pack")
+    } else {
+        ("songs", "song")
+    };
+    let _ = writeln!(
+        out,
+        "//!\n//! Right on {scored} {pieces} held out of the fit (cross-validation by {by}, every fold):"
+    );
     for line in &summary.lines {
         let _ = writeln!(out, "//! - {line}");
     }
     out.push_str("\nuse super::{Calibration, FEATURES, Thresholds};\n\n");
     out.push_str("/// Whether these weights were fitted (`false` for the placeholder).\npub(super) const FITTED: bool = true;\n\n");
-    let names: Vec<String> = learned.iter().map(|l| format!("{:?}", l.name)).collect();
+    // A rescale learned from the sources the weights it scaled were fitted on, too.
+    let mut names: Vec<String> = Vec::new();
+    if earlier.is_some() {
+        names.extend(keyfind::LEARNED_FROM.iter().map(|n| format!("{n:?}")));
+    }
+    for l in learned {
+        let name = format!("{:?}", l.name);
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
     out.push_str("/// The sources learned from, by the names `theorybench` gives them.\n");
     let _ = writeln!(out, "pub(super) const LEARNED_FROM: &[&str] = &[{}];\n", names.join(", "));
     out.push_str(
@@ -1782,10 +2160,18 @@ fn weights_file(
         numbers.join(", ")
     );
     let knots = |k: &[f64]| k.iter().map(|v| format!("{v:?}")).collect::<Vec<_>>().join(", ");
-    out.push_str(
-        "/// How likely each kind of answer must be (see `Thresholds`) at 1, 2, 4, 8, 16 and 32 bars, fitted on the chances\n",
-    );
-    out.push_str("/// of songs held out (`theorybench` `answerfit`):\n");
+    if earlier.is_some() {
+        out.push_str(
+            "/// How likely each kind of answer must be (see `Thresholds`) at 1, 2, 4, 8, 16 and 32 bars: kept as they were\n",
+        );
+        let _ =
+            writeln!(out, "/// fitted before the rescale, and how they come out on the {scored} {pieces} held out:");
+    } else {
+        out.push_str(
+            "/// How likely each kind of answer must be (see `Thresholds`) at 1, 2, 4, 8, 16 and 32 bars, fitted on the chances\n",
+        );
+        out.push_str("/// of songs held out (`theorybench` `answerfit`):\n");
+    }
     for line in &answers.knot_lines {
         let _ = writeln!(out, "/// - {line}");
     }
@@ -1980,7 +2366,7 @@ mod tests {
             piece_on("b", "1", 100, 62, "measuring only"),
             piece_on("b", "2", 200, 62, "measuring only"),
         ];
-        let left_out = leave_out_measured_twins(&mut items);
+        let left_out = leave_out_measured_twins(&mut items, Learning::Licensed);
         // a/2 is learned from too, so it stays; b/1 is a/1 a tone up, so it goes; b/2's notes are its own.
         let kept: Vec<String> = items.iter().map(|i| format!("{}/{}", i.source, i.id)).collect();
         assert_eq!(kept, ["a/1", "a/2", "b/2"]);
@@ -1990,9 +2376,10 @@ mod tests {
     #[test]
     fn a_run_with_nothing_to_learn_from_stops() {
         let song = |learn, w| Song { name: String::new(), fold: 1, inner: 0, group: 0, learn, weight: [w; 5] };
-        assert!(check_learning(&[song(false, 0.0)]).unwrap_err().contains("licence"));
-        assert!(check_learning(&[song(true, 0.0)]).unwrap_err().contains("weighed 0"));
-        assert!(check_learning(&[song(false, 0.0), song(true, 0.0), song(true, 1.0)]).is_ok());
+        assert!(check_learning(&[song(false, 0.0)], false).unwrap_err().contains("licence"));
+        assert!(check_learning(&[song(false, 0.0)], true).unwrap_err().contains("theorybench packs"));
+        assert!(check_learning(&[song(true, 0.0)], false).unwrap_err().contains("weighed 0"));
+        assert!(check_learning(&[song(false, 0.0), song(true, 0.0), song(true, 1.0)], false).is_ok());
     }
 
     #[test]
@@ -2010,7 +2397,7 @@ mod tests {
             .collect();
         let sources = vec!["a".to_owned(), "b".to_owned()];
         let weigh = HashMap::from([("a".to_owned(), 0.5), ("a/upper".to_owned(), 0.0)]);
-        let songs = songs_of(&items, &sources, &weigh);
+        let songs = songs_of(&items, &sources, &weigh, Learning::Licensed);
         for (item, song) in items.iter().zip(&songs) {
             assert_eq!(song.learn, item.source == "a");
             assert_eq!(song.group, usize::from(item.source == "b"));
@@ -2068,7 +2455,7 @@ mod tests {
 
     #[test]
     fn the_weights_file_carries_the_version_its_numbers_belong_to() {
-        let opts = Options { lambda_delta: Some(LAMBDA_DELTA), loop_cut: Cut::Opening(1) };
+        let opts = Options { lambda_delta: Some(LAMBDA_DELTA), loop_cut: Cut::Opening(1), rescale: false };
         let summary =
             Summary { lines: vec!["Whole songs with one key: 90.0% right (1 cases)".into()], full: Vec::new() };
         let calibration = *keyfind::SHIPPED.calibration;
@@ -2080,7 +2467,7 @@ mod tests {
         };
         let file = |weights: [f64; FEATURES]| {
             let x = Learned { name: "x".into(), how: "x at 0.5".into(), credit: "x: CC0".into() };
-            weights_file(&Model { weights }, &calibration, &answers, &opts, &[x], ("x", &summary))
+            weights_file(&Model { weights }, &calibration, &answers, &opts, &[x], ("x", &summary), None)
         };
         // The numbers built in: the hash and version built in.
         let same = file(*keyfind::SHIPPED.weights);
@@ -2104,5 +2491,210 @@ mod tests {
         let changed = file(weights);
         assert!(changed.contains(&format!("HASH_VERSION: u32 = {};", KEY_FINDER_VERSION + 1)));
         assert!(!changed.contains(&format!("{hash:#018x}")));
+    }
+
+    /// Songs learned from, all in fold 1.
+    fn learned_songs(n: usize) -> Vec<Song> {
+        (0..n)
+            .map(|i| Song { name: format!("packs/{i}"), fold: 1, inner: 0, group: 0, learn: true, weight: [1.0; 5] })
+            .collect()
+    }
+
+    /// A case whose only evidence is a tune: the major scale on `tonic`, a stray note on every fifth, labelled `truth`.
+    fn tune_case(song: usize, tonic: usize, truth: Key, cut: Cut) -> Case {
+        let mut x = [[0.0; 12]; STREAMS];
+        for (n, d) in [0, 2, 4, 5, 7, 9, 11].into_iter().enumerate() {
+            x[0][(tonic + d) % 12] = 1.0 + ((song + n) % 3) as f64 * 0.25;
+        }
+        if song.is_multiple_of(5) {
+            x[0][(tonic + 1) % 12] = 0.5;
+        }
+        let ev = Evidence { x, bars: 2, config: Config::MelodyOnly, diatonic_fit: 0.95, notes: 20 };
+        Case { song, truth, cut, input: Input::Full, one_key: true, pick: true, ev, cs: None }
+    }
+
+    /// Tunes in C or G major, every fourth one labelled as the relative minor.
+    fn tune_cases(cut: Cut) -> Vec<Case> {
+        (0..60)
+            .map(|i| {
+                let tonic = if i % 2 == 0 { 0 } else { 7 };
+                let major = Key::major(PitchClass::new(tonic as i32));
+                tune_case(i, tonic, if i % 4 == 3 { major.relative() } else { major }, cut)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_rescale_scales_only_the_streams_its_pieces_sound() {
+        // A bass under ten of the tunes: too few to scale the bass stream by.
+        let mut cases = tune_cases(Cut::Loop);
+        for c in cases.iter_mut().take(10) {
+            c.ev.x[Stream::Bass as usize][c.truth.tonic.index()] = 1.0;
+        }
+        let (model, _, n) = rescale(&cases, &learned_songs(60), &|_| true).unwrap();
+        assert_eq!(n, 60);
+        let scales = scales_of(&model);
+        assert!(scales[0] > 0.0 && (scales[0] - 1.0).abs() > 1e-6, "{scales:?}");
+        // Every other stream keeps the built-in weights exactly: the pieces never sound them.
+        for (s, scale) in scales.iter().enumerate().skip(1) {
+            assert_eq!(*scale, 1.0, "{s}");
+            for i in s * 24..(s + 1) * 24 {
+                assert_eq!(model.weights[i].to_bits(), keyfind::SHIPPED.weights[i].to_bits());
+            }
+        }
+        // The tune's weights keep their shape: each is the built-in one times the same number.
+        for i in 0..24 {
+            let built_in = keyfind::SHIPPED.weights[i];
+            assert!((model.weights[i] - scales[0] * built_in).abs() < 1e-9 * built_in.abs().max(1.0));
+        }
+        // Only 15 of the tunes are labelled minor: the minor weight keeps its built-in number.
+        assert_eq!(model.weights[MINOR].to_bits(), keyfind::SHIPPED.weights[MINOR].to_bits());
+        assert!(scales_line(&model).ends_with(" (as built in)"), "{}", scales_line(&model));
+        // Half of them minor (30 of each): it's fitted.
+        let halves: Vec<Case> = (0..60)
+            .map(|i| {
+                let tonic = if i % 2 == 0 { 0 } else { 7 };
+                let major = Key::major(PitchClass::new(tonic as i32));
+                tune_case(i, tonic, if i % 4 >= 2 { major.relative() } else { major }, Cut::Loop)
+            })
+            .collect();
+        let (model, _, _) = rescale(&halves, &learned_songs(60), &|_| true).unwrap();
+        assert_ne!(model.weights[MINOR], keyfind::SHIPPED.weights[MINOR]);
+        assert!(!scales_line(&model).ends_with(" (as built in)"));
+    }
+
+    #[test]
+    fn a_rescale_keeps_the_calibration_terms_its_pieces_never_have() {
+        // Two-bar windows of full mixes: only the 2-bar knot is heard (no loop, no song, no part alone).
+        let cases = tune_cases(Cut::Window(2))
+            .into_iter()
+            .map(|c| Case { ev: Evidence { config: Config::Full, ..c.ev }, ..c })
+            .collect::<Vec<_>>();
+        let songs = learned_songs(60);
+        let shipped = Model { weights: *keyfind::SHIPPED.weights };
+        let held: Held = cases.iter().map(|c| Some(shipped.scores(&c.ev))).collect();
+        let opts = |rescale| Options { lambda_delta: None, loop_cut: Cut::Opening(1), rescale };
+        let built_in = keyfind::SHIPPED.calibration.0;
+        let c = calibrate(&cases, &songs, &held, |_| true, &opts(true)).unwrap();
+        for t in (0..CALIBRATION_TERMS).filter(|&t| t != 1) {
+            assert_eq!(c.0[t].to_bits(), built_in[t].to_bits(), "term {t}");
+        }
+        assert_ne!(c.0[1], built_in[1]);
+        // A plain run fits every term: those no case has go to 0.
+        let plain = calibrate(&cases, &songs, &held, |_| true, &opts(false)).unwrap();
+        assert!(plain.0[CALIBRATION_TERMS - 1].abs() < 1e-9 && plain.0[1] == c.0[1], "{plain:?}");
+        // Tunes alone: their own number is fitted, the curve (which full mixes read) kept.
+        let alone = tune_cases(Cut::Window(2));
+        let held: Held = alone.iter().map(|c| Some(shipped.scores(&c.ev))).collect();
+        let c = calibrate(&alone, &songs, &held, |_| true, &opts(true)).unwrap();
+        let melody_only = keyfind::KNOTS;
+        for t in (0..CALIBRATION_TERMS).filter(|&t| t != melody_only) {
+            assert_eq!(c.0[t].to_bits(), built_in[t].to_bits(), "term {t}");
+        }
+        assert_ne!(c.0[melody_only], built_in[melody_only]);
+    }
+
+    #[test]
+    fn a_rescale_learns_only_from_solomons_own_pieces_and_a_packs_files_share_a_fold() {
+        let mut items: Vec<Item> = (1..=40).map(|n| piece("pop909cl", n, "MIT")).collect();
+        for n in 41..=120 {
+            let mut own = piece("packs", n, item::OWN);
+            own.group = format!("Pack {}", n % 7);
+            items.push(own);
+        }
+        let sources = vec!["pop909cl".to_owned(), "packs".to_owned()];
+        for learning in [Learning::Licensed, Learning::Own, Learning::Scored] {
+            let songs = songs_of(&items, &sources, &HashMap::new(), learning);
+            for (item, song) in items.iter().zip(&songs) {
+                let learn = match learning {
+                    Learning::Licensed => item.may_learn(),
+                    Learning::Own => item.is_own(),
+                    Learning::Scored => true,
+                };
+                assert_eq!(song.learn, learn, "{}", song.name);
+                // Each piece keeps its own name; only its fold is drawn by its pack.
+                assert_eq!(song.name, fold_name(item));
+                assert!(!item.is_own() || song.name == format!("packs/{}", item.id));
+            }
+            for pack in 0..7 {
+                let group = format!("Pack {pack}");
+                let folds: HashSet<usize> =
+                    items.iter().zip(&songs).filter(|(i, _)| i.group == group).map(|(_, s)| s.fold).collect();
+                assert_eq!(folds.len(), 1, "{group}: {folds:?}");
+            }
+        }
+        // Only measured, Solomon's pieces never sit in the kept-back fold.
+        let plain = songs_of(&items, &sources, &HashMap::new(), Learning::Licensed);
+        assert!(items.iter().zip(&plain).all(|(i, s)| !i.is_own() || s.fold != FROZEN));
+        // A run that only scores draws each piece's fold as the run that learns from it does, so their dumps pair.
+        let scored = songs_of(&items, &sources, &HashMap::new(), Learning::Scored);
+        let own = songs_of(&items, &sources, &HashMap::new(), Learning::Own);
+        for (((item, a), b), c) in items.iter().zip(&scored).zip(&own).zip(&plain) {
+            assert_eq!(a.fold, if item.is_own() { b.fold } else { c.fold }, "{}", a.name);
+        }
+    }
+
+    #[test]
+    fn a_loop_is_heard_whole_as_a_loop() {
+        assert_eq!((Cut::Loop.span(), Cut::Loop.name()), (Span::Loop, "Whole loops".to_owned()));
+        assert_eq!(set_weight(Cut::Loop, Input::Full), SONG_WEIGHT);
+        let mut item = piece("packs", 400, item::OWN);
+        item.loops = true;
+        item.parts[0].notes = (0..16).map(|i| (i * 96, 96, [60, 62, 64, 65][i as usize % 4], 100)).collect();
+        item.length = 16 * 96;
+        let cutting = Cutting { lengths: &[1, 2, 4], inputs: &[Input::Full], picks: 8 };
+        let cases = song_cases(&item, 0, "packs/400", &cutting);
+        assert!(cases.iter().any(|c| c.cut == Cut::Loop));
+        assert!(!cases.iter().any(|c| c.cut == Cut::Song));
+    }
+
+    #[test]
+    fn a_rescale_keeps_the_credits_of_the_weights_it_scales() {
+        let hash = format!("pub(super) const SHIPPED_HASH: u64 = {:#018x};", keyfind::SHIPPED_HASH.0);
+        let file = format!(
+            "//! The key finder's weights.\n//!\n//! Fitted on: a, b at 0.25 (penalties).\n//! - A: MIT\n//! - B: CC0\n\
+             //!\n//! Only these numbers come from them.\n{hash}\n"
+        );
+        let path = std::path::Path::new("weights.rs");
+        let credits = credits_in(&file, path).unwrap();
+        assert_eq!(credits, ["//! Fitted on: a, b at 0.25 (penalties).", "//! - A: MIT", "//! - B: CC0"]);
+        // Another file's numbers, or weights rescaled already: refused.
+        assert!(credits_in(&file.replace(&hash, "pub(super) const SHIPPED_HASH: u64 = 0x1;"), path).is_err());
+        assert!(credits_in(&format!("{file}//! Then rescaled on packs: …\n"), path).is_err());
+
+        let opts = Options { lambda_delta: None, loop_cut: Cut::Opening(1), rescale: true };
+        let summary = Summary { lines: vec!["Whole loops: 80.0% right (10 cases)".into()], full: Vec::new() };
+        let answers = Fitted {
+            thresholds: *keyfind::SHIPPED.thresholds,
+            not_tonal_below: keyfind::SHIPPED.not_tonal_below,
+            scale_line: "Notes in one scale a key needs: 0.750.".into(),
+            knot_lines: vec!["1 bar (10 cases): one key from 0.87.".into()],
+        };
+        let packs = Learned { name: "packs".into(), how: "packs".into(), credit: credit("packs", item::OWN) };
+        let mut weights = *keyfind::SHIPPED.weights;
+        weights[0] *= 1.5;
+        let written = weights_file(
+            &Model { weights },
+            keyfind::SHIPPED.calibration,
+            &answers,
+            &opts,
+            &[packs],
+            ("packs", &summary),
+            Some(&credits),
+        );
+        assert!(
+            written.contains(
+                "//! - B: CC0\n//!\n//! Only these numbers come from them.\n//!\n//! Then rescaled on packs:"
+            )
+        );
+        assert!(written.contains("//! Scales: Tune 1.500, Harmony 1.000"), "{written}");
+        assert!(
+            written.contains("//! Right on packs pieces held out of the fit (cross-validation by pack, every fold):")
+        );
+        let mut names: Vec<String> = keyfind::LEARNED_FROM.iter().map(|n| format!("{n:?}")).collect();
+        names.push("\"packs\"".into());
+        assert!(written.contains(&format!("LEARNED_FROM: &[&str] = &[{}];", names.join(", "))), "{written}");
+        assert!(written.contains("kept as they were\n/// fitted before the rescale"), "{written}");
+        assert!(written.contains(&format!("HASH_VERSION: u32 = {};", KEY_FINDER_VERSION + 1)));
     }
 }
