@@ -1,6 +1,6 @@
 // The window shell: the rail on the left and the page on show. Agreed map (2026-10-29): Songs, Sounds, Presets, MIDI,
 // Plugins and Space, with Settings at the bottom.
-import { Theme, Type, Space, RailItem, Groove, Caps, ActionKey, TipLayer, TipState } from "studio.slint";
+import { Theme, Type, Space, Icons, RailItem, Groove, Caps, ActionKey, TipLayer, TipState } from "studio.slint";
 import { ComingPage } from "pages/coming.slint";
 import { PartsGallery } from "pages/parts.slint";
 import { SoundsPage, SoundsData, AlikeLine, FolderLine, PadLine, TypeChipInfo, SoundTile, TileRow, SoundLine, SoundFact, PickedSound } from "pages/sounds.slint";
@@ -25,13 +25,15 @@ import "../fonts/SpaceGrotesk-700.ttf";
 import "../fonts/SpaceMono-400.ttf";
 import "../fonts/SpaceMono-700.ttf";
 
-export { Theme, ActionKey, MenuItem, SoundsData, AlikeLine, FolderLine, PadLine, TypeChipInfo, SoundTile, TileRow, SoundLine, SoundFact, PickedSound, BackupData, BackupFolderLine, LeftOutLine, ArrangementData, ArrLabel, ArrKind, CardInfo, KeyRow, SongsData, SongLine, YearStart, PanelSong, CountLine, PluginLine, SampleLine, SaveLine, DetailPair, HealthLine, OlderLine }
+export { Theme, Icons, ActionKey, MenuItem, SoundsData, AlikeLine, FolderLine, PadLine, TypeChipInfo, SoundTile, TileRow, SoundLine, SoundFact, PickedSound, BackupData, BackupFolderLine, LeftOutLine, ArrangementData, ArrLabel, ArrKind, CardInfo, KeyRow, SongsData, SongLine, YearStart, PanelSong, CountLine, PluginLine, SampleLine, SaveLine, DetailPair, HealthLine, OlderLine }
 
 export struct PlaceInfo {
     name: string,
     coming: string,
     // The key that goes there, from the shortcut list.
     key: string,
+    // Its icon, from Icons.
+    icon: string,
 }
 
 export component AppWindow inherits Window {
@@ -127,6 +129,7 @@ export component AppWindow inherits Window {
                     // The rail's places are the first ones in `places`; Settings sits apart at the bottom.
                     for p[i] in root.rail: RailItem {
                         text: p.name;
+                        icon: p.icon;
                         key: p.key;
                         selected: root.place == i;
                         clicked => { root.place-chosen(i); }
@@ -144,6 +147,7 @@ export component AppWindow inherits Window {
                     Rectangle { }
                     RailItem {
                         text: root.places[root.settings-place].name;
+                        icon: root.places[root.settings-place].icon;
                         key: root.places[root.settings-place].key;
                         selected: root.place == root.settings-place;
                         clicked => { root.place-chosen(root.settings-place); }

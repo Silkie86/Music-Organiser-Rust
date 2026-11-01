@@ -329,6 +329,8 @@ export component StudioButton inherits Rectangle {
 // One line on the left-hand rail.
 export component RailItem inherits Rectangle {
     in property <string> text;
+    // The place's icon (a 16 by 16 path from Icons), beside its name.
+    in property <string> icon;
     in property <bool> selected;
     // The key that goes here, from the shortcut list.
     in property <string> key;
@@ -344,8 +346,19 @@ export component RailItem inherits Rectangle {
         background: Theme.accent;
         animate width { duration: 120ms; }
     }
-    Text {
+    if root.icon != "": Path {
         x: 12px;
+        y: (parent.height - self.height) / 2;
+        width: 16px;
+        height: 16px;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: root.icon;
+        stroke: name.color;
+        stroke-width: 1.5px;
+    }
+    name := Text {
+        x: root.icon != "" ? 38px : 12px;
         text: root.text;
         color: root.selected ? Theme.text : Theme.muted;
         font-size: Type.row-title;
@@ -927,6 +940,23 @@ export global Icons {
     out property <string> more: "M 2.5 8 A 0.75 0.75 0 1 0 4 8 A 0.75 0.75 0 1 0 2.5 8 M 7.25 8 A 0.75 0.75 0 1 0 8.75 8 A 0.75 0.75 0 1 0 7.25 8 M 12 8 A 0.75 0.75 0 1 0 13.5 8 A 0.75 0.75 0 1 0 12 8";
     // Two sliders: the page's own options.
     out property <string> options: "M 2 5 L 14 5 M 2 11 L 14 11 M 5.5 3 L 5.5 7 M 10.5 9 L 10.5 13";
+    // The rail's places, one each.
+    // Songs: two joined notes.
+    out property <string> songs: "M 6 12 L 6 3 L 13 2 L 13 11 M 6 12 A 2 2 0 1 1 2 12 A 2 2 0 1 1 6 12 M 13 11 A 2 2 0 1 1 9 11 A 2 2 0 1 1 13 11";
+    // Sounds: a waveform.
+    out property <string> sounds: "M 1 8 L 3 8 L 4.5 4 L 6.5 12 L 8.5 2 L 10.5 14 L 12 6 L 13 8 L 15 8";
+    // Presets: a knob.
+    out property <string> presets: "M 13.5 8 A 5.5 5.5 0 1 1 2.5 8 A 5.5 5.5 0 1 1 13.5 8 M 8 8 L 11 5";
+    // MIDI: piano keys.
+    out property <string> midi: "M 2 3 L 14 3 L 14 13 L 2 13 Z M 5 3 L 5 9 M 8 3 L 8 13 M 11 3 L 11 9";
+    // Plugins: a plug.
+    out property <string> plugins: "M 6 1.5 L 6 5 M 10 1.5 L 10 5 M 4 5 L 12 5 L 12 8 A 4 4 0 0 1 4 8 Z M 8 12 L 8 15";
+    // Space: a pie with a slice taken out.
+    out property <string> space: "M 7 3 A 6 6 0 1 0 13 9 L 7 9 Z M 9 1 L 9 7 L 15 7 A 6 6 0 0 0 9 1 Z";
+    // Backup: a drive with an arrow going up into it.
+    out property <string> backup: "M 2 10 L 14 10 L 14 14.5 L 2 14.5 Z M 8 8 L 8 1.5 M 5 4.5 L 8 1.5 L 11 4.5";
+    // Settings: a cog.
+    out property <string> settings: "M 10.5 8 A 2.5 2.5 0 1 1 5.5 8 A 2.5 2.5 0 1 1 10.5 8 M 8 1 L 8 3.5 M 8 12.5 L 8 15 M 1 8 L 3.5 8 M 12.5 8 L 15 8 M 3 3 L 4.8 4.8 M 11.2 11.2 L 13 13 M 13 3 L 11.2 4.8 M 4.8 11.2 L 3 13";
 }
 
 // A coloured dot, like a sound's type or a DAW's colour beside a name.

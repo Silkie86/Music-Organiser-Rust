@@ -54,6 +54,7 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> R
             name: p.name().into(),
             coming: coming(*p).into(),
             key: shortcuts.key_of(p.shortcut_id()).into(),
+            icon: icon(&app, *p),
         })
         .collect();
     let settings = Place::Settings.index();
@@ -187,6 +188,21 @@ fn rgb(c: u32) -> Color {
 }
 
 /// What a place's page will hold, shown until the page is built.
+/// The place's icon on the rail, drawn in the shared style's Icons.
+fn icon(app: &AppWindow, place: Place) -> slint::SharedString {
+    let icons = app.global::<Icons>();
+    match place {
+        Place::Songs => icons.get_songs(),
+        Place::Sounds => icons.get_sounds(),
+        Place::Presets => icons.get_presets(),
+        Place::Midi => icons.get_midi(),
+        Place::Plugins => icons.get_plugins(),
+        Place::Space => icons.get_space(),
+        Place::Backup => icons.get_backup(),
+        Place::Settings => icons.get_settings(),
+    }
+}
+
 fn coming(place: Place) -> &'static str {
     match place {
         Place::Songs => {
