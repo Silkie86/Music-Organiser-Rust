@@ -15,7 +15,7 @@ use super::{
 use crate::chord::Chord;
 use crate::keyfind::Span as Stretch;
 use crate::notes::{Grid, Note, Part, Role};
-use crate::pitch::{PcSet, PitchClass};
+use crate::pitch::PcSet;
 
 /// A reading as the tests see it.
 #[derive(Clone, Debug, PartialEq)]
@@ -128,7 +128,7 @@ fn render(spans: &[Span]) -> String {
 
 /// What a case named must be, with units counted from the first unit reported.
 #[derive(Clone, Debug)]
-enum Want {
+pub(super) enum Want {
     /// The span starting at this unit is written so, over this kind of bass.
     Writes(usize, &'static str, BassKind),
     /// The span starting at this tick (in the music's own ticks) is written so.
@@ -225,7 +225,7 @@ const B: usize = 8;
 
 /// The design's hand cases, named: a name (from the design's table), the music (read as a loop), and what it must be
 /// named.
-fn named_cases() -> Vec<(&'static str, Music, Vec<Want>)> {
+pub(super) fn named_cases() -> Vec<(&'static str, Music, Vec<Want>)> {
     use BassKind::{Inversion, Moving, Root, Slash};
     use Want::*;
     let keys_bass = |bass: &str, keys: &str| Music::new().bass(bars(bass)).keys(bars(keys));
@@ -651,7 +651,13 @@ fn sounding_in(hearing: &Hearing, units: Range<usize>) -> PcSet {
 /// a name holds only notes that sound, and its root when it isn't rootless (over silence, it's written in full, as the
 /// decode read it); the bass kind fits the name, and is the
 /// same kind of bass on every reading of a span; and readings share a same-notes group when they hold the same notes.
-fn keeps_the_rules(hearing: &Hearing, decoding: &Decoding, naming: &Naming, most: usize) -> Result<(), String> {
+fn keeps_the_rules(
+    hearing: &Hearing,
+    decoding: &Decoding,
+    pins: &[PinnedSpan],
+    naming: &Naming,
+    most: usize,
+) -> Result<(), String> {
     let reported = hearing.reported();
     let spans = naming.spans();
     let check = |yes: bool, why: &dyn Fn() -> String| if yes { Ok(()) } else { Err(why()) };
@@ -675,6 +681,26 @@ fn keeps_the_rules(hearing: &Hearing, decoding: &Decoding, naming: &Naming, most
         let sum = readings.iter().map(|r| r.chance).sum::<f64>() + s.none;
         check(chance(s.none) && readings.iter().all(|r| chance(r.chance)) && sum <= 1.0 + 1e-9, &why)?;
         check(readings.get(1..).unwrap_or_default().windows(2).all(|w| w[0].chance >= w[1].chance), &why)?;
+        // A pinned stretch is never cut in two, and a chord given for it (one the decode can read) is its only reading,
+        // written as given: in root position over the bass held under it.
+        // The decode says which: a chord given is one of the pins' (a pin's own, or round a loop, one given over its
+        // last bar).
+        let given = decoded.given;
+        check(!decoded.pinned || !split, &why)?;
+        check(given.is_none() || decoded.pinned, &why)?;
+        check(given.is_none_or(|g| pins.iter().any(|p| p.given() == Some(g))), &why)?;
+        check(given.is_some() == s.flags.contains(SpanFlags::GIVEN), &why)?;
+        if let Some(given) = given {
+            let [r] = readings else { return Err(format!("not one reading: {}", why())) };
+            let c = r.chord;
+            let bass = match hearing.bass(s.sound.clone()).held() {
+                Some(held) if given.bass() == given.root() => held,
+                _ => given.bass(),
+            };
+            check(c.root() == given.root() && c.notes() == given.notes() && c.bass() == bass, &why)?;
+            check(r.also.is_none() && r.doubtful.is_empty() && r.group == 0, &why)?;
+            continue;
+        }
         let sounding = sounding_in(hearing, s.sound.clone());
         let silent = hearing.heard(s.sound.clone()).is_empty();
         let mut groups: Vec<PcSet> = Vec::new();
@@ -741,7 +767,7 @@ fn any_music_with_any_pins_is_named_by_the_rules() {
         let what = format!("round {round}: {music:?}, pins {pins:?}, most {most}");
         assert!(decoder.decode(&hearing, &HAND, &COUNTED, &pins, &mut decoding), "nothing read: {what}");
         namer.name(&hearing, &decoder, &decoding, most, &mut naming);
-        if let Err(why) = keeps_the_rules(&hearing, &decoding, &naming, most) {
+        if let Err(why) = keeps_the_rules(&hearing, &decoding, &pins, &naming, most) {
             panic!("{why}\n{what}");
         }
         named += 1;
@@ -755,7 +781,7 @@ fn the_music_and_the_hand_cases_are_named_by_the_rules() {
     for (music, pins) in music.chain([(song(), Vec::new())]) {
         for most in [1, 6, 40] {
             let named = Named::read(&music, &pins, most);
-            if let Err(why) = keeps_the_rules(&named.hearing, &named.decoding, &named.naming, most) {
+            if let Err(why) = keeps_the_rules(&named.hearing, &named.decoding, &pins, &named.naming, most) {
                 panic!("{why}\n{music:?}");
             }
         }
@@ -796,7 +822,7 @@ fn the_same_notes_moved_are_named_the_same_moved() {
             let moved = music.map(|n| Note { key: (i32::from(n.key) + shift) as u8, ..n });
             let up = |pin: &PinnedSpan| PinnedSpan {
                 units: pin.units.clone(),
-                label: pin.label.map(|l| Label::new(l.root.up(shift), l.core)),
+                chord: pin.chord.map(|c| c.transposed(shift)),
             };
             let pins: Vec<PinnedSpan> = pins.iter().map(up).collect();
             assert_eq!(everything(&Named::read(&moved, &pins, 6).naming, shift, 480), want, "moved {shift}");
@@ -859,16 +885,34 @@ fn a_reading_is_always_named_and_most_counts_readings() {
         let names: Vec<&str> = spans.iter().flat_map(|s| s.readings.iter().map(|r| r.name.as_str())).collect();
         assert!(names.len() <= most.max(1) && names.first() == Some(&"Am6"), "most {most}: {names:?}");
     }
-    // A pinned chord is named from the pin, however unlikely: Db7 pinned over C E G is written with what's heard of it,
-    // rootless.
-    let music = Music::new().bass(bars("C2")).keys(bars("C4 E4 G4"));
-    let pin = PinnedSpan { units: 0..B, label: Some(Label::new(PitchClass::new(1), super::Core::Dominant7)) };
-    let named = Named::read(&music, std::slice::from_ref(&pin), 4);
-    let first = named.naming.spans().first().and_then(|s| named.naming.readings(s).first());
-    assert!(first.is_some_and(|r| Some(r.label) == pin.label && r.rootless), "{}", render(&named.spans()));
+    // A pinned chord is written as given, however unlikely, over the bass held under it: Db7 pinned over C E G with C
+    // in the bass is Db7/C, rootless; with no bass, Db7. Given with a bass of its own, it keeps it.
+    let chord = |name: &str| Chord::parse(name).unwrap();
+    for (bass, given, written, kind) in [
+        ("C2", "Db7", "Db7/C", BassKind::Slash),
+        ("", "Db7", "Db7", BassKind::None),
+        ("C2", "Am7", "Am7/C", BassKind::Inversion),
+        ("C2", "Db7/F", "Db7/F", BassKind::Inversion),
+        ("", "C/G", "C/G", BassKind::Inversion),
+    ] {
+        let music = Music::new().bass(bars(bass)).keys(bars("C4 E4 G4"));
+        let pin = PinnedSpan { units: 0..B, chord: Some(chord(given)) };
+        let named = Named::read(&music, std::slice::from_ref(&pin), 4);
+        let spans = named.spans();
+        let span = named.naming.spans().first().unwrap();
+        let [r] = named.naming.readings(span) else { panic!("{}", render(&spans)) };
+        assert!(span.flags.contains(SpanFlags::GIVEN), "{}", render(&spans));
+        assert_eq!((r.chord.name(), r.bass), (written.to_owned(), kind), "{given}: {}", render(&spans));
+        assert!(Some(r.label) == pin.label() && r.rootless == !r.chord.name().starts_with('C'));
+    }
+    // And never cut in two, however its bass moves: Db9 pinned over C C/E is one chord.
+    let music = Music::new().bass(bars("C2 (1-2) E2 (3-4) | F2")).keys(bars("C4 E4 G4 | F3 A3 C4"));
+    let pin = PinnedSpan { units: 0..B, chord: Some(chord("Db9")) };
+    let spans = Named::read(&music, std::slice::from_ref(&pin), 4).spans();
+    assert_eq!(spans.iter().map(|s| s.name()).collect::<Vec<_>>(), ["Db9", "F"], "{}", render(&spans));
     // Pinned over silence, it's written in full: C | Db7 | F, with nothing played in the second bar.
     let music = Music::new().bass(bars("C2 | | F2")).keys(bars("C4 E4 G4 | | F3 A3 C4"));
-    let pin = PinnedSpan { units: B..2 * B, label: Some(Label::new(PitchClass::new(1), super::Core::Dominant7)) };
+    let pin = PinnedSpan { units: B..2 * B, chord: Some(chord("Db7")) };
     let spans = Named::read(&music, std::slice::from_ref(&pin), 4).spans();
     let names: Vec<(&str, bool)> =
         spans.iter().map(|s| (s.name(), s.readings.first().is_some_and(|r| r.rootless))).collect();
@@ -896,7 +940,7 @@ fn damaged_notes_are_named_without_a_panic() {
                 assert!(hearing.hear(&parts, grid, span));
                 assert!(decoder.decode(&hearing, &HAND, &COUNTED, &[], &mut decoding));
                 namer.name(&hearing, &decoder, &decoding, 4, &mut naming);
-                if let Err(why) = keeps_the_rules(&hearing, &decoding, &naming, 4) {
+                if let Err(why) = keeps_the_rules(&hearing, &decoding, &[], &naming, 4) {
                     panic!("{why}\n{grid:?} {span:?}");
                 }
             }

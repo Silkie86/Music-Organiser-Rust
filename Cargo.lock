@@ -2896,6 +2896,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "mo-backup",
+ "mo-convert",
  "mo-formats",
  "mo-library",
  "mo-sounds",

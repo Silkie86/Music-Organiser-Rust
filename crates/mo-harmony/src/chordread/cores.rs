@@ -17,8 +17,8 @@
 
 use std::fmt;
 
-use crate::chord::Family;
-use crate::pitch::PcSet;
+use crate::chord::{Chord, Family};
+use crate::pitch::{PcSet, PitchClass};
 
 /// One of the 16 kinds of chord the reader decides between: a chord with its tensions left out (C9, C13(♭9) and
 /// C7alt are all [`Core::Dominant7`]). Their order here is the order exact ties are broken in, and each fits in four
@@ -265,6 +265,12 @@ impl Core {
             Family::Power if intervals.has(7) => Core::Power,
             Family::Power => return None,
         })
+    }
+
+    /// The core of a chord as written ([`Core::of`]), its root counted as heard: a rootless voicing written with its
+    /// root left out of its notes has the core its name has. `None` when it has no chord to name.
+    pub const fn of_chord(chord: Chord) -> Option<Core> {
+        Core::of(chord.intervals().with(PitchClass::C))
     }
 
     /// Its quality as the chord names write it ([`crate::Chord::quality`]): "" for a major triad, "m", "7", "maj7",

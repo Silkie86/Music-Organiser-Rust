@@ -4,8 +4,8 @@
 
 use super::cases::{Book, HandCase, hand_cases};
 use super::tests::{ODD_CALIBRATION, odd_model, odd_weights};
-use super::version::Fnv;
 use super::*;
+use crate::fnv::Fnv;
 use crate::notes::{Note, Role};
 use crate::pitch::PitchClass;
 

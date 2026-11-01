@@ -6,9 +6,16 @@
 //! fit (chordfit) will start from them and learn the rest from labelled music, keeping every rule [`Weights::check`]
 //! lists, so no explanation can ever show a chord's own note counting against it.
 
+use super::answer::Thresholds;
 use super::candidates::Label;
 use super::cores::{Core, Group};
 use super::score::{Feature, PerFeature};
+
+/// The hash of every number the reader is built from ([`super::numbers_hash`]) that these were written with, and the
+/// version of the reader they were first given with ([`super::CHORD_READER_VERSION`]). A test checks both: change a
+/// number here, in the counted tables or among those set by hand, and it asks for the new hash and a new version.
+pub(super) const SHIPPED_HASH: u64 = 0x2a25_dc50_1312_92a7;
+pub(super) const HASH_VERSION: u32 = 1;
 
 /// What each piece of evidence is worth ([`Feature`]), the trust in the pair term, and what a stretch read as no chord
 /// scores.
@@ -99,6 +106,14 @@ pub const HAND: Weights = Weights {
     none: -0.5,
 };
 
+/// The hand-set thresholds the answers are graded by (texture by texture: a full mix, an accompaniment, chords alone,
+/// one line), until the calibration's fit sets them. Set from the hand cases: keys alone that a player could read
+/// more than one way (cases 13, 20, 22 and 33 with no bass) give their first reading a chance of 0.63 to 0.76 and
+/// must not be one chord, while the chords the cases want as one chord read 0.98 or more (cases 1, 10, 11 and 54).
+/// The same notes need their group at 0.9: were the chances true, the chord would be outside it at most one time in
+/// ten, the design's target. One line alone is never one chord or the same notes: it's implied.
+pub const THRESHOLDS: Thresholds = Thresholds { one: [0.8, 0.8, 0.8, 1.0], same: [0.9, 0.9, 0.9, 1.0] };
+
 impl Weights {
     /// The rules every set of weights keeps (the design's signs and orders), as the broken ones' descriptions; empty
     /// when it keeps them all.
@@ -171,7 +186,7 @@ pub const EVEN: Tables = Tables {
 
 /// The least share a prior reads, and 1 less it the most: a core or a tension never counted (or always played) still
 /// costs a finite amount, so no score is ever infinite and a trust of 0 always leaves the prior out.
-const FLOOR: f64 = 1e-6;
+pub(super) const FLOOR: f64 = 1e-6;
 
 /// A share, kept between the floor and 1 less it; a share that isn't a number reads as the floor.
 fn kept(share: f64) -> f64 {
