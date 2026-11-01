@@ -65,10 +65,12 @@ pub enum Core {
 pub enum ToneClass {
     /// One of the core's own notes: its root, third (or 4th or 2nd), fifth, and seventh or sixth.
     Core,
-    /// A tension the core can carry: a 9, 11 or 13, or their altered forms, as the core allows.
+    /// A note the core can carry: a 9, 11 or 13 or their altered forms, as the core allows, and a seventh no other
+    /// core has (the major seventh of Cmaj7♯5, Cmaj7sus4 and Cdim7(maj7), the ♭7 of C7(no3)).
     Tension,
-    /// A note that doesn't belong: an avoid note (a natural 11 over a major third), or a seventh or sixth the core
-    /// doesn't have, which belongs to another core (the ♭7 over a major triad is [`Core::Dominant7`]'s).
+    /// A note that doesn't belong: an avoid note (a natural 11 over a major third), a second seventh beside the
+    /// core's own (a major seventh on a dominant), or a seventh or sixth that belongs to another core (the ♭7 over a
+    /// major triad is [`Core::Dominant7`]'s, so a reading with it moves there).
     Other,
 }
 
@@ -94,7 +96,9 @@ impl Core {
     ];
 
     /// The cores a reading may take with its root not sounding: the seventh and sixth chords a pianist voices without
-    /// the root, and the m7b5 of a minor ii-V.
+    /// the root (dominant, minor and major sevenths, sixths and 7sus4) and the m7b5 of a minor ii-V. A diminished
+    /// seventh needs none (any of its notes can be its root), and a minor-major seventh is left out: it is a tonic
+    /// chord, played over its root.
     pub const ROOTLESS: CoreSet = CoreSet::EMPTY
         .with(Core::Dominant7)
         .with(Core::Minor7)
@@ -176,17 +180,24 @@ impl Core {
         })
     }
 
-    /// The tensions it can carry, as intervals above the root: the 9ths, 11ths and 13ths its scale allows, as
-    /// [`crate::chord::role`] gives them for the core's own notes, with four notes judged again (the tests list them):
-    /// the 13 of a major seventh is a tension; the ♭13 of a minor sixth and the ♭9 of a sus2 sit a semitone under one
-    /// of the chord's own notes, so don't belong; and the major seventh over a diminished seventh is the fourth
-    /// tension of its scale (9, 11, ♭13 and 7).
+    /// The notes it can carry ([`ToneClass::Tension`]), as intervals above the root: the 9ths, 11ths and 13ths its
+    /// scale allows, as [`crate::chord::role`] gives them for the core's own notes, and a seventh no other core has.
+    /// Three notes are judged again (the tests list them): the 13 of a major seventh is a tension, and the ♭13 of a
+    /// minor sixth and the ♭9 of a sus2 sit a semitone under one of the chord's own notes, so don't belong.
+    ///
+    /// The core's own notes include its fifth, so whether the fifth sounds is left to the scoring, where a missing
+    /// fifth costs a little: a ♭13 is a minor chord's tension even where it takes the fifth's place (C E♭ A♭ is also
+    /// A♭/C, and the bass decides between them).
     pub const fn tensions(self) -> PcSet {
         PcSet::of(match self {
             // 9, ♯11.
-            Core::Major | Core::Major6 | Core::Augmented => &[2, 6],
+            Core::Major | Core::Major6 => &[2, 6],
+            // 9, ♯11, and the 7 of Cmaj7♯5.
+            Core::Augmented => &[2, 6, 11],
             // 9, 11, ♭13.
-            Core::Minor | Core::HalfDiminished | Core::Diminished => &[2, 5, 8],
+            Core::Minor | Core::HalfDiminished => &[2, 5, 8],
+            // 9, 11, ♭13, and the 7 (of Cdim(maj7), and the fourth tension of the diminished scale).
+            Core::Diminished | Core::Diminished7 => &[2, 5, 8, 11],
             // ♭9, 9, ♯9, ♯11, ♭13, 13.
             Core::Dominant7 => &[1, 2, 3, 6, 8, 9],
             // 9, ♯11, 13.
@@ -195,13 +206,14 @@ impl Core {
             Core::Minor7 | Core::MinorMajor7 => &[2, 5, 8, 9],
             // 9, 11.
             Core::Minor6 => &[2, 5],
-            // 9, 11, ♭13, 7.
-            Core::Diminished7 => &[2, 5, 8, 11],
+            // ♭9, 9, 13, and the 7 of Cmaj7sus4.
+            Core::Sus4 => &[1, 2, 9, 11],
             // ♭9, 9, 13.
-            Core::Sus4 | Core::Dominant7Sus4 => &[1, 2, 9],
-            // 13 (its 6).
-            Core::Sus2 => &[9],
-            Core::Power => &[],
+            Core::Dominant7Sus4 => &[1, 2, 9],
+            // 13 (its 6), and the 7 of Cmaj7sus2.
+            Core::Sus2 => &[9, 11],
+            // The ♭7 of C7(no3) and the 7 of Cmaj7(no3).
+            Core::Power => &[10, 11],
         })
     }
 
@@ -221,10 +233,11 @@ impl Core {
         }
     }
 
-    /// The core of a chord with these intervals above its root: its tensions dropped, its seventh or sixth kept, as
-    /// the chord names it (Cmaj13 is [`Core::Major7`], C6/9 [`Core::Major6`], Cm11 [`Core::Minor7`], C7♯5
-    /// [`Core::Dominant7`], C9sus4 [`Core::Dominant7Sus4`], Cmaj7♯5 [`Core::Augmented`]). `None` when the notes have
-    /// no third, no 4th or 2nd and no fifth: there is no chord to name.
+    /// The core of a chord with these intervals above its root, as the chord names it: its tensions dropped and its
+    /// seventh or sixth kept, where a core has that seventh (Cmaj13 is [`Core::Major7`], C6/9 [`Core::Major6`], Cm11
+    /// [`Core::Minor7`], C7♯5 [`Core::Dominant7`], C9sus4 [`Core::Dominant7Sus4`]); a seventh no core has stays a
+    /// note its core carries (Cmaj7♯5 is [`Core::Augmented`] with a major seventh). `None` when the notes have no
+    /// third, no 4th or 2nd and no fifth: there is no chord to name.
     pub const fn of(intervals: PcSet) -> Option<Core> {
         let (six, b7, maj7) = (intervals.has(9), intervals.has(10), intervals.has(11));
         Some(match Family::of(intervals) {
@@ -279,27 +292,23 @@ impl Core {
     pub const fn fits(self, heard: PcSet) -> bool {
         let third = match self {
             Core::Dominant7Sus4 => heard.has(5) || heard.has(2),
-            _ => has_all(heard, self.third()),
+            _ => heard.contains_all(self.third()),
         };
-        heard.has(0) && third && has_all(heard, self.seventh()) && has_all(heard, self.fifth())
+        heard.has(0) && third && heard.contains_all(self.seventh()) && heard.contains_all(self.fifth())
     }
 
     /// Whether a reading on a root that doesn't sound may be this core: it is one of [`Core::ROOTLESS`], and its
     /// third (or 4th), its seventh (or sixth), a m7b5's ♭5 and at least one of its tensions are among the notes heard,
-    /// read from the root (`heard`, without bit 0).
+    /// read from the root (`heard`, without bit 0). Unlike [`Core::fits`], a 7sus4 needs its 4th here: with neither
+    /// the root nor the 4th, nothing says it's a sus chord on that root (D B♭ A is B♭maj7, on a B♭ that sounds).
     pub const fn fits_rootless(self, heard: PcSet) -> bool {
         !heard.has(0)
             && Core::ROOTLESS.contains(self)
-            && has_all(heard, self.third())
-            && has_all(heard, self.seventh())
-            && has_all(heard, self.fifth())
+            && heard.contains_all(self.third())
+            && heard.contains_all(self.seventh())
+            && heard.contains_all(self.fifth())
             && !heard.intersection(self.tensions()).is_empty()
     }
-}
-
-/// Whether every one of `notes` is among `heard`.
-const fn has_all(heard: PcSet, notes: PcSet) -> bool {
-    notes.difference(heard).is_empty()
 }
 
 /// A set of cores, one bit each (bit `k` for the core whose [`Core::index`] is `k`).
@@ -477,16 +486,38 @@ mod tests {
         assert_eq!(Core::Major.class(9), ToneClass::Other);
         assert_eq!(Core::Minor.class(9), ToneClass::Other);
         assert_eq!(Core::Sus4.class(10), ToneClass::Other);
-        // A natural 11 over a major third is an avoid note.
+        // A natural 11 over a major third is an avoid note, and so is a second seventh.
         assert_eq!(Core::Dominant7.class(5), ToneClass::Other);
-        assert_eq!(Core::Power.tensions(), PcSet::EMPTY);
-        // 45 (core, tension) pairs in all, for the tension counts the reader learns.
-        assert_eq!(Core::ALL.iter().map(|c| c.tensions().len()).sum::<u32>(), 45);
+        assert_eq!(Core::Dominant7.class(11), ToneClass::Other);
+        // A seventh no other core has is carried: Cmaj7♯5, Cmaj7sus4, C7(no3).
+        assert_eq!(Core::Augmented.class(11), ToneClass::Tension);
+        assert_eq!(Core::Sus4.class(11), ToneClass::Tension);
+        assert_eq!(Core::Power.class(10), ToneClass::Tension);
+        // 51 (core, tension) pairs in all, for the tension counts the reader learns.
+        assert_eq!(Core::ALL.iter().map(|c| c.tensions().len()).sum::<u32>(), 51);
     }
 
     #[test]
-    fn the_tensions_are_the_chord_names_own_with_four_notes_judged_again() {
-        // `chord::role` on each core's own notes, with the notes it calls a tension, and the four it is overruled on.
+    fn a_seventh_belongs_to_the_core_that_has_it() {
+        for core in Core::ALL {
+            let iv = core.intervals();
+            for seventh in [10, 11].into_iter().filter(|&s| !iv.has(s)) {
+                let class = core.class(seventh);
+                if iv.has(10) || iv.has(11) {
+                    // Two sevenths clash.
+                    assert_eq!(class, ToneClass::Other, "{core:?} {seventh}");
+                } else {
+                    // C with a B♭ is C7, so the B♭ is wrong in a C major reading; C+ with a B is still C+.
+                    let moves = Core::of(iv.with(PitchClass::new(seventh))) != Some(core);
+                    assert_eq!(class == ToneClass::Other, moves, "{core:?} {seventh}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_tensions_are_the_chord_names_own_with_a_few_notes_judged_again() {
+        // `chord::role` on each core's own notes, with the notes it calls a tension, and those it is overruled on.
         let mut differ = Vec::new();
         for core in Core::ALL {
             let iv = core.intervals();
@@ -504,10 +535,17 @@ mod tests {
                 (Core::Major7, 9, false),
                 // Cm6 with an A♭: a semitone under the chord's own 6 (C D E♭ F G A B♭ is its scale).
                 (Core::Minor6, 8, true),
-                // Cdim7 with a B: a whole step above its 𝄫7, the diminished scale's fourth tension.
+                // A seventh no other core has (`a_seventh_belongs_to_the_core_that_has_it`): Cdim(maj7), Cdim7 with a
+                // B (the diminished scale's fourth tension), Cmaj7♯5, Cmaj7sus4, Cmaj7sus2, C7(no3), Cmaj7(no3).
                 (Core::Diminished7, 11, false),
+                (Core::Diminished, 11, false),
+                (Core::Augmented, 11, false),
+                (Core::Sus4, 11, false),
                 // Csus2 with a D♭: a semitone under the chord's own 2.
                 (Core::Sus2, 1, true),
+                (Core::Sus2, 11, false),
+                (Core::Power, 10, false),
+                (Core::Power, 11, false),
             ]
         );
     }
@@ -554,11 +592,11 @@ mod tests {
         for heard in every_set() {
             for core in Core::ALL {
                 let mut need = says(core);
-                let mut played = has_all(heard, need);
+                let mut played = heard.contains_all(need);
                 if core == Core::Dominant7Sus4 && !played {
                     // C D G B♭: the 2 standing in for the 4th.
                     need = need.without(PitchClass::new(5)).with(PitchClass::new(2));
-                    played = has_all(heard, need);
+                    played = heard.contains_all(need);
                 }
                 assert_eq!(valid(heard).contains(core), heard.has(0) && played, "{core:?} {heard}");
                 let rootless = matches!(
@@ -571,7 +609,7 @@ mod tests {
                         | Core::HalfDiminished
                         | Core::Dominant7Sus4
                 ) && !heard.has(0)
-                    && has_all(heard, says(core))
+                    && heard.contains_all(says(core))
                     && !heard.intersection(tensions(core)).is_empty();
                 assert_eq!(valid_rootless(heard).contains(core), rootless, "{core:?} rootless {heard}");
                 if rootless {
@@ -651,8 +689,9 @@ mod tests {
         assert_eq!(rootless("C", "E G B D"), [Major7]);
         // An upper structure: a D triad over C7's third and seventh (and again C6/9, where the B♭ is wrong).
         assert_eq!(rootless("C", "E Bb D F# A"), [Dominant7, Major6]);
-        // C9sus4 without C: its 4th, 7th and 9.
+        // C9sus4 without C: its 4th, 7th and 9. Without its 4th too, it isn't tried (D B♭ A is B♭maj7).
         assert_eq!(rootless("C", "F Bb D"), [Dominant7Sus4]);
+        assert!(rootless("C", "D Bb A").is_empty());
         // Dm9b5 in a minor ii-V, without its D (and as a Dm9, where the A♭ is wrong).
         assert_eq!(rootless("D", "F Ab C E"), [Minor7, HalfDiminished]);
         // A m7b5 needs its ♭5: without it, it is a m7.

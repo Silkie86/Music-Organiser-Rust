@@ -105,6 +105,11 @@ impl PcSet {
         self.0 >> pc.0 & 1 != 0
     }
 
+    /// Whether every pitch class in `other` is in it too (always so for an empty `other`).
+    pub const fn contains_all(self, other: PcSet) -> bool {
+        other.0 & !self.0 == 0
+    }
+
     /// Whether the interval this many semitones above the root is in a set of intervals (any whole number, round
     /// the octave: 14 is the 9th, the same as 2).
     pub const fn has(self, interval: i32) -> bool {
@@ -260,6 +265,8 @@ mod tests {
         assert_eq!(c_major.transposed(13), PcSet::of(&[1, 5, 8]));
         assert_eq!(c_major.transposed(-1), PcSet::of(&[11, 3, 6]));
         assert!(c_major.has(16) && !c_major.has(3));
+        assert!(c_major.contains_all(PcSet::of(&[0, 7])) && c_major.contains_all(PcSet::EMPTY));
+        assert!(!c_major.contains_all(PcSet::of(&[0, 3])));
         assert_eq!(c_major.iter().collect::<PcSet>(), c_major);
         assert_eq!((c_major.len(), PcSet::EMPTY.first(), a_minor.first()), (3, None, Some(PitchClass::C)));
         // Every set comes back from every turn.
