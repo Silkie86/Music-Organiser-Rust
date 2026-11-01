@@ -32,6 +32,26 @@ cd pop909cl && git sparse-checkout set --no-cone '/POP909_processed/*' '/POP909_
 python3 -I tools/theorybench/convert/pop909cl.py path/to/pop909cl path/to/bench/pop909cl.jsonl
 ```
 
+- **McGill Billboard** (CC0; Burgoyne, Wild and Fujinaga, ISMIR 2011): people's chord charts of US Billboard Hot 100
+  songs from 1958 to 1991, with their tonic. `convert/charts.py` plays each as a bass line under block chords, and
+  reads the key's mode from the tonic chord. They bring the blues and modal chords POP909 hardly has (a chord on the
+  flat 7th, say), and keyfit may learn from them.
+- **Rolling Stone 200** (de Clercq and Temperley's rock corpus, through ChoCo's JAMS files): 200 rock charts with
+  their tonic, played the same way, for measuring only: their licence isn't one keyfit learns from. The Billboard run
+  leaves out the 22 songs both have, so the rock songs stay unseen.
+
+```
+git clone --filter=blob:none --sparse https://github.com/boomerr1/the-mcgill-billboard-project.git billboard
+cd billboard && git sparse-checkout set --no-cone '/billboard-2.0-index.csv' '/billboard-2.0-salami_chords/*'
+git clone --filter=blob:none --sparse https://github.com/smashub/choco.git choco
+cd choco && git sparse-checkout set --no-cone '/partitions/rock-corpus/choco/*'
+python3 -I tools/theorybench/convert/charts.py jams choco/partitions/rock-corpus/choco/jams-converted \
+    choco/partitions/rock-corpus/choco/meta.csv rs200 "measuring only (RS200)" path/to/bench/rs200.jsonl \
+    --titles path/to/bench/rs200-titles.txt
+python3 -I tools/theorybench/convert/charts.py billboard billboard/billboard-2.0-salami_chords \
+    billboard/billboard-2.0-index.csv path/to/bench/billboard.jsonl --skip path/to/bench/rs200-titles.txt
+```
+
 ## Keys
 
 ```
@@ -65,9 +85,9 @@ often 1 to 4 bars).
 ## Fitting the key finder
 
 ```
-cargo run -p mo-theorybench --release -- keyfit path/to/bench/pop909cl.jsonl [--lambda-delta 1e-4|inf]
-    [--inputs full,tune,upper,bass,piano] [--picks 8] [--bars 1,2,4,8,16] [--dump <file>] [--against <file>]
-    [--hand 13,14,16] [--final | --write <weights.rs>]
+cargo run -p mo-theorybench --release -- keyfit path/to/bench/pop909cl.jsonl [more.jsonl...] [--lambda-delta 1e-4|inf]
+    [--inputs full,tune,upper,bass,piano] [--picks 8] [--bars 1,2,4,8,16] [--weigh <source>[/<input>]=<w>]
+    [--dump <file>] [--against <file>] [--hand 13,14,16] [--final | --write <weights.rs>]
 ```
 
 `keyfit` fits mo-harmony's key finder and measures it on songs held out of each fit, beside the C# app on the same
@@ -87,13 +107,21 @@ notes.
   tables a song is fitted with are counted without its own fifth of the songs.
 - **Calibration.** How sure a reading may be comes from held-out scores: a curve over the bars heard (1 to 16, flat
   past 16), offsets for the kind of input, a curve of its own that a loop adds, and an offset for a song.
+- **Sources.** Several files can be read at once (`keyfit pop909cl.jsonl billboard.jsonl rs200.jsonl`). keyfit
+  learns only from pieces whose licence lets the fitted weights ship (MIT, CC0, CC BY without NC, SA or ND: the
+  `licence` each converter writes). The rest are measured only, by the finders fitted without them, and never fall
+  in the kept-back fold. A piece with no tune (a chart) is heard as its full mix, its upper notes and its bass alone.
 - **Weighting.** Each set of cases (a cut and a kind of input) counts 1 in all, however many cases it has, and whole
-  songs as a full mix count 5. Counting every case the same instead lets the many one-bar windows outvote the rest: on
-  folds 1 to 4 that gave one-bar windows 46.2% (against 42.3%), but songs that change key 72.0% (against 79.6%).
+  songs as a full mix count 5. Counting every case the same instead lets the many one-bar windows outvote the rest:
+  on folds 1 to 4 that gave one-bar windows 46.2% (against 42.3%), but songs that change key 72.0% (against 79.6%).
+  Each source has sets of its own: `--weigh billboard=0.25` makes a source's sets count a quarter as much (0 counts
+  it in the tables only), and `--weigh billboard/upper=0` does the same for one kind of input.
 
 The report gives the full mix set by set as `keys` does, then a table of every kind of input against the C# app on
 the same notes. Its last column ("sure") is how sure the finder was on average: above its share right, it was too
-sure; below, not sure enough.
+sure; below, not sure enough. Both are for the first file's source. Each other source follows in short, set by set:
+how often the key, and the home note alone, was found by the C# app and by mo-harmony (a chart's key is its tonic
+with a mode read from its chords, so the home note is the fairer score), and mo-harmony's log-loss.
 
 - **Answers.** How sure each kind of answer must be at 1, 2, 4, 8, 16 and 32 bars (whole songs take the last) is
   fitted on held-out chances (`answerfit.rs`): the smallest chance at which the answers of that kind, given by at least

@@ -1847,6 +1847,64 @@ mod tests {
         assert_eq!(named, ["Whole songs with one key, full mix: 20 of 60 cases not in both runs, left out"]);
     }
 
+    /// A piece from a source with a licence, its one note as long as `n` ticks so no two share a shape.
+    fn piece(source: &str, n: i64, licence: &str) -> Item {
+        serde_json::from_str(&format!(
+            r#"{{"source":"{source}","id":"{n:03}","ppq":96,"length":4096,"licence":"{licence}",
+                "parts":[{{"role":"melody","notes":[[0,{n},60,100]]}}],"keys":[[0,4096,"C:maj"]]}}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn only_shippable_licences_are_learned_from_and_the_rest_stay_out_of_the_kept_back_fold() {
+        let items: Vec<Item> = (1..=200)
+            .map(|n| if n % 2 == 0 { piece("a", n, "MIT") } else { piece("b", n, "measuring only") })
+            .collect();
+        let sources = vec!["a".to_owned(), "b".to_owned()];
+        let weigh = HashMap::from([("a".to_owned(), 0.5), ("a/upper".to_owned(), 0.0)]);
+        let songs = songs_of(&items, &sources, &weigh);
+        for (item, song) in items.iter().zip(&songs) {
+            assert_eq!(song.learn, item.source == "a");
+            assert_eq!(song.group, usize::from(item.source == "b"));
+            if song.learn {
+                assert_eq!((song.weight(Input::Full), song.weight(Input::Upper)), (0.5, 0.0));
+            } else {
+                assert_ne!(song.fold, FROZEN, "{} is only measured", song.name);
+                assert!(Input::ALL.iter().all(|&i| song.weight(i) == 0.0));
+            }
+        }
+        // The kept-back fold still gets its share of the songs learned from.
+        assert!(songs.iter().any(|s| s.learn && s.fold == FROZEN));
+    }
+
+    #[test]
+    fn each_source_has_sets_of_its_own_weighed_as_asked() {
+        // Songs 0 to 2 from one source, 3 and 4 from another weighed 0.5: each source's whole songs add up to the
+        // songs' set weight times its own.
+        let songs: Vec<Song> = (0..5)
+            .map(|i| Song {
+                name: format!("s/{i}"),
+                fold: 1,
+                inner: 0,
+                group: usize::from(i >= 3),
+                learn: true,
+                weight: [if i >= 3 { 0.5 } else { 1.0 }; 5],
+            })
+            .collect();
+        let cases: Vec<Case> = (0..5).map(song_case).collect();
+        let w = case_weights(&cases, &songs, |_| true);
+        assert!((w[..3].iter().sum::<f64>() - SONG_WEIGHT).abs() < 1e-12, "{w:?}");
+        assert!((w[3..].iter().sum::<f64>() - 0.5 * SONG_WEIGHT).abs() < 1e-12, "{w:?}");
+        // A song only measured counts nothing, and leaves the others' shares as they were.
+        let mut measured = songs;
+        measured[4].learn = false;
+        measured[4].weight = [0.0; 5];
+        let w = case_weights(&cases, &measured, |_| true);
+        assert_eq!(w[4], 0.0);
+        assert!((w[3] - 0.5 * SONG_WEIGHT / 2.0).abs() < 1e-12, "{w:?}");
+    }
+
     #[test]
     fn folds_are_drawn_by_name() {
         // Fixed for good: changing the hash would move songs in and out of the kept-back fold.

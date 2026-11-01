@@ -164,3 +164,20 @@ pub fn read_lines<T: DeserializeOwned>(path: &Path) -> Result<Vec<T>, String> {
     }
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_licences_that_let_fitted_weights_ship_are_learned_from() {
+        let bare: Item = serde_json::from_str(r#"{"source":"x","id":"1","ppq":96,"length":96,"parts":[]}"#).unwrap();
+        let with = |licence: &str| Item { licence: licence.to_owned(), ..bare.clone() };
+        for yes in ["MIT", "CC0", "CC0-1.0", "CC BY 4.0", "CC-BY-4.0", "cc by"] {
+            assert!(with(yes).may_learn(), "{yes}");
+        }
+        for no in ["", "CC BY-NC-SA 4.0", "CC BY-SA 4.0", "CC BY-ND 4.0", "ODbL", "GPL-3.0", "measuring only (RS200)"] {
+            assert!(!with(no).may_learn(), "{no}");
+        }
+    }
+}
