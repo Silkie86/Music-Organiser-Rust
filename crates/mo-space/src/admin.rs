@@ -1,6 +1,6 @@
 //! The administrator step: one step the app needs administrator rights for (a plugin folder Windows guards, such as
-//! Spectrasonics' in ProgramData, renamed for a move; a link it guards pointed somewhere else; a file it guards sent to
-//! the Recycle Bin). The app starts itself again as administrator for just that step, Windows asks you once, and the app
+//! Spectrasonics' in ProgramData, checked before a move and renamed for it; a link it guards pointed somewhere else; a
+//! file it guards sent to the Recycle Bin). The app starts itself again as administrator for just that step, Windows asks you once, and the app
 //! waits for it, the same as Explorer's "You'll need to provide administrator permission". The C# app's `AdminStep`.
 //!
 //! How the two copies of the app talk: the app writes what the step is to do in a list in your Temp folder, and starts
@@ -25,13 +25,13 @@ use sha2::{Digest, Sha256};
 
 use crate::after_move::relink;
 use crate::clean::{Bin, NEEDS_ADMIN, SystemBin};
-use crate::folder_move::{CantMove, leads_to, swap, unswap};
+use crate::folder_move::{CantMove, check_rename, leads_to, swap, unswap};
 use crate::plugin_clean::made_by_the_system;
 use crate::size::is_link;
 use crate::{is_dir, key, not_there, real_path, text};
 
-/// The flag the app is started with to rename or link a folder Windows guards: `--move-folder swap|unswap|relink
-/// <list> <result> <fingerprint>`.
+/// The flag the app is started with to rename or link a folder Windows guards: `--move-folder
+/// check|swap|unswap|relink <list> <result> <fingerprint>`.
 pub const MOVE_FOLDER: &str = "--move-folder";
 
 /// The flag the app is started with to send files Windows guards to the Recycle Bin: `--recycle-bin <list> <result>
@@ -167,6 +167,8 @@ fn quoted(arg: &str) -> String {
 /// A step and what its list's lines hold (separated by tabs).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Step {
+    /// `from`: renamed and straight back, to learn before copying whether the swap will work.
+    Check,
     /// `from`, `to`, `aside`: the folder becomes `aside` and a link to `to` takes its name.
     Swap,
     /// `from`, `restore`, `to`: the link to `to` goes and `restore` takes its name.
@@ -178,11 +180,12 @@ pub(crate) enum Step {
 }
 
 impl Step {
-    const ALL: [Step; 4] = [Step::Swap, Step::Unswap, Step::Relink, Step::Bin];
+    const ALL: [Step; 5] = [Step::Check, Step::Swap, Step::Unswap, Step::Relink, Step::Bin];
 
     /// What the app is started with for this step, before the list, the result and the fingerprint.
     fn flags(self) -> &'static [&'static str] {
         match self {
+            Step::Check => &[MOVE_FOLDER, "check"],
             Step::Swap => &[MOVE_FOLDER, "swap"],
             Step::Unswap => &[MOVE_FOLDER, "unswap"],
             Step::Relink => &[MOVE_FOLDER, "relink"],
@@ -402,6 +405,7 @@ pub fn run_step_with(args: &[String], bin: &dyn Bin) -> bool {
 /// Does one line of the step, as administrator, once its paths are checked again.
 fn do_line(step: Step, fields: &[&str], bin: &dyn Bin) -> Outcome {
     let checked = match (step, fields) {
+        (Step::Check, [from]) => check_here(from),
         (Step::Swap, [from, to, aside]) => swap_here(from, to, aside),
         (Step::Unswap, [from, restore, to]) => unswap_here(from, restore, to),
         (Step::Relink, [at, target]) => relink_here(at, target),
@@ -409,6 +413,14 @@ fn do_line(step: Step, fields: &[&str], bin: &dyn Bin) -> Outcome {
         _ => Err("The list wasn't as the app writes it.".to_owned()),
     };
     checked.unwrap_or_else(Outcome::Kept)
+}
+
+fn check_here(from: &str) -> Result<Outcome, String> {
+    plain(from)?;
+    if is_link(Path::new(from)) || !is_dir(from) {
+        return Err(format!("{from} isn't a real folder now, so it was left alone."));
+    }
+    Ok(check_rename(from).map_or_else(|why| said(&why), |()| Outcome::Done))
 }
 
 fn swap_here(from: &str, to: &str, aside: &str) -> Result<Outcome, String> {

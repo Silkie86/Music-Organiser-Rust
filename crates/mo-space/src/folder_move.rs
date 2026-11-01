@@ -401,7 +401,7 @@ pub fn move_folder(
     }
     let to = target(&from, destination);
     // Find out before copying whether Windows lets the folder be renamed, rather than after an hour of copying. One it
-    // guards is swapped as administrator: Windows asks then.
+    // guards is checked as administrator now and swapped as administrator after the copy: Windows asks both times.
     check_rename_or_ask(&from, drives.admin())?;
     let leave_out = left_out(&from, already_moved);
     let tree = Tree { leave_out: &leave_out, ..Tree::new(Path::new(&from), &to, &to) };
@@ -806,13 +806,30 @@ pub(crate) fn denied(e: &io::Error) -> bool {
     e.kind() == io::ErrorKind::PermissionDenied
 }
 
-/// [`check_rename`], except that a folder Windows guards is fine when `admin` can ask: the swap is done as
-/// administrator then.
+/// [`check_rename`], as administrator when Windows guards the folder and `admin` can ask (Windows asks you then, and
+/// again for the swap after the copy). So a folder even the administrator can't rename, because the DAW has a file in it
+/// open, is found before copying rather than after. What's there afterwards decides how it went, as for the swap.
 pub(crate) fn check_rename_or_ask(from: &str, admin: &dyn Admin) -> Result<(), CantMove> {
     match check_rename(from) {
-        Err(CantMove::NeedsAdmin) if admin.can_ask() => Ok(()),
-        other => other,
+        Err(CantMove::NeedsAdmin) if admin.can_ask() => {}
+        other => return other,
     }
+    let check = format!("{from}{CHECK_SUFFIX}");
+    let said = ask_for(admin, Step::Check, &[vec![real_spot(from)]]);
+    if real_folder(from) && not_there(Path::new(&check)) {
+        return match said {
+            Ok(outcomes) if outcomes.first() == Some(&Outcome::Done) => Ok(()),
+            other => Err(as_it_was(other, "The administrator step finished, but couldn't check the folder.")),
+        };
+    }
+    Err(not_as_expected(
+        said,
+        format!(
+            "After the administrator's check, {from} should be as it was, but it isn't quite: look at it, and for \
+             \"{}\" beside it, before trying again. Nothing was copied.",
+            file_name(&check)
+        ),
+    ))
 }
 
 /// Renames the folder and straight back, to learn whether the swap will work.

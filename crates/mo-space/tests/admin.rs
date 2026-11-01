@@ -173,6 +173,41 @@ fn the_swap_is_checked_again_line_by_line_before_it_happens() {
 }
 
 #[test]
+fn the_check_before_copying_renames_the_folder_and_back_and_only_a_real_folder() {
+    let dir = fixtures("mo-space-admin-check-step");
+    let plugins = dir.join("Plugins");
+    let from = plugins.join("Serum Presets");
+    fs::create_dir_all(from.join("Factory")).unwrap();
+    let checking = plugins.join("Serum Presets (checking)");
+
+    // As the app writes it: renamed and straight back.
+    let said = move_step(&dir, "check", &[&from]);
+    assert!(said.contains("\tdone\t"), "{said}");
+    assert!(!is_link(&from) && from.join("Factory").is_dir() && !checking.exists());
+
+    // Reached through a link now: left alone.
+    folder_link(&plugins, &dir.join("Plugins link"));
+    let said = move_step(&dir, "check", &[&dir.join("Plugins link").join("Serum Presets")]);
+    assert!(said.contains("\tkept\t") && said.contains("reached through a link"), "{said}");
+
+    // Something is called "… (checking)" already: it isn't renamed over it.
+    fs::create_dir_all(&checking).unwrap();
+    let said = move_step(&dir, "check", &[&from]);
+    assert!(said.contains("\tkept\t") && said.contains("(checking) beside it"), "{said}");
+    assert!(from.join("Factory").is_dir() && checking.is_dir());
+    fs::remove_dir(&checking).unwrap();
+
+    // A link in its place, or nothing there: left alone.
+    let link = plugins.join("Serum Link");
+    folder_link(&from, &link);
+    let said = move_step(&dir, "check", &[&link]);
+    assert!(said.contains("\tkept\t") && said.contains("isn't a real folder now"), "{said}");
+    assert!(is_link(&link) && !plugins.join("Serum Link (checking)").exists());
+    let said = move_step(&dir, "check", &[&plugins.join("Gone")]);
+    assert!(said.contains("\tkept\t") && said.contains("isn't a real folder now"), "{said}");
+}
+
+#[test]
 fn putting_a_folder_back_is_checked_again_line_by_line_before_it_happens() {
     let dir = fixtures("mo-space-admin-unswap-checks");
     let plugins = dir.join("Plugins");
@@ -216,7 +251,7 @@ mod guarded {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     use mo_space::admin::{Admin, NoAdmin, run_step_with};
@@ -402,8 +437,8 @@ mod guarded {
             &stop,
         );
         let moved = moved.unwrap();
-        // Asked once, at the swap: the copy was made as you.
-        assert_eq!(unlock.asked(), 1);
+        // Asked twice: to check the folder can be renamed before copying, and for the swap. The copy was made as you.
+        assert_eq!(unlock.asked(), 2);
         assert!(fs::symlink_metadata(&from).unwrap().file_type().is_symlink());
         assert_eq!(real(&from), real(&d.join("Spectrasonics")));
         assert_eq!(fs::read_to_string(guarded.join("Spectrasonics (old copy)/Pad.db")).unwrap(), "pad");
@@ -412,7 +447,7 @@ mod guarded {
         write(&d, "Spectrasonics/User.db", "mine");
         let back = mo_space::folder_move::move_back(&moved, &drives, &nothing, &stop).unwrap();
         assert!(back.kept.is_empty());
-        assert_eq!(unlock.asked(), 2);
+        assert_eq!(unlock.asked(), 3);
         assert!(!fs::symlink_metadata(&from).unwrap().file_type().is_symlink());
         assert_eq!(fs::read_to_string(from.join("User.db")).unwrap(), "mine");
         assert!(!guarded.join("Spectrasonics (old copy)").exists());
@@ -431,6 +466,11 @@ mod guarded {
         let from = guarded.join("Spectrasonics");
         lock(&guarded, true);
         let stop = AtomicBool::new(false);
+        // Bytes copied, by any of the moves below: none, as each stops before copying.
+        let copied = AtomicU64::new(0);
+        let progress = |n: u64| {
+            copied.fetch_add(n.max(1), Ordering::SeqCst);
+        };
         let move_it = |drives: &dyn Drives| {
             mo_space::folder_move::move_folder(
                 &s(&from),
@@ -439,11 +479,11 @@ mod guarded {
                 ("omnisphere", mo_space::plugin_space::SpaceKind::Sounds, &[]),
                 drives,
                 &[],
-                &nothing,
+                &progress,
                 &stop,
             )
         };
-        // You said no: the copy made meanwhile goes, and the folder is as it was.
+        // You said no (Windows asks before copying): nothing is copied, and the folder is as it was.
         let no = Unlock { no: true, ..Unlock::new(&[&guarded]) };
         let said = move_it(&OtherDrive(&no)).unwrap_err().text();
         assert_eq!(said, "You said no to Windows' administrator question. Nothing was moved.");
@@ -456,14 +496,17 @@ mod guarded {
         assert_eq!(said, mo_space::folder_move::CantMove::NeedsAdmin);
         assert!(!d.join("Spectrasonics").exists());
 
-        // Allowed, but Windows says no even then (the DAW has a file in it open): it says to close it.
+        // Allowed, but Windows says no even then (the DAW has a file in it open): found before copying, and it says to
+        // close it.
         let in_use = Unlock::new(&[]);
         let said = move_it(&OtherDrive(&in_use)).unwrap_err().text();
         assert!(said.contains("even as administrator") && said.contains("close your DAW"), "{said}");
         assert!(said.ends_with("Nothing was moved."), "{said}");
         assert_eq!(in_use.asked(), 1);
         assert!(!d.join("Spectrasonics").exists());
+        assert!(!guarded.join("Spectrasonics (checking)").exists());
         assert_eq!(fs::read_to_string(from.join("Pad.db")).unwrap(), "pad");
+        assert_eq!(copied.load(Ordering::SeqCst), 0);
         lock(&guarded, false);
     }
 
