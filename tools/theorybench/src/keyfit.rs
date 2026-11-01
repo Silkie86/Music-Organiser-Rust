@@ -31,7 +31,8 @@
 //! - **Sources.** Several files can be read at once. Only pieces whose licence lets fitted weights ship (MIT, CC0,
 //!   CC BY: [`Item::may_learn`]) are learned from; the rest are measured only, by finders fitted without them, and
 //!   never land in the kept-back fold. `--weigh source=w` sets how much a source's sets count in the fit and the
-//!   calibration (1 unless it says otherwise; 0 counts it in the tables only). The report puts the first file's
+//!   calibration (1 unless it says otherwise; 0 counts it in the tables only), and `--weigh source/input=w` one
+//!   kind of input's sets (`billboard/upper=0`). The report puts the first file's
 //!   source first, as before, then each other source, with how often the key's tonic was found (chord charts label
 //!   only the tonic).
 
@@ -111,8 +112,13 @@ impl Input {
         }
     }
 
+    /// The first word of its name, as the command line gives it.
+    fn short(self) -> &'static str {
+        self.name().split(' ').next().unwrap_or_default()
+    }
+
     fn parse(text: &str) -> Option<Input> {
-        Input::ALL.into_iter().find(|i| i.name().split(' ').next() == Some(text))
+        Input::ALL.into_iter().find(|i| i.short() == text)
     }
 }
 
@@ -214,8 +220,16 @@ struct Song {
     group: usize,
     /// Its licence lets fitted weights ship, so it's learned from; the rest are only measured.
     learn: bool,
-    /// How much its source's sets count in the fit and the calibration (`--weigh`; 0 when it's only measured).
-    weight: f64,
+    /// How much its source's sets count in the fit and the calibration, for each kind of input in `Input::ALL`'s
+    /// order (`--weigh`; 0 when it's only measured).
+    weight: [f64; 5],
+}
+
+impl Song {
+    /// How much its sets of this kind of input count.
+    fn weight(&self, input: Input) -> f64 {
+        self.weight.get(input as usize).copied().unwrap_or(0.0)
+    }
 }
 
 /// The name a song's fold is drawn from: POP909 and POP909-CL share their songs' names.
@@ -262,7 +276,11 @@ fn songs_of(items: &[Item], sources: &[String], weigh: &HashMap<String, f64>) ->
                 inner: (h / FOLDS % INNER) as usize,
                 group: sources.iter().position(|s| *s == item.source).unwrap_or(0),
                 learn,
-                weight: if learn { weigh.get(&item.source).copied().unwrap_or(1.0) } else { 0.0 },
+                weight: Input::ALL.map(|input| {
+                    let named = format!("{}/{}", item.source, input.short());
+                    let w = weigh.get(&named).or_else(|| weigh.get(&item.source)).copied().unwrap_or(1.0);
+                    if learn { w } else { 0.0 }
+                }),
             }
         })
         .collect()
@@ -585,7 +603,7 @@ fn set_weight(cut: Cut, input: Input) -> f64 {
 /// Each case's share of its set's weight, over the cases `keep` takes (0 for the rest). Each source has sets of its
 /// own, which count as much as its songs' weight says (`--weigh`).
 fn case_weights(cases: &[Case], songs: &[Song], keep: impl Fn(&Case) -> bool) -> Vec<f64> {
-    let song = |c: &Case| songs.get(c.song).map_or((0, 0.0), |s| (s.group, s.weight));
+    let song = |c: &Case| songs.get(c.song).map_or((0, 0.0), |s| (s.group, s.weight(c.input)));
     let mut sizes: HashMap<(usize, Cut, Input), usize> = HashMap::new();
     for c in cases.iter().filter(|c| keep(c)) {
         *sizes.entry((song(c).0, c.cut, c.input)).or_default() += 1;
@@ -830,7 +848,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
             [o, v] if o == "--against" => before = Some(PathBuf::from(v)),
             [o, v] if o == "--hand" => show = v.split(',').map(|n| n.trim().to_owned()).collect(),
             [o, v] if o == "--weigh" => {
-                let bad = || format!("--weigh {v}: give a source and a weight of 0 or more, such as billboard=0.5");
+                let bad =
+                    || format!("--weigh {v}: give a source (or source/input) and a weight of 0 or more: billboard=0.5");
                 let (source, w) = v.split_once('=').ok_or_else(bad)?;
                 let w = w.parse::<f64>().ok().filter(|w| w.is_finite() && *w >= 0.0).ok_or_else(bad)?;
                 weigh.insert(source.trim().to_owned(), w);
@@ -878,20 +897,29 @@ pub fn run(args: &[String]) -> Result<(), String> {
             sources.push(item.source.clone());
         }
     }
-    if let Some(unknown) = weigh.keys().find(|w| !sources.contains(w)) {
-        return Err(format!("--weigh {unknown}: no piece read comes from {unknown}"));
+    for named in weigh.keys() {
+        let (source, input) = named.split_once('/').map_or((named.as_str(), None), |(s, i)| (s, Some(i)));
+        if !sources.iter().any(|s| s == source) {
+            return Err(format!("--weigh {named}: no piece read comes from {source}"));
+        }
+        if let Some(input) = input.filter(|i| Input::parse(i).is_none()) {
+            return Err(format!("--weigh {named}: {input}? (full, tune, upper, bass, piano)"));
+        }
     }
     let songs = songs_of(&setup.items, &sources, &weigh);
     for (g, source) in sources.iter().enumerate() {
         let of: Vec<&Song> = songs.iter().filter(|s| s.group == g).collect();
         let learned = of.iter().filter(|s| s.learn).count();
-        let weight = of.first().map_or(1.0, |s| s.weight);
+        let weights = of.first().map_or([1.0; 5], |s| s.weight);
         let how = if learned == 0 {
             "measured only (its licence doesn't let fitted weights ship)".to_owned()
-        } else if weight > 0.0 {
-            format!("learned from, its sets counting {weight}")
-        } else {
+        } else if weights.iter().all(|w| *w == 0.0) {
             "counted in the tables only".to_owned()
+        } else if weights.iter().all(|w| *w == weights[0]) {
+            format!("learned from, its sets counting {}", weights[0])
+        } else {
+            let each: Vec<String> = Input::ALL.iter().zip(weights).map(|(i, w)| format!("{} {w}", i.short())).collect();
+            format!("learned from, its sets counting {}", each.join(", "))
         };
         println!("{source}: {} songs, {how}.", of.len());
     }
@@ -923,7 +951,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let group = |c: &Case| songs.get(c.song).map_or(usize::MAX, |s| s.group);
     let learn = |s: usize| songs.get(s).is_some_and(|g| g.learn);
     // The cases the calibration and the answers' thresholds are fitted on: those the fit learns from.
-    let taught = |c: &Case| songs.get(c.song).is_some_and(|s| s.learn && s.weight > 0.0);
+    let taught = |c: &Case| songs.get(c.song).is_some_and(|s| s.learn && s.weight(c.input) > 0.0);
     let design: Vec<usize> = (0..FOLDS as usize).filter(|&f| f != FROZEN).collect();
     let every: Vec<usize> = (0..FOLDS as usize).collect();
 
@@ -1760,7 +1788,14 @@ mod tests {
     #[test]
     fn a_dumped_run_is_read_back_case_by_case() {
         let songs: Vec<Song> = (0..3)
-            .map(|i| Song { name: format!("pop909/{i:03}"), fold: 1, inner: 0, group: 0, learn: true, weight: 1.0 })
+            .map(|i| Song {
+                name: format!("pop909/{i:03}"),
+                fold: 1,
+                inner: 0,
+                group: 0,
+                learn: true,
+                weight: [1.0; 5],
+            })
             .collect();
         let cases: Vec<Case> = (0..3).map(song_case).collect();
         let chances = vec![c_or_a(0.9), c_or_a(0.2), None];
@@ -1784,7 +1819,14 @@ mod tests {
     #[test]
     fn a_set_that_got_worse_beyond_its_range_is_named() {
         let songs: Vec<Song> = (0..60)
-            .map(|i| Song { name: format!("pop909/{i:03}"), fold: 1, inner: 0, group: 0, learn: true, weight: 1.0 })
+            .map(|i| Song {
+                name: format!("pop909/{i:03}"),
+                fold: 1,
+                inner: 0,
+                group: 0,
+                learn: true,
+                weight: [1.0; 5],
+            })
             .collect();
         let cases: Vec<Case> = (0..60).map(song_case).collect();
         let sure: Vec<Option<[f64; 24]>> = (0..60).map(|_| c_or_a(0.9)).collect();
