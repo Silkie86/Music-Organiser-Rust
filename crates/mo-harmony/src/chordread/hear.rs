@@ -172,6 +172,14 @@ impl BassTexture {
             _ => BassTexture::None,
         }
     }
+
+    /// The note held, when the bass holds one.
+    pub const fn held(self) -> Option<PitchClass> {
+        match self {
+            BassTexture::Held(pc) => Some(pc),
+            BassTexture::Moving | BassTexture::None => None,
+        }
+    }
 }
 
 /// A note as the reader hears it. Its ticks count from the start of the first unit ([`Hearing::tick`] turns them
@@ -409,7 +417,13 @@ impl Hearing {
     pub fn strength_at(&self, tick: i64) -> Option<Level> {
         let unit = self.layout.unit_at(tick.max(0));
         let late = tick.saturating_sub(self.layout.start(unit));
-        (late < (self.layout.unit_ticks() / 4).max(1)).then(|| self.layout.level(unit))
+        (late < self.together()).then(|| self.layout.level(unit))
+    }
+
+    /// Notes struck within a quarter of a unit of each other are one strike, and one struck that little after a unit
+    /// starts is struck on its start: that's a player's timing.
+    fn together(&self) -> i64 {
+        (self.layout.unit_ticks() / 4).max(1)
     }
 
     /// Whether some notes were left out because they lay further apart than [`MOST_UNITS`] units (a damaged file).
@@ -862,6 +876,12 @@ pub fn presence_of(chords: &PerPitch<u64>, bass: &PerPitch<u64>, held_tune: &Per
 pub fn heard_in(ticks: &PerPitch<u64>, sounding: u64) -> PcSet {
     let s = u128::from(sounding.max(1));
     PitchClass::ALL.into_iter().filter(|&pc| 4 * u128::from(ticks[pc]) >= s).collect()
+}
+
+/// The notes played: heard ([`heard_in`]) counting only the chords and the tune's held notes, not the bass, from their
+/// masses and the ticks in which a chord or bass note sounds.
+pub fn played_in(chords: &PerPitch<u64>, held_tune: &PerPitch<u64>, sounding: u64) -> PcSet {
+    heard_in(&presence_of(chords, &PerPitch::default(), held_tune), sounding)
 }
 
 /// Whether a chord part's notes struck in one felt beat (in order of their start) play a broken chord there: see

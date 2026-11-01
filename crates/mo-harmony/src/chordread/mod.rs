@@ -50,7 +50,7 @@ pub use cores::{Core, CoreSet, Group, ToneClass, valid, valid_rootless};
 pub use decode::{Chance, DecodedSpan, Decoder, Decoding, KEEP, PinnedSpan, SHARPNESS, SPAN_BARS};
 pub use hear::{
     BASS_GAP, BassTexture, HeardNote, Hearing, Level, Line, MOST_UNITS, Mass, Push, Shape, Shaped, Stream, Unit,
-    heard_in, presence_of,
+    heard_in, played_in, presence_of,
 };
 pub use name::{BassKind, NamedSpan, Namer, Naming, Reading, SpanFlags};
 pub use score::{Evidence, Feature, PerFeature, Scored, Scorer, Scoring, SpanFacts};

@@ -256,6 +256,21 @@ fn named_cases() -> Vec<(&'static str, Music, Vec<Want>)> {
             ],
         ),
         (
+            "4 C7 C7/Bb | F/A, its own seventh",
+            keys_bass("C2 (1-2) Bb1 (3-4) | A1", "C4 E4 G4 Bb4 | A3 C4 F4"),
+            vec![Cuts(&[0, 4, B]), Writes(0, "C7", Root), Writes(4, "C7/Bb", Inversion), Writes(B, "F/A", Inversion)],
+        ),
+        (
+            "4 C7, never cut where the bass plays B",
+            keys_bass("C2 (1-2) B1 (3-4) | A1", "C4 E4 G4 Bb4 | A3 C4 E4"),
+            vec![Cuts(&[0, B]), Writes(0, "C7", Moving), Never(&["/B"])],
+        ),
+        (
+            "4 Cmaj7, never cut where the bass plays Bb",
+            keys_bass("C2 (1-2) Bb1 (3-4) | A1", "C4 E4 G4 B4 | A3 C4 F4"),
+            vec![Cuts(&[0, B]), Writes(0, "Cmaj7", Moving)],
+        ),
+        (
             "5 C | F, never C/G",
             keys_bass("C2 (1-2) G2 (3-4) | F2", "C4 E4 G4 | F3 A3 C4"),
             vec![Cuts(&[0, B]), Writes(0, "C", Moving), Writes(B, "F", Root)],
@@ -923,5 +938,31 @@ fn show_the_cases_named() {
         let over: Vec<Span> =
             spans.into_iter().filter(|s| s.units.start < units.end && units.start < s.units.end).collect();
         println!("{name} over {units:?}\n{}", render(&over));
+    }
+}
+
+#[test]
+#[ignore = "times naming a long song and a dense part, once they're read (run with --release)"]
+fn show_the_naming_speed() {
+    for (what, music) in [("a 64-bar song", song()), ("16 dense bars", dense(16))] {
+        let hearing = music.hear();
+        let (mut decoder, mut decoding) = (Decoder::new(), Decoding::new());
+        assert!(decoder.decode(&hearing, &HAND, &COUNTED, &[], &mut decoding));
+        let (mut namer, mut naming) = (Namer::new(), Naming::new());
+        let mut times = Vec::new();
+        for _ in 0..50 {
+            let started = std::time::Instant::now();
+            namer.name(&hearing, &decoder, &decoding, 6, &mut naming);
+            times.push(started.elapsed());
+        }
+        times.sort();
+        let readings: usize = naming.spans().iter().map(|s| naming.readings(s).len()).sum();
+        let chances: usize = decoding.spans().iter().map(|s| decoding.chances(s).len()).sum();
+        println!(
+            "{what}: {} spans, {chances} chances named into {readings} readings, in {:?} (the middle of 50; {:?} at most)",
+            naming.spans().len(),
+            times[25],
+            times[49]
+        );
     }
 }

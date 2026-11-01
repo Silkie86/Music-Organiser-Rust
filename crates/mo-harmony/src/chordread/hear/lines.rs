@@ -178,13 +178,7 @@ impl Hearing {
         n.key % 12 == bass % 12 && !self.strike_notes(strike).any(|(_, m)| other_below(&m))
     }
 
-    /// Notes struck within a quarter of a unit of each other are one strike.
-    fn together(&self) -> i64 {
-        (self.layout.unit_ticks() / 4).max(1)
-    }
-
     fn step(&self, note: usize, n: &HeardNote) -> Step {
-        // Struck a little late (by less than a quarter of a unit) is on the unit's start: that's a player's timing.
         let weight = self.strength_at(n.start).map_or(0, Level::weight);
         let length = n.length.max(1);
         Step { note, key: n.key, start: n.start, end: n.start.saturating_add(length), length, weight, shaped: true }

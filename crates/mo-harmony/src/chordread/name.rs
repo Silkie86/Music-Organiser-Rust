@@ -52,7 +52,7 @@ use std::ops::Range;
 use super::candidates::Label;
 use super::cores::Core;
 use super::decode::{Chance, DecodedSpan, Decoder, Decoding};
-use super::hear::{BassTexture, Hearing, Level, Line, Mass, Shaped, Stream, heard_in, presence_of};
+use super::hear::{BassTexture, Hearing, Level, Line, Mass, Push, Shaped, Stream, played_in};
 use crate::chord::{Chord, Family, ToneRole, role};
 use crate::pitch::{PcSet, PerPitch, PitchClass};
 
@@ -213,13 +213,16 @@ struct Part {
     sound: Range<usize>,
     label: Option<Label>,
     pushed: bool,
+    /// Where its chord is struck when it's pushed, in ticks from the first unit's start.
+    struck_at: Option<i64>,
     rest: bool,
     change: f64,
     split: bool,
     /// How the bass behaves over its sound.
     bass: BassTexture,
     pedal: bool,
-    /// The roots of the chords read before it and after it (round a loop), when they're chords.
+    /// The roots of the chords read before it and after it (round a loop), when they're chords. The halves of a span
+    /// cut in two keep the span's: the chord after the first half is the same chord, not where it goes.
     before: Option<PitchClass>,
     after: Option<PitchClass>,
 }
@@ -227,7 +230,8 @@ struct Part {
 /// What a part sounds, for naming each reading on it.
 #[derive(Clone, Debug)]
 struct Sound {
-    /// Its sound, in ticks from the first unit's start.
+    /// Its sound: its units, and where they start and end in ticks from the first unit's start.
+    units: Range<usize>,
     from: i64,
     to: i64,
     /// S, the ticks of its sound in which a chord or bass note sounds.
@@ -235,10 +239,43 @@ struct Sound {
     /// The notes heard (P), and those heard counting only the chords and the tune's held notes.
     heard: PcSet,
     played: PcSet,
-    /// The chords' ticks of each pitch class ([`Mass::Harmony`]).
-    chords: PerPitch<u64>,
     bass: BassTexture,
     lowest: Option<PitchClass>,
+}
+
+/// A note that sounds in the part being named, with what it may count for in the gate whatever the reading.
+#[derive(Clone, Copy, Debug)]
+struct Near {
+    pc: PitchClass,
+    /// Its place in the notes.
+    note: usize,
+    /// Its shaped notes, as places in `Namer::near_shaped`.
+    shaped: (usize, usize),
+    counts: Counts,
+}
+
+/// What a note may count for in the gate, unless it only passes by under the reading.
+#[derive(Clone, Copy, Debug)]
+enum Counts {
+    /// Nothing: it isn't struck in the part, it's the bass, or it's a tune note too short or struck too weakly.
+    Nothing,
+    /// Struck in the chords in the part: the pitch classes of the chords and the bass sounding in its unit, and its felt
+    /// beat when it's in a broken chord.
+    Chords { with: PcSet, beat: Option<usize> },
+    /// A tune note struck on a felt beat or stronger and held a felt beat or more: where its own sound (not what it
+    /// holds over a bar line) starts and ends in the part.
+    Tune { start: i64, end: i64 },
+}
+
+/// A stretch in which a note sounds in the chords on the part being named: its own sound (not what it holds over a bar
+/// line), less the units in which it's heard as the bass.
+#[derive(Clone, Copy, Debug)]
+struct Piece {
+    pc: PitchClass,
+    start: i64,
+    end: i64,
+    /// Its note's shaped notes, as places in `Namer::near_shaped`.
+    shaped: (usize, usize),
 }
 
 /// A reading being named, before the readings written the same are put together.
@@ -262,12 +299,20 @@ pub struct Namer {
     shaped: Vec<Shaped>,
     longest_shaped: i64,
     longest_note: i64,
-    /// The notes and the shaped notes that sound in the part being named, the notes by their places, and the chords'
-    /// pitch classes there from the lowest note up.
-    near: Vec<usize>,
+    /// On the part being named: the notes that sound there in order of their pitch class, then of where they start; the
+    /// shaped notes there in order of their note, then of where their shaped part starts; the pieces of the chords
+    /// there in order of their pitch class; each pitch class's ticks in the chords, and those with a shaped note among
+    /// them (which may pass by under a reading); and the chords' pitch classes from the lowest note up.
+    near: Vec<Near>,
+    in_order: Vec<Near>,
     near_shaped: Vec<Shaped>,
+    pieces: Vec<Piece>,
+    in_chords: PerPitch<u64>,
+    shaped_in_chords: PcSet,
     upward: Vec<PitchClass>,
     keys: Vec<u8>,
+    /// Working space: stretches of a pitch class's time.
+    stretches: Vec<(i64, i64)>,
     chances: Vec<Chance>,
     drafts: Vec<Draft>,
     groups: Vec<PcSet>,
@@ -309,9 +354,11 @@ impl Namer {
         let root = |span: Option<&DecodedSpan>| span.filter(|s| !s.rest).and_then(|s| s.label).map(|l| l.root);
         for (i, span) in spans.iter().enumerate() {
             let (before, after) = (around(i.checked_sub(1)), around(Some(i + 1)));
-            // A chord pushed to the first unit reported is struck in a loop's copied bar: it's named from there.
-            let pushed = hearing.pushes().iter().find(|push| span.pushed && push.unit == span.units.start);
-            let struck = pushed.map_or(span.sound.start, |push| hearing.unit_of(push.at).min(span.sound.start));
+            // A pushed chord is named from where it's struck. At the first unit reported that's in a loop's copied bar,
+            // before the units the decode reports its sound from: it scored the span with it there all the same
+            // ([`super::Evidence::facts`]), and the span's chances are its own units'.
+            let struck_at = span.pushed.then(|| push_to(hearing, span.units.start)).flatten().map(|push| push.at);
+            let struck = struck_at.map_or(span.sound.start, |at| hearing.unit_of(at).min(span.sound.start));
             let sound = struck..span.sound.end;
             let part = Part {
                 span: i,
@@ -319,6 +366,7 @@ impl Namer {
                 sound: sound.clone(),
                 label: span.label,
                 pushed: span.pushed,
+                struck_at,
                 rest: span.rest,
                 change: span.change,
                 split: false,
@@ -341,6 +389,7 @@ impl Namer {
                         units: k..part.units.end,
                         sound: k..part.sound.end,
                         pushed: false,
+                        struck_at: None,
                         change: decoder.change(k),
                         split: true,
                         bass: hearing.bass(k..part.sound.end),
@@ -359,7 +408,7 @@ impl Namer {
     fn find_pedals(&mut self) {
         let mut i = 0;
         while let Some(first) = self.parts.get(i) {
-            let (BassTexture::Held(bass), Some(label), false) = (first.bass, first.label, first.rest) else {
+            let (Some(bass), Some(label), false) = (first.bass.held(), first.label, first.rest) else {
                 i += 1;
                 continue;
             };
@@ -403,22 +452,19 @@ impl Namer {
             self.drafts.clear();
             for k in 0..self.chances.len() {
                 let Some(Chance { label: Some(label), chance }) = self.chances.get(k).copied() else { continue };
-                let draft = self.draft(hearing, &sound, &part, label, chance);
+                let draft = self.draft(&sound, &part, label, chance);
                 self.add(draft);
             }
             // The reading the best way reads is always named, even with no chance left on the part.
             if let Some(label) = part.label
                 && !self.drafts.iter().any(|d| d.decoded)
             {
-                let draft = self.draft(hearing, &sound, &part, label, 0.0);
+                let draft = self.draft(&sound, &part, label, 0.0);
                 self.add(draft);
             }
             self.drafts.sort_by(|a, b| b.decoded.cmp(&a.decoded).then(b.chance.total_cmp(&a.chance)));
             self.drafts.truncate(most);
-            let held = match sound.bass {
-                BassTexture::Held(pc) => PcSet::EMPTY.with(pc),
-                _ => PcSet::EMPTY,
-            };
+            let held = sound.bass.held().map_or(PcSet::EMPTY, |pc| PcSet::EMPTY.with(pc));
             self.groups.clear();
             for d in &self.drafts {
                 let notes = d.chord.notes().union(held);
@@ -455,13 +501,12 @@ impl Namer {
             }
         }
         let start = hearing.start(part.units.start);
-        let pushed_from = hearing.pushes().iter().find(|push| push.unit == part.units.start).map(|push| push.at);
         out.spans.push(NamedSpan {
             units: part.units.clone(),
             sound: part.sound.clone(),
             start,
             end: hearing.start(part.units.end),
-            heard_start: pushed_from.filter(|_| part.pushed).map_or(start, |at| hearing.tick(at)),
+            heard_start: part.struck_at.map_or(start, |at| hearing.tick(at)),
             change: part.change,
             rest: part.rest,
             none,
@@ -470,24 +515,110 @@ impl Namer {
         });
     }
 
-    /// Finds the notes and the shaped notes that sound in a part.
+    /// Finds the notes, the shaped notes and the pieces of the chords that sound in a part, and what they may count for
+    /// whatever the reading.
     fn gather(&mut self, hearing: &Hearing, sound: &Sound) {
         let notes = hearing.notes();
         let from = notes.partition_point(|n| n.start < sound.from.saturating_sub(self.longest_note));
-        self.near.clear();
+        let from_shaped = self.shaped.partition_point(|s| s.start < sound.from.saturating_sub(self.longest_shaped));
+        self.near_shaped.clear();
+        let shaped = self.shaped.get(from_shaped..).unwrap_or_default().iter().take_while(|s| s.start < sound.to);
+        self.near_shaped.extend(shaped.filter(|s| s.end > sound.from));
+        self.near_shaped.sort_unstable_by_key(|s| (s.note, s.start, s.end));
+        let (felt_units, felt) = (hearing.felt_units().max(1), hearing.felt_ticks());
+        self.in_order.clear();
         for (i, n) in notes.iter().enumerate().skip(from).take_while(|(_, n)| n.start < sound.to) {
-            if n.end > sound.from {
-                self.near.push(i);
+            if n.end <= sound.from {
+                continue;
+            }
+            let first = self.near_shaped.partition_point(|s| s.note < i);
+            let shaped =
+                (first, first + self.near_shaped.get(first..).unwrap_or_default().partition_point(|s| s.note == i));
+            let struck_here = n.struck && n.start >= sound.from && n.start < sound.to;
+            let counts = match n.stream {
+                Stream::Harmony if struck_here => {
+                    let unit = hearing.unit_of(n.start);
+                    if hearing.is_bass_in(unit, n) {
+                        Counts::Nothing
+                    } else {
+                        let with = hearing.sounding(unit, Stream::Harmony).union(hearing.sounding(unit, Stream::Bass));
+                        Counts::Chords { with, beat: n.broken.then_some(unit / felt_units) }
+                    }
+                }
+                Stream::Melody
+                    if n.struck
+                        && n.length >= felt
+                        && hearing.strength_at(n.start).is_some_and(|level| level >= Level::Beat) =>
+                {
+                    let end = n.held_over.unwrap_or(n.end).clamp(n.start, n.end).min(sound.to);
+                    Counts::Tune { start: n.start.max(sound.from), end }
+                }
+                Stream::Harmony | Stream::Melody | Stream::Bass => Counts::Nothing,
+            };
+            self.in_order.push(Near { pc: n.pitch_class(), note: i, shaped, counts });
+        }
+        // In order of their pitch class, each kept in order of where they start.
+        let mut first = PerPitch::<usize>::default();
+        for near in &self.in_order {
+            first[near.pc] += 1;
+        }
+        let mut total = 0;
+        for pc in PitchClass::ALL {
+            (first[pc], total) = (total, total + first[pc]);
+        }
+        self.near.clear();
+        self.near.extend_from_slice(&self.in_order);
+        for near in &self.in_order {
+            if let Some(slot) = self.near.get_mut(first[near.pc]) {
+                *slot = *near;
+            }
+            first[near.pc] += 1;
+        }
+        // The chords' notes in the part: their own sound, less the units where they're heard as the bass (only where
+        // no bass part plays).
+        let gap = sound.units.clone().any(|u| hearing.gap_bass(u).is_some());
+        self.pieces.clear();
+        for near in &self.near {
+            let Some(n) = notes.get(near.note).filter(|n| n.stream == Stream::Harmony) else { continue };
+            let (pc, shaped) = (near.pc, near.shaped);
+            let end = n.held_over.unwrap_or(n.end).clamp(n.start, n.end).min(sound.to);
+            let mut start = n.start.max(sound.from);
+            if !gap {
+                if start < end {
+                    self.pieces.push(Piece { pc, start, end, shaped });
+                }
+                continue;
+            }
+            let mut joined = false;
+            while start < end {
+                let unit = hearing.unit_of(start);
+                let next = hearing.offset(unit + 1).min(end);
+                if next <= start {
+                    break;
+                }
+                let bass = hearing.is_bass_in(unit, n);
+                match self.pieces.last_mut() {
+                    Some(p) if joined && !bass && p.end == start => p.end = next,
+                    _ if !bass => self.pieces.push(Piece { pc, start, end: next, shaped }),
+                    _ => {}
+                }
+                joined = !bass;
+                start = next;
             }
         }
-        let from = self.shaped.partition_point(|s| s.start < sound.from.saturating_sub(self.longest_shaped));
-        self.near_shaped.clear();
-        let shaped = self.shaped.get(from..).unwrap_or_default().iter().take_while(|s| s.start < sound.to);
-        self.near_shaped.extend(shaped.filter(|s| s.end > sound.from));
+        // Each pitch class's ticks in the chords, and those that have a shaped note among them.
+        self.in_chords = PerPitch::default();
+        self.shaped_in_chords = PcSet::EMPTY;
+        for pc in PitchClass::ALL {
+            if self.pieces_of(pc).any(|p| self.near_shaped.get(p.shaped.0..p.shaped.1).is_some_and(|s| !s.is_empty())) {
+                self.shaped_in_chords = self.shaped_in_chords.with(pc);
+            }
+            self.in_chords[pc] = self.held_by(pc, |_| false);
+        }
         // The chords' notes (not the bass) from the lowest up, each pitch class once.
         self.keys.clear();
-        for &i in &self.near {
-            let Some(n) = notes.get(i) else { continue };
+        for near in &self.near {
+            let Some(n) = notes.get(near.note) else { continue };
             if n.stream == Stream::Harmony && !hearing.is_bass_in(hearing.unit_of(n.start.max(sound.from)), n) {
                 self.keys.push(n.key);
             }
@@ -502,19 +633,16 @@ impl Namer {
     }
 
     /// A reading named on a part, before the readings written the same are put together.
-    fn draft(&self, hearing: &Hearing, sound: &Sound, part: &Part, label: Label, chance: f64) -> Draft {
+    fn draft(&mut self, sound: &Sound, part: &Part, label: Label, chance: f64) -> Draft {
         let decoded = part.label == Some(label);
         // Over silence (a chord held on over it, or pinned there), a reading is written in full, as the decode read it.
         if sound.heard.is_empty() {
             let chord = written_root(Chord::of(label.root, label.core.intervals()), None, part, &[], None);
             return Draft { label, chord, also: None, doubtful: PcSet::EMPTY, chance, decoded };
         }
-        let (named, doubtful) = self.gate(hearing, sound, label);
+        let (named, doubtful) = self.gate(sound, label);
         let notes = label.tones().intersection(sound.heard).union(named);
-        let held = match sound.bass {
-            BassTexture::Held(pc) => Some(pc),
-            _ => None,
-        };
+        let held = sound.bass.held();
         let chord = Chord::new(label.root, notes, held.unwrap_or(label.root));
         let mut chord = written_root(chord, held, part, &self.upward, sound.lowest);
         let mut also = None;
@@ -550,7 +678,7 @@ impl Namer {
 
     /// What the gate makes of the notes that aren't a reading's own on a part: the notes named (tensions, and others
     /// voiced as a named tension is), and the tensions doubtful.
-    fn gate(&self, hearing: &Hearing, sound: &Sound, label: Label) -> (PcSet, PcSet) {
+    fn gate(&mut self, sound: &Sound, label: Label) -> (PcSet, PcSet) {
         let (tones, tensions) = (label.tones(), label.tensions());
         let intervals = label.core.intervals();
         let family = Family::of(intervals);
@@ -560,7 +688,7 @@ impl Namer {
             let interval = i32::from(pc.above(label.root));
             let tension = tensions.contains(pc);
             let tune = tension && role(intervals, family, interval) != ToneRole::Avoid;
-            match self.band(hearing, sound, tones, pc, tune) {
+            match self.band(sound, tones, pc, tune) {
                 Band::Named => named = named.with(pc),
                 Band::Doubtful if tension => doubtful = doubtful.with(pc),
                 Band::Doubtful | Band::Out => {}
@@ -571,61 +699,41 @@ impl Namer {
 
     /// What the gate makes of a pitch class `pc` on a part, under a reading whose own notes are `tones`; `tune` when the
     /// tune may count.
-    fn band(&self, hearing: &Hearing, sound: &Sound, tones: PcSet, pc: PitchClass, tune: bool) -> Band {
+    fn band(&mut self, sound: &Sound, tones: PcSet, pc: PitchClass, tune: bool) -> Band {
         let s = sound.sounding;
         if s == 0 {
             return Band::Out;
         }
-        // Its ticks in the chords, less what only passes by under the reading (held-over ends count in neither).
-        let passing = self
-            .near_shaped
-            .iter()
-            .filter(|sh| sh.pc == pc && matches!(sh.line, Line::Chords | Line::Broken(_)) && sh.passes_under(tones))
-            .map(|sh| {
-                let held_from = hearing.notes().get(sh.note).and_then(|n| n.held_over).unwrap_or(sh.end);
-                overlap(sh.start..held_from.clamp(sh.start, sh.end), sound.from..sound.to)
-            })
-            .fold(0u64, u64::saturating_add);
-        let chords = sound.chords[pc];
-        let held = chords - passing.min(chords);
-        let felt_units = hearing.felt_units().max(1);
-        let felt = hearing.felt_ticks();
+        // Its ticks in the chords, but for what only passes by under the reading.
+        let held = if self.shaped_in_chords.contains(pc) {
+            self.held_by(pc, |shaped| shaped.line != Line::Bass && shaped.passes_under(tones))
+        } else {
+            self.in_chords[pc]
+        };
         let (mut voiced, mut arpeggiated) = (false, false);
         let mut beat: Option<usize> = None;
         // The tune's time on it from notes that count (they're in order of where they start, so their overlaps are
         // added up once), and where the last of them ends.
         let (mut in_tune, mut tune_to) = (0u64, sound.from);
-        for &i in &self.near {
-            let Some(n) = hearing.notes().get(i) else { continue };
-            if n.pitch_class() != pc || !n.struck || self.passes(i, tones) {
+        let first = self.near.partition_point(|near| near.pc < pc);
+        for near in self.near.get(first..).unwrap_or_default().iter().take_while(|near| near.pc == pc) {
+            if matches!(near.counts, Counts::Nothing) || self.passes(near.shaped, tones) {
                 continue;
             }
-            match n.stream {
-                Stream::Harmony => {
-                    let unit = hearing.unit_of(n.start);
-                    if n.start < sound.from || n.start >= sound.to || hearing.is_bass_in(unit, n) {
-                        continue;
-                    }
-                    let with = hearing.sounding(unit, Stream::Harmony).union(hearing.sounding(unit, Stream::Bass));
+            match near.counts {
+                Counts::Chords { with, beat: here } => {
                     voiced |= with.intersection(tones).len() >= 2;
-                    if n.broken {
-                        let here = unit / felt_units;
+                    if let Some(here) = here {
                         arpeggiated |= beat.is_some_and(|b| b != here);
                         beat = beat.or(Some(here));
                     }
                 }
-                Stream::Melody if tune => {
-                    let strong = hearing.strength_at(n.start).is_some_and(|level| level >= Level::Beat);
-                    if !strong || n.length < felt {
-                        continue;
-                    }
-                    // Its own sound: what it holds over a bar line counts nowhere, as the masses have it.
-                    let end = n.held_over.unwrap_or(n.end).clamp(n.start, n.end).min(sound.to);
-                    let start = n.start.max(tune_to).max(sound.from);
-                    in_tune = in_tune.saturating_add(overlap(start..end, sound.from..sound.to));
+                Counts::Tune { start, end } if tune => {
+                    let start = start.max(tune_to);
+                    in_tune = in_tune.saturating_add(u64::try_from(end.saturating_sub(start)).unwrap_or(0));
                     tune_to = tune_to.max(end);
                 }
-                Stream::Melody | Stream::Bass => {}
+                Counts::Tune { .. } | Counts::Nothing => {}
             }
         }
         let half = |ticks: u64| ticks.saturating_mul(2) >= s;
@@ -638,10 +746,51 @@ impl Namer {
         }
     }
 
-    /// Whether a note (by its place in the notes) only passes by under a reading whose own notes are `tones`, on the
-    /// part being named.
-    fn passes(&self, note: usize, tones: PcSet) -> bool {
-        self.near_shaped.iter().any(|sh| sh.note == note && sh.line != Line::Bass && sh.passes_under(tones))
+    /// The pieces of the chords of a pitch class on the part being named.
+    fn pieces_of(&self, pc: PitchClass) -> impl Iterator<Item = &Piece> {
+        let first = self.pieces.partition_point(|p| p.pc < pc);
+        self.pieces.get(first..).unwrap_or_default().iter().take_while(move |p| p.pc == pc)
+    }
+
+    /// The ticks in which a pitch class sounds in the chords on the part being named, less where a note sounding it
+    /// only passes by (`passing` says which shaped notes do): each tick once, however many notes sound it then.
+    fn held_by(&mut self, pc: PitchClass, passing: impl Fn(&Shaped) -> bool) -> u64 {
+        let mut stretches = std::mem::take(&mut self.stretches);
+        stretches.clear();
+        for piece in self.pieces_of(pc) {
+            let mut from = piece.start;
+            for sh in self.near_shaped.get(piece.shaped.0..piece.shaped.1).unwrap_or_default().iter() {
+                let (a, b) = (sh.start.max(piece.start), sh.end.min(piece.end));
+                if a >= b || !passing(sh) {
+                    continue;
+                }
+                if a > from {
+                    stretches.push((from, a));
+                }
+                from = from.max(b);
+            }
+            if from < piece.end {
+                stretches.push((from, piece.end));
+            }
+        }
+        stretches.sort_unstable();
+        let (mut ticks, mut to) = (0u64, i64::MIN);
+        for &(a, b) in &stretches {
+            let a = a.max(to);
+            if b > a {
+                ticks = ticks.saturating_add(u64::try_from(b - a).unwrap_or(0));
+                to = b;
+            }
+        }
+        self.stretches = stretches;
+        ticks
+    }
+
+    /// Whether a note only passes by under a reading whose own notes are `tones`, from its shaped notes (as places in
+    /// `near_shaped`).
+    fn passes(&self, shaped: (usize, usize), tones: PcSet) -> bool {
+        let shaped = self.near_shaped.get(shaped.0..shaped.1).unwrap_or_default();
+        shaped.iter().any(|sh| sh.line != Line::Bass && sh.passes_under(tones))
     }
 }
 
@@ -649,38 +798,37 @@ impl Namer {
 fn sound(hearing: &Hearing, part: &Part) -> Sound {
     let units = part.sound.clone();
     let s = hearing.sounding_ticks(units.clone());
-    let chords = hearing.mass(units.clone(), Mass::Harmony);
-    let held_tune = hearing.mass(units.clone(), Mass::HeldMelody);
+    let (chords, held_tune) =
+        (hearing.mass(units.clone(), Mass::Harmony), hearing.mass(units.clone(), Mass::HeldMelody));
     Sound {
         from: hearing.offset(units.start),
         to: hearing.offset(units.end),
         sounding: s,
-        heard: heard_in(&hearing.presence_ticks(units.clone()), s),
-        played: heard_in(&presence_of(&chords, &PerPitch::default(), &held_tune), s),
-        chords,
+        heard: hearing.heard(units.clone()),
+        played: played_in(&chords, &held_tune, s),
         bass: part.bass,
-        lowest: hearing.lowest(units).map(PitchClass::of_key),
+        lowest: hearing.lowest(units.clone()).map(PitchClass::of_key),
+        units,
     }
 }
 
-/// The ticks two stretches share.
-fn overlap(a: Range<i64>, b: Range<i64>) -> u64 {
-    u64::try_from(a.end.min(b.end).saturating_sub(a.start.max(b.start))).unwrap_or(0)
+/// The push to a unit, if there is one (the pushes are in order of their units).
+fn push_to(hearing: &Hearing, unit: usize) -> Option<&Push> {
+    let pushes = hearing.pushes();
+    pushes.get(pushes.partition_point(|p| p.unit < unit)).filter(|p| p.unit == unit)
 }
 
 /// The first bass note of some units: the lowest of those struck first; when none is struck there, the bass held.
 fn first_bass(hearing: &Hearing, units: Range<usize>) -> Option<PitchClass> {
-    hearing.bass_onset(units.clone()).or(match hearing.bass(units) {
-        BassTexture::Held(pc) => Some(pc),
-        BassTexture::Moving | BassTexture::None => None,
-    })
+    hearing.bass_onset(units.clone()).or_else(|| hearing.bass(units).held())
 }
 
-/// Where a part is cut in two, when its bass moves from its root to its third or a seventh on a bar line or the middle
-/// of a bar, each held at least two felt beats, and the second steps (by one or two semitones) into the next chord's
-/// first bass note (`next_bass`): the unit its second half starts at.
+/// Where a part is cut in two, when its bass moves from its root to its third or its seventh (either seventh under a
+/// major or minor triad) on a bar line or the middle of a bar, each held at least two felt beats, and the second steps
+/// (by one or two semitones) into the next chord's first bass note (`next_bass`): the unit its second half starts at.
+/// A diminished seventh or an augmented triad is never cut: any of its notes is its root.
 fn split_at(hearing: &Hearing, part: &Part, next_bass: Option<PitchClass>) -> Option<usize> {
-    let label = part.label.filter(|_| !part.rest)?;
+    let label = part.label.filter(|l| !part.rest && !matches!(l.core, Core::Diminished7 | Core::Augmented))?;
     let next_bass = next_bass?;
     let two_beats = hearing.felt_units().max(1).saturating_mul(2);
     let two_beats_ticks = u64::try_from(hearing.felt_ticks()).unwrap_or(0).saturating_mul(2);
@@ -697,9 +845,11 @@ fn split_at(hearing: &Hearing, part: &Part, next_bass: Option<PitchClass>) -> Op
         };
         let up = to.above(label.root);
         let third = matches!(up, 3 | 4) && label.core.third().has(i32::from(up));
+        let triad = matches!(label.core, Core::Major | Core::Minor);
+        let seventh = matches!(up, 10 | 11) && (triad || label.core.intervals().has(i32::from(up)));
         let step = to.above(next_bass).min(next_bass.above(to));
         root == label.root
-            && (third || matches!(up, 10 | 11))
+            && (third || seventh)
             && matches!(step, 1 | 2)
             && hearing.mass(first, Mass::Bass)[root] >= two_beats_ticks
             && hearing.mass(second, Mass::Bass)[to] >= two_beats_ticks

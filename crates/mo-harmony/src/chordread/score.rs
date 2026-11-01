@@ -29,7 +29,7 @@ use std::ops::{Index, IndexMut, Range};
 
 use super::candidates::{Candidate, Label, Route, candidates};
 use super::cores::Core;
-use super::hear::{BassTexture, Hearing, Level, Line, Mass, Push, Shaped, Stream, heard_in, presence_of};
+use super::hear::{BassTexture, Hearing, Level, Line, Mass, Push, Shaped, Stream, heard_in, played_in, presence_of};
 use super::weights::{Priors, Weights};
 use crate::pitch::{PcSet, PerPitch, PitchClass, SetSums, WrappingSum};
 
@@ -458,7 +458,7 @@ impl Evidence {
         let held_tune = hearing.mass(sound.clone(), Mass::HeldMelody);
         out.presence = presence_of(&out.chords, &bass, &held_tune);
         out.heard = heard_in(&out.presence, s);
-        out.played = heard_in(&presence_of(&out.chords, &PerPitch::default(), &held_tune), s);
+        out.played = played_in(&out.chords, &held_tune, s);
         out.bass = BassTexture::of(&bass);
         out.level = hearing.level(units.start);
         out.pushed = start.is_some();
