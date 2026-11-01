@@ -1,7 +1,7 @@
 //! The counted tables the chord reader's template priors read: how often each core is the labelled chord, and how
 //! often a chord of each core names each tension it can carry. Written by `theorybench tables --write` from the
-//! labels alone (folds 1 to 4, in beats, each source counting as much as any other, half a beat added to each
-//! cell); don't edit it by hand.
+//! labels alone (folds 1 to 4, in beats, each core from the sources whose labels name it, each source counting as
+//! much as any other, half a beat added to each cell); don't edit it by hand.
 
 use super::weights::Tables;
 
@@ -14,22 +14,22 @@ pub const COUNTED_FROM: &[&str] = &["billboard", "pop909cl"];
 #[rustfmt::skip]
 pub const COUNTED: Tables = Tables {
     core: [
-        0.537712218994907, // maj
-        0.24557048111204086, // m
-        0.06443586481965308, // 7
-        0.02484824278716123, // maj7
-        0.06794317811824836, // m7
-        0.005496682347573008, // 6
-        0.001280884113151639, // m6
-        0.000343008536732608, // m(maj7)
-        0.001849983566639928, // m7b5
-        0.00021394368898588808, // dim7
-        0.003425635822784873, // dim
-        0.0007876906109029929, // +
-        0.017029082269829666, // sus4
-        0.010234044634479024, // sus2
-        0.010344320399070099, // 7sus4
-        0.008484738177839835, // 5
+        0.5242874403346854, // maj
+        0.23943945184033208, // m
+        0.06282712841302887, // 7
+        0.02422786975539971, // maj7
+        0.06624687646191921, // m7
+        0.010718718195341127, // 6
+        0.0024977677409035513, // m6
+        0.0003344448226834666, // m(maj7)
+        0.0018037959982160395, // m7b5
+        0.00020860226922839135, // dim7
+        0.0033401097717359043, // dim
+        0.0007680247529764735, // +
+        0.016603926113463188, // sus4
+        0.009978536615201506, // sus2
+        0.020171777859586123, // 7sus4
+        0.016545529055298828, // 5
     ],
     tension: [
         [0.5, 0.5, 0.021162966990242046, 0.5, 0.5, 0.5, 0.00024960857455375306, 0.5, 0.5, 0.5, 0.5, 0.5], // maj

@@ -3,10 +3,12 @@
 //! often a chord of each core names each tension it can carry (f_ten).
 //!
 //! They are counted from the labels alone, never from what a reader hears, in beats, on folds 1 to 4 of the pieces
-//! whose licence lets the numbers ship: fold 0 stays kept back, as keyfit keeps it. Each source counts as much as any
-//! other, and half a beat is added to each cell, so nothing is ever impossible. Only the sources whose labels name
-//! 9ths count towards f_ten: POP909-CL names its chords by triad and seventh templates, so its labels never say a 9 is
-//! played, even where the piano plays one, and counting them would say tensions are rarer than they are.
+//! whose licence lets the numbers ship: fold 0 stays kept back, drawn as keyfit draws it. Each source counts as much
+//! as any other, and half a beat is added to each cell, so nothing is ever impossible. A source only counts for what
+//! its labels can say: each core is counted from the sources whose labels name it (POP909-CL has no 6, m6, 7sus4 or
+//! power chord), and f_ten from those whose labels name 9ths as a matter of course. POP909-CL names its chords by
+//! triad and seventh templates, so its labels never say a 9 is played, even where the piano plays one; counting them
+//! would say tensions are rarer than they are.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -24,6 +26,11 @@ const PRIOR: f64 = 0.5;
 
 /// How many cores there are.
 const CORES: usize = Core::ALL.len();
+
+/// The least share of its labelled time on which a source's labels name a 9 for it to count towards f_ten: a source
+/// that names tensions does so on a few percent of its time (Billboard 5.2%), and one stray label in a source that
+/// never names them stays far below.
+const NAMES_TENSIONS: f64 = 0.01;
 
 /// The beats of labelled chords in one source.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -44,11 +51,23 @@ impl Counts {
         self.core.iter().sum()
     }
 
-    /// Whether its labels name tensions: whether any names a 9, the commonest, which any chart that names tensions
-    /// names. Only those sources count towards f_ten (POP909-CL names a few altered fifths, C7♯5's ♭13, but never a
-    /// 9).
+    /// The share of its labelled time whose label names a 9, the commonest tension, which any chart that names
+    /// tensions names.
+    fn nines(&self) -> f64 {
+        let named: f64 = self.tension.iter().filter_map(|row| row.get(2)).sum();
+        if self.total() > 0.0 { named / self.total() } else { 0.0 }
+    }
+
+    /// Whether its labels name tensions as a matter of course (a 9 on at least [`NAMES_TENSIONS`] of its time). Only
+    /// those sources count towards f_ten: POP909-CL names a few altered fifths (C7♯5's ♭13), but never a 9.
     fn names_tensions(&self) -> bool {
-        self.tension.iter().any(|row| row.get(2).is_some_and(|&beats| beats > 0.0))
+        self.nines() >= NAMES_TENSIONS
+    }
+
+    /// Whether its labels name a core at all: a source whose labels can't name a core says nothing about how common
+    /// it is.
+    fn names(&self, core: usize) -> bool {
+        self.core.get(core).is_some_and(|&beats| beats > 0.0)
     }
 
     /// Counts a piece's labels.
@@ -75,36 +94,46 @@ impl Counts {
 }
 
 /// The core a label names, and the tensions it names (as intervals above its root); `None` for no chord, a chord no
-/// core names (a root alone) or a label that can't be read. A dominant eleventh (its third and its 11 with a ♭7) is
-/// read as the 9sus4 players voice it, as `convert/voice.py` plays it.
+/// core names (a root alone) or a label that can't be read. A dominant eleventh (its major third, no ♯9, and its 11
+/// with a ♭7) is read as the 9sus4 players voice it, as `convert/voice.py` plays it.
 fn reading(label: &str) -> Option<(Core, PcSet)> {
     let Named::Chord(chord) = harte::named(label) else { return None };
     let mut intervals = chord.intervals();
-    if intervals.has(4) && intervals.has(5) && intervals.has(10) {
+    if intervals.has(4) && !intervals.has(3) && intervals.has(5) && intervals.has(10) {
         intervals = intervals.difference(PcSet::of(&[4]));
     }
     let core = Core::of(intervals)?;
     Some((core, intervals.difference(core.intervals()).intersection(core.tensions())))
 }
 
-/// The tables from each source's counts: each source weighed so that it counts as much as any other (its beats
-/// scaled to the sources' mean), and half a beat added to each cell. f_ten comes from the sources whose labels name
-/// tensions; its cells for notes a core doesn't carry stay at a half (the priors never read them).
+/// Each source's weight, so that it counts as much as any other: its beats scaled to the sources' mean.
+fn weighed<'a>(sources: impl Iterator<Item = &'a Counts>) -> Vec<(f64, &'a Counts)> {
+    let sources: Vec<&Counts> = sources.collect();
+    let mean = sources.iter().map(|c| c.total()).sum::<f64>() / sources.len().max(1) as f64;
+    sources.into_iter().map(|c| (if c.total() > 0.0 { mean / c.total() } else { 0.0 }, c)).collect()
+}
+
+/// The tables from each source's counts, each source weighed to count as much as any other, with half a beat added
+/// to each cell.
+///
+/// Each core is counted from the sources whose labels name it (from all of them when none does), and the cores'
+/// shares are then scaled to add up to 1: where every source names every core, that changes nothing. f_ten comes from
+/// the sources whose labels name tensions; its cells for notes a core doesn't carry stay at a half (the priors never
+/// read them).
 fn tables(sources: &BTreeMap<String, Counts>) -> Tables {
     let mut out = EVEN;
-    let weighed = |counts: &[&Counts]| -> Vec<(f64, Counts)> {
-        let mean = counts.iter().map(|c| c.total()).sum::<f64>() / counts.len().max(1) as f64;
-        counts.iter().map(|&c| (if c.total() > 0.0 { mean / c.total() } else { 0.0 }, c.clone())).collect()
-    };
-    let all: Vec<&Counts> = sources.values().collect();
-    let all = weighed(&all);
-    let total: f64 = all.iter().map(|(w, c)| w * c.total()).sum();
+    let all = weighed(sources.values());
     for (i, cell) in out.core.iter_mut().enumerate() {
-        let beats: f64 = all.iter().map(|(w, c)| w * c.core.get(i).copied().unwrap_or(0.0)).sum();
+        let naming = all.iter().filter(|(_, c)| c.names(i));
+        let naming: Vec<&(f64, &Counts)> =
+            if all.iter().any(|(_, c)| c.names(i)) { naming.collect() } else { all.iter().collect() };
+        let beats: f64 = naming.iter().map(|(w, c)| w * c.core.get(i).copied().unwrap_or(0.0)).sum();
+        let total: f64 = naming.iter().map(|(w, c)| w * c.total()).sum();
         *cell = (beats + PRIOR) / (total + PRIOR * CORES as f64);
     }
-    let naming: Vec<&Counts> = sources.values().filter(|c| c.names_tensions()).collect();
-    let naming = weighed(&naming);
+    let sum: f64 = out.core.iter().sum();
+    out.core.iter_mut().for_each(|cell| *cell /= sum);
+    let naming = weighed(sources.values().filter(|c| c.names_tensions()));
     for core in Core::ALL {
         let i = core.index();
         let of_core: f64 = naming.iter().map(|(w, c)| w * c.core.get(i).copied().unwrap_or(0.0)).sum();
@@ -130,34 +159,44 @@ fn name(core: Core) -> &'static str {
 
 /// A tension's name, by its interval above the root.
 fn tension_name(interval: u8) -> &'static str {
-    ["1", "b9", "9", "#9", "3", "11", "#11", "5", "b13", "13", "b7", "7"]
-        .get(usize::from(interval))
-        .copied()
-        .unwrap_or("?")
+    harte::COMPOUND.get(usize::from(interval)).copied().unwrap_or("?")
 }
 
 /// What was counted: each source's beats by core, and the tables.
 fn report(sources: &BTreeMap<String, Counts>, out: &Tables) -> String {
     let mut text = String::new();
-    let _ = writeln!(text, "Counted on folds 1 to 4, in beats (each source weighed to count as much as any other):\n");
+    let _ = writeln!(
+        text,
+        "Counted on folds 1 to 4, in beats; each core from the sources that name it, each source weighed to count as\n\
+         much as any other:\n"
+    );
     let _ = write!(text, "{:<8}", "core");
     for (source, counts) in sources {
-        let _ = write!(text, "{:>14}", format!("{source} ({})", counts.pieces));
+        let _ = write!(text, "{:>17}", format!("{source} ({})", counts.pieces));
     }
     let _ = writeln!(text, "{:>10}", "f_core");
     for core in Core::ALL {
         let _ = write!(text, "{:<8}", name(core));
         for counts in sources.values() {
-            let _ = write!(text, "{:>14.1}", counts.core.get(core.index()).copied().unwrap_or(0.0));
+            let _ = write!(text, "{:>17.1}", counts.core.get(core.index()).copied().unwrap_or(0.0));
         }
         let _ = writeln!(text, "{:>10.5}", out.core.get(core.index()).copied().unwrap_or(0.0));
     }
     let _ = write!(text, "{:<8}", "none");
     for counts in sources.values() {
-        let _ = write!(text, "{:>14.1}", counts.other);
+        let _ = write!(text, "{:>17.1}", counts.other);
+    }
+    let _ = write!(text, "\n{:<8}", "a 9");
+    for counts in sources.values() {
+        let _ = write!(text, "{:>16.2}%", 100.0 * counts.nines());
     }
     let naming: Vec<&str> = sources.iter().filter(|(_, c)| c.names_tensions()).map(|(s, _)| s.as_str()).collect();
-    let _ = writeln!(text, "\n\nf_ten, from the labels of {}:\n", naming.join(", "));
+    let _ = writeln!(
+        text,
+        "\n\nf_ten, from the labels of {} (a 9 named on at least {}% of the time):\n",
+        naming.join(", "),
+        100.0 * NAMES_TENSIONS
+    );
     for core in Core::ALL {
         let row: Vec<String> = core
             .tensions()
@@ -178,8 +217,8 @@ fn rust_file(sources: &BTreeMap<String, Counts>, out: &Tables) -> String {
     text.push_str(
         "//! The counted tables the chord reader's template priors read: how often each core is the labelled chord, and how\n\
          //! often a chord of each core names each tension it can carry. Written by `theorybench tables --write` from the\n\
-         //! labels alone (folds 1 to 4, in beats, each source counting as much as any other, half a beat added to each\n\
-         //! cell); don't edit it by hand.\n\nuse super::weights::Tables;\n\n",
+         //! labels alone (folds 1 to 4, in beats, each core from the sources whose labels name it, each source counting as\n\
+         //! much as any other, half a beat added to each cell); don't edit it by hand.\n\nuse super::weights::Tables;\n\n",
     );
     let names: Vec<String> = sources.keys().map(|s| format!("{s:?}")).collect();
     let naming: Vec<String> =
@@ -225,8 +264,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
     for path in &paths {
         items.extend(item::read(path)?);
     }
-    // The folds are drawn over every piece read, as keyfit draws them on the same files.
-    let folds = keyfit::folds(&items);
+    // The folds are drawn as keyfit draws them on the same files (which may leave out a piece only measured).
+    let folds = keyfit::folds(&mut items);
     let mut sources: BTreeMap<String, Counts> = BTreeMap::new();
     for (item, fold) in items.iter().zip(folds) {
         if item.may_learn() && fold != keyfit::FROZEN {
@@ -270,8 +309,9 @@ mod tests {
         // A 13 names its 9 and 13 (its 11 is no note a dominant carries); a maj13 its 9 and 13 (the 11 doesn't belong).
         assert_eq!(reading("G:13"), Some((Core::Dominant7, PcSet::of(&[2, 9]))));
         assert_eq!(reading("F:maj13"), Some((Core::Major7, PcSet::of(&[2, 9]))));
-        // A dominant eleventh is the 9sus4 players voice.
+        // A dominant eleventh is the 9sus4 players voice; with a ♯9 it stays a dominant (its 11 a note it can't carry).
         assert_eq!(reading("G:11"), Some((Core::Dominant7Sus4, PcSet::of(&[2]))));
+        assert_eq!(reading("C:7(#9,11)"), Some((Core::Dominant7, PcSet::of(&[3]))));
         assert_eq!(reading("A:min11"), Some((Core::Minor7, PcSet::of(&[2, 5]))));
         // Inversions don't matter; no chord, a root alone and nonsense name no core.
         assert_eq!(reading("C:maj/3"), Some((Core::Major, PcSet::EMPTY)));
@@ -281,30 +321,55 @@ mod tests {
         assert_eq!((c.core[Core::Dominant7.index()], c.core[Core::Major.index()], c.other), (2.0, 1.0, 0.5));
         assert_eq!((c.tension[Core::Dominant7.index()][2], c.total(), c.pieces), (2.0, 3.0, 1));
         assert!(c.names_tensions() && !counts("pop909cl", &[(0, 960, "G:7")]).names_tensions());
+        assert!(c.names(Core::Major.index()) && !c.names(Core::Minor.index()));
         // A 7♯5 names its ♭13, but a source that never names a 9 doesn't name tensions.
         let sharp_five = counts("pop909cl", &[(0, 960, "C:(1,3,#5,b7)")]);
         assert_eq!(sharp_five.tension[Core::Dominant7.index()][8], 2.0);
         assert!(!sharp_five.names_tensions());
+        // Nor does one with a stray 9 on under 1% of its time: a beat in 101 doesn't make it, a beat in 100 does.
+        let stray = |beats: i64| counts("x", &[(0, beats * 480, "C:maj"), (beats * 480, (beats + 1) * 480, "C:maj9")]);
+        assert!(!stray(100).names_tensions() && stray(99).names_tensions());
     }
 
     #[test]
-    fn each_source_counts_as_much_as_any_other_and_half_a_beat_is_added_to_each_cell() {
-        // One source of 30 beats, all major; one of 10, all minor seventh, half of them with a 9.
+    fn each_core_counts_from_the_sources_that_name_it_each_as_much_as_any_other() {
+        // a: 30 beats of major and minor triads, from labels that never name a 6 or a minor seventh. b: 10 beats that
+        // name them too, with a 9 on one of them.
+        let beats =
+            |chords: &[(i64, i64, &'static str)]| chords.iter().map(|&(s, e, l)| (s * 480, e * 480, l)).collect();
+        let a: Vec<(i64, i64, &str)> = beats(&[(0, 15, "C:maj"), (15, 30, "A:min")]);
+        let b: Vec<(i64, i64, &str)> =
+            beats(&[(0, 3, "C:maj"), (3, 5, "A:min"), (5, 7, "C:maj6"), (7, 9, "D:min7"), (9, 10, "D:min9")]);
         let mut sources = BTreeMap::new();
-        sources.insert("a".to_owned(), counts("a", &[(0, 30 * 480, "C:maj")]));
-        sources.insert("b".to_owned(), counts("b", &[(0, 5 * 480, "D:min7"), (5 * 480, 10 * 480, "D:min9")]));
+        sources.insert("a".to_owned(), counts("a", &a));
+        sources.insert("b".to_owned(), counts("b", &b));
         let t = tables(&sources);
-        // Each source counts as the mean, 20 beats: major 20, minor seventh 20, of 40, with half a beat a cell.
-        let f = |beats: f64| (beats + 0.5) / (40.0 + 8.0);
-        assert_eq!((t.core[Core::Major.index()], t.core[Core::Minor7.index()]), (f(20.0), f(20.0)));
-        assert_eq!(t.core[Core::Augmented.index()], f(0.0));
-        assert!((t.core.iter().sum::<f64>() - 1.0).abs() < 1e-12);
-        // f_ten from b alone (a names none): its 9 on half the minor sevenths; its 11, never; on major, nothing seen.
+        // Each source counts as the mean, 20 beats (a's beats at two thirds, b's twice). Major: 10 + 6 of 40. The 6
+        // and the minor seventh only from b: 4 and 6 of 20. Half a beat to each cell, then the shares scaled to add up
+        // to 1.
+        let raw = |beats: f64, total: f64| (beats + 0.5) / (total + 8.0);
+        let sum = raw(16.0, 40.0) + raw(14.0, 40.0) + raw(4.0, 20.0) + raw(6.0, 20.0) + 12.0 * raw(0.0, 40.0);
+        let near = |x: f64, y: f64| (x - y).abs() < 1e-12;
+        assert!(near(t.core[Core::Major.index()], raw(16.0, 40.0) / sum));
+        assert!(near(t.core[Core::Major6.index()], raw(4.0, 20.0) / sum));
+        assert!(near(t.core[Core::Augmented.index()], raw(0.0, 40.0) / sum));
+        assert!(near(t.core.iter().sum::<f64>(), 1.0));
+        // f_ten from b alone (a names no 9): the 9 on one of the minor seventh's three beats, its 11 never; nothing
+        // named on the major triad's three. A note a core doesn't carry keeps the half it starts with.
         let m7 = Core::Minor7.index();
-        assert_eq!((t.tension[m7][2], t.tension[m7][5]), (5.5 / 11.0, 0.5 / 11.0));
-        assert_eq!(t.tension[Core::Major.index()][2], 0.5);
-        // A note a core doesn't carry keeps the half it starts with.
+        assert_eq!((t.tension[m7][2], t.tension[m7][5]), (1.5 / 4.0, 0.5 / 4.0));
+        assert_eq!(t.tension[Core::Major.index()][2], 0.5 / 4.0);
         assert_eq!(t.tension[m7][4], 0.5);
+        // Where the sources name the same cores, they pool, and the shares already add up to 1: a, 30 beats of major
+        // and minor triads; b, 10.
+        let mut pooled = BTreeMap::new();
+        pooled.insert("a".to_owned(), counts("a", &beats(&[(0, 20, "C:maj"), (20, 30, "A:min")])));
+        pooled.insert("b".to_owned(), counts("b", &beats(&[(0, 5, "C:maj"), (5, 10, "A:min")])));
+        let t = tables(&pooled);
+        let f = |beats: f64| (beats + 0.5) / (40.0 + 8.0);
+        assert!(near(t.core[Core::Major.index()], f(20.0 * 2.0 / 3.0 + 10.0)));
+        assert!(near(t.core[Core::Minor.index()], f(10.0 * 2.0 / 3.0 + 10.0)));
+        assert!(near(t.core[Core::Augmented.index()], f(0.0)));
     }
 
     #[test]

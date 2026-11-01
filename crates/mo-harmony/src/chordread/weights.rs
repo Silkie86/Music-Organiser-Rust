@@ -36,7 +36,7 @@ pub struct Weights {
 ///   read as Em.
 /// - With no bass, the lowest chord note leans a little towards its own root (E G B D: Em7 rather than G6).
 /// - A chord changing on a bar line costs nothing, on the middle of a bar a little, between beats most.
-/// - The template priors are trusted a little, on the counted tables: 0.15 for how common the chord is and 0.04 for
+/// - The template priors are trusted a little, on the counted tables: 0.2 for how common the chord is and 0.06 for
 ///   its tensions, a beat. Where the notes leave readings close, the commoner chord wins (B D G over a C struck in the
 ///   bass reads G, not Csus2), and a tension labels rarely name costs a little (a ♭13 on a minor seventh more than a
 ///   9 on a major seventh). These are the trusts at which the hand cases' smallest lead is largest. The pair term
@@ -79,8 +79,8 @@ pub const HAND: Weights = Weights {
         -0.5,  // E6: starts on another beat
         -1.0,  // E7: starts between beats
         -0.3,  // E8: starts at a pushed chord
-        0.15,  // P1's trust (t_core)
-        0.04,  // P2's trust (t_ten)
+        0.2,   // P1's trust (t_core)
+        0.06,  // P2's trust (t_ten)
     ]),
     pair: 0.0,
     none: -0.5,

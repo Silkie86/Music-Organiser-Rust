@@ -899,15 +899,17 @@ fn the_hand_cases_read_as_a_player_reads_them_one_stretch_at_a_time() {
 /// two") less the score of the best other reading that could take its place. Below 0 the case fails. Kept readings
 /// have no lead.
 fn lead(ranked: &[Scored], want: Want, beats: f64) -> Option<f64> {
-    let (these, need, room) = match want {
+    let (these, need, room): (_, usize, usize) = match want {
         Want::First(any) => (any, 1, 1),
         Want::TopTwo(these) => (these, these.len(), 2),
         Want::Kept(_) => return None,
     };
+    // More readings wanted than there's room for never fit; none wanted always does.
+    let Some(place) = room.checked_sub(need) else { return Some(f64::NEG_INFINITY) };
     let (wanted, others): (Vec<&Scored>, Vec<&Scored>) =
         ranked.iter().partition(|s| these.contains(&s.label.to_string().as_str()));
-    let last = wanted.get(need - 1).map_or(f64::NEG_INFINITY, |s| s.score);
-    let rival = others.get(room - need).map_or(f64::NEG_INFINITY, |s| s.score);
+    let last = need.checked_sub(1).map_or(f64::INFINITY, |k| wanted.get(k).map_or(f64::NEG_INFINITY, |s| s.score));
+    let rival = others.get(place).map_or(f64::NEG_INFINITY, |s| s.score);
     Some((last - rival) / beats)
 }
 

@@ -331,15 +331,11 @@ fn learns(item: &Item, learning: Learning) -> bool {
     }
 }
 
-/// Each piece's fold, as a plain run draws it: other tools that learn from the same pieces keep the same fold back.
-pub(crate) fn folds(items: &[Item]) -> Vec<usize> {
-    let mut sources: Vec<String> = Vec::new();
-    for item in items {
-        if !sources.contains(&item.source) {
-            sources.push(item.source.clone());
-        }
-    }
-    songs_of(items, &sources, &HashMap::new(), Learning::Licensed).iter().map(|s| s.fold).collect()
+/// Each piece's fold, as a plain run draws it, so other tools that learn from the same pieces keep the same fold back.
+/// Like a plain run, it first leaves out the pieces only measured whose notes are also in a piece learned from.
+pub(crate) fn folds(items: &mut Vec<Item>) -> Vec<usize> {
+    leave_out_measured_twins(items, Learning::Licensed);
+    songs_of(items, &[], &HashMap::new(), Learning::Licensed).iter().map(|s| s.fold).collect()
 }
 
 /// Each song's folds, songs with the same notes in another key going where the first of them by name goes (a pack's
@@ -2459,6 +2455,27 @@ mod tests {
         let kept: Vec<String> = items.iter().map(|i| format!("{}/{}", i.source, i.id)).collect();
         assert_eq!(kept, ["a/1", "a/2", "b/2"]);
         assert_eq!(left_out, HashMap::from([("b".to_owned(), 1)]));
+    }
+
+    #[test]
+    fn other_tools_draw_the_folds_a_plain_run_draws() {
+        // b/0 is only measured and has a/1's notes a tone up: a plain run leaves it out before drawing the folds, so
+        // its name never decides a/1's fold.
+        let pieces = || {
+            vec![
+                piece_on("a", "1", 100, 60, "MIT"),
+                piece_on("b", "0", 100, 62, "measuring only"),
+                piece("a", 300, "MIT"),
+            ]
+        };
+        let mut items = pieces();
+        let drawn = folds(&mut items);
+        let mut plain = pieces();
+        leave_out_measured_twins(&mut plain, Learning::Licensed);
+        let sources = ["a".to_owned(), "b".to_owned()];
+        let want: Vec<usize> =
+            songs_of(&plain, &sources, &HashMap::new(), Learning::Licensed).iter().map(|s| s.fold).collect();
+        assert_eq!((items.len(), drawn), (2, want));
     }
 
     #[test]
