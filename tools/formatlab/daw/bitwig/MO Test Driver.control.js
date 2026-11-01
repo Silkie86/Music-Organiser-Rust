@@ -19,7 +19,7 @@
 // Plain ES5 and plain ASCII (rule 11).
 
 loadAPI(18);
-host.defineController("Music Organiser", "Test driver", "1.0", "6f0f5d38-7c1e-4b8e-9d0a-3a8f1c2b7e41", "Music Organiser");
+host.defineController("Music Organiser", "Test driver", "1.2", "6f0f5d38-7c1e-4b8e-9d0a-3a8f1c2b7e41", "Music Organiser");
 host.defineMidiPorts(0, 0);
 
 var PROJECT = "MO Live Test automation";
