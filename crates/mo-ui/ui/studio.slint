@@ -449,6 +449,91 @@ export component TickBox inherits Rectangle {
     }
 }
 
+// A slider from 0 to 1 between two words ("Safe" … "Adventurous"): drag or click the track, or use the arrow keys.
+// `moved` follows the knob; `released` says where it was let go, for work that should only run then.
+export component StudioSlider inherits HorizontalLayout {
+    in property <string> low;
+    in property <string> high;
+    in property <string> tip;
+    in-out property <float> value;
+    callback moved(float);
+    callback released(float);
+    spacing: Space.sm;
+    Text {
+        text: root.low;
+        color: Theme.muted;
+        font-size: Type.meta;
+        vertical-alignment: center;
+    }
+    track := Rectangle {
+        width: 120px;
+        height: 28px;
+        Rectangle {
+            y: (parent.height - self.height) / 2;
+            height: 4px;
+            border-radius: 2px;
+            background: Theme.well;
+            border-width: 1px;
+            border-color: Theme.stroke;
+        }
+        Rectangle {
+            x: 0;
+            y: (parent.height - self.height) / 2;
+            width: root.value * parent.width;
+            height: 4px;
+            border-radius: 2px;
+            background: Theme.accent;
+        }
+        knob := Rectangle {
+            x: root.value * (parent.width - self.width);
+            y: (parent.height - self.height) / 2;
+            width: 14px;
+            height: 14px;
+            border-radius: 7px;
+            background: keys.has-focus ? Theme.accent : Theme.text;
+        }
+        touch := TouchArea {
+            pointer-event(e) => {
+                if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                    keys.focus();
+                    root.value = clamp(self.mouse-x / self.width, 0, 1);
+                    root.moved(root.value);
+                } else if e.kind == PointerEventKind.up && e.button == PointerEventButton.left {
+                    root.released(root.value);
+                }
+            }
+            moved => {
+                root.value = clamp(self.mouse-x / self.width, 0, 1);
+                root.moved(root.value);
+            }
+        }
+        keys := FocusScope {
+            key-pressed(e) => {
+                if e.text == Key.LeftArrow || e.text == Key.RightArrow {
+                    root.value = clamp(root.value + (e.text == Key.LeftArrow ? -0.1 : 0.1), 0, 1);
+                    root.moved(root.value);
+                    root.released(root.value);
+                    return accept;
+                }
+                reject
+            }
+        }
+        Tip {
+            text: root.tip;
+            hovering: touch.has-hover && !touch.pressed;
+            at-x: touch.mouse-x;
+            at-y: touch.mouse-y + Space.xl;
+            above-y: touch.mouse-y - Space.sm;
+        }
+    }
+    Text {
+        text: root.high;
+        color: Theme.muted;
+        font-size: Type.meta;
+        vertical-alignment: center;
+    }
+}
+
 // The search box: a pressed-in field with its hint shown until something is typed.
 export component SearchBox inherits Rectangle {
     in property <string> hint: "Search";

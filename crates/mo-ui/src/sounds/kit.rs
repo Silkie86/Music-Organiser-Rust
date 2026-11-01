@@ -20,9 +20,6 @@ use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use super::{FEED, HERE, PAGE, Page, pick, play_picked, strings};
 use crate::{AppWindow, PadLine, SoundsData};
 
-/// The Randomness choices, for the C# app's slider from 0 (the best fits) to 1 (anything that fits).
-const RANDOMNESS: [(&str, f64); 4] = [("Best fits", 0.1), ("Some", 0.5), ("Lots", 0.75), ("Anything", 1.0)];
-
 /// The kit builder's part of the page.
 pub(super) struct Kit {
     pub(super) slots: Vec<KitSlot>,
@@ -144,7 +141,6 @@ pub(super) fn wire(app: &AppWindow) {
     let data = app.global::<SoundsData>();
     data.set_pads(ModelRc::from(PADS.with(|m| m.clone()) as Rc<dyn Model<Data = PadLine>>));
     data.set_kit_keys(strings(NOTE_NAMES));
-    data.set_kit_randomnesses(strings(RANDOMNESS.map(|r| r.0)));
     let weak = app.as_weak();
     data.on_kit_roll(move || {
         if let Some(app) = weak.upgrade() {
@@ -180,16 +176,16 @@ pub(super) fn wire(app: &AppWindow) {
         let Some(app) = weak.upgrade() else { return };
         PAGE.with(|p| {
             let k = &mut p.borrow_mut().kit;
-            match what.as_str() {
-                "key" => k.options.key_tonic = NOTE_NAMES.iter().position(|n| *n == value.as_str()).map(|i| i as i32),
-                "randomness" => {
-                    if let Some(r) = RANDOMNESS.iter().find(|r| r.0 == value.as_str()) {
-                        k.options.randomness = r.1;
-                    }
-                }
-                _ => {}
+            if what.as_str() == "key" {
+                k.options.key_tonic = NOTE_NAMES.iter().position(|n| *n == value.as_str()).map(|i| i as i32);
             }
         });
+        show(&app);
+    });
+    let weak = app.as_weak();
+    data.on_kit_randomness_set(move |v| {
+        let Some(app) = weak.upgrade() else { return };
+        PAGE.with(|p| p.borrow_mut().kit.options.randomness = f64::from(v.clamp(0.0, 1.0)));
         show(&app);
     });
     let weak = app.as_weak();
@@ -455,10 +451,7 @@ pub(super) fn show(app: &AppWindow) {
         data.set_kit_normalise(k.export.normalise);
         let key = k.options.key_tonic.and_then(|t| usize::try_from(t).ok()).and_then(|t| NOTE_NAMES.get(t));
         data.set_kit_key(key.copied().unwrap_or_default().into());
-        let r = RANDOMNESS
-            .iter()
-            .min_by(|a, b| (a.1 - k.options.randomness).abs().total_cmp(&(b.1 - k.options.randomness).abs()));
-        data.set_kit_randomness(r.map_or("", |r| r.0).into());
+        data.set_kit_randomness(k.options.randomness as f32);
         data.set_kit_types(strings(p.types.iter().map(|t| t.0.as_str())));
     });
     redraw();
