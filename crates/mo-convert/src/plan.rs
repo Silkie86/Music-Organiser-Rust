@@ -111,11 +111,12 @@ pub struct Track {
     pub muted: bool,
 }
 
-/// The master track, or a track by its place in [`Plan::tracks`].
+/// The master track, or a track by its place in [`Plan::tracks`], or the song itself (its tempo).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TrackRef {
     Master,
     Track(usize),
+    Song,
 }
 
 /// What an automation lane moves.
@@ -130,6 +131,8 @@ pub enum Target {
     Plugin { device: usize, path: String, id: u32, name: String },
     /// Switches a device on (1) and off (0): the device by its place on the track.
     OnOff { device: usize },
+    /// The song's tempo in BPM (on [`TrackRef::Song`]).
+    Tempo,
 }
 
 impl Target {
@@ -342,6 +345,9 @@ fn on_fader_curve(a: &FlAutomation) -> Vec<FlPoint> {
 pub fn tempo_bpm(value: f64) -> f64 {
     10.0 + 512.0 * value.clamp(0.0, 1.0)
 }
+
+/// The slowest tempo Bitwig takes.
+const MIN_BPM: f64 = 20.0;
 
 /// FL's pan knob (0 to 1, centre 0.5) as -1 to 1.
 pub fn pan(fl_pan: f64) -> f64 {
@@ -930,6 +936,17 @@ pub fn from_fl(song: &FlSong, options: Options, read_sample: &mut dyn FnMut(&str
             }
             continue;
         }
+        // The song's tempo, on Bitwig's tempo lane.
+        if a.control == FlControl::Tempo {
+            if a.points.iter().any(|p| tempo_bpm(p.value) < MIN_BPM - 1e-9) {
+                planner.notes.push(format!(
+                    "{}: Bitwig's tempo goes down to {MIN_BPM} BPM, so the slower part plays at {MIN_BPM} BPM",
+                    a.name
+                ));
+            }
+            add_lane(&mut lanes, TrackRef::Song, Target::Tempo, a, |v| tempo_bpm(v).max(MIN_BPM));
+            continue;
+        }
         let channel = match a.channel {
             Some(ch) if !matches!(a.control, FlControl::Pitch | FlControl::Other) => ch,
             _ => {
@@ -1010,7 +1027,7 @@ pub fn from_fl(song: &FlSong, options: Options, read_sample: &mut dyn FnMut(&str
         let dense = FlAutomation { points: on_fader_curve(a), ..a.clone() };
         for track in onto {
             let own = match track {
-                TrackRef::Master => None,
+                TrackRef::Master | TrackRef::Song => None,
                 TrackRef::Track(t) => tracks.get(t),
             };
             let automated = lanes.iter().any(|l| l.track == track && l.target == target && !l.from_insert);

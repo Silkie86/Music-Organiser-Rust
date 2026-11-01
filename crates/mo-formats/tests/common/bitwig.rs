@@ -787,8 +787,12 @@ fn template_body(b: &mut BwWriter, t: Template, sampler: &str, note_transpose: &
     let mut n = Numbers::default();
     b.begin(0x2e);
     b.id(0xf);
-    b.obj(0x29a6);
+    // The transport, holding the tempo, as Bitwig 6.1.6 saves it.
+    b.obj(0x190);
+    b.begin(0xd7);
+    b.obj(0x211);
     param(b, 0x4c1, "TEMPO", 120.0);
+    b.end();
     b.obj(0x4dd);
     b.begin(0x1dd);
     b.id(0xf);

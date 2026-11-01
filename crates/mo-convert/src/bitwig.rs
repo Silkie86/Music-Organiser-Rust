@@ -84,6 +84,15 @@ pub fn write(plan: &Plan, template: &[u8]) -> Result<Converted, String> {
     for lane in &plan.lanes {
         let (track, devices) = match lane.track {
             TrackRef::Master => (master, &master_devices),
+            TrackRef::Song => match t.transport() {
+                Some(transport) => (transport, &master_devices),
+                None => {
+                    for clip in &lane.clips {
+                        w.notes.push(format!("{clip}: automation left out (the Bitwig template has no tempo setting)"));
+                    }
+                    continue;
+                }
+            },
             TrackRef::Track(i) => match tracks.get(i) {
                 Some(Some((track, devices))) => (*track, devices),
                 // Its track is left out, and said.
@@ -855,17 +864,36 @@ impl Template {
         self.doc.add(expression)
     }
 
+    /// A lane in `lanes` already moves `setting`. The template's master and transport are kept with what's on them,
+    /// their own lanes too, and one setting can't have two.
+    fn automated(&self, lanes: Option<ObjId>, setting: ObjId) -> bool {
+        lanes
+            .into_iter()
+            .flat_map(|l| self.doc.field_list(l, 0x4ba))
+            .any(|lane| self.doc.field_obj(lane, 0x2a3).and_then(|t| self.doc.field_obj(t, 0x41)) == Some(setting))
+    }
+
+    /// Where the song's tempo setting is (field 0x211, as Bitwig 6.1.6 saves it): the project's transport (field
+    /// 0x190), which holds the tempo lane too.
+    fn transport(&self) -> Option<ObjId> {
+        let transport = self.doc.field_obj(self.doc.root?, 0x190)?;
+        self.doc.field_obj(transport, 0x211).map(|_| transport)
+    }
+
     /// Gives a track the list its automation lanes go in (class 0xfa2, as Bitwig 6.1.6 saves one on every track and
-    /// the master), before its mixer as Bitwig has it, for a template track that has none.
+    /// the master; 0xfa3 on the transport), before its mixer (or the transport's tempo) as Bitwig has it, for a
+    /// template track that has none.
     fn lane_list(&mut self, track: ObjId) -> ObjId {
-        let mut list = Object::new(0xfa2);
+        let transport = self.doc.obj(track).has(0x211);
+        let mut list = Object::new(if transport { 0xfa3 } else { 0xfa2 });
         list.set(0x1832, Value::Null);
         list.set(0x4ba, Value::List(Vec::new()));
         list.set(0x3f83, Value::List(Vec::new()));
         let list = self.doc.add(list);
         let o = self.doc.obj_mut(track);
         let field = mo_formats::bitwig::Field { id: 0x2dc9, value: Value::Obj(Slot::Obj(list)) };
-        match o.fields.iter().position(|f| f.id == 0x165) {
+        let before = if transport { 0x211 } else { 0x165 };
+        match o.fields.iter().position(|f| f.id == before) {
             Some(at) => o.fields.insert(at, field),
             None => o.fields.push(field),
         }
@@ -882,6 +910,7 @@ impl Template {
     /// it can't.
     fn add_lane(&mut self, track: ObjId, devices: &[Option<ObjId>], lane: &Lane) -> Option<&'static str> {
         const NO_LANE: &str = "the Bitwig template has no automation lane to copy";
+        const TAKEN: &str = "the Bitwig template already automates it there";
         let lanes = self.doc.field_obj(track, 0x2dc9);
         let (pattern, set_up): (Option<ObjId>, SetUp) = match &lane.target {
             Target::Volume | Target::Pan => {
@@ -891,12 +920,8 @@ impl Template {
                     .field_obj(track, 0x165)
                     .and_then(|m| self.doc.field_obj(m, if pan { 0x1a5 } else { 0x1a4 }));
                 let Some(param) = param else { return Some("this track has no fader") };
-                // The template's master is kept with what's on it, its own lanes too: one setting can't have two.
-                let taken = lanes.into_iter().flat_map(|l| self.doc.field_list(l, 0x4ba)).any(|lane| {
-                    self.doc.field_obj(lane, 0x2a3).and_then(|t| self.doc.field_obj(t, 0x41)) == Some(param)
-                });
-                if taken {
-                    return Some("the Bitwig template already automates it there");
+                if self.automated(lanes, param) {
+                    return Some(TAKEN);
                 }
                 let name = if pan { "Pan" } else { "Volume" };
                 (
@@ -905,6 +930,23 @@ impl Template {
                         let o = doc.obj_mut(target);
                         put(o, 0x41, Value::Obj(Slot::Obj(param)));
                         o.set(0x133a, text(name));
+                    }),
+                )
+            }
+            Target::Tempo => {
+                let Some(tempo) = self.doc.field_obj(track, 0x211) else {
+                    return Some("the Bitwig template has no tempo setting");
+                };
+                if self.automated(lanes, tempo) {
+                    return Some(TAKEN);
+                }
+                (
+                    self.mixer_lane,
+                    Box::new(move |doc: &mut Document, target: ObjId| {
+                        let o = doc.obj_mut(target);
+                        put(o, 0x41, Value::Obj(Slot::Obj(tempo)));
+                        o.set(0x133b, text("Transport"));
+                        o.set(0x133a, text("Tempo"));
                     }),
                 )
             }

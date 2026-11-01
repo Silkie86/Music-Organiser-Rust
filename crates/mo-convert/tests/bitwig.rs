@@ -472,6 +472,36 @@ fn an_insert_fader_is_a_volume_lane_and_the_master_inserts_is_on_the_master() {
 }
 
 #[test]
+fn tempo_automation_is_the_transports_tempo_lane_in_bpm() {
+    let mut s = song();
+    s.automation = vec![FlAutomation {
+        channel: None,
+        ..automation("Tempo", 0, FlControl::Tempo, 0, &[(0.0, 0.2), (4.0, 0.25), (8.0, 0.0)])
+    }];
+    let (doc, notes, _) = convert(&s, &bitwig_template(Template::default()));
+    let transport = obj(&doc, doc.root.unwrap(), &[0x190]);
+    let tempo = obj(&doc, transport, &[0x211]);
+    let lanes = doc.field_list(obj(&doc, transport, &[0x2dc9]), 0x4ba);
+    assert_eq!(lanes.len(), 1);
+    assert_eq!(doc.obj(obj(&doc, transport, &[0x2dc9])).class, 0xfa3);
+    let target = obj(&doc, lanes[0], &[0x2a3]);
+    assert_eq!(doc.field_obj(target, 0x41), Some(tempo));
+    assert_eq!(doc.obj(target).str(0x133b), "Transport");
+    assert_eq!(doc.obj(target).str(0x133a), "Tempo");
+    let bpm: Vec<f64> = doc
+        .field_list(obj(&doc, lanes[0], &[0x2d8c, 0x35ac]), 0x21f)
+        .iter()
+        .map(|&p| doc.obj(p).num(0x28f).unwrap())
+        .collect();
+    // 10 + 512 x the FL value; below Bitwig's 20 BPM stays at 20.
+    assert_eq!(bpm, [112.4, 138.0, 20.0]);
+    assert!(notes.iter().any(|n| n.starts_with("Tempo: Bitwig's tempo goes down to 20 BPM")), "{notes:?}");
+    // The lanes list comes before the tempo it points at, so the tempo is defined in the lane, as Bitwig saves it.
+    let fields: Vec<u32> = doc.obj(transport).fields.iter().map(|f| f.id).collect();
+    assert!(fields.iter().position(|&f| f == 0x2dc9) < fields.iter().position(|&f| f == 0x211));
+}
+
+#[test]
 fn a_master_fader_lane_is_left_out_where_the_template_master_already_has_one() {
     use mo_formats::bitwig::{Field, Object, Slot, Value, clone_object, encode};
     // The template's Sampler track volume lane, copied onto its master and pointed at the master's fader.

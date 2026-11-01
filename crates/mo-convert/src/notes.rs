@@ -68,9 +68,6 @@ pub fn not_carried(a: &FlAutomation, song: &FlSong) -> String {
         None => format!("insert {}", a.insert.map_or(-1, i64::from)),
     };
     match a.control {
-        FlControl::Tempo => {
-            format!("tempo automation isn't carried over yet; the project is set to {} BPM", number(song.tempo, 2))
-        }
         FlControl::MainVolume => "the master volume isn't automated here yet".to_owned(),
         FlControl::InsertVolume => format!("the fader of {insert} isn't automated here yet"),
         FlControl::InsertPan => format!("the pan of {insert} isn't automated here yet"),
