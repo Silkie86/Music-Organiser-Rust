@@ -82,6 +82,8 @@ export struct PanelSong {
     facts: string,
     name: string,
     saves: string,
+    // When the song last reached the backup drive; empty until a backup drive is picked.
+    backed: string,
     status: string,
     rating: int,
     favourite: bool,
@@ -205,6 +207,12 @@ component SongPanel inherits Rectangle {
         }
         if SongsData.song.saves != "": Text {
             text: SongsData.song.saves;
+            color: Theme.muted;
+            font-size: Type.meta;
+            overflow: elide;
+        }
+        if SongsData.song.backed != "": Text {
+            text: SongsData.song.backed;
             color: Theme.muted;
             font-size: Type.meta;
             overflow: elide;

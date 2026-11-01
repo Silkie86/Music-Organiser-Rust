@@ -79,14 +79,20 @@ fn a_song_goes_with_the_sample_it_uses_from_outside_the_folders() {
     assert_eq!(prepared.missing, vec![root.join("unplugged")]);
     assert_eq!(prepared.songs.len(), 1);
 
-    let last = run(&prepared, &settings, &stop, &|_| {});
+    let ran = run(&prepared, &settings, &stop, &|_| {});
+    let last = &ran.last;
+    // The song's newest save went (its id is its first save's).
+    assert_eq!(ran.went, vec![(1, prepared.newest[0].2)]);
+    assert_eq!(prepared.newest[0].1, save2);
     assert!(last.line.starts_with("4 checked · 4 new or changed"), "{}", last.line);
     assert!(!last.ok, "a folder wasn't plugged in");
     let copies = fs::read_dir(&backup).unwrap().count();
     assert!(copies >= 1);
 
     settings.format = Format::Zips;
-    let last = run(&prepared, &settings, &stop, &|_| {});
+    let ran = run(&prepared, &settings, &stop, &|_| {});
+    let last = &ran.last;
+    assert_eq!(ran.went.len(), 1, "a zipped song went too");
     // The preset is no song's: it still goes, as a plain folder (up to date from the first run); the song is zipped.
     assert!(last.line.starts_with("2 checked · 1 new or changed"), "{}", last.line);
     let zips: Vec<_> = fs::read_dir(backup.join(SONGS)).unwrap().map(|e| e.unwrap().file_name()).collect();

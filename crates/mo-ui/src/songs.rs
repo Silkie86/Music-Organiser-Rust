@@ -567,6 +567,7 @@ fn panel_song(r: &SongRow) -> PanelSong {
         facts: panel::facts(r).into(),
         name: r.song.name.as_str().into(),
         saves: panel::saves_text(r).into(),
+        backed: crate::backup::song_line(&r.song, r.saved).into(),
         status: r.status.as_str().into(),
         rating: r.rating,
         favourite: r.favourite,
@@ -612,6 +613,18 @@ fn with_picked(f: impl FnOnce(&Page, &SongRow)) {
         let p = p.borrow();
         if let Some(r) = p.picked.and_then(|i| p.songs.rows.get(i)) {
             f(&p, r);
+        }
+    });
+}
+
+/// The backup changed (a run ended, or another drive was picked): the picked song's "Backed up" line is put right.
+pub fn backup_changed(app: &AppWindow) {
+    let data = app.global::<SongsData>();
+    with_picked(|_, r| {
+        // Only when the line changed: the rest of the panel is left as it is.
+        let song = panel_song(r);
+        if song.backed != data.get_song().backed {
+            data.set_song(song);
         }
     });
 }
