@@ -310,6 +310,32 @@ fn inner_voices_are_never_lines() {
     ];
     let h = Music::new().keys(keys.concat()).hear();
     assert_eq!(shapes(&h), ["chords Passing B4@2160 (C A)"]);
+    // A left hand's octave isn't a chord's top: C2 C3 struck on beat 2 round G2 B2 held from beat 1, between chords
+    // topped by B2 and D3, is the bass (C2 the bass, and C3 its octave), so C3 doesn't pass from B2 to D3 on the
+    // chords' line.
+    let keys = [notes("C2", 0, BEAT), notes("G2 B2", 0, 2 * BEAT), notes("C2 C3", BEAT, BEAT / 2)];
+    let h = Music::new().keys([keys.concat(), notes("G2 B2 D3", 2 * BEAT, 2 * BEAT)].concat()).hear();
+    assert_eq!((h.gap_bass(2), shapes(&h)), (Some(key("C2")), Vec::<String>::new()));
+    // Struck with G2 and B2 under it, C3 is the chord's top, and passes.
+    let keys = [notes("C2 G2 B2", 0, BEAT), notes("C2 G2 B2 C3", BEAT, BEAT / 2)];
+    let h = Music::new().keys([keys.concat(), notes("G2 B2 D3", 2 * BEAT, 2 * BEAT)].concat()).hear();
+    assert_eq!((h.gap_bass(2), shapes(&h)), (Some(key("C2")), vec!["chords Passing C3@480 (D B)".to_string()]));
+}
+
+#[test]
+fn a_loops_copied_bar_hears_notes_held_into_it_as_struck_before() {
+    // A 2-bar loop: the tune's C5 D5 E5 F5 in eighths, then G5 from beat 3 held to the loop's end. In the copied bar,
+    // the G5 held from before stops at the loop's start, so the loop's first notes are the tune's line: D5 and F5
+    // pass by.
+    let tune = [line("C5 D5 E5 F5", 0, BEAT / 2), notes("G5", 2 * BEAT, 2 * BAR - 2 * BEAT)].concat();
+    let h = Music::new().looped().bass(notes("C2", 0, 2 * BAR)).keys(notes("C4 E4", 0, 2 * BAR)).tune(tune).hear();
+    assert_eq!(shapes(&h), ["tune Passing D5@240 (C E)", "tune Passing F5@720 (E G)"]);
+    // G5 held from beat 2 into the last bar, where E5 is struck under it: in the copied bar, the E5 is an inner voice
+    // and the G5 isn't struck, so the loop's F#5 has no note before it, and doesn't turn round G5.
+    let tune = [notes("F#5", BEAT / 2, BEAT / 2), notes("G5", BEAT, BAR + BEAT), notes("E5", BAR, BEAT / 2)].concat();
+    let h = Music::new().looped().bass(notes("C2", 0, 2 * BAR)).keys(notes("C4 E4", 0, 2 * BAR)).tune(tune).hear();
+    assert_eq!(shapes(&h), Vec::<String>::new());
+    assert!(h.shaped().iter().all(|s| h.notes()[s.note].struck));
 }
 
 #[test]
@@ -353,6 +379,9 @@ fn a_chord_isnt_pushed_over_a_bass_held_from_before_or_when_it_is_one_note() {
     let on_the_beat = notes("D4 E4 G4 B4", BAR, BEAT);
     let h = Music::new().bass(notes("C2", 0, 2 * BAR)).keys([before, early("F3 A3"), on_the_beat].concat()).hear();
     assert_eq!(pushes(&h), Vec::<String>::new());
+    // On a grid of one tick a beat, every unit is a felt beat: a chord held over the bar isn't pushed onto its beats.
+    let h = Music::new().grid(4, 1).bass(notes("C2", 0, 4)).keys(notes("C4 E4 G4", 0, 4)).hear();
+    assert_eq!(pushes(&h), Vec::<String>::new());
     // Not held a unit past the beat: struck early and let go.
     let h = Music::new()
         .bass([notes("C2", 0, BAR), notes("F2", BAR, BAR)].concat())
@@ -372,6 +401,15 @@ fn a_chord_struck_at_a_loops_end_may_be_pushed_to_its_start() {
         .hear();
     assert_eq!(pushes(&h), ["0 <- -240 C E F A"]);
     assert!(h.push_notes(&h.pushes()[0]).all(|(_, n)| n.copy && n.wraps));
+    // With the Fmaj7 ringing on past the loop's end, to 4600 (a release, nowhere near a bar line), the loop stays two
+    // bars, and the push stays.
+    let h = Music::new()
+        .looped()
+        .bass([notes("G2", 960, 2640), notes("F2", 3600, 1000)].concat())
+        .keys([notes("F4 B4 D5", 960, 2640), notes("E4 A4 C5", 3600, 1000)].concat())
+        .hear();
+    assert_eq!(h.reported(), 8..24);
+    assert_eq!(pushes(&h), ["0 <- -240 C E F A"]);
 }
 
 #[test]

@@ -46,7 +46,9 @@ impl Hearing {
         self.pushed.clear();
         let layout = self.layout;
         for unit in 1..self.units.len() {
-            if layout.level(unit) < Level::Beat {
+            // A felt beat, and the unit before it between felt beats (on a grid of one tick a beat, every unit is a
+            // felt beat, and nothing comes between them).
+            if layout.level(unit) < Level::Beat || layout.level(unit - 1) != Level::Off {
                 continue;
             }
             let (from, to, past) = (layout.start(unit - 1), layout.start(unit), layout.start(unit + 1));

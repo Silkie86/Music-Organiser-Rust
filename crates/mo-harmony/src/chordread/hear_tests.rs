@@ -357,6 +357,32 @@ fn an_arpeggio_is_heard_as_its_chord_and_is_never_the_bass() {
 }
 
 #[test]
+fn a_bass_held_through_each_beat_under_an_arpeggio_is_the_bass() {
+    // The left hand's C3 a quarter note on each beat, with C4 E4 in eighths above it: each C3 is held through its
+    // beat, so it isn't broken and is the bass; the C4s and E4s are broken.
+    let keys: Vec<Note> =
+        (0..4).flat_map(|b| [notes("C3", b * BEAT, BEAT), line("C4 E4", b * BEAT, BEAT / 2)].concat()).collect();
+    let h = Music::new().keys(keys.clone()).hear();
+    assert!(h.notes().iter().all(|n| n.broken == (n.key != key("C3"))));
+    assert_eq!(h.bass(0..8), BassTexture::Held(PitchClass::C));
+    // Each C3 let go of 10 ticks early (a player's timing), the same.
+    let early: Vec<Note> =
+        keys.iter().map(|&n| if n.key == key("C3") { Note { length: n.length - 10, ..n } } else { n }).collect();
+    let h = Music::new().keys(early).hear();
+    assert!(h.notes().iter().all(|n| n.broken == (n.key != key("C3"))));
+    assert_eq!(h.bass(0..8), BassTexture::Held(PitchClass::C));
+    // In a loop, the last C3 held past the loop's end is cut there, and is still held through its beat.
+    let mut held_on = keys;
+    if let Some(last) = held_on.iter_mut().rfind(|n| n.key == key("C3")) {
+        last.length += 100;
+    }
+    let h = Music::new().looped().keys(held_on).hear();
+    assert_eq!(h.reported(), 8..16);
+    assert!(h.notes().iter().all(|n| n.broken == (n.key != key("C3"))));
+    assert_eq!(h.bass(8..16), BassTexture::Held(PitchClass::C));
+}
+
+#[test]
 fn an_alberti_bass_is_heard_as_its_chord() {
     // The design's case 42, in eighths and in sixteenths: C3 G3 E3 G3 over and over.
     for step in [BEAT / 2, BEAT / 4] {
@@ -421,14 +447,18 @@ fn a_chord_held_to_the_end_of_the_music_is_held_through_its_felt_beat() {
 #[test]
 fn a_left_hand_playing_bass_and_chord_by_turns_on_its_own_is_broken() {
     // C2 on each beat, E3 G3 between: alone, it's heard as a broken chord, as the design has it, so the C2 is no bass.
-    // With the right hand's held chord in the same part, it isn't broken, and the C2 is the bass on each beat.
+    // With the right hand's held chord in the same part, it isn't broken, and the C2 is the bass on each beat; so too
+    // when the chord is let go of 10 ticks before the bar's end (a player's timing), as it's still held through the
+    // last beat.
     let beat = |b: i64| [notes("C2", b * BEAT, BEAT / 2), notes("E3 G3", b * BEAT + BEAT / 2, BEAT / 2)].concat();
     let left: Vec<Note> = (0..4).flat_map(beat).collect();
     let h = Music::new().keys(left.clone()).hear();
     assert!((0..8).all(|u| h.gap_bass(u).is_none()));
-    let h = Music::new().keys([left, notes("C4 E4 G4", 0, BAR)].concat()).hear();
-    assert!((0..8).step_by(2).all(|u| h.gap_bass(u) == Some(key("C2"))));
-    assert_eq!(h.bass(0..8), BassTexture::Held(PitchClass::C));
+    for held in [BAR, BAR - 10] {
+        let h = Music::new().keys([left.clone(), notes("C4 E4 G4", 0, held)].concat()).hear();
+        assert!((0..8).step_by(2).all(|u| h.gap_bass(u) == Some(key("C2"))), "{held}");
+        assert_eq!(h.bass(0..8), BassTexture::Held(PitchClass::C), "{held}");
+    }
 }
 
 #[test]
@@ -528,6 +558,17 @@ fn a_loop_is_heard_with_its_last_bar_copied_in_front() {
     let h = Music::new().looped().keys(notes("C4 E4 G4", 0, BAR + 10)).hear();
     assert_eq!(h.reported(), 8..16);
     assert!(h.notes().iter().all(|n| n.wraps));
+    // A loop of two 2-bar chords: the F chord, struck at bar 3 and held to the end of bar 4 (or to within a felt beat
+    // of it), takes the loop to 4 bars.
+    for held in [2 * BAR, 2 * BAR - BEAT, 2 * BAR + BEAT / 2] {
+        let keys = [notes("C4 E4 G4", 0, 2 * BAR), notes("F4 A4 C5", 2 * BAR, held)].concat();
+        let h = Music::new().looped().keys(keys).hear();
+        assert_eq!(h.reported(), 8..40, "{held}");
+    }
+    // Ringing on to the middle of bar 4, it's a release: the loop ends at bar 3's end, and the chord is cut there.
+    let keys = [notes("C4 E4 G4", 0, 2 * BAR), notes("F4 A4 C5", 2 * BAR, BAR + BAR / 2)].concat();
+    let h = Music::new().looped().keys(keys).hear();
+    assert_eq!(h.reported(), 8..32);
 }
 
 #[test]

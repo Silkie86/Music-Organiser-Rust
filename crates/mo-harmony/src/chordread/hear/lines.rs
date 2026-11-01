@@ -119,38 +119,46 @@ impl Hearing {
         self.bass_line(&mut space);
         self.shape_line(&space.steps, Line::Bass, &mut out);
 
-        let LineSpace { parts, .. } = &mut space;
-        parts.clear();
-        parts.extend(self.notes.iter().filter(|n| n.stream == Stream::Melody).map(|n| n.part));
-        parts.sort_unstable();
-        parts.dedup();
-        for k in 0..space.parts.len() {
-            let Some(&part) = space.parts.get(k) else { break };
-            self.top_line(&mut space, |_, n| n.stream == Stream::Melody && n.part == part);
+        let mut parts = std::mem::take(&mut space.parts);
+        self.parts_of(&mut parts, |n| n.stream == Stream::Melody);
+        for &part in &parts {
+            self.top_line(&mut space, |n| n.stream == Stream::Melody && n.part == part, false);
             self.shape_line(&space.steps, Line::Tune(part), &mut out);
         }
 
-        self.top_line(&mut space, |h, n| n.stream == Stream::Harmony && !n.broken && !h.is_gap_bass(n));
+        self.top_line(&mut space, |n| n.stream == Stream::Harmony && !n.broken, true);
         self.shape_line(&space.steps, Line::Chords, &mut out);
 
-        let LineSpace { parts, .. } = &mut space;
-        parts.clear();
-        parts.extend(self.notes.iter().filter(|n| n.broken).map(|n| n.part));
-        parts.sort_unstable();
-        parts.dedup();
-        for k in 0..space.parts.len() {
-            let Some(&part) = space.parts.get(k) else { break };
+        self.parts_of(&mut parts, |n| n.broken);
+        for &part in &parts {
             self.broken_line(&mut space, part);
             self.shape_line(&space.steps, Line::Broken(part), &mut out);
         }
 
+        space.parts = parts;
         self.shaped = out;
         self.line_space = space;
+    }
+
+    /// The parts with notes that `of` picks, in order.
+    fn parts_of(&self, parts: &mut Vec<usize>, of: impl Fn(&HeardNote) -> bool) {
+        parts.clear();
+        parts.extend(self.notes.iter().filter(|n| of(n)).map(|n| n.part));
+        parts.sort_unstable();
+        parts.dedup();
     }
 
     /// Whether a chord note is the bass of the unit it's struck in.
     fn is_gap_bass(&self, n: &HeardNote) -> bool {
         self.gap_bass(self.layout.unit_at(n.start)) == Some(n.key)
+    }
+
+    /// Whether a chord note struck in a strike is the bass there, as the hearing has it: the bass of its unit, or its
+    /// octave with no chord note of another pitch class struck below it (a left hand's octave, not a chord's top).
+    fn in_bass(&self, n: &HeardNote, strike: &[usize]) -> bool {
+        let Some(bass) = self.gap_bass(self.layout.unit_at(n.start)) else { return false };
+        let other_below = |m: &HeardNote| m.key < n.key && m.key % 12 != bass % 12;
+        n.key % 12 == bass % 12 && !self.strike_notes(strike).any(|(_, m)| other_below(&m))
     }
 
     /// Notes struck within a quarter of a unit of each other are one strike.
@@ -209,27 +217,33 @@ impl Hearing {
         });
     }
 
-    /// The top line of some notes: the highest note of each strike, unless a higher note struck before still sounds
-    /// more than a quarter of a unit into it (a little legato overlap, or a held-over end, doesn't count): then it's
-    /// an inner voice.
-    fn top_line(&self, space: &mut LineSpace, take: impl Fn(&Hearing, &HeardNote) -> bool) {
+    /// The top line of some notes (those `take` picks): the highest note struck in each strike, unless a higher note
+    /// struck before still sounds more than a quarter of a unit into it (a little legato overlap, or a held-over end,
+    /// doesn't count): then it's an inner voice. A loop's copy of a note struck before its last bar is one struck
+    /// before. On the chords' line (`chords`), the bass isn't a chord's top ([`Hearing::in_bass`]).
+    fn top_line(&self, space: &mut LineSpace, take: impl Fn(&HeardNote) -> bool, chords: bool) {
         let LineSpace { steps, picked, ringing, .. } = space;
         steps.clear();
         picked.clear();
         ringing.clear();
         let together = self.together();
-        picked.extend(self.notes.iter().enumerate().filter(|(_, n)| take(self, n)).map(|(i, _)| i));
+        // Where a note stops ringing: as played, before any held-over end.
+        let until = |n: &HeardNote| {
+            let played = n.start.saturating_add(n.length.max(1)).min(n.end);
+            played.min(n.held_over.unwrap_or(i64::MAX))
+        };
+        picked.extend(self.notes.iter().enumerate().filter(|(_, n)| take(n)).map(|(i, _)| i));
         self.strikes(picked, |strike| {
-            let Some((i, top)) = Self::top(self.strike_notes(strike)) else { return };
-            ringing.retain(|&(until, _)| until - top.start > together);
-            let under = ringing.iter().any(|&(_, key)| key > top.key);
-            let struck = strike.iter().any(|&j| self.notes.get(j).is_some_and(|n| n.struck));
-            if struck && !under {
-                steps.push(self.step(i, &top));
+            let notes = || self.strike_notes(strike);
+            ringing.extend(notes().filter(|(_, n)| !n.struck).map(|(_, n)| (until(&n), n.key)));
+            let bass = |n: &HeardNote| chords && self.in_bass(n, strike);
+            if let Some((i, top)) = Self::top(notes().filter(|(_, n)| n.struck && !bass(n))) {
+                ringing.retain(|&(until, _)| until - top.start > together);
+                if !ringing.iter().any(|&(_, key)| key > top.key) {
+                    steps.push(self.step(i, &top));
+                }
             }
-            let sounding = strike.iter().filter_map(|&j| self.notes.get(j));
-            let until = |n: &HeardNote| n.start.saturating_add(n.length.max(1)).min(n.held_over.unwrap_or(i64::MAX));
-            ringing.extend(sounding.map(|n| (until(n), n.key)));
+            ringing.extend(notes().filter(|(_, n)| n.struck).map(|(_, n)| (until(&n), n.key)));
         });
     }
 
@@ -354,28 +368,27 @@ impl Hearing {
         None
     }
 
+    /// The units after the one a note is struck in, for a bar: a bar line comes within them, and nothing is stronger.
+    fn bar_after(&self, s: Step) -> impl Iterator<Item = usize> + use<> {
+        let from = self.layout.unit_at(s.start);
+        (1..=uncount(self.layout.per_bar).max(1)).map(move |k| from.saturating_add(k))
+    }
+
     /// The first unit start after a note is struck that is stronger than where it's struck (none for a note struck on
     /// a bar line, as nothing is stronger).
     fn next_stronger(&self, s: Step) -> Option<i64> {
         let layout = self.layout;
-        let from = layout.unit_at(s.start);
-        // A bar line comes within a bar.
-        (1..=uncount(layout.per_bar).max(1))
-            .map(|k| from.saturating_add(k))
-            .find(|&u| layout.level(u).weight() > s.weight)
-            .map(|u| layout.start(u))
+        self.bar_after(s).find(|&u| layout.level(u).weight() > s.weight).map(|u| layout.start(u))
     }
 
     /// Where a suspension starts: the strongest felt beat a note is held at least a unit into (the first, when two are
     /// as strong), when it's at least as strong as where the note is struck.
     fn held_into(&self, s: Step) -> Option<i64> {
         let layout = self.layout;
-        let from = layout.unit_at(s.start);
         // Held at least a unit into it: a little legato isn't held.
         let latest = s.end - layout.unit_ticks();
-        // A bar line comes within a bar, and nothing is stronger.
-        let best = (1..=uncount(layout.per_bar).max(1))
-            .map(|k| from.saturating_add(k))
+        let best = self
+            .bar_after(s)
             .take_while(|&u| layout.start(u) <= latest)
             .reduce(|best, u| if layout.level(u) > layout.level(best) { u } else { best })?;
         let level = layout.level(best);
