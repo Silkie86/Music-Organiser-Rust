@@ -1,7 +1,7 @@
-// The Backup section of the Space page (Solomon liked the mock-up, 1 Nov 2026): the backup drive and its last run,
-// How much, the format, the list of folders (each whole or slimmed), and what goes and what's left out, and why.
-// Only shared parts from studio.slint; mo-app decides every word (mo_app::backup), mo-ui/src/backup.rs fills it.
-// The section tabs are a Segmented here so the Space page can lift them into its own frame later.
+// The Backup page, a page of its own in the rail (Solomon, 1 Nov 2026: different enough from Space, and room to
+// grow): the backup drive and its last run, How much, the format, the list of folders (each whole or slimmed), and
+// what goes and what's left out, and why. Only shared parts from studio.slint; mo-app decides every word
+// (mo_app::backup), mo-ui/src/backup.rs fills it.
 import { Theme, Type, Space, StudioButton, Segmented, FolderRow, PageHeader, Caps, Well, Groove, ProgressLine, EmptyState } from "../studio.slint";
 
 export struct BackupFolderLine {
@@ -51,7 +51,7 @@ export global BackupData {
     callback remove-folder(int);
 }
 
-export component BackupSection inherits Rectangle {
+export component BackupPage inherits Rectangle {
     Flickable {
         content-height: page.preferred-height;
         page := VerticalLayout {
@@ -59,17 +59,10 @@ export component BackupSection inherits Rectangle {
             spacing: Space.xl;
             alignment: start;
             PageHeader {
-                title: "Space";
-                summary: "Backup: a lean copy of your music on another drive";
+                title: "Backup";
+                summary: "A lean copy of your music on another drive";
                 busy: BackupData.busy;
                 done: BackupData.done;
-            }
-            HorizontalLayout {
-                alignment: start;
-                Segmented {
-                    choices: ["Drives", "Clean", "Storage", "Backup"];
-                    current: 3;
-                }
             }
 
             // The drive.
