@@ -39,13 +39,11 @@ The Presets page's engine (spec section 3.4a). No UI. It writes only `presets.db
 
 ## Next
 
-- More plugins' own octave (`octave`: Serum 1 is read, from the C# `Serum1State` offsets, with its sub oscillator
-  when only that plays; Serum 2's CBOR state next), and Bitwig Note Transpose devices (needs the Bitwig reader to say which devices come
-  before an instrument).
+- Other synths' own octave: left for now (Solomon, 2026-11-01: too complex for a small gain). Bitwig Note
+  Transpose devices still need the Bitwig reader to say which devices come before an instrument.
 - Bitwig: the reader doesn't say which presets are instruments, so no Bitwig synth is marked unused yet.
 - Send to Bitwig reads each template again when the page lists them (they were read once by the list); the list
   could keep what a template needs instead.
 - A sound's Bitwig preset name is kept for it in the export names, so two plugins with one sound name ("Pad.fxp",
   "Pad.vstpreset") now give "Pad 2.vstpreset" for the second, where the C# app gave "Pad.vstpreset".
-- Export: half-written `.part-*` files left by a crash aren't cleared yet; names are cut by UTF-16 units as the C#
-  app does, not by Linux's 255-byte limit.
+- Export: names are cut by UTF-16 units as the C# app does, not by Linux's 255-byte limit.

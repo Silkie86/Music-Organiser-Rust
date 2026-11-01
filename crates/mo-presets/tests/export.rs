@@ -93,3 +93,26 @@ fn a_save_that_cant_be_read_exports_nothing() {
     );
     assert!(!root.join("out").exists());
 }
+
+#[test]
+fn half_written_files_a_crash_left_are_cleared() {
+    let root = folder("left-behind");
+    let presets = export::folder_for(&root, "Song.flp");
+    std::fs::create_dir_all(presets.join("Kept.fxp.part-1-1")).unwrap();
+    let old = presets.join("Serum - Lead.fxp.part-99-3");
+    let fresh = presets.join("Serum - Pad.fxp.part-98-0");
+    let yours = presets.join("My notes.part-1.txt");
+    for f in [&old, &fresh, &yours] {
+        std::fs::write(f, b"x").unwrap();
+    }
+    let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    for f in [&old, &yours] {
+        std::fs::File::options().write(true).open(f).unwrap().set_modified(hour_ago).unwrap();
+    }
+    export::export(&[serum("Lead", "")], "Song.flp", &root, None).unwrap();
+    // Only the old one of the export's own shape goes; one still being written, your file and folders stay.
+    assert_eq!(
+        names(&presets),
+        ["Kept.fxp.part-1-1", "My notes.part-1.txt", "Serum - Lead.fxp", "Serum - Pad.fxp.part-98-0"]
+    );
+}

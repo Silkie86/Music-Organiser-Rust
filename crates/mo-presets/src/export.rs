@@ -19,6 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime};
 
 use mo_formats::paths;
 use mo_formats::presets::PresetBlob;
@@ -123,6 +124,7 @@ fn write_all(
     }
     let folder = folder_for(export_root, save);
     std::fs::create_dir_all(&folder)?;
+    clear_half_written(&folder, LEFT_BEHIND);
     let mut files = Vec::new();
     // Each template's file, read once for the whole export.
     let mut template_bytes: HashMap<PathBuf, Result<Vec<u8>, String>> = HashMap::new();
@@ -184,6 +186,43 @@ fn stale(folder: &Path, bw: &str, why: &str) -> String {
     } else {
         format!("{bw}: {why}")
     }
+}
+
+/// How old a half-written file must be before it's taken as left behind by a crash: no export takes this long to
+/// write one file, so one still being written by another export is never cleared.
+const LEFT_BEHIND: Duration = Duration::from_secs(10 * 60);
+
+/// Clears half-written files ([`write_checked`]'s "<name>.part-<app>-<write>") a crash left in an export folder, once
+/// they're older than `older_than`. Only names of exactly that shape are touched, in this folder only (not inside
+/// others), so nothing else is ever deleted; one that can't be cleared is left for next time.
+pub fn clear_half_written(folder: &Path, older_than: Duration) {
+    let Ok(entries) = std::fs::read_dir(folder) else { return };
+    let now = SystemTime::now();
+    for entry in entries.flatten() {
+        let Ok(kind) = entry.file_type() else { continue };
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !kind.is_file() || !is_half_written(name) {
+            continue;
+        }
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| now.duration_since(t).ok())
+            .is_some_and(|age| age >= older_than);
+        if old {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// A half-written file's name: something, then ".part-", digits, "-", digits, and nothing after.
+fn is_half_written(name: &str) -> bool {
+    let Some((before, tail)) = name.rsplit_once(".part-") else { return false };
+    let Some((app, write)) = tail.split_once('-') else { return false };
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    !before.is_empty() && digits(app) && digits(write)
 }
 
 /// Writes `data` to `path` under a name of its own first, makes sure it's on the disk, reads it back, checks it's the
@@ -267,6 +306,23 @@ pub fn export_from_save(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn knows_a_half_written_name() {
+        assert!(is_half_written("Serum - Lead.fxp.part-1234-0"));
+        assert!(is_half_written("a.part-1-22"));
+        for name in [
+            "Serum - Lead.fxp",
+            "x.part-12",
+            "x.part-12-",
+            "x.part-1a-2",
+            ".part-1-2",
+            "x.part-1-2.fxp",
+            "Body part-1-2",
+        ] {
+            assert!(!is_half_written(name), "{name}");
+        }
+    }
 
     #[test]
     fn a_label_is_plugin_name_and_place() {
