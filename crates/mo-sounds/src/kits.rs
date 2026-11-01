@@ -354,7 +354,9 @@ fn copy_whole(from: &Path, to: &Path) -> Result<(), ExportError> {
     let part = part_of(to);
     let done = (|| {
         std::fs::copy(from, &part).map_err(|e| ExportError::Io(to.to_owned(), e))?;
-        let file = std::fs::File::open(&part).map_err(|e| ExportError::Io(to.to_owned(), e))?;
+        // Opened to write: Windows only flushes a file to the disk through a handle that may write to it.
+        let file =
+            std::fs::OpenOptions::new().write(true).open(&part).map_err(|e| ExportError::Io(to.to_owned(), e))?;
         file.sync_all().map_err(|e| ExportError::Io(to.to_owned(), e))?;
         if file.metadata().map_err(|e| ExportError::Io(to.to_owned(), e))?.len() != size {
             return Err(ExportError::Short(from.to_owned()));
