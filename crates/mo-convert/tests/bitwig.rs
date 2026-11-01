@@ -461,11 +461,52 @@ fn an_insert_fader_is_a_volume_lane_and_the_master_inserts_is_on_the_master() {
             .map(|&p| doc.obj(p).num(0x28f).unwrap())
             .collect()
     };
-    let want = [1.0, mo_convert::plan::insert_gain(0.5).cbrt()];
+    // From 0.8 to 0.5 in steps of 0.05 on FL's curve, as Bitwig draws a straight line on its own scale.
+    let want: Vec<f64> = (0..=6).map(|i| mo_convert::plan::insert_gain(0.8 - 0.05 * i as f64).cbrt()).collect();
+    assert!((want[0] - 1.0).abs() < 1e-12);
     for (got, track) in [(gains(tracks[0]), "Serum"), (gains(obj(&doc, group, &[0x4e0])), "master")] {
-        assert!(got.iter().zip(want).all(|(g, w)| (g - w).abs() < 1e-12), "{track}: {got:?}");
+        assert_eq!(got.len(), want.len(), "{track}: {got:?}");
+        assert!(got.iter().zip(&want).all(|(g, w)| (g - w).abs() < 1e-12), "{track}: {got:?}");
     }
     assert!(!notes.iter().any(|n| n.contains("automation")), "{notes:?}");
+}
+
+#[test]
+fn a_master_fader_lane_is_left_out_where_the_template_master_already_has_one() {
+    use mo_formats::bitwig::{Field, Object, Slot, Value, clone_object, encode};
+    // The template's Sampler track volume lane, copied onto its master and pointed at the master's fader.
+    let template = bitwig_template(Template::default());
+    let mut t = decode(template.clone()).unwrap();
+    let (group, sampler) = tracks(&t);
+    let master = obj(&t, group, &[0x4e0]);
+    let sampler_lane = t.field_list(obj(&t, sampler[0], &[0x2dc9]), 0x4ba)[0];
+    let lane = clone_object(&mut t, sampler_lane);
+    let fader = obj(&t, master, &[0x165, 0x1a4]);
+    let target = obj(&t, lane, &[0x2a3]);
+    t.obj_mut(target).set(0x41, Value::Obj(Slot::Obj(fader)));
+    let mut list = Object::new(0xfa2);
+    list.set(0x1832, Value::Null);
+    list.set(0x4ba, Value::List(vec![Slot::Obj(lane)]));
+    list.set(0x3f83, Value::List(Vec::new()));
+    let list = t.add(list);
+    t.obj_mut(master).fields.insert(0, Field { id: 0x2dc9, value: Value::Obj(Slot::Obj(list)) });
+    let zip = t.has_zip.then(|| template[t.zip_offset..].to_vec());
+    let template = encode(&t, zip.as_deref()).unwrap();
+
+    let mut s = song();
+    s.automation = vec![FlAutomation {
+        channel: None,
+        insert: Some(0),
+        ..automation("Master fader", 0, FlControl::InsertVolume, 0, &[(0.0, 0.8)])
+    }];
+    let (doc, notes, _) = convert(&s, &template);
+    let master = obj(&doc, tracks(&doc).0, &[0x4e0]);
+    assert_eq!(doc.field_list(obj(&doc, master, &[0x2dc9]), 0x4ba).len(), 1);
+    assert!(
+        notes
+            .contains(&"Master fader: automation left out (the Bitwig template already automates it there)".to_owned()),
+        "{notes:?}"
+    );
 }
 
 #[test]

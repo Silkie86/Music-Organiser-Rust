@@ -891,6 +891,13 @@ impl Template {
                     .field_obj(track, 0x165)
                     .and_then(|m| self.doc.field_obj(m, if pan { 0x1a5 } else { 0x1a4 }));
                 let Some(param) = param else { return Some("this track has no fader") };
+                // The template's master is kept with what's on it, its own lanes too: one setting can't have two.
+                let taken = lanes.into_iter().flat_map(|l| self.doc.field_list(l, 0x4ba)).any(|lane| {
+                    self.doc.field_obj(lane, 0x2a3).and_then(|t| self.doc.field_obj(t, 0x41)) == Some(param)
+                });
+                if taken {
+                    return Some("the Bitwig template already automates it there");
+                }
                 let name = if pan { "Pan" } else { "Volume" };
                 (
                     self.mixer_lane,
@@ -940,6 +947,13 @@ impl Template {
             }
         };
         let (Some(pattern), Some(point)) = (pattern, self.point) else { return Some(NO_LANE) };
+        // Checked on the pattern before anything is added, so a lane left out leaves the track as it was.
+        let pattern_arrangement = self.doc.field_obj(pattern, 0x2d8c);
+        if self.doc.field_obj(pattern, 0x2a3).is_none()
+            || pattern_arrangement.and_then(|a| self.doc.field_obj(a, 0x35ac)).is_none()
+        {
+            return Some(NO_LANE);
+        }
         let lanes = match lanes {
             Some(lanes) => lanes,
             None => self.lane_list(track),

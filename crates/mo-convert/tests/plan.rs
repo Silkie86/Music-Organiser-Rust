@@ -383,15 +383,23 @@ fn an_insert_fader_and_pan_are_automated_on_the_tracks_it_feeds_after_their_own_
     quiet.volume = 0.5;
     let mut left = channel(2, "Keys", Some(plugin("Keys", "VST2", "3")), "", 4);
     left.pan = 0.25;
+    let mut loud = channel(3, "Loud", Some(plugin("Loud", "VST2", "4")), "", 5);
+    loud.volume = 1.0;
     let s = song(
-        vec![channel(0, "Bass", Some(plugin("Bass", "VST2", "1")), "", 3), quiet, left],
-        vec![insert(3, "Bus", vec![]), insert(4, "Keys", vec![]), insert(9, "Empty", vec![])],
+        vec![channel(0, "Bass", Some(plugin("Bass", "VST2", "1")), "", 3), quiet, left, loud],
+        vec![
+            insert(3, "Bus", vec![]),
+            insert(4, "Keys", vec![]),
+            insert(5, "Loud", vec![]),
+            insert(9, "Empty", vec![]),
+        ],
         vec![
             fader("Bus fader", 3, FlControl::InsertVolume, &[(0.0, 0.8), (4.0, 0.5)]),
             fader("Bus pan", 3, FlControl::InsertPan, &[(0.0, 0.5), (4.0, 1.0)]),
             fader("Keys pan", 4, FlControl::InsertPan, &[(0.0, 0.0)]),
             fader("Master fader", 0, FlControl::InsertVolume, &[(0.0, 1.0)]),
             fader("Nobody", 9, FlControl::InsertVolume, &[(0.0, 1.0)]),
+            fader("Loud fader", 5, FlControl::InsertVolume, &[(0.0, 1.0)]),
             // Its own volume is automated too, so that lane stays.
             automation("Pad volume", Some(1), FlControl::Volume, &[(0.0, 0.2)]),
         ],
@@ -399,9 +407,13 @@ fn an_insert_fader_and_pan_are_automated_on_the_tracks_it_feeds_after_their_own_
     let p = plan(&s);
     let lane = |track, target: Target| p.lanes.iter().find(|l| l.track == track && l.target == target);
     let values = |track, target| lane(track, target).unwrap().points.iter().map(|x| x.value).collect::<Vec<_>>();
-    // Bass is at FL's default level (gain 1), so its fader lane is the insert's alone.
+    // Bass is at FL's default level (gain 1), so its fader lane is the insert's alone, with a point every 0.05 of
+    // fader travel so the fade keeps FL's curve.
     let bass = values(TrackRef::Track(0), Target::Volume);
-    assert!((bass[0] - 1.0).abs() < 1e-9 && (bass[1] - insert_gain(0.5)).abs() < 1e-12);
+    let want: Vec<f64> = (0..=6).map(|i| insert_gain(0.8 - 0.05 * i as f64)).collect();
+    assert_eq!(bass.len(), want.len(), "{bass:?}");
+    assert!(bass.iter().zip(&want).all(|(b, w)| (b - w).abs() < 1e-9), "{bass:?}");
+    assert_eq!(values(TrackRef::Track(3), Target::Volume), [2.0]);
     assert_eq!(values(TrackRef::Track(0), Target::Pan), [0.0, 1.0]);
     assert_eq!(values(TrackRef::Track(1), Target::Volume), [gain(0.2)]);
     assert_eq!(values(TrackRef::Track(1), Target::Pan), [0.0, 1.0]);
@@ -411,6 +423,8 @@ fn an_insert_fader_and_pan_are_automated_on_the_tracks_it_feeds_after_their_own_
         "Bus fader: automation left out on some tracks (Pad has its own volume automated)",
         "Keys pan: automation left out on some tracks (Keys's own pan isn't in the middle)",
         "Nobody: automation left out (no converted channel feeds it)",
+        "Loud fader: on Loud the fader and the channel's own level come to more than Bitwig's +6 dB, so the loudest \
+         part stays at +6 dB",
     ] {
         assert!(p.notes.contains(&note.to_owned()), "{note}: {:?}", p.notes);
     }
