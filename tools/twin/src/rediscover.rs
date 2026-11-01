@@ -30,11 +30,22 @@ impl Numbers {
     }
 }
 
+const RATES: [i32; 3] = [44_100, 48_000, 96_000];
+
 const TYPES: [&str; 4] = ["Kick", "Closed hat", "Snare", "808"];
 
 /// The library: 160 sounds, 40 of each type around a point of its own, in packs dated 2018 to 2023 (mid-year, so
 /// the time zone can't move one into another year). With `clap`, deep listening has heard them all.
 fn library(seed: u64, clap: bool) -> (Vec<Value>, Vec<Value>) {
+    let ext = |i: usize| {
+        if i % 6 == 5 {
+            "mp3"
+        } else if i % 11 == 9 {
+            "flac"
+        } else {
+            "wav"
+        }
+    };
     let mut n = Numbers(seed | 1);
     let centres: Vec<Vec<f32>> = TYPES.iter().map(|_| (0..20).map(|_| n.next() * 4.0).collect()).collect();
     let clap_centres: Vec<Vec<f32>> = TYPES.iter().map(|_| (0..16).map(|_| n.next() - 0.5).collect()).collect();
@@ -47,7 +58,7 @@ fn library(seed: u64, clap: bool) -> (Vec<Value>, Vec<Value>) {
         let path = if i == 10 || i == 50 {
             format!("/samples/Pack {pack}/{}/shared.wav", TYPES[t])
         } else {
-            format!("/samples/Pack {pack}/{}/{} {i:03}.wav", TYPES[t], TYPES[t])
+            format!("/samples/Pack {pack}/{}/{} {i:03}.{}", TYPES[t], TYPES[t], ext(i))
         };
         // 2018-07-01 12:00 UTC plus a year a pack.
         let mtime = 1_530_446_400 + pack as i64 * 31_557_600;
@@ -62,6 +73,11 @@ fn library(seed: u64, clap: bool) -> (Vec<Value>, Vec<Value>) {
             // 808s have a pitch (for kits tuned to a key); a few sounds are loops (kits leave them out).
             "Pitch": if TYPES[t] == "808" { json!(29.0 + (i % 17) as f64 * 0.75) } else { Value::Null },
             "IsLoop": i % 29 == 11,
+            // For the duplicates: lengths (two long ones, past what the exact hash covers), rates, levels, sizes.
+            "Seconds": if i == 16 || i == 17 { 25.0 } else { 0.3 + (i % 13) as f64 * 0.4 },
+            "SampleRate": RATES[i % 3],
+            "PeakDb": -((i % 8) as f64) * 0.7,
+            "Size": 1000 + i * 37,
             "Favourite": i % 17 == 3,
             "Rating": if i % 13 == 5 { 5 } else if i % 11 == 2 { 2 } else { 0 },
             "Plays": if i % 9 == 4 { 4 } else { (i % 5 == 1) as i32 },
@@ -76,6 +92,39 @@ fn library(seed: u64, clap: bool) -> (Vec<Value>, Vec<Value>) {
     }
     uses.push(json!(["shared.wav", 4]));
     (sounds, uses)
+}
+
+/// What the duplicate finder found in the library: audio hashes several sounds share (and a few no other has), and
+/// pairs of copies of every kind, near and far apart, some joining one cluster to the next.
+fn copies(sounds: &[Value]) -> (Vec<Value>, Vec<Value>) {
+    let path = |i: usize| sounds[i]["Path"].clone();
+    let kinds = ["Exact", "Converted", "Trimmed"];
+    let aparts = [json!(0.05), json!(0.5), json!(1.0), json!(2.0), Value::Null];
+    let typicals = [Value::Null, json!(0.5), json!(2.0), json!(4.0)];
+    let (mut prints, mut matches) = (Vec::new(), Vec::new());
+    for k in 0..20usize {
+        let base = k * 8;
+        let hash = format!("{:02X}AB{k:02X}", k * 7);
+        prints.push(json!([path(base), hash]));
+        prints.push(json!([path(base + 1), hash]));
+        if k % 3 == 0 {
+            prints.push(json!([path(base + 2), hash]));
+        }
+        prints.push(json!([path(base + 7), format!("FF{k:02X}")]));
+        let m = |a: usize, b: usize, kind: &str, apart: Value, typical: Value| {
+            json!([path(a), path(b), kind, 0.9, 0.0, apart, typical])
+        };
+        matches.push(m(base, base + 3, kinds[k % 3], aparts[k % 5].clone(), typicals[k % 4].clone()));
+        matches.push(m(base + 3, base + 4, "Converted", json!(0.08), Value::Null));
+        if k % 2 == 0 {
+            matches.push(m(base + 4, base + 5, "Trimmed", json!(0.3), json!(1.0)));
+        }
+        matches.push(m(base + 1, base + 6, "Converted", json!(0.9), json!(0.2)));
+        if k % 5 == 4 && k < 19 {
+            matches.push(m(base + 5, base + 13, "Converted", json!(0.02), Value::Null));
+        }
+    }
+    (prints, matches)
 }
 
 fn queries() -> Vec<Options> {
@@ -172,11 +221,31 @@ fn rust_side(db: &Path, uses: &[Value]) -> Result<Value, String> {
             json!({ "Seed": seed, "Pads": slots.iter().map(|s| s.sound).collect::<Vec<_>>() })
         })
         .collect();
+    let duplicates: Vec<Value> = mo_sounds::duplicates::read(&db, &sounds, &usage)
+        .map_err(|e| e.to_string())?
+        .iter()
+        .map(|g| {
+            json!({
+                "Kind": format!("{:?}", g.kind),
+                "SpareBytes": g.spare_bytes,
+                "Members": g.members.iter().map(|m| json!({
+                    "Id": m.id,
+                    "Size": m.size,
+                    "Keep": m.keep,
+                    "Kind": m.kind.map(|k| format!("{k:?}")),
+                    "Why": m.why,
+                    "Same": m.same,
+                    "SameSet": m.same_set,
+                })).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
     let names: serde_json::Map<String, Value> = sounds.iter().map(|s| (s.id.to_string(), json!(s.name()))).collect();
     Ok(json!({
         "names": names,
         "answers": answers,
         "kits": kits,
+        "duplicates": duplicates,
         "years": years(&sounds),
         "folders": folders(&sounds, &usage)
             .iter()
@@ -202,6 +271,29 @@ fn same_suggestions(cs: &Value, rust: &Value, names: &Value) -> bool {
         })
 }
 
+/// The duplicate groups less the one known difference (DIFFERENCES.md): a trimmed copy that's only like the others
+/// was described against itself in C# (always "Longer version (x s)"), against the one to keep in Rust. Those C#
+/// texts are left out; the Rust ones are still checked to be one of the two wordings.
+fn known_differences(groups: &Value, rust: bool) -> Value {
+    let mut g = groups.clone();
+    for group in g.as_array_mut().into_iter().flatten() {
+        for m in group["Members"].as_array_mut().into_iter().flatten() {
+            if m["Same"] != json!(false) || m["Kind"] != json!("Trimmed") {
+                continue;
+            }
+            let why = m["Why"].as_str().unwrap_or_default();
+            let fits = if rust {
+                (why.starts_with("Trimmed: ") && why.contains(" s of ") && why.ends_with(" s"))
+                    || (why.starts_with("Longer version (") && why.ends_with(" s)"))
+            } else {
+                why.starts_with("Longer version (")
+            };
+            m["Why"] = if fits { Value::Null } else { json!(format!("unexpected: {why}")) };
+        }
+    }
+    g
+}
+
 fn short(v: &Value) -> String {
     let s = v.to_string();
     if s.len() > 400 { format!("{}…", &s[..s.floor_char_boundary(400)]) } else { s }
@@ -214,10 +306,13 @@ pub fn compare(helper: &Path, dir: &Path) -> Result<Vec<String>, String> {
     let mut files = Vec::new();
     for (i, (_, (sounds, uses))) in cases.iter().enumerate() {
         let path = dir.join(format!("rediscover-{i}.json"));
+        let (prints, copies_found) = copies(sounds);
         let body = json!({
             "Db": dir.join(format!("rediscover-{i}.db")),
             "Sounds": sounds,
             "Usage": uses,
+            "Prints": prints,
+            "Matches": copies_found,
             "Queries": queries().iter().map(query_json).collect::<Vec<_>>(),
             "Kits": kits().iter().map(kit_json).collect::<Vec<_>>(),
         });
@@ -251,6 +346,13 @@ pub fn compare(helper: &Path, dir: &Path) -> Result<Vec<String>, String> {
                     a["WhyNothing"], b["WhyNothing"]
                 ));
             }
+        }
+        if !same(&known_differences(&cs["duplicates"], false), &known_differences(&rust["duplicates"], true)) {
+            differences.push(format!(
+                "Duplicates, {name}: C# {}, Rust {}",
+                short(&cs["duplicates"]),
+                short(&rust["duplicates"])
+            ));
         }
         for part in ["kits", "years", "folders"] {
             if !same(&cs[part], &rust[part]) {

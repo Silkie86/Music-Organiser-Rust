@@ -24,6 +24,7 @@ CREATE TABLE sound_events (sound_id INTEGER REFERENCES sounds(id) ON DELETE CASC
 CREATE TABLE sound_maps (space TEXT NOT NULL, sound_id INTEGER NOT NULL, x REAL NOT NULL, y REAL NOT NULL, PRIMARY KEY (space, sound_id));
 CREATE TABLE sound_matches (a INTEGER NOT NULL, b INTEGER NOT NULL, kind TEXT NOT NULL, score REAL, offset REAL, apart REAL, typical REAL, PRIMARY KEY (a, b));
 CREATE TABLE sound_hidden (sound_id INTEGER PRIMARY KEY, batch TEXT NOT NULL, at INTEGER NOT NULL);
+CREATE TABLE sound_prints (sound_id INTEGER PRIMARY KEY, mtime INTEGER, size INTEGER, version INTEGER, exact BLOB, frames INTEGER, bands BLOB, keys BLOB, sketch BLOB, seconds REAL, sfp BLOB, compared INTEGER NOT NULL DEFAULT 0);
 ";
 
 /// "Now" for the tests: 1 June 2026, noon, local time. Recent means after 1 June 2025, noon.
@@ -71,7 +72,8 @@ fn full(name: &str) -> PathBuf {
          INSERT INTO sound_events VALUES (1, 'play', {r}), (1, 'play', {o}), (1, 'drag', {r}), (2, 'send', {o}), (2, 'play', {r2});
          INSERT INTO sound_maps VALUES ('features', 1, 1.5, -2.0), ('clap', 2, 0, 0);
          INSERT INTO sound_matches VALUES (1, 2, 'Converted', 0.9, 0.0, 1.5, NULL);
-         INSERT INTO sound_hidden VALUES (2, 'b1', 0);",
+         INSERT INTO sound_hidden VALUES (2, 'b1', 0);
+         INSERT INTO sound_prints (sound_id, exact) VALUES (1, x'0aff'), (2, x'0aff'), (3, x'01');",
         r = at(2026, 1, 1),
         r2 = at(2026, 2, 1),
         o = at(2024, 1, 1)
@@ -152,6 +154,13 @@ fn reads_the_rest() {
 
     let m = db.matches().unwrap();
     assert_eq!((m[0].a, m[0].b, m[0].kind.as_str(), m[0].apart, m[0].typical), (1, 2, "Converted", Some(1.5), None));
+
+    // Only hashes more than one sound has, in capitals.
+    let mut exact = db.exact_copies().unwrap();
+    exact.sort();
+    assert_eq!(exact, [(1, "0AFF".to_owned()), (2, "0AFF".to_owned())]);
+    let sizes = db.sizes().unwrap();
+    assert_eq!((sizes[&1], sizes[&2], sizes[&3]), (100, 50, 0));
 
     let known = db.known_files().unwrap();
     assert_eq!(known.len(), 3);

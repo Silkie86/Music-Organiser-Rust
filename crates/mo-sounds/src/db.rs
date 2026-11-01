@@ -367,6 +367,39 @@ impl SoundsDb {
     }
 }
 
+impl SoundsDb {
+    /// Sounds whose audio is exactly the same as another's, by the hash the duplicate finder kept (in capitals, as
+    /// SQLite's `hex` gives it). Only hashes that more than one sound has.
+    pub fn exact_copies(&self) -> Result<Vec<(i64, String)>, SoundsError> {
+        if !self.has("sound_prints") {
+            return Ok(Vec::new());
+        }
+        let mut st = self.conn.prepare(
+            "SELECT sound_id, hex(exact) FROM sound_prints
+             WHERE exact IN (SELECT exact FROM sound_prints WHERE exact IS NOT NULL GROUP BY exact HAVING COUNT(*) > 1)",
+        )?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// What the duplicate finder found: its matches, the exact copies and every file's size, read at one moment (the
+    /// C# app may be saving more while the page reads).
+    #[allow(clippy::type_complexity)]
+    pub fn duplicate_finds(&self) -> Result<(Vec<SoundMatch>, Vec<(i64, String)>, HashMap<i64, i64>), SoundsError> {
+        let snapshot = self.conn.unchecked_transaction()?;
+        let found = (self.matches()?, self.exact_copies()?, self.sizes()?);
+        snapshot.finish()?;
+        Ok(found)
+    }
+
+    /// Each sound's file size in bytes (0 when not known).
+    pub fn sizes(&self) -> Result<HashMap<i64, i64>, SoundsError> {
+        let mut st = self.conn.prepare("SELECT id, size FROM sounds")?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, int_at(r, 1).unwrap_or(0))))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+}
+
 /// A stored count as an `i32`, clamped (a damaged row can't wrap it).
 fn int(n: Option<i64>) -> i32 {
     n.unwrap_or(0).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
@@ -405,9 +438,23 @@ fn add_undated_plays(a: &mut SoundActivity, plays: i32) {
 
 /// A copy's kind as the C# app reads it: one it doesn't know reads as "Converted".
 fn copy_kind(kind: Option<&str>) -> &'static str {
-    match kind {
-        Some("Exact") => "Exact",
-        Some("Trimmed") => "Trimmed",
+    // As .NET's Enum.TryParse: names or numbers (spaces around them allowed), several joined by commas adding up;
+    // anything else, or a number with no name, reads as Converted.
+    let mut value = 0i64;
+    for part in kind.unwrap_or("").split(',') {
+        value |= match part.trim() {
+            "Exact" => 0,
+            "Converted" => 1,
+            "Trimmed" => 2,
+            n => match n.parse::<i64>() {
+                Ok(n) => n,
+                Err(_) => return "Converted",
+            },
+        };
+    }
+    match value {
+        0 => "Exact",
+        2 => "Trimmed",
         _ => "Converted",
     }
 }
@@ -452,5 +499,22 @@ mod tests {
     fn a_year_before() {
         let leap = chrono::NaiveDate::from_ymd_opt(2024, 2, 29).unwrap().and_hms_opt(12, 0, 0).unwrap();
         assert_eq!(year_before(leap).to_string(), "2023-02-28 12:00:00");
+    }
+}
+
+#[cfg(test)]
+mod copy_kind_tests {
+    use super::copy_kind;
+
+    #[test]
+    fn kinds_read_as_dotnet_reads_them() {
+        assert_eq!(copy_kind(Some("Exact")), "Exact");
+        assert_eq!(copy_kind(Some(" Trimmed ")), "Trimmed");
+        assert_eq!(copy_kind(Some("0")), "Exact");
+        assert_eq!(copy_kind(Some("02")), "Trimmed");
+        assert_eq!(copy_kind(Some("Exact, Trimmed")), "Trimmed");
+        assert_eq!(copy_kind(Some("exact")), "Converted");
+        assert_eq!(copy_kind(Some("Mystery")), "Converted");
+        assert_eq!(copy_kind(None), "Converted");
     }
 }
