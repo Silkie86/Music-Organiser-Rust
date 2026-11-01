@@ -8,7 +8,7 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
-use mo_formats::case;
+use mo_formats::{case, paths};
 
 use crate::rediscover::used_in;
 use crate::usage::Usage;
@@ -91,18 +91,12 @@ const READ_SECONDS: f64 = 20.0;
 const LOSSY: [&str; 6] = ["mp3", "m4a", "aac", "ogg", "opus", "wma"];
 const LOSSLESS: [&str; 5] = ["wav", "aif", "aiff", "aifc", "flac"];
 
-/// The extension without its dot, as .NET's `GetExtension` finds it (after the last dot of the file name).
-fn extension(path: &str) -> &str {
-    let name = crate::file_name(path);
-    name.rfind('.').map_or("", |i| &name[i + 1..])
-}
-
 fn is_lossy(path: Option<&str>) -> bool {
-    path.is_some_and(|p| LOSSY.iter().any(|e| e.eq_ignore_ascii_case(extension(p))))
+    path.is_some_and(|p| paths::has_extension(p, &LOSSY))
 }
 
 fn is_lossless(path: &str) -> bool {
-    LOSSLESS.iter().any(|e| e.eq_ignore_ascii_case(extension(path)))
+    paths::has_extension(path, &LOSSLESS)
 }
 
 /// Whether a match is a real copy: one whose sounds are far apart all through only shares a rhythm, or an onset.
@@ -123,17 +117,26 @@ struct Sets {
 }
 
 impl Sets {
+    /// The set's root, every sound on the way pointed straight at it (as C#'s recursive Find does, but in a loop, so
+    /// a long chain of copies can't run out of stack).
     fn find(&mut self, x: i64) -> i64 {
-        let Some(&p) = self.parent.get(&x) else {
-            self.parent.insert(x, x);
+        if let std::collections::hash_map::Entry::Vacant(e) = self.parent.entry(x) {
+            e.insert(x);
             self.order.push(x);
             return x;
-        };
-        if p == x {
-            return x;
         }
-        let root = self.find(p);
-        self.parent.insert(x, root);
+        let mut root = x;
+        while let Some(&p) = self.parent.get(&root)
+            && p != root
+        {
+            root = p;
+        }
+        let mut at = x;
+        while at != root {
+            let next = self.parent[&at];
+            self.parent.insert(at, root);
+            at = next;
+        }
         root
     }
 
@@ -150,21 +153,47 @@ fn round(x: f64, digits: i32) -> f64 {
     crate::analyse::round_to(x, digits)
 }
 
-/// A number as .NET's "0.##" or "0.#" format writes it: up to `places` decimals, halves away from zero, no trailing
-/// zeros.
-fn short(x: f64, places: i32) -> String {
-    let p = 10f64.powi(places);
-    let r = (x * p).round() / p;
-    let s = format!("{r:.*}", places as usize);
-    let s = if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.') } else { &s };
-    s.to_owned()
+/// A number as .NET's "0.##" or "0.#" format writes it: first to 15 significant digits, then to `places` decimals
+/// with halves away from zero, no trailing zeros. Done on the decimal digits, so 0.285 gives "0.29" as in .NET (in
+/// binary it's just under, and would round down).
+fn short(x: f64, places: usize) -> String {
+    if !x.is_finite() {
+        return x.to_string();
+    }
+    // "2.85000000000000e-1": 15 significant digits and where the point goes.
+    let sci = format!("{:.14e}", x.abs());
+    let (mantissa, exp) = sci.split_once('e').unwrap_or((&sci, "0"));
+    let exp: i64 = exp.parse().unwrap_or(0);
+    let digits: Vec<u8> = mantissa.bytes().filter(u8::is_ascii_digit).map(|d| d - b'0').collect();
+    // How many of the digits come before the cut: those before the point, plus the decimals kept.
+    let keep = exp + 1 + places as i64;
+    let mut whole: u128 = 0;
+    if keep >= 0 {
+        for i in 0..keep {
+            whole = whole * 10 + u128::from(digits.get(i as usize).copied().unwrap_or(0));
+        }
+        if digits.get(keep as usize).is_some_and(|d| *d >= 5) {
+            whole += 1;
+        }
+    }
+    let text = whole.to_string();
+    let text = if places == 0 {
+        text
+    } else {
+        let padded = format!("{text:0>width$}", width = places + 1);
+        let (int, frac) = padded.split_at(padded.len() - places);
+        let frac = frac.trim_end_matches('0');
+        if frac.is_empty() { int.to_owned() } else { format!("{int}.{frac}") }
+    };
+    if x < 0.0 && whole > 0 { format!("-{text}") } else { text }
 }
 
 /// Reads the copies the C# app's duplicate finder found from `db` and groups them, biggest saving first. `sounds` is
 /// the whole library (hidden copies included: they're listed, so they can be shown again), `usage` from
 /// [`crate::usage::usage`].
 pub fn read(db: &SoundsDb, sounds: &[Sound], usage: &HashMap<i64, Usage>) -> Result<Vec<DuplicateGroup>, SoundsError> {
-    Ok(groups(sounds, usage, &db.matches()?, &db.exact_copies()?, &db.sizes()?))
+    let (matches, exact, sizes) = db.duplicate_finds()?;
+    Ok(groups(sounds, usage, &matches, &exact, &sizes))
 }
 
 /// Groups the copies found, biggest saving first: `matches` and `exact` (sounds sharing an audio hash) as the
@@ -177,7 +206,8 @@ pub fn groups(
     sizes: &HashMap<i64, i64>,
 ) -> Vec<DuplicateGroup> {
     let by_id: HashMap<i64, &Sound> = sounds.iter().map(|s| (s.id, s)).collect();
-    let size = |id: i64| sizes.get(&id).copied().unwrap_or(0);
+    // A damaged size (below 0) counts as unknown.
+    let size = |id: i64| sizes.get(&id).copied().unwrap_or(0).max(0);
     let mut copies = Sets::default();
     // Sounds that are the same sound as each other: exact copies, and converted copies whose whole sounds match.
     let mut same = Sets::default();
@@ -289,26 +319,17 @@ pub fn groups(
                 .then(case::key(&a.path).cmp(&case::key(&b.path)))
         };
         // The best of `of` (stable, as C#'s OrderBy).
-        let best = |of: &[&Sound]| -> i64 {
-            let mut ranked: Vec<&Sound> = of.to_vec();
-            ranked.sort_by(better);
-            ranked[0].id
-        };
+        // The best of `of`: the first of the equally good, as C#'s stable OrderBy then First.
+        let best = |of: &[&Sound]| -> i64 { of.iter().copied().min_by(|a, b| better(a, b)).map_or(0, |s| s.id) };
         let keep = by_id[&best(&members)];
         let keep_set = sets[&keep.id];
         // In each other set of the same sound, the best one stays and the rest are copies of it.
-        let mut lead: HashMap<i64, &Sound> = HashMap::new();
-        let mut by_set: Vec<(i64, Vec<&Sound>)> = Vec::new();
+        let mut by_set: HashMap<i64, Vec<&Sound>> = HashMap::new();
         for s in &members {
-            let set = sets[&s.id];
-            match by_set.iter_mut().find(|(k, _)| *k == set) {
-                Some((_, v)) => v.push(s),
-                None => by_set.push((set, vec![s])),
-            }
+            by_set.entry(sets[&s.id]).or_default().push(s);
         }
-        for (set, list) in &by_set {
-            lead.insert(*set, if *set == keep_set { keep } else { by_id[&best(list)] });
-        }
+        let lead: HashMap<i64, &Sound> =
+            by_set.iter().map(|(set, list)| (*set, if *set == keep_set { keep } else { by_id[&best(list)] })).collect();
         let kind_of = |s: &Sound, of: &Sound| -> CopyKind {
             if let Some(h) = hash_of.get(&s.id)
                 && hash_of.get(&of.id) == Some(h)
@@ -373,7 +394,8 @@ pub fn groups(
             same: c.same,
             same_set: c.set,
         }));
-        let spare_bytes = list.iter().filter(|m| !m.keep && m.same).map(|m| m.size).sum();
+        // Added up without wrapping: a damaged size can't stop the page.
+        let spare_bytes = list.iter().filter(|m| !m.keep && m.same).fold(0i64, |t, m| t.saturating_add(m.size));
         let kind = list.iter().filter_map(|m| m.kind).max().unwrap_or(CopyKind::Exact);
         out.push(DuplicateGroup { members: list, kind, spare_bytes });
     }
@@ -436,8 +458,9 @@ fn describe(kind: CopyKind, same: bool, s: &Sound, keep: &Sound, of_another: boo
 
 fn changes(s: &Sound, keep: &Sound) -> String {
     let mut bits = Vec::new();
-    if !extension(&s.path).eq_ignore_ascii_case(extension(&keep.path)) {
-        bits.push(format!("converted to {}", extension(&s.path).to_uppercase()));
+    let (ext, keep_ext) = (paths::extension(&s.path), paths::extension(&keep.path));
+    if !case::eq_ignore_case(ext, keep_ext) {
+        bits.push(format!("converted to {}", case::key(ext.trim_start_matches('.'))));
     }
     if let (Some(a), Some(k)) = (&s.analysis, &keep.analysis) {
         if a.sample_rate != k.sample_rate {
@@ -535,9 +558,15 @@ mod tests {
     fn numbers_as_dotnet_writes_them() {
         assert_eq!(short(2.0, 2), "2");
         assert_eq!(short(0.125, 2), "0.13");
+        // Just under in binary, a half in decimal: .NET rounds it up.
+        assert_eq!(short(0.285, 2), "0.29");
+        assert_eq!(short(0.145, 2), "0.15");
+        assert_eq!(short(0.004, 2), "0");
+        assert_eq!(short(25.0, 2), "25");
+        assert_eq!(short(96.0, 1), "96");
         assert_eq!(short(44.1, 1), "44.1");
         assert_eq!(short(48.0, 1), "48");
-        assert_eq!(extension("/a/b.c/Kick"), "");
-        assert_eq!(extension("/a/Kick.WAV"), "WAV");
+        assert!(is_lossless("/a/Kick.WAV") && !is_lossless("/a/b.wav/Kick"));
+        assert!(is_lossy(Some("/a/Kick.Mp3")) && !is_lossy(None));
     }
 }

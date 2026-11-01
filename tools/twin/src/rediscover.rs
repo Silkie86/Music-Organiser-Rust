@@ -271,15 +271,24 @@ fn same_suggestions(cs: &Value, rust: &Value, names: &Value) -> bool {
         })
 }
 
-/// The duplicate groups less the one known difference (DIFFERENCES.md): a copy that's only like the others, alone
-/// in its set, was described against itself in C# ("Longer version"), against the one to keep in Rust.
-fn known_differences(groups: &Value) -> Value {
+/// The duplicate groups less the one known difference (DIFFERENCES.md): a trimmed copy that's only like the others
+/// was described against itself in C# (always "Longer version (x s)"), against the one to keep in Rust. Those C#
+/// texts are left out; the Rust ones are still checked to be one of the two wordings.
+fn known_differences(groups: &Value, rust: bool) -> Value {
     let mut g = groups.clone();
     for group in g.as_array_mut().into_iter().flatten() {
         for m in group["Members"].as_array_mut().into_iter().flatten() {
-            if m["Same"] == json!(false) && m["Kind"] == json!("Trimmed") {
-                m["Why"] = Value::Null;
+            if m["Same"] != json!(false) || m["Kind"] != json!("Trimmed") {
+                continue;
             }
+            let why = m["Why"].as_str().unwrap_or_default();
+            let fits = if rust {
+                (why.starts_with("Trimmed: ") && why.contains(" s of ") && why.ends_with(" s"))
+                    || (why.starts_with("Longer version (") && why.ends_with(" s)"))
+            } else {
+                why.starts_with("Longer version (")
+            };
+            m["Why"] = if fits { Value::Null } else { json!(format!("unexpected: {why}")) };
         }
     }
     g
@@ -297,12 +306,13 @@ pub fn compare(helper: &Path, dir: &Path) -> Result<Vec<String>, String> {
     let mut files = Vec::new();
     for (i, (_, (sounds, uses))) in cases.iter().enumerate() {
         let path = dir.join(format!("rediscover-{i}.json"));
+        let (prints, copies_found) = copies(sounds);
         let body = json!({
             "Db": dir.join(format!("rediscover-{i}.db")),
             "Sounds": sounds,
             "Usage": uses,
-            "Prints": copies(sounds).0,
-            "Matches": copies(sounds).1,
+            "Prints": prints,
+            "Matches": copies_found,
             "Queries": queries().iter().map(query_json).collect::<Vec<_>>(),
             "Kits": kits().iter().map(kit_json).collect::<Vec<_>>(),
         });
@@ -337,7 +347,7 @@ pub fn compare(helper: &Path, dir: &Path) -> Result<Vec<String>, String> {
                 ));
             }
         }
-        if !same(&known_differences(&cs["duplicates"]), &known_differences(&rust["duplicates"])) {
+        if !same(&known_differences(&cs["duplicates"], false), &known_differences(&rust["duplicates"], true)) {
             differences.push(format!(
                 "Duplicates, {name}: C# {}, Rust {}",
                 short(&cs["duplicates"]),
