@@ -24,7 +24,7 @@ use rayon::prelude::*;
 use crate::clean::{Bin, Done, Problem, Sending, Sent, What, both, on_network, parts};
 use crate::plugin_space::{PluginSpace, SpaceFolder, SpaceKind, data_roots, is_install_folder};
 use crate::plugins::is_plugin_file;
-use crate::size::{DEEPEST, Measured, Stopped, is_online_only, is_sound};
+use crate::size::{DEEPEST, Measured, Stopped, is_online_only, is_sound, total};
 use crate::{home_folder, key, real_path};
 
 /// How your projects use a plugin.
@@ -170,15 +170,16 @@ pub fn freed(picked: &[CleanLine]) -> u64 {
     let mut seen = HashSet::new();
     let going: Vec<&CleanLine> =
         picked.iter().filter(|l| l.stays.is_none() && seen.insert(key(&l.folder.path))).collect();
-    going
-        .iter()
-        .filter(|l| {
-            !going
-                .iter()
-                .any(|o| key(&o.folder.path) != key(&l.folder.path) && is_inside(&l.folder.path, &o.folder.path))
-        })
-        .map(|l| l.bytes())
-        .fold(0, u64::saturating_add)
+    total(
+        going
+            .iter()
+            .filter(|l| {
+                !going
+                    .iter()
+                    .any(|o| key(&o.folder.path) != key(&l.folder.path) && is_inside(&l.folder.path, &o.folder.path))
+            })
+            .map(|l| l.bytes()),
+    )
 }
 
 /// What the library knows that Clean up must respect.

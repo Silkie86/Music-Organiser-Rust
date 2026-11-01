@@ -312,7 +312,13 @@ pub fn problem(
     if fs::symlink_metadata(format!("{from}{OLD_SUFFIX}")).is_ok() {
         return Some(CantMove::OldCopyThere);
     }
-    destination_problem(from, destination, bytes, drives, false, stop)
+    destination_problem(from, destination, (bytes, &left_out(from, moved)), drives, false, stop)
+}
+
+/// The old copies of folders moved from inside `from` before (Reaktor 6's inside Native Instruments), as keys: they
+/// aren't copied when it moves, but stay in its own old copy, which can't go while their links don't reach their copies.
+fn left_out(from: &str, moved: &[MovedFolder]) -> Vec<String> {
+    moved.iter().filter(|m| is_inside(&m.old_copy, from)).map(|m| key(&m.old_copy)).collect()
 }
 
 /// Whether the folder picked is the folder being moved or inside it, as written or where it really is.
@@ -324,13 +330,13 @@ fn destination_inside(from: &str, destination: &str) -> bool {
 
 /// Why a folder (a real one, there) can't be copied into `destination`, or `None` when it can: the folder picked is
 /// inside it, on a network drive or not there; the name is taken there; some of its files are only online; or there
-/// isn't room for it and some to spare (counted, each file as the drive keeps it; `bytes`, its measured size, when
-/// that's more or it can't be counted). On the same drive it's [`CantMove::SameDrive`], or, when `rename` (it'll be
-/// renamed rather than copied), only the checks before the copying ones count.
+/// isn't room for what's copied (counted, each file and folder as the drive keeps it, leaving out `leave_out`; `bytes`,
+/// its measured size, when it can't be counted) and some to spare. On the same drive it's [`CantMove::SameDrive`], or,
+/// when `rename` (it'll be renamed rather than copied), only the checks before the copying ones count.
 pub(crate) fn destination_problem(
     from: &str,
     destination: &str,
-    bytes: u64,
+    (bytes, leave_out): (u64, &[String]),
     drives: &dyn Drives,
     rename: bool,
     stop: &AtomicBool,
@@ -364,10 +370,10 @@ pub(crate) fn destination_problem(
         Err(_) => return Some(CantMove::Stopped),
     }
     let free = drives.free(Path::new(destination))?;
-    // Counted again here, each file as the drive it goes to keeps it; `bytes` (measured earlier) when it can't be.
-    let tree = Tree { piece: drives.piece(Path::new(destination)), ..Tree::new(from_path, &to, &to) };
+    // Counted again here, as the drive it goes to keeps files; `bytes` (measured earlier) only when it can't be.
+    let tree = Tree { piece: drives.piece(Path::new(destination)), leave_out, ..Tree::new(from_path, &to, &to) };
     let needs = match copy_tree(&tree, Fill::Count, &|_| {}, stop) {
-        Ok(counted) => counted.bytes.max(bytes),
+        Ok(counted) => counted.bytes,
         Err(CantMove::Stopped) => return Some(CantMove::Stopped),
         Err(_) => bytes,
     };
@@ -397,10 +403,7 @@ pub fn move_folder(
     // Find out before copying whether Windows lets the folder be renamed, rather than after an hour of copying. One it
     // guards is swapped as administrator: Windows asks then.
     check_rename_or_ask(&from, drives.admin())?;
-    // The old copies of folders moved from inside it before (Reaktor 6's inside Native Instruments) aren't copied:
-    // they stay in its own old copy, which can't go while their links don't reach their copies.
-    let leave_out: Vec<String> =
-        already_moved.iter().filter(|m| is_inside(&m.old_copy, &from)).map(|m| key(&m.old_copy)).collect();
+    let leave_out = left_out(&from, already_moved);
     let tree = Tree { leave_out: &leave_out, ..Tree::new(Path::new(&from), &to, &to) };
     copy_fresh(&tree, progress, stop)?;
     let aside = format!("{from}{OLD_SUFFIX}");
@@ -1051,7 +1054,7 @@ pub(crate) struct Tree<'a> {
     /// Folders not copied (keys).
     pub(crate) leave_out: &'a [String],
     /// Counting: the size of the pieces the drive it goes to keeps files in. Each file counts as a whole number of
-    /// them, so a folder of many small files isn't taken for smaller than it'll be there.
+    /// them, and each new folder as one, so a folder of many small files isn't taken for smaller than it'll be there.
     pub(crate) piece: u64,
 }
 
@@ -1084,6 +1087,10 @@ pub(crate) fn copy_tree(
     let source_real = fs::canonicalize(tree.from).map_err(|e| failed(tree.from, &e))?;
     let inside = |copy: &Path| copy.strip_prefix(tree.to).unwrap_or(copy).to_path_buf();
     let mut copied = Copied::default();
+    // Counting for a copy not made yet: the folder it's made in takes a piece of the drive too.
+    if fill == Fill::Count && fs::symlink_metadata(tree.to).is_err() {
+        copied.bytes = tree.piece;
+    }
     let mut folders = vec![(tree.from.to_path_buf(), tree.to.to_path_buf())];
     while let Some((source_dir, copy_dir)) = folders.pop() {
         let entries = match fs::read_dir(&source_dir) {
@@ -1091,6 +1098,8 @@ pub(crate) fn copy_tree(
             Err(_) if gone(&source_dir) => continue,
             Err(e) => return Err(failed(&source_dir, &e)),
         };
+        // Counting for a copy not made yet: nothing is there, so the other drive isn't asked about each name.
+        let copy_dir_there = fill != Fill::Count || fs::symlink_metadata(&copy_dir).is_ok();
         for entry in entries {
             if stop.load(Ordering::Relaxed) {
                 return Err(CantMove::Stopped);
@@ -1101,7 +1110,7 @@ pub(crate) fn copy_tree(
                 continue;
             }
             let copy = copy_dir.join(entry.file_name());
-            let there = fs::symlink_metadata(&copy).ok();
+            let there = if copy_dir_there { fs::symlink_metadata(&copy).ok() } else { None };
             if fill == Fill::New && there.is_some() {
                 return Err(CantMove::Failed(format!(
                     "{} has a twin whose name differs only in capitals, and the drive picked doesn't tell them apart.",
@@ -1131,7 +1140,8 @@ pub(crate) fn copy_tree(
             }
             if kind.is_dir() {
                 match &there {
-                    None if fill == Fill::Count => {}
+                    // A folder takes a piece of the drive too (on exFAT), as each file does.
+                    None if fill == Fill::Count => copied.bytes = copied.bytes.saturating_add(tree.piece),
                     None => fs::create_dir(&copy).map_err(|e| failed(&copy, &e))?,
                     Some(m) if m.is_dir() => {}
                     Some(_) => {
@@ -1224,9 +1234,9 @@ fn keep_aside(file: &Path, keep: &Path) -> Result<(), CantMove> {
 }
 
 /// Files at least this big are copied a piece at a time, so Stop and the progress bar don't wait for the whole file
-/// (Omnisphere's sound sources run to tens of GB). Smaller ones are copied by the system in one go, which also keeps
-/// what else Windows keeps with a file (hidden, for one).
-const BIG_FILE: u64 = 64 << 20;
+/// (Omnisphere's sound sources run to tens of GB). Smaller ones are copied by the system in one go, which on a Mac also
+/// keeps a file's extended attributes (Finder tags, say); a big file's pieces don't.
+const IN_PIECES_FROM: u64 = 64 << 20;
 
 /// How much of a big file is copied between looks at Stop.
 const PIECE: usize = 8 << 20;
@@ -1276,10 +1286,11 @@ fn copy_file(
 }
 
 /// Copies a file's bytes to a new file. A big one goes a piece at a time, looking at Stop and saying how far it's got
-/// between pieces, and gets the file's read-only mark as the system's copy gives it. A stop leaves the part copied,
+/// between pieces, and then gets the file's permissions as the system's copy gives them (on Windows, its marks:
+/// read-only, hidden and so on). A stop leaves the part copied,
 /// which goes with the rest of the copy (or as a temporary copy does).
 fn copy_bytes(source: &Path, to: &Path, meta: &fs::Metadata, pieces: &Pieces) -> Result<(), CantMove> {
-    if meta.len() < BIG_FILE {
+    if meta.len() < IN_PIECES_FROM {
         return fs::copy(source, to).map(drop).map_err(|e| failed(source, &e));
     }
     let mut from = fs::File::open(source).map_err(|e| failed(source, &e))?;

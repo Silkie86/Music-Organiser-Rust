@@ -385,19 +385,18 @@ fn the_room_a_move_needs_is_counted_as_the_other_drive_keeps_files() {
     let dir = fixtures("mo-space-move-pieces");
     let (c, d) = (dir.join("C"), dir.join("D"));
     for n in 0..10 {
-        write(&c, &format!("Presets/{n}.fxp"), "x");
+        write(&c, &format!("Presets/{}/{n}.fxp", if n < 5 { "Bank A" } else { "Bank B" }), "x");
     }
     fs::create_dir_all(&d).unwrap();
     let stop = AtomicBool::new(false);
     let presets = s(&c.join("Presets"));
-    // Ten files of a byte each take ten pieces of 128 KB there: 1.25 MB, more than the 1 MB left beyond the headroom.
+    // Ten files of a byte each, and their three folders, take thirteen pieces of 128 KB there: 1.625 MB, more than
+    // the 1 MB left beyond the headroom.
     let drive = BigPieces { free: HEADROOM + (1 << 20) };
-    assert_eq!(
-        problem(&presets, &s(&d), 10, &drive, &[], &stop),
-        Some(CantMove::NoRoom { free: drive.free, needs: 10 * (128 << 10) })
-    );
+    let needs = 13 * (128 << 10);
+    assert_eq!(problem(&presets, &s(&d), 10, &drive, &[], &stop), Some(CantMove::NoRoom { free: drive.free, needs }));
     let moved = move_folder(&presets, &s(&d), 10, whose(), &drive, &[], &nothing, &stop);
-    assert_eq!(moved, Err(CantMove::NoRoom { free: drive.free, needs: 10 * (128 << 10) }));
+    assert_eq!(moved, Err(CantMove::NoRoom { free: drive.free, needs }));
     // A size measured earlier that's too small now doesn't count: the folder is counted again.
     let tight = OtherDrive { free: Some(HEADROOM + 5) };
     assert_eq!(
@@ -406,11 +405,24 @@ fn the_room_a_move_needs_is_counted_as_the_other_drive_keeps_files() {
     );
     assert_eq!(problem(&presets, &s(&d), 1, &OtherDrive { free: Some(HEADROOM + 10) }, &[], &stop), None);
 
+    // The old copy of a folder moved from inside it before isn't copied, so it isn't counted either.
+    let bank = move_folder(&s(&c.join("Presets/Bank B")), &s(&dir), 5, whose(), &ROOMY, &[], &nothing, &stop).unwrap();
+    let all = std::slice::from_ref(&bank);
+    assert!(Path::new(&bank.old_copy).exists());
+    let roomy_enough = BigPieces { free: HEADROOM + 7 * (128 << 10) };
+    assert_eq!(problem(&presets, &s(&d), 10, &roomy_enough, all, &stop), None);
+    let short = BigPieces { free: HEADROOM + 6 * (128 << 10) };
+    assert_eq!(
+        problem(&presets, &s(&d), 10, &short, all, &stop),
+        Some(CantMove::NoRoom { free: short.free, needs: 7 * (128 << 10) })
+    );
+    move_back(&bank, &ROOMY, &nothing, &stop).unwrap();
+
     // Coming back, it's counted as the drive it comes back to keeps files.
     let moved = move_folder(&presets, &s(&d), 10, whose(), &ROOMY, &[], &nothing, &stop).unwrap();
     fs::remove_dir_all(&moved.old_copy).unwrap();
     let back = move_back(&moved, &drive, &nothing, &stop);
-    assert_eq!(back, Err(CantMove::NoRoom { free: drive.free, needs: 10 * (128 << 10) }));
+    assert_eq!(back, Err(CantMove::NoRoom { free: drive.free, needs }));
     assert!(move_back(&moved, &BigPieces { free: HEADROOM + (2 << 20) }, &nothing, &stop).is_ok());
 }
 

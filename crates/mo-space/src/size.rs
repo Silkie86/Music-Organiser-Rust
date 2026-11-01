@@ -1,8 +1,8 @@
 //! How much room files and folders take, and how to say it ("38.2 GB"). The C# app's `DiskSpace`.
 //!
 //! Every walk here leaves links to other places (junctions, symbolic links) alone, so nothing is counted twice and a
-//! folder moved to another drive isn't counted where its link is. A file with more than one name (a hard link) is
-//! measured once on a Mac or Linux; Windows can't tell from here, so there it counts once per name. On Windows, a OneDrive file that is only online takes
+//! folder moved to another drive isn't counted where its link is. [`measure`] counts a file with more than one name (a
+//! hard link) once on a Mac or Linux (Windows can't tell from here); the other walks list each name. On Windows, a OneDrive file that is only online takes
 //! no room here, so the size walks leave it out; [`all_files`] still lists it (only its name is read, so nothing
 //! downloads).
 
@@ -95,6 +95,17 @@ pub struct FileEntry {
     pub path: PathBuf,
     pub size: u64,
     pub modified: NaiveDateTime,
+}
+
+/// Adds up sizes. Release builds stop on arithmetic that overflows, so every total of bytes saturates instead (a broken
+/// drive can report any size).
+pub(crate) fn total(sizes: impl IntoIterator<Item = u64>) -> u64 {
+    sizes.into_iter().fold(0, u64::saturating_add)
+}
+
+/// Adds a size to a running total, as [`total`] does.
+pub(crate) fn add(to: &mut u64, bytes: u64) {
+    *to = to.saturating_add(bytes);
 }
 
 /// The local time a file was last written, as the library keeps times (the start of 1970 when it can't be told).
@@ -268,16 +279,27 @@ pub fn measure(path: &Path, stop: &AtomicBool) -> Result<Measured, Stopped> {
 }
 
 /// For a file with more than one name (a hard link): which file on disk it is, so it's measured once.
-#[cfg(unix)]
 fn hard_linked(meta: &Metadata) -> Option<(u64, u64)> {
-    use std::os::unix::fs::MetadataExt;
-    (meta.nlink() > 1).then(|| (meta.dev(), meta.ino()))
+    #[cfg(unix)]
+    if std::os::unix::fs::MetadataExt::nlink(meta) < 2 {
+        return None;
+    }
+    file_id(meta)
 }
 
-/// Windows' file numbers aren't readable from here yet.
-#[cfg(not(unix))]
-fn hard_linked(_meta: &Metadata) -> Option<(u64, u64)> {
-    None
+/// Which file on disk this is (its drive and number): two names for one file (hard links) give the same. Only a Mac
+/// or Linux can tell here; Windows' file numbers aren't readable from here yet.
+pub(crate) fn file_id(meta: &Metadata) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some((meta.dev(), meta.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        None
+    }
 }
 
 /// A file's SHA-256, read once in large pieces; `None` when it can't be read whole, changed while it was read, or when

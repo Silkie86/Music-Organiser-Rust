@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::admin::{Admin, AsAdmin, NoAdmin, Step, ask_for, real_spot, reason, stamp};
 use crate::plugin_space::SpaceKind;
-use crate::size::{OnlineOnly, Stopped, is_link, is_online_only, local_time, online_only_in};
+use crate::size::{OnlineOnly, Stopped, is_link, is_online_only, modified_of, online_only_in, total};
 use crate::song::{CompactItem, CompactKind, has_studio_one_song, parent};
 use crate::{key, not_there, real_path, text};
 
@@ -316,11 +316,11 @@ impl Guard<'_> {
     }
 }
 
-/// Whether a file was last written when the line says (to the second, either way), or the line doesn't say.
+/// Whether a file was last written when the line says (to the second, either way), or the line doesn't say. A time
+/// that can't be told is read as the measure read it (the start of 1970), so such a file isn't always taken as changed.
 fn same_time(meta: &Metadata, measured: Option<NaiveDateTime>) -> bool {
     let Some(measured) = measured else { return true };
-    let Some(modified) = meta.modified().ok().and_then(local_time) else { return false };
-    (modified - measured).num_milliseconds().abs() < 2000
+    (modified_of(meta) - measured).num_milliseconds().abs() < 2000
 }
 
 /// The names in a path, whichever way its slashes lean.
@@ -377,7 +377,7 @@ pub struct Plan {
 impl Plan {
     /// How much room the lines that would go take.
     pub fn bytes(&self) -> u64 {
-        self.lines.iter().map(|l| l.item.bytes).fold(0, u64::saturating_add)
+        total(self.lines.iter().map(|l| l.item.bytes))
     }
 }
 
@@ -454,7 +454,7 @@ pub struct Done {
 impl Done {
     /// How much room was freed.
     pub fn bytes(&self) -> u64 {
-        self.removed.iter().map(|r| r.bytes).fold(0, u64::saturating_add)
+        total(self.removed.iter().map(|r| r.bytes))
     }
 }
 

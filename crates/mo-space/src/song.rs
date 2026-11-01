@@ -18,7 +18,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::key;
-use crate::size::{self, Stopped};
+use crate::size::{self, Stopped, add, total};
 
 /// What a song's space can be freed from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -100,16 +100,12 @@ pub struct SongSpaceReport {
 impl SongSpaceReport {
     /// What Compact frees: copies, old autosaves and caches (thinning and unused audio are extra, picked by hand).
     pub fn freeable(&self) -> u64 {
-        self.items
-            .iter()
-            .filter(|i| i.can_remove() && i.kind != CompactKind::ThinnedSave)
-            .map(|i| i.bytes)
-            .fold(0, u64::saturating_add)
+        total(self.items.iter().filter(|i| i.can_remove() && i.kind != CompactKind::ThinnedSave).map(|i| i.bytes))
     }
 
     /// What thinning older saves could free on top, if you pick it.
     pub fn thinnable(&self) -> u64 {
-        self.items.iter().filter(|i| i.kind == CompactKind::ThinnedSave).map(|i| i.bytes).fold(0, u64::saturating_add)
+        total(self.items.iter().filter(|i| i.kind == CompactKind::ThinnedSave).map(|i| i.bytes))
     }
 }
 
@@ -199,29 +195,29 @@ pub fn measure(
                 None => (&[][..], ""),
             };
             if save_keys.contains(&path_key) {
-                report.saves += f.size;
+                add(&mut report.saves, f.size);
             } else if daw_of(&path).is_some() && (folders.iter().any(|d| is_autosave_dir(d)) || is_autosave_file(name))
             {
                 // Only project files are autosaves: audio or anything else kept in a "Backups" folder is yours.
-                report.backups += f.size;
+                add(&mut report.backups, f.size);
                 backups.push((path, f.size, f.modified));
             } else if studio_one && folders.first().is_some_and(|d| case::eq_ignore_case(d, "Cache")) {
-                report.caches += f.size;
+                add(&mut report.caches, f.size);
                 cache = Some(dir.join(folders.first().map_or("Cache", |d| d.as_str())).to_string_lossy().into_owned());
             } else if is_audio_path(&path) {
-                report.audio += f.size;
+                add(&mut report.audio, f.size);
                 if !used_full.contains(&path_key) && !used_names.contains(&case::key(name)) {
                     unused_audio.push((path, f.size));
                 }
             } else {
-                report.other += f.size;
+                add(&mut report.other, f.size);
             }
         }
     }
     // Saves outside the folder (or all of them, when the song shares its folder) count on their own.
     for s in saves {
         if seen.insert(key(&s.path)) {
-            report.saves += fs::metadata(&s.path).map_or(s.size, |m| m.len());
+            add(&mut report.saves, fs::metadata(&s.path).map_or(s.size, |m| m.len()));
         }
     }
 
@@ -244,7 +240,7 @@ pub fn measure(
     // FL Studio keeps its autosaves in one Backup folder for all songs (Projects\Backup), named after the song.
     for b in fl_backups(saves, roots, elsewhere.map(|e| e.shared_names)) {
         if seen.insert(key(&b.0)) {
-            report.backups += b.1;
+            add(&mut report.backups, b.1);
             backups.push(b);
         }
     }
@@ -296,7 +292,7 @@ pub fn measure(
     for (path, bytes) in unused_audio {
         report.items.push(CompactItem { kind: CompactKind::UnusedAudio, path, bytes, modified: None, same_as: None });
     }
-    report.bytes = report.saves + report.backups + report.caches + report.audio + report.other;
+    report.bytes = total([report.saves, report.backups, report.caches, report.audio, report.other]);
     Ok(report)
 }
 

@@ -102,7 +102,7 @@ pub fn aax_folders() -> Vec<PathBuf> {
 }
 
 /// Whether Pro Tools is installed, so AAX plugins are in use. On a Mac: a Pro Tools app ("Pro Tools", "Pro Tools
-/// First", …) in the Applications folders, or a folder in them. On Windows: its usual folder, or any Pro Tools among
+/// First", …) in the Applications folders, or in folders in them. On Windows: its usual folder, or any Pro Tools among
 /// the installed programs (it can be on another drive, or named otherwise). A Pro Tools left listed after it was
 /// removed still counts: an AAX copy then stays, which is the safe way to be wrong.
 pub fn pro_tools_installed() -> bool {
@@ -114,19 +114,27 @@ pub fn pro_tools_installed() -> bool {
         || crate::uninstallers::all().iter().any(|u| u.name.to_lowercase().contains("pro tools"))
 }
 
-/// Whether a folder (a Mac's Applications folder), or a folder in it, holds a Pro Tools app.
+/// Whether a folder (a Mac's Applications folder), or a folder in it up to three down, holds a Pro Tools app. Apps
+/// aren't looked inside.
 pub fn pro_tools_app_in(folder: &Path) -> bool {
-    let is_pro_tools = |name: &str| name.starts_with("pro tools") && name.ends_with(".app");
-    let Ok(entries) = fs::read_dir(folder) else { return false };
-    entries.flatten().any(|entry| {
-        let name = entry.file_name().to_string_lossy().to_lowercase();
-        is_pro_tools(&name)
-            || (!name.ends_with(".app")
-                && entry.file_type().is_ok_and(|kind| kind.is_dir())
-                && fs::read_dir(entry.path()).is_ok_and(|inner| {
-                    inner.flatten().any(|app| is_pro_tools(&app.file_name().to_string_lossy().to_lowercase()))
-                }))
-    })
+    let mut level = vec![folder.to_path_buf()];
+    for _ in 0..4 {
+        let mut next = Vec::new();
+        for dir in &level {
+            for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+                let name = entry.file_name().to_string_lossy().to_lowercase();
+                if name.ends_with(".app") {
+                    if name.starts_with("pro tools") {
+                        return true;
+                    }
+                } else if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                    next.push(entry.path());
+                }
+            }
+        }
+        level = next;
+    }
+    false
 }
 
 /// Plugin bundles are folders (a .vst3 on Windows; on a Mac .component, .clap and .vst too): what's inside one isn't a

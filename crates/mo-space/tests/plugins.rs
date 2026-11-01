@@ -320,10 +320,17 @@ fn pro_tools_is_found_by_any_of_its_app_names_and_in_a_folder() {
     let none = dir.join("None");
     fs::create_dir_all(none.join("Avid/Media Composer.app")).unwrap();
     fs::create_dir_all(none.join("Logic Pro.app")).unwrap();
+    // Not inside another app, and not deeper than three folders down.
+    fs::create_dir_all(none.join("Avid/Media Composer.app/Contents/Pro Tools.app")).unwrap();
+    fs::create_dir_all(none.join("Deep/Deeper/Deepest/Lower/Pro Tools.app")).unwrap();
     assert!(!pro_tools_app_in(&none));
-    for (name, app) in
-        [("Plain", "Pro Tools.app"), ("First", "Pro Tools First.app"), ("In a folder", "Avid/Pro Tools.app")]
-    {
+    for (name, app) in [
+        ("Plain", "Pro Tools.app"),
+        ("First", "Pro Tools First.app"),
+        ("In a folder", "Avid/Pro Tools.app"),
+        ("Deeper", "Avid/Pro Tools/Pro Tools.app"),
+        ("Deepest", "Deep/Deeper/Deepest/Pro Tools.app"),
+    ] {
         fs::create_dir_all(dir.join(name).join(app)).unwrap();
         assert!(pro_tools_app_in(&dir.join(name)), "{app}");
     }

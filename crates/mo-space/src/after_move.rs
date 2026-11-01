@@ -390,7 +390,7 @@ pub fn move_home(
     if !is_dir(home) {
         return Err(CantMove::Gone);
     }
-    if let Some(why) = destination_problem(home, destination, bytes, drives, true, stop) {
+    if let Some(why) = destination_problem(home, destination, (bytes, &[]), drives, true, stop) {
         return Err(why);
     }
     let to = target(home, destination);

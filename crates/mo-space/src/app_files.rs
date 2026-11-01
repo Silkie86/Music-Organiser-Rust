@@ -127,10 +127,12 @@ pub struct DriveSpace {
 /// How much room is left on the drive `path` is on; `None` when that can't be read.
 pub fn drive_space(path: &Path) -> Option<DriveSpace> {
     // Where it really is: Windows finds the drive from the path's text, so a link on the way would give another drive.
-    let path = really(path);
-    let free = fs4::available_space(&path).ok()?;
-    let total = fs4::total_space(&path).ok()?;
-    Some(DriveSpace { drive: drive_name(&path), free, total })
+    let real = really(path);
+    let free = fs4::available_space(&real).ok()?;
+    let total = fs4::total_space(&real).ok()?;
+    // A mapped network drive keeps the letter you know rather than the share's name.
+    let named = if real.to_string_lossy().starts_with(r"\\") { path } else { &real };
+    Some(DriveSpace { drive: drive_name(named), free, total })
 }
 
 fn drive_name(path: &Path) -> String {
