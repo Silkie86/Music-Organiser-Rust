@@ -141,8 +141,34 @@ fn reads_mixer_insert_settings_effect_slots_and_what_automation_moves_on_them() 
         song.inserts.iter().map(|i| (i.index, i.fader, i.moved())).collect::<Vec<_>>(),
         [(0, Some(12800), false), (1, Some(9600), true)]
     );
-    // Pattern 1 holds edit events, which are found but not read yet.
+    // Pattern 1's edit events: the plugin setting's moves play wherever the pattern does; the volume's aren't carried,
+    // so the pattern is listed.
     assert_eq!(song.edit_events, [(1, "Bass".to_owned())]);
+    let recorded = song.automation.iter().find(|a| a.name.contains("edit events")).expect("edit events");
+    assert_eq!(recorded.name, "Bass - setting 2 (edit events in Bass)");
+    assert_eq!((recorded.channel, recorded.control, recorded.parameter), (Some(0), FlControl::PluginParameter, 2));
+    assert_eq!(recorded.starts, [0.0, 4.0, 10.0]);
+    // In each placement of the pattern (at beats 0, 4 and 10, four beats long) the setting goes 0.5 then 1 half a beat
+    // later, and holds until the next.
+    let points: Vec<(f64, f64)> = recorded.points.iter().map(|p| (p.beat, p.value)).collect();
+    assert_eq!(
+        points,
+        [
+            (0.0, 0.5),
+            (0.5, 0.5),
+            (1.0, 1.0),
+            (4.0, 1.0),
+            (4.0, 0.5),
+            (4.5, 0.5),
+            (5.0, 1.0),
+            (8.0, 1.0),
+            (10.0, 1.0),
+            (10.0, 0.5),
+            (10.5, 0.5),
+            (11.0, 1.0),
+            (14.0, 1.0)
+        ]
+    );
     // Where each insert goes: insert 1's slots come before its routes, which still belong to it.
     assert_eq!(song.routes.into_iter().collect::<Vec<_>>(), [(0, vec![]), (1, vec![0, 2]), (2, vec![0])]);
 
@@ -159,6 +185,7 @@ fn reads_mixer_insert_settings_effect_slots_and_what_automation_moves_on_them() 
             ("Pro-Q 3 - Gain", FlControl::InsertEffect, None, Some(1), Some(0), 3),
             ("Tempo", FlControl::Tempo, None, None, None, 5),
             ("Insert 1 - Volume", FlControl::InsertVolume, None, Some(1), Some(0), 0x1fc0),
+            ("Bass - setting 2 (edit events in Bass)", FlControl::PluginParameter, Some(0), None, None, 2),
         ]
     );
 }

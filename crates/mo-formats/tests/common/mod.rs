@@ -624,6 +624,11 @@ pub fn automation_points(points: &[(f64, f64)]) -> Vec<u8> {
 }
 
 /// The mixer's settings (event 225): u32 0, u32 target, i32 value for each.
+/// One FL edit event (event 223): the tick in the pattern, what it moves (as an automation link's target), the value.
+pub fn edit_event(tick: u32, target: u32, value: f32) -> Vec<u8> {
+    [tick.to_le_bytes(), target.to_le_bytes(), value.to_le_bytes()].concat()
+}
+
 pub fn mixer_settings(settings: &[(u32, i32)]) -> Vec<u8> {
     settings.iter().flat_map(|&(t, v)| [0u32.to_le_bytes(), t.to_le_bytes(), v.to_le_bytes()].concat()).collect()
 }
@@ -722,8 +727,9 @@ pub fn fl_studio_25_switched_and_mixer(more: bool) -> Vec<u8> {
         .word(65, 1)
         .text(193, "Bass")
         .data(224, &[note(0, 0, 48, 36, 100), note(192, 0, 48, 38, 100)].concat())
-        // An edit event recorded into the pattern (not decoded yet): 12 bytes, as PyFLP has one.
-        .data(223, &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x80, 0x3f])
+        // Edit events recorded into the pattern, 12 bytes each (tick, target, value): the bass's volume (not carried),
+        // then its plugin's setting 2 at ticks 48 and 96.
+        .data(223, &[edit_event(0, 0, 1.0), edit_event(48, 0x8002, 0.5), edit_event(96, 0x8002, 1.0)].concat())
         .data(227, &automation_link(1, 7))
         .data(227, &automation_link(3, 2 << 16 | 7))
         .data(227, &automation_link(4, INSERT1 | 0x8003))

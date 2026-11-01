@@ -76,7 +76,8 @@ pub fn not_carried(a: &FlAutomation, song: &FlSong) -> String {
     }
 }
 
-/// What's said of the patterns holding edit events (knob moves recorded into them), which aren't decoded yet: up to
+/// What's said of the patterns holding edit events (knob moves recorded into them) that move something other than a
+/// plugin's setting, which aren't carried: up to
 /// eight by name, then how many more. `None` when none.
 pub fn edit_events(patterns: &[(u32, String)]) -> Option<String> {
     const SHOWN: usize = 8;
@@ -86,8 +87,12 @@ pub fn edit_events(patterns: &[(u32, String)]) -> Option<String> {
         names.push_str(&format!(" and {more} more"));
     }
     let s = if patterns.len() == 1 { "" } else { "s" };
-    (!patterns.is_empty())
-        .then(|| format!("Edit events: the knob moves recorded into pattern{s} {names} aren't carried over yet"))
+    (!patterns.is_empty()).then(|| {
+        format!(
+            "Edit events: the knob moves recorded into pattern{s} {names} for anything but a plugin's setting aren't \
+             carried over yet"
+        )
+    })
 }
 
 /// What's said of a track some of whose clips (`on`, by playlist track) sit on FL's muted playlist tracks: the track is

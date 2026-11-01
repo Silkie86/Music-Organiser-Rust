@@ -6,7 +6,7 @@ use std::path::Path;
 
 use super::automation::{
     FlAutomation, FlControl, FlPoint, MixerSettings, OnOff, TARGET_INSERT_PAN, TARGET_INSERT_VOLUME,
-    TARGET_SLOT_ON_OFF, automation_points, place_automation,
+    TARGET_SLOT_ON_OFF, automation_points, place_automation, place_edit_events,
 };
 use super::events::*;
 use super::notes;
@@ -239,8 +239,9 @@ pub struct FlSong {
     /// insert going to one other insert besides nothing else is a bus; several are sends.
     pub routes: BTreeMap<u32, Vec<u32>>,
     pub automation: Vec<FlAutomation>,
-    /// The patterns placed in the song that hold edit events (knob moves recorded into the pattern, event 223), by
-    /// number and name: not decoded yet, so a converter can say they're left out.
+    /// The patterns placed in the song with edit events (knob moves recorded into the pattern, event 223) that aren't
+    /// read: anything but a plugin's setting (those are in [`FlSong::automation`]), by number and name, so a converter
+    /// can say they're left out.
     pub edit_events: Vec<(u32, String)>,
     /// Muted playlist tracks that have something on them: their clips are on a muted track, and their automation is
     /// left out.
@@ -757,7 +758,7 @@ pub fn read_song_with(flp: &Flp<'_>, sounds: bool) -> FlSong {
     let mut tracks = PlaylistTracks::default();
     let mut rack = Rack::default();
     let mut pattern: Option<u32> = None;
-    let mut edit_events: BTreeSet<u32> = BTreeSet::new();
+    let mut edit_events: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
     let mut pending_internal = String::new();
     let mut plugin_name = String::new();
     let mut insert_names: BTreeMap<u32, String> = BTreeMap::new();
@@ -795,7 +796,7 @@ pub fn read_song_with(flp: &Flp<'_>, sounds: bool) -> FlSong {
             }
             EV_PATTERN_CONTROLLERS if !e.data.is_empty() => {
                 if let Some(p) = pattern {
-                    edit_events.insert(p);
+                    edit_events.entry(p).or_default().extend_from_slice(&e.data);
                 }
             }
             EV_PLAYLIST if playlist.is_none() => playlist = Some(&e.data),
@@ -890,7 +891,13 @@ pub fn read_song_with(flp: &Flp<'_>, sounds: bool) -> FlSong {
     let mixer = MixerSettings::new(mixer_settings);
     // An automation clip switched off in the Channel Rack doesn't play, like a muted one.
     links.retain(|(clip, _)| !off.contains(clip));
-    let (automation, too_many_points) = place_automation(&links, &curves, &names, &items, &tracks, &mixer, flp.ppq);
+    let (mut automation, mut too_many_points) =
+        place_automation(&links, &curves, &names, &items, &tracks, &mixer, flp.ppq);
+    // Knob moves recorded into patterns play wherever the pattern does, like an automation clip.
+    let (recorded, edit_events, too_many_recorded) =
+        place_edit_events(&edit_events, &pattern_names, &names, &items, &tracks, &mixer, flp.ppq);
+    automation.extend(recorded);
+    too_many_points |= too_many_recorded;
     // A channel whose on/off is automated plays only while it's on. When several clips switch it, it follows each in
     // turn: where one clip ends and another starts, the one starting there has the last word.
     // Per channel: the clips' names, and their points with the tick each is on and where its clip starts.
