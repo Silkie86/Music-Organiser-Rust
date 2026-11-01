@@ -303,6 +303,29 @@ moves the labelled chord's ends by up to a unit (keeping to two bars), as the re
 even then, it can't read, and `--misses` lists those stretches. On POP909-CL the design's accept sets apply (a major
 label also takes a maj7 or 6, and so on, as in **lenient** above).
 
+### The chord reader's counted tables
+
+The chord reader's two template priors read counted tables (harmony/design/chord-reader-design.md, P1 and P2): how
+often each kind of chord is the labelled one (f_core), and how often a chord of each kind names each tension it can
+carry (f_ten). `tables` counts them from the labels alone, never from what a reader hears:
+
+```
+cargo run -p mo-theorybench --release -- tables path/to/bench/pop909cl.jsonl path/to/bench/billboard.jsonl --write crates/mo-harmony/src/chordread/tables.rs
+```
+
+- **In beats**, on folds 1 to 4 of the pieces whose licence lets numbers ship (fold 0 stays kept back, drawn as keyfit
+  draws it). Each source counts as much as any other (its beats scaled to the sources' mean), and half a beat is
+  added to each cell, so nothing is ever impossible.
+- **A source counts only for what its labels can say.** Each kind of chord is counted from the sources whose labels
+  name it, and the shares are then scaled to add up to 1: POP909-CL has no 6, m6, 7sus4 or power chord, so it says
+  nothing about how common they are. f_ten comes only from the sources whose labels name a 9 on at least 1% of their
+  time (Billboard 5.2%): POP909-CL labels by triad and seventh templates, so its labels never say a tension is played,
+  even where the piano plays one, and one stray label can't change that.
+- **A dominant 11** (Harte "11": a major third and an 11 with a ♭7, and no ♯9) is counted as the 9sus4 players voice,
+  as `voice.py` plays it.
+- Give it the labelled sources themselves, not `voice.py`'s renders of the same charts, which would count Billboard's
+  labels twice. Without `--write` it only prints the counts and the tables.
+
 ## Charts played as music (`convert/voice.py`)
 
 `charts.py` plays Billboard's and RS200's charts as block chords over the label's bass: every note the label names,
@@ -445,3 +468,22 @@ a stretch on average (23 in the sweep's dense chords). Labels too short to place
 of the time, and at most one a set elsewhere. What POP909-CL misses even with the ends moved is mostly a stretch whose
 notes don't hold the chord: one or two notes under a full label, a maj7 label over a plain triad, a sus2 label over an
 open fifth. With no bass part, the chords' roots often aren't played at all: that's most of the upper part's misses.
+
+## The chord reader's counted tables (2026-11-01)
+
+`tables` on POP909-CL (727 pieces on folds 1 to 4) and the Billboard charts (571), shipped as mo-harmony's
+`chordread::COUNTED`:
+
+- **f_core, the share of labelled time:** major 52.4%, minor 23.9%, minor 7 6.6%, dominant 7 6.3%, major 7 2.4%, 7sus4
+  2.0%, sus4 1.7%, power chords 1.7%, 6 1.1%, sus2 1.0%, diminished 0.3%, m6 0.25%, m7b5 0.2%, and augmented, m(maj7)
+  and dim7 under 0.1% each. The 6, m6, 7sus4 and power chords come from Billboard alone; counted from both sources,
+  they came out at half that.
+- **f_ten, from Billboard's labels:** a 9 is named on 68% of 7sus4 chords, 23% of 6 chords, 20% of major 7s, 9.4% of
+  minor 7s and 6.2% of dominant 7s (a ♯9 7.2%, a 13 3.7%, a ♭9 1.2%); a ♭13 on a minor 7 almost never (0.04%).
+
+The reader trusts them a little, a beat: 0.2 for f_core and 0.06 for f_ten, where the design's hand cases' smallest lead
+is largest (0.26 a beat, against 0.10 trusting neither; `cargo test -p mo-harmony show_the_trusts -- --ignored
+--nocapture` prints the grid). Labels name tensions far less often than players play them, so f_ten makes every tension
+cost a little; trusted much more, it breaks hand cases (G C F over D reads Fsus2, not Dm11). No trust up to 0.5 brings
+the rootless voicings with no bass (the design's cases 12, 13 and 20) into the top two or three: those wait for the pair
+term, which reads the chords around. The experiments are in harmony/experiments/chord-reader-experiments.md, E1.

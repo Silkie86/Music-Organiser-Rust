@@ -8,6 +8,10 @@
 use mo_harmony::chord::{Family, ToneRole, role};
 use mo_harmony::{Chord, PcSet, PitchClass};
 
+/// Each interval above a root as Harte writes it as a tension: the ninths, elevenths and thirteenths (the root, third,
+/// fifth and sevenths keep their simple names).
+pub const COMPOUND: [&str; 12] = ["1", "b9", "9", "#9", "3", "11", "#11", "5", "b13", "13", "b7", "7"];
+
 /// A label as mir_eval encodes it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Label {
@@ -55,8 +59,7 @@ impl Label {
     /// without but keeps when it joins chords in a row ("C:(1,3,5,b7,9,13)/3").
     pub fn write(chord: Chord) -> String {
         const SIMPLE: [&str; 12] = ["1", "b2", "2", "b3", "3", "4", "b5", "5", "#5", "6", "b7", "7"];
-        // The third, the fifth and the sevenths are always core (`is_core`), so they're never looked up here.
-        const COMPOUND: [&str; 12] = ["1", "b9", "9", "#9", "3", "11", "#11", "5", "b13", "13", "b7", "7"];
+        // The third, the fifth and the sevenths are always core (`is_core`), so they're never looked up in COMPOUND.
         let intervals = chord.intervals();
         let family = chord.family();
         let degrees: Vec<&str> = std::iter::once("1")

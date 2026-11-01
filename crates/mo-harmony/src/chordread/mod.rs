@@ -15,7 +15,10 @@
 //!   ([`Shaped`]), and the chords that may be pushed ([`Push`]);
 //! - the readings worth scoring for a stretch of music ([`candidates()`]): each a root and a core ([`Label`]);
 //! - the evidence for and against each reading of a stretch ([`Feature`], worked out by [`Evidence`] into
-//!   [`SpanFacts`]), weighed by hand-set weights ([`HAND`]) and ranked, best first ([`SpanFacts::rank`]).
+//!   [`SpanFacts`]), weighed by hand-set weights ([`HAND`]) and ranked, best first ([`SpanFacts::rank`]);
+//! - the tables the two template priors read (how often each kind of chord is the labelled one, and how often its
+//!   labels name each tension), counted from POP909-CL's and the Billboard charts' labels by `theorybench tables`
+//!   ([`COUNTED`]).
 
 mod candidates;
 mod cores;
@@ -27,6 +30,7 @@ mod score;
 mod score_tests;
 #[cfg(test)]
 mod shape_tests;
+mod tables;
 mod weights;
 
 pub use candidates::{Candidate, Label, Route, allowed, candidates, escape, open_fifth};
@@ -36,4 +40,5 @@ pub use hear::{
     heard_in, presence_of,
 };
 pub use score::{Evidence, Feature, PerFeature, Scored, SpanFacts};
+pub use tables::{COUNTED, COUNTED_FROM};
 pub use weights::{EVEN, HAND, Tables, Weights};
