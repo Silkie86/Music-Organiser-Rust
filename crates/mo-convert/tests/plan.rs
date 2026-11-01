@@ -4,7 +4,7 @@
 // Test files may unwrap: a test that stops there has failed, which is what it should do.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use mo_convert::plan::{gain, played_seconds, sample_ticks};
+use mo_convert::plan::{gain, insert_gain, played_seconds, sample_ticks, tempo_bpm};
 use mo_convert::{Device, Options, Plan, Role, SampleFile, Target, TrackKind, TrackRef, from_fl};
 use mo_formats::fl::automation::{FlAutomation, FlControl, FlPoint};
 use mo_formats::fl::song::{FlAudioClip, FlChannel, FlClip, FlInsert, FlPlugin, FlSong, FlStretch, FlTrack};
@@ -344,14 +344,11 @@ fn where_two_clips_moving_a_setting_meet_the_lane_goes_on_from_the_one_starting_
 }
 
 #[test]
-fn mixer_and_song_automation_and_moved_faders_are_listed() {
+fn song_automation_and_moved_faders_are_listed() {
     let mut bus = insert(3, "Bass", vec![]);
     bus.fader = Some(9000);
     let tempo = automation("Tempo", None, FlControl::Tempo, &[(0.0, 0.5)]);
-    let fader =
-        FlAutomation { insert: Some(3), ..automation("Bass fader", None, FlControl::InsertVolume, &[(0.0, 0.5)]) };
-    let p =
-        plan(&song(vec![channel(0, "Bass", Some(plugin("Bass", "VST2", "1")), "", 3)], vec![bus], vec![tempo, fader]));
+    let p = plan(&song(vec![channel(0, "Bass", Some(plugin("Bass", "VST2", "1")), "", 3)], vec![bus], vec![tempo]));
     assert!(p.lanes.is_empty());
     assert!(
         p.notes.contains(
@@ -359,10 +356,64 @@ fn mixer_and_song_automation_and_moved_faders_are_listed() {
                 .to_owned()
         )
     );
-    assert!(p.notes.contains(
-        &"Bass fader: automation left out (the fader of Bass (insert 3) isn't automated here yet)".to_owned()
-    ));
     assert!(p.notes.iter().any(|n| n.starts_with("Mixer: the fader or pan of Bass (insert 3)")));
+}
+
+#[test]
+fn the_insert_fader_follows_the_table_measured_in_fl_studio() {
+    let db = |v: f64| 20.0 * insert_gain(v).log10();
+    assert_eq!(insert_gain(0.0), 0.0);
+    assert!(db(0.8).abs() < 1e-9);
+    assert!((db(0.5) + 9.179).abs() < 1e-9);
+    assert!((db(1.0) - 5.59).abs() < 1e-9);
+    // Between two measured points, the gain runs in a straight line.
+    let half = (insert_gain(0.80) + insert_gain(0.81)) / 2.0;
+    assert!((insert_gain(0.805) - half).abs() < 1e-12);
+    assert_eq!(insert_gain(1.5), insert_gain(1.0));
+    assert_eq!(tempo_bpm(0.5), 266.0);
+}
+
+#[test]
+fn an_insert_fader_and_pan_are_automated_on_the_tracks_it_feeds_after_their_own_level() {
+    let fader = |name: &str, insert, control, points: &[(f64, f64)]| FlAutomation {
+        insert: Some(insert),
+        ..automation(name, None, control, points)
+    };
+    let mut quiet = channel(1, "Pad", Some(plugin("Pad", "VST2", "2")), "", 3);
+    quiet.volume = 0.5;
+    let mut left = channel(2, "Keys", Some(plugin("Keys", "VST2", "3")), "", 4);
+    left.pan = 0.25;
+    let s = song(
+        vec![channel(0, "Bass", Some(plugin("Bass", "VST2", "1")), "", 3), quiet, left],
+        vec![insert(3, "Bus", vec![]), insert(4, "Keys", vec![]), insert(9, "Empty", vec![])],
+        vec![
+            fader("Bus fader", 3, FlControl::InsertVolume, &[(0.0, 0.8), (4.0, 0.5)]),
+            fader("Bus pan", 3, FlControl::InsertPan, &[(0.0, 0.5), (4.0, 1.0)]),
+            fader("Keys pan", 4, FlControl::InsertPan, &[(0.0, 0.0)]),
+            fader("Master fader", 0, FlControl::InsertVolume, &[(0.0, 1.0)]),
+            fader("Nobody", 9, FlControl::InsertVolume, &[(0.0, 1.0)]),
+            // Its own volume is automated too, so that lane stays.
+            automation("Pad volume", Some(1), FlControl::Volume, &[(0.0, 0.2)]),
+        ],
+    );
+    let p = plan(&s);
+    let lane = |track, target: Target| p.lanes.iter().find(|l| l.track == track && l.target == target);
+    let values = |track, target| lane(track, target).unwrap().points.iter().map(|x| x.value).collect::<Vec<_>>();
+    // Bass is at FL's default level (gain 1), so its fader lane is the insert's alone.
+    let bass = values(TrackRef::Track(0), Target::Volume);
+    assert!((bass[0] - 1.0).abs() < 1e-9 && (bass[1] - insert_gain(0.5)).abs() < 1e-12);
+    assert_eq!(values(TrackRef::Track(0), Target::Pan), [0.0, 1.0]);
+    assert_eq!(values(TrackRef::Track(1), Target::Volume), [gain(0.2)]);
+    assert_eq!(values(TrackRef::Track(1), Target::Pan), [0.0, 1.0]);
+    assert!(lane(TrackRef::Track(2), Target::Pan).is_none(), "Keys is panned on its channel");
+    assert_eq!(values(TrackRef::Master, Target::Volume), [insert_gain(1.0)]);
+    for note in [
+        "Bus fader: automation left out on some tracks (Pad has its own volume automated)",
+        "Keys pan: automation left out on some tracks (Keys's own pan isn't in the middle)",
+        "Nobody: automation left out (no converted channel feeds it)",
+    ] {
+        assert!(p.notes.contains(&note.to_owned()), "{note}: {:?}", p.notes);
+    }
 }
 
 #[test]

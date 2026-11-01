@@ -163,6 +163,8 @@ pub struct Lane {
     pub track: TrackRef,
     pub target: Target,
     pub points: Vec<LanePoint>,
+    /// It comes from an FL mixer insert's fader or pan, not the track's own channel.
+    pub from_insert: bool,
 }
 
 /// What the song becomes.
@@ -184,6 +186,130 @@ pub struct Plan {
 /// published; a square law keeps each channel's level relative to the default (as the C# app does).
 pub fn gain(fl_volume: f64) -> f64 {
     (fl_volume / song::DEFAULT_VOLUME).powi(2).min(2.0)
+}
+
+/// The decibels FL Studio 2025 shows for a mixer insert's fader at 0.00, 0.01 ... 1.00 (its automation value), as
+/// measured on Solomon's PC (2026-11-01, FL Studio's own reading, rounded to 0.001 dB). It's no simple curve, so the
+/// table is used as it is.
+const INSERT_FADER_DB: [f64; 101] = [
+    f64::NEG_INFINITY,
+    -50.335,
+    -44.183,
+    -40.529,
+    -37.898,
+    -35.827,
+    -34.109,
+    -32.636,
+    -31.341,
+    -30.182,
+    -29.131,
+    -28.166,
+    -27.273,
+    -26.439,
+    -25.657,
+    -24.918,
+    -24.217,
+    -23.549,
+    -22.912,
+    -22.3,
+    -21.711,
+    -21.144,
+    -20.596,
+    -20.065,
+    -19.55,
+    -19.05,
+    -18.563,
+    -18.087,
+    -17.624,
+    -17.17,
+    -16.727,
+    -16.292,
+    -15.866,
+    -15.448,
+    -15.037,
+    -14.633,
+    -14.235,
+    -13.844,
+    -13.458,
+    -13.078,
+    -12.703,
+    -12.333,
+    -11.967,
+    -11.605,
+    -11.248,
+    -10.894,
+    -10.545,
+    -10.198,
+    -9.855,
+    -9.516,
+    -9.179,
+    -8.845,
+    -8.514,
+    -8.186,
+    -7.86,
+    -7.536,
+    -7.215,
+    -6.896,
+    -6.579,
+    -6.264,
+    -5.951,
+    -5.64,
+    -5.331,
+    -5.023,
+    -4.717,
+    -4.413,
+    -4.11,
+    -3.809,
+    -3.509,
+    -3.21,
+    -2.912,
+    -2.616,
+    -2.321,
+    -2.028,
+    -1.735,
+    -1.443,
+    -1.153,
+    -0.863,
+    -0.575,
+    -0.287,
+    0.0,
+    0.286,
+    0.571,
+    0.855,
+    1.139,
+    1.422,
+    1.704,
+    1.985,
+    2.266,
+    2.546,
+    2.826,
+    3.104,
+    3.383,
+    3.66,
+    3.938,
+    4.214,
+    4.49,
+    4.766,
+    5.041,
+    5.316,
+    5.59,
+];
+
+/// A mixer insert's fader (0 to 1, FL's automation value; 0.8 is 0 dB) as a linear gain, between the measured points.
+pub fn insert_gain(fader: f64) -> f64 {
+    let gain = |i: usize| INSERT_FADER_DB.get(i).map_or(0.0, |db| 10f64.powf(db / 20.0));
+    if fader.is_nan() {
+        return 1.0;
+    }
+    let at = fader.clamp(0.0, 1.0) * 100.0;
+    let below = at.floor() as usize;
+    let part = at - below as f64;
+    gain(below) * (1.0 - part) + if part > 0.0 { gain(below + 1) * part } else { 0.0 }
+}
+
+/// FL's tempo automation value (0 to 1) in BPM: 10 to 522 in a straight line, as measured in FL Studio 2025.
+pub fn tempo_bpm(value: f64) -> f64 {
+    10.0 + 512.0 * value.clamp(0.0, 1.0)
 }
 
 /// FL's pan knob (0 to 1, centre 0.5) as -1 to 1.
@@ -555,7 +681,7 @@ fn add_lane(lanes: &mut Vec<Lane>, track: TrackRef, target: Target, a: &FlAutoma
     let at = match lanes.iter().position(|l| l.track == track && l.target.same_as(&target)) {
         Some(at) => at,
         None => {
-            lanes.push(Lane { clips: Vec::new(), track, target, points: Vec::new() });
+            lanes.push(Lane { clips: Vec::new(), track, target, points: Vec::new(), from_insert: false });
             lanes.len() - 1
         }
     };
@@ -712,7 +838,8 @@ pub fn from_fl(song: &FlSong, options: Options, read_sample: &mut dyn FnMut(&str
         }
     }
 
-    // FL's insert faders and pans aren't carried yet (how FL's fader maps to gain isn't worked out).
+    // FL's insert faders and pans where they sit (not automated) aren't carried yet: the fader's curve is measured as
+    // an automation value, but not yet what the saved fader value is on that scale.
     let mut used: Vec<u32> =
         placed.keys().filter_map(|i| song.channels.iter().find(|c| c.index == *i)).map(|c| c.insert).collect();
     used.push(0);
@@ -725,7 +852,12 @@ pub fn from_fl(song: &FlSong, options: Options, read_sample: &mut dyn FnMut(&str
     // Automation clips as lanes on the track they move: its volume, pan or a setting of its plugin, or a setting of an
     // effect on a mixer insert or the effect's slot switched on and off, on each track that has a copy of it.
     let mut lanes = Vec::new();
+    let mut faders = Vec::new();
     for a in &song.automation {
+        if matches!(a.control, FlControl::InsertVolume | FlControl::InsertPan) && a.insert.is_some() {
+            faders.push(a);
+            continue;
+        }
         if matches!(a.control, FlControl::InsertSlotOnOff | FlControl::InsertEffect) {
             let copies = match (a.insert, a.slot) {
                 (Some(i), Some(s)) => planner.effect_copies.get(&(i, s)),
@@ -809,6 +941,61 @@ pub fn from_fl(song: &FlSong, options: Options, read_sample: &mut dyn FnMut(&str
             },
             // Carried by muting what the channel plays while it's off (see FlChannel::switched_by).
             _ => {}
+        }
+    }
+    // A mixer insert's fader and pan on the tracks of the channels feeding it (the master insert's on the master),
+    // after the channels' own volume and pan: Bitwig has one fader for both, so the lane is the channel's level times
+    // the insert's, and an insert's pan is carried only where the channel's pan is in the middle. Where a channel's
+    // own volume or pan is automated too, that lane is kept and the insert's is left out.
+    for a in faders {
+        let Some(insert) = a.insert else { continue };
+        let pan_lane = a.control == FlControl::InsertPan;
+        let target = if pan_lane { Target::Pan } else { Target::Volume };
+        let onto: Vec<TrackRef> = if insert == 0 {
+            vec![TrackRef::Master]
+        } else {
+            song.channels
+                .iter()
+                .filter(|c| c.insert == insert)
+                .filter_map(|c| placed.get(&c.index))
+                .flat_map(|&(first, count)| (first..first + count).map(TrackRef::Track))
+                .collect()
+        };
+        if onto.is_empty() {
+            planner.notes.push(format!("{}: automation left out (no converted channel feeds it)", a.name));
+            continue;
+        }
+        let mut left = Vec::new();
+        for track in onto {
+            let own = match track {
+                TrackRef::Master => None,
+                TrackRef::Track(t) => tracks.get(t),
+            };
+            let automated = lanes.iter().any(|l| l.track == track && l.target == target && !l.from_insert);
+            if automated {
+                left.push(format!(
+                    "{} has its own {} automated",
+                    own.map_or("the master", |t| t.name.as_str()),
+                    if pan_lane { "pan" } else { "volume" }
+                ));
+                continue;
+            }
+            if pan_lane {
+                if own.is_some_and(|t| t.pan.abs() > 1e-9) {
+                    left.push(format!("{}'s own pan isn't in the middle", own.map_or("", |t| t.name.as_str())));
+                    continue;
+                }
+                add_lane(&mut lanes, track, Target::Pan, a, pan);
+            } else {
+                let level = own.map_or(1.0, |t| t.gain);
+                add_lane(&mut lanes, track, Target::Volume, a, |v| (level * insert_gain(v)).min(2.0));
+            }
+            if let Some(lane) = lanes.iter_mut().find(|l| l.track == track && l.target == target) {
+                lane.from_insert = true;
+            }
+        }
+        if !left.is_empty() {
+            planner.notes.push(format!("{}: automation left out on some tracks ({})", a.name, left.join("; ")));
         }
     }
     // Several FL clips moving one thing share a lane.

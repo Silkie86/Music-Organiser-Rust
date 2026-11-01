@@ -438,6 +438,37 @@ fn an_effect_slot_switched_on_and_off_is_an_on_off_lane_of_switch_points() {
 }
 
 #[test]
+fn an_insert_fader_is_a_volume_lane_and_the_master_inserts_is_on_the_master() {
+    let mut s = song();
+    s.channels.remove(0);
+    s.channels[0].insert = 3;
+    s.inserts = vec![FlInsert { index: 3, name: "Keys bus".into(), effects: vec![], fader: None, pan: None }];
+    let fader = |name: &str, insert| FlAutomation {
+        channel: None,
+        insert: Some(insert),
+        ..automation(name, 0, FlControl::InsertVolume, 0, &[(0.0, 0.8), (4.0, 0.5)])
+    };
+    s.automation = vec![fader("Bus fader", 3), fader("Master fader", 0)];
+    let (doc, notes, _) = convert(&s, &bitwig_template(Template::default()));
+    let (group, tracks) = tracks(&doc);
+    let gains = |track: ObjId| -> Vec<f64> {
+        let lanes = doc.field_list(obj(&doc, track, &[0x2dc9]), 0x4ba);
+        assert_eq!(lanes.len(), 1);
+        let target = obj(&doc, lanes[0], &[0x2a3]);
+        assert_eq!(doc.field_obj(target, 0x41), Some(obj(&doc, track, &[0x165, 0x1a4])));
+        doc.field_list(obj(&doc, lanes[0], &[0x2d8c, 0x35ac]), 0x21f)
+            .iter()
+            .map(|&p| doc.obj(p).num(0x28f).unwrap())
+            .collect()
+    };
+    let want = [1.0, mo_convert::plan::insert_gain(0.5).cbrt()];
+    for (got, track) in [(gains(tracks[0]), "Serum"), (gains(obj(&doc, group, &[0x4e0])), "master")] {
+        assert!(got.iter().zip(want).all(|(g, w)| (g - w).abs() < 1e-12), "{track}: {got:?}");
+    }
+    assert!(!notes.iter().any(|n| n.contains("automation")), "{notes:?}");
+}
+
+#[test]
 fn audio_clips_come_across_stretched_and_pitched_on_a_copy_of_the_audio_track() {
     let mut vox = channel(0, "Vox", None, r"C:\Samples\Snare 01.wav");
     vox.notes.clear();
