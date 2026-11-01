@@ -266,6 +266,8 @@ export component StudioButton inherits Rectangle {
     }
     label := Text {
         x: (parent.width - self.width - (root.menu ? 14px : 0px)) / 2;
+        // A button with an icon shows only the icon; its words go in `tip`.
+        visible: root.icon == "";
         text: root.text;
         color: !root.enabled ? Theme.faint : root.main ? Theme.accent-text : Theme.text;
         font-size: Type.body;
@@ -608,7 +610,8 @@ export component ListLine inherits Rectangle {
     in property <length> tip-from;
     callback clicked;
     callback double-clicked;
-    // A right click, with the mouse's place in the line: the page opens its `RightClickMenu` there.
+    // A right click, after the line is picked, with the mouse's place in the window: the page opens its
+    // `RightClickMenu` there.
     callback right-clicked(length, length);
     border-radius: Theme.radius;
     background: selected ? Theme.surface-raised : touch.has-hover ? Theme.hover : transparent;
@@ -624,7 +627,9 @@ export component ListLine inherits Rectangle {
         double-clicked => { root.double-clicked(); }
         pointer-event(e) => {
             if e.kind == PointerEventKind.down && e.button == PointerEventButton.right {
-                root.right-clicked(self.mouse-x, self.mouse-y);
+                // The menu acts on what's picked, so pick this line first.
+                root.clicked();
+                root.right-clicked(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
             }
         }
     }
@@ -882,7 +887,9 @@ export component PageHeader inherits VerticalLayout {
             overflow: elide;
         }
     }
-    if root.busy != "": ProgressLine {
+    // Always there, so the page doesn't jump when a job starts or ends; only seen while one runs.
+    ProgressLine {
+        visible: root.busy != "";
         text: root.busy;
         done: root.done;
     }
@@ -893,7 +900,8 @@ export component Segmented inherits Rectangle {
     in property <[string]> choices;
     // Each choice's tooltip key, from the shortcut list, if it has one.
     in property <[string]> keys;
-    in-out property <int> current;
+    // The picked one. The page sets it when told of a pick, so a key that changes the view moves it too.
+    in property <int> current;
     callback picked(int);
     width: row.preferred-width;
     height: 32px;
@@ -921,10 +929,7 @@ export component Segmented inherits Rectangle {
                 font-weight: 500;
             }
             touch := TouchArea {
-                clicked => {
-                    root.current = i;
-                    root.picked(i);
-                }
+                clicked => { root.picked(i); }
             }
             Tip {
                 text: name;
@@ -945,8 +950,9 @@ export struct MenuItem {
     enabled: bool,
 }
 
-// The lines of a menu, on its card.
-component MenuItems inherits MenuCard {
+// The lines of a menu, on its card. A click on a line that can't be used does nothing, so the menu around it closes
+// only when a line is chosen (or on a click outside it).
+export component MenuItems inherits MenuCard {
     in property <[MenuItem]> items;
     callback chosen(string);
     for item in root.items: VerticalLayout {
@@ -971,15 +977,19 @@ export component MoreButton inherits StudioButton {
         x: root.width - self.width;
         y: root.height + Space.xs;
         width: 280px;
+        close-policy: close-on-click-outside;
         MenuItems {
             items: root.items;
-            chosen(id) => { root.chosen(id); }
+            chosen(id) => {
+                more-menu.close();
+                root.chosen(id);
+            }
         }
     }
 }
 
-// A right-click menu: put one on the page and call `open-at` with the mouse's place, in the menu's parent's space.
-// Placed at 0,0 with no size of its own, so it takes no room and no clicks.
+// A right-click menu: put one on the page and call `open-at` with the mouse's place in the window (as `ListLine`'s
+// `right-clicked` gives it). Placed at 0,0 with no size of its own, so it takes no room and no clicks.
 export component RightClickMenu {
     in property <[MenuItem]> items;
     callback chosen(string);
@@ -990,17 +1000,21 @@ export component RightClickMenu {
     property <length> at-x;
     property <length> at-y;
     public function open-at(x: length, y: length) {
-        root.at-x = x;
-        root.at-y = y;
+        root.at-x = x - root.absolute-position.x;
+        root.at-y = y - root.absolute-position.y;
         menu.show();
     }
     menu := PopupWindow {
         x: root.at-x;
         y: root.at-y;
         width: 280px;
+        close-policy: close-on-click-outside;
         MenuItems {
             items: root.items;
-            chosen(id) => { root.chosen(id); }
+            chosen(id) => {
+                menu.close();
+                root.chosen(id);
+            }
         }
     }
 }
@@ -1061,6 +1075,7 @@ export component PanelDivider inherits Rectangle {
     property <length> start-width;
     // Where the press was, in the window: the seam moves while it's dragged, so its own space won't do.
     property <length> start-x;
+    property <bool> dragging;
     Rectangle {
         x: (parent.width - self.width) / 2;
         width: 2px;
@@ -1072,16 +1087,23 @@ export component PanelDivider inherits Rectangle {
     touch := TouchArea {
         mouse-cursor: MouseCursor.col-resize;
         pointer-event(e) => {
+            if e.button != PointerEventButton.left {
+                return;
+            }
             if e.kind == PointerEventKind.down {
                 root.start-width = root.panel-width;
                 root.start-x = self.absolute-position.x + self.mouse-x;
+                root.dragging = false;
             }
-            if e.kind == PointerEventKind.up {
+            // Saved only when the seam really moved.
+            if e.kind == PointerEventKind.up && root.dragging {
+                root.dragging = false;
                 root.resized(root.panel-width);
             }
         }
         moved => {
             if self.pressed {
+                root.dragging = true;
                 root.resizing(clamp(root.start-width - (self.absolute-position.x + self.mouse-x - root.start-x), root.min-panel,
                     max(root.min-panel, root.room - root.width - root.min-list)));
             }
@@ -1152,13 +1174,11 @@ export component FolderRow inherits Rectangle {
     in property <string> path;
     in property <string> size;
     in property <[string]> modes;
-    in-out property <int> mode;
+    // The picked mode; the page sets it when told of a pick.
+    in property <int> mode;
     callback mode-picked(int);
     callback remove;
     height: 44px;
-    border-radius: Theme.radius;
-    background: touch.has-hover ? Theme.hover : transparent;
-    touch := TouchArea { }
     HorizontalLayout {
         padding-left: Space.md;
         padding-right: Space.sm;
@@ -1182,7 +1202,7 @@ export component FolderRow inherits Rectangle {
             alignment: center;
             Segmented {
                 choices: root.modes;
-                current <=> root.mode;
+                current: root.mode;
                 picked(i) => { root.mode-picked(i); }
             }
         }

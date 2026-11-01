@@ -103,7 +103,7 @@ export component AppWindow inherits Window {
 
         HorizontalLayout {
             // The rail.
-            Rectangle {
+            rail := Rectangle {
                 width: 208px;
                 background: Theme.sidebar;
                 VerticalLayout {
@@ -151,19 +151,23 @@ export component AppWindow inherits Window {
                 }
             }
             // The page on show.
-            if !root.parts-gallery && root.place == root.songs-place: SongsPage {
+            if root.place == root.songs-place: SongsPage {
                 horizontal-stretch: 1;
             }
-            if root.parts-gallery: PartsGallery {
-                horizontal-stretch: 1;
-            }
-            if !root.parts-gallery && root.place != root.songs-place: ComingPage {
+            if root.place != root.songs-place: ComingPage {
                 horizontal-stretch: 1;
                 title: root.places[root.place].name;
                 coming: root.places[root.place].coming;
                 can-try-job: root.place == root.settings-place;
                 try-job => { root.try-job(); }
             }
+        }
+
+        // For the screenshots only: the shared parts on one page, over the page beside the rail.
+        if root.parts-gallery: PartsGallery {
+            x: rail.width;
+            width: parent.width - self.x;
+            height: parent.height;
         }
 
         ActivityCards {
