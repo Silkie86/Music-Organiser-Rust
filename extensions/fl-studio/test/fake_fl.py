@@ -49,8 +49,9 @@ class Studio:
     """An FL Studio with a project open. `group` lists the global channels the channel rack shows."""
 
     def __init__(self, api=37, title="Night Drive - FL Studio 2025", tempo=124000, modified=0, channels=(),
-                 mixer=(), group=None, version="Producer Edition v25.1.6 [build 4997]"):
+                 mixer=(), group=None, version="Producer Edition v25.1.6 [build 4997]", info_title=""):
         self.api, self.title, self.tempo, self.modified, self.version = api, title, tempo, modified, version
+        self.info_title = info_title  # the title in File > Project info
         self.channels = list(channels)
         self.mixer = list(mixer)   # (name, {slot: Plugin}) for each track, master first
         self.group = list(range(len(self.channels))) if group is None else list(group)
@@ -174,6 +175,9 @@ class Studio:
         def getChangedFlag():
             return studio.modified
 
+        def getProjectTitle():
+            return studio.info_title
+
         def ui_getVersion(mode=4, /):
             return studio.version
 
@@ -199,7 +203,7 @@ class Studio:
                         setParamValue],
             "mixer": [trackCount, getTrackName, isTrackPluginValid, getCurrentTempo, setTrackVolume,
                       getTrackVolume, setTrackName],
-            "general": [getVersion, getChangedFlag, processRECEvent],
+            "general": [getVersion, getChangedFlag, processRECEvent, getProjectTitle],
             "transport": [globalTransport],
             "ui": [ui_getVersion, getProgTitle],
             "device": [isAssigned, midiOutSysex],

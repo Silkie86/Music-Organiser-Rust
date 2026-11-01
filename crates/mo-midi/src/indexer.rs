@@ -19,7 +19,8 @@ use mo_formats::case;
 
 use crate::extract::{self, Unread};
 use crate::index::{MidiError, SourceKind};
-use crate::store::{FileRead, MidiStore, Outcome, Stamp};
+use crate::keys;
+use crate::store::{FileRead, MidiStore, Outcome, ReadKey, Stamp};
 
 /// A file the index should hold.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -112,6 +113,8 @@ pub struct Summary {
     pub failed: usize,
     pub forgotten: usize,
     pub parts: usize,
+    /// Sets of notes whose key was read again, as the key finder got better.
+    pub rekeyed: usize,
     /// Stopped before the end, because a newer run was wanted.
     pub stopped: bool,
 }
@@ -145,6 +148,9 @@ pub fn run(
     let total = plan.todo.len();
     if total == 0 {
         store.tidy()?;
+        let (rekeyed, finished) = rekey(store, pool, readers, stop, progress)?;
+        summary.rekeyed = rekeyed;
+        summary.stopped = !finished;
         return Ok(summary);
     }
     // A small bounded queue: readers wait when the saver is behind, so read files never pile up in memory.
@@ -220,9 +226,62 @@ pub fn run(
     });
     saved?;
     summary.stopped = summary.read < total;
+    progress(summary.read, total, "");
     if !summary.stopped {
         store.tidy()?;
+        let (rekeyed, finished) = rekey(store, pool, readers, stop, progress)?;
+        summary.rekeyed = rekeyed;
+        summary.stopped = !finished;
     }
-    progress(summary.read, total, "");
     Ok(summary)
+}
+
+/// Sets of notes read again at once, for their key.
+const REKEY_BATCH: usize = 500;
+
+/// Reads again the key of every set of notes that needs it (an older key finder read it, or its kind changed), from
+/// the notes kept in the index: no file is opened. On `readers` threads of `pool`, a batch at a time; `progress` hears
+/// how many are done, of how many, with no path. `stop` ends it after the batch it's on. Gives how many were read and
+/// whether it got to the end.
+fn rekey(
+    store: &mut MidiStore,
+    pool: &rayon::ThreadPool,
+    readers: usize,
+    stop: &AtomicBool,
+    progress: &dyn Fn(usize, usize, &str),
+) -> Result<(usize, bool), MidiError> {
+    let total = store.stale_key_count()?;
+    let readers = readers.clamp(1, pool.current_num_threads().max(1));
+    let mut done = 0;
+    while done < total {
+        if stop.load(Ordering::Relaxed) {
+            return Ok((done, false));
+        }
+        let stale = store.stale_keys(REKEY_BATCH)?;
+        if stale.is_empty() {
+            break;
+        }
+        let share = stale.len().div_ceil(readers);
+        let mut read: Vec<Vec<ReadKey>> = Vec::new();
+        pool.scope(|s| {
+            let mut slots: Vec<&mut Vec<ReadKey>> = Vec::new();
+            read.resize_with(readers, Vec::new);
+            slots.extend(read.iter_mut());
+            for (chunk, slot) in stale.chunks(share).zip(slots) {
+                s.spawn(move |_| {
+                    keys::with_reader(|reader| {
+                        for k in chunk {
+                            let (fact, features) = keys::reread(reader, &k.notes, k.role, k.cut);
+                            slot.push(ReadKey { notes_id: k.notes_id, role: k.role, fact, features });
+                        }
+                    });
+                });
+            }
+        });
+        let read: Vec<ReadKey> = read.into_iter().flatten().collect();
+        store.save_keys(&read)?;
+        done += read.len();
+        progress(done, total, "");
+    }
+    Ok((done, true))
 }

@@ -20,7 +20,7 @@ Nothing in the project changes unless LET_THE_APP_MAKE_CHANGES below is True.
 LET_THE_APP_MAKE_CHANGES = False
 
 # True measures FL Studio's fader and tempo curves once, in the project "MO Live Test automation" only (see measure()):
-# it moves that project's faders and tempo, renames 122 of its inserts and saves it.
+# it moves insert 1's fader and the tempo, puts them back, renames inserts 1 to 14 and saves it.
 MEASURE_IN_LIVE_TEST = False
 
 import channels
@@ -134,9 +134,10 @@ def script_folder():
 # Measuring (Format Lab): how FL Studio turns an automation value into decibels and BPM
 
 MEASURE_PROJECT = "MO Live Test automation"
-FADER_STEPS = 100     # the fader at 0.00, 0.01 ... 1.00, each on its own insert (1 to 101)
-TEMPO_STEPS = 20      # the tempo at 0.00, 0.05 ... 1.00, written on inserts 102 to 122
-TEMPO_FIRST = FADER_STEPS + 2
+FADER_STEPS = 100     # insert 1's fader at 0.00, 0.01 ... 1.00
+TEMPO_STEPS = 20      # the tempo at 0.00, 0.05 ... 1.00
+PER_NAME = 10         # readings written in each insert's name, from insert 1 on ("v0.80 0.0dB; v0.81 ...")
+FADER = 1             # the insert whose fader is moved
 
 _measuring = None     # the measurement under way: the step, what was found, and what to put back
 
@@ -159,17 +160,25 @@ def project_name(title):
 
 
 def in_live_test():
-    """Whether the project open is exactly MEASURE_PROJECT."""
-    return project_name(ui.getProgTitle()) == MEASURE_PROJECT
+    """
+    Whether the project open is exactly MEASURE_PROJECT: by the title, or by the title set in the project's own info
+    (File > Project info), as FL Studio 2025 gives scripts only "FL Studio 2025" for the title.
+    """
+    if project_name(ui.getProgTitle()) == MEASURE_PROJECT:
+        return True
+    try:
+        return general.getProjectTitle().strip() == MEASURE_PROJECT
+    except AttributeError:
+        return False
 
 
 def measure():
     """
     Runs once, a step at each idle, when MEASURE_IN_LIVE_TEST is True and the project open is MEASURE_PROJECT: sets
-    each insert's fader to a known value and reads, at the next idle, the decibels FL Studio shows; then the tempo to
-    known automation values and reads the BPM; puts the faders and tempo back, writes what it found as the inserts'
-    names, and saves the project, so Format Lab reads the table from the .flp (FL Studio doesn't let scripts write
-    files).
+    insert 1's fader to known values and reads, at the next idle each time, the decibels FL Studio shows; then the
+    tempo to known automation values and reads the BPM; puts the fader and tempo back, writes what it found in the
+    inserts' names, PER_NAME readings to a name from insert 1 on, and saves the project, so Format Lab reads the table
+    from the .flp (FL Studio doesn't let scripts write files).
     """
     global _measuring
     if not MEASURE_IN_LIVE_TEST or _measuring == "done":
@@ -178,11 +187,14 @@ def measure():
         if not in_live_test():
             return
         if _measuring is None:
-            if mixer.trackCount() - 1 <= TEMPO_FIRST + TEMPO_STEPS:
-                print("Music Organiser: this FL Studio has too few mixer inserts to measure on, so nothing changed.")
+            needed = -(-(FADER_STEPS + 1) // PER_NAME) - (-(TEMPO_STEPS + 1) // PER_NAME)
+            if mixer.trackCount() - 1 <= needed:
+                print("Music Organiser: this FL Studio has too few mixer inserts to measure on (" +
+                      str(mixer.trackCount()) + "), so nothing changed.")
                 _measuring = "done"
                 return
-            _measuring = {"step": 0, "names": {}, "tempo": tempo(), "faders": {}, "tempos": []}
+            _measuring = {"step": 0, "readings": [], "tempo": tempo(), "fader": mixer.getTrackVolume(FADER),
+                          "tempos": []}
             print("Music Organiser: measuring the fader and tempo in " + MEASURE_PROJECT)
         m = _measuring
         step = m["step"]
@@ -190,13 +202,11 @@ def measure():
         tempo_end = fader_end + 2 * (TEMPO_STEPS + 1)
         if step < fader_end:
             # Set at one idle, read at the next, once FL Studio has moved it.
-            track = step // 2 + 1
             value = (step // 2) / float(FADER_STEPS)
             if step % 2 == 0:
-                m["faders"][track] = mixer.getTrackVolume(track)
-                mixer.setTrackVolume(track, value)
+                mixer.setTrackVolume(FADER, value)
             else:
-                m["names"][track] = "v%.2f %sdB" % (value, round(mixer.getTrackVolume(track, 1), 3))
+                m["readings"].append("v%.2f %sdB" % (value, round(mixer.getTrackVolume(FADER, 1), 3)))
         elif step < tempo_end:
             t = step - fader_end
             value = (t // 2) / float(TEMPO_STEPS)
@@ -205,17 +215,20 @@ def measure():
             else:
                 bpm = tempo()
                 m["tempos"].append((value, bpm))
-                m["names"][TEMPO_FIRST + t // 2] = "t%.2f %sbpm" % (value, round(bpm, 3))
+                m["readings"].append("t%.2f %sbpm" % (value, round(bpm, 3)))
         elif step == tempo_end:
-            # Back as it was: each fader, and the tempo at the automation value that gave it.
-            for track, value in m["faders"].items():
-                mixer.setTrackVolume(track, value)
+            # Back as it was: the fader, and the tempo at the automation value that gave it.
+            mixer.setTrackVolume(FADER, m["fader"])
             back = value_for(m["tempos"], m["tempo"])
             if back is not None:
                 set_tempo(back)
         else:
-            for track, name in m["names"].items():
-                mixer.setTrackName(track, name)
+            # Fader readings and tempo readings each start a name of their own.
+            faders = [r for r in m["readings"] if r.startswith("v")]
+            tempos = [r for r in m["readings"] if r.startswith("t")]
+            names = [group[i:i + PER_NAME] for group in (faders, tempos) for i in range(0, len(group), PER_NAME)]
+            for track, name in enumerate(names, 1):
+                mixer.setTrackName(track, "; ".join(name))
             transport.globalTransport(midi.FPT_Save, 1)
             print("Music Organiser: measured and saved " + MEASURE_PROJECT)
             _measuring = "done"

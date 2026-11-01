@@ -348,8 +348,9 @@ if __name__ == "__main__":
 
 
 class Measuring(unittest.TestCase):
-    def run_script(self, title, changes=True, idles=600):
-        studio = fake_fl.night_drive(title=title, mixer=[("Master", {})] + [("Insert", {})] * 125)
+    def run_script(self, title, changes=True, idles=600, info_title=""):
+        studio = fake_fl.night_drive(title=title, mixer=[("Master", {})] + [("Insert", {})] * 125,
+                                     info_title=info_title)
         script = fake_fl.compile_script(studio)
         script.MEASURE_IN_LIVE_TEST = changes
         script.OnInit()
@@ -361,15 +362,41 @@ class Measuring(unittest.TestCase):
         # FL Studio 2025 shows the file name with ".flp", and a "*" while it has unsaved changes.
         studio = self.run_script("MO Live Test automation.flp* - FL Studio 2025")
         self.assertEqual(studio.saves, 1)
-        self.assertEqual(studio.names[1], "v0.00 -infdB")
-        self.assertEqual(studio.names[81], "v0.80 0.0dB")
-        self.assertEqual(studio.names[101], "v1.00 1.938dB")
-        self.assertEqual(studio.names[102], "t0.00 10.0bpm")
-        self.assertEqual(studio.names[122], "t1.00 522.0bpm")
-        self.assertEqual(len(studio.names), 122)
-        # Everything put back as it was.
+        # Ten readings to a name: the fader on inserts 1 to 11, the tempo on 12 to 14.
+        self.assertEqual(len(studio.names), 14)
+        faders = "; ".join(studio.names[i] for i in range(1, 12)).split("; ")
+        tempos = "; ".join(studio.names[i] for i in range(12, 15)).split("; ")
+        self.assertEqual(len(faders), 101)
+        self.assertEqual(len(tempos), 21)
+        self.assertEqual(faders[0], "v0.00 -infdB")
+        self.assertEqual(faders[80], "v0.80 0.0dB")
+        self.assertEqual(faders[100], "v1.00 1.938dB")
+        self.assertEqual(tempos[0], "t0.00 10.0bpm")
+        self.assertEqual(tempos[20], "t1.00 522.0bpm")
+        self.assertTrue(studio.names[12].startswith("t0.00 "))
+        # Everything put back as it was, and only insert 1's fader moved.
         self.assertEqual(studio.tempo, 124000)
-        self.assertEqual(set(studio.volumes.values()), {0.8})
+        self.assertEqual(studio.volumes, {1: 0.8})
+
+    def test_measures_with_only_a_few_inserts(self):
+        # A new FL Studio 2025 project on Solomon's PC: the master, 16 inserts and the "current" track (18).
+        studio = fake_fl.night_drive(title="FL Studio 2025", mixer=[("Master", {})] + [("Insert", {})] * 16,
+                                     info_title="MO Live Test automation")
+        script = fake_fl.compile_script(studio)
+        script.MEASURE_IN_LIVE_TEST = True
+        script.OnInit()
+        for _ in range(600):
+            script.OnIdle()
+        self.assertEqual((studio.saves, len(studio.names)), (1, 14))
+
+    def test_knows_the_live_test_by_its_project_info_title(self):
+        # FL Studio 2025 gives scripts only "FL Studio 2025" as the title.
+        studio = self.run_script("FL Studio 2025", info_title="MO Live Test automation ")
+        self.assertEqual(studio.saves, 1)
+        self.assertIn("v0.80 0.0dB", studio.names[9])
+        for other in ("", "Night Drive", "MO Live Test automation 2"):
+            studio = self.run_script("FL Studio 2025", info_title=other)
+            self.assertEqual((studio.saves, studio.names, studio.volumes), (0, {}, {}), other)
 
     def test_reads_the_project_name_from_the_title_as_the_app_does(self):
         script = fake_fl.compile_script(fake_fl.night_drive())

@@ -11,8 +11,11 @@
 //!   with the same notes played harder are two rows (`sound`), which share the C# app's note `hash` (timing and keys
 //!   only), by which the page groups copies and your corrections hold.
 //! - `parts`: where each set of notes was found and what its names say: one row per part per file.
-//! - `harmony`: the key and chords `mo-harmony` reads from a set of notes, with the version that read them, so they're
-//!   read again when it gets better (rule 7). Empty until `mo-harmony`'s key finder lands.
+//! - `keys`: `mo-harmony`'s key reading of each set of notes (8 bytes, [`KeyFact`]), with what read it
+//!   ([`keys::VERSION`]) and how (the kind the notes were heard as, and whether they're a piece cut from a longer
+//!   stretch), so it's read again from the stored notes, without opening any file, when the finder gets better or the
+//!   kind changes (rule 7). It's per set of notes, velocities and all: a stray soft touch isn't heard. A table of its
+//!   own, so the list reads it without going past the notes, and finding what to read again is one index lookup.
 //! - `your_roles`, `your_octaves`: what you said about a set of notes in the Rust app. Until the Rust MIDI page is
 //!   trusted, the C# app's `midi.db` is still where you correct parts day to day, so its two tables are read live
 //!   (read-only) and only corrections made in the Rust app are kept here, winning over the C# ones (a row with no value
@@ -31,9 +34,11 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use crate::analyser;
 use crate::extract::Found;
-use crate::index::{Key, MidiError, Source, SourceKind, StoredPhrase};
+use crate::index::{MidiError, Source, SourceKind, StoredPhrase};
+use crate::keys;
 use crate::member::PhraseMember;
 use crate::roles::Role;
+use mo_harmony::KeyFact;
 
 /// Marks a file as `midi-index.db` ("MOMI"), so the C# `midi.db` or another app's database is never taken for it.
 const APPLICATION_ID: i64 = 0x4D4F_4D49;
@@ -59,7 +64,7 @@ const SCHEMA: &str = "
         lowest INTEGER NOT NULL,
         highest INTEGER NOT NULL,
         chroma BLOB NOT NULL,           -- 12 bytes, the strongest 255
-        features BLOB NOT NULL,         -- 48 bytes, 0 to 1 as 0 to 255
+        features BLOB NOT NULL,         -- 48 bytes, 0 to 1 as 0 to 255; the scale counts from the key
         data BLOB NOT NULL              -- last, so the list reads the small facts without the notes (NOTE_BYTES each)
     );
     CREATE INDEX IF NOT EXISTS ix_notes_hash ON notes(hash);
@@ -78,18 +83,57 @@ const SCHEMA: &str = "
     );
     CREATE INDEX IF NOT EXISTS ix_parts_file ON parts(file);
     CREATE INDEX IF NOT EXISTS ix_parts_notes ON parts(notes);
-    CREATE TABLE IF NOT EXISTS harmony (
-        hash TEXT PRIMARY KEY,          -- the note hash: velocities don't change the harmony
-        version INTEGER NOT NULL,       -- mo-harmony's version that read it
-        key_tonic INTEGER,              -- 0 to 11, or NULL for no clear key
-        key_mode INTEGER,               -- 0 major, 1 minor, NULL unclear
-        confidence REAL,
-        chords BLOB
-    ) WITHOUT ROWID;
+    CREATE TABLE IF NOT EXISTS keys (
+        notes INTEGER PRIMARY KEY REFERENCES notes(id) ON DELETE CASCADE,
+        version INTEGER NOT NULL,       -- keys::VERSION that read it; 0 not read yet
+        role INTEGER NOT NULL,          -- the kind the notes were heard as (Role::code)
+        cut INTEGER NOT NULL,           -- 1 for a piece cut from a longer stretch, heard as a window
+        fact BLOB                       -- mo-harmony's KeyFact (8 bytes); NULL for drums or no pitched notes
+    );
+    CREATE INDEX IF NOT EXISTS ix_keys_version ON keys(version);
     -- NULL: back to the app's guess (which wins over the C# app's correction too).
     CREATE TABLE IF NOT EXISTS your_roles (hash TEXT PRIMARY KEY, role INTEGER) WITHOUT ROWID;
     CREATE TABLE IF NOT EXISTS your_octaves (hash TEXT PRIMARY KEY, octaves INTEGER) WITHOUT ROWID;
 ";
+
+/// The tables' layout this app makes (`PRAGMA user_version`).
+const LAYOUT: i64 = 1;
+
+/// Brings an index made by an older Rust app up to this one's tables, only adding: sets of notes saved before keys were
+/// read get a `keys` row saying "not read yet", so the next run reads them. One transaction, so a crash leaves it as it
+/// was, and two apps opening it at once do it once.
+fn upgrade(conn: &Connection) -> rusqlite::Result<()> {
+    let layout: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    if layout >= LAYOUT {
+        return Ok(());
+    }
+    conn.execute_batch(&format!(
+        "BEGIN IMMEDIATE;
+         INSERT OR IGNORE INTO keys (notes, version, role, cut, fact) SELECT id, 0, {other}, 0, NULL FROM notes;
+         PRAGMA user_version = {LAYOUT};
+         COMMIT;",
+        other = Role::Other.code()
+    ))
+}
+
+/// A set of notes whose key is to be read again ([`MidiStore::stale_keys`]).
+#[derive(Clone, Debug)]
+pub struct StaleKey {
+    pub notes_id: i64,
+    /// The kind the newest part holding them gives them.
+    pub role: Role,
+    pub cut: bool,
+    pub notes: Vec<NoteEvent>,
+}
+
+/// A key read again, to keep ([`MidiStore::save_keys`]).
+#[derive(Clone, Debug)]
+pub struct ReadKey {
+    pub notes_id: i64,
+    pub role: Role,
+    pub fact: Option<KeyFact>,
+    pub features: [f32; analyser::FEATURE_COUNT],
+}
 
 /// Bytes a note takes in `notes.data`: start and length (i32), key, velocity (u16), attribute kind and data (u16),
 /// little-endian.
@@ -149,6 +193,8 @@ pub struct Stamp {
 pub struct MidiStore {
     conn: Connection,
     path: PathBuf,
+    /// Whether the index has its `keys` table (always, once the indexer has opened it).
+    has_keys: bool,
 }
 
 impl MidiStore {
@@ -176,7 +222,8 @@ impl MidiStore {
         }
         conn.pragma_update(None, "application_id", APPLICATION_ID).map_err(|e| open_error(e.to_string()))?;
         conn.execute_batch(SCHEMA).map_err(|e| open_error(e.to_string()))?;
-        Ok(MidiStore { conn, path: path.to_owned() })
+        upgrade(&conn).map_err(|e| open_error(e.to_string()))?;
+        Ok(MidiStore { conn, path: path.to_owned(), has_keys: true })
     }
 
     /// Opens the index for reading only, for the page: it must already exist.
@@ -191,7 +238,11 @@ impl MidiStore {
         if id != APPLICATION_ID {
             return Err(open_error("it isn't the Rust app's MIDI index".into()));
         }
-        Ok(MidiStore { conn, path: path.to_owned() })
+        // An index made before keys were read (until the indexer next opens it): listed without keys.
+        let has_keys = conn
+            .query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'keys'", [], |r| r.get(0))
+            .map_err(|e| open_error(e.to_string()))?;
+        Ok(MidiStore { conn, path: path.to_owned(), has_keys })
     }
 
     pub fn path(&self) -> &Path {
@@ -244,6 +295,10 @@ impl MidiStore {
                      chroma = ?7, features = ?8
                  RETURNING id",
             )?;
+            let mut key = tx.prepare_cached(
+                "INSERT INTO keys (notes, version, role, cut, fact) VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(notes) DO UPDATE SET version = ?2, role = ?3, cut = ?4, fact = ?5",
+            )?;
             let mut part = tx.prepare_cached(
                 "INSERT INTO parts (file, notes, part, clip, role, why, drums, program, track_name, members)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
@@ -283,6 +338,13 @@ impl MidiStore {
                                 ],
                                 |r| r.get(0),
                             )?;
+                            key.execute(params![
+                                notes,
+                                keys::VERSION,
+                                a.role.code(),
+                                p.cut,
+                                a.key_fact.map(|f| f.0.to_vec())
+                            ])?;
                             let members = (!p.members.is_empty()).then(|| PhraseMember::encode(&p.members));
                             part.execute(params![
                                 id,
@@ -320,12 +382,60 @@ impl MidiStore {
         Ok(n)
     }
 
-    /// Drops notes no file has any more, and harmony read from them: once at the end of each run, not with every batch.
+    /// How many sets of notes have a key to read again.
+    pub fn stale_key_count(&self) -> Result<usize, MidiError> {
+        let n: i64 =
+            self.conn.query_row("SELECT COUNT(*) FROM keys WHERE version < ?1", [keys::VERSION], |r| r.get(0))?;
+        Ok(n.max(0) as usize)
+    }
+
+    /// Sets of notes whose key is to be read again (an older key finder read it, or the kind it was heard as has
+    /// changed), up to `limit`: each with the kind the newest part holding it gives it now, whether it's a cut piece,
+    /// and its notes.
+    pub fn stale_keys(&self, limit: usize) -> Result<Vec<StaleKey>, MidiError> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT k.notes, k.cut, n.data,
+                    (SELECT p.role FROM parts p WHERE p.notes = k.notes ORDER BY p.id DESC LIMIT 1)
+             FROM keys k JOIN notes n ON n.id = k.notes WHERE k.version < ?1 LIMIT ?2",
+        )?;
+        let rows = st.query_map(params![keys::VERSION, limit as i64], |r| {
+            Ok(StaleKey {
+                notes_id: r.get(0)?,
+                cut: r.get(1)?,
+                notes: decode_notes(&r.get::<_, Vec<u8>>(2)?),
+                role: r.get::<_, Option<i64>>(3)?.map_or(Role::Other, Role::from_code),
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Keeps keys read again ([`crate::keys::reread`]) with the "more like this" numbers that count from them.
+    pub fn save_keys(&mut self, read: &[ReadKey]) -> Result<(), MidiError> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut key = tx.prepare_cached("UPDATE keys SET version = ?2, role = ?3, fact = ?4 WHERE notes = ?1")?;
+            let mut features = tx.prepare_cached("UPDATE notes SET features = ?2 WHERE id = ?1")?;
+            for k in read {
+                key.execute(params![k.notes_id, keys::VERSION, k.role.code(), k.fact.map(|f| f.0.to_vec())])?;
+                features.execute(params![k.notes_id, analyser::bytes(&k.features, false)])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Drops notes no file has any more: once at the end of each run, not with every batch.
     pub fn tidy(&mut self) -> Result<usize, MidiError> {
         let tx = self.conn.transaction()?;
         let n =
             tx.execute("DELETE FROM notes WHERE NOT EXISTS (SELECT 1 FROM parts p WHERE p.notes = notes.id)", [])?;
-        tx.execute("DELETE FROM harmony WHERE NOT EXISTS (SELECT 1 FROM notes n WHERE n.hash = harmony.hash)", [])?;
+        // A key heard as a kind no part gives those notes any more (the file that did was forgotten, or read again
+        // as another kind) is read again.
+        tx.execute(
+            "UPDATE keys SET version = 0 WHERE version > 0
+                 AND NOT EXISTS (SELECT 1 FROM parts p WHERE p.notes = keys.notes AND p.role = keys.role)",
+            [],
+        )?;
         tx.commit()?;
         Ok(n)
     }
@@ -353,16 +463,17 @@ impl MidiStore {
         cs_roles: &HashMap<String, Role>,
         cs_octaves: &HashMap<String, i32>,
     ) -> Result<Vec<StoredPhrase>, MidiError> {
-        let mut st = self.conn.prepare(
+        let (key_fact, keys_join) =
+            if self.has_keys { ("k.fact", "LEFT JOIN keys k ON k.notes = n.id") } else { ("NULL", "") };
+        let mut st = self.conn.prepare(&format!(
             "SELECT p.id, f.id, f.path, f.kind, f.mtime, f.size, p.part, p.clip, p.role, p.why, y.role, n.hash,
                     n.count, n.bars, n.lowest, n.highest, n.chroma, n.features, p.members, o.octaves, p.program,
-                    p.drums, p.track_name, h.key_tonic, h.key_mode, h.confidence, y.hash IS NOT NULL,
-                    o.hash IS NOT NULL
+                    p.drums, p.track_name, {key_fact}, y.hash IS NOT NULL, o.hash IS NOT NULL
              FROM parts p JOIN files f ON f.id = p.file JOIN notes n ON n.id = p.notes
                   LEFT JOIN your_roles y ON y.hash = n.hash LEFT JOIN your_octaves o ON o.hash = n.hash
-                  LEFT JOIN harmony h ON h.hash = n.hash
-             ORDER BY f.mtime DESC, p.id",
-        )?;
+                  {keys_join}
+             ORDER BY f.mtime DESC, p.id"
+        ))?;
         let mut rows = st.query([])?;
         // One shared copy of each file's facts.
         let mut sources: HashMap<i64, Arc<Source>> = HashMap::new();
@@ -392,21 +503,14 @@ impl MidiStore {
             for (to, from) in chroma.iter_mut().zip(r.get::<_, Vec<u8>>(16)?) {
                 *to = from;
             }
-            let key = match (r.get::<_, Option<i64>>(23)?, r.get::<_, Option<i64>>(24)?) {
-                (Some(tonic), Some(mode)) => Some(Key {
-                    tonic: tonic.rem_euclid(12) as u8,
-                    minor: mode == 1,
-                    confidence: r.get::<_, Option<f64>>(25)?.unwrap_or(0.0),
-                }),
-                _ => None,
-            };
+            let key_fact = r.get::<_, Option<Vec<u8>>>(23)?.and_then(|b| <[u8; 8]>::try_from(b).ok()).map(KeyFact);
             // A Rust row (even one saying "back to the guess") wins; with none, the C# app's correction counts.
-            let your_role = if r.get::<_, bool>(26)? {
+            let your_role = if r.get::<_, bool>(24)? {
                 r.get::<_, Option<i64>>(10)?.map(Role::from_code)
             } else {
                 cs_roles.get(&hash).copied()
             };
-            let your_octave = if r.get::<_, bool>(27)? {
+            let your_octave = if r.get::<_, bool>(25)? {
                 r.get::<_, Option<i64>>(19)?.map(|o| o.clamp(-10, 10) as i32)
             } else {
                 cs_octaves.get(&hash).copied()
@@ -423,7 +527,8 @@ impl MidiStore {
                 notes: r.get::<_, i64>(12)?.clamp(0, i64::from(i32::MAX)) as i32,
                 lowest: r.get::<_, i64>(14)?.clamp(0, 255) as u8,
                 highest: r.get::<_, i64>(15)?.clamp(0, 255) as u8,
-                key,
+                key: key_fact.as_ref().and_then(keys::sure_key),
+                key_fact,
                 chroma,
                 // The chords come with mo-harmony's chord reader.
                 chords: Vec::new(),
