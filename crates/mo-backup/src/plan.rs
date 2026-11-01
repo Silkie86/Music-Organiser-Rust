@@ -224,7 +224,8 @@ pub fn milestones(saves: &[SongSave], more: &[String]) -> HashSet<String> {
 pub struct SaveShape {
     pub path: String,
     pub modified: chrono::NaiveDateTime,
-    pub tracks: u32,
+    /// How many tracks or channels it has, when the reader knows.
+    pub tracks: Option<u32>,
     pub plugins: u32,
     pub samples: u32,
     /// How long the arrangement runs, in beats, when the reader knows.
@@ -251,20 +252,22 @@ pub fn big_changes(shapes: &[SaveShape]) -> Vec<String> {
     for pair in ordered.windows(2) {
         let (before, after) = (pair[0], pair[1]);
         let grew = |a: u32, b: u32, step: u32| b >= a.saturating_add(step);
+        // Tracks only count when both saves say how many.
+        let tracks_grew = |a: Option<u32>, b: Option<u32>| matches!((a, b), (Some(a), Some(b)) if grew(a, b, BIG_STEP));
         let length = match (before.length_beats, after.length_beats) {
             (Some(a), Some(b)) => Some((a, b)),
             _ => None,
         };
         let longer = length.is_some_and(|(a, b)| b - a >= BIG_LENGTH_BEATS && b - a >= a * BIG_LENGTH_SHARE);
         let shorter = length.is_some_and(|(a, b)| a - b >= BIG_LENGTH_BEATS && a - b >= a * BIG_LENGTH_SHARE);
-        if grew(before.tracks, after.tracks, BIG_STEP)
+        if tracks_grew(before.tracks, after.tracks)
             || grew(before.plugins, after.plugins, BIG_STEP)
             || grew(before.samples, after.samples, BIG_SAMPLE_STEP)
             || longer
         {
             out.push(after.path.clone());
         }
-        if grew(after.tracks, before.tracks, BIG_STEP)
+        if tracks_grew(after.tracks, before.tracks)
             || grew(after.plugins, before.plugins, BIG_STEP)
             || grew(after.samples, before.samples, BIG_SAMPLE_STEP)
             || shorter
