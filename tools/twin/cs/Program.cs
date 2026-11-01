@@ -69,13 +69,15 @@ var similar = args is ["--similar"];
 // `twin-cs --rediscover`: each file is a made-up sound library (for Rediscover and kits) made by tools/twin/src/rediscover.rs; it's saved to a new
 // sounds.db beside it (which the Rust side then reads) and Rediscover is asked the case's questions.
 var rediscover = args is ["--rediscover"];
+// `twin-cs --galaxy`: each file is a galaxy case (vectors, and the sounds new since the map) made by tools/twin/src/galaxy.rs.
+var galaxy = args is ["--galaxy"];
 var output = Console.OpenStandardOutput();
 var gate = new object();
 Parallel.ForEach(files, file =>
 {
     string json;
     // One odd value (JSON has no NaN) loses that file's reading, not the whole run.
-    try { json = (sounds ? DumpSound(file) : classify ? DumpClassify(file) : similar ? DumpSimilar(file) : rediscover ? DumpRediscover(file) : Dump(file)).ToJsonString(); }
+    try { json = (sounds ? DumpSound(file) : classify ? DumpClassify(file) : similar ? DumpSimilar(file) : rediscover ? DumpRediscover(file) : galaxy ? DumpGalaxy(file) : Dump(file)).ToJsonString(); }
     catch (Exception e) { json = new JsonObject { ["file"] = file, ["error_more"] = $"couldn't write it: {e.Message}" }.ToJsonString(); }
     var bytes = System.Text.Encoding.UTF8.GetBytes(json + "\n");
     lock (gate) output.Write(bytes);
@@ -162,6 +164,63 @@ static JsonObject DumpSimilar(string path)
     }
     catch (Exception e) { o["error"] = $"{e.GetType().Name}: {e.Message}"; }
     return o;
+}
+
+// The galaxy laid out from a case's vectors (the sounds not marked new), then the new sounds placed on it.
+static JsonObject DumpGalaxy(string path)
+{
+    var o = new JsonObject { ["file"] = path };
+    try
+    {
+        var c = JsonNode.Parse(File.ReadAllText(path))!;
+        var vectors = new Dictionary<long, float[]>();
+        foreach (var e in c["Vectors"]!.AsArray())
+            vectors[e![0]!.GetValue<long>()] = e[1]!.AsArray().Select(n => n!.GetValue<float>()).ToArray();
+        var isNew = c["New"]!.AsArray().Select(n => n!.GetValue<long>()).ToHashSet();
+        var old = vectors.Where(kv => !isNew.Contains(kv.Key)).ToDictionary(kv => kv.Key, kv => kv.Value);
+        static JsonArray Points(IReadOnlyDictionary<long, MusicOrganiser.Core.Sounds.StarPoint> map) =>
+            new(map.OrderBy(kv => kv.Key).Select(kv => (JsonNode)new JsonArray(kv.Key, kv.Value.X, kv.Value.Y)).ToArray());
+        var map = MusicOrganiser.Core.Sounds.GalaxyMap.Layout(old);
+        o["map"] = Points(map);
+        o["placed"] = Points(MusicOrganiser.Core.Sounds.GalaxyMap.PlaceNew(vectors, map));
+        if (c["Steps"]?.GetValue<bool>() == true) o["steps"] = GalaxySteps(old);
+    }
+    catch (Exception e) { o["error"] = $"{e.GetType().Name}: {e.Message}"; }
+    return o;
+}
+
+// The steps of a layout (private to GalaxyMap, so a change there shows up here): each sound's squashed fingerprint,
+// the starting picture, the sound-alikes, the weighed pairs, and the next number the random sequence would give.
+static JsonObject GalaxySteps(Dictionary<long, float[]> vectors)
+{
+    var t = typeof(MusicOrganiser.Core.Sounds.GalaxyMap);
+    const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static;
+    object Call(string name, params object[] args) =>
+        (t.GetMethod(name, flags) ?? throw new InvalidOperationException($"GalaxyMap.{name} is gone")).Invoke(null, args)!;
+    var ids = vectors.Keys.Distinct().Order().ToArray();
+    var rng = new Random(42);
+    var pca = (System.Runtime.CompilerServices.ITuple)Call("Pca", ids, (Func<long, float[]>)(id => vectors[id]), rng, CancellationToken.None);
+    var reduced = (float[][])pca[0]!;
+    var init = (double[])pca[1]!;
+    var nb = (System.Runtime.CompilerServices.ITuple)Call("ExactNeighbours", reduced, Math.Min(15, ids.Length - 1), CancellationToken.None);
+    var nbr = (int[][])nb[0]!;
+    var dist = (float[][])nb[1]!;
+    var edges = new JsonArray();
+    foreach (var e in (Array)Call("Edges", nbr, dist))
+    {
+        var et = e!.GetType();
+        edges.Add(new JsonArray((int)et.GetProperty("I")!.GetValue(e)!, (int)et.GetProperty("J")!.GetValue(e)!, (float)et.GetProperty("W")!.GetValue(e)!));
+    }
+    static JsonArray Rows<T>(IEnumerable<T[]> rows) => new(rows.Select(r => (JsonNode)new JsonArray(r.Select(x => JsonValue.Create(x)).ToArray())).ToArray());
+    return new JsonObject
+    {
+        ["Reduced"] = Rows(reduced),
+        ["Init"] = new JsonArray(init.Select(x => (JsonNode)JsonValue.Create(x)).ToArray()),
+        ["Nbr"] = Rows(nbr),
+        ["Dist"] = Rows(dist),
+        ["Edges"] = edges,
+        ["Next"] = rng.Next(),
+    };
 }
 
 // A made-up library saved by the C# app's own sound library to a new sounds.db, read back by SoundOrganiser with the

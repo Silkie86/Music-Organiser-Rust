@@ -22,6 +22,7 @@ pub mod classify;
 mod db;
 mod dotnet_random;
 pub mod duplicates;
+pub mod galaxy;
 pub mod index;
 pub mod kits;
 pub mod learn;
