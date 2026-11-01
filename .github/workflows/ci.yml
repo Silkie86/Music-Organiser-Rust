@@ -173,3 +173,24 @@ jobs:
       # The sound analysers: test sounds made by the twin tool (none is anyone's sample), analysed by both apps.
       - name: Both apps analyse the test sounds
         run: cargo run -p mo-twin -- sounds --cs "$RUNNER_TEMP/twin-cs/twin-cs.dll" "$RUNNER_TEMP"
+
+  # The scripts that run inside the DAWs (rule 11: plain ASCII; tests never reach a real DAW). Cheap, so always run.
+  daw-scripts:
+    name: DAW scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: FL Studio link parses as FL Studio's Python 3.9 and passes its tests
+        run: |
+          python -c "import ast, sys; ast.parse(open(sys.argv[1], encoding='utf-8').read(), feature_version=(3, 9))" extensions/fl-studio/device_MusicOrganiser.py
+          python -m unittest discover -s extensions/fl-studio/test -v
+      - name: Bitwig scripts parse and are plain ASCII
+        run: |
+          for f in tools/formatlab/daw/bitwig/*.js; do node --check "$f"; done
+          # grep finds nothing (1) is the pass; a missing file (2) fails too.
+          set +e
+          LC_ALL=C grep -nP '[^\x00-\x7F]' tools/formatlab/daw/bitwig/*.js extensions/fl-studio/device_MusicOrganiser.py
+          test $? -eq 1

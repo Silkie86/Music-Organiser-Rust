@@ -48,3 +48,5 @@ Thumbs.db
 # What the C# helpers build
 **/cs/bin/
 **/cs/obj/
+__pycache__/
+*.pyc
