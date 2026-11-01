@@ -6,7 +6,8 @@
 //! will start from them and learn the rest from labelled music, keeping every rule [`Weights::check`] lists, so no
 //! explanation can ever show a chord's own note counting against it.
 
-use super::cores::Core;
+use super::candidates::Label;
+use super::cores::{Core, Group};
 use super::score::{Feature, PerFeature};
 
 /// What each piece of evidence is worth ([`Feature`]), the trust in the pair term, and what a stretch read as no chord
@@ -129,23 +130,32 @@ impl Weights {
     }
 }
 
-/// How many cores the tables count.
+/// How many cores the tables count, and how many groups of them the pair term tells apart ([`Group`]).
 const CORES: usize = Core::ALL.len();
+const GROUPS: usize = Group::ALL.len();
 
-/// The counted tables the template priors read: how often each core is the chord (f_core), and how often each of its
-/// tensions is played with it (f_ten). The reader's are counted from labelled music ([`COUNTED`](super::COUNTED));
-/// [`EVEN`] holds the tables before counting.
+/// The counted tables the priors read: how often each core is the chord (f_core), how often each of its tensions is
+/// played with it (f_ten), and how chords move from one to the next (f_motion). The reader's are counted from labelled
+/// music ([`COUNTED`](super::COUNTED)); [`EVEN`] holds the tables before counting.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Tables {
     /// For each core (in [`Core::ALL`]'s order), the share of chords that are it.
     pub core: [f64; CORES],
     /// For each core, and each interval above its root, the share of its chords that play that tension.
     pub tension: [[f64; 12]; CORES],
+    /// For each group of the chord before ([`Group::ALL`]'s order), how often the next chord's root lies each
+    /// interval above its root, with the next chord in each group: each group's 36 shares add up to 1.
+    pub motion: [[[f64; GROUPS]; 12]; GROUPS],
 }
 
-/// The tables before counting: every core as likely as any other, and each tension played half the time. P1 is then
-/// the same for every reading; P2 costs ln 2 for each tension the core can carry, heard or not.
-pub const EVEN: Tables = Tables { core: [1.0 / CORES as f64; CORES], tension: [[0.5; 12]; CORES] };
+/// The tables before counting: every core as likely as any other, each tension played half the time, and every way
+/// to move on as likely as any other. P1 is then the same for every reading; P2 costs ln 2 for each tension the core
+/// can carry, heard or not; and P3 costs ln 36 for every change of chord.
+pub const EVEN: Tables = Tables {
+    core: [1.0 / CORES as f64; CORES],
+    tension: [[0.5; 12]; CORES],
+    motion: [[[1.0 / Group::MOVES as f64; GROUPS]; 12]; GROUPS],
+};
 
 /// The least share a prior reads, and 1 less it the most: a core or a tension never counted (or always played) still
 /// costs a finite amount, so no score is ever infinite and a trust of 0 always leaves the prior out.
@@ -169,5 +179,18 @@ impl Tables {
         let row = self.tension.get(core.index());
         let f = row.and_then(|row| row.get(usize::from(interval))).copied().unwrap_or(0.5);
         ln_share(if heard { f } else { 1.0 - f })
+    }
+
+    /// What the pair term reads for a chord moving on from `from` to `to`: ln f_motion, by the interval its root moves
+    /// up and the groups of the two ([`Group`]). The same label again is no move but the chord held on, past the
+    /// longest stretch the reader reads at once: 0, as the tables count only changes of chord.
+    pub fn pair_prior(&self, from: Label, to: Label) -> f64 {
+        if from == to {
+            return 0.0;
+        }
+        let row = self.motion.get(from.core.group().index());
+        let cell = row.and_then(|row| row.get(usize::from(to.root.above(from.root))));
+        let share = cell.and_then(|cell| cell.get(to.core.group().index())).copied();
+        ln_share(share.unwrap_or(1.0 / Group::MOVES as f64))
     }
 }

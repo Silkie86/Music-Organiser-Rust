@@ -16,9 +16,9 @@
 //! - the readings worth scoring for a stretch of music ([`candidates()`]): each a root and a core ([`Label`]);
 //! - the evidence for and against each reading of a stretch ([`Feature`], worked out by [`Evidence`] into
 //!   [`SpanFacts`]), weighed by hand-set weights ([`HAND`]) and ranked, best first ([`SpanFacts::rank`]);
-//! - the tables the two template priors read (how often each kind of chord is the labelled one, and how often its
-//!   labels name each tension), counted from POP909-CL's and the Billboard charts' labels by `theorybench tables`
-//!   ([`COUNTED`]).
+//! - the tables the priors read (how often each kind of chord is the labelled one, how often its labels name each
+//!   tension, and how chords move from one to the next), counted from POP909-CL's and the Billboard charts' labels by
+//!   `theorybench tables` ([`COUNTED`]).
 
 mod candidates;
 mod cores;
@@ -34,7 +34,7 @@ mod tables;
 mod weights;
 
 pub use candidates::{Candidate, Label, Route, allowed, candidates, escape, open_fifth};
-pub use cores::{Core, CoreSet, ToneClass, valid, valid_rootless};
+pub use cores::{Core, CoreSet, Group, ToneClass, valid, valid_rootless};
 pub use hear::{
     BASS_GAP, BassTexture, HeardNote, Hearing, Level, Line, MOST_UNITS, Mass, Push, Shape, Shaped, Stream, Unit,
     heard_in, presence_of,

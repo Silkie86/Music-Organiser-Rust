@@ -305,9 +305,10 @@ label also takes a maj7 or 6, and so on, as in **lenient** above).
 
 ### The chord reader's counted tables
 
-The chord reader's two template priors read counted tables (harmony/design/chord-reader-design.md, P1 and P2): how
-often each kind of chord is the labelled one (f_core), and how often a chord of each kind names each tension it can
-carry (f_ten). `tables` counts them from the labels alone, never from what a reader hears:
+The chord reader's priors read counted tables (harmony/design/chord-reader-design.md, P1 to P3): how often each kind
+of chord is the labelled one (f_core), how often a chord of each kind names each tension it can carry (f_ten), and how
+the labelled chords move from one to the next (f_motion). `tables` counts them from the labels alone, never from what a
+reader hears:
 
 ```
 cargo run -p mo-theorybench --release -- tables path/to/bench/pop909cl.jsonl path/to/bench/billboard.jsonl --write crates/mo-harmony/src/chordread/tables.rs
@@ -316,6 +317,13 @@ cargo run -p mo-theorybench --release -- tables path/to/bench/pop909cl.jsonl pat
 - **In beats**, on folds 1 to 4 of the pieces whose licence lets numbers ship (fold 0 stays kept back, drawn as keyfit
   draws it). Each source counts as much as any other (its beats scaled to the sources' mean), and half a beat is
   added to each cell, so nothing is ever impossible.
+- **f_motion in changes of chord**: a label read as another root or core than the one before it (C to C/E, or G7 to
+  G9, is no change), counted by how far its root moves up and by the group of each chord (a dominant 7 or 7sus4; a
+  diminished or augmented chord, whose altered fifth says which it is: dim, m7b5, dim7, +; or any other). No chord, a
+  label that can't be read, or one that lasts no time, breaks the line. Only the sources whose labels name every kind
+  of chord count: one that can't name a 6 or a 7sus4 reads C to C6 as no change, and G7sus4 to C as G7 or Gsus4 to C.
+  Each source counts as much as any other (its changes scaled to the sources' mean), half a change is added to each
+  cell, and each group's 36 shares add up to 1.
 - **A source counts only for what its labels can say.** Each kind of chord is counted from the sources whose labels
   name it, and the shares are then scaled to add up to 1: POP909-CL has no 6, m6, 7sus4 or power chord, so it says
   nothing about how common they are. f_ten comes only from the sources whose labels name a 9 on at least 1% of their
@@ -480,6 +488,12 @@ open fifth. With no bass part, the chords' roots often aren't played at all: tha
   they came out at half that.
 - **f_ten, from Billboard's labels:** a 9 is named on 68% of 7sus4 chords, 23% of 6 chords, 20% of major 7s, 9.4% of
   minor 7s and 6.2% of dominant 7s (a ♯9 7.2%, a 13 3.7%, a ♭9 1.2%); a ♭13 on a minor 7 almost never (0.04%).
+- **f_motion, from Billboard's 53,491 changes** (POP909-CL's labels can't name a 6, m6, 7sus4 or power chord). Each
+  share is of the changes from one group, to a chord of the group named. Of the 6,232 from a dominant, 42.4% go up a
+  fourth to another chord (V to I) and 8.7% up a fourth to another dominant (a chain of dominants), while a tritone
+  sub falling a semitone is rare in this music (0.3%). Of the 331 from a diminished or augmented chord, 15.0% rise a
+  semitone to another chord and 8.5% fall one, against 1.6% of the other chords' changes rising a semitone. Of the
+  46,928 from any other chord, 21.4% go up a fourth to another such chord, 20.2% a fifth and 14.4% a tone.
 
 The reader trusts them a little, a beat: 0.2 for f_core and 0.06 for f_ten, where the design's hand cases' smallest lead
 is largest (0.26 a beat, against 0.10 trusting neither; `cargo test -p mo-harmony show_the_trusts -- --ignored
