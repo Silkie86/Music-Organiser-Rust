@@ -163,8 +163,6 @@ pub struct SoundActivity {
     pub older_sends: i32,
 }
 
-/// A file name without its extension, as .NET's `GetFileNameWithoutExtension` cuts it: everything before the last dot
-/// (so ".wav" alone gives "").
 /// The folder a file is in, as .NET's `GetDirectoryName` gives it: "D:\\" for a file at a drive's top, "/" at the top
 /// of a Mac or Linux disk, and "" for a drive's or disk's top itself (or a bare name). On Windows, `/` and `\\` are
 /// both separators; elsewhere too, since a library can hold paths from either.
@@ -182,6 +180,8 @@ pub(crate) fn directory(path: &str) -> &str {
     if is_drive(dir) { &path[..=i] } else { dir }
 }
 
+/// A file name without its extension, as .NET's `GetFileNameWithoutExtension` cuts it: everything before the last dot
+/// (so ".wav" alone gives "").
 pub(crate) fn stem(name: &str) -> &str {
     match name.rfind('.') {
         Some(i) => name.get(..i).unwrap_or(name),

@@ -95,3 +95,5 @@ save a made-up library to a new sounds.db, which the Rust app reads, and both an
 | A described vibe | Turned into a vector by deep listening's model inside the roll. | The caller passes the vector (the model lives in the app); not twin-checked. | Same |
 | Export | Copies straight over the pad's name. | Writes beside it (`.part`) and renames, so a stopped export leaves no half pad. | Better |
 | Names on Mac or Linux | Leaves characters only Windows forbids (`<>:"\|?*`). | Turns them into "-" everywhere, so a kit copied to Windows still opens. | Better |
+| Two exports of the same kit at once | Could share one folder. | Each makes its own folder, then fills it. | Better |
+| A copied pad | Not checked. | Checked to be whole and on the disk before it takes its name; a failed one is removed. | Better |

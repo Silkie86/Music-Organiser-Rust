@@ -58,7 +58,7 @@ pub struct FolderUse {
 }
 
 /// How many projects use a sound.
-fn used_in(usage: &HashMap<i64, Usage>, id: i64) -> u32 {
+pub(crate) fn used_in(usage: &HashMap<i64, Usage>, id: i64) -> u32 {
     usage.get(&id).map_or(0, |u| u.projects)
 }
 

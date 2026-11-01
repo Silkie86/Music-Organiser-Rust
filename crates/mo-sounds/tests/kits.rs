@@ -56,4 +56,11 @@ fn exports_copies_and_converted_pads_and_never_overwrites_a_kit() {
     // The first kit is untouched, and so are the samples.
     assert_eq!(fs::read(&first.pads[0]).unwrap(), fs::read(&kick).unwrap());
     assert!(kick.exists() && snare.exists());
+
+    // A pad whose sample has gone: the error names the sample, and no half pad is left.
+    let gone = [sound(1, &samples.join("Gone.wav"))];
+    let err =
+        export(&kit[..1], |id| gone.iter().find(|s| s.id == id), &out, "Gone", ExportOptions::default()).unwrap_err();
+    assert!(err.to_string().starts_with("Couldn't read the sample"), "{err}");
+    assert_eq!(fs::read_dir(out.join("Gone")).unwrap().count(), 0);
 }

@@ -75,11 +75,13 @@ pub fn default_drum_kit() -> Vec<KitSlot> {
     ]
 }
 
-/// The pack a sample belongs to: the folder two levels above it, or its own folder (as C#'s `KitBuilder.Pack`).
-pub fn pack(s: &Sound) -> &str {
+/// The pack a sample belongs to: the folder two levels above it, or its own folder (as C#'s `KitBuilder.Pack`; on
+/// Windows with `/` turned into `\`, as .NET does, so one pack spelt both ways is one).
+pub fn pack(s: &Sound) -> String {
     let dir = directory(&s.path);
     let parent = directory(dir);
-    if parent.is_empty() { dir } else { parent }
+    let p = if parent.is_empty() { dir } else { parent };
+    if cfg!(windows) { p.replace('/', "\\") } else { p.to_owned() }
 }
 
 fn is_loop(s: &Sound) -> bool {
@@ -99,36 +101,43 @@ pub fn roll(
     let mut rng = DotnetRandom::new(seed);
     let clap = index.clap.as_ref().filter(|_| index.deep);
     let vibe = o.vibe.as_deref().filter(|_| clap.is_some());
-    let visible: Vec<&Sound> = sounds.iter().filter(|s| !s.hidden).collect();
-    let by_id: HashMap<i64, &Sound> = visible.iter().map(|s| (s.id, *s)).collect();
-    let locked = |slot: &KitSlot| if slot.locked { slot.sound.and_then(|id| by_id.get(&id).copied()) } else { None };
+    // A locked pad keeps its sound whatever has happened to it since (hidden, or gone in a rescan), as in C#.
+    let is_locked = |slot: &KitSlot| slot.locked && slot.sound.is_some();
+    let locked_ids: Vec<i64> = slots.iter().filter(|s| is_locked(s)).filter_map(|s| s.sound).collect();
+    let locked_sound = |id: i64| sounds.iter().find(|s| s.id == id);
 
     // The pack everything should come from, when asked.
     let mut the_pack: Option<String> = None;
     if o.same_pack {
-        the_pack = slots.iter().find_map(&locked).map(|s| pack(s).to_owned());
+        the_pack = locked_ids.iter().find_map(|id| locked_sound(*id)).map(pack);
         if the_pack.is_none() {
+            let visible: Vec<&Sound> = sounds.iter().filter(|s| !s.hidden).collect();
             the_pack = pick_pack(&visible, slots, &mut rng);
         }
     }
 
-    let mut used: Vec<i64> = slots.iter().filter_map(&locked).map(|s| s.id).collect();
+    let mut used = locked_ids;
     for slot in slots.iter_mut() {
-        if locked(slot).is_some() {
+        if is_locked(slot) {
             continue;
         }
-        let mut candidates: Vec<&Sound> = visible
+        let candidates: Vec<(&Sound, Option<String>)> = sounds
             .iter()
             .filter(|s| {
-                s.analysis.is_some() && !is_loop(s) && slot.types.contains(&s.sound_type) && !used.contains(&s.id)
+                !s.hidden
+                    && s.analysis.is_some()
+                    && !is_loop(s)
+                    && slot.types.contains(&s.sound_type)
+                    && !used.contains(&s.id)
             })
-            .copied()
+            .map(|s| (s, the_pack.as_ref().map(|_| pack(s))))
             .collect();
-        if let Some(p) = &the_pack
-            && candidates.iter().any(|c| pack(c) == p)
-        {
-            candidates.retain(|c| pack(c) == p);
-        }
+        let candidates: Vec<&Sound> = match &the_pack {
+            Some(p) if candidates.iter().any(|(_, cp)| cp.as_ref() == Some(p)) => {
+                candidates.into_iter().filter(|(_, cp)| cp.as_ref() == Some(p)).map(|(c, _)| c).collect()
+            }
+            _ => candidates.into_iter().map(|(c, _)| c).collect(),
+        };
         if candidates.is_empty() {
             slot.sound = None;
             continue;
@@ -140,7 +149,7 @@ pub fn roll(
                 // Earlier types in the slot are the better fit (a "Clap" pad prefers claps over snares).
                 let at = slot.types.iter().position(|t| *t == c.sound_type).map_or(-1, |p| p as i64);
                 score -= at as f64 * 0.3;
-                let used_in = usage.get(&c.id).map_or(0, |u| u.projects);
+                let used_in = crate::rediscover::used_in(usage, c.id);
                 if o.prefer_unused {
                     score += if used_in == 0 { 0.4 } else { -0.1 * f64::from(used_in.min(5)) };
                 }
@@ -193,11 +202,11 @@ fn sample<'a>(scored: &[(&'a Sound, f64)], randomness: f64, rng: &mut DotnetRand
 /// A pack that can fill most of the kit's pads, picked at random.
 fn pick_pack(sounds: &[&Sound], slots: &[KitSlot], rng: &mut DotnetRandom) -> Option<String> {
     // Grouped in the order the packs are first met, as C#'s GroupBy.
-    let mut at: HashMap<&str, usize> = HashMap::new();
-    let mut groups: Vec<(&str, Vec<&Sound>)> = Vec::new();
+    let mut at: HashMap<String, usize> = HashMap::new();
+    let mut groups: Vec<(String, Vec<&Sound>)> = Vec::new();
     for s in sounds.iter().filter(|s| !is_loop(s)) {
         let p = pack(s);
-        let i = *at.entry(p).or_insert_with(|| {
+        let i = *at.entry(p.clone()).or_insert_with(|| {
             groups.push((p, Vec::new()));
             groups.len() - 1
         });
@@ -207,7 +216,7 @@ fn pick_pack(sounds: &[&Sound], slots: &[KitSlot], rng: &mut DotnetRandom) -> Op
     let packs: Vec<&str> = groups
         .iter()
         .filter(|(_, g)| slots.iter().filter(|sl| g.iter().any(|s| sl.types.contains(&s.sound_type))).count() >= need)
-        .map(|(p, _)| *p)
+        .map(|(p, _)| p.as_str())
         .collect();
     if packs.is_empty() {
         return None;
@@ -237,14 +246,20 @@ pub struct Exported {
 /// What stopped an export.
 #[derive(Debug)]
 pub enum ExportError {
+    /// A pad's sample couldn't be read (a drive not plugged in, a file moved).
+    Missing(PathBuf, std::io::Error),
     Io(PathBuf, std::io::Error),
+    /// A copy came out a different size from its sample.
+    Short(PathBuf),
     Audio(PathBuf, mo_audio::AudioError),
 }
 
 impl std::fmt::Display for ExportError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            ExportError::Missing(p, e) => write!(f, "Couldn't read the sample {}: {e}", p.display()),
             ExportError::Io(p, e) => write!(f, "Couldn't write {}: {e}", p.display()),
+            ExportError::Short(p) => write!(f, "{} didn't copy whole.", p.display()),
             ExportError::Audio(p, e) => write!(f, "Couldn't convert {}: {e}", p.display()),
         }
     }
@@ -264,13 +279,20 @@ pub fn export<'a>(
     o: ExportOptions,
 ) -> Result<Exported, ExportError> {
     let name = safe(kit_name);
+    std::fs::create_dir_all(parent).map_err(|e| ExportError::Io(parent.to_owned(), e))?;
+    // Made, not just looked for, so two exports at once never share a folder.
     let mut folder = parent.join(&name);
     let mut n = 2;
-    while folder.exists() {
-        folder = parent.join(format!("{name} ({n})"));
-        n += 1;
+    loop {
+        match std::fs::create_dir(&folder) {
+            Ok(()) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                folder = parent.join(format!("{name} ({n})"));
+                n += 1;
+            }
+            Err(e) => return Err(ExportError::Io(folder, e)),
+        }
     }
-    std::fs::create_dir_all(&folder).map_err(|e| ExportError::Io(folder.clone(), e))?;
     let mut pads = Vec::new();
     let mut lines = vec![kit_name.to_owned(), String::new()];
     let mut n = 0;
@@ -282,16 +304,19 @@ pub fn export<'a>(
         let target = if !o.elektron_ready && !o.mono && !o.normalise {
             let ext = from.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
             let target = folder.join(format!("{base}{ext}"));
-            let part = part_of(&target);
-            std::fs::copy(from, &part).map_err(|e| ExportError::Io(target.clone(), e))?;
-            std::fs::rename(&part, &target).map_err(|e| ExportError::Io(target.clone(), e))?;
+            copy_whole(from, &target)?;
             target
         } else {
             let audio = mo_audio::read(from, 600.0).map_err(|e| ExportError::Audio(from.to_owned(), e))?;
             let rate = if o.elektron_ready { 48_000 } else { audio.sample_rate };
-            let channels: Vec<Vec<f32>> = if o.mono { vec![audio.mono().into_owned()] } else { audio.channels.clone() };
-            let mut channels: Vec<Vec<f32>> =
-                channels.iter().map(|c| mo_audio::dsp::resample(c, audio.sample_rate, rate)).collect();
+            // Converted straight from the decoded audio (a long sample isn't copied more than it has to be).
+            let mut channels: Vec<Vec<f32>> = if o.mono {
+                vec![mo_audio::dsp::resample(&audio.mono(), audio.sample_rate, rate)]
+            } else if rate == audio.sample_rate {
+                audio.channels
+            } else {
+                audio.channels.iter().map(|c| mo_audio::dsp::resample(c, audio.sample_rate, rate)).collect()
+            };
             if o.normalise {
                 let peak = channels.iter().flat_map(|c| c.iter()).fold(0f32, |m, x| m.max(x.abs()));
                 if peak > 0.0 {
@@ -314,9 +339,33 @@ pub fn export<'a>(
     text.push_str(newline);
     let list = folder.join("kit.txt");
     let part = part_of(&list);
-    std::fs::write(&part, text).map_err(|e| ExportError::Io(list.clone(), e))?;
-    std::fs::rename(&part, &list).map_err(|e| ExportError::Io(list.clone(), e))?;
+    let written = std::fs::write(&part, text).and_then(|()| std::fs::rename(&part, &list));
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&part);
+        return Err(ExportError::Io(list, e));
+    }
     Ok(Exported { folder, pads })
+}
+
+/// Copies `from` to `to`: beside it first, checked to be the whole file and on the disk, then renamed. A copy that
+/// fails is removed, so no half pad is left behind.
+fn copy_whole(from: &Path, to: &Path) -> Result<(), ExportError> {
+    let size = std::fs::metadata(from).map_err(|e| ExportError::Missing(from.to_owned(), e))?.len();
+    let part = part_of(to);
+    let done = (|| {
+        std::fs::copy(from, &part).map_err(|e| ExportError::Io(to.to_owned(), e))?;
+        let file = std::fs::File::open(&part).map_err(|e| ExportError::Io(to.to_owned(), e))?;
+        file.sync_all().map_err(|e| ExportError::Io(to.to_owned(), e))?;
+        if file.metadata().map_err(|e| ExportError::Io(to.to_owned(), e))?.len() != size {
+            return Err(ExportError::Short(from.to_owned()));
+        }
+        drop(file);
+        std::fs::rename(&part, to).map_err(|e| ExportError::Io(to.to_owned(), e))
+    })();
+    if done.is_err() {
+        let _ = std::fs::remove_file(&part);
+    }
+    done
 }
 
 /// Where a file is written before it's renamed to `path`.
@@ -403,6 +452,14 @@ mod tests {
         roll(&sounds, &HashMap::new(), &SoundIndex::default(), &mut kit, &o);
         assert_eq!(kit[0].sound, Some(16));
         let by_id: HashMap<i64, &Sound> = sounds.iter().map(|s| (s.id, s)).collect();
+        for id in kit.iter().filter_map(|s| s.sound) {
+            assert_eq!(pack(by_id[&id]), "/s/Pack B", "{id}");
+        }
+        // A locked pad keeps its sound even once it's hidden.
+        let mut sounds = sounds.clone();
+        sounds[15].hidden = true;
+        roll(&sounds, &HashMap::new(), &SoundIndex::default(), &mut kit, &o);
+        assert_eq!(kit[0].sound, Some(16));
         for id in kit.iter().filter_map(|s| s.sound) {
             assert_eq!(pack(by_id[&id]), "/s/Pack B", "{id}");
         }
