@@ -18,7 +18,7 @@ use mo_formats::paths;
 // Moved to mo-formats with the presets; kept here under its old name.
 pub use mo_formats::presets::fxp_to_bank;
 
-use crate::plan::{AudioClip, Device, Lane, Plan, Role, SampleFile, Target, Track, TrackKind, TrackRef};
+use crate::plan::{AudioClip, Device, Lane, LanePoint, Plan, Role, SampleFile, Target, Track, TrackKind, TrackRef};
 
 const SAMPLER_ID: &str = "468bc14b-b2e7-45a1-9666-e83117fe404e";
 const NOTE_TRANSPOSE_ID: &str = "0815cd9e-3a31-4429-a268-dabd952a3b68";
@@ -82,10 +82,11 @@ pub fn write(plan: &Plan, template: &[u8]) -> Result<Converted, String> {
     }
 
     for lane in &plan.lanes {
-        let (track, devices) = match lane.track {
+        let (track, devices): (ObjId, &[Option<ObjId>]) = match lane.track {
             TrackRef::Master => (master, &master_devices),
+            // The transport has no devices.
             TrackRef::Song => match t.transport() {
-                Some(transport) => (transport, &master_devices),
+                Some(transport) => (transport, &[]),
                 None => {
                     for clip in &lane.clips {
                         w.notes.push(format!("{clip}: automation left out (the Bitwig template has no tempo setting)"));
@@ -99,12 +100,33 @@ pub fn write(plan: &Plan, template: &[u8]) -> Result<Converted, String> {
                 _ => continue,
             },
         };
-        if let Some(why) = t.add_lane(track, devices, lane) {
-            // FL's reader leaves an effect that's switched on and off switched on.
-            let on = if matches!(lane.target, Target::OnOff { .. }) { ", so the effect stays on" } else { "" };
-            for clip in &lane.clips {
-                w.notes.push(format!("{clip}: automation left out ({why}){on}"));
+        // Bitwig's tempo runs from 20 BPM; below it the lane stays at 20, from where FL's line crosses it.
+        let slowest = (lane.target == Target::Tempo).then(|| at_least(&lane.points, MIN_BPM));
+        let clamped = slowest.as_ref().is_some_and(|(_, clamped)| *clamped);
+        let raised;
+        let lane = match slowest {
+            Some((points, true)) => {
+                raised = Lane { points, ..lane.clone() };
+                &raised
             }
+            _ => lane,
+        };
+        match t.add_lane(track, devices, lane) {
+            Some(why) => {
+                // FL's reader leaves an effect that's switched on and off switched on.
+                let on = if matches!(lane.target, Target::OnOff { .. }) { ", so the effect stays on" } else { "" };
+                for clip in &lane.clips {
+                    w.notes.push(format!("{clip}: automation left out ({why}){on}"));
+                }
+            }
+            None if clamped => {
+                for clip in &lane.clips {
+                    w.notes.push(format!(
+                        "{clip}: Bitwig's tempo goes down to {MIN_BPM} BPM, so the slower part plays at {MIN_BPM} BPM"
+                    ));
+                }
+            }
+            None => {}
         }
     }
 
@@ -113,6 +135,28 @@ pub fn write(plan: &Plan, template: &[u8]) -> Result<Converted, String> {
     let mut seen = HashSet::new();
     let notes = w.notes.into_iter().filter(|n| seen.insert(n.clone())).collect();
     Ok(Converted { bytes, notes })
+}
+
+/// The slowest tempo Bitwig takes, in BPM.
+const MIN_BPM: f64 = 20.0;
+
+/// A lane's points kept at `min` or above, with a point put in where the straight line between two points crosses
+/// `min`; and whether any point was raised.
+fn at_least(points: &[LanePoint], min: f64) -> (Vec<LanePoint>, bool) {
+    let mut out: Vec<LanePoint> = Vec::with_capacity(points.len());
+    let mut last: Option<LanePoint> = None;
+    for &q in points {
+        if let Some(p) = last
+            && q.beat > p.beat + SAME_BEAT
+            && (p.value < min) != (q.value < min)
+        {
+            let part = (min - p.value) / (q.value - p.value);
+            out.push(LanePoint { beat: p.beat + (q.beat - p.beat) * part, value: min, ..q });
+        }
+        out.push(LanePoint { value: q.value.max(min), ..q });
+        last = Some(q);
+    }
+    (out, points.iter().any(|p| p.value < min))
 }
 
 struct Writing {
@@ -873,18 +917,16 @@ impl Template {
             .any(|lane| self.doc.field_obj(lane, 0x2a3).and_then(|t| self.doc.field_obj(t, 0x41)) == Some(setting))
     }
 
-    /// Where the song's tempo setting is (field 0x211, as Bitwig 6.1.6 saves it): the project's transport (field
-    /// 0x190), which holds the tempo lane too.
+    /// The project's transport (field 0x190), which holds the song's tempo setting (0x211) and its lane, as Bitwig
+    /// 6.1.6 saves them.
     fn transport(&self) -> Option<ObjId> {
-        let transport = self.doc.field_obj(self.doc.root?, 0x190)?;
-        self.doc.field_obj(transport, 0x211).map(|_| transport)
+        self.doc.field_obj(self.doc.root?, 0x190)
     }
 
     /// Gives a track the list its automation lanes go in (class 0xfa2, as Bitwig 6.1.6 saves one on every track and
     /// the master; 0xfa3 on the transport), before its mixer (or the transport's tempo) as Bitwig has it, for a
     /// template track that has none.
-    fn lane_list(&mut self, track: ObjId) -> ObjId {
-        let transport = self.doc.obj(track).has(0x211);
+    fn lane_list(&mut self, track: ObjId, transport: bool) -> ObjId {
         let mut list = Object::new(if transport { 0xfa3 } else { 0xfa2 });
         list.set(0x1832, Value::Null);
         list.set(0x4ba, Value::List(Vec::new()));
@@ -998,7 +1040,7 @@ impl Template {
         }
         let lanes = match lanes {
             Some(lanes) => lanes,
-            None => self.lane_list(track),
+            None => self.lane_list(track, lane.target == Target::Tempo),
         };
         let made = self.copy(pattern);
         let Some(target) = self.doc.field_obj(made, 0x2a3) else { return Some(NO_LANE) };

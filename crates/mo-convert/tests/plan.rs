@@ -348,13 +348,13 @@ fn where_two_clips_moving_a_setting_meet_the_lane_goes_on_from_the_one_starting_
 fn tempo_automation_is_a_song_lane_in_bpm_and_moved_faders_are_listed() {
     let mut bus = insert(3, "Bass", vec![]);
     bus.fader = Some(9000);
-    let tempo = automation("Tempo", None, FlControl::Tempo, &[(0.0, 0.5), (4.0, 0.0)]);
+    let tempo = automation("Tempo", None, FlControl::Tempo, &[(8.0, 0.5), (12.0, 0.0)]);
     let p = plan(&song(vec![channel(0, "Bass", Some(plugin("Bass", "VST2", "1")), "", 3)], vec![bus], vec![tempo]));
     assert_eq!(p.lanes.len(), 1);
     assert_eq!((p.lanes[0].track, &p.lanes[0].target), (TrackRef::Song, &Target::Tempo));
-    // 0.5 is 266 BPM in FL; 0 would be 10 BPM, below Bitwig's 20.
-    assert_eq!(p.lanes[0].points.iter().map(|x| x.value).collect::<Vec<_>>(), [266.0, 20.0]);
-    assert!(p.notes.iter().any(|n| n.starts_with("Tempo: Bitwig's tempo goes down to 20 BPM")), "{:?}", p.notes);
+    // Until the clip starts at beat 8 the song keeps the project's 120 BPM; then 0.5 is 266 BPM and 0 is 10 BPM.
+    let points: Vec<_> = p.lanes[0].points.iter().map(|x| (x.beat, x.value)).collect();
+    assert_eq!(points, [(0.0, 120.0), (8.0, 120.0), (8.0, 266.0), (12.0, 10.0)]);
     assert!(p.notes.iter().any(|n| n.starts_with("Mixer: the fader or pan of Bass (insert 3)")));
 }
 

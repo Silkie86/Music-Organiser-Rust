@@ -488,13 +488,13 @@ fn tempo_automation_is_the_transports_tempo_lane_in_bpm() {
     assert_eq!(doc.field_obj(target, 0x41), Some(tempo));
     assert_eq!(doc.obj(target).str(0x133b), "Transport");
     assert_eq!(doc.obj(target).str(0x133a), "Tempo");
-    let bpm: Vec<f64> = doc
+    let bpm: Vec<(f64, f64)> = doc
         .field_list(obj(&doc, lanes[0], &[0x2d8c, 0x35ac]), 0x21f)
         .iter()
-        .map(|&p| doc.obj(p).num(0x28f).unwrap())
+        .map(|&p| (doc.obj(p).num(0x2af).unwrap(), doc.obj(p).num(0x28f).unwrap()))
         .collect();
-    // 10 + 512 x the FL value; below Bitwig's 20 BPM stays at 20.
-    assert_eq!(bpm, [112.4, 138.0, 20.0]);
+    // 10 + 512 x the FL value; below Bitwig's 20 BPM stays at 20, from where FL's line from 138 to 10 crosses it.
+    assert_eq!(bpm, [(0.0, 112.4), (4.0, 138.0), (7.6875, 20.0), (8.0, 20.0)]);
     assert!(notes.iter().any(|n| n.starts_with("Tempo: Bitwig's tempo goes down to 20 BPM")), "{notes:?}");
     // The lanes list comes before the tempo it points at, so the tempo is defined in the lane, as Bitwig saves it.
     let fields: Vec<u32> = doc.obj(transport).fields.iter().map(|f| f.id).collect();

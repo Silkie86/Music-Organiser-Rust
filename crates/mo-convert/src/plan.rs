@@ -346,9 +346,6 @@ pub fn tempo_bpm(value: f64) -> f64 {
     10.0 + 512.0 * value.clamp(0.0, 1.0)
 }
 
-/// The slowest tempo Bitwig takes.
-const MIN_BPM: f64 = 20.0;
-
 /// FL's pan knob (0 to 1, centre 0.5) as -1 to 1.
 pub fn pan(fl_pan: f64) -> f64 {
     ((fl_pan - 0.5) * 2.0).clamp(-1.0, 1.0)
@@ -938,13 +935,7 @@ pub fn from_fl(song: &FlSong, options: Options, read_sample: &mut dyn FnMut(&str
         }
         // The song's tempo, on Bitwig's tempo lane.
         if a.control == FlControl::Tempo {
-            if a.points.iter().any(|p| tempo_bpm(p.value) < MIN_BPM - 1e-9) {
-                planner.notes.push(format!(
-                    "{}: Bitwig's tempo goes down to {MIN_BPM} BPM, so the slower part plays at {MIN_BPM} BPM",
-                    a.name
-                ));
-            }
-            add_lane(&mut lanes, TrackRef::Song, Target::Tempo, a, |v| tempo_bpm(v).max(MIN_BPM));
+            add_lane(&mut lanes, TrackRef::Song, Target::Tempo, a, tempo_bpm);
             continue;
         }
         let channel = match a.channel {
@@ -1072,6 +1063,14 @@ pub fn from_fl(song: &FlSong, options: Options, read_sample: &mut dyn FnMut(&str
     // Several FL clips moving one thing share a lane.
     for lane in &mut lanes {
         lane.points = in_song_order(std::mem::take(&mut lane.points));
+        // Until FL's first tempo point the song plays at the project's tempo; a lane would hold its first point.
+        if lane.target == Target::Tempo
+            && let Some(&first) = lane.points.first()
+            && first.beat > SAME_BEAT
+        {
+            let held = LanePoint { beat: 0.0, value: song.tempo, from: 0.0, ..first };
+            lane.points.splice(0..0, [held, LanePoint { beat: first.beat, ..held }]);
+        }
     }
 
     let mut seen = HashSet::new();
