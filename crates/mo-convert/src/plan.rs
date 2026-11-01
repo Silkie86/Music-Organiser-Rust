@@ -168,6 +168,19 @@ pub struct Lane {
     pub points: Vec<LanePoint>,
     /// The FL mixer insert whose fader or pan it comes from; `None` when it's the track's own channel's.
     pub from_insert: Option<u32>,
+    /// FL's edit events (knob moves recorded into a pattern) as automation clips on the lane, one for each place the
+    /// pattern plays. Their moves are in [`Lane::points`] too, for a writer that can't make automation clips.
+    pub parts: Vec<LanePart>,
+}
+
+/// An automation clip on a lane: where it starts and how long it is (beats from the song's start), its points (beats
+/// from its start, values in the target's units), and the FL clip it comes from, by its place in [`Lane::clips`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct LanePart {
+    pub start: f64,
+    pub length: f64,
+    pub points: Vec<(f64, f64)>,
+    pub source: usize,
 }
 
 /// What the song becomes.
@@ -750,7 +763,14 @@ fn add_lane(
     let at = match lanes.iter().position(|l| l.track == track && l.target.same_as(&target)) {
         Some(at) => at,
         None => {
-            lanes.push(Lane { clips: Vec::new(), track, target, points: Vec::new(), from_insert: None });
+            lanes.push(Lane {
+                clips: Vec::new(),
+                track,
+                target,
+                points: Vec::new(),
+                from_insert: None,
+                parts: Vec::new(),
+            });
             lanes.len() - 1
         }
     };
@@ -761,6 +781,12 @@ fn add_lane(
         beat: p.beat,
         value: value(p.value),
         from: a.start_of(p),
+        source,
+    }));
+    lane.parts.extend(a.parts.iter().map(|part| LanePart {
+        start: part.start,
+        length: part.length,
+        points: part.points.iter().map(|p| (p.beat, value(p.value))).collect(),
         source,
     }));
     at

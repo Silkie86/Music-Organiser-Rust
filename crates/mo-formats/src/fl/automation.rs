@@ -72,6 +72,19 @@ pub struct FlAutomation {
     pub slot: Option<u32>,
     /// The beats where each of its playlist clips starts.
     pub starts: Vec<f64>,
+    /// For edit events (knob moves recorded into a pattern): each place the pattern plays, with its moves timed from
+    /// there, so a DAW with automation clips can give each its own. Empty for an automation clip, whose curve is
+    /// [`FlAutomation::points`] only.
+    pub parts: Vec<FlPart>,
+}
+
+/// One place a pattern with edit events plays: where it starts and how long it is (beats from the song's start), and
+/// its moves there, in beats from where it starts.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FlPart {
+    pub start: f64,
+    pub length: f64,
+    pub points: Vec<FlPoint>,
 }
 
 impl FlAutomation {
@@ -205,6 +218,7 @@ fn moves(name: &str, target: u32, mixer: &MixerSettings, points: Vec<FlPoint>) -
         insert: None,
         slot: None,
         starts: Vec::new(),
+        parts: Vec::new(),
     };
     if high == TARGET_SONG {
         a.parameter = low;
@@ -354,16 +368,39 @@ pub(super) fn place_edit_events(
             if placed.is_empty() {
                 continue;
             }
+            let until = placed.last().map_or(0.0, |p| p.beat);
+            let parts = pattern_parts(&points, &placements, ppq, until);
             let channel_name =
                 channel_names.get(&channel).cloned().unwrap_or_else(|| format!("Channel {}", channel + 1));
             let name = format!("{channel_name} - setting {} (edit events)", what.parameter);
-            result.push(FlAutomation { starts, ..moves(&name, target, mixer, placed) });
+            result.push(FlAutomation { starts, parts, ..moves(&name, target, mixer, placed) });
         }
         if !all_carried {
             left.push(pattern);
         }
     }
     (result, left, cut)
+}
+
+/// A pattern's edit events (in beats from its start, in time order) at each of its placements: the part of the
+/// pattern each plays, timed from where it starts. Each holds no more points than its part of the placed curve, so they
+/// are kept for the placements the curve reached (up to `until`, where it ends) without counting towards the limit
+/// again.
+fn pattern_parts(points: &[FlPoint], placements: &[PlaylistItem], ppq: f64, until: f64) -> Vec<FlPart> {
+    let mut parts = Vec::new();
+    for item in placements.iter().take_while(|i| i.at as f64 / ppq < until) {
+        let (from, length) = ((item.offset as i64) as f64 / ppq, item.length as f64 / ppq);
+        let moves: Vec<FlPoint> = points
+            .iter()
+            .filter(|p| p.beat >= from - SAME_BEAT && p.beat < from + length - SAME_BEAT)
+            .map(|p| FlPoint { beat: (p.beat - from).max(0.0), value: p.value })
+            .collect();
+        if moves.is_empty() {
+            continue;
+        }
+        parts.push(FlPart { start: item.at as f64 / ppq, length, points: moves });
+    }
+    parts
 }
 
 fn u32_le(d: &[u8], at: usize) -> Option<u32> {

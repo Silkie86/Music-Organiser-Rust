@@ -114,6 +114,7 @@ fn automation(name: &str, channel: Option<u32>, control: FlControl, points: &[(f
         insert: None,
         slot: None,
         starts: vec![0.0],
+        parts: Vec::new(),
     }
 }
 
@@ -337,6 +338,7 @@ fn where_two_clips_moving_a_setting_meet_the_lane_goes_on_from_the_one_starting_
     let first = automation("Fade in", Some(0), FlControl::Volume, &[(0.0, 0.0), (4.0, 0.5)]);
     let second = FlAutomation {
         starts: vec![4.0],
+        parts: Vec::new(),
         ..automation("Drop", Some(0), FlControl::Volume, &[(4.0, 0.2), (8.0, 0.78125)])
     };
     let p =

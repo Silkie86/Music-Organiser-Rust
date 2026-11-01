@@ -109,6 +109,7 @@ fn automation(name: &str, channel: u32, control: FlControl, parameter: u32, poin
         insert: None,
         slot: None,
         starts: vec![0.0],
+        parts: Vec::new(),
     }
 }
 
@@ -588,6 +589,61 @@ fn audio_clips_come_across_stretched_and_pitched_on_a_copy_of_the_audio_track() 
     let summary = decode(summary.bytes()).unwrap();
     let project = obj(&summary, summary.root.unwrap(), &[0xad2]);
     assert_eq!(summary.obj(summary.field_list(project, 0xace)[0]).class, 0x287, "listed as an audio track");
+}
+
+#[test]
+fn edit_events_are_an_automation_clip_for_each_place_their_pattern_plays() {
+    use mo_formats::fl::automation::FlPart;
+    let mut s = song();
+    let moves = [(0.5, 0.2), (1.0, 0.8)];
+    let part = |start: f64| FlPart {
+        start,
+        length: 4.0,
+        points: moves.iter().map(|&(beat, value)| FlPoint { beat, value }).collect(),
+    };
+    s.automation = vec![FlAutomation {
+        starts: vec![0.5, 8.5],
+        parts: vec![part(0.0), part(8.0)],
+        ..automation(
+            "Serum - setting 205 (edit events)",
+            1,
+            FlControl::PluginParameter,
+            205,
+            &[(0.5, 0.2), (1.0, 0.8), (4.0, 0.8), (8.5, 0.8), (8.5, 0.2), (9.0, 0.8), (12.0, 0.8)],
+        )
+    }];
+    let (doc, notes, _) = convert(&s, &bitwig_template(Template::default()));
+    assert!(!notes.iter().any(|n| n.contains("automation")), "{notes:?}");
+    let (_, tracks) = tracks(&doc);
+    let lanes = doc.field_list(obj(&doc, tracks[1], &[0x2dc9]), 0x4ba);
+    assert_eq!(lanes.len(), 1);
+    let num = |o: ObjId, f: u32| doc.obj(o).num(f).unwrap();
+    // Two automation clips on the lane, each with the moves timed from its start, and its loop and play range.
+    let clips = doc.field_list(obj(&doc, lanes[0], &[0x2d8c]), 0x21f);
+    assert_eq!(
+        clips.iter().map(|&c| (doc.obj(c).class, num(c, 0x2af), num(c, 0x26))).collect::<Vec<_>>(),
+        [(0xd90, 0.0, 4.0), (0xd90, 8.0, 4.0)]
+    );
+    let contents: Vec<ObjId> = clips.iter().map(|&c| obj(&doc, c, &[0x2ae9, 0x10e9])).collect();
+    for (&clip, &content) in clips.iter().zip(&contents) {
+        let points: Vec<(f64, f64)> = doc
+            .field_list(obj(&doc, content, &[0x48e]), 0x21f)
+            .iter()
+            .map(|&p| (num(p, 0x2af), num(p, 0x28f)))
+            .collect();
+        assert_eq!(points, moves);
+        let range = obj(&doc, clip, &[0x2adb]);
+        assert_eq!((num(obj(&doc, range, &[0x992]), 0x26), num(obj(&doc, range, &[0x98d]), 0x2af)), (4.0, 4.0));
+    }
+    assert_ne!(contents[0], contents[1], "each clip keeps its own moves");
+    // The lane lists each clip's content, and holds the value each clip ends on from its end.
+    assert_eq!(doc.field_list(obj(&doc, lanes[0], &[0x2aec]), 0x10e6), contents);
+    let held: Vec<(f64, f64)> = doc
+        .field_list(obj(&doc, lanes[0], &[0x2d8c, 0x35ac]), 0x21f)
+        .iter()
+        .map(|&p| (num(p, 0x2af), num(p, 0x28f)))
+        .collect();
+    assert_eq!(held, [(4.0, 0.8), (12.0, 0.8)]);
 }
 
 #[test]
