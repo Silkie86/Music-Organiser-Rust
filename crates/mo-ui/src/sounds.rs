@@ -2,6 +2,7 @@
 //! read-only) is read once on a background thread; each change of the filters or order is worked out on its own
 //! low-priority thread, newest ask first (rule 12), across every core (rule 21). Tiles and lines are only made when
 //! the list draws them, so 357,000 sounds cost what's on screen. Sounds are read and played off the window's thread.
+//! Rediscover (unused sounds that fit your taste) is dug out on its own low-priority thread too.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -22,12 +23,14 @@ use mo_library::UsageRules;
 use mo_library::songs::thousands;
 use mo_sounds::index::SoundIndex;
 use mo_sounds::liking::{self, LIKED_WEIGHTS_KEY, LikedWeights};
+use mo_sounds::rediscover::{self, FolderUse};
 use mo_sounds::usage::{self, Usage};
 use mo_sounds::{Sound, SoundsDb, music};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, Timer, TimerMode, VecModel};
 
 use crate::{
-    AlikeLine, AppWindow, MenuItem, PickedSound, SoundFact, SoundLine, SoundTile, SoundsData, TileRow, TypeChipInfo,
+    AlikeLine, AppWindow, FolderLine, MenuItem, PickedSound, SoundFact, SoundLine, SoundTile, SoundsData, TileRow,
+    TypeChipInfo,
 };
 
 /// The C# app's settings in `library.db` for the view shown last and autoplay, read (not written: it's read-only).
@@ -36,11 +39,23 @@ const AUTOPLAY_KEY: &str = "sound_lab_autoplay";
 /// The C# app's Settings in `library.db` for which songs count as using a sound.
 const USED_NEEDS_NOTES_KEY: &str = "used_in_needs_notes";
 const USED_NOT_MUTED_KEY: &str = "used_in_not_muted_newest";
+/// The C# app's setting in `library.db` for how many sounds Rediscover digs out.
+const COUNT_KEY: &str = "rediscover_count";
 
 /// The views, in the order of the page's view buttons.
 const TILES: i32 = 0;
+const LIST: i32 = 1;
 const HISTORY: i32 = 3;
-const VIEWS: [&str; 4] = ["Tiles", "List", "Galaxy", "History"];
+const REDISCOVER: i32 = 4;
+const VIEWS: [&str; 5] = ["Tiles", "List", "Galaxy", "History", "Rediscover"];
+
+/// Rediscover's How many choices (the C# app's), and the one it starts on.
+const COUNTS: [usize; 4] = [30, 60, 120, 250];
+const COUNT: usize = 60;
+/// Rediscover's Adventurous choices, for the C# app's slider from 0 (close to what you use) to 1 (further afield).
+const ADVENTURES: [(&str, f64); 4] = [("Not very", 0.1), ("A little", 0.3), ("Quite", 0.6), ("Very", 0.9)];
+/// How many forgotten folders Rediscover lists, as in the C# app.
+const FOLDERS: usize = 40;
 
 /// How many type chips show; the other types go in the More types menu.
 const TYPE_CHIPS: usize = 9;
@@ -80,8 +95,18 @@ struct Page {
     playing: Option<(usize, f64)>,
     /// Each sound's place in `list`, by id.
     places: Arc<HashMap<i64, usize>>,
-    /// Every sound's fingerprint, once read, for Sounds like this.
+    /// Every sound's fingerprint, once read, for Sounds like this and Rediscover.
     index: Option<Arc<SoundIndex>>,
+    /// What Rediscover dug out, as places in `list` with why, best first.
+    rediscover: Vec<(usize, String)>,
+    /// What Rediscover digs out next time.
+    re: rediscover::Options,
+    /// Counts Rediscover's asks, so an older answer that arrives late is dropped.
+    re_asked: u64,
+    /// Rediscover has run on this library (so changing a choice picks again).
+    re_started: bool,
+    /// The answer to Rediscover's newest ask hasn't come yet.
+    re_busy: bool,
 }
 
 impl Default for Page {
@@ -103,6 +128,11 @@ impl Default for Page {
             playing: None,
             places: Arc::default(),
             index: None,
+            rediscover: Vec::new(),
+            re: rediscover::Options { count: COUNT, ..rediscover::Options::default() },
+            re_asked: 0,
+            re_started: false,
+            re_busy: false,
         }
     }
 }
@@ -110,19 +140,27 @@ impl Default for Page {
 impl Page {
     /// The places in `list` of what the view on show lists, in order.
     fn entry(&self, row: usize) -> Option<usize> {
-        if self.view == HISTORY { self.history.get(row).map(|h| h.0) } else { self.shown.get(row).copied() }
+        match self.view {
+            HISTORY => self.history.get(row).map(|h| h.0),
+            REDISCOVER => self.rediscover.get(row).map(|r| r.0),
+            _ => self.shown.get(row).copied(),
+        }
     }
 
     fn entries(&self) -> usize {
-        if self.view == HISTORY { self.history.len() } else { self.shown.len() }
+        match self.view {
+            HISTORY => self.history.len(),
+            REDISCOVER => self.rediscover.len(),
+            _ => self.shown.len(),
+        }
     }
 
     /// The row of the view on show that holds the sound at `at` in `list`.
     fn row_of(&self, at: usize) -> Option<usize> {
-        if self.view == HISTORY {
-            self.history.iter().position(|h| h.0 == at)
-        } else {
-            self.shown.iter().position(|&i| i == at)
+        match self.view {
+            HISTORY => self.history.iter().position(|h| h.0 == at),
+            REDISCOVER => self.rediscover.iter().position(|r| r.0 == at),
+            _ => self.shown.iter().position(|&i| i == at),
         }
     }
 }
@@ -142,6 +180,7 @@ thread_local! {
     static LINES: Rc<Lines> = PAGE.with(|p| Rc::new(Lines { page: p.clone(), notify: ModelNotify::default() }));
     static WORKER: RefCell<Option<Newest<Ask>>> = const { RefCell::new(None) };
     static ALIKE: RefCell<Option<Newest<AlikeAsk>>> = const { RefCell::new(None) };
+    static REDISCOVERING: RefCell<Option<Newest<RediscoverAsk>>> = const { RefCell::new(None) };
     static FEED: RefCell<Option<Feed>> = const { RefCell::new(None) };
     /// Moves the picked tile's waveform along while it plays.
     static TICKER: Timer = Timer::default();
@@ -242,6 +281,7 @@ fn line(p: &Page, row: usize, at: usize) -> SoundLine {
         used: list::used_text(p.list.used_in(at)).into(),
         folder: s.folder().into(),
         when: p.history.get(row).filter(|_| p.view == HISTORY).map(|h| when(h.1, p.now)).unwrap_or_default().into(),
+        reason: p.rediscover.get(row).filter(|_| p.view == REDISCOVER).map(|r| r.1.clone()).unwrap_or_default().into(),
         favourite: s.favourite,
         picked: p.picked == Some(at),
         playing: p.playing.is_some_and(|(i, _)| i == at),
@@ -347,6 +387,7 @@ fn arrive(app: &AppWindow, step: Step) {
 struct Read {
     library: Library,
     view: Option<String>,
+    count: Option<String>,
     autoplay: Option<String>,
 }
 
@@ -398,6 +439,8 @@ fn with_usage(list: &SoundList, usage: HashMap<i64, Usage>, weights: &LikedWeigh
 #[derive(Default)]
 struct Settings {
     view: Option<String>,
+    /// How many sounds Rediscover digs out.
+    count: Option<String>,
     autoplay: Option<String>,
     rules: UsageRules,
     weights: LikedWeights,
@@ -418,6 +461,7 @@ impl Settings {
         let on = |key: &str| get(key).as_deref() == Some("1");
         Settings {
             view: get(VIEW_KEY),
+            count: get(COUNT_KEY),
             autoplay: get(AUTOPLAY_KEY),
             rules: UsageRules { needs_notes: on(USED_NEEDS_NOTES_KEY), not_muted_in_newest: on(USED_NOT_MUTED_KEY) },
             weights: LikedWeights::from_json(get(LIKED_WEIGHTS_KEY).as_deref()),
@@ -454,6 +498,7 @@ fn read_all(sounds_db: &Path, library_db: &Path, send: impl Fn(Step)) {
     send(Step::Read(read.map(|library| Read {
         library,
         view: settings.view.clone(),
+        count: settings.count.clone(),
         autoplay: settings.autoplay.clone(),
     })));
     let Some(list) = list else { return };
@@ -513,6 +558,10 @@ pub fn index_known(app: &AppWindow, index: Arc<SoundIndex>) {
     });
     if let Some(at) = picked {
         find_alike(app, at);
+    }
+    // Rediscover was waiting on the fingerprints.
+    if PAGE.with(|p| p.borrow().re_started) {
+        rediscover_now(app);
     }
 }
 
@@ -599,6 +648,10 @@ fn use_known(app: &AppWindow, list: Arc<SoundList>) {
     });
     let Some(picked) = picked else { return };
     refresh(app);
+    // What Rediscover dug out didn't know your taste yet.
+    if PAGE.with(|p| p.borrow().re_started) {
+        rediscover_now(app);
+    }
     if let Some(at) = picked {
         let sound = PAGE.with(|p| picked_sound(&p.borrow(), at));
         app.global::<SoundsData>().set_picked(sound);
@@ -626,6 +679,8 @@ fn loaded(app: &AppWindow, read: Result<Read, String>) {
             return;
         }
     };
+    let count = read.count.and_then(|c| c.parse().ok()).filter(|c| COUNTS.contains(c)).unwrap_or(COUNT);
+    PAGE.with(|p| p.borrow_mut().re.count = count);
     show(app, read.library, read.view.as_deref(), read.autoplay.as_deref());
 }
 
@@ -644,8 +699,16 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
         // As in the C# app: off unless it was turned on.
         p.autoplay = autoplay == Some("1");
         p.picked = None;
+        p.rediscover.clear();
+        p.re_started = false;
+        // An answer still on its way was for the old list: it's dropped.
+        p.re_asked += 1;
     });
     refresh(app);
+    show_rediscover_chips(app);
+    if PAGE.with(|p| p.borrow().view == REDISCOVER) {
+        rediscover_now(app);
+    }
 }
 
 fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
@@ -745,7 +808,12 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
         PAGE.with(|p| p.borrow_mut().view = v);
         show_lists(&app);
         bring_picked_into_view(&app);
+        // Rediscover fills itself the first time it's opened, so it never greets you empty (as in the C# app).
+        if v == REDISCOVER && PAGE.with(|p| !p.borrow().re_started) {
+            rediscover_now(&app);
+        }
     });
+    wire_rediscover(app);
     let weak = app.as_weak();
     data.on_columns_changed(move |n| {
         let Some(app) = weak.upgrade() else { return };
@@ -834,6 +902,247 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     data.on_panel_resized(|w| log::info("Sounds", &format!("Panel width {w:.0}")));
 }
 
+/// A Rediscover ask: everything its thread needs, so the page can go on changing meanwhile.
+struct RediscoverAsk {
+    id: u64,
+    list: Arc<SoundList>,
+    places: Arc<HashMap<i64, usize>>,
+    index: Arc<SoundIndex>,
+    options: rediscover::Options,
+}
+
+/// What Rediscover dug out for one ask.
+struct RediscoverAnswer {
+    id: u64,
+    /// Places in the list, with why, best first.
+    found: Vec<(usize, String)>,
+    /// Why nothing was found, when nothing was.
+    why: String,
+    folders: Vec<FolderUse>,
+    years: Vec<i32>,
+    /// How many sounds your projects use: what your taste was learned from.
+    learned_from: usize,
+}
+
+impl RediscoverAsk {
+    /// Scoring every unused sound takes a while on a big library: it's spread over the low-priority pool's threads.
+    fn answer(self) -> RediscoverAnswer {
+        let empty = HashMap::new();
+        let usage = self.list.usage_map().unwrap_or(&empty);
+        let sounds = self.list.sounds();
+        let o = &self.options;
+        background::on_pool(|| {
+            let found: Vec<(usize, String)> = rediscover::suggest(sounds, usage, &self.index, o)
+                .into_iter()
+                .filter_map(|s| self.places.get(&s.id).map(|&i| (i, s.reason)))
+                .collect();
+            let why = if found.is_empty() { rediscover::why_nothing(sounds, &self.index, o) } else { String::new() };
+            let mut folders = rediscover::folders(sounds, usage);
+            folders.truncate(FOLDERS);
+            RediscoverAnswer {
+                id: self.id,
+                found,
+                why,
+                folders,
+                years: rediscover::years(sounds),
+                learned_from: usage.values().filter(|u| u.projects > 0).count(),
+            }
+        })
+    }
+}
+
+/// Digs out a new Rediscover list with the choices as they are now (each time a new set: the seed is 0). Waits for
+/// the fingerprints when they aren't read yet; they call this again when they arrive.
+fn rediscover_now(app: &AppWindow) {
+    let data = app.global::<SoundsData>();
+    let ask = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        if p.list.is_empty() {
+            return None;
+        }
+        p.re_asked += 1;
+        p.re_started = true;
+        p.re_busy = true;
+        let ask = p.index.clone().map(|index| RediscoverAsk {
+            id: p.re_asked,
+            list: p.list.clone(),
+            places: p.places.clone(),
+            index,
+            options: p.re.clone(),
+        });
+        Some((ask, p.list.len()))
+    });
+    let Some((ask, total)) = ask else { return };
+    data.set_re_busy(true);
+    data.set_re_empty_title("Picking sounds…".into());
+    data.set_re_empty_text("".into());
+    let Some(ask) = ask else {
+        data.set_re_intro(
+            "Listening to your sounds first: their fingerprints are still being read, and the list fills in by itself."
+                .into(),
+        );
+        return;
+    };
+    data.set_re_intro(format!("Looking through {} sounds…", thousands(total)).into());
+    if HERE.with(|h| *h.borrow()) {
+        let answer = ask.answer();
+        rediscovered(app, answer);
+        return;
+    }
+    REDISCOVERING.with(|w| {
+        let mut w = w.borrow_mut();
+        if w.is_none() {
+            let weak = app.as_weak();
+            match Newest::start("Rediscover", move |ask: RediscoverAsk| {
+                let answer = ask.answer();
+                let weak = weak.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(app) = weak.upgrade() {
+                        rediscovered(&app, answer);
+                    }
+                });
+            }) {
+                Ok(worker) => *w = Some(worker),
+                Err(e) => log::error("Sounds", &format!("Couldn't start the Rediscover thread: {e}")),
+            }
+        }
+        if let Some(worker) = w.as_ref() {
+            worker.ask(ask);
+        }
+    });
+}
+
+/// Rediscover's answer arrived: shows it, unless a newer one has been asked for since.
+fn rediscovered(app: &AppWindow, a: RediscoverAnswer) {
+    let fresh = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        if p.re_asked != a.id {
+            return None;
+        }
+        p.re_busy = false;
+        p.rediscover = a.found;
+        Some((p.rediscover.len(), p.list.knows_use()))
+    });
+    let Some((found, knows_use)) = fresh else { return };
+    let data = app.global::<SoundsData>();
+    data.set_re_busy(false);
+    let folders: Vec<FolderLine> = a
+        .folders
+        .iter()
+        .map(|f| FolderLine {
+            folder: f.folder.clone().into(),
+            name: f.folder.rsplit(['\\', '/']).find(|s| !s.is_empty()).unwrap_or(&f.folder).into(),
+            used: format!("{} of {} used", thousands(f.used), thousands(f.sounds)).into(),
+        })
+        .collect();
+    data.set_folders(ModelRc::new(VecModel::from(folders)));
+    data.set_re_years(strings(a.years.iter().map(i32::to_string)));
+    if found == 0 {
+        data.set_re_empty_title("Nothing to suggest".into());
+        data.set_re_empty_text(a.why.into());
+        data.set_re_intro("".into());
+    } else {
+        let intro = if !knows_use {
+            "Your projects haven't been counted yet, so these are a varied pick. They fit your taste once they are."
+                .to_owned()
+        } else if a.learned_from == 0 {
+            "None of your sounds show up in scanned projects yet, so these are a varied pick. Star favourites or scan \
+             your projects to teach it your taste."
+                .to_owned()
+        } else {
+            format!(
+                "Learned from the {} sounds your projects use, plus your favourites and plays.",
+                thousands(a.learned_from)
+            )
+        };
+        data.set_re_intro(intro.into());
+    }
+    show_lists(app);
+    bring_picked_into_view(app);
+}
+
+/// Rediscover's choices as they are now.
+fn show_rediscover_chips(app: &AppWindow) {
+    let data = app.global::<SoundsData>();
+    PAGE.with(|p| {
+        let p = p.borrow();
+        data.set_re_types(strings(p.types.iter().map(|t| t.0.as_str())));
+        data.set_re_type(p.re.sound_type.clone().unwrap_or_default().into());
+        data.set_re_year(p.re.year.map(|y| y.to_string()).unwrap_or_default().into());
+        data.set_re_adventures(strings(ADVENTURES.map(|a| a.0)));
+        let adventure = ADVENTURES.iter().find(|a| a.1 == p.re.adventure).map_or(ADVENTURES[1].0, |a| a.0);
+        data.set_re_adventure(adventure.into());
+        data.set_re_counts(strings(COUNTS.map(|c| c.to_string())));
+        data.set_re_count(p.re.count.to_string().into());
+        data.set_re_rarely(p.re.max_uses > 0);
+    });
+}
+
+fn wire_rediscover(app: &AppWindow) {
+    let data = app.global::<SoundsData>();
+    // Once there's a list, changing what it's picked by picks it again (as in the C# app); the newest ask wins.
+    let weak = app.as_weak();
+    data.on_re_pick(move |what, value| {
+        let Some(app) = weak.upgrade() else { return };
+        let again = PAGE.with(|p| {
+            let mut p = p.borrow_mut();
+            let v = value.as_str();
+            match what.as_str() {
+                "type" => p.re.sound_type = (!v.is_empty()).then(|| v.to_owned()),
+                "year" => p.re.year = v.parse().ok(),
+                "adventure" => {
+                    if let Some(a) = ADVENTURES.iter().find(|a| a.0 == v) {
+                        p.re.adventure = a.1;
+                    }
+                }
+                "count" => {
+                    if let Some(c) = v.parse().ok().filter(|c| COUNTS.contains(c)) {
+                        p.re.count = c;
+                    }
+                }
+                _ => {}
+            }
+            p.re_started
+        });
+        show_rediscover_chips(&app);
+        if again {
+            rediscover_now(&app);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_re_toggle_rarely(move || {
+        let Some(app) = weak.upgrade() else { return };
+        let again = PAGE.with(|p| {
+            let mut p = p.borrow_mut();
+            p.re.max_uses = if p.re.max_uses == 0 { 1 } else { 0 };
+            p.re_started
+        });
+        show_rediscover_chips(&app);
+        if again {
+            rediscover_now(&app);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_re_shuffle(move || {
+        if let Some(app) = weak.upgrade() {
+            rediscover_now(&app);
+        }
+    });
+    // A forgotten folder: its sounds in the List, with the other filters cleared so all of them show.
+    let weak = app.as_weak();
+    data.on_pick_folder(move |folder| {
+        let Some(app) = weak.upgrade() else { return };
+        PAGE.with(|p| {
+            let mut p = p.borrow_mut();
+            p.filters = Filters { search: folder.to_string(), ..Filters::default() };
+            p.view = LIST;
+        });
+        app.global::<SoundsData>().set_search(folder);
+        refresh(&app);
+        show_lists(&app);
+    });
+}
+
 fn change(weak: &slint::Weak<AppWindow>, f: impl FnOnce(&mut Filters)) {
     let Some(app) = weak.upgrade() else { return };
     PAGE.with(|p| f(&mut p.borrow_mut().filters));
@@ -900,7 +1209,8 @@ fn show_lists(app: &AppWindow) {
         let total = p.list.len();
         let summary = if p.list.is_empty() {
             String::new()
-        } else if p.view != HISTORY && (p.filters.any() || !p.filters.search.trim().is_empty()) {
+        } else if p.view != HISTORY && p.view != REDISCOVER && (p.filters.any() || !p.filters.search.trim().is_empty())
+        {
             format!("{} of {} sounds", thousands(p.shown.len()), thousands(total))
         } else {
             format!("{} sounds", thousands(total))
@@ -1311,6 +1621,38 @@ mod tests {
         assert_eq!(used.used_in(0), Some(0));
         assert_eq!(used.used_in(1), Some(3));
         assert_eq!(used.liked_share(1), Some(1.0));
+    }
+
+    #[test]
+    fn rediscover_suggests_unused_sounds_by_their_place() {
+        let mut sounds: Vec<Sound> = (1..=6).map(|id| sound(id, &format!("Pack/{id}.wav"))).collect();
+        for s in &mut sounds {
+            s.analysis = Some(mo_sounds::SoundAnalysis { seconds: 0.5, ..Default::default() });
+        }
+        let lib = Library::new(sounds, Vec::new(), &LikedWeights::default()).with_usage(
+            HashMap::from([(2, Usage { projects: 3, recent: 1, years: vec![2026] })]),
+            &LikedWeights::default(),
+        );
+        let features = (1..=6i64).map(|id| (id, (0..8).map(|d| ((id + d) % 3) as f32).collect())).collect();
+        let index = SoundIndex::build(&features, &Default::default(), 6);
+        let ask = RediscoverAsk {
+            id: 7,
+            list: lib.list.clone(),
+            places: lib.places.clone(),
+            index: Arc::new(index),
+            options: rediscover::Options { seed: 1, ..rediscover::Options::default() },
+        };
+        let a = ask.answer();
+        assert_eq!(a.id, 7);
+        assert_eq!(a.learned_from, 1);
+        assert!(!a.found.is_empty(), "{}", a.why);
+        // Sound 2 is used, so it isn't suggested; every place found is a sound in the list.
+        for (at, reason) in &a.found {
+            let s = lib.list.sound(*at).map(|s| s.id);
+            assert!(s.is_some() && s != Some(2));
+            assert!(!reason.is_empty());
+        }
+        assert_eq!(a.folders.first().map(|f| (f.sounds, f.used)), Some((6, 1)));
     }
 
     #[test]

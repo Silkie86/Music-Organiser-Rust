@@ -1,4 +1,5 @@
-// The Sounds page: every sound in your library as Tiles, a List or the History of what you played, with the type chips
+// The Sounds page: every sound in your library as Tiles, a List, the History of what you played or Rediscover (unused
+// sounds that fit your taste), with the type chips
 // and filters over them and the picked sound's panel beside them. Agreed mock-up: the design canvas, 2026-11-01.
 // Read-only for now (favourites, tags and types are shown, not changed), like the C# app's sounds.db until it's trusted.
 import { ListView } from "std-widgets.slint";
@@ -38,6 +39,13 @@ export struct AlikeLine {
     likeness: string,
 }
 
+// One sample folder on Rediscover, with how much of it your projects use: "12 of 340 used".
+export struct FolderLine {
+    folder: string,
+    name: string,
+    used: string,
+}
+
 // One row of tiles, as many as fit the list's width.
 export struct TileRow {
     tiles: [SoundTile],
@@ -56,6 +64,8 @@ export struct SoundLine {
     folder: string,
     // When it was played, on History.
     when: string,
+    // Why it's suggested, on Rediscover.
+    reason: string,
     favourite: bool,
     picked: bool,
     playing: bool,
@@ -102,10 +112,33 @@ export global SoundsData {
     in property <string> empty-title;
     in property <string> empty-text;
 
-    // 0 Tiles, 1 List, 2 Galaxy, 3 History.
-    in property <[string]> views: ["Tiles", "List", "Galaxy", "History"];
+    // 0 Tiles, 1 List, 2 Galaxy, 3 History, 4 Rediscover.
+    in property <[string]> views: ["Tiles", "List", "Galaxy", "History", "Rediscover"];
     in property <int> view;
     callback pick-view(int);
+
+    // Rediscover: what it digs out (type, year, how adventurous, how many) and whether sounds used once count.
+    in property <string> re-type;
+    in property <[string]> re-types;
+    in property <string> re-year;
+    in property <[string]> re-years;
+    in property <string> re-adventure;
+    in property <[string]> re-adventures;
+    in property <string> re-count;
+    in property <[string]> re-counts;
+    in property <bool> re-rarely;
+    // "type", "year", "adventure" or "count", and the value ("" for any).
+    callback re-pick(string, string);
+    callback re-toggle-rarely();
+    callback re-shuffle();
+    in property <bool> re-busy;
+    // What it learned your taste from, over the list; and instead of the list when there's nothing.
+    in property <string> re-intro;
+    in property <string> re-empty-title;
+    in property <string> re-empty-text;
+    // Sample folders by how little of them your projects use; a click lists that folder's sounds.
+    in property <[FolderLine]> folders;
+    callback pick-folder(string);
 
     in-out property <string> search;
     callback search-edited(string);
@@ -256,6 +289,7 @@ component SoundTileView inherits Rectangle {
 component SoundLineView inherits ListLine {
     in property <SoundLine> line;
     in property <bool> history;
+    in property <bool> rediscover;
     // A click on it, so the page can take the keys (arrows, Space) from the search box.
     callback chosen();
     height: 40px;
@@ -329,9 +363,10 @@ component SoundLineView inherits ListLine {
             vertical-alignment: center;
             horizontal-alignment: right;
         }
+        // Rediscover's reasons say how it's used already.
         Text {
-            width: 72px;
-            text: root.history ? root.line.when : root.line.used;
+            width: root.rediscover ? 0 : 72px;
+            text: root.rediscover ? "" : root.history ? root.line.when : root.line.used;
             color: Theme.muted;
             font-family: Theme.number-font;
             font-size: Type.meta;
@@ -339,10 +374,10 @@ component SoundLineView inherits ListLine {
             horizontal-alignment: right;
         }
         Text {
-            horizontal-stretch: 1;
+            horizontal-stretch: root.rediscover ? 3 : 1;
             preferred-width: 0px;
             min-width: 0px;
-            text: root.line.folder;
+            text: root.rediscover ? root.line.reason : root.line.folder;
             color: Theme.muted;
             font-size: Type.meta;
             vertical-alignment: center;
@@ -353,6 +388,7 @@ component SoundLineView inherits ListLine {
 
 component ListHeading inherits HorizontalLayout {
     in property <bool> history;
+    in property <bool> rediscover;
     padding-left: Space.md + Space.xs;
     padding-right: Space.md + Space.xs;
     spacing: Space.md;
@@ -387,17 +423,62 @@ component ListHeading inherits HorizontalLayout {
         horizontal-alignment: right;
     }
     Caps {
-        width: 72px;
-        text: root.history ? "PLAYED" : SoundsData.knows-use ? "USED" : "";
+        width: root.rediscover ? 0 : 72px;
+        text: root.rediscover ? "" : root.history ? "PLAYED" : SoundsData.knows-use ? "USED" : "";
         vertical-alignment: center;
         horizontal-alignment: right;
     }
     Caps {
-        horizontal-stretch: 1;
+        horizontal-stretch: root.rediscover ? 3 : 1;
         preferred-width: 0px;
         min-width: 0px;
-        text: "FOLDER";
+        text: root.rediscover ? "WHY" : "FOLDER";
         vertical-alignment: center;
+    }
+}
+
+// Rediscover's forgotten folders, beside its list.
+component FoldersCard inherits Rectangle {
+    background: Theme.surface;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: Theme.edge;
+    VerticalLayout {
+        padding: Space.lg;
+        spacing: Space.sm;
+        Caps { text: "FORGOTTEN FOLDERS"; }
+        Text {
+            text: "Sample folders by how little of them your projects use. Click one to list its sounds.";
+            color: Theme.muted;
+            font-size: Type.meta;
+            wrap: word-wrap;
+        }
+        ListView {
+            vertical-stretch: 1;
+            for f in SoundsData.folders: ListLine {
+                height: 44px;
+                tip: f.folder;
+                clicked => { SoundsData.pick-folder(f.folder); }
+                VerticalLayout {
+                    width: 100%;
+                    padding-left: Space.sm;
+                    padding-right: Space.sm;
+                    alignment: center;
+                    Text {
+                        text: f.name;
+                        color: Theme.text;
+                        font-size: Type.meta;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: f.used;
+                        color: Theme.muted;
+                        font-size: Type.meta;
+                        overflow: elide;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -643,8 +724,61 @@ export component SoundsPage inherits Rectangle {
             }
             Rectangle { horizontal-stretch: 1; }
         }
+        // Rediscover's own choices, in place of the filters.
+        if SoundsData.view == 4: HorizontalLayout {
+            spacing: Space.sm;
+            alignment: start;
+            vertical-stretch: 0;
+            MenuChip {
+                name: "Type";
+                value: SoundsData.re-type;
+                choices: SoundsData.re-types;
+                picked(v) => { SoundsData.re-pick("type", v); }
+            }
+            if SoundsData.re-years.length > 0: MenuChip {
+                name: "Year";
+                value: SoundsData.re-year;
+                choices: SoundsData.re-years;
+                picked(v) => { SoundsData.re-pick("year", v); }
+            }
+            MenuChip {
+                name: "Adventurous";
+                value: SoundsData.re-adventure;
+                choices: SoundsData.re-adventures;
+                has-any: false;
+                picked(v) => { SoundsData.re-pick("adventure", v); }
+            }
+            MenuChip {
+                name: "How many";
+                value: SoundsData.re-count;
+                choices: SoundsData.re-counts;
+                has-any: false;
+                picked(v) => { SoundsData.re-pick("count", v); }
+            }
+            ToggleChip {
+                text: "Include sounds used once";
+                on: SoundsData.re-rarely;
+                clicked => { SoundsData.re-toggle-rarely(); }
+            }
+            VerticalLayout {
+                alignment: center;
+                StudioButton {
+                    horizontal-stretch: 0;
+                    text: SoundsData.re-busy ? "Shuffling…" : "Shuffle";
+                    main: true;
+                    tip: "Dig out a new set";
+                    clicked => { SoundsData.re-shuffle(); }
+                }
+            }
+        }
+        if SoundsData.view == 4 && SoundsData.re-intro != "": Text {
+            text: SoundsData.re-intro;
+            color: Theme.muted;
+            font-size: Type.meta;
+            wrap: word-wrap;
+        }
         // The type chips: every type with its count, most first.
-        HorizontalLayout {
+        if SoundsData.view != 4: HorizontalLayout {
             spacing: Space.sm;
             alignment: start;
             vertical-stretch: 0;
@@ -660,7 +794,7 @@ export component SoundsPage inherits Rectangle {
                 picked(v) => { SoundsData.pick("type", v); }
             }
         }
-        HorizontalLayout {
+        if SoundsData.view != 4: HorizontalLayout {
             spacing: Space.sm;
             alignment: start;
             vertical-stretch: 0;
@@ -720,9 +854,13 @@ export component SoundsPage inherits Rectangle {
             property <length> list-width: SoundsData.panel-shown
                 ? max(380px, self.width - SoundsData.panel-width - divider.width)
                 : self.width;
+            // Rediscover's forgotten folders take the list's right side when there's room.
+            property <length> folders-width: SoundsData.view == 4 && SoundsData.folders.length > 0 && self.list-width >= 900px
+                ? 300px
+                : 0px;
             keys := FocusScope {
                 x: 0;
-                width: area.list-width;
+                width: area.list-width - area.folders-width;
                 key-pressed(event) => {
                     if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
                         return reject;
@@ -751,10 +889,20 @@ export component SoundsPage inherits Rectangle {
                 }
                 Well {
                     if SoundsData.empty-title != "" || SoundsData.shown == 0: EmptyState {
-                        title: SoundsData.empty-title != "" ? SoundsData.empty-title : "No sounds match";
-                        text: SoundsData.empty-title != "" ? SoundsData.empty-text : "Try fewer filters or other words.";
-                        action: SoundsData.empty-title == "" && SoundsData.any-filter ? "Clear the filters" : "";
-                        act => { SoundsData.clear(); }
+                        title: SoundsData.empty-title != "" ? SoundsData.empty-title
+                            : SoundsData.view == 4 ? SoundsData.re-empty-title : "No sounds match";
+                        text: SoundsData.empty-title != "" ? SoundsData.empty-text
+                            : SoundsData.view == 4 ? SoundsData.re-empty-text : "Try fewer filters or other words.";
+                        action: SoundsData.empty-title != "" ? ""
+                            : SoundsData.view == 4 ? (SoundsData.re-busy ? "" : "Shuffle")
+                            : SoundsData.any-filter ? "Clear the filters" : "";
+                        act => {
+                            if (SoundsData.view == 4) {
+                                SoundsData.re-shuffle();
+                            } else {
+                                SoundsData.clear();
+                            }
+                        }
                     }
                     if SoundsData.empty-title == "" && SoundsData.shown > 0 && SoundsData.view == 0: tiles := ListView {
                         property <int> columns: max(1, floor((self.visible-width - Space.sm) / (TileSize.width + Space.sm)));
@@ -786,8 +934,11 @@ export component SoundsPage inherits Rectangle {
                             }
                         }
                     }
-                    if SoundsData.empty-title == "" && SoundsData.shown > 0 && (SoundsData.view == 1 || SoundsData.view == 3): VerticalLayout {
-                        ListHeading { history: SoundsData.view == 3; }
+                    if SoundsData.empty-title == "" && SoundsData.shown > 0 && (SoundsData.view == 1 || SoundsData.view >= 3): VerticalLayout {
+                        ListHeading {
+                            history: SoundsData.view == 3;
+                            rediscover: SoundsData.view == 4;
+                        }
                         lines := ListView {
                             property <int> show-ask: SoundsData.show-ask;
                             changed show-ask => {
@@ -800,6 +951,7 @@ export component SoundsPage inherits Rectangle {
                             for l in SoundsData.lines: SoundLineView {
                                 line: l;
                                 history: SoundsData.view == 3;
+                                rediscover: SoundsData.view == 4;
                                 chosen => { keys.focus(); }
                                 right-clicked(x, y) => {
                                     keys.focus();
@@ -813,6 +965,11 @@ export component SoundsPage inherits Rectangle {
                         text: "Every sound as a star on a map, with the same filters. It's built in a later part of the Sounds page.";
                     }
                 }
+            }
+            if area.folders-width > 0: FoldersCard {
+                x: area.list-width - area.folders-width + Space.md;
+                width: area.folders-width - Space.md;
+                height: parent.height;
             }
             divider := PanelDivider {
                 visible: SoundsData.panel-shown;

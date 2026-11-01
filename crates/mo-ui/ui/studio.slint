@@ -570,6 +570,8 @@ export component MenuChip inherits Rectangle {
     in property <string> name;
     in property <string> value;
     in property <[string]> choices;
+    // Whether the menu starts with "Any" (which picks ""); off for a chip that always has a value.
+    in property <bool> has-any: true;
     callback picked(string);
     width: label.preferred-width + 34px;
     height: 28px;
@@ -605,7 +607,7 @@ export component MenuChip inherits Rectangle {
         y: root.height + 4px;
         width: max(root.width, 180px);
         MenuCard {
-            MenuLine {
+            if root.has-any: MenuLine {
                 text: "Any";
                 on: root.value == "";
                 clicked => { root.picked(""); }
