@@ -13,7 +13,7 @@
 //! - the first step, hearing the notes ([`Hearing`]): the units chords change on, the bass, the chords and the tune,
 //!   broken chords, notes held over a bar line, how long each note sounds where, the shapes of the lines' notes
 //!   ([`Shaped`]), and the chords that may be pushed ([`Push`]);
-//! - the readings worth scoring for a stretch of music ([`candidates`]): each a root and a core ([`Label`]).
+//! - the readings worth scoring for a stretch of music ([`candidates()`]): each a root and a core ([`Label`]).
 
 mod candidates;
 mod cores;
@@ -27,4 +27,5 @@ pub use candidates::{Candidate, Label, Route, allowed, candidates, escape, open_
 pub use cores::{Core, CoreSet, ToneClass, valid, valid_rootless};
 pub use hear::{
     BASS_GAP, BassTexture, HeardNote, Hearing, Level, Line, MOST_UNITS, Mass, Push, Shape, Shaped, Stream, Unit,
+    heard_in,
 };

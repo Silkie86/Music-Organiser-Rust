@@ -541,20 +541,7 @@ type Heard = (Evidence, Option<(Key, f64)>);
 
 /// Hears one case's parts and asks the C# app too.
 fn hear(reader: &mut KeyReader, parts: &[(Role, Vec<Note>)], grid: Grid, ppq: u32, span: Span) -> Option<Heard> {
-    let notes: Vec<Vec<mo_harmony::Note>> = parts
-        .iter()
-        .map(|(_, notes)| {
-            notes
-                .iter()
-                .map(|n| mo_harmony::Note {
-                    start: n.start,
-                    length: n.length,
-                    key: n.key,
-                    velocity: keys::velocity16(n.velocity),
-                })
-                .collect()
-        })
-        .collect();
+    let notes: Vec<Vec<mo_harmony::Note>> = parts.iter().map(|(_, notes)| keys::harmony_notes(notes)).collect();
     let heard_parts: Vec<mo_harmony::Part> =
         parts.iter().zip(&notes).map(|((role, _), notes)| mo_harmony::Part { role: *role, notes }).collect();
     let heard = reader.hear(&heard_parts, grid)?;

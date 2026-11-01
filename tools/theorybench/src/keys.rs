@@ -120,14 +120,17 @@ const CLIP_BARS: [i64; 1] = [8];
 pub enum Parts {
     /// Every part but drums.
     Pitched,
+    /// Every part but the tune and drums: the accompaniment.
+    Accompaniment,
     /// Only the parts with this role.
     Role(String),
 }
 
 impl Parts {
-    fn keeps(&self, role: &str) -> bool {
+    pub(crate) fn keeps(&self, role: &str) -> bool {
         match self {
             Parts::Pitched => role != "drums",
+            Parts::Accompaniment => role != "drums" && role != "melody",
             Parts::Role(r) => role == r,
         }
     }
@@ -147,6 +150,14 @@ pub fn role(name: &str) -> Role {
 /// A MIDI 1.0 velocity in MIDI 2.0's sixteen bits, by the rule the app's readers use (rule 22).
 pub fn velocity16(v: u8) -> u16 {
     mo_formats::velocity::from_7(v)
+}
+
+/// Notes as mo-harmony takes them, their velocities in sixteen bits.
+pub fn harmony_notes(notes: &[Note]) -> Vec<mo_harmony::Note> {
+    notes
+        .iter()
+        .map(|n| mo_harmony::Note { start: n.start, length: n.length, key: n.key, velocity: velocity16(n.velocity) })
+        .collect()
 }
 
 /// The options both `keys` and `keyfit` take, and the files read.
@@ -265,13 +276,13 @@ pub fn all_cases(items: &[Item], parts: &Parts, lengths: &[i64]) -> Vec<(String,
 
 /// One song's notes as the finders hear them: all together, and part by part with each part's role, each in order of
 /// start. Sorted once a song, then cut for each clip.
-struct SongNotes {
-    merged: Vec<Note>,
+pub(crate) struct SongNotes {
+    pub(crate) merged: Vec<Note>,
     parts: Vec<(Role, Vec<Note>)>,
 }
 
 impl SongNotes {
-    fn of(item: &Item, parts: &Parts) -> SongNotes {
+    pub(crate) fn of(item: &Item, parts: &Parts) -> SongNotes {
         let merged = item.notes_of(|r| parts.keeps(r));
         let parts = item
             .parts
@@ -292,25 +303,15 @@ impl SongNotes {
 
     /// The notes from `from` for `length` ticks (the whole song when `None`), moved to start at 0 when cut: all
     /// together, and part by part as mo-harmony takes them.
-    fn heard(&self, cut: Option<(i64, i64)>) -> (Vec<Note>, Vec<(Role, Vec<mo_harmony::Note>)>) {
+    pub(crate) fn heard(&self, cut: Option<(i64, i64)>) -> (Vec<Note>, Vec<(Role, Vec<mo_harmony::Note>)>) {
         let take = |notes: &[Note]| cut.map_or_else(|| notes.to_vec(), |(from, length)| item::cut(notes, from, length));
-        let by_part = self
-            .parts
-            .iter()
-            .map(|(role, notes)| {
-                let notes = take(notes)
-                    .iter()
-                    .map(|n| mo_harmony::Note {
-                        start: n.start,
-                        length: n.length,
-                        key: n.key,
-                        velocity: velocity16(n.velocity),
-                    })
-                    .collect();
-                (*role, notes)
-            })
-            .collect();
+        let by_part = self.parts.iter().map(|(role, notes)| (*role, harmony_notes(&take(notes)))).collect();
         (take(&self.merged), by_part)
+    }
+
+    /// Part by part as mo-harmony takes them, the whole song.
+    pub(crate) fn by_part(&self) -> Vec<(Role, Vec<mo_harmony::Note>)> {
+        self.parts.iter().map(|(role, notes)| (*role, harmony_notes(notes))).collect()
     }
 }
 

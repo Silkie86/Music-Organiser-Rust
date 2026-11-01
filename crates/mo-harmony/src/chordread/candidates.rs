@@ -13,7 +13,8 @@
 //!   lets in, so a real chord with a note missing (C G B♭ D, a C9 with no third) always has a way in.
 //!
 //! What scores each label comes later; this only says which are worth scoring. Everything here moves with the music:
-//! moving the notes moves every label to its new root, and ties are broken from the lowest note.
+//! the list runs from the lowest note up (by root, then by core), so moving the notes moves every label to its new
+//! root and keeps the list in the same order, and the escape's ties are broken in that order too.
 
 use std::fmt;
 
@@ -94,8 +95,8 @@ pub fn allowed(heard: PcSet) -> CoreSet {
 
 /// The escape label: on a root that sounds, the core whose own notes have the most ticks (`ticks`, such as
 /// [`super::Hearing::presence_ticks`]) of all the labels `taken` turns away. A tie goes to the root nearest above the
-/// lowest note sounding (`lowest`), then to the first core in order ([`Core::ALL`]), so the choice moves with the music.
-/// `None` when no root sounds or `taken` takes every label.
+/// lowest note sounding (`lowest`), then to the first core in order ([`Core::ALL`]): the order [`candidates()`] lists
+/// labels in, so the choice moves with the music. `None` when no root sounds or `taken` takes every label.
 pub fn escape(heard: PcSet, ticks: &PerPitch<u64>, lowest: PitchClass, taken: impl Fn(Label) -> bool) -> Option<Label> {
     let mut best: Option<(u128, Label)> = None;
     for up in 0..12 {
@@ -120,20 +121,34 @@ pub fn escape(heard: PcSet, ticks: &PerPitch<u64>, lowest: PitchClass, taken: im
 
 /// The labels worth scoring for a stretch, each once, by the first way that lets it in: `heard` is the notes heard
 /// there (the design's P, [`super::Hearing::heard`]), `ticks` how long each pitch class sounds there (for the escape)
-/// and `lowest` the lowest note sounding there. In order of root from C, then of core; the escape last.
+/// and `lowest` the lowest note sounding there. In the order ties are broken: by root, from the lowest note up, then
+/// by core ([`Core::ALL`]), with the escape in its place.
 pub fn candidates(heard: PcSet, ticks: &PerPitch<u64>, lowest: PitchClass, out: &mut Vec<Candidate>) {
     out.clear();
+    let mut allowed_on = PerPitch::<CoreSet>::default();
     for root in PitchClass::ALL {
-        let rel = heard.above(root);
-        let (route, cores) =
-            if rel.has(0) { (Route::Played, valid(rel)) } else { (Route::Rootless, valid_rootless(rel)) };
-        out.extend(cores.iter().map(|core| Candidate { label: Label::new(root, core), route }));
-        let open = open_fifth(rel).difference(cores);
-        out.extend(open.iter().map(|core| Candidate { label: Label::new(root, core), route: Route::OpenFifth }));
+        allowed_on[root] = allowed(heard.above(root));
     }
-    let taken = |label: Label| allowed(heard.above(label.root)).contains(label.core);
-    if let Some(label) = escape(heard, ticks, lowest, taken) {
-        out.push(Candidate { label, route: Route::Escape });
+    let escape = escape(heard, ticks, lowest, |label| allowed_on[label.root].contains(label.core));
+    for up in 0..12 {
+        let root = lowest.up(up);
+        let rel = heard.above(root);
+        for core in Core::ALL {
+            let label = Label::new(root, core);
+            let route = if !allowed_on[root].contains(core) {
+                if escape != Some(label) {
+                    continue;
+                }
+                Route::Escape
+            } else if !rel.has(0) {
+                Route::Rootless
+            } else if valid(rel).contains(core) {
+                Route::Played
+            } else {
+                Route::OpenFifth
+            };
+            out.push(Candidate { label, route });
+        }
     }
 }
 
@@ -182,11 +197,17 @@ mod tests {
     fn a_triad_lets_in_its_own_chord() {
         // C E G: C and C5 played on C; E G with C over them is an Em(b13); G with C is a Gsus4; and with no D, C E G
         // are a D9sus4's 7th, 9th and 4th (a C triad over a D bass is one). The escape is the label with the most
-        // notes of the rest: C7, whose own C E G sound (its B♭ doesn't; the scoring will see that).
+        // notes of the rest: C7, whose own C E G sound (its B♭ doesn't; the scoring will see that). The list runs
+        // from the lowest note up, by root and then by core.
         let ticks = even("C E G", 480);
         assert_eq!(
             described("C E G", &ticks, "C"),
-            ["C Played", "C5 Played", "D7sus4 Rootless", "Em Played", "Gsus4 Played", "C7 Escape"]
+            ["C Played", "C7 Escape", "C5 Played", "D7sus4 Rootless", "Em Played", "Gsus4 Played"]
+        );
+        // Over an E in the bass, the same labels start from E.
+        assert_eq!(
+            described("C E G", &ticks, "E"),
+            ["Em Played", "Gsus4 Played", "C Played", "C7 Escape", "C5 Played", "D7sus4 Rootless"]
         );
     }
 
@@ -195,7 +216,7 @@ mod tests {
         let ticks = even("C G", 480);
         assert_eq!(
             described("C G", &ticks, "C"),
-            ["C5 Played", "C OpenFifth", "Cm OpenFifth", "Gsus4 Played", "C7 Escape"]
+            ["C OpenFifth", "Cm OpenFifth", "C7 Escape", "C5 Played", "Gsus4 Played"]
         );
         // A sus shape (1 4 5) too, beside its own sus chord; not when a third sounds.
         let sus = described("C F G", &even("C F G", 480), "C");
@@ -216,7 +237,8 @@ mod tests {
         ticks[pc("C")] = 3840;
         let out = described("C D G Bb", &ticks, "C");
         assert!(out.contains(&"C7sus4 Played".to_owned()), "{out:?}");
-        assert_eq!(out.last().map(String::as_str), Some("C7 Escape"), "{out:?}");
+        let escapes: Vec<&String> = out.iter().filter(|c| c.ends_with("Escape")).collect();
+        assert_eq!(escapes, ["C7 Escape"], "{out:?}");
     }
 
     #[test]
@@ -275,10 +297,9 @@ mod tests {
             }
             let lowest = PitchClass::new((dice.next() % 12) as i32);
             candidates(heard, &ticks, lowest, &mut out);
-            let mut labels: Vec<Label> = out.iter().map(|c| c.label).collect();
-            labels.sort_unstable();
-            labels.dedup();
-            assert_eq!(labels.len(), out.len(), "{heard}: a label twice");
+            // In the order ties are broken (from the lowest note up, by root and then by core), so each label once.
+            let place = |c: &Candidate| (c.label.root.above(lowest), c.label.core);
+            assert!(out.windows(2).all(|w| w.first().map(place) < w.last().map(place)), "{heard}: out of order");
             for root in PitchClass::ALL {
                 let rel = heard.above(root);
                 for core in Core::ALL {
@@ -323,18 +344,18 @@ mod tests {
             }
             let lowest = PitchClass::new((dice.next() % 12) as i32);
             candidates(heard, &ticks, lowest, &mut out);
-            let mut want: Vec<(Label, Route)> = out.iter().map(|c| (c.label, c.route)).collect();
-            want.sort_unstable_by_key(|(l, _)| *l);
             for shift in 1..12 {
                 let mut shifted = PerPitch::default();
                 for p in PitchClass::ALL {
                     shifted[p.up(shift)] = ticks[p];
                 }
                 candidates(heard.transposed(shift), &shifted, lowest.up(shift), &mut moved);
-                let mut got: Vec<(Label, Route)> =
-                    moved.iter().map(|c| (Label::new(c.label.root.up(-shift), c.label.core), c.route)).collect();
-                got.sort_unstable_by_key(|(l, _)| *l);
-                assert_eq!(got, want, "{heard} moved {shift}");
+                // The same labels moved, the same ways in, in the same order.
+                let back: Vec<Candidate> = moved
+                    .iter()
+                    .map(|c| Candidate { label: Label::new(c.label.root.up(-shift), c.label.core), route: c.route })
+                    .collect();
+                assert_eq!(back, out, "{heard} moved {shift}");
             }
         }
     }

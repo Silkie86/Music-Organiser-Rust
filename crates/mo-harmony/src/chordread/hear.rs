@@ -459,18 +459,17 @@ impl Hearing {
     }
 
     /// The notes heard over some units (the design's P): those at least half present, so sounding an eighth of the
-    /// time. Worked out in whole numbers, so it never wobbles at the edge.
+    /// time ([`heard_in`]).
     pub fn heard(&self, units: Range<usize>) -> PcSet {
-        let ticks = self.presence_ticks(units.clone());
-        let s = u128::from(self.sounding_ticks(units).max(1));
-        PitchClass::ALL.into_iter().filter(|&pc| 4 * u128::from(ticks[pc]) >= s).collect()
+        heard_in(&self.presence_ticks(units.clone()), self.sounding_ticks(units))
     }
 
     /// The lowest chord or bass note sounding in any of some units (for at least a quarter of a unit, held-over ends
-    /// left out): the note ties between readings are broken from, so that they move with the music.
+    /// left out); where none does, the lowest note of any stream sounding there at all. It's the note ties between
+    /// readings are broken from, so that they move with the music, and there is one wherever a note is heard.
     pub fn lowest(&self, units: Range<usize>) -> Option<u8> {
-        let units = self.clamp(units);
-        self.units.get(units).unwrap_or_default().iter().filter_map(|u| u.lowest).min()
+        let units = self.units.get(self.clamp(units)).unwrap_or_default();
+        units.iter().filter_map(|u| u.lowest).min().or_else(|| units.iter().filter_map(|u| u.lowest_any).min())
     }
 
     /// The unit start nearest a tick (the music's own ticks), from 0 to [`Hearing::units`] (where the last unit
@@ -759,6 +758,9 @@ impl Hearing {
                     }
                     Kind::BassOver | Kind::MelodyOver => {}
                 }
+                if !c.kind.held_over() && c.ticks > 0 {
+                    facts.lowest_any = Some(facts.lowest_any.map_or(c.key, |low| low.min(c.key)));
+                }
                 if !c.kind.held_over() && c.ticks.saturating_mul(4) >= len {
                     facts.sounding.add(stream, pc);
                     if stream != Stream::Melody {
@@ -800,6 +802,14 @@ impl Hearing {
             self.sound.push(sounded);
         }
     }
+}
+
+/// The notes heard (the design's P), from what presence counts ([`Hearing::presence_ticks`]) and the ticks in which a
+/// chord or bass note sounds ([`Hearing::sounding_ticks`]): those at least half present, so sounding an eighth of the
+/// time. Worked out in whole numbers, so it never wobbles at the edge.
+pub fn heard_in(ticks: &PerPitch<u64>, sounding: u64) -> PcSet {
+    let s = u128::from(sounding.max(1));
+    PitchClass::ALL.into_iter().filter(|&pc| 4 * u128::from(ticks[pc]) >= s).collect()
 }
 
 /// Whether a chord part's notes struck in one felt beat (in order of their start) play a broken chord there: see
@@ -1072,6 +1082,8 @@ struct UnitFacts {
     gap_bass: Option<u8>,
     /// The lowest chord or bass note sounding (for at least a quarter of the unit), held-over ends left out.
     lowest: Option<u8>,
+    /// The lowest note of any stream sounding at all, held-over ends left out.
+    lowest_any: Option<u8>,
 }
 
 /// The masses of some units, one table of twelve for each [`Mass`].

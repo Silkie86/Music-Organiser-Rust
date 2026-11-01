@@ -294,13 +294,14 @@ chord missing from them can never be read. `candidates` measures how often the l
 cargo run -p mo-theorybench --release -- candidates path/to/bench/pop909cl.jsonl --inputs piano,full,upper --misses misses.tsv
 ```
 
-Each labelled chord is lined up with the units the reader hears and cut into stretches of at most two bars, the
-longest it scores. The rows add the ways in one at a time: the tables (the root played with the notes that say which
-chord it is, or a rootless seventh chord), open fifths (a root heard with its fifth and no third tries the major and the
-minor triad), and the escape (the label whose own notes sound longest of all the rest): the reader's candidates. The
-last row moves the labelled chord's ends by up to a unit, as the reader finds its own ends: what's missed even then, it
-can't read, and `--misses` lists those stretches. On POP909-CL the design's accept sets apply (a major label also takes
-a maj7 or 6, and so on, as in **lenient** above).
+Each labelled chord is lined up with the units the reader hears and cut into stretches of at most two bars, the longest
+it scores; a label so short that both its ends land on the same unit start is left out, and the report says how much
+time those take. The rows add the ways in one at a time: the tables (the root played with the notes that say which chord
+it is, or a rootless seventh chord), open fifths (a root heard with its fifth and no third tries the major and the minor
+triad), and the escape (the label whose own notes sound longest of all the rest): the reader's candidates. The last row
+moves the labelled chord's ends by up to a unit (keeping to two bars), as the reader finds its own ends: what's missed
+even then, it can't read, and `--misses` lists those stretches. On POP909-CL the design's accept sets apply (a major
+label also takes a maj7 or 6, and so on, as in **lenient** above).
 
 ## Charts played as music (`convert/voice.py`)
 
@@ -436,10 +437,11 @@ choice are in harmony/experiments/chord-reader-experiments.md, E0):
 | the tables alone | 89.19 | 91.34 | 84.23 |
 | + open fifths | 95.43 | 96.25 | 89.87 |
 | + the escape: the reader's candidates | 96.99 | 97.43 | 91.48 |
-| the reader's, ends within a unit | 98.89 | 99.07 | 95.98 |
+| the reader's, ends within a unit | 98.89 | 99.07 | 95.97 |
 
 On every set `voice.py` plays (Billboard and RS200, sets A and B, and the sweep), every row is 99.99% or more for the
-accompaniment and with the tune, and 93.6% to 99.3% within a unit for the upper part alone. There are 8 to 15 candidates a stretch on average (23 in the
-sweep's dense chords). What POP909-CL misses even with the ends moved is mostly a stretch whose notes don't hold the
-chord: one or two notes under a full label, a maj7 label over a plain triad, a sus2 label over an open fifth. With no
-bass part, the chords' roots often aren't played at all: that's most of the upper part's misses.
+accompaniment and with the tune, and 93.6% to 99.3% within a unit for the upper part alone. There are 8 to 15 candidates
+a stretch on average (23 in the sweep's dense chords). Labels too short to place are rare: 20 on POP909-CL, under 0.01%
+of the time, and at most one a set elsewhere. What POP909-CL misses even with the ends moved is mostly a stretch whose
+notes don't hold the chord: one or two notes under a full label, a maj7 label over a plain triad, a sus2 label over an
+open fifth. With no bass part, the chords' roots often aren't played at all: that's most of the upper part's misses.

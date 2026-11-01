@@ -260,6 +260,21 @@ fn the_lowest_note_is_the_lowest_chord_or_bass_note_sounding() {
     assert_eq!(h.lowest(0..8), Some(key("C2")));
     let (from, to) = (5, 3);
     assert_eq!((h.lowest(16..17), h.lowest(from..to)), (None, None));
+    // Where no chord or bass note sounds a quarter of a unit, the lowest note sounding at all, of any stream: a tune
+    // alone, or chords too short.
+    let h =
+        Music::new().tune(notes("E5", 0, BAR)).keys(notes("G4 C5", BAR, 50)).keys(notes("A3", BAR + 120, 40)).hear();
+    assert_eq!((h.lowest(0..8), h.lowest(8..9), h.lowest(0..9)), (Some(key("E5")), Some(key("A3")), Some(key("A3"))));
+    assert_eq!(h.heard(0..8), pcs("E"));
+}
+
+#[test]
+fn the_notes_heard_are_those_sounding_an_eighth_of_the_time() {
+    let ticks = per_pitch(&[(PitchClass::C, 3840), (PitchClass::D, 480), (PitchClass::E, 479)]);
+    assert_eq!(super::heard_in(&ticks, 1920), pcs("C D"));
+    // Nothing sounding: any tick is heard (a tune alone).
+    assert_eq!(super::heard_in(&per_pitch(&[(PitchClass::A, 1)]), 0), pcs("A"));
+    assert_eq!(super::heard_in(&PerPitch::default(), 0), PcSet::EMPTY);
 }
 
 #[test]
@@ -907,8 +922,11 @@ fn slow_unit_facts(h: &Hearing) -> Vec<String> {
             let mut streams = [(PcSet::EMPTY, PcSet::EMPTY, PcSet::EMPTY); 3];
             let mut broken = PcSet::EMPTY;
             let mut onset: Option<(i64, u8)> = None;
-            let mut lowest: Option<u8> = None;
+            let (mut lowest, mut lowest_any): (Option<u8>, Option<u8>) = (None, None);
             for p in pieces.iter().filter(|p| overlap(p) > 0) {
+                if !p.over {
+                    lowest_any = Some(lowest_any.map_or(p.key, |l| l.min(p.key)));
+                }
                 let ticks = overlap(p) as u64;
                 let to_bass =
                     p.stream == Stream::Harmony && !p.broken && !p.over && gap.is_some_and(|g| g % 12 == p.key % 12);
@@ -956,7 +974,8 @@ fn slow_unit_facts(h: &Hearing) -> Vec<String> {
             let (harmony, bass) = (streams[stream_index(Stream::Harmony)].2, streams[stream_index(Stream::Bass)].2);
             let sound = if harmony.union(bass).is_empty() { 0 } else { len as u64 };
             let onset = onset.map(|(_, k)| PitchClass::of_key(k));
-            describe(h.level(u), sound, streams, broken, onset, gap.map(i32::from), lowest.map(i32::from), masses)
+            let lowest = lowest.or(lowest_any).map(i32::from);
+            describe(h.level(u), sound, streams, broken, onset, gap.map(i32::from), lowest, masses)
         })
         .collect()
 }
