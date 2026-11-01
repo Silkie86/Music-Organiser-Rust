@@ -10,9 +10,9 @@
 //
 // What it records, from the start of the arrangement, with arranger automation write on:
 //   the tempo, the master track's volume, a new instrument track's volume and pan, and its MO Probe's on/off,
-//   each set to the values in STEPS, one step every two seconds after six seconds of playing, in touch mode, each control at its own moment in the step and
-//   touched only while it's set (Bitwig 6.1.6 missed some volume and pan moves made all at once); then it stops,
-//   turns automation write off and saves.
+//   each set to the values in STEPS in touch mode, one step every two seconds after six seconds of playing, each
+//   control at its own moment in the step and touched only while it's set (Bitwig 6.1.6 missed some volume and pan
+//   moves made all at once or soon after it started playing); then it stops, turns automation write off and saves.
 // The values are written to Bitwig's Controller Script console as they're set, so the saved file can be checked
 // against them.
 //
