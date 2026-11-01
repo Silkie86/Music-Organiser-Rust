@@ -166,7 +166,7 @@ pub struct Lane {
     pub track: TrackRef,
     pub target: Target,
     pub points: Vec<LanePoint>,
-    /// It comes from an FL mixer insert's fader or pan, not the track's own channel.
+    /// The FL mixer insert whose fader or pan it comes from; `None` when it's the track's own channel's.
     pub from_insert: Option<u32>,
 }
 
@@ -710,10 +710,9 @@ fn audio_clip(c: &FlChannel, fl: &FlAudioClip, info: Option<&SampleFile>, tempo:
     }
 }
 
-/// Adds an automation clip's points to the lane for what it moves on a track, making the lane if it's the first.
 /// The mixer inserts a channel's sound goes through from `start`: all of it (on through each insert sending only to
 /// one other insert, a bus), and part of it (past an insert sending to several, or to the master and another insert:
-/// a send), the master left out.
+/// a send, or a sidechain, which FL also marks there), the master left out.
 fn sound_path(routes: &BTreeMap<u32, Vec<u32>>, start: u32) -> (Vec<u32>, HashSet<u32>) {
     let mut whole = vec![start];
     let mut at = start;
@@ -725,7 +724,7 @@ fn sound_path(routes: &BTreeMap<u32, Vec<u32>>, start: u32) -> (Vec<u32>, HashSe
                 at = next;
             }
             Some(to) if to.len() > 1 => {
-                let mut todo: Vec<u32> = to.iter().copied().filter(|&i| i != 0).collect();
+                let mut todo = to.to_vec();
                 while let Some(i) = todo.pop() {
                     if i != 0 && !whole.contains(&i) && part.insert(i) {
                         todo.extend(routes.get(&i).into_iter().flatten().copied());
@@ -911,8 +910,14 @@ pub fn from_fl(song: &FlSong, options: Options, read_sample: &mut dyn FnMut(&str
 
     // FL's insert faders and pans where they sit (not automated) aren't carried yet: the fader's curve is measured as
     // an automation value, but not yet what the saved fader value is on that scale.
-    let mut used: Vec<u32> =
-        placed.keys().filter_map(|i| song.channels.iter().find(|c| c.index == *i)).map(|c| c.insert).collect();
+    // A channel's sound goes through its insert and on through the buses it's routed to, all of it.
+    let paths: HashMap<u32, (Vec<u32>, HashSet<u32>)> = song
+        .channels
+        .iter()
+        .filter(|c| placed.contains_key(&c.index))
+        .map(|c| (c.index, sound_path(&song.routes, c.insert)))
+        .collect();
+    let mut used: Vec<u32> = paths.values().flat_map(|(whole, _)| whole.iter().copied()).collect();
     used.push(0);
     used.sort_unstable();
     used.dedup();
@@ -1023,7 +1028,7 @@ pub fn from_fl(song: &FlSong, options: Options, read_sample: &mut dyn FnMut(&str
     // after the channels' own volume and pan: Bitwig has one fader for both, so the lane is the channel's level times
     // the insert's, and an insert's pan is carried only where the channel's pan is in the middle. Where a channel's
     // own volume or pan is automated too, that lane is kept and the insert's is left out.
-    for a in faders {
+    for &a in &faders {
         let Some(insert) = a.insert else { continue };
         let pan_lane = a.control == FlControl::InsertPan;
         let target = if pan_lane { Target::Pan } else { Target::Volume };
@@ -1033,15 +1038,22 @@ pub fn from_fl(song: &FlSong, options: Options, read_sample: &mut dyn FnMut(&str
         } else {
             let mut onto = Vec::new();
             for c in &song.channels {
-                let Some(&(first, count)) = placed.get(&c.index) else { continue };
-                let (whole, part) = sound_path(&song.routes, c.insert);
-                if whole.contains(&insert) {
+                let (Some(&(first, count)), Some((whole, part))) = (placed.get(&c.index), paths.get(&c.index)) else {
+                    continue;
+                };
+                let name = tracks.get(first).map_or("", |t| t.name.as_str());
+                // Bitwig has one fader for the track: it follows the automated insert nearest the channel.
+                let nearest = whole
+                    .iter()
+                    .find(|&&i| faders.iter().any(|f| f.insert == Some(i) && f.control == a.control))
+                    .copied();
+                if nearest == Some(insert) {
                     onto.extend((first..first + count).map(TrackRef::Track));
+                } else if let Some(nearer) = nearest.filter(|_| whole.contains(&insert)) {
+                    let what = if pan_lane { "pan" } else { "fader" };
+                    left.push(format!("{name} follows insert {nearer}'s {what}, nearer to it"));
                 } else if part.contains(&insert) {
-                    left.push(format!(
-                        "{} reaches it through a send",
-                        tracks.get(first).map_or("", |t| t.name.as_str())
-                    ));
+                    left.push(format!("{name} reaches it through a send or sidechain"));
                 }
             }
             onto
@@ -1059,19 +1071,6 @@ pub fn from_fl(song: &FlSong, options: Options, read_sample: &mut dyn FnMut(&str
                 TrackRef::Master | TrackRef::Song => None,
                 TrackRef::Track(t) => tracks.get(t),
             };
-            let other = lanes
-                .iter()
-                .find(|l| l.track == track && l.target == target)
-                .and_then(|l| l.from_insert)
-                .filter(|&i| i != insert);
-            if let Some(other) = other {
-                left.push(format!(
-                    "{} already follows insert {other}'s {}",
-                    own.map_or("the master", |t| t.name.as_str()),
-                    if pan_lane { "pan" } else { "fader" }
-                ));
-                continue;
-            }
             let automated = lanes.iter().any(|l| l.track == track && l.target == target && l.from_insert.is_none());
             if automated {
                 left.push(format!(

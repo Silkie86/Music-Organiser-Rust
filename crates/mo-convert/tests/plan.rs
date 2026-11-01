@@ -608,15 +608,23 @@ fn a_bus_fader_reaches_the_channels_routed_to_it_through_other_inserts_but_not_t
     let p = plan(&s);
     let lanes: Vec<_> = p.lanes.iter().map(|l| (l.track, l.from_insert)).collect();
     assert_eq!(lanes, [(TrackRef::Track(0), Some(2)), (TrackRef::Track(1), Some(3))]);
-    // The bus fader would be a second fader lane on Bass, which Bitwig hasn't got, and only part of Keys.
-    let note = "Bus fader: automation left out (Keys reaches it through a send; Bass already follows insert 2's fader)";
+    // Bass follows its own insert, nearer to it than the bus (Bitwig has one fader), and the bus has only part of Keys.
+    let note = "Bus fader: automation left out (Bass follows insert 2's fader, nearer to it; Keys reaches it through a send or \
+         sidechain)";
     assert!(p.notes.contains(&note.to_owned()), "{:?}", p.notes);
+    // The same whichever clip comes first.
+    s.automation.reverse();
+    let reversed = plan(&s);
+    let mut lanes: Vec<_> = reversed.lanes.iter().map(|l| (l.track, l.from_insert)).collect();
+    lanes.sort();
+    assert_eq!(lanes, [(TrackRef::Track(0), Some(2)), (TrackRef::Track(1), Some(3))]);
+    assert!(reversed.notes.contains(&note.to_owned()), "{:?}", reversed.notes);
 
     // On its own, the bus fader goes on Bass.
     s.automation = vec![fader("Bus fader", 1)];
     let p = plan(&s);
     assert_eq!(p.lanes.iter().map(|l| (l.track, l.from_insert)).collect::<Vec<_>>(), [(TrackRef::Track(0), Some(1))]);
-    assert!(
-        p.notes.contains(&"Bus fader: automation left out on some tracks (Keys reaches it through a send)".to_owned())
-    );
+    assert!(p.notes.contains(
+        &"Bus fader: automation left out on some tracks (Keys reaches it through a send or sidechain)".to_owned()
+    ));
 }
