@@ -62,7 +62,7 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> R
     app.set_settings_place(settings as i32);
     app.set_songs_place(Place::Songs.index() as i32);
     app.set_sounds_place(Place::Sounds.index() as i32);
-    app.set_space_place(Place::Space.index() as i32);
+    app.set_backup_place(Place::Backup.index() as i32);
     KEYS.with(|k| *k.borrow_mut() = Some(shortcuts.clone()));
     show_button_keys(&app, &shortcuts);
     go_to(&app, start.index() as i32);
@@ -131,7 +131,7 @@ fn go_to(app: &AppWindow, index: i32) {
         log::info("Page", place.name());
     }
     app.set_place(index);
-    if place == Place::Space {
+    if place == Place::Backup {
         backup::shown();
     }
     KEYS.with(|k| {
@@ -206,6 +206,7 @@ fn coming(place: Place) -> &'static str {
         Place::Space => {
             "The biggest ways to free disk space, across plugins, songs, spare copies and duplicates. Built in phase 4."
         }
+        Place::Backup => "A lean copy of your music on another drive.",
         Place::Settings => "General, Folders, DAWs, Shortcuts and Developer. Filled in as each page arrives.",
     }
 }

@@ -66,8 +66,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         app.set_place(place.index() as i32);
         shots.push((format!("{}-graphite.png", slug(place.name())), capture(&window)));
     }
-    // Space's Backup section, filled with made-up folders.
-    app.set_place(Place::Space.index() as i32);
+    // The Backup page, filled with made-up folders.
+    app.set_place(Place::Backup.index() as i32);
     mo_ui::backup::show_lines(&app, mo_ui::backup::sample_lines());
     shots.push(("backup.png".into(), capture(&window)));
     app.set_place(Place::Songs.index() as i32);
