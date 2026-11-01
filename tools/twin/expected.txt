@@ -6,6 +6,8 @@ fl 25 audio only.flp	channels.len	e949ff46
 fl 25 audio only.flp	info.unplayed{}	9ec94ce1
 fl 25 audio only.flp	song.channels[].clips.len	b93e191a
 fl 25 audio only.flp	song.channels[].notes.len	fb11dd7c
+fl 25 switched and mixer more.flp	song.automation.len	1d42041a
+fl 25 switched and mixer.flp	song.automation.len	713a4d69
 fl 7 garbled header.flp	info.details.Notes	8317528c
 fl 7.flp	info.details.Notes	8317528c
 version 9 bare.flp	info.title	d915282b
