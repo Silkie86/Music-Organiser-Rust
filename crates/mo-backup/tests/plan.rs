@@ -304,7 +304,7 @@ fn big_changes_are_where_the_song_grew_or_lost_a_lot() {
         path: format!("/s/{n}.flp"),
         modified: NaiveDate::from_ymd_opt(2026, 3, 14).unwrap().and_hms_opt(12, 0, 0).unwrap()
             + chrono::TimeDelta::hours(n),
-        tracks,
+        tracks: Some(tracks),
         plugins: 4,
         samples,
         length_beats: beats,
@@ -325,4 +325,9 @@ fn big_changes_are_where_the_song_grew_or_lost_a_lot() {
     // Up a lot, then down a lot: the save in the middle once.
     let up_down = [shape(0, 4, 10, None), shape(1, 9, 10, None), shape(2, 2, 10, None)];
     assert_eq!(big_changes(&up_down), ["/s/1.flp"]);
+
+    // A save whose tracks aren't known is no big change in tracks.
+    let mut unknown = [shape(0, 4, 10, None), shape(1, 9, 10, None)];
+    unknown[0].tracks = None;
+    assert!(big_changes(&unknown).is_empty());
 }

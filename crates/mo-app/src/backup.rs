@@ -303,6 +303,23 @@ fn sample_file(sample: &str, save_folder: &str) -> Option<PathBuf> {
     }
 }
 
+/// What the library knows of each save's size, for finding big changes. A save the reader couldn't read says
+/// nothing (its counts would read as everything taken away). Bars are counted as four beats.
+fn shapes(saves: &[&mo_library::Save]) -> Vec<plan::SaveShape> {
+    saves
+        .iter()
+        .filter(|v| v.error.is_none())
+        .map(|v| plan::SaveShape {
+            path: v.path.clone(),
+            modified: v.modified,
+            tracks: u32::try_from(v.track_count).ok(),
+            plugins: v.plugin_count,
+            samples: v.sample_count,
+            length_beats: (v.length_bars > 0).then(|| f64::from(v.length_bars) * 4.0),
+        })
+        .collect()
+}
+
 /// Walks the folders on the list, finds the songs saved in them and the samples they use (wherever those are), and
 /// makes the plan. Reads only. Slow: on the app's low-priority pool, never the window's thread.
 pub fn prepare(library: &Library, settings: &Settings, stop: &AtomicBool) -> Result<Prepared, String> {
@@ -389,8 +406,10 @@ pub fn prepare(library: &Library, settings: &Settings, stop: &AtomicBool) -> Res
                 }
             }
             let report = measure(&saves, &roots, &used_text, compact, Some(&elsewhere), stop).map_err(|_| ())?;
-            // Saves you mark as milestones by their name always go.
-            let milestones = picked.iter().filter(|v| marked(&v.name)).map(|v| v.path.clone()).collect();
+            // Saves you mark as milestones by their name always go, and so do saves where the song changed a lot.
+            let mut milestones: Vec<String> =
+                picked.iter().filter(|v| marked(&v.name)).map(|v| v.path.clone()).collect();
+            milestones.extend(plan::big_changes(&shapes(&picked)));
             Ok(Measured { saves, report, milestones, used, id: song_id(song) })
         })
         .collect::<Result<_, ()>>()
@@ -985,6 +1004,28 @@ mod tests {
         // A plan made for another folder list isn't shown.
         s.add_folder(PathBuf::from("/more"));
         assert_eq!(page_lines(&s, room, PlanState::Ready(&prepared), now).goes, "");
+    }
+
+    #[test]
+    fn big_changes_come_from_what_the_library_knows() {
+        let t = |h: u32| chrono::NaiveDate::from_ymd_opt(2026, 3, 14).unwrap().and_hms_opt(h, 0, 0).unwrap();
+        let save = |n: u32, tracks: i32, bars: i32| mo_library::Save {
+            path: format!("/s/{n}.flp"),
+            modified: t(n),
+            track_count: tracks,
+            length_bars: bars,
+            plugin_count: 4,
+            sample_count: 10,
+            ..mo_library::Save::default()
+        };
+        let a = save(1, 4, 16);
+        let b = save(2, 9, 16); // five tracks more: big
+        let c = save(3, -1, 40); // tracks unknown; 24 bars longer: big
+        let mut broken = save(4, 0, -1);
+        broken.plugin_count = 0;
+        broken.error = Some("damaged".into()); // couldn't be read: says nothing
+        let found = plan::big_changes(&shapes(&[&a, &b, &c, &broken]));
+        assert_eq!(found, ["/s/2.flp", "/s/3.flp"]);
     }
 
     #[test]
