@@ -1446,9 +1446,16 @@ pub fn toggle_play(app: &AppWindow) -> bool {
 
 /// Plays the picked sound from `from` (0 to 1 of its waveform). The file is read off the window's thread.
 fn play_picked(app: &AppWindow, from: f64) {
+    if let Some(at) = PAGE.with(|p| p.borrow().picked) {
+        play_sound(app, at, from);
+    }
+}
+
+/// Plays the sound at `at` in the list from `from` (0 to 1 of the way through), whether it's picked or not (the
+/// galaxy's sweep plays the stars it passes without picking them).
+fn play_sound(app: &AppWindow, at: usize, from: f64) {
     let Some((at, path, seconds)) = PAGE.with(|p| {
         let p = p.borrow();
-        let at = p.picked?;
         let s = p.list.sound(at)?;
         let seconds = s.analysis.as_ref().map_or(0.0, |a| a.seconds).min(mo_audio::MAX_SECONDS);
         Some((at, s.path.clone(), seconds))

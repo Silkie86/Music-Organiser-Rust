@@ -167,10 +167,12 @@ export global SoundsData {
     callback galaxy-place-by(string);
     callback galaxy-lay-out();
     callback galaxy-reset();
-    // The view's size, and the mouse on it: a drag moves the map, a click picks the star under the mouse and a
-    // double-click plays it, the wheel zooms round the mouse by notches.
+    // The view's size, and the mouse on it: a left drag plays each star it passes, a right or middle drag moves the
+    // map, a click picks the star under the mouse and a double-click plays it, the wheel zooms round the mouse by
+    // notches.
     callback galaxy-resized(length, length);
-    callback galaxy-down(length, length);
+    // A press: the left button sweeps (plays each star it passes), the right or middle button moves the map.
+    callback galaxy-down(length, length, bool);
     callback galaxy-move(length, length);
     callback galaxy-up();
     callback galaxy-cancelled();
@@ -1267,8 +1269,13 @@ export component SoundsPage inherits Rectangle {
                             grabbing: SoundsData.galaxy-grabbing;
                             down(x, y) => {
                                 keys.focus();
-                                SoundsData.galaxy-down(x, y);
+                                SoundsData.galaxy-down(x, y, false);
                             }
+                            side-down(x, y) => {
+                                keys.focus();
+                                SoundsData.galaxy-down(x, y, true);
+                            }
+                            side-up => { SoundsData.galaxy-up(); }
                             move(x, y) => { SoundsData.galaxy-move(x, y); }
                             cancelled => { SoundsData.galaxy-cancelled(); }
                             up => { SoundsData.galaxy-up(); }
