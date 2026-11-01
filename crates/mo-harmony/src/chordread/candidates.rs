@@ -19,7 +19,7 @@
 use std::fmt;
 
 use super::cores::{Core, CoreSet, valid, valid_rootless};
-use crate::pitch::{PcSet, PerPitch, PitchClass};
+use crate::pitch::{PcSet, PerPitch, PitchClass, SetSums};
 
 /// A reading of a stretch before it's named: a root and one of the 16 cores (the design's label). Its tensions, its
 /// bass and its spelling come later, from the notes.
@@ -98,7 +98,23 @@ pub fn allowed(heard: PcSet) -> CoreSet {
 /// lowest note sounding (`lowest`), then to the first core in order ([`Core::ALL`]): the order [`candidates()`] lists
 /// labels in, so the choice moves with the music. `None` when no root sounds or `taken` takes every label.
 pub fn escape(heard: PcSet, ticks: &PerPitch<u64>, lowest: PitchClass, taken: impl Fn(Label) -> bool) -> Option<Label> {
-    let mut best: Option<(u128, Label)> = None;
+    // Where the ticks all add up to less than the top, any set's add up exactly in three lookups.
+    if ticks.total() < u64::MAX {
+        let sums = SetSums::new(ticks);
+        return first_most(heard, lowest, taken, |label| sums.sum(label.tones()));
+    }
+    first_most(heard, lowest, taken, |label| label.tones().iter().map(|pc| u128::from(ticks[pc])).sum::<u128>())
+}
+
+/// The label that isn't taken whose own notes have the most ticks (`own`), on a root that's heard: the first of equals,
+/// from the lowest note up.
+fn first_most<T: PartialOrd>(
+    heard: PcSet,
+    lowest: PitchClass,
+    taken: impl Fn(Label) -> bool,
+    own: impl Fn(Label) -> T,
+) -> Option<Label> {
+    let mut best: Option<(T, Label)> = None;
     for up in 0..12 {
         let root = lowest.up(up);
         if !heard.contains(root) {
@@ -109,9 +125,8 @@ pub fn escape(heard: PcSet, ticks: &PerPitch<u64>, lowest: PitchClass, taken: im
             if taken(label) {
                 continue;
             }
-            let own: u128 = label.tones().iter().map(|pc| u128::from(ticks[pc])).sum();
-            // Only a longer sound replaces the best so far: the first of equals, in the order of the tie-breaks.
-            if best.is_none_or(|(most, _)| own > most) {
+            let own = own(label);
+            if best.as_ref().is_none_or(|(most, _)| own > *most) {
                 best = Some((own, label));
             }
         }
@@ -129,25 +144,39 @@ pub fn candidates(heard: PcSet, ticks: &PerPitch<u64>, lowest: PitchClass, out: 
     for root in PitchClass::ALL {
         allowed_on[root] = allowed(heard.above(root));
     }
-    let escape = escape(heard, ticks, lowest, |label| allowed_on[label.root].contains(label.core));
+    let escape = if ticks.total() < u64::MAX {
+        // The escape as [`escape`] finds it, quicker: from the cores each heard root doesn't let in.
+        let sums = SetSums::new(ticks);
+        let mut best: Option<(u64, Label)> = None;
+        for root in heard.above(lowest).iter().map(|up| lowest.up(i32::from(up.number()))) {
+            for core in allowed_on[root].others().iter() {
+                let label = Label::new(root, core);
+                let own = sums.sum(label.tones());
+                if best.is_none_or(|(most, _)| own > most) {
+                    best = Some((own, label));
+                }
+            }
+        }
+        best.map(|(_, label)| label)
+    } else {
+        escape(heard, ticks, lowest, |label| allowed_on[label.root].contains(label.core))
+    };
     for up in 0..12 {
         let root = lowest.up(up);
-        let rel = heard.above(root);
-        for core in Core::ALL {
-            let label = Label::new(root, core);
-            let route = if !allowed_on[root].contains(core) {
-                if escape != Some(label) {
-                    continue;
-                }
+        let (rel, allowed) = (heard.above(root), allowed_on[root]);
+        let played = valid(rel);
+        let escapes = escape.filter(|e| e.root == root).map(|e| CoreSet::EMPTY.with(e.core));
+        for core in allowed.union(escapes.unwrap_or(CoreSet::EMPTY)).iter() {
+            let route = if !allowed.contains(core) {
                 Route::Escape
             } else if !rel.has(0) {
                 Route::Rootless
-            } else if valid(rel).contains(core) {
+            } else if played.contains(core) {
                 Route::Played
             } else {
                 Route::OpenFifth
             };
-            out.push(Candidate { label, route });
+            out.push(Candidate { label: Label::new(root, core), route });
         }
     }
 }

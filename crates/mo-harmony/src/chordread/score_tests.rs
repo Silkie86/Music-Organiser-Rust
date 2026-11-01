@@ -4,10 +4,10 @@
 
 use std::ops::Range;
 
-use super::hear_tests::{BAR, BEAT, Music, keys_only, line, notes, with_bass};
+use super::hear_tests::{BAR, BEAT, Dice, Music, keys_only, line, notes, random_music, with_bass};
 use super::{
     COUNTED, COUNTED_FROM, Candidate, Core, EVEN, Evidence, Feature, Group, HAND, Hearing, Label, Mass, PerFeature,
-    Push, Route, Scored, Shape, SpanFacts, Weights,
+    Priors, Push, Route, Scored, Scorer, Shape, SpanFacts, Weights,
 };
 use crate::notes::{Note, Role};
 use crate::pitch::PitchClass;
@@ -64,7 +64,7 @@ pub(super) fn facts_on(hearing: &Hearing, units: Range<usize>, push: Option<&Pus
 /// The evidence about a label, with the tables before counting.
 fn evidence(facts: &SpanFacts, name: &str) -> PerFeature<f64> {
     let mut out = PerFeature::default();
-    facts.features(label(name), &EVEN, &mut out);
+    facts.features(label(name), &Priors::of(&EVEN), &mut out);
     out
 }
 
@@ -78,7 +78,7 @@ pub(super) fn ranking_by(facts: &SpanFacts, weights: &Weights) -> Vec<Scored> {
     let mut candidates = Vec::new();
     facts.candidates(&mut candidates);
     let mut out = Vec::new();
-    facts.rank(&candidates, weights, &COUNTED, &mut out);
+    facts.rank(&candidates, &Scorer::new(weights, &Priors::of(&COUNTED)), &mut out);
     out
 }
 
@@ -505,13 +505,13 @@ fn the_priors_read_the_counted_tables() {
     tables.tension[Core::Major.index()][6] = 0.2;
     let facts = facts_on(&Music::new().keys(notes("C4 E4 G4 D5", 0, BAR)).hear(), bar(0), None);
     let mut f = PerFeature::default();
-    facts.features(label("C"), &tables, &mut f);
+    facts.features(label("C"), &Priors::of(&tables), &mut f);
     assert_eq!(f[CorePrior], 0.5f64.ln());
     assert_eq!(f[TensionPrior], 0.9f64.ln() + 0.8f64.ln());
     // On even tables, P2 costs ln 2 for each tension a core can carry, heard or not: two for a major triad (its 9 and
     // ♯11), six for a dominant seventh. So it only leaves the priors out at a trust of 0.
     for (name, tensions) in [("C", 2.0), ("C7", 6.0)] {
-        facts.features(label(name), &EVEN, &mut f);
+        facts.features(label(name), &Priors::of(&EVEN), &mut f);
         assert!((f[TensionPrior] - tensions * 0.5f64.ln()).abs() < 1e-12, "{name}");
     }
     // A D carried in from before, struck for a 32nd of the bar (under an eighth of it), or passing by in a broken
@@ -521,7 +521,7 @@ fn the_priors_read_the_counted_tables() {
     let broken = line("C4 D4 E4 G4 E4 D4 C4 G3", 0, BEAT / 2);
     for (keys, units) in [(carried, bar(1)), (short, bar(0)), (broken, bar(0))] {
         let facts = facts_on(&Music::new().keys(keys).hear(), units, None);
-        facts.features(label("C"), &tables, &mut f);
+        facts.features(label("C"), &Priors::of(&tables), &mut f);
         assert_eq!(f[TensionPrior], (1.0f64 - 0.9).ln() + (1.0f64 - 0.2).ln());
     }
 }
@@ -539,11 +539,11 @@ fn the_priors_stay_finite_on_any_table_and_a_trust_of_0_leaves_them_out() {
     let facts = facts_on(&Music::new().keys(notes("C4 E4 G4", 0, BAR)).hear(), bar(0), None);
     let mut f = PerFeature::default();
     for name in ["C", "Cm", "Am"] {
-        facts.features(label(name), &tables, &mut f);
+        facts.features(label(name), &Priors::of(&tables), &mut f);
         assert!(f.0.iter().all(|v| v.is_finite()), "{name}");
         assert!(f[CorePrior] < 0.0 && f[TensionPrior] <= 0.0);
     }
-    facts.features(label("C"), &tables, &mut f);
+    facts.features(label("C"), &Priors::of(&tables), &mut f);
     assert!(f[CorePrior] < -13.0 && f[TensionPrior] < -13.0);
     // Trusting neither prior, the ranking is the same on any tables; trusting them, it isn't.
     let mut candidates = Vec::new();
@@ -552,11 +552,11 @@ fn the_priors_stay_finite_on_any_table_and_a_trust_of_0_leaves_them_out() {
     let mut untrusting = HAND;
     untrusting.features[CorePrior] = 0.0;
     untrusting.features[TensionPrior] = 0.0;
-    facts.rank(&candidates, &untrusting, &EVEN, &mut even);
-    facts.rank(&candidates, &untrusting, &tables, &mut odd);
+    facts.rank(&candidates, &Scorer::new(&untrusting, &Priors::of(&EVEN)), &mut even);
+    facts.rank(&candidates, &Scorer::new(&untrusting, &Priors::of(&tables)), &mut odd);
     assert_eq!(even, odd);
-    facts.rank(&candidates, &HAND, &EVEN, &mut even);
-    facts.rank(&candidates, &HAND, &tables, &mut odd);
+    facts.rank(&candidates, &Scorer::new(&HAND, &Priors::of(&EVEN)), &mut even);
+    facts.rank(&candidates, &Scorer::new(&HAND, &Priors::of(&tables)), &mut odd);
     assert_ne!(even, odd);
 }
 
@@ -722,6 +722,52 @@ fn equal_scores_keep_the_candidates_order_however_long_the_list() {
     assert!(ties >= 16 * 10, "{ties} ties");
 }
 
+#[test]
+fn the_quick_scoring_agrees_with_the_evidence_weighed_one_piece_at_a_time() {
+    // The quick scoring adds the same evidence up in another order, so it may differ in the last bits, no more: on the
+    // samples and random music, on every span, for the candidates and a share of every other label, on the counted
+    // tables and the even ones.
+    let mut music = samples();
+    let mut dice = Dice(0x9e37_79b9_7f4a_7c15);
+    music.extend((0..12).map(|_| random_music(&mut dice)));
+    let (mut evidence, mut facts, mut f) = (Evidence::new(), SpanFacts::new(), PerFeature::default());
+    let (mut candidates, mut scored) = (Vec::new(), Vec::new());
+    let (mut checked, mut passing) = (0, 0);
+    let mut hearing = Hearing::new();
+    for (k, piece) in music.iter().enumerate() {
+        if !piece.hear_into(&mut hearing) {
+            continue;
+        }
+        evidence.prepare(&hearing);
+        let priors = Priors::of(if k % 2 == 0 { &COUNTED } else { &EVEN });
+        let scorer = Scorer::new(&HAND, &priors);
+        for (n, (units, start, end)) in spans(&hearing).into_iter().enumerate() {
+            evidence.facts(&hearing, units, start.as_ref(), end.as_ref(), &mut facts);
+            facts.candidates(&mut candidates);
+            facts.score_all(&candidates, &scorer, &mut scored);
+            let others = all_labels().skip(n % 5).step_by(5);
+            for label in scored.iter().map(|s| s.label).chain(others) {
+                facts.features(label, &priors, &mut f);
+                let (score, held) = facts.score_one(label, &scorer);
+                let (want, want_held) = (facts.score(&f, &HAND), facts.held_score(&f, &HAND));
+                let close = |a: f64, b: f64| (a - b).abs() <= 1e-9 * b.abs().max(1.0);
+                assert!(
+                    close(score, want) && close(held, want_held),
+                    "{label}: {score} {held}, not {want} {want_held}"
+                );
+                checked += 1;
+                passing += usize::from(f[Feature::Passing] > 0.0);
+            }
+            // All at once, each candidate scores the same as on its own, to the last bit.
+            for s in &scored {
+                let (score, held) = facts.score_one(s.label, &scorer);
+                assert_eq!((score.to_bits(), held.to_bits()), (s.score.to_bits(), s.held.to_bits()), "{}", s.label);
+            }
+        }
+    }
+    assert!(checked > 200_000 && passing > 10_000, "{checked} labels, {passing} with notes passing by");
+}
+
 /// The sample musics, with pushes and loops: what the rules that hold for any music are checked on.
 pub(super) fn samples() -> Vec<Music> {
     let pushed = Music::new()
@@ -773,9 +819,9 @@ fn everything(hearing: &Hearing, shift: i32) -> Vec<(Label, Route, [u64; Feature
     for (units, start, end) in spans(hearing) {
         evidence.facts(hearing, units, start.as_ref(), end.as_ref(), &mut facts);
         facts.candidates(&mut candidates);
-        facts.rank(&candidates, &HAND, &COUNTED, &mut ranked);
+        facts.rank(&candidates, &Scorer::new(&HAND, &Priors::of(&COUNTED)), &mut ranked);
         for s in &ranked {
-            facts.features(s.label, &COUNTED, &mut f);
+            facts.features(s.label, &Priors::of(&COUNTED), &mut f);
             let back = Label::new(s.label.root.up(-shift), s.label.core);
             out.push((back, s.route, f.0.map(f64::to_bits), s.score.to_bits()));
         }
@@ -841,7 +887,7 @@ fn every_piece_of_evidence_stays_in_its_range_on_any_span() {
             let (sound, units) = (facts.sound(), facts.units());
             assert!(sound.start <= units.start && sound.end <= units.end && units.start <= sound.start + 1);
             for l in all_labels() {
-                facts.features(l, &EVEN, &mut f);
+                facts.features(l, &Priors::of(&EVEN), &mut f);
                 assert!(f.0.iter().all(|v| v.is_finite()));
                 assert!(shares.iter().all(|&k| (0.0..=1.0).contains(&f[k])), "{l} {:?}", f.0);
                 assert!(flags.iter().all(|&k| f[k] == 0.0 || f[k] == 1.0));

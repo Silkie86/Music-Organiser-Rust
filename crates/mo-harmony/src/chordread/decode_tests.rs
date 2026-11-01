@@ -6,11 +6,11 @@
 
 use std::ops::Range;
 
-use super::decode::{Kind, Lattice};
+use super::decode::{Kind, Lattice, Reading};
 use super::hear_tests::{BAR, BEAT, Dice, Music, line, notes, random_music};
 use super::score_tests::{Want, bars, facts_on, hand_cases, label, ranking_by, reads, samples};
 use super::{
-    COUNTED, Chance, Core, Decoder, Decoding, Evidence, Feature, HAND, Hearing, Label, PerFeature, PinnedSpan,
+    COUNTED, Chance, Core, Decoder, Decoding, Evidence, Feature, HAND, Hearing, Label, PerFeature, PinnedSpan, Priors,
     SpanFacts, Weights,
 };
 use crate::notes::{Note, Role};
@@ -964,6 +964,21 @@ fn small_music(dice: &mut Dice) -> Music {
     music
 }
 
+/// Up to three pins anywhere in some music heard (past the end, empty, or over each other too), on a chord or only at
+/// their ends.
+fn random_pins(dice: &mut Dice, hearing: &Hearing) -> Vec<PinnedSpan> {
+    let (units, bar) = (hearing.units(), hearing.bar_units().max(1));
+    let mut pins = Vec::new();
+    for _ in 0..dice.below(4) {
+        let start = dice.below((units + bar) as u64) as usize;
+        let end = start + dice.below(3 * bar as u64) as usize;
+        let core = dice.pick(&Core::ALL);
+        let label = (dice.below(3) > 0).then(|| Label::new(PitchClass::new(dice.below(12) as i32), core));
+        pins.push(PinnedSpan { units: start..end, label });
+    }
+    pins
+}
+
 #[test]
 fn any_music_with_any_pins_is_read_whole_and_the_fast_way_agrees_with_the_slow_way() {
     let mut dice = Dice(0x9e37_79b9_7f4a_7c15);
@@ -975,16 +990,8 @@ fn any_music_with_any_pins_is_read_whole_and_the_fast_way_agrees_with_the_slow_w
         if !music.hear_into(&mut hearing) {
             continue;
         }
-        let (units, bar) = (hearing.units(), hearing.bar_units().max(1));
-        // Up to three pins anywhere (past the end, empty, or over each other too), on a chord or only at their ends.
-        let mut pins = Vec::new();
-        for _ in 0..dice.below(4) {
-            let start = dice.below((units + bar) as u64) as usize;
-            let end = start + dice.below(3 * bar as u64) as usize;
-            let core = dice.pick(&Core::ALL);
-            let label = (dice.below(3) > 0).then(|| Label::new(PitchClass::new(dice.below(12) as i32), core));
-            pins.push(PinnedSpan { units: start..end, label });
-        }
+        let units = hearing.units();
+        let pins = random_pins(&mut dice, &hearing);
         let what = format!("round {round}: {music:?}, pins {pins:?}");
         assert!(decoder.decode(&hearing, &HAND, &COUNTED, &pins, &mut out), "nothing read: {what}");
         read += 1;
@@ -1165,7 +1172,7 @@ fn explain_the_paths() {
                 "N" => (facts.none_score(&weights), 0.0),
                 chord => {
                     let label = label(chord);
-                    facts.features(label, &COUNTED, &mut features);
+                    facts.features(label, &Priors::of(&COUNTED), &mut features);
                     for f in Feature::ALL {
                         let times = if f.once() { 1.0 } else { facts.beats() };
                         parts[f] += weights.features[f] * features[f] * times;
@@ -1189,23 +1196,9 @@ fn explain_the_paths() {
     }
 }
 
-#[test]
-#[ignore = "times reading a long song and a dense part whole, and prints what the song reads (run with --release)"]
-fn show_the_speed() {
-    let time = |what: &str, music: &Music| {
-        let (mut decoder, mut out, mut hearing) = (Decoder::new(), Decoding::new(), Hearing::new());
-        for round in 0..3 {
-            let time = std::time::Instant::now();
-            assert!(music.hear_into(&mut hearing));
-            let heard = time.elapsed();
-            assert!(decoder.decode(&hearing, &HAND, &COUNTED, &[], &mut out));
-            let read = time.elapsed() - heard;
-            let (units, spans) = (hearing.units(), out.spans().len());
-            println!("{what}, round {round}: {units} units heard in {heard:?}, read in {read:?} into {spans} spans");
-        }
-    };
-    // 64 bars of a ii V I in four keys, with a walking bass and a tune, the ii pushed into its bar every four bars,
-    // and a bar of rest every sixteen.
+/// 64 bars of a ii V I in four keys, with a walking bass and a tune, the ii pushed into its bar every four bars, and a
+/// bar of rest every sixteen.
+fn song() -> Music {
     let (mut bass, mut keys, mut tune) = (Vec::new(), Vec::new(), Vec::new());
     for bar in 0..64i64 {
         let start = bar * BAR;
@@ -1228,7 +1221,89 @@ fn show_the_speed() {
         }
         tune.extend(up(line("E5 D5 C5 B4 A4 G4 A4 B4", start, BEAT / 2)));
     }
-    let song = Music::new().bass(bass).keys(keys).tune(tune);
+    Music::new().bass(bass).keys(keys).tune(tune)
+}
+
+/// A fingerprint of some words (FNV-1a).
+fn fingerprint(words: &[String]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in words.iter().flat_map(|w| w.bytes().chain(*b"\n")) {
+        hash = (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+    }
+    hash
+}
+
+#[test]
+#[ignore = "prints a fingerprint of everything some music reads (every reading kept, its scores and chances, on every \
+            span): a change meant to change nothing must print the same"]
+fn show_the_fingerprints() {
+    let mut music: Vec<(String, Music, Vec<PinnedSpan>)> = Vec::new();
+    for (name, case, _) in all_cases() {
+        music.push((name, case.looped(), Vec::new()));
+    }
+    for (k, (case, pins)) in the_music().into_iter().enumerate() {
+        music.push((format!("music {k}"), case, pins));
+    }
+    music.push(("the song".to_owned(), song(), Vec::new()));
+    music.push(("16 dense bars".to_owned(), dense(16), Vec::new()));
+    let (mut dice, mut hearing) = (Dice(0x5851_f42d_4c95_7f2d), Hearing::new());
+    for round in 0..200 {
+        let case = if round % 2 == 0 { random_music(&mut dice) } else { small_music(&mut dice) };
+        if case.hear_into(&mut hearing) {
+            let pins = random_pins(&mut dice, &hearing);
+            music.push((format!("random {round}"), case, pins));
+        }
+    }
+    let mut all = Vec::new();
+    let mut dump = String::new();
+    for (what, case, pins) in &music {
+        let whole = Whole::read(case, &HAND, pins);
+        let mut words = everything(&whole.hearing, &whole.decoder, &whole.out, 0);
+        let lattice = whole.decoder.lattice();
+        for (from, to, full, readings) in &lattice.spans {
+            let bits = |r: &Reading| (name(r.0), r.1.to_bits(), r.2.to_bits(), r.3.to_bits());
+            words.push(format!("{from} {to} {full} {:?}", readings.iter().map(bits).collect::<Vec<_>>()));
+        }
+        words.push(format!("{:x}", lattice.total.to_bits()));
+        let print = fingerprint(&words);
+        println!("{what}: {print:016x}");
+        all.push(format!("{print:x}"));
+        dump.extend(words.iter().map(|w| format!("{what}| {w}\n")));
+    }
+    println!("{} pieces, all: {:016x}", all.len(), fingerprint(&all));
+    // DUMP=path writes every word, to compare two runs number by number.
+    if let Ok(path) = std::env::var("DUMP") {
+        std::fs::write(path, dump).unwrap();
+    }
+}
+
+#[test]
+#[ignore = "times reading a long song and a dense part whole, and prints what the song reads (run with --release)"]
+fn show_the_speed() {
+    let time = |what: &str, music: &Music| {
+        let (mut decoder, mut out, mut hearing) = (Decoder::new(), Decoding::new(), Hearing::new());
+        let (mut heard, mut read) = (Vec::new(), Vec::new());
+        for _ in 0..50 {
+            let time = std::time::Instant::now();
+            assert!(music.hear_into(&mut hearing));
+            heard.push(time.elapsed());
+            assert!(decoder.decode(&hearing, &HAND, &COUNTED, &[], &mut out));
+            read.push(time.elapsed() - heard.last().copied().unwrap_or_default());
+        }
+        heard.sort();
+        read.sort();
+        let (units, spans) = (hearing.units(), out.spans().len());
+        let at = |times: &[std::time::Duration], share: f64| times[((times.len() - 1) as f64 * share) as usize];
+        println!(
+            "{what}: {units} units heard in {:?} (the middle of 50 times), read into {spans} spans in {:?} at best, {:?} \
+             in the middle, and {:?} or less 98 times in 100",
+            at(&heard, 0.5),
+            at(&read, 0.0),
+            at(&read, 0.5),
+            at(&read, 0.98),
+        );
+    };
+    let song = song();
     time("64 bars", &song);
     // 16 bars of a dense gospel part.
     let dense = dense(16);

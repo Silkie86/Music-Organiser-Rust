@@ -231,6 +231,54 @@ impl PerPitch<u64> {
     }
 }
 
+/// Values that add up round the top, as whole ticks do (they never get near it): for [`SetSums`].
+pub trait WrappingSum: Copy + Default {
+    fn wrapping_plus(self, other: Self) -> Self;
+}
+
+impl WrappingSum for u64 {
+    fn wrapping_plus(self, other: u64) -> u64 {
+        self.wrapping_add(other)
+    }
+}
+
+/// Any set of pitch classes' values added up in three lookups ([`SetSums::sum`]): the sums of every set of C to E♭,
+/// of E to G and of A♭ to B, worked out once from the twelve values ([`SetSums::fill`]). Whole numbers add up the same
+/// in any order, so it's the same to the last bit as adding them up one at a time.
+#[derive(Clone, Debug, Default)]
+pub struct SetSums<T>([[T; 16]; 3]);
+
+impl<T: WrappingSum> SetSums<T> {
+    pub fn new(values: &PerPitch<T>) -> SetSums<T> {
+        let mut out = SetSums([[T::default(); 16]; 3]);
+        out.fill(values);
+        out
+    }
+
+    /// Works the sums out again for twelve other values.
+    pub fn fill(&mut self, values: &PerPitch<T>) {
+        for (four, table) in (0..).zip(self.0.iter_mut()) {
+            // The empty set's is none (kept from when it was made).
+            for set in 1..16usize {
+                // The set's lowest pitch class, and the rest of it (worked out before it).
+                let lowest = values.0.get(4 * four + set.trailing_zeros() as usize).copied().unwrap_or_default();
+                let rest = table.get(set & (set - 1)).copied().unwrap_or_default();
+                if let Some(cell) = table.get_mut(set) {
+                    *cell = rest.wrapping_plus(lowest);
+                }
+            }
+        }
+    }
+
+    /// The values of the pitch classes in `set`, added up.
+    pub fn sum(&self, set: PcSet) -> T {
+        let bits = usize::from(set.bits());
+        let [low, middle, high] = &self.0;
+        let pick = |table: &[T; 16], four: usize| table.get(four & 15).copied().unwrap_or_default();
+        pick(low, bits).wrapping_plus(pick(middle, bits >> 4)).wrapping_plus(pick(high, bits >> 8))
+    }
+}
+
 impl<T: Copy> PerPitch<T> {
     /// The values with pitch class `root` first: `rotated(root)[i]` is the value `i` semitones above `root`.
     pub fn rotated(&self, root: PitchClass) -> PerPitch<T> {
@@ -283,6 +331,31 @@ mod tests {
                 assert_eq!(set.transposed(s).transposed(-s), set);
                 assert_eq!(set.transposed(s).len(), set.len());
             }
+        }
+    }
+
+    #[test]
+    fn any_sets_values_add_up_in_three_lookups_as_one_at_a_time() {
+        // Small values, and values near the top that add up round it.
+        let mut x = 0x2545_f491_4f6c_dd1du64;
+        for big in [false, true] {
+            let mut values = PerPitch([0u64; 12]);
+            for value in &mut values.0 {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                *value = if big { u64::MAX - x % 1000 } else { x % 100_000 };
+            }
+            let sums = SetSums::new(&values);
+            for bits in 0..4096u16 {
+                let set = PcSet::from_bits(bits);
+                let want = set.iter().fold(0u64, |sum, pc| sum.wrapping_add(values[pc]));
+                assert_eq!(sums.sum(set), want, "{set}");
+            }
+            // Filled again with other values, it forgets the first.
+            let mut again = SetSums::new(&PerPitch([7u64; 12]));
+            again.fill(&values);
+            assert_eq!(again.sum(PcSet::ALL), sums.sum(PcSet::ALL));
         }
     }
 

@@ -17,14 +17,21 @@
 //!
 //! Everything is counted in whole ticks and divided once, so the same notes moved give every label on its new root
 //! exactly the same evidence, to the last bit, and the same ranking.
+//!
+//! The decoder scores some fifty readings on each of thousands of spans, so it scores them the quick way
+//! ([`SpanFacts::score_all`]): what depends only on the span is worked out once, what depends only on a root once for
+//! each root, and the ticks of any set of notes are three lookups ([`SetSums`]). It adds the same evidence up in
+//! another order, so it may differ from the evidence weighed one piece at a time ([`SpanFacts::features`], then
+//! [`SpanFacts::score`]) in the last bits, no more; that slower way stays, as what the quick way is tested against
+//! and what an explanation shows.
 
 use std::ops::{Index, IndexMut, Range};
 
 use super::candidates::{Candidate, Label, Route, candidates};
 use super::cores::Core;
 use super::hear::{BassTexture, Hearing, Level, Line, Mass, Push, Shape, Shaped, Stream, heard_in, presence_of};
-use super::weights::{Tables, Weights};
-use crate::pitch::{PcSet, PerPitch, PitchClass};
+use super::weights::{Priors, Weights};
+use crate::pitch::{PcSet, PerPitch, PitchClass, SetSums, WrappingSum};
 
 /// A piece of evidence about a reading of a span (the design's features, named by their codes there). Shares are of
 /// the span's sound in ticks, so they lie between 0 and 1; the yes-or-no ones are 1 or 0.
@@ -211,6 +218,33 @@ impl Feature {
     }
 }
 
+/// How many pieces of evidence count once ([`Feature::once`]).
+const ONCE_COUNT: usize = 8;
+
+/// The pieces of evidence that count for each felt beat, in order.
+const PER_BEAT: [Feature; Feature::COUNT - ONCE_COUNT] = features_that_count(false);
+
+/// The pieces of evidence that count once, in order.
+const ONCE: [Feature; ONCE_COUNT] = features_that_count(true);
+
+/// The pieces of evidence that count once (or for each felt beat), in order; worked out when the app is built, which
+/// fails if `N` isn't how many there are.
+// The loop stays inside the list of features, and a place past `N` stops the build.
+#[allow(clippy::indexing_slicing)]
+const fn features_that_count<const N: usize>(once: bool) -> [Feature; N] {
+    let mut out = [Feature::ChordTones; N];
+    let (mut i, mut k) = (0, 0);
+    while i < Feature::COUNT {
+        if Feature::ALL[i].once() == once {
+            out[k] = Feature::ALL[i];
+            k += 1;
+        }
+        i += 1;
+    }
+    assert!(k == N, "the wrong number of features");
+    out
+}
+
 /// A value for each piece of evidence, picked by [`Feature`] (so a pick can never miss).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PerFeature<T>(pub [T; Feature::COUNT]);
@@ -257,43 +291,55 @@ struct ShapedNote {
     held_from: i64,
 }
 
-/// A shaped note's part in a span.
+/// What may pass by under a label in a span, from its shaped notes, with the notes alike added up so each label tests
+/// each kind once: a pitch class, the notes it hangs on ([`hangs_on`]), and its shaped ticks inside the span in the
+/// chords, in what they hold over (a note's held-over end) and in the tune.
 #[derive(Clone, Copy, Debug)]
-struct ShapedPart {
-    voice: Voice,
-    /// Whether it's the note's held-over end: it then counts with what the chords hold over.
-    held_over: bool,
+struct Passer {
     pc: PitchClass,
     anchors: PcSet,
-    shape: Shape,
-    /// Its shaped ticks inside the span, from the first unit's start.
-    start: i64,
-    end: i64,
+    chords: u64,
+    over: u64,
+    tune: u64,
 }
 
-impl ShapedPart {
-    fn ticks(&self) -> u64 {
-        u64::try_from(self.end - self.start).unwrap_or(0)
+impl Passer {
+    /// Whether it only passes by under a label whose own notes are `tones`: it isn't one of them, and the notes it hangs
+    /// on are.
+    fn passes_under(&self, tones: PcSet) -> bool {
+        !tones.contains(self.pc) && tones.contains_all(self.anchors)
     }
 }
 
-/// Whether a shaped note only passes by under a label whose own notes are `tones`: it isn't one of them, and the notes
-/// it hangs on are (an anticipation or an approach hangs on the chord after it, so needs only the first).
-fn passes_by(shape: Shape, pc: PitchClass, anchors: PcSet, tones: PcSet) -> bool {
-    !tones.contains(pc)
-        && match shape {
-            Shape::Anticipation | Shape::Approach => true,
-            Shape::Passing | Shape::Neighbour | Shape::Suspension | Shape::Appoggiatura => tones.contains_all(anchors),
-        }
+/// The notes a shaped note must hang on to pass by under a label: those it moves between, or none for an anticipation
+/// or an approach, which hang on the chord after it (so need only not to be the label's own notes).
+fn hangs_on(shape: Shape, anchors: PcSet) -> PcSet {
+    match shape {
+        Shape::Anticipation | Shape::Approach => PcSet::EMPTY,
+        Shape::Passing | Shape::Neighbour | Shape::Suspension | Shape::Appoggiatura => anchors,
+    }
 }
 
-/// A bass note's part in a unit where it would count against a label it doesn't belong to (B9): on a bar line or the
-/// middle of a bar, or from a note played longer than a felt beat.
-#[derive(Clone, Copy, Debug)]
-struct StrongBass {
-    pc: PitchClass,
-    /// Its ticks in the unit times the unit's weight ([`Level::weight`]).
-    weighted: u64,
+/// Some pitch classes' ticks in a span: in the chords (struck in the span, and carried in), in what the chords hold
+/// over, and in the tune. Added up in whole ticks, round the top as the release build adds (they never get near it).
+#[derive(Clone, Copy, Debug, Default)]
+struct Sums {
+    struck: u64,
+    carried: u64,
+    held: u64,
+    tune: u64,
+}
+
+impl Sums {
+    /// Those of all the pitch classes less those of some.
+    fn less(self, other: Sums) -> Sums {
+        Sums {
+            struck: self.struck.wrapping_sub(other.struck),
+            carried: self.carried.wrapping_sub(other.carried),
+            held: self.held.wrapping_sub(other.held),
+            tune: self.tune.wrapping_sub(other.tune),
+        }
+    }
 }
 
 /// Works out the evidence on the spans of one hearing. Keep one and reuse it: [`Evidence::prepare`] once for each
@@ -482,7 +528,7 @@ impl Evidence {
             !chords_struck && !bass_first.is_empty() && bass_first.iter().all(|pc| self.walking(hearing, u, pc));
         out.nothing_struck = first.is_empty() || walks;
         // What passes by in the span.
-        out.shaped.clear();
+        out.passers.clear();
         let (a, b) = (hearing.offset(sound.start), hearing.offset(sound.end));
         let from = self.shaped.partition_point(|s| s.shaped.start < a.saturating_sub(self.longest));
         for s in self.shaped.get(from..).unwrap_or_default().iter().take_while(|s| s.shaped.start < b) {
@@ -494,16 +540,33 @@ impl Evidence {
             };
             // A held-over end counts with what the chords hold over; the tune's counts nowhere, as the masses have it.
             let split = s.held_from.clamp(first, last);
+            let anchors = hangs_on(shape, anchors);
             for (from, to, held_over) in [(first, split, false), (split, last, true)] {
                 let (start, end) = (from.max(a), to.min(b));
-                if start < end && !(held_over && voice == Voice::Tune) {
-                    out.shaped.push(ShapedPart { voice, held_over, pc, anchors, shape, start, end });
+                if start >= end || (held_over && voice == Voice::Tune) {
+                    continue;
+                }
+                let ticks = u64::try_from(end - start).unwrap_or(0);
+                let at = match out.passers.iter().position(|p| p.pc == pc && p.anchors == anchors) {
+                    Some(at) => at,
+                    None => {
+                        out.passers.push(Passer { pc, anchors, chords: 0, over: 0, tune: 0 });
+                        out.passers.len() - 1
+                    }
+                };
+                if let Some(passer) = out.passers.get_mut(at) {
+                    let sum = match (voice, held_over) {
+                        (Voice::Chords, false) => &mut passer.chords,
+                        (Voice::Chords, true) => &mut passer.over,
+                        (Voice::Tune, _) => &mut passer.tune,
+                    };
+                    *sum = sum.saturating_add(ticks);
                 }
             }
         }
 
         // The bass where a note that doesn't belong would count against a label (B9).
-        out.strong_bass.clear();
+        out.strong_bass = PerPitch::default();
         if out.bass == BassTexture::Moving {
             for u in sound {
                 let level = hearing.level(u);
@@ -513,9 +576,20 @@ impl Evidence {
                     if ticks[pc] == 0 || (level < Level::HalfBar && !long.contains(pc)) {
                         continue;
                     }
-                    let weighted = ticks[pc].saturating_mul(level.weight());
-                    out.strong_bass.push(StrongBass { pc, weighted });
+                    out.strong_bass[pc] = out.strong_bass[pc].saturating_add(ticks[pc].saturating_mul(level.weight()));
                 }
+            }
+        }
+
+        // All the pitch classes' ticks, and how much the chords lean towards each root: each note's ticks times its
+        // root weight (in tenths) by its interval above the root.
+        out.all = out.sums(PcSet::ALL);
+        out.fill_ticks();
+        out.leaning = PerPitch::default();
+        for (pc, ticks) in out.chords.iter().filter(|&(_, ticks)| ticks > 0) {
+            for (k, &weight) in (0..).zip(&ROOT_SUPPORT).filter(|&(_, &weight)| weight > 0) {
+                let root = pc.up(-k);
+                out.leaning[root] = out.leaning[root].wrapping_add(ticks.saturating_mul(weight));
             }
         }
     }
@@ -571,8 +645,18 @@ pub struct SpanFacts {
     lowest_chord_total: u64,
     level: Level,
     pushed: bool,
-    shaped: Vec<ShapedPart>,
-    strong_bass: Vec<StrongBass>,
+    /// What may pass by under a label.
+    passers: Vec<Passer>,
+    /// For a moving bass, each pitch class's ticks where it would count against a label it doesn't belong to (B9): on a
+    /// bar line or the middle of a bar, or from a note played longer than a felt beat; each unit's ticks times its
+    /// weight ([`Level::weight`]).
+    strong_bass: PerPitch<u64>,
+    /// All the pitch classes' ticks (for the shares of those that aren't a label's own notes or tensions, found by
+    /// subtraction), and how much the chords lean towards each root (T15, before it's divided).
+    all: Sums,
+    leaning: PerPitch<u64>,
+    /// The ticks of any set of pitch classes, for the quick scoring.
+    ticks: SetSums<Ticks>,
 }
 
 impl Default for SpanFacts {
@@ -605,8 +689,11 @@ impl Default for SpanFacts {
             lowest_chord_total: 0,
             level: Level::Bar,
             pushed: false,
-            shaped: Vec::new(),
-            strong_bass: Vec::new(),
+            passers: Vec::new(),
+            strong_bass: PerPitch::default(),
+            all: Sums::default(),
+            leaning: PerPitch::default(),
+            ticks: SetSums::default(),
         }
     }
 }
@@ -621,6 +708,215 @@ pub struct Scored {
     /// Its score without what counts once, where the span starts ([`SpanFacts::held_score`]): what it scores when the
     /// chord before is the same, held on into the span.
     pub held: f64,
+}
+
+/// The weights and the priors as the quick scoring reads them ([`SpanFacts::score_all`]), worked out once: the
+/// weights and priors themselves, and what depends only on a label's core and the held bass's interval above its root,
+/// weighed.
+#[derive(Clone, Debug)]
+pub struct Scorer {
+    weights: Weights,
+    priors: Priors,
+    /// By core, and by the held bass's interval above the root: B1 to B6, weighed.
+    held_bass: [[f64; 12]; Core::ALL.len()],
+    /// By core: P1 weighed; and by core and tension interval, what P2 adds weighed, not heard and heard.
+    core_prior: [f64; Core::ALL.len()],
+    tension_prior: [[[f64; 2]; 12]; Core::ALL.len()],
+}
+
+impl Default for Scorer {
+    /// Every weight 0.
+    fn default() -> Scorer {
+        let weights = Weights { features: PerFeature::default(), pair: 0.0, none: 0.0 };
+        Scorer::new(&weights, &Priors::default())
+    }
+}
+
+impl Scorer {
+    /// What some weights and priors give.
+    pub fn new(weights: &Weights, priors: &Priors) -> Scorer {
+        use Feature::*;
+        let w = &weights.features;
+        let mut out = Scorer {
+            weights: *weights,
+            priors: *priors,
+            held_bass: [[0.0; 12]; Core::ALL.len()],
+            core_prior: [0.0; Core::ALL.len()],
+            tension_prior: [[[0.0; 2]; 12]; Core::ALL.len()],
+        };
+        let rows = out.held_bass.iter_mut().zip(&mut out.core_prior).zip(&mut out.tension_prior);
+        for (core, ((held, core_prior), tension_prior)) in Core::ALL.into_iter().zip(rows) {
+            let (third, seventh) = (core.third(), core.seventh());
+            let fifth = core.intervals().difference(UNISON).difference(third).difference(seventh);
+            // The six sets don't overlap, so at most one weight counts for each interval.
+            let sets = [
+                (BassRoot, UNISON),
+                (BassThird, third),
+                (BassFifth, fifth),
+                (BassSeventh, seventh),
+                (BassTension, core.tensions()),
+                (BassWrong, core.others()),
+            ];
+            for (k, cell) in (0..).zip(held.iter_mut()) {
+                *cell = sets.iter().filter(|(_, set)| set.has(k)).map(|&(f, _)| w[f]).sum();
+            }
+            *core_prior = w[CorePrior] * priors.core(core);
+            for (interval, cell) in (0..).zip(tension_prior.iter_mut()) {
+                let part = |heard| w[TensionPrior] * priors.tension(core, interval, heard);
+                *cell = [part(false), part(true)];
+            }
+        }
+        out
+    }
+
+    pub fn weights(&self) -> &Weights {
+        &self.weights
+    }
+
+    pub fn priors(&self) -> &Priors {
+        &self.priors
+    }
+}
+
+/// The interval of a root above itself, as a set.
+const UNISON: PcSet = PcSet::of(&[0]);
+
+/// The notes of a label that the quick scoring weighs, worked out for every label when the app is built
+/// ([`LabelNotes::of`]): its own notes, and those but its root; its tensions; and the notes that say which chord it is
+/// (T9 to T12): its third (a 7sus4's 4th, or its 2 in place of it), its seventh or sixth, the fifth its core must have,
+/// and a plain fifth where the core has one it may leave out.
+#[derive(Clone, Copy, Debug)]
+struct LabelNotes {
+    tones: PcSet,
+    upper: PcSet,
+    tensions: PcSet,
+    third: PcSet,
+    seventh: PcSet,
+    fifth: PcSet,
+    plain_fifth: PcSet,
+}
+
+/// [`LabelNotes`] by core and root.
+static LABEL_NOTES: [[LabelNotes; 12]; Core::ALL.len()] = label_notes();
+
+// The loops stay inside the table (16 cores, 12 roots).
+#[allow(clippy::indexing_slicing)]
+const fn label_notes() -> [[LabelNotes; 12]; Core::ALL.len()] {
+    let none = PcSet::EMPTY;
+    let empty = LabelNotes {
+        tones: none,
+        upper: none,
+        tensions: none,
+        third: none,
+        seventh: none,
+        fifth: none,
+        plain_fifth: none,
+    };
+    let mut out = [[empty; 12]; Core::ALL.len()];
+    let mut k = 0;
+    while k < Core::ALL.len() {
+        let core = Core::ALL[k];
+        let third = match core {
+            Core::Dominant7Sus4 => core.third().union(PcSet::of(&[2])),
+            _ => core.third(),
+        };
+        let plain_fifth = if core.intervals().has(7) && core.fifth().is_empty() { PcSet::of(&[7]) } else { none };
+        let mut r = 0;
+        while r < 12 {
+            let root = PitchClass::new(r as i32);
+            out[k][r] = LabelNotes {
+                tones: core.intervals().on(root),
+                upper: core.intervals().difference(UNISON).on(root),
+                tensions: core.tensions().on(root),
+                third: third.on(root),
+                seventh: core.seventh().on(root),
+                fifth: core.fifth().on(root),
+                plain_fifth: plain_fifth.on(root),
+            };
+            r += 1;
+        }
+        k += 1;
+    }
+    out
+}
+
+impl LabelNotes {
+    // A core's place is below 16 and a root's below 12, so always in the table.
+    #[allow(clippy::indexing_slicing)]
+    fn of(label: Label) -> &'static LabelNotes {
+        &LABEL_NOTES[label.core.index()][label.root.index()]
+    }
+}
+
+/// `part` over a whole already made a float (from whole ticks), as [`share`] divides them: the same to the last bit.
+fn share_of(part: u64, whole: f64) -> f64 {
+    if whole == 0.0 { 0.0 } else { part as f64 / whole }
+}
+
+/// Some pitch classes' ticks in a span, as the quick scoring adds them up: those of [`Sums`] (in the chords, struck in
+/// the span and carried in; in what the chords hold over; in the tune), then in the moving bass, weighted (B7, B8),
+/// and in the bass where it would count against a label it doesn't belong to (B9). Added up round the top, as
+/// [`Sums`] are: the bass's two are only read where they add up to less than the top ([`Quick::exact`]).
+#[derive(Clone, Copy, Debug, Default)]
+struct Ticks([u64; 6]);
+
+impl WrappingSum for Ticks {
+    fn wrapping_plus(self, other: Ticks) -> Ticks {
+        let mut out = self;
+        for (sum, more) in out.0.iter_mut().zip(other.0) {
+            *sum = sum.wrapping_add(more);
+        }
+        out
+    }
+}
+
+impl Ticks {
+    fn sums(self) -> Sums {
+        let [struck, carried, held, tune, ..] = self.0;
+        Sums { struck, carried, held, tune }
+    }
+
+    /// The moving bass's, weighted, and where it would count against a label.
+    fn bass(self) -> (u64, u64) {
+        let [.., walking, strong] = self.0;
+        (walking, strong)
+    }
+}
+
+/// What the quick scoring works out once for a span: how far each pitch class is from sounding (T9 to T12), the chord
+/// notes struck long enough to be a tension heard where nothing passes by (P2), the evidence that counts once whatever
+/// the label (E3 to E8), weighed; and the wholes each share is of, as floats. Every share is still its whole ticks
+/// divided once, so the same music at another resolution scores the same to the last bit.
+struct Quick {
+    missing: PerPitch<f64>,
+    heard_tensions: PcSet,
+    once: f64,
+    /// Whether the moving bass's ticks, weighted and where they'd count against a label, add up to less than the top:
+    /// then any set's add up exactly, and those of the notes a set leaves out are all of them less the set's.
+    exact: bool,
+    strong_bass: u64,
+    /// The chords' ticks, the larger of those and what they hold over, the tune's and the weighted bass's.
+    chords: f64,
+    held: f64,
+    tune: f64,
+    bass: f64,
+}
+
+impl Quick {
+    /// How far the notes of a set are from sounding: the nearest of them (0 for none).
+    fn missing(&self, set: PcSet) -> f64 {
+        set.iter().map(|pc| self.missing[pc]).reduce(f64::min).unwrap_or(0.0)
+    }
+}
+
+/// What only passes by under a label ([`SpanFacts::features`]): the pitch classes, and each one's ticks in the chords,
+/// in what they hold over and in the tune.
+#[derive(Default)]
+struct PassingBy {
+    set: PcSet,
+    chords: PerPitch<u64>,
+    over: PerPitch<u64>,
+    tune: PerPitch<u64>,
 }
 
 impl SpanFacts {
@@ -664,66 +960,80 @@ impl SpanFacts {
         candidates(self.heard, &self.presence, self.lowest.unwrap_or(PitchClass::C), out);
     }
 
+    /// Some pitch classes' ticks in the span ([`Sums`]).
+    fn sums(&self, set: PcSet) -> Sums {
+        let mut out = Sums::default();
+        for pc in set.iter() {
+            let ticks = self.chords[pc];
+            if self.struck.contains(pc) {
+                out.struck = out.struck.wrapping_add(ticks);
+            } else {
+                out.carried = out.carried.wrapping_add(ticks);
+            }
+            out.held = out.held.wrapping_add(self.held_over[pc]);
+            out.tune = out.tune.wrapping_add(self.tune[pc]);
+        }
+        out
+    }
+
     /// The evidence about one label.
-    pub fn features(&self, label: Label, tables: &Tables, out: &mut PerFeature<f64>) {
+    pub fn features(&self, label: Label, priors: &Priors, out: &mut PerFeature<f64>) {
         use Feature::*;
         let (root, core) = (label.root, label.core);
         let (tones, tensions) = (label.tones(), label.tensions());
         // The ticks of each pitch class that only pass by under the label: in the chords, in what they hold over, and
         // in the tune.
-        let (mut by_chords, mut by_over, mut by_tune) = (PerPitch::default(), PerPitch::default(), PerPitch::default());
-        for s in self.shaped.iter().filter(|s| passes_by(s.shape, s.pc, s.anchors, tones)) {
-            let by: &mut PerPitch<u64> = match (s.voice, s.held_over) {
-                (Voice::Chords, false) => &mut by_chords,
-                (Voice::Chords, true) => &mut by_over,
-                (Voice::Tune, _) => &mut by_tune,
-            };
-            by[s.pc] = by[s.pc].saturating_add(s.ticks());
+        let (mut by_chords, mut by_over, mut by_tune) =
+            (PerPitch::<u64>::default(), PerPitch::<u64>::default(), PerPitch::<u64>::default());
+        let mut passing_by = PcSet::EMPTY;
+        for p in self.passers.iter().filter(|p| p.passes_under(tones)) {
+            by_chords[p.pc] = by_chords[p.pc].saturating_add(p.chords);
+            by_over[p.pc] = by_over[p.pc].saturating_add(p.over);
+            by_tune[p.pc] = by_tune[p.pc].saturating_add(p.tune);
+            passing_by = passing_by.with(p.pc);
         }
 
-        // The chords and the tune, by what each note is to the label (whole ticks, divided once).
-        let (mut own, mut tension, mut wrong, mut carried, mut passing, mut leaning) = (0, 0, 0, 0, 0, 0);
-        let (mut over, mut over_passing) = (0, 0);
-        let (mut tune_own, mut tune_tension, mut tune_wrong) = (0, 0, 0);
-        for (k, weight) in (0..12).zip(ROOT_SUPPORT) {
-            let pc = root.up(k);
-            let ticks = self.chords[pc];
-            let passes = by_chords[pc].min(ticks);
-            let (held, held_passes) = (self.held_over[pc], by_over[pc].min(self.held_over[pc]));
-            let (tune, tune_passes) = (self.tune[pc], by_tune[pc].min(self.tune[pc]));
-            leaning += ticks.saturating_mul(weight);
-            if tones.contains(pc) {
-                own += ticks;
-                tune_own += tune;
-                continue;
-            }
-            passing += passes;
-            over_passing += held_passes;
+        // The chords and the tune, by what each note is to the label: its own notes, its tensions struck in the span,
+        // and the notes that don't belong (all less the other two), each less what only passes by (whole ticks,
+        // divided once).
+        let (own, carried_tensions) = (self.sums(tones), self.sums(tensions));
+        let rest = self.all.less(own).less(carried_tensions);
+        let (mut tension, mut tune_tension) = (carried_tensions.struck, carried_tensions.tune);
+        let (mut wrong, mut carried, mut over, mut tune_wrong) = (rest.struck, rest.carried, rest.held, rest.tune);
+        let (mut passing, mut over_passing) = (0u64, 0u64);
+        for pc in passing_by.iter() {
+            let passes = by_chords[pc].min(self.chords[pc]);
+            let held_passes = by_over[pc].min(self.held_over[pc]);
+            let tune_passes = by_tune[pc].min(self.tune[pc]);
+            passing = passing.wrapping_add(passes);
+            over_passing = over_passing.wrapping_add(held_passes);
             let struck = self.struck.contains(pc);
             if tensions.contains(pc) {
-                tension += if struck { ticks - passes } else { 0 };
-                tune_tension += tune - tune_passes;
+                if struck {
+                    tension = tension.wrapping_sub(passes);
+                }
+                tune_tension = tune_tension.wrapping_sub(tune_passes);
             } else {
                 if struck {
-                    wrong += ticks - passes;
+                    wrong = wrong.wrapping_sub(passes);
                 } else {
-                    carried += ticks - passes;
+                    carried = carried.wrapping_sub(passes);
                 }
-                over += held - held_passes;
-                tune_wrong += tune - tune_passes;
+                over = over.wrapping_sub(held_passes);
+                tune_wrong = tune_wrong.wrapping_sub(tune_passes);
             }
         }
         // What the chords hold over counts as a share of the larger of their sound and all they hold over.
         let (d, held) = (self.chords_total, self.chords_total.max(self.held_over_total));
-        out[ChordTones] = share(own, d);
+        out[ChordTones] = share(own.struck.wrapping_add(own.carried), d);
         out[Tensions] = share(tension, d);
         out[WrongStruck] = share(wrong, d);
         out[WrongHeld] = share(carried, d) + share(over, held);
         out[Passing] = share(passing, d) + share(over_passing, held);
-        out[TuneTones] = share(tune_own, self.tune_total);
+        out[TuneTones] = share(own.tune, self.tune_total);
         out[TuneTensions] = share(tune_tension, self.tune_total);
         out[TuneWrong] = share(tune_wrong, self.tune_total);
-        out[RootSupport] = share(leaning, d.saturating_mul(10));
+        out[RootSupport] = share(self.leaning[root], d.saturating_mul(10));
 
         // The notes that say which chord it is: how far each is from sounding.
         let missing = |intervals: PcSet| -> f64 {
@@ -735,14 +1045,14 @@ impl SpanFacts {
         };
         // A 7sus4 may sound its 2 in place of its 4th.
         let third = match core {
-            Core::Dominant7Sus4 => core.third().union(PcSet::of(&[2])),
+            Core::Dominant7Sus4 => core.third().union(const { PcSet::of(&[2]) }),
             _ => core.third(),
         };
         out[NoThird] = missing(third);
         out[NoSeventh] = missing(core.seventh());
         out[NoCoreFifth] = missing(core.fifth());
         out[NoPlainFifth] =
-            if core.intervals().has(7) && core.fifth().is_empty() { missing(PcSet::of(&[7])) } else { 0.0 };
+            if core.intervals().has(7) && core.fifth().is_empty() { missing(const { PcSet::of(&[7]) }) } else { 0.0 };
 
         // Where the root is.
         let (played, heard, bass) = (self.played.contains(root), self.heard.contains(root), self.bass);
@@ -758,8 +1068,8 @@ impl SpanFacts {
             _ => None,
         };
         let held_is = |set: PcSet| flag(held.is_some_and(|k| set.has(k)));
-        let fifth = core.intervals().difference(PcSet::of(&[0])).difference(core.third()).difference(core.seventh());
-        out[BassRoot] = held_is(PcSet::of(&[0]));
+        let fifth = core.intervals().difference(UNISON).difference(core.third()).difference(core.seventh());
+        out[BassRoot] = held_is(UNISON);
         out[BassThird] = held_is(core.third());
         out[BassFifth] = held_is(fifth);
         out[BassSeventh] = held_is(core.seventh());
@@ -771,8 +1081,8 @@ impl SpanFacts {
             for pc in tones.without(root).iter() {
                 on_tones = on_tones.saturating_add(self.weighted_bass[pc]);
             }
-            for b in self.strong_bass.iter().filter(|b| !tones.contains(b.pc)) {
-                on_wrong = on_wrong.saturating_add(b.weighted);
+            for pc in PcSet::ALL.difference(tones).iter() {
+                on_wrong = on_wrong.saturating_add(self.strong_bass[pc]);
             }
         }
         let v = self.weighted_bass_total;
@@ -793,16 +1103,224 @@ impl SpanFacts {
         out[Pushed] = flag(self.pushed);
 
         // The template priors.
-        out[CorePrior] = tables.core_prior(core);
+        out[CorePrior] = priors.core(core);
         let mut prior = 0.0;
         for k in core.tensions().iter() {
             let interval = k.number();
             let pc = root.up(i32::from(interval));
             let unpassed = self.chords[pc] - by_chords[pc].min(self.chords[pc]);
             let heard = self.struck.contains(pc) && unpassed.saturating_mul(8) >= self.sounding.max(1);
-            prior += tables.tension_prior(core, interval, heard);
+            prior += priors.tension(core, interval, heard);
         }
         out[TensionPrior] = prior;
+    }
+
+    /// What the quick scoring works out once for the span.
+    fn quick(&self, scorer: &Scorer) -> Quick {
+        use Feature::*;
+        let w = &scorer.weights.features;
+        let s = self.sounding.max(1);
+        let mut missing = PerPitch::default();
+        for pc in PitchClass::ALL {
+            missing[pc] = share(s - self.presence[pc].saturating_mul(2).min(s), s);
+        }
+        let heard_tensions = PitchClass::ALL
+            .into_iter()
+            .filter(|&pc| self.chords[pc].saturating_mul(8) >= s)
+            .fold(PcSet::EMPTY, PcSet::with);
+        let level = |at: Level| flag(self.level == at);
+        let once = w[NothingStruck] * flag(self.nothing_struck)
+            + w[OnBar] * level(Level::Bar)
+            + w[MidBar] * level(Level::HalfBar)
+            + w[OnBeat] * level(Level::Beat)
+            + w[OffBeat] * level(Level::Off)
+            + w[Pushed] * flag(self.pushed);
+        let strong_bass = self.strong_bass.total();
+        Quick {
+            missing,
+            heard_tensions: heard_tensions.intersection(self.struck),
+            once,
+            exact: self.weighted_bass_total < u64::MAX && strong_bass < u64::MAX,
+            strong_bass,
+            chords: self.chords_total as f64,
+            held: self.chords_total.max(self.held_over_total) as f64,
+            tune: self.tune_total as f64,
+            bass: self.weighted_bass_total as f64,
+        }
+    }
+
+    /// Works out the ticks of any set of pitch classes, for the quick scoring.
+    fn fill_ticks(&mut self) {
+        let mut ticks = PerPitch::<Ticks>::default();
+        for pc in PitchClass::ALL {
+            let Sums { struck, carried, held, tune } = self.sums(PcSet::EMPTY.with(pc));
+            ticks[pc] = Ticks([struck, carried, held, tune, self.weighted_bass[pc], self.strong_bass[pc]]);
+        }
+        self.ticks.fill(&ticks);
+    }
+
+    /// What only passes by under a label whose own notes are `tones`.
+    fn passing_by(&self, tones: PcSet) -> PassingBy {
+        let mut out = PassingBy::default();
+        for p in self.passers.iter().filter(|p| p.passes_under(tones)) {
+            out.chords[p.pc] = out.chords[p.pc].saturating_add(p.chords);
+            out.over[p.pc] = out.over[p.pc].saturating_add(p.over);
+            out.tune[p.pc] = out.tune[p.pc].saturating_add(p.tune);
+            out.set = out.set.with(p.pc);
+        }
+        out
+    }
+
+    /// The weighed evidence that depends only on a label's root: for each felt beat (T15, R1 to R4, L1, B7) and once
+    /// (E1).
+    fn root_part(&self, root: PitchClass, scorer: &Scorer) -> (f64, f64) {
+        use Feature::*;
+        let w = &scorer.weights.features;
+        let (played, heard, bass) = (self.played.contains(root), self.heard.contains(root), self.bass);
+        let mut per_beat = w[RootSupport] * share(self.leaning[root], self.chords_total.saturating_mul(10))
+            + w[RootPlayed] * flag(played)
+            + w[RootInBass] * flag(heard && !played)
+            + w[RootlessOverBass] * flag(!heard && bass != BassTexture::None)
+            + w[RootlessNoBass] * flag(!heard && bass == BassTexture::None)
+            + w[LowestIsRoot] * share(self.lowest_chord[root], self.lowest_chord_total);
+        if bass == BassTexture::Moving {
+            per_beat += w[WalkingRoot] * share(self.weighted_bass[root], self.weighted_bass_total);
+        }
+        let once = w[BassStrikesRoot] * flag(self.onset_counts && self.bass_onset == Some(root));
+        (per_beat, once)
+    }
+
+    /// The rest of a label's weighed evidence: for each felt beat, and once.
+    fn label_part(&self, label: Label, scorer: &Scorer, quick: &Quick) -> (f64, f64) {
+        use Feature::*;
+        let w = &scorer.weights.features;
+        let (root, core, notes) = (label.root, label.core, LabelNotes::of(label));
+        let (tones, tensions) = (notes.tones, notes.tensions);
+        // The chords and the tune, by what each note is to the label, less what only passes by, as in `features`.
+        let (tone_ticks, tension_ticks) = (self.ticks.sum(tones), self.ticks.sum(tensions));
+        let (own, carried_tensions) = (tone_ticks.sums(), tension_ticks.sums());
+        let rest = self.all.less(own).less(carried_tensions);
+        let (mut tension, mut tune_tension) = (carried_tensions.struck, carried_tensions.tune);
+        let (mut wrong, mut carried, mut over, mut tune_wrong) = (rest.struck, rest.carried, rest.held, rest.tune);
+        let (mut passing, mut over_passing) = (0u64, 0u64);
+        let by = (!self.passers.is_empty()).then(|| self.passing_by(tones));
+        for (pc, by) in by.iter().flat_map(|by| by.set.iter().map(move |pc| (pc, by))) {
+            let passes = by.chords[pc].min(self.chords[pc]);
+            let held_passes = by.over[pc].min(self.held_over[pc]);
+            let tune_passes = by.tune[pc].min(self.tune[pc]);
+            passing = passing.wrapping_add(passes);
+            over_passing = over_passing.wrapping_add(held_passes);
+            let struck = self.struck.contains(pc);
+            if tensions.contains(pc) {
+                if struck {
+                    tension = tension.wrapping_sub(passes);
+                }
+                tune_tension = tune_tension.wrapping_sub(tune_passes);
+            } else {
+                if struck {
+                    wrong = wrong.wrapping_sub(passes);
+                } else {
+                    carried = carried.wrapping_sub(passes);
+                }
+                over = over.wrapping_sub(held_passes);
+                tune_wrong = tune_wrong.wrapping_sub(tune_passes);
+            }
+        }
+        let (d, held, tune) = (quick.chords, quick.held, quick.tune);
+        let mut per_beat = w[ChordTones] * share_of(own.struck.wrapping_add(own.carried), d)
+            + w[Tensions] * share_of(tension, d)
+            + w[WrongStruck] * share_of(wrong, d)
+            + w[WrongHeld] * (share_of(carried, d) + share_of(over, held))
+            + w[Passing] * (share_of(passing, d) + share_of(over_passing, held))
+            + w[TuneTones] * share_of(own.tune, tune)
+            + w[TuneTensions] * share_of(tune_tension, tune)
+            + w[TuneWrong] * share_of(tune_wrong, tune);
+
+        // The notes that say which chord it is: how far each is from sounding.
+        per_beat += w[NoThird] * quick.missing(notes.third)
+            + w[NoSeventh] * quick.missing(notes.seventh)
+            + w[NoCoreFifth] * quick.missing(notes.fifth);
+        if !notes.plain_fifth.is_empty() {
+            per_beat += w[NoPlainFifth] * quick.missing(notes.plain_fifth);
+        }
+
+        // The bass under it.
+        match self.bass {
+            BassTexture::Held(pc) => {
+                let row = scorer.held_bass.get(core.index());
+                per_beat += row.and_then(|row| row.get(usize::from(pc.above(root)))).copied().unwrap_or(0.0);
+            }
+            BassTexture::Moving => {
+                // Its other notes' (the label's own but its root), and the notes' that aren't its own.
+                let (on_tones, on_wrong) = if quick.exact {
+                    let (walking, strong) = tone_ticks.bass();
+                    (walking.wrapping_sub(self.weighted_bass[root]), quick.strong_bass.wrapping_sub(strong))
+                } else {
+                    let upper = notes.upper.iter().fold(0u64, |sum, pc| sum.saturating_add(self.weighted_bass[pc]));
+                    let others = PcSet::ALL.difference(tones).iter();
+                    (upper, others.fold(0u64, |sum, pc| sum.saturating_add(self.strong_bass[pc])))
+                };
+                per_beat +=
+                    w[WalkingTones] * share_of(on_tones, quick.bass) + w[WalkingWrong] * share_of(on_wrong, quick.bass);
+            }
+            BassTexture::None => {}
+        }
+
+        // The template priors.
+        per_beat += scorer.core_prior.get(core.index()).copied().unwrap_or(0.0);
+        let row = scorer.tension_prior.get(core.index());
+        for k in core.tensions().iter() {
+            let interval = k.number();
+            let pc = root.up(i32::from(interval));
+            let heard = match &by {
+                Some(by) if by.set.contains(pc) => {
+                    let unpassed = self.chords[pc] - by.chords[pc].min(self.chords[pc]);
+                    self.struck.contains(pc) && unpassed.saturating_mul(8) >= self.sounding.max(1)
+                }
+                _ => quick.heard_tensions.contains(pc),
+            };
+            let cell = row.and_then(|row| row.get(usize::from(interval)));
+            per_beat += cell.and_then(|cell| cell.get(usize::from(heard))).copied().unwrap_or(0.0);
+        }
+
+        // Where the span starts.
+        let sounding_tones = tones.intersection(self.heard);
+        let struck_tones = sounding_tones.intersection(self.first_struck);
+        let once = w[StruckAtStart] * share(u64::from(struck_tones.len()), u64::from(sounding_tones.len()));
+        (per_beat, once)
+    }
+
+    /// Every candidate's score and held-on score, in the candidates' order: the evidence ([`SpanFacts::features`])
+    /// weighed ([`SpanFacts::score`], [`SpanFacts::held_score`]), the same up to rounding, worked out quicker. What
+    /// depends only on the span is worked out once, and what depends only on the root once for each root.
+    pub fn score_all(&self, candidates: &[Candidate], scorer: &Scorer, out: &mut Vec<Scored>) {
+        out.clear();
+        let quick = self.quick(scorer);
+        let mut by_root: Option<(PitchClass, (f64, f64))> = None;
+        for c in candidates {
+            let root = c.label.root;
+            let (root_beat, root_once) = match by_root {
+                Some((r, part)) if r == root => part,
+                _ => {
+                    let part = self.root_part(root, scorer);
+                    by_root = Some((root, part));
+                    part
+                }
+            };
+            let (per_beat, once) = self.label_part(c.label, scorer, &quick);
+            let held = self.beats * (root_beat + per_beat);
+            let score = held + (quick.once + root_once + once);
+            out.push(Scored { label: c.label, route: c.route, score, held });
+        }
+    }
+
+    /// One label's score and held-on score, as [`SpanFacts::score_all`] scores it.
+    pub fn score_one(&self, label: Label, scorer: &Scorer) -> (f64, f64) {
+        let quick = self.quick(scorer);
+        let (root_beat, root_once) = self.root_part(label.root, scorer);
+        let (per_beat, once) = self.label_part(label, scorer, &quick);
+        let held = self.beats * (root_beat + per_beat);
+        (held + (quick.once + root_once + once), held)
     }
 
     /// A label's score from its evidence: each piece weighed, those about the whole span counted for each felt beat it
@@ -818,16 +1336,14 @@ impl SpanFacts {
         self.beats * self.parts(features, weights).0
     }
 
-    /// The weighed evidence that counts for each felt beat, and that which counts once.
+    /// The weighed evidence that counts for each felt beat, and that which counts once, each added up in order.
     fn parts(&self, features: &PerFeature<f64>, weights: &Weights) -> (f64, f64) {
         let (mut per_beat, mut once) = (0.0, 0.0);
-        for f in Feature::ALL {
-            let term = weights.features[f] * features[f];
-            if f.once() {
-                once += term;
-            } else {
-                per_beat += term;
-            }
+        for f in PER_BEAT {
+            per_beat += weights.features[f] * features[f];
+        }
+        for f in ONCE {
+            once += weights.features[f] * features[f];
         }
         (per_beat, once)
     }
@@ -837,17 +1353,54 @@ impl SpanFacts {
         self.beats * weights.none
     }
 
-    /// The candidates scored and ranked, best first; equal scores keep the candidates' order, which runs from the
-    /// lowest note up, so the ranking moves with the music.
-    pub fn rank(&self, candidates: &[Candidate], weights: &Weights, tables: &Tables, out: &mut Vec<Scored>) {
-        out.clear();
-        let mut features = PerFeature::default();
-        for c in candidates {
-            self.features(c.label, tables, &mut features);
-            let (per_beat, once) = self.parts(&features, weights);
-            let held = self.beats * per_beat;
-            out.push(Scored { label: c.label, route: c.route, score: held + once, held });
-        }
+    /// The candidates scored ([`SpanFacts::score_all`]) and ranked, best first; equal scores keep the candidates'
+    /// order, which runs from the lowest note up, so the ranking moves with the music.
+    pub fn rank(&self, candidates: &[Candidate], scorer: &Scorer, out: &mut Vec<Scored>) {
+        self.score_all(candidates, scorer, out);
         out.sort_by(|a, b| b.score.total_cmp(&a.score));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chordread::{COUNTED, HAND};
+
+    #[test]
+    fn a_moving_bass_whose_ticks_reach_the_top_scores_as_the_evidence_says() {
+        // Ticks no music has, so the bass's add up only as far as the top: the quick scoring adds them up one at a
+        // time then, as the evidence does.
+        let mut facts = SpanFacts::new();
+        let huge = u64::MAX / 3;
+        facts.sounding = 1920;
+        facts.beats = 4.0;
+        facts.bass = BassTexture::Moving;
+        for (pc, ticks) in [(PitchClass::C, 960), (PitchClass::E, 480), (PitchClass::G, 480), (PitchClass::B, 240)] {
+            facts.chords[pc] = ticks;
+            facts.presence[pc] = ticks;
+            facts.weighted_bass[pc] = huge;
+            facts.strong_bass[pc] = huge;
+            facts.heard = facts.heard.with(pc);
+        }
+        facts.chords_total = facts.chords.total();
+        facts.weighted_bass_total = facts.weighted_bass.total();
+        facts.struck = facts.heard;
+        facts.played = facts.heard;
+        facts.all = facts.sums(PcSet::ALL);
+        facts.fill_ticks();
+        let priors = Priors::of(&COUNTED);
+        let scorer = Scorer::new(&HAND, &priors);
+        assert!(!facts.quick(&scorer).exact);
+        let mut f = PerFeature::default();
+        for root in PitchClass::ALL {
+            for core in Core::ALL {
+                let label = Label::new(root, core);
+                facts.features(label, &priors, &mut f);
+                let (score, held) = facts.score_one(label, &scorer);
+                let (want, want_held) = (facts.score(&f, &HAND), facts.held_score(&f, &HAND));
+                assert!((score - want).abs() <= 1e-9 * want.abs().max(1.0), "{label}: {score}, not {want}");
+                assert!((held - want_held).abs() <= 1e-9 * want_held.abs().max(1.0), "{label}");
+            }
+        }
     }
 }

@@ -46,6 +46,6 @@ pub use hear::{
     BASS_GAP, BassTexture, HeardNote, Hearing, Level, Line, MOST_UNITS, Mass, Push, Shape, Shaped, Stream, Unit,
     heard_in, presence_of,
 };
-pub use score::{Evidence, Feature, PerFeature, Scored, SpanFacts};
+pub use score::{Evidence, Feature, PerFeature, Scored, Scorer, SpanFacts};
 pub use tables::{COUNTED, COUNTED_FROM};
-pub use weights::{EVEN, HAND, Tables, Weights};
+pub use weights::{EVEN, HAND, Priors, Tables, Weights};
