@@ -147,6 +147,11 @@ impl SoundList {
         &self.sounds
     }
 
+    /// How your projects use every sound (by id; ones no project uses are left out), if that's known yet.
+    pub fn usage_map(&self) -> Option<&HashMap<i64, Usage>> {
+        self.used.as_ref()
+    }
+
     /// How your projects use the sound at `i`, if that's known yet (`None` too when none do).
     pub fn usage(&self, i: usize) -> Option<&Usage> {
         self.used.as_ref()?.get(&self.sounds.get(i)?.id)

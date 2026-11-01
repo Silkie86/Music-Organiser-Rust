@@ -207,6 +207,8 @@ fn sounds_shots(
     data.invoke_pick_view(3);
     shots.push(("sounds-history.png".into(), capture(window)));
     data.invoke_close_panel();
+    data.invoke_pick_view(4);
+    shots.push(("sounds-rediscover.png".into(), capture(window)));
     data.invoke_pick_view(0);
     mo_ui::apply_look(app, &Look::from_settings(Some("Paper"), None));
     capture(window);
