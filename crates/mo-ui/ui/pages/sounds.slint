@@ -217,6 +217,8 @@ export global SoundsData {
     // Types past the first chips, in one menu.
     in property <[string]> more-types;
     in property <string> more-type;
+    // Whether any type is picked: shows the Clear types chip.
+    in property <bool> any-type;
     in property <string> length;
     in property <[string]> lengths;
     in property <string> key;
@@ -1025,6 +1027,11 @@ export component SoundsPage inherits Rectangle {
                 value: SoundsData.more-type;
                 choices: SoundsData.more-types;
                 picked(v) => { SoundsData.pick("type", v); }
+            }
+            if SoundsData.any-type: ToggleChip {
+                text: "Clear types";
+                on: false;
+                clicked => { SoundsData.pick("types", ""); }
             }
         }
         if SoundsData.view < 4: HorizontalLayout {

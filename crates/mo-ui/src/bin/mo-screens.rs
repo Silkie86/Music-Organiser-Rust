@@ -197,7 +197,11 @@ fn sounds_shots(
     data.invoke_select(6);
     data.set_played(0.35);
     shots.push(("sounds-panel.png".into(), capture(window)));
+    // Two types at once, with the Clear types chip.
     data.invoke_pick_type(0);
+    data.invoke_pick_type(1);
+    shots.push(("sounds-types.png".into(), capture(window)));
+    data.invoke_pick_type(1);
     data.invoke_pick("key".into(), "A minor".into());
     data.invoke_toggle("mix-well".into());
     shots.push(("sounds-filtered.png".into(), capture(window)));

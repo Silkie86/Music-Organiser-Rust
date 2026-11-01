@@ -767,11 +767,15 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     data.on_pick_type(move |i| {
         let Some(app) = weak.upgrade() else { return };
         let ty = PAGE.with(|p| p.borrow().types.get(i as usize).map(|t| t.0.clone()));
-        change(&app.as_weak(), |f| f.sound_type = if f.sound_type == ty { None } else { ty });
+        if let Some(ty) = ty {
+            change(&app.as_weak(), |f| f.toggle_type(&ty));
+        }
     });
     let weak = app.as_weak();
     data.on_pick(move |kind, value| {
         let value = value.to_string();
+        // The types on chips (not in the More types menu), read before the filters are borrowed to change.
+        let chips: Vec<String> = PAGE.with(|p| p.borrow().types.iter().take(TYPE_CHIPS).map(|t| t.0.clone()).collect());
         change(&weak, |f| match kind.as_str() {
             "length" => {
                 f.length = Length::ALL.into_iter().find(|l| l.name() == value).unwrap_or_default();
@@ -783,7 +787,10 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
                 f.bpm_to = t.and_then(|t| t.2);
             }
             "tag" => f.tag = (!value.is_empty()).then_some(value),
-            "type" => f.sound_type = (!value.is_empty()).then_some(value),
+            // From the More types menu: a type picks or unpicks it; "Any" takes off the types the menu holds.
+            "type" if value.is_empty() => f.sound_types.retain(|t| chips.contains(t)),
+            "type" => f.toggle_type(&value),
+            "types" => f.sound_types.clear(),
             _ => {}
         });
     });
@@ -1286,13 +1293,19 @@ fn show_chips(app: &AppWindow) {
                 name: t.clone().into(),
                 count: list::short_count(*n).into(),
                 colour: list::type_colour(t),
-                on: f.sound_type.as_deref() == Some(t),
+                on: f.sound_types.contains(t),
             })
             .collect();
         data.set_types(ModelRc::new(VecModel::from(chips)));
         data.set_more_types(strings(counts.iter().skip(TYPE_CHIPS).map(|(t, _)| t.as_str())));
-        let more = f.sound_type.as_deref().filter(|t| counts.iter().skip(TYPE_CHIPS).any(|(c, _)| c == t));
-        data.set_more_type(more.unwrap_or_default().into());
+        let more: Vec<&str> = counts
+            .iter()
+            .skip(TYPE_CHIPS)
+            .map(|(t, _)| t.as_str())
+            .filter(|t| f.sound_types.iter().any(|picked| picked == t))
+            .collect();
+        data.set_more_type(more.join(", ").into());
+        data.set_any_type(!f.sound_types.is_empty());
         data.set_length(if f.length == Length::All { "" } else { f.length.name() }.into());
         data.set_key(f.key.map(|(t, m)| music::key_name(t, m, false)).unwrap_or_default().into());
         data.set_mix_well(f.mix_well);
