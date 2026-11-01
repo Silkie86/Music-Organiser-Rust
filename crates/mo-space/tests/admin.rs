@@ -126,7 +126,7 @@ fn a_path_reached_through_a_link_is_left_alone() {
     assert_eq!(real(&at), real(&a));
 }
 
-/// Runs one line of a move step (`swap` or `unswap`) as the app starts it, and says how it went.
+/// Runs one line of a move step (`check`, `swap` or `unswap`) as the app starts it, and says how it went.
 fn move_step(dir: &Path, step: &str, fields: &[&Path]) -> String {
     let (list, result) = (dir.join(format!("{step} list.txt")), dir.join(format!("{step} result.txt")));
     let _ = fs::remove_file(&list);
@@ -173,6 +173,41 @@ fn the_swap_is_checked_again_line_by_line_before_it_happens() {
 }
 
 #[test]
+fn the_check_before_copying_renames_the_folder_and_back_and_only_a_real_folder() {
+    let dir = fixtures("mo-space-admin-check-step");
+    let plugins = dir.join("Plugins");
+    let from = plugins.join("Serum Presets");
+    fs::create_dir_all(from.join("Factory")).unwrap();
+    let checking = plugins.join("Serum Presets (checking)");
+
+    // As the app writes it: renamed and straight back.
+    let said = move_step(&dir, "check", &[&from]);
+    assert!(said.contains("\tdone\t"), "{said}");
+    assert!(!is_link(&from) && from.join("Factory").is_dir() && !checking.exists());
+
+    // Reached through a link now: left alone.
+    folder_link(&plugins, &dir.join("Plugins link"));
+    let said = move_step(&dir, "check", &[&dir.join("Plugins link").join("Serum Presets")]);
+    assert!(said.contains("\tkept\t") && said.contains("reached through a link"), "{said}");
+
+    // Something is called "… (checking)" already: it isn't renamed over it.
+    fs::create_dir_all(&checking).unwrap();
+    let said = move_step(&dir, "check", &[&from]);
+    assert!(said.contains("\tkept\t") && said.contains("(checking) beside it"), "{said}");
+    assert!(from.join("Factory").is_dir() && checking.is_dir());
+    fs::remove_dir(&checking).unwrap();
+
+    // A link in its place, or nothing there: left alone.
+    let link = plugins.join("Serum Link");
+    folder_link(&from, &link);
+    let said = move_step(&dir, "check", &[&link]);
+    assert!(said.contains("\tkept\t") && said.contains("isn't a real folder now"), "{said}");
+    assert!(is_link(&link) && !plugins.join("Serum Link (checking)").exists());
+    let said = move_step(&dir, "check", &[&plugins.join("Gone")]);
+    assert!(said.contains("\tkept\t") && said.contains("isn't a real folder now"), "{said}");
+}
+
+#[test]
 fn putting_a_folder_back_is_checked_again_line_by_line_before_it_happens() {
     let dir = fixtures("mo-space-admin-unswap-checks");
     let plugins = dir.join("Plugins");
@@ -216,15 +251,15 @@ mod guarded {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     use mo_space::admin::{Admin, NoAdmin, run_step_with};
     use mo_space::clean::{Bin, NEEDS_ADMIN, Problem, Removed};
-    use mo_space::folder_move::Drives;
+    use mo_space::folder_move::{CantMove, Drives};
     use mo_space::key;
 
-    use super::{fixtures, folder_link, real, s};
+    use super::{fixtures, folder_link, real, s, unlink};
 
     fn write(dir: &Path, rel: &str, text: &str) {
         let p = dir.join(rel);
@@ -283,11 +318,13 @@ mod guarded {
     }
 
     /// Stands in for Windows' administrator question: unlocks the locked folders while the step runs here, then locks
-    /// them again. With `no`, you said no.
+    /// them again. You say yes to the first `yes_to` questions and no after that. The folders are unlocked for the first
+    /// `unlocks_for` of them; after that even the administrator is refused (something has a file in them open).
     struct Unlock {
         locked: Vec<PathBuf>,
         asked: AtomicUsize,
-        no: bool,
+        yes_to: usize,
+        unlocks_for: usize,
         bin: Option<FolderBin>,
         /// A file something saves while Windows asks.
         saved_meanwhile: Option<PathBuf>,
@@ -298,7 +335,8 @@ mod guarded {
             Unlock {
                 locked: locked.iter().map(|p| p.to_path_buf()).collect(),
                 asked: AtomicUsize::new(0),
-                no: false,
+                yes_to: usize::MAX,
+                unlocks_for: usize::MAX,
                 bin: None,
                 saved_meanwhile: None,
             }
@@ -314,20 +352,36 @@ mod guarded {
             true
         }
         fn ask(&self, args: &[String]) -> Result<(), String> {
-            self.asked.fetch_add(1, Ordering::SeqCst);
-            if self.no {
+            let before = self.asked.fetch_add(1, Ordering::SeqCst);
+            if before >= self.yes_to {
                 return Err("You said no to Windows' administrator question.".to_owned());
             }
             if let Some(saved) = &self.saved_meanwhile {
                 fs::write(saved, "saved meanwhile").unwrap();
             }
-            self.locked.iter().for_each(|d| lock(d, false));
+            if before < self.unlocks_for {
+                self.locked.iter().for_each(|d| lock(d, false));
+            }
             let ran = match &self.bin {
                 Some(bin) => run_step_with(args, bin),
                 None => run_step_with(args, &FolderBin::new(Path::new("unused"))),
             };
             self.locked.iter().for_each(|d| lock(d, true));
             assert!(ran, "the step didn't know {args:?}");
+            Ok(())
+        }
+    }
+
+    /// Windows' question, with something else happening while it asks: `meanwhile` is handed what the step was started
+    /// with, and runs it or not.
+    struct Meanwhile<F>(F);
+
+    impl<F: Fn(&[String]) + Sync> Admin for Meanwhile<F> {
+        fn can_ask(&self) -> bool {
+            true
+        }
+        fn ask(&self, args: &[String]) -> Result<(), String> {
+            (self.0)(args);
             Ok(())
         }
     }
@@ -357,6 +411,21 @@ mod guarded {
         }
         fn free(&self, _path: &Path) -> Option<u64> {
             None
+        }
+        fn admin(&self) -> &dyn Admin {
+            self.0
+        }
+    }
+
+    /// Another drive with no room left.
+    struct FullDrive<'a>(&'a dyn Admin);
+
+    impl Drives for FullDrive<'_> {
+        fn same(&self, _a: &Path, _b: &Path) -> bool {
+            false
+        }
+        fn free(&self, _path: &Path) -> Option<u64> {
+            Some(0)
         }
         fn admin(&self) -> &dyn Admin {
             self.0
@@ -402,8 +471,8 @@ mod guarded {
             &stop,
         );
         let moved = moved.unwrap();
-        // Asked once, at the swap: the copy was made as you.
-        assert_eq!(unlock.asked(), 1);
+        // Asked twice: to check the folder can be renamed before copying, and for the swap. The copy was made as you.
+        assert_eq!(unlock.asked(), 2);
         assert!(fs::symlink_metadata(&from).unwrap().file_type().is_symlink());
         assert_eq!(real(&from), real(&d.join("Spectrasonics")));
         assert_eq!(fs::read_to_string(guarded.join("Spectrasonics (old copy)/Pad.db")).unwrap(), "pad");
@@ -412,7 +481,7 @@ mod guarded {
         write(&d, "Spectrasonics/User.db", "mine");
         let back = mo_space::folder_move::move_back(&moved, &drives, &nothing, &stop).unwrap();
         assert!(back.kept.is_empty());
-        assert_eq!(unlock.asked(), 2);
+        assert_eq!(unlock.asked(), 3);
         assert!(!fs::symlink_metadata(&from).unwrap().file_type().is_symlink());
         assert_eq!(fs::read_to_string(from.join("User.db")).unwrap(), "mine");
         assert!(!guarded.join("Spectrasonics (old copy)").exists());
@@ -431,6 +500,11 @@ mod guarded {
         let from = guarded.join("Spectrasonics");
         lock(&guarded, true);
         let stop = AtomicBool::new(false);
+        // Bytes copied, by any of the moves below: none, as each stops before copying.
+        let copied = AtomicU64::new(0);
+        let progress = |n: u64| {
+            copied.fetch_add(n.max(1), Ordering::SeqCst);
+        };
         let move_it = |drives: &dyn Drives| {
             mo_space::folder_move::move_folder(
                 &s(&from),
@@ -439,12 +513,12 @@ mod guarded {
                 ("omnisphere", mo_space::plugin_space::SpaceKind::Sounds, &[]),
                 drives,
                 &[],
-                &nothing,
+                &progress,
                 &stop,
             )
         };
-        // You said no: the copy made meanwhile goes, and the folder is as it was.
-        let no = Unlock { no: true, ..Unlock::new(&[&guarded]) };
+        // You said no (Windows asks before copying): nothing is copied, and the folder is as it was.
+        let no = Unlock { yes_to: 0, ..Unlock::new(&[&guarded]) };
         let said = move_it(&OtherDrive(&no)).unwrap_err().text();
         assert_eq!(said, "You said no to Windows' administrator question. Nothing was moved.");
         assert_eq!(no.asked(), 1);
@@ -456,15 +530,161 @@ mod guarded {
         assert_eq!(said, mo_space::folder_move::CantMove::NeedsAdmin);
         assert!(!d.join("Spectrasonics").exists());
 
-        // Allowed, but Windows says no even then (the DAW has a file in it open): it says to close it.
+        // Allowed, but Windows says no even then (the DAW has a file in it open): found before copying, and it says to
+        // close it.
         let in_use = Unlock::new(&[]);
         let said = move_it(&OtherDrive(&in_use)).unwrap_err().text();
         assert!(said.contains("even as administrator") && said.contains("close your DAW"), "{said}");
         assert!(said.ends_with("Nothing was moved."), "{said}");
         assert_eq!(in_use.asked(), 1);
         assert!(!d.join("Spectrasonics").exists());
+        assert!(!guarded.join("Spectrasonics (checking)").exists());
+        assert_eq!(fs::read_to_string(from.join("Pad.db")).unwrap(), "pad");
+        assert_eq!(copied.load(Ordering::SeqCst), 0);
+
+        // Yes to the check, then no to the swap once it's copied: the copy goes, and the folder is as it was.
+        let no_to_swap = Unlock { yes_to: 1, ..Unlock::new(&[&guarded]) };
+        let said = move_it(&OtherDrive(&no_to_swap)).unwrap_err().text();
+        assert_eq!(said, "You said no to Windows' administrator question. Nothing was moved.");
+        assert_eq!(no_to_swap.asked(), 2);
+        assert!(copied.load(Ordering::SeqCst) > 0);
+        assert!(!d.join("Spectrasonics").exists());
+        assert!(!guarded.join("Spectrasonics (old copy)").exists());
+        assert_eq!(fs::read_to_string(from.join("Pad.db")).unwrap(), "pad");
+
+        // The DAW opened a file in it after the check: even the administrator is refused at the swap, and the copy goes.
+        let opened = Unlock { unlocks_for: 1, ..Unlock::new(&[&guarded]) };
+        let said = move_it(&OtherDrive(&opened)).unwrap_err().text();
+        assert!(said.contains("even as administrator") && said.ends_with("Nothing was moved."), "{said}");
+        assert_eq!(opened.asked(), 2);
+        assert!(!d.join("Spectrasonics").exists());
+        assert!(!guarded.join("Spectrasonics (old copy)").exists());
         assert_eq!(fs::read_to_string(from.join("Pad.db")).unwrap(), "pad");
         lock(&guarded, false);
+    }
+
+    #[test]
+    fn what_the_check_as_administrator_leaves_decides_what_it_says() {
+        let dir = fixtures("mo-space-admin-check-after");
+        if !locking_works(&dir) {
+            return;
+        }
+        let (guarded, d) = (dir.join("ProgramData"), dir.join("D"));
+        write(&guarded, "Spectrasonics/Pad.db", "pad");
+        fs::create_dir_all(&d).unwrap();
+        let from = guarded.join("Spectrasonics");
+        let checking = guarded.join("Spectrasonics (checking)");
+        lock(&guarded, true);
+        let stop = AtomicBool::new(false);
+        let move_it = |admin: &dyn Admin| {
+            mo_space::folder_move::move_folder(
+                &s(&from),
+                &s(&d),
+                3,
+                ("omnisphere", mo_space::plugin_space::SpaceKind::Sounds, &[]),
+                &OtherDrive(admin),
+                &[],
+                &nothing,
+                &stop,
+            )
+        };
+        let step = |args: &[String]| assert!(run_step_with(args, &FolderBin::new(Path::new("unused"))));
+        let unlocked = |change: &dyn Fn()| {
+            lock(&guarded, false);
+            change();
+            lock(&guarded, true);
+        };
+
+        // Something took the check's name while Windows asked: the step leaves the folder alone, and nothing moved.
+        let named = Meanwhile(|args: &[String]| {
+            unlocked(&|| {
+                fs::create_dir(&checking).unwrap();
+                step(args);
+            })
+        });
+        let said = move_it(&named).unwrap_err();
+        assert!(matches!(&said, CantMove::Failed(why) if why.contains("(checking) beside it")), "{said:?}");
+        assert!(from.join("Pad.db").exists() && !d.join("Spectrasonics").exists());
+        unlocked(&|| fs::remove_dir(&checking).unwrap());
+
+        // An uninstaller removed it while Windows asked: it isn't a real folder now, and nothing is left halfway.
+        let uninstalled = Meanwhile(|args: &[String]| {
+            unlocked(&|| {
+                fs::remove_dir_all(&from).unwrap();
+                step(args);
+            })
+        });
+        let said = move_it(&uninstalled).unwrap_err();
+        assert!(matches!(&said, CantMove::Failed(why) if why.contains("isn't a real folder now")), "{said:?}");
+        assert!(!d.join("Spectrasonics").exists());
+        unlocked(&|| write(&guarded, "Spectrasonics/Pad.db", "pad"));
+
+        // Renamed and not back (the step didn't finish): it says to look for "… (checking)", and nothing is copied.
+        let stuck = Meanwhile(|_: &[String]| unlocked(&|| fs::rename(&from, &checking).unwrap()));
+        let said = move_it(&stuck).unwrap_err();
+        assert!(
+            matches!(&said, CantMove::LeftHalfway(what) if what.contains("\"Spectrasonics (checking)\"")),
+            "{said:?}"
+        );
+        assert!(!d.join("Spectrasonics").exists());
+        lock(&guarded, false);
+        assert_eq!(fs::read_to_string(checking.join("Pad.db")).unwrap(), "pad");
+    }
+
+    #[test]
+    fn linking_a_folder_windows_guards_again_asks_before_copying_and_for_the_swap() {
+        let dir = fixtures("mo-space-admin-link-again");
+        if !locking_works(&dir) {
+            return;
+        }
+        let (guarded, d) = (dir.join("ProgramData"), dir.join("D"));
+        write(&guarded, "Spectrasonics/Pad.db", "pad");
+        fs::create_dir_all(&d).unwrap();
+        let from = guarded.join("Spectrasonics");
+        let stop = AtomicBool::new(false);
+        let moved = mo_space::folder_move::move_folder(
+            &s(&from),
+            &s(&d),
+            3,
+            ("omnisphere", mo_space::plugin_space::SpaceKind::Sounds, &[]),
+            &OtherDrive(&NoAdmin),
+            &[],
+            &nothing,
+            &stop,
+        )
+        .unwrap();
+        let all = vec![moved.clone()];
+        // An update put a real folder where the link was.
+        unlink(&from);
+        write(&guarded, "Spectrasonics/Update.db", "new");
+        lock(&guarded, true);
+        let link_again = |admin: &dyn Admin| {
+            mo_space::after_move::link_again(&moved, &all, 3, false, &OtherDrive(admin), &nothing, &stop)
+        };
+
+        // No room on the other drive: Windows isn't asked for nothing.
+        let not_asked = Unlock::new(&[&guarded]);
+        let said = mo_space::after_move::link_again(&moved, &all, 3, false, &FullDrive(&not_asked), &nothing, &stop);
+        assert!(matches!(said, Err(CantMove::NoRoom { .. })), "{said:?}");
+        assert_eq!(not_asked.asked(), 0);
+
+        // You say no before anything is copied: nothing is.
+        let no = Unlock { yes_to: 0, ..Unlock::new(&[&guarded]) };
+        let said = link_again(&no).unwrap_err().text();
+        assert_eq!(said, "You said no to Windows' administrator question. Nothing was moved.");
+        assert_eq!(no.asked(), 1);
+        assert!(!d.join("Spectrasonics/Update.db").exists());
+        assert!(from.join("Update.db").exists() && !fs::symlink_metadata(&from).unwrap().file_type().is_symlink());
+
+        // Allowed: asked before copying and for the swap.
+        let unlock = Unlock::new(&[&guarded]);
+        let linked = link_again(&unlock).unwrap();
+        lock(&guarded, false);
+        assert_eq!(unlock.asked(), 2);
+        assert_eq!(real(&from), real(&d.join("Spectrasonics")));
+        assert_eq!(fs::read_to_string(d.join("Spectrasonics/Update.db")).unwrap(), "new");
+        assert!(guarded.join("Spectrasonics (after update)/Update.db").exists());
+        assert!(linked.set_aside.path.ends_with("Spectrasonics (after update)"), "{:?}", linked.set_aside);
     }
 
     #[test]
@@ -537,7 +757,7 @@ mod guarded {
 
         // You said no: it stays, and says why.
         let mut bin = FolderBin::new(&dir);
-        bin.admin = Some(Box::new(Unlock { no: true, bin: Some(bin.twin()), ..Unlock::new(&[&guarded]) }));
+        bin.admin = Some(Box::new(Unlock { yes_to: 0, bin: Some(bin.twin()), ..Unlock::new(&[&guarded]) }));
         let kept = mo_space::folder_move::remove_old_copy(&moved, &all, false, &bin, &stop);
         assert!(kept.removed.is_empty());
         assert_eq!(kept.problems[0].why, "You said no to Windows' administrator question.");
@@ -613,7 +833,7 @@ mod guarded {
         let card = lines(&serum, all, &library, &stop).unwrap();
         lock(&docs, true);
         let mut bin = FolderBin::new(&dir);
-        bin.admin = Some(Box::new(Unlock { no: true, ..Unlock::new(&[&docs]) }));
+        bin.admin = Some(Box::new(Unlock { yes_to: 0, ..Unlock::new(&[&docs]) }));
         let done = apply(&card, &serum, all, &library, &bin, &stop);
         lock(&docs, false);
         assert_eq!(done.removed.len(), 1, "{done:?}");
