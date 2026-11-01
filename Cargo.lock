@@ -3063,6 +3063,7 @@ version = "0.1.0"
 dependencies = [
  "mo-formats",
  "mo-harmony",
+ "mo-library",
  "mo-midi",
  "rayon",
  "serde",

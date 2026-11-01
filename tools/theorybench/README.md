@@ -186,24 +186,36 @@ cargo run -p mo-theorybench --release -- keyfit D:\Bench\packs.jsonl --inputs fu
 ```
 
 - **`packs`** reads every MIDI file under the folders as the MIDI page does (each part, its role guessed from its notes
-  and names) and keeps a file only when its name gives exactly one key and no other note or chord name ("Loop 3 - C
-  minor", "Keys_90_Ebmaj", "F#m"; not "Fm Bb Eb", which names chords, nor "Stab (Eb)", where a lone note may or may
-  not be the key). A file whose name says nothing about notes takes the key of the nearest folder (up to three up)
-  that names one. Each part is a piece, heard whole as the MIDI page hears it: as a loop, or as a window when the page
-  cut it from a part longer than 16 bars. Its pack (the first folder below the one given) is its
-  group, and a pack's files share a fold. Their licence says they're Solomon's own, so a plain keyfit run only
-  measures them. The file can't be written inside a copy of this repository.
+  and names), walking the folders as the app does (a folder given inside another is read once, hidden folders passed
+  by). It keeps a file only when its name gives exactly one key and no other note or chord name ("Loop 3 - C minor",
+  "Keys_90_Ebmaj", "F#m"; not "Fm Bb Eb", which names chords, nor "Stab (Eb)" or "Lost in A Dream", where a lone note
+  may or may not be the key). Words that only look like notes are words: "R&B", "D&B", "Who I Am", "E Piano". A lone
+  note after "in" or "of" is a key only at the end of the name or before a number ("Pad in F 90bpm"). A file whose
+  name says nothing about notes takes the key of the nearest folder (up to three up) that names one.
+- Each part is a piece, heard whole as the MIDI page hears it: as a loop, or as a window when the page cut it from a
+  part longer than 16 bars. Its pack (the first folder below the one given; the files right inside a folder given are
+  one pack) is its group, and a pack's files share a fold. The summary warns when there are fewer than 10 packs or one
+  holds more than a third of the pieces, since a refit would have little to learn from and check on. Their licence
+  says they're Solomon's own, so a plain keyfit run only measures them. The file can't be written inside a copy of
+  this repository.
 - **`--shipped`** scores the finder built in, as it is, on folds 1 to 4: what a refit has to beat. Its folds are drawn
-  as a refit's are, so `--dump` and `--against` pair the two case by case.
+  as the run it's compared with draws them (a rescale's when his pieces are read, a plain run's when they aren't), so
+  `--dump` and `--against` pair the two case by case.
 - **`--rescale`** fits only the allowed numbers, on his pieces alone (anything else read is only measured): the
-  built-in finder's weights for each stream times one number, and the minor weight, then the calibration. The tables
-  and corrections inside those weights, the answers' thresholds and the share of notes in one scale stay as built in.
-  A stream scale or calibration number that fewer than 30 pieces sound keeps its built-in number, and so does the
-  minor weight unless 30 pieces are labelled major and 30 minor. The calibration's curve over bars moves only when 30
-  full mixes (several parts together) have it: a part alone adds its own number to the curve, so parts alone can't
-  tell the two apart, and full mixes (the Songs page) would pay for it. `--write` keeps the credits of the weights it
-  scales, adds the rescale and its scales after them, and adds `packs` to `LEARNED_FROM`. A `--dump` of a run that
-  read his pieces names his files, so it can't be written inside a copy of this repository either.
+  built-in finder's weights for each stream times one number, and the minor weight, then the calibration, each held
+  near its built-in value by the penalty. The tables and corrections inside those weights, the answers' thresholds and
+  the share of notes in one scale stay as built in.
+  - A stream scale or calibration number that fewer than 30 pieces sound keeps its built-in number, and so does the
+    minor weight unless 30 pieces are labelled major and 30 minor. Pieces with the same notes in other keys (a loop
+    sold in every key) count once there, and share one piece's weight in the fit.
+  - The calibration's curve over bars moves only when 30 full mixes (several parts together) have it: a part alone
+    adds its own number to the curve, so parts alone can't tell the two apart, and full mixes (the Songs page) would
+    pay for it.
+  - It stops if his pieces fall in fewer than two of folds 1 to 4. The ranges draw a pack's files again together, as
+    one, since they're alike.
+  - `--write` keeps the credits of the weights it scales, adds the rescale and its scales after them, and adds
+    `packs` to `LEARNED_FROM`. A `--dump` of a run that read his pieces names his files, so it can't be written inside
+    a copy of this repository either.
 - **Keep rule**, as for a design change: on folds 1 to 4 against `--shipped`, the whole loops' accuracy rises with its
   range above 0, or their log-loss falls by 0.01 or more; no set gets worse beyond its range; no gate breaks. Then
   `--final` once, and `--write`. Back in the cloud, the public sets are scored with `--shipped` before and after the

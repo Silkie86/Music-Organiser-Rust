@@ -31,6 +31,8 @@ use crate::item::{self, Item, Part, Whole};
 pub const SOURCE: &str = "packs";
 /// How many folders up a file may take its key from.
 const FOLDERS_UP: usize = 3;
+/// Fewer packs than this, and the summary warns that a refit would have little to learn from.
+const MIN_PACKS: usize = 10;
 
 /// What a name says about the key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,26 +69,38 @@ fn quality(text: &str) -> Option<bool> {
     }
 }
 
+/// The words after an "E" that make it electric, not the note: "E Piano", "E-Bass".
+const ELECTRIC: [&str; 8] = ["piano", "pianos", "pno", "keys", "organ", "guitar", "gtr", "bass"];
+
 /// One word of a name, given the words either side ("F#" then "Minor"; "key" then "Eb"). Gives what it is and how
 /// many words it took.
 fn word_at(words: &[&str], i: usize) -> (Word, usize) {
     let Some(&word) = words.get(i) else { return (Word::Other, 1) };
+    let before = |n: usize| i.checked_sub(n).and_then(|j| words.get(j)).map(|w| w.to_ascii_lowercase());
+    let next = words.get(i + 1).copied();
     // A note's letter must be a capital: "a" and "be" are words, "A" and "Bb" may be notes.
     if !word.starts_with(|c: char| ('A'..='G').contains(&c)) {
+        return (Word::Other, 1);
+    }
+    // Words, not keys: "Who I Am", "Am I Wrong"; "E Piano", "E-Guitar".
+    let english = word == "Am" && (before(1).as_deref() == Some("i") || next == Some("I"));
+    let electric = word == "E" && next.is_some_and(|n| ELECTRIC.contains(&n.to_ascii_lowercase().as_str()));
+    if english || electric {
         return (Word::Other, 1);
     }
     let Some((tonic, used)) = parse_note(word) else { return (Word::Other, 1) };
     let rest = word.get(used..).unwrap_or_default();
     let key = |minor: bool| if minor { Key::minor(tonic) } else { Key::major(tonic) };
     if rest.is_empty() {
-        if let Some(minor) = words.get(i + 1).and_then(|next| quality(next)) {
+        if let Some(minor) = next.and_then(quality) {
             return (Word::Key(key(minor)), 2);
         }
-        let after_key = i
-            .checked_sub(1)
-            .and_then(|j| words.get(j))
-            .is_some_and(|before| matches!(before.to_ascii_lowercase().as_str(), "key" | "of" | "in"));
-        return (if after_key { Word::Key(key(false)) } else { Word::Music }, 1);
+        // A lone note names a major key after "key" ("Key E", "Key of E"), and after "in" or "of" when it ends the
+        // name or a number follows ("Chords in Db", "Pad in F 90bpm"); not in "Lost in A Dream".
+        let ends = next.is_none_or(|n| n.starts_with(|c: char| c.is_ascii_digit()));
+        let named = before(1).as_deref() == Some("key")
+            || (matches!(before(1).as_deref(), Some("in" | "of")) && (before(2).as_deref() == Some("key") || ends));
+        return (if named { Word::Key(key(false)) } else { Word::Music }, 1);
     }
     if let Some(minor) = quality(rest) {
         return (Word::Key(key(minor)), 1);
@@ -94,8 +108,38 @@ fn word_at(words: &[&str], i: usize) -> (Word, usize) {
     (if Chord::parse(word).is_some() { Word::Music } else { Word::Other }, 1)
 }
 
+/// A name with the genres whose letters stand alone made into one word each: "R&B" and "R & B" become "RnB", "D&B"
+/// "DnB", so their "B" isn't taken for a note.
+fn genres_joined(name: &str) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    let at = |i: usize| chars.get(i).copied();
+    let alone = |i: Option<usize>| i.and_then(at).is_none_or(|c| !c.is_alphanumeric());
+    let mut out = String::with_capacity(name.len());
+    let mut i = 0;
+    while let Some(c) = at(i) {
+        let first = c.to_ascii_lowercase();
+        let mut j = i + 1;
+        if (first == 'r' || first == 'd') && alone(i.checked_sub(1)) {
+            j += usize::from(at(j) == Some(' '));
+            if at(j) == Some('&') {
+                j += 1;
+                j += usize::from(at(j) == Some(' '));
+                if at(j).is_some_and(|b| b.eq_ignore_ascii_case(&'b')) && alone(Some(j + 1)) {
+                    out.push_str(if first == 'r' { "RnB" } else { "DnB" });
+                    i = j + 1;
+                    continue;
+                }
+            }
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
 /// What a file's or folder's name says about the key ([`Named`]).
 pub fn read_name(name: &str) -> Named {
+    let name = genres_joined(name);
     let words: Vec<&str> = name
         .split([' ', '_', '-', '(', ')', '[', ']', '{', '}', '.', ',', '&', '+', '~', '='])
         .filter(|w| !w.is_empty())
@@ -236,35 +280,38 @@ fn read_file(path: &Path, root: &Path, root_name: &str) -> Outcome {
     Outcome::Read { pieces, drums, from_folder: key.1 }
 }
 
-/// Every MIDI file under a folder, in order of path. A folder inside it that can't be read is counted and passed by;
-/// links aren't followed.
-fn midi_files(root: &Path) -> Result<(Vec<PathBuf>, usize), String> {
-    let mut files = Vec::new();
-    let mut unreadable = 0;
-    let mut stack = vec![root.to_path_buf()];
-    let mut first = true;
-    while let Some(dir) = stack.pop() {
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(e) if first => return Err(format!("{}: {e}", dir.display())),
-            Err(_) => {
-                unreadable += 1;
-                continue;
-            }
-        };
-        first = false;
-        for entry in entries.flatten() {
-            let Ok(kind) = entry.file_type() else { continue };
-            let path = entry.path();
-            if kind.is_dir() {
-                stack.push(path);
-            } else if kind.is_file() && mo_formats::midi::is_midi_path(&path.to_string_lossy()) {
-                files.push(path);
-            }
-        }
+/// Every MIDI file worth reading under the folders, walked as the app walks its folders
+/// (`mo_library::scan::find_files`: a folder given inside another walked once, as part of the outer one; hidden
+/// folders passed by) and kept as the MIDI page keeps them (`mo_midi::indexer::worth_reading`), in order of path. Each
+/// comes with the folder given it's under (the outermost), and how many folders couldn't be read.
+fn midi_files(roots: &[PathBuf]) -> Result<(Vec<(PathBuf, usize)>, usize), String> {
+    if let Some(missing) = roots.iter().find(|r| !r.is_dir()) {
+        return Err(format!("{}: not a folder that can be read", missing.display()));
     }
-    files.sort();
-    Ok((files, unreadable))
+    let names: Vec<String> = roots.iter().map(|r| r.to_string_lossy().into_owned()).collect();
+    let found = mo_library::scan::find_files(
+        &names,
+        &|path: &str| mo_formats::midi::is_midi_path(path),
+        &|name: &str, _parent: &str| name.starts_with('.') || mo_formats::case::eq_ignore_case(name, "__MACOSX"),
+    );
+    let files = found
+        .files
+        .iter()
+        .filter(|f| mo_midi::indexer::worth_reading(&f.path, f.size))
+        .filter_map(|f| Some((PathBuf::from(&f.path), outermost(&f.path, &names)?)))
+        .collect();
+    Ok((files, found.unreadable.len()))
+}
+
+/// Which of the folders given a file found is under: the outermost, when one is inside another (the walk reads the
+/// inner one as part of it).
+fn outermost(path: &str, roots: &[String]) -> Option<usize> {
+    roots
+        .iter()
+        .enumerate()
+        .filter(|(_, root)| mo_library::scan::is_inside(path, root))
+        .min_by_key(|(_, root)| root.replace('\\', "/").trim_end_matches('/').split('/').count())
+        .map(|(r, _)| r)
 }
 
 /// Refuses to write inside a copy of this repository: the file holds Solomon's notes (rule 4).
@@ -324,35 +371,35 @@ pub fn run(args: &[String]) -> Result<(), String> {
     check_out(&out)?;
     let mut counts = Counts::default();
     let mut pieces: Vec<Item> = Vec::new();
-    for root in &roots {
-        let (files, folders_unread) = midi_files(root)?;
-        counts.files += files.len();
-        counts.folders_unread += folders_unread;
-        let root_name =
-            root.file_name().map_or_else(|| root.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned());
-        let outcomes: Vec<Outcome> = files.par_iter().map(|path| read_file(path, root, &root_name)).collect();
-        for outcome in outcomes {
-            match outcome {
-                Outcome::NoKey => counts.no_key += 1,
-                Outcome::Unclear => counts.unclear += 1,
-                Outcome::Unread => counts.unread += 1,
-                Outcome::Read { pieces: found, drums, from_folder } => {
-                    if from_folder {
-                        counts.from_folder += 1;
-                    } else {
-                        counts.from_file += 1;
-                    }
-                    counts.drums += drums;
-                    for piece in found {
-                        let role = piece.parts.first().map_or("", |p| p.role.as_str());
-                        *counts
-                            .roles
-                            .entry(if role.is_empty() { "not known" } else { role }.to_owned())
-                            .or_default() += 1;
-                        *counts.packs.entry(piece.group.clone()).or_default() += 1;
-                        counts.cut += usize::from(piece.whole == Whole::Window);
-                        pieces.push(piece);
-                    }
+    let (files, folders_unread) = midi_files(&roots)?;
+    counts.files = files.len();
+    counts.folders_unread = folders_unread;
+    let root_names: Vec<String> = roots
+        .iter()
+        .map(|root| {
+            root.file_name().map_or_else(|| root.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned())
+        })
+        .collect();
+    let outcomes: Vec<Outcome> =
+        files.par_iter().filter_map(|(path, r)| Some(read_file(path, roots.get(*r)?, root_names.get(*r)?))).collect();
+    for outcome in outcomes {
+        match outcome {
+            Outcome::NoKey => counts.no_key += 1,
+            Outcome::Unclear => counts.unclear += 1,
+            Outcome::Unread => counts.unread += 1,
+            Outcome::Read { pieces: found, drums, from_folder } => {
+                if from_folder {
+                    counts.from_folder += 1;
+                } else {
+                    counts.from_file += 1;
+                }
+                counts.drums += drums;
+                for piece in found {
+                    let role = piece.parts.first().map_or("", |p| p.role.as_str());
+                    *counts.roles.entry(if role.is_empty() { "not known" } else { role }.to_owned()).or_default() += 1;
+                    *counts.packs.entry(piece.group.clone()).or_default() += 1;
+                    counts.cut += usize::from(piece.whole == Whole::Window);
+                    pieces.push(piece);
                 }
             }
         }
@@ -386,6 +433,15 @@ pub fn run(args: &[String]) -> Result<(), String> {
             "  {} of the pieces were cut from parts longer than 16 bars, as the MIDI page cuts them: each is heard \
              as a window, as the page hears it.",
             counts.cut
+        );
+    }
+    let biggest = counts.packs.values().copied().max().unwrap_or(0);
+    if counts.packs.len() < MIN_PACKS || biggest * 3 > pieces.len() {
+        println!(
+            "  Only {} packs, the biggest with {biggest} of the pieces. A pack's files share a fold (one person made \
+             them alike), so a refit would have little to learn from and check on. Give the folder that holds the \
+             packs, each in a folder of its own: the files right inside a folder given count as one pack.",
+            counts.packs.len()
         );
     }
     println!("Written to {}. It holds your notes: keep it on this computer.", out.display());
@@ -425,7 +481,20 @@ mod tests {
             ("C/E walk", Named::Unclear),
             // A lone note: a key or not?
             ("Stab (Eb)", Named::Unclear),
-            ("E Piano C minor", Named::Unclear),
+            ("Lost in A Dream", Named::Unclear),
+            ("Best of E Major Scale Runs C minor", Named::Unclear),
+            // Words that only look like notes.
+            ("E Piano C minor", key("Cm")),
+            ("E-Bass Loop", Named::Nothing),
+            ("Who I Am - Gospel Keys", Named::Nothing),
+            ("Am I Wrong (F minor)", key("Fm")),
+            ("R&B Keys - C minor", key("Cm")),
+            ("RnB_Loop_Ebmaj", key("Eb")),
+            ("90s R & B Chords", Named::Nothing),
+            ("D&B Bass Gm", key("Gm")),
+            // After "in" or "of", a lone note is the key when the name ends or a number follows.
+            ("Pad in F 90bpm", key("F")),
+            ("Key of Ab Loop", key("Ab")),
             // Two keys.
             ("Am to C major", Named::Unclear),
         ] {
@@ -493,6 +562,15 @@ mod tests {
         // Drums aren't kept.
         let kit = extract::from_bytes(&path, &smf(&[36, 38, 42, 36, 38, 42], 9, "Kit"), &[]).unwrap();
         assert_eq!(pieces_of(&kit, "x", "g", c_minor, false).1, 1);
+    }
+
+    #[test]
+    fn a_file_belongs_to_the_outermost_folder_given() {
+        let roots = ["D:\\Packs".to_owned(), "D:\\Packs\\Gospel".to_owned(), "E:/More".to_owned()];
+        assert_eq!(outermost("D:\\Packs\\Gospel\\Keys\\a.mid", &roots), Some(0));
+        assert_eq!(outermost("D:\\Packs\\b.mid", &roots), Some(0));
+        assert_eq!(outermost("e:\\more\\c.mid", &roots), Some(2));
+        assert_eq!(outermost("D:\\Packs Old\\d.mid", &roots), None);
     }
 
     #[test]
