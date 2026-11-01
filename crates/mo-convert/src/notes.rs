@@ -47,13 +47,14 @@ pub fn insert_name(insert: &FlInsert) -> String {
     if insert.name.is_empty() { format!("Insert {}", insert.index) } else { insert.name.clone() }
 }
 
-/// What's said of the mixer inserts (the master is insert 0) whose fader or pan isn't where FL leaves it, which isn't
-/// carried over yet; `None` when none.
+/// What's said of the mixer inserts (the master is insert 0) whose fader or pan isn't where FL leaves it: where it sits
+/// isn't carried over yet (its automation is); `None` when none.
 pub fn moved_inserts<'a>(inserts: impl IntoIterator<Item = &'a FlInsert>) -> Option<String> {
     let moved: Vec<String> = inserts.into_iter().filter(|i| i.moved()).map(insert_label).collect();
     (!moved.is_empty()).then(|| {
         format!(
-            "Mixer: the fader or pan of {} isn't at FL Studio's default, and mixer faders and pans aren't carried over yet",
+            "Mixer: the fader or pan of {} isn't at FL Studio's default, and where a mixer fader or pan sits isn't carried \
+             over yet",
             moved.join(", ")
         )
     })
@@ -142,8 +143,8 @@ mod tests {
         assert_eq!(insert_name(&insert(4, "")), "Insert 4");
         assert_eq!(
             moved_inserts(&[insert(0, ""), insert(3, "Bass")]).unwrap(),
-            "Mixer: the fader or pan of the master, Bass (insert 3) isn't at FL Studio's default, and mixer faders and \
-             pans aren't carried over yet"
+            "Mixer: the fader or pan of the master, Bass (insert 3) isn't at FL Studio's default, and where a mixer \
+             fader or pan sits isn't carried over yet"
         );
     }
 }
