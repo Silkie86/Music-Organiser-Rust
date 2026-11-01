@@ -92,11 +92,12 @@ pub enum Feature {
     /// B9: the same on notes that aren't its own (its tensions too), where they sound on a bar line or the middle of a
     /// bar, or from a note played longer than a felt beat.
     WalkingWrong,
-    /// E1, once: the first bass note struck in the span is its root.
+    /// E1, once: the first bass note struck in the span is its root, the bass moving to it, and it's no walking note
+    /// (one no longer than a felt beat, under chords that strike nothing new).
     BassStrikesRoot,
     /// E2, once: the share of its own notes heard in the span that are struck where it starts.
     StruckAtStart,
-    /// E3, once: nothing in the chords or the bass is struck where the span starts.
+    /// E3, once: nothing in the chords or the bass is struck where the span starts, or only walking bass notes.
     NothingStruck,
     /// E4, once: the span starts on a bar line.
     OnBar,
@@ -304,6 +305,12 @@ pub struct Evidence {
     longest: i64,
     /// For each unit, the bass pitch classes sounding in it from a note played longer than a felt beat.
     long_bass: Vec<PcSet>,
+    /// For each unit, the bass pitch classes of the last unit before it, at most a bar before, in which the bass
+    /// sounds (as the masses count it): the bass a note struck there moves from.
+    bass_before: Vec<PcSet>,
+    /// For each unit, the chords' notes sounding in the last unit before it, at most a bar before, in which they sound:
+    /// what the chords struck there are new against.
+    chords_before: Vec<PcSet>,
 }
 
 impl Evidence {
@@ -311,7 +318,8 @@ impl Evidence {
         Evidence::default()
     }
 
-    /// Gets ready for the spans of a hearing: what passes by, and where the bass holds a note longer than a felt beat.
+    /// Gets ready for the spans of a hearing: what passes by, where the bass holds a note longer than a felt beat, and
+    /// what the bass and the chords sound last before each unit.
     pub fn prepare(&mut self, hearing: &Hearing) {
         self.shaped.clear();
         self.shaped.extend(hearing.shaped().iter().map(|&shaped| {
@@ -337,40 +345,92 @@ impl Evidence {
                 }
             }
         }
+        self.bass_before.clear();
+        self.chords_before.clear();
+        let bar = hearing.bar_units().max(1);
+        // The last unit in which the bass sounds, and in which the chords do, with what sounds there.
+        type Last = Option<(usize, PcSet)>;
+        let before = |last: Last, u: usize| last.filter(|&(w, _)| u - w <= bar).map_or(PcSet::EMPTY, |l| l.1);
+        let (mut last_bass, mut last_chords): (Last, Last) = (None, None);
+        for u in 0..units {
+            self.bass_before.push(before(last_bass, u));
+            self.chords_before.push(before(last_chords, u));
+            let bass = hearing.mass(u..u + 1, Mass::Bass);
+            let set = PitchClass::ALL.into_iter().filter(|&pc| bass[pc] > 0).fold(PcSet::EMPTY, PcSet::with);
+            if !set.is_empty() {
+                last_bass = Some((u, set));
+            }
+            let chords = hearing.sounding(u, Stream::Harmony);
+            if !chords.is_empty() {
+                last_chords = Some((u, chords));
+            }
+        }
     }
 
-    /// What a span holds, for scoring every label on it: `units` are its units, and `push` a push to its first unit
-    /// when the chord struck just before that is counted from it (the chord's notes then count as struck there).
-    pub fn facts(&self, hearing: &Hearing, units: Range<usize>, push: Option<&Push>, out: &mut SpanFacts) {
-        let end = units.end.min(hearing.units());
-        let units = units.start.min(end)..end;
-        let push = push.filter(|p| p.unit == units.start && units.start < units.end);
-        let s = hearing.sounding_ticks(units.clone());
+    /// Whether the chords strike a note in a unit that didn't sound in them just before (in the last unit, at most a
+    /// bar before, in which they sound). The same chord struck again is no new chord.
+    fn struck_anew(&self, hearing: &Hearing, unit: usize) -> bool {
+        let before = self.chords_before.get(unit).copied().unwrap_or(PcSet::EMPTY);
+        !before.contains_all(hearing.struck(unit, Stream::Harmony))
+    }
+
+    /// Whether a bass note struck in a unit is a walking note: played no longer than a felt beat, under chords that
+    /// sound there and strike nothing new (held through the unit, or struck again on the same notes). A walking bass's
+    /// notes move under one chord; they aren't where a chord starts.
+    fn walking(&self, hearing: &Hearing, unit: usize, pc: PitchClass) -> bool {
+        let long = self.long_bass.get(unit).is_some_and(|set| set.contains(pc));
+        !long && !hearing.sounding(unit, Stream::Harmony).is_empty() && !self.struck_anew(hearing, unit)
+    }
+
+    /// What a span holds, for scoring every label on it: `units` are its units; `start` a push to its first unit, when
+    /// the chord read there is pushed (struck in the unit before and held over); and `end` a push to the unit after its
+    /// last, when the next chord is.
+    ///
+    /// A pushed chord's sound is its own from the unit it's struck in: the span's sound starts a unit early with
+    /// `start`, and ends a unit early with `end`, so each unit's sound counts in exactly one of the spans a reading cuts
+    /// the music into. Where the span starts (how strong that is, what's struck there, the first bass note) is read at
+    /// its first unit, a pushed chord's notes counting as struck there, and its bass (as heard where it's struck) as the
+    /// first bass note.
+    pub fn facts(
+        &self,
+        hearing: &Hearing,
+        units: Range<usize>,
+        start: Option<&Push>,
+        end: Option<&Push>,
+        out: &mut SpanFacts,
+    ) {
+        let last = units.end.min(hearing.units());
+        let units = units.start.min(last)..last;
+        let start = start.filter(|p| p.unit == units.start && units.start > 0 && units.start < units.end);
+        let end = end.filter(|p| p.unit == units.end && units.end > units.start);
+        let sound = units.start - usize::from(start.is_some())..units.end - usize::from(end.is_some());
+        let s = hearing.sounding_ticks(sound.clone());
         out.units = units.clone();
+        out.sound = sound.clone();
         out.sounding = s;
         out.beats = s as f64 / hearing.felt_ticks().max(1) as f64;
-        out.chords = hearing.mass(units.clone(), Mass::Harmony);
+        out.chords = hearing.mass(sound.clone(), Mass::Harmony);
         out.chords_total = out.chords.total();
-        out.held_over = hearing.mass(units.clone(), Mass::HeldOver);
+        out.held_over = hearing.mass(sound.clone(), Mass::HeldOver);
         out.held_over_total = out.held_over.total();
-        out.tune = hearing.mass(units.clone(), Mass::Melody);
+        out.tune = hearing.mass(sound.clone(), Mass::Melody);
         out.tune_total = out.tune.total();
-        out.weighted_bass = hearing.mass(units.clone(), Mass::WeightedBass);
+        out.weighted_bass = hearing.mass(sound.clone(), Mass::WeightedBass);
         out.weighted_bass_total = out.weighted_bass.total();
-        let bass = hearing.mass(units.clone(), Mass::Bass);
-        let held_tune = hearing.mass(units.clone(), Mass::HeldMelody);
+        let bass = hearing.mass(sound.clone(), Mass::Bass);
+        let held_tune = hearing.mass(sound.clone(), Mass::HeldMelody);
         out.presence = presence_of(&out.chords, &bass, &held_tune);
         out.heard = heard_in(&out.presence, s);
         out.played = heard_in(&presence_of(&out.chords, &PerPitch::default(), &held_tune), s);
         out.bass = BassTexture::of(&bass);
         out.level = hearing.level(units.start);
-        out.pushed = push.is_some();
-        out.lowest = hearing.lowest(units.clone()).map(PitchClass::of_key);
+        out.pushed = start.is_some();
+        out.lowest = hearing.lowest(sound.clone()).map(PitchClass::of_key);
         // With no bass, how long each pitch class is the lowest chord note (for L1).
         out.lowest_chord = PerPitch::default();
         out.lowest_chord_total = 0;
         if out.bass == BassTexture::None {
-            for u in units.clone() {
+            for u in sound.clone() {
                 if let Some(key) = hearing.lowest_sounding(u) {
                     let ticks = u64::try_from(hearing.offset(u + 1) - hearing.offset(u)).unwrap_or(0);
                     let pc = PitchClass::of_key(key);
@@ -380,31 +440,47 @@ impl Evidence {
             }
         }
 
-        let mut struck = hearing.struck_in(units.clone(), Stream::Harmony);
-        let mut first = hearing.struck(units.start, Stream::Harmony).union(hearing.struck(units.start, Stream::Bass));
-        let mut onset = hearing.bass_onset(units.clone());
-        if let Some(push) = push {
-            // The pushed chord's notes count as struck where the span starts; its bass, if it has one (as heard where
-            // it's struck), is the first bass note struck.
-            let before = push.unit.saturating_sub(1);
+        // The chord notes struck in the span (a pushed chord's among them, struck in its first unit of sound), and
+        // where it starts: there, a pushed chord's notes count as struck, and its bass (as heard where it's struck,
+        // if it has one) is the first bass note struck. A bass note struck in the unit before that isn't the pushed
+        // chord's is a pickup, not where the span starts.
+        let u = units.start;
+        let struck = hearing.struck_in(sound.clone(), Stream::Harmony);
+        let mut first = hearing.struck(u, Stream::Harmony).union(hearing.struck(u, Stream::Bass));
+        let mut chords_struck = self.struck_anew(hearing, u);
+        let mut onset = (u..sound.end).find_map(|v| hearing.bass_onset(v..v + 1).map(|pc| (pc, v, false)));
+        if let Some(push) = start {
+            let before = push.unit - 1;
             let mut pushed_bass: Option<u8> = None;
             for (_, n) in hearing.push_notes(push) {
                 if hearing.is_bass_in(before, n) {
                     pushed_bass = Some(pushed_bass.map_or(n.key, |k| k.min(n.key)));
                 } else {
-                    struck = struck.with(n.pitch_class());
+                    chords_struck = true;
                 }
                 first = first.with(n.pitch_class());
             }
-            onset = pushed_bass.map(PitchClass::of_key).or(onset);
+            onset = pushed_bass.map(|k| (PitchClass::of_key(k), before, true)).or(onset);
         }
         out.struck = struck;
         out.first_struck = first;
-        out.bass_onset = onset;
-
+        out.bass_onset = onset.map(|(pc, _, _)| pc);
+        // The first bass note struck is the root at a change (E1) only when the bass moves to it, and it isn't a
+        // walking note: the chords strike something new with it, or it's longer than a felt beat (a pushed chord's
+        // bass, or one struck under a pushed chord, always counts). The span starts where nothing is struck (E3) when
+        // only walking notes are.
+        out.onset_counts = onset.is_some_and(|(pc, v, pushed)| {
+            let moves = !self.bass_before.get(v).is_some_and(|set| set.contains(pc));
+            let with_chords = pushed || (v == u && chords_struck);
+            moves && (with_chords || !self.walking(hearing, v, pc))
+        });
+        let bass_first = hearing.struck(u, Stream::Bass);
+        let walks =
+            !chords_struck && !bass_first.is_empty() && bass_first.iter().all(|pc| self.walking(hearing, u, pc));
+        out.nothing_struck = first.is_empty() || walks;
         // What passes by in the span.
         out.shaped.clear();
-        let (a, b) = (hearing.offset(units.start), hearing.offset(units.end));
+        let (a, b) = (hearing.offset(sound.start), hearing.offset(sound.end));
         let from = self.shaped.partition_point(|s| s.shaped.start < a.saturating_sub(self.longest));
         for s in self.shaped.get(from..).unwrap_or_default().iter().take_while(|s| s.shaped.start < b) {
             let Shaped { line, shape, pc, anchors, start: first, end: last, .. } = s.shaped;
@@ -426,7 +502,7 @@ impl Evidence {
         // The bass where a note that doesn't belong would count against a label (B9).
         out.strong_bass.clear();
         if out.bass == BassTexture::Moving {
-            for u in units.clone() {
+            for u in sound {
                 let level = hearing.level(u);
                 let long = self.long_bass.get(u).copied().unwrap_or(PcSet::EMPTY);
                 let ticks = hearing.mass(u..u + 1, Mass::Bass);
@@ -454,8 +530,10 @@ fn flag(yes: bool) -> f64 {
 /// What a span holds ([`Evidence::facts`]): the same for every label scored on it.
 #[derive(Clone, Debug)]
 pub struct SpanFacts {
+    /// Its units, and the units whose sound is its own (a unit earlier at each end when a chord is pushed there).
     units: Range<usize>,
-    /// S, the ticks of its units where a chord or bass note sounds, and b = S over a felt beat's ticks.
+    sound: Range<usize>,
+    /// S, the ticks of its sound where a chord or bass note sounds, and b = S over a felt beat's ticks.
     sounding: u64,
     beats: f64,
     /// The masses ([`Mass`]) of the chords, what they hold over, the tune and the weighted bass, and their totals.
@@ -477,7 +555,12 @@ pub struct SpanFacts {
     /// The chord and bass notes struck in its first unit, or pushed into it.
     first_struck: PcSet,
     bass: BassTexture,
+    /// The first bass note struck, and whether it may be the root at a change (E1): the bass moves to it, and it isn't
+    /// a walking note ([`Evidence::facts`]).
     bass_onset: Option<PitchClass>,
+    onset_counts: bool,
+    /// Whether nothing is struck where the span starts (E3): no chord or bass note, or only walking notes.
+    nothing_struck: bool,
     /// The lowest note sounding (for the candidates' order), and with no bass, the ticks in which each pitch class is
     /// the lowest chord note, and their total (for L1).
     lowest: Option<PitchClass>,
@@ -494,6 +577,7 @@ impl Default for SpanFacts {
     fn default() -> SpanFacts {
         SpanFacts {
             units: 0..0,
+            sound: 0..0,
             sounding: 0,
             beats: 0.0,
             chords: PerPitch::default(),
@@ -511,6 +595,8 @@ impl Default for SpanFacts {
             first_struck: PcSet::EMPTY,
             bass: BassTexture::None,
             bass_onset: None,
+            onset_counts: false,
+            nothing_struck: true,
             lowest: None,
             lowest_chord: PerPitch::default(),
             lowest_chord_total: 0,
@@ -529,6 +615,9 @@ pub struct Scored {
     /// The way it got among the candidates.
     pub route: Route,
     pub score: f64,
+    /// Its score without what counts once, where the span starts ([`SpanFacts::held_score`]): what it scores when the
+    /// chord before is the same, held on into the span.
+    pub held: f64,
 }
 
 impl SpanFacts {
@@ -539,6 +628,17 @@ impl SpanFacts {
     /// Its units.
     pub fn units(&self) -> Range<usize> {
         self.units.clone()
+    }
+
+    /// The units whose sound is its own: its units, from a unit earlier when its chord is pushed, to a unit earlier
+    /// when the next one is.
+    pub fn sound(&self) -> Range<usize> {
+        self.sound.clone()
+    }
+
+    /// S: the ticks of its sound in which a chord or bass note sounds.
+    pub fn sounding(&self) -> u64 {
+        self.sounding
     }
 
     /// b: the felt beats it sounds (S over a felt beat's ticks).
@@ -673,11 +773,11 @@ impl SpanFacts {
         out[WalkingWrong] = share(on_wrong, v);
 
         // Where the span starts.
-        out[BassStrikesRoot] = flag(self.bass_onset == Some(root));
+        out[BassStrikesRoot] = flag(self.onset_counts && self.bass_onset == Some(root));
         let sounding_tones = tones.intersection(self.heard);
         out[StruckAtStart] =
             share(u64::from(sounding_tones.intersection(self.first_struck).len()), u64::from(sounding_tones.len()));
-        out[NothingStruck] = flag(self.first_struck.is_empty());
+        out[NothingStruck] = flag(self.nothing_struck);
         out[OnBar] = flag(self.level == Level::Bar);
         out[MidBar] = flag(self.level == Level::HalfBar);
         out[OnBeat] = flag(self.level == Level::Beat);
@@ -700,6 +800,18 @@ impl SpanFacts {
     /// A label's score from its evidence: each piece weighed, those about the whole span counted for each felt beat it
     /// sounds (b), those about where it starts once.
     pub fn score(&self, features: &PerFeature<f64>, weights: &Weights) -> f64 {
+        let (per_beat, once) = self.parts(features, weights);
+        self.beats * per_beat + once
+    }
+
+    /// A label's score without what counts once: what it scores when the same chord is held on into the span from
+    /// before, so the span's start is no place a chord starts.
+    pub fn held_score(&self, features: &PerFeature<f64>, weights: &Weights) -> f64 {
+        self.beats * self.parts(features, weights).0
+    }
+
+    /// The weighed evidence that counts for each felt beat, and that which counts once.
+    fn parts(&self, features: &PerFeature<f64>, weights: &Weights) -> (f64, f64) {
         let (mut per_beat, mut once) = (0.0, 0.0);
         for f in Feature::ALL {
             let term = weights.features[f] * features[f];
@@ -709,7 +821,7 @@ impl SpanFacts {
                 per_beat += term;
             }
         }
-        self.beats * per_beat + once
+        (per_beat, once)
     }
 
     /// What the span scores read as no chord: w_N for each felt beat it sounds.
@@ -724,7 +836,9 @@ impl SpanFacts {
         let mut features = PerFeature::default();
         for c in candidates {
             self.features(c.label, tables, &mut features);
-            out.push(Scored { label: c.label, route: c.route, score: self.score(&features, weights) });
+            let (per_beat, once) = self.parts(&features, weights);
+            let held = self.beats * per_beat;
+            out.push(Scored { label: c.label, route: c.route, score: held + once, held });
         }
         out.sort_by(|a, b| b.score.total_cmp(&a.score));
     }
