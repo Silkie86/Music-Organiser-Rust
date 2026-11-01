@@ -22,6 +22,7 @@ pub mod classify;
 mod db;
 mod dotnet_random;
 pub mod index;
+pub mod kits;
 pub mod learn;
 pub mod liking;
 pub mod music;
@@ -69,6 +70,28 @@ pub struct Sound {
 }
 
 impl Sound {
+    /// A sound at `path` with nothing known about it yet (as a scan finds it, before it's analysed).
+    pub fn new(id: i64, path: &str) -> Sound {
+        Sound {
+            id,
+            path: path.to_owned(),
+            error: None,
+            analysis: None,
+            sound_type: types::UNKNOWN.to_owned(),
+            type_source: String::new(),
+            type_confidence: 0.0,
+            user_type: None,
+            name_type: None,
+            tags: Vec::new(),
+            favourite: false,
+            hidden: false,
+            rating: 0,
+            plays: 0,
+            added: NaiveDateTime::default(),
+            activity: SoundActivity::default(),
+        }
+    }
+
     /// The file's name without its extension: "Kick_01".
     pub fn name(&self) -> &str {
         stem(file_name(&self.path))
@@ -140,6 +163,23 @@ pub struct SoundActivity {
     pub older_sends: i32,
 }
 
+/// The folder a file is in, as .NET's `GetDirectoryName` gives it: "D:\\" for a file at a drive's top, "/" at the top
+/// of a Mac or Linux disk, and "" for a drive's or disk's top itself (or a bare name). On Windows, `/` and `\\` are
+/// both separators; elsewhere too, since a library can hold paths from either.
+pub(crate) fn directory(path: &str) -> &str {
+    let is_drive = |d: &str| matches!(d.as_bytes(), [l, b':'] if l.is_ascii_alphabetic());
+    let Some(i) = path.rfind(['\\', '/']) else { return "" };
+    // The top itself: "/", "D:\\".
+    if i + 1 == path.len() && (i == 0 || is_drive(&path[..i])) {
+        return "";
+    }
+    if i == 0 {
+        return &path[..1];
+    }
+    let dir = &path[..i];
+    if is_drive(dir) { &path[..=i] } else { dir }
+}
+
 /// A file name without its extension, as .NET's `GetFileNameWithoutExtension` cuts it: everything before the last dot
 /// (so ".wav" alone gives "").
 pub(crate) fn stem(name: &str) -> &str {
@@ -155,23 +195,6 @@ pub(crate) mod test_support {
 
     /// A sound at `path` with nothing known about it yet.
     pub(crate) fn sound(id: i64, path: &str) -> Sound {
-        Sound {
-            id,
-            path: path.to_owned(),
-            error: None,
-            analysis: None,
-            sound_type: types::UNKNOWN.to_owned(),
-            type_source: String::new(),
-            type_confidence: 0.0,
-            user_type: None,
-            name_type: None,
-            tags: Vec::new(),
-            favourite: false,
-            hidden: false,
-            rating: 0,
-            plays: 0,
-            added: NaiveDateTime::default(),
-            activity: SoundActivity::default(),
-        }
+        Sound::new(id, path)
     }
 }

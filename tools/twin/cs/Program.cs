@@ -66,7 +66,7 @@ var sounds = args is ["--sounds"];
 var classify = args is ["--classify"];
 // `twin-cs --similar`: each file is a likeness case (vectors and probes) made by tools/twin/src/similar.rs.
 var similar = args is ["--similar"];
-// `twin-cs --rediscover`: each file is a made-up sound library made by tools/twin/src/rediscover.rs; it's saved to a new
+// `twin-cs --rediscover`: each file is a made-up sound library (for Rediscover and kits) made by tools/twin/src/rediscover.rs; it's saved to a new
 // sounds.db beside it (which the Rust side then reads) and Rediscover is asked the case's questions.
 var rediscover = args is ["--rediscover"];
 var output = Console.OpenStandardOutput();
@@ -177,7 +177,11 @@ static JsonObject DumpRediscover(string path)
         {
             lib.Save(c["Sounds"]!.AsArray().Select(s => new MusicOrganiser.Core.Sounds.SoundLibrary.Analysed(
                 s!["Path"]!.GetValue<string>(), 1000, s["Mtime"]!.GetValue<long>(),
-                s["Features"] is JsonArray f ? new MusicOrganiser.Core.Sounds.SoundAnalysis { Seconds = 1, Features = f.Select(n => n!.GetValue<float>()).ToArray() } : null,
+                s["Features"] is JsonArray f ? new MusicOrganiser.Core.Sounds.SoundAnalysis
+                {
+                    Seconds = 1, Features = f.Select(n => n!.GetValue<float>()).ToArray(),
+                    Pitch = s["Pitch"]?.GetValue<double>(), IsLoop = s["IsLoop"]!.GetValue<bool>(),
+                } : null,
                 null,
                 s["Clap"] is JsonArray k ? k.Select(n => n!.GetValue<float>()).ToArray() : null,
                 s["NameType"]?.GetValue<string>())).ToList());
@@ -209,6 +213,25 @@ static JsonObject DumpRediscover(string path)
                 });
             }
             o["answers"] = answers;
+            var kits = new JsonArray();
+            foreach (var k in c["Kits"]!.AsArray())
+            {
+                var slots = MusicOrganiser.Core.Sounds.KitBuilder.DefaultDrumKit();
+                if (k!["LockKick"]?.GetValue<string>() is { } lockPath)
+                {
+                    slots[0].Sound = org.Sounds.FirstOrDefault(x => x.Path == lockPath);
+                    slots[0].Locked = true;
+                }
+                var seed = MusicOrganiser.Core.Sounds.KitBuilder.Roll(org, slots, new MusicOrganiser.Core.Sounds.KitBuilder.Options(
+                    k["PreferUnused"]!.GetValue<bool>(), k["SamePack"]!.GetValue<bool>(), null,
+                    k["KeyTonic"]?.GetValue<int>(), k["Seed"]!.GetValue<int>(), k["Randomness"]!.GetValue<double>()));
+                kits.Add(new JsonObject
+                {
+                    ["Seed"] = seed,
+                    ["Pads"] = new JsonArray(slots.Select(x => (JsonNode?)(x.Sound is { } snd ? JsonValue.Create(snd.Id) : null)).ToArray()),
+                });
+            }
+            o["kits"] = kits;
             o["years"] = new JsonArray(MusicOrganiser.Core.Sounds.Rediscover.Years(org).Select(y => (JsonNode)y).ToArray());
             o["folders"] = new JsonArray(MusicOrganiser.Core.Sounds.Rediscover.Folders(org).Select(f => (JsonNode)new JsonObject
                 { ["Folder"] = f.Folder, ["Sounds"] = f.Sounds, ["Used"] = f.Used, ["Share"] = f.Share }).ToArray());
