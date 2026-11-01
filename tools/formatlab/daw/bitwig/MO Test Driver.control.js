@@ -10,7 +10,9 @@
 //
 // What it records, from the start of the arrangement, with arranger automation write on:
 //   the tempo, the master track's volume, a new instrument track's volume and pan, and its MO Probe's on/off,
-//   each set to the values in STEPS, one step a second; then it stops, turns automation write off and saves.
+//   each set to the values in STEPS, one step every two seconds, each control at its own moment in the step and
+//   touched only while it's set (Bitwig 6.1.6 missed some volume and pan moves made all at once); then it stops,
+//   turns automation write off and saves.
 // The values are written to Bitwig's Controller Script console as they're set, so the saved file can be checked
 // against them.
 //
@@ -25,7 +27,10 @@ var PROJECT = "MO Live Test automation";
  * Bitwig has it switched on, with positions, a check on what Bitwig recorded beside the saved file. */
 var PROBE = "org.musicorganiser.probe.instrument";
 /** Milliseconds between steps, and before the first. */
-var STEP_MS = 1000;
+var STEP_MS = 2000;
+/** Milliseconds between one control's move and the next within a step, and how long each is touched. */
+var CONTROL_MS = 300;
+var TOUCH_MS = 250;
 /**
  * The values set at each step: tempo in BPM, the others 0..1 as Bitwig's API takes them (pan 0.5 is the middle),
  * and whether the MO Probe is on.
@@ -127,26 +132,36 @@ function record() {
     host.scheduleTask(stopAndSave, STEP_MS * (STEPS.length + 1));
 }
 
-/** Sets one step's values, each touched while it's set so Bitwig writes it. */
+/** Sets one step's values, one control at a time, each touched while it's set so Bitwig writes it. */
 function step(i) {
     return function () {
         if (!allowed()) return;
         var s = STEPS[i];
-        var at = Number(transport.getPosition().get());
-        touchSet(transport.tempo(), function (p) { p.setRaw(s.tempo); });
-        touchSet(master.volume(), function (p) { p.set(s.master); });
-        touchSet(cursorTrack.volume(), function (p) { p.set(s.volume); });
-        touchSet(cursorTrack.pan(), function (p) { p.set(s.pan); });
-        cursorDevice.isEnabled().set(s.on);
-        println("MO test driver: step " + (i + 1) + " at beat " + at.toFixed(3) + ": tempo " + s.tempo + ", master " +
-                s.master + ", volume " + s.volume + ", pan " + s.pan + ", probe " + (s.on ? "on" : "off"));
+        var moves = [
+            function () { touchSet(transport.tempo(), function (p) { p.setRaw(s.tempo); }); },
+            function () { touchSet(master.volume(), function (p) { p.set(s.master); }); },
+            function () { touchSet(cursorTrack.volume(), function (p) { p.set(s.volume); }); },
+            function () { touchSet(cursorTrack.pan(), function (p) { p.set(s.pan); }); },
+            function () { cursorDevice.isEnabled().set(s.on); }
+        ];
+        for (var m = 0; m < moves.length; m++) host.scheduleTask(move(moves[m]), CONTROL_MS * m);
+        println("MO test driver: step " + (i + 1) + " from beat " + Number(transport.getPosition().get()).toFixed(3) +
+                ": tempo " + s.tempo + ", master " + s.master + ", volume " + s.volume + ", pan " + s.pan +
+                ", probe " + (s.on ? "on" : "off"));
+    };
+}
+
+/** A move that's skipped once the live test project isn't in front any more (rule 10). */
+function move(set) {
+    return function () {
+        if (running && allowed()) set();
     };
 }
 
 function touchSet(param, set) {
     param.touch(true);
     set(param);
-    host.scheduleTask(function () { param.touch(false); }, 200);
+    host.scheduleTask(function () { param.touch(false); }, TOUCH_MS);
 }
 
 function stopAndSave() {
