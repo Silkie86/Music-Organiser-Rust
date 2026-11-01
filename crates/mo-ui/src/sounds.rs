@@ -4,6 +4,7 @@
 //! the list draws them, so 357,000 sounds cost what's on screen. Sounds are read and played off the window's thread.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -17,7 +18,10 @@ use mo_app::log;
 use mo_app::shortcuts::Shortcuts;
 use mo_app::sounds::{self as list, Filters, Length, Order, SoundList};
 use mo_audio::play::Player;
+use mo_library::UsageRules;
 use mo_library::songs::thousands;
+use mo_sounds::liking::{LIKED_WEIGHTS_KEY, LikedWeights};
+use mo_sounds::usage::{self, Usage};
 use mo_sounds::{Sound, SoundsDb, music};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, Timer, TimerMode, VecModel};
 
@@ -26,6 +30,9 @@ use crate::{AppWindow, MenuItem, PickedSound, SoundFact, SoundLine, SoundTile, S
 /// The C# app's settings in `sounds.db` for the view shown last and autoplay, read (not written: it's read-only).
 const VIEW_KEY: &str = "sounds_view";
 const AUTOPLAY_KEY: &str = "sound_lab_autoplay";
+/// The C# app's Settings in `library.db` for which songs count as using a sound.
+const USED_NEEDS_NOTES_KEY: &str = "used_in_needs_notes";
+const USED_NOT_MUTED_KEY: &str = "used_in_not_muted_newest";
 
 /// The views, in the order of the page's view buttons.
 const TILES: i32 = 0;
@@ -269,19 +276,20 @@ pub fn compute_here() {
     HERE.with(|h| *h.borrow_mut() = true);
 }
 
-/// Wires the page and starts reading the sound library at `sounds_db` in the background. Show in folder and Copy path
-/// report on `feed`'s cards.
-pub fn connect(app: &AppWindow, sounds_db: PathBuf, feed: Feed, shortcuts: &Shortcuts) {
+/// Wires the page and starts reading the sound library at `sounds_db` in the background, with how much your songs use
+/// each sound from the song library at `library_db` (both read-only). Show in folder and Copy path report on `feed`'s
+/// cards.
+pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: Feed, shortcuts: &Shortcuts) {
     wire(app, feed, shortcuts);
     let data = app.global::<SoundsData>();
     data.set_busy("Reading your sounds".into());
     if HERE.with(|h| *h.borrow()) {
-        loaded(app, read_library(&sounds_db));
+        loaded(app, read_library(&sounds_db, &library_db));
         return;
     }
     let weak = app.as_weak();
     let started = background::spawn("Sounds library", move || {
-        let read = read_library(&sounds_db);
+        let read = read_library(&sounds_db, &library_db);
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(app) = weak.upgrade() {
                 loaded(&app, read);
@@ -310,18 +318,33 @@ pub struct Library {
 }
 
 impl Library {
-    /// Gets `sounds` ready to list, with what was `played` (id, when). Takes a while for a big library, so it's done
-    /// on a background thread (the screenshots do it in place).
-    pub fn new(sounds: Vec<Sound>, played: Vec<(i64, NaiveDateTime)>) -> Library {
-        let list = background::on_pool(|| SoundList::new(sounds));
-        let ids: std::collections::HashMap<i64, usize> =
-            (0..list.len()).filter_map(|i| list.sound(i).map(|s| (s.id, i))).collect();
+    /// Gets `sounds` ready to list, with what was `played` (id, when), how many songs use each (`usage`, when the
+    /// song library could be read) and how much each sign of liking counts (`weights`). Takes a while for a big
+    /// library, so it's done on a background thread (the screenshots do it in place).
+    pub fn new(
+        sounds: Vec<Sound>,
+        played: Vec<(i64, NaiveDateTime)>,
+        usage: Option<HashMap<i64, Usage>>,
+        weights: LikedWeights,
+    ) -> Library {
+        let list = background::on_pool(|| {
+            let mut list = SoundList::new(sounds);
+            // Most liked counts plays, drags, sends and favourites even when the songs' use isn't known.
+            let none = HashMap::new();
+            let used = usage.as_ref().unwrap_or(&none);
+            list.set_liked(|s| weights.score(s, used.get(&s.id)));
+            if let Some(usage) = &usage {
+                list.set_used(usage.iter().map(|(id, u)| (*id, u.projects)).collect());
+            }
+            list
+        });
+        let ids: HashMap<i64, usize> = (0..list.len()).filter_map(|i| list.sound(i).map(|s| (s.id, i))).collect();
         let played = played.into_iter().filter_map(|(id, at)| ids.get(&id).map(|&i| (i, at))).collect();
         Library { types: list.type_counts(), tags: list.tags(), list, played }
     }
 }
 
-fn read_library(path: &Path) -> Result<Read, String> {
+fn read_library(path: &Path, library_db: &Path) -> Result<Read, String> {
     if !path.exists() {
         return Err(String::new());
     }
@@ -331,7 +354,36 @@ fn read_library(path: &Path) -> Result<Read, String> {
     let history = db.history(500).unwrap_or_default();
     let view = db.setting(VIEW_KEY).ok().flatten();
     let autoplay = db.setting(AUTOPLAY_KEY).ok().flatten();
-    Ok(Read { library: Library::new(sounds, history), view, autoplay })
+    let (usage, weights) = read_usage(library_db, &sounds, now);
+    Ok(Read { library: Library::new(sounds, history, usage, weights), view, autoplay })
+}
+
+/// How many of your songs use each sound, by the C# app's Settings (only where the sample has notes, not when muted in
+/// the song's newest save), with "recent" meaning the last year; and the Most liked weights. Without a song library
+/// the use isn't known (the Used chips stay hidden) and the weights are the C# app's starting ones.
+fn read_usage(library_db: &Path, sounds: &[Sound], now: NaiveDateTime) -> (Option<HashMap<i64, Usage>>, LikedWeights) {
+    if !library_db.exists() {
+        return (None, LikedWeights::default());
+    }
+    let lib = match mo_library::Library::open_read_only(library_db) {
+        Ok(lib) => lib,
+        Err(e) => {
+            log::warning("Sounds", &format!("Couldn't read the song library for how sounds are used: {e}"));
+            return (None, LikedWeights::default());
+        }
+    };
+    let on = |key: &str| lib.setting(key).ok().flatten().as_deref() == Some("1");
+    let rules = UsageRules { needs_notes: on(USED_NEEDS_NOTES_KEY), not_muted_in_newest: on(USED_NOT_MUTED_KEY) };
+    let weights = LikedWeights::from_json(lib.setting(LIKED_WEIGHTS_KEY).ok().flatten().as_deref());
+    let year_ago = now.checked_sub_months(chrono::Months::new(12)).unwrap_or(now);
+    let usage = match lib.sample_usage(year_ago, rules) {
+        Ok(uses) => Some(background::on_pool(|| usage::usage(sounds, &uses))),
+        Err(e) => {
+            log::warning("Sounds", &format!("Couldn't count how your songs use sounds: {e}"));
+            None
+        }
+    };
+    (usage, weights)
 }
 
 fn loaded(app: &AppWindow, read: Result<Read, String>) {
