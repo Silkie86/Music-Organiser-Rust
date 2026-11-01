@@ -10,6 +10,7 @@
 //! - [`SoundAnalysis`]: what the C# analyser stored for each sound (length, level, pitch, key, chords, waveform…).
 //! - [`classify`]: the sound type classifier, learned from your own library (reads the C# app's saved model).
 //! - [`learn`]: each sound's type when its name doesn't say, disagreements, and suggested tags.
+//! - [`usage`] and [`liking`]: how many of your projects use each sound, and Most liked.
 //! - [`types`]: the sound type a sample's name or folder gives ("Kick", "Pad"…), and loop, tempo and key from names.
 //! - [`music`]: note and key names, and Camelot codes.
 //! - [`scan`]: finding the sounds in your sample folders, and what a scan has to do (listen, follow moves, forget).
@@ -20,9 +21,11 @@ pub mod classify;
 mod db;
 mod dotnet_random;
 pub mod learn;
+pub mod liking;
 pub mod music;
 pub mod scan;
 pub mod types;
+pub mod usage;
 
 pub use analysis::{ChordSpan, SoundAnalysis};
 pub use db::{KnownSound, SoundMatch, SoundsDb, SoundsError, StarPoint, TagCount};
@@ -140,5 +143,32 @@ pub(crate) fn stem(name: &str) -> &str {
     match name.rfind('.') {
         Some(i) => name.get(..i).unwrap_or(name),
         None => name,
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+
+    /// A sound at `path` with nothing known about it yet.
+    pub(crate) fn sound(id: i64, path: &str) -> Sound {
+        Sound {
+            id,
+            path: path.to_owned(),
+            error: None,
+            analysis: None,
+            sound_type: types::UNKNOWN.to_owned(),
+            type_source: String::new(),
+            type_confidence: 0.0,
+            user_type: None,
+            name_type: None,
+            tags: Vec::new(),
+            favourite: false,
+            hidden: false,
+            rating: 0,
+            plays: 0,
+            added: NaiveDateTime::default(),
+            activity: SoundActivity::default(),
+        }
     }
 }

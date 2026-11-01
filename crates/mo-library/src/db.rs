@@ -1,11 +1,11 @@
 //! Reading `library.db`, the C# app's database, without ever changing it.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use chrono::{Local, NaiveDateTime};
+use chrono::{Datelike, Local, NaiveDateTime};
 use mo_formats::case;
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, Statement};
@@ -352,6 +352,131 @@ impl Library {
             st.query_map([], |r| Ok((text(r, "tag"), int(r, "n").and_then(|n| u32::try_from(n).ok()).unwrap_or(0))))?;
         Ok(tags.collect::<Result<_, _>>()?)
     }
+
+    /// How many of your projects use each sample, how many of those were saved since `recent_since` (local time), and
+    /// the years they were saved in, as the C# app's `SampleUsageByAge` (for the Sounds page's "Used in" and Most
+    /// liked). One entry per path, ignoring case; projects whose file has gone don't count. `rules` leave out saves
+    /// that hold a sample without playing it (Settings, Sounds).
+    pub fn sample_usage(&self, recent_since: NaiveDateTime, rules: UsageRules) -> Result<Vec<SampleUse>, LibraryError> {
+        if !self.has("samples") {
+            return Ok(Vec::new());
+        }
+        let since = recent_since.and_local_timezone(Local).earliest().map_or(i64::MIN, |t| t.timestamp());
+        let notes = i64::from(rules.needs_notes);
+        let mut st = self.conn.prepare("SELECT name FROM pragma_table_info('samples')")?;
+        let has_unplayed = st.query_map([], |r| r.get::<_, String>(0))?.any(|c| c.is_ok_and(|c| c == "unplayed"));
+        // An older library has no `unplayed`: every sample there counts as played.
+        let unplayed = if has_unplayed { "s.unplayed" } else { "0" };
+        if !rules.not_muted_in_newest {
+            let mut st = self.conn.prepare(&format!(
+                "SELECT s.path, COUNT(DISTINCT s.project_id) AS n,
+                        COUNT(DISTINCT CASE WHEN p.mtime >= ?1 THEN s.project_id END) AS recent,
+                        GROUP_CONCAT(DISTINCT strftime('%Y', p.mtime, 'unixepoch', 'localtime')) AS years
+                 FROM samples s JOIN projects p ON p.id = s.project_id
+                 WHERE p.file_missing = 0 AND (?2 = 0 OR {unplayed} <> 1)
+                 GROUP BY s.path COLLATE NOCASE"
+            ))?;
+            let rows = st.query_map([since, notes], |r| {
+                let mut years: Vec<i32> = text(r, "years").split(',').filter_map(|y| y.trim().parse().ok()).collect();
+                years.sort_unstable();
+                Ok(SampleUse {
+                    path: text(r, "path"),
+                    projects: count(int(r, "n")),
+                    recent: count(int(r, "recent")),
+                    years,
+                })
+            })?;
+            return Ok(rows.collect::<Result<_, _>>()?);
+        }
+
+        // A sound muted in a song's newest save doesn't count for that song at all: its older saves are left out too.
+        let saves = self.saves()?;
+        let mut newest: HashMap<i64, i64> = HashMap::new();
+        for song in crate::songs::group_songs(&saves, &self.song_choices()?) {
+            for save in song.older.iter().chain([&song.latest]) {
+                newest.insert(save.id, song.latest.id);
+            }
+        }
+        let muted: HashSet<(i64, String)> = if has_unplayed {
+            let mut st = self.conn.prepare("SELECT project_id, path FROM samples WHERE unplayed = 2")?;
+            let rows = st.query_map([], |r| Ok((int(r, "project_id").unwrap_or(0), text(r, "path"))))?;
+            let mut set = HashSet::new();
+            for row in rows {
+                let (project, path) = row?;
+                if newest.get(&project) == Some(&project) {
+                    set.insert((project, case::to_lower(&path)));
+                }
+            }
+            set
+        } else {
+            HashSet::new()
+        };
+        let mut st = self.conn.prepare(&format!(
+            "SELECT s.path, s.project_id, p.mtime FROM samples s JOIN projects p ON p.id = s.project_id
+             WHERE p.file_missing = 0 AND (?1 = 0 OR {unplayed} <> 1)"
+        ))?;
+        let rows = st.query_map([notes], |r| {
+            Ok((text(r, "path"), int(r, "project_id").unwrap_or(0), int(r, "mtime").unwrap_or(0)))
+        })?;
+        // Grouped ignoring case, in the order each path first appears.
+        let mut order: Vec<String> = Vec::new();
+        let mut groups: HashMap<String, (String, Vec<(i64, i64)>)> = HashMap::new();
+        for row in rows {
+            let (path, project, mtime) = row?;
+            let save = *newest.get(&project).unwrap_or(&project);
+            if muted.contains(&(save, case::to_lower(&path))) {
+                continue;
+            }
+            let key = case::key(&path);
+            let group = groups.entry(key.clone()).or_insert_with(|| {
+                order.push(key);
+                (path, Vec::new())
+            });
+            if !group.1.iter().any(|(p, _)| *p == project) {
+                group.1.push((project, mtime));
+            }
+        }
+        Ok(order
+            .into_iter()
+            .filter_map(|key| groups.remove(&key))
+            .map(|(path, saves)| {
+                let mut years: Vec<i32> = saves.iter().filter_map(|(_, m)| local(*m)).map(|t| t.year()).collect();
+                years.sort_unstable();
+                years.dedup();
+                SampleUse {
+                    path,
+                    projects: count(Some(saves.len() as i64)),
+                    recent: count(Some(saves.iter().filter(|(_, m)| *m >= since).count() as i64)),
+                    years,
+                }
+            })
+            .collect())
+    }
+}
+
+/// Which saves count as using a sample (Settings, Sounds), for the DAWs whose reader can tell (FL Studio so far).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UsageRules {
+    /// Only where the sample's channel has notes or clips.
+    pub needs_notes: bool,
+    /// Not in a song whose newest save has it muted.
+    pub not_muted_in_newest: bool,
+}
+
+/// One sample path's use across your projects, from [`Library::sample_usage`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SampleUse {
+    /// As one of the projects stores it: a full path, a relative one, or just a file name.
+    pub path: String,
+    pub projects: u32,
+    /// How many of `projects` were saved since the date asked about.
+    pub recent: u32,
+    /// The years those projects were last saved in, oldest first.
+    pub years: Vec<i32>,
+}
+
+fn count(n: Option<i64>) -> u32 {
+    n.and_then(|n| u32::try_from(n).ok()).unwrap_or(0)
 }
 
 /// The C# app's list query: each save's own columns (as many as this library has, leaving out `info`) with its
