@@ -37,18 +37,14 @@ impl Usage {
     }
 }
 
-/// The last part of a path as a project stores it, cut at either slash (as the C# app cuts it).
-fn last_part(path: &str) -> &str {
-    path.rsplit(['\\', '/']).next().unwrap_or(path)
-}
-
-/// Each sound's use, by sound id. Sounds no project uses are left out (their use is [`Usage::default`]).
+/// Each sound's use, by sound id. As in the C# app, a sound matched by its name adds up every path with that name, so
+/// one project listing it twice (a Bitwig copy and a relative path) counts twice. Sounds no project uses are left out (their use is [`Usage::default`]).
 pub fn usage(sounds: &[Sound], uses: &[SampleUse]) -> HashMap<i64, Usage> {
     let mut by_path: HashMap<String, Usage> = HashMap::new();
     let mut by_name: HashMap<String, Usage> = HashMap::new();
     for u in uses {
         by_path.entry(case::key(&u.path)).or_default().add(u);
-        by_name.entry(case::key(last_part(&u.path))).or_default().add(u);
+        by_name.entry(case::key(file_name(&u.path))).or_default().add(u);
     }
     // File names more than one sound in the library has: a project naming only that can't say which it meant.
     let mut seen = HashSet::new();

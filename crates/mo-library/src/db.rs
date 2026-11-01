@@ -355,99 +355,100 @@ impl Library {
 
     /// How many of your projects use each sample, how many of those were saved since `recent_since` (local time), and
     /// the years they were saved in, as the C# app's `SampleUsageByAge` (for the Sounds page's "Used in" and Most
-    /// liked). One entry per path, ignoring case; projects whose file has gone don't count. `rules` leave out saves
-    /// that hold a sample without playing it (Settings, Sounds).
+    /// liked). One entry per path, ignoring case (all of a path's letters, where SQLite's own grouping only knew A to
+    /// Z); projects whose file has gone don't count. `rules` leave out saves that hold a sample without playing it
+    /// (Settings, Sounds).
     pub fn sample_usage(&self, recent_since: NaiveDateTime, rules: UsageRules) -> Result<Vec<SampleUse>, LibraryError> {
         if !self.has("samples") {
             return Ok(Vec::new());
         }
-        let since = recent_since.and_local_timezone(Local).earliest().map_or(i64::MIN, |t| t.timestamp());
+        // A time the clocks skipped (the hour lost in spring) is read as the hour after; one they went through twice,
+        // as the first.
+        let since = recent_since
+            .and_local_timezone(Local)
+            .earliest()
+            .or_else(|| (recent_since + chrono::Duration::hours(1)).and_local_timezone(Local).earliest())
+            .map_or_else(|| recent_since.and_utc().timestamp(), |t| t.timestamp());
         let notes = i64::from(rules.needs_notes);
         let mut st = self.conn.prepare("SELECT name FROM pragma_table_info('samples')")?;
         let has_unplayed = st.query_map([], |r| r.get::<_, String>(0))?.any(|c| c.is_ok_and(|c| c == "unplayed"));
-        // An older library has no `unplayed`: every sample there counts as played.
+        // An older library has no `unplayed` (every sample counts as played) or no `file_missing` (every file is there).
         let unplayed = if has_unplayed { "s.unplayed" } else { "0" };
-        if !rules.not_muted_in_newest {
-            let mut st = self.conn.prepare(&format!(
-                "SELECT s.path, COUNT(DISTINCT s.project_id) AS n,
-                        COUNT(DISTINCT CASE WHEN p.mtime >= ?1 THEN s.project_id END) AS recent,
-                        GROUP_CONCAT(DISTINCT strftime('%Y', p.mtime, 'unixepoch', 'localtime')) AS years
-                 FROM samples s JOIN projects p ON p.id = s.project_id
-                 WHERE p.file_missing = 0 AND (?2 = 0 OR {unplayed} <> 1)
-                 GROUP BY s.path COLLATE NOCASE"
-            ))?;
-            let rows = st.query_map([since, notes], |r| {
-                let mut years: Vec<i32> = text(r, "years").split(',').filter_map(|y| y.trim().parse().ok()).collect();
-                years.sort_unstable();
-                Ok(SampleUse {
-                    path: text(r, "path"),
-                    projects: count(int(r, "n")),
-                    recent: count(int(r, "recent")),
-                    years,
-                })
-            })?;
-            return Ok(rows.collect::<Result<_, _>>()?);
-        }
+        let present = if self.columns.contains("file_missing") { "COALESCE(p.file_missing, 0) = 0" } else { "1" };
 
-        // A sound muted in a song's newest save doesn't count for that song at all: its older saves are left out too.
-        let saves = self.saves()?;
+        // A sound muted in a song's newest save doesn't count for that song at all: its older saves (and copies of
+        // them elsewhere) are left out too.
         let mut newest: HashMap<i64, i64> = HashMap::new();
-        for song in crate::songs::group_songs(&saves, &self.song_choices()?) {
-            for save in song.older.iter().chain([&song.latest]) {
-                newest.insert(save.id, song.latest.id);
+        let mut muted: HashSet<(i64, String)> = HashSet::new();
+        if rules.not_muted_in_newest && has_unplayed {
+            let saves = self.saves()?;
+            for song in crate::songs::group_songs(&saves, &self.song_choices()?) {
+                for save in song.older.iter().chain(&song.copies).chain([&song.latest]) {
+                    newest.insert(save.id, song.latest.id);
+                }
             }
-        }
-        let muted: HashSet<(i64, String)> = if has_unplayed {
             let mut st = self.conn.prepare("SELECT project_id, path FROM samples WHERE unplayed = 2")?;
             let rows = st.query_map([], |r| Ok((int(r, "project_id").unwrap_or(0), text(r, "path"))))?;
-            let mut set = HashSet::new();
             for row in rows {
                 let (project, path) = row?;
                 if newest.get(&project) == Some(&project) {
-                    set.insert((project, case::to_lower(&path)));
+                    muted.insert((project, case::to_lower(&path)));
                 }
             }
-            set
-        } else {
-            HashSet::new()
-        };
+        }
+
+        // One way of counting whatever the rules: grouped ignoring case, in the order each path first appears, each
+        // project once.
         let mut st = self.conn.prepare(&format!(
             "SELECT s.path, s.project_id, p.mtime FROM samples s JOIN projects p ON p.id = s.project_id
-             WHERE p.file_missing = 0 AND (?1 = 0 OR {unplayed} <> 1)"
+             WHERE {present} AND (?1 = 0 OR {unplayed} <> 1)"
         ))?;
-        let rows = st.query_map([notes], |r| {
-            Ok((text(r, "path"), int(r, "project_id").unwrap_or(0), int(r, "mtime").unwrap_or(0)))
-        })?;
-        // Grouped ignoring case, in the order each path first appears.
+        let rows =
+            st.query_map([notes], |r| Ok((text(r, "path"), int(r, "project_id").unwrap_or(0), int(r, "mtime"))))?;
+        struct Group {
+            path: String,
+            projects: HashSet<i64>,
+            recent: u32,
+            years: Vec<i32>,
+        }
         let mut order: Vec<String> = Vec::new();
-        let mut groups: HashMap<String, (String, Vec<(i64, i64)>)> = HashMap::new();
+        let mut groups: HashMap<String, Group> = HashMap::new();
         for row in rows {
             let (path, project, mtime) = row?;
-            let save = *newest.get(&project).unwrap_or(&project);
-            if muted.contains(&(save, case::to_lower(&path))) {
-                continue;
+            if !muted.is_empty() {
+                let save = *newest.get(&project).unwrap_or(&project);
+                if muted.contains(&(save, case::to_lower(&path))) {
+                    continue;
+                }
             }
             let key = case::key(&path);
-            let group = groups.entry(key.clone()).or_insert_with(|| {
-                order.push(key);
-                (path, Vec::new())
-            });
-            if !group.1.iter().any(|(p, _)| *p == project) {
-                group.1.push((project, mtime));
+            let group = match groups.entry(key) {
+                std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    order.push(e.key().clone());
+                    e.insert(Group { path, projects: HashSet::new(), recent: 0, years: Vec::new() })
+                }
+            };
+            if group.projects.insert(project) {
+                if mtime.is_some_and(|m| m >= since) {
+                    group.recent += 1;
+                }
+                if let Some(t) = mtime.and_then(local) {
+                    group.years.push(t.year());
+                }
             }
         }
         Ok(order
             .into_iter()
             .filter_map(|key| groups.remove(&key))
-            .map(|(path, saves)| {
-                let mut years: Vec<i32> = saves.iter().filter_map(|(_, m)| local(*m)).map(|t| t.year()).collect();
-                years.sort_unstable();
-                years.dedup();
+            .map(|mut g| {
+                g.years.sort_unstable();
+                g.years.dedup();
                 SampleUse {
-                    path,
-                    projects: count(Some(saves.len() as i64)),
-                    recent: count(Some(saves.iter().filter(|(_, m)| *m >= since).count() as i64)),
-                    years,
+                    path: g.path,
+                    projects: u32::try_from(g.projects.len()).unwrap_or(u32::MAX),
+                    recent: g.recent,
+                    years: g.years,
                 }
             })
             .collect())
@@ -473,10 +474,6 @@ pub struct SampleUse {
     pub recent: u32,
     /// The years those projects were last saved in, oldest first.
     pub years: Vec<i32>,
-}
-
-fn count(n: Option<i64>) -> u32 {
-    n.and_then(|n| u32::try_from(n).ok()).unwrap_or(0)
 }
 
 /// The C# app's list query: each save's own columns (as many as this library has, leaving out `info`) with its
