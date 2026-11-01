@@ -16,3 +16,7 @@ mo-space = { path = "../mo-space" }
 rayon.workspace = true
 # Each copy is read back and its SHA-256 checked against what was read from your folder.
 sha2 = "0.10"
+# A song zip's check numbers, to see a file whose time moved is still the same bytes.
+crc32fast = "1.5"
+# The one-zip-per-song format.
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
