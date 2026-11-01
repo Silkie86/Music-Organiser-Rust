@@ -633,11 +633,12 @@ fn a_bus_fader_reaches_the_channels_routed_to_it_through_other_inserts_but_not_t
 #[test]
 fn edit_events_are_listed_as_not_carried() {
     let mut s = song(vec![channel(0, "Bass", Some(plugin("Bass", "VST2", "1")), "", 0)], vec![], vec![]);
-    s.edit_events = vec![1, 4];
+    s.edit_events = vec![(1, "Lead".to_owned()), (4, "Pattern 4".to_owned())];
     let p = plan(&s);
-    assert!(
-        p.notes.contains(&"Edit events: the knob moves recorded into patterns 1, 4 aren't carried over yet".to_owned()),
-        "{:?}",
-        p.notes
-    );
+    let note = r#"Edit events: the knob moves recorded into patterns "Lead", "Pattern 4" aren't carried over yet"#;
+    assert!(p.notes.contains(&note.to_owned()), "{:?}", p.notes);
+    // A long list stops at eight.
+    s.edit_events = (1..=10).map(|i| (i, format!("P{i}"))).collect();
+    let p = plan(&s);
+    assert!(p.notes.iter().any(|n| n.ends_with(r#""P8" and 2 more aren't carried over yet"#)), "{:?}", p.notes);
 }

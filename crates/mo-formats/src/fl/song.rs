@@ -239,9 +239,9 @@ pub struct FlSong {
     /// insert going to one other insert besides nothing else is a bus; several are sends.
     pub routes: BTreeMap<u32, Vec<u32>>,
     pub automation: Vec<FlAutomation>,
-    /// The patterns holding edit events (knob moves recorded into the pattern, event 223), by number: not decoded
-    /// yet, so a converter can say they're left out.
-    pub edit_events: Vec<u32>,
+    /// The patterns placed in the song that hold edit events (knob moves recorded into the pattern, event 223), by
+    /// number and name: not decoded yet, so a converter can say they're left out.
+    pub edit_events: Vec<(u32, String)>,
     /// Muted playlist tracks that have something on them: their clips are on a muted track, and their automation is
     /// left out.
     pub muted_tracks: Vec<FlTrack>,
@@ -914,6 +914,14 @@ pub fn read_song_with(flp: &Flp<'_>, sounds: bool) -> FlSong {
         .collect();
     let known = seen_channels;
     let (mut clips, too_many) = place_clips(flp, &raw_notes, &items, &tracks, &known, &pattern_names);
+    // Only patterns the song plays (all of them where there's no playlist) lose anything.
+    let placed: HashSet<u32> =
+        items.iter().filter(|i| i.index > PATTERN_BASE).map(|i| i.index - PATTERN_BASE).collect();
+    let edit_events: Vec<(u32, String)> = edit_events
+        .into_iter()
+        .filter(|p| items.is_empty() || placed.contains(p))
+        .map(|p| (p, pattern_names.get(&p).cloned().unwrap_or_else(|| format!("Pattern {p}"))))
+        .collect();
     let playing: HashSet<u32> =
         order.iter().copied().filter(|c| types.get(c) != Some(&CHANNEL_TYPE_AUTOMATION)).collect();
     let mut audio_clips = place_audio_clips(&items, &tracks, &playing);
@@ -994,7 +1002,7 @@ pub fn read_song_with(flp: &Flp<'_>, sounds: bool) -> FlSong {
         inserts,
         routes: insert_routes,
         automation,
-        edit_events: edit_events.into_iter().collect(),
+        edit_events,
         muted_tracks: muted_tracks.into_iter().collect(),
         curves: curves.into_iter().collect(),
         warning: if too_many { Some(TOO_MANY_NOTES) } else { too_many_points.then_some(TOO_MANY_POINTS) },

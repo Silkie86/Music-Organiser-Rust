@@ -142,7 +142,7 @@ fn reads_mixer_insert_settings_effect_slots_and_what_automation_moves_on_them() 
         [(0, Some(12800), false), (1, Some(9600), true)]
     );
     // Pattern 1 holds edit events, which are found but not read yet.
-    assert_eq!(song.edit_events, [1]);
+    assert_eq!(song.edit_events, [(1, "Bass".to_owned())]);
     // Where each insert goes: insert 1's slots come before its routes, which still belong to it.
     assert_eq!(song.routes.into_iter().collect::<Vec<_>>(), [(0, vec![]), (1, vec![0, 2]), (2, vec![0])]);
 
