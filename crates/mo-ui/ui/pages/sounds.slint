@@ -135,7 +135,7 @@ export global SoundsData {
     in property <string> re-year;
     in property <[string]> re-years;
     // 0 (close to what you use) to 1 (further afield).
-    in property <float> re-adventure;
+    in-out property <float> re-adventure;
     callback re-adventure-set(float);
     in property <string> re-count;
     in property <[string]> re-counts;
@@ -197,7 +197,7 @@ export global SoundsData {
     in property <string> kit-key;
     in property <[string]> kit-keys;
     // 0 (the best fits) to 1 (anything that fits).
-    in property <float> kit-randomness;
+    in-out property <float> kit-randomness;
     callback kit-randomness-set(float);
     in property <[string]> kit-types;
     callback kit-add(string);
@@ -891,7 +891,7 @@ export component SoundsPage inherits Rectangle {
                 low: "Safe";
                 high: "Adventurous";
                 tip: "Left sticks close to what you already use; right goes further afield";
-                value: SoundsData.re-adventure;
+                value <=> SoundsData.re-adventure;
                 released(v) => { SoundsData.re-adventure-set(v); }
             }
             MenuChip {
@@ -961,7 +961,7 @@ export component SoundsPage inherits Rectangle {
                 low: "Best fits";
                 high: "Random";
                 tip: "Left picks the sounds that fit each pad best; right, anything that fits";
-                value: SoundsData.kit-randomness;
+                value <=> SoundsData.kit-randomness;
                 released(v) => { SoundsData.kit-randomness-set(v); }
             }
             MenuChip {
