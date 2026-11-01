@@ -20,12 +20,15 @@ use mo_app::sounds::{self as list, Filters, Length, Order, SoundList};
 use mo_audio::play::Player;
 use mo_library::UsageRules;
 use mo_library::songs::thousands;
+use mo_sounds::index::SoundIndex;
 use mo_sounds::liking::{self, LIKED_WEIGHTS_KEY, LikedWeights};
 use mo_sounds::usage::{self, Usage};
 use mo_sounds::{Sound, SoundsDb, music};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, Timer, TimerMode, VecModel};
 
-use crate::{AppWindow, MenuItem, PickedSound, SoundFact, SoundLine, SoundTile, SoundsData, TileRow, TypeChipInfo};
+use crate::{
+    AlikeLine, AppWindow, MenuItem, PickedSound, SoundFact, SoundLine, SoundTile, SoundsData, TileRow, TypeChipInfo,
+};
 
 /// The C# app's settings in `library.db` for the view shown last and autoplay, read (not written: it's read-only).
 const VIEW_KEY: &str = "sounds_view";
@@ -75,6 +78,10 @@ struct Page {
     now: NaiveDateTime,
     /// The sound playing (its place in `list`) and how long the part shown in its waveform lasts.
     playing: Option<(usize, f64)>,
+    /// Each sound's place in `list`, by id.
+    places: Arc<HashMap<i64, usize>>,
+    /// Every sound's fingerprint, once read, for Sounds like this.
+    index: Option<Arc<SoundIndex>>,
 }
 
 impl Default for Page {
@@ -94,6 +101,8 @@ impl Default for Page {
             types: Vec::new(),
             now: Local::now().naive_local(),
             playing: None,
+            places: Arc::default(),
+            index: None,
         }
     }
 }
@@ -132,6 +141,7 @@ thread_local! {
     static TILE_ROWS: Rc<TileRows> = PAGE.with(|p| Rc::new(TileRows { page: p.clone(), notify: ModelNotify::default() }));
     static LINES: Rc<Lines> = PAGE.with(|p| Rc::new(Lines { page: p.clone(), notify: ModelNotify::default() }));
     static WORKER: RefCell<Option<Newest<Ask>>> = const { RefCell::new(None) };
+    static ALIKE: RefCell<Option<Newest<AlikeAsk>>> = const { RefCell::new(None) };
     static FEED: RefCell<Option<Feed>> = const { RefCell::new(None) };
     /// Moves the picked tile's waveform along while it plays.
     static TICKER: Timer = Timer::default();
@@ -321,12 +331,15 @@ pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: F
 enum Step {
     Read(Result<Read, String>),
     Used(Arc<SoundList>),
+    /// Every sound's fingerprint, for Sounds like this.
+    Index(Arc<SoundIndex>),
 }
 
 fn arrive(app: &AppWindow, step: Step) {
     match step {
         Step::Read(read) => loaded(app, read),
         Step::Used(list) => use_known(app, list),
+        Step::Index(index) => index_known(app, index),
     }
 }
 
@@ -344,6 +357,8 @@ pub struct Library {
     types: Vec<(String, usize)>,
     tags: Vec<String>,
     played: Vec<(usize, NaiveDateTime)>,
+    /// Each sound's place in the list, by its id.
+    places: Arc<HashMap<i64, usize>>,
 }
 
 impl Library {
@@ -356,9 +371,9 @@ impl Library {
             list.set_liked(|s| weights.score(s, None));
             list
         });
-        let ids: HashMap<i64, usize> = (0..list.len()).filter_map(|i| list.sound(i).map(|s| (s.id, i))).collect();
-        let played = played.into_iter().filter_map(|(id, at)| ids.get(&id).map(|&i| (i, at))).collect();
-        Library { types: list.type_counts(), tags: list.tags(), list: Arc::new(list), played }
+        let places: HashMap<i64, usize> = (0..list.len()).filter_map(|i| list.sound(i).map(|s| (s.id, i))).collect();
+        let played = played.into_iter().filter_map(|(id, at)| places.get(&id).map(|&i| (i, at))).collect();
+        Library { types: list.type_counts(), tags: list.tags(), list: Arc::new(list), played, places: Arc::new(places) }
     }
 
     /// The same library with how your songs use each sound (by sound id) counted in, for the screenshots.
@@ -423,8 +438,14 @@ fn read_all(sounds_db: &Path, library_db: &Path, send: impl Fn(Step)) {
     });
     let settings = lib.as_ref().map(Settings::read).unwrap_or_default();
     let now = Local::now().naive_local();
+    let db = match SoundsDb::open_read_only(sounds_db) {
+        Ok(db) => db,
+        Err(e) => {
+            send(Step::Read(Err(e.to_string())));
+            return;
+        }
+    };
     let read = (|| {
-        let db = SoundsDb::open_read_only(sounds_db).map_err(|e| e.to_string())?;
         let sounds = db.all(now).map_err(|e| e.to_string())?;
         let history = db.history(500).unwrap_or_default();
         Ok(Library::new(sounds, history, &settings.weights))
@@ -435,7 +456,14 @@ fn read_all(sounds_db: &Path, library_db: &Path, send: impl Fn(Step)) {
         view: settings.view.clone(),
         autoplay: settings.autoplay.clone(),
     })));
-    let (Some(lib), Some(list)) = (lib, list) else { return };
+    let Some(list) = list else { return };
+    // Sounds like this: every sound's fingerprint, read once.
+    match SoundIndex::read(&db, list.sounds()) {
+        Ok(index) => send(Step::Index(Arc::new(index))),
+        Err(e) => log::warning("Sounds", &format!("Couldn't read the sounds' fingerprints for Sounds like this: {e}")),
+    }
+    drop(db);
+    let Some(lib) = lib else { return };
     let year_ago = now.checked_sub_months(chrono::Months::new(12)).unwrap_or(now);
     match count_usage(&lib, &list, year_ago, settings.rules) {
         Ok(usage) => send(Step::Used(Arc::new(with_usage(&list, usage, &settings.weights)))),
@@ -452,6 +480,111 @@ fn count_usage(
 ) -> Result<HashMap<i64, Usage>, mo_library::LibraryError> {
     let uses = lib.sample_usage(recent_since, rules)?;
     Ok(background::on_pool(|| usage::usage(list.sounds(), &uses)))
+}
+
+/// How many sounds Sounds like this shows.
+const ALIKE_COUNT: usize = 8;
+
+/// A search for sounds like the one at `at`, answered off the window's thread (comparing with 450,000 others takes
+/// about half a second); only the newest pick's answer is shown.
+struct AlikeAsk {
+    at: usize,
+    list: Arc<SoundList>,
+    places: Arc<HashMap<i64, usize>>,
+    index: Arc<SoundIndex>,
+}
+
+impl AlikeAsk {
+    /// The sounds like it, most alike first, as places in the list with how alike (0 to 1).
+    fn answer(&self) -> Vec<(usize, f64)> {
+        let Some(s) = self.list.sound(self.at) else { return Vec::new() };
+        let get = |id: i64| self.places.get(&id).and_then(|&i| self.list.sound(i));
+        let found = background::on_pool(|| self.index.similar(s, get, ALIKE_COUNT, false));
+        found.into_iter().filter_map(|(id, likeness)| self.places.get(&id).map(|&i| (i, likeness))).collect()
+    }
+}
+
+/// The fingerprints arrived: the picked sound can now say what sounds like it. Public for the screenshots.
+pub fn index_known(app: &AppWindow, index: Arc<SoundIndex>) {
+    let picked = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.index = Some(index);
+        p.picked
+    });
+    if let Some(at) = picked {
+        find_alike(app, at);
+    }
+}
+
+fn find_alike(app: &AppWindow, at: usize) {
+    let data = app.global::<SoundsData>();
+    data.set_alike(ModelRc::default());
+    let ask = PAGE.with(|p| {
+        let p = p.borrow();
+        let index = p.index.clone()?;
+        Some(AlikeAsk { at, list: p.list.clone(), places: p.places.clone(), index })
+    });
+    let Some(ask) = ask else {
+        data.set_alike_note("Not ready yet: the sounds' fingerprints are still being read.".into());
+        return;
+    };
+    data.set_alike_note("Listening for sounds like it…".into());
+    if HERE.with(|h| *h.borrow()) {
+        let found = ask.answer();
+        alike_found(app, at, found);
+        return;
+    }
+    ALIKE.with(|w| {
+        let mut w = w.borrow_mut();
+        if w.is_none() {
+            let weak = app.as_weak();
+            match Newest::start("Sounds like this", move |ask: AlikeAsk| {
+                let found = ask.answer();
+                let at = ask.at;
+                let weak = weak.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(app) = weak.upgrade() {
+                        alike_found(&app, at, found);
+                    }
+                });
+            }) {
+                Ok(worker) => *w = Some(worker),
+                Err(e) => log::error("Sounds", &format!("Couldn't start the Sounds like this thread: {e}")),
+            }
+        }
+        if let Some(worker) = w.as_ref() {
+            worker.ask(ask);
+        }
+    });
+}
+
+/// Shows the sounds like the one at `at`, if it's still the one picked.
+fn alike_found(app: &AppWindow, at: usize, found: Vec<(usize, f64)>) {
+    let lines = PAGE.with(|p| {
+        let p = p.borrow();
+        if p.picked != Some(at) {
+            return None;
+        }
+        Some(
+            found
+                .iter()
+                .filter_map(|&(i, likeness)| {
+                    let s = p.list.sound(i)?;
+                    Some(AlikeLine {
+                        place: i as i32,
+                        name: s.name().into(),
+                        sound_type: s.sound_type.clone().into(),
+                        colour: list::type_colour(&s.sound_type),
+                        likeness: format!("{:.0}%", likeness.clamp(0.0, 1.0) * 100.0).into(),
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+    });
+    let Some(lines) = lines else { return };
+    let data = app.global::<SoundsData>();
+    data.set_alike_note(if lines.is_empty() { "No sounds like it found." } else { "" }.into());
+    data.set_alike(ModelRc::new(VecModel::from(lines)));
 }
 
 /// The use counts arrived: the same sounds in the same order, so what's shown and picked stays as it is.
@@ -505,6 +638,7 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
         let mut p = p.borrow_mut();
         p.history = library.played;
         p.list = library.list;
+        p.places = library.places;
         p.types = library.types;
         p.view = view.and_then(|v| VIEWS.iter().position(|n| *n == v)).map_or(TILES, |i| i as i32);
         // As in the C# app: off unless it was turned on.
@@ -632,6 +766,23 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     data.on_play_row(move |row| {
         let Some(app) = weak.upgrade() else { return };
         select_row(&app, row, false);
+        play_picked(&app, 0.0);
+    });
+    // A sound like the picked one: picked in turn (and played with autoplay on), or played on a double-click.
+    let weak = app.as_weak();
+    data.on_pick_alike(move |place| {
+        let Some(app) = weak.upgrade() else { return };
+        let Ok(at) = usize::try_from(place) else { return };
+        pick(&app, at);
+        if PAGE.with(|p| p.borrow().autoplay) {
+            play_picked(&app, 0.0);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_play_alike(move |place| {
+        let Some(app) = weak.upgrade() else { return };
+        let Ok(at) = usize::try_from(place) else { return };
+        pick(&app, at);
         play_picked(&app, 0.0);
     });
     let weak = app.as_weak();
@@ -820,6 +971,7 @@ fn pick(app: &AppWindow, at: usize) {
     });
     data.set_picked(picked);
     data.set_panel_shown(true);
+    find_alike(app, at);
     data.set_playing(PAGE.with(|p| p.borrow().playing.is_some_and(|(i, _)| i == at)));
     redraw();
     bring_picked_into_view(app);

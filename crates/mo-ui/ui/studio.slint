@@ -1067,10 +1067,16 @@ export component SidePanel inherits Rectangle {
     border-radius: Theme.radius;
     border-width: 1px;
     border-color: Theme.edge;
-    VerticalLayout {
-        padding: Space.xl;
-        spacing: Space.md;
-        @children
+    // Scrolls when what it holds is taller than the panel; fills it otherwise, so a stretch at the end works.
+    flick := Flickable {
+        content-height: content.height;
+        content := VerticalLayout {
+            width: flick.width;
+            height: max(flick.height, self.preferred-height);
+            padding: Space.xl;
+            spacing: Space.md;
+            @children
+        }
     }
     CloseButton {
         x: parent.width - self.width - Space.md;
