@@ -111,11 +111,12 @@ pub struct Track {
     pub muted: bool,
 }
 
-/// The master track, or a track by its place in [`Plan::tracks`].
+/// The master track, or a track by its place in [`Plan::tracks`], or the song itself (its tempo).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TrackRef {
     Master,
     Track(usize),
+    Song,
 }
 
 /// What an automation lane moves.
@@ -130,6 +131,8 @@ pub enum Target {
     Plugin { device: usize, path: String, id: u32, name: String },
     /// Switches a device on (1) and off (0): the device by its place on the track.
     OnOff { device: usize },
+    /// The song's tempo in BPM (on [`TrackRef::Song`]).
+    Tempo,
 }
 
 impl Target {
@@ -930,6 +933,11 @@ pub fn from_fl(song: &FlSong, options: Options, read_sample: &mut dyn FnMut(&str
             }
             continue;
         }
+        // The song's tempo, on Bitwig's tempo lane.
+        if a.control == FlControl::Tempo {
+            add_lane(&mut lanes, TrackRef::Song, Target::Tempo, a, tempo_bpm);
+            continue;
+        }
         let channel = match a.channel {
             Some(ch) if !matches!(a.control, FlControl::Pitch | FlControl::Other) => ch,
             _ => {
@@ -1010,7 +1018,7 @@ pub fn from_fl(song: &FlSong, options: Options, read_sample: &mut dyn FnMut(&str
         let dense = FlAutomation { points: on_fader_curve(a), ..a.clone() };
         for track in onto {
             let own = match track {
-                TrackRef::Master => None,
+                TrackRef::Master | TrackRef::Song => None,
                 TrackRef::Track(t) => tracks.get(t),
             };
             let automated = lanes.iter().any(|l| l.track == track && l.target == target && !l.from_insert);
@@ -1055,6 +1063,14 @@ pub fn from_fl(song: &FlSong, options: Options, read_sample: &mut dyn FnMut(&str
     // Several FL clips moving one thing share a lane.
     for lane in &mut lanes {
         lane.points = in_song_order(std::mem::take(&mut lane.points));
+        // Until FL's first tempo point the song plays at the project's tempo; a lane would hold its first point.
+        if lane.target == Target::Tempo
+            && let Some(&first) = lane.points.first()
+            && first.beat > SAME_BEAT
+        {
+            let held = LanePoint { beat: 0.0, value: song.tempo, from: 0.0, ..first };
+            lane.points.splice(0..0, [held, LanePoint { beat: first.beat, ..held }]);
+        }
     }
 
     let mut seen = HashSet::new();

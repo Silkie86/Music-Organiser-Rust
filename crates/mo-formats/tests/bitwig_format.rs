@@ -403,11 +403,11 @@ fn metadata_read_before_a_damaged_entry_stays() {
 fn a_changed_number_keeps_the_kind_bitwig_wrote() {
     let mut doc = decode(&bitwig_template(Template::default()));
     let r = root(&doc);
-    let tempo = doc.field_obj(r, 0x29a6).expect("tempo");
+    let tempo = doc.field_obj(r, 0x190).and_then(|t| doc.field_obj(t, 0x211)).expect("tempo");
     doc.obj_mut(tempo).set(0x2c8, Value::I32(140));
     assert_eq!(doc.obj(tempo).get(0x2c8), Some(&Value::F64(140.0)));
     let back = decode(&bitwig::encode(&doc, None).expect("written"));
-    let tempo = back.field_obj(root(&back), 0x29a6).expect("tempo");
+    let tempo = back.field_obj(root(&back), 0x190).and_then(|t| back.field_obj(t, 0x211)).expect("tempo");
     assert_eq!(back.obj(tempo).num(0x2c8), Some(140.0));
 }
 
