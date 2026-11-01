@@ -4,29 +4,31 @@
 //! key, the cores and tensions the chords are written with, and what else they have.
 
 use super::decode_tests::small_music;
+use super::fact::{BASS_KINDS, answer_code, bass_code};
 use super::hear_tests::{BAR, Dice, Music, VELOCITY, notes, random_music};
 use super::reader_tests::{case, chord, random_pins, read, the_music_in_ticks};
 use super::score_tests::bars;
 use super::{
     BassKind, ChordAnswer, ChordFact, ChordReading, ChordSpan, ChordSummary, Core, CoreSet, Extensions, FACT_LAYOUT,
-    Hearing, Label, MOST_READINGS, NoChord, Pin, Reading, SpanFlags, SummaryFlags, Texture, Unit,
+    Hearing, Label, MOST_READINGS, MOST_UNITS, NoChord, Pin, Reading, SpanFlags, SummaryFlags, Texture, Unit,
 };
 use crate::key::Key;
 use crate::notes::{Grid, Note};
 use crate::pitch::PitchClass;
 
-/// Whether a fact read back is the reading it was made from, and if not, why: the same header; the same stretches,
-/// each with its answer, its flags, its first reading (its chance to the nearest 255th) and its runner-up; the same
-/// chart in any key and the same summary; and each stretch's ticks where the reading has them, on the grid it was
-/// read on.
-fn kept(r: &ChordReading, grid: Grid) -> Result<(), String> {
+/// Whether a fact read back is the reading it was made from, and if not, why: the same header and grid; the same
+/// stretches, each with its answer, its flags, its first reading (its chance to the nearest 255th) and its runner-up;
+/// the same chart in any key and the same summary; and each stretch's ticks where the reading has them.
+fn kept(r: &ChordReading) -> Result<(), String> {
     let fact = r.fact();
     let back = fact.read().ok_or_else(|| format!("not read back: {fact:?}"))?;
     let check = |yes: bool, what: &str| if yes { Ok(()) } else { Err(format!("{what} differs: {back:?}")) };
     let near = |a: f64, b: f64| (a - b).abs() <= 0.5 / 255.0 + 1e-12;
-    check(fact.0.len() == 14 + 11 * r.spans.len(), "the length")?;
+    check(fact.0.len() == 22 + 11 * r.spans.len(), "the length")?;
     let head = (back.unit, back.texture, back.looped, back.truncated, back.start);
     check(head == (r.unit, r.texture, r.looped, r.truncated, r.start), "the header")?;
+    let grid = (back.grid.ticks_per_beat, back.grid.beats_per_bar, back.grid.bar_line);
+    check(grid == (r.grid.ticks_per_beat, r.grid.beats_per_bar, r.start), "the grid")?;
     check(back.units == r.spans.last().map_or(0, |s| s.units.end) && back.spans.len() == r.spans.len(), "the units")?;
     for (b, s) in back.spans.iter().zip(&r.spans) {
         let (first, second) = (s.readings.first(), s.readings.get(1));
@@ -41,7 +43,7 @@ fn kept(r: &ChordReading, grid: Grid) -> Result<(), String> {
         check(b.runner_up.map(|x| (x.label, x.same_notes)) == second.map(|x| (x.label, same(x))), "a runner-up")?;
         check(near(b.runner_up.map_or(0.0, |x| x.chance), second.map_or(0.0, |x| x.chance)), "a runner-up's chance")?;
         check(b.shown() == s.shown().map(|x| x.chord), "the chord shown")?;
-        check(back.tick(grid, s.units.start) == s.start && back.tick(grid, s.units.end) == s.end, "the ticks")?;
+        check(back.tick(s.units.start) == s.start && back.tick(s.units.end) == s.end, "the ticks")?;
     }
     let keys = [Key::major(PitchClass::C), Key::minor(PitchClass::new(3)), Key::major(PitchClass::new(6))];
     for key in [None].into_iter().chain(keys.map(Some)) {
@@ -55,7 +57,8 @@ fn a_fact_read_back_is_the_reading_it_was_made_from() {
     for (music, pins) in the_music_in_ticks() {
         for keep in [1, 2, MOST_READINGS] {
             let r = read(&music, &pins, keep).unwrap();
-            kept(&r, music.grid).unwrap_or_else(|why| panic!("{why}\n{music:?}"));
+            assert_eq!(r.grid, music.grid);
+            kept(&r).unwrap_or_else(|why| panic!("{why}\n{music:?}"));
         }
     }
     // Any music with any pins, on any grid.
@@ -69,11 +72,13 @@ fn a_fact_read_back_is_the_reading_it_was_made_from() {
         }
         let pins = random_pins(&mut dice, &hearing);
         let r = read(&music, &pins, dice.pick(&[1, 2, 6])).unwrap();
-        kept(&r, music.grid).unwrap_or_else(|why| panic!("round {round}: {why}\n{music:?}, pins {pins:?}"));
+        kept(&r).unwrap_or_else(|why| panic!("round {round}: {why}\n{music:?}, pins {pins:?}"));
         read_back += 1;
     }
     assert!(read_back > 250, "{read_back} read back");
 }
+
+// The layout's numbers are written out again here, not taken from the code, so the tests check the layout.
 
 /// A label in a byte, as a fact keeps it.
 fn label_byte(label: Label) -> u8 {
@@ -95,10 +100,13 @@ fn answer_and_chances(s: &ChordSpan) -> [u8; 4] {
 
 #[test]
 fn a_fact_is_laid_out_as_the_design_says() {
-    // C | F over their roots, a bar each: read on half beats, with a bass and chords, from tick 0, in 16 units; each
-    // stretch is one chord, read on its root and written there over its root, its notes the major triad's.
+    // C | F over their roots, a bar each: read on half beats, with a bass and chords, from tick 0, in 16 units, on
+    // 4/4 at 480 ticks a beat; each stretch is one chord, read on its root and written there over its root, its notes
+    // the major triad's.
     let r = read(&Music::new().bass(bars("C2 | F2")).keys(bars("C4 E4 G4 | F3 A3 C4")), &[], 2).unwrap();
+    let grid = [0, 0, 0x01, 0xE0, 0, 0, 0, 4];
     let mut want = vec![FACT_LAYOUT, 0b0010, 0, 16, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0];
+    want.extend(grid);
     want.extend([0, 0, 0x00, 0x00, 0x00, 0x91, 0]);
     want.extend(answer_and_chances(&r.spans[0]));
     want.extend([0, 8, 0x50, 0x50, 0x00, 0x91, 0]);
@@ -109,6 +117,7 @@ fn a_fact_is_laid_out_as_the_design_says() {
     let looped = Music::new().bass(bars("G1 | | C2")).keys(bars("F3 A3 C4 | | C4 E4 G4")).looped();
     let r = read(&looped, &[], 2).unwrap();
     let mut want = vec![FACT_LAYOUT, 0b1010, 0, 24, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0];
+    want.extend(grid);
     want.extend([0, 0, label_byte(r.spans[0].readings[0].label), 0x70, 0x44, 0x25, 0]);
     want.extend(answer_and_chances(&r.spans[0]));
     want.extend([0, 8, 0xFF, 0, 0, 0, 0x40, 0x04, 0, 0xFF, 0]);
@@ -118,10 +127,11 @@ fn a_fact_is_laid_out_as_the_design_says() {
     assert_eq!(r.spans[1].answer, ChordAnswer::NoChord(NoChord::Rest));
 }
 
-/// A fact made by hand: on half beats with no bass, starting a beat in, two bars long. First a diminished seventh read
-/// on E, written on C# (as before Dm), sure at 0.8, the same notes as its runner-up A7 at 0.1; then a rest.
+/// A fact made by hand: on half beats with no bass, starting a beat in, two bars of 4/4 at 480 ticks a beat long.
+/// First a diminished seventh read on E, written on C# (as before Dm), sure at 0.8, the same notes as its runner-up A7
+/// at 0.1; then a rest.
 fn by_hand() -> ChordFact {
-    let mut bytes = vec![FACT_LAYOUT, 0b0100, 0, 16, 0, 2, 0, 0, 0, 0, 0, 0, 0x01, 0xE0];
+    let mut bytes = vec![FACT_LAYOUT, 0b0100, 0, 16, 0, 2, 0, 0, 0, 0, 0, 0, 0x01, 0xE0, 0, 0, 0x01, 0xE0, 0, 0, 0, 4];
     bytes.extend([0, 0, 0x49, 0x10, 0x02, 0x49, 0x44, 0x18, 204, 0x92, 26]);
     bytes.extend([0, 8, 0xFF, 0, 0, 0, 0x40, 0x04, 0, 0xFF, 0]);
     ChordFact(bytes)
@@ -132,6 +142,7 @@ fn a_fact_made_by_hand_reads_as_its_bytes_say() {
     let back = by_hand().read().unwrap();
     let head = (back.unit, back.texture, back.looped, back.truncated, back.start, back.units);
     assert_eq!(head, (Unit::HalfBeat, Texture::HarmonyOnly, false, false, 480, 16));
+    assert_eq!(back.grid, Grid { ticks_per_beat: 480, beats_per_bar: 4, bar_line: 480 });
     let [dim, rest] = &back.spans[..] else { panic!("{back:?}") };
     // The root it's read on isn't the one it's written on: the fact keeps both.
     assert_eq!(dim.label.map(|l| (l.root, l.core)), Some((PitchClass::E, Core::Diminished7)));
@@ -152,8 +163,7 @@ fn a_fact_made_by_hand_reads_as_its_bytes_say() {
     // Its chart, and where its units start: a beat after the bar line, half a beat a unit.
     let names: Vec<Option<String>> = back.names(None).iter().map(|s| s.map(|s| s.name())).collect();
     assert_eq!(names, [Some("C#dim7".to_owned()), None]);
-    let grid = Grid::four_four(480);
-    assert_eq!([0, 1, 8, 16, 17, usize::MAX].map(|u| back.tick(grid, u)), [480, 720, 2400, 4320, 4320, 4320]);
+    assert_eq!([0, 1, 8, 16, 17, usize::MAX].map(|u| back.tick(u)), [480, 720, 2400, 4320, 4320, 4320]);
 }
 
 #[test]
@@ -164,58 +174,59 @@ fn a_fact_of_another_layout_or_a_damaged_one_reads_as_none() {
         damaged.0[at] = byte;
         damaged.read()
     };
-    // Another layout; a bit no layout-1 header sets; stretches that aren't as many as it says, or none at all.
+    // Another layout; a bit no layout-1 header sets; more units than a reader hears; a unit the grid doesn't read on
+    // (a beat on 4/4, or half a beat on 6/8); stretches that aren't as many as it says, or none at all.
     assert_eq!(with(0, FACT_LAYOUT + 1), None);
-    for kind in [0x24, 0x44, 0x84] {
-        assert_eq!(with(1, kind), None);
+    for (at, byte) in [(1, 0x24), (1, 0x44), (1, 0x84), (2, 0x40), (1, 0b0101), (21, 6), (5, 0), (5, 1), (5, 3)] {
+        assert_eq!(with(at, byte), None, "byte {at} as {byte:#04x}");
     }
-    for count in [0, 1, 3] {
-        assert_eq!(with(5, count), None);
-    }
+    assert!(usize::from(u16::from_be_bytes([0x40, 16])) > MOST_UNITS);
     let (mut short, mut long, mut empty) = (fact.clone(), fact.clone(), fact.clone());
     short.0.pop();
     long.0.push(0);
-    empty.0.truncate(14);
+    empty.0.truncate(22);
     empty.0[5] = 0;
-    for damaged in [short, long, empty, ChordFact(Vec::new()), ChordFact(fact.0[..13].to_vec())] {
+    for damaged in [short, long, empty, ChordFact(Vec::new()), ChordFact(fact.0[..21].to_vec())] {
         assert_eq!(damaged.read(), None, "{damaged:?}");
     }
     // Stretches out of order: the first not at the start, one not after the one before, the last not before the end.
-    assert_eq!(with(15, 1), None);
-    assert_eq!(with(26, 0), None);
+    assert_eq!(with(23, 1), None);
+    assert_eq!(with(34, 0), None);
     assert_eq!(with(3, 8), None);
     // Roots and basses that aren't pitch classes; a bit no layout-1 stretch sets; a bass, an answer or a runner-up no
     // fact has; a rest with a reading; a stretch with no reading that has some of one; a runner-up's chance or same
     // notes with no runner-up.
     for (at, byte) in [
-        (16, 0xC9),
-        (17, 0xC0),
-        (17, 0x0C),
-        (18, 0x82),
-        (20, 0x45),
-        (20, 0x47),
-        (21, 0x16),
-        (21, 0x58),
-        (21, 0x98),
-        (23, 0xC2),
-        (21, 0x14),
-        (16, 0xFF),
-        (28, 0x10),
-        (29, 0x01),
-        (31, 0x41),
-        (32, 0x14),
-        (33, 1),
-        (34, 0x92),
-        (35, 1),
-        (32, 0x0C),
+        (24, 0xC9),
+        (25, 0xC0),
+        (25, 0x0C),
+        (26, 0x82),
+        (28, 0x45),
+        (28, 0x47),
+        (29, 0x16),
+        (29, 0x58),
+        (29, 0x98),
+        (31, 0xC2),
+        (29, 0x14),
+        (24, 0xFF),
+        (36, 0x10),
+        (37, 0x01),
+        (39, 0x41),
+        (40, 0x14),
+        (41, 1),
+        (42, 0x92),
+        (43, 1),
+        (40, 0x0C),
     ] {
         assert_eq!(with(at, byte), None, "byte {at} as {byte:#04x}");
     }
-    // The same stretches with a runner-up's bytes in order, or none, read.
-    assert!(with(23, 0x2E).is_some() && with(24, 255).is_some() && with(31, 0).is_some());
+    // Another grid with the same unit (3/4 at 448 ticks a beat), another runner-up, a sure first reading, or a rest
+    // with a bass under it, read.
+    for (at, byte) in [(21, 3), (17, 0xC0), (31, 0x2E), (32, 255), (39, 0)] {
+        assert!(with(at, byte).is_some(), "byte {at} as {byte:#04x}");
+    }
     // Damaged at random, or not a fact at all: read as none, or as a reading the page can show, never with a panic.
     let mut dice = Dice(0x9e37_79b9_7f4a_7c15);
-    let grid = Grid::four_four(480);
     let real = read(&Music::new().bass(bars("C2 | F2 | G2")).keys(bars("C4 E4 G4 | F3 A3 C4 | G3 B3 D4")), &[], 2);
     let facts = [fact.0.clone(), real.unwrap().fact().0];
     let mut read_back = 0;
@@ -235,14 +246,19 @@ fn a_fact_of_another_layout_or_a_damaged_one_reads_as_none() {
         assert_eq!((spans[0].units.start, spans[spans.len() - 1].units.end), (0, back.units), "{back:?}");
         assert!(spans.windows(2).all(|w| w[0].units.end == w[1].units.start), "{back:?}");
         assert!(spans.iter().all(|s| !s.units.is_empty() && (0.0..=1.0).contains(&s.chance)), "{back:?}");
-        let _ = (back.names(Some(Key::minor(PitchClass::new(1)))), back.summary(), back.tick(grid, usize::MAX));
+        let _ = (back.names(Some(Key::minor(PitchClass::new(1)))), back.summary(), back.tick(usize::MAX));
     }
     assert!(read_back > 1000, "{read_back} read back");
 }
 
-/// What chords given read, a bar each over their own notes (the bass under the rest): written as given, whatever the
-/// numbers read, so the summary's rules are checked on chords that stay put.
+/// What chords given read, a bar each over their own notes (the bass under the rest), as a song: written as given,
+/// whatever the numbers read, so the summary's rules are checked on chords that stay put.
 fn given(names: &[&str]) -> ChordReading {
+    given_as(names, false)
+}
+
+/// What chords given read ([`given`]), as a song or a loop.
+fn given_as(names: &[&str], looped: bool) -> ChordReading {
     let (mut bass, mut keys, mut pins) = (Vec::new(), Vec::new(), Vec::new());
     for (bar, name) in names.iter().enumerate() {
         let c = chord(name);
@@ -252,9 +268,10 @@ fn given(names: &[&str]) -> ChordReading {
         keys.extend(c.notes().iter().map(|pc| note(60 + pc.number())));
         pins.push(Pin { start, end: start + BAR, chord: Some(c) });
     }
-    let r = read(&Music::new().bass(bass).keys(keys), &pins, 2).unwrap();
+    let music = Music::new().bass(bass).keys(keys);
+    let r = read(&if looped { music.looped() } else { music }, &pins, 2).unwrap();
     let written: Vec<String> = r.spans.iter().map(|s| s.shown().map_or("N".to_owned(), |x| x.chord.name())).collect();
-    assert_eq!(written, names, "{r:?}");
+    assert_eq!((written, r.looped), (names.iter().map(|&n| n.to_owned()).collect(), looped), "{r:?}");
     r
 }
 
@@ -284,6 +301,18 @@ fn the_progression_is_the_same_in_any_key_however_the_chords_are_voiced() {
     ] {
         assert_ne!(given(names).summary().progression(), two_five_one, "{names:?}");
     }
+    // Round a loop, a chord held over its seam counts once, and a loop that plays the same chords over again is the
+    // loop played once: C F G C is C F G, as the same loop started a bar before (C C F G) is, and C F C F is C F. A
+    // song has no seam, and a loop counts from the chord it starts on.
+    let progression = |names: &[&str], looped: bool| given_as(names, looped).summary().progression();
+    let c_f_g = progression(&["C", "F", "G"], false);
+    for names in [&["C", "F", "G", "C"][..], &["C", "C", "F", "G"], &["C", "F", "G", "C", "F", "G"], &["C", "F", "G"]] {
+        assert_eq!(progression(names, true), c_f_g, "{names:?}");
+    }
+    assert_eq!(progression(&["C", "F", "C", "F"], true), progression(&["C", "F"], false));
+    assert_ne!(progression(&["C", "F", "G", "C"], false), c_f_g);
+    assert_ne!(progression(&["C", "F", "C", "F"], false), progression(&["C", "F"], false));
+    assert_ne!(progression(&["F", "G", "C"], true), c_f_g);
     // Stretches with no chord are left out: C | rest | F is C | F.
     let c_f = read(&Music::new().bass(bars("C2 | F2")).keys(bars("C4 E4 G4 | F3 A3 C4")), &[], 2).unwrap();
     let rest = read(&Music::new().bass(bars("C2 | | F2")).keys(bars("C4 E4 G4 | | F3 A3 C4")), &[], 2).unwrap();
@@ -353,7 +382,9 @@ fn the_summary_holds_what_else_the_chords_have() {
     assert_eq!(r.summary().flags(), F::ROOTLESS, "{r:?}");
     // What's heard: a pedal, chords pushed, a walking bass, and a sus chord over its bass that's also a chord over a
     // bass that's only a bass.
+    // A triad over its seventh is written another way too (D/C, also D7/C), but it's no sus chord: only a slash.
     for (name, want) in [
+        ("3 D/C", F::SLASH),
         ("9 C | F/C | G/C | C over a pedal", F::PEDAL.with(F::INVERSION).with(F::SLASH)),
         ("44 C | F pushed", F::PUSHED),
         ("36 a walk under F A C", F::WALKING),
@@ -372,4 +403,17 @@ fn the_summary_holds_what_else_the_chords_have() {
     assert!(r.summary().cores().contains(Core::HalfDiminished));
     r.spans[3].label = None;
     assert!(!r.summary().cores().contains(Core::HalfDiminished));
+}
+
+#[test]
+fn a_fact_numbers_answers_basses_and_textures_by_their_places() {
+    for (i, answer) in ChordAnswer::ALL.into_iter().enumerate() {
+        assert_eq!(usize::from(answer_code(answer)), i, "{answer:?}");
+    }
+    for (i, bass) in BASS_KINDS.into_iter().enumerate() {
+        assert_eq!(usize::from(bass_code(bass)), i, "{bass:?}");
+    }
+    for (i, texture) in Texture::ALL.into_iter().enumerate() {
+        assert_eq!(texture.index(), i, "{texture:?}");
+    }
 }

@@ -94,6 +94,8 @@ pub struct ChordReading {
     pub texture: Texture,
     /// The unit chords change on: half a beat, or a beat in compound metre.
     pub unit: Unit,
+    /// The grid it was read on, as given.
+    pub grid: Grid,
     /// Where the reading starts and ends, in the music's own ticks, on units' starts: from the bar line at or before
     /// the first note to the end of the unit the last note ends in (a loop: from the bar line at or before its first
     /// note to the bar line it ends on).
@@ -259,15 +261,18 @@ pub(super) fn spell_chart(
     looped: bool,
     key: Option<Key>,
 ) -> Vec<Option<Spelled>> {
-    let shown: Vec<Option<Chord>> = shown.collect();
-    let chart: Vec<(usize, Chord)> = shown.iter().enumerate().filter_map(|(i, c)| c.map(|c| (i, c))).collect();
+    let (mut chart, mut spans): (Vec<(usize, Chord)>, usize) = (Vec::new(), 0);
+    for (i, chord) in shown.enumerate() {
+        spans = i + 1;
+        chart.extend(chord.map(|c| (i, c)));
+    }
     let mut run: Vec<Chord> = chart.iter().map(|&(_, c)| c).collect();
     // Round a loop: spelled twice over, so the last chord knows the first as it's spelled.
     if looped {
         run.extend_from_within(..);
     }
     let spelled = spell_in_key(&run, key);
-    let mut out = vec![None; shown.len()];
+    let mut out = vec![None; spans];
     for (&(i, _), s) in chart.iter().zip(spelled) {
         if let Some(slot) = out.get_mut(i) {
             *slot = Some(s);
@@ -369,7 +374,7 @@ impl ChordReader {
         }
         // Every reading is named and graded, whatever the caller keeps.
         self.namer.name(&self.hearing, &self.decoder, &self.decoding, usize::MAX, &mut self.naming);
-        Some(self.reading(cx, model))
+        Some(self.reading(grid, cx, model))
     }
 
     /// What the last read heard.
@@ -387,7 +392,7 @@ impl ChordReader {
         self.pins.extend(pins.iter().map(|p| PinnedSpan { units: unit(p.start)..unit(p.end), chord: p.chord }));
     }
 
-    fn reading(&self, cx: &ChordContext, model: &Model) -> ChordReading {
+    fn reading(&self, grid: Grid, cx: &ChordContext, model: &Model) -> ChordReading {
         let hearing = &self.hearing;
         let texture = Texture::of(hearing);
         let reported = hearing.reported();
@@ -432,6 +437,7 @@ impl ChordReader {
             spans,
             texture,
             unit: hearing.unit(),
+            grid,
             start: hearing.start(reported.start),
             end: hearing.start(hearing.units()),
             notes: u32::try_from(hearing.notes_heard()).unwrap_or(u32::MAX),

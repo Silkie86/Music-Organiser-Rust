@@ -12,7 +12,7 @@ use std::ops::Range;
 use super::answer::{ChordAnswer, NoChord, Texture};
 use super::candidates::Label;
 use super::cores::{Core, CoreSet};
-use super::hear::{MOST_UNITS, Unit, unit_offset};
+use super::hear::{MOST_UNITS, Unit, unit_of, unit_offset};
 use super::name::{BassKind, SpanFlags};
 use super::reader::{ChordReading, spell_chart};
 use crate::chord::{Chord, is_altered};
@@ -26,27 +26,29 @@ use crate::spell::{Degree, Spelled};
 pub const FACT_LAYOUT: u8 = 1;
 
 /// The bytes before the stretches, and the bytes of each stretch.
-const HEAD: usize = 14;
+const HEAD: usize = 22;
 const STRETCH: usize = 11;
 
 // Where a stretch starts, and how many units and stretches there are, each fit in two bytes.
 const _: () = assert!(MOST_UNITS <= u16::MAX as usize);
 
-/// How a bass stands, as a fact numbers it (in three bits).
-const BASS_KINDS: [BassKind; 5] =
+/// How a bass stands under a stretch's chord, by the number a fact gives it ([`bass_code`]).
+pub(super) const BASS_KINDS: [BassKind; 5] =
     [BassKind::Root, BassKind::Inversion, BassKind::Slash, BassKind::Moving, BassKind::None];
 
 /// What a reading has, kept in a few bytes ([`ChordReading::fact`], read back by [`ChordFact::read`]). Numbers of two
-/// bytes or more are big-endian. First, 14 bytes:
+/// bytes or more are big-endian. First, 22 bytes:
 ///
 /// - 0: the layout ([`FACT_LAYOUT`]);
 /// - 1: the unit chords change on (bit 0: 1 for a beat, 0 for half a beat), the texture (bits 1 and 2: its place in
 ///   [`Texture::ALL`]), whether it was read as a loop (bit 3), and whether notes were left out (bit 4);
-/// - 2 and 3: how many units it covers;
-/// - 4 and 5: how many stretches it has;
-/// - 6 to 13: the tick it starts at, in the music's own ticks.
+/// - 2 and 3: how many units it covers (at most [`MOST_UNITS`]);
+/// - 4 and 5: how many stretches it has (one at least);
+/// - 6 to 13: the tick it starts at, in the music's own ticks (on a bar line);
+/// - 14 to 17 and 18 to 21: the grid it was read on, its ticks a beat and its beats a bar, so the units can be put in
+///   the music's own ticks again ([`FactReading::tick`]); the unit in byte 1 is the one the reader reads on that grid.
 ///
-/// Then 11 bytes for each stretch, in order (a 16-bar part takes about 100 to 370 bytes in all), keeping its first
+/// Then 11 bytes for each stretch, in order (a 16-bar part takes about 110 to 380 bytes in all), keeping its first
 /// reading as it's written, its answer and its runner-up:
 ///
 /// - 0 and 1: its first unit, counted from the reading's first (it ends where the next starts, the last where the
@@ -85,6 +87,8 @@ pub struct FactReading {
     /// The tick it starts at, in the music's own ticks, and how many units it covers.
     pub start: i64,
     pub units: usize,
+    /// The grid it was read on: its ticks a beat and beats a bar as given, with a bar line where the reading starts.
+    pub grid: Grid,
     /// Its stretches, in order: the next starts where one ends.
     pub spans: Vec<FactSpan>,
 }
@@ -127,7 +131,9 @@ pub struct RunnerUp {
 
 impl ChordReading {
     /// The reading kept in a few bytes, for the MIDI page's index ([`ChordFact`]). It keeps each stretch's first two
-    /// readings, so it's made from a reading that keeps two or more.
+    /// readings, so it's made from a reading that keeps two or more, as the MIDI page's index does
+    /// ([`ChordContext::new`](super::ChordContext::new)'s two): made from one that keeps one, no stretch has a
+    /// runner-up.
     pub fn fact(&self) -> ChordFact {
         let mut out = Vec::with_capacity(HEAD + STRETCH * self.spans.len());
         out.push(FACT_LAYOUT);
@@ -137,6 +143,8 @@ impl ChordReading {
         out.extend(two(self.spans.last().map_or(0, |s| s.units.end)));
         out.extend(two(self.spans.len()));
         out.extend(self.start.to_be_bytes());
+        out.extend(self.grid.ticks_per_beat.to_be_bytes());
+        out.extend(self.grid.beats_per_bar.to_be_bytes());
         for s in &self.spans {
             let flag = |f: SpanFlags| u8::from(s.flags.contains(f));
             let (first, runner_up) = (s.readings.first(), s.readings.get(1));
@@ -178,12 +186,17 @@ impl ChordFact {
     /// The reading it keeps, or none when its bytes aren't a fact this layout reads: another layout, or damaged.
     pub fn read(&self) -> Option<FactReading> {
         let (head, stretches) = self.0.split_first_chunk::<HEAD>()?;
-        let [layout, kind, u0, u1, c0, c1, t0, t1, t2, t3, t4, t5, t6, t7] = *head;
-        if layout != FACT_LAYOUT || kind >> 5 != 0 {
-            return None;
-        }
+        let [layout, kind, u0, u1, c0, c1, t0, t1, t2, t3, t4, t5, t6, t7, b0, b1, b2, b3, m0, m1, m2, m3] = *head;
         let units = usize::from(u16::from_be_bytes([u0, u1]));
         let count = usize::from(u16::from_be_bytes([c0, c1]));
+        let start = i64::from_be_bytes([t0, t1, t2, t3, t4, t5, t6, t7]);
+        let (ticks_per_beat, beats_per_bar) =
+            (u32::from_be_bytes([b0, b1, b2, b3]), u32::from_be_bytes([m0, m1, m2, m3]));
+        let grid = Grid { ticks_per_beat, beats_per_bar, bar_line: start };
+        let unit = if kind & 1 == 1 { Unit::Beat } else { Unit::HalfBeat };
+        if layout != FACT_LAYOUT || kind >> 5 != 0 || units > MOST_UNITS || unit != unit_of(grid) {
+            return None;
+        }
         let (chunks, left) = stretches.as_chunks::<STRETCH>();
         // A reading has a stretch at least, and the fact as many as it says.
         if count == 0 || chunks.len() != count || !left.is_empty() {
@@ -200,12 +213,13 @@ impl ChordFact {
             spans.push(read_stretch(from..to, chunk)?);
         }
         Some(FactReading {
-            unit: if kind & 1 == 1 { Unit::Beat } else { Unit::HalfBeat },
+            unit,
             texture: *Texture::ALL.get(usize::from(kind >> 1 & 3))?,
             looped: kind >> 3 & 1 == 1,
             truncated: kind >> 4 & 1 == 1,
-            start: i64::from_be_bytes([t0, t1, t2, t3, t4, t5, t6, t7]),
+            start,
             units,
+            grid,
             spans,
         })
     }
@@ -293,10 +307,10 @@ impl FactReading {
         spell_chart(self.spans.iter().map(FactSpan::shown), self.looped, key)
     }
 
-    /// Where a unit starts (counted from the reading's first, up to [`FactReading::units`]), in the music's own ticks:
-    /// `grid` is the grid the reading was read on.
-    pub fn tick(&self, grid: Grid, unit: usize) -> i64 {
-        self.start.saturating_add(unit_offset(grid, unit.min(self.units)))
+    /// Where a unit starts (counted from the reading's first, up to [`FactReading::units`]), in the music's own ticks,
+    /// as the reading has it: a stretch starts at its first unit's tick, and ends at the next one's.
+    pub fn tick(&self, unit: usize) -> i64 {
+        self.start.saturating_add(unit_offset(self.grid, unit.min(self.units)))
     }
 }
 
@@ -311,10 +325,12 @@ impl FactReading {
 pub struct ChordSummary(pub [u8; 8]);
 
 impl ChordSummary {
-    /// Its progression: the chords shown in order, each as its root above the first one's and its core (a chord held
-    /// over stretches side by side counted once, the stretches with no chord left out, and a loop from the chord it
-    /// starts on), as a hash: the same progression in any key, with any tensions and over any basses, is the same
-    /// number. 0 when no chord is shown, and never otherwise.
+    /// Its progression: the chords shown in order, each as its root above the first one's and its core, as a hash:
+    /// the same progression in any key, with any tensions and over any basses, is the same number. A chord held over
+    /// stretches side by side, or played again after stretches with no chord, counts once. A loop counts from the
+    /// chord it starts on, once round: a chord held over its seam (its last chord the same as its first) counts once,
+    /// and a loop that plays the same chords over again (C F C F) is the loop played once (C F). 0 when no chord is
+    /// shown, and never otherwise.
     pub fn progression(self) -> u32 {
         let [a, b, c, d, ..] = self.0;
         u32::from_be_bytes([a, b, c, d])
@@ -417,7 +433,7 @@ const TENSIONS: [(Degree, Extensions); 7] = [
 impl ChordReading {
     /// What the reading has, in eight bytes, for the MIDI page's search ([`ChordSummary`]).
     pub fn summary(&self) -> ChordSummary {
-        summarise(self.spans.iter().map(|s| Charted {
+        let charted = self.spans.iter().map(|s| Charted {
             length: s.units.len(),
             answer: s.answer,
             flags: s.flags,
@@ -428,14 +444,15 @@ impl ChordReading {
                 rootless: r.rootless,
                 also: r.also.is_some(),
             }),
-        }))
+        });
+        summarise(charted, self.looped)
     }
 }
 
 impl FactReading {
     /// What the reading kept has, in eight bytes, as [`ChordReading::summary`] gives it.
     pub fn summary(&self) -> ChordSummary {
-        summarise(self.spans.iter().map(|s| Charted {
+        let charted = self.spans.iter().map(|s| Charted {
             length: s.units.len(),
             answer: s.answer,
             flags: s.flags,
@@ -446,7 +463,8 @@ impl FactReading {
                 rootless: s.rootless,
                 also: s.also,
             }),
-        }))
+        });
+        summarise(charted, self.looped)
     }
 }
 
@@ -468,11 +486,12 @@ struct Shown {
     also: bool,
 }
 
-/// What a reading has, in eight bytes ([`ChordSummary`]).
-fn summarise(spans: impl Iterator<Item = Charted>) -> ChordSummary {
+/// What a reading has, in eight bytes ([`ChordSummary`]); `looped` when it was read as a loop.
+fn summarise(spans: impl Iterator<Item = Charted>, looped: bool) -> ChordSummary {
     let (mut cores, mut extensions, mut flags) = (CoreSet::EMPTY, Extensions::NONE, SummaryFlags::NONE);
-    let mut progression = Fnv::new();
-    let (mut first_root, mut last): (Option<PitchClass>, Option<(PitchClass, Core)>) = (None, None);
+    // The chords shown in order, as their roots and cores: a chord held on, or played again after stretches with no
+    // chord, once.
+    let mut chart: Vec<(PitchClass, Core)> = Vec::new();
     let (mut playing, mut unclear) = (0usize, 0usize);
     for s in spans {
         if s.answer != ChordAnswer::NoChord(NoChord::Rest) {
@@ -485,10 +504,8 @@ fn summarise(spans: impl Iterator<Item = Charted>) -> ChordSummary {
         let c = shown.chord;
         let core = Core::of_chord(c).unwrap_or(shown.core);
         cores = cores.with(core);
-        if last != Some((c.root(), core)) {
-            let from = *first_root.get_or_insert(c.root());
-            progression.bytes(&[c.root().above(from), u8::try_from(core.index()).unwrap_or(u8::MAX)]);
-            last = Some((c.root(), core));
+        if chart.last() != Some(&(c.root(), core)) {
+            chart.push((c.root(), core));
         }
         for interval in (0..12).filter(|&i| c.has(i)) {
             let degree = c.degree(interval);
@@ -501,6 +518,10 @@ fn summarise(spans: impl Iterator<Item = Charted>) -> ChordSummary {
         if is_altered(c.intervals()) {
             extensions = extensions.with(Extensions::ALTERED);
         }
+        // A hybrid is a sus chord on its bass whose notes are written another way too, as a chord over a bass that's
+        // only a bass (G9sus4, also F/G). A triad over its seventh is written another way too (D/C, also D7/C), but
+        // it's no sus chord, and stands over a bass that's only a bass itself.
+        let sus = matches!(core, Core::Sus4 | Core::Sus2 | Core::Dominant7Sus4);
         for (yes, flag) in [
             (shown.bass == BassKind::Slash, SummaryFlags::SLASH),
             (shown.bass == BassKind::Inversion, SummaryFlags::INVERSION),
@@ -508,7 +529,7 @@ fn summarise(spans: impl Iterator<Item = Charted>) -> ChordSummary {
             (s.flags.contains(SpanFlags::PEDAL), SummaryFlags::PEDAL),
             (s.flags.contains(SpanFlags::PUSHED), SummaryFlags::PUSHED),
             (s.flags.contains(SpanFlags::WALKING), SummaryFlags::WALKING),
-            (shown.also && shown.bass == BassKind::Root, SummaryFlags::HYBRID),
+            (shown.also && sus && shown.bass == BassKind::Root, SummaryFlags::HYBRID),
         ] {
             if yes {
                 flags = flags.with(flag);
@@ -518,9 +539,29 @@ fn summarise(spans: impl Iterator<Item = Charted>) -> ChordSummary {
     if unclear.saturating_mul(4) > playing {
         flags = flags.with(SummaryFlags::UNCLEAR);
     }
-    // The hash's two halves folded into one, so it takes four bytes; 0 is kept for no chord.
-    let hash = progression.finish();
-    let progression = if first_root.is_some() { ((hash >> 32) as u32 ^ hash as u32).max(1) } else { 0 };
+    if looped {
+        // Round a loop its first chord follows its last: the same chord there is one chord held over the seam.
+        if chart.len() > 1 && chart.first() == chart.last() {
+            chart.pop();
+        }
+        // A loop that plays the same chords over again is the same loop played once.
+        let length = chart.len();
+        let once = (1..=length)
+            .find(|&p| length.is_multiple_of(p) && chart.iter().zip(chart.iter().skip(p)).all(|(a, b)| a == b));
+        chart.truncate(once.unwrap_or(length));
+    }
+    let progression = match chart.first() {
+        Some(&(from, _)) => {
+            let mut hash = Fnv::new();
+            for &(root, core) in &chart {
+                hash.bytes(&[root.above(from), u8::try_from(core.index()).unwrap_or(u8::MAX)]);
+            }
+            // The hash's two halves folded into one, so it takes four bytes; 0 is kept for no chord.
+            let hash = hash.finish();
+            ((hash >> 32) as u32 ^ hash as u32).max(1)
+        }
+        None => 0,
+    };
     let [a, b, c, d] = progression.to_be_bytes();
     let [e, f] = cores.bits().to_be_bytes();
     ChordSummary([a, b, c, d, e, f, extensions.bits(), flags.bits()])
@@ -543,12 +584,27 @@ fn label_of(byte: u8) -> Option<Label> {
     (root < 12).then(|| Label::new(PitchClass::new(i32::from(root)), core))
 }
 
-fn bass_code(kind: BassKind) -> u8 {
-    BASS_KINDS.iter().position(|&k| k == kind).and_then(|i| u8::try_from(i).ok()).unwrap_or(0)
+/// How a bass stands under a stretch's chord, as a number: its place in [`BASS_KINDS`].
+pub(super) const fn bass_code(kind: BassKind) -> u8 {
+    match kind {
+        BassKind::Root => 0,
+        BassKind::Inversion => 1,
+        BassKind::Slash => 2,
+        BassKind::Moving => 3,
+        BassKind::None => 4,
+    }
 }
 
-fn answer_code(answer: ChordAnswer) -> u8 {
-    ChordAnswer::ALL.iter().position(|&a| a == answer).and_then(|i| u8::try_from(i).ok()).unwrap_or(0)
+/// An answer as a number: its place in [`ChordAnswer::ALL`].
+pub(super) const fn answer_code(answer: ChordAnswer) -> u8 {
+    match answer {
+        ChordAnswer::Chord => 0,
+        ChordAnswer::SameNotes => 1,
+        ChordAnswer::Implied => 2,
+        ChordAnswer::Unclear => 3,
+        ChordAnswer::NoChord(NoChord::Rest) => 4,
+        ChordAnswer::NoChord(NoChord::TooFewNotes) => 5,
+    }
 }
 
 /// A chance out of 255, to the nearest.

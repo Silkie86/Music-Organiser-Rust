@@ -704,7 +704,7 @@ fn damaged_notes_are_read_without_a_panic() {
 
 /// What the hand cases, the tests' music and some music made here read at each version of the reader, as a hash
 /// ([`readings_hash`]). A change that moves any of them needs `CHORD_READER_VERSION` bumped, and a line added here.
-const READINGS: &[(u32, u64)] = &[(1, 0xf12c_ef7c_3f31_9da5)];
+const READINGS: &[(u32, u64)] = &[(1, 0xe3a9_cd16_4f69_5725)];
 
 /// The music whose readings the hash covers, with its pins: every hand case, the music the rules are checked on, and
 /// music made here so every kind of answer is read (one line, one note, all twelve, a rest, chords given) and what
@@ -737,8 +737,9 @@ fn hashed_music() -> Vec<(Music, Vec<Pin>)> {
 /// summary the MIDI page keeps of it.
 ///
 /// The chances come through `exp`, whose last bit can differ from one machine's maths library to another's. Rounding to
-/// six places makes that very unlikely to tip a number over; CI runs this on Windows, macOS and Linux, so if it ever
-/// does, CI says so on that machine and the rounding can be made coarser.
+/// six places makes that very unlikely to tip a number over, and the fact's chances, to the nearest 255th, are
+/// coarser still; CI runs this on Windows, macOS and Linux, so if it ever does, CI says so on that machine and the
+/// rounding can be made coarser.
 fn readings_hash() -> u64 {
     let six = |x: f64| (x * 1e6).round() as i128;
     let chord = |h: &mut Fnv, c: Chord| {
