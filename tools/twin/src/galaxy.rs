@@ -1,28 +1,25 @@
 //! The galaxy twin: both apps lay a galaxy out from the same made-up fingerprints (families of sound-alikes, sounds
 //! that are exact copies, a library of just four), then place the sounds marked new on it.
 //!
-//! The smallest libraries must come out star for star the same. For the bigger ones, each step is compared on its
-//! own: the C# app squashes fingerprints with sums it adds eight at a time, in an order .NET picks for the processor,
-//! so its numbers can differ from Rust's in the last float digit, and 400 rounds of settling grow that into a
-//! different (equally good) picture. So the steps must agree to within that rounding, with the same sound-alikes,
-//! and Rust settling from the C# app's own start, and placing new sounds on its map, must land every star where C#
-//! does. Libraries of 6,000 sounds or more settle on every core at once, which no two runs repeat, so they aren't
-//! compared. Run as part of `twin sounds`, in its own folder.
+//! The Rust galaxy does what the C# one does but its own way (its own random numbers, every core at once), so the
+//! maps aren't star for star the same. What's compared is how good each map is: how many of each star's nearest
+//! sound-alikes are also its nearest stars, and whether each new sound lands beside its sound-alikes. Rust must do
+//! at least as well (to within a twentieth). A library of one or two sounds, laid out by a fixed rule, must match.
+//! Run as part of `twin sounds`, in its own folder.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
 use mo_sounds::StarPoint;
-use mo_sounds::galaxy::{EXACT_BELOW, SEED, layout, place_new};
+use mo_sounds::galaxy::{SEED, layout, place_new};
 use serde_json::{Value, json};
 
 struct Case {
     name: &'static str,
     vectors: Vec<(i64, Vec<f32>)>,
     new: Vec<i64>,
-    /// Compare each step of the layout too, to show where a difference starts.
-    steps: bool,
 }
 
 /// Numbers from a fixed seed: -0.5 up to 0.5.
@@ -54,7 +51,7 @@ fn families(families: usize, per: usize, dim: usize, seed: u64) -> Vec<(i64, Vec
 
 fn cases() -> Vec<Case> {
     let mut copies = families(3, 12, 9, 33);
-    // Exact copies: no distance between them, so which comes first among equals matters.
+    // Exact copies: no distance between them.
     for id in [2, 5, 14] {
         let v = copies[0].1.clone();
         copies[id as usize - 1].1 = v;
@@ -65,135 +62,35 @@ fn cases() -> Vec<Case> {
         (30, vec![0.0, 1.0, 0.2]),
         (40, vec![0.2, 0.9, 0.1]),
     ];
-    vec![
-        Case { name: "families", vectors: families(4, 30, 40, 7), new: vec![3, 31, 64, 100, 119, 120], steps: true },
-        Case { name: "copies", vectors: copies, new: vec![5, 30], steps: true },
-        Case { name: "four sounds", vectors: tiny, new: vec![], steps: false },
-        Case { name: "two sounds", vectors: families(1, 3, 5, 9), new: vec![3], steps: false },
-    ]
+    let mut cases = vec![
+        Case { name: "families", vectors: families(4, 30, 40, 7), new: vec![3, 31, 64, 100, 119, 120] },
+        Case { name: "copies", vectors: copies, new: vec![5, 30] },
+        Case { name: "four sounds", vectors: tiny, new: vec![] },
+        Case { name: "two sounds", vectors: families(1, 3, 5, 9), new: vec![3] },
+    ];
+    // Unit length, as the app's fingerprints are, so "most alike" (a dot product) and "nearest" agree.
+    for c in &mut cases {
+        for (_, v) in &mut c.vectors {
+            mo_sounds::index::unit(v);
+        }
+    }
+    cases
 }
 
-/// The map and the placed sounds, as the C# helper gives them: `[id, x, y]` in id order.
-fn rust_side(c: &Case) -> (Value, Value) {
+/// The map and the placed sounds.
+fn rust_side(c: &Case) -> (HashMap<i64, StarPoint>, HashMap<i64, StarPoint>) {
     let all: HashMap<i64, Vec<f32>> = c.vectors.iter().cloned().collect();
-    let get = |id: i64| all[&id].clone();
-    let map = layout(&old_ids(c), &get, SEED, EXACT_BELOW, &|_| {}, &AtomicBool::new(false)).unwrap_or_default();
-    // As C#'s PlaceNew(vectors, map): every sound the map lacks, compared with every one it has.
+    let get = |id: i64| Cow::Borrowed(all[&id].as_slice());
+    let old: Vec<i64> = c.vectors.iter().map(|(id, _)| *id).filter(|id| !c.new.contains(id)).collect();
+    let map = layout(&old, &get, SEED, &|_| {}, &AtomicBool::new(false)).unwrap_or_default();
     let new: Vec<i64> = c.vectors.iter().map(|(id, _)| *id).filter(|id| !map.contains_key(id)).collect();
-    let mapped: Vec<i64> = c.vectors.iter().map(|(id, _)| *id).filter(|id| map.contains_key(id)).collect();
-    let placed = place_new(&new, &mapped, &get, &map);
-    (points(&map), points(&placed))
+    let placed = place_new(&new, &old, &get, &map);
+    (map, placed)
 }
 
-fn points(map: &HashMap<i64, StarPoint>) -> Value {
-    let mut ids: Vec<&i64> = map.keys().collect();
-    ids.sort();
-    ids.into_iter().map(|id| json!([id, map[id].x, map[id].y])).collect()
-}
-
-/// Every star where the other app put it. Single-precision places to within a millionth: the same numbers, worked
-/// out in the same order, should land on the same float, so anything more is a real difference.
-fn differences(what: &str, cs: &Value, rust: &Value, out: &mut Vec<String>) {
-    let empty = Vec::new();
-    let (a, b) = (cs.as_array().unwrap_or(&empty), rust.as_array().unwrap_or(&empty));
-    if a.len() != b.len() {
-        out.push(format!("{what}: C# has {} stars, Rust {}", a.len(), b.len()));
-        return;
-    }
-    let mut worst = 0f64;
-    let mut moved = 0;
-    for (x, y) in a.iter().zip(b) {
-        if x[0] != y[0] {
-            out.push(format!("{what}: C# has sound {}, Rust {}", x[0], y[0]));
-            return;
-        }
-        let gap = (1..3)
-            .map(|t| (x[t].as_f64().unwrap_or(f64::NAN) - y[t].as_f64().unwrap_or(0.0)).abs())
-            .fold(0.0, f64::max);
-        if gap.is_nan() || gap > 1e-6 {
-            moved += 1;
-        }
-        worst = if gap.is_nan() { f64::NAN } else { worst.max(gap) };
-    }
-    if moved > 0 {
-        out.push(format!("{what}: {moved} of {} stars sit elsewhere (by up to {worst:.2e})", a.len()));
-    }
-}
-
-/// Each step of a layout beside the C# app's. The sound-alikes found and the random numbers used must be the same;
-/// the numbers worked out may differ in their last float digit (the C# app adds eight products at a time, in an order
-/// .NET picks for the processor), so they must agree to within a hundred-thousandth of their size.
-fn steps(c: &Case, cs: &Value, out: &mut Vec<String>) {
-    let all: HashMap<i64, Vec<f32>> = c.vectors.iter().cloned().collect();
-    let get = |id: i64| all[&id].clone();
-    let (reduced, init, nbr, dist, edges, next) = mo_sounds::galaxy::twin_steps(&old_ids(c), &get, SEED);
-    let edges: Vec<Value> = edges.iter().map(|(i, j, w)| json!([i, j, w])).collect();
-    let rust = [json!(reduced), json!(init), json!(nbr), json!(dist), json!(edges), json!(next)];
-    for (name, r) in ["Reduced", "Init", "Nbr", "Dist", "Edges", "Next"].iter().zip(rust) {
-        let (a, b) = (flat(&cs[*name]), flat(&r));
-        let exact = matches!(*name, "Nbr" | "Next");
-        let off = if a.len() == b.len() {
-            a.iter()
-                .zip(&b)
-                .filter(|(x, y)| {
-                    let gap = (*x - *y).abs();
-                    gap.is_nan() || if exact { gap > 0.0 } else { gap > 1e-5 * x.abs().max(1.0) }
-                })
-                .count()
-        } else {
-            a.len().max(b.len())
-        };
-        if off > 0 {
-            out.push(format!(
-                "galaxy, {}, step {name}: {off} of {} numbers differ (Rust has {})",
-                c.name,
-                a.len(),
-                b.len()
-            ));
-        }
-    }
-}
-
-/// Every number in a JSON value, in order.
-fn flat(v: &Value) -> Vec<f64> {
-    let mut o = Vec::new();
-    let mut walk = vec![v];
-    while let Some(x) = walk.pop() {
-        match x {
-            Value::Array(a) => walk.extend(a.iter().rev()),
-            _ => o.push(x.as_f64().unwrap_or(f64::NAN)),
-        }
-    }
-    o
-}
-
-fn old_ids(c: &Case) -> Vec<i64> {
-    c.vectors.iter().map(|(id, _)| *id).filter(|id| !c.new.contains(id)).collect()
-}
-
-/// Rust settling from the C# app's starting picture and weighed pairs, and placing the new sounds on the C# map.
-fn from_cs(c: &Case, cs: &Value) -> (Value, Value) {
-    let all: HashMap<i64, Vec<f32>> = c.vectors.iter().cloned().collect();
-    let get = |id: i64| all[&id].clone();
-    let steps = &cs["steps"];
-    let init = flat(&steps["Init"]);
-    let edges: Vec<(usize, usize, f32)> = steps["Edges"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .map(|e| {
-                    (
-                        e[0].as_u64().unwrap_or(0) as usize,
-                        e[1].as_u64().unwrap_or(0) as usize,
-                        e[2].as_f64().unwrap_or(0.0) as f32,
-                    )
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let settled = mo_sounds::galaxy::twin_settle(&old_ids(c), &get, SEED, init, &edges);
-    let cs_map: HashMap<i64, StarPoint> = cs["map"]
-        .as_array()
+/// The C# helper's `[id, x, y]` list.
+fn read_points(v: &Value) -> HashMap<i64, StarPoint> {
+    v.as_array()
         .map(|a| {
             a.iter()
                 .map(|p| {
@@ -202,10 +99,56 @@ fn from_cs(c: &Case, cs: &Value) -> (Value, Value) {
                 })
                 .collect()
         })
-        .unwrap_or_default();
-    let new: Vec<i64> = c.vectors.iter().map(|(id, _)| *id).filter(|id| !cs_map.contains_key(id)).collect();
-    let mapped: Vec<i64> = c.vectors.iter().map(|(id, _)| *id).filter(|id| cs_map.contains_key(id)).collect();
-    (points(&settled), points(&place_new(&new, &mapped, &get, &cs_map)))
+        .unwrap_or_default()
+}
+
+/// The `k` ids nearest `of` among `ids` by `far` (ties by id).
+fn nearest(of: i64, ids: &[i64], k: usize, far: impl Fn(i64, i64) -> f64) -> Vec<i64> {
+    let mut others: Vec<(f64, i64)> = ids.iter().filter(|id| **id != of).map(|id| (far(of, *id), *id)).collect();
+    others.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    others.into_iter().take(k).map(|(_, id)| id).collect()
+}
+
+fn apart(a: &[f32], b: &[f32]) -> f64 {
+    a.iter().zip(b).map(|(x, y)| f64::from(x - y).powi(2)).sum()
+}
+
+fn on_map(map: &HashMap<i64, StarPoint>, a: i64, b: i64) -> f64 {
+    let (p, q) = (map[&a], map[&b]);
+    f64::from(p.x - q.x).powi(2) + f64::from(p.y - q.y).powi(2)
+}
+
+/// How good a map is: the share of each star's 10 nearest sound-alikes that are among its 10 nearest stars, and how
+/// many new sounds landed with one of their nearest sound-alikes (the closest quarter of the map) as their nearest
+/// star.
+fn quality(c: &Case, map: &HashMap<i64, StarPoint>, placed: &HashMap<i64, StarPoint>) -> (f64, usize) {
+    let all: HashMap<i64, &Vec<f32>> = c.vectors.iter().map(|(id, v)| (*id, v)).collect();
+    let mut ids: Vec<i64> = map.keys().copied().collect();
+    ids.sort_unstable();
+    let k = 10.min(ids.len().saturating_sub(1));
+    if k == 0 {
+        return (1.0, placed.len());
+    }
+    let kept: usize = ids
+        .iter()
+        .map(|&id| {
+            let alike = nearest(id, &ids, k, |a, b| apart(all[&a], all[&b]));
+            let close = nearest(id, &ids, k, |a, b| on_map(map, a, b));
+            alike.iter().filter(|x| close.contains(x)).count()
+        })
+        .sum();
+    let mut with_new = map.clone();
+    with_new.extend(placed);
+    let landed = placed
+        .keys()
+        .filter(|&&id| {
+            let alike = nearest(id, &ids, (ids.len() / 4).max(k), |a, b| apart(all[&a], all[&b]));
+            let mut both = ids.clone();
+            both.push(id);
+            nearest(id, &both, 1, |a, b| on_map(&with_new, a, b)).first().is_some_and(|n| alike.contains(n))
+        })
+        .count();
+    (kept as f64 / (ids.len() * k) as f64, landed)
 }
 
 /// Writes the cases into `dir` (the twin's own new folder), has both apps lay them out, and gives every difference.
@@ -217,7 +160,6 @@ pub fn compare(helper: &Path, dir: &Path) -> Result<Vec<String>, String> {
         let body = json!({
             "Vectors": c.vectors.iter().map(|(id, v)| json!([id, v])).collect::<Vec<_>>(),
             "New": c.new,
-            "Steps": c.steps,
         });
         std::fs::write(&path, body.to_string()).map_err(|e| format!("Couldn't write a galaxy case: {e}"))?;
         files.push(path);
@@ -233,21 +175,48 @@ pub fn compare(helper: &Path, dir: &Path) -> Result<Vec<String>, String> {
             out.push(format!("galaxy, {}: the C# helper failed: {e}", c.name));
             continue;
         }
-        if c.steps {
-            // A bigger library: each step in turn, then the settling and placing from the C# app's own inputs.
-            steps(c, &cs["steps"], &mut out);
-            let (map, placed) = from_cs(c, cs);
-            differences(&format!("galaxy, {}, settled from C#'s start", c.name), &cs["map"], &map, &mut out);
-            differences(
-                &format!("galaxy, {}, new sounds placed on C#'s map", c.name),
-                &cs["placed"],
-                &placed,
-                &mut out,
-            );
-        } else {
-            let (map, placed) = rust_side(c);
-            differences(&format!("galaxy, {}, laid out", c.name), &cs["map"], &map, &mut out);
-            differences(&format!("galaxy, {}, new sounds placed", c.name), &cs["placed"], &placed, &mut out);
+        let (cs_map, cs_placed) = (read_points(&cs["map"]), read_points(&cs["placed"]));
+        let (map, placed) = rust_side(c);
+        if map.len() != cs_map.len() || placed.len() != cs_placed.len() {
+            out.push(format!(
+                "galaxy, {}: C# has {} stars and {} placed, Rust {} and {}",
+                c.name,
+                cs_map.len(),
+                cs_placed.len(),
+                map.len(),
+                placed.len()
+            ));
+            continue;
+        }
+        if map.len() < 3 {
+            // Laid out by a fixed rule; a placed sound differs only by its little nudge (under 0.002 each way).
+            let off = |a: &HashMap<i64, StarPoint>, b: &HashMap<i64, StarPoint>, most: f32| {
+                a.iter().any(|(id, p)| b.get(id).is_none_or(|q| (p.x - q.x).abs() > most || (p.y - q.y).abs() > most))
+            };
+            if off(&cs_map, &map, 0.0) || off(&cs_placed, &placed, 0.0041) {
+                out.push(format!("galaxy, {}: C# {cs_map:?} {cs_placed:?}, Rust {map:?} {placed:?}", c.name));
+            }
+            continue;
+        }
+        let (cs_kept, cs_landed) = quality(c, &cs_map, &cs_placed);
+        let (kept, landed) = quality(c, &map, &placed);
+        println!(
+            "  galaxy, {}: sound-alikes kept as neighbours C# {cs_kept:.2}, Rust {kept:.2}; new sounds beside their \
+             sound-alikes C# {cs_landed}, Rust {landed} of {}",
+            c.name,
+            placed.len()
+        );
+        if kept < cs_kept - 0.05 {
+            out.push(format!(
+                "galaxy, {}: Rust keeps fewer sound-alikes together ({kept:.2} to C#'s {cs_kept:.2})",
+                c.name
+            ));
+        }
+        if landed < cs_landed {
+            out.push(format!(
+                "galaxy, {}: fewer new sounds land beside their sound-alikes (Rust {landed}, C# {cs_landed})",
+                c.name
+            ));
         }
     }
     Ok(out)
@@ -258,14 +227,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_case_lays_out_and_places_its_new_sounds() {
+    fn every_case_lays_out_and_places_its_new_sounds_well() {
         for c in cases() {
             let (map, placed) = rust_side(&c);
-            let count = |v: &Value| v.as_array().map_or(0, Vec::len);
-            assert_eq!(count(&map) + count(&placed), c.vectors.len(), "{}", c.name);
-            let mut none = Vec::new();
-            differences(c.name, &map, &map, &mut none);
-            assert!(none.is_empty());
+            assert_eq!(map.len() + placed.len(), c.vectors.len(), "{}", c.name);
+            if map.len() >= 3 {
+                let (kept, landed) = quality(&c, &map, &placed);
+                assert!(kept > 0.5, "{}: {kept}", c.name);
+                assert_eq!(landed, placed.len(), "{}", c.name);
+            }
         }
     }
 }

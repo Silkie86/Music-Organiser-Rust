@@ -110,14 +110,18 @@ for the Space page. The twin test has the C# app group the same made-up copies i
 
 ## Galaxy
 
-`galaxy` ports `GalaxyMap` (laying the map out, placing new sounds) and the galaxy part of `SoundOrganiser` (which
-fingerprints, when to lay out afresh). The twin test lays out the same made-up libraries in both apps and compares
-every star.
+`galaxy` does what `GalaxyMap` (laying the map out, placing new sounds) and the galaxy part of `SoundOrganiser`
+(which fingerprints, when to lay out afresh) do, the Rust way: the parts that only kept a C# app fast and small are
+gone, and the tricks that make it fast in any language stay (squashing to 32 numbers, learning that from a sample,
+neighbours of neighbours for big libraries, every core at once). So a fresh map isn't star for star the C# one; the
+twin test checks it's at least as good (sound-alikes kept together, new sounds placed beside theirs).
 
 | What | C# | Rust | Judged |
 |---|---|---|---|
+| Random numbers | .NET's seeded `Random`. | Rust's own (SplitMix64), one sequence per star per round. | Same (a different but equally good map) |
+| A library of 6,000 sounds or more | Settled by every core nudging shared stars at once, so each layout differs. | Each round, every star moves itself against where the others stood at its start, so the same library always gives the same map, however many cores. | Better |
+| A library under 6,000 sounds | Settled on one core (so it would repeat). | Every core, and still repeats. | Better (faster) |
+| Fingerprints | Copied for each step. | The measurements are lent straight from the index; only joined ones are made. | Better |
+| Placing new sounds | Compared with a sample of 10,000 mapped sounds. | With every mapped sound when few are new (up to 50,000, within 500 million comparisons); with at least 10,000 otherwise. | Better |
 | Saving the map | `UpdateGalaxy` saves it to sounds.db. | `update` hands back what to save; the app saves it once sounds.db writes are trusted. | Same, for now |
-| A big library (6,000 sounds or more) | Settles on every core at once, so each layout differs a little. | The same way, so it can't be twin-checked; small libraries are. | Same |
-| Squashing fingerprints (PCA) | Adds eight products at a time, in an order .NET picks for the processor. | Copies the usual order, but can still differ in the last float digit; after 400 rounds of settling, a library of more than a few sounds can come out as a different picture of the same families. The twin test checks each step to within that rounding, and that settling from the C# app's own start gives its exact map. | Same (rounding) |
 | Stopping a layout | Throws when cancelled. | Gives nothing back (`None`). | Same |
-| A new sound whose nearest stars aren't on the map | Can't happen (it only compares mapped sounds). | Left unplaced rather than failing. | Same |
