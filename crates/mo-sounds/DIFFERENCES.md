@@ -52,3 +52,9 @@ back; nothing is saved to `sounds.db` yet.
 | A tag's model that can't train (vectors of different lengths) | Stopped with an error. | That half suggests nothing. | Better |
 | The type model can't train (vectors of different lengths, halfway through analysing again) | Stopped with an error, or used part of each vector. | Nothing changes: the saved model and every type stay. | Better |
 | A sound CLAP's words typed ("model") | Worked out again each time. | Kept as stored while the classifier isn't sure (Rust can't work it out yet). | Not yet |
+
+## Names
+
+| What | C# | Rust | Judged |
+|---|---|---|---|
+| A key written with capitals ("Pad C Minor", "Keys Bb MIN") | Read as major: only small "minor"/"min" counted. | Read as minor (found by the harmony thread, 2026-11-01). A lone capital "M" still isn't minor. | Better |
