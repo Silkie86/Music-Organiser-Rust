@@ -98,10 +98,10 @@ fn a_save_that_cant_be_read_exports_nothing() {
 fn half_written_files_a_crash_left_are_cleared() {
     let root = folder("left-behind");
     let presets = export::folder_for(&root, "Song.flp");
-    std::fs::create_dir_all(presets.join("Kept.fxp.part-1-1")).unwrap();
-    let old = presets.join("Serum - Lead.fxp.part-99-3");
-    let fresh = presets.join("Serum - Pad.fxp.part-98-0");
-    let yours = presets.join("My notes.part-1.txt");
+    std::fs::create_dir_all(presets.join("Kept.fxp.mo-part-1-1")).unwrap();
+    let old = presets.join("Serum - Lead.fxp.mo-part-99-3");
+    let fresh = presets.join("Serum - Pad.fxp.mo-part-98-0");
+    let yours = presets.join("Lead.part-1-2");
     for f in [&old, &fresh, &yours] {
         std::fs::write(f, b"x").unwrap();
     }
@@ -110,9 +110,28 @@ fn half_written_files_a_crash_left_are_cleared() {
         std::fs::File::options().write(true).open(f).unwrap().set_modified(hour_ago).unwrap();
     }
     export::export(&[serum("Lead", "")], "Song.flp", &root, None).unwrap();
-    // Only the old one of the export's own shape goes; one still being written, your file and folders stay.
+    // Only the old one of the export's own shape goes; one still being written, other files and folders stay.
     assert_eq!(
         names(&presets),
-        ["Kept.fxp.part-1-1", "My notes.part-1.txt", "Serum - Lead.fxp", "Serum - Pad.fxp.part-98-0"]
+        ["Kept.fxp.mo-part-1-1", "Lead.part-1-2", "Serum - Lead.fxp", "Serum - Pad.fxp.mo-part-98-0"]
     );
+}
+
+#[test]
+fn a_leftover_with_the_same_name_is_passed_over_not_touched() {
+    let root = folder("taken");
+    let path = root.join("Serum - Lead.fxp");
+    // The names this run could take first are already there.
+    let mut taken = Vec::new();
+    for n in 0..5 {
+        let p = PathBuf::from(format!("{}.mo-part-{}-{n}", path.display(), std::process::id()));
+        std::fs::write(&p, b"someone else's").unwrap();
+        taken.push(p);
+    }
+    let data = fxp::wrap_chunk(&[1], "Lead", 1);
+    export::write_checked(&path, &data).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), data);
+    for p in taken {
+        assert_eq!(std::fs::read(p).unwrap(), b"someone else's");
+    }
 }

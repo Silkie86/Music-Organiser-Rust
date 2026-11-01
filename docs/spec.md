@@ -322,6 +322,8 @@ sessions) settles that page's map, with mock-ups first.
 
 - **Serum 1 → Serum 2** (knob translator and swap in Fix and Open in Bitwig): left out for now; it was mainly a test
   (you, 2026-10-29). The C# code and `Serum2FromSerum1.json` stay in the old repo if it's ever wanted.
+- **Synths' own octave beyond Serum 1** (section 3.4a's "the plugin's own octave or coarse tune"): left for now, too
+  complex for a small gain (you, 2026-11-01). Serum 1's is read; for other synths the guess says it wasn't checked.
 
 ### For you to sort
 

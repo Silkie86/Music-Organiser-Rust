@@ -124,7 +124,6 @@ fn write_all(
     }
     let folder = folder_for(export_root, save);
     std::fs::create_dir_all(&folder)?;
-    clear_half_written(&folder, LEFT_BEHIND);
     let mut files = Vec::new();
     // Each template's file, read once for the whole export.
     let mut template_bytes: HashMap<PathBuf, Result<Vec<u8>, String>> = HashMap::new();
@@ -173,6 +172,13 @@ fn write_all(
             Err(e) => failed.push(format!("{name}: {e}")),
         }
     }
+    // The newest file just written says what time it is by the clock that stamps this folder's files (a network
+    // drive's own), so a leftover's age is measured on that clock too.
+    if let Some(now) =
+        files.iter().filter_map(|f| std::fs::metadata(folder.join(f)).and_then(|m| m.modified()).ok()).max()
+    {
+        clear_half_written(&folder, now);
+    }
     if files.is_empty() && !failed.is_empty() {
         return Err(io::Error::other(failed.join("; ")));
     }
@@ -188,16 +194,19 @@ fn stale(folder: &Path, bw: &str, why: &str) -> String {
     }
 }
 
+/// What [`write_checked`] puts after a file's name while writing it: "Serum - Lead.fxp.mo-part-<app>-<write>".
+const PART: &str = ".mo-part-";
+
 /// How old a half-written file must be before it's taken as left behind by a crash: no export takes this long to
-/// write one file, so one still being written by another export is never cleared.
+/// write one file, so one another export is still writing is left alone.
 const LEFT_BEHIND: Duration = Duration::from_secs(10 * 60);
 
-/// Clears half-written files ([`write_checked`]'s "<name>.part-<app>-<write>") a crash left in an export folder, once
-/// they're older than `older_than`. Only names of exactly that shape are touched, in this folder only (not inside
-/// others), so nothing else is ever deleted; one that can't be cleared is left for next time.
-pub fn clear_half_written(folder: &Path, older_than: Duration) {
+/// Clears half-written files ([`write_checked`]'s, named with [`PART`]) a crash left in an export folder, once
+/// they're [`LEFT_BEHIND`] older than `now` (the time by the clock that stamps this folder's files). Only names of
+/// exactly that shape are touched, in this folder only (not inside others); one that can't be cleared is left for
+/// next time.
+fn clear_half_written(folder: &Path, now: SystemTime) {
     let Ok(entries) = std::fs::read_dir(folder) else { return };
-    let now = SystemTime::now();
     for entry in entries.flatten() {
         let Ok(kind) = entry.file_type() else { continue };
         let name = entry.file_name();
@@ -210,16 +219,32 @@ pub fn clear_half_written(folder: &Path, older_than: Duration) {
             .and_then(|m| m.modified())
             .ok()
             .and_then(|t| now.duration_since(t).ok())
-            .is_some_and(|age| age >= older_than);
+            .is_some_and(|age| age >= LEFT_BEHIND);
         if old {
-            let _ = std::fs::remove_file(entry.path());
+            remove_part(&entry.path());
         }
     }
 }
 
-/// A half-written file's name: something, then ".part-", digits, "-", digits, and nothing after.
+/// Removes a half-written file, read-only or not (on Windows a read-only file can't be removed until it's made
+/// writable again, as mo-backup's own leftovers).
+fn remove_part(path: &Path) {
+    #[cfg(windows)]
+    if let Ok(meta) = std::fs::symlink_metadata(path)
+        && meta.is_file()
+        && meta.permissions().readonly()
+    {
+        let mut permissions = meta.permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        let _ = std::fs::set_permissions(path, permissions);
+    }
+    let _ = std::fs::remove_file(path);
+}
+
+/// A half-written file's name: something, then [`PART`], digits, "-", digits, and nothing after.
 fn is_half_written(name: &str) -> bool {
-    let Some((before, tail)) = name.rsplit_once(".part-") else { return false };
+    let Some((before, tail)) = name.rsplit_once(PART) else { return false };
     let Some((app, write)) = tail.split_once('-') else { return false };
     let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
     !before.is_empty() && digits(app) && digits(write)
@@ -230,16 +255,27 @@ fn is_half_written(name: &str) -> bool {
 pub fn write_checked(path: &Path, data: &[u8]) -> io::Result<()> {
     // Its own name for each write (this copy of the app, then which write in it), so two exports at once never write
     // into one file and put the other's half-written bytes in place.
+    // A name already taken (a crash's leftover from an earlier run that had this one's process number, or another
+    // computer's export into a shared folder) is passed over for the next, and never touched.
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    let mut temp = path.as_os_str().to_owned();
-    temp.push(format!(".part-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
-    let temp = PathBuf::from(temp);
+    let mut tries = 0;
+    let (temp, mut file) = loop {
+        let mut temp = path.as_os_str().to_owned();
+        temp.push(format!("{PART}{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+        let temp = PathBuf::from(temp);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&temp) {
+            Ok(file) => break (temp, file),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists && tries < 100 => tries += 1,
+            Err(e) => return Err(e),
+        }
+    };
+    // From here the file is this write's own, so it's removed if anything goes wrong.
     let result = (|| {
         {
-            let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp)?;
             file.write_all(data)?;
             // On the disk before it takes the real name, so a power cut can't leave an empty file there.
             file.sync_all()?;
+            drop(file);
         }
         let back = std::fs::read(&temp)?;
         if back != data {
@@ -309,17 +345,17 @@ mod tests {
 
     #[test]
     fn knows_a_half_written_name() {
-        assert!(is_half_written("Serum - Lead.fxp.part-1234-0"));
-        assert!(is_half_written("a.part-1-22"));
-        for name in [
+        assert!(is_half_written("Serum - Lead.fxp.mo-part-1234-0"));
+        assert!(is_half_written("a.mo-part-1-22"));
+        let not = [
             "Serum - Lead.fxp",
-            "x.part-12",
-            "x.part-12-",
-            "x.part-1a-2",
-            ".part-1-2",
-            "x.part-1-2.fxp",
-            "Body part-1-2",
-        ] {
+            "x.mo-part-12",
+            "x.mo-part-12-",
+            "x.mo-part-1a-2",
+            ".mo-part-1-2",
+            "x.mo-part-1-2.fxp",
+        ];
+        for name in not.into_iter().chain(["Lead.part-1-2", "Body mo-part-1-2"]) {
             assert!(!is_half_written(name), "{name}");
         }
     }
