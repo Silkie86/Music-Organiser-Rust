@@ -795,23 +795,23 @@ mod tests {
     }
 
     /// The average distance within families, and between them.
-    fn spread(map: &HashMap<i64, StarPoint>, per: usize) -> (f32, f32) {
-        let (mut within, mut across, mut nw, mut na) = (0f32, 0f32, 0, 0);
+    fn spread(map: &HashMap<i64, StarPoint>, per: usize) -> (f64, f64) {
+        let (mut within, mut across, mut nw, mut na) = (0f64, 0f64, 0, 0);
         for (a, pa) in map {
             for (b, pb) in map {
                 if a >= b {
                     continue;
                 }
                 if (a - 1) / per as i64 == (b - 1) / per as i64 {
-                    within += gap(*pa, *pb);
+                    within += f64::from(gap(*pa, *pb));
                     nw += 1;
                 } else {
-                    across += gap(*pa, *pb);
+                    across += f64::from(gap(*pa, *pb));
                     na += 1;
                 }
             }
         }
-        (within / nw as f32, across / na as f32)
+        (within / f64::from(nw), across / f64::from(na))
     }
 
     #[test]
@@ -892,7 +892,7 @@ mod tests {
         let map = run(&v, EXACT_BELOW);
         println!("40,000 sounds in {:?}", started.elapsed());
         let (within, across) = spread(&map, 1000);
-        assert!(within * 2.0 < across, "{within} {across}");
+        assert!(within * 10.0 < across, "{within} {across}");
     }
 
     #[test]
