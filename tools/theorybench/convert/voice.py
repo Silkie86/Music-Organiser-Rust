@@ -51,7 +51,9 @@ the music it's measured on can't share a mistake (chord-reader design, "Data tha
 import json
 import re
 import sys
+from bisect import bisect_right
 from collections import Counter, namedtuple
+from itertools import accumulate
 
 
 # Choices: a hash of what's being chosen, so every run on every computer makes the same ones.
@@ -578,7 +580,7 @@ def nearest(options, ideal, avoid, prefer):
     return min((m for m in options if m not in avoid), key=lambda m: (abs(m - ideal), m not in prefer, m))
 
 
-def walk(chord, first, times, end, nxt, key):
+def walk(chord, first, times, nxt, key):
     """A walking line over one chord, a note a beat: first on its first beat; over four beats or more, out to a chord
     note a fourth to a sixth away by the middle; and on the last beat an approach to the next chord's first note nxt
     (half a step off about half the time, else a step below) when one follows. Between, it steps through the chord's
@@ -673,10 +675,10 @@ def play_tune(chord, r, times, end, prev, eighth, key):
     return merged, m
 
 
-Row = namedtuple("Row", "start end chart chord recipe style keys texture tune")
+Row = namedtuple("Row", "start end chart chord recipe style keys texture tune tags")
 
 
-def play(item, plan, which, pushes):
+def play(item, plan, pushes):
     """Plays a piece's labelled chords; plan(i, start, label) says each one's texture, recipe and tune, and a pedal or
     a bass note when there's one. Returns the item with the new parts, labels and render tags."""
     ppq = int(item["ppq"])
@@ -705,7 +707,7 @@ def play(item, plan, which, pushes):
         if texture == "none":
             # No bass part: the lowest key is the bass, but under a rootless recipe the root is implied.
             chord = with_bass(chord, chord.root if used in ROOTLESS else min(m for m, _ in keys) % 12)
-        rows.append(Row(s, e, label, chord, used, style, keys, texture, p["tune"]))
+        rows.append(Row(s, e, label, chord, used, style, keys, texture, p["tune"], p.get("tags", {})))
 
     keys_part, bass_part, tune_part = [], [], []
     firsts = {}
@@ -746,7 +748,7 @@ def play(item, plan, which, pushes):
             nxt = None
             if i + 1 < len(rows) and rows[i + 1].start == e:
                 nxt = firsts.get(i + 1, above(bass_pc(rows[i + 1].chord), HELD_LOW))
-            line = walk(chord, firsts[i], times, e, nxt, (song, i))
+            line = walk(chord, firsts[i], times, nxt, (song, i))
             for (m, g), t, until in zip(line, times, times[1:] + [e]):
                 bass_part.append([t, until - t, m, 90, g, i])
         if row.tune:
@@ -755,6 +757,11 @@ def play(item, plan, which, pushes):
 
     pushed = set()
     if pushes:
+        # Each row's keys (a key never sounds past its row's end), and the latest end of the rows up to each one.
+        by_row = [[] for _ in rows]
+        for n in keys_part:
+            by_row[n[5]].append(n)
+        reach = list(accumulate((row.end for row in rows), max))
         for i in range(1, len(rows)):
             s, prev = rows[i].start, rows[i - 1]
             if prev.end != s or (s - origin) % beat or prev.end - prev.start < beat:
@@ -762,11 +769,15 @@ def play(item, plan, which, pushes):
             if rows[i].style != "block" or prev.style != "block" or fnv(song, i, "push") % 5:
                 continue
             early = s - eighth
-            for n in keys_part:
-                if n[5] < i and n[0] + n[1] > early:
-                    # The chord before stops where this one comes in (a key struck after that point never sounds).
-                    n[1] = max(0, early - n[0])
-                elif n[5] == i and n[0] == s:
+            for j in range(i - 1, -1, -1):
+                if reach[j] <= early:
+                    break
+                for n in by_row[j]:
+                    if n[0] + n[1] > early:
+                        # The chord before stops where this one comes in (a key struck after that point never sounds).
+                        n[1] = max(0, early - n[0])
+            for n in by_row[i]:
+                if n[0] == s:
                     n[0], n[1], n[4] = early, n[1] + eighth, "push"
             pushed.add(i)
 
@@ -785,7 +796,7 @@ def play(item, plan, which, pushes):
         tags = {"set": RECIPE_SET[row.recipe], "recipe": row.recipe, "texture": row.texture,
                 "tune": "yes" if row.tune else "no", "push": "yes" if i in pushed else "no", "chart": row.chart,
                 "quality": quality_of(label)}
-        tags.update(plan(i, row.start, row.chart).get("tags", {}))
+        tags.update(row.tags)
         out["render"].append([row.start, row.end, tags])
     last = max((n[0] + n[1] for p in out["parts"] for n in p["notes"]), default=0)
     out["length"] = max(int(item.get("length", 0)), last)
@@ -858,7 +869,7 @@ def sweep_item(quality, recipe, texture, context):
         name = f"{NAMES[root]}:{quality}"
         bass = (root + tones[k % len(tones)].semis) % 12
         target_plan = {"texture": texture, "recipe": recipe, "tune": False, "pedal": root,
-                       "tags": {"quality": quality, "context": context}}
+                       "tags": {"quality": quality, "context": context, "role": "swept"}}
         if texture == "inversions":
             target_plan["bass"] = bass
         if context == "alone":
@@ -871,9 +882,9 @@ def sweep_item(quality, recipe, texture, context):
         chords += [[base, base + bar, f"{NAMES[(root + 2) % 12]}:{ii}"],
                    [base + bar, base + 2 * bar, f"{NAMES[(root + 7) % 12]}:{v}"],
                    [base + 2 * bar, base + 4 * bar, name]]
-        for q in ("(ii)", "(V)"):
+        for q, role in (("(ii)", "ii"), ("(V)", "V")):
             plans.append({"texture": side, "recipe": recipe, "tune": False, "pedal": root,
-                          "tags": {"quality": q, "context": context}})
+                          "tags": {"quality": q, "context": context, "role": role}})
         plans.append(target_plan)
     item = {
         "source": "sweep", "id": f"{quality} {recipe} {texture} {context}", "ppq": ppq, "length": chords[-1][1],
@@ -881,7 +892,7 @@ def sweep_item(quality, recipe, texture, context):
         "key_labels": "", "chord_labels": "voice.py sweep (labels say what is played)",
         "licence": "measuring only (voice.py sweep)",
     }
-    return play(item, lambda i, s, label: plans[i], RECIPE_SET[recipe], pushes=False)
+    return play(item, lambda i, s, label: plans[i], pushes=False)
 
 
 def sweep(out_path):
@@ -912,7 +923,7 @@ def charts(in_path, out_path, which):
             item = json.loads(line)
             if not item.get("chords"):
                 continue
-            played = play(item, chart_plan(item, which), which, pushes=True)
+            played = play(item, chart_plan(item, which), pushes=True)
             played["voicings"] = which
             played["chord_labels"] = (item.get("chord_labels") or "human") + \
                 f", voiced by voice.py set {which} (labels say what is played)"
@@ -939,16 +950,18 @@ def charts(in_path, out_path, which):
 
 
 def owners(item):
-    """Each note's labelled chord: the one it starts in, or for a pushed note the one it was struck early for."""
+    """Each note's labelled chord: the one it starts in, or for a pushed note the one it was struck early for. The
+    chords are in order and don't overlap, as play() writes them."""
     starts = [s for s, _, _ in item["chords"]]
     ends = [e for _, e, _ in item["chords"]]
     found = {}
     for part in item["parts"]:
         for (t, length, m, _), g in zip(part["notes"], part.get("tags", [])):
+            k = bisect_right(starts, t)
             if g == "push":
-                i = next((k for k, s in enumerate(starts) if s > t), None)
+                i = k if k < len(starts) else None
             else:
-                i = next((k for k, (s, e) in enumerate(zip(starts, ends)) if s <= t < e), None)
+                i = k - 1 if k > 0 and t < ends[k - 1] else None
             if i is not None:
                 found.setdefault(i, []).append((part["role"], t, m, g))
     return found
@@ -995,7 +1008,8 @@ def check(item):
         if texture == "none":
             if bass:
                 problems.append(f"{label} at {s}: a bass part where there should be none")
-            first = [m for role, t, m, g in played if role == "chords" and t == min(x[1] for x in played)]
+            strike = min((t for _, t, _, _ in played), default=None)
+            first = [m for role, t, m, g in played if role == "chords" and t == strike]
             want = chord.root if tags["recipe"] in ROOTLESS else min(first) % 12 if first else None
             if want is not None and bass_pc(chord) != want:
                 problems.append(f"{label} at {s}: with no bass, the label's bass isn't the lowest key")

@@ -57,7 +57,7 @@ theorybench chords <labelled.jsonl>... --answers <name>=<answers.jsonl> [--answe
              part plays
   --per-segment  mir_eval's scores per labelled chord too, each counted once
   --by       the chords named whole split by a tag convert/voice.py gives each chord it plays: set, recipe, texture,
-             tune, push or quality (and context in its sweep); given twice, by both
+             tune, push, chart or quality (and context and role in its sweep); given twice, by both
   --dump     write every piece's labels, chords read and scores to a file, for convert/check_mir_eval.py";
 
 fn main() -> ExitCode {

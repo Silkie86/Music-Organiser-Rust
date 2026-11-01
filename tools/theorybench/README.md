@@ -278,7 +278,8 @@ name a chord. Each label is read whole, ninths, elevenths and thirteenths and al
   **changes a bar**: how often the reader changes chord.
 
 `--by tag` splits the chords named whole by a tag `convert/voice.py` gives each chord it plays (below): set, recipe,
-texture, tune, push or quality, and context in its sweep. Given twice, it splits by both (`--by recipe --by texture`).
+texture, tune, push, chart or quality, and context and role in its sweep. Given twice, it splits by both:
+`--by recipe --by texture`.
 
 `--dump file` writes every piece's labels, chords read and scores; `python3 -I convert/check_mir_eval.py file` runs
 mir_eval itself on them and prints both sets of numbers (they matched exactly on all 909 POP909 songs, 2026-10-31, and
@@ -310,7 +311,8 @@ python3 -I tools/theorybench/convert/test_voice.py
   Harte's 11 (a third under an 11th, which players avoid) is played and named as a 9sus4. The fifth may be left out and
   a rootless voicing leaves out the root, but the label keeps both, as a chart would.
 - **Tags:** every note says what it is (chord, ext, passing, neighbour, approach, walking or push), and every chord its
-  set, recipe, texture, tune, push, the chart's own label and the quality played, for `chords --by`.
+  set, recipe, texture, tune, push, the chart's own label and the quality played, for `chords --by`; in the sweep also
+  its context and role (the chord swept, or the ii or V before it).
 - **The sweep:** 45 chord qualities (sixths, ninths, elevenths, thirteenths, altered dominants, sus, diminished and
   augmented chords) in every voicing that fits them, over every bass texture, on all 12 roots, alone and as the I of a
   ii-V-I: 5,423 pieces.
@@ -354,7 +356,7 @@ by the names it shows (#107 first measured the notes it heard):
   label's root sounds in no part (1.5% of the time), the root is right 3.7% of it. The labelled chord is the first
   reading 78.6% of the time and among the first three 80.1%. Its labels name no extensions. Piano and tune together:
   notes+bass 55.1% (tune notes go into the names), lenient event 77.4%.
-- **Billboard charts, played as block chords over the label's bass (CC0):** notes+bass 94.1% (93.2 to 95.0), name
+- **Billboard charts, played as block chords over the label's bass (CC0):** notes+bass 94.2% (93.3 to 95.0), name
   90.8%, event 91.1%. Extensions, F1: 6 68.1% (precision 55.3%), b9 59.6%, 9 82.9%, #9 98.3%, 11 74.0%, #11 82.7%,
   b13 41.8% (precision 28.8%), 13 75.1%; altered tones pooled 85.4%; macro F1 72.8% (67.4 to 77.0). Nearly all its
   false 6ths (95.5% of their time) and most of its false b13s (68.1%) are readings on another root, mostly
@@ -362,7 +364,7 @@ by the names it shows (#107 first measured the notes it heard):
   time. Slash chords (2.7% of the time) are never written as slashes: 69.0% are read with the bass as the root and
   31.0% as the chord with the bass added (D7/C for D/C). Where the notes and bass were right, the root was too 97.0%
   of the time; the commonest other root is C/D read as D9sus4 (0.7% of the chord time).
-- **RS200 rock charts, played the same way (measuring only):** notes+bass 98.5%, name 97.3%; inversions read in root
+- **RS200 rock charts, played the same way (measuring only):** notes+bass 98.6%, name 97.4%; inversions read in root
   position 49.2% of their time.
 
 The notes+bass and name numbers were checked with a separate Python line-up that reads the labels with `charts.py`
@@ -374,28 +376,33 @@ and the notes a name may leave out).
 The same charts played by `voice.py`, and its sweep. Played like music, the C# app names a chord whole about 20 points
 less often than as block chords, and most of the tensions it names aren't in the chord.
 
-- **Billboard, set A (the voicings a reader may learn from):** notes+bass 77.5% (76.6 to 78.4), name 71.7%, event 74.4%
-  (block chords: 94.1%, 90.8%, 91.1%). Extensions: macro F1 33.6% (29.9 to 36.3); of the tensions it names, only 46.5%
+- **Billboard, set A (the voicings a reader may learn from):** notes+bass 77.6% (76.7 to 78.4), name 71.7%, event 74.4%
+  (block chords: 94.2%, 90.8%, 91.1%). Extensions: macro F1 33.6% (29.9 to 36.3); of the tensions it names, only 46.5%
   of its 9ths are in the chord, 12.2% of its 11ths and 13.5% of its 13ths. Where it names a tension the chord hasn't, on
   the right root, the note is the tune's neighbour (28.0%) and passing notes (10.4%), the walking bass's passing (23.1%)
   and approach notes (17.1%), a note of the next chord pushed early (5.2%), or one from the chord before or after, where
   its reading runs over the change (15.3%). Inversions are read in root position 77.8% of their time. Given the changes,
   it does no better (name 0.9 points lower).
-  - By bass (name): a held root 93.5%, two-feel 92.4%, the chart's inversions 88.1%, no bass 75.4%, a pedal 42.9%
-    (its notes and bass right 71.5%: the pedal is taken as the root), walking 38.9%.
+  - By bass (name): a held root 93.6%, two-feel 92.5%, the chart's inversions 88.1%, no bass 75.4%, a pedal 42.9%
+    (its notes and bass right 71.7%: the pedal is taken as the root), walking 38.9%.
   - By voicing: shells 76.0%, gospel 74.1%, the chart's inversions 73.6%, close 68.1%, drop 2 66.9%. With a tune
     68.2%, without 75.3%. Pushed changes make no difference (71.9% against 71.7%).
-- **Billboard, set B (measuring only):** notes+bass 67.2% (66.2 to 68.2), name 62.9%, event 66.7%; macro F1 26.2%.
+- **Billboard, set B (measuring only):** notes+bass 67.3% (66.2 to 68.2), name 62.9%, event 66.7%; macro F1 26.2%.
   Alberti 47.8%, arpeggios 55.7%, spreads 70.6%, clusters 74.3%; the rootless, upper-structure, quartal and So What
   voicings (2.6% of the time: most chart chords have no 9 or 13) 46.7% to 58.9%. Walking 29.3%, a pedal 37.5%.
-- **RS200, played the same way:** set A notes+bass 81.1%, name 75.0%; set B 72.4% and 68.2% (block chords: 98.5% and
-  97.3%).
-- **The sweep (45 qualities, every voicing and bass):** notes+bass 63.5% (62.5 to 64.4), name 59.1%, event 61.5%;
-  macro F1 56.8% (55.6 to 57.9). Inversions read in root position 63.6%. Alone 51.3%; in a ii-V-I 62.4% (its ii and V
-  are plain m7 and 7 chords; the I itself about 55%).
-  - By bass: held 82.2%, two-feel 71.4%, none 65.6%, a pedal 46.2%, walking 36.1%, the chord's inversions 32.3%.
-  - By voicing: spread 76.1%, gospel 72.4%, cluster 72.0%, close 70.1%, shells and inversions 70.0%, drop 2 63.6%,
-    So What 60.5%, quartal 52.5%, upper structures 37.6%, rootless 35.0% and 35.2%, arpeggios 32.5%, Alberti 15.0%.
+- **RS200, played the same way:** set A notes+bass 81.2%, name 75.1%; set B 72.5% and 68.2% (block chords: 98.6% and
+  97.4%).
+- **The sweep (45 qualities, every voicing and bass):** every chord, notes+bass 63.5% (62.5 to 64.4), name 59.1%,
+  event 61.5%; macro F1 56.8% (55.6 to 57.9); inversions read in root position 63.6%. Counting only the chords swept,
+  not the ii and V before them (plain m7 and 7 chords; `--by role`): notes+bass 59.4%, name 53.6%, event 57.1%; on
+  their own 51.3%, as the I of a ii-V-I 55.6%. The splits below are of the chords swept too (`--by role` with
+  `--by texture` or `--by recipe`):
+  - By bass: a held root 77.6%, a pedal (in a ii-V-I, on the I's own root) 77.7%, two-feel 65.0%, no bass 54.7%,
+    the chord's inversions 32.3%, walking 26.5%. Over that pedal, the V is never named right and the ii 29.3% of the
+    time.
+  - By voicing: spread 69.5%, gospel 68.1%, cluster 67.8%, shells 65.7%, close 65.5%, the chord's inversions 65.4%,
+    So What 60.5%, drop 2 60.4%, quartal 52.5%, upper structures 37.6%, rootless 34.4% and 34.1%, arpeggios 27.9%,
+    Alberti 14.2%.
   - By quality, best: major 79.0%, minor 76.7%, minor-major 7th 76.3%, maj7 74.8%, 7 73.7%. Worst: a dominant 9 or 13
     with a #11 21.2% and 19.0% (it writes the #11 as a b5 when no fifth sounds, as mo-harmony's own names do; the
     labels write #11, as charts do), minor add 9 3.8% (read as Ebmaj13/C for Cm(add9): the right notes from the wrong

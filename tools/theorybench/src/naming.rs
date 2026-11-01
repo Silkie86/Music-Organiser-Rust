@@ -74,17 +74,15 @@ pub fn named_notes(c: Chord) -> PcSet {
 }
 
 /// The notes a chord's name stands for without saying they sound, as charts write names and mo-harmony reads them
-/// (its `every_note_is_in_the_name` test): the plain fifth of a chord with a third or a seventh, the 9 under an 11 or a
-/// 13, and the 11 of a minor 13. So "Cm13" names a minor 13 with no 11 and "Cm11" a minor 7 with an 11 and no 9, as
-/// players read them. A 7alt says it has alterations but not which, so they are no such notes: it is right as the
-/// event, not as the name.
+/// (its `every_note_is_in_the_name` test): the plain fifth (but a power chord's, which is all it has besides its
+/// root), the 9 under an 11 or a 13, and the 11 of a minor 13. So "Cm13" names a minor 13 with no 11, "Cm11" a minor 7
+/// with an 11 and no 9, and "Csus4" C and F, as players read them. A 7alt says it has alterations but not which, so
+/// they are no such notes: it is right as the event, not as the name.
 pub fn may_leave_out(c: Chord) -> PcSet {
     let degrees = c.degrees();
     let has = |d: Degree| degrees.contains(&d);
-    let third = has(Degree::MAJOR_THIRD) || has(Degree::MINOR_THIRD);
-    let seventh = has(Degree::MINOR_SEVENTH) || has(Degree::MAJOR_SEVENTH);
     let mut out = PcSet::EMPTY;
-    if has(Degree::FIFTH) && (third || seventh) {
+    if has(Degree::FIFTH) && c.intervals().len() > 2 {
         out = out.union(PcSet::of(&[7]));
     }
     if has(Degree::NINTH) && (has(Degree::ELEVENTH) || has(Degree::THIRTEENTH)) {
@@ -760,7 +758,10 @@ mod tests {
         assert_eq!(left_out("Cm11"), [2, 7]);
         assert_eq!(left_out("Cmaj9"), [7]);
         assert_eq!(left_out("C7sus4"), [7]);
-        assert_eq!(left_out("Csus4"), Vec::<u8>::new());
+        assert_eq!(left_out("Csus4"), [7]);
+        assert_eq!(left_out("Csus2"), [7]);
+        assert_eq!(left_out("C"), [7]);
+        // A power chord is its fifth.
         assert_eq!(left_out("C5"), Vec::<u8>::new());
         assert_eq!(left_out("C7alt"), Vec::<u8>::new());
         assert_eq!(left_out("Cm7b5"), Vec::<u8>::new());
@@ -778,7 +779,13 @@ mod tests {
         };
         let right =
             |l: &str, name: &str| tally(&[(0, 4, harte::named(l))], &[named(name)], &[PcSet::EMPTY], true, 1).right;
-        for (l, name) in [("C:min13", "Cm13"), ("C:min7(11)", "Cm11"), ("C:7(13)", "C13"), ("C:7(*5)", "C7")] {
+        for (l, name) in [
+            ("C:min13", "Cm13"),
+            ("C:min7(11)", "Cm11"),
+            ("C:7(13)", "C13"),
+            ("C:7(*5)", "C7"),
+            ("C:sus4(*5)", "Csus4"),
+        ] {
             assert_eq!(right(l, name), [4.0; 4], "{l} {name}");
         }
         // A name's own notes count: the 13 of Cm13 isn't in a min7, nor the 11 of Cm11 in a min9.

@@ -19,9 +19,6 @@ def load(name):
 voice = load("voice")
 charts = load("charts")
 
-NAMES = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"]
-
-
 def keys_of(notes):
     return [voice.NAMES[m % 12] + str(m // 12 - 1) for m, _ in notes]
 
@@ -121,22 +118,22 @@ class Recipes(unittest.TestCase):
 class Playing(unittest.TestCase):
     def test_textures_set_the_bass_the_label_names(self):
         chart = piece([(1, "C:maj/3"), (1, "F:maj"), (1, "G:7")])
-        held = voice.play(chart, fixed("held", "close"), "A", pushes=False)
+        held = voice.play(chart, fixed("held", "close"), pushes=False)
         self.assertEqual([c[2] for c in held["chords"]], ["C:maj", "F:maj", "G:7"])
-        kept = voice.play(chart, fixed("inversions", "close"), "A", pushes=False)
+        kept = voice.play(chart, fixed("inversions", "close"), pushes=False)
         self.assertEqual([c[2] for c in kept["chords"]], ["C:maj/3", "F:maj", "G:7"])
-        pedal = voice.play(chart, fixed("pedal", "close"), "A", pushes=False)
+        pedal = voice.play(chart, fixed("pedal", "close"), pushes=False)
         self.assertEqual([c[2] for c in pedal["chords"]], ["C:maj", "F:maj/5", "G:7/4"])
-        alone = voice.play(chart, fixed("none", "inverted"), "A", pushes=False)
+        alone = voice.play(chart, fixed("none", "inverted"), pushes=False)
         self.assertEqual([c[2] for c in alone["chords"]], ["C:maj/3", "F:maj", "G:7"])
-        rootless = voice.play(piece([(1, "C:9/3")]), fixed("none", "rootless-a"), "B", pushes=False)
+        rootless = voice.play(piece([(1, "C:9/3")]), fixed("none", "rootless-a"), pushes=False)
         self.assertEqual(rootless["chords"][0][2], "C:9")
         for item in (held, kept, pedal, alone, rootless):
             self.assertEqual(voice.check(item), [])
 
     def test_a_walking_bass_steps_and_approaches_the_next_chord(self):
         chart = piece([(1, "C:7"), (1, "F:7")])
-        out = voice.play(chart, fixed("walking", "shell"), "A", pushes=False)
+        out = voice.play(chart, fixed("walking", "shell"), pushes=False)
         bass = [n for p in out["parts"] if p["role"] == "bass" for n in zip(p["notes"], p["tags"])]
         self.assertEqual([n[0][0] for n in bass], [0, 480, 960, 1440, 1920, 2400, 2880, 3360])
         self.assertEqual(bass[3][1], "approach")
@@ -145,7 +142,7 @@ class Playing(unittest.TestCase):
 
     def test_a_push_strikes_the_keys_an_eighth_early_and_the_bass_on_the_beat(self):
         chart = piece([(1, "C:maj")] + [(1, "F:maj"), (1, "G:maj"), (1, "C:maj")] * 8)
-        out = voice.play(chart, fixed("held", "close"), "A", pushes=True)
+        out = voice.play(chart, fixed("held", "close"), pushes=True)
         pushed = [k for k, (_, _, t) in enumerate(out["render"]) if t["push"] == "yes"]
         self.assertTrue(pushed)
         start = out["chords"][pushed[0]][0]
@@ -160,7 +157,7 @@ class Playing(unittest.TestCase):
 
     def test_the_tune_holds_only_the_labels_notes(self):
         chart = piece([(2, "C:maj7"), (2, "A:min7"), (2, "D:min9"), (2, "G:13")])
-        out = voice.play(chart, fixed("held", "close", tune=True), "A", pushes=False)
+        out = voice.play(chart, fixed("held", "close", tune=True), pushes=False)
         tune = next(p for p in out["parts"] if p["role"] == "melody")
         self.assertTrue(tune["notes"])
         for (t, length, m, _), g in zip(tune["notes"], tune["tags"]):
@@ -169,7 +166,7 @@ class Playing(unittest.TestCase):
         self.assertEqual(voice.check(out), [])
 
     def test_check_finds_a_wrong_label(self):
-        out = voice.play(piece([(1, "C:maj"), (1, "A:min7")]), fixed("held", "close"), "A", pushes=False)
+        out = voice.play(piece([(1, "C:maj"), (1, "A:min7")]), fixed("held", "close"), pushes=False)
         self.assertEqual(voice.check(out), [])
         wrong = copy.deepcopy(out)
         wrong["chords"][0][2] = "C:min"
@@ -188,8 +185,8 @@ class Playing(unittest.TestCase):
         chart = piece([(1, "C:maj"), (0.5, "A:min7"), (0.5, "D:min7"), (1, "G:7(b9)")] * 6,
                       keys=[[0, 10 ** 6, "C:maj"]])
         for which in ("A", "B"):
-            first = voice.play(chart, voice.chart_plan(chart, which), which, pushes=True)
-            again = voice.play(copy.deepcopy(chart), voice.chart_plan(chart, which), which, pushes=True)
+            first = voice.play(chart, voice.chart_plan(chart, which), pushes=True)
+            again = voice.play(copy.deepcopy(chart), voice.chart_plan(chart, which), pushes=True)
             self.assertEqual(json.dumps(first, sort_keys=True), json.dumps(again, sort_keys=True))
             self.assertEqual(voice.check(first), [])
 
