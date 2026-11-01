@@ -224,6 +224,13 @@ impl<T> std::ops::IndexMut<PitchClass> for PerPitch<T> {
     }
 }
 
+impl PerPitch<u64> {
+    /// All twelve counts added up (at most `u64::MAX`).
+    pub fn total(&self) -> u64 {
+        self.0.iter().fold(0u64, |sum, &count| sum.saturating_add(count))
+    }
+}
+
 impl<T: Copy> PerPitch<T> {
     /// The values with pitch class `root` first: `rotated(root)[i]` is the value `i` semitones above `root`.
     pub fn rotated(&self, root: PitchClass) -> PerPitch<T> {

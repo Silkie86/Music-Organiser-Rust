@@ -13,19 +13,27 @@
 //! - the first step, hearing the notes ([`Hearing`]): the units chords change on, the bass, the chords and the tune,
 //!   broken chords, notes held over a bar line, how long each note sounds where, the shapes of the lines' notes
 //!   ([`Shaped`]), and the chords that may be pushed ([`Push`]);
-//! - the readings worth scoring for a stretch of music ([`candidates()`]): each a root and a core ([`Label`]).
+//! - the readings worth scoring for a stretch of music ([`candidates()`]): each a root and a core ([`Label`]);
+//! - the evidence for and against each reading of a stretch ([`Feature`], worked out by [`Evidence`] into
+//!   [`SpanFacts`]), weighed by hand-set weights ([`HAND`]) and ranked, best first ([`SpanFacts::rank`]).
 
 mod candidates;
 mod cores;
 mod hear;
 #[cfg(test)]
 mod hear_tests;
+mod score;
+#[cfg(test)]
+mod score_tests;
 #[cfg(test)]
 mod shape_tests;
+mod weights;
 
 pub use candidates::{Candidate, Label, Route, allowed, candidates, escape, open_fifth};
 pub use cores::{Core, CoreSet, ToneClass, valid, valid_rootless};
 pub use hear::{
     BASS_GAP, BassTexture, HeardNote, Hearing, Level, Line, MOST_UNITS, Mass, Push, Shape, Shaped, Stream, Unit,
-    heard_in,
+    heard_in, presence_of,
 };
+pub use score::{Evidence, Feature, PerFeature, Scored, SpanFacts};
+pub use weights::{EVEN, HAND, Tables, Weights};

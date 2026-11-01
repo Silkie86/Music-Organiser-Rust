@@ -162,6 +162,18 @@ pub enum BassTexture {
     None,
 }
 
+impl BassTexture {
+    /// How a bass behaves, from its ticks on each pitch class over some units ([`Mass::Bass`]).
+    pub fn of(bass: &PerPitch<u64>) -> BassTexture {
+        let total: u128 = bass.0.iter().map(|&t| u128::from(t)).sum();
+        match bass.iter().max_by_key(|&(_, t)| t) {
+            Some((pc, most)) if total > 0 && 4 * u128::from(most) >= 3 * total => BassTexture::Held(pc),
+            _ if total > 0 => BassTexture::Moving,
+            _ => BassTexture::None,
+        }
+    }
+}
+
 /// A note as the reader hears it. Its ticks count from the start of the first unit ([`Hearing::tick`] turns them
 /// back into the music's own).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -433,16 +445,11 @@ impl Hearing {
     /// What presence counts of each pitch class over some units, in ticks: twice its ticks in the chords and the bass,
     /// and its ticks in the tune's held notes (which count half as much).
     pub fn presence_ticks(&self, units: Range<usize>) -> PerPitch<u64> {
-        let (h, b, m) = (
-            self.mass(units.clone(), Mass::Harmony),
-            self.mass(units.clone(), Mass::Bass),
-            self.mass(units, Mass::HeldMelody),
-        );
-        let mut out = PerPitch::default();
-        for pc in PitchClass::ALL {
-            out[pc] = h[pc].saturating_add(b[pc]).saturating_mul(2).saturating_add(m[pc]);
-        }
-        out
+        presence_of(
+            &self.mass(units.clone(), Mass::Harmony),
+            &self.mass(units.clone(), Mass::Bass),
+            &self.mass(units, Mass::HeldMelody),
+        )
     }
 
     /// How present each pitch class is over some units, 0 to 1: four times its ticks in the chords and the bass, and
@@ -486,13 +493,7 @@ impl Hearing {
     /// How the bass behaves over some units: held on one pitch class (three quarters of its ticks or more), moving,
     /// or not there.
     pub fn bass(&self, units: Range<usize>) -> BassTexture {
-        let bass = self.mass(units, Mass::Bass);
-        let total: u128 = bass.0.iter().map(|&t| u128::from(t)).sum();
-        match bass.iter().max_by_key(|&(_, t)| t) {
-            Some((pc, most)) if total > 0 && 4 * u128::from(most) >= 3 * total => BassTexture::Held(pc),
-            _ if total > 0 => BassTexture::Moving,
-            _ => BassTexture::None,
-        }
+        BassTexture::of(&self.mass(units, Mass::Bass))
     }
 
     /// The notes of a stream struck in a unit (a held-over end is never struck).
@@ -533,6 +534,38 @@ impl Hearing {
     /// doubles in the chords (not broken) are heard as the bass too.
     pub fn gap_bass(&self, unit: usize) -> Option<u8> {
         self.units.get(unit).and_then(|u| u.gap_bass)
+    }
+
+    /// Whether a note is heard as the bass in a unit, as the masses count it ([`Mass::Bass`]): a bass part's note, or
+    /// a chord note (not broken) on the pitch class of the unit's gap bass. A held-over end is never the bass.
+    pub fn is_bass_in(&self, unit: usize, n: &HeardNote) -> bool {
+        match n.stream {
+            Stream::Bass => true,
+            Stream::Harmony => !n.broken && self.gap_bass(unit).is_some_and(|k| k % 12 == n.key % 12),
+            Stream::Melody => false,
+        }
+    }
+
+    /// The lowest chord or bass note sounding in a unit, for at least a quarter of it (held-over ends left out): unlike
+    /// [`Hearing::lowest`], nothing when none does.
+    pub fn lowest_sounding(&self, unit: usize) -> Option<u8> {
+        self.units.get(unit).and_then(|u| u.lowest)
+    }
+
+    /// Where a unit starts, in ticks from the first unit's start (as [`HeardNote`]s count), from 0 to
+    /// [`Hearing::units`].
+    pub fn offset(&self, unit: usize) -> i64 {
+        self.layout.start(unit.min(self.units.len()))
+    }
+
+    /// The unit a time is in, given in ticks from the first unit's start: 0 before the first, and
+    /// [`Hearing::units`] at or after where the last one ends.
+    pub fn unit_of(&self, from_first: i64) -> usize {
+        let units = self.units.len();
+        if from_first >= self.layout.start(units) {
+            return units;
+        }
+        self.layout.unit_at(from_first.max(0)).min(units)
     }
 
     fn clamp(&self, units: Range<usize>) -> Range<usize> {
@@ -802,6 +835,16 @@ impl Hearing {
             self.sound.push(sounded);
         }
     }
+}
+
+/// What presence counts of each pitch class ([`Hearing::presence_ticks`]), from the masses of the chords, the bass and
+/// the tune's held notes over the same units: twice the chords' and the bass's ticks, and the held tune's once.
+pub fn presence_of(chords: &PerPitch<u64>, bass: &PerPitch<u64>, held_tune: &PerPitch<u64>) -> PerPitch<u64> {
+    let mut out = PerPitch::default();
+    for pc in PitchClass::ALL {
+        out[pc] = chords[pc].saturating_add(bass[pc]).saturating_mul(2).saturating_add(held_tune[pc]);
+    }
+    out
 }
 
 /// The notes heard (the design's P), from what presence counts ([`Hearing::presence_ticks`]) and the ticks in which a
