@@ -59,7 +59,7 @@ pub const BASS_GAP: u8 = 7;
 
 /// The longest bar heard, in beats, as in the key finder: a longer one comes from a damaged file, and is heard as bars
 /// of this many beats.
-const MOST_BAR_BEATS: i64 = 1024;
+pub(super) const MOST_BAR_BEATS: i64 = 1024;
 
 /// How strong the start of a unit is, by where it falls in its bar. Stronger compares greater.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -429,6 +429,26 @@ impl Hearing {
     /// Whether some notes were left out because they lay further apart than [`MOST_UNITS`] units (a damaged file).
     pub fn truncated(&self) -> bool {
         self.truncated
+    }
+
+    /// Whether the notes heard are one line: never two sounding together as they were played (a player's timing
+    /// apart: [`Hearing::strength_at`]'s allowance, so a line played legato is still one), and none in a broken chord.
+    /// A tune, a bass line, or a lead played one note at a time is one line; an arpeggio, a broken chord, isn't.
+    pub fn one_line(&self) -> bool {
+        let together = self.together();
+        let mut till = i64::MIN;
+        for n in self.notes.iter().filter(|n| !n.copy) {
+            if n.broken || n.start < till.saturating_sub(together) {
+                return false;
+            }
+            till = till.max(n.start.saturating_add(n.length));
+        }
+        true
+    }
+
+    /// How many notes were heard, a loop's copies left out.
+    pub fn notes_heard(&self) -> usize {
+        self.notes.iter().filter(|n| !n.copy).count()
     }
 
     /// Whether a bass part was heard anywhere. In the bars where none plays, the bass is found in the chords by the

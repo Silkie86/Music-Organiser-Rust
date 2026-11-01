@@ -13,6 +13,7 @@ use super::{
     COUNTED, Chance, Core, Decoder, Decoding, Evidence, Feature, HAND, Hearing, Label, PerFeature, PinnedSpan, Priors,
     SpanFacts, Weights,
 };
+use crate::chord::Chord;
 use crate::notes::{Note, Role};
 use crate::pitch::PitchClass;
 
@@ -499,7 +500,12 @@ fn two_five_one() -> Music {
 
 /// A stretch pinned to a chord.
 fn pin(units: Range<usize>, chord: &str) -> PinnedSpan {
-    PinnedSpan { units, label: Some(label(chord)) }
+    PinnedSpan { units, chord: Some(written(label(chord))) }
+}
+
+/// A label written in full: its core's notes on its root.
+pub(super) fn written(label: Label) -> Chord {
+    Chord::of(label.root, label.core.intervals())
 }
 
 #[test]
@@ -546,7 +552,7 @@ fn a_stretch_pinned_at_its_ends_is_read_as_one_chord() {
     let free = Whole::read(&music, &HAND, &[]).spans();
     assert_eq!(cuts(&free), [(0..4, "C"), (4..B, "Am"), (B..2 * B, "F"), (2 * B..3 * B, "G"), (3 * B..4 * B, "C")]);
     // Pinned at the bar's ends, it's one chord.
-    let ends = |units: Range<usize>| PinnedSpan { units, label: None };
+    let ends = |units: Range<usize>| PinnedSpan { units, chord: None };
     let one = Whole::read(&music, &HAND, &[ends(0..B)]).spans();
     assert_eq!(one[0].units, 0..B, "read {}", render(&one));
     assert!(["C", "C6", "Am", "Am7"].contains(&one[0].label.as_str()), "read {}", render(&one));
@@ -582,7 +588,7 @@ pub(super) fn the_music() -> Vec<(Music, Vec<PinnedSpan>)> {
         .bass([notes("C2", BEAT, BAR), notes("F2", 3 * BAR, BAR)].concat())
         .keys([notes("C4 E4 G4", BEAT, BAR), notes("F3 A3 C4", 3 * BAR, BAR)].concat());
     out.push((rest, Vec::new()));
-    out.push((two_five_one(), vec![pin(B..2 * B, "Db7"), PinnedSpan { units: 2 * B..4 * B, label: None }]));
+    out.push((two_five_one(), vec![pin(B..2 * B, "Db7"), PinnedSpan { units: 2 * B..4 * B, chord: None }]));
     out
 }
 
@@ -666,7 +672,7 @@ fn the_same_notes_moved_read_the_same_moved_to_the_last_bit() {
             let moved = music.map(|n| Note { key: (i32::from(n.key) + shift) as u8, ..n });
             let up = |pin: &PinnedSpan| PinnedSpan {
                 units: pin.units.clone(),
-                label: pin.label.map(|l| Label::new(l.root.up(shift), l.core)),
+                chord: pin.chord.map(|c| c.transposed(shift)),
             };
             let pins: Vec<PinnedSpan> = pins.iter().map(up).collect();
             let whole = Whole::read(&moved, &HAND, &pins);
@@ -901,7 +907,7 @@ fn the_fast_way_agrees_with_adding_up_every_way_one_by_one() {
         .bass([notes("C2", 0, 2 * BEAT), notes("F2", BAR, BAR)].concat())
         .keys([notes("C4 E4 G4", 0, 2 * BEAT), notes("F3 A3 C4", BAR, BAR)].concat());
     let case = |prefix: &str| whole_cases().into_iter().find(|(name, _, _)| name.starts_with(prefix)).unwrap().1;
-    let ends = PinnedSpan { units: 2 * B..4 * B, label: None };
+    let ends = PinnedSpan { units: 2 * B..4 * B, chord: None };
     let cases = [
         ("4", case("4 "), vec![]),
         ("44", case("44 "), vec![]),
@@ -932,7 +938,7 @@ fn kept_pins(pins: &[PinnedSpan], units: usize) -> Vec<PinnedSpan> {
         .iter()
         .map(|pin| {
             let end = pin.units.end.min(units);
-            PinnedSpan { units: pin.units.start.min(end)..end, label: pin.label }
+            PinnedSpan { units: pin.units.start.min(end)..end, chord: pin.chord }
         })
         .filter(|pin| !pin.units.is_empty())
         .collect();
@@ -984,7 +990,7 @@ pub(super) fn random_pins(dice: &mut Dice, hearing: &Hearing) -> Vec<PinnedSpan>
         let end = start + dice.below(3 * bar as u64) as usize;
         let core = dice.pick(&Core::ALL);
         let label = (dice.below(3) > 0).then(|| Label::new(PitchClass::new(dice.below(12) as i32), core));
-        pins.push(PinnedSpan { units: start..end, label });
+        pins.push(PinnedSpan { units: start..end, chord: label.map(written) });
     }
     pins
 }
@@ -1040,7 +1046,7 @@ fn any_music_with_any_pins_is_read_whole_and_the_fast_way_agrees_with_the_slow_w
                 continue;
             }
             let span = spans.iter().find(|s| s.units == units);
-            assert!(span.is_some_and(|s| pin.label.is_none_or(|l| s.label == Some(l))), "{pin:?}: {what}");
+            assert!(span.is_some_and(|s| pin.label().is_none_or(|l| s.label == Some(l))), "{pin:?}: {what}");
         }
         // And where there are few enough ways to add up one by one, the slow way agrees.
         if count_ways(&decoder.lattice(), &HAND) <= 20_000.0 {

@@ -40,6 +40,10 @@
 //! - **A bass that moves to the chord's third or seventh** halfway through it, on a bar line or the middle of a bar,
 //!   each note held two felt beats or more, and steps from there into the next chord's bass, cuts the chord in two: C
 //!   C/E | F, C C/B | Am ([`SpanFlags::SPLIT`]). A bass moving to the fifth (a two-feel) never does.
+//! - **Pins** (a Chord check answer or the user's fix: [`PinnedSpan`]). A pinned stretch is never cut in two, and a
+//!   chord given for it is written as given, whatever is heard ([`SpanFlags::GIVEN`]): D♭7 pinned over C E G is D♭7,
+//!   rootless. Given in root position, it stands over the bass held under it, as any reading does (Am7 given over a
+//!   held C is Am7/C, and that D♭7 over a C bass D♭7/C); given with a bass of its own, it keeps it.
 //!
 //! Over silence (a chord held on over it, or pinned there), a reading is written in full, as the decode read it. Every
 //! reading the decode gave a chance on a span is named the same way, and readings written the same are one reading,
@@ -51,7 +55,7 @@ use std::ops::Range;
 
 use super::candidates::Label;
 use super::cores::Core;
-use super::decode::{Chance, DecodedSpan, Decoder, Decoding};
+use super::decode::{Chance, DecodedSpan, Decoder, Decoding, PinnedSpan};
 use super::hear::{BassTexture, Hearing, Level, Line, Mass, Push, Shaped, Stream, played_in};
 use crate::chord::{Chord, Family, ToneRole, role};
 use crate::pitch::{PcSet, PerPitch, PitchClass};
@@ -100,6 +104,8 @@ impl SpanFlags {
     pub const NO_BASS: SpanFlags = SpanFlags(1 << 3);
     /// It's half of a chord cut in two where its bass moves to its third or seventh.
     pub const SPLIT: SpanFlags = SpanFlags(1 << 4);
+    /// Its chord was given (a pin with its chord), and is written as given.
+    pub const GIVEN: SpanFlags = SpanFlags(1 << 5);
 
     /// Whether all of some flags are set.
     pub const fn contains(self, flags: SpanFlags) -> bool {
@@ -155,6 +161,8 @@ pub struct NamedSpan {
     pub heard_start: i64,
     /// The chance a chord starts where it starts.
     pub change: f64,
+    /// What the best way reads there: a label, the first reading's, or none for no chord.
+    pub label: Option<Label>,
     /// Whether it's a rest: then it has no readings.
     pub rest: bool,
     /// The chance it's no chord.
@@ -218,6 +226,9 @@ struct Part {
     rest: bool,
     change: f64,
     split: bool,
+    /// Whether it's pinned (never cut in two), and its chord as given, written as given.
+    pinned: bool,
+    given: Option<Chord>,
     /// How the bass behaves over its sound.
     bass: BassTexture,
     pedal: bool,
@@ -323,24 +334,34 @@ impl Namer {
         Namer::default()
     }
 
-    /// Names what the last decode of `hearing` read: `decoder` is what decoded it, and `decoding` what it read. Each
-    /// span gets at most `most` readings (at least one).
-    pub fn name(&mut self, hearing: &Hearing, decoder: &Decoder, decoding: &Decoding, most: usize, out: &mut Naming) {
+    /// Names what the last decode of `hearing` read: `decoder` is what decoded it, `decoding` what it read, and `pins`
+    /// the pins it was given. A pinned stretch is never cut in two, and a pin's chord is written as given. Each span
+    /// gets at most `most` readings (at least one).
+    pub fn name(
+        &mut self,
+        hearing: &Hearing,
+        decoder: &Decoder,
+        decoding: &Decoding,
+        pins: &[PinnedSpan],
+        most: usize,
+        out: &mut Naming,
+    ) {
         out.clear();
         self.shaped.clear();
         self.shaped.extend_from_slice(hearing.shaped());
         self.shaped.sort_unstable_by_key(|s| (s.start, s.end, s.note));
         self.longest_shaped = self.shaped.iter().map(|s| s.end.saturating_sub(s.start)).max().unwrap_or(0).max(0);
         self.longest_note = hearing.notes().iter().map(|n| n.end.saturating_sub(n.start)).max().unwrap_or(0).max(0);
-        self.find_parts(hearing, decoder, decoding);
+        self.find_parts(hearing, decoder, decoding, pins);
         self.find_pedals();
         for p in 0..self.parts.len() {
             self.name_part(hearing, decoder, decoding, p, most.max(1), out);
         }
     }
 
-    /// The parts: each decoded span, or its two halves where its bass moves to its third or seventh ([`split_at`]).
-    fn find_parts(&mut self, hearing: &Hearing, decoder: &Decoder, decoding: &Decoding) {
+    /// The parts: each decoded span, or its two halves where its bass moves to its third or seventh ([`split_at`]),
+    /// unless it's pinned.
+    fn find_parts(&mut self, hearing: &Hearing, decoder: &Decoder, decoding: &Decoding, pins: &[PinnedSpan]) {
         self.parts.clear();
         let spans = decoding.spans();
         // A loop goes round: its first chord comes after its last.
@@ -360,6 +381,9 @@ impl Namer {
             let struck_at = span.pushed.then(|| push_to(hearing, span.units.start)).flatten().map(|push| push.at);
             let struck = struck_at.map_or(span.sound.start, |at| hearing.unit_of(at).min(span.sound.start));
             let sound = struck..span.sound.end;
+            // A chord given with no core (nothing a decode can read) pins only where it starts and ends.
+            let pin = span.pin.and_then(|i| pins.get(i));
+            let given = pin.filter(|p| p.label().is_some()).and_then(|p| p.chord);
             let part = Part {
                 span: i,
                 units: span.units.clone(),
@@ -370,13 +394,15 @@ impl Namer {
                 rest: span.rest,
                 change: span.change,
                 split: false,
+                pinned: pin.is_some(),
+                given,
                 bass: hearing.bass(sound),
                 pedal: false,
                 before: root(before),
                 after: root(after),
             };
             let next_bass = after.filter(|s| !s.rest).and_then(|s| first_bass(hearing, s.sound.clone()));
-            match split_at(hearing, &part, next_bass) {
+            match split_at(hearing, &part, next_bass).filter(|_| !part.pinned) {
                 Some(k) => {
                     let first = Part {
                         units: part.units.start..k,
@@ -480,7 +506,12 @@ impl Namer {
                     chord: d.chord,
                     also: d.also,
                     roots: roots_of(d.chord),
-                    bass: BassKind::of(d.chord, sound.bass),
+                    // A bass written under the chord is the bass it stands on (a chord given with its own bass too).
+                    bass: if d.chord.bass() == d.chord.root() {
+                        BassKind::of(d.chord, sound.bass)
+                    } else {
+                        BassKind::of(d.chord, BassTexture::Held(d.chord.bass()))
+                    },
                     rootless: !sound.heard.is_empty() && !sound.heard.contains(d.chord.root()),
                     doubtful: d.doubtful.difference(d.chord.notes()),
                     chance: d.chance.min(1.0),
@@ -495,6 +526,7 @@ impl Namer {
             (part.bass == BassTexture::Moving, SpanFlags::WALKING),
             (part.bass == BassTexture::None, SpanFlags::NO_BASS),
             (part.split, SpanFlags::SPLIT),
+            (part.given.is_some(), SpanFlags::GIVEN),
         ] {
             if yes {
                 flags = flags.with(flag);
@@ -508,6 +540,7 @@ impl Namer {
             end: hearing.start(part.units.end),
             heard_start: part.struck_at.map_or(start, |at| hearing.tick(at)),
             change: part.change,
+            label: part.label.filter(|_| !part.rest),
             rest: part.rest,
             none,
             flags,
@@ -635,6 +668,15 @@ impl Namer {
     /// A reading named on a part, before the readings written the same are put together.
     fn draft(&mut self, sound: &Sound, part: &Part, label: Label, chance: f64) -> Draft {
         let decoded = part.label == Some(label);
+        // A chord given is written as given; one given in root position stands over the bass held under it, as any
+        // reading does.
+        if decoded && let Some(given) = part.given {
+            let chord = match sound.bass.held() {
+                Some(bass) if given.bass() == given.root() => Chord::new(given.root(), given.notes(), bass),
+                _ => given,
+            };
+            return Draft { label, chord, also: None, doubtful: PcSet::EMPTY, chance, decoded };
+        }
         // Over silence (a chord held on over it, or pinned there), a reading is written in full, as the decode read it.
         if sound.heard.is_empty() {
             let chord = written_root(Chord::of(label.root, label.core.intervals()), None, part, &[], None);
