@@ -229,6 +229,37 @@ fn an_effect_switched_off_in_fl_stays_off_and_its_settings_are_automated_on_ever
 }
 
 #[test]
+fn an_effect_slot_switched_on_and_off_is_a_switch_lane_on_every_copy() {
+    let s = song(
+        vec![channel(0, "Keys", Some(plugin("Keys", "VST2", "1")), "", 2), channel(1, "Pad", None, "pad.wav", 2)],
+        vec![insert(2, "", vec![effect("Pro-Q 3", "VST2", 1)])],
+        vec![
+            FlAutomation {
+                insert: Some(2),
+                slot: Some(1),
+                ..automation("Pro-Q 3 on", None, FlControl::InsertSlotOnOff, &[(0.0, 1.0), (4.0, 0.2), (8.0, 0.5)])
+            },
+            // A slot with nothing converted in it.
+            FlAutomation {
+                insert: Some(2),
+                slot: Some(5),
+                ..automation("Empty slot", None, FlControl::InsertSlotOnOff, &[(0.0, 1.0)])
+            },
+        ],
+    );
+    let p = plan(&s);
+    let lanes: Vec<_> = p.lanes.iter().map(|l| (l.track, l.target.clone())).collect();
+    assert_eq!(
+        lanes,
+        [(TrackRef::Track(0), Target::OnOff { device: 1 }), (TrackRef::Track(1), Target::OnOff { device: 1 })]
+    );
+    // FL counts 0.5 and above as on.
+    let values: Vec<_> = p.lanes[0].points.iter().map(|x| (x.beat, x.value)).collect();
+    assert_eq!(values, [(0.0, 1.0), (4.0, 0.0), (8.0, 1.0)]);
+    assert!(p.notes.contains(&"Empty slot: automation left out (its effect isn't converted)".to_owned()));
+}
+
+#[test]
 fn volume_and_pan_get_one_lane_each_in_song_order() {
     let keys = FlPlugin { parameter_ids: Some(vec![10, 20, 2_000_003]), ..plugin("Keys", "VST3", "565354536B657973") };
     let setting = |name: &str, n: u32, points: &[(f64, f64)]| FlAutomation {
@@ -262,6 +293,7 @@ fn volume_and_pan_get_one_lane_each_in_song_order() {
             Target::Volume => "Volume".to_owned(),
             Target::Pan => "Pan".to_owned(),
             Target::Plugin { name, path, .. } => format!("{name} {path}"),
+            Target::OnOff { device } => format!("On/Off {device}"),
         })
         .collect();
     assert_eq!(

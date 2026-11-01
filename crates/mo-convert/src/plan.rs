@@ -128,6 +128,8 @@ pub enum Target {
     /// A plugin's setting, 0 to 1: the device by its place on the track, the setting by its path in the plugin and the
     /// plugin's own id for it, and the name FL gave it.
     Plugin { device: usize, path: String, id: u32, name: String },
+    /// Switches a device on (1) and off (0): the device by its place on the track.
+    OnOff { device: usize },
 }
 
 impl Target {
@@ -721,16 +723,24 @@ pub fn from_fl(song: &FlSong, options: Options, read_sample: &mut dyn FnMut(&str
     }
 
     // Automation clips as lanes on the track they move: its volume, pan or a setting of its plugin, or a setting of an
-    // effect on a mixer insert, on each track that has a copy of it.
+    // effect on a mixer insert or the effect's slot switched on and off, on each track that has a copy of it.
     let mut lanes = Vec::new();
     for a in &song.automation {
-        if a.control == FlControl::InsertEffect {
+        if matches!(a.control, FlControl::InsertSlotOnOff | FlControl::InsertEffect) {
             let copies = match (a.insert, a.slot) {
                 (Some(i), Some(s)) => planner.effect_copies.get(&(i, s)),
                 _ => None,
             };
             let left = match copies {
                 None => Some("its effect isn't converted"),
+                // FL counts 0.5 and above as on.
+                Some(copies) if a.control == FlControl::InsertSlotOnOff => {
+                    for (track, device, _) in copies {
+                        let on = |v: f64| if v >= 0.5 { 1.0 } else { 0.0 };
+                        add_lane(&mut lanes, *track, Target::OnOff { device: *device }, a, on);
+                    }
+                    None
+                }
                 Some(copies) => match copies.first().and_then(|(_, _, p)| setting_path(p, a.parameter)) {
                     None => Some("FL didn't save which of the effect's settings it moves"),
                     Some((path, id)) => {
