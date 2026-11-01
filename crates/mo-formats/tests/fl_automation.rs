@@ -148,6 +148,16 @@ fn reads_mixer_insert_settings_effect_slots_and_what_automation_moves_on_them() 
     assert_eq!(recorded.name, "Bass - setting 2 (edit events)");
     assert_eq!((recorded.channel, recorded.control, recorded.parameter), (Some(0), FlControl::PluginParameter, 2));
     assert_eq!(recorded.starts, [0.5, 4.5, 10.5]);
+    // Each placement also on its own, with the moves timed from where it starts, for a DAW with automation clips.
+    type Part = (f64, f64, Vec<(f64, f64)>);
+    let parts: Vec<Part> = recorded
+        .parts
+        .iter()
+        .map(|p| (p.start, p.length, p.points.iter().map(|q| (q.beat, q.value)).collect()))
+        .collect();
+    // Each starts at the first move, half a beat in, and runs to the placement's end.
+    let moves = vec![(0.0, 0.5), (0.25, 0.75), (0.5, 1.0), (3.5, 1.0)];
+    assert_eq!(parts, [(0.5, 3.5, moves.clone()), (4.5, 3.5, moves.clone()), (10.5, 3.5, moves)]);
     // In each placement of the pattern (at beats 0, 4 and 10, four beats long) the setting is left alone until the
     // first edit event half a beat in, then goes 0.5, 0.75 (saved as FL 8 did) and 1, and holds until the next.
     let points: Vec<(f64, f64)> = recorded.points.iter().map(|p| (p.beat, p.value)).collect();

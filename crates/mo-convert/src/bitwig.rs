@@ -18,7 +18,9 @@ use mo_formats::paths;
 // Moved to mo-formats with the presets; kept here under its old name.
 pub use mo_formats::presets::fxp_to_bank;
 
-use crate::plan::{AudioClip, Device, Lane, LanePoint, Plan, Role, SampleFile, Target, Track, TrackKind, TrackRef};
+use crate::plan::{
+    AudioClip, Device, Lane, LanePart, LanePoint, Plan, Role, SampleFile, Target, Track, TrackKind, TrackRef,
+};
 
 const SAMPLER_ID: &str = "468bc14b-b2e7-45a1-9666-e83117fe404e";
 const NOTE_TRANSPOSE_ID: &str = "0815cd9e-3a31-4429-a268-dabd952a3b68";
@@ -342,6 +344,10 @@ struct Template {
     plugin_lane: Option<ObjId>,
     point: Option<ObjId>,
     setting: Option<ObjId>,
+    /// An automation clip with its points emptied, for FL's edit events, when the template has one.
+    auto_clip: Option<ObjId>,
+    /// A point to copy into an automation clip.
+    auto_point: Option<ObjId>,
     audio: Option<AudioPattern>,
     audio_tracks: HashSet<ObjId>,
     copier: Copier,
@@ -474,6 +480,13 @@ impl Template {
         if point.is_none() {
             (mixer_lane, plugin_lane) = (None, None);
         }
+        // An automation clip on one of them (class 0xd90, as Bitwig 6.1.6 saves one), to copy for FL's edit events.
+        let auto_clip = [mixer_lane, plugin_lane]
+            .into_iter()
+            .flatten()
+            .filter_map(|l| doc.field_obj(l, 0x2d8c))
+            .flat_map(|a| doc.field_list(a, 0x21f))
+            .find(|&c| doc.obj(c).class == 0xd90 && auto_clip_points(&doc, c).is_some());
         let setting = [vst3_device, vst2_device]
             .iter()
             .filter_map(|&d| def(&doc, d))
@@ -612,6 +625,14 @@ impl Template {
         {
             audio = None;
         }
+        // Likewise an automation clip, filled in for each copy: without one, edit events stay points on the lane.
+        let auto_clip = auto_clip.filter(|&c| !reachable(&doc, c).iter().any(|&o| copier.shares(o)));
+        // Its points are copies of its own first point, where it has one, as Bitwig saves points in a clip.
+        let auto_point = auto_clip
+            .and_then(|c| auto_clip_points(&doc, c))
+            .and_then(|l| doc.field_list(l, 0x21f).first().copied())
+            .filter(|&p| doc.obj(p).has(0x2af) && doc.obj(p).has(0x28f))
+            .or(point);
         Ok(Template {
             doc,
             group,
@@ -629,6 +650,8 @@ impl Template {
             plugin_lane,
             point,
             setting,
+            auto_clip,
+            auto_point,
             audio,
             audio_tracks: HashSet::new(),
             copier,
@@ -908,6 +931,23 @@ impl Template {
         self.doc.add(expression)
     }
 
+    /// A point on a lane or in an automation clip: a copy of the template's, at `beat` with `value` (a volume as the
+    /// cube root of its gain, as Bitwig saves it), joined to the next by a straight line.
+    fn lane_point(&mut self, point: ObjId, beat: f64, value: f64, volume: bool) -> Slot {
+        let copy = self.copy(point);
+        let o = self.doc.obj_mut(copy);
+        o.set(0x2af, Value::F64(beat));
+        o.set(0x28f, Value::F64(if volume { value.cbrt() } else { value }));
+        if o.has(0x359e) {
+            put(o, 0x359e, Value::U8(1));
+        }
+        if o.has(0xba6) {
+            // A straight line to the next point.
+            o.set(0xba6, Value::F64(0.0));
+        }
+        Slot::Obj(copy)
+    }
+
     /// A lane in `lanes` already moves `setting`. The template's master and transport are kept with what's on them,
     /// their own lanes too, and one setting can't have two.
     fn automated(&self, lanes: Option<ObjId>, setting: ObjId) -> bool {
@@ -1049,6 +1089,15 @@ impl Template {
         if self.doc.field_obj(arrangement, 0x35ac).is_none() {
             return Some(NO_LANE);
         }
+        // Edit events go in automation clips where the template has one to copy and the lane can hold them; a lane that
+        // FL automation clips move too keeps all its moves as points, as only it can say where each takes over.
+        let in_clips: HashSet<usize> = lane.parts.iter().map(|p| p.source).collect();
+        let only_edit_events = !in_clips.is_empty() && lane.points.iter().all(|p| in_clips.contains(&p.source));
+        let usable = only_edit_events
+            && !matches!(lane.target, Target::OnOff { .. })
+            && self.doc.field_obj(made, 0x2aec).is_some();
+        let auto_clip = self.auto_clip.zip(self.auto_point).filter(|_| usable);
+        let volume = lane.target == Target::Volume;
         let points = match lane.target {
             Target::OnOff { .. } => {
                 // A switch's lane holds a point at each change (class 0x7d: where, and on or off) in a list of its own
@@ -1083,25 +1132,41 @@ impl Template {
                 None
             }
             _ => {
-                let mut points = Vec::with_capacity(lane.points.len());
-                for p in &lane.points {
-                    let value = if lane.target == Target::Volume { p.value.cbrt() } else { p.value };
-                    let copy = self.copy(point);
-                    let o = self.doc.obj_mut(copy);
-                    o.set(0x2af, Value::F64(p.beat));
-                    o.set(0x28f, Value::F64(value));
-                    if o.has(0x359e) {
-                        put(o, 0x359e, Value::U8(1));
-                    }
-                    if o.has(0xba6) {
-                        // A straight line to the next point.
-                        o.set(0xba6, Value::F64(0.0));
-                    }
-                    points.push(Slot::Obj(copy));
-                }
-                Some(points)
+                let kept = match auto_clip {
+                    Some(_) => lane_outside_clips(lane),
+                    None => lane.points.iter().map(|p| (p.beat, p.value)).collect(),
+                };
+                Some(kept.into_iter().map(|(beat, value)| self.lane_point(point, beat, value, volume)).collect())
             }
         };
+        // FL's edit events as automation clips on the lane, one for each place their pattern plays, each holding its
+        // points timed from its start (as Bitwig 6.1.6 saves clips Solomon drew, 2026-11-01).
+        if let Some((pattern_clip, clip_point)) = auto_clip {
+            for part in &lane.parts {
+                let clip = self.copy(pattern_clip);
+                {
+                    let c = self.doc.obj_mut(clip);
+                    c.set(0x2af, Value::F64(part.start));
+                    c.set(0x26, Value::F64(part.length));
+                    if c.has(0x10f8) {
+                        put(c, 0x10f8, Value::Bool(0));
+                    }
+                }
+                if let Some(range) = self.doc.field_obj(clip, 0x2adb) {
+                    self.set_range(range, 0.0, part.length);
+                }
+                let moves: Vec<Slot> =
+                    part.points.iter().map(|&(beat, value)| self.lane_point(clip_point, beat, value, volume)).collect();
+                if let Some(list) = auto_clip_points(&self.doc, clip) {
+                    self.doc.obj_mut(list).set(0x21f, Value::List(moves));
+                }
+                push(self.doc.obj_mut(arrangement), 0x21f, Slot::Obj(clip));
+                let content = self.doc.field_obj(clip, 0x2ae9).and_then(|h| self.doc.field_obj(h, 0x10e9));
+                if let (Some(contents), Some(content)) = (self.doc.field_obj(made, 0x2aec), content) {
+                    push(self.doc.obj_mut(contents), 0x10e6, Slot::Obj(content));
+                }
+            }
+        }
         if let Some(points) = points
             && let Some(list) = self.doc.field_obj(arrangement, 0x35ac)
         {
@@ -1235,6 +1300,33 @@ fn note_content(doc: &Document, clip: ObjId) -> Option<ObjId> {
     let c = doc.field_obj(clip, 0x2ae9)?;
     let c = doc.field_obj(c, 0x10e9)?;
     doc.field_obj(c, 0x49c)
+}
+
+/// An automation clip's list of points: in its content (0x2ae9 > 0x10e9), field 0x48e.
+fn auto_clip_points(doc: &Document, clip: ObjId) -> Option<ObjId> {
+    let holder = doc.field_obj(clip, 0x2ae9)?;
+    let content = doc.field_obj(holder, 0x10e9)?;
+    doc.field_obj(content, 0x48e)
+}
+
+/// What a lane whose moves are all in automation clips holds outside them: the value each clip ends on, held from its
+/// end to where the next starts (Bitwig saves a point after a clip; lane points are joined by straight lines, and FL
+/// holds a setting where the last move left it).
+fn lane_outside_clips(lane: &Lane) -> Vec<(f64, f64)> {
+    let mut parts: Vec<&LanePart> = lane.parts.iter().collect();
+    parts.sort_by(|a, b| a.start.total_cmp(&b.start));
+    let mut held = Vec::new();
+    for (k, part) in parts.iter().enumerate() {
+        let Some(&(_, value)) = part.points.last() else { continue };
+        let end = part.start + part.length;
+        held.push((end, value));
+        if let Some(next) = parts.get(k + 1)
+            && next.start > end + SAME_BEAT
+        {
+            held.push((next.start, value));
+        }
+    }
+    held
 }
 
 fn key_lanes(doc: &Document, clip: ObjId) -> Vec<ObjId> {

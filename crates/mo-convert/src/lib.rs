@@ -18,5 +18,6 @@ pub mod sample;
 pub mod save;
 
 pub use plan::{
-    AudioClip, Device, Lane, LanePoint, Options, Plan, Role, SampleFile, Target, Track, TrackKind, TrackRef, from_fl,
+    AudioClip, Device, Lane, LanePart, LanePoint, Options, Plan, Role, SampleFile, Target, Track, TrackKind, TrackRef,
+    from_fl,
 };

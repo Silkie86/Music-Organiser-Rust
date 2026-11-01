@@ -616,6 +616,52 @@ fn file_ref(b: &mut BwWriter, path: &str) {
     b.end();
 }
 
+/// An automation clip as Bitwig 6.1.6 saves one on a lane (class 0xd90): where it starts and how long it is, its
+/// holder and content with its points (timed from its start), and its loop and play range.
+fn automation_clip(b: &mut BwWriter) {
+    b.begin(0xd90);
+    b.f64(0x2af, 0.0);
+    b.f64(0x26, 4.0);
+    b.u8(0x10f8, 0);
+    b.obj(0x2ae9);
+    b.begin(0xebc);
+    b.obj(0x10e9);
+    b.begin(0x3c);
+    b.str(0x2d24, "");
+    b.obj(0x48e);
+    b.begin(0x6e);
+    b.u8(0x1fd, 0);
+    b.list(0x21f);
+    b.begin(0x108);
+    b.f64(0x2af, 0.0);
+    b.f64(0x28f, 0.25);
+    b.u8(0x359e, 1);
+    b.f64(0xba6, 0.0);
+    b.f64(0x2ebe, 0.0);
+    b.end();
+    b.end_list();
+    b.end();
+    b.end();
+    b.end();
+    b.obj(0x2adb);
+    b.begin(0x267);
+    b.obj(0x992);
+    b.begin(0x58);
+    b.f64(0x2af, 0.0);
+    b.f64(0x26, 4.0);
+    b.end();
+    b.obj(0x98c);
+    b.begin(0x269);
+    b.f64(0x2af, 0.0);
+    b.end();
+    b.obj(0x98d);
+    b.begin(0x268);
+    b.f64(0x2af, 4.0);
+    b.end();
+    b.end();
+    b.end();
+}
+
 /// A track's start: ids, per-user view state that first writes its volume automation lane and mixer volume, its
 /// automation lanes. An automated lane holds an automation clip and a point after it.
 fn track_start(b: &mut BwWriter, name: &str, automated: bool, lanes: impl FnOnce(&mut BwWriter)) -> u32 {
@@ -638,10 +684,7 @@ fn track_start(b: &mut BwWriter, name: &str, automated: bool, lanes: impl FnOnce
     b.begin(0xd91);
     b.list(0x21f);
     if automated {
-        b.begin(0xd90);
-        b.f64(0x2af, 0.0);
-        b.f64(0x26, 4.0);
-        b.end();
+        automation_clip(b);
     }
     b.end_list();
     b.obj(0x35ac);
@@ -1149,10 +1192,7 @@ fn template_body(b: &mut BwWriter, t: Template, sampler: &str, note_transpose: &
         b.obj(0x2d8c);
         b.begin(0xd91);
         b.list(0x21f);
-        b.begin(0xd90);
-        b.f64(0x2af, 0.0);
-        b.f64(0x26, 4.0);
-        b.end();
+        automation_clip(b);
         b.end_list();
         b.obj(0x35ac);
         b.begin(0x6e);
