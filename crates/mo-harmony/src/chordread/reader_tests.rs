@@ -19,7 +19,7 @@ use crate::notes::{Grid, Note, Part, Role};
 use crate::pitch::{PcSet, PitchClass};
 
 /// What some music reads, keeping `readings` readings a span.
-fn read(music: &Music, pins: &[Pin], readings: u8) -> Option<ChordReading> {
+pub(super) fn read(music: &Music, pins: &[Pin], readings: u8) -> Option<ChordReading> {
     let parts: Vec<Part> = music.parts.iter().map(|(role, notes)| Part { role: *role, notes }).collect();
     let cx = ChordContext { span: music.span, pins, readings };
     ChordReader::new().read(&parts, music.grid, &cx)
@@ -32,13 +32,13 @@ fn hand_cases() -> Vec<(&'static str, Music)> {
 }
 
 /// What the hand case named reads, every reading kept.
-fn case(name: &str) -> ChordReading {
+pub(super) fn case(name: &str) -> ChordReading {
     let (_, music) = hand_cases().into_iter().find(|(n, _)| *n == name).unwrap_or_else(|| panic!("no case {name}"));
     read(&music, &[], MOST_READINGS).unwrap_or_else(|| panic!("{name}: nothing read"))
 }
 
 /// The music the rules are checked on, with pins given in ticks: the decode's tests' music, the hand cases and a song.
-fn the_music_in_ticks() -> Vec<(Music, Vec<Pin>)> {
+pub(super) fn the_music_in_ticks() -> Vec<(Music, Vec<Pin>)> {
     let mut out: Vec<(Music, Vec<Pin>)> =
         the_music().into_iter().map(|(music, pins)| (music.clone(), in_ticks(&music.hear(), &pins))).collect();
     out.extend(hand_cases().into_iter().map(|(_, music)| (music, Vec::new())));
@@ -52,7 +52,7 @@ fn in_ticks(hearing: &Hearing, pins: &[PinnedSpan]) -> Vec<Pin> {
     pins.iter().map(|p| Pin { start: tick(p.units.start), end: tick(p.units.end), chord: p.chord }).collect()
 }
 
-fn chord(name: &str) -> Chord {
+pub(super) fn chord(name: &str) -> Chord {
     Chord::parse(name).unwrap_or_else(|| panic!("{name} doesn't read"))
 }
 
@@ -504,7 +504,7 @@ fn keeps_the_rules(hearing: &Hearing, r: &ChordReading, keep: usize) -> Result<(
 
 /// Up to three pins anywhere in some music, in its own ticks (before it, past its end, empty, over each other and off
 /// the units too), on a chord or only at their ends.
-fn random_pins(dice: &mut Dice, hearing: &Hearing) -> Vec<Pin> {
+pub(super) fn random_pins(dice: &mut Dice, hearing: &Hearing) -> Vec<Pin> {
     let units = hearing.units();
     let (from, to) = (hearing.start(0), hearing.start(units));
     let span = (to - from).max(1);
@@ -704,7 +704,7 @@ fn damaged_notes_are_read_without_a_panic() {
 
 /// What the hand cases, the tests' music and some music made here read at each version of the reader, as a hash
 /// ([`readings_hash`]). A change that moves any of them needs `CHORD_READER_VERSION` bumped, and a line added here.
-const READINGS: &[(u32, u64)] = &[(1, 0x0ed7_3fed_dfbc_a860)];
+const READINGS: &[(u32, u64)] = &[(1, 0xe3a9_cd16_4f69_5725)];
 
 /// The music whose readings the hash covers, with its pins: every hand case, the music the rules are checked on, and
 /// music made here so every kind of answer is read (one line, one note, all twelve, a rest, chords given) and what
@@ -733,11 +733,13 @@ fn hashed_music() -> Vec<(Music, Vec<Pin>)> {
 
 /// A hash of what the music the version covers reads ([`hashed_music`]), with every reading kept: each span's place,
 /// answer and flags, its chances to six places, and each reading's chord, the other way to write it, its roots, its
-/// bass, whether it's rootless, its doubtful tensions, its chance to six places and its group.
+/// bass, whether it's rootless, its doubtful tensions, its chance to six places and its group; and the fact and the
+/// summary the MIDI page keeps of it.
 ///
 /// The chances come through `exp`, whose last bit can differ from one machine's maths library to another's. Rounding to
-/// six places makes that very unlikely to tip a number over; CI runs this on Windows, macOS and Linux, so if it ever
-/// does, CI says so on that machine and the rounding can be made coarser.
+/// six places makes that very unlikely to tip a number over, and the fact's chances, to the nearest 255th, are
+/// coarser still; CI runs this on Windows, macOS and Linux, so if it ever does, CI says so on that machine and the
+/// rounding can be made coarser.
 fn readings_hash() -> u64 {
     let six = |x: f64| (x * 1e6).round() as i128;
     let chord = |h: &mut Fnv, c: Chord| {
@@ -755,6 +757,9 @@ fn readings_hash() -> u64 {
             continue;
         };
         h.bytes(format!("{:?} {:?} {} {} {}", r.texture, r.unit, r.notes, r.truncated, r.looped).as_bytes());
+        // What the MIDI page keeps of it: a change to either needs it read again.
+        h.bytes(&r.fact().0);
+        h.bytes(&r.summary().0);
         h.number(i128::from(r.start));
         h.number(i128::from(r.end));
         for s in &r.spans {

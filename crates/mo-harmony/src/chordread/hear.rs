@@ -978,6 +978,17 @@ fn gap_bass(filled: &Filled, here: &[Touch], len: i64, before: Option<u8>) -> Op
     }
 }
 
+/// Where a unit starts, in ticks after a bar line, as the reader lays units out on a grid: where unit `unit` of a
+/// reading that starts on that bar line starts ([`super::FactReading::tick`]).
+pub(super) fn unit_offset(grid: Grid, unit: usize) -> i64 {
+    Layout::new(grid).start(unit)
+}
+
+/// The unit a reader reads chords on, on a grid ([`Hearing::unit`]).
+pub(super) fn unit_of(grid: Grid) -> Unit {
+    if Layout::new(grid).per_beat == 2 { Unit::HalfBeat } else { Unit::Beat }
+}
+
 /// A count of units, as a number of ticks can be multiplied by.
 fn count(units: usize) -> i64 {
     i64::try_from(units).unwrap_or(i64::MAX)

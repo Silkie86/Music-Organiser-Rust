@@ -94,6 +94,8 @@ pub struct ChordReading {
     pub texture: Texture,
     /// The unit chords change on: half a beat, or a beat in compound metre.
     pub unit: Unit,
+    /// The grid it was read on, as given.
+    pub grid: Grid,
     /// Where the reading starts and ends, in the music's own ticks, on units' starts: from the bar line at or before
     /// the first note to the end of the unit the last note ends in (a loop: from the bar line at or before its first
     /// note to the bar line it ends on).
@@ -217,21 +219,7 @@ impl ChordReading {
     /// chord on the chart does (round a loop, the first comes after the last), or as charts spell chords when no key
     /// is given; none for a span with no chord. The key is only for spelling, never evidence.
     pub fn names(&self, key: Option<Key>) -> Vec<Option<Spelled>> {
-        let chart: Vec<(usize, Chord)> =
-            self.spans.iter().enumerate().filter_map(|(i, s)| s.shown().map(|r| (i, r.chord))).collect();
-        let mut run: Vec<Chord> = chart.iter().map(|&(_, c)| c).collect();
-        // Round a loop: spelled twice over, so the last chord knows the first as it's spelled.
-        if self.looped {
-            run.extend_from_within(..);
-        }
-        let spelled = spell_in_key(&run, key);
-        let mut out = vec![None; self.spans.len()];
-        for (&(i, _), s) in chart.iter().zip(spelled) {
-            if let Some(slot) = out.get_mut(i) {
-                *slot = Some(s);
-            }
-        }
-        out
+        spell_chart(self.spans.iter().map(|s| s.shown().map(|r| r.chord)), self.looped, key)
     }
 
     /// A chord written at a span (one of its readings, or the other way to write one), spelled as the chart spells
@@ -264,6 +252,33 @@ impl ChordReading {
         }
         best.map_or_else(|| vec![NameCheck::Disagrees; names.len()], |(_, checks)| checks)
     }
+}
+
+/// A chart spelled in a key ([`ChordReading::names`]): each chord shown spelled by what the next one does (round a
+/// loop, the first comes after the last), and none where none is shown.
+pub(super) fn spell_chart(
+    shown: impl Iterator<Item = Option<Chord>>,
+    looped: bool,
+    key: Option<Key>,
+) -> Vec<Option<Spelled>> {
+    let (mut chart, mut spans): (Vec<(usize, Chord)>, usize) = (Vec::new(), 0);
+    for (i, chord) in shown.enumerate() {
+        spans = i + 1;
+        chart.extend(chord.map(|c| (i, c)));
+    }
+    let mut run: Vec<Chord> = chart.iter().map(|&(_, c)| c).collect();
+    // Round a loop: spelled twice over, so the last chord knows the first as it's spelled.
+    if looped {
+        run.extend_from_within(..);
+    }
+    let spelled = spell_in_key(&run, key);
+    let mut out = vec![None; spans];
+    for (&(i, _), s) in chart.iter().zip(spelled) {
+        if let Some(slot) = out.get_mut(i) {
+            *slot = Some(s);
+        }
+    }
+    out
 }
 
 /// What a name earns matched to a chord the chart shows: one name matched and one that agrees when it's the chord
@@ -359,7 +374,7 @@ impl ChordReader {
         }
         // Every reading is named and graded, whatever the caller keeps.
         self.namer.name(&self.hearing, &self.decoder, &self.decoding, usize::MAX, &mut self.naming);
-        Some(self.reading(cx, model))
+        Some(self.reading(grid, cx, model))
     }
 
     /// What the last read heard.
@@ -377,7 +392,7 @@ impl ChordReader {
         self.pins.extend(pins.iter().map(|p| PinnedSpan { units: unit(p.start)..unit(p.end), chord: p.chord }));
     }
 
-    fn reading(&self, cx: &ChordContext, model: &Model) -> ChordReading {
+    fn reading(&self, grid: Grid, cx: &ChordContext, model: &Model) -> ChordReading {
         let hearing = &self.hearing;
         let texture = Texture::of(hearing);
         let reported = hearing.reported();
@@ -422,6 +437,7 @@ impl ChordReader {
             spans,
             texture,
             unit: hearing.unit(),
+            grid,
             start: hearing.start(reported.start),
             end: hearing.start(hearing.units()),
             notes: u32::try_from(hearing.notes_heard()).unwrap_or(u32::MAX),
