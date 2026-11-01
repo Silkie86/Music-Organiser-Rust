@@ -159,8 +159,16 @@ def project_name(title):
 
 
 def in_live_test():
-    """Whether the project open is exactly MEASURE_PROJECT."""
-    return project_name(ui.getProgTitle()) == MEASURE_PROJECT
+    """
+    Whether the project open is exactly MEASURE_PROJECT: by the title, or by the title set in the project's own info
+    (File > Project info), as FL Studio 2025 gives scripts only "FL Studio 2025" for the title.
+    """
+    if project_name(ui.getProgTitle()) == MEASURE_PROJECT:
+        return True
+    try:
+        return general.getProjectTitle().strip() == MEASURE_PROJECT
+    except AttributeError:
+        return False
 
 
 def measure():
