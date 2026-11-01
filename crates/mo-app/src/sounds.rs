@@ -415,13 +415,13 @@ pub fn facts_line(s: &Sound) -> String {
     parts.join(" · ")
 }
 
-/// "Never", "1 song", "12 songs", or "" when the counts aren't known yet.
+/// "Never", "1 project", "12 projects", or "" when the counts aren't known yet.
 pub fn used_text(used: Option<u32>) -> String {
     match used {
         None => String::new(),
         Some(0) => "Never".into(),
-        Some(1) => "1 song".into(),
-        Some(n) => format!("{n} songs"),
+        Some(1) => "1 project".into(),
+        Some(n) => format!("{n} projects"),
     }
 }
 
@@ -601,7 +601,7 @@ mod tests {
         assert_eq!(bpm_text(92.5), "92.5 BPM");
         assert_eq!(used_text(None), "");
         assert_eq!(used_text(Some(0)), "Never");
-        assert_eq!(used_text(Some(1)), "1 song");
+        assert_eq!(used_text(Some(1)), "1 project");
         assert_eq!(short_count(812), "812");
         assert_eq!(short_count(6_140), "6.1k");
         assert_eq!(short_count(357_412), "357k");

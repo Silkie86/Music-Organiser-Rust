@@ -20,7 +20,7 @@ use mo_app::sounds::{self as list, Filters, Length, Order, SoundList};
 use mo_audio::play::Player;
 use mo_library::UsageRules;
 use mo_library::songs::thousands;
-use mo_sounds::liking::{LIKED_WEIGHTS_KEY, LikedWeights};
+use mo_sounds::liking::{self, LIKED_WEIGHTS_KEY, LikedWeights};
 use mo_sounds::usage::{self, Usage};
 use mo_sounds::{Sound, SoundsDb, music};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, Timer, TimerMode, VecModel};
@@ -210,6 +210,7 @@ fn tile(p: &Page, row: usize, at: usize) -> SoundTile {
         colour: list::type_colour(&s.sound_type),
         favourite: s.favourite,
         liked: p.list.liked_share(at).map_or(-1.0, |l| l as f32),
+        liked_why: liked_why(p, at).into(),
         wave: wave(s).into(),
         points: points(s),
         picked: p.picked == Some(at),
@@ -234,6 +235,14 @@ fn line(p: &Page, row: usize, at: usize) -> SoundLine {
         favourite: s.favourite,
         picked: p.picked == Some(at),
         playing: p.playing.is_some_and(|(i, _)| i == at),
+    }
+}
+
+/// Why a sound is as liked as it is (empty until the scores are known).
+fn liked_why(p: &Page, at: usize) -> String {
+    match (p.list.liked_share(at), p.list.sound(at)) {
+        (Some(_), Some(s)) => liking::explain(s, p.list.usage(at)),
+        _ => String::new(),
     }
 }
 
@@ -868,6 +877,7 @@ fn picked_sound(p: &Page, at: usize) -> PickedSound {
         tags: strings(&s.tags),
         favourite: s.favourite,
         character: a.map(|a| a.character.join(", ")).unwrap_or_default().into(),
+        liked_why: liked_why(p, at).into(),
     }
 }
 
