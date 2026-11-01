@@ -39,8 +39,9 @@ const NOT_TONAL_PERCENTILE: f64 = 0.005;
 /// that knot.
 const NEVER: f64 = 1.0;
 /// No kind of answer is given below an even chance: what it names must be likelier than not. Without this floor the
-/// pair's threshold fell to the grid's 0.01 from 8 bars, where nearly every pair the bench sees is right (none of its
-/// pairs is below 0.5); music unlike the songs fitted on could then be shown a pair at, say, 0.3.
+/// pair's threshold fell to the grid's 0.01 from 8 bars, where nearly every pair the bench sees is right. The few below
+/// 0.5 (about 0.2% of the cases from 5 bars up, all from a part heard alone) were wrong far more often, and music
+/// unlike the songs fitted on could have been shown a pair at, say, 0.3.
 pub const LEAST: f64 = 0.5;
 /// The fewest songs whose answers a threshold may be judged on.
 pub const MIN_SONGS: usize = 30;

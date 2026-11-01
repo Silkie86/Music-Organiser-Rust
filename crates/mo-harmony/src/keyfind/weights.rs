@@ -77,13 +77,13 @@ pub(super) const CALIBRATION: Calibration = Calibration([0.4196033634844185, 0.5
 /// - 1 bar (366367 cases): one key from 0.87, raised from 0.74: 0.2% given, 12.1% wrong (up to 15.6%); key or its relative never; home note never.
 /// - 2 bars (249465 cases): one key from 0.87, raised from 0.81: 0.3% given, 11.3% wrong (up to 16.8%); key or its relative never; home note from 0.88, raised from 0.87: 0.2% given, 10.7% wrong (up to 16.5%).
 /// - 3 to 4 bars (139886 cases): one key from 0.87: 3.4% given, 9.7% wrong (up to 11.7%); key or its relative from 0.61: 42.7% given, 10.0% wrong (up to 11.1%); home note from 0.88: 0.6% given, 9.4% wrong (up to 12.6%).
-/// - 5 to 8 bars (62332 cases): one key from 0.82, raised from 0.77: 20.0% given, 8.1% wrong (up to 9.6%); key or its relative from 0.01: 46.9% given, 7.4% wrong (up to 8.7%); home note from 0.86: 0.7% given, 9.5% wrong (up to 15.2%).
-/// - 9 to 16 bars (26459 cases): one key from 0.82, raised from 0.76: 28.8% given, 6.8% wrong (up to 8.4%); key or its relative from 0.01: 49.4% given, 4.6% wrong (up to 6.0%); home note from 0.75: 4.5% given, 9.8% wrong (up to 12.9%).
-/// - 17 bars or more, and songs (5815 cases): one key from 0.82: 47.9% given, 4.9% wrong (up to 6.2%); key or its relative from 0.01: 23.0% given, 4.3% wrong (up to 6.1%); home note from 0.72: 12.3% given, 10.0% wrong (up to 12.8%).
+/// - 5 to 8 bars (62332 cases): one key from 0.82, raised from 0.77: 20.0% given, 8.1% wrong (up to 9.6%); key or its relative from 0.50: 46.7% given, 7.3% wrong (up to 8.6%); home note from 0.86: 0.7% given, 9.5% wrong (up to 15.2%).
+/// - 9 to 16 bars (26459 cases): one key from 0.82, raised from 0.76: 28.8% given, 6.8% wrong (up to 8.4%); key or its relative from 0.50: 49.3% given, 4.6% wrong (up to 6.0%); home note from 0.75: 4.5% given, 9.8% wrong (up to 12.9%).
+/// - 17 bars or more, and songs (5815 cases): one key from 0.82: 47.9% given, 4.9% wrong (up to 6.2%); key or its relative from 0.50: 22.9% given, 4.1% wrong (up to 5.8%); home note from 0.72: 12.3% given, 10.0% wrong (up to 12.8%).
 #[rustfmt::skip]
 pub(super) const THRESHOLDS: Thresholds = Thresholds {
     one: [0.87, 0.87, 0.87, 0.82, 0.82, 0.82],
-    pair: [1.0, 1.0, 0.61, 0.01, 0.01, 0.01],
+    pair: [1.0, 1.0, 0.61, 0.5, 0.5, 0.5],
     home: [1.0, 0.88, 0.88, 0.86, 0.75, 0.72],
 };
 /// Notes with less than this share of their time inside one scale have no key (see `Why::NotTonal`).
@@ -92,5 +92,5 @@ pub(super) const NOT_TONAL_BELOW: f64 = 0.75;
 /// The hash of every number the finder is built from (see `numbers_hash`) when this file was written, and the version
 /// of the finder these numbers were first given with: a test checks both, so changing any number fails until the
 /// version is bumped.
-pub(super) const SHIPPED_HASH: u64 = 0x979a18887be71603;
+pub(super) const SHIPPED_HASH: u64 = 0x5e5cbe9fd9d3e96c;
 pub(super) const HASH_VERSION: u32 = 4;

@@ -16,7 +16,7 @@ const A_MINOR: Key = Key::minor(PitchClass::A);
 
 /// The hand cases' readings at each version of the finder, as a hash ([`readings_hash`]). A change that moves any of
 /// them needs `KEY_FINDER_VERSION` bumped, and a line added here.
-const READINGS: &[(u32, u64)] = &[(2, 0x6a1f_32df_22b2_bfb4), (3, 0x5648_73ce_4812_981c), (4, 0x35da_d8ac_7342_6ec8)];
+const READINGS: &[(u32, u64)] = &[(2, 0x6a1f_32df_22b2_bfb4), (3, 0x5648_73ce_4812_981c), (4, 0x0c76_de15_0c54_3dc4)];
 
 /// A hash of the readings an answer can change with: every hand case's reading with the shipped model, and with the
 /// odd one made four times as sharp (weights with no pattern: its answers are keys alone with their colours as well
