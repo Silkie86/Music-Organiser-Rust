@@ -183,44 +183,9 @@ static JsonObject DumpGalaxy(string path)
         var map = MusicOrganiser.Core.Sounds.GalaxyMap.Layout(old);
         o["map"] = Points(map);
         o["placed"] = Points(MusicOrganiser.Core.Sounds.GalaxyMap.PlaceNew(vectors, map));
-        if (c["Steps"]?.GetValue<bool>() == true) o["steps"] = GalaxySteps(old);
     }
     catch (Exception e) { o["error"] = $"{e.GetType().Name}: {e.Message}"; }
     return o;
-}
-
-// The steps of a layout (private to GalaxyMap, so a change there shows up here): each sound's squashed fingerprint,
-// the starting picture, the sound-alikes, the weighed pairs, and the next number the random sequence would give.
-static JsonObject GalaxySteps(Dictionary<long, float[]> vectors)
-{
-    var t = typeof(MusicOrganiser.Core.Sounds.GalaxyMap);
-    const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static;
-    object Call(string name, params object[] args) =>
-        (t.GetMethod(name, flags) ?? throw new InvalidOperationException($"GalaxyMap.{name} is gone")).Invoke(null, args)!;
-    var ids = vectors.Keys.Distinct().Order().ToArray();
-    var rng = new Random(42);
-    var pca = (System.Runtime.CompilerServices.ITuple)Call("Pca", ids, (Func<long, float[]>)(id => vectors[id]), rng, CancellationToken.None);
-    var reduced = (float[][])pca[0]!;
-    var init = (double[])pca[1]!;
-    var nb = (System.Runtime.CompilerServices.ITuple)Call("ExactNeighbours", reduced, Math.Min(15, ids.Length - 1), CancellationToken.None);
-    var nbr = (int[][])nb[0]!;
-    var dist = (float[][])nb[1]!;
-    var edges = new JsonArray();
-    foreach (var e in (Array)Call("Edges", nbr, dist))
-    {
-        var et = e!.GetType();
-        edges.Add(new JsonArray((int)et.GetProperty("I")!.GetValue(e)!, (int)et.GetProperty("J")!.GetValue(e)!, (float)et.GetProperty("W")!.GetValue(e)!));
-    }
-    static JsonArray Rows<T>(IEnumerable<T[]> rows) => new(rows.Select(r => (JsonNode)new JsonArray(r.Select(x => JsonValue.Create(x)).ToArray())).ToArray());
-    return new JsonObject
-    {
-        ["Reduced"] = Rows(reduced),
-        ["Init"] = new JsonArray(init.Select(x => (JsonNode)JsonValue.Create(x)).ToArray()),
-        ["Nbr"] = Rows(nbr),
-        ["Dist"] = Rows(dist),
-        ["Edges"] = edges,
-        ["Next"] = rng.Next(),
-    };
 }
 
 // A made-up library saved by the C# app's own sound library to a new sounds.db, read back by SoundOrganiser with the

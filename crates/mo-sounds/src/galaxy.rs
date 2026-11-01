@@ -1,41 +1,46 @@
-//! The sound galaxy: every sound becomes a point on a flat map, and sounds that sound alike end up close together. A
-//! port of the C# app's `GalaxyMap` and the galaxy part of `SoundOrganiser`, checked by the galaxy twin test.
+//! The sound galaxy: every sound becomes a point on a flat map, and sounds that sound alike end up close together.
+//! What it does follows the C# app's `GalaxyMap` (and the galaxy part of `SoundOrganiser`); how it does it is Rust's
+//! own (see DIFFERENCES.md).
 //!
 //! It works like UMAP, cut down to what a sample library needs:
-//! 1. Squash each sound's fingerprint to its 32 most telling directions (PCA, learned from at most 20,000 sounds).
+//! 1. Squash each sound's fingerprint to its 32 most telling directions (PCA, learned from a fair sample of at most
+//!    20,000 sounds, which pins those directions down as well as the whole library would), so the search is fast.
 //! 2. Find each sound's 15 nearest sound-alikes: exactly below 6,000 sounds, and above by "neighbours of
 //!    neighbours" (NN-descent), which gets almost all of them right in a fraction of the time.
 //! 3. Start from the PCA picture, then let close sound-alikes pull together and random pairs push apart for a few
-//!    hundred rounds, until the clusters settle.
+//!    hundred rounds, until the clusters settle. Every round is spread over every core, and every star's moves come
+//!    from a random sequence of its own, so the same library always gives the same map, however many cores.
 //!
-//! A small library always gives the same map (a fixed seed, the same numbers as the C# app gives). A big one settles
-//! on every core at once, so it can differ slightly between layouts. Either way it's worked out once and saved; new
-//! sounds are then placed beside their nearest sound-alikes ([`place_new`]), so the stars you know don't move.
+//! The map is worked out once and saved; new sounds are then placed beside their nearest sound-alikes
+//! ([`place_new`]), so the stars you know don't move.
 //!
 //! Laying out a big library takes a while and uses every core: call it on the app's low-priority pool
 //! (`mo_app::background::on_pool`), never the window's thread.
 
-use std::cell::Cell;
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use rayon::prelude::*;
 
 use crate::StarPoint;
-use crate::dotnet_random::DotnetRandom;
-use crate::index::{SoundIndex, dot, unit};
+use crate::index::{SoundIndex, unit};
 
 /// How many sound-alikes each sound is tied to.
 pub const NEIGHBOURS: usize = 15;
-/// Libraries smaller than this get exact neighbours and a single-threaded (repeatable) layout.
+/// Libraries smaller than this get exact neighbours; bigger ones, neighbours of neighbours.
 pub const EXACT_BELOW: usize = 6000;
 /// The seed the app lays out with.
-pub const SEED: i32 = 42;
+pub const SEED: u64 = 42;
 const DIMS: usize = 32;
 const PCA_SAMPLE: usize = 20_000;
 const NEGATIVE_SAMPLES: usize = 5;
-/// How many mapped sounds a new sound is compared with.
+/// Placing new sounds compares each with at least this many mapped sounds (all of them, in a smaller library)…
 const PLACE_SAMPLE: usize = 10_000;
+/// …and with more while the comparisons stay under this many…
+const PLACE_BUDGET: usize = 500_000_000;
+/// …but never more than this many (so a joined fingerprint per mapped sound never takes more than a few hundred MB).
+const PLACE_MOST: usize = 50_000;
 // UMAP's curve for min_dist 0.5: close neighbours keep a little room, so a family of sounds reads as a cloud of
 // separate stars rather than one blob.
 const A: f64 = 0.583;
@@ -68,24 +73,24 @@ pub fn space(wanted: Placing, index: &SoundIndex) -> &'static str {
     }
 }
 
-/// The fingerprints a galaxy is laid out from: every sound the features index has, in id order, and how to make each
-/// one's fingerprint. As C#'s `SoundOrganiser.GalaxyVectors`.
+/// The fingerprints a galaxy is laid out from: every sound the features index has, in id order, and each one's
+/// fingerprint. As C#'s `SoundOrganiser.GalaxyVectors`.
 ///
 /// "clap+features" joins CLAP's "what it is" (80 %) to the measured "how it sounds" (60 %), so neighbours match in
 /// kind and in character. A sound deep listening hasn't heard yet falls back to its measurements in every space.
-/// The joined fingerprints are made when asked for, never all held at once.
+/// The measurements alone are lent straight from the index; joined ones are made when asked for.
 pub struct Fingerprints<'a> {
-    pub ids: Vec<i64>,
+    pub ids: &'a [i64],
     index: &'a SoundIndex,
     /// Joined with CLAP (and how); `None` for the measurements alone.
     clap: Option<(usize, bool)>,
 }
 
-impl Fingerprints<'_> {
+impl<'a> Fingerprints<'a> {
     /// One sound's fingerprint; empty for a sound the features index doesn't have.
-    pub fn get(&self, id: i64) -> Vec<f32> {
-        let Some(f) = self.index.features.get(id) else { return Vec::new() };
-        let Some((clap_dim, clap_only)) = self.clap else { return f.to_vec() };
+    pub fn get(&self, id: i64) -> Cow<'a, [f32]> {
+        let Some(f) = self.index.features.get(id) else { return Cow::Borrowed(&[]) };
+        let Some((clap_dim, clap_only)) = self.clap else { return Cow::Borrowed(f) };
         let mut v = vec![0f32; clap_dim + f.len()];
         let c = self.index.clap.as_ref().and_then(|c| c.get(id)).filter(|c| c.len() == clap_dim);
         let (wc, wf) = match c {
@@ -102,20 +107,18 @@ impl Fingerprints<'_> {
             *out = x * wf;
         }
         unit(&mut v);
-        v
+        Cow::Owned(v)
     }
 }
 
 /// The fingerprints for `space` (see [`space`]).
 pub fn fingerprints<'a>(index: &'a SoundIndex, space: &str) -> Fingerprints<'a> {
-    let ids = index.features.ids().to_vec();
     let clap = if space == "features" { None } else { index.clap.as_ref() };
     let clap = clap.map(|c| c.dim()).filter(|d| *d > 0);
-    Fingerprints { ids, index, clap: clap.map(|d| (d, space == "clap")) }
+    Fingerprints { ids: index.features.ids(), index, clap: clap.map(|d| (d, space == "clap")) }
 }
 
-/// True when the saved `map` lacks some sound the features index has (or there's no map yet, in a library with any
-/// analysed sound). As C#'s `SoundOrganiser.GalaxyOutOfDate`.
+/// True when the saved `map` lacks some sound the features index has. As C#'s `SoundOrganiser.GalaxyOutOfDate`.
 pub fn out_of_date(index: &SoundIndex, map: &HashMap<i64, StarPoint>) -> bool {
     index.features.ids().iter().any(|id| !map.contains_key(id))
 }
@@ -148,7 +151,7 @@ pub fn update(
     let vector = |id: i64| prints.get(id);
     let new_ids: Vec<i64> = prints.ids.iter().copied().filter(|id| !saved.contains_key(id)).collect();
     if fresh || saved.is_empty() || new_ids.len() > prints.ids.len() / 5 {
-        let map = layout(&prints.ids, &vector, SEED, EXACT_BELOW, progress, cancel)?;
+        let map = layout(prints.ids, &vector, SEED, progress, cancel)?;
         return Some(Updated { save: map.clone(), map, replace: true });
     }
     let mut map = saved;
@@ -168,13 +171,27 @@ pub struct Step {
     pub done: u32,
 }
 
-/// Lays out the sounds `ids`, fetching each fingerprint from `vector` when it's needed (it must be safe to call from
-/// several threads). `seed` 42 and `exact_below` [`EXACT_BELOW`] are the app's. `None` when `cancel` was set. As
-/// C#'s `GalaxyMap.Layout`.
+/// A sound's fingerprint, lent or made when asked for. It must be safe to ask from several threads at once.
+pub type Vector<'v> = dyn Fn(i64) -> Cow<'v, [f32]> + Sync + 'v;
+
+/// Lays out the sounds `ids`, fetching each fingerprint from `vector` when it's needed. The same ids and seed always
+/// give the same map. `None` when `cancel` was set. As C#'s `GalaxyMap.Layout`.
 pub fn layout(
     ids: &[i64],
-    vector: &(dyn Fn(i64) -> Vec<f32> + Sync),
-    seed: i32,
+    vector: &Vector<'_>,
+    seed: u64,
+    progress: &(dyn Fn(Step) + Sync),
+    cancel: &AtomicBool,
+) -> Option<HashMap<i64, StarPoint>> {
+    layout_with(ids, vector, seed, EXACT_BELOW, progress, cancel)
+}
+
+/// [`layout`], with exact neighbours only below `exact_below` sounds (so the tests can try neighbours of neighbours
+/// on a small library).
+fn layout_with(
+    ids: &[i64],
+    vector: &Vector<'_>,
+    seed: u64,
     exact_below: usize,
     progress: &(dyn Fn(Step) + Sync),
     cancel: &AtomicBool,
@@ -189,19 +206,21 @@ pub fn layout(
         );
     }
     let stop = || cancel.load(Ordering::Relaxed);
-    let mut rng = DotnetRandom::new(seed);
-    let exact = n < exact_below;
 
     progress(Step { what: "Finding what each sound is like", done: 0 });
-    let (reduced, mut pos) = pca(&order, vector, &mut rng, &stop)?;
+    let (reduced, mut pos) = pca(&order, vector, seed, &stop)?;
 
     progress(Step { what: "Finding sound-alikes", done: 1 });
     let k = NEIGHBOURS.min(n - 1);
-    let (nbr, dist) =
-        if exact { exact_neighbours(&reduced, n, k) } else { descent_neighbours(&reduced, n, k, seed, &stop)? };
+    let (nbr, dist) = if n < exact_below {
+        exact_neighbours(&reduced, n, k)
+    } else {
+        descent_neighbours(&reduced, n, k, seed, &stop)?
+    };
 
     progress(Step { what: "Weighing sound-alikes", done: 2 });
-    let edges = edges(&nbr, &dist);
+    let ties = Ties::new(n, &edges(&nbr, &dist));
+    drop((nbr, dist, reduced));
 
     progress(Step { what: "Letting the galaxy settle", done: 3 });
     let epochs = if n <= 10_000 {
@@ -211,11 +230,7 @@ pub fn layout(
     } else {
         120
     };
-    if exact {
-        optimise(&mut pos, &edges, n, epochs, &mut rng, &stop)?;
-    } else {
-        pos = optimise_parallel(pos, &edges, n, epochs, seed, &stop)?;
-    }
+    settle(&mut pos, &ties, epochs, seed, &stop)?;
 
     finish(&mut pos, n);
     progress(Step { what: "Galaxy mapped", done: 4 });
@@ -228,71 +243,20 @@ pub fn layout(
     )
 }
 
-/// The steps of a layout, for the twin test to compare with the C# app's one by one: each sound's squashed
-/// fingerprint, the starting picture, the sound-alikes and their distances, the weighed pairs, and the next number the
-/// random sequence would give. Exact neighbours only. Not for the app.
-#[doc(hidden)]
-#[allow(clippy::type_complexity)]
-pub fn twin_steps(
-    ids: &[i64],
-    vector: &(dyn Fn(i64) -> Vec<f32> + Sync),
-    seed: i32,
-) -> (Vec<Vec<f32>>, Vec<f64>, Vec<Vec<usize>>, Vec<Vec<f32>>, Vec<(usize, usize, f32)>, i32) {
-    let mut order = ids.to_vec();
-    order.sort_unstable();
-    order.dedup();
-    let n = order.len();
-    let mut rng = DotnetRandom::new(seed);
-    let Some((reduced, init)) = pca(&order, vector, &mut rng, &|| false) else { unreachable!("never stopped") };
-    let (nbr, dist) = exact_neighbours(&reduced, n, NEIGHBOURS.min(n.saturating_sub(1)));
-    let edges = edges(&nbr, &dist).into_iter().map(|e| (e.i, e.j, e.w)).collect();
-    let rows = (0..n).map(|i| reduced.row(i).to_vec()).collect();
-    (rows, init, nbr, dist, edges, rng.next())
-}
-
-/// The last steps of a small layout (settling, then evening out) from a starting picture and weighed pairs the twin
-/// test got from the C# app, with the random sequence where the first steps leave it. Not for the app.
-#[doc(hidden)]
-pub fn twin_settle(
-    ids: &[i64],
-    vector: &(dyn Fn(i64) -> Vec<f32> + Sync),
-    seed: i32,
-    mut pos: Vec<f64>,
-    edges: &[(usize, usize, f32)],
-) -> HashMap<i64, StarPoint> {
-    let mut order = ids.to_vec();
-    order.sort_unstable();
-    order.dedup();
-    let n = order.len();
-    let mut rng = DotnetRandom::new(seed);
-    // Only to take as many numbers from the sequence as the first steps do.
-    let _ = pca(&order, vector, &mut rng, &|| false);
-    let edges: Vec<Edge> = edges.iter().map(|&(i, j, w)| Edge { i, j, w }).collect();
-    let epochs = if n <= 10_000 { 400 } else { 200 };
-    let _ = optimise(&mut pos, &edges, n, epochs, &mut rng, &|| false);
-    finish(&mut pos, n);
-    order
-        .iter()
-        .enumerate()
-        .map(|(i, id)| (*id, StarPoint { x: pos[2 * i] as f32, y: pos[2 * i + 1] as f32 }))
-        .collect()
-}
-
 /// Evens the picture out a little and fits it into 0..1, with one scale both ways and a margin for the labels.
 ///
 /// Evening out is the same in every direction: each star keeps its direction from the middle, but its distance moves
 /// part of the way to where it would be if the stars were spread evenly over a disc.
 fn finish(pos: &mut [f64], n: usize) {
     let (mut mx, mut my) = (0.0, 0.0);
-    for i in 0..n {
-        mx += pos[2 * i];
-        my += pos[2 * i + 1];
+    for p in pos.as_chunks::<2>().0.iter() {
+        mx += p[0];
+        my += p[1];
     }
     mx /= n as f64;
     my /= n as f64;
-    let dist: Vec<f64> = (0..n)
-        .map(|i| ((pos[2 * i] - mx) * (pos[2 * i] - mx) + (pos[2 * i + 1] - my) * (pos[2 * i + 1] - my)).sqrt())
-        .collect();
+    let dist: Vec<f64> =
+        pos.as_chunks::<2>().0.iter().map(|p| ((p[0] - mx).powi(2) + (p[1] - my).powi(2)).sqrt()).collect();
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by(|a, b| dist[*a].total_cmp(&dist[*b]));
     let far = dist[order[n - 1]].max(1e-9);
@@ -306,113 +270,127 @@ fn finish(pos: &mut [f64], n: usize) {
         pos[2 * i + 1] = my + (pos[2 * i + 1] - my) * k;
     }
     let (mut min_x, mut min_y, mut max_x, mut max_y) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
-    for i in 0..n {
-        min_x = min_x.min(pos[2 * i]);
-        max_x = max_x.max(pos[2 * i]);
-        min_y = min_y.min(pos[2 * i + 1]);
-        max_y = max_y.max(pos[2 * i + 1]);
+    for p in pos.as_chunks::<2>().0.iter() {
+        min_x = min_x.min(p[0]);
+        max_x = max_x.max(p[0]);
+        min_y = min_y.min(p[1]);
+        max_y = max_y.max(p[1]);
     }
     let span = (max_x - min_x).max(max_y - min_y).max(1e-9);
     let off_x = (1.0 - (max_x - min_x) / span) / 2.0;
     let off_y = (1.0 - (max_y - min_y) / span) / 2.0;
-    for i in 0..n {
-        pos[2 * i] = 0.07 + 0.86 * (off_x + (pos[2 * i] - min_x) / span);
-        pos[2 * i + 1] = 0.07 + 0.86 * (off_y + (pos[2 * i + 1] - min_y) / span);
+    for p in pos.as_chunks_mut::<2>().0.iter_mut() {
+        p[0] = 0.07 + 0.86 * (off_x + (p[0] - min_x) / span);
+        p[1] = 0.07 + 0.86 * (off_y + (p[1] - min_y) / span);
     }
 }
 
 /// Places sounds the map doesn't have yet at the middle of their 3 nearest mapped sound-alikes, nudged a little so
-/// they don't sit exactly on top of one. In a big library they're compared with a sample of 10,000 mapped sounds,
-/// which is plenty to find their neighbourhood. As C#'s `GalaxyMap.PlaceNew`.
+/// they don't sit exactly on top of one. Each is compared with every mapped sound when there are few new ones; with
+/// many, with a fair sample (at least 10,000), which is plenty to find their neighbourhood. As C#'s
+/// `GalaxyMap.PlaceNew`.
 pub fn place_new(
     new_ids: &[i64],
     mapped_ids: &[i64],
-    vector: &(dyn Fn(i64) -> Vec<f32> + Sync),
+    vector: &Vector<'_>,
     map: &HashMap<i64, StarPoint>,
 ) -> HashMap<i64, StarPoint> {
     if mapped_ids.is_empty() || new_ids.is_empty() {
         return HashMap::new();
     }
+    let size = (PLACE_BUDGET / new_ids.len()).clamp(PLACE_SAMPLE, PLACE_MOST);
     let mut sample = mapped_ids.to_vec();
-    if sample.len() > PLACE_SAMPLE {
+    if sample.len() > size {
         sample.sort_by_key(|id| hash(*id));
-        sample.truncate(PLACE_SAMPLE);
+        sample.truncate(size);
     }
-    let vectors: Vec<Vec<f32>> = sample.par_iter().map(|id| vector(*id)).collect();
+    let vectors: Vec<Cow<'_, [f32]>> = sample.par_iter().map(|id| vector(*id)).collect();
     new_ids
         .par_iter()
         .filter_map(|&id| {
             let v = vector(id);
-            // The 3 best so far, best first.
-            let mut best = [(f64::MIN, -1i64); 3];
-            for (m, s) in vectors.iter().map(|w| dot(&v, w)).enumerate() {
-                // As C#: anything not better than the third is passed over (a likeness that isn't a number isn't).
-                if s <= best[2].0 {
-                    continue;
-                }
-                best[2] = (s, sample[m]);
-                // As C#'s Array.Sort of three: three fixed swaps, best first.
-                for (i, j) in [(0, 1), (0, 2), (1, 2)] {
-                    if dotnet_cmp(best[j].0, best[i].0).is_gt() {
-                        best.swap(i, j);
-                    }
+            // The 3 most alike, most alike first; on a tie, the one met first.
+            let mut best = [(f32::NEG_INFINITY, None::<i64>); 3];
+            for (w, other) in vectors.iter().zip(&sample) {
+                let s = dot(&v, w);
+                if s > best[2].0 {
+                    best[2] = (s, Some(*other));
+                    best.sort_by(|p, q| q.0.total_cmp(&p.0));
                 }
             }
-            let near: Vec<&StarPoint> = best.iter().filter(|b| b.1 >= 0).filter_map(|b| map.get(&b.1)).collect();
+            let near: Vec<&StarPoint> = best.iter().filter_map(|b| b.1.and_then(|id| map.get(&id))).collect();
             if near.is_empty() {
                 return None;
             }
-            // As C#'s Average of floats: added up in double, the answer back in single precision.
-            let average = |f: fn(&StarPoint) -> f32| {
-                (near.iter().map(|p| f64::from(f(p))).sum::<f64>() / near.len() as f64) as f32
-            };
-            let (x, y) = (average(|p| p.x), average(|p| p.y));
-            let mut jitter = DotnetRandom::new((id % i64::from(i32::MAX)) as i32);
-            let x = (f64::from(x) + (jitter.next_double() - 0.5) * 0.004).clamp(0.0, 1.0);
-            let y = (f64::from(y) + (jitter.next_double() - 0.5) * 0.004).clamp(0.0, 1.0);
+            let x = near.iter().map(|p| f64::from(p.x)).sum::<f64>() / near.len() as f64;
+            let y = near.iter().map(|p| f64::from(p.y)).sum::<f64>() / near.len() as f64;
+            let mut jitter = Rng::new(hash(id));
+            let x = (x + (jitter.unit() - 0.5) * 0.004).clamp(0.0, 1.0);
+            let y = (y + (jitter.unit() - 0.5) * 0.004).clamp(0.0, 1.0);
             Some((id, StarPoint { x: x as f32, y: y as f32 }))
         })
         .collect()
 }
 
-/// .NET's `double.CompareTo`: a value that isn't a number is the smallest.
-fn dotnet_cmp(a: f64, b: f64) -> std::cmp::Ordering {
-    match (a.is_nan(), b.is_nan()) {
-        (true, true) => std::cmp::Ordering::Equal,
-        (true, false) => std::cmp::Ordering::Less,
-        (false, true) => std::cmp::Ordering::Greater,
-        _ => a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal),
-    }
-}
-
 /// Spreads ids evenly, so taking the first few of a big library is a fair sample.
 fn hash(id: i64) -> u64 {
-    let x = (id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    x ^ (x >> 31)
+    mix(id as u64)
 }
 
-/// As C#'s `GalaxyMap.Dot`, which adds the products eight at a time (one per lane of .NET's `Vector<float>` on a
-/// computer with AVX2) and then the lanes together, pairwise as .NET does.
-fn lane_dot(a: &[f32], b: &[f32]) -> f64 {
-    const W: usize = 8;
-    let mut acc = [0f32; W];
-    let mut i = 0;
-    while i + W <= a.len() {
-        for l in 0..W {
-            acc[l] += a[i + l] * b[i + l];
-        }
-        i += W;
+/// SplitMix64's mixer: every bit of `x` stirs every bit of the answer.
+fn mix(x: u64) -> u64 {
+    let mut z = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// A small, fast random sequence (SplitMix64). Each star gets its own for each round, from the seed, the round and
+/// the star, so what happens to it doesn't depend on which core did it or in what order.
+struct Rng(u64);
+
+impl Rng {
+    fn new(seed: u64) -> Rng {
+        Rng(seed)
     }
-    let v: [f32; 4] = std::array::from_fn(|l| acc[l] + acc[l + 4]);
-    let mut s = f64::from((v[0] + v[1]) + (v[2] + v[3]));
-    while i < a.len() {
-        s += f64::from(a[i] * b[i]);
-        i += 1;
+
+    fn of(seed: u64, a: u64, b: u64) -> Rng {
+        Rng(mix(mix(seed ^ mix(a)) ^ b))
+    }
+
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        mix(self.0)
+    }
+
+    /// 0 up to (not including) 1.
+    fn unit(&mut self) -> f64 {
+        (self.next() >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
+    }
+
+    /// 0 up to (not including) `n`.
+    fn below(&mut self, n: usize) -> usize {
+        ((u128::from(self.next()) * n as u128) >> 64) as usize
+    }
+}
+
+/// The dot product, eight at a time (so it runs on the processor's wide registers), then the eight added up.
+fn dot(a: &[f32], b: &[f32]) -> f32 {
+    let mut acc = [0f32; 8];
+    let ((ca, ra), (cb, rb)) = (a.as_chunks::<8>(), b.as_chunks::<8>());
+    for (x, y) in ca.iter().zip(cb) {
+        for l in 0..8 {
+            acc[l] += x[l] * y[l];
+        }
+    }
+    let mut s = acc.iter().sum::<f32>();
+    for (x, y) in ra.iter().zip(rb) {
+        s += x * y;
     }
     s
 }
 
-/// A sound's fingerprint, its numbers squashed to the top directions, row by row.
+/// Each sound's fingerprint squashed to the top directions, one row each.
 struct Reduced {
     dims: usize,
     rows: Vec<f32>,
@@ -426,28 +404,20 @@ impl Reduced {
 
 /// The top 32 principal directions (learned from up to 20,000 sounds), every sound projected onto them, and a 2D
 /// starting layout from the first two, as x,y pairs.
-fn pca(
-    ids: &[i64],
-    vector: &(dyn Fn(i64) -> Vec<f32> + Sync),
-    rng: &mut DotnetRandom,
-    stop: &dyn Fn() -> bool,
-) -> Option<(Reduced, Vec<f64>)> {
+fn pca(ids: &[i64], vector: &Vector<'_>, seed: u64, stop: &dyn Fn() -> bool) -> Option<(Reduced, Vec<f64>)> {
     let n = ids.len();
-    let sample_ids: Vec<i64> = if n <= PCA_SAMPLE {
-        ids.to_vec()
-    } else {
-        let mut s = ids.to_vec();
-        s.sort_by_key(|id| hash(*id));
-        s.truncate(PCA_SAMPLE);
-        s
-    };
-    let x: Vec<Vec<f32>> = sample_ids.par_iter().map(|id| vector(*id)).collect();
+    let mut rng = Rng::of(seed, 1, 0);
+    let mut sample_ids = ids.to_vec();
+    if n > PCA_SAMPLE {
+        sample_ids.sort_by_key(|id| hash(*id));
+        sample_ids.truncate(PCA_SAMPLE);
+    }
+    let x: Vec<Cow<'_, [f32]>> = sample_ids.par_iter().map(|id| vector(*id)).collect();
     let count = x.len() as f64;
-    let d = x.iter().map(Vec::len).max().unwrap_or(0);
-    let dims = DIMS.min(d);
+    let d = x.iter().map(|v| v.len()).max().unwrap_or(0);
     let mut mean = vec![0f64; d];
     for v in &x {
-        for (m, a) in mean.iter_mut().zip(v) {
+        for (m, a) in mean.iter_mut().zip(v.iter()) {
             *m += f64::from(*a);
         }
     }
@@ -460,8 +430,10 @@ fn pca(
         .into_par_iter()
         .map(|a| x.iter().map(|v| (f64::from(v.get(a).copied().unwrap_or(0.0)) - mean[a]) as f32).collect())
         .collect();
+    drop(x);
     let upper: Vec<Vec<f64>> =
-        (0..d).into_par_iter().map(|a| (a..d).map(|b| lane_dot(&cols[a], &cols[b]) / count).collect()).collect();
+        (0..d).into_par_iter().map(|a| (a..d).map(|b| f64::from(dot(&cols[a], &cols[b])) / count).collect()).collect();
+    drop(cols);
     let mut cov = vec![0f64; d * d];
     for (a, row) in upper.iter().enumerate() {
         for (t, c) in row.iter().enumerate() {
@@ -469,28 +441,28 @@ fn pca(
             cov[(a + t) * d + a] = *c;
         }
     }
-    drop(cols);
     if stop() {
         return None;
     }
 
+    // The directions one at a time, by power iteration, each kept at right angles to those already found.
     let mut comps: Vec<Vec<f64>> = Vec::new();
-    for _ in 0..dims {
+    for _ in 0..DIMS.min(d) {
         if stop() {
             return None;
         }
-        let mut w: Vec<f64> = (0..d).map(|_| rng.next_double() - 0.5).collect();
+        let mut w: Vec<f64> = (0..d).map(|_| rng.unit() - 0.5).collect();
+        let mut found = false;
         for _ in 0..60 {
             let mut next: Vec<f64> =
-                cov.par_chunks(d).map(|row| row.iter().zip(&w).fold(0.0, |s, (c, x)| s + c * x)).collect();
-            // Kept at right angles to the directions already found.
+                cov.par_chunks(d).map(|row| row.iter().zip(&w).map(|(c, x)| c * x).sum()).collect();
             for p in &comps {
-                let dot = next.iter().zip(p).fold(0.0, |s, (a, b)| s + a * b);
+                let along: f64 = next.iter().zip(p).map(|(a, b)| a * b).sum();
                 for (a, b) in next.iter_mut().zip(p) {
-                    *a -= dot * b;
+                    *a -= along * b;
                 }
             }
-            let norm = next.iter().fold(0.0, |s, t| s + t * t).sqrt();
+            let norm = next.iter().map(|t| t * t).sum::<f64>().sqrt();
             if norm < 1e-12 {
                 break;
             }
@@ -498,8 +470,10 @@ fn pca(
                 *a /= norm;
             }
             w = next;
+            found = true;
         }
-        if w.iter().all(|t| *t == 0.0) {
+        // Nothing left to explain: the fingerprints vary in fewer directions than asked for.
+        if !found {
             break;
         }
         comps.push(w);
@@ -511,38 +485,29 @@ fn pca(
         rows.par_chunks_mut(dims).zip(ids.par_iter()).for_each(|(r, id)| {
             let v = vector(*id);
             for (out, comp) in r.iter_mut().zip(&comps) {
-                let mut s = 0.0;
-                for j in 0..v.len().min(d) {
-                    s += (f64::from(v[j]) - mean[j]) * comp[j];
-                }
-                *out = s as f32;
+                *out = v.iter().zip(&mean).zip(comp).map(|((x, m), c)| (f64::from(*x) - m) * c).sum::<f64>() as f32;
             }
         });
     }
     let reduced = Reduced { dims, rows };
     let mut init = vec![0f64; 2 * n];
-    for i in 0..n {
+    for (i, p) in init.as_chunks_mut::<2>().0.iter_mut().enumerate() {
         let r = reduced.row(i);
-        init[2 * i] = r.first().map_or(0.0, |x| f64::from(*x));
-        init[2 * i + 1] = r.get(1).map_or(0.0, |x| f64::from(*x));
+        p[0] = r.first().map_or(0.0, |x| f64::from(*x));
+        p[1] = r.get(1).map_or(0.0, |x| f64::from(*x));
     }
     // Scaled to about ±10 (UMAP's usual range), with a whisker of noise so identical sounds don't stack. A big library
     // starts spread wider: every star wants about the same room.
     let max = init.iter().fold(1e-9f64, |m, x| m.max(x.abs()));
     let room = 10.0 * (n as f64 / 10_000.0).sqrt().max(1.0);
     for x in &mut init {
-        *x = *x / max * room + (rng.next_double() - 0.5) * 0.01;
+        *x = *x / max * room + (rng.unit() - 0.5) * 0.01;
     }
     Some((reduced, init))
 }
 
 fn distance2(a: &[f32], b: &[f32]) -> f32 {
-    let mut s = 0f32;
-    for (x, y) in a.iter().zip(b) {
-        let t = x - y;
-        s += t * t;
-    }
-    s
+    a.iter().zip(b).map(|(x, y)| (x - y) * (x - y)).sum()
 }
 
 type Neighbours = (Vec<Vec<usize>>, Vec<Vec<f32>>);
@@ -565,21 +530,20 @@ fn exact_neighbours(x: &Reduced, n: usize, k: usize) -> Neighbours {
 /// NN-descent: start each sound with likely neighbours (its neighbours along a few random directions), then
 /// repeatedly check its neighbours' neighbours, keeping the closest. Each round only a sound's own list changes, so
 /// every core can work at once. Stops when a round barely improves anything.
-fn descent_neighbours(x: &Reduced, n: usize, k: usize, seed: i32, stop: &dyn Fn() -> bool) -> Option<Neighbours> {
+fn descent_neighbours(x: &Reduced, n: usize, k: usize, seed: u64, stop: &dyn Fn() -> bool) -> Option<Neighbours> {
     let mut best: Vec<KBest> = (0..n).map(|_| KBest::new(k)).collect();
 
     // Start: neighbours in sorted order along 8 random directions.
-    let mut rng = DotnetRandom::new(seed);
+    let mut rng = Rng::of(seed, 2, 0);
+    let window = (k / 2).max(2);
     for _ in 0..8 {
         if stop() {
             return None;
         }
-        let dir: Vec<f32> = (0..x.dims).map(|_| (rng.next_double() - 0.5) as f32).collect();
-        let keys: Vec<f32> =
-            (0..n).into_par_iter().map(|i| x.row(i).iter().zip(&dir).fold(0f32, |s, (a, b)| s + a * b)).collect();
+        let dir: Vec<f32> = (0..x.dims).map(|_| (rng.unit() - 0.5) as f32).collect();
+        let keys: Vec<f32> = (0..n).into_par_iter().map(|i| dot(x.row(i), &dir)).collect();
         let mut idx: Vec<usize> = (0..n).collect();
-        idx.par_sort_by(|a, b| keys[*a].total_cmp(&keys[*b]));
-        let window = (k / 2).max(2);
+        idx.par_sort_by(|a, b| keys[*a].total_cmp(&keys[*b]).then(a.cmp(b)));
         // Each sound's place in that order, so every sound can gather its own window at once.
         let mut rank = vec![0usize; n];
         for (r, i) in idx.iter().enumerate() {
@@ -601,23 +565,23 @@ fn descent_neighbours(x: &Reduced, n: usize, k: usize, seed: i32, stop: &dyn Fn(
             return None;
         }
         // Each sound's candidates: its neighbours, plus up to 10 sounds that list it as theirs.
-        let lists: Vec<Vec<usize>> = best.iter().map(|b| b.items().to_vec()).collect();
         let mut reverse: Vec<Vec<usize>> = vec![Vec::new(); n];
-        for (i, list) in lists.iter().enumerate() {
-            for &j in list {
+        for (i, b) in best.iter().enumerate() {
+            for &j in b.items() {
                 if reverse[j].len() < 10 {
                     reverse[j].push(i);
                 }
             }
         }
-        let cands: Vec<Vec<usize>> = lists
-            .iter()
+        let cands: Vec<Vec<usize>> = best
+            .par_iter()
             .zip(&reverse)
-            .map(|(a, b)| {
+            .map(|(b, r)| {
                 let mut seen = HashSet::new();
-                a.iter().chain(b).copied().filter(|c| seen.insert(*c)).collect()
+                b.items().iter().chain(r).copied().filter(|c| seen.insert(*c)).collect()
             })
             .collect();
+        drop(reverse);
         let changed = AtomicUsize::new(0);
         best.par_iter_mut().enumerate().for_each(|(i, b)| {
             let mut local = 0;
@@ -634,11 +598,10 @@ fn descent_neighbours(x: &Reduced, n: usize, k: usize, seed: i32, stop: &dyn Fn(
             break;
         }
     }
-    Some(best.into_par_iter().map(|b| b.sorted()).unzip())
+    Some(best.into_par_iter().map(KBest::sorted).unzip())
 }
 
-/// The `k` closest seen so far (squared distances), no repeats. As C#'s `KBest`, step for step: which one it drops
-/// on a tie decides which sound-alikes a sound gets.
+/// The `k` closest seen so far (squared distances), no repeats.
 struct KBest {
     k: usize,
     ids: Vec<usize>,
@@ -676,223 +639,131 @@ impl KBest {
         &self.ids
     }
 
-    /// Closest first, as distances (no longer squared).
+    /// Closest first (on a tie, the lower number), as distances (no longer squared).
     fn sorted(self) -> (Vec<usize>, Vec<f32>) {
-        let (mut d, mut ids) = (self.d, self.ids);
-        dotnet_sort_pairs(&mut d, &mut ids);
-        for x in &mut d {
-            *x = x.sqrt();
-        }
-        (ids, d)
+        let mut pairs: Vec<(f32, usize)> = self.d.into_iter().zip(self.ids).collect();
+        pairs.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        pairs.into_iter().map(|(d, id)| (id, d.sqrt())).unzip()
     }
 }
 
-/// `Array.Sort(keys, items)` as .NET does it, for the short lists `KBest` keeps (at most 16, sorted by insertion,
-/// and 2 or 3 by fixed swaps), so equal distances come out in the same order. Longer lists fall back to a stable sort.
-fn dotnet_sort_pairs(keys: &mut [f32], items: &mut [usize]) {
-    let swap_if_greater = |keys: &mut [f32], items: &mut [usize], i: usize, j: usize| {
-        if keys[i] > keys[j] {
-            keys.swap(i, j);
-            items.swap(i, j);
-        }
-    };
-    match keys.len() {
-        0 | 1 => {}
-        2 => swap_if_greater(keys, items, 0, 1),
-        3 => {
-            swap_if_greater(keys, items, 0, 1);
-            swap_if_greater(keys, items, 0, 2);
-            swap_if_greater(keys, items, 1, 2);
-        }
-        n if n <= 16 => {
-            for i in 0..n - 1 {
-                let (t, ti) = (keys[i + 1], items[i + 1]);
-                let mut j = i as isize;
-                while j >= 0 && t < keys[j as usize] {
-                    keys[j as usize + 1] = keys[j as usize];
-                    items[j as usize + 1] = items[j as usize];
-                    j -= 1;
-                }
-                keys[(j + 1) as usize] = t;
-                items[(j + 1) as usize] = ti;
-            }
-        }
-        _ => {
-            let mut pairs: Vec<(f32, usize)> = keys.iter().copied().zip(items.iter().copied()).collect();
-            pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
-            for (t, (key, item)) in pairs.into_iter().enumerate() {
-                keys[t] = key;
-                items[t] = item;
-            }
-        }
-    }
-}
-
-/// A pair of neighbours and how strongly they belong together.
-#[derive(Clone, Copy, Debug)]
-struct Edge {
-    i: usize,
-    j: usize,
-    w: f32,
-}
-
-/// How strongly each pair of neighbours belongs together (UMAP's fuzzy weights, made symmetric).
-fn edges(nbr: &[Vec<usize>], dist: &[Vec<f32>]) -> Vec<Edge> {
-    let n = nbr.len();
+/// How strongly each pair of neighbours belongs together (UMAP's fuzzy weights, made symmetric): `(i, j, weight)`
+/// with `i < j`, each pair once.
+fn edges(nbr: &[Vec<usize>], dist: &[Vec<f32>]) -> Vec<(usize, usize, f32)> {
     let target = (nbr.iter().map(Vec::len).max().unwrap_or(0).max(2) as f64).log2();
-    let mut directed: Vec<(u64, f32)> = nbr
+    let mut directed: Vec<(usize, usize, f32)> = nbr
         .par_iter()
         .zip(dist)
         .enumerate()
         .flat_map_iter(|(i, (nbr, dist))| {
-            let rho = dist.first().copied().unwrap_or(0.0);
-            let weight = move |dd: f32, sigma: f64| (-f64::from((dd - rho).max(0.0)) / sigma).exp();
+            let rho = f64::from(dist.first().copied().unwrap_or(0.0));
+            let weight = move |dd: f32, sigma: f64| (-(f64::from(dd) - rho).max(0.0) / sigma).exp();
             // The width that makes the weights add up to log2(k), found by halving.
             let (mut lo, mut hi, mut sigma) = (1e-6, 1e3, 1.0);
             for _ in 0..48 {
                 sigma = (lo + hi) / 2.0;
-                let sum = dist.iter().fold(0.0, |s, dd| s + weight(*dd, sigma));
+                let sum: f64 = dist.iter().map(|dd| weight(*dd, sigma)).sum();
                 if sum > target {
                     hi = sigma;
                 } else {
                     lo = sigma;
                 }
             }
-            nbr.iter().zip(dist).map(move |(&j, &dd)| {
-                let (a, b) = if i < j { (i, j) } else { (j, i) };
-                (a as u64 * n as u64 + b as u64, weight(dd, sigma) as f32)
-            })
+            nbr.iter().zip(dist).map(move |(&j, &dd)| (i.min(j), i.max(j), weight(dd, sigma) as f32))
         })
         .collect();
     // The same pair from both ends joins as a + b - ab.
-    directed.par_sort_by_key(|(key, _)| *key);
-    let mut edges = Vec::with_capacity(directed.len());
-    let mut t = 0;
-    while t < directed.len() {
-        let (key, mut w) = directed[t];
-        if t + 1 < directed.len() && directed[t + 1].0 == key {
-            t += 1;
-            let v = directed[t].1;
-            w = w + v - w * v;
+    directed.par_sort_by_key(|(i, j, _)| (*i, *j));
+    let mut edges: Vec<(usize, usize, f32)> = Vec::with_capacity(directed.len());
+    for (i, j, w) in directed {
+        match edges.last_mut() {
+            Some(last) if (last.0, last.1) == (i, j) => last.2 = last.2 + w - last.2 * w,
+            _ => edges.push((i, j, w)),
         }
-        edges.push(Edge { i: (key / n as u64) as usize, j: (key % n as u64) as usize, w });
-        t += 1;
     }
     edges
 }
 
-/// Star positions, x,y pairs, that an epoch can nudge: plain cells on one thread, or shared by every core.
-trait Positions {
-    fn get(&self, i: usize) -> f64;
-    fn add(&self, i: usize, by: f64);
+/// Every star's ties to its sound-alikes, listed from both ends: star `i`'s are `to[from[i]..from[i + 1]]`, how
+/// strongly (as a share of the strongest) in `pull`.
+struct Ties {
+    from: Vec<usize>,
+    to: Vec<usize>,
+    pull: Vec<f32>,
 }
 
-/// One thread's positions.
-impl Positions for [Cell<f64>] {
-    fn get(&self, i: usize) -> f64 {
-        self[i].get()
-    }
-    fn add(&self, i: usize, by: f64) {
-        self[i].set(self[i].get() + by);
-    }
-}
-
-/// Positions every core nudges at once. Like UMAP, a nudge now and then lost to another core's is allowed: each one
-/// is tiny.
-impl Positions for [AtomicU64] {
-    fn get(&self, i: usize) -> f64 {
-        f64::from_bits(self[i].load(Ordering::Relaxed))
-    }
-    fn add(&self, i: usize, by: f64) {
-        let v = Positions::get(self, i) + by;
-        self[i].store(v.to_bits(), Ordering::Relaxed);
-    }
-}
-
-fn max_weight(edges: &[Edge]) -> f32 {
-    edges.iter().fold(1e-6f32, |m, e| m.max(e.w))
-}
-
-fn optimise(
-    pos: &mut [f64],
-    edges: &[Edge],
-    n: usize,
-    epochs: usize,
-    rng: &mut DotnetRandom,
-    stop: &dyn Fn() -> bool,
-) -> Option<()> {
-    let max_w = max_weight(edges);
-    let cells = Cell::from_mut(pos).as_slice_of_cells();
-    for epoch in 0..epochs {
-        if stop() {
-            return None;
+impl Ties {
+    fn new(n: usize, edges: &[(usize, usize, f32)]) -> Ties {
+        let strongest = edges.iter().fold(1e-6f32, |m, e| m.max(e.2));
+        let mut from = vec![0usize; n + 1];
+        for &(i, j, _) in edges {
+            from[i + 1] += 1;
+            from[j + 1] += 1;
         }
-        run_epoch(cells, edges, n, 1.0 - epoch as f64 / epochs as f64, max_w, rng);
+        for i in 0..n {
+            from[i + 1] += from[i];
+        }
+        let mut next = from.clone();
+        let (mut to, mut pull) = (vec![0usize; from[n]], vec![0f32; from[n]]);
+        for &(i, j, w) in edges {
+            for (a, b) in [(i, j), (j, i)] {
+                to[next[a]] = b;
+                pull[next[a]] = w / strongest;
+                next[a] += 1;
+            }
+        }
+        Ties { from, to, pull }
     }
-    Some(())
 }
 
-/// The same rounds on every core: each takes a slice of the pairs, with a random sequence of its own.
-fn optimise_parallel(
-    pos: Vec<f64>,
-    edges: &[Edge],
-    n: usize,
-    epochs: usize,
-    seed: i32,
-    stop: &dyn Fn() -> bool,
-) -> Option<Vec<f64>> {
-    let max_w = max_weight(edges);
-    let shared: Vec<AtomicU64> = pos.into_iter().map(|x| AtomicU64::new(x.to_bits())).collect();
-    let slices = (rayon::current_num_threads() * 4).max(1);
-    let size = edges.len().div_ceil(slices).max(1);
+/// The rounds of pulling together and pushing apart. Each round every star moves itself (on every core at once)
+/// against where the others stood at the start of the round, with a random sequence of its own, so the map is the
+/// same however many cores do it, and in whatever order.
+fn settle(pos: &mut Vec<f64>, ties: &Ties, epochs: usize, seed: u64, stop: &dyn Fn() -> bool) -> Option<()> {
+    let n = pos.len() / 2;
+    let clip = |v: f64| v.clamp(-4.0, 4.0);
+    let mut next = vec![0f64; pos.len()];
     for epoch in 0..epochs {
         if stop() {
             return None;
         }
         let alpha = 1.0 - epoch as f64 / epochs as f64;
-        edges.par_chunks(size).enumerate().for_each(|(s, slice)| {
-            let mut rng =
-                DotnetRandom::new(seed.wrapping_add((epoch as i32).wrapping_mul(7919)).wrapping_add(s as i32));
-            run_epoch(shared.as_slice(), slice, n, alpha, max_w, &mut rng);
-        });
-    }
-    Some(shared.into_iter().map(|x| f64::from_bits(x.into_inner())).collect())
-}
-
-fn run_epoch<P: Positions + ?Sized>(pos: &P, edges: &[Edge], n: usize, alpha: f64, max_w: f32, rng: &mut DotnetRandom) {
-    let clip = |v: f64| v.clamp(-4.0, 4.0);
-    for e in edges {
-        let (i, j) = (e.i, e.j);
-        // Stronger pairs get a pull more often, like UMAP's edge sampling.
-        if rng.next_double() > f64::from(e.w / max_w) {
-            continue;
-        }
-        let dx = pos.get(2 * i) - pos.get(2 * j);
-        let dy = pos.get(2 * i + 1) - pos.get(2 * j + 1);
-        let d2 = dx * dx + dy * dy;
-        if d2 > 0.0 {
-            let pb = d2.powf(B - 1.0);
-            let g = -2.0 * A * B * pb / (1.0 + A * pb * d2);
-            let gx = clip(g * dx) * alpha;
-            let gy = clip(g * dy) * alpha;
-            pos.add(2 * i, gx);
-            pos.add(2 * i + 1, gy);
-            pos.add(2 * j, -gx);
-            pos.add(2 * j + 1, -gy);
-        }
-        for _ in 0..NEGATIVE_SAMPLES {
-            let k = rng.next_in(0, n as i32) as usize;
-            if k == i {
-                continue;
+        let was: &[f64] = pos;
+        next.par_chunks_mut(2).enumerate().for_each(|(i, p)| {
+            let mut rng = Rng::of(seed, 3 + epoch as u64, i as u64);
+            let (mut x, mut y) = (was[2 * i], was[2 * i + 1]);
+            for t in ties.from[i]..ties.from[i + 1] {
+                // Stronger ties pull more often, like UMAP's edge sampling.
+                if rng.unit() > f64::from(ties.pull[t]) {
+                    continue;
+                }
+                let j = ties.to[t];
+                let (dx, dy) = (x - was[2 * j], y - was[2 * j + 1]);
+                let d2 = dx * dx + dy * dy;
+                if d2 > 0.0 {
+                    let pb = d2.powf(B - 1.0);
+                    let g = -2.0 * A * B * pb / (1.0 + A * pb * d2);
+                    x += clip(g * dx) * alpha;
+                    y += clip(g * dy) * alpha;
+                }
+                for _ in 0..NEGATIVE_SAMPLES {
+                    let k = rng.below(n);
+                    if k == i {
+                        continue;
+                    }
+                    let (dx, dy) = (x - was[2 * k], y - was[2 * k + 1]);
+                    let d2 = dx * dx + dy * dy;
+                    let g = 2.0 * B / ((0.001 + d2) * (1.0 + A * d2.powf(B)));
+                    x += clip(g * dx) * alpha;
+                    y += clip(g * dy) * alpha;
+                }
             }
-            let dx = pos.get(2 * i) - pos.get(2 * k);
-            let dy = pos.get(2 * i + 1) - pos.get(2 * k + 1);
-            let d2 = dx * dx + dy * dy;
-            let g = 2.0 * B / ((0.001 + d2) * (1.0 + A * d2.powf(B)));
-            pos.add(2 * i, clip(g * dx) * alpha);
-            pos.add(2 * i + 1, clip(g * dy) * alpha);
-        }
+            p[0] = x;
+            p[1] = y;
+        });
+        std::mem::swap(pos, &mut next);
     }
+    Some(())
 }
 
 #[cfg(test)]
@@ -901,17 +772,11 @@ mod tests {
 
     /// `per` sounds in each of `clusters` families: each family around a corner of its own, a little spread.
     fn families(clusters: usize, per: usize, dim: usize) -> HashMap<i64, Vec<f32>> {
-        let mut state = 12345u64;
-        let mut next = || {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            (state >> 40) as f32 / (1u64 << 24) as f32 - 0.5
-        };
+        let mut rng = Rng::new(12345);
         let mut out = HashMap::new();
         for c in 0..clusters {
             for s in 0..per {
-                let mut v: Vec<f32> = (0..dim).map(|_| next() * 0.2).collect();
+                let mut v: Vec<f32> = (0..dim).map(|_| (rng.unit() as f32 - 0.5) * 0.2).collect();
                 v[c % dim] += 3.0;
                 out.insert((c * per + s + 1) as i64, v);
             }
@@ -921,8 +786,8 @@ mod tests {
 
     fn run(vectors: &HashMap<i64, Vec<f32>>, exact_below: usize) -> HashMap<i64, StarPoint> {
         let ids: Vec<i64> = vectors.keys().copied().collect();
-        let get = |id: i64| vectors[&id].clone();
-        layout(&ids, &get, SEED, exact_below, &|_| {}, &AtomicBool::new(false)).unwrap()
+        let get = |id: i64| Cow::Borrowed(vectors[&id].as_slice());
+        layout_with(&ids, &get, SEED, exact_below, &|_| {}, &AtomicBool::new(false)).unwrap()
     }
 
     fn gap(a: StarPoint, b: StarPoint) -> f32 {
@@ -930,23 +795,23 @@ mod tests {
     }
 
     /// The average distance within families, and between them.
-    fn spread(map: &HashMap<i64, StarPoint>, per: usize) -> (f32, f32) {
-        let (mut within, mut across, mut nw, mut na) = (0f32, 0f32, 0, 0);
+    fn spread(map: &HashMap<i64, StarPoint>, per: usize) -> (f64, f64) {
+        let (mut within, mut across, mut nw, mut na) = (0f64, 0f64, 0, 0);
         for (a, pa) in map {
             for (b, pb) in map {
                 if a >= b {
                     continue;
                 }
                 if (a - 1) / per as i64 == (b - 1) / per as i64 {
-                    within += gap(*pa, *pb);
+                    within += f64::from(gap(*pa, *pb));
                     nw += 1;
                 } else {
-                    across += gap(*pa, *pb);
+                    across += f64::from(gap(*pa, *pb));
                     na += 1;
                 }
             }
         }
-        (within / nw as f32, across / na as f32)
+        (within / f64::from(nw), across / f64::from(na))
     }
 
     #[test]
@@ -959,7 +824,7 @@ mod tests {
     }
 
     #[test]
-    fn families_gather_and_a_small_library_always_gives_the_same_map() {
+    fn families_gather_and_the_same_library_always_gives_the_same_map() {
         let v = families(4, 40, 24);
         let map = run(&v, EXACT_BELOW);
         assert_eq!(map.len(), 160);
@@ -970,12 +835,16 @@ mod tests {
     }
 
     #[test]
-    fn a_big_library_finds_its_neighbours_by_descent() {
-        // Laid out as a big library would be (neighbours of neighbours, every core at once).
+    fn the_map_is_the_same_however_many_cores_work_on_it() {
         let v = families(5, 60, 16);
-        let map = run(&v, 0);
-        assert_eq!(map.len(), 300);
-        let (within, across) = spread(&map, 60);
+        let on = |threads: usize| {
+            let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+            pool.install(|| run(&v, 0))
+        };
+        let one = on(1);
+        assert_eq!(one, on(4));
+        // Laid out as a big library would be (neighbours of neighbours), the families still gather.
+        let (within, across) = spread(&one, 60);
         assert!(within * 3.0 < across, "{within} {across}");
     }
 
@@ -1000,7 +869,7 @@ mod tests {
         let mut new = v[&5].clone();
         new[0] += 0.01;
         all.insert(1000, new);
-        let get = |id: i64| all[&id].clone();
+        let get = |id: i64| Cow::Borrowed(all[&id].as_slice());
         let mut mapped: Vec<i64> = v.keys().copied().collect();
         mapped.sort_unstable();
         let placed = place_new(&[1000], &mapped, &get, &map);
@@ -1014,31 +883,42 @@ mod tests {
         assert!(place_new(&[1000], &[], &get, &map).is_empty());
     }
 
+    /// How long a big library takes (run by hand: `cargo test --release -p mo-sounds big_library -- --ignored`).
+    #[test]
+    #[ignore = "slow; run by hand to time a big library"]
+    fn big_library_lays_out_in_reasonable_time() {
+        let v = families(40, 1000, 64);
+        let started = std::time::Instant::now();
+        let map = run(&v, EXACT_BELOW);
+        println!("40,000 sounds in {:?}", started.elapsed());
+        let (within, across) = spread(&map, 1000);
+        assert!(within * 10.0 < across, "{within} {across}");
+    }
+
     #[test]
     fn cancelling_stops_the_layout() {
         let v = families(2, 20, 6);
         let ids: Vec<i64> = v.keys().copied().collect();
-        let get = |id: i64| v[&id].clone();
-        assert!(layout(&ids, &get, SEED, EXACT_BELOW, &|_| {}, &AtomicBool::new(true)).is_none());
+        let get = |id: i64| Cow::Borrowed(v[&id].as_slice());
+        assert!(layout(&ids, &get, SEED, &|_| {}, &AtomicBool::new(true)).is_none());
     }
 
     #[test]
-    fn short_lists_sort_as_dotnet_sorts_them() {
-        // Three: .NET's fixed swaps put the two equal ones the other way round.
-        let (mut k, mut v) = (vec![1.0, 1.0, 0.0], vec![0, 1, 2]);
-        dotnet_sort_pairs(&mut k, &mut v);
-        assert_eq!((k, v), (vec![0.0, 1.0, 1.0], vec![2, 1, 0]));
-        // More: by insertion, so equal ones keep their order.
-        let (mut k, mut v) = (vec![2.0, 1.0, 1.0, 0.5], vec![0, 1, 2, 3]);
-        dotnet_sort_pairs(&mut k, &mut v);
-        assert_eq!((k, v), (vec![0.5, 1.0, 1.0, 2.0], vec![3, 1, 2, 0]));
-    }
-
-    #[test]
-    fn the_lane_dot_is_a_dot_product() {
+    fn the_wide_dot_is_a_dot_product() {
         let a: Vec<f32> = (0..21).map(|i| i as f32 * 0.25).collect();
         let b: Vec<f32> = (0..21).map(|i| 1.0 - i as f32 * 0.1).collect();
-        assert!((lane_dot(&a, &b) - dot(&a, &b)).abs() < 1e-4);
+        let plain: f32 = a.iter().zip(&b).map(|(x, y)| x * y).sum();
+        assert!((dot(&a, &b) - plain).abs() < 1e-4);
+    }
+
+    #[test]
+    fn random_numbers_stay_in_range() {
+        let mut r = Rng::of(SEED, 1, 2);
+        for _ in 0..10_000 {
+            let u = r.unit();
+            assert!((0.0..1.0).contains(&u));
+            assert!(r.below(7) < 7);
+        }
     }
 
     #[test]
@@ -1055,7 +935,9 @@ mod tests {
         let joined = fingerprints(&deep, "clap+features").get(3);
         assert_eq!(joined.len(), 5);
         assert!((joined.iter().map(|x| x * x).sum::<f32>() - 1.0).abs() < 1e-5);
-        assert_eq!(fingerprints(&deep, "features").get(3), deep.features.get(3).unwrap());
+        // The measurements alone are lent, not copied.
+        assert!(matches!(fingerprints(&deep, "features").get(3), Cow::Borrowed(_)));
+        assert_eq!(&*fingerprints(&deep, "features").get(3), deep.features.get(3).unwrap());
     }
 
     #[test]
