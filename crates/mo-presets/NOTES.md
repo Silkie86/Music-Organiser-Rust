@@ -8,6 +8,8 @@ The Presets page's engine (spec section 3.4a). No UI. It writes only `presets.db
   `.vstpreset` (class id; plugin name, category, kind and tags from its "Info" chunk, read from the file's end when the
   state before it is big), `.bwpreset` (device, creator, category, tags from its metadata; for a plugin, its id from the
   state file in the zip). Only headers are read, never the whole state.
+- **A synth's own octave** (`octave`): Serum 1's octave, semi and coarse knobs, from the C# `Serum1State` offsets.
+  Other synths: left for now (Solomon, 2026-11-01).
 - **Part guess** (`role`): bass, lead, chords, pad, stabs/plucks, arp, drums, FX, from the notes as heard (FL root key
   and pitch knob), with names as clues for a weak call or a part with no notes. Each guess carries its reason and says
   when the octave or transpose wasn't checked. Your fix always wins (`list::apply_fixes`).
@@ -39,13 +41,11 @@ The Presets page's engine (spec section 3.4a). No UI. It writes only `presets.db
 
 ## Next
 
-- More plugins' own octave (`octave`: Serum 1 is read, from the C# `Serum1State` offsets, with its sub oscillator
-  when only that plays; Serum 2's CBOR state next), and Bitwig Note Transpose devices (needs the Bitwig reader to say which devices come
-  before an instrument).
+- Bitwig Note Transpose devices need the Bitwig reader to say which devices come before an instrument.
 - Bitwig: the reader doesn't say which presets are instruments, so no Bitwig synth is marked unused yet.
 - Send to Bitwig reads each template again when the page lists them (they were read once by the list); the list
   could keep what a template needs instead.
 - A sound's Bitwig preset name is kept for it in the export names, so two plugins with one sound name ("Pad.fxp",
   "Pad.vstpreset") now give "Pad 2.vstpreset" for the second, where the C# app gave "Pad.vstpreset".
-- Export: half-written `.part-*` files left by a crash aren't cleared yet; names are cut by UTF-16 units as the C#
-  app does, not by Linux's 255-byte limit.
+- Export: half-written files a crash leaves are cleared when that song is exported again (ten minutes on, by the
+  folder's own clock); a song never exported again keeps its leftovers. Names are cut by UTF-16 units as the C# app does, not by Linux's 255-byte limit.
