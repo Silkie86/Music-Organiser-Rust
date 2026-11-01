@@ -46,9 +46,23 @@ pub struct Item {
     /// dataset's songs, each its own.
     #[serde(default)]
     pub group: String,
-    /// The piece is a loop (a pack's file): heard whole as a loop, as the MIDI page hears it, not as a song.
+    /// How the piece is heard whole: a dataset's song as a song; a pack's part as the MIDI page hears it.
     #[serde(default)]
-    pub loops: bool,
+    pub whole: Whole,
+}
+
+/// How a piece is heard whole.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Whole {
+    /// A song, heard as a song.
+    #[default]
+    Song,
+    /// A part of a pack's file, or a section of one between rests, heard as a loop.
+    Loop,
+    /// A piece the MIDI page cut from a part longer than 16 bars: heard as a window, since it needn't start or end
+    /// where the music does.
+    Window,
 }
 
 /// The licence `theorybench packs` gives Solomon's own music. Rule 5: only counts and averages from it go in code,

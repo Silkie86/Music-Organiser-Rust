@@ -189,7 +189,8 @@ cargo run -p mo-theorybench --release -- keyfit D:\Bench\packs.jsonl --inputs fu
   and names) and keeps a file only when its name gives exactly one key and no other note or chord name ("Loop 3 - C
   minor", "Keys_90_Ebmaj", "F#m"; not "Fm Bb Eb", which names chords, nor "Stab (Eb)", where a lone note may or may
   not be the key). A file whose name says nothing about notes takes the key of the nearest folder (up to three up)
-  that names one. Each part is a piece, heard whole as a loop; its pack (the first folder below the one given) is its
+  that names one. Each part is a piece, heard whole as the MIDI page hears it: as a loop, or as a window when the page
+  cut it from a part longer than 16 bars. Its pack (the first folder below the one given) is its
   group, and a pack's files share a fold. Their licence says they're Solomon's own, so a plain keyfit run only
   measures them. The file can't be written inside a copy of this repository.
 - **`--shipped`** scores the finder built in, as it is, on folds 1 to 4: what a refit has to beat. Its folds are drawn

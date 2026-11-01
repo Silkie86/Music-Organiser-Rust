@@ -6,7 +6,10 @@
 //! gives exactly one key and no other note or chord name labels a file: "Loop 3 - C minor", "Keys_90_Ebmaj", "F#m".
 //! A name with chord names in it ("Fm Bb Eb", "Dm7 G7 Cmaj7") names chords, not the key, and a lone letter ("A
 //! Section") could be either, so those files are left out. A file whose name says nothing about notes takes the key of
-//! the nearest folder (up to three below the one given) whose name gives exactly one.
+//! the nearest folder above it (up to three up, inside the one given) whose name gives exactly one.
+//!
+//! Each piece is heard as the MIDI page hears it: whole, as a loop, or as a window when the page cut it from a part
+//! longer than 16 bars ([`Whole`]).
 //!
 //! Each piece keeps its file's path below the folder given as its id, and its pack (the first folder below it) as its
 //! group, so a pack's files share a fold. Its licence is [`item::OWN`]: `keyfit` only measures these pieces, and
@@ -22,7 +25,7 @@ use mo_midi::Role;
 use mo_midi::extract::{self, Found};
 use rayon::prelude::*;
 
-use crate::item::{self, Item, Part};
+use crate::item::{self, Item, Part, Whole};
 
 /// The source the pieces are given.
 pub const SOURCE: &str = "packs";
@@ -130,8 +133,9 @@ fn label(stem: &str, folders: &[String]) -> (Named, &'static str) {
     (Named::Nothing, "")
 }
 
-/// The role a piece is given, as the bench's datasets name them: an arp is heard as chords (as `mo_harmony::Role`
-/// hears it) and a part whose role isn't known as harmony; drums aren't kept.
+/// The role a piece is given, as the bench's datasets name them, so the key finder hears it as the MIDI page has it
+/// heard (`mo_midi::keys`): an arp as chords, a part whose role isn't known as one not known ("", heard as
+/// `mo_harmony::Role::Unknown`); drums aren't kept.
 fn role_name(role: Role) -> Option<&'static str> {
     match role {
         Role::Chords | Role::Arp => Some("chords"),
@@ -186,7 +190,8 @@ fn pieces_of(found: &[Found], id: &str, group: &str, key: Key, from_folder: bool
             continue;
         };
         let length = f.analysis.bars.max(1) * bar;
-        let notes = f.notes.iter().map(|n| (n.start, n.length, n.key, n.velocity7())).collect();
+        // Muted notes aren't heard, as on the MIDI page.
+        let notes = f.notes.iter().filter(|n| !n.muted).map(|n| (n.start, n.length, n.key, n.velocity7())).collect();
         pieces.push(Item {
             source: SOURCE.to_owned(),
             id: if several { format!("{id} #{}", i + 1) } else { id.to_owned() },
@@ -202,7 +207,7 @@ fn pieces_of(found: &[Found], id: &str, group: &str, key: Key, from_folder: bool
             chord_labels: String::new(),
             licence: item::OWN.to_owned(),
             group: group.to_owned(),
-            loops: true,
+            whole: if f.cut { Whole::Window } else { Whole::Loop },
         });
     }
     (pieces, drums)
@@ -295,6 +300,7 @@ struct Counts {
     from_file: usize,
     from_folder: usize,
     drums: usize,
+    cut: usize,
     folders_unread: usize,
     roles: BTreeMap<String, usize>,
     packs: BTreeMap<String, usize>,
@@ -344,6 +350,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
                             .entry(if role.is_empty() { "not known" } else { role }.to_owned())
                             .or_default() += 1;
                         *counts.packs.entry(piece.group.clone()).or_default() += 1;
+                        counts.cut += usize::from(piece.whole == Whole::Window);
                         pieces.push(piece);
                     }
                 }
@@ -374,6 +381,13 @@ pub fn run(args: &[String]) -> Result<(), String> {
         roles.join(", "),
         counts.drums
     );
+    if counts.cut > 0 {
+        println!(
+            "  {} of the pieces were cut from parts longer than 16 bars, as the MIDI page cuts them: each is heard \
+             as a window, as the page hears it.",
+            counts.cut
+        );
+    }
     println!("Written to {}. It holds your notes: keep it on this computer.", out.display());
     Ok(())
 }
@@ -472,7 +486,7 @@ mod tests {
         assert_eq!((p.ppq, p.length, p.key_labels.as_str()), (96, 768, "file name"));
         assert_eq!(p.parts[0].notes.len(), 8);
         assert_eq!(p.parts[0].notes[0], (0, 96, 60, 100));
-        assert!(!p.may_learn() && p.is_own() && p.loops);
+        assert!(!p.may_learn() && p.is_own() && p.whole == Whole::Loop);
         // The piece reads back as the bench reads its files.
         let back: Item = serde_json::from_str(&serde_json::to_string(p).unwrap()).unwrap();
         assert_eq!((back.group, back.keys, back.parts[0].notes.len()), (p.group.clone(), p.keys.clone(), 8));

@@ -37,7 +37,8 @@
 //!   source first, as before, then each other source, with how often the key's tonic was found (chord charts label
 //!   only the tonic).
 //! - **Solomon's packs.** Pieces from `theorybench packs` are his own music ([`item::OWN`]): a plain run only measures
-//!   them, each pack's files in one fold, each file heard whole as a loop. `--shipped` scores the finder built in, as
+//!   them, each pack's files in one fold, each part heard whole as the MIDI page hears it (as a loop, or as a window
+//!   when the page cut it from a part longer than 16 bars). `--shipped` scores the finder built in, as
 //!   it is (folds 1 to 4; nothing fitted), to compare a refit with (`--dump`, then `--against`). `--rescale` fits only
 //!   what rule 5's exception allows (Solomon, 2026-11-01): the built-in finder's weights for each stream scaled by one
 //!   number, the minor weight and the calibration, on his pieces alone (everything else read is only measured); the
@@ -61,7 +62,7 @@ use rayon::prelude::*;
 use crate::answerfit::{self, Fitted};
 use crate::baseline;
 use crate::fit::{self, Choice, Scored};
-use crate::item::{self, Item, Note};
+use crate::item::{self, Item, Note, Whole};
 use crate::keys::{self, Answer, Found, MIN_NOTES, Run};
 use crate::metrics::{self, pct};
 
@@ -141,6 +142,8 @@ enum Cut {
     Song,
     /// A whole loop (a pack's file), heard as a loop.
     Loop,
+    /// A whole piece the MIDI page cut from a longer part of a pack's file, heard as a window.
+    Piece,
     /// A stretch of this many bars along the bar lines.
     Window(i64),
     /// The song's first bars, from its first bar with notes.
@@ -152,7 +155,7 @@ impl Cut {
         match self {
             Cut::Song => Span::Song,
             Cut::Loop => Span::Loop,
-            Cut::Window(_) => Span::Window,
+            Cut::Piece | Cut::Window(_) => Span::Window,
             Cut::Opening(_) => Span::Loop,
         }
     }
@@ -161,6 +164,7 @@ impl Cut {
         match self {
             Cut::Song => "Whole songs".to_owned(),
             Cut::Loop => "Whole loops".to_owned(),
+            Cut::Piece => "Pieces cut from longer parts".to_owned(),
             Cut::Window(b) => format!("{b}-bar windows"),
             Cut::Opening(b) => format!("{b}-bar openings"),
         }
@@ -547,7 +551,12 @@ fn song_cases(item: &Item, song: usize, name: &str, cutting: &Cutting) -> Vec<Ca
         }
     };
     if let Some(truth) = item.main_key().filter(|_| voices.all.len() >= MIN_NOTES) {
-        add(if item.loops { Cut::Loop } else { Cut::Song }, None, truth, item.one_key(), true);
+        let whole = match item.whole {
+            Whole::Song => Cut::Song,
+            Whole::Loop => Cut::Loop,
+            Whole::Window => Cut::Piece,
+        };
+        add(whole, None, truth, item.one_key(), true);
     }
     let (bar, origin) = (item.bar(), item.grid_origin());
     // The first bar with notes in it, where the openings start.
@@ -573,7 +582,8 @@ fn song_cases(item: &Item, song: usize, name: &str, cutting: &Cutting) -> Vec<Ca
         for (at, truth, one_key) in windows {
             add(Cut::Window(bars), Some((at, length)), truth, one_key, picked.contains(&at));
         }
-        if let Some(at) = opening.filter(|at| at + length <= item.length)
+        // A piece cut from a longer part doesn't start where the music does, so its first bars aren't a loop.
+        if let Some(at) = opening.filter(|at| at + length <= item.length && item.whole != Whole::Window)
             && let Some(truth) = item.key_at(at + length / 2).filter(|_| voices.count(at, length) >= MIN_NOTES)
         {
             let one_key = one_key_in(item, at, at + length, truth);
@@ -928,9 +938,10 @@ fn cross_validate(
 
 /// The calibration fitted on held-out scores of the one-key cases `keep` takes, each set counting as in the fit. With
 /// `--rescale`, a number fewer than [`SUPPORT`] of their pieces have (a song's, for loops alone) is held at its
-/// built-in one. The curve over bars counts only full mixes as having it: every other kind of input adds its own
-/// number to the curve, so pieces that are all one part alone (a pack's) can't tell the curve from those numbers, and
-/// would move it for full mixes too.
+/// built-in one. A piece counts by the most any of its cases has of the number: one whose longest stretch is 12 bars
+/// is part 8 bars, part 16, so it counts as a part of a piece for each. The curve over bars counts only full mixes as
+/// having it: every other kind of input adds its own number to the curve, so pieces that are all one part alone (a
+/// pack's) can't tell the curve from those numbers, and would move it for full mixes too.
 fn calibrate(
     cases: &[Case],
     songs: &[Song],
@@ -950,7 +961,7 @@ fn calibrate(
     let built_in = keyfind::SHIPPED.calibration.0;
     let mut kept = [false; CALIBRATION_TERMS];
     if opts.rescale {
-        let mut had: [HashSet<usize>; CALIBRATION_TERMS] = std::array::from_fn(|_| HashSet::new());
+        let mut had: [HashMap<usize, f64>; CALIBRATION_TERMS] = std::array::from_fn(|_| HashMap::new());
         for (c, _, _) in &taken {
             let full = c.ev.config == Config::Full;
             for (t, v) in terms_of(c).iter().enumerate() {
@@ -958,11 +969,12 @@ fn calibrate(
                     && (full || t >= keyfind::KNOTS)
                     && let Some(songs) = had.get_mut(t)
                 {
-                    songs.insert(c.song);
+                    let most = songs.entry(c.song).or_insert(0.0);
+                    *most = most.max(v.abs());
                 }
             }
         }
-        kept = std::array::from_fn(|t| had.get(t).is_none_or(|songs| songs.len() < SUPPORT));
+        kept = std::array::from_fn(|t| had.get(t).is_none_or(|songs| songs.values().sum::<f64>() < SUPPORT as f64));
     }
     let scored: Vec<Scored> = taken
         .iter()
@@ -2592,6 +2604,15 @@ mod tests {
             assert_eq!(c.0[t].to_bits(), built_in[t].to_bits(), "term {t}");
         }
         assert_ne!(c.0[melody_only], built_in[melody_only]);
+        // Three-bar windows are part 2 bars (0.415 each: 25 pieces' worth of 60), part 4 (0.585: 35): only the 4-bar
+        // knot is fitted.
+        let threes = tune_cases(Cut::Window(2))
+            .into_iter()
+            .map(|c| Case { ev: Evidence { config: Config::Full, bars: 3, ..c.ev }, ..c })
+            .collect::<Vec<_>>();
+        let c = calibrate(&threes, &songs, &held, |_| true, &opts(true)).unwrap();
+        assert_eq!(c.0[1].to_bits(), built_in[1].to_bits());
+        assert_ne!(c.0[2], built_in[2]);
     }
 
     #[test]
@@ -2639,13 +2660,28 @@ mod tests {
         assert_eq!((Cut::Loop.span(), Cut::Loop.name()), (Span::Loop, "Whole loops".to_owned()));
         assert_eq!(set_weight(Cut::Loop, Input::Full), SONG_WEIGHT);
         let mut item = piece("packs", 400, item::OWN);
-        item.loops = true;
+        item.whole = Whole::Loop;
         item.parts[0].notes = (0..16).map(|i| (i * 96, 96, [60, 62, 64, 65][i as usize % 4], 100)).collect();
         item.length = 16 * 96;
         let cutting = Cutting { lengths: &[1, 2, 4], inputs: &[Input::Full], picks: 8 };
-        let cases = song_cases(&item, 0, "packs/400", &cutting);
-        assert!(cases.iter().any(|c| c.cut == Cut::Loop));
-        assert!(!cases.iter().any(|c| c.cut == Cut::Song));
+        let wholes = |item: &Item| -> Vec<Cut> {
+            let cases = song_cases(item, 0, "packs/400", &cutting);
+            cases.iter().filter(|c| !matches!(c.cut, Cut::Window(_) | Cut::Opening(_))).map(|c| c.cut).collect()
+        };
+        assert_eq!(wholes(&item), [Cut::Loop]);
+        let openings =
+            |item: &Item| song_cases(item, 0, "packs/400", &cutting).iter().any(|c| matches!(c.cut, Cut::Opening(_)));
+        assert!(openings(&item));
+        // A piece the MIDI page cut from a longer part is heard whole as a window, as the page hears it, and its first
+        // bars aren't a loop.
+        item.whole = Whole::Window;
+        assert_eq!(wholes(&item), [Cut::Piece]);
+        assert!(!openings(&item));
+        assert_eq!((Cut::Piece.span(), set_weight(Cut::Piece, Input::Full)), (Span::Window, 1.0));
+        // The field reads from the file, a song when it isn't there.
+        let line = r#"{"source":"x","id":"1","ppq":96,"length":96,"parts":[],"whole":"window"}"#;
+        assert_eq!(serde_json::from_str::<Item>(line).unwrap().whole, Whole::Window);
+        assert_eq!(serde_json::from_str::<Item>(&line.replace(r#","whole":"window""#, "")).unwrap().whole, Whole::Song);
     }
 
     #[test]
