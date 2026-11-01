@@ -14,7 +14,7 @@ struct Case {
     name: &'static str,
     space: &'static str,
     options: Options,
-    examples: Vec<Example>,
+    examples: Vec<Example<'static>>,
     probes: Vec<Vec<f32>>,
 }
 
@@ -33,7 +33,7 @@ impl Numbers {
 /// `sizes` examples of each type, around a point of its own (`spread` sets how far they stray, so types can overlap),
 /// handed out a type at a time in turn so the types first appear out of alphabetical order. One number never changes.
 /// Every `heavy`th example of each type counts three times (your own label).
-fn clusters(kinds: &[(&str, usize)], dim: usize, spread: f32, heavy: usize, seed: u64) -> Vec<Example> {
+fn clusters(kinds: &[(&str, usize)], dim: usize, spread: f32, heavy: usize, seed: u64) -> Vec<Example<'static>> {
     let mut n = Numbers(seed | 1);
     let centres: Vec<Vec<f32>> = kinds.iter().map(|_| (0..dim).map(|_| n.next() * 4.0).collect()).collect();
     let mut left: Vec<usize> = kinds.iter().map(|k| k.1).collect();
@@ -48,7 +48,7 @@ fn clusters(kinds: &[(&str, usize)], dim: usize, spread: f32, heavy: usize, seed
             let mut x: Vec<f32> = centres[k].iter().map(|c| c + (n.next() - 0.5) * spread).collect();
             x[dim - 1] = 0.5;
             let weight = if heavy > 0 && i.is_multiple_of(heavy) { 3.0 } else { 1.0 };
-            out.push(Example { x, label: (*label).to_owned(), weight });
+            out.push(Example { x: x.into(), label: (*label).to_owned(), weight });
         }
     }
     out
@@ -124,7 +124,7 @@ fn case_json(c: &Case, rust_model: Option<&str>) -> Value {
             "MaxPerClass": c.options.max_per_class,
             "Seed": c.options.seed,
         },
-        "Examples": c.examples.iter().map(|e| json!({ "X": e.x, "Label": e.label, "Weight": e.weight })).collect::<Vec<_>>(),
+        "Examples": c.examples.iter().map(|e| json!({ "X": e.x.as_ref(), "Label": e.label, "Weight": e.weight })).collect::<Vec<_>>(),
         "Probes": c.probes,
     })
 }

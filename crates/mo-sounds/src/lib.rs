@@ -9,6 +9,7 @@
 //! - [`SoundsDb`]: the database, read-only.
 //! - [`SoundAnalysis`]: what the C# analyser stored for each sound (length, level, pitch, key, chords, waveform…).
 //! - [`classify`]: the sound type classifier, learned from your own library (reads the C# app's saved model).
+//! - [`learn`]: each sound's type when its name doesn't say, disagreements, and suggested tags.
 //! - [`types`]: the sound type a sample's name or folder gives ("Kick", "Pad"…), and loop, tempo and key from names.
 //! - [`music`]: note and key names, and Camelot codes.
 //! - [`scan`]: finding the sounds in your sample folders, and what a scan has to do (listen, follow moves, forget).
@@ -18,6 +19,7 @@ mod analysis;
 pub mod classify;
 mod db;
 mod dotnet_random;
+pub mod learn;
 pub mod music;
 pub mod scan;
 pub mod types;

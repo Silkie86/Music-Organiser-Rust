@@ -318,6 +318,17 @@ impl SoundsDb {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// The sounds tagged `tag`, by `source` ("you" for your own tags, "learned" for the app's suggestions), in the
+    /// order SQLite gives them (as the C# app reads them, so learning from them goes the same way).
+    pub fn tagged(&self, tag: &str, source: &str) -> Result<Vec<i64>, SoundsError> {
+        if !self.has("sound_tags") {
+            return Ok(Vec::new());
+        }
+        let mut st = self.conn.prepare("SELECT sound_id FROM sound_tags WHERE tag = ?1 AND source = ?2")?;
+        let rows = st.query_map([tag, source], |r| r.get::<_, Option<i64>>(0))?;
+        Ok(rows.filter_map(|r| r.transpose()).collect::<Result<_, _>>()?)
+    }
+
     /// The sounds you've hidden as duplicates.
     pub fn hidden(&self) -> Result<HashSet<i64>, SoundsError> {
         if !self.has("sound_hidden") {
