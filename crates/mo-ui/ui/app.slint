@@ -5,6 +5,7 @@ import { ComingPage } from "pages/coming.slint";
 import { PartsGallery } from "pages/parts.slint";
 import { SongsPage, SongsData, SongLine, YearStart, PanelSong, CountLine, PluginLine, SampleLine, SaveLine, DetailPair, HealthLine, OlderLine } from "pages/songs.slint";
 import { ArrangementData, ArrLabel, ArrKind } from "pages/arrangement.slint";
+import { BackupSection, BackupData, BackupFolderLine, LeftOutLine } from "pages/backup.slint";
 import { ActivityCards, CardInfo, KeySheet, KeyRow, NoteDialog } from "shell.slint";
 
 import "../fonts/IBMPlexSans-400.ttf";
@@ -22,7 +23,7 @@ import "../fonts/SpaceGrotesk-700.ttf";
 import "../fonts/SpaceMono-400.ttf";
 import "../fonts/SpaceMono-700.ttf";
 
-export { Theme, ActionKey, ArrangementData, ArrLabel, ArrKind, CardInfo, KeyRow, SongsData, SongLine, YearStart, PanelSong, CountLine, PluginLine, SampleLine, SaveLine, DetailPair, HealthLine, OlderLine }
+export { Theme, ActionKey, BackupData, BackupFolderLine, LeftOutLine, ArrangementData, ArrLabel, ArrKind, CardInfo, KeyRow, SongsData, SongLine, YearStart, PanelSong, CountLine, PluginLine, SampleLine, SaveLine, DetailPair, HealthLine, OlderLine }
 
 export struct PlaceInfo {
     name: string,
@@ -47,6 +48,8 @@ export component AppWindow inherits Window {
     in property <int> settings-place;
     // The places that have pages of their own so far (the rest show what's coming).
     in property <int> songs-place: 0;
+    // Space shows its Backup section until the rest of the page is built.
+    in property <int> space-place: -1;
     // The shared parts on one page instead of the places, for the screenshots only.
     in property <bool> parts-gallery;
     in-out property <int> place: 0;
@@ -154,7 +157,10 @@ export component AppWindow inherits Window {
             if root.place == root.songs-place: SongsPage {
                 horizontal-stretch: 1;
             }
-            if root.place != root.songs-place: ComingPage {
+            if root.place == root.space-place: BackupSection {
+                horizontal-stretch: 1;
+            }
+            if root.place != root.songs-place && root.place != root.space-place: ComingPage {
                 horizontal-stretch: 1;
                 title: root.places[root.place].name;
                 coming: root.places[root.place].coming;

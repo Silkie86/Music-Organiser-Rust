@@ -71,7 +71,7 @@ pub struct Gathered {
 }
 
 /// Whether `inner` is `outer` or inside it, letter case aside on Windows and Mac.
-fn within(inner: &Path, outer: &Path) -> bool {
+pub fn within(inner: &Path, outer: &Path) -> bool {
     if cfg!(any(windows, target_os = "macos")) {
         let fold = |p: &Path| PathBuf::from(p.to_string_lossy().to_lowercase());
         fold(inner).starts_with(fold(outer))
