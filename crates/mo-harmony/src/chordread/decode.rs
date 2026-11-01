@@ -45,6 +45,7 @@ use super::cores::{Core, Group};
 use super::hear::{Hearing, Level, Mass, Stream};
 use super::score::{Evidence, Scored, Scorer, Scoring, SpanFacts};
 use super::weights::{Priors, Tables, Weights};
+use crate::chord::Chord;
 use crate::pitch::PitchClass;
 
 /// The longest span, in bars: a chord held longer is read as the same chord again, held on.
@@ -62,8 +63,26 @@ pub const SHARPNESS: f64 = 1.0;
 pub struct PinnedSpan {
     /// Its units, from the first unit heard (a loop's copied bar included).
     pub units: Range<usize>,
-    /// Its chord. None pins only where it starts and ends: it's then read as one chord, whichever reads best.
-    pub label: Option<Label>,
+    /// Its chord, as written: the decode reads its label ([`PinnedSpan::label`]), and the namer writes it as given.
+    /// None pins only where it starts and ends: it's then read as one chord, whichever reads best. In a loop, a chord
+    /// given over its last bar is given for the copy of that bar heard in front too, so the loop's first chord follows
+    /// it as the loop goes round.
+    pub chord: Option<Chord>,
+}
+
+impl PinnedSpan {
+    /// The label the decode reads for its chord: the chord's root and its core ([`Core::of`], the root counted as
+    /// heard). None when it pins only where it starts and ends, or its chord has no core (no third, 4th, 2nd or
+    /// fifth): then it pins only where it starts and ends.
+    pub fn label(&self) -> Option<Label> {
+        let chord = self.chord?;
+        Some(Label::new(chord.root(), Core::of_chord(chord)?))
+    }
+
+    /// Its chord when the decode can read it ([`PinnedSpan::label`]): the chord given.
+    pub fn given(&self) -> Option<Chord> {
+        self.chord.filter(|_| self.label().is_some())
+    }
 }
 
 /// A reading and its chance: a label, or none for no chord.
@@ -92,6 +111,11 @@ pub struct DecodedSpan {
     /// one but others hold the chord before on. At the first unit reported of a loop, the chord before is the one in
     /// its copied bar (where the loop ends), so it's low where the chord goes on round.
     pub change: f64,
+    /// Whether it was read from a pin: a pinned stretch is reported as one span (cut at the first unit reported, when
+    /// it starts in a loop's copied bar).
+    pub pinned: bool,
+    /// The chord given for it, as written ([`PinnedSpan::given`]).
+    pub given: Option<Chord>,
     /// Its readings' places in [`Decoding::chances`].
     chances: Range<usize>,
 }
@@ -320,6 +344,8 @@ enum Given {
 struct Region {
     units: Range<usize>,
     given: Given,
+    /// For a pin with a chord, the chord as written.
+    chord: Option<Chord>,
     /// For a stretch pinned only where it starts and ends, the readings kept for all of it: their places in
     /// `Decoder::region_ids`.
     ids: Range<usize>,
@@ -684,15 +710,19 @@ impl Decoder {
     }
 
     /// The rests and the pins, in order: the pins inside what's heard (one that overlaps an earlier one left out), and
-    /// the runs of a bar or more of silence outside them.
+    /// the runs of a bar or more of silence outside them. In a loop, a chord given over its last bar is given for the
+    /// copy of that bar heard in front too.
     fn find_regions(&mut self, hearing: &Hearing, pins: &[PinnedSpan]) {
         let units = hearing.units();
+        let pin = |units: Range<usize>, pin: &PinnedSpan| {
+            let given = pin.label().map_or(Given::Ends, Given::Chord);
+            Region { units, given, chord: pin.given(), ids: 0..0 }
+        };
         let mut pinned: Vec<Region> = pins
             .iter()
-            .map(|pin| {
-                let end = pin.units.end.min(units);
-                let given = pin.label.map_or(Given::Ends, Given::Chord);
-                Region { units: pin.units.start.min(end)..end, given, ids: 0..0 }
+            .map(|p| {
+                let end = p.units.end.min(units);
+                pin(p.units.start.min(end)..end, p)
             })
             .filter(|r| !r.units.is_empty())
             .collect();
@@ -705,6 +735,22 @@ impl Decoder {
             }
             free
         });
+        // In a loop, a chord given over its last bar is given for the copy of that bar in front too (its units are the
+        // last bar's, a loop's length earlier), where no pin is given already.
+        let reported = hearing.reported();
+        if reported.start > 0 {
+            let length = reported.len();
+            let copy = |r: &Region| r.units.start.saturating_sub(length)..r.units.end.saturating_sub(length);
+            let free = |c: &Range<usize>| !pinned.iter().any(|r| r.units.start < c.end && c.start < r.units.end);
+            let copies: Vec<Region> = pinned
+                .iter()
+                .filter(|r| r.chord.is_some())
+                .map(|r| Region { units: copy(r), ..r.clone() })
+                .filter(|c| !c.units.is_empty() && free(&c.units))
+                .collect();
+            pinned.extend(copies);
+            pinned.sort_by_key(|r| (r.units.start, r.units.end));
+        }
 
         let bar = hearing.bar_units().max(1);
         let mut rests: Vec<Region> = Vec::new();
@@ -722,12 +768,12 @@ impl Decoder {
             let mut from = start;
             for pin in pinned.iter().filter(|p| p.units.start < u && p.units.end > start) {
                 if pin.units.start >= from + bar {
-                    rests.push(Region { units: from..pin.units.start, given: Given::Rest, ids: 0..0 });
+                    rests.push(Region { units: from..pin.units.start, given: Given::Rest, chord: None, ids: 0..0 });
                 }
                 from = from.max(pin.units.end);
             }
             if u >= from + bar {
-                rests.push(Region { units: from..u, given: Given::Rest, ids: 0..0 });
+                rests.push(Region { units: from..u, given: Given::Rest, chord: None, ids: 0..0 });
             }
         }
 
@@ -1185,6 +1231,9 @@ impl Decoder {
             let sound = if sound.is_empty() { start..to.unit } else { sound };
             let chances = out.chances.len();
             self.add_chances(hearing, sound.clone(), &mut out.chances);
+            // The pin it's in: a span never crosses a pin's edge.
+            let region = self.regions.partition_point(|r| r.units.end <= start);
+            let pin = self.regions.get(region).filter(|r| r.units.contains(&start) && r.given != Given::Rest);
             out.spans.push(DecodedSpan {
                 units: start..to.unit,
                 sound,
@@ -1192,6 +1241,8 @@ impl Decoder {
                 label: id.label(),
                 rest,
                 change: self.change(start),
+                pinned: pin.is_some(),
+                given: pin.and_then(|r| r.chord),
                 chances: chances..out.chances.len(),
             });
         }

@@ -24,8 +24,17 @@
 //!   ([`PinnedSpan`]);
 //! - the third step, naming each chord from the notes really played ([`Namer`]): its extensions, its root and its
 //!   bass ([`BassKind`]), a seventh heard only in the bass, sus chords over a bass, pedals, the roots of diminished
-//!   sevenths and augmented triads, and a chord cut in two where its bass moves to its third or seventh.
+//!   sevenths and augmented triads, a chord cut in two where its bass moves to its third or seventh, and the chords
+//!   given by pins, as given;
+//! - the reader as the app uses it ([`ChordReader`], [`read_chords`]): the chords in some notes ([`ChordReading`]),
+//!   each stretch with its readings and the answer a person would give ([`ChordAnswer`]: one chord, the same notes
+//!   written more than one way, a chord implied by one line, unclear, or no chord), the chart spelled in a key
+//!   ([`ChordReading::names`]), Chord check's choices ([`ChordSpan::choices`]), and names found elsewhere checked
+//!   against it ([`ChordReading::check_names`]);
+//! - the version ([`CHORD_READER_VERSION`]), with the hash of every number the reader is built from
+//!   ([`numbers_hash`]).
 
+mod answer;
 mod candidates;
 mod cores;
 mod decode;
@@ -37,13 +46,19 @@ mod hear_tests;
 mod name;
 #[cfg(test)]
 mod name_tests;
+mod reader;
+#[cfg(test)]
+mod reader_tests;
 mod score;
 #[cfg(test)]
 mod score_tests;
 #[cfg(test)]
 mod shape_tests;
 mod tables;
+mod version;
 mod weights;
+
+pub use answer::{ChordAnswer, Grading, NoChord, Texture, Thresholds, grade};
 
 pub use candidates::{Candidate, Label, Route, allowed, candidates, escape, open_fifth};
 pub use cores::{Core, CoreSet, Group, ToneClass, valid, valid_rootless};
@@ -53,6 +68,16 @@ pub use hear::{
     heard_in, played_in, presence_of,
 };
 pub use name::{BassKind, NamedSpan, Namer, Naming, Reading, SpanFlags};
+pub use reader::{
+    CHOICE_FLOOR, Choice, ChoiceFrom, ChordContext, ChordReader, ChordReading, ChordSpan, MOST_READINGS, Model,
+    NameCheck, Pin, SHIPPED, read_chords,
+};
 pub use score::{Evidence, Feature, PerFeature, Scored, Scorer, Scoring, SpanFacts};
 pub use tables::{COUNTED, COUNTED_FROM};
-pub use weights::{EVEN, HAND, Priors, Tables, Weights};
+pub use version::{SHIPPED_HASH, numbers_hash};
+pub use weights::{EVEN, HAND, Priors, THRESHOLDS, Tables, Weights};
+
+/// Bumped whenever the reader can read the same notes differently (new weights, a new rule for hearing, decoding,
+/// naming or grading), so the chords the app keeps (the MIDI page's index) know to be read again. Version 1 is the
+/// first reader, on hand-set weights; the fit's first weights will be version 2.
+pub const CHORD_READER_VERSION: u32 = 1;

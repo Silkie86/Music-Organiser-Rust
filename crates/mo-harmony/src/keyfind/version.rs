@@ -9,35 +9,7 @@
 
 use super::colour::{COLOUR_NOTE, I7_SHARE, LEADING_NOTE, NO_SIXTH_BELOW};
 use super::{LEAST_SHARPNESS, MIN_NOTES, Model, heard, weights};
-
-/// FNV-1a over bytes, 64 bits: a hash that's the same on every machine and in every version of Rust.
-#[derive(Clone, Copy, Debug)]
-pub(super) struct Fnv(u64);
-
-impl Fnv {
-    pub(super) const fn new() -> Fnv {
-        Fnv(0xcbf2_9ce4_8422_2325)
-    }
-
-    pub(super) fn bytes(&mut self, bytes: &[u8]) {
-        for b in bytes {
-            self.0 ^= u64::from(*b);
-            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    }
-
-    pub(super) fn number(&mut self, n: i128) {
-        self.bytes(&n.to_le_bytes());
-    }
-
-    pub(super) fn real(&mut self, x: f64) {
-        self.bytes(&x.to_bits().to_le_bytes());
-    }
-
-    pub(super) const fn finish(self) -> u64 {
-        self.0
-    }
-}
+use crate::fnv::Fnv;
 
 /// A hash over every number the finder is built from: the model's (weights, calibration, thresholds, the share of
 /// notes in one scale a key needs) and those set by hand (the colour rules, the notes an answer needs, how the notes

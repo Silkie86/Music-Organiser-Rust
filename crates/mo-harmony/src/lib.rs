@@ -14,6 +14,7 @@
 
 pub mod chord;
 pub mod chordread;
+mod fnv;
 pub mod key;
 pub mod keyfind;
 pub mod names;
@@ -22,6 +23,10 @@ pub mod pitch;
 pub mod spell;
 
 pub use chord::{Chord, Family, ToneRole};
+pub use chordread::{
+    CHORD_READER_VERSION, Choice, ChoiceFrom, ChordAnswer, ChordContext, ChordReader, ChordReading, ChordSpan,
+    NameCheck, NoChord, Pin, Texture, read_chords,
+};
 pub use key::{Key, KeyRelation, Mode};
 pub use keyfind::{
     Colours, Heard, HintCheck, HintSource, KEY_FINDER_VERSION, KeyAnswer, KeyFact, KeyReader, KeyReading, Span,
