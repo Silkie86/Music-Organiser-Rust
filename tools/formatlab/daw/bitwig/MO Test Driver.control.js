@@ -37,7 +37,7 @@ var STEPS = [
     { tempo: 100, master: 0.5, volume: 0.7, pan: 0.0, on: true }
 ];
 
-var app, project, transport, master, cursorTrack, cursorDevice, changes;
+var app, project, popupBrowser, transport, master, cursorTrack, cursorDevice, changes;
 var running = false;
 /** Set when Save should run at Bitwig's next flush (Bitwig 6.1.3 only saved for a script from there). */
 var saveAtFlush = false;
@@ -49,6 +49,9 @@ function init() {
     app.projectName().markInterested();
     project = host.getProject();
     project.isModified().markInterested();
+    // Adding a track can open Bitwig's browser, which then holds the selection: it's closed (as the link does).
+    popupBrowser = host.createPopupBrowser();
+    popupBrowser.exists().markInterested();
     transport = host.createTransport();
     transport.tempo().markInterested();
     transport.isPlaying().markInterested();
@@ -101,6 +104,7 @@ function start() {
     app.createInstrumentTrack(-1);
     host.scheduleTask(function () {
         if (!allowed()) return finish();
+        if (popupBrowser.exists().get()) popupBrowser.cancel();
         cursorTrack.endOfDeviceChainInsertionPoint().insertCLAPDevice(PROBE);
         host.scheduleTask(record, 1500);
     }, 1500);
@@ -108,6 +112,7 @@ function start() {
 
 function record() {
     if (!allowed()) return finish();
+    if (popupBrowser.exists().get()) popupBrowser.cancel();
     if (!cursorDevice.exists().get() || String(cursorDevice.name().get()).indexOf("MO Probe") < 0) {
         say("the selected device isn't the new MO Probe, so nothing was recorded.");
         return finish();
