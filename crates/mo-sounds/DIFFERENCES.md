@@ -118,5 +118,6 @@ every star.
 |---|---|---|---|
 | Saving the map | `UpdateGalaxy` saves it to sounds.db. | `update` hands back what to save; the app saves it once sounds.db writes are trusted. | Same, for now |
 | A big library (6,000 sounds or more) | Settles on every core at once, so each layout differs a little. | The same way, so it can't be twin-checked; small libraries are. | Same |
+| Squashing fingerprints (PCA) | Adds eight products at a time, in an order .NET picks for the processor. | Copies the usual order, but can still differ in the last float digit; after 400 rounds of settling, a library of more than a few sounds can come out as a different picture of the same families. The twin test checks each step to within that rounding, and that settling from the C# app's own start gives its exact map. | Same (rounding) |
 | Stopping a layout | Throws when cancelled. | Gives nothing back (`None`). | Same |
 | A new sound whose nearest stars aren't on the map | Can't happen (it only compares mapped sounds). | Left unplaced rather than failing. | Same |

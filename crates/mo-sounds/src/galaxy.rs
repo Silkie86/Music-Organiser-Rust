@@ -250,6 +250,34 @@ pub fn twin_steps(
     (rows, init, nbr, dist, edges, rng.next())
 }
 
+/// The last steps of a small layout (settling, then evening out) from a starting picture and weighed pairs the twin
+/// test got from the C# app, with the random sequence where the first steps leave it. Not for the app.
+#[doc(hidden)]
+pub fn twin_settle(
+    ids: &[i64],
+    vector: &(dyn Fn(i64) -> Vec<f32> + Sync),
+    seed: i32,
+    mut pos: Vec<f64>,
+    edges: &[(usize, usize, f32)],
+) -> HashMap<i64, StarPoint> {
+    let mut order = ids.to_vec();
+    order.sort_unstable();
+    order.dedup();
+    let n = order.len();
+    let mut rng = DotnetRandom::new(seed);
+    // Only to take as many numbers from the sequence as the first steps do.
+    let _ = pca(&order, vector, &mut rng, &|| false);
+    let edges: Vec<Edge> = edges.iter().map(|&(i, j, w)| Edge { i, j, w }).collect();
+    let epochs = if n <= 10_000 { 400 } else { 200 };
+    let _ = optimise(&mut pos, &edges, n, epochs, &mut rng, &|| false);
+    finish(&mut pos, n);
+    order
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (*id, StarPoint { x: pos[2 * i] as f32, y: pos[2 * i + 1] as f32 }))
+        .collect()
+}
+
 /// Evens the picture out a little and fits it into 0..1, with one scale both ways and a margin for the labels.
 ///
 /// Evening out is the same in every direction: each star keeps its direction from the middle, but its distance moves

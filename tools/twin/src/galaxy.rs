@@ -1,7 +1,13 @@
 //! The galaxy twin: both apps lay a galaxy out from the same made-up fingerprints (families of sound-alikes, sounds
-//! that are exact copies, a library of just four), then place the sounds marked new on it. Every star must sit in the
-//! same place. Only small libraries are compared: a big one settles on every core at once, so even the C# app gives a
-//! slightly different map each time. Run as part of `twin sounds`, in its own folder.
+//! that are exact copies, a library of just four), then place the sounds marked new on it.
+//!
+//! The smallest libraries must come out star for star the same. For the bigger ones, each step is compared on its
+//! own: the C# app squashes fingerprints with sums it adds eight at a time, in an order .NET picks for the processor,
+//! so its numbers can differ from Rust's in the last float digit, and 400 rounds of settling grow that into a
+//! different (equally good) picture. So the steps must agree to within that rounding, with the same sound-alikes,
+//! and Rust settling from the C# app's own start, and placing new sounds on its map, must land every star where C#
+//! does. Libraries of 6,000 sounds or more settle on every core at once, which no two runs repeat, so they aren't
+//! compared. Run as part of `twin sounds`, in its own folder.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -71,8 +77,7 @@ fn cases() -> Vec<Case> {
 fn rust_side(c: &Case) -> (Value, Value) {
     let all: HashMap<i64, Vec<f32>> = c.vectors.iter().cloned().collect();
     let get = |id: i64| all[&id].clone();
-    let old: Vec<i64> = c.vectors.iter().map(|(id, _)| *id).filter(|id| !c.new.contains(id)).collect();
-    let map = layout(&old, &get, SEED, EXACT_BELOW, &|_| {}, &AtomicBool::new(false)).unwrap_or_default();
+    let map = layout(&old_ids(c), &get, SEED, EXACT_BELOW, &|_| {}, &AtomicBool::new(false)).unwrap_or_default();
     // As C#'s PlaceNew(vectors, map): every sound the map lacks, compared with every one it has.
     let new: Vec<i64> = c.vectors.iter().map(|(id, _)| *id).filter(|id| !map.contains_key(id)).collect();
     let mapped: Vec<i64> = c.vectors.iter().map(|(id, _)| *id).filter(|id| map.contains_key(id)).collect();
@@ -115,40 +120,92 @@ fn differences(what: &str, cs: &Value, rust: &Value, out: &mut Vec<String>) {
     }
 }
 
-/// Where a layout first parts from the C# app's, step by step: the biggest gap in each.
+/// Each step of a layout beside the C# app's. The sound-alikes found and the random numbers used must be the same;
+/// the numbers worked out may differ in their last float digit (the C# app adds eight products at a time, in an order
+/// .NET picks for the processor), so they must agree to within a hundred-thousandth of their size.
 fn steps(c: &Case, cs: &Value, out: &mut Vec<String>) {
     let all: HashMap<i64, Vec<f32>> = c.vectors.iter().cloned().collect();
     let get = |id: i64| all[&id].clone();
-    let old: Vec<i64> = c.vectors.iter().map(|(id, _)| *id).filter(|id| !c.new.contains(id)).collect();
-    let (reduced, init, nbr, dist, edges, next) = mo_sounds::galaxy::twin_steps(&old, &get, SEED);
-    let flat = |v: &Value| -> Vec<f64> {
-        let mut o = Vec::new();
-        let mut walk = vec![v];
-        while let Some(x) = walk.pop() {
-            match x {
-                Value::Array(a) => walk.extend(a.iter().rev()),
-                _ => o.push(x.as_f64().unwrap_or(f64::NAN)),
-            }
-        }
-        o
-    };
+    let (reduced, init, nbr, dist, edges, next) = mo_sounds::galaxy::twin_steps(&old_ids(c), &get, SEED);
     let edges: Vec<Value> = edges.iter().map(|(i, j, w)| json!([i, j, w])).collect();
     let rust = [json!(reduced), json!(init), json!(nbr), json!(dist), json!(edges), json!(next)];
     for (name, r) in ["Reduced", "Init", "Nbr", "Dist", "Edges", "Next"].iter().zip(rust) {
         let (a, b) = (flat(&cs[*name]), flat(&r));
-        let gap = if a.len() == b.len() {
-            a.iter().zip(&b).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max)
+        let exact = matches!(*name, "Nbr" | "Next");
+        let off = if a.len() == b.len() {
+            a.iter()
+                .zip(&b)
+                .filter(|(x, y)| {
+                    let gap = (*x - *y).abs();
+                    gap.is_nan() || if exact { gap > 0.0 } else { gap > 1e-5 * x.abs().max(1.0) }
+                })
+                .count()
         } else {
-            f64::INFINITY
+            a.len().max(b.len())
         };
-        let first = a.iter().zip(&b).position(|(x, y)| x != y);
-        out.push(format!(
-            "galaxy, {}, step {name}: {} vs {} numbers, biggest gap {gap:.2e}, first different at {first:?}",
-            c.name,
-            a.len(),
-            b.len()
-        ));
+        if off > 0 {
+            out.push(format!(
+                "galaxy, {}, step {name}: {off} of {} numbers differ (Rust has {})",
+                c.name,
+                a.len(),
+                b.len()
+            ));
+        }
     }
+}
+
+/// Every number in a JSON value, in order.
+fn flat(v: &Value) -> Vec<f64> {
+    let mut o = Vec::new();
+    let mut walk = vec![v];
+    while let Some(x) = walk.pop() {
+        match x {
+            Value::Array(a) => walk.extend(a.iter().rev()),
+            _ => o.push(x.as_f64().unwrap_or(f64::NAN)),
+        }
+    }
+    o
+}
+
+fn old_ids(c: &Case) -> Vec<i64> {
+    c.vectors.iter().map(|(id, _)| *id).filter(|id| !c.new.contains(id)).collect()
+}
+
+/// Rust settling from the C# app's starting picture and weighed pairs, and placing the new sounds on the C# map.
+fn from_cs(c: &Case, cs: &Value) -> (Value, Value) {
+    let all: HashMap<i64, Vec<f32>> = c.vectors.iter().cloned().collect();
+    let get = |id: i64| all[&id].clone();
+    let steps = &cs["steps"];
+    let init = flat(&steps["Init"]);
+    let edges: Vec<(usize, usize, f32)> = steps["Edges"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|e| {
+                    (
+                        e[0].as_u64().unwrap_or(0) as usize,
+                        e[1].as_u64().unwrap_or(0) as usize,
+                        e[2].as_f64().unwrap_or(0.0) as f32,
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let settled = mo_sounds::galaxy::twin_settle(&old_ids(c), &get, SEED, init, &edges);
+    let cs_map: HashMap<i64, StarPoint> = cs["map"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|p| {
+                    let f = |t: usize| p[t].as_f64().unwrap_or(f64::NAN) as f32;
+                    (p[0].as_i64().unwrap_or(0), StarPoint { x: f(1), y: f(2) })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let new: Vec<i64> = c.vectors.iter().map(|(id, _)| *id).filter(|id| !cs_map.contains_key(id)).collect();
+    let mapped: Vec<i64> = c.vectors.iter().map(|(id, _)| *id).filter(|id| cs_map.contains_key(id)).collect();
+    (points(&settled), points(&place_new(&new, &mapped, &get, &cs_map)))
 }
 
 /// Writes the cases into `dir` (the twin's own new folder), has both apps lay them out, and gives every difference.
@@ -176,11 +233,21 @@ pub fn compare(helper: &Path, dir: &Path) -> Result<Vec<String>, String> {
             out.push(format!("galaxy, {}: the C# helper failed: {e}", c.name));
             continue;
         }
-        let (map, placed) = rust_side(c);
-        differences(&format!("galaxy, {}, laid out", c.name), &cs["map"], &map, &mut out);
-        differences(&format!("galaxy, {}, new sounds placed", c.name), &cs["placed"], &placed, &mut out);
-        if c.steps && !out.is_empty() {
+        if c.steps {
+            // A bigger library: each step in turn, then the settling and placing from the C# app's own inputs.
             steps(c, &cs["steps"], &mut out);
+            let (map, placed) = from_cs(c, cs);
+            differences(&format!("galaxy, {}, settled from C#'s start", c.name), &cs["map"], &map, &mut out);
+            differences(
+                &format!("galaxy, {}, new sounds placed on C#'s map", c.name),
+                &cs["placed"],
+                &placed,
+                &mut out,
+            );
+        } else {
+            let (map, placed) = rust_side(c);
+            differences(&format!("galaxy, {}, laid out", c.name), &cs["map"], &map, &mut out);
+            differences(&format!("galaxy, {}, new sounds placed", c.name), &cs["placed"], &placed, &mut out);
         }
     }
     Ok(out)
