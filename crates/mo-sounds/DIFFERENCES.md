@@ -107,3 +107,16 @@ for the Space page. The twin test has the C# app group the same made-up copies i
 |---|---|---|---|
 | A trimmed (or only similar) copy alone in its set | Described against itself: always "Longer version (x s)". | Described against the one to keep: "Trimmed: 0.5 s of 2 s". | Better (bug in C#) |
 | A copy kind stored as a number ("1") | Read as that kind. | The same. | Same |
+
+## Galaxy
+
+`galaxy` ports `GalaxyMap` (laying the map out, placing new sounds) and the galaxy part of `SoundOrganiser` (which
+fingerprints, when to lay out afresh). The twin test lays out the same made-up libraries in both apps and compares
+every star.
+
+| What | C# | Rust | Judged |
+|---|---|---|---|
+| Saving the map | `UpdateGalaxy` saves it to sounds.db. | `update` hands back what to save; the app saves it once sounds.db writes are trusted. | Same, for now |
+| A big library (6,000 sounds or more) | Settles on every core at once, so each layout differs a little. | The same way, so it can't be twin-checked; small libraries are. | Same |
+| Stopping a layout | Throws when cancelled. | Gives nothing back (`None`). | Same |
+| A new sound whose nearest stars aren't on the map | Can't happen (it only compares mapped sounds). | Left unplaced rather than failing. | Same |

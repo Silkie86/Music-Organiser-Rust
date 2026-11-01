@@ -158,7 +158,12 @@ pub fn run(helper: &Path, parent: &Path) -> Result<bool, String> {
         for d in &rediscover {
             println!("  {d}");
         }
-        Ok(sounds_same && differences.is_empty() && likeness.is_empty() && rediscover.is_empty())
+        let galaxy = crate::galaxy::compare(helper, &dir)?;
+        println!("Galaxy twin: {} differences in where the stars sit.", galaxy.len());
+        for d in &galaxy {
+            println!("  {d}");
+        }
+        Ok(sounds_same && differences.is_empty() && likeness.is_empty() && rediscover.is_empty() && galaxy.is_empty())
     });
     let _ = std::fs::remove_dir_all(&dir);
     outcome

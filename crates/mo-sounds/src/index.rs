@@ -131,6 +131,16 @@ impl VectorIndex {
         self.ids.is_empty()
     }
 
+    /// How many numbers each vector has (0 for an empty index).
+    pub fn dim(&self) -> usize {
+        self.dim
+    }
+
+    /// The ids it holds, in order.
+    pub fn ids(&self) -> &[i64] {
+        &self.ids
+    }
+
     pub fn contains(&self, id: i64) -> bool {
         self.ids.binary_search(&id).is_ok()
     }

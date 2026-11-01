@@ -69,13 +69,15 @@ var similar = args is ["--similar"];
 // `twin-cs --rediscover`: each file is a made-up sound library (for Rediscover and kits) made by tools/twin/src/rediscover.rs; it's saved to a new
 // sounds.db beside it (which the Rust side then reads) and Rediscover is asked the case's questions.
 var rediscover = args is ["--rediscover"];
+// `twin-cs --galaxy`: each file is a galaxy case (vectors, and the sounds new since the map) made by tools/twin/src/galaxy.rs.
+var galaxy = args is ["--galaxy"];
 var output = Console.OpenStandardOutput();
 var gate = new object();
 Parallel.ForEach(files, file =>
 {
     string json;
     // One odd value (JSON has no NaN) loses that file's reading, not the whole run.
-    try { json = (sounds ? DumpSound(file) : classify ? DumpClassify(file) : similar ? DumpSimilar(file) : rediscover ? DumpRediscover(file) : Dump(file)).ToJsonString(); }
+    try { json = (sounds ? DumpSound(file) : classify ? DumpClassify(file) : similar ? DumpSimilar(file) : rediscover ? DumpRediscover(file) : galaxy ? DumpGalaxy(file) : Dump(file)).ToJsonString(); }
     catch (Exception e) { json = new JsonObject { ["file"] = file, ["error_more"] = $"couldn't write it: {e.Message}" }.ToJsonString(); }
     var bytes = System.Text.Encoding.UTF8.GetBytes(json + "\n");
     lock (gate) output.Write(bytes);
@@ -159,6 +161,28 @@ static JsonObject DumpSimilar(string path)
                 .Select(t => (JsonNode)new JsonObject { ["Id"] = t.Id, ["Score"] = t.Score }).ToArray()));
         }
         o["nearest"] = nearest;
+    }
+    catch (Exception e) { o["error"] = $"{e.GetType().Name}: {e.Message}"; }
+    return o;
+}
+
+// The galaxy laid out from a case's vectors (the sounds not marked new), then the new sounds placed on it.
+static JsonObject DumpGalaxy(string path)
+{
+    var o = new JsonObject { ["file"] = path };
+    try
+    {
+        var c = JsonNode.Parse(File.ReadAllText(path))!;
+        var vectors = new Dictionary<long, float[]>();
+        foreach (var e in c["Vectors"]!.AsArray())
+            vectors[e![0]!.GetValue<long>()] = e[1]!.AsArray().Select(n => n!.GetValue<float>()).ToArray();
+        var isNew = c["New"]!.AsArray().Select(n => n!.GetValue<long>()).ToHashSet();
+        var old = vectors.Where(kv => !isNew.Contains(kv.Key)).ToDictionary(kv => kv.Key, kv => kv.Value);
+        static JsonArray Points(IReadOnlyDictionary<long, MusicOrganiser.Core.Sounds.StarPoint> map) =>
+            new(map.OrderBy(kv => kv.Key).Select(kv => (JsonNode)new JsonArray(kv.Key, kv.Value.X, kv.Value.Y)).ToArray());
+        var map = MusicOrganiser.Core.Sounds.GalaxyMap.Layout(old);
+        o["map"] = Points(map);
+        o["placed"] = Points(MusicOrganiser.Core.Sounds.GalaxyMap.PlaceNew(vectors, map));
     }
     catch (Exception e) { o["error"] = $"{e.GetType().Name}: {e.Message}"; }
     return o;

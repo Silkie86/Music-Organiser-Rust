@@ -1,6 +1,6 @@
 [package]
 name = "mo-sounds"
-description = "Your sound library: reads the C# app's sounds.db (read-only until it's trusted), sound types from names, keys and Camelot codes. Analysis, duplicates and the galaxy layout come later. No UI in it."
+description = "Your sound library: reads the C# app's sounds.db (read-only until it's trusted), sound types from names, keys and Camelot codes. Analysis, likeness, Rediscover, kits, duplicates and the galaxy map. No UI in it."
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
