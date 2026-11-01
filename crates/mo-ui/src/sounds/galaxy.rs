@@ -1,7 +1,8 @@
 //! The Sounds page's galaxy: every sound as a star on a map, sound-alikes close together (`mo_sounds::galaxy`). The
 //! map is the C# app's saved one, brought up to date (or laid out afresh) on the low-priority pool; it's kept in
 //! memory only, as sounds.db stays read-only until it's trusted. The stars are drawn into a picture off the window's
-//! thread, newest ask first, so 450,000 of them cost one image; the filters dim the stars they leave out.
+//! thread, newest ask first, so 450,000 of them cost one image; the filters dim the stars they leave out. Which part
+//! of the map is on show, the wheel and clicks versus drags are `mo_app::galaxy_view`'s.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -10,8 +11,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use mo_app::background::{self, Newest};
+use mo_app::galaxy_view::{Moved, View};
 use mo_app::log;
-use mo_app::sounds::{self as list, SoundList};
+use mo_app::sounds as list;
 use mo_sounds::galaxy::{self, Placing, Step};
 use mo_sounds::{SoundsDb, StarPoint};
 use slint::{ComponentHandle, Image, Model, Rgba8Pixel, SharedPixelBuffer};
@@ -22,12 +24,13 @@ use crate::{AppWindow, SoundsData, Theme};
 /// The Placed by choices, as the page names them, and what each places the stars by.
 const PLACINGS: [(&str, Placing); 3] =
     [("Both", Placing::Both), ("Deep listening", Placing::Clap), ("Measurements", Placing::Own)];
-/// How far in the map can be zoomed.
-const MOST_ZOOM: f32 = 60.0;
 /// How near the mouse (in the window's points) a star has to be to be the one under it.
 const NEAR: f32 = 8.0;
 /// The grid the drawn stars are sorted into, for finding the one under the mouse (in pixels).
 const CELL: usize = 16;
+
+/// The map as it arrives: every star by its place in the list, and each one's colour.
+type Arrived = Option<(Vec<Option<StarPoint>>, Vec<i32>)>;
 
 /// The galaxy's part of the page.
 pub(super) struct Galaxy {
@@ -36,26 +39,21 @@ pub(super) struct Galaxy {
     placing: Placing,
     /// Every star's place on the map (0 to 1), by its place in the list; `None` until the map is in.
     stars: Option<Arc<Vec<Option<StarPoint>>>>,
+    /// Each star's colour, as its place in `Theme.sound-types` (-1 grey), by its place in the list.
+    colours: Option<Arc<Vec<i32>>>,
     /// The map being read or laid out, and what stops it.
     loading: Option<Arc<AtomicBool>>,
     note: String,
-    /// The part of the map on show: its middle, and how far in.
-    cx: f32,
-    cy: f32,
-    zoom: f32,
-    /// The view's size in the window's points, and pixels per point.
-    width: f32,
-    height: f32,
+    /// The part of the map on show, and a press on it.
+    view: View,
+    /// Pixels per point.
     scale: f32,
+    /// The press going on was cancelled (the window lost the mouse), so it isn't a click.
+    cancelled: bool,
     /// Counts the pictures asked for, so an older one that arrives late is dropped.
     asked: u64,
     /// Where each star was drawn, to find the one under the mouse.
     hits: Option<Arc<Hits>>,
-    /// A press: where it started, and the map's middle then.
-    drag: Option<(f32, f32, f32, f32)>,
-    /// Where the mouse last was on the view.
-    mouse: (f32, f32),
-    dragged: bool,
 }
 
 impl Default for Galaxy {
@@ -64,33 +62,15 @@ impl Default for Galaxy {
             db: None,
             placing: Placing::Both,
             stars: None,
+            colours: None,
             loading: None,
             note: String::new(),
-            cx: 0.5,
-            cy: 0.5,
-            zoom: 1.0,
-            width: 0.0,
-            height: 0.0,
+            view: View::default(),
             scale: 1.0,
+            cancelled: false,
             asked: 0,
             hits: None,
-            drag: None,
-            mouse: (0.0, 0.0),
-            dragged: false,
         }
-    }
-}
-
-impl Galaxy {
-    /// Pixels per map unit at this zoom: the map's square fits the view's shorter side.
-    fn unit(&self) -> f32 {
-        self.width.min(self.height).max(1.0) * 0.92 * self.zoom
-    }
-
-    /// Where a map point is on the view, in points.
-    fn to_view(&self, p: StarPoint) -> (f32, f32) {
-        let u = self.unit();
-        (self.width / 2.0 + (p.x - self.cx) * u, self.height / 2.0 + (p.y - self.cy) * u)
     }
 }
 
@@ -150,10 +130,7 @@ pub(super) fn wire(app: &AppWindow) {
     let weak = app.as_weak();
     data.on_galaxy_reset(move || {
         let Some(app) = weak.upgrade() else { return };
-        PAGE.with(|p| {
-            let g = &mut p.borrow_mut().galaxy;
-            (g.cx, g.cy, g.zoom) = (0.5, 0.5, 1.0);
-        });
+        PAGE.with(|p| p.borrow_mut().galaxy.view.whole());
         draw(&app);
     });
     let weak = app.as_weak();
@@ -162,23 +139,14 @@ pub(super) fn wire(app: &AppWindow) {
         let scale = app.window().scale_factor();
         PAGE.with(|p| {
             let g = &mut p.borrow_mut().galaxy;
-            (g.width, g.height, g.scale) = (w, h, scale);
+            (g.view.width, g.view.height, g.scale) = (w, h, scale);
         });
         draw(&app);
     });
     let weak = app.as_weak();
-    data.on_galaxy_wheel(move |steps| {
+    data.on_galaxy_wheel(move |notches| {
         let Some(app) = weak.upgrade() else { return };
-        PAGE.with(|p| {
-            let g = &mut p.borrow_mut().galaxy;
-            let (x, y) = g.mouse;
-            let u = g.unit();
-            // The map point under the mouse stays under it.
-            let (mx, my) = (g.cx + (x - g.width / 2.0) / u, g.cy + (y - g.height / 2.0) / u);
-            g.zoom = (g.zoom * 1.25f32.powf(steps)).clamp(1.0, MOST_ZOOM);
-            let u = g.unit();
-            (g.cx, g.cy) = (mx - (x - g.width / 2.0) / u, my - (y - g.height / 2.0) / u);
-        });
+        PAGE.with(|p| p.borrow_mut().galaxy.view.zoom_at_mouse(notches));
         draw(&app);
     });
     let weak = app.as_weak();
@@ -186,33 +154,23 @@ pub(super) fn wire(app: &AppWindow) {
         let Some(app) = weak.upgrade() else { return };
         PAGE.with(|p| {
             let g = &mut p.borrow_mut().galaxy;
-            g.drag = Some((x, y, g.cx, g.cy));
-            g.dragged = false;
+            g.view.press(x, y);
+            g.cancelled = false;
         });
         app.global::<SoundsData>().set_galaxy_grabbing(true);
     });
     let weak = app.as_weak();
     data.on_galaxy_move(move |x, y| {
         let Some(app) = weak.upgrade() else { return };
-        let moved = PAGE.with(|p| {
-            let g = &mut p.borrow_mut().galaxy;
-            g.mouse = (x, y);
-            let (x0, y0, cx0, cy0) = g.drag?;
-            if (x - x0).abs() + (y - y0).abs() > 4.0 {
-                g.dragged = true;
-            }
-            let u = g.unit();
-            (g.cx, g.cy) = (cx0 - (x - x0) / u, cy0 - (y - y0) / u);
-            Some(g.dragged)
-        });
+        let moved = PAGE.with(|p| p.borrow_mut().galaxy.view.moved(x, y));
         let data = app.global::<SoundsData>();
         match moved {
-            Some(true) => {
+            Moved::Panned => {
                 data.set_galaxy_hover_text("".into());
                 draw(&app);
             }
-            Some(false) => {}
-            None => {
+            Moved::Still => {}
+            Moved::Hover => {
                 let found = star_at(x, y);
                 let name = PAGE.with(|p| {
                     let p = p.borrow();
@@ -224,14 +182,15 @@ pub(super) fn wire(app: &AppWindow) {
             }
         }
     });
+    data.on_galaxy_cancelled(|| PAGE.with(|p| p.borrow_mut().galaxy.cancelled = true));
     let weak = app.as_weak();
     data.on_galaxy_up(move || {
         let Some(app) = weak.upgrade() else { return };
         app.global::<SoundsData>().set_galaxy_grabbing(false);
         let click = PAGE.with(|p| {
             let g = &mut p.borrow_mut().galaxy;
-            let was = g.drag.take();
-            (!std::mem::take(&mut g.dragged)).then_some(was).flatten().map(|d| (d.0, d.1))
+            let cancelled = std::mem::take(&mut g.cancelled);
+            g.view.release(cancelled)
         });
         let Some(at) = click.and_then(|(x, y)| star_at(x, y)) else { return };
         pick(&app, at);
@@ -239,11 +198,15 @@ pub(super) fn wire(app: &AppWindow) {
             play_picked(&app, 0.0);
         }
     });
+    // A double-click plays the star; with autoplay on, its first click already did.
     let weak = app.as_weak();
     data.on_galaxy_double(move || {
         let Some(app) = weak.upgrade() else { return };
-        let (x, y) = PAGE.with(|p| p.borrow().galaxy.mouse);
-        if let Some(at) = star_at(x, y) {
+        let (autoplay, (x, y)) = PAGE.with(|p| {
+            let p = p.borrow();
+            (p.autoplay, p.galaxy.view.mouse)
+        });
+        if !autoplay && let Some(at) = star_at(x, y) {
             pick(&app, at);
             play_picked(&app, 0.0);
         }
@@ -271,16 +234,22 @@ pub(super) fn forget(g: &mut Galaxy) {
         old.store(true, Ordering::Relaxed);
     }
     g.stars = None;
+    g.colours = None;
     g.hits = None;
+    g.note = String::new();
 }
 
-/// The view came on show: reads the map the first time.
+/// The view came on show (or a new library did while it was): reads the map the first time.
 pub(super) fn shown(app: &AppWindow) {
     let start = PAGE.with(|p| {
         let p = p.borrow();
         p.galaxy.stars.is_none() && p.galaxy.loading.is_none()
     });
     if start {
+        // The old library's picture goes; the new map is on its way.
+        let data = app.global::<SoundsData>();
+        data.set_galaxy_image(Image::default());
+        data.set_galaxy_picked_shown(false);
         load(app, false);
     } else {
         draw(app);
@@ -352,15 +321,17 @@ fn load(app: &AppWindow, fresh: bool) {
             }
             (stars, u.replace)
         });
+        // Each star's colour, worked out once rather than on every picture.
+        let colours: Vec<i32> = list.sounds().iter().map(|s| list::type_colour(&s.sound_type)).collect();
         match (&stars, job) {
             (Some((_, true)), Some(job)) => job.done("Laid out afresh (kept in memory until sounds.db is trusted)"),
             (Some(_), Some(job)) => job.done("Up to date"),
             (None, Some(job)) => job.done("Stopped"),
             _ => {}
         }
-        stars.map(|s| s.0)
+        stars.map(|s| (s.0, colours))
     };
-    let arrive = move |app: &AppWindow, stars: Option<Vec<Option<StarPoint>>>, cancel: &Arc<AtomicBool>| {
+    let arrive = move |app: &AppWindow, stars: Arrived, cancel: &Arc<AtomicBool>| {
         let current = PAGE.with(|p| {
             let mut p = p.borrow_mut();
             let g = &mut p.galaxy;
@@ -368,7 +339,7 @@ fn load(app: &AppWindow, fresh: bool) {
                 return false;
             }
             g.loading = None;
-            if let Some(stars) = stars {
+            if let Some((stars, colours)) = stars {
                 let n = stars.iter().filter(|s| s.is_some()).count();
                 g.note = if n == 0 {
                     "No sounds on the map yet: the analysis hasn't heard any.".to_owned()
@@ -376,6 +347,7 @@ fn load(app: &AppWindow, fresh: bool) {
                     String::new()
                 };
                 g.stars = Some(Arc::new(stars));
+                g.colours = Some(Arc::new(colours));
             }
             true
         });
@@ -416,23 +388,19 @@ fn show_note(app: &AppWindow) {
 struct Picture {
     id: u64,
     stars: Arc<Vec<Option<StarPoint>>>,
-    list: Arc<SoundList>,
+    /// Each star's place in `palette`.
+    colours: Arc<Vec<i32>>,
     shown: Arc<Vec<usize>>,
     /// Every sound type's colour (as `Theme.sound-types`), then grey for a sound with no type.
-    colours: Vec<[u8; 3]>,
-    width: usize,
-    height: usize,
-    /// Pixels per map unit, and the map's middle.
-    unit: f32,
-    cx: f32,
-    cy: f32,
-    zoom: f32,
+    palette: Vec<[u8; 3]>,
+    view: View,
     scale: f32,
 }
 
 impl Picture {
     fn draw(self) -> (u64, SharedPixelBuffer<Rgba8Pixel>, Hits) {
-        let (w, h) = (self.width, self.height);
+        let (w, h) =
+            ((self.view.width * self.scale).round() as usize, (self.view.height * self.scale).round() as usize);
         let mut px = SharedPixelBuffer::<Rgba8Pixel>::new(w as u32, h as u32);
         let columns = w.div_ceil(CELL).max(1);
         let rows = h.div_ceil(CELL).max(1);
@@ -443,14 +411,12 @@ impl Picture {
                 *o = true;
             }
         }
-        let place = |p: StarPoint| {
-            ((w as f32) / 2.0 + (p.x - self.cx) * self.unit, (h as f32) / 2.0 + (p.y - self.cy) * self.unit)
-        };
-        // Stars grow a little as the map is zoomed in, so a close look shows each one.
-        // A small library gets bigger stars, so a few dozen don't look like dust.
+        // A small library gets bigger stars, so a few dozen don't look like dust; and they grow a little as the map is
+        // zoomed in, so a close look shows each one.
         let n = self.stars.iter().filter(|s| s.is_some()).count().max(1) as f32;
         let base = (200.0 / n.sqrt()).clamp(1.2, 4.5);
-        let r = self.scale * (base + (self.zoom - 1.0).max(0.0).sqrt() * 0.5).min(6.0);
+        let r = self.scale * (base + (self.view.zoom - 1.0).max(0.0).sqrt() * 0.5).min(6.0);
+        let grey = self.palette.last().copied().unwrap_or([128, 128, 128]);
         let buf = px.make_mut_slice();
         // The ones the filters leave out first, faint, then the shown ones over them.
         for pass in [false, true] {
@@ -459,19 +425,17 @@ impl Picture {
                 if on[at] != pass {
                     continue;
                 }
-                let (x, y) = place(p);
+                let (x, y) = self.view.to_view(p.x, p.y, self.scale);
                 if x < -r || y < -r || x > w as f32 + r || y > h as f32 + r {
                     continue;
                 }
                 let colour = self
-                    .list
-                    .sound(at)
-                    .map(|s| list::type_colour(&s.sound_type))
-                    .and_then(|i| usize::try_from(i).ok())
-                    .and_then(|i| self.colours.get(i))
-                    .or(self.colours.last())
+                    .colours
+                    .get(at)
+                    .and_then(|&i| usize::try_from(i).ok())
+                    .and_then(|i| self.palette.get(i))
                     .copied()
-                    .unwrap_or([128, 128, 128]);
+                    .unwrap_or(grey);
                 disc(buf, w, h, x, y, if pass { r } else { r * 0.8 }, colour, if pass { 0.9 } else { 0.14 });
                 if pass && x >= 0.0 && y >= 0.0 {
                     let (gx, gy) = (x as usize / CELL, y as usize / CELL);
@@ -509,37 +473,28 @@ fn disc(buf: &mut [Rgba8Pixel], w: usize, h: usize, x: f32, y: f32, r: f32, c: [
 
 /// Draws the stars again (the map, the view, the filters or the window's size changed), off the window's thread.
 pub(super) fn draw(app: &AppWindow) {
+    let on_show = PAGE.with(|p| {
+        let p = p.borrow();
+        p.view == super::GALAXY && p.galaxy.stars.is_some()
+    });
+    if !on_show {
+        show_picked(app);
+        return;
+    }
     let types = app.global::<Theme>().get_sound_types();
-    let mut colours: Vec<[u8; 3]> = types.iter().map(|c| [c.red(), c.green(), c.blue()]).collect();
-    colours.push([110, 110, 110]);
+    let mut palette: Vec<[u8; 3]> = types.iter().map(|c| [c.red(), c.green(), c.blue()]).collect();
+    palette.push([110, 110, 110]);
     let ask = PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        if p.view != super::GALAXY {
-            return None;
-        }
-        let shown = Arc::new(p.shown.clone());
-        let list = p.list.clone();
+        let shown = p.shown.clone();
         let g = &mut p.galaxy;
         let stars = g.stars.clone()?;
-        let (width, height) = ((g.width * g.scale).round() as usize, (g.height * g.scale).round() as usize);
-        if width == 0 || height == 0 {
+        let colours = g.colours.clone()?;
+        if g.view.width < 1.0 || g.view.height < 1.0 {
             return None;
         }
         g.asked += 1;
-        Some(Picture {
-            id: g.asked,
-            stars,
-            list,
-            shown,
-            colours,
-            width,
-            height,
-            unit: g.unit() * g.scale,
-            cx: g.cx,
-            cy: g.cy,
-            zoom: g.zoom,
-            scale: g.scale,
-        })
+        Some(Picture { id: g.asked, stars, colours, shown, palette, view: g.view, scale: g.scale })
     });
     let Some(ask) = ask else {
         show_picked(app);
@@ -595,8 +550,8 @@ pub(super) fn show_picked(app: &AppWindow) {
         let p = p.borrow();
         let g = &p.galaxy;
         let star = (*g.stars.as_ref()?.get(p.picked?)?)?;
-        let (x, y) = g.to_view(star);
-        (x >= 0.0 && y >= 0.0 && x <= g.width && y <= g.height).then_some((x, y))
+        let (x, y) = g.view.to_view(star.x, star.y, 1.0);
+        (x >= 0.0 && y >= 0.0 && x <= g.view.width && y <= g.view.height).then_some((x, y))
     });
     data.set_galaxy_picked_shown(at.is_some());
     if let Some((x, y)) = at {

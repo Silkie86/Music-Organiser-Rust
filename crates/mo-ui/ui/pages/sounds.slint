@@ -167,6 +167,7 @@ export global SoundsData {
     callback galaxy-down(length, length);
     callback galaxy-move(length, length);
     callback galaxy-up();
+    callback galaxy-cancelled();
     callback galaxy-double();
     callback galaxy-wheel(float);
     callback galaxy-gone();
@@ -1253,6 +1254,7 @@ export component SoundsPage inherits Rectangle {
                                 SoundsData.galaxy-down(x, y);
                             }
                             move(x, y) => { SoundsData.galaxy-move(x, y); }
+                            cancelled => { SoundsData.galaxy-cancelled(); }
                             up => { SoundsData.galaxy-up(); }
                             double => { SoundsData.galaxy-double(); }
                             wheel(x, dx, dy, ctrl, shift) => { SoundsData.galaxy-wheel(dy); }

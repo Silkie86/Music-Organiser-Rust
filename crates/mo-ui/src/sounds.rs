@@ -85,7 +85,7 @@ struct Page {
     seed: u64,
     view: i32,
     /// What the filters let through, in order, as places in `list`.
-    shown: Vec<usize>,
+    shown: Arc<Vec<usize>>,
     /// What History shows: the sounds played, newest first, as places in `list`, with when.
     history: Vec<(usize, NaiveDateTime)>,
     /// How many tiles fit side by side.
@@ -128,7 +128,7 @@ impl Default for Page {
             order: Order::default(),
             seed: new_seed(),
             view: TILES,
-            shown: Vec::new(),
+            shown: Arc::default(),
             history: Vec::new(),
             columns: 4,
             picked: None,
@@ -735,8 +735,10 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
     refresh(app);
     show_rediscover_chips(app);
     kit::show(app);
-    if PAGE.with(|p| p.borrow().view == REDISCOVER) {
-        rediscover_now(app);
+    match PAGE.with(|p| p.borrow().view) {
+        REDISCOVER => rediscover_now(app),
+        GALAXY => galaxy::shown(app),
+        _ => {}
     }
 }
 
@@ -1229,7 +1231,7 @@ fn listed(app: &AppWindow, id: u64, shown: Vec<usize>) {
         if p.asked != id {
             return false;
         }
-        p.shown = shown;
+        p.shown = Arc::new(shown);
         true
     });
     if current {

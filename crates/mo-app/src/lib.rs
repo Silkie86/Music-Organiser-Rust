@@ -5,6 +5,7 @@ pub mod activity;
 pub mod arrangement;
 pub mod background;
 pub mod backup;
+pub mod galaxy_view;
 pub mod live;
 pub mod log;
 pub mod note;
