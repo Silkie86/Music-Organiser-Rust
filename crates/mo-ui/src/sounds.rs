@@ -4,6 +4,7 @@
 //! the list draws them, so 357,000 sounds cost what's on screen. Sounds are read and played off the window's thread.
 //! Rediscover (unused sounds that fit your taste) is dug out on its own low-priority thread too.
 
+mod galaxy;
 mod kit;
 
 use std::cell::RefCell;
@@ -47,6 +48,7 @@ const COUNT_KEY: &str = "rediscover_count";
 /// The views, in the order of the page's view buttons.
 const TILES: i32 = 0;
 const LIST: i32 = 1;
+const GALAXY: i32 = 2;
 const HISTORY: i32 = 3;
 const REDISCOVER: i32 = 4;
 const KITS: i32 = 5;
@@ -83,7 +85,7 @@ struct Page {
     seed: u64,
     view: i32,
     /// What the filters let through, in order, as places in `list`.
-    shown: Vec<usize>,
+    shown: Arc<Vec<usize>>,
     /// What History shows: the sounds played, newest first, as places in `list`, with when.
     history: Vec<(usize, NaiveDateTime)>,
     /// How many tiles fit side by side.
@@ -114,6 +116,8 @@ struct Page {
     re_busy: bool,
     /// The kit builder's pads and choices.
     kit: kit::Kit,
+    /// The galaxy's map and the part of it on show.
+    galaxy: galaxy::Galaxy,
 }
 
 impl Default for Page {
@@ -124,7 +128,7 @@ impl Default for Page {
             order: Order::default(),
             seed: new_seed(),
             view: TILES,
-            shown: Vec::new(),
+            shown: Arc::default(),
             history: Vec::new(),
             columns: 4,
             picked: None,
@@ -141,6 +145,7 @@ impl Default for Page {
             re_started: false,
             re_busy: false,
             kit: kit::Kit::default(),
+            galaxy: galaxy::Galaxy::default(),
         }
     }
 }
@@ -352,6 +357,7 @@ pub fn compute_here() {
 /// `feed`'s cards.
 pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: Feed, shortcuts: &Shortcuts) {
     wire(app, feed, shortcuts);
+    PAGE.with(|p| p.borrow_mut().galaxy.db = Some(sounds_db.clone()));
     app.global::<SoundsData>().set_busy("Reading your sounds".into());
     let here = HERE.with(|h| *h.borrow());
     let weak = app.as_weak();
@@ -575,6 +581,7 @@ pub fn index_known(app: &AppWindow, index: Arc<SoundIndex>) {
     if let Some(at) = picked {
         find_alike(app, at);
     }
+    galaxy::index_known(app);
     // Rediscover was waiting on the fingerprints.
     if PAGE.with(|p| p.borrow().re_started) {
         rediscover_now(app);
@@ -721,14 +728,17 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
         p.picked = None;
         p.rediscover.clear();
         p.re_started = false;
+        galaxy::forget(&mut p.galaxy);
         // An answer still on its way was for the old list: it's dropped.
         p.re_asked += 1;
     });
     refresh(app);
     show_rediscover_chips(app);
     kit::show(app);
-    if PAGE.with(|p| p.borrow().view == REDISCOVER) {
-        rediscover_now(app);
+    match PAGE.with(|p| p.borrow().view) {
+        REDISCOVER => rediscover_now(app),
+        GALAXY => galaxy::shown(app),
+        _ => {}
     }
 }
 
@@ -836,9 +846,13 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
         if v == KITS {
             kit::show(&app);
         }
+        if v == GALAXY {
+            galaxy::shown(&app);
+        }
     });
     wire_rediscover(app);
     kit::wire(app);
+    galaxy::wire(app);
     let weak = app.as_weak();
     data.on_columns_changed(move |n| {
         let Some(app) = weak.upgrade() else { return };
@@ -1217,11 +1231,13 @@ fn listed(app: &AppWindow, id: u64, shown: Vec<usize>) {
         if p.asked != id {
             return false;
         }
-        p.shown = shown;
+        p.shown = Arc::new(shown);
         true
     });
     if current {
         show_lists(app);
+        // The filters dim the stars they leave out.
+        galaxy::draw(app);
     }
 }
 
@@ -1308,6 +1324,7 @@ fn pick(app: &AppWindow, at: usize) {
     data.set_picked(picked);
     data.set_panel_shown(true);
     find_alike(app, at);
+    galaxy::show_picked(app);
     data.set_playing(PAGE.with(|p| p.borrow().playing.is_some_and(|(i, _)| i == at)));
     redraw();
     bring_picked_into_view(app);

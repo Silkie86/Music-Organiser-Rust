@@ -207,6 +207,10 @@ fn sounds_shots(
     data.invoke_pick_view(3);
     shots.push(("sounds-history.png".into(), capture(window)));
     data.invoke_close_panel();
+    data.invoke_pick_view(2);
+    data.invoke_select(3);
+    capture(window);
+    shots.push(("sounds-galaxy.png".into(), capture(window)));
     data.invoke_pick_view(4);
     shots.push(("sounds-rediscover.png".into(), capture(window)));
     data.invoke_pick_view(5);

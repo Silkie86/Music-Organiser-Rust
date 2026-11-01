@@ -3,7 +3,7 @@
 // and filters over them and the picked sound's panel beside them. Agreed mock-up: the design canvas, 2026-11-01.
 // Read-only for now (favourites, tags and types are shown, not changed), like the C# app's sounds.db until it's trusted.
 import { ListView } from "std-widgets.slint";
-import { Theme, Type, Space, Well, SearchBox, ToggleChip, MenuChip, ListLine, Caps, Heart, StudioButton, CloseButton, Segmented, MoreButton, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader } from "../studio.slint";
+import { Theme, Type, Space, Well, SearchBox, ToggleChip, MenuChip, ListLine, Caps, Heart, StudioButton, CloseButton, HoverNote, PointerPad, Segmented, MoreButton, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader } from "../studio.slint";
 
 // One type chip: the type, how many sounds have it, its colour (a place in Theme.sound-types) and whether it's on.
 export struct TypeChipInfo {
@@ -151,6 +151,34 @@ export global SoundsData {
     // Sample folders by how little of them your projects use; a click lists that folder's sounds.
     in property <[FolderLine]> folders;
     callback pick-folder(string);
+
+    // The galaxy: the stars drawn, a word while there's no map, and what the stars are placed by.
+    in property <image> galaxy-image;
+    in property <string> galaxy-note;
+    in property <bool> galaxy-busy;
+    in property <string> galaxy-placing;
+    in property <[string]> galaxy-placings;
+    callback galaxy-place-by(string);
+    callback galaxy-lay-out();
+    callback galaxy-reset();
+    // The view's size, and the mouse on it: a drag moves the map, a click picks the star under the mouse and a
+    // double-click plays it, the wheel zooms round the mouse by notches.
+    callback galaxy-resized(length, length);
+    callback galaxy-down(length, length);
+    callback galaxy-move(length, length);
+    callback galaxy-up();
+    callback galaxy-cancelled();
+    callback galaxy-double();
+    callback galaxy-wheel(float);
+    callback galaxy-gone();
+    in property <bool> galaxy-grabbing;
+    in property <length> galaxy-mouse-x;
+    in property <length> galaxy-mouse-y;
+    in property <string> galaxy-hover-text;
+    // The ring round the picked star.
+    in property <bool> galaxy-picked-shown;
+    in property <length> galaxy-picked-x;
+    in property <length> galaxy-picked-y;
 
     // The kit builder: its pads, and how it rolls and exports.
     in property <[PadLine]> pads;
@@ -1050,6 +1078,35 @@ export component SoundsPage inherits Rectangle {
                 on: false;
                 clicked => { SoundsData.clear(); }
             }
+            if SoundsData.view == 2: Rectangle { horizontal-stretch: 1; }
+            if SoundsData.view == 2: VerticalLayout {
+                alignment: center;
+                MenuChip {
+                    name: "Placed by";
+                    value: SoundsData.galaxy-placing;
+                    choices: SoundsData.galaxy-placings;
+                    has-any: false;
+                    picked(v) => { SoundsData.galaxy-place-by(v); }
+                }
+            }
+            if SoundsData.view == 2: VerticalLayout {
+                alignment: center;
+                StudioButton {
+                    horizontal-stretch: 0;
+                    text: "Lay out again";
+                    tip: "Work the map out afresh from every sound's fingerprint";
+                    clicked => { SoundsData.galaxy-lay-out(); }
+                }
+            }
+            if SoundsData.view == 2: VerticalLayout {
+                alignment: center;
+                StudioButton {
+                    horizontal-stretch: 0;
+                    text: "Whole map";
+                    tip: "Zoom out to see every star";
+                    clicked => { SoundsData.galaxy-reset(); }
+                }
+            }
         }
         // The sounds, and the picked one's panel beside them.
         area := Rectangle {
@@ -1170,9 +1227,50 @@ export component SoundsPage inherits Rectangle {
                             chosen => { keys.focus(); }
                         }
                     }
-                    if SoundsData.empty-title == "" && SoundsData.shown > 0 && SoundsData.view == 2: EmptyState {
-                        title: "The galaxy comes next";
-                        text: "Every sound as a star on a map, with the same filters. It's built in a later part of the Sounds page.";
+                    if SoundsData.empty-title == "" && SoundsData.view == 2: sky := Rectangle {
+                        clip: true;
+                        init => { SoundsData.galaxy-resized(self.width, self.height); }
+                        changed width => { SoundsData.galaxy-resized(self.width, self.height); }
+                        changed height => { SoundsData.galaxy-resized(self.width, self.height); }
+                        Image {
+                            width: parent.width;
+                            height: parent.height;
+                            source: SoundsData.galaxy-image;
+                            image-fit: fill;
+                        }
+                        if SoundsData.galaxy-picked-shown: Rectangle {
+                            x: SoundsData.galaxy-picked-x - 9px;
+                            y: SoundsData.galaxy-picked-y - 9px;
+                            width: 18px;
+                            height: 18px;
+                            border-radius: 9px;
+                            border-width: 2px;
+                            border-color: Theme.accent;
+                        }
+                        PointerPad {
+                            grabbing: SoundsData.galaxy-grabbing;
+                            down(x, y) => {
+                                keys.focus();
+                                SoundsData.galaxy-down(x, y);
+                            }
+                            move(x, y) => { SoundsData.galaxy-move(x, y); }
+                            cancelled => { SoundsData.galaxy-cancelled(); }
+                            up => { SoundsData.galaxy-up(); }
+                            double => { SoundsData.galaxy-double(); }
+                            wheel(x, dx, dy, ctrl, shift) => { SoundsData.galaxy-wheel(dy); }
+                            gone => { SoundsData.galaxy-gone(); }
+                        }
+                        if SoundsData.galaxy-hover-text != "": HoverNote {
+                            text: SoundsData.galaxy-hover-text;
+                            at-x: SoundsData.galaxy-mouse-x;
+                            at-y: SoundsData.galaxy-mouse-y;
+                            room-width: sky.width;
+                            room-height: sky.height;
+                        }
+                        if SoundsData.galaxy-note != "": EmptyState {
+                            title: SoundsData.galaxy-busy ? "Making the galaxy" : "";
+                            text: SoundsData.galaxy-note;
+                        }
                     }
                 }
             }
