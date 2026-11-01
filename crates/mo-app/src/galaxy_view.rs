@@ -129,6 +129,11 @@ impl View {
         (!p.dragged && !cancelled && p.hold == Hold::Sweep).then_some((p.x, p.y))
     }
 
+    /// What the button held down does, if one is.
+    pub fn holding(&self) -> Option<Hold> {
+        self.press.map(|p| p.hold)
+    }
+
     /// The press going on sweeps and has moved: letting go stops the sound.
     pub fn sweeping(&self) -> bool {
         self.press.is_some_and(|p| p.hold == Hold::Sweep && p.dragged)

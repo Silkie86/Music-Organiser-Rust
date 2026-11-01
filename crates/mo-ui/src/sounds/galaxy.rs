@@ -135,6 +135,10 @@ pub(super) fn wire(app: &AppWindow) {
     let weak = app.as_weak();
     data.on_galaxy_down(move |x, y, pan| {
         let Some(app) = weak.upgrade() else { return };
+        // A second button pressed while one is held changes nothing: the first press carries on.
+        if PAGE.with(|p| p.borrow().galaxy.view.pressed()) {
+            return;
+        }
         PAGE.with(|p| {
             let g = &mut p.borrow_mut().galaxy;
             g.view.press(x, y, if pan { Hold::Pan } else { Hold::Sweep });
@@ -169,8 +173,17 @@ pub(super) fn wire(app: &AppWindow) {
     });
     data.on_galaxy_cancelled(|| PAGE.with(|p| p.borrow_mut().galaxy.cancelled = true));
     let weak = app.as_weak();
-    data.on_galaxy_up(move || {
+    data.on_galaxy_up(move |side| {
         let Some(app) = weak.upgrade() else { return };
+        // Only the button that started the press ends it (a cancelled press ends whichever it was).
+        let other = PAGE.with(|p| {
+            let g = &p.borrow().galaxy;
+            let held = g.view.holding();
+            held.is_none() || (!g.cancelled && held != Some(if side { Hold::Pan } else { Hold::Sweep }))
+        });
+        if other {
+            return;
+        }
         app.global::<SoundsData>().set_galaxy_grabbing(false);
         let (click, swept) = PAGE.with(|p| {
             let g = &mut p.borrow_mut().galaxy;

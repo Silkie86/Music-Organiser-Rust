@@ -174,7 +174,8 @@ export global SoundsData {
     // A press: the left button sweeps (plays each star it passes), the right or middle button moves the map.
     callback galaxy-down(length, length, bool);
     callback galaxy-move(length, length);
-    callback galaxy-up();
+    // A button came up: the right or middle one (true), or the left one.
+    callback galaxy-up(bool);
     callback galaxy-cancelled();
     callback galaxy-double();
     callback galaxy-wheel(float);
@@ -1275,10 +1276,10 @@ export component SoundsPage inherits Rectangle {
                                 keys.focus();
                                 SoundsData.galaxy-down(x, y, true);
                             }
-                            side-up => { SoundsData.galaxy-up(); }
+                            side-up => { SoundsData.galaxy-up(true); }
                             move(x, y) => { SoundsData.galaxy-move(x, y); }
                             cancelled => { SoundsData.galaxy-cancelled(); }
-                            up => { SoundsData.galaxy-up(); }
+                            up => { SoundsData.galaxy-up(false); }
                             double => { SoundsData.galaxy-double(); }
                             wheel(x, dx, dy, ctrl, shift) => { SoundsData.galaxy-wheel(dy); }
                             gone => { SoundsData.galaxy-gone(); }
