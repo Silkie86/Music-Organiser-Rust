@@ -13,6 +13,7 @@ pub mod extract;
 pub mod index;
 pub mod indexer;
 pub mod instruments;
+pub mod keys;
 pub mod member;
 pub mod roles;
 pub mod store;

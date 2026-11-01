@@ -1,0 +1,755 @@
+// The Sounds page: every sound in your library as Tiles, a List or the History of what you played, with the type chips
+// and filters over them and the picked sound's panel beside them. Agreed mock-up: the design canvas, 2026-11-01.
+// Read-only for now (favourites, tags and types are shown, not changed), like the C# app's sounds.db until it's trusted.
+import { ListView } from "std-widgets.slint";
+import { Theme, Type, Space, Well, SearchBox, ToggleChip, MenuChip, ListLine, Caps, Heart, StudioButton, Segmented, MoreButton, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader } from "../studio.slint";
+
+// One type chip: the type, how many sounds have it, its colour (a place in Theme.sound-types) and whether it's on.
+export struct TypeChipInfo {
+    name: string,
+    count: string,
+    colour: int,
+    on: bool,
+}
+
+// One tile: `row` is its place in the shown sounds, for picking it.
+export struct SoundTile {
+    row: int,
+    name: string,
+    facts: string,
+    colour: int,
+    favourite: bool,
+    // How liked, from 0 to 1, or below 0 when it isn't known yet.
+    liked: float,
+    wave: string,
+    points: int,
+    picked: bool,
+    playing: bool,
+}
+
+// One row of tiles, as many as fit the list's width.
+export struct TileRow {
+    tiles: [SoundTile],
+}
+
+// One line of the List and History views.
+export struct SoundLine {
+    row: int,
+    name: string,
+    sound-type: string,
+    colour: int,
+    key: string,
+    bpm: string,
+    length: string,
+    used: string,
+    folder: string,
+    // When it was played, on History.
+    when: string,
+    favourite: bool,
+    picked: bool,
+    playing: bool,
+}
+
+// One fact under the picked sound's waveform ("Key", "Fm").
+export struct SoundFact {
+    name: string,
+    value: string,
+}
+
+// The picked sound, for its panel.
+export struct PickedSound {
+    name: string,
+    sound-type: string,
+    colour: int,
+    // Where the type came from: "you set this", "from its name", "learned from your library".
+    type-from: string,
+    path: string,
+    wave: string,
+    points: int,
+    // How long the waveform lasts (the analysis reads up to the first minute).
+    seconds: float,
+    facts: [SoundFact],
+    tags: [string],
+    favourite: bool,
+    // What the analysis says it sounds like ("punchy, bright").
+    character: string,
+}
+
+export global SoundsData {
+    in property <string> summary;
+    // The job working on the page (reading the library), and how far.
+    in property <string> busy;
+    in property <float> done;
+    // Instead of the list, when there's nothing to show yet: why, and what to do.
+    in property <string> empty-title;
+    in property <string> empty-text;
+
+    // 0 Tiles, 1 List, 2 Galaxy, 3 History.
+    in property <[string]> views: ["Tiles", "List", "Galaxy", "History"];
+    in property <int> view;
+    callback pick-view(int);
+
+    in-out property <string> search;
+    callback search-edited(string);
+    in property <[TypeChipInfo]> types;
+    callback pick-type(int);
+    // Types past the first chips, in one menu.
+    in property <[string]> more-types;
+    in property <string> more-type;
+    in property <string> length;
+    in property <[string]> lengths;
+    in property <string> key;
+    in property <[string]> keys;
+    in property <bool> mix-well;
+    in property <string> bpm;
+    in property <[string]> bpms;
+    in property <string> tag;
+    in property <[string]> tags;
+    in property <bool> unused;
+    in property <bool> used;
+    // The use counts are in, so the Used and Unused chips can work.
+    in property <bool> knows-use;
+    in property <bool> favourites;
+    in property <bool> any-filter;
+    // "length", "key", "bpm" or "tag", and the value ("" for any).
+    callback pick(string, string);
+    // "mix-well", "unused", "used" or "favourites".
+    callback toggle(string);
+    callback clear();
+
+    in property <string> order;
+    in property <[string]> orders;
+    callback pick-order(string);
+    callback shuffle();
+    in property <bool> autoplay;
+    callback toggle-autoplay();
+
+    // How many sounds are shown, for the list's empty state.
+    in property <int> shown;
+    in property <[TileRow]> tile-rows;
+    in property <[SoundLine]> lines;
+    // How many tiles fit side by side; the page says when that changes.
+    callback columns-changed(int);
+    // The place of the picked sound's line or tile row, to bring it into view, and a count that changes each time.
+    in property <int> show-row;
+    in property <int> show-ask;
+
+    callback select(int);
+    callback play-row(int);
+    // Arrow keys: -1 or 1 across, -2 or 2 up and down.
+    callback step(int);
+
+    in property <bool> panel-shown;
+    in property <PickedSound> picked;
+    in property <bool> playing;
+    // How much of the picked sound has played, from 0 to 1.
+    in property <float> played;
+    in-out property <length> panel-width: 400px;
+    callback panel-resized(length);
+    callback play();
+    callback seek(float);
+    callback close-panel();
+    // The picked sound's menu (the More button and a right click), and what was chosen.
+    in property <[MenuItem]> menu;
+    callback menu-chosen(string);
+    in property <string> play-tip;
+}
+
+// A tile's width at least; as many as fit go in a row.
+global TileSize {
+    out property <length> width: 200px;
+    out property <length> height: 112px;
+}
+
+component SoundTileView inherits Rectangle {
+    in property <SoundTile> tile;
+    // A click on it, so the page can take the keys (arrows, Space) from the search box.
+    callback chosen();
+    callback right-clicked(length, length);
+    height: TileSize.height;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: tile.picked ? Theme.accent : Theme.edge;
+    background: tile.picked ? Theme.surface-raised : Theme.surface;
+    ListLine {
+        selected: false;
+        clicked => {
+            root.chosen();
+            SoundsData.select(root.tile.row);
+        }
+        double-clicked => { SoundsData.play-row(root.tile.row); }
+        right-clicked(x, y) => { root.right-clicked(x, y); }
+        VerticalLayout {
+            padding: Space.md;
+            spacing: Space.xs;
+            HorizontalLayout {
+                spacing: Space.sm;
+                VerticalLayout {
+                    alignment: center;
+                    Dot { tint: Theme.sound-type(root.tile.colour); }
+                }
+                Text {
+                    text: root.tile.name;
+                    color: Theme.text;
+                    font-size: Type.body;
+                    font-weight: 600;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+                if root.tile.favourite: VerticalLayout {
+                    alignment: center;
+                    Heart { }
+                }
+            }
+            Text {
+                text: root.tile.facts;
+                color: Theme.muted;
+                font-size: Type.meta;
+                overflow: elide;
+            }
+            Waveform {
+                vertical-stretch: 1;
+                shape: root.tile.wave;
+                points: root.tile.points;
+                tint: Theme.sound-type(root.tile.colour);
+                playing: root.tile.playing;
+                played: root.tile.playing ? SoundsData.played : 1;
+            }
+            // How liked, as a thin bar (only once the scores are known).
+            Rectangle {
+                height: 3px;
+                border-radius: 1.5px;
+                background: root.tile.liked >= 0 ? Theme.hover : transparent;
+                Rectangle {
+                    x: 0;
+                    width: parent.width * max(0, root.tile.liked);
+                    border-radius: 1.5px;
+                    background: Theme.muted;
+                }
+            }
+        }
+    }
+}
+
+// The List and History views' line.
+component SoundLineView inherits ListLine {
+    in property <SoundLine> line;
+    in property <bool> history;
+    // A click on it, so the page can take the keys (arrows, Space) from the search box.
+    callback chosen();
+    height: 40px;
+    selected: line.picked;
+    clicked => {
+        root.chosen();
+        SoundsData.select(root.line.row);
+    }
+    double-clicked => { SoundsData.play-row(root.line.row); }
+    HorizontalLayout {
+        width: 100%;
+        height: 100%;
+        padding-left: Space.md;
+        padding-right: Space.md;
+        spacing: Space.md;
+        VerticalLayout {
+            alignment: center;
+            Dot { tint: Theme.sound-type(root.line.colour); }
+        }
+        // Columns that stretch start from no width, so every line splits the room the same way.
+        HorizontalLayout {
+            horizontal-stretch: 2;
+            preferred-width: 0px;
+            min-width: 0px;
+            spacing: Space.sm;
+            Text {
+                horizontal-stretch: 1;
+                preferred-width: 0px;
+                min-width: 0px;
+                text: root.line.name;
+                color: root.line.playing ? Theme.accent : Theme.text;
+                font-size: Type.body;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            if root.line.favourite: VerticalLayout {
+                alignment: center;
+                Heart { }
+            }
+        }
+        Text {
+            width: 110px;
+            text: root.line.sound-type;
+            color: Theme.muted;
+            font-size: Type.meta;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        Text {
+            width: 52px;
+            text: root.line.key;
+            color: Theme.muted;
+            font-family: Theme.number-font;
+            font-size: Type.meta;
+            vertical-alignment: center;
+        }
+        Text {
+            width: 80px;
+            text: root.line.bpm;
+            color: Theme.muted;
+            font-family: Theme.number-font;
+            font-size: Type.meta;
+            vertical-alignment: center;
+        }
+        Text {
+            width: 56px;
+            text: root.line.length;
+            color: Theme.muted;
+            font-family: Theme.number-font;
+            font-size: Type.meta;
+            vertical-alignment: center;
+            horizontal-alignment: right;
+        }
+        Text {
+            width: 72px;
+            text: root.history ? root.line.when : root.line.used;
+            color: Theme.muted;
+            font-family: Theme.number-font;
+            font-size: Type.meta;
+            vertical-alignment: center;
+            horizontal-alignment: right;
+        }
+        Text {
+            horizontal-stretch: 1;
+            preferred-width: 0px;
+            min-width: 0px;
+            text: root.line.folder;
+            color: Theme.muted;
+            font-size: Type.meta;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
+component ListHeading inherits HorizontalLayout {
+    in property <bool> history;
+    padding-left: Space.md + Space.xs;
+    padding-right: Space.md + Space.xs;
+    spacing: Space.md;
+    height: 28px;
+    Rectangle { width: 8px; }
+    Caps {
+        horizontal-stretch: 2;
+        preferred-width: 0px;
+        min-width: 0px;
+        text: "SOUND";
+        vertical-alignment: center;
+    }
+    Caps {
+        width: 110px;
+        text: "TYPE";
+        vertical-alignment: center;
+    }
+    Caps {
+        width: 52px;
+        text: "KEY";
+        vertical-alignment: center;
+    }
+    Caps {
+        width: 80px;
+        text: "TEMPO";
+        vertical-alignment: center;
+    }
+    Caps {
+        width: 56px;
+        text: "LENGTH";
+        vertical-alignment: center;
+        horizontal-alignment: right;
+    }
+    Caps {
+        width: 72px;
+        text: root.history ? "PLAYED" : SoundsData.knows-use ? "USED" : "";
+        vertical-alignment: center;
+        horizontal-alignment: right;
+    }
+    Caps {
+        horizontal-stretch: 1;
+        preferred-width: 0px;
+        min-width: 0px;
+        text: "FOLDER";
+        vertical-alignment: center;
+    }
+}
+
+// The picked sound: what it is, its waveform (click to play from there), Play and its menu, its facts and tags.
+component SoundPanel inherits SidePanel {
+    close => { SoundsData.close-panel(); }
+    HorizontalLayout {
+        spacing: Space.sm;
+        alignment: start;
+        VerticalLayout {
+            alignment: center;
+            Dot { tint: Theme.sound-type(SoundsData.picked.colour); }
+        }
+        Text {
+            text: SoundsData.picked.sound-type;
+            color: Theme.sound-type(SoundsData.picked.colour);
+            font-size: Type.meta;
+            font-weight: 600;
+        }
+        Text {
+            text: SoundsData.picked.type-from;
+            color: Theme.muted;
+            font-size: Type.meta;
+        }
+    }
+    HorizontalLayout {
+        spacing: Space.sm;
+        Text {
+            text: SoundsData.picked.name;
+            color: Theme.text;
+            font-size: Type.panel-title;
+            font-weight: 600;
+            wrap: word-wrap;
+            horizontal-stretch: 1;
+        }
+        if SoundsData.picked.favourite: VerticalLayout {
+            alignment: center;
+            Heart { }
+        }
+    }
+    Text {
+        text: SoundsData.picked.path;
+        color: Theme.muted;
+        font-size: Type.meta;
+        wrap: word-wrap;
+    }
+    Well {
+        height: 88px;
+        Waveform {
+            x: Space.sm;
+            width: parent.width - 2 * Space.sm;
+            shape: SoundsData.picked.wave;
+            points: SoundsData.picked.points;
+            tint: Theme.sound-type(SoundsData.picked.colour);
+            playing: SoundsData.playing;
+            played: SoundsData.playing ? SoundsData.played : 1;
+            seconds: SoundsData.picked.seconds;
+            can-seek: true;
+            seek(at) => { SoundsData.seek(at); }
+        }
+    }
+    HorizontalLayout {
+        spacing: Space.sm;
+        alignment: start;
+        StudioButton {
+            text: SoundsData.playing ? "Stop" : "Play";
+            main: true;
+            tip: SoundsData.play-tip;
+            key: "Space";
+            clicked => { SoundsData.play(); }
+        }
+        MoreButton {
+            items: SoundsData.menu;
+            chosen(id) => { SoundsData.menu-chosen(id); }
+        }
+    }
+    HorizontalLayout {
+        spacing: Space.md;
+        for f in SoundsData.picked.facts: VerticalLayout {
+            spacing: Space.xs;
+            horizontal-stretch: 1;
+            Caps { text: f.name; }
+            Text {
+                text: f.value;
+                color: Theme.text;
+                font-family: Theme.number-font;
+                font-size: Type.meta;
+            }
+        }
+    }
+    if SoundsData.picked.character != "": Text {
+        text: SoundsData.picked.character;
+        color: Theme.muted;
+        font-size: Type.meta;
+        wrap: word-wrap;
+    }
+    if SoundsData.picked.tags.length > 0: VerticalLayout {
+        spacing: Space.xs;
+        Caps { text: "TAGS"; }
+        HorizontalLayout {
+            spacing: Space.xs;
+            alignment: start;
+            for t in SoundsData.picked.tags: ToggleChip {
+                text: t;
+                on: SoundsData.tag == t;
+                clicked => { SoundsData.pick("tag", SoundsData.tag == t ? "" : t); }
+            }
+        }
+    }
+    Rectangle { vertical-stretch: 1; }
+}
+
+export component SoundsPage inherits Rectangle {
+    forward-focus: search-box;
+
+    VerticalLayout {
+        padding: Space.xl;
+        padding-bottom: Space.lg;
+        spacing: Space.md;
+        PageHeader {
+            title: "Sounds";
+            summary: SoundsData.summary;
+            busy: SoundsData.busy;
+            done: SoundsData.done;
+        }
+        HorizontalLayout {
+            spacing: Space.sm;
+            vertical-stretch: 0;
+            search-box := SearchBox {
+                horizontal-stretch: 1;
+                max-width: 480px;
+                hint: "Search names, types, tags and folders";
+                text <=> SoundsData.search;
+                edited(t) => { SoundsData.search-edited(t); }
+                key(k) => {
+                    if (k == Key.Escape && SoundsData.search != "") {
+                        SoundsData.search = "";
+                        SoundsData.search-edited("");
+                        return true;
+                    }
+                    if (k == Key.DownArrow) {
+                        keys.focus();
+                        SoundsData.step(2);
+                        return true;
+                    }
+                    false
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                Segmented {
+                    choices: SoundsData.views;
+                    current: SoundsData.view;
+                    picked(i) => { SoundsData.pick-view(i); }
+                }
+            }
+            if SoundsData.view < 2: VerticalLayout {
+                alignment: center;
+                MenuChip {
+                    name: "Order";
+                    value: SoundsData.order;
+                    choices: SoundsData.orders;
+                    picked(v) => { SoundsData.pick-order(v); }
+                }
+            }
+            if SoundsData.view < 2: VerticalLayout {
+                alignment: center;
+                StudioButton {
+                    horizontal-stretch: 0;
+                    text: "Shuffle";
+                    tip: "A new order";
+                    clicked => { SoundsData.shuffle(); }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                ToggleChip {
+                    text: "Autoplay";
+                    on: SoundsData.autoplay;
+                    clicked => { SoundsData.toggle-autoplay(); }
+                }
+            }
+            Rectangle { horizontal-stretch: 1; }
+        }
+        // The type chips: every type with its count, most first.
+        HorizontalLayout {
+            spacing: Space.sm;
+            alignment: start;
+            vertical-stretch: 0;
+            for t[i] in SoundsData.types: ToggleChip {
+                text: t.count == "" ? t.name : t.name + "  " + t.count;
+                on: t.on;
+                clicked => { SoundsData.pick-type(i); }
+            }
+            if SoundsData.more-types.length > 0: MenuChip {
+                name: "More types";
+                value: SoundsData.more-type;
+                choices: SoundsData.more-types;
+                picked(v) => { SoundsData.pick("type", v); }
+            }
+        }
+        HorizontalLayout {
+            spacing: Space.sm;
+            alignment: start;
+            vertical-stretch: 0;
+            MenuChip {
+                name: "Length";
+                value: SoundsData.length;
+                choices: SoundsData.lengths;
+                picked(v) => { SoundsData.pick("length", v); }
+            }
+            MenuChip {
+                name: "Key";
+                value: SoundsData.key;
+                choices: SoundsData.keys;
+                picked(v) => { SoundsData.pick("key", v); }
+            }
+            if SoundsData.key != "": ToggleChip {
+                text: "Keys that mix well";
+                on: SoundsData.mix-well;
+                clicked => { SoundsData.toggle("mix-well"); }
+            }
+            MenuChip {
+                name: "Tempo";
+                value: SoundsData.bpm;
+                choices: SoundsData.bpms;
+                picked(v) => { SoundsData.pick("bpm", v); }
+            }
+            if SoundsData.tags.length > 0: MenuChip {
+                name: "Tag";
+                value: SoundsData.tag;
+                choices: SoundsData.tags;
+                picked(v) => { SoundsData.pick("tag", v); }
+            }
+            if SoundsData.knows-use: ToggleChip {
+                text: "In my songs";
+                on: SoundsData.used;
+                clicked => { SoundsData.toggle("used"); }
+            }
+            if SoundsData.knows-use: ToggleChip {
+                text: "Unused";
+                on: SoundsData.unused;
+                clicked => { SoundsData.toggle("unused"); }
+            }
+            ToggleChip {
+                text: "Favourites";
+                on: SoundsData.favourites;
+                clicked => { SoundsData.toggle("favourites"); }
+            }
+            if SoundsData.any-filter: ToggleChip {
+                text: "Clear";
+                on: false;
+                clicked => { SoundsData.clear(); }
+            }
+        }
+        // The sounds, and the picked one's panel beside them.
+        area := Rectangle {
+            vertical-stretch: 1;
+            property <length> list-width: SoundsData.panel-shown
+                ? max(380px, self.width - SoundsData.panel-width - divider.width)
+                : self.width;
+            keys := FocusScope {
+                x: 0;
+                width: area.list-width;
+                key-pressed(event) => {
+                    if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
+                        return reject;
+                    }
+                    if (event.text == Key.LeftArrow) {
+                        SoundsData.step(-1);
+                        return accept;
+                    }
+                    if (event.text == Key.RightArrow) {
+                        SoundsData.step(1);
+                        return accept;
+                    }
+                    if (event.text == Key.UpArrow) {
+                        SoundsData.step(-2);
+                        return accept;
+                    }
+                    if (event.text == Key.DownArrow) {
+                        SoundsData.step(2);
+                        return accept;
+                    }
+                    if (event.text == Key.Return) {
+                        SoundsData.play();
+                        return accept;
+                    }
+                    reject
+                }
+                Well {
+                    if SoundsData.empty-title != "" || SoundsData.shown == 0: EmptyState {
+                        title: SoundsData.empty-title != "" ? SoundsData.empty-title : "No sounds match";
+                        text: SoundsData.empty-title != "" ? SoundsData.empty-text : "Try fewer filters or other words.";
+                        action: SoundsData.empty-title == "" && SoundsData.any-filter ? "Clear the filters" : "";
+                        act => { SoundsData.clear(); }
+                    }
+                    if SoundsData.empty-title == "" && SoundsData.shown > 0 && SoundsData.view == 0: tiles := ListView {
+                        property <int> columns: max(1, floor((self.visible-width - Space.sm) / (TileSize.width + Space.sm)));
+                        property <int> show-ask: SoundsData.show-ask;
+                        changed columns => { SoundsData.columns-changed(self.columns); }
+                        init => { SoundsData.columns-changed(self.columns); }
+                        changed show-ask => {
+                            // Scrolls only when the picked tile's row is out of sight.
+                            if (SoundsData.show-row * (TileSize.height + Space.sm) < -self.content-y
+                                || (SoundsData.show-row + 1) * (TileSize.height + Space.sm) > -self.content-y + self.visible-height) {
+                                self.content-y = -clamp(SoundsData.show-row * (TileSize.height + Space.sm) - self.visible-height / 3,
+                                    0px, max(0px, self.content-height - self.visible-height));
+                            }
+                        }
+                        for r in SoundsData.tile-rows: HorizontalLayout {
+                            height: TileSize.height + Space.sm;
+                            padding-left: Space.sm;
+                            padding-top: Space.sm;
+                            spacing: Space.sm;
+                            alignment: start;
+                            for t in r.tiles: SoundTileView {
+                                width: (tiles.visible-width - Space.sm) / tiles.columns - Space.sm;
+                                tile: t;
+                                chosen => { keys.focus(); }
+                                right-clicked(x, y) => {
+                                    keys.focus();
+                                    menu.open-at(x, y);
+                                }
+                            }
+                        }
+                    }
+                    if SoundsData.empty-title == "" && SoundsData.shown > 0 && (SoundsData.view == 1 || SoundsData.view == 3): VerticalLayout {
+                        ListHeading { history: SoundsData.view == 3; }
+                        lines := ListView {
+                            property <int> show-ask: SoundsData.show-ask;
+                            changed show-ask => {
+                                if (SoundsData.show-row * 40px < -self.content-y
+                                    || (SoundsData.show-row + 1) * 40px > -self.content-y + self.visible-height) {
+                                    self.content-y = -clamp(SoundsData.show-row * 40px - self.visible-height / 3, 0px,
+                                        max(0px, self.content-height - self.visible-height));
+                                }
+                            }
+                            for l in SoundsData.lines: SoundLineView {
+                                line: l;
+                                history: SoundsData.view == 3;
+                                chosen => { keys.focus(); }
+                                right-clicked(x, y) => {
+                                    keys.focus();
+                                    menu.open-at(x, y);
+                                }
+                            }
+                        }
+                    }
+                    if SoundsData.empty-title == "" && SoundsData.shown > 0 && SoundsData.view == 2: EmptyState {
+                        title: "The galaxy comes next";
+                        text: "Every sound as a star on a map, with the same filters. It's built in a later part of the Sounds page.";
+                    }
+                }
+            }
+            divider := PanelDivider {
+                visible: SoundsData.panel-shown;
+                x: area.list-width;
+                height: parent.height;
+                panel-width: SoundsData.panel-width;
+                room: area.width;
+                resizing(w) => { SoundsData.panel-width = w; }
+                resized(w) => { SoundsData.panel-resized(w); }
+            }
+            if SoundsData.panel-shown: SoundPanel {
+                x: area.list-width + divider.width;
+                width: area.width - self.x;
+                height: parent.height;
+            }
+            menu := RightClickMenu {
+                items: SoundsData.menu;
+                chosen(id) => { SoundsData.menu-chosen(id); }
+            }
+        }
+    }
+}

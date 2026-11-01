@@ -19,6 +19,8 @@ mo-app.workspace = true
 mo-library = { path = "../mo-library" }
 mo-formats = { path = "../mo-formats" }
 mo-space = { path = "../mo-space" }
+mo-sounds = { path = "../mo-sounds" }
+mo-audio = { path = "../mo-audio" }
 mo-backup = { path = "../mo-backup" }
 slint.workspace = true
 image.workspace = true

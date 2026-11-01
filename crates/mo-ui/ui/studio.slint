@@ -41,6 +41,23 @@ export global Theme {
     out property <color> bitwig: #F2994A;
     out property <color> studio-one: #4ACB8B;
 
+    // Sound types' colours, the same in every theme (the C# app's StarColours): Kick, 808, Snare, Clap, Hat, Cymbal,
+    // Perc, Tom, Bass, Lead, Pad, Keys, Pluck, Chord, Vocal, FX, Loop, Guitar, Texture, then four spare ones for other
+    // types. mo-app's `sounds::type_colour` gives a type's place in this list.
+    out property <[color]> sound-types: [
+        #FF6B5B, #FF8A4C, #FFB547, #FFD15C, #E8E36A, #C9E46A, #F59ABF, #F07C9E, #7C8CFF, #4FB3FF,
+        #5CD6E0, #3DDC97, #7FE0B0, #62C9A8, #C792EA, #B39DDB, #9AB8D6, #E0A86A, #8FA3B8,
+        #8FA3B8, #A8B88F, #B89A8F, #9F8FB8,
+    ];
+
+    // A sound type's colour from its place in `sound-types`; grey (-1) for a sound with no type yet.
+    public pure function sound-type(i: int) -> color {
+        if (i < 0 || i >= sound-types.length) {
+            return #6E6E6E;
+        }
+        return sound-types[i];
+    }
+
     // A DAW's colour from its name as the library writes it, or `muted` for one without a colour of its own.
     public pure function daw(name: string) -> color {
         if (name == "FL Studio") {
@@ -1144,27 +1161,87 @@ export component EmptyState inherits VerticalLayout {
     }
 }
 
-// A sound's shape as bars, from its peaks (0 to 1, a few dozen of them). The part already played is brighter; a click
-// says where, from 0 to 1, to play from.
+// A sound's waveform, one thin line per stored peak, like the old app drew it. `shape` is the path the Rust side makes
+// from the peaks (`mo_app::sounds::wave_path`: one line per peak, `points` wide and 100 high). What has played is
+// drawn in the full tint with a playhead at the edge; with `seconds` given, the mouse shows a guide line with the time
+// under it, and a click plays from there.
 export component Waveform inherits Rectangle {
-    in property <[float]> peaks;
+    in property <string> shape;
+    in property <int> points;
     in property <color> tint: Theme.accent;
     // How much has played, from 0 to 1.
     in property <float> played;
+    // Whether it's playing now, which shows the playhead.
+    in property <bool> playing;
     in property <bool> can-seek;
+    // How long the waveform lasts, for the time under the mouse (0 shows none).
+    in property <float> seconds;
+    // Each line's width: thin enough that the lines stay apart.
+    in property <length> line: max(1px, root.width / max(1, root.points) * 0.6);
     callback seek(float);
-    property <length> step: self.width / max(1, root.peaks.length);
-    for p[i] in root.peaks: Rectangle {
-        x: i * root.step;
-        width: max(1px, root.step - 1px);
-        height: max(1px, root.height * clamp(p, 0, 1));
-        y: (root.height - self.height) / 2;
-        border-radius: 1px;
-        background: (i + 0.5) / root.peaks.length <= root.played ? root.tint : root.tint.transparentize(40%);
+    clip: true;
+    Path {
+        width: root.width;
+        height: root.height;
+        commands: root.shape;
+        viewbox-width: max(1, root.points);
+        viewbox-height: 100;
+        fit: fill;
+        stroke: root.played >= 1 ? root.tint : root.tint.transparentize(55%);
+        stroke-width: root.line;
     }
-    if root.can-seek: TouchArea {
-        mouse-cursor: pointer;
+    if root.played < 1: Rectangle {
+        x: 0;
+        width: root.width * clamp(root.played, 0, 1);
+        clip: true;
+        Path {
+            x: 0;
+            width: root.width;
+            height: root.height;
+            commands: root.shape;
+            viewbox-width: max(1, root.points);
+            viewbox-height: 100;
+        fit: fill;
+            stroke: root.tint;
+            stroke-width: root.line;
+        }
+    }
+    if root.playing && root.played < 1: Rectangle {
+        x: min(root.width * clamp(root.played, 0, 1), root.width - 2px);
+        width: 2px;
+        background: Theme.text;
+    }
+    area := TouchArea {
+        enabled: root.can-seek;
+        mouse-cursor: root.can-seek ? MouseCursor.pointer : MouseCursor.default;
         clicked => { root.seek(clamp(self.mouse-x / self.width, 0, 1)); }
+    }
+    if root.can-seek && area.has-hover && root.seconds > 0: Rectangle {
+        property <float> at: clamp(area.mouse-x / root.width, 0, 1) * root.seconds;
+        property <string> time: at >= 60
+            ? floor(at / 60) + ":" + (mod(floor(at), 60) < 10 ? "0" : "") + mod(floor(at), 60)
+            : (round(at * 100) / 100) + "s";
+        Rectangle {
+            x: area.mouse-x;
+            width: 1px;
+            background: Theme.muted;
+        }
+        Rectangle {
+            x: area.mouse-x + 4px + label.preferred-width + 6px > root.width
+                ? area.mouse-x - 4px - label.preferred-width - 6px
+                : area.mouse-x + 4px;
+            y: 2px;
+            width: label.preferred-width + 6px;
+            height: label.preferred-height + 2px;
+            border-radius: 3px;
+            background: Theme.sidebar;
+            label := Text {
+                text: time;
+                color: Theme.text;
+                font-family: Theme.number-font;
+                font-size: Type.meta;
+            }
+        }
     }
 }
 

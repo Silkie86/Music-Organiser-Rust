@@ -67,8 +67,6 @@ thread_local! {
     static READER: RefCell<Option<Newest<(u64, i64)>>> = const { RefCell::new(None) };
     /// The activity cards, for Open, Show in folder and Copy path.
     static FEED: RefCell<Option<Feed>> = const { RefCell::new(None) };
-    /// The clipboard, kept open: on Linux what's copied only stays while it is.
-    static CLIPBOARD: RefCell<Option<arboard::Clipboard>> = const { RefCell::new(None) };
 }
 
 /// The list's lines, made from the page's view one at a time as the list draws them, so a new search doesn't build
@@ -567,6 +565,7 @@ fn panel_song(r: &SongRow) -> PanelSong {
         facts: panel::facts(r).into(),
         name: r.song.name.as_str().into(),
         saves: panel::saves_text(r).into(),
+        backed: crate::backup::song_line(&r.song, r.saved).into(),
         status: r.status.as_str().into(),
         rating: r.rating,
         favourite: r.favourite,
@@ -616,6 +615,18 @@ fn with_picked(f: impl FnOnce(&Page, &SongRow)) {
     });
 }
 
+/// The backup changed (a run ended, or another drive was picked): the picked song's "Backed up" line is put right.
+pub fn backup_changed(app: &AppWindow) {
+    let data = app.global::<SongsData>();
+    with_picked(|_, r| {
+        // Only when the line changed: the rest of the panel is left as it is.
+        let song = panel_song(r);
+        if song.backed != data.get_song().backed {
+            data.set_song(song);
+        }
+    });
+}
+
 /// Whether a song is picked, for the page's keys.
 pub fn has_pick() -> bool {
     PAGE.with(|p| p.borrow().picked.is_some())
@@ -651,38 +662,14 @@ fn open_save(page: &Page, save: &mo_library::Save) {
 
 /// Shows the file picked in its folder, or the folder when the file has gone.
 fn reveal(save: &mo_library::Save) {
-    let Some(feed) = FEED.with(|f| f.borrow().clone()) else { return };
-    let (path, folder) = (save.path.clone(), save.folder.clone());
-    let started = background::spawn("Show in folder", move || {
-        let launch = shell::reveal(&path, &folder, shell::exists(&path), shell::Os::THIS);
-        if let Err(e) = shell::run(&launch) {
-            log::warning("Show in folder", &format!("{path}: {e}"));
-            feed.start("Couldn't show the file", "").failed(&e.to_string());
-        }
-    });
-    if let Err(e) = started {
-        log::error("Show in folder", &format!("Couldn't start: {e}"));
+    if let Some(feed) = FEED.with(|f| f.borrow().clone()) {
+        crate::files::reveal(&feed, &save.path, &save.folder);
     }
 }
 
 /// Puts the file's path on the clipboard.
 fn copy_path(path: &str) {
-    let copied = CLIPBOARD.with(|c| {
-        let mut c = c.borrow_mut();
-        if c.is_none() {
-            *c = Some(arboard::Clipboard::new()?);
-        }
-        match c.as_mut() {
-            Some(clip) => clip.set_text(path.to_owned()),
-            None => Ok(()),
-        }
-    });
-    let Some(feed) = FEED.with(|f| f.borrow().clone()) else { return };
-    match copied {
-        Ok(()) => feed.start("Copied the path", "").done(path),
-        Err(e) => {
-            log::warning("Copy path", &e.to_string());
-            feed.start("Couldn't copy the path", "").failed(&e.to_string());
-        }
+    if let Some(feed) = FEED.with(|f| f.borrow().clone()) {
+        crate::files::copy_path(&feed, path);
     }
 }

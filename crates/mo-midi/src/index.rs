@@ -156,7 +156,11 @@ pub struct StoredPhrase {
     pub notes: i32,
     pub lowest: u8,
     pub highest: u8,
+    /// The key, when the reading names one (one key, or the likelier of a pair).
     pub key: Option<Key>,
+    /// The Rust app's whole key reading (`mo-harmony`): a pair, a home note, or no clear key and why. None from the C#
+    /// app's `midi.db`.
+    pub key_fact: Option<mo_harmony::KeyFact>,
     /// How long each pitch class sounds, the strongest as 255.
     pub chroma: [u8; 12],
     /// The chords in order, a repeated chord once, with no timing.
@@ -400,6 +404,7 @@ fn phrase_of(r: &Row<'_>, source: Arc<Source>) -> rusqlite::Result<StoredPhrase>
         lowest: int(9)?.clamp(0, 127) as u8,
         highest: int(10)?.clamp(0, 127) as u8,
         key,
+        key_fact: None,
         chroma,
         chords: PhraseChord::decode(&text(15)?),
         features: r.get::<_, Option<Vec<u8>>>(16)?.unwrap_or_default(),

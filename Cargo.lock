@@ -2898,6 +2898,7 @@ dependencies = [
  "mo-backup",
  "mo-formats",
  "mo-library",
+ "mo-sounds",
  "mo-space",
  "rayon",
  "rusqlite",
@@ -2988,6 +2989,7 @@ name = "mo-midi"
 version = "0.1.0"
 dependencies = [
  "mo-formats",
+ "mo-harmony",
  "mo-library",
  "rayon",
  "regex",
@@ -3090,9 +3092,11 @@ dependencies = [
  "chrono",
  "image",
  "mo-app",
+ "mo-audio",
  "mo-backup",
  "mo-formats",
  "mo-library",
+ "mo-sounds",
  "mo-space",
  "rfd",
  "slint",

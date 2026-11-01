@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 mo-formats = { path = "../mo-formats" }
+mo-harmony = { path = "../mo-harmony" }
 mo-library = { path = "../mo-library" }
 rayon.workspace = true
 regex = { version = "1", default-features = false, features = ["std", "unicode", "perf"] }

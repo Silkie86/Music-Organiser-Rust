@@ -45,6 +45,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = mo_ui::new_app(&graphite, Shortcuts::default(), Place::Songs, feed.clone())?;
     app.show()?;
     mo_ui::songs::show(&app, sample_songs());
+    // The Sounds page, worked out in place too, from made-up sounds.
+    mo_ui::sounds::compute_here();
+    mo_ui::sounds::connect(&app, out.join("no sounds.db"), feed.clone(), &Shortcuts::default());
+    app.set_place(Place::Sounds.index() as i32);
+    let sounds_empty = capture(&window);
+    mo_ui::sounds::show(&app, sample_sounds(), None, None);
+    // Once to lay the page out (the tiles' width tells the page how many fit in a row), then for real.
+    capture(&window);
 
     let mut shots = Vec::new();
     for place in Place::ALL {
@@ -62,6 +70,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     mo_ui::apply_look(&app, &graphite);
+    shots.push(("sounds-empty.png".into(), sounds_empty));
+    sounds_shots(&app, &window, &graphite, &mut shots);
 
     // The song panel, on the first song, on Overview and on Plugins.
     for tab in [Tab::Overview, Tab::Plugins, Tab::Saves] {
@@ -160,6 +170,129 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("{}", path.display());
     }
     Ok(())
+}
+
+/// The Sounds page: a sound picked and playing in its panel, a filter on, the List and History views, and the tiles in
+/// a light theme.
+fn sounds_shots(
+    app: &mo_ui::AppWindow,
+    window: &MinimalSoftwareWindow,
+    graphite: &Look,
+    shots: &mut Vec<(String, Vec<u8>)>,
+) {
+    app.set_place(Place::Sounds.index() as i32);
+    let data = app.global::<mo_ui::SoundsData>();
+    // Autoplay is on, so picking a sound plays it.
+    data.invoke_select(6);
+    data.set_played(0.35);
+    shots.push(("sounds-panel.png".into(), capture(window)));
+    data.invoke_pick_type(0);
+    data.invoke_pick("key".into(), "A minor".into());
+    data.invoke_toggle("mix-well".into());
+    shots.push(("sounds-filtered.png".into(), capture(window)));
+    data.invoke_clear();
+    data.invoke_pick_view(1);
+    shots.push(("sounds-list.png".into(), capture(window)));
+    data.invoke_pick_view(3);
+    shots.push(("sounds-history.png".into(), capture(window)));
+    data.invoke_close_panel();
+    data.invoke_pick_view(0);
+    mo_ui::apply_look(app, &Look::from_settings(Some("Paper"), None));
+    capture(window);
+    shots.push(("sounds-paper.png".into(), capture(window)));
+    mo_ui::apply_look(app, graphite);
+    app.set_place(Place::Songs.index() as i32);
+}
+
+/// Made-up sounds of many types, with a made-up waveform each, and a few plays for History.
+fn sample_sounds() -> mo_ui::sounds::Library {
+    use mo_sounds::{Sound, SoundAnalysis};
+    // (folder, name, type, seconds, tempo, key)
+    type Made = (&'static str, &'static str, &'static str, f64, Option<f64>, Option<(i32, bool)>);
+    const SOUNDS: &[Made] = &[
+        ("Drums", "Tight Kick 01", "Kick", 0.4, None, None),
+        ("Drums", "Boom Kick", "Kick", 0.9, None, Some((9, true))),
+        ("Drums", "Dusty Snare", "Snare", 0.5, None, None),
+        ("Drums", "Rim Shot 3", "Snare", 0.2, None, None),
+        ("Drums", "Closed Hat", "Hi-hat", 0.1, None, None),
+        ("Drums", "Open Hat Long", "Hi-hat", 0.8, None, None),
+        ("Loops", "Rolling Bass 140", "Bass", 6.9, Some(140.0), Some((9, true))),
+        ("Bass", "Sub Drop", "Bass", 2.1, None, Some((4, true))),
+        ("Bass", "Reese Stab", "Bass", 0.7, None, Some((2, true))),
+        ("Drums", "Big Clap", "Clap", 0.6, None, None),
+        ("Pads", "Glass Pad", "Pad", 8.0, None, Some((0, false))),
+        ("Pads", "Warm Choir", "Pad", 12.4, None, Some((7, false))),
+        ("Leads", "Saw Lead 7", "Lead", 1.2, None, Some((9, true))),
+        ("Vox", "Hey Chop", "Vocal", 0.5, None, Some((4, true))),
+        ("Vox", "Ooh Phrase 95", "Vocal", 5.1, Some(95.0), Some((2, false))),
+        ("FX", "Riser 8 Bars", "FX", 13.7, Some(140.0), None),
+        ("FX", "Tape Stop", "FX", 1.4, None, None),
+        ("Perc", "Shaker Loop 120", "Perc", 4.0, Some(120.0), None),
+        ("Perc", "Wood Block", "Perc", 0.3, None, Some((11, false))),
+        ("Keys", "Rhodes Chord Am9", "Chord", 2.8, None, Some((9, true))),
+        ("Keys", "Pluck Arp 128", "Pluck", 7.5, Some(128.0), Some((5, false))),
+        ("Drums", "Crash Wide", "Cymbal", 3.2, None, None),
+        ("Drums", "Low Tom", "Tom", 0.7, None, None),
+        ("Keys", "Felt Piano C", "Keys", 4.4, None, Some((0, false))),
+        ("Strings", "Long Strings Dm", "Strings", 9.9, None, Some((2, true))),
+        ("Brass", "Horn Stab", "Brass", 0.9, None, Some((10, false))),
+        ("Loops", "Break 172", "Drum loop", 5.6, Some(172.0), None),
+        ("Loops", "Hats 128", "Drum loop", 7.5, Some(128.0), None),
+        ("Misc", "Room Tone", "", 3.0, None, None),
+    ];
+    let day = |d: u32, h: u32| {
+        chrono::NaiveDate::from_ymd_opt(2026, 10, d).and_then(|d| d.and_hms_opt(h, 15, 0)).unwrap_or_default()
+    };
+    let sounds = SOUNDS
+        .iter()
+        .enumerate()
+        .map(|(i, &(folder, name, ty, seconds, bpm, key))| {
+            let is_loop = bpm.is_some();
+            // A made-up waveform: hits fall away fast, loops pulse on the beat, long sounds swell.
+            let waveform = (0..160)
+                .map(|x| {
+                    let t = x as f32 / 160.0;
+                    let wobble = 0.75 + 0.25 * ((x * 7 + i * 13) % 11) as f32 / 10.0;
+                    let shape = if is_loop {
+                        1.0 - (t * 8.0).fract() * 0.7
+                    } else if seconds < 2.0 {
+                        (-t * 6.0).exp()
+                    } else {
+                        (t * 3.0).min(1.0) * (1.0 - t * 0.5)
+                    };
+                    (shape * wobble).clamp(0.02, 1.0)
+                })
+                .collect();
+            Sound {
+                id: i as i64 + 1,
+                path: format!(r"D:\Samples\{folder}\{name}.wav"),
+                error: None,
+                analysis: Some(SoundAnalysis {
+                    seconds,
+                    is_loop,
+                    bpm,
+                    key_tonic: key.map(|k| k.0),
+                    key_minor: key.is_some_and(|k| k.1),
+                    waveform,
+                    ..SoundAnalysis::default()
+                }),
+                sound_type: if ty.is_empty() { mo_sounds::types::UNKNOWN.into() } else { ty.into() },
+                type_source: if i % 5 == 0 { "learned".into() } else { "name".into() },
+                type_confidence: 0.9,
+                user_type: None,
+                name_type: None,
+                tags: if i % 4 == 0 { vec!["Dark".into()] } else { Vec::new() },
+                favourite: i % 6 == 1,
+                hidden: false,
+                rating: 0,
+                plays: 0,
+                added: day(1 + (i as u32 % 28), 12),
+                activity: Default::default(),
+            }
+        })
+        .collect();
+    let played = vec![(7, day(31, 22)), (13, day(31, 21)), (2, day(30, 18)), (11, day(28, 9)), (20, day(20, 14))];
+    mo_ui::sounds::Library::new(sounds, played)
 }
 
 /// A made-up library for the Songs page: names, plugins and dates invented here, none of Solomon's (rule 4).

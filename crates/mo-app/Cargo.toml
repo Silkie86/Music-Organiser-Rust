@@ -15,6 +15,7 @@ chrono.workspace = true
 mo-backup = { path = "../mo-backup" }
 mo-formats = { path = "../mo-formats" }
 mo-library = { path = "../mo-library" }
+mo-sounds = { path = "../mo-sounds" }
 mo-space = { path = "../mo-space" }
 thread-priority.workspace = true
 rayon.workspace = true
