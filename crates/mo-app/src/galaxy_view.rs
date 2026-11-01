@@ -113,6 +113,16 @@ impl View {
     pub fn pressed(&self) -> bool {
         self.press.is_some()
     }
+
+    /// Where a picture drawn for view `drawn` sits on this view (x, y, width, height in points), so it can be moved
+    /// and stretched at once while the new picture is drawn.
+    pub fn place_of(&self, drawn: &View) -> (f32, f32, f32, f32) {
+        let (mx0, my0) = drawn.to_map(0.0, 0.0);
+        let (mx1, my1) = drawn.to_map(drawn.width, drawn.height);
+        let (x0, y0) = self.to_view(mx0, my0, 1.0);
+        let (x1, y1) = self.to_view(mx1, my1, 1.0);
+        (x0, y0, x1 - x0, y1 - y0)
+    }
 }
 
 #[cfg(test)]
@@ -179,5 +189,18 @@ mod tests {
         // A move to where the mouse already is changes nothing.
         v.moved(150.0, 100.0);
         assert!((v.cx - cx).abs() < 1e-6 && (v.cy - cy).abs() < 1e-6);
+    }
+
+    #[test]
+    fn an_old_picture_moves_and_grows_with_the_view() {
+        let mut v = View { width: 400.0, height: 300.0, ..View::default() };
+        let drawn = v;
+        assert_eq!(v.place_of(&drawn), (0.0, 0.0, 400.0, 300.0));
+        // Zoomed in round the middle: the old picture grows round the middle too.
+        v.mouse = (200.0, 150.0);
+        v.zoom_at_mouse(1.0);
+        let (x, y, w, h) = v.place_of(&drawn);
+        assert!((w - 500.0).abs() < 0.01 && (h - 375.0).abs() < 0.01);
+        assert!((x + 50.0).abs() < 0.01 && (y + 37.5).abs() < 0.01);
     }
 }
