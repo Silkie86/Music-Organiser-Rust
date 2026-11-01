@@ -18,7 +18,9 @@ use mo_formats::paths;
 // Moved to mo-formats with the presets; kept here under its old name.
 pub use mo_formats::presets::fxp_to_bank;
 
-use crate::plan::{AudioClip, Device, Lane, LanePoint, Plan, Role, SampleFile, Target, Track, TrackKind, TrackRef};
+use crate::plan::{
+    AudioClip, Device, Lane, LanePart, LanePoint, Plan, Role, SampleFile, Target, Track, TrackKind, TrackRef,
+};
 
 const SAMPLER_ID: &str = "468bc14b-b2e7-45a1-9666-e83117fe404e";
 const NOTE_TRANSPOSE_ID: &str = "0815cd9e-3a31-4429-a268-dabd952a3b68";
@@ -344,6 +346,8 @@ struct Template {
     setting: Option<ObjId>,
     /// An automation clip with its points emptied, for FL's edit events, when the template has one.
     auto_clip: Option<ObjId>,
+    /// A point to copy into an automation clip.
+    auto_point: Option<ObjId>,
     audio: Option<AudioPattern>,
     audio_tracks: HashSet<ObjId>,
     copier: Copier,
@@ -610,7 +614,7 @@ impl Template {
             [sampler_track, vst3_track, vst2_track, vst3_device, vst2_device, note_transpose, clip, key_lane, note]
                 .into_iter()
                 .map(Some)
-                .chain([mixer_lane, plugin_lane, point, setting, auto_clip]);
+                .chain([mixer_lane, plugin_lane, point, setting]);
         if patterns.flatten().any(|o| copier.shares(o)) {
             return Err("The Bitwig template refers to its tracks from somewhere this app doesn't know to clear".into());
         }
@@ -621,6 +625,14 @@ impl Template {
         {
             audio = None;
         }
+        // Likewise an automation clip, filled in for each copy: without one, edit events stay points on the lane.
+        let auto_clip = auto_clip.filter(|&c| !reachable(&doc, c).iter().any(|&o| copier.shares(o)));
+        // Its points are copies of its own first point, where it has one, as Bitwig saves points in a clip.
+        let auto_point = auto_clip
+            .and_then(|c| auto_clip_points(&doc, c))
+            .and_then(|l| doc.field_list(l, 0x21f).first().copied())
+            .filter(|&p| doc.obj(p).has(0x2af) && doc.obj(p).has(0x28f))
+            .or(point);
         Ok(Template {
             doc,
             group,
@@ -639,6 +651,7 @@ impl Template {
             point,
             setting,
             auto_clip,
+            auto_point,
             audio,
             audio_tracks: HashSet::new(),
             copier,
@@ -1076,11 +1089,15 @@ impl Template {
         if self.doc.field_obj(arrangement, 0x35ac).is_none() {
             return Some(NO_LANE);
         }
-        // Edit events go in automation clips where the template has one to copy and the lane can hold them.
-        let auto_clip = self
-            .auto_clip
-            .filter(|_| !lane.parts.is_empty() && !matches!(lane.target, Target::OnOff { .. }))
-            .filter(|_| self.doc.field_obj(made, 0x2aec).is_some());
+        // Edit events go in automation clips where the template has one to copy and the lane can hold them; a lane that
+        // FL automation clips move too keeps all its moves as points, as only it can say where each takes over.
+        let in_clips: HashSet<usize> = lane.parts.iter().map(|p| p.source).collect();
+        let only_edit_events = !in_clips.is_empty() && lane.points.iter().all(|p| in_clips.contains(&p.source));
+        let usable = only_edit_events
+            && !matches!(lane.target, Target::OnOff { .. })
+            && self.doc.field_obj(made, 0x2aec).is_some();
+        let auto_clip = self.auto_clip.zip(self.auto_point).filter(|_| usable);
+        let volume = lane.target == Target::Volume;
         let points = match lane.target {
             Target::OnOff { .. } => {
                 // A switch's lane holds a point at each change (class 0x7d: where, and on or off) in a list of its own
@@ -1115,7 +1132,6 @@ impl Template {
                 None
             }
             _ => {
-                let volume = lane.target == Target::Volume;
                 let kept = match auto_clip {
                     Some(_) => lane_outside_clips(lane),
                     None => lane.points.iter().map(|p| (p.beat, p.value)).collect(),
@@ -1125,8 +1141,7 @@ impl Template {
         };
         // FL's edit events as automation clips on the lane, one for each place their pattern plays, each holding its
         // points timed from its start (as Bitwig 6.1.6 saves clips Solomon drew, 2026-11-01).
-        if let Some(pattern_clip) = auto_clip {
-            let volume = lane.target == Target::Volume;
+        if let Some((pattern_clip, clip_point)) = auto_clip {
             for part in &lane.parts {
                 let clip = self.copy(pattern_clip);
                 {
@@ -1141,7 +1156,7 @@ impl Template {
                     self.set_range(range, 0.0, part.length);
                 }
                 let moves: Vec<Slot> =
-                    part.points.iter().map(|&(beat, value)| self.lane_point(point, beat, value, volume)).collect();
+                    part.points.iter().map(|&(beat, value)| self.lane_point(clip_point, beat, value, volume)).collect();
                 if let Some(list) = auto_clip_points(&self.doc, clip) {
                     self.doc.obj_mut(list).set(0x21f, Value::List(moves));
                 }
@@ -1294,19 +1309,24 @@ fn auto_clip_points(doc: &Document, clip: ObjId) -> Option<ObjId> {
     doc.field_obj(content, 0x48e)
 }
 
-/// What a lane holds outside its automation clips: the points of the FL automation clips on it; and where only edit
-/// events move it, the value each automation clip ends on, from its end (Bitwig saves that point after a clip).
+/// What a lane whose moves are all in automation clips holds outside them: the value each clip ends on, held from its
+/// end to where the next starts (Bitwig saves a point after a clip; lane points are joined by straight lines, and FL
+/// holds a setting where the last move left it).
 fn lane_outside_clips(lane: &Lane) -> Vec<(f64, f64)> {
-    let in_clips: HashSet<usize> = lane.parts.iter().map(|p| p.source).collect();
-    let own: Vec<(f64, f64)> =
-        lane.points.iter().filter(|p| !in_clips.contains(&p.source)).map(|p| (p.beat, p.value)).collect();
-    if !own.is_empty() {
-        return own;
+    let mut parts: Vec<&LanePart> = lane.parts.iter().collect();
+    parts.sort_by(|a, b| a.start.total_cmp(&b.start));
+    let mut held = Vec::new();
+    for (k, part) in parts.iter().enumerate() {
+        let Some(&(_, value)) = part.points.last() else { continue };
+        let end = part.start + part.length;
+        held.push((end, value));
+        if let Some(next) = parts.get(k + 1)
+            && next.start > end + SAME_BEAT
+        {
+            held.push((next.start, value));
+        }
     }
-    let mut ends: Vec<(f64, f64)> =
-        lane.parts.iter().filter_map(|p| p.points.last().map(|&(_, value)| (p.start + p.length, value))).collect();
-    ends.sort_by(|a, b| a.0.total_cmp(&b.0));
-    ends
+    held
 }
 
 fn key_lanes(doc: &Document, clip: ObjId) -> Vec<ObjId> {

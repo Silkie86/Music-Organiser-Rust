@@ -595,21 +595,22 @@ fn audio_clips_come_across_stretched_and_pitched_on_a_copy_of_the_audio_track() 
 fn edit_events_are_an_automation_clip_for_each_place_their_pattern_plays() {
     use mo_formats::fl::automation::FlPart;
     let mut s = song();
-    let moves = [(0.5, 0.2), (1.0, 0.8)];
-    let part = |start: f64| FlPart {
+    // The pattern plays at beats 0 and 8, four beats each; it ends on 0.8 the first time, 0.3 the second.
+    let moves = [[(0.0, 0.2), (0.5, 0.8)], [(0.0, 0.2), (0.5, 0.3)]];
+    let part = |start: f64, k: usize| FlPart {
         start,
         length: 4.0,
-        points: moves.iter().map(|&(beat, value)| FlPoint { beat, value }).collect(),
+        points: moves[k].iter().map(|&(beat, value)| FlPoint { beat, value }).collect(),
     };
     s.automation = vec![FlAutomation {
-        starts: vec![0.5, 8.5],
-        parts: vec![part(0.0), part(8.0)],
+        starts: vec![0.0, 8.0],
+        parts: vec![part(0.0, 0), part(8.0, 1)],
         ..automation(
             "Serum - setting 205 (edit events)",
             1,
             FlControl::PluginParameter,
             205,
-            &[(0.5, 0.2), (1.0, 0.8), (4.0, 0.8), (8.5, 0.8), (8.5, 0.2), (9.0, 0.8), (12.0, 0.8)],
+            &[(0.0, 0.2), (0.5, 0.8), (4.0, 0.8), (8.0, 0.8), (8.0, 0.2), (8.5, 0.3), (12.0, 0.3)],
         )
     }];
     let (doc, notes, _) = convert(&s, &bitwig_template(Template::default()));
@@ -625,7 +626,7 @@ fn edit_events_are_an_automation_clip_for_each_place_their_pattern_plays() {
         [(0xd90, 0.0, 4.0), (0xd90, 8.0, 4.0)]
     );
     let contents: Vec<ObjId> = clips.iter().map(|&c| obj(&doc, c, &[0x2ae9, 0x10e9])).collect();
-    for (&clip, &content) in clips.iter().zip(&contents) {
+    for ((&clip, &content), moves) in clips.iter().zip(&contents).zip(moves) {
         let points: Vec<(f64, f64)> = doc
             .field_list(obj(&doc, content, &[0x48e]), 0x21f)
             .iter()
@@ -636,14 +637,44 @@ fn edit_events_are_an_automation_clip_for_each_place_their_pattern_plays() {
         assert_eq!((num(obj(&doc, range, &[0x992]), 0x26), num(obj(&doc, range, &[0x98d]), 0x2af)), (4.0, 4.0));
     }
     assert_ne!(contents[0], contents[1], "each clip keeps its own moves");
-    // The lane lists each clip's content, and holds the value each clip ends on from its end.
+    // The lane lists each clip's content, and holds the value each clip ends on from its end to the next.
     assert_eq!(doc.field_list(obj(&doc, lanes[0], &[0x2aec]), 0x10e6), contents);
     let held: Vec<(f64, f64)> = doc
         .field_list(obj(&doc, lanes[0], &[0x2d8c, 0x35ac]), 0x21f)
         .iter()
         .map(|&p| (num(p, 0x2af), num(p, 0x28f)))
         .collect();
-    assert_eq!(held, [(4.0, 0.8), (12.0, 0.8)]);
+    // Held flat between the clips, as FL keeps the setting where the last move left it.
+    assert_eq!(held, [(4.0, 0.8), (8.0, 0.8), (12.0, 0.3)]);
+}
+
+#[test]
+fn edit_events_on_a_setting_an_automation_clip_also_moves_stay_points_on_the_lane() {
+    use mo_formats::fl::automation::FlPart;
+    let mut s = song();
+    let recorded = FlAutomation {
+        parts: vec![FlPart { start: 8.0, length: 4.0, points: vec![FlPoint { beat: 0.0, value: 0.9 }] }],
+        ..automation(
+            "Serum - setting 205 (edit events)",
+            1,
+            FlControl::PluginParameter,
+            205,
+            &[(8.0, 0.9), (12.0, 0.9)],
+        )
+    };
+    s.automation.push(recorded);
+    let (doc, _, _) = convert(&s, &bitwig_template(Template::default()));
+    let (_, tracks) = tracks(&doc);
+    let lanes = doc.field_list(obj(&doc, tracks[1], &[0x2dc9]), 0x4ba);
+    assert_eq!(lanes.len(), 1);
+    assert!(doc.field_list(obj(&doc, lanes[0], &[0x2d8c]), 0x21f).is_empty(), "no automation clips");
+    let beats: Vec<f64> = doc
+        .field_list(obj(&doc, lanes[0], &[0x2d8c, 0x35ac]), 0x21f)
+        .iter()
+        .map(|&p| doc.obj(p).num(0x2af).unwrap())
+        .collect();
+    assert_eq!(beats.first(), Some(&0.0));
+    assert_eq!(beats.last(), Some(&12.0));
 }
 
 #[test]

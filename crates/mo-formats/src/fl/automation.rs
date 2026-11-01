@@ -78,8 +78,9 @@ pub struct FlAutomation {
     pub parts: Vec<FlPart>,
 }
 
-/// One place a pattern with edit events plays: where it starts and how long it is (beats from the song's start), and
-/// its moves there, in beats from where it starts.
+/// One place a pattern with edit events plays, from its first move (FL leaves the setting alone until then) to where
+/// the placement ends or a later one takes over: where that starts and how long it is (beats from the song's start),
+/// and the moves, in beats from where it starts, cut to the placement as the song's curve is.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FlPart {
     pub start: f64,
@@ -296,6 +297,7 @@ pub(super) fn place_automation(
             false,
             &mut placed_points,
             &mut cut,
+            None,
         );
         if !placed.is_empty() {
             result.push(FlAutomation { starts, ..moves(&name, target, mixer, placed) });
@@ -364,12 +366,24 @@ pub(super) fn place_edit_events(
                 continue;
             };
             points.sort_by(|a, b| a.beat.total_cmp(&b.beat));
-            let (placed, starts) = place_curve(&points, &placements, ppq, false, true, &mut placed_points, &mut cut);
+            let mut parts = Vec::new();
+            let (placed, starts) =
+                place_curve(&points, &placements, ppq, false, true, &mut placed_points, &mut cut, Some(&mut parts));
             if placed.is_empty() {
                 continue;
             }
-            let until = placed.last().map_or(0.0, |p| p.beat);
-            let parts = pattern_parts(&points, &placements, ppq, until);
+            // Where a placement starts before an earlier one ends, it takes over from there, as in the curve.
+            for k in 1..parts.len() {
+                let next = parts.get(k).map_or(f64::INFINITY, |p| p.start);
+                if let Some(part) = parts.get_mut(k - 1)
+                    && part.start + part.length > next + SAME_BEAT
+                {
+                    part.length = next - part.start;
+                    let length = part.length;
+                    part.points.retain(|p| p.beat < length - SAME_BEAT);
+                }
+            }
+            parts.retain(|p| !p.points.is_empty() && p.length > SAME_BEAT);
             let channel_name =
                 channel_names.get(&channel).cloned().unwrap_or_else(|| format!("Channel {}", channel + 1));
             let name = format!("{channel_name} - setting {} (edit events)", what.parameter);
@@ -382,27 +396,6 @@ pub(super) fn place_edit_events(
     (result, left, cut)
 }
 
-/// A pattern's edit events (in beats from its start, in time order) at each of its placements: the part of the
-/// pattern each plays, timed from where it starts. Each holds no more points than its part of the placed curve, so they
-/// are kept for the placements the curve reached (up to `until`, where it ends) without counting towards the limit
-/// again.
-fn pattern_parts(points: &[FlPoint], placements: &[PlaylistItem], ppq: f64, until: f64) -> Vec<FlPart> {
-    let mut parts = Vec::new();
-    for item in placements.iter().take_while(|i| i.at as f64 / ppq < until) {
-        let (from, length) = ((item.offset as i64) as f64 / ppq, item.length as f64 / ppq);
-        let moves: Vec<FlPoint> = points
-            .iter()
-            .filter(|p| p.beat >= from - SAME_BEAT && p.beat < from + length - SAME_BEAT)
-            .map(|p| FlPoint { beat: (p.beat - from).max(0.0), value: p.value })
-            .collect();
-        if moves.is_empty() {
-            continue;
-        }
-        parts.push(FlPart { start: item.at as f64 / ppq, length, points: moves });
-    }
-    parts
-}
-
 fn u32_le(d: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_le_bytes(d.get(at..at + 4)?.try_into().ok()?))
 }
@@ -411,6 +404,9 @@ fn u32_le(d: &[u8], at: usize) -> Option<u32> {
 /// across the song and the beats where each placement starts. `placed_points` counts the points held across all the
 /// song's automation, and `cut` is set when it passes the limit. With `from_first`, nothing is placed before the
 /// curve's first point (edit events leave a setting alone until the first one), rather than holding its value there.
+/// `parts`, when given, gets each placement's own part of the curve, from its first point to where the placement ends,
+/// timed from that first point (the same points as in the curve, so they don't count towards the limit again).
+#[allow(clippy::too_many_arguments)]
 fn place_curve(
     curve: &[FlPoint],
     placements: &[PlaylistItem],
@@ -419,6 +415,7 @@ fn place_curve(
     from_first: bool,
     placed_points: &mut usize,
     cut: &mut bool,
+    mut parts: Option<&mut Vec<FlPart>>,
 ) -> (Vec<FlPoint>, Vec<f64>) {
     let mut placed: Vec<FlPoint> = Vec::new();
     let mut starts = Vec::new();
@@ -438,6 +435,11 @@ fn place_curve(
             break;
         }
         starts.push(first.beat);
+        if let Some(parts) = parts.as_deref_mut() {
+            let end = (item.at as f64 + item.length as f64) / ppq;
+            let points = part.iter().map(|p| FlPoint { beat: p.beat - first.beat, value: p.value }).collect();
+            parts.push(FlPart { start: first.beat, length: end - first.beat, points });
+        }
         // A clip placed over an earlier placement takes over from where it starts to where it ends; if the
         // earlier one runs on past that, it carries on from there.
         let mut rest = Vec::new();
@@ -615,6 +617,44 @@ mod tests {
             placed.extend(rest);
         }
         placed
+    }
+
+    #[test]
+    fn edit_events_give_a_part_for_each_placement_from_its_first_move_and_a_later_one_takes_over() {
+        // Pattern 1's edit events on channel 0's setting 2: 0.25 one beat in, 0.75 three beats in (ppq 96).
+        let record = |tick: u32, value: f32| {
+            [tick.to_le_bytes(), (0x8002u32).to_le_bytes(), value.to_bits().to_le_bytes()].concat()
+        };
+        let raw = std::collections::BTreeMap::from([(1u32, [record(96, 0.25), record(288, 0.75)].concat())]);
+        let pattern = super::super::song::PATTERN_BASE + 1;
+        // Placed at beat 0 for 8 beats, and again at beat 2 (over the first) for 4 beats starting 2 beats in.
+        let items = [
+            PlaylistItem { index: pattern, at: 0, length: 768, offset: 0.0, muted: false, slot: 0 },
+            PlaylistItem { index: pattern, at: 192, length: 384, offset: 192.0, muted: false, slot: 0 },
+        ];
+        let (moved, left, cut) = place_edit_events(
+            &raw,
+            &HashMap::new(),
+            &items,
+            &PlaylistTracks::default(),
+            &MixerSettings::new(None),
+            96,
+            0,
+        );
+        assert!(left.is_empty() && !cut);
+        type Part = (f64, f64, Vec<(f64, f64)>);
+        let parts: Vec<Part> = moved[0]
+            .parts
+            .iter()
+            .map(|p| (p.start, p.length, p.points.iter().map(|q| (q.beat, q.value)).collect()))
+            .collect();
+        // The first runs from its first move (beat 1) until the second takes over at beat 2. The second plays the
+        // pattern from 2 beats in, where the moves are already sliding from 0.25 towards 0.75 (0.5 there).
+        assert_eq!(parts.len(), 2);
+        assert_eq!((parts[0].0, parts[0].1), (1.0, 1.0));
+        assert_eq!(parts[0].2, [(0.0, 0.25)]);
+        assert_eq!((parts[1].0, parts[1].1), (2.0, 4.0));
+        assert_eq!(parts[1].2, [(0.0, 0.5), (1.0, 0.75), (4.0, 0.75)]);
     }
 
     #[test]
