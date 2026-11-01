@@ -29,7 +29,7 @@ use std::ops::{Index, IndexMut, Range};
 
 use super::candidates::{Candidate, Label, Route, candidates};
 use super::cores::Core;
-use super::hear::{BassTexture, Hearing, Level, Line, Mass, Push, Shape, Shaped, Stream, heard_in, presence_of};
+use super::hear::{BassTexture, Hearing, Level, Line, Mass, Push, Shaped, Stream, heard_in, played_in, presence_of};
 use super::weights::{Priors, Weights};
 use crate::pitch::{PcSet, PerPitch, PitchClass, SetSums, WrappingSum};
 
@@ -292,8 +292,8 @@ struct ShapedNote {
 }
 
 /// What may pass by under a label in a span, from its shaped notes, with the notes alike added up so each label tests
-/// each kind once: a pitch class, the notes it hangs on ([`hangs_on`]), and its shaped ticks inside the span in the
-/// chords, in what they hold over (a note's held-over end) and in the tune.
+/// each kind once: a pitch class, the notes it hangs on ([`Shaped::hangs_on`]), and its shaped ticks inside the span
+/// in the chords, in what they hold over (a note's held-over end) and in the tune.
 #[derive(Clone, Copy, Debug)]
 struct Passer {
     pc: PitchClass,
@@ -308,15 +308,6 @@ impl Passer {
     /// on are.
     fn passes_under(&self, tones: PcSet) -> bool {
         !tones.contains(self.pc) && tones.contains_all(self.anchors)
-    }
-}
-
-/// The notes a shaped note must hang on to pass by under a label: those it moves between, or none for an anticipation
-/// or an approach, which hang on the chord after it (so need only not to be the label's own notes).
-fn hangs_on(shape: Shape, anchors: PcSet) -> PcSet {
-    match shape {
-        Shape::Anticipation | Shape::Approach => PcSet::EMPTY,
-        Shape::Passing | Shape::Neighbour | Shape::Suspension | Shape::Appoggiatura => anchors,
     }
 }
 
@@ -467,7 +458,7 @@ impl Evidence {
         let held_tune = hearing.mass(sound.clone(), Mass::HeldMelody);
         out.presence = presence_of(&out.chords, &bass, &held_tune);
         out.heard = heard_in(&out.presence, s);
-        out.played = heard_in(&presence_of(&out.chords, &PerPitch::default(), &held_tune), s);
+        out.played = played_in(&out.chords, &held_tune, s);
         out.bass = BassTexture::of(&bass);
         out.level = hearing.level(units.start);
         out.pushed = start.is_some();
@@ -532,7 +523,7 @@ impl Evidence {
         let (a, b) = (hearing.offset(sound.start), hearing.offset(sound.end));
         let from = self.shaped.partition_point(|s| s.shaped.start < a.saturating_sub(self.longest));
         for s in self.shaped.get(from..).unwrap_or_default().iter().take_while(|s| s.shaped.start < b) {
-            let Shaped { line, shape, pc, anchors, start: first, end: last, .. } = s.shaped;
+            let Shaped { line, pc, start: first, end: last, .. } = s.shaped;
             let voice = match line {
                 Line::Bass => continue,
                 Line::Tune(_) => Voice::Tune,
@@ -540,7 +531,7 @@ impl Evidence {
             };
             // A held-over end counts with what the chords hold over; the tune's counts nowhere, as the masses have it.
             let split = s.held_from.clamp(first, last);
-            let anchors = hangs_on(shape, anchors);
+            let anchors = s.shaped.hangs_on();
             for (from, to, held_over) in [(first, split, false), (split, last, true)] {
                 let (start, end) = (from.max(a), to.min(b));
                 if start >= end || (held_over && voice == Voice::Tune) {
