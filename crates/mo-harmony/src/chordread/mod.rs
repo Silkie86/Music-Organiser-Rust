@@ -1,0 +1,14 @@
+//! The chords in some notes (spec section 5.1, part 3 of the engine): what a pianist would write over each stretch of
+//! a part, a loop or a song, with its extensions, its root and its bass, named as jazz and gospel players name them.
+//!
+//! The reader works in three steps (harmony/design/chord-reader-design.md): it hears the notes (the bass, the chords
+//! and the tune, and which notes only pass by), decides where the chords change and which chord each stretch is, and
+//! names each chord from the notes it really plays. It is being built in that order, one pull request at a time.
+//!
+//! What is here so far is what every step decides between: the 16 kinds of chord ([`Core`]), what each note is to
+//! each of them (one of its own notes, a tension it can carry, or a note that doesn't belong: [`ToneClass`]), and
+//! which kinds the notes heard allow on each root ([`valid`] and [`valid_rootless`]).
+
+mod cores;
+
+pub use cores::{Core, CoreSet, ToneClass, valid, valid_rootless};

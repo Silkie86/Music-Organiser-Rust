@@ -13,6 +13,7 @@
 #![cfg_attr(not(test), deny(clippy::indexing_slicing))]
 
 pub mod chord;
+pub mod chordread;
 pub mod key;
 pub mod keyfind;
 pub mod names;
