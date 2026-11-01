@@ -9,8 +9,9 @@
 //! - **Snap.** A note struck just before a unit starts (at most a quarter of a unit before) is heard on it: that's a
 //!   player's timing, not a new rhythm.
 //! - **Streams.** Bass parts are the bass, melody parts the tune, and every other pitched part the chords
-//!   ([`Stream`]). With no bass part, the lowest chord note of a unit is its bass when another chord note sounds and
-//!   the next one up is at least a fifth above it ([`BASS_GAP`]); its octave doubles go with it.
+//!   ([`Stream`]). In a bar where no bass part plays, the lowest chord note of a unit is its bass when the next chord
+//!   note up of another pitch class is at least a fifth above it ([`BASS_GAP`]); its octave doubles go with it.
+//!   With only its own octaves above it, it stays the bass if it was the unit before's.
 //! - **Broken chords.** In a felt beat where a chord part plays its notes one at a time (an arpeggio, an Alberti
 //!   bass), its short notes are heard to the end of the felt beat, as a player's pedal holds them, and are never the
 //!   bass.
@@ -36,10 +37,13 @@ use crate::pitch::{PcSet, PerPitch, PitchClass};
 /// the stretch with the most notes is heard, by the key finder's rule, and [`Hearing::truncated`] says so.
 pub const MOST_UNITS: usize = 1 << 14;
 
-/// With no bass part, the lowest chord note sounding in a unit is its bass when the next note up is at least this many
-/// semitones above it (a fifth). Only the gap counts, never how high the notes are: it takes a left hand's root under
-/// its chord (D3 under C4 F4), a shell's root and the Kenny Barron voicing's C3 under G3, and never the bottom of a
-/// rootless voicing (B2 under E3) or of a chord in fourths (D3 under G3).
+/// In a bar where no bass part plays, the lowest chord note sounding in a unit is its bass when the next note up of
+/// another pitch class is at least this many semitones above it (a fifth). Only the gap counts, never how high the
+/// notes are: it takes a left hand's root under its chord (D3 under C4 F4), a shell's root and the Kenny Barron
+/// voicing's C3 under G3, and never the bottom of a rootless voicing (B2 under E3) or of a chord in fourths (D3 under
+/// G3). A note's own octave double is the note doubled, not a chord above it: with only its octaves above it (or
+/// nothing), a note is the bass only when it was the unit before's, as a held bass stays the bass while an arpeggio
+/// passes its octave; C3 and C4 alone have no bass, as C3 alone has none.
 pub const BASS_GAP: u8 = 7;
 
 /// The longest bar heard, in beats, as in the key finder: a longer one comes from a damaged file, and is heard as bars
@@ -84,8 +88,8 @@ pub enum Unit {
 /// What a part's notes are to the reader.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Stream {
-    /// The bass: bass parts; or, when there are none, the lowest chord note of a unit standing apart from the rest
-    /// ([`BASS_GAP`]). Its notes say where the chord stands and never name a tension.
+    /// The bass: bass parts; and in a bar where none plays, the lowest chord note of a unit standing apart from the
+    /// rest ([`BASS_GAP`]). Its notes say where the chord stands and never name a tension.
     Bass,
     /// The tune: melody parts.
     Melody,
@@ -114,7 +118,8 @@ pub enum Mass {
     /// The chords, without what's held over, and without each unit's gap bass and its octave doubles (they are the
     /// bass, doubled).
     Harmony,
-    /// The bass: bass parts, or else each unit's gap bass ([`Hearing::gap_bass`]); without what's held over.
+    /// The bass: bass parts, and each unit's gap bass in the bars where none plays ([`Hearing::gap_bass`]); without
+    /// what's held over.
     Bass,
     /// The tune, without what's held over.
     Melody,
@@ -171,7 +176,8 @@ pub struct HeardNote {
     pub copy: bool,
     /// Whether it's struck where it starts: a copy whose start was before the loop's last bar isn't.
     pub struck: bool,
-    /// Held to the end of a loop, so as the loop goes round it's held into its start.
+    /// Held to the end of a loop, so as the loop goes round it's held into its start. Only by how it was played: a
+    /// broken chord's pedal doesn't make it wrap, as an arpeggio is never pushed.
     pub wraps: bool,
 }
 
@@ -206,6 +212,7 @@ pub struct Hearing {
     filled: Filled,
     velocities: Vec<u16>,
     starts: Vec<i64>,
+    bass_bars: Vec<i64>,
 }
 
 impl Hearing {
@@ -238,18 +245,19 @@ impl Hearing {
             }
         }
         let first = self.raw.iter().map(|r| r.start).min();
-        let last_start = self.raw.iter().map(|r| r.start).max();
+        let last_played = self.raw.iter().map(|r| i128::from(r.played)).max();
         let last_end = self.raw.iter().map(|r| r.end).max();
-        let (Some(first), Some(last_start), Some(last_end)) = (first, last_start, last_end) else { return false };
+        let (Some(first), Some(last_played), Some(last_end)) = (first, last_played, last_end) else { return false };
 
         // Where the units start and end. A loop runs from the bar line at or before its first note to the bar line
-        // after its last onset, and is heard with its last bar copied in front. Anything else runs to its last note's
+        // after where its last note is played (a note played just before that line is heard on the loop's start, as
+        // the loop goes round), and is heard with its last bar copied in front. Anything else runs to its last note's
         // end; when its notes lie further apart than the units can hold, the busiest stretch is heard.
         let bar = i128::from(layout.bar);
         let most_bars = i128::from((count(MOST_UNITS) / layout.per_bar).max(1));
         let hearing = most_bars * bar;
         let line = |t: i128| layout.origin + (t - layout.origin).div_euclid(bar) * bar;
-        let loop_end = line(last_start) + bar;
+        let loop_end = line(last_played.max(first)) + bar;
         let looped = span == Span::Loop && (loop_end - line(first)) / bar < most_bars;
         let (origin, end) = if looped {
             (line(first) - bar, loop_end)
@@ -270,25 +278,30 @@ impl Hearing {
         self.layout = layout;
         self.end = ticks(end - origin);
 
+        // A loop's length: the first bar heard is the copy of its last.
+        let length = end - origin - bar;
         for r in &self.raw {
-            if !(origin..end).contains(&r.start) {
+            // Only a note struck just before a loop's end is snapped onto it: it's heard on the loop's start.
+            let back = if looped && r.start >= end { length } else { 0 };
+            let (start, stop) = (r.start - back, r.end - back);
+            if !(origin..end).contains(&start) {
                 self.truncated = true;
                 continue;
             }
-            self.truncated |= r.end > end && !looped;
+            self.truncated |= stop > end && !looped;
             self.notes.push(HeardNote {
                 part: r.part,
                 note: r.note,
                 key: r.key,
                 stream: r.stream,
-                start: ticks(r.start - origin),
-                end: ticks(r.end.min(end) - origin),
-                length: ticks(r.end - r.start),
+                start: ticks(start - origin),
+                end: ticks(stop.min(end) - origin),
+                length: ticks(stop - start),
                 held_over: None,
                 broken: false,
                 copy: false,
                 struck: true,
-                wraps: looped && r.end >= end,
+                wraps: looped && stop >= end,
             });
         }
         self.has_bass_part = self.notes.iter().any(|n| n.stream == Stream::Bass);
@@ -340,9 +353,8 @@ impl Hearing {
     }
 
     /// A time given in ticks from the first unit's start (a [`HeardNote`]'s), in the music's own ticks.
-    pub fn tick(&self, ticks: i64) -> i64 {
-        let t = self.layout.origin + i128::from(ticks);
-        i64::try_from(t).unwrap_or(if t < 0 { i64::MIN } else { i64::MAX })
+    pub fn tick(&self, from_first: i64) -> i64 {
+        ticks(self.layout.origin + i128::from(from_first))
     }
 
     /// How strong a unit's start is.
@@ -355,7 +367,8 @@ impl Hearing {
         self.truncated
     }
 
-    /// Whether a bass part was heard. Without one, the bass is found in the chords by the gaps ([`BASS_GAP`]).
+    /// Whether a bass part was heard anywhere. In the bars where none plays, the bass is found in the chords by the
+    /// gaps ([`BASS_GAP`]).
     pub fn has_bass_part(&self) -> bool {
         self.has_bass_part
     }
@@ -458,8 +471,8 @@ impl Hearing {
         self.units.get(units).unwrap_or_default().iter().find_map(|u| u.bass_onset)
     }
 
-    /// The key of the chord note that is a unit's bass when there's no bass part ([`BASS_GAP`]). Its octave doubles
-    /// in the chords (not broken) are heard as the bass too.
+    /// The key of the chord note that is a unit's bass when no bass part plays in its bar ([`BASS_GAP`]). Its octave
+    /// doubles in the chords (not broken) are heard as the bass too.
     pub fn gap_bass(&self, unit: usize) -> Option<u8> {
         self.units.get(unit).and_then(|u| u.gap_bass)
     }
@@ -492,6 +505,7 @@ impl Hearing {
         self.pieces.clear();
         self.touches.clear();
         self.edges.clear();
+        self.bass_bars.clear();
     }
 
     /// The usual velocity of one stream's notes, for the ghost-note rule.
@@ -540,21 +554,22 @@ impl Hearing {
             let size = rest.iter().take_while(same).count().max(1);
             let Some((group, later)) = rest.split_at_checked(size) else { break };
             rest = later;
-            held.retain(|&(until, _)| until >= to);
+            // Held through the felt beat, or through as much of it as is heard (the music's last one may end first).
+            let through_to = to.min(*end);
+            held.retain(|&(until, _)| until >= through_to);
             let struck = group.iter().filter_map(|&i| notes.get(i));
-            let through = struck.clone().filter(|n| n.start - from < together && n.end >= to).map(|n| n.key);
+            let through = struck.clone().filter(|n| n.start - from < together && n.end >= through_to).map(|n| n.key);
             let held_pcs: PcSet = held.iter().map(|&(_, key)| key).chain(through).map(PitchClass::of_key).collect();
             let lowest = struck.clone().map(|n| n.key).chain(held.iter().map(|&(_, key)| key)).min();
             let free = lowest.is_none_or(|low| held_pcs.without(PitchClass::of_key(low)).is_empty());
             let broken = free && plays_broken(struck.clone(), unit, together);
             held.extend(struck.filter(|n| n.end > to).map(|n| (n.end, n.key)));
             if broken {
-                let until = to.min(*end);
                 for &i in group {
                     if let Some(n) = notes.get_mut(i)
-                        && n.end < until
+                        && n.end < through_to
                     {
-                        n.end = until;
+                        n.end = through_to;
                         n.broken = true;
                     }
                 }
@@ -567,19 +582,19 @@ impl Hearing {
         // The loop runs from the end of the first bar heard to the end, so its length is also where its last bar
         // starts; each copy lands a loop's length earlier.
         let length = self.end - self.layout.bar;
-        let from = length;
+        // The notes there are, as the copies are pushed after them.
         for i in 0..self.notes.len() {
             let Some(n) = self.notes.get(i).copied() else { continue };
-            if n.end <= from || n.copy {
+            if n.end <= length {
                 continue;
             }
-            let start = n.start.max(from);
+            let start = n.start.max(length);
             self.notes.push(HeardNote {
                 start: start - length,
                 end: n.end - length,
                 held_over: n.held_over.map(|h| h.max(start) - length),
                 copy: true,
-                struck: n.start >= from,
+                struck: n.start >= length,
                 ..n
             });
         }
@@ -627,6 +642,22 @@ impl Hearing {
         self.edges.sort_unstable_by_key(|e| e.unit);
 
         let units = layout.unit_at(self.end - 1) + 1;
+        // The bars a bass part plays in (by how many of its notes do, each added where its bars start and taken off
+        // after they end). Only in the other bars is a chord note taken as the bass.
+        let per_bar = uncount(layout.per_bar).max(1);
+        self.bass_bars.clear();
+        self.bass_bars.resize(units / per_bar + 2, 0);
+        for p in self.pieces.iter().filter(|p| p.kind == Kind::Bass) {
+            if let Some((from, to)) = layout.played_units(p.start, p.end, p.onset) {
+                for (bar, step) in [(from / per_bar, 1), (to / per_bar + 1, -1)] {
+                    if let Some(b) = self.bass_bars.get_mut(bar) {
+                        *b += step;
+                    }
+                }
+            }
+        }
+        let mut bass_playing = 0i64;
+        let mut last_gap = None;
         self.filled.reset();
         let (mut t, mut e) = (0, 0);
         let mut total = Sums::default();
@@ -634,6 +665,9 @@ impl Hearing {
         self.sums.push(total);
         self.sound.push(sounded);
         for u in 0..units {
+            if u % per_bar == 0 {
+                bass_playing += self.bass_bars.get(u / per_bar).copied().unwrap_or(0);
+            }
             while let Some(edge) = self.edges.get(e).filter(|x| x.unit == u) {
                 self.filled.change(edge.kind, edge.key, edge.enter);
                 e += 1;
@@ -644,7 +678,8 @@ impl Hearing {
             }
             let here = self.touches.get(from..t).unwrap_or_default();
             let len = layout.start(u + 1) - layout.start(u);
-            let gap = if self.has_bass_part { None } else { gap_bass(&self.filled, here, len) };
+            let gap = if bass_playing > 0 { None } else { gap_bass(&self.filled, here, len, last_gap) };
+            last_gap = gap;
             let mut facts = UnitFacts { gap_bass: gap, ..UnitFacts::default() };
             let mut masses = Sums::default();
             let mut onset: Option<(i64, u8)> = None;
@@ -735,10 +770,10 @@ fn plays_broken<'a>(notes: impl Iterator<Item = &'a HeardNote>, unit: i64, toget
     strikes >= 2 && single * 2 >= strikes
 }
 
-/// The key of the unit's bass when there is no bass part: the lowest chord note sounding there (for at least a
-/// quarter of the unit), when it isn't broken, another chord note sounds, and the next one up is [`BASS_GAP`] or more
-/// semitones above it.
-fn gap_bass(filled: &Filled, here: &[Touch], len: i64) -> Option<u8> {
+/// The key of the unit's bass when no bass part plays in its bar: the lowest chord note sounding there (for at least a
+/// quarter of the unit), when it isn't broken and the next one up of another pitch class is [`BASS_GAP`] or more
+/// semitones above it; or, when nothing of another pitch class sounds, when it was the unit before's bass (`before`).
+fn gap_bass(filled: &Filled, here: &[Touch], len: i64, before: Option<u8>) -> Option<u8> {
     let mut all = filled.keys(Kind::Harmony).union(filled.keys(Kind::BrokenHarmony));
     let mut unbroken = filled.keys(Kind::Harmony);
     for c in here.iter().filter(|c| c.ticks.saturating_mul(4) >= len) {
@@ -751,9 +786,12 @@ fn gap_bass(filled: &Filled, here: &[Touch], len: i64) -> Option<u8> {
             _ => {}
         }
     }
-    let low = all.lowest()?;
-    let next = all.without(low).lowest()?;
-    (unbroken.contains(low) && next - low >= BASS_GAP).then_some(low)
+    let low = all.lowest().filter(|&low| unbroken.contains(low))?;
+    // Its own octave double is the bass doubled, not a chord above it.
+    match all.iter().find(|&k| k % 12 != low % 12) {
+        Some(next) => (next - low >= BASS_GAP).then_some(low),
+        None => (before == Some(low)).then_some(low),
+    }
 }
 
 /// A count of units, as a number of ticks can be multiplied by.
@@ -874,6 +912,20 @@ impl Layout {
         }
     }
 
+    /// The first and last units a stretch of a note (from the first unit's start) plays in: those it sounds in for at
+    /// least a quarter of the unit, and the one where it's struck when `struck`. None when it only touches the end of
+    /// one (the last moment of a note played legato).
+    fn played_units(&self, start: i64, end: i64, struck: bool) -> Option<(usize, usize)> {
+        let (first, last) = (self.unit_at(start), self.unit_at(end - 1));
+        let sounds = |u: usize| {
+            let (from, to) = (self.start(u), self.start(u + 1));
+            (end.min(to) - start.max(from)).saturating_mul(4) >= to - from
+        };
+        let from = if struck || sounds(first) { first } else { first + 1 };
+        let to = if sounds(last) || (struck && last == first) { last } else { last.checked_sub(1)? };
+        (from <= to).then_some((from, to))
+    }
+
     /// The last unit at or before this one that starts a bar or the middle of one.
     fn strong_at_or_before(&self, unit: usize) -> usize {
         let k = count(unit);
@@ -955,7 +1007,7 @@ struct UnitFacts {
     broken: PcSet,
     /// The first bass note struck (the lowest of those struck first).
     bass_onset: Option<PitchClass>,
-    /// With no bass part, the chord note that is the unit's bass.
+    /// In a bar where no bass part plays, the chord note that is the unit's bass.
     gap_bass: Option<u8>,
 }
 

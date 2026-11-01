@@ -269,6 +269,9 @@ fn with_no_bass_part_the_bass_is_found_by_the_gaps() {
         ("C3 F#3 C4", None),
         ("C3", None),
         ("C3 C3", None),
+        ("C3 C4", None),
+        ("C2 C3 C4", None),
+        ("C2 C3 G3", Some("C2")),
     ];
     for (keys, bass) in cases {
         let h = Music::new().keys(notes(keys, 0, BAR)).hear();
@@ -278,6 +281,15 @@ fn with_no_bass_part_the_bass_is_found_by_the_gaps() {
         assert_eq!(h.bass(0..8), texture, "{keys}");
     }
     assert_eq!(BASS_GAP, 7);
+    // A lone note and its octave double are heard the same: the double is the note doubled, not a chord over it.
+    let lone = |keys: &str| unit_facts(&Music::new().keys(notes(keys, 0, BAR)).hear(), 0, 1);
+    assert_eq!(lone("C3 C4"), lone("C3"));
+    // With only its octave above it, a note is the bass if it was just before: a held bass stays the bass.
+    let h = Music::new().keys(notes("D3", 0, BAR)).keys(notes("C4 F4", 0, BEAT)).keys(notes("D4", BEAT, BEAT)).hear();
+    assert!((0..8).all(|u| h.gap_bass(u) == Some(key("D3"))));
+    let h = Music::new().keys(notes("D3", 0, BAR)).keys(notes("D4", 0, BEAT)).keys(notes("C4 F4", BEAT, BEAT)).hear();
+    let gaps: Vec<Option<u8>> = (0..8).map(|u| h.gap_bass(u)).collect();
+    assert_eq!(gaps, [&[None; 2][..], &[Some(key("D3")); 6]].concat());
     // The gap bass's ticks are the bass's, not the chords'; so are its octave doubles' (the bass, doubled).
     let h = Music::new().keys(notes("D3 C4 F4", 0, BAR)).hear();
     assert_eq!((h.mass(0..8, Mass::Harmony)[PitchClass::D], h.mass(0..8, Mass::Bass)[PitchClass::D]), (0, 1920));
@@ -291,6 +303,29 @@ fn with_no_bass_part_the_bass_is_found_by_the_gaps() {
     let h = Music::new().bass(notes("D2", 0, BAR)).keys(notes("C3 E3 F3 A3", 0, BAR)).hear();
     assert!((0..8).all(|u| h.gap_bass(u).is_none()));
     assert_eq!(h.mass(0..8, Mass::Bass), per_pitch(&[(PitchClass::D, 1920)]));
+}
+
+#[test]
+fn the_bass_is_found_by_the_gaps_in_bars_where_no_bass_part_plays() {
+    // The left hand's D3 under C4 F4 for four bars, and a bass part that only plays bar 3: D3 is the bass in bars 1, 2
+    // and 4, and the bass part's G2 in bar 3, where the D3 stays in the chords.
+    let keys: Vec<Note> = (0..4).flat_map(|b| notes("D3 C4 F4", b * BAR, BAR)).collect();
+    let music = Music::new().keys(keys).bass(notes("G2", 2 * BAR, BAR));
+    let h = music.hear();
+    let gaps: Vec<Option<u8>> = (0..32).map(|u| h.gap_bass(u)).collect();
+    let want: Vec<Option<u8>> = (0..32).map(|u| (!(16..24).contains(&u)).then_some(key("D3"))).collect();
+    assert_eq!(gaps, want);
+    assert!(h.has_bass_part());
+    let (d, g) = (BassTexture::Held(PitchClass::D), BassTexture::Held(PitchClass::G));
+    assert_eq!((h.bass(0..16), h.bass(16..24), h.bass(24..32)), (d, g, d));
+    assert_eq!((h.mass(16..24, Mass::Harmony)[PitchClass::D], h.mass(16..24, Mass::Bass)[PitchClass::D]), (1920, 0));
+    // The last moment of a bass note played legato into bar 4 doesn't make the bass part play there; a short note
+    // struck there does.
+    let tail = music.clone().bass(notes("A2", 3 * BAR - 100, 110)).hear();
+    assert!((24..32).all(|u| tail.gap_bass(u) == Some(key("D3"))));
+    let hit = music.bass(notes("A2", 3 * BAR + 3 * BEAT, 20)).hear();
+    assert!((24..32).all(|u| hit.gap_bass(u).is_none()));
+    assert_eq!(hit.bass(24..32), BassTexture::Held(PitchClass::A));
 }
 
 #[test]
@@ -367,6 +402,18 @@ fn a_held_note_under_an_arpeggio_is_not_broken() {
     let keys =
         held.map(|(i, k)| Note { start: i as i64 * 120, length: BEAT - i as i64 * 120, key: key(k), velocity: 1 });
     let h = Music::new().keys(keys.collect()).hear();
+    assert!(h.notes().iter().all(|n| !n.broken));
+}
+
+#[test]
+fn a_chord_held_to_the_end_of_the_music_is_held_through_its_felt_beat() {
+    // The left hand's C3 and G3 by turns under the right hand's E4 G4, in one part. The music ends 260 ticks into the
+    // felt beat: E4 G4 held to the end count as held through it, so the felt beat isn't broken...
+    let turns = [notes("C3", 0, 100), notes("G3", BEAT / 2, 20)].concat();
+    let h = Music::new().keys([turns.clone(), notes("E4 G4", 0, 260)].concat()).hear();
+    assert!(h.notes().iter().all(|n| !n.broken));
+    // ...as with E4 G4 held to the felt beat's end and more music after it.
+    let h = Music::new().keys([turns, notes("E4 G4", 0, BEAT), notes("F4", BAR, BEAT)].concat()).hear();
     assert!(h.notes().iter().all(|n| !n.broken));
 }
 
@@ -465,6 +512,13 @@ fn a_loop_is_heard_with_its_last_bar_copied_in_front() {
     assert_eq!((h.heard(0..8), h.heard(8..16), h.heard(16..24)), (pcs("G B D"), pcs("C E G"), pcs("G B D")));
     assert_eq!(h.notes().iter().filter(|n| n.copy).count(), 4);
     assert!(h.notes().iter().filter(|n| n.copy).all(|n| n.struck && n.start == 0));
+    // A note played just before the loop's end (a quarter of a unit or less) is heard on its start, as the loop goes
+    // round: the loop stays two bars long.
+    let h = music.clone().keys(notes("C5", 2 * BAR - 10, 200)).hear();
+    assert_eq!((h.units(), h.reported()), (24, 8..24));
+    let c5: Vec<_> = h.notes().iter().filter(|n| n.key == key("C5")).map(|n| (n.start, n.copy, n.struck)).collect();
+    assert_eq!(c5, [(BAR, false, true)]);
+    assert!(h.struck(8, Stream::Harmony).contains(PitchClass::C) && !h.truncated());
     // Heard as a song, it has no copy.
     let h = Music { span: Span::Song, ..music }.hear();
     assert_eq!((h.units(), h.reported()), (16, 0..16));
@@ -720,25 +774,40 @@ fn slow_unit_facts(h: &Hearing) -> Vec<String> {
         })
         .filter(|p| p.start < p.end)
         .collect();
+    // The bars a bass part plays in: where one of its notes is struck, or sounds for a quarter of a unit or more.
+    let bounds = |u: usize| (h.start(u) - h.tick(0), h.start(u + 1) - h.tick(0));
+    let plays = |u: usize| {
+        let (lo, hi) = bounds(u);
+        pieces.iter().any(|p| {
+            let struck = p.onset && (lo..hi).contains(&p.start);
+            p.stream == Stream::Bass && !p.over && (struck || (p.end.min(hi) - p.start.max(lo)) * 4 >= hi - lo)
+        })
+    };
+    let per_bar = h.bar_units();
+    let bass_bars: Vec<bool> = (0..h.units().div_ceil(per_bar))
+        .map(|b| (b * per_bar..((b + 1) * per_bar).min(h.units())).any(plays))
+        .collect();
+    let mut last_gap: Option<u8> = None;
     (0..h.units())
         .map(|u| {
-            let (lo, hi) = (h.start(u) - h.tick(0), h.start(u + 1) - h.tick(0));
+            let (lo, hi) = bounds(u);
             let len = hi - lo;
             let overlap = |p: &Piece| p.end.min(hi) - p.start.max(lo);
-            let gap = if h.has_bass_part() {
+            let gap = if bass_bars[u / per_bar] {
                 None
             } else {
                 let sounding: Vec<&Piece> =
                     pieces.iter().filter(|p| p.stream == Stream::Harmony && !p.over && overlap(p) * 4 >= len).collect();
-                let low = sounding.iter().map(|p| p.key).min();
-                let next = low.and_then(|l| sounding.iter().map(|p| p.key).filter(|&k| k > l).min());
+                let unbroken = |l: &u8| sounding.iter().any(|p| p.key == *l && !p.broken);
+                let low = sounding.iter().map(|p| p.key).min().filter(unbroken);
+                let next = low.and_then(|l| sounding.iter().map(|p| p.key).filter(|&k| k % 12 != l % 12).min());
                 match (low, next) {
-                    (Some(l), Some(n)) if n - l >= BASS_GAP && sounding.iter().any(|p| p.key == l && !p.broken) => {
-                        Some(l)
-                    }
+                    (Some(l), Some(n)) => (n - l >= BASS_GAP).then_some(l),
+                    (Some(l), None) => (last_gap == Some(l)).then_some(l),
                     _ => None,
                 }
             };
+            last_gap = gap;
             let mut masses = [[0u64; 12]; 6];
             let mut streams = [(PcSet::EMPTY, PcSet::EMPTY, PcSet::EMPTY); 3];
             let mut broken = PcSet::EMPTY;
