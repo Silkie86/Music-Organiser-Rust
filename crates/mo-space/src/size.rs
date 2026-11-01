@@ -99,15 +99,16 @@ pub(crate) fn modified_of(meta: &Metadata) -> NaiveDateTime {
     meta.modified().map(|t| DateTime::<Local>::from(t).naive_local()).unwrap_or_default()
 }
 
-/// Windows' "offline", "recall on open" and "recall on data access": a OneDrive file that's only online, so it takes no
-/// room here and reading it downloads it (or a folder whose list of files is still only online).
+/// Windows' "offline" and "recall on data access": a OneDrive file that's only online, so it takes no room here and
+/// reading it downloads it. ("Recall on open", for a folder whose list of files is still only online, isn't asked:
+/// Windows gives the same bit to ordinary files with extended attributes. Such a folder can't be listed while OneDrive
+/// isn't running, which [`online_only_in`] counts as can't tell.)
 #[cfg(windows)]
 pub fn is_online_only(meta: &Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
     const OFFLINE: u32 = 0x1000;
-    const RECALL_ON_OPEN: u32 = 0x0004_0000;
     const RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
-    meta.file_attributes() & (OFFLINE | RECALL_ON_OPEN | RECALL_ON_DATA_ACCESS) != 0
+    meta.file_attributes() & (OFFLINE | RECALL_ON_DATA_ACCESS) != 0
 }
 
 /// Only Windows has files that are only online.
@@ -278,9 +279,9 @@ pub(crate) enum OnlineOnly {
     CantTell,
 }
 
-/// Whether anything in a folder is only online in OneDrive: a file, or a folder whose list of files is still only
-/// online. Unlike the size walks, a folder in it that can't be read doesn't count as holding none, as this decides
-/// whether the Recycle Bin can keep it. Only Windows has them.
+/// Whether anything in a folder is only online in OneDrive. Unlike the size walks, a folder in it that can't be read
+/// (one whose list of files is still only online, say, while OneDrive isn't running) doesn't count as holding none,
+/// as this decides whether the Recycle Bin can keep it. Only Windows has them.
 pub(crate) fn online_only_in(folder: &Path, stop: &AtomicBool) -> Result<OnlineOnly, Stopped> {
     if !cfg!(windows) {
         return Ok(OnlineOnly::No);

@@ -16,7 +16,7 @@ use crate::clean::{Bin, Done, Problem, Sending, What};
 use crate::folder_move::{
     CantMove, Drives, Fill, KEPT_SUFFIX, MovedFolder, Tree, check_rename, check_rename_or_ask, clear_failed_link,
     copy_fresh, copy_tree, denied, destination_problem, fresh_name, inside_moved, leads_to, link, link_reaches, listed,
-    only_in, remove_link, rest_after, room_for, shown, swap_or_ask, target,
+    only_in, part_way, remove_link, rest_after, room_for, shown, swap_or_ask, target,
 };
 use crate::plugin_space::{PluginSpace, SpaceKind};
 use crate::size::{self, is_link};
@@ -196,12 +196,11 @@ pub fn link_again(
         CantMove::LeftHalfway(_) => why,
         other => {
             let said = match other {
-                CantMove::Stopped => "Stopped.".to_owned(),
                 // A folder took the name it was to be set aside under meanwhile.
                 CantMove::OldCopyThere => {
                     format!("There's a folder called {} beside it now: rename or delete it.", file_name(&aside))
                 }
-                other => other.text(),
+                other => part_way(&other),
             };
             let kept = if kept_in.exists() {
                 format!(", and the ones they replaced are kept in {}", text(&kept_in))
@@ -209,9 +208,8 @@ pub fn link_again(
                 String::new()
             };
             CantMove::LeftHalfway(format!(
-                "{} Some of its files may be in {} already{kept}. The folder here is as it was, so it's safe to try \
-                 again once the DAW is closed.",
-                said.trim_end_matches("Nothing was moved.").trim_end(),
+                "{said} Some of its files may be in {} already{kept}. The folder here is as it was, so it's safe to \
+                 try again once the DAW is closed.",
                 moved.to
             ))
         }

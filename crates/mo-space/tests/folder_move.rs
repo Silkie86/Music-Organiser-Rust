@@ -324,14 +324,23 @@ fn moving_back_stopped_part_way_says_so_and_where_the_old_copys_newer_files_are(
     let found = kept_beside(std::slice::from_ref(&moved), &[], &stop);
     assert_eq!(found.iter().map(|h| h.path.as_str()).collect::<Vec<_>>(), [kept_in.as_str()]);
 
-    // Tried again, it finishes, and keeps the rest in the same folder.
+    // Tried again, it finishes, keeping the rest in a folder of its own; before dropping the move's record, the app
+    // finds both folders of kept files.
     stop.store(false, Ordering::Relaxed);
     let back = move_back(&moved, &ROOMY, &nothing, &stop).unwrap();
-    assert_eq!(back.kept_in, kept_in);
-    assert_eq!(fs::read_dir(&kept_in).unwrap().count(), 4);
+    assert_eq!(back.kept_in, format!("{from} (newer files from the old copy 2)"));
+    assert_eq!(back.kept.len(), 3);
+    let mut found: Vec<String> =
+        kept_beside(std::slice::from_ref(&moved), &[], &stop).into_iter().map(|h| h.path).collect();
+    let mut both = vec![kept_in.clone(), back.kept_in.clone()];
+    found.sort();
+    both.sort();
+    assert_eq!(found, both);
     for n in 0..4 {
-        assert_eq!(fs::read_to_string(Path::new(&kept_in).join(format!("{n}.db"))).unwrap(), "first");
-        assert_eq!(fs::read_to_string(Path::new(&from).join(format!("{n}.db"))).unwrap(), "update");
+        let name = format!("{n}.db");
+        let kept = [&kept_in, &back.kept_in].iter().filter(|k| Path::new(k).join(&name).exists()).count();
+        assert_eq!(kept, 1, "{name}");
+        assert_eq!(fs::read_to_string(Path::new(&from).join(&name)).unwrap(), "update");
     }
 }
 

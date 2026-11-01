@@ -168,14 +168,29 @@ fn versions_folders_and_your_choices_are_each_counted_once() {
     let by_key: HashMap<&str, _> = spaces.iter().map(|p| (p.key.as_str(), p)).collect();
     // "Kontakt 8 Library" names its version: Kontakt 8's alone.
     assert_eq!(by_key["kontakt8"].sounds(), 300);
-    // The library Kontakt 7 added is its alone, not Kontakt 8's too.
-    assert_eq!(by_key["kontakt7"].sounds(), 5000);
-    assert_eq!(by_key["kontakt8"].shared_bytes(), 0);
+    // The library Kontakt 7 added is still Kontakt 8's guess too: shared, so it stays while Kontakt 8 is used.
+    assert_eq!(by_key["kontakt7"].sounds(), 0);
+    assert_eq!(by_key["kontakt7"].shared_bytes(), 5000);
+    assert_eq!(by_key["kontakt8"].shared_bytes(), 5000);
     // Xfer\Serum, ruled out, stays part of Xfer's shared folder rather than being counted nowhere.
     assert_eq!(by_key["serum"].shared_bytes(), 1030);
     assert_eq!(by_key["nerve"].shared_bytes(), 1030);
     let total: u64 = spaces.iter().map(|p| p.bytes()).sum();
-    assert_eq!(total, 4 + 300 + 5000);
+    assert_eq!(total, 4 + 300);
+
+    // Ruled out for Kontakt 8, it's Kontakt 7's alone.
+    let ruled_out = |k: &str| match k {
+        "serum" => vec![s(&docs.join("Xfer/Serum"))],
+        "kontakt8" => vec![kontakt_library.clone()],
+        _ => Vec::new(),
+    };
+    let choices = Choices { added: &added, ruled_out: &ruled_out };
+    let spaces =
+        measure(&installed, std::slice::from_ref(&docs), &plugin_roots, &[], &choices, None, &AtomicBool::new(false))
+            .unwrap();
+    let by_key: HashMap<&str, _> = spaces.iter().map(|p| (p.key.as_str(), p)).collect();
+    assert_eq!(by_key["kontakt7"].sounds(), 5000);
+    assert_eq!(by_key["kontakt8"].shared_bytes(), 0);
 }
 
 #[test]

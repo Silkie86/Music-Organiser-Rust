@@ -155,6 +155,36 @@ fn what_turns_into_a_link_while_it_waits_for_windows_isnt_asked_about() {
 }
 
 #[test]
+fn what_waits_for_windows_stays_when_a_folder_on_the_way_leads_elsewhere_now() {
+    let dir = fixtures("mo-space-sending-folder-swapped");
+    let (d, e) = (dir.join("D"), dir.join("E"));
+    write(&d, "Data/Plugin Data/STEAM/Pad.db", "pad");
+    write(&e, "Plugin Data/STEAM/Pad.db", "pad");
+    let home = d.join("Data/Plugin Data");
+    let old = OldHome {
+        path: s(&home),
+        bytes: 3,
+        note: "its old place".to_owned(),
+        copy: s(&e.join("Plugin Data")),
+        kind: 2,
+    };
+    // While it waits, the folder it's in is put aside and a link to that takes its place: the same files, but not
+    // where it was really.
+    let bin = GuardedBin::new(&dir, |path| {
+        let folder = path.parent().unwrap();
+        let aside = folder.with_file_name("Data (aside)");
+        fs::rename(folder, &aside).unwrap();
+        folder_link(&aside, folder);
+    });
+    let done = remove_old_home(&old, &[], true, &bin, &AtomicBool::new(false));
+    assert!(done.removed.is_empty());
+    assert_eq!(done.problems.len(), 1);
+    assert!(done.problems[0].why.contains("leads somewhere else now"), "{}", done.problems[0].why);
+    assert_eq!(bin.asked(), 0);
+    assert_eq!(fs::read_to_string(d.join("Data (aside)/Plugin Data/STEAM/Pad.db")).unwrap(), "pad");
+}
+
+#[test]
 fn one_folder_reached_two_ways_goes_once_as_administrator() {
     let dir = fixtures("mo-space-sending-twice");
     let projects = dir.join("Projects");

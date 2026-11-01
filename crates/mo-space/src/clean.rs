@@ -29,7 +29,7 @@ use mo_formats::textscan::is_audio_path;
 use mo_library::scan::{daw_of, is_autosave_dir, is_autosave_file, is_inside, is_project_file};
 use serde::{Deserialize, Serialize};
 
-use crate::admin::{Admin, AsAdmin, NoAdmin, Step, ask_for, reason, stamp};
+use crate::admin::{Admin, AsAdmin, NoAdmin, Step, ask_for, real_spot, reason, stamp};
 use crate::plugin_space::SpaceKind;
 use crate::size::{OnlineOnly, Stopped, is_link, is_online_only, online_only_in};
 use crate::song::{CompactItem, CompactKind, has_studio_one_song, parent};
@@ -645,21 +645,23 @@ impl<'a> Sending<'a> {
         let mut lines = Vec::new();
         let mut sent = Vec::new();
         for (r, again) in std::mem::take(&mut self.waiting) {
-            // The step is given where it really is: that must still be the very thing picked, and not a link.
+            // The step is given where it really is: that must still be the very thing picked (in the same real
+            // folder: one on the way may have been swapped for a link meanwhile), and not a link.
             let still_there = || {
                 if self.stop.load(Ordering::Relaxed) {
                     return Err(STOPPED.to_owned());
                 }
+                if not_there(Path::new(&r.path)) {
+                    return Err(Refused::Gone.text().to_owned());
+                }
                 if is_link(Path::new(&r.path)) {
                     return Err(Refused::Link.text().to_owned());
                 }
-                match real_path(&r.path) {
-                    Some(now) if key(&now) == key(&r.real) => Ok(()),
-                    Some(_) => {
-                        Err("It's reached through a link that leads somewhere else now, so it stays.".to_owned())
-                    }
-                    None => Err(Refused::Gone.text().to_owned()),
+                let folder = |p: &str| Path::new(p).parent().map(|f| key(&text(f)));
+                if folder(&real_spot(&r.path)) != folder(&r.real) {
+                    return Err("It's reached through a link that leads somewhere else now, so it stays.".to_owned());
                 }
+                Ok(())
             };
             let stamped = still_there().and_then(|()| again()).and_then(|()| {
                 stamp(Path::new(&r.real))

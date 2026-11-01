@@ -17,7 +17,7 @@ use mo_formats::case;
 use mo_library::read::name_key;
 
 use crate::admin::stamp;
-use crate::clean::{Bin, Done, Problem, Refused, STOPPED, Sending, What, cant_keep};
+use crate::clean::{Bin, Done, Problem, Refused, STOPPED, Sending, Sent, What, cant_keep};
 use crate::plugin_space::SpaceKind;
 use crate::plugins::{InstalledPlugin, format_of, is_waves};
 use crate::size::{Stopped, is_link, measure};
@@ -236,9 +236,14 @@ pub fn remove(picked: &[SpareCopy], now: &[SpareCopy], bin: &dyn Bin, stop: &Ato
             done.problems.push(Problem { path: copy.path.clone(), why });
             continue;
         }
-        // Only now: one whose first path stayed is still checked by the next.
-        seen.insert(key(&real), &copy.path);
-        sending.send(&copy.path, real, copy.bytes, What::Plugin(SpaceKind::Program), &mut done, check);
+        // Only once it went (or waits for Windows): one whose first path stayed is still tried by the next.
+        let real_key = key(&real);
+        match sending.send(&copy.path, real, copy.bytes, What::Plugin(SpaceKind::Program), &mut done, check) {
+            Sent::Went | Sent::Waits => {
+                seen.insert(real_key, &copy.path);
+            }
+            Sent::Stays => {}
+        }
     }
     sending.finish(&mut done);
     done

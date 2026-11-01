@@ -241,12 +241,6 @@ fn maker_matches(folder_name: &str, maker: &str) -> bool {
         && maker.strip_prefix(name.as_str()).is_some_and(|rest| rest.chars().next().is_some_and(|c| !c.is_numeric()))
 }
 
-/// A guessed folder. A maker's folder holds plugin folders counted on their own: [`measure`] counts it without them.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Guessed {
-    path: String,
-}
-
 /// Each plugin's guessed data folders. A folder in a data root named after a plugin is that plugin's. A folder named
 /// after a maker is looked into: its folders named after one of the maker's plugins are that plugin's, and the rest of
 /// it belongs to all the maker's plugins together.
@@ -255,8 +249,8 @@ fn guess(
     data_roots: &[PathBuf],
     plugin_roots: &[String],
     protected_roots: &[String],
-) -> HashMap<String, Vec<Guessed>> {
-    let mut result: HashMap<String, Vec<Guessed>> = HashMap::new();
+) -> HashMap<String, Vec<String>> {
+    let mut result: HashMap<String, Vec<String>> = HashMap::new();
     let families: Vec<Fam<'_>> = plugins
         .iter()
         .map(|p| {
@@ -294,7 +288,7 @@ fn guess(
         let chosen = if that_version.is_empty() { hits } else { that_version };
         chosen.iter().map(|f| f.key.to_owned()).collect()
     };
-    let mut add = |key: String, g: Guessed| result.entry(key).or_default().push(g);
+    let mut add = |key: String, folder: &str| result.entry(key).or_default().push(folder.to_owned());
     for root in data_roots {
         for dir in sub_folders(root) {
             if off(&dir) {
@@ -303,7 +297,7 @@ fn guess(
             let named = plugins_named(&dir, &families);
             if !named.is_empty() {
                 for k in named {
-                    add(k, Guessed { path: dir.clone() });
+                    add(k, &dir);
                 }
                 continue;
             }
@@ -314,11 +308,11 @@ fn guess(
                     continue;
                 }
                 for k in plugins_named(&sub, &theirs) {
-                    add(k, Guessed { path: sub.clone() });
+                    add(k, &sub);
                 }
             }
             for k in keys {
-                add((*k).to_owned(), Guessed { path: dir.clone() });
+                add((*k).to_owned(), &dir);
             }
         }
     }
@@ -386,65 +380,55 @@ pub fn measure(
         Ok(m)
     };
 
-    // Folders you added are the plugin's alone: no other plugin's guess takes them. The ones you ruled out are left out
-    // of every guess for it.
+    // Folders you added are the plugin's as well as its guessed ones. One another plugin's guess takes too, or another
+    // plugin has added too (Kontakt 7 and Kontakt 8 using one library), is shared, so it stays on one's clean-up card
+    // while the other is used; rule it out for the other to make it this one's alone. The ones you ruled out are left
+    // out of every guess for it.
     let added: HashMap<&str, Vec<String>> = plugins
         .iter()
         .map(|p| (p.key.as_str(), (choices.added)(&p.key).into_iter().filter(|a| Path::new(a).is_dir()).collect()))
         .collect();
-    // Who added each folder: two plugins can both have it (Kontakt 7 and Kontakt 8 using one library), and then it's
-    // shared, as a guessed folder two plugins claim is.
-    let mut added_by: HashMap<String, Vec<&str>> = HashMap::new();
-    for (k, folders) in &added {
-        for f in folders {
-            let list = added_by.entry(key(f)).or_default();
-            if !list.contains(k) {
-                list.push(k);
-            }
-        }
-    }
-    let mut claimed: HashMap<&str, (Vec<Guessed>, Vec<String>)> = HashMap::new();
+    let mut claimed: HashMap<&str, (Vec<String>, Vec<String>)> = HashMap::new();
     for p in plugins {
         let no: HashSet<String> = (choices.ruled_out)(&p.key).iter().map(|f| key(f)).collect();
-        let guessed: Vec<Guessed> = guesses
+        let guessed: Vec<String> = guesses
             .get(&p.key)
-            .map(|g| {
-                g.iter()
-                    .filter(|f| !no.contains(&key(&f.path)))
-                    .filter(|f| added_by.get(&key(&f.path)).is_none_or(|ks| ks.contains(&p.key.as_str())))
-                    .cloned()
-                    .collect()
-            })
+            .map(|g| g.iter().filter(|f| !no.contains(&key(f))).cloned().collect())
             .unwrap_or_default();
         claimed.insert(&p.key, (guessed, added.get(p.key.as_str()).cloned().unwrap_or_default()));
     }
-    // Who claims each guessed folder, for the shared ones.
+    // Who claims each folder (by guess or because you added it), for the shared ones; and every folder counted on its
+    // own for some plugin, as (key, path): a folder that holds one counts without it, so nothing is counted twice.
     let mut owners: HashMap<String, Vec<&str>> = HashMap::new();
+    let mut counted: Vec<(String, &str)> = Vec::new();
     for p in plugins {
-        for g in claimed.get(p.key.as_str()).map(|c| c.0.as_slice()).unwrap_or_default() {
-            let list = owners.entry(key(&g.path)).or_default();
+        let Some((guessed, mine)) = claimed.get(p.key.as_str()) else { continue };
+        for path in guessed.iter().chain(mine) {
+            let k = key(path);
+            let list = owners.entry(k.clone()).or_default();
             if !list.contains(&p.key.as_str()) {
                 list.push(&p.key);
             }
-        }
-    }
-    // Every folder counted on its own for some plugin (guessed for one, or added): a folder that holds one counts
-    // without it, so nothing is counted twice.
-    let mut counted: Vec<(String, &str)> = Vec::new();
-    for (guessed, mine) in claimed.values() {
-        for path in guessed.iter().map(|g| g.path.as_str()).chain(mine.iter().map(String::as_str)) {
-            let k = key(path);
             if !counted.iter().any(|(c, _)| *c == k) {
                 counted.push((k, path));
             }
         }
     }
+    let mut own_sizes: HashMap<String, Measured> = HashMap::new();
     let mut own_size = |path: &str| -> Result<Measured, Stopped> {
-        let mut all = size_of(path)?;
         let k = key(path);
-        let inside: Vec<&(String, &str)> = counted.iter().filter(|(c, _)| strictly_inside(c, &k)).collect();
+        if let Some(m) = own_sizes.get(&k) {
+            return Ok(*m);
+        }
+        let mut all = size_of(path)?;
+        // (A key starting with this one's is a cheap first look; `is_inside` decides.)
+        let below = |c: &str, inner: &str, outer: &str, outer_key: &str| {
+            c.len() > outer_key.len() && c.starts_with(outer_key) && is_inside(inner, outer)
+        };
+        let inside: Vec<&(String, &str)> = counted.iter().filter(|(c, inner)| below(c, inner, path, &k)).collect();
         // Only the outermost of those: one inside another of them is already in that one.
-        for (c, inner) in inside.iter().filter(|(c, _)| !inside.iter().any(|(o, _)| strictly_inside(c, o))) {
+        let outermost = inside.iter().filter(|(c, inner)| !inside.iter().any(|(o, outer)| below(c, inner, outer, o)));
+        for (c, inner) in outermost {
             // Only one the walk of this folder reached (not past a link), or it isn't in this folder's size.
             if !plainly_inside(inner, c, path, &k) {
                 continue;
@@ -456,25 +440,26 @@ pub fn measure(
                 files: all.files.saturating_sub(part.files),
             };
         }
+        own_sizes.insert(k, all);
         Ok(all)
     };
-    // The plugins that have a folder besides this one, by guess or because you added it.
+    // The other plugins that have a folder.
     let others_of = |path: &str, me: &str| -> Vec<String> {
-        let k = key(path);
-        let mut others: Vec<String> = Vec::new();
-        for o in owners.get(&k).into_iter().chain(added_by.get(&k)).flatten() {
-            if *o != me && !others.iter().any(|x| x == o) {
-                others.push((*o).to_owned());
-            }
-        }
-        others
+        owners
+            .get(&key(path))
+            .map(|o| o.iter().filter(|k| **k != me).map(|k| (*k).to_owned()).collect())
+            .unwrap_or_default()
     };
     let mut result = Vec::new();
     for p in plugins.iter().filter(|p| only.is_none_or(|o| o.contains(&p.key))) {
         let mut folders: Vec<SpaceFolder> = Vec::new();
         // Each file once, by where it really is: a link to a file listed already isn't more room.
         let mut files_seen = HashSet::new();
-        for f in p.files.iter().filter(|f| files_seen.insert(key(&real_path(f).unwrap_or_else(|| (*f).clone())))) {
+        let real_key = |f: &String| match size::is_link(Path::new(f)) {
+            true => key(&real_path(f).unwrap_or_else(|| f.clone())),
+            false => key(f),
+        };
+        for f in p.files.iter().filter(|f| files_seen.insert(real_key(f))) {
             let m = own_size(f)?;
             folders.push(SpaceFolder {
                 path: f.clone(),
@@ -485,42 +470,25 @@ pub fn measure(
             });
         }
         let Some((guessed, mine)) = claimed.get(p.key.as_str()) else { continue };
-        for g in guessed {
-            // A maker's folder counts without the plugin folders inside it that are counted on their own (ones every
-            // plugin ruled out stay part of the maker's folder, so they're counted somewhere).
-            let m = own_size(&g.path)?;
-            folders.push(SpaceFolder {
-                path: g.path.clone(),
-                kind: kind_of(m),
-                bytes: m.bytes,
-                shared_with: others_of(&g.path, &p.key),
-                added: false,
-            });
-        }
-        for a in mine {
-            if folders.iter().any(|f| key(&f.path) == key(a)) {
+        for (path, added) in guessed.iter().map(|g| (g, false)).chain(mine.iter().map(|a| (a, true))) {
+            if folders.iter().any(|f| key(&f.path) == key(path)) {
                 continue;
             }
-            let m = own_size(a)?;
+            // A maker's folder counts without the plugin folders inside it that are counted on their own (ones every
+            // plugin ruled out stay part of the maker's folder, so they're counted somewhere).
+            let m = own_size(path)?;
             folders.push(SpaceFolder {
-                path: a.clone(),
+                path: path.clone(),
                 kind: kind_of(m),
                 bytes: m.bytes,
-                shared_with: others_of(a, &p.key),
-                added: true,
+                shared_with: others_of(path, &p.key),
+                added,
             });
         }
         folders.retain(|f| f.bytes > 0 || f.added);
         result.push(PluginSpace { key: p.key.clone(), name: p.name.clone(), vendor: p.vendor.clone(), folders });
     }
     Ok(result)
-}
-
-/// Whether one path key is inside another (not the same).
-fn strictly_inside(inner: &str, outer: &str) -> bool {
-    inner.len() > outer.len()
-        && inner.starts_with(outer)
-        && (outer.ends_with('/') || inner.as_bytes().get(outer.len()) == Some(&b'/'))
 }
 
 /// Whether a folder inside another (`inner_key` inside `outer_key`) is reached from it without passing a link, as a

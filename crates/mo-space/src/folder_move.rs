@@ -433,8 +433,10 @@ pub struct MovedBack {
 /// move copied into it first (presets the plugin wrote through the link live only there). The old copy's own newer
 /// files are kept aside, never replaced. Once the old copy is deleted, the folder is copied back instead. Either way
 /// only with room to spare on this drive, and only while the link still leads to the copy the move made. Close the DAW
-/// first: what it saves meanwhile is caught by a second pass, but not after the swap. Once it returns `Ok`, the move
-/// is over and the app drops its record; the copy on the other drive is left for you to remove. Call it away from the
+/// first: what it saves meanwhile is caught by a second pass, but not after the swap. Stopped or failing part way, it
+/// says what's where ([`CantMove::LeftHalfway`]). Once it returns `Ok`, the move is over: the app lists the folders of
+/// kept files beside it ([`crate::after_move::kept_beside`], which finds those a stopped try left too) as folders left
+/// behind, then drops its record; the copy on the other drive is left for you to remove. Call it away from the
 /// window's thread.
 pub fn move_back(
     moved: &MovedFolder,
@@ -459,16 +461,13 @@ pub fn move_back(
     let settled = Path::new(from);
     let here = settled.parent().unwrap_or(settled);
     if moved.has_old_copy() {
-        // The folder a try that stopped part way kept files in is used again, so they're all in one place.
-        let kept_first = format!("{from}{KEPT_SUFFIX}");
-        let kept_in = PathBuf::from(if real_folder(&kept_first) { kept_first } else { fresh_name(from, KEPT_SUFFIX) });
+        let kept_in = PathBuf::from(fresh_name(from, KEPT_SUFFIX));
         let tree = Tree { keep_in: Some(&kept_in), ..Tree::new(to, Path::new(&moved.old_copy), settled) };
         room_for(&tree, here, drives, stop)?;
         // From here on the old copy changes: a stop or a failure says so, and where its own newer files are.
         let partly = |why: CantMove| match why {
             CantMove::LeftHalfway(_) => why,
             other => {
-                let said = if matches!(other, CantMove::Stopped) { "Stopped.".to_owned() } else { other.text() };
                 let kept = if kept_in.exists() {
                     format!(", and its own newer files are kept in {}", text(&kept_in))
                 } else {
@@ -477,7 +476,7 @@ pub fn move_back(
                 CantMove::LeftHalfway(format!(
                     "{} The old copy ({}) was partly brought up to date from {}{kept}. The link and {} are as they \
                      were, so it's safe to try again once the DAW is closed.",
-                    said.trim_end_matches("Nothing was moved.").trim_end(),
+                    part_way(&other),
                     moved.old_copy,
                     moved.to,
                     moved.to
@@ -517,6 +516,14 @@ pub fn move_back(
         return Err(why);
     }
     Ok(MovedBack { links_left: shown(&[first.links_left, again.links_left].concat()), ..MovedBack::default() })
+}
+
+/// What a stop or a failure part way says first: "Stopped.", or why, without "Nothing was moved." (something was).
+pub(crate) fn part_way(why: &CantMove) -> String {
+    match why {
+        CantMove::Stopped => "Stopped.".to_owned(),
+        other => other.text().trim_end_matches("Nothing was moved.").trim_end().to_owned(),
+    }
 }
 
 /// Whether the drive `here` is on has room for what freshening `tree` copies, and some to spare. Counted only when the

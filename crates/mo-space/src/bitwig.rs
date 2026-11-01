@@ -17,7 +17,7 @@ use std::time::SystemTime;
 
 use rayon::prelude::*;
 
-use crate::clean::{Bin, Done, Problem, STOPPED, Sending, What, cant_keep};
+use crate::clean::{Bin, Done, Problem, STOPPED, Sending, Sent, What, cant_keep};
 use crate::size::{Stopped, file_hash, is_link, walk};
 use crate::{real_path, text};
 
@@ -199,8 +199,13 @@ pub fn remove_copies(fixed: &FixedProject<'_>, bin: &dyn Bin, stop: &AtomicBool)
         };
         // Where it really is, as a plain path (not Windows' long-path form).
         let real = real_path(&text(copy)).unwrap_or_else(|| text(copy));
-        sent.extend(real_before.into_iter().chain([checked.real]).map(|r| (r, copy.as_path())));
-        sending.send(&text(copy), real, checked.bytes, What::BitwigCopy, &mut done, move || check().map(|_| ()));
+        // Noted only once it went (or waits for Windows): one whose first path stayed is still tried by the next.
+        match sending.send(&text(copy), real, checked.bytes, What::BitwigCopy, &mut done, move || check().map(|_| ())) {
+            Sent::Went | Sent::Waits => {
+                sent.extend(real_before.into_iter().chain([checked.real]).map(|r| (r, copy.as_path())));
+            }
+            Sent::Stays => {}
+        }
     }
     sending.finish(&mut done);
     done
