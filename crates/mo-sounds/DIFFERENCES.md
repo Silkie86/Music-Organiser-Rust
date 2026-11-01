@@ -71,3 +71,17 @@ nearest sounds for the same made-up vectors.
 | Two sounds exactly as alike at the cut-off (exact copies are common) | Kept whichever each worker met first, which depends on the order the dictionary holds them. | Keeps the lower id, every time. | Better (same list each time) |
 | Standardising | Sums in dictionary order. | Sums in id order, so a rebuild gives the same numbers. | Same in practice |
 | "Sounds like this" when hidden copies or other types fill the first 3 × max | Stops there, so the list can come up short. | Asks for more until the list is full or the library has no more. | Better |
+
+## Rediscover
+
+`rediscover` ports `Rediscover` (suggest, why nothing, years, folders); the twin test (`twin sounds`) has the C# app
+save a made-up library to a new sounds.db, which the Rust app reads, and both answer the same seeded questions.
+
+| What | C# | Rust | Judged |
+|---|---|---|---|
+| Shuffle (seed 0) | .NET's unseeded random numbers. | The seeded ones, seeded from the clock. | Same in practice (a new list each time) |
+| Sounds analysed but no vectors stored | Says every sound is used already. | Says none have been listened to yet. | Better |
+| Folders of a Mac or Linux path on Windows (and back) | Splits only on that system's separator. | Splits on `\` and `/` everywhere. | Same in practice |
+| Why a starred (or rated, or much played) unused sound is suggested | Can say it "sounds like" itself. | Names the closest other sound you like. | Better (bug in C#) |
+| No sounds of the chosen type in the index yet (deep listening hasn't heard them) | Says every one is used already. | Says they haven't been listened to yet. | Better |
+| Folders on Windows spelt with `/` and `\` | One folder. | One folder too (`/` turned into `\`), spelt with `\`. | Same |

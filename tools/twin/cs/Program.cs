@@ -1,7 +1,8 @@
 // The C# half of the twin test. Reads each file named on its input (one path a line) with the C# app's FL Studio,
 // Bitwig, Studio One or MIDI file reader (or with --sounds, its sound analyser; with --classify, its type classifier;
-// with --similar, its likeness index), unchanged, and writes what it finds as one JSON a line, in the same shape as
-// tools/twin/src/rust_side.rs (sounds.rs for sounds, classify.rs for the classifier, similar.rs for likeness).
+// with --similar, its likeness index; with --rediscover, its Rediscover), unchanged, and writes what it finds as one JSON a line, in the same shape as
+// tools/twin/src/rust_side.rs (sounds.rs for sounds, classify.rs for the classifier, similar.rs for likeness,
+// rediscover.rs for Rediscover).
 // Files are read on every core; the lines come out in whatever order they finish, each naming its file.
 // With --roots it lists the library's folders instead (below).
 
@@ -65,13 +66,16 @@ var sounds = args is ["--sounds"];
 var classify = args is ["--classify"];
 // `twin-cs --similar`: each file is a likeness case (vectors and probes) made by tools/twin/src/similar.rs.
 var similar = args is ["--similar"];
+// `twin-cs --rediscover`: each file is a made-up sound library made by tools/twin/src/rediscover.rs; it's saved to a new
+// sounds.db beside it (which the Rust side then reads) and Rediscover is asked the case's questions.
+var rediscover = args is ["--rediscover"];
 var output = Console.OpenStandardOutput();
 var gate = new object();
 Parallel.ForEach(files, file =>
 {
     string json;
     // One odd value (JSON has no NaN) loses that file's reading, not the whole run.
-    try { json = (sounds ? DumpSound(file) : classify ? DumpClassify(file) : similar ? DumpSimilar(file) : Dump(file)).ToJsonString(); }
+    try { json = (sounds ? DumpSound(file) : classify ? DumpClassify(file) : similar ? DumpSimilar(file) : rediscover ? DumpRediscover(file) : Dump(file)).ToJsonString(); }
     catch (Exception e) { json = new JsonObject { ["file"] = file, ["error_more"] = $"couldn't write it: {e.Message}" }.ToJsonString(); }
     var bytes = System.Text.Encoding.UTF8.GetBytes(json + "\n");
     lock (gate) output.Write(bytes);
@@ -157,6 +161,65 @@ static JsonObject DumpSimilar(string path)
         o["nearest"] = nearest;
     }
     catch (Exception e) { o["error"] = $"{e.GetType().Name}: {e.Message}"; }
+    return o;
+}
+
+// A made-up library saved by the C# app's own sound library to a new sounds.db, read back by SoundOrganiser with the
+// projects' sample lists applied, and Rediscover's suggestions, its reason when there are none, its years and folders.
+static JsonObject DumpRediscover(string path)
+{
+    var o = new JsonObject { ["file"] = path };
+    try
+    {
+        var c = JsonNode.Parse(File.ReadAllText(path))!;
+        var db = c["Db"]!.GetValue<string>();
+        using (var lib = new MusicOrganiser.Core.Sounds.SoundLibrary(db))
+        {
+            lib.Save(c["Sounds"]!.AsArray().Select(s => new MusicOrganiser.Core.Sounds.SoundLibrary.Analysed(
+                s!["Path"]!.GetValue<string>(), 1000, s["Mtime"]!.GetValue<long>(),
+                s["Features"] is JsonArray f ? new MusicOrganiser.Core.Sounds.SoundAnalysis { Seconds = 1, Features = f.Select(n => n!.GetValue<float>()).ToArray() } : null,
+                null,
+                s["Clap"] is JsonArray k ? k.Select(n => n!.GetValue<float>()).ToArray() : null,
+                s["NameType"]?.GetValue<string>())).ToList());
+            var ids = lib.All().ToDictionary(s => s.Path, s => s.Id);
+            var hide = new List<long>();
+            foreach (var s in c["Sounds"]!.AsArray())
+            {
+                var id = ids[s!["Path"]!.GetValue<string>()];
+                if (s["Favourite"]!.GetValue<bool>()) lib.SetFavourite(id, true);
+                lib.SetRating(id, s["Rating"]!.GetValue<int>());
+                for (var i = s["Plays"]!.GetValue<int>(); i > 0; i--) lib.MarkPlayed(id);
+                if (s["Hidden"]!.GetValue<bool>()) hide.Add(id);
+            }
+            lib.Hide(hide, "twin");
+            var org = new MusicOrganiser.Core.Sounds.SoundOrganiser(lib);
+            org.ApplyUsage(c["Usage"]!.AsArray().Select(u => (u![0]!.GetValue<string>(), u[1]!.GetValue<int>())).ToList());
+            var answers = new JsonArray();
+            foreach (var q in c["Queries"]!.AsArray())
+            {
+                var opts = new MusicOrganiser.Core.Sounds.Rediscover.Options(
+                    q!["Type"]?.GetValue<string>(), q["Count"]!.GetValue<int>(), q["Adventure"]!.GetValue<double>(),
+                    q["Seed"]!.GetValue<int>(), q["MaxUses"]!.GetValue<int>(), q["Year"]?.GetValue<int>());
+                var found = MusicOrganiser.Core.Sounds.Rediscover.Suggest(org, opts);
+                answers.Add(new JsonObject
+                {
+                    ["Suggestions"] = new JsonArray(found.Select(x => (JsonNode)new JsonObject
+                        { ["Id"] = x.Sound.Id, ["Reason"] = x.Reason, ["Score"] = x.Score }).ToArray()),
+                    ["WhyNothing"] = found.Count == 0 ? MusicOrganiser.Core.Sounds.Rediscover.WhyNothing(org, opts) : null,
+                });
+            }
+            o["answers"] = answers;
+            o["years"] = new JsonArray(MusicOrganiser.Core.Sounds.Rediscover.Years(org).Select(y => (JsonNode)y).ToArray());
+            o["folders"] = new JsonArray(MusicOrganiser.Core.Sounds.Rediscover.Folders(org).Select(f => (JsonNode)new JsonObject
+                { ["Folder"] = f.Folder, ["Sounds"] = f.Sounds, ["Used"] = f.Used, ["Share"] = f.Share }).ToArray());
+        }
+    }
+    catch (Exception e) { o["error"] = $"{e.GetType().Name}: {e.Message}"; }
+    finally
+    {
+        // Lets go of the sounds.db so the Rust side can read it and the folder can be removed.
+        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+    }
     return o;
 }
 

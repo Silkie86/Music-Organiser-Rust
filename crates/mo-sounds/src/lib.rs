@@ -25,6 +25,7 @@ pub mod index;
 pub mod learn;
 pub mod liking;
 pub mod music;
+pub mod rediscover;
 pub mod scan;
 pub mod types;
 pub mod usage;

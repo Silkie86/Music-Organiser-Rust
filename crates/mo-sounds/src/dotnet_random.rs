@@ -77,6 +77,11 @@ impl DotnetRandom {
         f64::from(self.next()) * (1.0 / f64::from(MAX))
     }
 
+    /// As `NextDouble()`: 0 up to (not including) 1.
+    pub(crate) fn next_double(&mut self) -> f64 {
+        self.sample()
+    }
+
     /// As `Next(min, max)` for a range that fits in an `i32` (all the app uses).
     pub(crate) fn next_in(&mut self, min: i32, max: i32) -> i32 {
         let range = i64::from(max) - i64::from(min);

@@ -19,6 +19,7 @@
 
 mod classify;
 mod compare;
+mod rediscover;
 mod rust_side;
 mod similar;
 mod songs;
