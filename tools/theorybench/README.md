@@ -38,7 +38,8 @@ python3 -I tools/theorybench/convert/pop909cl.py path/to/pop909cl path/to/bench/
   flat 7th, say), and keyfit may learn from them.
 - **Rolling Stone 200** (de Clercq and Temperley's rock corpus, through ChoCo's JAMS files): 200 rock charts with
   their tonic, played the same way, for measuring only: their licence isn't one keyfit learns from. The Billboard run
-  leaves out the 22 songs both have, so the rock songs stay unseen.
+  leaves out the 22 charts whose title RS200 has too, so the rock songs stay unseen. That's by title alone, so covers
+  go too (they share the chords); two are other songs with the same title.
 
 ```
 git clone --filter=blob:none --sparse https://github.com/boomerr1/the-mcgill-billboard-project.git billboard
@@ -109,8 +110,10 @@ notes.
   past 16), offsets for the kind of input, a curve of its own that a loop adds, and an offset for a song.
 - **Sources.** Several files can be read at once (`keyfit pop909cl.jsonl billboard.jsonl rs200.jsonl`). keyfit
   learns only from pieces whose licence lets the fitted weights ship (MIT, CC0, CC BY without NC, SA or ND: the
-  `licence` each converter writes). The rest are measured only, by the finders fitted without them, and never fall
-  in the kept-back fold. A piece with no tune (a chart) is heard as its full mix, its upper notes and its bass alone.
+  `licence` each converter writes), and stops if no piece read has one. The rest are measured only: by the finders
+  fitted without them, never in the kept-back fold, and by `--final`'s finder too. A piece only measured whose
+  notes (in any key) are also in a piece learned from is left out, since its finder learned them. A piece with no
+  tune (a chart) is heard as its full mix, its upper notes and its bass alone.
 - **Weighting.** Each set of cases (a cut and a kind of input) counts 1 in all, however many cases it has, and whole
   songs as a full mix count 5. Counting every case the same instead lets the many one-bar windows outvote the rest:
   on folds 1 to 4 that gave one-bar windows 46.2% (against 42.3%), but songs that change key 72.0% (against 79.6%).

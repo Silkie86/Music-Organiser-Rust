@@ -116,7 +116,7 @@ impl Item {
         let licence = self.licence.to_ascii_uppercase().replace(['-', '_'], " ");
         let words: Vec<&str> = licence.split_whitespace().collect();
         match words.as_slice() {
-            ["MIT"] => true,
+            ["MIT"] | ["MIT", "LICENSE" | "LICENCE"] => true,
             [first, ..] if first.starts_with("CC0") => true,
             ["CC", "BY", rest @ ..] => !rest.iter().any(|w| matches!(*w, "NC" | "SA" | "ND")),
             _ => false,
@@ -173,10 +173,19 @@ mod tests {
     fn only_licences_that_let_fitted_weights_ship_are_learned_from() {
         let bare: Item = serde_json::from_str(r#"{"source":"x","id":"1","ppq":96,"length":96,"parts":[]}"#).unwrap();
         let with = |licence: &str| Item { licence: licence.to_owned(), ..bare.clone() };
-        for yes in ["MIT", "CC0", "CC0-1.0", "CC BY 4.0", "CC-BY-4.0", "cc by"] {
+        for yes in ["MIT", "MIT License", "mit licence", "CC0", "CC0-1.0", "CC BY 4.0", "CC-BY-4.0", "cc by"] {
             assert!(with(yes).may_learn(), "{yes}");
         }
-        for no in ["", "CC BY-NC-SA 4.0", "CC BY-SA 4.0", "CC BY-ND 4.0", "ODbL", "GPL-3.0", "measuring only (RS200)"] {
+        for no in [
+            "",
+            "CC BY-NC-SA 4.0",
+            "CC BY-SA 4.0",
+            "CC BY-ND 4.0",
+            "ODbL",
+            "GPL-3.0",
+            "MIT-0 or GPL",
+            "measuring only (RS200)",
+        ] {
             assert!(!with(no).may_learn(), "{no}");
         }
     }

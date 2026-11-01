@@ -8,8 +8,8 @@ Usage:
 Two chart collections, both of people's chord labels with no notes of their own:
   - The McGill Billboard charts (Burgoyne, Wild and Fujinaga, ISMIR 2011; CC0): 890 charts of US Billboard Hot 100
     songs from 1958 to 1991, with their tonic and metre. Duplicates (a song drawn twice) are dropped, and so are the
-    songs whose titles are in --skip, so a set measured on its own stays unseen. Written with licence CC0, so keyfit
-    may learn from them.
+    songs whose titles are in --skip, so a set measured on its own stays unseen (by title alone, so covers go too:
+    they share the chords). Written with licence CC0, so keyfit may learn from them.
   - The Rolling Stone 200 rock charts (de Clercq and Temperley), as ChoCo's JAMS files (de Berardinis et al.).
     Written with the licence given on the command line: "measuring only (RS200)" keeps keyfit from learning from
     them. --titles writes their titles, for the Billboard run's --skip.
@@ -28,7 +28,10 @@ Two chart collections, both of people's chord labels with no notes of their own:
 Each chart is played as a bass line (the chord's bass, C2 to B2) under block chords (G3 to F#4), both struck at the
 chord's start and again at every bar line it lasts over. A beat is the metre's own beat note (an eighth in 6/8 and
 12/8), as pop909cl.py counts them; a Billboard bar written in another metre is stretched to the song's bar. Charts
-have no tune, so keyfit hears each as its full mix, its chords alone and its bass alone.
+have no tune, so keyfit hears each as its full mix, its chords alone and its bass alone. A JAMS chart is played from
+its chords' lengths, one after another, and each key change starts with the chord written at the same time (ChoCo
+writes a time as measure + beat / 10, which can't be read back alone in 12/8); a chart with a key change no chord
+starts at is left out.
 
 Keys: the chart's tonic, with the mode read from the tonic chord in that key region (a silver label): minor when
 chords on the tonic with a minor third last longer than those with a major third, else major; a region with no chord
@@ -36,6 +39,7 @@ on its tonic takes the song's choice for that tonic, and is left unlabelled when
 """
 
 import csv
+import functools
 import json
 import re
 import sys
@@ -79,6 +83,7 @@ def interval(text):
     return DEGREE[int(m.group(2))] + shift
 
 
+@functools.lru_cache(maxsize=None)
 def harte(label):
     """A Harte chord as (root pc, the pcs, the bass pc, the third: 'major', 'minor' or None); None for no chord."""
     label = label.strip()
@@ -122,7 +127,7 @@ def harte(label):
     return root, pcs, bass, third
 
 
-def render(segments, bar_ticks, end):
+def render(segments, bar_ticks):
     """The bass and chord parts for chord segments [(start, end, label)] in ticks, struck again at each bar line."""
     bass, chords = [], []
     for start, stop, label in segments:
@@ -307,7 +312,7 @@ def billboard_item(path, ident, bad_labels):
         "beats_per_bar": beats,
         "first_downbeat": 0,
         "aligned": True,
-        "parts": render(segments, bar_ticks, end),
+        "parts": render(segments, bar_ticks),
         "keys": keys,
         "chords": [s for s in segments if s[2] != "N"],
         "key_labels": "human (tonic), mode from the tonic chord",
@@ -331,81 +336,93 @@ def jams(jams_dir, meta_csv, source, licence, out, titles_out):
     with open(meta_csv, newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
             meta[row["id"]] = (row.get("title", ""), row.get("performers", ""))
-    items, dropped, bad_labels = [], {"no labels": 0, "unreadable": 0}, {}
+    items, dropped, bad_labels = [], {"no labels": 0, "keys off the chords": 0, "unreadable": 0}, {}
     titles = []
     for path in sorted(Path(jams_dir).glob("*.jams"), key=lambda p: int(re.sub(r"\D", "", p.stem) or 0)):
-        d = json.loads(path.read_text(encoding="utf-8"))
-        anns = {}
-        for a in d["annotations"]:
-            anns.setdefault(a["namespace"], a["data"])
-        chords, keys_data, timesig = anns.get("chord_harte"), anns.get("key_mode"), anns.get("timesig")
-        if not chords or not keys_data:
-            dropped["no labels"] += 1
+        try:
+            item, why = jams_item(path, source, licence, bad_labels)
+        except (ValueError, KeyError, TypeError, IndexError) as e:
+            dropped["unreadable"] += 1
+            print(f"  {path.name}: {e!r}", file=sys.stderr)
             continue
-        num, den = 4, 4
-        if timesig:
-            num, den = timesig[0]["value"]["numerator"], timesig[0]["value"]["denominator"]
-        beats = metre_beats(f"{num}/{den}")
-        unit = PPQ  # the durations count the metre's beat note, which is the bench's beat
-        bar_ticks = beats * PPQ
-        first = chords[0]["time"]
-        measure = int(round(first * 1000)) // 1000
-        origin_units = 0.0
-        segments, at = [], 0.0
-        for o in chords:
-            label = o["value"]
-            try:
-                if harte(label) is None:
-                    label = "N"
-            except ValueError:
-                bad_labels[label] = bad_labels.get(label, 0) + 1
-                label = "N"
-            s = round(at * unit)
-            at += o["duration"]
-            segments.append([s, round(at * unit), label])
-        end = round(at * unit)
-        # Key regions: placed by measure.beat from the first chord's measure (keys change on bar lines in RS200).
-        regions = []
-        for k in keys_data:
-            t = k["time"]
-            m = int(round(t * 1000)) // 1000
-            frac = round((t - m) * 10)
-            start = (m - measure) * bar_ticks + max(frac - 1, 0) * round(unit)
-            tonic = pitch(k["value"].split(":")[0])
-            regions.append([max(start, 0), None, tonic])
-        regions.sort()
-        for i, r in enumerate(regions):
-            r[1] = regions[i + 1][0] if i + 1 < len(regions) else end
-        segments = merge(segments)
-        keys = silver_keys([tuple(r) for r in regions], segments, end)
-        if not keys:
-            dropped["no labels"] += 1
+        if item is None:
+            dropped[why] += 1
             continue
-        title, artist = meta.get(path.stem, (d.get("file_metadata", {}).get("title", ""), ""))
-        titles.append(norm_title(title))
-        items.append({
-            "source": source,
-            "id": path.stem,
-            "ppq": PPQ,
-            "length": end,
-            "beats_per_bar": beats,
-            "first_downbeat": 0,
-            "aligned": True,
-            "parts": render(segments, bar_ticks, end),
-            "keys": keys,
-            "chords": [s for s in segments if s[2] != "N"],
-            "key_labels": "human (tonic only), mode from the tonic chord",
-            "chord_labels": "human",
-            "licence": licence,
-            "title": title,
-            "artist": artist,
-        })
+        if path.stem in meta:
+            item["title"], item["artist"] = meta[path.stem]
+        titles.append(norm_title(item["title"]))
+        items.append(item)
     write(items, out)
     if titles_out:
         Path(titles_out).write_text("\n".join(titles) + "\n", encoding="utf-8")
     print(f"{source}: {len(items)} songs written; left out: {dropped}")
     if bad_labels:
         print("  chords not read (played as no chord):", sorted(bad_labels.items(), key=lambda x: -x[1])[:20])
+
+
+def jams_item(path, source, licence, bad_labels):
+    """One JAMS chart as a bench item, or None and why it's left out."""
+    d = json.loads(path.read_text(encoding="utf-8"))
+    anns = {}
+    for a in d["annotations"]:
+        anns.setdefault(a["namespace"], a["data"])
+    chords, keys_data, timesig = anns.get("chord_harte"), anns.get("key_mode"), anns.get("timesig")
+    if not chords or not keys_data:
+        return None, "no labels"
+    num, den = 4, 4
+    if timesig:
+        num, den = timesig[0]["value"]["numerator"], timesig[0]["value"]["denominator"]
+    beats = metre_beats(f"{num}/{den}")
+    bar_ticks = beats * PPQ
+    # The durations count the metre's beat note, which is the bench's beat.
+    segments, starts, at = [], [], 0.0
+    for o in chords:
+        label = o["value"]
+        try:
+            if harte(label) is None:
+                label = "N"
+        except ValueError:
+            bad_labels[label] = bad_labels.get(label, 0) + 1
+            label = "N"
+        start = round(at * PPQ)
+        starts.append((o["time"], start))
+        at += o["duration"]
+        segments.append([start, round(at * PPQ), label])
+    end = round(at * PPQ)
+    # Each key change starts with the chord written at its time (on a bar line, if two are: in 12/8, 2.1 is both
+    # bar 2's first beat and bar 1's eleventh).
+    regions = []
+    for k in keys_data:
+        at_key = [start for time, start in starts if abs(time - k["time"]) < 1e-6]
+        if len(at_key) > 1:
+            at_key = [start for start in at_key if start % bar_ticks == 0]
+        if len(at_key) != 1:
+            return None, "keys off the chords"
+        regions.append([at_key[0], None, pitch(k["value"].split(":")[0])])
+    regions.sort()
+    for i, r in enumerate(regions):
+        r[1] = regions[i + 1][0] if i + 1 < len(regions) else end
+    segments = merge(segments)
+    keys = silver_keys([tuple(r) for r in regions], segments, end)
+    if not keys:
+        return None, "no labels"
+    return {
+        "source": source,
+        "id": path.stem,
+        "ppq": PPQ,
+        "length": end,
+        "beats_per_bar": beats,
+        "first_downbeat": 0,
+        "aligned": True,
+        "parts": render(segments, bar_ticks),
+        "keys": keys,
+        "chords": [s for s in segments if s[2] != "N"],
+        "key_labels": "human (tonic only), mode from the tonic chord",
+        "chord_labels": "human",
+        "licence": licence,
+        "title": d.get("file_metadata", {}).get("title", ""),
+        "artist": "",
+    }, None
 
 
 def write(items, out):

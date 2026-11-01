@@ -29,10 +29,11 @@
 //! measured, so the numbers stay comparable with the C# app's on the same cases.
 //!
 //! - **Sources.** Several files can be read at once. Only pieces whose licence lets fitted weights ship (MIT, CC0,
-//!   CC BY: [`Item::may_learn`]) are learned from; the rest are measured only, by finders fitted without them, and
-//!   never land in the kept-back fold. `--weigh source=w` sets how much a source's sets count in the fit and the
-//!   calibration (1 unless it says otherwise; 0 counts it in the tables only), and `--weigh source/input=w` one
-//!   kind of input's sets (`billboard/upper=0`). The report puts the first file's
+//!   CC BY: [`Item::may_learn`]) are learned from. The rest are measured only: by finders fitted without them, never
+//!   from the kept-back fold, and by `--final`'s finder too. A piece only measured whose notes (in any key) are also
+//!   in a piece learned from is left out, since its finder learned them. `--weigh source=w` sets how much a source's
+//!   sets count in the fit and the calibration (1 unless it says otherwise; 0 counts it in the tables only), and
+//!   `--weigh source/input=w` one kind of input's sets (`billboard/upper=0`). The report puts the first file's
 //!   source first, as before, then each other source, with how often the key's tonic was found (chord charts label
 //!   only the tonic).
 
@@ -230,6 +231,12 @@ impl Song {
     fn weight(&self, input: Input) -> f64 {
         self.weight.get(input as usize).copied().unwrap_or(0.0)
     }
+
+    /// Whether `--final`'s finder, fitted on folds 1 to 4, may score it: it's in the kept-back fold, or it's only
+    /// measured and so never fitted on.
+    fn unseen_by_final(&self) -> bool {
+        self.fold == FROZEN || !self.learn
+    }
 }
 
 /// The name a song's fold is drawn from: POP909 and POP909-CL share their songs' names.
@@ -284,6 +291,38 @@ fn songs_of(items: &[Item], sources: &[String], weigh: &HashMap<String, f64>) ->
             }
         })
         .collect()
+}
+
+/// Leaves out the pieces only measured whose notes, in some key, are also in a piece learned from: they'd measure a
+/// finder on notes it learned. Gives how many each source lost.
+fn leave_out_measured_twins(items: &mut Vec<Item>) -> HashMap<String, usize> {
+    let shapes: Vec<u64> = items.par_iter().map(shape_of).collect();
+    let learned: HashSet<u64> =
+        items.iter().zip(&shapes).filter(|(item, _)| item.may_learn()).map(|(_, shape)| *shape).collect();
+    let mut left_out: HashMap<String, usize> = HashMap::new();
+    // `retain` visits each piece once, in order, so the shapes line up.
+    let mut shapes = shapes.into_iter();
+    items.retain(|item| {
+        let twin = shapes.next().is_some_and(|shape| !item.may_learn() && learned.contains(&shape));
+        if twin {
+            *left_out.entry(item.source.clone()).or_default() += 1;
+        }
+        !twin
+    });
+    left_out
+}
+
+/// Stops a run that has nothing to fit the weights on, which would otherwise fit zeros without a word.
+fn check_learning(songs: &[Song]) -> Result<(), String> {
+    if !songs.iter().any(|s| s.learn) {
+        return Err("no piece read may be learned from: keyfit learns only from pieces whose licence is MIT, CC0 or \
+                    CC BY, which each converter writes (files converted before that have none: convert them again)"
+            .into());
+    }
+    if !songs.iter().any(|s| s.learn && s.weight.iter().any(|w| *w > 0.0)) {
+        return Err("every source learned from is weighed 0 (--weigh), so there's nothing to fit the weights on".into());
+    }
+    Ok(())
 }
 
 /// A song's notes as each kind of input hears them, each list in order of start.
@@ -601,11 +640,11 @@ fn set_weight(cut: Cut, input: Input) -> f64 {
 }
 
 /// Each case's share of its set's weight, over the cases `keep` takes (0 for the rest). Each source has sets of its
-/// own, which count as much as its songs' weight says (`--weigh`).
+/// own, which count as much as its songs' weight says (`--weigh`); a song only measured, weighing 0, takes no share.
 fn case_weights(cases: &[Case], songs: &[Song], keep: impl Fn(&Case) -> bool) -> Vec<f64> {
     let song = |c: &Case| songs.get(c.song).map_or((0, 0.0), |s| (s.group, s.weight(c.input)));
     let mut sizes: HashMap<(usize, Cut, Input), usize> = HashMap::new();
-    for c in cases.iter().filter(|c| keep(c)) {
+    for c in cases.iter().filter(|c| keep(c) && song(c).1 > 0.0) {
         *sizes.entry((song(c).0, c.cut, c.input)).or_default() += 1;
     }
     cases
@@ -815,7 +854,7 @@ fn fitted_per_fold(
 }
 
 pub fn run(args: &[String]) -> Result<(), String> {
-    let setup = keys::setup(
+    let mut setup = keys::setup(
         args,
         &["--lambda-delta", "--write", "--picks", "--inputs", "--dump", "--against", "--hand", "--weigh"],
         &["--final"],
@@ -906,12 +945,14 @@ pub fn run(args: &[String]) -> Result<(), String> {
             return Err(format!("--weigh {named}: {input}? (full, tune, upper, bass, piano)"));
         }
     }
+    let left_out = leave_out_measured_twins(&mut setup.items);
     let songs = songs_of(&setup.items, &sources, &weigh);
     for (g, source) in sources.iter().enumerate() {
         let of: Vec<&Song> = songs.iter().filter(|s| s.group == g).collect();
         let learned = of.iter().filter(|s| s.learn).count();
-        let weights = of.first().map_or([1.0; 5], |s| s.weight);
-        let how = if learned == 0 {
+        // A source's songs learned from all weigh the same (`--weigh` names sources), so the first one says.
+        let weights = of.iter().find(|s| s.learn).map_or([0.0; 5], |s| s.weight);
+        let mut how = if learned == 0 {
             "measured only (its licence doesn't let fitted weights ship)".to_owned()
         } else if weights.iter().all(|w| *w == 0.0) {
             "counted in the tables only".to_owned()
@@ -921,8 +962,15 @@ pub fn run(args: &[String]) -> Result<(), String> {
             let each: Vec<String> = Input::ALL.iter().zip(weights).map(|(i, w)| format!("{} {w}", i.short())).collect();
             format!("learned from, its sets counting {}", each.join(", "))
         };
+        if learned > 0 && learned < of.len() {
+            let _ = write!(how, "; {} of them only measured (their licence doesn't)", of.len() - learned);
+        }
+        if let Some(n) = left_out.get(source) {
+            let _ = write!(how, "; {n} more left out, their notes being in a piece learned from");
+        }
         println!("{source}: {} songs, {how}.", of.len());
     }
+    check_learning(&songs)?;
     let cutting = Cutting { lengths: &lengths, inputs: &inputs, picks };
     let cases: Vec<Case> = setup
         .items
@@ -966,18 +1014,19 @@ pub fn run(args: &[String]) -> Result<(), String> {
         print_answers("Answers", &fitted_answers);
         let train = |s: usize| songs.get(s).is_some_and(|g| g.fold != FROZEN && g.learn);
         let (model, fitted, n) = fit_model(&cases, &songs, &train, &opts)?;
+        let measured = songs.iter().filter(|s| !s.learn).count();
         println!(
-            "Fitted on folds 1 to 4: {n} cases, {} Newton steps. Scoring fold {FROZEN}, kept back until now.",
-            fitted.steps
+            "Fitted on folds 1 to 4: {n} cases, {} Newton steps. Scoring fold {FROZEN}, kept back until now{}.",
+            fitted.steps,
+            if measured > 0 { format!(", and the {measured} songs only measured") } else { String::new() }
         );
-        let chances: Held = cases
-            .par_iter()
-            .map(|c| (fold(c) == FROZEN).then(|| chances_of(c, &model.scores(&c.ev), &calibration)))
-            .collect();
+        let unseen = |c: &Case| songs.get(c.song).is_some_and(Song::unseen_by_final);
+        let chances: Held =
+            cases.par_iter().map(|c| unseen(c).then(|| chances_of(c, &model.scores(&c.ev), &calibration))).collect();
         let answers = answers_of(&cases, &chances, |_| Some(&fitted_answers));
-        let summary = report(&cases, &chances, &answers, &songs, |c| fold(c) == FROZEN && group(c) == 0, &inputs);
+        let summary = report(&cases, &chances, &answers, &songs, |c| unseen(c) && group(c) == 0, &inputs);
         for (g, source) in sources.iter().enumerate().skip(1) {
-            source_report(source, &cases, &chances, |c| fold(c) == FROZEN && group(c) == g, &inputs);
+            source_report(source, &cases, &chances, |c| unseen(c) && group(c) == g, &inputs);
         }
         log_run("--final", &summary, &opts)?;
         let finder = finder(&model.weights, &calibration, &fitted_answers);
@@ -1847,13 +1896,50 @@ mod tests {
         assert_eq!(named, ["Whole songs with one key, full mix: 20 of 60 cases not in both runs, left out"]);
     }
 
-    /// A piece from a source with a licence, its one note as long as `n` ticks so no two share a shape.
-    fn piece(source: &str, n: i64, licence: &str) -> Item {
+    /// A piece from a source with a licence: one note `n` ticks long on `key`, so pieces whose notes are as long are
+    /// the same notes in another key.
+    fn piece_on(source: &str, id: &str, n: i64, key: u8, licence: &str) -> Item {
         serde_json::from_str(&format!(
-            r#"{{"source":"{source}","id":"{n:03}","ppq":96,"length":4096,"licence":"{licence}",
-                "parts":[{{"role":"melody","notes":[[0,{n},60,100]]}}],"keys":[[0,4096,"C:maj"]]}}"#
+            r#"{{"source":"{source}","id":"{id}","ppq":96,"length":4096,"licence":"{licence}",
+                "parts":[{{"role":"melody","notes":[[0,{n},{key},100]]}}],"keys":[[0,4096,"C:maj"]]}}"#
         ))
         .unwrap()
+    }
+
+    /// A piece from a source with a licence, its one note as long as `n` ticks so no two share a shape.
+    fn piece(source: &str, n: i64, licence: &str) -> Item {
+        piece_on(source, &format!("{n:03}"), n, 60, licence)
+    }
+
+    #[test]
+    fn pieces_only_measured_with_the_notes_of_one_learned_from_are_left_out() {
+        let mut items = vec![
+            piece_on("a", "1", 100, 60, "MIT"),
+            piece_on("a", "2", 100, 64, "MIT"),
+            piece_on("b", "1", 100, 62, "measuring only"),
+            piece_on("b", "2", 200, 62, "measuring only"),
+        ];
+        let left_out = leave_out_measured_twins(&mut items);
+        // a/2 is learned from too, so it stays; b/1 is a/1 a tone up, so it goes; b/2's notes are its own.
+        let kept: Vec<String> = items.iter().map(|i| format!("{}/{}", i.source, i.id)).collect();
+        assert_eq!(kept, ["a/1", "a/2", "b/2"]);
+        assert_eq!(left_out, HashMap::from([("b".to_owned(), 1)]));
+    }
+
+    #[test]
+    fn a_run_with_nothing_to_learn_from_stops() {
+        let song = |learn, w| Song { name: String::new(), fold: 1, inner: 0, group: 0, learn, weight: [w; 5] };
+        assert!(check_learning(&[song(false, 0.0)]).unwrap_err().contains("licence"));
+        assert!(check_learning(&[song(true, 0.0)]).unwrap_err().contains("weighed 0"));
+        assert!(check_learning(&[song(false, 0.0), song(true, 0.0), song(true, 1.0)]).is_ok());
+    }
+
+    #[test]
+    fn the_final_finder_scores_the_kept_back_fold_and_the_songs_only_measured() {
+        let song = |fold, learn| Song { name: String::new(), fold, inner: 0, group: 0, learn, weight: [1.0; 5] };
+        assert!(song(FROZEN, true).unseen_by_final());
+        assert!(song(2, false).unseen_by_final());
+        assert!(!song(2, true).unseen_by_final());
     }
 
     #[test]
@@ -1896,13 +1982,13 @@ mod tests {
         let w = case_weights(&cases, &songs, |_| true);
         assert!((w[..3].iter().sum::<f64>() - SONG_WEIGHT).abs() < 1e-12, "{w:?}");
         assert!((w[3..].iter().sum::<f64>() - 0.5 * SONG_WEIGHT).abs() < 1e-12, "{w:?}");
-        // A song only measured counts nothing, and leaves the others' shares as they were.
+        // A song only measured counts nothing, and the songs learned from share their set's whole weight.
         let mut measured = songs;
         measured[4].learn = false;
         measured[4].weight = [0.0; 5];
         let w = case_weights(&cases, &measured, |_| true);
         assert_eq!(w[4], 0.0);
-        assert!((w[3] - 0.5 * SONG_WEIGHT / 2.0).abs() < 1e-12, "{w:?}");
+        assert!((w[3] - 0.5 * SONG_WEIGHT).abs() < 1e-12, "{w:?}");
     }
 
     #[test]
