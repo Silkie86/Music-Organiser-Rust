@@ -67,8 +67,8 @@ impl Order {
 /// What the page's chips and boxes ask for. Empty means everything.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Filters {
-    /// One type ("Kick"), or every type.
-    pub sound_type: Option<String>,
+    /// The types picked ("Kick", "Snare"): a sound shows when it has any of them. Empty means every type.
+    pub sound_types: Vec<String>,
     pub length: Length,
     /// A key as tonic (0 = C) and minor.
     pub key: Option<(i32, bool)>,
@@ -88,6 +88,16 @@ pub struct Filters {
 }
 
 impl Filters {
+    /// Picks a type, or takes it off again when it's already picked.
+    pub fn toggle_type(&mut self, sound_type: &str) {
+        match self.sound_types.iter().position(|t| t == sound_type) {
+            Some(at) => {
+                self.sound_types.remove(at);
+            }
+            None => self.sound_types.push(sound_type.to_owned()),
+        }
+    }
+
     /// Whether any filter is set (for the Clear chip). The search box doesn't count: it has its own ×.
     pub fn any(&self) -> bool {
         let none = Filters { search: self.search.clone(), ..Filters::default() };
@@ -230,7 +240,7 @@ impl SoundList {
         let s = &self.sounds[i];
         let analysis = s.analysis.as_ref();
         let is_loop = analysis.is_some_and(|a| a.is_loop);
-        if t.sound_type.is_some_and(|ty| s.sound_type != ty)
+        if (!t.sound_types.is_empty() && !t.sound_types.contains(&s.sound_type))
             || (t.length == Length::Hits && is_loop)
             || (t.length == Length::Loops && !is_loop)
             || (t.favourites && !s.favourite)
@@ -284,7 +294,7 @@ impl SoundList {
 
 /// The filters made ready to test many sounds: lower-cased words, the set of keys allowed.
 struct Test<'a> {
-    sound_type: Option<&'a str>,
+    sound_types: &'a [String],
     length: Length,
     unused: bool,
     used: bool,
@@ -305,7 +315,7 @@ impl<'a> Test<'a> {
                 },
             );
         Test {
-            sound_type: f.sound_type.as_deref(),
+            sound_types: &f.sound_types,
             length: f.length,
             unused: f.unused,
             used: f.used,
@@ -517,7 +527,14 @@ mod tests {
         let list = library();
         let by = |f: Filters| ids(&list, &list.view(&f, Order::Name, 0));
         assert_eq!(by(Filters::default()), vec![4, 3, 1, 2]);
-        assert_eq!(by(Filters { sound_type: Some("Kick".into()), ..Filters::default() }), vec![1]);
+        assert_eq!(by(Filters { sound_types: vec!["Kick".into()], ..Filters::default() }), vec![1]);
+        let kick_or_vocal = Filters { sound_types: vec!["Kick".into(), "Vocal".into()], ..Filters::default() };
+        assert_eq!(by(kick_or_vocal), vec![3, 1]);
+        let mut f = Filters::default();
+        f.toggle_type("Kick");
+        f.toggle_type("Vocal");
+        f.toggle_type("Kick");
+        assert_eq!(f.sound_types, vec!["Vocal".to_string()]);
         assert_eq!(by(Filters { length: Length::Loops, ..Filters::default() }), vec![4, 2]);
         assert_eq!(by(Filters { length: Length::Hits, ..Filters::default() }), vec![3, 1]);
         assert_eq!(by(Filters { favourites: true, ..Filters::default() }), vec![3]);
