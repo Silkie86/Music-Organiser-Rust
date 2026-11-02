@@ -20,8 +20,8 @@ cargo run -p mo-formatlab -- fields fl 224
   into a conversation.
 - **fields** lists what the registry knows, or everything about one id.
 
-The registry (`registry/bitwig.json`, `registry/fl-studio.json`) is a copy of the C# app's `Core/Formats/Registry`,
-which stays the source of truth until the Rust app takes it over.
+The registry (`registry/bitwig.json`, `registry/fl-studio.json`) began as a copy of the C# app's
+`Core/Formats/Registry`. Since 2026-11-02 it is the source of truth (the C# app is frozen): new findings go here.
 
 MO Probe (`probe`) and the live tests (`live`) come with the DAW links in phase 5.
 

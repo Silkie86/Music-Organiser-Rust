@@ -1,6 +1,7 @@
 //! The field registry: everything the app knows about one DAW's file format, written down once. Format Lab names what
-//! it shows with it, and the census counts what isn't in it. The data is in `registry/*.json`, copied from the C#
-//! app's `Core/Formats/Registry`, which stays the source of truth until the Rust app takes it over.
+//! it shows with it, and the census counts what isn't in it. The data is in `registry/*.json`. It began as a copy of
+//! the C# app's `Core/Formats/Registry`; since 2026-11-02 this copy is the source of truth (the C# app is frozen), so
+//! new findings are written here.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
