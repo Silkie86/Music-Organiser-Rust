@@ -40,6 +40,11 @@
 
 use std::ops::{Index, IndexMut, Range};
 
+mod fit;
+
+pub use fit::{FitSums, LABEL_TOLERANCE};
+pub(crate) use fit::{FitWork, Gold, IdSet};
+
 use super::candidates::{Candidate, Label, Route};
 use super::cores::{Core, Group};
 use super::hear::{Hearing, Level, Mass, Stream};
@@ -650,6 +655,12 @@ pub struct Decoder {
     scaled: Vec<f64>,
     seen: PerId<bool>,
     path: Vec<(usize, Id)>,
+    /// For the fit (chordfit): the labels, whose readings are kept on every span inside a labelled stretch, whatever
+    /// their rank (none when reading); how many readings the last decode kept only for that; and how many of the
+    /// labels' changes it moved to a place a chord may change ([`Gold::settle`]).
+    gold: Gold,
+    forced: usize,
+    moved: usize,
 }
 
 impl Decoder {
@@ -683,6 +694,10 @@ impl Decoder {
         self.evidence.prepare(hearing);
         self.find_regions(hearing, pins);
         self.place(hearing);
+        if self.gold.is_labelled() {
+            let places = self.change_places();
+            self.moved = self.gold.settle(&places);
+        }
         self.forward(hearing, weights);
         let reached = self.nodes.last().is_some_and(|end| !end.entries.is_empty());
         if !reached {
@@ -717,6 +732,8 @@ impl Decoder {
         self.change.clear();
         self.path.clear();
         self.total = f64::NEG_INFINITY;
+        self.forced = 0;
+        self.moved = 0;
     }
 
     /// The rests and the pins, in order: the pins inside what's heard (one that overlaps an earlier one left out), and
@@ -1024,6 +1041,19 @@ impl Decoder {
                         }
                     }
                 }
+                // For the fit, the readings the labels accept over the span are kept too, whatever their rank, so the
+                // ways the labels allow are never pruned away.
+                if let Some(accepts) = self.gold.accepts(v.unit..w.unit) {
+                    for id in accepts.ids() {
+                        let Some(label) = id.label() else { continue };
+                        if self.labels.iter().any(|&(kept, _, _)| kept == id) {
+                            continue;
+                        }
+                        let (score, held) = self.facts.score_one(label, &self.scorer);
+                        self.labels.push((id, score, held));
+                        self.forced += 1;
+                    }
+                }
             }
         }
     }
@@ -1321,12 +1351,15 @@ pub(super) fn kept_pins<'p>(hearing: &Hearing, pins: &'p [PinnedSpan]) -> Vec<(R
 
 /// What the last decode weighed, for the tests' slow way: each place's unit, whether a chord is pushed to it and what
 /// may happen there; each span's first and last places, whether it's as long as a span from its start may be, and its
-/// readings with their scores, held-on scores and chances; ln Z; and the best way, as spans and readings.
+/// readings with their scores, held-on scores and chances; which spans are rests; ln Z; and the best way, as spans and
+/// readings.
 #[cfg(test)]
 #[derive(Clone, Debug)]
 pub(super) struct Lattice {
     pub(super) places: Vec<(usize, bool, Kind)>,
     pub(super) spans: Vec<(usize, usize, bool, Vec<Reading>)>,
+    /// Whether each span is a rest's.
+    pub(super) rests: Vec<bool>,
     pub(super) total: f64,
     pub(super) best: Vec<(usize, Option<Label>)>,
 }
@@ -1337,6 +1370,11 @@ pub(super) type Reading = (Option<Label>, f64, f64, f64);
 
 #[cfg(test)]
 impl Decoder {
+    /// The labels as the last decode settled them on its places.
+    pub(super) fn gold(&self) -> &Gold {
+        &self.gold
+    }
+
     pub(super) fn lattice(&self) -> Lattice {
         let places = self.nodes.iter().map(|n| (n.unit, n.pushed(), n.kind)).collect();
         let kept = |span: &Span| -> Vec<Reading> {
@@ -1344,8 +1382,9 @@ impl Decoder {
             kept.iter().map(|k| (k.id.label(), k.score, k.held, k.chance)).collect()
         };
         let spans = self.spans.iter().map(|s| (s.from, s.to, s.full, kept(s))).collect();
+        let rests = self.spans.iter().map(|s| s.rest).collect();
         let best = self.path.iter().map(|&(s, id)| (s, id.label())).collect();
-        Lattice { places, spans, total: self.total, best }
+        Lattice { places, spans, rests, total: self.total, best }
     }
 }
 
