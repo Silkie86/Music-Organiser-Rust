@@ -995,6 +995,71 @@ export component MapName inherits Rectangle {
     }
 }
 
+// The whole of a map in miniature with a box round the part on show, like the galaxy's mini-map: a click or a drag
+// on it goes there. The box is in parts of the picture (0 to 1).
+export component MapInset inherits Rectangle {
+    in property <image> picture;
+    in property <string> title;
+    in property <float> box-x;
+    in property <float> box-y;
+    in property <float> box-width;
+    in property <float> box-height;
+    // Where on the picture it was pressed or dragged to (0 to 1 each way).
+    callback go(float, float);
+    width: column.preferred-width;
+    height: column.preferred-height;
+    background: Theme.surface;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: Theme.edge;
+    clip: true;
+    column := VerticalLayout {
+        padding: Space.sm;
+        spacing: Space.xs;
+        Text {
+            text: root.title;
+            color: Theme.muted;
+            font-size: Type.meta;
+        }
+        area := Rectangle {
+            width: 132px;
+            height: 132px;
+            border-radius: Theme.radius;
+            clip: true;
+            Image {
+                width: parent.width;
+                height: parent.height;
+                source: root.picture;
+                image-fit: fill;
+            }
+            Rectangle {
+                x: root.box-x * parent.width;
+                y: root.box-y * parent.height;
+                width: max(root.box-width * parent.width, 3px);
+                height: max(root.box-height * parent.height, 3px);
+                border-width: 1px;
+                border-color: Theme.accent;
+                background: Theme.accent.transparentize(88%);
+            }
+            touch := TouchArea {
+                mouse-cursor: pointer;
+                pointer-event(e) => {
+                    if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                        root.go(self.mouse-x / self.width, self.mouse-y / self.height);
+                    }
+                }
+                moved => {
+                    if self.pressed {
+                        root.go(self.mouse-x / self.width, self.mouse-y / self.height);
+                    }
+                }
+                // The wheel stays with the map under the card.
+                scroll-event(e) => { reject }
+            }
+        }
+    }
+}
+
 // A coloured dot, like a sound's type or a DAW's colour beside a name.
 export component Dot inherits Rectangle {
     in property <color> tint: Theme.muted;

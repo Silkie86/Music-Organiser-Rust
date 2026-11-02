@@ -114,46 +114,159 @@ pub const HAND: Weights = Weights {
 /// ten, the design's target. One line alone is never one chord or the same notes: it's implied.
 pub const THRESHOLDS: Thresholds = Thresholds { one: [0.8, 0.8, 0.8, 1.0], same: [0.9, 0.9, 0.9, 1.0] };
 
+/// How many numbers a set of weights is ([`Weights::numbers`]), the numbers the fit sets: a weight for each piece of
+/// evidence (the two template priors' trusts among them), the trust in the pair term ([`Weights::PAIR`]), and w_N
+/// ([`Weights::NONE`]).
+pub const NUMBERS: usize = Feature::COUNT + 2;
+
+/// One way a rule holds a number ([`Rule`]), each number by its place among [`Weights::numbers`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Bound {
+    /// The number is 0 or more.
+    AtLeast0(usize),
+    /// The number is 0 or less.
+    AtMost0(usize),
+    /// The first number is at most the second.
+    AtMost(usize, usize),
+}
+
+impl Bound {
+    /// Whether some numbers keep it (never, where one it reads isn't a number or isn't there).
+    pub fn holds(self, numbers: &[f64]) -> bool {
+        let at = |i: usize| numbers.get(i).copied().unwrap_or(f64::NAN);
+        match self {
+            Bound::AtLeast0(i) => at(i) >= 0.0,
+            Bound::AtMost0(i) => at(i) <= 0.0,
+            Bound::AtMost(i, j) => at(i) <= at(j),
+        }
+    }
+}
+
+/// One of the rules every set of weights keeps (the design's signs and orders): the bounds it puts on the numbers,
+/// and what it says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rule {
+    pub bounds: &'static [Bound],
+    pub says: &'static str,
+}
+
+/// A feature's place among the numbers.
+const fn n(feature: Feature) -> usize {
+    feature as usize
+}
+
+/// The rules every set of weights keeps, besides every number being finite ([`Weights::check`]): each piece of
+/// evidence counts the way it says (a chord's own note never counts against it), and the costs of starting a chord
+/// rise from a bar line to between beats. The fit keeps them all.
+pub const RULES: [Rule; 26] = {
+    use Bound::*;
+    use Feature::*;
+    [
+        Rule { bounds: &[AtLeast0(n(ChordTones))], says: "T1 counts for the label" },
+        Rule { bounds: &[AtLeast0(n(Tensions)), AtMost(n(Tensions), n(ChordTones))], says: "T2 is between 0 and T1" },
+        Rule { bounds: &[AtMost0(n(WrongStruck))], says: "T3 counts against the label" },
+        Rule { bounds: &[AtMost(n(WrongStruck), n(WrongHeld)), AtMost0(n(WrongHeld))], says: "T4 is between T3 and 0" },
+        Rule { bounds: &[AtMost(n(WrongStruck), n(Passing)), AtMost0(n(Passing))], says: "T5 is between T3 and 0" },
+        Rule { bounds: &[AtLeast0(n(TuneTones)), AtLeast0(n(TuneTensions))], says: "T6 and T7 count for the label" },
+        Rule { bounds: &[AtMost0(n(TuneWrong))], says: "T8 counts against the label" },
+        Rule {
+            bounds: &[AtMost0(n(NoThird)), AtMost0(n(NoSeventh)), AtMost0(n(NoCoreFifth))],
+            says: "T9 to T11 count against",
+        },
+        Rule {
+            bounds: &[AtMost(n(NoThird), n(NoPlainFifth)), AtMost0(n(NoPlainFifth))],
+            says: "T12 is between T9 and 0",
+        },
+        Rule { bounds: &[AtLeast0(n(RootSupport))], says: "T15 counts for the label" },
+        Rule { bounds: &[AtLeast0(n(RootPlayed)), AtLeast0(n(RootInBass))], says: "R1 and R2 count for the label" },
+        Rule {
+            bounds: &[AtMost(n(RootlessNoBass), n(RootlessOverBass)), AtMost0(n(RootlessOverBass))],
+            says: "R3 is between R4 and 0",
+        },
+        Rule { bounds: &[AtLeast0(n(LowestIsRoot))], says: "L1 counts for the label" },
+        Rule { bounds: &[AtLeast0(n(BassThird)), AtMost(n(BassThird), n(BassRoot))], says: "B2 is between 0 and B1" },
+        Rule { bounds: &[AtLeast0(n(BassFifth)), AtMost(n(BassFifth), n(BassRoot))], says: "B3 is between 0 and B1" },
+        Rule {
+            bounds: &[AtLeast0(n(BassSeventh)), AtMost(n(BassSeventh), n(BassRoot))],
+            says: "B4 is between 0 and B1",
+        },
+        Rule {
+            bounds: &[AtMost(n(BassWrong), n(BassTension)), AtMost0(n(BassTension))],
+            says: "B5 is between B6 and 0",
+        },
+        Rule { bounds: &[AtLeast0(n(WalkingRoot))], says: "B7 counts for the label" },
+        Rule {
+            bounds: &[AtLeast0(n(WalkingTones)), AtMost(n(WalkingTones), n(WalkingRoot))],
+            says: "B8 is between 0 and B7",
+        },
+        Rule { bounds: &[AtMost0(n(WalkingWrong))], says: "B9 counts against the label" },
+        Rule {
+            bounds: &[AtLeast0(n(BassStrikesRoot)), AtLeast0(n(StruckAtStart))],
+            says: "E1 and E2 count for the label",
+        },
+        Rule { bounds: &[AtMost0(n(NothingStruck)), AtMost0(n(Pushed))], says: "E3 and E8 count against the label" },
+        Rule { bounds: &[AtMost0(n(OnBar))], says: "E4 is 0 or less" },
+        Rule { bounds: &[AtMost(n(MidBar), n(OnBar))], says: "E5 is at most E4" },
+        Rule {
+            bounds: &[AtMost(n(OnBeat), n(MidBar)), AtMost(n(OffBeat), n(OnBeat))],
+            says: "E7 is at most E6, at most E5",
+        },
+        Rule {
+            bounds: &[AtLeast0(n(CorePrior)), AtLeast0(n(TensionPrior)), AtLeast0(Weights::PAIR)],
+            says: "the trusts are 0 or more",
+        },
+    ]
+};
+
 impl Weights {
-    /// The rules every set of weights keeps (the design's signs and orders), as the broken ones' descriptions; empty
-    /// when it keeps them all.
+    /// Where the pair term's trust is among the numbers ([`Weights::numbers`]), and w_N.
+    pub const PAIR: usize = Feature::COUNT;
+    pub const NONE: usize = Feature::COUNT + 1;
+
+    /// The rules every set of weights keeps ([`RULES`], then every number being finite), as the broken ones'
+    /// descriptions; empty when it keeps them all.
     pub fn check(&self) -> Vec<&'static str> {
-        use Feature::*;
-        let w = |f: Feature| self.features[f];
-        let rules: [(bool, &'static str); 27] = [
-            (w(ChordTones) >= 0.0, "T1 counts for the label"),
-            ((0.0..=w(ChordTones)).contains(&w(Tensions)), "T2 is between 0 and T1"),
-            (w(WrongStruck) <= 0.0, "T3 counts against the label"),
-            ((w(WrongStruck)..=0.0).contains(&w(WrongHeld)), "T4 is between T3 and 0"),
-            ((w(WrongStruck)..=0.0).contains(&w(Passing)), "T5 is between T3 and 0"),
-            (w(TuneTones) >= 0.0 && w(TuneTensions) >= 0.0, "T6 and T7 count for the label"),
-            (w(TuneWrong) <= 0.0, "T8 counts against the label"),
-            (w(NoThird) <= 0.0 && w(NoSeventh) <= 0.0 && w(NoCoreFifth) <= 0.0, "T9 to T11 count against"),
-            ((w(NoThird)..=0.0).contains(&w(NoPlainFifth)), "T12 is between T9 and 0"),
-            (w(RootSupport) >= 0.0, "T15 counts for the label"),
-            (w(RootPlayed) >= 0.0 && w(RootInBass) >= 0.0, "R1 and R2 count for the label"),
-            ((w(RootlessNoBass)..=0.0).contains(&w(RootlessOverBass)), "R3 is between R4 and 0"),
-            (w(LowestIsRoot) >= 0.0, "L1 counts for the label"),
-            ((0.0..=w(BassRoot)).contains(&w(BassThird)), "B2 is between 0 and B1"),
-            ((0.0..=w(BassRoot)).contains(&w(BassFifth)), "B3 is between 0 and B1"),
-            ((0.0..=w(BassRoot)).contains(&w(BassSeventh)), "B4 is between 0 and B1"),
-            ((w(BassWrong)..=0.0).contains(&w(BassTension)), "B5 is between B6 and 0"),
-            (w(WalkingRoot) >= 0.0, "B7 counts for the label"),
-            ((0.0..=w(WalkingRoot)).contains(&w(WalkingTones)), "B8 is between 0 and B7"),
-            (w(WalkingWrong) <= 0.0, "B9 counts against the label"),
-            (w(BassStrikesRoot) >= 0.0 && w(StruckAtStart) >= 0.0, "E1 and E2 count for the label"),
-            (w(NothingStruck) <= 0.0 && w(Pushed) <= 0.0, "E3 and E8 count against the label"),
-            (w(OnBar) <= 0.0, "E4 is 0 or less"),
-            (w(MidBar) <= w(OnBar), "E5 is at most E4"),
-            (w(OnBeat) <= w(MidBar) && w(OffBeat) <= w(OnBeat), "E7 is at most E6, at most E5"),
-            (w(CorePrior) >= 0.0 && w(TensionPrior) >= 0.0 && self.pair >= 0.0, "the trusts are 0 or more"),
-            (self.is_finite(), "every number is finite"),
-        ];
-        rules.into_iter().filter(|(kept, _)| !kept).map(|(_, rule)| rule).collect()
+        let numbers = self.numbers();
+        let mut broken: Vec<&'static str> = RULES
+            .iter()
+            .filter(|rule| !rule.bounds.iter().all(|bound| bound.holds(&numbers)))
+            .map(|rule| rule.says)
+            .collect();
+        if !numbers.iter().all(|x| x.is_finite()) {
+            broken.push("every number is finite");
+        }
+        broken
     }
 
-    fn is_finite(&self) -> bool {
-        self.features.0.iter().all(|w| w.is_finite()) && self.pair.is_finite() && self.none.is_finite()
+    /// Every number, in the fit's order: the weight of each piece of evidence in [`Feature::ALL`]'s order (the two
+    /// template priors' trusts last among them), then the trust in the pair term ([`Weights::PAIR`]), then w_N
+    /// ([`Weights::NONE`]).
+    pub fn numbers(&self) -> [f64; NUMBERS] {
+        let mut out = [0.0; NUMBERS];
+        for (slot, w) in out.iter_mut().zip(self.features.0.iter().chain([&self.pair, &self.none])) {
+            *slot = *w;
+        }
+        out
+    }
+
+    /// The weights some numbers are, in [`Weights::numbers`]'s order.
+    pub fn from_numbers(numbers: &[f64; NUMBERS]) -> Weights {
+        let mut features = PerFeature::<f64>::default();
+        for (w, x) in features.0.iter_mut().zip(numbers) {
+            *w = *x;
+        }
+        let at = |i: usize| numbers.get(i).copied().unwrap_or(0.0);
+        Weights { features, pair: at(Weights::PAIR), none: at(Weights::NONE) }
+    }
+
+    /// A number's name, by its place: a piece of evidence's code ("T1", "E8", "P2"), "pair" or "none".
+    pub fn number_name(place: usize) -> &'static str {
+        match Feature::ALL.get(place) {
+            Some(feature) => feature.code(),
+            None if place == Weights::PAIR => "pair",
+            None if place == Weights::NONE => "none",
+            None => "?",
+        }
     }
 }
 
