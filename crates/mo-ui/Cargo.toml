@@ -15,6 +15,7 @@ name = "mo-screens"
 path = "src/bin/mo-screens.rs"
 
 [dependencies]
+rayon.workspace = true
 mo-app.workspace = true
 mo-library = { path = "../mo-library" }
 mo-formats = { path = "../mo-formats" }

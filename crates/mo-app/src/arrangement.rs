@@ -27,6 +27,47 @@ pub struct Preview {
     pub found: Arc<HashMap<String, PathBuf>>,
 }
 
+/// An audio file's sound boiled down for drawing its waveform: the loudest a channel gets in each slice of the file.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Peaks {
+    /// How long the whole file is, in seconds (it may be longer than what was read).
+    pub file_seconds: f64,
+    /// How many seconds each value covers.
+    pub step: f64,
+    /// The loudest (0 to 1) in each slice, from the file's start.
+    pub values: Vec<f32>,
+}
+
+/// Each slice of a waveform: 5 ms, so even a clip zoomed far in looks smooth, and a minute is 12,000 numbers.
+const PEAK_STEP: f64 = 0.005;
+
+impl Peaks {
+    /// Boils down a file's samples (`channels`, at `sample_rate` a second).
+    pub fn of(sample_rate: u32, channels: &[Vec<f32>], file_seconds: f64) -> Peaks {
+        let per = ((f64::from(sample_rate) * PEAK_STEP).round() as usize).max(1);
+        let frames = channels.iter().map(Vec::len).max().unwrap_or(0);
+        let values = (0..frames.div_ceil(per))
+            .map(|i| {
+                let (a, b) = (i * per, ((i + 1) * per).min(frames));
+                channels
+                    .iter()
+                    .flat_map(|c| c.get(a..b.min(c.len())).unwrap_or(&[]))
+                    .fold(0.0f32, |m, v| m.max(v.abs()))
+                    .min(1.0)
+            })
+            .collect();
+        Peaks { file_seconds, step: per as f64 / f64::from(sample_rate.max(1)), values }
+    }
+
+    /// The loudest from `from` to `to` seconds into the file, or none past what was read.
+    pub fn loudest(&self, from: f64, to: f64) -> Option<f32> {
+        let (from, to) = (from.min(to), from.max(to));
+        let first = (from / self.step).floor().max(0.0) as usize;
+        let last = ((to / self.step).ceil() as usize).max(first + 1).min(self.values.len());
+        (first < last).then(|| self.values[first..last].iter().fold(0.0f32, |m, &v| m.max(v)))
+    }
+}
+
 /// Reads a project's arrangement and looks for its audio files the way the Samples tab does (rule 13: the project's
 /// folders first, then the DAW's own, then the Sounds library at `sounds_db` when given). Reads the disk, so never on the window's thread. An error is the message to
 /// show instead.
@@ -204,6 +245,8 @@ const SCROLLBAR: f64 = 5.0;
 pub struct View {
     arrangement: Arc<Arrangement>,
     found: Arc<HashMap<String, PathBuf>>,
+    /// The waveforms of the audio files read so far, by the path the project saved.
+    peaks: Arc<HashMap<String, Arc<Peaks>>>,
     pub width: f64,
     pub height: f64,
     /// Pixels per beat; 0 fits the song to the width.
@@ -247,6 +290,7 @@ impl View {
         View {
             arrangement,
             found,
+            peaks: Arc::default(),
             width: 0.0,
             height: 0.0,
             zoom: 0.0,
@@ -292,6 +336,11 @@ impl View {
         } else {
             1.0
         }
+    }
+
+    /// Draws the audio clips' waveforms from these (the audio files are read after the arrangement, so it shows first).
+    pub fn set_peaks(&mut self, peaks: Arc<HashMap<String, Arc<Peaks>>>) {
+        self.peaks = peaks;
     }
 
     fn x(&self, beat: f64) -> f64 {
@@ -789,8 +838,13 @@ impl<'a> Draw<'a> {
             return;
         }
         let mid = inner.y + inner.h / 2.0;
+        if let Some(peaks) = v.peaks.get(&part.path)
+            && self.waveform(part, clip, peaks, (x0, x1), inner, visible, c, fade)
+        {
+            return;
+        }
         if v.found.contains_key(&part.path) {
-            // The sound itself is drawn once its file has been read (waveforms come next); until then a soft band.
+            // The sound itself is drawn once its file has been read; until then (or when it can't be) a soft band.
             let band = Box2::new(x0, mid - inner.h * 0.3, x1 - x0, inner.h * 0.6);
             if let Some(b) = band.intersect(&visible) {
                 self.rect(b, colour(c, 0.22 * fade));
@@ -807,6 +861,55 @@ impl<'a> Draw<'a> {
             let r = Box2::new(x0 + 4.0, y, x1 - x0 - 8.0, 12.0);
             self.label(Area::Timeline, r, "file not on this computer", Style::Small);
         }
+    }
+
+    /// Draws an audio part's waveform, a thin bar a column, mirrored about the clip's middle. False when the file's
+    /// speed in the song can't be told, so the caller draws the plain band.
+    #[allow(clippy::too_many_arguments)]
+    fn waveform(
+        &mut self,
+        part: &AudioPart,
+        clip: &PreviewClip,
+        peaks: &Peaks,
+        (x0, x1): (f64, f64),
+        inner: Box2,
+        visible: Box2,
+        c: u32,
+        fade: f64,
+    ) -> bool {
+        let rate = part.rate(peaks.file_seconds);
+        if rate <= 0.0 {
+            return false;
+        }
+        let v = self.v;
+        let mid = inner.y + inner.h / 2.0;
+        let half = inner.h * 0.46;
+        // Seconds into the file at beat `b` of the song (a reversed part plays from its end back).
+        let start = clip.start + part.start;
+        let at = |b: f64| {
+            let into = (b - start).clamp(0.0, part.length);
+            part.from + (if part.reversed { part.length - into } else { into }) * rate
+        };
+        let fill = colour(if self.p.light { darken(c, 0.35) } else { lighten(c, 0.25) }, 0.9 * fade);
+        let paint = Paint { shader: tiny_skia::Shader::SolidColor(fill), anti_alias: false, ..Paint::default() };
+        let mut pb = PathBuilder::new();
+        let mut x = x0.floor();
+        while x < x1 {
+            let (b0, b1) = (v.beat(x), v.beat(x + 1.0));
+            if let Some(loud) = peaks.loudest(at(b0), at(b1)) {
+                let h = (f64::from(loud) * half).max(0.5);
+                if let Some(b) = Box2::new(x, mid - h, 1.0, 2.0 * h).intersect(&visible)
+                    && let Some(r) = Rect::from_xywh(b.x as f32, b.y as f32, b.w as f32, b.h as f32)
+                {
+                    pb.push_rect(r);
+                }
+            }
+            x += 1.0;
+        }
+        if let Some(path) = pb.finish() {
+            self.pixmap.fill_path(&path, &paint, FillRule::Winding, self.transform, None);
+        }
+        true
     }
 
     fn curve(&mut self, clip: &PreviewClip, inner: Box2, visible: Box2, fill: Color) {
@@ -874,6 +977,24 @@ fn describe(lane: &PreviewLane, clip: &PreviewClip, found: &HashMap<String, Path
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_waveform_keeps_the_loudest_of_each_slice() {
+        // 1,000 frames a second: a slice is 5 frames. Quiet, then a loud click in the second slice of the right channel.
+        let left = vec![0.1f32; 20];
+        let mut right = vec![-0.05f32; 20];
+        right[7] = -0.9;
+        let p = Peaks::of(1000, &[left, right], 0.02);
+        assert_eq!(p.values.len(), 4);
+        assert!((p.step - 0.005).abs() < 1e-9);
+        assert_eq!(p.values[1], 0.9);
+        assert_eq!(p.values[0], 0.1);
+        assert_eq!(p.loudest(0.0, 0.004), Some(0.1));
+        assert_eq!(p.loudest(0.004, 0.0), Some(0.1));
+        assert_eq!(p.loudest(0.0, 0.02), Some(0.9));
+        // Past what was read.
+        assert_eq!(p.loudest(0.03, 0.04), None);
+    }
     use mo_formats::arrangement::{PreviewMarker, PreviewNote, PreviewPoint};
 
     fn note(start: f64, key: u8) -> PreviewNote {
