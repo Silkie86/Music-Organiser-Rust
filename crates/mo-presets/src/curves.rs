@@ -17,7 +17,7 @@
 //! apart from what a scan finds, so a rescan never loses them. Curve files are written on demand ([`file`]) into the
 //! app's own `Curves` folder; [`save_to_bitwig`] copies one into Bitwig's library under a new name, never over a file.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, UNIX_EPOCH};
@@ -32,6 +32,7 @@ use mo_formats::fl::events;
 use mo_formats::fl::song::read_song;
 
 use crate::fixes::{FixesError, is_there, make_new, text_at};
+use crate::{export, names};
 
 /// The file's name in the app's data folder.
 pub const FILE_NAME: &str = "curves.db";
@@ -42,11 +43,11 @@ pub const FOLDER: &str = "Curves";
 const SCHEMA: &str = "\
     CREATE TABLE IF NOT EXISTS curve_saves (path TEXT PRIMARY KEY NOT NULL, modified INTEGER NOT NULL, \
         size INTEGER NOT NULL);
-    CREATE TABLE IF NOT EXISTS curve_shapes (id TEXT PRIMARY KEY NOT NULL, points TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS curve_sources (id TEXT NOT NULL, path TEXT NOT NULL, kind TEXT NOT NULL, \
         song TEXT NOT NULL, name TEXT NOT NULL, device TEXT NOT NULL, setting TEXT NOT NULL, at REAL NOT NULL, \
-        length REAL NOT NULL, modified INTEGER NOT NULL);
+        length REAL NOT NULL, modified INTEGER NOT NULL, points TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS curve_sources_path ON curve_sources (path);
+    CREATE INDEX IF NOT EXISTS curve_sources_id ON curve_sources (id);
     CREATE TABLE IF NOT EXISTS your_curves (id TEXT PRIMARY KEY NOT NULL, name TEXT, hidden INTEGER NOT NULL DEFAULT 0);";
 
 /// Where a curve was found.
@@ -237,13 +238,15 @@ fn fl_curves(automation: &[FlAutomation], plugin_of: &dyn Fn(Option<u32>) -> Str
 }
 
 /// Bitwig's automation clips, on lanes whose values run 0 to 1 (a volume lane goes a little over 1, by Bitwig's
-/// cube-root gain; the tempo lane, in BPM, is left out).
+/// cube-root gain, and is scaled to fit; the tempo lane, in BPM, is left out).
 fn bitwig_curves(clips: &[automation::AutomationClip], place: &Place<'_>) -> Vec<Found> {
     clips
         .iter()
         .filter(|c| c.points.iter().all(|p| p.value >= -1e-6 && p.value <= 1.26))
         .filter_map(|clip| {
-            let points: Vec<(f64, f64, f64)> = clip.points.iter().map(|p| (p.beat, p.value, p.bend)).collect();
+            // A volume lane that goes over 0 dB is scaled down to fit, rather than cut flat at the top.
+            let top = clip.points.iter().map(|p| p.value).fold(1.0, f64::max);
+            let points: Vec<(f64, f64, f64)> = clip.points.iter().map(|p| (p.beat, p.value / top, p.bend)).collect();
             let source = place.source(SourceKind::BitwigClip, &clip.name, &clip.device, &clip.setting, clip.start);
             found(shape(&points, clip.length), clip.length, source)
         })
@@ -293,8 +296,8 @@ fn stamp(path: &Path) -> Option<(i64, i64)> {
     Some((modified, m.len() as i64))
 }
 
-/// A save read in a scan: its path, its date and size (None when it couldn't be looked at), and its curves.
-type ReadSave = (String, Option<(i64, i64)>, Vec<Found>);
+/// A save read in a scan: its path, date and size, and its curves.
+type ReadSave = (String, (i64, i64), Vec<Found>);
 
 /// The curves library, open on `curves.db`. Asks the disk, so never on the window's thread.
 pub struct CurvesDb {
@@ -305,7 +308,7 @@ impl CurvesDb {
     /// Opens the database at `path`, making it first when it isn't there (made beside it, checked, then put in place).
     pub fn open(path: &Path) -> Result<CurvesDb, CurvesError> {
         if !is_there(path)? {
-            make_new(path, SCHEMA, "curve_shapes")?;
+            make_new(path, SCHEMA, "curve_sources")?;
         }
         let conn = Connection::open(path)?;
         conn.busy_timeout(Duration::from_secs(2))?;
@@ -314,63 +317,78 @@ impl CurvesDb {
         Ok(CurvesDb { conn })
     }
 
-    /// The saves among `paths` that changed since they were read (or were never read), and whether any that were read
-    /// before are gone from `paths`. Quick: it only looks at each file's date and size.
-    pub fn out_of_date(&self, paths: &[String]) -> Result<(Vec<String>, bool), CurvesError> {
+    fn known(&self) -> Result<HashMap<String, (i64, i64)>, CurvesError> {
         let mut st = self.conn.prepare("SELECT path, modified, size FROM curve_saves")?;
-        let known: HashMap<String, (i64, i64)> =
-            st.query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?))))?.collect::<Result<_, _>>()?;
-        let changed =
-            paths.iter().filter(|p| known.get(p.as_str()).copied() != stamp(Path::new(p.as_str()))).cloned().collect();
-        let wanted: std::collections::HashSet<&str> = paths.iter().map(String::as_str).collect();
-        let gone = known.keys().any(|k| !wanted.contains(k.as_str()));
+        let rows = st.query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?))))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// The saves among `paths` that changed since they were read (or were never read), each once, and whether any
+    /// read before are gone from `paths`. Quick: it only looks at each file's date and size.
+    pub fn out_of_date(&self, paths: &[String]) -> Result<(Vec<String>, bool), CurvesError> {
+        let (changed, gone) = self.changed(paths)?;
+        Ok((changed.into_iter().map(|(p, _)| p).collect(), !gone.is_empty()))
+    }
+
+    /// The changed saves with their date and size now (None when they can't be looked at), and the saves gone.
+    #[allow(clippy::type_complexity)]
+    fn changed(&self, paths: &[String]) -> Result<(Vec<(String, Option<(i64, i64)>)>, Vec<String>), CurvesError> {
+        let known = self.known()?;
+        let mut seen = HashSet::new();
+        let changed = paths
+            .iter()
+            .filter(|p| seen.insert(p.as_str()))
+            .map(|p| (p.clone(), stamp(Path::new(p))))
+            .filter(|(p, now)| known.get(p.as_str()).copied() != *now)
+            .collect();
+        let gone = known.into_keys().filter(|k| !seen.contains(k.as_str())).collect();
         Ok((changed, gone))
     }
 
     /// Reads the saves among `paths` that changed (over every core, at low priority as the caller's pool is), and
-    /// forgets saves no longer in `paths`. `progress` counts the saves read. Returns how many saves were read.
+    /// forgets saves no longer in `paths` or no longer there. A save that can't be read now (locked by its DAW, a
+    /// drive gone for a moment) keeps what was found in it before and is tried again next time. `progress` counts the
+    /// saves read. Returns how many were read.
     pub fn scan(&mut self, paths: &[String], progress: &Progress) -> Result<usize, CurvesError> {
-        let (changed, _) = self.out_of_date(paths)?;
+        let (changed, mut gone) = self.changed(paths)?;
         progress.total.store(changed.len(), Ordering::Relaxed);
         progress.done.store(0, Ordering::Relaxed);
-        let read: Vec<ReadSave> = changed
+        let results: Vec<Result<ReadSave, (String, bool)>> = changed
             .par_iter()
-            .map(|p| {
-                let stamp = stamp(Path::new(p));
-                let found = match (stamp, std::fs::read(p)) {
-                    (Some((modified, _)), Ok(raw)) => found_in(p, raw, modified),
-                    _ => Vec::new(),
+            .map(|(p, now)| {
+                let read = match (now, std::fs::read(p)) {
+                    (Some(now), Ok(raw)) => Ok((p.clone(), *now, found_in(p, raw, now.0))),
+                    // Not there any more: forgotten. There but not readable: kept as it was.
+                    (None, _) => Err((p.clone(), true)),
+                    (Some(_), Err(_)) => Err((p.clone(), false)),
                 };
                 progress.done.fetch_add(1, Ordering::Relaxed);
-                (p.clone(), stamp, found)
+                read
             })
             .collect();
+        let mut read = Vec::new();
+        for r in results {
+            match r {
+                Ok(save) => read.push(save),
+                Err((path, true)) => gone.push(path),
+                Err(_) => {}
+            }
+        }
         let tx = self.conn.transaction()?;
-        let wanted: std::collections::HashSet<&str> = paths.iter().map(String::as_str).collect();
-        let gone: Vec<String> = {
-            let mut st = tx.prepare("SELECT path FROM curve_saves")?;
-            let all: Vec<String> = st.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
-            all.into_iter().filter(|p| !wanted.contains(p.as_str())).collect()
-        };
         for p in gone.iter().chain(read.iter().map(|r| &r.0)) {
             tx.execute("DELETE FROM curve_sources WHERE path = ?1", [p])?;
             tx.execute("DELETE FROM curve_saves WHERE path = ?1", [p])?;
         }
-        for (path, stamp, found) in &read {
-            let Some((modified, size)) = stamp else { continue };
+        for (path, (modified, size), found) in &read {
             tx.execute(
                 "INSERT INTO curve_saves (path, modified, size) VALUES (?1, ?2, ?3)",
                 params![path, modified, size],
             )?;
             for f in found {
-                tx.execute(
-                    "INSERT OR IGNORE INTO curve_shapes (id, points) VALUES (?1, ?2)",
-                    params![f.id, points_text(&f.points)],
-                )?;
                 let s = &f.source;
                 tx.execute(
-                    "INSERT INTO curve_sources (id, path, kind, song, name, device, setting, at, length, modified) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    "INSERT INTO curve_sources (id, path, kind, song, name, device, setting, at, length, modified, points) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                     params![
                         f.id,
                         s.path,
@@ -381,28 +399,34 @@ impl CurvesDb {
                         s.setting,
                         s.at,
                         f.length,
-                        s.modified
+                        s.modified,
+                        points_text(&f.points)
                     ],
                 )?;
             }
         }
-        // Shapes nothing is found in any more go; your names and hidden marks stay, for if they come back.
-        tx.execute("DELETE FROM curve_shapes WHERE id NOT IN (SELECT id FROM curve_sources)", [])?;
         tx.commit()?;
         Ok(read.len())
     }
 
-    /// Every curve, each with every place it was found (newest save first), in name order.
+    /// Every curve, each with every place it was found (newest save first), in name order. A curve's points and length
+    /// are its newest place's.
     pub fn list(&self) -> Result<Vec<Curve>, CurvesError> {
-        let mut st = self.conn.prepare("SELECT id, points FROM curve_shapes")?;
-        let shapes: Vec<(String, Option<String>)> =
-            st.query_map([], |r| Ok((r.get(0)?, text_at(r, 1)?)))?.collect::<Result<_, _>>()?;
+        self.curves(None)
+    }
+
+    /// One curve, by its id.
+    pub fn get(&self, id: &str) -> Result<Option<Curve>, CurvesError> {
+        Ok(self.curves(Some(id))?.into_iter().next())
+    }
+
+    fn curves(&self, only: Option<&str>) -> Result<Vec<Curve>, CurvesError> {
         let mut st = self.conn.prepare(
-            "SELECT id, path, kind, song, name, device, setting, at, length, modified FROM curve_sources \
-             ORDER BY modified DESC, path, at",
+            "SELECT id, path, kind, song, name, device, setting, at, length, modified, points FROM curve_sources \
+             WHERE ?1 IS NULL OR id = ?1 ORDER BY modified DESC, path, at",
         )?;
-        let mut sources: BTreeMap<String, Vec<(CurveSource, f64)>> = BTreeMap::new();
-        for row in st.query_map([], |r| {
+        type Row = (String, Option<SourceKind>, CurveSource, f64, Option<String>);
+        let rows = st.query_map([only], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 text_at(r, 2)?.as_deref().and_then(SourceKind::from_key),
@@ -417,29 +441,33 @@ impl CurvesDb {
                     modified: r.get(9)?,
                 },
                 r.get::<_, f64>(8)?,
+                text_at(r, 10)?,
             ))
-        })? {
-            let (id, kind, mut source, length) = row?;
+        })?;
+        let mut by_id: BTreeMap<String, Vec<(CurveSource, f64, Option<String>)>> = BTreeMap::new();
+        for row in rows {
+            let (id, kind, mut source, length, points): Row = row?;
             // A kind a newer app wrote is passed over.
             let Some(kind) = kind else { continue };
             source.kind = kind;
-            sources.entry(id).or_default().push((source, length));
+            by_id.entry(id).or_default().push((source, length, points));
         }
-        let yours = self.yours()?;
-        let mut out: Vec<Curve> = shapes
+        let yours = self.yours(only)?;
+        let mut out: Vec<Curve> = by_id
             .into_iter()
-            .filter_map(|(id, points)| {
+            .filter_map(|(id, found)| {
+                let (first, length, points) = found.first()?;
                 let points = parse_points(points.as_deref()?)?;
-                let found = sources.remove(&id)?;
-                let (first, length) = found.first().cloned()?;
+                let made = made_name(first);
+                let length_beats = *length;
                 let (name, hidden) = yours.get(&id).cloned().unwrap_or((None, false));
                 Some(Curve {
-                    name: name.unwrap_or_else(|| made_name(&first)),
+                    name: name.unwrap_or(made),
                     id,
                     points,
-                    length_beats: length,
+                    length_beats,
                     hidden,
-                    sources: found.into_iter().map(|(s, _)| s).collect(),
+                    sources: found.into_iter().map(|(s, _, _)| s).collect(),
                 })
             })
             .collect();
@@ -447,14 +475,10 @@ impl CurvesDb {
         Ok(out)
     }
 
-    /// One curve, by its id.
-    pub fn get(&self, id: &str) -> Result<Option<Curve>, CurvesError> {
-        Ok(self.list()?.into_iter().find(|c| c.id == id))
-    }
-
-    fn yours(&self) -> Result<HashMap<String, (Option<String>, bool)>, CurvesError> {
-        let mut st = self.conn.prepare("SELECT id, name, hidden FROM your_curves")?;
-        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, (text_at(r, 1)?, r.get::<_, i64>(2)? != 0))))?;
+    fn yours(&self, only: Option<&str>) -> Result<HashMap<String, (Option<String>, bool)>, CurvesError> {
+        let mut st = self.conn.prepare("SELECT id, name, hidden FROM your_curves WHERE ?1 IS NULL OR id = ?1")?;
+        let rows =
+            st.query_map([only], |r| Ok((r.get::<_, String>(0)?, (text_at(r, 1)?, r.get::<_, i64>(2)? != 0))))?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
@@ -477,9 +501,9 @@ impl CurvesDb {
         self.get(id)
     }
 
-    /// Whether a curve with this id was ever found (for a page holding an old id).
+    /// Whether a curve with this id is found anywhere now (for a page holding an old id).
     pub fn has(&self, id: &str) -> Result<bool, CurvesError> {
-        Ok(self.conn.query_row("SELECT 1 FROM curve_shapes WHERE id = ?1", [id], |_| Ok(())).optional()?.is_some())
+        Ok(self.conn.query_row("SELECT 1 FROM curve_sources WHERE id = ?1", [id], |_| Ok(())).optional()?.is_some())
     }
 }
 
@@ -508,53 +532,11 @@ fn parse_points(text: &str) -> Option<Vec<curve::CurvePoint>> {
         .collect()
 }
 
-/// A file name for a curve: its name with the letters Windows won't have in a file name taken out.
-fn file_name(name: &str) -> String {
-    let clean: String =
-        name.chars().map(|c| if r#"<>:"/\|?*"#.contains(c) || c.is_control() { '_' } else { c }).collect();
-    let clean = clean.trim().trim_end_matches('.').to_owned();
-    if clean.is_empty() { "Curve".to_owned() } else { clean }
-}
-
-/// The curve file for `curve` in the app's `Curves` folder (`folder`), written the first time it's asked for and
-/// reused after; returns its path. Written beside its name first, then put in place. Never on the window's thread.
-pub fn file(curve_found: &Curve, folder: &Path) -> Result<PathBuf, String> {
-    let path = folder.join(format!(
-        "{} {}.{}",
-        file_name(&curve_found.name),
-        &curve_found.id[..8.min(curve_found.id.len())],
-        curve::EXTENSION
-    ));
-    if path.is_file() {
-        return Ok(path);
-    }
-    std::fs::create_dir_all(folder).map_err(|e| format!("Couldn't make the Curves folder: {e}"))?;
-    write_new(&path, curve_found)?;
-    Ok(path)
-}
-
-/// Copies `curve` into Bitwig's curves library (`folder`, such as `K:\Bitwig Studio\Library\Curves`) under its name,
-/// with " (2)", " (3)"... when that name is taken: never over a file. Returns the path written.
-pub fn save_to_bitwig(curve_found: &Curve, folder: &Path) -> Result<PathBuf, String> {
-    std::fs::create_dir_all(folder).map_err(|e| format!("Couldn't make the folder: {e}"))?;
-    let base = file_name(&curve_found.name);
-    for n in 1..1000 {
-        let name = if n == 1 { base.clone() } else { format!("{base} ({n})") };
-        let path = folder.join(format!("{name}.{}", curve::EXTENSION));
-        if path.exists() {
-            continue;
-        }
-        write_new(&path, curve_found)?;
-        return Ok(path);
-    }
-    Err("Too many curves with that name in the folder".into())
-}
-
-/// Writes the curve file beside `path` first, then puts it in place without replacing anything there.
-fn write_new(path: &Path, c: &Curve) -> Result<(), String> {
+/// The curve file's bytes for `c`.
+fn curve_bytes(c: &Curve) -> Result<Vec<u8>, String> {
     let periodic = c.sources.iter().all(|s| s.kind == SourceKind::BitwigCurve)
         && c.points.first().map(|p| p.y) == c.points.last().map(|p| p.y);
-    let bytes = curve::write(&curve::Curve {
+    curve::write(&curve::Curve {
         name: c.name.clone(),
         creator: "Music Organiser".into(),
         comment: String::new(),
@@ -563,27 +545,78 @@ fn write_new(path: &Path, c: &Curve) -> Result<(), String> {
         beat_length: Some(c.length_beats).filter(|l| *l > 0.0),
         points: c.points.clone(),
     })
-    .ok_or("This curve has no points")?;
-    let mut temp = path.as_os_str().to_owned();
-    temp.push(format!(".mo-new-{}", std::process::id()));
-    let temp = PathBuf::from(temp);
-    std::fs::write(&temp, &bytes).map_err(|e| format!("Couldn't write the curve: {e}"))?;
-    // Checked before it's put in place.
-    let check = std::fs::read(&temp).ok().and_then(curve::read);
-    let placed = if check.is_some_and(|back| back.points.len() == c.points.len()) {
-        match std::fs::hard_link(&temp, path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
-            Err(_) if !path.exists() => {
-                std::fs::rename(&temp, path).map_err(|e| format!("Couldn't put the curve in place: {e}"))
+    .ok_or_else(|| "This curve has no points".to_owned())
+}
+
+/// Whether a curve file already holds this curve as it is now (its points and length).
+fn holds(path: &Path, c: &Curve) -> bool {
+    std::fs::read(path)
+        .ok()
+        .and_then(curve::read)
+        .is_some_and(|back| back.points == c.points && back.beat_length == Some(c.length_beats).filter(|l| *l > 0.0))
+}
+
+/// The curve file for `curve` in the app's own `Curves` folder (`folder`): written the first time it's asked for, and
+/// again when the curve has changed since (copy, check, rename, as every file the app writes); returns its path.
+/// Safe on the worker pool; never on the window's thread.
+pub fn file(c: &Curve, folder: &Path) -> Result<PathBuf, String> {
+    let id = c.id.get(..8).unwrap_or(&c.id);
+    let path = folder.join(format!("{} {id}.{}", names::safe_file_name(&c.name), curve::EXTENSION));
+    if holds(&path, c) {
+        return Ok(path);
+    }
+    std::fs::create_dir_all(folder).map_err(|e| format!("Couldn't make the Curves folder: {e}"))?;
+    export::write_checked(&path, &curve_bytes(c)?).map_err(|e| format!("Couldn't write the curve: {e}"))?;
+    Ok(path)
+}
+
+/// Copies `curve` into Bitwig's curves library (`folder`, such as `K:\Bitwig Studio\Library\Curves`) under its name,
+/// with " (2)", " (3)"... when that name is taken: written and checked under a name of its own, then linked to the
+/// real name, which never replaces a file (where the disk can't link, the file is made new, which can't either).
+/// Returns the path written.
+pub fn save_to_bitwig(c: &Curve, folder: &Path) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(folder).map_err(|e| format!("Couldn't make the folder: {e}"))?;
+    let bytes = curve_bytes(c)?;
+    let base = names::safe_file_name(&c.name);
+    let base = if base.is_empty() { "Curve".to_owned() } else { base };
+    let staged = folder.join(format!("{base}.{}.mo-staged", curve::EXTENSION));
+    export::write_checked(&staged, &bytes).map_err(|e| format!("Couldn't write the curve: {e}"))?;
+    let result = (|| {
+        for n in 1..1000 {
+            let name = if n == 1 { base.clone() } else { format!("{base} ({n})") };
+            let path = folder.join(format!("{name}.{}", curve::EXTENSION));
+            match std::fs::hard_link(&staged, &path) {
+                Ok(()) => return Ok(path),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(_) => match new_file(&path, &bytes) {
+                    Ok(true) => return Ok(path),
+                    Ok(false) => continue,
+                    Err(e) => return Err(format!("Couldn't save the curve: {e}")),
+                },
             }
-            Err(e) => Err(format!("Couldn't put the curve in place: {e}")),
         }
-    } else {
-        Err("The curve file didn't read back as written".into())
+        Err("Too many curves with that name in the folder".to_owned())
+    })();
+    let _ = std::fs::remove_file(&staged);
+    result
+}
+
+/// Makes `path` new with `bytes` (false when it's taken), on the disk and checked before it's left there.
+fn new_file(path: &Path, bytes: &[u8]) -> std::io::Result<bool> {
+    use std::io::Write as _;
+    let mut f = match std::fs::OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(e) => return Err(e),
     };
-    let _ = std::fs::remove_file(&temp);
-    placed
+    let written = f.write_all(bytes).and_then(|()| f.sync_all());
+    drop(f);
+    if written.is_err() || std::fs::read(path).ok().as_deref() != Some(bytes) {
+        // Ours, half made: it goes.
+        let _ = std::fs::remove_file(path);
+        return Err(written.err().unwrap_or_else(|| std::io::Error::other("it didn't read back as written")));
+    }
+    Ok(true)
 }
 
 #[cfg(test)]
