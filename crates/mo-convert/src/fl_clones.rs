@@ -18,6 +18,11 @@
 //! A clip only moves when nothing on its source's track plays at the same time; one that would overlap is listed and
 //! stays where it is. Only the track of each clip changes: two bytes of each moved clip, so the file is otherwise the
 //! same, byte for byte.
+//!
+//! In a save that keeps patterns on rows of their own (FL 8 and older, many FL 9 saves, some FL 11.1), each row
+//! becomes a pattern clip on a track, as FL itself does when it opens one (seen in Solomon's FL 8 "midnight_33" and
+//! its FL 11 re-save): the clip keeps its place, length and everything else; a pattern and its clones share a track,
+//! the others get one each, in pattern order below the tracks already used. Only those six bytes of each row change.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -63,6 +68,7 @@ pub struct Move {
     pub pattern: u32,
     /// Where it starts, in ticks.
     pub at: u32,
+    /// 0 for a pattern that was on a row of its own (an old save).
     pub from_track: u32,
     pub to_track: u32,
 }
@@ -75,9 +81,10 @@ pub struct Lineup {
     pub moves: Vec<Move>,
     /// What stays as it is, and why, in plain words.
     pub left: Vec<String>,
-    /// The file's bytes to change: where, and the track slot written there.
-    patches: Vec<(usize, u16)>,
-    /// The playlist is saved one row per pattern (FL 8 and older, many FL 9 saves): its tracks can't be changed.
+    /// The file's bytes to change: where, and the byte written there.
+    patches: Vec<(usize, u8)>,
+    /// The playlist had patterns on rows of their own (FL 8 and older, many FL 9 saves, some FL 11.1): each becomes a
+    /// pattern clip on a track, as FL does when it opens such a save, with clones on their source's track.
     pub rows: bool,
 }
 
@@ -85,15 +92,16 @@ impl Lineup {
     /// The project's bytes with the clones lined up.
     pub fn apply(&self, raw: &[u8]) -> Vec<u8> {
         let mut out = raw.to_vec();
-        for &(at, slot) in &self.patches {
-            if let Some(b) = out.get_mut(at..at + 2) {
-                b.copy_from_slice(&slot.to_le_bytes());
+        for &(at, byte) in &self.patches {
+            if let Some(b) = out.get_mut(at) {
+                *b = byte;
             }
         }
         out
     }
 
-    /// One line for each pattern whose clips move: "bass #2: 3 clips from track 7 to track 2".
+    /// One line for each pattern whose clips move: "bass #2: 3 clips from track 7 to track 2" ("from its own row" for
+    /// an old save's row).
     pub fn summary(&self) -> Vec<String> {
         let name = |p: u32| {
             self.patterns.iter().find(|q| q.number == p).map_or_else(|| format!("Pattern {p}"), Pattern::shown)
@@ -105,7 +113,8 @@ impl Lineup {
         by.into_iter()
             .map(|((p, from, to), n)| {
                 let clips = if n == 1 { "1 clip".to_owned() } else { format!("{n} clips") };
-                format!("{}: {clips} from track {from} to track {to}", name(p))
+                let from = if from == 0 { "its own row".to_owned() } else { format!("track {from}") };
+                format!("{}: {clips} from {from} to track {to}", name(p))
             })
             .collect()
     }
@@ -123,7 +132,7 @@ fn default_name(name: &str) -> bool {
 }
 
 /// The project's patterns: names and the channels their notes are on.
-fn patterns(flp: &Flp<'_>) -> Vec<Pattern> {
+fn patterns(flp: &Flp<'_>, v: (u32, u32)) -> Vec<Pattern> {
     let mut by: BTreeMap<u32, Pattern> = BTreeMap::new();
     let mut current = None;
     for e in &flp.events {
@@ -140,7 +149,9 @@ fn patterns(flp: &Flp<'_>) -> Vec<Pattern> {
             }
             EV_PATTERN_NOTES => {
                 if let Some(p) = current.and_then(|p| by.get_mut(&p)) {
-                    let size = notes::note_size(&e.data, flp.major, e.offset.is_none(), None);
+                    // FL 8.5 writes 24-byte notes, as FL 9 does (checked on Solomon's saves, 2026-11-02).
+                    let size =
+                        if v >= (8, 5) { 24 } else { notes::note_size(&e.data, flp.major, e.offset.is_none(), None) };
                     p.channels.extend(notes::decode(&e.data, size).into_iter().map(|(c, _)| c));
                 }
             }
@@ -224,46 +235,86 @@ fn u32_at(r: &[u8], at: usize) -> u32 {
     r.get(at..at + 4).map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
 }
 
-/// A pattern clip in a playlist.
-struct Clip {
-    /// Where its track slot is in the file.
-    slot_at: usize,
+/// FL's version as numbers: (8, 5) for "8.5.0".
+fn version(v: &str) -> (u32, u32) {
+    let mut parts = v.split('.').map(|p| p.trim().parse::<u32>().unwrap_or(0));
+    (parts.next().unwrap_or(0), parts.next().unwrap_or(0))
+}
+
+/// What a playlist record holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    /// A pattern on a row of its own (FL 11.1 and older): no track.
+    Row,
+    /// A pattern clip on a track.
+    Pattern,
+    /// A channel's clip (audio or automation) on a track.
+    Channel,
+}
+
+/// One clip in a playlist.
+struct Record {
+    /// Where the record starts in the file.
+    offset: usize,
+    kind: Kind,
     pattern: u32,
     at: u32,
     end: u32,
-    slot: u16,
+    /// The track slot, counted down from the first track; None for a row.
+    slot: Option<u16>,
 }
 
-/// The clips in a playlist saved with tracks (FL 8.5 and later): None when it's saved one row per pattern (or in a
-/// layout this doesn't know).
-fn clips(data: &[u8], offset: usize) -> Option<Vec<Clip>> {
-    let size = [88, 80, 60, 32].into_iter().find(|&s| {
-        !data.is_empty() && data.len().is_multiple_of(s) && data.chunks_exact(s).all(|r| u16_at(r, 4) == PATTERN_BASE)
-    })?;
-    Some(
-        data.chunks_exact(size)
-            .enumerate()
-            .filter(|(_, r)| u16_at(r, 6) > PATTERN_BASE && u32_at(r, 8) > 0)
-            .map(|(i, r)| Clip {
-                slot_at: offset + i * size + 12,
-                pattern: (u16_at(r, 6) - PATTERN_BASE) as u32,
-                at: u32_at(r, 0),
-                end: u32_at(r, 0).saturating_add(u32_at(r, 8)),
-                slot: u16_at(r, 12),
-            })
-            .collect(),
-    )
-}
-
-/// Every channel or audio clip's slot and time in a playlist with tracks, so a moved clone doesn't land on one.
-fn other_clips(data: &[u8]) -> Vec<(u16, u32, u32)> {
-    let Some(size) = [88, 80, 60, 32].into_iter().find(|&s| !data.is_empty() && data.len().is_multiple_of(s)) else {
-        return Vec::new();
+/// The size of a playlist record, by FL's version (checked on Solomon's 17,316 old saves, 2026-11-02): 28 bytes to
+/// FL 8.0, 32 from FL 8.5 to 20, then 60, 80 or 88.
+fn record_size(data: &[u8], v: (u32, u32)) -> Option<usize> {
+    let fits = |s: usize| {
+        !data.is_empty()
+            && data.len().is_multiple_of(s)
+            && data.chunks_exact(s).all(|r| matches!(u16_at(r, 4), 0 | PATTERN_BASE))
     };
-    data.chunks_exact(size)
-        .filter(|r| u16_at(r, 6) < PATTERN_BASE && u32_at(r, 8) > 0)
-        .map(|r| (u16_at(r, 12), u32_at(r, 0), u32_at(r, 0).saturating_add(u32_at(r, 8))))
-        .collect()
+    let sizes: &[usize] = if v < (8, 5) {
+        &[28]
+    } else if v.0 < 21 {
+        &[32]
+    } else {
+        &[88, 80, 60]
+    };
+    sizes.iter().copied().find(|&s| fits(s))
+}
+
+/// The records of a playlist. A row is 0 then 0x5000 or 0x6000 where a clip's pattern base and index go, on slot
+/// 999 − pattern; a clip has the base (0x5000) then the base + pattern, or the channel. In 28-byte records (FL 8 and
+/// older) the slot is byte 12 with byte 14 above it (byte 13 is always 0x78).
+fn records(data: &[u8], offset: usize, size: usize) -> Option<Vec<Record>> {
+    let slot_of = |r: &[u8]| if size == 28 { u16::from(r[12]) | (u16::from(r[14]) << 8) } else { u16_at(r, 12) };
+    let mut out = Vec::new();
+    for (i, r) in data.chunks_exact(size).enumerate() {
+        let (base, index, at, length) = (u16_at(r, 4), u16_at(r, 6), u32_at(r, 0), u32_at(r, 8));
+        let slot = slot_of(r);
+        let (kind, pattern, slot) = match (base, index) {
+            (0, 0x5000 | 0x6000) if (1..=999).contains(&slot) => (Kind::Row, 999 - slot as u32, None),
+            (PATTERN_BASE, i) if i > PATTERN_BASE => (Kind::Pattern, (i - PATTERN_BASE) as u32, Some(slot)),
+            (PATTERN_BASE, _) => (Kind::Channel, 0, Some(slot)),
+            // A layout this doesn't know: change nothing.
+            _ => return None,
+        };
+        if length == 0 {
+            continue;
+        }
+        out.push(Record { offset: offset + i * size, kind, pattern, at, end: at.saturating_add(length), slot });
+    }
+    Some(out)
+}
+
+/// What FL saves for the first playlist track in a project of this version: FL 10 and older have 99 tracks, FL 11 and
+/// 12 199, from FL 12.9.1 500 (row saves only come from FL 11.1 and older).
+fn top_slot(flp: &Flp<'_>, highest: u16) -> u16 {
+    let at_least = match version(&flp.version) {
+        (..=10, _) => return 98,
+        (11 | 12, _) => highest.max(99),
+        _ => highest,
+    };
+    song::top_slot(&flp.version, at_least as i64).clamp(0, 499) as u16
 }
 
 /// Works out which clips move where. Changes nothing.
@@ -272,81 +323,150 @@ pub fn line_up(raw: &[u8]) -> Result<Lineup, String> {
     if flp.warning.is_some() {
         return Err("This save is damaged or cut short, so it isn't changed.".to_owned());
     }
-    let mut lineup = Lineup { patterns: patterns(&flp), ..Lineup::default() };
+    let v = version(&flp.version);
+    let mut lineup = Lineup { patterns: patterns(&flp, v), ..Lineup::default() };
     lineup.groups = groups(&lineup.patterns, &mut lineup.left);
-    let playlists: Vec<_> = flp.events.iter().filter(|e| e.id == EV_PLAYLIST).collect();
-    let group_of: HashMap<u32, usize> = lineup
+    let group_of: HashMap<u32, u32> = lineup
         .groups
         .iter()
-        .enumerate()
-        .flat_map(|(g, group)| std::iter::once(group.source).chain(group.clones.iter().copied()).map(move |p| (p, g)))
+        .flat_map(|g| std::iter::once(g.source).chain(g.clones.iter().copied()).map(move |p| (p, g.source)))
         .collect();
+    // The pattern whose track a pattern's clips go on: its group's source, or itself.
+    let unit = |p: u32| group_of.get(&p).copied().unwrap_or(p);
+    let name =
+        |p: u32| lineup.patterns.iter().find(|q| q.number == p).map_or_else(|| format!("Pattern {p}"), Pattern::shown);
+    let mut left = Vec::new();
 
-    for (arrangement, e) in playlists.iter().enumerate() {
+    for (arrangement, e) in flp.events.iter().filter(|e| e.id == EV_PLAYLIST).enumerate() {
         let Some(offset) = e.offset else { continue };
-        let Some(clips) = clips(&e.data, offset) else {
-            lineup.rows = true;
-            continue;
+        let Some(records) = record_size(&e.data, v).and_then(|size| records(&e.data, offset, size).map(|r| (size, r)))
+        else {
+            return Err("Its playlist is saved in a way this doesn't know, so it isn't changed.".to_owned());
         };
-        let others = other_clips(&e.data);
-        let highest = clips.iter().map(|c| c.slot).chain(others.iter().map(|c| c.0)).max().unwrap_or(0);
-        let top = song::top_slot(&flp.version, highest as i64);
-        let track = |slot: u16| u32::try_from(top - slot as i64 + 1).unwrap_or(0);
+        let (size, records) = records;
+        let rows = records.iter().any(|r| r.kind == Kind::Row);
+        lineup.rows |= rows;
+        let highest = records.iter().filter_map(|r| r.slot).max().unwrap_or(0);
+        let top = top_slot(&flp, highest);
+        let track = |slot: u16| u32::from(top.saturating_sub(slot)) + 1;
 
-        // Each group's track: where its source is most often, else where its first placed clone is.
-        let mut target: HashMap<usize, u16> = HashMap::new();
-        for (g, group) in lineup.groups.iter().enumerate() {
-            let most = |p: u32| {
-                let mut count: BTreeMap<u16, usize> = BTreeMap::new();
-                for c in clips.iter().filter(|c| c.pattern == p) {
-                    *count.entry(c.slot).or_default() += 1;
-                }
-                // Ties go to the higher track (the bigger slot).
-                count.into_iter().max_by_key(|&(slot, n)| (n, slot)).map(|(slot, _)| slot)
-            };
-            let mut members = std::iter::once(group.source).chain(group.clones.iter().copied()).collect::<Vec<_>>();
+        // Each group's track: where its source is most often, else where its first placed clone is. Ties go to the
+        // higher track (the bigger slot).
+        let most = |p: u32| {
+            let mut count: BTreeMap<u16, usize> = BTreeMap::new();
+            for r in records.iter().filter(|r| r.kind == Kind::Pattern && r.pattern == p) {
+                *count.entry(r.slot.unwrap_or_default()).or_default() += 1;
+            }
+            count.into_iter().max_by_key(|&(slot, n)| (n, slot)).map(|(slot, _)| slot)
+        };
+        let mut target: BTreeMap<u32, u16> = BTreeMap::new();
+        for g in &lineup.groups {
+            let mut members: Vec<u32> = std::iter::once(g.source).chain(g.clones.iter().copied()).collect();
             members.sort_unstable();
-            if let Some(slot) = most(group.source).or_else(|| members.iter().find_map(|&p| most(p))) {
-                target.insert(g, slot);
+            if let Some(slot) = most(g.source).or_else(|| members.iter().find_map(|&p| most(p))) {
+                target.insert(g.source, slot);
             }
         }
 
-        // What's on each track and stays.
-        let moving = |c: &Clip| group_of.get(&c.pattern).and_then(|g| target.get(g)).is_some_and(|&t| t != c.slot);
-        let mut taken: HashMap<u16, Vec<(u32, u32)>> = HashMap::new();
-        for c in clips.iter().filter(|c| !moving(c)) {
-            taken.entry(c.slot).or_default().push((c.at, c.end));
+        // What's on each track and stays there.
+        let moving = |r: &Record| match r.kind {
+            Kind::Row => true,
+            Kind::Pattern => target.get(&unit(r.pattern)).is_some_and(|&t| Some(t) != r.slot),
+            Kind::Channel => false,
+        };
+        let mut taken: BTreeMap<u16, Vec<(u32, u32)>> = BTreeMap::new();
+        for r in records.iter().filter(|r| !moving(r)) {
+            taken.entry(r.slot.unwrap_or_default()).or_default().push((r.at, r.end));
         }
-        for &(slot, at, end) in &others {
-            taken.entry(slot).or_default().push((at, end));
-        }
-        let mut order: Vec<&Clip> = clips.iter().filter(|c| moving(c)).collect();
-        order.sort_by_key(|c| (c.at, c.pattern));
-        for c in order {
-            let Some(&to) = group_of.get(&c.pattern).and_then(|g| target.get(g)) else { continue };
-            let on = taken.entry(to).or_default();
-            if on.iter().any(|&(a, b)| c.at < b && a < c.end) {
-                let name = lineup.patterns.iter().find(|p| p.number == c.pattern).map(Pattern::shown);
-                lineup.left.push(format!(
-                    "{} at tick {} stays on track {}: something on track {} plays at the same time",
-                    name.unwrap_or_else(|| format!("Pattern {}", c.pattern)),
-                    c.at,
-                    track(c.slot),
-                    track(to)
-                ));
-                continue;
+        // New tracks for rows, as FL gives them when it opens such a save: in pattern order, below the tracks in use.
+        let mut next = taken.keys().next().map_or(Some(top), |&s| s.checked_sub(1));
+        let mut new_track = |taken: &BTreeMap<u16, Vec<(u32, u32)>>| -> Result<u16, String> {
+            while let Some(s) = next {
+                next = s.checked_sub(1);
+                if !taken.contains_key(&s) {
+                    return Ok(s);
+                }
             }
-            on.push((c.at, c.end));
-            lineup.patches.push((c.slot_at, to));
+            Err(format!(
+                "Nothing was written: its patterns need more than the {} playlist tracks FL {}.{} has.",
+                top + 1,
+                v.0,
+                v.1
+            ))
+        };
+        // Extra tracks a group's clips spill onto when they play at the same time as each other (rows only).
+        let mut spill: BTreeMap<u32, Vec<u16>> = BTreeMap::new();
+
+        let mut order: Vec<&Record> = records.iter().filter(|r| moving(r)).collect();
+        order.sort_by_key(|r| (unit(r.pattern), r.at, r.pattern));
+        for r in order {
+            let u = unit(r.pattern);
+            let free = |slot: u16, taken: &BTreeMap<u16, Vec<(u32, u32)>>| {
+                taken.get(&slot).is_none_or(|on| !on.iter().any(|&(a, b)| r.at < b && a < r.end))
+            };
+            let to = match (r.kind, target.get(&u).copied()) {
+                (Kind::Pattern, Some(to)) if free(to, &taken) => to,
+                (Kind::Pattern, Some(to)) => {
+                    left.push(format!(
+                        "{} at tick {} stays on track {}: something on track {} plays at the same time",
+                        name(r.pattern),
+                        r.at,
+                        track(r.slot.unwrap_or_default()),
+                        track(to)
+                    ));
+                    continue;
+                }
+                (_, Some(to)) if free(to, &taken) => to,
+                (_, first) => {
+                    let to = match first {
+                        None => {
+                            let to = new_track(&taken)?;
+                            target.insert(u, to);
+                            to
+                        }
+                        Some(_) => match spill.get(&u).and_then(|s| s.iter().copied().find(|&s| free(s, &taken))) {
+                            Some(to) => to,
+                            None => {
+                                let to = new_track(&taken)?;
+                                spill.entry(u).or_default().push(to);
+                                to
+                            }
+                        },
+                    };
+                    if first.is_some() {
+                        left.push(format!(
+                            "{} at tick {} plays at the same time as another of its group, so it goes on track {}",
+                            name(r.pattern),
+                            r.at,
+                            track(to)
+                        ));
+                    }
+                    to
+                }
+            };
+            taken.entry(to).or_default().push((r.at, r.end));
+            let [lo, hi] = to.to_le_bytes();
+            if r.kind == Kind::Row {
+                // Made a pattern clip, as FL does when it opens such a save: base, then base + pattern.
+                let index = PATTERN_BASE + r.pattern as u16;
+                lineup.patches.extend([(r.offset + 4, 0x00), (r.offset + 5, 0x50)]);
+                lineup.patches.extend(index.to_le_bytes().into_iter().enumerate().map(|(i, b)| (r.offset + 6 + i, b)));
+            }
+            if size == 28 {
+                lineup.patches.extend([(r.offset + 12, lo), (r.offset + 14, hi)]);
+            } else {
+                lineup.patches.extend([(r.offset + 12, lo), (r.offset + 13, hi)]);
+            }
             lineup.moves.push(Move {
                 arrangement,
-                pattern: c.pattern,
-                at: c.at,
-                from_track: track(c.slot),
+                pattern: r.pattern,
+                at: r.at,
+                from_track: r.slot.map_or(0, track),
                 to_track: track(to),
             });
         }
     }
+    lineup.left.extend(left);
     Ok(lineup)
 }
 
@@ -372,9 +492,7 @@ pub fn fix_fl_project(project: &Path) -> Result<Fixed, String> {
     let raw = std::fs::read(project).map_err(|e| format!("Couldn't read {}: {e}", project.display()))?;
     let lineup = line_up(&raw)?;
     if lineup.moves.is_empty() {
-        let why = if lineup.rows {
-            "this save keeps one playlist row per pattern (FL 9 and older), so its tracks can't be changed yet"
-        } else if lineup.groups.is_empty() {
+        let why = if lineup.groups.is_empty() {
             "no pattern in it is a clone (\"name #2\")"
         } else {
             "its clones are already on their sources' tracks"

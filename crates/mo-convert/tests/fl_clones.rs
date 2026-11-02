@@ -41,10 +41,20 @@ impl Flp {
 
     /// A pattern, its name (UTF-16, as FL 11.5 and later write it) and one note on each channel given.
     fn pattern(self, number: u16, name: &str, channels: &[u16]) -> Flp {
+        let text: Vec<u8> = name.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect();
+        self.named_pattern(number, &text, name.is_empty(), channels)
+    }
+
+    /// [`Flp::pattern`] as FL 11 and older write its name: a byte a letter.
+    fn old_pattern(self, number: u16, name: &str, channels: &[u16]) -> Flp {
+        let text: Vec<u8> = name.bytes().chain([0]).collect();
+        self.named_pattern(number, &text, name.is_empty(), channels)
+    }
+
+    fn named_pattern(self, number: u16, text: &[u8], unnamed: bool, channels: &[u16]) -> Flp {
         let mut flp = self.word(65, number);
-        if !name.is_empty() {
-            let text: Vec<u8> = name.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect();
-            flp = flp.data(193, &text);
+        if !unnamed {
+            flp = flp.data(193, text);
         }
         let mut notes = Vec::new();
         for &c in channels {
@@ -134,7 +144,7 @@ fn clones_go_on_their_sources_track() {
     );
     let moved: Vec<(u32, u32, u32)> = lineup.moves.iter().map(|m| (m.pattern, m.from_track, m.to_track)).collect();
     // "lead #2" plays alongside "lead", so it stays.
-    assert_eq!(moved, vec![(2, 2, 1), (5, 5, 4), (3, 3, 1)]);
+    assert_eq!(moved, vec![(2, 2, 1), (3, 3, 1), (5, 5, 4)]);
     let left = lineup.left.join("\n");
     assert!(left.contains("lead #2 at tick 0 stays on track 9"), "{left}");
     assert!(left.contains("Pattern 1 #2 stays: the unnamed pattern before it (Pattern 6) has none"), "{left}");
@@ -171,21 +181,101 @@ fn each_arrangement_is_lined_up_on_its_own() {
     assert_eq!(moved, vec![(0, 3, 1), (1, 2, 5)]);
 }
 
+/// An FL 9 row: 0 and 0x6000 where a clip's pattern goes, on slot 999 − pattern.
+fn row32(at: u32, pattern: u16) -> [u8; 32] {
+    let mut r = [0u8; 32];
+    r[..4].copy_from_slice(&at.to_le_bytes());
+    r[6..8].copy_from_slice(&0x6000u16.to_le_bytes());
+    r[8..12].copy_from_slice(&384u32.to_le_bytes());
+    r[12..14].copy_from_slice(&(999 - pattern).to_le_bytes());
+    r[16] = 120;
+    r[20..24].copy_from_slice(&0x8080_6440u32.to_le_bytes());
+    r[24..32].copy_from_slice(&[0, 0, 0x80, 0xBF, 0, 0, 0x80, 0xBF]);
+    r
+}
+
+/// An FL 8 row (28 bytes): the slot is byte 12 with byte 14 above it; byte 13 is always 0x78.
+fn row28(at: u32, pattern: u16) -> [u8; 28] {
+    let mut r = [0u8; 28];
+    r[..4].copy_from_slice(&at.to_le_bytes());
+    r[6..8].copy_from_slice(&0x6000u16.to_le_bytes());
+    r[8..12].copy_from_slice(&384u32.to_le_bytes());
+    let [lo, hi] = (999 - pattern).to_le_bytes();
+    (r[12], r[13], r[14]) = (lo, 0x78, hi);
+    r[16..20].copy_from_slice(&0x8080_6440u32.to_le_bytes());
+    r[20..28].copy_from_slice(&[0, 0, 0x80, 0xBF, 0, 0, 0x80, 0xBF]);
+    r
+}
+
+/// An FL 8 channel clip (28 bytes) on slot `slot`.
+fn channel28(at: u32, channel: u16, slot: u8) -> [u8; 28] {
+    let mut r = row28(at, 1);
+    r[4..6].copy_from_slice(&20480u16.to_le_bytes());
+    r[6..8].copy_from_slice(&channel.to_le_bytes());
+    (r[12], r[14]) = (slot, 0);
+    r
+}
+
 #[test]
-fn an_old_save_with_a_row_per_pattern_is_left_alone() {
-    // FL 9: 32-byte records with 0 and 0x6000 where the pattern goes, on row 999 − pattern.
-    let mut rows = Vec::new();
-    for p in [1u16, 3] {
-        let mut r = [0u8; 32];
-        r[6..8].copy_from_slice(&0x6000u16.to_le_bytes());
-        r[8..12].copy_from_slice(&384u32.to_le_bytes());
-        r[12..14].copy_from_slice(&(999 - p).to_le_bytes());
-        rows.extend(r);
-    }
-    let raw = Flp::default().version("9.0.0").pattern(1, "bass", &[3]).pattern(3, "bass #2", &[3]).data(233, &rows);
-    let lineup = line_up(&raw.build()).unwrap();
+fn an_old_saves_rows_become_tracks_with_clones_together() {
+    let rows = [row32(0, 1), row32(0, 2), row32(384, 3), row32(768, 1), row32(768, 3)].concat();
+    let raw = Flp::default()
+        .version("9.0.0")
+        .old_pattern(1, "bass", &[3])
+        .old_pattern(2, "", &[4])
+        .old_pattern(3, "bass #2", &[3])
+        .data(233, &rows)
+        .build();
+    let lineup = line_up(&raw).unwrap();
     assert!(lineup.rows);
-    assert!(lineup.moves.is_empty());
+    let moved: Vec<(u32, u32, u32, u32)> =
+        lineup.moves.iter().map(|m| (m.pattern, m.at, m.from_track, m.to_track)).collect();
+    // Bass and its clone on track 1; the clone at 768 plays with the bass, so it gets a track of its own.
+    assert_eq!(moved, vec![(1, 0, 0, 1), (3, 384, 0, 1), (1, 768, 0, 1), (3, 768, 0, 2), (2, 0, 0, 3)]);
+    assert!(lineup.left.iter().any(|l| l.starts_with("bass #2 at tick 768 plays at the same time")));
+
+    let fixed = lineup.apply(&raw);
+    // The first row is now pattern 1's clip on slot 98 (track 1 of FL 9's 99); nothing else in it changed.
+    let at = raw.len() - rows.len();
+    assert_eq!(&fixed[at + 4..at + 8], &[0x00, 0x50, 0x01, 0x50]);
+    assert_eq!(&fixed[at + 12..at + 14], &[98, 0]);
+    assert_eq!(&fixed[at + 14..at + 32], &raw[at + 14..at + 32]);
+    let again = line_up(&fixed).unwrap();
+    assert!(!again.rows && again.moves.is_empty(), "{:?}", again.moves);
+}
+
+#[test]
+fn an_fl_8_saves_rows_go_below_its_audio_tracks() {
+    let records = [channel28(0, 9, 98), row28(0, 1), row28(384, 2)].concat();
+    let mut notes = Vec::new();
+    for c in [3u16, 3] {
+        let mut n = [0u8; 20];
+        n[6..8].copy_from_slice(&c.to_le_bytes());
+        notes.extend(n);
+    }
+    let text = |s: &str| {
+        let mut b = s.as_bytes().to_vec();
+        b.push(0);
+        b
+    };
+    let raw = Flp::default()
+        .version("8.0.0")
+        .word(65, 1)
+        .data(193, &text("lead"))
+        .data(224, &notes)
+        .word(65, 2)
+        .data(193, &text("lead #2"))
+        .data(224, &notes)
+        .data(233, &records)
+        .build();
+    let lineup = line_up(&raw).unwrap();
+    let moved: Vec<(u32, u32)> = lineup.moves.iter().map(|m| (m.pattern, m.to_track)).collect();
+    assert_eq!(moved, vec![(1, 2), (2, 2)]);
+    let fixed = lineup.apply(&raw);
+    let at = raw.len() - records.len() + 28;
+    assert_eq!(&fixed[at + 4..at + 8], &[0x00, 0x50, 0x01, 0x50]);
+    assert_eq!(&fixed[at + 12..at + 15], &[97, 0x78, 0]);
+    assert!(line_up(&fixed).unwrap().moves.is_empty());
 }
 
 #[test]
