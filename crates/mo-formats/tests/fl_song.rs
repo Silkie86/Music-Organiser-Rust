@@ -294,8 +294,9 @@ fn an_fl_8_pattern_clip_plays_with_its_patterns_row() {
 
 #[test]
 fn an_fl_9_playlist_mixing_rows_and_clips_is_read() {
-    // FL 9.0 to 9.5 often save pattern rows (0, 0x6000, row 999 - n) and newer FL's clips (the pattern base and the
-    // pattern, slot counted down from 98) in one event; 902 of Solomon's saves read no playlist before.
+    // FL 9.0 to 9.5 (and 11.1) often save pattern rows (0, 0x6000, row 999 - n) and newer FL's clips (the pattern base
+    // and the pattern, slot counted down from 98, or 198 in 11.1) in one event; 902 of Solomon's saves read no
+    // playlist before.
     let record = |at: u32, kind: u16, index: u16, slot: u16| {
         let mut r = vec![0u8; 32];
         r[..4].copy_from_slice(&at.to_le_bytes());
@@ -306,21 +307,35 @@ fn an_fl_9_playlist_mixing_rows_and_clips_is_read() {
         r[24..28].copy_from_slice(&(-1i32).to_le_bytes());
         r
     };
-    let mut playlist = record(0, 0, 0x6000, 998);
-    playlist.extend(record(768, 20480, 20482, 97));
-    let bytes = Flp::new()
-        .ascii(199, "9.1.0")
-        .word(64, 0)
-        .ascii(192, "Kick")
-        .word(65, 1)
-        .data(224, &common::note(0, 0, 96, 60, 100))
-        .word(65, 2)
-        .data(224, &common::note(0, 0, 96, 62, 100))
-        .data(233, &playlist)
-        .build();
-    let song = read_song(&bytes);
-    let clips: Vec<(i64, u32)> = song.channels[0].clips.iter().map(|c| (c.start, c.notes[0].key as u32)).collect();
-    assert_eq!(clips, [(0, 60), (768, 62)]);
+    for (version, clip_slot) in [("9.1.0", 97), ("11.1.0", 197)] {
+        let mut playlist = record(0, 0, 0x6000, 998);
+        playlist.extend(record(768, 20480, 20482, clip_slot));
+        let bytes = Flp::new()
+            .ascii(199, version)
+            .word(64, 0)
+            .ascii(192, "Kick")
+            .word(65, 1)
+            .data(224, &common::note(0, 0, 96, 60, 100))
+            .word(65, 2)
+            .data(224, &common::note(0, 0, 96, 62, 100))
+            .data(233, &playlist)
+            .build();
+        let song = read_song(&bytes);
+        let clips: Vec<(i64, u32)> = song.channels[0].clips.iter().map(|c| (c.start, c.notes[0].key as u32)).collect();
+        assert_eq!(clips, [(0, 60), (768, 62)], "FL {version}");
+    }
+}
+
+#[test]
+fn fl_8_5_notes_are_24_bytes_and_8_0_notes_20() {
+    // Five 24-byte notes make 120 bytes, as six 20-byte ones would: the version says which (a census of 17,316 of
+    // Solomon's saves: FL 3.5 to 8.0 write 20 bytes, 8.5 on 24).
+    let notes: Vec<u8> = (0..5u32).flat_map(|i| common::note(i * 96, 0, 96, 60, 100)).collect();
+    let read = |version: &str| {
+        let bytes = Flp::new().ascii(199, version).word(64, 0).ascii(192, "Kick").word(65, 1).data(224, &notes).build();
+        read_song(&bytes).channels[0].clips.iter().map(|c| c.notes.len()).sum::<usize>()
+    };
+    assert_eq!(read("8.5.2"), 5);
 }
 
 #[test]

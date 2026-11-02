@@ -10,9 +10,8 @@ use crate::model::{NoteAttribute, NoteEvent, velocity};
 
 /// The size of the note records in an event, by FL's version (major, minor; rule 9): 24 bytes from FL 8.5, 20 bytes
 /// in FL 4 to 8.0. Notes the reader made from old step sequencer dots are always 24. Without a version, or in an FL 4
-/// to 8.0 save whose
-/// notes divide into 24 bytes but not 20, the size is told from the notes themselves; `channels` are the song's channels,
-/// when known, which a right reading only ever names.
+/// to 8.0 save whose notes divide into 24 bytes but not 20, the size is told from the notes themselves; `channels` are
+/// the song's channels, when known, which a right reading only ever names.
 pub fn note_size(data: &[u8], version: (u32, u32), made_here: bool, channels: Option<&HashSet<u32>>) -> usize {
     match version.0 {
         _ if made_here => 24,

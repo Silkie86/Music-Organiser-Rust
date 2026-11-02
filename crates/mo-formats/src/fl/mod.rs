@@ -170,7 +170,8 @@ fn read_with(raw: &[u8], resolve: &mut dyn FnMut(&str) -> String) -> ProjectInfo
             EV_PATTERN_NEW => patterns += 1,
             EV_SAMPLE_PATH => info.samples.push(resolve(&flp.text(&e.data))),
             EV_PATTERN_NOTES => {
-                notes += e.data.len() / notes::note_size(&e.data, flp.major_minor(), e.offset.is_none(), Some(&known))
+                notes +=
+                    e.data.len() / notes::note_size(&e.data, (flp.major, flp.minor), e.offset.is_none(), Some(&known))
             }
             EV_PROJECT_TIME if e.data.len() >= 16 => {
                 let (created, spent) = project_time(&e.data);
