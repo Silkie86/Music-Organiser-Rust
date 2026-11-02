@@ -239,6 +239,36 @@ if ((Test-Path $newer) -and (Test-Path $Installed) -and $PSCommandPath -eq $Inst
 # Below this much free space (in GB) the build's leftovers are cleared first; below the second it doesn't start.
 $LowSpaceGb = 10
 $NeededGb = 4
+# Cargo never deletes the old pieces of earlier builds, so the build folder only ever grows: by gigabytes over a few
+# weeks of pushes. Past this size (in GB) it's cleared after a build, and the next build starts from scratch.
+$MaxBuildGb = 25
+
+function Get-FolderGb([string]$Path) {
+    # How big a folder is, in GB; 0 when it isn't there.
+    try {
+        $bytes = (Get-ChildItem -Path $Path -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+        return [double]($bytes) / 1GB
+    } catch { return 0 }
+}
+
+function Limit-BuildFolder([string]$TargetDir) {
+    # Keeps the build folder under $MaxBuildGb, after a build (so the app just built is already copied out). First its
+    # leftovers go (the incremental cache and any release build); if it's still too big, the whole folder goes, and
+    # the next build takes the long first-build time once.
+    $gb = Get-FolderGb $TargetDir
+    if ($gb -le $MaxBuildGb) { return }
+    Say ("The build folder has grown to {0:N1} GB. Clearing its leftovers..." -f $gb) 'Yellow'
+    foreach ($leftover in @((Join-Path (Join-Path $TargetDir 'debug') 'incremental'), (Join-Path $TargetDir 'release'))) {
+        Remove-Item -Recurse -Force $leftover -ErrorAction SilentlyContinue
+    }
+    $gb = Get-FolderGb $TargetDir
+    if ($gb -le $MaxBuildGb) {
+        Say ("Now {0:N1} GB." -f $gb) 'DarkGray'
+        return
+    }
+    Say ("Still {0:N1} GB: clearing the whole build folder. The next build starts from scratch (a few minutes longer, once)." -f $gb) 'Yellow'
+    Remove-Item -Recurse -Force $TargetDir -ErrorAction SilentlyContinue
+}
 
 function Get-FreeGb([string]$Path) {
     # The free space on the drive holding $Path (or its nearest folder that exists), in GB; $null when unknown.
@@ -307,6 +337,7 @@ function Build-App {
         Say "Couldn't copy the new build ($($_.Exception.Message)). The app keeps the version it has." 'Red'
         return $null
     }
+    Limit-BuildFolder $targetDir
     $copy
 }
 
