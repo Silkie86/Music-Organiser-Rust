@@ -1,20 +1,30 @@
-//! The format registry test (spec section 11.2): every FL Studio and Bitwig id the readers in mo-formats use is
-//! written down in `registry/*.json` with a name, and every id the registry says a reader relies on is used by one (or
-//! is on a list of ones we know aren't used yet).
+//! The format registry test (spec section 11.2), for the mo-formats readers: every FL Studio and Bitwig id the readers
+//! in `crates/mo-formats/src/fl` and `src/bitwig` use is written down in `registry/*.json` with a name, and every id the
+//! registry says a reader relies on is used by one (or is on a list of ones we know aren't used yet).
 //!
-//! How it works: the test reads the readers' own source files (`crates/mo-formats/src/fl` and `src/bitwig`) as plain
-//! text and picks out the ids in them, so a new id in a reader is checked without anyone having to remember to add it
-//! here. Most ids are named constants (`const EV_TEMPO: u8 = 156;`, `const F_START: u32 = 0x2af;`), and the name says
-//! what kind of id it is (`EV_` an FL event, `VST_` a Fruity Wrapper record, `CLS_` a Bitwig class, `F_` a Bitwig
-//! field). The few ids written as bare numbers, and the constants named some other way, are in the small tables below;
-//! the test checks each one is still in its file, so the tables can't quietly go stale.
+//! Not covered yet: mo-convert's Bitwig writer (`crates/mo-convert/src/bitwig.rs`) also uses ids, written as bare
+//! numbers; bringing it in is a follow-up.
 //!
-//! Only the code before a file's `#[cfg(test)]` counts: ids made up in a reader's own tests aren't the reader's.
-//! The registry and the sources are read from this repository (CARGO_MANIFEST_DIR), never from a user folder.
+//! How it works: the test reads the readers' own source files (and any in folders under them) as plain text and picks
+//! out the ids in them, so a new id in a reader is checked without anyone having to remember to add it here.
+//!
+//! - Most ids are named constants (`const EV_TEMPO: u8 = 156;`, `const F_START: u32 = 0x2af;`), and the name says what
+//!   kind of id it is: `EV_` an FL event, `VST_` a Fruity Wrapper record, `CLS_` a Bitwig class, `F_` a Bitwig field.
+//!   Every other `u8` or `u32` constant must be in OTHER_NAMED (an id named some other way) or NOT_IDS.
+//! - In the Bitwig files that hold ids, every hex number outside a constant must be in BARE (an id written as a bare
+//!   number) or NOT_ID_HEX (a hex number that isn't an id). This "fails closed": an id passed through a variable, or
+//!   on a line rustfmt wrapped, is still found, because nothing in those files is skipped.
+//! - FL's bare ids are the VST3 state's records, read as `records.get(&n)`.
+//!
+//! Every table below is checked both ways: an entry the scan no longer finds fails the test, so the tables can't go
+//! stale without a word.
+//!
+//! Only the code before a file's `#[cfg(test)] mod tests` counts: ids made up in a reader's own tests aren't the
+//! reader's. The registry and the sources are read from this repository (CARGO_MANIFEST_DIR), never a user folder.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use mo_formatlab::registry::{Entry, Registry};
@@ -37,6 +47,15 @@ enum List {
 
 use List::*;
 
+/// The Bitwig files that hold ids. Every hex number in them (outside a constant) is checked.
+const BITWIG_ID_FILES: &[&str] =
+    &["bitwig/reader.rs", "bitwig/arrangement.rs", "bitwig/automation.rs", "bitwig/curve.rs"];
+
+/// The Bitwig files that are the codec (how any object is read and written, whatever its class): their hex numbers
+/// are value types and byte patterns, not ids, so only their constants are checked. A new Bitwig file must go in one
+/// of these two lists.
+const BITWIG_CODEC_FILES: &[&str] = &["bitwig/format.rs", "bitwig/encode.rs", "bitwig/mod.rs"];
+
 /// Constants in the readers whose names don't start with `EV_`, `VST_`, `CLS_` or `F_` but which are ids all the same:
 /// (file, constant, which list).
 const OTHER_NAMED: &[(&str, &str, List)] = &[
@@ -56,39 +75,39 @@ const OTHER_NAMED: &[(&str, &str, List)] = &[
     ("bitwig/encode.rs", "DEVICE_TYPE", BwField),
 ];
 
-/// Number constants in the reader files that aren't ids of the file format: versions of our own readers, colours,
-/// values inside an event (what an automation link moves, a channel's type), and so on.
-const NOT_IDS: &[&str] = &[
+/// Number constants in the reader files that aren't ids of the file format: (file, constant).
+const NOT_IDS: &[(&str, &str)] = &[
     // The readers' own version numbers (rule 7), not the file's.
-    "VERSION",
+    ("fl/mod.rs", "VERSION"),
+    ("bitwig/reader.rs", "VERSION"),
     // FL: colours FL gives a track or channel that doesn't say.
-    "DEFAULT_TRACK_COLOUR",
-    "DEFAULT_CHANNEL_COLOUR",
+    ("fl/arrangement.rs", "DEFAULT_TRACK_COLOUR"),
+    ("fl/arrangement.rs", "DEFAULT_CHANNEL_COLOUR"),
     // FL: values inside an automation link (event 227), not events.
-    "TARGET_VOLUME",
-    "TARGET_PAN",
-    "TARGET_PITCH",
-    "TARGET_ON_OFF",
-    "TARGET_PLUGIN",
-    "TARGET_SLOT_ON_OFF",
-    "TARGET_INSERT_VOLUME",
-    "TARGET_INSERT_PAN",
-    "TARGET_SONG",
-    "TARGET_MAIN_VOLUME",
-    "TARGET_TEMPO",
-    "FL8_PLUGIN",
+    ("fl/automation.rs", "TARGET_VOLUME"),
+    ("fl/automation.rs", "TARGET_PAN"),
+    ("fl/automation.rs", "TARGET_PITCH"),
+    ("fl/automation.rs", "TARGET_ON_OFF"),
+    ("fl/automation.rs", "TARGET_PLUGIN"),
+    ("fl/automation.rs", "TARGET_SLOT_ON_OFF"),
+    ("fl/automation.rs", "TARGET_INSERT_VOLUME"),
+    ("fl/automation.rs", "TARGET_INSERT_PAN"),
+    ("fl/automation.rs", "TARGET_SONG"),
+    ("fl/automation.rs", "TARGET_MAIN_VOLUME"),
+    ("fl/automation.rs", "TARGET_TEMPO"),
+    ("fl/automation.rs", "FL8_PLUGIN"),
     // FL: values of a channel's type (event 21) and of the wrapper's kind (record 50).
-    "CHANNEL_TYPE_INSTRUMENT",
-    "CHANNEL_TYPE_AUTOMATION",
-    "KIND_VST3",
+    ("fl/mod.rs", "CHANNEL_TYPE_INSTRUMENT"),
+    ("fl/song.rs", "CHANNEL_TYPE_AUTOMATION"),
+    ("fl/mod.rs", "KIND_VST3"),
     // FL: the wrapper version FL 7 and 8 save, and the playlist's pattern numbering (item above 20480).
-    "OLD_WRAPPER",
-    "PATTERN_BASE",
+    ("fl/mod.rs", "OLD_WRAPPER"),
+    ("fl/song.rs", "PATTERN_BASE"),
 ];
 
-/// Ids the readers write as bare numbers rather than named constants: (file, which list, id). The test finds bare
-/// Bitwig ids on lines that read or set a field or make an object, and FL VST3 records read with `get(&n)`; each one
-/// it finds must be listed here, and each one listed here must still be in its file.
+/// Ids the readers write as bare numbers rather than named constants: (file, which list, id). For Bitwig the list is
+/// checked against how the number is used: making an object (`Object::new(..)`) or comparing an object's `.class`
+/// means a class, anything else a field.
 const BARE: &[(&str, List, u32)] = &[
     // An automation clip's points, name, place and what its lane moves.
     ("bitwig/automation.rs", BwField, 0x2ae9),
@@ -119,8 +138,17 @@ const BARE: &[(&str, List, u32)] = &[
     ("fl/presets.rs", FlVst3, 4),
 ];
 
+/// Hex numbers in the Bitwig id files that aren't ids: (file, number, what it is).
+const NOT_ID_HEX: &[(&str, u32, &str)] = &[
+    ("bitwig/reader.rs", 0xff, "the low byte of a UTF-16 text's length"),
+    ("bitwig/reader.rs", 0x80, "a text's header byte, and the end of plain ASCII"),
+    ("bitwig/reader.rs", 0x78, "the first byte of a zlib stream"),
+    ("bitwig/reader.rs", 0x7800, "a zlib stream's first byte, for its check"),
+    ("bitwig/curve.rs", 0xff, "the value the curve writer puts in three unknown fields"),
+];
+
 /// Bitwig metadata keys the readers use (by name, not number): (file, key). The test finds keys read with `meta(..)`,
-/// `meta_str(..)` or `meta_strings(..)`; the curve writer's keys are listed by hand.
+/// `meta_str(..)` or `meta_strings(..)`, and keys written as `("key", value)` pairs (the curve writer's).
 const META: &[(&str, &str)] = &[
     ("bitwig/reader.rs", "application_version_name"),
     ("bitwig/reader.rs", "title"),
@@ -213,20 +241,50 @@ impl Registries {
     }
 }
 
+/// The `.rs` files in a folder and every folder under it.
+fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            rust_files(&path, out);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            out.push(path);
+        }
+    }
+}
+
+/// The code before the file's tests: everything up to a `#[cfg(test)]` followed by `mod ..`. A `#[cfg(test)]` on
+/// anything else is an error, so test code can't be cut off (or let in) by mistake.
+fn without_tests(text: &str, file: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    for (i, line) in lines.iter().enumerate() {
+        if line.trim() == "#[cfg(test)]" {
+            let next = lines[i + 1..].iter().map(|l| l.trim()).find(|l| !l.is_empty()).unwrap_or_default();
+            assert!(
+                next.starts_with("mod ") || next.starts_with("pub mod "),
+                "{file}: a #[cfg(test)] that isn't on a test module (\"{next}\"); teach this test what it covers"
+            );
+            return lines[..i].join("\n");
+        }
+    }
+    text.to_owned()
+}
+
 /// The reader files: (path from `crates/mo-formats/src`, the code before its tests).
 fn sources() -> Vec<(String, String)> {
     let src = repo().join("crates/mo-formats/src");
-    let mut files = Vec::new();
+    let mut paths = Vec::new();
     for folder in ["fl", "bitwig"] {
-        for entry in std::fs::read_dir(src.join(folder)).unwrap() {
-            let path = entry.unwrap().path();
-            if path.extension().is_some_and(|e| e == "rs") {
-                let text = std::fs::read_to_string(&path).unwrap();
-                let code = text.split("#[cfg(test)]").next().unwrap_or_default().to_owned();
-                files.push((format!("{folder}/{}", path.file_name().unwrap().to_string_lossy()), code));
-            }
-        }
+        rust_files(&src.join(folder), &mut paths);
     }
+    let mut files: Vec<(String, String)> = paths
+        .iter()
+        .map(|path| {
+            let file = path.strip_prefix(&src).unwrap().to_string_lossy().replace('\\', "/");
+            let code = without_tests(&std::fs::read_to_string(path).unwrap(), &file);
+            (file, code)
+        })
+        .collect();
     files.sort();
     assert!(files.len() > 5, "the reader files weren't found under {}", src.display());
     files
@@ -237,75 +295,105 @@ fn code_lines(code: &str) -> impl Iterator<Item = &str> {
     code.lines().map(|l| l.split("//").next().unwrap_or_default())
 }
 
-/// A number as Rust writes it: hex after "0x" or decimal, with any `_` between the digits.
+/// A number as Rust writes it: hex after "0x" (either case) or decimal, with any `_` between the digits.
 fn number(text: &str) -> Option<u32> {
     let text = text.replace('_', "");
-    match text.strip_prefix("0x") {
+    match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
         Some(hex) => u32::from_str_radix(hex, 16).ok(),
         None => text.parse().ok(),
     }
 }
 
-/// Every `const NAME: u8 = n;` or `const NAME: u32 = n;` in the code: (name, n). Constants set from another constant
-/// (`F_ITEMS = F_NOTES`) are left out; the one they copy is found where it's set.
-fn number_constants(code: &str) -> Vec<(String, u32)> {
+/// Whether the name says it's an id: `EV_` or `VST_` in an FL file, `CLS_` or `F_` in a Bitwig one.
+fn id_list_by_prefix(file: &str, name: &str) -> Option<List> {
+    let fl = file.starts_with("fl/");
+    match () {
+        _ if fl && name.starts_with("EV_") => Some(FlEvent),
+        _ if fl && name.starts_with("VST_") => Some(FlWrapper),
+        _ if !fl && name.starts_with("CLS_") => Some(BwClass),
+        _ if !fl && name.starts_with("F_") => Some(BwField),
+        _ => None,
+    }
+}
+
+/// A constant written on one line: its name, type and value as text. None for a line that isn't one, or a `const fn`
+/// or a generic's `const N: usize`.
+fn constant(line: &str) -> Option<(&str, &str, &str)> {
+    let rest = line.trim().strip_prefix("pub ").unwrap_or(line.trim());
+    let rest = ["pub(crate) ", "pub(super) "].iter().fold(rest, |r, p| r.strip_prefix(p).unwrap_or(r));
+    let rest = rest.strip_prefix("const ")?;
+    let (name, rest) = rest.split_once(':')?;
+    let name = name.trim();
+    if !name.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_') {
+        return None;
+    }
+    let (kind, value) = rest.split_once('=').unwrap_or((rest, ""));
+    Some((name, kind.trim(), value.trim().trim_end_matches(';').trim()))
+}
+
+/// Every `u8` or `u32` constant in the code: (name, value). Problems for an id constant (by its name or OTHER_NAMED)
+/// whose value can't be read: another type, a suffix, or a value on the next line. One set from another constant
+/// (`F_ITEMS = F_NOTES`) is fine and left out; the one it copies is found where it's set.
+fn number_constants(file: &str, code: &str, problems: &mut Vec<String>) -> Vec<(String, u32)> {
     let mut found = Vec::new();
     for line in code_lines(code) {
-        let Some(rest) = line.trim().split("const ").nth(1) else { continue };
-        let Some((name, rest)) = rest.split_once(':') else { continue };
-        let Some((kind, value)) = rest.split_once('=') else { continue };
-        if !matches!(kind.trim(), "u8" | "u32") {
-            continue;
-        }
-        if let Some(n) = number(value.trim().trim_end_matches(';').trim()) {
-            found.push((name.trim().to_owned(), n));
+        let Some((name, kind, value)) = constant(line) else { continue };
+        let is_id =
+            id_list_by_prefix(file, name).is_some() || OTHER_NAMED.iter().any(|(f, n, _)| *f == file && *n == name);
+        let copy = !value.is_empty() && value.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+        match (matches!(kind, "u8" | "u32"), number(value)) {
+            (true, Some(n)) => found.push((name.to_owned(), n)),
+            _ if !is_id || copy => {}
+            _ => problems.push(format!("{file}: const {name}: {kind} = \"{value}\" can't be read as a u8 or u32 id")),
         }
     }
     found
 }
 
-/// Every Bitwig id written as a bare hex number where code reads or sets a field, makes an object or checks its class:
-/// `field_obj(o, 0x2ae9)`, `p.num(0x2af)`, `root.set(0x362d, ..)`, `Object::new(0x108)`, `.class == 0xd90`. Only the
-/// id itself counts, not a value that follows it (`Value::U8(0xff)`).
-fn bare_bitwig_ids(code: &str) -> BTreeSet<u32> {
-    // (what comes just before the id, whether the id is the call's second argument)
-    const ID_CALLS: &[(&str, bool)] = &[
-        ("field_obj(", true),
-        ("field_list(", true),
-        (".num(", false),
-        (".str(", false),
-        (".get(", false),
-        (".has(", false),
-        (".set(", false),
-        ("Object::new(", false),
-        (".class == ", false),
-    ];
-    let mut found = BTreeSet::new();
-    for line in code_lines(code) {
-        for &(call, second) in ID_CALLS {
-            for (at, _) in line.match_indices(call) {
-                let mut rest = &line[at + call.len()..];
-                if second {
-                    let Some((_, after)) = rest.split_once(',') else { continue };
-                    rest = after;
-                }
-                let Some(hex) = rest.trim_start().strip_prefix("0x") else { continue };
-                let digits: String = hex.chars().take_while(|c| c.is_ascii_hexdigit() || *c == '_').collect();
-                if let Some(n) = number(&format!("0x{digits}")) {
-                    found.insert(n);
-                }
+/// A hex number found in Bitwig code, and whether where it's written says it's a class.
+#[derive(Debug, PartialEq)]
+struct Hex {
+    n: u32,
+    class: bool,
+}
+
+/// Every hex number in the code outside constants. A number counts as a class when it makes an object
+/// (`Object::new(0x..)`) or is compared with an object's class (`.class == 0x..`, `0x.. == o.class`,
+/// `matches!(o.class, 0x.. | ..)`); anything else is taken as a field. A number too big for a u32 is a problem. A call
+/// rustfmt wraps (`Object::new(` on one line, its number on the next) still has its number found, but taken as a
+/// field, so BARE's class-or-field check then points at it.
+fn hex_numbers(file: &str, code: &str, problems: &mut Vec<String>) -> Vec<Hex> {
+    let mut found = Vec::new();
+    for line in code_lines(code).filter(|l| constant(l).is_none()) {
+        let lower = line.to_ascii_lowercase();
+        for (at, _) in lower.match_indices("0x") {
+            if lower[..at].ends_with(|c: char| c.is_ascii_alphanumeric() || c == '_') {
+                continue;
             }
+            let digits: String = lower[at + 2..].chars().take_while(|c| c.is_ascii_hexdigit() || *c == '_').collect();
+            let Some(n) = number(&format!("0x{digits}")) else {
+                problems.push(format!("{file}: can't read the number at \"{}\"", line.trim()));
+                continue;
+            };
+            let (before, after) = (lower[..at].trim_end(), lower[at + 2 + digits.len()..].trim_start());
+            let class = before.ends_with("object::new(")
+                || before.ends_with(".class ==")
+                || before.ends_with(".class !=")
+                || ((after.starts_with("==") || after.starts_with("!=")) && after.contains(".class"))
+                || before.rfind("matches!(").is_some_and(|m| before[m..].contains(".class"));
+            found.push(Hex { n, class });
         }
     }
     found
 }
 
-/// Every FL record read as `get(&n)` with a number n.
+/// Every FL VST3 record read as `records.get(&n)` with a number n (the VST3 state's records are kept in `records`;
+/// other maps read with `get(&..)` aren't counted).
 fn bare_fl_records(code: &str) -> BTreeSet<u32> {
     let mut found = BTreeSet::new();
     for line in code_lines(code) {
-        for (at, _) in line.match_indices("get(&") {
-            let digits: String = line[at + 5..].chars().take_while(char::is_ascii_digit).collect();
+        for (at, s) in line.match_indices("records.get(&") {
+            let digits: String = line[at + s.len()..].chars().take_while(char::is_ascii_digit).collect();
             if let Some(n) = number(&digits) {
                 found.insert(n);
             }
@@ -314,28 +402,25 @@ fn bare_fl_records(code: &str) -> BTreeSet<u32> {
     found
 }
 
-/// Every key read with `meta("..")`, `meta_str("..")` or `meta_strings("..")`.
-fn meta_keys_read(code: &str) -> BTreeSet<String> {
+/// Every metadata key read with `meta("..")`, `meta_str("..")` or `meta_strings("..")`, or written as a
+/// `("key", value)` pair.
+fn meta_keys(code: &str) -> BTreeSet<String> {
     let mut found = BTreeSet::new();
-    for call in ["meta(\"", "meta_str(\"", "meta_strings(\""] {
+    for call in ["meta(\"", "meta_str(\"", "meta_strings(\"", "(\""] {
         for (at, _) in code.match_indices(call) {
             let rest = &code[at + call.len()..];
-            found.insert(rest[..rest.find('"').unwrap()].to_owned());
+            let Some(end) = rest.find('"') else { continue };
+            let key = &rest[..end];
+            let pair = call == "(\"";
+            if pair && !rest[end + 1..].starts_with(',') {
+                continue;
+            }
+            if !key.is_empty() && key.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
+                found.insert(key.to_owned());
+            }
         }
     }
     found
-}
-
-/// Whether the code has this number written as `0x..` (Bitwig) or as a plain number after `&` (FL records), as a whole
-/// number rather than the start of a longer one.
-fn has_number(code: &str, list: List, id: u32) -> bool {
-    match list {
-        FlVst3 => bare_fl_records(code).contains(&id),
-        _ => code_lines(code).any(|line| {
-            line.match_indices(&format!("{id:#x}"))
-                .any(|(at, s)| !line[at + s.len()..].starts_with(|c: char| c.is_ascii_hexdigit() || c == '_'))
-        }),
-    }
 }
 
 /// `EV_PATTERN_NOTES` as the C# app writes it: `EvPatternNotes`.
@@ -361,46 +446,90 @@ struct Use {
     id: u32,
 }
 
-/// Every id the readers use, found in their sources. Fails when it finds a number constant it can't place, or a bare
-/// id the tables above don't list.
+/// Every id the readers use, found in their sources. Fails when something in the sources isn't accounted for by the
+/// tables above, or a table has an entry the sources no longer have.
 fn ids_in_use() -> Vec<Use> {
     let mut uses = Vec::new();
     let mut problems = Vec::new();
+    let mut other_named_seen = BTreeSet::new();
+    let mut not_ids_seen = BTreeSet::new();
+    let mut bare_seen = BTreeSet::new();
+    let mut not_id_hex_seen = BTreeSet::new();
+
     for (file, code) in sources() {
-        let fl = file.starts_with("fl/");
-        for (name, id) in number_constants(&code) {
-            let list = if fl && name.starts_with("EV_") {
-                Some(FlEvent)
-            } else if fl && name.starts_with("VST_") {
-                Some(FlWrapper)
-            } else if !fl && name.starts_with("CLS_") {
-                Some(BwClass)
-            } else if !fl && name.starts_with("F_") {
-                Some(BwField)
-            } else {
-                OTHER_NAMED.iter().find(|(f, n, _)| *f == file && *n == name).map(|&(_, _, list)| list)
-            };
+        // Named constants.
+        for (name, id) in number_constants(&file, &code, &mut problems) {
+            let other = OTHER_NAMED.iter().position(|(f, n, _)| *f == file && *n == name);
+            let list = id_list_by_prefix(&file, &name).or_else(|| other.map(|i| OTHER_NAMED[i].2));
+            other_named_seen.extend(other);
             match list {
                 Some(list) => uses.push(Use { file: file.clone(), constant: Some(name), list, id }),
-                None if NOT_IDS.contains(&name.as_str()) => {}
-                None => problems.push(format!(
-                    "{file}: const {name} = {id} isn't known to this test: add it to OTHER_NAMED (an id) or NOT_IDS"
-                )),
+                None => match NOT_IDS.iter().position(|(f, n)| *f == file && *n == name) {
+                    Some(i) => {
+                        not_ids_seen.insert(i);
+                    }
+                    None => problems.push(format!(
+                        "{file}: const {name} = {id} isn't known to this test: add it to OTHER_NAMED (an id) or NOT_IDS"
+                    )),
+                },
             }
         }
 
-        let listed: BTreeSet<u32> = BARE.iter().filter(|(f, _, _)| *f == file).map(|&(_, _, id)| id).collect();
-        let found = if fl { bare_fl_records(&code) } else { bare_bitwig_ids(&code) };
-        for id in found.difference(&listed) {
-            problems.push(format!("{file}: the bare id {id:#x} ({id}) isn't in this test's BARE table"));
-        }
-        for &(_, list, id) in BARE.iter().filter(|(f, _, _)| *f == file) {
-            if has_number(&code, list, id) {
-                uses.push(Use { file: file.clone(), constant: None, list, id });
-            } else {
-                problems.push(format!("{file} no longer has the id {id:#x} ({id}): take it off the BARE table"));
+        // Bare numbers.
+        if file.starts_with("bitwig/") {
+            let id_file = BITWIG_ID_FILES.contains(&file.as_str());
+            if !id_file && !BITWIG_CODEC_FILES.contains(&file.as_str()) {
+                problems.push(format!("{file} is new: add it to BITWIG_ID_FILES or BITWIG_CODEC_FILES"));
+            }
+            if !id_file {
+                continue;
+            }
+            for hex in hex_numbers(&file, &code, &mut problems) {
+                if let Some(i) = NOT_ID_HEX.iter().position(|&(f, n, _)| f == file && n == hex.n) {
+                    not_id_hex_seen.insert(i);
+                    continue;
+                }
+                let Some(i) = BARE.iter().position(|&(f, _, n)| f == file && n == hex.n) else {
+                    problems.push(format!(
+                        "{file}: the number {:#x} isn't in this test's BARE (an id) or NOT_ID_HEX (not an id)",
+                        hex.n
+                    ));
+                    continue;
+                };
+                let (_, list, id) = BARE[i];
+                let found_as = if hex.class { BwClass } else { BwField };
+                if list != found_as {
+                    problems.push(format!("{file}: {id:#x} is used as a {found_as:?} there, but BARE says {list:?}"));
+                }
+                if bare_seen.insert(i) {
+                    uses.push(Use { file: file.clone(), constant: None, list, id });
+                }
+            }
+        } else {
+            for n in bare_fl_records(&code) {
+                match BARE.iter().position(|&(f, list, id)| f == file && list == FlVst3 && id == n) {
+                    Some(i) => {
+                        bare_seen.insert(i);
+                        uses.push(Use { file: file.clone(), constant: None, list: FlVst3, id: n });
+                    }
+                    None => problems.push(format!("{file}: the VST3 record {n} isn't in this test's BARE table")),
+                }
             }
         }
+    }
+
+    // Table entries the sources no longer have.
+    for (i, (file, name, _)) in OTHER_NAMED.iter().enumerate().filter(|(i, _)| !other_named_seen.contains(i)) {
+        problems.push(format!("{file} no longer has const {name}: take it off OTHER_NAMED ({i})"));
+    }
+    for (file, name) in NOT_IDS.iter().enumerate().filter(|(i, _)| !not_ids_seen.contains(i)).map(|(_, e)| e) {
+        problems.push(format!("{file} no longer has const {name}: take it off NOT_IDS"));
+    }
+    for (file, _, id) in BARE.iter().enumerate().filter(|(i, _)| !bare_seen.contains(i)).map(|(_, e)| e) {
+        problems.push(format!("{file} no longer has the id {id:#x} ({id}): take it off BARE"));
+    }
+    for (file, n, _) in NOT_ID_HEX.iter().enumerate().filter(|(i, _)| !not_id_hex_seen.contains(i)).map(|(_, e)| e) {
+        problems.push(format!("{file} no longer has the number {n:#x}: take it off NOT_ID_HEX"));
     }
     assert!(problems.is_empty(), "\n{}", problems.join("\n"));
     uses
@@ -465,22 +594,24 @@ fn every_id_the_registry_says_a_reader_relies_on_is_used() {
     assert!(problems.is_empty(), "\n{}", problems.join("\n"));
 }
 
-/// Every Bitwig metadata key the readers use is in the registry with a name, and the META table stays true.
+/// Every Bitwig metadata key the readers use is in the registry with a name, and the META table is exactly what the
+/// sources have.
 #[test]
 fn every_metadata_key_the_readers_use_is_in_the_registry() {
     let reg = Registries::read();
     let mut problems = Vec::new();
-    let sources: BTreeMap<String, String> = sources().into_iter().collect();
-    for (file, code) in &sources {
-        for key in meta_keys_read(code) {
+    let mut found = BTreeSet::new();
+    for (file, code) in sources().into_iter().filter(|(f, _)| f.starts_with("bitwig/")) {
+        for key in meta_keys(&code) {
             if !META.contains(&(file.as_str(), key.as_str())) {
                 problems.push(format!("{file}: the metadata key \"{key}\" isn't in this test's META table"));
             }
+            found.insert((file.clone(), key));
         }
     }
     for &(file, key) in META {
-        if !sources[file].contains(&format!("\"{key}\"")) {
-            problems.push(format!("{file} no longer has the metadata key \"{key}\": take it off META"));
+        if !found.contains(&(file.to_owned(), key.to_owned())) {
+            problems.push(format!("{file} no longer uses the metadata key \"{key}\": take it off META"));
         }
         match reg.bitwig.meta_key(key) {
             None => problems.push(format!("{file}: the metadata key \"{key}\" isn't in the registry")),
@@ -494,16 +625,43 @@ fn every_metadata_key_the_readers_use_is_in_the_registry() {
 /// The test's own helpers find what they should, so a passing test means something.
 #[test]
 fn the_source_scan_finds_constants_and_bare_ids() {
+    let mut problems = Vec::new();
     let code = "pub(super) const F_START: u32 = 0x2af;\nconst EV_TEMPO: u8 = 156;\nconst F_ITEMS: u32 = F_NOTES;\n\
-                let x = doc.field_obj(o, 0x2ae9); // 0x9999 in a comment\nlet y = 0x1234;\nroot.set(0x362d, Value::U8(0xff));\nrecords.get(&3)\n";
-    assert_eq!(number_constants(code), [("F_START".to_owned(), 0x2af), ("EV_TEMPO".to_owned(), 156)]);
-    assert_eq!(bare_bitwig_ids(code), BTreeSet::from([0x2ae9, 0x362d]));
-    assert_eq!(bare_fl_records(code), BTreeSet::from([3]));
-    assert!(has_number(code, BwField, 0x2ae9) && !has_number(code, BwField, 0x2ae));
+                const F_WIDE: u64 = 0x10;\nconst NAMES: &str = \"0x77\";\n";
     assert_eq!(
-        meta_keys_read("d.meta_str(\"title\") + d.meta(\"structure\")"),
-        BTreeSet::from(["structure".into(), "title".into()])
+        number_constants("bitwig/x.rs", code, &mut problems),
+        [("F_START".to_owned(), 0x2af), ("EV_TEMPO".to_owned(), 156)]
     );
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].contains("F_WIDE"));
+
+    let mut problems = Vec::new();
+    let code = "let x = field_obj(doc, o, 0x2AE9); // 0x9999 in a comment\nif o.class != 0xd90 {}\n\
+                matches!(c.class, 0x47 | 0xEE)\nlet a = 0x1_0F8 == o.class;\nfor id in [0x3788] { root.set(id, \
+                Value::U8(0xff)) }\nlet m = Object::new(\n0x108);\n";
+    let found: Vec<(u32, bool)> =
+        hex_numbers("bitwig/x.rs", code, &mut problems).iter().map(|h| (h.n, h.class)).collect();
+    assert_eq!(
+        found,
+        [
+            (0x2ae9, false),
+            (0xd90, true),
+            (0x47, true),
+            (0xee, true),
+            (0x10f8, true),
+            (0x3788, false),
+            (0xff, false),
+            (0x108, false)
+        ]
+    );
+    assert!(problems.is_empty());
+
+    assert_eq!(bare_fl_records("records.get(&3)\nother.get(&5)"), BTreeSet::from([3]));
+    assert_eq!(
+        meta_keys("d.meta_str(\"title\") + d.meta(\"structure\")\n(\"branch\", text(\"releases\")),\n(\"\", 1)"),
+        BTreeSet::from(["branch".into(), "structure".into(), "title".into()])
+    );
+    assert_eq!(without_tests("a\n#[cfg(test)]\n\nmod tests {\n0x1\n}", "x.rs"), "a");
     assert_eq!(pascal_case("EV_PATTERN_NOTES"), "EvPatternNotes");
     assert_eq!(pascal_case("CLS_HARDWARE_IO"), "ClsHardwareIo");
 }
