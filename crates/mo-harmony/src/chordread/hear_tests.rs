@@ -5,51 +5,33 @@
 
 use std::ops::Range;
 
+use super::cases::Writer;
 use super::{BASS_GAP, BassTexture, Hearing, Level, MOST_UNITS, Mass, Stream, Unit};
 use crate::keyfind::Span;
 use crate::notes::{Grid, Note, Part, Role};
 use crate::pitch::{PcSet, PerPitch, PitchClass};
 
-const PPQ: i64 = 480;
-pub(super) const BEAT: i64 = PPQ;
-pub(super) const BAR: i64 = 4 * PPQ;
-pub(super) const VELOCITY: u16 = 1 << 15;
+pub(super) use super::cases::{BAR, BEAT, Music, VELOCITY};
 
 /// The MIDI key of a note's name, C4 being 60: "C4", "Eb3", "F#2".
 pub(super) fn key(name: &str) -> u8 {
-    let mut chars = name.chars();
-    let mut semitones = match chars.next() {
-        Some('C') => 0,
-        Some('D') => 2,
-        Some('E') => 4,
-        Some('F') => 5,
-        Some('G') => 7,
-        Some('A') => 9,
-        Some('B') => 11,
-        _ => panic!("not a note: {name}"),
-    };
-    let mut rest = chars.as_str();
-    while let Some(r) = rest.strip_prefix('#') {
-        semitones += 1;
-        rest = r;
-    }
-    while let Some(r) = rest.strip_prefix('b') {
-        semitones -= 1;
-        rest = r;
-    }
-    let octave: i32 = rest.parse().unwrap();
-    u8::try_from((octave + 1) * 12 + semitones).unwrap()
+    super::cases::key(name).unwrap()
 }
 
 /// The notes named, all struck at `start` and held `length` ticks.
 pub(super) fn notes(names: &str, start: i64, length: i64) -> Vec<Note> {
-    names.split_whitespace().map(|n| Note { start, length, key: key(n), velocity: VELOCITY }).collect()
+    let w = Writer::new();
+    let out = w.notes(names, start, length);
+    w.done().unwrap();
+    out
 }
 
 /// The notes named, one after another from `start`, each `step` ticks long.
 pub(super) fn line(names: &str, start: i64, step: i64) -> Vec<Note> {
-    let named = names.split_whitespace().enumerate();
-    named.map(|(i, n)| Note { start: start + i as i64 * step, length: step, key: key(n), velocity: VELOCITY }).collect()
+    let w = Writer::new();
+    let out = w.line(names, start, step);
+    w.done().unwrap();
+    out
 }
 
 /// Pitch classes by name: "C E G".
@@ -66,50 +48,10 @@ fn per_pitch(values: &[(PitchClass, u64)]) -> PerPitch<u64> {
     out
 }
 
-/// Some music: parts with their roles, on a grid, heard as a loop, a song or a stretch.
-#[derive(Clone, Debug)]
-pub(super) struct Music {
-    pub(super) parts: Vec<(Role, Vec<Note>)>,
-    pub(super) grid: Grid,
-    pub(super) span: Span,
-}
-
+/// What the tests do with some music besides reading its cases.
 impl Music {
-    /// 4/4 at 480 ticks a beat, heard as a song.
-    pub(super) fn new() -> Music {
-        Music { parts: Vec::new(), grid: Grid::four_four(480), span: Span::Song }
-    }
-
-    pub(super) fn grid(mut self, beats_per_bar: u32, ticks_per_beat: u32) -> Music {
-        self.grid = Grid { ticks_per_beat, beats_per_bar, bar_line: 0 };
-        self
-    }
-
-    pub(super) fn looped(mut self) -> Music {
-        self.span = Span::Loop;
-        self
-    }
-
-    pub(super) fn part(mut self, role: Role, notes: Vec<Note>) -> Music {
-        self.parts.push((role, notes));
-        self
-    }
-
-    pub(super) fn bass(self, notes: Vec<Note>) -> Music {
-        self.part(Role::Bass, notes)
-    }
-
-    pub(super) fn keys(self, notes: Vec<Note>) -> Music {
-        self.part(Role::Harmony, notes)
-    }
-
-    pub(super) fn tune(self, notes: Vec<Note>) -> Music {
-        self.part(Role::Melody, notes)
-    }
-
     pub(super) fn hear_into(&self, hearing: &mut Hearing) -> bool {
-        let parts: Vec<Part> = self.parts.iter().map(|(role, notes)| Part { role: *role, notes }).collect();
-        hearing.hear(&parts, self.grid, self.span)
+        hearing.hear(&self.parts(), self.grid, self.span)
     }
 
     pub(super) fn hear(&self) -> Hearing {

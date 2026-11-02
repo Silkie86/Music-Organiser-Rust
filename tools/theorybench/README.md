@@ -396,6 +396,21 @@ w_N, what a stretch read as no chord scores. The counted tables stay as `tables`
   held out; and a `SET=` line that reads the hand cases with the fitted numbers (`cargo test -p mo-harmony --release
   show_the_cases_read_whole -- --ignored --nocapture`, and `show_the_grid`). `--out` writes the numbers, by name, for
   `chords --weights` and `chordfit --from`.
+- **The hand cases' gates.** After every fit, mo-harmony's hand cases (`chordread::cases`) are read with the numbers
+  it started from and the fitted ones, one stretch at a time, read whole and named: the report gives how many gates
+  break at each step, every gate the fitted numbers break (with what they read), and how many of the design's
+  targets are met; the `--out` file says which gates break ("gates"), as weights that break one aren't shipped. The
+  gates the design holds out (G\*: cases 6, 15, 32, 34 and 35) are never learned from nor looked at here; the tests
+  check them.
+- **Learning from the hand cases.** `--hand μ` adds the hand cases to the aim: each case read whole (but the held-out
+  ones) is a piece labelled where its gates name readings: what a stretch must read (the cases only a whole read
+  decides, and each stretch case's first reading), or the readings that must come among its best two or be kept
+  (accepting any of them, so they grow likelier together), and the aim adds μ times their mean −ln P(labels) to the data's loss per bar, its
+  slope and curvature added the same way. `--hold n` keeps the gates as straight-line rules instead: from the start,
+  each case's labels must keep at least half their chance (or what they have, if less) as the slope at the start
+  sees it (a half-space, kept by the projection with the signs and orders); after each fit, the cases whose gates
+  still break are held again where the fit got to, tighter (at 0.75, then 0.875 of their chance), for at most n more
+  rounds. The two can go together.
 
 ## Charts played as music (`convert/voice.py`)
 

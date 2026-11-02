@@ -4,35 +4,23 @@
 
 use std::ops::Range;
 
+use super::cases::{Writer, label_named, ranked, stretch_verdicts};
 use super::hear_tests::{BAR, BEAT, Dice, Music, keys_only, line, notes, random_music, with_bass};
 use super::{
     COUNTED, COUNTED_FROM, Candidate, Core, EVEN, Evidence, Feature, Group, HAND, Hearing, Label, Mass, PerFeature,
-    Priors, Push, Route, Scored, Scorer, Shape, SpanFacts, Weights,
+    Priors, Push, Route, SHIPPED, Scored, Scorer, Shape, SpanFacts, Weights,
 };
 use crate::notes::{Note, Role};
 use crate::pitch::PitchClass;
 
+pub(super) use super::cases::{Want, facts_on, kept, reads};
+
 /// Notes bar by bar: bars split by "|", each a run of notes held the whole bar, or groups of notes each followed by
 /// the beats they sound in brackets (from 1, in 4/4): "C2 (1-2) B1 (3-4) | A1".
 pub(super) fn bars(text: &str) -> Vec<Note> {
-    let mut out = Vec::new();
-    for (b, bar) in text.split('|').enumerate() {
-        let start = b as i64 * BAR;
-        let mut names: Vec<&str> = Vec::new();
-        for word in bar.split_whitespace() {
-            if let Some(beats) = word.strip_prefix('(').and_then(|w| w.strip_suffix(')')) {
-                let (from, to) = beats.split_once('-').unwrap_or((beats, beats));
-                let (from, to): (i64, i64) = (from.parse().unwrap(), to.parse().unwrap());
-                out.extend(notes(&names.join(" "), start + (from - 1) * BEAT, (to - from + 1) * BEAT));
-                names.clear();
-            } else {
-                names.push(word);
-            }
-        }
-        if !names.is_empty() {
-            out.extend(notes(&names.join(" "), start, BAR));
-        }
-    }
+    let w = Writer::new();
+    let out = w.bars(text);
+    w.done().unwrap();
     out
 }
 
@@ -48,17 +36,7 @@ fn all_labels() -> impl Iterator<Item = Label> {
 
 /// A label by its name, as it's written: "C", "F#m7b5", "Bb7sus4".
 pub(super) fn label(name: &str) -> Label {
-    all_labels().find(|l| l.to_string() == name).unwrap_or_else(|| panic!("no label {name}"))
-}
-
-/// What a span holds: `units` counted from the first unit reported (a loop's copied bar left out).
-pub(super) fn facts_on(hearing: &Hearing, units: Range<usize>, push: Option<&Push>) -> SpanFacts {
-    let mut evidence = Evidence::new();
-    evidence.prepare(hearing);
-    let first = hearing.reported().start;
-    let mut facts = SpanFacts::new();
-    evidence.facts(hearing, first + units.start..first + units.end, push, None, &mut facts);
-    facts
+    label_named(name).unwrap_or_else(|| panic!("no label {name}"))
 }
 
 /// The evidence about a label, with the tables before counting.
@@ -75,11 +53,7 @@ fn ranking(facts: &SpanFacts) -> Vec<Scored> {
 
 /// The candidates ranked by some weights, on the counted tables.
 pub(super) fn ranking_by(facts: &SpanFacts, weights: &Weights) -> Vec<Scored> {
-    let mut candidates = Vec::new();
-    facts.candidates(&mut candidates);
-    let mut out = Vec::new();
-    facts.rank(&candidates, &Scorer::new(weights, &Priors::of(&COUNTED)), &mut out);
-    out
+    ranked(facts, weights, &COUNTED)
 }
 
 /// Checks some pieces of evidence, each to within a rounding error, and that every other one is 0 (the priors left
@@ -961,136 +935,20 @@ fn the_hand_weights_keep_every_rule_and_broken_ones_are_named() {
     assert_eq!(w.check(), ["T2 is between 0 and T1", "every number is finite"]);
 }
 
-/// What a hand case's stretch must read on its own.
-#[derive(Clone, Copy, Debug)]
-pub(super) enum Want {
-    /// The first reading is one of these (the design's gate allows any, or the namer turns it into the name wanted).
-    First(&'static [&'static str]),
-    /// These are the first two readings, or the first two hold the one given.
-    TopTwo(&'static [&'static str]),
-    /// These are kept for deciding where the chords change: among the best eight, or the best rootless reading. Their
-    /// gates wait for what decides between neighbouring stretches (the pair term): at no trusts in the counted tables
-    /// (up to 0.5 each) do they reach the top two or three.
-    Kept(&'static [&'static str]),
-}
-
-/// The design's hand cases that one stretch read on its own decides, as far as it decides them
-/// (harmony/design/chord-reader-design.md, "Hand cases"): a name, the music, the units, and what it must read.
+/// The design's hand cases that one stretch read on its own decides ([`super::cases::hand_cases`]).
 pub(super) fn hand_cases() -> Vec<(&'static str, Music, Range<usize>, Want)> {
-    use Want::*;
-    let keys_bass = |bass: &str, keys: &str| Music::new().bass(bars(bass)).keys(bars(keys));
-    let keys = |keys: &str| Music::new().keys(bars(keys));
-    let pedal = || Music::new().bass(notes("C2", 0, 4 * BAR)).keys(bars("C4 E4 G4 | C4 F4 A4 | B3 D4 G4 | C4 E4 G4"));
-    let inversion = || keys_bass("C2 (1-2) B1 (3-4) | A1", "C4 E4 G4 | A3 C4 E4");
-    let two_feel = || keys_bass("C2 (1-2) G2 (3-4) | F2", "C4 E4 G4 | F3 A3 C4");
-    let ii_v_i = || keys_bass("D2 | G2 | C2 | C2", "F3 A3 C4 E4 | F3 A3 B3 E4 | E3 G3 B3 D4 | E3 G3 B3 D4");
-    let low = || keys_bass("D2 | G2 | C2 | C2", "C3 E3 F3 A3 | B2 E3 F3 A3 | B2 D3 E3 G3 | B2 D3 E3 G3");
-    let rootless = || keys("F4 A4 C5 E5 | F4 A4 B4 E5 | E4 G4 B4 D5 | E4 G4 B4 D5");
-    let shells = || keys("D3 C4 F4 | G2 B3 F4 | C3 B3 E4");
-    let dim7 = || keys_bass("C#2 | D2", "E3 G3 Bb3 | F3 A3 C4");
-    let chromatic = || keys_bass("D2 | Db2 | C2", "F3 A3 C4 | F3 B3 Eb4 | E3 G3 B3");
-    let sus = || keys_bass("G1", "G3 C4 D4 F4 (1-2) G3 B3 D4 F4 (3-4)");
-    let tune = |t: Vec<Note>| Music::new().bass(bars("G2")).keys(bars("G3 B3 D4")).tune(t);
-    let cmaj7 = |t: Vec<Note>| Music::new().bass(bars("C2")).keys(bars("E3 G3 B3")).tune(t);
-    let turn = [notes("D5", 0, 3 * BEAT), line("E5 D5", 3 * BEAT, BEAT / 2)].concat();
-    vec![
-        ("1", keys_bass("C2", "C4 E4 G4"), bar(0), First(&["C"])),
-        ("2 C/E", keys_bass("E2", "C4 E4 G4"), bar(0), First(&["C"])),
-        ("2 C/E in octaves", keys_bass("E2 E3", "C4 E4 G4"), bar(0), First(&["C"])),
-        ("2 C/G", keys_bass("G1", "C4 E4 G4"), bar(0), First(&["C"])),
-        ("2 G7/F", keys_bass("F2", "G3 B3 D4 F4"), bar(0), First(&["G7"])),
-        ("3 D/C", keys_bass("C2", "D4 F#4 A4"), bar(0), First(&["D7", "D"])),
-        ("4 C C/B", inversion(), bar(0), First(&["C", "Cmaj7"])),
-        ("4 Am", inversion(), bar(1), First(&["Am"])),
-        ("5 C", two_feel(), bar(0), First(&["C"])),
-        ("5 F", two_feel(), bar(1), First(&["F"])),
-        ("7 G9sus4", keys_bass("G1", "F3 A3 C4"), bar(0), First(&["G7sus4", "F"])),
-        ("7 G9sus4 with D", keys_bass("G1", "F3 A3 C4 D4"), bar(0), First(&["G7sus4"])),
-        ("7 C9sus4", keys_bass("C2", "Bb3 D4 F4"), bar(0), First(&["C7sus4", "Bb"])),
-        ("7 Bb9sus4", keys_bass("Bb1", "Ab3 C4 Eb4"), bar(0), First(&["Bb7sus4", "Ab"])),
-        ("8 Bb13sus4", keys_bass("Bb1", "F3 Ab3 C4 Eb4 G4"), bar(0), First(&["Bb7sus4"])),
-        ("9 C", pedal(), bar(0), First(&["C"])),
-        ("9 F/C", pedal(), bar(1), First(&["F"])),
-        ("9 G/C", pedal(), bar(2), First(&["G"])),
-        ("10 Dm9", ii_v_i(), bar(0), First(&["Dm7"])),
-        ("10 G13", ii_v_i(), bar(1), First(&["G7"])),
-        ("10 Cmaj9", ii_v_i(), 16..32, First(&["Cmaj7"])),
-        ("11 Dm9", low(), bar(0), First(&["Dm7"])),
-        ("11 G13", low(), bar(1), First(&["G7"])),
-        ("11 Cmaj9", low(), 16..32, First(&["Cmaj7"])),
-        ("12 Fmaj7 or Dm9", rootless(), bar(0), Kept(&["Fmaj7", "Dm7"])),
-        ("12 G13 or Fmaj7(#11)", rootless(), bar(1), Kept(&["G7", "Fmaj7"])),
-        ("12 Em7 or Cmaj9", rootless(), 16..32, Kept(&["Em7", "Cmaj7"])),
-        ("13 G13 rootless", keys("B2 E3 F3 A3"), bar(0), Kept(&["G7"])),
-        ("14 Dm7", shells(), bar(0), First(&["Dm7"])),
-        ("14 G7", shells(), bar(1), First(&["G7"])),
-        ("14 Cmaj7", shells(), bar(2), First(&["Cmaj7"])),
-        ("16 C7(#9)", keys_bass("C2", "E3 Bb3 Eb4"), bar(0), First(&["C7"])),
-        ("16 E7(#9)", keys_bass("E2", "G#3 D4 G4"), bar(0), First(&["E7"])),
-        ("16 E7(#9) keys alone", keys("E3 G#3 D4 G4"), bar(0), First(&["E7"])),
-        ("17 C7alt", keys_bass("C2", "E3 Bb3 D#4 G#4"), bar(0), First(&["C7"])),
-        ("18 G7alt", keys_bass("G2", "B3 F4 Ab4 Bb4 Eb5"), bar(0), First(&["G7"])),
-        ("19 Db13", keys_bass("Db2", "F3 B3 Eb4 Bb4"), bar(0), First(&["Db7"])),
-        ("19 G7alt", keys_bass("G1", "F3 B3 Eb4 Bb4"), bar(0), First(&["G7"])),
-        ("20 no bass", keys("F3 B3 Eb4 Bb4"), bar(0), Kept(&["Db7", "G7"])),
-        ("21 Am6", keys_bass("A1", "C4 E4 F#4 A4"), bar(0), First(&["Am6"])),
-        ("21 F#m7b5", keys_bass("F#2", "C4 E4 F#4 A4"), bar(0), First(&["F#m7b5"])),
-        ("21 D9", keys_bass("D2", "C4 E4 F#4 A4"), bar(0), First(&["D7"])),
-        ("21 no bass", keys("C4 E4 F#4 A4"), bar(0), TopTwo(&["Am6", "F#m7b5"])),
-        ("22 C6", keys_bass("C2", "C4 E4 G4 A4"), bar(0), First(&["C6"])),
-        ("22 Am7", keys_bass("A1", "C4 E4 G4 A4"), bar(0), First(&["Am7"])),
-        ("22 Fmaj9", keys_bass("F1", "C4 E4 G4 A4"), bar(0), First(&["Fmaj7"])),
-        ("22 no bass", keys("C4 E4 G4 A4"), bar(0), TopTwo(&["C6", "Am7"])),
-        ("23 Cmaj9/E", keys_bass("E2", "G3 B3 C4 D4"), bar(0), TopTwo(&["Cmaj7", "Em7"])),
-        ("24 C#dim7", dim7(), bar(0), First(&["Dbdim7", "Edim7", "Gdim7", "Bbdim7"])),
-        ("24 Dm7", dim7(), bar(1), First(&["Dm7"])),
-        ("26 C7(b9)", keys_bass("C2", "E3 G3 Bb3 Db4"), bar(0), First(&["C7"])),
-        ("30 C+", keys_bass("C2", "E3 G#3 C4"), bar(0), First(&["C+", "E+", "Ab+"])),
-        ("31 G7sus4", sus(), 0..4, First(&["G7sus4"])),
-        ("31 G7", sus(), 4..8, First(&["G7"])),
-        ("33 Em11", keys_bass("E2", "E3 A3 D4 G4 B4"), bar(0), First(&["Em7"])),
-        ("33 Dm11", keys_bass("D2", "G3 C4 F4"), bar(0), First(&["Dm7"])),
-        ("33 no bass", keys("E3 A3 D4 G4"), bar(0), TopTwo(&["A7sus4", "Em7"])),
-        ("34 Cmaj9", keys_bass("C2", "D4 E4 G4 B4"), bar(0), First(&["Cmaj7"])),
-        ("47 G, E5 a neighbour", tune(turn), bar(0), First(&["G"])),
-        ("48a Cmaj9, D5 held", cmaj7(bars("D5")), bar(0), First(&["Cmaj7"])),
-        ("48b Cmaj7, F5 held", cmaj7(bars("F5")), bar(0), First(&["Cmaj7"])),
-        ("48c Cmaj7, C5 D5 E5", cmaj7(line("C5 D5 E5", 0, BEAT / 2)), bar(0), First(&["Cmaj7"])),
-        ("49 Cmaj9 keys alone", keys("C2 G2 C3 E4 G4 B4 D5"), bar(0), First(&["Cmaj7"])),
-        ("50 Cmaj9/E keys alone", keys("E2 E3 C4 G4 B4 D5"), bar(0), TopTwo(&["Cmaj7"])),
-        ("55 Dm7", chromatic(), bar(0), First(&["Dm7"])),
-        ("55 Db9", chromatic(), bar(1), First(&["Db7"])),
-        ("55 Cmaj7", chromatic(), bar(2), First(&["Cmaj7"])),
-    ]
+    super::cases::hand_cases().unwrap()
 }
 
 #[test]
 fn the_hand_cases_read_as_a_player_reads_them_one_stretch_at_a_time() {
-    for (name, music, units, want) in hand_cases() {
-        let ranked = ranking(&facts_on(&music.looped().hear(), units, None));
-        let read: Vec<String> = ranked.iter().take(8).map(|s| format!("{} {:.2}", s.label, s.score)).collect();
-        assert!(reads(&ranked, want), "case {name}: wanted {want:?}, read {}", read.join(", "));
-    }
-}
-
-/// Whether a stretch's ranking reads what a hand case wants.
-pub(super) fn reads(ranked: &[Scored], want: Want) -> bool {
-    let among =
-        |these: &[&str], most: usize| these.iter().all(|t| ranked.iter().take(most).any(|s| s.label.to_string() == *t));
-    match want {
-        Want::First(any) => ranked.first().is_some_and(|s| any.contains(&s.label.to_string().as_str())),
-        Want::TopTwo(these) => among(these, 2),
-        Want::Kept(these) => kept(ranked, these),
-    }
-}
-
-/// Whether each of these readings is kept for deciding where the chords change: among the best eight, or the best
-/// rootless reading.
-fn kept(ranked: &[Scored], these: &[&str]) -> bool {
-    let best_rootless = ranked.iter().find(|s| s.route == Route::Rootless).map(|s| s.label.to_string());
-    these
-        .iter()
-        .all(|t| ranked.iter().take(8).any(|s| s.label.to_string() == *t) || best_rootless.as_deref() == Some(*t))
+    let failed: Vec<String> = stretch_verdicts(&SHIPPED)
+        .unwrap()
+        .into_iter()
+        .filter(|v| !v.holds())
+        .map(|v| format!("case {}: {}, read {}", v.name, v.wrong.join(", "), v.read))
+        .collect();
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
 }
 
 /// How far a hand case's wanted readings lead the rest, for each felt beat its stretch sounds: the score of the last
