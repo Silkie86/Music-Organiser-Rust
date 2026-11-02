@@ -45,11 +45,11 @@ pub fn is_autosave_dir(name: &str) -> bool {
     one_of(name, &AUTOSAVE_DIRS)
 }
 
-/// FL Studio's own backup copies, should they end up outside its Backup folder: "Song (autosave).flp" and
-/// "Song (overwritten at 2213h05).flp".
+/// FL Studio's own backup copies, should they end up outside its Backup folder: "Song (autosave).flp",
+/// "Song (autosaved at 4h10).flp" and "Song (overwritten at 2213h05).flp".
 pub fn is_autosave_file(name: &str) -> bool {
     let name = case::to_lower(name);
-    name.contains(" (autosave)") || name.contains(" (overwritten at ")
+    name.contains(" (autosave)") || name.contains(" (autosaved at ") || name.contains(" (overwritten at ")
 }
 
 /// Whether the scan leaves out a folder called `name` inside one called `parent`.
@@ -378,6 +378,8 @@ mod tests {
         assert!(!is_project_file(r"C:\m\._Night Drive_14.flp"));
         assert!(!is_project_file(r"C:\m\Night Drive (autosave).flp"));
         assert!(!is_project_file(r"C:\m\Night Drive (Overwritten at 2213h05).flp"));
+        assert!(!is_project_file(r"C:\m\sly_17 (autosaved at 4h10).flp"));
+        assert!(is_project_file(r"C:\m\autosaved at night.flp"));
         assert!(skip_dir(".git", "m"));
         assert!(skip_dir("Backup", "Night Drive"));
         assert!(skip_dir("auto-backups", "x"));

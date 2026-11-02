@@ -108,6 +108,8 @@ impl Live {
         if !pending.is_empty() {
             saves.retain(|s| !pending.contains(&s.path));
         }
+        // A DAW's autosave copies the C# app's scan let in ("sly_17 (autosaved at 4h10).flp") stay hidden.
+        saves.retain(|s| !scan::is_autosave_file(paths::file_name(&s.path)));
         // As the C# app: asked unless Settings turned it off; across folders only when turned on.
         let asking = (library.setting(ASK_DOUBTS)?.as_deref() != Some("0"))
             .then(|| library.setting(DOUBTS_ACROSS_FOLDERS).map(|v| v.as_deref() == Some("1")))

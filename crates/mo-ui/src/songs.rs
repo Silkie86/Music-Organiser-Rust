@@ -27,8 +27,8 @@ use mo_library::{Library, STATUSES, SaveDetail};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel};
 
 use crate::{
-    AppWindow, CountLine, DetailPair, HealthLine, OlderLine, PanelSong, PluginLine, SampleLine, SaveLine, SongLine,
-    SongsData, YearStart,
+    AppWindow, CountLine, DetailPair, HealthLine, MenuItem, OlderLine, PanelSong, PluginLine, SampleLine, SaveLine,
+    SongLine, SongsData, YearStart,
 };
 
 /// The page's rows, filters and what they let through, kept on the window's thread.
@@ -73,6 +73,8 @@ thread_local! {
     static READER: RefCell<Option<Newest<(u64, i64)>>> = const { RefCell::new(None) };
     /// The activity cards, for Open, Show in folder and Copy path.
     static FEED: RefCell<Option<Feed>> = const { RefCell::new(None) };
+    /// The save last right-clicked on the Saves tab, by its path, for its menu's lines.
+    static MENU_SAVE: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
 /// The list's lines, made from the page's view one at a time as the list draws them, so a new search doesn't build
@@ -107,11 +109,23 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
     PAGE.with(|p| p.borrow_mut().db = path.clone());
     data.on_open(|| with_picked(|p, r| open_main(p, &r.song.latest)));
     data.on_open_own(|| with_picked(|p, r| open_save(p, &r.song.latest)));
-    data.on_open_save(|path| {
-        with_picked(|p, r| {
-            if let Some(s) = r.song.saves().find(|s| s.path == path.as_str()) {
-                open_save(p, s);
-            }
+    data.on_open_save(|path| with_save(&path, open_save));
+    let weak = app.as_weak();
+    data.on_save_menu_for(move |path| {
+        let Some(app) = weak.upgrade() else { return };
+        let mut items = Vec::new();
+        with_save(&path, |_, s| items = save_menu(&s.daw));
+        MENU_SAVE.with(|m| *m.borrow_mut() = path.to_string());
+        app.global::<SongsData>().set_save_menu(ModelRc::new(VecModel::from(items)));
+    });
+    data.on_save_menu_chosen(|id| {
+        let path = MENU_SAVE.with(|m| m.borrow().clone());
+        with_save(&path, |p, s| match id.as_str() {
+            "open" => open_save(p, s),
+            "bitwig" => open_in_bitwig(p, s),
+            "reveal" => reveal(s),
+            "copy" => copy_path(&s.path),
+            _ => {}
         });
     });
     data.on_reveal(|| with_picked(|_, r| reveal(&r.song.latest)));
@@ -237,7 +251,6 @@ const NO_SONGS: &str = "No songs in the library yet.";
 /// Watches the project folders while the app is open and keeps the list up to date, on this background thread: each
 /// time saves change, the list is made again and put on the page with a card.
 fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
-    let _doing = crate::watchdog::doing("Songs: take in the library's changes");
     let (tx, rx) = mpsc::channel::<Changes>();
     let watching = FolderWatch::start(live.roots(), is_project_file, WATCH_QUIET, move |c| {
         let _ = tx.send(c);
@@ -635,6 +648,34 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
 }
 
 /// Does `f` with the page and the picked song's row, when a song is picked.
+/// Runs `f` on one save of the picked song, found by its path.
+fn with_save(path: &str, f: impl FnOnce(&Page, &mo_library::Save)) {
+    with_picked(|p, r| {
+        if let Some(s) = r.song.saves().find(|s| s.path == path) {
+            f(p, s);
+        }
+    });
+}
+
+/// The lines of a save's right-click menu: open it in its own DAW (what a double-click does), FL Studio saves also
+/// in Bitwig, then Show in folder and Copy path.
+fn save_menu(daw: &str) -> Vec<MenuItem> {
+    let item = |what: String, key: &str, id: &str| MenuItem {
+        what: what.into(),
+        key: key.into(),
+        id: id.into(),
+        enabled: true,
+    };
+    let mut items = vec![item(format!("Open in {daw}"), "Double-click", "open")];
+    if daw == FL {
+        items.push(item("Open in Bitwig".into(), "", "bitwig"));
+    }
+    items.push(item(String::new(), "", ""));
+    items.push(item("Show in folder".into(), "", "reveal"));
+    items.push(item("Copy path".into(), "", "copy"));
+    items
+}
+
 fn with_picked(f: impl FnOnce(&Page, &SongRow)) {
     PAGE.with(|p| {
         let p = p.borrow();
@@ -778,5 +819,18 @@ fn reveal(save: &mo_library::Save) {
 fn copy_path(path: &str) {
     if let Some(feed) = FEED.with(|f| f.borrow().clone()) {
         crate::files::copy_path(&feed, path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_fl_save_s_menu_also_opens_it_in_bitwig() {
+        let ids = |daw: &str| save_menu(daw).iter().map(|i| i.id.to_string()).collect::<Vec<_>>();
+        assert_eq!(ids(FL), ["open", "bitwig", "", "reveal", "copy"]);
+        assert_eq!(ids("Bitwig Studio"), ["open", "", "reveal", "copy"]);
+        assert_eq!(save_menu(FL)[0].what, "Open in FL Studio");
     }
 }
