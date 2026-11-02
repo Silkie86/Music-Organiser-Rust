@@ -1459,13 +1459,15 @@ pub fn toggle_play(app: &AppWindow) -> bool {
 /// Plays the picked sound from `from` (0 to 1 of its waveform). The file is read off the window's thread.
 fn play_picked(app: &AppWindow, from: f64) {
     if let Some(at) = PAGE.with(|p| p.borrow().picked) {
-        play_sound(app, at, from);
+        play_sound(app, at, from, mo_audio::MAX_SECONDS);
     }
 }
 
 /// Plays the sound at `at` in the list from `from` (0 to 1 of the way through), whether it's picked or not (the
 /// galaxy's sweep plays the stars it passes without picking them).
-fn play_sound(app: &AppWindow, at: usize, from: f64) {
+/// Plays the sound at `at` from `from` (0 to 1 of the way through), reading at most `most` seconds of it: a sweep
+/// only needs its start, which reads far quicker than a whole loop.
+fn play_sound(app: &AppWindow, at: usize, from: f64, most: f64) {
     let Some((at, path, seconds)) = PAGE.with(|p| {
         let p = p.borrow();
         let s = p.list.sound(at)?;
@@ -1482,32 +1484,31 @@ fn play_sound(app: &AppWindow, at: usize, from: f64) {
     }
     let ask = PLAYS.fetch_add(1, Ordering::SeqCst) + 1;
     let weak = app.as_weak();
-    let started =
-        background::spawn("Read sound", move || match mo_audio::read(Path::new(&path), mo_audio::MAX_SECONDS) {
-            // A newer play or a stop came while this one was reading.
-            _ if PLAYS.load(Ordering::SeqCst) != ask => {}
-            Ok(audio) => {
-                let player = PLAYER.get_or_init(|| {
-                    Player::new(|key| {
-                        let key = key.to_owned();
-                        let _ = slint::invoke_from_event_loop(move || ended(&key));
-                    })
-                });
-                player.play(Arc::new(audio), path, from * seconds);
-            }
-            Err(e) => {
-                log::warning("Sounds", &format!("Couldn't play {path}: {e}"));
-                let why = e.to_string();
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(feed) = FEED.with(|f| f.borrow().clone()) {
-                        feed.start("Couldn't play the sound", "").failed(&why);
-                    }
-                    if let Some(app) = weak.upgrade() {
-                        stop(&app);
-                    }
-                });
-            }
-        });
+    let started = background::spawn("Read sound", move || match mo_audio::read(Path::new(&path), most) {
+        // A newer play or a stop came while this one was reading.
+        _ if PLAYS.load(Ordering::SeqCst) != ask => {}
+        Ok(audio) => {
+            let player = PLAYER.get_or_init(|| {
+                Player::new(|key| {
+                    let key = key.to_owned();
+                    let _ = slint::invoke_from_event_loop(move || ended(&key));
+                })
+            });
+            player.play(Arc::new(audio), path, from * seconds);
+        }
+        Err(e) => {
+            log::warning("Sounds", &format!("Couldn't play {path}: {e}"));
+            let why = e.to_string();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(feed) = FEED.with(|f| f.borrow().clone()) {
+                    feed.start("Couldn't play the sound", "").failed(&why);
+                }
+                if let Some(app) = weak.upgrade() {
+                    stop(&app);
+                }
+            });
+        }
+    });
     if let Err(e) = started {
         log::error("Sounds", &format!("Couldn't start reading the sound: {e}"));
     }
