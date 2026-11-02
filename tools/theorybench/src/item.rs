@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-use mo_harmony::Key;
+use mo_harmony::{Key, Span};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -68,6 +68,17 @@ pub enum Whole {
     /// A piece the MIDI page cut from a part longer than 16 bars: heard as a window, since it needn't start or end
     /// where the music does.
     Window,
+}
+
+impl Whole {
+    /// How mo-harmony hears a piece heard this way.
+    pub fn span(self) -> Span {
+        match self {
+            Whole::Song => Span::Song,
+            Whole::Loop => Span::Loop,
+            Whole::Window => Span::Window,
+        }
+    }
 }
 
 /// The licence `theorybench packs` gives Solomon's own music. Rule 5: only counts and averages from it go in code,

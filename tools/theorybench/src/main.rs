@@ -102,10 +102,12 @@ fn main() -> ExitCode {
 fn low_priority_threads() {
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get().saturating_sub(1).max(1));
     // If this pool can't be set up, rayon's own one does the work at normal priority: the numbers are the same.
-    let _ = rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
-        .start_handler(|_| {
-            let _ = thread_priority::set_current_thread_priority(thread_priority::ThreadPriority::Min);
-        })
-        .build_global();
+    let _ = at_low_priority(rayon::ThreadPoolBuilder::new().num_threads(threads)).build_global();
+}
+
+/// A pool whose threads run at low priority (rule 21).
+fn at_low_priority(pool: rayon::ThreadPoolBuilder) -> rayon::ThreadPoolBuilder {
+    pool.start_handler(|_| {
+        let _ = thread_priority::set_current_thread_priority(thread_priority::ThreadPriority::Min);
+    })
 }

@@ -10,12 +10,12 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use mo_harmony::{Chord, ChordContext, ChordReader, PcSet, Pin, PitchClass, Role, Span};
+use mo_harmony::{Chord, ChordContext, ChordReader, PcSet, Pin, PitchClass, Role};
 use rayon::prelude::*;
 use serde::Deserialize;
 
 use crate::harte::{self, Label, Measure, Named};
-use crate::item::{self, Item, Whole};
+use crate::item::{self, Item};
 use crate::keys::{self, Parts, SongNotes};
 use crate::metrics::{self, pct};
 use crate::naming::{self, Read, Tally};
@@ -54,26 +54,25 @@ struct Engine {
 fn cs_chord(name: &str, root: u8, bass: u8, pcs: u16) -> (Chord, PcSet) {
     let root = PitchClass::new(i32::from(root));
     let bass = PitchClass::new(i32::from(bass));
-    match read_back(name, root, bass) {
-        Some(c) => (c, naming::may_leave_out(c)),
-        None => (Chord::new(root, PcSet::from_bits(pcs).with(root), bass), PcSet::EMPTY),
-    }
+    by_name(name, root, bass).unwrap_or((Chord::new(root, PcSet::from_bits(pcs).with(root), bass), PcSet::EMPTY))
+}
+
+/// A chord as mo-harmony's chart shows it, scored as the C# app's are ([`cs_chord`]): by its name, as mo-harmony's
+/// names stand for notes too (its `every_note_is_in_the_name` test). So a shell voiced C E Bb, shown as "C7", is right
+/// for a C7 label. A name that doesn't read back (none should) falls back to the notes read, nothing left out.
+fn shown_by_name(name: &str, read: Chord) -> (Chord, PcSet) {
+    by_name(name, read.root(), read.bass()).unwrap_or((read, PcSet::EMPTY))
+}
+
+/// How a chord shown by its name is scored, when the name reads back on the root and bass given: the notes it says,
+/// and the ones it stands for without saying they sound, which count only where the label has them.
+fn by_name(name: &str, root: PitchClass, bass: PitchClass) -> Option<(Chord, PcSet)> {
+    read_back(name, root, bass).map(|c| (c, naming::may_leave_out(c)))
 }
 
 /// An engine's name read with mo-harmony, when it reads back on the root and bass the engine gives.
 fn read_back(name: &str, root: PitchClass, bass: PitchClass) -> Option<Chord> {
     Chord::parse(name).filter(|c| c.root() == root && c.bass() == bass)
-}
-
-/// A chord as mo-harmony's chart shows it, scored as the C# app's are ([`cs_chord`]): by its name, the notes it says
-/// on the root and over the bass read, and the ones it stands for without saying they sound, as mo-harmony's names do
-/// (its `every_note_is_in_the_name` test). So a shell voiced C E Bb, shown as "C7", is right for a C7 label. A name
-/// that doesn't read back (none should) falls back to the notes read, nothing left out.
-fn shown_by_name(name: &str, read: Chord) -> (Chord, PcSet) {
-    match read_back(name, read.root(), read.bass()) {
-        Some(c) => (c, naming::may_leave_out(c)),
-        None => (read, PcSet::EMPTY),
-    }
 }
 
 /// Warns of an engine's chords whose name doesn't read back on their root and bass: they're scored by the notes heard.
@@ -135,31 +134,48 @@ struct RustRun {
 }
 
 impl RustRun {
-    /// The engine's name in the tables: mo-harmony, and how it was run when that isn't as the app runs it.
-    fn name(self) -> String {
-        let how: Vec<&str> = [(self.roles_off, "merged"), (self.oracle, "cuts given")]
-            .into_iter()
-            .filter_map(|(on, what)| on.then_some(what))
-            .collect();
-        if how.is_empty() { "mo-harmony".to_owned() } else { format!("mo-harmony ({})", how.join(", ")) }
+    /// The engine's name in the tables, which keep it short; [`RustRun::how`] says how it ran.
+    const NAME: &'static str = "mo-harmony";
+
+    /// How it was run, for a line above the tables.
+    fn how(self) -> String {
+        format!(
+            "{} hears {}{}.",
+            RustRun::NAME,
+            if self.roles_off {
+                "every part as one, with no role, as the C# app does"
+            } else {
+                "each part with its role"
+            },
+            if self.oracle { ", given the labelled changes" } else { "" }
+        )
     }
 }
 
 /// The readings mo-harmony keeps for each stretch: the first, and two more for the lists' top 3.
 const READINGS: u8 = 3;
 
+/// An engine asked for: an engine's answers read from a file (the C# app's, from its helper), or mo-harmony, run here.
+#[derive(Debug, PartialEq)]
+enum EngineArg {
+    Answers { name: String, path: PathBuf },
+    Rust,
+}
+
 /// What `chords` is asked to do.
 #[derive(Debug, Default, PartialEq)]
 struct Options {
     files: Vec<PathBuf>,
-    /// The engines in the order given: the C# app's answers (a name and a file), or mo-harmony (None), run here.
-    engines: Vec<Option<(String, PathBuf)>>,
+    /// The engines in the order given: the first is the baseline.
+    engines: Vec<EngineArg>,
     dump: Option<PathBuf>,
     part: Option<String>,
     per_chord: bool,
     by: Vec<String>,
     rust: RustRun,
     timing: bool,
+    /// Whether an option only mo-harmony takes was given (`--roles`, `--oracle-cuts`, `--timing`).
+    rust_only: bool,
 }
 
 impl Options {
@@ -175,20 +191,23 @@ impl Options {
                 "--answers" => {
                     let spec = args.next().ok_or("--answers needs name=file")?;
                     let (name, path) = spec.split_once('=').ok_or("--answers needs name=file")?;
-                    o.engines.push(Some((name.to_owned(), PathBuf::from(path))));
+                    o.engines.push(EngineArg::Answers { name: name.to_owned(), path: PathBuf::from(path) });
                 }
                 "--engine" => match args.next().map(String::as_str) {
-                    Some("rust") if !o.engines.contains(&None) => o.engines.push(None),
+                    Some("rust") if !o.engines.contains(&EngineArg::Rust) => o.engines.push(EngineArg::Rust),
                     Some("rust") => return Err("--engine rust is given twice".to_owned()),
                     _ => return Err("--engine takes rust (mo-harmony's chord reader, run here)".to_owned()),
                 },
-                "--roles" => match args.next().map(String::as_str) {
-                    Some("off") => o.rust.roles_off = true,
-                    Some("on") => o.rust.roles_off = false,
-                    _ => return Err("--roles takes on or off".to_owned()),
-                },
-                "--oracle-cuts" => o.rust.oracle = true,
-                "--timing" => o.timing = true,
+                "--roles" => {
+                    o.rust_only = true;
+                    match args.next().map(String::as_str) {
+                        Some("off") => o.rust.roles_off = true,
+                        Some("on") => o.rust.roles_off = false,
+                        _ => return Err("--roles takes on or off".to_owned()),
+                    }
+                }
+                "--oracle-cuts" => (o.rust_only, o.rust.oracle) = (true, true),
+                "--timing" => (o.rust_only, o.timing) = (true, true),
                 a if a.starts_with("--") => return Err(format!("Unknown option {a}.\n\n{}", crate::USAGE)),
                 a => o.files.push(PathBuf::from(a)),
             }
@@ -196,7 +215,7 @@ impl Options {
         if o.files.is_empty() || o.engines.is_empty() {
             return Err(crate::USAGE.to_owned());
         }
-        if !o.engines.contains(&None) && (o.rust != RustRun::default() || o.timing) {
+        if o.rust_only && !o.engines.contains(&EngineArg::Rust) {
             return Err("--roles, --oracle-cuts and --timing are for --engine rust".to_owned());
         }
         Ok(o)
@@ -204,11 +223,15 @@ impl Options {
 }
 
 pub fn run(args: &[String]) -> Result<(), String> {
-    let Options { files, engines, dump, part, per_chord, by, rust, timing } = Options::parse(args)?;
-    // The C# app's answers, read before the music; mo-harmony (None) reads once the music is.
+    let Options { files, engines, dump, part, per_chord, by, rust, timing, .. } = Options::parse(args)?;
+    // The answers read from files, read before the music so a wrong file stops the bench at once; mo-harmony (None
+    // here) reads once the music is.
     let engines: Vec<Option<Engine>> = engines
         .iter()
-        .map(|e| e.as_ref().map(|(name, path)| load(name, path)).transpose())
+        .map(|e| match e {
+            EngineArg::Answers { name, path } => load(name, path).map(Some),
+            EngineArg::Rust => Ok(None),
+        })
         .collect::<Result<_, _>>()?;
     let mut items = Vec::new();
     for f in &files {
@@ -230,6 +253,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let bars: f64 = items.iter().map(|i| i.length as f64 / i.bar() as f64).sum();
     let label_changes: usize = items.iter().map(|i| harte::join(&reference(i)).len()).sum();
     println!("The labels change chord {:.2} times a bar.", label_changes as f64 / bars);
+    if engines.iter().any(Option::is_none) {
+        println!("{}", rust.how());
+    }
 
     // The parts the engines heard, as the C# helper picks them: those with the role given, or all but drums.
     let parts = part.map_or(Parts::Pitched, Parts::Role);
@@ -313,43 +339,42 @@ pub fn run(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// How long each piece's read took, none where nothing was heard.
+type Times = Vec<Option<Duration>>;
+
 /// mo-harmony's chord reader run on every piece: the parts heard (`parts`, as the C# helper heard them), read as the
 /// piece is heard whole (a song, a loop or a window), each stretch's chord as the chart shows it and its other readings
-/// as the lists; and how long each read took. With `one_core`, on one core, one piece after another, so the times are
-/// a read's own (that one thread at normal priority, so the computer's other work slows it less).
-fn read_rust(items: &[Item], parts: &Parts, run: RustRun, one_core: bool) -> Result<(Engine, Vec<Duration>), String> {
-    let read_all = || -> Vec<(Vec<Read>, Duration)> {
+/// as the lists; and how long each read took. With `one_core`, on one core (at low priority, as every thread the bench
+/// runs: rule 21), one piece after another, so the times are a read's own.
+fn read_rust(items: &[Item], parts: &Parts, run: RustRun, one_core: bool) -> Result<(Engine, Times), String> {
+    let read_all = || -> Vec<(Vec<Read>, Option<Duration>)> {
         items.par_iter().map_init(ChordReader::new, |reader, item| read_piece(reader, item, parts, run)).collect()
     };
     let read = if one_core {
-        let pool = rayon::ThreadPoolBuilder::new().num_threads(1).build();
+        let pool = crate::at_low_priority(rayon::ThreadPoolBuilder::new().num_threads(1)).build();
         pool.map_err(|e| format!("--timing needs a thread of its own: {e}"))?.install(read_all)
     } else {
         read_all()
     };
     let times = read.iter().map(|(_, took)| *took).collect();
     let read = items.iter().zip(read).map(|(item, (chords, _))| (key(item), chords)).collect();
-    let engine = Engine { name: run.name(), read, lists: true };
+    let engine = Engine { name: RustRun::NAME.to_owned(), read, lists: true };
     warn_unread(&engine);
     Ok((engine, times))
 }
 
-/// One piece read by mo-harmony, and how long the read took (the notes made ready and the chart spelled left out).
-fn read_piece(reader: &mut ChordReader, item: &Item, parts: &Parts, run: RustRun) -> (Vec<Read>, Duration) {
+/// One piece read by mo-harmony, and how long the read took (the notes made ready and the chart spelled left out);
+/// none when nothing was heard.
+fn read_piece(reader: &mut ChordReader, item: &Item, parts: &Parts, run: RustRun) -> (Vec<Read>, Option<Duration>) {
     let heard = parts_heard(item, parts, run.roles_off);
     let heard: Vec<mo_harmony::Part> =
         heard.iter().map(|(role, notes)| mo_harmony::Part { role: *role, notes }).collect();
     let pins = pins_of(item, run.oracle);
-    let span = match item.whole {
-        Whole::Song => Span::Song,
-        Whole::Loop => Span::Loop,
-        Whole::Window => Span::Window,
-    };
-    let cx = ChordContext { span, pins: &pins, readings: READINGS };
+    let cx = ChordContext { span: item.whole.span(), pins: &pins, readings: READINGS };
     let started = Instant::now();
     let reading = reader.read(&heard, keys::grid_of(item, false), &cx);
     let took = started.elapsed();
-    let Some(reading) = reading else { return (Vec::new(), took) };
+    let Some(reading) = reading else { return (Vec::new(), None) };
     let chart = reading.names(None);
     let chords = reading
         .spans
@@ -359,11 +384,11 @@ fn read_piece(reader: &mut ChordReader, item: &Item, parts: &Parts, run: RustRun
             let first = span.shown()?;
             let name = name.map_or_else(|| first.chord.name(), |n| n.name());
             let (chord, optional) = shown_by_name(&name, first.chord);
-            let others = span.readings.iter().skip(1).map(|r| r.chord).collect();
+            let others = span.readings.iter().skip(1).map(|r| shown_by_name(&r.chord.name(), r.chord).0).collect();
             Some(Read { start: span.start, end: span.end, chord, name, optional, others })
         })
         .collect();
-    (chords, took)
+    (chords, Some(took))
 }
 
 /// The parts mo-harmony hears in a piece (those `parts` keeps), each with the role its dataset gives; or with
@@ -383,20 +408,27 @@ fn pins_of(item: &Item, oracle: bool) -> Vec<Pin> {
 }
 
 /// How long mo-harmony took to read each piece, on one core: in all, and for 16 bars of music (the design's budget:
-/// 3 ms for a dense 16-bar part, 99 times in 100).
-fn print_timing(items: &[Item], times: &[Duration]) {
-    let ms = |d: &Duration| d.as_secs_f64() * 1e3;
-    let mut whole: Vec<f64> = times.iter().map(ms).collect();
-    let mut per_16: Vec<f64> = items
+/// 3 ms for a dense 16-bar part, 99 times in 100). A piece where nothing was heard is left out: there was nothing to
+/// read.
+fn print_timing(items: &[Item], times: &[Option<Duration>]) {
+    let read: Vec<(&Item, f64)> =
+        items.iter().zip(times).filter_map(|(item, d)| Some((item, d.as_ref()?.as_secs_f64() * 1e3))).collect();
+    let mut whole: Vec<f64> = read.iter().map(|&(_, ms)| ms).collect();
+    let mut per_16: Vec<f64> = read
         .iter()
-        .zip(times)
-        .map(|(item, d)| (item.length as f64 / item.bar() as f64, ms(d)))
+        .map(|&(item, ms)| (item.length as f64 / item.bar() as f64, ms))
         .filter(|&(bars, _)| bars > 0.0)
         .map(|(bars, ms)| ms * 16.0 / bars)
         .collect();
     let total: f64 = whole.iter().sum();
+    let silent = times.len() - read.len();
     println!();
-    println!("mo-harmony read {} pieces in {:.2} s on one core.", times.len(), total / 1e3);
+    println!(
+        "mo-harmony read {} pieces in {:.2} s on one core{}.",
+        read.len(),
+        total / 1e3,
+        if silent > 0 { format!(" ({silent} with nothing heard left out)") } else { String::new() }
+    );
     println!("{:<28} {:>9} {:>9} {:>9} {:>9}", "ms a read", "middle", "9 in 10", "99 in 100", "longest");
     for (what, values) in [("each piece", &mut whole), ("16 bars of it", &mut per_16)] {
         values.sort_by(f64::total_cmp);
@@ -802,20 +834,23 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(all.files, [PathBuf::from("a.jsonl")]);
-        assert_eq!(all.engines, [Some(("C# app".to_owned(), PathBuf::from("cs.jsonl"))), None]);
+        assert_eq!(
+            all.engines,
+            [EngineArg::Answers { name: "C# app".to_owned(), path: PathBuf::from("cs.jsonl") }, EngineArg::Rust]
+        );
         assert_eq!(all.rust, RustRun { roles_off: true, oracle: true });
         assert!(all.timing);
         // mo-harmony alone is an engine like any other (the baseline when it's given first), its roles on unless
         // they're turned off.
         let alone = parse(&["a.jsonl", "--engine", "rust", "--roles", "off", "--roles", "on"]).unwrap();
-        assert_eq!((alone.engines, alone.rust), (vec![None], RustRun::default()));
+        assert_eq!((alone.engines, alone.rust), (vec![EngineArg::Rust], RustRun::default()));
         // What's wrong is said.
         let wrong = |a: &[&str]| parse(a).unwrap_err();
         assert_eq!(wrong(&["a.jsonl", "--engine", "rust", "--engine", "rust"]), "--engine rust is given twice");
         assert!(wrong(&["a.jsonl", "--engine", "python"]).starts_with("--engine takes rust"));
         assert!(wrong(&["a.jsonl", "--engine"]).starts_with("--engine takes rust"));
         assert_eq!(wrong(&["a.jsonl", "--engine", "rust", "--roles", "maybe"]), "--roles takes on or off");
-        for rust_only in [&["--roles", "off"][..], &["--oracle-cuts"], &["--timing"]] {
+        for rust_only in [&["--roles", "off"][..], &["--roles", "on"], &["--oracle-cuts"], &["--timing"]] {
             let a = [&["a.jsonl", "--answers", "C# app=cs.jsonl"][..], rust_only].concat();
             assert_eq!(wrong(&a), "--roles, --oracle-cuts and --timing are for --engine rust");
         }
@@ -825,12 +860,15 @@ mod tests {
     }
 
     #[test]
-    fn the_rust_engines_name_says_how_it_ran() {
-        let name = |roles_off, oracle| RustRun { roles_off, oracle }.name();
-        assert_eq!(name(false, false), "mo-harmony");
-        assert_eq!(name(true, false), "mo-harmony (merged)");
-        assert_eq!(name(false, true), "mo-harmony (cuts given)");
-        assert_eq!(name(true, true), "mo-harmony (merged, cuts given)");
+    fn how_mo_harmony_ran_is_said_once() {
+        let how = |roles_off, oracle| RustRun { roles_off, oracle }.how();
+        assert_eq!(how(false, false), "mo-harmony hears each part with its role.");
+        assert_eq!(
+            how(true, true),
+            "mo-harmony hears every part as one, with no role, as the C# app does, given the labelled changes."
+        );
+        // Its name fits the tables' first column with " precision" or " - C# app" after it.
+        assert!(RustRun::NAME.len() + " precision".len() <= 28);
     }
 
     /// Block chords at 96 ticks a beat, a bar each: (keys played, the bass, the label).
@@ -875,14 +913,17 @@ mod tests {
             assert_eq!(Chord::parse(&r.name), Some(r.chord), "{}", r.name);
             assert_eq!(r.optional, naming::may_leave_out(r.chord), "{}", r.name);
             assert!(r.others.len() < usize::from(READINGS) && !r.others.contains(&r.chord), "{}", r.name);
+            // The other readings are scored by their names too.
+            assert!(r.others.iter().all(|o| Chord::parse(&o.name()) == Some(*o)), "{:?}", r.others);
         }
         assert!(read.iter().any(|r| !r.others.is_empty()));
         // The shell's C7 stands for the G it hasn't.
         let shell = read.get(3).unwrap();
         assert_eq!((shell.chord.notes(), shell.optional), (PcSet::of(&[0, 4, 7, 10]), PcSet::of(&[7])));
         // A piece with no notes heard reads nothing.
-        let (none, _) = read_piece(&mut ChordReader::new(), &item, &Parts::Role("tune".to_owned()), RustRun::default());
-        assert!(none.is_empty());
+        let (none, took) =
+            read_piece(&mut ChordReader::new(), &item, &Parts::Role("tune".to_owned()), RustRun::default());
+        assert!(none.is_empty() && took.is_none());
     }
 
     #[test]

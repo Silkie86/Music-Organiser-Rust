@@ -568,10 +568,11 @@ heard as a tune, 14 points ahead.
   - Piano and tune together, each part with its role: notes+bass 69.1% against 55.1% (+14.0), name 67.8% against
     54.2%, sevenths 75.1% against 67.9%. With the roles off (every part one, as the C# app hears them), 45.4% (-9.7):
     knowing which part is the tune is worth 24 points here.
-- **Speed (release, one core of a 2.1 GHz cloud machine):** a POP909-CL song's piano part reads in 37 ms in the middle
-  and 81 ms 99 times in 100 (longest 124 ms); 16 bars of it in 7.7 ms and 14.8 ms. That is about five times the budget
-  (3 ms), as the design's speed notes found: the next speed step comes before the MIDI page reads with it. Sparse music
-  is quick: RS200's block chords take 0.3 ms for 16 bars in the middle and 1.5 ms 99 times in 100.
+- **Speed (release, one core of a 2.1 GHz cloud machine, two runs):** a POP909-CL song's piano part reads in 37 ms in
+  the middle and 74 to 81 ms 99 times in 100 (longest 94 to 124 ms); 16 bars of it in 7.6 to 7.7 ms and 13.6 to 14.8
+  ms. That is about five times the budget (3 ms), as the design's speed notes found: the next speed step comes before
+  the MIDI page reads with it. Sparse music is quick: RS200's block chords take 0.3 ms for 16 bars in the middle and
+  1.5 ms 99 times in 100.
 - **Against the design's merge rule** (decided later, on fold 0, after chordfit): on sets B and RS200 it passes every
   gate measured here (bass kind 94.7% against 82.7%; altered tones F1 53.9% against 32.2%; root and majmin+bass up
   12 to 15 points), but not rootless roots (under 90%). On POP909-CL it passes the root, not majmin+bass (-1.8),
