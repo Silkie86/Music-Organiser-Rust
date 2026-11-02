@@ -32,6 +32,7 @@ library.
 | Edit events: knob moves recorded into a pattern (event 223; in 120 of Solomon's 744 projects, such as sly_15) | Not read: the moves are lost without a word. | A plugin setting's moves are read (FL 25's and FL 8's forms) and placed wherever the pattern plays, as an automation clip is, so the song has one more automation per setting moved; moves of anything else are listed as left out (VERSION 14). | Better |
 | Samples on the channels inside a Layer channel | Counted as not played when only the Layer has notes. | The same, until the Layer's children are read (needs one of Solomon's saves with a Layer). | Not yet |
 | Songs arranged in a later arrangement (FL 12.9 on) | Only the first arrangement is read. | The same: the twin test will show whether any of Solomon's songs need more. | Not yet |
+| A VST hosted by FL 7 or 8 (wrapper version 4, such as sly_7's and sly_15's LegacyCell) | Read as having no name, id or settings, so a convert says the plugin is missing. | Reads its name, VST id and settings (FL 7 and 8 keep no file or maker). | Better |
 
 ## Bitwig Studio
 

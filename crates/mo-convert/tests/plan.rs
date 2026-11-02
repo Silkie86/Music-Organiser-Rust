@@ -263,6 +263,33 @@ fn an_effect_slot_switched_on_and_off_is_a_switch_lane_on_every_copy() {
 }
 
 #[test]
+fn edit_events_of_several_patterns_are_one_lane_of_clips_in_song_order() {
+    use mo_formats::fl::automation::FlPart;
+    let keys = FlPlugin { parameter_ids: Some(vec![10, 20, 30]), ..plugin("Keys", "VST3", "565354536B657973") };
+    let part = |start: f64, length: f64| FlPart {
+        start,
+        length,
+        points: vec![FlPoint { beat: 0.0, value: 0.5 }, FlPoint { beat: 1.0, value: 1.0 }],
+    };
+    // Two patterns moving one setting: the first placed at beats 8 and 24, the second at 0 and 12 (over the first's
+    // end, so it takes over there).
+    let recorded = |parts: Vec<FlPart>| FlAutomation {
+        parameter: 2,
+        parts,
+        ..automation("Keys - setting 2 (edit events)", Some(0), FlControl::PluginParameter, &[(0.0, 0.5)])
+    };
+    let s = song(
+        vec![channel(0, "Keys", Some(keys), "", 0)],
+        vec![],
+        vec![recorded(vec![part(8.0, 8.0), part(24.0, 8.0)]), recorded(vec![part(0.0, 4.0), part(12.0, 4.0)])],
+    );
+    let p = plan(&s);
+    assert_eq!(p.lanes.len(), 1);
+    let clips: Vec<(f64, f64)> = p.lanes[0].parts.iter().map(|c| (c.start, c.length)).collect();
+    assert_eq!(clips, [(0.0, 4.0), (8.0, 4.0), (12.0, 4.0), (24.0, 8.0)]);
+}
+
+#[test]
 fn volume_and_pan_get_one_lane_each_in_song_order() {
     let keys = FlPlugin { parameter_ids: Some(vec![10, 20, 2_000_003]), ..plugin("Keys", "VST3", "565354536B657973") };
     let setting = |name: &str, n: u32, points: &[(f64, f64)]| FlAutomation {
