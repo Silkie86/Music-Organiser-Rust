@@ -50,3 +50,9 @@ Thumbs.db
 **/cs/obj/
 __pycache__/
 *.pyc
+
+# The fuzzer: its build, its starting files (made by the fuzz_seeds test) and what it finds
+/fuzz/target/
+/fuzz/corpus/
+/fuzz/artifacts/
+/fuzz/coverage/

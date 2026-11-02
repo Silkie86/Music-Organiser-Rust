@@ -2,7 +2,8 @@
 resolver = "3"
 members = ["crates/*", "tools/formatlab", "tools/miditwin", "tools/theorybench", "tools/twin"]
 # The galaxy check is a workspace of its own, so its wgpu never gets mixed into the app's build.
-exclude = ["tools/galaxycheck"]
+# The fuzzer (fuzz/) is one too: it's built with nightly Rust by cargo-fuzz.
+exclude = ["tools/galaxycheck", "fuzz"]
 
 [workspace.package]
 version = "0.1.0"
