@@ -44,6 +44,10 @@ This repo is the Rust rebuild of the C# app. The plan, the inventory of today's 
 21. Highly multithreaded where it helps (rayon), at low priority, never on the UI thread.
 22. MIDI 2.0 ready: notes and controllers keep MIDI 2.0 resolution (16-bit velocity, 32-bit controllers, per-note
     controllers, MIDI Clip Files, UMP ports); only a MIDI 1.0 file, port or DAW gets 7-bit values (spec section 4.4).
+28. The app cleans up after itself: every cache, temp file and report it writes has a limit or is removed when done,
+    and a start-up sweep clears leftovers; it never deletes what the user made (Solomon, 2026-11-02). The sweep is
+    `mo_app::tidy`; it removes only files it can prove the app made (its own folder, or its own whole file name).
+    (Rules 23 to 27 are in `docs/handover/memory/rust-rebuild-rules.md`; code already cites rule 23.)
 
 ## How work is done
 

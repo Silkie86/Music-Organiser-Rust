@@ -59,3 +59,6 @@ Work through the phase plan without pausing for check-ins; message only for real
 
 27. (Solomon, 2026-10-31) Don't wait for merges: start the next job while a PR's CI runs, as long as it won't get in
     the way (different files, branched so it can be rebased).
+28. (Solomon, 2026-11-02) The app cleans up after itself: every cache, temp file and report it writes has a limit or
+    is removed when done, and a start-up sweep clears leftovers (`mo_app::tidy`); it never deletes what the user made.
+    Also in CLAUDE.md.

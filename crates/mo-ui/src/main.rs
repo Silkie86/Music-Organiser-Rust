@@ -1,7 +1,7 @@
 // No console window behind the app on Windows.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::io::Write;
+use std::sync::atomic::AtomicUsize;
 
 use mo_app::activity::Feed;
 use mo_app::log;
@@ -18,6 +18,8 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     let session = log::start_session();
     log_crashes();
+    // Rule 28: what an earlier run or a stopped tool left behind is cleared, a little later, at low priority.
+    mo_app::tidy::start();
     let feed = Feed::default();
     // The settings come from library.db once mo-library exists (phase 2); until then the app opens in its defaults.
     let shortcuts = Shortcuts::from_setting(None);
@@ -62,8 +64,10 @@ fn main() -> Result<(), slint::PlatformError> {
 }
 
 /// Rule 17, crashes always log: a panic anywhere goes into the session log, with where it happened, and is written out
-/// before the app closes. It also gets its own `logs\crash-<time>.log`, in case the session log couldn't be written.
+/// before the app closes. It also gets its own `logs\crash-<time>.log`, in case the session log couldn't be written
+/// (the first few of a run: a crash that keeps happening can't fill the folder; rule 28).
 fn log_crashes() {
+    static CRASH_FILES: AtomicUsize = AtomicUsize::new(0);
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let thread = std::thread::current().name().unwrap_or("unnamed").to_owned();
@@ -76,13 +80,8 @@ fn log_crashes() {
         if let Some(l) = log::current() {
             l.flush();
         }
-        let dir = mo_app::paths::logs_dir();
         let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        if std::fs::create_dir_all(&dir).is_ok()
-            && let Ok(mut f) = std::fs::File::create(dir.join(format!("crash-{secs}.log")))
-        {
-            let _ = f.write_all(text.as_bytes());
-        }
+        let _ = log::write_crash_file(&mo_app::paths::logs_dir(), &text, secs, &CRASH_FILES);
         default(info);
     }));
 }

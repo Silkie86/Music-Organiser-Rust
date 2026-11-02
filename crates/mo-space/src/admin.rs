@@ -261,12 +261,25 @@ pub(crate) fn ask_for(admin: &dyn Admin, step: Step, lines: &[Vec<String>]) -> R
         .collect())
 }
 
+/// How the names of the step's lists and results in your Temp folder start ([`temp_names`]).
+const TEMP_PREFIX: &str = "mo-admin-";
+
+/// Whether `name` is one of the step's lists or results in your Temp folder ([`temp_names`]): `mo-admin-`, three
+/// numbers, then `.txt` or `-result.txt`, and nothing else. [`ask_for`] removes both when the step ends; the app's
+/// start-up sweep (rule 28) clears only names like these, a day after a crash left them.
+pub fn is_temp_file(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix(TEMP_PREFIX) else { return false };
+    let Some(numbers) = rest.strip_suffix("-result.txt").or_else(|| rest.strip_suffix(".txt")) else { return false };
+    let parts: Vec<&str> = numbers.split('-').collect();
+    parts.len() == 3 && parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+}
+
 /// A list and a result file in your Temp folder, under names no other run uses. The folder is named as it really is
 /// (Windows can give Temp's short name, `JOSMIT~1`), as the step checks there's no link on the way to the result.
 fn temp_names() -> (PathBuf, PathBuf) {
     static COUNT: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-    let name = format!("mo-admin-{}-{nanos}-{}", std::process::id(), COUNT.fetch_add(1, Ordering::Relaxed));
+    let name = format!("{TEMP_PREFIX}{}-{nanos}-{}", std::process::id(), COUNT.fetch_add(1, Ordering::Relaxed));
     let temp = std::env::temp_dir();
     let temp = real_path(&text(&temp)).map_or(temp, PathBuf::from);
     (temp.join(format!("{name}.txt")), temp.join(format!("{name}-result.txt")))
@@ -546,5 +559,27 @@ mod tests {
             assert_eq!(back, plain);
         }
         assert_eq!(read_outcome("x\tmaybe\t"), None);
+    }
+
+    #[test]
+    fn only_the_steps_own_temp_files_are_known_as_its() {
+        let (list, result) = temp_names();
+        let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        assert!(is_temp_file(&name(&list)), "{}", list.display());
+        assert!(is_temp_file(&name(&result)), "{}", result.display());
+        for other in [
+            "mo-admin-1-2.txt",
+            "mo-admin-1-2-3-4.txt",
+            "mo-admin-1-2-x.txt",
+            "mo-admin-1--3.txt",
+            "mo-admin-1-2-3.txt.bak",
+            "mo-admin-1-2-3-results.txt",
+            "mo-admin-.txt",
+            "mo-move-1-2-3.txt",
+            "my mo-admin-1-2-3.txt",
+            "MO-ADMIN-1-2-3.txt",
+        ] {
+            assert!(!is_temp_file(other), "{other}");
+        }
     }
 }

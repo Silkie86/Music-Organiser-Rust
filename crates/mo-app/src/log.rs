@@ -6,11 +6,15 @@
 //! Writing never waits on the disk: lines go to a writer thread of their own. A message that keeps coming
 //! is written three times and then only counted (at 10, 100, 1000…), and a run stops writing at 5 MB, so a runaway
 //! warning can't fill the disk. The newest 30 runs' logs are kept.
+//!
+//! A crash also gets a log of its own ([`write_crash_file`]), at most [`CRASH_FILES_PER_RUN`] a run; the start-up
+//! sweep ([`crate::tidy`]) keeps the newest 30 of those.
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Mutex, OnceLock};
 use std::thread::JoinHandle;
@@ -30,6 +34,13 @@ const REPEATS_WRITTEN: u32 = 3;
 const SEEN_MAX: usize = 2000;
 /// How many recent lines are kept for an F12 note.
 const RECENT: usize = 60;
+/// How a crash's own log is named: `crash-<seconds since 1970>.log`, or `crash-<seconds>-2.log` for the next crash in
+/// the same second. The C# app writes none of these, so the start-up sweep knows them as this app's.
+pub const CRASH_PREFIX: &str = "crash-";
+/// The most crash logs one run writes. A crash that keeps happening (one bad file hit over and over on every
+/// background thread) still goes in the session log each time, counted once it repeats, but can't fill the folder
+/// with files of its own.
+pub const CRASH_FILES_PER_RUN: usize = 10;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Level {
@@ -254,20 +265,41 @@ fn write_queued(file: File, rx: Receiver<Msg>) {
 
 /// Deletes all but the newest `keep` of this app's session logs, newest by when they were last written.
 fn prune(folder: &Path, keep: usize) {
-    let Ok(entries) = std::fs::read_dir(folder) else { return };
-    let mut logs: Vec<PathBuf> = entries
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| {
-            p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with(PREFIX) && n.ends_with(".log"))
-        })
-        .collect();
-    if logs.len() <= keep {
-        return;
+    crate::tidy::keep_newest(folder, |n| n.starts_with(PREFIX) && n.ends_with(".log"), keep);
+}
+
+/// Writes a crash's own log into `folder` (`logs\`), in case the session log couldn't be written (rule 17), and says
+/// where. `written` counts this run's crash logs: once there have been [`CRASH_FILES_PER_RUN`], nothing more is
+/// written (the session log still has each crash). A second crash in the same second gets a name of its own rather
+/// than writing over the first. Called from the crash handler, so it never panics and never waits.
+pub fn write_crash_file(folder: &Path, text: &str, secs: u64, written: &AtomicUsize) -> Option<PathBuf> {
+    if written.fetch_add(1, Ordering::Relaxed) >= CRASH_FILES_PER_RUN {
+        return None;
     }
-    // Names alone put "…-05-2.log" before "…-05.log", so the time each was last written decides.
-    logs.sort_by_cached_key(|p| (std::fs::metadata(p).and_then(|m| m.modified()).ok(), p.clone()));
-    for old in &logs[..logs.len() - keep] {
-        let _ = std::fs::remove_file(old);
+    std::fs::create_dir_all(folder).ok()?;
+    for n in 1..100 {
+        let name = if n == 1 { format!("{CRASH_PREFIX}{secs}.log") } else { format!("{CRASH_PREFIX}{secs}-{n}.log") };
+        let path = folder.join(name);
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut f) => {
+                let _ = f.write_all(text.as_bytes());
+                return Some(path);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
+/// Whether `name` is a crash's own log as [`write_crash_file`] names them: `crash-`, a number, perhaps `-` and a
+/// second number, then `.log`, and nothing else.
+pub fn is_crash_log(name: &str) -> bool {
+    let Some(stamp) = name.strip_prefix(CRASH_PREFIX).and_then(|r| r.strip_suffix(".log")) else { return false };
+    let number = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    match stamp.split_once('-') {
+        Some((secs, n)) => number(secs) && number(n),
+        None => number(stamp),
     }
 }
 
@@ -355,6 +387,39 @@ mod tests {
         assert!(recent.last().is_some_and(|l| l.ends_with("line 99")));
         log.close();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn crash_files_get_their_own_names_and_stop_at_the_runs_limit() {
+        let dir = temp_folder("crash");
+        let written = AtomicUsize::new(0);
+        let first = write_crash_file(&dir, "first", 1_700_000_000, &written).expect("written");
+        let second = write_crash_file(&dir, "second", 1_700_000_000, &written).expect("written");
+        assert_eq!(first, dir.join("crash-1700000000.log"));
+        assert_eq!(second, dir.join("crash-1700000000-2.log"));
+        assert_eq!(std::fs::read_to_string(&first).expect("readable"), "first", "a second crash doesn't write over it");
+        assert!(is_crash_log("crash-1700000000.log") && is_crash_log("crash-1700000000-2.log"));
+        for n in 2..CRASH_FILES_PER_RUN {
+            assert!(write_crash_file(&dir, "more", 1_700_000_100 + n as u64, &written).is_some());
+        }
+        assert_eq!(write_crash_file(&dir, "one too many", 1_700_000_999, &written), None);
+        assert_eq!(std::fs::read_dir(&dir).expect("listable").count(), CRASH_FILES_PER_RUN);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_crash_logs_named_as_this_app_names_them_are_crash_logs() {
+        for name in [
+            "crash-.log",
+            "crash-12.txt",
+            "crash-12-.log",
+            "crash-12-2-3.log",
+            "crash-x.log",
+            "my crash-12.log",
+            "crash-12.log.old",
+        ] {
+            assert!(!is_crash_log(name), "{name}");
+        }
     }
 
     #[test]

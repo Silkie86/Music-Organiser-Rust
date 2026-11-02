@@ -32,7 +32,7 @@ param(
 )
 
 # Raised whenever this script changes, so an older branch's copy never replaces a newer installed one.
-$LauncherVersion = 4
+$LauncherVersion = 5
 
 $ErrorActionPreference = 'Continue'   # git and cargo write progress to stderr, which Windows PowerShell treats as failure
 $GitHubRepo = 'Silkie86/Music-Organiser-Rust'
@@ -239,6 +239,23 @@ if ((Test-Path $newer) -and (Test-Path $Installed) -and $PSCommandPath -eq $Inst
 # Below this much free space (in GB) the build's leftovers are cleared first; below the second it doesn't start.
 $LowSpaceGb = 10
 $NeededGb = 4
+# The build folder only grows: each version built leaves its own copies of what changed, which are never used again.
+# Past this size (in GB) it's cleared before the next build, which then takes a few minutes, as the first one did
+# (rule 28: the app cleans up after itself).
+$TargetCapGb = 25
+
+function Get-FolderGb([string]$Path) {
+    # The size of the files in $Path, in GB; 0 when it isn't there or can't be read through. Each file's size comes
+    # with the folder's listing, so no file is opened or asked about one by one.
+    if (-not (Test-Path -LiteralPath $Path)) { return 0 }
+    try {
+        $bytes = 0
+        foreach ($file in ([System.IO.DirectoryInfo]::new($Path)).EnumerateFiles('*', [System.IO.SearchOption]::AllDirectories)) {
+            $bytes += $file.Length
+        }
+        return $bytes / 1GB
+    } catch { return 0 }
+}
 
 function Get-FreeGb([string]$Path) {
     # The free space on the drive holding $Path (or its nearest folder that exists), in GB; $null when unknown.
@@ -258,6 +275,12 @@ function Build-App {
     Say "$(Get-Date -Format 'HH:mm:ss')  Building..." 'DarkGray'
     # The build folder is named, so a CARGO_TARGET_DIR set on the PC can't move the app somewhere this doesn't look.
     $targetDir = Join-Path $Repo 'target'
+    # Grown past the cap: the build's leftovers go (the open app runs from its copy in run\, so nothing in use).
+    $targetGb = Get-FolderGb $targetDir
+    if ($targetGb -gt $TargetCapGb) {
+        Say ("The build folder has grown to {0:N0} GB. Clearing it, so this build starts afresh (a few minutes)..." -f $targetGb) 'Yellow'
+        Remove-Item -LiteralPath $targetDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
     # A full drive makes the compiler stop part way ("no space on device"). Before building, the build's own
     # leftovers (the incremental cache and any release build; they only speed builds up) are cleared when space is
     # low, and the build waits when there still isn't enough, saying how much is free.
