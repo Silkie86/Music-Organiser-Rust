@@ -25,7 +25,7 @@ use mo_sounds::galaxy::{self, Placing, Step};
 use mo_sounds::{SoundsDb, StarPoint};
 use slint::{ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, Timer, TimerMode, VecModel};
 
-use super::sky::Sky;
+use super::sky::{Shine, Sky};
 use super::{FEED, HERE, PAGE, pick, play_picked, strings};
 use crate::gpu;
 use crate::{AppWindow, GalaxyLabel, SoundsData, SweptLine, Theme, TrailDot};
@@ -152,6 +152,8 @@ struct Lit {
     list: Arc<list::SoundList>,
     by: LightBy,
     light: Arc<Vec<f32>>,
+    /// How much of the list has the measure (`galaxy_look::lit_share`).
+    share: f32,
 }
 
 impl Lit {
@@ -164,6 +166,12 @@ impl Galaxy {
     /// The kept light for the page's list and the Light by chosen now, if it's been worked out.
     fn light_for(&self, list: &Arc<list::SoundList>) -> Option<Arc<Vec<f32>>> {
         self.light.as_ref()?.of(list, self.light_by)
+    }
+
+    /// How much of the page's list has the Light by measure, once it's been worked out (0 until then, or lit by
+    /// nothing).
+    fn lit_share_for(&self, list: &Arc<list::SoundList>) -> f32 {
+        self.light.as_ref().filter(|l| l.of(list, self.light_by).is_some()).map_or(0.0, |l| l.share)
     }
 }
 
@@ -222,7 +230,8 @@ impl SetAsk {
                 },
             )
         });
-        let light = Lit { list: k.list.clone(), by: k.light_by, light };
+        let share = galaxy_look::lit_share(&light);
+        let light = Lit { list: k.list.clone(), by: k.light_by, light, share };
         Packed { version: self.version, grid, bytes, light }
     }
 }
@@ -246,6 +255,54 @@ thread_local! {
     /// Moves a glide on a frame at a time, and when it last did.
     static FLIGHT: Timer = Timer::default();
     static LAST_FRAME: RefCell<Option<Instant>> = const { RefCell::new(None) };
+}
+
+/// How much the stars twinkle (their brightness, up and down), and how often the picture is drawn again for it: a very
+/// slight shimmer, never so much that it gets in the way of looking or picking.
+const TWINKLE: f32 = 0.07;
+const TWINKLE_EVERY: Duration = Duration::from_millis(80);
+
+thread_local! {
+    /// Draws the galaxy again now and then while its stars twinkle.
+    static TWINKLING: Timer = Timer::default();
+    /// The twinkle's clock.
+    static TWINKLE_CLOCK: Instant = Instant::now();
+    /// Whether the last picture had stars drawn as stars, the ones that twinkle (far out with nothing lit, none do).
+    static TWINKLE_SHOWS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Keeps the stars twinkling on the graphics card while the galaxy is on show. Each beat draws only the picture again;
+/// while a button is held or the view glides, the picture is being drawn anyway and doesn't twinkle (see
+/// [`draw_on_card`]), and once the galaxy is off show the beat stops.
+fn keep_twinkling(app: &AppWindow) {
+    if TWINKLING.with(Timer::running) {
+        return;
+    }
+    let weak = app.as_weak();
+    TWINKLING.with(|t| {
+        t.start(TimerMode::Repeated, TWINKLE_EVERY, move || {
+            let Some(app) = weak.upgrade() else { return };
+            let (on_show, moving) = PAGE.with(|p| {
+                let p = p.borrow();
+                let g = &p.galaxy;
+                (p.view == super::GALAXY && g.stars.is_some(), g.view.pressed() || g.view.flying())
+            });
+            let card =
+                gpu::current().filter(|(_, generation)| CARD_FAILED.with(std::cell::Cell::get) != Some(*generation));
+            let Some((gpu, generation)) = card.filter(|_| on_show) else {
+                TWINKLING.with(Timer::stop);
+                return;
+            };
+            if moving || !TWINKLE_SHOWS.with(std::cell::Cell::get) {
+                return;
+            }
+            let _doing = crate::watchdog::doing("Galaxy: twinkle");
+            if let Err(e) = draw_on_card(&app, &gpu, generation, false) {
+                log::warning("Sounds", &format!("The graphics card couldn't draw the galaxy's twinkle: {e}"));
+                TWINKLING.with(Timer::stop);
+            }
+        });
+    });
 }
 
 /// Starts moving a glide on, if it isn't already.
@@ -1114,8 +1171,11 @@ pub(super) fn draw(app: &AppWindow) {
     pack(app, &palette, card.is_some());
     if let Some((gpu, generation)) = &card {
         let (gpu, generation) = (gpu, *generation);
-        match draw_on_card(app, gpu, generation) {
-            Ok(true) => return,
+        match draw_on_card(app, gpu, generation, true) {
+            Ok(true) => {
+                keep_twinkling(app);
+                return;
+            }
             // The stars aren't on the card yet: the picture on show stays until they are.
             Ok(false) => {
                 place_picture(app);
@@ -1381,10 +1441,12 @@ pub(super) fn card_gone(app: &AppWindow) {
     });
 }
 
-/// Draws the galaxy on the card, now: `false` when its stars aren't there yet.
-fn draw_on_card(app: &AppWindow, gpu: &gpu::Gpu, generation: u64) -> Result<bool, String> {
+/// Draws the galaxy on the card, now: `false` when its stars aren't there yet. `whole`: what's over the picture is
+/// placed again too (not for a twinkle, where only the stars' brightness changes).
+fn draw_on_card(app: &AppWindow, gpu: &gpu::Gpu, generation: u64, whole: bool) -> Result<bool, String> {
     let ask = PAGE.with(|p| {
-        let g = &p.borrow().galaxy;
+        let p = p.borrow();
+        let g = &p.galaxy;
         let in_view = match &g.grid {
             Some(grid) => {
                 let (l, t, r, b) = galaxy_look::on_view(&g.view);
@@ -1392,9 +1454,18 @@ fn draw_on_card(app: &AppWindow, gpu: &gpu::Gpu, generation: u64) -> Result<bool
             }
             None => g.count,
         };
-        (g.view, g.scale, galaxy_look::look(&g.view, in_view), g.packed.clone(), g.set_got)
+        let share = g.lit_share_for(&p.list);
+        // The stars twinkle only while nothing moves, so a sweep or a glide never has them flicker.
+        let still = !g.view.pressed() && !g.view.flying();
+        let shine = Shine {
+            light_on: share > 0.0,
+            time: TWINKLE_CLOCK.with(Instant::elapsed).as_secs_f32(),
+            twinkle: if still { TWINKLE } else { 0.0 },
+        };
+        (g.view, g.scale, galaxy_look::look(&g.view, in_view, share), shine, g.packed.clone(), g.set_got)
     });
-    let (view, scale, look, packed, version) = ask;
+    let (view, scale, look, shine, packed, version) = ask;
+    TWINKLE_SHOWS.with(|t| t.set(shine.light_on || look.painted < 0.99));
     if view.width < 1.0 || view.height < 1.0 {
         return Ok(false);
     }
@@ -1421,7 +1492,7 @@ fn draw_on_card(app: &AppWindow, gpu: &gpu::Gpu, generation: u64) -> Result<bool
             return Ok(None);
         }
         let _doing = crate::watchdog::doing("Galaxy: draw on the GPU");
-        gpu::checked(&gpu.device, || on.sky.draw(&view, scale, &look, background)).map(Some)
+        gpu::checked(&gpu.device, || on.sky.draw(&view, scale, &look, shine, background)).map(Some)
     })?;
     let Some(texture) = texture else { return Ok(false) };
     let _doing = crate::watchdog::doing("Galaxy: show the GPU picture (property updates)");
@@ -1434,8 +1505,10 @@ fn draw_on_card(app: &AppWindow, gpu: &gpu::Gpu, generation: u64) -> Result<bool
         g.drawn = Some(view);
     });
     app.global::<SoundsData>().set_galaxy_image(image);
-    place_picture(app);
-    show_picked(app);
+    if whole {
+        place_picture(app);
+        show_picked(app);
+    }
     Ok(true)
 }
 

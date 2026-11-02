@@ -5,14 +5,17 @@
 //!
 //! To look like a galaxy rather than a scatter plot, the stars give off light: each one brightens what's under it
 //! (a "screen" blend, so a crowd of them glows towards white, the way a galaxy's core does), and behind them a soft
-//! cloud of each crowd's colour glows like a nebula, thicker where more sounds are alike.
+//! cloud of each crowd's colour glows like a nebula, thicker where more sounds are alike. As on the graphics card,
+//! close up each star has a white-hot core in a soft glow, and with Light by on the best lit ones get it far out too.
 
 use std::sync::Arc;
 
 use mo_sounds::StarPoint;
 use rayon::prelude::*;
 
-use crate::galaxy_look::{lit_size, lit_weight};
+use crate::galaxy_look::{
+    self as gl, FAR_GLOW, FAR_HALO, GLOW, GLOW_LIT, HOT, MIN_LIT_PX, UNLIT_SIZE, WHITE, lit_size, lit_weight,
+};
 use crate::galaxy_view::View;
 
 /// The nebula's grid, in points: each square gathers the light of the stars in it, then it's blurred and spread.
@@ -25,9 +28,6 @@ const CLOUD_LIGHT: f32 = 0.3;
 const CLOUD_THICK: f32 = 6.0;
 /// Up to about this many stars on show, each shines fully; more and each is dimmed.
 const BRIGHT_CROWD: f32 = 30_000.0;
-/// With Light by on, an unlit star is drawn this much the size of an all-alike one, and a fully lit one 2.8 times
-/// that (the graphics card's curve, [`lit_size`]), so the lit ones stand out without the map filling up.
-const UNLIT_SIZE: f32 = 0.7;
 
 /// One pixel, its colour premultiplied by its alpha.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -69,7 +69,8 @@ pub struct Picture {
 /// scale factor), so a star never reaches past the band below the one its top is in.
 const BAND: usize = 64;
 
-/// A star to draw: where (in pixels), its size, colour and strength.
+/// A star to draw: where (in pixels), its size, colour and strength, and how strong its glow is (0 for none) and
+/// how far it reaches (in pixels).
 #[derive(Clone, Copy)]
 struct Dot {
     x: f32,
@@ -77,6 +78,10 @@ struct Dot {
     r: f32,
     colour: [u8; 3],
     alpha: f32,
+    glow: f32,
+    halo: f32,
+    /// How lit it is (0 to 1), for its glow.
+    lit: f32,
 }
 
 impl Picture {
@@ -102,16 +107,24 @@ impl Picture {
         // white; zoomed in, or with the filters leaving few, fewer are on show and each shines fully.
         let on_show = self.shown.len().max(1) as f32 / (self.view.zoom * self.view.zoom);
         let bright = (0.9 * (BRIGHT_CROWD / on_show).sqrt()).clamp(0.3, 0.9);
-        // How big and bright each shown star is for how lit it is (all alike with nothing lit).
+        // How big and bright each shown star is for how lit it is (all alike with nothing lit), and how strongly it
+        // glows: every star close up, only the best lit far out (the graphics card's look).
         let lighting = !self.light.is_empty();
-        let lit = |at: usize| -> (f32, f32) {
+        let in_view = (self.shown.len() as f32 / (self.view.zoom * self.view.zoom)).round() as usize;
+        let lk = gl::look(&self.view, in_view, gl::lit_share(&self.light));
+        let crisp = 1.0 - lk.painted;
+        let lit = |at: usize| -> (f32, f32, f32, f32) {
             if !lighting {
-                return (1.0, 1.0);
+                return (r, 1.0, crisp, 0.0);
             }
             let l = self.light.get(at).copied().unwrap_or(0.0);
-            (UNLIT_SIZE * lit_size(l), lit_weight(l) / lit_weight(1.0))
+            let glint = gl::glint(l, lk.glint_from);
+            let size = (r * UNLIT_SIZE * lit_size(l)).max(MIN_LIT_PX * self.scale * glint * lk.painted);
+            (size, lit_weight(l) / lit_weight(1.0), crisp.max(lk.painted * glint), l)
         };
-        let biggest = if lighting { r * UNLIT_SIZE * lit_size(1.0) } else { r };
+        // A glow reaches 2.8 times its star's core, a well lit one's up to twice that.
+        let biggest =
+            if lighting { (r * UNLIT_SIZE * lit_size(1.0)).max(MIN_LIT_PX * self.scale) * 5.6 } else { r * 2.8 };
         let band_rows = BAND.max((2.0 * biggest + 4.0).ceil() as usize);
         let bands = h.div_ceil(band_rows).max(1);
         // The nebula's squares, lined up with the map so its light holds still as the map is dragged, and the stars
@@ -142,9 +155,22 @@ impl Picture {
                     .copied()
                     .unwrap_or(grey);
                 let shown = on[at];
-                let (size, glow) = if shown { lit(at) } else { (0.8, 0.16) };
-                let dot = Dot { x, y, r: r * size, colour, alpha: bright * glow };
-                let band = ((y - dot.r - 1.0).max(0.0) as usize / band_rows).min(bands - 1);
+                let (radius, strength, glow, l) = if shown { lit(at) } else { (r * 0.8, 0.16, 0.0, 0.0) };
+                let alpha = bright * strength;
+                let halo = radius * (FAR_HALO + (2.8 + 2.8 * l - FAR_HALO) * crisp);
+                let dot = Dot {
+                    x,
+                    y,
+                    r: radius,
+                    colour,
+                    alpha,
+                    glow: glow * alpha.max(0.5) * (FAR_GLOW + (1.0 - FAR_GLOW) * crisp),
+                    halo,
+                    lit: l,
+                };
+                // Its top edge: its glow's when it has one.
+                let reach = if dot.glow > 0.02 { dot.halo.max(dot.r + 1.0) } else { dot.r + 1.0 };
+                let band = ((y - reach).max(0.0) as usize / band_rows).min(bands - 1);
                 Some((band, shown, at, dot))
             })
             .collect();
@@ -179,11 +205,29 @@ impl Picture {
     }
 }
 
-/// Draws a soft-edged dot over what's there (colours premultiplied by their alpha), on the rows in `rows`: a band of
-/// the picture `w` pixels wide whose first row is row `y0` of the whole picture.
+/// Draws a star over what's there (colours premultiplied by their alpha), on the rows in `rows`: a band of the
+/// picture `w` pixels wide whose first row is row `y0` of the whole picture. Its glow first (when it has one), then
+/// its soft-edged core, white-hot in the middle.
 fn disc(rows: &mut [Rgba], w: usize, y0: usize, d: &Dot) {
     let h = rows.len() / w.max(1);
     let (x, y, r) = (d.x, d.y - y0 as f32, d.r);
+    if d.glow > 0.02 {
+        let reach = d.halo.max(r + 1.0);
+        let (x0, x1) = ((x - reach).floor().max(0.0) as usize, ((x + reach).ceil().max(0.0) as usize).min(w));
+        let (top, bottom) = ((y - reach).floor().max(0.0) as usize, ((y + reach).ceil().max(0.0) as usize).min(h));
+        for py in top..bottom {
+            let dy = (py as f32 + 0.5 - y).powi(2);
+            for px in x0..x1 {
+                let d2 = (px as f32 + 0.5 - x).powi(2) + dy;
+                let edge = (1.0 - d2.sqrt() / reach).max(0.0);
+                // The graphics card's falloff: soft from the core, gone by the glow's edge.
+                let a = (GLOW + GLOW_LIT * d.lit) * d.glow * edge.powf(1.3);
+                if a > 0.004 {
+                    screen(&mut rows[py * w + px], d.colour, a);
+                }
+            }
+        }
+    }
     let (x0, x1) = ((x - r - 1.0).floor().max(0.0) as usize, ((x + r + 1.0).ceil().max(0.0) as usize).min(w));
     let (top, bottom) = ((y - r - 1.0).floor().max(0.0) as usize, ((y + r + 1.0).ceil().max(0.0) as usize).min(h));
     let outer = (r + 0.5).powi(2);
@@ -201,6 +245,13 @@ fn disc(rows: &mut [Rgba], w: usize, y0: usize, d: &Dot) {
                 (r + 0.5 - d2.sqrt()).clamp(0.0, 1.0) * d.alpha
             };
             screen(&mut rows[py * w + px], d.colour, a);
+            // The middle heads for white.
+            if d.glow > 0.02 {
+                let hot = WHITE * d.glow * (-d2 / (HOT * r * r + 0.15)).exp();
+                if hot > 0.004 {
+                    screen(&mut rows[py * w + px], [255, 255, 255], hot);
+                }
+            }
         }
     }
 }
@@ -347,17 +398,33 @@ mod tests {
     #[test]
     fn a_disc_covers_its_middle_and_not_far_away() {
         let mut buf = vec![Rgba::default(); 100];
-        let dot = Dot { x: 5.0, y: 5.0, r: 1.5, colour: [200, 100, 50], alpha: 1.0 };
+        let dot = Dot { x: 5.0, y: 5.0, r: 1.5, colour: [200, 100, 50], alpha: 1.0, glow: 0.0, halo: 0.0, lit: 0.0 };
         disc(&mut buf, 10, 0, &dot);
         assert_eq!(buf[5 * 10 + 5].a, 255);
         assert_eq!(buf[0].a, 0);
     }
 
     #[test]
+    fn a_glowing_star_lights_round_it_and_its_middle_heads_for_white() {
+        let mut plain = vec![Rgba::default(); 400];
+        let mut glowing = plain.clone();
+        let dot = Dot { x: 10.0, y: 10.0, r: 2.0, colour: [40, 80, 200], alpha: 0.6, glow: 0.0, halo: 0.0, lit: 0.0 };
+        disc(&mut plain, 20, 0, &dot);
+        disc(&mut glowing, 20, 0, &Dot { glow: 1.0, halo: 6.0, ..dot });
+        // Three pixels out, past the core: only the glowing one lights it.
+        assert_eq!(plain[10 * 20 + 13].a, 0);
+        assert!(glowing[10 * 20 + 13].a > 0);
+        // The middle is whiter: its red (the colour's weakest) is lifted most.
+        assert!(glowing[10 * 20 + 10].r > plain[10 * 20 + 10].r + 40);
+        // Nothing past the glow's reach.
+        assert_eq!(glowing[10 * 20 + 19].a, 0);
+    }
+
+    #[test]
     fn a_disc_lands_on_the_right_rows_of_a_band() {
         // The band holds rows 4 to 7 of the picture; the dot sits on row 5, the band's second row.
         let mut band = vec![Rgba::default(); 40];
-        let dot = Dot { x: 5.0, y: 5.5, r: 1.0, colour: [200, 100, 50], alpha: 1.0 };
+        let dot = Dot { x: 5.0, y: 5.5, r: 1.0, colour: [200, 100, 50], alpha: 1.0, glow: 0.0, halo: 0.0, lit: 0.0 };
         disc(&mut band, 10, 4, &dot);
         assert_eq!(band[10 + 5].a, 255);
         assert_eq!(band[3 * 10 + 5].a, 0);

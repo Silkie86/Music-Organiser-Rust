@@ -6,8 +6,12 @@
 //! - one last step squeezes the brightness, so a crowd stays vivid and keeps its colour instead of burning white.
 //!
 //! How many stars are on the view decides the rest. Far out they're only painted that way. Close up each one is also
-//! drawn crisply, a bright core in a soft halo, with the stars the filters leave out kept as faint dust. In between
-//! the two blend.
+//! drawn as a star, a white-hot core in a soft glow, with the stars the filters leave out kept as faint dust. In
+//! between the two blend.
+//!
+//! With Light by on, the unlit stars are dimmer and smaller, and the best lit ones are drawn as stars even far out
+//! (never smaller than [`MIN_LIT_PX`]), with a bigger glow; the very brightest few get faint four-point spikes. So
+//! what Light by picks out shows at every zoom, while the unlit stars still keep the map's shape.
 
 use mo_sounds::StarPoint;
 use rayon::prelude::*;
@@ -100,10 +104,49 @@ pub fn lit_size(lit: f32) -> f32 {
     1.0 + 1.8 * lit.clamp(0.0, 1.0).sqrt()
 }
 
-/// How bright a star is for how lit it is (0 to 1): 0.5 for an unlit one, up to 1.4 (as C#: a liked star shines up
-/// to nearly three times as bright).
+/// How bright a star is for how lit it is (0 to 1), with Light by on: 0.3 for an unlit one (dimmer than the 0.5 of
+/// an all-alike star, so the lit ones stand out), up to 1.5, five times as bright.
 pub fn lit_weight(lit: f32) -> f32 {
-    0.5 + 0.9 * lit.clamp(0.0, 1.0).sqrt()
+    0.3 + 1.2 * lit.clamp(0.0, 1.0).sqrt()
+}
+
+/// How bright every star is with nothing lit.
+pub const ALIKE_WEIGHT: f32 = 0.5;
+
+/// With Light by on, an unlit star is drawn this much the size of an all-alike one, and a fully lit one 2.8 times that
+/// ([`lit_size`]), so the lit ones stand out without the map filling up.
+pub const UNLIT_SIZE: f32 = 0.7;
+/// Far out, a star lit enough to show as a point of its own has a core at least this many pixels across its radius.
+pub const MIN_LIT_PX: f32 = 1.6;
+/// A star's glow (as drawn by both the card and the processor): how bright it starts, how much brighter for a lit
+/// star, and its white-hot middle (how wide, as a share of the core's radius squared, and how white).
+pub const GLOW: f32 = 0.36;
+pub const GLOW_LIT: f32 = 0.3;
+pub const HOT: f32 = 0.08;
+pub const WHITE: f32 = 0.4;
+/// How much of that glow a star has far out, where it's one of thousands and their glows would add up to white.
+pub const FAR_GLOW: f32 = 0.2;
+/// How far a star's glow reaches far out, as a share of its core's radius (close up it's 2.8, up to twice that lit).
+pub const FAR_HALO: f32 = 2.2;
+/// About how many of the best lit stars on the view show as points of their own when it's far out, and how many get
+/// spikes: a few thousand points read as "these", more would fill the map.
+const GLINTS: f32 = 2_500.0;
+const SPIKY: f32 = 250.0;
+/// Spikes only ever go to the top 1.5 in a hundred.
+const SPIKES_FROM: f32 = 0.985;
+
+/// How much of the list has the Light by measure (0 to 1): the share of `light` above 0. 0 with nothing lit.
+pub fn lit_share(light: &[f32]) -> f32 {
+    if light.is_empty() {
+        return 0.0;
+    }
+    light.par_iter().filter(|&&l| l > 0.0).count() as f32 / light.len() as f32
+}
+
+/// How strongly a star this lit shows as a point of its own when the view is painted (0 to 1), with `from` from
+/// [`Look::glint_from`].
+pub fn glint(lit: f32, from: f32) -> f32 {
+    smooth(from, 1.0, lit)
 }
 
 /// Below this many stars on the view each is drawn crisply; above the upper one they're only painted (as C#).
@@ -128,6 +171,9 @@ pub struct Look {
     pub gain: f32,
     /// A crisp star's core radius, in points.
     pub radius: f32,
+    /// From how lit a star shows as a point of its own far out, and from how lit it gets spikes.
+    pub glint_from: f32,
+    pub spikes_from: f32,
 }
 
 /// A smooth step from 0 at `a` to 1 at `b`.
@@ -136,9 +182,12 @@ fn smooth(a: f32, b: f32, v: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// The look for `view` with `in_view` shown stars on it.
-pub fn look(view: &View, in_view: usize) -> Look {
+/// The look for `view` with `in_view` shown stars on it, `lit_share` of which have the Light by measure (see
+/// [`lit_share`]; 0 with nothing lit).
+pub fn look(view: &View, in_view: usize, lit_share: f32) -> Look {
     let n = in_view as f32;
+    // Light ranks the sounds that have the measure, so the top ones are a share of those on the view.
+    let lit_on_view = (n * lit_share.clamp(0.0, 1.0)).max(1.0);
     let painted = smooth(CRISP, PAINTED, n);
     let area = (view.width * view.height).max(1.0);
     // The more stars per point, the gentler the squeeze, so a busy view isn't all white.
@@ -153,6 +202,8 @@ pub fn look(view: &View, in_view: usize) -> Look {
         glow: (0.35 + 0.65 * painted) / STAMP * 0.9,
         gain,
         radius: (1.9 * grow).clamp(1.6, room),
+        glint_from: (1.0 - GLINTS / lit_on_view).clamp(0.6, 0.995),
+        spikes_from: (1.0 - SPIKY / lit_on_view).clamp(SPIKES_FROM, 0.9995),
     }
 }
 
@@ -195,7 +246,11 @@ pub fn pack(
         let c = colours.get(at).and_then(|&i| usize::try_from(i).ok()).and_then(|i| palette.get(i)).copied();
         let [r, g, b] = c.unwrap_or(grey);
         let lit = light.get(at).copied().unwrap_or(0.0).clamp(0.0, 1.0);
-        let weight = if want { lit_weight(lit) } else { 0.05 } * twinkle(at);
+        let weight = match (want, light.is_empty()) {
+            (false, _) => 0.05,
+            (true, true) => ALIKE_WEIGHT,
+            (true, false) => lit_weight(lit),
+        } * twinkle(at);
         let flag = if want { 1 + (lit * 254.0).round() as u8 } else { 0 };
         let mut out = [0u8; STAR_BYTES];
         out[0..4].copy_from_slice(&p.x.to_le_bytes());
@@ -206,10 +261,29 @@ pub fn pack(
     };
     let mut bytes: Vec<u8> = Vec::with_capacity(stars.len() * STAR_BYTES);
     for want in [false, true] {
-        let part: Vec<[u8; STAR_BYTES]> = stars.par_iter().enumerate().filter_map(|s| star(s, want)).collect();
+        let mut part: Vec<[u8; STAR_BYTES]> = stars.par_iter().enumerate().filter_map(|s| star(s, want)).collect();
+        // The shown ones from the least lit to the most, so the best lit are drawn on top and come last: far out only
+        // those few are drawn as stars, and the card is told to start there (see `lit_counts`).
+        if want {
+            part.par_sort_by_key(|s| s[11]);
+        }
         bytes.extend_from_slice(part.as_flattened());
     }
     bytes
+}
+
+/// How many of the stars [`pack`] made have each light byte (0 left out, 1 to 255 shown, by how lit).
+pub fn lit_counts(bytes: &[u8]) -> [u32; 256] {
+    let mut counts = [0u32; 256];
+    for star in bytes.as_chunks::<STAR_BYTES>().0 {
+        counts[usize::from(star[11])] += 1;
+    }
+    counts
+}
+
+/// How many stars are lit more than `from` (0 to 1), by their light bytes' `counts`: the last that many of [`pack`]'s.
+pub fn lit_more_than(counts: &[u32; 256], from: f32) -> u32 {
+    (1..256).filter(|&f| (f - 1) as f32 / 254.0 > from).map(|f| counts[f]).sum()
 }
 
 /// The camera as the star shaders read it (8 f32, 32 bytes) for a layer `width` by `height` pixels that shows `view`
@@ -242,24 +316,24 @@ mod tests {
     #[test]
     fn far_out_is_painted_and_close_up_is_crisp() {
         let v = view();
-        assert_eq!(look(&v, 450_000).painted, 1.0);
-        assert_eq!(look(&v, 200).painted, 0.0);
-        let between = look(&v, 3_000).painted;
+        assert_eq!(look(&v, 450_000, 0.0).painted, 1.0);
+        assert_eq!(look(&v, 200, 0.0).painted, 0.0);
+        let between = look(&v, 3_000, 0.0).painted;
         assert!(between > 0.0 && between < 1.0);
         // A crowded view squeezes gently, a sparse one fully.
-        assert!(look(&v, 450_000).gain < look(&v, 2_000).gain);
-        assert_eq!(look(&v, 10).gain, 1.7);
+        assert!(look(&v, 450_000, 0.0).gain < look(&v, 2_000, 0.0).gain);
+        assert_eq!(look(&v, 10, 0.0).gain, 1.7);
     }
 
     #[test]
     fn stars_grow_as_the_view_flies_in_but_keep_their_room() {
         let mut v = view();
-        let far = look(&v, 100).radius;
+        let far = look(&v, 100, 0.0).radius;
         v.zoom = 20.0;
-        let near = look(&v, 100).radius;
+        let near = look(&v, 100, 0.0).radius;
         assert!(near > far);
         // Very crowded: they shrink to keep apart, never below 1.6 points.
-        assert_eq!(look(&v, 1_000_000).radius, 1.6);
+        assert_eq!(look(&v, 1_000_000, 0.0).radius, 1.6);
     }
 
     #[test]
@@ -294,6 +368,52 @@ mod tests {
         assert!(light(&list, LightBy::Nothing).is_empty());
         assert!(light(&list, LightBy::Used).is_empty());
         assert_eq!(LightBy::from_name("Used in songs"), Some(LightBy::Used));
+    }
+
+    #[test]
+    fn far_out_only_the_best_lit_few_thousand_glint_and_a_few_hundred_get_spikes() {
+        let v = view();
+        // Length: every sound has the measure. 450,000 on the view: the top 2,500 show as points, 250 get spikes.
+        let all = look(&v, 450_000, 1.0);
+        assert!((all.glint_from - (1.0 - 2_500.0 / 450_000.0)).abs() < 1e-6);
+        assert!((all.spikes_from - (1.0 - 250.0 / 450_000.0)).abs() < 1e-6);
+        // Liked: 2,000 liked sounds. Their top 40 in a hundred glint; spikes for the top 1.5 in a hundred at most.
+        let liked = look(&v, 450_000, 2_000.0 / 450_000.0);
+        assert_eq!(liked.glint_from, 0.6);
+        assert_eq!(liked.spikes_from, 0.985);
+        assert_eq!(glint(0.5, 0.6), 0.0);
+        assert_eq!(glint(1.0, 0.6), 1.0);
+        assert!(glint(0.9, 0.6) > glint(0.7, 0.6));
+    }
+
+    #[test]
+    fn with_light_by_on_the_unlit_stars_are_dimmer_than_all_alike_ones_and_the_lit_brighter() {
+        assert!(lit_weight(0.0) < ALIKE_WEIGHT);
+        assert!(lit_weight(1.0) >= 3.0 * ALIKE_WEIGHT);
+        let stars = vec![Some(StarPoint { x: 0.5, y: 0.5 })];
+        let weight = |light: &[f32]| {
+            let b = pack(&stars, &[0], &[[1, 2, 3]], &[0], light);
+            f32::from_le_bytes(b[12..16].try_into().unwrap())
+        };
+        let alike = weight(&[]);
+        assert!(weight(&[0.0]) < alike && weight(&[1.0]) > alike);
+        assert_eq!(lit_share(&[0.0, 0.5, 1.0, 0.0]), 0.5);
+        assert_eq!(lit_share(&[]), 0.0);
+    }
+
+    #[test]
+    fn the_shown_stars_go_from_least_lit_to_most_so_the_best_lit_come_last() {
+        let stars: Vec<Option<StarPoint>> = (0..5).map(|i| Some(StarPoint { x: i as f32 / 5.0, y: 0.5 })).collect();
+        let light = [1.0, 0.0, 0.5, 0.9, 0.2];
+        // The fourth is left out.
+        let bytes = pack(&stars, &[0; 5], &[[9, 9, 9]], &[0, 1, 2, 4], &light);
+        let flags: Vec<u8> = bytes.as_chunks::<STAR_BYTES>().0.iter().map(|s| s[11]).collect();
+        assert_eq!(flags, [0, 1, 1 + 51, 1 + 127, 255]);
+        let counts = lit_counts(&bytes);
+        assert_eq!(counts[0], 1);
+        assert_eq!(lit_more_than(&counts, 0.6), 1);
+        assert_eq!(lit_more_than(&counts, 0.4), 2);
+        assert_eq!(lit_more_than(&counts, -1.0), 4);
     }
 
     #[test]
