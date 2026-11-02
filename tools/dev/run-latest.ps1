@@ -32,7 +32,7 @@ param(
 )
 
 # Raised whenever this script changes, so an older branch's copy never replaces a newer installed one.
-$LauncherVersion = 2
+$LauncherVersion = 3
 
 $ErrorActionPreference = 'Continue'   # git and cargo write progress to stderr, which Windows PowerShell treats as failure
 $GitHubRepo = 'Silkie86/Music-Organiser-Rust'
@@ -243,8 +243,21 @@ function Build-App {
     Say "$(Get-Date -Format 'HH:mm:ss')  Building..." 'DarkGray'
     # The build folder is named, so a CARGO_TARGET_DIR set on the PC can't move the app somewhere this doesn't look.
     $targetDir = Join-Path $Repo 'target'
+    # The compiler itself crashing (rustc exits with 101; a plain build error is 1) can come from a damaged
+    # incremental cache even when the code is fine, as CI builds without one. The cache only speeds builds up, so
+    # it's cleared and the build tried once more.
+    $crashed = $false
     & $CargoExe build --manifest-path (Join-Path $Repo 'Cargo.toml') --target-dir $targetDir --bin $AppName --color never 2>&1 |
-        ForEach-Object { Say "  $_" 'DarkGray' }
+        ForEach-Object {
+            if ("$_" -match 'rustc.*\(exit code: 101\)') { $crashed = $true }
+            Say "  $_" 'DarkGray'
+        }
+    if ($LASTEXITCODE -ne 0 -and $crashed) {
+        Say 'The compiler crashed. Clearing its incremental cache and trying once more...' 'Yellow'
+        Remove-Item -Recurse -Force (Join-Path (Join-Path $targetDir 'debug') 'incremental') -ErrorAction SilentlyContinue
+        & $CargoExe build --manifest-path (Join-Path $Repo 'Cargo.toml') --target-dir $targetDir --bin $AppName --color never 2>&1 |
+            ForEach-Object { Say "  $_" 'DarkGray' }
+    }
     if ($LASTEXITCODE -ne 0) {
         Say 'The build failed (what cargo said is above). The app keeps the version it has; the next push is tried again.' 'Red'
         return $null
