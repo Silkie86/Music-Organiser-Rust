@@ -1,15 +1,18 @@
-//! Tests of the explanations ([`super::ChordReader::explain`]): what each note does in the design's hand cases and in
-//! music made for each kind of note, where the bass comes from, the evidence as the scoring weighs it, the rules every
-//! explanation keeps for any music, and that the same notes moved or at another resolution explain the same.
+//! Tests of the explanations ([`super::ChordExplainer`]): what each note does in the design's hand cases and in music
+//! made for each kind of note, where the bass comes from, the evidence as the scoring weighs it (and as the decode
+//! scored it), chords held on from the stretch before, the rules every explanation keeps for any music, that the same
+//! notes moved or at another resolution explain the same, and that a reading of other notes or pins explains nothing.
 
+use super::decode::{Reading as Kept, kept_pins};
 use super::decode_tests::small_music;
 use super::hear_tests::{BAR, BEAT, Dice, Music, line, notes, random_music};
 use super::name::push_to;
-use super::reader_tests::{hand_cases, random_pins, the_music_in_ticks};
+use super::reader::pinned;
+use super::reader_tests::{chord, hand_cases, random_pins, the_music_in_ticks};
 use super::{
-    BassFrom, ChordContext, ChordReader, ChordReading, ChordSpan, Evidence, Explanation, Feature, Hearing,
-    MOST_READINGS, NoteDoes, NoteWhy, PerFeature, Pin, Priors, SHIPPED, SpanFacts, SpanFlags, Stream, TERMS_SHOWN,
-    Term,
+    BassFrom, ChordContext, ChordExplainer, ChordReader, ChordReading, ChordSpan, Decoder, Decoding, Evidence,
+    Explanation, Feature, Hearing, Label, MOST_READINGS, NoteDoes, NoteWhy, PerFeature, Pin, PinnedSpan, Priors,
+    SHIPPED, SpanFacts, SpanFlags, Stream, TERMS_SHOWN, Term, TermWhy,
 };
 use crate::notes::{Note, Part, Role};
 use crate::pitch::{PcSet, PitchClass};
@@ -24,20 +27,44 @@ fn parts(music: &Music) -> Vec<Part<'_>> {
     music.parts.iter().map(|(role, notes)| Part { role: *role, notes }).collect()
 }
 
-/// What some music reads with some pins, keeping `readings` a span, and each span explained, by one reader.
+/// What some music reads with some pins, keeping `readings` a span, and each span explained, by one explainer;
+/// explained all at once too, which must say the same.
 fn explained(music: &Music, pins: &[Pin], readings: u8) -> (ChordReading, Vec<Option<Explanation>>) {
     let parts = parts(music);
     let cx = ChordContext { span: music.span, pins, readings };
-    let mut reader = ChordReader::new();
-    let reading = reader.read(&parts, music.grid, &cx).expect("nothing read");
-    let all = (0..reading.spans.len()).map(|s| reader.explain(&parts, music.grid, &cx, &reading, s)).collect();
+    let reading = ChordReader::new().read(&parts, music.grid, &cx).expect("nothing read");
+    let mut explainer = ChordExplainer::new();
+    let all: Vec<Option<Explanation>> =
+        (0..reading.spans.len()).map(|s| explainer.explain(&parts, music.grid, &cx, &reading, s)).collect();
+    let at_once = explainer.explain_all(&parts, music.grid, &cx, &reading).expect("not a reading of the notes");
+    assert_eq!(at_once, all.iter().flatten().cloned().collect::<Vec<_>>(), "explained all at once");
     (reading, all)
+}
+
+/// Where every reading starts a chord, as the decode reads some pins: where each pin it keeps starts and ends.
+fn edges(hearing: &Hearing, pins: &[Pin]) -> Vec<usize> {
+    let pinned: Vec<PinnedSpan> = pins.iter().map(|p| pinned(hearing, p)).collect();
+    kept_pins(hearing, &pinned).iter().flat_map(|(units, _)| [units.start, units.end]).collect()
+}
+
+/// Whether a reading of a stretch is the chord before it held on (for a loop's first stretch, the chord the decode
+/// reads before it as the loop goes round): no pin starts or ends between them.
+fn held_on(r: &ChordReading, span: usize, label: Label, edges: &[usize], reported: usize) -> bool {
+    let before = match span.checked_sub(1) {
+        Some(b) => r.spans[b].label,
+        None => r.before,
+    };
+    before == Some(label) && !edges.contains(&(reported + r.spans[span].units.start))
+}
+
+/// Whether a piece of evidence is about where a chord starts.
+fn about_the_start(t: &TermWhy) -> bool {
+    matches!(t.term, Term::Feature(f) if f.once())
 }
 
 /// A hand case's explanation of one span, every reading kept.
 fn case(name: &str, span: usize) -> Explanation {
-    let (_, music) = hand_cases().into_iter().find(|(n, _)| *n == name).unwrap_or_else(|| panic!("no case {name}"));
-    let (_, all) = explained(&music, &[], MOST_READINGS);
+    let (_, all) = explained(&case_music(name), &[], MOST_READINGS);
     all[span].clone().unwrap_or_else(|| panic!("{name} [{span}]: no explanation"))
 }
 
@@ -232,43 +259,55 @@ fn the_evidence_is_what_the_scoring_weighs_the_biggest_lead_first() {
     let priors = Priors::of(SHIPPED.tables);
     let (w, pair) = (&SHIPPED.weights.features, SHIPPED.weights.pair);
     let mut evidence = Evidence::new();
-    let mut facts = SpanFacts::new();
+    let (mut facts, mut plain) = (SpanFacts::new(), SpanFacts::new());
+    let mut held_where_pushed = 0;
     for (music, pins) in the_music_in_ticks() {
         let hearing = music.hear();
+        let edges = edges(&hearing, &pins);
         let (reading, all) = explained(&music, &pins, 2);
         evidence.prepare(&hearing);
         for (i, (s, e)) in reading.spans.iter().zip(&all).enumerate() {
             let Some(e) = e else { continue };
-            // The evidence worked out again, on the span's units with the pushes to its ends.
+            // The evidence worked out again, on the span's units with the pushes to its ends; and with none to its
+            // start, for a reading held on (from where the chord before ends: never from a chord pushed in early).
             let units = hearing.reported().start + s.units.start..hearing.reported().start + s.units.end;
             let pushed = |s: &ChordSpan| s.flags.contains(SpanFlags::PUSHED);
             let start = if pushed(s) { push_to(&hearing, units.start) } else { None };
             let next = reading.spans.get(i + 1).is_some_and(pushed);
             let end = if next { push_to(&hearing, units.end) } else { None };
-            evidence.facts(&hearing, units, start, end, &mut facts);
+            evidence.facts(&hearing, units.clone(), start, end, &mut facts);
+            evidence.facts(&hearing, units, None, end, &mut plain);
+            let readings = [Some(e.first), e.second];
+            let held =
+                readings.map(|r| r.is_some_and(|r| held_on(&reading, i, r.label, &edges, hearing.reported().start)));
+            let facts_of = |k: usize| if held[k] { &plain } else { &facts };
+            held_where_pushed += held.iter().filter(|&&h| h && start.is_some()).count();
             let mut values = [PerFeature::default(); 2];
-            facts.features(e.first.label, &priors, &mut values[0]);
-            if let Some(second) = e.second {
-                facts.features(second.label, &priors, &mut values[1]);
+            for (k, (r, out)) in readings.iter().zip(&mut values).enumerate() {
+                let Some(r) = r else { continue };
+                facts_of(k).features(r.label, &priors, out);
+                // A chord held on from the stretch before has none of the evidence about where a chord starts.
+                if held[k] {
+                    Feature::ALL.into_iter().filter(|f| f.once()).for_each(|f| out[f] = 0.0);
+                }
             }
             let before = match i.checked_sub(1) {
                 Some(b) => reading.spans[b].label,
-                None if reading.looped => reading.spans.last().unwrap().label,
-                None => None,
+                None => reading.before,
             };
             let after = reading.spans.get(i + 1).and_then(|s| s.label);
-            let pairs = [Some(e.first.label), e.second.map(|r| r.label)].map(|label| {
-                label.map_or(0.0, |l| {
-                    before.map_or(0.0, |b| SHIPPED.tables.pair_prior(b, l))
-                        + after.map_or(0.0, |a| SHIPPED.tables.pair_prior(l, a))
+            let pairs = readings.map(|r| {
+                r.map_or(0.0, |r| {
+                    before.map_or(0.0, |b| SHIPPED.tables.pair_prior(b, r.label))
+                        + after.map_or(0.0, |a| SHIPPED.tables.pair_prior(r.label, a))
                 })
             });
             let what = format!("span {i}: {}", render(e));
             // Every piece that differs is there, as the scoring weighs it, and no other.
             let mut want = Vec::new();
             for f in Feature::ALL {
-                let counted = if f.once() { 1.0 } else { facts.beats() };
-                let scores = [w[f] * values[0][f] * counted, w[f] * values[1][f] * counted];
+                let counted = |k: usize| if f.once() { 1.0 } else { facts_of(k).beats() };
+                let scores = [w[f] * values[0][f] * counted(0), w[f] * values[1][f] * counted(1)];
                 if scores[0] != scores[1] {
                     want.push((Term::Feature(f), [values[0][f], values[1][f]], scores));
                 }
@@ -286,14 +325,14 @@ fn the_evidence_is_what_the_scoring_weighs_the_biggest_lead_first() {
             assert!(e.terms.windows(2).all(|t| t[0].lead().abs() >= t[1].lead().abs()), "{what}");
             assert_eq!(e.shown_terms(), &e.terms[..e.terms.len().min(TERMS_SHOWN)]);
             // The totals are the scoring's, with the pair term.
-            let score = |v: &PerFeature<f64>| facts.score(v, SHIPPED.weights);
-            let totals =
-                [score(&values[0]) + pair * pairs[0], e.second.map_or(0.0, |_| score(&values[1]) + pair * pairs[1])];
+            let score = |k: usize| facts_of(k).score(&values[k], SHIPPED.weights) + pair * pairs[k];
+            let totals = [score(0), e.second.map_or(0.0, |_| score(1))];
             for (got, want) in e.totals.iter().zip(totals) {
                 assert!((got - want).abs() <= 1e-9 * want.abs().max(1.0), "{what}: {got} not {want}");
             }
         }
     }
+    assert!(held_where_pushed > 0);
 }
 
 #[test]
@@ -318,14 +357,18 @@ fn with_no_runner_up_the_first_readings_evidence_is_told_biggest_first() {
     }
 }
 
-/// The rules every explanation of a reading keeps, as the reason one is broken.
+/// The rules every explanation of a reading keeps, as the reason one is broken; and how many of its readings are held
+/// on, first readings and runners-up.
 fn keeps_the_rules(
     music: &Music,
     hearing: &Hearing,
+    pins: &[Pin],
     r: &ChordReading,
     all: &[Option<Explanation>],
-) -> Result<(), String> {
+) -> Result<[usize; 2], String> {
     let check = |ok: bool, what: &str| if ok { Ok(()) } else { Err(what.to_owned()) };
+    let edges = edges(hearing, pins);
+    let mut held = [0, 0];
     for (i, (s, e)) in r.spans.iter().zip(all).enumerate() {
         let Some(e) = e else {
             check(s.readings.is_empty(), &format!("span {i}: no explanation"))?;
@@ -347,7 +390,10 @@ fn keeps_the_rules(
             check(notes[w.note].key == w.key, &what("the key"))?;
             let pc = PitchClass::of_key(w.key);
             let interval = i32::from(pc.above(chord.root()));
-            let bass_like = matches!(w.does, NoteDoes::Bass(_) | NoteDoes::Walking | NoteDoes::Approach);
+            // Only the bass walks or approaches, and only the bass is the bass, but where it doubles a bass written
+            // under the chord that's only a bass.
+            let doubles = matches!(w.does, NoteDoes::Bass(_)) && pc == chord.bass() && !chord.notes().contains(pc);
+            let bass_like = matches!(w.does, NoteDoes::Bass(_) | NoteDoes::Walking | NoteDoes::Approach) && !doubles;
             let heard = match w.heard_as {
                 Stream::Bass => *role != Role::Melody,
                 Stream::Melody => *role == Role::Melody,
@@ -391,15 +437,22 @@ fn keeps_the_rules(
         let none = e.second.is_none();
         check(!none || e.terms.iter().all(|t| t.scores[1] == 0.0) && e.totals[1] == 0.0, &what("no runner-up"))?;
         check(e.totals.iter().all(|t| t.is_finite()), &what("totals"))?;
+        // A reading held on from the chord before has nothing about where a chord starts.
+        for (k, reading) in [Some(e.first), e.second].iter().enumerate() {
+            if reading.is_some_and(|x| held_on(r, i, x.label, &edges, hearing.reported().start)) {
+                check(e.terms.iter().filter(|t| about_the_start(t)).all(|t| t.values[k] == 0.0), &what("held on"))?;
+                held[k] += 1;
+            }
+        }
     }
-    Ok(())
+    Ok(held)
 }
 
 #[test]
 fn any_music_with_any_pins_is_explained_by_the_rules() {
     let mut dice = Dice(0x3c6e_f372_fe94_f82b);
     let mut hearing = Hearing::new();
-    let mut explained_spans = 0;
+    let (mut explained_spans, mut held) = (0, [0, 0]);
     for round in 0..200 {
         let music = if round % 2 == 0 { random_music(&mut dice) } else { small_music(&mut dice) };
         if !music.hear_into(&mut hearing) {
@@ -408,15 +461,18 @@ fn any_music_with_any_pins_is_explained_by_the_rules() {
         let pins = random_pins(&mut dice, &hearing);
         let keep = dice.pick(&[1, 2, 6]);
         let (r, all) = explained(&music, &pins, keep);
-        if let Err(why) = keeps_the_rules(&music, &hearing, &r, &all) {
-            panic!("round {round}: {why}\n{music:?}, pins {pins:?}");
+        match keeps_the_rules(&music, &hearing, &pins, &r, &all) {
+            Ok([first, second]) => held = [held[0] + first, held[1] + second],
+            Err(why) => panic!("round {round}: {why}\n{music:?}, pins {pins:?}"),
         }
         explained_spans += all.iter().flatten().count();
     }
     assert!(explained_spans > 500, "{explained_spans} spans explained");
+    // First readings and runners-up held on are both met.
+    assert!(held[0] > 10 && held[1] > 10, "held on: {held:?}");
     for (music, pins) in the_music_in_ticks() {
         let (r, all) = explained(&music, &pins, MOST_READINGS);
-        if let Err(why) = keeps_the_rules(&music, &music.hear(), &r, &all) {
+        if let Err(why) = keeps_the_rules(&music, &music.hear(), &pins, &r, &all) {
             panic!("{why}\n{music:?}");
         }
     }
@@ -475,34 +531,237 @@ fn the_same_notes_moved_or_at_another_resolution_are_explained_the_same() {
 }
 
 #[test]
-fn a_reading_of_other_notes_a_rest_or_a_stretch_not_there_explains_nothing() {
+fn a_reading_of_other_notes_or_pins_a_rest_or_a_stretch_not_there_explains_nothing() {
     let music = Music::new()
         .bass([notes("C2", 0, BAR), notes("F2", 2 * BAR, BAR)].concat())
         .keys([notes("C4 E4 G4", 0, BAR), notes("F3 A3 C4", 2 * BAR, BAR)].concat());
     let parts = parts(&music);
     let cx = ChordContext::new(music.span);
-    let mut reader = ChordReader::new();
-    let r = reader.read(&parts, music.grid, &cx).unwrap();
+    let r = ChordReader::new().read(&parts, music.grid, &cx).unwrap();
+    let mut explainer = ChordExplainer::new();
     // C | rest | F: the rest has nothing to explain, and there's no fourth stretch.
     assert_eq!(r.spans.len(), 3);
-    assert!(reader.explain(&parts, music.grid, &cx, &r, 0).is_some());
-    assert_eq!(reader.explain(&parts, music.grid, &cx, &r, 1), None);
-    assert_eq!(reader.explain(&parts, music.grid, &cx, &r, 3), None);
+    assert!(explainer.explain(&parts, music.grid, &cx, &r, 0).is_some());
+    assert_eq!(explainer.explain(&parts, music.grid, &cx, &r, 1), None);
+    assert_eq!(explainer.explain(&parts, music.grid, &cx, &r, 3), None);
+    assert_eq!(explainer.explain_all(&parts, music.grid, &cx, &r).map(|all| all.len()), Some(2));
     // Other notes, another grid, a loop: not this reading.
     let other = music.map(|n| Note { start: n.start + BEAT, ..n });
-    assert_eq!(reader.explain(&self::parts(&other), music.grid, &cx, &r, 0), None);
+    assert_eq!(explainer.explain(&self::parts(&other), music.grid, &cx, &r, 0), None);
     let mut grid = music.grid;
     grid.bar_line = BEAT;
-    assert_eq!(reader.explain(&parts, grid, &cx, &r, 0), None);
+    assert_eq!(explainer.explain(&parts, grid, &cx, &r, 0), None);
     let looped = ChordContext::new(crate::keyfind::Span::Loop);
-    assert_eq!(reader.explain(&parts, music.grid, &looped, &r, 0), None);
+    assert_eq!(explainer.explain(&parts, music.grid, &looped, &r, 0), None);
     let fewer = Music { parts: vec![(Role::Bass, notes("C2", 0, BAR)), music.parts[1].clone()], ..music.clone() };
-    assert_eq!(reader.explain(&self::parts(&fewer), music.grid, &cx, &r, 0), None);
+    assert_eq!(explainer.explain(&self::parts(&fewer), music.grid, &cx, &r, 0), None);
     // Nothing heard.
-    assert_eq!(reader.explain(&[], music.grid, &cx, &r, 0), None);
-    // A reader kept and used again explains as a new one.
-    let mut fresh = ChordReader::new();
+    assert_eq!(explainer.explain(&[], music.grid, &cx, &r, 0), None);
+    assert_eq!(explainer.explain_all(&[], music.grid, &cx, &r), None);
+
+    // C held two bars, then F: read with some pins and explained with others (one left out, one added, another
+    // chord given, or the C cut in two where its second bar starts, by a pin with only its ends), not this reading.
+    let music = Music::new()
+        .bass([notes("C2", 0, 2 * BAR), notes("F2", 2 * BAR, BAR)].concat())
+        .keys([notes("C4 E4 G4", 0, 2 * BAR), notes("F3 A3 C4", 2 * BAR, BAR)].concat());
+    let parts = self::parts(&music);
+    let mut explains = |read_with: &[Pin], explained_with: &[Pin]| {
+        let read = ChordContext { span: music.span, pins: read_with, readings: 2 };
+        let r = ChordReader::new().read(&parts, music.grid, &read).unwrap();
+        let cx = ChordContext { pins: explained_with, ..read };
+        explainer.explain_all(&parts, music.grid, &cx, &r).is_some()
+    };
+    let g7 = [Pin { start: 2 * BAR, end: 3 * BAR, chord: Some(chord("G7")) }];
+    let g9 = [Pin { chord: Some(chord("G9")), ..g7[0] }];
+    let cut = [Pin { start: BAR, end: 2 * BAR, chord: None }];
+    for pins in [&[][..], &g7, &g9, &cut] {
+        assert!(explains(pins, pins), "{pins:?}");
+    }
+    for (read_with, explained_with) in
+        [(&g7[..], &[][..]), (&[], &g7), (&g7, &g9), (&cut, &[]), (&[], &cut), (&g7, &cut)]
+    {
+        assert!(!explains(read_with, explained_with), "read with {read_with:?}, explained with {explained_with:?}");
+    }
+}
+
+#[test]
+fn an_explainer_kept_and_used_again_explains_as_a_new_one() {
+    let mut kept = ChordExplainer::new();
+    let music = the_music_in_ticks();
+    for (music, pins) in music.iter().chain(music.iter().rev()) {
+        let parts = parts(music);
+        let cx = ChordContext { span: music.span, pins, readings: 2 };
+        let reading = ChordReader::new().read(&parts, music.grid, &cx).unwrap();
+        let fresh = ChordExplainer::new().explain_all(&parts, music.grid, &cx, &reading);
+        assert!(fresh.is_some());
+        assert_eq!(kept.explain_all(&parts, music.grid, &cx, &reading), fresh);
+    }
+    // Asked for a reading of other notes (a tune alone), then for one of the notes given.
     let tune = Music::new().tune(line("C5 D5 E5 G5", 0, BEAT));
-    assert!(reader.read(&self::parts(&tune), tune.grid, &cx).is_some());
-    assert_eq!(reader.explain(&parts, music.grid, &cx, &r, 2), fresh.explain(&parts, music.grid, &cx, &r, 2));
+    let music = case_music("10 Dm9 | G13 | Cmaj9");
+    let cx = ChordContext { span: music.span, pins: &[], readings: 2 };
+    let reading = ChordReader::new().read(&parts(&music), music.grid, &cx).unwrap();
+    let fresh = ChordExplainer::new().explain_all(&parts(&music), music.grid, &cx, &reading);
+    assert_eq!(fresh.as_ref().map(Vec::len), Some(3));
+    assert_eq!(kept.explain_all(&parts(&tune), tune.grid, &cx, &reading), None);
+    assert_eq!(kept.explain_all(&parts(&music), music.grid, &cx, &reading), fresh);
+}
+
+/// Whether two scores are the same up to rounding.
+fn close(got: f64, want: f64) -> bool {
+    (got - want).abs() <= 1e-9 * want.abs().max(1.0)
+}
+
+/// Checks each stretch of some music read with some pins against what the decode scored there, where the stretch is
+/// one span of the decode's best way, read as a chord; counting the first readings checked, the runners-up, and the
+/// runners-up held on into a stretch whose chord is pushed.
+fn scored_as_decoded(music: &Music, pins: &[Pin], checked: &mut [usize; 3]) {
+    // The decode's own scores, as its quick scoring worked them out: each kept reading's on each span, from a decode
+    // of its own.
+    let hearing = music.hear();
+    let pinned: Vec<PinnedSpan> = pins.iter().map(|p| pinned(&hearing, p)).collect();
+    let (mut decoder, mut decoding) = (Decoder::new(), Decoding::new());
+    assert!(decoder.decode(&hearing, SHIPPED.weights, SHIPPED.tables, &pinned, &mut decoding));
+    let lattice = decoder.lattice();
+    let (reported, edges) = (hearing.reported().start, edges(&hearing, pins));
+    let (_, alone) = explained(music, pins, 1);
+    let (reading, all) = explained(music, pins, 2);
+    for (i, ((s, alone), e)) in reading.spans.iter().zip(&alone).zip(&all).enumerate() {
+        let (Some(alone), Some(e)) = (alone, e) else { continue };
+        // Only a stretch that's one span of the decode's best way is scored as the decode scored it (a chord held
+        // longer than a span, or cut in two, is read on all of it at once).
+        let units = reported + s.units.start..reported + s.units.end;
+        let at = |place: usize| lattice.places[place].0;
+        let on_best: Vec<_> = lattice
+            .best
+            .iter()
+            .filter(|&&(k, _)| at(lattice.spans[k].0) < units.end && at(lattice.spans[k].1) > units.start)
+            .collect();
+        let [&(k, label)] = on_best[..] else { continue };
+        let &(from, to, _, ref kept) = &lattice.spans[k];
+        // And one read as a chord: where the decode reads no chord, the first reading is only the likeliest.
+        if (at(from), at(to)) != (units.start, units.end) || s.flags.contains(SpanFlags::SPLIT) || label.is_none() {
+            continue;
+        }
+        let what = format!("span {i}: {}", render(e));
+        assert_eq!(label, Some(e.first.label), "{what}");
+        // Each one's score on the stretch is its total less its pair term (with no runner-up, the pair term is shown
+        // whenever it adds anything; with one, it's the same for both when it isn't shown). Its kept score, or its
+        // score held on when it's the chord before held on.
+        let pair = |e: &Explanation, k: usize| e.terms.iter().find(|t| t.term == Term::Pair).map(|t| t.scores[k]);
+        let kept_score = |kept: &[Kept], label: Label, held: bool| {
+            kept.iter().find(|r| r.0 == Some(label)).map(|r| if held { r.2 } else { r.1 })
+        };
+        // The first reading starts a chord here: held on, the decode would have read the stretches as one.
+        assert!(!held_on(&reading, i, e.first.label, &edges, reported), "{what}");
+        let first = pair(alone, 0).unwrap_or(0.0);
+        let want = kept_score(kept, e.first.label, false).expect("the best way's reading is kept");
+        assert!(close(alone.totals[0] - first, want), "{what}: {} not {want}", alone.totals[0] - first);
+        checked[0] += 1;
+        let Some(second) = e.second else { continue };
+        let held = held_on(&reading, i, second.label, &edges, reported);
+        // Held on, it's held on from where the chord before ends (never from a chord pushed in early): its score on
+        // the span from the place there with no chord pushed to it.
+        let plain = match lattice.places[from] {
+            (unit, true, _) if held => lattice.places.iter().position(|p| (p.0, p.1) == (unit, false)),
+            _ => None,
+        };
+        let kept = match plain {
+            Some(plain) => lattice.spans.iter().find(|span| (span.0, span.1) == (plain, to)).map_or(&[][..], |s| &s.3),
+            None => kept,
+        };
+        if let Some(want) = kept_score(kept, second.label, held) {
+            let got = e.totals[1] - pair(e, 1).unwrap_or(first);
+            assert!(close(got, want), "{what}: the runner-up's {got} not {want}");
+            checked[1] += 1;
+            checked[2] += usize::from(plain.is_some());
+        }
+    }
+}
+
+#[test]
+fn the_evidence_adds_up_to_what_the_decode_scored() {
+    let mut checked = [0, 0, 0];
+    for (music, pins) in the_music_in_ticks() {
+        scored_as_decoded(&music, &pins, &mut checked);
+    }
+    assert!(checked[0] > 50 && checked[1] > 30, "{checked:?} checked");
+    // And any music with any pins, where a runner-up held on into a stretch whose chord is pushed is met (rare: one
+    // piece in several hundred has one the decode kept a score for).
+    let mut dice = Dice(0x510e_527f_ade6_82d1);
+    let mut hearing = Hearing::new();
+    for round in 0..100 {
+        let music = if round % 2 == 0 { random_music(&mut dice) } else { small_music(&mut dice) };
+        if !music.hear_into(&mut hearing) {
+            continue;
+        }
+        let pins = random_pins(&mut dice, &hearing);
+        scored_as_decoded(&music, &pins, &mut checked);
+    }
+    assert!(checked[0] > 400 && checked[1] > 250 && checked[2] > 0, "{checked:?} checked");
+}
+
+#[test]
+fn a_chord_held_on_from_the_stretch_before_has_no_evidence_about_where_a_chord_starts() {
+    // C C/B | Am: the C/B is the C held on, its bass moving to its seventh halfway through the bar. Nothing about where
+    // a chord starts counts for it, and the runner-up starts a chord in the middle of the bar.
+    let (r, all) = explained(&case_music("4 C C/B | Am"), &[], 2);
+    assert!(r.spans[1].flags.contains(SpanFlags::SPLIT), "{:?}", r.spans[1]);
+    let e = all[1].clone().unwrap();
+    assert_eq!((e.first.chord.name(), e.first.label), ("C/B".to_owned(), r.spans[0].label.unwrap()));
+    assert!(e.terms.iter().filter(|t| about_the_start(t)).all(|t| t.values[0] == 0.0), "{}", render(&e));
+    let mid_bar = e.terms.iter().find(|t| t.term == Term::Feature(Feature::MidBar)).expect("the runner-up's start");
+    assert_eq!(mid_bar.values, [0.0, 1.0]);
+    // Its first half starts the chord, after the Am going round (with no runner-up, all its evidence is told).
+    let first_alone = |music: &Music, pins: &[Pin]| explained(music, pins, 1).1[0].clone().unwrap();
+    let starts = |e: &Explanation| e.terms.iter().any(|t| about_the_start(t) && t.values[0] != 0.0);
+    let e = first_alone(&case_music("4 C C/B | Am"), &[]);
+    assert!(starts(&e), "{}", render(&e));
+    // C C/E | F F#dim7 | C/G goes round from C/G into C: the same chord held on, its bass moving.
+    let e = first_alone(&case_music("6 C C/E | F F#dim7 | C/G"), &[]);
+    assert!(!starts(&e), "{}", render(&e));
+    // A one-chord loop goes round into itself, held on; but a pin over it starts a chord where it starts.
+    let music = case_music("1 C");
+    let e = first_alone(&music, &[]);
+    assert!(!starts(&e), "{}", render(&e));
+    let hearing = music.hear();
+    let (start, end) = (hearing.start(hearing.reported().start), hearing.start(hearing.units()));
+    let e = first_alone(&music, &[Pin { start, end, chord: None }]);
+    assert!(starts(&e), "{}", render(&e));
+    // Dm9 | G13 | Cmaj9 goes round from Cmaj9 to Dm9: a chord starts there.
+    let e = first_alone(&case_music("10 Dm9 | G13 | Cmaj9"), &[]);
+    assert!(starts(&e), "{}", render(&e));
+}
+
+/// A hand case's music, read as a loop.
+fn case_music(name: &str) -> Music {
+    hand_cases().into_iter().find(|(n, _)| *n == name).unwrap_or_else(|| panic!("no case {name}")).1
+}
+
+#[test]
+fn the_bass_written_under_a_chord_doubled_in_the_tune_is_the_bass() {
+    // D/C with the tune's C6 struck for an eighth off the beat: it doubles the bass the name writes.
+    let music = Music::new().bass(notes("C2", 0, BAR)).keys(notes("D4 F#4 A4", 0, BAR)).tune(
+        [notes("A5", 0, BEAT + BEAT / 2), notes("C6", BEAT + BEAT / 2, BEAT / 2), notes("A5", 2 * BEAT, 2 * BEAT)]
+            .concat(),
+    );
+    let e = first_explained(music);
+    assert_eq!(e.first.chord.name(), "D/C", "{}", render(&e));
+    assert!(notes_of(&e).contains(&"tune C6 on b7".to_owned()), "{}", render(&e));
+}
+
+#[test]
+fn a_bass_note_only_held_over_into_a_bar_isnt_the_bass_part_playing_there() {
+    // The bass part's C2 rings half a beat into the bar of F, which the keys play with F2 under them: the bass there
+    // is the keys' lowest note, and the C2 is held over.
+    let music = Music::new()
+        .bass(notes("C2", 0, BAR + BEAT / 2))
+        .keys([notes("C4 E4 G4", 0, BAR), notes("F2 A3 C4 F4", BAR, BAR)].concat());
+    let (r, all) = explained(&music, &[], 2);
+    let shown: Vec<String> = r.spans.iter().map(|s| s.shown().unwrap().chord.name()).collect();
+    assert_eq!(shown, ["C", "F"]);
+    let e = all[1].clone().unwrap();
+    assert_eq!(e.bass_from, BassFrom::LowestKeys, "{}", render(&e));
+    assert!(notes_of(&e).contains(&"bass C2 HeldOver".to_owned()), "{}", render(&e));
+    assert!(notes_of(&e).contains(&"bass F2 on 1".to_owned()), "{}", render(&e));
 }

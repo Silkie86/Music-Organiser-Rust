@@ -126,6 +126,7 @@ pub struct DecodedSpan {
 pub struct Decoding {
     spans: Vec<DecodedSpan>,
     chances: Vec<Chance>,
+    before: Option<Label>,
 }
 
 impl Decoding {
@@ -144,9 +145,18 @@ impl Decoding {
         self.chances.get(span.chances.clone()).unwrap_or_default()
     }
 
+    /// In a loop, the reading the best way reads just before the first unit reported, over the copy of the loop's end
+    /// heard in front: the chord before its first as the loop goes round (usually its last, as the loop's own end
+    /// reads it, but read on the copy alone, with nothing before it). The same as the first span's when that chord is
+    /// carried round, held on into it. None for no chord there, and for music that isn't a loop.
+    pub fn before(&self) -> Option<Label> {
+        self.before
+    }
+
     fn clear(&mut self) {
         self.spans.clear();
         self.chances.clear();
+        self.before = None;
     }
 }
 
@@ -714,43 +724,13 @@ impl Decoder {
     /// copy of that bar heard in front too.
     fn find_regions(&mut self, hearing: &Hearing, pins: &[PinnedSpan]) {
         let units = hearing.units();
-        let pin = |units: Range<usize>, pin: &PinnedSpan| {
-            let given = pin.label().map_or(Given::Ends, Given::Chord);
-            Region { units, given, chord: pin.given(), ids: 0..0 }
-        };
-        let mut pinned: Vec<Region> = pins
-            .iter()
-            .map(|p| {
-                let end = p.units.end.min(units);
-                pin(p.units.start.min(end)..end, p)
+        let pinned: Vec<Region> = kept_pins(hearing, pins)
+            .into_iter()
+            .map(|(units, pin)| {
+                let given = pin.label().map_or(Given::Ends, Given::Chord);
+                Region { units, given, chord: pin.given(), ids: 0..0 }
             })
-            .filter(|r| !r.units.is_empty())
             .collect();
-        pinned.sort_by_key(|r| (r.units.start, r.units.end));
-        let mut kept_end = 0;
-        pinned.retain(|r| {
-            let free = r.units.start >= kept_end;
-            if free {
-                kept_end = r.units.end;
-            }
-            free
-        });
-        // In a loop, a chord given over its last bar is given for the copy of that bar in front too (its units are the
-        // last bar's, a loop's length earlier), where no pin is given already.
-        let reported = hearing.reported();
-        if reported.start > 0 {
-            let length = reported.len();
-            let copy = |r: &Region| r.units.start.saturating_sub(length)..r.units.end.saturating_sub(length);
-            let free = |c: &Range<usize>| !pinned.iter().any(|r| r.units.start < c.end && c.start < r.units.end);
-            let copies: Vec<Region> = pinned
-                .iter()
-                .filter(|r| r.chord.is_some())
-                .map(|r| Region { units: copy(r), ..r.clone() })
-                .filter(|c| !c.units.is_empty() && free(&c.units))
-                .collect();
-            pinned.extend(copies);
-            pinned.sort_by_key(|r| (r.units.start, r.units.end));
-        }
 
         let bar = hearing.bar_units().max(1);
         let mut rests: Vec<Region> = Vec::new();
@@ -1204,6 +1184,13 @@ impl Decoder {
         self.path.reverse();
 
         let reported = hearing.reported();
+        // In a loop, the way's span over the last unit before the first reported: the first that ends after it.
+        if reported.start > 0 {
+            let over = self.path.iter().find(|&&(s, _)| {
+                self.spans.get(s).and_then(|s| self.nodes.get(s.to)).is_some_and(|to| to.unit >= reported.start)
+            });
+            out.before = over.and_then(|&(_, id)| id.label());
+        }
         let mut p = 0;
         while let Some(&(first, id)) = self.path.get(p) {
             let rest = self.spans.get(first).is_some_and(|s| s.rest);
@@ -1290,6 +1277,46 @@ impl Node {
         let exact = region.is_some();
         Node { unit, push, kind, reach, exact, last: reach, region, into: 0..0, entries: 0..0, out: 0..0 }
     }
+}
+
+/// The pins the decode keeps, in order of their units: those inside what's heard (one that overlaps an earlier one left
+/// out); and in a loop, each with a chord the decode can read given for the copy of its units a loop's length earlier,
+/// where that's in the copied bar heard in front and no pin is given already (so a chord given over a loop's last bar
+/// is given for the copy of that bar too, and the loop's first chord follows it as the loop goes round).
+pub(super) fn kept_pins<'p>(hearing: &Hearing, pins: &'p [PinnedSpan]) -> Vec<(Range<usize>, &'p PinnedSpan)> {
+    let units = hearing.units();
+    let mut kept: Vec<(Range<usize>, &PinnedSpan)> = pins
+        .iter()
+        .map(|p| {
+            let end = p.units.end.min(units);
+            (p.units.start.min(end)..end, p)
+        })
+        .filter(|(units, _)| !units.is_empty())
+        .collect();
+    kept.sort_by_key(|(units, _)| (units.start, units.end));
+    let mut kept_end = 0;
+    kept.retain(|(units, _)| {
+        let free = units.start >= kept_end;
+        if free {
+            kept_end = units.end;
+        }
+        free
+    });
+    let reported = hearing.reported();
+    if reported.start > 0 {
+        let length = reported.len();
+        let copy = |u: &Range<usize>| u.start.saturating_sub(length)..u.end.saturating_sub(length);
+        let free = |c: &Range<usize>| !kept.iter().any(|(u, _)| u.start < c.end && c.start < u.end);
+        let copies: Vec<(Range<usize>, &PinnedSpan)> = kept
+            .iter()
+            .filter(|(_, pin)| pin.given().is_some())
+            .map(|(units, pin)| (copy(units), *pin))
+            .filter(|(c, _)| !c.is_empty() && free(c))
+            .collect();
+        kept.extend(copies);
+        kept.sort_by_key(|(units, _)| (units.start, units.end));
+    }
+    kept
 }
 
 /// What the last decode weighed, for the tests' slow way: each place's unit, whether a chord is pushed to it and what
