@@ -397,42 +397,64 @@ pub(super) fn playlist_items(d: &[u8]) -> Vec<PlaylistItem> {
     // FL 9: 32-byte items with 0 and 0x6000 where newer FL has the pattern, and the playlist row, counted from 999
     // down, at 12. Each row plays one pattern there: row 999 − n is pattern n (checked against FL 25's re-save of funk
     // step_8). FL 25 gives each pattern played a track, in pattern order from track 1, so the slot is the one newer FL
-    // saves for that track.
+    // saves for that track. FL 9.0 to 9.5 (and 11.1) often mix those rows with newer FL's clips (the pattern base and
+    // the pattern or channel) in one event: 902 of Solomon's saves, whose playlists read empty before. Each record is
+    // told apart on its own. The clips' slots count down from 98 (198 in FL 11.1), with pattern n mostly on track n,
+    // so in a mixed save each row's pattern n goes on track n too, counted from the same top as the clips.
     if items.is_empty() && !d.is_empty() && d.len().is_multiple_of(32) {
+        let mut rows = 0;
         for r in d.as_chunks::<32>().0 {
-            let row = u16_at(r, 12) as u32;
-            if u16_at(r, 4) != 0 || u16_at(r, 6) != 0x6000 || row == 0 || row > 999 {
+            let (kind, index, row) = (u16_at(r, 4) as u32, u16_at(r, 6) as u32, u16_at(r, 12) as u32);
+            let is_row = kind == 0 && index == 0x6000 && row > 0 && row <= 999;
+            if !is_row && (kind != PATTERN_BASE || row > 999) {
                 // Not FL 9's: perhaps FL 6 to 8's, whose 28-byte items fill a whole number of 32 bytes too.
                 items.clear();
                 break;
             }
+            rows += usize::from(is_row);
             items.push(PlaylistItem {
-                index: PATTERN_BASE + 999 - row,
+                index: if is_row { PATTERN_BASE + 999 - row } else { index },
                 at: u32_at(r, 0) as i64,
                 length: u32_at(r, 8) as i64,
                 offset: item_offset(r, 24),
                 muted: u16_at(r, 18) & 0x2000 != 0,
-                slot: row as i64,
+                // A row's is set below.
+                slot: if is_row { -1 } else { row as i64 },
             });
         }
-        let order: Vec<u32> = items.iter().map(|i| i.index).collect::<BTreeSet<_>>().into_iter().collect();
-        for item in &mut items {
-            item.slot = 499 - order.partition_point(|&i| i < item.index) as i64;
+        if !items.is_empty() && rows == items.len() {
+            let order: Vec<u32> = items.iter().map(|i| i.index).collect::<BTreeSet<_>>().into_iter().collect();
+            for item in &mut items {
+                item.slot = 499 - order.partition_point(|&i| i < item.index) as i64;
+            }
+        } else if rows > 0 {
+            // The top that fits the clips and puts every row's pattern on a track (as the song's tracks count it).
+            let pattern = |i: &PlaylistItem| (i.index - PATTERN_BASE) as i64;
+            let highest = items.iter().map(|i| if i.slot < 0 { pattern(i) - 1 } else { i.slot }).max().unwrap_or(0);
+            let top = top_slot("", highest);
+            for item in items.iter_mut().filter(|i| i.slot < 0) {
+                item.slot = top + 1 - pattern(item);
+            }
         }
     }
-    // FL 6 to 8: 28-byte items laid out like FL 9's, but with the start offset at 20 (a float, −1 = none) and rows
-    // 29952 higher: pattern n plays on row 30951 − n. Audio and automation clips have the pattern base and their
-    // channel instead, on rows counted down from 30818 below the patterns (checked on Solomon's FL 7 saves). Each
-    // pattern gets a track, as for FL 9, and each row of audio or automation clips one after them.
+    // FL 6 to 8: 28-byte items laid out like FL 9's, but with the start offset at 20 (a float, −1 = none) and the row
+    // split around a constant byte 13: pattern n plays on row 999 − n. Audio and automation clips have the pattern base
+    // and their channel instead, on rows counted down from 98 below the patterns (checked on Solomon's FL 7 saves);
+    // a pattern clip has the pattern base and its pattern, and goes with that pattern's row. Each pattern gets a track,
+    // as for FL 9, and each row of audio or automation clips one after them.
     if items.is_empty() && !d.is_empty() && d.len().is_multiple_of(28) {
-        const FL8_ROWS: u32 = 29952;
         let mut rows = Vec::new();
         for r in d.as_chunks::<28>().0 {
             let (kind, mut index, row) = (u16_at(r, 4) as u32, u16_at(r, 6) as u32, u16_at(r, 12) as u32);
+            // The row is byte 12 with byte 14 above it (byte 13 is always 0x78 and byte 15 a flag): 3 and so 768 up
+            // for pattern rows, 0 for clips (a census of 1,052,189 records in Solomon's saves, 2026-11-02), so
+            // pattern n is on row 999 − n, as in FL 9.
+            let slot = byte_at(r, 12) as u32 | (byte_at(r, 14) as u32) << 8;
             // FL 6.0 writes 0x5000 where FL 6.0.4 to 8 write 0x6000 (checked on Solomon's 2006 saves).
-            if kind == 0 && (index == 0x5000 || index == 0x6000) && row > FL8_ROWS && row < FL8_ROWS + 999 {
-                index = PATTERN_BASE + FL8_ROWS + 999 - row;
-            } else if kind != PATTERN_BASE || index >= PATTERN_BASE {
+            if kind == 0 && (index == 0x5000 || index == 0x6000) && byte_at(r, 13) == 0x78 && slot > 0 && slot < 999 {
+                index = PATTERN_BASE + 999 - slot;
+            } else if kind != PATTERN_BASE || index == PATTERN_BASE {
+                // A clip has the pattern base and its pattern (above it) or channel (below), as newer FL's.
                 return Vec::new();
             }
             items.push(PlaylistItem {
@@ -475,7 +497,7 @@ fn place_clips(
 ) -> (BTreeMap<u32, Vec<FlClip>>, bool) {
     let mut patterns: BTreeMap<u32, Vec<(u32, NoteEvent)>> = BTreeMap::new();
     for &(pattern, e) in raw_notes {
-        let size = notes::note_size(&e.data, flp.major, e.offset.is_none(), Some(known));
+        let size = notes::note_size(&e.data, (flp.major, flp.minor), e.offset.is_none(), Some(known));
         patterns.entry(pattern).or_default().extend(notes::decode(&e.data, size));
     }
     // Each pattern's notes by start (with their place in the file), so a clip finds its part of the pattern without
@@ -1045,7 +1067,7 @@ pub fn extract_midi(flp: &Flp<'_>) -> Vec<MidiClip> {
             }
             EV_PATTERN_NOTES => {
                 if let Some(p) = pattern {
-                    let size = notes::note_size(&e.data, flp.major, e.offset.is_none(), Some(&known));
+                    let size = notes::note_size(&e.data, (flp.major, flp.minor), e.offset.is_none(), Some(&known));
                     let unmuted = notes::decode(&e.data, size).into_iter().filter(|(_, n)| !n.muted);
                     pattern_notes.entry(p).or_default().extend(unmuted);
                 }
@@ -1204,6 +1226,27 @@ pub fn extract_channels(flp: &Flp<'_>) -> Vec<MidiChannel> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mixed_fl_9_playlist_puts_pattern_n_on_track_n_beside_the_clips() {
+        let record = |kind: u16, index: u16, slot: u16| {
+            let mut r = [0u8; 32];
+            r[4..6].copy_from_slice(&kind.to_le_bytes());
+            r[6..8].copy_from_slice(&index.to_le_bytes());
+            r[12..14].copy_from_slice(&slot.to_le_bytes());
+            r
+        };
+        // Pattern 1 on a row, pattern 2 as a clip on track 2: 98 down in FL 9, 198 down in FL 11.1.
+        for (clip_slot, top) in [(97, 98), (197, 198)] {
+            let d = [record(0, 0x6000, 998), record(20480, 20482, clip_slot)].concat();
+            let slots: Vec<(u32, i64)> = playlist_items(&d).iter().map(|i| (i.index, i.slot)).collect();
+            assert_eq!(slots, [(20481, top), (20482, clip_slot as i64)]);
+        }
+        // A row's pattern above the clips' top moves the top up, so it still gets its own track.
+        let d = [record(0, 0x6000, 999 - 150), record(20480, 20482, 97)].concat();
+        let slots: Vec<i64> = playlist_items(&d).iter().map(|i| i.slot).collect();
+        assert_eq!(slots, [199 - 150, 97]);
+    }
 
     #[test]
     fn fl_12_9_1_and_later_save_500_tracks() {

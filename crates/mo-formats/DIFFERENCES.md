@@ -33,6 +33,9 @@ library.
 | Samples on the channels inside a Layer channel | Counted as not played when only the Layer has notes. | The same, until the Layer's children are read (needs one of Solomon's saves with a Layer). | Not yet |
 | Songs arranged in a later arrangement (FL 12.9 on) | Only the first arrangement is read. | The same: the twin test will show whether any of Solomon's songs need more. | Not yet |
 | A VST hosted by FL 7 or 8 (wrapper version 4, such as sly_7's and sly_15's LegacyCell) | Read as having no name, id or settings, so a convert says the plugin is missing. | Reads its name, VST id and settings (FL 7 and 8 keep no file or maker). | Better |
+| FL 8.5's notes (a census of 17,316 of Solomon's saves: FL 3.5 to 8.0 write 20-byte notes, 8.5 on 24) | Told apart by version, 24 from FL 9. | 24 from FL 8.5 too; before, an 8.5 pattern whose notes divided by both sizes was read as 20-byte notes, garbled (VERSION 16). | Better |
+| FL 9.0 to 9.5 (and 11.1) playlists that mix pattern rows with clips in one event (902 of Solomon's saves) | Not read. | Each record read on its own kind: rows as pattern n on track n, clips on their own tracks (VERSION 16). | Better |
+| FL 6 to 8 pattern clips saved as newer FL's (the pattern base, then the pattern) among the rows | Not read. | Read, on their pattern's track; the row is taken from bytes 12 and 14, as the census found (VERSION 16). | Better |
 
 ## Bitwig Studio
 

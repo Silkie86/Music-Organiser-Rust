@@ -95,6 +95,8 @@ pub struct Flp<'a> {
     pub version: String,
     /// FL's major version (21 for "21.2.3.4004"), or 0 when the project doesn't say.
     pub major: u32,
+    /// FL's minor version (2 for "21.2.3.4004"), or 0 when the project doesn't say.
+    pub minor: u32,
     /// Text is UTF-16 from FL 11.5, one byte a letter before that.
     pub utf16: bool,
     pub events: Vec<Event<'a>>,
@@ -189,8 +191,15 @@ pub fn load(raw: &[u8]) -> Result<Flp<'_>, Damaged> {
     if header_len < 0 || header_len as i64 > raw.len() as i64 - 16 {
         return Err(Damaged);
     }
-    let mut flp =
-        Flp { ppq: u16_at(raw, 12), version: String::new(), major: 0, utf16: true, events: Vec::new(), warning: None };
+    let mut flp = Flp {
+        ppq: u16_at(raw, 12),
+        version: String::new(),
+        major: 0,
+        minor: 0,
+        utf16: true,
+        events: Vec::new(),
+        warning: None,
+    };
     let dt = 8 + header_len as usize;
     let mut pos = dt + 8;
     let end = if raw.get(dt..dt + 4) == Some(b"FLdt") {
@@ -258,10 +267,10 @@ pub fn load(raw: &[u8]) -> Result<Flp<'_>, Damaged> {
             if major == 0 {
                 major = major_of(&flp.version);
             }
+            // "11" alone is 11.0.
+            flp.minor = flp.version.split('.').nth(1).and_then(|m| m.trim().parse().ok()).unwrap_or(0);
             if major > 0 {
-                // "11" alone is 11.0.
-                let minor: u32 = flp.version.split('.').nth(1).and_then(|m| m.parse().ok()).unwrap_or(0);
-                flp.utf16 = major > 11 || (major == 11 && minor >= 5);
+                flp.utf16 = major > 11 || (major == 11 && flp.minor >= 5);
             }
         }
         // Without the FLdt chunk to go by, only events that include FL's version show it's really a project.

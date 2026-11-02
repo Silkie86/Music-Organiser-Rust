@@ -1,20 +1,22 @@
 //! Pattern notes (event 224): records of u32 position, u16 flags, u16 channel, u32 length, u16 key, and more.
-//! FL 9 onwards writes 24 bytes a note, with the velocity at 21; FL 4 to 8 20 bytes, with the velocity at 17 (checked
-//! on Solomon's saves from FL 4 to FL 26).
+//! FL 8.5 onwards writes 24 bytes a note, with the velocity at 21; FL 4 to 8.0 20 bytes, with the velocity at 17
+//! (checked on Solomon's saves from FL 4 to FL 26; a census of 17,316 of them found FL 3.5 to 8.0 always 20 and 8.5 on
+//! always 24, 2026-11-02).
 
 use std::collections::HashSet;
 
 use super::events::{byte_at, u16_at, u32_at};
 use crate::model::{NoteAttribute, NoteEvent, velocity};
 
-/// The size of the note records in an event, by FL's version (rule 9): 24 bytes from FL 9, 20 bytes in FL 4 to 8.
-/// Notes the reader made from old step sequencer dots are always 24. Without a version, or in an FL 4 to 8 save whose
-/// notes divide into 24 bytes but not 20, the size is told from the notes themselves; `channels` are the song's channels,
-/// when known, which a right reading only ever names.
-pub fn note_size(data: &[u8], major: u32, made_here: bool, channels: Option<&HashSet<u32>>) -> usize {
-    match major {
+/// The size of the note records in an event, by FL's version (major, minor; rule 9): 24 bytes from FL 8.5, 20 bytes
+/// in FL 4 to 8.0. Notes the reader made from old step sequencer dots are always 24. Without a version, or in an FL 4
+/// to 8.0 save whose notes divide into 24 bytes but not 20, the size is told from the notes themselves; `channels` are
+/// the song's channels, when known, which a right reading only ever names.
+pub fn note_size(data: &[u8], version: (u32, u32), made_here: bool, channels: Option<&HashSet<u32>>) -> usize {
+    match version.0 {
         _ if made_here => 24,
         9.. => 24,
+        8 if version.1 >= 5 => 24,
         1.. if data.len().is_multiple_of(20) => 20,
         // Damaged notes that divide by neither size are read at the version's size, up to the damage.
         1.. if !data.len().is_multiple_of(24) => 20,
@@ -82,14 +84,14 @@ mod tests {
     fn fl_4_to_8_notes_are_20_bytes_even_when_they_also_divide_into_24() {
         // Six 20-byte notes are 120 bytes: five 24-byte ones too.
         let data: Vec<u8> = (0..6).flat_map(|i| note(i * 96, 0, 96, 60 + i as u16, 100, 20)).collect();
-        assert_eq!(note_size(&data, 7, false, None), 20);
+        assert_eq!(note_size(&data, (7, 0), false, None), 20);
         let notes = decode(&data, 20);
         assert_eq!(
             notes.iter().map(|(_, n)| (n.start, n.key)).collect::<Vec<_>>(),
             [(0, 60), (96, 61), (192, 62), (288, 63), (384, 64), (480, 65)]
         );
         // Without a version, time order tells: read as 24 bytes these would jump about.
-        assert_eq!(note_size(&data, 0, false, Some(&HashSet::from([0]))), 20);
+        assert_eq!(note_size(&data, (0, 0), false, Some(&HashSet::from([0]))), 20);
     }
 
     #[test]
@@ -97,15 +99,23 @@ mod tests {
         // 130 bytes: six 20-byte notes and the start of a seventh.
         let mut data: Vec<u8> = (0..6).flat_map(|i| note(i * 96, 0, 96, 60, 100, 20)).collect();
         data.extend([0; 10]);
-        assert_eq!(note_size(&data, 7, false, None), 20);
+        assert_eq!(note_size(&data, (7, 0), false, None), 20);
         assert_eq!(decode(&data, 20).len(), 6);
+    }
+
+    #[test]
+    fn fl_8_5_writes_24_byte_notes_and_8_0_20() {
+        // Five 24-byte notes are 120 bytes: six 20-byte ones too.
+        let data: Vec<u8> = (0..5).flat_map(|i| note(i * 96, 0, 96, 60, 100, 24)).collect();
+        assert_eq!(note_size(&data, (8, 5), false, None), 24);
+        assert_eq!(note_size(&data, (8, 0), false, None), 20);
     }
 
     #[test]
     fn from_fl_9_notes_are_always_24_bytes() {
         let mut data = note(0, 0, 96, 60, 100, 24);
         data.extend([0; 4]);
-        assert_eq!(note_size(&data, 21, false, None), 24, "a damaged event isn't read as 20-byte notes");
+        assert_eq!(note_size(&data, (21, 0), false, None), 24, "a damaged event isn't read as 20-byte notes");
         assert_eq!(decode(&data, 24).len(), 1);
     }
 

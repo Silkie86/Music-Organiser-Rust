@@ -28,8 +28,10 @@ pub const DAW: &str = "FL Studio";
 /// 12.9.1 by its slot, as the arrangement preview does, so mutes on those tracks count; 13 reads the playlist of an
 /// FL 6.0 save, which marks its pattern clips differently from FL 6.0.4 to 8; 14 reads edit events (knob moves
 /// recorded into patterns), whose points count towards the song's automation limit and its warning; 15 reads the
-/// plugins FL 7 and 8 hosted in their wrapper (version 4), whose names, ids and settings were left out.
-pub const VERSION: u32 = 15;
+/// plugins FL 7 and 8 hosted in their wrapper (version 4), whose names, ids and settings were left out; 16 reads FL
+/// 8.5's notes as 24 bytes (they were read as 20 when they divided by both), the playlists of FL 9.0 to 9.5 saves that
+/// mix pattern rows with clips (they read empty), and FL 6 to 8's pattern clips.
+pub const VERSION: u32 = 16;
 pub const EXTENSIONS: [&str; 1] = ["flp"];
 
 /// The Fruity Wrapper (FL's VST host) keeps a VST's details as records: u32 version, then (u32 id, u64 size, data).
@@ -168,7 +170,8 @@ fn read_with(raw: &[u8], resolve: &mut dyn FnMut(&str) -> String) -> ProjectInfo
             EV_PATTERN_NEW => patterns += 1,
             EV_SAMPLE_PATH => info.samples.push(resolve(&flp.text(&e.data))),
             EV_PATTERN_NOTES => {
-                notes += e.data.len() / notes::note_size(&e.data, flp.major, e.offset.is_none(), Some(&known))
+                notes +=
+                    e.data.len() / notes::note_size(&e.data, (flp.major, flp.minor), e.offset.is_none(), Some(&known))
             }
             EV_PROJECT_TIME if e.data.len() >= 16 => {
                 let (created, spent) = project_time(&e.data);

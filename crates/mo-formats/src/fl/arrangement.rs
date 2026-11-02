@@ -149,7 +149,7 @@ fn read_playlist(flp: &Flp<'_>) -> Playlist {
             }
             EV_PATTERN_NOTES => {
                 if let Some(p) = pattern {
-                    let size = notes::note_size(&e.data, flp.major, e.offset.is_none(), Some(&known));
+                    let size = notes::note_size(&e.data, (flp.major, flp.minor), e.offset.is_none(), Some(&known));
                     raw_notes.entry(p).or_default().extend(notes::decode(&e.data, size));
                 }
             }
