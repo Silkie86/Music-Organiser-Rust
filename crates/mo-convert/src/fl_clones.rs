@@ -135,7 +135,7 @@ fn default_name(name: &str) -> bool {
 }
 
 /// The project's patterns: names and the channels their notes are on.
-fn patterns(flp: &Flp<'_>, v: (u32, u32)) -> Vec<Pattern> {
+fn patterns(flp: &Flp<'_>) -> Vec<Pattern> {
     let mut by: BTreeMap<u32, Pattern> = BTreeMap::new();
     let mut current = None;
     for e in &flp.events {
@@ -152,9 +152,7 @@ fn patterns(flp: &Flp<'_>, v: (u32, u32)) -> Vec<Pattern> {
             }
             EV_PATTERN_NOTES => {
                 if let Some(p) = current.and_then(|p| by.get_mut(&p)) {
-                    // FL 8.5 writes 24-byte notes, as FL 9 does (checked on Solomon's saves, 2026-11-02).
-                    let size =
-                        if v >= (8, 5) { 24 } else { notes::note_size(&e.data, flp.major, e.offset.is_none(), None) };
+                    let size = notes::note_size(&e.data, (flp.major, flp.minor), e.offset.is_none(), None);
                     p.channels.extend(notes::decode(&e.data, size).into_iter().map(|(c, _)| c));
                 }
             }
@@ -336,7 +334,7 @@ pub fn line_up(raw: &[u8]) -> Result<Lineup, String> {
         return Err("This save is damaged or cut short, so it isn't changed.".to_owned());
     }
     let v = version(&flp.version);
-    let mut lineup = Lineup { patterns: patterns(&flp, v), ..Lineup::default() };
+    let mut lineup = Lineup { patterns: patterns(&flp), ..Lineup::default() };
     lineup.groups = groups(&lineup.patterns, &mut lineup.left);
     let group_of: HashMap<u32, u32> = lineup
         .groups

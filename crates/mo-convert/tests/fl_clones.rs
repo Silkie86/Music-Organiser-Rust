@@ -351,3 +351,20 @@ fn an_fl_21_playlist_that_divides_by_two_sizes_is_read_as_60_bytes() {
     let moved: Vec<(u32, u32)> = line_up(&raw).unwrap().moves.iter().map(|m| (m.pattern, m.to_track)).collect();
     assert_eq!(moved, vec![(3, 1)]);
 }
+
+#[test]
+fn a_clone_that_stays_keeps_its_track_taken() {
+    // "bass #2" can't join the bass (a channel clip plays there), so it stays on track 3, and "lead #2" mustn't land
+    // on it when it goes to the lead's track 3.
+    let clips = [
+        clip(0, 384, 1, 0, 1),
+        clip(0, 384, 0, 12, 1),
+        clip(0, 384, 3, 0, 3),
+        clip(1000, 384, 8, 0, 3),
+        clip(0, 384, 9, 0, 5),
+    ];
+    let raw = song().data(233, &playlist(&clips)).build();
+    let lineup = line_up(&raw).unwrap();
+    assert!(lineup.moves.is_empty(), "{:?}", lineup.moves);
+    assert!(lineup.left.iter().any(|l| l.starts_with("lead #2 at tick 0 stays on track 5")), "{:?}", lineup.left);
+}
