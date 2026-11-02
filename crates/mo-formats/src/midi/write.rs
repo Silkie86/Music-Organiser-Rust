@@ -124,9 +124,12 @@ pub struct Written {
     pub bytes: Vec<u8>,
     /// MIDI 2.0's per-note and relative controllers left out: MIDI 1.0 has no message for them.
     pub dropped_controllers: usize,
-    /// Tracks (by place in [`SmfSong::tracks`]) that had to share a channel with an earlier track of another sound,
-    /// so they play with that sound: more than 15 different sounds besides drums.
-    pub shared_channels: Vec<usize>,
+    /// Each channel that holds tracks of more than one sound, with all its tracks (by place in [`SmfSong::tracks`],
+    /// in order), whichever of them sets which sound. A track that sets no sound counts as a sound of its own (the
+    /// instrument's default). A channel plays one sound at a time, so these tracks don't all sound as they should: a
+    /// later sound change takes over the channel for the tracks before it too, and a reader gives every one of them
+    /// the channel's first sound. Empty when every track keeps its sound.
+    pub shared_channels: Vec<(u8, Vec<usize>)>,
 }
 
 /// Why a song couldn't be written. `track` is the track's place in [`SmfSong::tracks`] (from 0), whichever format
@@ -301,32 +304,34 @@ impl SmfSong {
     /// channels are handed out again and the tracks end at their last note:
     /// - drum parts go on channel 10;
     /// - the others take the other 15 channels in order, a channel each while there are enough;
-    /// - with more than 15, parts with the same sound share a channel (a channel plays one sound at a time); past 15
-    ///   different sounds, channels are shared round again and [`Written::shared_channels`] says which tracks lost
-    ///   their sound.
+    /// - each part after the 15th goes on the channel of an earlier part with the same sound (a part that sets no
+    ///   sound counts as a sound of its own), as a channel plays one sound at a time;
+    /// - when no channel has its sound, it goes on the channels round again, and [`Written::shared_channels`] names
+    ///   the channel and its tracks.
     pub fn from_parts(name: &str, parts: &[MidiPart]) -> Result<SmfSong, WriteError> {
         let ppq = parts.first().map_or(96, |p| p.ppq);
         if let Some(other) = parts.iter().find(|p| p.ppq != ppq) {
             return Err(WriteError::MixedPpq { first: ppq, other: other.ppq });
         }
-        let melodic = parts.iter().filter(|p| !p.drums).count();
-        let per_sound = melodic > usize::from(CHANNELS - 1);
         let mut channels = melodic_channels();
-        // With too many parts: the channel each sound got (a part with no sound counts as a sound of its own).
-        let mut by_sound: Vec<(Option<u8>, u8)> = Vec::new();
+        // The sound each of the 15 melodic channels was first given, in the order they were handed out.
+        let mut given: Vec<(u8, Option<u8>)> = Vec::new();
         let mut channel_for = |p: &MidiPart| {
             if p.drums {
                 return DRUM_CHANNEL;
             }
-            if !per_sound {
-                return channels.next().unwrap_or_default();
-            }
-            if let Some(&(_, ch)) = by_sound.iter().find(|(sound, _)| *sound == p.program) {
+            // A channel of its own while there are any left.
+            if given.len() < usize::from(CHANNELS - 1) {
+                let ch = channels.next().unwrap_or_default();
+                given.push((ch, p.program));
                 return ch;
             }
-            let ch = channels.next().unwrap_or_default();
-            by_sound.push((p.program, ch));
-            ch
+            // Then a channel already playing its sound.
+            if let Some(&(ch, _)) = given.iter().find(|(_, sound)| *sound == p.program) {
+                return ch;
+            }
+            // Then round again: it shares with another sound, which `write` reports.
+            channels.next().unwrap_or_default()
         };
         let tracks = parts
             .iter()
@@ -465,22 +470,16 @@ pub fn write(song: &SmfSong, options: &WriteOptions) -> Result<Written, WriteErr
     Ok(Written { bytes: out, dropped_controllers: dropped, shared_channels: shared_channels(&song.tracks) })
 }
 
-/// The tracks (by place in [`SmfSong::tracks`]) on a channel an earlier track uses with another sound (a track that
-/// sets none counts as one more sound: the instrument's own). A channel plays one sound at a time, so these play with
-/// the earlier track's sound, and a reader gives them its sound too.
-fn shared_channels(tracks: &[SmfTrack]) -> Vec<usize> {
-    // Each channel's first track's sound, once a track is on it.
-    let mut sounds: [Option<Option<u8>>; CHANNELS as usize] = [None; CHANNELS as usize];
-    let mut clashes = Vec::new();
-    for (i, t) in tracks.iter().enumerate() {
-        let Some(slot) = sounds.get_mut(usize::from(t.channel)) else { continue };
-        match slot {
-            Some(earlier) if *earlier != t.program => clashes.push(i),
-            Some(_) => {}
-            None => *slot = Some(t.program),
-        }
-    }
-    clashes
+/// Each channel holding tracks of more than one sound, with all its tracks: see [`Written::shared_channels`].
+fn shared_channels(tracks: &[SmfTrack]) -> Vec<(u8, Vec<usize>)> {
+    (0..CHANNELS)
+        .filter_map(|ch| {
+            let on: Vec<usize> = tracks.iter().enumerate().filter(|(_, t)| t.channel == ch).map(|(i, _)| i).collect();
+            let first = on.first().and_then(|&i| tracks.get(i)).map(|t| t.program);
+            let mixed = on.iter().filter_map(|&i| tracks.get(i)).any(|t| Some(t.program) != first);
+            mixed.then_some((ch, on))
+        })
+        .collect()
 }
 
 /// A channel message at a tick. `rank` puts messages at the same tick in order: the sound first, then notes ending,

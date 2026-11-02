@@ -494,30 +494,56 @@ fn part(name: &str, program: Option<u8>, drums: bool) -> MidiPart {
 
 #[test]
 fn more_than_15_parts_share_channels_by_sound() {
-    // 20 melodic parts with 5 sounds, and drums: each sound gets a channel, so every part keeps its sound.
+    // 20 melodic parts with 5 sounds, and drums: the first 15 get a channel each, the other 5 go on the channel of
+    // the first part with their sound, so every part keeps its sound.
     let mut parts: Vec<MidiPart> = (0..20).map(|i| part(&format!("P{i}"), Some(i % 5 * 10), false)).collect();
     parts.insert(3, part("Drums", None, true));
     let s = SmfSong::from_parts("Song", &parts).unwrap();
     let channels: Vec<u8> = s.tracks.iter().map(|t| t.channel).collect();
-    assert_eq!(channels[..7], [0, 1, 2, 9, 3, 4, 0]);
+    assert_eq!(channels, [0, 1, 2, 9, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4]);
     let written = write(&s, &WriteOptions::default()).unwrap();
     assert!(written.shared_channels.is_empty());
     let back = read_bytes(&written.bytes, "Song").unwrap();
     assert_eq!(back.iter().map(|p| p.program).collect::<Vec<_>>(), parts.iter().map(|p| p.program).collect::<Vec<_>>());
 
     // 16 different sounds: the 16th has to share channel 1 with the first, and loses its sound; the file is still
-    // written, and says which track it was.
+    // written, and names the channel and both its tracks.
     let parts: Vec<MidiPart> = (0..16).map(|i| part(&format!("P{i}"), Some(i), false)).collect();
     let s = SmfSong::from_parts("Song", &parts).unwrap();
     assert_eq!(s.tracks[15].channel, 0);
     let written = write(&s, &WriteOptions::default()).unwrap();
-    assert_eq!(written.shared_channels, [15]);
+    assert_eq!(written.shared_channels, [(0, vec![0, 15])]);
     assert_eq!(read_bytes(&written.bytes, "Song").unwrap()[15].program, Some(0));
+
+    // 16 parts that set no sound: 15 channels, then the 16th shares with the first (the same sound: none).
+    let parts: Vec<MidiPart> = (0..16).map(|i| part(&format!("P{i}"), None, false)).collect();
+    let s = SmfSong::from_parts("Song", &parts).unwrap();
+    let channels: Vec<u8> = s.tracks.iter().map(|t| t.channel).collect();
+    assert_eq!(channels, [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 0]);
+    assert!(write(&s, &WriteOptions::default()).unwrap().shared_channels.is_empty());
 
     // 15 parts: a channel each, whatever their sounds.
     let parts: Vec<MidiPart> = (0..15).map(|i| part(&format!("P{i}"), Some(1), false)).collect();
     let channels: Vec<u8> = SmfSong::from_parts("Song", &parts).unwrap().tracks.iter().map(|t| t.channel).collect();
     assert_eq!(channels, [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15]);
+}
+
+#[test]
+fn a_shared_channel_names_every_track_on_it() {
+    // A part that sets no sound first: the 16th part's sound change takes over its channel, so the first part changes
+    // too. Both are named, not only the later one.
+    let mut parts = vec![part("Plain", None, false)];
+    parts.extend((0..15).map(|i| part(&format!("P{i}"), Some(i), false)));
+    let s = SmfSong::from_parts("Song", &parts).unwrap();
+    let written = write(&s, &WriteOptions::default()).unwrap();
+    assert_eq!(written.shared_channels, [(0, vec![0, 15])]);
+    // The reader gives the first part the 16th part's sound: it did change.
+    assert_eq!(read_bytes(&written.bytes, "Song").unwrap()[0].program, Some(14));
+
+    // Two drum kits on channel 10, the first setting no sound: both named.
+    let parts = [part("Kit A", None, true), part("Kit B", Some(25), true), part("Bass", Some(33), false)];
+    let written = write(&SmfSong::from_parts("Song", &parts).unwrap(), &WriteOptions::default()).unwrap();
+    assert_eq!(written.shared_channels, [(9, vec![0, 1])]);
 }
 
 /// C# `FlStepSequencerStepsAreWrittenAsSixteenthsNotOneTick`: FL's step-sequencer steps have no length (1 tick, which
