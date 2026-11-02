@@ -21,6 +21,8 @@
             -PullEvery <s>    seconds between checks for new pushes (0 turns checking off)
             -NoWatch          build and run once, without checking for new pushes
             -Repo <folder>    use this clone instead of the script's own (for testing the script)
+            -BuildDir <folder>  build on another drive: the builds go in a "MusicOrganiser-build" folder inside it.
+                              Remembered, so it's only needed once. -BuildDir default goes back to the usual place.
 
   Plain ASCII on purpose: Windows PowerShell 5.1 misreads anything else in a file without a BOM.
 #>
@@ -28,11 +30,12 @@ param(
     [string]$Branch,
     [int]$PullEvery = 20,
     [switch]$NoWatch,
-    [string]$Repo
+    [string]$Repo,
+    [string]$BuildDir
 )
 
 # Raised whenever this script changes, so an older branch's copy never replaces a newer installed one.
-$LauncherVersion = 4
+$LauncherVersion = 5
 
 $ErrorActionPreference = 'Continue'   # git and cargo write progress to stderr, which Windows PowerShell treats as failure
 $GitHubRepo = 'Silkie86/Music-Organiser-Rust'
@@ -46,6 +49,8 @@ $LastChoice = Join-Path $Home_ 'last-branch.txt'
 # Each build is copied here before it runs, so the next build never has to replace a file the open app is using.
 $RunDir = Join-Path $Home_ 'run'
 if (-not $Repo) { $Repo = Join-Path $Home_ 'app' }
+# Where the builds go when they're not beside the code (-BuildDir): remembered in this file.
+$BuildChoice = Join-Path $Home_ 'build-folder.txt'
 
 function Say([string]$Text, [string]$Colour = 'Gray') { Write-Host $Text -ForegroundColor $Colour }
 
@@ -54,6 +59,21 @@ function Stop-WithMessage([string]$Text) {
     Say $Text 'Red'
     exit 1
 }
+
+# --- Where it builds -------------------------------------------------------------------------------------------
+# The build folder grows to many GB, so it can go on a drive with more room (-BuildDir). The builds always go in a
+# folder of their own inside the one named, so clearing the build folder can never touch anything else there.
+if ($BuildDir -eq 'default') {
+    Remove-Item -Force $BuildChoice -ErrorAction SilentlyContinue
+    $BuildDir = ''
+} elseif ($BuildDir) {
+    New-Item -ItemType Directory -Force -Path $Home_ | Out-Null
+    Set-Content -Path $BuildChoice -Value $BuildDir -Encoding ASCII
+} elseif (Test-Path $BuildChoice) {
+    $BuildDir = (Get-Content -Path $BuildChoice -TotalCount 1).Trim()
+}
+$TargetDir = if ($BuildDir) { Join-Path $BuildDir 'MusicOrganiser-build' } else { Join-Path $Repo 'target' }
+if ($BuildDir) { Say "Building in $TargetDir (-BuildDir default builds beside the code again)." 'DarkGray' }
 
 # --- The tools it needs -----------------------------------------------------------------------------------------
 # Git: the one on the PATH, or the copy Visual Studio brings with it.
@@ -267,7 +287,9 @@ function Limit-BuildFolder([string]$TargetDir) {
         return
     }
     Say ("Still {0:N1} GB: clearing the whole build folder. The next build starts from scratch (a few minutes longer, once)." -f $gb) 'Yellow'
-    Remove-Item -Recurse -Force $TargetDir -ErrorAction SilentlyContinue
+    # What's inside it, not the folder itself: if the folder is a link to another drive, the link stays.
+    Get-ChildItem -Path $TargetDir -Force -ErrorAction SilentlyContinue |
+        ForEach-Object { Remove-Item -Recurse -Force $_.FullName -ErrorAction SilentlyContinue }
 }
 
 function Get-FreeGb([string]$Path) {
@@ -287,7 +309,7 @@ function Build-App {
     # What cargo says is shown as it goes, so a long first build doesn't look stuck, and a failure shows its cause.
     Say "$(Get-Date -Format 'HH:mm:ss')  Building..." 'DarkGray'
     # The build folder is named, so a CARGO_TARGET_DIR set on the PC can't move the app somewhere this doesn't look.
-    $targetDir = Join-Path $Repo 'target'
+    $targetDir = $TargetDir
     # A full drive makes the compiler stop part way ("no space on device"). Before building, the build's own
     # leftovers (the incremental cache and any release build; they only speed builds up) are cleared when space is
     # low, and the build waits when there still isn't enough, saying how much is free.
@@ -303,6 +325,11 @@ function Build-App {
             return $null
         }
     }
+    # No incremental cache: it only speeds up building the same crates again and again while editing, which the
+    # launcher doesn't do (it builds once per push, and the libraries are kept anyway), and its old copies piled up
+    # by the gigabyte. One left from an older launcher goes.
+    $env:CARGO_INCREMENTAL = '0'
+    Remove-Item -Recurse -Force (Join-Path (Join-Path $targetDir 'debug') 'incremental') -ErrorAction SilentlyContinue
     # The compiler itself crashing (rustc exits with 101; a plain build error is 1) can come from a damaged
     # incremental cache even when the code is fine, as CI builds without one. The cache only speeds builds up, so
     # it's cleared and the build tried once more.
