@@ -100,12 +100,15 @@ impl Lineup {
         out
     }
 
+    /// A pattern's name as FL shows it.
+    pub fn name_of(&self, p: u32) -> String {
+        self.patterns.iter().find(|q| q.number == p).map_or_else(|| format!("Pattern {p}"), Pattern::shown)
+    }
+
     /// One line for each pattern whose clips move: "bass #2: 3 clips from track 7 to track 2" ("from its own row" for
     /// an old save's row).
     pub fn summary(&self) -> Vec<String> {
-        let name = |p: u32| {
-            self.patterns.iter().find(|q| q.number == p).map_or_else(|| format!("Pattern {p}"), Pattern::shown)
-        };
+        let name = |p: u32| self.name_of(p);
         let mut by: BTreeMap<(u32, u32, u32), usize> = BTreeMap::new();
         for m in &self.moves {
             *by.entry((m.pattern, m.from_track, m.to_track)).or_default() += 1;
@@ -161,6 +164,11 @@ fn patterns(flp: &Flp<'_>, v: (u32, u32)) -> Vec<Pattern> {
     by.into_values().collect()
 }
 
+/// Whether two patterns share a channel, or neither has notes (automation only, or empty).
+fn related(a: &Pattern, b: &Pattern) -> bool {
+    (a.channels.is_empty() && b.channels.is_empty()) || !a.channels.is_disjoint(&b.channels)
+}
+
 /// Each clone's source, as groups. What can't be matched is said in `left`.
 fn groups(patterns: &[Pattern], left: &mut Vec<String>) -> Vec<Group> {
     let mut source_of: BTreeMap<u32, u32> = BTreeMap::new();
@@ -176,14 +184,12 @@ fn groups(patterns: &[Pattern], left: &mut Vec<String>) -> Vec<Group> {
                 // Else an earlier clone of the same "Pattern N" that shares a channel: FL renumbered the source, or
                 // there's none left, but the clones still go together.
                 let sibling = || {
-                    patterns.iter().find(|p| {
-                        p.number < c.number && clone_base(&p.name) == Some(base) && !p.channels.is_disjoint(&c.channels)
-                    })
+                    patterns.iter().find(|p| p.number < c.number && clone_base(&p.name) == Some(base) && related(p, c))
                 };
-                match found {
-                    Some(p) if !p.channels.is_disjoint(&c.channels) => Some(p),
-                    _ if sibling().is_some() => sibling(),
-                    Some(p) => {
+                match (found, sibling()) {
+                    (Some(p), _) if related(p, c) => Some(p),
+                    (_, Some(s)) => Some(s),
+                    (Some(p), None) => {
                         left.push(format!(
                             "{} stays: the unnamed pattern before it ({}) has none of its channels",
                             c.shown(),
@@ -191,7 +197,7 @@ fn groups(patterns: &[Pattern], left: &mut Vec<String>) -> Vec<Group> {
                         ));
                         None
                     }
-                    None => {
+                    (None, None) => {
                         left.push(format!("{} stays: no unnamed pattern comes before it", c.shown()));
                         None
                     }
@@ -299,15 +305,13 @@ fn records(data: &[u8], offset: usize, size: usize) -> Option<Vec<Record>> {
         let (base, index, at, length) = (u16_at(r, 4), u16_at(r, 6), u32_at(r, 0), u32_at(r, 8));
         let slot = slot_of(r);
         let (kind, pattern, slot) = match (base, index) {
-            (0, 0x5000 | 0x6000) if (1..=999).contains(&slot) => (Kind::Row, 999 - slot as u32, None),
+            (0, 0x5000 | 0x6000) if (1..=998).contains(&slot) => (Kind::Row, 999 - slot as u32, None),
             (PATTERN_BASE, i) if i > PATTERN_BASE => (Kind::Pattern, (i - PATTERN_BASE) as u32, Some(slot)),
             (PATTERN_BASE, _) => (Kind::Channel, 0, Some(slot)),
             // A layout this doesn't know: change nothing.
             _ => return None,
         };
-        if length == 0 {
-            continue;
-        }
+        // A clip with no length is kept: a row of one still has to become a clip.
         out.push(Record { offset: offset + i * size, kind, pattern, at, end: at.saturating_add(length), slot });
     }
     Some(out)
@@ -318,7 +322,8 @@ fn records(data: &[u8], offset: usize, size: usize) -> Option<Vec<Record>> {
 fn top_slot(flp: &Flp<'_>, highest: u16) -> u16 {
     let at_least = match version(&flp.version) {
         (..=10, _) => return 98,
-        (11 | 12, _) => highest.max(99),
+        // Rows alone (no clip to go by): FL 11 and 12 count from 198.
+        (11 | 12, _) if highest == 0 => 99,
         _ => highest,
     };
     song::top_slot(&flp.version, at_least as i64).clamp(0, 499) as u16
@@ -340,8 +345,8 @@ pub fn line_up(raw: &[u8]) -> Result<Lineup, String> {
         .collect();
     // The pattern whose track a pattern's clips go on: its group's source, or itself.
     let unit = |p: u32| group_of.get(&p).copied().unwrap_or(p);
-    let name =
-        |p: u32| lineup.patterns.iter().find(|q| q.number == p).map_or_else(|| format!("Pattern {p}"), Pattern::shown);
+    let names = Lineup { patterns: lineup.patterns.clone(), ..Lineup::default() };
+    let name = |p: u32| names.name_of(p);
     let mut left = Vec::new();
 
     for (arrangement, e) in flp.events.iter().filter(|e| e.id == EV_PLAYLIST).enumerate() {
@@ -366,13 +371,11 @@ pub fn line_up(raw: &[u8]) -> Result<Lineup, String> {
 
         // Each group's track: where its source is most often, else where its first placed clone is. Ties go to the
         // higher track (the bigger slot).
-        let most = |p: u32| {
-            let mut count: BTreeMap<u16, usize> = BTreeMap::new();
-            for r in records.iter().filter(|r| r.kind == Kind::Pattern && r.pattern == p) {
-                *count.entry(r.slot.unwrap_or_default()).or_default() += 1;
-            }
-            count.into_iter().max_by_key(|&(slot, n)| (n, slot)).map(|(slot, _)| slot)
-        };
+        let mut count: BTreeMap<u32, BTreeMap<u16, usize>> = BTreeMap::new();
+        for r in records.iter().filter(|r| r.kind == Kind::Pattern) {
+            *count.entry(r.pattern).or_default().entry(r.slot.unwrap_or_default()).or_default() += 1;
+        }
+        let most = |p: u32| count.get(&p)?.iter().max_by_key(|&(&slot, &n)| (n, slot)).map(|(&slot, _)| slot);
         let mut target: BTreeMap<u32, u16> = BTreeMap::new();
         for g in &lineup.groups {
             let mut members: Vec<u32> = std::iter::once(g.source).chain(g.clones.iter().copied()).collect();
@@ -382,15 +385,17 @@ pub fn line_up(raw: &[u8]) -> Result<Lineup, String> {
             }
         }
 
-        // What's on each track and stays there.
+        // What's on each track: every clip where it is now, until it moves away.
         let moving = |r: &Record| match r.kind {
             Kind::Row => true,
             Kind::Pattern => target.get(&unit(r.pattern)).is_some_and(|&t| Some(t) != r.slot),
             Kind::Channel => false,
         };
         let mut taken: BTreeMap<u16, Vec<(u32, u32)>> = BTreeMap::new();
-        for r in records.iter().filter(|r| !moving(r)) {
-            taken.entry(r.slot.unwrap_or_default()).or_default().push((r.at, r.end));
+        for r in records.iter() {
+            if let Some(slot) = r.slot {
+                taken.entry(slot).or_default().push((r.at, r.end));
+            }
         }
         // New tracks for rows, as FL gives them when it opens such a save: in pattern order, below the tracks in use.
         let mut next = taken.keys().next().map_or(Some(top), |&s| s.checked_sub(1));
@@ -458,6 +463,11 @@ pub fn line_up(raw: &[u8]) -> Result<Lineup, String> {
                     to
                 }
             };
+            if let Some(on) = r.slot.and_then(|from| taken.get_mut(&from))
+                && let Some(i) = on.iter().position(|&span| span == (r.at, r.end))
+            {
+                on.swap_remove(i);
+            }
             taken.entry(to).or_default().push((r.at, r.end));
             let [lo, hi] = to.to_le_bytes();
             if r.kind == Kind::Row {
@@ -511,18 +521,22 @@ pub fn fix_fl_project(project: &Path) -> Result<Fixed, String> {
     let lineup = line_up(&raw)?;
     if lineup.moves.is_empty() {
         let why = if lineup.groups.is_empty() {
-            "no pattern in it is a clone (\"name #2\")"
+            "no pattern in it is a clone (\"name #2\")".to_owned()
+        } else if lineup.left.iter().any(|l| l.contains(" at tick ")) {
+            format!("no clone could move without playing over something: {}", lineup.left.join("; "))
         } else {
-            "its clones are already on their sources' tracks"
+            "its clones are already on their sources' tracks".to_owned()
         };
         return Err(format!("Nothing was written: {why}."));
     }
     let bytes = lineup.apply(&raw);
-    // The copy must read back as the same project, its clones lined up.
-    let problem = |back: &[u8]| match (events::load(&raw), events::load(back)) {
-        (Ok(a), Ok(b)) if a.events.len() == b.events.len() && b.warning.is_none() => match line_up(back) {
-            Ok(again) if again.moves.is_empty() => None,
-            Ok(_) => Some("some clones still aren't lined up".to_owned()),
+    // The copy must read back as the same project with every pattern on a track. (A second line-up may still find
+    // a clip to move, one that waited for another to make room.)
+    let events = events::load(&raw).map(|f| f.events.len()).map_err(|e| e.to_string())?;
+    let problem = |back: &[u8]| match events::load(back) {
+        Ok(b) if b.events.len() == events && b.warning.is_none() => match line_up(back) {
+            Ok(again) if !again.rows => None,
+            Ok(_) => Some("some patterns are still on rows".to_owned()),
             Err(e) => Some(e),
         },
         _ => Some("it doesn't read as the same FL project".to_owned()),
