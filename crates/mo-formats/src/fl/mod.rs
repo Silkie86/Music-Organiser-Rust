@@ -27,8 +27,9 @@ pub const DAW: &str = "FL Studio";
 /// project was made to the tick, as the C# app does; 12 finds the playlist track of a clip in a save from before FL
 /// 12.9.1 by its slot, as the arrangement preview does, so mutes on those tracks count; 13 reads the playlist of an
 /// FL 6.0 save, which marks its pattern clips differently from FL 6.0.4 to 8; 14 reads edit events (knob moves
-/// recorded into patterns), whose points count towards the song's automation limit and its warning.
-pub const VERSION: u32 = 14;
+/// recorded into patterns), whose points count towards the song's automation limit and its warning; 15 reads the
+/// plugins FL 7 and 8 hosted in their wrapper (version 4), whose names, ids and settings were left out.
+pub const VERSION: u32 = 15;
 pub const EXTENSIONS: [&str; 1] = ["flp"];
 
 /// The Fruity Wrapper (FL's VST host) keeps a VST's details as records: u32 version, then (u32 id, u64 size, data).
@@ -366,12 +367,45 @@ fn note_unplayed(song: &song::FlSong, resolve: &mut dyn FnMut(&str) -> String, i
 }
 
 /// The Fruity Wrapper's records by id, each a slice of the event rather than a copy (a plugin's state can be
-/// megabytes). A record that runs past the end stops the reading; a later record with the same id wins.
+/// megabytes). A record that runs past the end stops the reading; a later record with the same id wins. FL 7 and 8
+/// (wrapper version 4) laid it out differently: see [`old_wrapper_fields`].
 pub(crate) fn wrapper_fields(blob: &[u8]) -> BTreeMap<u32, &[u8]> {
     if blob.len() < 4 || !(1..=64).contains(&u32_at(blob, 0)) {
         return BTreeMap::new();
     }
+    if u32_at(blob, 0) == OLD_WRAPPER
+        && let Some(fields) = old_wrapper_fields(blob)
+    {
+        return fields;
+    }
     records(blob).0
+}
+
+/// The wrapper version FL 7 and 8 save.
+const OLD_WRAPPER: u32 = 4;
+
+/// FL 7 and 8's wrapper (version 4), worked out from Solomon's sly_7 (FL 7.0) and sly_15 (FL 8.0), with KORG's
+/// LegacyCell, MDE-X and MS-20FX (2026-11-02): u32 4, i32 -1 (or a small number), u32 1, u32 0, u32 the name's
+/// length + 6, at 20 a byte the name's length and the name, u32 the state's length and the state (FL's VST2 header
+/// with -8, then the plugin's chunk), then u32 4 and the plugin's four letters. Given as the records the newer wrapper
+/// saves them in (name, four letters, state); it kept no file or vendor. None when it doesn't add up.
+fn old_wrapper_fields(blob: &[u8]) -> Option<BTreeMap<u32, &[u8]>> {
+    let len = usize::from(*blob.get(20)?);
+    if usize::try_from(u32_at(blob, 16)).ok()? != len + 6 {
+        return None;
+    }
+    let name = blob.get(21..21 + len)?;
+    let state_at = 25 + len;
+    let state_len = usize::try_from(u32_at(blob, 21 + len)).ok()?;
+    let state = blob.get(state_at..state_at.checked_add(state_len)?)?;
+    let after = state_at + state_len;
+    let mut fields = BTreeMap::from([(VST_NAME, name), (VST_STATE, state)]);
+    if u32_at(blob, after) == 4
+        && let Some(four_cc) = blob.get(after + 4..after + 8)
+    {
+        fields.insert(VST_FOUR_CC, four_cc);
+    }
+    Some(fields)
 }
 
 /// Records after a u32 version: (u32 id, u64 size, data), by id, a later one with the same id winning. Says whether
@@ -425,13 +459,13 @@ pub(crate) fn wrapper_class_id<'a>(fields: &BTreeMap<u32, &'a [u8]>) -> Option<&
 ///
 /// Newer FL (seen in FL 21 and 25): i32 -9, u8 flags (0x08 = the plugin saves a chunk), i32 -2, u32 chunk length,
 /// u32 0, u32 program, so 21 bytes. FL 9 (wrapper version 6) has no -2 or 0: i32 -9, u8 flags, u32 chunk length,
-/// u32 program, so 13 bytes.
+/// u32 program, so 13 bytes. FL 7 and 8 (wrapper version 4) write it as FL 9 does, with -8.
 pub(crate) fn vst2_header(state: &[u8]) -> Option<(usize, u32, u32)> {
     let i32_at = |at| events::i32_at(state, at);
-    if state.len() < 13 || i32_at(0) != -9 {
+    if state.len() < 13 || !matches!(i32_at(0), -9 | -8) {
         return None;
     }
-    if i32_at(5) == -2 {
+    if i32_at(0) == -9 && i32_at(5) == -2 {
         return (state.len() >= 21).then(|| (21, i32_at(9) as u32, i32_at(17).max(0) as u32));
     }
     Some((13, i32_at(5) as u32, i32_at(9).max(0) as u32))
@@ -515,4 +549,38 @@ fn after_user_data(sample: &str) -> Option<&str> {
     const USER_DATA: &str = "%FLStudioUserData%";
     plugins::starts_with_ignore_case(sample, USER_DATA)
         .then(|| sample[USER_DATA.len()..].trim_start_matches(['\\', '/']))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// FL 7 and 8's wrapper as sly_15 saves LegacyCell: its name, the state (-8 header, a 3-byte chunk) and 'KLCV'.
+    #[test]
+    fn fl_7_and_8_wrapper_gives_name_state_and_four_letters() {
+        let name = b"LegacyCell";
+        let mut state = (-8i32).to_le_bytes().to_vec();
+        state.push(0x08);
+        state.extend(3u32.to_le_bytes());
+        state.extend(2u32.to_le_bytes());
+        state.extend(b"abc");
+        let mut blob = Vec::new();
+        for v in [4u32, u32::MAX, 1, 0, name.len() as u32 + 6] {
+            blob.extend(v.to_le_bytes());
+        }
+        blob.push(name.len() as u8);
+        blob.extend(name);
+        blob.extend((state.len() as u32).to_le_bytes());
+        blob.extend(&state);
+        blob.extend(4u32.to_le_bytes());
+        blob.extend(b"VCLK");
+        let fields = wrapper_fields(&blob);
+        assert_eq!(wrapper_plugin_name(&fields), "LegacyCell");
+        assert_eq!(fields.get(&VST_STATE).copied(), Some(&state[..]));
+        assert_eq!(wrapper_four_cc(&fields), Some(1_263_289_174));
+        assert_eq!(vst2_header(&state), Some((13, 3, 2)));
+        // A length that doesn't add up isn't taken for the old layout.
+        blob[16] += 1;
+        assert!(wrapper_plugin_name(&wrapper_fields(&blob)).is_empty());
+    }
 }

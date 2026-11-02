@@ -1146,6 +1146,9 @@ pub fn from_fl(song: &FlSong, options: Options, read_sample: &mut dyn FnMut(&str
     // Several FL clips moving one thing share a lane.
     for lane in &mut lanes {
         lane.points = in_song_order(std::mem::take(&mut lane.points));
+        // Automation clips in song order (Bitwig shows a lane's clips only up to one out of order: Solomon's sly_17,
+        // 2026-11-02). Where they overlap is the writer's to settle.
+        lane.parts.sort_by(|a, b| a.start.total_cmp(&b.start));
         // Until FL's first tempo point the song plays at the project's tempo; a lane would hold its first point.
         if lane.target == Target::Tempo
             && let Some(&first) = lane.points.first()

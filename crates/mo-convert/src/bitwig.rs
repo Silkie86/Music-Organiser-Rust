@@ -1097,6 +1097,7 @@ impl Template {
             && !matches!(lane.target, Target::OnOff { .. })
             && self.doc.field_obj(made, 0x2aec).is_some();
         let auto_clip = self.auto_clip.zip(self.auto_point).filter(|_| usable);
+        let clips = clips_in_order(&lane.parts);
         let volume = lane.target == Target::Volume;
         let points = match lane.target {
             Target::OnOff { .. } => {
@@ -1133,7 +1134,7 @@ impl Template {
             }
             _ => {
                 let kept = match auto_clip {
-                    Some(_) => lane_outside_clips(lane),
+                    Some(_) => lane_outside_clips(&clips),
                     None => lane.points.iter().map(|p| (p.beat, p.value)).collect(),
                 };
                 Some(kept.into_iter().map(|(beat, value)| self.lane_point(point, beat, value, volume)).collect())
@@ -1142,7 +1143,7 @@ impl Template {
         // FL's edit events as automation clips on the lane, one for each place their pattern plays, each holding its
         // points timed from its start (as Bitwig 6.1.6 saves clips Solomon drew, 2026-11-01).
         if let Some((pattern_clip, clip_point)) = auto_clip {
-            for part in &lane.parts {
+            for part in &clips {
                 let clip = self.copy(pattern_clip);
                 {
                     let c = self.doc.obj_mut(clip);
@@ -1309,18 +1310,56 @@ fn auto_clip_points(doc: &Document, clip: ObjId) -> Option<ObjId> {
     doc.field_obj(content, 0x48e)
 }
 
-/// What a lane whose moves are all in automation clips holds outside them: the value each clip ends on, held from its
-/// end to where the next starts (Bitwig saves a point after a clip; lane points are joined by straight lines, and FL
-/// holds a setting where the last move left it).
-fn lane_outside_clips(lane: &Lane) -> Vec<(f64, f64)> {
-    let mut parts: Vec<&LanePart> = lane.parts.iter().collect();
-    parts.sort_by(|a, b| a.start.total_cmp(&b.start));
+/// A lane's automation clips as Bitwig can show them: in song order, none over another. Where a clip starts inside an
+/// earlier one (two patterns placed over each other), the later one plays from there; if the earlier one runs on past
+/// it, the rest of the earlier one picks up after it, from the value it had reached, so no move is lost. A clip left
+/// with nothing to play is dropped.
+fn clips_in_order(parts: &[LanePart]) -> Vec<LanePart> {
+    let mut todo = parts.to_vec();
+    todo.sort_by(|a, b| a.start.total_cmp(&b.start));
+    let mut out: Vec<LanePart> = Vec::with_capacity(todo.len());
+    let mut k = 0;
+    while let Some(part) = todo.get(k).cloned() {
+        k += 1;
+        if let Some(last) = out.last_mut()
+            && last.start + last.length > part.start + SAME_BEAT
+        {
+            let end = last.start + last.length;
+            let after = part.start + part.length;
+            if end > after + SAME_BEAT {
+                let from = after - last.start;
+                let held = last.points.iter().rev().find(|p| p.0 <= from + SAME_BEAT).or(last.points.first());
+                let points = held
+                    .map(|&(_, value)| (0.0, value))
+                    .into_iter()
+                    .chain(last.points.iter().filter(|p| p.0 > from + SAME_BEAT).map(|&(beat, v)| (beat - from, v)))
+                    .collect();
+                let rest = LanePart { start: after, length: end - after, points, source: last.source };
+                let at = k + todo.get(k..).map_or(0, |t| t.partition_point(|p| p.start <= rest.start));
+                todo.insert(at, rest);
+            }
+            last.length = part.start - last.start;
+            let length = last.length;
+            last.points.retain(|p| p.0 < length - SAME_BEAT);
+            if length <= SAME_BEAT || last.points.is_empty() {
+                out.pop();
+            }
+        }
+        out.push(part);
+    }
+    out
+}
+
+/// What a lane whose moves are all in automation clips (`clips`, from [`clips_in_order`]) holds outside them: the
+/// value each clip ends on, held from its end to where the next starts (Bitwig saves a point after a clip; lane points
+/// are joined by straight lines, and FL holds a setting where the last move left it).
+fn lane_outside_clips(clips: &[LanePart]) -> Vec<(f64, f64)> {
     let mut held = Vec::new();
-    for (k, part) in parts.iter().enumerate() {
+    for (k, part) in clips.iter().enumerate() {
         let Some(&(_, value)) = part.points.last() else { continue };
         let end = part.start + part.length;
         held.push((end, value));
-        if let Some(next) = parts.get(k + 1)
+        if let Some(next) = clips.get(k + 1)
             && next.start > end + SAME_BEAT
         {
             held.push((next.start, value));
@@ -1434,6 +1473,31 @@ fn uuid_text(b: &[u8; 16]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clips_over_each_other_take_turns_and_keep_every_move() {
+        let part =
+            |start, length, points: &[(f64, f64)], source| LanePart { start, length, points: points.to_vec(), source };
+        // A: 16 beats moving at 0, 2, 8 and 12. B inside it at 4 for 2 beats. C starts with B, on the same beat.
+        let a = part(0.0, 16.0, &[(0.0, 0.1), (2.0, 0.2), (8.0, 0.8), (12.0, 0.9)], 0);
+        let b = part(4.0, 2.0, &[(0.0, 0.5)], 1);
+        let c = part(4.0, 1.0, &[(0.0, 0.6)], 2);
+        let clips = clips_in_order(&[a, b, c]);
+        assert_eq!(
+            clips,
+            [
+                part(0.0, 4.0, &[(0.0, 0.1), (2.0, 0.2)], 0),
+                // B is taken over by C, which started on the same beat and comes later.
+                part(4.0, 1.0, &[(0.0, 0.6)], 2),
+                // B's last beat.
+                part(5.0, 1.0, &[(0.0, 0.5)], 1),
+                // The rest of A, from the value it had reached at beat 6.
+                part(6.0, 10.0, &[(0.0, 0.2), (2.0, 0.8), (6.0, 0.9)], 0),
+            ]
+        );
+        let outside = lane_outside_clips(&clips);
+        assert_eq!(outside.last(), Some(&(16.0, 0.9)));
+    }
 
     #[test]
     fn ids_read_and_write_as_bitwig_spells_them() {
