@@ -79,3 +79,18 @@ tests don't have.
 | A header or track length so damaged it points before the file's start, or past what a whole number holds | Stops with an error that isn't "not a MIDI file", so the file counts as failed. | Reads the tracks before the damage and stops there. | Better |
 | A note's velocity | MIDI 1.0's 0 to 127. | Kept in MIDI 2.0's 16 bits, scaled up by MIDI 2.0's own rule, so each comes back as it was written. | Same values (rule 22) |
 | MIDI 2.0 Clip Files (`.midi2`) | Not read. | Read: a part for each group and channel with notes, keeping MIDI 2.0's 16-bit velocities and note attributes. No twin to compare with, so the tests follow the MIDI Clip File and Universal MIDI Packet specifications. | New (rule 22) |
+
+### Writing MIDI files
+
+The writer (`midi::write`) against the C# `MidiWriter`. Same file for ordinary clips: format 1, a first track with the
+clip's name, no tempo, note-offs before note-ons at the same tick.
+
+| What | C# | Rust | Judged |
+|---|---|---|---|
+| A note of no length | Its note-off is sorted before its note-on at the same tick, so the note sounds on to the end of the track. | Written one tick long (or refused, if asked). | Better |
+| A note still sounding when the same key starts again | Written as it is, so a note inside a longer one on its key comes back with the wrong lengths (readers end the earliest first). | The earlier note ends where the key starts again, as a MIDI 1.0 instrument plays it; two struck together become one (or refused, if asked). | Better |
+| A clip's 10th and 17th tracks | Channel = track number % 16, so the 10th track lands on General MIDI's drum channel. | Channel 10 is skipped for a clip's tracks (they aren't marked as drums). | Better |
+| A key over 127, a channel or sound out of range, a tick too far | Cut to a byte without a word. | An error that says what's wrong. | Better |
+| A name over 255 bytes | Cut at byte 255, which can split a letter. | Cut at the last whole letter. | Better |
+| FL step-sequencer steps (no length) | Lengthened to a sixteenth (or the next step on the key) inside the writer. | The writer writes what it's given; the export that calls it should lengthen steps first (`mo_convert::clips::lengthen`). | Not yet |
+| Tempo, time signature, format 0, sounds and controllers | Never written. | Written when the song has them and the options ask (no tempo by default, as in C#); controllers cut to MIDI 1.0's bits only in the file (rule 22). | New |
