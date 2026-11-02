@@ -17,13 +17,15 @@ use crate::types::{key_from_name, loop_from_path, tempo_from_name};
 /// The sound files the app reads, on every system.
 ///
 /// The C# app reads WAV and AIFF itself and MP3, FLAC, M4A, OGG, WMA and AAC through Windows only. The Rust app decodes
-/// all but WMA itself on every system, so a Mac or Linux lists them too. A WMA is left out, and like any file the app
-/// can't read, it isn't forgotten either: its sound keeps what you gave it.
+/// all but WMA itself on every system, so a Mac or Linux lists them too. WMA is decoded by Windows (as in the C# app),
+/// so it's listed there only; elsewhere it's left out, and like any file the app can't read, it isn't forgotten
+/// either: its sound keeps what you gave it.
 pub const AUDIO_EXTENSIONS: [&str; 9] = ["wav", "aif", "aiff", "aifc", "mp3", "flac", "m4a", "ogg", "aac"];
 
-/// Whether the app reads this kind of sound file (by its extension, ignoring case).
+/// Whether the app reads this kind of sound file on this computer (by its extension, ignoring case).
 pub fn can_read(path: &str) -> bool {
-    has_extension(file_name(path), &AUDIO_EXTENSIONS)
+    let name = file_name(path);
+    has_extension(name, &AUDIO_EXTENSIONS) || (cfg!(windows) && has_extension(name, &mo_audio::WMA_EXTENSIONS))
 }
 
 /// A Mac's "._" shadow file, which holds no sound.
@@ -221,7 +223,8 @@ mod tests {
     fn readable_files() {
         assert!(can_read(r"D:\s\Kick.WAV"));
         assert!(can_read("D:/s/loop.flac"));
-        assert!(!can_read(r"D:\s\Song.wma"));
+        // Windows decodes WMA; a Mac or Linux can't.
+        assert_eq!(can_read(r"D:\s\Song.WMA"), cfg!(windows));
         assert!(!can_read(r"D:\s.wav\readme"));
         assert!(!is_sound_file(r"D:\s\._Kick.wav"));
         assert!(is_hidden_folder("__macosx"));

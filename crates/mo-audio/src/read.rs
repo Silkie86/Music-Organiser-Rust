@@ -32,13 +32,14 @@ pub fn read(path: &Path, max_seconds: f64) -> Result<AudioData, AudioError> {
 pub fn read_from(path: &Path, max_seconds: f64, from_frame: u64) -> Result<AudioData, AudioError> {
     if !can_read_from(path) {
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
-        if !crate::other::is_other(path) {
+        let wma = crate::wma::is_wma(path);
+        if !crate::other::is_other(path) && !wma {
             return Err(AudioError::NotSupported(format!("No decoder for .{ext} files")));
         }
         if from_frame > 0 {
             return Err(AudioError::NotSupported(format!(".{ext} files are only read from the start")));
         }
-        return crate::other::read_other(path, max_seconds);
+        return if wma { crate::wma::read_wma(path, max_seconds) } else { crate::other::read_other(path, max_seconds) };
     }
     let mut f = File::open(path)?;
     let len = f.metadata()?.len();

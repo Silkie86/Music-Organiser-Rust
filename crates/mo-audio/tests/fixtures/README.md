@@ -3,3 +3,4 @@ symphonia. Nothing from anyone's sample library.
 
     ffmpeg -f lavfi -i sine=frequency=440:sample_rate=22050:duration=0.5 -ac 2 -map_metadata -1 tone.flac
     (and tone.mp3 at 64k, tone.m4a and tone.aac as AAC 64k, tone.ogg as Vorbis q0)
+    (tone.wma as WMA v2 64k: `-c:a wmav2 -b:a 64k`, which only Windows decodes)
