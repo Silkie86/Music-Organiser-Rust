@@ -18,7 +18,7 @@ Format Lab: looks inside Bitwig and FL Studio files, to learn how each DAW saves
   formatlab census <folder>... [--top N]   what the app doesn't know yet, across all projects in folders
   formatlab fields bitwig|fl [<id>]        what the app knows (the field registry)
 
-Files: .bwproject, .bwpreset, .bwclip and .flp.
+Files: .bwproject, .bwpreset, .bwclip, .bwcurve and .flp.
 ";
 
 /// How many finds are listed.

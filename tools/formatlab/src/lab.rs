@@ -87,7 +87,7 @@ impl LabFile {
         LabFile::read(&raw, &name)
     }
 
-    /// Lays out a Bitwig file (.bwproject, .bwpreset, .bwclip) or an FL Studio project.
+    /// Lays out a Bitwig file (.bwproject, .bwpreset, .bwclip, .bwcurve) or an FL Studio project.
     pub fn read(raw: &[u8], name: &str) -> Result<LabFile, String> {
         if mo_formats::bitwig::is_bitwig(raw) {
             return bitwig_lab::read(raw, name);
