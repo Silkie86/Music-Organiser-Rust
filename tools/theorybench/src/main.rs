@@ -27,8 +27,8 @@ theorybench keyfit <labelled.jsonl>... [--aligned] [--bars <lengths>] [--lambda-
                    [--picks <n>] [--weigh <source>=<w>] [--dump <file>] [--against <file>] [--hand <cases>]
                    [--shipped | --rescale] [--final | --write <weights.rs>]
 theorybench packs <folder>... --out <file.jsonl>
-theorybench chords <labelled.jsonl>... --answers <name>=<answers.jsonl> [--answers ...] [--part <role>]
-                   [--per-segment] [--by <tag>]... [--dump <file>]
+theorybench chords <labelled.jsonl>... [--answers <name>=<answers.jsonl>]... [--engine rust] [--part <role>]
+                   [--roles on|off] [--oracle-cuts] [--timing] [--per-segment] [--by <tag>]... [--dump <file>]
 theorybench candidates <labelled.jsonl>... [--inputs <kinds>] [--misses <file>]
 theorybench tables <labelled.jsonl>... [--write <tables.rs>]
 
@@ -56,9 +56,14 @@ theorybench tables <labelled.jsonl>... [--write <tables.rs>]
   --out      where to write them: a .jsonl outside this repository
   chords     how often each chord reader names the labelled chord, scored as mir_eval scores it, then the whole
              chord: its notes and bass, each extension, the root among the same notes, the bass kind, readings listed
-  --answers  the chords an engine read in each piece, as the C# helper in cs/ writes them; the first is the baseline
-  --part     the parts the engines heard (as given to the helper; all but drums when left out), for the roots no
-             part plays
+  --answers  the chords an engine read in each piece, as the C# helper in cs/ writes them; the first engine given
+             is the baseline
+  --engine   rust: mo-harmony's chord reader, run here on the same notes (an engine like the others, in its place)
+  --part     the parts the engines heard (as given to the helper; all but drums when left out): mo-harmony hears
+             them too, and they give the roots no part plays
+  --roles    off: mo-harmony hears every part as one, with no role, as the C# app does (on: each with its role)
+  --oracle-cuts  mo-harmony given the labelled changes: each labelled chord read as one chord
+  --timing   mo-harmony reads on one core and says how long a read takes: a piece, and 16 bars of it
   --per-segment  mir_eval's scores per labelled chord too, each counted once
   --by       the chords named whole split by a tag convert/voice.py gives each chord it plays: set, recipe, texture,
              tune, push, chart or quality (and context and role in its sweep); given twice, by both
