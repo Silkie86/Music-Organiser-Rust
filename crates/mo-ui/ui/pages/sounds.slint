@@ -184,6 +184,10 @@ export global SoundsData {
     in property <length> galaxy-mouse-x;
     in property <length> galaxy-mouse-y;
     in property <string> galaxy-hover-text;
+    // The faint ring round the star under the mouse: the one a click picks.
+    in property <bool> galaxy-hover-shown;
+    in property <length> galaxy-hover-x;
+    in property <length> galaxy-hover-y;
     // The ring round the picked star.
     in property <bool> galaxy-picked-shown;
     in property <length> galaxy-picked-x;
@@ -1256,6 +1260,16 @@ export component SoundsPage inherits Rectangle {
                             height: SoundsData.galaxy-image-height;
                             source: SoundsData.galaxy-image;
                             image-fit: fill;
+                        }
+                        if SoundsData.galaxy-hover-shown: Rectangle {
+                            x: SoundsData.galaxy-hover-x - 7px;
+                            y: SoundsData.galaxy-hover-y - 7px;
+                            width: 14px;
+                            height: 14px;
+                            border-radius: 7px;
+                            border-width: 1.5px;
+                            border-color: Theme.text;
+                            opacity: 0.7;
                         }
                         if SoundsData.galaxy-picked-shown: Rectangle {
                             x: SoundsData.galaxy-picked-x - 9px;
