@@ -83,9 +83,8 @@ struct Teller<'a> {
     second: Option<Spelled>,
     /// The chords the decode reads for each, written plainly (Cmaj7 for a C cut from it) and spelled the same way.
     plain: [Option<Spelled>; 2],
-    /// Whether each is written as the chord the decode reads: on its root, as the same kind of chord (C for Cmaj7 cut
-    /// in two, Dm9 for Dm7; not D/C for D7, nor C#dim7 for Edim7). The evidence tells each as written where it is,
-    /// else as the chord the decode reads.
+    /// Whether each is written as the chord the decode reads ([`written_as_read`]). The evidence tells each as written
+    /// where it is, else as the chord the decode reads.
     same: [bool; 2],
     /// The same notes written other ways: the other way the namer writes them, and a chord that repeats round the
     /// octave on its other roots.
@@ -147,7 +146,7 @@ impl<'a> Teller<'a> {
         let second = e.second.map(|r| spell(e.span, r.chord));
         let plain = [Some(&e.first), e.second.as_ref()].map(|r| r.map(|r| spell(e.span, plain_chord(r.label))));
         let same = |written: Option<Spelled>, plain: Option<Spelled>| match (written, plain) {
-            (Some(w), Some(p)) => w.chord().root() == p.chord().root() && w.chord().family() == p.chord().family(),
+            (Some(w), Some(p)) => written_as_read(w.chord(), p.chord()),
             _ => true,
         };
         let [p0, p1] = plain;
@@ -206,14 +205,12 @@ impl<'a> Teller<'a> {
 
     /// A note, spelled by its degree above a reading's root as the evidence tells it.
     fn note_of(&self, k: usize, pc: PitchClass) -> String {
-        let told = self.told(k);
-        told.root().up(degree_in(told.chord(), pc)).without_doubles().name()
+        spelled_in(self.told(k), pc)
     }
 
-    /// A note, spelled by its degree above the first reading's root: its own degree when it's one of the chord's
-    /// notes or the bass written under it, else the degree it would have were it named.
+    /// A note, spelled by its degree above the first reading's root as written.
     fn note(&self, pc: PitchClass) -> String {
-        self.first.root().up(degree_in(self.e.first.chord, pc)).without_doubles().name()
+        spelled_in(self.first, pc)
     }
 
     /// The chord: its name and how its notes make it.
@@ -278,7 +275,10 @@ impl<'a> Teller<'a> {
             }
             kind => {
                 let what = match kind {
-                    BassKind::Slash => format!("a {} under the chord", degree_name(chord.bass_degree())),
+                    BassKind::Slash => {
+                        let degree = degree_name(chord.bass_degree());
+                        format!("{} {degree} under the chord", article(&degree))
+                    }
                     _ => format!("its {}", role_word(chord.bass_degree())),
                 };
                 let bass = self.note(chord.bass());
@@ -345,7 +345,7 @@ impl<'a> Teller<'a> {
                 out.push("You gave this chord (a fix or a Chord check answer), so it's written as given.".to_owned());
             }
             if s.flags.contains(SpanFlags::PUSHED) && s.heard_start < s.start {
-                out.push(self.pushed(s));
+                out.push(pushed_words(self.grid, s.start, s.heard_start));
             }
         }
         if let (false, Some(plain)) = (self.same(0), self.plain[0]) {
@@ -384,35 +384,6 @@ impl<'a> Teller<'a> {
             self.kind_lines(kind, &mut out);
         }
         out
-    }
-
-    /// A pushed chord: how early it's struck, and where.
-    fn pushed(&self, s: &ChordSpan) -> String {
-        let beat = self.grid.beat();
-        let early = s.start - s.heard_start;
-        let amount = match fraction(early, beat) {
-            Some((1, 1)) => "a beat".to_owned(),
-            Some((1, 2)) => "half a beat".to_owned(),
-            Some((1, 3)) => "a third of a beat".to_owned(),
-            Some((1, 4)) => "a quarter of a beat".to_owned(),
-            Some((3, 4)) => "three quarters of a beat".to_owned(),
-            Some((2, 3)) => "two thirds of a beat".to_owned(),
-            Some((n, 1)) => format!("{n} beats"),
-            _ if early < beat => "a little".to_owned(),
-            _ => "more than a beat".to_owned(),
-        };
-        let at = (s.heard_start - self.grid.bar_line).rem_euclid(self.grid.bar());
-        let (number, within) = (at / beat + 1, at % beat);
-        let next =
-            if number >= self.grid.bar_beats() { "the bar line".to_owned() } else { format!("beat {}", number + 1) };
-        let place = match fraction(within, beat) {
-            Some((0, _)) => format!("on beat {number}"),
-            Some((1, 2)) => format!("on the and of {number}"),
-            Some((1, 4)) => format!("on the e of {number}"),
-            Some((3, 4)) => format!("on the a of {number}"),
-            _ => format!("just before {next}"),
-        };
-        format!("Pushed: struck {amount} early, {place}.")
     }
 
     /// The lines for one kind of note that isn't the chord's own.
@@ -488,7 +459,7 @@ impl<'a> Teller<'a> {
                     }
                 }
                 for (stream, pc, anchors, times) in seen {
-                    let on: Vec<String> = anchors.iter().map(|a| self.note(a)).collect();
+                    let on: Vec<String> = below_first(pc, anchors).into_iter().map(|a| self.note(a)).collect();
                     let does = match kind {
                         _ if on.is_empty() => "passes by".to_owned(),
                         Kind::Suspension => format!("is held over from before and steps down to {}", list(on, "or")),
@@ -604,13 +575,17 @@ impl<'a> Teller<'a> {
         (!facts.is_empty()).then(|| facts.join("; "))
     }
 
-    /// Which root the notes lean towards ([`Feature::RootSupport`]).
+    /// Which root the notes lean towards ([`Feature::RootSupport`]: each reading's is about its root as read).
     fn leaning(&self, t: &TermWhy) -> String {
         let [a, b] = t.values;
-        let (r0, r1) = (self.root(0), self.second.map(|s| s.root().name()));
-        match r1 {
-            Some(r1) if r1 != r0 && b > a => format!("the notes lean more towards {r1} as the root than towards {r0}"),
-            Some(r1) if r1 != r0 => format!("the notes lean more towards {r0} as the root than towards {r1}"),
+        let r0 = self.root(0);
+        let roots = [0, 1].map(|k| self.reading(k).map(|r| r.label.root));
+        match roots {
+            [Some(x), Some(y)] if x != y => {
+                let r1 = self.root(1);
+                let (more, less) = if b > a { (r1, r0) } else { (r0, r1) };
+                format!("the notes lean more towards {more} as the root than towards {less}")
+            }
             _ => format!("the notes lean towards {r0} as the root"),
         }
     }
@@ -650,8 +625,11 @@ impl<'a> Teller<'a> {
                         Feature::WalkingTones => format!("on {whose} other notes"),
                         _ => format!("on notes not {whose} own, on a strong beat or held long"),
                     };
-                    let is = if i == 0 { " is" } else { "" };
-                    format!("{}{is} {what}", share(v, "all of it"))
+                    match f {
+                        // These add a share of what the chords hold over to one of their sound: not a share.
+                        Feature::WrongHeld | Feature::Passing => format!("{} is {what}", amount(v)),
+                        _ => format!("{}{} {what}", share(v, "all of it"), if i == 0 { " is" } else { "" }),
+                    }
                 })
                 .collect();
             let told = list(told, "and");
@@ -677,24 +655,33 @@ impl<'a> Teller<'a> {
                     _ => ("fifth", const { PcSet::of(&[7]) }),
                 };
                 let Some(pc) = intervals.on(root).iter().next() else { continue };
-                let far = value(t, k);
-                let how = if far >= 1.0 {
-                    "isn't heard"
-                } else if far > 0.5 {
-                    "is barely heard"
-                } else {
-                    "is only partly heard"
-                };
-                // A name leaves out a third, seventh or sixth it doesn't sound (C for Cmaj7, C5 for C), never a fifth.
+                // A name leaves out a third, seventh or sixth it doesn't sound (C for Cmaj7, C5 for C), never a fifth:
+                // then it's told by the chord read.
                 let (told, plain) = (self.told(k), self.plain.get(k).copied().flatten());
                 let left_out = f != Feature::NoPlainFifth && !told.chord().notes().contains(pc);
-                facts.push(match plain.filter(|_| left_out) {
+                let by = plain.filter(|_| left_out);
+                let spell = |pc: PitchClass| by.map_or_else(|| self.note_of(k, pc), |plain| spelled_in(plain, pc));
+                // A 7sus4's 2 may stand in for its 4th: the evidence is about the one heard more.
+                let both = f == Feature::NoThird && core == Core::Dominant7Sus4;
+                let notes = if both {
+                    format!("{what}, {}, and the 2 that may stand in for it, {},", spell(pc), spell(root.up(2)))
+                } else {
+                    format!("{what}, {},", spell(pc))
+                };
+                let how = match (both, value(t, k)) {
+                    (false, far) if far >= 1.0 => "isn't heard",
+                    (false, far) if far > 0.5 => "is barely heard",
+                    (false, _) => "is only partly heard",
+                    (true, far) if far >= 1.0 => "aren't heard",
+                    (true, far) if far > 0.5 => "are at most barely heard",
+                    (true, _) => "are at most partly heard",
+                };
+                facts.push(match by {
                     Some(plain) => {
                         let read = if k == 0 { "is read as" } else { "would be read as" };
-                        let note = plain.root().up(degree_in(plain.chord(), pc)).without_doubles().name();
-                        format!("{} {read} {}, whose {what}, {note}, {how}", told.name(), plain.name())
+                        format!("{} {read} {}, whose {notes} {how}", told.name(), plain.name())
                     }
-                    None => format!("{}'s {what}, {}, {how}", told.name(), self.note_of(k, pc)),
+                    None => format!("{}'s {notes} {how}", told.name()),
                 });
             }
         }
@@ -782,12 +769,9 @@ impl<'a> Teller<'a> {
             (Some(k0), Some(k1)) => {
                 let (more, less, km, kl) = if a >= b { (0, 1, k0, k1) } else { (1, 0, k1, k0) };
                 let is = if more == 0 { "is" } else { "would be" };
-                let way = if km == kl { String::new() } else { format!(" is to write a {kl} chord") };
-                Some(format!(
-                    "{counted}, {} {is} a more usual way to write a {km} chord than {}{way}",
-                    self.name(more),
-                    self.name(less)
-                ))
+                let way = if km == kl { String::new() } else { format!(" is to write {} {kl} chord", article(kl)) };
+                let (more, less, a) = (self.name(more), self.name(less), article(km));
+                Some(format!("{counted}, {more} {is} a more usual way to write {a} {km} chord than {less}{way}"))
             }
             (Some(k0), None) => {
                 Some(format!("{counted}, about {} of {k0} chords are written as {} is", percent(a.exp()), self.name(0)))
@@ -984,6 +968,65 @@ fn degree_in(chord: Chord, pc: PitchClass) -> Degree {
     }
 }
 
+/// Whether a chord is written as the chord read: on its root, as the same kind of chord (Dm9 for Dm7, C for Cmaj7 cut
+/// in two) or as that chord with notes it doesn't sound left out (G for G7, C5 for C); not D/C for D7, its seventh
+/// heard as a bass under it, nor C#dim7 for Edim7.
+pub(super) fn written_as_read(written: Chord, read: Chord) -> bool {
+    let left_out = read.notes().difference(written.notes());
+    let fewer = read.notes().contains_all(written.notes()) && !left_out.contains(written.bass());
+    written.root() == read.root() && (written.family() == read.family() || fewer)
+}
+
+/// A chord pushed to `start` and struck at `struck`: how early it's struck, and where ("Pushed: struck half a beat
+/// early, on the and of 4.").
+pub(super) fn pushed_words(grid: Grid, start: i64, struck: i64) -> String {
+    let beat = grid.beat();
+    let early = start - struck;
+    let amount = match fraction(early, beat) {
+        Some((1, 1)) => "a beat".to_owned(),
+        Some((1, 2)) => "half a beat".to_owned(),
+        Some((1, 3)) => "a third of a beat".to_owned(),
+        Some((1, 4)) => "a quarter of a beat".to_owned(),
+        Some((3, 4)) => "three quarters of a beat".to_owned(),
+        Some((2, 3)) => "two thirds of a beat".to_owned(),
+        Some((n, 1)) => format!("{n} beats"),
+        _ if early.saturating_mul(4) < beat => "a little".to_owned(),
+        _ if early.saturating_mul(2) < beat => "less than half a beat".to_owned(),
+        _ if early < beat => "less than a beat".to_owned(),
+        _ => "more than a beat".to_owned(),
+    };
+    let at = (struck - grid.bar_line).rem_euclid(grid.bar());
+    let (number, within) = (at / beat + 1, at % beat);
+    let next = if number >= grid.bar_beats() { "the bar line".to_owned() } else { format!("beat {}", number + 1) };
+    let place = match fraction(within, beat) {
+        Some((0, _)) => format!("on beat {number}"),
+        Some((1, 2)) => format!("on the and of {number}"),
+        Some((1, 4)) => format!("on the e of {number}"),
+        Some((3, 4)) => format!("on the a of {number}"),
+        Some((1, 3)) => format!("on the second triplet of {number}"),
+        Some((2, 3)) => format!("on the last triplet of {number}"),
+        _ => format!("between beat {number} and {next}"),
+    };
+    format!("Pushed: struck {amount} early, {place}.")
+}
+
+/// A note spelled by its degree above a chord's root, as the chord is spelled: its own degree when it's one of the
+/// chord's notes or the bass written under it, else the degree it would have were it named.
+fn spelled_in(chord: Spelled, pc: PitchClass) -> String {
+    chord.root().up(degree_in(chord.chord(), pc)).without_doubles().name()
+}
+
+/// The notes a note hangs on, the one below it first (each the nearest way from it: a tritone counts as above), as a
+/// passing note goes from one to the other.
+fn below_first(pc: PitchClass, anchors: PcSet) -> Vec<PitchClass> {
+    let mut all: Vec<PitchClass> = anchors.iter().collect();
+    all.sort_by_key(|a| {
+        let up = i32::from(a.above(pc));
+        if up > 6 { up - 12 } else { up }
+    });
+    all
+}
+
 /// A note's degree in a chord were it named, the bass's too: the b9 of F7/Gb, where its bass is a b2.
 fn named_degree(chord: Chord, pc: PitchClass) -> Degree {
     Chord::new(chord.root(), chord.notes().with(pc), chord.root()).degree(i32::from(pc.above(chord.root())))
@@ -1066,6 +1109,24 @@ fn share(value: f64, all: &str) -> String {
     }
     let p = (value * 100.0).round().min(99.0);
     if p < 1.0 { "under 1%".to_owned() } else { format!("{p:.0}%") }
+}
+
+/// How much a measure that adds two shares shows (T4 and T5 add a share of what the chords hold over to one of their
+/// sound, so they can pass 1): a little, some or much.
+fn amount(value: f64) -> &'static str {
+    if value >= 0.5 {
+        "much"
+    } else if value >= 0.1 {
+        "some"
+    } else {
+        "a little"
+    }
+}
+
+/// The article before a word, by how it's said: "an" before a vowel ("an augmented chord", "an 11"), else "a".
+pub(super) fn article(word: &str) -> &'static str {
+    let vowel = word.starts_with(['a', 'e', 'i', 'o', 'u', 'A', 'E', 'I', 'O', 'U', '8']) || word.starts_with("11");
+    if vowel { "an" } else { "a" }
 }
 
 /// A chance as a percentage, to a tenth of a percent under 10%, and "under 0.1%" for less.

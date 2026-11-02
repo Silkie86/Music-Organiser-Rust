@@ -6,10 +6,13 @@ use super::decode_tests::small_music;
 use super::explain_tests::{case_music, explained};
 use super::hear_tests::{BAR, BEAT, Dice, Music, notes, random_music};
 use super::reader_tests::{chord, hand_cases, random_pins, the_music_in_ticks};
-use super::words::{Kind, Topic, kind_of, topic_of};
-use super::{ChordAnswer, ChordReading, Explanation, Hearing, MOST_READINGS, NoChord, Pin, SpanFlags, Words};
+use super::words::{Kind, Topic, article, kind_of, pushed_words, topic_of, written_as_read};
+use super::{
+    ChordAnswer, ChordReading, Explanation, Feature, Hearing, MOST_READINGS, NoChord, Pin, SpanFlags, Term, TermWhy,
+    Words,
+};
 use crate::key::Key;
-use crate::notes::Note;
+use crate::notes::{Grid, Note};
 use crate::pitch::PitchClass;
 
 /// Each stretch's words, the chart spelled in `key`.
@@ -443,4 +446,104 @@ fn the_same_notes_at_another_resolution_are_told_the_same() {
             assert_eq!(words_of(&r, &all, None), want, "at {ppq} ticks a beat");
         }
     }
+}
+
+#[test]
+fn a_name_that_only_leaves_out_notes_not_heard_is_the_chord_read() {
+    let as_read = |written: &str, read: &str| written_as_read(chord(written), chord(read));
+    // The same kind of chord, with its tensions named or not.
+    assert!(as_read("Dm9", "Dm7") && as_read("Dm7", "Dm9") && as_read("C", "Cmaj7") && as_read("C/B", "Cmaj7"));
+    // Notes it doesn't sound left out: told as the name, with the notes left out told by the chord read.
+    assert!(as_read("G", "G7") && as_read("G/B", "G7") && as_read("C5", "C") && as_read("Bdim", "Bm7b5"));
+    // Its seventh heard as a bass under it, another root, another kind of chord.
+    assert!(!as_read("D/C", "D7") && !as_read("C#dim7", "Edim7") && !as_read("Dm11/G", "D7sus4"));
+    assert!(!as_read("Cm", "C") && !as_read("Cmaj7", "Cm") && !as_read("G7", "G"));
+}
+
+#[test]
+fn a_push_is_told_by_how_early_and_where_its_struck() {
+    let grid = Grid::four_four(480);
+    let told = |early: i64| pushed_words(grid, 4 * 480, 4 * 480 - early);
+    assert_eq!(told(240), "Pushed: struck half a beat early, on the and of 4.");
+    assert_eq!(told(120), "Pushed: struck a quarter of a beat early, on the a of 4.");
+    assert_eq!(told(360), "Pushed: struck three quarters of a beat early, on the e of 4.");
+    assert_eq!(told(320), "Pushed: struck two thirds of a beat early, on the second triplet of 4.");
+    assert_eq!(told(160), "Pushed: struck a third of a beat early, on the last triplet of 4.");
+    // Any other amount, between the beats it's struck between.
+    assert_eq!(told(10), "Pushed: struck a little early, between beat 4 and the bar line.");
+    assert_eq!(told(200), "Pushed: struck less than half a beat early, between beat 4 and the bar line.");
+    assert_eq!(told(470), "Pushed: struck less than a beat early, between beat 4 and the bar line.");
+    // To the middle of a bar, and in 6/8 (its beat an eighth), a bar line away from the grid's.
+    assert_eq!(pushed_words(grid, 2 * 480, 2 * 480 - 240), "Pushed: struck half a beat early, on the and of 2.");
+    let six_eight = Grid { ticks_per_beat: 240, beats_per_bar: 6, bar_line: 120 };
+    assert_eq!(pushed_words(six_eight, 1560, 1320), "Pushed: struck a beat early, on beat 6.");
+}
+
+#[test]
+fn evidence_about_two_notes_or_adding_two_shares_is_told_as_it_was_weighed() {
+    let music = Music::new().bass(notes("G2", 0, BAR)).keys(notes("C4 D4 F4", 0, BAR));
+    let (reading, all) = explained(&music.looped(), &[], 2);
+    let mut e = all.into_iter().next().flatten().expect("no explanation");
+    assert_eq!(e.first.chord.name(), "G7sus4");
+    let chart = reading.names(None);
+    let mut why = |f: Feature, value: f64| {
+        e.terms = vec![TermWhy { term: Term::Feature(f), values: [value, 0.0], scores: [-value, 0.0] }];
+        e.words(&reading, &chart, None).why.into_iter().last().unwrap_or_default()
+    };
+    // A 7sus4's 2 may stand in for its 4th: the evidence is about the one heard more.
+    let partly = "G7sus4's 4th, C, and the 2 that may stand in for it, A, are at most partly heard.";
+    assert_eq!(why(Feature::NoThird, 0.4), partly);
+    assert_eq!(why(Feature::NoThird, 1.0), partly.replace("are at most partly heard", "aren't heard"));
+    // What the chords carry in or hold over adds a share of what they hold over to one of their sound: no share.
+    let held = "Of what the chords play, much is notes carried in or held over that don't fit G7sus4.";
+    assert_eq!(why(Feature::WrongHeld, 1.2), held);
+    assert_eq!(why(Feature::WrongHeld, 0.3), held.replace("much", "some"));
+    assert_eq!(
+        why(Feature::Passing, 0.05),
+        "Of what the chords play, a little is notes that only pass by under G7sus4."
+    );
+    assert_eq!(why(Feature::ChordTones, 1.0), "Of what the chords play, all of it is G7sus4's own notes.");
+}
+
+#[test]
+fn the_runner_up_is_told_by_the_chord_it_is_read_as() {
+    // G+/C read as B+: the notes lean towards the root it's read on, B.
+    let w = case("35 Cm | Cm(maj7) | Cm7 | Cm6 over a held C", 1);
+    assert_eq!(w.why[0], "The runner-up, G+/C, is read as B+.");
+    assert!(has(
+        &w,
+        "Cm(maj7)'s root, C, is only in the bass; the notes lean more towards B as the root than towards C."
+    ));
+    // A passing note between the notes it hangs on, the one below it first.
+    assert!(has(&case("54 C | G | Am | F with a tune", 2), "B in the tune passes between A and C."));
+    // What the chords carry in or hold over, told by how much.
+    assert!(has(
+        &case("44 C | F pushed", 1),
+        "Of what the chords play, all of it is F's own notes; for C, 33% is its own notes and much is notes carried in \
+         or held over that don't fit it."
+    ));
+}
+
+#[test]
+fn a_word_said_with_a_vowel_first_takes_an() {
+    for (word, a) in [("augmented", "an"), ("11", "an"), ("#11", "a"), ("b13", "a"), ("major", "a"), ("7sus4", "a")] {
+        assert_eq!(article(word), a, "{word}");
+    }
+    // An augmented triad (which has no runner-up: its roots are one chord) as the runner-up of C.
+    let first = |keys: &str| {
+        let music = Music::new().bass(notes("C2", 0, BAR)).keys(notes(keys, 0, BAR)).looped();
+        let (reading, all) = explained(&music, &[], 2);
+        (reading, all.into_iter().next().flatten().expect("no explanation"))
+    };
+    let (reading, mut e) = first("E4 G4 C5");
+    e.second = Some(first("E4 G#4 C5").1.first);
+    e.terms = vec![TermWhy { term: Term::Feature(Feature::TensionPrior), values: [-0.5, -1.0], scores: [-0.5, -1.0] }];
+    let why = e.words(&reading, &reading.names(None), None).why;
+    assert_eq!(
+        why.last().map(String::as_str),
+        Some(
+            "As the songs counted name tensions, C is a more usual way to write a major chord than C+ is to write an \
+              augmented chord."
+        )
+    );
 }
