@@ -9,7 +9,8 @@
 //!
 //! A way is allowed when every reading it takes is one the labels accept where it is, and it starts a chord only near
 //! a labelled change ([`Gold`]). The readings the labels accept are kept on every span inside a labelled stretch,
-//! whatever their rank (the decode keeps them while it's told the labels), so the allowed ways are never pruned away.
+//! whatever their rank (the decode keeps them when it's given the labels, [`Decoder::decode_labelled`]), so the
+//! allowed ways are never pruned away.
 //!
 //! The sums are worked out over the decode's own lattice, forward and back, in logarithms, the same way for every way
 //! and for the allowed ones; over every way they are the decode's own ln Z and chances (a test checks both). The
@@ -18,9 +19,8 @@
 
 use std::ops::Range;
 
-use super::{Decoder, Id, Kind, LnSum, PerId, SHARPNESS, add_ln};
+use super::{Decoder, Decoding, Id, Kind, LnSum, PerId, SHARPNESS, add_ln};
 use crate::chordread::candidates::Label;
-use crate::chordread::cores::{Core, Group};
 use crate::chordread::hear::Hearing;
 use crate::chordread::score::{Feature, PerFeature};
 use crate::chordread::weights::{NUMBERS, Priors, Tables, Weights};
@@ -97,11 +97,6 @@ impl Gold {
         let mut gold = Gold { units, stretches, may_start: Vec::new() };
         gold.mark();
         gold
-    }
-
-    /// Whether any stretch is labelled.
-    pub(crate) fn is_labelled(&self) -> bool {
-        !self.stretches.is_empty()
     }
 
     /// Puts the stretches in order, leaving out the empty ones, and marks where a chord may start.
@@ -190,36 +185,6 @@ impl Gold {
     }
 }
 
-/// The motion prior of every way to move on ([`Tables::motion_prior`]), worked out once: what the pair term's trust is
-/// weighed by.
-struct Motion([[[f64; 3]; 12]; 3]);
-
-impl Motion {
-    fn new(tables: &Tables) -> Motion {
-        let mut out = [[[0.0; 3]; 12]; 3];
-        for (from, row) in Group::ALL.into_iter().zip(&mut out) {
-            for (up, cell) in (0u8..).zip(row.iter_mut()) {
-                for (to, value) in Group::ALL.into_iter().zip(cell) {
-                    *value = tables.motion_prior(from, up, to);
-                }
-            }
-        }
-        Motion(out)
-    }
-
-    /// The motion prior between two readings, as the decode's pair term reads it: 0 for the same reading again and for
-    /// a move into or out of no chord.
-    fn between(&self, from: Id, to: Id) -> f64 {
-        if from == to || from == Id::NONE || to == Id::NONE {
-            return 0.0;
-        }
-        let group = |id: Id| Core::ALL.get(usize::from(id.0 % 16)).map_or(0, |c| c.group().index());
-        let up = usize::from((to.0 / 16 + 12 - from.0 / 16) % 12);
-        let row = self.0.get(group(from));
-        row.and_then(|row| row.get(up)).and_then(|cell| cell.get(group(to))).copied().unwrap_or(0.0)
-    }
-}
-
 /// Which steps a reading kept on a span may take in the ways summed: start a chord there (`STARTS`), or be held on
 /// into the span (`HOLDS`).
 const STARTS: u8 = 1;
@@ -268,10 +233,18 @@ pub struct FitSums {
 }
 
 impl Decoder {
-    /// Keeps the readings `gold` accepts on every span inside a labelled stretch in the decodes that follow, whatever
-    /// their rank, until it's given empty labels; and says which ways [`Decoder::fit_sums`] allows.
-    pub(crate) fn set_gold(&mut self, gold: Gold) {
-        self.gold = gold;
+    /// Decodes as [`Decoder::decode`] does (with no pins), but first moves the labels' changes that no place a chord
+    /// may change is near to the nearest place one may ([`Gold::settle`]), then keeps the readings `gold` accepts on
+    /// every span inside a labelled stretch, whatever their rank. [`Decoder::fit_sums`] then sums the ways it allows.
+    pub(crate) fn decode_labelled(
+        &mut self,
+        hearing: &Hearing,
+        weights: &Weights,
+        tables: &Tables,
+        gold: &mut Gold,
+        out: &mut Decoding,
+    ) -> bool {
+        self.decode_with(hearing, weights, tables, &[], Some(gold), out)
     }
 
     /// How many readings the last decode kept only because the labels accept them.
@@ -292,10 +265,10 @@ impl Decoder {
         out
     }
 
-    /// The fit's sums over the last decode of `hearing` ([`FitSums`]), on the labels it was given ([`Decoder::set_gold`])
-    /// and the priors of the tables it was read with. Call it only after a decode that read something.
-    pub(crate) fn fit_sums(&mut self, hearing: &Hearing, tables: &Tables, work: &mut FitWork) -> FitSums {
-        let motion = Motion::new(tables);
+    /// The fit's sums over the last decode of `hearing` ([`FitSums`]), on the labels it was given and settled
+    /// ([`Decoder::decode_labelled`]) and the priors of the tables it was read with. Call it only after a decode that
+    /// read something.
+    pub(crate) fn fit_sums(&mut self, hearing: &Hearing, tables: &Tables, gold: &Gold, work: &mut FitWork) -> FitSums {
         let mut out = FitSums {
             ln_z: f64::NEG_INFINITY,
             ln_z_labelled: f64::NEG_INFINITY,
@@ -304,8 +277,8 @@ impl Decoder {
         };
         let mut sweeps = std::mem::take(&mut work.sweeps);
         for (pass, sweep) in sweeps.iter_mut().enumerate() {
-            self.steps_allowed(pass == 1, &mut work.steps);
-            self.sweep(&motion, work, sweep);
+            self.steps_allowed((pass == 1).then_some(gold), &mut work.steps);
+            self.sweep(work, sweep);
         }
         let [free, labelled] = &sweeps;
         out.ln_z = free.ln_z;
@@ -318,17 +291,15 @@ impl Decoder {
     }
 
     /// Which steps each kept reading may take in the ways summed: every step, or the steps the labels allow (`gold`).
-    fn steps_allowed(&self, gold: bool, out: &mut Vec<u8>) {
+    fn steps_allowed(&self, gold: Option<&Gold>, out: &mut Vec<u8>) {
         out.clear();
         out.resize(self.kept.len(), STARTS | HOLDS);
-        if !gold {
-            return;
-        }
+        let Some(gold) = gold else { return };
         for span in &self.spans {
             let (Some(from), Some(to)) = (self.nodes.get(span.from), self.nodes.get(span.to)) else { continue };
             // A rest is no chord whatever the labels say: nothing else can be read there.
-            let accepts = if span.rest { None } else { self.gold.accepts(from.unit..to.unit) };
-            let starts = matches!(from.kind, Kind::Start | Kind::Edge) || self.gold.may_start(from.unit);
+            let accepts = if span.rest { None } else { gold.accepts(from.unit..to.unit) };
+            let starts = matches!(from.kind, Kind::Start | Kind::Edge) || gold.may_start(from.unit);
             for (k, kept) in span.kept.clone().zip(self.kept.get(span.kept.clone()).unwrap_or_default()) {
                 let label_ok = accepts.is_none_or(|set| set.has(kept.id));
                 let steps = match (label_ok, starts) {
@@ -344,7 +315,7 @@ impl Decoder {
     }
 
     /// One sweep forward and back over the lattice, each kept reading taking only the steps `work.steps` allows.
-    fn sweep(&self, motion: &Motion, work: &mut FitWork, out: &mut Sweep) {
+    fn sweep(&self, work: &mut FitWork, out: &mut Sweep) {
         let (kept, entries) = (self.kept.len(), self.entries.len());
         let none = f64::NEG_INFINITY;
         for v in [&mut work.started_in, &mut work.held_in, &mut work.after, &mut out.motion] {
@@ -359,7 +330,7 @@ impl Decoder {
             v.clear();
             v.resize(entries, none);
         }
-        self.forward_sweep(motion, work, &mut out.motion);
+        self.forward_sweep(work, &mut out.motion);
         let end = self.nodes.last().map_or(0..0, |end| end.entries.clone());
         let mut z = LnSum::EMPTY;
         for &alpha in work.alpha.get(end).unwrap_or_default() {
@@ -387,9 +358,9 @@ impl Decoder {
     }
 
     /// The forward half of a sweep, place by place: what the ways that reach each place bring to the readings of the
-    /// spans that start there, started there or held on, pushed on to where each span ends. `motion` gets, for each
-    /// reading kept, the motion prior expected over the readings before it when it starts a chord.
-    fn forward_sweep(&self, motion: &Motion, work: &mut FitWork, out_motion: &mut [f64]) {
+    /// spans that start there, started there or held on, pushed on to where each span ends. `out_motion` gets, for
+    /// each reading kept, the motion prior expected over the readings before it when it starts a chord.
+    fn forward_sweep(&self, work: &mut FitWork, out_motion: &mut [f64]) {
         let mut at: PerId<Option<usize>> = PerId::filled(None);
         let mut ready: PerId<Option<(f64, f64)>> = PerId::filled(None);
         let mut touched: Vec<Id> = Vec::new();
@@ -422,7 +393,7 @@ impl Decoder {
                         let (into, expected) = match ready[id] {
                             Some(r) => r,
                             None => {
-                                let r = self.start_into(node.kind, id, &node.entries, motion, work);
+                                let r = self.start_into(node.kind, id, &node.entries, work);
                                 ready[id] = Some(r);
                                 touched.push(id);
                                 r
@@ -470,14 +441,7 @@ impl Decoder {
     /// The ln mass of the ways that reach a place (of kind `kind`, the readings there at `entries`) and start the
     /// reading `id` there, with the pair term; and the motion prior expected over the readings they come from. Where
     /// the music starts, nothing comes before: ln 1 and no move.
-    fn start_into(
-        &self,
-        kind: Kind,
-        id: Id,
-        entries: &Range<usize>,
-        motion: &Motion,
-        work: &mut FitWork,
-    ) -> (f64, f64) {
+    fn start_into(&self, kind: Kind, id: Id, entries: &Range<usize>, work: &mut FitWork) -> (f64, f64) {
         if kind == Kind::Start {
             return (0.0, 0.0);
         }
@@ -490,7 +454,7 @@ impl Decoder {
                 continue;
             }
             let term = alpha + SHARPNESS * self.moves.between(entry.id, id).0;
-            work.terms.push((term, motion.between(entry.id, id)));
+            work.terms.push((term, self.moves.prior(entry.id, id)));
         }
         let top = work.terms.iter().fold(f64::NEG_INFINITY, |top, &(t, _)| top.max(t));
         if top == f64::NEG_INFINITY {

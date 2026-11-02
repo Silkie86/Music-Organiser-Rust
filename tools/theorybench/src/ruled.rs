@@ -94,15 +94,10 @@ fn settle(y: &mut [f64], bounds: &[Bound], fixed: &[bool]) {
     }
 }
 
-/// Whether some numbers keep every bound.
+/// Whether some numbers keep every bound, as the reader checks them ([`Bound::holds`]).
 #[cfg(test)]
 pub fn keeps(x: &[f64], bounds: &[Bound]) -> bool {
-    let at = |i: usize| x.get(i).copied().unwrap_or(f64::NAN);
-    bounds.iter().all(|b| match *b {
-        Bound::AtLeast0(i) => at(i) >= 0.0,
-        Bound::AtMost0(i) => at(i) <= 0.0,
-        Bound::AtMost(i, j) => at(i) <= at(j),
-    })
+    bounds.iter().all(|b| b.holds(x))
 }
 
 /// What the loss gives at some numbers: its value and its slope, and a curvature to start from (the first point's is

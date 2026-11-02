@@ -9,8 +9,8 @@
 //!   look, and the folds `--test` names (1) are measured, the pieces only measured among them.
 //! - **How each is heard.** A piece `convert/voice.py` played as given, each part with its role. A dataset's song
 //!   (POP909-CL) four ways (`--inputs`), all from its own piano's notes: the piano with its role; with the tune; with
-//!   the piano's bass line (each lowest note with no other within a fifth above it, the reader's own test) as a bass
-//!   part; and the rest of the piano alone, with no bass, where the roots often aren't played.
+//!   the piano's bass line as a bass part (the notes the reader would hear as the bass, [`bass_line`]); and the rest
+//!   of the piano alone, with no bass, where the roots often aren't played.
 //! - **What a label accepts** ([`accepts`]): its root and core. POP909-CL labels a template's triads while its piano
 //!   often plays more, so there a major label also accepts a maj7 or 6, a minor one an m7 or m6, and a sus4 a 7sus4.
 //!   A dominant 11 accepts the 9sus4 it's voiced as too, and a diminished seventh its four roots (an augmented triad
@@ -25,10 +25,11 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use mo_harmony::chordread::{
-    BASS_GAP, Bound, COUNTED, ChordFitter, Core, FitLabel, FitRead, HAND, Label, NUMBERS, RULES, SHARPNESS, Weights,
+    BASS_GAP, Bound, ChordFitter, Core, FitLabel, FitRead, HAND, Label, NUMBERS, RULES, SHARPNESS, SHIPPED, Weights,
 };
 use mo_harmony::{Grid, Role, Span};
 use rayon::prelude::*;
@@ -77,23 +78,82 @@ impl Input {
         if item.render.is_empty() { asked.to_vec() } else { vec![Input::Given] }
     }
 
-    /// The piece's parts as this way hears them, each in order of start; none left empty.
-    fn parts(self, item: &Item) -> Vec<(Role, Vec<mo_harmony::Note>)> {
-        let parts = match self {
-            Input::Given | Input::Full => SongNotes::of(item, &Parts::Pitched).by_part(),
-            Input::Piano => SongNotes::of(item, &Parts::Accompaniment).by_part(),
-            Input::Split | Input::Upper => {
-                let piano = item.notes_of(|role| role != "melody" && role != "drums");
-                let (bass, upper) = keyfit::split_bass(&piano, BASS_GAP);
-                let mut parts = vec![(Role::Harmony, keys::harmony_notes(&upper))];
-                if self == Input::Split {
-                    parts.push((Role::Bass, keys::harmony_notes(&bass)));
-                }
-                parts
+    /// The piece's parts as this way hears them, each in order of start; none left empty. `split` is the piano's bass
+    /// line and the rest ([`bass_line`]), for the ways that hear them apart.
+    fn parts(self, item: &Item, split: Option<&Split>) -> Vec<(Role, Vec<mo_harmony::Note>)> {
+        let parts = match (self, split) {
+            (Input::Given | Input::Full, _) => SongNotes::of(item, &Parts::Pitched).by_part(),
+            (Input::Piano, _) => SongNotes::of(item, &Parts::Accompaniment).by_part(),
+            (Input::Split, Some(split)) => {
+                vec![(Role::Harmony, split.upper.clone()), (Role::Bass, split.bass.clone())]
             }
+            (Input::Upper, Some(split)) => vec![(Role::Harmony, split.upper.clone())],
+            (Input::Split | Input::Upper, None) => Vec::new(),
         };
         parts.into_iter().filter(|(_, notes)| !notes.is_empty()).collect()
     }
+
+    /// Whether this way hears the piano's bass line apart from the rest.
+    fn splits(self) -> bool {
+        matches!(self, Input::Split | Input::Upper)
+    }
+}
+
+/// The piano's bass line and the rest of its notes, as mo-harmony takes them.
+struct Split {
+    bass: Vec<mo_harmony::Note>,
+    upper: Vec<mo_harmony::Note>,
+}
+
+impl Split {
+    fn of(item: &Item) -> Split {
+        let piano = item.notes_of(|role| role != "melody" && role != "drums");
+        let (bass, upper) = bass_line(&piano);
+        Split { bass: keys::harmony_notes(&bass), upper: keys::harmony_notes(&upper) }
+    }
+}
+
+/// The piano's bass line and the rest, as the reader hears a bass where no bass part plays (`chordread::BASS_GAP`), note
+/// by note. At each note's start, the lowest note sounding is the bass when the next one up of another pitch class is
+/// a fifth or more above it, or, with nothing of another pitch class sounding, when it carries on the bass before it
+/// (the same key); a note that's the bass at any start while it sounds is in the bass line, with the notes of its key
+/// sounding with it. So a bass note struck before the chord over it joins the line when the chord comes, and a figure
+/// played alone (an Alberti right hand, a broken chord with no bass under it) stays in the rest. Unlike the reader, it
+/// doesn't leave a broken part's notes out of the bass, nor ask a note to sound a quarter of a unit. `notes` must be in
+/// order of start.
+pub(crate) fn bass_line(notes: &[item::Note]) -> (Vec<item::Note>, Vec<item::Note>) {
+    let mut bass = vec![false; notes.len()];
+    let mut sounding: Vec<usize> = Vec::new();
+    // The bass at the last start, if there was one.
+    let mut before: Option<u8> = None;
+    let mut i = 0;
+    while let Some(first) = notes.get(i) {
+        let at = first.start;
+        let together = notes.get(i..).map_or(0, |rest| rest.partition_point(|n| n.start == at)).max(1);
+        sounding.retain(|&k| notes.get(k).is_some_and(|n| n.start + n.length.max(1) > at));
+        sounding.extend(i..(i + together).min(notes.len()));
+        let key_of = |k: usize| notes.get(k).map_or(u8::MAX, |n| n.key);
+        let lowest = sounding.iter().map(|&k| key_of(k)).min();
+        before = lowest.filter(|&low| {
+            let next = sounding.iter().map(|&k| key_of(k)).filter(|&k| k > low && k % 12 != low % 12).min();
+            next.map_or(before == Some(low), |next| next - low >= BASS_GAP)
+        });
+        if let Some(low) = before {
+            for &k in &sounding {
+                if key_of(k) == low
+                    && let Some(b) = bass.get_mut(k)
+                {
+                    *b = true;
+                }
+            }
+        }
+        i += together;
+    }
+    let (mut line, mut rest) = (Vec::new(), Vec::new());
+    for (n, is_bass) in notes.iter().zip(bass) {
+        if is_bass { line.push(*n) } else { rest.push(*n) }
+    }
+    (line, rest)
 }
 
 /// The readings a label accepts (the design's accept sets): its own root and core. On a dataset whose labels are a
@@ -148,7 +208,8 @@ struct Piece {
     parts: Vec<(Role, Vec<mo_harmony::Note>)>,
     grid: Grid,
     span: Span,
-    labels: Vec<FitLabel>,
+    /// Shared by the ways the same song is heard.
+    labels: Arc<[FitLabel]>,
     /// How much it counts (`--weigh`), and how long it is in bars.
     weight: f64,
     bars: f64,
@@ -163,19 +224,25 @@ fn pieces_of(items: &[Item], folds: &[usize], keep: impl Fn(&Item, usize) -> boo
             if !keep(item, fold) {
                 return Vec::new();
             }
-            Input::of(item, &o.inputs)
+            let ways: Vec<(Input, f64)> = Input::of(item, &o.inputs)
                 .into_iter()
                 .map(|input| (input, o.weight(&item.source, input)))
                 .filter(|&(_, weight)| weight > 0.0)
+                .collect();
+            let split = ways.iter().any(|(input, _)| input.splits()).then(|| Split::of(item));
+            let labels: Arc<[FitLabel]> = labels_of(item).into();
+            let (grid, span, bars) =
+                (keys::grid_of(item, false), item.whole.span(), item.length as f64 / item.bar() as f64);
+            ways.into_iter()
                 .map(|(input, weight)| Piece {
                     source: item.source.clone(),
                     input,
-                    parts: input.parts(item),
-                    grid: keys::grid_of(item, false),
-                    span: item.whole.span(),
-                    labels: labels_of(item),
+                    parts: input.parts(item, split.as_ref()),
+                    grid,
+                    span,
+                    labels: Arc::clone(&labels),
                     weight,
-                    bars: item.length as f64 / item.bar() as f64,
+                    bars,
                 })
                 .collect()
         })
@@ -191,7 +258,7 @@ fn read_all(pieces: &[Piece], numbers: &[f64; NUMBERS]) -> Vec<Option<FitRead>> 
         .map_init(ChordFitter::new, |fitter, piece| {
             let parts: Vec<mo_harmony::Part> =
                 piece.parts.iter().map(|(role, notes)| mo_harmony::Part { role: *role, notes }).collect();
-            fitter.read(&parts, piece.grid, piece.span, &piece.labels, &weights, &COUNTED)
+            fitter.read(&parts, piece.grid, piece.span, &piece.labels, &weights, SHIPPED.tables)
         })
         .collect()
 }
@@ -484,6 +551,15 @@ pub fn run(args: &[String]) -> Result<(), String> {
         test.len(),
         o.test
     );
+    // A piece learned from that shares its notes with one named before it goes to that one's fold: a bench of its
+    // renders read without it (`chords --folds`) draws them by their own names, so it can measure another fold there.
+    let elsewhere = items.iter().zip(&folds).filter(|(i, f)| i.may_learn() && keyfit::own_fold(i) != **f).count();
+    if elsewhere > 0 {
+        println!(
+            "{elsewhere} pieces learned from share their notes with one named before them and go to its fold: \
+             `chords --folds` on their renders alone draws those by their own names."
+        );
+    }
     if train.is_empty() {
         return Err(
             "Nothing to learn from: no piece whose licence lets fitted numbers ship is in those folds.".to_owned()
@@ -609,6 +685,55 @@ mod tests {
     use super::*;
     use mo_harmony::PitchClass;
 
+    fn note(start: i64, length: i64, key: u8) -> item::Note {
+        item::Note { start, length, key, velocity: 100 }
+    }
+
+    /// The keys of some notes, in order.
+    fn keys_of(notes: &[item::Note]) -> Vec<u8> {
+        notes.iter().map(|n| n.key).collect()
+    }
+
+    #[test]
+    fn the_bass_line_is_what_the_reader_would_hear_as_the_bass() {
+        // A held C2 under C E G, then G1 struck alone a beat before the chord over it: both are the bass (the G1 once
+        // the chord comes), and the chord isn't.
+        let notes = [
+            note(0, 384, 36),
+            note(0, 384, 60),
+            note(0, 384, 64),
+            note(0, 384, 67),
+            note(384, 384, 31),
+            note(480, 288, 62),
+            note(480, 288, 65),
+            note(480, 288, 71),
+        ];
+        let (bass, rest) = bass_line(&notes);
+        assert_eq!((keys_of(&bass), rest.len()), (vec![36, 31], 6));
+        // An Alberti right hand alone, its notes one after another: never a bass, as the reader hears it.
+        let alberti: Vec<item::Note> =
+            [60, 67, 64, 67, 60, 67, 64, 67].iter().zip(0..).map(|(&k, i)| note(i * 48, 48, k)).collect();
+        let (bass, rest) = bass_line(&alberti);
+        assert!(bass.is_empty(), "{bass:?}");
+        assert_eq!(rest.len(), 8);
+        // A fourth up is too near (the reader's gap is a fifth): A1 under D2 isn't a bass; a fifth up, G1 under D2, is.
+        assert!(bass_line(&[note(0, 96, 33), note(0, 96, 38)]).0.is_empty());
+        assert_eq!(keys_of(&bass_line(&[note(0, 96, 31), note(0, 96, 38)]).0), [31]);
+        // Its own octave above isn't a chord over it: C2 and C3 alone, struck after C2 was the bass, carry it on; a
+        // new key struck alone doesn't (D2), nor what follows it alone (D2 again).
+        let carried = [
+            note(0, 96, 36),
+            note(0, 96, 52),
+            note(96, 96, 36),
+            note(96, 96, 48),
+            note(192, 96, 38),
+            note(288, 96, 38),
+        ];
+        let (bass, rest) = bass_line(&carried);
+        assert_eq!(keys_of(&bass), [36, 36]);
+        assert_eq!(keys_of(&rest), [52, 48, 38, 38]);
+    }
+
     #[test]
     fn a_label_accepts_its_own_reading_and_on_pop909_the_template_triads_more() {
         assert_eq!(accepts("C:maj", false), [Label::new(PitchClass::C, Core::Major)]);
@@ -727,14 +852,16 @@ mod tests {
     fn a_song_is_heard_each_way_asked_for_and_a_render_as_given() {
         let item = song();
         let keys = |input: Input| -> Vec<(Role, Vec<u8>)> {
-            input.parts(&item).into_iter().map(|(role, notes)| (role, notes.iter().map(|n| n.key).collect())).collect()
+            let split = input.splits().then(|| Split::of(&item));
+            let parts = input.parts(&item, split.as_ref());
+            parts.into_iter().map(|(role, notes)| (role, notes.iter().map(|n| n.key).collect())).collect()
         };
         assert_eq!(keys(Input::Piano), [(Role::Harmony, vec![36, 60, 64, 67])]);
         assert_eq!(keys(Input::Full), [(Role::Harmony, vec![36, 60, 64, 67]), (Role::Melody, vec![72])]);
-        // The bass line by the reader's own test: C2 has nothing within a fifth above it; G4 alone is the lowest
-        // note sounding with nothing above it.
-        assert_eq!(keys(Input::Split), [(Role::Harmony, vec![60, 64]), (Role::Bass, vec![36, 67])]);
-        assert_eq!(keys(Input::Upper), [(Role::Harmony, vec![60, 64])]);
+        // The bass line as the reader hears it: C2, with nothing of another pitch class within a fifth above it. G4,
+        // struck alone after it, carries on no bass, so it stays with the rest.
+        assert_eq!(keys(Input::Split), [(Role::Harmony, vec![60, 64, 67]), (Role::Bass, vec![36])]);
+        assert_eq!(keys(Input::Upper), [(Role::Harmony, vec![60, 64, 67])]);
         assert_eq!(Input::of(&item, &Input::SONG), Input::SONG);
         let mut render = item.clone();
         render.render = vec![(0, 16, BTreeMap::new())];

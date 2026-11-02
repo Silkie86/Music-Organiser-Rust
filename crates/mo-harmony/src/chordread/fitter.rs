@@ -74,13 +74,11 @@ impl ChordFitter {
             .filter(|l| !l.accepts.is_empty())
             .map(|l| (hearing.nearest_unit(l.start)..hearing.nearest_unit(l.end), IdSet::of(&l.accepts)))
             .collect();
-        self.decoder.set_gold(Gold::new(units, stretches));
-        let read = self.decoder.decode(&self.hearing, weights, tables, &[], &mut self.decoding);
-        let out = read.then(|| {
-            let sums = self.decoder.fit_sums(&self.hearing, tables, &mut self.work);
+        let mut gold = Gold::new(units, stretches);
+        let read = self.decoder.decode_labelled(&self.hearing, weights, tables, &mut gold, &mut self.decoding);
+        read.then(|| {
+            let sums = self.decoder.fit_sums(&self.hearing, tables, &gold, &mut self.work);
             FitRead { sums, units, forced: self.decoder.forced(), moved: self.decoder.moved() }
-        });
-        self.decoder.set_gold(Gold::default());
-        out
+        })
     }
 }

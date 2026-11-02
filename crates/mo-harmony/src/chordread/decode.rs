@@ -221,10 +221,10 @@ impl<T> IndexMut<Id> for PerId<T> {
 
 /// The pair term for each move, times its trust, by the group of the chord before, how far its root moves up, and the
 /// group of the chord after ([`Tables::motion_prior`]); with e to the pair term times the sharpness, which is what the
-/// move multiplies the mass of a way by.
+/// move multiplies the mass of a way by, and the motion prior itself, which the fit weighs the trust's slope by.
 #[derive(Clone, Copy, Debug, Default)]
 struct Moves {
-    motion: [[[(f64, f64); 3]; 12]; 3],
+    motion: [[[(f64, f64, f64); 3]; 12]; 3],
     /// Each core's group, by its place in [`Core::ALL`].
     groups: [usize; 16],
     /// Whether the masses of the ways may be added up as masses ([`ln_of_sum`]): every move's sharpness times its pair
@@ -240,15 +240,16 @@ const LINEAR_RANGE: f64 = 30.0;
 
 impl Moves {
     fn new(trust: f64, tables: &Tables) -> Moves {
-        let mut motion = [[[(0.0, 1.0); 3]; 12]; 3];
+        let mut motion = [[[(0.0, 1.0, 0.0); 3]; 12]; 3];
         let mut linear = true;
         for (from, row) in Group::ALL.into_iter().zip(&mut motion) {
             for (up, cell) in (0u8..).zip(row.iter_mut()) {
                 for (to, value) in Group::ALL.into_iter().zip(cell) {
-                    let pair = trust * tables.motion_prior(from, up, to);
+                    let prior = tables.motion_prior(from, up, to);
+                    let pair = trust * prior;
                     // False for a pair term that isn't a number too.
                     linear &= (SHARPNESS * pair).abs() <= LINEAR_RANGE;
-                    *value = (pair, (SHARPNESS * pair).exp());
+                    *value = (pair, (SHARPNESS * pair).exp(), prior);
                 }
             }
         }
@@ -259,18 +260,30 @@ impl Moves {
         Moves { motion, groups, linear }
     }
 
-    /// The pair term for the reading `from` followed by `to`, and e to it times the sharpness: 0 (and 1) for the same
-    /// reading again (the chord held on), and for a move into or out of no chord, which is no likelier or rarer than
-    /// any other.
-    fn between(&self, from: Id, to: Id) -> (f64, f64) {
+    /// The move from the reading `from` to `to`: its pair term, e to it times the sharpness, and its motion prior.
+    /// None for the same reading again (the chord held on), and for a move into or out of no chord, which is no
+    /// likelier or rarer than any other.
+    fn of(&self, from: Id, to: Id) -> Option<(f64, f64, f64)> {
         if from == to || from == Id::NONE || to == Id::NONE {
-            return (0.0, 1.0);
+            return None;
         }
         let group = |id: Id| self.groups.get(usize::from(id.0 % 16)).copied().unwrap_or(0);
         let up = (to.0 / 16 + 12 - from.0 / 16) % 12;
         let row = self.motion.get(group(from));
         let cell = row.and_then(|row| row.get(usize::from(up)));
-        cell.and_then(|cell| cell.get(group(to))).copied().unwrap_or((0.0, 1.0))
+        cell.and_then(|cell| cell.get(group(to))).copied()
+    }
+
+    /// The pair term for the reading `from` followed by `to`, and e to it times the sharpness: 0 (and 1) for the same
+    /// reading again and for a move into or out of no chord ([`Moves::of`]).
+    fn between(&self, from: Id, to: Id) -> (f64, f64) {
+        self.of(from, to).map_or((0.0, 1.0), |(pair, factor, _)| (pair, factor))
+    }
+
+    /// The motion prior of the move from `from` to `to`, what the fit weighs the pair term's trust's slope by: 0 where
+    /// the pair term is 0 whatever the trust ([`Moves::of`]).
+    fn prior(&self, from: Id, to: Id) -> f64 {
+        self.of(from, to).map_or(0.0, |(_, _, prior)| prior)
     }
 }
 
@@ -655,10 +668,9 @@ pub struct Decoder {
     scaled: Vec<f64>,
     seen: PerId<bool>,
     path: Vec<(usize, Id)>,
-    /// For the fit (chordfit): the labels, whose readings are kept on every span inside a labelled stretch, whatever
-    /// their rank (none when reading); how many readings the last decode kept only for that; and how many of the
-    /// labels' changes it moved to a place a chord may change ([`Gold::settle`]).
-    gold: Gold,
+    /// For the fit (chordfit, [`Decoder::decode_labelled`]): how many readings the last decode kept only because the
+    /// labels accept them, and how many of the labels' changes it moved to a place a chord may change
+    /// ([`Gold::settle`]).
     forced: usize,
     moved: usize,
 }
@@ -679,6 +691,20 @@ impl Decoder {
         pins: &[PinnedSpan],
         out: &mut Decoding,
     ) -> bool {
+        self.decode_with(hearing, weights, tables, pins, None, out)
+    }
+
+    /// [`Decoder::decode`], and for the fit with labels (`gold`): their readings are kept on every span inside a
+    /// labelled stretch, whatever their rank, after their changes are moved to the places a chord may change.
+    fn decode_with(
+        &mut self,
+        hearing: &Hearing,
+        weights: &Weights,
+        tables: &Tables,
+        pins: &[PinnedSpan],
+        gold: Option<&mut Gold>,
+        out: &mut Decoding,
+    ) -> bool {
         out.clear();
         self.clear();
         let units = hearing.units();
@@ -694,11 +720,11 @@ impl Decoder {
         self.evidence.prepare(hearing);
         self.find_regions(hearing, pins);
         self.place(hearing);
-        if self.gold.is_labelled() {
-            let places = self.change_places();
-            self.moved = self.gold.settle(&places);
-        }
-        self.forward(hearing, weights);
+        let gold = gold.map(|gold| {
+            self.moved = gold.settle(&self.change_places());
+            &*gold
+        });
+        self.forward(hearing, weights, gold);
         let reached = self.nodes.last().is_some_and(|end| !end.entries.is_empty());
         if !reached {
             return false;
@@ -863,8 +889,9 @@ impl Decoder {
     }
 
     /// Pass A on every span, and the forward pass of pass B and of forward-backward: for each place in order, the
-    /// spans that end there, the readings pass A keeps on each, and what every way brings to each reading there.
-    fn forward(&mut self, hearing: &Hearing, weights: &Weights) {
+    /// spans that end there, the readings pass A keeps on each (and those `gold` accepts, for the fit), and what every
+    /// way brings to each reading there.
+    fn forward(&mut self, hearing: &Hearing, weights: &Weights, gold: Option<&Gold>) {
         let ring = 2 * self.cap + 4;
         self.slots.resize_with(ring, Slot::default);
         for slot in &mut self.slots {
@@ -884,7 +911,7 @@ impl Decoder {
                 if w.unit <= v.unit || !reaches || v.sound() >= w.sound() {
                     continue;
                 }
-                self.keep_on(hearing, weights, &v, &w);
+                self.keep_on(hearing, weights, gold, &v, &w);
                 let span = self.spans.len();
                 let first = self.kept.len();
                 let full = w.unit == v.last;
@@ -958,9 +985,9 @@ impl Decoder {
     }
 
     /// The readings pass A keeps on the span from `v` to `w`, with their scores, into `labels`: the given one inside a
-    /// rest or a pin; otherwise the best eight, the best rootless one, no chord where anything sounds, and the readings
-    /// that may be held on into the span.
-    fn keep_on(&mut self, hearing: &Hearing, weights: &Weights, v: &Node, w: &Node) {
+    /// rest or a pin; otherwise the best eight, the best rootless one, no chord where anything sounds, the readings
+    /// that may be held on into the span, and for the fit those the labels (`gold`) accept there.
+    fn keep_on(&mut self, hearing: &Hearing, weights: &Weights, gold: Option<&Gold>, v: &Node, w: &Node) {
         let pushes = hearing.pushes();
         let (start, end) = (v.push.and_then(|p| pushes.get(p)), w.push.and_then(|p| pushes.get(p)));
         self.evidence.facts(hearing, v.unit..w.unit, start, end, &mut self.facts);
@@ -1043,7 +1070,7 @@ impl Decoder {
                 }
                 // For the fit, the readings the labels accept over the span are kept too, whatever their rank, so the
                 // ways the labels allow are never pruned away.
-                if let Some(accepts) = self.gold.accepts(v.unit..w.unit) {
+                if let Some(accepts) = gold.and_then(|gold| gold.accepts(v.unit..w.unit)) {
                     for id in accepts.ids() {
                         let Some(label) = id.label() else { continue };
                         if self.labels.iter().any(|&(kept, _, _)| kept == id) {
@@ -1370,11 +1397,6 @@ pub(super) type Reading = (Option<Label>, f64, f64, f64);
 
 #[cfg(test)]
 impl Decoder {
-    /// The labels as the last decode settled them on its places.
-    pub(super) fn gold(&self) -> &Gold {
-        &self.gold
-    }
-
     pub(super) fn lattice(&self) -> Lattice {
         let places = self.nodes.iter().map(|n| (n.unit, n.pushed(), n.kind)).collect();
         let kept = |span: &Span| -> Vec<Reading> {

@@ -131,8 +131,8 @@ pub enum Bound {
 }
 
 impl Bound {
-    /// Whether some numbers keep it (never, where one it reads isn't a number).
-    pub fn holds(self, numbers: &[f64; NUMBERS]) -> bool {
+    /// Whether some numbers keep it (never, where one it reads isn't a number or isn't there).
+    pub fn holds(self, numbers: &[f64]) -> bool {
         let at = |i: usize| numbers.get(i).copied().unwrap_or(f64::NAN);
         match self {
             Bound::AtLeast0(i) => at(i) >= 0.0,

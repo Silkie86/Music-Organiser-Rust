@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use mo_harmony::chordread::{COUNTED, Model, SHIPPED, THRESHOLDS};
+use mo_harmony::chordread::{Model, SHIPPED};
 use mo_harmony::{Chord, ChordContext, ChordReader, PcSet, Pin, PitchClass, Role};
 use rayon::prelude::*;
 use serde::Deserialize;
@@ -292,11 +292,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         .map(|e| match e {
             Some(answers) => Ok(answers),
             None => {
-                let model = Model {
-                    weights: weights.as_ref().unwrap_or(SHIPPED.weights),
-                    tables: &COUNTED,
-                    thresholds: &THRESHOLDS,
-                };
+                let model = Model { weights: weights.as_ref().unwrap_or(SHIPPED.weights), ..SHIPPED };
                 let (engine, times) = read_rust(&items, &parts, rust, &model, timing)?;
                 if timing {
                     print_timing(&items, &times);

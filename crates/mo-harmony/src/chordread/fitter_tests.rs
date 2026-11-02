@@ -176,14 +176,11 @@ fn random_gold(dice: &mut Dice, units: usize, bar: usize, read: &Decoding) -> Go
     Gold::new(units, stretches)
 }
 
-/// Decodes some music with labels, and works out the fit's sums over it.
-fn fit_sums(decoder: &mut Decoder, hearing: &Hearing, gold: &Gold, work: &mut FitWork) -> FitSums {
-    decoder.set_gold(gold.clone());
+/// Decodes some music with labels (settling them on the decode's places), and works out the fit's sums over it.
+fn fit_sums(decoder: &mut Decoder, hearing: &Hearing, gold: &mut Gold, work: &mut FitWork) -> FitSums {
     let mut out = Decoding::new();
-    assert!(decoder.decode(hearing, &HAND, &COUNTED, &[], &mut out), "nothing read");
-    let sums = decoder.fit_sums(hearing, &COUNTED, work);
-    decoder.set_gold(Gold::default());
-    sums
+    assert!(decoder.decode_labelled(hearing, &HAND, &COUNTED, gold, &mut out), "nothing read");
+    decoder.fit_sums(hearing, &COUNTED, gold, work)
 }
 
 #[test]
@@ -200,12 +197,9 @@ fn the_fit_sums_agree_with_adding_up_every_way_one_by_one() {
         assert!(decoder.decode(&hearing, &HAND, &COUNTED, &[], &mut out));
         let gold = random_gold(&mut dice, hearing.units(), hearing.bar_units().max(1), &out);
         let what = format!("round {round}: {music:?}, labels {gold:?}");
-        let fast = fit_sums(&mut decoder, &hearing, &gold, &mut work);
-        decoder.set_gold(gold.clone());
-        assert!(decoder.decode(&hearing, &HAND, &COUNTED, &[], &mut out));
-        // The labels as the decode settled them on its places: the ways they allow.
-        let settled = decoder.gold().clone();
-        decoder.set_gold(Gold::default());
+        // The labels as the decode settles them on its places: the ways they allow.
+        let mut settled = gold.clone();
+        let fast = fit_sums(&mut decoder, &hearing, &mut settled, &mut work);
         let lattice = decoder.lattice();
         settles(&gold, &settled, &lattice, &what);
         if count_ways(&lattice, &HAND) > 20_000.0 {
@@ -235,13 +229,9 @@ fn the_fit_sums_over_every_way_are_the_decodes_own_and_each_unit_is_read_once() 
         }
         let units = hearing.units();
         assert!(decoder.decode(&hearing, &HAND, &COUNTED, &[], &mut out));
-        let gold = random_gold(&mut dice, units, hearing.bar_units().max(1), &out);
+        let mut gold = random_gold(&mut dice, units, hearing.bar_units().max(1), &out);
         let what = format!("music {round}: labels {gold:?}");
-        let sums = fit_sums(&mut decoder, &hearing, &gold, &mut work);
-        decoder.set_gold(gold.clone());
-        assert!(decoder.decode(&hearing, &HAND, &COUNTED, &[], &mut out));
-        let gold = decoder.gold().clone();
-        decoder.set_gold(Gold::default());
+        let sums = fit_sums(&mut decoder, &hearing, &mut gold, &mut work);
         let lattice = decoder.lattice();
         assert!(
             close(sums.ln_z, lattice.total, 1e-9),

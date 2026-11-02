@@ -359,14 +359,17 @@ weight of each piece of evidence (T1 to E8), the trusts in the two template prio
 w_N, what a stretch read as no chord scores. The counted tables stay as `tables` counted them.
 
 - **Folds.** Drawn as keyfit draws them, from each piece's name (fold 0 kept back), with one difference: a piece only
-  measured goes where a piece learned from with its name or its notes goes, so `voice.py`'s set B (only measured)
-  goes where set A's render of the same chart goes, and a fit is never measured on a chart it learned. It learns from
-  folds 2 to 4 (`--train`) of the pieces whose licence lets fitted numbers ship, and measures fold 1 (`--test`).
-  `chords --folds 1` scores the same pieces.
+  measured goes where a piece learned from with its name goes (`voice.py`'s set B, only measured, where set A's render
+  of the same chart goes), or else one with its notes in some key, or else where its own name goes; so a fit is never
+  measured on a chart it learned. It learns from folds 2 to 4 (`--train`) of the pieces whose licence lets fitted
+  numbers ship, and measures fold 1 (`--test`). `chords --folds 1` scores the same pieces, but for one case it says
+  when it meets: a chart learned from that shares its notes with one named before it goes to that one's fold, and its
+  renders read without it go where their own name goes.
 - **How each piece is heard.** A dataset's song (POP909-CL) four ways (`--inputs`), all from its own piano's notes:
-  the piano (`piano`); with the tune (`full`); with the piano's bass line as a bass part (`split`: each lowest note
-  with no other note within a fifth above it, the reader's own test for a bass); and the rest of the piano with no
-  bass (`upper`), where the roots often aren't played. A piece `voice.py` played is heard as given, each part with its
+  the piano (`piano`); with the tune (`full`); with the piano's bass line as a bass part (`split`: the notes the
+  reader would hear as the bass, each the lowest sounding with nothing of another pitch class within a fifth above it
+  at some note's start, or alone and carrying on the bass before it, so a figure played alone stays in the rest); and
+  the rest of the piano with no bass (`upper`), where the roots often aren't played. A piece `voice.py` played is heard as given, each part with its
   role (set A, CC0, is learned from). Each reading counts 1 unless `--weigh` says otherwise (`pop909cl/upper=0` drops
   one way), so a Billboard song, heard one way, counts a quarter of a POP909-CL song heard four: the design's weight
   for set A.
