@@ -8,7 +8,8 @@
 //! laying out). A marked step that takes longer than [`STALL`] gets its own `[Slow]` line with its time.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 
 use mo_app::activity::Feed;
@@ -24,11 +25,17 @@ const LOOK_EVERY: Duration = Duration::from_millis(25);
 /// The marked step the window is in, and since when.
 static DOING: Mutex<Option<(&'static str, Instant)>> = Mutex::new(None);
 
+/// The window's thread, kept by [`start`]. Only steps on it are marked: a background thread's long wait isn't the
+/// window being busy.
+static WINDOW: OnceLock<ThreadId> = OnceLock::new();
+
 /// Marks a step on the window's thread until the guard is dropped: `let _doing = watchdog::doing("Songs: pick");`.
+/// On any other thread it marks nothing (before [`start`], as in tests, every thread counts).
 pub fn doing(what: &'static str) -> Doing {
     let since = Instant::now();
-    let outer = DOING.lock().ok().and_then(|mut d| d.replace((what, since)));
-    Doing { what, since, outer }
+    let on_window = WINDOW.get().is_none_or(|w| *w == std::thread::current().id());
+    let outer = if on_window { DOING.lock().ok().and_then(|mut d| d.replace((what, since))) } else { None };
+    Doing { what, since, outer, on_window }
 }
 
 /// A step being done; see [`doing`].
@@ -37,10 +44,15 @@ pub struct Doing {
     since: Instant,
     /// The step this one is inside, put back when this one ends.
     outer: Option<(&'static str, Instant)>,
+    /// Off the window's thread: nothing was marked, so nothing is put back or logged.
+    on_window: bool,
 }
 
 impl Drop for Doing {
     fn drop(&mut self) {
+        if !self.on_window {
+            return;
+        }
         let took = self.since.elapsed();
         if took >= STALL {
             log::warning("Slow", &format!("{} took {} ms on the window's thread", self.what, took.as_millis()));
@@ -62,6 +74,7 @@ fn busy_with() -> String {
 /// Starts watching. Call it from inside the event loop (for example with `slint::invoke_from_event_loop` before
 /// `run`), so the time the window takes to open isn't counted as a freeze. Stops by itself when the window closes.
 pub fn start(feed: Feed) {
+    let _ = WINDOW.set(std::thread::current().id());
     let spawned = std::thread::Builder::new().name("Freeze watchdog".into()).spawn(move || watch(&feed));
     if let Err(e) = spawned {
         log::warning("Freeze", &format!("Couldn't start the freeze watchdog: {e}"));

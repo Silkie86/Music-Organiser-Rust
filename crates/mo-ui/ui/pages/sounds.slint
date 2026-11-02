@@ -830,6 +830,8 @@ export component SoundsPage inherits Rectangle {
             vertical-stretch: 0;
             search-box := SearchBox {
                 horizontal-stretch: 1;
+                // Wide enough for its hint, whatever else the row holds (it showed cut short on Tiles and List).
+                min-width: 320px;
                 max-width: 480px;
                 hint: "Search names, types, tags and folders";
                 text <=> SoundsData.search;
