@@ -1103,13 +1103,24 @@ export component YearRange inherits VerticalLayout {
                     root.from = -1;
                     root.to = -1;
                 }
+                // The window lost the mouse mid-drag: nothing is picked.
+                if e.kind == PointerEventKind.cancel {
+                    root.from = -1;
+                    root.to = -1;
+                }
             }
             moved => {
                 if self.pressed && root.from >= 0 {
                     root.to = clamp(floor(self.mouse-y / root.line), 0, root.years.length - 1);
                 }
             }
-            double-clicked => { root.cleared(); }
+            // A release runs this before the button-up above, so the drag is forgotten first: otherwise the up
+            // would pick the one year straight after the strip was cleared.
+            double-clicked => {
+                root.from = -1;
+                root.to = -1;
+                root.cleared();
+            }
         }
     }
     LinkText {

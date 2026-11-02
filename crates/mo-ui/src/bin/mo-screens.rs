@@ -220,6 +220,15 @@ fn sounds_shots(
     data.invoke_select(3);
     capture(window);
     shots.push(("sounds-galaxy.png".into(), capture(window)));
+    // Lit by length: long sounds big and bright, one-shots small; then all alike, to compare.
+    data.invoke_galaxy_light_by("Length".into());
+    capture(window);
+    shots.push(("sounds-galaxy-length.png".into(), capture(window)));
+    data.invoke_galaxy_light_by("Nothing".into());
+    capture(window);
+    shots.push(("sounds-galaxy-alike.png".into(), capture(window)));
+    data.invoke_galaxy_light_by("Liked".into());
+    capture(window);
     // A sweep across the map: the trail through the swept stars and the Swept card.
     data.invoke_galaxy_down(40.0, 120.0, false);
     for step in 1..=60 {

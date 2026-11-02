@@ -56,6 +56,7 @@ impl LightBy {
 
 /// How lit each sound in `list` is by `by`, from 0 to 1, by its place in the list: where it ranks among the sounds
 /// that have the measure (so one very long loop doesn't leave every other sound dark). A sound without it is 0.
+/// When no sound has the measure (or `by` is Nothing) the list is empty: every star is drawn alike.
 pub fn light(list: &SoundList, by: LightBy) -> Vec<f32> {
     let n = list.len();
     let value = |i: usize| -> Option<f64> {
@@ -70,23 +71,39 @@ pub fn light(list: &SoundList, by: LightBy) -> Vec<f32> {
         }
     };
     let mut known: Vec<(f64, usize)> = (0..n).into_par_iter().filter_map(|i| Some((value(i)?, i))).collect();
+    if known.is_empty() {
+        return Vec::new();
+    }
     known.par_sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
     let mut out = vec![0.0f32; n];
     let last = known.len().saturating_sub(1).max(1) as f32;
     let mut at = 0;
     while at < known.len() {
-        // Equal values share a rank, so the same count lights the same.
+        // Equal values share a rank, so the same count lights the same: the middle of the places they take up, so
+        // a value most sounds have (one like each, say) sits halfway, not up with the very top.
         let mut end = at;
         while end + 1 < known.len() && known[end + 1].0 == known[at].0 {
             end += 1;
         }
-        let rank = if known.len() == 1 { 1.0 } else { end as f32 / last };
+        let rank = if known.len() == 1 { 1.0 } else { (at + end) as f32 / 2.0 / last };
         for &(_, i) in &known[at..=end] {
             out[i] = rank;
         }
         at = end + 1;
     }
     out
+}
+
+/// How much bigger a star is drawn for how lit it is (0 to 1): 1 for an unlit one, up to 2.8 (as C#: a well lit
+/// star is up to nearly three times as big). The graphics card's shader in `mo-ui` uses the same curve.
+pub fn lit_size(lit: f32) -> f32 {
+    1.0 + 1.8 * lit.clamp(0.0, 1.0).sqrt()
+}
+
+/// How bright a star is for how lit it is (0 to 1): 0.5 for an unlit one, up to 1.4 (as C#: a liked star shines up
+/// to nearly three times as bright).
+pub fn lit_weight(lit: f32) -> f32 {
+    0.5 + 0.9 * lit.clamp(0.0, 1.0).sqrt()
 }
 
 /// Below this many stars on the view each is drawn crisply; above the upper one they're only painted (as C#).
@@ -178,8 +195,7 @@ pub fn pack(
         let c = colours.get(at).and_then(|&i| usize::try_from(i).ok()).and_then(|i| palette.get(i)).copied();
         let [r, g, b] = c.unwrap_or(grey);
         let lit = light.get(at).copied().unwrap_or(0.0).clamp(0.0, 1.0);
-        // As C#: a liked star shines up to nearly three times as bright.
-        let weight = if want { 0.5 + 0.9 * lit.sqrt() } else { 0.05 } * twinkle(at);
+        let weight = if want { lit_weight(lit) } else { 0.05 } * twinkle(at);
         let flag = if want { 1 + (lit * 254.0).round() as u8 } else { 0 };
         let mut out = [0u8; STAR_BYTES];
         out[0..4].copy_from_slice(&p.x.to_le_bytes());
@@ -272,10 +288,11 @@ mod tests {
             s.added = day(y);
         }
         let list = SoundList::new(sounds);
-        assert_eq!(light(&list, LightBy::Newest), [0.0, 1.0 / 3.0, 1.0, 1.0]);
-        assert_eq!(light(&list, LightBy::Nothing), [0.0; 4]);
-        // Use counts aren't in yet: nothing lights.
-        assert_eq!(light(&list, LightBy::Used), [0.0; 4]);
+        // The two sounds added in 2022 share the middle of the top two places.
+        assert_eq!(light(&list, LightBy::Newest), [0.0, 1.0 / 3.0, 2.5 / 3.0, 2.5 / 3.0]);
+        // Nothing lit, or nothing has the measure (use counts aren't in yet): every star alike.
+        assert!(light(&list, LightBy::Nothing).is_empty());
+        assert!(light(&list, LightBy::Used).is_empty());
         assert_eq!(LightBy::from_name("Used in songs"), Some(LightBy::Used));
     }
 

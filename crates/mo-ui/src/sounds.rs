@@ -19,9 +19,9 @@ use std::time::{Duration, Instant};
 use chrono::{Local, NaiveDateTime};
 use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
-use mo_app::log;
 use mo_app::shortcuts::Shortcuts;
 use mo_app::sounds::{self as list, Filters, Length, Order, SoundList};
+use mo_app::{log, year_strip};
 use mo_audio::play::Player;
 use mo_library::UsageRules;
 use mo_library::songs::thousands;
@@ -838,12 +838,7 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     });
     let weak = app.as_weak();
     data.on_years_picked(move |a, b| {
-        // The strip runs newest first: its first place picked is the last year.
-        let span = PAGE.with(|p| {
-            let p = p.borrow();
-            let at = |i: i32| p.years.get(usize::try_from(i).ok()?).map(|y| y.0);
-            Some((at(b)?, at(a)?))
-        });
+        let span = PAGE.with(|p| year_strip::year_span(&p.borrow().years, a, b));
         if let Some(span) = span {
             change(&weak, |f| f.years = Some(span));
         }

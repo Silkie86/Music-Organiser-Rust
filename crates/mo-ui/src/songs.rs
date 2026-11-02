@@ -19,7 +19,7 @@ use mo_app::log;
 use mo_app::shell;
 use mo_app::song_panel::{self as panel, Go, SaveLine as PanelSaveLine, Tab};
 use mo_app::songs::{Entry, Filters, SongRow, Songs, View};
-use mo_app::{paths, sound_library};
+use mo_app::{paths, sound_library, year_strip};
 use mo_library::scan::is_project_file;
 use mo_library::songs::DEFAULT_RUN_GAP_MONTHS;
 use mo_library::watch::{Changes, FolderWatch};
@@ -163,12 +163,7 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
     });
     let weak = app.as_weak();
     data.on_years_picked(move |a, b| {
-        // The strip runs newest first: its first place picked is the last year.
-        let span = PAGE.with(|p| {
-            let p = p.borrow();
-            let at = |i: i32| p.years.get(usize::try_from(i).ok()?).map(|y| y.0);
-            Some((at(b)?, at(a)?))
-        });
+        let span = PAGE.with(|p| year_strip::year_span(&p.borrow().years, a, b));
         if let Some(span) = span {
             change(&weak, |f| f.years = Some(span));
         }

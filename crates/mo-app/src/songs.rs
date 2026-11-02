@@ -379,10 +379,6 @@ impl Songs {
         for (i, row) in self.rows.iter().enumerate().filter(|(_, r)| filters.allows(r, &search)) {
             let h = When::of(row.saved, now);
             if heading != Some(h) {
-                let year = row.saved.year();
-                if view.years.last().is_none_or(|(y, _)| *y != year) {
-                    view.years.push((year, view.entries.len()));
-                }
                 view.entries.push(Entry::Heading(h));
                 heading = Some(h);
             }
@@ -418,8 +414,6 @@ pub enum Entry {
 #[derive(Clone, Debug, Default)]
 pub struct View {
     pub entries: Vec<Entry>,
-    /// Each year shown, newest first, with the line its first heading is on: the year scrubber.
-    pub years: Vec<(i32, usize)>,
     /// How many songs are shown.
     pub shown: usize,
     /// "1,234 of 16,000 songs (52,000 saves)".
@@ -526,7 +520,6 @@ mod tests {
             })
             .collect();
         assert_eq!(lines, ["# This week", "Didums", "# Earlier in 2026", "Night", "# 2019", "Old", "# 2017", "Older"]);
-        assert_eq!(v.years, [(2026, 0), (2019, 4), (2017, 6)]);
         assert_eq!(v.count, "4 songs (5 saves)");
         let copied = Songs { copies: 2, ..s.clone() };
         assert_eq!(copied.view(&Filters::default(), now).count, "4 songs (5 saves, 2 hidden as copies)");
@@ -577,7 +570,6 @@ mod tests {
             })
             .collect();
         assert_eq!(names, ["# Earlier in 2026", "Alpha", "Didums", "Charlie"]);
-        assert_eq!(v.years, [(2026, 0)]);
         assert_eq!(s.rows[1].short_date(now), "1 May");
     }
 
