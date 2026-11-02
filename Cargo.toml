@@ -38,6 +38,12 @@ expect_used = "deny"
 [profile.release]
 overflow-checks = true
 
+# Debug builds (the launcher's, the tests') keep only file names and line numbers for their debugging info: all a
+# crash log needs to say where it happened. Full debugging info made the build folder several times bigger, and the
+# launcher's one grew by gigabytes on Solomon's C: drive.
+[profile.dev]
+debug = "line-tables-only"
+
 # Dependencies get optimised once and then cached, so the app stays quick to rebuild but doesn't crawl when run.
 [profile.dev.package."*"]
 opt-level = 2
