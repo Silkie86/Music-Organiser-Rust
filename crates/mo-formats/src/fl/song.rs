@@ -331,7 +331,7 @@ impl PlaylistTracks {
 /// 499; before that 198 (199 tracks), though a 2012 song with all its clips on tracks 1 to 4 counted down from 98, so
 /// an older song whose slots all fit under 99 is read that way (the C# app's arrangement preview, checked on Solomon's
 /// saves from FL 9 to 12).
-pub(super) fn top_slot(version: &str, highest: i64) -> i64 {
+pub fn top_slot(version: &str, highest: i64) -> i64 {
     if from_12_9_1(version) || highest > 198 {
         499
     } else if highest > 98 {

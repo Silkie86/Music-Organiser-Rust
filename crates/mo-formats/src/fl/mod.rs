@@ -6,7 +6,7 @@
 pub mod arrangement;
 pub mod automation;
 pub mod events;
-mod notes;
+pub mod notes;
 pub mod presets;
 pub mod song;
 
