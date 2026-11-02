@@ -242,6 +242,15 @@ fn sounds_shots(
     ])));
     capture(window);
     shots.push(("sounds-galaxy-names.png".into(), capture(window)));
+    // Flown in: the mini-map shows the whole map with a box round the part on show.
+    data.set_galaxy_labels(slint::ModelRc::new(slint::VecModel::from(Vec::<mo_ui::GalaxyLabel>::new())));
+    data.invoke_galaxy_move(300.0, 300.0);
+    data.invoke_galaxy_wheel(8.0);
+    for _ in 0..60 {
+        std::thread::sleep(Duration::from_millis(16));
+        capture(window);
+    }
+    shots.push(("sounds-galaxy-mini.png".into(), capture(window)));
     data.invoke_pick_view(4);
     shots.push(("sounds-rediscover.png".into(), capture(window)));
     data.invoke_pick_view(5);
