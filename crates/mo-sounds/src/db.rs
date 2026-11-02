@@ -166,10 +166,15 @@ impl SoundsDb {
             }
         }
         let hidden = self.hidden()?;
+        // Read in the order the rows are stored, then sorted here. Asking SQLite for `ORDER BY path` walks the path
+        // index and fetches each row from wherever it sits, and every row carries its fingerprints (`features`,
+        // `clap`), which come before the type and rating columns, so each one meant reading several kilobytes from a
+        // random place in a file of gigabytes: minutes on a cold disk with a big library. In stored order the same
+        // read goes straight through the file once.
         let mut st = self.conn.prepare(
             "SELECT id, path, mtime, error, analysis, name_type, user_type, type, type_source, type_conf,
                     favourite, rating, plays
-             FROM sounds ORDER BY path",
+             FROM sounds",
         )?;
         // Every column but the id and path is read as the C# app reads it: a value of an unexpected kind in a damaged
         // row reads as none (or 0) rather than stopping the whole list.
@@ -206,6 +211,7 @@ impl SoundsDb {
         }
         drop(st);
         snapshot.finish()?;
+        sounds.sort_unstable_by(|a, b| by_path(&a.path, &b.path));
         Ok(sounds)
     }
 
@@ -401,6 +407,12 @@ impl SoundsDb {
 }
 
 /// A stored count as an `i32`, clamped (a damaged row can't wrap it).
+/// The order SQLite's `COLLATE NOCASE` gives the `path` column, so the list comes out as the C# app's did: byte by
+/// byte, with only the English letters A to Z folded to lower case.
+fn by_path(a: &str, b: &str) -> std::cmp::Ordering {
+    a.bytes().map(|c| c.to_ascii_lowercase()).cmp(b.bytes().map(|c| c.to_ascii_lowercase()))
+}
+
 fn int(n: Option<i64>) -> i32 {
     n.unwrap_or(0).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
 }
@@ -493,6 +505,32 @@ mod tests {
         assert_eq!(floats(&blob), Some(vec![1.5, -2.0]));
         assert_eq!(floats(&blob[..5]), None);
         assert_eq!(floats(&[]), None);
+    }
+
+    #[test]
+    fn paths_sort_as_sqlite_nocase_does() {
+        let paths = [
+            r"C:\Kicks\b.wav",
+            r"c:\kicks\A.wav",
+            r"C:\Kicks_\x.wav",
+            r"C:\Kicks\Ébc.wav",
+            r"C:\Kicks\ébd.wav",
+            r"C:\KICKS\z.wav",
+            r"C:\Kicks\[1].wav",
+            r"C:\Kicks\Z1.wav",
+            r"C:\Kicks\a.wav ",
+            "",
+        ];
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (p TEXT COLLATE NOCASE)", []).unwrap();
+        for p in paths {
+            conn.execute("INSERT INTO t VALUES (?1)", [p]).unwrap();
+        }
+        let mut st = conn.prepare("SELECT p FROM t ORDER BY p").unwrap();
+        let sqlite: Vec<String> = st.query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
+        let mut ours: Vec<&str> = paths.to_vec();
+        ours.sort_unstable_by(|a, b| by_path(a, b));
+        assert_eq!(ours, sqlite);
     }
 
     #[test]
