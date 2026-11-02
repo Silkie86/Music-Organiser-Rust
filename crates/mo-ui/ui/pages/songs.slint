@@ -2,7 +2,7 @@
 // scrubber, and the picked song's panel beside it. Agreed with Solomon on 2026-10-31.
 import { ListView } from "std-widgets.slint";
 import { ArrangementPreview } from "arrangement.slint";
-import { Theme, Type, Space, Well, SearchBox, ToggleChip, MenuChip, ListLine, Stars, YearMark, Caps, Heart, CloseButton, TabBar, LinkText, StudioButton, ActionKey, MenuLine, MenuCard, Groove, MenuItem, RightClickMenu } from "../studio.slint";
+import { Theme, Type, Space, Well, SearchBox, ToggleChip, MenuChip, ListLine, Stars, YearRange, YearBar, Caps, Heart, CloseButton, TabBar, LinkText, StudioButton, ActionKey, MenuLine, MenuCard, Groove, MenuItem, RightClickMenu } from "../studio.slint";
 
 // One line of the list: a heading ("This week", "2019") when `heading` isn't empty, else a song.
 export struct SongLine {
@@ -18,12 +18,6 @@ export struct SongLine {
     favourite: bool,
     status: string,
     daw: string,
-}
-
-// Where a year starts in the list, for the scrubber.
-export struct YearStart {
-    year: string,
-    y: length,
 }
 
 // One of Overview's counts ("9 plugins", "3 missing"), opening the tab at `tab`.
@@ -97,7 +91,10 @@ export struct PanelSong {
 // What the page shows and what it reports, filled and answered by mo-ui's songs.rs.
 export global SongsData {
     in property <[SongLine]> lines;
-    in property <[YearStart]> years;
+    // The year strip beside the list: each year with how many songs; drag over years to show only those.
+    in property <[YearBar]> years;
+    callback years-picked(int, int);
+    callback years-cleared();
     in property <string> count;
     // Shown instead of the list while it loads, or when the library can't be read.
     in property <string> message: "Reading your library…";
@@ -840,17 +837,11 @@ export component SongsPage inherits Rectangle {
                             }
                         }
                     }
-                    // The year scrubber: jump to the first song of a year.
-                    if SongsData.years.length > 1: VerticalLayout {
-                        width: 52px;
-                        // No gap between the marks, so as many years fit as before the bigger text.
-                        padding: Space.xs;
-                        alignment: start;
-                        for y in SongsData.years: YearMark {
-                            text: y.year;
-                            // Never past the end, so the last year doesn't leave the list mostly empty.
-                            clicked => { list.content-y = -min(y.y, max(0px, list.content-height - list.visible-height)); }
-                        }
+                    if SongsData.years.length > 1: YearRange {
+                        width: 56px;
+                        years: SongsData.years;
+                        picked(a, b) => { SongsData.years-picked(a, b); }
+                        cleared => { SongsData.years-cleared(); }
                     }
                 }
             }

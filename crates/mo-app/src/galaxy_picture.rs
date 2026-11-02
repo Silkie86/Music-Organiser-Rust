@@ -12,6 +12,7 @@ use std::sync::Arc;
 use mo_sounds::StarPoint;
 use rayon::prelude::*;
 
+use crate::galaxy_look::{lit_size, lit_weight};
 use crate::galaxy_view::View;
 
 /// The nebula's grid, in points: each square gathers the light of the stars in it, then it's blurred and spread.
@@ -24,6 +25,9 @@ const CLOUD_LIGHT: f32 = 0.3;
 const CLOUD_THICK: f32 = 6.0;
 /// Up to about this many stars on show, each shines fully; more and each is dimmed.
 const BRIGHT_CROWD: f32 = 30_000.0;
+/// With Light by on, an unlit star is drawn this much the size of an all-alike one, and a fully lit one 2.8 times
+/// that (the graphics card's curve, [`lit_size`]), so the lit ones stand out without the map filling up.
+const UNLIT_SIZE: f32 = 0.7;
 
 /// One pixel, its colour premultiplied by its alpha.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -52,6 +56,9 @@ pub struct Picture {
     /// Each star's place in `palette`.
     pub colours: Arc<Vec<i32>>,
     pub shown: Arc<Vec<usize>>,
+    /// How lit each star is (0 to 1), by its place in the list, as [`crate::galaxy_look::light`] gives it; empty
+    /// draws every star alike. A lit star is bigger and brighter, on the same curve as on the graphics card.
+    pub light: Arc<Vec<f32>>,
     /// Every sound type's colour (as `Theme.sound-types`), then grey for a sound with no type.
     pub palette: Vec<[u8; 3]>,
     pub view: View,
@@ -95,7 +102,17 @@ impl Picture {
         // white; zoomed in, or with the filters leaving few, fewer are on show and each shines fully.
         let on_show = self.shown.len().max(1) as f32 / (self.view.zoom * self.view.zoom);
         let bright = (0.9 * (BRIGHT_CROWD / on_show).sqrt()).clamp(0.3, 0.9);
-        let band_rows = BAND.max((2.0 * r + 4.0).ceil() as usize);
+        // How big and bright each shown star is for how lit it is (all alike with nothing lit).
+        let lighting = !self.light.is_empty();
+        let lit = |at: usize| -> (f32, f32) {
+            if !lighting {
+                return (1.0, 1.0);
+            }
+            let l = self.light.get(at).copied().unwrap_or(0.0);
+            (UNLIT_SIZE * lit_size(l), lit_weight(l) / lit_weight(1.0))
+        };
+        let biggest = if lighting { r * UNLIT_SIZE * lit_size(1.0) } else { r };
+        let band_rows = BAND.max((2.0 * biggest + 4.0).ceil() as usize);
         let bands = h.div_ceil(band_rows).max(1);
         // The nebula's squares, lined up with the map so its light holds still as the map is dragged, and the stars
         // just past the picture's edges, whose light spreads onto it.
@@ -103,7 +120,7 @@ impl Picture {
         let (ox, oy) = self.view.to_view(0.0, 0.0, self.scale);
         let reach = 2 * CLOUD_BLUR;
         let grid = (ox.rem_euclid(size) - reach as f32 * size, oy.rem_euclid(size) - reach as f32 * size);
-        let margin = r.max(-grid.0).max(-grid.1);
+        let margin = biggest.max(-grid.0).max(-grid.1);
         // Every star on the picture with the band its top edge is in; sorted so each band's stars are together, the
         // ones the filters leave out (drawn faint) before the shown ones (drawn over them), and otherwise in list
         // order, so stars that overlap are always drawn the same way round.
@@ -125,13 +142,8 @@ impl Picture {
                     .copied()
                     .unwrap_or(grey);
                 let shown = on[at];
-                let dot = Dot {
-                    x,
-                    y,
-                    r: if shown { r } else { r * 0.8 },
-                    colour,
-                    alpha: if shown { bright } else { bright * 0.16 },
-                };
+                let (size, glow) = if shown { lit(at) } else { (0.8, 0.16) };
+                let dot = Dot { x, y, r: r * size, colour, alpha: bright * glow };
                 let band = ((y - dot.r - 1.0).max(0.0) as usize / band_rows).min(bands - 1);
                 Some((band, shown, at, dot))
             })
@@ -378,6 +390,7 @@ mod tests {
             count: n,
             colours: Arc::new(vec![0; n]),
             shown: Arc::new((0..n).collect()),
+            light: Arc::default(),
             palette: vec![[200, 100, 50], [110, 110, 110]],
             view,
             scale: 1.0,
@@ -388,6 +401,36 @@ mod tests {
         assert!(near.r > 3 && near.r > near.b, "{near:?}");
         // A corner far from it is dark.
         assert_eq!(d.pixels[5 * d.width + 5], Rgba::default());
+    }
+
+    #[test]
+    fn a_lit_star_is_drawn_bigger_and_brighter() {
+        // Two stars far apart, the left one unlit and the right one fully lit.
+        let mut view = View::default();
+        (view.width, view.height) = (200.0, 100.0);
+        let picture = Picture {
+            id: 1,
+            stars: Arc::new(vec![Some(StarPoint { x: 0.25, y: 0.5 }), Some(StarPoint { x: 0.75, y: 0.5 })]),
+            count: 2,
+            colours: Arc::new(vec![0, 0]),
+            shown: Arc::new(vec![0, 1]),
+            light: Arc::new(vec![0.0, 1.0]),
+            palette: vec![[200, 100, 50], [110, 110, 110]],
+            view,
+            scale: 4.0,
+        };
+        let d = picture.draw();
+        let (w, h) = (d.width, d.height);
+        let (left, y) = d.view.to_view(0.25, 0.5, 4.0);
+        let (right, _) = d.view.to_view(0.75, 0.5, 4.0);
+        let row = (y.round() as usize).min(h - 1);
+        // How many pixels across each star's middle row are lit well above the nebula round it.
+        let across = |from: usize, to: usize| (from..to).filter(|&x| d.pixels[row * w + x].r > 60).count();
+        let half = ((left + right) / 2.0) as usize;
+        let (unlit, lit) = (across(0, half), across(half, w));
+        assert!(lit > unlit * 2, "lit {lit} pixels across, unlit {unlit}");
+        let middle = |x: f32| d.pixels[row * w + (x.round() as usize).min(w - 1)];
+        assert!(middle(right).r > middle(left).r, "{:?} {:?}", middle(right), middle(left));
     }
 
     #[test]
@@ -402,6 +445,7 @@ mod tests {
             count: 1,
             colours: Arc::new(vec![0]),
             shown: Arc::new(vec![0]),
+            light: Arc::default(),
             palette: vec![[200, 100, 50], [110, 110, 110]],
             view,
             scale: 8.0,
@@ -467,6 +511,7 @@ mod look {
             count: n,
             colours: Arc::new(colours),
             shown: Arc::new((0..n).collect()),
+            light: Arc::default(),
             palette,
             view,
             scale: 1.0,

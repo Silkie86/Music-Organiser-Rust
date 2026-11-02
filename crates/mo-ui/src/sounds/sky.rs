@@ -85,8 +85,11 @@ struct Crisp {
 fn crisp_vertex(@builtin(vertex_index) v: u32, @location(0) at: vec2<f32>, @location(1) colour: u32,
                 @location(2) weight: f32) -> Crisp {
     let c = unpack4x8unorm(colour);
-    let shown = c.a > 0.5;
-    let radius = select(camera.dust, camera.size, shown);
+    // 0 for a left-out star; 1 to 255 for a shown one, by how lit it is.
+    let shown = c.a > 0.5 / 255.0;
+    let lit = max(c.a * 255.0 - 1.0, 0.0) / 254.0;
+    // As C#: a well lit star is up to nearly three times as big (mo_app::galaxy_look::lit_size, the same curve).
+    let radius = select(camera.dust, camera.size * (1.0 + 1.8 * sqrt(lit)), shown);
     // A shown star's halo reaches 2.8 times its core.
     let local = corner(v) * (select(radius, radius * 2.8, shown) + 1.0);
     var out: Crisp;
@@ -610,7 +613,9 @@ mod tests {
         let shown: Vec<usize> = (0..stars.len()).filter(|i| i % 3 != 0).collect();
         let grid = mo_app::galaxy_grid::Grid::new(&stars, &shown);
         let mut sky = Sky::new(&device, &queue);
-        sky.set_stars(&pack(&stars, &colours, &palette, &shown));
+        // Half the clumps lit, so close up they're the bigger, brighter stars.
+        let light: Vec<f32> = (0..stars.len()).map(|i| if i % 2 == 0 { 1.0 } else { 0.0 }).collect();
+        sky.set_stars(&pack(&stars, &colours, &palette, &shown, &light));
         for zoom in [1.0f32, 6.0, 60.0, 400.0] {
             let mut view = View::default();
             (view.width, view.height, view.zoom) = (1100.0, 800.0, zoom);

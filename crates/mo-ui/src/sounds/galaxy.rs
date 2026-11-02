@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use mo_app::background::{self, Newest};
 use mo_app::galaxy_grid::Grid;
-use mo_app::galaxy_look;
+use mo_app::galaxy_look::{self, LightBy};
 use mo_app::galaxy_names::{self as names, NO_KIND, Region};
 use mo_app::galaxy_picture::{Drawn, Picture};
 use mo_app::galaxy_view::{Hold, Moved, View, most_zoom_for};
@@ -63,6 +63,11 @@ pub(super) struct Galaxy {
     /// Where the sound library is, to read its saved map; `None` (the screenshots) lays out afresh.
     pub(super) db: Option<PathBuf>,
     placing: Placing,
+    /// What makes a star bigger and brighter.
+    light_by: LightBy,
+    /// How lit each star is, worked out (off the window's thread) for one list and one Light by, and kept: a search
+    /// only changes which stars are shown, so it doesn't rank half a million sounds again on every key.
+    light: Option<Lit>,
     /// Every star's place on the map (0 to 1), by its place in the list; `None` until the map is in.
     stars: Option<Arc<Vec<Option<StarPoint>>>>,
     /// Each star's colour, as its place in `Theme.sound-types` (-1 grey), by its place in the list.
@@ -111,6 +116,8 @@ impl Default for Galaxy {
         Galaxy {
             db: None,
             placing: Placing::Both,
+            light_by: LightBy::default(),
+            light: None,
             stars: None,
             colours: None,
             loading: None,
@@ -138,6 +145,27 @@ impl Default for Galaxy {
     }
 }
 
+/// How lit each star is (see [`galaxy_look::light`]) for one list of sounds and one Light by.
+#[derive(Clone)]
+struct Lit {
+    list: Arc<list::SoundList>,
+    by: LightBy,
+    light: Arc<Vec<f32>>,
+}
+
+impl Lit {
+    fn of(&self, list: &Arc<list::SoundList>, by: LightBy) -> Option<Arc<Vec<f32>>> {
+        (Arc::ptr_eq(&self.list, list) && self.by == by).then(|| self.light.clone())
+    }
+}
+
+impl Galaxy {
+    /// The kept light for the page's list and the Light by chosen now, if it's been worked out.
+    fn light_for(&self, list: &Arc<list::SoundList>) -> Option<Arc<Vec<f32>>> {
+        self.light.as_ref()?.of(list, self.light_by)
+    }
+}
+
 /// What the stars were packed for: the map, its colours, the stars the filters let through and the types' colours.
 #[derive(Clone)]
 struct SetKey {
@@ -145,6 +173,11 @@ struct SetKey {
     colours: Arc<Vec<i32>>,
     shown: Arc<Vec<usize>>,
     palette: Vec<[u8; 3]>,
+    /// The sounds (their likes, uses and lengths light the stars) and what lights them.
+    list: Arc<list::SoundList>,
+    light_by: LightBy,
+    /// The light for `list` and `light_by`, when it's been worked out already.
+    light: Option<Arc<Vec<f32>>>,
 }
 
 impl SetKey {
@@ -153,6 +186,8 @@ impl SetKey {
             && Arc::ptr_eq(&self.colours, &o.colours)
             && Arc::ptr_eq(&self.shown, &o.shown)
             && self.palette == o.palette
+            && Arc::ptr_eq(&self.list, &o.list)
+            && self.light_by == o.light_by
     }
 }
 
@@ -163,23 +198,31 @@ struct SetAsk {
     for_card: bool,
 }
 
-/// The grid and the packed stars, and which ask they answer.
+/// The grid and the packed stars, and which ask they answer, with the light they were packed with.
 struct Packed {
     version: u64,
     grid: Grid,
     bytes: Option<Vec<u8>>,
+    light: Lit,
 }
 
 impl SetAsk {
     fn work(self) -> Packed {
         let k = &self.key;
-        let (grid, bytes) = background::on_pool(|| {
+        let (grid, (light, bytes)) = background::on_pool(|| {
             rayon::join(
                 || Grid::new(&k.stars, &k.shown),
-                || self.for_card.then(|| galaxy_look::pack(&k.stars, &k.colours, &k.palette, &k.shown)),
+                || {
+                    // Ranked only when the list or Light by has changed; a new search reuses it.
+                    let light = k.light.clone().unwrap_or_else(|| Arc::new(galaxy_look::light(&k.list, k.light_by)));
+                    let bytes =
+                        self.for_card.then(|| galaxy_look::pack(&k.stars, &k.colours, &k.palette, &k.shown, &light));
+                    (light, bytes)
+                },
             )
         });
-        Packed { version: self.version, grid, bytes }
+        let light = Lit { list: k.list.clone(), by: k.light_by, light };
+        Packed { version: self.version, grid, bytes, light }
     }
 }
 
@@ -240,6 +283,16 @@ pub(super) fn wire(app: &AppWindow) {
         PAGE.with(|p| p.borrow_mut().galaxy.placing = placing);
         app.global::<SoundsData>().set_galaxy_placing(v);
         load(&app, false);
+    });
+    data.set_galaxy_lights(strings(LightBy::ALL.map(LightBy::name)));
+    data.set_galaxy_light(LightBy::default().name().into());
+    let weak = app.as_weak();
+    data.on_galaxy_light_by(move |v| {
+        let Some(app) = weak.upgrade() else { return };
+        let Some(by) = LightBy::from_name(v.as_str()) else { return };
+        PAGE.with(|p| p.borrow_mut().galaxy.light_by = by);
+        app.global::<SoundsData>().set_galaxy_light(v);
+        draw(&app);
     });
     let weak = app.as_weak();
     data.on_galaxy_lay_out(move || {
@@ -1051,16 +1104,20 @@ pub(super) fn draw(app: &AppWindow) {
     let ask = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         let shown = p.shown.clone();
+        let list = p.list.clone();
         let g = &mut p.galaxy;
         let stars = g.stars.clone()?;
         let colours = g.colours.clone()?;
         if g.view.width < 1.0 || g.view.height < 1.0 {
             return None;
         }
+        // Until the light for a new list or Light by has been worked out, the stars are drawn alike; the packing
+        // that works it out asks for the picture again.
+        let light = g.light_for(&list).unwrap_or_default();
         g.asked += 1;
         let moving = g.view.flying() || g.view.panning();
         let scale = if moving { g.scale.min(MOVING_SCALE) } else { g.scale };
-        Some(Picture { id: g.asked, stars, count: g.count, colours, shown, palette, view: g.view, scale })
+        Some(Picture { id: g.asked, stars, count: g.count, colours, shown, light, palette, view: g.view, scale })
     });
     let Some(ask) = ask else {
         show_picked(app);
@@ -1101,8 +1158,18 @@ fn pack(app: &AppWindow, palette: &[[u8; 3]], for_card: bool) {
     let ask = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         let shown = p.shown.clone();
+        let list = p.list.clone();
         let g = &mut p.galaxy;
-        let key = SetKey { stars: g.stars.clone()?, colours: g.colours.clone()?, shown, palette: palette.to_vec() };
+        let light = g.light_for(&list);
+        let key = SetKey {
+            stars: g.stars.clone()?,
+            colours: g.colours.clone()?,
+            shown,
+            palette: palette.to_vec(),
+            list,
+            light_by: g.light_by,
+            light,
+        };
         // Packed already, unless the card has come since and the stars weren't packed for it.
         let fresh = g.set_for.as_ref().is_some_and(|k| k.same(&key));
         if fresh && (!for_card || g.packed.is_some() || g.set_got < g.set_asked) {
@@ -1150,6 +1217,7 @@ fn packed(app: &AppWindow, done: Packed) {
         g.set_got = done.version;
         g.grid = Some(Arc::new(done.grid));
         g.packed = done.bytes.map(Arc::new);
+        g.light = Some(done.light);
         true
     });
     if newer {
@@ -1175,6 +1243,7 @@ fn draw_mini(app: &AppWindow) {
             count: g.count,
             colours: key.colours.clone(),
             shown: key.shown.clone(),
+            light: g.light_for(&p.list).unwrap_or_default(),
             palette,
             view: mini_view(),
             scale,

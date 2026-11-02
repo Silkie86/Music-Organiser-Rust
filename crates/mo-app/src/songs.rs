@@ -360,7 +360,17 @@ impl Songs {
         set.into_iter().map(str::to_owned).collect()
     }
 
-    /// The rows the filters let through, under their headings, with where each year starts for the scrubber.
+    /// How many songs were last saved in each year, newest first, for the year strip (every song, whatever the
+    /// filters, so the strip doesn't shrink to the years picked).
+    pub fn year_counts(&self) -> Vec<(i32, usize)> {
+        let mut counts: std::collections::BTreeMap<i32, usize> = std::collections::BTreeMap::new();
+        for r in &self.rows {
+            *counts.entry(r.saved.year()).or_default() += 1;
+        }
+        counts.into_iter().rev().collect()
+    }
+
+    /// The rows the filters let through, under their headings, with where each year starts.
     pub fn view(&self, filters: &Filters, now: NaiveDateTime) -> View {
         let mut view = View::default();
         let mut heading = None;
@@ -369,10 +379,6 @@ impl Songs {
         for (i, row) in self.rows.iter().enumerate().filter(|(_, r)| filters.allows(r, &search)) {
             let h = When::of(row.saved, now);
             if heading != Some(h) {
-                let year = row.saved.year();
-                if view.years.last().is_none_or(|(y, _)| *y != year) {
-                    view.years.push((year, view.entries.len()));
-                }
                 view.entries.push(Entry::Heading(h));
                 heading = Some(h);
             }
@@ -408,8 +414,6 @@ pub enum Entry {
 #[derive(Clone, Debug, Default)]
 pub struct View {
     pub entries: Vec<Entry>,
-    /// Each year shown, newest first, with the line its first heading is on: the year scrubber.
-    pub years: Vec<(i32, usize)>,
     /// How many songs are shown.
     pub shown: usize,
     /// "1,234 of 16,000 songs (52,000 saves)".
@@ -428,6 +432,8 @@ pub struct Filters {
     pub missing: bool,
     /// Archived songs are left out unless their status is picked.
     pub hide_archived: bool,
+    /// Only songs last saved in these years, first to last (the year strip).
+    pub years: Option<(i32, i32)>,
 }
 
 impl Filters {
@@ -449,6 +455,11 @@ impl Filters {
             return false;
         }
         if self.missing && !r.has_missing() {
+            return false;
+        }
+        if let Some((first, last)) = self.years
+            && !(first..=last).contains(&r.saved.year())
+        {
             return false;
         }
         r.matches(search)
@@ -509,10 +520,34 @@ mod tests {
             })
             .collect();
         assert_eq!(lines, ["# This week", "Didums", "# Earlier in 2026", "Night", "# 2019", "Old", "# 2017", "Older"]);
-        assert_eq!(v.years, [(2026, 0), (2019, 4), (2017, 6)]);
         assert_eq!(v.count, "4 songs (5 saves)");
         let copied = Songs { copies: 2, ..s.clone() };
         assert_eq!(copied.view(&Filters::default(), now).count, "4 songs (5 saves, 2 hidden as copies)");
+    }
+
+    #[test]
+    fn the_year_strip_counts_every_song_and_picks_a_span() {
+        let now = day(2026, 10, 31);
+        let s = songs(&[
+            save("Alpha", day(2026, 6, 1)),
+            save("Bravo", day(2024, 5, 1)),
+            save("Charlie", day(2023, 4, 1)),
+            save("Delta", day(2023, 1, 1)),
+            save("Echo", day(2019, 1, 1)),
+        ]);
+        assert_eq!(s.year_counts(), [(2026, 1), (2024, 1), (2023, 2), (2019, 1)]);
+        let picked = Filters { years: Some((2023, 2024)), ..Filters::default() };
+        assert!(picked.any());
+        let v = s.view(&picked, now);
+        let names: Vec<&str> = v
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Song(i) => Some(s.rows[*i].song.name.as_str()),
+                Entry::Heading(_) => None,
+            })
+            .collect();
+        assert_eq!(names, ["Bravo", "Charlie", "Delta"]);
     }
 
     #[test]
@@ -535,7 +570,6 @@ mod tests {
             })
             .collect();
         assert_eq!(names, ["# Earlier in 2026", "Alpha", "Didums", "Charlie"]);
-        assert_eq!(v.years, [(2026, 0)]);
         assert_eq!(s.rows[1].short_date(now), "1 May");
     }
 
