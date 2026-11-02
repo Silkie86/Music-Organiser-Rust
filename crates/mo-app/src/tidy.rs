@@ -18,6 +18,11 @@
 //! Never touched: samples (rule 2), projects, "(fixed)" copies (rule 3), converts and exports, F12 notes with their
 //! pictures and drafts (rule 17), Playground ideas, settings, the databases (library.db, sounds.db and midi.db are the
 //! C# app's too, and opened read-only), the C# app's own logs and reports, and everything else in those folders.
+//!
+//! Nor the launcher's folders: `run-latest-rust\` and its build folders (beside the code, or a `MusicOrganiser-build`
+//! wherever `-BuildDir` puts it) are the launcher's to keep in bounds (`tools/dev/run-latest.ps1`). The sweep never
+//! goes into a folder inside the data folder at all, and in its own temp folder it never goes into a folder called
+//! either of those names, nor any folder cargo marked as a build folder of its own (it holds a `CACHEDIR.TAG`).
 
 use std::fs::{self, Metadata};
 use std::io::ErrorKind;
@@ -56,6 +61,13 @@ const WAIT: Duration = Duration::from_secs(20);
 
 /// How deep the sweep goes in the app's own temp folder.
 const DEEPEST: usize = 8;
+
+/// The launcher's own folders (`tools/dev/run-latest.ps1`): its home in the data folder, and the build folder it makes
+/// inside the folder `-BuildDir` names. The sweep never goes into a folder with one of these names.
+pub const LAUNCHER_FOLDERS: [&str; 2] = ["run-latest-rust", "MusicOrganiser-build"];
+
+/// The file cargo puts in a build folder it made (and other programs in caches they keep): such a folder is theirs.
+const CACHE_TAG: &str = "CACHEDIR.TAG";
 
 /// What a sweep removed, and what it couldn't (in use, or read-only), which is tried again next time.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -193,7 +205,8 @@ fn is_old(meta: &Metadata, age: Duration, now: SystemTime) -> bool {
 
 /// Deletes everything in the app's own temp folder that was last written at least `age` before `now`, then the
 /// folders inside it that are empty by then and had nothing new put in them for as long. The folder must really be
-/// there, not a link to somewhere else; and links inside it are only ever left as they are.
+/// there, not a link to somewhere else; and links inside it are only ever left as they are, as are the launcher's
+/// folders and cargo's build folders ([`LAUNCHER_FOLDERS`], [`CACHE_TAG`]).
 fn clear_own_folder(folder: &Path, age: Duration, now: SystemTime) -> Tidied {
     let mut done = Tidied::default();
     if fs::symlink_metadata(folder).is_ok_and(|m| m.is_dir()) {
@@ -202,7 +215,22 @@ fn clear_own_folder(folder: &Path, age: Duration, now: SystemTime) -> Tidied {
     done
 }
 
+/// Whether a folder is another program's to keep: one cargo made as a build folder (or another program as a cache),
+/// marked with a [`CACHE_TAG`] file.
+fn is_marked_cache(folder: &Path) -> bool {
+    fs::symlink_metadata(folder.join(CACHE_TAG)).is_ok()
+}
+
+/// Whether a folder's name is one of the launcher's own ([`LAUNCHER_FOLDERS`]), letter case aside.
+fn is_launchers(name: &std::ffi::OsStr) -> bool {
+    let name = name.to_string_lossy();
+    LAUNCHER_FOLDERS.iter().any(|l| l.eq_ignore_ascii_case(&name))
+}
+
 fn clear_inside(folder: &Path, age: Duration, now: SystemTime, depth: usize, done: &mut Tidied) {
+    if is_marked_cache(folder) {
+        return;
+    }
     let Ok(entries) = fs::read_dir(folder) else { return };
     for entry in entries.flatten() {
         // From the listing: a link (to a file or a folder, or a Windows junction) is neither a file nor a folder here.
@@ -210,7 +238,7 @@ fn clear_inside(folder: &Path, age: Duration, now: SystemTime, depth: usize, don
         let path = entry.path();
         if kind.is_file() && is_old(&meta, age, now) {
             done.remove(&path, meta.len());
-        } else if kind.is_dir() && depth < DEEPEST {
+        } else if kind.is_dir() && depth < DEEPEST && !is_launchers(&entry.file_name()) {
             // Whether anything was put in it lately, before its old files go (that changes its time).
             let quiet = is_old(&meta, age, now);
             clear_inside(&path, age, now, depth + 1, done);
@@ -456,6 +484,44 @@ mod tests {
             fs::symlink_metadata(own.join("a link")).is_ok()
                 && fs::symlink_metadata(own.join("a file link.flp")).is_ok()
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_launchers_folders_and_cargos_build_folders_are_never_gone_into() {
+        let dir = test_folder("launcher");
+        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let own = places.temp.join(paths::TEMP_FOLDER);
+        let now = SystemTime::now();
+        let old = DAY * 400;
+        // Files named as the sweep clears them elsewhere, inside the launcher's folders: beside the code, and wherever
+        // -BuildDir put a build folder (the data folder, its logs, the Temp folder, the app's own temp folder).
+        let launchers = [
+            places.data.join("run-latest-rust").join("run").join("20261101-120000").join("music-organiser.exe"),
+            places.data.join("run-latest-rust").join("app").join("target").join("debug").join("crash-1.log"),
+            places.data.join("run-latest-rust").join("backup.txt.mo-part"),
+            places.data.join("MusicOrganiser-build").join("debug").join("presets.db.new-1"),
+            places.data.join("logs").join("MusicOrganiser-build").join("crash-1700000000.log"),
+            places.temp.join("MusicOrganiser-build").join("mo-admin-1-2-3.txt"),
+            own.join("MusicOrganiser-build").join("debug").join("deps").join("libmo_app.rlib"),
+            own.join("musicorganiser-BUILD").join("CACHEDIR.TAG"),
+            own.join("Run-Latest-Rust").join("last-branch.txt"),
+            // A build folder cargo made under another name: its CACHEDIR.TAG says so.
+            own.join("Builds").join("target").join("CACHEDIR.TAG"),
+            own.join("Builds").join("target").join("debug").join("music-organiser"),
+        ];
+        for path in &launchers {
+            file(path, old, now);
+        }
+        // Something of the sweep's own beside them, so it's seen to run.
+        file(&own.join("Bass line.mid"), old, now);
+
+        let done = sweep(&places, now);
+        assert_eq!(done, Tidied { removed: 1, bytes: 1, failed: 0 });
+        assert!(!own.join("Bass line.mid").exists());
+        for path in &launchers {
+            assert!(path.exists(), "{} stays", path.display());
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 
