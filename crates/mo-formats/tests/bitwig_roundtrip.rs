@@ -11,7 +11,8 @@
 //! - A random file that's cut short or has bytes changed never stops the reader.
 //!
 //! Each test is driven by a list of random numbers that a small builder turns into choices, so when one fails,
-//! proptest shrinks the list down to the smallest file that still fails and prints it.
+//! proptest shrinks the list down to a short one that still fails and prints that list (the file it makes can be
+//! rebuilt from it with `random_file`).
 
 // Test files may unwrap: a test that stops there has failed, which is what it should do.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
@@ -208,13 +209,13 @@ impl FileMaker<'_> {
 
     /// An object slot in a list, map or name: none, a reference back ("class 1"), or a new object.
     fn slot(&mut self, depth: u32) {
-        match self.c.pick(3) {
+        match self.c.pick(4) {
             1 => {
                 let n = 1 + self.c.pick(self.objects);
                 self.u32(1);
                 self.u32(n);
             }
-            2 if self.room_for_more(depth) => self.object(depth + 1),
+            2 | 3 if self.room_for_more(depth) => self.object(depth + 1),
             _ => self.u32(0),
         }
     }
@@ -224,41 +225,45 @@ impl FileMaker<'_> {
         let class = self.class();
         self.u32(class);
         self.objects += 1;
-        for _ in 0..self.c.pick(8) {
+        // The root has a few fields more, so a file is rarely just the root.
+        let fields = self.c.pick(9) + if depth == 0 { 4 } else { 0 };
+        for _ in 0..fields {
             // Field ids are never 0, which ends the object. They may repeat.
             let id = 1 + self.c.pick(0x3000);
             self.u32(id);
-            // Half the fields hold objects, so the tree grows until it's as big or as deep as allowed.
+            // Half the fields hold objects. Each object then makes more than one new object on average, so the tree
+            // grows until it's as big or as deep as allowed, or the random numbers run out.
             if self.c.pick(2) == 0 {
                 let ty = PLAIN[self.c.pick(PLAIN.len() as u32) as usize];
                 self.out.push(ty);
                 self.plain(ty);
                 continue;
             }
-            match self.c.pick(5) as usize + PLAIN.len() {
-                // A field that holds one object holds it in full, or none, or is a bare reference (0x0b) back to one
-                // already written: never a "class 1" reference, as Bitwig writes them (rule 8).
-                i if i == PLAIN.len() => {
+            match self.c.pick(5) {
+                // A field that holds one object holds it in full, or none when there's no room, or is a bare
+                // reference (0x0b) back to one already written: never a "class 1" reference, as Bitwig writes them
+                // (rule 8).
+                0 => {
                     self.out.push(0x09);
-                    if self.room_for_more(depth) && self.c.pick(2) == 1 {
+                    if self.room_for_more(depth) {
                         self.object(depth + 1);
                     } else {
                         self.u32(0);
                     }
                 }
-                i if i == PLAIN.len() + 1 => {
+                1 => {
                     self.out.push(0x0b);
                     let n = 1 + self.c.pick(self.objects);
                     self.u32(n);
                 }
-                i if i == PLAIN.len() + 2 => {
+                2 => {
                     self.out.push(0x12);
-                    for _ in 0..self.c.pick(5) {
+                    for _ in 0..self.c.pick(6) {
                         self.slot(depth);
                     }
                     self.u32(3);
                 }
-                i if i == PLAIN.len() + 3 => {
+                3 => {
                     self.out.push(0x14);
                     for _ in 0..self.c.pick(4) {
                         self.out.push(1);
@@ -408,6 +413,7 @@ fn tree(doc: &Document) -> Vec<String> {
             format!("{{{}}}", m.iter().map(|(k, s)| format!("{}: {}", text(k), link(s))).collect::<Vec<_>>().join(", "))
         }
         Value::Str(t) => text(t),
+        Value::Blob(b) => format!("blob {:02x?}", b.bytes()),
         Value::Strings(l) => format!("[{}]", l.iter().map(text).collect::<Vec<_>>().join(", ")),
         // Floats by their bits, so a NaN matches itself.
         Value::F32(x) => format!("f32 {:08x}", x.to_bits()),
@@ -443,12 +449,17 @@ fn first_difference(a: &[u8], b: &[u8]) -> String {
 
 /// Writes a document out, reads it back and checks the file is trusted, the tree is the same, rule 8 holds and the
 /// file writes back byte for byte. Returns the file.
+///
+/// Rule 8 is checked only on a document that keeps it to start with: a "class 1" reference read from a file stays as
+/// it was (so an untouched file writes back byte for byte), and a damaged file can have one.
 fn written_and_read_back(doc: &Document) -> Result<Vec<u8>, TestCaseError> {
     let file = bitwig::encode(doc, None).map_err(|e| TestCaseError::fail(format!("not written: {e}")))?;
     let back = bitwig::decode(file.clone()).map_err(|_| TestCaseError::fail("not Bitwig's format"))?;
     prop_assert_eq!(&back.body_error, &None, "the written file isn't read to the zip");
     prop_assert_eq!(tree(&back), tree(doc), "the tree read back isn't the tree written");
-    prop_assert!(no_class_1_reference_in_a_field(&back), "a class 1 reference in a single-object field");
+    if no_class_1_reference_in_a_field(doc) {
+        prop_assert!(no_class_1_reference_in_a_field(&back), "a class 1 reference in a single-object field");
+    }
     let again = bitwig::encode(&back, None).map_err(|e| TestCaseError::fail(format!("not written again: {e}")))?;
     prop_assert!(again == file, "written again differently: {}", first_difference(&again, &file));
     Ok(file)
@@ -471,11 +482,11 @@ fn seeded(seed: u64, n: usize) -> Vec<u32> {
 /// passing on files that are nearly empty.
 #[test]
 fn the_random_files_hold_every_kind_of_link() {
-    let (mut most, mut refs, mut bare, mut zips, mut meta, mut wide) = (0, 0, 0, 0, 0, 0);
+    let (mut sizes, mut refs, mut bare, mut zips, mut meta, mut wide) = (Vec::new(), 0, 0, 0, 0, 0);
     for seed in 0..200 {
         let doc = bitwig::decode(random_file(&seeded(seed, 3000))).expect("Bitwig's format");
         assert_eq!(doc.body_error, None);
-        most = most.max(doc.objects.len());
+        sizes.push(doc.objects.len());
         zips += usize::from(doc.has_zip);
         meta += doc.meta.len();
         for f in doc.objects.iter().flat_map(|o| &o.fields) {
@@ -484,7 +495,11 @@ fn the_random_files_hold_every_kind_of_link() {
             wide += usize::from(matches!(&f.value, Value::Str(t) if t.wide()));
         }
     }
-    assert!(most >= 30, "the biggest file has only {most} objects");
+    sizes.sort_unstable();
+    let (middle, full) = (sizes[sizes.len() / 2], sizes.iter().filter(|&&n| n >= MAX_OBJECTS as usize).count());
+    println!("objects per file: middle {middle}, smallest {}, biggest {}; {full} files full", sizes[0], sizes[199]);
+    assert!(middle >= 20, "half the files have {middle} objects or fewer");
+    assert!(full >= 20, "only {full} of 200 files reach {MAX_OBJECTS} objects");
     for (what, n) in
         [("references", refs), ("bare references", bare), ("zips", zips), ("metadata", meta), ("UTF-16 texts", wide)]
     {
@@ -497,7 +512,13 @@ fn numbers() -> impl Strategy<Value = Vec<u32>> {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 512, ..ProptestConfig::default() })]
+    // 512 cases each, or PROPTEST_CASES when it's set (for a longer run by hand). A failure isn't saved to a file
+    // beside the test: proptest prints the failing list, which is enough to make a fixed test of.
+    #![proptest_config(ProptestConfig {
+        cases: std::env::var("PROPTEST_CASES").ok().and_then(|n| n.parse().ok()).unwrap_or(512),
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
 
     #[test]
     fn a_random_file_writes_back_byte_for_byte(numbers in numbers()) {
