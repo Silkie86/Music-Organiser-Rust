@@ -12,7 +12,7 @@ yet** or **bug**.
 | AIFF with a bit depth of 0 | Divided by zero. | Says the bit depth isn't supported. | Same result, clearer |
 | Writing a WAV (kit export) | Wrote straight to the final name. | Writes beside it as `.wav.part`, then renames; a failed write removes the `.part` file, so a stopped export leaves no half file. | Better |
 | MP3, FLAC, M4A, OGG, AAC | Windows' decoders (Media Foundation), Windows only. | symphonia, on every system. Lengths can differ by an encoder's padding (a few ms), as each decoder trims it its own way. | Better (Mac and Linux read them) |
-| WMA | Windows' decoders. | Not read (no Rust decoder). | Not yet |
+| WMA | Windows' decoders. | Windows' decoder too (Media Foundation, as 32-bit float at the file's own rate); a Mac or Linux can't read it (no WMA decoder written in Rust), and `can_decode` says so. | Same on Windows |
 | A written WAV whose samples take an odd number of bytes (mono 24-bit, odd length) | No pad byte after the data, which RIFF requires. | Pads it, as RIFF says. | Better |
 | An M4A or AAC file's whole length | Windows' decoder trims the encoder's padding. | symphonia's AAC decoder doesn't, so a whole read counts ~10 ms more than a partial one. | Bug, small (fix with a padding-aware AAC path later) |
 | A FLAC or OGG file cut short | Windows read the part that's there. | Says the file is cut short or damaged (MP3 gives the part that's there). | Not yet |

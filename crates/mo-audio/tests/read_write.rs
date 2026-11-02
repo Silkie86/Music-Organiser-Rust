@@ -169,7 +169,10 @@ fn reads_aiff_and_aifc() {
 #[test]
 fn says_what_it_cannot_read() {
     let e = |name: &str, bytes: &[u8]| read(&fixture(name, bytes), 60.0).unwrap_err();
-    assert!(matches!(e("x.wma", b"0&"), AudioError::NotSupported(_)));
+    // Not a real WMA: Windows can't decode it; elsewhere there's no WMA decoder at all.
+    let wma = e("x.wma", b"0&");
+    assert!(cfg!(windows) || matches!(wma, AudioError::NotSupported(_)), "{wma}");
+    assert!(matches!(e("x.opus", b"0&"), AudioError::NotSupported(_)));
     assert!(!e("x.mp3", b"not an mp3 at all").to_string().is_empty());
     assert!(e("text.wav", b"hello there").to_string().contains("Not a WAV or AIFF"));
     assert!(e("empty.wav", b"").to_string().contains("Not a WAV or AIFF"));
@@ -240,6 +243,31 @@ fn decodes_mp3_flac_m4a_ogg_and_aac() {
     assert_eq!(a.len(), 2205);
     assert_eq!(a.file_seconds, 0.5);
     assert!(read_from(&tone("tone.mp3"), 60.0, 10).unwrap_err().to_string().contains("only read from the start"));
+}
+
+#[test]
+fn decodes_wma_on_windows_only() {
+    let path = tone("tone.wma");
+    assert_eq!(mo_audio::can_decode(&path), cfg!(windows));
+    assert!(mo_audio::can_decode(&tone("tone.flac")) && mo_audio::can_decode(&PathBuf::from("a.WAV")));
+    assert!(!mo_audio::can_decode(&PathBuf::from("a.opus")));
+    if !cfg!(windows) {
+        assert!(read(&path, 60.0).unwrap_err().to_string().contains("only be played on Windows"));
+        return;
+    }
+    let a = read(&path, 60.0).unwrap();
+    assert_eq!((a.sample_rate, a.channels.len()), (22050, 2));
+    // Half a second, give or take the encoder's padding, and a tone, not silence.
+    assert!((a.seconds() - 0.5).abs() < 0.1, "{}", a.seconds());
+    let peak = a.mono().iter().fold(0f32, |m, s| m.max(s.abs()));
+    assert!(peak > 0.05, "{peak}");
+    // Only so long, and the whole length still known.
+    let short = read(&path, 0.1).unwrap();
+    assert_eq!(short.len(), 2205);
+    assert!((short.file_seconds - 0.5).abs() < 0.1, "{}", short.file_seconds);
+    assert!(read_from(&path, 60.0, 10).unwrap_err().to_string().contains("only read from the start"));
+    // A missing file is a read error, as for any other kind.
+    assert!(matches!(read(&PathBuf::from("does/not/exist.wma"), 60.0), Err(AudioError::Io(_))));
 }
 
 #[test]
