@@ -702,6 +702,8 @@ mod tests {
         let second = save_to_bitwig(&rise, &library).unwrap();
         assert_eq!(first.file_name().unwrap(), "My rise.bwcurve");
         assert_eq!(second.file_name().unwrap(), "My rise (2).bwcurve");
+        // Windows won't remove a folder while the database in it is open.
+        drop(db);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
