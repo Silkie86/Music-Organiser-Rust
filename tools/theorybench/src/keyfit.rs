@@ -338,6 +338,34 @@ pub(crate) fn folds(items: &mut Vec<Item>) -> Vec<usize> {
     songs_of(items, &[], &HashMap::new(), Learning::Licensed).iter().map(|s| s.fold).collect()
 }
 
+/// Each piece's fold drawn from its name alone, whether it's learned from or only measured, leaving none out: the
+/// chord fit's folds (`chordfit`, `chords --folds`). A piece learned from has the fold a plain run gives it. A piece
+/// only measured goes where a piece learned from with its name or its notes goes (`convert/voice.py`'s set B, only
+/// measured, where set A's render of the same chart goes), so a fit never learns the chart it's measured on; unlike in
+/// a plain run, it may go to the kept-back fold.
+pub(crate) fn drawn_folds(items: &[Item]) -> Vec<usize> {
+    let shapes: Vec<u64> = items.par_iter().map(shape_of).collect();
+    let learned: HashSet<u64> =
+        items.iter().zip(&shapes).filter(|(item, _)| item.may_learn()).map(|(_, shape)| *shape).collect();
+    // As in a plain run, the first name among the songs with the same notes, but only those learned from where there
+    // are any: a plain run leaves the others out before it draws.
+    let mut first_name: HashMap<u64, String> = HashMap::new();
+    for (item, shape) in items.iter().zip(&shapes) {
+        if item.may_learn() || !learned.contains(shape) {
+            let draw = fold_draw(item);
+            first_name.entry(*shape).and_modify(|n| *n = n.clone().min(draw.clone())).or_insert(draw);
+        }
+    }
+    items
+        .iter()
+        .zip(&shapes)
+        .map(|(item, shape)| {
+            let own = fold_draw(item);
+            (fnv1a(first_name.get(shape).unwrap_or(&own).as_bytes()) % FOLDS) as usize
+        })
+        .collect()
+}
+
 /// Each song's folds, songs with the same notes in another key going where the first of them by name goes (a pack's
 /// files where its first by name goes). A song that's only measured goes to one of folds 1 to 4 (never the kept-back
 /// fold), so every choosing run measures it.
@@ -483,7 +511,7 @@ impl Voices {
             list.sort_by_key(|n| (n.start, n.key));
         }
         let piano = item.notes_of(|r| r != "melody" && r != "drums");
-        let (bass, upper) = split_bass(&piano);
+        let (bass, upper) = split_bass(&piano, FOURTH);
         let all = item.notes_of(|r| r != "drums");
         Voices { tune, others, upper, bass, all }
     }
@@ -513,10 +541,13 @@ impl Voices {
     }
 }
 
+/// The key finder's own test for a bass ([`split_bass`]): nothing else sounding within a fourth above it.
+pub(crate) const FOURTH: u8 = 5;
+
 /// The piano's bass line and the rest: a note is in the bass line when, as it starts, it's the lowest note the piano
-/// sounds and nothing else sounds within a fourth above it (the key finder's own test for a bass). `notes` must be in
-/// order of start.
-pub(crate) fn split_bass(notes: &[Note]) -> (Vec<Note>, Vec<Note>) {
+/// sounds and nothing else sounds less than `gap` semitones above it ([`FOURTH`] here; the chord reader's own test is
+/// a fifth, `chordread::BASS_GAP`). `notes` must be in order of start.
+pub(crate) fn split_bass(notes: &[Note], gap: u8) -> (Vec<Note>, Vec<Note>) {
     let (mut bass, mut upper) = (Vec::new(), Vec::new());
     let mut sounding: Vec<Note> = Vec::new();
     let mut i = 0;
@@ -529,7 +560,7 @@ pub(crate) fn split_bass(notes: &[Note]) -> (Vec<Note>, Vec<Note>) {
             let low = u16::from(n.key);
             let alone = sounding.iter().chain(group).all(|m| {
                 let k = u16::from(m.key);
-                k == low || k >= low + 5
+                k == low || k >= low + u16::from(gap)
             });
             if alone {
                 bass.push(*n);
@@ -2341,9 +2372,14 @@ mod tests {
             note(192, 96, 31),
             note(192, 96, 38),
         ];
-        let (bass, upper) = split_bass(&notes);
+        let (bass, upper) = split_bass(&notes, FOURTH);
         assert_eq!(bass.iter().map(|n| n.key).collect::<Vec<_>>(), [36, 31]);
         assert_eq!(upper.len(), 5);
+        // A1 under D2, a fourth up, stands apart by the key finder's test but not by the chord reader's (a fifth).
+        let fourth = [note(0, 96, 33), note(0, 96, 38)];
+        assert_eq!(split_bass(&fourth, FOURTH).0.iter().map(|n| n.key).collect::<Vec<_>>(), [33]);
+        assert!(split_bass(&fourth, 7).0.is_empty());
+        assert_eq!(split_bass(&notes, 7).0.iter().map(|n| n.key).collect::<Vec<_>>(), [36, 31]);
     }
 
     /// A whole song as a full mix, labelled C major, with no evidence (the comparison only reads chances).
@@ -2476,6 +2512,33 @@ mod tests {
         let want: Vec<usize> =
             songs_of(&plain, &sources, &HashMap::new(), Learning::Licensed).iter().map(|s| s.fold).collect();
         assert_eq!((items.len(), drawn), (2, want));
+    }
+
+    #[test]
+    fn the_chord_fits_folds_put_a_piece_only_measured_where_its_chart_goes() {
+        // a/1 and a/2 are learned from; b/1 (only measured) has a/1's notes a tone up, c/2 is only measured and alone,
+        // and a/2's twin "a" "2" render (set B: the same name, other notes) is only measured.
+        let items = vec![
+            piece_on("a", "1", 100, 60, "MIT"),
+            piece_on("b", "1", 100, 62, "measuring only"),
+            piece_on("a", "2", 300, 60, "MIT"),
+            piece_on("a", "2", 500, 64, "measuring only (set B)"),
+            piece_on("c", "2", 700, 60, "measuring only"),
+        ];
+        let drawn = drawn_folds(&items);
+        // The pieces learned from have the folds a plain run gives them.
+        let mut plain = items.clone();
+        let plain_folds = folds(&mut plain);
+        let fold_of = |source: &str, id: &str, n: i64| {
+            let at = plain.iter().position(|i| i.source == source && i.id == id && i.parts[0].notes[0].1 == n);
+            at.map(|at| plain_folds[at])
+        };
+        assert_eq!(Some(drawn[0]), fold_of("a", "1", 100));
+        assert_eq!(Some(drawn[2]), fold_of("a", "2", 300));
+        // The twin goes with a/1, the render with a/2, and the piece alone by its own name, any of the five folds.
+        assert_eq!(drawn[1], drawn[0]);
+        assert_eq!(drawn[3], drawn[2]);
+        assert_eq!(drawn[4], (fnv1a(b"c/2") % FOLDS) as usize);
     }
 
     #[test]

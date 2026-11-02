@@ -64,7 +64,7 @@ impl Input {
         let song = SongNotes::of(item, if self == Input::Full { &Parts::Pitched } else { &Parts::Accompaniment });
         match self {
             Input::Upper => {
-                let (_, upper) = crate::keyfit::split_bass(&song.merged);
+                let (_, upper) = crate::keyfit::split_bass(&song.merged, crate::keyfit::FOURTH);
                 vec![(Role::Harmony, keys::harmony_notes(&upper))]
             }
             Input::Piano | Input::Full => song.by_part(),
