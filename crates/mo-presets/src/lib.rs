@@ -10,14 +10,16 @@
 //! - [`export`]: a song's sounds as preset files in the export folder (copy, check, rename).
 //! - [`bitwig`]: Send to Bitwig, a `.bwpreset` for an exported sound, from a preset Bitwig saved for its plugin.
 //! - [`fixes`]: your fixes to the part guess, in the app's own `presets.db`.
+//! - [`curves`]: the curves library: shapes settings were moved in, from songs and Bitwig's library, as curve files.
 //!
-//! No UI here: the screen logic goes in `mo-app`. It writes only `presets.db` ([`fixes`]) and exported presets in the
-//! export folder ([`export`]); it never changes a project or a preset file you made.
+//! No UI here: the screen logic goes in `mo-app`. It writes only `presets.db` ([`fixes`]), `curves.db` and curve files ([`curves`]) and
+//! exported presets in the export folder ([`export`]); it never changes a project or a preset file you made.
 
 // Preset files can be damaged in any way, so nothing here indexes past what's there (tests may).
 #![cfg_attr(not(test), deny(clippy::indexing_slicing))]
 
 pub mod bitwig;
+pub mod curves;
 pub mod export;
 pub mod files;
 pub mod filter;

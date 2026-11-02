@@ -76,7 +76,7 @@ fn hex16(digest: &[u8]) -> String {
 
 /// Whether a file is at `path`. A file that can't be looked at is an error, never "not there": that would make a new,
 /// empty database and put it over yours.
-fn is_there(path: &Path) -> Result<bool, FixesError> {
+pub(crate) fn is_there(path: &Path) -> Result<bool, FixesError> {
     path.try_exists().map_err(|e| FixesError(format!("couldn't look for it: {e}")))
 }
 
@@ -108,7 +108,7 @@ impl RoleFixes {
     /// renamed into place.
     pub fn open(path: &Path) -> Result<RoleFixes, FixesError> {
         if !is_there(path)? {
-            make_new(path)?;
+            make_new(path, SCHEMA, "your_preset_roles")?;
         }
         let conn = Connection::open(path)?;
         conn.busy_timeout(Duration::from_secs(2))?;
@@ -173,12 +173,13 @@ impl RoleFixes {
 
 /// A column's text, or `None` when it holds something else (a newer app's row, or a hand edit): such a row is passed
 /// over like an unknown part, rather than hiding every other fix.
-fn text_at(r: &rusqlite::Row<'_>, i: usize) -> rusqlite::Result<Option<String>> {
+pub(crate) fn text_at(r: &rusqlite::Row<'_>, i: usize) -> rusqlite::Result<Option<String>> {
     r.get_ref(i).map(|v| v.as_str().ok().map(str::to_owned))
 }
 
-/// Makes a new database at `path`: under a name beside it first, checked, then renamed into place.
-fn make_new(path: &Path) -> Result<(), FixesError> {
+/// Makes a new database at `path` with the tables in `schema` (`table` is one of them, to check): under a name beside
+/// it first, checked, then renamed into place.
+pub(crate) fn make_new(path: &Path, schema: &str, table: &str) -> Result<(), FixesError> {
     // Its own name, so two copies of the app starting at once never touch each other's half-made file.
     let mut temp = path.as_os_str().to_owned();
     temp.push(format!(".new-{}", std::process::id()));
@@ -187,7 +188,7 @@ fn make_new(path: &Path) -> Result<(), FixesError> {
         std::fs::create_dir_all(dir).map_err(|e| FixesError(format!("couldn't make its folder: {e}")))?;
     }
     remove_old_half_made(path);
-    if let Err(e) = make_checked(&temp) {
+    if let Err(e) = make_checked(&temp, schema, table) {
         // Whatever stopped it, the half-made file doesn't stay.
         let _ = std::fs::remove_file(&temp);
         return Err(e);
@@ -235,15 +236,12 @@ fn remove_old_half_made(path: &Path) {
 
 /// Makes the tables in a new file at `temp` and checks them. The file is closed again when this returns, so it can be
 /// removed or put in place.
-fn make_checked(temp: &Path) -> Result<(), FixesError> {
+fn make_checked(temp: &Path, schema: &str, table: &str) -> Result<(), FixesError> {
     let conn = Connection::open(temp)?;
-    conn.execute_batch(SCHEMA)?;
+    conn.execute_batch(schema)?;
     let check: String = conn.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
-    let tables: i64 = conn.query_row(
-        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'your_preset_roles'",
-        [],
-        |r| r.get(0),
-    )?;
+    let tables: i64 =
+        conn.query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1", [table], |r| r.get(0))?;
     if check != "ok" || tables != 1 {
         return Err(FixesError(format!("the new database didn't check out ({check})")));
     }

@@ -1,6 +1,7 @@
 //! Bitwig Studio's files: `.bwproject`, and `.bwpreset`, `.bwclip` and `.bwcurve`, which are laid out the same.
 
 pub mod arrangement;
+pub mod automation;
 pub mod curve;
 pub mod encode;
 pub mod format;
