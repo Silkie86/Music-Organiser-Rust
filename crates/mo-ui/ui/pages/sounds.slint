@@ -3,7 +3,7 @@
 // and filters over them and the picked sound's panel beside them. Agreed mock-up: the design canvas, 2026-11-01.
 // Read-only for now (favourites, tags and types are shown, not changed), like the C# app's sounds.db until it's trusted.
 import { ListView } from "std-widgets.slint";
-import { Theme, Type, Space, Well, StudioSlider, SearchBox, ToggleChip, MenuChip, ListLine, Caps, Heart, StudioButton, CloseButton, HoverNote, PointerPad, Segmented, MoreButton, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset } from "../studio.slint";
+import { Theme, Type, Space, Well, StudioSlider, SearchBox, ToggleChip, MenuChip, ListLine, Caps, Heart, StudioButton, CloseButton, HoverNote, PointerPad, Segmented, MoreButton, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
 
 // One type chip: the type, how many sounds have it, its colour (a place in Theme.sound-types) and whether it's on.
 export struct TypeChipInfo {
@@ -190,6 +190,14 @@ export global SoundsData {
     in property <string> galaxy-placing;
     in property <[string]> galaxy-placings;
     callback galaxy-place-by(string);
+    // The year strip beside the list: each year with how much is in it; drag over years to show only those.
+    in property <[YearBar]> years;
+    callback years-picked(int, int);
+    callback years-cleared();
+    // What makes a star bigger and brighter.
+    in property <string> galaxy-light;
+    in property <[string]> galaxy-lights;
+    callback galaxy-light-by(string);
     callback galaxy-lay-out();
     callback galaxy-reset();
     // The view's size, and the mouse on it: a left drag plays each star it passes, a right or middle drag moves the
@@ -493,7 +501,7 @@ component SoundLineView inherits ListLine {
         }
         // Rediscover's reasons say how it's used already.
         Text {
-            width: root.rediscover ? 0 : 72px;
+            width: root.rediscover ? 0 : 96px;
             text: root.rediscover ? "" : root.history ? root.line.when : root.line.used;
             color: Theme.muted;
             font-family: Theme.number-font;
@@ -551,7 +559,7 @@ component ListHeading inherits HorizontalLayout {
         horizontal-alignment: right;
     }
     Caps {
-        width: root.rediscover ? 0 : 72px;
+        width: root.rediscover ? 0 : 96px;
         text: root.rediscover ? "" : root.history ? "PLAYED" : SoundsData.knows-use ? "USED" : "";
         vertical-alignment: center;
         horizontal-alignment: right;
@@ -1158,6 +1166,16 @@ export component SoundsPage inherits Rectangle {
             }
             if SoundsData.view == 2: VerticalLayout {
                 alignment: center;
+                MenuChip {
+                    name: "Light by";
+                    value: SoundsData.galaxy-light;
+                    choices: SoundsData.galaxy-lights;
+                    has-any: false;
+                    picked(v) => { SoundsData.galaxy-light-by(v); }
+                }
+            }
+            if SoundsData.view == 2: VerticalLayout {
+                alignment: center;
                 StudioButton {
                     horizontal-stretch: 0;
                     text: "Lay out again";
@@ -1185,9 +1203,21 @@ export component SoundsPage inherits Rectangle {
             property <length> folders-width: SoundsData.view == 4 && SoundsData.folders.length > 0 && self.list-width >= 900px
                 ? 300px
                 : 0px;
+            // The year strip, on the pages of sounds (not Rediscover or Kits, which pick their own).
+            property <length> years-width: SoundsData.view <= 3 && SoundsData.years.length > 1 && SoundsData.empty-title == ""
+                ? 56px
+                : 0px;
+            if area.years-width > 0: YearRange {
+                x: area.list-width - area.folders-width - area.years-width;
+                y: 0;
+                height: area.height;
+                years: SoundsData.years;
+                picked(a, b) => { SoundsData.years-picked(a, b); }
+                cleared => { SoundsData.years-cleared(); }
+            }
             keys := FocusScope {
                 x: 0;
-                width: area.list-width - area.folders-width;
+                width: area.list-width - area.folders-width - area.years-width;
                 key-pressed(event) => {
                     if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
                         return reject;

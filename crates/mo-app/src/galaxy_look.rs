@@ -13,6 +13,81 @@ use mo_sounds::StarPoint;
 use rayon::prelude::*;
 
 use crate::galaxy_view::View;
+use crate::sounds::SoundList;
+
+/// What makes a star bigger and brighter (its colour always says its type).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum LightBy {
+    /// All alike.
+    Nothing,
+    /// The sounds you like most shine (the C# app's look).
+    #[default]
+    Liked,
+    /// The ones used in the most songs.
+    Used,
+    /// Long sounds (loops, pads) big, one-shots small.
+    Length,
+    /// The ones added lately.
+    Newest,
+    /// The fastest.
+    Tempo,
+}
+
+impl LightBy {
+    pub const ALL: [LightBy; 6] =
+        [LightBy::Liked, LightBy::Used, LightBy::Length, LightBy::Newest, LightBy::Tempo, LightBy::Nothing];
+
+    /// The name the page shows.
+    pub fn name(self) -> &'static str {
+        match self {
+            LightBy::Nothing => "Nothing",
+            LightBy::Liked => "Liked",
+            LightBy::Used => "Used in songs",
+            LightBy::Length => "Length",
+            LightBy::Newest => "Newest",
+            LightBy::Tempo => "Tempo",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<LightBy> {
+        LightBy::ALL.into_iter().find(|l| l.name() == name)
+    }
+}
+
+/// How lit each sound in `list` is by `by`, from 0 to 1, by its place in the list: where it ranks among the sounds
+/// that have the measure (so one very long loop doesn't leave every other sound dark). A sound without it is 0.
+pub fn light(list: &SoundList, by: LightBy) -> Vec<f32> {
+    let n = list.len();
+    let value = |i: usize| -> Option<f64> {
+        let s = list.sound(i)?;
+        match by {
+            LightBy::Nothing => None,
+            LightBy::Liked => list.liked_share(i).filter(|&v| v > 0.0),
+            LightBy::Used => list.used_in(i).filter(|&u| u > 0).map(f64::from),
+            LightBy::Length => s.analysis.as_ref().map(|a| a.seconds).filter(|&v| v > 0.0),
+            LightBy::Newest => Some(s.added.and_utc().timestamp() as f64),
+            LightBy::Tempo => s.analysis.as_ref().and_then(|a| a.bpm).filter(|&v| v > 0.0),
+        }
+    };
+    let mut known: Vec<(f64, usize)> = (0..n).into_par_iter().filter_map(|i| Some((value(i)?, i))).collect();
+    known.par_sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    let mut out = vec![0.0f32; n];
+    let last = known.len().saturating_sub(1).max(1) as f32;
+    let mut at = 0;
+    while at < known.len() {
+        // Equal values share a rank, so the same count lights the same.
+        let mut end = at;
+        while end + 1 < known.len() && known[end + 1].0 == known[at].0 {
+            end += 1;
+        }
+        let rank = if known.len() == 1 { 1.0 } else { end as f32 / last };
+        for &(_, i) in &known[at..=end] {
+            out[i] = rank;
+        }
+        at = end + 1;
+    }
+    out
+}
 
 /// Below this many stars on the view each is drawn crisply; above the upper one they're only painted (as C#).
 const CRISP: f32 = 1_500.0;
@@ -79,8 +154,15 @@ fn twinkle(at: usize) -> f32 {
 
 /// Every star on the map as the graphics card reads it ([`STAR_BYTES`] each), the ones the filters leave out first so
 /// the crisp ones are drawn over them. `colours` is each star's place in `palette` (anything else is the last colour,
-/// grey); `shown` is the places the filters let through. Made on every core.
-pub fn pack(stars: &[Option<StarPoint>], colours: &[i32], palette: &[[u8; 3]], shown: &[usize]) -> Vec<u8> {
+/// grey); `shown` is the places the filters let through; `light` how lit each is (see [`light`]), which rides in the
+/// colour's last byte (0 for a left-out star, 1 to 255 for a shown one). Made on every core.
+pub fn pack(
+    stars: &[Option<StarPoint>],
+    colours: &[i32],
+    palette: &[[u8; 3]],
+    shown: &[usize],
+    light: &[f32],
+) -> Vec<u8> {
     let mut on = vec![false; stars.len()];
     for &at in shown {
         if let Some(o) = on.get_mut(at) {
@@ -95,11 +177,14 @@ pub fn pack(stars: &[Option<StarPoint>], colours: &[i32], palette: &[[u8; 3]], s
         }
         let c = colours.get(at).and_then(|&i| usize::try_from(i).ok()).and_then(|i| palette.get(i)).copied();
         let [r, g, b] = c.unwrap_or(grey);
-        let weight = if want { 0.5 } else { 0.05 } * twinkle(at);
+        let lit = light.get(at).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+        // As C#: a liked star shines up to nearly three times as bright.
+        let weight = if want { 0.5 + 0.9 * lit.sqrt() } else { 0.05 } * twinkle(at);
+        let flag = if want { 1 + (lit * 254.0).round() as u8 } else { 0 };
         let mut out = [0u8; STAR_BYTES];
         out[0..4].copy_from_slice(&p.x.to_le_bytes());
         out[4..8].copy_from_slice(&p.y.to_le_bytes());
-        out[8..12].copy_from_slice(&[r, g, b, if want { 255 } else { 0 }]);
+        out[8..12].copy_from_slice(&[r, g, b, flag]);
         out[12..16].copy_from_slice(&weight.to_le_bytes());
         Some(out)
     };
@@ -165,7 +250,7 @@ mod tests {
     fn the_left_out_stars_come_first_and_the_shown_ones_are_marked() {
         let stars = vec![Some(StarPoint { x: 0.25, y: 0.5 }), None, Some(StarPoint { x: 0.75, y: 0.1 })];
         let palette = [[200, 100, 50], [110, 110, 110]];
-        let bytes = pack(&stars, &[0, 0, 7], &palette, &[0]);
+        let bytes = pack(&stars, &[0, 0, 7], &palette, &[0], &[1.0, 0.0, 0.0]);
         assert_eq!(bytes.len(), 2 * STAR_BYTES);
         // The left out one (the third, grey: its colour isn't in the palette).
         assert_eq!(f32::from_le_bytes(bytes[0..4].try_into().unwrap()), 0.75);
@@ -177,6 +262,21 @@ mod tests {
             f32::from_le_bytes(bytes[28..32].try_into().unwrap())
                 > f32::from_le_bytes(bytes[12..16].try_into().unwrap())
         );
+    }
+
+    #[test]
+    fn light_ranks_the_sounds_that_have_the_measure() {
+        let day = |y: i32| chrono::NaiveDate::from_ymd_opt(y, 1, 1).and_then(|d| d.and_hms_opt(0, 0, 0)).unwrap();
+        let mut sounds: Vec<mo_sounds::Sound> = (0..4).map(|i| mo_sounds::Sound::new(i, "x.wav")).collect();
+        for (s, y) in sounds.iter_mut().zip([2020, 2021, 2022, 2022]) {
+            s.added = day(y);
+        }
+        let list = SoundList::new(sounds);
+        assert_eq!(light(&list, LightBy::Newest), [0.0, 1.0 / 3.0, 1.0, 1.0]);
+        assert_eq!(light(&list, LightBy::Nothing), [0.0; 4]);
+        // Use counts aren't in yet: nothing lights.
+        assert_eq!(light(&list, LightBy::Used), [0.0; 4]);
+        assert_eq!(LightBy::from_name("Used in songs"), Some(LightBy::Used));
     }
 
     #[test]
