@@ -32,7 +32,7 @@ param(
 )
 
 # Raised whenever this script changes, so an older branch's copy never replaces a newer installed one.
-$LauncherVersion = 3
+$LauncherVersion = 4
 
 $ErrorActionPreference = 'Continue'   # git and cargo write progress to stderr, which Windows PowerShell treats as failure
 $GitHubRepo = 'Silkie86/Music-Organiser-Rust'
@@ -236,6 +236,21 @@ if ((Test-Path $newer) -and (Test-Path $Installed) -and $PSCommandPath -eq $Inst
 }
 
 # --- Build and run ----------------------------------------------------------------------------------------------
+# Below this much free space (in GB) the build's leftovers are cleared first; below the second it doesn't start.
+$LowSpaceGb = 10
+$NeededGb = 4
+
+function Get-FreeGb([string]$Path) {
+    # The free space on the drive holding $Path (or its nearest folder that exists), in GB; $null when unknown.
+    try {
+        $probe = $Path
+        while ($probe -and -not (Test-Path $probe)) { $probe = Split-Path $probe -Parent }
+        if (-not $probe) { return $null }
+        $root = [System.IO.Path]::GetPathRoot((Resolve-Path $probe).Path)
+        return [System.IO.DriveInfo]::new($root).AvailableFreeSpace / 1GB
+    } catch { return $null }
+}
+
 function Build-App {
     # Builds while the app (if any) stays open, then copies the new app into run\ under a new name. Returns its path,
     # or $null when the build failed (what cargo said is shown).
@@ -243,15 +258,36 @@ function Build-App {
     Say "$(Get-Date -Format 'HH:mm:ss')  Building..." 'DarkGray'
     # The build folder is named, so a CARGO_TARGET_DIR set on the PC can't move the app somewhere this doesn't look.
     $targetDir = Join-Path $Repo 'target'
+    # A full drive makes the compiler stop part way ("no space on device"). Before building, the build's own
+    # leftovers (the incremental cache and any release build; they only speed builds up) are cleared when space is
+    # low, and the build waits when there still isn't enough, saying how much is free.
+    $freeGb = Get-FreeGb $targetDir
+    if ($null -ne $freeGb -and $freeGb -lt $LowSpaceGb) {
+        Say ("Only {0:N1} GB free on the drive the app builds on. Clearing the build's leftovers..." -f $freeGb) 'Yellow'
+        foreach ($leftover in @((Join-Path (Join-Path $targetDir 'debug') 'incremental'), (Join-Path $targetDir 'release'))) {
+            Remove-Item -Recurse -Force $leftover -ErrorAction SilentlyContinue
+        }
+        $freeGb = Get-FreeGb $targetDir
+        if ($null -ne $freeGb -and $freeGb -lt $NeededGb) {
+            Say ("Still only {0:N1} GB free: a build needs about {1} GB. Free some space on that drive (or delete $targetDir, which is rebuilt), and the next push is tried again." -f $freeGb, $NeededGb) 'Red'
+            return $null
+        }
+    }
     # The compiler itself crashing (rustc exits with 101; a plain build error is 1) can come from a damaged
     # incremental cache even when the code is fine, as CI builds without one. The cache only speeds builds up, so
     # it's cleared and the build tried once more.
     $crashed = $false
+    $full = $false
     & $CargoExe build --manifest-path (Join-Path $Repo 'Cargo.toml') --target-dir $targetDir --bin $AppName --color never 2>&1 |
         ForEach-Object {
             if ("$_" -match 'rustc.*\(exit code: 101\)') { $crashed = $true }
+            if ("$_" -match 'no space (left )?on device|not enough space on the disk') { $full = $true }
             Say "  $_" 'DarkGray'
         }
+    if ($LASTEXITCODE -ne 0 -and $full) {
+        Say "The drive the app builds on is full. Free some space on it (or delete $targetDir, which is rebuilt), and the next push is tried again." 'Red'
+        return $null
+    }
     if ($LASTEXITCODE -ne 0 -and $crashed) {
         Say 'The compiler crashed. Clearing its incremental cache and trying once more...' 'Yellow'
         Remove-Item -Recurse -Force (Join-Path (Join-Path $targetDir 'debug') 'incremental') -ErrorAction SilentlyContinue
