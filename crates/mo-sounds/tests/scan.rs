@@ -35,13 +35,19 @@ fn finds_sounds_leaving_out_shadows_hidden_folders_and_other_files() {
             ("__MACOSX/Loops/Groove.flac", 1),
             (".cache/x.wav", 1),
             ("Docs/readme.txt", 1),
-            ("Old/Song.wma", 1),
+            ("Old/Song.opus", 1),
+            ("Old/Tune.wma", 3),
         ],
     );
     let root = dir.to_str().unwrap().to_owned();
     let found = find_sounds(std::slice::from_ref(&root));
     let names: Vec<String> = found.files.iter().map(|f| rel(&root, &f.path)).collect();
-    assert_eq!(names, ["Kicks/Kick 1.wav", "Kicks/Kick 2.AIF", "Loops/Groove.flac"]);
+    let mut expected = vec!["Kicks/Kick 1.wav", "Kicks/Kick 2.AIF", "Loops/Groove.flac"];
+    // Windows decodes WMA; a Mac or Linux can't, so leaves it out.
+    if cfg!(windows) {
+        expected.push("Old/Tune.wma");
+    }
+    assert_eq!(names, expected);
     assert!(found.files.iter().all(|f| f.size == 3 && f.mtime > 0));
 }
 
@@ -49,7 +55,7 @@ fn finds_sounds_leaving_out_shadows_hidden_folders_and_other_files() {
 fn plans_what_to_listen_to_follow_and_forget() {
     let dir = folder(
         "mo-sounds-plan",
-        &[("Pack 2/Kick.wav", 4), ("Pack 2/Pad 90bpm.wav", 5), ("New.wav", 6), ("Same.wav", 7), ("Song.wma", 8)],
+        &[("Pack 2/Kick.wav", 4), ("Pack 2/Pad 90bpm.wav", 5), ("New.wav", 6), ("Same.wav", 7), ("Song.opus", 8)],
     );
     let root = dir.to_str().unwrap().to_owned();
     let found = find_sounds(std::slice::from_ref(&root));
@@ -67,7 +73,7 @@ fn plans_what_to_listen_to_follow_and_forget() {
         // Gone for good.
         known(at("Gone.wav"), (1, 1)),
         // A file the app can't read, still there: kept.
-        known(at("Song.wma"), (8, 1)),
+        known(at("Song.opus"), (8, 1)),
         // On a drive that isn't plugged in: kept.
         known(format!(r"{unplugged}\Far.wav"), (1, 1)),
         // Outside every listed folder: kept, unlike the C# app.

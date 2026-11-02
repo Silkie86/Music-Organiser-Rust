@@ -12,11 +12,19 @@ mod other;
 #[cfg(feature = "play")]
 pub mod play;
 mod read;
+mod wma;
 mod write;
 
 pub use other::OTHER_EXTENSIONS;
 pub use read::{MAX_SECONDS, can_read_from, read, read_from};
+pub use wma::WMA_EXTENSIONS;
 pub use write::write_wav;
+
+/// Whether this computer can decode this sound file (by its extension, ignoring case): WAV, AIFF, MP3, FLAC, M4A,
+/// OGG and AAC everywhere, WMA on Windows only. A sound it can't decode can be listed but not played or analysed.
+pub fn can_decode(path: &std::path::Path) -> bool {
+    can_read_from(path) || other::is_other(path) || (cfg!(windows) && wma::is_wma(path))
+}
 
 use std::fmt;
 

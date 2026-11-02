@@ -2914,6 +2914,7 @@ version = "0.1.0"
 dependencies = [
  "cpal",
  "symphonia",
+ "windows",
 ]
 
 [[package]]
