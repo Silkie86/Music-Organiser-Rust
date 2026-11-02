@@ -21,7 +21,7 @@ use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
 use mo_app::shortcuts::Shortcuts;
 use mo_app::sounds::{self as list, Filters, Length, Order, SoundList};
-use mo_app::{log, year_strip};
+use mo_app::{log, sweep_timing, year_strip};
 use mo_audio::play::Player;
 use mo_library::UsageRules;
 use mo_library::songs::thousands;
@@ -405,6 +405,7 @@ enum Step {
 }
 
 fn arrive(app: &AppWindow, step: Step) {
+    let _doing = crate::watchdog::doing("Sounds: the library arrived");
     match step {
         Step::Read(read) => loaded(app, read),
         Step::Used(list) => use_known(app, list),
@@ -656,6 +657,7 @@ fn find_alike(app: &AppWindow, at: usize) {
 
 /// Shows the sounds like the one at `at`, if it's still the one picked.
 fn alike_found(app: &AppWindow, at: usize, found: Vec<(usize, f64)>) {
+    let _doing = crate::watchdog::doing("Sounds: show the sounds like this");
     let lines = PAGE.with(|p| {
         let p = p.borrow();
         if p.picked != Some(at) {
@@ -706,6 +708,7 @@ fn use_known(app: &AppWindow, list: Arc<SoundList>) {
 }
 
 fn loaded(app: &AppWindow, read: Result<Read, String>) {
+    let _doing = crate::watchdog::doing("Sounds: the sounds were read");
     let data = app.global::<SoundsData>();
     data.set_busy("".into());
     let read = match read {
@@ -1093,6 +1096,7 @@ fn rediscover_now(app: &AppWindow) {
 
 /// Rediscover's answer arrived: shows it, unless a newer one has been asked for since.
 fn rediscovered(app: &AppWindow, a: RediscoverAnswer) {
+    let _doing = crate::watchdog::doing("Sounds: show Rediscover");
     let fresh = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         if p.re_asked != a.id {
@@ -1276,6 +1280,7 @@ fn refresh(app: &AppWindow) {
 
 /// A new list has been worked out: shows it, unless a newer one has been asked for since.
 fn listed(app: &AppWindow, id: u64, shown: Vec<usize>, years: Vec<(i32, usize)>) {
+    let _doing = crate::watchdog::doing("Sounds: show the filtered list");
     let current = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         if p.asked != id {
@@ -1529,32 +1534,44 @@ fn play_sound(app: &AppWindow, at: usize, from: f64, most: f64) {
     }
     let ask = PLAYS.fetch_add(1, Ordering::SeqCst) + 1;
     let weak = app.as_weak();
-    let started = background::spawn("Read sound", move || match mo_audio::read(Path::new(&path), most) {
-        // A newer play or a stop came while this one was reading.
-        _ if PLAYS.load(Ordering::SeqCst) != ask => {}
-        Ok(audio) => {
-            let player = PLAYER.get_or_init(|| {
-                Player::new(|key| {
-                    let key = key.to_owned();
-                    let _ = slint::invoke_from_event_loop(move || ended(&key));
-                })
-            });
-            player.play(Arc::new(audio), path, from * seconds);
-        }
-        Err(e) => {
-            log::warning("Sounds", &format!("Couldn't play {path}: {e}"));
-            let why = e.to_string();
-            let _ = slint::invoke_from_event_loop(move || {
-                if let Some(feed) = FEED.with(|f| f.borrow().clone()) {
-                    feed.start("Couldn't play the sound", "").failed(&why);
-                }
-                if let Some(app) = weak.upgrade() {
-                    stop(&app);
-                }
-            });
+    let key = path.clone();
+    // The sweep's timings (`mo_app::sweep_timing`) hear when it's being opened, and when it's handed to the output
+    // or dropped; for a sound the sweep didn't ask for they count nothing.
+    let started = background::spawn("Read sound", move || {
+        sweep_timing::opening(&path);
+        let read = mo_audio::read(Path::new(&path), most);
+        match read {
+            // A newer play or a stop came while this one was reading.
+            _ if PLAYS.load(Ordering::SeqCst) != ask => sweep_timing::dropped(&path),
+            Ok(audio) => {
+                let player = PLAYER.get_or_init(|| {
+                    Player::new(|key| {
+                        let key = key.to_owned();
+                        let _ = slint::invoke_from_event_loop(move || ended(&key));
+                    })
+                });
+                player.play(Arc::new(audio), path.clone(), from * seconds);
+                let output = player.info();
+                sweep_timing::output(output.mix_every_ms.map(|m| m / 2.0), output.delay_ms);
+                sweep_timing::started(&path);
+            }
+            Err(e) => {
+                sweep_timing::dropped(&path);
+                log::warning("Sounds", &format!("Couldn't play {path}: {e}"));
+                let why = e.to_string();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(feed) = FEED.with(|f| f.borrow().clone()) {
+                        feed.start("Couldn't play the sound", "").failed(&why);
+                    }
+                    if let Some(app) = weak.upgrade() {
+                        stop(&app);
+                    }
+                });
+            }
         }
     });
     if let Err(e) = started {
+        sweep_timing::dropped(&key);
         log::error("Sounds", &format!("Couldn't start reading the sound: {e}"));
     }
 }

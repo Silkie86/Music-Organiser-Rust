@@ -52,6 +52,7 @@ impl Outputs for FakeOutputs {
             sample_rate: f.rate,
             channels: 2,
             delay: Arc::new(AtomicU64::new(12_000)),
+            period: Arc::new(AtomicU64::new(10_000)),
             stream: Box::new(()),
         })
     }
@@ -138,6 +139,7 @@ fn nothing_opens_until_a_sound_plays_and_then_it_plays_to_the_end() {
     let info = player.info();
     assert_eq!(info.name.as_deref(), Some("Speakers"));
     assert_eq!(info.delay_ms, Some(12.0));
+    assert_eq!(info.mix_every_ms, Some(10.0));
     assert_eq!(outputs.pull(100), vec![0.5; 100]);
     assert_eq!(player.position(), Some(0.1));
     outputs.pull(300);

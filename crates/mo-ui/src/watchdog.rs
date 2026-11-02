@@ -4,16 +4,21 @@
 //! case it never comes back. The watchdog never waits on the window itself, so it can't make a freeze worse.
 //!
 //! The window's own steps that might be slow mark themselves with [`doing`], so a freeze line says which step the
-//! window was in ("busy with Songs: show the song's details"), or that it was in none of them (then it was drawing or
-//! laying out). A marked step that takes longer than [`STALL`] gets its own `[Slow]` line with its time.
+//! window was in ("busy with Songs: show the song's details"), or that it was in none of them. Slint drawing the window
+//! is marked too ([`drawing`]), so "no marked step" means Slint handling input, laying out or showing the frame. A
+//! marked step that takes longer than [`STALL`] gets its own `[Slow]` line with its time.
+//!
+//! The frame timing (`mo_app::frame_timing`, the `[Frames]` lines) hears from here too: each marked step's own time
+//! (less the steps inside it), and every knock answered later than 33 ms with the step the window was in.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::cell::RefCell;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 
 use mo_app::activity::Feed;
-use mo_app::log;
+use mo_app::{frame_timing, log};
 
 /// Longer than this without an answer is a freeze.
 pub const STALL: Duration = Duration::from_millis(250);
@@ -29,13 +34,42 @@ static DOING: Mutex<Option<(&'static str, Instant)>> = Mutex::new(None);
 /// window being busy.
 static WINDOW: OnceLock<ThreadId> = OnceLock::new();
 
+thread_local! {
+    /// For each marked step going on (on this thread), how long the steps inside it took, so each counts only its own
+    /// time in the frame timing.
+    static INSIDE: RefCell<Vec<Duration>> = const { RefCell::new(Vec::new()) };
+}
+
+fn on_window() -> bool {
+    WINDOW.get().is_none_or(|w| *w == std::thread::current().id())
+}
+
 /// Marks a step on the window's thread until the guard is dropped: `let _doing = watchdog::doing("Songs: pick");`.
 /// On any other thread it marks nothing (before [`start`], as in tests, every thread counts).
 pub fn doing(what: &'static str) -> Doing {
     let since = Instant::now();
-    let on_window = WINDOW.get().is_none_or(|w| *w == std::thread::current().id());
+    let on_window = on_window();
     let outer = if on_window { DOING.lock().ok().and_then(|mut d| d.replace((what, since))) } else { None };
+    if on_window {
+        INSIDE.with(|i| i.borrow_mut().push(Duration::ZERO));
+    }
     Doing { what, since, outer, on_window }
+}
+
+/// Slint is drawing the window (`true`, from its "before rendering" call) or has finished (`false`). Marks it like a
+/// step, unless a marked step is going on already.
+pub fn drawing(started: bool) {
+    if !on_window() {
+        return;
+    }
+    let Ok(mut d) = DOING.lock() else { return };
+    if started {
+        if d.is_none() {
+            *d = Some((frame_timing::DRAWING, Instant::now()));
+        }
+    } else if d.is_some_and(|(what, _)| what == frame_timing::DRAWING) {
+        *d = None;
+    }
 }
 
 /// A step being done; see [`doing`].
@@ -54,6 +88,16 @@ impl Drop for Doing {
             return;
         }
         let took = self.since.elapsed();
+        // Its own time goes to the frame timing; all of it counts as time inside the step it's in.
+        let inside = INSIDE.with(|i| {
+            let mut i = i.borrow_mut();
+            let inside = i.pop().unwrap_or_default();
+            if let Some(outer) = i.last_mut() {
+                *outer += took;
+            }
+            inside
+        });
+        frame_timing::step(self.what, took.saturating_sub(inside));
         if took >= STALL {
             log::warning("Slow", &format!("{} took {} ms on the window's thread", self.what, took.as_millis()));
         }
@@ -63,11 +107,16 @@ impl Drop for Doing {
     }
 }
 
+/// The marked step the window is in now, if any.
+fn busy_step() -> Option<&'static str> {
+    DOING.lock().ok().and_then(|d| *d).map(|(what, _)| what)
+}
+
 /// What the window is busy with, for a freeze line.
 fn busy_with() -> String {
     match DOING.lock().ok().and_then(|d| *d) {
         Some((what, since)) => format!("busy with {what} for {} ms", since.elapsed().as_millis()),
-        None => "in no marked step, so drawing or laying out".to_owned(),
+        None => format!("in {}", frame_timing::UNMARKED),
     }
 }
 
@@ -84,18 +133,30 @@ pub fn start(feed: Feed) {
 fn watch(feed: &Feed) {
     loop {
         std::thread::sleep(KNOCK_EVERY);
-        let answered = Arc::new(AtomicBool::new(false));
+        // How long the knock waited, in microseconds (at least 1), once it's answered; 0 until then.
+        let answered = Arc::new(AtomicU64::new(0));
         let a = answered.clone();
         let sent = Instant::now();
-        if slint::invoke_from_event_loop(move || a.store(true, Ordering::Release)).is_err() {
+        let answer = move || {
+            let waited = u64::try_from(sent.elapsed().as_micros()).unwrap_or(u64::MAX).max(1);
+            a.store(waited, Ordering::Release);
+        };
+        if slint::invoke_from_event_loop(answer).is_err() {
             return; // The event loop has ended.
         }
         let mut said_still_stuck = false;
         // What the window was busy with once it had been stuck for STALL: the step the freeze is in.
         let mut busy = None;
-        while !answered.load(Ordering::Acquire) {
+        // The step it was in at the first look, for a late answer (answered before then, it wasn't late).
+        let mut first_step = None;
+        let mut looked = false;
+        while answered.load(Ordering::Acquire) == 0 {
             std::thread::sleep(LOOK_EVERY);
             let waited = sent.elapsed();
+            if !looked {
+                looked = true;
+                first_step = busy_step();
+            }
             if waited >= STALL && busy.is_none() {
                 busy = Some(busy_with());
             }
@@ -106,7 +167,8 @@ fn watch(feed: &Feed) {
                 log::current().inspect(|l| l.flush());
             }
         }
-        let waited = sent.elapsed();
+        let waited = Duration::from_micros(answered.load(Ordering::Acquire));
+        frame_timing::late(waited, first_step);
         if waited >= STALL {
             let busy = busy.unwrap_or_else(busy_with);
             log::warning("Freeze", &line(waited, false, crate::page_name(), &feed.running_titles(), &busy));
@@ -129,6 +191,9 @@ pub fn line(waited: Duration, still_stuck: bool, page: &str, running: &[String],
 mod tests {
     use super::*;
 
+    /// The marked step is kept for the whole app, so the tests that mark steps take turns.
+    static TURN: Mutex<()> = Mutex::new(());
+
     #[test]
     fn freeze_lines_say_how_long_where_and_what_ran() {
         assert_eq!(
@@ -142,14 +207,14 @@ mod tests {
             "The window was stuck for 612 ms (page Sounds; running: Analysing sounds; busy with x for 600 ms)"
         );
         assert_eq!(
-            line(Duration::from_millis(5020), true, "Songs", &[], "in no marked step, so drawing or laying out"),
-            "The window is still stuck after 5.0 s (page Songs; no jobs running; in no marked step, so drawing or \
-             laying out)"
+            line(Duration::from_millis(5020), true, "Songs", &[], "in no marked step"),
+            "The window is still stuck after 5.0 s (page Songs; no jobs running; in no marked step)"
         );
     }
 
     #[test]
     fn a_step_marks_itself_and_puts_back_the_one_it_was_in() {
+        let _turn = TURN.lock();
         let outer = doing("outer step");
         assert!(busy_with().starts_with("busy with outer step"));
         {
@@ -158,6 +223,21 @@ mod tests {
         }
         assert!(busy_with().starts_with("busy with outer step"));
         drop(outer);
-        assert_eq!(busy_with(), "in no marked step, so drawing or laying out");
+        assert_eq!(busy_with(), format!("in {}", frame_timing::UNMARKED));
+    }
+
+    #[test]
+    fn drawing_is_marked_only_outside_other_steps() {
+        let _turn = TURN.lock();
+        drawing(true);
+        assert!(busy_with().starts_with("busy with drawing the window"));
+        drawing(false);
+        assert_eq!(busy_step(), None);
+        let step = doing("a step");
+        drawing(true);
+        assert_eq!(busy_step(), Some("a step"));
+        drawing(false);
+        assert_eq!(busy_step(), Some("a step"));
+        drop(step);
     }
 }
