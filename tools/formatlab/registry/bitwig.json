@@ -41,6 +41,15 @@
     { "id": "0x127e", "name": "curve point", "about": "0x35fd the value (0 to 1), 0x35fe where across the curve (0 to 1, in order; two on one x make a jump), 0x35ff how the line to the next point bends (-1 to 1, 0 straight; it becomes the automation point's 0xba6 unchanged when dropped on a lane).", "seen": "5.0-6.1", "proof": "Solomon's own curves Filter Rhythm 001 2, Gararge 1, London City (5.0-6.0) and a drop test (6.1.6, 2026-11-02); bitwig::curve tests" }
   ],
   "fields": [
+    { "id": "0x3603", "name": "curve points", "type": "list", "about": "In a curve (0x127f): its points (0x127e), in order across the curve.", "seen": "5.0-6.0", "proof": "Solomon's own curves (5.0-6.0, 2026-11-02); bitwig::curve tests" },
+    { "id": "0x35fd", "name": "curve value", "type": "f64", "about": "In a curve point: the value, 0 to 1.", "seen": "5.0-6.0", "proof": "Solomon's own curves (5.0-6.0, 2026-11-02); bitwig::curve tests" },
+    { "id": "0x35fe", "name": "curve position", "type": "f64", "about": "In a curve point: where across the curve, 0 to 1; two points on one position make a jump.", "seen": "5.0-6.0", "proof": "Solomon's own curves (5.0-6.0, 2026-11-02); bitwig::curve tests" },
+    { "id": "0x35ff", "name": "curve bend", "type": "f64", "about": "In a curve point: how the line to the next point bends, -1 to 1 (0 straight). Becomes an automation point's 0xba6 unchanged when the curve is dropped on a lane.", "seen": "5.0-6.0", "proof": "Solomon's own curves (5.0-6.0, 2026-11-02); bitwig::curve tests" },
+    { "id": "0x360b", "name": "curve name", "type": "string", "about": "In a curve: its name; a dropped curve's clip takes it.", "seen": "5.0-6.0", "proof": "Solomon's own curves (5.0-6.0, 2026-11-02); bitwig::curve tests" },
+    { "id": "0x3621", "name": "curve creator", "type": "string", "about": "In a curve: who made it.", "seen": "5.0-6.0", "proof": "Solomon's own curves (5.0-6.0, 2026-11-02); bitwig::curve tests" },
+    { "id": "0x3623", "name": "curve comment", "type": "string", "about": "In a curve: its comment (empty in every file so far).", "seen": "5.0-6.0", "proof": "Solomon's own curves (5.0-6.0, 2026-11-02); bitwig::curve tests" },
+    { "id": "0x3622", "name": "curve category", "type": "string", "about": "In a curve: Sequence or Periodic, as the metadata's curve_category.", "seen": "5.0-6.0", "proof": "Solomon's own curves (5.0-6.0, 2026-11-02); bitwig::curve tests" },
+    { "id": "0x36a6", "name": "curve tags", "type": "string", "about": "In a curve: its tags, as the metadata's tags.", "seen": "5.0-6.0", "proof": "Solomon's own curves (5.0-6.0, 2026-11-02); bitwig::curve tests" },
     { "id": "0xf", "name": "ID", "type": "uuid", "about": "An object's own ID (tracks, groups, devices). Copies get new ones; 0x99 is different: it names which Bitwig device it is.", "seen": "5.1-6.1", "proof": "Solomon's bitwig_test (6.1.3)" },
     { "id": "0x16", "name": "MD5", "type": "blob", "about": "In a file hash (0x1e2): the MD5 of the whole sample file.", "seen": "6.1", "proof": "Checked against the sample's MD5; Bitwig opened projects the app wrote with it" },
     { "id": "0x17", "name": "file size", "type": "integer", "about": "In a sample file (0x4a6): its size in bytes, in the smallest integer type that holds it.", "seen": "6.1", "proof": "Solomon's bitwig_test (6.1.3)" },
@@ -175,6 +184,16 @@
     { "id": "application_version_name", "name": "Bitwig version", "type": "string", "about": "The Bitwig version that saved the file, e.g. 6.1.3.", "seen": "5.1-6.1", "proof": "BitwigTests.ReadsTempoVersionPluginsAndHardware" },
     { "id": "structure", "name": "summary", "type": "blob", "about": "A small Bitwig document of its own: the tracks with the names Bitwig shows, for its browser.", "seen": "5.1-6.1", "proof": "BitwigTests.UsesBitwigsDisplayNamesForTracks" },
     { "id": "used_files", "name": "used files", "type": "string list", "about": "Files the project uses, relative to its folder (collected copies get -2 suffixes).", "seen": "5.1-6.1", "proof": "BitwigTests.FindsSamples" },
-    { "id": "title", "name": "title", "type": "string", "about": "The project's title, usually empty.", "seen": "5.1-6.1", "proof": "BitwigTests.ReadsTempoVersionPluginsAndHardware" }
+    { "id": "title", "name": "title", "type": "string", "about": "The project's title, usually empty.", "seen": "5.1-6.1", "proof": "BitwigTests.ReadsTempoVersionPluginsAndHardware" },
+    { "id": "beat_length", "name": "curve length", "type": "f64", "about": "A curve's length in beats, when Bitwig keeps it (only some curves).", "seen": "5.0-6.0", "proof": "Solomon's own curves (5.0-6.0, 2026-11-02); bitwig::curve tests" },
+    { "id": "branch", "name": "release branch", "type": "string", "about": "Which Bitwig build saved it: releases, or a beta's branch such as test/5.2.", "seen": "5.0-6.0", "proof": "Solomon's own curves (5.0-6.0, 2026-11-02); bitwig::curve tests" },
+    { "id": "comment", "name": "comment", "type": "string", "about": "A library file's comment.", "seen": "5.0-6.0", "proof": "Solomon's own curves (5.0-6.0, 2026-11-02); bitwig::curve tests" },
+    { "id": "creator", "name": "creator", "type": "string", "about": "Who made a library file.", "seen": "5.0-6.0", "proof": "Solomon's own curves (5.0-6.0, 2026-11-02); bitwig::curve tests" },
+    { "id": "curve_category", "name": "curve category", "type": "string", "about": "Sequence or Periodic.", "seen": "5.0-6.0", "proof": "Solomon's own curves (5.0-6.0, 2026-11-02); bitwig::curve tests" },
+    { "id": "curve_kind", "name": "curve kind", "type": "u8", "about": "0 in every curve so far.", "seen": "5.0-6.0", "proof": "Solomon's own curves (5.0-6.0, 2026-11-02); bitwig::curve tests" },
+    { "id": "revision_id", "name": "revision id", "type": "string", "about": "40 hex characters, new each save.", "seen": "5.0-6.0", "proof": "Solomon's own curves (5.0-6.0, 2026-11-02); bitwig::curve tests" },
+    { "id": "revision_no", "name": "revision number", "type": "i32", "about": "Bitwig's save count for the file.", "seen": "5.0-6.0", "proof": "Solomon's own curves (5.0-6.0, 2026-11-02); bitwig::curve tests" },
+    { "id": "tags", "name": "tags", "type": "string", "about": "A library file's tags, space-separated.", "seen": "5.0-6.0", "proof": "Solomon's own curves (5.0-6.0, 2026-11-02); bitwig::curve tests" },
+    { "id": "type", "name": "file type", "type": "string", "about": "What a library file holds: application/bitwig-curve for a curve.", "seen": "5.0-6.0", "proof": "Solomon's own curves (5.0-6.0, 2026-11-02); bitwig::curve tests" }
   ]
 }

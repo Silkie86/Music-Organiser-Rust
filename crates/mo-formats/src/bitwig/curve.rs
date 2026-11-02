@@ -11,7 +11,10 @@
 //! - bend (-1 to 1, 0 straight) bends the line from this point to the next. Dropped on a lane it becomes the point's
 //!   curve (0xba6) as it is: Basic Sequence 1's 0.82, -1 and 1 came across unchanged.
 
-use super::format::{Document, Value, decode};
+use std::sync::Arc;
+
+use super::encode::{encode, fresh_id};
+use super::format::{Document, HEADER, ObjId, Object, Slot, Text, Value, decode};
 
 /// The metadata's type for a curve.
 pub const TYPE: &str = "application/bitwig-curve";
@@ -41,29 +44,14 @@ pub struct CurvePoint {
     pub bend: f64,
 }
 
-/// How Bitwig files a curve: a one-off run of moves, or a shape that repeats (as an LFO's).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Category {
-    Sequence,
-    Periodic,
-}
-
-impl Category {
-    fn name(self) -> &'static str {
-        match self {
-            Category::Sequence => "Sequence",
-            Category::Periodic => "Periodic",
-        }
-    }
-}
-
 /// A curve file.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Curve {
     pub name: String,
     pub creator: String,
     pub comment: String,
-    /// "Sequence" or "Periodic" as saved (another word is kept as it is).
+    /// How Bitwig files it: "Sequence" (a one-off run of moves) or "Periodic" (a shape that repeats, as an LFO's);
+    /// another word is kept as it is.
     pub category: String,
     /// Space-separated, as Bitwig saves them.
     pub tags: String,
@@ -100,132 +88,117 @@ pub fn read(raw: Vec<u8>) -> Option<Curve> {
         comment: curve.str(COMMENT).to_owned(),
         category: curve.str(CATEGORY).to_owned(),
         tags: curve.str(TAGS).to_owned(),
-        beat_length: meta_num(&doc, "beat_length"),
+        beat_length: doc.meta("beat_length").and_then(number),
         points,
     })
 }
 
-fn meta_num(doc: &Document, key: &str) -> Option<f64> {
-    doc.meta.iter().find(|(k, _)| k.as_str() == key).and_then(|(_, v)| match v {
+fn number(v: &Value) -> Option<f64> {
+    match v {
         Value::F64(x) => Some(*x),
+        Value::F32(x) => Some(f64::from(*x)),
+        Value::I32(x) => Some(f64::from(*x)),
+        Value::I16(x) => Some(f64::from(*x)),
         _ => None,
-    })
+    }
 }
 
-/// A curve file for `curve`, as Bitwig saves one. `id` is the revision id Bitwig keeps in the metadata (40 hex
-/// characters; any that tell curves apart will do). The x of each point is kept within 0 to 1 and in order, y within
-/// 0 to 1 and the bend within -1 to 1, so Bitwig never gets a point it couldn't have saved. Written from Gararge 1's
-/// numbers, the body comes out byte for byte as Bitwig saved it (checked outside the repo, 2026-11-02).
-pub fn write(curve: &Curve, category: Category, id: &str) -> Vec<u8> {
-    let mut meta = Vec::new();
-    u32(&mut meta, 4);
-    text(&mut meta, "meta");
-    let mut entry = |key: &str, value: &dyn Fn(&mut Vec<u8>)| {
-        u32(&mut meta, 1);
-        text(&mut meta, key);
-        value(&mut meta);
-    };
-    // In the order Bitwig writes them (by name).
-    entry("application_version_name", &|m| string(m, "5.0"));
-    if let Some(beats) = curve.beat_length {
-        entry("beat_length", &|m| {
-            m.push(0x07);
-            m.extend_from_slice(&beats.to_be_bytes());
-        });
+/// A curve file for `curve`, as Bitwig saves one; None when it has no points. Points are put in order across the
+/// curve (two on one x keep their order, making a jump), x and y are kept within 0 to 1 and the bend within -1 to 1,
+/// and a single point becomes a flat line, so Bitwig never gets a curve it couldn't have saved. Each file gets its own
+/// revision id. Written from Gararge 1's numbers, the body comes out byte for byte as Bitwig saved it (checked outside
+/// the repo, 2026-11-02).
+pub fn write(curve: &Curve) -> Option<Vec<u8>> {
+    let mut points: Vec<(f64, f64, f64)> =
+        curve.points.iter().map(|p| (clean(p.x, 0.0, 1.0), clean(p.y, 0.0, 1.0), clean(p.bend, -1.0, 1.0))).collect();
+    points.sort_by(|a, b| a.0.total_cmp(&b.0));
+    match points.as_slice() {
+        [] => return None,
+        [(_, y, _)] => points = vec![(0.0, *y, 0.0), (1.0, *y, 0.0)],
+        _ => {}
     }
-    entry("branch", &|m| string(m, "releases"));
-    entry("comment", &|m| string(m, &curve.comment));
-    entry("creator", &|m| string(m, &curve.creator));
-    entry("curve_category", &|m| string(m, category.name()));
-    entry("curve_kind", &|m| m.extend_from_slice(&[0x01, 0]));
-    entry("revision_id", &|m| string(m, id));
-    entry("revision_no", &|m| {
-        m.push(0x03);
-        m.extend_from_slice(&1i32.to_be_bytes());
-    });
-    entry("tags", &|m| string(m, &curve.tags));
-    entry("type", &|m| string(m, TYPE));
-    u32(&mut meta, 0);
-    // Bitwig leaves room so it can save the metadata again without moving the body.
-    meta.extend(std::iter::repeat_n(b' ', 5000));
-    meta.push(b'\n');
 
-    let mut body = Vec::new();
-    u32(&mut body, CURVE);
-    field(&mut body, 0x362d, &[0x01, 0]);
-    field(&mut body, 0x3646, &[0x05, 1]);
-    field(&mut body, 0x3601, &[0x01, 16]);
-    // Unknown: 1 in Solomon's Sequence curve, 4 in his two Periodic ones; kept as they have it.
-    field(&mut body, 0x3602, &[0x01, if category == Category::Periodic { 4 } else { 1 }]);
-    field(&mut body, 0x3635, &[0x01, 0]);
-    u32(&mut body, POINTS);
-    body.push(0x12);
-    let mut last_x = 0.0f64;
-    for p in &curve.points {
-        let x = clean(p.x, 0.0, 1.0).max(last_x);
-        last_x = x;
-        u32(&mut body, POINT);
-        for (id, v) in [(Y, clean(p.y, 0.0, 1.0)), (X, x), (BEND, clean(p.bend, -1.0, 1.0))] {
-            u32(&mut body, id);
-            body.push(0x07);
-            body.extend_from_slice(&v.to_be_bytes());
-        }
-        u32(&mut body, 0);
+    let text = |s: &str| Value::Str(Text::new(s));
+    let mut meta = vec![("application_version_name", text("5.0"))];
+    if let Some(beats) = curve.beat_length.filter(|b| b.is_finite() && *b > 0.0) {
+        meta.push(("beat_length", Value::F64(beats)));
     }
-    u32(&mut body, 3);
+    // In the order Bitwig writes them (by name).
+    meta.extend([
+        ("branch", text("releases")),
+        ("comment", text(&curve.comment)),
+        ("creator", text(&curve.creator)),
+        ("curve_category", text(&curve.category)),
+        ("curve_kind", Value::U8(0)),
+        ("revision_id", text(&revision_id())),
+        ("revision_no", Value::I32(1)),
+        ("tags", text(&curve.tags)),
+        ("type", text(TYPE)),
+    ]);
+
+    let mut objects = Vec::with_capacity(points.len() + 1);
+    let mut root = Object::new(CURVE);
+    root.set(0x362d, Value::U8(0));
+    root.set(0x3646, Value::Bool(1));
+    root.set(0x3601, Value::U8(16));
+    // Unknown: 1 in Solomon's Sequence curve, 4 in his two Periodic ones; kept as they have it.
+    root.set(0x3602, Value::U8(if curve.category == "Periodic" { 4 } else { 1 }));
+    root.set(0x3635, Value::U8(0));
+    root.set(POINTS, Value::List((1..=points.len() as u32).map(|n| Slot::Obj(ObjId(n))).collect()));
     for id in [0x3788, 0x3665, 0x3666] {
-        field(&mut body, id, &[0x01, 0xff]);
+        root.set(id, Value::U8(0xff));
     }
     for (id, s) in [
         (NAME, &curve.name),
         (CREATOR, &curve.creator),
         (COMMENT, &curve.comment),
-        (CATEGORY, &category.name().to_owned()),
+        (CATEGORY, &curve.category),
         (TAGS, &curve.tags),
     ] {
-        u32(&mut body, id);
-        string(&mut body, s);
+        root.set(id, text(s));
     }
-    u32(&mut body, 0);
+    objects.push(root);
+    for (x, y, bend) in points {
+        let mut point = Object::new(POINT);
+        point.set(Y, Value::F64(y));
+        point.set(X, Value::F64(x));
+        point.set(BEND, Value::F64(bend));
+        objects.push(point);
+    }
 
-    let body_offset = super::format::HEADER + meta.len();
-    let mut file = Vec::with_capacity(body_offset + body.len());
-    file.extend_from_slice(format!("BtWg000300020000{body_offset:08x}{:016x}00", 0).as_bytes());
-    file.extend_from_slice(&meta);
-    file.extend_from_slice(&body);
-    file
+    // The metadata's end marker, then the room Bitwig leaves so it can save the metadata again without moving the
+    // body; encode copies these from the "file as it was" (from meta_end to the body). meta_end sits one byte past the
+    // header, as encode writes metadata only for a document that had some.
+    let meta_end = HEADER + 1;
+    let mut raw = vec![0u8; meta_end + 4];
+    raw.extend(std::iter::repeat_n(b' ', 5000));
+    raw.push(b'\n');
+    let mut header = [b'0'; 38];
+    header[..12].copy_from_slice(b"000300020000");
+    let doc = Document {
+        body_offset: raw.len(),
+        zip_offset: raw.len(),
+        raw: Arc::new(raw),
+        header,
+        meta: meta.into_iter().map(|(k, v)| (Text::new(k), v)).collect(),
+        meta_end,
+        root: Some(ObjId(0)),
+        objects,
+        has_zip: false,
+        body_error: None,
+    };
+    encode(&doc, None).ok()
+}
+
+/// 40 hex characters, as Bitwig's revision ids are, new each time.
+fn revision_id() -> String {
+    let (a, b) = (fresh_id(), fresh_id());
+    a.iter().chain(&b[..4]).map(|x| format!("{x:02x}")).collect()
 }
 
 /// A number Bitwig can hold: within its range, and 0 when it isn't a number at all.
 fn clean(v: f64, low: f64, high: f64) -> f64 {
     if v.is_finite() { v.clamp(low, high) } else { 0.0 }
-}
-
-fn u32(out: &mut Vec<u8>, v: u32) {
-    out.extend_from_slice(&v.to_be_bytes());
-}
-
-fn field(out: &mut Vec<u8>, id: u32, value: &[u8]) {
-    u32(out, id);
-    out.extend_from_slice(value);
-}
-
-/// A text without its type byte: its length, then its bytes; text that isn't plain ASCII goes as UTF-16 with the top
-/// bit of the length set, as Bitwig writes it.
-fn text(out: &mut Vec<u8>, s: &str) {
-    if s.is_ascii() {
-        u32(out, s.len() as u32);
-        out.extend_from_slice(s.as_bytes());
-    } else {
-        let units: Vec<u16> = s.encode_utf16().collect();
-        u32(out, 0x8000_0000 | units.len() as u32);
-        out.extend(units.iter().flat_map(|u| u.to_be_bytes()));
-    }
-}
-
-fn string(out: &mut Vec<u8>, s: &str) {
-    out.push(0x08);
-    text(out, s);
 }
 
 #[cfg(test)]
@@ -254,14 +227,15 @@ mod tests {
             CurvePoint { x: 1.0, y: 0.0, bend: 0.0 },
         ];
         let c = curve(points);
-        let raw = write(&c, Category::Sequence, "455263ea8403a86e70124694ea938320dd24d1d2");
+        let raw = write(&c).unwrap();
         assert_eq!(read(raw.clone()), Some(c.clone()));
         // The body starts where the header says, after the padding, as in Bitwig's own curves.
         let doc = decode(raw.clone()).unwrap();
         assert_eq!(raw.get(doc.body_offset - 1), Some(&b'\n'));
         assert!(doc.meta.iter().any(|(k, v)| k.as_str() == "type" && matches!(v, Value::Str(t) if t.as_str() == TYPE)));
         // And it comes back byte for byte through the project writer.
-        assert_eq!(super::super::encode(&doc, None).unwrap(), raw);
+        assert_eq!(encode(&doc, None).unwrap(), raw);
+        assert_eq!(doc.meta_str("revision_id").len(), 40);
     }
 
     #[test]
@@ -270,11 +244,12 @@ mod tests {
             curve(vec![CurvePoint { x: 0.5, y: 2.0, bend: f64::NAN }, CurvePoint { x: 0.25, y: -1.0, bend: -3.0 }]);
         c.name = "Café – Encoder1".into();
         c.beat_length = None;
-        let back = read(write(&c, Category::Periodic, "0")).unwrap();
+        c.category = "Periodic".into();
+        let back = read(write(&c).unwrap()).unwrap();
         assert_eq!(back.name, "Café – Encoder1");
         assert_eq!(back.category, "Periodic");
         assert_eq!(back.beat_length, None);
-        assert_eq!(back.points, [CurvePoint { x: 0.5, y: 1.0, bend: 0.0 }, CurvePoint { x: 0.5, y: 0.0, bend: -1.0 }]);
+        assert_eq!(back.points, [CurvePoint { x: 0.25, y: 0.0, bend: -1.0 }, CurvePoint { x: 0.5, y: 1.0, bend: 0.0 }]);
     }
 
     #[test]
