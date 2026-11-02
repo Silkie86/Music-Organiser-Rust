@@ -759,9 +759,9 @@ fn a_decoder_kept_and_used_again_reads_the_same() {
 /// A way to read the music through what a decode kept: each of its steps (a span, and the place of its reading among
 /// those kept there), its score, and the units where it starts a chord.
 #[derive(Clone, Debug, Default)]
-struct Way {
-    steps: Vec<(usize, usize)>,
-    score: f64,
+pub(super) struct Way {
+    pub(super) steps: Vec<(usize, usize)>,
+    pub(super) score: f64,
     starts: Vec<usize>,
 }
 
@@ -779,7 +779,7 @@ fn pair(weights: &Weights, a: Option<Label>, b: Option<Label>) -> f64 {
 /// for where a chord starts), after a span as long as a span from its start may be, and never from a place a chord
 /// is pushed to. At a rest's or a pin's edge, any reading starts, even the same. Inside a rest or a pin, only the same
 /// reading goes on, held on.
-fn step(
+pub(super) fn step(
     lattice: &Lattice,
     weights: &Weights,
     before: Option<(usize, usize)>,
@@ -801,7 +801,7 @@ fn step(
 }
 
 /// Every way to read the music through what the last decode kept, found one by one: the slow way.
-fn every_way(lattice: &Lattice, weights: &Weights) -> Vec<Way> {
+pub(super) fn every_way(lattice: &Lattice, weights: &Weights) -> Vec<Way> {
     let mut from: Vec<Vec<usize>> = vec![Vec::new(); lattice.places.len()];
     for (s, span) in lattice.spans.iter().enumerate() {
         from[span.0].push(s);
@@ -856,7 +856,7 @@ fn every_way(lattice: &Lattice, weights: &Weights) -> Vec<Way> {
 
 /// How many ways there are to read the music through what the last decode kept, counted span by span (so the slow way
 /// is only tried where it's quick).
-fn count_ways(lattice: &Lattice, weights: &Weights) -> f64 {
+pub(super) fn count_ways(lattice: &Lattice, weights: &Weights) -> f64 {
     // The spans into each place; a span's index is above those of the spans into its first place.
     let mut into: Vec<Vec<usize>> = vec![Vec::new(); lattice.places.len()];
     let mut ways: Vec<Vec<f64>> = Vec::with_capacity(lattice.spans.len());

@@ -52,6 +52,9 @@ mod explain_tests;
 mod fact;
 #[cfg(test)]
 mod fact_tests;
+mod fitter;
+#[cfg(test)]
+mod fitter_tests;
 mod hear;
 #[cfg(test)]
 mod hear_tests;
@@ -77,9 +80,12 @@ pub use answer::{ChordAnswer, Grading, NoChord, Texture, Thresholds, grade};
 
 pub use candidates::{Candidate, Label, Route, allowed, candidates, escape, open_fifth};
 pub use cores::{Core, CoreSet, Group, ToneClass, valid, valid_rootless};
-pub use decode::{Chance, DecodedSpan, Decoder, Decoding, KEEP, PinnedSpan, SHARPNESS, SPAN_BARS};
+pub use decode::{
+    Chance, DecodedSpan, Decoder, Decoding, FitSums, KEEP, LABEL_TOLERANCE, PinnedSpan, SHARPNESS, SPAN_BARS,
+};
 pub use explain::{BassFrom, ChordExplainer, Explanation, NoteDoes, NoteWhy, TERMS_SHOWN, Term, TermWhy};
 pub use fact::{ChordFact, ChordSummary, Extensions, FACT_LAYOUT, FactReading, FactSpan, RunnerUp, SummaryFlags};
+pub use fitter::{ChordFitter, FitLabel, FitRead};
 pub use hear::{
     BASS_GAP, BassTexture, HeardNote, Hearing, Level, Line, MOST_UNITS, Mass, Push, Shape, Shaped, Stream, Unit,
     heard_in, played_in, presence_of,
@@ -92,7 +98,7 @@ pub use reader::{
 pub use score::{Evidence, Feature, PerFeature, Scored, Scorer, Scoring, SpanFacts};
 pub use tables::{COUNTED, COUNTED_FROM};
 pub use version::{SHIPPED_HASH, numbers_hash};
-pub use weights::{EVEN, HAND, Priors, THRESHOLDS, Tables, Weights};
+pub use weights::{Bound, EVEN, HAND, NUMBERS, Priors, RULES, Rule, THRESHOLDS, Tables, Weights};
 pub use words::Words;
 
 /// Bumped whenever the reader can read the same notes differently (new weights, a new rule for hearing, decoding,
