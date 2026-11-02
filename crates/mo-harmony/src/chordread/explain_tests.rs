@@ -23,13 +23,13 @@ fn name(key: u8) -> String {
     format!("{}{}", NAMES[usize::from(key % 12)], i32::from(key / 12) - 1)
 }
 
-fn parts(music: &Music) -> Vec<Part<'_>> {
+pub(super) fn parts(music: &Music) -> Vec<Part<'_>> {
     music.parts.iter().map(|(role, notes)| Part { role: *role, notes }).collect()
 }
 
 /// What some music reads with some pins, keeping `readings` a span, and each span explained, by one explainer;
 /// explained all at once too, which must say the same.
-fn explained(music: &Music, pins: &[Pin], readings: u8) -> (ChordReading, Vec<Option<Explanation>>) {
+pub(super) fn explained(music: &Music, pins: &[Pin], readings: u8) -> (ChordReading, Vec<Option<Explanation>>) {
     let parts = parts(music);
     let cx = ChordContext { span: music.span, pins, readings };
     let reading = ChordReader::new().read(&parts, music.grid, &cx).expect("nothing read");
@@ -417,6 +417,16 @@ fn keeps_the_rules(
                 NoteDoes::Walking | NoteDoes::HeldOver => true,
             };
             check(ok, &what(&note(w)))?;
+            // A note that passes by hangs on notes (an anticipation on its own), and no other note does.
+            let anchors_ok = match w.does {
+                NoteDoes::Anticipation => w.anchors == PcSet::EMPTY.with(pc),
+                NoteDoes::Passing | NoteDoes::Neighbour | NoteDoes::Approach => {
+                    !w.anchors.is_empty() && !w.anchors.contains(pc)
+                }
+                NoteDoes::Suspension | NoteDoes::Appoggiatura => !w.anchors.is_empty(),
+                _ => w.anchors.is_empty(),
+            };
+            check(anchors_ok, &what(&format!("{} hangs on {:?}", note(w), w.anchors)))?;
         }
         // Every note struck in the span's own units is there (but in its last when the next chord is pushed to it).
         let reported = hearing.reported().start;
@@ -437,9 +447,16 @@ fn keeps_the_rules(
         let none = e.second.is_none();
         check(!none || e.terms.iter().all(|t| t.scores[1] == 0.0) && e.totals[1] == 0.0, &what("no runner-up"))?;
         check(e.totals.iter().all(|t| t.is_finite()), &what("totals"))?;
+        // The bass each one is weighed on: none for no runner-up, and the same for both but where only one of them is
+        // held on (weighed on the stretch's own units when a chord is pushed to it).
+        check(e.second.is_some() || e.held_bass[1].is_none(), &what("no runner-up's bass"))?;
+        let may_differ = e.second.is_none() || e.held_on[0] != e.held_on[1];
+        check(may_differ || e.held_bass[0] == e.held_bass[1], &what("the bass held"))?;
         // A reading held on from the chord before has nothing about where a chord starts.
         for (k, reading) in [Some(e.first), e.second].iter().enumerate() {
-            if reading.is_some_and(|x| held_on(r, i, x.label, &edges, hearing.reported().start)) {
+            let is_held = reading.is_some_and(|x| held_on(r, i, x.label, &edges, hearing.reported().start));
+            check(e.held_on[k] == is_held, &what("held on, as said"))?;
+            if is_held {
                 check(e.terms.iter().filter(|t| about_the_start(t)).all(|t| t.values[k] == 0.0), &what("held on"))?;
                 held[k] += 1;
             }
@@ -484,7 +501,10 @@ fn everything(e: &Explanation, shift: i32) -> String {
     let notes: Vec<String> = e
         .notes
         .iter()
-        .map(|w| format!("{} {} {} {:?} {:?}", w.part, w.note, i32::from(w.key) - shift, w.heard_as, w.does))
+        .map(|w| {
+            let anchors = w.anchors.transposed(-shift).bits();
+            format!("{} {} {} {:?} {:?} {anchors:x}", w.part, w.note, i32::from(w.key) - shift, w.heard_as, w.does)
+        })
         .collect();
     let terms: Vec<String> = e
         .terms
@@ -502,7 +522,9 @@ fn everything(e: &Explanation, shift: i32) -> String {
         .collect();
     let second = e.second.map(|r| back(r.chord));
     let totals = e.totals.map(f64::to_bits);
-    format!("{} {:?} {second:?} {:?} {notes:?} {terms:?} {totals:x?}", e.span, back(e.first.chord), e.bass_from)
+    let (first, bass_from, held_on) = (back(e.first.chord), e.bass_from, e.held_on);
+    let held_bass = e.held_bass.map(|b| b.map(|pc| pc.up(-shift)));
+    format!("{} {first:?} {second:?} {bass_from:?} {notes:?} {terms:?} {totals:x?} {held_on:?} {held_bass:?}", e.span)
 }
 
 #[test]
@@ -734,7 +756,7 @@ fn a_chord_held_on_from_the_stretch_before_has_no_evidence_about_where_a_chord_s
 }
 
 /// A hand case's music, read as a loop.
-fn case_music(name: &str) -> Music {
+pub(super) fn case_music(name: &str) -> Music {
     hand_cases().into_iter().find(|(n, _)| *n == name).unwrap_or_else(|| panic!("no case {name}")).1
 }
 
