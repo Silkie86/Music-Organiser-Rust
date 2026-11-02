@@ -272,7 +272,7 @@ fn edit_events_of_several_patterns_are_one_lane_of_clips_in_song_order() {
         points: vec![FlPoint { beat: 0.0, value: 0.5 }, FlPoint { beat: 1.0, value: 1.0 }],
     };
     // Two patterns moving one setting: the first placed at beats 8 and 24, the second at 0 and 12 (over the first's
-    // end, so it takes over there).
+    // end: the plan keeps both whole, the writer settles the overlap).
     let recorded = |parts: Vec<FlPart>| FlAutomation {
         parameter: 2,
         parts,
@@ -286,7 +286,7 @@ fn edit_events_of_several_patterns_are_one_lane_of_clips_in_song_order() {
     let p = plan(&s);
     assert_eq!(p.lanes.len(), 1);
     let clips: Vec<(f64, f64)> = p.lanes[0].parts.iter().map(|c| (c.start, c.length)).collect();
-    assert_eq!(clips, [(0.0, 4.0), (8.0, 4.0), (12.0, 4.0), (24.0, 8.0)]);
+    assert_eq!(clips, [(0.0, 4.0), (8.0, 8.0), (12.0, 4.0), (24.0, 8.0)]);
 }
 
 #[test]
