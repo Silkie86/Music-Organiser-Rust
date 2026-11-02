@@ -496,10 +496,11 @@ fn the_random_files_hold_every_kind_of_link() {
         }
     }
     sizes.sort_unstable();
-    let (middle, full) = (sizes[sizes.len() / 2], sizes.iter().filter(|&&n| n >= MAX_OBJECTS as usize).count());
-    println!("objects per file: middle {middle}, smallest {}, biggest {}; {full} files full", sizes[0], sizes[199]);
+    // Most files stop when the random numbers run out, a little short of MAX_OBJECTS.
+    let (middle, big) = (sizes[sizes.len() / 2], sizes.iter().filter(|&&n| n >= 60).count());
+    println!("objects per file: middle {middle}, smallest {}, biggest {}; {big} with 60 or more", sizes[0], sizes[199]);
     assert!(middle >= 20, "half the files have {middle} objects or fewer");
-    assert!(full >= 20, "only {full} of 200 files reach {MAX_OBJECTS} objects");
+    assert!(big >= 50, "only {big} of 200 files have 60 objects or more");
     for (what, n) in
         [("references", refs), ("bare references", bare), ("zips", zips), ("metadata", meta), ("UTF-16 texts", wide)]
     {
