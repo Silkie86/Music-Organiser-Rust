@@ -845,7 +845,7 @@ fn sound(hearing: &Hearing, part: &Part) -> Sound {
 }
 
 /// The push to a unit, if there is one (the pushes are in order of their units).
-fn push_to(hearing: &Hearing, unit: usize) -> Option<&Push> {
+pub(super) fn push_to(hearing: &Hearing, unit: usize) -> Option<&Push> {
     let pushes = hearing.pushes();
     pushes.get(pushes.partition_point(|p| p.unit < unit)).filter(|p| p.unit == unit)
 }

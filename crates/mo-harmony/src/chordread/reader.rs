@@ -107,6 +107,10 @@ pub struct ChordReading {
     pub truncated: bool,
     /// Whether it was read as a loop: its first chord comes after its last.
     pub looped: bool,
+    /// In a loop, the chord the decode reads just before its first stretch, over the copy of its end heard in front:
+    /// the chord before its first as it goes round (usually its last chord; its first, when that's carried round from
+    /// its end, held on). None for no chord there, and for music that isn't a loop.
+    pub before: Option<Label>,
 }
 
 /// A stretch read as one chord, or as no chord.
@@ -382,20 +386,18 @@ impl ChordReader {
         &self.hearing
     }
 
-    /// Puts the pins on the units heard: each end at the nearest unit start within the music (a loop's own units,
-    /// never its copied bar). The decode leaves out those empty there and those over one before them, and gives a
-    /// chord given over a loop's last bar for the copy of that bar in front too.
+    /// Puts the pins on the units heard ([`pinned`]).
     fn pin(&mut self, pins: &[Pin]) {
-        let reported = self.hearing.reported();
-        let unit = |tick: i64| self.hearing.nearest_unit(tick).max(reported.start);
+        let hearing = &self.hearing;
         self.pins.clear();
-        self.pins.extend(pins.iter().map(|p| PinnedSpan { units: unit(p.start)..unit(p.end), chord: p.chord }));
+        self.pins.extend(pins.iter().map(|p| pinned(hearing, p)));
     }
 
     fn reading(&self, grid: Grid, cx: &ChordContext, model: &Model) -> ChordReading {
         let hearing = &self.hearing;
         let texture = Texture::of(hearing);
         let reported = hearing.reported();
+        let from = ReadFrom::heard(hearing, grid);
         let keep = usize::from(cx.readings.clamp(1, MOST_READINGS));
         let spans = self
             .naming
@@ -436,14 +438,57 @@ impl ChordReader {
         ChordReading {
             spans,
             texture,
-            unit: hearing.unit(),
+            unit: from.unit,
+            grid: from.grid,
+            start: from.start,
+            end: from.end,
+            notes: from.notes,
+            truncated: hearing.truncated(),
+            looped: from.looped,
+            before: self.decoding.before(),
+        }
+    }
+}
+
+/// A pin on the units heard, as a read puts it: each end at the nearest unit start within the music (a loop's own
+/// units, never its copied bar). The decode leaves out those empty there and those over one before them, and gives a
+/// chord given over a loop's last bar for the copy of that bar in front too ([`super::decode::kept_pins`]).
+pub(super) fn pinned(hearing: &Hearing, pin: &Pin) -> PinnedSpan {
+    let reported = hearing.reported();
+    let unit = |tick: i64| hearing.nearest_unit(tick).max(reported.start);
+    PinnedSpan { units: unit(pin.start)..unit(pin.end), chord: pin.chord }
+}
+
+/// What a reading says of the notes it was read from: its grid and unit, where it starts and ends, whether it's read
+/// as a loop, and how many notes it heard. An explanation checks a reading against the notes it hears by it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct ReadFrom {
+    grid: Grid,
+    unit: Unit,
+    looped: bool,
+    start: i64,
+    end: i64,
+    notes: u32,
+}
+
+impl ReadFrom {
+    /// What a reading of the notes heard on a grid says.
+    pub(super) fn heard(hearing: &Hearing, grid: Grid) -> ReadFrom {
+        let reported = hearing.reported();
+        ReadFrom {
             grid,
+            unit: hearing.unit(),
+            looped: reported.start > 0,
             start: hearing.start(reported.start),
             end: hearing.start(hearing.units()),
             notes: u32::try_from(hearing.notes_heard()).unwrap_or(u32::MAX),
-            truncated: hearing.truncated(),
-            looped: reported.start > 0,
         }
+    }
+
+    /// What a reading says.
+    pub(super) fn of(reading: &ChordReading) -> ReadFrom {
+        let &ChordReading { grid, unit, looped, start, end, notes, .. } = reading;
+        ReadFrom { grid, unit, looped, start, end, notes }
     }
 }
 

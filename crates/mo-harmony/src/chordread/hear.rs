@@ -422,7 +422,7 @@ impl Hearing {
 
     /// Notes struck within a quarter of a unit of each other are one strike, and one struck that little after a unit
     /// starts is struck on its start: that's a player's timing.
-    fn together(&self) -> i64 {
+    pub(super) fn together(&self) -> i64 {
         (self.layout.unit_ticks() / 4).max(1)
     }
 

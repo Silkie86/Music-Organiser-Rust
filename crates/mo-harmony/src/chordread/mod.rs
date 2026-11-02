@@ -33,6 +33,9 @@
 //!   against it ([`ChordReading::check_names`]);
 //! - what the MIDI page keeps of a reading: its chords in a few bytes a stretch ([`ChordFact`]), and eight bytes for
 //!   its search ([`ChordSummary`]);
+//! - why a stretch reads as it does ([`ChordExplainer`]): what each note does there ([`NoteDoes`]: one of the
+//!   chord's notes, a tension it names, a passing note, a walking bass note, a note rung on from before, a clash...),
+//!   where the bass comes from, and the evidence that tells the first reading from the runner-up ([`Explanation`]);
 //! - the version ([`CHORD_READER_VERSION`]), with the hash of every number the reader is built from
 //!   ([`numbers_hash`]).
 
@@ -42,6 +45,9 @@ mod cores;
 mod decode;
 #[cfg(test)]
 mod decode_tests;
+mod explain;
+#[cfg(test)]
+mod explain_tests;
 mod fact;
 #[cfg(test)]
 mod fact_tests;
@@ -68,6 +74,7 @@ pub use answer::{ChordAnswer, Grading, NoChord, Texture, Thresholds, grade};
 pub use candidates::{Candidate, Label, Route, allowed, candidates, escape, open_fifth};
 pub use cores::{Core, CoreSet, Group, ToneClass, valid, valid_rootless};
 pub use decode::{Chance, DecodedSpan, Decoder, Decoding, KEEP, PinnedSpan, SHARPNESS, SPAN_BARS};
+pub use explain::{BassFrom, ChordExplainer, Explanation, NoteDoes, NoteWhy, TERMS_SHOWN, Term, TermWhy};
 pub use fact::{ChordFact, ChordSummary, Extensions, FACT_LAYOUT, FactReading, FactSpan, RunnerUp, SummaryFlags};
 pub use hear::{
     BASS_GAP, BassTexture, HeardNote, Hearing, Level, Line, MOST_UNITS, Mass, Push, Shape, Shaped, Stream, Unit,

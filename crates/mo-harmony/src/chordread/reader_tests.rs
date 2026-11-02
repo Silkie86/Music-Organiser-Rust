@@ -8,8 +8,8 @@ use super::name_tests::named_cases;
 use super::score_tests::bars;
 use super::{
     BassKind, CHOICE_FLOOR, CHORD_READER_VERSION, ChoiceFrom, ChordAnswer, ChordContext, ChordReader, ChordReading,
-    ChordSpan, Grading, Hearing, MOST_READINGS, Model, NameCheck, NoChord, Pin, PinnedSpan, SHIPPED, SHIPPED_HASH,
-    SpanFlags, Texture, Thresholds, grade, numbers_hash, read_chords,
+    ChordSpan, Grading, Hearing, Label, MOST_READINGS, Model, NameCheck, NoChord, Pin, PinnedSpan, SHIPPED,
+    SHIPPED_HASH, SpanFlags, Texture, Thresholds, grade, numbers_hash, read_chords,
 };
 use crate::chord::Chord;
 use crate::fnv::Fnv;
@@ -26,7 +26,7 @@ pub(super) fn read(music: &Music, pins: &[Pin], readings: u8) -> Option<ChordRea
 }
 
 /// The hand cases, each read as a loop: the decode's, then the namer's.
-fn hand_cases() -> Vec<(&'static str, Music)> {
+pub(super) fn hand_cases() -> Vec<(&'static str, Music)> {
     let whole = whole_cases().into_iter().map(|(name, music, _)| (name, music.looped()));
     whole.chain(named_cases().into_iter().map(|(name, music, _)| (name, music.looped()))).collect()
 }
@@ -439,13 +439,34 @@ fn a_chord_given_over_a_loops_last_bar_is_the_chord_before_its_first() {
     let first = |r: &ChordReading| r.spans[0].readings[0].chance.to_bits();
     assert_ne!(first(&r), first(&free), "{}", render(&r));
     assert!((r.spans[0].change - 1.0).abs() < 1e-9 && free.spans[0].change < 1.0 - 1e-9, "{}", render(&r));
+    let last = |r: &ChordReading| r.spans.last().and_then(|s| s.label);
+    assert_eq!((r.before, free.before), (last(&r), last(&free)), "{}", render(&r));
+    assert_ne!(r.before, free.before);
     // Given only its ends, the last bar says nothing of the chord before the first.
     let ends = read(&music, &[Pin { start: 3 * BAR, end: 4 * BAR, chord: None }], 6).unwrap();
     assert_eq!(shown(&ends), ["C", "F", "G", "G"], "{}", render(&ends));
     assert!(ends.spans[0].change < 1.0 - 1e-9, "{}", render(&ends));
+    assert_eq!(ends.before, free.before, "{}", render(&ends));
     // A pin before the loop's start is left out: the copied bar is never pinned on its own.
     let before = read(&music, &[Pin { start: -BAR, end: 0, chord: db7 }], 6).unwrap();
     assert_eq!(before, free);
+}
+
+#[test]
+fn a_loop_reads_the_chord_before_its_first_as_it_goes_round() {
+    // Dm9 | G13 | Cmaj9 goes round from Cmaj9 to Dm9.
+    let r = case("10 Dm9 | G13 | Cmaj9");
+    assert_eq!((r.before, r.spans.len()), (r.spans[2].label, 3), "{}", render(&r));
+    assert!(r.before.is_some() && r.before != r.spans[0].label, "{}", render(&r));
+    // C C/E | F F#dim7 | C/G goes round from C/G into C, and a one-chord loop into itself: the same chord carried
+    // round, held on.
+    for name in ["6 C C/E | F F#dim7 | C/G", "1 C"] {
+        let r = case(name);
+        assert!(r.before.is_some() && r.before == r.spans[0].label, "{name}: {}", render(&r));
+    }
+    // A song has nothing before its first chord.
+    let r = read(&two_five_one(), &[], 2).unwrap();
+    assert_eq!((r.looped, r.before), (false, None), "{}", render(&r));
 }
 
 /// Whether a reading keeps the rules that hold for any music, and if not, why: the spans run from the reading's start
@@ -463,6 +484,7 @@ fn keeps_the_rules(hearing: &Hearing, r: &ChordReading, keep: usize) -> Result<(
     check(spans.last().map(|s| (s.units.end, s.end)) == Some((reported.len(), r.end)), &all)?;
     check(spans.windows(2).all(|w| w[0].units.end == w[1].units.start && w[0].end == w[1].start), &all)?;
     check(r.looped == (reported.start > 0) && r.notes > 0 && r.unit == hearing.unit(), &all)?;
+    check(r.looped || r.before.is_none(), &all)?;
     let (one, same) = SHIPPED.thresholds.at(r.texture);
     let chart = r.names(None);
     for (i, s) in spans.iter().enumerate() {
@@ -589,7 +611,9 @@ fn everything(r: &ChordReading, shift: i32, ppq: i64) -> Vec<String> {
     let tick = |t: i64| t * 480 / ppq;
     let back = |c: Chord| c.transposed(-shift);
     let (start, end) = (tick(r.start), tick(r.end));
-    let mut all = vec![format!("{:?} {:?} {start} {end} {} {} {}", r.texture, r.unit, r.notes, r.truncated, r.looped)];
+    let before = r.before.map(|l| Label::new(l.root.up(-shift), l.core));
+    let mut all =
+        vec![format!("{:?} {:?} {start} {end} {} {} {} {before:?}", r.texture, r.unit, r.notes, r.truncated, r.looped)];
     for s in &r.spans {
         let (start, end, heard) = (tick(s.start), tick(s.end), tick(s.heard_start));
         let (change, none, other) = (s.change.to_bits(), s.no_chord.to_bits(), s.other.to_bits());
