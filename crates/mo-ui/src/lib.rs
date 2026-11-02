@@ -13,6 +13,7 @@ pub mod arrangement;
 pub mod backup;
 pub mod cards;
 pub mod files;
+pub mod gpu;
 pub mod note;
 pub mod songs;
 pub mod sounds;

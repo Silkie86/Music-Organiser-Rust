@@ -1,8 +1,9 @@
 //! The Sounds page's galaxy: every sound as a star on a map, sound-alikes close together (`mo_sounds::galaxy`). The
 //! map is the C# app's saved one, brought up to date (or laid out afresh) on the low-priority pool; it's kept in
-//! memory only, as sounds.db stays read-only until it's trusted. The stars are drawn into a picture off the window's
-//! thread, newest ask first, so 450,000 of them cost one image; the filters dim the stars they leave out. Which part
-//! of the map is on show, the wheel and clicks versus drags are `mo_app::galaxy_view`'s.
+//! memory only, as sounds.db stays read-only until it's trusted. The graphics card draws the stars (`sky`), every
+//! frame; without one they're drawn into a picture off the window's thread instead, newest ask first. The filters dim
+//! the stars they leave out. Which part of the map is on show, the wheel and clicks versus drags are
+//! `mo_app::galaxy_view`'s; the star under the mouse is found on a grid over the whole map (`mo_app::galaxy_grid`).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -12,8 +13,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use mo_app::background::{self, Newest};
+use mo_app::galaxy_grid::Grid;
+use mo_app::galaxy_look;
 use mo_app::galaxy_names::{self as names, NO_KIND, Region};
-use mo_app::galaxy_picture::{Drawn, Hits, Picture};
+use mo_app::galaxy_picture::{Drawn, Picture};
 use mo_app::galaxy_view::{Hold, Moved, View, most_zoom_for};
 use mo_app::log;
 use mo_app::sounds as list;
@@ -21,7 +24,9 @@ use mo_sounds::galaxy::{self, Placing, Step};
 use mo_sounds::{SoundsDb, StarPoint};
 use slint::{ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, Timer, TimerMode, VecModel};
 
+use super::sky::Sky;
 use super::{FEED, HERE, PAGE, pick, play_picked, strings};
+use crate::gpu;
 use crate::{AppWindow, GalaxyLabel, SoundsData, SweptLine, Theme, TrailDot};
 
 /// The Placed by choices, as the page names them, and what each places the stars by.
@@ -70,11 +75,17 @@ pub(super) struct Galaxy {
     cancelled: bool,
     /// Counts the pictures asked for, so an older one that arrives late is dropped.
     asked: u64,
-    /// Where each star was drawn, to find the one under the mouse.
-    hits: Option<Arc<Hits>>,
-    /// The view the picture on show was drawn for, its scale and its number.
+    /// The shown stars on a grid over the map, to find the one under the mouse and count the ones on the view.
+    grid: Option<Arc<Grid>>,
+    /// The stars as the graphics card reads them, kept to send again to a new card.
+    packed: Option<Arc<Vec<u8>>>,
+    /// What the grid (and the card's stars) were last asked for, how many times they've been asked, and which ask
+    /// the ones in hand are from.
+    set_for: Option<SetKey>,
+    set_asked: u64,
+    set_got: u64,
+    /// The view the picture on show was drawn for, and its number.
     drawn: Option<View>,
-    drawn_scale: f32,
     drawn_id: u64,
     /// How many stars are on the map.
     count: usize,
@@ -105,9 +116,12 @@ impl Default for Galaxy {
             scale: 1.0,
             cancelled: false,
             asked: 0,
-            hits: None,
+            grid: None,
+            packed: None,
+            set_for: None,
+            set_asked: 0,
+            set_got: 0,
             drawn: None,
-            drawn_scale: 1.0,
             drawn_id: 0,
             count: 0,
             sweep: Sweep::default(),
@@ -121,8 +135,65 @@ impl Default for Galaxy {
     }
 }
 
+/// What the stars were packed for: the map, its colours, the stars the filters let through and the types' colours.
+#[derive(Clone)]
+struct SetKey {
+    stars: Arc<Vec<Option<StarPoint>>>,
+    colours: Arc<Vec<i32>>,
+    shown: Arc<Vec<usize>>,
+    palette: Vec<[u8; 3]>,
+}
+
+impl SetKey {
+    fn same(&self, o: &SetKey) -> bool {
+        Arc::ptr_eq(&self.stars, &o.stars)
+            && Arc::ptr_eq(&self.colours, &o.colours)
+            && Arc::ptr_eq(&self.shown, &o.shown)
+            && self.palette == o.palette
+    }
+}
+
+/// An ask to sort the stars onto the grid and, for the graphics card, pack them.
+struct SetAsk {
+    key: SetKey,
+    version: u64,
+    for_card: bool,
+}
+
+/// The grid and the packed stars, and which ask they answer.
+struct Packed {
+    version: u64,
+    grid: Grid,
+    bytes: Option<Vec<u8>>,
+}
+
+impl SetAsk {
+    fn work(self) -> Packed {
+        let k = &self.key;
+        let (grid, bytes) = background::on_pool(|| {
+            rayon::join(
+                || Grid::new(&k.stars, &k.shown),
+                || self.for_card.then(|| galaxy_look::pack(&k.stars, &k.colours, &k.palette, &k.shown)),
+            )
+        });
+        Packed { version: self.version, grid, bytes }
+    }
+}
+
+/// The galaxy's painter on the card it was made on (which card, as `gpu::generation` counts), and which packed stars
+/// it holds.
+struct OnCard {
+    generation: u64,
+    sky: Sky,
+    stars: u64,
+}
+
 thread_local! {
     static DRAWING: RefCell<Option<Newest<Picture>>> = const { RefCell::new(None) };
+    static PACKING: RefCell<Option<Newest<SetAsk>>> = const { RefCell::new(None) };
+    static CARD: RefCell<Option<OnCard>> = const { RefCell::new(None) };
+    /// The card refused to draw the galaxy once: it's drawn on the processor from then on.
+    static CARD_FAILED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Moves a glide on a frame at a time, and when it last did.
     static FLIGHT: Timer = Timer::default();
     static LAST_FRAME: RefCell<Option<Instant>> = const { RefCell::new(None) };
@@ -635,13 +706,8 @@ fn star_at(x: f32, y: f32) -> Option<usize> {
 }
 
 fn star_at_in(g: &Galaxy, x: f32, y: f32) -> Option<usize> {
-    // The picture on show may have been drawn for another view (it's moved and stretched until the new one
-    // comes): the mouse is turned into a place on that picture.
-    let drawn = g.drawn?;
     let (mx, my) = g.view.to_map(x, y);
-    let (px, py) = drawn.to_view(mx, my, g.drawn_scale);
-    let near = NEAR * g.drawn_scale * drawn.zoom / g.view.zoom;
-    g.hits.as_ref()?.nearest(px, py, near)
+    g.grid.as_ref()?.nearest(mx, my, NEAR / g.view.unit())
 }
 
 /// A new library: its stars are placed afresh (they're kept by place in the list).
@@ -657,7 +723,11 @@ pub(super) fn forget(g: &mut Galaxy) {
     g.trail.clear();
     g.trail_at = 0;
     g.view.most = most_zoom_for(0);
-    g.hits = None;
+    g.grid = None;
+    g.packed = None;
+    g.set_for = None;
+    // Stars still being packed for the old library are too old to use.
+    g.set_got = g.set_asked;
     g.drawn = None;
     // A picture of the old library still on its way is too old to show.
     g.drawn_id = g.asked;
@@ -837,7 +907,8 @@ fn show_note(app: &AppWindow) {
     });
 }
 
-/// Draws the stars again (the map, the view, the filters or the window's size changed), off the window's thread.
+/// Draws the stars again (the map, the view, the filters or the window's size changed): on the graphics card at
+/// once, or without one off the window's thread.
 pub(super) fn draw(app: &AppWindow) {
     let on_show = PAGE.with(|p| {
         let p = p.borrow();
@@ -850,6 +921,27 @@ pub(super) fn draw(app: &AppWindow) {
     let types = app.global::<Theme>().get_sound_types();
     let mut palette: Vec<[u8; 3]> = types.iter().map(|c| [c.red(), c.green(), c.blue()]).collect();
     palette.push([110, 110, 110]);
+    let card = if HERE.with(|h| *h.borrow()) || CARD_FAILED.with(std::cell::Cell::get) { None } else { gpu::current() };
+    pack(app, &palette, card.is_some());
+    if let Some((gpu, generation)) = card {
+        match draw_on_card(app, &gpu, generation) {
+            Ok(true) => return,
+            // The stars aren't on the card yet: the picture on show stays until they are.
+            Ok(false) => {
+                place_picture(app);
+                show_picked(app);
+                return;
+            }
+            Err(e) => {
+                log::error(
+                    "Sounds",
+                    &format!("The graphics card couldn't draw the galaxy, so the processor does: {e}"),
+                );
+                CARD_FAILED.with(|f| f.set(true));
+                CARD.with(|c| *c.borrow_mut() = None);
+            }
+        }
+    }
     let ask = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         let shown = p.shown.clone();
@@ -897,6 +989,122 @@ pub(super) fn draw(app: &AppWindow) {
     });
 }
 
+/// Sorts the shown stars onto the grid (and packs them for the card) again when the map, the filters or the colours
+/// have changed, off the window's thread. Until they come, the last ones stay in use.
+fn pack(app: &AppWindow, palette: &[[u8; 3]], for_card: bool) {
+    let ask = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let shown = p.shown.clone();
+        let g = &mut p.galaxy;
+        let key = SetKey { stars: g.stars.clone()?, colours: g.colours.clone()?, shown, palette: palette.to_vec() };
+        // Packed already, unless the card has come since and the stars weren't packed for it.
+        let fresh = g.set_for.as_ref().is_some_and(|k| k.same(&key));
+        if fresh && (!for_card || g.packed.is_some() || g.set_got < g.set_asked) {
+            return None;
+        }
+        g.set_asked += 1;
+        g.set_for = Some(key.clone());
+        Some(SetAsk { key, version: g.set_asked, for_card })
+    });
+    let Some(ask) = ask else { return };
+    if HERE.with(|h| *h.borrow()) {
+        packed(app, ask.work());
+        return;
+    }
+    PACKING.with(|w| {
+        let mut w = w.borrow_mut();
+        if w.is_none() {
+            let weak = app.as_weak();
+            match Newest::start("Galaxy stars", move |ask: SetAsk| {
+                let done = ask.work();
+                let weak = weak.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(app) = weak.upgrade() {
+                        packed(&app, done);
+                    }
+                });
+            }) {
+                Ok(worker) => *w = Some(worker),
+                Err(e) => log::error("Sounds", &format!("Couldn't start sorting the galaxy's stars: {e}")),
+            }
+        }
+        if let Some(worker) = w.as_ref() {
+            worker.ask(ask);
+        }
+    });
+}
+
+/// The grid (and the packed stars) came: newer than the ones in use, they're used, and the galaxy is drawn again.
+fn packed(app: &AppWindow, done: Packed) {
+    let newer = PAGE.with(|p| {
+        let g = &mut p.borrow_mut().galaxy;
+        if done.version <= g.set_got || done.version > g.set_asked {
+            return false;
+        }
+        g.set_got = done.version;
+        g.grid = Some(Arc::new(done.grid));
+        g.packed = done.bytes.map(Arc::new);
+        true
+    });
+    if newer {
+        draw(app);
+        hover(app);
+    }
+}
+
+/// Draws the galaxy on the card, now: `false` when its stars aren't there yet.
+fn draw_on_card(app: &AppWindow, gpu: &gpu::Gpu, generation: u64) -> Result<bool, String> {
+    let ask = PAGE.with(|p| {
+        let g = &p.borrow().galaxy;
+        let in_view = match &g.grid {
+            Some(grid) => {
+                let (l, t, r, b) = galaxy_look::on_view(&g.view);
+                grid.count_in(l, t, r, b)
+            }
+            None => g.count,
+        };
+        (g.view, g.scale, galaxy_look::look(&g.view, in_view), g.packed.clone(), g.set_got)
+    });
+    let (view, scale, look, packed, version) = ask;
+    if view.width < 1.0 || view.height < 1.0 {
+        return Ok(false);
+    }
+    // The well the map sits in, so the picture matches what's round it.
+    let bg = app.global::<Theme>().get_well();
+    let background = [bg.red(), bg.green(), bg.blue()].map(|c| f32::from(c) / 255.0);
+    let texture = CARD.with(|c| -> Result<Option<_>, String> {
+        let mut c = c.borrow_mut();
+        if c.as_ref().is_none_or(|on| on.generation != generation) {
+            let sky = gpu::checked(&gpu.device, || Sky::new(&gpu.device, &gpu.queue))?;
+            *c = Some(OnCard { generation, sky, stars: 0 });
+        }
+        let Some(on) = c.as_mut() else { return Ok(None) };
+        if on.stars != version
+            && let Some(bytes) = &packed
+        {
+            gpu::checked(&gpu.device, || on.sky.set_stars(bytes))?;
+            on.stars = version;
+        }
+        if !on.sky.has_stars() {
+            return Ok(None);
+        }
+        gpu::checked(&gpu.device, || on.sky.draw(&view, scale, &look, background)).map(Some)
+    })?;
+    let Some(texture) = texture else { return Ok(false) };
+    let image = Image::try_from(texture).map_err(|e| format!("Slint wouldn't show the picture: {e}"))?;
+    PAGE.with(|p| {
+        let g = &mut p.borrow_mut().galaxy;
+        // A picture drawn on the processor that's still on its way is older than this one.
+        g.asked += 1;
+        g.drawn_id = g.asked;
+        g.drawn = Some(view);
+    });
+    app.global::<SoundsData>().set_galaxy_image(image);
+    place_picture(app);
+    show_picked(app);
+    Ok(true)
+}
+
 /// The picture as the window shows it (copied, off the window's thread), and what else came with it.
 fn to_image(mut d: Drawn) -> (Drawn, SharedPixelBuffer<Rgba8Pixel>) {
     let mut px = SharedPixelBuffer::<Rgba8Pixel>::new(d.width as u32, d.height as u32);
@@ -916,9 +1124,7 @@ fn drawn(app: &AppWindow, d: Drawn, px: SharedPixelBuffer<Rgba8Pixel>) {
             return false;
         }
         g.drawn_id = d.id;
-        g.hits = Some(Arc::new(d.hits));
         g.drawn = Some(d.view);
-        g.drawn_scale = d.scale;
         true
     });
     if current {

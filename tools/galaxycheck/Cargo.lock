@@ -2910,6 +2910,7 @@ name = "mo-audio"
 version = "0.1.0"
 dependencies = [
  "symphonia",
+ "windows",
 ]
 
 [[package]]
