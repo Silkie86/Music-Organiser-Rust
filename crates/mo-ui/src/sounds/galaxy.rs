@@ -341,6 +341,9 @@ pub(super) fn wire(app: &AppWindow) {
 /// How long each star of a sweep plays before the next one may start, so a sweep over a crowded part isn't cut to
 /// clicks (the C# app's 90 ms).
 const SWEEP_GAP: Duration = Duration::from_millis(90);
+/// How much of a swept sound is read and played: its start is what a sweep hears, and a whole loop would take a
+/// moment to read.
+const SWEEP_SECONDS: f64 = 4.0;
 /// How far apart (in points) the mouse's path is looked along for stars.
 const SWEEP_STEP: f32 = 3.0;
 
@@ -430,7 +433,7 @@ fn sweep_play(app: &AppWindow, at: usize) {
     let name = PAGE.with(|p| p.borrow().list.sound(at).map(|s| format!("{}  ·  {}", s.name(), s.sound_type)));
     app.global::<SoundsData>().set_galaxy_hover_text(name.unwrap_or_default().into());
     on_trail(app, at, true);
-    super::play_sound(app, at, 0.0);
+    super::play_sound(app, at, 0.0, SWEEP_SECONDS);
 }
 
 /// Puts a sound on the trail, newest first (as the C# app: a swept one moves to the front; a clicked one already on

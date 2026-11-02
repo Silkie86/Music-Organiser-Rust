@@ -4,13 +4,16 @@
 //! song has been picked meanwhile.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use mo_app::arrangement::{self as arr, Area, Frame, Hover, Palette, Preview, Style, View};
-use mo_app::background::Newest;
+use mo_app::arrangement::{self as arr, Area, Frame, Hover, Palette, Peaks, Preview, Style, View};
+use mo_app::background::{self, Newest};
 use mo_app::log;
 use mo_app::themes::Look;
+use rayon::prelude::*;
 use slint::{ComponentHandle, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
 
 use crate::{AppWindow, ArrKind, ArrLabel, ArrangementData};
@@ -28,6 +31,8 @@ struct State {
     /// Counts the songs shown, so a read or a picture that arrives after another song was picked is dropped.
     asked: u64,
     preview: Option<Preview>,
+    /// The audio clips' waveforms, once their files have been read.
+    peaks: Arc<HashMap<String, Arc<Peaks>>>,
     view: Option<View>,
     /// The size the page gives the picture, in points.
     size: (f64, f64),
@@ -35,6 +40,9 @@ struct State {
     /// Read and draw here instead of on the background threads: for the screenshots, which have no event loop.
     here: bool,
 }
+
+/// The song shown last, so the reading thread can stop reading an older song's audio files.
+static SHOWN: AtomicU64 = AtomicU64::new(0);
 
 thread_local! {
     static STATE: RefCell<State> = RefCell::default();
@@ -102,7 +110,13 @@ pub fn connect(app: &AppWindow) {
     let weak = app.as_weak();
     let reader = Newest::start("Arrangement", move |(asked, path): (u64, PathBuf)| {
         let read = arr::read(&path, Some(&mo_app::paths::data_dir().join("sounds.db")));
+        let found = read.as_ref().ok().map(|p| p.found.clone()).filter(|f| !f.is_empty());
         let _ = weak.upgrade_in_event_loop(move |app| arrived(&app, asked, read));
+        // Then the waveforms: the arrangement is up meanwhile.
+        if let Some(found) = found {
+            let peaks = background::on_pool(|| read_peaks(&found, asked));
+            let _ = weak.upgrade_in_event_loop(move |app| waves_arrived(&app, asked, peaks));
+        }
     });
     match reader {
         Ok(r) => READER.with(|slot| *slot.borrow_mut() = Some(r)),
@@ -139,9 +153,11 @@ pub fn show_song(app: &AppWindow, path: Option<&str>, missing: bool) {
         let mut s = s.borrow_mut();
         s.asked += 1;
         s.preview = None;
+        s.peaks = Arc::default();
         s.view = None;
         (s.asked, s.here)
     });
+    SHOWN.store(asked, Ordering::Relaxed);
     clear(&data);
     let Some(path) = path.filter(|p| !p.is_empty()) else { return };
     if missing {
@@ -209,6 +225,41 @@ fn arrived(app: &AppWindow, asked: u64, read: Result<Preview, String>) {
     pick_view(app, 0);
 }
 
+/// Reads each audio file the arrangement plays (up to its first minute) and boils it down to a waveform, a file per
+/// core on the low-priority pool. Stops early when another song has been picked; a file that can't be read is
+/// drawn as a plain band.
+fn read_peaks(found: &HashMap<String, PathBuf>, asked: u64) -> Arc<HashMap<String, Arc<Peaks>>> {
+    let peaks = found
+        .par_iter()
+        .filter_map(|(saved, file)| {
+            if SHOWN.load(Ordering::Relaxed) != asked {
+                return None;
+            }
+            let audio = mo_audio::read(file, mo_audio::MAX_SECONDS).ok()?;
+            Some((saved.clone(), Arc::new(Peaks::of(audio.sample_rate, &audio.channels, audio.file_seconds))))
+        })
+        .collect();
+    Arc::new(peaks)
+}
+
+/// The waveforms came: drawn, if their song is still the one picked.
+fn waves_arrived(app: &AppWindow, asked: u64, peaks: Arc<HashMap<String, Arc<Peaks>>>) {
+    let current = STATE.with(|s| {
+        let mut s = s.borrow_mut();
+        if s.asked != asked {
+            return false;
+        }
+        s.peaks = peaks.clone();
+        if let Some(v) = s.view.as_mut() {
+            v.set_peaks(peaks);
+        }
+        true
+    });
+    if current {
+        redraw(app);
+    }
+}
+
 /// Shows the project's view at `index` (the FL playlist, or as it opens in Bitwig), fitted to the width.
 fn pick_view(app: &AppWindow, index: usize) {
     let data = app.global::<ArrangementData>();
@@ -217,6 +268,7 @@ fn pick_view(app: &AppWindow, index: usize) {
         let p = s.preview.as_ref()?;
         let a = p.views.get(index)?.clone();
         let mut view = View::new(a.clone(), p.found.clone());
+        view.set_peaks(s.peaks.clone());
         view.resize(s.size.0, s.size.1);
         s.view = Some(view);
         Some(a)
