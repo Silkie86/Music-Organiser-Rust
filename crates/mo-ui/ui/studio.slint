@@ -1054,11 +1054,13 @@ export component YearRange inherits VerticalLayout {
     // Places in `years` from the first to the last picked (either way round).
     callback picked(int, int);
     callback cleared();
-    property <length> line: 20px;
+    // Each year's line: smaller when there are many years, so they all fit with All years below.
+    property <length> line: clamp((root.height - 48px) / max(1, root.years.length), 10px, 20px);
     // The drag going on, as places in `years` (-1 when there's none).
     property <int> from: -1;
     property <int> to: -1;
-    property <bool> any: false;
+    // The strip fits the room it's given rather than asking for more.
+    min-height: 0px;
     width: 56px;
     padding: Space.xs;
     spacing: Space.xs;

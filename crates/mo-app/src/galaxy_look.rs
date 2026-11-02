@@ -170,6 +170,13 @@ pub fn pack(
         }
     }
     let grey = palette.last().copied().unwrap_or([110, 110, 110]);
+    let lit_at = |at: usize| light.get(at).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+    // As C#: a lit star shines up to nearly three times as bright as an unlit one. Scaled so the shown stars keep
+    // the same brightness on average (0.5 each) whatever lights them, so only the lit ones stand out.
+    let glow = |lit: f32| 1.0 + 1.8 * lit.sqrt();
+    let on_map = shown.iter().filter(|&&at| stars.get(at).is_some_and(Option::is_some));
+    let (sum, count) = on_map.fold((0.0f64, 0usize), |(s, n), &at| (s + f64::from(glow(lit_at(at))), n + 1));
+    let mean = if count == 0 { 1.0 } else { (sum / count as f64) as f32 };
     let star = |(at, p): (usize, &Option<StarPoint>), want: bool| -> Option<[u8; STAR_BYTES]> {
         let p = (*p)?;
         if on[at] != want {
@@ -177,9 +184,8 @@ pub fn pack(
         }
         let c = colours.get(at).and_then(|&i| usize::try_from(i).ok()).and_then(|i| palette.get(i)).copied();
         let [r, g, b] = c.unwrap_or(grey);
-        let lit = light.get(at).copied().unwrap_or(0.0).clamp(0.0, 1.0);
-        // As C#: a liked star shines up to nearly three times as bright.
-        let weight = if want { 0.5 + 0.9 * lit.sqrt() } else { 0.05 } * twinkle(at);
+        let lit = lit_at(at);
+        let weight = if want { 0.5 * glow(lit) / mean } else { 0.05 } * twinkle(at);
         let flag = if want { 1 + (lit * 254.0).round() as u8 } else { 0 };
         let mut out = [0u8; STAR_BYTES];
         out[0..4].copy_from_slice(&p.x.to_le_bytes());

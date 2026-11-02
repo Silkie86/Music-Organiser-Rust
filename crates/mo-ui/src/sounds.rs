@@ -822,18 +822,26 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     });
     let weak = app.as_weak();
     data.on_toggle(move |kind| {
-        change(&weak, |f| match kind.as_str() {
-            "mix-well" => f.mix_well = !f.mix_well,
-            "unused" => {
-                f.unused = !f.unused;
-                f.used &= !f.unused;
+        change(&weak, |f| {
+            let by_use = f.used;
+            match kind.as_str() {
+                "mix-well" => f.mix_well = !f.mix_well,
+                "unused" => {
+                    f.unused = !f.unused;
+                    f.used &= !f.unused;
+                }
+                "used" => {
+                    f.used = !f.used;
+                    f.unused &= !f.used;
+                }
+                "favourites" => f.favourites = !f.favourites,
+                _ => {}
             }
-            "used" => {
-                f.used = !f.used;
-                f.unused &= !f.used;
+            // The strip's years mean the songs' years with Used on and the year added without: a span picked for
+            // one isn't kept for the other.
+            if f.used != by_use {
+                f.years = None;
             }
-            "favourites" => f.favourites = !f.favourites,
-            _ => {}
         });
     });
     let weak = app.as_weak();
@@ -1234,6 +1242,9 @@ fn wire_rediscover(app: &AppWindow) {
     });
 }
 
+/// Each year with how many sounds, newest first (the year strip).
+type YearCounts = Vec<(i32, usize)>;
+
 fn change(weak: &slint::Weak<AppWindow>, f: impl FnOnce(&mut Filters)) {
     let Some(app) = weak.upgrade() else { return };
     PAGE.with(|p| f(&mut p.borrow_mut().filters));
@@ -1258,10 +1269,18 @@ fn refresh(app: &AppWindow) {
         let mut w = w.borrow_mut();
         if w.is_none() {
             let weak = app.as_weak();
+            // The year strip only changes with the sounds and the Used chip, not with each search or filter.
+            let mut counted: Option<(Arc<SoundList>, bool, YearCounts)> = None;
             match Newest::start("Sounds list", move |ask: Ask| {
+                let known = counted
+                    .as_ref()
+                    .filter(|(list, used, _)| Arc::ptr_eq(list, &ask.list) && *used == ask.filters.used)
+                    .map(|c| c.2.clone());
                 let (shown, years) = background::on_pool(|| {
-                    (ask.list.view(&ask.filters, ask.order, ask.seed), ask.list.year_counts(ask.filters.used))
+                    let years = known.unwrap_or_else(|| ask.list.year_counts(ask.filters.used));
+                    (ask.list.view(&ask.filters, ask.order, ask.seed), years)
                 });
+                counted = Some((ask.list.clone(), ask.filters.used, years.clone()));
                 let weak = weak.clone();
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(app) = weak.upgrade() {

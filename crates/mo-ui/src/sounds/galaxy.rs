@@ -174,23 +174,53 @@ struct SetAsk {
 /// The grid and the packed stars, and which ask they answer.
 struct Packed {
     version: u64,
-    grid: Grid,
+    grid: Arc<Grid>,
     bytes: Option<Vec<u8>>,
 }
+
+/// What the packing worker made last, kept so an ask that only changes one part doesn't redo the others: the grid
+/// (for these stars and these shown) and how lit each star is (for this list and this Light by).
+type Stars = Arc<Vec<Option<StarPoint>>>;
+
+#[derive(Default)]
+struct Made {
+    grid: Option<(Stars, Arc<Vec<usize>>, Arc<Grid>)>,
+    light: Option<(Arc<list::SoundList>, LightBy, Arc<Vec<f32>>)>,
+}
+
+static MADE: std::sync::Mutex<Made> = std::sync::Mutex::new(Made { grid: None, light: None });
 
 impl SetAsk {
     fn work(self) -> Packed {
         let k = &self.key;
-        let (grid, bytes) = background::on_pool(|| {
+        // Only the packing worker uses it, one ask at a time.
+        let mut made = MADE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let grid = made
+            .grid
+            .as_ref()
+            .filter(|(stars, shown, _)| Arc::ptr_eq(stars, &k.stars) && Arc::ptr_eq(shown, &k.shown))
+            .map(|g| g.2.clone());
+        let light = made
+            .light
+            .as_ref()
+            .filter(|(list, by, _)| Arc::ptr_eq(list, &k.list) && *by == k.light_by)
+            .map(|l| l.2.clone());
+        let (grid, packed) = background::on_pool(|| {
             rayon::join(
-                || Grid::new(&k.stars, &k.shown),
+                || grid.unwrap_or_else(|| Arc::new(Grid::new(&k.stars, &k.shown))),
                 || {
                     self.for_card.then(|| {
-                        let light = galaxy_look::light(&k.list, k.light_by);
-                        galaxy_look::pack(&k.stars, &k.colours, &k.palette, &k.shown, &light)
+                        let light = light.unwrap_or_else(|| Arc::new(galaxy_look::light(&k.list, k.light_by)));
+                        let bytes = galaxy_look::pack(&k.stars, &k.colours, &k.palette, &k.shown, &light);
+                        (light, bytes)
                     })
                 },
             )
+        });
+        made.grid = Some((k.stars.clone(), k.shown.clone(), grid.clone()));
+        let bytes = packed.map(|(light, bytes)| {
+            made.light = Some((k.list.clone(), k.light_by, light));
+            bytes
         });
         Packed { version: self.version, grid, bytes }
     }
@@ -1179,7 +1209,7 @@ fn packed(app: &AppWindow, done: Packed) {
             return false;
         }
         g.set_got = done.version;
-        g.grid = Some(Arc::new(done.grid));
+        g.grid = Some(done.grid);
         g.packed = done.bytes.map(Arc::new);
         true
     });

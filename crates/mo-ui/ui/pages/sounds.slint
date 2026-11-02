@@ -1203,8 +1203,8 @@ export component SoundsPage inherits Rectangle {
             property <length> folders-width: SoundsData.view == 4 && SoundsData.folders.length > 0 && self.list-width >= 900px
                 ? 300px
                 : 0px;
-            // The year strip, on the pages of sounds (not Rediscover or Kits, which pick their own).
-            property <length> years-width: SoundsData.view <= 3 && SoundsData.years.length > 1 && SoundsData.empty-title == ""
+            // The year strip, on Tiles, List and Galaxy (History lists what was played, Rediscover and Kits pick their own).
+            property <length> years-width: SoundsData.view <= 2 && SoundsData.years.length > 1 && SoundsData.empty-title == ""
                 ? 56px
                 : 0px;
             if area.years-width > 0: YearRange {
