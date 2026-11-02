@@ -34,7 +34,7 @@ theorybench chords <labelled.jsonl>... [--answers <name>=<answers.jsonl>]... [--
                    [--per-segment] [--by <tag>]... [--dump <file>]
 theorybench chordfit <labelled.jsonl>... [--inputs <kinds>] [--weigh <source>=<w>]... [--train <folds>]
                    [--test <folds>] [--lambda <x>] [--steps <n>] [--from <weights.json>] [--fix <numbers>]
-                   [--out <weights.json>]
+                   [--hand <mu>] [--hold <rounds>] [--out <weights.json>]
 theorybench candidates <labelled.jsonl>... [--inputs <kinds>] [--misses <file>]
 theorybench tables <labelled.jsonl>... [--write <tables.rs>]
 
@@ -87,7 +87,10 @@ theorybench tables <labelled.jsonl>... [--write <tables.rs>]
   --steps    the most steps the fit takes (40)
   --from     starts from the weights a fit wrote; the hand-set ones when left out
   --fix      holds these numbers where they start (their codes, such as P1,P2,pair)
-  --out      writes the fitted numbers to a file, for chords --weights and chordfit --from
+  --hand     how much the hand cases' gates count in the aim (0: left out), against the data's loss per bar
+  --hold     keeps the hand cases' gates as straight-line rules, refitting at most this many rounds while some break
+  --out      writes the fitted numbers to a file, for chords --weights and chordfit --from; after a fit, it and the
+             report say which hand cases' gates break
   candidates how often mo-harmony's chord reader has the labelled chord among the readings it scores (its ceiling),
              with the labelled ends, and moved by up to a unit
   --inputs   the parts heard: piano (all but the tune), full, upper (the accompaniment without its bass line); piano,full

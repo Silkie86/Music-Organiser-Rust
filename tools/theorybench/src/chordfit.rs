@@ -20,6 +20,13 @@
 //!   ln Z over the allowed ways less ln Z over every way (`chordread::ChordFitter`), summed over the pieces each
 //!   weighed by `--weigh` and taken per bar, less a pull towards the numbers it starts from (`--lambda`). A way is
 //!   allowed when every reading it takes is one the labels accept and it changes chord within a unit of where they do.
+//! - **The hand cases.** mo-harmony's hand cases (`chordread::cases`) can be learned from too (`--hand μ`): each case
+//!   read whole is a piece, labelled where its gates say what it must read ([`cases::fit_cases`]), and the aim adds μ
+//!   times their mean −ln P(labels) to the data's loss per bar. `--hold n` keeps them as straight-line rules instead
+//!   (or too): each case's labels keep at least half their chance as the slope at the start sees it ([`hold`]), and
+//!   for at most n rounds the cases whose gates still break are held again where the fit got to. After a fit, every gate is read with the fitted
+//!   numbers, and the report (and the `--out` file) says which break: weights that break a gate don't ship. The gates
+//!   the design holds out (G\*) are neither learned from nor looked at here; the tests check them.
 //! - **The method.** Projected quasi-Newton ([`crate::ruled`]): every point it tries keeps the rules. Each piece's sums
 //!   are added in the pieces' order, so a fit gives the same bits however many threads read them.
 
@@ -28,8 +35,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use mo_harmony::chordread::cases::{self, Book, Step, Verdict};
 use mo_harmony::chordread::{
-    BASS_GAP, Bound, ChordFitter, Core, FitLabel, FitRead, HAND, Label, NUMBERS, RULES, SHARPNESS, SHIPPED, Weights,
+    BASS_GAP, Bound, ChordFitter, Core, FitLabel, FitRead, HAND, Label, Model, NUMBERS, RULES, SHARPNESS, SHIPPED,
+    Weights,
 };
 use mo_harmony::{Grid, Role, Span};
 use rayon::prelude::*;
@@ -38,7 +47,7 @@ use crate::harte::{self, Named};
 use crate::item::{self, Item};
 use crate::keyfit;
 use crate::keys::{self, Parts, SongNotes};
-use crate::ruled::{self, Plan, Reading};
+use crate::ruled::{self, Plan, Plane, Reading};
 
 /// How a piece is heard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -250,6 +259,22 @@ fn pieces_of(items: &[Item], folds: &[usize], keep: impl Fn(&Item, usize) -> boo
     per_item.into_iter().flatten().collect()
 }
 
+/// The hand cases the fit learns from ([`cases::fit_cases`]), each a piece heard as given, counting 1 and one "bar"
+/// long, so their part in the aim is their mean.
+fn hand_pieces() -> Result<Vec<Piece>, String> {
+    let pieces = cases::fit_cases()?.into_iter().map(|case| Piece {
+        source: format!("hand {}", case.name),
+        input: Input::Given,
+        parts: case.music.parts.clone(),
+        grid: case.music.grid,
+        span: case.music.span,
+        labels: case.labels.into(),
+        weight: 1.0,
+        bars: 1.0,
+    });
+    Ok(pieces.collect())
+}
+
 /// Every piece read with some numbers, in the pieces' order: what each gives the fit, none where nothing was heard.
 fn read_all(pieces: &[Piece], numbers: &[f64; NUMBERS]) -> Vec<Option<FitRead>> {
     let weights = Weights::from_numbers(numbers);
@@ -325,6 +350,78 @@ impl Totals {
     }
 }
 
+/// How likely `--hold` keeps each hand case's labels (or as likely as they are at the start, if less).
+const HOLD: f64 = 0.5;
+
+/// The straight-line rule that keeps a hand case's labels at least e^`least` likely as the numbers move from `x`, as
+/// the slope there sees it: ln P(labels) + g · (y - x) ≥ least. At the start, a case whose labels are less likely than
+/// that keeps what it has. None when nothing was heard, or no way is allowed.
+fn hold(read: Option<&FitRead>, x: &[f64], least: f64, start: bool) -> Option<Plane> {
+    let (ln_p, slope) = piece_aim(read)?;
+    let least = if start { least.min(ln_p) } else { least };
+    let along: f64 = slope.iter().zip(x).map(|(g, x)| g * x).sum();
+    Some(Plane { a: slope.to_vec(), b: least - ln_p + along })
+}
+
+/// The design's number of a hand case, as its name starts ("4", "h6"), whichever way it's read: a stretch case read
+/// whole is named "w" and its own name, and a piece of the fit "hand" and the case's name.
+fn case_key(name: &str) -> &str {
+    let name = name.strip_prefix("hand ").unwrap_or(name);
+    let first = name.split_whitespace().next().unwrap_or("");
+    match first.strip_prefix('w') {
+        Some(rest) if rest.starts_with(|c: char| c.is_ascii_digit()) => rest,
+        _ => first,
+    }
+}
+
+/// The data's reading with `mu` times the hand cases' added: the loss, its slope and its curvature.
+fn with_hand(data: Reading, hand: Reading, mu: f64) -> Reading {
+    let slope = data.slope.iter().zip(&hand.slope).map(|(a, b)| a + mu * b).collect();
+    let curvature = match (data.curvature, hand.curvature) {
+        (Some(a), Some(b)) => Some(a.iter().zip(&b).map(|(a, b)| a + mu * b).collect()),
+        (a, _) => a,
+    };
+    Reading { loss: data.loss + mu * hand.loss, slope, curvature }
+}
+
+/// The model the reader ships with, on other weights.
+fn model_with(weights: &Weights) -> Model<'_> {
+    Model { weights, ..SHIPPED }
+}
+
+/// The gates the fit looks at (not those held out) that break, in a book.
+fn broken_gates(book: &Book) -> Vec<&Verdict> {
+    book.broken().into_iter().filter(|v| !v.held_out).collect()
+}
+
+/// The hand cases read with the numbers the fit started from and with the fitted ones: how many gates break at each
+/// step, every gate the fitted numbers break (with what they read), and the targets met. The gates the design holds
+/// out aren't looked at. Gives the gates the fitted numbers break.
+fn print_gates(start: &Book, fitted: &Book) -> Vec<String> {
+    println!();
+    println!("The hand cases' gates (weights that break one aren't shipped), from the start to the fit:");
+    let (before, after) = (broken_gates(start), broken_gates(fitted));
+    for step in Step::ALL {
+        let gates = fitted.verdicts.iter().filter(|v| v.step == step && v.gate && !v.held_out).count();
+        let count = |broken: &[&Verdict]| broken.iter().filter(|v| v.step == step).count();
+        println!(
+            "  {:<22} {gates:>3} gates: {:>3} break at the start, {:>3} fitted",
+            step.about(),
+            count(&before),
+            count(&after)
+        );
+    }
+    let held_out = fitted.verdicts.iter().filter(|v| v.gate && v.held_out).count();
+    println!("  ({held_out} gates the design holds out aren't looked at here: the tests check them.)");
+    for v in &after {
+        println!("  BREAKS {} ({}): {}", v.name, v.step.about(), v.wrong.join(", "));
+        println!("         read {}", v.read.replace('\n', "\n         "));
+    }
+    let ((met_before, targets), (met_after, _)) = (start.targets(), fitted.targets());
+    println!("  Targets met: {met_before} of {targets} at the start, {met_after} fitted.");
+    after.iter().map(|v| format!("{} ({})", v.name, v.step.about())).collect()
+}
+
 /// What `chordfit` is asked to do.
 #[derive(Debug, PartialEq)]
 struct Options {
@@ -339,6 +436,10 @@ struct Options {
     from: Option<PathBuf>,
     fix: Vec<usize>,
     out: Option<PathBuf>,
+    /// How much the hand cases count (μ): their mean −ln P(labels), against the data's loss per bar.
+    hand: f64,
+    /// The most rounds the hand cases' gates are held as straight-line rules (0: not held).
+    hold: usize,
 }
 
 /// The pull towards the numbers a fit starts from, unless `--lambda` says otherwise.
@@ -359,6 +460,8 @@ impl Options {
             from: None,
             fix: Vec::new(),
             out: None,
+            hand: 0.0,
+            hold: 0,
         };
         let mut args = args.iter();
         while let Some(arg) = args.next() {
@@ -403,6 +506,18 @@ impl Options {
                     }
                 }
                 "--out" => o.out = Some(PathBuf::from(value("a file to write the weights to")?)),
+                "--hand" => {
+                    let text = value("a number")?;
+                    o.hand = text
+                        .parse()
+                        .ok()
+                        .filter(|x: &f64| x.is_finite() && *x >= 0.0)
+                        .ok_or_else(|| format!("--hand {text}: how much the hand cases count, 0 or more"))?;
+                }
+                "--hold" => {
+                    let text = value("a number of rounds")?;
+                    o.hold = text.parse().map_err(|_| format!("--hold {text}: a number of rounds"))?;
+                }
                 a if a.starts_with("--") => return Err(format!("Unknown option {a}.\n\n{}", crate::USAGE)),
                 a => o.files.push(PathBuf::from(a)),
             }
@@ -565,6 +680,16 @@ pub fn run(args: &[String]) -> Result<(), String> {
             "Nothing to learn from: no piece whose licence lets fitted numbers ship is in those folds.".to_owned()
         );
     }
+    let hand = if o.hand > 0.0 || o.hold > 0 { hand_pieces()? } else { Vec::new() };
+    if o.hand > 0.0 {
+        let labels: usize = hand.iter().map(|p| p.labels.len()).sum();
+        println!(
+            "Learning from {} hand cases too ({labels} stretches their gates label), counting {} against the data's \
+             loss per bar.",
+            hand.len(),
+            o.hand
+        );
+    }
     let bounds: Vec<Bound> = RULES.iter().flat_map(|rule| rule.bounds.iter().copied()).collect();
     let plan = Plan { steps: o.steps, slope: 1e-6, fall: 1e-7 };
     println!(
@@ -574,29 +699,102 @@ pub fn run(args: &[String]) -> Result<(), String> {
     );
 
     let mut counts: Option<Vec<bool>> = None;
+    let mut hand_counts: Option<Vec<bool>> = None;
     let mut first: Option<Vec<Option<FitRead>>> = None;
+    let mut hand_first: Option<Vec<Option<FitRead>>> = None;
     let mut seconds = 0.0f64;
-    let fitted = ruled::minimise(
-        &start,
-        &bounds,
-        &fixed,
-        plan,
-        |x| {
-            let began = Instant::now();
-            let numbers: [f64; NUMBERS] = std::array::from_fn(|k| x.get(k).copied().unwrap_or(0.0));
-            let reads = read_all(&train, &numbers);
-            let counts = counts.get_or_insert_with(|| reads.iter().map(|r| piece_aim(r.as_ref()).is_some()).collect());
-            let reading = Totals::of(&train, &reads, counts).reading(x, &start, o.lambda, &fixed);
-            seconds += began.elapsed().as_secs_f64();
-            if first.is_none() {
-                println!("  start: loss {:.6} ({:.1} s a reading)", reading.loss, seconds);
-                first = Some(reads);
-            }
-            reading
-        },
-        |line| println!("  {line}"),
-    );
+    // With --hold, every hand case's labels keep most of their chance, as a straight-line rule (a plane) from the
+    // start; each round after, the cases whose gates still break are held again where the fit got to, tighter.
+    let mut planes: Vec<Plane> = Vec::new();
+    if o.hold > 0 {
+        let reads = read_all(&hand, &start);
+        planes.extend(hand.iter().zip(&reads).filter_map(|(_, r)| hold(r.as_ref(), &start, HOLD.ln(), true)));
+        println!(
+            "Holding the hand cases' gates: each case's labels keep at least {HOLD} of their chance (or what they have \
+             at the start, if less), as {} straight-line rules on the numbers, for at most {} rounds.",
+            planes.len(),
+            o.hold
+        );
+    }
+    let (mut x, mut steps, mut readings) = (start.to_vec(), 0, 0);
+    let mut why = "no step taken";
+    let mut loss = f64::NAN;
+    for round in 0..=o.hold {
+        let fitted = ruled::minimise(
+            &x,
+            &bounds,
+            &planes,
+            &fixed,
+            plan,
+            |x| {
+                let began = Instant::now();
+                let numbers: [f64; NUMBERS] = std::array::from_fn(|k| x.get(k).copied().unwrap_or(0.0));
+                let reads = read_all(&train, &numbers);
+                let counts =
+                    counts.get_or_insert_with(|| reads.iter().map(|r| piece_aim(r.as_ref()).is_some()).collect());
+                let mut reading = Totals::of(&train, &reads, counts).reading(x, &start, o.lambda, &fixed);
+                if o.hand > 0.0 && !hand.is_empty() {
+                    let hand_reads = read_all(&hand, &numbers);
+                    let hand_counts = hand_counts
+                        .get_or_insert_with(|| hand_reads.iter().map(|r| piece_aim(r.as_ref()).is_some()).collect());
+                    let cases = Totals::of(&hand, &hand_reads, hand_counts).reading(x, &start, 0.0, &fixed);
+                    if hand_first.is_none() {
+                        println!("  start: the hand cases' mean -ln P {:.6}", cases.loss);
+                        hand_first = Some(hand_reads);
+                    }
+                    reading = with_hand(reading, cases, o.hand);
+                }
+                seconds += began.elapsed().as_secs_f64();
+                if first.is_none() {
+                    println!("  start: loss {:.6} ({:.1} s a reading)", reading.loss, seconds);
+                    first = Some(reads);
+                }
+                reading
+            },
+            |line| println!("  {line}"),
+        );
+        (x, loss, why) = (fitted.x, fitted.loss, fitted.why);
+        steps += fitted.steps;
+        readings += fitted.readings;
+        if round == o.hold {
+            break;
+        }
+        // The cases whose gates the fit breaks, held again where it got to.
+        let numbers: [f64; NUMBERS] = std::array::from_fn(|k| x.get(k).copied().unwrap_or(0.0));
+        let weights = Weights::from_numbers(&numbers);
+        let book = Book::read(&model_with(&weights))?;
+        let gates = broken_gates(&book).len();
+        let mut broken: Vec<&str> = broken_gates(&book).iter().map(|v| case_key(&v.name)).collect();
+        broken.sort_unstable();
+        broken.dedup();
+        if broken.is_empty() {
+            println!("Round {}: every gate holds.", round + 1);
+            break;
+        }
+        let tighter = (1.0 - (1.0 - HOLD) / 2f64.powi(i32::try_from(round + 1).unwrap_or(i32::MAX))).ln();
+        let again: Vec<usize> =
+            (0..hand.len()).filter(|&k| hand.get(k).is_some_and(|p| broken.contains(&case_key(&p.source)))).collect();
+        let reads = read_all(&hand, &numbers);
+        planes.extend(again.iter().filter_map(|&k| hold(reads.get(k).and_then(Option::as_ref), &x, tighter, false)));
+        println!(
+            "Round {}: {gates} gates break (cases {}); holding the {} of their cases the fit learns from again, at \
+             {:.3} of their chance, and fitting on.",
+            round + 1,
+            broken.join(", "),
+            again.len(),
+            tighter.exp()
+        );
+    }
+    let fitted = ruled::Fitted { x, loss, steps, readings, why };
     let numbers: [f64; NUMBERS] = std::array::from_fn(|k| fitted.x.get(k).copied().unwrap_or(0.0));
+    if !planes.is_empty() {
+        let on = planes.iter().filter(|p| p.room(&fitted.x) < 1e-6).count();
+        println!(
+            "{} of the {} straight-line rules holding the hand cases are met with nothing to spare.",
+            on,
+            planes.len()
+        );
+    }
     println!(
         "Stopped after {} steps ({}): loss {:.6}; {} readings of every piece, {:.1} s each.",
         fitted.steps,
@@ -641,6 +839,22 @@ pub fn run(args: &[String]) -> Result<(), String> {
     }
 
     print_groups("Learned from", &train, &start_reads, &read_all(&train, &numbers));
+    if !hand.is_empty() {
+        let left = hand_counts.as_ref().map_or(0, |c| c.iter().filter(|c| !**c).count());
+        let mean = |reads: &[Option<FitRead>]| {
+            let aims: Vec<f64> = reads.iter().filter_map(|r| piece_aim(r.as_ref()).map(|(l, _)| -l)).collect();
+            aims.iter().sum::<f64>() / aims.len().max(1) as f64
+        };
+        let after = read_all(&hand, &numbers);
+        println!(
+            "  {:<28} {:>9.4} {:>9.4}   {} cases (the mean -ln P of each case's labels){}",
+            "the hand cases",
+            mean(&hand_first.unwrap_or_else(|| read_all(&hand, &start))),
+            mean(&after),
+            hand.len(),
+            if left > 0 { format!(", {left} with no way the labels allow") } else { String::new() }
+        );
+    }
     if !test.is_empty() {
         print_groups(
             &format!("Held out (folds {:?})", o.test),
@@ -649,6 +863,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
             &read_all(&test, &numbers),
         );
     }
+    let start_weights = Weights::from_numbers(&start);
+    let broken = print_gates(&Book::read(&model_with(&start_weights))?, &Book::read(&model_with(&fitted_weights))?);
     println!();
     println!("The hand cases with these numbers (mo-harmony's tests):");
     println!(
@@ -663,8 +879,18 @@ pub fn run(args: &[String]) -> Result<(), String> {
             ("inputs", o.inputs.iter().map(|i| i.short()).collect::<Vec<_>>().join(",")),
             ("weigh", format!("{:?}", o.weigh.iter().collect::<BTreeMap<_, _>>())),
             ("lambda", o.lambda.to_string()),
+            ("hand", o.hand.to_string()),
+            ("hold", format!("{} rounds at most, {} straight-line rules", o.hold, planes.len())),
             ("loss", fitted.loss.to_string()),
             ("steps", format!("{} ({})", fitted.steps, fitted.why)),
+            (
+                "gates",
+                if broken.is_empty() {
+                    "every gate holds".to_owned()
+                } else {
+                    format!("{} break, so these weights aren't shipped: {}", broken.len(), broken.join("; "))
+                },
+            ),
         ];
         std::fs::write(path, weights_file(&numbers, &about)).map_err(|e| format!("{}: {e}", path.display()))?;
         println!("Written to {}.", path.display());
@@ -801,6 +1027,8 @@ mod tests {
             "P1,pair",
             "--out",
             "w.json",
+            "--hand",
+            "0.5",
         ])
         .unwrap();
         assert_eq!(all.inputs, [Input::Piano, Input::Split]);
@@ -809,6 +1037,7 @@ mod tests {
         assert_eq!((all.train, all.test, all.lambda, all.steps), (vec![1, 2, 3], vec![4], 0.01, 5));
         assert_eq!(all.fix, [place_of("P1").unwrap(), Weights::PAIR]);
         assert_eq!(all.out, Some(PathBuf::from("w.json")));
+        assert_eq!((plain.hand, all.hand), (0.0, 0.5));
         let wrong = |a: &[&str]| parse(a).unwrap_err();
         assert_eq!(wrong(&["a.jsonl", "--train", "0,1"]), "fold 0 is kept back for the final look");
         assert_eq!(wrong(&["a.jsonl", "--train", "1,2", "--test", "2"]), "fold 2 is both learned from and measured");
@@ -817,6 +1046,7 @@ mod tests {
         assert_eq!(wrong(&["a.jsonl", "--inputs", "tune"]), "--inputs: tune? (piano, full, split, upper)");
         assert_eq!(wrong(&["a.jsonl", "--weigh", "x=-1"]), "--weigh x=-1: a weight is 0 or more");
         assert_eq!(wrong(&["a.jsonl", "--lambda"]), "--lambda needs a number");
+        assert_eq!(wrong(&["a.jsonl", "--hand", "-1"]), "--hand -1: how much the hand cases count, 0 or more");
         assert_eq!(wrong(&[]), crate::USAGE);
     }
 
@@ -912,7 +1142,7 @@ mod tests {
         assert!(fall > 0.0 && (fall - said).abs() < 0.05 * said, "fell {fall}, the slope said {said}");
         let bounds: Vec<Bound> = RULES.iter().flat_map(|rule| rule.bounds.iter().copied()).collect();
         let plan = Plan { steps: 5, ..Plan::default() };
-        let fitted = ruled::minimise(&start, &bounds, &[false; NUMBERS], plan, at, |_| {});
+        let fitted = ruled::minimise(&start, &bounds, &[], &[false; NUMBERS], plan, at, |_| {});
         assert!(fitted.loss < begin.loss, "{} against {}", fitted.loss, begin.loss);
         let numbers: [f64; NUMBERS] = std::array::from_fn(|k| fitted.x[k]);
         assert!(Weights::from_numbers(&numbers).check().is_empty());
@@ -920,5 +1150,47 @@ mod tests {
         let one =
             rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap().install(|| read_all(&pieces, &numbers));
         assert_eq!(one, read_all(&pieces, &numbers));
+    }
+
+    #[test]
+    fn the_hand_cases_are_learned_from_as_pieces_each_counting_once() {
+        let hand = hand_pieces().unwrap();
+        assert!(hand.len() > 70, "{} cases", hand.len());
+        assert!(hand.iter().all(|p| p.weight == 1.0 && p.bars == 1.0 && !p.labels.is_empty() && p.span == Span::Loop));
+        // The built-in weights find every case's labelled ways, so the aim is finite, and each counts once: the hand
+        // cases' part is their mean.
+        let start = HAND.numbers();
+        let reads = read_all(&hand, &start);
+        let counts: Vec<bool> = reads.iter().map(|r| piece_aim(r.as_ref()).is_some()).collect();
+        assert!(counts.iter().all(|c| *c));
+        let totals = Totals::of(&hand, &reads, &counts);
+        assert_eq!(totals.bars, hand.len() as f64);
+        let reading = totals.reading(&start, &start, 0.0, &[false; NUMBERS]);
+        assert!(reading.loss > 0.0 && reading.loss.is_finite(), "{}", reading.loss);
+        assert!((reading.loss + totals.likelihood / hand.len() as f64).abs() < 1e-12);
+    }
+
+    #[test]
+    fn the_hand_cases_add_to_the_aim_by_how_much_they_count() {
+        let data = Reading { loss: 2.0, slope: vec![1.0, -1.0], curvature: Some(vec![1.0, 0.0, 0.0, 1.0]) };
+        let hand = Reading { loss: 0.5, slope: vec![2.0, 4.0], curvature: Some(vec![4.0, 2.0, 2.0, 8.0]) };
+        let both = with_hand(data, hand, 0.5);
+        assert_eq!((both.loss, both.slope), (2.25, vec![2.0, 1.0]));
+        assert_eq!(both.curvature, Some(vec![3.0, 1.0, 1.0, 5.0]));
+    }
+
+    #[test]
+    fn the_gates_are_read_with_the_numbers_fitted() {
+        // The hand-set numbers keep every gate the fit looks at; numbers turned round break some, each named.
+        let book = |w: &Weights| Book::read(&model_with(w)).unwrap();
+        let hand = book(&HAND);
+        assert!(broken_gates(&hand).is_empty());
+        let wrong = Weights::from_numbers(&HAND.numbers().map(|x| -x));
+        let wrong = book(&wrong);
+        assert!(!broken_gates(&wrong).is_empty());
+        assert!(broken_gates(&wrong).iter().all(|v| !v.held_out));
+        let said = print_gates(&hand, &wrong);
+        assert_eq!(said.len(), broken_gates(&wrong).len());
+        assert!(print_gates(&hand, &hand).is_empty());
     }
 }

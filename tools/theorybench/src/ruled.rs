@@ -1,5 +1,7 @@
 //! Fitting numbers that must keep some rules (`chordfit`): each rule a sign (a number at least 0, or at most 0) or an
-//! order (one number at most another), as mo-harmony's chord reader's weights keep them ([`mo_harmony::chordread::RULES`]).
+//! order (one number at most another), as mo-harmony's chord reader's weights keep them ([`mo_harmony::chordread::RULES`]),
+//! or a straight line the numbers must stay on one side of ([`Plane`]: how `chordfit --hold` keeps the hand cases'
+//! gates).
 //!
 //! The method is a projected quasi-Newton one: from where it is, it builds a quadratic picture of the loss from its
 //! slope and a curvature it learns as it goes (BFGS, kept whole: the chord reader has 39 numbers), finds that
@@ -9,13 +11,39 @@
 
 use mo_harmony::chordread::Bound;
 
-/// The nearest numbers to `x` that keep every bound, with the numbers `fixed` holds kept as they are in `x` (Dykstra's
-/// method: each bound in turn, carrying what each took away, until nothing moves).
-pub fn project(x: &[f64], bounds: &[Bound], fixed: &[bool]) -> Vec<f64> {
+/// A straight-line rule: the numbers x must keep `a · x ≥ b`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Plane {
+    pub a: Vec<f64>,
+    pub b: f64,
+}
+
+impl Plane {
+    /// How far inside the rule some numbers are: `a · x - b`, below 0 when they break it.
+    pub fn room(&self, x: &[f64]) -> f64 {
+        self.a.iter().zip(x).map(|(a, x)| a * x).sum::<f64>() - self.b
+    }
+}
+
+/// The nearest numbers to `x` that keep every bound and plane, with the numbers `fixed` holds kept as they are in `x`
+/// (Dykstra's method: each rule in turn, carrying what each took away, until nothing moves). When the planes and
+/// bounds leave no numbers that keep them all, the bounds are kept and the planes as nearly as they can be.
+pub fn project(x: &[f64], bounds: &[Bound], planes: &[Plane], fixed: &[bool]) -> Vec<f64> {
     let n = x.len();
     let is_fixed = |i: usize| fixed.get(i).copied().unwrap_or(false);
-    // What each bound took away last time, on the one or two numbers it touches.
+    // What each bound took away last time, on the one or two numbers it touches, and each plane, on every number.
     let mut taken: Vec<(f64, f64)> = vec![(0.0, 0.0); bounds.len()];
+    let mut taken_by_planes: Vec<Vec<f64>> = vec![vec![0.0; n]; planes.len()];
+    // Each plane's line through the numbers that may move, and its size.
+    let free_parts: Vec<(Vec<f64>, f64)> = planes
+        .iter()
+        .map(|p| {
+            let a: Vec<f64> =
+                (0..n).map(|i| if is_fixed(i) { 0.0 } else { p.a.get(i).copied().unwrap_or(0.0) }).collect();
+            let size = a.iter().map(|v| v * v).sum();
+            (a, size)
+        })
+        .collect();
     let mut y = x.to_vec();
     let at = |y: &[f64], i: usize| y.get(i).copied().unwrap_or(0.0);
     for _ in 0..100_000 {
@@ -52,6 +80,17 @@ pub fn project(x: &[f64], bounds: &[Bound], fixed: &[bool]) -> Vec<f64> {
                     y[i] = pi;
                     y[j] = pj;
                 }
+            }
+        }
+        for ((plane, (a, size)), took) in planes.iter().zip(&free_parts).zip(taken_by_planes.iter_mut()) {
+            let z: Vec<f64> = y.iter().zip(took.iter()).map(|(y, t)| y + t).collect();
+            let short = plane.b - plane.a.iter().zip(&z).map(|(a, z)| a * z).sum::<f64>();
+            let step = if short > 0.0 && *size > 0.0 { short / size } else { 0.0 };
+            for i in 0..n {
+                let p = z[i] + step * a[i];
+                moved = moved.max((p - y[i]).abs());
+                took[i] = z[i] - p;
+                y[i] = p;
             }
         }
         if moved <= 1e-15 * y.iter().fold(1.0f64, |m, v| m.max(v.abs())) {
@@ -142,6 +181,7 @@ pub struct Fitted {
 pub fn minimise(
     x0: &[f64],
     bounds: &[Bound],
+    planes: &[Plane],
     fixed: &[bool],
     plan: Plan,
     mut read: impl FnMut(&[f64]) -> Reading,
@@ -149,7 +189,7 @@ pub fn minimise(
 ) -> Fitted {
     let n = x0.len();
     let free = |i: usize| !fixed.get(i).copied().unwrap_or(false);
-    let mut x = project(x0, bounds, fixed);
+    let mut x = project(x0, bounds, planes, fixed);
     let first = read(&x);
     let mut readings = 1;
     let (mut loss, mut slope) = (first.loss, held_slope(&first.slope, fixed));
@@ -173,12 +213,12 @@ pub fn minimise(
     }
     let mut flat = 0;
     for step in 1..=plan.steps {
-        let gap = projected_gap(&x, &slope, bounds, fixed);
+        let gap = projected_gap(&x, &slope, bounds, planes, fixed);
         if gap < plan.slope {
             return Fitted { x, loss, steps: step - 1, readings, why: "the projected slope is flat" };
         }
         // The quadratic picture's lowest point among the numbers that keep the rules.
-        let target = lowest(&x, &slope, &b, bounds, fixed);
+        let target = lowest(&x, &slope, &b, bounds, planes, fixed);
         let d: Vec<f64> = target.iter().zip(&x).map(|(t, v)| t - v).collect();
         let fall_rate: f64 = slope.iter().zip(&d).map(|(g, d)| g * d).sum();
         if fall_rate >= 0.0 || d.iter().all(|v| v.abs() < 1e-15) {
@@ -188,7 +228,7 @@ pub fn minimise(
         let mut t = 1.0;
         let mut taken = None;
         for _ in 0..30 {
-            let next = project(&x.iter().zip(&d).map(|(v, d)| v + t * d).collect::<Vec<_>>(), bounds, fixed);
+            let next = project(&x.iter().zip(&d).map(|(v, d)| v + t * d).collect::<Vec<_>>(), bounds, planes, fixed);
             let r = read(&next);
             readings += 1;
             if r.loss.is_finite() && r.loss <= loss + 1e-4 * t * fall_rate {
@@ -228,14 +268,14 @@ fn held_slope(slope: &[f64], fixed: &[bool]) -> Vec<f64> {
 
 /// How far a projected slope step moves the numbers, the largest move: 0 where nothing that keeps the rules lowers the
 /// loss (the fit's end).
-fn projected_gap(x: &[f64], slope: &[f64], bounds: &[Bound], fixed: &[bool]) -> f64 {
+fn projected_gap(x: &[f64], slope: &[f64], bounds: &[Bound], planes: &[Plane], fixed: &[bool]) -> f64 {
     let moved: Vec<f64> = x.iter().zip(slope).map(|(v, g)| v - g).collect();
-    project(&moved, bounds, fixed).iter().zip(x).map(|(p, v)| (p - v).abs()).fold(0.0, f64::max)
+    project(&moved, bounds, planes, fixed).iter().zip(x).map(|(p, v)| (p - v).abs()).fold(0.0, f64::max)
 }
 
 /// The lowest point of the quadratic picture `slope · d + ½ dᵀ B d` (d from `x`) among the numbers that keep the
 /// rules: projected gradient steps, sped up (FISTA), each 1 over the largest curvature B can have.
-fn lowest(x: &[f64], slope: &[f64], b: &[f64], bounds: &[Bound], fixed: &[bool]) -> Vec<f64> {
+fn lowest(x: &[f64], slope: &[f64], b: &[f64], bounds: &[Bound], planes: &[Plane], fixed: &[bool]) -> Vec<f64> {
     let n = x.len();
     // Gershgorin: no eigenvalue of B is larger than its largest row of sizes.
     let largest = (0..n).map(|i| (0..n).map(|j| b[i * n + j].abs()).sum::<f64>()).fold(1e-12, f64::max);
@@ -247,7 +287,7 @@ fn lowest(x: &[f64], slope: &[f64], b: &[f64], bounds: &[Bound], fixed: &[bool])
     let mut t = 1.0f64;
     for _ in 0..20_000 {
         let g = slope_at(&z);
-        let next = project(&z.iter().zip(&g).map(|(v, g)| v - step * g).collect::<Vec<_>>(), bounds, fixed);
+        let next = project(&z.iter().zip(&g).map(|(v, g)| v - step * g).collect::<Vec<_>>(), bounds, planes, fixed);
         let moved = next.iter().zip(&y).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
         let t_next = (1.0 + (1.0 + 4.0 * t * t).sqrt()) / 2.0;
         z = next.iter().zip(&y).map(|(a, b)| a + (t - 1.0) / t_next * (a - b)).collect();
@@ -293,15 +333,15 @@ mod tests {
         // 0 ≤ x1 ≤ x0, x2 ≤ 0, x3 ≤ x2.
         let bounds = [AtLeast0(1), AtMost(1, 0), AtMost0(2), AtMost(3, 2)];
         let none = [false; 4];
-        let p = project(&[1.0, 2.0, 1.0, 3.0], &bounds, &none);
+        let p = project(&[1.0, 2.0, 1.0, 3.0], &bounds, &[], &none);
         // x0 and x1 meet at 1.5; x2 and x3 meet at 2, then x2 is held at 0 and x3 with it.
         let want = [1.5, 1.5, 0.0, 0.0];
         assert!(p.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-12), "{p:?}");
         assert!(keeps(&p, &bounds));
         // Numbers that keep the rules stay where they are.
-        assert_eq!(project(&[2.0, 1.0, -1.0, -2.0], &bounds, &none), [2.0, 1.0, -1.0, -2.0]);
+        assert_eq!(project(&[2.0, 1.0, -1.0, -2.0], &bounds, &[], &none), [2.0, 1.0, -1.0, -2.0]);
         // A fixed number stays; the others meet it.
-        let p = project(&[1.0, 2.0, 1.0, 3.0], &bounds, &[true, false, false, false]);
+        let p = project(&[1.0, 2.0, 1.0, 3.0], &bounds, &[], &[true, false, false, false]);
         assert!(p.iter().zip([1.0, 1.0, 0.0, 0.0]).all(|(a, b)| (a - b).abs() < 1e-12), "{p:?}");
     }
 
@@ -318,11 +358,11 @@ mod tests {
         };
         for _ in 0..200 {
             let x: Vec<f64> = (0..6).map(|_| next()).collect();
-            let p = project(&x, &bounds, &[false; 6]);
+            let p = project(&x, &bounds, &[], &[false; 6]);
             assert!(keeps(&p, &bounds), "{p:?}");
             let far = |q: &[f64]| q.iter().zip(&x).map(|(a, b)| (a - b) * (a - b)).sum::<f64>();
             for _ in 0..50 {
-                let q = project(&(0..6).map(|_| next()).collect::<Vec<_>>(), &bounds, &[false; 6]);
+                let q = project(&(0..6).map(|_| next()).collect::<Vec<_>>(), &bounds, &[], &[false; 6]);
                 assert!(far(&p) <= far(&q) + 1e-9, "{x:?}: {p:?} against {q:?}");
             }
         }
@@ -338,7 +378,7 @@ mod tests {
             slope: x.iter().zip(c).zip(m).map(|((x, c), m)| 2.0 * c * (x - m)).collect(),
             curvature: None,
         };
-        let fitted = minimise(&[0.0; 4], &bounds, &[false; 4], Plan::default(), read, |_| {});
+        let fitted = minimise(&[0.0; 4], &bounds, &[], &[false; 4], Plan::default(), read, |_| {});
         // x0 and x1 meet where c0 (x - 1) + c1 (x - 3) is 0, at 2.6; x2 is held at 0; x3 is free at -1.
         let want = [2.6, 2.6, 0.0, -1.0];
         assert!(fitted.x.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-6), "{fitted:?}");
@@ -349,7 +389,7 @@ mod tests {
             curvature: None,
         };
         let fitted =
-            minimise(&[4.0, 0.0, 0.0, 0.0], &bounds, &[true, false, false, false], Plan::default(), read, |_| {});
+            minimise(&[4.0, 0.0, 0.0, 0.0], &bounds, &[], &[true, false, false, false], Plan::default(), read, |_| {});
         assert!(fitted.x.iter().zip([4.0, 3.0, 0.0, -1.0]).all(|(a, b)| (a - b).abs() < 1e-6), "{fitted:?}");
     }
 
@@ -365,8 +405,60 @@ mod tests {
                 curvature: Some(vec![1.25, -0.25, -0.25, 1.5]),
             }
         };
-        let fitted = minimise(&[1.0, 1.0], &[], &[false; 2], Plan::default(), read, |_| {});
+        let fitted = minimise(&[1.0, 1.0], &[], &[], &[false; 2], Plan::default(), read, |_| {});
         let r = read(&fitted.x);
         assert!(r.slope.iter().all(|g| g.abs() < 1e-6), "{fitted:?}");
+    }
+
+    #[test]
+    fn the_nearest_numbers_keeping_planes_and_bounds_are_found() {
+        // x0 + x1 ≥ 2 from (0, 0): (1, 1). With x1 ≤ 0 too: (2, 0). Numbers inside stay.
+        let plane = [Plane { a: vec![1.0, 1.0], b: 2.0 }];
+        let close = |p: &[f64], want: [f64; 2]| p.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-9);
+        let p = project(&[0.0, 0.0], &[], &plane, &[false; 2]);
+        assert!(close(&p, [1.0, 1.0]), "{p:?}");
+        let p = project(&[0.0, 0.0], &[AtMost0(1)], &plane, &[false; 2]);
+        assert!(close(&p, [2.0, 0.0]), "{p:?}");
+        assert_eq!(project(&[3.0, -0.5], &[AtMost0(1)], &plane, &[false; 2]), [3.0, -0.5]);
+        // A fixed number stays: only x1 moves.
+        let p = project(&[0.5, 0.0], &[], &plane, &[true, false]);
+        assert!(close(&p, [0.5, 1.5]), "{p:?}");
+        assert!(plane[0].room(&p).abs() < 1e-9 && plane[0].room(&[0.0, 0.0]) == -2.0);
+        // Random points: the projection keeps every rule and is nearer than any other point that does.
+        let bounds = [AtLeast0(0), AtMost(1, 0)];
+        let planes = [Plane { a: vec![1.0, -2.0, 1.0], b: 1.0 }, Plane { a: vec![0.0, 1.0, 1.0], b: -1.0 }];
+        let mut seed = 0x0bad_cafe_f00d_1234u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % 2000) as f64 / 250.0 - 4.0
+        };
+        let keeps_all = |q: &[f64]| keeps(q, &bounds) && planes.iter().all(|p| p.room(q) > -1e-9);
+        for _ in 0..100 {
+            let x: Vec<f64> = (0..3).map(|_| next()).collect();
+            let p = project(&x, &bounds, &planes, &[false; 3]);
+            assert!(keeps_all(&p), "{x:?}: {p:?}");
+            let far = |q: &[f64]| q.iter().zip(&x).map(|(a, b)| (a - b) * (a - b)).sum::<f64>();
+            for _ in 0..50 {
+                let q: Vec<f64> = (0..3).map(|_| next()).collect();
+                if keeps_all(&q) {
+                    assert!(far(&p) <= far(&q) + 1e-9, "{x:?}: {p:?} against {q:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_bowl_is_fitted_to_its_lowest_point_on_the_right_side_of_a_plane() {
+        // (x0 - 2)² + (x1 - 2)² with x0 + x1 ≤ 2 (written -x0 - x1 ≥ -2): (1, 1).
+        let read = |x: &[f64]| Reading {
+            loss: (x[0] - 2.0).powi(2) + (x[1] - 2.0).powi(2),
+            slope: vec![2.0 * (x[0] - 2.0), 2.0 * (x[1] - 2.0)],
+            curvature: None,
+        };
+        let plane = [Plane { a: vec![-1.0, -1.0], b: -2.0 }];
+        let fitted = minimise(&[0.0, 0.0], &[], &plane, &[false; 2], Plan::default(), read, |_| {});
+        assert!(fitted.x.iter().all(|v| (v - 1.0).abs() < 1e-6), "{fitted:?}");
     }
 }

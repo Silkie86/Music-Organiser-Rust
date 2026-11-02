@@ -42,6 +42,10 @@
 
 mod answer;
 mod candidates;
+#[cfg(any(test, feature = "hand-cases"))]
+pub mod cases;
+#[cfg(test)]
+mod cases_tests;
 mod cores;
 mod decode;
 #[cfg(test)]
