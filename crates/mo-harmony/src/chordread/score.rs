@@ -972,6 +972,11 @@ impl SpanFacts {
         self.beats
     }
 
+    /// The bass under its sound: held, moving or none (what B1 to B9, R3 and R4 weigh).
+    pub fn bass(&self) -> BassTexture {
+        self.bass
+    }
+
     /// The notes heard in it (the design's P).
     pub fn heard(&self) -> PcSet {
         self.heard

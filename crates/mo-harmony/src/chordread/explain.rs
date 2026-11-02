@@ -48,7 +48,7 @@ use super::score::{Evidence, Feature, PerFeature, SpanFacts};
 use super::weights::Priors;
 use crate::chord::{Chord, Family, ToneRole, role};
 use crate::notes::{Grid, Part};
-use crate::pitch::PitchClass;
+use crate::pitch::{PcSet, PitchClass};
 use crate::spell::Degree;
 
 /// How many pieces of evidence an explanation shows: the six that tell the first reading from the runner-up most.
@@ -124,6 +124,10 @@ pub struct NoteWhy {
     /// the tune, or the chords.
     pub heard_as: Stream,
     pub does: NoteDoes,
+    /// What a note that passes by under the chord hangs on ([`Shaped::anchors`]): the notes either side of a passing
+    /// note, the note a neighbour leaves and comes back to, the note an approach leads to, the note a suspension or an
+    /// appoggiatura resolves to, an anticipation's own. None for any other note.
+    pub anchors: PcSet,
 }
 
 /// Where the bass under a stretch comes from.
@@ -190,6 +194,13 @@ pub struct Explanation {
     /// Each one's score on the stretch read on its own: every piece of its evidence added up (0 for no runner-up). The
     /// decode reads the stretches together, so these needn't be the scores that ranked them.
     pub totals: [f64; 2],
+    /// Whether each is the chord before held on (the module's last paragraph): the first reading where the stretch
+    /// goes on with the chord before, the runner-up where it would. False for no runner-up.
+    pub held_on: [bool; 2],
+    /// The bass held under the stretch, as each one's evidence weighs it (B1 to B6): the same for both, but where a
+    /// reading held on is weighed on the stretch's own units (a chord pushed into it). None where no bass is held
+    /// (none sounds, or it moves), and for no runner-up.
+    pub held_bass: [Option<PitchClass>; 2],
 }
 
 /// Explains readings ([`ChordExplainer::explain`]). Keep one while explaining: it keeps its working space between
@@ -341,9 +352,10 @@ impl ChordExplainer {
             edge: self.edges.binary_search(&units.start).is_ok(),
         };
         let labels = [Some(first.label), second.map(|r| r.label)];
+        let held_on = labels.map(|label| label.is_some_and(|label| around.holds_on(label)));
         // A reading held on into a stretch with a chord pushed to it is held on from the place it's pushed from (the
         // decode never holds a chord on from a place a chord is pushed to): it sounds over the stretch's own units.
-        let plain = start.is_some() && labels.iter().flatten().any(|&label| around.holds_on(label));
+        let plain = start.is_some() && held_on.contains(&true);
         if plain {
             self.evidence.facts(&self.hearing, units, None, end, &mut self.plain);
         }
@@ -354,8 +366,18 @@ impl ChordExplainer {
             _ if from_part => BassFrom::BassPart,
             _ => BassFrom::LowestKeys,
         };
-        let (terms, totals) = self.terms(labels, around, plain, model);
-        Some(Explanation { span, first, second, notes, bass_from, terms, totals })
+        let (terms, totals) = self.terms(labels, held_on, around, plain, model);
+        let mut held_bass = [None; 2];
+        for ((bass, label), held) in held_bass.iter_mut().zip(labels).zip(held_on) {
+            *bass = label.and(self.weighed_on(held, plain).bass().held());
+        }
+        Some(Explanation { span, first, second, notes, bass_from, terms, totals, held_on, held_bass })
+    }
+
+    /// The facts a reading is weighed on: the stretch's own units for one held on into it where a chord is pushed to it
+    /// (`plain`), else its sound.
+    fn weighed_on(&self, held: bool, plain: bool) -> &SpanFacts {
+        if held && plain { &self.plain } else { &self.facts }
     }
 
     /// What each note sounding in the stretch does, and whether a bass part plays there (a note only held over into
@@ -384,16 +406,20 @@ impl ChordExplainer {
             let does = does(hearing, n, shape, Place { from, to, held, bass }, first);
             from_part |= n.stream == Stream::Bass && does != NoteDoes::HeldOver;
             let heard_as = if bass { Stream::Bass } else { n.stream };
-            out.push(NoteWhy { part: n.part, note: n.note, key: n.key, heard_as, does });
+            // What it hangs on, where what it does is its shape's (only a shape makes a note pass by).
+            let anchors = shape.filter(|s| NoteDoes::of_shape(s.shape) == does).map_or(PcSet::EMPTY, |s| s.anchors);
+            out.push(NoteWhy { part: n.part, note: n.note, key: n.key, heard_as, does, anchors });
         }
         (out, from_part)
     }
 
     /// The evidence for each label (the runner-up's none when there isn't one), the piece that leads by most first,
-    /// and each one's total; with `plain`, a reading held on is weighed on the stretch's own units.
+    /// and each one's total. A label `held_on` has none about where a chord starts, and with `plain` it's weighed on
+    /// the stretch's own units.
     fn terms(
         &self,
         labels: [Option<Label>; 2],
+        held_on: [bool; 2],
         around: Around,
         plain: bool,
         model: &Model,
@@ -401,10 +427,9 @@ impl ChordExplainer {
         let priors = Priors::of(model.tables);
         let mut values = [PerFeature::default(); 2];
         let mut beats = [self.facts.beats(); 2];
-        for ((label, out), beats) in labels.iter().zip(&mut values).zip(&mut beats) {
+        for (((label, held), out), beats) in labels.iter().zip(held_on).zip(&mut values).zip(&mut beats) {
             let Some(label) = *label else { continue };
-            let held = around.holds_on(label);
-            let facts = if held && plain { &self.plain } else { &self.facts };
+            let facts = self.weighed_on(held, plain);
             facts.features(label, &priors, out);
             *beats = facts.beats();
             if held {

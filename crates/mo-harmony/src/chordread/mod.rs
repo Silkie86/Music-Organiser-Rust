@@ -35,7 +35,8 @@
 //!   its search ([`ChordSummary`]);
 //! - why a stretch reads as it does ([`ChordExplainer`]): what each note does there ([`NoteDoes`]: one of the
 //!   chord's notes, a tension it names, a passing note, a walking bass note, a note rung on from before, a clash...),
-//!   where the bass comes from, and the evidence that tells the first reading from the runner-up ([`Explanation`]);
+//!   where the bass comes from, and the evidence that tells the first reading from the runner-up ([`Explanation`]),
+//!   told in plain words ([`Words`]);
 //! - the version ([`CHORD_READER_VERSION`]), with the hash of every number the reader is built from
 //!   ([`numbers_hash`]).
 
@@ -68,6 +69,9 @@ mod shape_tests;
 mod tables;
 mod version;
 mod weights;
+mod words;
+#[cfg(test)]
+mod words_tests;
 
 pub use answer::{ChordAnswer, Grading, NoChord, Texture, Thresholds, grade};
 
@@ -89,6 +93,7 @@ pub use score::{Evidence, Feature, PerFeature, Scored, Scorer, Scoring, SpanFact
 pub use tables::{COUNTED, COUNTED_FROM};
 pub use version::{SHIPPED_HASH, numbers_hash};
 pub use weights::{EVEN, HAND, Priors, THRESHOLDS, Tables, Weights};
+pub use words::Words;
 
 /// Bumped whenever the reader can read the same notes differently (new weights, a new rule for hearing, decoding,
 /// naming or grading), so the chords the app keeps (the MIDI page's index) know to be read again. Version 1 is the
