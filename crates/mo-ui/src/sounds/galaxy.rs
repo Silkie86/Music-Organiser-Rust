@@ -36,6 +36,9 @@ const PLACINGS: [(&str, Placing); 3] =
 const NEAR: f32 = 10.0;
 /// How often a glide moves the view on: about 60 times a second.
 const FRAME: Duration = Duration::from_millis(16);
+/// The mini-map's size, in points, and how far in the view has to be before it shows (as C#).
+const MINI: f32 = 132.0;
+const MINI_FROM_ZOOM: f32 = 1.25;
 /// While the view moves, pictures are drawn at no more than this many pixels per point, so they keep up; the sharp
 /// one follows when it stops.
 const MOVING_SCALE: f32 = 1.0;
@@ -191,6 +194,7 @@ struct OnCard {
 thread_local! {
     static DRAWING: RefCell<Option<Newest<Picture>>> = const { RefCell::new(None) };
     static PACKING: RefCell<Option<Newest<SetAsk>>> = const { RefCell::new(None) };
+    static MINI_DRAWING: RefCell<Option<Newest<Picture>>> = const { RefCell::new(None) };
     static CARD: RefCell<Option<OnCard>> = const { RefCell::new(None) };
     /// The card (as `gpu::generation` counts) that refused to draw the galaxy: on that one it's drawn on the
     /// processor from then on, and a new card is tried again.
@@ -359,6 +363,17 @@ pub(super) fn wire(app: &AppWindow) {
         }
     });
     let weak = app.as_weak();
+    data.on_galaxy_mini(move |fx, fy| {
+        let Some(app) = weak.upgrade() else { return };
+        PAGE.with(|p| {
+            let g = &mut p.borrow_mut().galaxy;
+            let (x, y) = mini_view().to_map(fx.clamp(0.0, 1.0) * MINI, fy.clamp(0.0, 1.0) * MINI);
+            let zoom = g.view.zoom;
+            g.view.fly_to(x.clamp(0.0, 1.0), y.clamp(0.0, 1.0), zoom);
+        });
+        fly(&app);
+    });
+    let weak = app.as_weak();
     data.on_galaxy_label(move |at| {
         let Some(app) = weak.upgrade() else { return };
         let flew = PAGE.with(|p| {
@@ -425,10 +440,85 @@ const SWEEP_STEP: f32 = 3.0;
 pub(super) struct Sweep {
     played: Option<(usize, Instant)>,
     waiting: Option<usize>,
+    /// When the mouse last moved in this sweep, to tell how fast it's going.
+    moved: Option<Instant>,
 }
+
+/// How far ahead of the mouse a sweep's next sounds are read (the C# app's 40 ms), at most how far in points, how
+/// many, and how much of each.
+const AHEAD: Duration = Duration::from_millis(40);
+const AHEAD_MOST: f32 = 200.0;
+const AHEAD_SOUNDS: usize = 4;
+const AHEAD_BYTES: usize = 128 * 1024;
 
 thread_local! {
     static SWEEP_TIMER: Timer = Timer::default();
+    /// Reads the start of the sounds a sweep is about to reach, newest ask first.
+    static READ_AHEAD: RefCell<Option<Newest<Vec<String>>>> = const { RefCell::new(None) };
+}
+
+/// Reads the start of each file, so the disk has it ready when the sweep reaches it (the system keeps what was read
+/// lately), and the sound plays the moment the mouse gets there.
+fn warm(paths: Vec<String>) {
+    use std::io::Read;
+    let mut buffer = vec![0u8; AHEAD_BYTES];
+    for path in paths {
+        if let Ok(mut f) = std::fs::File::open(&path) {
+            let _ = f.read(&mut buffer);
+        }
+    }
+}
+
+/// The mouse is sweeping from `from` to `to` at this speed: the sounds a little further along its way are read ahead.
+fn read_ahead(from: (f32, f32), to: (f32, f32), dt: Duration, passed: &[usize]) {
+    if HERE.with(|h| *h.borrow()) || dt.is_zero() {
+        return;
+    }
+    let k = AHEAD.as_secs_f32() / dt.as_secs_f32();
+    let (mut dx, mut dy) = ((to.0 - from.0) * k, (to.1 - from.1) * k);
+    let far = dx.hypot(dy);
+    if far < 1.0 {
+        return;
+    }
+    if far > AHEAD_MOST {
+        (dx, dy) = (dx * AHEAD_MOST / far, dy * AHEAD_MOST / far);
+    }
+    let steps = (far.min(AHEAD_MOST) / SWEEP_STEP).ceil() as usize;
+    let paths = PAGE.with(|p| {
+        let p = p.borrow();
+        let g = &p.galaxy;
+        let playing = g.sweep.played.map(|(at, _)| at);
+        let mut next: Vec<usize> = Vec::new();
+        for i in 1..=steps {
+            let t = i as f32 / steps as f32;
+            if let Some(at) = star_at_in(g, to.0 + dx * t, to.1 + dy * t)
+                && !next.contains(&at)
+                && !passed.contains(&at)
+                && playing != Some(at)
+            {
+                next.push(at);
+                if next.len() == AHEAD_SOUNDS {
+                    break;
+                }
+            }
+        }
+        next.iter().filter_map(|&at| Some(p.list.sound(at)?.path.clone())).collect::<Vec<String>>()
+    });
+    if paths.is_empty() {
+        return;
+    }
+    READ_AHEAD.with(|w| {
+        let mut w = w.borrow_mut();
+        if w.is_none() {
+            match Newest::start("Galaxy read ahead", warm) {
+                Ok(worker) => *w = Some(worker),
+                Err(e) => log::warning("Sounds", &format!("Couldn't start reading the sweep ahead: {e}")),
+            }
+        }
+        if let Some(worker) = w.as_ref() {
+            worker.ask(paths);
+        }
+    });
 }
 
 /// The mouse swept from `from` to `to`: every star along the way, not just where it landed (a quick sweep moves many
@@ -447,6 +537,11 @@ fn swept(app: &AppWindow, from: (f32, f32), to: (f32, f32)) {
     let data = app.global::<SoundsData>();
     data.set_galaxy_mouse_x(to.0);
     data.set_galaxy_mouse_y(to.1);
+    let now = Instant::now();
+    let was = PAGE.with(|p| p.borrow_mut().galaxy.sweep.moved.replace(now));
+    if let Some(was) = was {
+        read_ahead(from, to, now - was, &passed);
+    }
     for at in passed {
         reached(app, at);
     }
@@ -753,6 +848,7 @@ pub(super) fn shown(app: &AppWindow) {
         // The old library's picture goes; the new map is on its way.
         let data = app.global::<SoundsData>();
         data.set_galaxy_image(Image::default());
+        data.set_galaxy_mini_image(Image::default());
         data.set_galaxy_picked_shown(false);
         load(app, false);
     } else {
@@ -1059,6 +1155,103 @@ fn packed(app: &AppWindow, done: Packed) {
     if newer {
         draw(app);
         hover(app);
+        draw_mini(app);
+    }
+}
+
+/// The whole map in miniature for the mini-map, as it is with the filters now; drawn off the window's thread.
+fn draw_mini(app: &AppWindow) {
+    let types = app.global::<Theme>().get_sound_types();
+    let mut palette: Vec<[u8; 3]> = types.iter().map(|c| [c.red(), c.green(), c.blue()]).collect();
+    palette.push([110, 110, 110]);
+    let scale = app.window().scale_factor();
+    let ask = PAGE.with(|p| {
+        let p = p.borrow();
+        let g = &p.galaxy;
+        let key = g.set_for.as_ref()?;
+        Some(Picture {
+            id: g.set_got,
+            stars: key.stars.clone(),
+            count: g.count,
+            colours: key.colours.clone(),
+            shown: key.shown.clone(),
+            palette,
+            view: mini_view(),
+            scale,
+        })
+    });
+    let Some(ask) = ask else { return };
+    let show = |app: &AppWindow, d: Drawn, px: SharedPixelBuffer<Rgba8Pixel>| {
+        // Only the newest map's miniature.
+        if PAGE.with(|p| p.borrow().galaxy.set_got) == d.id {
+            app.global::<SoundsData>().set_galaxy_mini_image(Image::from_rgba8_premultiplied(px));
+        }
+    };
+    if HERE.with(|h| *h.borrow()) {
+        let (d, px) = to_image(ask.draw());
+        show(app, d, px);
+        return;
+    }
+    MINI_DRAWING.with(|w| {
+        let mut w = w.borrow_mut();
+        if w.is_none() {
+            let weak = app.as_weak();
+            match Newest::start("Galaxy mini-map", move |ask: Picture| {
+                let (d, px) = to_image(background::on_pool(|| ask.draw()));
+                let weak = weak.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(app) = weak.upgrade() {
+                        show(&app, d, px);
+                    }
+                });
+            }) {
+                Ok(worker) => *w = Some(worker),
+                Err(e) => log::warning("Sounds", &format!("Couldn't start drawing the mini-map: {e}")),
+            }
+        }
+        if let Some(worker) = w.as_ref() {
+            worker.ask(ask);
+        }
+    });
+}
+
+/// The mini-map's view: the whole map, at its own size.
+fn mini_view() -> View {
+    let mut v = View::default();
+    (v.width, v.height) = (MINI, MINI);
+    v
+}
+
+/// Shows the mini-map once the view has flown in (and there's room for it), with a box round the part on show.
+fn show_mini(app: &AppWindow) {
+    let mini = PAGE.with(|p| {
+        let g = &p.borrow().galaxy;
+        let v = &g.view;
+        if v.zoom <= MINI_FROM_ZOOM || v.width < 420.0 || v.height < 320.0 || g.count == 0 {
+            return None;
+        }
+        let m = mini_view();
+        let (l, t, r, b) = galaxy_look::on_view(v);
+        let corner = |x: f32, y: f32| {
+            let (px, py) = m.to_view(x, y, 1.0);
+            ((px / MINI).clamp(0.0, 1.0), (py / MINI).clamp(0.0, 1.0))
+        };
+        let ((x0, y0), (x1, y1)) = (corner(l, t), corner(r, b));
+        let on_view = g.grid.as_ref().map(|grid| grid.count_in(l, t, r, b));
+        let title = match on_view {
+            Some(n) => format!("×{:.0}  ·  {} in view", v.zoom, mo_app::songs::thousands(n)),
+            None => format!("×{:.0}", v.zoom),
+        };
+        Some((title, x0, y0, x1 - x0, y1 - y0))
+    });
+    let data = app.global::<SoundsData>();
+    data.set_galaxy_mini_shown(mini.is_some());
+    if let Some((title, x, y, w, h)) = mini {
+        data.set_galaxy_mini_title(title.into());
+        data.set_galaxy_mini_x(x);
+        data.set_galaxy_mini_y(y);
+        data.set_galaxy_mini_width(w);
+        data.set_galaxy_mini_height(h);
     }
 }
 
@@ -1180,6 +1373,7 @@ fn place_picture(app: &AppWindow) {
     // What's drawn over the picture moves with it.
     show_trail(app);
     show_names(app);
+    show_mini(app);
 }
 
 /// The ring round the picked star, where it is on the view now.
