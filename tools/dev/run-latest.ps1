@@ -21,6 +21,11 @@
             -PullEvery <s>    seconds between checks for new pushes (0 turns checking off)
             -NoWatch          build and run once, without checking for new pushes
             -Repo <folder>    use this clone instead of the script's own (for testing the script)
+            -BuildDir <folder>  build on another drive, like -BuildDir D:\Builds (a drive letter, not a network
+                              folder, and not inside code kept with git): the builds go in a "MusicOrganiser-build"
+                              folder inside it. Remembered, so it's only needed once (the Desktop shortcut then uses
+                              it). -BuildDir default goes back to building beside the code. With -Repo it's for that
+                              run only, and the remembered one isn't used.
 
   Plain ASCII on purpose: Windows PowerShell 5.1 misreads anything else in a file without a BOM.
 #>
@@ -28,11 +33,12 @@ param(
     [string]$Branch,
     [int]$PullEvery = 20,
     [switch]$NoWatch,
-    [string]$Repo
+    [string]$Repo,
+    [string]$BuildDir
 )
 
 # Raised whenever this script changes, so an older branch's copy never replaces a newer installed one.
-$LauncherVersion = 5
+$LauncherVersion = 6
 
 $ErrorActionPreference = 'Continue'   # git and cargo write progress to stderr, which Windows PowerShell treats as failure
 $GitHubRepo = 'Silkie86/Music-Organiser-Rust'
@@ -45,7 +51,11 @@ $Installed = Join-Path $Home_ 'run-latest.ps1'
 $LastChoice = Join-Path $Home_ 'last-branch.txt'
 # Each build is copied here before it runs, so the next build never has to replace a file the open app is using.
 $RunDir = Join-Path $Home_ 'run'
+# A test run on another clone (-Repo) leaves the remembered build folder alone, so it can't move Solomon's builds.
+$RepoGiven = [bool]$Repo
 if (-not $Repo) { $Repo = Join-Path $Home_ 'app' }
+# Where the builds go when they're not beside the code (-BuildDir): remembered in this file.
+$BuildChoice = Join-Path $Home_ 'build-folder.txt'
 
 function Say([string]$Text, [string]$Colour = 'Gray') { Write-Host $Text -ForegroundColor $Colour }
 
@@ -77,6 +87,94 @@ if (-not $CargoExe) {
 }
 if (-not $CargoExe) {
     Stop-WithMessage 'Rust isn''t installed. Download rustup-init.exe from https://rustup.rs and run it with the default choices, then run this again.'
+}
+
+# --- Where it builds -------------------------------------------------------------------------------------------
+# The build folder grows to many GB, so it can go on a drive with more room (-BuildDir). The builds always go in a
+# "MusicOrganiser-build" folder of their own inside the one named, and clearing a build folder only ever removes what
+# cargo makes there (see Clear-BuildFolder), so nothing else in that folder can be touched.
+function Resolve-BuildDir([string]$Path, [switch]$Create) {
+    # The folder -BuildDir names, as a whole path, or $null (saying why) when it can't be used. With -Create (a folder
+    # just typed) it's made if need be; without it (the remembered one) it must still be there. The build folder inside
+    # it is left for cargo to make: cargo marks a folder as its own (with a CACHEDIR.TAG) only when it makes it.
+    $p = "$Path".Trim().Trim('"').Trim()
+    if ($OnWindows -and $p -match '^[A-Za-z]:$') { $p += '\' }
+    if ($OnWindows -and $p -match '^[\\/]{2}') {
+        Say "The build folder can't be a network folder like '$p': the launcher can't check how much room it has. Use a drive letter, like D:\Builds." 'Red'
+        return $null
+    }
+    $whole = if ($OnWindows) { $p -match '^[A-Za-z]:[\\/]' } else { $p.StartsWith('/') }
+    if (-not $whole) {
+        Say "The build folder has to be a whole path, like D:\Builds, not '$p'." 'Red'
+        return $null
+    }
+    try { $p = [IO.Path]::GetFullPath($p) }
+    catch {
+        Say "'$p' can't be a folder name ($($_.Exception.Message))." 'Red'
+        return $null
+    }
+    $drive = [IO.Path]::GetPathRoot($p)
+    if (-not [IO.Directory]::Exists($drive)) {
+        Say "The drive $drive for the build folder isn't there (is it plugged in?)." 'Yellow'
+        return $null
+    }
+    # Inside the app's own code, git would see the builds as new files and put them aside on every start.
+    $code = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Repo).TrimEnd('\', '/')
+    $sep = [IO.Path]::DirectorySeparatorChar
+    if (($p.TrimEnd('\', '/') + $sep).StartsWith($code + $sep, [StringComparison]::OrdinalIgnoreCase)) {
+        Say "The build folder can't be inside the app's own code ($code)." 'Red'
+        return $null
+    }
+    # Nor inside any other copy of code kept with git, which would see the builds as new files too. Asking git also
+    # catches a way into the app's code that the name doesn't show: a link, or a second drive letter for the same place.
+    $probe = $p
+    while ($probe -and -not [IO.Directory]::Exists($probe)) { $probe = [IO.Path]::GetDirectoryName($probe) }
+    if ($probe) {
+        $top = & $GitExe -C $probe rev-parse --show-toplevel 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            Say "The build folder can't be inside a folder of code kept with git ($top): git would see the builds as new files." 'Red'
+            return $null
+        }
+    }
+    if ($Create) {
+        try { [void][IO.Directory]::CreateDirectory($p) }
+        catch {
+            Say "Couldn't make the folder $p ($($_.Exception.Message))." 'Red'
+            return $null
+        }
+    }
+    elseif (-not [IO.Directory]::Exists($p)) {
+        Say "The build folder $p isn't there (is its drive plugged in?)." 'Yellow'
+        return $null
+    }
+    return $p
+}
+
+$ChosenBuildDir = $null
+if ("$BuildDir".Trim() -eq 'default') {
+    if (-not $RepoGiven) { Remove-Item -Force -LiteralPath $BuildChoice -ErrorAction SilentlyContinue }
+}
+elseif ($BuildDir) {
+    $ChosenBuildDir = Resolve-BuildDir $BuildDir -Create
+    if (-not $ChosenBuildDir) {
+        Stop-WithMessage 'Nothing was changed. Run it again with another folder, like -BuildDir D:\Builds'
+    }
+    if (-not $RepoGiven) {
+        New-Item -ItemType Directory -Force -Path $Home_ | Out-Null
+        Set-Content -LiteralPath $BuildChoice -Value $ChosenBuildDir -Encoding UTF8
+    }
+}
+elseif (-not $RepoGiven -and (Test-Path -LiteralPath $BuildChoice)) {
+    $rememberedDir = "$(Get-Content -LiteralPath $BuildChoice -TotalCount 1 -Encoding UTF8)".Trim()
+    if ($rememberedDir) {
+        $ChosenBuildDir = Resolve-BuildDir $rememberedDir
+        if (-not $ChosenBuildDir) { Say 'So this time it builds beside the code instead.' 'Yellow' }
+    }
+}
+$TargetDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath((Join-Path $Repo 'target'))
+if ($ChosenBuildDir) {
+    $TargetDir = [IO.Path]::Combine($ChosenBuildDir, 'MusicOrganiser-build')
+    Say "Building in $TargetDir (-BuildDir default builds beside the code again)." 'DarkGray'
 }
 
 function Git {
@@ -236,63 +334,195 @@ if ((Test-Path $newer) -and (Test-Path $Installed) -and $PSCommandPath -eq $Inst
 }
 
 # --- Build and run ----------------------------------------------------------------------------------------------
-# Below this much free space (in GB) the build's leftovers are cleared first; below the second it doesn't start.
-$LowSpaceGb = 10
+# Below this much free space (in GB) on the drive it builds on, the build folder is cleared first, and if there still
+# isn't enough the build waits for the next push.
 $NeededGb = 4
-# The build folder only grows: each version built leaves its own copies of what changed, which are never used again.
-# Past this size (in GB) it's cleared before the next build, which then takes a few minutes, as the first one did
-# (rule 28: the app cleans up after itself).
-$TargetCapGb = 25
+# Cargo never deletes the old pieces of earlier builds, so the build folder only ever grows: by gigabytes over a few
+# weeks of pushes. Past this size (in GB) it's cleared once the new app is open, and the next build starts from scratch.
+$MaxBuildGb = 25
+# The incremental cache (what cargo keeps of the app's own code between builds) makes the build after a push about
+# five times quicker, so it's kept; but its old copies pile up, so past this size (in GB) just the cache is cleared.
+$MaxIncrementalGb = 5
 
-function Get-FolderGb([string]$Path) {
-    # The size of the files in $Path, in GB; 0 when it isn't there or can't be read through. Each file's size comes
-    # with the folder's listing, so no file is opened or asked about one by one.
-    if (-not (Test-Path -LiteralPath $Path)) { return 0 }
+function Test-BuildFolder([string]$Path) {
+    # True only for a whole path to a folder cargo builds in: when cargo makes one, it puts a CACHEDIR.TAG in it that
+    # says "created by cargo". Everything that clears build files asks this first, so a wrong or empty path, or a
+    # folder cargo didn't make, never has anything cleared.
+    if (-not $Path -or -not [IO.Path]::IsPathRooted($Path)) { return $false }
+    if ($OnWindows -and $Path -notmatch '^([A-Za-z]:[\\/]|[\\/]{2})') { return $false }
     try {
-        $bytes = 0
-        foreach ($file in ([System.IO.DirectoryInfo]::new($Path)).EnumerateFiles('*', [System.IO.SearchOption]::AllDirectories)) {
-            $bytes += $file.Length
+        $tag = [IO.File]::ReadAllText([IO.Path]::Combine($Path, 'CACHEDIR.TAG'))
+        return $tag.StartsWith('Signature: 8a477f597d28d172789f06886806bc55') -and $tag.Contains('created by cargo')
+    }
+    catch { return $false }
+}
+
+function Remove-Tree([string]$Path) {
+    # Deletes a folder or file for good. A link (a junction or symbolic link) is removed as a link and never gone
+    # into, so what it points to is never touched. What Windows won't let go (a file in use) stays; cargo rebuilds it.
+    try { $attr = [IO.File]::GetAttributes($Path) } catch { return }
+    $isLink = ($attr -band [IO.FileAttributes]::ReparsePoint) -ne 0
+    $isDir = ($attr -band [IO.FileAttributes]::Directory) -ne 0
+    try {
+        if (-not $isDir) {
+            if (($attr -band [IO.FileAttributes]::ReadOnly) -ne 0) { [IO.File]::SetAttributes($Path, [IO.FileAttributes]::Normal) }
+            [IO.File]::Delete($Path)
         }
-        return $bytes / 1GB
-    } catch { return 0 }
+        elseif ($isLink) { [IO.Directory]::Delete($Path, $false) }
+        else { [IO.Directory]::Delete($Path, $true) }   # .NET's own: links inside are removed, not gone into
+        return
+    } catch { }
+    if (-not $isDir -or $isLink) { return }
+    # Something was in the way (a read-only file, say): one by one, then.
+    try { $inside = [IO.Directory]::GetFileSystemEntries($Path) } catch { return }
+    foreach ($entry in $inside) { Remove-Tree $entry }
+    try { [IO.Directory]::Delete($Path, $false) } catch { }
+}
+
+function Clear-BuildFolder([string]$Path) {
+    # Empties a build folder of what cargo makes in it: its debug and release builds and its scratch files. Only
+    # those, so even a build folder that's a link to a folder holding other things loses nothing else; the folder
+    # itself (or the link) stays. $false when $Path isn't a build folder, and then nothing is touched.
+    if (-not (Test-BuildFolder $Path)) { return $false }
+    foreach ($name in 'debug', 'release', 'tmp') { Remove-Tree ([IO.Path]::Combine($Path, $name)) }
+    return $true
+}
+
+function Get-FolderGb([string]$Path, [string]$Skip = '') {
+    # How big a folder is, in GB, leaving out the folder $Skip inside it; 0 when it isn't there. .NET's own listing
+    # (PowerShell's takes several times as long on a big folder), and links inside are counted as links, not gone into.
+    $bytes = 0L
+    if ($Skip) { $Skip = [IO.Path]::GetFullPath($Skip).TrimEnd('\', '/') }
+    $todo = [System.Collections.Generic.Stack[string]]::new()
+    $todo.Push($Path)
+    while ($todo.Count -gt 0) {
+        try {
+            $dir = [IO.DirectoryInfo]::new($todo.Pop())
+            foreach ($file in $dir.EnumerateFiles()) { $bytes += $file.Length }
+            foreach ($sub in $dir.EnumerateDirectories()) {
+                if (($sub.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0 -and
+                    -not [string]::Equals($sub.FullName, $Skip, [StringComparison]::OrdinalIgnoreCase)) { $todo.Push($sub.FullName) }
+            }
+        } catch { }
+    }
+    return $bytes / 1GB
+}
+
+$SaidNotBuildFolder = $false
+function Limit-BuildFolder([string]$Path) {
+    # Keeps the build folder in check. Called once the new app is open (it runs from its own copy in run\), so
+    # measuring a big folder never holds it up. Only what clearing would remove is measured: cargo's debug, release
+    # and scratch folders. Past $MaxBuildGb they're cleared, and the next build takes the long first-build time once;
+    # otherwise past $MaxIncrementalGb just the incremental cache is, and the next build takes a little longer.
+    if (-not (Test-BuildFolder $Path)) {
+        if ([IO.Directory]::Exists($Path) -and -not $script:SaidNotBuildFolder) {
+            $script:SaidNotBuildFolder = $true
+            Say "$Path has no mark from cargo saying it made it (CACHEDIR.TAG), so the launcher never clears it." 'Yellow'
+        }
+        return
+    }
+    $incremental = [IO.Path]::Combine($Path, 'debug', 'incremental')
+    $incrementalGb = Get-FolderGb $incremental
+    $gb = $incrementalGb + (Get-FolderGb ([IO.Path]::Combine($Path, 'debug')) $incremental) +
+        (Get-FolderGb ([IO.Path]::Combine($Path, 'release'))) + (Get-FolderGb ([IO.Path]::Combine($Path, 'tmp')))
+    if ($gb -gt $MaxBuildGb) {
+        if (Clear-BuildFolder $Path) {
+            Say ("The build folder had grown to {0:N1} GB, so it was cleared. The next build starts from scratch (a few minutes longer, once)." -f $gb) 'Yellow'
+        }
+    }
+    elseif ($incrementalGb -gt $MaxIncrementalGb) {
+        Remove-Tree $incremental
+        if (-not [IO.Directory]::Exists($incremental)) {
+            Say ("The incremental cache had grown to {0:N1} GB, so it was cleared. The next build takes a little longer, once." -f $incrementalGb) 'Yellow'
+        }
+    }
 }
 
 function Get-FreeGb([string]$Path) {
     # The free space on the drive holding $Path (or its nearest folder that exists), in GB; $null when unknown.
     try {
         $probe = $Path
-        while ($probe -and -not (Test-Path $probe)) { $probe = Split-Path $probe -Parent }
+        while ($probe -and -not (Test-Path -LiteralPath $probe)) { $probe = [IO.Path]::GetDirectoryName($probe) }
         if (-not $probe) { return $null }
-        $root = [System.IO.Path]::GetPathRoot((Resolve-Path $probe).Path)
+        $root = [System.IO.Path]::GetPathRoot((Resolve-Path -LiteralPath $probe).ProviderPath)
         return [System.IO.DriveInfo]::new($root).AvailableFreeSpace / 1GB
     } catch { return $null }
 }
 
+function Get-PdbName([string]$Program) {
+    # The name of the debugging-info file (.pdb) a Windows program looks for, from its CodeView record; $null when it
+    # has none. rustc links with /PDBALTPATH:%_PDB%, so the program holds just the file's name, not where it was
+    # built, and a crash's backtrace finds it only beside the program (or in the folder it was started in).
+    try {
+        $fs = [IO.File]::OpenRead($Program)
+        try {
+            $r = New-Object IO.BinaryReader($fs)
+            $fs.Position = 0x3C
+            $pe = [long]$r.ReadUInt32()
+            $fs.Position = $pe
+            if ($r.ReadUInt32() -ne 0x4550) { return $null }   # "PE\0\0"
+            $fs.Position = $pe + 6
+            $sections = [int]$r.ReadUInt16()
+            $fs.Position = $pe + 20
+            $optional = $pe + 24
+            $sectionTable = $optional + [long]$r.ReadUInt16()
+            $fs.Position = $optional
+            $dataDirs = if ($r.ReadUInt16() -eq 0x20B) { $optional + 112 } else { $optional + 96 }
+            $fs.Position = $dataDirs + 6 * 8   # data directory 6: the debug directory
+            $debugRva = [long]$r.ReadUInt32()
+            $debugSize = [long]$r.ReadUInt32()
+            if ($debugRva -eq 0) { return $null }
+            $debugAt = $null
+            for ($i = 0; $i -lt $sections; $i++) {
+                $fs.Position = $sectionTable + 40 * $i + 8
+                $virtualSize = [long]$r.ReadUInt32()
+                $virtualAt = [long]$r.ReadUInt32()
+                $rawSize = [long]$r.ReadUInt32()
+                $rawAt = [long]$r.ReadUInt32()
+                if ($debugRva -ge $virtualAt -and $debugRva -lt $virtualAt + [Math]::Max($virtualSize, $rawSize)) {
+                    $debugAt = $debugRva - $virtualAt + $rawAt
+                    break
+                }
+            }
+            if ($null -eq $debugAt) { return $null }
+            for ($i = 0; $i -lt [Math]::Floor($debugSize / 28); $i++) {
+                $fs.Position = $debugAt + 28 * $i + 12
+                $type = $r.ReadUInt32()
+                $size = [long]$r.ReadUInt32()
+                $null = $r.ReadUInt32()
+                $at = [long]$r.ReadUInt32()
+                if ($type -ne 2 -or $size -le 24) { continue }   # 2: CodeView
+                $fs.Position = $at
+                if ($r.ReadUInt32() -ne 0x53445352) { continue }   # "RSDS"
+                $fs.Position = $at + 24   # after the GUID and age
+                $name = [Text.Encoding]::UTF8.GetString($r.ReadBytes([int]$size - 24)).Split([char]0)[0]
+                return ($name -split '[\\/]')[-1]
+            }
+        }
+        finally { $fs.Dispose() }
+    }
+    catch { }
+    return $null
+}
+
 function Build-App {
-    # Builds while the app (if any) stays open, then copies the new app into run\ under a new name. Returns its path,
-    # or $null when the build failed (what cargo said is shown).
+    # Builds while the app (if any) stays open, then copies the new app into a folder of its own in run\. Returns its
+    # path, or $null when the build failed (what cargo said is shown).
     # What cargo says is shown as it goes, so a long first build doesn't look stuck, and a failure shows its cause.
     Say "$(Get-Date -Format 'HH:mm:ss')  Building..." 'DarkGray'
     # The build folder is named, so a CARGO_TARGET_DIR set on the PC can't move the app somewhere this doesn't look.
-    $targetDir = Join-Path $Repo 'target'
-    # Grown past the cap: the build's leftovers go (the open app runs from its copy in run\, so nothing in use).
-    $targetGb = Get-FolderGb $targetDir
-    if ($targetGb -gt $TargetCapGb) {
-        Say ("The build folder has grown to {0:N0} GB. Clearing it, so this build starts afresh (a few minutes)..." -f $targetGb) 'Yellow'
-        Remove-Item -LiteralPath $targetDir -Recurse -Force -ErrorAction SilentlyContinue
-    }
-    # A full drive makes the compiler stop part way ("no space on device"). Before building, the build's own
-    # leftovers (the incremental cache and any release build; they only speed builds up) are cleared when space is
-    # low, and the build waits when there still isn't enough, saying how much is free.
+    $targetDir = $TargetDir
+    # A full drive makes the compiler stop part way ("no space on device"). Before building, when space is short the
+    # build folder is cleared (it only speeds builds up), and the build waits when there still isn't enough, saying
+    # how much is free.
     $freeGb = Get-FreeGb $targetDir
-    if ($null -ne $freeGb -and $freeGb -lt $LowSpaceGb) {
-        Say ("Only {0:N1} GB free on the drive the app builds on. Clearing the build's leftovers..." -f $freeGb) 'Yellow'
-        foreach ($leftover in @((Join-Path (Join-Path $targetDir 'debug') 'incremental'), (Join-Path $targetDir 'release'))) {
-            Remove-Item -Recurse -Force $leftover -ErrorAction SilentlyContinue
+    if ($null -ne $freeGb -and $freeGb -lt $NeededGb) {
+        if (Clear-BuildFolder $targetDir) {
+            Say ("Only {0:N1} GB was free on the drive the app builds on, so the build folder was cleared (the next build starts from scratch)." -f $freeGb) 'Yellow'
+            $freeGb = Get-FreeGb $targetDir
         }
-        $freeGb = Get-FreeGb $targetDir
         if ($null -ne $freeGb -and $freeGb -lt $NeededGb) {
-            Say ("Still only {0:N1} GB free: a build needs about {1} GB. Free some space on that drive (or delete $targetDir, which is rebuilt), and the next push is tried again." -f $freeGb, $NeededGb) 'Red'
+            Say ("Only {0:N1} GB free: a build needs about {1} GB. Free some space on that drive, and the next push is tried again." -f $freeGb, $NeededGb) 'Red'
             return $null
         }
     }
@@ -308,12 +538,12 @@ function Build-App {
             Say "  $_" 'DarkGray'
         }
     if ($LASTEXITCODE -ne 0 -and $full) {
-        Say "The drive the app builds on is full. Free some space on it (or delete $targetDir, which is rebuilt), and the next push is tried again." 'Red'
+        Say "The drive the app builds on is full. Free some space on it; the next push is tried again (with the build folder cleared first if space is still short)." 'Red'
         return $null
     }
     if ($LASTEXITCODE -ne 0 -and $crashed) {
         Say 'The compiler crashed. Clearing its incremental cache and trying once more...' 'Yellow'
-        Remove-Item -Recurse -Force (Join-Path (Join-Path $targetDir 'debug') 'incremental') -ErrorAction SilentlyContinue
+        if (Test-BuildFolder $targetDir) { Remove-Tree ([IO.Path]::Combine($targetDir, 'debug', 'incremental')) }
         & $CargoExe build --manifest-path (Join-Path $Repo 'Cargo.toml') --target-dir $targetDir --bin $AppName --color never 2>&1 |
             ForEach-Object { Say "  $_" 'DarkGray' }
     }
@@ -321,22 +551,63 @@ function Build-App {
         Say 'The build failed (what cargo said is above). The app keeps the version it has; the next push is tried again.' 'Red'
         return $null
     }
-    $built = Join-Path (Join-Path $targetDir 'debug') $Exe
-    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-    $copy = Join-Path $RunDir $(if ($OnWindows) { "$AppName-$stamp.exe" } else { "$AppName-$stamp" })
+    $built = [IO.Path]::Combine($targetDir, 'debug', $Exe)
+    # Each build gets a folder of its own, so its debugging info can sit beside it under the name it looks for.
+    $folder = Join-Path $RunDir (Get-Date -Format 'yyyyMMdd-HHmmss')
+    $copy = Join-Path $folder $Exe
     # A copy that fails (a full disk, antivirus holding the file) counts as a failed build: the open app stays as it is.
-    try { Copy-Item -Force $built $copy -ErrorAction Stop }
+    try {
+        $null = [IO.Directory]::CreateDirectory($folder)
+        Copy-Item -Force -LiteralPath $built -Destination $copy -ErrorAction Stop
+    }
     catch {
         Say "Couldn't copy the new build ($($_.Exception.Message)). The app keeps the version it has." 'Red'
         return $null
+    }
+    if ($OnWindows) {
+        # Its debugging info (.pdb) goes beside it, so a crash log's backtrace names the functions and lines. cargo
+        # keeps it as deps\<the name the app looks for>, and also as <app>.pdb beside the app it built.
+        $pdbName = Get-PdbName $copy
+        $plain = ($AppName -replace '-', '_') + '.pdb'
+        $from = $null
+        if ($pdbName -and [IO.File]::Exists([IO.Path]::Combine($targetDir, 'debug', 'deps', $pdbName))) {
+            $from = [IO.Path]::Combine($targetDir, 'debug', 'deps', $pdbName)
+        }
+        elseif ([IO.File]::Exists([IO.Path]::Combine($targetDir, 'debug', $plain))) {
+            $from = [IO.Path]::Combine($targetDir, 'debug', $plain)
+        }
+        if ($from) {
+            $to = Join-Path $folder $(if ($pdbName) { $pdbName } else { $plain })
+            try { Copy-Item -Force -LiteralPath $from -Destination $to -ErrorAction Stop }
+            catch { Say "Couldn't copy the debugging info ($($_.Exception.Message)): a crash log may not name the functions." 'Yellow' }
+        }
     }
     $copy
 }
 
 function Remove-OldBuilds([string]$Keep) {
-    # Older copies in run\ that no open app is using. One still in use just stays until next time.
-    Get-ChildItem -Path $RunDir -File -ErrorAction SilentlyContinue | Where-Object { $_.FullName -ne $Keep } |
-        ForEach-Object { Remove-Item -Force $_.FullName -ErrorAction SilentlyContinue }
+    # Older builds in run\ that no open app is using: each in a folder of its own (the app and its debugging info),
+    # and the single files older launchers left. One still in use just stays until next time.
+    $keepFolder = [IO.Path]::GetDirectoryName($Keep)
+    Get-ChildItem -LiteralPath $RunDir -Force -ErrorAction SilentlyContinue | Where-Object { $_.FullName -ne $keepFolder } |
+        ForEach-Object {
+            $isLink = ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+            if ($_.PSIsContainer -and $_.Name -match '^\d{8}-\d{6}$' -and $isLink) {
+                Remove-Tree $_.FullName   # a link named like a build: just the link goes, never what it leads to
+            }
+            elseif ($_.PSIsContainer -and $_.Name -match '^\d{8}-\d{6}$') {
+                # The app first: Windows won't delete it while it's open, and then its folder stays as it is.
+                try {
+                    $old = Join-Path $_.FullName $Exe
+                    if ([IO.File]::Exists($old)) { [IO.File]::Delete($old) }
+                    Remove-Tree $_.FullName
+                }
+                catch { }
+            }
+            elseif (-not $_.PSIsContainer -and $_.Name -like "$AppName-*") {
+                Remove-Item -Force -LiteralPath $_.FullName -ErrorAction SilentlyContinue
+            }
+        }
 }
 
 function Start-App([string]$Path) {
@@ -386,13 +657,31 @@ Say 'In the app, F12 saves a note (and a picture) for Claude.' 'Cyan'
 Say 'Press Ctrl+C here, or close this window, to stop. (Close just the app and the next change opens it again.)' 'Cyan'
 Say ''
 
+# Once the builds go to another drive (-BuildDir), the launcher's own old builds beside the code (often many GB on C:)
+# are cleared, and again after any run that had to build there because that drive wasn't plugged in. Only its debug
+# builds: the twin tests build their release builds there too, and keep them.
+if ($ChosenBuildDir) {
+    $oldTarget = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath((Join-Path $Repo 'target'))
+    $oldBuilds = [IO.Path]::Combine($oldTarget, 'debug')
+    if ((Test-BuildFolder $oldTarget) -and [IO.Directory]::Exists($oldBuilds)) {
+        Say "Clearing the old builds beside the code ($oldBuilds)..." 'DarkGray'
+        $gb = Get-FolderGb $oldBuilds
+        Remove-Tree $oldBuilds
+        Say ("Done: {0:N1} GB freed." -f ($gb - (Get-FolderGb $oldBuilds))) 'Green'
+    }
+}
+
 $current = Build-App
 if (-not $current) {
     if ($NoWatch -or $PullEvery -le 0) { exit 1 }
     Say 'Waiting for a push that fixes it...' 'Yellow'
 }
 $app = $null
-if ($current) { $app = Start-App $current; Remove-OldBuilds $current }
+if ($current) {
+    $app = Start-App $current
+    Remove-OldBuilds $current
+    Limit-BuildFolder $TargetDir
+}
 if ($NoWatch -or $PullEvery -le 0) {
     if ($app) { $app.WaitForExit() }
     exit 0
@@ -442,6 +731,7 @@ try {
         $saidClosed = $false
         Remove-OldBuilds $current
         Say "$(Get-Date -Format 'HH:mm:ss')  The app is open on the new build." 'Green'
+        Limit-BuildFolder $TargetDir
     }
 }
 finally {

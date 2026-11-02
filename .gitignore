@@ -1,5 +1,7 @@
 /target/
 /tools/galaxycheck/target/
+# The launcher's build folder (-BuildDir), wherever it ends up
+MusicOrganiser-build/
 **/*.rs.bk
 .DS_Store
 Thumbs.db
