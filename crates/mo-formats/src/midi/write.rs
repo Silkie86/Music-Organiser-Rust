@@ -26,6 +26,7 @@
 //! too far for the file. Notes of no length and notes over each other on the same key are fixed (or refused, if
 //! [`WriteOptions::tidy`] says so), because a MIDI 1.0 file can't hold them in a way every reader agrees on.
 
+use std::collections::HashMap;
 use std::fmt;
 
 use super::{Controller, ControllerKind, MidiPart};
@@ -115,7 +116,21 @@ pub struct WriteOptions {
     pub tidy: Tidy,
 }
 
-/// Why a song couldn't be written. `track` counts the song's tracks from 0.
+/// A written file, and what MIDI 1.0 made it leave out, so the caller can say so (the file is written anyway: a
+/// drag or an export shouldn't fail over it).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Written {
+    /// The Standard MIDI File's bytes.
+    pub bytes: Vec<u8>,
+    /// MIDI 2.0's per-note and relative controllers left out: MIDI 1.0 has no message for them.
+    pub dropped_controllers: usize,
+    /// Tracks (by place in [`SmfSong::tracks`]) that had to share a channel with an earlier track of another sound,
+    /// so they play with that sound: more than 15 different sounds besides drums.
+    pub shared_channels: Vec<usize>,
+}
+
+/// Why a song couldn't be written. `track` is the track's place in [`SmfSong::tracks`] (from 0), whichever format
+/// is written.
 #[derive(Clone, Debug, PartialEq)]
 pub enum WriteError {
     /// Ticks a beat must be 1 to 32767 (the top bit means SMPTE time, which this writer doesn't write).
@@ -254,7 +269,9 @@ pub fn fits_midi1(kind: ControllerKind) -> bool {
 
 impl SmfSong {
     /// A clip's tracks as a song, as the C# writer lays them out: each track on its own channel in order, skipping
-    /// channel 10 (General MIDI's drums, which a clip doesn't mark), and round again after 15.
+    /// channel 10 (General MIDI's drums, which a clip doesn't mark), and round again after 15 (a clip's tracks set no
+    /// sound, so sharing a channel loses nothing). Its notes are taken as they are: [`write_clip`] lengthens FL's
+    /// steps first.
     pub fn from_clip(clip: &MidiClip) -> SmfSong {
         let mut channels = melodic_channels();
         SmfSong {
@@ -277,20 +294,45 @@ impl SmfSong {
         }
     }
 
-    /// Parts a MIDI reader found as a song, a track each: drum parts on channel 10, the others on the other
-    /// channels in order (round again after 15). Each keeps its track's own name, its sound and its controllers; the
-    /// song takes the first part's tempo. Parts at different ticks a beat are an error.
+    /// Parts a MIDI reader found as a song, a track each. Each keeps its track's own name, its sound and its
+    /// controllers; the song takes the first part's tempo. Parts at different ticks a beat are an error.
+    ///
+    /// A part doesn't say which channel it was on, nor where its clip ended (the readers don't keep either), so the
+    /// channels are handed out again and the tracks end at their last note:
+    /// - drum parts go on channel 10;
+    /// - the others take the other 15 channels in order, a channel each while there are enough;
+    /// - with more than 15, parts with the same sound share a channel (a channel plays one sound at a time); past 15
+    ///   different sounds, channels are shared round again and [`Written::shared_channels`] says which tracks lost
+    ///   their sound.
     pub fn from_parts(name: &str, parts: &[MidiPart]) -> Result<SmfSong, WriteError> {
         let ppq = parts.first().map_or(96, |p| p.ppq);
         if let Some(other) = parts.iter().find(|p| p.ppq != ppq) {
             return Err(WriteError::MixedPpq { first: ppq, other: other.ppq });
         }
+        let melodic = parts.iter().filter(|p| !p.drums).count();
+        let per_sound = melodic > usize::from(CHANNELS - 1);
         let mut channels = melodic_channels();
+        // With too many parts: the channel each sound got (a part with no sound counts as a sound of its own).
+        let mut by_sound: Vec<(Option<u8>, u8)> = Vec::new();
+        let mut channel_for = |p: &MidiPart| {
+            if p.drums {
+                return DRUM_CHANNEL;
+            }
+            if !per_sound {
+                return channels.next().unwrap_or_default();
+            }
+            if let Some(&(_, ch)) = by_sound.iter().find(|(sound, _)| *sound == p.program) {
+                return ch;
+            }
+            let ch = channels.next().unwrap_or_default();
+            by_sound.push((p.program, ch));
+            ch
+        };
         let tracks = parts
             .iter()
             .map(|p| SmfTrack {
                 name: if p.track_name.is_empty() { p.name.clone() } else { p.track_name.clone() },
-                channel: if p.drums { DRUM_CHANNEL } else { channels.next().unwrap_or_default() },
+                channel: channel_for(p),
                 program: p.program,
                 notes: p.notes.clone(),
                 controllers: p.controllers.clone(),
@@ -312,13 +354,58 @@ fn melodic_channels() -> impl Iterator<Item = u8> {
     (0..CHANNELS).filter(|&c| c != DRUM_CHANNEL).cycle()
 }
 
-/// A clip as a MIDI file, as the C# `MidiWriter.Write` makes it: format 1, no tempo, notes fixed.
-pub fn write_clip(clip: &MidiClip) -> Result<Vec<u8>, WriteError> {
-    write(&SmfSong::from_clip(clip), &WriteOptions::default())
+/// A clip as a MIDI file, as the C# `MidiWriter.Write` makes it: format 1, no tempo, notes fixed. FL's
+/// step-sequencer steps (which have no length) each play a sixteenth, or up to the next note on their key or the
+/// clip's end if that's sooner, as the MIDI page reads them ([`lengthen_steps`]); written as they are, a sampler
+/// would barely sound them.
+pub fn write_clip(clip: &MidiClip) -> Result<Written, WriteError> {
+    let mut song = SmfSong::from_clip(clip);
+    let sixteenth = i64::from(clip.ppq / 4);
+    let longest = |_: u8| sixteenth;
+    for track in &mut song.tracks {
+        let notes = std::mem::take(&mut track.notes);
+        track.notes = lengthen_steps(notes, clip.end.unwrap_or(i64::MAX), Some(&longest));
+    }
+    write(&song, &WriteOptions::default())
 }
 
-/// A song as the bytes of a Standard MIDI File.
-pub fn write(song: &SmfSong, options: &WriteOptions) -> Result<Vec<u8>, WriteError> {
+/// Gives steps from FL's step sequencer, which have no length, the length FL plays them for: FL plays a step until its
+/// sound ends. Here that's until the next note on the same key or the end of the clip, and no longer than `longest`
+/// gives for the key (how long its sample plays), when it knows. Other notes stay as they are.
+pub fn lengthen_steps(notes: Vec<NoteEvent>, clip_length: i64, longest: Option<&dyn Fn(u8) -> i64>) -> Vec<NoteEvent> {
+    if !notes.iter().any(|n| n.step) {
+        return notes;
+    }
+    // Each key's starts in order, so the next is found by halves: a whole song's steps can all be on one key.
+    // A muted note plays nothing, so it doesn't cut a step short.
+    let mut starts: HashMap<u8, Vec<i64>> = HashMap::new();
+    for n in notes.iter().filter(|n| !n.muted) {
+        starts.entry(n.key).or_default().push(n.start);
+    }
+    for on in starts.values_mut() {
+        on.sort_unstable();
+        on.dedup();
+    }
+    notes
+        .into_iter()
+        .map(|n| {
+            if !n.step {
+                return n;
+            }
+            let on = starts.get(&n.key).map(Vec::as_slice).unwrap_or_default();
+            let next = on.partition_point(|&s| s <= n.start);
+            let next = on.get(next).copied().unwrap_or(clip_length);
+            let mut length = next.min(clip_length).saturating_sub(n.start);
+            if let Some(most) = longest {
+                length = length.min(most(n.key));
+            }
+            NoteEvent { length: n.length.max(length), ..n }
+        })
+        .collect()
+}
+
+/// A song as the bytes of a Standard MIDI File, with what the file couldn't keep.
+pub fn write(song: &SmfSong, options: &WriteOptions) -> Result<Written, WriteError> {
     if song.ppq == 0 || song.ppq > 0x7FFF {
         return Err(WriteError::BadPpq(song.ppq));
     }
@@ -345,6 +432,7 @@ pub fn write(song: &SmfSong, options: &WriteOptions) -> Result<Vec<u8>, WriteErr
     };
 
     let mut tracks = Vec::new();
+    let mut dropped = 0;
     if single {
         let track = song.tracks.first();
         let name = match track {
@@ -352,13 +440,14 @@ pub fn write(song: &SmfSong, options: &WriteOptions) -> Result<Vec<u8>, WriteErr
             _ => &song.name,
         };
         let empty = SmfTrack::default();
-        tracks.push(track_chunk(0, song_events(name), track.unwrap_or(&empty), song.end, options.tidy)?);
+        tracks.push(track_chunk(0, song_events(name), track.unwrap_or(&empty), song.end, options.tidy, &mut dropped)?);
     } else {
-        // The first track holds no notes: the song's name and timing only, ending at once.
-        tracks.push(track_chunk(0, song_events(&song.name), &SmfTrack::default(), None, options.tidy)?);
+        // The first track holds no notes: the song's name and timing only, ending at once. It's no track of the
+        // song's, and holds nothing that can go wrong, so the 0 it's given never shows in an error.
+        tracks.push(track_chunk(0, song_events(&song.name), &SmfTrack::default(), None, options.tidy, &mut dropped)?);
         for (i, track) in song.tracks.iter().enumerate() {
-            let at = i.saturating_add(1);
-            tracks.push(track_chunk(at, vec![text_event(0x03, &track.name)], track, song.end, options.tidy)?);
+            let name = vec![text_event(0x03, &track.name)];
+            tracks.push(track_chunk(i, name, track, song.end, options.tidy, &mut dropped)?);
         }
     }
 
@@ -373,12 +462,30 @@ pub fn write(song: &SmfSong, options: &WriteOptions) -> Result<Vec<u8>, WriteErr
     for t in tracks {
         out.extend(t);
     }
-    Ok(out)
+    Ok(Written { bytes: out, dropped_controllers: dropped, shared_channels: shared_channels(&song.tracks) })
+}
+
+/// The tracks (by place in [`SmfSong::tracks`]) on a channel an earlier track uses with another sound (a track that
+/// sets none counts as one more sound: the instrument's own). A channel plays one sound at a time, so these play with
+/// the earlier track's sound, and a reader gives them its sound too.
+fn shared_channels(tracks: &[SmfTrack]) -> Vec<usize> {
+    // Each channel's first track's sound, once a track is on it.
+    let mut sounds: [Option<Option<u8>>; CHANNELS as usize] = [None; CHANNELS as usize];
+    let mut clashes = Vec::new();
+    for (i, t) in tracks.iter().enumerate() {
+        let Some(slot) = sounds.get_mut(usize::from(t.channel)) else { continue };
+        match slot {
+            Some(earlier) if *earlier != t.program => clashes.push(i),
+            Some(_) => {}
+            None => *slot = Some(t.program),
+        }
+    }
+    clashes
 }
 
 /// A channel message at a tick. `rank` puts messages at the same tick in order: the sound first, then notes ending,
-/// then controllers, then notes starting (so a note starts with its controllers already set). Messages of the same
-/// rank keep the order they were added in.
+/// then controllers, then notes starting (so a note starts with its controllers already set), then key pressure (on
+/// the notes just started). Messages of the same rank keep the order they were added in.
 struct Message {
     tick: i64,
     rank: u8,
@@ -390,6 +497,8 @@ const RANK_PROGRAM: u8 = 0;
 const RANK_NOTE_OFF: u8 = 1;
 const RANK_CONTROLLER: u8 = 2;
 const RANK_NOTE_ON: u8 = 3;
+/// Key pressure presses a note that's sounding, so at the tick a note starts it comes after the note-on.
+const RANK_KEY_PRESSURE: u8 = 4;
 
 /// One `MTrk` chunk: the meta events at its start, then the track's sound, notes and controllers, then its end.
 fn track_chunk(
@@ -398,6 +507,7 @@ fn track_chunk(
     track: &SmfTrack,
     end: Option<i64>,
     tidy: Tidy,
+    dropped: &mut usize,
 ) -> Result<Vec<u8>, WriteError> {
     let ch = track.channel;
     if ch >= CHANNELS {
@@ -437,7 +547,7 @@ fn track_chunk(
             ControllerKind::PitchBend => push(c.tick, RANK_CONTROLLER, &[0xE0 | ch, lsb, msb]),
             ControllerKind::ChannelPressure => push(c.tick, RANK_CONTROLLER, &[0xD0 | ch, seven]),
             ControllerKind::KeyPressure(k) if k > 127 => return out_of_range,
-            ControllerKind::KeyPressure(k) => push(c.tick, RANK_CONTROLLER, &[0xA0 | ch, k, seven]),
+            ControllerKind::KeyPressure(k) => push(c.tick, RANK_KEY_PRESSURE, &[0xA0 | ch, k, seven]),
             // MIDI 1.0's RPN and NRPN: choose the controller (bank, then index), then its value's 14 bits as data
             // entry (6, then 38), as MIDI 2.0's translation to MIDI 1.0 does.
             ControllerKind::Registered(bank, i) | ControllerKind::Assignable(bank, i) => {
@@ -450,8 +560,9 @@ fn track_chunk(
                     push(c.tick, RANK_CONTROLLER, &[0xB0 | ch, cc, v]);
                 }
             }
-            // Per-note and relative controllers are MIDI 2.0's own: MIDI 1.0 has no message for them.
-            _ => {}
+            // Per-note and relative controllers are MIDI 2.0's own: MIDI 1.0 has no message for them. Counted, so the
+            // caller can say so.
+            _ => *dropped = dropped.saturating_add(1),
         }
     }
     // Stable, so messages at the same tick and rank keep their order (an RPN's four controllers, say).
@@ -534,23 +645,29 @@ fn tidy_notes(track: usize, notes: &[NoteEvent], tidy: Tidy) -> Result<Vec<Tidie
     Ok(kept)
 }
 
-/// The gap from `last` to `tick` as a variable-length number: seven bits a byte, highest first, every byte but the
-/// last with its top bit set.
+/// The gap from `last` to `tick` as a variable-length number ([`push_vlq`]).
 fn push_delta(out: &mut Vec<u8>, track: usize, last: i64, tick: i64) -> Result<(), WriteError> {
     let delta = tick.checked_sub(last).filter(|d| (0..=MAX_DELTA).contains(d));
     let Some(delta) = delta.and_then(|d| u32::try_from(d).ok()) else {
         return Err(WriteError::TooFar { track, tick });
     };
+    push_vlq(out, delta);
+    Ok(())
+}
+
+/// A variable-length number, as a Standard MIDI File writes gaps between events and the lengths of meta events:
+/// seven bits a byte, highest first, every byte but the last with its top bit set. At most 0x0FFF_FFFF (four bytes);
+/// callers keep to that.
+fn push_vlq(out: &mut Vec<u8>, value: u32) {
     let mut started = false;
     for shift in [21u32, 14, 7] {
-        let part = ((delta >> shift) & 0x7F) as u8;
+        let part = ((value >> shift) & 0x7F) as u8;
         if started || part != 0 {
             out.push(part | 0x80);
             started = true;
         }
     }
-    out.push((delta & 0x7F) as u8);
-    Ok(())
+    out.push((value & 0x7F) as u8);
 }
 
 /// A text meta event (type 3 is a track's name), without its time: UTF-8, cut to 255 bytes at a whole letter.
@@ -560,7 +677,9 @@ fn text_event(kind: u8, text: &str) -> Vec<u8> {
         cut -= 1;
     }
     let bytes = text.as_bytes().get(..cut).unwrap_or_default();
-    let mut out = vec![0xFF, kind, cut as u8];
+    // The length is a variable-length number like any other: 128 bytes and up take two bytes to say.
+    let mut out = vec![0xFF, kind];
+    push_vlq(&mut out, cut as u32);
     out.extend_from_slice(bytes);
     out
 }
@@ -629,7 +748,12 @@ mod tests {
     fn long_names_are_cut_at_a_whole_letter() {
         let name = "é".repeat(200);
         let event = text_event(3, &name);
-        assert_eq!(event[2], 254);
-        assert!(std::str::from_utf8(&event[3..]).is_ok());
+        // 254 bytes (127 two-byte letters), said as a variable-length number: 0x81 0x7E.
+        assert_eq!(&event[..4], [0xFF, 3, 0x81, 0x7E]);
+        assert_eq!(event.len(), 4 + 254);
+        assert!(std::str::from_utf8(&event[4..]).is_ok());
+        // Up to 127 bytes the length is one byte.
+        assert_eq!(&text_event(3, &"a".repeat(127))[..3], [0xFF, 3, 0x7F]);
+        assert_eq!(&text_event(3, &"a".repeat(128))[..4], [0xFF, 3, 0x81, 0x00]);
     }
 }
