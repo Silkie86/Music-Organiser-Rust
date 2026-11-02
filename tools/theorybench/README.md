@@ -632,11 +632,13 @@ heard as a tune, 14 points ahead.
 ## The chord reader's first fit (2026-11-02)
 
 `chordfit` on POP909-CL (each song heard four ways) and Billboard set A, learning from folds 2 to 4 (538 and 436
-pieces) and measuring fold 1, from the hand-set numbers, `--lambda 1e-3`, 40 steps. At the start, 7.1 million
-readings over 1.77 million units are kept only because the labels accept them, and 3,495 of the 635,348 labelled ends
-(0.6%) move to the nearest place the reader can change chord. The loss per bar on fold 1, held out, falls from 2.79
-to 0.88 on POP909-CL's piano (full 2.71 to 0.87, split 2.61 to 0.87, upper 3.28 to 1.17) and from 0.58 to 0.42 on
-set A.
+pieces) and measuring fold 1, from the hand-set numbers, `--lambda 1e-3`, 40 steps. These numbers come from the run
+before the code review's fixes (how a render's fold is drawn, and the piano's bass line for `split` and `upper`), so
+the same run now starts a little lower (a loss of 2.406 a bar against 2.418); run it again before leaning on them. At
+the start, 7.1 million readings over 1.77 million units are kept only because the labels accept them, and 3,495 of
+the 635,348 labelled ends (0.6%) move to the nearest place the reader can change chord. The loss per bar on fold 1,
+held out, falls from 2.79 to 0.88 on POP909-CL's piano (full 2.71 to 0.87, split 2.61 to 0.87, upper 3.28 to 1.17)
+and from 0.58 to 0.42 on set A.
 
 Scored with `chords --weights` (fold 1 of POP909-CL and Billboard; RS200 and the sweep, never learned from, whole):
 
