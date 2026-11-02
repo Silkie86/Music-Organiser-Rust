@@ -124,10 +124,11 @@ fn blur(p: vec2<i32>, step: vec2<i32>) -> vec4<f32> {
     for (var i = -8; i <= 8; i++) {
         let w = exp(-f32(i * i) / (2.0 * 2.6 * 2.6));
         let q = p + step * i;
+        // Only what's on the layer counts, so the glow doesn't fade towards the picture's edges.
         if (all(q >= vec2(0)) && all(q < size)) {
             sum += textureLoad(source, q, 0) * w;
+            total += w;
         }
-        total += w;
     }
     return sum / total;
 }
@@ -379,12 +380,17 @@ impl Sky {
         self.count = count;
     }
 
+    /// Forgets the stars (a new library is coming).
+    pub(super) fn clear_stars(&mut self) {
+        (self.stars, self.count) = (None, 0);
+    }
+
     pub(super) fn has_stars(&self) -> bool {
         self.stars.is_some()
     }
 
     /// The layers for a picture `width` by `height` pixels, made again when the size changes.
-    fn layers(&mut self, width: u32, height: u32) -> &mut Layers {
+    fn make_layers(&mut self, width: u32, height: u32) {
         if self.layers.as_ref().is_none_or(|l| l.width != width || l.height != height) {
             let device = &self.device;
             let make = |label, w: u32, h: u32, format| {
@@ -439,8 +445,6 @@ impl Sky {
                 next: 0,
             });
         }
-        // Made just above when missing.
-        self.layers.get_or_insert_with(|| unreachable!())
     }
 
     /// Draws `view` at `scale` pixels per point, with `look`, over `background` (red, green, blue, 0 to 1), and
@@ -469,18 +473,13 @@ impl Sky {
             &look::bytes(&[look.core, look.glow, look.gain, 0.0, r, g, b, 1.0]),
         );
 
-        let count = self.count;
-        let stars = self.stars.clone();
-        let (stamp, crisp_pipeline, blur_across, blur_down, shade) = (
-            self.stamp.clone(),
-            self.crisp.clone(),
-            self.blur_across.clone(),
-            self.blur_down.clone(),
-            self.shade.clone(),
-        );
-        let groups: Vec<wgpu::BindGroup> = self.cameras.iter().map(|c| c.1.clone()).collect();
-        let device = self.device.clone();
-        let layers = self.layers(width, height);
+        self.make_layers(width, height);
+        let Some(layers) = self.layers.as_mut() else { unreachable!("made just above") };
+        let (count, stars) = (self.count, &self.stars);
+        let (stamp, crisp_pipeline, blur_across, blur_down, shade) =
+            (&self.stamp, &self.crisp, &self.blur_across, &self.blur_down, &self.shade);
+        let groups = [&self.cameras[0].1, &self.cameras[1].1, &self.cameras[2].1];
+        let device = &self.device;
         let picture = layers.pictures[layers.next].clone();
         layers.next = 1 - layers.next;
         let target = picture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -507,10 +506,10 @@ impl Sky {
                 .forget_lifetime()
         };
         // 1 and 2: the stamps, full and quarter size.
-        for (to, group) in [(&layers.stamps, &groups[0]), (&layers.small, &groups[1])] {
+        for (to, group) in [(&layers.stamps, groups[0]), (&layers.small, groups[1])] {
             let mut p = pass(&mut encoder, to, Some(wgpu::Color::TRANSPARENT));
-            if let Some(stars) = &stars {
-                p.set_pipeline(&stamp);
+            if let Some(stars) = stars {
+                p.set_pipeline(stamp);
                 p.set_bind_group(0, group, &[]);
                 p.set_vertex_buffer(0, stars.slice(..));
                 p.draw(0..6, 0..count);
@@ -518,7 +517,7 @@ impl Sky {
         }
         // 3: the glow.
         for (to, pipeline, group) in
-            [(&layers.across, &blur_across, &layers.blur_across), (&layers.glow, &blur_down, &layers.blur_down)]
+            [(&layers.across, blur_across, &layers.blur_across), (&layers.glow, blur_down, &layers.blur_down)]
         {
             let mut p = pass(&mut encoder, to, None);
             p.set_pipeline(pipeline);
@@ -528,17 +527,17 @@ impl Sky {
         // 4: the squeeze, into the picture.
         {
             let mut p = pass(&mut encoder, &target, None);
-            p.set_pipeline(&shade);
+            p.set_pipeline(shade);
             p.set_bind_group(0, &layers.shade, &[]);
             p.draw(0..3, 0..1);
         }
         // 5: close up, the crisp stars.
         if crisp > 0.01
-            && let Some(stars) = &stars
+            && let Some(stars) = stars
         {
             let mut p = pass(&mut encoder, &target, None);
-            p.set_pipeline(&crisp_pipeline);
-            p.set_bind_group(0, &groups[2], &[]);
+            p.set_pipeline(crisp_pipeline);
+            p.set_bind_group(0, groups[2], &[]);
             p.set_vertex_buffer(0, stars.slice(..));
             p.draw(0..6, 0..count);
         }
@@ -562,19 +561,6 @@ mod tests {
             .expect("the shader is valid");
     }
 
-    /// The answer of a future that wgpu has ready at once on a PC.
-    fn block<T>(f: impl std::future::Future<Output = T>) -> T {
-        let mut f = std::pin::pin!(f);
-        loop {
-            if let std::task::Poll::Ready(v) =
-                f.as_mut().poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
-            {
-                return v;
-            }
-            std::thread::yield_now();
-        }
-    }
-
     /// Draws 450,000 made-up stars in clumps on whatever graphics card there is (a software one will do) to PNGs in
     /// the folder GALAXY_GPU_LOOK names, at a few zooms, to judge the look by eye and to check the card takes every
     /// step.
@@ -585,9 +571,11 @@ mod tests {
         use mo_sounds::StarPoint;
         let Ok(out) = std::env::var("GALAXY_GPU_LOOK") else { return };
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
-        let adapter = block(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).expect("a card");
+        let adapter =
+            crate::gpu::wait(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).expect("a card");
         eprintln!("{:?}", adapter.get_info());
-        let (device, queue) = block(adapter.request_device(&wgpu::DeviceDescriptor::default())).expect("a device");
+        let (device, queue) =
+            crate::gpu::wait(adapter.request_device(&wgpu::DeviceDescriptor::default())).expect("a device");
         let mut seed = 12345u64;
         let mut rnd = || {
             seed ^= seed << 13;

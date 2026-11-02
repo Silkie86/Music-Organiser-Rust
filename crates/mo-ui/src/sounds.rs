@@ -355,6 +355,11 @@ pub fn graphics_ready(app: &AppWindow) {
     galaxy::draw(app);
 }
 
+/// The graphics card went (the window closed, or the card was reset): what the galaxy made on it goes too.
+pub fn graphics_gone(app: &AppWindow) {
+    galaxy::card_gone(app);
+}
+
 /// Wires the page and starts reading the sound library at `sounds_db` in the background, then how much your songs use
 /// each sound from the song library at `library_db` (both read-only). The sounds show as soon as they're read; the use
 /// counts and Most liked follow when they're worked out, as in the C# app. Show in folder and Copy path report on

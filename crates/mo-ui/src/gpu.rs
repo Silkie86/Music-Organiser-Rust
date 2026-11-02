@@ -33,6 +33,25 @@ pub fn choose() {
         log::info("Graphics", "MO_DRAW_CPU is set: the views draw on the processor");
         return;
     }
+    // Slint only finds out whether there's a card once the window is being made, too late to draw the usual way
+    // instead, so the card is looked for first.
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let options =
+        wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() };
+    match wait(instance.request_adapter(&options)) {
+        Ok(adapter) if adapter.get_info().device_type != wgpu::DeviceType::Cpu => {}
+        Ok(_) => {
+            log::warning("Graphics", "Only a software graphics card here, so the views draw on the processor");
+            return;
+        }
+        Err(e) => {
+            log::warning(
+                "Graphics",
+                &format!("No graphics card to draw with, so the views draw on the processor: {e}"),
+            );
+            return;
+        }
+    }
     let mut settings = WGPUSettings::default();
     settings.power_preference = wgpu::PowerPreference::HighPerformance;
     if let Err(e) = slint::BackendSelector::new().require_wgpu_30(WGPUConfiguration::Automatic(settings)).select() {
@@ -65,6 +84,10 @@ pub fn connect(app: &AppWindow) {
         RenderingState::RenderingTeardown => {
             GPU.with(|g| *g.borrow_mut() = None);
             GENERATION.with(|n| n.set(n.get() + 1));
+            // What the views made on the card goes with it, pictures on show included.
+            if let Some(app) = weak.upgrade() {
+                crate::sounds::graphics_gone(&app);
+            }
         }
         _ => {}
     });
@@ -89,19 +112,22 @@ pub fn checked<T>(device: &wgpu::Device, work: impl FnOnce() -> T) -> Result<T, 
     let memory = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
     let valid = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let out = work();
-    let invalid = now(valid.pop());
-    let full = now(memory.pop());
+    let invalid = wait(valid.pop());
+    let full = wait(memory.pop());
     match invalid.or(full) {
         Some(e) => Err(e.to_string()),
         None => Ok(out),
     }
 }
 
-/// The answer of a future that's ready at once (wgpu's error scopes are, on a PC); `None` if it isn't.
-fn now<T>(f: impl Future<Output = Option<T>>) -> Option<T> {
+/// The answer of a wgpu future. On a PC wgpu answers at once (the work is done by the time it's asked), so this only
+/// ever waits a moment.
+pub(crate) fn wait<T>(f: impl Future<Output = T>) -> T {
     let mut f = std::pin::pin!(f);
-    match f.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
-        Poll::Ready(v) => v,
-        Poll::Pending => None,
+    loop {
+        if let Poll::Ready(v) = f.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+            return v;
+        }
+        std::thread::yield_now();
     }
 }

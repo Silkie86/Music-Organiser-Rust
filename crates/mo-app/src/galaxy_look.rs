@@ -106,7 +106,7 @@ pub fn pack(stars: &[Option<StarPoint>], colours: &[i32], palette: &[[u8; 3]], s
     let mut bytes: Vec<u8> = Vec::with_capacity(stars.len() * STAR_BYTES);
     for want in [false, true] {
         let part: Vec<[u8; STAR_BYTES]> = stars.par_iter().enumerate().filter_map(|s| star(s, want)).collect();
-        bytes.extend(part.iter().flatten());
+        bytes.extend_from_slice(part.as_flattened());
     }
     bytes
 }

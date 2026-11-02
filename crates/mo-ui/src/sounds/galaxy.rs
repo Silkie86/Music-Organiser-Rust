@@ -192,8 +192,9 @@ thread_local! {
     static DRAWING: RefCell<Option<Newest<Picture>>> = const { RefCell::new(None) };
     static PACKING: RefCell<Option<Newest<SetAsk>>> = const { RefCell::new(None) };
     static CARD: RefCell<Option<OnCard>> = const { RefCell::new(None) };
-    /// The card refused to draw the galaxy once: it's drawn on the processor from then on.
-    static CARD_FAILED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The card (as `gpu::generation` counts) that refused to draw the galaxy: on that one it's drawn on the
+    /// processor from then on, and a new card is tried again.
+    static CARD_FAILED: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
     /// Moves a glide on a frame at a time, and when it last did.
     static FLIGHT: Timer = Timer::default();
     static LAST_FRAME: RefCell<Option<Instant>> = const { RefCell::new(None) };
@@ -725,6 +726,13 @@ pub(super) fn forget(g: &mut Galaxy) {
     g.view.most = most_zoom_for(0);
     g.grid = None;
     g.packed = None;
+    // The old library's stars on the card aren't drawn over the new one's.
+    CARD.with(|c| {
+        if let Some(on) = c.borrow_mut().as_mut() {
+            on.sky.clear_stars();
+            on.stars = 0;
+        }
+    });
     g.set_for = None;
     // Stars still being packed for the old library are too old to use.
     g.set_got = g.set_asked;
@@ -921,10 +929,12 @@ pub(super) fn draw(app: &AppWindow) {
     let types = app.global::<Theme>().get_sound_types();
     let mut palette: Vec<[u8; 3]> = types.iter().map(|c| [c.red(), c.green(), c.blue()]).collect();
     palette.push([110, 110, 110]);
-    let card = if HERE.with(|h| *h.borrow()) || CARD_FAILED.with(std::cell::Cell::get) { None } else { gpu::current() };
+    let failed = CARD_FAILED.with(std::cell::Cell::get);
+    let card = gpu::current().filter(|(_, generation)| !HERE.with(|h| *h.borrow()) && failed != Some(*generation));
     pack(app, &palette, card.is_some());
-    if let Some((gpu, generation)) = card {
-        match draw_on_card(app, &gpu, generation) {
+    if let Some((gpu, generation)) = &card {
+        let (gpu, generation) = (gpu, *generation);
+        match draw_on_card(app, gpu, generation) {
             Ok(true) => return,
             // The stars aren't on the card yet: the picture on show stays until they are.
             Ok(false) => {
@@ -937,7 +947,7 @@ pub(super) fn draw(app: &AppWindow) {
                     "Sounds",
                     &format!("The graphics card couldn't draw the galaxy, so the processor does: {e}"),
                 );
-                CARD_FAILED.with(|f| f.set(true));
+                CARD_FAILED.with(|f| f.set(Some(generation)));
                 CARD.with(|c| *c.borrow_mut() = None);
             }
         }
@@ -1050,6 +1060,24 @@ fn packed(app: &AppWindow, done: Packed) {
         draw(app);
         hover(app);
     }
+}
+
+/// The card went: the painter goes, and the picture made on it isn't shown any more (it's drawn again, on the next
+/// card or the processor, when the galaxy next is).
+pub(super) fn card_gone(app: &AppWindow) {
+    CARD.with(|c| *c.borrow_mut() = None);
+    let weak = app.as_weak();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(app) = weak.upgrade() {
+            app.global::<SoundsData>().set_galaxy_image(Image::default());
+        }
+        PAGE.with(|p| {
+            let g = &mut p.borrow_mut().galaxy;
+            g.drawn = None;
+            g.asked += 1;
+            g.drawn_id = g.asked;
+        });
+    });
 }
 
 /// Draws the galaxy on the card, now: `false` when its stars aren't there yet.

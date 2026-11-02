@@ -38,8 +38,6 @@ pub struct Rgba {
 pub struct Drawn {
     pub id: u64,
     pub view: View,
-    /// Pixels per point it was drawn at.
-    pub scale: f32,
     pub width: usize,
     pub height: usize,
     pub pixels: Vec<Rgba>,
@@ -165,7 +163,7 @@ impl Picture {
             }
             draw(mine.1, next);
         });
-        Drawn { id: self.id, view: self.view, scale: self.scale, width: w, height: h, pixels }
+        Drawn { id: self.id, view: self.view, width: w, height: h, pixels }
     }
 }
 
