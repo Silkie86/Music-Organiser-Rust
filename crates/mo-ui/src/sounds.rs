@@ -6,6 +6,7 @@
 
 mod galaxy;
 mod kit;
+mod sky;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -347,6 +348,16 @@ fn key_choices() -> Vec<String> {
 /// For the screenshots: work lists out on the window's thread, as there's no event loop to send them back with.
 pub fn compute_here() {
     HERE.with(|h| *h.borrow_mut() = true);
+}
+
+/// A graphics card came (the window is up, or came back): the galaxy is drawn on it.
+pub fn graphics_ready(app: &AppWindow) {
+    galaxy::draw(app);
+}
+
+/// The graphics card went (the window closed, or the card was reset): what the galaxy made on it goes too.
+pub fn graphics_gone(app: &AppWindow) {
+    galaxy::card_gone(app);
 }
 
 /// Wires the page and starts reading the sound library at `sounds_db` in the background, then how much your songs use

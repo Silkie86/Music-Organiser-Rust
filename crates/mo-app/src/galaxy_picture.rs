@@ -1,7 +1,7 @@
-//! The Sounds page's galaxy picture, without a window: every star drawn as a soft dot on a picture the size of the
-//! view, spread over every core, and where each one landed so the one under the mouse can be found. The page shows
-//! the picture; this is kept here (an optimised crate even in the launcher's debug build) because it draws half a
-//! million stars.
+//! The Sounds page's galaxy picture on the processor, without a window, for when there's no graphics card to draw
+//! with (and for the screenshots): every star drawn as a soft dot on a picture the size of the view, spread over
+//! every core. It's kept here (an optimised crate even in the launcher's debug build) because it draws half a million
+//! stars.
 //!
 //! To look like a galaxy rather than a scatter plot, the stars give off light: each one brightens what's under it
 //! (a "screen" blend, so a crowd of them glows towards white, the way a galaxy's core does), and behind them a soft
@@ -14,8 +14,6 @@ use rayon::prelude::*;
 
 use crate::galaxy_view::View;
 
-/// The grid the drawn stars are sorted into, for finding the one under the mouse (in pixels).
-const CELL: usize = 16;
 /// The nebula's grid, in points: each square gathers the light of the stars in it, then it's blurred and spread.
 const CLOUD: f32 = 5.0;
 /// How far the nebula's light spreads, in squares (each blur pass).
@@ -36,73 +34,13 @@ pub struct Rgba {
     pub a: u8,
 }
 
-/// A picture drawn: what it was asked as, its size in pixels, the pixels row by row, and where the stars went.
+/// A picture drawn: what it was asked as, its size in pixels and the pixels row by row.
 pub struct Drawn {
     pub id: u64,
     pub view: View,
-    /// Pixels per point it was drawn at.
-    pub scale: f32,
     pub width: usize,
     pub height: usize,
     pub pixels: Vec<Rgba>,
-    pub hits: Hits,
-}
-
-/// Where each shown star was drawn, by grid cell: (place in the list, x, y) in pixels, sorted by cell, and where each
-/// cell's stars start in that list.
-pub struct Hits {
-    columns: usize,
-    rows: usize,
-    stars: Vec<(usize, f32, f32)>,
-    starts: Vec<usize>,
-}
-
-impl Hits {
-    /// Sorts the drawn stars (place in the list, x, y in pixels, all on the picture) into a grid of `columns` by
-    /// `rows` cells.
-    fn new(columns: usize, rows: usize, drawn: Vec<(usize, f32, f32)>) -> Hits {
-        let cell_of = |&(_, x, y): &(usize, f32, f32)| {
-            ((y as usize / CELL).min(rows - 1)) * columns + (x as usize / CELL).min(columns - 1)
-        };
-        // Counted per cell, then each star put straight into its cell's place.
-        let mut starts = vec![0; columns * rows + 1];
-        for s in &drawn {
-            starts[cell_of(s) + 1] += 1;
-        }
-        for i in 1..starts.len() {
-            starts[i] += starts[i - 1];
-        }
-        let mut next = starts.clone();
-        let mut stars = vec![(0, 0.0, 0.0); drawn.len()];
-        for s in drawn {
-            let cell = cell_of(&s);
-            stars[next[cell]] = s;
-            next[cell] += 1;
-        }
-        Hits { columns, rows, stars, starts }
-    }
-
-    /// The shown star nearest (`x`, `y`) in pixels, within `near` pixels.
-    pub fn nearest(&self, x: f32, y: f32, near: f32) -> Option<usize> {
-        let (cx, cy) = ((x / CELL as f32).floor() as isize, (y / CELL as f32).floor() as isize);
-        let reach = (near / CELL as f32).ceil() as isize;
-        let mut best: Option<(f32, usize)> = None;
-        for gy in cy - reach..=cy + reach {
-            for gx in cx - reach..=cx + reach {
-                if gx < 0 || gy < 0 || gx as usize >= self.columns || gy as usize >= self.rows {
-                    continue;
-                }
-                let cell = gy as usize * self.columns + gx as usize;
-                for &(at, sx, sy) in &self.stars[self.starts[cell]..self.starts[cell + 1]] {
-                    let d = (sx - x).powi(2) + (sy - y).powi(2);
-                    if d <= near * near && best.is_none_or(|(b, _)| d < b) {
-                        best = Some((d, at));
-                    }
-                }
-            }
-        }
-        best.map(|b| b.1)
-    }
 }
 
 /// A picture of the stars: everything its thread needs.
@@ -225,15 +163,7 @@ impl Picture {
             }
             draw(mine.1, next);
         });
-        let columns = w.div_ceil(CELL).max(1);
-        let rows = h.div_ceil(CELL).max(1);
-        let drawn: Vec<(usize, f32, f32)> = placed
-            .par_iter()
-            .filter(|p| p.1 && p.3.x >= 0.0 && p.3.y >= 0.0 && p.3.x < w as f32 && p.3.y < h as f32)
-            .map(|p| (p.2, p.3.x, p.3.y))
-            .collect();
-        let hits = Hits::new(columns, rows, drawn);
-        Drawn { id: self.id, view: self.view, scale: self.scale, width: w, height: h, pixels, hits }
+        Drawn { id: self.id, view: self.view, width: w, height: h, pixels }
     }
 }
 
@@ -403,14 +333,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_star_under_the_mouse_is_the_nearest_within_reach() {
-        let hits = Hits::new(4, 4, vec![(3, 20.0, 20.0), (1, 5.0, 5.0), (2, 18.0, 5.0)]);
-        assert_eq!(hits.nearest(6.0, 5.0, 8.0), Some(1));
-        assert_eq!(hits.nearest(15.0, 5.0, 8.0), Some(2));
-        assert_eq!(hits.nearest(40.0, 40.0, 8.0), None);
-    }
-
-    #[test]
     fn a_disc_covers_its_middle_and_not_far_away() {
         let mut buf = vec![Rgba::default(); 100];
         let dot = Dot { x: 5.0, y: 5.0, r: 1.5, colour: [200, 100, 50], alpha: 1.0 };
@@ -490,7 +412,6 @@ mod tests {
         for y in middle - 30..middle + 30 {
             assert!(d.pixels[y * w + middle].a > 200, "row {y}");
         }
-        assert_eq!(d.hits.nearest(middle as f32, middle as f32, 8.0), Some(0));
     }
 }
 
