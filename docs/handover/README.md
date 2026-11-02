@@ -1,0 +1,151 @@
+# Handover: carry on the whole Rust rebuild (2026-11-02)
+
+Until now the work was done by several Claude sessions inside one claude.ai project, each owning one part (screens,
+harmony, Sounds, MIDI, Space, Backup, Presets, converter). Solomon is moving ALL of it to one Claude Code cloud session.
+This folder is everything that session needs. Those other sessions have stopped, so nothing here is owned by anyone
+else any more.
+
+## Read in this order
+
+1. `CLAUDE.md` (rules, checks before pushing) and `docs/spec.md` (3A keep/fold/rethink, 11 tests, 12 layout,
+   13 phase order, 14 rules).
+2. This file.
+3. `memory/` = the project's shared notes, copied as they were on 2026-11-02 (Solomon's drive paths replaced by
+   placeholders such as `<FL projects folder>`, because this repo is public). `[[name]]` in them means `memory/name.md`.
+   Start with `rust-rebuild-rules.md` (Solomon's rules 1-27), `rust-rebuild-status.md`, `rust-app-design-decisions.md`,
+   `app-screens-handover.md`, `app-screens-ui.md`, then `harmony-handoff.md`. The others are per-crate notes; read one
+   when you touch that crate.
+4. `docs/harmony/` = the harmony engine's design and experiment notes (they used to live outside the repo).
+
+Paths like `/mnt/project-files/...` in the notes pointed to a shared folder you can't see. Everything you need from
+it is copied into `docs/`; the rest was screenshots and bench output that can be made again.
+
+## How to work (short form, full rules in `memory/rust-rebuild-rules.md`)
+
+- Solomon is new to Rust: write PRs and replies in plain words. Keep going until he says stop; ask only for real
+  decisions. No deadlines.
+- Small PRs from fresh branches off `main`. Before pushing: `cargo fmt --all --check`,
+  `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` (CI uses Rust 1.99, so use
+  `cargo +1.99`; `CARGO_INCREMENTAL=0` saves disk; Linux needs `libasound2-dev`). When `mo-app` or the galaxy
+  changes, also run the same three with `--manifest-path tools/galaxycheck/Cargo.toml`.
+- Every PR gets a code review before merging. Pick the effort yourself and say which you used: xhigh for anything that
+  writes files or databases, high for readers and harmony, lower for small fixes.
+- Rule 18: you merge (squash) once the review's points are fixed and CI is green. Don't push to a build Solomon is
+  testing without asking.
+- Rule 19: after a batch merges (at the latest each phase), start a full CI run on `main` by hand (Actions, CI, Run
+  workflow), then an ultracode whole-app review, then fix what it finds. One is due now that phase 3 is nearly done
+  and many backends landed.
+- Force-push is refused. After a squash merge: `git fetch origin main <branch> && git checkout -B <branch>
+  origin/main && git merge -s ours origin/<branch>`, then push. Merging needs the PR head's full SHA.
+- On a `Cargo.lock` conflict, take main's, run `cargo metadata`, commit.
+- Databases (library.db, sounds.db, midi.db in `%LOCALAPPDATA%\MusicOrganiser`, shared with the C# app) stay
+  READ-ONLY until Solomon trusts a page. Rust-only side files (presets.db, curves.db, midi-index.db, backup.txt) are
+  fine. Anything that writes files: copy, check, rename. Never move or delete samples; fixes write "(fixed)" copies.
+- Screenshots: `mo-screens` renders pages headlessly; show Solomon every new or changed screenshot with the PR.
+- Solomon tests at home with the launcher (`tools/dev/Run latest.cmd`), which builds `main` or a pushed branch in
+  Debug. He sends notes with F12 in the app; they land in `%LOCALAPPDATA%\MusicOrganiser\notes` on his PC (ask him to
+  paste them, unless your session can reach his PC).
+- The old C# app (`Silkie86/Music-Organiser`, public) is the read-only reference: clone it into a scratch folder,
+  never push to it. The container can install .NET for twin tests: `apt-get install -y dotnet-sdk-10.0`
+  (`memory/cloud-container-tools.md`).
+
+## Where things stand
+
+Phases 0-2 (shell, file readers, Songs page) are done. Phase 3 (Sounds page) is nearly done. Phase 4/5 backends
+(Space, Backup, Presets, Curves, converter) are on main; most of their pages are not built yet. Phase 6 harmony is
+in progress. Main was at `deacf60` (#162) when this was written.
+
+### Open work in git
+
+- **PR #164** "Year strip on Sounds and Songs; Light by on the galaxy" (branch `claude/project-thread-uptbg1`,
+  2c33903). Local fmt/clippy/tests passed. To do: a quick code review, the galaxy check (the three checks with
+  `--manifest-path tools/galaxycheck/Cargo.toml`), green CI, merge, then reset that branch as above. Do this first.
+- Branch `claude/affectionate-noether-qw3i3h` (2 commits, your own earlier work): Bitwig proptest round-trip tests
+  plus review fixes, no PR yet. It is based on an older `main`, so rebase it onto `main` and open the PR.
+- All other `claude/project-thread-*` branches hold only merged work; leave them.
+
+### Each workstream and what's next
+
+**Screens and UI** (`mo-ui` Slint pages, `studio.slint` shared style, `mo-app` screen logic). Notes:
+`memory/app-screens-handover.md`, `memory/app-screens-ui.md`, `memory/gpu-for-graphics.md`.
+Queue from Solomon, in order:
+1. Finish #164.
+2. Lag on the galaxy: Solomon still feels it ("check the old project, it did a report to find the bottleneck").
+   The log shows a 332 ms freeze on Sounds "in no marked step" (drawing or layout). Find the C# app's performance
+   report or frame-timing code, port it, and measure before changing anything. Also: Sounds read takes ~833 s for
+   453,885 sounds and the Songs library read 15-87 s in his logs (the launcher builds Debug; mo-ui isn't optimised).
+   Earlier freezes: 4480 ms on Songs, 459 ms on a key press.
+3. Bug: while sounds load, the galaxy's empty state draws two subtitles over each other ("Listening to your sounds
+   first..." and "Try fewer filters...").
+4. Arrangement and waveforms drawn on the GPU (wgpu). Solomon wants ALL custom graphics on the GPU, with the CPU only
+   as a fallback and for headless screenshots.
+5. Drag sounds (tiles, list rows) into a DAW with a nice animation (the item lifts and dims, a card follows the
+   cursor, a pulse when it lands); also drag MIDI clips (written as .mid) and audio clips (their sample) out of the
+   Songs arrangement and tracks. That needs a Standard MIDI File writer in `mo-formats` (not built yet).
+6. "Send to Bitwig" on the Sounds side card, like the old app; show the ⋯ actions on every Sounds card; the side card
+   is cut off on the right at 4K or ultrawide.
+7. Year strip on every other list page (MIDI, Presets, Plugins...).
+8. Then the pages not built yet, each starting with a short question round and mock-ups: Space (with Duplicates from
+   `mo_sounds::duplicates`), Plugins, Presets (with a Curves section on `mo_presets::curves`), MIDI, Settings (General,
+   Folders, DAWs, Shortcuts, Developer; must show the "Made with Slint" credit), Ctrl+K. Agreed layout: the same
+   list + side panel frame everywhere; actions in the side panel and right-click menu (each menu line shows its key),
+   not row buttons; rail with names and icons. Plan doc: https://claude.ai/artifact/PdiLCg2s9fJDVA9GssfTxz; design
+   canvas: https://claude.ai/artifact/QvnfEeSqAfNMV1SSHmEXzv; style: https://claude.ai/artifact/YVTaf9wbierXjBX8ocHyUj
+   (Solomon's claude.ai artifacts; read them with the Artifact tool if you have it, otherwise ask him).
+
+**Harmony engine** (`mo-harmony`, `tools/theorybench`). Full handover: `harmony-handoff.md` (read it all; it has
+the next PR step by step). Solomon wants the highest effort here.
+- Next PR: make the chord hand cases public (`chordread::cases`), have chordfit check every gate, then learn from
+  the hand cases. The decode fingerprint must stay `300 pieces, all: 57bda66c6f357eee`.
+- Then the training mix, speed step 2, the mo-app hookup (key and chords on the MIDI page and Songs), Chord check.
+- The key-finder refit on Solomon's own MIDI packs (rule 5 exception) can only run on his PC. It needs a Remote
+  Control session that Solomon starts, plus the folders where his MIDI packs are. The brief to give it is in
+  `harmony-handoff.md`, word for word.
+- Bench data is gone with the old container; rebuild it with `tools/theorybench/README.md`.
+
+**Sounds backend** (`mo-sounds`, `mo-audio`): finished. Left: streaming long files while they play; sounds.db
+writes once trusted; a decoder panic caught by catch_unwind still trips mo-ui's crash hook (fix in mo-ui). Never
+`ORDER BY` on the sounds table for whole-table reads; sort in Rust. Notes: `memory/sounds-backend-status.md`.
+
+**MIDI backend** (`mo-midi`): index, analyser and key hookup are merged. Left: folder walk via
+`mo_library::scan::find_files`, PhraseJoiner (the arrangement readers it needs now exist), chords once the chord
+reader is hooked into mo-app; ask Solomon to run `tools/dev/MIDI twin test.cmd`. Notes: `memory/midi-page-backend.md`.
+
+**FL to Bitwig converter** (`mo-convert`): automation (tempo, faders, pan, on/off, knob-move clips) merged. Left:
+every re-convert makes "Name (2)" because the `written` stamp isn't stored while library.db is read-only (keep the
+stamps in a Rust-only file in the data folder); the first convert of a song took 36 s (cold sample search?); FL 7/8
+plugins have no vendor or path; knob-move lanes are named "setting N" rather than the plugin's parameter names;
+not yet checked live in Bitwig: the master lanes and the tempo lane; DAWproject export (phase 5). Decided later:
+FL native plugins in Bitwig, 3x Osc, Grid patches. Notes: `memory/fl-to-bitwig-converter-plan.md`,
+`memory/bitwig-automation-lanes.md`, `memory/bitwig-automation-clips.md`.
+
+**Old FL project fixes** (`mo-convert/src/fl_clones.rs`, #155): the fixed test copies are in his MO Test folder.
+Waiting for Solomon to open them in FL 2026. Next idea offered: a Fix button on the Songs page. Notes:
+`memory/fl-pattern-clones.md`.
+
+**Bitwig curves** (`mo-presets::curves`, #151/#156): done. Left: prove that a curve point's x times the clip length
+gives the beat (Solomon was asked to drop his own curve at bar 10); a doc nit (`Curve.points` and `length` docs say
+"first found", but the code uses the newest source). Notes: `memory/bitwig-curve-files.md`.
+
+**Space / clean-up** (`mo-space`): backend finished, with all 45 review points fixed. Bitwig multisample copies: the
+"(fixed)" project is written by `mo_convert::relink`; copies go to the bin only after Solomon checks that the fixed
+project plays. Notes: `memory/space-backend.md`, `memory/bitwig-multisample-relink.md`.
+
+**Backup** (`mo-backup`, Backup page): finished; it has its own page in the rail.
+
+**Presets** (`mo-presets`): backend finished (`crates/mo-presets/NOTES.md`); page not built. Notes:
+`memory/presets-page.md`.
+
+**Readers** (`mo-formats`): "Not yet" items in `crates/mo-formats/DIFFERENCES.md` need Solomon's saves. Still to
+do: fuzzing (a reader may error but never panic or hang), the format registry test (spec 11.2), Bitwig note
+expressions. FL event 172 size in FL 26 is open (see `memory/external-format-references.md`).
+
+## Waiting on Solomon (don't block on these; carry on with something else)
+
+- Where his MIDI packs are (for the key refit), and a Remote Control session started on his PC.
+- Three chord-name choices (the C# names stay until he says yes): C13(#11) and C9(#11) instead of (b5) when a 9 or 13
+  sounds; Eb/E instead of Eb/Fb; C7(#9,#5) and C7(b9,#11) instead of C7alt. If he says yes: a `chord.rs` PR with a
+  version bump.
+- Opening the FL clone-fix test copies in FL 2026, and checking that a relinked "(fixed)" Bitwig project plays.
+- Dropping his own Bitwig curve at bar 10 (curves x-to-beat proof).
+- Windows MIDI 2.0 developer API: Microsoft plans it from late November; nothing to do until then.
