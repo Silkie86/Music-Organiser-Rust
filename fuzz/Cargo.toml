@@ -1,0 +1,65 @@
+# The fuzzer: feeds the file readers in mo-formats endless made-up, broken files to find any that make a reader stop
+# the app (a panic) or never finish (a hang). See README.md. A workspace of its own, built with nightly Rust, so it
+# never touches the app's build.
+[workspace]
+
+[package]
+name = "mo-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+mo-formats = { path = "../crates/mo-formats" }
+
+# The app's release builds stop on arithmetic that overflows (see the top Cargo.toml), so the fuzzer does too: an
+# overflow is a crash it should find. Line numbers are kept so a crash says where it happened.
+[profile.release]
+overflow-checks = true
+debug = 1
+
+[[bin]]
+name = "fl"
+path = "fuzz_targets/fl.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bitwig_decode"
+path = "fuzz_targets/bitwig_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bitwig_read"
+path = "fuzz_targets/bitwig_read.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "studio_one"
+path = "fuzz_targets/studio_one.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "midi_smf"
+path = "fuzz_targets/midi_smf.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "midi_clip"
+path = "fuzz_targets/midi_clip.rs"
+test = false
+doc = false
+bench = false

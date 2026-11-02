@@ -777,28 +777,6 @@ export component Stars inherits HorizontalLayout {
     }
 }
 
-// One year on a scrubber beside a long list: click to jump to it.
-export component YearMark inherits Rectangle {
-    in property <string> text;
-    callback clicked;
-    height: 20px;
-    border-radius: Theme.radius;
-    background: touch.has-hover ? Theme.hover : transparent;
-    Text {
-        text: root.text;
-        color: touch.has-hover ? Theme.text : Theme.faint;
-        font-family: Theme.number-font;
-        font-size: Type.caps;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-        width: parent.width;
-        height: parent.height;
-    }
-    touch := TouchArea {
-        clicked => { root.clicked(); }
-    }
-}
-
 // A small heart, for a favourite.
 export component Heart inherits Path {
     in property <bool> on: true;
@@ -1057,6 +1035,99 @@ export component MapInset inherits Rectangle {
                 scroll-event(e) => { reject }
             }
         }
+    }
+}
+
+// A year on a year strip: its name, how much of the list is in it (0 to 1 of the biggest year) and whether it's
+// picked.
+export struct YearBar {
+    year: string,
+    share: float,
+    picked: bool,
+}
+
+// A strip of years beside a list, newest at the top, each with a bar for how much of the list is in it. Press on a
+// year and drag over others to show only those years; a click picks just one; a double-click or All years shows
+// every year again. The page says which are picked.
+export component YearRange inherits VerticalLayout {
+    in property <[YearBar]> years;
+    // Places in `years` from the first to the last picked (either way round).
+    callback picked(int, int);
+    callback cleared();
+    property <length> line: 20px;
+    // The drag going on, as places in `years` (-1 when there's none).
+    property <int> from: -1;
+    property <int> to: -1;
+    property <bool> any: false;
+    width: 56px;
+    padding: Space.xs;
+    spacing: Space.xs;
+    alignment: start;
+    strip := Rectangle {
+        height: root.years.length * root.line;
+        for y[i] in root.years: Rectangle {
+            property <bool> lit: root.from >= 0 ? (i >= min(root.from, root.to) && i <= max(root.from, root.to)) : y.picked;
+            property <bool> under: touch.has-hover && touch.mouse-y >= self.y && touch.mouse-y < self.y + self.height;
+            y: i * root.line;
+            height: root.line;
+            border-radius: Theme.radius;
+            background: self.lit ? Theme.accent.transparentize(80%) : self.under ? Theme.hover : transparent;
+            Rectangle {
+                x: Space.xs;
+                y: parent.height - 3px;
+                width: (parent.width - 2 * Space.xs) * y.share;
+                height: 2px;
+                border-radius: 1px;
+                background: parent.lit ? Theme.accent : Theme.stroke;
+            }
+            Text {
+                width: parent.width;
+                height: parent.height;
+                text: y.year;
+                color: parent.lit || parent.under ? Theme.text : Theme.faint;
+                font-family: Theme.number-font;
+                font-size: Type.caps;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+        touch := TouchArea {
+            mouse-cursor: pointer;
+            pointer-event(e) => {
+                if e.button == PointerEventButton.left && e.kind == PointerEventKind.down {
+                    root.from = clamp(floor(self.mouse-y / root.line), 0, root.years.length - 1);
+                    root.to = root.from;
+                }
+                if e.button == PointerEventButton.left && e.kind == PointerEventKind.up && root.from >= 0 {
+                    root.picked(min(root.from, root.to), max(root.from, root.to));
+                    root.from = -1;
+                    root.to = -1;
+                }
+                // The window lost the mouse mid-drag: nothing is picked.
+                if e.kind == PointerEventKind.cancel {
+                    root.from = -1;
+                    root.to = -1;
+                }
+            }
+            moved => {
+                if self.pressed && root.from >= 0 {
+                    root.to = clamp(floor(self.mouse-y / root.line), 0, root.years.length - 1);
+                }
+            }
+            // A release runs this before the button-up above, so the drag is forgotten first: otherwise the up
+            // would pick the one year straight after the strip was cleared.
+            double-clicked => {
+                root.from = -1;
+                root.to = -1;
+                root.cleared();
+            }
+        }
+    }
+    LinkText {
+        text: "All years";
+        tint: Theme.muted;
+        font-size: Type.meta;
+        clicked => { root.cleared(); }
     }
 }
 

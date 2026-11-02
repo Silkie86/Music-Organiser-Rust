@@ -19,7 +19,7 @@ use mo_app::log;
 use mo_app::shell;
 use mo_app::song_panel::{self as panel, Go, SaveLine as PanelSaveLine, Tab};
 use mo_app::songs::{Entry, Filters, SongRow, Songs, View};
-use mo_app::{paths, sound_library};
+use mo_app::{paths, sound_library, year_strip};
 use mo_library::scan::is_project_file;
 use mo_library::songs::DEFAULT_RUN_GAP_MONTHS;
 use mo_library::watch::{Changes, FolderWatch};
@@ -28,7 +28,7 @@ use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedSt
 
 use crate::{
     AppWindow, CountLine, DetailPair, HealthLine, MenuItem, OlderLine, PanelSong, PluginLine, SampleLine, SaveLine,
-    SongLine, SongsData, YearStart,
+    SongLine, SongsData, YearBar,
 };
 
 /// The page's rows, filters and what they let through, kept on the window's thread.
@@ -36,6 +36,8 @@ struct Page {
     songs: Songs,
     filters: Filters,
     view: View,
+    /// Every year a song was last saved in, newest first, with how many: the year strip.
+    years: Vec<(i32, usize)>,
     /// When the view was made, for "This week" and the short dates.
     now: NaiveDateTime,
     /// The song whose panel is open: its place in `songs.rows`.
@@ -56,6 +58,7 @@ impl Default for Page {
             songs: Songs::default(),
             filters: Filters::default(),
             view: View::default(),
+            years: Vec::new(),
             now: Local::now().naive_local(),
             picked: None,
             asked: 0,
@@ -158,6 +161,15 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
     data.on_clear(move || {
         change(&weak, |f| *f = Filters { hide_archived: f.hide_archived, ..Filters::default() });
     });
+    let weak = app.as_weak();
+    data.on_years_picked(move |a, b| {
+        let span = PAGE.with(|p| year_strip::year_span(&p.borrow().years, a, b));
+        if let Some(span) = span {
+            change(&weak, |f| f.years = Some(span));
+        }
+    });
+    let weak = app.as_weak();
+    data.on_years_cleared(move || change(&weak, |f| f.years = None));
     let weak = app.as_weak();
     data.on_select(move |row| {
         if let Some(app) = weak.upgrade() {
@@ -358,7 +370,11 @@ pub fn show(app: &AppWindow, songs: Songs) {
     data.set_daws(strings(songs.daws().iter().map(String::as_str)));
     data.set_tags(strings(songs.tags.iter().map(String::as_str)));
     data.set_message(if songs.rows.is_empty() { NO_SONGS.into() } else { SharedString::new() });
-    PAGE.with(|p| p.borrow_mut().songs = songs);
+    PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.years = songs.year_counts();
+        p.songs = songs;
+    });
     pick(app, None);
     data.set_lines(LINES.with(|l| ModelRc::from(l.clone() as Rc<dyn Model<Data = SongLine>>)));
     refresh(app);
@@ -398,8 +414,6 @@ fn show_song(app: &AppWindow, row: usize) {
 /// Works out what the rows and filters let through and shows it.
 fn refresh(app: &AppWindow) {
     let data = app.global::<SongsData>();
-    let heading = data.get_heading_height();
-    let song = data.get_song_height();
     PAGE.with(|p| {
         {
             let mut p = p.borrow_mut();
@@ -409,19 +423,18 @@ fn refresh(app: &AppWindow) {
         LINES.with(|l| l.notify.reset());
         let p = p.borrow();
         let view = &p.view;
-        // Where each year's heading starts, for the year scrubber: every line is one of two heights.
-        let mut y = 0.0;
-        let mut at = 0;
-        let mut years = Vec::with_capacity(view.years.len());
-        for (year, start) in &view.years {
-            for e in view.entries.get(at..*start).unwrap_or_default() {
-                y += if matches!(e, Entry::Heading(_)) { heading } else { song };
-            }
-            at = *start;
-            years.push(YearStart { year: year.to_string().into(), y });
-        }
         let f = &p.filters;
-        data.set_years(ModelRc::new(VecModel::from(years)));
+        let most = p.years.iter().map(|y| y.1).max().unwrap_or(1).max(1) as f32;
+        let bars: Vec<YearBar> = p
+            .years
+            .iter()
+            .map(|&(year, n)| YearBar {
+                year: year.to_string().into(),
+                share: n as f32 / most,
+                picked: f.years.is_some_and(|(a, b)| year >= a && year <= b),
+            })
+            .collect();
+        data.set_years(ModelRc::new(VecModel::from(bars)));
         data.set_count(view.count.as_str().into());
         data.set_daw(f.daw.clone().unwrap_or_default().into());
         data.set_status(f.status.clone().unwrap_or_default().into());

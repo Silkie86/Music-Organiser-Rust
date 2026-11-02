@@ -24,3 +24,4 @@ pub mod sound_library;
 pub mod sounds;
 pub mod themes;
 pub mod version;
+pub mod year_strip;

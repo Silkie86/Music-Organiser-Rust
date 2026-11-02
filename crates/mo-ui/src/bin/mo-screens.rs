@@ -208,6 +208,11 @@ fn sounds_shots(
     data.invoke_clear();
     data.invoke_pick_view(1);
     shots.push(("sounds-list.png".into(), capture(window)));
+    // Two years picked on the year strip.
+    data.invoke_years_picked(1, 2);
+    capture(window);
+    shots.push(("sounds-years.png".into(), capture(window)));
+    data.invoke_years_cleared();
     data.invoke_pick_view(3);
     shots.push(("sounds-history.png".into(), capture(window)));
     data.invoke_close_panel();
@@ -215,6 +220,15 @@ fn sounds_shots(
     data.invoke_select(3);
     capture(window);
     shots.push(("sounds-galaxy.png".into(), capture(window)));
+    // Lit by length: long sounds big and bright, one-shots small; then all alike, to compare.
+    data.invoke_galaxy_light_by("Length".into());
+    capture(window);
+    shots.push(("sounds-galaxy-length.png".into(), capture(window)));
+    data.invoke_galaxy_light_by("Nothing".into());
+    capture(window);
+    shots.push(("sounds-galaxy-alike.png".into(), capture(window)));
+    data.invoke_galaxy_light_by("Liked".into());
+    capture(window);
     // A sweep across the map: the trail through the swept stars and the Swept card.
     data.invoke_galaxy_down(40.0, 120.0, false);
     for step in 1..=60 {
@@ -359,7 +373,10 @@ fn sample_sounds() -> mo_ui::sounds::Library {
                 hidden: false,
                 rating: 0,
                 plays: 0,
-                added: day(1 + (i as u32 % 28), 12),
+                // Spread over a few years, for the year strip.
+                added: chrono::NaiveDate::from_ymd_opt(2026 - (i as i32 % 6), 10, 1 + (i as u32 % 28))
+                    .and_then(|d| d.and_hms_opt(12, 15, 0))
+                    .unwrap_or_default(),
                 activity: Default::default(),
             }
         })

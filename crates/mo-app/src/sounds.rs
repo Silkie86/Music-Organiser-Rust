@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 
+use chrono::Datelike;
 use mo_sounds::usage::Usage;
 use mo_sounds::{Sound, music, types};
 use rayon::prelude::*;
@@ -85,6 +86,9 @@ pub struct Filters {
     pub tag: Option<String>,
     /// Words that must all be in the path, type, tags or character.
     pub search: String,
+    /// Only sounds from these years, first to last: the years of the songs that use them when Used is on (and the
+    /// use counts are in), otherwise the year the file was added.
+    pub years: Option<(i32, i32)>,
 }
 
 impl Filters {
@@ -272,7 +276,41 @@ impl SoundList {
         {
             return false;
         }
+        if let Some((first, last)) = t.years {
+            let within = |y: i32| y >= first && y <= last;
+            let ok = match (&self.used, t.used) {
+                (Some(used), true) => used.get(&s.id).is_some_and(|u| u.years.iter().any(|&y| within(y))),
+                _ => within(s.added.year()),
+            };
+            if !ok {
+                return false;
+            }
+        }
         t.words.iter().all(|w| self.hay[i].contains(w.as_str()))
+    }
+
+    /// How many sounds there are in each year, newest first, as the year filter reads them: by the years of the songs
+    /// that use them when `by_use` (and the use counts are in), otherwise by the year each was added.
+    pub fn year_counts(&self, by_use: bool) -> Vec<(i32, usize)> {
+        let mut counts: std::collections::BTreeMap<i32, usize> = std::collections::BTreeMap::new();
+        match (&self.used, by_use) {
+            (Some(used), true) => {
+                for s in &self.sounds {
+                    let mut years = used.get(&s.id).map(|u| u.years.clone()).unwrap_or_default();
+                    years.dedup();
+                    for y in years {
+                        *counts.entry(y).or_default() += 1;
+                    }
+                }
+            }
+            _ => {
+                for s in &self.sounds {
+                    *counts.entry(s.added.year()).or_default() += 1;
+                }
+            }
+        }
+        // A file with no date reads as 1970: it isn't a year anyone picks.
+        counts.into_iter().rev().filter(|&(y, _)| y > 1980).collect()
     }
 
     fn compare(&self, a: usize, b: usize, order: Order) -> std::cmp::Ordering {
@@ -303,6 +341,7 @@ struct Test<'a> {
     keys: Option<Vec<(i32, bool)>>,
     bpm_from: Option<f64>,
     bpm_to: Option<f64>,
+    years: Option<(i32, i32)>,
     words: Vec<String>,
 }
 
@@ -324,6 +363,7 @@ impl<'a> Test<'a> {
             keys,
             bpm_from: f.bpm_from,
             bpm_to: f.bpm_to,
+            years: f.years,
             words: f.search.split_whitespace().map(str::to_lowercase).collect(),
         }
     }
@@ -513,6 +553,25 @@ mod tests {
         assert_eq!(wave_path(&[]), "");
         // The loudest fills the height, a silent one is a sliver, and a negative peak counts by its size.
         assert_eq!(wave_path(&[0.5, 0.0, -0.25]), "M0.5 0.0V100.0M1.5 49.5V50.5M2.5 25.0V75.0");
+    }
+
+    #[test]
+    fn the_year_filter_reads_the_added_year_or_the_songs_years() {
+        let year = |y: i32| NaiveDate::from_ymd_opt(y, 6, 1).and_then(|d| d.and_hms_opt(0, 0, 0)).unwrap();
+        let mut sounds: Vec<Sound> = (1..=4).map(|i| sound(i, &format!(r"I:\S\{i}.wav"), "Kick", None)).collect();
+        for (s, y) in sounds.iter_mut().zip([2019, 2021, 2021, 2024]) {
+            s.added = year(y);
+        }
+        let mut list = SoundList::new(sounds);
+        assert_eq!(list.year_counts(false), [(2024, 1), (2021, 2), (2019, 1)]);
+        let by = |list: &SoundList, f: Filters| ids(list, &list.view(&f, Order::Newest, 0));
+        assert_eq!(by(&list, Filters { years: Some((2020, 2023)), ..Filters::default() }), [2, 3]);
+        // With Used on, the songs' years count instead.
+        let used = |years: Vec<i32>| Usage { projects: years.len() as u32, recent: 0, years };
+        list.set_used(HashMap::from([(1, used(vec![2025, 2026])), (4, used(vec![2020]))]));
+        assert_eq!(list.year_counts(true), [(2026, 1), (2025, 1), (2020, 1)]);
+        let used_then = Filters { used: true, years: Some((2025, 2026)), ..Filters::default() };
+        assert_eq!(by(&list, used_then), [1]);
     }
 
     #[test]

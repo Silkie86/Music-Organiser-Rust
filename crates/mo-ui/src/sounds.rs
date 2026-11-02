@@ -19,9 +19,9 @@ use std::time::{Duration, Instant};
 use chrono::{Local, NaiveDateTime};
 use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
-use mo_app::log;
 use mo_app::shortcuts::Shortcuts;
 use mo_app::sounds::{self as list, Filters, Length, Order, SoundList};
+use mo_app::{log, year_strip};
 use mo_audio::play::Player;
 use mo_library::UsageRules;
 use mo_library::songs::thousands;
@@ -34,7 +34,7 @@ use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedSt
 
 use crate::{
     AlikeLine, AppWindow, FolderLine, MenuItem, PickedSound, SoundFact, SoundLine, SoundTile, SoundsData, TileRow,
-    TypeChipInfo,
+    TypeChipInfo, YearBar,
 };
 
 /// The C# app's settings in `library.db` for the view shown last and autoplay, read (not written: it's read-only).
@@ -85,6 +85,8 @@ struct Page {
     view: i32,
     /// What the filters let through, in order, as places in `list`.
     shown: Arc<Vec<usize>>,
+    /// The year strip's years, newest first, with how many sounds each holds.
+    years: Vec<(i32, usize)>,
     /// What History shows: the sounds played, newest first, as places in `list`, with when.
     history: Vec<(usize, NaiveDateTime)>,
     /// How many tiles fit side by side.
@@ -128,6 +130,7 @@ impl Default for Page {
             seed: new_seed(),
             view: TILES,
             shown: Arc::default(),
+            years: Vec::new(),
             history: Vec::new(),
             columns: 4,
             picked: None,
@@ -834,6 +837,15 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
         });
     });
     let weak = app.as_weak();
+    data.on_years_picked(move |a, b| {
+        let span = PAGE.with(|p| year_strip::year_span(&p.borrow().years, a, b));
+        if let Some(span) = span {
+            change(&weak, |f| f.years = Some(span));
+        }
+    });
+    let weak = app.as_weak();
+    data.on_years_cleared(move || change(&weak, |f| f.years = None));
+    let weak = app.as_weak();
     data.on_clear(move || change(&weak, |f| *f = Filters { search: f.search.clone(), ..Filters::default() }));
     let weak = app.as_weak();
     data.on_pick_order(move |name| {
@@ -1233,7 +1245,8 @@ fn refresh(app: &AppWindow) {
     });
     if HERE.with(|h| *h.borrow()) {
         let shown = ask.list.view(&ask.filters, ask.order, ask.seed);
-        listed(app, ask.id, shown);
+        let years = ask.list.year_counts(ask.filters.used);
+        listed(app, ask.id, shown, years);
         return;
     }
     WORKER.with(|w| {
@@ -1241,11 +1254,13 @@ fn refresh(app: &AppWindow) {
         if w.is_none() {
             let weak = app.as_weak();
             match Newest::start("Sounds list", move |ask: Ask| {
-                let shown = background::on_pool(|| ask.list.view(&ask.filters, ask.order, ask.seed));
+                let (shown, years) = background::on_pool(|| {
+                    (ask.list.view(&ask.filters, ask.order, ask.seed), ask.list.year_counts(ask.filters.used))
+                });
                 let weak = weak.clone();
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(app) = weak.upgrade() {
-                        listed(&app, ask.id, shown);
+                        listed(&app, ask.id, shown, years);
                     }
                 });
             }) {
@@ -1260,20 +1275,39 @@ fn refresh(app: &AppWindow) {
 }
 
 /// A new list has been worked out: shows it, unless a newer one has been asked for since.
-fn listed(app: &AppWindow, id: u64, shown: Vec<usize>) {
+fn listed(app: &AppWindow, id: u64, shown: Vec<usize>, years: Vec<(i32, usize)>) {
     let current = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         if p.asked != id {
             return false;
         }
         p.shown = Arc::new(shown);
+        p.years = years;
         true
     });
     if current {
+        show_years(app);
         show_lists(app);
         // The filters dim the stars they leave out.
         galaxy::draw(app);
     }
+}
+
+/// The year strip: each year, how full it is, and whether the filter has it.
+fn show_years(app: &AppWindow) {
+    let bars = PAGE.with(|p| {
+        let p = p.borrow();
+        let most = p.years.iter().map(|y| y.1).max().unwrap_or(1).max(1) as f32;
+        p.years
+            .iter()
+            .map(|&(year, n)| YearBar {
+                year: year.to_string().into(),
+                share: n as f32 / most,
+                picked: p.filters.years.is_some_and(|(a, b)| year >= a && year <= b),
+            })
+            .collect::<Vec<_>>()
+    });
+    app.global::<SoundsData>().set_years(ModelRc::new(VecModel::from(bars)));
 }
 
 fn show_lists(app: &AppWindow) {
