@@ -67,6 +67,8 @@ pub(super) struct Galaxy {
     count: usize,
     /// A left-button sweep going on.
     sweep: Sweep,
+    /// The mouse is over the map.
+    inside: bool,
 }
 
 impl Default for Galaxy {
@@ -88,6 +90,7 @@ impl Default for Galaxy {
             drawn_id: 0,
             count: 0,
             sweep: Sweep::default(),
+            inside: false,
         }
     }
 }
@@ -112,13 +115,13 @@ fn fly(app: &AppWindow) {
             let now = Instant::now();
             let dt = LAST_FRAME.with(|l| l.borrow_mut().replace(now).map_or(FRAME, |was| now - was));
             let going = PAGE.with(|p| p.borrow_mut().galaxy.view.glide(dt.min(Duration::from_millis(100))));
-            if !going {
-                FLIGHT.with(Timer::stop);
-            }
             // The picture on show moves at once; a new one is asked for (newest wins, so asks don't pile up), sharp
             // once the glide has stopped.
             draw(&app);
-            hover(&app);
+            if !going {
+                FLIGHT.with(Timer::stop);
+                hover(&app);
+            }
         });
     });
 }
@@ -184,7 +187,11 @@ pub(super) fn wire(app: &AppWindow) {
     let weak = app.as_weak();
     data.on_galaxy_move(move |x, y| {
         let Some(app) = weak.upgrade() else { return };
-        let moved = PAGE.with(|p| p.borrow_mut().galaxy.view.moved(x, y));
+        let moved = PAGE.with(|p| {
+            let g = &mut p.borrow_mut().galaxy;
+            g.inside = true;
+            g.view.moved(x, y)
+        });
         let data = app.global::<SoundsData>();
         match moved {
             Moved::Panned => {
@@ -227,8 +234,8 @@ pub(super) fn wire(app: &AppWindow) {
         // The drag drew quick pictures: the sharp one now.
         if panned {
             draw(&app);
-            hover(&app);
         }
+        hover(&app);
         // Let go after sweeping: the sound stops with the mouse.
         if swept {
             super::stop(&app);
@@ -254,6 +261,7 @@ pub(super) fn wire(app: &AppWindow) {
     });
     let weak = app.as_weak();
     data.on_galaxy_gone(move || {
+        PAGE.with(|p| p.borrow_mut().galaxy.inside = false);
         if let Some(app) = weak.upgrade() {
             let data = app.global::<SoundsData>();
             data.set_galaxy_hover_text("".into());
@@ -358,10 +366,15 @@ fn sweep_play(app: &AppWindow, at: usize) {
 /// Names the star under the mouse and rings it, so it's plain which one a click picks.
 fn hover(app: &AppWindow) {
     let data = app.global::<SoundsData>();
+    // While a button is held, the ring stays away and a sweep's name stays as it is.
+    if PAGE.with(|p| p.borrow().galaxy.view.pressed()) {
+        data.set_galaxy_hover_shown(false);
+        return;
+    }
     let found = PAGE.with(|p| {
         let p = p.borrow();
         let g = &p.galaxy;
-        if g.view.pressed() || g.view.flying() {
+        if g.view.flying() || !g.inside {
             return None;
         }
         let (x, y) = g.view.mouse;
@@ -645,6 +658,8 @@ fn drawn(app: &AppWindow, d: Drawn, px: SharedPixelBuffer<Rgba8Pixel>) {
         app.global::<SoundsData>().set_galaxy_image(Image::from_rgba8_premultiplied(px));
         place_picture(app);
         show_picked(app);
+        // The stars may have moved under the mouse (a new filter, size or map): the ring follows what a click picks.
+        hover(app);
     }
 }
 

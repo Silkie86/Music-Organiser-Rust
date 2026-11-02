@@ -154,11 +154,18 @@ impl Picture {
         let r = self.scale * (base + (self.view.zoom - 1.0).max(0.0).sqrt() * 0.5).min(6.0);
         let grey = self.palette.last().copied().unwrap_or([128, 128, 128]);
         // Light adds up, so when a great many stars are on show each gives off less, or the crowds would all burn
-        // white; zoomed in, fewer are on show and each shines fully.
-        let on_show = n / (self.view.zoom * self.view.zoom);
+        // white; zoomed in, or with the filters leaving few, fewer are on show and each shines fully.
+        let on_show = self.shown.len().max(1) as f32 / (self.view.zoom * self.view.zoom);
         let bright = (0.9 * (BRIGHT_CROWD / on_show).sqrt()).clamp(0.3, 0.9);
         let band_rows = BAND.max((2.0 * r + 4.0).ceil() as usize);
         let bands = h.div_ceil(band_rows).max(1);
+        // The nebula's squares, lined up with the map so its light holds still as the map is dragged, and the stars
+        // just past the picture's edges, whose light spreads onto it.
+        let size = (CLOUD * self.scale).max(2.0);
+        let (ox, oy) = self.view.to_view(0.0, 0.0, self.scale);
+        let reach = 2 * CLOUD_BLUR;
+        let grid = (ox.rem_euclid(size) - reach as f32 * size, oy.rem_euclid(size) - reach as f32 * size);
+        let margin = r.max(-grid.0).max(-grid.1);
         // Every star on the picture with the band its top edge is in; sorted so each band's stars are together, the
         // ones the filters leave out (drawn faint) before the shown ones (drawn over them), and otherwise in list
         // order, so stars that overlap are always drawn the same way round.
@@ -169,7 +176,7 @@ impl Picture {
             .filter_map(|(at, star)| {
                 let p = (*star)?;
                 let (x, y) = self.view.to_view(p.x, p.y, self.scale);
-                if x < -r || y < -r || x > w as f32 + r || y > h as f32 + r {
+                if x < -margin || y < -margin || x > w as f32 + margin || y > h as f32 + margin {
                     return None;
                 }
                 let colour = self
@@ -192,7 +199,7 @@ impl Picture {
             })
             .collect();
         placed.par_sort_unstable_by_key(|p| (p.0, p.1, p.2));
-        let cloud = Cloud::new(&placed, w, h, (CLOUD * self.scale).max(2.0));
+        let cloud = Cloud::new(&placed, w, h, size, grid);
         // Where each band's stars start, and where its shown ones start.
         let first = |band: usize, shown: bool| placed.partition_point(|p| (p.0, p.1) < (band, shown));
         let ranges: Vec<(usize, usize)> = (0..=bands).map(|b| (first(b, false), first(b, true))).collect();
@@ -275,31 +282,45 @@ struct Cloud {
     rows: usize,
     /// Pixels per square.
     size: f32,
+    /// Where the first square's top left corner is on the picture, in pixels (up to the blur's reach before it).
+    origin: (f32, f32),
     /// Each square's colour (the stars' light, averaged) and how thick it is (0 to `CLOUD_LIGHT`).
     squares: Vec<([f32; 3], f32)>,
 }
 
 impl Cloud {
-    fn new(placed: &[(usize, bool, usize, Dot)], w: usize, h: usize, size: f32) -> Cloud {
-        let columns = (w as f32 / size).ceil() as usize + 1;
-        let rows = (h as f32 / size).ceil() as usize + 1;
-        let mut sums = vec![[0.0f32; 4]; columns * rows];
-        for (_, shown, _, d) in placed {
-            if d.x < 0.0 || d.y < 0.0 {
-                continue;
-            }
-            let (cx, cy) = ((d.x / size) as usize, (d.y / size) as usize);
-            if cx >= columns || cy >= rows {
-                continue;
+    fn new(placed: &[(usize, bool, usize, Dot)], w: usize, h: usize, size: f32, origin: (f32, f32)) -> Cloud {
+        let columns = ((w as f32 - origin.0) / size).ceil() as usize + 2 * CLOUD_BLUR + 1;
+        let rows = ((h as f32 - origin.1) / size).ceil() as usize + 2 * CLOUD_BLUR + 1;
+        let cells = columns * rows;
+        // Added up on every core: each core's share of the stars into a grid of its own, then the grids together.
+        let share = placed.len().div_ceil(rayon::current_num_threads().max(1)).max(1);
+        let add = |mut sums: Vec<[f32; 4]>, (_, shown, _, d): &(usize, bool, usize, Dot)| {
+            let (fx, fy) = ((d.x - origin.0) / size, (d.y - origin.1) / size);
+            if fx < 0.0 || fy < 0.0 || fx as usize >= columns || fy as usize >= rows {
+                return sums;
             }
             // A star the filters leave out still glows a little, as it's drawn faint.
             let weight = if *shown { 1.0 } else { 0.15 };
-            let s = &mut sums[cy * columns + cx];
+            let s = &mut sums[fy as usize * columns + fx as usize];
             s[0] += d.colour[0] as f32 * weight;
             s[1] += d.colour[1] as f32 * weight;
             s[2] += d.colour[2] as f32 * weight;
             s[3] += weight;
-        }
+            sums
+        };
+        let sums = placed.par_chunks(share).map(|stars| stars.iter().fold(vec![[0.0f32; 4]; cells], add)).reduce(
+            || vec![[0.0f32; 4]; cells],
+            |mut a, b| {
+                for (a, b) in a.iter_mut().zip(&b) {
+                    for j in 0..4 {
+                        a[j] += b[j];
+                    }
+                }
+                a
+            },
+        );
+        let mut sums = sums;
         // Blurred twice each way, which is close to a soft round spread.
         for _ in 0..2 {
             sums = blur(&sums, columns, rows, true);
@@ -315,7 +336,7 @@ impl Cloud {
                 (colour, CLOUD_LIGHT * (1.0 - (-s[3] / CLOUD_THICK).exp()))
             })
             .collect();
-        Cloud { columns, rows, size, squares }
+        Cloud { columns, rows, size, origin, squares }
     }
 
     /// Lights the rows in `rows` (a band `w` pixels wide starting at row `y0`) with the nebula, smoothly between
@@ -323,10 +344,10 @@ impl Cloud {
     fn light(&self, rows: &mut [Rgba], w: usize, y0: usize) {
         let at = |x: usize, y: usize| self.squares[y.min(self.rows - 1) * self.columns + x.min(self.columns - 1)];
         for (i, row) in rows.chunks_mut(w.max(1)).enumerate() {
-            let fy = (((y0 + i) as f32 + 0.5) / self.size - 0.5).max(0.0);
+            let fy = (((y0 + i) as f32 + 0.5 - self.origin.1) / self.size - 0.5).max(0.0);
             let (gy, ty) = (fy as usize, fy.fract());
             for (x, o) in row.iter_mut().enumerate() {
-                let fx = ((x as f32 + 0.5) / self.size - 0.5).max(0.0);
+                let fx = ((x as f32 + 0.5 - self.origin.0) / self.size - 0.5).max(0.0);
                 let (gx, tx) = (fx as usize, fx.fract());
                 let corners = [
                     (at(gx, gy), (1.0 - tx) * (1.0 - ty)),
@@ -358,8 +379,8 @@ fn blur(sums: &[[f32; 4]], columns: usize, rows: usize, across: bool) -> Vec<[f3
     let r = CLOUD_BLUR as isize;
     let k = 1.0 / (2 * r + 1) as f32;
     let mut out = vec![[0.0f32; 4]; sums.len()];
-    for y in 0..rows {
-        for x in 0..columns {
+    out.par_chunks_mut(columns.max(1)).enumerate().for_each(|(y, line)| {
+        for (x, cell) in line.iter_mut().enumerate() {
             let mut acc = [0.0f32; 4];
             for d in -r..=r {
                 let (sx, sy) = if across { (x as isize + d, y as isize) } else { (x as isize, y as isize + d) };
@@ -371,9 +392,9 @@ fn blur(sums: &[[f32; 4]], columns: usize, rows: usize, across: bool) -> Vec<[f3
                     acc[j] += s[j];
                 }
             }
-            out[y * columns + x] = acc.map(|a| a * k);
+            *cell = acc.map(|a| a * k);
         }
-    }
+    });
     out
 }
 
