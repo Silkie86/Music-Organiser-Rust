@@ -95,8 +95,12 @@ fn clip(at: u32, length: u32, pattern: u16, channel: u16, track: u16) -> [u8; 32
 
 /// A song re-saved by FL 20 from an FL 8 one: every pattern on its own track.
 fn song() -> Flp {
+    song_of("20.0.5.681")
+}
+
+fn song_of(version: &str) -> Flp {
     Flp::default()
-        .version("20.0.5.681")
+        .version(version)
         .pattern(1, "bass", &[3])
         .pattern(2, "bass #3", &[3])
         .pattern(3, "bass #2", &[3, 4])
@@ -239,7 +243,9 @@ fn an_old_saves_rows_become_tracks_with_clones_together() {
     let at = raw.len() - rows.len();
     assert_eq!(&fixed[at + 4..at + 8], &[0x00, 0x50, 0x01, 0x50]);
     assert_eq!(&fixed[at + 12..at + 14], &[98, 0]);
-    assert_eq!(&fixed[at + 14..at + 32], &raw[at + 14..at + 32]);
+    assert_eq!(&fixed[at + 14..at + 24], &raw[at + 14..at + 24]);
+    // The part played becomes "all of it" as FL writes it on a clip.
+    assert_eq!(&fixed[at + 24..at + 32], &[0xFF; 8]);
     let again = line_up(&fixed).unwrap();
     assert!(!again.rows && again.moves.is_empty(), "{:?}", again.moves);
 }
@@ -297,4 +303,51 @@ fn the_fix_writes_a_copy_and_never_changes_the_project() {
     let again = fix_fl_project(&fixed.file).unwrap_err();
     assert!(again.contains("already on their sources' tracks"), "{again}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn clones_of_a_lost_pattern_go_together() {
+    // "Pattern 1 #2" and "#3" have no unnamed pattern before them; they still share a track.
+    let raw = Flp::default()
+        .version("20.0.5.681")
+        .pattern(1, "Pattern 1 #2", &[3])
+        .pattern(2, "Pattern 1 #3", &[3, 4])
+        .pattern(3, "Pattern 1 #4", &[9])
+        .data(233, &playlist(&[clip(0, 384, 1, 0, 1), clip(384, 384, 2, 0, 2), clip(768, 384, 3, 0, 3)]))
+        .build();
+    let lineup = line_up(&raw).unwrap();
+    assert_eq!(lineup.groups, vec![Group { source: 1, clones: vec![2] }]);
+    assert_eq!(lineup.summary(), vec!["Pattern 1 #3: 1 clip from track 2 to track 1"]);
+}
+
+#[test]
+fn an_empty_playlist_has_nothing_to_line_up() {
+    let raw = song().data(233, &[]).build();
+    let lineup = line_up(&raw).unwrap();
+    assert!(lineup.moves.is_empty() && !lineup.rows);
+}
+
+#[test]
+fn an_fl_21_playlist_that_divides_by_two_sizes_is_read_as_60_bytes() {
+    // 8 clips of 60 bytes are 480 bytes, 6 of 80 too.
+    let wide = |c: [u8; 32]| {
+        let mut r = [0u8; 60];
+        r[..32].copy_from_slice(&c);
+        r
+    };
+    let clips: Vec<[u8; 60]> = [
+        clip(0, 384, 1, 0, 1),
+        clip(384, 384, 3, 0, 3),
+        clip(768, 384, 4, 0, 4),
+        clip(1152, 384, 4, 0, 4),
+        clip(1536, 384, 4, 0, 4),
+        clip(1920, 384, 4, 0, 4),
+        clip(2304, 384, 4, 0, 4),
+        clip(2688, 384, 4, 0, 4),
+    ]
+    .map(wide)
+    .to_vec();
+    let raw = song_of("21.0.3.3517").data(233, &clips.concat()).build();
+    let moved: Vec<(u32, u32)> = line_up(&raw).unwrap().moves.iter().map(|m| (m.pattern, m.to_track)).collect();
+    assert_eq!(moved, vec![(3, 1)]);
 }

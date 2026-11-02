@@ -22,7 +22,7 @@
 //! In a save that keeps patterns on rows of their own (FL 8 and older, many FL 9 saves, some FL 11.1), each row
 //! becomes a pattern clip on a track, as FL itself does when it opens one (seen in Solomon's FL 8 "midnight_33" and
 //! its FL 11 re-save): the clip keeps its place, length and everything else; a pattern and its clones share a track,
-//! the others get one each, in pattern order below the tracks already used. Only those six bytes of each row change.
+//! the others get one each, in pattern order below the tracks already used. Only those bytes and the part played (set to "all of it", as FL does) change.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -173,8 +173,16 @@ fn groups(patterns: &[Pattern], left: &mut Vec<String>) -> Vec<Group> {
             // A clone of a pattern never named: the nearest such before it, if they share a channel.
             None if default_name(base) => {
                 let found = earlier.clone().find(|p| p.name.is_empty() || default_name(&p.name));
+                // Else an earlier clone of the same "Pattern N" that shares a channel: FL renumbered the source, or
+                // there's none left, but the clones still go together.
+                let sibling = || {
+                    patterns.iter().find(|p| {
+                        p.number < c.number && clone_base(&p.name) == Some(base) && !p.channels.is_disjoint(&c.channels)
+                    })
+                };
                 match found {
                     Some(p) if !p.channels.is_disjoint(&c.channels) => Some(p),
+                    _ if sibling().is_some() => sibling(),
                     Some(p) => {
                         left.push(format!(
                             "{} stays: the unnamed pattern before it ({}) has none of its channels",
@@ -264,22 +272,21 @@ struct Record {
     slot: Option<u16>,
 }
 
-/// The size of a playlist record, by FL's version (checked on Solomon's 17,316 old saves, 2026-11-02): 28 bytes to
-/// FL 8.0, 32 from FL 8.5 to 20, then 60, 80 or 88.
-fn record_size(data: &[u8], v: (u32, u32)) -> Option<usize> {
-    let fits = |s: usize| {
-        !data.is_empty()
-            && data.len().is_multiple_of(s)
-            && data.chunks_exact(s).all(|r| matches!(u16_at(r, 4), 0 | PATTERN_BASE))
-    };
-    let sizes: &[usize] = if v < (8, 5) {
+/// The sizes a playlist record may have, most likely first, by FL's version (checked on Solomon's saves, 2026-11-02):
+/// 28 bytes to FL 8.0, 32 from FL 8.5 to 20, 60 from FL 20.99 (21's beta) to 24, 80 to 25, 88 after. A length can
+/// divide by more than one (480 bytes is 8 of 60 or 6 of 80), so the version's goes first and each is tried.
+fn record_sizes(v: (u32, u32)) -> &'static [usize] {
+    if v < (8, 5) {
         &[28]
-    } else if v.0 < 21 {
+    } else if v < (20, 99) {
         &[32]
+    } else if v < (24, 2) {
+        &[60, 80, 88]
+    } else if v < (25, 2) {
+        &[80, 60, 88]
     } else {
         &[88, 80, 60]
-    };
-    sizes.iter().copied().find(|&s| fits(s))
+    }
 }
 
 /// The records of a playlist. A row is 0 then 0x5000 or 0x6000 where a clip's pattern base and index go, on slot
@@ -339,8 +346,15 @@ pub fn line_up(raw: &[u8]) -> Result<Lineup, String> {
 
     for (arrangement, e) in flp.events.iter().filter(|e| e.id == EV_PLAYLIST).enumerate() {
         let Some(offset) = e.offset else { continue };
-        let Some(records) = record_size(&e.data, v).and_then(|size| records(&e.data, offset, size).map(|r| (size, r)))
-        else {
+        // An empty playlist: nothing to line up.
+        if e.data.is_empty() {
+            continue;
+        }
+        let parsed = record_sizes(v).iter().find_map(|&size| {
+            let fits = e.data.len().is_multiple_of(size);
+            fits.then(|| records(&e.data, offset, size)).flatten().map(|r| (size, r))
+        });
+        let Some(records) = parsed else {
             return Err("Its playlist is saved in a way this doesn't know, so it isn't changed.".to_owned());
         };
         let (size, records) = records;
@@ -451,6 +465,10 @@ pub fn line_up(raw: &[u8]) -> Result<Lineup, String> {
                 let index = PATTERN_BASE + r.pattern as u16;
                 lineup.patches.extend([(r.offset + 4, 0x00), (r.offset + 5, 0x50)]);
                 lineup.patches.extend(index.to_le_bytes().into_iter().enumerate().map(|(i, b)| (r.offset + 6 + i, b)));
+                // The part played: "all of it" (-1, -1), as FL writes it there. Rows say so as two -1.0 floats or
+                // as -1 and 0x7FFFFFFF; no pattern clip in Solomon's saves has the second.
+                let tail = size - 8;
+                lineup.patches.extend((0..8).map(|i| (r.offset + tail + i, 0xFF)));
             }
             if size == 28 {
                 lineup.patches.extend([(r.offset + 12, lo), (r.offset + 14, hi)]);
