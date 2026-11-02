@@ -347,6 +347,56 @@ cargo run -p mo-theorybench --release -- tables path/to/bench/pop909cl.jsonl pat
 - Give it the labelled sources themselves, not `voice.py`'s renders of the same charts, which would count Billboard's
   labels twice. Without `--write` it only prints the counts and the tables.
 
+### Fitting the chord reader (`chordfit`)
+
+```
+cargo run -p mo-theorybench --release -- chordfit path/to/bench/pop909cl.jsonl path/to/voiced/billboard-A.jsonl --out fitted.json
+cargo run -p mo-theorybench --release -- chords path/to/bench/pop909cl.jsonl --engine rust --part accompaniment --weights fitted.json --folds 1
+```
+
+`chordfit` fits the chord reader's 39 numbers (harmony/design/chord-reader-design.md, "Model, training and data"): the
+weight of each piece of evidence (T1 to E8), the trusts in the two template priors (P1, P2) and in the pair term, and
+w_N, what a stretch read as no chord scores. The counted tables stay as `tables` counted them.
+
+- **Folds.** Drawn as keyfit draws them, from each piece's name (fold 0 kept back), with one difference: a piece only
+  measured goes where a piece learned from with its name goes (`voice.py`'s set B, only measured, where set A's render
+  of the same chart goes), or else one with its notes in some key, or else where its own name goes; so a fit is never
+  measured on a chart it learned. It learns from folds 2 to 4 (`--train`) of the pieces whose licence lets fitted
+  numbers ship, and measures fold 1 (`--test`). `chords --folds 1` scores the same pieces, but for one case it says
+  when it meets: a chart learned from that shares its notes with one named before it goes to that one's fold, and its
+  renders read without it go where their own name goes.
+- **How each piece is heard.** A dataset's song (POP909-CL) four ways (`--inputs`), all from its own piano's notes:
+  the piano (`piano`); with the tune (`full`); with the piano's bass line as a bass part (`split`: the notes the
+  reader would hear as the bass, each the lowest sounding with nothing of another pitch class within a fifth above it
+  at some note's start, or alone and carrying on the bass before it, so a figure played alone stays in the rest); and
+  the rest of the piano with no bass (`upper`), where the roots often aren't played. A piece `voice.py` played is heard as given, each part with its
+  role (set A, CC0, is learned from). Each reading counts 1 unless `--weigh` says otherwise (`pop909cl/upper=0` drops
+  one way), so a Billboard song, heard one way, counts a quarter of a POP909-CL song heard four: the design's weight
+  for set A.
+- **What a label accepts.** Its root and core. On POP909-CL, whose labels are a template's triads while the piano
+  often plays more, a major label also accepts a maj7 or 6, a minor one an m7 or m6, and a sus4 a 7sus4. A dominant 11
+  also accepts the 9sus4 `voice.py` plays it as; a diminished seventh accepts its four roots and an augmented triad
+  its three (the same notes, which the reader names after it decodes). No chord, a label that can't be read, or a
+  chord the reader can't read (a root alone) leaves its stretch free.
+- **What it makes likelier.** For each piece, the chance the reader gives the ways of reading it that the labels
+  allow, among every way it can read it: each reading one its stretch accepts (reaching at most a unit, half a beat,
+  into a stretch labelled otherwise), changing chord only within a unit of a labelled change. A labelled change with
+  no place within a unit where the reader can change chord (the labels' time is off, or the music holds on through
+  it) moves to the nearest place it can: 0.6% of POP909-CL's labelled ends. The report's **loss per bar** is minus
+  the log of that chance, per bar of music, over the pieces (each weighed), plus a pull towards the numbers it starts
+  from (`--lambda`, 1e-3): lower is better, 0 would be every labelled reading certain.
+- **How.** Projected quasi-Newton: each step makes a quadratic picture of the loss from its slope and a curvature it
+  learns as it goes (started from the slopes' outer products, piece by piece), finds that picture's lowest point
+  among the numbers that keep every rule the weights keep (`chordread::RULES`: signs and orders, such as T2 between 0
+  and T1), and moves towards it as far as the loss falls enough. Every point it reads keeps the rules. The pieces'
+  sums are added in their order, so a run gives the same bits on any number of threads. At most 40 steps
+  (`--steps`); `--fix P1,P2` holds numbers where they start; `--from` starts from a file a fit wrote.
+- **The report.** The loss at each step; each number at the start and fitted, and which sit on a rule's bound; the
+  loss per bar of each source and way of hearing, at the start and fitted, on the pieces learned from and on those
+  held out; and a `SET=` line that reads the hand cases with the fitted numbers (`cargo test -p mo-harmony --release
+  show_the_cases_read_whole -- --ignored --nocapture`, and `show_the_grid`). `--out` writes the numbers, by name, for
+  `chords --weights` and `chordfit --from`.
+
 ## Charts played as music (`convert/voice.py`)
 
 `charts.py` plays Billboard's and RS200's charts as block chords over the label's bass: every note the label names,
@@ -578,3 +628,49 @@ heard as a tune, 14 points ahead.
   12 to 15 points), but not rootless roots (under 90%). On POP909-CL it passes the root, not majmin+bass (-1.8),
   the bass (-0.6), sevenths (-2.9) or the segmentation (92.6, under 93.0). The two-feel, arpeggios and edges are
   where chordfit starts.
+
+## The chord reader's first fit (2026-11-02)
+
+`chordfit` on POP909-CL (each song heard four ways) and Billboard set A, learning from folds 2 to 4 (538 and 436
+pieces) and measuring fold 1, from the hand-set numbers, `--lambda 1e-3`, 40 steps. These numbers come from the run
+before the code review's fixes (how a render's fold is drawn, and the piano's bass line for `split` and `upper`), so
+the same run now starts a little lower (a loss of 2.406 a bar against 2.418); run it again before leaning on them. At
+the start, 7.1 million readings over 1.77 million units are kept only because the labels accept them, and 3,495 of
+the 635,348 labelled ends (0.6%) move to the nearest place the reader can change chord. The loss per bar on fold 1,
+held out, falls from 2.79 to 0.88 on POP909-CL's piano (full 2.71 to 0.87, split 2.61 to 0.87, upper 3.28 to 1.17)
+and from 0.58 to 0.42 on set A.
+
+Scored with `chords --weights` (fold 1 of POP909-CL and Billboard; RS200 and the sweep, never learned from, whole):
+
+| set | majmin: C# / hand / fit | name: C# / hand / fit | extensions' macro F1: C# / hand / fit | inversions read in root position: C# / hand / fit |
+|---|---|---|---|---|
+| POP909-CL piano | 86.7 / 85.3 / 89.3 | 75.7 / 73.3 / 77.1 | - | 74.3 / 78.0 / 69.3 |
+| POP909-CL with the tune | 84.0 / 85.4 / 90.3 | 56.1 / 68.3 / 77.1 | - | 70.8 / 77.2 / 69.5 |
+| Billboard block chords | 96.2 / 98.1 / 98.8 | 91.2 / 92.4 / 91.6 | 73.2 / 71.0 / 69.5 | 59.0 / 27.2 / 18.0 |
+| Billboard set A | 83.9 / 92.7 / 95.6 | 71.7 / 84.5 / 86.7 | 36.7 / 56.4 / 47.6 | 79.5 / 37.4 / 28.3 |
+| Billboard set B | 75.6 / 88.0 / 95.6 | 61.7 / 79.2 / 87.1 | 28.9 / 44.8 / 49.1 | 78.0 / 19.6 / 7.3 |
+| RS200 block chords | 97.6 / 98.5 / 99.6 | 97.4 / 98.2 / 99.1 | (too few) | 49.2 / 30.7 / 6.8 |
+| RS200 set A | 84.5 / 96.0 / 97.8 | 75.1 / 90.9 / 92.9 | (too few) | 83.2 / 28.1 / 17.9 |
+| RS200 set B | 78.2 / 91.9 / 98.0 | 68.2 / 87.4 / 94.6 | (too few) | 82.7 / 17.0 / 2.5 |
+| The sweep | 65.4 / 77.1 / 77.6 | 59.1 / 69.4 / 66.8 | 56.8 / 61.1 / 52.1 | 63.6 / 40.6 / 23.4 |
+
+- **What it gains.** Roots, chord kinds and inversions, on every set: POP909-CL's piano is now named ahead of the C#
+  app (77.1% against 75.7%), and with the tune 77.1% (hand 68.3%). The hard basses gain most: on set A the two-feel
+  is named 94.0% of its time (hand 84.5%) and walking 89.8% (80.3%); the sweep's segmentation goes from 84.8 to 95.0.
+- **What it loses.** Extensions, and plain held chords: on set A, held chords are named 92.0% (hand 94.7%) and their
+  extensions' F1 falls from 84.4% to 59.5% (the 13's recall from 96% to 34%); the sweep's name falls from 69.4% to
+  66.8% and its macro F1 from 61.1% to 52.1%, behind the C# app.
+- **The hand cases** (the `SET=` line): 27 gates break, none with the hand-set numbers. Cmaj9 is read as Em7 (h6, 34,
+  49), C6 as Am7 (h1, h2, 22) and Fmaj9 as Am7 (22), Dm11 as G7sus4 (33), the 7alt and Db13 voicings as triads
+  (17 to 19), passing diminished sevenths as dominant sevenths (6, 28, 29, 24), and walks under G13 and Cmaj7 as Em
+  (37, 38).
+- **Why, in the numbers.** The fit learns only what the labels show: POP909-CL's are triads and sevenths, and the
+  loss counts a label's root and core, never its tensions. T1 (the label's own notes) rose from 3 to 5.23 and T2
+  (tensions) fell from 1 to 0.36, so a reading that makes every note its own (Em7 on C E G B D) beats one with a
+  tension (Cmaj9). R1 to R4 all went to 0, their rules' bound, so a played root no longer counts for itself; P1's
+  trust rose from 0.11 to 0.34, so of two chords with the same notes the commoner core wins (Am7 over C6). Starting
+  mid-bar costs far more (E5 from -1.2 to -3.11, E6 and E7 -4.27), so short chords merge (1.17 changes a bar on
+  POP909-CL's piano, hand 1.32); w_N fell to -2.78. 13 of the 39 numbers sit on a rule's bound.
+- **So these numbers aren't shipped.** Next, the fit keeps the hand cases' gates (on a stretch read whole, a gate is
+  a margin between two readings' scores, a straight-line rule in the numbers, which the fit's projection can keep as
+  it keeps the signs and orders), and the training mix is tried (the design's C12).

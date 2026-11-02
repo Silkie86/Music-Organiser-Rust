@@ -8,6 +8,7 @@
 mod answerfit;
 mod baseline;
 mod candidates;
+mod chordfit;
 mod chords;
 mod fit;
 mod harte;
@@ -18,6 +19,7 @@ mod metrics;
 mod naming;
 mod packs;
 mod profiles;
+mod ruled;
 mod tables;
 
 use std::process::ExitCode;
@@ -28,7 +30,11 @@ theorybench keyfit <labelled.jsonl>... [--aligned] [--bars <lengths>] [--lambda-
                    [--shipped | --rescale] [--final | --write <weights.rs>]
 theorybench packs <folder>... --out <file.jsonl>
 theorybench chords <labelled.jsonl>... [--answers <name>=<answers.jsonl>]... [--engine rust] [--part <role>]
-                   [--roles on|off] [--oracle-cuts] [--timing] [--per-segment] [--by <tag>]... [--dump <file>]
+                   [--roles on|off] [--oracle-cuts] [--timing] [--weights <weights.json>] [--folds <folds>]
+                   [--per-segment] [--by <tag>]... [--dump <file>]
+theorybench chordfit <labelled.jsonl>... [--inputs <kinds>] [--weigh <source>=<w>]... [--train <folds>]
+                   [--test <folds>] [--lambda <x>] [--steps <n>] [--from <weights.json>] [--fix <numbers>]
+                   [--out <weights.json>]
 theorybench candidates <labelled.jsonl>... [--inputs <kinds>] [--misses <file>]
 theorybench tables <labelled.jsonl>... [--write <tables.rs>]
 
@@ -64,10 +70,24 @@ theorybench tables <labelled.jsonl>... [--write <tables.rs>]
   --roles    off: mo-harmony hears every part as one, with no role, as the C# app does (on: each with its role)
   --oracle-cuts  mo-harmony given the labelled changes: each labelled chord read as one chord
   --timing   mo-harmony reads on one core and says how long a read takes: a piece, and 16 bars of it
+  --weights  mo-harmony reads with the weights a fit wrote (chordfit --out); the hand-set ones when left out
+  --folds    only the pieces in these folds (1 to 4), drawn as chordfit draws them: a chart's renders with the chart
   --per-segment  mir_eval's scores per labelled chord too, each counted once
   --by       the chords named whole split by a tag convert/voice.py gives each chord it plays: set, recipe, texture,
              tune, push, chart or quality (and context and role in its sweep); given twice, by both
   --dump     write every piece's labels, chords read and scores to a file, for convert/check_mir_eval.py
+  chordfit   fits mo-harmony's chord reader's 39 numbers on the chords labelled in folds 2 to 4 (the pieces whose
+             licence lets fitted numbers ship), keeping every rule they keep, and measures the fit on fold 1
+  --inputs   the ways a dataset's song is heard: piano, full (with the tune), split (the piano's bass line as a bass
+             part), upper (the rest of the piano, no bass); all four when left out. voice.py's pieces as given
+  --weigh    how much a source's pieces count, each way they're heard (1); source/input for one way, such as
+             pop909cl/upper=0
+  --train    the folds learned from (2,3,4); --test the folds measured (1). Fold 0 is kept back
+  --lambda   how hard the numbers are pulled towards the ones the fit starts from (1e-3)
+  --steps    the most steps the fit takes (40)
+  --from     starts from the weights a fit wrote; the hand-set ones when left out
+  --fix      holds these numbers where they start (their codes, such as P1,P2,pair)
+  --out      writes the fitted numbers to a file, for chords --weights and chordfit --from
   candidates how often mo-harmony's chord reader has the labelled chord among the readings it scores (its ceiling),
              with the labelled ends, and moved by up to a unit
   --inputs   the parts heard: piano (all but the tune), full, upper (the accompaniment without its bass line); piano,full
@@ -84,6 +104,7 @@ fn main() -> ExitCode {
         Some("keys") => keys::run(&args[1..]),
         Some("keyfit") => keyfit::run(&args[1..]),
         Some("chords") => chords::run(&args[1..]),
+        Some("chordfit") => chordfit::run(&args[1..]),
         Some("candidates") => candidates::run(&args[1..]),
         Some("packs") => packs::run(&args[1..]),
         Some("tables") => tables::run(&args[1..]),
