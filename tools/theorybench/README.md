@@ -237,17 +237,30 @@ with. The chords are scored exactly as `mir_eval.chord` scores chord recognition
 ones mean: each stretch of time weighted by its length in beats, pooled over all the songs. `--per-segment` scores
 them per labelled chord too (each counts once, right when right for more than half its time).
 
-The C# app is scored by the name it shows, read back with mo-harmony (`Chord::parse`, on the root and over the bass it
-gives), not by the notes it heard: "C7" names a G even when none sounds, and "Gsus4" for C/G leaves the E out, as its
-page shows them. A name stands for a few notes a chord may leave out, as players read names and as mo-harmony's own
-names do: the plain fifth, the 9 under an 11 or 13, and the 11 of a minor 13. Those count only where the label has
-them, so "Cm13" is right for a minor 13 with no 11 and "Cm11" for a minor 7 with an 11 and no 9. A 7alt says it is
-altered but not how, so it can be right as the event, never as the name.
+The C# app is scored by the name it shows (and mo-harmony by the name its chart shows), read back with mo-harmony
+(`Chord::parse`, on the root and over the bass it gives), not by the notes it heard: "C7" names a G even when none
+sounds, and "Gsus4" for C/G leaves the E out, as its page shows them. A name stands for a few notes a chord may leave
+out, as players read names and as mo-harmony's own names do: the plain fifth, the 9 under an 11 or 13, and the 11 of a
+minor 13. Those count only where the label has them, so "Cm13" is right for a minor 13 with no 11 and "Cm11" for a minor
+7 with an 11 and no 9. A 7alt says it is altered but not how, so it can be right as the event, never as the name.
 
 The helper also writes, for each chord, the other names the C# app's Playground offers for the same notes (on its
 other roots, at most four), so its pick list can be scored. With `--oracle-cuts` it reads each labelled chord's
 stretch on its own and keeps the chord it read there for longest: its naming when the changes are given, apart from
 where it would change chord. Give the bench the same `--part` as the helper, so it knows which notes were heard.
+
+`--engine rust` runs mo-harmony's chord reader in the bench, on the same notes: the parts `--part` gives (all but
+drums when left out), each with the role its dataset gives (melody, bass, chords), as the MIDI page hears a file's
+parts. `--roles off` hears them all as one part with no role, as the C# app does. Each piece is read whole, as a song
+(or as a loop or a window: Solomon's packs), and each stretch's chord is scored by the name its chart shows, as the C#
+app's are, with its next two readings as its list. `--oracle-cuts` gives it the labelled changes (a pin at each
+label's ends, so each label is read as one chord), as the helper's `--oracle-cuts` does for the C# app. `--timing`
+reads on one core, one piece after another, and says how long a read takes, a piece and 16 bars of it (the design's
+budget: 3 ms for a dense 16-bar part, 99 reads in 100):
+
+```
+cargo run -p mo-theorybench --release -- chords path/to/bench/pop909cl.jsonl --answers "C# app=cs-chords.jsonl" --engine rust --part accompaniment --timing
+```
 
 Then come the scores the chord reader's design adds (harmony/design/chord-reader-design.md), over the time the labels
 name a chord. Each label is read whole, ninths, elevenths and thirteenths and all (mir_eval drops them), as
@@ -501,3 +514,67 @@ is largest (0.26 a beat, against 0.10 trusting neither; `cargo test -p mo-harmon
 cost a little; trusted much more, it breaks hand cases (G C F over D reads Fsus2, not Dm11). No trust up to 0.5 brings
 the rootless voicings with no bass (the design's cases 12, 13 and 20) into the top two or three: those wait for the pair
 term, which reads the chords around. The experiments are in harmony/experiments/chord-reader-experiments.md, E1.
+
+## mo-harmony beside the C# app (2026-11-02)
+
+mo-harmony's chord reader as it stands, before chordfit fits anything (its weights set by hand), on the same notes as
+the C# app and scored the same way, by the names each shows (`chords --engine rust`). Played like music, it names the
+chord whole 10 to 19 points more often than the C# app. On POP909-CL's piano part it is 2 points behind; with the tune
+heard as a tune, 14 points ahead.
+
+- **Charts played as music (`voice.py`):**
+  - Billboard set A: notes+bass 89.0% against 77.6% (+11.4, +10.8 to +12.1), name 84.8% against 71.7%, event 85.4%
+    against 74.4%; extensions' macro F1 53.2% against 33.6% (+19.6). Inversions are read in root position 36.9% of their
+    time (C#: 77.8%), root position as an inversion or slash 0.5% (6.4%). The labelled chord is the first reading 85.4%
+    of the time and among the first three 90.9% (74.4% and 79.5%).
+    - By bass (name): walking 78.3% (C#: 38.9%), a pedal 72.2% (42.9%), no bass 82.1% (75.4%), the chart's inversions
+      93.1% (88.1%), a held root 96.5% (93.6%). The root-fifth two-feel is its one loss, 86.6% (92.5%): over the fifth
+      it often reads a new root for the bar's second half (C over G as Gsus4(add6), 4.1% of the two-feel time).
+    - By voicing, every recipe gains, shells most (89.5% against 76.0%). With a tune 85.3% (68.2%), without 84.4%
+      (75.3%): the tune no longer goes into the names. Pushed changes 83.7% (71.9%).
+    - Given the changes (`--oracle-cuts`), name 88.9% against 70.9%.
+  - Billboard set B: notes+bass 84.6% against 67.3% (+17.3), name 80.9% against 62.9%; macro F1 43.9% against 26.2%;
+    inversions read in root position 19.6% (75.8%). Alberti 79.0% (47.8%), arpeggios 75.2% (55.7%), spreads 84.5%
+    (70.6%), clusters 84.9% (74.3%); rootless 62.3% and 53.6% (49.8% and 46.7%), upper structures 68.1% (58.9%),
+    quartal 70.5% (49.2%), So What 75.3% (49.3%). Walking 59.3% (29.3%), a pedal 71.2% (37.5%), two-feel 83.5% (71.2%).
+    Given the changes, name 89.1% against 63.7%.
+  - RS200: set A notes+bass 94.5% against 81.2% (+13.3), set B 90.7% against 72.5% (+18.2).
+- **The sweep:** every chord, notes+bass 73.5% against 63.5% (+10.1), name 69.4% against 59.1%; macro F1 61.1% against
+  56.8%. The chords swept: name 60.8% against 53.6%; the ii and V before them 88.1% and 82.2% (72.3% and 66.0%).
+  - By bass (the chords swept, name): walking 54.3% (26.5%), the chord's inversions 47.4% (32.3%), held 83.7% (77.6%), a
+    pedal 82.7% (77.7%), no bass 58.4% (54.7%); the two-feel falls, 49.3% (65.0%), its fifth taken as the root.
+  - By voicing: Alberti 34.7% (14.2%), quartal 67.9% (52.5%), the rootless voicings 46.7% and 46.6% (34.4% and 34.1%),
+    upper structures 46.4% (37.6%); shells the same (65.3%, 65.7%); arpeggios fall, 22.6% (27.9%): each piece of the
+    arpeggio is read on its own, so a 7 chord is a triad until its seventh comes.
+  - By quality, the most gained: power chords 65.5% (1.5%), m(add9) 64.2% (3.8%), 7(#9,b13) 29.9% and 7(b9,b13) 18.2%
+    (0.0%: a 7alt never names them), 7(b13) 68.8% (48.6%), 7(#11) 75.5% (56.7%), m9 62.9% (45.6%), 9(#11) 37.0%
+    (21.2%). Lost: maj7(#5) 42.1% (73.4%), m7(11) 54.4% (66.5%), maj13 51.0% (65.5%), m11 47.7% (58.3%), 9sus4 with a
+    13 41.7% (51.0%), dim7 50.7% (59.2%), m6(9) 46.6% (54.7%).
+  - Where the label's root sounds in no part (rootless voicings, 2.6% of the time), the root is still almost never
+    right (1.7% with a bass part, 0.0% without): the design's pair term, which reads the chords around, isn't built yet.
+- **Block chords (`charts.py`):** Billboard notes+bass 96.6% against 94.2% (+2.4), name 93.1% against 90.8%; macro F1
+  76.6% against 72.8% (+3.8, +0.3 to +7.8), though its false b13s are as common (b13 F1 23.1% against 41.8%);
+  inversions read in root position 27.3% (59.7%). Slash chords are still never written as slashes: 63.0% are read with
+  the bass as the root. RS200 99.7% against 98.6%; its labels name almost no tensions, and its few b9s (0.1% of the
+  time) are missed, so its macro F1 means nothing.
+- **POP909-CL:**
+  - The accompaniment part: notes+bass 74.0% against 75.9% (-1.9, -2.4 to -1.5), name 72.7% against 74.9%, event
+    75.5% against 78.6%, lenient 79.0% against 80.4%. mir_eval: root 89.5% (+1.5), majmin+bass 83.5% (-1.8), sevenths
+    79.5% (-2.9), bass 92.2% (-0.6); segmentation 92.6 (93.9), 1.38 changes a bar (labels 1.35). About half of what it
+    loses is where the chords change (a labelled chord's main reading right but its edges wrong, 3.0% of the time
+    against 1.9%); much of the rest is open fifths read as power chords (1.6% of the time), which POP909-CL's labels
+    never name and where the C# app takes a triad.
+  - Given the changes: notes+bass 79.2% against 79.7% (-0.5), root 93.2% (+5.2), bass 96.0% (+3.4).
+  - Piano and tune together, each part with its role: notes+bass 69.1% against 55.1% (+14.0), name 67.8% against
+    54.2%, sevenths 75.1% against 67.9%. With the roles off (every part one, as the C# app hears them), 45.4% (-9.7):
+    knowing which part is the tune is worth 24 points here.
+- **Speed (release, one core of a 2.1 GHz cloud machine, two runs):** a POP909-CL song's piano part reads in 37 ms in
+  the middle and 74 to 81 ms 99 times in 100 (longest 94 to 124 ms); 16 bars of it in 7.6 to 7.7 ms and 13.6 to 14.8
+  ms. That is about five times the budget (3 ms), as the design's speed notes found: the next speed step comes before
+  the MIDI page reads with it. Sparse music is quick: RS200's block chords take 0.3 ms for 16 bars in the middle and
+  1.5 ms 99 times in 100.
+- **Against the design's merge rule** (decided later, on fold 0, after chordfit): on sets B and RS200 it passes every
+  gate measured here (bass kind 94.7% against 82.7%; altered tones F1 53.9% against 32.2%; root and majmin+bass up
+  12 to 15 points), but not rootless roots (under 90%). On POP909-CL it passes the root, not majmin+bass (-1.8),
+  the bass (-0.6), sevenths (-2.9) or the segmentation (92.6, under 93.0). The two-feel, arpeggios and edges are
+  where chordfit starts.
