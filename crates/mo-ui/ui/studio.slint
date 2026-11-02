@@ -966,6 +966,35 @@ export global Icons {
     out property <string> settings: "M 10.5 8 A 2.5 2.5 0 1 1 5.5 8 A 2.5 2.5 0 1 1 10.5 8 M 8 1 L 8 3.5 M 8 12.5 L 8 15 M 1 8 L 3.5 8 M 12.5 8 L 15 8 M 3 3 L 4.8 4.8 M 11.2 11.2 L 13 13 M 13 3 L 11.2 4.8 M 4.8 11.2 L 3 13";
 }
 
+// A name over a map, like a neighbourhood of the galaxy ("KICK"): it lights up under the mouse, as a click on it flies
+// into that part of the map.
+export component MapName inherits Rectangle {
+    in property <string> text;
+    in property <color> tint: Theme.text;
+    callback clicked;
+    width: row.preferred-width;
+    height: row.preferred-height;
+    border-radius: Theme.radius;
+    background: touch.has-hover ? Theme.surface-raised : Theme.scrim;
+    row := HorizontalLayout {
+        padding-left: Space.sm;
+        padding-right: Space.sm;
+        padding-top: Space.xs / 2;
+        padding-bottom: Space.xs / 2;
+        Text {
+            text: root.text;
+            color: root.tint;
+            font-size: Type.meta;
+            font-weight: 700;
+            letter-spacing: 1.5px;
+        }
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
 // A coloured dot, like a sound's type or a DAW's colour beside a name.
 export component Dot inherits Rectangle {
     in property <color> tint: Theme.muted;

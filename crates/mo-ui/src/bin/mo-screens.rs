@@ -215,6 +215,33 @@ fn sounds_shots(
     data.invoke_select(3);
     capture(window);
     shots.push(("sounds-galaxy.png".into(), capture(window)));
+    // A sweep across the map: the trail through the swept stars and the Swept card.
+    data.invoke_galaxy_down(40.0, 120.0, false);
+    for step in 1..=60 {
+        data.invoke_galaxy_move(40.0 + step as f32 * 12.0, 120.0 + step as f32 * 6.0);
+        // Slow enough that each star passed gets its turn to play.
+        if step % 3 == 0 {
+            std::thread::sleep(Duration::from_millis(95));
+        }
+    }
+    data.invoke_galaxy_up(false);
+    capture(window);
+    shots.push(("sounds-galaxy-swept.png".into(), capture(window)));
+    // The names over a zoomed-out map (a 29-sound library is too small to have neighbourhoods, so two are set here).
+    let label = |region: i32, name: &str, x: f32, y: f32, colour: i32| mo_ui::GalaxyLabel {
+        region,
+        name: name.into(),
+        x,
+        y,
+        colour,
+        fade: 1.0,
+    };
+    data.set_galaxy_labels(slint::ModelRc::new(slint::VecModel::from(vec![
+        label(0, "KICK", 220.0, 200.0, 0),
+        label(1, "PAD", 420.0, 460.0, 5),
+    ])));
+    capture(window);
+    shots.push(("sounds-galaxy-names.png".into(), capture(window)));
     data.invoke_pick_view(4);
     shots.push(("sounds-rediscover.png".into(), capture(window)));
     data.invoke_pick_view(5);

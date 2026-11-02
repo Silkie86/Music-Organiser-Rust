@@ -7,8 +7,14 @@
 
 use std::time::Duration;
 
-/// How far in the map can be zoomed.
+/// How far in the map can be zoomed at least; a big library goes further (see [`most_zoom_for`]).
 pub const MOST_ZOOM: f32 = 60.0;
+
+/// How far in a map of `stars` stars can be zoomed: far enough that the stars of a crowded part sit apart, one by
+/// one (the C# app's rule: 0.8 times the square root of the number of stars, and never less than [`MOST_ZOOM`]).
+pub fn most_zoom_for(stars: usize) -> f32 {
+    ((stars as f32).sqrt() * 0.8).max(MOST_ZOOM)
+}
 /// How far (in points) a press can move and still be a click.
 pub const STILL: f32 = 4.0;
 /// How much of the view's shorter side the whole map fills, so the outer stars aren't on the edge.
@@ -30,6 +36,8 @@ pub struct View {
     pub height: f32,
     /// Where the mouse last was, in points.
     pub mouse: (f32, f32),
+    /// How far in it can be zoomed.
+    pub most: f32,
     press: Option<Press>,
     flight: Option<Flight>,
 }
@@ -84,7 +92,17 @@ pub enum Moved {
 
 impl Default for View {
     fn default() -> View {
-        View { cx: 0.5, cy: 0.5, zoom: 1.0, width: 0.0, height: 0.0, mouse: (0.0, 0.0), press: None, flight: None }
+        View {
+            cx: 0.5,
+            cy: 0.5,
+            zoom: 1.0,
+            width: 0.0,
+            height: 0.0,
+            mouse: (0.0, 0.0),
+            most: MOST_ZOOM,
+            press: None,
+            flight: None,
+        }
     }
 }
 
@@ -122,10 +140,24 @@ impl View {
     pub fn fly_at_mouse(&mut self, notches: f32) {
         let (x, y) = self.mouse;
         let from = self.flight.map_or(self.zoom, |f| f.zoom);
-        let zoom = (from * NOTCH.powf(notches)).clamp(1.0, MOST_ZOOM);
+        let zoom = (from * NOTCH.powf(notches)).clamp(1.0, self.most.max(1.0));
         // The map point under the mouse now ends under it too.
         let (mx, my) = self.to_map(x, y);
         self.flight = Some(Flight { zoom, to: Goal::Anchor(x, y, mx, my) });
+    }
+
+    /// Glides to map point (`x`, `y`) in the middle, at `zoom` (kept within how far in it can go).
+    pub fn fly_to(&mut self, x: f32, y: f32, zoom: f32) {
+        self.flight = Some(Flight { zoom: zoom.clamp(1.0, self.most.max(1.0)), to: Goal::Middle(x, y) });
+    }
+
+    /// Glides into a box on the map (left, top, right, bottom): to its middle, in far enough that it about fills the
+    /// view, and always some way further in than now (as the C# app's names did).
+    pub fn fly_into(&mut self, (left, top, right, bottom): (f32, f32, f32, f32)) {
+        let size = (right - left).max(bottom - top).max(1e-4);
+        let now = self.flight.map_or(self.zoom, |f| f.zoom);
+        let zoom = (now * 1.5).max((0.7 / size).min(self.most));
+        self.fly_to((left + right) / 2.0, (top + bottom) / 2.0, zoom);
     }
 
     /// Whether a glide is going on.
@@ -249,6 +281,29 @@ mod tests {
     fn wheel(v: &mut View, notches: f32) {
         v.fly_at_mouse(notches);
         while v.glide(Duration::from_millis(16)) {}
+    }
+
+    #[test]
+    fn a_big_library_zooms_in_further() {
+        assert_eq!(most_zoom_for(0), MOST_ZOOM);
+        assert_eq!(most_zoom_for(2_500), MOST_ZOOM);
+        assert!((most_zoom_for(453_885) - 539.0).abs() < 1.0);
+        let mut v = View { most: most_zoom_for(453_885), ..view() };
+        wheel(&mut v, 100.0);
+        assert!((v.zoom - v.most).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_name_flies_into_its_part_of_the_map() {
+        let mut v = view();
+        v.fly_into((0.2, 0.2, 0.3, 0.25));
+        while v.glide(Duration::from_millis(16)) {}
+        assert!((v.cx - 0.25).abs() < 1e-3 && (v.cy - 0.225).abs() < 1e-3);
+        assert!((v.zoom - 7.0).abs() < 0.01);
+        // Never further than it can go.
+        v.fly_to(0.5, 0.5, 1e6);
+        while v.glide(Duration::from_millis(16)) {}
+        assert_eq!(v.zoom, MOST_ZOOM);
     }
 
     #[test]
