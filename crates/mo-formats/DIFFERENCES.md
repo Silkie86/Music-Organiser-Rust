@@ -79,3 +79,22 @@ tests don't have.
 | A header or track length so damaged it points before the file's start, or past what a whole number holds | Stops with an error that isn't "not a MIDI file", so the file counts as failed. | Reads the tracks before the damage and stops there. | Better |
 | A note's velocity | MIDI 1.0's 0 to 127. | Kept in MIDI 2.0's 16 bits, scaled up by MIDI 2.0's own rule, so each comes back as it was written. | Same values (rule 22) |
 | MIDI 2.0 Clip Files (`.midi2`) | Not read. | Read: a part for each group and channel with notes, keeping MIDI 2.0's 16-bit velocities and note attributes. No twin to compare with, so the tests follow the MIDI Clip File and Universal MIDI Packet specifications. | New (rule 22) |
+
+### Writing MIDI files
+
+The writer (`midi::write`) against the C# `MidiWriter`. Same file for ordinary clips: format 1, a first track with the
+clip's name, no tempo, note-offs before note-ons at the same tick.
+
+| What | C# | Rust | Judged |
+|---|---|---|---|
+| A note of no length | Its note-off is sorted before its note-on at the same tick, so the note sounds on to the end of the track. | Written one tick long (or refused, if asked). | Better |
+| A note still sounding when the same key starts again | Written as it is, so a note inside a longer one on its key comes back with the wrong lengths (readers end the earliest first). | The earlier note ends where the key starts again, as a MIDI 1.0 instrument plays it; two struck together become one (or refused, if asked). | Better |
+| A clip's 10th and 17th tracks | Channel = track number % 16, so the 10th track lands on General MIDI's drum channel. | Channel 10 is skipped for a clip's tracks (they aren't marked as drums). | Better |
+| More than 15 melodic parts written from a MIDI file (`from_parts`) | No such writer. | The first 15 get a channel each; each later part goes on the channel of an earlier part with the same sound. When none has its sound it shares with another sound (a channel plays one sound at a time): the file is still written, and `Written::shared_channels` names that channel and every track on it so the caller can say so. Before the review (PR #168) the 16th part simply wrapped onto channel 1 and lost its sound without a word. | New |
+| A part's channel and its clip's end (`from_parts`) | No such writer. | Not kept: a reader's part has neither, so channels are handed out again (drums on 10, the rest from 1) and each track ends at its last note. The notes, sounds and names come back the same. | New (limit) |
+| A key over 127, a channel or sound out of range, a tick too far | Cut to a byte without a word. | An error that says what's wrong. | Better |
+| A name over 255 bytes | Cut at byte 255, which can split a letter; its length written as a variable-length number. | Cut at the last whole letter; its length written the same way. | Better (cutting only) |
+| FL step-sequencer steps (no length) | Lengthened to a sixteenth (or the next step on the key) inside the writer. | The same in `write_clip` (`midi::write::lengthen_steps`, which `mo_convert::clips::lengthen` now calls too); `write` takes notes as they are. Muted notes are written too (as in C#), so a step ends where a muted note on its key starts, as in C#; only the FL to Bitwig converter, which keeps muted notes muted, lets a step play on past one. | Same |
+| MIDI 2.0's per-note and relative controllers | Not kept by any reader, so never written. | Have no MIDI 1.0 message, so they're left out, and `Written::dropped_controllers` counts them so the caller can say so. | New |
+| Key pressure at the tick its note starts | Never written. | Written after the note-on (a pressure needs a sounding note); other controllers come before it. | New |
+| Tempo, time signature, format 0, sounds and controllers | Never written. | Written when the song has them and the options ask (no tempo by default, as in C#); controllers cut to MIDI 1.0's bits only in the file (rule 22). | New |
