@@ -214,6 +214,7 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
 
     let weak = app.as_weak();
     let started = background::spawn("Songs", move || {
+        let began = Instant::now();
         let read = Library::open_read_only(&path)
             .and_then(|lib| Live::load(&lib, DEFAULT_RUN_GAP_MONTHS, details))
             // Missing samples are looked for in the Sounds library beside it last (rule 13).
@@ -228,8 +229,18 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
                 return;
             }
         };
+        let read_in = began.elapsed();
         let songs = live.songs();
-        log::info("Songs", &format!("{} songs from {} saves", songs.rows.len(), songs.saves));
+        log::info(
+            "Songs",
+            &format!(
+                "{} songs from {} saves (library read in {:.1} s, grouped in {:.1} s)",
+                songs.rows.len(),
+                songs.saves,
+                read_in.as_secs_f32(),
+                (began.elapsed() - read_in).as_secs_f32()
+            ),
+        );
         let _ = weak.upgrade_in_event_loop(move |app| show(&app, songs));
         watch(&mut live, &weak);
     });

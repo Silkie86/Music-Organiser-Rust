@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{Local, NaiveDateTime};
 use mo_app::activity::Feed;
@@ -508,10 +508,22 @@ fn read_all(sounds_db: &Path, library_db: &Path, send: impl Fn(Step)) {
             return;
         }
     };
+    let began = Instant::now();
     let read = (|| {
         let sounds = db.all(now).map_err(|e| e.to_string())?;
+        let read_in = began.elapsed();
         let history = db.history(500).unwrap_or_default();
-        Ok(Library::new(sounds, history, &settings.weights))
+        let library = Library::new(sounds, history, &settings.weights);
+        log::info(
+            "Sounds",
+            &format!(
+                "{} sounds (read in {:.1} s, listed in {:.1} s)",
+                library.list.len(),
+                read_in.as_secs_f32(),
+                (began.elapsed() - read_in).as_secs_f32()
+            ),
+        );
+        Ok(library)
     })();
     let list = read.as_ref().ok().map(|l: &Library| l.list.clone());
     send(Step::Read(read.map(|library| Read {

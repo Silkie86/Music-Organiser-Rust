@@ -45,3 +45,35 @@ opt-level = 2
 # which unoptimised code is too slow for. (mo-ui itself stays quick to build: its Slint code is most of the time.)
 [profile.dev.package.mo-app]
 opt-level = 2
+
+# And the crates under it: the library reads 16,000 saves and groups them into songs, the sounds read half a million
+# rows, and unoptimised they took a minute or more on start. Only mo-ui stays unoptimised.
+[profile.dev.package.mo-audio]
+opt-level = 2
+
+[profile.dev.package.mo-backup]
+opt-level = 2
+
+[profile.dev.package.mo-convert]
+opt-level = 2
+
+[profile.dev.package.mo-formats]
+opt-level = 2
+
+[profile.dev.package.mo-harmony]
+opt-level = 2
+
+[profile.dev.package.mo-library]
+opt-level = 2
+
+[profile.dev.package.mo-midi]
+opt-level = 2
+
+[profile.dev.package.mo-presets]
+opt-level = 2
+
+[profile.dev.package.mo-sounds]
+opt-level = 2
+
+[profile.dev.package.mo-space]
+opt-level = 2

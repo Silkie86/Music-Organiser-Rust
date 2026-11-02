@@ -3,7 +3,7 @@
 // and filters over them and the picked sound's panel beside them. Agreed mock-up: the design canvas, 2026-11-01.
 // Read-only for now (favourites, tags and types are shown, not changed), like the C# app's sounds.db until it's trusted.
 import { ListView } from "std-widgets.slint";
-import { Theme, Type, Space, Well, StudioSlider, SearchBox, ToggleChip, MenuChip, ListLine, Caps, Heart, StudioButton, CloseButton, HoverNote, PointerPad, Segmented, MoreButton, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader } from "../studio.slint";
+import { Theme, Type, Space, Well, StudioSlider, SearchBox, ToggleChip, MenuChip, ListLine, Caps, Heart, StudioButton, CloseButton, HoverNote, PointerPad, Segmented, MoreButton, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName } from "../studio.slint";
 
 // One type chip: the type, how many sounds have it, its colour (a place in Theme.sound-types) and whether it's on.
 export struct TypeChipInfo {
@@ -90,6 +90,31 @@ export struct SoundFact {
 }
 
 // The picked sound, for its panel.
+// A name over the zoomed-out galaxy, like "KICK": (x, y) is the middle of its bottom edge on the view.
+export struct GalaxyLabel {
+    region: int,
+    name: string,
+    x: length,
+    y: length,
+    colour: int,
+    fade: float,
+}
+
+// A sound the galaxy's sweep passed, newest first; `current` is the one Back and Next are on.
+export struct SweptLine {
+    name: string,
+    kind: string,
+    colour: int,
+    current: bool,
+}
+
+// A swept star on the view, fainter the longer ago it was swept.
+export struct TrailDot {
+    x: length,
+    y: length,
+    fade: float,
+}
+
 export struct PickedSound {
     name: string,
     sound-type: string,
@@ -189,6 +214,16 @@ export global SoundsData {
     in property <length> galaxy-hover-x;
     in property <length> galaxy-hover-y;
     // The ring round the picked star.
+    // The zoomed-out names (a click flies into its cloud), the sweep's trail as a line through the swept stars
+    // (path commands in points), its dots, and the Swept card's lines (a click goes to one; Back and Next step by one).
+    in property <[GalaxyLabel]> galaxy-labels;
+    callback galaxy-label(int);
+    in property <string> galaxy-trail;
+    in property <[TrailDot]> galaxy-trail-dots;
+    in property <[SweptLine]> galaxy-swept;
+    callback galaxy-swept-go(int);
+    callback galaxy-swept-step(int);
+    callback galaxy-swept-clear();
     in property <bool> galaxy-picked-shown;
     in property <length> galaxy-picked-x;
     in property <length> galaxy-picked-y;
@@ -1263,6 +1298,30 @@ export component SoundsPage inherits Rectangle {
                             source: SoundsData.galaxy-image;
                             image-fit: fill;
                         }
+                        if SoundsData.galaxy-trail != "": Path {
+                            x: 0;
+                            y: 0;
+                            width: sky.width;
+                            height: sky.height;
+                            viewbox-x: 0;
+                            viewbox-y: 0;
+                            viewbox-width: sky.width / 1px;
+                            viewbox-height: sky.height / 1px;
+                            commands: SoundsData.galaxy-trail;
+                            stroke: Theme.text;
+                            stroke-width: 1.2px;
+                            opacity: 0.45;
+                        }
+                        for d in SoundsData.galaxy-trail-dots: Rectangle {
+                            x: d.x - 4px;
+                            y: d.y - 4px;
+                            width: 8px;
+                            height: 8px;
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: Theme.text;
+                            opacity: 0.2 + 0.6 * d.fade;
+                        }
                         if SoundsData.galaxy-hover-shown: Rectangle {
                             x: SoundsData.galaxy-hover-x - 7px;
                             y: SoundsData.galaxy-hover-y - 7px;
@@ -1299,6 +1358,82 @@ export component SoundsPage inherits Rectangle {
                             double => { SoundsData.galaxy-double(); }
                             wheel(x, dx, dy, ctrl, shift) => { SoundsData.galaxy-wheel(dy); }
                             gone => { SoundsData.galaxy-gone(); }
+                        }
+                        for l in SoundsData.galaxy-labels: MapName {
+                            x: l.x - self.width / 2;
+                            y: l.y - self.height;
+                            text: l.name;
+                            tint: Theme.sound-type(l.colour);
+                            opacity: l.fade;
+                            clicked => { SoundsData.galaxy-label(l.region); }
+                        }
+                        if SoundsData.galaxy-swept.length > 0: Rectangle {
+                            x: sky.width - self.width - Space.md;
+                            y: Space.md;
+                            width: 250px;
+                            height: min(swept-card.preferred-height, sky.height - 2 * Space.md);
+                            background: Theme.surface;
+                            border-radius: Theme.radius;
+                            border-width: 1px;
+                            border-color: Theme.edge;
+                            clip: true;
+                            // The card takes its own clicks and the wheel, so they don't reach the map under it.
+                            TouchArea {}
+                            swept-card := VerticalLayout {
+                                padding: Space.md;
+                                spacing: Space.xs;
+                                HorizontalLayout {
+                                    spacing: Space.sm;
+                                    Caps {
+                                        text: "SWEPT";
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                    }
+                                    StudioButton {
+                                        text: "Back";
+                                        tip: "The sound swept before this one";
+                                        clicked => { SoundsData.galaxy-swept-step(1); }
+                                    }
+                                    StudioButton {
+                                        text: "Next";
+                                        tip: "The sound swept after this one";
+                                        clicked => { SoundsData.galaxy-swept-step(-1); }
+                                    }
+                                }
+                                for line[i] in SoundsData.galaxy-swept: ListLine {
+                                    height: 30px;
+                                    selected: line.current;
+                                    tip: line.kind;
+                                    clicked => { SoundsData.galaxy-swept-go(i); }
+                                    HorizontalLayout {
+                                        padding-left: Space.sm;
+                                        padding-right: Space.sm;
+                                        spacing: Space.sm;
+                                        alignment: start;
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Dot { tint: Theme.sound-type(line.colour); }
+                                        }
+                                        Text {
+                                            text: line.name;
+                                            color: line.current ? Theme.text : Theme.muted;
+                                            font-size: Type.meta;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                            horizontal-stretch: 1;
+                                        }
+                                    }
+                                }
+                                HorizontalLayout {
+                                    alignment: end;
+                                    LinkText {
+                                        text: "Clear";
+                                        tint: Theme.muted;
+                                        font-size: Type.meta;
+                                        clicked => { SoundsData.galaxy-swept-clear(); }
+                                    }
+                                }
+                            }
                         }
                         if SoundsData.galaxy-hover-text != "": HoverNote {
                             text: SoundsData.galaxy-hover-text;

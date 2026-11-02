@@ -12,16 +12,17 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use mo_app::background::{self, Newest};
+use mo_app::galaxy_names::{self as names, NO_KIND, Region};
 use mo_app::galaxy_picture::{Drawn, Hits, Picture};
-use mo_app::galaxy_view::{Hold, Moved, View};
+use mo_app::galaxy_view::{Hold, Moved, View, most_zoom_for};
 use mo_app::log;
 use mo_app::sounds as list;
 use mo_sounds::galaxy::{self, Placing, Step};
 use mo_sounds::{SoundsDb, StarPoint};
-use slint::{ComponentHandle, Image, Model, Rgba8Pixel, SharedPixelBuffer, Timer, TimerMode};
+use slint::{ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, Timer, TimerMode, VecModel};
 
 use super::{FEED, HERE, PAGE, pick, play_picked, strings};
-use crate::{AppWindow, SoundsData, Theme};
+use crate::{AppWindow, GalaxyLabel, SoundsData, SweptLine, Theme, TrailDot};
 
 /// The Placed by choices, as the page names them, and what each places the stars by.
 const PLACINGS: [(&str, Placing); 3] =
@@ -34,8 +35,20 @@ const FRAME: Duration = Duration::from_millis(16);
 /// one follows when it stops.
 const MOVING_SCALE: f32 = 1.0;
 
-/// The map as it arrives: every star by its place in the list, and each one's colour.
-type Arrived = Option<(Vec<Option<StarPoint>>, Vec<i32>)>;
+/// The most sounds the sweep's trail and the Swept card hold (the C# app's 16).
+const TRAIL: usize = 16;
+
+/// Each star's sound type, for the names over the map: a place in `names` by the star's place in the list
+/// ([`NO_KIND`] for none), and each type's colour.
+#[derive(Default)]
+pub(super) struct Kinds {
+    of: Vec<u32>,
+    names: Vec<String>,
+    colours: Vec<i32>,
+}
+
+/// The map as it arrives: every star by its place in the list, each one's colour, and its type.
+type Arrived = Option<(Vec<Option<StarPoint>>, Vec<i32>, Kinds)>;
 
 /// The galaxy's part of the page.
 pub(super) struct Galaxy {
@@ -69,6 +82,14 @@ pub(super) struct Galaxy {
     sweep: Sweep,
     /// The mouse is over the map.
     inside: bool,
+    /// Each star's type, and the neighbourhoods named over the map for the stars on show, with which list of shown
+    /// stars they were found for (so they're found again when the filters change).
+    kinds: Option<Arc<Kinds>>,
+    regions: Arc<Vec<Region>>,
+    regions_for: Option<Arc<Vec<usize>>>,
+    /// The sounds swept (and clicked) lately, newest first, by place in the list, and the one Back and Next are on.
+    trail: Vec<usize>,
+    trail_at: usize,
 }
 
 impl Default for Galaxy {
@@ -91,6 +112,11 @@ impl Default for Galaxy {
             count: 0,
             sweep: Sweep::default(),
             inside: false,
+            kinds: None,
+            regions: Arc::default(),
+            regions_for: None,
+            trail: Vec::new(),
+            trail_at: 0,
         }
     }
 }
@@ -241,6 +267,7 @@ pub(super) fn wire(app: &AppWindow) {
             super::stop(&app);
         }
         let Some(at) = click.and_then(|(x, y)| star_at(x, y)) else { return };
+        on_trail(&app, at, false);
         pick(&app, at);
         if PAGE.with(|p| p.borrow().autoplay) {
             play_picked(&app, 0.0);
@@ -258,6 +285,47 @@ pub(super) fn wire(app: &AppWindow) {
             pick(&app, at);
             play_picked(&app, 0.0);
         }
+    });
+    let weak = app.as_weak();
+    data.on_galaxy_label(move |at| {
+        let Some(app) = weak.upgrade() else { return };
+        let flew = PAGE.with(|p| {
+            let g = &mut p.borrow_mut().galaxy;
+            let area = g.regions.get(usize::try_from(at).ok()?)?.area;
+            g.view.fly_into(area);
+            Some(())
+        });
+        if flew.is_some() {
+            fly(&app);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_galaxy_swept_go(move |i| {
+        if let Some(app) = weak.upgrade() {
+            go_to_swept(&app, usize::try_from(i).unwrap_or(0));
+        }
+    });
+    let weak = app.as_weak();
+    data.on_galaxy_swept_step(move |by| {
+        let Some(app) = weak.upgrade() else { return };
+        let to = PAGE.with(|p| {
+            let g = &p.borrow().galaxy;
+            let last = g.trail.len().checked_sub(1)?;
+            Some((g.trail_at as i64 + i64::from(by)).clamp(0, last as i64) as usize)
+        });
+        if let Some(to) = to {
+            go_to_swept(&app, to);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_galaxy_swept_clear(move || {
+        let Some(app) = weak.upgrade() else { return };
+        PAGE.with(|p| {
+            let g = &mut p.borrow_mut().galaxy;
+            g.trail.clear();
+            g.trail_at = 0;
+        });
+        show_trail(&app);
     });
     let weak = app.as_weak();
     data.on_galaxy_gone(move || {
@@ -357,10 +425,174 @@ fn reached(app: &AppWindow, at: usize) {
 }
 
 /// Plays a star the sweep reached, and names it beside the mouse. It isn't picked: a sweep is for listening along.
+/// It goes on the trail.
 fn sweep_play(app: &AppWindow, at: usize) {
     let name = PAGE.with(|p| p.borrow().list.sound(at).map(|s| format!("{}  ·  {}", s.name(), s.sound_type)));
     app.global::<SoundsData>().set_galaxy_hover_text(name.unwrap_or_default().into());
+    on_trail(app, at, true);
     super::play_sound(app, at, 0.0);
+}
+
+/// Puts a sound on the trail, newest first (as the C# app: a swept one moves to the front; a clicked one already on
+/// it stays where it is), and Back and Next start from it.
+fn on_trail(app: &AppWindow, at: usize, swept: bool) {
+    PAGE.with(|p| {
+        let g = &mut p.borrow_mut().galaxy;
+        match g.trail.iter().position(|&t| t == at) {
+            Some(i) if !swept => g.trail_at = i,
+            found => {
+                if let Some(i) = found {
+                    g.trail.remove(i);
+                }
+                g.trail.insert(0, at);
+                g.trail.truncate(TRAIL);
+                g.trail_at = 0;
+            }
+        }
+    });
+    show_trail(app);
+}
+
+/// Goes to the `i`th sound on the trail (0 the newest): picks it, plays it and glides the map to it, keeping the zoom.
+fn go_to_swept(app: &AppWindow, i: usize) {
+    let found = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let g = &mut p.galaxy;
+        let at = *g.trail.get(i)?;
+        g.trail_at = i;
+        if let Some(star) = g.stars.as_ref().and_then(|s| *s.get(at)?) {
+            let zoom = g.view.zoom;
+            g.view.fly_to(star.x, star.y, zoom);
+        }
+        Some(at)
+    });
+    let Some(at) = found else { return };
+    show_trail(app);
+    pick(app, at);
+    play_picked(app, 0.0);
+    fly(app);
+}
+
+/// The trail on the map (a line through the swept stars and a dot on each, fainter with age) and on the Swept card.
+fn show_trail(app: &AppWindow) {
+    let (path, dots, lines) = PAGE.with(|p| {
+        let p = p.borrow();
+        let g = &p.galaxy;
+        let Some(stars) = g.stars.as_ref() else { return (String::new(), Vec::new(), Vec::new()) };
+        let n = g.trail.len().max(1) as f32;
+        let on_view: Vec<(f32, f32, f32)> = g
+            .trail
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &at)| {
+                let star = (*stars.get(at)?)?;
+                let (x, y) = g.view.to_view(star.x, star.y, 1.0);
+                Some((x, y, 1.0 - i as f32 / n))
+            })
+            .collect();
+        let mut path = String::new();
+        if on_view.len() > 1 {
+            for (i, (x, y, _)) in on_view.iter().enumerate() {
+                path.push_str(&format!("{} {x:.1} {y:.1} ", if i == 0 { "M" } else { "L" }));
+            }
+        }
+        let near = |&(x, y, _): &(f32, f32, f32)| {
+            x > -10.0 && y > -10.0 && x < g.view.width + 10.0 && y < g.view.height + 10.0
+        };
+        let dots: Vec<TrailDot> =
+            on_view.iter().filter(|d| near(d)).map(|&(x, y, fade)| TrailDot { x, y, fade }).collect();
+        let lines: Vec<SweptLine> = g
+            .trail
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &at)| {
+                let s = p.list.sound(at)?;
+                Some(SweptLine {
+                    name: s.name().into(),
+                    kind: s.sound_type.clone().into(),
+                    colour: list::type_colour(&s.sound_type),
+                    current: i == g.trail_at,
+                })
+            })
+            .collect();
+        (path, dots, lines)
+    });
+    let data = app.global::<SoundsData>();
+    data.set_galaxy_trail(path.into());
+    data.set_galaxy_trail_dots(ModelRc::new(VecModel::from(dots)));
+    data.set_galaxy_swept(ModelRc::new(VecModel::from(lines)));
+}
+
+/// The names over the map where the view is now; the neighbourhoods are found again (on the pool) when the stars on
+/// show have changed.
+fn show_names(app: &AppWindow) {
+    let ask = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let shown = p.shown.clone();
+        let g = &mut p.galaxy;
+        let fresh = g.regions_for.as_ref().is_some_and(|f| Arc::ptr_eq(f, &shown));
+        if fresh || g.stars.is_none() || g.kinds.is_none() {
+            return None;
+        }
+        g.regions_for = Some(shown.clone());
+        Some((g.stars.clone()?, g.kinds.clone()?, shown))
+    });
+    if let Some((stars, kinds, shown)) = ask {
+        let find = move || background::on_pool(|| names::find(&stars, &kinds.of, &kinds.names, &kinds.colours, &shown));
+        let take = |app: &AppWindow, found: Vec<Region>, shown: &Arc<Vec<usize>>| {
+            let current = PAGE.with(|p| {
+                let g = &mut p.borrow_mut().galaxy;
+                let current = g.regions_for.as_ref().is_some_and(|f| Arc::ptr_eq(f, shown));
+                if current {
+                    g.regions = Arc::new(found);
+                }
+                current
+            });
+            if current {
+                place_names(app);
+            }
+        };
+        let for_shown = PAGE.with(|p| p.borrow().shown.clone());
+        if HERE.with(|h| *h.borrow()) {
+            take(app, find(), &for_shown);
+        } else {
+            let weak = app.as_weak();
+            let started = background::spawn("Galaxy names", move || {
+                let found = find();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(app) = weak.upgrade() {
+                        take(&app, found, &for_shown);
+                    }
+                });
+            });
+            if let Err(e) = started {
+                log::warning("Sounds", &format!("Couldn't start naming the galaxy: {e}"));
+            }
+        }
+    }
+    place_names(app);
+}
+
+/// Puts the names found where they are on the view now.
+fn place_names(app: &AppWindow) {
+    let labels = PAGE.with(|p| {
+        let g = &p.borrow().galaxy;
+        // About a capital's width with its letter spacing, and the line with its padding (the names are Type.meta,
+        // 13 px, bold, in capitals).
+        names::place(&g.regions, &g.view, |name| (name.chars().count() as f32 * 10.5 + 16.0, 22.0))
+    });
+    let labels: Vec<GalaxyLabel> = labels
+        .into_iter()
+        .map(|l| GalaxyLabel {
+            region: l.region as i32,
+            name: l.name.to_uppercase().into(),
+            x: l.x,
+            y: l.y,
+            colour: l.colour,
+            fade: l.fade,
+        })
+        .collect();
+    app.global::<SoundsData>().set_galaxy_labels(ModelRc::new(VecModel::from(labels)));
 }
 
 /// Names the star under the mouse and rings it, so it's plain which one a click picks.
@@ -416,6 +648,12 @@ pub(super) fn forget(g: &mut Galaxy) {
     }
     g.stars = None;
     g.colours = None;
+    g.kinds = None;
+    g.regions = Arc::default();
+    g.regions_for = None;
+    g.trail.clear();
+    g.trail_at = 0;
+    g.view.most = most_zoom_for(0);
     g.hits = None;
     g.drawn = None;
     // A picture of the old library still on its way is too old to show.
@@ -508,13 +746,14 @@ fn load(app: &AppWindow, fresh: bool) {
         });
         // Each star's colour, worked out once rather than on every picture.
         let colours: Vec<i32> = list.sounds().iter().map(|s| list::type_colour(&s.sound_type)).collect();
+        let kinds = kinds_of(&list);
         match (&stars, job) {
             (Some((_, true)), Some(job)) => job.done("Laid out afresh (kept in memory until sounds.db is trusted)"),
             (Some(_), Some(job)) => job.done("Up to date"),
             (None, Some(job)) => job.done("Stopped"),
             _ => {}
         }
-        stars.map(|s| (s.0, colours))
+        stars.map(|s| (s.0, colours, kinds))
     };
     let arrive = move |app: &AppWindow, stars: Arrived, cancel: &Arc<AtomicBool>| {
         let current = PAGE.with(|p| {
@@ -524,7 +763,7 @@ fn load(app: &AppWindow, fresh: bool) {
                 return false;
             }
             g.loading = None;
-            if let Some((stars, colours)) = stars {
+            if let Some((stars, colours, kinds)) = stars {
                 let n = stars.iter().filter(|s| s.is_some()).count();
                 g.note = if n == 0 {
                     "No sounds on the map yet: the analysis hasn't heard any.".to_owned()
@@ -533,7 +772,11 @@ fn load(app: &AppWindow, fresh: bool) {
                 };
                 g.stars = Some(Arc::new(stars));
                 g.colours = Some(Arc::new(colours));
+                g.kinds = Some(Arc::new(kinds));
+                g.regions_for = None;
                 g.count = n;
+                g.view.most = most_zoom_for(n);
+                g.view.zoom = g.view.zoom.min(g.view.most);
             }
             true
         });
@@ -559,6 +802,27 @@ fn load(app: &AppWindow, fresh: bool) {
     if let Err(e) = started {
         log::error("Sounds", &format!("Couldn't start the galaxy: {e}"));
     }
+}
+
+/// Each sound's type as a number, and the types' names and colours, for the names over the map. A sound with no type,
+/// or "Unknown", names nothing.
+fn kinds_of(list: &list::SoundList) -> Kinds {
+    let mut kinds = Kinds::default();
+    let mut ids: HashMap<&str, u32> = HashMap::new();
+    for s in list.sounds() {
+        let t = s.sound_type.as_str();
+        if t.is_empty() || t == mo_sounds::types::UNKNOWN {
+            kinds.of.push(NO_KIND);
+            continue;
+        }
+        let id = *ids.entry(t).or_insert_with(|| {
+            kinds.names.push(t.to_owned());
+            kinds.colours.push(list::type_colour(t));
+            (kinds.names.len() - 1) as u32
+        });
+        kinds.of.push(id);
+    }
+    kinds
 }
 
 fn show_note(app: &AppWindow) {
@@ -676,6 +940,9 @@ fn place_picture(app: &AppWindow) {
     data.set_galaxy_image_y(y);
     data.set_galaxy_image_width(w);
     data.set_galaxy_image_height(h);
+    // What's drawn over the picture moves with it.
+    show_trail(app);
+    show_names(app);
 }
 
 /// The ring round the picked star, where it is on the view now.
