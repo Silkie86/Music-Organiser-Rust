@@ -167,6 +167,12 @@ fn major_of(version: &str) -> u32 {
 }
 
 impl Flp<'_> {
+    /// FL's major and minor version ((8, 5) for "8.5.2"); the minor is 0 when the version doesn't say.
+    pub fn major_minor(&self) -> (u32, u32) {
+        let minor = self.version.split('.').nth(1).and_then(|v| v.trim().parse().ok()).unwrap_or(0);
+        (self.major, minor)
+    }
+
     /// A text event's text.
     pub fn text(&self, data: &[u8]) -> String {
         let text = if self.utf16 {

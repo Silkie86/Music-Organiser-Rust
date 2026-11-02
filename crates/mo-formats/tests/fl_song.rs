@@ -240,13 +240,14 @@ fn an_old_playlist_with_more_patterns_than_tracks_still_reads() {
 
 #[test]
 fn an_fl_6_0_playlist_is_read() {
-    // FL 6.0 writes 0x5000 where FL 6.0.4 to 8 write 0x6000; both keep 28-byte items with pattern n on row 30951 - n.
+    // FL 6.0 writes 0x5000 where FL 6.0.4 to 8 write 0x6000; both keep 28-byte items with pattern n on row 999 - n,
+    // its low byte at 12 and high byte at 14 (13 is always 0x78).
     for mark in [0x5000u16, 0x6000] {
         let mut item = vec![0u8; 28];
         item[..4].copy_from_slice(&768u32.to_le_bytes());
         item[6..8].copy_from_slice(&mark.to_le_bytes());
         item[8..12].copy_from_slice(&384u32.to_le_bytes());
-        item[12..14].copy_from_slice(&30950u16.to_le_bytes());
+        item[12..15].copy_from_slice(&[0xe6, 0x78, 3]);
         item[20..24].copy_from_slice(&(-1f32).to_le_bytes());
         item[24..28].copy_from_slice(&(-1f32).to_le_bytes());
         let bytes = Flp::new()
@@ -261,6 +262,65 @@ fn an_fl_6_0_playlist_is_read() {
         assert_eq!(song.channels[0].clips.len(), 1, "mark {mark:#x}");
         assert_eq!(song.channels[0].clips[0].start, 768);
     }
+}
+
+#[test]
+fn an_fl_8_pattern_clip_plays_with_its_patterns_row() {
+    // FL 6 to 8 also save some clips as newer FL does: the pattern base, then the pattern (Solomon's FL 7 elijah_4).
+    let record = |at: u32, kind: u16, index: u16, slot: [u8; 3]| {
+        let mut r = vec![0u8; 28];
+        r[..4].copy_from_slice(&at.to_le_bytes());
+        r[4..6].copy_from_slice(&kind.to_le_bytes());
+        r[6..8].copy_from_slice(&index.to_le_bytes());
+        r[8..12].copy_from_slice(&384u32.to_le_bytes());
+        r[12..15].copy_from_slice(&slot);
+        r[20..24].copy_from_slice(&(-1f32).to_le_bytes());
+        r
+    };
+    let mut playlist = record(0, 0, 0x6000, [0xe6, 0x78, 3]);
+    playlist.extend(record(768, 20480, 20481, [0x61, 0x78, 0]));
+    let bytes = Flp::new()
+        .ascii(199, "7.0.2")
+        .word(64, 0)
+        .ascii(192, "Kick")
+        .word(65, 1)
+        .data(224, &common::note(0, 0, 96, 60, 100))
+        .data(233, &playlist)
+        .build();
+    let song = read_song(&bytes);
+    let starts: Vec<i64> = song.channels[0].clips.iter().map(|c| c.start).collect();
+    assert_eq!(starts, [0, 768]);
+}
+
+#[test]
+fn an_fl_9_playlist_mixing_rows_and_clips_is_read() {
+    // FL 9.0 to 9.5 often save pattern rows (0, 0x6000, row 999 - n) and newer FL's clips (the pattern base and the
+    // pattern, slot counted down from 98) in one event; 902 of Solomon's saves read no playlist before.
+    let record = |at: u32, kind: u16, index: u16, slot: u16| {
+        let mut r = vec![0u8; 32];
+        r[..4].copy_from_slice(&at.to_le_bytes());
+        r[4..6].copy_from_slice(&kind.to_le_bytes());
+        r[6..8].copy_from_slice(&index.to_le_bytes());
+        r[8..12].copy_from_slice(&384u32.to_le_bytes());
+        r[12..14].copy_from_slice(&slot.to_le_bytes());
+        r[24..28].copy_from_slice(&(-1i32).to_le_bytes());
+        r
+    };
+    let mut playlist = record(0, 0, 0x6000, 998);
+    playlist.extend(record(768, 20480, 20482, 97));
+    let bytes = Flp::new()
+        .ascii(199, "9.1.0")
+        .word(64, 0)
+        .ascii(192, "Kick")
+        .word(65, 1)
+        .data(224, &common::note(0, 0, 96, 60, 100))
+        .word(65, 2)
+        .data(224, &common::note(0, 0, 96, 62, 100))
+        .data(233, &playlist)
+        .build();
+    let song = read_song(&bytes);
+    let clips: Vec<(i64, u32)> = song.channels[0].clips.iter().map(|c| (c.start, c.notes[0].key as u32)).collect();
+    assert_eq!(clips, [(0, 60), (768, 62)]);
 }
 
 #[test]
