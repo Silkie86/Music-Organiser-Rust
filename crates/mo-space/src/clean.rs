@@ -476,6 +476,11 @@ pub trait Bin {
     fn find(&self, removed: &mut [Removed]) -> Vec<Problem>;
     /// Puts things back from the bin where they were; says what couldn't come back.
     fn put_back(&self, removed: &[Removed]) -> Vec<Problem>;
+    /// Which of these are in the bin now, in the same order (not once you've emptied the bin or put them back), or
+    /// `None` when the bin can't be looked in. By default it can't.
+    fn holds(&self, _removed: &[Removed]) -> Option<Vec<bool>> {
+        None
+    }
 }
 
 /// Sends each line of the plan to the bin, checking each again just before: one that changed, or that the guard now
@@ -751,6 +756,10 @@ impl Bin for SystemBin {
     fn put_back(&self, removed: &[Removed]) -> Vec<Problem> {
         put_back_from_system_bin(removed)
     }
+
+    fn holds(&self, removed: &[Removed]) -> Option<Vec<bool>> {
+        held_in_system_bin(removed)
+    }
 }
 
 fn bin_problem(e: &trash::Error) -> String {
@@ -866,6 +875,43 @@ fn find_in_system_bin(_removed: &mut [Removed]) -> Vec<Problem> {
     Vec::new()
 }
 
+/// Which of these are in the bin now: the one found when it went, by what the bin calls it; one never found then, by
+/// place and time (as putting it back looks for it), each bin item counted for one only. `None` when the bin can't be
+/// read.
+#[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+fn held_in_system_bin(removed: &[Removed]) -> Option<Vec<bool>> {
+    bin_items().map(|items| held_among(&items, removed))
+}
+
+/// Which of `removed` are among the bin's `items`, as [`held_in_system_bin`] says.
+#[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+fn held_among(items: &[trash::TrashItem], removed: &[Removed]) -> Vec<bool> {
+    let ids: HashSet<&std::ffi::OsStr> = items.iter().map(|i| i.id.as_os_str()).collect();
+    fn id_of(r: &Removed) -> Option<&std::ffi::OsStr> {
+        r.bin_id.as_deref().map(std::ffi::OsStr::new)
+    }
+    let mut taken: HashSet<&std::ffi::OsStr> = removed.iter().filter_map(id_of).filter(|id| ids.contains(id)).collect();
+    removed
+        .iter()
+        .map(|r| match id_of(r) {
+            Some(id) => ids.contains(id),
+            None => {
+                let found = items
+                    .iter()
+                    .filter(|i| !taken.contains(i.id.as_os_str()) && is_the_one(i, r))
+                    .min_by_key(|i| i.time_deleted);
+                found.is_some_and(|item| taken.insert(item.id.as_os_str()))
+            }
+        })
+        .collect()
+}
+
+/// A Mac's Trash can't be read by a program: what's in it can't be told.
+#[cfg(not(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))))]
+fn held_in_system_bin(_removed: &[Removed]) -> Option<Vec<bool>> {
+    None
+}
+
 /// A Mac's Trash can't be asked to put things back by a program: Finder's Put Back does it.
 #[cfg(not(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))))]
 fn put_back_from_system_bin(removed: &[Removed]) -> Vec<Problem> {
@@ -888,5 +934,41 @@ mod tests {
         assert!(on_network("//nas/music/Kontakt"));
         // A folder that isn't there can't be asked about: only its path tells.
         assert!(!on_network("no such folder/Kontakt"));
+    }
+
+    #[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+    #[test]
+    fn what_is_still_in_the_bin_is_found_by_its_id_or_else_by_place_and_time() {
+        use std::path::PathBuf;
+
+        use super::{Removed, What, held_among};
+        use crate::plugin_space::SpaceKind;
+
+        let folder = PathBuf::from(if cfg!(windows) { r"C:\Presets" } else { "/presets" });
+        let item = |id: &str, name: &str, at: i64| trash::TrashItem {
+            id: id.into(),
+            name: name.into(),
+            original_parent: folder.clone(),
+            time_deleted: at,
+        };
+        let removed = |name: &str, when: i64, bin_id: Option<&str>| {
+            let path = folder.join(name).to_string_lossy().into_owned();
+            let what = What::Plugin(SpaceKind::Presets);
+            Removed { real: path.clone(), path, bytes: 10, what, when, bin_id: bin_id.map(str::to_owned) }
+        };
+        let items = [item("1", "a.fxp", 100), item("2", "b.fxp", 200), item("3", "b.fxp", 300)];
+        let asked = [
+            // Found when it went, and still there.
+            removed("a.fxp", 100, Some("1")),
+            // Found when it went, but gone since: the bin was emptied, or it was put back.
+            removed("c.fxp", 100, Some("9")),
+            // Never found when it went: the first from its place since it went, then the next.
+            removed("b.fxp", 150, None),
+            removed("b.fxp", 250, None),
+            // None left for it, and the one that would do is another's.
+            removed("b.fxp", 250, None),
+            removed("a.fxp", 50, None),
+        ];
+        assert_eq!(held_among(&items, &asked), [true, false, true, true, false, false]);
     }
 }

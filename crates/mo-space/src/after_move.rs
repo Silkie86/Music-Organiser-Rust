@@ -18,6 +18,7 @@ use crate::folder_move::{
     copy_fresh, copy_tree, denied, destination_problem, fresh_name, inside_moved, leads_to, link, link_reaches, listed,
     only_in, part_way, remove_link, rest_after, room_for, shown, swap_or_ask, target,
 };
+use crate::half_copy::{clear_own, unmark};
 use crate::plugin_space::{PluginSpace, SpaceKind};
 use crate::size::{self, is_link};
 use crate::{is_dir, key, real_folder, text};
@@ -295,6 +296,19 @@ pub fn old_home_can_go(home: &OldHome, moved: &[MovedFolder]) -> bool {
     real_folder(&home.path) && !moved.iter().any(|m| is_inside(&m.to, &home.path) || is_inside(&m.from, &home.path))
 }
 
+/// Why a folder left behind can't go now, when it can't: it isn't there, it's a link now (removing it frees nothing), or
+/// a moved folder (or its link) is still in it ([`old_home_can_go`]). What's only in it is looked at when it goes
+/// ([`remove_old_home`]).
+pub fn old_home_stays(home: &OldHome, moved: &[MovedFolder]) -> Option<String> {
+    if !is_dir(&home.path) {
+        return Some("It isn't there any more.".to_owned());
+    }
+    if is_link(Path::new(&home.path)) {
+        return Some("It's a link now, so removing it frees nothing.".to_owned());
+    }
+    (!old_home_can_go(home, moved)).then(|| "A moved folder, or its link, is still in it, so it stays.".to_owned())
+}
+
 /// What's in a folder left behind but not where its files went, or newer in it, as paths inside it; `None` when it
 /// doesn't say where its files went (the C# app's, or the files linking again replaced), so it can't be told. Reads
 /// both folders: call it away from the window's thread.
@@ -316,14 +330,8 @@ pub fn remove_old_home(home: &OldHome, moved: &[MovedFolder], sure: bool, bin: &
         problems: vec![Problem { path: home.path.clone(), why: why.to_owned() }],
         ..Done::default()
     };
-    if !is_dir(&home.path) {
-        return stays("It isn't there any more.");
-    }
-    if is_link(Path::new(&home.path)) {
-        return stays("It's a link now, so removing it frees nothing.");
-    }
-    if !old_home_can_go(home, moved) {
-        return stays("A moved folder, or its link, is still in it, so it stays.");
+    if let Some(why) = old_home_stays(home, moved) {
+        return stays(&why);
     }
     if !sure {
         match only_in_old_home(home, stop) {
@@ -369,9 +377,11 @@ pub struct HomeMoved {
 
 /// Moves the folder the moved folders live in (all of it, other files too) and points every link at the new place. On
 /// the same drive it's one rename, with the links pointed at the new place just before (if any won't change, or the
-/// rename fails, they're put back and nothing moves); not while a moved folder's own link is in it. To another drive it's copied and checked, and the old one stays
-/// for you to delete. `homes` is every folder left behind. The app keeps the moves and homes it returns. Close the DAW
-/// first. Call it away from the window's thread.
+/// rename fails, they're put back and nothing moves); not while a moved folder's own link is in it. To another drive
+/// it's copied and checked, and the old one stays for you to delete; the copy holds a marker until the links are
+/// pointed at it, so one the app or the computer stopped is cleared by the next try ([`crate::half_copy`]). `homes` is
+/// every folder left behind. The app keeps the moves and homes it returns. Close the DAW first. Call it away from the
+/// window's thread.
 #[allow(clippy::too_many_arguments)]
 pub fn move_home(
     home: &str,
@@ -391,10 +401,12 @@ pub fn move_home(
     if !is_dir(home) {
         return Err(CantMove::Gone);
     }
-    if let Some(why) = destination_problem(home, destination, (bytes, &[]), drives, true, stop) {
+    let to = target(home, destination);
+    // A half copy an earlier try left, cut off part way (the app or the computer stopped), goes first.
+    clear_own(&to, home, moved, stop)?;
+    if let Some(why) = destination_problem(home, destination, (bytes, &[]), moved, drives, true, stop) {
         return Err(why);
     }
-    let to = target(home, destination);
     let new_home = text(&to);
     if drives.same(home_path, Path::new(destination)) {
         // A moved folder's link (or old copy) in it would go with the rename, and its record would be wrong.
@@ -411,6 +423,8 @@ pub fn move_home(
     }
     copy_fresh(&Tree::new(home_path, &to, &to), progress, stop)?;
     let now = repoint(home, &new_home, moved, homes, drives.admin());
+    // The links lead into it now: it's no half copy.
+    unmark(&to);
     let old_home = OldHome { path: home.to_owned(), bytes, note: its_old_place(), copy: new_home, kind: 2 };
     Ok(HomeMoved { old_home: Some(old_home), ..now })
 }

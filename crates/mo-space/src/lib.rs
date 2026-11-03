@@ -11,7 +11,10 @@
 //!   the Recycle Bin.
 //! - [`uninstallers`]: a plugin's own uninstaller from the programs Windows lists, and running it.
 //! - [`folder_move`]: moving a plugin's sounds or presets to another drive with a link in their place, and back.
+//! - [`half_copy`]: the marker in each copy a move makes until it's in use, so a copy a crash cut off is cleared.
 //! - [`after_move`]: what can happen to a moved folder later (lost links, updates), and putting it right.
+//! - [`old_copies`]: the old copies and other folders moves leave behind, with their size, to remind you of every time.
+//! - [`in_bin`]: what the app has put in the Recycle Bin that's still there, to remind you: the app never empties it.
 //! - [`admin`]: the administrator step, for folders, links and files Windows guards.
 //! - [`bitwig`]: Bitwig's copies of Library multisamples inside projects, found byte for byte, and binned once a
 //!   "(fixed)" project uses the Library file instead.
@@ -28,6 +31,9 @@ pub mod app_files;
 pub mod bitwig;
 pub mod clean;
 pub mod folder_move;
+pub mod half_copy;
+pub mod in_bin;
+pub mod old_copies;
 pub mod plugin_clean;
 pub mod plugin_space;
 pub mod plugins;

@@ -5,7 +5,9 @@
 //! on Windows, which needs no administrator rights) takes its place, pointing at the new copy, so the plugin and every
 //! project still find their files where they were. The old copy goes only when you say, after the plugin has opened
 //! fine, only to the Recycle Bin, and only once nothing is only in it; [`move_back`] undoes the lot. Nothing here
-//! deletes anything of yours: the only things ever removed for good are copies the move itself made, when it stops.
+//! deletes anything of yours: the only things ever removed for good are copies the move itself made, when it stops, or
+//! when a later try finds one that a crash cut off ([`crate::half_copy`]: each new copy holds a marker until it's in
+//! use).
 
 use std::fs;
 use std::io::{self, Read, Write};
@@ -20,6 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::admin::{Admin, AsAdmin, NoAdmin, Outcome, Step, ask_for, real_spot, reason};
 use crate::clean::{Bin, Done, Problem, Sending, What, on_network};
+use crate::half_copy::{self, MARKER, clear_own, own_room, remove_marked, unmark};
 use crate::plugin_space::SpaceKind;
 use crate::size::{self, is_link, is_online_only, size_text};
 use crate::{key, not_there, real_folder, real_path, really, text};
@@ -37,7 +40,7 @@ pub const KEPT_SUFFIX: &str = " (newer files from the old copy)";
 const CHECK_SUFFIX: &str = " (checking)";
 
 /// What a file going in over an older one is called until it's whole.
-const PART_SUFFIX: &str = ".mo-copying";
+pub(crate) const PART_SUFFIX: &str = ".mo-copying";
 
 /// How far apart two times of the same file can be: some drives (exFAT, FAT32) keep times to two seconds.
 const SAME_TIME: Duration = Duration::from_secs(2);
@@ -231,6 +234,9 @@ pub enum CantMove {
     Failed(String),
     /// Something went wrong part way and things aren't as they were: what to do about it.
     LeftHalfway(String),
+    /// There's a half copy where the copy goes, left by an earlier try that was cut off (the app or the computer
+    /// stopped), and it stays ([`crate::half_copy`]): where, and why.
+    HalfCopy { path: String, why: String },
 }
 
 impl CantMove {
@@ -280,6 +286,10 @@ impl CantMove {
             CantMove::Stopped => "Stopped: nothing was moved.".to_owned(),
             CantMove::Failed(why) => format!("{why} Nothing was moved."),
             CantMove::LeftHalfway(what) => what.clone(),
+            CantMove::HalfCopy { path, why } => format!(
+                "There's a half copy at {path}, left when an earlier try was cut off part way, and it stays: {why} \
+                 Nothing was moved."
+            ),
         }
     }
 }
@@ -312,7 +322,7 @@ pub fn problem(
     if fs::symlink_metadata(format!("{from}{OLD_SUFFIX}")).is_ok() {
         return Some(CantMove::OldCopyThere);
     }
-    destination_problem(from, destination, (bytes, &left_out(from, moved)), drives, false, stop)
+    destination_problem(from, destination, (bytes, &left_out(from, moved)), moved, drives, false, stop)
 }
 
 /// The old copies of folders moved from inside `from` before (Reaktor 6's inside Native Instruments), as keys: they
@@ -329,14 +339,18 @@ fn destination_inside(from: &str, destination: &str) -> bool {
 }
 
 /// Why a folder (a real one, there) can't be copied into `destination`, or `None` when it can: the folder picked is
-/// inside it, on a network drive or not there; the name is taken there; some of its files are only online; or there
-/// isn't room for what's copied (counted, each file and folder as the drive keeps it, leaving out `leave_out`; `bytes`,
-/// its measured size, when it can't be counted) and some to spare. On the same drive it's [`CantMove::SameDrive`], or,
-/// when `rename` (it'll be renamed rather than copied), only the checks before the copying ones count.
+/// inside it, on a network drive or not there; the name is taken there (by anything but a half copy an earlier try at
+/// this copy left, cut off part way, which the copy clears first: its room counts as free); some of its files are only
+/// online; or there isn't room for what's copied (counted, each file and folder as the drive keeps it, leaving out
+/// `leave_out`; `bytes`, its measured size, when it can't be counted) and some to spare. On the same drive it's
+/// [`CantMove::SameDrive`], or, when `rename` (it'll be renamed rather than copied), only the checks before the copying
+/// ones count. `moved` is every moved folder.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn destination_problem(
     from: &str,
     destination: &str,
     (bytes, leave_out): (u64, &[String]),
+    moved: &[MovedFolder],
     drives: &dyn Drives,
     rename: bool,
     stop: &AtomicBool,
@@ -357,8 +371,14 @@ pub(crate) fn destination_problem(
         return Some(CantMove::SameDrive);
     }
     let to = target(from, destination);
+    // A half copy an earlier try at this copy left is cleared before copying: the room it takes is free then.
+    let mut freed = 0;
     if fs::symlink_metadata(&to).is_ok() {
-        return Some(CantMove::TargetThere(to.to_string_lossy().into_owned()));
+        match own_room(&to, from, moved, stop) {
+            Ok(Some(bytes)) => freed = bytes,
+            Ok(None) => return Some(CantMove::TargetThere(to.to_string_lossy().into_owned())),
+            Err(why) => return Some(why),
+        }
     }
     if same {
         return None;
@@ -369,9 +389,15 @@ pub(crate) fn destination_problem(
         Ok(false) => {}
         Err(_) => return Some(CantMove::Stopped),
     }
-    let free = drives.free(Path::new(destination))?;
-    // Counted again here, as the drive it goes to keeps files; `bytes` (measured earlier) only when it can't be.
-    let tree = Tree { piece: drives.piece(Path::new(destination)), leave_out, ..Tree::new(from_path, &to, &to) };
+    let free = drives.free(Path::new(destination))?.saturating_add(freed);
+    // Counted again here, as the drive it goes to keeps files; `bytes` (measured earlier) only when it can't be. All
+    // of it, when a half copy there goes first.
+    let tree = Tree {
+        piece: drives.piece(Path::new(destination)),
+        leave_out,
+        as_new: freed > 0,
+        ..Tree::new(from_path, &to, &to)
+    };
     let needs = match copy_tree(&tree, Fill::Count, &|_| {}, stop) {
         Ok(counted) => counted.bytes,
         Err(CantMove::Stopped) => return Some(CantMove::Stopped),
@@ -381,9 +407,11 @@ pub(crate) fn destination_problem(
 }
 
 /// Copies the folder to the other drive and checks every file arrived whole, then swaps the original for a link to the
-/// copy. If anything goes wrong before the swap, the half-made copy is removed and nothing else has changed. `kind` and
-/// `key` say whose folder it is; `shared_with`, the other plugins it's also the folder of. `progress` hears the bytes
-/// copied so far. Call it away from the window's thread.
+/// copy. If anything goes wrong before the swap, the half-made copy is removed and nothing else has changed; if the app
+/// or the computer stops meanwhile, the copy's marker says it's a half copy, and the next try clears it first (when
+/// nothing uses it and it holds only copies: [`crate::half_copy`]). `kind` and `key` say whose folder it is;
+/// `shared_with`, the other plugins it's also the folder of. `progress` hears the bytes copied so far. Call it away
+/// from the window's thread.
 #[allow(clippy::too_many_arguments)]
 pub fn move_folder(
     from: &str,
@@ -396,10 +424,12 @@ pub fn move_folder(
     stop: &AtomicBool,
 ) -> Result<MovedFolder, CantMove> {
     let from = from.trim_end_matches(['/', '\\']).to_owned();
+    let to = target(&from, destination);
+    // A half copy an earlier try left, cut off part way (the app or the computer stopped), goes first.
+    clear_own(&to, &from, already_moved, stop)?;
     if let Some(why) = problem(&from, destination, bytes, drives, already_moved, stop) {
         return Err(why);
     }
-    let to = target(&from, destination);
     // Find out before copying whether Windows lets the folder be renamed, rather than after an hour of copying. One it
     // guards is checked as administrator now and swapped as administrator after the copy: Windows asks both times.
     check_rename_or_ask(&from, drives.admin())?;
@@ -415,6 +445,8 @@ pub fn move_folder(
         }
         return Err(why);
     }
+    // In use now: it's no half copy. A marker that won't come out stays as a leftover, and nothing more.
+    unmark(&to);
     Ok(MovedFolder {
         from,
         to: to.to_string_lossy().into_owned(),
@@ -428,7 +460,7 @@ pub fn move_folder(
 }
 
 /// A time as the C# app writes one: seven digits after the second (chrono's own `%.Nf` only does 3, 6 or 9).
-fn csharp_time(now: chrono::DateTime<chrono::Local>) -> String {
+pub(crate) fn csharp_time(now: chrono::DateTime<chrono::Local>) -> String {
     use chrono::Timelike;
     let ticks = (now.nanosecond() / 100).min(9_999_999);
     format!("{}.{ticks:07}{}", now.format("%Y-%m-%dT%H:%M:%S"), now.format("%:z"))
@@ -452,10 +484,11 @@ pub struct MovedBack {
 /// files are kept aside, never replaced. Once the old copy is deleted, the folder is copied back instead. Either way
 /// only with room to spare on this drive, and only while the link still leads to the copy the move made. Close the DAW
 /// first: what it saves meanwhile is caught by a second pass, but not after the swap. Stopped or failing part way, it
-/// says what's where ([`CantMove::LeftHalfway`]). Once it returns `Ok`, the move is over: the app lists the folders of
-/// kept files beside it ([`crate::after_move::kept_beside`], which finds those a stopped try left too) as folders left
-/// behind, then drops its record; the copy on the other drive is left for you to remove. Call it away from the
-/// window's thread.
+/// says what's where ([`CantMove::LeftHalfway`]); the copy it makes when the old copy is gone holds a marker until it's
+/// in place, so one the app or the computer stopped is cleared by the next try ([`crate::half_copy`]). Once it returns
+/// `Ok`, the move is over: the app lists the folders of kept files beside it ([`crate::after_move::kept_beside`], which
+/// finds those a stopped try left too) as folders left behind, then drops its record; the copy on the other drive is
+/// left for you to remove. Call it away from the window's thread.
 pub fn move_back(
     moved: &MovedFolder,
     drives: &dyn Drives,
@@ -478,6 +511,9 @@ pub fn move_back(
     }
     let settled = Path::new(from);
     let here = settled.parent().unwrap_or(settled);
+    // A marker left in the copy (the app stopped between a swap and taking it out) would make it look like a half
+    // copy once the move is over, and it's left for you.
+    unmark(to);
     if moved.has_old_copy() {
         let kept_in = PathBuf::from(fresh_name(from, KEPT_SUFFIX));
         let tree = Tree { keep_in: Some(&kept_in), ..Tree::new(to, Path::new(&moved.old_copy), settled) };
@@ -517,6 +553,8 @@ pub fn move_back(
         });
     }
     let back = format!("{from}{BACK_SUFFIX}");
+    // A half copy an earlier try left, cut off part way (the app or the computer stopped), goes first.
+    clear_own(Path::new(&back), &moved.to, std::slice::from_ref(moved), stop)?;
     if fs::symlink_metadata(&back).is_ok() {
         return Err(CantMove::Failed(format!(
             "There's a folder called {} beside it, left from an earlier try: look in it, then delete or rename it.",
@@ -534,6 +572,8 @@ pub fn move_back(
         }
         return Err(why);
     }
+    // In place now, as the plugin's own folder: it's no half copy.
+    unmark(settled);
     Ok(MovedBack { links_left: shown(&[first.links_left, again.links_left].concat()), ..MovedBack::default() })
 }
 
@@ -557,8 +597,10 @@ pub(crate) fn room_for(tree: &Tree, here: &Path, drives: &dyn Drives, stop: &Ato
 }
 
 /// Copies a folder into a new folder made for it (so a folder that appeared meanwhile is never copied into, or later
-/// removed), then a second time for what was saved while it copied (an hour, for a big one). If anything goes wrong,
-/// the new folder goes. Returns what each pass did.
+/// removed), then a second time for what was saved while it copied (an hour, for a big one). The new folder holds a
+/// marker from the moment it's made ([`crate::half_copy`]), which the caller takes out once the copy is in use, so one
+/// the app or the computer stops part way is known for the half copy it is. If anything goes wrong, the new folder
+/// goes. Returns what each pass did.
 pub(crate) fn copy_fresh(
     tree: &Tree,
     progress: &(dyn Fn(u64) + Sync),
@@ -566,6 +608,10 @@ pub(crate) fn copy_fresh(
 ) -> Result<(Copied, Copied), CantMove> {
     fs::create_dir(tree.to)
         .map_err(|e| CantMove::Failed(format!("Couldn't make {} ({e}).", tree.to.to_string_lossy())))?;
+    if let Err(e) = half_copy::mark(tree) {
+        remove_copy(tree.to);
+        return Err(CantMove::Failed(format!("Couldn't start the copy in {} ({e}).", tree.to.to_string_lossy())));
+    }
     let copied = copy_tree(tree, Fill::New, progress, stop).and_then(|first| {
         copy_tree(tree, Fill::Freshen, &|n| progress(first.bytes.saturating_add(n)), stop).map(|again| (first, again))
     });
@@ -693,6 +739,7 @@ fn differences(
     let show = |p: &Path| shown_as.join(p.strip_prefix(old).unwrap_or(p)).to_string_lossy().into_owned();
     let mut folders = vec![(old.to_path_buf(), copy.to_path_buf())];
     while let Some((old_dir, copy_dir)) = folders.pop() {
+        let top = old_dir.as_path() == old;
         let Ok(entries) = fs::read_dir(&old_dir) else {
             only.push(show(&old_dir));
             continue;
@@ -706,7 +753,8 @@ fn differences(
                 continue;
             };
             let path = entry.path();
-            if skip.contains(&key(&path.to_string_lossy())) {
+            // A half copy's marker (left at the top when moving back couldn't take it out) is the app's, not yours.
+            if skip.contains(&key(&path.to_string_lossy())) || top && entry.file_name() == MARKER {
                 continue;
             }
             let there = copy_dir.join(entry.file_name());
@@ -745,30 +793,8 @@ fn differences(
 /// only in the old copy ([`only_in_old_copy`]): the app shows that list first. `all` is every moved folder.
 /// [`crate::clean::undo`] puts it back.
 pub fn remove_old_copy(moved: &MovedFolder, all: &[MovedFolder], sure: bool, bin: &dyn Bin, stop: &AtomicBool) -> Done {
-    if is_link(Path::new(&moved.old_copy)) {
-        return stays(
-            moved,
-            "It's a link now, not the folder the move set aside, so it stays, and so does where it leads.",
-        );
-    }
-    if !old_copy_can_go(moved) {
-        return stays(
-            moved,
-            "It's the only copy the plugin could use now (the link or the copy on the other drive isn't as the move \
-             left it), so it stays.",
-        );
-    }
-    let mut inner = Vec::new();
-    all_held(Path::new(&moved.old_copy), moved, all, &mut inner);
-    if let Some(lost) = inner.into_iter().find(|m| !link_reaches(m)) {
-        return stays(
-            moved,
-            &format!(
-                "It holds the old copy of {}, whose link doesn't lead to {} now, so it stays.",
-                file_name(&lost.from),
-                lost.to
-            ),
-        );
+    if let Some(why) = old_copy_stays(moved, all) {
+        return stays(moved, &why);
     }
     if !sure {
         match only_in_old_copy(moved, all, stop) {
@@ -794,6 +820,33 @@ pub fn remove_old_copy(moved: &MovedFolder, all: &[MovedFolder], sure: bool, bin
     sending.send(&moved.old_copy, real, moved.bytes, What::Plugin(moved.space_kind()), &mut done, || Ok(()));
     sending.finish(&mut done);
     done
+}
+
+/// Why the old copy can't go now, when it can't: it's a link now, it's the only copy the plugin could use
+/// ([`old_copy_can_go`]), or it holds the old copy of a folder moved from inside it before whose link doesn't reach its
+/// copy. `all` is every moved folder. What's only in it is looked at when it goes ([`remove_old_copy`]).
+pub fn old_copy_stays(moved: &MovedFolder, all: &[MovedFolder]) -> Option<String> {
+    if is_link(Path::new(&moved.old_copy)) {
+        return Some(
+            "It's a link now, not the folder the move set aside, so it stays, and so does where it leads.".to_owned(),
+        );
+    }
+    if !old_copy_can_go(moved) {
+        return Some(
+            "It's the only copy the plugin could use now (the link or the copy on the other drive isn't as the move \
+             left it), so it stays."
+                .to_owned(),
+        );
+    }
+    let mut inner = Vec::new();
+    all_held(Path::new(&moved.old_copy), moved, all, &mut inner);
+    inner.into_iter().find(|m| !link_reaches(m)).map(|lost| {
+        format!(
+            "It holds the old copy of {}, whose link doesn't lead to {} now, so it stays.",
+            file_name(&lost.from),
+            lost.to
+        )
+    })
 }
 
 /// The old copy stays, and why.
@@ -1046,10 +1099,11 @@ pub(crate) fn remove_link(at: &Path) -> io::Result<()> {
     if cfg!(windows) { fs::remove_dir(at) } else { fs::remove_file(at) }
 }
 
-/// Removes a copy the move made itself, when the move stops: never a link, never the original.
+/// Removes a copy the move made itself, when the move stops: never a link, never the original. Its marker goes last,
+/// so one that can't all go (a file in it is open) is still known for a half copy, and cleared by the next try.
 pub(crate) fn remove_copy(path: &Path) {
     if fs::symlink_metadata(path).is_ok_and(|m| m.is_dir()) && !is_link(path) {
-        let _ = fs::remove_dir_all(path);
+        let _ = remove_marked(path);
     }
 }
 
@@ -1085,12 +1139,14 @@ pub(crate) struct Tree<'a> {
     /// Counting: the size of the pieces the drive it goes to keeps files in. Each file counts as a whole number of
     /// them, and each new folder as one, so a folder of many small files isn't taken for smaller than it'll be there.
     pub(crate) piece: u64,
+    /// Counting: as for a copy not made yet, whatever is at `to` now (a half copy, cleared before copying).
+    pub(crate) as_new: bool,
 }
 
 impl<'a> Tree<'a> {
     /// `from` copied into `to`, which ends up as `settled`; nothing kept aside or left out.
     pub(crate) fn new(from: &'a Path, to: &'a Path, settled: &'a Path) -> Self {
-        Tree { from, to, settled, keep_in: None, keep_all: false, ours: &[], leave_out: &[], piece: 0 }
+        Tree { from, to, settled, keep_in: None, keep_all: false, ours: &[], leave_out: &[], piece: 0, as_new: false }
     }
 }
 
@@ -1117,25 +1173,27 @@ pub(crate) fn copy_tree(
     let inside = |copy: &Path| copy.strip_prefix(tree.to).unwrap_or(copy).to_path_buf();
     let mut copied = Copied::default();
     // Counting for a copy not made yet: the folder it's made in takes a piece of the drive too.
-    if fill == Fill::Count && fs::symlink_metadata(tree.to).is_err() {
+    if fill == Fill::Count && (tree.as_new || fs::symlink_metadata(tree.to).is_err()) {
         copied.bytes = tree.piece;
     }
     let mut folders = vec![(tree.from.to_path_buf(), tree.to.to_path_buf())];
     while let Some((source_dir, copy_dir)) = folders.pop() {
+        let top = source_dir.as_path() == tree.from;
         let entries = match fs::read_dir(&source_dir) {
             Ok(entries) => entries,
             Err(_) if gone(&source_dir) => continue,
             Err(e) => return Err(failed(&source_dir, &e)),
         };
         // Counting for a copy not made yet: nothing is there, so the other drive isn't asked about each name.
-        let copy_dir_there = fill != Fill::Count || fs::symlink_metadata(&copy_dir).is_ok();
+        let copy_dir_there = fill != Fill::Count || !tree.as_new && fs::symlink_metadata(&copy_dir).is_ok();
         for entry in entries {
             if stop.load(Ordering::Relaxed) {
                 return Err(CantMove::Stopped);
             }
             let entry = entry.map_err(|e| failed(&source_dir, &e))?;
             let source = entry.path();
-            if tree.leave_out.contains(&key(&source.to_string_lossy())) {
+            // A half copy's marker, left in a copy that's in use now, is never copied on (into the old copy, say).
+            if tree.leave_out.contains(&key(&source.to_string_lossy())) || top && entry.file_name() == MARKER {
                 continue;
             }
             let copy = copy_dir.join(entry.file_name());
@@ -1372,7 +1430,7 @@ fn remove_part(part: &Path) {
 
 /// Windows only (elsewhere a read-only file can be replaced or removed anyway): makes a file read-only or not, and
 /// says whether it changed.
-fn set_read_only(path: &Path, read_only: bool) -> bool {
+pub(crate) fn set_read_only(path: &Path, read_only: bool) -> bool {
     #[cfg(windows)]
     {
         let Ok(meta) = fs::symlink_metadata(path) else { return false };
