@@ -18,6 +18,8 @@ path = "src/bin/mo-screens.rs"
 rayon.workspace = true
 mo-app.workspace = true
 mo-library = { path = "../mo-library" }
+mo-harmony = { path = "../mo-harmony" }
+mo-midi = { path = "../mo-midi" }
 mo-formats = { path = "../mo-formats" }
 mo-space = { path = "../mo-space" }
 mo-sounds = { path = "../mo-sounds" }

@@ -14,6 +14,7 @@ pub mod backup;
 pub mod cards;
 pub mod files;
 pub mod gpu;
+pub mod midi;
 pub mod note;
 pub mod songs;
 pub mod sounds;
@@ -25,7 +26,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use mo_app::activity::Feed;
 use mo_app::log;
 use mo_app::places::Place;
-use mo_app::shortcuts::{APP_ACTIONS, Action, SONGS_ACTIONS, SOUNDS_ACTIONS, Shortcuts, repeats, what_of};
+use mo_app::shortcuts::{
+    APP_ACTIONS, Action, MIDI_ACTIONS, SONGS_ACTIONS, SOUNDS_ACTIONS, Shortcuts, repeats, what_of,
+};
 use mo_app::themes::Look;
 use note::open_note;
 use slint::platform::Key;
@@ -70,6 +73,7 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> R
     app.set_songs_place(Place::Songs.index() as i32);
     app.set_sounds_place(Place::Sounds.index() as i32);
     app.set_backup_place(Place::Backup.index() as i32);
+    app.set_midi_place(Place::Midi.index() as i32);
     KEYS.with(|k| *k.borrow_mut() = Some(shortcuts.clone()));
     show_button_keys(&app, &shortcuts);
     go_to(&app, start.index() as i32);
@@ -107,6 +111,13 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> R
         {
             return true;
         }
+        if let Some(app) = weak.upgrade()
+            && app.get_place() == Place::Midi.index() as i32
+            && let Some(id) = shortcuts.page_action_for(&key, MIDI_ACTIONS)
+            && (repeat || midi::run_action(&app, id))
+        {
+            return true;
+        }
         let Some(id) = shortcuts.action_for(&key) else { return false };
         // A key held down did its job once (unless it's one that steps), and the page behind doesn't get it either.
         if repeat && !repeats(id) {
@@ -140,6 +151,9 @@ fn go_to(app: &AppWindow, index: i32) {
     if place == Place::Backup {
         backup::shown();
     }
+    if place == Place::Midi {
+        midi::shown(app);
+    }
     KEYS.with(|k| {
         if let Some(shortcuts) = k.borrow().as_ref() {
             app.set_key_rows(ModelRc::new(VecModel::from(key_rows(shortcuts, place))));
@@ -153,6 +167,7 @@ fn key_rows(shortcuts: &Shortcuts, place: Place) -> Vec<KeyRow> {
     let page: &[Action] = match place {
         Place::Songs => SONGS_ACTIONS,
         Place::Sounds => SOUNDS_ACTIONS,
+        Place::Midi => MIDI_ACTIONS,
         _ => &[],
     };
     let mut rows: Vec<KeyRow> =

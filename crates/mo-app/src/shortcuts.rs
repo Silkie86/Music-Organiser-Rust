@@ -75,8 +75,18 @@ pub const SOUNDS_ACTIONS: &[Action] = &[
     action("sounds.copyPath", "Copy where the sound's file is", "Ctrl+Shift+C"),
 ];
 
+/// The MIDI page's own actions, with the C# MIDI page's ids where it had them. What goes with this (midi.fit),
+/// the playground, Send to Bitwig, Save as and the octave keys join as those parts are built.
+pub const MIDI_ACTIONS: &[Action] = &[
+    action("midi.moreLike", "Parts shaped like the picked one", "Ctrl+L"),
+    action("midi.within", "The longer phrases the picked part is in", ""),
+    action("midi.source", "Show the picked part's file in its folder", "Ctrl+Shift+E"),
+    action("midi.copyPath", "Copy where the picked part's file is", "Ctrl+Shift+C"),
+    action("midi.back", "Back to the whole list", "Esc"),
+];
+
 /// Every page's own list. A page's keys only work on that page, so two pages may share a key.
-pub const PAGE_ACTIONS: &[&[Action]] = &[SONGS_ACTIONS, SOUNDS_ACTIONS];
+pub const PAGE_ACTIONS: &[&[Action]] = &[SONGS_ACTIONS, SOUNDS_ACTIONS, MIDI_ACTIONS];
 
 /// What an action does, in the words its tooltip and the key list use, or "" for an id in no list.
 pub fn what_of(id: &str) -> &'static str {

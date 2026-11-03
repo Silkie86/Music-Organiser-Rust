@@ -16,6 +16,7 @@ pub mod galaxy_picture;
 pub mod galaxy_view;
 pub mod live;
 pub mod log;
+pub mod midi;
 pub mod note;
 pub mod paths;
 pub mod places;
