@@ -927,6 +927,32 @@ mod tests {
         }
     }
 
+    /// A test's bin with another copy of the app beside it that has got further: while this one sends its first note,
+    /// the other says it has looked at every note saved up to `ahead_to`.
+    struct OtherCopyAhead {
+        bin: TestBin,
+        done_file: PathBuf,
+        ahead_to: &'static str,
+        said: std::cell::Cell<bool>,
+    }
+
+    impl Bin for OtherCopyAhead {
+        fn send(&self, path: &Path) -> Result<(), String> {
+            if !self.said.replace(true) {
+                fs::write(&self.done_file, format!("{}\n", self.ahead_to)).map_err(|e| e.to_string())?;
+            }
+            self.bin.send(path)
+        }
+
+        fn find(&self, _: &mut [Removed]) -> Vec<Problem> {
+            Vec::new()
+        }
+
+        fn put_back(&self, _: &[Removed]) -> Vec<Problem> {
+            Vec::new()
+        }
+    }
+
     /// A test's bin the app closes in front of, at the second file it's sent (the test stops there).
     struct ClosingBin {
         bin: TestBin,
@@ -1649,6 +1675,27 @@ mod tests {
     }
 
     #[test]
+    fn a_note_another_copy_of_the_app_has_looked_at_meanwhile_stays() {
+        let dir = test_folder("copy-ahead");
+        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let notes = places.data.join("notes");
+        let [first, second, third] = three_old_notes(&notes);
+        let done_file = places.data.join(NOTES_DONE_FILE);
+        // While this copy sends the first note, the other gets past the second (which you put back from the bin, say).
+        let other = OtherCopyAhead {
+            bin: TestBin(dir.join("bin")),
+            done_file: done_file.clone(),
+            ahead_to: "2026-07-02_12-00-00",
+            said: std::cell::Cell::new(false),
+        };
+        let done = sweep(&places, local("2026-11-03_12-00-00"), &other);
+        assert_eq!(done.to_bin, 2);
+        assert!(!first.exists() && second.exists() && !third.exists(), "the one the other copy looked at stays");
+        assert_eq!(how_far(&done_file).0, "2026-08-01_09-00-00");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn notes_wait_for_the_next_start_while_the_bin_cant_be_read() {
         let dir = test_folder("unread-bin");
         let places = Places { data: dir.join("data"), temp: dir.join("temp") };
@@ -1755,6 +1802,34 @@ mod tests {
         let done = sweep(&places, local("2026-11-03_12-00-00"), &bin);
         assert!(done.to_bin == 0 && done.notes_stay.is_some());
         assert_eq!(fs::read_to_string(&yours).unwrap(), "yours");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Mac, Linux: what says how far the sweep went is put in its place whole, never written into, so a crash part
+    /// way leaves the old one as it was (with its "Stopped" line, if it has one).
+    #[cfg(unix)]
+    #[test]
+    fn what_says_how_far_the_sweep_went_is_put_in_place_whole() {
+        use std::io::Read as _;
+        let dir = test_folder("done-whole");
+        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let bin = TestBin(dir.join("bin"));
+        let [first, ..] = three_old_notes(&places.data.join("notes"));
+        let done_file = places.data.join(NOTES_DONE_FILE);
+        fs::write(&done_file, "2026-06-01_00-00-00\n").unwrap();
+        // What a crash part way through an earlier write left beside it.
+        let part = places.data.join(format!("{NOTES_DONE_FILE}{PART_ENDING}"));
+        fs::write(&part, "2026-0").unwrap();
+        // The old one, held open: if it were written into, this would read the new words.
+        let mut old = File::open(&done_file).unwrap();
+        let done = sweep(&places, local("2026-11-03_12-00-00"), &bin);
+        assert_eq!(done.to_bin, 3);
+        assert!(!first.exists());
+        let mut held = String::new();
+        old.read_to_string(&mut held).unwrap();
+        assert_eq!(held, "2026-06-01_00-00-00\n", "the old one was never written into");
+        assert_eq!(how_far(&done_file).0, "2026-08-01_09-00-00");
+        assert!(!part.exists(), "nothing is left beside it");
         let _ = fs::remove_dir_all(&dir);
     }
 
