@@ -709,6 +709,29 @@ fn a_half_copy_on_a_drive_with_another_letter_now_is_still_cleared_by_the_next_t
 }
 
 #[test]
+fn a_half_copy_made_through_a_link_is_still_known_once_its_drive_has_another_letter() {
+    let dir = fixtures("mo-space-half-through-link");
+    let (c, d, f) = (dir.join("C"), dir.join("D"), dir.join("F"));
+    let presets = c.join("Presets");
+    library(&presets);
+    // The folder picked is a link to another folder on that drive.
+    fs::create_dir_all(d.join("Real")).unwrap();
+    folder_link(&d.join("Real"), &d.join("Link"));
+    let stop = AtomicBool::new(false);
+    let link = s(&d.join("Link"));
+    stopped_part_way(10, |progress| move_folder(&s(&presets), &link, 35, whose(), &ROOMY, &[], progress, &stop));
+    assert!(d.join("Real").join("Presets").join(MARKER).exists());
+    // Plugged in again, the drive got another letter: the link leads nowhere now, but the half copy is still known.
+    fs::rename(&d, &f).unwrap();
+    let half = f.join("Real").join("Presets");
+    assert_eq!(find(&half, &[], &ROOMY, &stop).unwrap().unwrap().state, State::CutOff);
+    // The next try, to where it really is, clears it first.
+    move_folder(&s(&presets), &s(&f.join("Real")), 35, whose(), &ROOMY, &[], &nothing, &stop).unwrap();
+    assert!(is_link(&presets) && !half.join(MARKER).exists());
+    assert_eq!(fs::read_dir(half.join("Sounds")).unwrap().count(), 6);
+}
+
+#[test]
 fn a_half_copy_you_moved_elsewhere_on_its_drive_keeps_everything_but_its_marker() {
     let dir = fixtures("mo-space-half-moved-by-you");
     let (c, d) = (dir.join("C"), dir.join("D"));

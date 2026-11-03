@@ -11,8 +11,9 @@
 //! the move made. And only while all of this holds, looked at again just before:
 //!
 //! - nothing in this app is making or clearing a copy there now ([`claim`]);
-//! - the marker is a plain file in the folder it names (or at the same place on the folder's own drive, when the drive
-//!   was called something else then: it has another letter now), and the folder is a real folder, not a link;
+//! - the marker is a plain file in the folder it names, or where that really was when the copy started (links on the
+//!   way worked out), or at either place on the folder's own drive when the drive was called something else then (it
+//!   has another letter now); and the folder is a real folder, not a link;
 //! - the copy never started going into use: the plugin can't have saved into it;
 //! - the folder it copies from is there, and doesn't lead to the copy;
 //! - no moved folder's link leads to it or into it, and no moved folder's copy is it or inside it;
@@ -82,6 +83,9 @@ struct Marker {
     from: String,
     /// Where the copy is made: the folder holding the marker.
     to: String,
+    /// Where that really is, links on the way worked out, when the copy started ("" in a marker that doesn't say).
+    #[serde(default)]
+    real: String,
     /// Where the copy ends up: `to` itself, or, moving back, the folder's own place once the link has gone.
     settled: String,
     /// When the copy started, as the app writes times.
@@ -195,6 +199,7 @@ pub(crate) fn mark(tree: &Tree) -> io::Result<()> {
     let marker = Marker {
         from: text(tree.from),
         to: text(tree.to),
+        real: real_path(&text(tree.to)).unwrap_or_default(),
         settled: text(tree.settled),
         started: csharp_time(chrono::Local::now()),
         in_use: false,
@@ -507,14 +512,17 @@ fn judge(
     Ok((State::CutOff, Some(bytes)))
 }
 
-/// Whether the folder (`here` is where it really is) is where its marker says the copy was made: that place is a real
-/// folder, and it's this one as it really is; or this folder is at that place on its own drive, and the drive was
-/// called something else then ([`on_another_drive`]). A link at that place (left at the name of a half copy renamed
-/// since, leading to it) isn't this folder, and nor is a folder renamed or moved since on its own drive.
+/// Whether the folder (`here` is where it really is) is where its marker says the copy was made: where the copy really
+/// was when it started; that place as the move named it, when it's a real folder that's really this one; or either,
+/// on this folder's own drive when the drive was called something else then ([`on_another_drive`]). A link at that
+/// place (left at the name of a half copy renamed since, leading to it) isn't this folder, and nor is a folder renamed
+/// or moved since on its own drive.
 fn in_place(marker: &Marker, here: &str, drives: &dyn Drives) -> bool {
-    let to = marker.to.as_str();
+    let (to, real) = (marker.to.as_str(), marker.real.as_str());
     let real_there = fs::symlink_metadata(to).is_ok_and(|meta| meta.is_dir());
-    (real_there && real_path(to).is_some_and(|to| key(&to) == key(here))) || on_another_drive(here, to, drives)
+    (!real.is_empty() && key(real) == key(here))
+        || (real_there && real_path(to).is_some_and(|to| key(&to) == key(here)))
+        || [to, real].into_iter().any(|place| !place.is_empty() && on_another_drive(here, place, drives))
 }
 
 /// Whether `here` (where a folder really is) is the place `to` names, but on a drive that was called something else

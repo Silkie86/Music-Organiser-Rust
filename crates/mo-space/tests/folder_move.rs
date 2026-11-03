@@ -328,30 +328,40 @@ fn a_folder_only_moves_where_it_makes_sense() {
 fn moving_back_stopped_part_way_says_so_and_where_the_old_copys_newer_files_are() {
     let dir = fixtures("mo-space-move-back-stopped");
     let (c, d) = (dir.join("C"), dir.join("D"));
-    for n in 0..4 {
+    // More files than go into the old copy together, so a first lot is in when Stop is pressed.
+    const FILES: usize = 300;
+    for n in 0..FILES {
         write(&c, &format!("Library/{n}.db"), "first");
     }
     fs::create_dir_all(&d).unwrap();
     let stop = AtomicBool::new(false);
     let from = s(&c.join("Library"));
-    let moved = move_folder(&from, &s(&d), 20, whose(), &ROOMY, &[], &nothing, &stop).unwrap();
+    let moved = move_folder(&from, &s(&d), 1500, whose(), &ROOMY, &[], &nothing, &stop).unwrap();
     // The other drive's files change, but each keeps an older time than the old copy's: the old copy's are newer.
     let (copy, old) = (d.join("Library"), PathBuf::from(&moved.old_copy));
-    for n in 0..4 {
+    for n in 0..FILES {
         let name = format!("{n}.db");
         fs::write(copy.join(&name), "update").unwrap();
         set_time(&copy.join(&name), time(&old.join(&name)) - Duration::from_secs(3600));
     }
 
-    // Stop is pressed once the first file is in.
-    let result = move_back(&moved, &ROOMY, &|_| stop.store(true, Ordering::Relaxed), &stop);
+    // Stop is pressed once the first lot is in (256 files of six bytes), as the next one is copied.
+    let stopping = |bytes: u64| {
+        if bytes > 256 * 6 {
+            stop.store(true, Ordering::Relaxed);
+        }
+    };
+    let result = move_back(&moved, &ROOMY, &stopping, &stop);
     let kept_in = format!("{from}{KEPT_SUFFIX}");
     let Err(CantMove::LeftHalfway(said)) = result else { panic!("{result:?}") };
     assert!(said.starts_with("Stopped. The old copy"), "{said}");
     assert!(said.contains(&format!("its own newer files are kept in {kept_in}")), "{said}");
-    // The link and the other drive are as they were; the kept file is found, so the app can show it.
+    // The link and the other drive are as they were; the kept files are found, so the app can show them. Each file is
+    // still in the old copy: the other drive's, with yours kept, or yours where it was.
     assert!(is_link(Path::new(&from)));
-    assert_eq!(fs::read_dir(&kept_in).unwrap().count(), 1);
+    assert_eq!(fs::read_dir(&kept_in).unwrap().count(), 256);
+    assert!((0..FILES).all(|n| old.join(format!("{n}.db")).exists()));
+    assert!(part_files(&old).is_empty());
     let found = kept_beside(std::slice::from_ref(&moved), &[], &stop);
     assert_eq!(found.iter().map(|h| h.path.as_str()).collect::<Vec<_>>(), [kept_in.as_str()]);
 
@@ -360,18 +370,49 @@ fn moving_back_stopped_part_way_says_so_and_where_the_old_copys_newer_files_are(
     stop.store(false, Ordering::Relaxed);
     let back = move_back(&moved, &ROOMY, &nothing, &stop).unwrap();
     assert_eq!(back.kept_in, format!("{from} (newer files from the old copy 2)"));
-    assert_eq!(back.kept.len(), 3);
+    assert_eq!(back.kept.len(), FILES - 256);
     let mut found: Vec<String> =
         kept_beside(std::slice::from_ref(&moved), &[], &stop).into_iter().map(|h| h.path).collect();
     let mut both = vec![kept_in.clone(), back.kept_in.clone()];
     found.sort();
     both.sort();
     assert_eq!(found, both);
-    for n in 0..4 {
+    for n in 0..FILES {
         let name = format!("{n}.db");
         let kept = [&kept_in, &back.kept_in].iter().filter(|k| Path::new(k).join(&name).exists()).count();
         assert_eq!(kept, 1, "{name}");
         assert_eq!(fs::read_to_string(Path::new(&from).join(&name)).unwrap(), "update");
+    }
+}
+
+#[test]
+fn moving_back_brings_the_right_files_when_the_copy_holds_temporary_files_a_try_left() {
+    let dir = fixtures("mo-space-move-back-leftovers");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    for n in 0..12 {
+        write(&c, &format!("Presets/{n}.fxp"), "old");
+    }
+    fs::create_dir_all(&d).unwrap();
+    let stop = AtomicBool::new(false);
+    let presets = c.join("Presets");
+    let moved = move_folder(&s(&presets), &s(&d), 36, whose(), &ROOMY, &[], &nothing, &stop).unwrap();
+    // The plugin saved over each through the link, and a try cut off part way left a temporary file beside each in
+    // the copy, older than both.
+    let copy = d.join("Presets");
+    let (later, earlier) =
+        (SystemTime::now() + Duration::from_secs(3600), SystemTime::now() - Duration::from_secs(86400));
+    for n in 0..12 {
+        let file = copy.join(format!("{n}.fxp"));
+        fs::write(&file, "new").unwrap();
+        set_time(&file, later);
+        let left = copy.join(format!("{n}.fxp.mo-copying"));
+        fs::write(&left, "LEFTOVER").unwrap();
+        set_time(&left, earlier);
+    }
+    move_back(&moved, &ROOMY, &nothing, &stop).unwrap();
+    assert!(!is_link(&presets));
+    for n in 0..12 {
+        assert_eq!(fs::read_to_string(presets.join(format!("{n}.fxp"))).unwrap(), "new", "{n}.fxp");
     }
 }
 
