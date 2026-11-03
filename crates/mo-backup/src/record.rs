@@ -103,6 +103,11 @@ impl Record {
         self.entries.get(key)
     }
 
+    /// Every file the record names, by key, in no set order.
+    pub fn entries(&self) -> impl Iterator<Item = (&str, &Entry)> {
+        self.entries.iter().map(|(k, e)| (k.as_str(), e))
+    }
+
     /// Records a file. A name with a tab or a line break in it isn't recorded (the record is one line per file): it's
     /// only read again next time.
     pub fn set(&mut self, key: String, entry: Entry) {

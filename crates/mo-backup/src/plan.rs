@@ -444,6 +444,41 @@ fn file_name(path: &str) -> &str {
     path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
+/// Where a file on the backup came from: the reverse of [`place_on_backup`], from the file's place on the backup as
+/// the backup's record names it, relative and with forward slashes (`I/Fl Studio Data/x.flp` came from
+/// `I:\Fl Studio Data\x.flp`). `None` for a place no file of yours would have (a damaged line, say).
+pub fn from_backup(rel: &str) -> Option<PathBuf> {
+    use std::path::Component;
+    let mut parts: Vec<&str> = rel.split('/').collect();
+    // Only plain names, so the path can't climb or jump anywhere.
+    let plain = |p: &&str| {
+        let mut c = Path::new(p).components();
+        matches!((c.next(), c.next()), (Some(Component::Normal(_)), None))
+    };
+    if parts.is_empty() || !parts.iter().all(plain) {
+        return None;
+    }
+    let mut out = if cfg!(windows) {
+        let first = parts.remove(0);
+        match first.as_bytes() {
+            [letter] if letter.is_ascii_alphabetic() => PathBuf::from(format!("{first}:\\")),
+            _ if first == "Network" && parts.len() >= 2 => {
+                let share = format!("\\\\{}\\{}\\", parts[0], parts[1]);
+                parts.drain(..2);
+                PathBuf::from(share)
+            }
+            _ => return None,
+        }
+    } else {
+        PathBuf::from("/")
+    };
+    if parts.is_empty() {
+        return None;
+    }
+    out.extend(parts);
+    Some(out)
+}
+
 /// Where a file goes on the backup drive: the backup folder, then the drive letter as a folder, then the same path
 /// (`I:\Fl Studio Data\x.flp` goes to `<backup>\I\Fl Studio Data\x.flp`). A network path goes under `Network\server`.
 /// `None` for a path that isn't absolute.

@@ -1,7 +1,8 @@
 //! Fills the Backup page from `mo_app::backup` and answers its buttons. Everything slow (walking the folders,
 //! reading the library, the backup itself, reading and removing older versions) runs on low-priority threads (rule
 //! 21); the window only ever shows what they send back (rule 12). Working out what goes is redone after every change,
-//! newest ask first; the drive's older versions are read again when the drive changes and after each run or removal.
+//! newest ask first, and then the files the backup keeps that are gone from your folders are looked for; the drive's
+//! older versions are read again when the drive changes and after a run that kept some, or a removal.
 
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
@@ -9,11 +10,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::Local;
+use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
 use mo_app::backup::{
     self, BackedUp, DriveRoom, PageLines, PlanState, Prepared, Progress, Settings, level_at, library_folders,
     page_lines,
 };
+use mo_app::backup_gone::{self, Warning};
 use mo_app::backup_older::{self, KeptState};
 use mo_app::log;
 use mo_backup::folders::Mode;
@@ -21,7 +24,7 @@ use mo_backup::older::{self, Kept, Run};
 use mo_library::Library;
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel, Weak};
 
-use crate::{AppWindow, BackupData, BackupFolderLine, LeftOutLine, MenuItem};
+use crate::{AppWindow, BackupData, BackupFolderLine, GoneLine, LeftOutLine, MenuItem};
 
 /// What the page knows, on the window's thread.
 #[derive(Default)]
@@ -55,6 +58,10 @@ struct Section {
     older_done: String,
     /// The removal of older versions running now: what stops it.
     removing: Option<Arc<AtomicBool>>,
+    /// The files the backup keeps that are gone from your folders, and the drive they were looked for on.
+    gone: Option<(PathBuf, Warning)>,
+    /// Where Show on the backup reports a file it couldn't show.
+    feed: Feed,
 }
 
 /// A job for the planner: the ask's number, the settings then, the library's file, and what stops it.
@@ -69,7 +76,7 @@ thread_local! {
     static OLDER: RefCell<Option<Newest<OlderJob>>> = const { RefCell::new(None) };
 }
 
-pub fn connect(app: &AppWindow, library: PathBuf) {
+pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed) {
     let settings_file = mo_app::paths::data_dir().join(backup::SETTINGS_FILE);
     let settings = Settings::load(&settings_file);
     let backed_file = mo_app::paths::data_dir().join(backup::SONGS_FILE);
@@ -81,6 +88,7 @@ pub fn connect(app: &AppWindow, library: PathBuf) {
         s.backed = backed;
         s.backed_file = backed_file;
         s.library = library;
+        s.feed = feed;
     });
     let weak = app.as_weak();
     let planner = Newest::start("Backup plan", move |(asked, settings, library, stop): Job| {
@@ -91,20 +99,24 @@ pub fn connect(app: &AppWindow, library: PathBuf) {
         let result = (!settings.folders.is_empty()).then(|| {
             background::on_pool(|| {
                 let lib = Library::open_read_only(&library).map_err(|e| e.to_string())?;
-                backup::prepare(&lib, &settings, &stop)
+                backup::prepare(&lib, &settings, &stop).map(Arc::new)
             })
         });
-        let weak = weak.clone();
+        let ready = match &result {
+            Some(Ok(p)) => Some(Arc::clone(p)),
+            _ => None,
+        };
+        let plan_weak = weak.clone();
         let _ = slint::invoke_from_event_loop(move || {
-            SECTION.with(|s| {
+            let planned = SECTION.with(|s| {
                 let mut s = s.borrow_mut();
                 if s.asked != asked {
-                    return;
+                    return true;
                 }
                 s.room = room;
                 match result {
                     Some(Ok(p)) => {
-                        s.prepared = Some(Arc::new(p));
+                        s.prepared = Some(p);
                         s.failed = None;
                     }
                     Some(Err(e)) => {
@@ -113,8 +125,32 @@ pub fn connect(app: &AppWindow, library: PathBuf) {
                     }
                     None => {}
                 }
+                s.prepared.is_some()
             });
-            show(&weak);
+            // No plan, so no look for gone files: the strip from before goes.
+            if !planned {
+                put_gone(&plan_weak, None);
+            }
+            show(&plan_weak);
+        });
+        // Then the files the backup keeps that are gone from the folders just walked: slower (the backup's record and
+        // every song zip are read), so the plan is shown first.
+        let (Some(prepared), Some(drive)) = (ready, settings.drive.clone()) else { return };
+        let warning = match background::on_pool(|| backup_gone::find(&prepared, &drive, &stop)) {
+            Ok(gone) => backup_gone::warning(&gone),
+            // A newer plan is on its way, and looks again.
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => return,
+            Err(e) => {
+                log::warning("Backup", &format!("Couldn't look for the files gone from your folders: {e}"));
+                return;
+            }
+        };
+        let weak = weak.clone();
+        let _ = slint::invoke_from_event_loop(move || {
+            let current = SECTION.with(|s| s.borrow().asked == asked);
+            if current {
+                put_gone(&weak, Some((drive, warning)));
+            }
         });
     });
     match planner {
@@ -178,6 +214,8 @@ pub fn connect(app: &AppWindow, library: PathBuf) {
                 s.older_ask = None;
                 s.older_done.clear();
             });
+            // Nor are the files the old drive keeps.
+            put_gone(&weak, None);
             change(&weak, |s| s.drive = Some(path));
             reread_older();
         });
@@ -232,6 +270,17 @@ pub fn connect(app: &AppWindow, library: PathBuf) {
     });
     let weak = app.as_weak();
     data.on_older_remove(move || start_removal(&weak));
+    data.on_gone_show(|i| {
+        let found = SECTION.with(|s| {
+            let s = s.borrow();
+            let line = usize::try_from(i).ok().and_then(|i| s.gone.as_ref()?.1.lines.get(i).cloned());
+            line.map(|l| (l.show, s.feed.clone()))
+        });
+        if let Some((path, feed)) = found {
+            let folder = path.parent().map(|f| f.display().to_string()).unwrap_or_default();
+            crate::files::reveal(&feed, &path.display().to_string(), &folder);
+        }
+    });
     show(&app.as_weak());
     // The app opened on the page.
     if app.get_place() == mo_app::places::Place::Backup.index() as i32 {
@@ -556,6 +605,33 @@ pub fn show_older(app: &AppWindow, card: OlderCard) {
     data.set_older_done(card.done.into());
 }
 
+/// Keeps the files gone from your folders that were found on a drive (or none), and puts them on the page when that's
+/// the drive picked now. Only when they change, as the list can be long.
+fn put_gone(weak: &Weak<AppWindow>, gone: Option<(PathBuf, Warning)>) {
+    let shown = SECTION.with(|s| {
+        let mut s = s.borrow_mut();
+        s.gone = gone;
+        match (&s.gone, &s.settings.drive) {
+            (Some((d, w)), Some(drive)) if d == drive => w.clone(),
+            _ => Warning::default(),
+        }
+    });
+    if let Some(app) = weak.upgrade() {
+        show_gone(&app, &shown);
+    }
+}
+
+/// Puts the warning about files gone from your folders on the page (an empty one hides the strip).
+pub fn show_gone(app: &AppWindow, warning: &Warning) {
+    let data = app.global::<BackupData>();
+    data.set_gone_line(warning.line.as_str().into());
+    data.set_gone_quiet(warning.quiet);
+    data.set_gone_note(warning.note.as_str().into());
+    let lines: Vec<GoneLine> =
+        warning.lines.iter().map(|l| GoneLine { was: l.was.as_str().into(), note: l.note.as_str().into() }).collect();
+    data.set_gone(ModelRc::new(VecModel::from(lines)));
+}
+
 /// The song panel's "Backed up" line for a song (empty until a backup drive is picked).
 pub fn song_line(song: &mo_library::songs::Song, newest: chrono::NaiveDateTime) -> String {
     SECTION.with(|s| {
@@ -661,4 +737,35 @@ pub fn sample_older(asking: bool) -> OlderCard {
         ask: ask.unwrap_or_default(),
         done: String::new(),
     }
+}
+
+/// Made-up files gone from your folders for the screenshots: three of yours (one kept in a song zip too) and two
+/// autosaves FL Studio cleared away.
+pub fn sample_gone() -> Warning {
+    use mo_backup::gone::{Gone, Kept};
+    let now = Local::now();
+    let saved = |days: i64| i128::from((now - chrono::Duration::days(days)).timestamp()) * 1_000_000_000;
+    let on_backup = |path: &str| PathBuf::from(format!(r"E:\Music Backup\{}", path.replacen(":", "", 1)));
+    let gone = |was: &str, size: u64, days: i64, zip: Option<&str>| {
+        let mut kept = vec![Kept::Copy(on_backup(was))];
+        kept.extend(zip.map(|z| Kept::InZip(PathBuf::from(format!(r"E:\Music Backup\Songs\{z}")))));
+        Gone { was: PathBuf::from(was), size, time: saved(days), kept }
+    };
+    backup_gone::warning(&[
+        gone(r"I:\FL Studio Data\Projects\Night Drive\Night Drive_3.flp", 412_000, 40, Some("Night Drive.zip")),
+        gone(r"I:\Samples\Drums\Kicks\Kick Deep 04.wav", 1_180_000, 120, None),
+        gone(r"I:\Samples\Vocals\Chop Ah.wav", 2_640_000, 200, None),
+        gone(
+            r"I:\FL Studio Data\Projects\Night Drive\Backup\Night Drive (overwritten at 2213h05).flp",
+            400_000,
+            3,
+            None,
+        ),
+        gone(
+            r"I:\FL Studio Data\Projects\Night Drive\Backup\Night Drive (overwritten at 2240h11).flp",
+            401_000,
+            3,
+            None,
+        ),
+    ])
 }

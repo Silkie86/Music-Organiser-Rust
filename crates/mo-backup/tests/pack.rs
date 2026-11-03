@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, SystemTime};
 
-use mo_backup::pack::{Packed, Packer, SONGS, pack_names};
+use mo_backup::pack::{Packed, Packer, SONGS, lists, pack_names};
 
 fn fixtures(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
@@ -70,10 +70,10 @@ fn a_song_packs_once_and_again_only_when_it_changes() {
     drop(entry);
     drop(zip);
 
-    assert_eq!(packer.pack_song(&files, name, 1, &stop).unwrap(), Packed::UpToDate);
+    assert_eq!(packer.pack_song(&files, name, 1, &stop).unwrap(), Packed::UpToDate { kept: 0 });
     // Only the time moved (the clocks changed on a FAT drive): the bytes are compared, nothing is packed again.
     set_time(&kick, 3700);
-    assert_eq!(packer.pack_song(&files, name, 1, &stop).unwrap(), Packed::UpToDate);
+    assert_eq!(packer.pack_song(&files, name, 1, &stop).unwrap(), Packed::UpToDate { kept: 0 });
     write(&save, &[8u8; 5000], 10);
     assert!(matches!(packer.pack_song(&files, name, 1, &stop).unwrap(), Packed::Written { .. }));
     // No half-made zip is left.
@@ -130,4 +130,97 @@ fn zip_names_are_safe_and_never_shared() {
     assert_eq!(names[3], "_con.zip");
     assert_eq!(names[4], "untitled.zip");
     assert!(names[5].len() < 200);
+}
+
+fn bytes_in(zip: &Path, ends: &str) -> Vec<u8> {
+    let mut zip = zip::ZipArchive::new(fs::File::open(zip).unwrap()).unwrap();
+    let name =
+        zip.file_names().map(|n| String::from(n.expect("a name"))).find(|n| n.ends_with(ends)).expect("in the zip");
+    let mut bytes = Vec::new();
+    zip.by_name(&name).unwrap().read_to_end(&mut bytes).unwrap();
+    bytes
+}
+
+#[test]
+fn a_file_gone_from_your_folders_stays_in_the_songs_zip() {
+    let root = fixtures("backup-pack-gone");
+    let backup = root.join("backup");
+    fs::create_dir_all(&backup).unwrap();
+    let save = root.join("music/Song/Song.flp");
+    let kick = root.join("music/Samples/Kick.wav");
+    let snare = root.join("music/Samples/Snare.wav");
+    write(&save, &[7u8; 500], 100);
+    write(&kick, &[1u8; 3000], 100);
+    write(&snare, &[2u8; 3000], 100);
+    let stop = AtomicBool::new(false);
+    let packer = Packer::new(&backup).unwrap();
+    let zip = backup.join(SONGS).join("Song.zip");
+    let packed = packer.pack_song(&[save.clone(), kick.clone(), snare.clone()], "Song.zip", 1, &stop).unwrap();
+    assert!(matches!(packed, Packed::Written { kept: 0, .. }), "{packed:?}");
+
+    // The snare is deleted: the song no longer lists it, and its zip is up to date with the snare still in it.
+    fs::remove_file(&snare).unwrap();
+    let now = [save.clone(), kick.clone()];
+    assert_eq!(packer.pack_song(&now, "Song.zip", 1, &stop).unwrap(), Packed::UpToDate { kept: 1 });
+    // The song changes: packed again, and the snare goes along, its bytes as they were.
+    write(&save, &[8u8; 500], 10);
+    let packed = packer.pack_song(&now, "Song.zip", 1, &stop).unwrap();
+    assert!(matches!(&packed, Packed::Written { kept: 1, damaged, .. } if damaged.is_empty()), "{packed:?}");
+    assert_eq!(bytes_in(&zip, "Samples/Snare.wav"), vec![2u8; 3000]);
+    assert_eq!(bytes_in(&zip, "Song/Song.flp"), vec![8u8; 500]);
+
+    // The kick is no longer the song's, but it's still in your folders: it goes from the zip (you still have it).
+    write(&save, &[9u8; 500], 5);
+    let packed = packer.pack_song(std::slice::from_ref(&save), "Song.zip", 1, &stop).unwrap();
+    assert!(matches!(packed, Packed::Written { kept: 1, .. }), "{packed:?}");
+    let names = names_in(&zip);
+    assert_eq!(names.len(), 3, "the save, the kept snare and the list: {names:?}");
+    assert!(names.iter().any(|n| n.ends_with("Samples/Snare.wav")));
+    assert!(!names.iter().any(|n| n.ends_with("Samples/Kick.wav")));
+
+    // Every song zip's list, as the warning about gone files reads them.
+    let found = lists(&backup, &stop).unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].zip, zip);
+    let mut inside: Vec<(u64, &str)> = found[0].files.iter().map(|(size, _, at)| (*size, at.as_str())).collect();
+    inside.sort();
+    assert_eq!(inside.len(), 2);
+    assert!(inside[0].0 == 500 && inside[0].1.ends_with("Song/Song.flp"), "{inside:?}");
+    assert!(inside[1].0 == 3000 && inside[1].1.ends_with("Samples/Snare.wav"), "{inside:?}");
+}
+
+#[test]
+fn a_kept_file_damaged_in_the_zip_before_is_left_out_and_named() {
+    let root = fixtures("backup-pack-damaged");
+    let backup = root.join("backup");
+    fs::create_dir_all(&backup).unwrap();
+    let save = root.join("music/Song/Song.flp");
+    let snare = root.join("music/Samples/Snare.wav");
+    write(&save, &[7u8; 500], 100);
+    write(&snare, &[2u8; 3000], 100);
+    let stop = AtomicBool::new(false);
+    let packer = Packer::new(&backup).unwrap();
+    let zip = backup.join(SONGS).join("Song.zip");
+    packer.pack_song(&[save.clone(), snare.clone()], "Song.zip", 1, &stop).unwrap();
+    fs::remove_file(&snare).unwrap();
+    // A sound is stored as it is: one byte of it changed in the zip is damage its check number finds.
+    let mut bytes = fs::read(&zip).unwrap();
+    let at = bytes.windows(3000).position(|w| w.iter().all(|&b| b == 2)).expect("the snare's bytes");
+    bytes[at + 1500] = 3;
+    fs::write(&zip, &bytes).unwrap();
+
+    write(&save, &[8u8; 500], 10);
+    let packed = packer.pack_song(std::slice::from_ref(&save), "Song.zip", 1, &stop).unwrap();
+    let Packed::Written { kept, damaged, .. } = packed else { panic!("packed again: {packed:?}") };
+    assert_eq!(kept, 0);
+    assert_eq!(damaged.len(), 1);
+    assert!(damaged[0].ends_with("Samples/Snare.wav"), "{damaged:?}");
+    // The new zip is whole: the save and the list, read back to the end.
+    assert_eq!(names_in(&zip).len(), 2);
+    assert_eq!(bytes_in(&zip, "Song/Song.flp"), vec![8u8; 500]);
+    // And up to date the next time.
+    assert_eq!(
+        packer.pack_song(std::slice::from_ref(&save), "Song.zip", 1, &stop).unwrap(),
+        Packed::UpToDate { kept: 0 }
+    );
 }

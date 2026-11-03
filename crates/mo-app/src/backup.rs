@@ -605,6 +605,8 @@ fn run_on(
     };
     let mut record_note = None;
     let mut problems: Vec<String> = Vec::new();
+    // Files gone from your folders that a song's zip couldn't keep, because they were damaged in its zip before.
+    let mut damaged = 0usize;
     let mut new_or_changed = 0usize;
     let mut checked = 0usize;
     if !copy_list.is_empty() {
@@ -660,11 +662,21 @@ fn run_on(
                 there.extend(song.files.iter().map(|p| case::key(&p.to_string_lossy())));
             }
             match packed {
-                Ok(Packed::Written { .. }) => {
+                Ok(Packed::Written { damaged: lost, .. }) => {
                     new_or_changed += 1;
                     checked += 1;
+                    for inside in &lost {
+                        crate::log::warning(
+                            "Backup",
+                            &format!(
+                                "{}: {inside}, gone from your folders, was damaged in the song's zip, so it isn't kept",
+                                song.title
+                            ),
+                        );
+                    }
+                    damaged += lost.len();
                 }
-                Ok(Packed::UpToDate) => checked += 1,
+                Ok(Packed::UpToDate { .. }) => checked += 1,
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {
                     return LastRun { when, ok: false, line: format!("Stopped · {} checked", thousands(checked)) };
                 }
@@ -682,6 +694,13 @@ fn run_on(
     if !problems.is_empty() {
         line.push_str(&format!(" · {} couldn't go", thousands(problems.len())));
     }
+    if damaged > 0 {
+        let verb = if damaged == 1 { "was" } else { "were" };
+        line.push_str(&format!(
+            " · {} gone from your folders {verb} damaged in a song zip, so no longer kept",
+            crate::songs::plural(damaged, "file")
+        ));
+    }
     if !prepared.missing.is_empty() {
         line.push_str(&format!(" · {} folders not plugged in", prepared.missing.len()));
     }
@@ -689,7 +708,7 @@ fn run_on(
         // Everything was still copied and checked; the next run just reads every file again.
         line.push_str(" · the backup's own list couldn't be saved, so next time takes longer");
     }
-    LastRun { when, ok: problems.is_empty() && prepared.missing.is_empty(), line }
+    LastRun { when, ok: problems.is_empty() && prepared.missing.is_empty() && damaged == 0, line }
 }
 
 /// Your DAWs' project folders (the library's roots) and your sample folders, for "Add my DAW and sample folders".
