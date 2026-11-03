@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use chrono::{Local, NaiveDateTime};
@@ -1249,18 +1249,23 @@ fn refresh(app: &AppWindow) {
         if w.is_none() {
             let weak = app.as_weak();
             // The year strip's counts change only with the sounds and the Used chip, not with each search or other
-            // filter: kept here (only this worker uses them) and counted again only when either changes.
-            let mut counted: Option<(Arc<SoundList>, bool, YearCounts)> = None;
+            // filter: kept here (only this worker uses them) and counted again only when either changes. The list
+            // they were counted from is known by a weak hold: it never keeps an old list alive (a big one takes a
+            // while to free), and while it's held no new list can be given the same place in memory, so a new list is
+            // never taken for the old one.
+            let mut counted: Option<(Weak<SoundList>, bool, YearCounts)> = None;
             match Newest::start("Sounds list", move |ask: Ask| {
                 let kept = counted
                     .as_ref()
-                    .filter(|(list, used, _)| Arc::ptr_eq(list, &ask.list) && *used == ask.filters.used)
+                    .filter(|(list, used, _)| {
+                        std::ptr::eq(list.as_ptr(), Arc::as_ptr(&ask.list)) && *used == ask.filters.used
+                    })
                     .map(|(_, _, years)| years.clone());
                 let (shown, years) = background::on_pool(|| {
                     let years = kept.unwrap_or_else(|| ask.list.year_counts(ask.filters.used));
                     (ask.list.view(&ask.filters, ask.order, ask.seed), years)
                 });
-                counted = Some((ask.list.clone(), ask.filters.used, years.clone()));
+                counted = Some((Arc::downgrade(&ask.list), ask.filters.used, years.clone()));
                 let weak = weak.clone();
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(app) = weak.upgrade() {
