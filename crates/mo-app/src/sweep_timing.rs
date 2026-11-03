@@ -67,6 +67,9 @@ struct Pending {
     input_ms: Option<f64>,
     /// When its turn came and it was asked for.
     asked: Option<Instant>,
+    /// Once asked for, when the mouse reached it again (swept back over it while it was being read, say): a new ask
+    /// waits from then, not from the first pass.
+    again: Option<Instant>,
     /// When the reading thread began opening it, which read that is, and whether its start had been read ahead.
     opening: Option<Opening>,
 }
@@ -145,13 +148,20 @@ impl SweepTiming {
         }
         // Reached again before it was asked for: it still waits from its first pass, unless that was long ago (then
         // it waits from now, not from seconds ago).
-        let keep = self
-            .pending
-            .get(path)
-            .is_some_and(|p| p.asked.is_some() || now.saturating_duration_since(p.reached) < STALE);
+        // Once asked for, it stays (its read may be going on), and a new pass is kept for the next ask.
+        if let Some(p) = self.pending.get_mut(path)
+            && p.asked.is_some()
+        {
+            if p.again.is_none_or(|a| now.saturating_duration_since(a) >= STALE) {
+                p.again = Some(now);
+            }
+            return;
+        }
+        let keep = self.pending.get(path).is_some_and(|p| now.saturating_duration_since(p.reached) < STALE);
         if !keep {
             let input_ms = input_ms.map(|i| i.max(0.0));
-            self.pending.insert(path.to_owned(), Pending { reached: now, input_ms, asked: None, opening: None });
+            self.pending
+                .insert(path.to_owned(), Pending { reached: now, input_ms, asked: None, again: None, opening: None });
         }
     }
 
@@ -159,10 +169,25 @@ impl SweepTiming {
     pub fn asked(&mut self, path: &str, now: Instant) {
         // Reached long ago and passed by (a click on it now, say): its wait starts now. Counted from the old pass,
         // one such star once read as a 42 s wait in the C# app and made a 10 s average 1.8 s.
-        let fresh = self.pending.get(path).filter(|p| now.saturating_duration_since(p.reached) < STALE).copied();
-        let p = match fresh {
-            Some(p) => Pending { asked: Some(now), opening: None, ..p },
-            None => Pending { reached: now, input_ms: None, asked: Some(now), opening: None },
+        // Asked for before (its read may still be going on, and keeps its place so it can be counted): this ask waits
+        // from the mouse's newer pass over it.
+        let was = self.pending.get(path).copied();
+        let reached = match was {
+            Some(p) if p.asked.is_some() => p.again,
+            Some(p) => Some(p.reached),
+            None => None,
+        }
+        .filter(|r| now.saturating_duration_since(*r) < STALE);
+        let p = Pending {
+            reached: reached.unwrap_or(now),
+            input_ms: if reached.is_some() && was.is_some_and(|p| p.asked.is_none()) {
+                was.and_then(|p| p.input_ms)
+            } else {
+                None
+            },
+            asked: Some(now),
+            again: None,
+            opening: was.and_then(|p| p.opening),
         };
         self.pending.insert(path.to_owned(), p);
     }
@@ -190,12 +215,18 @@ impl SweepTiming {
         }
     }
 
-    /// Takes the sound being opened by read `read`, leaving a newer ask for the same sound alone.
+    /// Takes the sound being opened by read `read`. When the sound was asked for again after that read began, the
+    /// newer ask stays, waiting for its own read.
     fn take(&mut self, path: &str, read: u64) -> Option<(Pending, Opening)> {
-        let p = *self.pending.get(path)?;
+        let p = self.pending.get_mut(path)?;
         let o = p.opening.filter(|o| o.read == read)?;
-        self.pending.remove(path);
-        Some((p, o))
+        let taken = *p;
+        if p.asked.is_some_and(|asked| asked > o.at) {
+            p.opening = None;
+        } else {
+            self.pending.remove(path);
+        }
+        Some((taken, o))
     }
 
     /// The first sound of a stretch starts its clock.
@@ -237,7 +268,9 @@ impl SweepTiming {
     /// What the output adds after that: the wait for its next mix and how long a mixed sound takes to come out. `None`
     /// when not known.
     pub fn output(&mut self, mix_ms: Option<f64>, output_ms: Option<f64>) {
-        (self.mix_ms, self.output_ms) = (mix_ms, output_ms);
+        // An output just opened doesn't know yet: what was known before stands.
+        self.mix_ms = mix_ms.or(self.mix_ms);
+        self.output_ms = output_ms.or(self.output_ms);
     }
 
     /// The line for what's been counted so far, when anything has (as the app closes, say), and the counts start
@@ -571,6 +604,36 @@ mod tests {
         t.opening("/a.wav", 1, at(t0, 62));
         t.started("/a.wav", 2, at(t0, 71));
         assert!(t.note(at(t0, 10_000)).contains("opening the file 10.0 ms"));
+    }
+
+    #[test]
+    fn swept_back_over_while_being_read_the_new_wait_is_from_the_new_pass_and_the_old_read_still_counts() {
+        let t0 = Instant::now();
+        let mut t = SweepTiming::new();
+        t.reached("/a.wav", None, at(t0, 0));
+        t.asked("/a.wav", at(t0, 0));
+        t.opening("/a.wav", 1, at(t0, 1));
+        // Back over it at 100 ms while read 1 is still a slow, cold open; its turn comes at 120 ms.
+        t.reached("/a.wav", None, at(t0, 100));
+        t.asked("/a.wav", at(t0, 120));
+        // Read 1 finishes, overtaken: its 400 ms count, and the newer ask stays for read 2.
+        t.overtaken("/a.wav", 1, at(t0, 401));
+        assert_eq!(t.waiting(), 1);
+        t.opening("/a.wav", 2, at(t0, 402));
+        t.started("/a.wav", 2, at(t0, 405));
+        let note = t.note(at(t0, 10_000));
+        assert!(note.contains("waiting its turn 20 ms"), "{note}");
+        assert!(note.contains("1 dropped while being read, overtaken by a newer sound (their reads took 400.0 ms"));
+    }
+
+    #[test]
+    fn an_output_that_doesnt_know_yet_keeps_what_was_known() {
+        let mut t = SweepTiming::new();
+        t.output(Some(5.0), Some(20.0));
+        t.output(None, None);
+        let t0 = Instant::now();
+        heard(&mut t, "/a.wav", 1, [at(t0, 0), at(t0, 0), at(t0, 0), at(t0, 1)]);
+        assert!(t.note(at(t0, 10_000)).contains("next mix about 5 ms, then out of the speakers after 20 ms"));
     }
 
     #[test]

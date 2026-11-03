@@ -211,6 +211,8 @@ static PLAYER: OnceLock<Player> = OnceLock::new();
 /// Counts the plays and stops asked for, so a sound that finishes reading after a newer play or a stop stays quiet
 /// (newest wins, rule 12).
 static PLAYS: AtomicU64 = AtomicU64::new(0);
+/// The newest play's number (not a stop's), so a read cut short can tell a newer sound from a stop.
+static NEWEST_PLAY: AtomicU64 = AtomicU64::new(0);
 
 /// The tile rows, made from the page's list one row at a time as the list draws them.
 struct TileRows {
@@ -1533,6 +1535,7 @@ fn play_sound(app: &AppWindow, at: usize, from: f64, most: f64) {
         return;
     }
     let ask = PLAYS.fetch_add(1, Ordering::SeqCst) + 1;
+    NEWEST_PLAY.fetch_max(ask, Ordering::SeqCst);
     let weak = app.as_weak();
     // The sweep's timings (`mo_app::sweep_timing`) hear when it's being opened, and when it's handed to the output,
     // overtaken by a newer sound or dropped, by this play's number; for a sound the sweep didn't ask for they count
@@ -1541,8 +1544,9 @@ fn play_sound(app: &AppWindow, at: usize, from: f64, most: f64) {
         sweep_timing::opening(&path, ask);
         let read = mo_audio::read(Path::new(&path), most);
         match read {
-            // A newer play or a stop came while this one was reading.
-            _ if PLAYS.load(Ordering::SeqCst) != ask => sweep_timing::overtaken(&path, ask),
+            // A newer play came while this one was reading: overtaken. A stop (the mouse let go, say): dropped.
+            _ if NEWEST_PLAY.load(Ordering::SeqCst) != ask => sweep_timing::overtaken(&path, ask),
+            _ if PLAYS.load(Ordering::SeqCst) != ask => sweep_timing::dropped(&path, ask),
             Ok(audio) => {
                 let player = PLAYER.get_or_init(|| {
                     Player::new(|key| {

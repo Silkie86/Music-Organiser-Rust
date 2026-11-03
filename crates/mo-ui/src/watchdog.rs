@@ -111,17 +111,31 @@ impl Drop for Doing {
 fn report(what: &'static str, own: Duration) {
     #[cfg(test)]
     tests::REPORTED.with(|r| r.borrow_mut().push((what, own)));
-    frame_timing::step(what, own);
+    // Before [`start`] every thread's steps are marked, so the frame timing hears only once the window's thread is
+    // known: a background job's step at start-up isn't the window being busy.
+    if WINDOW.get().is_some() {
+        frame_timing::step(what, own);
+    }
 }
 
 /// Which step a late answer is put down to, from the step seen at each look while it waited: the one seen most, and
 /// of those the one seen last (`None` is no marked step).
 fn blame(seen: &[Option<&'static str>]) -> Option<&'static str> {
+    let mut counts: Vec<(Option<&'static str>, usize)> = Vec::new();
     let mut best: Option<(Option<&'static str>, usize)> = None;
-    for (i, step) in seen.iter().enumerate() {
-        let n = seen[..=i].iter().filter(|s| *s == step).count();
+    for &step in seen {
+        let n = match counts.iter_mut().find(|(s, _)| *s == step) {
+            Some((_, n)) => {
+                *n += 1;
+                *n
+            }
+            None => {
+                counts.push((step, 1));
+                1
+            }
+        };
         if best.is_none_or(|(_, most)| n >= most) {
-            best = Some((*step, n));
+            best = Some((step, n));
         }
     }
     best.and_then(|(step, _)| step)
@@ -172,6 +186,10 @@ fn watch(feed: &Feed) {
         let mut seen: Vec<Option<&'static str>> = Vec::new();
         while answered.load(Ordering::Acquire) == 0 {
             std::thread::sleep(LOOK_EVERY);
+            // Answered while this look slept: what the window does now came after the answer, so it isn't looked at.
+            if answered.load(Ordering::Acquire) != 0 {
+                break;
+            }
             let waited = sent.elapsed();
             if seen.len() < 400 {
                 seen.push(busy_step());

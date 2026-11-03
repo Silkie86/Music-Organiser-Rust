@@ -24,6 +24,7 @@ use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::log;
+use crate::sweep_timing::Step;
 
 /// A frame (or a late answer) over this is a hitch: two frames missed at 60 frames a second.
 pub const SLOW: Duration = Duration::from_millis(33);
@@ -47,20 +48,28 @@ const PARTS_NAMED: usize = 6;
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Part {
     what: &'static str,
-    total: f64,
-    count: u32,
-    most: f64,
+    time: Step,
 }
 
 fn add(parts: &mut Vec<Part>, what: &'static str, ms: f64) {
     match parts.iter_mut().find(|p| p.what == what) {
-        Some(p) => {
-            p.total += ms;
-            p.count += 1;
-            p.most = p.most.max(ms);
+        Some(p) => p.time.add(ms),
+        None => {
+            let mut time = Step::default();
+            time.add(ms);
+            parts.push(Part { what, time });
         }
-        None => parts.push(Part { what, total: ms, count: 1, most: ms }),
     }
+}
+
+/// A marked step's own time since the last frame (all its runs, merged by name, so the list can't grow), when its
+/// first run began and when its last one ended.
+#[derive(Clone, Copy, Debug)]
+struct Waiting {
+    what: &'static str,
+    ms: f64,
+    first_began: Instant,
+    last_ended: Instant,
 }
 
 fn ms(d: Duration) -> f64 {
@@ -75,10 +84,8 @@ pub struct FrameTiming {
     frames: u32,
     draw_total: f64,
     draw_most: f64,
-    /// The marked steps' own times since the last frame, one entry a step (so it can't grow), and when the first of
-    /// them began.
-    this_frame: Vec<(&'static str, f64)>,
-    first_step: Option<Instant>,
+    /// The marked steps' own times since the last frame.
+    this_frame: Vec<Waiting>,
     slow: u32,
     slowest: f64,
     slow_parts: Vec<Part>,
@@ -98,7 +105,6 @@ impl FrameTiming {
             draw_total: 0.0,
             draw_most: 0.0,
             this_frame: Vec::new(),
-            first_step: None,
             slow: 0,
             slowest: 0.0,
             slow_parts: Vec::new(),
@@ -112,14 +118,22 @@ impl FrameTiming {
     /// A marked step on the window's thread ended at `now`, having taken `own` (its time less the steps inside it).
     pub fn step(&mut self, what: &'static str, own: Duration, now: Instant) {
         let began = now.checked_sub(own).unwrap_or(now);
-        // No frame came for a while after the steps waiting: they ran between frames, and this one starts afresh.
-        self.flush_between(began);
-        self.first_step = Some(self.first_step.map_or(began, |f| f.min(began)));
         self.moving |= [SWEEPING, GLIDING, DRAGGING].contains(&what);
         let t = ms(own);
-        match self.this_frame.iter_mut().find(|(w, _)| *w == what) {
-            Some((_, total)) => *total += t,
-            None => self.this_frame.push((what, t)),
+        // The same step's runs spread over more than BETWEEN with no frame drawn: those ran between frames, and this
+        // run starts afresh.
+        if let Some(at) = self.this_frame.iter().position(|w| w.what == what)
+            && began.saturating_duration_since(self.this_frame[at].first_began) > BETWEEN
+        {
+            let w = self.this_frame.swap_remove(at);
+            add(&mut self.between_parts, w.what, w.ms);
+        }
+        match self.this_frame.iter_mut().find(|w| w.what == what) {
+            Some(w) => {
+                w.ms += t;
+                w.last_ended = w.last_ended.max(now);
+            }
+            None => self.this_frame.push(Waiting { what, ms: t, first_began: began, last_ended: now }),
         }
     }
 
@@ -131,31 +145,27 @@ impl FrameTiming {
         self.frames += 1;
         self.draw_total += draw;
         self.draw_most = self.draw_most.max(draw);
-        // Steps that began well before this frame did ran while no frame was being drawn: they're not this frame's.
-        self.flush_between(began);
-        let total = draw + self.this_frame.iter().map(|(_, t)| t).sum::<f64>();
+        // Steps that ended well before this frame began ran while no frame was being drawn: they're not this frame's.
+        // The ones just before it are, whatever else waited.
+        let mut total = draw;
+        let mut mine = Vec::new();
+        for w in self.this_frame.drain(..) {
+            if began.saturating_duration_since(w.last_ended) > BETWEEN {
+                add(&mut self.between_parts, w.what, w.ms);
+            } else {
+                total += w.ms;
+                mine.push(w);
+            }
+        }
         if total >= ms(SLOW) {
             self.slow += 1;
             self.slowest = self.slowest.max(total);
             add(&mut self.slow_parts, DRAWING, draw);
-            for &(what, t) in &self.this_frame {
-                add(&mut self.slow_parts, what, t);
+            for w in &mine {
+                add(&mut self.slow_parts, w.what, w.ms);
             }
         }
-        self.this_frame.clear();
-        self.first_step = None;
         self.due(now)
-    }
-
-    /// The steps waiting for a frame began over [`BETWEEN`] before `at` with no frame drawn: they ran between frames,
-    /// so they're counted there and not put on the next frame. Only those; steps from the last [`BETWEEN`] stay.
-    fn flush_between(&mut self, at: Instant) {
-        if self.first_step.is_some_and(|f| at.saturating_duration_since(f) > BETWEEN) {
-            for (what, t) in self.this_frame.drain(..) {
-                add(&mut self.between_parts, what, t);
-            }
-            self.first_step = None;
-        }
     }
 
     /// The watchdog's knock waited `waited` for an answer, on `page`, while the window was in the marked step `busy`
@@ -185,43 +195,44 @@ impl FrameTiming {
     /// The summary line, or `None` for a quiet stretch; the counts start again either way. Steps since the last frame
     /// stay for the next one.
     pub fn note(&mut self, now: Instant) -> Option<String> {
-        let between = self.between_parts.iter().any(|p| p.total >= 0.5);
+        let between = self.between_parts.iter().any(|p| p.time.total >= 0.5);
         let quiet = self.slow == 0 && self.late == 0 && !between && !self.moving;
         let line = (!quiet).then(|| self.line(now));
-        let (page, this_frame, first_step) = (self.page, std::mem::take(&mut self.this_frame), self.first_step);
+        let (page, this_frame) = (self.page, std::mem::take(&mut self.this_frame));
         *self = FrameTiming::new(now);
-        (self.page, self.this_frame, self.first_step) = (page, this_frame, first_step);
+        (self.page, self.this_frame) = (page, this_frame);
         line
     }
 
     fn line(&self, now: Instant) -> String {
         let secs = now.saturating_duration_since(self.since).as_secs_f64();
+        let (slow, between) = (ms(SLOW), ms(BETWEEN));
         let average = if self.frames == 0 { 0.0 } else { self.draw_total / f64::from(self.frames) };
         let mut line = format!(
             "{} frames in {secs:.0} s on {}, {DRAWING} took {average:.1} ms on average (slowest {:.0} ms); ",
             self.frames, self.page, self.draw_most
         );
         if self.slow == 0 {
-            line.push_str("no frame over 33 ms. ");
+            line.push_str(&format!("no frame over {slow:.0} ms. "));
         } else {
             line.push_str(&format!(
-                "{} over 33 ms (slowest {:.0} ms), their time went to: {}. ",
+                "{} over {slow:.0} ms (slowest {:.0} ms), their time went to: {}. ",
                 self.slow,
                 self.slowest,
                 named(&self.slow_parts, true)
             ));
         }
-        if self.between_parts.iter().any(|p| p.total >= 0.5) {
+        if self.between_parts.iter().any(|p| p.time.total >= 0.5) {
             line.push_str(&format!(
-                "Between frames (no frame drawn for over 100 ms), marked steps took: {}. ",
+                "Between frames (no frame drawn for over {between:.0} ms), marked steps took: {}. ",
                 named(&self.between_parts, true)
             ));
         }
         if self.late == 0 {
-            line.push_str("The window answered every knock within 33 ms.");
+            line.push_str(&format!("The window answered every knock within {slow:.0} ms."));
         } else {
             line.push_str(&format!(
-                "The window answered late (over 33 ms) {} time{}, busy with: {}.",
+                "The window answered late (over {slow:.0} ms) {} time{}, busy with: {}.",
                 self.late,
                 if self.late == 1 { "" } else { "s" },
                 named(&self.late_parts, false)
@@ -234,17 +245,19 @@ impl FrameTiming {
 /// The parts, the biggest first: "Galaxy: draw on the card 90 ms (in 2, longest 45)", or with `in_frames` off, how
 /// many times each was seen: "drawing the window 2 times (longest 60 ms)".
 fn named(parts: &[Part], in_frames: bool) -> String {
-    let mut parts: Vec<Part> = parts.iter().copied().filter(|p| p.total >= 0.5).collect();
-    parts.sort_by(|a, b| b.total.total_cmp(&a.total));
+    let mut parts: Vec<Part> = parts.iter().copied().filter(|p| p.time.total >= 0.5).collect();
+    parts.sort_by(|a, b| b.time.total.total_cmp(&a.time.total));
     let more = parts.len().saturating_sub(PARTS_NAMED);
     let mut said: Vec<String> = parts
         .iter()
         .take(PARTS_NAMED)
         .map(|p| {
             if in_frames {
-                format!("{} {:.0} ms (in {}, longest {:.0})", p.what, p.total, p.count, p.most)
+                let Step { total, count, most } = p.time;
+                format!("{} {total:.0} ms (in {count}, longest {most:.0})", p.what)
             } else {
-                format!("{} {} time{} (longest {:.0} ms)", p.what, p.count, if p.count == 1 { "" } else { "s" }, p.most)
+                let Step { count, most, .. } = p.time;
+                format!("{} {count} time{} (longest {most:.0} ms)", p.what, if count == 1 { "" } else { "s" })
             }
         })
         .collect();
@@ -375,18 +388,18 @@ mod tests {
     fn steps_while_no_frame_is_drawn_are_counted_between_frames_not_as_one_huge_frame() {
         let t0 = Instant::now();
         let mut f = FrameTiming::new(t0);
-        // Ten seconds of steps with no frame (the window showing nothing that changes), then one quick frame. Only the
-        // step just before the frame is the frame's; the rest are counted between frames, in batches of 100 ms.
+        // Ten seconds of steps with no frame (the window showing nothing that changes), then half a second later one
+        // quick frame. They're counted between frames, in batches of 100 ms.
         for i in 0..10_000 {
             f.step("Sounds: the library arrived", d(1), at(t0, i + 1));
         }
         assert_eq!(f.this_frame.len(), 1, "steps merge by name, so the list can't grow without frames");
-        let line = f.drawn(d(2), "Sounds", at(t0, 10_005)).expect("steps between frames are worth a line");
+        let line = f.drawn(d(2), "Sounds", at(t0, 10_500)).expect("steps between frames are worth a line");
         assert!(line.contains("no frame over 33 ms"), "{line}");
         assert!(
             line.contains(
                 "Between frames (no frame drawn for over 100 ms), marked steps took: Sounds: the library arrived \
-                 9999 ms (in 99, longest 101)."
+                 10000 ms (in 100, longest 101)."
             ),
             "{line}"
         );
@@ -415,6 +428,22 @@ mod tests {
         assert!(line.contains("1 over 33 ms (slowest 45 ms), their time went to: Galaxy: draw 40 ms"), "{line}");
         assert!(!line.contains("went to: Sounds"), "{line}");
         assert!(line.contains("marked steps took: Sounds: the library arrived 20 ms (in 1, longest 20)"), "{line}");
+    }
+
+    #[test]
+    fn a_drag_just_before_a_frame_is_the_frames_though_an_older_step_waited_too() {
+        let t0 = Instant::now();
+        let mut f = FrameTiming::new(t0);
+        // A hover that changed nothing on show, so no frame; then a drag and its frame.
+        f.step("Galaxy: hover", d(2), at(t0, 2));
+        f.step(DRAGGING, d(45), at(t0, 135));
+        f.drawn(d(5), "Sounds", at(t0, 140));
+        let line = f.note(at(t0, 10_000)).expect("a slow frame");
+        assert!(
+            line.contains("1 over 33 ms (slowest 50 ms), their time went to: Galaxy: drag the map 45 ms"),
+            "{line}"
+        );
+        assert!(line.contains("marked steps took: Galaxy: hover 2 ms"), "{line}");
     }
 
     #[test]
