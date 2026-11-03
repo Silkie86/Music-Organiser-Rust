@@ -10,9 +10,12 @@
 //! between the two blend.
 //!
 //! With Light by on, the unlit stars are dimmer and smaller, and the best lit ones are drawn as stars even far out
-//! (never smaller than [`MIN_LIT`] points), with a bigger glow; the very brightest few get faint four-point spikes.
-//! So what Light by picks out shows at every zoom, while the unlit stars still keep the map's shape. Which ones those
-//! are goes by their rank ([`lit_order`]), the same on the card and on the processor.
+//! (never smaller than [`MIN_LIT`] points), each a bright point with a short, faint glow; on the card the very
+//! brightest few also get faint four-point spikes. So what Light by picks out shows at every zoom, while the unlit
+//! stars still keep the map's shape. Which ones those are goes by their rank ([`lit_order`]), the same on the card
+//! and on the processor. Only the card twinkles ([`twinkle_amount`]) and draws spikes.
+
+use std::time::Duration;
 
 use mo_sounds::StarPoint;
 use rayon::prelude::*;
@@ -120,7 +123,7 @@ pub const ALIKE_WEIGHT: f32 = 0.5;
 pub const UNLIT_SIZE: f32 = 0.7;
 /// Far out, a star lit enough to show as a point of its own (it "glints") has a core at least this many points across
 /// its radius, up to 1.6 times that for the best lit ([`glint_point`]). In points, so it's the same size on a 4K
-/// screen as on any other, and on the processor's picture drawn smaller while the view glides.
+/// screen as on any other (while the view glides the processor's picture has fewer pixels, so it's only softer).
 pub const MIN_LIT: f32 = 1.6;
 /// The shortest a star's spikes are, in points.
 pub const SPIKE_MIN: f32 = 10.0;
@@ -140,6 +143,10 @@ pub const HALO: f32 = 2.8;
 pub const FALLOFF: f32 = 1.3;
 /// How bright the best lit star is ([`lit_weight`] of 1): with Light by on, a star's core is its weight over this.
 pub const LIT_BRIGHTEST: f32 = 1.5;
+/// With Light by on, the stars the filters leave out are this much as bright as with Nothing: an unlit star on show is
+/// dimmed too (to [`lit_weight`] of 0), and the left-out ones are kept at about half of it, so what the filters let
+/// through still reads.
+pub const DUST_LIT: f32 = 0.5;
 /// About how many of the best lit stars on the view show as points of their own when it's far out, and how many get
 /// spikes: a few thousand points read as "these", more would fill the map.
 const GLINTS: f32 = 2_500.0;
@@ -147,24 +154,30 @@ const SPIKY: f32 = 250.0;
 /// Spikes only ever go to the top 1.5 in a hundred.
 const SPIKES_FROM: f32 = 0.985;
 
-/// How much of what's on show has the Light by measure (0 to 1): the share of the `shown` sounds whose `light` is
-/// above 0. 0 with nothing lit or nothing shown. Only the shown ones count: with a filter for loops and Light by Tempo,
-/// every loop on show has a tempo, whatever share of the whole list does. Above 0 is what "Light by is on" means
-/// everywhere (the card's stars, its shader and the processor's picture): with none of the shown sounds having the
-/// measure, every star is drawn alike, as with Nothing.
-pub fn lit_share(light: &[f32], shown: &[usize]) -> f32 {
-    if light.is_empty() || shown.is_empty() {
+/// How much of what's on show has the Light by measure (0 to 1): of the `shown` sounds that have a star on the map
+/// (`stars`), the share whose `light` is above 0. 0 with nothing lit or nothing shown. Only the shown ones count: with
+/// a filter for loops and Light by Tempo, every loop on show has a tempo, whatever share of the whole list does. A
+/// sound not on the map yet doesn't count either way, as in [`lit_order`]. Above 0 is what "Light by is on" means
+/// everywhere (the card's stars, its shader and the processor's picture), just as [`lit_order`] not being empty: with
+/// none of the shown stars having the measure, every star is drawn alike, as with Nothing.
+pub fn lit_share(stars: &[Option<StarPoint>], shown: &[usize], light: &[f32]) -> f32 {
+    if light.is_empty() {
         return 0.0;
     }
-    shown.par_iter().filter(|&&at| light.get(at).is_some_and(|&l| l > 0.0)).count() as f32 / shown.len() as f32
+    let (on_map, lit) = shown
+        .par_iter()
+        .filter(|&&at| stars.get(at).is_some_and(Option::is_some))
+        .map(|&at| (1usize, usize::from(light.get(at).is_some_and(|&l| l > 0.0))))
+        .reduce(|| (0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
+    if on_map == 0 { 0.0 } else { lit as f32 / on_map as f32 }
 }
 
 /// The shown stars that have the Light by measure (`light` above 0), by their place in the list, from the least lit
 /// to the most. Equally lit ones go in a steady order by where they are on the map rather than by their place in the
 /// list, so when only some of a crowd of equally lit sounds can glint, they're spread over the map instead of all
-/// coming from one folder, and they stay the same ones when the list changes. The stars that glint far out and the
-/// ones with spikes are the last of these ([`glinting`]), on the card and on the processor alike. Empty with nothing
-/// lit. Made on every core.
+/// coming from one folder, and they stay the same ones when the list changes. The stars that glint far out (on the card
+/// and on the processor alike) and the ones with spikes (the card's) are the last of these ([`glinting`]). Empty with
+/// nothing lit. Made on every core.
 pub fn lit_order(stars: &[Option<StarPoint>], shown: &[usize], light: &[f32]) -> Vec<u32> {
     if light.is_empty() {
         return Vec::new();
@@ -190,25 +203,28 @@ fn spread(p: StarPoint) -> u32 {
 }
 
 /// Of `lit` stars with the measure on the map ([`lit_order`]), how many glint far out and how many get spikes, for
-/// `look`: always the last ones, the best lit.
+/// `look`: always the last ones, the best lit. With any star lit at least one glints, so a single liked sound shows
+/// too; spikes are only ever for the top few of many.
 pub fn glinting(look: &Look, lit: u32) -> (u32, u32) {
     let top = |from: f32| ((lit as f32 * (1.0 - from)).round() as u32).min(lit);
-    (top(look.glint_from), top(look.spikes_from))
+    (top(look.glint_from).max(u32::from(lit > 0)), top(look.spikes_from))
 }
 
 /// How strongly the star `k` places into the ones that glint (of `of`, the least lit first) shows as a point of its
-/// own when the view is painted (0 to 1). The graphics card's shader works it out the same way.
+/// own when the view is painted (above 0 to 1): it rises along them, and the last, the best lit, shows fully, even
+/// when it's the only one. The graphics card's shader works it out the same way, and its spikes grow the same way.
 pub fn glint_at(k: u32, of: u32) -> f32 {
-    smooth(0.0, 1.0, k as f32 / of.max(1) as f32)
+    smooth(0.0, 1.0, (k + 1) as f32 / of.max(1) as f32)
 }
 
 /// A star's radius on the processor's picture with Light by on, in pixels: `near` close up (its size by how lit it is,
 /// as [`lit_size`]); far out, a star that glints (`glint` above 0) is a point of [`MIN_LIT`] points (`min_lit`
-/// pixels) or a little more, and grows to `near` as the view flies in (`crisp` 0 far out, 1 close up).
+/// pixels) or a little more, and goes to `near` as the view flies in (`crisp` 0 far out, 1 close up).
 ///
 /// The processor draws every star as a dot at every zoom (it has no painted layer), so a star that glints is never
-/// drawn smaller than `near` either, or it would be smaller than the less lit one beside it. The card paints the
-/// stars that don't glint far out, so its shader lets a glint be the smaller point (see `mo-ui`'s `sounds::sky`).
+/// drawn smaller than `near` either, or it would be smaller than the less lit one beside it: far out it's the bigger
+/// of the two, and it shrinks to `near` (or stays) as the view flies in. The card paints the stars that don't glint
+/// far out, so its shader lets a glint be the smaller point (see `mo-ui`'s `sounds::sky`).
 pub fn glint_point(near: f32, glint: f32, crisp: f32, min_lit: f32) -> f32 {
     if glint <= 0.0 {
         return near;
@@ -223,8 +239,9 @@ const PAINTED: f32 = 5_000.0;
 /// Stamps are stored at a fraction of their brightness, so a crowd can pile onto one pixel before the layer runs
 /// out of room; the last step scales back up.
 pub const STAMP: f32 = 1.0 / 6.0;
-/// The bytes each star takes on the graphics card: where it is (two f32), its colour (four bytes, the last 255 when
-/// the filters let it through) and its weight (an f32).
+/// The bytes each star takes on the graphics card: where it is (two f32), its colour (four bytes: red, green, blue,
+/// and the last 0 when the filters leave it out, 1 to 255 by how lit it is when they let it through) and its weight
+/// (an f32).
 pub const STAR_BYTES: usize = 16;
 
 /// What the shaders need for one view.
@@ -239,7 +256,8 @@ pub struct Look {
     pub gain: f32,
     /// A crisp star's core radius, in points.
     pub radius: f32,
-    /// From how lit a star shows as a point of its own far out, and from how lit it gets spikes.
+    /// How far up the lit stars' rank order (0 to 1, [`lit_order`]) they show as points of their own far out, and from
+    /// where they get spikes: the top `1 - glint_from` of them glint ([`glinting`]).
     pub glint_from: f32,
     pub spikes_from: f32,
 }
@@ -275,15 +293,17 @@ pub fn look(view: &View, in_view: usize, lit_share: f32) -> Look {
     }
 }
 
-/// The part of the map on show, with a little room round it: left, top, right, bottom.
+/// The part of the map on show: left, top, right, bottom.
 pub fn on_view(view: &View) -> (f32, f32, f32, f32) {
     let (l, t) = view.to_map(0.0, 0.0);
     let (r, b) = view.to_map(view.width, view.height);
     (l, t, r, b)
 }
 
-/// A little steady variety in brightness, so a crowd of one type isn't flat (as C#'s twinkle).
-fn twinkle(at: usize) -> f32 {
+/// A little steady variety in brightness for the star at `at` (0.6 to 1), so a crowd of one type isn't flat (as C#'s
+/// twinkle, which didn't move). It rides in each star's weight on the card; with Light by on the processor's picture
+/// gives a lit star's core the same.
+pub fn variety(at: usize) -> f32 {
     let h = (at as u32).wrapping_mul(2_654_435_761) >> 24;
     0.6 + 0.4 * h as f32 / 255.0
 }
@@ -329,7 +349,7 @@ pub fn pack(
             (false, _) => 0.05,
             (true, false) => ALIKE_WEIGHT,
             (true, true) => lit_weight(lit),
-        } * twinkle(at);
+        } * variety(at);
         let flag = if want { 1 + (lit * 254.0).round() as u8 } else { 0 };
         let mut out = [0u8; STAR_BYTES];
         out[0..4].copy_from_slice(&p.x.to_le_bytes());
@@ -357,6 +377,49 @@ pub fn pack(
 pub fn glint_starts(look: &Look, lit: u32, count: u32) -> (u32, u32) {
     let (glints, spikes) = glinting(look, lit.min(count));
     (count - glints, count - spikes)
+}
+
+/// How much the stars twinkle at most on the card (their brightness, up and down): a very slight shimmer, never so
+/// much that it gets in the way of looking or picking.
+pub const TWINKLE: f32 = 0.07;
+/// Once the view is still again, the twinkle comes back in over this long rather than all at once.
+pub const TWINKLE_IN: Duration = Duration::from_millis(600);
+
+/// How much the stars twinkle when the view has been still for `still_for`: none while a button is held or the view
+/// glides (`None`), so a sweep or a glide never has them flicker, then back in over [`TWINKLE_IN`] to [`TWINKLE`].
+pub fn twinkle_amount(still_for: Option<Duration>) -> f32 {
+    still_for.map_or(0.0, |s| TWINKLE * (s.as_secs_f32() / TWINKLE_IN.as_secs_f32()).min(1.0))
+}
+
+/// Whether a picture drawn with `look` has stars drawn as stars, the ones that twinkle: every star close up, and far
+/// out, with Light by on (`light_on`) and `lit` stars lit, the ones that glint. Far out with nothing lit none do, and
+/// there's nothing to draw again for a twinkle.
+pub fn twinkles(look: &Look, light_on: bool, lit: u32) -> bool {
+    look.painted < 0.99 || (light_on && glinting(look, lit).0 > 0)
+}
+
+/// What the twinkle's beat does each time it comes round.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Beat {
+    /// The galaxy isn't on show (or the card can't draw it, or nothing in the picture twinkles): the beat stops until
+    /// it's drawn again.
+    Stop,
+    /// A button is held or the view glides: the stars hold still and the beat waits.
+    Hold,
+    /// The stars are drawn again, a little brighter or dimmer.
+    Draw,
+}
+
+/// The twinkle's beat, for a galaxy `on_show` (its page in front, the window not minimised, a card to draw on and
+/// looked at lately), whose picture `twinkles`, while a button is held or the view glides (`moving`) or not.
+pub fn beat(on_show: bool, twinkles: bool, moving: bool) -> Beat {
+    if !on_show || !twinkles {
+        Beat::Stop
+    } else if moving {
+        Beat::Hold
+    } else {
+        Beat::Draw
+    }
 }
 
 /// The camera as the star shaders read it (8 f32, 32 bytes) for a layer `width` by `height` pixels that shows `view`
@@ -439,7 +502,8 @@ mod tests {
         // The two sounds added in 2022 share the middle of the top two places. The oldest is only just lit: a sound
         // with the measure is never 0, which is what a sound without it is.
         assert_eq!(light(&list, LightBy::Newest), [f32::MIN_POSITIVE, 1.0 / 3.0, 2.5 / 3.0, 2.5 / 3.0]);
-        assert_eq!(lit_share(&light(&list, LightBy::Newest), &[0, 1, 2, 3]), 1.0);
+        let stars = vec![Some(StarPoint { x: 0.5, y: 0.5 }); 4];
+        assert_eq!(lit_share(&stars, &[0, 1, 2, 3], &light(&list, LightBy::Newest)), 1.0);
         // Nothing lit, or nothing has the measure (use counts aren't in yet): every star alike.
         assert!(light(&list, LightBy::Nothing).is_empty());
         assert!(light(&list, LightBy::Used).is_empty());
@@ -450,16 +514,36 @@ mod tests {
     fn of_450000_lit_stars_exactly_the_top_250_get_spikes_and_2500_glint() {
         let count = 450_000u32;
         let lk = look(&view(), count as usize, 1.0);
-        let (glints, spikes) = glinting(&lk, count);
-        assert!(spikes.abs_diff(250) <= 1, "{spikes}");
-        assert!(glints.abs_diff(2_500) <= 2, "{glints}");
-        // They're the last ones the card holds; none with nothing lit.
-        assert_eq!(glint_starts(&lk, count, count), (count - glints, count - spikes));
+        assert_eq!(glinting(&lk, count), (2_500, 250));
+        // They're the last ones the card holds (by rank: their light bytes would be one value for all of them); none
+        // with nothing lit.
+        assert_eq!(glint_starts(&lk, count, count), (count - 2_500, count - 250));
         assert_eq!(glint_starts(&lk, 0, count), (count, count));
-        // The ramp: from nothing at the first that glints to fully at the last.
-        assert_eq!(glint_at(0, glints), 0.0);
-        assert_eq!(glint_at(glints, glints), 1.0);
-        assert!(glint_at(glints / 2, glints) > glint_at(glints / 4, glints));
+        // With 10 more stars on the card that aren't lit (they come first), the same ones still do.
+        assert_eq!(glint_starts(&lk, count, count + 10), (count + 10 - 2_500, count + 10 - 250));
+        // The ramp: from a little at the first that glints to fully at the last.
+        assert!(glint_at(0, 2_500) > 0.0 && glint_at(0, 2_500) < 1e-5);
+        assert_eq!(glint_at(2_499, 2_500), 1.0);
+        assert!(glint_at(1_250, 2_500) > glint_at(625, 2_500));
+    }
+
+    #[test]
+    fn a_few_lit_stars_still_glint_far_out_and_the_best_lit_fully() {
+        let v = view();
+        // One liked sound among 450,000: it glints, fully.
+        let one = look(&v, 450_000, 1.0 / 450_000.0);
+        assert_eq!(glinting(&one, 1), (1, 0));
+        assert_eq!(glint_at(0, 1), 1.0);
+        // Two or three: the best one glints fully. Four: two glint, the best fully, the other half way.
+        assert_eq!(glinting(&look(&v, 450_000, 2.0 / 450_000.0), 2), (1, 0));
+        assert_eq!(glinting(&look(&v, 450_000, 3.0 / 450_000.0), 3), (1, 0));
+        assert_eq!(glinting(&look(&v, 450_000, 4.0 / 450_000.0), 4), (2, 0));
+        assert_eq!((glint_at(0, 2), glint_at(1, 2)), (0.5, 1.0));
+        // Nothing lit: nothing glints.
+        assert_eq!(glinting(&one, 0), (0, 0));
+        // Spikes only from a few dozen lit, the first one at full length.
+        assert_eq!(glinting(&look(&v, 450_000, 34.0 / 450_000.0), 34).1, 1);
+        assert_eq!(glinting(&look(&v, 450_000, 30.0 / 450_000.0), 30).1, 0);
     }
 
     #[test]
@@ -478,8 +562,8 @@ mod tests {
 
     #[test]
     fn a_star_that_glints_is_a_point_far_out_and_never_smaller_than_one_less_lit() {
-        // Far out a glint is at least the smallest point, a little more for the best lit, and grows to its own size
-        // as the view flies in.
+        // Far out a glint is at least the smallest point, a little more for the best lit, and goes to its own size as
+        // the view flies in.
         assert_eq!(glint_point(1.0, 0.0, 0.0, 1.6), 1.0);
         assert_eq!(glint_point(1.0, 0.5, 0.0, 1.6), 1.6 * 1.3);
         assert_eq!(glint_point(1.0, 1.0, 1.0, 1.6), 1.0);
@@ -510,11 +594,55 @@ mod tests {
         assert_eq!(lit, 1);
         assert!(f32::from_le_bytes(b[12..16].try_into().unwrap()) < alike);
         assert_eq!(lit_weight(1.0), LIT_BRIGHTEST);
-        assert_eq!(lit_share(&[0.0, 0.5, 1.0, 0.0], &[0, 1, 2, 3]), 0.5);
+        let four = vec![Some(StarPoint { x: 0.5, y: 0.5 }); 4];
+        assert_eq!(lit_share(&four, &[0, 1, 2, 3], &[0.0, 0.5, 1.0, 0.0]), 0.5);
         // Only what's on show counts.
-        assert_eq!(lit_share(&[0.0, 0.5, 1.0, 0.0], &[1, 2]), 1.0);
-        assert_eq!(lit_share(&[], &[0]), 0.0);
-        assert_eq!(lit_share(&[1.0], &[]), 0.0);
+        assert_eq!(lit_share(&four, &[1, 2], &[0.0, 0.5, 1.0, 0.0]), 1.0);
+        assert_eq!(lit_share(&four, &[0], &[]), 0.0);
+        assert_eq!(lit_share(&four, &[], &[1.0]), 0.0);
+    }
+
+    #[test]
+    fn light_by_is_on_only_when_a_shown_star_on_the_map_is_lit() {
+        // The only liked sound on show has no place on the map yet (it isn't analysed): nothing on the map is lit, so
+        // the share is 0 and the order is empty, and the stars are drawn alike, as with Nothing, everywhere.
+        let stars = vec![Some(StarPoint { x: 0.2, y: 0.5 }), None, Some(StarPoint { x: 0.8, y: 0.5 })];
+        let light = [0.0, 1.0, 0.0];
+        let shown = [0, 1, 2];
+        assert_eq!(lit_share(&stars, &shown, &light), 0.0);
+        assert!(lit_order(&stars, &shown, &light).is_empty());
+        // Once a star on the map is lit, both say so, and only the stars on the map count.
+        let light = [0.0, 1.0, 0.5];
+        assert_eq!(lit_share(&stars, &shown, &light), 0.5);
+        assert_eq!(lit_order(&stars, &shown, &light), [2]);
+        assert_eq!(lit_share(&[None, None], &[0, 1], &[1.0, 1.0]), 0.0);
+    }
+
+    #[test]
+    fn the_twinkle_holds_still_while_moving_and_comes_back_in() {
+        assert_eq!(twinkle_amount(None), 0.0);
+        assert_eq!(twinkle_amount(Some(Duration::ZERO)), 0.0);
+        assert_eq!(twinkle_amount(Some(TWINKLE_IN / 2)), TWINKLE / 2.0);
+        assert_eq!(twinkle_amount(Some(TWINKLE_IN)), TWINKLE);
+        assert_eq!(twinkle_amount(Some(Duration::from_secs(3_600))), TWINKLE);
+        // The beat: stops off show or with nothing that twinkles, waits while moving, draws otherwise.
+        assert_eq!(beat(false, true, false), Beat::Stop);
+        assert_eq!(beat(true, false, false), Beat::Stop);
+        assert_eq!(beat(true, true, true), Beat::Hold);
+        assert_eq!(beat(true, true, false), Beat::Draw);
+    }
+
+    #[test]
+    fn only_a_picture_with_stars_drawn_as_stars_twinkles() {
+        let v = view();
+        // Close up every star is drawn as a star.
+        assert!(twinkles(&look(&v, 200, 0.0), false, 0));
+        // Far out with nothing lit, none is: there's nothing to draw again.
+        let far = look(&v, 450_000, 0.0);
+        assert!(!twinkles(&far, false, 0));
+        // Far out with Light by on, the ones that glint are, even a single one.
+        assert!(twinkles(&look(&v, 450_000, 1.0 / 450_000.0), true, 1));
+        assert!(!twinkles(&far, true, 0));
     }
 
     #[test]
@@ -530,7 +658,7 @@ mod tests {
         let flags: Vec<u8> = bytes.as_chunks::<STAR_BYTES>().0.iter().map(|s| s[11]).collect();
         assert_eq!(flags, [0, 1, 1 + 51, 1 + 76, 1 + 127, 255]);
         // Four of the five shown have the measure.
-        assert_eq!(lit_share(&light, &shown), 0.8);
+        assert_eq!(lit_share(&stars, &shown, &light), 0.8);
         let mut lk = look(&view(), 5, 0.8);
         (lk.glint_from, lk.spikes_from) = (0.5, 0.75);
         // The top half of the four lit glint (2), the top quarter (1) gets spikes: the last stars on the card.

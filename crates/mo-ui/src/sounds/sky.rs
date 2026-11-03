@@ -8,12 +8,16 @@
 //! 2. stamp them again onto a quarter-size layer;
 //! 3. blur that layer, across and then down, into the glow;
 //! 4. squeeze the brightness of the stamps and the glow into the picture, over the page's background;
-//! 5. draw the stars as stars over it, their light screened on (as the processor's picture does): a white-hot core
-//!    in a soft glow, so a cluster glows where they crowd but keeps its colour. Close up every star is drawn so, the
-//!    left-out ones as faint dust; far out only the stars "Light by" lights most, each a point of its own with a
-//!    bigger halo, so they stand out at every zoom. The very brightest get faint four-point spikes, and every star
-//!    twinkles very slightly (only in brightness, and not while the mouse sweeps, drags or glides, so it never gets in
-//!    the way of picking a sound).
+//! 5. draw the stars as stars over it: a core in the star's colour, white-hot in its very middle, in a soft glow.
+//!    On a dark page their light is screened on (as the processor's picture does), so a cluster glows where they crowd
+//!    but keeps its colour; on a light page (Paper) they're laid over it, as the processor's picture is laid over the
+//!    page. Close up every star is drawn so, the left-out ones as faint dust; far out only the stars "Light by" lights
+//!    most, each a bright point of its own with a short, faint glow, so they stand out at every zoom. The very
+//!    brightest get faint four-point spikes, and every star twinkles very slightly (only in brightness, and not while
+//!    the mouse sweeps, drags or glides, so it never gets in the way of picking a sound).
+//!
+//! A twinkle only changes step 5, so for a twinkle the card keeps the picture of steps 1 to 4 and draws the stars
+//! over it again.
 
 use mo_app::galaxy_look::{self as look, Look, STAMP};
 use mo_app::galaxy_view::View;
@@ -40,8 +44,9 @@ struct Camera {
     strength: f32,
     // Crisp stars: a left-out star's radius in pixels.
     dust: f32,
-    // How painted the view is (1 far out, 0 close up); 1 when Light by lights the stars.
+    // How painted the view is (1 far out, 0 close up).
     painted: f32,
+    // 1 when Light by lights the stars (some of the shown ones are lit), 0 when they're all alike.
     light_on: f32,
     // The twinkle: the time in seconds, and how much (0 for none).
     time: f32,
@@ -103,6 +108,7 @@ const FAR_HALO: f32 = 2.2;
 const HALO: f32 = 2.8;
 const FALLOFF: f32 = 1.3;
 const LIT_BRIGHTEST: f32 = 1.5;
+const DUST_LIT: f32 = 0.5;
 
 struct Crisp {
     @builtin(position) position: vec4<f32>,
@@ -139,17 +145,20 @@ fn crisp_vertex(@builtin(vertex_index) v: u32, @builtin(instance_index) star: u3
     let lighting = camera.light_on > 0.5;
     let lit = select(0.0, max(c.a * 255.0 - 1.0, 0.0) / 254.0, lighting);
     // Close up every star shows; far out, where the stars are only painted, the best lit still show as points. By rank:
-    // the light byte can't tell the top few hundred of a big library apart.
+    // the light byte can't tell the top few hundred of a big library apart. It rises along the ones that glint, and
+    // the last, the best lit, shows fully, even when it's the only one (mo_app::galaxy_look::glint_at).
     let rank = f32(star);
-    let glint = select(0.0, smoothstep(0.0, 1.0, (rank - camera.glint_start) / max(camera.count - camera.glint_start, 1.0)),
+    let glint = select(0.0, smoothstep(0.0, 1.0, (rank - camera.glint_start + 1.0) / max(camera.count - camera.glint_start, 1.0)),
                        lighting && rank >= camera.glint_start);
-    let show = select(0.15 * camera.strength, max(camera.strength, camera.painted * glint), shown);
+    // A left-out star is faint dust, fainter still with Light by on, when the unlit stars on show are dimmed too.
+    let show = select(0.15 * camera.strength * select(1.0, DUST_LIT, lighting), max(camera.strength, camera.painted * glint),
+                      shown);
     // A well lit star is up to nearly three times as big (mo_app::galaxy_look::lit_size, the same curve); with Light by
     // on, an unlit one is smaller than an all-alike star, so the lit ones stand out.
     let size = (1.0 + 1.8 * sqrt(lit)) * select(1.0, UNLIT_SIZE, lighting);
     let near = camera.size * size;
     // With Light by on, far out a star that glints is a small bright point, never smaller than one you can see, and it
-    // grows to its close-up size as the view flies in. The others shrink towards such a point with it, though never
+    // goes to its close-up size as the view flies in. The others shrink towards such a point with it, though never
     // past their own size, so a star that glints is never smaller than a less lit one beside it. (Far out only the
     // ones that glint are drawn; the processor's picture draws every star at every zoom, so there the ones that glint
     // keep at least their own size instead: mo_app::galaxy_look::glint_point.)
@@ -158,22 +167,25 @@ fn crisp_vertex(@builtin(vertex_index) v: u32, @builtin(instance_index) star: u3
     // A shown star's glow reaches 2.8 times its core close up, a well lit one's up to twice that; far out, where
     // only a little of the glow shows, it's kept short.
     let halo = select(radius * 1.5, radius * mix(FAR_HALO, HALO + HALO * lit, camera.strength), shown);
-    // The brightest few get faint four-point spikes.
-    let spiky = smoothstep(0.0, 1.0, (rank - camera.spike_start) / max(camera.count - camera.spike_start, 1.0));
+    // The brightest few get faint four-point spikes, growing along them as the glints do.
+    let spiky = smoothstep(0.0, 1.0, (rank - camera.spike_start + 1.0) / max(camera.count - camera.spike_start, 1.0));
     let spikes = select(0.0, spiky * max(radius * 7.0, SPIKE_MIN * camera.scale),
                         shown && lighting && rank >= camera.spike_start);
     // A very slight twinkle, only in brightness, each star at its own pace: by where it is on the map, so it keeps its
-    // pace when the stars are packed again in another order.
+    // pace when the stars are packed again in another order. Each pace is a whole number of rounds an hour, so when
+    // the clock wraps round each hour no star jumps.
     let id = (bitcast<u32>(at.x) * 73856093u) ^ (bitcast<u32>(at.y) * 19349663u);
-    let twinkle = 1.0 + camera.twinkle * sin(camera.time * (1.1 + 1.6 * hash(id)) + 6.2832 * hash(id ^ 0x9e3779b9u));
+    let pace = round((1.1 + 1.6 * hash(id)) * 3600.0 / 6.2831853) * 6.2831853 / 3600.0;
+    let twinkle = 1.0 + camera.twinkle * sin(camera.time * pace + 6.2831853 * hash(id ^ 0x9e3779b9u));
     let local = corner(v) * (max(halo, spikes) + 1.0);
     var out: Crisp;
-    // A star that doesn't show costs nothing: its corners all fall on one point, off the picture.
+    // A star that doesn't show costs next to nothing: its corners all fall on one point, off the picture, so it has no
+    // pixels to draw.
     out.position = select(vec4((at - camera.centre) * camera.unit + local * camera.pixel, 0.0, 1.0),
                           vec4(2.0, 2.0, 0.0, 1.0), show < 0.004);
     out.local = local;
-    // With Light by on, a shown star's core is as bright as it's lit (the processor's picture does the same); a
-    // left-out one stays faint dust.
+    // With Light by on, a shown star's core is as bright as it's lit, with its steady variety (its weight, as `pack`
+    // made it; the processor's picture does the same); a left-out one stays faint dust.
     let strength = show * twinkle * select(1.0, weight / LIT_BRIGHTEST, lighting && shown);
     out.colour = c.rgb * strength;
     out.strength = strength;
@@ -204,13 +216,21 @@ fn crisp_fragment(in: Crisp) -> @location(0) vec4<f32> {
         spike = 0.3 * (exp(-a.y * 1.8) + exp(-a.x * 1.8)) * fade * fade;
     }
     let shown = in.shown > 0.5;
-    let light = select(core, core + glow + spike, shown);
+    // The glow (with the spikes) and the core are screened together, as the processor's picture screens a star's core
+    // over its glow: where the glow is under the core it lights it a little more, and nothing goes past 1, so the core
+    // keeps the star's own colour (light past 1 would be cut channel by channel, turning a blue star cyan).
+    let around = select(0.0, min(glow + spike, 1.0), shown);
+    let g = in.colour * around;
+    let k = in.colour * core;
     let white = select(0.0, WHITE * hot * core * in.glow, shown) * max(in.colour.r, max(in.colour.g, in.colour.b));
+    // How strongly it shows, the same way (its alpha, at least each of its colours, so it stays premultiplied).
+    let ga = in.strength * around;
+    let ka = in.strength * core;
     // On a dark page the light is screened onto what's there (as the processor's picture does): where stars crowd
     // their glows build up, but a crowd keeps its colour longer than if the light were simply added, which burns a
     // dense cluster to white. On a light page screened light wouldn't show, so there it's laid over the picture by how
     // strongly it shows (its alpha), as the processor's picture is laid over the page.
-    return vec4(min(in.colour * light + vec3(white), vec3(1.0)), min(in.strength * light + white, 1.0));
+    return vec4(min(g + k - g * k + vec3(white), vec3(1.0)), min(ga + ka - ga * ka + white, 1.0));
 }
 
 // A triangle over the whole picture, for the steps that work pixel by pixel.
@@ -673,7 +693,10 @@ impl Sky {
         // Far out, only the stars lit enough to glint are drawn as stars: the last ones, as `pack` sorts them.
         let as_stars = if crisp > 0.01 { 0..count } else { glint_start..count };
         // On a light page (Paper) the stars are laid over the picture; on a dark one their light is screened onto it.
-        let light_page = 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.5;
+        // Light as the app judges a colour light (`themes::is_light`).
+        let light_page = mo_app::themes::is_light(
+            [r, g, b].iter().fold(0, |rgb, c| (rgb << 8) | (c.clamp(0.0, 1.0) * 255.0).round() as u32),
+        );
         let crisp_pipeline = if light_page { &self.crisp_over } else { &self.crisp };
         let (stamp, blur_across, blur_down, shade_pipeline) =
             (&self.stamp, &self.blur_across, &self.blur_down, &self.shade);
@@ -783,6 +806,7 @@ mod tests {
             ("HALO", look::HALO),
             ("FALLOFF", look::FALLOFF),
             ("LIT_BRIGHTEST", look::LIT_BRIGHTEST),
+            ("DUST_LIT", look::DUST_LIT),
         ] {
             assert!(SHADER.contains(&format!("const {name}: f32 = {value:?};")), "{name} isn't {value} in the shader");
         }
@@ -850,7 +874,7 @@ mod tests {
         let pages = [("dark", [18.0 / 255.0; 3]), ("paper", [241.0 / 255.0, 239.0 / 255.0, 235.0 / 255.0])];
         for (lit_by, light) in [("length", length), ("liked", liked), ("nothing", Vec::new())] {
             let order = lit_order(&stars, &shown, &light);
-            let share = lit_share(&light, &shown);
+            let share = lit_share(&stars, &shown, &light);
             let shine = Shine { light_on: share > 0.0, ..Shine::default() };
             let (packed, lit) = pack(&stars, &colours, &palette, &shown, &light, &order);
             sky.set_stars(&packed, lit);

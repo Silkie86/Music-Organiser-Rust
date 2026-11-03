@@ -224,7 +224,7 @@ impl SetAsk {
                 || {
                     // Ranked only when the list or Light by has changed; a new search reuses it.
                     let light = k.light.clone().unwrap_or_else(|| Arc::new(galaxy_look::light(&k.list, k.light_by)));
-                    let share = galaxy_look::lit_share(&light, &k.shown);
+                    let share = galaxy_look::lit_share(&k.stars, &k.shown, &light);
                     let order = Arc::new(galaxy_look::lit_order(&k.stars, &k.shown, &light));
                     let bytes = self
                         .for_card
@@ -259,22 +259,20 @@ thread_local! {
     static LAST_FRAME: RefCell<Option<Instant>> = const { RefCell::new(None) };
 }
 
-/// How much the stars twinkle (their brightness, up and down), and how often the picture is drawn again for it: a very
-/// slight shimmer, never so much that it gets in the way of looking or picking.
-const TWINKLE: f32 = 0.07;
+/// How often the picture is drawn again while the stars twinkle (how much they do, and the rules for when, are
+/// `galaxy_look`'s: `TWINKLE`, `twinkle_amount`, `twinkles` and `beat`).
 const TWINKLE_EVERY: Duration = Duration::from_millis(80);
 /// The twinkle stops this long after the galaxy was last drawn for anything else (a move, a filter) or the mouse last
 /// moved over it, so a window left open on the galaxy doesn't keep the graphics card busy all day.
 const TWINKLE_FOR: Duration = Duration::from_secs(30);
-/// Once the view is still again, the twinkle comes back in over this long rather than all at once.
-const TWINKLE_IN: Duration = Duration::from_millis(600);
 
 thread_local! {
     /// Draws the galaxy again now and then while its stars twinkle.
     static TWINKLING: Timer = Timer::default();
     /// The twinkle's clock.
     static TWINKLE_CLOCK: Instant = Instant::now();
-    /// Whether the last picture had stars drawn as stars, the ones that twinkle (far out with nothing lit, none do).
+    /// Whether the last picture drawn on the card had stars drawn as stars, the ones that twinkle
+    /// (`galaxy_look::twinkles`: far out with nothing lit, none do).
     static TWINKLE_SHOWS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Until when the stars twinkle (see [`TWINKLE_FOR`]).
     static TWINKLE_UNTIL: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
@@ -301,7 +299,7 @@ fn in_view(g: &Galaxy) -> usize {
 }
 
 /// How much the stars twinkle now: not at all while a button is held or the view glides (`still` is false), so a
-/// sweep or a glide never has them flicker; once it's still, the twinkle comes back in over [`TWINKLE_IN`].
+/// sweep or a glide never has them flicker; once it's still, the twinkle comes back in (`galaxy_look::twinkle_amount`).
 fn twinkle_now(still: bool) -> f32 {
     STILL_SINCE.with(|since| {
         if !still {
@@ -310,15 +308,16 @@ fn twinkle_now(still: bool) -> f32 {
         }
         let from = since.get().unwrap_or_else(Instant::now);
         since.set(Some(from));
-        TWINKLE * (from.elapsed().as_secs_f32() / TWINKLE_IN.as_secs_f32()).min(1.0)
+        galaxy_look::twinkle_amount(Some(from.elapsed()))
     })
 }
 
-/// Keeps the stars twinkling on the graphics card while the galaxy is on show. Each beat draws only the stars again
-/// (the card keeps the painted picture under them); while a button is held or the view glides, the picture is being
-/// drawn anyway and doesn't twinkle (see [`twinkle_now`]), and once the galaxy is off show (another page, the window
-/// minimised) or [`TWINKLE_FOR`] after it was last drawn for anything else or the mouse last moved over it, the beat
-/// stops.
+/// Keeps the stars twinkling on the graphics card while the galaxy is on show and its picture has stars drawn as stars.
+/// Each beat draws only the stars again (the card keeps the painted picture under them). While a button is held or the
+/// view glides the beat leaves the picture as it is (a glide draws it anyway), and once the view is still the twinkle
+/// comes back in from nothing. Once the galaxy is off show (another page, the window minimised), nothing in its picture
+/// twinkles, or [`TWINKLE_FOR`] after it was last drawn for anything else or the mouse last moved over it, the beat
+/// stops (`galaxy_look::beat`).
 fn keep_twinkling(app: &AppWindow) {
     TWINKLE_UNTIL.with(|u| u.set(Some(Instant::now() + TWINKLE_FOR)));
     if TWINKLING.with(Timer::running) {
@@ -339,13 +338,22 @@ fn keep_twinkling(app: &AppWindow) {
                     g.view.pressed() || g.view.flying(),
                 )
             });
-            let Some((gpu, generation)) = usable_card().filter(|_| on_show) else {
-                TWINKLING.with(Timer::stop);
-                return;
-            };
-            if moving || !TWINKLE_SHOWS.with(std::cell::Cell::get) {
-                return;
+            let card = usable_card();
+            let twinkles = TWINKLE_SHOWS.with(std::cell::Cell::get);
+            match galaxy_look::beat(on_show && card.is_some(), twinkles, moving) {
+                galaxy_look::Beat::Stop => {
+                    TWINKLING.with(Timer::stop);
+                    STILL_SINCE.with(|s| s.set(None));
+                    return;
+                }
+                // The stars hold still; once the view is still again the twinkle comes back in from nothing.
+                galaxy_look::Beat::Hold => {
+                    STILL_SINCE.with(|s| s.set(None));
+                    return;
+                }
+                galaxy_look::Beat::Draw => {}
             }
+            let Some((gpu, generation)) = card else { return };
             let _doing = crate::watchdog::doing("Galaxy: twinkle");
             if let Err(e) = draw_on_card(&app, &gpu, generation, false) {
                 log::warning("Sounds", &format!("The graphics card couldn't draw the galaxy's twinkle: {e}"));
@@ -966,7 +974,7 @@ fn hover(app: &AppWindow) {
         data.set_galaxy_hover_shown(false);
         return;
     }
-    // Someone's looking: the stars keep twinkling (when the card draws them) while the mouse moves over them.
+    // Someone's looking: the stars keep twinkling while the mouse moves over them (when the card drew some as stars).
     if TWINKLE_SHOWS.with(std::cell::Cell::get) && PAGE.with(|p| p.borrow().galaxy.inside) {
         keep_twinkling(app);
     }
@@ -1027,7 +1035,9 @@ pub(super) fn forget(g: &mut Galaxy) {
         }
     });
     g.set_for = None;
-    // Stars still being packed for the old library are too old to use.
+    // Stars still being packed for the old library are too old to use, and so is a mini-map still being drawn of it
+    // (it's shown only if it's of the newest stars, `set_got`).
+    g.set_asked += 1;
     g.set_got = g.set_asked;
     g.drawn = None;
     // A picture of the old library still on its way is too old to show.
@@ -1234,7 +1244,9 @@ pub(super) fn draw(app: &AppWindow) {
         let (gpu, generation) = (gpu, *generation);
         match draw_on_card(app, gpu, generation, true) {
             Ok(true) => {
-                keep_twinkling(app);
+                if TWINKLE_SHOWS.with(std::cell::Cell::get) {
+                    keep_twinkling(app);
+                }
                 return;
             }
             // The stars aren't on the card yet: the picture on show stays until they are.
@@ -1250,6 +1262,8 @@ pub(super) fn draw(app: &AppWindow) {
                 );
                 CARD_FAILED.with(|f| f.set(Some(generation)));
                 CARD.with(|c| *c.borrow_mut() = None);
+                // The processor's picture doesn't twinkle.
+                TWINKLE_SHOWS.with(|t| t.set(false));
             }
         }
     }
@@ -1417,12 +1431,14 @@ fn draw_mini(app: &AppWindow) {
             count: g.count,
             colours: key.colours.clone(),
             shown: key.shown.clone(),
-            light: g.light_for(&p.list).map(|l| l.light.clone()).unwrap_or_default(),
+            // It only shows the map's shape, and where the view is on it: plain dots, all alike (Light by would dim
+            // nearly all of them, the unlit ones).
+            light: Arc::default(),
             order: Arc::default(),
             palette,
             view: mini_view(),
             scale,
-            // The whole map is on show, and it only shows the map's shape: plain dots.
+            // The whole map is on show.
             in_view: key.shown.len(),
             glows: false,
         })
@@ -1508,6 +1524,7 @@ fn show_mini(app: &AppWindow) {
 /// card or the processor, when the galaxy next is).
 pub(super) fn card_gone(app: &AppWindow) {
     CARD.with(|c| *c.borrow_mut() = None);
+    TWINKLE_SHOWS.with(|t| t.set(false));
     let weak = app.as_weak();
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(app) = weak.upgrade() {
@@ -1539,7 +1556,8 @@ fn draw_on_card(app: &AppWindow, gpu: &gpu::Gpu, generation: u64, whole: bool) -
         (g.view, g.scale, galaxy_look::look(&g.view, in_view(g), share), shine, g.packed.clone(), g.set_got)
     });
     let (view, scale, look, shine, packed, version) = ask;
-    TWINKLE_SHOWS.with(|t| t.set(shine.light_on || look.painted < 0.99));
+    let lit = packed.as_ref().map_or(0, |p| p.1);
+    TWINKLE_SHOWS.with(|t| t.set(galaxy_look::twinkles(&look, shine.light_on, lit)));
     if view.width < 1.0 || view.height < 1.0 {
         return Ok(false);
     }
