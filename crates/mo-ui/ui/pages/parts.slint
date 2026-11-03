@@ -1,6 +1,6 @@
 // Every shared part on one page, for the screenshots (mo-screens): each new part shows here in every theme before any
 // page uses it, so its look can be judged on its own.
-import { Theme, Type, Space, Caps, Well, StudioButton, Dot, PageHeader, Segmented, MoreButton, MenuButton, OptionsButton, MenuItem, MenuItems, SidePanel, PanelDivider, EmptyState, Waveform, FolderRow, TickBox, ToggleChip, ListLine, RightClickMenu } from "../studio.slint";
+import { Theme, Type, Space, Caps, Well, StudioButton, Dot, PageHeader, Segmented, MoreButton, MenuButton, OptionsButton, MenuItem, MenuItems, SidePanel, PanelDivider, EmptyState, Waveform, FolderRow, TickBox, ToggleChip, ListLine, RightClickMenu, NoticeStrip } from "../studio.slint";
 
 export component PartsGallery inherits Rectangle {
     background: Theme.background;
@@ -137,6 +137,19 @@ export component PartsGallery inherits Rectangle {
                             font-size: Type.body;
                             vertical-alignment: center;
                         }
+                    }
+                    NoticeStrip {
+                        text: "2 samples are missing";
+                        open: true;
+                        Text {
+                            text: "What it means, once opened.";
+                            color: Theme.muted;
+                            font-size: Type.meta;
+                        }
+                    }
+                    NoticeStrip {
+                        text: "News that needs no care";
+                        quiet: true;
                     }
                 }
                 Well {
