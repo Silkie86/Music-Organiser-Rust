@@ -20,7 +20,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rayon::prelude::*;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -38,6 +38,14 @@ use crate::{export, names};
 pub const FILE_NAME: &str = "curves.db";
 /// The folder in the app's data folder that curve files are written to.
 pub const FOLDER: &str = "Curves";
+
+/// What [`save_to_bitwig`] puts after a curve file's name while it makes it in Bitwig's folder:
+/// "Rise.bwcurve.mo-staged".
+const STAGED: &str = ".mo-staged";
+
+/// How old a file [`save_to_bitwig`] left in Bitwig's folder must be before it's taken as left behind by a save that
+/// was stopped part way: a save takes far less, so one another copy of the app is making right now is left alone.
+const STAGED_LEFT_BEHIND: Duration = Duration::from_secs(60);
 
 /// The tables, as made in a new database; only ever added to.
 const SCHEMA: &str = "\
@@ -573,13 +581,15 @@ pub fn file(c: &Curve, folder: &Path) -> Result<PathBuf, String> {
 /// Copies `curve` into Bitwig's curves library (`folder`, such as `K:\Bitwig Studio\Library\Curves`) under its name,
 /// with " (2)", " (3)"... when that name is taken: written and checked under a name of its own, then linked to the
 /// real name, which never replaces a file (where the disk can't link, the file is made new, which can't either).
-/// Returns the path written.
+/// A save stopped part way (the app closed by force) leaves its own files there (`Rise.bwcurve.mo-staged`, and the
+/// same with `.mo-part-<app>-<write>` after it while it's written): each save clears those a minute old or more, and
+/// nothing else (rule 28). Returns the path written.
 pub fn save_to_bitwig(c: &Curve, folder: &Path) -> Result<PathBuf, String> {
     std::fs::create_dir_all(folder).map_err(|e| format!("Couldn't make the folder: {e}"))?;
     let bytes = curve_bytes(c)?;
     let base = names::safe_file_name(&c.name);
     let base = if base.is_empty() { "Curve".to_owned() } else { base };
-    let staged = folder.join(format!("{base}.{}.mo-staged", curve::EXTENSION));
+    let staged = folder.join(format!("{base}.{}{STAGED}", curve::EXTENSION));
     export::write_checked(&staged, &bytes).map_err(|e| format!("Couldn't write the curve: {e}"))?;
     let result = (|| {
         for n in 1..1000 {
@@ -598,7 +608,52 @@ pub fn save_to_bitwig(c: &Curve, folder: &Path) -> Result<PathBuf, String> {
         Err("Too many curves with that name in the folder".to_owned())
     })();
     let _ = std::fs::remove_file(&staged);
+    // The file just saved says what time it is by the clock that stamps this folder's files (a network drive's own),
+    // so a leftover's age is measured on that clock too.
+    if let Ok(path) = &result
+        && let Ok(now) = std::fs::metadata(path).and_then(|m| m.modified())
+    {
+        clear_staged(folder, now);
+    }
     result
+}
+
+/// Clears what [`save_to_bitwig`] leaves in Bitwig's curves folder when it's stopped part way (the app closed by force,
+/// or a power cut), once it's [`STAGED_LEFT_BEHIND`] older than `now` (the time by the clock that stamps this
+/// folder's files). Only plain files right in this folder with a name [`is_staged`] knows (rule 28): never a folder or
+/// a link of that name, nor anything else in your Bitwig library. One that can't be cleared stays (read-only: a staged
+/// file can be a second name of your saved curve, whose read-only mark isn't the app's to take off).
+fn clear_staged(folder: &Path, now: SystemTime) {
+    let Ok(entries) = std::fs::read_dir(folder) else { return };
+    for entry in entries.flatten() {
+        // The entry itself, never followed: a link of that name is a link, not a plain file.
+        let plain = entry.file_type().is_ok_and(|t| t.is_file());
+        let ours = entry.file_name().to_str().is_some_and(is_staged);
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| now.duration_since(t).ok())
+            .is_some_and(|age| age >= STAGED_LEFT_BEHIND);
+        if plain && ours && old {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Whether `name` is one [`save_to_bitwig`] gives a file on its way and removes when it's done: the curve under its
+/// staged name ("Rise.bwcurve.mo-staged"), or that file while it's written ("Rise.bwcurve.mo-staged.mo-part-12-0",
+/// [`export::write_checked`]'s name for it). Nothing else: never "Rise.bwcurve", "Rise.bwcurve.mo-staged.bak" or
+/// "Rise.bwcurve.mo-part-12-0".
+fn is_staged(name: &str) -> bool {
+    let staged = |n: &str| {
+        n.strip_suffix(STAGED)
+            .and_then(|n| n.strip_suffix(curve::EXTENSION))
+            .and_then(|n| n.strip_suffix('.'))
+            .is_some_and(|base| !base.is_empty())
+    };
+    // `write_checked` writes under the name with ".mo-part-<app>-<write>" after it.
+    staged(name) || (export::is_half_written(name) && name.rsplit_once(".mo-part-").is_some_and(|(s, _)| staged(s)))
 }
 
 /// Makes `path` new with `bytes` (false when it's taken), on the disk and checked before it's left there.
@@ -704,6 +759,88 @@ mod tests {
         assert_eq!(second.file_name().unwrap(), "My rise (2).bwcurve");
         // Windows won't remove a folder while the database in it is open.
         drop(db);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_save_to_bitwig_clears_what_one_stopped_part_way_left_and_nothing_else() {
+        let dir = temp_dir("staged");
+        let library = dir.join("Library").join("Curves");
+        std::fs::create_dir_all(&library).unwrap();
+        let hour_ago = SystemTime::now() - Duration::from_secs(3600);
+        // Left an hour ago by a save of "Fall" that was stopped part way: the curve under its staged name, and the
+        // same half written. (A number no process can have, so never this test's own.)
+        let gone = ["Fall.bwcurve.mo-staged", "Fall.bwcurve.mo-staged.mo-part-9999999901-0"];
+        // As old, but only named like them: yours.
+        let yours = [
+            "Fall.bwcurve",
+            "Fall.bwcurve.mo-staged.bak",
+            "Fall.bwcurve.mo-staged.mo-part-1-x",
+            "Fall.bwcurve.mo-part-1-2",
+            "Fall.mo-staged",
+            ".bwcurve.mo-staged",
+        ];
+        for name in gone.iter().chain(&yours) {
+            let path = library.join(name);
+            std::fs::write(&path, b"left").unwrap();
+            std::fs::File::options().write(true).open(&path).unwrap().set_modified(hour_ago).unwrap();
+        }
+        // Another copy of the app saving "Swell" right now.
+        let being_made = ["Swell.bwcurve.mo-staged", "Swell.bwcurve.mo-staged.mo-part-9999999902-0"];
+        for name in being_made {
+            std::fs::write(library.join(name), b"being made").unwrap();
+        }
+        let rise = Curve {
+            id: "ab".repeat(16),
+            name: "Rise".into(),
+            points: vec![p(0.0, 0.0, 0.0), p(1.0, 1.0, 0.0)],
+            length_beats: 4.0,
+            hidden: false,
+            sources: Vec::new(),
+        };
+        assert_eq!(save_to_bitwig(&rise, &library).unwrap(), library.join("Rise.bwcurve"));
+        let mut there: Vec<String> =
+            std::fs::read_dir(&library).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        there.sort();
+        let mut kept: Vec<&str> = yours.iter().chain(&being_made).copied().chain(["Rise.bwcurve"]).collect();
+        kept.sort();
+        assert_eq!(there, kept, "the save's leftovers gone, everything else as it was");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn only_a_plain_file_a_save_left_is_cleared_never_a_folder_or_a_link_of_that_name() {
+        let dir = temp_dir("staged-links");
+        let staged = dir.join("Fall.bwcurve.mo-staged");
+        std::fs::write(&staged, b"left").unwrap();
+        let folder = dir.join("Rise.bwcurve.mo-staged");
+        std::fs::create_dir_all(&folder).unwrap();
+        // Nothing in a folder inside is looked at.
+        let inside = folder.join("Fall.bwcurve.mo-staged");
+        std::fs::write(&inside, b"left").unwrap();
+        // Links of those names, to a curve of yours elsewhere.
+        #[cfg(unix)]
+        let (links, yours) = {
+            let yours = folder.join("Swell.bwcurve");
+            std::fs::write(&yours, b"yours").unwrap();
+            let links = [dir.join("Swell.bwcurve.mo-staged"), dir.join("Swell.bwcurve.mo-staged.mo-part-9999999901-0")];
+            for link in &links {
+                std::os::unix::fs::symlink(&yours, link).unwrap();
+            }
+            (links, yours)
+        };
+        // An hour on, each of them is old enough to go, were it a file a save left.
+        clear_staged(&dir, SystemTime::now() + Duration::from_secs(3600));
+        assert!(!staged.exists(), "a plain file a save left goes");
+        assert!(folder.is_dir() && inside.exists(), "a folder of that name stays, and what's in it");
+        #[cfg(unix)]
+        {
+            for link in &links {
+                let link_there = std::fs::symlink_metadata(link).is_ok_and(|m| m.file_type().is_symlink());
+                assert!(link_there, "{} stays", link.display());
+            }
+            assert_eq!(std::fs::read(&yours).unwrap(), b"yours", "and so does what they lead to");
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

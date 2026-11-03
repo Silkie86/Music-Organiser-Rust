@@ -86,25 +86,28 @@ fn a_half_made_database_from_a_crash_is_removed_and_an_old_journal_not_replayed(
     std::fs::write(&old, b"half made").unwrap();
     let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
     std::fs::File::options().write(true).open(&old).unwrap().set_modified(hour_ago).unwrap();
-    let fresh = dir.join("presets.db.new-2");
+    // Another copy of the app making it now. Its number, and those below, are bigger than any process's number can be
+    // (4294967295 at most, on every system), so none is ever this test's own half-made file.
+    let fresh = dir.join("presets.db.new-9999999902");
     std::fs::write(&fresh, b"another copy making it now").unwrap();
     std::fs::write(dir.join("presets.db-journal"), b"left by a deleted database").unwrap();
     // SQLite's own file beside a half-made one goes with it; a file only named like one, and a folder, never (rule 28).
     let old_wal = dir.join("presets.db.new-1-wal");
     let yours = dir.join("presets.db.new-12.bak");
-    let folder = dir.join("presets.db.new-3");
+    let folder = dir.join("presets.db.new-9999999903");
     std::fs::create_dir_all(&folder).unwrap();
     for file in [&old_wal, &yours] {
         std::fs::write(file, b"old").unwrap();
         std::fs::File::options().write(true).open(file).unwrap().set_modified(hour_ago).unwrap();
     }
     // A link of that name (to a file of yours elsewhere) isn't a half-made database either: it stays, and so does
-    // what it leads to.
+    // what it leads to. (The folder and the link are made just now, so the minute's wait would keep them here anyway:
+    // the test in src/fixes.rs looks at them an hour on.)
     #[cfg(unix)]
     let link = {
         let elsewhere = folder.join("Song.flp");
         std::fs::write(&elsewhere, b"yours").unwrap();
-        let link = dir.join("presets.db.new-4");
+        let link = dir.join("presets.db.new-9999999904");
         std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
         link
     };
