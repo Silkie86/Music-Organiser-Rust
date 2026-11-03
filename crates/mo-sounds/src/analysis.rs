@@ -62,7 +62,14 @@ pub struct SoundAnalysis {
 impl SoundAnalysis {
     /// Reads the JSON the C# app stored. `None` when it isn't a readable analysis (the C# app then shows none too).
     pub fn from_json(json: &str) -> Option<SoundAnalysis> {
-        serde_json::from_str(json).ok()
+        let mut a: SoundAnalysis = serde_json::from_str(json).ok()?;
+        // Reading a list doubles its room each time it fills, so the 160 waveform points got room for 256: with half a
+        // million sounds held, that spare room alone was about 200 MB. Each list is cut to what it holds.
+        a.waveform.shrink_to_fit();
+        a.chroma.shrink_to_fit();
+        a.character.shrink_to_fit();
+        a.chords.shrink_to_fit();
+        Some(a)
     }
 
     /// The key, short ("Ebm", "F#"), when one was found.

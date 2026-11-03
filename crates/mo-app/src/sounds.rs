@@ -4,6 +4,7 @@
 //! (rule 21). Call [`SoundList::view`] off the window's thread; it takes well under a second for 357,000 sounds.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use chrono::Datelike;
 use mo_sounds::usage::Usage;
@@ -134,14 +135,18 @@ impl Filters {
 }
 
 /// Every sound the page can show (hidden copies left out: they only hide in the app, rule 2), with what's worked out
-/// once per sound for searching and sorting. Cloning copies every sound, so it's only done off the window's thread.
+/// once per sound for searching and sorting.
+///
+/// The sounds and what's worked out from them are shared, not copied, by a clone: a big library's list is most of a
+/// gigabyte, and the page makes a second list once it knows how your songs use each sound. Only what that adds (use,
+/// Most liked) is each clone's own.
 #[derive(Clone, Default)]
 pub struct SoundList {
-    sounds: Vec<Sound>,
+    sounds: Arc<Vec<Sound>>,
     /// Lower-cased path, type, tags and character, one per line: what the search words are looked for in.
-    hay: Vec<String>,
+    hay: Arc<Vec<String>>,
     /// Lower-cased names, for the name order and every order's tie-break.
-    names: Vec<String>,
+    names: Arc<Vec<String>>,
     /// How your projects use each sound, by sound id, once known (sounds no project uses are left out).
     used: Option<HashMap<i64, Usage>>,
     /// Each sound's Most liked score, in `sounds` order, once known.
@@ -153,10 +158,12 @@ pub struct SoundList {
 impl SoundList {
     /// The list from the library's sounds.
     pub fn new(sounds: Vec<Sound>) -> SoundList {
-        let sounds: Vec<Sound> = sounds.into_iter().filter(|s| !s.hidden).collect();
-        let hay = sounds.par_iter().map(hay_of).collect();
-        let names = sounds.par_iter().map(|s| s.name().to_lowercase()).collect();
-        SoundList { sounds, hay, names, ..SoundList::default() }
+        let mut sounds: Vec<Sound> = sounds.into_iter().filter(|s| !s.hidden).collect();
+        // Leaving out the hidden copies keeps the room they took: give it back.
+        sounds.shrink_to_fit();
+        let hay = Arc::new(sounds.par_iter().map(hay_of).collect());
+        let names = Arc::new(sounds.par_iter().map(|s| s.name().to_lowercase()).collect());
+        SoundList { sounds: Arc::new(sounds), hay, names, ..SoundList::default() }
     }
 
     /// How your projects use each sound (by id, as [`mo_sounds::usage::usage`] gives it), for the Used chips and
@@ -245,7 +252,7 @@ impl SoundList {
     /// Each type and how many sounds have it, most first (the type chips), counting every sound the list holds.
     pub fn type_counts(&self) -> Vec<(String, usize)> {
         let mut counts: HashMap<&str, usize> = HashMap::new();
-        for s in &self.sounds {
+        for s in self.sounds.iter() {
             *counts.entry(s.sound_type.as_str()).or_default() += 1;
         }
         let mut counts: Vec<(String, usize)> = counts.into_iter().map(|(t, n)| (t.to_string(), n)).collect();
@@ -319,7 +326,7 @@ impl SoundList {
         let mut counts: std::collections::BTreeMap<i32, usize> = std::collections::BTreeMap::new();
         match (&self.used, by_use) {
             (Some(used), true) => {
-                for s in &self.sounds {
+                for s in self.sounds.iter() {
                     let mut years = used.get(&s.id).map(|u| u.years.clone()).unwrap_or_default();
                     years.dedup();
                     for y in years {
@@ -328,7 +335,7 @@ impl SoundList {
                 }
             }
             _ => {
-                for s in &self.sounds {
+                for s in self.sounds.iter() {
                     *counts.entry(s.added.year()).or_default() += 1;
                 }
             }
