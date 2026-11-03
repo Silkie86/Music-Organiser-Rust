@@ -42,8 +42,10 @@ use crate::notes::{Grid, Part};
 /// giving the answer), so the answers the app keeps (the MIDI page's index) know to be worked out again. Version 2 gives
 /// the graded answer with its colours and checks hints; version 3 counts every major and minor chord heard, not only
 /// those standing on the bass; version 4 has the first fitted weights (POP909-CL, and the Billboard charts at a quarter
-/// weight), where before every key scored the same.
-pub const KEY_FINDER_VERSION: u32 = 4;
+/// weight), where before every key scored the same; version 5 has those weights rescaled on Solomon's own MIDI packs
+/// (each stream's scale, the minor weight and the calibration, as rule 5's exception allows), pulled back to the last
+/// point where every hand case keeps its gate.
+pub const KEY_FINDER_VERSION: u32 = 5;
 
 /// What the notes are, as cut from the music: it says what their first and last bass mean.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -121,7 +123,9 @@ pub const STREAMS: usize = 8;
 /// for minor keys as a whole.
 pub const FEATURES: usize = STREAMS * 24 + 1;
 
-/// The feature minor keys have as a whole: the music the finder learned from has fewer minor keys.
+/// The feature minor keys have as a whole: one weight added to every minor key's score, which the fit sets by how
+/// often the music it learned from is in a minor key (below 0 on the public songs, fewer of them minor; above 0 since
+/// the rescale on Solomon's packs, most of them minor).
 pub const MINOR: usize = STREAMS * 24;
 
 /// Knots of the calibration curves: 1, 2, 4, 8 and 16 bars heard (flat past 16 bars).

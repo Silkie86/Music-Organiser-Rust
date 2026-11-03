@@ -4,10 +4,11 @@ import { Theme, Type, Space, Icons, RailItem, Groove, Caps, ActionKey, TipLayer,
 import { ComingPage } from "pages/coming.slint";
 import { PartsGallery } from "pages/parts.slint";
 import { SoundsPage, SoundsData, GalaxyLabel, SweptLine, TrailDot, AlikeLine, FolderLine, PadLine, TypeChipInfo, SoundTile, TileRow, SoundLine, SoundFact, PickedSound } from "pages/sounds.slint";
-import { MenuItem, YearBar } from "studio.slint";
+import { MenuItem, CardAction, YearBar } from "studio.slint";
 import { SongsPage, SongsData, SongLine, PanelSong, CountLine, PluginLine, SampleLine, SaveLine, DetailPair, HealthLine, OlderLine } from "pages/songs.slint";
 import { ArrangementData, ArrLabel, ArrKind } from "pages/arrangement.slint";
 import { BackupPage, BackupData, BackupFolderLine, LeftOutLine } from "pages/backup.slint";
+import { SpacePage, SpaceData, DriveCard, RoomLine, CardPart } from "pages/space.slint";
 import { ActivityCards, CardInfo, KeySheet, KeyRow, NoteDialog } from "shell.slint";
 
 import "../fonts/IBMPlexSans-400.ttf";
@@ -25,7 +26,7 @@ import "../fonts/SpaceGrotesk-700.ttf";
 import "../fonts/SpaceMono-400.ttf";
 import "../fonts/SpaceMono-700.ttf";
 
-export { Theme, Icons, ActionKey, MenuItem, YearBar, SoundsData, GalaxyLabel, SweptLine, TrailDot, AlikeLine, FolderLine, PadLine, TypeChipInfo, SoundTile, TileRow, SoundLine, SoundFact, PickedSound, BackupData, BackupFolderLine, LeftOutLine, ArrangementData, ArrLabel, ArrKind, CardInfo, KeyRow, SongsData, SongLine, PanelSong, CountLine, PluginLine, SampleLine, SaveLine, DetailPair, HealthLine, OlderLine }
+export { Theme, Icons, ActionKey, MenuItem, CardAction, YearBar, SoundsData, GalaxyLabel, SweptLine, TrailDot, AlikeLine, FolderLine, PadLine, TypeChipInfo, SoundTile, TileRow, SoundLine, SoundFact, PickedSound, BackupData, BackupFolderLine, LeftOutLine, SpaceData, DriveCard, RoomLine, CardPart, ArrangementData, ArrLabel, ArrKind, CardInfo, KeyRow, SongsData, SongLine, PanelSong, CountLine, PluginLine, SampleLine, SaveLine, DetailPair, HealthLine, OlderLine }
 
 export struct PlaceInfo {
     name: string,
@@ -55,6 +56,7 @@ export component AppWindow inherits Window {
     in property <int> sounds-place: 1;
     // Backup: a lean copy of your music on another drive.
     in property <int> backup-place: -1;
+    in property <int> space-place: -1;
     // The shared parts on one page instead of the places, for the screenshots only.
     in property <bool> parts-gallery;
     in-out property <int> place: 0;
@@ -170,7 +172,11 @@ export component AppWindow inherits Window {
             if root.place == root.backup-place: BackupPage {
                 horizontal-stretch: 1;
             }
-            if root.place != root.songs-place && root.place != root.sounds-place && root.place != root.backup-place: ComingPage {
+            if root.place == root.space-place: SpacePage {
+                horizontal-stretch: 1;
+            }
+            if root.place != root.songs-place && root.place != root.sounds-place && root.place != root.backup-place
+                && root.place != root.space-place: ComingPage {
                 horizontal-stretch: 1;
                 title: root.places[root.place].name;
                 coming: root.places[root.place].coming;

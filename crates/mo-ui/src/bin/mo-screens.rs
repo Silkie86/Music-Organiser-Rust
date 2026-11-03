@@ -56,10 +56,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     app.set_place(Place::Sounds.index() as i32);
     let sounds_empty = capture(&window);
+    // While the sounds are still being read, on the galaxy: one word in the list's place, not the galaxy's own on top.
+    mo_ui::sounds::reading(&app);
+    app.global::<mo_ui::SoundsData>().invoke_pick_view(2);
+    let sounds_reading = capture(&window);
     mo_ui::sounds::show(&app, sample_sounds(), None, Some("1"));
     mo_ui::sounds::index_known(&app, std::sync::Arc::new(sample_fingerprints()));
     // Once to lay the page out (the tiles' width tells the page how many fit in a row), then for real.
     capture(&window);
+
+    // The Space page, from made-up drives: it only reads the real ones when it's shown in the app.
+    mo_ui::space::connect(&app, out.join("no library.db"), feed.clone(), &Shortcuts::default());
+    mo_ui::space::show_sample(&app, sample_drives(), sample_app_files(), "");
 
     let mut shots = Vec::new();
     for place in Place::ALL {
@@ -98,6 +106,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     shots.push(("backup-gone-open.png".into(), capture(&window)));
     app.global::<mo_ui::BackupData>().set_gone_open(false);
     mo_ui::backup::show_gone(&app, &mo_app::backup_gone::Warning::default());
+    // Space with the App files card open: what each part of the app's folder takes, and C: nearly full.
+    app.set_place(Place::Space.index() as i32);
+    mo_ui::space::show_sample(&app, sample_drives(), sample_app_files(), mo_app::space::APP_FILES);
+    capture(&window);
+    shots.push(("space-app-files.png".into(), capture(&window)));
+    mo_ui::apply_look(&app, &Look::from_settings(Some("Paper"), None));
+    capture(&window);
+    shots.push(("space-paper.png".into(), capture(&window)));
+    mo_ui::apply_look(&app, &graphite);
+    mo_ui::space::show_sample(&app, sample_drives(), sample_app_files(), "");
     app.set_place(Place::Songs.index() as i32);
     for theme in THEMES.iter().skip(1) {
         mo_ui::apply_look(&app, &Look::from_settings(Some(theme.name), None));
@@ -106,6 +124,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     mo_ui::apply_look(&app, &graphite);
     shots.push(("sounds-empty.png".into(), sounds_empty));
+    shots.push(("sounds-reading.png".into(), sounds_reading));
     sounds_shots(&app, &window, &graphite, &mut shots);
 
     // The song panel, on the first song, on Overview and on Plugins.
@@ -225,6 +244,21 @@ fn sounds_shots(
     data.invoke_select(6);
     data.set_played(0.35);
     shots.push(("sounds-panel.png".into(), capture(window)));
+    // A sound deep in a pack, with folder names too long for a line, and six tags: its card wraps them, at the usual
+    // width and as narrow as it goes, with nothing cut off on the right. Found by name, as the shuffled order changes
+    // with every run.
+    data.set_search("Boom Kick".into());
+    data.invoke_search_edited("Boom Kick".into());
+    data.invoke_select(0);
+    capture(window);
+    shots.push(("sounds-panel-long.png".into(), capture(window)));
+    let wide = data.get_panel_width();
+    data.set_panel_width(320.0);
+    capture(window);
+    shots.push(("sounds-panel-narrow.png".into(), capture(window)));
+    data.set_panel_width(wide);
+    data.set_search("".into());
+    data.invoke_search_edited("".into());
     // Two types at once, with the Clear types chip.
     data.invoke_pick_type(0);
     data.invoke_pick_type(1);
@@ -248,6 +282,13 @@ fn sounds_shots(
     data.invoke_select(3);
     capture(window);
     shots.push(("sounds-galaxy.png".into(), capture(window)));
+    // A search that leaves no stars: the list's word says so over the dimmed galaxy, once.
+    data.set_search("Nothing called this".into());
+    data.invoke_search_edited("Nothing called this".into());
+    capture(window);
+    shots.push(("sounds-galaxy-none.png".into(), capture(window)));
+    data.set_search("".into());
+    data.invoke_search_edited("".into());
     // Lit by length: long sounds big and bright, one-shots small; then all alike, to compare.
     data.invoke_galaxy_light_by("Length".into());
     capture(window);
@@ -298,6 +339,9 @@ fn sounds_shots(
     data.invoke_pick_view(5);
     data.invoke_kit_roll();
     data.invoke_pad_lock(0);
+    capture(window);
+    // The Snare pad's Lock, clicked as you would: the pad's own buttons take their click, not the line under them.
+    click(window, SNARE_LOCK.0, SNARE_LOCK.1);
     shots.push(("sounds-kits.png".into(), capture(window)));
     data.invoke_pick_view(0);
     mo_ui::apply_look(app, &Look::from_settings(Some("Paper"), None));
@@ -305,6 +349,41 @@ fn sounds_shots(
     shots.push(("sounds-paper.png".into(), capture(window)));
     mo_ui::apply_look(app, graphite);
     app.set_place(Place::Songs.index() as i32);
+}
+
+/// Made-up drives for the Space page: C: nearly full with the app's files, a big drive of projects and samples, the
+/// Bitwig drive, and a backup drive that isn't plugged in.
+fn sample_drives() -> Vec<mo_app::space::Drive> {
+    use mo_app::space::{Drive, Holds};
+    const GB: u64 = 1 << 30;
+    let drive = |name: &str, free: u64, total: u64, holds: Vec<Holds>| Drive {
+        name: name.into(),
+        free: free * GB,
+        total: total * GB,
+        here: total > 0,
+        holds,
+    };
+    vec![
+        drive("C:", 8, 476, vec![Holds::Samples, Holds::AppFiles]),
+        drive("E:", 0, 0, vec![Holds::Backup]),
+        drive("I:", 1229, 3726, vec![Holds::Projects, Holds::Samples]),
+        drive("K:", 655, 1863, vec![Holds::Projects]),
+    ]
+}
+
+/// The app's own files, made up, with the parts' words as the app gives them.
+fn sample_app_files() -> Vec<mo_space::app_files::AppFilesPart> {
+    use mo_space::app_files::{AppFilesPart, part_of};
+    const MB: u64 = 1 << 20;
+    let part = |(name, what): (&'static str, &'static str), bytes: u64| AppFilesPart { name, what, bytes };
+    vec![
+        AppFilesPart { name: "Your library", what: "Projects, plugins, samples, tags and ratings", bytes: 6250 * MB },
+        AppFilesPart { name: "Sound Lab", what: "Every sound's details, likes and look-alikes", bytes: 2460 * MB },
+        part(part_of("models", true), 310 * MB),
+        part(part_of("logs", true), 48 * MB),
+        part(part_of("notes", true), 21 * MB),
+        part(part_of("bitwig template", false), 4 * MB),
+    ]
 }
 
 /// Made-up fingerprints for the made-up sounds: sounds of a type, and of a length, sit near each other.
@@ -378,9 +457,17 @@ fn sample_sounds() -> mo_ui::sounds::Library {
                     (shape * wobble).clamp(0.02, 1.0)
                 })
                 .collect();
+            // The picked one sits deep in a pack, with folder names too long for a line: its card must wrap them.
+            let path = if name == "Boom Kick" {
+                format!(
+                    r"D:\Samples\Packs\Vintage_Drum_Machines_Collection_Vol_2\Kicks_And_Bass_Drums\Processed\{name}.wav"
+                )
+            } else {
+                format!(r"D:\Samples\{folder}\{name}.wav")
+            };
             Sound {
                 id: i as i64 + 1,
-                path: format!(r"D:\Samples\{folder}\{name}.wav"),
+                path,
                 error: None,
                 analysis: Some(SoundAnalysis {
                     seconds,
@@ -396,7 +483,13 @@ fn sample_sounds() -> mo_ui::sounds::Library {
                 type_confidence: 0.9,
                 user_type: None,
                 name_type: None,
-                tags: if i % 4 == 0 { vec!["Dark".into()] } else { Vec::new() },
+                tags: if name == "Boom Kick" {
+                    ["Dark", "Punchy", "Live set", "Sub heavy", "Analog", "Long tail"].map(String::from).to_vec()
+                } else if i % 4 == 0 {
+                    vec!["Dark".into()]
+                } else {
+                    Vec::new()
+                },
                 favourite: i % 6 == 1,
                 hidden: false,
                 rating: 0,
@@ -511,6 +604,8 @@ const SHOW_BUTTON: (f32, f32) = (1140.0, 328.0);
 const REMOVE_OLDER_BUTTON: (f32, f32) = (1127.0, 820.0);
 const PAGE_DOWN: f32 = 300.0;
 const OLDER_BUTTON: (f32, f32) = (1005.0, 328.0);
+/// The Lock chip on the kit's second pad (Snare).
+const SNARE_LOCK: (f32, f32) = (846.0, 333.0);
 /// A point on a clip in the arrangement, from the view's top left, for the hover and zoom shots.
 const ARRANGEMENT_CLIP: (f32, f32) = (480.0, 180.0);
 

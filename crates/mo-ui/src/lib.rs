@@ -17,6 +17,7 @@ pub mod gpu;
 pub mod note;
 pub mod songs;
 pub mod sounds;
+pub mod space;
 pub mod watchdog;
 
 use std::cell::RefCell;
@@ -25,7 +26,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use mo_app::activity::Feed;
 use mo_app::log;
 use mo_app::places::Place;
-use mo_app::shortcuts::{APP_ACTIONS, Action, SONGS_ACTIONS, SOUNDS_ACTIONS, Shortcuts, repeats};
+use mo_app::shortcuts::{
+    APP_ACTIONS, Action, SONGS_ACTIONS, SOUNDS_ACTIONS, SPACE_ACTIONS, Shortcuts, repeats, what_of,
+};
 use mo_app::themes::Look;
 use note::open_note;
 use slint::platform::Key;
@@ -70,6 +73,7 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> R
     app.set_songs_place(Place::Songs.index() as i32);
     app.set_sounds_place(Place::Sounds.index() as i32);
     app.set_backup_place(Place::Backup.index() as i32);
+    app.set_space_place(Place::Space.index() as i32);
     KEYS.with(|k| *k.borrow_mut() = Some(shortcuts.clone()));
     show_button_keys(&app, &shortcuts);
     go_to(&app, start.index() as i32);
@@ -81,6 +85,7 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> R
         }
     });
     let weak = app.as_weak();
+    let key_feed = feed.clone();
     app.on_key(move |text, ctrl, shift, alt, meta, repeat| {
         let _doing = watchdog::doing("a key");
         let key = key_name(&text, ctrl, shift, alt, meta);
@@ -107,12 +112,19 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> R
         {
             return true;
         }
+        if let Some(app) = weak.upgrade()
+            && app.get_place() == Place::Space.index() as i32
+            && let Some(id) = shortcuts.page_action_for(&key, SPACE_ACTIONS)
+            && (repeat || space::run_action(&app, id))
+        {
+            return true;
+        }
         let Some(id) = shortcuts.action_for(&key) else { return false };
         // A key held down did its job once (unless it's one that steps), and the page behind doesn't get it either.
         if repeat && !repeats(id) {
             return handles(id);
         }
-        run(id, &weak)
+        run(id, &weak, &key_feed)
     });
 
     cards::connect(&app, &feed);
@@ -122,10 +134,7 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> R
 
 /// The Songs page's buttons' tooltips: what each does and its key, from the one shortcut list (rule 15).
 fn show_button_keys(app: &AppWindow, shortcuts: &Shortcuts) {
-    let action = |id: &str| ActionKey {
-        what: SONGS_ACTIONS.iter().find(|a| a.id == id).map_or("", |a| a.what).into(),
-        key: shortcuts.key_of(id).into(),
-    };
+    let action = |id: &str| ActionKey { what: what_of(id).into(), key: shortcuts.key_of(id).into() };
     let data = app.global::<SongsData>();
     data.set_open_key(action("projects.open"));
     data.set_reveal_key(action("projects.reveal"));
@@ -143,6 +152,9 @@ fn go_to(app: &AppWindow, index: i32) {
     if place == Place::Backup {
         backup::shown();
     }
+    if place == Place::Space {
+        space::shown(app);
+    }
     KEYS.with(|k| {
         if let Some(shortcuts) = k.borrow().as_ref() {
             app.set_key_rows(ModelRc::new(VecModel::from(key_rows(shortcuts, place))));
@@ -156,6 +168,7 @@ fn key_rows(shortcuts: &Shortcuts, place: Place) -> Vec<KeyRow> {
     let page: &[Action] = match place {
         Place::Songs => SONGS_ACTIONS,
         Place::Sounds => SOUNDS_ACTIONS,
+        Place::Space => SPACE_ACTIONS,
         _ => &[],
     };
     let mut rows: Vec<KeyRow> =
@@ -236,14 +249,15 @@ fn coming(place: Place) -> &'static str {
 }
 
 /// The app-wide actions `run` does something for so far (besides going to a place).
-const HANDLED: [&str; 6] = ["app.prevPage", "app.nextPage", "app.help", "app.helpF1", "app.fullScreen", "app.play"];
+const HANDLED: [&str; 7] =
+    ["app.prevPage", "app.nextPage", "app.help", "app.helpF1", "app.fullScreen", "app.play", "app.recycleBin"];
 
 fn handles(id: &str) -> bool {
     HANDLED.contains(&id) || Place::ALL.iter().any(|p| p.shortcut_id() == id)
 }
 
 /// Runs an app-wide action. Returns whether it did anything, so an unused key can go on to the page.
-fn run(id: &str, weak: &Weak<AppWindow>) -> bool {
+fn run(id: &str, weak: &Weak<AppWindow>, feed: &Feed) -> bool {
     let Some(app) = weak.upgrade() else { return false };
     if let Some(p) = Place::ALL.into_iter().find(|p| p.shortcut_id() == id) {
         go_to(&app, p.index() as i32);
@@ -258,6 +272,8 @@ fn run(id: &str, weak: &Weak<AppWindow>) -> bool {
             let w = app.window();
             w.set_fullscreen(!w.is_fullscreen());
         }
+        // Where everything the app removes goes first, from any page.
+        "app.recycleBin" => files::open_recycle_bin(feed),
         // Space plays the picked sound on the Sounds page; elsewhere it's left for the page (a button, a text box).
         "app.play" => {
             return app.get_place() == Place::Sounds.index() as i32 && sounds::toggle_play(&app);

@@ -34,13 +34,13 @@ pub mod types;
 pub mod usage;
 
 pub use analysis::{ChordSpan, SoundAnalysis};
-pub use db::{KnownSound, SoundMatch, SoundsDb, SoundsError, StarPoint, TagCount};
+pub use db::{Everything, KnownSound, SoundMatch, SoundsDb, SoundsError, StarPoint, TagCount};
 
 use chrono::NaiveDateTime;
 pub(crate) use mo_formats::paths::file_name;
 
 /// One sample in your sound library, as the list shows it.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Sound {
     pub id: i64,
     pub path: String,

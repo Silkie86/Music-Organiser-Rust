@@ -90,6 +90,7 @@ pub fn reread(
 mod tests {
     use super::*;
     use mo_formats::NoteAttribute;
+    use mo_harmony::KeyAnswer;
 
     fn note(start: i64, key: u8) -> NoteEvent {
         NoteEvent {
@@ -119,10 +120,35 @@ mod tests {
         let fact = fact.unwrap();
         let key = key.unwrap();
         assert_eq!((key.tonic, key.minor), (9, true), "{fact:?}");
-        // The fact holds the whole answer.
-        assert_eq!(fact.tonic().map(|t| t.number()), Some(9));
+        // The fact holds the whole answer, the key it leans to with it: A minor, whether or not the finder is sure
+        // enough to give it as the key (a tune alone seldom is).
+        let leaning = fact.answer().and_then(KeyAnswer::leaning_key);
+        assert_eq!(leaning.map(|k| (k.tonic.number(), k.mode)), Some((9, Mode::Minor)), "{fact:?}");
         assert_eq!(read(&mut reader, &notes, Role::Drums, false), (None, None), "drums aren't heard");
         assert_eq!(read(&mut reader, &[], Role::Melody, false), (None, None), "nothing pitched");
+    }
+
+    /// Chords held a bar each, the progression played twice.
+    fn chords(progression: &[&[u8]]) -> Vec<NoteEvent> {
+        let bar = 4 * PPQ;
+        (0..2)
+            .flat_map(|round| {
+                progression.iter().enumerate().map(move |(i, chord)| (round * progression.len() + i, *chord))
+            })
+            .flat_map(|(at, chord)| chord.iter().map(move |&k| NoteEvent { length: bar, ..note(at as i64 * bar, k) }))
+            .collect()
+    }
+
+    #[test]
+    fn a_part_the_finder_is_sure_of_gives_the_key_to_show() {
+        let mut reader = KeyReader::new();
+        // Am Dm E Am: A minor for sure, the key the page shows and searches by.
+        let notes = chords(&[&[69, 72, 76], &[62, 65, 69], &[64, 68, 71], &[69, 72, 76]]);
+        let (_, fact) = read(&mut reader, &notes, Role::Chords, false);
+        let fact = fact.unwrap();
+        assert!(matches!(fact.answer(), Some(KeyAnswer::Key(_))), "{fact:?}");
+        let shown = sure_key(&fact).expect("a key to show");
+        assert_eq!((shown.tonic, shown.minor), (9, true), "{fact:?}");
     }
 
     #[test]

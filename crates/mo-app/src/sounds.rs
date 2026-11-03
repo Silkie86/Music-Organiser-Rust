@@ -102,6 +102,30 @@ impl Filters {
         }
     }
 
+    /// Turns one of the on/off chips on or off, by the name the page gives it: "mix-well", "unused", "used" or
+    /// "favourites" (any other name changes nothing). Used and Unused are never both on. When Used goes on or off,
+    /// the years picked on the year strip go too: its years then mean something else (the years of the songs that
+    /// use each sound, or the year each was added), so a span picked for one isn't kept for the other.
+    pub fn toggle(&mut self, chip: &str) {
+        let by_use = self.used;
+        match chip {
+            "mix-well" => self.mix_well = !self.mix_well,
+            "unused" => {
+                self.unused = !self.unused;
+                self.used &= !self.unused;
+            }
+            "used" => {
+                self.used = !self.used;
+                self.unused &= !self.used;
+            }
+            "favourites" => self.favourites = !self.favourites,
+            _ => {}
+        }
+        if self.used != by_use {
+            self.years = None;
+        }
+    }
+
     /// Whether any filter is set (for the Clear chip). The search box doesn't count: it has its own ×.
     pub fn any(&self) -> bool {
         let none = Filters { search: self.search.clone(), ..Filters::default() };
@@ -126,13 +150,28 @@ pub struct SoundList {
     liked_best: f64,
 }
 
+/// A list of at least this many sounds is freed off the thread that lets it go ([`crate::background::free_later`]):
+/// freeing a few thousand takes a few milliseconds, half a million over a second.
+const FREE_LATER_FROM: usize = 2_000;
+
+impl Drop for SoundList {
+    /// The last copy of an old list is often let go on the window's thread (when the use counts arrive, the page swaps
+    /// its list for one that has them, and whichever part of the page held the old one last lets it go there), so a
+    /// big one goes to the freeing thread whole, all it holds with it, and is freed there.
+    fn drop(&mut self) {
+        if self.sounds.len() >= FREE_LATER_FROM && !crate::background::freeing_here() {
+            crate::background::free_later(std::mem::take(self));
+        }
+    }
+}
+
 impl SoundList {
     /// The list from the library's sounds.
     pub fn new(sounds: Vec<Sound>) -> SoundList {
         let sounds: Vec<Sound> = sounds.into_iter().filter(|s| !s.hidden).collect();
         let hay = sounds.par_iter().map(hay_of).collect();
         let names = sounds.par_iter().map(|s| s.name().to_lowercase()).collect();
-        SoundList { sounds, hay, names, ..SoundList::default() }
+        SoundList { sounds, hay, names, used: None, liked: None, liked_best: 0.0 }
     }
 
     /// How your projects use each sound (by id, as [`mo_sounds::usage::usage`] gives it), for the Used chips and
@@ -549,6 +588,26 @@ mod tests {
     }
 
     #[test]
+    fn a_big_list_is_freed_off_the_thread_that_lets_it_go() {
+        let sounds = |n: usize| (0..n as i64).map(|i| sound(i, &format!(r"I:\S\{i}.wav"), "Kick", None)).collect();
+        let (big, small) = (SoundList::new(sounds(FREE_LATER_FROM)), SoundList::new(sounds(10)));
+        // A copy still in use keeps the list: only the last copy's going frees it.
+        let shared = std::sync::Arc::new(big);
+        let copy = shared.clone();
+        let before = crate::background::handed_over();
+        drop(small);
+        drop(shared);
+        assert_eq!(
+            crate::background::handed_over(),
+            before,
+            "a small list is freed here; one still in use isn't freed"
+        );
+        assert_eq!(copy.len(), FREE_LATER_FROM);
+        drop(copy);
+        assert_eq!(crate::background::handed_over(), before + 1, "the big one goes to the freeing thread");
+    }
+
+    #[test]
     fn waveforms_are_one_line_per_peak() {
         assert_eq!(wave_path(&[]), "");
         // The loudest fills the height, a silent one is a sliver, and a negative peak counts by its size.
@@ -572,6 +631,33 @@ mod tests {
         assert_eq!(list.year_counts(true), [(2026, 1), (2025, 1), (2020, 1)]);
         let used_then = Filters { used: true, years: Some((2025, 2026)), ..Filters::default() };
         assert_eq!(by(&list, used_then), [1]);
+    }
+
+    #[test]
+    fn turning_used_on_or_off_lets_go_of_the_years_picked() {
+        let picked = Filters { years: Some((2020, 2022)), ..Filters::default() };
+        // Used on: the strip counts the songs' years now, so years picked from the years added go.
+        let mut f = picked.clone();
+        f.toggle("used");
+        assert!(f.used);
+        assert_eq!(f.years, None);
+        // And off again: years picked from the songs' years go too.
+        f.years = Some((2025, 2026));
+        f.toggle("used");
+        assert!(!f.used);
+        assert_eq!(f.years, None);
+        // Unused on turns Used off, so it lets go of them as well.
+        let mut f = Filters { used: true, ..picked.clone() };
+        f.toggle("unused");
+        assert!(f.unused && !f.used);
+        assert_eq!(f.years, None);
+        // Unused with Used off and the other chips keep them: the strip still reads the years added.
+        let mut f = picked.clone();
+        for chip in ["unused", "mix-well", "favourites", "unused", "no such chip"] {
+            f.toggle(chip);
+        }
+        assert!(!f.unused && !f.used && f.mix_well && f.favourites);
+        assert_eq!(f.years, Some((2020, 2022)));
     }
 
     #[test]

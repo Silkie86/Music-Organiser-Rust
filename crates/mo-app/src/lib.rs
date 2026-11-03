@@ -25,6 +25,7 @@ pub mod song_panel;
 pub mod songs;
 pub mod sound_library;
 pub mod sounds;
+pub mod space;
 pub mod sweep_timing;
 pub mod themes;
 pub mod tidy;

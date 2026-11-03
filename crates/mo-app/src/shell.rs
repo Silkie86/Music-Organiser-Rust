@@ -92,6 +92,16 @@ pub fn reveal(path: &str, folder: &str, exists: bool, os: Os) -> Launch {
     }
 }
 
+/// Opens the Recycle Bin (the Trash on a Mac or Linux), where everything the app removes goes, as the C# app's
+/// `Shell.OpenRecycleBin` does. `home` is your home folder, where a Mac keeps the Trash.
+pub fn recycle_bin(home: &str, os: Os) -> Launch {
+    match os {
+        Os::Windows => launch("explorer.exe", &["shell:RecycleBinFolder"], Check::Ends),
+        Os::Mac => launch("open", &[&format!("{}/.Trash", home.trim_end_matches('/'))], Check::ExitCode),
+        Os::Linux => launch("xdg-open", &["trash:///"], Check::ExitCode),
+    }
+}
+
 /// The folder part of a path: everything before its file name, whichever way its slashes lean. A drive's own folder
 /// keeps its slash ("C:\\", "/").
 pub fn folder_of(path: &str) -> &str {
@@ -103,6 +113,20 @@ pub fn folder_of(path: &str) -> &str {
     } else {
         folder
     }
+}
+
+/// A path as a card shows it, with a break allowed after each slash (a zero-width space, which isn't drawn), so a long
+/// path wraps at its folders instead of in the middle of a name or past the card's edge. Only for showing: copying
+/// or opening uses the path itself.
+pub fn wrappable_path(path: &str) -> String {
+    let mut shown = String::with_capacity(path.len() + path.len() / 4);
+    for c in path.chars() {
+        shown.push(c);
+        if matches!(c, '\\' | '/') {
+            shown.push('\u{200B}');
+        }
+    }
+    shown
 }
 
 /// Starts it with nothing tying it to this app, so a DAW keeps running when the app closes or the launcher restarts
@@ -188,11 +212,28 @@ mod tests {
     }
 
     #[test]
+    fn the_recycle_bin_opens_where_each_system_keeps_it() {
+        assert_eq!(recycle_bin("", Os::Windows), launch("explorer.exe", &["shell:RecycleBinFolder"], Check::Ends));
+        assert_eq!(recycle_bin("/Users/me/", Os::Mac), launch("open", &["/Users/me/.Trash"], Check::ExitCode));
+        assert_eq!(recycle_bin("/home/me", Os::Linux), launch("xdg-open", &["trash:///"], Check::ExitCode));
+    }
+
+    #[test]
     fn a_drives_own_folder_keeps_its_slash() {
         assert_eq!(folder_of(SONG), r"C:\Music\Night Drive");
         assert_eq!(folder_of(r"C:\song.flp"), r"C:\");
         assert_eq!(folder_of("/song.flp"), "/");
         assert_eq!(folder_of("/m/s/a.flp"), "/m/s");
         assert_eq!(folder_of("a.flp"), "");
+    }
+
+    #[test]
+    fn a_shown_path_may_wrap_after_each_slash_only() {
+        let wrap = "\u{200B}";
+        assert_eq!(wrappable_path(r"J:\Samples\Kick.wav"), format!(r"J:\{wrap}Samples\{wrap}Kick.wav"));
+        assert_eq!(wrappable_path("/m/s/a.wav"), format!("/{wrap}m/{wrap}s/{wrap}a.wav"));
+        assert_eq!(wrappable_path("Boom Kick.wav"), "Boom Kick.wav");
+        // Taking the marks out gives the path back.
+        assert_eq!(wrappable_path(SONG).replace(wrap, ""), SONG);
     }
 }
