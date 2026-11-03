@@ -668,12 +668,13 @@ pub(crate) fn copy_fresh(
 }
 
 /// Writes a copy through to the disk just before it goes into use: every big file its passes wrote
-/// ([`Copied::big`]), and the small files they wrote last ([`Copied::recent`]), each once. Windows keeps a file's bytes
-/// in memory a while after it's written, and a power cut just after the swap mustn't leave the plugin using files
-/// whose bytes never reached the disk; small files written earlier are taken to be on the disk by then
-/// ([`WRITTEN_THROUGH`]). A file that can't be opened for it is left as it is. Spread over the cores of the pool it's
-/// called in. Stop is looked at before each file: stopped, it says so, and the copy doesn't go into use. (The progress
-/// bar stays full meanwhile: it's seconds, or a minute or two for a big copy to a slow drive.)
+/// ([`Copied::big`]), and the small files they wrote last ([`Copied::recent`]), each once (a file put into a folder of
+/// yours was as it went in: [`Put::Through`]). Windows keeps a file's bytes in memory a while after it's written, and a
+/// power cut just after the swap mustn't leave the plugin using files whose bytes never reached the disk; small files
+/// written earlier are taken to be on the disk by then ([`WRITTEN_THROUGH`]). A file that can't be opened for it is
+/// left as it is. Spread over the cores of the pool it's called in. Stop is looked at before each file: stopped, it
+/// says so, and the copy doesn't go into use. (The progress bar stays full meanwhile: it's seconds, or a minute or two
+/// for a big copy to a slow drive.)
 pub(crate) fn write_through(passes: &[&Copied], stop: &AtomicBool) -> Result<(), CantMove> {
     let mut files: Vec<&PathBuf> = passes.iter().flat_map(|pass| pass.big.iter().chain(&pass.recent)).collect();
     // A file both passes wrote is written through once.
@@ -1262,10 +1263,12 @@ pub(crate) struct Copied {
     /// With `keep_in`, freshening: the files it wrote (paths inside the copy), for [`Tree::ours`] in the next pass.
     pub(crate) written: Vec<PathBuf>,
     /// The small files it wrote in its last [`WRITTEN_THROUGH`], at most [`THROUGH_MOST`] of them: written through to
-    /// the disk before the copy goes into use ([`write_through`]).
+    /// the disk before the copy goes into use ([`write_through`]). Not those put into a folder of yours, written
+    /// through as they went in ([`Put::Through`]).
     pub(crate) recent: Vec<PathBuf>,
-    /// Every big file it wrote ([`IN_PIECES_FROM`] or more): they hold most of what a move copies, so they're all
-    /// written through to the disk before the copy goes into use, however long ago they were written.
+    /// Every big file it wrote ([`IN_PIECES_FROM`] or more), but into a folder of yours: they hold most of what a move
+    /// copies, so they're all written through to the disk before the copy goes into use, however long ago they were
+    /// written.
     pub(crate) big: Vec<PathBuf>,
 }
 
@@ -1333,8 +1336,10 @@ pub(crate) fn copy_tree(
                         other => other?,
                     }
                     // A file link Windows wouldn't make again is copied as its file.
-                    if fs::symlink_metadata(&copy).is_ok_and(|m| m.is_file()) {
-                        wrote(&mut recent, copy);
+                    if let Ok(m) = fs::symlink_metadata(&copy)
+                        && m.is_file()
+                    {
+                        note_written(&mut copied, &mut recent, copy, m.len());
                     }
                 }
                 continue;
@@ -1389,7 +1394,12 @@ pub(crate) fn copy_tree(
             }
             let before = copied.bytes;
             let pieces = Pieces { before, progress, stop };
-            match copy_file(&source, &copy, &meta, fill == Fill::Freshen, &pieces) {
+            let put = match (fill, tree.keep_in) {
+                (Fill::Freshen, Some(_)) => Put::Through,
+                (Fill::Freshen, None) => Put::Temporary,
+                _ => Put::Straight,
+            };
+            match copy_file(&source, &copy, &meta, put, &pieces) {
                 Err(e) if !matches!(e, CantMove::Stopped) && gone(&source) => {
                     if fill == Fill::New {
                         let _ = fs::remove_file(&copy);
@@ -1401,10 +1411,9 @@ pub(crate) fn copy_tree(
             if tree.keep_in.is_some() && fill == Fill::Freshen {
                 copied.written.push(inside(&copy));
             }
-            if meta.len() >= IN_PIECES_FROM {
-                copied.big.push(copy);
-            } else {
-                wrote(&mut recent, copy);
+            // Into a folder of yours it was written through to the disk as it went in.
+            if put != Put::Through {
+                note_written(&mut copied, &mut recent, copy, meta.len());
             }
             copied.bytes = copied.bytes.saturating_add(meta.len());
             progress(copied.bytes);
@@ -1412,6 +1421,16 @@ pub(crate) fn copy_tree(
     }
     copied.recent = recent.into_iter().map(|(_, file)| file).collect();
     Ok(copied)
+}
+
+/// Notes a file a copy wrote, to be written through to the disk before the copy goes into use ([`write_through`]): a
+/// big one ([`IN_PIECES_FROM`] or more) whenever it was written, a small one while it's among the last written.
+fn note_written(copied: &mut Copied, recent: &mut VecDeque<(Instant, PathBuf)>, file: PathBuf, len: u64) {
+    if len >= IN_PIECES_FROM {
+        copied.big.push(file);
+    } else {
+        wrote(recent, file);
+    }
 }
 
 /// Notes a small file a copy just wrote, keeping only those written in the last [`WRITTEN_THROUGH`], at most
@@ -1466,18 +1485,24 @@ struct Pieces<'a> {
     stop: &'a AtomicBool,
 }
 
-/// Copies one file, keeps its time and checks it arrived whole. `through_temp` (into a folder of yours): it's written
-/// under a temporary name first and takes its place only once whole, so one that fails leaves what was there as it
-/// was.
-fn copy_file(
-    source: &Path,
-    copy: &Path,
-    meta: &fs::Metadata,
-    through_temp: bool,
-    pieces: &Pieces,
-) -> Result<(), CantMove> {
+/// How [`copy_file`] puts a file in.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Put {
+    /// Straight in: a copy just made has nothing there.
+    Straight,
+    /// Under a temporary name first, taking its place only once whole, so one that fails leaves what was there as it
+    /// was.
+    Temporary,
+    /// The same, and written through to the disk before it takes its place: into a folder of yours (the old copy, or
+    /// the copy on the other drive), where a power cut mustn't leave a file of the right size and time whose bytes
+    /// never reached the disk (the next try would take it for its twin and leave it).
+    Through,
+}
+
+/// Copies one file, keeps its time and checks it arrived whole, put in as `put` says.
+fn copy_file(source: &Path, copy: &Path, meta: &fs::Metadata, put: Put, pieces: &Pieces) -> Result<(), CantMove> {
     let when = meta.modified().map_err(|e| failed(source, &e))?;
-    if !through_temp {
+    if put == Put::Straight {
         return copy_bytes(source, copy, meta, pieces)
             .and_then(|()| keep_time(copy, when).map_err(|e| failed(source, &e)))
             .and_then(|()| whole(copy, meta, source));
@@ -1496,7 +1521,12 @@ fn copy_file(
     let written = copy_bytes(source, &part, meta, pieces)
         .and_then(|()| keep_time(&part, when).map_err(|e| failed(source, &e)))
         .and_then(|()| whole(&part, meta, source))
-        .and_then(|()| put_in_place(&part, copy));
+        .and_then(|()| {
+            if put == Put::Through {
+                flush_file(&part);
+            }
+            put_in_place(&part, copy)
+        });
     if written.is_err() {
         remove_part(&part);
     }
@@ -1505,9 +1535,9 @@ fn copy_file(
 
 /// Copies a file's bytes to a new file. A big one goes a piece at a time, looking at Stop and saying how far it's got
 /// between pieces, and then gets the file's permissions as the system's copy gives them (on Windows, its marks:
-/// read-only, hidden and so on); it's written through to the disk with the rest of the copy, before the copy goes into
-/// use ([`write_through`]). A stop leaves the part copied, which goes with the rest of the copy (or as a temporary copy
-/// does).
+/// read-only, hidden and so on). It's written through to the disk later: with the rest of the copy before the copy goes
+/// into use ([`write_through`]), or, into a folder of yours, before it takes its place ([`Put::Through`]). A stop
+/// leaves the part copied, which goes with the rest of the copy (or as a temporary copy does).
 fn copy_bytes(source: &Path, to: &Path, meta: &fs::Metadata, pieces: &Pieces) -> Result<(), CantMove> {
     if meta.len() < IN_PIECES_FROM {
         return fs::copy(source, to).map(drop).map_err(|e| failed(source, &e));

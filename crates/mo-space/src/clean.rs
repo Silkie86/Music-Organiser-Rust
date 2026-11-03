@@ -425,6 +425,10 @@ pub struct Removed {
     /// tells them apart.
     #[serde(default)]
     pub binned: Option<i64>,
+    /// On Linux, the computer's time zone when it was found there (seconds ahead of UTC): the Trash keeps the time as
+    /// the clock showed it, without the zone, so once the computer is in another zone it reads that much off.
+    #[serde(default)]
+    pub binned_zone: Option<i32>,
 }
 
 /// What something removed was.
@@ -630,8 +634,16 @@ impl<'a> Sending<'a> {
         if self.stop.load(Ordering::Relaxed) {
             return stays(done, STOPPED.to_owned());
         }
-        let removed =
-            Removed { path: path.to_owned(), real, bytes, what, when: now_seconds(), bin_id: None, binned: None };
+        let removed = Removed {
+            path: path.to_owned(),
+            real,
+            bytes,
+            what,
+            when: now_seconds(),
+            bin_id: None,
+            binned: None,
+            binned_zone: None,
+        };
         let why = match self.bin.send(Path::new(path)) {
             Ok(()) => {
                 done.removed.push(removed);
@@ -796,18 +808,35 @@ fn from_there(item: &trash::TrashItem, r: &Removed) -> bool {
 }
 
 /// Whether a bin item went in when the bin said, when it was found there (`binned`): Linux names a thing in the Trash
-/// after one gone before, and this tells them apart. Linux keeps that time as the clock showed it, without the time
-/// zone, so once the computer's time zone changes it reads that many quarters of an hour off: those count as the same
-/// time too. Never found there, at or after the moment it was sent ([`is_the_one`]).
+/// after one gone before, and this tells them apart. On Linux that time is read as the Trash reads it now, in the
+/// computer's time zone now ([`read_now`]). Never found there, at or after the moment it was sent ([`is_the_one`]).
 #[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
 fn went_in_then(item: &trash::TrashItem, r: &Removed) -> bool {
-    // The most two time zones are apart (from 12 hours behind to 14 ahead); they differ by whole quarters of an hour.
-    const ZONES_APART: u64 = 26 * 3600;
-    const QUARTER_HOUR: u64 = 900;
     let Some(at) = r.binned else { return item.time_deleted >= r.when.saturating_sub(2) };
-    let apart = item.time_deleted.abs_diff(at);
-    let off_a_quarter = apart % QUARTER_HOUR;
-    apart <= ZONES_APART + 2 && off_a_quarter.min(QUARTER_HOUR - off_a_quarter) <= 2
+    let then = r.binned_zone.map_or(at, |zone| read_now(at, zone));
+    item.time_deleted.abs_diff(then) <= 2
+}
+
+/// How the Linux Trash reads now a time it read as `at` in the time zone `zone` (seconds ahead of UTC): it keeps the
+/// clock's time without the zone, and reads that in the computer's zone now.
+#[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+fn read_now(at: i64, zone: i32) -> i64 {
+    use chrono::TimeZone;
+    let clock = chrono::DateTime::from_timestamp(at.saturating_add(i64::from(zone)), 0).map(|t| t.naive_utc());
+    clock.and_then(|clock| chrono::Local.from_local_datetime(&clock).earliest()).map_or(at, |t| t.timestamp())
+}
+
+/// The computer's time zone at a time the bin gave (seconds ahead of UTC), where the bin keeps times without it: on
+/// Linux. Windows keeps them in UTC.
+#[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+fn zone_then(at: i64) -> Option<i32> {
+    use chrono::TimeZone;
+    chrono::Local.timestamp_opt(at, 0).earliest().map(|t| t.offset().local_minus_utc())
+}
+
+#[cfg(windows)]
+fn zone_then(_at: i64) -> Option<i32> {
+    None
 }
 
 /// Whether a bin item has the name of the file removed. Windows gives the name as Explorer shows it, so with "Hide
@@ -855,6 +884,7 @@ fn find_in_system_bin(removed: &mut [Removed]) -> Vec<Problem> {
                 taken.insert(item.id.as_os_str());
                 r.bin_id = item.id.to_str().map(str::to_owned);
                 r.binned = Some(item.time_deleted);
+                r.binned_zone = zone_then(item.time_deleted);
             }
             None => problems.push(Problem { path: r.path.clone(), why: NOT_IN_BIN.into() }),
         }
@@ -998,7 +1028,8 @@ mod tests {
             let path = folder.join(name).to_string_lossy().into_owned();
             let what = What::Plugin(SpaceKind::Presets);
             let bin_id = bin_id.map(str::to_owned);
-            Removed { real: path.clone(), path, bytes: 10, what, when, binned: bin_id.as_ref().map(|_| when), bin_id }
+            let binned = bin_id.as_ref().map(|_| when);
+            Removed { real: path.clone(), path, bytes: 10, what, when, binned, binned_zone: None, bin_id }
         };
         let mut items = vec![item("1", "a.fxp", 100), item("2", "b.fxp", 200), item("3", "b.fxp", 300)];
         // What the bin called one of the app's is used again for something else from another folder (Linux does
@@ -1032,20 +1063,19 @@ mod tests {
         let older = [Removed { binned: None, ..removed("e.fxp", 500, Some("5")) }];
         assert_eq!(held_among(&items, &older), [true]);
 
-        // The computer's time zone changed since (Linux keeps the time without it): whole quarters of an hour off, up
-        // to the 26 hours between the furthest zones, is the same time. Anything else is a later thing's.
+        // Linux keeps the time without the time zone. Found when the computer was an hour ahead of where it is now,
+        // the bin reads that time an hour later now: that's when it went in, and nothing else is.
+        use chrono::TimeZone;
         let day = 100_000;
-        let zoned = [
-            (item("20", "g.fxp", day + 3600), true),
-            (item("21", "h.fxp", day - 5 * 3600 - 1800 + 1), true),
-            (item("22", "i.fxp", day + 26 * 3600), true),
-            (item("23", "j.fxp", day + 3000), false),
-            (item("24", "k.fxp", day + 27 * 3600), false),
-        ];
-        for (in_bin, held) in zoned {
-            let name = in_bin.name.to_string_lossy().into_owned();
-            let asked = [removed(&name, day, in_bin.id.to_str())];
-            assert_eq!(held_among(std::slice::from_ref(&in_bin), &asked), [held], "{name}");
-        }
+        let zone = chrono::Local.timestamp_opt(day, 0).earliest().map_or(0, |t| t.offset().local_minus_utc());
+        let in_bin = |at: i64| [item("20", "g.fxp", at)];
+        let asked = |zone_then: i32| [Removed { binned_zone: Some(zone_then), ..removed("g.fxp", day, Some("20")) }];
+        assert_eq!(held_among(&in_bin(day + 3600), &asked(zone + 3600)), [true]);
+        assert_eq!(held_among(&in_bin(day + 3601), &asked(zone + 3600)), [true]);
+        assert_eq!(held_among(&in_bin(day), &asked(zone + 3600)), [false]);
+        // In the same zone, something of the same name from the same place binned an hour later, called the same once
+        // the first had gone, is another thing.
+        assert_eq!(held_among(&in_bin(day), &asked(zone)), [true]);
+        assert_eq!(held_among(&in_bin(day + 3601), &asked(zone)), [false]);
     }
 }

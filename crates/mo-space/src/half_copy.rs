@@ -243,14 +243,19 @@ fn note_in_use(folder: &Path, in_use: bool) -> io::Result<()> {
 
 /// The marker in a folder, if it holds one the app wrote.
 fn read_marker(folder: &Path) -> Option<Marker> {
+    let body = String::from_utf8(marker_bytes(folder)?).ok()?;
+    let line = body.lines().rev().map(str::trim).find(|l| l.starts_with('{'))?;
+    serde_json::from_str(line).ok()
+}
+
+/// What the marker file in a folder holds, if it's a plain file no bigger than a marker the app writes.
+fn marker_bytes(folder: &Path) -> Option<Vec<u8>> {
     let path = folder.join(MARKER);
     let meta = fs::symlink_metadata(&path).ok()?;
     if !meta.is_file() || meta.len() > MARKER_MOST {
         return None;
     }
-    let body = fs::read_to_string(&path).ok()?;
-    let line = body.lines().rev().map(str::trim).find(|l| l.starts_with('{'))?;
-    serde_json::from_str(line).ok()
+    fs::read(&path).ok()
 }
 
 /// Takes the marker out of a copy that's in use now, trying again for a few seconds while something (a virus checker)
@@ -484,17 +489,17 @@ fn judge(
     Ok((State::CutOff, Some(bytes)))
 }
 
-/// Whether the folder is where its marker says the copy was made: that place as it really is (its folder's real place
-/// and its name, so a link left at that name, leading to the folder renamed, isn't taken for it), or, with that folder
-/// gone, a folder of the same name (the drive it's on has another letter now, or a Mac gave it another name).
+/// Whether the folder is where its marker says the copy was made, by what's at that place now: a real folder, when
+/// it's this one as it really is; nothing at all (the drive it's on has another letter now, maybe another drive's old
+/// one, or a Mac gave it another name), when this one has the same name. A link there (left at the name of a half copy
+/// renamed since, leading to it), a file, or what can't be looked at isn't this folder.
 fn in_place(folder: &Path, marker: &Marker, here: &str) -> bool {
-    let to = Path::new(&marker.to);
-    match (to.parent().and_then(|parent| real_path(&text(parent))), to.file_name()) {
-        (Some(parent), Some(name)) => key(&text(&Path::new(&parent).join(name))) == key(here),
-        _ => {
-            not_there(to)
-                && folder.file_name().is_some_and(|name| key(&name.to_string_lossy()) == key(file_name(&marker.to)))
+    match fs::symlink_metadata(&marker.to) {
+        Ok(meta) if meta.is_dir() => real_path(&marker.to).is_some_and(|to| key(&to) == key(here)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            folder.file_name().is_some_and(|name| key(&name.to_string_lossy()) == key(file_name(&marker.to)))
         }
+        _ => false,
     }
 }
 
@@ -746,15 +751,12 @@ fn finish(folder: &Path) -> Result<(), NotRemoved> {
     }
     if let Some(name) = left {
         return Err(NotRemoved::Failed(format!(
-            "{name} was put in {} while it was cleared, so the rest of it stays: it's looked at again next time.",
+            "{name} is still in {} (something put it there, or has it open), so the folder stays: it's looked at \
+             again next time.",
             text(folder)
         )));
     }
-    let path = folder.join(MARKER);
-    let marker = fs::symlink_metadata(&path)
-        .is_ok_and(|m| m.is_file() && m.len() <= MARKER_MOST)
-        .then(|| fs::read(&path).ok())
-        .flatten();
+    let marker = marker_bytes(folder);
     if !unmark(folder) {
         return Err(NotRemoved::Failed(format!(
             "The marker in {} couldn't be removed: it's tried again next time.",

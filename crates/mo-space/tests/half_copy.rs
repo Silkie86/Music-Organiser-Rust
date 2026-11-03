@@ -673,6 +673,9 @@ fn a_half_copy_on_a_drive_with_another_letter_now_is_still_cleared_by_the_next_t
     fs::rename(&d, &f).unwrap();
     let half = f.join("Presets");
     assert_eq!(find(&half, &[], &stop).unwrap().unwrap().state, State::CutOff);
+    // Another drive has its old letter now: it's still the same half copy.
+    fs::create_dir_all(&d).unwrap();
+    assert_eq!(find(&half, &[], &stop).unwrap().unwrap().state, State::CutOff);
     assert_eq!(problem(&s(&presets), &s(&f), 35, &ROOMY, &[], &stop), None);
     move_folder(&s(&presets), &s(&f), 35, whose(), &ROOMY, &[], &nothing, &stop).unwrap();
     assert!(is_link(&presets) && !half.join(MARKER).exists());

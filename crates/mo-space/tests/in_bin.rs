@@ -45,6 +45,7 @@ fn removed(real: &str, bytes: u64, day: &str, bin_id: &str) -> Removed {
         when: noon(day),
         bin_id: Some(bin_id.to_owned()),
         binned: Some(noon(day)),
+        binned_zone: None,
     }
 }
 
