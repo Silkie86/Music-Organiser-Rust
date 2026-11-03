@@ -23,12 +23,19 @@
 //!   its temporary name, and the files Explorer and Finder make by themselves.
 //!
 //! Otherwise it stays, and says why. A marker in a copy that's in use (the app stopped between the swap and taking the
-//! marker out), or in a folder renamed since, is the only thing that goes then: the folder is left as it is.
+//! marker out), or in a folder renamed since (a link at its old name, leading to it, doesn't make it the copy), is the
+//! only thing that goes then: the folder is left as it is.
 //!
 //! Clearing stops when you press Stop, between the things it removes; the marker goes last, so what's left is still a
-//! half copy, cleared the next time. A copy whose swap fails (the swap didn't happen) goes as a move's copy does when
-//! it stops, its marker saying first that it isn't going into use after all, so what can't go then is cleared next time
-//! too.
+//! half copy, cleared the next time. A file Explorer or Finder writes into the emptied folder just then goes too; if
+//! anything else is in it by then, the folder stays, with its marker. A copy whose swap fails (the swap didn't happen)
+//! goes as a move's copy does when it stops, its marker saying first that it isn't going into use after all, so what
+//! can't go then is cleared next time too.
+//!
+//! Removing never follows a link it meets: a link goes as the link, and each folder is looked at again just before
+//! it's read. Something that swapped one of its folders for a link while it's being removed could still lead removals
+//! through it: Rust's standard library can't remove things by a folder it holds open, as would close that. Nothing
+//! does that to a half copy (a folder only the app makes, where moves go), so it's named here rather than guarded.
 
 use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
@@ -222,9 +229,12 @@ pub(crate) fn not_in_use(folder: &Path) {
     let _ = note_in_use(folder, false);
 }
 
-/// Writes in a copy's marker whether it's going into use.
+/// Writes in a copy's marker whether it's going into use (when it doesn't say so already).
 fn note_in_use(folder: &Path, in_use: bool) -> io::Result<()> {
     let mut marker = read_marker(folder).ok_or_else(|| io::Error::other("the marker can't be read"))?;
+    if marker.in_use == in_use {
+        return Ok(());
+    }
     marker.in_use = in_use;
     // Written over, not beside: a marker cut off part way can't be read, and a folder with none is never cleared.
     let mut file = OpenOptions::new().write(true).truncate(true).open(folder.join(MARKER))?;
@@ -465,22 +475,24 @@ fn judge(
     }
     let (only, bytes) = only_here(folder, Path::new(from), stop)?;
     if !only.is_empty() {
-        // Not counted then: what's only in it isn't all looked in.
-        return stays(format!(
+        let why = format!(
             "It holds what isn't in {from} now, or is newer than there: {}. Look at it before deleting it yourself.",
             listed(&only)
-        ));
+        );
+        return Ok((State::Stays(why), Some(bytes)));
     }
     Ok((State::CutOff, Some(bytes)))
 }
 
-/// Whether the folder is where its marker says the copy was made: there as it really is, or, with nothing there now,
-/// of the same name (the drive it's on has another letter now, or a Mac gave it another name).
+/// Whether the folder is where its marker says the copy was made: that place as it really is (its folder's real place
+/// and its name, so a link left at that name, leading to the folder renamed, isn't taken for it), or, with that folder
+/// gone, a folder of the same name (the drive it's on has another letter now, or a Mac gave it another name).
 fn in_place(folder: &Path, marker: &Marker, here: &str) -> bool {
-    match real_path(&marker.to) {
-        Some(to) => key(&to) == key(here),
-        None => {
-            not_there(Path::new(&marker.to))
+    let to = Path::new(&marker.to);
+    match (to.parent().and_then(|parent| real_path(&text(parent))), to.file_name()) {
+        (Some(parent), Some(name)) => key(&text(&Path::new(&parent).join(name))) == key(here),
+        _ => {
+            not_there(to)
                 && folder.file_name().is_some_and(|name| key(&name.to_string_lossy()) == key(file_name(&marker.to)))
         }
     }
@@ -542,13 +554,14 @@ fn used(folder: &Path, here: &str, moved: &[MovedFolder]) -> bool {
 /// newer but no bigger is let through: the one the copy was writing when it stopped (not whole yet, or not given its
 /// time yet). Left out: the marker at the top, a file the copy was writing under its temporary name (when its own file
 /// is in `from`), and the files Explorer and Finder make by themselves. A folder in it that can't be read, or is deeper
-/// than walks go, is named too: what's in it can't be told. The size counts only what's looked at, so it's the copy's
-/// whole size only when nothing is named. Walked a level at a time on every core of the pool it's called in.
+/// than walks go, is named too: what's in it can't be told. The size is all of it, what's named too (a folder without
+/// a twin is walked only to be counted), as far as it can be read and as deep as walks go: one walk for both. Walked a
+/// level at a time on every core of the pool it's called in.
 fn only_here(copy: &Path, from: &Path, stop: &AtomicBool) -> Result<(Vec<String>, u64), Stopped> {
     let mut only = Vec::new();
     let mut writing = Vec::new();
     let mut bytes: u64 = 0;
-    let mut level = vec![(copy.to_path_buf(), from.to_path_buf())];
+    let mut level = vec![(copy.to_path_buf(), Some(from.to_path_buf()))];
     for depth in 0..DEEPEST {
         if level.is_empty() {
             break;
@@ -557,7 +570,7 @@ fn only_here(copy: &Path, from: &Path, stop: &AtomicBool) -> Result<(Vec<String>
             return Err(Stopped);
         }
         let read: Vec<Compared> =
-            level.par_iter().map(|(dir, twin)| compare(copy, dir, twin, depth == 0, stop)).collect();
+            level.par_iter().map(|(dir, twin)| compare(copy, dir, twin.as_deref(), depth == 0, stop)).collect();
         level = Vec::new();
         for compared in read {
             only.extend(compared.only);
@@ -569,8 +582,8 @@ fn only_here(copy: &Path, from: &Path, stop: &AtomicBool) -> Result<(Vec<String>
     if stop.load(Ordering::Relaxed) {
         return Err(Stopped);
     }
-    // Deeper than walks go: what's in them can't be told.
-    only.extend(level.iter().map(|(dir, _)| inside(copy, dir)));
+    // Deeper than walks go: what's in them can't be told (one without a twin is named already).
+    only.extend(level.iter().filter(|(_, twin)| twin.is_some()).map(|(dir, _)| inside(copy, dir)));
     // One file newer than its twin but no bigger is the one the copy was writing when it stopped; two or more aren't.
     if writing.len() > 1 {
         only.append(&mut writing);
@@ -588,19 +601,26 @@ struct Compared {
     writing: Vec<String>,
     /// The room its files take.
     bytes: u64,
-    /// The folders in it, each with its twin, to look in next.
-    folders: Vec<(PathBuf, PathBuf)>,
+    /// The folders in it to look in next, each with its twin; one without a twin (named already) is only counted.
+    folders: Vec<(PathBuf, Option<PathBuf>)>,
 }
 
-/// Compares one folder of a half copy (`dir`, the copy's top when `top`) with its twin. Looks at Stop before it starts
-/// and every 256 entries; one stopped part way says no more.
-fn compare(copy: &Path, dir: &Path, twin_dir: &Path, top: bool, stop: &AtomicBool) -> Compared {
+/// Compares one folder of a half copy (`dir`, the copy's top when `top`) with its twin, or, with none (it's named
+/// already, or inside what is), only counts it. Looks at Stop before it starts and every 256 entries; one stopped part
+/// way says no more.
+fn compare(copy: &Path, dir: &Path, twin_dir: Option<&Path>, top: bool, stop: &AtomicBool) -> Compared {
     let mut compared = Compared::default();
     if stop.load(Ordering::Relaxed) {
         return compared;
     }
+    // What can't be read inside what's named already needn't be named again.
+    let cant_tell = |compared: &mut Compared, path: &Path| {
+        if twin_dir.is_some() {
+            compared.only.push(inside(copy, path));
+        }
+    };
     let Ok(entries) = fs::read_dir(dir) else {
-        compared.only.push(inside(copy, dir));
+        cant_tell(&mut compared, dir);
         return compared;
     };
     for (n, entry) in entries.enumerate() {
@@ -608,19 +628,27 @@ fn compare(copy: &Path, dir: &Path, twin_dir: &Path, top: bool, stop: &AtomicBoo
             break;
         }
         let Ok(entry) = entry else {
-            compared.only.push(inside(copy, dir));
+            cant_tell(&mut compared, dir);
             continue;
         };
         let name = entry.file_name();
         let path = entry.path();
         // As it is, not where a link leads.
         let Ok(meta) = entry.metadata() else {
-            compared.only.push(inside(copy, &path));
+            cant_tell(&mut compared, &path);
             continue;
         };
         let kind = meta.file_type();
         if kind.is_file() {
             compared.bytes = compared.bytes.saturating_add(meta.len());
+        }
+        let Some(twin_dir) = twin_dir else {
+            if kind.is_dir() {
+                compared.folders.push((path, None));
+            }
+            continue;
+        };
+        if kind.is_file() {
             if (top && name == OsStr::new(MARKER)) || made_by_the_system(&name.to_string_lossy()) {
                 continue;
             }
@@ -633,6 +661,9 @@ fn compare(copy: &Path, dir: &Path, twin_dir: &Path, top: bool, stop: &AtomicBoo
         let twin = twin_dir.join(&name);
         let Ok(twin_meta) = fs::symlink_metadata(&twin) else {
             compared.only.push(inside(copy, &path));
+            if kind.is_dir() {
+                compared.folders.push((path, None));
+            }
             continue;
         };
         let twin_kind = twin_meta.file_type();
@@ -642,9 +673,10 @@ fn compare(copy: &Path, dir: &Path, twin_dir: &Path, top: bool, stop: &AtomicBoo
             }
         } else if kind.is_dir() {
             if twin_kind.is_dir() {
-                compared.folders.push((path, twin));
+                compared.folders.push((path, Some(twin)));
             } else {
                 compared.only.push(inside(copy, &path));
+                compared.folders.push((path, None));
             }
         } else {
             // A file's twin is a file, or a link to one, as where it leads.
@@ -674,9 +706,9 @@ pub(crate) enum NotRemoved {
 }
 
 /// Removes a copy the move made, for good, keeping its marker (if it has one) to the last: everything else in it goes
-/// first, then the marker, then the folder. So a copy that can't all go (a file in it is open), or whose clearing you
-/// stop (`stop`, looked at between the things it removes), keeps its marker, and is cleared when it's tried again.
-/// Never a link, never through one: a link inside goes as the link.
+/// first, then the marker, then the folder ([`finish`]). So a copy that can't all go (a file in it is open), or whose
+/// clearing you stop (`stop`, looked at between the things it removes), keeps its marker, and is cleared when it's
+/// tried again. Never a link, never through one: a link inside goes as the link.
 pub(crate) fn remove_marked(folder: &Path, stop: &AtomicBool) -> Result<(), NotRemoved> {
     if is_link(folder) || !real_folder(&text(folder)) {
         return Ok(());
@@ -692,13 +724,83 @@ pub(crate) fn remove_marked(folder: &Path, stop: &AtomicBool) -> Result<(), NotR
         }
         remove_entry(&entry.path(), stop)?;
     }
+    finish(folder)
+}
+
+/// How many times [`finish`] tries the folder itself, a tenth of a second apart.
+const LAST_TRIES: usize = 5;
+
+/// Takes the marker out of a copy that's empty but for it, then the folder. Something put in it meanwhile keeps it, and
+/// its marker, but the files Explorer and Finder write by themselves into a folder open in a window: those go too. The
+/// folder is tried a few times (a virus checker or the indexer can hold a file that's been removed for a moment); if it
+/// still won't go, the marker goes back as it was, so the folder is still known for the half copy it is, and cleared
+/// the next time.
+fn finish(folder: &Path) -> Result<(), NotRemoved> {
+    if let Some(name) = put_in(folder) {
+        return Err(NotRemoved::Failed(format!(
+            "{name} was put in {} while it was cleared, so the rest of it stays: it's looked at again next time.",
+            text(folder)
+        )));
+    }
+    let path = folder.join(MARKER);
+    let marker = fs::symlink_metadata(&path)
+        .is_ok_and(|m| m.is_file() && m.len() <= MARKER_MOST)
+        .then(|| fs::read(&path).ok())
+        .flatten();
     if !unmark(folder) {
         return Err(NotRemoved::Failed(format!(
             "The marker in {} couldn't be removed: it's tried again next time.",
             text(folder)
         )));
     }
-    fs::remove_dir(folder).map_err(|e| couldnt(folder, &e))
+    let mut tries = 1;
+    loop {
+        remove_system_files(folder);
+        match fs::remove_dir(folder) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) if tries == LAST_TRIES => {
+                if let Some(marker) = &marker {
+                    put_marker_back(folder, marker);
+                }
+                return Err(couldnt(folder, &e));
+            }
+            Err(_) => {
+                thread::sleep(Duration::from_millis(100));
+                tries += 1;
+            }
+        }
+    }
+}
+
+/// The name of something in a copy being cleared that isn't its marker or a file Explorer or Finder made, if any.
+fn put_in(folder: &Path) -> Option<String> {
+    fs::read_dir(folder).ok()?.flatten().find_map(|entry| {
+        let name = entry.file_name();
+        let theirs = name == OsStr::new(MARKER) || system_file(&entry);
+        (!theirs).then(|| name.to_string_lossy().into_owned())
+    })
+}
+
+/// Whether a folder's entry is a plain file Explorer or Finder made by themselves.
+fn system_file(entry: &fs::DirEntry) -> bool {
+    entry.file_type().is_ok_and(|kind| kind.is_file()) && made_by_the_system(&entry.file_name().to_string_lossy())
+}
+
+/// Removes the files Explorer and Finder make by themselves from a folder.
+fn remove_system_files(folder: &Path) {
+    for entry in fs::read_dir(folder).into_iter().flatten().flatten().filter(system_file) {
+        let path = entry.path();
+        set_read_only(&path, false);
+        let _ = fs::remove_file(path);
+    }
+}
+
+/// Puts a marker taken out back as it was, written through to the disk. Only where nothing has its name.
+fn put_marker_back(folder: &Path, marker: &[u8]) {
+    if let Ok(mut file) = OpenOptions::new().write(true).create_new(true).open(folder.join(MARKER)) {
+        let _ = file.write_all(marker).and_then(|()| file.sync_all());
+    }
 }
 
 /// What's said when something in a copy the move made can't be removed.
@@ -767,7 +869,29 @@ mod tests {
     use std::fs;
     use std::sync::atomic::AtomicBool;
 
-    use super::{MARKER, NotRemoved, remove_entry, remove_marked};
+    use super::{MARKER, NotRemoved, finish, remove_entry, remove_marked};
+
+    #[test]
+    fn the_folder_goes_last_with_a_file_finder_wrote_but_not_with_one_of_yours() {
+        let dir = std::env::temp_dir().join("mo-space-unit-clear-finish");
+        let _ = fs::remove_dir_all(&dir);
+        let half = dir.join("Presets");
+        fs::create_dir_all(&half).unwrap();
+        fs::write(half.join(MARKER), "a marker").unwrap();
+        // Finder wrote its file into the emptied folder, open in a window: it goes too.
+        fs::write(half.join(".DS_Store"), "finder").unwrap();
+        assert!(finish(&half).is_ok());
+        assert!(!half.exists());
+
+        // Something else was put in it meanwhile: the folder stays, with its marker as it was.
+        fs::create_dir_all(&half).unwrap();
+        fs::write(half.join(MARKER), "a marker").unwrap();
+        fs::write(half.join("keep.txt"), "yours").unwrap();
+        assert!(matches!(finish(&half), Err(NotRemoved::Failed(_))));
+        assert_eq!(fs::read_to_string(half.join(MARKER)).unwrap(), "a marker");
+        assert_eq!(fs::read_to_string(half.join("keep.txt")).unwrap(), "yours");
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn clearing_stops_when_you_press_stop_and_the_marker_stays() {

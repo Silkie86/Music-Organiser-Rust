@@ -223,7 +223,7 @@ pub fn link_again(
     let again =
         copy_tree(&Tree { ours: &ours, ..tree }, Fill::Freshen, &|n| progress(first.bytes.saturating_add(n)), stop)
             .map_err(partly)?;
-    write_through(&[&first, &again]);
+    write_through(&[&first, &again], stop).map_err(partly)?;
     swap_or_ask(from, to, &aside, drives.admin()).map_err(partly)?;
     let replaced = shown(&[first.kept, again.kept].concat());
     let kept = (!replaced.is_empty()).then(|| OldHome {

@@ -785,9 +785,29 @@ fn bin_problem(e: &trash::Error) -> String {
 /// (a couple of seconds' leeway for the clock).
 #[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
 fn is_the_one(item: &trash::TrashItem, r: &Removed) -> bool {
+    from_there(item, r) && item.time_deleted >= r.when.saturating_sub(2)
+}
+
+/// Whether a bin item is from where the thing removed was: the same folder, and the same name.
+#[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+fn from_there(item: &trash::TrashItem, r: &Removed) -> bool {
     let real = Path::new(&r.real);
-    let same_folder = real.parent().is_some_and(|f| key(&text(f)) == key(&text(&item.original_parent)));
-    same_folder && same_name(item, real) && item.time_deleted >= r.when.saturating_sub(2)
+    real.parent().is_some_and(|f| key(&text(f)) == key(&text(&item.original_parent))) && same_name(item, real)
+}
+
+/// Whether a bin item went in when the bin said, when it was found there (`binned`): Linux names a thing in the Trash
+/// after one gone before, and this tells them apart. Linux keeps that time as the clock showed it, without the time
+/// zone, so once the computer's time zone changes it reads that many quarters of an hour off: those count as the same
+/// time too. Never found there, at or after the moment it was sent ([`is_the_one`]).
+#[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+fn went_in_then(item: &trash::TrashItem, r: &Removed) -> bool {
+    // The most two time zones are apart (from 12 hours behind to 14 ahead); they differ by whole quarters of an hour.
+    const ZONES_APART: u64 = 26 * 3600;
+    const QUARTER_HOUR: u64 = 900;
+    let Some(at) = r.binned else { return item.time_deleted >= r.when.saturating_sub(2) };
+    let apart = item.time_deleted.abs_diff(at);
+    let off_a_quarter = apart % QUARTER_HOUR;
+    apart <= ZONES_APART + 2 && off_a_quarter.min(QUARTER_HOUR - off_a_quarter) <= 2
 }
 
 /// Whether a bin item has the name of the file removed. Windows gives the name as Explorer shows it, so with "Hide
@@ -891,10 +911,10 @@ fn held_among(items: &[trash::TrashItem], removed: &[Removed]) -> Vec<bool> {
 }
 
 /// The bin item each of `removed` is, while it's still there: the one found when it went, by what the bin calls it,
-/// while that's still from its place and went in when the bin said then (on Linux a name is used again once its item
-/// has gone); one never found then, by its place and time, the first to go there after it was sent. Each item is one
-/// thing's only, and the last sent is matched first: of two from the same place with the same name, an item that went
-/// after both is the later one's.
+/// while that's still from its place and went in when the bin said then ([`went_in_then`]: on Linux a name is used
+/// again once its item has gone); one never found then, by its place and time, the first to go there after it was
+/// sent. Each item is one thing's only, and the last sent is matched first: of two from the same place with the same
+/// name, an item that went after both is the later one's.
 #[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
 fn matched<'a>(items: &'a [trash::TrashItem], removed: &[Removed]) -> Vec<Option<&'a trash::TrashItem>> {
     let mut found: Vec<Option<&trash::TrashItem>> = vec![None; removed.len()];
@@ -905,8 +925,7 @@ fn matched<'a>(items: &'a [trash::TrashItem], removed: &[Removed]) -> Vec<Option
     for &n in &last_first {
         let r = &removed[n];
         let Some(id) = r.bin_id.as_deref().map(std::ffi::OsStr::new) else { continue };
-        let then = |i: &trash::TrashItem| r.binned.is_none_or(|at| i.time_deleted.abs_diff(at) <= 2);
-        let item = items.iter().find(|i| i.id.as_os_str() == id && is_the_one(i, r) && then(i));
+        let item = items.iter().find(|i| i.id.as_os_str() == id && from_there(i, r) && went_in_then(i, r));
         if let Some(item) = item
             && taken.insert(item.id.as_os_str())
         {
@@ -1012,5 +1031,21 @@ mod tests {
         // Kept before the time was: found by what the bin calls it alone.
         let older = [Removed { binned: None, ..removed("e.fxp", 500, Some("5")) }];
         assert_eq!(held_among(&items, &older), [true]);
+
+        // The computer's time zone changed since (Linux keeps the time without it): whole quarters of an hour off, up
+        // to the 26 hours between the furthest zones, is the same time. Anything else is a later thing's.
+        let day = 100_000;
+        let zoned = [
+            (item("20", "g.fxp", day + 3600), true),
+            (item("21", "h.fxp", day - 5 * 3600 - 1800 + 1), true),
+            (item("22", "i.fxp", day + 26 * 3600), true),
+            (item("23", "j.fxp", day + 3000), false),
+            (item("24", "k.fxp", day + 27 * 3600), false),
+        ];
+        for (in_bin, held) in zoned {
+            let name = in_bin.name.to_string_lossy().into_owned();
+            let asked = [removed(&name, day, in_bin.id.to_str())];
+            assert_eq!(held_among(std::slice::from_ref(&in_bin), &asked), [held], "{name}");
+        }
     }
 }

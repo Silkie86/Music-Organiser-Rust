@@ -31,7 +31,8 @@ fn fixtures(name: &str) -> PathBuf {
     dir
 }
 
-/// Makes the read-only files (and, on a Mac or Linux, folders) a test left writable again, so its folder can be cleared.
+/// Makes the read-only files (and, on a Mac or Linux, folders) a test left writable again, so its folder can be
+/// cleared.
 fn writable(dir: &Path) {
     for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
         let Ok(kind) = entry.file_type() else { continue };
@@ -120,27 +121,32 @@ fn library(at: &Path) {
 }
 
 /// A file kept from being removed until this is dropped: on a Mac or Linux its folder can't be written to (by anyone
-/// but the administrator, so a test run as root can't hold it), and on Windows it's held open, letting nothing else at
-/// it.
+/// but the administrator, so a test run as root can't hold it: `holds` says whether it does), and on Windows it's held
+/// open, letting nothing else at it.
 struct Held {
     #[cfg(windows)]
     _open: fs::File,
     #[cfg(not(windows))]
     folder: PathBuf,
+    holds: bool,
 }
 
 fn hold(file: &Path) -> Held {
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
-        Held { _open: fs::File::options().read(true).share_mode(0).open(file).unwrap() }
+        Held { _open: fs::File::options().read(true).share_mode(0).open(file).unwrap(), holds: true }
     }
     #[cfg(not(windows))]
     {
         use std::os::unix::fs::PermissionsExt;
         let folder = file.parent().unwrap().to_path_buf();
         fs::set_permissions(&folder, fs::Permissions::from_mode(0o555)).unwrap();
-        Held { folder }
+        // Root writes into it anyway.
+        let tried = folder.join("can root write here");
+        let holds = fs::create_dir(&tried).is_err();
+        let _ = fs::remove_dir(&tried);
+        Held { folder, holds }
     }
 }
 
@@ -711,8 +717,8 @@ fn a_copy_whose_swap_failed_goes_and_what_couldnt_go_is_cleared_by_the_next_try(
     let copy = d.join("Presets");
     let aside = c.join("Presets (old copy)");
     let held: Mutex<Option<Held>> = Mutex::new(None);
-    // Once all of it has copied, a folder takes the name the folder is set aside under, so the swap fails; and a file in
-    // the copy is held, so the copy can't all go then.
+    // Once all of it has copied, a folder takes the name the folder is set aside under, so the swap fails; and a file
+    // in the copy is held, so the copy can't all go then.
     let progress = |n: u64| {
         let mut held = held.lock().unwrap();
         if n >= 35 && held.is_none() {
@@ -722,11 +728,16 @@ fn a_copy_whose_swap_failed_goes_and_what_couldnt_go_is_cleared_by_the_next_try(
     };
     let tried = move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], &progress, &stop);
     assert_eq!(tried, Err(CantMove::OldCopyThere));
-    let held = held.into_inner().unwrap();
-    assert!(held.is_some() && !is_link(&presets));
-    // The swap didn't happen, so the copy never went into use: what's left of it is a half copy like any other.
-    if copy.exists() {
+    let held = held.into_inner().unwrap().expect("a file of the copy was held");
+    assert!(!is_link(&presets));
+    if held.holds {
+        // The swap didn't happen, so the copy never went into use: what's left of it is a half copy like any other.
+        assert!(copy.join("Sounds").join("0.db").exists() && copy.join(MARKER).exists());
         assert_eq!(find(&copy, &[], &stop).unwrap().unwrap().state, State::CutOff);
+    } else {
+        // Run as root, nothing holds the file, so all of the copy went: what's left can't be checked.
+        assert!(!copy.exists());
+        eprintln!("Run as root: the file couldn't be held, so a copy left by a failed swap wasn't checked.");
     }
     drop(held);
     fs::remove_dir_all(&aside).unwrap();
@@ -758,4 +769,14 @@ fn a_link_where_the_copy_goes_is_in_the_way_as_anything_is() {
     // The move says the same: its own hold on the place doesn't count as the app making a copy there.
     assert_eq!(move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], &nothing, &stop), Err(there));
     assert!(renamed.join(MARKER).exists() && is_link(&half) && !is_link(&presets));
+
+    // The renamed half copy isn't where the copy was made, though the link of that name leads to it: it's yours now,
+    // so only its marker goes, and the link stays.
+    let found = half_copies(&[], &[s(&d)], &stop).unwrap();
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!((found[0].path.as_str(), &found[0].state), (s(&renamed).as_str(), &State::MarkerOnly));
+    assert_eq!(clear(&renamed, &[], &stop), Ok(Cleared::Marker));
+    assert!(!renamed.join(MARKER).exists());
+    assert!(renamed.join("Patch.prt").exists() || renamed.join("Sounds").exists());
+    assert!(is_link(&half) && fs::canonicalize(&half).unwrap() == fs::canonicalize(&renamed).unwrap());
 }
