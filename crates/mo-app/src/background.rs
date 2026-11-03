@@ -43,18 +43,46 @@ pub fn lower_priority() {
 /// small parts, as half a million sounds each with their own names, tags and analysis are, takes long enough to free
 /// that letting it go on the window's thread freezes the window: on Solomon's PC an old list of 453,885 sounds took
 /// 1.4 s. One thread frees for the whole app, one thing at a time, in the order they come; where it can't be started,
-/// `value` is freed here after all.
+/// `value` is freed here after all (see [`freeing_here`]).
 pub fn free_later<T: Send + 'static>(value: T) {
     static FREEING: LazyLock<Option<mpsc::Sender<Box<dyn Send>>>> = LazyLock::new(|| {
         let (to_free, freeing) = mpsc::channel::<Box<dyn Send>>();
-        spawn("Freeing", move || freeing.into_iter().for_each(drop)).ok().map(|_| to_free)
+        spawn("Freeing", move || {
+            FREEING_HERE.with(|here| here.set(true));
+            for value in freeing {
+                // A part that panics as it's let go is logged (the panic hook does that) and the thread goes on, so
+                // what comes after is still freed here, not on the window's thread.
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(value)));
+            }
+        })
+        .ok()
+        .map(|_| to_free)
     });
     #[cfg(test)]
     HANDED_OVER.with(|h| h.set(h.get() + 1));
-    if let Some(to_free) = FREEING.as_ref() {
-        // Only if the thread has gone (it never ends by itself) does the value come back here, to be freed here.
-        let _ = to_free.send(Box::new(value));
+    let left = match FREEING.as_ref() {
+        // Only if the thread has gone (it never ends by itself) does the value come back here.
+        Some(to_free) => to_free.send(Box::new(value)).err().map(|e| e.0),
+        None => Some(Box::new(value) as Box<dyn Send>),
+    };
+    if let Some(value) = left {
+        FREEING_HERE.with(|here| {
+            let was = here.replace(true);
+            drop(value);
+            here.set(was);
+        });
     }
+}
+
+/// Whether this thread is letting go of something [`free_later`] was given: its own thread, or here when that thread
+/// can't be started. Something that hands itself to [`free_later`] when it's let go (a big sound list) checks this, so
+/// it's freed then, not handed on again.
+pub fn freeing_here() -> bool {
+    FREEING_HERE.with(std::cell::Cell::get)
+}
+
+thread_local! {
+    static FREEING_HERE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -161,16 +189,28 @@ mod tests {
 
     #[test]
     fn what_is_let_go_later_is_freed_on_the_freeing_thread() {
-        // Says which thread it was freed on.
-        struct Noted(mpsc::Sender<Option<String>>);
+        // Says which thread it was freed on, and whether that thread knew it was freeing.
+        struct Noted(mpsc::Sender<(Option<String>, bool)>);
         impl Drop for Noted {
             fn drop(&mut self) {
-                let _ = self.0.send(std::thread::current().name().map(str::to_owned));
+                let _ = self.0.send((std::thread::current().name().map(str::to_owned), freeing_here()));
+            }
+        }
+        // Panics as it's let go.
+        struct Breaks;
+        impl Drop for Breaks {
+            fn drop(&mut self) {
+                panic!("a part that breaks as it's freed (the test means it)");
             }
         }
         let (noted, freed_on) = mpsc::channel();
+        free_later(Noted(noted.clone()));
+        assert_eq!(freed_on.recv_timeout(Duration::from_secs(5)).unwrap(), (Some("Freeing".to_owned()), true));
+        assert!(!freeing_here());
+        // One that panics doesn't stop the thread: what comes after is still freed there.
+        free_later(Breaks);
         free_later(Noted(noted));
-        assert_eq!(freed_on.recv_timeout(Duration::from_secs(5)).unwrap().as_deref(), Some("Freeing"));
+        assert_eq!(freed_on.recv_timeout(Duration::from_secs(5)).unwrap(), (Some("Freeing".to_owned()), true));
     }
 
     #[test]

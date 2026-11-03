@@ -133,16 +133,10 @@ const FREE_LATER_FROM: usize = 2_000;
 impl Drop for SoundList {
     /// The last copy of an old list is often let go on the window's thread (when the use counts arrive, the page swaps
     /// its list for one that has them, and whichever part of the page held the old one last lets it go there), so a
-    /// big one is freed on a thread of its own.
+    /// big one goes to the freeing thread whole, all it holds with it, and is freed there.
     fn drop(&mut self) {
-        if self.sounds.len() >= FREE_LATER_FROM {
-            crate::background::free_later((
-                std::mem::take(&mut self.sounds),
-                std::mem::take(&mut self.hay),
-                std::mem::take(&mut self.names),
-                self.used.take(),
-                self.liked.take(),
-            ));
+        if self.sounds.len() >= FREE_LATER_FROM && !crate::background::freeing_here() {
+            crate::background::free_later(std::mem::take(self));
         }
     }
 }
