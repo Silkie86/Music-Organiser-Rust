@@ -219,16 +219,26 @@ cargo run -p mo-theorybench --release -- keyfit D:\Bench\packs.jsonl --inputs fu
     weight and calibration number goes a share t of the way from its built-in value to the one fitted, the same t for
     all of them, and the thresholds stay as built in. t is the largest of 1, 0.95, 0.9 and so on down to 0 at which
     every hand case keeps its gate, so a fit that keeps every gate stays as it is (t = 1). The run prints t for each
-    finder, with the scales it was pulled back to and the gates it broke one step further, then scores the pieces
-    held out with the numbers pulled back. A calibration is fitted on scores of the fits, as before, then pulled back
-    with the weights it goes with. Why: on his packs (2026-11-03, folds 1 to 4), nearly all minor (81% of the whole
-    loops), the plain rescale moved the minor weight from -0.49 to between 1.6 and 1.9 and the scales of the tune,
-    harmony, bass and chord streams to between 0.25 and 0.64, and broke the gates of 12 of the 29 hand cases that have
-    one (mostly a major key pushed below a minor one, C major below A or D minor, Eb major below F minor, and the
-    answer turned to no clear key). Pulled back (t 0.50 or 0.55 in each fold), every gate held, and the whole loops
-    were right 56.0% of the time, against 53.3% for the plain rescale and 46.1% for the finder built in; every set got
-    better beyond its range. Each number pulled back lies between its built-in value and the one fitted on his packs,
-    so it's still one of the numbers rule 5's exception allows.
+    finder, with the scales it was pulled back to and the gates it broke one step further, then scores the pieces held
+    out with the numbers pulled back. A calibration is fitted on scores of the fits, as before, then pulled back with
+    the weights it goes with: the one a choosing run prints for all four folds is as fitted, before the pull-back, as
+    `--write` fits the one it writes, and the answers printed are the thresholds built in as they come out on the
+    chances the pieces were scored with, pulled back. Why: on his packs (2026-11-03, folds 1 to 4), nearly all minor
+    (81% of the whole loops), the plain rescale moved the minor weight from -0.49 to between 1.6 and 1.9 and the scales
+    of the tune, harmony, bass and chord streams to between 0.25 and 0.64, and broke the gates of 12 of the 29 hand
+    cases that have one (mostly a major key pushed below a minor one, C major below A or D minor, Eb major below F
+    minor, and the answer turned to no clear key). Pulled back (t 0.50 or 0.55 in each fold), every gate held, and the
+    whole loops were right 56.0% of the time, against 53.3% for the plain rescale and 46.1% for the finder built in;
+    every set got better beyond its range. Each number pulled back lies between its built-in value and the one fitted on
+    his packs, so it's still one of the numbers rule 5's exception allows.
+  - What to watch for. t is found from the fit back, so a finder can keep every gate at t and break one again further
+    back, nearer the finder built in: the run says so ("but further back, at 0.40, nearer the finder built in, a gate
+    breaks again"), and the finder it stopped at still keeps every gate. How sure a reading is comes from the weights
+    and the calibration multiplied, so a finder part of the way can be surer than either end; the held-out report
+    measures each finder as pulled back, so it would show there (in that trial, the whole loops' calibration error was
+    0.037 pulled back, against 0.107 for the plain rescale and 0.119 for the finder built in). Pulled back part of the
+    way, the numbers written are a step from breaking a gate, so a later change to the finder or to a hand case may
+    break one: mo-harmony's tests say which, and the rescale is run again.
   - `--write` keeps the credits of the weights it scales, adds the rescale, how far it was pulled back and the scales
     of the numbers written after them, and adds `packs` to `LEARNED_FROM`. Pulled back all the way (t = 0), it writes
     nothing, since only the numbers built in keep every gate. A `--dump` of a run that read his pieces names his
