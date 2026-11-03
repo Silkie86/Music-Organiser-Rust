@@ -13,6 +13,8 @@ mod chords;
 mod fit;
 mod harte;
 mod item;
+mod keycheck;
+mod keyfind_v4;
 mod keyfit;
 mod keys;
 mod metrics;
@@ -29,6 +31,7 @@ theorybench keyfit <labelled.jsonl>... [--aligned] [--bars <lengths>] [--lambda-
                    [--picks <n>] [--weigh <source>=<w>] [--dump <file>] [--against <file>] [--hand <cases>]
                    [--shipped | --rescale] [--final | --write <weights.rs>]
 theorybench packs <folder>... --out <file.jsonl>
+theorybench keycheck <folder or file.mid>... [--changed | --counts]
 theorybench chords <labelled.jsonl>... [--answers <name>=<answers.jsonl>]... [--engine rust] [--part <role>]
                    [--roles on|off] [--oracle-cuts] [--timing] [--weights <weights.json>] [--folds <folds>]
                    [--per-segment] [--by <tag>]... [--dump <file>]
@@ -61,6 +64,11 @@ theorybench tables <labelled.jsonl>... [--write <tables.rs>]
              finder built in, to the last point where every hand case keeps its gate
   packs      Solomon's MIDI packs as labelled music, on his computer: each part of each file whose name gives one key
   --out      where to write them: a .jsonl outside this repository
+  keycheck   the key finder built in beside version 4's (before the rescale on Solomon's packs), part by part, on MIDI
+             files: what each says, the key the file's name gives, and how often each agrees with the names. Prints
+             only; writes nothing
+  --changed  only the parts the two answer differently
+  --counts   only the counts at the end
   chords     how often each chord reader names the labelled chord, scored as mir_eval scores it, then the whole
              chord: its notes and bass, each extension, the root among the same notes, the bass kind, readings listed
   --answers  the chords an engine read in each piece, as the C# helper in cs/ writes them; the first engine given
@@ -108,6 +116,7 @@ fn main() -> ExitCode {
         Some("chordfit") => chordfit::run(&args[1..]),
         Some("candidates") => candidates::run(&args[1..]),
         Some("packs") => packs::run(&args[1..]),
+        Some("keycheck") => keycheck::run(&args[1..]),
         Some("tables") => tables::run(&args[1..]),
         _ => Err(USAGE.to_owned()),
     };

@@ -89,7 +89,7 @@ fn is_loop(s: &Sound) -> bool {
 }
 
 /// Fills every unlocked pad. Returns the seed used, so the kit can be rolled again the same. `sounds` is the whole
-/// library (hidden copies are left out here), `usage` from [`crate::usage::usage`], `index` from [`SoundIndex::read`].
+/// library (hidden copies are left out here), `usage` from [`crate::usage::usage`], `index` from [`SoundIndex::build`].
 pub fn roll(
     sounds: &[Sound],
     usage: &HashMap<i64, Usage>,

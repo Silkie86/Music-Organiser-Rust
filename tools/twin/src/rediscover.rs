@@ -187,7 +187,10 @@ fn query_json(o: &Options) -> Value {
 /// What the Rust app answers, read from the sounds.db the C# app saved.
 fn rust_side(db: &Path, uses: &[Value]) -> Result<Value, String> {
     let db = SoundsDb::open_read_only(db).map_err(|e| format!("Rust couldn't read the sounds.db C# saved: {e}"))?;
-    let sounds = db.all(Local::now().naive_local()).map_err(|e| e.to_string())?;
+    // As the Sounds page reads it: the sounds and their vectors in one pass.
+    let everything = db.everything(Local::now().naive_local()).map_err(|e| e.to_string())?;
+    let index = SoundIndex::build(&everything.features, &everything.clap, everything.analysed());
+    let sounds = everything.sounds;
     let uses: Vec<SampleUse> = uses
         .iter()
         .map(|u| SampleUse {
@@ -198,7 +201,6 @@ fn rust_side(db: &Path, uses: &[Value]) -> Result<Value, String> {
         })
         .collect();
     let usage = usage(&sounds, &uses);
-    let index = SoundIndex::read(&db, &sounds).map_err(|e| e.to_string())?;
     let answers: Vec<Value> = queries()
         .iter()
         .map(|o| {
