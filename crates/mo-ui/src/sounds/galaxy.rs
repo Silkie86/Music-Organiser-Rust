@@ -238,10 +238,8 @@ impl SetAsk {
     }
 }
 
-/// The galaxy's painter on the card it was made on (which card, as `gpu::generation` counts), and which packed stars
-/// it holds.
+/// The galaxy's painter on the graphics card, and which packed stars it holds.
 struct OnCard {
-    generation: u64,
     sky: Sky,
     stars: u64,
 }
@@ -250,10 +248,7 @@ thread_local! {
     static DRAWING: RefCell<Option<Newest<Picture>>> = const { RefCell::new(None) };
     static PACKING: RefCell<Option<Newest<SetAsk>>> = const { RefCell::new(None) };
     static MINI_DRAWING: RefCell<Option<Newest<Picture>>> = const { RefCell::new(None) };
-    static CARD: RefCell<Option<OnCard>> = const { RefCell::new(None) };
-    /// The card (as `gpu::generation` counts) that refused to draw the galaxy: on that one it's drawn on the
-    /// processor from then on, and a new card is tried again.
-    static CARD_FAILED: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    static CARD: RefCell<gpu::Painter<OnCard>> = const { RefCell::new(gpu::Painter::new()) };
     /// Moves a glide on a frame at a time, and when it last did.
     static FLIGHT: Timer = Timer::default();
     static LAST_FRAME: RefCell<Option<Instant>> = const { RefCell::new(None) };
@@ -281,10 +276,12 @@ thread_local! {
 }
 
 /// The graphics card to draw the galaxy on, when there's one it can draw on: not for the screenshots (drawn on the
-/// processor), and not the card that refused to (`CARD_FAILED`).
+/// processor), and not one that refused to.
 fn usable_card() -> Option<(gpu::Gpu, u64)> {
-    let failed = CARD_FAILED.with(std::cell::Cell::get);
-    gpu::current().filter(|(_, generation)| !HERE.with(|h| *h.borrow()) && failed != Some(*generation))
+    if HERE.with(|h| *h.borrow()) {
+        return None;
+    }
+    CARD.with(|c| c.borrow().card())
 }
 
 /// How many shown stars are on the view, as the grid counts them (all of them until the grid comes).
@@ -1029,7 +1026,7 @@ pub(super) fn forget(g: &mut Galaxy) {
     g.light = None;
     // The old library's stars on the card aren't drawn over the new one's.
     CARD.with(|c| {
-        if let Some(on) = c.borrow_mut().as_mut() {
+        if let Some(on) = c.borrow_mut().made() {
             on.sky.clear_stars();
             on.stars = 0;
         }
@@ -1260,8 +1257,7 @@ pub(super) fn draw(app: &AppWindow) {
                     "Sounds",
                     &format!("The graphics card couldn't draw the galaxy, so the processor does: {e}"),
                 );
-                CARD_FAILED.with(|f| f.set(Some(generation)));
-                CARD.with(|c| *c.borrow_mut() = None);
+                CARD.with(|c| c.borrow_mut().refused(generation));
                 // The processor's picture doesn't twinkle.
                 TWINKLE_SHOWS.with(|t| t.set(false));
             }
@@ -1520,11 +1516,15 @@ fn show_mini(app: &AppWindow) {
     }
 }
 
-/// The card went: the painter goes, and the picture made on it isn't shown any more (it's drawn again, on the next
-/// card or the processor, when the galaxy next is).
-pub(super) fn card_gone(app: &AppWindow) {
-    CARD.with(|c| *c.borrow_mut() = None);
+/// The card went: the painter goes with it, now.
+pub(super) fn painter_gone() {
+    CARD.with(|c| c.borrow_mut().gone());
     TWINKLE_SHOWS.with(|t| t.set(false));
+}
+
+/// The card went: the picture made on it isn't shown any more (it's drawn again, on the next card or the processor,
+/// when the galaxy next is).
+pub(super) fn card_gone(app: &AppWindow) {
     let weak = app.as_weak();
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(app) = weak.upgrade() {
@@ -1566,13 +1566,11 @@ fn draw_on_card(app: &AppWindow, gpu: &gpu::Gpu, generation: u64, whole: bool) -
     let background = [bg.red(), bg.green(), bg.blue()].map(|c| f32::from(c) / 255.0);
     let texture = CARD.with(|c| -> Result<Option<_>, String> {
         let mut c = c.borrow_mut();
-        if c.as_ref().is_none_or(|on| on.generation != generation) {
+        let on = c.on(gpu, generation, |gpu| {
             // The first time, the card builds the shader and its steps, which can take a while.
             let _doing = crate::watchdog::doing("Galaxy: set up the GPU painter");
-            let sky = gpu::checked(&gpu.device, || Sky::new(&gpu.device, &gpu.queue))?;
-            *c = Some(OnCard { generation, sky, stars: 0 });
-        }
-        let Some(on) = c.as_mut() else { return Ok(None) };
+            OnCard { sky: Sky::new(&gpu.device, &gpu.queue), stars: 0 }
+        })?;
         if on.stars != version
             && let Some(packed) = &packed
         {

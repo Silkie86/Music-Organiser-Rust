@@ -2895,6 +2895,7 @@ dependencies = [
  "chrono",
  "mo-backup",
  "mo-convert",
+ "mo-dawlink",
  "mo-formats",
  "mo-harmony",
  "mo-library",
@@ -2939,6 +2940,14 @@ dependencies = [
  "mo-library",
  "rayon",
  "zip",
+]
+
+[[package]]
+name = "mo-dawlink"
+version = "0.1.0"
+dependencies = [
+ "mo-formats",
+ "serde_json",
 ]
 
 [[package]]

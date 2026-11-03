@@ -67,10 +67,10 @@ pub const SONGS_ACTIONS: &[Action] = &[
     action("projects.copyPath", "Copy where the picked song's file is", "Ctrl+Shift+C"),
 ];
 
-/// The Sounds page's own actions, with the C# Sound Lab's ids. Favourite, tag and To Bitwig join once the page may
-/// write and the DAW link is in.
+/// The Sounds page's own actions, with the C# Sound Lab's ids. Favourite and tag join once the page may write.
 pub const SOUNDS_ACTIONS: &[Action] = &[
     action("sounds.stop", "Stop the sound playing", "Esc"),
+    action("sounds.toBitwig", "Put the picked sound into Bitwig", "Ctrl+B"),
     action("sounds.reveal", "Show the sound's file in Explorer", "Ctrl+Shift+E"),
     action("sounds.copyPath", "Copy where the sound's file is", "Ctrl+Shift+C"),
 ];
@@ -408,6 +408,7 @@ mod tests {
         assert_eq!(what_of("projects.reveal"), "Show the picked song's file in its folder");
         assert_eq!(what_of("sounds.copyPath"), "Copy where the sound's file is");
         assert_eq!(what_of("space.reveal"), "Show the picked line's folder");
+        assert_eq!(what_of("sounds.toBitwig"), "Put the picked sound into Bitwig");
         assert_eq!(what_of("no.such.action"), "");
     }
 

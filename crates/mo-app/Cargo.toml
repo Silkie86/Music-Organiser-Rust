@@ -15,6 +15,8 @@ chrono.workspace = true
 mo-backup = { path = "../mo-backup" }
 # FL Studio songs converted for Bitwig ("Open in Bitwig").
 mo-convert = { path = "../mo-convert" }
+# The link to Bitwig: Send to Bitwig from the Sounds page.
+mo-dawlink = { path = "../mo-dawlink" }
 mo-formats = { path = "../mo-formats" }
 mo-harmony = { path = "../mo-harmony" }
 mo-library = { path = "../mo-library" }
@@ -28,3 +30,5 @@ tiny-skia.workspace = true
 [dev-dependencies]
 # A small library made by the backup test.
 rusqlite = { version = "0.41", features = ["bundled"] }
+# The stand-in Bitwig, for the Send to Bitwig tests: no test reaches a real Bitwig (rule 11).
+mo-dawlink = { path = "../mo-dawlink", features = ["fake-bitwig"] }
