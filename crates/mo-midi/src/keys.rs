@@ -6,7 +6,8 @@
 use std::cell::RefCell;
 
 use mo_formats::NoteEvent;
-use mo_harmony::{Grid, KEY_FINDER_VERSION, KeyFact, KeyReader, Mode, Note, Part, Span};
+use mo_harmony::keyfind::{self, SHIPPED};
+use mo_harmony::{Grid, Heard, KEY_FINDER_VERSION, KeyFact, KeyReader, Mode, Note, Part, Span};
 
 use crate::PPQ;
 use crate::analyser::{self, FEATURE_COUNT, Shape};
@@ -46,23 +47,32 @@ fn heard_as(role: Role) -> mo_harmony::Role {
 /// as a window (where its first bass note needn't be home). Gives the key the part's shape is counted from (the
 /// answer, or the key it leans to) and the whole reading to keep; none for drums or without pitched notes.
 pub fn read(reader: &mut KeyReader, notes: &[NoteEvent], role: Role, cut: bool) -> (Option<Key>, Option<KeyFact>) {
-    if role == Role::Drums {
-        return (None, None);
-    }
-    let heard: Vec<Note> = notes
-        .iter()
-        .filter(|n| !n.muted)
-        .map(|n| Note { start: n.start, length: n.length, key: n.key, velocity: n.velocity })
-        .collect();
-    let parts = [Part { role: heard_as(role), notes: &heard }];
-    let span = if cut { Span::Window } else { Span::Loop };
-    let Some(reading) = reader.read(&parts, Grid::four_four(PPQ as u32), span) else { return (None, None) };
+    let Some((heard, span)) = hear(reader, notes, role, cut) else { return (None, None) };
+    let reading = keyfind::read_heard(&heard, span, &SHIPPED);
     let key = reading.answer.leaning_key().map(|k| Key {
         tonic: k.tonic.number(),
         minor: k.mode == Mode::Minor,
         confidence: reading.shown_chance,
     });
     (key, Some(reading.fact()))
+}
+
+/// What the key finder hears in one part, as [`read`] hears it, and how that is read: as a loop, or as a window for a
+/// piece cut from a longer stretch. `keyfind::read_heard` reads it with any finder's numbers ([`SHIPPED`] for the one
+/// built in; `theorybench keycheck` reads it with an older one's too, to compare the two). None for drums or without
+/// pitched notes.
+pub fn hear(reader: &mut KeyReader, notes: &[NoteEvent], role: Role, cut: bool) -> Option<(Heard, Span)> {
+    if role == Role::Drums {
+        return None;
+    }
+    let pitched: Vec<Note> = notes
+        .iter()
+        .filter(|n| !n.muted)
+        .map(|n| Note { start: n.start, length: n.length, key: n.key, velocity: n.velocity })
+        .collect();
+    let parts = [Part { role: heard_as(role), notes: &pitched }];
+    let span = if cut { Span::Window } else { Span::Loop };
+    Some((reader.hear(&parts, Grid::four_four(PPQ as u32))?, span))
 }
 
 /// The key a stored reading names for sure (one key, or the likelier of a pair), for the page to show and search by.
@@ -149,6 +159,25 @@ mod tests {
         assert!(matches!(fact.answer(), Some(KeyAnswer::Key(_))), "{fact:?}");
         let shown = sure_key(&fact).expect("a key to show");
         assert_eq!((shown.tonic, shown.minor), (9, true), "{fact:?}");
+    }
+
+    #[test]
+    fn what_a_part_is_heard_as_is_read_with_the_numbers_given() {
+        let mut reader = KeyReader::new();
+        let notes = a_minor();
+        let (heard, span) = hear(&mut reader, &notes, Role::Melody, false).unwrap();
+        assert_eq!(span, Span::Loop);
+        // No weight for anything: every key as likely as the next, so no clear key and none to lean to.
+        let flat = [0.0; keyfind::FEATURES];
+        let none = keyfind::read_heard(&heard, span, &keyfind::Model { weights: &flat, ..SHIPPED });
+        assert!(none.chances.iter().all(|&p| (p - 1.0 / 24.0).abs() < 1e-12), "{none:?}");
+        assert!(matches!(none.answer, KeyAnswer::Unclear { leaning: None, .. }), "{none:?}");
+        // With the numbers built in, the reading is the one `read` keeps.
+        let built_in = keyfind::read_heard(&heard, span, &SHIPPED);
+        assert_eq!(Some(built_in.fact()), read(&mut reader, &notes, Role::Melody, false).1);
+        // A piece cut from a longer stretch is read as a window; drums aren't heard.
+        assert_eq!(hear(&mut reader, &notes, Role::Bass, true).map(|(_, span)| span), Some(Span::Window));
+        assert!(hear(&mut reader, &notes, Role::Drums, false).is_none(), "drums aren't heard");
     }
 
     #[test]
