@@ -251,10 +251,12 @@ export component Caps inherits Text {
     letter-spacing: 0.8px;
 }
 
-// The shaded, top-lit button. `main` is the page's main action, in the accent colour.
+// The shaded, top-lit button. `main` is the page's main action, in the accent colour; `danger` says in red that it
+// removes something for good (only ever the yes of a question that said what goes).
 export component StudioButton inherits Rectangle {
     in property <string> text;
     in property <bool> main: false;
+    in property <bool> danger: false;
     in property <bool> enabled: true;
     // The tooltip and the key from the shortcut list, if it has one.
     in property <string> tip;
@@ -286,7 +288,7 @@ export component StudioButton inherits Rectangle {
         // A button with an icon shows only the icon; its words go in `tip`.
         visible: root.icon == "";
         text: root.text;
-        color: !root.enabled ? Theme.faint : root.main ? Theme.accent-text : Theme.text;
+        color: !root.enabled ? Theme.faint : root.main ? Theme.accent-text : root.danger ? Theme.missing : Theme.text;
         font-size: Type.body;
         font-weight: 500;
         vertical-alignment: center;
@@ -1279,26 +1281,36 @@ export component MenuItems inherits MenuCard {
     }
 }
 
-// The menu of things to do with what's picked: a small "more" button, the same lines as the right-click menu.
-export component MoreButton inherits StudioButton {
+// A button that opens a menu of lines under it, like "Remove older versions…". The menu lines up with the button's
+// left edge, or with its right edge (`menu-at-right`, for a button at the right of a row, like the small "more" one).
+export component MenuButton inherits StudioButton {
     in property <[MenuItem]> items;
+    in property <bool> menu-at-right: false;
     callback chosen(string);
-    icon: Icons.more;
-    tip: "More";
-    clicked => { more-menu.show(); }
-    more-menu := PopupWindow {
-        x: root.width - self.width;
+    menu: true;
+    clicked => { button-menu.show(); }
+    button-menu := PopupWindow {
+        x: root.menu-at-right ? root.width - self.width : 0;
         y: root.height + Space.xs;
-        width: 280px;
+        width: max(root.width, 280px);
         close-policy: close-on-click-outside;
         MenuItems {
             items: root.items;
             chosen(id) => {
-                more-menu.close();
+                button-menu.close();
                 root.chosen(id);
             }
         }
     }
+}
+
+// The menu of things to do with what's picked: a small "more" button, the same lines as the right-click menu.
+export component MoreButton inherits MenuButton {
+    icon: Icons.more;
+    tip: "More";
+    // The icon says it opens a menu: no arrow.
+    menu: false;
+    menu-at-right: true;
 }
 
 // A right-click menu: put one on the page and call `open-at` with the mouse's place in the window (as `ListLine`'s

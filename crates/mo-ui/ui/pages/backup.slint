@@ -2,7 +2,7 @@
 // grow): the backup drive and its last run, How much, the format, the list of folders (each whole or slimmed), and
 // what goes and what's left out, and why. Only shared parts from studio.slint; mo-app decides every word
 // (mo_app::backup), mo-ui/src/backup.rs fills it.
-import { Theme, Type, Space, StudioButton, Segmented, FolderRow, PageHeader, Caps, Well, Groove, ProgressLine, EmptyState } from "../studio.slint";
+import { Theme, Type, Space, StudioButton, MenuButton, MenuItem, Segmented, FolderRow, PageHeader, Caps, Well, Groove, ProgressLine, EmptyState } from "../studio.slint";
 
 export struct BackupFolderLine {
     path: string,
@@ -40,6 +40,16 @@ export global BackupData {
     in property <[LeftOutLine]> left-out;
     // Shown instead of the totals while they're worked out, or when they can't be.
     in property <string> plan-note: "Add a folder to see what goes";
+    // The backup drive's older versions (Solomon, 3 Nov 2026: kept for ever, with a way to remove them): the room they
+    // take and how many, or empty; the words under them; and the Remove menu, empty when there's nothing to remove.
+    in property <string> older-size;
+    in property <string> older-count;
+    in property <string> older-note: "Pick a backup drive to see the older versions it keeps.";
+    in property <[MenuItem]> older-choices;
+    // The question asked before older versions are removed, with what goes; empty when nothing is asked.
+    in property <string> older-ask;
+    // What the last removal did.
+    in property <string> older-done;
     callback pick-drive();
     callback run();
     callback stop();
@@ -49,6 +59,11 @@ export global BackupData {
     callback add-library-folders();
     callback mode-picked(int, int);
     callback remove-folder(int);
+    // A line of the Remove older versions menu (its id): the page asks before anything goes.
+    callback older-picked(string);
+    // Yes to the question: they're removed.
+    callback older-remove();
+    callback older-cancel();
 }
 
 export component BackupPage inherits Rectangle {
@@ -128,10 +143,11 @@ export component BackupPage inherits Rectangle {
 
             HorizontalLayout {
                 spacing: Space.xl;
-                // How, and which folders.
+                // How, and which folders. Kept to the top when the right column is the taller one.
                 VerticalLayout {
                     spacing: Space.lg;
                     horizontal-stretch: 3;
+                    alignment: start;
                     VerticalLayout {
                         spacing: Space.sm;
                         Caps { text: "HOW MUCH"; }
@@ -219,11 +235,12 @@ export component BackupPage inherits Rectangle {
                     }
                 }
 
-                // What goes.
+                // What goes, and the older versions the backup keeps.
                 VerticalLayout {
                     horizontal-stretch: 2;
                     max-width: 440px;
                     alignment: start;
+                    spacing: Space.lg;
                     Rectangle {
                     background: Theme.surface;
                     border-radius: Theme.radius;
@@ -294,6 +311,78 @@ export component BackupPage inherits Rectangle {
                             wrap: word-wrap;
                         }
                     }
+                    }
+
+                    // The older versions on the backup drive.
+                    Rectangle {
+                        background: Theme.surface;
+                        border-radius: Theme.radius;
+                        border-width: 1px;
+                        border-color: Theme.stroke;
+                        VerticalLayout {
+                            padding: Space.lg;
+                            spacing: Space.md;
+                            alignment: start;
+                            Caps { text: "OLDER VERSIONS"; }
+                            if BackupData.older-size != "": HorizontalLayout {
+                                spacing: Space.sm;
+                                alignment: start;
+                                Text {
+                                    text: BackupData.older-size;
+                                    color: Theme.text;
+                                    font-size: Type.panel-title;
+                                    font-weight: 600;
+                                }
+                                Text {
+                                    text: BackupData.older-count;
+                                    color: Theme.muted;
+                                    font-size: Type.meta;
+                                    vertical-alignment: bottom;
+                                }
+                            }
+                            Text {
+                                text: BackupData.older-note;
+                                color: Theme.muted;
+                                font-size: Type.meta;
+                                wrap: word-wrap;
+                            }
+                            if BackupData.older-ask == "" && BackupData.older-choices.length > 0: HorizontalLayout {
+                                alignment: start;
+                                MenuButton {
+                                    text: "Remove older versions…";
+                                    // Not while a backup (or a removal) runs.
+                                    enabled: BackupData.busy == "";
+                                    items: BackupData.older-choices;
+                                    chosen(id) => { BackupData.older-picked(id); }
+                                }
+                            }
+                            if BackupData.older-ask != "": Text {
+                                text: BackupData.older-ask;
+                                color: Theme.text;
+                                font-size: Type.body;
+                                wrap: word-wrap;
+                            }
+                            if BackupData.older-ask != "": HorizontalLayout {
+                                spacing: Space.sm;
+                                alignment: start;
+                                StudioButton {
+                                    text: "Remove them";
+                                    danger: true;
+                                    enabled: BackupData.busy == "";
+                                    clicked => { BackupData.older-remove(); }
+                                }
+                                StudioButton {
+                                    text: "Cancel";
+                                    clicked => { BackupData.older-cancel(); }
+                                }
+                            }
+                            if BackupData.older-done != "": Text {
+                                text: BackupData.older-done;
+                                color: Theme.muted;
+                                font-size: Type.meta;
+                                wrap: word-wrap;
+                            }
+                        }
                     }
                 }
             }

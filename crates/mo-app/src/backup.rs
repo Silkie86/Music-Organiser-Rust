@@ -552,35 +552,41 @@ pub struct Ran {
     pub last: LastRun,
     /// Each song's id and the time of its newest save that went (or was already there and checked).
     pub went: Vec<(u64, NaiveDateTime)>,
+    /// How many replaced files were kept in Older versions (the Older versions card is read again only when some were).
+    pub kept_older: usize,
 }
 
 /// Copies the plan to the drive (or, for the zip format, packs each song and copies the whole folders), and says how
 /// it went. Never on the window's thread. A run that stops part way still says which songs went before it stopped.
 pub fn run(prepared: &Prepared, settings: &Settings, stop: &AtomicBool, progress: &dyn Fn(Progress)) -> Ran {
     let mut there: HashSet<String> = HashSet::new();
-    let last = run_on(prepared, settings, stop, progress, &mut there);
+    let mut kept_older = 0;
+    let last = run_on(prepared, settings, stop, progress, &mut there, &mut kept_older);
     let went = prepared
         .newest
         .iter()
         .filter(|(_, path, _)| there.contains(&case::key(&path.to_string_lossy())))
         .map(|(id, _, time)| (*id, *time))
         .collect();
-    Ran { last, went }
+    Ran { last, went, kept_older }
 }
 
-/// The run itself; `there` gathers the files now safely on the drive.
+/// The run itself; `there` gathers the files now safely on the drive, and `kept_older` counts the replaced files kept
+/// in Older versions.
 fn run_on(
     prepared: &Prepared,
     settings: &Settings,
     stop: &AtomicBool,
     progress: &dyn Fn(Progress),
     there: &mut HashSet<String>,
+    kept_older: &mut usize,
 ) -> LastRun {
     let when = Local::now().naive_local();
     let Some(backup) = settings.drive.as_deref() else {
         return LastRun { when, ok: false, line: "No backup drive picked".to_owned() };
     };
-    let options = copy::Options::new(when.format("%Y-%m-%d %H.%M").to_string());
+    // This run's older versions go in a folder named after the minute it began, as the Older versions card reads them.
+    let options = copy::Options::new(mo_backup::older::stamp(when));
     let copy_list: Vec<FileEntry> = match settings.format {
         Format::Folders => prepared.plan.copy.clone(),
         // Everything that isn't in a song's zip still goes, as plain folders: whole folders, and files no song owns
@@ -608,6 +614,9 @@ fn run_on(
             Err(_) => return LastRun { when, ok: false, line: "The backup drive isn't there".to_owned() },
             Ok(report) => {
                 for l in &report.lines {
+                    if l.outcome == (Outcome::Updated { kept_older: true }) {
+                        *kept_older += 1;
+                    }
                     match &l.outcome {
                         Outcome::New | Outcome::Updated { .. } => {
                             new_or_changed += 1;
@@ -883,7 +892,7 @@ pub fn level_note(level: Level) -> &'static str {
 pub fn format_note(format: Format) -> &'static str {
     match format {
         Format::Folders => {
-            "Open it in Explorer without the app. Only new or changed files are copied; small replaced files keep older versions."
+            "Open it in Explorer without the app. Only new or changed files are copied, and the small files a backup replaces are kept as older versions."
         }
         Format::Zips => {
             "One zip per song in Songs, with every sample it uses. Easy to move or send. Whole folders, and files that aren't any song's, go as plain folders."

@@ -86,6 +86,7 @@ fn a_song_goes_with_the_sample_it_uses_from_outside_the_folders() {
     assert_eq!(prepared.newest[0].1, save2);
     assert!(last.line.starts_with("4 checked · 4 new or changed"), "{}", last.line);
     assert!(!last.ok, "a folder wasn't plugged in");
+    assert_eq!(ran.kept_older, 0, "nothing was there to replace");
     let copies = fs::read_dir(&backup).unwrap().count();
     assert!(copies >= 1);
 
@@ -97,4 +98,12 @@ fn a_song_goes_with_the_sample_it_uses_from_outside_the_folders() {
     assert!(last.line.starts_with("2 checked · 1 new or changed"), "{}", last.line);
     let zips: Vec<_> = fs::read_dir(backup.join(SONGS)).unwrap().map(|e| e.unwrap().file_name()).collect();
     assert_eq!(zips.len(), 1);
+
+    // The preset changes: the copy it replaces is kept in Older versions, and the run says so (the Older versions
+    // card is read again only then).
+    write(&preset, b"preset, changed");
+    settings.format = Format::Folders;
+    let ran = run(&prepared, &settings, &stop, &|_| {});
+    assert!(ran.last.line.starts_with("4 checked · 1 new or changed"), "{}", ran.last.line);
+    assert_eq!(ran.kept_older, 1);
 }
