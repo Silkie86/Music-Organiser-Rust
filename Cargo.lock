@@ -3041,6 +3041,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mo-dawlink"
+version = "0.1.0"
+dependencies = [
+ "mo-dawlink",
+ "mo-sounds",
+ "serde_json",
+]
+
+[[package]]
 name = "mo-formatlab"
 version = "0.1.0"
 dependencies = [
