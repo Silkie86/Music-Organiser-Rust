@@ -26,13 +26,14 @@ use crate::chord::Chord;
 use crate::key::Key;
 use crate::keyfind::Span;
 use crate::notes::{Grid, Part};
+use crate::pitch::PcSet;
 use crate::spell::{Spelled, root_in_key, spell_in_key};
 
 /// The most readings a span keeps ([`ChordContext::readings`]).
 pub const MOST_READINGS: u8 = 6;
 
 /// The least chance a reading needs to be one of Chord check's choices, besides the first ([`ChordSpan::choices`]):
-/// below it are mostly the same notes written as no player would (Gsus4(add6)/C for C). The choices are worked out
+/// below it are mostly the same notes written as no player would (Gsus4(add6) over C, for C). The choices are worked out
 /// from the readings each time they're shown (a Chord check answer keeps those it showed), so the floor isn't part of
 /// what the reader's version covers.
 pub const CHOICE_FLOOR: f64 = 0.01;
@@ -226,10 +227,12 @@ impl ChordReading {
         spell_chart(self.spans.iter().map(|s| s.shown().map(|r| r.chord)), self.looped, key)
     }
 
-    /// A chord written at a span (one of its readings, or the other way to write one), spelled as the chart spells
-    /// chords there: in `key`, by what the next chord on the chart does. `chart` is this reading's chart in that key
-    /// ([`ChordReading::names`]), worked out once for every chord spelled.
+    /// A chord at a span (one of its readings, or another way to write one), as it's written
+    /// ([`Chord::as_written`]) and spelled as the chart spells chords there: in `key`, by what the next chord on the
+    /// chart does. `chart` is this reading's chart in that key ([`ChordReading::names`]), worked out once for every
+    /// chord spelled.
     pub fn spell(&self, chart: &[Option<Spelled>], span: usize, chord: Chord, key: Option<Key>) -> Spelled {
+        let chord = chord.as_written();
         let Some(key) = key else { return Spelled::plain(chord) };
         let after = chart.get(span.saturating_add(1)..).unwrap_or_default().iter().flatten().next();
         let round = if self.looped { chart.iter().flatten().next() } else { None };
@@ -239,8 +242,9 @@ impl ChordReading {
     /// Checks chord names found elsewhere (a file's name: "Fm9 Bb13 Ebmaj9.mid") against the reading. The names are
     /// matched to the chords the chart shows, in order, as many as can be and as well as they can be (round a loop,
     /// from any of its chords): each agrees when it's the chord shown where it's matched, is listed when it's another
-    /// of the readings kept there (so keeping more can list more), and disagrees when it can't be matched. A name is a
-    /// chord when its root is one of the reading's roots (any of a diminished seventh's), its core is the same (its
+    /// of the readings kept there (so keeping more can list more), and disagrees when it can't be matched. A name and
+    /// a chord are compared as they're written ([`Chord::as_written`]: "D/C" and "D7" are both D7): a name is the
+    /// chord when its root is one of the chord's roots (any of a diminished seventh's), its core is the same (its
     /// tensions may differ), and, when it has a bass of its own (a slash), its bass is the same. The names are never
     /// evidence.
     pub fn check_names(&self, names: &[Chord]) -> Vec<NameCheck> {
@@ -336,12 +340,13 @@ fn match_names(names: &[Chord], chart: &[&ChordSpan]) -> ((u32, u32), Vec<NameCh
     (at(&best, names.len(), chart.len()).unwrap_or_default(), checks)
 }
 
-/// Whether a chord name is a reading: its chord or the other way to write it ([`ChordReading::check_names`]).
+/// Whether a chord name is a reading, both as they're written ([`ChordReading::check_names`]).
 fn names_it(r: &Reading, name: Chord) -> bool {
-    let core = Core::of_chord;
-    let bass = |c: Chord| name.bass() == name.root() || name.bass() == c.bass();
-    let chord = r.roots.contains(name.root()) && core(r.chord) == core(name) && bass(r.chord);
-    chord || r.also.is_some_and(|c| c.root() == name.root() && core(c) == core(name) && bass(c))
+    let (written, name) = (r.chord.as_written(), name.as_written());
+    // A chord written on its bass has that one root.
+    let roots = if written.root() == r.chord.root() { r.roots } else { PcSet::EMPTY.with(written.root()) };
+    let bass = name.bass() == name.root() || name.bass() == written.bass();
+    roots.contains(name.root()) && Core::of_chord(written) == Core::of_chord(name) && bass
 }
 
 /// Reads the chords in some notes ([`ChordReader::read`]). Keep one and reuse it: it keeps its working space between

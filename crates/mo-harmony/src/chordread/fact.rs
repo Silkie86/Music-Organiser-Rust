@@ -106,7 +106,7 @@ pub struct FactSpan {
     pub bass: BassKind,
     /// Whether its root isn't heard, whether some of its tensions are doubtful (left out of its name), and whether the
     /// same notes are written another way too (a sus chord over its bass is also a chord over a bass that's only a
-    /// bass: G9sus4, also F/G; and a triad over its seventh, also the seventh chord: D/C, also D7/C).
+    /// bass: G9sus4, also F over G; and a triad over its seventh, also the seventh chord: D over C, also D7 over C).
     pub rootless: bool,
     pub doubtful: bool,
     pub also: bool,
@@ -125,7 +125,7 @@ pub struct RunnerUp {
     pub label: Label,
     /// Its chance, to the nearest 255th.
     pub chance: f64,
-    /// Whether it's the same notes as the first, written another way (C6 and Am7/C).
+    /// Whether it's the same notes as the first, written another way (C6 and Am7 over C).
     pub same_notes: bool,
 }
 
@@ -315,7 +315,7 @@ impl FactReading {
 }
 
 /// What a reading has, in eight bytes, for the MIDI page's search ([`ChordReading::summary`]), from the chords its
-/// chart shows, as they're written:
+/// chart shows, as they're written ([`Chord::as_written`]: D over C as D7):
 ///
 /// - 0 to 3: its progression, as a number that's the same in any key ([`ChordSummary::progression`]);
 /// - 4 and 5: the cores it has, a bit for each ([`ChordSummary::cores`]);
@@ -353,8 +353,8 @@ impl ChordSummary {
     }
 }
 
-/// The tensions the chords a reading shows name, as bits ([`ChordSummary::extensions`]): a 7alt chord's too (its
-/// altered ninths, eleventh and thirteenth), with [`Extensions::ALTERED`].
+/// The tensions the chords a reading shows name, as bits ([`ChordSummary::extensions`]): an altered dominant's too
+/// (its altered ninths and eleventh; its ♯5 stands in for its fifth), with [`Extensions::ALTERED`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Extensions(u8);
 
@@ -367,7 +367,7 @@ impl Extensions {
     pub const SHARP_ELEVENTH: Extensions = Extensions(1 << 4);
     pub const FLAT_THIRTEENTH: Extensions = Extensions(1 << 5);
     pub const THIRTEENTH: Extensions = Extensions(1 << 6);
-    /// An altered dominant, written 7alt.
+    /// An altered dominant, as players call it ([`crate::chord::is_altered`]), its notes written out: C7#9#5, C7b9#11.
     pub const ALTERED: Extensions = Extensions(1 << 7);
 
     pub const fn contains(self, other: Extensions) -> bool {
@@ -389,9 +389,9 @@ pub struct SummaryFlags(u8);
 
 impl SummaryFlags {
     pub const NONE: SummaryFlags = SummaryFlags(0);
-    /// A chord over a bass that's only a bass (D/C).
+    /// A chord over a bass that's only a bass (D over C, written D7).
     pub const SLASH: SummaryFlags = SummaryFlags(1);
-    /// A chord over another of its notes (C/E).
+    /// A chord over another of its notes (C over E).
     pub const INVERSION: SummaryFlags = SummaryFlags(1 << 1);
     /// A chord whose root isn't heard.
     pub const ROOTLESS: SummaryFlags = SummaryFlags(1 << 2);
@@ -401,7 +401,7 @@ impl SummaryFlags {
     pub const PUSHED: SummaryFlags = SummaryFlags(1 << 4);
     /// A chord over a walking bass.
     pub const WALKING: SummaryFlags = SummaryFlags(1 << 5);
-    /// A sus chord over its bass that's also a chord over a bass that's only a bass (G9sus4, also F/G).
+    /// A sus chord over its bass that's also a chord over a bass that's only a bass (G9sus4, also F over G).
     pub const HYBRID: SummaryFlags = SummaryFlags(1 << 6);
     /// Unclear for more than a quarter of the time the music plays (rests left out).
     pub const UNCLEAR: SummaryFlags = SummaryFlags(1 << 7);
@@ -476,8 +476,9 @@ struct Charted {
     shown: Option<Shown>,
 }
 
-/// A chord the chart shows: as it's written, the core the decode read (for a chord written with no core of its own),
-/// how its bass stands, whether it's rootless, and whether the same notes are written another way too.
+/// A chord the chart shows: the chord (summed up as it's written, [`Chord::as_written`]), the core the decode read
+/// (for a chord written with no core of its own), how its bass stands, whether it's rootless, and whether the same
+/// notes are written another way too.
 struct Shown {
     chord: Chord,
     core: Core,
@@ -501,7 +502,7 @@ fn summarise(spans: impl Iterator<Item = Charted>, looped: bool) -> ChordSummary
             unclear = unclear.saturating_add(s.length);
         }
         let Some(shown) = s.shown else { continue };
-        let c = shown.chord;
+        let c = shown.chord.as_written();
         let core = Core::of_chord(c).unwrap_or(shown.core);
         cores = cores.with(core);
         if chart.last() != Some(&(c.root(), core)) {
@@ -519,8 +520,8 @@ fn summarise(spans: impl Iterator<Item = Charted>, looped: bool) -> ChordSummary
             extensions = extensions.with(Extensions::ALTERED);
         }
         // A hybrid is a sus chord on its bass whose notes are written another way too, as a chord over a bass that's
-        // only a bass (G9sus4, also F/G). A triad over its seventh is written another way too (D/C, also D7/C), but
-        // it's no sus chord, and stands over a bass that's only a bass itself.
+        // only a bass (G9sus4, also F over G). A triad over its seventh is written another way too (D over C, also D7
+        // over C), but it's no sus chord, and stands over a bass that's only a bass itself.
         let sus = matches!(core, Core::Sus4 | Core::Sus2 | Core::Dominant7Sus4);
         for (yes, flag) in [
             (shown.bass == BassKind::Slash, SummaryFlags::SLASH),

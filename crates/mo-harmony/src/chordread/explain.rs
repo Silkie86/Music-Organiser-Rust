@@ -13,17 +13,18 @@
 //! - **Held over.** A note whose only sound in the stretch is the end it holds over a bar line or the middle of a bar
 //!   ([`HeardNote::held_over`]) rings on from the chord before: the reader keeps that apart from what the chord plays.
 //! - **The bass** (a bass part's note, or a chord note heard as the bass where no bass part plays). The held bass, and
-//!   any note the written chord sounds (its own, or the bass written under it), is its bass. Another note passes by
+//!   any note the chord as written sounds (its bass among its notes), is its bass. Another note passes by
 //!   when its shape on the bass line passes under the chord ([`Shaped::passes_under`]); else it walks when it's played
 //!   no longer than a felt beat and sounds only off the bar line and the middle of the bar, and it clashes when it
 //!   doesn't (what a moving bass is marked down for).
-//! - **The chords and the tune.** A note on one of the written chord's notes is one of its own notes (its root, third,
-//!   fifth, seventh or sixth, or a sus chord's 4th or 2nd) or a tension it names; one on the bass written under it
-//!   that's only a bass (the C of D/C) doubles the bass; one on a note of the reading that the name leaves out (heard
-//!   too little) is one of its own notes too. Any other note passes by when its shape on its line passes under the
-//!   chord; else it's doubtful when the name lists it as doubtful; else, on a tension the chord can carry, it's colour
-//!   too little to name (in the chords), or a tune note over the chord (in the tune: one on a note the chord can't
-//!   carry there clashes); and on a note that doesn't belong, it clashes.
+//! - **The chords and the tune.** A note on one of the written chord's notes (the chord as it's written, its bass
+//!   among them: the C of D over C is D7's seventh) is one of its own notes (its root, third, fifth, seventh or sixth,
+//!   or a sus chord's 4th or 2nd) or a tension it names; one on the root a rootless chord stands on doubles it; one on
+//!   a note of the reading that the name leaves out (heard too little) is one of its own notes too. Any other note
+//!   passes by when its shape on its line passes under the chord; else it's doubtful when the name lists it as
+//!   doubtful; else, on a tension the chord can carry, it's colour too little to name (in the chords), or a tune note
+//!   over the chord (in the tune: one on a note the chord can't carry there clashes); and on a note that doesn't
+//!   belong, it clashes.
 //!
 //! The evidence ([`TermWhy`]) is each piece the scoring weighs ([`Feature`]), and the pair term for how the root moves
 //! from the chord before and on to the chord after, for the first reading and the runner-up: each one's value and what
@@ -57,9 +58,9 @@ pub const TERMS_SHOWN: usize = 6;
 /// What a note does in a stretch, under its first reading as written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NoteDoes {
-    /// The bass the chord stands on: the held bass, or a bass note on a note the chord sounds; or, in the chords or
-    /// the tune, a note doubling a bass written under the chord that's only a bass (the C of D/C). By its degree above
-    /// the chord's root (its own when it's one of the chord's notes, the ♭7 of D/C).
+    /// The bass the chord stands on: the held bass, or a bass note on a note the chord sounds. By its degree above the
+    /// root of the chord as written ([`Chord::as_written`]), where the bass is one of its notes: the ♭7 of D over C,
+    /// which is D7.
     Bass(Degree),
     /// One of the chord's own notes, by its degree: its root, third, fifth, seventh or sixth, or a sus chord's 4th or
     /// 2nd (the ♭3 of Dm9).
@@ -548,13 +549,14 @@ fn in_bass(hearing: &Hearing, n: &HeardNote, from: i64) -> bool {
     }
 }
 
-/// What a note does in a stretch under its first reading (the module's rules, in order).
+/// What a note does in a stretch under its first reading (the module's rules, in order), each degree as the chord is
+/// written ([`Chord::as_written`]): the C of D over C is D7's seventh, the A of F over G is G9sus4's 9.
 fn does(hearing: &Hearing, n: &HeardNote, shape: Option<&Shaped>, place: Place, first: &Reading) -> NoteDoes {
     let Place { from, to, held, bass } = place;
     if n.held_over.is_some_and(|h| h <= from) {
         return NoteDoes::HeldOver;
     }
-    let (label, chord, pc) = (first.label, first.chord, n.pitch_class());
+    let (label, chord, pc) = (first.label, first.chord.as_written(), n.pitch_class());
     let tones = label.tones();
     let passes = |line_is_bass: bool| {
         shape.filter(|s| (s.line == Line::Bass) == line_is_bass && s.passes_under(tones)).map(|s| s.shape)
@@ -579,7 +581,7 @@ fn does(hearing: &Hearing, n: &HeardNote, shape: Option<&Shaped>, place: Place, 
             ToneRole::Tension | ToneRole::Avoid => NoteDoes::Extension(degree),
         };
     }
-    // The bass written under the chord, only a bass: doubled.
+    // The root a rootless chord stands on, left out of its notes: doubled.
     if pc == chord.bass() {
         return NoteDoes::Bass(chord.bass_degree());
     }

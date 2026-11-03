@@ -109,7 +109,8 @@ fn keeps_the_rules(
         for (i, r) in readings.iter().enumerate() {
             let why = || format!("{} ({r:?}) in {}", r.chord.name(), why());
             let c = r.chord;
-            check(!readings.get(..i).unwrap_or_default().iter().any(|o| o.chord == c), &why)?;
+            let written = c.as_written();
+            check(!readings.get(..i).unwrap_or_default().iter().any(|o| o.chord.as_written() == written), &why)?;
             if silent {
                 // Over silence, written in full.
                 check(c.notes() == r.label.tones() && !r.rootless && r.also.is_none(), &why)?;
@@ -230,8 +231,9 @@ fn the_same_notes_moved_are_named_the_same_moved() {
             assert_eq!(everything(&Named::read(&moved, &pins, 6).naming, shift, 480), want, "moved {shift}");
         }
     }
-    // Named as a player names them, moved: C#dim7 before Dm is Ddim7 before Ebm, Bb13sus4 is B13sus4.
-    for (case, want) in [("24 C#dim7", "Ddim7"), ("8 Bb13sus4", "B13sus4"), ("3 D/C", "Eb/Db"), ("2 G7/F", "Ab7/Gb")] {
+    // Named as a player names them, moved: C#dim7 before Dm is Ddim7 before Ebm, Bb13sus4 is B13sus4, D over C (D7) is
+    // Eb7, and G7 over F is Ab7.
+    for (case, want) in [("24 C#dim7", "Ddim7"), ("8 Bb13sus4", "B13sus4"), ("3 D/C", "Eb7"), ("2 G7/F", "Ab7")] {
         let (_, music, _) = named_cases().into_iter().find(|(name, _, _)| name.starts_with(case)).unwrap();
         let moved = music.map(|n| Note { key: n.key + 1, ..n }).looped();
         let spans = Named::read(&moved, &[], 6).spans();
@@ -287,15 +289,16 @@ fn a_reading_is_always_named_and_most_counts_readings() {
         let names: Vec<&str> = spans.iter().flat_map(|s| s.readings.iter().map(|r| r.name.as_str())).collect();
         assert!(names.len() <= most.max(1) && names.first() == Some(&"Am6"), "most {most}: {names:?}");
     }
-    // A pinned chord is written as given, however unlikely, over the bass held under it: Db7 pinned over C E G with C
-    // in the bass is Db7/C, rootless; with no bass, Db7. Given with a bass of its own, it keeps it.
+    // A pinned chord is written as given, however unlikely, over the bass held under it, and named from all its notes:
+    // Db7 pinned over C E G with C in the bass is Db7(maj7) (the C is its major seventh), rootless; with no bass,
+    // Db7. Given with a bass of its own, it keeps it, and a bass in its notes adds nothing to the name.
     let chord = |name: &str| Chord::parse(name).unwrap();
     for (bass, given, written, kind) in [
-        ("C2", "Db7", "Db7/C", BassKind::Slash),
+        ("C2", "Db7", "Db7(maj7)", BassKind::Slash),
         ("", "Db7", "Db7", BassKind::None),
-        ("C2", "Am7", "Am7/C", BassKind::Inversion),
-        ("C2", "Db7/F", "Db7/F", BassKind::Inversion),
-        ("", "C/G", "C/G", BassKind::Inversion),
+        ("C2", "Am7", "Am7", BassKind::Inversion),
+        ("C2", "Db7/F", "Db7", BassKind::Inversion),
+        ("", "C/G", "C", BassKind::Inversion),
     ] {
         let music = Music::new().bass(bars(bass)).keys(bars("C4 E4 G4"));
         let pin = PinnedSpan { units: 0..B, chord: Some(chord(given)) };

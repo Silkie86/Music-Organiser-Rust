@@ -251,8 +251,9 @@ fn a_fact_of_another_layout_or_a_damaged_one_reads_as_none() {
     assert!(read_back > 1000, "{read_back} read back");
 }
 
-/// What chords given read, a bar each over their own notes (the bass under the rest), as a song: written as given,
-/// whatever the numbers read, so the summary's rules are checked on chords that stay put.
+/// What chords given read, a bar each over their own notes (the bass under the rest), as a song: written as given
+/// (named from all their notes, D/C as D7), whatever the numbers read, so the summary's rules are checked on chords
+/// that stay put.
 fn given(names: &[&str]) -> ChordReading {
     given_as(names, false)
 }
@@ -271,7 +272,7 @@ fn given_as(names: &[&str], looped: bool) -> ChordReading {
     let music = Music::new().bass(bass).keys(keys);
     let r = read(&if looped { music.looped() } else { music }, &pins, 2).unwrap();
     let written: Vec<String> = r.spans.iter().map(|s| s.shown().map_or("N".to_owned(), |x| x.chord.name())).collect();
-    assert_eq!((written, r.looped), (names.iter().map(|&n| n.to_owned()).collect(), looped), "{r:?}");
+    assert_eq!((written, r.looped), (names.iter().map(|&n| chord(n).name()).collect(), looped), "{r:?}");
     r
 }
 
@@ -348,7 +349,7 @@ fn the_summary_holds_the_cores_and_tensions_the_chords_are_written_with() {
     }
     assert_eq!(given(&plain).summary().cores(), Core::ALL.into_iter().collect::<CoreSet>());
     // The tensions as the names write them, the cores as the chords are written: Cmaj9 is a major seventh.
-    let altered = E::ALTERED.with(E::FLAT_NINTH).with(E::SHARP_NINTH).with(E::SHARP_ELEVENTH).with(E::FLAT_THIRTEENTH);
+    let altered = E::ALTERED.with(E::FLAT_NINTH).with(E::SHARP_NINTH).with(E::SHARP_ELEVENTH);
     let ninths = &["C9", "Cm9", "Cmaj9", "C6/9", "Cadd9", "C9sus4"][..];
     let ii_v_i = [Minor7, Dominant7, Major7];
     for (names, cores, tensions) in [
@@ -360,7 +361,8 @@ fn the_summary_holds_the_cores_and_tensions_the_chords_are_written_with() {
         (&["C7(b13)"], &[Dominant7], E::FLAT_THIRTEENTH),
         (&["C13", "C13sus4"], &[Dominant7, Dominant7Sus4], E::NINTH.with(E::THIRTEENTH)),
         (&["C7(b9,b13)"], &[Dominant7], E::FLAT_NINTH.with(E::FLAT_THIRTEENTH)),
-        // An altered dominant: its altered ninths, eleventh and thirteenth, and that it's altered.
+        // An altered dominant (C7b9#9#11#5): its altered ninths and eleventh, and that it's altered; its #5 stands in
+        // for its fifth.
         (&["C7alt"], &[Dominant7], altered),
         (&["Dm11", "G7alt", "Cmaj9"], &ii_v_i, altered.with(E::NINTH).with(E::ELEVENTH)),
     ] {
@@ -372,7 +374,8 @@ fn the_summary_holds_the_cores_and_tensions_the_chords_are_written_with() {
 #[test]
 fn the_summary_holds_what_else_the_chords_have() {
     use SummaryFlags as F;
-    // How a bass stands under the chords written: on their roots, only a bass (D/C), or another of their notes.
+    // How a bass stands under the chords written: on their roots, only a bass (D over C, written D7), or another of
+    // their notes.
     assert_eq!(given(&["C", "Dm7", "G7"]).summary().flags(), F::NONE);
     assert_eq!(given(&["D/C"]).summary().flags(), F::SLASH);
     assert_eq!(given(&["C/E", "G7/F"]).summary().flags(), F::INVERSION);
@@ -382,7 +385,7 @@ fn the_summary_holds_what_else_the_chords_have() {
     assert_eq!(r.summary().flags(), F::ROOTLESS, "{r:?}");
     // What's heard: a pedal, chords pushed, a walking bass, and a sus chord over its bass that's also a chord over a
     // bass that's only a bass.
-    // A triad over its seventh is written another way too (D/C, also D7/C), but it's no sus chord: only a slash.
+    // A triad over its seventh (D over C, written D7) is no sus chord: only a chord over a bass that's only a bass.
     for (name, want) in [
         ("3 D/C", F::SLASH),
         ("9 C | F/C | G/C | C over a pedal", F::PEDAL.with(F::INVERSION).with(F::SLASH)),
