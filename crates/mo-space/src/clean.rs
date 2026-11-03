@@ -476,6 +476,13 @@ pub trait Bin {
     fn find(&self, removed: &mut [Removed]) -> Vec<Problem>;
     /// Puts things back from the bin where they were; says what couldn't come back.
     fn put_back(&self, removed: &[Removed]) -> Vec<Problem>;
+    /// Why this bin can't take `path` (`bytes` big) quietly: sending it would ask you something first, or remove it for
+    /// good. `None` when it can. For what the app clears by itself, with nobody there to answer (the start-up sweep's
+    /// old F12 notes); the Space page's clean-ups, which you start and watch, check what they need as they go. A bin of
+    /// the tests' own (a folder) takes everything.
+    fn refuses_quietly(&self, _path: &Path, _bytes: u64) -> Option<String> {
+        None
+    }
 }
 
 /// Sends each line of the plan to the bin, checking each again just before: one that changed, or that the guard now
@@ -751,6 +758,111 @@ impl Bin for SystemBin {
     fn put_back(&self, removed: &[Removed]) -> Vec<Problem> {
         put_back_from_system_bin(removed)
     }
+
+    fn refuses_quietly(&self, path: &Path, bytes: u64) -> Option<String> {
+        refuses_quietly(path, bytes).map(str::to_owned)
+    }
+}
+
+/// Why the computer's own Recycle Bin can't take `path` (`bytes` big) without a word: what [`cant_keep`] looks for (a
+/// network drive, a USB stick or memory card, a file only online in OneDrive), without walking a folder; or the Recycle
+/// Bin on that drive is off, or smaller than `bytes`. Windows asks "permanently delete?" about such a file, and removes
+/// it for good on a yes. On a Mac the Trash is reached through Finder, which can ask first too.
+fn refuses_quietly(path: &Path, bytes: u64) -> Option<&'static str> {
+    let shown = text(path);
+    let (shown, real) = both(&shown);
+    if on_network(shown) || on_network(&real) {
+        return Some(Refused::NetworkDrive.text());
+    }
+    if on_removable(&real) {
+        return Some(Refused::RemovableDrive.text());
+    }
+    match fs::symlink_metadata(path) {
+        Ok(meta) if is_online_only(&meta) => return Some(ONLINE_ONLY),
+        Ok(_) => {}
+        Err(_) => return Some(CANT_LOOK),
+    }
+    bin_refuses(Path::new(&real), bytes)
+}
+
+/// What's said of something that stays because the Recycle Bin is off where it is.
+#[cfg(windows)]
+const BIN_OFF: &str = "The Recycle Bin is off for that drive, so it would be removed for good. It stays.";
+/// What's said of something too big for the Recycle Bin where it is.
+#[cfg(windows)]
+const TOO_BIG: &str =
+    "It's bigger than the Recycle Bin on that drive may hold, so it would be removed for good. It stays.";
+
+/// Windows: whether the Recycle Bin is off for the drive holding `real` (that drive's own setting, or a policy for this
+/// account or the whole PC), or may hold less than `bytes` (its "Maximum size"). One that can't be told about stays.
+#[cfg(windows)]
+fn bin_refuses(real: &Path, bytes: u64) -> Option<&'static str> {
+    use windows_registry::{CURRENT_USER, LOCAL_MACHINE};
+    // Where a policy can say "Do not move deleted files to the Recycle Bin".
+    const POLICY: &str = r"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer";
+    // Each drive's Recycle Bin settings (the Recycle Bin's Properties), under the drive's id.
+    const DRIVES: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume";
+    for hive in [LOCAL_MACHINE, CURRENT_USER] {
+        if hive.open(POLICY).and_then(|k| k.get_u32("NoRecycleFiles")).is_ok_and(|on| on != 0) {
+            return Some(BIN_OFF);
+        }
+    }
+    let Some(drive) = drive_id(real) else {
+        return Some(
+            "Windows didn't say which drive it's on, so whether the Recycle Bin can take it isn't known. It stays.",
+        );
+    };
+    // A drive whose Recycle Bin settings were never changed may have none of its own: then Windows' own hold, which put
+    // things in the Recycle Bin.
+    let Ok(settings) = CURRENT_USER.open(format!(r"{DRIVES}\{drive}")) else { return None };
+    // "Don't move files to the Recycle Bin. Remove files immediately when deleted."
+    if settings.get_u32("NukeOnDelete").is_ok_and(|on| on != 0) {
+        return Some(BIN_OFF);
+    }
+    // "Maximum size (MB)": a file that big can't go in.
+    match settings.get_u32("MaxCapacity") {
+        Ok(mb) if bytes >= u64::from(mb) * 1024 * 1024 => Some(TOO_BIG),
+        _ => None,
+    }
+}
+
+/// The id Windows knows the drive holding `real` by (the `{…}` of `\\?\Volume{…}\`), which its Recycle Bin settings are
+/// kept under.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn drive_id(real: &Path) -> Option<String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{GetVolumeNameForVolumeMountPointW, GetVolumePathNameW};
+    let path: Vec<u16> = real.as_os_str().encode_wide().chain([0]).collect();
+    // The drive's root ("C:\", or the folder a drive is mounted in) is never longer than the path inside it.
+    let mut root = vec![0u16; path.len().max(261)];
+    let room = u32::try_from(root.len()).ok()?;
+    // SAFETY: `path` ends in a 0, and `root` has room for `room` characters, as the call is told.
+    if unsafe { GetVolumePathNameW(path.as_ptr(), root.as_mut_ptr(), room) } == 0 {
+        return None;
+    }
+    // "\\?\Volume{…}\" is 49 characters and the 0 after them.
+    let mut name = [0u16; 64];
+    // SAFETY: `root` holds the 0-ended root the call above wrote, and `name` has room for the 64 characters it's told.
+    if unsafe { GetVolumeNameForVolumeMountPointW(root.as_ptr(), name.as_mut_ptr(), 64) } == 0 {
+        return None;
+    }
+    let end = name.iter().position(|&c| c == 0)?;
+    let name = String::from_utf16(&name[..end]).ok()?;
+    let id = name.strip_prefix(r"\\?\Volume")?.strip_suffix('\\')?;
+    (id.starts_with('{') && id.ends_with('}')).then(|| id.to_owned())
+}
+
+/// A Mac: the Trash is reached through Finder, which can first ask you to let the app use it.
+#[cfg(target_os = "macos")]
+fn bin_refuses(_real: &Path, _bytes: u64) -> Option<&'static str> {
+    Some("On a Mac the Trash is reached through Finder, which can ask you first, so nothing goes there by itself.")
+}
+
+/// Linux keeps its Trash in folders of its own, and never asks.
+#[cfg(not(any(windows, target_os = "macos")))]
+fn bin_refuses(_real: &Path, _bytes: u64) -> Option<&'static str> {
+    None
 }
 
 fn bin_problem(e: &trash::Error) -> String {
@@ -880,7 +992,7 @@ fn put_back_from_system_bin(removed: &[Removed]) -> Vec<Problem> {
 
 #[cfg(test)]
 mod tests {
-    use super::on_network;
+    use super::{Bin, SystemBin, on_network};
 
     #[test]
     fn a_server_path_is_on_the_network() {
@@ -888,5 +1000,25 @@ mod tests {
         assert!(on_network("//nas/music/Kontakt"));
         // A folder that isn't there can't be asked about: only its path tells.
         assert!(!on_network("no such folder/Kontakt"));
+    }
+
+    /// Only asks: nothing is sent to the computer's bin here (rule 11).
+    #[test]
+    fn the_computers_bin_says_whether_it_takes_a_file_quietly() {
+        let dir = std::env::temp_dir().join(format!("mo-space-quiet-bin-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("note-2026-07-01_10-00-00.md");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(SystemBin.refuses_quietly(&dir.join("not there.md"), 1).is_some(), "what can't be looked at stays");
+        let said = SystemBin.refuses_quietly(&file, 1);
+        // Linux's Trash never asks; a Mac's Finder can, so nothing goes there by itself. On Windows it depends on the
+        // PC's own Recycle Bin settings: asking them mustn't fail.
+        if cfg!(target_os = "macos") {
+            assert!(said.is_some());
+        } else if cfg!(unix) {
+            assert_eq!(said, None);
+        }
+        assert!(file.exists(), "it was only asked about");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

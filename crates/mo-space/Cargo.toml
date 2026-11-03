@@ -34,6 +34,8 @@ windows-registry = "0.6"
 junction = "1.4.1"
 # Which drives are USB sticks or memory cards: Windows keeps no Recycle Bin on them, so nothing there is removed.
 sysinfo = { version = "0.40", default-features = false, features = ["disk"] }
+# Which drive a file is on, by the id Windows keeps that drive's Recycle Bin settings under (is it on, how big).
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
 # Whether a folder is on a network share (Mac, Linux). Already used by fs4.
 [target.'cfg(unix)'.dependencies]

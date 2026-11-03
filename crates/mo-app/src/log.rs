@@ -6,19 +6,25 @@
 //! Writing never waits on the disk: lines go to a writer thread of their own. A message that keeps coming
 //! is written three times and then only counted (at 10, 100, 1000…), and a run stops writing at 5 MB, so a runaway
 //! warning can't fill the disk; only a crash is still written after that, up to 1 MB more (rule 17: crashes always
-//! log). At each start, a low-priority thread keeps the folder in bounds ([`crate::tidy::prune_logs`]): the newest 30
-//! runs' logs, the newest 30 crash logs and each tool's newest 10 reports.
+//! log). A crash is counted by where in the code it happened, whichever thread it was on. At each start, a
+//! low-priority thread keeps the folder in bounds ([`crate::tidy::prune_logs`]): the newest 30 runs' logs, the newest
+//! 30 crash logs and each tool's newest 10 reports.
 //!
 //! A crash also gets a log of its own ([`write_crash_file`]): one for each place in the code that crashed, up to
 //! [`CRASH_FILES_PER_RUN`] places a run, and always one for the crash that ends the app.
+//!
+//! The crash handler uses this log too, so nothing that can crash runs while the log's lock is held: a crash in
+//! there would leave the lock taken, and every later line, the crash's own too, would wait for it for ever.
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError, TryLockError};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Local};
 
@@ -42,9 +48,19 @@ const RECENT: usize = 60;
 /// the same second. The C# app writes none of these, so the start-up sweep knows them as this app's.
 pub const CRASH_PREFIX: &str = "crash-";
 /// The most places in the code a run writes crash logs for, besides the crash that ends the app. A crash that keeps
-/// happening (one bad file hit over and over on every background thread) gets one file, and still goes in the session
-/// log each time, counted once it repeats, but can't fill the folder with files of its own.
+/// happening (one bad file hit over and over on every background thread) gets one file, and goes in the session log
+/// three times and is then counted by its place, so it can't fill the folder with files of its own, nor the log.
 pub const CRASH_FILES_PER_RUN: usize = 10;
+/// The name of the thread that writes the log. A crash there can't wait for the log to be written: it's the one
+/// writing it.
+pub const WRITER_THREAD: &str = "Session log";
+/// How long the app waits as it closes for the logs folder to be kept in bounds, and then for the last lines to be
+/// written: a folder on a drive that's asleep mustn't hold it open (the launcher stops it after 10 seconds).
+const PRUNE_WAIT: Duration = Duration::from_secs(2);
+const WRITER_WAIT: Duration = Duration::from_secs(5);
+/// What std says of a crash it can't recover from (a second crash while one is being cleaned up, or one inside code
+/// that mustn't crash): it ends the app straight after, on whichever thread it was (checked on Rust 1.99).
+const ENDS_THE_APP: [&str; 2] = ["panic in a destructor during cleanup", "panic in a function that cannot unwind"];
 
 /// The places in the code this run has written a crash log for ([`write_crash_file`]).
 pub struct CrashFiles {
@@ -81,6 +97,12 @@ impl CrashFiles {
     fn give_back(&self, place: &str) {
         self.places.lock().unwrap_or_else(|e| e.into_inner()).retain(|p| p != place);
     }
+}
+
+/// Whether a crash ends the app: one on the window's thread (`main`), or one std can't recover from, on any thread
+/// (`message` is what the crash says). `thread` is the crashing thread's name.
+pub fn crash_ends_the_app(thread: Option<&str>, message: Option<&str>) -> bool {
+    thread == Some("main") || message.is_some_and(|m| ENDS_THE_APP.contains(&m))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -120,8 +142,11 @@ pub struct SessionLog {
     tx: Mutex<Option<Sender<Msg>>>,
     state: Mutex<State>,
     writer: Mutex<Option<JoinHandle<()>>>,
-    /// Keeping the logs folder in bounds, off the window's thread; [`SessionLog::close`] waits for it.
+    /// Keeping the logs folder in bounds, off the window's thread; [`SessionLog::close`] waits a little for it.
     pruning: Mutex<Option<JoinHandle<()>>>,
+    /// How far the computer's clock is from UTC, in seconds, as the last line found it: a crash's line tells its time
+    /// with it, without asking the computer for its time zone (see [`time_of_day`]).
+    offset: AtomicI32,
 }
 
 static CURRENT: OnceLock<SessionLog> = OnceLock::new();
@@ -160,11 +185,13 @@ pub fn error(area: &str, message: &str) {
     }
 }
 
-/// A crash, as an error in the "Crash" area: written even once this run's log has stopped writing other lines (rule
-/// 17), up to [`CRASH_ROOM`] more.
-pub fn crash(text: &str) {
+/// A crash at `place` in the code (`file:line`), as an error in the "Crash" area: written even once this run's log has
+/// stopped writing other lines (rule 17), up to [`CRASH_ROOM`] more. Crashes are counted by their place: the same
+/// bug hit on every background thread has another thread's name and backtrace each time, but one place. Called from
+/// the crash handler, so it never waits long and never crashes itself.
+pub fn crash(place: &str, text: &str) {
     if let Some(log) = current() {
-        log.put(Level::Error, "Crash", text, true);
+        log.put(Level::Error, "Crash", text, Some(place));
     }
 }
 
@@ -178,7 +205,7 @@ impl SessionLog {
             Some((_, f)) => {
                 let (tx, rx) = channel();
                 // At normal priority, unlike other background work: a crash waits for it to write the crash out.
-                let handle = std::thread::Builder::new().name("Session log".into()).spawn(move || write_queued(f, rx));
+                let handle = std::thread::Builder::new().name(WRITER_THREAD.into()).spawn(move || write_queued(f, rx));
                 match handle {
                     Ok(h) => (Some(tx), Some(h)),
                     Err(_) => (None, None),
@@ -202,6 +229,7 @@ impl SessionLog {
             state: Mutex::new(State { seen: HashMap::new(), recent: VecDeque::new() }),
             writer: Mutex::new(writer),
             pruning: Mutex::new(pruning),
+            offset: AtomicI32::new(start.offset().local_minus_utc()),
         };
         log.write(Level::Info, "App", header);
         log
@@ -213,40 +241,70 @@ impl SessionLog {
     }
 
     pub fn write(&self, level: Level, area: &str, message: &str) {
-        self.put(level, area, message, false);
+        self.put(level, area, message, None);
     }
 
-    /// Writes a line; a `crash` one even once the log has stopped writing other lines (see [`crash`]).
-    fn put(&self, level: Level, area: &str, message: &str, crash: bool) {
+    /// Writes a line. `crash` is where in the code a crash happened (see [`crash`]): its line is written even once the
+    /// log has stopped writing other lines, it's counted by its place, and it never waits long for the log's lock.
+    fn put(&self, level: Level, area: &str, message: &str, crash: Option<&str>) {
         // Trailing spaces only make the log wide.
         let message: String = message.lines().map(str::trim_end).collect::<Vec<_>>().join("\n");
-        let key = format!("{}\u{1}{area}\u{1}{message}", level.name());
-        let line = {
-            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            if st.seen.len() >= SEEN_MAX && !st.seen.contains_key(&key) {
-                st.seen.clear();
+        // The time and the key the line is counted by are made before the lock is taken: nothing that could crash
+        // runs while it's held (see the top of this file).
+        let time = match crash {
+            // Asking the computer for its time zone can fail, and a failure in the crash handler would end the app
+            // at once: a crash's line uses the zone the last line found.
+            Some(_) => time_of_day(SystemTime::now(), self.offset.load(Ordering::Relaxed)),
+            None => {
+                let now = Local::now();
+                self.offset.store(now.offset().local_minus_utc(), Ordering::Relaxed);
+                now.format("%H:%M:%S%.3f").to_string()
             }
-            let times = st.seen.entry(key).or_insert(0);
-            *times = times.saturating_add(1);
-            let times = *times;
-            let message = if times > REPEATS_WRITTEN {
-                if !is_power_of_ten(times) {
-                    return;
-                }
-                format!("(said {times} times now) {}", message.lines().next().unwrap_or_default())
-            } else {
-                message
-            };
-            let line = format!("{} {:<7} [{area}] {message}", Local::now().format("%H:%M:%S%.3f"), level.name());
-            st.recent.push_back(line.clone());
-            while st.recent.len() > RECENT {
-                st.recent.pop_front();
-            }
-            line
         };
-        if let Some(tx) = self.tx.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-            let _ = tx.send(if crash { Msg::Crash(line) } else { Msg::Line(line) });
+        let key = match crash {
+            Some(place) => format!("Crash\u{1}{place}"),
+            None => format!("{}\u{1}{area}\u{1}{message}", level.name()),
+        };
+        let whole = |message: &str| format!("{time} {:<7} [{area}] {message}", level.name());
+        let line = match self.state_for(crash.is_some()) {
+            Some(mut st) => {
+                if st.seen.len() >= SEEN_MAX && !st.seen.contains_key(&key) {
+                    st.seen.clear();
+                }
+                let times = st.seen.entry(key).or_insert(0);
+                *times = times.saturating_add(1);
+                let times = *times;
+                let line = if times > REPEATS_WRITTEN {
+                    if !is_power_of_ten(times) {
+                        return;
+                    }
+                    let first = message.lines().next().unwrap_or_default();
+                    match crash {
+                        Some(place) => whole(&format!("(crashed at {place} {times} times now) {first}")),
+                        None => whole(&format!("(said {times} times now) {first}")),
+                    }
+                } else {
+                    whole(&message)
+                };
+                st.recent.push_back(line.clone());
+                while st.recent.len() > RECENT {
+                    st.recent.pop_front();
+                }
+                line
+            }
+            // Only a crash gets here, when the lock stays busy: its line is written, just not counted.
+            None => whole(&message),
+        };
+        // This lock is only ever held to hand a line over (or take the writer away as the log closes), which can't
+        // crash or wait, so even a crash's line waits for it rather than be lost.
+        if let Some(tx) = self.tx.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
+            let _ = tx.send(if crash.is_some() { Msg::Crash(line) } else { Msg::Line(line) });
         }
+    }
+
+    /// The counts and recent lines. A crash waits only a moment for them (see [`lock_briefly`]).
+    fn state_for(&self, crash: bool) -> Option<MutexGuard<'_, State>> {
+        if crash { lock_briefly(&self.state) } else { Some(self.state.lock().unwrap_or_else(PoisonError::into_inner)) }
     }
 
     /// The last lines written, newest last, for a note to Claude.
@@ -268,19 +326,69 @@ impl SessionLog {
         }
     }
 
-    /// Writes "Closed" and stops the writer. Later lines are kept in memory only.
+    /// Writes "Closed" and stops the writer. Later lines are kept in memory only. It waits a little for the logs
+    /// folder to be kept in bounds first, so a crash doing that still reaches this log, and then for the last lines
+    /// to be written; never long, as a folder on a drive that's asleep mustn't hold the app open.
     pub fn close(&self) {
+        self.wait_for_pruning(PRUNE_WAIT);
         self.write(Level::Info, "App", "Closed");
         if let Some(tx) = self.tx.lock().unwrap_or_else(|e| e.into_inner()).take() {
             let _ = tx.send(Msg::Close);
         }
         if let Some(h) = self.writer.lock().unwrap_or_else(|e| e.into_inner()).take() {
-            let _ = h.join();
-        }
-        if let Some(h) = self.pruning.lock().unwrap_or_else(|e| e.into_inner()).take() {
-            let _ = h.join();
+            let _ = wait_for(h, WRITER_WAIT);
         }
     }
+
+    /// Waits up to `limit` for the start's look at the logs folder to finish; says whether it has.
+    pub(crate) fn wait_for_pruning(&self, limit: Duration) -> bool {
+        let mut pruning = self.pruning.lock().unwrap_or_else(|e| e.into_inner());
+        match pruning.take() {
+            None => true,
+            Some(h) => match wait_for(h, limit) {
+                Ok(()) => true,
+                // Still going: it's put back, so a later wait (or the app's end) still finds it.
+                Err(h) => {
+                    *pruning = Some(h);
+                    false
+                }
+            },
+        }
+    }
+}
+
+/// Waits up to `limit` for a thread to finish. Gives it back if it hasn't.
+fn wait_for(thread: JoinHandle<()>, limit: Duration) -> Result<(), JoinHandle<()>> {
+    let until = Instant::now() + limit;
+    while !thread.is_finished() {
+        if Instant::now() >= until {
+            return Err(thread);
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let _ = thread.join();
+    Ok(())
+}
+
+/// Takes a lock for the crash handler: it tries for a moment (another thread may have it for a line of its own), and
+/// then goes on without it rather than wait, as the thread that crashed may be the one holding it.
+fn lock_briefly<T>(lock: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
+    for _ in 0..200 {
+        match lock.try_lock() {
+            Ok(guard) => return Some(guard),
+            Err(TryLockError::Poisoned(e)) => return Some(e.into_inner()),
+            Err(TryLockError::WouldBlock) => std::thread::yield_now(),
+        }
+    }
+    None
+}
+
+/// The time of day as the log writes it (`14:30:05.123`), from the clock and how far it is from UTC (`offset`, in
+/// seconds), without asking the computer for its time zone: for a crash's line.
+fn time_of_day(now: SystemTime, offset: i32) -> String {
+    let since = now.duration_since(UNIX_EPOCH).unwrap_or_default();
+    let secs = i64::try_from(since.as_secs()).unwrap_or(0).saturating_add(i64::from(offset)).rem_euclid(24 * 60 * 60);
+    format!("{:02}:{:02}:{:02}.{:03}", secs / 3600, secs / 60 % 60, secs % 60, since.subsec_millis())
 }
 
 fn create_file(folder: &Path, start: DateTime<Local>) -> Option<(PathBuf, File)> {
@@ -290,7 +398,18 @@ fn create_file(folder: &Path, start: DateTime<Local>) -> Option<(PathBuf, File)>
     for n in 1..100 {
         let name = if n == 1 { format!("{PREFIX}{stamp}.log") } else { format!("{PREFIX}{stamp}-{n}.log") };
         let path = folder.join(name);
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        // On Windows nobody can remove the log while this run is writing it (another copy of the app keeping the
+        // folder in bounds as it starts): the removal fails, and is tried again at a later start, once this run has
+        // closed it. Anyone can still read it.
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            // FILE_SHARE_READ | FILE_SHARE_WRITE, without FILE_SHARE_DELETE.
+            options.share_mode(0x1 | 0x2);
+        }
+        match options.open(&path) {
             Ok(f) => return Some((path, f)),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(_) => return None,
@@ -304,6 +423,7 @@ fn write_queued(file: File, rx: Receiver<Msg>) {
     let mut out = BufWriter::new(file);
     let mut written: u64 = 0;
     let mut full = false;
+    let mut no_room_for_crashes = false;
     while let Ok(msg) = rx.recv() {
         let mut next = Some(msg);
         while let Some(msg) = next.take() {
@@ -325,6 +445,14 @@ fn write_queued(file: File, rx: Receiver<Msg>) {
                     if written + size <= MAX_BYTES + CRASH_ROOM {
                         written += size;
                         let _ = writeln!(out, "{line}");
+                    } else if !no_room_for_crashes {
+                        // Said once, so whoever reads the log knows the crashes didn't stop, only their lines here.
+                        no_room_for_crashes = true;
+                        let _ = writeln!(
+                            out,
+                            "(no room for more crashes in this log; the first crash at each place has a crash-….log \
+                             file of its own)"
+                        );
                     }
                 }
                 Msg::Flush(done) => {
@@ -377,7 +505,8 @@ pub fn write_crash_file(
         return None;
     }
     let written = new_crash_file(folder, text, secs);
-    if written.is_none() {
+    // A crash that ends the app took no place (it always gets a file), so it has none to give back.
+    if written.is_none() && !fatal {
         files.give_back(place);
     }
     written
@@ -671,11 +800,11 @@ mod tests {
             log.write(Level::Warning, "Scan", &format!("{i} {filler}"));
         }
         log.write(Level::Warning, "Scan", "not written: the log is full");
-        log.put(Level::Error, "Crash", "Music Organiser crashed on thread Scan 1", true);
-        // A crash that keeps happening still can't fill the disk: at most 1 MB more of them.
+        log.put(Level::Error, "Crash", "Music Organiser crashed on thread Scan 1", Some("src/scan.rs:1"));
+        // Crashes at many places still can't fill the disk: at most 1 MB more of them.
         let big = "y".repeat(100 * 1024);
         for i in 0..30 {
-            log.put(Level::Error, "Crash", &format!("crash {i} {big}"), true);
+            log.put(Level::Error, "Crash", &format!("crash {i} {big}"), Some(&format!("src/read.rs:{i}")));
         }
         log.close();
         let path = log.path().expect("a file").to_owned();
@@ -687,6 +816,97 @@ mod tests {
         let size = std::fs::metadata(&path).expect("there").len();
         assert!(size <= MAX_BYTES + CRASH_ROOM + 1024, "{size}");
         assert!(!text.contains("[Crash] crash 29 "), "the crashes past the extra room aren't written");
+        assert_eq!(text.matches("(no room for more crashes in this log;").count(), 1, "and it says so, once");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_crash_while_this_thread_holds_the_logs_lock_is_still_written() {
+        let dir = temp_folder("busy");
+        let log = SessionLog::new(&dir, Local::now(), "start");
+        {
+            // As if this thread had crashed in the middle of writing a line: the lock is still taken.
+            let _held = log.state.lock().expect("not poisoned");
+            log.put(Level::Error, "Crash", "Music Organiser crashed on thread Scan 1", Some("src/a.rs:1"));
+        }
+        log.close();
+        let text = std::fs::read_to_string(log.path().expect("a file")).expect("readable");
+        assert!(text.contains("Error   [Crash] Music Organiser crashed on thread Scan 1"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn crashes_at_one_place_are_counted_whichever_thread_they_were_on() {
+        let dir = temp_folder("crash-repeats");
+        let log = SessionLog::new(&dir, Local::now(), "start");
+        // The same bad file on every background thread: another thread's name and backtrace each time.
+        for i in 0..12 {
+            let text = format!("Music Organiser crashed on thread Background {i}\nat src/x.rs:42\n\n{i}: backtrace");
+            log.put(Level::Error, "Crash", &text, Some("src/x.rs:42"));
+        }
+        log.put(Level::Error, "Crash", "Music Organiser crashed on thread Scan 1", Some("src/y.rs:7"));
+        log.close();
+        let text = std::fs::read_to_string(log.path().expect("a file")).expect("readable");
+        assert_eq!(text.matches("[Crash] Music Organiser crashed on thread Background").count(), 3, "{text}");
+        assert!(text.contains("[Crash] (crashed at src/x.rs:42 10 times now) Music Organiser crashed on thread"));
+        assert!(!text.contains("Background 11"), "the later ones are only counted");
+        assert!(text.contains("[Crash] Music Organiser crashed on thread Scan 1"), "another place is written");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_crash_tells_its_time_without_the_time_zone() {
+        let at = UNIX_EPOCH + Duration::from_millis((25 * 3600 + 61) * 1000 + 500);
+        assert_eq!(time_of_day(at, 3600), "02:01:01.500");
+        assert_eq!(time_of_day(UNIX_EPOCH + Duration::from_secs(30 * 60), -3600), "23:30:00.000", "the day before");
+    }
+
+    #[test]
+    fn the_folder_is_kept_in_bounds_at_each_start() {
+        let dir = temp_folder("start-prune");
+        let _ = std::fs::create_dir_all(&dir);
+        // Dated far after now (a clock that was wrong): they count as the oldest, and none is still being written.
+        let far = std::time::SystemTime::now() + 10_000 * crate::tidy::DAY;
+        for i in 0..KEPT + 5 {
+            let old = dir.join(format!("{PREFIX}2099-01-01_00-00-{i:02}.log"));
+            std::fs::write(&old, "old").expect("writable");
+            File::options().write(true).open(&old).and_then(|f| f.set_modified(far)).expect("settable");
+        }
+        let log = SessionLog::new(&dir, Local::now(), "start");
+        assert!(log.wait_for_pruning(Duration::from_secs(60)), "the start's look at the folder finishes");
+        log.close();
+        let logs: Vec<String> = std::fs::read_dir(&dir)
+            .expect("listable")
+            .map(|e| e.expect("listed").file_name().to_string_lossy().into_owned())
+            .filter(|n| is_session_log(n))
+            .collect();
+        assert_eq!(logs.len(), KEPT, "{logs:?}");
+        assert!(log.path().is_some_and(|p| p.exists()), "this run's own stays");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_crash_that_ends_the_app_is_known_on_any_thread() {
+        assert!(crash_ends_the_app(Some("main"), Some("index out of bounds")));
+        assert!(crash_ends_the_app(Some("Scan 1"), Some("panic in a destructor during cleanup")));
+        assert!(crash_ends_the_app(None, Some("panic in a function that cannot unwind")));
+        assert!(!crash_ends_the_app(Some("Scan 1"), Some("index out of bounds")));
+        assert!(!crash_ends_the_app(Some("Background 3"), None));
+    }
+
+    #[test]
+    fn a_crash_that_ends_the_app_frees_no_other_crash_its_place() {
+        let dir = temp_folder("fatal-blocked");
+        let _ = std::fs::create_dir_all(&dir);
+        let logs = dir.join("logs");
+        let files = CrashFiles::new();
+        assert!(write_crash_file(&logs, "first", 1_700_000_000, "src/a.rs:1", false, &files).is_some());
+        // The crash that ends the app, at the same place, when no file can be made (a file in the folder's way).
+        let blocked = dir.join("blocked");
+        std::fs::write(&blocked, "in the way").expect("writable");
+        assert_eq!(write_crash_file(&blocked, "the end", 1_700_000_001, "src/a.rs:1", true, &files), None);
+        // That place had its file: it gets no second one.
+        assert_eq!(write_crash_file(&logs, "again", 1_700_000_002, "src/a.rs:1", false, &files), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

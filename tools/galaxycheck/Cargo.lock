@@ -2897,6 +2897,7 @@ dependencies = [
  "mo-convert",
  "mo-formats",
  "mo-library",
+ "mo-presets",
  "mo-sounds",
  "mo-space",
  "rayon",
@@ -2965,6 +2966,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mo-presets"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "mo-formats",
+ "rayon",
+ "rusqlite",
+ "sha2",
+ "zip",
+]
+
+[[package]]
 name = "mo-sounds"
 version = "0.1.0"
 dependencies = [
@@ -2998,6 +3011,7 @@ dependencies = [
  "sysinfo",
  "trash",
  "windows-registry",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

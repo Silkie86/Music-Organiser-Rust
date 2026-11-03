@@ -253,14 +253,16 @@ pub fn finish_up() {
     }
 }
 
-/// For a crash. The words typed are kept straight away on this thread, as the app may be about to end. Only a crash
-/// of the window's own thread ends the app: then the lock comes down, but after a crash on any other thread the app
-/// goes on with the note still open, so the lock stays as it should be.
-pub fn after_crash(window_thread: bool) {
-    keep_unsaved();
-    if window_thread {
+/// For a crash. When it ends the app (`ends_the_app`), the words typed are kept straight away on this thread and the
+/// lock comes down, as there's no time to hand them to anyone. After any other crash the app goes on with the note
+/// still open: the "Note files" thread keeps the words and puts the lock as it should be, as it does everything with
+/// the note's files, so two threads never write the draft at once.
+pub fn after_crash(ends_the_app: bool) {
+    if ends_the_app {
+        keep_unsaved();
         note::writing(&note::notes_dir(), false);
     } else {
+        on_files(FileJob::KeepDraft);
         update_lock();
     }
 }
