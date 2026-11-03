@@ -258,6 +258,42 @@ cargo run -p mo-theorybench --release -- keyfit D:\Bench\packs.jsonl --inputs fu
   "version 5, with version 4's numbers", in the report and in `test-runs.md`. Their `--shipped` scores version 4; to
   compare with what ships, make the dump before putting version 4's weights back.
 
+### Checking the finder on his packs (`keycheck`)
+
+Until the MIDI page shows keys, this is how Solomon can see for himself what version 5 changed, on his computer. It
+reads MIDI files as the page does and sets the old finder (version 4, before the rescale on his packs) beside the one
+built in, part by part. It only prints: nothing is written.
+
+```
+cargo run -p mo-theorybench --release -- keycheck "L:\New Midi\Some Pack"
+cargo run -p mo-theorybench --release -- keycheck "L:\New Midi" --changed
+cargo run -p mo-theorybench --release -- keycheck "L:\New Midi" --counts
+```
+
+- Give folders, MIDI files, or both. Each part that isn't drums gets a line under its file: what the old finder says,
+  then the new one, each with the chance it gives ("C minor 93%", "A minor or C major 81%", "unsure, leaning Eb major
+  37%"). The file's line says the key its name gives, read as `packs` reads names. A file whose name says nothing
+  takes the key of the nearest folder above it (up to three up) that names one. The folder given counts too, so a
+  pack reads the same whether it or the folder of all the packs is given. A part's kind is guessed as the MIDI page
+  guesses it, from its notes and the names of its track, its file and the three folders nearest it.
+- "better": only the new finder gives the name's key, or leans to it. "worse": only the old one does. "changed": they
+  say different things, neither nearer the name. `--changed` prints only the parts the two answer differently;
+  `--counts` prints only the counts.
+- The counts are of the parts whose names give one key: every name, then the minor and the major names apart. They
+  say how often each finder gives the name's key or leans to it (of every part, of the whole loops, and of the pieces
+  the page cut from longer parts); how often it's sure of one key, and how often that key is the name's; how often it
+  gives a key or its relative, and how often the name's key is one of the two.
+- On `L:\New Midi`, the whole loops' line should come out near the refit report's 46.1% (version 4) and 56.0%
+  (version 5). It counts nearly what the report calls right, on all his packs where the report had 4 of every 5. The
+  report also counts the likeliest key of a part the finder gives no key at all (too few notes, or not in one scale),
+  which this doesn't. Version 5 learned about twenty of its numbers from these packs, so on them it looks a little
+  better than it would on packs it hasn't heard.
+- Version 4's numbers are kept for this in `src/keyfind_v4.rs`, copied from 3be3d26 with their credits. A test checks
+  them against the hash version 4 shipped with, so the old finder stays version 4 as it shipped.
+- What it prints names his files. To keep it, save it outside this folder: `... --counts > D:\Bench\keycheck.txt`.
+- A folder typed with a backslash at the end (`"L:\New Midi\"`) reaches the program with a quote at its end, because
+  Windows reads `\"` as a quote. The quote is dropped, so the folder is still found.
+
 ## Chords
 
 The C# app's chord reader runs unchanged through the small C# helper in `cs/`, which needs .NET 10 and a clone of the

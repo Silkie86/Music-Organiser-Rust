@@ -6,7 +6,8 @@
 use std::cell::RefCell;
 
 use mo_formats::NoteEvent;
-use mo_harmony::{Grid, KEY_FINDER_VERSION, KeyFact, KeyReader, Mode, Note, Part, Span};
+use mo_harmony::keyfind::{self, Model, SHIPPED};
+use mo_harmony::{Grid, KEY_FINDER_VERSION, KeyFact, KeyReader, KeyReading, Mode, Note, Part, Span};
 
 use crate::PPQ;
 use crate::analyser::{self, FEATURE_COUNT, Shape};
@@ -46,23 +47,37 @@ fn heard_as(role: Role) -> mo_harmony::Role {
 /// as a window (where its first bass note needn't be home). Gives the key the part's shape is counted from (the
 /// answer, or the key it leans to) and the whole reading to keep; none for drums or without pitched notes.
 pub fn read(reader: &mut KeyReader, notes: &[NoteEvent], role: Role, cut: bool) -> (Option<Key>, Option<KeyFact>) {
-    if role == Role::Drums {
-        return (None, None);
-    }
-    let heard: Vec<Note> = notes
-        .iter()
-        .filter(|n| !n.muted)
-        .map(|n| Note { start: n.start, length: n.length, key: n.key, velocity: n.velocity })
-        .collect();
-    let parts = [Part { role: heard_as(role), notes: &heard }];
-    let span = if cut { Span::Window } else { Span::Loop };
-    let Some(reading) = reader.read(&parts, Grid::four_four(PPQ as u32), span) else { return (None, None) };
+    let Some(reading) = reading(reader, notes, role, cut, &SHIPPED) else { return (None, None) };
     let key = reading.answer.leaning_key().map(|k| Key {
         tonic: k.tonic.number(),
         minor: k.mode == Mode::Minor,
         confidence: reading.shown_chance,
     });
     (key, Some(reading.fact()))
+}
+
+/// The whole reading of one part, heard as [`read`] hears it, by a finder with these numbers: [`SHIPPED`] for the
+/// one built in (`theorybench keycheck` passes an older one's too, to compare the two). None for drums or without
+/// pitched notes.
+pub fn reading(
+    reader: &mut KeyReader,
+    notes: &[NoteEvent],
+    role: Role,
+    cut: bool,
+    model: &Model,
+) -> Option<KeyReading> {
+    if role == Role::Drums {
+        return None;
+    }
+    let pitched: Vec<Note> = notes
+        .iter()
+        .filter(|n| !n.muted)
+        .map(|n| Note { start: n.start, length: n.length, key: n.key, velocity: n.velocity })
+        .collect();
+    let parts = [Part { role: heard_as(role), notes: &pitched }];
+    let span = if cut { Span::Window } else { Span::Loop };
+    let heard = reader.hear(&parts, Grid::four_four(PPQ as u32))?;
+    Some(keyfind::read_heard(&heard, span, model))
 }
 
 /// The key a stored reading names for sure (one key, or the likelier of a pair), for the page to show and search by.
@@ -149,6 +164,22 @@ mod tests {
         assert!(matches!(fact.answer(), Some(KeyAnswer::Key(_))), "{fact:?}");
         let shown = sure_key(&fact).expect("a key to show");
         assert_eq!((shown.tonic, shown.minor), (9, true), "{fact:?}");
+    }
+
+    #[test]
+    fn a_reading_uses_the_numbers_it_is_given() {
+        let mut reader = KeyReader::new();
+        let notes = a_minor();
+        // No weight for anything: every key as likely as the next, so no clear key and none to lean to.
+        let flat = [0.0; keyfind::FEATURES];
+        let model = Model { weights: &flat, ..SHIPPED };
+        let none = reading(&mut reader, &notes, Role::Melody, false, &model).unwrap();
+        assert!(none.chances.iter().all(|&p| (p - 1.0 / 24.0).abs() < 1e-12), "{none:?}");
+        assert!(matches!(none.answer, KeyAnswer::Unclear { leaning: None, .. }), "{none:?}");
+        // With the numbers built in, the reading is the one `read` keeps.
+        let built_in = reading(&mut reader, &notes, Role::Melody, false, &SHIPPED).unwrap();
+        assert_eq!(Some(built_in.fact()), read(&mut reader, &notes, Role::Melody, false).1);
+        assert_eq!(reading(&mut reader, &notes, Role::Drums, false, &SHIPPED), None, "drums aren't heard");
     }
 
     #[test]

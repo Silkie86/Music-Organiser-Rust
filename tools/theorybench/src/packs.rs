@@ -163,7 +163,7 @@ pub fn read_name(name: &str) -> Named {
 }
 
 /// Where a file's key comes from: its own name, or a folder's (the nearest that names notes).
-fn label(stem: &str, folders: &[String]) -> (Named, &'static str) {
+pub(crate) fn label(stem: &str, folders: &[String]) -> (Named, &'static str) {
     match read_name(stem) {
         Named::Nothing => {}
         named => return (named, "file name"),
@@ -208,7 +208,7 @@ enum Outcome {
 }
 
 /// A file's place below the folder it was found in: the folders on the way down, and its name without the ending.
-fn place(path: &Path, root: &Path) -> (Vec<String>, String) {
+pub(crate) fn place(path: &Path, root: &Path) -> (Vec<String>, String) {
     let below = path.strip_prefix(root).unwrap_or(path);
     let mut parts: Vec<String> = below
         .components()
@@ -285,7 +285,7 @@ fn read_file(path: &Path, root: &Path, root_name: &str) -> Outcome {
 /// (`mo_library::scan::find_files`: a folder given inside another walked once, as part of the outer one; hidden
 /// folders passed by) and kept as the MIDI page keeps them (`mo_midi::indexer::worth_reading`), in order of path. Each
 /// comes with the folder given it's under (the outermost), and how many folders couldn't be read.
-fn midi_files(roots: &[PathBuf]) -> Result<(Vec<(PathBuf, usize)>, usize), String> {
+pub(crate) fn midi_files(roots: &[PathBuf]) -> Result<(Vec<(PathBuf, usize)>, usize), String> {
     if let Some(missing) = roots.iter().find(|r| !r.is_dir()) {
         return Err(format!("{}: not a folder that can be read", missing.display()));
     }
