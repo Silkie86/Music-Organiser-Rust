@@ -60,16 +60,21 @@ impl CrashFiles {
 
     /// Whether a crash at `place` gets a file: always when it ends the app (`fatal`); otherwise only the first crash at
     /// each place, and only while fewer than [`CRASH_FILES_PER_RUN`] places have one.
-    fn take(&self, place: &str, fatal: bool) -> bool {
+    fn allowed(&self, place: &str, fatal: bool) -> bool {
         if fatal {
             return true;
         }
+        let places = self.places.lock().unwrap_or_else(|e| e.into_inner());
+        places.len() < CRASH_FILES_PER_RUN && !places.iter().any(|p| p == place)
+    }
+
+    /// A file was written for a crash at `place`. Counted only once it's there, so a write that failed (a full disk)
+    /// doesn't use up the place's file.
+    fn wrote(&self, place: &str) {
         let mut places = self.places.lock().unwrap_or_else(|e| e.into_inner());
-        if places.len() >= CRASH_FILES_PER_RUN || places.iter().any(|p| p == place) {
-            return false;
+        if !places.iter().any(|p| p == place) {
+            places.push(place.to_owned());
         }
-        places.push(place.to_owned());
-        true
     }
 }
 
@@ -108,6 +113,8 @@ pub struct SessionLog {
     tx: Mutex<Option<Sender<Msg>>>,
     state: Mutex<State>,
     writer: Mutex<Option<JoinHandle<()>>>,
+    /// Clearing old session and crash logs, off the window's thread; [`SessionLog::close`] waits for it.
+    pruning: Mutex<Option<JoinHandle<()>>>,
 }
 
 static CURRENT: OnceLock<SessionLog> = OnceLock::new();
@@ -164,12 +171,27 @@ impl SessionLog {
             }
             None => (None, None),
         };
-        prune(folder, KEPT, path.as_deref());
+        // Old logs are cleared on a thread of their own, so the window never waits on the disk for it (rules 12 and
+        // 21). Crash logs too, here rather than only in the sweep 20 s on, so an app that crashes sooner (a crash
+        // loop) still keeps them in bounds.
+        let pruning = {
+            let (folder, just_made) = (folder.to_path_buf(), path.clone());
+            std::thread::Builder::new()
+                .name("Prune logs".into())
+                .spawn(move || {
+                    let now = std::time::SystemTime::now();
+                    prune(&folder, KEPT, just_made.as_deref(), now);
+                    let young = crate::tidy::YOUNG;
+                    crate::tidy::keep_newest(&folder, is_crash_log, crate::tidy::CRASH_LOGS_KEPT, now, None, young);
+                })
+                .ok()
+        };
         let log = SessionLog {
             path,
             tx: Mutex::new(tx),
             state: Mutex::new(State { seen: HashMap::new(), recent: VecDeque::new() }),
             writer: Mutex::new(writer),
+            pruning: Mutex::new(pruning),
         };
         log.write(Level::Info, "App", header);
         log
@@ -240,6 +262,9 @@ impl SessionLog {
         if let Some(h) = self.writer.lock().unwrap_or_else(|e| e.into_inner()).take() {
             let _ = h.join();
         }
+        if let Some(h) = self.pruning.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = h.join();
+        }
     }
 }
 
@@ -296,8 +321,8 @@ fn write_queued(file: File, rx: Receiver<Msg>) {
 
 /// Deletes all but the newest `keep` of this app's session logs, newest by when they were last written, never
 /// `just_made` (this run's), and only ones named exactly as [`create_file`] names them.
-fn prune(folder: &Path, keep: usize, just_made: Option<&Path>) {
-    crate::tidy::keep_newest(folder, is_session_log, keep, std::time::SystemTime::now(), just_made);
+fn prune(folder: &Path, keep: usize, just_made: Option<&Path>, now: std::time::SystemTime) {
+    crate::tidy::keep_newest(folder, is_session_log, keep, now, just_made, crate::tidy::YOUNG);
 }
 
 /// Whether `name` is a session log as [`create_file`] names them, and nothing else: `rust-session-`, the time
@@ -325,7 +350,7 @@ pub fn write_crash_file(
     fatal: bool,
     files: &CrashFiles,
 ) -> Option<PathBuf> {
-    if !files.take(place, fatal) {
+    if !files.allowed(place, fatal) {
         return None;
     }
     std::fs::create_dir_all(folder).ok()?;
@@ -335,6 +360,7 @@ pub fn write_crash_file(
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(mut f) => {
                 let _ = f.write_all(text.as_bytes());
+                files.wrote(place);
                 return Some(path);
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -403,12 +429,8 @@ mod tests {
     #[test]
     fn same_second_runs_get_their_own_files_and_old_ones_go() {
         let dir = temp_folder("prune");
-        let now = Local::now();
-        let a = SessionLog::new(&dir, now, "a");
-        let b = SessionLog::new(&dir, now, "b");
-        assert_ne!(a.path(), b.path());
-        a.close();
-        b.close();
+        let _ = std::fs::create_dir_all(&dir);
+        // A log's age runs from the later of when it was made and changed, so the old ones are made first.
         let long_ago = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(946_684_800);
         for i in 0..40 {
             let old = dir.join(format!("{PREFIX}2000-01-01_00-00-{i:02}.log"));
@@ -432,10 +454,20 @@ mod tests {
             let f = File::options().write(true).open(dir.join(name)).expect("openable");
             f.set_modified(long_ago).expect("settable");
         }
-        prune(&dir, KEPT, None);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let now = Local::now();
+        let a = SessionLog::new(&dir, now, "a");
+        let b = SessionLog::new(&dir, now, "b");
+        assert_ne!(a.path(), b.path());
+        a.close();
+        b.close();
+        // Every log was made a moment ago, so none is a day old yet: nothing went.
+        assert_eq!(std::fs::read_dir(&dir).expect("listable").count(), 42 + 5 + copies.len());
+        // Three days on, the oldest go.
+        prune(&dir, KEPT, None, std::time::SystemTime::now() + 3 * crate::tidy::DAY);
         let left = std::fs::read_dir(&dir).expect("listable").count();
         assert_eq!(left, KEPT + 5 + copies.len());
-        assert!(a.path().is_some_and(|p| p.exists()), "the newest logs stay");
+        assert!(a.path().is_some_and(|p| p.exists()) && b.path().is_some_and(|p| p.exists()), "the newest stay");
         for name in &copies {
             assert!(dir.join(name).exists(), "{name} stays");
         }
@@ -443,32 +475,47 @@ mod tests {
     }
 
     #[test]
-    fn the_log_just_made_always_stays_and_one_dated_after_now_goes_first() {
+    fn the_log_just_made_always_stays_and_one_dated_far_after_now_goes_first() {
         let dir = temp_folder("future");
         let _ = std::fs::create_dir_all(&dir);
-        let set = |name: &str, when: std::time::SystemTime| {
-            std::fs::write(dir.join(name), "old").expect("writable");
-            File::options().write(true).open(dir.join(name)).expect("openable").set_modified(when).expect("settable");
+        let set = |name: &str, when: Option<std::time::SystemTime>| {
+            std::fs::write(dir.join(name), "log").expect("writable");
+            if let Some(when) = when {
+                let f = File::options().write(true).open(dir.join(name)).expect("openable");
+                f.set_modified(when).expect("settable");
+            }
         };
-        let now = std::time::SystemTime::now();
-        // Others of this app's logs dated years after now (a clock that was wrong once): without care they'd hold
-        // every place, and the log just made would be the oldest.
-        for i in 0..KEPT + 3 {
-            set(&format!("{PREFIX}2099-01-01_00-00-{i:02}.log"), now + std::time::Duration::from_secs(1_000_000_000));
+        let names = |dir: &Path| -> Vec<String> {
+            std::fs::read_dir(dir)
+                .expect("listable")
+                .map(|e| e.expect("listed").file_name().to_string_lossy().into_owned())
+                .collect()
+        };
+        let later = std::time::SystemTime::now() + 3 * crate::tidy::DAY;
+        // The log just made, made first so it's the oldest of all; then others, newer.
+        let mine = format!("{PREFIX}1999-01-01_00-00-00.log");
+        set(&mine, None);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        for i in 0..KEPT + 2 {
+            set(&format!("{PREFIX}2001-01-01_00-00-{i:02}.log"), None);
         }
-        set(&format!("{PREFIX}2001-01-01_00-00-00.log"), now - std::time::Duration::from_secs(1_000_000));
-        // Started with a clock set years back, so its own time is the oldest of all.
-        let start = DateTime::parse_from_rfc3339("1999-01-01T00:00:00+00:00").expect("a time").with_timezone(&Local);
-        let log = SessionLog::new(&dir, start, "start");
-        log.close();
-        let mine = log.path().expect("a file").to_owned();
-        assert!(mine.exists(), "the log just made stays");
-        let left: Vec<String> = std::fs::read_dir(&dir)
-            .expect("listable")
-            .map(|e| e.expect("listed").file_name().to_string_lossy().into_owned())
-            .collect();
+        prune(&dir, KEPT, Some(&dir.join(&mine)), later);
+        let left = names(&dir);
         assert_eq!(left.len(), KEPT);
-        assert!(left.contains(&format!("{PREFIX}2001-01-01_00-00-00.log")), "the rightly dated one isn't pushed out");
+        assert!(left.contains(&mine), "the log just made stays");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Logs dated decades on (a clock that was plainly wrong once) would hold every place: they go first.
+        let _ = std::fs::create_dir_all(&dir);
+        let rightly = format!("{PREFIX}2001-01-01_00-00-00.log");
+        set(&rightly, None);
+        for i in 0..KEPT + 3 {
+            set(&format!("{PREFIX}2099-01-01_00-00-{i:02}.log"), Some(later + 10_000 * crate::tidy::DAY));
+        }
+        prune(&dir, KEPT, None, later);
+        let left = names(&dir);
+        assert_eq!(left.len(), KEPT);
+        assert!(left.contains(&rightly), "the rightly dated one isn't pushed out");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

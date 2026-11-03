@@ -59,7 +59,14 @@ const LIBRARY_COPY: &str = "library-copy.db";
 
 /// How long a file being written may take before what's left of it counts as a crash's leftover.
 const WRITING: Duration = Duration::from_secs(60 * 60);
-const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+pub(crate) const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+/// How far after now a file's time may be and still count as just made: the clock was a little fast when it was
+/// written, or was set back since. Further on than this, the clock was plainly wrong once, and the time counts for
+/// nothing (the file is as old as can be).
+const SKEW: Duration = DAY;
+/// Logs (session and crash) younger than this are never removed to keep the count down: one may be another copy of
+/// the app's, still being written, or a crash that just happened.
+pub(crate) const YOUNG: Duration = DAY;
 
 /// How long after start the sweep waits, so it never competes with the first page for the disk (rule 12).
 const WAIT: Duration = Duration::from_secs(20);
@@ -88,6 +95,8 @@ impl Tidied {
             }
             // Gone already (another copy of the app swept it first): nothing to do.
             Err(e) if e.kind() == ErrorKind::NotFound => {}
+            // Not this user's to remove (someone else's file in a shared temp folder): it isn't ours, so not a fault.
+            Err(e) if e.kind() == ErrorKind::PermissionDenied && !cfg!(windows) => {}
             Err(_) => self.failed += 1,
         }
     }
@@ -141,9 +150,14 @@ fn report(done: Tidied) {
 pub fn sweep(places: &Places, now: SystemTime) -> Tidied {
     let mut done = Tidied::default();
     if let Some(logs) = real_folder(&places.data, &["logs"]) {
-        done.add(keep_newest(&logs, is_crash_log, CRASH_LOGS_KEPT, now, None));
+        // The folder is listed once, then each kind keeps its newest.
+        let all = own_files(&logs, |n| is_crash_log(n) || REPORTS.iter().any(|start| is_report(n, start)));
+        let of = |is_kind: &dyn Fn(&str) -> bool| -> Vec<(PathBuf, Metadata)> {
+            all.iter().filter(|(p, _)| p.file_name().and_then(|n| n.to_str()).is_some_and(is_kind)).cloned().collect()
+        };
+        done.add(keep_newest_of(of(&is_crash_log), CRASH_LOGS_KEPT, now, None, YOUNG));
         for start in REPORTS {
-            done.add(keep_newest(&logs, |n| is_report(n, start), REPORTS_KEPT, now, None));
+            done.add(keep_newest_of(of(&|n| is_report(n, start)), REPORTS_KEPT, now, None, Duration::ZERO));
         }
     }
     done.add(remove_older(&places.data, is_cut_short, WRITING, now));
@@ -172,19 +186,34 @@ fn real_folder(base: &Path, inside: &[&str]) -> Option<PathBuf> {
     Some(at)
 }
 
-/// Deletes all but the newest `keep` of the plain files in `folder` whose names `is_kind` knows, newest by when they
-/// were last written. A time after `now` (a clock that was wrong once) would hold its place for ever, so it counts as
-/// the oldest. `spare`, the file just made, is never deleted, and counts as one of the newest. Nothing else in the
-/// folder is looked at.
+/// Deletes all but the newest `keep` of the plain files right in `folder` whose names `is_kind` knows (see
+/// [`keep_newest_of`]). Nothing else in the folder is looked at, and nothing in a folder that is a link or a junction.
 pub(crate) fn keep_newest(
     folder: &Path,
     is_kind: impl Fn(&str) -> bool,
     keep: usize,
     now: SystemTime,
     spare: Option<&Path>,
+    young: Duration,
+) -> Tidied {
+    if !fs::symlink_metadata(folder).is_ok_and(|m| m.is_dir()) {
+        return Tidied::default();
+    }
+    keep_newest_of(own_files(folder, is_kind), keep, now, spare, young)
+}
+
+/// Deletes all but the newest `keep` of `files`, newest by the later of when each was made and last changed (see
+/// [`age`]). A time up to [`SKEW`] after `now` counts as now; one further on (a clock that was plainly wrong once)
+/// would hold its place for ever, so it counts as the oldest. `spare`, the file just made, is never deleted and
+/// counts as one of the newest, and neither is a file younger than `young`.
+fn keep_newest_of(
+    mut files: Vec<(PathBuf, Metadata)>,
+    keep: usize,
+    now: SystemTime,
+    spare: Option<&Path>,
+    young: Duration,
 ) -> Tidied {
     let mut done = Tidied::default();
-    let mut files = own_files(folder, is_kind);
     let before = files.len();
     if let Some(spare) = spare {
         files.retain(|(p, _)| p != spare);
@@ -193,20 +222,26 @@ pub(crate) fn keep_newest(
     if files.len() <= keep {
         return done;
     }
-    // Names alone put "…-05-2.log" before "…-05.log", so the time each was last written decides.
-    files.sort_by_cached_key(|(p, m)| (m.modified().ok().filter(|t| *t <= now), p.clone()));
+    // Names alone put "…-05-2.log" before "…-05.log", so the time each was written decides.
+    files.sort_by_cached_key(|(p, m)| (latest(m).filter(|t| *t <= now + SKEW), p.clone()));
     for (old, meta) in &files[..files.len() - keep] {
-        done.remove(old, meta.len());
+        let is_young =
+            latest(meta).is_some_and(|t| t <= now + SKEW && now.duration_since(t).unwrap_or_default() < young);
+        if !is_young {
+            done.remove(old, meta.len());
+        }
     }
     done
 }
 
 /// Deletes the plain files in `folder` whose names `is_kind` knows, once they're at least `age` old at `now` (see
-/// [`age`]). One whose times can't be read, or are after `now`, stays.
+/// [`age`]). One whose times can't be read stays, and so does one dated up to [`SKEW`] after `now`; one dated further
+/// on (the clock was plainly wrong when it was written) is a leftover as old as can be.
 fn remove_older(folder: &Path, is_kind: impl Fn(&str) -> bool, old_at: Duration, now: SystemTime) -> Tidied {
     let mut done = Tidied::default();
     for (path, meta) in own_files(folder, is_kind) {
-        if age(&meta, now).is_some_and(|a| a >= old_at) {
+        let far_on = latest(&meta).is_some_and(|t| t > now + SKEW);
+        if far_on || age(&meta, now).is_some_and(|a| a >= old_at) {
             done.remove(&path, meta.len());
         }
     }
@@ -216,11 +251,15 @@ fn remove_older(folder: &Path, is_kind: impl Fn(&str) -> bool, old_at: Duration,
 /// How old a file is at `now`: from the later of when it was made and when it was last changed (a copy keeps the
 /// changed time of the file it was copied from). `None` when neither can be read, or the later one is after `now`.
 fn age(meta: &Metadata, now: SystemTime) -> Option<Duration> {
-    let latest = match (meta.created().ok(), meta.modified().ok()) {
-        (Some(made), Some(changed)) => made.max(changed),
-        (made, changed) => made.or(changed)?,
-    };
-    now.duration_since(latest).ok()
+    now.duration_since(latest(meta)?).ok()
+}
+
+/// The later of when a file was made and when it was last changed, when either can be read.
+fn latest(meta: &Metadata) -> Option<SystemTime> {
+    match (meta.created().ok(), meta.modified().ok()) {
+        (Some(made), Some(changed)) => Some(made.max(changed)),
+        (made, changed) => made.or(changed),
+    }
 }
 
 /// The plain files right in `folder` (not in folders inside it) whose names `is_kind` knows, with what the folder's
@@ -341,7 +380,8 @@ mod tests {
         // A folder named like a crash log is never removed.
         fs::create_dir_all(logs.join("crash-1600000000.log")).unwrap();
 
-        let done = sweep(&places, now);
+        // Crash logs under a day old are never removed (another copy's, or a crash just now), so three days on.
+        let done = sweep(&places, now + DAY * 3);
         assert_eq!(done.removed, 6 + 2 + 2);
         assert_eq!(done.failed, 0);
         let left = names(&logs);

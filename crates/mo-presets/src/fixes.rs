@@ -217,21 +217,29 @@ pub(crate) fn make_new(path: &Path, schema: &str, table: &str) -> Result<(), Fix
     placed
 }
 
-/// Removes half-made databases that a copy of the app left when it stopped part way (`presets.db.new-<number>`), once
-/// they're a minute old, so one being made right now by another copy is left alone.
+/// Removes half-made databases that a copy of the app left when it stopped part way (`presets.db.new-<number>`, and
+/// SQLite's own `-journal`, `-wal` and `-shm` beside it), once they're a minute old, so one being made right now by
+/// another copy is left alone. Only plain files named exactly so (rule 28): never "presets.db.new-12.bak" or a folder.
 fn remove_old_half_made(path: &Path) {
-    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else { return };
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) else { return };
     let dir = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
-    let mut prefix = name.to_os_string();
-    prefix.push(".new-");
-    let prefix = prefix.to_string_lossy().into_owned();
+    let prefix = format!("{name}.new-");
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for e in entries.flatten() {
+        let plain = e.file_type().is_ok_and(|t| t.is_file());
+        let ours = e.file_name().to_str().is_some_and(|n| is_half_made(n, &prefix));
         let old = e.metadata().ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok());
-        if e.file_name().to_string_lossy().starts_with(&prefix) && old.is_some_and(|o| o.as_secs() >= 60) {
+        if plain && ours && old.is_some_and(|o| o.as_secs() >= 60) {
             let _ = std::fs::remove_file(e.path());
         }
     }
+}
+
+/// `prefix` (`presets.db.new-`), a number, and perhaps SQLite's `-journal`, `-wal` or `-shm`: nothing else.
+fn is_half_made(name: &str, prefix: &str) -> bool {
+    let Some(rest) = name.strip_prefix(prefix) else { return false };
+    let number = ["-journal", "-wal", "-shm"].iter().find_map(|end| rest.strip_suffix(end)).unwrap_or(rest);
+    !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Makes the tables in a new file at `temp` and checks them. The file is closed again when this returns, so it can be
@@ -251,6 +259,17 @@ fn make_checked(temp: &Path, schema: &str, table: &str) -> Result<(), FixesError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_half_made_databases_named_exactly_so_are_ours() {
+        let p = "presets.db.new-";
+        assert!(is_half_made("presets.db.new-4120", p) && is_half_made("presets.db.new-77-journal", p));
+        assert!(is_half_made("presets.db.new-1-wal", p) && is_half_made("presets.db.new-1-shm", p));
+        for name in ["presets.db.new-", "presets.db.new-12.bak", "presets.db.new-old copy", "presets.db.new-1-wal2"] {
+            assert!(!is_half_made(name, p), "{name}");
+        }
+        assert!(!is_half_made("curves.db.new-1", p));
+    }
 
     #[test]
     fn a_fingerprint_is_the_same_every_time() {
