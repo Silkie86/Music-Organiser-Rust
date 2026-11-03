@@ -5,6 +5,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -72,7 +73,7 @@ impl Default for Kit {
 
 /// Where kits go in Bitwig while the app runs: a new Drum Machine, or the one selected in Bitwig once Bitwig didn't add
 /// one for the ID.
-static TO_BITWIG: to_bitwig::Kits = to_bitwig::Kits::new();
+static KITS_TO_BITWIG: to_bitwig::Kits = to_bitwig::Kits::new();
 
 thread_local! {
     static PADS: Rc<VecModel<PadLine>> = Rc::new(VecModel::default());
@@ -374,7 +375,7 @@ fn rolled_in(app: &AppWindow, r: Rolled) {
         k.status = if empty > 0 {
             format!("{empty} pad{} found no sound of the right type yet.", if empty == 1 { "" } else { "s" })
         } else {
-            format!("Kit #{}", k.seed)
+            to_bitwig::kit_name(k.seed)
         };
     });
     show(app);
@@ -439,19 +440,21 @@ fn export(app: &AppWindow) {
 /// and the rest on the free pads. A card and the line under the buttons say how it went. The button waits while it
 /// goes.
 fn send_to_bitwig(app: &AppWindow) {
+    let Some(feed) = FEED.with(|f| f.borrow().clone()) else { return };
     let ready = PAGE.with(|p| {
         let p = p.borrow();
         let k = &p.kit;
-        if k.sending {
+        // A kit on its way waits for Bitwig; one rolling isn't the kit on show yet.
+        if k.sending || k.busy {
             return Err(None);
         }
         let pads = to_bitwig::kit_pads(&to_bitwig::kit_sounds(&k.slots, &p.list));
         if pads.is_empty() {
             return Err(Some("Roll a kit first."));
         }
-        Ok((pads, to_bitwig::kit_name(k.seed), k.drum_machine.clone()))
+        Ok((pads, to_bitwig::kit_name(k.seed), k.drum_machine.clone(), k.asked))
     });
-    let (pads, name, setting) = match ready {
+    let (pads, name, setting, asked) = match ready {
         Ok(ready) => ready,
         Err(why) => {
             if let Some(why) = why {
@@ -461,7 +464,6 @@ fn send_to_bitwig(app: &AppWindow) {
             return;
         }
     };
-    let feed = FEED.with(|f| f.borrow().clone()).unwrap_or_default();
     let job = to_bitwig::kit_card(&feed, pads.len());
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
@@ -472,12 +474,19 @@ fn send_to_bitwig(app: &AppWindow) {
     let weak = app.as_weak();
     let started = background::spawn("Kit to Bitwig", move || {
         let to = to_bitwig::Bitwig::default();
-        let line = to_bitwig::send_kit(job, &to, &TO_BITWIG, &name, &pads, setting.as_deref());
+        // A panic in it is logged as a crash and fails the card as it goes; the button still comes back.
+        let line = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            to_bitwig::send_kit(job, &to, &KITS_TO_BITWIG, &name, &pads, setting.as_deref())
+        }))
+        .unwrap_or_else(|_| "The kit couldn't be sent: see the log.".to_owned());
         let _ = slint::invoke_from_event_loop(move || {
             PAGE.with(|p| {
                 let mut p = p.borrow_mut();
                 p.kit.sending = false;
-                p.kit.status = line;
+                // A kit rolled since says what it is; the card still says how the send went.
+                if p.kit.asked == asked {
+                    p.kit.status = line;
+                }
             });
             if let Some(app) = weak.upgrade() {
                 show(&app);

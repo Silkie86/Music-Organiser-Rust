@@ -10,9 +10,10 @@ mod sky;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
@@ -797,7 +798,14 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
 /// buttons after Play (Solomon's F12 note, 2026-11-02 03:28) and the right-click menu lists them under Play, from this
 /// one list so the two can't drift apart.
 const CARD_ACTIONS: &[(&str, &str)] =
-    &[("Send to Bitwig", "sounds.toBitwig"), ("Show in folder", "sounds.reveal"), ("Copy path", "sounds.copyPath")];
+    &[("Send to Bitwig", TO_BITWIG), ("Show in folder", "sounds.reveal"), ("Copy path", "sounds.copyPath")];
+
+/// Send to Bitwig's id in the shortcut list (the C# app's).
+const TO_BITWIG: &str = "sounds.toBitwig";
+
+/// A sound is on its way to Bitwig: Send to Bitwig waits meanwhile, as it did in the C# app, so a second press doesn't
+/// put a second track into the project.
+static SENDING: AtomicBool = AtomicBool::new(false);
 
 /// The card's buttons and the right-click menu, with each one's key and tooltip from the shortcut list (rule 15).
 fn show_actions(data: &SoundsData, shortcuts: &Shortcuts) {
@@ -1713,7 +1721,7 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
             }
             stop(app);
         }
-        ("sounds.toBitwig", Some((path, name)), Some(feed)) => send_to_bitwig(&feed, path, name),
+        (TO_BITWIG, Some((path, name)), Some(feed)) => send_to_bitwig(app, &feed, path, name),
         ("sounds.reveal", Some((path, _)), Some(feed)) => {
             crate::files::reveal(&feed, &path, mo_app::shell::folder_of(&path));
         }
@@ -1724,15 +1732,47 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
 }
 
 /// Puts a sound on a Sampler on a new track in the project open in Bitwig, on a thread of its own, as its file name
-/// (without the extension) names it. Its card shows at once and says how it went.
-fn send_to_bitwig(feed: &Feed, path: String, name: String) {
+/// (without the extension) names it. Its card shows at once and says how it went. While it goes, Send to Bitwig waits.
+fn send_to_bitwig(app: &AppWindow, feed: &Feed, path: String, name: String) {
+    if SENDING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    show_sending(app, true);
     let job = to_bitwig::sound_card(feed, &name);
+    let weak = app.as_weak();
     let sent = background::spawn("Send to Bitwig", move || {
-        to_bitwig::send_sound(job, &to_bitwig::Bitwig::default(), &path, &name)
+        // A panic in it is logged as a crash and fails the card as it goes; Send to Bitwig still comes back.
+        let to = to_bitwig::Bitwig::default();
+        let _ = std::panic::catch_unwind(AssertUnwindSafe(|| to_bitwig::send_sound(job, &to, &path, &name)));
+        SENDING.store(false, Ordering::Release);
+        let _ = weak.upgrade_in_event_loop(|app| show_sending(&app, false));
     });
     // Its card was taken into the thread, so it fails by itself ("It stopped before it finished").
     if let Err(e) = sent {
         log::error("Sounds", &format!("Couldn't start sending to Bitwig: {e}"));
+        SENDING.store(false, Ordering::Release);
+        show_sending(app, false);
+    }
+}
+
+/// Send to Bitwig on the card and on the right-click menu: greyed, saying "Sending…", while a sound is on its way.
+fn show_sending(app: &AppWindow, sending: bool) {
+    let data = app.global::<SoundsData>();
+    let text = CARD_ACTIONS.iter().find(|a| a.1 == TO_BITWIG).map_or("", |a| a.0);
+    let actions = data.get_actions();
+    for i in 0..actions.row_count() {
+        if let Some(mut a) = actions.row_data(i).filter(|a| a.id == TO_BITWIG) {
+            a.enabled = !sending;
+            a.text = if sending { "Sending…".into() } else { text.into() };
+            actions.set_row_data(i, a);
+        }
+    }
+    let menu = data.get_menu();
+    for i in 0..menu.row_count() {
+        if let Some(mut m) = menu.row_data(i).filter(|m| m.id == TO_BITWIG) {
+            m.enabled = !sending;
+            menu.set_row_data(i, m);
+        }
     }
 }
 

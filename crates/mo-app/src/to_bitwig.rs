@@ -76,7 +76,7 @@ impl Kits {
     /// Where the next kit goes. `setting` is the Drum Machine ID the C# app kept in `library.db`
     /// (`mo_dawlink::bitwig::DRUM_MACHINE_KEY`), if it kept one; without it, Bitwig's own.
     pub fn target(&self, setting: Option<&str>) -> KitTarget {
-        if self.selected.load(Ordering::Relaxed) {
+        if self.on_the_selected() {
             KitTarget::Selected
         } else {
             KitTarget::NewDrumMachine(bitwig::drum_machine(setting))
@@ -86,6 +86,11 @@ impl Kits {
     /// Whether kits now go on the Drum Machine selected in Bitwig.
     pub fn on_the_selected(&self) -> bool {
         self.selected.load(Ordering::Relaxed)
+    }
+
+    /// From now on, kits go on the Drum Machine selected in Bitwig.
+    fn use_the_selected(&self) {
+        self.selected.store(true, Ordering::Relaxed);
     }
 }
 
@@ -106,7 +111,7 @@ pub fn send_kit(job: Job, to: &Bitwig, kits: &Kits, name: &str, pads: &[Pad], se
                 detail.clone()
             } else {
                 // The ID didn't give a Drum Machine: the selected one from now on.
-                kits.selected.store(true, Ordering::Relaxed);
+                kits.use_the_selected();
                 format!("{title}. {detail}")
             };
             if sent.went_in() {

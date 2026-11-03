@@ -1023,7 +1023,7 @@ export component SoundsPage inherits Rectangle {
                 StudioButton {
                     horizontal-stretch: 0;
                     text: SoundsData.kit-sending ? "Sending…" : "Send to Bitwig";
-                    enabled: !SoundsData.kit-sending;
+                    enabled: !SoundsData.kit-sending && !SoundsData.kit-busy;
                     tip: "Put the kit on a Drum Machine on a new track in the project open in Bitwig: kick on C1, snare on D1, closed hat on F#1, and the rest on the free pads";
                     clicked => { SoundsData.kit-to-bitwig(); }
                 }
