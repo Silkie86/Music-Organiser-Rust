@@ -192,6 +192,9 @@ export global SoundsData {
     callback galaxy-place-by(string);
     // The year strip beside the list: each year with how much is in it; drag over years to show only those.
     in property <[YearBar]> years;
+    // The places in `years` of the first and last years picked, top first (-1 when none are).
+    in property <int> years-from: -1;
+    in property <int> years-to: -1;
     callback years-picked(int, int);
     callback years-cleared();
     // What makes a star bigger and brighter.
@@ -1206,8 +1209,9 @@ export component SoundsPage inherits Rectangle {
             property <length> folders-width: SoundsData.view == 4 && SoundsData.folders.length > 0 && self.list-width >= 900px
                 ? 300px
                 : 0px;
-            // The year strip, on the pages of sounds (not Rediscover or Kits, which pick their own).
-            property <length> years-width: SoundsData.view <= 3 && SoundsData.years.length > 1 && SoundsData.empty-title == ""
+            // The year strip, on Tiles, List and Galaxy: the views the filters pick for. Not on History, which lists
+            // what was played whatever the filters say, nor Rediscover or Kits, which pick their own.
+            property <length> years-width: SoundsData.view <= 2 && SoundsData.years.length > 1 && SoundsData.empty-title == ""
                 ? 56px
                 : 0px;
             if area.years-width > 0: YearRange {
@@ -1215,6 +1219,8 @@ export component SoundsPage inherits Rectangle {
                 y: 0;
                 height: area.height;
                 years: SoundsData.years;
+                picked-from: SoundsData.years-from;
+                picked-to: SoundsData.years-to;
                 picked(a, b) => { SoundsData.years-picked(a, b); }
                 cleared => { SoundsData.years-cleared(); }
             }

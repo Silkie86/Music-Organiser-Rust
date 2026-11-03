@@ -455,13 +455,12 @@ fn refresh(app: &AppWindow) {
         let bars: Vec<YearBar> = p
             .years
             .iter()
-            .map(|&(year, n)| YearBar {
-                year: year.to_string().into(),
-                share: n as f32 / most,
-                picked: f.years.is_some_and(|(a, b)| year >= a && year <= b),
-            })
+            .map(|&(year, n)| YearBar { year: year.to_string().into(), share: n as f32 / most })
             .collect();
         data.set_years(ModelRc::new(VecModel::from(bars)));
+        let (from, to) = year_strip::picked_places(&p.years, f.years).unwrap_or((-1, -1));
+        data.set_years_from(from);
+        data.set_years_to(to);
         data.set_count(view.count.as_str().into());
         data.set_daw(f.daw.clone().unwrap_or_default().into());
         data.set_status(f.status.clone().unwrap_or_default().into());

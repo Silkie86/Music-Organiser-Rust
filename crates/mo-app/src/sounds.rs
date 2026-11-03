@@ -102,6 +102,30 @@ impl Filters {
         }
     }
 
+    /// Turns one of the on/off chips on or off, by the name the page gives it: "mix-well", "unused", "used" or
+    /// "favourites" (any other name changes nothing). Used and Unused are never both on. When Used goes on or off,
+    /// the years picked on the year strip go too: its years then mean something else (the years of the songs that
+    /// use each sound, or the year each was added), so a span picked for one isn't kept for the other.
+    pub fn toggle(&mut self, chip: &str) {
+        let by_use = self.used;
+        match chip {
+            "mix-well" => self.mix_well = !self.mix_well,
+            "unused" => {
+                self.unused = !self.unused;
+                self.used &= !self.unused;
+            }
+            "used" => {
+                self.used = !self.used;
+                self.unused &= !self.used;
+            }
+            "favourites" => self.favourites = !self.favourites,
+            _ => {}
+        }
+        if self.used != by_use {
+            self.years = None;
+        }
+    }
+
     /// Whether any filter is set (for the Clear chip). The search box doesn't count: it has its own ×.
     pub fn any(&self) -> bool {
         let none = Filters { search: self.search.clone(), ..Filters::default() };
@@ -572,6 +596,33 @@ mod tests {
         assert_eq!(list.year_counts(true), [(2026, 1), (2025, 1), (2020, 1)]);
         let used_then = Filters { used: true, years: Some((2025, 2026)), ..Filters::default() };
         assert_eq!(by(&list, used_then), [1]);
+    }
+
+    #[test]
+    fn turning_used_on_or_off_lets_go_of_the_years_picked() {
+        let picked = Filters { years: Some((2020, 2022)), ..Filters::default() };
+        // Used on: the strip counts the songs' years now, so years picked from the years added go.
+        let mut f = picked.clone();
+        f.toggle("used");
+        assert!(f.used);
+        assert_eq!(f.years, None);
+        // And off again: years picked from the songs' years go too.
+        f.years = Some((2025, 2026));
+        f.toggle("used");
+        assert!(!f.used);
+        assert_eq!(f.years, None);
+        // Unused on turns Used off, so it lets go of them as well.
+        let mut f = Filters { used: true, ..picked.clone() };
+        f.toggle("unused");
+        assert!(f.unused && !f.used);
+        assert_eq!(f.years, None);
+        // Unused with Used off and the other chips keep them: the strip still reads the years added.
+        let mut f = picked.clone();
+        for chip in ["unused", "mix-well", "favourites", "unused", "no such chip"] {
+            f.toggle(chip);
+        }
+        assert!(!f.unused && !f.used && f.mix_well && f.favourites);
+        assert_eq!(f.years, Some((2020, 2022)));
     }
 
     #[test]
