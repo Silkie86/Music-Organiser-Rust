@@ -514,6 +514,11 @@ fn read_folders_later(app: &AppWindow, library: PathBuf, asked: u64) {
     }
 }
 
+/// The standard plugin folders, which an empty plugin list stands for, as the page shows them.
+fn plugin_defaults() -> Vec<String> {
+    mo_space::plugins::default_folders().iter().map(|p| p.display().to_string()).collect()
+}
+
 /// The list a folder group changes, by its number on the tab.
 fn folder_list(group: i32) -> Option<FolderList> {
     let group = usize::try_from(group).ok()?;
@@ -525,16 +530,24 @@ fn folder_list(group: i32) -> Option<FolderList> {
 fn edit_folder(app: &AppWindow, list: FolderList, folder: String, add: bool) {
     let library = PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        let p = p.as_mut().filter(|p| p.live && !p.folders_busy)?;
+        let p = p.as_mut().filter(|p| p.live)?;
+        if p.folders_busy {
+            // A folder picked while another change was being kept: say so rather than drop it.
+            p.folders_message =
+                format!("{folder} wasn't changed: another folder change was being saved. Try it again.");
+            return None;
+        }
         p.folders_busy = true;
         Some(p.library.clone())
     });
-    let Some(library) = library else { return };
+    let Some(library) = library else {
+        show(app);
+        return;
+    };
     show(app);
     let weak = app.as_weak();
     let started = background::spawn("Settings folder change", move || {
-        let defaults: Vec<String> =
-            mo_space::plugins::default_folders().iter().map(|p| p.display().to_string()).collect();
+        let defaults = if list == FolderList::Plugins { plugin_defaults() } else { Vec::new() };
         let done = if add {
             folders::add_folder(&library, list, &folder, &defaults)
         } else {
@@ -635,7 +648,7 @@ fn read_folders(library: &Path) -> Result<Vec<page::FolderGroup>, String> {
         .map_err(|e| e.to_string())?
         .map(|json| mo_space::folder_move::parse_moved(&json))
         .unwrap_or_default();
-    let defaults = mo_space::plugins::default_folders().iter().map(|p| p.display().to_string()).collect();
+    let defaults = plugin_defaults();
     Ok(page::folder_groups(
         lib.roots().map_err(|e| e.to_string())?,
         list("sample_folders")?,

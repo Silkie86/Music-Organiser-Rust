@@ -105,3 +105,25 @@ fn a_missing_library_or_table_is_never_made() {
         .unwrap();
     assert_eq!(tables, 1);
 }
+
+#[test]
+fn a_list_it_cant_read_is_never_written_over() {
+    let path = make("unreadable.db");
+    let c = Connection::open(&path).unwrap();
+    c.execute_batch(
+        r#"UPDATE settings SET value = '[{"path":"D:\\Samples"}]' WHERE key = 'sample_folders';
+                       INSERT INTO settings VALUES ('midi_folders', 7);
+                       INSERT INTO roots VALUES (NULL);"#,
+    )
+    .unwrap();
+    let e = add_folder(&path, FolderList::Samples, r"E:\New", &[]).unwrap_err();
+    assert!(e.to_string().contains("left as it is"), "{e}");
+    assert!(add_folder(&path, FolderList::Midi, r"E:\New", &[]).is_err());
+    let value: String =
+        c.query_row("SELECT value FROM settings WHERE key = 'sample_folders'", [], |r| r.get(0)).unwrap();
+    assert_eq!(value, r#"[{"path":"D:\\Samples"}]"#);
+    // A root that isn't text doesn't stop the others changing, and stays as it was.
+    add_folder(&path, FolderList::Projects, r"E:\Songs", &[]).unwrap();
+    let nulls: i64 = c.query_row("SELECT COUNT(*) FROM roots WHERE path IS NULL", [], |r| r.get(0)).unwrap();
+    assert_eq!(nulls, 1);
+}

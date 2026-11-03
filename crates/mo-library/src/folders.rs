@@ -13,6 +13,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use mo_formats::case;
+use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 
 use crate::LibraryError;
@@ -101,22 +102,22 @@ fn change(
     plugin_defaults: &[String],
     edit: impl FnOnce(&mut Vec<String>) -> bool,
 ) -> Result<Changed, LibraryError> {
+    let write_error = |why: String| LibraryError::Write { path: library.to_owned(), why };
+    let sql = |e: rusqlite::Error| write_error(e.to_string());
     let mut conn = open(library)?;
     let table = if list == FolderList::Projects { "roots" } else { "settings" };
-    let has: bool = conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
-        [table],
-        |r| r.get(0),
-    )?;
+    let has: bool = conn
+        .query_row("SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)", [table], |r| {
+            r.get(0)
+        })
+        .map_err(sql)?;
     if !has {
-        return Err(LibraryError::Open {
-            path: library.to_owned(),
-            why: format!("it has no {table} table yet; open the C# app once to make it"),
-        });
+        return Err(write_error(format!("it has no {table} table yet; open the C# app once to make it")));
     }
     // IMMEDIATE takes the write lock at the start, so the list read is the one written over.
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let mut folders = read_list(&tx, list)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(sql)?;
+    let before = read_list(&tx, list).map_err(write_error)?;
+    let mut folders = before.clone();
     if list == FolderList::Plugins && folders.is_empty() {
         folders = plugin_defaults.to_vec();
     }
@@ -126,27 +127,25 @@ fn change(
     match list.setting_key() {
         None => {
             // Only what changed: every other row (and its letter case) stays as the C# app wrote it.
-            let before = read_list(&tx, list)?;
             for gone in before.iter().filter(|b| !folders.iter().any(|f| f == *b)) {
-                tx.execute("DELETE FROM roots WHERE path = ?1", [gone])?;
+                tx.execute("DELETE FROM roots WHERE path = ?1", [gone]).map_err(sql)?;
             }
             for new in folders.iter().filter(|f| !before.iter().any(|b| b == *f)) {
-                tx.execute("INSERT OR IGNORE INTO roots VALUES (?1)", [new])?;
+                tx.execute("INSERT OR IGNORE INTO roots (path) VALUES (?1)", [new]).map_err(sql)?;
             }
         }
         Some(key) => {
-            let json = serde_json::to_string(&folders).map_err(|e| LibraryError::Open {
-                path: library.to_owned(),
-                why: format!("couldn't write the list ({e})"),
-            })?;
+            let json =
+                serde_json::to_string(&folders).map_err(|e| write_error(format!("couldn't write the list ({e})")))?;
             tx.execute(
-                "INSERT INTO settings VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 [key, json.as_str()],
-            )?;
+            )
+            .map_err(sql)?;
         }
     }
     // Check before keeping it: the list read back must be the one meant.
-    let mut written = read_list(&tx, list)?;
+    let mut written = read_list(&tx, list).map_err(write_error)?;
     let mut meant = folders.clone();
     if list == FolderList::Projects {
         // The table lists them in its own order.
@@ -155,29 +154,46 @@ fn change(
     }
     if written != meant {
         // Dropping the transaction undoes it.
-        return Err(LibraryError::Open {
-            path: library.to_owned(),
-            why: "the folders read back weren't the ones written, so nothing was changed".to_owned(),
-        });
+        return Err(write_error("the folders read back weren't the ones written, so nothing was changed".to_owned()));
     }
-    tx.commit()?;
+    tx.commit().map_err(sql)?;
     Ok(Changed::Done(folders))
 }
 
-/// The list as kept now. A setting that isn't a list of text reads as empty, as in the C# app.
-fn read_list(conn: &Connection, list: FolderList) -> Result<Vec<String>, LibraryError> {
-    Ok(match list.setting_key() {
+/// The list as kept now, read the way the page reads it ([`crate::Library::roots`], [`crate::Library::setting`]): a
+/// path that isn't text reads as "", a setting that is NULL or missing as no folders. A setting that holds something
+/// that isn't a list of text is refused rather than read as empty, so a change never writes over folders it couldn't
+/// read.
+fn read_list(conn: &Connection, list: FolderList) -> Result<Vec<String>, String> {
+    let lossy = |v: ValueRef<'_>| match v {
+        ValueRef::Text(t) => Some(String::from_utf8_lossy(t).into_owned()),
+        _ => None,
+    };
+    match list.setting_key() {
         None => {
-            let mut st = conn.prepare("SELECT path FROM roots ORDER BY path")?;
-            st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<_, _>>()?
+            let mut st = conn.prepare("SELECT path FROM roots ORDER BY path").map_err(|e| e.to_string())?;
+            st.query_map([], |r| Ok(lossy(r.get_ref(0)?).unwrap_or_default()))
+                .and_then(|rows| rows.collect())
+                .map_err(|e| e.to_string())
         }
-        Some(key) => conn
-            .query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| r.get::<_, Option<String>>(0))
-            .optional()?
-            .flatten()
-            .and_then(|json| serde_json::from_str::<Vec<String>>(&json).ok())
-            .unwrap_or_default(),
-    })
+        Some(key) => {
+            let value = conn
+                .query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
+                    Ok(match r.get_ref(0)? {
+                        ValueRef::Null => Ok(None),
+                        v => lossy(v).map(Some).ok_or(()),
+                    })
+                })
+                .optional()
+                .map_err(|e| e.to_string())?;
+            match value {
+                None | Some(Ok(None)) => Ok(Vec::new()),
+                Some(Ok(Some(json))) => serde_json::from_str::<Vec<String>>(&json)
+                    .map_err(|_| format!("its {key} setting isn't a list the app can read, so it was left as it is")),
+                Some(Err(())) => Err(format!("its {key} setting isn't text, so it was left as it is")),
+            }
+        }
+    }
 }
 
 /// Opens an existing library to change it: never makes one.
