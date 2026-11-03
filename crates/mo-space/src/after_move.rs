@@ -5,7 +5,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use mo_formats::paths::file_name;
 use mo_library::scan::is_inside;
@@ -188,22 +188,30 @@ pub fn link_again(
     }
     let aside = fresh_name(from, if second { SECOND_SUFFIX } else { UPDATE_SUFFIX });
     let kept_in = PathBuf::from(fresh_name(&moved.to, KEPT_BEFORE_SUFFIX));
-    let tree = Tree { keep_in: Some(&kept_in), keep_all: true, ..Tree::new(Path::new(from), to, to) };
+    let changed = AtomicBool::new(false);
+    let tree =
+        Tree { keep_in: Some(&kept_in), keep_all: true, changed: Some(&changed), ..Tree::new(Path::new(from), to, to) };
     room_for(&tree, to, drives, stop)?;
     // Find out before copying whether Windows lets the folder be renamed (asking you, when it guards the folder), once
     // there's known to be room: not after an hour of copying, and not for nothing.
     check_rename_or_ask(from, drives.admin())?;
-    // From here on the copy changes: a stop or a failure says so.
+    // From here on the copy changes: a stop or a failure once it has says so. Before that, nothing was moved.
     let partly = |why: CantMove| match why {
         CantMove::LeftHalfway(_) => why,
         other => {
-            let said = match other {
+            let said = match &other {
                 // A folder took the name it was to be set aside under meanwhile.
                 CantMove::OldCopyThere => {
                     format!("There's a folder called {} beside it now: rename or delete it.", file_name(&aside))
                 }
-                other => part_way(&other),
+                other => part_way(other),
             };
+            if !changed.load(Ordering::Relaxed) && !kept_in.exists() {
+                return match other {
+                    CantMove::OldCopyThere => CantMove::Failed(said),
+                    other => other,
+                };
+            }
             let kept = if kept_in.exists() {
                 format!(", and the ones they replaced are kept in {}", text(&kept_in))
             } else {

@@ -481,6 +481,89 @@ fn two_names_that_differ_only_in_capitals_both_come_back_where_the_drive_tells_t
 }
 
 #[test]
+fn moving_back_finds_what_would_stop_it_before_the_old_copy_changes_even_when_the_room_cant_be_told() {
+    let dir = fixtures("mo-space-move-back-found-first");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    write(&c, "Presets/Same/X", "a file");
+    fs::create_dir_all(&d).unwrap();
+    let stop = AtomicBool::new(false);
+    let from = s(&c.join("Presets"));
+    let moved = move_folder(&from, &s(&d), 6, whose(), &ROOMY, &[], &nothing, &stop).unwrap();
+    // On the other drive a new folder comes, and a folder takes the place of a file the old copy has.
+    let copy = d.join("Presets");
+    write(&copy, "New/a.fxp", "new");
+    fs::remove_file(copy.join("Same").join("X")).unwrap();
+    write(&copy, "Same/X/b.fxp", "in a folder now");
+    // The drive's room can't be told (ROOMY), and still the count finds it first: nothing in the old copy changes.
+    let result = move_back(&moved, &ROOMY, &nothing, &stop);
+    let Err(CantMove::Failed(why)) = &result else { panic!("{result:?}") };
+    assert!(why.contains("is a file in the copy"), "{why}");
+    let old = Path::new(&moved.old_copy);
+    assert!(!old.join("New").exists());
+    assert_eq!(fs::read_to_string(old.join("Same").join("X")).unwrap(), "a file");
+    assert!(is_link(Path::new(&from)));
+}
+
+#[test]
+fn the_apps_temporary_files_are_never_copied_on_nor_count_as_only_in_the_old_copy() {
+    let dir = fixtures("mo-space-move-temporary-files");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    // Left by a moving back cut off part way, which wrote them into the old copy that's the plugin's folder again now:
+    // one beside its own file, one whose own file has gone since.
+    write(&c, "Presets/Lead.fxp", "lead");
+    write(&c, "Presets/Lead.fxp.mo-copying", "half");
+    write(&c, "Presets/New.fxp.mo-copying", "half");
+    fs::create_dir_all(&d).unwrap();
+    let stop = AtomicBool::new(false);
+    let from = s(&c.join("Presets"));
+    let moved = move_folder(&from, &s(&d), 12, whose(), &ROOMY, &[], &nothing, &stop).unwrap();
+    let copy = d.join("Presets");
+    assert_eq!(fs::read_to_string(copy.join("Lead.fxp")).unwrap(), "lead");
+    assert!(part_files(&copy).is_empty(), "{:?}", part_files(&copy));
+    // Nothing of yours is only in the old copy, so it can go without asking whether you're sure.
+    let all = std::slice::from_ref(&moved);
+    assert_eq!(only_in_old_copy(&moved, all, &stop).unwrap(), Vec::<String>::new());
+}
+
+/// Windows lets one folder tell capitals apart, as Linux does, when asked (`fsutil file setCaseSensitiveInfo`; some
+/// versions only with the Windows Subsystem for Linux). Where it won't, there's nothing to try here.
+#[cfg(windows)]
+#[test]
+fn twins_from_a_folder_that_tells_capitals_apart_stop_moving_back_before_the_old_copy_changes() {
+    let dir = fixtures("mo-space-move-back-capitals");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    write(&c, "Presets/Bank/Lead.fxp", "yours");
+    fs::create_dir_all(&d).unwrap();
+    let stop = AtomicBool::new(false);
+    let from = s(&c.join("Presets"));
+    let moved = move_folder(&from, &s(&d), 5, whose(), &ROOMY, &[], &nothing, &stop).unwrap();
+    // On the other drive a folder that tells capitals apart holds two names that differ only in them.
+    let bank = d.join("Presets").join("Bank 2");
+    fs::create_dir_all(&bank).unwrap();
+    let asked = std::process::Command::new("fsutil")
+        .args(["file", "setCaseSensitiveInfo", &s(&bank), "enable"])
+        .output()
+        .is_ok_and(|out| out.status.success());
+    if !asked {
+        return;
+    }
+    write(&bank, "Lead.fxp", "first");
+    write(&bank, "lead.fxp", "second");
+    if fs::read_to_string(bank.join("Lead.fxp")).unwrap() != "first" {
+        return;
+    }
+    // In the old copy, that folder holds one of them already: the count stops it before anything there changes.
+    let old = Path::new(&moved.old_copy);
+    write(old, "Bank 2/Lead.fxp", "yours too");
+    let result = move_back(&moved, &ROOMY, &nothing, &stop);
+    let Err(CantMove::Failed(why)) = &result else { panic!("{result:?}") };
+    assert!(why.contains("differs only in capitals"), "{why}");
+    assert_eq!(fs::read_to_string(old.join("Bank 2").join("Lead.fxp")).unwrap(), "yours too");
+    assert_eq!(fs::read_dir(old.join("Bank 2")).unwrap().count(), 1);
+    assert!(is_link(Path::new(&from)));
+}
+
+#[test]
 fn a_stopped_move_leaves_everything_as_it_was() {
     let dir = fixtures("mo-space-move-stopped");
     let (c, d) = (dir.join("C"), dir.join("D"));

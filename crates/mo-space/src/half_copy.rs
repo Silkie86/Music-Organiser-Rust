@@ -53,7 +53,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::folder_move::{
-    CantMove, Drives, MovedFolder, OLD_SUFFIX, PART_SUFFIX, Tree, csharp_time, leads_to, listed, newer, remove_link,
+    CantMove, Drives, MovedFolder, OLD_SUFFIX, Tree, csharp_time, leads_to, listed, newer, own_name, remove_link,
     same_file, set_read_only,
 };
 use crate::plugin_clean::made_by_the_system;
@@ -738,7 +738,7 @@ fn compare(copy: &Path, dir: &Path, twin_dir: Option<&Path>, top: bool, stop: &A
                 continue;
             }
             // A file the copy was writing over an older one when it stopped, named after a file still in `from`.
-            let own_part = name.to_string_lossy().strip_suffix(PART_SUFFIX).map(|own| twin_dir.join(own));
+            let own_part = own_name(&name.to_string_lossy()).map(|own| twin_dir.join(own));
             if own_part.is_some_and(|own| fs::symlink_metadata(own).is_ok_and(|m| m.is_file())) {
                 continue;
             }
