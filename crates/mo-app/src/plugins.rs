@@ -14,9 +14,7 @@ use std::collections::{HashMap, HashSet};
 use chrono::{Datelike, Months, NaiveDateTime};
 use mo_formats::case;
 use mo_formats::plugins::format_from_path;
-use mo_library::plugins::{
-    NEEDED_COUNT_KEY, PluginUse, ScanCounts, ScannedPlugin, StoredSpace, UNUSED_YEARS_KEY,
-};
+use mo_library::plugins::{NEEDED_COUNT_KEY, PluginUse, ScanCounts, ScannedPlugin, StoredSpace, UNUSED_YEARS_KEY};
 use mo_library::songs::group_songs;
 use mo_library::{Library, LibraryError, PluginKind};
 use mo_space::plugin_space::{PluginSpace, SpaceFolder, SpaceKind};
@@ -410,9 +408,7 @@ impl Plugins {
             .collect();
         // The most used first: by songs (the C# page counted saves, so a song saved 40 times came first), then saves,
         // then by name.
-        rows.sort_by(|a, b| {
-            (b.songs, b.saves.len()).cmp(&(a.songs, a.saves.len())).then_with(|| a.name.cmp(&b.name))
-        });
+        rows.sort_by(|a, b| (b.songs, b.saves.len()).cmp(&(a.songs, a.saves.len())).then_with(|| a.name.cmp(&b.name)));
 
         let measured = spaces.iter().filter_map(|s| s.measured).min();
         let cutoff = now.checked_sub_months(Months::new(unused_years * 12)).unwrap_or(now);
@@ -731,12 +727,15 @@ impl Plugins {
             _ => "no song uses it".to_owned(),
         };
         let total = room.bytes().max(1) as f32;
-        let parts =
-            [("Plugin files", room.program(), 0), ("Presets and settings", room.presets(), 1), ("Sounds", room.sounds(), 2)]
-                .into_iter()
-                .filter(|p| p.1 > 0)
-                .map(|(name, bytes, kind)| RoomPart { name, size: size_text(bytes), share: bytes as f32 / total, kind })
-                .collect();
+        let parts = [
+            ("Plugin files", room.program(), 0),
+            ("Presets and settings", room.presets(), 1),
+            ("Sounds", room.sounds(), 2),
+        ]
+        .into_iter()
+        .filter(|p| p.1 > 0)
+        .map(|(name, bytes, kind)| RoomPart { name, size: size_text(bytes), share: bytes as f32 / total, kind })
+        .collect();
         let mut folders: Vec<&SpaceFolder> = room.folders.iter().collect();
         folders.sort_by_key(|a| std::cmp::Reverse(a.bytes));
         let names = |keys: &[String]| -> String {
