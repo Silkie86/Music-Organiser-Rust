@@ -1,0 +1,332 @@
+// The Space page (phase 4), part 1: the drives your projects, samples, backup and the app's own files are on, how full
+// each is, and what the app's own files take. Agreed layout: the design canvas's Space board (2026-11-03): the drives
+// across the top, Biggest wins first, Also taking room, and the picked line's card beside them. Only shared parts from
+// studio.slint; mo-app decides every word (mo_app::space), mo-ui/src/space.rs fills it.
+import { Theme, Type, Space, Caps, Well, PageHeader, ListLine, SidePanel, PanelDivider, CardAction, CardActions } from "../studio.slint";
+
+// One drive across the top.
+export struct DriveCard {
+    name: string,
+    // "38 GB free of 500 GB", or "Not plugged in".
+    room: string,
+    // How much of it is used, 0 to 1.
+    used: float,
+    // What of yours is on it: "Projects, samples and the app's files".
+    holds: string,
+    // Why it needs room when it's nearly full; empty when it has room.
+    note: string,
+    // 0 it has room, 1 nearly full, 2 almost full.
+    fill: int,
+    // Whether its room could be read (an unplugged drive shows without a bar).
+    here: bool,
+}
+
+// A line of a list on the page: what it is, why it's there, and its size.
+export struct RoomLine {
+    id: string,
+    title: string,
+    why: string,
+    size: string,
+}
+
+// One part on the picked line's card: its name, what it holds and its size.
+export struct CardPart {
+    name: string,
+    what: string,
+    size: string,
+}
+
+export global SpaceData {
+    in property <string> summary;
+    in property <[DriveCard]> drives;
+    // What Biggest wins first will list, while it lists nothing yet.
+    in property <string> wins-note;
+    in property <[RoomLine]> also;
+    // The buttons beside Biggest wins first: Measure again, Open Recycle Bin.
+    in property <[CardAction]> actions;
+    // The picked line's id, or "" when none is; then its card.
+    in property <string> picked;
+    in property <string> card-kind;
+    in property <string> card-title;
+    in property <string> card-big;
+    in property <string> card-big-note;
+    in property <string> card-lead;
+    in property <[CardPart]> card-parts;
+    in property <string> card-room;
+    in property <string> card-warning;
+    in property <[CardAction]> card-actions;
+    in-out property <length> panel-width: 380px;
+    callback pick(string);
+    callback close-card();
+    // A button on the page or the card (its id).
+    callback chosen(string);
+    callback panel-resized(length);
+}
+
+// A drive: its name and room, a bar of how full it is, what of yours it holds, and why it needs room when it does.
+component DriveView inherits Rectangle {
+    in property <DriveCard> drive;
+    // How full it is in the colours every theme shares (all good, a warning, missing), never the accent: some
+    // themes' accent is a red.
+    property <color> tint: drive.fill == 2 ? Theme.missing : drive.fill == 1 ? Theme.warning : Theme.ok;
+    width: 300px;
+    background: Theme.surface;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: drive.fill > 0 ? self.tint.transparentize(50%) : Theme.stroke;
+    // At the top when a taller card beside it makes this one taller too.
+    VerticalLayout {
+        padding: Space.lg;
+        spacing: Space.sm;
+        alignment: start;
+        HorizontalLayout {
+            spacing: Space.md;
+            Text {
+                text: root.drive.name;
+                color: Theme.text;
+                font-size: Type.row-title;
+                font-weight: 600;
+                overflow: elide;
+                horizontal-stretch: 1;
+            }
+            Text {
+                text: root.drive.room;
+                color: root.drive.fill > 0 ? root.tint : Theme.muted;
+                font-size: Type.meta;
+                vertical-alignment: center;
+                horizontal-alignment: right;
+            }
+        }
+        if root.drive.here: Rectangle {
+            height: 6px;
+            border-radius: 3px;
+            background: Theme.surface-raised;
+            Rectangle {
+                x: 0;
+                width: parent.width * clamp(root.drive.used, 0, 1);
+                border-radius: 3px;
+                background: root.tint;
+            }
+        }
+        Text {
+            text: root.drive.holds;
+            color: Theme.muted;
+            font-size: Type.meta;
+            wrap: word-wrap;
+        }
+        if root.drive.note != "": Text {
+            text: root.drive.note;
+            color: root.tint;
+            font-size: Type.meta;
+            wrap: word-wrap;
+        }
+    }
+}
+
+// A line of Also taking room (and, once there are some, Biggest wins first): picked, it opens its card.
+component RoomLineView inherits ListLine {
+    in property <RoomLine> line;
+    height: 56px;
+    selected: SpaceData.picked == line.id;
+    clicked => { SpaceData.pick(root.line.id); }
+    HorizontalLayout {
+        width: 100%;
+        height: 100%;
+        padding-left: Space.md;
+        padding-right: Space.md;
+        spacing: Space.md;
+        VerticalLayout {
+            alignment: center;
+            spacing: Space.xs;
+            horizontal-stretch: 1;
+            Text {
+                text: root.line.title;
+                color: Theme.text;
+                font-size: Type.body;
+                overflow: elide;
+            }
+            Text {
+                text: root.line.why;
+                color: Theme.muted;
+                font-size: Type.meta;
+                overflow: elide;
+            }
+        }
+        Text {
+            text: root.line.size;
+            color: Theme.text;
+            font-family: Theme.number-font;
+            font-size: Type.body;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// The picked line's card: what it is, its size in big figures, its parts, the room on its drive, and what to do.
+component SpaceCard inherits SidePanel {
+    close => { SpaceData.close-card(); }
+    Caps { text: SpaceData.card-kind; }
+    Text {
+        text: SpaceData.card-title;
+        color: Theme.text;
+        font-size: Type.panel-title;
+        font-weight: 600;
+        wrap: word-wrap;
+        min-width: 0px;
+    }
+    VerticalLayout {
+        spacing: Space.xs;
+        Text {
+            text: SpaceData.card-big;
+            color: Theme.text;
+            font-family: Theme.number-font;
+            font-size: Type.heading;
+            font-weight: 600;
+        }
+        if SpaceData.card-big-note != "": Text {
+            text: SpaceData.card-big-note;
+            color: Theme.muted;
+            font-size: Type.meta;
+        }
+    }
+    Text {
+        text: SpaceData.card-lead;
+        color: Theme.muted;
+        font-size: Type.body;
+        wrap: word-wrap;
+    }
+    if SpaceData.card-parts.length > 0: VerticalLayout {
+        spacing: Space.sm;
+        for part in SpaceData.card-parts: HorizontalLayout {
+            spacing: Space.md;
+            VerticalLayout {
+                spacing: Space.xs;
+                horizontal-stretch: 1;
+                Text {
+                    text: part.name;
+                    color: Theme.text;
+                    font-size: Type.body;
+                    wrap: word-wrap;
+                    min-width: 0px;
+                }
+                Text {
+                    text: part.what;
+                    color: Theme.muted;
+                    font-size: Type.meta;
+                    wrap: word-wrap;
+                    min-width: 0px;
+                }
+            }
+            Text {
+                text: part.size;
+                color: Theme.text;
+                font-family: Theme.number-font;
+                font-size: Type.meta;
+            }
+        }
+    }
+    if SpaceData.card-room != "": Text {
+        text: SpaceData.card-room;
+        color: Theme.muted;
+        font-size: Type.meta;
+        wrap: word-wrap;
+    }
+    if SpaceData.card-warning != "": Text {
+        text: SpaceData.card-warning;
+        color: Theme.warning;
+        font-size: Type.meta;
+        wrap: word-wrap;
+    }
+    CardActions {
+        actions: SpaceData.card-actions;
+        chosen(id) => { SpaceData.chosen(id); }
+    }
+    // The room left over goes below everything, not between the parts.
+    Rectangle {
+        vertical-stretch: 1;
+    }
+}
+
+export component SpacePage inherits Rectangle {
+    property <bool> card-shown: SpaceData.picked != "";
+    property <length> main-width: self.card-shown ? max(480px, self.width - SpaceData.panel-width - divider.width) : self.width;
+    Flickable {
+        x: 0;
+        width: root.main-width;
+        height: parent.height;
+        // Never wider than its room, as on the side cards: a long line wraps instead of pushing the page sideways.
+        content-width: self.width;
+        content-height: page.preferred-height;
+        page := VerticalLayout {
+            x: 0;
+            width: parent.width;
+            padding: Space.xl;
+            spacing: Space.xl;
+            alignment: start;
+            PageHeader {
+                title: "Space";
+                summary: SpaceData.summary;
+            }
+            // The drives your folders are on; they wrap onto another row when the window is narrow.
+            FlexboxLayout {
+                spacing: Space.md;
+                for d in SpaceData.drives: DriveView {
+                    drive: d;
+                }
+            }
+            VerticalLayout {
+                spacing: Space.sm;
+                HorizontalLayout {
+                    spacing: Space.md;
+                    VerticalLayout {
+                        alignment: center;
+                        horizontal-stretch: 1;
+                        Caps { text: "BIGGEST WINS FIRST"; }
+                    }
+                    CardActions {
+                        horizontal-stretch: 0;
+                        actions: SpaceData.actions;
+                        chosen(id) => { SpaceData.chosen(id); }
+                    }
+                }
+                Well {
+                    min-height: 96px;
+                    VerticalLayout {
+                        padding: Space.xl;
+                        alignment: center;
+                        Text {
+                            text: SpaceData.wins-note;
+                            color: Theme.muted;
+                            font-size: Type.body;
+                            horizontal-alignment: center;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+            if SpaceData.also.length > 0: VerticalLayout {
+                spacing: Space.sm;
+                Caps { text: "ALSO TAKING ROOM"; }
+                for line in SpaceData.also: RoomLineView {
+                    line: line;
+                }
+            }
+        }
+    }
+    divider := PanelDivider {
+        visible: root.card-shown;
+        x: root.main-width;
+        height: parent.height;
+        panel-width: SpaceData.panel-width;
+        room: root.width;
+        min-list: 480px;
+        resizing(w) => { SpaceData.panel-width = w; }
+        resized(w) => { SpaceData.panel-resized(w); }
+    }
+    if root.card-shown: SpaceCard {
+        x: root.main-width + divider.width;
+        y: Space.xl;
+        width: root.width - self.x - Space.xl;
+        height: parent.height - 2 * Space.xl;
+    }
+}

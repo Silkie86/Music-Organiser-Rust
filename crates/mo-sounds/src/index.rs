@@ -11,8 +11,8 @@ use std::collections::HashMap;
 
 use rayon::prelude::*;
 
+use crate::Sound;
 use crate::learn::Vectors;
-use crate::{Sound, SoundsDb, SoundsError};
 
 /// Unit-length vectors held in memory for fast likeness search: all in one block, a row per sound, in id order.
 #[derive(Clone, Debug, Default)]
@@ -207,20 +207,14 @@ pub struct SoundIndex {
 }
 
 impl SoundIndex {
-    /// Builds both from the vectors, as the C# app does when it reads the library. `analysed` is how many sounds
-    /// have been analysed.
+    /// Builds both from the vectors (as [`crate::SoundsDb::everything`] reads them), as the C# app does when it reads
+    /// the library. `analysed` is how many sounds have been analysed, hidden copies too, as the C# app counts them.
     pub fn build(features: &Vectors, clap: &Vectors, analysed: usize) -> SoundIndex {
         let features = VectorIndex::features(features);
         let clap = (!clap.is_empty()).then(|| VectorIndex::clap(clap));
         // As C#: counts the CLAP vectors the index kept (the most common length).
         let deep = clap.as_ref().is_some_and(|c| crate::learn::heard_enough(c.len(), analysed));
         SoundIndex { features, clap, deep }
-    }
-
-    /// Reads the vectors from `db` and builds both. Reads every vector: off the window's thread.
-    pub fn read(db: &SoundsDb, sounds: &[Sound]) -> Result<SoundIndex, SoundsError> {
-        let analysed = sounds.iter().filter(|s| s.analysis.is_some()).count();
-        Ok(SoundIndex::build(&db.vectors("features")?, &db.vectors("clap")?, analysed))
     }
 
     /// The index searches use: CLAP when deep listening is on, else the features.

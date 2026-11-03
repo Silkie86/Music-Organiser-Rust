@@ -161,6 +161,30 @@ pub struct SoundList {
     liked_best: f64,
 }
 
+/// A list of at least this many sounds is freed off the thread that lets it go ([`crate::background::free_later`]):
+/// freeing a few thousand takes a few milliseconds, half a million over a second.
+const FREE_LATER_FROM: usize = 2_000;
+
+impl Drop for Shared {
+    /// The last list sharing a big library's sounds is often let go on the window's thread (when the use counts
+    /// arrive, the page swaps its list for one that has them, and whichever part of the page held the old one last
+    /// lets it go there), so the sounds go to the freeing thread whole, all they hold with them, and are freed there.
+    fn drop(&mut self) {
+        if self.sounds.len() >= FREE_LATER_FROM && !crate::background::freeing_here() {
+            crate::background::free_later(std::mem::take(self));
+        }
+    }
+}
+
+impl Drop for SoundList {
+    /// A list's own use counts (one per sound your songs use, each with its years) go the same way when there are many.
+    fn drop(&mut self) {
+        if self.used.as_ref().is_some_and(|u| u.len() >= FREE_LATER_FROM) && !crate::background::freeing_here() {
+            crate::background::free_later(self.used.take());
+        }
+    }
+}
+
 impl SoundList {
     /// The list from the library's sounds.
     pub fn new(sounds: Vec<Sound>) -> SoundList {
@@ -169,13 +193,13 @@ impl SoundList {
         sounds.shrink_to_fit();
         let hay = sounds.par_iter().map(hay_of).collect();
         let names = sounds.par_iter().map(|s| s.name().to_lowercase()).collect();
-        SoundList { shared: Arc::new(Shared { sounds, hay, names }), ..SoundList::default() }
+        SoundList { shared: Arc::new(Shared { sounds, hay, names }), used: None, liked: None, liked_best: 0.0 }
     }
 
     /// A list of the same sounds, sharing them, without this one's use or Most liked yet: what a list with the use
     /// counted in starts from.
     pub fn sharing(&self) -> SoundList {
-        SoundList { shared: self.shared.clone(), ..SoundList::default() }
+        SoundList { shared: self.shared.clone(), used: None, liked: None, liked_best: 0.0 }
     }
 
     /// Whether `other` shares this list's sounds (it was cloned from it, or made with [`SoundList::sharing`]).
@@ -595,6 +619,26 @@ mod tests {
 
     fn ids(list: &SoundList, shown: &[usize]) -> Vec<i64> {
         shown.iter().filter_map(|&i| list.sound(i)).map(|s| s.id).collect()
+    }
+
+    #[test]
+    fn a_big_list_is_freed_off_the_thread_that_lets_it_go() {
+        let sounds = |n: usize| (0..n as i64).map(|i| sound(i, &format!(r"I:\S\{i}.wav"), "Kick", None)).collect();
+        let (big, small) = (SoundList::new(sounds(FREE_LATER_FROM)), SoundList::new(sounds(10)));
+        // A copy still in use keeps the list: only the last copy's going frees it.
+        let shared = std::sync::Arc::new(big);
+        let copy = shared.clone();
+        let before = crate::background::handed_over();
+        drop(small);
+        drop(shared);
+        assert_eq!(
+            crate::background::handed_over(),
+            before,
+            "a small list is freed here; one still in use isn't freed"
+        );
+        assert_eq!(copy.len(), FREE_LATER_FROM);
+        drop(copy);
+        assert_eq!(crate::background::handed_over(), before + 1, "the big one goes to the freeing thread");
     }
 
     #[test]
