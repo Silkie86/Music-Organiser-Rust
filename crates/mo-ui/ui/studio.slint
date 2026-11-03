@@ -1588,10 +1588,21 @@ export component EmptyState inherits VerticalLayout {
     }
 }
 
+// Draws the waveforms on the graphics card (mo-ui's waves.rs). `picture` is the picture of a Waveform's lines (`shape`
+// and `points` as the Waveform has them) in `tint`, `width` by `height` pixels with lines `line` pixels wide: drawn
+// once on the card and kept, so the window shows a picture instead of working out every line again for each frame.
+// Where there's no card (the screenshots, an old driver, MO_DRAW_CPU) it's an empty image, and the Waveform draws its
+// path instead. `asked` changes when the card does, so every Waveform asks again.
+export global Waves {
+    in property <int> asked;
+    pure callback picture(string, int, color, float, float, float, int) -> image;
+}
+
 // A sound's waveform, one thin line per stored peak, like the old app drew it. `shape` is the path the Rust side makes
 // from the peaks (`mo_app::sounds::wave_path`: one line per peak, `points` wide and 100 high). What has played is
 // drawn in the full tint with a playhead at the edge; with `seconds` given, the mouse shows a guide line with the time
-// under it, and a click plays from there.
+// under it, and a click plays from there. The graphics card draws the lines when there's one (`Waves`); the window
+// draws the path where there isn't.
 export component Waveform inherits Rectangle {
     in property <string> shape;
     in property <int> points;
@@ -1606,8 +1617,34 @@ export component Waveform inherits Rectangle {
     // Each line's width: thin enough that the lines stay apart.
     in property <length> line: max(1px, root.width / max(1, root.points) * 0.6);
     callback seek(float);
+    // The lines drawn by the graphics card, in pixels, when there's a card; empty when there isn't.
+    property <image> picture: Waves.picture(root.shape, root.points, root.tint, root.width / 1phx, root.height / 1phx,
+        root.line / 1phx, Waves.asked);
+    property <bool> on-card: root.picture.width > 0;
     clip: true;
-    Path {
+    // The card's picture, shown pixel for pixel: see-through where it hasn't played yet, full where it has.
+    if root.on-card: Image {
+        x: 0;
+        y: 0;
+        width: root.picture.width * 1phx;
+        height: root.picture.height * 1phx;
+        source: root.picture;
+        opacity: root.played >= 1 ? 1 : 0.45;
+    }
+    if root.on-card && root.played < 1: Rectangle {
+        x: 0;
+        width: root.width * clamp(root.played, 0, 1);
+        clip: true;
+        Image {
+            x: 0;
+            y: 0;
+            width: root.picture.width * 1phx;
+            height: root.picture.height * 1phx;
+            source: root.picture;
+        }
+    }
+    // Without a card, the path.
+    if !root.on-card: Path {
         width: root.width;
         height: root.height;
         commands: root.shape;
@@ -1617,7 +1654,7 @@ export component Waveform inherits Rectangle {
         stroke: root.played >= 1 ? root.tint : root.tint.transparentize(55%);
         stroke-width: root.line;
     }
-    if root.played < 1: Rectangle {
+    if !root.on-card && root.played < 1: Rectangle {
         x: 0;
         width: root.width * clamp(root.played, 0, 1);
         clip: true;
@@ -1628,7 +1665,7 @@ export component Waveform inherits Rectangle {
             commands: root.shape;
             viewbox-width: max(1, root.points);
             viewbox-height: 100;
-        fit: fill;
+            fit: fill;
             stroke: root.tint;
             stroke-width: root.line;
         }

@@ -1,4 +1,4 @@
-//! The graphics card, for the views the app draws itself (the galaxy, the arrangement, then the waveforms). Slint
+//! The graphics card, for the views the app draws itself (the galaxy, the arrangement, the sounds' waveforms). Slint
 //! draws the window with wgpu, and once the window is up it hands over the same device; each view draws into a
 //! picture on the card that Slint shows like any other image. Where there's no card to draw with (an old driver,
 //! the screenshots, the tests, or `MO_DRAW_CPU=1` to compare), the views draw on the processor instead, as before.
@@ -82,6 +82,7 @@ pub fn connect(app: &AppWindow) {
                 if let Some(app) = weak.upgrade() {
                     crate::sounds::graphics_ready(&app);
                     crate::arrangement::graphics_ready(&app);
+                    crate::waves::graphics_ready(&app);
                 }
             });
         }
@@ -104,10 +105,12 @@ pub fn connect(app: &AppWindow) {
             // goes, when there's no window left to show anything on.
             crate::sounds::card_gone();
             crate::arrangement::card_gone();
+            crate::waves::card_gone();
             // The pictures on show go too, and are drawn again on the next card or the processor.
             if let Some(app) = weak.upgrade() {
                 crate::sounds::graphics_gone(&app);
                 crate::arrangement::graphics_gone(&app);
+                crate::waves::graphics_gone(&app);
             }
         }
         _ => {}
@@ -127,10 +130,10 @@ pub fn generation() -> u64 {
     GENERATION.with(Cell::get)
 }
 
-/// A view's painter on the graphics card (the galaxy's, the arrangement's): made on a card when the card is handed
-/// over ([`prepare`]) or the first time the view is drawn on it, gone with that card, and not made again on a card that
-/// refused to draw the view. On that card the processor draws the view; the next card is tried again. Each view keeps
-/// one, on the window's thread, for as long as the app is open.
+/// A view's painter on the graphics card (the galaxy's, the arrangement's, the waveforms'): made on a card when the
+/// card is handed over ([`prepare`]) or the first time the view is drawn on it, gone with that card, and not made again
+/// on a card that refused to draw the view. On that card the processor draws the view; the next card is tried again.
+/// Each view keeps one, on the window's thread, for as long as the app is open.
 pub struct Painter<T> {
     /// The painter, and which card it was made on (as [`generation`] counts).
     made: Option<(u64, T)>,
@@ -175,10 +178,15 @@ impl<T> Painter<T> {
         self.made.as_mut().map(|(_, painter)| painter)
     }
 
+    /// Whether the painter has been made on card `on`.
+    pub fn made_on(&self, on: u64) -> bool {
+        self.made.as_ref().is_some_and(|(made_on, _)| *made_on == on)
+    }
+
     /// Card `on` refused to draw the view: its painter goes, and the processor draws the view while that card lasts.
     pub fn refused(&mut self, on: u64) {
         self.refused = Some(on);
-        if self.made.as_ref().is_some_and(|(made_on, _)| *made_on == on) {
+        if self.made_on(on) {
             self.made = None;
         }
     }
@@ -191,7 +199,7 @@ impl<T> Painter<T> {
     /// Whether a painter for card `on` is still wanted: it's the card there is now, it hasn't refused, and no painter has
     /// been made on it yet.
     fn wants(&self, on: u64) -> bool {
-        on == generation() && self.refused != Some(on) && self.made.as_ref().is_none_or(|(made_on, _)| *made_on != on)
+        on == generation() && self.refused != Some(on) && !self.made_on(on)
     }
 }
 

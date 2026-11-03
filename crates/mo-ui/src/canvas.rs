@@ -1,5 +1,5 @@
-//! The graphics card's painter for the views the app draws itself (the arrangement first): it draws the
-//! [`mo_app::shapes::Scene`] a view works out, which the processor draws the same way where there's no card
+//! The graphics card's painter for the views the app draws itself (the arrangement, the sounds' waveforms): it draws
+//! the [`mo_app::shapes::Scene`] a view works out, which the processor draws the same way where there's no card
 //! (`Scene::paint`). A picture is one draw on the card: every shape is two triangles, which the card fills with its
 //! colour, cutting the corners round and softening the edges where the shape asks for it, each shape over the ones
 //! before.
@@ -120,6 +120,17 @@ const FRAME_BYTES: u64 = 16;
 /// so a huge song doesn't need a huge buffer on the card (or one bigger than the card allows).
 const MOST_AT_ONCE: usize = 1 << 20;
 
+/// What the pictures are for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Kind {
+    /// Whole pictures, the shapes over their background (the arrangement).
+    Picture,
+    /// Shapes of one colour over nothing, to lay over what's under them (a waveform): the background's colour
+    /// everywhere and how much of it shows in the alpha, which is how the window reads a picture from the card (a
+    /// colour see-through by half is the colour, half there).
+    OneColour,
+}
+
 /// The pictures drawn into, made for one size: two, so one is drawn into while Slint shows the other.
 struct Pictures {
     width: u32,
@@ -132,6 +143,7 @@ struct Pictures {
 pub(crate) struct Canvas {
     device: wgpu::Device,
     queue: wgpu::Queue,
+    kind: Kind,
     pipeline: wgpu::RenderPipeline,
     frame: wgpu::Buffer,
     frame_group: wgpu::BindGroup,
@@ -149,7 +161,7 @@ const SHAPE_IN: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
 };
 
 impl Canvas {
-    pub(crate) fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Canvas {
+    pub(crate) fn new(device: &wgpu::Device, queue: &wgpu::Queue, kind: Kind) -> Canvas {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("shapes"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
@@ -194,7 +206,11 @@ impl Canvas {
                 targets: &[Some(wgpu::ColorTargetState {
                     format: PICTURE,
                     blend: Some(wgpu::BlendState { color: over, alpha: over }),
-                    write_mask: wgpu::ColorWrites::ALL,
+                    // One colour: only how much shows is drawn, the colour staying the background's.
+                    write_mask: match kind {
+                        Kind::Picture => wgpu::ColorWrites::ALL,
+                        Kind::OneColour => wgpu::ColorWrites::ALPHA,
+                    },
                 })],
             }),
             primitive: wgpu::PrimitiveState::default(),
@@ -218,6 +234,7 @@ impl Canvas {
         Canvas {
             device: device.clone(),
             queue: queue.clone(),
+            kind,
             pipeline,
             frame,
             frame_group,
@@ -227,66 +244,84 @@ impl Canvas {
         }
     }
 
+    /// A picture `width` by `height` pixels to draw into.
+    fn picture(&self, width: u32, height: u32) -> wgpu::Texture {
+        self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("shapes picture"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: PICTURE,
+            // Shown by Slint, which needs both; copied out by the look tests.
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        })
+    }
+
     /// The pictures for `width` by `height` pixels, made again when the size changes.
     fn pictures(&mut self, width: u32, height: u32) -> &mut Pictures {
         if self.pictures.as_ref().is_none_or(|p| p.width != width || p.height != height) {
-            let make = || {
-                self.device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("shapes picture"),
-                    size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: PICTURE,
-                    // Shown by Slint, which needs both; copied out by the look test.
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                        | wgpu::TextureUsages::TEXTURE_BINDING
-                        | wgpu::TextureUsages::COPY_SRC,
-                    view_formats: &[],
-                })
-            };
-            self.pictures = Some(Pictures { width, height, textures: [make(), make()], next: 0 });
+            let textures = [self.picture(width, height), self.picture(width, height)];
+            self.pictures = Some(Pictures { width, height, textures, next: 0 });
         }
         self.pictures.get_or_insert_with(|| unreachable!("made just above"))
     }
 
-    /// Draws `shapes` (as `mo_app::shapes::Scene::pack` packed them for `scale`) at `scale` pixels to a point, on a picture
-    /// `width` by `height` pixels, over `background` (0xRRGGBB), and gives the picture for Slint to show. A picture
-    /// bigger than the card can hold is drawn as big as it can, at a scale to fit, and Slint stretches it.
-    pub(crate) fn draw(
-        &mut self,
-        (width, height): (u32, u32),
-        scale: f32,
-        background: u32,
-        shapes: &[u8],
-    ) -> wgpu::Texture {
+    /// A picture's size on this card: `width` by `height` pixels, or as big as the card can hold at a scale to fit (by
+    /// how much, the last number), at least a pixel each way.
+    fn fit(&self, (width, height): (u32, u32)) -> (u32, u32, f32) {
         let most = self.device.limits().max_texture_dimension_2d.clamp(1, shapes::MOST_PIXELS);
         let fit = (most as f32 / width.max(1) as f32).min(most as f32 / height.max(1) as f32).min(1.0);
-        let (width, height) = if fit < 1.0 {
-            (
-                ((width as f32 * fit).floor() as u32).clamp(1, most),
-                ((height as f32 * fit).floor() as u32).clamp(1, most),
-            )
+        if fit < 1.0 {
+            let fitted = |v: u32| ((v as f32 * fit).floor() as u32).clamp(1, most);
+            (fitted(width), fitted(height), fit)
         } else {
-            (width.max(1), height.max(1))
-        };
-        let frame = [width as f32, height as f32, scale * fit, fit];
-        let bytes: Vec<u8> = frame.iter().flat_map(|v| v.to_le_bytes()).collect();
-        self.queue.write_buffer(&self.frame, 0, &bytes);
-        let shapes = &shapes[..shapes.len() / SHAPE_BYTES * SHAPE_BYTES];
+            (width.max(1), height.max(1), 1.0)
+        }
+    }
+
+    /// Draws `shapes` (as `mo_app::shapes::Scene::pack` packed them for `scale`) at `scale` pixels to a point, on a
+    /// picture `width` by `height` pixels, over `background` (0xRRGGBB), and gives the picture for Slint to show. A
+    /// picture bigger than the card can hold is drawn as big as it can, at a scale to fit, and Slint stretches it.
+    /// Drawn into one of two pictures in turn, so the one drawn before is the one to show until this one is.
+    pub(crate) fn draw(&mut self, size: (u32, u32), scale: f32, background: u32, shapes: &[u8]) -> wgpu::Texture {
+        let (width, height, fit) = self.fit(size);
         let pictures = self.pictures(width, height);
         let picture = pictures.textures[pictures.next].clone();
         pictures.next = 1 - pictures.next;
+        self.draw_on(&picture, (scale, fit), background, shapes);
+        picture
+    }
+
+    /// As [`Canvas::draw`], on a picture of its own, for pictures that are kept (a waveform's).
+    pub(crate) fn draw_new(&mut self, size: (u32, u32), scale: f32, background: u32, shapes: &[u8]) -> wgpu::Texture {
+        let (width, height, fit) = self.fit(size);
+        let picture = self.picture(width, height);
+        self.draw_on(&picture, (scale, fit), background, shapes);
+        picture
+    }
+
+    /// Draws `shapes` (packed for `scale`) on `picture` at `scale` pixels to a point, shrunk by `fit` to fit the
+    /// picture, over `background`.
+    fn draw_on(&mut self, picture: &wgpu::Texture, (scale, fit): (f32, f32), background: u32, shapes: &[u8]) {
+        let frame = [picture.width() as f32, picture.height() as f32, scale * fit, fit];
+        let bytes: Vec<u8> = frame.iter().flat_map(|v| v.to_le_bytes()).collect();
+        self.queue.write_buffer(&self.frame, 0, &bytes);
+        let shapes = &shapes[..shapes.len() / SHAPE_BYTES * SHAPE_BYTES];
         let target = picture.create_view(&wgpu::TextureViewDescriptor::default());
         let channel = |shift: u32| f64::from((background >> shift) & 0xFF) / 255.0;
-        let clear = wgpu::Color { r: channel(16), g: channel(8), b: channel(0), a: 1.0 };
+        // One colour starts as its colour with none of it showing.
+        let shows = if self.kind == Kind::OneColour { 0.0 } else { 1.0 };
+        let clear = wgpu::Color { r: channel(16), g: channel(8), b: channel(0), a: shows };
         // The first part goes over the background; with no shapes at all, that's all there is.
         let parts: Vec<&[u8]> =
             if shapes.is_empty() { vec![&[]] } else { shapes.chunks(self.most * SHAPE_BYTES).collect() };
         for (i, part) in parts.into_iter().enumerate() {
             self.draw_part(&target, if i == 0 { wgpu::LoadOp::Clear(clear) } else { wgpu::LoadOp::Load }, part);
         }
-        picture
     }
 
     /// Draws up to [`Canvas::most`] shapes on `target`, over what `load` leaves there. Each part is sent to the card on
@@ -420,10 +455,10 @@ mod tests {
         assert_eq!(scene.shapes.len(), 1200);
         let bytes = scene.pack(1.5);
         let size = scene.pixel_size(1.5);
-        let mut canvas = Canvas::new(&device, &queue);
+        let mut canvas = Canvas::new(&device, &queue, Kind::Picture);
         let whole = read_back(&device, &queue, &canvas.draw(size, 1.5, scene.background, &bytes));
         // 7 at a time: 172 parts.
-        let mut small = Canvas::new(&device, &queue);
+        let mut small = Canvas::new(&device, &queue, Kind::Picture);
         small.most = 7;
         let parts = read_back(&device, &queue, &small.draw(size, 1.5, scene.background, &bytes));
         assert!(whole == parts, "drawn a part at a time, the picture came out different");
