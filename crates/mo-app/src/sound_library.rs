@@ -22,10 +22,11 @@ struct Kept {
 }
 
 impl Kept {
-    /// Whether this read still stands for `db`, which looks like `stamp` now: it hasn't changed since, or this read is
-    /// `age` old, under a minute.
+    /// Whether this read still stands for `db`, which looks like `stamp` now: this read is `age` old, under a minute,
+    /// or it read every sound and the database hasn't changed since. One that couldn't read them all (the database
+    /// missing, or busy beyond waiting for) is tried again after a minute, as before.
     fn still_good(&self, db: &Path, stamp: &Stamp, age: Duration) -> bool {
-        self.db == db && (self.stamp == *stamp || age < FRESH)
+        self.db == db && (age < FRESH || (self.library.is_complete() && self.stamp == *stamp))
     }
 }
 
@@ -87,10 +88,17 @@ mod tests {
         fs::write(&db, b"one").unwrap();
         let before = stamp(&db);
         assert_eq!(stamp(&db), before);
-        let kept = Kept { db: db.clone(), stamp: before, at: Instant::now(), library: Arc::default() };
+        let library = Arc::new(SoundLibrary::from_files(Vec::<(String, i64)>::new()));
+        let kept = Kept { db: db.clone(), stamp: before, at: Instant::now(), library };
         let old = FRESH * 10;
         // Kept for as long as the database stays as it is, however long that is.
         assert!(kept.still_good(&db, &stamp(&db), old));
+        // Unless that read couldn't read every sound: then tried again after a minute.
+        let failed = Kept { library: Arc::new(SoundLibrary::read(&dir.join("no such.db"))), ..kept };
+        assert!(!failed.library.is_complete());
+        assert!(failed.still_good(&db, &stamp(&db), Duration::from_secs(5)));
+        assert!(!failed.still_good(&db, &stamp(&db), old));
+        let kept = Kept { library: Arc::new(SoundLibrary::from_files(Vec::<(String, i64)>::new())), ..failed };
         // A save written into the log beside it, or into the database itself: read again, once a minute at most.
         let mut wal = db.as_os_str().to_owned();
         wal.push("-wal");

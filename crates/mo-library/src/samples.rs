@@ -32,7 +32,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 use mo_formats::case;
 use mo_formats::paths::{extension, file_name};
 use mo_formats::textscan::is_audio_path;
-use rusqlite::OptionalExtension;
 
 /// The most files read from one folder tree: a project kept at the top of a big drive stops there.
 pub const MOST_FILES: usize = 200_000;
@@ -251,8 +250,10 @@ pub struct SoundLibrary {
     /// Each name's sounds, in the order they joined the library.
     by_name: HashMap<String, Vec<String>>,
     sizes: Sizes,
-    /// The size every sound of a name has, when they're all copies of one sound, worked out once for each name.
-    copies: Mutex<HashMap<String, Option<i64>>>,
+    /// Whether every sound was read: not when the database couldn't be opened or a row couldn't be read.
+    complete: bool,
+    /// Whether the sounds of a name are all copies of one sound, worked out once for each name.
+    copies: Mutex<HashMap<String, bool>>,
 }
 
 /// Where a library's sizes come from.
@@ -276,11 +277,23 @@ impl SoundLibrary {
         let Ok(rows) = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))) else {
             return SoundLibrary::default();
         };
+        // A row that can't be read ends the read (SQLite gives nothing after it): what came before is kept.
+        let mut complete = true;
+        let mut files: Vec<(i64, String)> = Vec::new();
+        for row in rows {
+            match row {
+                Ok(file) => files.push(file),
+                Err(_) => {
+                    complete = false;
+                    break;
+                }
+            }
+        }
         // The index gives them by path: put back in the order they joined (as the table gives them), so the same copy
         // of a sound is found first as before.
-        let mut files: Vec<(i64, String)> = rows.flatten().collect();
         files.sort_unstable_by_key(|(id, _)| *id);
-        let mut library = SoundLibrary { sizes: Sizes::Database(sounds_db.to_owned()), ..SoundLibrary::default() };
+        let mut library =
+            SoundLibrary { sizes: Sizes::Database(sounds_db.to_owned()), complete, ..SoundLibrary::default() };
         for (_, path) in files {
             library.add(path);
         }
@@ -289,7 +302,7 @@ impl SoundLibrary {
 
     /// A library of these files and sizes (tests give their own).
     pub fn from_files(files: impl IntoIterator<Item = (String, i64)>) -> SoundLibrary {
-        let mut library = SoundLibrary::default();
+        let mut library = SoundLibrary { complete: true, ..SoundLibrary::default() };
         let mut sizes = HashMap::new();
         for (path, size) in files {
             sizes.insert(path.clone(), size);
@@ -297,6 +310,12 @@ impl SoundLibrary {
         }
         library.sizes = Sizes::Given(sizes);
         library
+    }
+
+    /// Whether every sound was read. A library that wasn't (the database missing, or busy beyond waiting for) is worth
+    /// reading again soon, even if the database hasn't changed since.
+    pub fn is_complete(&self) -> bool {
+        self.complete
     }
 
     fn add(&mut self, path: String) {
@@ -324,51 +343,47 @@ impl SoundLibrary {
                 return Some(p.clone());
             }
         }
-        self.copies_of_one(&key, all)?;
+        if !self.copies_of_one(&key, all) {
+            return None;
+        }
         all.iter().find(there).cloned()
     }
 
-    /// The size every sound in `all` (the sounds called `key`) has when they're copies of one sound, by the library's
-    /// own sizes; `None` when they aren't. Worked out the first time a name is asked about, then remembered.
-    fn copies_of_one(&self, key: &str, all: &[String]) -> Option<i64> {
-        if let Some(size) = self.copies.lock().ok().and_then(|c| c.get(key).copied()) {
-            return size;
+    /// Whether the sounds in `all` (the sounds called `key`) are copies of one sound, by the library's own sizes.
+    /// Worked out the first time a name is asked about, then kept as long as the library: no for a name whose sizes
+    /// couldn't be looked up too, so the database isn't asked again and again while it can't answer. The library is
+    /// read again once the database changes.
+    fn copies_of_one(&self, key: &str, all: &[String]) -> bool {
+        if let Some(known) = self.copies.lock().ok().and_then(|c| c.get(key).copied()) {
+            return known;
         }
-        let size = match &self.sizes {
-            Sizes::Unknown => None,
+        let copies = match &self.sizes {
+            Sizes::Unknown => false,
             Sizes::Given(sizes) => one_size(all.iter().map(|p| sizes.get(p).copied())),
-            // Not remembered when the database can't be asked just now (the C# app busy with it): asked again next
-            // time.
-            Sizes::Database(db) => size_in(db, all)?,
+            Sizes::Database(db) => sizes_in(db, all),
         };
-        if let Ok(mut copies) = self.copies.lock() {
-            copies.insert(key.to_owned(), size);
+        if let Ok(mut known) = self.copies.lock() {
+            known.insert(key.to_owned(), copies);
         }
-        size
+        copies
     }
 }
 
-/// The one size the sounds at `paths` have in the library at `db`, as [`one_size`] works it out, or `None` when the
-/// library can't be asked. A sound that has left the library since its paths were read has no size to compare with,
-/// so it's no guess.
-fn size_in(db: &Path, paths: &[String]) -> Option<Option<i64>> {
-    let conn = open(db)?;
-    let mut st = conn.prepare(SIZE_SQL).ok()?;
-    let mut failed = false;
-    let size = one_size(paths.iter().map(|p| {
-        st.query_row([p], |r| r.get::<_, i64>(0)).optional().unwrap_or_else(|_| {
-            failed = true;
-            None
-        })
-    }));
-    (!failed).then_some(size)
+/// Whether the sounds at `paths` have one size in the library at `db`, as [`one_size`] works it out. Not when it can't
+/// be asked, nor when a sound has left the library since its paths were read (no size to compare with).
+fn sizes_in(db: &Path, paths: &[String]) -> bool {
+    let Some(conn) = open(db) else { return false };
+    let Ok(mut st) = conn.prepare(SIZE_SQL) else { return false };
+    one_size(paths.iter().map(|p| st.query_row([p], |r| r.get::<_, i64>(0)).ok()))
 }
 
-/// The one size all of these are, looking no further than the first that differs: `None` when one differs, isn't
+/// Whether all of these are one size, looking no further than the first that differs: not when one differs, isn't
 /// known, or is nothing (a sound the library has no size for).
-fn one_size(mut sizes: impl Iterator<Item = Option<i64>>) -> Option<i64> {
-    let first = sizes.next()??;
-    (first > 0 && sizes.all(|s| s == Some(first))).then_some(first)
+fn one_size(mut sizes: impl Iterator<Item = Option<i64>>) -> bool {
+    match sizes.next() {
+        Some(Some(first)) if first > 0 => sizes.all(|s| s == Some(first)),
+        _ => false,
+    }
 }
 
 /// The Sounds page's database, opened read-only.
@@ -593,13 +608,14 @@ mod tests {
 
     #[test]
     fn copies_of_one_sound_have_one_size() {
-        assert_eq!(one_size([Some(6), Some(6)].into_iter()), Some(6));
-        assert_eq!(one_size([Some(6)].into_iter()), Some(6));
+        assert!(one_size([Some(6), Some(6)].into_iter()));
+        assert!(one_size([Some(6)].into_iter()));
         // Two different sounds sharing a name, one the library has no size for, or one gone from it: no guess.
-        assert_eq!(one_size([Some(6), Some(5)].into_iter()), None);
-        assert_eq!(one_size([Some(0), Some(0)].into_iter()), None);
-        assert_eq!(one_size([Some(6), None].into_iter()), None);
-        assert_eq!(one_size(std::iter::empty()), None);
+        assert!(!one_size([Some(6), Some(5)].into_iter()));
+        assert!(!one_size([Some(0), Some(0)].into_iter()));
+        assert!(!one_size([Some(6), None].into_iter()));
+        assert!(!one_size([None, Some(6)].into_iter()));
+        assert!(!one_size(std::iter::empty()));
     }
 
     #[test]

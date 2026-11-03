@@ -159,6 +159,7 @@ fn the_sounds_library_is_read_from_sounds_db_with_its_sizes() {
     let project = path_of("Projects/jazzy.flp");
     let library = SoundLibrary::read(&db);
     assert_eq!(library.len(), files.len());
+    assert!(library.is_complete());
     let locator = SampleLocator::new(Box::new(|_| Vec::new())).with_library(Arc::new(library));
     // The same name in a folder of the same name.
     assert_eq!(locator.locate(r"D:\harrys samples\Neptunian Drumz 2\N4K1.wav", &project), Some(path_of(files[0].1)));
@@ -174,15 +175,16 @@ fn the_sounds_library_is_read_from_sounds_db_with_its_sizes() {
     // The library has no size for it, so it can't tell it's the same sound: not a guess, unless the folder matches.
     assert!(!locator.found(r"D:\old\Drums\rim.wav", &project));
     assert!(locator.found(r"D:\old\Unsized\rim.wav", &project));
-    // What's been worked out about a name is kept: asked again, the database isn't needed.
-    drop(c);
-    for end in ["", "-wal", "-shm"] {
-        let mut f = db.as_os_str().to_owned();
-        f.push(end);
-        let _ = fs::remove_file(f);
-    }
+    // What's been worked out about a name is kept as long as the library: asked again after the sizes have changed
+    // in the database, the answers are the same (the app reads the library again once the database changes).
+    c.execute_batch("UPDATE sounds SET size = 3 WHERE id IN (3, 5); UPDATE sounds SET size = 99 WHERE id = 9;")
+        .unwrap();
     assert_eq!(locator.locate(r"E:\Kits\clap verb 1.wav", &project), Some(path_of(files[3].1)));
     assert!(!locator.found(r"E:\Drums\kick.wav", &project));
+    // A library read now sees the new sizes.
+    let again = SampleLocator::new(Box::new(|_| Vec::new())).with_library(Arc::new(SoundLibrary::read(&db)));
+    assert!(!again.found(r"E:\Kits\clap verb 1.wav", &project));
+    assert_eq!(again.locate(r"E:\Drums\kick.wav", &project), Some(path_of(files[1].1)));
 }
 
 #[cfg(unix)]
