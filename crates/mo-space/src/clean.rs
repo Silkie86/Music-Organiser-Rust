@@ -420,6 +420,11 @@ pub struct Removed {
     pub when: i64,
     /// What the bin calls it, once found there.
     pub bin_id: Option<String>,
+    /// When the bin says it went in (Unix seconds), once found there. Linux names a thing in the Trash after the one
+    /// before it once that's gone, so a later thing of the same name from the same place can be called the same: this
+    /// tells them apart.
+    #[serde(default)]
+    pub binned: Option<i64>,
 }
 
 /// What something removed was.
@@ -625,7 +630,8 @@ impl<'a> Sending<'a> {
         if self.stop.load(Ordering::Relaxed) {
             return stays(done, STOPPED.to_owned());
         }
-        let removed = Removed { path: path.to_owned(), real, bytes, what, when: now_seconds(), bin_id: None };
+        let removed =
+            Removed { path: path.to_owned(), real, bytes, what, when: now_seconds(), bin_id: None, binned: None };
         let why = match self.bin.send(Path::new(path)) {
             Ok(()) => {
                 done.removed.push(removed);
@@ -828,6 +834,7 @@ fn find_in_system_bin(removed: &mut [Removed]) -> Vec<Problem> {
             Some(item) => {
                 taken.insert(item.id.as_os_str());
                 r.bin_id = item.id.to_str().map(str::to_owned);
+                r.binned = Some(item.time_deleted);
             }
             None => problems.push(Problem { path: r.path.clone(), why: NOT_IN_BIN.into() }),
         }
@@ -842,14 +849,9 @@ fn put_back_from_system_bin(removed: &[Removed]) -> Vec<Problem> {
         return removed.iter().map(|r| problem(r, "The Recycle Bin couldn't be read.")).collect();
     };
     let mut problems = Vec::new();
-    for r in removed {
-        // The one found when it went, still from its place (on Linux an id is used again once its item has gone);
-        // only one never found then is looked for by place and time (an id that's gone means it was put back already,
-        // and anything there now from that place went later).
-        let item = match r.bin_id.as_deref() {
-            Some(id) => items.iter().find(|i| i.id.to_str() == Some(id) && is_the_one(i, r)),
-            None => items.iter().filter(|i| is_the_one(i, r)).min_by_key(|i| i.time_deleted),
-        };
+    // An item that's gone means it was put back already, or the bin was emptied: anything there now from its place
+    // went later, so it isn't put back instead.
+    for (r, item) in removed.iter().zip(matched(&items, removed)) {
         let Some(item) = item else {
             problems.push(problem(r, "It isn't in the Recycle Bin any more."));
             continue;
@@ -876,36 +878,56 @@ fn find_in_system_bin(_removed: &mut [Removed]) -> Vec<Problem> {
     Vec::new()
 }
 
-/// Which of these are in the bin now: the one found when it went, by what the bin calls it, still from its place and
-/// time (on Linux what the bin calls something is used again once it's gone); one never found then, by place and time
-/// (as putting it back looks for it), each bin item counted for one only. `None` when the bin can't be read.
+/// Which of these are in the bin now ([`matched`]). `None` when the bin can't be read.
 #[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
 fn held_in_system_bin(removed: &[Removed]) -> Option<Vec<bool>> {
     bin_items().map(|items| held_among(&items, removed))
 }
 
-/// Which of `removed` are among the bin's `items`, as [`held_in_system_bin`] says.
+/// Which of `removed` are among the bin's `items` ([`matched`]).
 #[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
 fn held_among(items: &[trash::TrashItem], removed: &[Removed]) -> Vec<bool> {
-    fn id_of(r: &Removed) -> Option<&std::ffi::OsStr> {
-        r.bin_id.as_deref().map(std::ffi::OsStr::new)
+    matched(items, removed).iter().map(Option::is_some).collect()
+}
+
+/// The bin item each of `removed` is, while it's still there: the one found when it went, by what the bin calls it,
+/// while that's still from its place and went in when the bin said then (on Linux a name is used again once its item
+/// has gone); one never found then, by its place and time, the first to go there after it was sent. Each item is one
+/// thing's only, and the last sent is matched first: of two from the same place with the same name, an item that went
+/// after both is the later one's.
+#[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+fn matched<'a>(items: &'a [trash::TrashItem], removed: &[Removed]) -> Vec<Option<&'a trash::TrashItem>> {
+    let mut found: Vec<Option<&trash::TrashItem>> = vec![None; removed.len()];
+    let mut taken: HashSet<&std::ffi::OsStr> = HashSet::new();
+    let mut last_first: Vec<usize> = (0..removed.len()).collect();
+    last_first.sort_by_key(|&n| std::cmp::Reverse(removed[n].when));
+    // Those found when they went first: what the bin calls them says which they are.
+    for &n in &last_first {
+        let r = &removed[n];
+        let Some(id) = r.bin_id.as_deref().map(std::ffi::OsStr::new) else { continue };
+        let then = |i: &trash::TrashItem| r.binned.is_none_or(|at| i.time_deleted.abs_diff(at) <= 2);
+        let item = items.iter().find(|i| i.id.as_os_str() == id && is_the_one(i, r) && then(i));
+        if let Some(item) = item
+            && taken.insert(item.id.as_os_str())
+        {
+            found[n] = Some(item);
+        }
     }
-    // The item found when it went, if it's still there and still the one.
-    let by_id = |r: &Removed| id_of(r).and_then(|id| items.iter().find(|i| i.id.as_os_str() == id && is_the_one(i, r)));
-    let mut taken: HashSet<&std::ffi::OsStr> = removed.iter().filter_map(by_id).map(|i| i.id.as_os_str()).collect();
-    removed
-        .iter()
-        .map(|r| match id_of(r) {
-            Some(_) => by_id(r).is_some(),
-            None => {
-                let found = items
-                    .iter()
-                    .filter(|i| !taken.contains(i.id.as_os_str()) && is_the_one(i, r))
-                    .min_by_key(|i| i.time_deleted);
-                found.is_some_and(|item| taken.insert(item.id.as_os_str()))
-            }
-        })
-        .collect()
+    for &n in &last_first {
+        let r = &removed[n];
+        if r.bin_id.is_some() {
+            continue;
+        }
+        let first = items
+            .iter()
+            .filter(|i| !taken.contains(i.id.as_os_str()) && is_the_one(i, r))
+            .min_by_key(|i| i.time_deleted);
+        if let Some(item) = first {
+            taken.insert(item.id.as_os_str());
+            found[n] = Some(item);
+        }
+    }
+    found
 }
 
 /// A Mac's Trash can't be read by a program: what's in it can't be told.
@@ -956,12 +978,16 @@ mod tests {
         let removed = |name: &str, when: i64, bin_id: Option<&str>| {
             let path = folder.join(name).to_string_lossy().into_owned();
             let what = What::Plugin(SpaceKind::Presets);
-            Removed { real: path.clone(), path, bytes: 10, what, when, bin_id: bin_id.map(str::to_owned) }
+            let bin_id = bin_id.map(str::to_owned);
+            Removed { real: path.clone(), path, bytes: 10, what, when, binned: bin_id.as_ref().map(|_| when), bin_id }
         };
         let mut items = vec![item("1", "a.fxp", 100), item("2", "b.fxp", 200), item("3", "b.fxp", 300)];
         // What the bin called one of the app's is used again for something else from another folder (Linux does
-        // that once the first is gone).
+        // that once the first is gone), and for a later thing of the same name from the same place.
         items.push(trash::TrashItem { original_parent: folder.join("Other"), ..item("4", "d.fxp", 400) });
+        items.push(item("5", "e.fxp", 900));
+        // Something of the same name from the same place went to the bin after both of these were sent.
+        items.push(item("6", "f.fxp", 700));
         let asked = [
             // Found when it went, and still there.
             removed("a.fxp", 100, Some("1")),
@@ -975,7 +1001,16 @@ mod tests {
             removed("a.fxp", 50, None),
             // Its id is something else's now.
             removed("d.fxp", 350, Some("4")),
+            // Its id is a later thing's now: the bin says that went in long after.
+            removed("e.fxp", 500, Some("5")),
+            // Of two never found, the later one's.
+            removed("f.fxp", 600, None),
+            removed("f.fxp", 650, None),
         ];
-        assert_eq!(held_among(&items, &asked), [true, false, true, true, false, false, false]);
+        let held = held_among(&items, &asked);
+        assert_eq!(held, [true, false, true, true, false, false, false, false, false, true]);
+        // Kept before the time was: found by what the bin calls it alone.
+        let older = [Removed { binned: None, ..removed("e.fxp", 500, Some("5")) }];
+        assert_eq!(held_among(&items, &older), [true]);
     }
 }

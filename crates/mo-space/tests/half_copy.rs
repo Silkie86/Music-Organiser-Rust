@@ -31,11 +31,16 @@ fn fixtures(name: &str) -> PathBuf {
     dir
 }
 
-/// Makes the read-only files a test left writable again, so its folder can be cleared.
+/// Makes the read-only files (and, on a Mac or Linux, folders) a test left writable again, so its folder can be cleared.
 fn writable(dir: &Path) {
     for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
         let Ok(kind) = entry.file_type() else { continue };
         if kind.is_dir() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(entry.path(), fs::Permissions::from_mode(0o755));
+            }
             writable(&entry.path());
         } else if kind.is_file()
             && let Ok(meta) = entry.metadata()
@@ -114,6 +119,39 @@ fn library(at: &Path) {
     write(at, "Patch.prt", "patch");
 }
 
+/// A file kept from being removed until this is dropped: on a Mac or Linux its folder can't be written to (by anyone
+/// but the administrator, so a test run as root can't hold it), and on Windows it's held open, letting nothing else at
+/// it.
+struct Held {
+    #[cfg(windows)]
+    _open: fs::File,
+    #[cfg(not(windows))]
+    folder: PathBuf,
+}
+
+fn hold(file: &Path) -> Held {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        Held { _open: fs::File::options().read(true).share_mode(0).open(file).unwrap() }
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let folder = file.parent().unwrap().to_path_buf();
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o555)).unwrap();
+        Held { folder }
+    }
+}
+
+#[cfg(not(windows))]
+impl Drop for Held {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&self.folder, fs::Permissions::from_mode(0o755));
+    }
+}
+
 /// A marker as the app writes one, for a copy of `from` made in `to` that ends up as `settled`; `in_use` once the copy
 /// started going into use (just before the swap).
 fn plant_marker(folder: &Path, from: &Path, to: &Path, settled: &Path, in_use: bool) {
@@ -181,9 +219,14 @@ fn a_half_copy_holding_what_isnt_in_the_folder_stays_and_says_what() {
 
     // Something that isn't in the folder being moved (yours, or deleted from it since) keeps the half copy.
     write(&half, "Mine.fxp", "mine");
+    // A folder of yours in it, with a big file, counts in its size too.
+    write(&half, "Mine/big.bin", &"x".repeat(100_000));
     let found = find(&half, &[], &stop).unwrap().unwrap();
     let State::Stays(why) = &found.state else { panic!("{found:?}") };
     assert!(why.contains("Mine.fxp"), "{why}");
+    assert!(found.bytes > 100_000, "{}", found.bytes);
+    assert_eq!(found.bytes, mo_space::size::measure(&half, &stop).unwrap().bytes);
+    fs::remove_dir_all(half.join("Mine")).unwrap();
     let said = problem(&from, &s(&d), 35, &ROOMY, &[], &stop);
     assert!(matches!(&said, Some(CantMove::HalfCopy { path, .. }) if *path == s(&half)), "{said:?}");
     assert!(said.unwrap().text().contains("Mine.fxp"));
@@ -655,4 +698,64 @@ fn a_file_link_copied_as_its_file_is_still_a_copy() {
     assert!(matches!(clear(&half, &[], &stop), Ok(Cleared::Copy(_))));
     assert_eq!(fs::read_to_string(dir.join("Shared").join("Init.fxp")).unwrap(), "init");
     assert!(is_link(&presets.join("Init.fxp")));
+}
+
+#[test]
+fn a_copy_whose_swap_failed_goes_and_what_couldnt_go_is_cleared_by_the_next_try() {
+    let dir = fixtures("mo-space-half-swap-failed");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    let presets = c.join("Presets");
+    library(&presets);
+    fs::create_dir_all(&d).unwrap();
+    let stop = AtomicBool::new(false);
+    let copy = d.join("Presets");
+    let aside = c.join("Presets (old copy)");
+    let held: Mutex<Option<Held>> = Mutex::new(None);
+    // Once all of it has copied, a folder takes the name the folder is set aside under, so the swap fails; and a file in
+    // the copy is held, so the copy can't all go then.
+    let progress = |n: u64| {
+        let mut held = held.lock().unwrap();
+        if n >= 35 && held.is_none() {
+            fs::create_dir_all(&aside).unwrap();
+            *held = Some(hold(&copy.join("Sounds").join("0.db")));
+        }
+    };
+    let tried = move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], &progress, &stop);
+    assert_eq!(tried, Err(CantMove::OldCopyThere));
+    let held = held.into_inner().unwrap();
+    assert!(held.is_some() && !is_link(&presets));
+    // The swap didn't happen, so the copy never went into use: what's left of it is a half copy like any other.
+    if copy.exists() {
+        assert_eq!(find(&copy, &[], &stop).unwrap().unwrap().state, State::CutOff);
+    }
+    drop(held);
+    fs::remove_dir_all(&aside).unwrap();
+
+    // Tried again, the move clears it and goes through.
+    let moved = move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], &nothing, &stop).unwrap();
+    assert!(is_link(&presets) && moved.has_old_copy());
+    assert!(!copy.join(MARKER).exists());
+    assert_eq!(fs::read_dir(copy.join("Sounds")).unwrap().count(), 6);
+    assert_eq!(fs::read_to_string(copy.join("Patch.prt")).unwrap(), "patch");
+}
+
+#[test]
+fn a_link_where_the_copy_goes_is_in_the_way_as_anything_is() {
+    let dir = fixtures("mo-space-half-link-there");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    let presets = c.join("Presets");
+    library(&presets);
+    fs::create_dir_all(&d).unwrap();
+    let stop = AtomicBool::new(false);
+    stopped_part_way(10, |progress| move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], progress, &stop));
+    // The half copy was renamed, and a link to it took its name.
+    let half = d.join("Presets");
+    let renamed = d.join("Presets kept");
+    fs::rename(&half, &renamed).unwrap();
+    folder_link(&renamed, &half);
+    let there = CantMove::TargetThere(s(&half));
+    assert_eq!(problem(&s(&presets), &s(&d), 35, &ROOMY, &[], &stop), Some(there.clone()));
+    // The move says the same: its own hold on the place doesn't count as the app making a copy there.
+    assert_eq!(move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], &nothing, &stop), Err(there));
+    assert!(renamed.join(MARKER).exists() && is_link(&half) && !is_link(&presets));
 }

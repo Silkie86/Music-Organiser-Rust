@@ -16,7 +16,7 @@ use crate::clean::{Bin, Done, Problem, Sending, What};
 use crate::folder_move::{
     CantMove, Drives, Fill, KEPT_SUFFIX, MovedFolder, Tree, check_rename, check_rename_or_ask, clear_failed_link,
     copy_fresh, copy_tree, denied, destination_problem, fresh_name, inside_moved, leads_to, link, link_reaches, listed,
-    not_noted, only_in, part_way, remove_link, rest_after, room_for, shown, swap_or_ask, target,
+    not_noted, only_in, part_way, remove_link, rest_after, room_for, shown, swap_or_ask, target, write_through,
 };
 use crate::half_copy::{busy_now, claim, clear_own, going_into_use, unmark};
 use crate::plugin_space::{PluginSpace, SpaceKind};
@@ -223,6 +223,7 @@ pub fn link_again(
     let again =
         copy_tree(&Tree { ours: &ours, ..tree }, Fill::Freshen, &|n| progress(first.bytes.saturating_add(n)), stop)
             .map_err(partly)?;
+    write_through(&[&first, &again]);
     swap_or_ask(from, to, &aside, drives.admin()).map_err(partly)?;
     let replaced = shown(&[first.kept, again.kept].concat());
     let kept = (!replaced.is_empty()).then(|| OldHome {
@@ -406,7 +407,7 @@ pub fn move_home(
     let mine = claim(&to).ok_or_else(|| busy_now(&to))?;
     // A half copy an earlier try left, cut off part way (the app or the computer stopped), goes first.
     clear_own(&to, home, moved, &mine, stop)?;
-    if let Some(why) = destination_problem(home, destination, (bytes, &[]), moved, drives, true, stop) {
+    if let Some(why) = destination_problem(home, destination, (bytes, &[]), moved, drives, true, Some(&mine), stop) {
         return Err(why);
     }
     let new_home = text(&to);

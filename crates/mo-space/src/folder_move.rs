@@ -9,20 +9,24 @@
 //! when a later try finds one that a crash cut off ([`crate::half_copy`]: each new copy holds a marker until it's in
 //! use).
 
+use std::collections::VecDeque;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use mo_formats::paths::file_name;
 use mo_library::scan::is_inside;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::admin::{Admin, AsAdmin, NoAdmin, Outcome, Step, ask_for, real_spot, reason};
 use crate::clean::{Bin, Done, Problem, Sending, What, on_network};
-use crate::half_copy::{self, MARKER, busy_now, claim, clear_own, going_into_use, own_room, remove_marked, unmark};
+use crate::half_copy::{
+    self, Claim, MARKER, busy_now, claim, clear_own, going_into_use, not_in_use, own_room, remove_marked, unmark,
+};
 use crate::plugin_space::SpaceKind;
 use crate::size::{self, is_link, is_online_only, size_text};
 use crate::{key, not_there, real_folder, real_path, really, text};
@@ -44,6 +48,14 @@ pub(crate) const PART_SUFFIX: &str = ".mo-copying";
 
 /// How far apart two times of the same file can be: some drives (exFAT, FAT32) keep times to two seconds.
 const SAME_TIME: Duration = Duration::from_secs(2);
+
+/// How long before a copy goes into use the files it wrote are written through to the disk ([`write_through`]):
+/// what was written earlier is taken to be on the disk by then (Windows writes what's waiting within seconds, and
+/// less than a minute or so behind even to a slow drive while a copy keeps it busy).
+const WRITTEN_THROUGH: Duration = Duration::from_secs(120);
+
+/// The most files written through to the disk just before a copy goes into use: the last ones written.
+const THROUGH_MOST: usize = 20_000;
 
 /// Room left over on the drive after the copy, so a move never fills it.
 pub const HEADROOM: u64 = 2 << 30;
@@ -304,6 +316,20 @@ pub fn problem(
     moved: &[MovedFolder],
     stop: &AtomicBool,
 ) -> Option<CantMove> {
+    problem_with(from, destination, bytes, drives, moved, None, stop)
+}
+
+/// [`problem`], for a move that holds `mine`, its claim on the copy it makes: its own claim doesn't count as the app
+/// being busy there.
+fn problem_with(
+    from: &str,
+    destination: &str,
+    bytes: u64,
+    drives: &dyn Drives,
+    moved: &[MovedFolder],
+    mine: Option<&Claim>,
+    stop: &AtomicBool,
+) -> Option<CantMove> {
     let from = from.trim_end_matches(['/', '\\']);
     let from_path = Path::new(from);
     if is_link(from_path) {
@@ -322,7 +348,7 @@ pub fn problem(
     if fs::symlink_metadata(format!("{from}{OLD_SUFFIX}")).is_ok() {
         return Some(CantMove::OldCopyThere);
     }
-    destination_problem(from, destination, (bytes, &left_out(from, moved)), moved, drives, false, stop)
+    destination_problem(from, destination, (bytes, &left_out(from, moved)), moved, drives, false, mine, stop)
 }
 
 /// The old copies of folders moved from inside `from` before (Reaktor 6's inside Native Instruments), as keys: they
@@ -344,7 +370,7 @@ fn destination_inside(from: &str, destination: &str) -> bool {
 /// online; or there isn't room for what's copied (counted, each file and folder as the drive keeps it, leaving out
 /// `leave_out`; `bytes`, its measured size, when it can't be counted) and some to spare. On the same drive it's
 /// [`CantMove::SameDrive`], or, when `rename` (it'll be renamed rather than copied), only the checks before the copying
-/// ones count. `moved` is every moved folder.
+/// ones count. `moved` is every moved folder; `mine`, the claim the move holds on the copy's place, if any.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn destination_problem(
     from: &str,
@@ -353,6 +379,7 @@ pub(crate) fn destination_problem(
     moved: &[MovedFolder],
     drives: &dyn Drives,
     rename: bool,
+    mine: Option<&Claim>,
     stop: &AtomicBool,
 ) -> Option<CantMove> {
     let from_path = Path::new(from);
@@ -374,7 +401,7 @@ pub(crate) fn destination_problem(
     // A half copy an earlier try at this copy left is cleared before copying: the room it takes is free then.
     let mut freed = 0;
     if fs::symlink_metadata(&to).is_ok() {
-        match own_room(&to, from, moved, stop) {
+        match own_room(&to, from, moved, mine, stop) {
             Ok(Some(bytes)) => freed = bytes,
             Ok(None) => return Some(CantMove::TargetThere(to.to_string_lossy().into_owned())),
             Err(why) => return Some(why),
@@ -429,7 +456,7 @@ pub fn move_folder(
     let mine = claim(&to).ok_or_else(|| busy_now(&to))?;
     // A half copy an earlier try left, cut off part way (the app or the computer stopped), goes first.
     clear_own(&to, &from, already_moved, &mine, stop)?;
-    if let Some(why) = problem(&from, destination, bytes, drives, already_moved, stop) {
+    if let Some(why) = problem_with(&from, destination, bytes, drives, already_moved, Some(&mine), stop) {
         return Err(why);
     }
     // Find out before copying whether Windows lets the folder be renamed, rather than after an hour of copying. One it
@@ -444,7 +471,7 @@ pub fn move_folder(
         // The copy goes only while nothing leads into it and the original is still there (where it was, or set
         // aside): otherwise it may be the copy the plugin uses, or the only one.
         if !is_link(Path::new(&from)) && (real_folder(&from) || real_folder(&aside)) {
-            remove_copy(&to);
+            remove_unused(&to);
         }
         return Err(why);
     }
@@ -548,6 +575,7 @@ pub fn move_back(
         let again =
             copy_tree(&Tree { ours: &ours, ..tree }, Fill::Freshen, &|n| progress(first.bytes.saturating_add(n)), stop)
                 .map_err(partly)?;
+        write_through(&[&first, &again]);
         unswap_or_ask(from, &moved.old_copy, to, drives.admin()).map_err(partly)?;
         return Ok(MovedBack {
             kept: shown(&[first.kept, again.kept].concat()),
@@ -573,7 +601,7 @@ pub fn move_back(
     if let Err(why) = unswap_or_ask(from, &back, to, drives.admin()) {
         if link_reaches(moved) {
             // As it was: the plugin still uses the other drive, so the copy made to come back goes.
-            remove_copy(Path::new(&back));
+            remove_unused(Path::new(&back));
         }
         return Err(why);
     }
@@ -587,6 +615,14 @@ pub fn move_back(
 pub(crate) fn not_noted(copy: &Path) -> CantMove {
     remove_copy(copy);
     CantMove::Failed(format!("Couldn't note in {} that the copy is going into use.", copy.to_string_lossy()))
+}
+
+/// Removes a copy that was going into use but didn't (its swap didn't happen, and nothing leads to it), as a move's copy
+/// goes when it stops. Its marker says it isn't going into use again first, so a copy that can't all go now (a file in
+/// it is open) is cleared by the next try, as one cut off part way is.
+fn remove_unused(copy: &Path) {
+    not_in_use(copy);
+    remove_copy(copy);
 }
 
 /// What a stop or a failure part way says first: "Stopped.", or why, without "Nothing was moved." (something was).
@@ -609,10 +645,10 @@ pub(crate) fn room_for(tree: &Tree, here: &Path, drives: &dyn Drives, stop: &Ato
 }
 
 /// Copies a folder into a new folder made for it (so a folder that appeared meanwhile is never copied into, or later
-/// removed), then a second time for what was saved while it copied (an hour, for a big one). The new folder holds a
-/// marker from the moment it's made ([`crate::half_copy`]), which the caller takes out once the copy is in use, so one
-/// the app or the computer stops part way is known for the half copy it is. If anything goes wrong, the new folder
-/// goes. Returns what each pass did.
+/// removed), then a second time for what was saved while it copied (an hour, for a big one), then writes what it wrote
+/// last through to the disk ([`write_through`]). The new folder holds a marker from the moment it's made
+/// ([`crate::half_copy`]), which the caller takes out once the copy is in use, so one the app or the computer stops
+/// part way is known for the half copy it is. If anything goes wrong, the new folder goes. Returns what each pass did.
 pub(crate) fn copy_fresh(
     tree: &Tree,
     progress: &(dyn Fn(u64) + Sync),
@@ -627,10 +663,40 @@ pub(crate) fn copy_fresh(
     let copied = copy_tree(tree, Fill::New, progress, stop).and_then(|first| {
         copy_tree(tree, Fill::Freshen, &|n| progress(first.bytes.saturating_add(n)), stop).map(|again| (first, again))
     });
-    if copied.is_err() {
-        remove_copy(tree.to);
+    match &copied {
+        Ok((first, again)) => write_through(&[first, again]),
+        Err(_) => remove_copy(tree.to),
     }
     copied
+}
+
+/// Writes the files a copy wrote last ([`Copied::recent`], from each of its passes) through to the disk, just before the
+/// copy goes into use; a big file was as it was written. Windows keeps a file's bytes in memory a while after it's
+/// written, and a power cut just after the swap mustn't leave the plugin using files whose bytes never reached the
+/// disk. What was written earlier is taken to be on the disk by then ([`WRITTEN_THROUGH`]). A file that can't be opened
+/// for it is left as it is. Spread over the cores of the pool it's called in.
+pub(crate) fn write_through(passes: &[&Copied]) {
+    let files: Vec<&PathBuf> = passes.iter().flat_map(|pass| &pass.recent).collect();
+    files.par_iter().for_each(|file| flush_file(file));
+}
+
+/// Writes one file through to the disk. Windows only does that for a program that may write to the file, so a
+/// read-only one is let be written to for the moment.
+fn flush_file(file: &Path) {
+    #[cfg(windows)]
+    {
+        let was_read_only = set_read_only(file, false);
+        if let Ok(open) = fs::File::options().write(true).open(file) {
+            let _ = open.sync_all();
+        }
+        if was_read_only {
+            set_read_only(file, true);
+        }
+    }
+    #[cfg(not(windows))]
+    if let Ok(open) = fs::File::open(file) {
+        let _ = open.sync_all();
+    }
 }
 
 /// `base` with `suffix` ("… (old copy)"), or, when that's taken, numbered ("… (old copy 2)").
@@ -1126,10 +1192,11 @@ pub(crate) fn remove_link(at: &Path) -> io::Result<()> {
 }
 
 /// Removes a copy the move made itself, when the move stops: never a link, never the original. Its marker goes last,
-/// so one that can't all go (a file in it is open) is still known for a half copy, and cleared by the next try.
+/// so one that can't all go (a file in it is open) is still known for a half copy, and cleared by the next try. All of
+/// it goes, Stop or not: it's what a stopped move leaves.
 pub(crate) fn remove_copy(path: &Path) {
     if fs::symlink_metadata(path).is_ok_and(|m| m.is_dir()) && !is_link(path) {
-        let _ = remove_marked(path);
+        let _ = remove_marked(path, &AtomicBool::new(false));
     }
 }
 
@@ -1184,6 +1251,9 @@ pub(crate) struct Copied {
     pub(crate) links_left: Vec<PathBuf>,
     /// With `keep_in`, freshening: the files it wrote (paths inside the copy), for [`Tree::ours`] in the next pass.
     pub(crate) written: Vec<PathBuf>,
+    /// The files it wrote in its last [`WRITTEN_THROUGH`], at most [`THROUGH_MOST`] of them: written through to the
+    /// disk before the copy goes into use ([`write_through`]).
+    pub(crate) recent: Vec<PathBuf>,
 }
 
 /// Copies a folder into another one, file by file, keeping each file's time and checking its size once written. A link
@@ -1198,6 +1268,7 @@ pub(crate) fn copy_tree(
     let source_real = fs::canonicalize(tree.from).map_err(|e| failed(tree.from, &e))?;
     let inside = |copy: &Path| copy.strip_prefix(tree.to).unwrap_or(copy).to_path_buf();
     let mut copied = Copied::default();
+    let mut recent: VecDeque<(Instant, PathBuf)> = VecDeque::new();
     // Counting for a copy not made yet: the folder it's made in takes a piece of the drive too.
     if fill == Fill::Count && (tree.as_new || fs::symlink_metadata(tree.to).is_err()) {
         copied.bytes = tree.piece;
@@ -1247,6 +1318,10 @@ pub(crate) fn copy_tree(
                     match copy_link(&source, &kind, &copy, tree, &source_real) {
                         Err(_) if gone(&source) => {}
                         other => other?,
+                    }
+                    // A file link Windows wouldn't make again is copied as its file.
+                    if fs::symlink_metadata(&copy).is_ok_and(|m| m.is_file()) {
+                        wrote(&mut recent, copy);
                     }
                 }
                 continue;
@@ -1313,11 +1388,24 @@ pub(crate) fn copy_tree(
             if tree.keep_in.is_some() && fill == Fill::Freshen {
                 copied.written.push(inside(&copy));
             }
+            wrote(&mut recent, copy);
             copied.bytes = copied.bytes.saturating_add(meta.len());
             progress(copied.bytes);
         }
     }
+    copied.recent = recent.into_iter().map(|(_, file)| file).collect();
     Ok(copied)
+}
+
+/// Notes a file a copy just wrote, keeping only those written in the last [`WRITTEN_THROUGH`], at most
+/// [`THROUGH_MOST`] of them.
+fn wrote(recent: &mut VecDeque<(Instant, PathBuf)>, file: PathBuf) {
+    let now = Instant::now();
+    recent.push_back((now, file));
+    while recent.len() > THROUGH_MOST || recent.front().is_some_and(|(at, _)| now.duration_since(*at) > WRITTEN_THROUGH)
+    {
+        recent.pop_front();
+    }
 }
 
 /// A file's size as a whole number of a drive's pieces (as it is, when they aren't known).
@@ -1399,9 +1487,10 @@ fn copy_file(
 }
 
 /// Copies a file's bytes to a new file. A big one goes a piece at a time, looking at Stop and saying how far it's got
-/// between pieces, and then gets the file's permissions as the system's copy gives them (on Windows, its marks:
-/// read-only, hidden and so on). A stop leaves the part copied,
-/// which goes with the rest of the copy (or as a temporary copy does).
+/// between pieces, is written through to the disk once whole (it holds much of what a move copies, so it isn't left
+/// for later: [`write_through`]), and then gets the file's permissions as the system's copy gives them (on Windows, its
+/// marks: read-only, hidden and so on). A stop leaves the part copied, which goes with the rest of the copy (or as a
+/// temporary copy does).
 fn copy_bytes(source: &Path, to: &Path, meta: &fs::Metadata, pieces: &Pieces) -> Result<(), CantMove> {
     if meta.len() < IN_PIECES_FROM {
         return fs::copy(source, to).map(drop).map_err(|e| failed(source, &e));
@@ -1424,6 +1513,8 @@ fn copy_bytes(source: &Path, to: &Path, meta: &fs::Metadata, pieces: &Pieces) ->
         done = done.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
         (pieces.progress)(pieces.before.saturating_add(done));
     }
+    // A drive that can't be asked to (some can't) has the bytes anyway: Windows writes them when it gets to them.
+    let _ = into.sync_all();
     drop(into);
     fs::set_permissions(to, meta.permissions()).map_err(|e| failed(to, &e))
 }

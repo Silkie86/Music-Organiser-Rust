@@ -21,9 +21,12 @@
 //!
 //! Nothing here touches the window or a database: the app reads what it needs from the library and hands it in, and
 //! every walk is spread over the cores of the pool it's called in (call it in the app's low-priority pool).
-//! Rules kept from the C# app: samples are never removed (rule 2), a song's newest save always stays, and nothing is
-//! ever deleted for good. The one exception to rule 2, Solomon's choice (31 Oct 2026): a Bitwig project's copy of a
-//! Library multisample, once a "(fixed)" project uses the Library file instead ([`bitwig::remove_copies`]).
+//! Rules kept from the C# app: samples are never removed (rule 2), a song's newest save always stays, and what goes
+//! goes to the Recycle Bin, never for good. The one exception to rule 2, Solomon's choice (31 Oct 2026): a Bitwig
+//! project's copy of a Library multisample goes to the Recycle Bin once a "(fixed)" project uses the Library file
+//! instead ([`bitwig::remove_copies`]). Removed for good, as the C# app did too: only copies a folder move made itself,
+//! when the move stops or fails part way, and (Solomon, 3 Nov 2026) half copies, a move's copies that a crash or a
+//! power cut cut off ([`half_copy`]). They only ever hold copies, and the folder they copy from is left as it was.
 
 pub mod admin;
 pub mod after_move;

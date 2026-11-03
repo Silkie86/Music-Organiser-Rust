@@ -66,19 +66,32 @@ impl Reminder {
         self.leftovers.is_empty()
     }
 
-    /// How much room they take together.
-    pub fn bytes(&self) -> u64 {
-        self.leftovers.iter().fold(0, |sum, l| sum.saturating_add(l.bytes))
+    /// The ones that can go (once nothing is only in them, or you're sure).
+    pub fn can_go(&self) -> impl Iterator<Item = &Leftover> {
+        self.leftovers.iter().filter(|l| l.stays.is_none())
     }
 
-    /// What the reminder says: "1 old copy left after a move (12.3 GB)", "3 old copies left after moving folders
-    /// (64.2 GB)"; nothing when there's none.
+    /// How much room the ones that can go take together: what deleting them frees. One that stays isn't counted (the
+    /// plugin may be using it).
+    pub fn bytes(&self) -> u64 {
+        self.can_go().fold(0, |sum, l| sum.saturating_add(l.bytes))
+    }
+
+    /// What the reminder says, counting what can go and its room: "1 old copy left after a move (12.3 GB)", "3 old
+    /// copies left after moving folders (64.2 GB), and 1 that can't go yet", "1 old copy left after a move can't go
+    /// yet"; nothing when there's none.
     pub fn title(&self) -> String {
-        let size = size_text(self.bytes());
-        match self.leftovers.len() {
-            0 => String::new(),
-            1 => format!("1 old copy left after a move ({size})"),
-            n => format!("{n} old copies left after moving folders ({size})"),
+        let go = self.can_go().count();
+        let staying = self.leftovers.len() - go;
+        let left = |n: usize| match n {
+            1 => "1 old copy left after a move".to_owned(),
+            n => format!("{n} old copies left after moving folders"),
+        };
+        match (go, staying) {
+            (0, 0) => String::new(),
+            (0, n) => format!("{} can't go yet", left(n)),
+            (n, 0) => format!("{} ({})", left(n), size_text(self.bytes())),
+            (n, m) => format!("{} ({}), and {m} that can't go yet", left(n), size_text(self.bytes())),
         }
     }
 }

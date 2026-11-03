@@ -107,12 +107,16 @@ fn every_old_copy_and_folder_left_behind_is_listed_with_its_size_biggest_first()
     assert!(matches!(&reminder.leftovers[3].what, Left::Kept(h) if key(&h.path) == key(&kept_in)));
     assert!(reminder.leftovers.iter().all(|l| l.stays.is_none()), "{:?}", reminder.leftovers);
 
-    // The copy on the other drive went missing (unplugged, say): that old copy is still listed, but it stays.
+    // The copy on the other drive went missing (unplugged, say): that old copy is still listed, but it stays, and the
+    // headline counts only what can go.
     fs::rename(&steam.to, d.join("STEAM renamed")).unwrap();
     let reminder = remind(&moved, &[], &[], &stop).unwrap();
     let first = &reminder.leftovers[0];
     assert_eq!(first.path, steam.old_copy);
     assert!(first.stays.as_deref().is_some_and(|w| w.contains("only copy the plugin could use")), "{first:?}");
+    assert_eq!(reminder.leftovers.len(), 3);
+    assert_eq!(reminder.bytes(), 8);
+    assert_eq!(reminder.title(), "2 old copies left after moving folders (8 bytes), and 1 that can't go yet");
     fs::rename(d.join("STEAM renamed"), &steam.to).unwrap();
 
     // Once they're gone there's nothing to remind you of.
@@ -187,6 +191,9 @@ fn an_old_copy_its_link_leads_back_into_is_what_the_plugin_uses_and_stays() {
     let found = &reminder.leftovers[0];
     assert_eq!(found.what, Left::Unknown);
     assert!(found.stays.as_deref().is_some_and(|w| w.contains("leads into it")), "{found:?}");
+    // Nothing is offered to free: it's what the plugin uses.
+    assert_eq!(reminder.bytes(), 0);
+    assert_eq!(reminder.title(), "1 old copy left after a move can't go yet");
     // A move kept that way goes no further: its old copy is the folder its link uses.
     let kept = MovedFolder {
         from: s(&steam),
@@ -232,6 +239,7 @@ fn an_old_copy_with_no_link_beside_it_stays_for_you_to_look_at() {
     let why = |n: usize| reminder.leftovers[n].stays.clone().unwrap_or_default();
     assert!(why(0).contains("rename it back to \"Kontakt Library\""), "{}", why(0));
     assert!(why(1).contains("isn't a link to a copy"), "{}", why(1));
+    assert_eq!(reminder.title(), "2 old copies left after moving folders can't go yet");
 }
 
 /// A Recycle Bin that's a folder in the fixtures.

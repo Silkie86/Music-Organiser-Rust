@@ -24,6 +24,11 @@
 //!
 //! Otherwise it stays, and says why. A marker in a copy that's in use (the app stopped between the swap and taking the
 //! marker out), or in a folder renamed since, is the only thing that goes then: the folder is left as it is.
+//!
+//! Clearing stops when you press Stop, between the things it removes; the marker goes last, so what's left is still a
+//! half copy, cleared the next time. A copy whose swap fails (the swap didn't happen) goes as a move's copy does when
+//! it stops, its marker saying first that it isn't going into use after all, so what can't go then is cleared next time
+//! too.
 
 use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
@@ -36,6 +41,7 @@ use std::time::Duration;
 
 use mo_formats::paths::file_name;
 use mo_library::scan::is_inside;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::folder_move::{
@@ -206,14 +212,23 @@ fn write_marker(file: &mut fs::File, marker: &Marker) -> io::Result<()> {
 /// so it's never cleared for good from then on, or, when that can't be written, takes the marker out (a copy without
 /// one is never cleared either). `false` when neither could be done: the copy mustn't go into use then.
 pub(crate) fn going_into_use(folder: &Path) -> bool {
-    let noted = || -> io::Result<()> {
-        let mut marker = read_marker(folder).ok_or_else(|| io::Error::other("the marker can't be read"))?;
-        marker.in_use = true;
-        // Written over, not beside: a marker cut off part way can't be read, and a folder with none is never cleared.
-        let mut file = OpenOptions::new().write(true).truncate(true).open(folder.join(MARKER))?;
-        write_marker(&mut file, &marker)
-    };
-    noted().is_ok() || unmark(folder)
+    note_in_use(folder, true).is_ok() || unmark(folder)
+}
+
+/// When a copy didn't go into use after all (its swap didn't happen, and nothing leads to it), just before it's
+/// removed: its marker says so again, so a copy that can't all go now (a file in it is open) is cleared by the next
+/// try, as one cut off part way is. A marker that can't be written stays as it was.
+pub(crate) fn not_in_use(folder: &Path) {
+    let _ = note_in_use(folder, false);
+}
+
+/// Writes in a copy's marker whether it's going into use.
+fn note_in_use(folder: &Path, in_use: bool) -> io::Result<()> {
+    let mut marker = read_marker(folder).ok_or_else(|| io::Error::other("the marker can't be read"))?;
+    marker.in_use = in_use;
+    // Written over, not beside: a marker cut off part way can't be read, and a folder with none is never cleared.
+    let mut file = OpenOptions::new().write(true).truncate(true).open(folder.join(MARKER))?;
+    write_marker(&mut file, &marker)
 }
 
 /// The marker in a folder, if it holds one the app wrote.
@@ -283,8 +298,8 @@ pub fn half_copies(moved: &[MovedFolder], also: &[String], stop: &AtomicBool) ->
 
 /// Clears a half copy: looked at again first, then removed for good when it was cut off, or only its marker taken out
 /// when the folder is in use or was renamed. Nothing else in this app makes or clears a copy there meanwhile. The
-/// marker goes last, so a clear that stops part way (a file in it is open) is tried again next time. `Err` says why it
-/// stays. Call it away from the window's thread.
+/// marker goes last, so a clear that stops part way (you press Stop, or a file in it is open) is tried again next time.
+/// `Err` says why it stays. Call it away from the window's thread.
 pub fn clear(folder: &Path, moved: &[MovedFolder], stop: &AtomicBool) -> Result<Cleared, String> {
     let Some(mine) = claim(folder) else { return Err(BUSY.to_owned()) };
     let stopped = || "Stopped before it was all checked, so it stays.".to_owned();
@@ -297,7 +312,13 @@ pub fn clear(folder: &Path, moved: &[MovedFolder], stop: &AtomicBool) -> Result<
         State::MarkerOnly => {
             Err(format!("The marker in {} couldn't be taken out: it's tried again next time.", text(folder)))
         }
-        State::CutOff => remove_half(folder).map(|()| Cleared::Copy(counted.unwrap_or(0))),
+        State::CutOff => match remove_half(folder, stop) {
+            Ok(()) => Ok(Cleared::Copy(counted.unwrap_or(0))),
+            Err(NotRemoved::Stopped) => {
+                Err("Stopped part way: what's left of it keeps its marker, and is cleared the next time.".to_owned())
+            }
+            Err(NotRemoved::Failed(why)) => Err(why),
+        },
     }
 }
 
@@ -313,7 +334,10 @@ pub(crate) fn clear_own(
     stop: &AtomicBool,
 ) -> Result<(), CantMove> {
     match own(copy, from, moved, Some(mine), stop)? {
-        Some((State::CutOff, _)) => remove_half(copy).map_err(|why| CantMove::HalfCopy { path: text(copy), why }),
+        Some((State::CutOff, _)) => remove_half(copy, stop).map_err(|not| match not {
+            NotRemoved::Stopped => CantMove::Stopped,
+            NotRemoved::Failed(why) => CantMove::HalfCopy { path: text(copy), why },
+        }),
         Some((State::MarkerOnly, _)) => {
             unmark(copy);
             Ok(())
@@ -324,14 +348,15 @@ pub(crate) fn clear_own(
 }
 
 /// How much room the half copy an earlier try at copying `from` into `copy` left takes, when it was cut off and the
-/// move clears it first. `Err` when it's this copy's but stays.
+/// move clears it first. `mine` is the claim the move holds on `copy`, if any. `Err` when it's this copy's but stays.
 pub(crate) fn own_room(
     copy: &Path,
     from: &str,
     moved: &[MovedFolder],
+    mine: Option<&Claim>,
     stop: &AtomicBool,
 ) -> Result<Option<u64>, CantMove> {
-    match own(copy, from, moved, None, stop)? {
+    match own(copy, from, moved, mine, stop)? {
         Some((State::CutOff, bytes)) => Ok(bytes),
         Some((State::Stays(why), _)) => Err(CantMove::HalfCopy { path: text(copy), why }),
         _ => Ok(None),
@@ -347,6 +372,10 @@ fn own(
     mine: Option<&Claim>,
     stop: &AtomicBool,
 ) -> Result<Option<(State, Option<u64>)>, CantMove> {
+    // A link, or a file, is never a half copy: it's left for the move's own checks to name.
+    if !real_folder(&text(copy)) {
+        return Ok(None);
+    }
     match read_marker(copy) {
         Some(marker) if same_place(&marker.from, from) => {
             if busy(copy, mine) {
@@ -360,11 +389,14 @@ fn own(
 }
 
 /// Removes a half copy that was found cut off, once its marker is seen to be there still and not yet saying the copy
-/// is going into use: one whose marker has gone, or changed, may be in use now.
-fn remove_half(folder: &Path) -> Result<(), String> {
+/// is going into use: one whose marker has gone, or changed, may be in use now. Stops when you press Stop.
+fn remove_half(folder: &Path, stop: &AtomicBool) -> Result<(), NotRemoved> {
     match read_marker(folder) {
-        Some(marker) if !marker.in_use => remove_marked(folder),
-        _ => Err(format!("The marker in {} changed as it was cleared, so the rest stays.", text(folder))),
+        Some(marker) if !marker.in_use => remove_marked(folder, stop),
+        _ => Err(NotRemoved::Failed(format!(
+            "The marker in {} changed as it was cleared, so the rest stays.",
+            text(folder)
+        ))),
     }
 }
 
@@ -433,11 +465,11 @@ fn judge(
     }
     let (only, bytes) = only_here(folder, Path::new(from), stop)?;
     if !only.is_empty() {
-        let why = format!(
+        // Not counted then: what's only in it isn't all looked in.
+        return stays(format!(
             "It holds what isn't in {from} now, or is newer than there: {}. Look at it before deleting it yourself.",
             listed(&only)
-        );
-        return Ok((State::Stays(why), Some(bytes)));
+        ));
     }
     Ok((State::CutOff, Some(bytes)))
 }
@@ -510,116 +542,207 @@ fn used(folder: &Path, here: &str, moved: &[MovedFolder]) -> bool {
 /// newer but no bigger is let through: the one the copy was writing when it stopped (not whole yet, or not given its
 /// time yet). Left out: the marker at the top, a file the copy was writing under its temporary name (when its own file
 /// is in `from`), and the files Explorer and Finder make by themselves. A folder in it that can't be read, or is deeper
-/// than walks go, is named too: what's in it can't be told.
+/// than walks go, is named too: what's in it can't be told. The size counts only what's looked at, so it's the copy's
+/// whole size only when nothing is named. Walked a level at a time on every core of the pool it's called in.
 fn only_here(copy: &Path, from: &Path, stop: &AtomicBool) -> Result<(Vec<String>, u64), Stopped> {
-    let shown = |p: &Path| text(p.strip_prefix(copy).unwrap_or(p));
     let mut only = Vec::new();
+    let mut writing = Vec::new();
     let mut bytes: u64 = 0;
-    let mut writing = false;
-    let mut folders: Vec<(PathBuf, PathBuf, usize)> = vec![(copy.to_path_buf(), from.to_path_buf(), 0)];
-    while let Some((dir, twin_dir, depth)) = folders.pop() {
-        let Ok(entries) = fs::read_dir(&dir) else {
-            only.push(shown(&dir));
-            continue;
-        };
-        for entry in entries {
-            if stop.load(Ordering::Relaxed) {
-                return Err(Stopped);
-            }
-            let Ok(entry) = entry else {
-                only.push(shown(&dir));
-                continue;
-            };
-            let name = entry.file_name();
-            let path = entry.path();
-            // As it is, not where a link leads.
-            let Ok(meta) = entry.metadata() else {
-                only.push(shown(&path));
-                continue;
-            };
-            let kind = meta.file_type();
-            if kind.is_file() {
-                bytes = bytes.saturating_add(meta.len());
-                if depth == 0 && name == OsStr::new(MARKER) || made_by_the_system(&name.to_string_lossy()) {
-                    continue;
-                }
-                // A file the copy was writing over an older one when it stopped, named after a file still in `from`.
-                let own_part = name.to_string_lossy().strip_suffix(PART_SUFFIX).map(|own| twin_dir.join(own));
-                if own_part.is_some_and(|own| fs::symlink_metadata(own).is_ok_and(|m| m.is_file())) {
-                    continue;
-                }
-            }
-            let twin = twin_dir.join(&name);
-            let Ok(twin_meta) = fs::symlink_metadata(&twin) else {
-                only.push(shown(&path));
-                continue;
-            };
-            let twin_kind = twin_meta.file_type();
-            if kind.is_symlink() {
-                if !twin_kind.is_symlink() {
-                    only.push(shown(&path));
-                }
-            } else if kind.is_dir() {
-                if !twin_kind.is_dir() || depth + 1 >= DEEPEST {
-                    only.push(shown(&path));
-                } else {
-                    folders.push((path, twin, depth + 1));
-                }
-            } else {
-                // A file's twin is a file, or a link to one, as where it leads.
-                let twin_file = if twin_kind.is_symlink() { fs::metadata(&twin).ok() } else { Some(twin_meta) };
-                match twin_file.filter(fs::Metadata::is_file) {
-                    Some(t) if same_file(&meta, &t) || newer(&t, &meta) => {}
-                    Some(t) if !writing && meta.len() <= t.len() => writing = true,
-                    _ => only.push(shown(&path)),
-                }
-            }
+    let mut level = vec![(copy.to_path_buf(), from.to_path_buf())];
+    for depth in 0..DEEPEST {
+        if level.is_empty() {
+            break;
         }
+        if stop.load(Ordering::Relaxed) {
+            return Err(Stopped);
+        }
+        let read: Vec<Compared> =
+            level.par_iter().map(|(dir, twin)| compare(copy, dir, twin, depth == 0, stop)).collect();
+        level = Vec::new();
+        for compared in read {
+            only.extend(compared.only);
+            writing.extend(compared.writing);
+            bytes = bytes.saturating_add(compared.bytes);
+            level.extend(compared.folders);
+        }
+    }
+    if stop.load(Ordering::Relaxed) {
+        return Err(Stopped);
+    }
+    // Deeper than walks go: what's in them can't be told.
+    only.extend(level.iter().map(|(dir, _)| inside(copy, dir)));
+    // One file newer than its twin but no bigger is the one the copy was writing when it stopped; two or more aren't.
+    if writing.len() > 1 {
+        only.append(&mut writing);
     }
     only.sort();
     Ok((only, bytes))
 }
 
-/// Removes a copy the move made, for good, keeping its marker (if it has one) to the last: everything else in it goes
-/// first, then the marker, then the folder. So a copy that can't all go (a file in it is open) keeps its marker, and is
-/// cleared when it's tried again. Never a link, never through one: a link inside goes as the link.
-pub(crate) fn remove_marked(folder: &Path) -> Result<(), String> {
-    let couldnt = |p: &Path, e: io::Error| {
-        format!("{} couldn't be removed ({e}): the rest of the half copy is cleared when it's tried again.", text(p))
+/// What one folder of a half copy holds, beside its twin in the folder it copies from, as [`only_here`] looks at it.
+#[derive(Default)]
+struct Compared {
+    /// What isn't a copy (paths inside the half copy).
+    only: Vec<String>,
+    /// Files newer than their twins but no bigger: the copy may have been writing one of them when it stopped.
+    writing: Vec<String>,
+    /// The room its files take.
+    bytes: u64,
+    /// The folders in it, each with its twin, to look in next.
+    folders: Vec<(PathBuf, PathBuf)>,
+}
+
+/// Compares one folder of a half copy (`dir`, the copy's top when `top`) with its twin. Looks at Stop before it starts
+/// and every 256 entries; one stopped part way says no more.
+fn compare(copy: &Path, dir: &Path, twin_dir: &Path, top: bool, stop: &AtomicBool) -> Compared {
+    let mut compared = Compared::default();
+    if stop.load(Ordering::Relaxed) {
+        return compared;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        compared.only.push(inside(copy, dir));
+        return compared;
     };
+    for (n, entry) in entries.enumerate() {
+        if n % 256 == 255 && stop.load(Ordering::Relaxed) {
+            break;
+        }
+        let Ok(entry) = entry else {
+            compared.only.push(inside(copy, dir));
+            continue;
+        };
+        let name = entry.file_name();
+        let path = entry.path();
+        // As it is, not where a link leads.
+        let Ok(meta) = entry.metadata() else {
+            compared.only.push(inside(copy, &path));
+            continue;
+        };
+        let kind = meta.file_type();
+        if kind.is_file() {
+            compared.bytes = compared.bytes.saturating_add(meta.len());
+            if (top && name == OsStr::new(MARKER)) || made_by_the_system(&name.to_string_lossy()) {
+                continue;
+            }
+            // A file the copy was writing over an older one when it stopped, named after a file still in `from`.
+            let own_part = name.to_string_lossy().strip_suffix(PART_SUFFIX).map(|own| twin_dir.join(own));
+            if own_part.is_some_and(|own| fs::symlink_metadata(own).is_ok_and(|m| m.is_file())) {
+                continue;
+            }
+        }
+        let twin = twin_dir.join(&name);
+        let Ok(twin_meta) = fs::symlink_metadata(&twin) else {
+            compared.only.push(inside(copy, &path));
+            continue;
+        };
+        let twin_kind = twin_meta.file_type();
+        if kind.is_symlink() {
+            if !twin_kind.is_symlink() {
+                compared.only.push(inside(copy, &path));
+            }
+        } else if kind.is_dir() {
+            if twin_kind.is_dir() {
+                compared.folders.push((path, twin));
+            } else {
+                compared.only.push(inside(copy, &path));
+            }
+        } else {
+            // A file's twin is a file, or a link to one, as where it leads.
+            let twin_file = if twin_kind.is_symlink() { fs::metadata(&twin).ok() } else { Some(twin_meta) };
+            match twin_file.filter(fs::Metadata::is_file) {
+                Some(t) if same_file(&meta, &t) || newer(&t, &meta) => {}
+                Some(t) if meta.len() <= t.len() => compared.writing.push(inside(copy, &path)),
+                _ => compared.only.push(inside(copy, &path)),
+            }
+        }
+    }
+    compared
+}
+
+/// A path in a half copy as it's named to you: from the copy's top.
+fn inside(copy: &Path, path: &Path) -> String {
+    text(path.strip_prefix(copy).unwrap_or(path))
+}
+
+/// Why a copy the move made wasn't all removed.
+#[derive(Debug)]
+pub(crate) enum NotRemoved {
+    /// You pressed Stop: what's left keeps its marker, so it's cleared the next time.
+    Stopped,
+    /// Something in it couldn't be removed: what, and why.
+    Failed(String),
+}
+
+/// Removes a copy the move made, for good, keeping its marker (if it has one) to the last: everything else in it goes
+/// first, then the marker, then the folder. So a copy that can't all go (a file in it is open), or whose clearing you
+/// stop (`stop`, looked at between the things it removes), keeps its marker, and is cleared when it's tried again.
+/// Never a link, never through one: a link inside goes as the link.
+pub(crate) fn remove_marked(folder: &Path, stop: &AtomicBool) -> Result<(), NotRemoved> {
     if is_link(folder) || !real_folder(&text(folder)) {
         return Ok(());
     }
     let entries =
-        fs::read_dir(folder).and_then(Iterator::collect::<io::Result<Vec<_>>>).map_err(|e| couldnt(folder, e))?;
+        fs::read_dir(folder).and_then(Iterator::collect::<io::Result<Vec<_>>>).map_err(|e| couldnt(folder, &e))?;
     for entry in entries {
+        if stop.load(Ordering::Relaxed) {
+            return Err(NotRemoved::Stopped);
+        }
         if entry.file_name() == OsStr::new(MARKER) {
             continue;
         }
-        let path = entry.path();
-        remove_entry(&path).map_err(|e| couldnt(&path, e))?;
+        remove_entry(&entry.path(), stop)?;
     }
     if !unmark(folder) {
-        return Err(format!("The marker in {} couldn't be removed: it's tried again next time.", text(folder)));
+        return Err(NotRemoved::Failed(format!(
+            "The marker in {} couldn't be removed: it's tried again next time.",
+            text(folder)
+        )));
     }
-    fs::remove_dir(folder).map_err(|e| couldnt(folder, e))
+    fs::remove_dir(folder).map_err(|e| couldnt(folder, &e))
+}
+
+/// What's said when something in a copy the move made can't be removed.
+fn couldnt(path: &Path, e: &io::Error) -> NotRemoved {
+    NotRemoved::Failed(format!(
+        "{} couldn't be removed ({e}): the rest of the half copy is cleared when it's tried again.",
+        text(path)
+    ))
 }
 
 /// Removes one thing in a copy the move made: a link as the link, a folder with all that's in it (links in it as
 /// links, never followed), a file even when it's read-only (Windows won't remove those otherwise, and on a drive
-/// without newer Windows' way of deleting, such as exFAT, not even inside a folder being removed).
-fn remove_entry(path: &Path) -> io::Result<()> {
+/// without newer Windows' way of deleting, such as exFAT, not even inside a folder being removed). Looks at `stop`
+/// between the things in it.
+fn remove_entry(path: &Path, stop: &AtomicBool) -> Result<(), NotRemoved> {
     let mut folders: Vec<(PathBuf, bool)> = Vec::new();
-    remove_one(path, fs::symlink_metadata(path)?.file_type(), &mut folders)?;
+    let kind = fs::symlink_metadata(path).map_err(|e| couldnt(path, &e))?.file_type();
+    remove_one(path, kind, &mut folders).map_err(|e| couldnt(path, &e))?;
     // Each folder is emptied, then removed once what's in it has gone.
     while let Some((dir, emptied)) = folders.pop() {
+        if stop.load(Ordering::Relaxed) {
+            return Err(NotRemoved::Stopped);
+        }
         if emptied {
-            fs::remove_dir(&dir)?;
+            fs::remove_dir(&dir).map_err(|e| couldnt(&dir, &e))?;
+            continue;
+        }
+        // Looked at again just before it's read: one swapped for a link meanwhile goes as the link, and what it leads
+        // to stays.
+        let kind = fs::symlink_metadata(&dir).map_err(|e| couldnt(&dir, &e))?.file_type();
+        if !kind.is_dir() {
+            remove_one(&dir, kind, &mut folders).map_err(|e| couldnt(&dir, &e))?;
             continue;
         }
         folders.push((dir.clone(), true));
-        for entry in fs::read_dir(&dir)?.collect::<io::Result<Vec<_>>>()? {
-            remove_one(&entry.path(), entry.file_type()?, &mut folders)?;
+        let entries =
+            fs::read_dir(&dir).and_then(Iterator::collect::<io::Result<Vec<_>>>).map_err(|e| couldnt(&dir, &e))?;
+        for entry in entries {
+            if stop.load(Ordering::Relaxed) {
+                return Err(NotRemoved::Stopped);
+            }
+            let path = entry.path();
+            let kind = entry.file_type().map_err(|e| couldnt(&path, &e))?;
+            remove_one(&path, kind, &mut folders).map_err(|e| couldnt(&path, &e))?;
         }
     }
     Ok(())
@@ -636,5 +759,34 @@ fn remove_one(path: &Path, kind: fs::FileType, folders: &mut Vec<(PathBuf, bool)
     } else {
         set_read_only(path, false);
         fs::remove_file(path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::sync::atomic::AtomicBool;
+
+    use super::{MARKER, NotRemoved, remove_entry, remove_marked};
+
+    #[test]
+    fn clearing_stops_when_you_press_stop_and_the_marker_stays() {
+        let dir = std::env::temp_dir().join("mo-space-unit-clear-stop");
+        let _ = fs::remove_dir_all(&dir);
+        let half = dir.join("Presets");
+        fs::create_dir_all(half.join("Sounds")).unwrap();
+        fs::write(half.join(MARKER), "a marker").unwrap();
+        fs::write(half.join("Sounds").join("a.db"), "a").unwrap();
+        fs::write(half.join("Patch.prt"), "p").unwrap();
+        let stopped = AtomicBool::new(true);
+
+        // Stopped before it starts on the next thing, inside a folder too.
+        assert!(matches!(remove_marked(&half, &stopped), Err(NotRemoved::Stopped)));
+        assert!(matches!(remove_entry(&half.join("Sounds"), &stopped), Err(NotRemoved::Stopped)));
+        assert!(half.join(MARKER).exists() && half.join("Sounds").join("a.db").exists());
+        // Not stopped, all of it goes.
+        assert!(remove_marked(&half, &AtomicBool::new(false)).is_ok());
+        assert!(!half.exists());
+        let _ = fs::remove_dir_all(&dir);
     }
 }
