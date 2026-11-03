@@ -6,8 +6,10 @@
 //!
 //! Words only: `mo-ui` reads the drive and removes on its low-priority threads.
 
-use chrono::{Months, NaiveDateTime};
-use mo_backup::older::{Kept, Removed, Run};
+use std::sync::Arc;
+
+use chrono::{Months, NaiveDateTime, NaiveTime};
+use mo_backup::older::{Kept, Removed, Run, Why, freed};
 use mo_space::size::size_text;
 
 use crate::songs::{plural, thousands};
@@ -53,16 +55,21 @@ pub struct Lines {
     pub choices: Vec<Choice>,
 }
 
-/// The runs a choice takes: those that began before the time it gives (`None`: every run).
+/// The runs a choice takes: those that began before the day it gives (`None`: every run). The start of that day, so a
+/// run from earlier on it doesn't go while the question says "kept before" it.
 fn cutoff(months: u32, now: NaiveDateTime) -> Option<NaiveDateTime> {
     // A date too far back to work out: nothing is that old.
-    (months > 0).then(|| now.checked_sub_months(Months::new(months)).unwrap_or(NaiveDateTime::MIN))
+    (months > 0).then(|| {
+        now.checked_sub_months(Months::new(months))
+            .map_or(NaiveDateTime::MIN, |day| day.date().and_time(NaiveTime::MIN))
+    })
 }
 
-/// How many older versions a set of runs holds, and the room they take.
+/// How many older versions a set of runs holds, and the room removing them gives back (a file the backup shares with
+/// another counts only when every name of it goes).
 fn count(runs: &[&Run]) -> (usize, u64) {
     let files = runs.iter().map(|r| r.versions.len()).sum();
-    (files, runs.iter().map(|r| r.bytes()).fold(0, u64::saturating_add))
+    (files, freed(runs.iter().flat_map(|r| &r.versions)))
 }
 
 /// The card's words. `drive_picked` is whether a backup drive is picked at all.
@@ -109,12 +116,20 @@ pub fn lines(drive_picked: bool, state: KeptState<'_>, now: NaiveDateTime) -> Li
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ask {
     pub question: String,
-    /// Exactly these go if you say yes, as they were listed: a newer listing doesn't change them.
-    pub runs: Vec<Run>,
+    /// The listing it was asked about (a newer one doesn't change what goes), and the time it cuts at.
+    kept: Arc<Kept>,
+    cut: Option<NaiveDateTime>,
+}
+
+impl Ask {
+    /// Exactly what goes if you say yes, as the listing had it, the oldest run first.
+    pub fn runs(&self) -> Vec<&Run> {
+        self.kept.before(self.cut)
+    }
 }
 
 /// The question for a menu choice (its `id`), or `None` for a choice that removes nothing (or isn't one).
-pub fn ask(kept: &Kept, id: &str, now: NaiveDateTime) -> Option<Ask> {
+pub fn ask(kept: &Arc<Kept>, id: &str, now: NaiveDateTime) -> Option<Ask> {
     let &(_, months, _) = CHOICES.iter().find(|(c, _, _)| *c == id)?;
     let cut = cutoff(months, now);
     let runs = kept.before(cut);
@@ -132,7 +147,8 @@ pub fn ask(kept: &Kept, id: &str, now: NaiveDateTime) -> Option<Ask> {
         question: format!(
             "{question} They go for good, not to the Recycle Bin. Your music and the rest of the backup stay as they are."
         ),
-        runs: runs.into_iter().cloned().collect(),
+        kept: Arc::clone(kept),
+        cut,
     })
 }
 
@@ -154,18 +170,32 @@ pub fn removed_line(r: &Removed) -> String {
         line = format!("Stopped · {line}");
     }
     if !r.left.is_empty() {
-        line.push_str(&format!(
-            " · {} stayed: changed since they were listed, open in another program, or read-only",
-            thousands(r.left.len())
-        ));
+        line.push_str(&format!(" · {} stayed: {}", thousands(r.left.len()), stayed_why(&r.left)));
     }
     line
+}
+
+/// Why the older versions that stayed stayed, in a few words: each reason with its count when there's more than one.
+fn stayed_why(left: &[(std::path::PathBuf, Why)]) -> String {
+    let changed = left.iter().filter(|(_, w)| *w == Why::Changed).count();
+    let folder = left.iter().filter(|(_, w)| *w == Why::Folder).count();
+    let refused = left.len() - changed - folder;
+    let reasons = [
+        (changed, "changed since they were listed"),
+        (folder, "in a folder that isn't as it was"),
+        (refused, "couldn't be removed (open in another program?)"),
+    ];
+    let reasons: Vec<&(usize, &str)> = reasons.iter().filter(|(n, _)| *n > 0).collect();
+    match reasons.as_slice() {
+        [(_, why)] => (*why).to_owned(),
+        many => many.iter().map(|(n, why)| format!("{} {why}", thousands(*n))).collect::<Vec<_>>().join(", "),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mo_backup::older::Version;
+    use mo_backup::older::{Shared, Version};
     use std::path::PathBuf;
 
     fn at(text: &str) -> NaiveDateTime {
@@ -180,7 +210,12 @@ mod tests {
             versions: sizes
                 .iter()
                 .enumerate()
-                .map(|(i, &size)| Version { path: PathBuf::from(format!("/b/{i}")), size, modified: None })
+                .map(|(i, &size)| Version {
+                    path: PathBuf::from(format!("/b/{i}")),
+                    size,
+                    modified: None,
+                    shared: None,
+                })
                 .collect(),
         }
     }
@@ -238,16 +273,16 @@ mod tests {
     #[test]
     fn asking_names_exactly_what_goes() {
         let now = at("2026-11-03 14:40");
-        let k = kept();
+        let k = Arc::new(kept());
         let a = ask(&k, "older-6", now).unwrap();
         assert!(a.question.starts_with("Remove 2 older versions (2.93 KB), kept before 3 May 2026? They go for good"));
         // The empty February run goes along, so its folder is tidied away; September and November stay.
-        let stamps: Vec<&str> = a.runs.iter().map(|r| r.stamp.as_str()).collect();
+        let stamps: Vec<&str> = a.runs().iter().map(|r| r.stamp.as_str()).collect();
         assert_eq!(stamps, ["2025-06-01 10.00", "2026-02-10 09.00"]);
         let all = ask(&k, "older-all", now).unwrap();
         assert!(all.question.starts_with("Remove all 5 older versions (3.91 KB)?"));
-        assert_eq!(all.runs.len(), 4);
-        let one = Kept { runs: vec![run("2026-01-01 10:00", &[10])], others: 0 };
+        assert_eq!(all.runs().len(), 4);
+        let one = Arc::new(Kept { runs: vec![run("2026-01-01 10:00", &[10])], others: 0 });
         assert!(ask(&one, "older-all", now).unwrap().question.starts_with("Remove 1 older version (10 bytes)?"));
         // Nothing that old, or not a choice: nothing to ask.
         assert_eq!(ask(&one, "older-12", now), None);
@@ -255,15 +290,52 @@ mod tests {
     }
 
     #[test]
+    fn kept_before_a_day_means_before_that_day_began() {
+        // Six months before 14:40 on 3 Nov is 3 May: a run from 09:15 that morning isn't "kept before 3 May".
+        let now = at("2026-11-03 14:40");
+        let k =
+            Arc::new(Kept { runs: vec![run("2026-05-02 23:59", &[10]), run("2026-05-03 09:15", &[20])], others: 0 });
+        let a = ask(&k, "older-6", now).unwrap();
+        assert!(a.question.starts_with("Remove 1 older version (10 bytes), kept before 3 May 2026?"), "{}", a.question);
+        assert_eq!(a.runs().len(), 1);
+    }
+
+    #[test]
+    fn shared_bytes_count_once_and_only_when_every_name_goes() {
+        let now = at("2026-11-03 14:40");
+        let shared = |names| Some(Shared { id: (1, 7), names });
+        let mut old = run("2025-01-01 10:00", &[4000, 500]);
+        // Shares its bytes with the backup's current copy of the file: removing it frees nothing.
+        old.versions[0].shared = shared(2);
+        let k = Arc::new(Kept { runs: vec![old], others: 0 });
+        let l = lines(true, KeptState::Ready(&k), now);
+        assert_eq!((l.size.as_str(), l.count.as_str()), ("500 bytes", "in 2 older versions"));
+        assert!(ask(&k, "older-all", now).unwrap().question.starts_with("Remove all 2 older versions (500 bytes)?"));
+    }
+
+    #[test]
     fn a_removal_says_what_it_did() {
         let done = Removed { files: 412, bytes: 230 << 20, ..Removed::default() };
         assert_eq!(removed_line(&done), "Removed 412 older versions (230 MB)");
-        let left =
-            Removed { files: 1, bytes: 10, left: vec![(PathBuf::from("/b/x"), "in use".into())], ..done.clone() };
+        let left = Removed { files: 1, bytes: 10, left: vec![(PathBuf::from("/b/x"), Why::Changed)], ..done.clone() };
         assert_eq!(
             removed_line(&left),
-            "Removed 1 older version (10 bytes) · 1 stayed: changed since they were listed, open in another program, \
-             or read-only"
+            "Removed 1 older version (10 bytes) · 1 stayed: changed since they were listed"
+        );
+        let mixed = Removed {
+            left: vec![
+                (PathBuf::from("/b/x"), Why::Changed),
+                (PathBuf::from("/b/y"), Why::Refused("in use".into())),
+                (PathBuf::from("/b/z"), Why::Refused("in use".into())),
+            ],
+            ..done.clone()
+        };
+        assert!(
+            removed_line(&mixed).ends_with(
+                "· 3 stayed: 1 changed since they were listed, 2 couldn't be removed (open in another program?)"
+            ),
+            "{}",
+            removed_line(&mixed)
         );
         let stopped = Removed { stopped: true, ..done.clone() };
         assert!(removed_line(&stopped).starts_with("Stopped · Removed 412"));

@@ -1281,36 +1281,16 @@ export component MenuItems inherits MenuCard {
     }
 }
 
-// The menu of things to do with what's picked: a small "more" button, the same lines as the right-click menu.
-export component MoreButton inherits StudioButton {
-    in property <[MenuItem]> items;
-    callback chosen(string);
-    icon: Icons.more;
-    tip: "More";
-    clicked => { more-menu.show(); }
-    more-menu := PopupWindow {
-        x: root.width - self.width;
-        y: root.height + Space.xs;
-        width: 280px;
-        close-policy: close-on-click-outside;
-        MenuItems {
-            items: root.items;
-            chosen(id) => {
-                more-menu.close();
-                root.chosen(id);
-            }
-        }
-    }
-}
-
-// A button with words that opens a menu of lines under it, like "Remove older versions…".
+// A button that opens a menu of lines under it, like "Remove older versions…". The menu lines up with the button's
+// left edge, or with its right edge (`menu-at-right`, for a button at the right of a row, like the small "more" one).
 export component MenuButton inherits StudioButton {
     in property <[MenuItem]> items;
+    in property <bool> menu-at-right: false;
     callback chosen(string);
     menu: true;
     clicked => { button-menu.show(); }
     button-menu := PopupWindow {
-        x: 0;
+        x: root.menu-at-right ? root.width - self.width : 0;
         y: root.height + Space.xs;
         width: max(root.width, 280px);
         close-policy: close-on-click-outside;
@@ -1322,6 +1302,15 @@ export component MenuButton inherits StudioButton {
             }
         }
     }
+}
+
+// The menu of things to do with what's picked: a small "more" button, the same lines as the right-click menu.
+export component MoreButton inherits MenuButton {
+    icon: Icons.more;
+    tip: "More";
+    // The icon says it opens a menu: no arrow.
+    menu: false;
+    menu-at-right: true;
 }
 
 // A right-click menu: put one on the page and call `open-at` with the mouse's place in the window (as `ListLine`'s

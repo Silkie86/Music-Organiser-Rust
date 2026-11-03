@@ -8,21 +8,24 @@
 //! - [`read`] lists them, a run at a time. It only reads.
 //! - [`remove`] removes the runs you pick, for good: not to the Recycle Bin, as the point is to make room on the backup
 //!   drive (and a USB stick has no bin). The app says what goes and asks first. It takes only what [`read`] listed:
-//!   each file only while it's still the size and time it was listed with, never through a link, and each folder only
-//!   once it's empty. Anything else in Older versions (a folder not named like a run, a file put there since) stays.
+//!   each file only while it's still the size and time it was listed with, never through a link, and the folders it
+//!   empties. Anything else in Older versions (a folder not named like a run, a file put there since) stays.
+//!
+//! The backup shares the bytes of files that are the same (one file with two names, [`crate::copy`]), so an older
+//! version can share its bytes with another file on the backup. Removing it frees no room until every name goes:
+//! [`freed`] counts the room each removal really gives back.
 
 use std::cmp::Reverse;
-use std::collections::HashMap;
-use std::fs;
+use std::collections::{HashMap, HashSet};
+use std::fs::{self, Metadata};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
 
 use chrono::NaiveDateTime;
-use rayon::prelude::*;
 
-use crate::copy::{CantStart, Drive, OLDER_VERSIONS};
+use crate::copy::{CantStart, Drive, OLDER_VERSIONS, set_read_only};
 
 /// How a run's folder is named: the minute the run began.
 const STAMP: &str = "%Y-%m-%d %H.%M";
@@ -44,6 +47,16 @@ pub fn stamp_time(name: &str) -> Option<NaiveDateTime> {
     (stamp(when) == name).then_some(when)
 }
 
+/// A file with more than one name on its drive (the backup's sharing): removing one name frees nothing until every
+/// name goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Shared {
+    /// Which file it is on its drive.
+    pub id: (u64, u64),
+    /// How many names it has, in Older versions and anywhere else on the drive.
+    pub names: u64,
+}
+
 /// One older version: the copy of a file that a run replaced.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Version {
@@ -52,6 +65,29 @@ pub struct Version {
     pub size: u64,
     /// Its time when it was listed: it's only removed while it still has it.
     pub modified: Option<SystemTime>,
+    /// When the file has other names too; `None` for one with just this name (or when the system can't say, as on a
+    /// drive that can't share).
+    pub shared: Option<Shared>,
+}
+
+/// The room removing these older versions gives back: each one's size, but a file with more than one name only once,
+/// and only when every one of its names is among them.
+pub fn freed<'a>(versions: impl IntoIterator<Item = &'a Version>) -> u64 {
+    let mut bytes: u64 = 0;
+    // Each shared file: its names, how many of them are here, and its size.
+    let mut shared: HashMap<(u64, u64), (u64, u64, u64)> = HashMap::new();
+    for v in versions {
+        match v.shared {
+            None => bytes = bytes.saturating_add(v.size),
+            Some(s) => shared.entry(s.id).or_insert((s.names, 0, v.size)).1 += 1,
+        }
+    }
+    for (names, here, size) in shared.into_values() {
+        if here >= names {
+            bytes = bytes.saturating_add(size);
+        }
+    }
+    bytes
 }
 
 /// One run's older versions.
@@ -65,17 +101,17 @@ pub struct Run {
 }
 
 impl Run {
-    /// The room its older versions take.
+    /// The room removing just this run's older versions gives back.
     pub fn bytes(&self) -> u64 {
-        self.versions.iter().map(|v| v.size).fold(0, u64::saturating_add)
+        freed(&self.versions)
     }
 }
 
 /// What Older versions holds.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Kept {
-    /// Each run's older versions, the oldest run first. A run's folder with nothing left in it is listed too, so
-    /// removing it tidies the folder away.
+    /// Each run's older versions, the oldest run first. A run's folder with nothing left in it is listed too, so a
+    /// removal that takes its time takes it along.
     pub runs: Vec<Run>,
     /// Things the backup didn't put there (a file or a folder not named like a run's, a link, something that couldn't
     /// be read): they're left alone and never removed.
@@ -88,9 +124,9 @@ impl Kept {
         self.runs.iter().map(|r| r.versions.len()).sum()
     }
 
-    /// The room they take.
+    /// The room they take: what removing all of them gives back.
     pub fn bytes(&self) -> u64 {
-        self.runs.iter().map(Run::bytes).fold(0, u64::saturating_add)
+        freed(self.runs.iter().flat_map(|r| &r.versions))
     }
 
     /// The runs that began before `cutoff`, the oldest first; every run for `None`.
@@ -99,10 +135,9 @@ impl Kept {
     }
 }
 
-/// Lists the older versions on a backup, a run at a time, each run's folder walked on the current rayon pool (call it
-/// inside the app's low-priority pool, never on the window's thread). Only reads; links are never followed. A backup
-/// with no Older versions yet gives an empty list; a backup folder that isn't there (the drive isn't plugged in) is
-/// an error.
+/// Lists the older versions on a backup, one run's folder after another (one drive, so no faster side by side). Call
+/// it away from the window's thread. Only reads; links are never followed. A backup with no Older versions yet gives
+/// an empty list; a backup folder that isn't there (the drive isn't plugged in) is an error.
 pub fn read(backup: &Path, stop: &AtomicBool) -> io::Result<Kept> {
     if Drive::find(backup).is_none() {
         return Err(io::Error::new(io::ErrorKind::NotFound, "The backup folder isn't there"));
@@ -115,8 +150,7 @@ pub fn read(backup: &Path, stop: &AtomicBool) -> io::Result<Kept> {
         Ok(meta) if !meta.is_dir() => return Ok(Kept { runs: Vec::new(), others: 1 }),
         Ok(_) => {}
     }
-    let mut folders: Vec<(String, NaiveDateTime, PathBuf)> = Vec::new();
-    let mut others = 0;
+    let mut kept = Kept::default();
     for entry in fs::read_dir(&older)? {
         // The entry's own type: a link to a folder is a link, never the folder it leads to.
         let run = entry.ok().and_then(|e| {
@@ -124,22 +158,19 @@ pub fn read(backup: &Path, stop: &AtomicBool) -> io::Result<Kept> {
             let when = stamp_time(&name)?;
             e.file_type().ok()?.is_dir().then(|| (name, when, e.path()))
         });
-        match run {
-            Some(run) => folders.push(run),
-            None => others += 1,
+        let Some((stamp, when, folder)) = run else {
+            kept.others += 1;
+            continue;
+        };
+        match walk(&folder, true, stop) {
+            Ok(w) => {
+                kept.others += w.others;
+                kept.runs.push(Run { stamp, when, versions: w.files });
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => return Err(e),
+            // A run's folder that can't be read can't be listed, so nothing in it is removed.
+            Err(_) => kept.others += 1,
         }
-    }
-    let walked: Vec<(Run, usize)> = folders
-        .into_par_iter()
-        .map(|(stamp, when, folder)| {
-            let w = walk(&folder, stop)?;
-            Ok((Run { stamp, when, versions: w.files }, w.others))
-        })
-        .collect::<io::Result<_>>()?;
-    let mut kept = Kept { runs: Vec::with_capacity(walked.len()), others };
-    for (run, run_others) in walked {
-        kept.others += run_others;
-        kept.runs.push(run);
     }
     kept.runs.sort_by(|a, b| a.when.cmp(&b.when).then_with(|| a.stamp.cmp(&b.stamp)));
     Ok(kept)
@@ -149,24 +180,28 @@ pub fn read(backup: &Path, stop: &AtomicBool) -> io::Result<Kept> {
 #[derive(Default)]
 struct Walked {
     files: Vec<Version>,
-    /// The folders inside it (not the run's folder itself).
-    dirs: Vec<PathBuf>,
-    /// Links, folders that couldn't be read or were too deep, and anything else that isn't a plain file or folder.
+    /// Links, folders inside that couldn't be read or were too deep, and anything else that isn't a plain file or
+    /// folder.
     others: usize,
 }
 
-/// Walks a run's folder. A folder that can't be read is left out (it counts as another thing); `stop` stops it with
+/// Walks a run's folder; `shared` also asks which files have other names. The run's folder itself not being readable
+/// is an error; a folder inside it that can't be read is left out (it counts as another thing). `stop` stops it with
 /// an `Interrupted` error.
-fn walk(folder: &Path, stop: &AtomicBool) -> io::Result<Walked> {
+fn walk(folder: &Path, shared: bool, stop: &AtomicBool) -> io::Result<Walked> {
     let mut out = Walked::default();
     let mut todo: Vec<(PathBuf, usize)> = vec![(folder.to_path_buf(), 0)];
     while let Some((dir, depth)) = todo.pop() {
         if stop.load(Ordering::Relaxed) {
             return Err(io::Error::new(io::ErrorKind::Interrupted, "Stopped"));
         }
-        let Ok(entries) = fs::read_dir(&dir) else {
-            out.others += 1;
-            continue;
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if depth == 0 => return Err(e),
+            Err(_) => {
+                out.others += 1;
+                continue;
+            }
         };
         for entry in entries {
             let Ok(entry) = entry else {
@@ -175,14 +210,13 @@ fn walk(folder: &Path, stop: &AtomicBool) -> io::Result<Walked> {
             };
             // The entry's own type, so a link (a junction on Windows too) is never taken for what it leads to.
             match entry.file_type() {
-                Ok(kind) if kind.is_dir() && depth < DEEPEST => {
-                    out.dirs.push(entry.path());
-                    todo.push((entry.path(), depth + 1));
-                }
+                Ok(kind) if kind.is_dir() && depth < DEEPEST => todo.push((entry.path(), depth + 1)),
                 // On Windows from the folder listing itself; elsewhere the file's own details, not a link's target.
                 Ok(kind) if kind.is_file() => match entry.metadata() {
                     Ok(meta) => {
-                        out.files.push(Version { path: entry.path(), size: meta.len(), modified: meta.modified().ok() })
+                        let path = entry.path();
+                        let shared = if shared { names(&path, &meta) } else { None };
+                        out.files.push(Version { path, size: meta.len(), modified: meta.modified().ok(), shared });
                     }
                     Err(_) => out.others += 1,
                 },
@@ -193,15 +227,51 @@ fn walk(folder: &Path, stop: &AtomicBool) -> io::Result<Walked> {
     Ok(out)
 }
 
+/// Which file this is and how many names it has, when it has more than one.
+#[cfg(unix)]
+fn names(_path: &Path, meta: &Metadata) -> Option<Shared> {
+    use std::os::unix::fs::MetadataExt;
+    (meta.nlink() > 1).then(|| Shared { id: (meta.dev(), meta.ino()), names: meta.nlink() })
+}
+
+/// Which file this is and how many names it has, when it has more than one. Windows only says when the file is
+/// opened: opened just to ask, not to read, and not through a link.
+#[cfg(windows)]
+fn names(path: &Path, _meta: &Metadata) -> Option<Shared> {
+    use std::os::windows::fs::OpenOptionsExt;
+    /// FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT.
+    const JUST_THIS: u32 = 0x0200_0000 | 0x0020_0000;
+    let file = fs::OpenOptions::new().access_mode(0).custom_flags(JUST_THIS).open(path).ok()?;
+    let info = winapi_util::file::information(&file).ok()?;
+    let names = info.number_of_links();
+    (names > 1).then(|| Shared { id: (info.volume_serial_number(), info.file_index()), names })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn names(_path: &Path, _meta: &Metadata) -> Option<Shared> {
+    None
+}
+
+/// Why an older version picked for removal stayed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Why {
+    /// It changed (or something else took its place) since it was listed.
+    Changed,
+    /// Its folder isn't as it was when listed: gone, a link now, or it couldn't be looked at.
+    Folder,
+    /// The system wouldn't remove it (open in another program, say): what it said.
+    Refused(String),
+}
+
 /// What a removal did.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Removed {
-    /// How many older versions went, and the room they took.
+    /// How many older versions went.
     pub files: usize,
+    /// The room that gave back ([`freed`]).
     pub bytes: u64,
-    /// Listed older versions that stayed, and why: changed since they were listed, a run's folder that isn't the
-    /// backup's own any more, or the system wouldn't remove them (open in another program, read-only).
-    pub left: Vec<(PathBuf, String)>,
+    /// Listed older versions that stayed, and why.
+    pub left: Vec<(PathBuf, Why)>,
     /// Things in the runs' folders that weren't listed (put there since, links): left alone.
     pub others: usize,
     /// You stopped it part way: the runs after that stay.
@@ -211,11 +281,11 @@ pub struct Removed {
 }
 
 /// Removes the older versions of `runs` (as [`read`] listed them), for good, once you've said yes. Each run's folder
-/// is walked again and only what was listed goes, each file only while it's still the size and time it was listed
-/// with. Links are never followed or removed. Each folder goes once it's empty, the run's own folder last. Anything
-/// else stays. Runs go in the order given (oldest first, from [`Kept::before`]), so a stopped removal leaves the
-/// newest ones. `progress` hears how many listed versions have been dealt with, of all of them. Call it away from the
-/// window's thread.
+/// is walked again and only what was listed goes. Just before each file goes, it's checked again: still a plain file of
+/// the size and time it was listed with, in real folders all the way down from its run's folder (never through a
+/// link). A read-only one goes too. The folders it empties go, the run's own folder last; anything else stays. Runs go
+/// in the order given (oldest first, from [`Kept::before`]), so a stopped removal leaves the newest ones. `progress`
+/// hears how many listed versions have been dealt with, of all of them. Call it away from the window's thread.
 pub fn remove(
     backup: &Path,
     runs: &[&Run],
@@ -226,6 +296,7 @@ pub fn remove(
         return Err(CantStart::NoBackupFolder(backup.to_path_buf()));
     };
     let mut out = Removed::default();
+    let mut gone_versions: Vec<&Version> = Vec::new();
     let total: usize = runs.iter().map(|r| r.versions.len()).sum();
     // Listed versions dealt with in the runs before this one.
     let mut before = 0usize;
@@ -242,32 +313,36 @@ pub fn remove(
             break;
         }
         let folder = older.join(&run.stamp);
+        let leave_all = |out: &mut Removed| out.left.extend(run.versions.iter().map(|v| (v.path.clone(), Why::Folder)));
         // Only the backup's own run folders, straight inside its own Older versions folder.
         if !older_is_own || stamp_time(&run.stamp) != Some(run.when) || !real_folder(&folder) {
-            let why = "Its backup's folder in Older versions isn't there any more, or isn't the backup's own";
-            out.left.extend(run.versions.iter().map(|v| (v.path.clone(), why.to_owned())));
+            leave_all(&mut out);
             before += run.versions.len();
             progress(before, total);
             continue;
         }
-        let walked = match walk(&folder, stop) {
+        let walked = match walk(&folder, false, stop) {
             Ok(w) => w,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {
                 out.stopped = true;
                 break;
             }
-            Err(e) => {
-                out.left.extend(run.versions.iter().map(|v| (v.path.clone(), e.to_string())));
+            Err(_) => {
+                leave_all(&mut out);
                 before += run.versions.len();
                 progress(before, total);
                 continue;
             }
         };
         out.others += walked.others;
-        let listed: HashMap<&Path, &Version> = run.versions.iter().map(|v| (v.path.as_path(), v)).collect();
-        let mut seen = 0usize;
+        let by_path: HashMap<&Path, &Version> = run.versions.iter().map(|v| (v.path.as_path(), v)).collect();
+        // The folders checked to be real ones, just before the first file in each goes.
+        let mut checked: HashMap<PathBuf, bool> = HashMap::new();
+        // The folders a file went from, to tidy away once they're empty.
+        let mut emptied: HashSet<PathBuf> = HashSet::new();
+        let mut seen: HashSet<&Path> = HashSet::new();
         for found in &walked.files {
-            let Some(listed) = listed.get(found.path.as_path()) else {
+            let Some(&listed) = by_path.get(found.path.as_path()) else {
                 out.others += 1;
                 continue;
             };
@@ -275,44 +350,150 @@ pub fn remove(
                 out.stopped = true;
                 break;
             }
-            if seen % LOOK_EVERY == LOOK_EVERY - 1 && !drive.still_there() {
+            if seen.len() % LOOK_EVERY == LOOK_EVERY - 1 && !drive.still_there() {
                 out.gone = true;
                 break;
             }
-            seen += 1;
-            if found.size != listed.size || found.modified.is_none() || found.modified != listed.modified {
-                out.left.push((found.path.clone(), "It changed since it was listed".to_owned()));
+            seen.insert(listed.path.as_path());
+            let path = listed.path.as_path();
+            let parent = path.parent().unwrap_or(&folder);
+            if !real_down(&folder, parent, &mut checked) {
+                out.left.push((path.to_path_buf(), Why::Folder));
+            } else if !as_listed(path, listed) {
+                out.left.push((path.to_path_buf(), Why::Changed));
             } else {
-                match fs::remove_file(&found.path) {
+                match remove_version(path, listed.shared.is_some()) {
                     Ok(()) => {
                         out.files += 1;
-                        out.bytes = out.bytes.saturating_add(found.size);
+                        gone_versions.push(listed);
+                        emptied.insert(parent.to_path_buf());
                     }
                     Err(_) if !drive.still_there() => {
                         out.gone = true;
                         break;
                     }
-                    Err(e) => out.left.push((found.path.clone(), e.to_string())),
+                    Err(e) => out.left.push((path.to_path_buf(), Why::Refused(e.to_string()))),
                 }
             }
-            progress(before + seen.min(run.versions.len()), total);
+            progress(before + seen.len(), total);
+        }
+        if !out.stopped && !out.gone {
+            // Listed but not found again as a file: gone already (nothing to do), something else in its place now, or
+            // in a folder that couldn't be looked at.
+            for v in run.versions.iter().filter(|v| !seen.contains(v.path.as_path())) {
+                match fs::symlink_metadata(&v.path) {
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Ok(_) => out.left.push((v.path.clone(), Why::Changed)),
+                    Err(_) => out.left.push((v.path.clone(), Why::Folder)),
+                }
+            }
         }
         before += run.versions.len();
         progress(before, total);
         if out.gone {
             break;
         }
-        // Each folder once it's empty, the deepest first, then the run's own. A folder that isn't empty stays.
-        let mut dirs = walked.dirs;
-        dirs.sort_by_key(|d| Reverse(d.components().count()));
-        for d in dirs.iter().chain(std::iter::once(&folder)) {
-            if real_folder(d) {
-                let _ = fs::remove_dir(d);
-            }
-        }
+        tidy(&folder, emptied);
         if out.stopped {
             break;
         }
     }
+    out.bytes = freed(gone_versions);
     Ok(out)
+}
+
+/// Whether every folder from `top` down to `dir` is a real folder (not a link), each asked about once.
+fn real_down(top: &Path, dir: &Path, checked: &mut HashMap<PathBuf, bool>) -> bool {
+    if let Some(&ok) = checked.get(dir) {
+        return ok;
+    }
+    let ok = fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir())
+        && (dir == top || dir.parent().is_some_and(|up| up.starts_with(top) && real_down(top, up, checked)));
+    checked.insert(dir.to_path_buf(), ok);
+    ok
+}
+
+/// Whether an older version is still as it was listed, looked at again just now: a plain file (not a link) of the same
+/// size and time.
+fn as_listed(path: &Path, listed: &Version) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|m| {
+        m.is_file() && m.len() == listed.size && listed.modified.is_some() && m.modified().ok() == listed.modified
+    })
+}
+
+/// Removes one older version, a read-only one too (Windows won't otherwise); the mark goes back if it can't be removed.
+/// Windows keeps the mark on the file, not on each of its names, so a file with other names (`shared`) gets it back
+/// once this name has gone, through a handle opened before: the other names stay as they were.
+fn remove_version(path: &Path, shared: bool) -> io::Result<()> {
+    if !set_read_only(path, false) {
+        return fs::remove_file(path);
+    }
+    let held = if shared { open_for_marks(path) } else { None };
+    match fs::remove_file(path) {
+        Ok(()) => {
+            if let Some(file) = held
+                && let Ok(meta) = file.metadata()
+            {
+                let mut marks = meta.permissions();
+                marks.set_readonly(true);
+                let _ = file.set_permissions(marks);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            drop(held);
+            set_read_only(path, true);
+            Err(e)
+        }
+    }
+}
+
+/// A file opened only to read and change its marks (not its bytes), and not through a link. Windows only: elsewhere a
+/// name is removed without changing the file's marks.
+#[cfg(windows)]
+fn open_for_marks(path: &Path) -> Option<fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    /// FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES.
+    const MARKS: u32 = 0x0080 | 0x0100;
+    /// FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT.
+    const JUST_THIS: u32 = 0x0200_0000 | 0x0020_0000;
+    fs::OpenOptions::new().access_mode(MARKS).custom_flags(JUST_THIS).open(path).ok()
+}
+
+#[cfg(not(windows))]
+fn open_for_marks(_path: &Path) -> Option<fs::File> {
+    None
+}
+
+/// Removes the folders files went from once they're empty, and the folders above them up to the run's own (which goes
+/// once it's empty, as a run with nothing left does), the deepest first. A folder that isn't empty stays, and so does
+/// one no file went from (a folder of yours, say).
+fn tidy(run_folder: &Path, emptied: HashSet<PathBuf>) {
+    let mut dirs: HashSet<PathBuf> = HashSet::from([run_folder.to_path_buf()]);
+    for dir in emptied {
+        for d in dir.ancestors() {
+            if !d.starts_with(run_folder) || !dirs.insert(d.to_path_buf()) {
+                break;
+            }
+        }
+    }
+    let mut dirs: Vec<PathBuf> = dirs.into_iter().collect();
+    dirs.sort_by_key(|d| Reverse(d.components().count()));
+    for d in &dirs {
+        if fs::symlink_metadata(d).is_ok_and(|m| m.is_dir()) {
+            let _ = fs::remove_dir(d);
+        }
+    }
+}
+
+impl std::fmt::Display for Why {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Why::Changed => f.write_str("It changed since it was listed"),
+            Why::Folder => {
+                f.write_str("Its folder isn't as it was when listed (gone, or a link now), or couldn't be read")
+            }
+            Why::Refused(e) => write!(f, "The system wouldn't remove it: {e}"),
+        }
+    }
 }

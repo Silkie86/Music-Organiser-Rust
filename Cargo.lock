@@ -3023,6 +3023,7 @@ dependencies = [
  "mo-space",
  "rayon",
  "sha2",
+ "winapi-util",
  "zip",
 ]
 

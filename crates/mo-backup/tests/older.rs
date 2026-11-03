@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime};
 
 use chrono::NaiveDateTime;
 use mo_backup::copy::{CantStart, OLDER_VERSIONS, Options, Outcome, run};
-use mo_backup::older::{Kept, Run, read, remove, stamp, stamp_time};
+use mo_backup::older::{Kept, Run, Version, Why, read, remove, stamp, stamp_time};
 use mo_backup::plan::place_on_backup;
 use mo_space::size::files;
 
@@ -187,6 +187,7 @@ fn a_version_changed_or_added_since_the_listing_stays() {
     let left: Vec<&Path> = removed.left.iter().map(|(p, _)| p.as_path()).collect();
     assert_eq!(left.len(), 2, "{removed:?}");
     assert!(left.contains(&song.as_path()) && left.contains(&song2.as_path()));
+    assert!(removed.left.iter().all(|(_, why)| *why == Why::Changed), "{removed:?}");
     assert_eq!(removed.others, 1, "the new file isn't the backup's to remove");
     assert_eq!(
         tree(&run_folder),
@@ -195,17 +196,65 @@ fn a_version_changed_or_added_since_the_listing_stays() {
 }
 
 #[test]
-fn empty_folders_go_and_a_run_with_nothing_left_is_tidied_away() {
+fn a_run_with_nothing_left_is_tidied_away_and_a_folder_of_yours_stays() {
     let root = fixtures("backup-older-empty");
     let backup = root.join("backup");
-    let run_folder = backup.join(OLDER_VERSIONS).join("2026-03-01 09.15");
-    fs::create_dir_all(run_folder.join("I/Projects/Gone")).unwrap();
+    let older = backup.join(OLDER_VERSIONS);
+    // An empty run's folder goes with a removal that takes its time.
+    let empty_run = older.join("2026-03-01 09.15");
+    fs::create_dir_all(&empty_run).unwrap();
+    // In another run, a folder nobody removed a file from (one of yours, say) stays, and so its run's folder does.
+    let run_folder = older.join("2026-04-01 09.15");
+    write(&run_folder.join("I/Projects/Song/Song.flp"), b"older", 100);
+    fs::create_dir_all(run_folder.join("I/keep me")).unwrap();
     let kept = read(&backup, &AtomicBool::new(false)).unwrap();
-    assert_eq!((kept.runs.len(), kept.files()), (1, 0));
+    assert_eq!((kept.runs.len(), kept.files()), (2, 1));
     let removed = remove(&backup, &kept.before(None), &AtomicBool::new(false), &no_progress).unwrap();
+    assert_eq!(removed.files, 1);
+    assert!(!empty_run.exists());
+    // The song's folders went with it, up to the folder of yours.
+    assert!(!run_folder.join("I/Projects").exists());
+    assert!(run_folder.join("I/keep me").is_dir());
+    assert!(older.is_dir(), "Older versions itself stays");
+}
+
+#[test]
+fn a_read_only_version_goes_too() {
+    let root = fixtures("backup-older-read-only");
+    let backup = two_runs(&root);
+    let song = backup.join(OLDER_VERSIONS).join("2026-10-31 22.40/I/Projects/Other/Other.flp");
+    let mut permissions = fs::metadata(&song).unwrap().permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(&song, permissions).unwrap();
+    let kept = read(&backup, &AtomicBool::new(false)).unwrap();
+    let removed = remove(&backup, &kept.before(None), &AtomicBool::new(false), &no_progress).unwrap();
+    assert_eq!((removed.files, removed.left.len()), (3, 0), "{removed:?}");
+    assert!(!song.exists());
+}
+
+#[test]
+fn a_folder_swapped_for_a_link_after_the_listing_is_left_alone() {
+    let root = fixtures("backup-older-swapped");
+    let backup = two_runs(&root);
+    let song_folder = backup.join(OLDER_VERSIONS).join("2026-01-05 10.00/I/Projects/Song");
+    let stop = AtomicBool::new(false);
+    let kept = read(&backup, &stop).unwrap();
+    // Your music, with files of the same names, sizes and times as the ones listed.
+    let music = root.join("music");
+    fs::create_dir_all(&music).unwrap();
+    for name in ["Song.flp", "Song (2).flp"] {
+        fs::copy(song_folder.join(name), music.join(name)).unwrap();
+        let time = fs::metadata(song_folder.join(name)).unwrap().modified().unwrap();
+        fs::File::options().write(true).open(music.join(name)).unwrap().set_modified(time).unwrap();
+    }
+    // After the listing, the folder is swapped for a link to your music.
+    fs::remove_dir_all(&song_folder).unwrap();
+    folder_link(&music, &song_folder);
+    let removed = remove(&backup, &kept.before(Some(at("2026-06-01 00:00"))), &stop, &no_progress).unwrap();
     assert_eq!(removed.files, 0);
-    assert!(!run_folder.exists());
-    assert!(backup.join(OLDER_VERSIONS).is_dir(), "Older versions itself stays");
+    assert_eq!(removed.left.len(), 2, "{removed:?}");
+    assert_eq!(tree(&music), ["Song (2).flp", "Song.flp"]);
+    assert!(is_link(&song_folder));
 }
 
 #[test]
@@ -254,7 +303,7 @@ fn an_older_versions_folder_that_is_a_link_is_left_alone() {
     let forged = Run {
         stamp: "2026-01-05 10.00".into(),
         when: at("2026-01-05 10:00"),
-        versions: vec![mo_backup::older::Version { path: through, size: meta.len(), modified: meta.modified().ok() }],
+        versions: vec![Version { path: through, size: meta.len(), modified: meta.modified().ok(), shared: None }],
     };
     let removed = remove(&backup, &[&forged], &AtomicBool::new(false), &no_progress).unwrap();
     assert_eq!((removed.files, removed.left.len()), (0, 1));
@@ -270,7 +319,7 @@ fn a_made_up_run_never_reaches_outside_its_folder() {
     let stop = AtomicBool::new(false);
     let song = fs::metadata(music.join("Song.flp")).unwrap();
     let outside =
-        mo_backup::older::Version { path: music.join("Song.flp"), size: song.len(), modified: song.modified().ok() };
+        Version { path: music.join("Song.flp"), size: song.len(), modified: song.modified().ok(), shared: None };
     // A name that isn't a run's, and a real run's name listing a file outside it.
     let climbs = Run { stamp: "../../music".into(), when: at("2026-01-05 10:00"), versions: vec![outside.clone()] };
     let real = Run { stamp: "2026-01-05 10.00".into(), when: at("2026-01-05 10:00"), versions: vec![outside] };
@@ -291,11 +340,32 @@ fn a_hard_linked_version_goes_and_the_file_it_shares_with_stays() {
     let version = backup.join(OLDER_VERSIONS).join("2026-01-05 10.00/I/Pack/Kick.wav");
     fs::create_dir_all(version.parent().unwrap()).unwrap();
     fs::hard_link(&current, &version).unwrap();
+    // Read-only, which is one mark for both names: the current copy keeps it when the older version goes.
+    let mut marks = fs::metadata(&current).unwrap().permissions();
+    marks.set_readonly(true);
+    fs::set_permissions(&current, marks).unwrap();
+    // Two more older versions that are one file between them, and nothing else shares.
+    let snare = backup.join(OLDER_VERSIONS).join("2026-01-05 10.00/I/Pack/Snare.wav");
+    let snare_again = backup.join(OLDER_VERSIONS).join("2026-02-05 10.00/I/Pack/Snare.wav");
+    write(&snare, &[6u8; 1000], 100);
+    fs::create_dir_all(snare_again.parent().unwrap()).unwrap();
+    fs::hard_link(&snare, &snare_again).unwrap();
     let kept = read(&backup, &AtomicBool::new(false)).unwrap();
+    assert_eq!(kept.files(), 3);
+    // The kick shares its bytes with the backup's current copy, so removing it gives no room back; the snare's
+    // bytes count once, and only when both its names go.
+    assert_eq!(kept.bytes(), 1000);
+    assert_eq!(kept.runs[0].bytes(), 0);
     let removed = remove(&backup, &kept.before(None), &AtomicBool::new(false), &no_progress).unwrap();
-    assert_eq!(removed.files, 1);
+    assert_eq!((removed.files, removed.bytes), (3, 1000));
     assert!(!version.exists());
     assert_eq!(fs::read(&current).unwrap(), vec![5u8; 4096]);
+    let mut marks = fs::metadata(&current).unwrap().permissions();
+    assert!(marks.readonly(), "the current copy is still read-only");
+    // So the fixtures folder can be cleared next time.
+    #[allow(clippy::permissions_set_readonly_false)]
+    marks.set_readonly(false);
+    fs::set_permissions(&current, marks).unwrap();
 }
 
 #[test]
@@ -322,25 +392,4 @@ fn no_backup_folder_no_removal() {
         Err(CantStart::NoBackupFolder(unplugged.clone()))
     );
     assert!(!unplugged.exists(), "nothing is made in its place");
-}
-
-/// On Windows a read-only file isn't removed (someone marked it to keep); elsewhere read-only doesn't stop a removal.
-#[cfg(windows)]
-#[test]
-fn a_read_only_version_stays_on_windows() {
-    let root = fixtures("backup-older-read-only");
-    let backup = two_runs(&root);
-    let song = backup.join(OLDER_VERSIONS).join("2026-10-31 22.40/I/Projects/Other/Other.flp");
-    let mut permissions = fs::metadata(&song).unwrap().permissions();
-    permissions.set_readonly(true);
-    fs::set_permissions(&song, permissions).unwrap();
-    let kept = read(&backup, &AtomicBool::new(false)).unwrap();
-    let removed = remove(&backup, &kept.before(None), &AtomicBool::new(false), &no_progress).unwrap();
-    assert_eq!(removed.files, 2);
-    assert_eq!(removed.left.len(), 1);
-    assert!(song.exists());
-    let mut permissions = fs::metadata(&song).unwrap().permissions();
-    #[allow(clippy::permissions_set_readonly_false)]
-    permissions.set_readonly(false);
-    fs::set_permissions(&song, permissions).unwrap();
 }

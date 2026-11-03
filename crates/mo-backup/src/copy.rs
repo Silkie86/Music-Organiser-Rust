@@ -686,7 +686,7 @@ pub(crate) fn remove_part(part: &Path) {
 
 /// Windows only (elsewhere a read-only file can be replaced or removed anyway): makes a file read-only or not, and
 /// says whether it changed.
-fn set_read_only(path: &Path, read_only: bool) -> bool {
+pub(crate) fn set_read_only(path: &Path, read_only: bool) -> bool {
     #[cfg(windows)]
     {
         let Ok(meta) = fs::symlink_metadata(path) else { return false };
