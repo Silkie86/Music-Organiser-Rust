@@ -45,9 +45,9 @@
 //! and the notes after it wait for the next start, so at most one is tried and fails at each start). A sweep cut off
 //! part way (the app closed) goes on from there next time. Two copies of the app never go through the notes at once:
 //! the one that does holds a lock on [`NOTES_LOCK_FILE`] (an empty file beside it, which stays), and the other leaves
-//! them be. Never the draft (`draft.txt`, nor `draft.txt.mo-part`, what it's written as first: it may hold the newest
-//! words, and the next draft written clears it), the words of a save that failed (`unsaved.txt`) or the lock
-//! (`writing.lock`) (rule 17).
+//! them be. Never the draft (`draft.txt`, nor `draft.txt.mo-part` and `draft.txt.mo-part-2`, what it's written as
+//! first: they may hold the newest words, and the next draft written clears one left behind), the words of a save
+//! that failed (`unsaved.txt`) or the lock (`writing.lock`) (rule 17).
 //!
 //! Never touched: samples (rule 2), projects, "(fixed)" copies (rule 3), converts and exports, F12 notes under 3 months
 //! old and the drafts (rule 17), Playground ideas, settings, the databases (library.db, sounds.db and midi.db are the
@@ -1450,6 +1450,7 @@ mod tests {
             data.join("presets.db.new-12.bak"),
             data.join("notes").join("draft.txt"),
             data.join("notes").join(crate::note::DRAFT_PART),
+            data.join("notes").join(crate::note::DRAFT_PART_ALONE),
             data.join("notes").join("unsaved.txt"),
             data.join("notes").join("writing.lock"),
             data.join("notes").join("backup.txt.mo-part"),
@@ -1518,6 +1519,7 @@ mod tests {
         let kept = [
             notes.join("draft.txt"),
             notes.join(crate::note::DRAFT_PART),
+            notes.join(crate::note::DRAFT_PART_ALONE),
             notes.join("unsaved.txt"),
             notes.join("writing.lock"),
             notes.join("note-2026-07-01_10-00-00 - Copy.md"),
@@ -2571,6 +2573,7 @@ mod tests {
             "note-2026-11-02_14-30-05.md.png",
             "draft.txt",
             crate::note::DRAFT_PART,
+            crate::note::DRAFT_PART_ALONE,
             "unsaved.txt",
             "writing.lock",
         ] {
