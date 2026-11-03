@@ -31,9 +31,10 @@ const CLOUD_THICK: f32 = 6.0;
 /// Up to about this many stars on show, each shines fully; more and each is dimmed.
 const BRIGHT_CROWD: f32 = 30_000.0;
 /// Each star's glow costs the processor many times its dot, so glows only come in as the stars on the view get few
-/// enough: from this many (none) to the lower one (all of it), evenly in doublings so they come in smoothly.
-const GLOWS_FROM: f32 = 40_000.0;
-const GLOWS_FULL: f32 = 2_000.0;
+/// enough: from this many (none) to the lower one (all of it), evenly in doublings so they come in smoothly. With more
+/// on the view the picture would take too long to draw, for glows too faint to see.
+const GLOWS_FROM: f32 = 8_000.0;
+const GLOWS_FULL: f32 = 1_500.0;
 
 /// One pixel, its colour premultiplied by its alpha.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -240,12 +241,11 @@ impl Picture {
 }
 
 /// How strongly the stars glow on the processor's picture with `look`, with `on_show` stars on the view (0 to 1): as
-/// they're drawn as stars on the card, but only from [`GLOWS_FROM`] stars on the view down, all of it by [`GLOWS_FULL`].
-/// The card's stars come in as soon as they're far enough apart to tell apart, many thousands of them; on the processor
-/// the glows of so many would take too long to draw.
+/// they're drawn as stars on the card, but only from [`GLOWS_FROM`] stars on the view down, all of it by
+/// [`GLOWS_FULL`]. The card's stars come in as soon as they're far enough apart to tell apart, many thousands of them;
+/// on the processor the glows of so many would take too long to draw.
 fn glows_in(look: &Look, on_show: f32) -> f32 {
-    let t = ((GLOWS_FROM.ln() - on_show.max(1.0).ln()) / (GLOWS_FROM / GLOWS_FULL).ln()).clamp(0.0, 1.0);
-    (1.0 - look.painted).min(t * t * (3.0 - 2.0 * t))
+    (1.0 - look.painted).min(gl::smooth(GLOWS_FROM.ln(), GLOWS_FULL.ln(), on_show.max(1.0).ln()))
 }
 
 /// Draws a star over what's there (colours premultiplied by their alpha), on the rows in `rows`: a band of the

@@ -836,8 +836,9 @@ mod tests {
     /// To look at one thing closely, these narrow it: GALAXY_GPU_ZOOMS (the zooms, as "1,6,12,60,400"),
     /// GALAXY_GPU_VIEW (the view's size in points, as "1100x800"), GALAXY_GPU_LIT ("length,liked,nothing") and
     /// GALAXY_GPU_PAGES ("dark,paper"). GALAXY_GPU_MAP=blob lays the stars out as a big library's map is, most of them
-    /// in one crowded blob, with the view in its middle. Each picture's line in the output (`LOOK ...`) says how many
-    /// stars were on it and how bright it is on average (0 to 255 over the page), to see brightness change with zoom.
+    /// in one crowded blob, with the view in its middle; GALAXY_GPU_AT ("0.05,0.05") puts the view's middle elsewhere.
+    /// Each picture's line in the output (`LOOK ...`) says how many stars were on it and how bright it is on average (0
+    /// to 255 over the page), to see brightness change with zoom.
     #[test]
     #[ignore]
     fn render() {
@@ -858,6 +859,7 @@ mod tests {
         let lit_kinds = listed("GALAXY_GPU_LIT", "length,liked,nothing");
         let page_kinds = listed("GALAXY_GPU_PAGES", "dark,paper");
         let blob = std::env::var("GALAXY_GPU_MAP").is_ok_and(|m| m == "blob");
+        let at: Vec<f32> = listed("GALAXY_GPU_AT", "").iter().filter_map(|v| v.parse().ok()).collect();
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let adapter =
             crate::gpu::wait(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).expect("a card");
@@ -929,7 +931,11 @@ mod tests {
             for &zoom in &zooms {
                 let mut view = View::default();
                 (view.width, view.height, view.zoom) = (view_width, view_height, zoom);
-                (view.cx, view.cy) = if blob { (0.5, 0.5) } else { (clumps[3].0, clumps[3].1) };
+                (view.cx, view.cy) = match at[..] {
+                    [x, y] => (x, y),
+                    _ if blob => (0.5, 0.5),
+                    _ => (clumps[3].0, clumps[3].1),
+                };
                 let (l, t, r, b) = mo_app::galaxy_look::on_view(&view);
                 let crowd = grid.crowd(l, t, r, b);
                 let in_view = crowd.in_view;

@@ -235,8 +235,8 @@ pub fn glint_point(near: f32, glint: f32, crisp: f32, min_lit: f32) -> f32 {
     far + (near - far) * crisp.clamp(0.0, 1.0)
 }
 
-/// Once the stars are this many points apart where they crowd ([`Crowd`]), far enough apart to tell apart, they start
-/// to be drawn as stars, over the painted dots; a doubling further apart, they're only drawn as stars.
+/// Once the stars are this many points apart, judged round each one ([`Crowd`]), far enough apart to tell apart, they
+/// start to be drawn as stars, over the painted dots; a doubling further apart, they're only drawn as stars.
 pub const STARS_FROM: f32 = 2.5;
 /// Where the stars have only just come apart, a star's core reaches this share of the gap to the stars round it: as
 /// small as the painted dot it takes over from. From there its light (how big it is times how bright) grows with the
@@ -278,8 +278,8 @@ pub struct Look {
     pub spikes_from: f32,
 }
 
-/// A smooth step from 0 at `a` to 1 at `b`.
-fn smooth(a: f32, b: f32, v: f32) -> f32 {
+/// A smooth step from 0 at `a` to 1 at `b` (`b` can be below `a`).
+pub(crate) fn smooth(a: f32, b: f32, v: f32) -> f32 {
     let t = ((v - a) / (b - a)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
@@ -295,7 +295,7 @@ pub fn look(view: &View, crowd: Crowd, lit_share: f32) -> Look {
     let n = crowd.in_view as f32;
     // Light ranks the sounds that have the measure, so the top ones are a share of those on the view.
     let lit_on_view = (n * lit_share.clamp(0.0, 1.0)).max(1.0);
-    // How far apart the stars are where they crowd, in points, and how many doublings that's past STARS_FROM.
+    // How far apart the stars are, in points, and how many doublings that's past STARS_FROM.
     let apart = crowd.apart.max(0.0) * view.unit();
     let past = (apart / STARS_FROM).max(f32::MIN_POSITIVE).log2();
     let painted = 1.0 - smooth(0.0, 1.0, past);
@@ -481,6 +481,7 @@ pub fn bytes(values: &[f32]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::galaxy_grid::Grid;
     use crate::galaxy_view::most_zoom_for as most_zoom;
 
     fn view() -> View {
@@ -579,6 +580,103 @@ mod tests {
         assert_eq!((at69.painted, at69.bright), (0.0, 1.0), "{at69:?}");
         assert!(at44.radius < at69.radius && at69.radius < at87.radius && at87.radius < at130.radius);
         assert!((at130.radius - 1.9 * (0.75 + 0.25 * 30.0f32.sqrt())).abs() < 1e-4, "{at130:?}");
+    }
+
+    /// Stars on a lattice `gap` apart, `across` by `down` of them from (`x`, `y`).
+    fn lattice(x: f32, y: f32, gap: f32, across: usize, down: usize) -> Vec<Option<StarPoint>> {
+        (0..across)
+            .flat_map(|i| (0..down).map(move |j| Some(StarPoint { x: x + i as f32 * gap, y: y + j as f32 * gap })))
+            .collect()
+    }
+
+    /// The look of `view` with `stars` on the map, all shown, as the grid finds them.
+    fn on_grid(grid: &Grid, view: &View) -> (Crowd, Look) {
+        let (l, t, r, b) = on_view(view);
+        let crowd = grid.crowd(l, t, r, b);
+        (crowd, look(view, crowd, 0.0))
+    }
+
+    #[test]
+    fn a_few_stars_far_apart_are_drawn_as_stars_even_on_the_whole_map() {
+        // A small library, or the filters leaving few: 196 stars 0.07 apart over the map, each alone in its square.
+        let stars = lattice(0.045, 0.045, 0.07, 14, 14);
+        let grid = Grid::new(&stars, &(0..stars.len()).collect::<Vec<_>>());
+        for (width, height) in [(800.0, 600.0), (1830.0, 1171.0), (400.0, 300.0)] {
+            let mut v = View::default();
+            (v.width, v.height) = (width, height);
+            let (crowd, lk) = on_grid(&grid, &v);
+            assert_eq!(crowd.in_view, 196);
+            assert_eq!(lk.painted, 0.0, "{width} by {height}: {lk:?}");
+            assert!(lk.bright > 0.9, "{width} by {height}: {lk:?}");
+        }
+    }
+
+    #[test]
+    fn a_crowd_coming_onto_the_views_edge_leaves_the_stars_on_it_as_they_are() {
+        // 150 stars 0.012 apart drawn as stars at 8 times, and a crowd of 10,000 (5e-5 apart) just past the view's top
+        // right corner. Moved a fraction of a point, so 15 of the crowd come onto the view, the stars are unchanged.
+        let mut v = View::default();
+        (v.width, v.height, v.zoom, v.cx, v.cy) = (1200.0, 800.0, 8.0, 0.4, 0.4);
+        let (_, top, right, _) = on_view(&v);
+        let mut stars = lattice(0.31, 0.34, 0.012, 15, 10);
+        stars.extend((0..100).flat_map(|i| {
+            (0..100)
+                .map(move |j| Some(StarPoint { x: right + 1e-5 + i as f32 * 5e-5, y: top + (j as f32 - 84.5) * 5e-5 }))
+        }));
+        let grid = Grid::new(&stars, &(0..stars.len()).collect::<Vec<_>>());
+        let (alone, before) = on_grid(&grid, &v);
+        assert_eq!(alone.in_view, 150);
+        assert_eq!((before.painted, before.bright), (0.0, 1.0), "{before:?}");
+        v.cx += 2e-5;
+        let (sliver, after) = on_grid(&grid, &v);
+        assert_eq!(sliver.in_view, 165);
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn flying_in_anywhere_on_a_clumpy_map_the_look_changes_smoothly() {
+        // 450,000 stars in 40 clumps of all sizes, as the render tests lay them out. Flying in a percent of zoom at a
+        // time, to the middle, into a clump, and to a corner where clumps' edges leave the view, nothing jumps. Where
+        // the view's stars change quickly (into the corner, the crowded edges leave it as it flies in), the stars come
+        // apart over a tenth of a doubling of zoom instead of a whole one; but each starts as bright as the painted
+        // dot it takes over from, so the view's brightness holds (on the card it changed by under 0.3 of 255 a step).
+        let mut seed = 12345u64;
+        let mut rnd = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % 1_000_000) as f32 / 1_000_000.0
+        };
+        let clumps: Vec<(f32, f32, f32)> =
+            (0..40).map(|_| (0.1 + rnd() * 0.8, 0.1 + rnd() * 0.8, 0.01 + rnd() * 0.08)).collect();
+        let stars: Vec<Option<StarPoint>> = (0..450_000)
+            .map(|i| {
+                let c = clumps[i % clumps.len()];
+                let (a, r) = (rnd() * std::f32::consts::TAU, (-(rnd().max(1e-6)).ln()).sqrt() * c.2);
+                Some(StarPoint { x: (c.0 + a.cos() * r).clamp(0.0, 1.0), y: (c.1 + a.sin() * r).clamp(0.0, 1.0) })
+            })
+            .collect();
+        let grid = Grid::new(&stars, &(0..stars.len()).collect::<Vec<_>>());
+        for (cx, cy) in [(0.5, 0.5), (clumps[3].0, clumps[3].1), (0.05, 0.05)] {
+            let mut v = View::default();
+            (v.width, v.height, v.cx, v.cy) = (1830.0, 1171.0, cx, cy);
+            let mut was: Option<Look> = None;
+            v.zoom = 1.0;
+            while v.zoom <= most_zoom(stars.len()) {
+                let (crowd, lk) = on_grid(&grid, &v);
+                if crowd.in_view == 0 {
+                    break;
+                }
+                if let Some(was) = was {
+                    let at = format!("at ({cx}, {cy}), zoom {}: {lk:?}", v.zoom);
+                    assert!((lk.painted - was.painted).abs() < 0.12, "painted {at}");
+                    assert!((lk.bright - was.bright).abs() < 0.03, "bright {at}");
+                    assert!((lk.radius / was.radius - 1.0).abs() < 0.05, "radius {at}");
+                }
+                was = Some(lk);
+                v.zoom *= 1.01;
+            }
+        }
     }
 
     #[test]

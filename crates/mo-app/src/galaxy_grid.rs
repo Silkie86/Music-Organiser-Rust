@@ -9,6 +9,8 @@ use crate::galaxy_view::View;
 
 /// Squares across (and down) the map, as the C# app.
 pub const SIDE: usize = 192;
+/// How many stars a star's gap is judged by, at the least (see [`Crowd`]).
+const ROUND: u32 = 4;
 
 /// The shown stars, by square.
 #[derive(Clone, Debug, Default)]
@@ -17,18 +19,25 @@ pub struct Grid {
     stars: Vec<(u32, f32, f32)>,
     /// Where each square's stars start in `stars` (one more than there are squares).
     starts: Vec<u32>,
+    /// How far apart each square's stars are, in doublings of a map unit (log2 of the gap): see [`Crowd`].
+    gaps: Vec<f32>,
 }
 
-/// How crowded the shown stars on a view are: how many there are, and how far apart where they crowd. That decides how
-/// the galaxy is drawn ([`crate::galaxy_look::look`]): only painted while the stars are too close to tell apart, as
-/// stars once they come apart. It goes by where the stars are, not by the view's average: a crowded clump in an
-/// otherwise empty view is still a crowd.
+/// How crowded the shown stars on a view are: how many there are, and how far apart they are, judged round each star.
+/// That decides how the galaxy is drawn ([`crate::galaxy_look::look`]): only painted while the stars are too close to
+/// tell apart, as stars once they come apart.
+///
+/// Each star's gap is judged by the stars round it: its square's, if it holds at least four, or else the squares round
+/// it too, out and out until there are four (3 by 3 squares, then 5 by 5, 9 by 9...), so a few stars far apart are
+/// judged by the room between them, not by one square's size. The view's is the stars' gaps averaged as doublings, so
+/// it goes by where the stars are, not by the view's own size: a crowded clump in an otherwise empty view is still a
+/// crowd. And a few stars from a crowd at the view's edge (or a few far apart) only sway it as much as their share of
+/// the view's stars, so the look never flips as the view moves.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Crowd {
     /// How many shown stars are on the view.
     pub in_view: usize,
-    /// How far apart they are where they crowd, in map units: the gap round a star in its square of the grid, averaged
-    /// over the stars on the view.
+    /// How far apart they are, in map units: each star's gap to the stars round it, averaged as doublings.
     pub apart: f32,
 }
 
@@ -72,7 +81,8 @@ impl Grid {
             sorted[next[c] as usize] = s;
             next[c] += 1;
         }
-        Grid { stars: sorted, starts }
+        let gaps = gaps(&starts);
+        Grid { stars: sorted, starts, gaps }
     }
 
     /// How many stars it holds.
@@ -122,9 +132,7 @@ impl Grid {
     }
 
     /// How crowded the stars in the box from (`left`, `top`) to (`right`, `bottom`) on the map are: how many are in it
-    /// (counted as [`Grid::count_in`] counts them) and how far apart they are where they crowd. Each square's crowd
-    /// is its stars over its area, all of it (so a square only just on the view isn't judged by a sliver), and the
-    /// box's is the average over its stars: a square with more of them on the view counts for more.
+    /// (counted as [`Grid::count_in`] counts them) and how far apart they are ([`Crowd`]).
     pub fn crowd(&self, left: f32, top: f32, right: f32, bottom: f32) -> Crowd {
         let none = Crowd { in_view: 0, apart: 1.0 };
         if self.stars.is_empty() || right < 0.0 || bottom < 0.0 || left > 1.0 || top > 1.0 {
@@ -132,8 +140,8 @@ impl Grid {
         }
         let (x0, x1) = (square(left), square(right));
         let (y0, y1) = (square(top), square(bottom));
-        // The stars on the view, and the same each times how many share its square.
-        let (mut n, mut crowded) = (0usize, 0u64);
+        // The stars on the view, and their gaps (as doublings) added up.
+        let (mut n, mut doublings) = (0usize, 0.0f64);
         for gy in y0..=y1 {
             for gx in x0..=x1 {
                 let stars = self.in_square(gx, gy);
@@ -144,16 +152,56 @@ impl Grid {
                     stars.iter().filter(|&&(_, x, y)| x >= left && x <= right && y >= top && y <= bottom).count()
                 };
                 n += on_view;
-                crowded += on_view as u64 * stars.len() as u64;
+                doublings += on_view as f64 * f64::from(self.gaps.get(gy * SIDE + gx).copied().unwrap_or(0.0));
             }
         }
         if n == 0 {
             return none;
         }
-        // A square's stars each have its area over their number round them; the gap is the square root of that.
-        let square_area = 1.0 / (SIDE * SIDE) as f64;
-        Crowd { in_view: n, apart: (square_area * n as f64 / crowded as f64).sqrt() as f32 }
+        Crowd { in_view: n, apart: (doublings / n as f64).exp2() as f32 }
     }
+}
+
+/// How far apart each square's stars are (see [`Crowd`]), in doublings of a map unit, from where each square's stars
+/// start (`starts`, as [`Grid`] keeps them). 0 for an empty square, which is never used.
+fn gaps(starts: &[u32]) -> Vec<f32> {
+    let count = |c: usize| starts.get(c + 1).zip(starts.get(c)).map_or(0, |(b, a)| b - a);
+    // How many stars are above and left of each corner of the squares, so a block of squares is counted at once.
+    let n = SIDE + 1;
+    let mut corner = vec![0u32; n * n];
+    for y in 0..SIDE {
+        let mut row = 0;
+        for x in 0..SIDE {
+            row += count(y * SIDE + x);
+            corner[(y + 1) * n + x + 1] = corner[y * n + x + 1] + row;
+        }
+    }
+    let block = |x0: usize, y0: usize, x1: usize, y1: usize| {
+        corner[y1 * n + x1] + corner[y0 * n + x0] - corner[y0 * n + x1] - corner[y1 * n + x0]
+    };
+    let square_area = 1.0 / (SIDE * SIDE) as f32;
+    (0..SIDE * SIDE)
+        .map(|c| {
+            if count(c) == 0 {
+                return 0.0;
+            }
+            let (x, y) = (c % SIDE, c / SIDE);
+            // The square itself, then the squares round it, out and out, until there are enough stars to judge by (or
+            // it's the whole map).
+            let mut reach = 0;
+            loop {
+                let (x0, y0) = (x.saturating_sub(reach), y.saturating_sub(reach));
+                let (x1, y1) = ((x + reach + 1).min(SIDE), (y + reach + 1).min(SIDE));
+                let stars = block(x0, y0, x1, y1);
+                if stars >= ROUND || (x0, y0, x1, y1) == (0, 0, SIDE, SIDE) {
+                    let area = ((x1 - x0) * (y1 - y0)) as f32 * square_area;
+                    // The gap is the square root of each star's share of the area: half its doublings.
+                    return 0.5 * (area / stars.max(1) as f32).log2();
+                }
+                reach = (reach * 2).max(1);
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -203,16 +251,51 @@ mod tests {
         let grid = Grid::new(&stars, &shown);
         let whole = grid.crowd(0.0, 0.0, 1.0, 1.0);
         assert_eq!(whole.in_view, 2_600);
-        // Spread over the whole map they'd be 0.02 apart; where they crowd they're far closer, within a square's
-        // rounding of the clump's own gap (the clump spans a few squares of the grid, each about half full).
-        assert!(whole.apart < 0.002, "{whole:?}");
-        assert!(whole.apart > 2e-4, "{whole:?}");
-        // Away from the clump, the stars are as far apart as they are.
+        // Spread over the whole map they'd be 0.02 apart. But nearly all of them are in the clump, so the map's gap is
+        // near the clump's own, swayed a little by the hundred far apart.
+        assert!(whole.apart > 4e-4 && whole.apart < 7e-4, "{whole:?}");
+        // Away from the clump, the stars are as far apart as they are (0.1), within the rounding of the squares they're
+        // judged over, though each square holds only one.
         let sparse = grid.crowd(0.0, 0.0, 0.4, 0.4);
         assert_eq!(sparse.in_view, 16);
-        assert!((sparse.apart - 1.0 / SIDE as f32).abs() < 1e-6, "one star to a square: {sparse:?}");
+        assert!(sparse.apart > 0.07 && sparse.apart < 0.15, "{sparse:?}");
         // Off the map: none.
         assert_eq!(grid.crowd(2.0, 2.0, 3.0, 3.0).in_view, 0);
+    }
+
+    #[test]
+    fn a_few_stars_far_apart_are_judged_by_the_room_between_them() {
+        // 49 stars 0.13 apart, each alone in its square (a 192nd of the map across): judged by the room between them.
+        let stars: Vec<Option<StarPoint>> =
+            (0..7).flat_map(|i| (0..7).map(move |j| star(0.11 + i as f32 * 0.13, 0.11 + j as f32 * 0.13))).collect();
+        let grid = Grid::new(&stars, &(0..stars.len()).collect::<Vec<_>>());
+        let all = grid.crowd(0.0, 0.0, 1.0, 1.0);
+        assert_eq!(all.in_view, 49);
+        assert!(all.apart > 0.1 && all.apart < 0.2, "{all:?}");
+        // Two stars alone on the map are as far apart as the map shared between them.
+        let two = Grid::new(&[star(0.1, 0.1), star(0.9, 0.9)], &[0, 1]).crowd(0.0, 0.0, 1.0, 1.0);
+        assert!((two.apart - 0.5f32.sqrt()).abs() < 1e-6, "{two:?}");
+    }
+
+    #[test]
+    fn a_few_stars_of_a_crowd_at_the_views_edge_sway_it_only_by_their_share() {
+        // 150 stars 0.016 apart (three squares) and, just past the view's top right corner, a crowd of 10,000 about a
+        // square across (5e-5 apart).
+        let mut stars: Vec<Option<StarPoint>> =
+            (0..15).flat_map(|i| (0..10).map(move |j| star(0.3 + i as f32 * 0.016, 0.4 + j as f32 * 0.016))).collect();
+        let (right, top) = (0.535, 0.39);
+        stars.extend(
+            (0..100).flat_map(|i| (0..100).map(move |j| star(right + i as f32 * 5e-5, top + (j as f32 - 84.5) * 5e-5))),
+        );
+        let grid = Grid::new(&stars, &(0..stars.len()).collect::<Vec<_>>());
+        let alone = grid.crowd(0.29, top, right - 1e-4, 0.56);
+        assert_eq!(alone.in_view, 150);
+        assert!(alone.apart > 0.012 && alone.apart < 0.024, "{alone:?}");
+        // Moved right a touch, so 15 of the crowd come onto the view's corner: a tenth of its stars, so they sway it by
+        // about a tenth of their doublings, not all the way to their own gap.
+        let sliver = grid.crowd(0.29, top, right + 2e-5, 0.56);
+        assert_eq!(sliver.in_view, 165);
+        assert!(sliver.apart > alone.apart * 0.5, "{alone:?} {sliver:?}");
     }
 
     #[test]
