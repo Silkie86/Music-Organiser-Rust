@@ -97,7 +97,7 @@ impl Drop for Doing {
             }
             inside
         });
-        frame_timing::step(self.what, took.saturating_sub(inside));
+        report(self.what, took.saturating_sub(inside));
         if took >= STALL {
             log::warning("Slow", &format!("{} took {} ms on the window's thread", self.what, took.as_millis()));
         }
@@ -105,6 +105,26 @@ impl Drop for Doing {
             *d = self.outer.take();
         }
     }
+}
+
+/// Gives a marked step's own time to the frame timing (and, in the tests, to a list they can look at).
+fn report(what: &'static str, own: Duration) {
+    #[cfg(test)]
+    tests::REPORTED.with(|r| r.borrow_mut().push((what, own)));
+    frame_timing::step(what, own);
+}
+
+/// Which step a late answer is put down to, from the step seen at each look while it waited: the one seen most, and
+/// of those the one seen last (`None` is no marked step).
+fn blame(seen: &[Option<&'static str>]) -> Option<&'static str> {
+    let mut best: Option<(Option<&'static str>, usize)> = None;
+    for (i, step) in seen.iter().enumerate() {
+        let n = seen[..=i].iter().filter(|s| *s == step).count();
+        if best.is_none_or(|(_, most)| n >= most) {
+            best = Some((*step, n));
+        }
+    }
+    best.and_then(|(step, _)| step)
 }
 
 /// The marked step the window is in now, if any.
@@ -147,15 +167,14 @@ fn watch(feed: &Feed) {
         let mut said_still_stuck = false;
         // What the window was busy with once it had been stuck for STALL: the step the freeze is in.
         let mut busy = None;
-        // The step it was in at the first look, for a late answer (answered before then, it wasn't late).
-        let mut first_step = None;
-        let mut looked = false;
+        // The step it was in at each look, for a late answer (answered before the first, it wasn't late). Kept to the
+        // first few hundred looks: a longer wait is a freeze, which has its own line.
+        let mut seen: Vec<Option<&'static str>> = Vec::new();
         while answered.load(Ordering::Acquire) == 0 {
             std::thread::sleep(LOOK_EVERY);
             let waited = sent.elapsed();
-            if !looked {
-                looked = true;
-                first_step = busy_step();
+            if seen.len() < 400 {
+                seen.push(busy_step());
             }
             if waited >= STALL && busy.is_none() {
                 busy = Some(busy_with());
@@ -168,7 +187,7 @@ fn watch(feed: &Feed) {
             }
         }
         let waited = Duration::from_micros(answered.load(Ordering::Acquire));
-        frame_timing::late(waited, first_step);
+        frame_timing::late(waited, blame(&seen), crate::page_name());
         if waited >= STALL {
             let busy = busy.unwrap_or_else(busy_with);
             log::warning("Freeze", &line(waited, false, crate::page_name(), &feed.running_titles(), &busy));
@@ -193,6 +212,42 @@ mod tests {
 
     /// The marked step is kept for the whole app, so the tests that mark steps take turns.
     static TURN: Mutex<()> = Mutex::new(());
+
+    thread_local! {
+        /// The steps' own times as given to the frame timing, on this thread.
+        pub(super) static REPORTED: RefCell<Vec<(&'static str, Duration)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    #[test]
+    fn each_step_counts_only_its_own_time_not_the_steps_inside_it() {
+        let _turn = TURN.lock();
+        REPORTED.with(|r| r.borrow_mut().clear());
+        let outer = doing("outer");
+        std::thread::sleep(Duration::from_millis(30));
+        {
+            let _inner = doing("inner");
+            std::thread::sleep(Duration::from_millis(60));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+        drop(outer);
+        let reported = REPORTED.with(|r| r.borrow().clone());
+        let own = |what| reported.iter().find(|(w, _)| *w == what).map(|(_, t)| *t).expect("reported");
+        assert_eq!(reported.len(), 2);
+        assert!(own("inner") >= Duration::from_millis(60));
+        // The outer step's own 40 ms, not its whole 100.
+        assert!(own("outer") >= Duration::from_millis(40), "{:?}", own("outer"));
+        assert!(own("outer") < Duration::from_millis(90), "{:?}", own("outer"));
+    }
+
+    #[test]
+    fn a_late_answer_is_put_down_to_the_step_seen_most_or_last() {
+        assert_eq!(blame(&[]), None);
+        assert_eq!(blame(&[Some("a"), Some("b"), Some("b")]), Some("b"));
+        // A tie goes to the one seen last before the answer.
+        assert_eq!(blame(&[Some("a"), None]), None);
+        assert_eq!(blame(&[None, Some("a")]), Some("a"));
+        assert_eq!(blame(&[Some("a"), Some("a"), None, Some("b")]), Some("a"));
+    }
 
     #[test]
     fn freeze_lines_say_how_long_where_and_what_ran() {

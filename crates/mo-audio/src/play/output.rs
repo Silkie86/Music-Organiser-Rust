@@ -148,6 +148,13 @@ impl Outputs for SystemOutputs {
     }
 }
 
+/// How long a buffer of `samples` samples (`channels` to a frame) lasts at `rate` frames a second, in microseconds:
+/// how often the output mixes. `None` for a rate of 0.
+pub(crate) fn period_us(samples: usize, channels: usize, rate: u32) -> Option<u64> {
+    let frames = (samples / channels.max(1)) as u64;
+    (rate > 0).then(|| frames * 1_000_000 / u64::from(rate))
+}
+
 /// Builds a stream that renders in f32 and hands the output its own kind of sample. On failure, gives back `render`
 /// so a second try can use it.
 fn stream<T>(
@@ -185,9 +192,8 @@ where
                 *o = T::from_sample(*m);
             }
             // How long this buffer lasts is how often the output mixes.
-            let frames = (out.len() / channels.max(1)) as u64;
-            if rate > 0 {
-                period.store(frames * 1_000_000 / u64::from(rate), Ordering::Relaxed);
+            if let Some(us) = period_us(out.len(), channels, rate) {
+                period.store(us, Ordering::Relaxed);
             }
             let ts = info.timestamp();
             if let Some(d) = ts.playback.checked_duration_since(ts.callback) {
