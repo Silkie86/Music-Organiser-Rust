@@ -40,7 +40,7 @@ static PAGE: AtomicUsize = AtomicUsize::new(0);
 
 thread_local! {
     /// The keys in use, for the key sheet, which changes with the page.
-    static KEYS: RefCell<Option<Shortcuts>> = const { RefCell::new(None) };
+    static KEYS: RefCell<Option<std::rc::Rc<Shortcuts>>> = const { RefCell::new(None) };
 }
 
 /// The place on show, safe to read from any thread.
@@ -58,24 +58,13 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> R
     let app = AppWindow::new()?;
     arrangement::connect(&app);
     apply_look(&app, look);
-    let places: Vec<PlaceInfo> = Place::ALL
-        .iter()
-        .map(|p| PlaceInfo {
-            name: p.name().into(),
-            coming: coming(*p).into(),
-            key: shortcuts.key_of(p.shortcut_id()).into(),
-            icon: icon(&app, *p),
-        })
-        .collect();
-    let settings = Place::Settings.index();
-    app.set_rail(ModelRc::new(VecModel::from(places[..settings].to_vec())));
-    app.set_places(ModelRc::new(VecModel::from(places)));
-    app.set_settings_place(settings as i32);
+    show_places(&app, &shortcuts);
+    app.set_settings_place(Place::Settings.index() as i32);
     app.set_songs_place(Place::Songs.index() as i32);
     app.set_sounds_place(Place::Sounds.index() as i32);
     app.set_backup_place(Place::Backup.index() as i32);
     app.set_space_place(Place::Space.index() as i32);
-    KEYS.with(|k| *k.borrow_mut() = Some(shortcuts.clone()));
+    KEYS.with(|k| *k.borrow_mut() = Some(std::rc::Rc::new(shortcuts.clone())));
     show_button_keys(&app, &shortcuts);
     go_to(&app, start.index() as i32);
 
@@ -90,6 +79,14 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> R
     app.on_key(move |text, ctrl, shift, alt, meta, repeat| {
         let _doing = watchdog::doing("a key");
         let key = key_name(&text, ctrl, shift, alt, meta);
+        // Settings › Shortcuts listening for a new key: this press is the key, not a shortcut.
+        if settings::listening()
+            && let Some(app) = weak.upgrade()
+        {
+            return repeat || settings::key_pressed(&app, &key);
+        }
+        // The keys as they are now: Settings may have changed one.
+        let Some(shortcuts) = KEYS.with(|k| k.borrow().clone()) else { return false };
         if key == "F12" {
             return weak.upgrade().is_some_and(|app| {
                 if !repeat {
@@ -131,6 +128,40 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> R
     cards::connect(&app, &feed);
     note::connect(&app, &feed);
     Ok(app)
+}
+
+/// The keys in use now.
+pub fn shortcuts() -> Shortcuts {
+    KEYS.with(|k| k.borrow().as_deref().cloned()).unwrap_or_default()
+}
+
+/// A key was changed in Settings: everything that shows or runs a key takes the new list at once (the rail's tooltips,
+/// the key sheet, the Songs buttons, the Sounds card and menu). Every page's keys already run from this one list; only
+/// Space's button tooltips still keep their own copy from the start.
+pub fn keys_changed(app: &AppWindow, shortcuts: &Shortcuts) {
+    KEYS.with(|k| *k.borrow_mut() = Some(std::rc::Rc::new(shortcuts.clone())));
+    show_places(app, shortcuts);
+    show_button_keys(app, shortcuts);
+    sounds::show_keys(app, shortcuts);
+    if let Some(place) = place() {
+        app.set_key_rows(ModelRc::new(VecModel::from(key_rows(shortcuts, place))));
+    }
+}
+
+/// The places on the rail, with each one's key for its tooltip.
+fn show_places(app: &AppWindow, shortcuts: &Shortcuts) {
+    let places: Vec<PlaceInfo> = Place::ALL
+        .iter()
+        .map(|p| PlaceInfo {
+            name: p.name().into(),
+            coming: coming(*p).into(),
+            key: shortcuts.key_of(p.shortcut_id()).into(),
+            icon: icon(app, *p),
+        })
+        .collect();
+    let settings = Place::Settings.index();
+    app.set_rail(ModelRc::new(VecModel::from(places[..settings].to_vec())));
+    app.set_places(ModelRc::new(VecModel::from(places)));
 }
 
 /// The Songs page's buttons' tooltips: what each does and its key, from the one shortcut list (rule 15).
