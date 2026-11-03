@@ -32,6 +32,16 @@ export struct SettingsFact {
     button: string,
 }
 
+// A line of the Shortcuts tab: a page's heading (only `page`), or an action and its key.
+export struct KeyLineInfo {
+    page: string,
+    id: string,
+    what: string,
+    key: string,
+    changed: bool,
+    starts: string,
+}
+
 export struct FolderGroupInfo {
     title: string,
     note: string,
@@ -76,6 +86,18 @@ export global SettingsData {
 
     // Developer.
     in property <[SettingsFact]> facts;
+
+    // Shortcuts: every action with its key; the one listening for a new key (its id), or empty; what the last change
+    // did; and whether any key isn't the one it started with.
+    in property <[KeyLineInfo]> key-lines;
+    in property <string> listening;
+    in property <string> keys-note;
+    in property <string> keys-message;
+    in property <bool> keys-changed;
+    callback listen(string);
+    callback clear-key(string);
+    callback default-key(string);
+    callback reset-keys();
 
     callback tab-picked(int);
     callback theme-picked(int);
@@ -460,6 +482,88 @@ component FoldersTab inherits VerticalLayout {
     }
 }
 
+// An action and its key: click the key to give it another.
+component KeyLineRow inherits HorizontalLayout {
+    in property <KeyLineInfo> line;
+    spacing: Space.sm;
+    Text {
+        horizontal-stretch: 1;
+        min-width: 0px;
+        text: root.line.what;
+        color: Theme.text;
+        font-size: Type.body;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    StudioButton {
+        horizontal-stretch: 0;
+        width: 150px;
+        main: SettingsData.listening == root.line.id;
+        text: SettingsData.listening == root.line.id ? "Press a key…" : root.line.key;
+        tip: "Click, then press the key you want";
+        clicked => { SettingsData.listen(root.line.id); }
+    }
+    StudioButton {
+        horizontal-stretch: 0;
+        text: "No key";
+        enabled: root.line.key != "None";
+        tip: "Take its key away";
+        clicked => { SettingsData.clear-key(root.line.id); }
+    }
+    StudioButton {
+        horizontal-stretch: 0;
+        text: "Default";
+        enabled: root.line.changed;
+        tip: root.line.starts;
+        clicked => { SettingsData.default-key(root.line.id); }
+    }
+}
+
+component ShortcutsTab inherits VerticalLayout {
+    spacing: Space.lg;
+    alignment: start;
+    Text {
+        text: SettingsData.keys-note;
+        color: Theme.muted;
+        font-size: Type.meta;
+        wrap: word-wrap;
+    }
+    HorizontalLayout {
+        spacing: Space.md;
+        Text {
+            horizontal-stretch: 1;
+            text: SettingsData.keys-message;
+            color: Theme.warning;
+            font-size: Type.meta;
+            vertical-alignment: center;
+            wrap: word-wrap;
+        }
+        StudioButton {
+            horizontal-stretch: 0;
+            text: "Every key back to the start";
+            enabled: SettingsData.keys-changed;
+            clicked => { SettingsData.reset-keys(); }
+        }
+    }
+    Rectangle {
+        background: Theme.surface;
+        border-radius: Theme.radius;
+        border-width: 1px;
+        border-color: Theme.stroke;
+        VerticalLayout {
+            padding: Space.lg;
+            spacing: Space.xs;
+            for l in SettingsData.key-lines: VerticalLayout {
+                if l.page != "": VerticalLayout {
+                    padding-top: Space.md;
+                    Caps { text: l.page; }
+                }
+                if l.page == "": KeyLineRow { line: l; }
+            }
+        }
+    }
+}
+
 component DawsTab inherits VerticalLayout {
     alignment: start;
     Well {
@@ -533,13 +637,7 @@ export component SettingsPage inherits Rectangle {
                 if SettingsData.tab == 0: GeneralTab { }
                 if SettingsData.tab == 1: FoldersTab { }
                 if SettingsData.tab == 2: DawsTab { }
-                if SettingsData.tab == 3: Well {
-                    height: 220px;
-                    EmptyState {
-                        title: "Coming next";
-                        text: "Every key in one list, to change any of them. Until then, press F1 or ? on a page to see its keys.";
-                    }
-                }
+                if SettingsData.tab == 3: ShortcutsTab { }
                 if SettingsData.tab == 4: DeveloperTab { }
             }
         }
