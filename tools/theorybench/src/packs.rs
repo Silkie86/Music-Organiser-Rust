@@ -208,7 +208,7 @@ enum Outcome {
 }
 
 /// A file's place below the folder it was found in: the folders on the way down, and its name without the ending.
-pub(crate) fn place(path: &Path, root: &Path) -> (Vec<String>, String) {
+fn place(path: &Path, root: &Path) -> (Vec<String>, String) {
     let below = path.strip_prefix(root).unwrap_or(path);
     let mut parts: Vec<String> = below
         .components()

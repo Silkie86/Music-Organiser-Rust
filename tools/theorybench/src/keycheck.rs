@@ -3,8 +3,8 @@
 //! and see for himself where the two differ, before any page shows keys. It prints to the screen and writes nothing.
 //!
 //! Every MIDI file under the folders given (and each MIDI file given) is read as the MIDI page reads it
-//! (`mo_midi::extract`), and each part that isn't drums is read by both finders, heard as the page hears it
-//! (`mo_midi::keys::reading`). The key the file's name gives is found as `theorybench packs` finds it
+//! (`mo_midi::extract`), and each part that isn't drums is heard as the page hears it (`mo_midi::keys::hear`) and read
+//! by both finders. The key the file's name gives is found as `theorybench packs` finds it
 //! ([`packs::label`]). Each part gets a line: what the old finder says, what the new one says, and "better" or
 //! "worse" when only one of them gives the name's key or leans to it. The counts at the end say how often each agrees
 //! with the names, the minor and major names apart.
@@ -14,7 +14,7 @@ use std::io::Write;
 use std::path::{Component, MAIN_SEPARATOR_STR, Path, PathBuf};
 
 use mo_harmony::Key;
-use mo_harmony::keyfind::{self, KeyAnswer, KeyReading, Why, numbers_hash};
+use mo_harmony::keyfind::{self, KeyAnswer, KeyReading, Why, cases, numbers_hash};
 use mo_midi::Role;
 use mo_midi::extract::{self, Found};
 use rayon::prelude::*;
@@ -43,18 +43,11 @@ impl Said {
     fn words(self) -> String {
         let chance = format!("{:.0}%", self.chance * 100.0);
         match self.answer {
-            KeyAnswer::Key(k) => format!("{k} {chance}"),
-            KeyAnswer::OrRelative(k) => format!("{k} or {} {chance}", k.relative()),
-            KeyAnswer::HomeNote { tonic, leaning } => {
-                // Spelled as the key it leans to would be: "home note F#", leaning minor.
-                let key = Key { tonic, mode: leaning.unwrap_or(mo_harmony::Mode::Major) };
-                let leans = match leaning {
-                    Some(mo_harmony::Mode::Minor) => ", leaning minor",
-                    Some(mo_harmony::Mode::Major) => ", leaning major",
-                    None => "",
-                };
-                format!("home note {}{leans} {chance}", key.tonic_name())
+            // As the bench's verdicts say them.
+            KeyAnswer::Key(_) | KeyAnswer::OrRelative(_) | KeyAnswer::HomeNote { .. } => {
+                format!("{} {chance}", cases::describe(self.answer))
             }
+            // Shorter than the verdicts say it, to fit the line.
             KeyAnswer::Unclear { leaning: Some(k), .. } => format!("unsure, leaning {k} {chance}"),
             KeyAnswer::Unclear { why: Why::TooFewNotes, .. } => "too few notes".to_owned(),
             KeyAnswer::Unclear { why: Why::NotTonal, .. } => "not in one scale".to_owned(),
@@ -147,11 +140,11 @@ fn lines_of(found: &[Found], stem: &str) -> (Vec<Line>, usize) {
                 drums += 1;
                 continue;
             }
-            let old = mo_midi::keys::reading(reader, &f.notes, role, f.cut, &keyfind_v4::MODEL);
-            let new = mo_midi::keys::reading(reader, &f.notes, role, f.cut, &keyfind::SHIPPED);
-            if let (Some(old), Some(new)) = (old, new) {
-                lines.push(Line { part: part_name(f, stem), cut: f.cut, old: Said::of(&old), new: Said::of(&new) });
-            }
+            // Heard once, read with each finder's numbers.
+            let Some((heard, span)) = mo_midi::keys::hear(reader, &f.notes, role, f.cut) else { continue };
+            let [old, new] = [&keyfind_v4::MODEL, &keyfind::SHIPPED]
+                .map(|model| Said::of(&keyfind::read_heard(&heard, span, model)));
+            lines.push(Line { part: part_name(f, stem), cut: f.cut, old, new });
         }
         (lines, drums)
     })
@@ -421,30 +414,50 @@ fn counts(t: &Tally, old: &str, new: &str, out: &mut impl Write) -> std::io::Res
     )
 }
 
-pub fn run(args: &[String]) -> Result<(), String> {
-    let (mut changed, mut counts_only) = (false, false);
-    let (mut folders, mut files) = (Vec::new(), Vec::new());
+/// The arguments as they were typed. Windows reads `\"` as a quote inside quotes, so a folder typed with a backslash
+/// at its end (`"L:\New Midi\" --changed`) comes as one argument holding a quote where the folder ended, and
+/// whatever was typed after it: `L:\New Midi" --changed`. No name on Windows can hold a quote, so there an argument
+/// with quotes in it is cut at them.
+fn as_typed(args: &[String], windows: bool) -> Vec<String> {
+    let mut typed = Vec::new();
     for arg in args {
+        if windows && arg.contains('"') {
+            typed.extend(arg.split('"').map(str::trim).filter(|a| !a.is_empty()).map(str::to_owned));
+        } else {
+            typed.push(arg.clone());
+        }
+    }
+    typed
+}
+
+/// A path with its "." and ".." taken out ("/Packs/C Minor/../Pop" is "/Packs/Pop"), as Windows takes them out of a
+/// path made whole: a file's key may come from the folders it's in, and only from those.
+fn resolved(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            part => out.push(part),
+        }
+    }
+    out
+}
+
+/// What was asked for: the folders and files given, made whole, and which lines to print.
+fn asked(args: &[String], windows: bool) -> Result<(Vec<PathBuf>, Show), String> {
+    let (mut changed, mut counts_only, mut paths) = (false, false, Vec::new());
+    for arg in as_typed(args, windows) {
         match arg.as_str() {
             "--changed" => changed = true,
             "--counts" => counts_only = true,
             flag if flag.starts_with("--") => return Err(crate::USAGE.to_owned()),
-            given => {
-                // Windows reads \" as a quote, so a folder given as "L:\New Midi\" comes as L:\New Midi" (with a
-                // quote at the end, which no name can have there).
-                let given = given.strip_suffix('"').unwrap_or(given);
-                let path = std::path::absolute(given).map_err(|e| format!("{given}: {e}"))?;
-                if path.is_dir() {
-                    folders.push(path);
-                } else if path.is_file() && mo_formats::midi::is_midi_path(&path.to_string_lossy()) {
-                    files.push(path);
-                } else {
-                    return Err(format!("{given}: not a folder or a MIDI file that can be read"));
-                }
-            }
+            given => paths.push(resolved(&std::path::absolute(given).map_err(|e| format!("{given}: {e}"))?)),
         }
     }
-    if folders.is_empty() && files.is_empty() {
+    if paths.is_empty() {
         return Err("keycheck needs the folders the MIDI files are in, or the files".into());
     }
     let show = match (counts_only, changed) {
@@ -452,6 +465,21 @@ pub fn run(args: &[String]) -> Result<(), String> {
         (false, true) => Show::Changed,
         (false, false) => Show::All,
     };
+    Ok((paths, show))
+}
+
+pub fn run(args: &[String]) -> Result<(), String> {
+    let (given, show) = asked(args, cfg!(windows))?;
+    let (mut folders, mut files) = (Vec::new(), Vec::new());
+    for path in given {
+        if path.is_dir() {
+            folders.push(path);
+        } else if path.is_file() && mo_formats::midi::is_midi_path(&path.to_string_lossy()) {
+            files.push(path);
+        } else {
+            return Err(format!("{}: not a folder or a MIDI file that can be read", path.display()));
+        }
+    }
     let (found, folders_unread) = packs::midi_files(&folders)?;
     let mut seen = HashSet::new();
     let mut todo: Vec<(PathBuf, String)> = Vec::new();
@@ -468,12 +496,14 @@ pub fn run(args: &[String]) -> Result<(), String> {
             todo.push((path, at));
         }
     }
-    if todo.is_empty() {
-        println!("No MIDI files there.");
-        return Ok(());
+    match folders_unread {
+        0 => {}
+        1 => println!("1 folder couldn't be opened, so it wasn't read."),
+        n => println!("{n} folders couldn't be opened, so they weren't read."),
     }
-    if folders_unread > 0 {
-        println!("{folders_unread} folders couldn't be opened and were passed by.");
+    if todo.is_empty() {
+        println!("No MIDI files there to read.");
+        return Ok(());
     }
     println!("Reading {}...", plural(todo.len(), "MIDI file"));
     let checked: Vec<Checked> = todo.into_par_iter().map(|(path, at)| check(&path, at)).collect();
@@ -548,6 +578,45 @@ mod tests {
             shown(path, Path::new("/packs/Gospel Pack")),
             ["Gospel Pack", "C Minor", "Loop 01.mid"].join(MAIN_SEPARATOR_STR)
         );
+    }
+
+    #[test]
+    fn a_folder_typed_with_a_backslash_at_its_end_is_still_found_on_windows() {
+        let typed =
+            |args: &[&str], windows| as_typed(&args.iter().map(|a| (*a).to_owned()).collect::<Vec<_>>(), windows);
+        // `"L:\New Midi\" --changed`, and two folders each with a backslash at its end, as Windows hands them over.
+        assert_eq!(typed(&[r#"L:\New Midi" --changed"#], true), [r"L:\New Midi", "--changed"]);
+        assert_eq!(typed(&[r#"L:\A" L:\B""#, "--counts"], true), [r"L:\A", r"L:\B", "--counts"]);
+        assert_eq!(typed(&[r"L:\New Midi", "--changed"], true), [r"L:\New Midi", "--changed"]);
+        // Elsewhere a quote can be part of a name.
+        assert_eq!(typed(&[r#"Odd "name""#], false), [r#"Odd "name""#]);
+    }
+
+    #[test]
+    fn what_is_asked_for_is_read_from_the_arguments() {
+        let asked = |args: &[&str]| asked(&args.iter().map(|a| (*a).to_owned()).collect::<Vec<_>>(), false);
+        let (paths, show) = asked(&["Packs/C Minor/../Pop", "--changed"]).unwrap();
+        assert_eq!(show, Show::Changed);
+        assert!(paths[0].is_absolute() && paths[0].ends_with("Packs/Pop"), "{paths:?}");
+        assert_eq!(asked(&["a", "--counts", "--changed"]).unwrap().1, Show::Counts);
+        assert_eq!(
+            asked(&["a", "b"]).unwrap(),
+            (
+                vec![resolved(&std::path::absolute("a").unwrap()), resolved(&std::path::absolute("b").unwrap())],
+                Show::All
+            )
+        );
+        assert!(asked(&["a", "--bogus"]).unwrap_err().starts_with("theorybench keys"));
+        assert!(asked(&["--changed"]).unwrap_err().contains("needs the folders"));
+    }
+
+    #[test]
+    fn a_path_keeps_only_the_folders_it_is_in() {
+        assert_eq!(resolved(Path::new("/Packs/C Minor/../Pop/./Loop.mid")), Path::new("/Packs/Pop/Loop.mid"));
+        assert_eq!(resolved(Path::new("/../Packs")), Path::new("/Packs"));
+        // So a file under "C Minor/.." doesn't take its key from "C Minor".
+        let path = resolved(Path::new("/Packs/C Minor/../Pop/Loop 02.mid"));
+        assert_eq!(packs::label("Loop 02", &folders_above(&path)).0, Named::Nothing);
     }
 
     /// A one-track MIDI file at 96 ticks a beat: each chord held a bar on channel 1, the whole played twice.

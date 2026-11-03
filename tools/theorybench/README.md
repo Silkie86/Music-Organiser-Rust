@@ -291,8 +291,12 @@ cargo run -p mo-theorybench --release -- keycheck "L:\New Midi" --counts
 - Version 4's numbers are kept for this in `src/keyfind_v4.rs`, copied from 3be3d26 with their credits. A test checks
   them against the hash version 4 shipped with, so the old finder stays version 4 as it shipped.
 - What it prints names his files. To keep it, save it outside this folder: `... --counts > D:\Bench\keycheck.txt`.
-- A folder typed with a backslash at the end (`"L:\New Midi\"`) reaches the program with a quote at its end, because
-  Windows reads `\"` as a quote. The quote is dropped, so the folder is still found.
+- A folder typed with a backslash at the end (`"L:\New Midi\" --changed`) reaches the program as one piece with a
+  quote where the folder ended, joined to whatever was typed after it, because Windows reads `\"` as a quote. No name
+  on Windows can hold a quote, so keycheck cuts what it's given at its quotes there: the folder and the rest are
+  still found.
+- A path with `..` in it (`keycheck "..\Other Pack"`) is read as the folders it names: a file takes its key only from
+  folders it's really in.
 
 ## Chords
 
