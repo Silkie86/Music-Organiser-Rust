@@ -24,19 +24,26 @@
 //!
 //! A file's age runs from the latest of when it was made, when it was last changed and, on a Mac or Linux, when its
 //! entry in the folder last changed: a copy keeps the changed time of what it was copied from, so a file from 2019
-//! copied in today is a day old tomorrow, not seven years old.
+//! copied in today is a day old tomorrow, not seven years old. A file dated up to a day after now (the clock was a
+//! little fast when it was written, or has been put back since) waits until its time comes: it isn't removed, and
+//! doesn't count among the newest 30 or 10 meanwhile.
 //!
 //! **F12 notes** are the one thing here you made, so they go to the Recycle Bin rather than straight off the disk, and
 //! only when it can take them without asking: Windows asks "permanently delete?" about a file it can't keep (on a
-//! network drive or USB stick, or where the Recycle Bin is off or too small), and nobody is there to answer. A Mac
-//! keeps them for now (its Trash is reached through Finder, which can ask too). The app never empties the Recycle Bin
-//! itself (Solomon, 2026-11-03: "leave it to me"; the Space page says what's there). A note's age comes from the time
-//! in its name, when it was saved, and runs to now or to the newest note, whichever is earlier, so a clock that jumps
-//! months on (a flat battery, a date set by hand) makes no note old by itself. [`NOTES_DONE_FILE`] in the data folder
-//! says how far the sweep has gone: it looks at each note once, so a note put back from the Recycle Bin stays, and so
-//! does one the Recycle Bin wouldn't take (it's never tried again, and the notes after it wait for the next start, so
-//! at most one is tried and fails at each start). Never the draft (`draft.txt`), the words of a save that failed
-//! (`unsaved.txt`) or the lock (`writing.lock`) (rule 17).
+//! network drive or USB stick, or where the Recycle Bin is off or too small), and makes room in a full one by removing
+//! the oldest things in it for good; nobody is there to answer, or to lose those. A Mac keeps them for now (its Trash
+//! is reached through Finder, which can ask too). The app never empties the Recycle Bin itself (Solomon, 2026-11-03:
+//! "leave it to me"; the Space page says what's there). If Windows asks all the same, or the first note sent isn't in
+//! the Recycle Bin afterwards, no more notes go by themselves (until the "Stopped" line in [`NOTES_DONE_FILE`] is
+//! taken out).
+//!
+//! A note's age comes from the time in its name, when it was saved, and runs to now or to the newest note, whichever is
+//! earlier, so a clock that jumps months on (a flat battery, a date set by hand) makes no note old by itself.
+//! [`NOTES_DONE_FILE`] in the data folder says how far the sweep has gone, note by note: it looks at each note once, so
+//! a note put back from the Recycle Bin stays, and so does one the Recycle Bin wouldn't take (it's never tried again,
+//! and the notes after it wait for the next start, so at most one is tried and fails at each start). A sweep cut off
+//! part way (the app closed) goes on from there next time. Never the draft (`draft.txt`), the words of a save that
+//! failed (`unsaved.txt`) or the lock (`writing.lock`) (rule 17).
 //!
 //! Never touched: samples (rule 2), projects, "(fixed)" copies (rule 3), converts and exports, F12 notes under 3 months
 //! old and the drafts (rule 17), Playground ideas, settings, the databases (library.db, sounds.db and midi.db are the
@@ -56,7 +63,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use chrono::{NaiveDateTime, TimeDelta};
-use mo_space::clean::Bin;
+use mo_space::clean::{Bin, KEPT_BY_YOU, NOT_IN_BIN, Removed, What};
 
 use crate::backup::{PART_ENDING, SETTINGS_FILE, SONGS_FILE};
 use crate::log::{is_crash_log, is_name_time, is_session_log};
@@ -73,8 +80,11 @@ pub const NOTES_KEPT_FOR: Duration = Duration::from_secs(90 * 24 * 60 * 60);
 
 /// The file in the data folder that says how far the sweep has gone through the F12 notes: the time (as in a note's
 /// name) up to which every note saved has been looked at. One saved before then that's in the folder now was put back,
-/// or the Recycle Bin wouldn't take it, so it stays.
+/// or the Recycle Bin wouldn't take it, so it stays. A line starting [`STOPPED`] says notes no longer go by themselves,
+/// and why.
 pub const NOTES_DONE_FILE: &str = "tidy-notes.txt";
+/// How [`NOTES_DONE_FILE`]'s line saying notes no longer go by themselves starts.
+const STOPPED: &str = "Stopped: ";
 
 /// The tools' reports in `logs\`, by how their names start. Each name is this, then the time it ran (digits, `-` and
 /// `_`), then `.txt`: `twin-test-2026-11-02-1430.txt`. Written by `tools/dev/twin-test.ps1`, `tools/dev/MIDI twin
@@ -113,7 +123,8 @@ pub struct Tidied {
     /// Files of your F12 notes put in the Recycle Bin (not counted in `removed`).
     pub to_bin: usize,
     pub to_bin_bytes: u64,
-    /// The app's files that couldn't be removed (in use, or read-only): they're tried again next time.
+    /// The app's files that couldn't be removed (in use, or the folder won't let them go): they're tried again next
+    /// time.
     pub failed: usize,
     /// Why F12 notes old enough to go stayed, when some did.
     pub notes_stay: Option<String>,
@@ -131,8 +142,9 @@ impl Tidied {
         }
     }
 
-    /// Removes one file, counting it.
-    fn remove(&mut self, path: &Path, bytes: u64) {
+    /// Removes one file, counting it. In a `shared` folder (the system's Temp, which on a Mac or Linux holds every
+    /// account's files), one this account may not remove is someone else's, not a fault.
+    fn remove(&mut self, path: &Path, bytes: u64, shared: bool) {
         match fs::remove_file(path) {
             Ok(()) => {
                 self.removed += 1;
@@ -140,22 +152,22 @@ impl Tidied {
             }
             // Gone already (another copy of the app swept it first): nothing to do.
             Err(e) if e.kind() == ErrorKind::NotFound => {}
-            // Not this user's to remove (someone else's file in a shared temp folder): it isn't ours, so not a fault.
-            Err(e) if e.kind() == ErrorKind::PermissionDenied && !cfg!(windows) => {}
+            Err(e) if e.kind() == ErrorKind::PermissionDenied && shared && !cfg!(windows) => {}
             Err(_) => self.failed += 1,
         }
     }
 
-    /// Puts one of your files in the bin, counting it; says why when it didn't go.
-    fn send(&mut self, bin: &dyn Bin, path: &Path, bytes: u64) -> Result<(), String> {
+    /// Puts one of your files in the bin, counting it: whether it went now (`false` when it was gone already); says
+    /// why when it didn't go.
+    fn send(&mut self, bin: &dyn Bin, path: &Path, bytes: u64) -> Result<bool, String> {
         match bin.send(path) {
             Ok(()) => {
                 self.to_bin += 1;
                 self.to_bin_bytes = self.to_bin_bytes.saturating_add(bytes);
-                Ok(())
+                Ok(true)
             }
             // Gone already (another copy of the app sent it first): nothing to do.
-            Err(_) if fs::symlink_metadata(path).is_err_and(|e| e.kind() == ErrorKind::NotFound) => Ok(()),
+            Err(_) if fs::symlink_metadata(path).is_err_and(|e| e.kind() == ErrorKind::NotFound) => Ok(false),
             Err(why) => Err(why),
         }
     }
@@ -217,14 +229,14 @@ fn report(done: &Tidied) {
 /// the window's thread.
 pub fn sweep(places: &Places, now: SystemTime, bin: &dyn Bin) -> Tidied {
     let mut done = Tidied::default();
-    done.add(remove_older(&places.data, is_cut_short, WRITING, now));
+    done.add(remove_older(&places.data, is_cut_short, WRITING, now, false));
     if let Some(curves) = real_folder(&places.data, &[CURVES]) {
-        done.add(remove_older(&curves, mo_presets::export::is_half_written, WRITING, now));
+        done.add(remove_older(&curves, mo_presets::export::is_half_written, WRITING, now, false));
     }
     if let Some(twin) = real_folder(&places.data, &["twin", "cs"]) {
-        done.add(remove_older(&twin, is_library_copy, DAY, now));
+        done.add(remove_older(&twin, is_library_copy, DAY, now, false));
     }
-    done.add(remove_older(&places.temp, mo_space::admin::is_temp_file, DAY, now));
+    done.add(remove_older(&places.temp, mo_space::admin::is_temp_file, DAY, now, true));
     if let Some(notes) = real_folder(&places.data, &[crate::note::FOLDER]) {
         done.add(old_notes_to_bin(&notes, &places.data.join(NOTES_DONE_FILE), NOTES_KEPT_FOR, now, bin));
     }
@@ -270,10 +282,12 @@ fn real_folder(base: &Path, inside: &[&str]) -> Option<PathBuf> {
     Some(at)
 }
 
-/// Deletes all but the newest `keep` of `files`, newest by the latest of their times (see [`latest`]). A time up to
-/// [`SKEW`] after `now` is taken as it is; one further on (a clock that was plainly wrong once) would hold its place
-/// for ever, so it counts as the oldest. `spare`, the file just made, is never deleted and counts as one of the newest,
-/// and neither is a file changed less than `live` before `now`.
+/// Deletes all but the newest `keep` of `files`, newest by the latest of their times (see [`latest`]). A file dated up
+/// to [`SKEW`] after `now` neither goes nor counts among the newest until its time comes: the clock was a little fast
+/// when it was written, or has been put back since, so it can't be told whether the others are newer. One dated further
+/// on (a clock that was plainly wrong once) would hold its place for ever, so it counts as the oldest. `spare`, the
+/// file just made, is never deleted and counts as one of the newest, and neither is a file changed less than `live`
+/// before `now`, nor a session log another copy of the app is writing now (see [`being_written`]).
 fn keep_newest(
     mut files: Vec<(PathBuf, Metadata)>,
     keep: usize,
@@ -287,29 +301,53 @@ fn keep_newest(
         files.retain(|(p, _)| p != spare);
     }
     let keep = if files.len() < before { keep.saturating_sub(1) } else { keep };
+    files.retain(|(_, m)| !latest(m).is_some_and(|t| t > now && t <= now + SKEW));
     if files.len() <= keep {
         return done;
     }
     // Names alone put "…-05-2.log" before "…-05.log", so the time each was written decides.
-    files.sort_by_cached_key(|(p, m)| (latest(m).filter(|t| *t <= now + SKEW), p.clone()));
+    files.sort_by_cached_key(|(p, m)| (latest(m).filter(|t| *t <= now), p.clone()));
     for (old, meta) in &files[..files.len() - keep] {
-        let is_live = latest(meta).is_some_and(|t| t <= now + SKEW && now.duration_since(t).unwrap_or_default() < live);
-        if !is_live {
-            done.remove(old, meta.len());
+        let is_live = latest(meta).is_some_and(|t| t <= now && now.duration_since(t).unwrap_or_default() < live);
+        if !is_live && !being_written(old) {
+            done.remove(old, meta.len(), false);
         }
     }
     done
 }
 
+/// Mac, Linux: whether a session log is being written by a copy of the app that's still running, however long since
+/// its last line: it holds a lock on its log while it writes it (see [`crate::log`]). On Windows a log being written
+/// can't be removed at all, so there's nothing to look for.
+#[cfg(unix)]
+fn being_written(path: &Path) -> bool {
+    fs::File::open(path).is_ok_and(|f| matches!(f.try_lock(), Err(fs::TryLockError::WouldBlock)))
+}
+
+#[cfg(not(unix))]
+fn being_written(_path: &Path) -> bool {
+    false
+}
+
 /// Deletes the plain files in `folder` whose names `is_kind` knows, once they're at least `age` old at `now` (see
 /// [`age`]). One whose times can't be read stays, and so does one dated up to [`SKEW`] after `now`; one dated further
-/// on (the clock was plainly wrong when it was written) is a leftover as old as can be.
-fn remove_older(folder: &Path, is_kind: impl Fn(&str) -> bool, old_at: Duration, now: SystemTime) -> Tidied {
+/// on (the clock was plainly wrong when it was written) is a leftover as old as can be. `shared`: see
+/// [`Tidied::remove`].
+fn remove_older(
+    folder: &Path,
+    is_kind: impl Fn(&str) -> bool,
+    old_at: Duration,
+    now: SystemTime,
+    shared: bool,
+) -> Tidied {
     let mut done = Tidied::default();
+    let old =
+        |meta: &Metadata| latest(meta).is_some_and(|t| t > now + SKEW) || age(meta, now).is_some_and(|a| a >= old_at);
     for (path, meta) in own_files(folder, is_kind) {
-        let far_on = latest(&meta).is_some_and(|t| t > now + SKEW);
-        if far_on || age(&meta, now).is_some_and(|a| a >= old_at) {
-            done.remove(&path, meta.len());
+        // Looked at again just before it goes: the app may have written it anew since the folder was listed (the
+        // Backup page saves its settings through the same name).
+        if old(&meta) && fs::symlink_metadata(&path).is_ok_and(|again| again.is_file() && old(&again)) {
+            done.remove(&path, meta.len(), shared);
         }
     }
     done
@@ -336,16 +374,24 @@ fn old_notes_to_bin(folder: &Path, done_file: &Path, kept_for: Duration, now: Sy
     let Some(until) = newest.and_then(|newest| newest.min(now).checked_sub_signed(kept_for)) else { return tidied };
     let since = match notes_done(done_file) {
         NotesDone::NotYet => None,
+        // Never after now, unless the computer's clock is wrong now (put back), or was when it was written. Which isn't
+        // known, so it's left as it is, and no notes go until the clock is past it: started again from an earlier
+        // time, a note you put back from the Recycle Bin could go again. (If it was the clock then, notes saved
+        // between now and that time count as looked at, and stay.)
+        NotesDone::UpTo(since) if since > now => {
+            tidied.notes_stay = Some(format!(
+                "{NOTES_DONE_FILE} in the data folder says {}, which is after now, so the computer's clock may be \
+                 wrong: none go until it's past then",
+                since.format(NAME_TIME)
+            ));
+            return tidied;
+        }
         NotesDone::UpTo(since) => Some(since),
         // Not known how far earlier sweeps went, so every note old now counts as looked at: none goes that may have
         // been put back. Notes that grow old from now on go as usual.
-        NotesDone::Unreadable => {
-            tidied.notes_stay = Some(match write_notes_done(done_file, until) {
-                Ok(()) => {
-                    format!("{NOTES_DONE_FILE} in the data folder held something else, so the notes old now stay")
-                }
-                Err(e) => format!("{NOTES_DONE_FILE} in the data folder couldn't be written ({e})"),
-            });
+        NotesDone::Unreadable => return start_again(done_file, until, "held something else"),
+        NotesDone::Stopped(why) => {
+            tidied.notes_stay = Some(format!("none go by themselves any more ({why}; see {NOTES_DONE_FILE})"));
             return tidied;
         }
         NotesDone::CantLook => {
@@ -358,18 +404,22 @@ fn old_notes_to_bin(folder: &Path, done_file: &Path, kept_for: Duration, now: Sy
     if old.is_empty() {
         return tidied;
     }
-    // Nobody is there to answer if Windows asks "permanently delete?", and a yes would remove them for good.
-    if let Some(why) = bin.refuses_quietly(folder, 0) {
+    // Nobody is there to answer if Windows asks "permanently delete?", and a yes would remove them for good. Asked
+    // about them all at once, as the Recycle Bin needs room for them all.
+    let bytes = old.iter().flat_map(|(_, parts)| parts).fold(0u64, |sum, (_, meta)| sum.saturating_add(meta.len()));
+    if let Some(why) = bin.refuses_quietly(folder, bytes) {
         tidied.notes_stay = Some(why);
         return tidied;
     }
-    // Written before any note goes, so each is looked at once: one put back from the bin, or one the bin wouldn't take,
-    // stays, and is never tried again.
-    if let Err(e) = write_notes_done(done_file, until) {
-        tidied.notes_stay = Some(format!("{NOTES_DONE_FILE} in the data folder couldn't be written ({e})"));
-        return tidied;
-    }
+    let mut looked_in_bin = false;
     for (saved, parts) in old {
+        // Written before the note goes, so each is looked at once: one put back from the bin later, or one the bin
+        // wouldn't take, stays, and is never tried again. The notes after it aren't counted yet, so if the app closes
+        // part way, they go at the next start.
+        if let Err(e) = write_notes_done(done_file, *saved, None) {
+            tidied.notes_stay = Some(format!("{NOTES_DONE_FILE} in the data folder couldn't be written ({e})"));
+            return tidied;
+        }
         // The picture first, so that if it can't go, its words stay with it.
         let mut parts: Vec<&(PathBuf, Metadata)> = parts.iter().collect();
         parts.sort_by_key(|(path, _)| path.extension().is_none_or(|end| end != "png"));
@@ -377,23 +427,89 @@ fn old_notes_to_bin(folder: &Path, done_file: &Path, kept_for: Duration, now: Sy
             tidied.notes_stay.get_or_insert(why);
             continue;
         }
+        // The Recycle Bin couldn't be read to see the first file is in it: this note's other file goes too, and the
+        // notes after it wait for the next start.
+        let mut unchecked = false;
         for (path, meta) in parts {
-            if let Err(why) = tidied.send(bin, path, meta.len()) {
-                // The first one the bin won't take ends this sweep's notes. It stays, and isn't tried again; the notes
-                // after it wait for the next start, so at most one is tried and fails at each start (a question from
-                // Windows included). If that can't be written down, they stay too.
-                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                let rest = if write_notes_done(done_file, *saved).is_ok() {
-                    "the notes after it wait for the next start"
-                } else {
-                    "so do the notes after it"
-                };
-                tidied.notes_stay =
-                    Some(format!("{name} couldn't go to the Recycle Bin ({why}); it stays, and {rest}"));
-                return tidied;
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            // For the first file to go: where it really is, and when it went, which is how the Recycle Bin is asked
+            // for it afterwards.
+            let first = (!looked_in_bin).then(|| {
+                let shown = path.to_string_lossy().into_owned();
+                let real = mo_space::real_path(&shown).unwrap_or_else(|| shown.clone());
+                let when = unix_seconds(SystemTime::now());
+                Removed { path: shown, real, bytes: meta.len(), what: What::Note, when, bin_id: None }
+            });
+            match tidied.send(bin, path, meta.len()) {
+                // The first file to go is looked for in the bin. Not there, Windows removed it for good (it asks
+                // first, and may have been told yes): none go by themselves from now on, not even this note's words.
+                Ok(true) if first.is_some() => {
+                    looked_in_bin = true;
+                    let mut sent: Vec<Removed> = first.into_iter().collect();
+                    let problems = bin.find(&mut sent);
+                    if problems.iter().any(|p| p.why == NOT_IN_BIN) {
+                        // Not counted as put in the Recycle Bin.
+                        tidied.to_bin = tidied.to_bin.saturating_sub(1);
+                        tidied.to_bin_bytes = tidied.to_bin_bytes.saturating_sub(meta.len());
+                        let why = format!(
+                            "{name} couldn't be found in the Recycle Bin after it was put there (Windows may have \
+                             asked, and removed it for good)"
+                        );
+                        return stop(tidied, done_file, *saved, &why);
+                    }
+                    unchecked = !problems.is_empty();
+                }
+                // It went, or another copy of the app sent it first.
+                Ok(_) => {}
+                // Windows asked first after all, so the Recycle Bin can't take notes quietly here: none go by
+                // themselves from now on.
+                Err(why) if why == KEPT_BY_YOU => {
+                    let why =
+                        format!("Windows asked before putting {name} in the Recycle Bin, and was told to keep it");
+                    return stop(tidied, done_file, *saved, &why);
+                }
+                Err(why) => {
+                    // The first one the bin won't take ends this sweep's notes. It stays, and isn't tried again; the
+                    // notes after it wait for the next start, so at most one is tried and fails at each start.
+                    tidied.notes_stay = Some(format!(
+                        "{name} couldn't go to the Recycle Bin ({why}); it stays, and the notes after it wait for the \
+                         next start"
+                    ));
+                    return tidied;
+                }
             }
         }
+        if unchecked {
+            tidied.notes_stay = Some(
+                "the Recycle Bin couldn't be read to see the first file put there is in it, so the notes after it wait \
+                 for the next start"
+                    .to_owned(),
+            );
+            return tidied;
+        }
     }
+    // Every note saved up to `until` has been looked at now.
+    let _ = write_notes_done(done_file, until, None);
+    tidied
+}
+
+/// Starts [`NOTES_DONE_FILE`] again from `until`, when what it held can't be read: every note old now counts as looked
+/// at, and stays. `why` says what was wrong with it.
+fn start_again(done_file: &Path, until: NaiveDateTime, why: &str) -> Tidied {
+    let notes_stay = Some(match write_notes_done(done_file, until, None) {
+        Ok(()) => format!("{NOTES_DONE_FILE} in the data folder {why}, so the notes old now stay"),
+        Err(e) => format!("{NOTES_DONE_FILE} in the data folder couldn't be written ({e})"),
+    });
+    Tidied { notes_stay, ..Tidied::default() }
+}
+
+/// No more notes go to the Recycle Bin by themselves (`why` says what the Recycle Bin did): [`NOTES_DONE_FILE`] says
+/// so from now on, with every note saved up to `up_to` looked at.
+fn stop(mut tidied: Tidied, done_file: &Path, up_to: NaiveDateTime, why: &str) -> Tidied {
+    tidied.notes_stay = Some(match write_notes_done(done_file, up_to, Some(why)) {
+        Ok(()) => format!("{why}, so no more go by themselves (see {NOTES_DONE_FILE} in the data folder)"),
+        Err(e) => format!("{why}, and {NOTES_DONE_FILE} in the data folder couldn't be written ({e})"),
+    });
     tidied
 }
 
@@ -403,6 +519,8 @@ enum NotesDone {
     NotYet,
     /// Every note saved up to then has been looked at.
     UpTo(NaiveDateTime),
+    /// No more notes go by themselves, and why.
+    Stopped(String),
     /// The file holds something else: cut short by a crash, or changed by hand.
     Unreadable,
     /// It couldn't be read, or isn't a plain file (a folder or a link of that name): it's left as it is, and the notes
@@ -418,6 +536,9 @@ fn notes_done(path: &Path) -> NotesDone {
     }
     match fs::read_to_string(path) {
         Ok(text) => {
+            if let Some(why) = text.lines().find_map(|line| line.strip_prefix(STOPPED)) {
+                return NotesDone::Stopped(why.trim().to_owned());
+            }
             let first = text.lines().next().unwrap_or_default().trim();
             NaiveDateTime::parse_from_str(first, NAME_TIME).map_or(NotesDone::Unreadable, NotesDone::UpTo)
         }
@@ -426,13 +547,25 @@ fn notes_done(path: &Path) -> NotesDone {
     }
 }
 
-fn write_notes_done(path: &Path, up_to: NaiveDateTime) -> std::io::Result<()> {
-    let text = format!(
+/// Writes [`NOTES_DONE_FILE`]: every note saved up to `up_to` looked at, and, when `stopped` says why, that no more
+/// go by themselves.
+fn write_notes_done(path: &Path, up_to: NaiveDateTime, stopped: Option<&str>) -> std::io::Result<()> {
+    let mut text = format!(
         "{}\nThe app's clean-up (rule 28) has looked at every F12 note saved up to this time; one still in the notes \
          folder stays.\n",
         up_to.format(NAME_TIME)
     );
+    if let Some(why) = stopped {
+        text += &format!(
+            "{STOPPED}{why}\nNo more notes go to the Recycle Bin by themselves until the line above is taken out.\n"
+        );
+    }
     fs::write(path, text)
+}
+
+/// A time as Unix seconds, as the Recycle Bin keeps when things went in.
+fn unix_seconds(when: SystemTime) -> i64 {
+    when.duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
 /// `when` in the computer's own time, as the app writes times into names.
@@ -469,7 +602,8 @@ fn entry_changed(meta: &Metadata) -> Option<SystemTime> {
     SystemTime::UNIX_EPOCH.checked_add(Duration::new(secs, nanos))
 }
 
-/// Windows: when a file was made is enough, as a copy is made anew.
+/// Windows: when a file was made is enough, as a copy made in Explorer is made anew (one made by a tool that keeps the
+/// old times, as robocopy can, counts by them).
 #[cfg(not(unix))]
 fn entry_changed(_meta: &Metadata) -> Option<SystemTime> {
     None
@@ -627,6 +761,82 @@ mod tests {
         }
     }
 
+    /// A test's bin that acts as Windows' Recycle Bin can when it can't keep something: it asks first (`asks`: and is
+    /// told no), or takes it but afterwards hasn't got it (it was told yes, and removed it for good), or can't be read
+    /// to see what it has.
+    struct OddBin {
+        bin: TestBin,
+        odd: Odd,
+    }
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Odd {
+        Asks,
+        Loses,
+        CantBeRead,
+    }
+
+    impl Bin for OddBin {
+        fn send(&self, path: &Path) -> Result<(), String> {
+            if self.odd == Odd::Asks {
+                return Err(KEPT_BY_YOU.to_owned());
+            }
+            self.bin.send(path)
+        }
+
+        fn find(&self, removed: &mut [Removed]) -> Vec<Problem> {
+            let why = match self.odd {
+                Odd::Loses => NOT_IN_BIN,
+                _ => "The Recycle Bin couldn't be read to check it's there.",
+            };
+            removed.iter().map(|r| Problem { path: r.path.clone(), why: why.to_owned() }).collect()
+        }
+
+        fn put_back(&self, _: &[Removed]) -> Vec<Problem> {
+            Vec::new()
+        }
+    }
+
+    /// A test's bin the app closes in front of, at the second file it's sent (the test stops there).
+    struct ClosingBin {
+        bin: TestBin,
+        sent: std::cell::Cell<usize>,
+    }
+
+    impl Bin for ClosingBin {
+        fn send(&self, path: &Path) -> Result<(), String> {
+            self.sent.set(self.sent.get() + 1);
+            assert!(self.sent.get() < 2, "the app closed");
+            self.bin.send(path)
+        }
+
+        fn find(&self, _: &mut [Removed]) -> Vec<Problem> {
+            Vec::new()
+        }
+
+        fn put_back(&self, _: &[Removed]) -> Vec<Problem> {
+            Vec::new()
+        }
+    }
+
+    /// A test's bin that finds each file already gone (another copy of the app sent it a moment before).
+    struct TooLateBin;
+
+    impl Bin for TooLateBin {
+        fn send(&self, path: &Path) -> Result<(), String> {
+            fs::remove_file(path).map_err(|e| e.to_string())?;
+            Err("it isn't there".to_owned())
+        }
+
+        fn find(&self, removed: &mut [Removed]) -> Vec<Problem> {
+            removed.iter().map(|r| Problem { path: r.path.clone(), why: NOT_IN_BIN.to_owned() }).collect()
+        }
+
+        fn put_back(&self, _: &[Removed]) -> Vec<Problem> {
+            Vec::new()
+        }
+    }
+
     const MINUTE: Duration = Duration::from_secs(60);
 
     #[test]
@@ -686,6 +896,27 @@ mod tests {
     }
 
     #[test]
+    fn each_tools_reports_keep_their_newest_10() {
+        let dir = test_folder("reports");
+        let logs = dir.join("logs");
+        let now = SystemTime::now();
+        let name = |start: &str, day: u32| format!("{start}2026-10-{day:02}-1200.txt");
+        for start in REPORTS {
+            for day in 1..=12 {
+                changed_at(&logs.join(name(start, day)), now - MINUTE * (50 - day));
+            }
+        }
+        // A minute on: each file was made a moment after `now`, so until then it counts as dated ahead.
+        let done = prune_logs(&logs, None, now + MINUTE);
+        assert_eq!(done.removed, 2 * REPORTS.len());
+        for start in REPORTS {
+            assert!(!logs.join(name(start, 2)).exists() && logs.join(name(start, 3)).exists(), "{start}");
+        }
+        assert_eq!(names(&logs).len(), REPORTS_KEPT * REPORTS.len());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn session_logs_keep_their_newest_30_and_any_still_being_written() {
         let dir = test_folder("sessions");
         let logs = dir.join("logs");
@@ -707,20 +938,78 @@ mod tests {
     }
 
     #[test]
-    fn a_log_dated_a_little_ahead_keeps_its_place() {
+    fn logs_dated_a_little_ahead_wait_and_the_newest_others_stay() {
         let dir = test_folder("ahead-logs");
         let logs = dir.join("logs");
         let name = |i: u32| format!("rust-session-2026-10-01_12-00-{i:02}.log");
-        for i in 1..=30 {
-            fresh(&logs.join(name(i)));
-        }
         let later = SystemTime::now() + DAY;
-        // Written by a copy of the app on a PC whose clock is a little fast: it's the newest, not the oldest.
-        changed_at(&logs.join(name(0)), later + MINUTE * 30);
-        let done = prune_logs(&logs, None, later);
-        assert_eq!(done.removed, 1);
-        assert!(logs.join(name(0)).exists(), "a little ahead, it keeps its place");
-        assert!(!logs.join(name(1)).exists() && logs.join(name(2)).exists(), "the oldest goes");
+        // Written while the clock was an hour fast, which has been put right since.
+        for i in 1..=30 {
+            changed_at(&logs.join(name(i)), later + MINUTE * 60);
+        }
+        // The last run's log, written since, and an old one.
+        changed_at(&logs.join(name(31)), later - MINUTE * 20);
+        changed_at(&logs.join(name(0)), later - DAY * 3);
+        // Until their time comes, the logs dated ahead neither go nor count: the last run's log stays.
+        assert_eq!(prune_logs(&logs, None, later), Tidied::default());
+        assert!(logs.join(name(31)).exists() && logs.join(name(0)).exists());
+        // Then they count as usual.
+        let done = prune_logs(&logs, None, later + MINUTE * 120);
+        assert_eq!(done.removed, 2);
+        assert!(!logs.join(name(0)).exists() && !logs.join(name(31)).exists() && logs.join(name(1)).exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Mac, Linux: a session log another copy of the app is still writing (it holds a lock on it) never goes, however
+    /// long since its last line.
+    #[cfg(unix)]
+    #[test]
+    fn a_log_another_copy_is_writing_stays() {
+        let dir = test_folder("written-logs");
+        let logs = dir.join("logs");
+        let name = |i: u32| format!("rust-session-2026-10-01_12-00-{i:02}.log");
+        let now = SystemTime::now();
+        for i in 0..=30 {
+            changed_at(&logs.join(name(i)), now - DAY + MINUTE * i);
+        }
+        // Past the 10 minutes in which any log may be another copy's: the oldest would go, but its copy holds a lock.
+        let later = now + MINUTE * 11;
+        let writing = File::open(logs.join(name(0))).unwrap();
+        writing.try_lock().unwrap();
+        assert_eq!(prune_logs(&logs, None, later), Tidied::default());
+        assert!(logs.join(name(0)).exists());
+        drop(writing);
+        assert_eq!(prune_logs(&logs, None, later).removed, 1);
+        assert!(!logs.join(name(0)).exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Mac, Linux: a leftover of the app's that can't be removed is counted as such, except in the system's Temp
+    /// folder, which holds every account's files.
+    #[cfg(unix)]
+    #[test]
+    fn a_leftover_that_cant_be_removed_is_counted() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = test_folder("locked");
+        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let bin = TestBin(dir.join("bin"));
+        let part = places.data.join("backup.txt.mo-part");
+        let list = places.temp.join("mo-admin-1-2-3.txt");
+        fresh(&part);
+        fresh(&list);
+        let made = SystemTime::now();
+        let shut = |folder: &Path, mode: u32| fs::set_permissions(folder, fs::Permissions::from_mode(mode)).unwrap();
+        shut(&places.data, 0o555);
+        shut(&places.temp, 0o555);
+        // An account that may remove anything (root) can't be shown this.
+        let may_remove_anything = fs::remove_file(&part).is_ok();
+        if !may_remove_anything {
+            // Two days on, both are old enough to go.
+            assert_eq!(sweep(&places, made + DAY * 2, &bin), Tidied { failed: 1, ..Tidied::default() });
+            assert!(part.exists() && list.exists());
+        }
+        shut(&places.data, 0o755);
+        shut(&places.temp, 0o755);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -946,13 +1235,22 @@ mod tests {
         assert_eq!(done, Tidied { notes_stay: Some("it's off".to_owned()), ..Tidied::default() });
         assert!(words.exists() && picture.exists() && other.exists() && !done_file.exists());
 
-        // A Recycle Bin that holds less than the picture: that note stays whole; the other goes.
-        let small =
-            PickyBin { bin: TestBin(dir.join("bin")), refuses: |_, bytes| (bytes > 1).then(|| "too big".into()) };
-        let done = sweep(&places, now, &small);
+        // A Recycle Bin without room for all of them at once (4 bytes): none go, and nothing is written down.
+        let full =
+            PickyBin { bin: TestBin(dir.join("bin")), refuses: |_, bytes| (bytes >= 4).then(|| "it's full".into()) };
+        let done = sweep(&places, now, &full);
+        assert_eq!(done, Tidied { notes_stay: Some("it's full".to_owned()), ..Tidied::default() });
+        assert!(words.exists() && picture.exists() && other.exists() && !done_file.exists());
+
+        // A picture the Recycle Bin can't take (only online in OneDrive, say): that note stays whole; the other goes.
+        let online = PickyBin {
+            bin: TestBin(dir.join("bin")),
+            refuses: |path, _| path.extension().is_some_and(|end| end == "png").then(|| "only online".into()),
+        };
+        let done = sweep(&places, now, &online);
         assert_eq!(
             done,
-            Tidied { to_bin: 1, to_bin_bytes: 1, notes_stay: Some("too big".to_owned()), ..Tidied::default() }
+            Tidied { to_bin: 1, to_bin_bytes: 1, notes_stay: Some("only online".to_owned()), ..Tidied::default() }
         );
         assert!(words.exists() && picture.exists() && !other.exists());
         // It was looked at once, so it isn't tried again.
@@ -1005,7 +1303,8 @@ mod tests {
         // A folder of that name isn't the app's: it's left as it is, and so are the notes.
         fs::create_dir_all(&done_file).unwrap();
         let done = sweep(&places, now, &bin);
-        assert!(done.to_bin == 0 && done.notes_stay.is_some() && note.exists() && done_file.is_dir());
+        assert_eq!(done.notes_stay, Some(format!("{NOTES_DONE_FILE} in the data folder couldn't be read")));
+        assert!(done.to_bin == 0 && note.exists() && done_file.is_dir());
         fs::remove_dir(&done_file).unwrap();
 
         // Cut short by a crash: how far earlier sweeps went isn't known, so the notes old now stay (one may have been
@@ -1019,6 +1318,188 @@ mod tests {
         fresh(&notes.join("note-2026-12-20_10-00-00.md"));
         assert_eq!(sweep(&places, local("2027-01-01_12-00-00"), &bin).to_bin, 1);
         assert!(note.exists() && !notes.join("note-2026-09-01_10-00-00.md").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_newest_note_a_few_hours_ahead_still_counts_but_old_runs_from_now() {
+        let dir = test_folder("hours-ahead");
+        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let bin = TestBin(dir.join("bin"));
+        let notes = places.data.join("notes");
+        // Now is the 3rd of November at 12:00; the newest note was saved at 18:00 that day, on a clock 6 hours fast.
+        // So the notes saved by the 5th of August at 12:00 are 3 months old, not those by 18:00.
+        let goes = notes.join("note-2026-08-05_11-00-00.md");
+        let stays = notes.join("note-2026-08-05_15-00-00.md");
+        for path in [&goes, &stays, &notes.join("note-2026-11-03_18-00-00.md")] {
+            fresh(path);
+        }
+        let done = sweep(&places, local("2026-11-03_12-00-00"), &bin);
+        assert_eq!(done, Tidied { to_bin: 1, to_bin_bytes: 1, ..Tidied::default() });
+        assert!(!goes.exists() && stays.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The first three notes saved in July and the newest in October: the ones the tests below send.
+    fn three_old_notes(notes: &Path) -> [PathBuf; 3] {
+        let old = ["01", "02", "03"].map(|day| notes.join(format!("note-2026-07-{day}_10-00-00.md")));
+        for path in &old {
+            fresh(path);
+        }
+        fresh(&notes.join("note-2026-10-30_09-00-00.md"));
+        old
+    }
+
+    /// The first line of what says how far the sweep went, and whether it says no more go by themselves.
+    fn how_far(done_file: &Path) -> (String, bool) {
+        let text = fs::read_to_string(done_file).unwrap();
+        (text.lines().next().unwrap_or_default().to_owned(), text.lines().any(|l| l.starts_with(STOPPED)))
+    }
+
+    #[test]
+    fn no_more_notes_go_by_themselves_once_windows_has_asked() {
+        let dir = test_folder("asks");
+        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let notes = places.data.join("notes");
+        let [first, second, third] = three_old_notes(&notes);
+        let now = local("2026-11-03_12-00-00");
+        let done_file = places.data.join(NOTES_DONE_FILE);
+
+        // Windows asks "permanently delete?" about the first, and is told no: it stays, and so do the rest.
+        let asks = OddBin { bin: TestBin(dir.join("bin")), odd: Odd::Asks };
+        let done = sweep(&places, now, &asks);
+        assert_eq!(done.to_bin, 0);
+        assert!(done.notes_stay.is_some_and(|why| why.contains("Windows asked before putting note-2026-07-01")));
+        assert!(first.exists() && second.exists() && third.exists());
+        assert_eq!(how_far(&done_file), ("2026-07-01_10-00-00".to_owned(), true));
+
+        // From then on, none go by themselves, even to a Recycle Bin that never asks.
+        let bin = TestBin(dir.join("bin"));
+        let done = sweep(&places, now, &bin);
+        assert_eq!(done.to_bin, 0);
+        assert!(done.notes_stay.is_some_and(|why| why.contains("none go by themselves any more")));
+        assert!(second.exists() && third.exists() && !bin.0.exists());
+
+        // With that line taken out, the rest go; the one you chose to keep stays.
+        let text = fs::read_to_string(&done_file).unwrap();
+        let kept: Vec<&str> = text.lines().filter(|l| !l.starts_with(STOPPED)).collect();
+        fs::write(&done_file, kept.join("\n")).unwrap();
+        assert_eq!(sweep(&places, now, &bin), Tidied { to_bin: 2, to_bin_bytes: 2, ..Tidied::default() });
+        assert!(first.exists() && !second.exists() && !third.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_more_notes_go_by_themselves_once_one_isnt_in_the_bin_after() {
+        let dir = test_folder("loses");
+        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let notes = places.data.join("notes");
+        let [first, second, third] = three_old_notes(&notes);
+        let picture = first.with_extension("png");
+        fresh(&picture);
+        let now = local("2026-11-03_12-00-00");
+        let done_file = places.data.join(NOTES_DONE_FILE);
+
+        // The first note's picture goes, but the Recycle Bin hasn't got it after (Windows asked, and was told yes):
+        // nothing more goes, not even that note's words.
+        let loses = OddBin { bin: TestBin(dir.join("bin")), odd: Odd::Loses };
+        let done = sweep(&places, now, &loses);
+        assert_eq!((done.to_bin, done.to_bin_bytes), (0, 0), "not counted as in the bin");
+        assert!(done.notes_stay.is_some_and(|why| why.contains("note-2026-07-01_10-00-00.png couldn't be found")));
+        assert!(!picture.exists() && first.exists() && second.exists() && third.exists());
+        assert_eq!(how_far(&done_file), ("2026-07-01_10-00-00".to_owned(), true));
+        assert_eq!(sweep(&places, now, &TestBin(dir.join("bin"))).to_bin, 0);
+        assert!(second.exists() && third.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn notes_wait_for_the_next_start_while_the_bin_cant_be_read() {
+        let dir = test_folder("unread-bin");
+        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let notes = places.data.join("notes");
+        let [first, second, third] = three_old_notes(&notes);
+        let picture = first.with_extension("png");
+        fresh(&picture);
+        let now = local("2026-11-03_12-00-00");
+        let done_file = places.data.join(NOTES_DONE_FILE);
+
+        // Whether the first note's picture is in the bin can't be seen: its words go with it, and the rest wait.
+        let unread = OddBin { bin: TestBin(dir.join("bin")), odd: Odd::CantBeRead };
+        let done = sweep(&places, now, &unread);
+        assert_eq!((done.to_bin, done.to_bin_bytes), (2, 2));
+        assert!(done.notes_stay.is_some_and(|why| why.contains("couldn't be read")));
+        assert!(!picture.exists() && !first.exists() && second.exists() && third.exists());
+        assert_eq!(how_far(&done_file), ("2026-07-01_10-00-00".to_owned(), false));
+        // At the next start, with the bin read, they go.
+        assert_eq!(sweep(&places, now, &TestBin(dir.join("bin"))).to_bin, 2);
+        assert!(!second.exists() && !third.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn notes_the_sweep_hadnt_reached_when_the_app_closed_go_at_the_next_start() {
+        let dir = test_folder("closed");
+        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let notes = places.data.join("notes");
+        let [first, second, third] = three_old_notes(&notes);
+        let now = local("2026-11-03_12-00-00");
+        let done_file = places.data.join(NOTES_DONE_FILE);
+
+        // The app closes as the second note is being put in the bin.
+        let closing = ClosingBin { bin: TestBin(dir.join("bin")), sent: std::cell::Cell::new(0) };
+        let cut_off = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sweep(&places, now, &closing)));
+        assert!(cut_off.is_err());
+        assert!(!first.exists() && second.exists() && third.exists());
+        // The second may have gone (and been put back since), so it counts as looked at; the third doesn't.
+        assert_eq!(how_far(&done_file), ("2026-07-02_10-00-00".to_owned(), false));
+        assert_eq!(
+            sweep(&places, now, &TestBin(dir.join("bin"))),
+            Tidied { to_bin: 1, to_bin_bytes: 1, ..Tidied::default() }
+        );
+        assert!(second.exists() && !third.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn notes_wait_while_what_says_how_far_the_sweep_went_is_after_now() {
+        let dir = test_folder("done-ahead");
+        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let bin = TestBin(dir.join("bin"));
+        let notes = places.data.join("notes");
+        let note = notes.join("note-2026-07-01_10-00-00.md");
+        fresh(&note);
+        fresh(&notes.join("note-2026-10-30_09-00-00.md"));
+        let done_file = places.data.join(NOTES_DONE_FILE);
+        // Written in March next year: the clock is wrong now (put back), or was then.
+        fs::write(&done_file, "2027-03-01_08-00-00\n").unwrap();
+        let done = sweep(&places, local("2026-11-03_12-00-00"), &bin);
+        assert_eq!(done.to_bin, 0);
+        assert!(done.notes_stay.is_some_and(|why| why.contains("clock may be wrong")));
+        assert!(note.exists());
+        assert_eq!(fs::read_to_string(&done_file).unwrap(), "2027-03-01_08-00-00\n", "left as it is");
+        // Once the clock is past it, notes saved after it go as usual; those before it count as looked at.
+        let march = notes.join("note-2027-03-10_10-00-00.md");
+        fresh(&march);
+        fresh(&notes.join("note-2027-06-20_10-00-00.md"));
+        assert_eq!(sweep(&places, local("2027-07-01_12-00-00"), &bin).to_bin, 1);
+        assert!(note.exists() && !march.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_note_gone_already_is_neither_counted_nor_a_reason_to_stop() {
+        let dir = test_folder("gone-already");
+        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let notes = places.data.join("notes");
+        let note = notes.join("note-2026-07-01_10-00-00.md");
+        fresh(&note);
+        fresh(&notes.join("note-2026-10-30_09-00-00.md"));
+        let done_file = places.data.join(NOTES_DONE_FILE);
+        // Another copy of the app put it in the bin a moment before.
+        assert_eq!(sweep(&places, local("2026-11-03_12-00-00"), &TooLateBin), Tidied::default());
+        assert!(!note.exists());
+        assert_eq!(how_far(&done_file), ("2026-08-01_09-00-00".to_owned(), false));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1075,8 +1556,10 @@ mod tests {
             places.data.join("run-latest-rust").join("app").join("target").join("debug").join("crash-1.log"),
             places.data.join("run-latest-rust").join("backup.txt.mo-part"),
             places.data.join("run-latest-rust").join("notes").join("note-2020-01-01_00-00-00.md"),
+            places.data.join("run-latest-rust").join("notes").join("note-2020-06-01_00-00-00.md"),
             places.data.join("MusicOrganiser-build").join("debug").join("presets.db.new-1"),
             places.data.join("notes").join("old").join("note-2020-01-01_00-00-00.md"),
+            places.data.join("notes").join("old").join("note-2020-06-01_00-00-00.md"),
             places.data.join("twin").join("backup.txt.mo-part"),
             places.temp.join("MusicOrganiser-build").join("mo-admin-1-2-3.txt"),
             places.temp.join("MusicOrganiser-Rust").join("mo-admin-1-2-3.txt"),
@@ -1112,7 +1595,14 @@ mod tests {
         let yours = dir.join("yours");
         let song = yours.join("Song.flp");
         fresh(&song);
-        let named = ["library-copy.db", "x.mo-part-1-2", "backup.txt.mo-part", "note-2000-01-01_00-00-00.md"];
+        // With a newer note beside it, the old note would go if the notes link were followed.
+        let named = [
+            "library-copy.db",
+            "x.mo-part-1-2",
+            "backup.txt.mo-part",
+            "note-2000-01-01_00-00-00.md",
+            "note-2000-06-01_00-00-00.md",
+        ];
         for name in named {
             fresh(&yours.join("cs").join(name));
             fresh(&yours.join(name));
@@ -1159,7 +1649,8 @@ mod tests {
         symlink(&elsewhere, places.data.join("logs")).unwrap();
         let song = dir.join("yours").join("Song.flp");
         fresh(&song);
-        fs::create_dir_all(places.data.join("notes")).unwrap();
+        // A newer note of its own beside it, so the link would be old enough to go if it counted as a note.
+        fresh(&places.data.join("notes").join("note-2000-06-01_00-00-00.md"));
         symlink(&song, places.data.join("notes").join("note-2000-01-01_00-00-00.md")).unwrap();
 
         let far = SystemTime::now() + DAY * 4000;
@@ -1186,7 +1677,7 @@ mod tests {
             let made = std::process::Command::new("cmd").arg("/C").arg("mklink").arg("/J").arg(at).arg(to).output();
             assert!(made.is_ok_and(|o| o.status.success()), "mklink /J {}", at.display());
         };
-        let named = ["library-copy.db", "x.mo-part-1-2", "note-2000-01-01_00-00-00.md"];
+        let named = ["library-copy.db", "x.mo-part-1-2", "note-2000-01-01_00-00-00.md", "note-2000-06-01_00-00-00.md"];
         for name in named {
             fresh(&yours.join("cs").join(name));
             fresh(&yours.join(name));
