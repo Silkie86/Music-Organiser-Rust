@@ -98,21 +98,56 @@ pub fn connect(app: &AppWindow) {
     });
     let weak = app.as_weak();
     data.on_grab(move |x, y| {
+        let (x, y) = (f64::from(x), f64::from(y));
+        // On a clip or a track's name the press may become a drag out of the app; elsewhere it moves the view.
+        let pick = STATE.with(|s| s.borrow().view.as_ref().and_then(|v| v.pick_at(x, y)));
+        PRESSED.with(|p| p.set(pick.map(|pick| (pick, x, y))));
+        if pick.is_none() {
+            with_view(&weak, |v| {
+                v.press(x, y);
+                false
+            });
+        }
+    });
+    let weak = app.as_weak();
+    data.on_side_grab(move |x, y| {
         with_view(&weak, |v| {
             v.press(f64::from(x), f64::from(y));
             false
         });
     });
-    // Only a drag changes the picture; the mouse just moving changes what's under it, which the window shows itself.
+    // Only moving the view changes the picture; the mouse just moving changes what's under it, which the window shows
+    // itself.
     let weak = app.as_weak();
     data.on_moved(move |x, y| {
+        let (x, y) = (f64::from(x), f64::from(y));
+        if let Some((pick, from_x, from_y)) = PRESSED.with(std::cell::Cell::get)
+            && ((x - from_x).abs() > DRAG_START || (y - from_y).abs() > DRAG_START)
+        {
+            PRESSED.with(|p| p.set(None));
+            if let Some(app) = weak.upgrade() {
+                drag_out(&app, pick);
+            }
+            return;
+        }
         with_view(&weak, |v| {
-            v.moved(f64::from(x), f64::from(y));
+            v.moved(x, y);
             v.dragging()
         });
     });
     let weak = app.as_weak();
     data.on_let_go(move || {
+        PRESSED.with(|p| p.set(None));
+        if let Some(app) = weak.upgrade() {
+            crate::drag::let_go(&app);
+        }
+        with_view(&weak, |v| {
+            v.release();
+            false
+        });
+    });
+    let weak = app.as_weak();
+    data.on_side_let_go(move || {
         with_view(&weak, |v| {
             v.release();
             false
@@ -400,6 +435,78 @@ fn show_notes(data: &ArrangementData, a: &mo_formats::arrangement::Arrangement, 
     true
 }
 
+// ---- Dragging a clip or a track out to a DAW (`drag.rs`) ---------------------------------------------------------
+//
+// A clip, or a whole track by its name, goes out as a MIDI file of its notes (written to Temp) and its audio clips'
+// samples. The left button drags those; on empty space it moves the view, and the right or middle button moves the view
+// anywhere.
+
+thread_local! {
+    /// A left press on a clip or a track's name, and where: dragged out of the app once the mouse moves far enough.
+    static PRESSED: std::cell::Cell<Option<(mo_app::drag_out::Pick, f64, f64)>> = const { std::cell::Cell::new(None) };
+}
+
+/// How far the mouse moves with the button down, in points, before a press on a clip drags it out of the app.
+const DRAG_START: f64 = 4.0;
+
+/// Drags `pick` out of the app: dims it where it is, and makes what it carries (a MIDI file in Temp for its notes)
+/// while the drag gets going.
+fn drag_out(app: &AppWindow, pick: mo_app::drag_out::Pick) {
+    let Some((make, at)) = STATE.with(|s| {
+        let s = s.borrow();
+        let v = s.view.as_ref()?;
+        Some((v.drag_out(pick), v.pick_box(pick)))
+    }) else {
+        return;
+    };
+    let under_way = crate::drag::start(
+        app,
+        crate::drag::Drag {
+            make: Box::new(move || {
+                make()?.write(&std::env::temp_dir()).map_err(|e| format!("Couldn't write the MIDI file in Temp: {e}."))
+            }),
+            done: Box::new(|app, outcome| {
+                app.global::<ArrangementData>().set_lifted(false);
+                if outcome == crate::drag::Outcome::Landed {
+                    crate::drag::glow(app, |app, on| app.global::<ArrangementData>().set_landed(on));
+                }
+            }),
+        },
+    );
+    let data = app.global::<ArrangementData>();
+    data.set_hover_text(SharedString::new());
+    if let Some(at) = at.filter(|_| under_way) {
+        lift(&data, at);
+        data.set_landed(false);
+        data.set_lifted(true);
+    }
+}
+
+/// Puts the dimming and the landing glow over `at` (x, y, width, height on the view).
+fn lift(data: &ArrangementData, (x, y, w, h): (f64, f64, f64, f64)) {
+    data.set_lifted_x(x as f32);
+    data.set_lifted_y(y as f32);
+    data.set_lifted_width(w as f32);
+    data.set_lifted_height(h as f32);
+}
+
+/// For the screenshots: the clip or track at `x`, `y` on the view as it looks while it's dragged out, or once it has
+/// landed, without dragging anything. False when there's nothing there to drag.
+pub fn show_lifted(app: &AppWindow, x: f32, y: f32, landed: bool) -> bool {
+    let at = STATE.with(|s| {
+        let s = s.borrow();
+        let v = s.view.as_ref()?;
+        v.pick_box(v.pick_at(f64::from(x), f64::from(y))?)
+    });
+    let data = app.global::<ArrangementData>();
+    if let Some(at) = at {
+        lift(&data, at);
+    }
+    data.set_lifted(at.is_some() && !landed);
+    data.set_landed(at.is_some() && landed);
+    at.is_some()
+}
+
 /// Changes what the view knows and draws it again.
 fn change(weak: &slint::Weak<AppWindow>, f: impl FnOnce(&mut State)) {
     let Some(app) = weak.upgrade() else { return };
@@ -674,7 +781,13 @@ pub fn sample_preview() -> Preview {
     use mo_formats::arrangement::{
         Arrangement, AudioPart, LaneKind, PreviewClip, PreviewLane, PreviewMarker, PreviewNote, PreviewPoint,
     };
-    let note = |start: f64, key: u8, length: f64| PreviewNote { start, length, key, velocity: 48000, muted: false };
+    let note = |start: f64, key: u8, length: f64| PreviewNote {
+        start,
+        length,
+        key,
+        velocity: 48000,
+        ..PreviewNote::default()
+    };
     let pattern = |name: &str, start: f64, length: f64, notes: Vec<PreviewNote>| PreviewClip {
         name: name.into(),
         start,

@@ -873,8 +873,19 @@ export component ListLine inherits Rectangle {
     callback right-clicked(length, length);
     // Whether the mouse is over it (it's shaded then).
     out property <bool> hovered: touch.has-hover;
+    // It can be dragged out of the app (a sound to a DAW): `drag-out` once the left button is down and the mouse has
+    // moved a few points, then `drag-let-go` if the button comes up before the drag has got going (mo-ui's drag.rs).
+    // `lifted` dims the line while it's carried, and `landed` glows round it for a moment once it has landed.
+    in property <bool> draggable;
+    in property <bool> lifted;
+    in property <bool> landed;
+    callback drag-out();
+    callback drag-let-go();
+    // This press has started a drag, so letting go isn't a click.
+    property <bool> dragged;
     border-radius: Theme.radius;
     background: selected ? Theme.surface-raised : touch.has-hover ? Theme.hover : transparent;
+    opacity: root.lifted ? 0.4 : 1;
     // The accent bar on the picked line.
     Rectangle {
         x: 0;
@@ -884,9 +895,29 @@ export component ListLine inherits Rectangle {
     // Under the line's own parts, so a button or chip on the line takes its own click; a click anywhere else on
     // the line still picks it.
     touch := TouchArea {
-        clicked => { root.clicked(); }
-        double-clicked => { root.double-clicked(); }
+        clicked => {
+            if !root.dragged {
+                root.clicked();
+            }
+        }
+        double-clicked => {
+            if !root.dragged {
+                root.double-clicked();
+            }
+        }
+        moved => {
+            if root.draggable && !root.dragged && self.pressed
+                && (abs(self.mouse-x - self.pressed-x) > 4px || abs(self.mouse-y - self.pressed-y) > 4px) {
+                root.dragged = true;
+                root.drag-out();
+            }
+        }
         pointer-event(e) => {
+            if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                root.dragged = false;
+            } else if e.kind == PointerEventKind.up && e.button == PointerEventButton.left && root.dragged {
+                root.drag-let-go();
+            }
             if e.kind == PointerEventKind.down && e.button == PointerEventButton.right {
                 // The menu acts on what's picked, so pick this line first.
                 root.clicked();
@@ -895,6 +926,24 @@ export component ListLine inherits Rectangle {
         }
     }
     @children
+    // The glow round a line that has just landed in another app: in quickly, out slowly.
+    Rectangle {
+        border-radius: root.border-radius;
+        border-width: 2px;
+        border-color: Theme.accent;
+        opacity: 0;
+        states [
+            landed when root.landed: {
+                opacity: 1;
+                in {
+                    animate opacity { duration: 90ms; }
+                }
+                out {
+                    animate opacity { duration: 600ms; easing: ease-out; }
+                }
+            }
+        ]
+    }
     Tip {
         text: root.tip;
         hovering: touch.has-hover && !touch.pressed && touch.mouse-x >= root.tip-from && touch.mouse-y >= root.tip-below;

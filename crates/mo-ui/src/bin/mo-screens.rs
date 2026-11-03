@@ -226,6 +226,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let arrangement = app.global::<mo_ui::ArrangementData>();
     arrangement.invoke_moved(ARRANGEMENT_CLIP.0, ARRANGEMENT_CLIP.1);
     shots.push(("arrangement-hover.png".into(), capture(&window)));
+    // The clip under the mouse dragged out to a DAW: dimmed while it's carried, then lit once it has landed.
+    if !mo_ui::arrangement::show_lifted(&app, ARRANGEMENT_CLIP.0, ARRANGEMENT_CLIP.1, false) {
+        return Err(
+            "arrangement-drag-lifted.png: no clip to drag at the hover point; has the sample song moved?".into()
+        );
+    }
+    shots.push(("arrangement-drag-lifted.png".into(), capture(&window)));
+    mo_ui::arrangement::show_lifted(&app, ARRANGEMENT_CLIP.0, ARRANGEMENT_CLIP.1, true);
+    shots.push(("arrangement-drag-landed.png".into(), capture_after(&window, Duration::from_millis(150))));
+    arrangement.set_landed(false);
+    capture_after(&window, Duration::from_millis(700));
     arrangement.invoke_wheel(ARRANGEMENT_CLIP.0, 0.0, 4.0, true, false);
     shots.push(("arrangement-zoomed.png".into(), capture(&window)));
     arrangement.invoke_left();
@@ -426,6 +437,15 @@ fn sounds_shots(
     data.invoke_toggle("mix-well".into());
     shots.push(("sounds-filtered.png".into(), capture(window)));
     data.invoke_clear();
+    // A tile dragged out to a DAW: dimmed while it's carried, then lit for a moment once it has landed.
+    data.set_lifted_row(2);
+    shots.push(("sounds-drag-lifted.png".into(), capture(window)));
+    data.set_lifted_row(-1);
+    data.set_landed_row(2);
+    shots.push(("sounds-drag-landed.png".into(), capture_after(window, Duration::from_millis(150))));
+    data.set_landed_row(-1);
+    // Its glow fades before the next picture.
+    capture_after(window, Duration::from_millis(700));
     data.invoke_pick_view(1);
     shots.push(("sounds-list.png".into(), capture(window)));
     // Two years picked on the year strip.

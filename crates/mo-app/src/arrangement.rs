@@ -408,6 +408,9 @@ pub struct View {
     keys: Arc<Vec<(u8, u8)>>,
 }
 
+/// What a drag out of the app picks up from the view, and what it carries (`drag_out`).
+mod pick;
+
 fn lane_height(lane: &PreviewLane) -> f64 {
     match lane.kind {
         LaneKind::Group => 26.0,
@@ -1150,8 +1153,10 @@ mod tests {
     }
     use mo_formats::arrangement::{PreviewMarker, PreviewNote, PreviewPoint};
 
+    use crate::drag_out::Pick;
+
     fn note(start: f64, key: u8) -> PreviewNote {
-        PreviewNote { start, length: 1.0, key, velocity: 40000, muted: false }
+        PreviewNote { start, length: 1.0, key, velocity: 40000, ..PreviewNote::default() }
     }
 
     fn song() -> Arrangement {
@@ -1306,6 +1311,35 @@ mod tests {
         assert_eq!(v.zoom(), v.fit_zoom());
         // A narrow view has a narrower header.
         assert_eq!(view(400.0, 300.0).header_width(), 118.0);
+    }
+
+    #[test]
+    fn a_drag_out_picks_the_clip_or_track_under_the_mouse() {
+        let v = view(1000.0, 300.0);
+        let ruler = v.ruler_height();
+        let (keys, vox, cutoff) = (ruler + 20.0, ruler + 46.0 + 20.0, ruler + 92.0 + 10.0);
+        // On a track's name: the whole track.
+        assert_eq!(v.pick_at(50.0, keys), Some(Pick::Lane(0)));
+        assert_eq!(v.pick_at(50.0, vox), Some(Pick::Lane(1)));
+        // On a clip: that clip, the muted Chorus too (it was picked).
+        assert_eq!(v.pick_at(v.x(2.0), keys), Some(Pick::Clip { lane: 0, clip: 0 }));
+        assert_eq!(v.pick_at(v.x(20.0), keys), Some(Pick::Clip { lane: 0, clip: 1 }));
+        assert_eq!(v.pick_at(v.x(10.0), vox), Some(Pick::Clip { lane: 1, clip: 0 }));
+        // Empty space, the ruler and automation carry nothing, so a drag there moves the view.
+        assert_eq!(v.pick_at(v.x(2.0), vox), None);
+        assert_eq!(v.pick_at(v.x(2.0), 10.0), None);
+        assert_eq!(v.pick_at(v.x(2.0), cutoff), None);
+        assert_eq!(v.pick_at(50.0, cutoff), None);
+        // Where it's drawn, for the outline while it's carried.
+        let (x, y, w, h) = v.pick_box(Pick::Clip { lane: 0, clip: 0 }).unwrap();
+        assert!((x - v.x(0.0)).abs() < 1.0, "{x}");
+        assert!(y > ruler && y + h <= ruler + 46.0 && w > 0.0 && h > 0.0);
+        assert_eq!(v.pick_box(Pick::Lane(1)).map(|b| (b.0, b.1, b.2)), Some((0.0, ruler + 46.0, 1000.0)));
+        assert_eq!(v.pick_box(Pick::Lane(9)), None);
+        // Scrolled out of sight.
+        let mut low = view(1000.0, 100.0);
+        low.wheel(500.0, 0.0, -10.0, false, false);
+        assert_eq!(low.pick_box(Pick::Lane(0)), None);
     }
 
     #[test]

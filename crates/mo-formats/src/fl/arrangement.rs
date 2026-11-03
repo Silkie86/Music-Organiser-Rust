@@ -247,6 +247,16 @@ fn read_playlist(flp: &Flp<'_>) -> Playlist {
     }
 }
 
+/// A channel's place among a pattern clip's parts, adding it if it's new. A clip with more channels than a part number
+/// holds (65,535) puts the rest on the last.
+fn part_of(parts: &mut Vec<u32>, channel: u32) -> u16 {
+    let at = parts.iter().position(|&c| c == channel).unwrap_or_else(|| {
+        parts.push(channel);
+        parts.len() - 1
+    });
+    u16::try_from(at).unwrap_or(u16::MAX)
+}
+
 fn channel_colour(colours: &HashMap<u32, u32>, channel: u32) -> Option<u32> {
     colours.get(&channel).copied().filter(|&c| c != DEFAULT_CHANNEL_COLOUR)
 }
@@ -281,6 +291,8 @@ fn playlist_view(song: &FlSong, pl: &Playlist, tempo: f64) -> Arrangement {
                 let pattern = pl.patterns.get(&p);
                 let from = item.offset as i64;
                 let end = from.saturating_add(item.length);
+                // The channels the clip's notes are on, in the order they first play: the clip's parts.
+                let mut parts: Vec<u32> = Vec::new();
                 let in_clip = pattern
                     .map(|pat| {
                         let first = pat.notes.partition_point(|(_, n)| n.start < from);
@@ -290,12 +302,14 @@ fn playlist_view(song: &FlSong, pl: &Playlist, tempo: f64) -> Arrangement {
                             .iter()
                             .take_while(|(_, n)| n.start < end)
                             .take_while(|_| budget.take())
-                            .map(|(_, n)| PreviewNote {
+                            .map(|(ch, n)| PreviewNote {
                                 start: beats((n.start - from) as f64),
                                 length: beats(n.length.max(1).min(end - n.start) as f64),
                                 key: n.key,
                                 velocity: n.velocity,
                                 muted: n.muted,
+                                step: n.step,
+                                part: part_of(&mut parts, *ch),
                             })
                             .collect()
                     })
@@ -307,6 +321,16 @@ fn playlist_view(song: &FlSong, pl: &Playlist, tempo: f64) -> Arrangement {
                     muted: item.muted,
                     notes: in_clip,
                     colour: pattern.and_then(|pat| pat.colour),
+                    parts: parts
+                        .iter()
+                        .map(|ch| {
+                            channels
+                                .get(ch)
+                                .map(|c| c.name.clone())
+                                .or_else(|| pl.channel_names.get(ch).cloned())
+                                .unwrap_or_else(|| format!("Channel {}", ch + 1))
+                        })
+                        .collect(),
                     ..PreviewClip::default()
                 });
             } else if let Some(ch) = item.channel.filter(|c| pl.automation_channels.contains(c)) {
@@ -432,6 +456,8 @@ fn by_channel(song: &FlSong, pl: &Playlist, tempo: f64) -> Arrangement {
                             key: n.key,
                             velocity: n.velocity,
                             muted: n.muted,
+                            step: n.step,
+                            part: 0,
                         })
                         .collect(),
                     ..PreviewClip::default()

@@ -4,6 +4,7 @@
 //! the list draws them, so 357,000 sounds cost what's on screen. Sounds are read and played off the window's thread.
 //! Rediscover (unused sounds that fit your taste) is dug out on its own low-priority thread too.
 
+mod drag_out;
 mod galaxy;
 mod grid;
 mod kit;
@@ -1438,6 +1439,7 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     grid::connect(app);
     kit::wire(app);
     galaxy::wire(app);
+    drag_out::wire(app);
     let weak = app.as_weak();
     data.on_columns_changed(move |n| {
         let Some(app) = weak.upgrade() else { return };
