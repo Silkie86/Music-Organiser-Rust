@@ -526,22 +526,32 @@ fn read_all(sounds_db: &Path, library_db: &Path, send: impl Fn(Step)) {
         }
     };
     let began = Instant::now();
-    let read = (|| {
-        let sounds = db.all(now).map_err(|e| e.to_string())?;
-        let read_in = began.elapsed();
+    // The sounds and their fingerprints in one pass over the library, on several connections at once, on the
+    // low-priority pool (rule 21). The connection goes there and back: it can only be used on one thread at a time.
+    let (db, everything) = background::on_pool(move || {
+        let everything = db.everything(now);
+        (db, everything)
+    });
+    let read_in = began.elapsed();
+    let mut fingerprints = None;
+    let read = everything.map_err(|e| e.to_string()).map(|e| {
+        let analysed = e.sounds.iter().filter(|s| s.analysis.is_some()).count();
         let history = db.history(500).unwrap_or_default();
-        let library = Library::new(sounds, history, &settings.weights);
+        let library = Library::new(e.sounds, history, &settings.weights);
         log::info(
             "Sounds",
             &format!(
-                "{} sounds (read in {:.1} s, listed in {:.1} s)",
+                "{} sounds (read in {:.1} s on {} connections, listed in {:.1} s)",
                 library.list.len(),
                 read_in.as_secs_f32(),
+                e.readers,
                 (began.elapsed() - read_in).as_secs_f32()
             ),
         );
-        Ok(library)
-    })();
+        fingerprints = Some((e.features, e.clap, analysed));
+        library
+    });
+    drop(db);
     let list = read.as_ref().ok().map(|l: &Library| l.list.clone());
     send(Step::Read(read.map(|library| Read {
         library,
@@ -550,13 +560,11 @@ fn read_all(sounds_db: &Path, library_db: &Path, send: impl Fn(Step)) {
         export_folder: settings.export_folder.clone(),
         autoplay: settings.autoplay.clone(),
     })));
-    let Some(list) = list else { return };
-    // Sounds like this: every sound's fingerprint, read once.
-    match SoundIndex::read(&db, list.sounds()) {
-        Ok(index) => send(Step::Index(Arc::new(index))),
-        Err(e) => log::warning("Sounds", &format!("Couldn't read the sounds' fingerprints for Sounds like this: {e}")),
-    }
-    drop(db);
+    let (Some(list), Some((features, clap, analysed))) = (list, fingerprints) else { return };
+    // Sounds like this: every sound's fingerprint, read with the sounds.
+    let index = background::on_pool(|| SoundIndex::build(&features, &clap, analysed));
+    drop((features, clap));
+    send(Step::Index(Arc::new(index)));
     let Some(lib) = lib else { return };
     let year_ago = now.checked_sub_months(chrono::Months::new(12)).unwrap_or(now);
     match count_usage(&lib, &list, year_ago, settings.rules) {
