@@ -16,9 +16,9 @@ use crate::clean::{Bin, Done, Problem, Sending, What};
 use crate::folder_move::{
     CantMove, Drives, Fill, KEPT_SUFFIX, MovedFolder, Tree, check_rename, check_rename_or_ask, clear_failed_link,
     copy_fresh, copy_tree, denied, destination_problem, fresh_name, inside_moved, leads_to, link, link_reaches, listed,
-    only_in, part_way, remove_link, rest_after, room_for, shown, swap_or_ask, target,
+    not_noted, only_in, part_way, remove_link, rest_after, room_for, shown, swap_or_ask, target,
 };
-use crate::half_copy::{clear_own, unmark};
+use crate::half_copy::{busy_now, claim, clear_own, going_into_use, unmark};
 use crate::plugin_space::{PluginSpace, SpaceKind};
 use crate::size::{self, is_link};
 use crate::{is_dir, key, real_folder, text};
@@ -402,8 +402,10 @@ pub fn move_home(
         return Err(CantMove::Gone);
     }
     let to = target(home, destination);
+    // Nothing else in the app makes or clears a copy there until this one is in use.
+    let mine = claim(&to).ok_or_else(|| busy_now(&to))?;
     // A half copy an earlier try left, cut off part way (the app or the computer stopped), goes first.
-    clear_own(&to, home, moved, stop)?;
+    clear_own(&to, home, moved, &mine, stop)?;
     if let Some(why) = destination_problem(home, destination, (bytes, &[]), moved, drives, true, stop) {
         return Err(why);
     }
@@ -422,6 +424,7 @@ pub fn move_home(
         return rename_home(home, &to, moved, homes).map_err(rename_it_yourself);
     }
     copy_fresh(&Tree::new(home_path, &to, &to), progress, stop)?;
+    going_into_use(&to).then_some(()).ok_or_else(|| not_noted(&to))?;
     let now = repoint(home, &new_home, moved, homes, drives.admin());
     // The links lead into it now: it's no half copy.
     unmark(&to);

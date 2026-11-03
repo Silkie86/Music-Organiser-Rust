@@ -7,7 +7,10 @@
 use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::{Duration, SystemTime};
 
 use mo_space::after_move::move_home;
 use mo_space::folder_move::{
@@ -89,6 +92,20 @@ fn stopped_part_way<T>(after: u64, job: impl FnOnce(&(dyn Fn(u64) + Sync)) -> T)
     assert!(ran.is_err(), "the copy should have been stopped part way");
 }
 
+/// Makes `copy` the same as `source`, with its time, as the copy makes it.
+fn same_as(copy: &Path, source: &Path) {
+    fs::copy(source, copy).unwrap();
+    let when = fs::metadata(source).unwrap().modified().unwrap();
+    fs::File::options().write(true).open(copy).unwrap().set_modified(when).unwrap();
+}
+
+/// Writes a file again an hour later than the folder being moved was written.
+fn rewrite(file: &Path, text: &str) {
+    fs::write(file, text).unwrap();
+    let later = SystemTime::now() + Duration::from_secs(3600);
+    fs::File::options().write(true).open(file).unwrap().set_modified(later).unwrap();
+}
+
 /// A library of six sounds and a patch: 35 bytes.
 fn library(at: &Path) {
     for n in 0..6 {
@@ -97,13 +114,15 @@ fn library(at: &Path) {
     write(at, "Patch.prt", "patch");
 }
 
-/// A marker as the app writes one, for a copy of `from` made in `to` that ends up as `settled`.
-fn plant_marker(folder: &Path, from: &Path, to: &Path, settled: &Path) {
+/// A marker as the app writes one, for a copy of `from` made in `to` that ends up as `settled`; `in_use` once the copy
+/// started going into use (just before the swap).
+fn plant_marker(folder: &Path, from: &Path, to: &Path, settled: &Path, in_use: bool) {
     let json = serde_json::json!({
         "From": s(from),
         "To": s(to),
         "Settled": s(settled),
         "Started": "2026-11-03T14:03:12.1234567+00:00",
+        "InUse": in_use,
     });
     fs::write(folder.join(MARKER), format!("Music Organiser is copying a folder into this one.\n\n{json}\n")).unwrap();
 }
@@ -189,6 +208,28 @@ fn a_half_copy_holding_what_isnt_in_the_folder_stays_and_says_what() {
     assert!(why.contains("Sounds"), "{why}");
     fs::remove_file(&sounds).unwrap();
 
+    // A file newer than its twin and bigger isn't a copy: it was changed in there since.
+    let patch = half.join("Patch.prt");
+    same_as(&patch, &presets.join("Patch.prt"));
+    assert_eq!(find(&half, &[], &stop).unwrap().unwrap().state, State::CutOff);
+    rewrite(&patch, "patch, changed since");
+    let State::Stays(why) = find(&half, &[], &stop).unwrap().unwrap().state else { panic!() };
+    assert!(why.contains("Patch.prt") && why.contains("newer"), "{why}");
+    // Newer but no bigger, it's the file the copy was writing when it stopped; but only one file can be that.
+    rewrite(&patch, "pat");
+    assert_eq!(find(&half, &[], &stop).unwrap().unwrap().state, State::CutOff);
+    let sound = half.join("Sounds").join("0.db");
+    fs::create_dir_all(half.join("Sounds")).unwrap();
+    rewrite(&sound, "so");
+    let State::Stays(why) = find(&half, &[], &stop).unwrap().unwrap().state else { panic!() };
+    assert!(why.contains("0.db") || why.contains("Patch.prt"), "{why}");
+    fs::remove_file(&sound).unwrap();
+    // Older than its twin, it's a copy from before the folder changed.
+    fs::write(&patch, "an older patch").unwrap();
+    let older = fs::metadata(presets.join("Patch.prt")).unwrap().modified().unwrap() - Duration::from_secs(3600);
+    fs::File::options().write(true).open(&patch).unwrap().set_modified(older).unwrap();
+    assert_eq!(find(&half, &[], &stop).unwrap().unwrap().state, State::CutOff);
+
     // Once it holds only copies again, it's cleared, for good, with all the room it took.
     let bytes = find(&half, &[], &stop).unwrap().unwrap().bytes;
     assert_eq!(clear(&half, &[], &stop), Ok(Cleared::Copy(bytes)));
@@ -235,7 +276,7 @@ fn a_marker_left_in_a_copy_in_use_is_all_that_goes() {
     let moved = move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], &nothing, &stop).unwrap();
     let copy = d.join("Presets");
     // The app stopped between the swap and taking the marker out.
-    plant_marker(&copy, &presets, &copy, &copy);
+    plant_marker(&copy, &presets, &copy, &copy, true);
     let all = std::slice::from_ref(&moved);
 
     let found = half_copies(all, &[], &stop).unwrap();
@@ -248,15 +289,16 @@ fn a_marker_left_in_a_copy_in_use_is_all_that_goes() {
     assert_eq!(fs::read_to_string(presets.join("Patch.prt")).unwrap(), "patch");
     assert_eq!(fs::read_dir(copy.join("Sounds")).unwrap().count(), 6);
 
-    // The folder it copies is a link leading elsewhere now (moved on again, say). It was a real folder while it was
-    // copied, so the swap went through: the copy was in use, and only its marker goes, even with no record of it.
+    // The folder it copies is a link leading elsewhere now (moved on again, say), with no record of this copy: it went
+    // into use once, so the plugin may have saved into it. It stays, whole, for you to look at.
     let elsewhere = dir.join("E").join("Presets");
     library(&elsewhere);
     unlink(&presets);
     folder_link(&elsewhere, &presets);
-    plant_marker(&copy, &presets, &copy, &copy);
-    assert_eq!(find(&copy, &[], &stop).unwrap().unwrap().state, State::MarkerOnly);
-    assert_eq!(clear(&copy, &[], &stop), Ok(Cleared::Marker));
+    plant_marker(&copy, &presets, &copy, &copy, true);
+    let State::Stays(why) = find(&copy, &[], &stop).unwrap().unwrap().state else { panic!() };
+    assert!(why.contains("went into use"), "{why}");
+    assert!(clear(&copy, &[], &stop).is_err());
     assert_eq!(fs::read_dir(copy.join("Sounds")).unwrap().count(), 6);
     unlink(&presets);
     folder_link(&copy, &presets);
@@ -264,7 +306,7 @@ fn a_marker_left_in_a_copy_in_use_is_all_that_goes() {
     // An update put a real folder back where the link was: the copy is still the move's, so it isn't touched.
     unlink(&presets);
     library(&presets);
-    plant_marker(&copy, &presets, &copy, &copy);
+    plant_marker(&copy, &presets, &copy, &copy, true);
     assert_eq!(find(&copy, all, &stop).unwrap().unwrap().state, State::MarkerOnly);
     // And moving back takes such a marker out first, so the copy left for you never looks like a half copy.
     unlink_or_skip(&presets);
@@ -329,7 +371,7 @@ fn a_half_copy_of_another_folder_or_with_a_broken_marker_is_left_alone() {
     fs::create_dir(half.join(MARKER)).unwrap();
     assert_eq!(find(&half, &[], &stop).unwrap(), None);
     fs::remove_dir(half.join(MARKER)).unwrap();
-    plant_marker(&half, &a, &half, &half);
+    plant_marker(&half, &a, &half, &half, false);
     let link = d.join("Presets link");
     folder_link(&half, &link);
     assert_eq!(find(&link, &[], &stop).unwrap(), None);
@@ -347,18 +389,24 @@ fn a_swap_the_computer_stopped_says_what_to_rename() {
     let stop = AtomicBool::new(false);
     stopped_part_way(35, |progress| move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], progress, &stop));
     let half = d.join("Presets");
-    // Stopped just after the swap renamed the folder, before its link was made.
+    // Cut off before its swap: with an "(old copy)" beside the folder from elsewhere, it's still only a half copy.
     let aside = c.join("Presets (old copy)");
+    library(&aside);
+    assert_eq!(find(&half, &[], &stop).unwrap().unwrap().state, State::CutOff);
+    fs::remove_dir_all(&aside).unwrap();
+    // Stopped just after the swap renamed the folder, before its link was made: the marker said it was going into use.
+    plant_marker(&half, &presets, &half, &half, true);
     fs::rename(&presets, &aside).unwrap();
     let State::Stays(why) = find(&half, &[], &stop).unwrap().unwrap().state else { panic!() };
     assert!(why.contains("Rename it back to \"Presets\""), "{why}");
     assert!(clear(&half, &[], &stop).is_err());
-    // Renamed back, it's a half copy again; with an "(old copy)" beside a folder, it stays.
+    // Renamed back, it still stays: the plugin may have saved into it (you may have undone a swap that went through).
     fs::rename(&aside, &presets).unwrap();
-    assert_eq!(find(&half, &[], &stop).unwrap().unwrap().state, State::CutOff);
-    library(&aside);
     let State::Stays(why) = find(&half, &[], &stop).unwrap().unwrap().state else { panic!() };
-    assert!(why.contains("(old copy)"), "{why}");
+    assert!(why.contains("went into use"), "{why}");
+    let tried = move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], &nothing, &stop);
+    assert!(matches!(tried, Err(CantMove::HalfCopy { .. })), "{tried:?}");
+    assert!(half.join("Patch.prt").exists() || half.join("Sounds").exists());
 }
 
 #[test]
@@ -400,16 +448,22 @@ fn moving_back_cut_off_as_it_swapped_says_what_to_rename() {
     stopped_part_way(35, |progress| move_back(&moved, &ROOMY, progress, &stop));
     let back = c.join("Presets (moving back)");
     let all = std::slice::from_ref(&moved);
-    // Stopped after the link went, before the copy took its name.
+    // An update put a real folder in the link's place while it copied: the copy may be in use.
     unlink(&presets);
-    let State::Stays(why) = find(&back, all, &stop).unwrap().unwrap().state else { panic!() };
-    assert!(why.contains("rename \"Presets (moving back)\" to \"Presets\""), "{why}");
-    // A real folder in the link's place: the copy may be in use.
     library(&presets);
     let State::Stays(why) = find(&back, all, &stop).unwrap().unwrap().state else { panic!() };
     assert!(why.contains("isn't the link"), "{why}");
     let tried = move_back(&moved, &ROOMY, &nothing, &stop);
     assert!(tried.is_err() && back.join(MARKER).exists(), "{tried:?}");
+    // Stopped after the link went, before the copy took its name: the marker said it was going into use.
+    fs::remove_dir_all(&presets).unwrap();
+    plant_marker(&back, Path::new(&moved.to), &back, &presets, true);
+    let State::Stays(why) = find(&back, all, &stop).unwrap().unwrap().state else { panic!() };
+    assert!(why.contains("rename \"Presets (moving back)\" to \"Presets\""), "{why}");
+    // A folder in the link's place by then: the plugin may have saved into the copy.
+    library(&presets);
+    let State::Stays(why) = find(&back, all, &stop).unwrap().unwrap().state else { panic!() };
+    assert!(why.contains("went into use"), "{why}");
 }
 
 #[test]
@@ -442,7 +496,7 @@ fn a_marker_at_the_top_of_a_folder_being_moved_is_never_copied_on() {
     let presets = c.join("Presets");
     library(&presets);
     // Left there when moving back couldn't take it out, naming the copy it came from.
-    plant_marker(&presets, &d.join("Presets"), &c.join("Presets (moving back)"), &presets);
+    plant_marker(&presets, &d.join("Presets"), &c.join("Presets (moving back)"), &presets, true);
     fs::create_dir_all(&d).unwrap();
     let stop = AtomicBool::new(false);
     let moved: MovedFolder = move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], &nothing, &stop).unwrap();
@@ -479,4 +533,126 @@ fn half_copies_are_looked_for_where_moves_go() {
     found.sort();
     assert_eq!(found, [s(&d.join("Two")), s(&e.join("Three"))]);
     assert!(half_copies(all, &[], &stop).unwrap().iter().all(|h| h.state == State::CutOff));
+}
+
+#[test]
+fn a_copy_a_move_is_making_is_never_cleared_nor_made_twice() {
+    let dir = fixtures("mo-space-half-busy");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    let presets = c.join("Presets");
+    library(&presets);
+    fs::create_dir_all(&d).unwrap();
+    let stop = AtomicBool::new(false);
+    let half = d.join("Presets");
+    let seen: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let looked = AtomicBool::new(false);
+    // Part way through the copy, the Space page looks from another thread, and a second move of the folder starts.
+    let progress = |n: u64| {
+        if n < 10 || looked.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let said = thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let found = find(&half, &[], &stop).unwrap().unwrap().state;
+                    let listed = half_copies(&[], &[s(&d)], &stop).unwrap().len();
+                    let cleared = clear(&half, &[], &stop);
+                    let looked_first = problem(&s(&presets), &s(&d), 35, &ROOMY, &[], &stop);
+                    let again = move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], &nothing, &stop);
+                    vec![
+                        format!("{found:?}"),
+                        listed.to_string(),
+                        format!("{cleared:?}"),
+                        format!("{looked_first:?}"),
+                        format!("{again:?}"),
+                    ]
+                })
+                .join()
+                .unwrap()
+        });
+        *seen.lock().unwrap() = said;
+    };
+    let moved = move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], &progress, &stop).unwrap();
+
+    let seen = seen.into_inner().unwrap();
+    assert_eq!(seen.len(), 5, "{seen:?}");
+    assert!(seen[0].contains("making or clearing a copy here now"), "{seen:?}");
+    assert_eq!(seen[1], "0", "{seen:?}");
+    assert!(seen[2].contains("making or clearing a copy here now"), "{seen:?}");
+    assert!(seen[3].contains("making or clearing a copy at"), "{seen:?}");
+    assert!(seen[4].contains("making or clearing a copy at"), "{seen:?}");
+    // The move went through, with all of its copy.
+    assert!(is_link(&presets) && moved.has_old_copy());
+    assert!(!half.join(MARKER).exists());
+    assert_eq!(fs::read_dir(half.join("Sounds")).unwrap().count(), 6);
+    assert_eq!(fs::read_to_string(half.join("Patch.prt")).unwrap(), "patch");
+}
+
+#[test]
+fn a_half_copy_whose_folder_moved_elsewhere_since_is_still_cleared() {
+    let dir = fixtures("mo-space-half-moved-on");
+    let (c, d, e) = (dir.join("C"), dir.join("D"), dir.join("E"));
+    let presets = c.join("Presets");
+    library(&presets);
+    fs::create_dir_all(&d).unwrap();
+    fs::create_dir_all(&e).unwrap();
+    let stop = AtomicBool::new(false);
+    stopped_part_way(10, |progress| move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], progress, &stop));
+    // Then the folder was moved to another drive, all the way: the half copy never went into use.
+    let moved = move_folder(&s(&presets), &s(&e), 35, whose(), &ROOMY, &[], &nothing, &stop).unwrap();
+    let half = d.join("Presets");
+    let all = std::slice::from_ref(&moved);
+    let found = half_copies(all, &[s(&d)], &stop).unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].state, State::CutOff);
+    assert!(found[0].bytes >= 10, "{:?}", found[0]);
+    assert_eq!(clear(&half, all, &stop), Ok(Cleared::Copy(found[0].bytes)));
+    assert!(!half.exists());
+    assert_eq!(fs::read_dir(e.join("Presets").join("Sounds")).unwrap().count(), 6);
+}
+
+#[test]
+fn a_half_copy_on_a_drive_with_another_letter_now_is_still_cleared_by_the_next_try() {
+    let dir = fixtures("mo-space-half-letter");
+    let (c, d, f) = (dir.join("C"), dir.join("D"), dir.join("F"));
+    let presets = c.join("Presets");
+    library(&presets);
+    fs::create_dir_all(&d).unwrap();
+    let stop = AtomicBool::new(false);
+    stopped_part_way(10, |progress| move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], progress, &stop));
+    // Plugged in again, the drive got another letter: its folder is called F here.
+    fs::rename(&d, &f).unwrap();
+    let half = f.join("Presets");
+    assert_eq!(find(&half, &[], &stop).unwrap().unwrap().state, State::CutOff);
+    assert_eq!(problem(&s(&presets), &s(&f), 35, &ROOMY, &[], &stop), None);
+    move_folder(&s(&presets), &s(&f), 35, whose(), &ROOMY, &[], &nothing, &stop).unwrap();
+    assert!(is_link(&presets) && !half.join(MARKER).exists());
+    assert_eq!(fs::read_dir(half.join("Sounds")).unwrap().count(), 6);
+}
+
+#[test]
+fn a_file_link_copied_as_its_file_is_still_a_copy() {
+    let dir = fixtures("mo-space-half-file-link");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    let presets = c.join("Presets");
+    library(&presets);
+    write(&dir, "Shared/Init.fxp", "init");
+    // Where a file link can't be made (Windows without Developer Mode), there's nothing to check.
+    if !common::file_link(&dir.join("Shared").join("Init.fxp"), &presets.join("Init.fxp")) {
+        return;
+    }
+    fs::create_dir_all(&d).unwrap();
+    let stop = AtomicBool::new(false);
+    stopped_part_way(10, |progress| move_folder(&s(&presets), &s(&d), 39, whose(), &ROOMY, &[], progress, &stop));
+    let half = d.join("Presets");
+    // Windows copies the file a link leads to when it won't make the link again.
+    let copied = half.join("Init.fxp");
+    if fs::symlink_metadata(&copied).is_ok() {
+        fs::remove_file(&copied).unwrap();
+    }
+    same_as(&copied, &dir.join("Shared").join("Init.fxp"));
+    assert_eq!(find(&half, &[], &stop).unwrap().unwrap().state, State::CutOff);
+    assert!(matches!(clear(&half, &[], &stop), Ok(Cleared::Copy(_))));
+    assert_eq!(fs::read_to_string(dir.join("Shared").join("Init.fxp")).unwrap(), "init");
+    assert!(is_link(&presets.join("Init.fxp")));
 }

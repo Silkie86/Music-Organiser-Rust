@@ -843,10 +843,11 @@ fn put_back_from_system_bin(removed: &[Removed]) -> Vec<Problem> {
     };
     let mut problems = Vec::new();
     for r in removed {
-        // The one found when it went; only one never found then is looked for by place and time (an id that's gone
-        // means it was put back already, and anything there now from that place went later).
+        // The one found when it went, still from its place (on Linux an id is used again once its item has gone);
+        // only one never found then is looked for by place and time (an id that's gone means it was put back already,
+        // and anything there now from that place went later).
         let item = match r.bin_id.as_deref() {
-            Some(id) => items.iter().find(|i| i.id.to_str() == Some(id)),
+            Some(id) => items.iter().find(|i| i.id.to_str() == Some(id) && is_the_one(i, r)),
             None => items.iter().filter(|i| is_the_one(i, r)).min_by_key(|i| i.time_deleted),
         };
         let Some(item) = item else {
@@ -875,9 +876,9 @@ fn find_in_system_bin(_removed: &mut [Removed]) -> Vec<Problem> {
     Vec::new()
 }
 
-/// Which of these are in the bin now: the one found when it went, by what the bin calls it; one never found then, by
-/// place and time (as putting it back looks for it), each bin item counted for one only. `None` when the bin can't be
-/// read.
+/// Which of these are in the bin now: the one found when it went, by what the bin calls it, still from its place and
+/// time (on Linux what the bin calls something is used again once it's gone); one never found then, by place and time
+/// (as putting it back looks for it), each bin item counted for one only. `None` when the bin can't be read.
 #[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
 fn held_in_system_bin(removed: &[Removed]) -> Option<Vec<bool>> {
     bin_items().map(|items| held_among(&items, removed))
@@ -886,15 +887,16 @@ fn held_in_system_bin(removed: &[Removed]) -> Option<Vec<bool>> {
 /// Which of `removed` are among the bin's `items`, as [`held_in_system_bin`] says.
 #[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
 fn held_among(items: &[trash::TrashItem], removed: &[Removed]) -> Vec<bool> {
-    let ids: HashSet<&std::ffi::OsStr> = items.iter().map(|i| i.id.as_os_str()).collect();
     fn id_of(r: &Removed) -> Option<&std::ffi::OsStr> {
         r.bin_id.as_deref().map(std::ffi::OsStr::new)
     }
-    let mut taken: HashSet<&std::ffi::OsStr> = removed.iter().filter_map(id_of).filter(|id| ids.contains(id)).collect();
+    // The item found when it went, if it's still there and still the one.
+    let by_id = |r: &Removed| id_of(r).and_then(|id| items.iter().find(|i| i.id.as_os_str() == id && is_the_one(i, r)));
+    let mut taken: HashSet<&std::ffi::OsStr> = removed.iter().filter_map(by_id).map(|i| i.id.as_os_str()).collect();
     removed
         .iter()
         .map(|r| match id_of(r) {
-            Some(id) => ids.contains(id),
+            Some(_) => by_id(r).is_some(),
             None => {
                 let found = items
                     .iter()
@@ -956,7 +958,10 @@ mod tests {
             let what = What::Plugin(SpaceKind::Presets);
             Removed { real: path.clone(), path, bytes: 10, what, when, bin_id: bin_id.map(str::to_owned) }
         };
-        let items = [item("1", "a.fxp", 100), item("2", "b.fxp", 200), item("3", "b.fxp", 300)];
+        let mut items = vec![item("1", "a.fxp", 100), item("2", "b.fxp", 200), item("3", "b.fxp", 300)];
+        // What the bin called one of the app's is used again for something else from another folder (Linux does
+        // that once the first is gone).
+        items.push(trash::TrashItem { original_parent: folder.join("Other"), ..item("4", "d.fxp", 400) });
         let asked = [
             // Found when it went, and still there.
             removed("a.fxp", 100, Some("1")),
@@ -968,7 +973,9 @@ mod tests {
             // None left for it, and the one that would do is another's.
             removed("b.fxp", 250, None),
             removed("a.fxp", 50, None),
+            // Its id is something else's now.
+            removed("d.fxp", 350, Some("4")),
         ];
-        assert_eq!(held_among(&items, &asked), [true, false, true, true, false, false]);
+        assert_eq!(held_among(&items, &asked), [true, false, true, true, false, false, false]);
     }
 }

@@ -8,7 +8,6 @@
 //! the app hands in: it's taken in as a move, so it goes the same guarded way as any other once you say. Nothing here
 //! removes anything: [`crate::folder_move::remove_old_copy`] and [`crate::after_move::remove_old_home`] do that.
 
-use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -16,9 +15,9 @@ use chrono::NaiveDateTime;
 use mo_formats::paths::file_name;
 
 use crate::after_move::{OldHome, kept_beside, old_home_stays, real_place};
-use crate::folder_move::{MovedFolder, OLD_SUFFIX, csharp_time, old_copy_stays};
+use crate::folder_move::{MovedFolder, OLD_SUFFIX, csharp_time, leads_into, old_copy_stays};
 use crate::size::{self, Stopped, is_link, size_text};
-use crate::{is_dir, key, not_there, real_folder, real_path, text};
+use crate::{in_places, is_dir, key, not_there, parent_of, real_folder, real_path, text};
 
 /// Something a move left for you to delete once its plugin opens fine.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -162,9 +161,8 @@ fn not_kept(
     listed: &[Leftover],
     stop: &AtomicBool,
 ) -> Result<Vec<Leftover>, Stopped> {
-    let parent = |p: &str| Path::new(p.trim_end_matches(['/', '\\'])).parent().map(text);
     let mut places: Vec<String> = look_in.to_vec();
-    places.extend(moved.iter().filter_map(|m| parent(&m.from)));
+    places.extend(moved.iter().filter_map(|m| parent_of(&m.from)));
     // Every place known already, as written and as it really is.
     let mut known: Vec<String> = Vec::new();
     for path in listed.iter().map(|l| l.path.as_str()).chain(moved.iter().map(|m| m.old_copy.as_str())) {
@@ -173,67 +171,54 @@ fn not_kept(
     for h in homes {
         know(&h.path, &mut known);
     }
-    let mut looked: Vec<String> = Vec::new();
     let mut found: Vec<Leftover> = Vec::new();
     let mut adopted: Vec<MovedFolder> = Vec::new();
-    for place in places {
-        if place.is_empty() {
+    for entry in in_places(places, stop)? {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = text(&entry.path());
+        let Some(base) = old_copy_of(&path, &name) else { continue };
+        // A real folder (an old copy that's a link frees nothing), not listed yet, and not a recorded move's.
+        if !entry.file_type().is_ok_and(|t| t.is_dir())
+            || known.contains(&key(&path))
+            || real_path(&path).is_some_and(|r| known.contains(&key(&r)))
+            || moved.iter().any(|m| key(&m.from) == key(&base))
+        {
             continue;
         }
-        let where_really = real_path(&place).map_or_else(|| key(&place), |r| key(&r));
-        if looked.contains(&where_really) {
+        know(&path, &mut known);
+        let bytes = size::measure(Path::new(&path), stop)?.bytes;
+        let unknown = |why: String| Leftover {
+            path: path.clone(),
+            bytes,
+            what: Left::Unknown,
+            now_in: String::new(),
+            since: None,
+            stays: Some(why),
+        };
+        let Some(to) = (is_link(Path::new(&base)) && is_dir(&base)).then(|| real_path(&base)).flatten() else {
+            found.push(unknown(unknown_stays(&base)));
+            continue;
+        };
+        let m = MovedFolder {
+            from: base,
+            to,
+            old_copy: path.clone(),
+            bytes,
+            moved: csharp_time(chrono::Local::now()),
+            key: String::new(),
+            kind: 2,
+            shared_with: Vec::new(),
+        };
+        // Its link leads into it (pointed back at it once the other drive went, say): it's what the plugin uses.
+        if leads_into(&m) {
+            let name = file_name(&m.from);
+            found.push(unknown(format!(
+                "{name} beside it is a link that leads into it, so it's what the plugin uses: it stays."
+            )));
             continue;
         }
-        looked.push(where_really);
-        let Ok(entries) = fs::read_dir(&place) else { continue };
-        for entry in entries.flatten() {
-            if stop.load(Ordering::Relaxed) {
-                return Err(Stopped);
-            }
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let path = text(&entry.path());
-            let Some(base) = old_copy_of(&path, &name) else { continue };
-            // A real folder (an old copy that's a link frees nothing), not listed yet, and not a recorded move's.
-            if !entry.file_type().is_ok_and(|t| t.is_dir())
-                || known.contains(&key(&path))
-                || real_path(&path).is_some_and(|r| known.contains(&key(&r)))
-                || moved.iter().any(|m| key(&m.from) == key(&base))
-            {
-                continue;
-            }
-            know(&path, &mut known);
-            let bytes = size::measure(Path::new(&path), stop)?.bytes;
-            let Some(to) = (is_link(Path::new(&base)) && is_dir(&base)).then(|| real_path(&base)).flatten() else {
-                found.push(Leftover {
-                    path,
-                    bytes,
-                    what: Left::Unknown,
-                    now_in: String::new(),
-                    since: None,
-                    stays: Some(unknown_stays(&base)),
-                });
-                continue;
-            };
-            let m = MovedFolder {
-                from: base,
-                to,
-                old_copy: path.clone(),
-                bytes,
-                moved: csharp_time(chrono::Local::now()),
-                key: String::new(),
-                kind: 2,
-                shared_with: Vec::new(),
-            };
-            adopted.push(m.clone());
-            found.push(Leftover {
-                path,
-                bytes,
-                now_in: m.to.clone(),
-                since: None,
-                stays: None,
-                what: Left::NotKept(m),
-            });
-        }
+        adopted.push(m.clone());
+        found.push(Leftover { path, bytes, now_in: m.to.clone(), since: None, stays: None, what: Left::NotKept(m) });
     }
     // Checked against every move, the ones taken in too: an old copy can hold another's.
     let all: Vec<MovedFolder> = moved.iter().chain(&adopted).cloned().collect();

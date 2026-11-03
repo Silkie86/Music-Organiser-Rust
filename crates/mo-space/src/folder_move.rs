@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::admin::{Admin, AsAdmin, NoAdmin, Outcome, Step, ask_for, real_spot, reason};
 use crate::clean::{Bin, Done, Problem, Sending, What, on_network};
-use crate::half_copy::{self, MARKER, clear_own, own_room, remove_marked, unmark};
+use crate::half_copy::{self, MARKER, busy_now, claim, clear_own, going_into_use, own_room, remove_marked, unmark};
 use crate::plugin_space::SpaceKind;
 use crate::size::{self, is_link, is_online_only, size_text};
 use crate::{key, not_there, real_folder, real_path, really, text};
@@ -425,8 +425,10 @@ pub fn move_folder(
 ) -> Result<MovedFolder, CantMove> {
     let from = from.trim_end_matches(['/', '\\']).to_owned();
     let to = target(&from, destination);
+    // Nothing else in the app makes or clears a copy there until this one is in use.
+    let mine = claim(&to).ok_or_else(|| busy_now(&to))?;
     // A half copy an earlier try left, cut off part way (the app or the computer stopped), goes first.
-    clear_own(&to, &from, already_moved, stop)?;
+    clear_own(&to, &from, already_moved, &mine, stop)?;
     if let Some(why) = problem(&from, destination, bytes, drives, already_moved, stop) {
         return Err(why);
     }
@@ -436,6 +438,7 @@ pub fn move_folder(
     let leave_out = left_out(&from, already_moved);
     let tree = Tree { leave_out: &leave_out, ..Tree::new(Path::new(&from), &to, &to) };
     copy_fresh(&tree, progress, stop)?;
+    going_into_use(&to).then_some(()).ok_or_else(|| not_noted(&to))?;
     let aside = format!("{from}{OLD_SUFFIX}");
     if let Err(why) = swap_or_ask(&from, &to, &aside, drives.admin()) {
         // The copy goes only while nothing leads into it and the original is still there (where it was, or set
@@ -553,8 +556,9 @@ pub fn move_back(
         });
     }
     let back = format!("{from}{BACK_SUFFIX}");
+    let mine = claim(Path::new(&back)).ok_or_else(|| busy_now(Path::new(&back)))?;
     // A half copy an earlier try left, cut off part way (the app or the computer stopped), goes first.
-    clear_own(Path::new(&back), &moved.to, std::slice::from_ref(moved), stop)?;
+    clear_own(Path::new(&back), &moved.to, std::slice::from_ref(moved), &mine, stop)?;
     if fs::symlink_metadata(&back).is_ok() {
         return Err(CantMove::Failed(format!(
             "There's a folder called {} beside it, left from an earlier try: look in it, then delete or rename it.",
@@ -565,6 +569,7 @@ pub fn move_back(
     let tree = Tree::new(to, Path::new(&back), settled);
     room_for(&tree, here, drives, stop)?;
     let (first, again) = copy_fresh(&tree, progress, stop)?;
+    going_into_use(Path::new(&back)).then_some(()).ok_or_else(|| not_noted(Path::new(&back)))?;
     if let Err(why) = unswap_or_ask(from, &back, to, drives.admin()) {
         if link_reaches(moved) {
             // As it was: the plugin still uses the other drive, so the copy made to come back goes.
@@ -575,6 +580,13 @@ pub fn move_back(
     // In place now, as the plugin's own folder: it's no half copy.
     unmark(settled);
     Ok(MovedBack { links_left: shown(&[first.links_left, again.links_left].concat()), ..MovedBack::default() })
+}
+
+/// A copy whose marker couldn't be told it's going into use goes (it isn't in use), and nothing has moved: a copy whose
+/// marker still says it's being copied mustn't go into use.
+pub(crate) fn not_noted(copy: &Path) -> CantMove {
+    remove_copy(copy);
+    CantMove::Failed(format!("Couldn't note in {} that the copy is going into use.", copy.to_string_lossy()))
 }
 
 /// What a stop or a failure part way says first: "Stopped.", or why, without "Nothing was moved." (something was).
@@ -831,6 +843,11 @@ pub fn old_copy_stays(moved: &MovedFolder, all: &[MovedFolder]) -> Option<String
             "It's a link now, not the folder the move set aside, so it stays, and so does where it leads.".to_owned(),
         );
     }
+    if leads_into(moved) {
+        return Some(
+            "The link leads into it (or the copy is in it), so it's what the plugin uses: it stays.".to_owned(),
+        );
+    }
     if !old_copy_can_go(moved) {
         return Some(
             "It's the only copy the plugin could use now (the link or the copy on the other drive isn't as the move \
@@ -847,6 +864,15 @@ pub fn old_copy_stays(moved: &MovedFolder, all: &[MovedFolder]) -> Option<String
             lost.to
         )
     })
+}
+
+/// Whether the moved folder's link leads into its old copy (pointed back at it once the other drive went, say), or its
+/// copy is in the old copy or holds it: then the old copy is what the plugin uses.
+pub(crate) fn leads_into(moved: &MovedFolder) -> bool {
+    let Some(old) = real_path(&moved.old_copy) else { return false };
+    let link_in = real_path(&moved.from).is_some_and(|f| is_inside(&f, &old));
+    let copy_in = real_path(&moved.to).is_some_and(|t| is_inside(&t, &old) || is_inside(&old, &t));
+    link_in || copy_in
 }
 
 /// The old copy stays, and why.
@@ -1450,7 +1476,7 @@ pub(crate) fn set_read_only(path: &Path, read_only: bool) -> bool {
 }
 
 /// Whether two files look the same: the same size, and times no further apart than a drive's clock steps.
-fn same_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
+pub(crate) fn same_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
     a.len() == b.len()
         && match (a.modified(), b.modified()) {
             (Ok(x), Ok(y)) => x.duration_since(y).unwrap_or_else(|e| e.duration()) < SAME_TIME,
@@ -1459,7 +1485,7 @@ fn same_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
 }
 
 /// Whether `a` was changed later than `b`, by more than a drive's clock steps.
-fn newer(a: &fs::Metadata, b: &fs::Metadata) -> bool {
+pub(crate) fn newer(a: &fs::Metadata, b: &fs::Metadata) -> bool {
     matches!((a.modified(), b.modified()), (Ok(x), Ok(y)) if x.duration_since(y).is_ok_and(|d| d >= SAME_TIME))
 }
 

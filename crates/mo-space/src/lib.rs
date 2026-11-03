@@ -98,6 +98,39 @@ pub fn real_path(path: &str) -> Option<String> {
     })
 }
 
+/// The folder a path is in.
+pub(crate) fn parent_of(path: &str) -> Option<String> {
+    std::path::Path::new(path.trim_end_matches(['/', '\\'])).parent().map(text)
+}
+
+/// What's in each of `places`, each place once (by where it really is); a place that can't be read is passed over.
+/// Looks at `stop` before each one.
+pub(crate) fn in_places(
+    places: Vec<String>,
+    stop: &std::sync::atomic::AtomicBool,
+) -> Result<Vec<std::fs::DirEntry>, Stopped> {
+    let mut looked: Vec<String> = Vec::new();
+    let mut found = Vec::new();
+    for place in places {
+        if place.is_empty() {
+            continue;
+        }
+        let where_really = real_path(&place).map_or_else(|| key(&place), |r| key(&r));
+        if looked.contains(&where_really) {
+            continue;
+        }
+        looked.push(where_really);
+        let Ok(entries) = std::fs::read_dir(&place) else { continue };
+        for entry in entries.flatten() {
+            if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(Stopped);
+            }
+            found.push(entry);
+        }
+    }
+    Ok(found)
+}
+
 /// [`real_path`] for a path; the path itself when where it really is can't be told (it isn't there yet).
 pub(crate) fn really(path: &std::path::Path) -> std::path::PathBuf {
     real_path(&path.to_string_lossy()).map_or_else(|| path.to_path_buf(), std::path::PathBuf::from)

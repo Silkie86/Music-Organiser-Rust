@@ -140,20 +140,21 @@ fn one_old_copy_is_one() {
 fn an_old_copy_no_move_was_kept_for_is_found_beside_its_link_and_goes_once_kept() {
     let dir = fixtures("mo-space-remind-not-kept");
     let (c, d) = (dir.join("C"), dir.join("D"));
-    write(&c, "Spectrasonics/STEAM/a.db", "0123456789");
+    let spectrasonics = c.join("Spectrasonics");
+    write(&spectrasonics, "STEAM/a.db", "0123456789");
     fs::create_dir_all(&d).unwrap();
     // The app stopped after the swap, before it kept the move: only the folders say there was one.
-    let lost = moved_folder(&c.join("Spectrasonics/STEAM"), &d);
+    let lost = moved_folder(&spectrasonics.join("STEAM"), &d);
     let stop = AtomicBool::new(false);
-    let look_in = [s(&c.join("Spectrasonics"))];
+    let look_in = [s(&spectrasonics)];
 
     let reminder = remind(&[], &[], &look_in, &stop).unwrap();
     assert_eq!(reminder.leftovers.len(), 1);
     let found = &reminder.leftovers[0];
-    assert_eq!((found.path.as_str(), found.bytes), (lost.old_copy.as_str(), 10));
+    assert_eq!((key(&found.path), found.bytes), (key(&lost.old_copy), 10));
     assert_eq!(found.stays, None);
     let Left::NotKept(taken) = &found.what else { panic!("{found:?}") };
-    assert_eq!((taken.from.as_str(), taken.old_copy.as_str()), (lost.from.as_str(), lost.old_copy.as_str()));
+    assert_eq!((key(&taken.from), key(&taken.old_copy)), (key(&lost.from), key(&lost.old_copy)));
     assert_eq!(key(&taken.to), key(&real(Path::new(&lost.to))));
     assert_eq!(found.now_in, taken.to);
     // Listed once, looked for twice.
@@ -169,6 +170,39 @@ fn an_old_copy_no_move_was_kept_for_is_found_beside_its_link_and_goes_once_kept(
     assert!(done.problems.is_empty(), "{:?}", done.problems);
     assert!(!Path::new(&lost.old_copy).exists());
     assert_eq!(fs::read_to_string(Path::new(&lost.from).join("a.db")).unwrap(), "0123456789");
+}
+
+#[test]
+fn an_old_copy_its_link_leads_back_into_is_what_the_plugin_uses_and_stays() {
+    let dir = fixtures("mo-space-remind-pointed-back");
+    let plugins = dir.join("Plugins");
+    // The other drive went, so the link was pointed back at the old copy, and no move was kept.
+    let old_copy = plugins.join(format!("STEAM{}", mo_space::folder_move::OLD_SUFFIX));
+    write(&old_copy, "a.db", "0123456789");
+    let steam = plugins.join("STEAM");
+    folder_link(&old_copy, &steam);
+    let stop = AtomicBool::new(false);
+    let reminder = remind(&[], &[], &[s(&plugins)], &stop).unwrap();
+    assert_eq!(reminder.leftovers.len(), 1);
+    let found = &reminder.leftovers[0];
+    assert_eq!(found.what, Left::Unknown);
+    assert!(found.stays.as_deref().is_some_and(|w| w.contains("leads into it")), "{found:?}");
+    // A move kept that way goes no further: its old copy is the folder its link uses.
+    let kept = MovedFolder {
+        from: s(&steam),
+        to: s(&old_copy),
+        old_copy: s(&old_copy),
+        bytes: 10,
+        moved: String::new(),
+        key: String::new(),
+        kind: 2,
+        shared_with: Vec::new(),
+    };
+    let all = std::slice::from_ref(&kept);
+    let bin = FolderBin { dir: dir.join("bin"), held: RefCell::new(Vec::new()) };
+    let done = remove_old_copy(&kept, all, true, &bin, &stop);
+    assert!(done.removed.is_empty() && !done.problems.is_empty(), "{done:?}");
+    assert_eq!(fs::read_to_string(steam.join("a.db")).unwrap(), "0123456789");
 }
 
 #[test]
