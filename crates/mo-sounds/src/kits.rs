@@ -158,7 +158,7 @@ pub fn roll(
                 }
                 score += f64::from((c.rating - 3).max(0)) * 0.1;
                 if let (Some(vibe), Some(cv)) = (vibe, clap.and_then(|i| i.get(c.id))) {
-                    score += 3.0 * dot(vibe, cv);
+                    score += 3.0 * dot(vibe, &cv);
                 }
                 if let (Some(key), true, Some(p)) = (
                     o.key_tonic,

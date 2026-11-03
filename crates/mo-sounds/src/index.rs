@@ -7,7 +7,9 @@
 //!
 //! Building reads every vector once; build it off the window's thread and keep it until the library changes.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 use rayon::prelude::*;
 
@@ -21,11 +23,141 @@ pub struct VectorIndex {
     dim: usize,
     /// The ids, in order; row `i` of `rows` is `ids[i]`'s vector.
     ids: Vec<i64>,
-    rows: Vec<f32>,
+    rows: Rows,
+}
+
+/// An index's numbers: full precision, or half (16 bits, about 3 significant digits). Held in parts of [`CHUNK`] rows
+/// (the last may be shorter), the blocks a search gives each worker: so no part is ever grown or copied whole, and
+/// the index never needs one big piece of memory.
+#[derive(Clone, Debug)]
+enum Rows {
+    Full(Vec<Box<[f32]>>),
+    /// Each number's half-precision bits. CLAP's 512 numbers a sound were 0.93 GB for half a million sounds at full
+    /// precision; at half they're 0.46 GB, and a likeness (a sum of 512 products, rounded to 3 places) moves by 0.001
+    /// at most now and then (Solomon chose this, 2026-11-03).
+    Half(Vec<Box<[u16]>>),
+}
+
+impl Default for Rows {
+    fn default() -> Rows {
+        Rows::Full(Vec::new())
+    }
+}
+
+/// Every half-precision number as a float, looked up rather than worked out: 256 KB, made once.
+static HALVES: LazyLock<Vec<f32>> =
+    LazyLock::new(|| (0..=u16::MAX).map(|b| half::f16::from_bits(b).to_f32()).collect());
+
+/// `x` at half precision (rounded to the nearest), as its bits.
+fn to_half(x: f32) -> u16 {
+    half::f16::from_f32(x).to_bits()
 }
 
 /// How many sounds each worker scores before keeping its best: as the C# app's chunks.
 const CHUNK: usize = 4096;
+
+/// How many numbers each block of [`Gathered`] holds: 4 MB. Small enough that the spare room in the last one doesn't
+/// count, big enough that there are only a few hundred.
+#[cfg(not(test))]
+const BLOCK: usize = 1 << 20;
+/// Small in tests, so even a small test library is spread over many blocks.
+#[cfg(test)]
+const BLOCK: usize = 100;
+
+/// Vectors gathered one after another into blocks of numbers as the library is read: the whole library's fingerprints
+/// held once, with no list of its own for each sound. With half a million sounds, a list each (as [`Vectors`] keeps
+/// them) cost about a gigabyte more, and building the index from them copied them all again. The blocks are of a fixed
+/// size, so none is ever grown (which would copy it, holding two copies meanwhile, and leave up to half of it spare),
+/// and building an index lets go of each one as soon as its numbers have been taken.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Gathered {
+    ids: Vec<i64>,
+    /// Where each vector is: its block, where it starts in it and how long it is.
+    places: Vec<(u32, u32, u32)>,
+    blocks: Vec<Vec<f32>>,
+}
+
+impl Gathered {
+    /// Adds `id`'s vector.
+    pub fn push(&mut self, id: i64, v: &[f32]) {
+        self.room(v.len()).extend_from_slice(v);
+        self.ids.push(id);
+    }
+
+    /// Adds `id`'s vector from a stored blob of little-endian floats. Anything but whole floats is left out (as the
+    /// C# app leaves it out), and then this says false.
+    pub fn push_blob(&mut self, id: i64, blob: &[u8]) -> bool {
+        if blob.is_empty() || !blob.len().is_multiple_of(4) {
+            return false;
+        }
+        let block = self.room(blob.len() / 4);
+        block.extend(blob.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])));
+        self.ids.push(id);
+        true
+    }
+
+    /// The block `len` more numbers go in (a new one when the last is too full), with their place noted. The id is
+    /// the caller's to add.
+    fn room(&mut self, len: usize) -> &mut Vec<f32> {
+        let full = self.blocks.last().is_none_or(|b| b.capacity() - b.len() < len);
+        if full {
+            self.blocks.push(Vec::with_capacity(BLOCK.max(len)));
+        }
+        let at = self.blocks.len() - 1;
+        let block = &mut self.blocks[at];
+        let place = (u32::try_from(at), u32::try_from(block.len()), u32::try_from(len));
+        if let (Ok(b), Ok(start), Ok(len)) = place {
+            self.places.push((b, start, len));
+        }
+        block
+    }
+
+    pub fn len(&self) -> usize {
+        self.ids.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty()
+    }
+
+    /// The most common length, and how many vectors have it; on a tie, the longer (newer analysers give more
+    /// numbers). (0, 0) with none.
+    fn common_length(&self) -> (usize, usize) {
+        let mut lengths: HashMap<usize, usize> = HashMap::new();
+        for &(_, _, len) in &self.places {
+            *lengths.entry(len as usize).or_default() += 1;
+        }
+        lengths.into_iter().max_by_key(|(len, n)| (*n, *len)).unwrap_or((0, 0))
+    }
+
+    /// The vector at `i` (in the order they were added).
+    fn at(&self, i: usize) -> &[f32] {
+        let (b, start, len) = self.places[i];
+        let start = start as usize;
+        &self.blocks[b as usize][start..start + len as usize]
+    }
+
+    /// Each id with its vector, in the order they were added.
+    pub fn iter(&self) -> impl Iterator<Item = (i64, &[f32])> {
+        self.ids.iter().enumerate().map(|(i, id)| (*id, self.at(i)))
+    }
+
+    /// The same vectors, a list each, by id (a later one for the same id wins).
+    pub fn to_vectors(&self) -> Vectors {
+        self.iter().map(|(id, v)| (id, v.to_vec())).collect()
+    }
+
+    /// `vectors` gathered, in id order.
+    pub fn from_vectors(vectors: &Vectors) -> Gathered {
+        let mut list: Vec<(i64, &Vec<f32>)> = vectors.iter().map(|(id, v)| (*id, v)).collect();
+        list.sort_unstable_by_key(|(id, _)| *id);
+        let mut g = Gathered::default();
+        for (id, v) in list {
+            g.push(id, v);
+        }
+        g
+    }
+}
 
 /// The weight of each feature for "sounds like": the last 12 (chroma) count 0.35, the rest 1.
 pub fn chroma_downweight(dim: usize) -> Vec<f32> {
@@ -57,34 +189,57 @@ impl VectorIndex {
     /// analyser can't be compared). With `standardise`, each number has its average taken off and is divided by its
     /// spread first; `weights` then scales each number.
     pub fn build(vectors: &Vectors, standardise: bool, weights: Option<fn(usize) -> Vec<f32>>) -> VectorIndex {
-        if vectors.is_empty() {
+        VectorIndex::from_gathered(Gathered::from_vectors(vectors), standardise, weights)
+    }
+
+    /// As [`VectorIndex::build`], from vectors gathered as the library was read. Their blocks are let go of as the
+    /// index takes their numbers, so the library's fingerprints are held about once all the way through.
+    pub fn from_gathered(gathered: Gathered, standardise: bool, weights: Option<fn(usize) -> Vec<f32>>) -> VectorIndex {
+        VectorIndex::make(gathered, standardise, weights, false)
+    }
+
+    /// As [`VectorIndex::from_gathered`], with the numbers held at half precision (see [`VectorIndex::halved`]),
+    /// made straight from the gathered ones: the full-precision index is never held whole.
+    pub fn from_gathered_halved(
+        gathered: Gathered,
+        standardise: bool,
+        weights: Option<fn(usize) -> Vec<f32>>,
+    ) -> VectorIndex {
+        VectorIndex::make(gathered, standardise, weights, true)
+    }
+
+    fn make(mut g: Gathered, standardise: bool, weights: Option<fn(usize) -> Vec<f32>>, half: bool) -> VectorIndex {
+        if g.is_empty() {
             return VectorIndex::default();
         }
-        let mut lengths: HashMap<usize, usize> = HashMap::new();
-        for v in vectors.values() {
-            *lengths.entry(v.len()).or_default() += 1;
+        let (dim, _) = g.common_length();
+        if dim == 0 {
+            return VectorIndex::default();
         }
-        // The most common length; on a tie, the longer (newer analysers give more numbers).
-        let dim = lengths.into_iter().max_by_key(|(len, n)| (*n, *len)).map_or(0, |(len, _)| len);
-        // In id order, so the sums below add up the same way every time.
-        let mut same: Vec<(i64, &Vec<f32>)> =
-            vectors.iter().filter(|(_, v)| v.len() == dim).map(|(id, v)| (*id, v)).collect();
-        same.sort_unstable_by_key(|(id, _)| *id);
+        // The vectors of that length, in id order. Read in stored order they already are (the ids are the table's row
+        // ids); otherwise sorted, a later one for the same id winning, as a map of them keeps it.
+        let mut order: Vec<usize> = (0..g.len()).filter(|&i| g.places[i].2 as usize == dim).collect();
+        if !order.is_sorted_by(|&a, &b| g.ids[a] < g.ids[b]) {
+            order.sort_by_key(|&i| (g.ids[i], std::cmp::Reverse(i)));
+            order.dedup_by_key(|i| g.ids[*i]);
+        }
+        let in_place_order = order.is_sorted();
         let mut mean = vec![0f64; dim];
         let mut sd = vec![0f64; dim];
         if standardise {
-            // As C#: divided by every vector's count, odd lengths included.
-            let count = vectors.len() as f64;
-            for (_, v) in &same {
-                for (m, x) in mean.iter_mut().zip(v.iter()) {
+            // As C#: divided by every vector's count, odd lengths included; added up in id order, so the sums come out
+            // the same every time.
+            let count = g.len() as f64;
+            for &i in &order {
+                for (m, x) in mean.iter_mut().zip(g.at(i)) {
                     *m += f64::from(*x);
                 }
             }
             for m in &mut mean {
                 *m /= count;
             }
-            for (_, v) in &same {
-                for ((s, x), m) in sd.iter_mut().zip(v.iter()).zip(&mean) {
+            for &i in &order {
+                for ((s, x), m) in sd.iter_mut().zip(g.at(i)).zip(&mean) {
                     *s += (f64::from(*x) - m) * (f64::from(*x) - m);
                 }
             }
@@ -93,24 +248,63 @@ impl VectorIndex {
             }
         }
         let w = weights.map(|f| f(dim));
-        let mut rows = vec![0f32; same.len() * dim];
-        if dim > 0 {
-            rows.par_chunks_mut(dim).zip(&same).for_each(|(row, (_, v))| {
-                for (d, out) in row.iter_mut().enumerate() {
-                    let x = f64::from(v[d]);
-                    let x = if !standardise {
-                        x
-                    } else if sd[d] > 1e-9 {
-                        (x - mean[d]) / sd[d]
-                    } else {
-                        0.0
-                    };
-                    *out = (x * w.as_ref().map_or(1.0, |w| f64::from(w[d]))) as f32;
+        let finish = |row: &mut [f32]| {
+            for (d, out) in row.iter_mut().enumerate() {
+                let x = f64::from(*out);
+                let x = if !standardise {
+                    x
+                } else if sd[d] > 1e-9 {
+                    (x - mean[d]) / sd[d]
+                } else {
+                    0.0
+                };
+                *out = (x * w.as_ref().map_or(1.0, |w| f64::from(w[d]))) as f32;
+            }
+            self::unit(row);
+        };
+        let ids: Vec<i64> = order.iter().map(|&i| g.ids[i]).collect();
+        let parts = order.len().div_ceil(CHUNK);
+        let mut full: Vec<Box<[f32]>> = Vec::with_capacity(if half { 0 } else { parts });
+        let mut halves: Vec<Box<[u16]>> = Vec::with_capacity(if half { parts } else { 0 });
+        // A part at a time: worked out in parallel, kept as a part of the index, and (in stored order) each block let
+        // go of once every row in it has been taken.
+        let mut taken_to = 0;
+        for part in order.chunks(CHUNK) {
+            let mut rows: Vec<f32> = Vec::with_capacity(part.len() * dim);
+            for &i in part {
+                rows.extend_from_slice(g.at(i));
+            }
+            rows.par_chunks_mut(dim).for_each(&finish);
+            if half {
+                halves.push(rows.iter().map(|x| to_half(*x)).collect());
+            } else {
+                full.push(rows.into_boxed_slice());
+            }
+            if in_place_order && let Some(&last) = part.last() {
+                let block = g.places[last].0 as usize;
+                for b in &mut g.blocks[taken_to..block] {
+                    *b = Vec::new();
                 }
-                self::unit(row);
-            });
+                taken_to = taken_to.max(block);
+            }
         }
-        VectorIndex { dim, ids: same.iter().map(|(id, _)| *id).collect(), rows }
+        drop(g);
+        let rows = if half { Rows::Half(halves) } else { Rows::Full(full) };
+        VectorIndex { dim, ids, rows }
+    }
+
+    /// The same index with its numbers at half precision: half the room, each number to about 3 significant digits.
+    pub fn halved(self) -> VectorIndex {
+        let rows = match self.rows {
+            Rows::Full(full) => Rows::Half(full.par_iter().map(|p| p.iter().map(|x| to_half(*x)).collect()).collect()),
+            half => half,
+        };
+        VectorIndex { rows, ..self }
+    }
+
+    /// Whether its numbers are held at half precision.
+    pub fn is_halved(&self) -> bool {
+        matches!(self.rows, Rows::Half(_))
     }
 
     /// The features index: standardised, chroma counting less.
@@ -145,10 +339,16 @@ impl VectorIndex {
         self.ids.binary_search(&id).is_ok()
     }
 
-    /// A sound's unit vector, if the index has it.
-    pub fn get(&self, id: i64) -> Option<&[f32]> {
+    /// A sound's unit vector, if the index has it: borrowed at full precision, made from the half-precision numbers
+    /// otherwise.
+    pub fn get(&self, id: i64) -> Option<Cow<'_, [f32]>> {
         let i = self.ids.binary_search(&id).ok()?;
-        Some(&self.rows[i * self.dim..(i + 1) * self.dim])
+        let (part, at) = (i / CHUNK, (i % CHUNK) * self.dim);
+        let at = at..at + self.dim;
+        Some(match &self.rows {
+            Rows::Full(parts) => Cow::Borrowed(&parts[part][at]),
+            Rows::Half(parts) => Cow::Owned(parts[part][at].iter().map(|b| HALVES[usize::from(*b)]).collect()),
+        })
     }
 
     /// The `max` closest sounds to `query`, closest first (ties by id), with their likeness (-1 to 1). Every vector is
@@ -161,23 +361,30 @@ impl VectorIndex {
         unit(&mut q);
         // Each worker scores a block of sounds and keeps only its best `max`, so a search over a big library never
         // holds a score for every sound at once.
-        let mut best: Vec<(i64, f32)> = self
-            .rows
-            .par_chunks(CHUNK * self.dim)
-            .zip(self.ids.par_chunks(CHUNK))
-            .flat_map_iter(|(rows, ids)| {
-                let mut scored: Vec<(i64, f32)> = rows
-                    .chunks_exact(self.dim)
-                    .zip(ids)
-                    .map(|(v, id)| (*id, v.iter().zip(&q).map(|(a, b)| a * b).sum::<f32>()))
-                    .collect();
-                keep_best(&mut scored, max);
-                scored
-            })
-            .collect();
+        let mut best: Vec<(i64, f32)> = match &self.rows {
+            Rows::Full(rows) => self.best_of(rows, max, |v| v.iter().zip(&q).map(|(a, b)| a * b).sum::<f32>()),
+            Rows::Half(rows) => {
+                let halves = &*HALVES;
+                self.best_of(rows, max, |v| v.iter().zip(&q).map(|(a, b)| halves[usize::from(*a)] * b).sum::<f32>())
+            }
+        };
         keep_best(&mut best, max);
         best.sort_unstable_by(closest_first);
         best.into_iter().map(|(id, s)| (id, f64::from(s))).collect()
+    }
+
+    /// Each part of the rows scored by `score` on a worker of its own, keeping its best `max`, all joined.
+    fn best_of<T: Sync>(&self, parts: &[Box<[T]>], max: usize, score: impl Fn(&[T]) -> f32 + Sync) -> Vec<(i64, f32)> {
+        parts
+            .par_iter()
+            .zip(self.ids.par_chunks(CHUNK))
+            .flat_map_iter(|(rows, ids)| {
+                let mut scored: Vec<(i64, f32)> =
+                    rows.chunks_exact(self.dim).zip(ids).map(|(v, id)| (*id, score(v))).collect();
+                keep_best(&mut scored, max);
+                scored
+            })
+            .collect()
     }
 }
 
@@ -200,7 +407,7 @@ fn keep_best(scored: &mut Vec<(i64, f32)>, max: usize) {
 #[derive(Clone, Debug, Default)]
 pub struct SoundIndex {
     pub features: VectorIndex,
-    /// `None` until deep listening has heard any sound.
+    /// `None` until deep listening has heard enough of the sounds for it to be used (see `deep`).
     pub clap: Option<VectorIndex>,
     /// Deep listening has heard at least 9 in 10 analysed sounds, so CLAP is the one to use.
     pub deep: bool,
@@ -210,10 +417,18 @@ impl SoundIndex {
     /// Builds both from the vectors (as [`crate::SoundsDb::everything`] reads them), as the C# app does when it reads
     /// the library. `analysed` is how many sounds have been analysed, hidden copies too, as the C# app counts them.
     pub fn build(features: &Vectors, clap: &Vectors, analysed: usize) -> SoundIndex {
-        let features = VectorIndex::features(features);
-        let clap = (!clap.is_empty()).then(|| VectorIndex::clap(clap));
-        // As C#: counts the CLAP vectors the index kept (the most common length).
-        let deep = clap.as_ref().is_some_and(|c| crate::learn::heard_enough(c.len(), analysed));
+        SoundIndex::from_gathered(Gathered::from_vectors(features), Gathered::from_vectors(clap), analysed)
+    }
+
+    /// As [`SoundIndex::build`], from vectors gathered as the library was read; their blocks become the indexes.
+    pub fn from_gathered(features: Gathered, clap: Gathered, analysed: usize) -> SoundIndex {
+        let features = VectorIndex::from_gathered(features, true, Some(chroma_downweight));
+        // As C#: counts the CLAP vectors the index keeps (those of the most common length).
+        let deep = crate::learn::heard_enough(clap.common_length().1, analysed);
+        // Until deep listening has heard enough, nothing searches CLAP's vectors (searches, kits and the galaxy all use
+        // the features), so they aren't kept: with a big library half heard, that's hundreds of megabytes. Once they
+        // are, they're held at half precision: CLAP's is the biggest block the app holds (Solomon, 2026-11-03).
+        let clap = (deep && !clap.is_empty()).then(|| VectorIndex::from_gathered_halved(clap, false, None));
         SoundIndex { features, clap, deep }
     }
 
@@ -238,6 +453,7 @@ impl SoundIndex {
     ) -> Vec<(i64, f64)> {
         let index = Some(self.active()).filter(|i| i.contains(of.id)).unwrap_or(&self.features);
         let Some(v) = index.get(of.id) else { return Vec::new() };
+        let v = &*v;
         // The C# app asks for 3 times as many and stops there; when hidden copies or other types use those up, this
         // asks for more, so the list is only short when the library has no more.
         let mut fetch = max.saturating_mul(3);
@@ -309,8 +525,8 @@ mod tests {
         let a = i.get(3).unwrap();
         assert_eq!(a[2], 0.0);
         // Sound 3 is as far from 1 as from 2 once both numbers count alike.
-        let d1 = dot(a, i.get(1).unwrap());
-        let d2 = dot(a, i.get(2).unwrap());
+        let d1 = dot(&a, &i.get(1).unwrap());
+        let d2 = dot(&a, &i.get(2).unwrap());
         assert!((d1 - d2).abs() < 1e-6, "{d1} {d2}");
     }
 
@@ -373,13 +589,161 @@ mod tests {
         assert_eq!(found.iter().map(|x| x.0).collect::<Vec<_>>(), all[..25].iter().map(|x| x.0).collect::<Vec<_>>());
     }
 
+    /// The index as it was built before the vectors were gathered in one block: a list each, copied row by row.
+    fn built_from_lists(vectors: &Vectors, standardise: bool, weights: Option<fn(usize) -> Vec<f32>>) -> VectorIndex {
+        let mut lengths: HashMap<usize, usize> = HashMap::new();
+        for v in vectors.values() {
+            *lengths.entry(v.len()).or_default() += 1;
+        }
+        let dim = lengths.into_iter().max_by_key(|(len, n)| (*n, *len)).map_or(0, |(len, _)| len);
+        let mut same: Vec<(i64, &Vec<f32>)> =
+            vectors.iter().filter(|(_, v)| v.len() == dim).map(|(id, v)| (*id, v)).collect();
+        same.sort_unstable_by_key(|(id, _)| *id);
+        let (mut mean, mut sd) = (vec![0f64; dim], vec![0f64; dim]);
+        if standardise {
+            let count = vectors.len() as f64;
+            for (_, v) in &same {
+                for (m, x) in mean.iter_mut().zip(v.iter()) {
+                    *m += f64::from(*x);
+                }
+            }
+            for m in &mut mean {
+                *m /= count;
+            }
+            for (_, v) in &same {
+                for ((s, x), m) in sd.iter_mut().zip(v.iter()).zip(&mean) {
+                    *s += (f64::from(*x) - m) * (f64::from(*x) - m);
+                }
+            }
+            for s in &mut sd {
+                *s = (*s / count).sqrt();
+            }
+        }
+        let w = weights.map(|f| f(dim));
+        let mut rows = vec![0f32; same.len() * dim];
+        for (row, (_, v)) in rows.chunks_mut(dim.max(1)).zip(&same) {
+            for (d, out) in row.iter_mut().enumerate() {
+                let x = f64::from(v[d]);
+                let x = if !standardise {
+                    x
+                } else if sd[d] > 1e-9 {
+                    (x - mean[d]) / sd[d]
+                } else {
+                    0.0
+                };
+                *out = (x * w.as_ref().map_or(1.0, |w| f64::from(w[d]))) as f32;
+            }
+            unit(row);
+        }
+        let parts = rows.chunks(CHUNK * dim.max(1)).map(Box::from).collect();
+        VectorIndex { dim, ids: same.iter().map(|(id, _)| *id).collect(), rows: Rows::Full(parts) }
+    }
+
+    /// A library's worth of made-up vectors: mostly 16 long, some of an older length, a few ids missing.
+    fn made(count: i64) -> Vec<(i64, Vec<f32>)> {
+        (1..=count)
+            .filter(|id| id % 11 != 0)
+            .map(|id| {
+                let len = if id % 7 == 0 { 9 } else { 16 };
+                (id, (0..len).map(|d| ((id * 31 + d * 17) % 101) as f32 / 7.0 - 5.0).collect())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn gathering_in_one_block_builds_the_same_index_to_the_last_bit() {
+        let list = made(3000);
+        let lists: Vectors = list.iter().cloned().collect();
+        // In stored (id) order, as the library is read, and jumbled.
+        let mut in_order = Gathered::default();
+        for (id, v) in &list {
+            in_order.push(*id, v);
+        }
+        let mut jumbled = Gathered::default();
+        for (id, v) in list.iter().rev() {
+            jumbled.push(*id, v);
+        }
+        for (standardise, weights) in [(true, Some(chroma_downweight as fn(usize) -> Vec<f32>)), (false, None)] {
+            let want = built_from_lists(&lists, standardise, weights);
+            for g in [&in_order, &jumbled] {
+                let got = VectorIndex::from_gathered(g.clone(), standardise, weights);
+                assert_eq!((got.dim, &got.ids), (want.dim, &want.ids));
+                let bits = |r: &Rows| match r {
+                    Rows::Full(r) => r.iter().flat_map(|p| p.iter().map(|x| x.to_bits())).collect::<Vec<_>>(),
+                    Rows::Half(_) => unreachable!("built at full precision"),
+                };
+                assert_eq!(bits(&got.rows), bits(&want.rows));
+            }
+        }
+        // Made at half precision straight away: the same numbers as halving the full index.
+        let halves = |i: &VectorIndex| match &i.rows {
+            Rows::Half(h) => h.clone(),
+            Rows::Full(_) => unreachable!("halved"),
+        };
+        let want = VectorIndex::from_gathered(in_order.clone(), false, None).halved();
+        for g in [&in_order, &jumbled] {
+            let got = VectorIndex::from_gathered_halved(g.clone(), false, None);
+            assert_eq!((got.dim, &got.ids, halves(&got)), (want.dim, &want.ids, halves(&want)));
+        }
+        assert!(in_order.blocks.len() > 100, "spread over many blocks");
+        assert_eq!(in_order.to_vectors(), lists);
+        assert_eq!(Gathered::from_vectors(&lists), in_order);
+    }
+
+    #[test]
+    fn half_precision_finds_the_same_sounds_to_within_a_thousandth() {
+        // CLAP-like: 512 numbers a sound, spread around nought.
+        let v: Vectors = (1..=2000i64)
+            .map(|id| {
+                let mut z = id as u64;
+                let v = (0..512)
+                    .map(|_| {
+                        // SplitMix64: a good spread of made-up numbers, the same every run.
+                        z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                        let mut x = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                        x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                        ((x ^ (x >> 31)) >> 40) as f32 / (1u64 << 23) as f32 - 1.0
+                    })
+                    .collect();
+                (id, v)
+            })
+            .collect();
+        let full = VectorIndex::clap(&v);
+        let half = full.clone().halved();
+        assert!(half.is_halved() && !full.is_halved());
+        assert_eq!((half.len(), half.dim()), (full.len(), full.dim()));
+        for id in [1, 500, 1999] {
+            let (a, b) = (full.get(id).unwrap(), half.get(id).unwrap());
+            assert!(a.iter().zip(b.iter()).all(|(x, y)| (x - y).abs() <= x.abs() / 1024.0 + 1e-7));
+            let (want, got) = (full.nearest(&a, 8), half.nearest(&b, 8));
+            assert_eq!(want[0].0, id);
+            assert_eq!(got[0].0, id);
+            for ((_, w), (_, g)) in want.iter().zip(&got) {
+                assert!((w - g).abs() < 1e-3, "{w} {g}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_blob_that_isnt_whole_floats_is_left_out() {
+        let mut g = Gathered::default();
+        assert!(g.push_blob(1, &[0, 0, 128, 63, 0, 0, 0, 64]));
+        assert!(!g.push_blob(2, &[1, 2, 3]));
+        assert!(!g.push_blob(3, &[]));
+        assert_eq!(g.iter().collect::<Vec<_>>(), [(1, &[1.0f32, 2.0][..])]);
+    }
+
     #[test]
     fn clap_is_used_once_deep_listening_has_heard_most_sounds() {
         let f = vectors(&[(1, &[1.0, 0.0]), (2, &[0.0, 1.0])]);
         let c = vectors(&[(1, &[1.0, 0.0, 0.0])]);
-        assert!(!SoundIndex::build(&f, &c, 2).deep);
+        let shallow = SoundIndex::build(&f, &c, 2);
+        assert!(!shallow.deep);
+        // Nothing searches CLAP's vectors until then, so they aren't held.
+        assert!(shallow.clap.is_none());
         let i = SoundIndex::build(&f, &c, 1);
         assert!(i.deep);
+        assert!(i.clap.as_ref().is_some_and(VectorIndex::is_halved));
         assert_eq!(i.active().len(), 1);
         assert!(!SoundIndex::build(&f, &Vectors::new(), 0).deep);
     }

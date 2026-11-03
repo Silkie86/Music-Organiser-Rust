@@ -574,9 +574,8 @@ fn read_all(sounds_db: &Path, library_db: &Path, send: impl Fn(Step)) {
         autoplay: settings.autoplay.clone(),
     })));
     let (Some(list), Some((features, clap, analysed))) = (list, fingerprints) else { return };
-    // Sounds like this: every sound's fingerprint, read with the sounds.
-    let index = background::on_pool(|| SoundIndex::build(&features, &clap, analysed));
-    drop((features, clap));
+    // Sounds like this: every sound's fingerprint, read with the sounds; their blocks become the index.
+    let index = background::on_pool(move || SoundIndex::from_gathered(features, clap, analysed));
     send(Step::Index(Arc::new(index)));
     let Some(lib) = lib else { return };
     let year_ago = now.checked_sub_months(chrono::Months::new(12)).unwrap_or(now);

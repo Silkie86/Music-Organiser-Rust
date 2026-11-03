@@ -5,6 +5,7 @@
 //! Scoring every unused sound is the long part on a big library (spread over rayon's threads): call it on the app's
 //! low-priority pool (`mo_app::background::on_pool`), never the window's thread.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use chrono::Datelike;
@@ -121,7 +122,7 @@ pub fn suggest(sounds: &[Sound], usage: &HashMap<i64, Usage>, index: &SoundIndex
         .map(|(c, noise)| {
             let centroid = centroids.get(c.sound_type.as_str()).or(overall.as_ref());
             let v = index.get(c.id).unwrap_or_default();
-            let fit = centroid.map_or(0.5, |m| (dot(v, m) + 1.0) / 2.0);
+            let fit = centroid.map_or(0.5, |m| (dot(&v, m) + 1.0) / 2.0);
             let fresh = if c.plays == 0 { 1.0 } else { 1.0 / f64::from(1 + c.plays) };
             (*c, (1.0 - o.adventure) * fit + 0.15 * fresh + o.adventure * noise)
         })
@@ -139,7 +140,7 @@ pub fn suggest(sounds: &[Sound], usage: &HashMap<i64, Usage>, index: &SoundIndex
         pool.truncate(keep);
     }
     pool.sort_unstable_by(order);
-    let pool: Vec<(&Sound, f64, &[f32])> =
+    let pool: Vec<(&Sound, f64, Cow<'_, [f32]>)> =
         pool.into_iter().map(|(_, s, score)| (s, score, index.get(s.id).unwrap_or_default())).collect();
     let mut redundancy = vec![0f64; pool.len()];
     let mut taken = vec![false; pool.len()];
@@ -162,10 +163,10 @@ pub fn suggest(sounds: &[Sound], usage: &HashMap<i64, Usage>, index: &SoundIndex
         }
         taken[best] = true;
         picked.push(best);
-        let v = pool[best].2;
+        let v = &pool[best].2;
         for (i, p) in pool.iter().enumerate() {
             if !taken[i] {
-                let d = dot(v, p.2);
+                let d = dot(v, &p.2);
                 redundancy[i] = if picked.len() == 1 { d } else { redundancy[i].max(d) };
             }
         }
@@ -174,8 +175,8 @@ pub fn suggest(sounds: &[Sound], usage: &HashMap<i64, Usage>, index: &SoundIndex
     picked
         .into_iter()
         .map(|i| {
-            let (s, score, v) = pool[i];
-            Suggestion { id: s.id, reason: reason(index, usage, s, v, &taste), score: round_to(score, 3) }
+            let (s, score, v) = &pool[i];
+            Suggestion { id: s.id, reason: reason(index, usage, s, v, &taste), score: round_to(*score, 3) }
         })
         .collect()
 }
@@ -192,7 +193,7 @@ fn centroid(index: &VectorIndex, items: &[(&Sound, f64)]) -> Vec<f32> {
     for (s, w) in items {
         let Some(v) = index.get(s.id) else { continue };
         let c = c.get_or_insert_with(|| vec![0f32; v.len()]);
-        for (x, y) in c.iter_mut().zip(v) {
+        for (x, y) in c.iter_mut().zip(v.iter()) {
             *x += (f64::from(*y) * w) as f32;
         }
     }
@@ -210,7 +211,7 @@ fn reason(index: &VectorIndex, usage: &HashMap<i64, Usage>, s: &Sound, v: &[f32]
             continue;
         }
         let Some(tv) = index.get(t.id) else { continue };
-        let sim = dot(v, tv);
+        let sim = dot(v, &tv);
         // The first of the closest, as C#'s stable sort keeps it.
         if nearest.is_none_or(|(_, best)| sim > best) {
             nearest = Some((t, sim));
