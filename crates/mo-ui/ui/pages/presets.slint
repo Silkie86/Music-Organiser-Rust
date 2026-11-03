@@ -1,0 +1,801 @@
+// The Presets page (spec 3.4a): every sound made inside your songs and your preset files, with the part each one
+// plays, in one list with the picked one's card beside it; and the Curves section, the shapes your settings moved in,
+// to drop onto a Bitwig lane (Solomon, 2 Nov 2026). Only shared parts from studio.slint; mo-app decides every word
+// (mo_app::presets), mo-ui/src/presets.rs fills it.
+import { ListView } from "std-widgets.slint";
+import { Theme, Type, Space, Well, SearchBox, ToggleChip, MenuChip, ListLine, Caps, StudioButton, Segmented, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, OptionsButton, TickBox, ActionKey } from "../studio.slint";
+
+// One line of the sounds list.
+export struct PresetLine {
+    // Its place among the lines shown, for picking it.
+    row: int,
+    name: string,
+    // The plugin and where it sits: "Serum · Bass".
+    under: string,
+    // "Bass", "Lead?" for a weak guess, "" for none.
+    part: string,
+    // The part's colour, a place in Theme.sound-types (-1 grey).
+    colour: int,
+    part-tip: string,
+    // You set the part.
+    fixed: bool,
+    // The song, or a preset file's folder.
+    from: string,
+    kind: string,
+    format: string,
+    picked: bool,
+}
+
+// One of a card's facts: a name in capitals over its value.
+export struct PresetFact {
+    name: string,
+    value: string,
+}
+
+// A part to fix the picked sound to, on its card: one click sets it.
+export struct PartChip {
+    text: string,
+    id: string,
+    on: bool,
+}
+
+// The picked sound's card.
+export struct PresetCard {
+    over: string,
+    name: string,
+    plugin: string,
+    part: string,
+    colour: int,
+    reason: string,
+    // The part you set, or "".
+    fixed: string,
+    hint: string,
+    path: string,
+    fixable: bool,
+}
+
+// One line of the curves list.
+export struct CurveLineInfo {
+    row: int,
+    name: string,
+    under: string,
+    found: string,
+    length: string,
+    hidden: bool,
+    // Path commands in a 100 by 100 box.
+    shape: string,
+    picked: bool,
+}
+
+// One place a curve was found.
+export struct CurvePlace {
+    title: string,
+    about: string,
+}
+
+export struct CurveCardInfo {
+    name: string,
+    shape: string,
+    hidden: bool,
+}
+
+export global PresetsData {
+    // 0 Sounds, 1 Curves.
+    in property <int> section;
+    callback section-picked(int);
+    in property <string> summary;
+    // The work going on, in words, and how far it's got (0 to 1, or -1 when it can't say).
+    in property <string> busy;
+    in property <float> done;
+
+    // The words in the search box, for the section on show.
+    in-out property <string> search;
+    // The Sounds section.
+    callback search-edited(string);
+    in property <[string]> maker-choices;
+    in property <string> maker;
+    in property <[string]> type-choices;
+    in property <string> type;
+    in property <[string]> part-choices;
+    in property <string> part;
+    in property <[string]> plugin-choices;
+    in property <string> plugin;
+    in property <[string]> from-choices;
+    in property <string> from;
+    // The song the list is cut to (a song's Presets tab), or "".
+    in property <string> song;
+    in property <bool> any-filter;
+    in property <bool> unused;
+    // A chip's choice: which chip ("maker", "type", "part", "plugin", "from") and what was picked ("" for Any).
+    callback pick(string, string);
+    callback clear();
+    callback clear-song();
+    callback unused-toggled(bool);
+    in property <[PresetLine]> lines;
+    in property <int> shown;
+    in property <string> empty-title;
+    in property <string> empty-text;
+    in property <string> format-note;
+    in property <[YearBar]> years;
+    callback years-picked(int, int);
+    callback years-cleared();
+    callback select(int);
+    // Up and down the list: -1 or 1.
+    callback step(int);
+    // Bring the picked line into view: its place, and a count that goes up each time it's asked.
+    in property <int> show-row;
+    in property <int> show-ask;
+    in property <bool> panel-shown;
+    in-out property <length> panel-width: 400px;
+    callback panel-resized(length);
+    callback close-panel();
+    in property <PresetCard> card;
+    in property <[PresetFact]> facts;
+    in property <[CardAction]> actions;
+    in property <[PartChip]> parts;
+    // What the last export or send did.
+    in property <string> message;
+    // The right-click menu: the card's actions and the part fixes, each with its key.
+    in property <[MenuItem]> menu;
+    callback menu-chosen(string);
+    // Export these: every sound shown.
+    in property <ActionKey> export-shown-key;
+    in property <bool> exporting;
+    callback export-shown();
+
+    // The Curves section (the search box is shared: `search` holds the section's words on show).
+    in property <[string]> curve-kinds;
+    in property <string> curve-kind;
+    in property <bool> curve-hidden;
+    callback curve-pick(string);
+    callback curve-hidden-toggled(bool);
+    in property <[CurveLineInfo]> curve-lines;
+    in property <int> curves-shown;
+    in property <string> curve-empty-title;
+    in property <string> curve-empty-text;
+    callback curve-select(int);
+    callback curve-step(int);
+    in property <int> curve-show-row;
+    in property <int> curve-show-ask;
+    in property <bool> curve-panel-shown;
+    in property <CurveCardInfo> curve-card;
+    in property <[PresetFact]> curve-facts;
+    in property <[CurvePlace]> curve-places;
+    in property <[CardAction]> curve-actions;
+    in property <[MenuItem]> curve-menu;
+    in property <string> curve-message;
+    callback curve-chosen(string);
+    // Renaming the picked curve: the box shows while this is on.
+    in-out property <bool> renaming;
+    in-out property <string> rename-text;
+    callback rename-done(string);
+}
+
+// A line of the sounds list.
+component PresetLineView inherits ListLine {
+    in property <PresetLine> line;
+    callback chosen();
+    height: 48px;
+    selected: line.picked;
+    tip: line.part-tip;
+    // The part column carries the reason (spec: the reason on hover).
+    tip-from: self.width * 0.5;
+    clicked => {
+        root.chosen();
+        PresetsData.select(root.line.row);
+    }
+    HorizontalLayout {
+        width: 100%;
+        height: 100%;
+        padding-left: Space.md;
+        padding-right: Space.md;
+        spacing: Space.md;
+        VerticalLayout {
+            alignment: center;
+            Dot { tint: Theme.sound-type(root.line.colour); }
+        }
+        VerticalLayout {
+            horizontal-stretch: 3;
+            preferred-width: 0px;
+            min-width: 0px;
+            alignment: center;
+            Text {
+                text: root.line.name;
+                color: Theme.text;
+                font-size: Type.body;
+                overflow: elide;
+            }
+            Text {
+                text: root.line.under;
+                color: Theme.muted;
+                font-size: Type.meta;
+                overflow: elide;
+            }
+        }
+        Text {
+            width: 96px;
+            text: root.line.part;
+            color: root.line.part == "" ? Theme.faint : Theme.sound-type(root.line.colour);
+            font-size: Type.meta;
+            font-weight: root.line.fixed ? 700 : 500;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        Text {
+            horizontal-stretch: 2;
+            preferred-width: 0px;
+            min-width: 0px;
+            text: root.line.from;
+            color: Theme.muted;
+            font-size: Type.meta;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        Text {
+            width: 56px;
+            text: root.line.kind;
+            color: Theme.muted;
+            font-size: Type.meta;
+            vertical-alignment: center;
+        }
+        Text {
+            width: 72px;
+            text: root.line.format;
+            color: Theme.faint;
+            font-family: Theme.number-font;
+            font-size: Type.meta;
+            vertical-alignment: center;
+            horizontal-alignment: right;
+        }
+    }
+}
+
+component PresetHeading inherits HorizontalLayout {
+    height: 28px;
+    padding-left: Space.md + 8px + Space.md;
+    padding-right: Space.md + Space.md;
+    spacing: Space.md;
+    Caps { horizontal-stretch: 3; preferred-width: 0px; min-width: 0px; text: "SOUND"; vertical-alignment: center; }
+    Caps { width: 96px; text: "PART"; vertical-alignment: center; }
+    Caps { horizontal-stretch: 2; preferred-width: 0px; min-width: 0px; text: "SONG OR FOLDER"; vertical-alignment: center; }
+    Caps { width: 56px; text: "WHAT"; vertical-alignment: center; }
+    Caps { width: 72px; text: "FILE"; vertical-alignment: center; horizontal-alignment: right; }
+}
+
+// A curve's shape, drawn in its box (the renderer draws it on the graphics card when there is one).
+component CurveShape inherits Rectangle {
+    in property <string> shape;
+    in property <color> tint: Theme.accent;
+    in property <length> line: 1.5px;
+    Path {
+        x: root.line;
+        y: root.line;
+        width: root.width - 2 * root.line;
+        height: root.height - 2 * root.line;
+        viewbox-width: 100;
+        viewbox-height: 100;
+        commands: root.shape;
+        stroke: root.tint;
+        stroke-width: root.line;
+        fill: transparent;
+    }
+}
+
+component CurveLineView inherits ListLine {
+    in property <CurveLineInfo> line;
+    callback chosen();
+    height: 48px;
+    selected: line.picked;
+    clicked => {
+        root.chosen();
+        PresetsData.curve-select(root.line.row);
+    }
+    HorizontalLayout {
+        width: 100%;
+        height: 100%;
+        padding-left: Space.md;
+        padding-right: Space.md;
+        spacing: Space.md;
+        Well {
+            width: 72px;
+            height: 32px;
+            y: (parent.height - self.height) / 2;
+            CurveShape {
+                shape: root.line.shape;
+                tint: root.line.hidden ? Theme.faint : Theme.accent;
+            }
+        }
+        VerticalLayout {
+            horizontal-stretch: 3;
+            preferred-width: 0px;
+            min-width: 0px;
+            alignment: center;
+            Text {
+                text: root.line.name;
+                color: root.line.hidden ? Theme.muted : Theme.text;
+                font-size: Type.body;
+                overflow: elide;
+            }
+            Text {
+                text: root.line.under;
+                color: Theme.muted;
+                font-size: Type.meta;
+                overflow: elide;
+            }
+        }
+        Text {
+            horizontal-stretch: 2;
+            preferred-width: 0px;
+            min-width: 0px;
+            text: root.line.hidden ? "Hidden" : root.line.found;
+            color: Theme.muted;
+            font-size: Type.meta;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        Text {
+            width: 72px;
+            text: root.line.length;
+            color: Theme.muted;
+            font-family: Theme.number-font;
+            font-size: Type.meta;
+            vertical-alignment: center;
+            horizontal-alignment: right;
+        }
+    }
+}
+
+// The picked sound: what it is, the part it plays and why (one click fixes it), what can be done with it, its facts.
+component PresetPanel inherits SidePanel {
+    close => { PresetsData.close-panel(); }
+    Caps { text: PresetsData.card.over; }
+    Text {
+        text: PresetsData.card.name;
+        color: Theme.text;
+        font-size: Type.panel-title;
+        font-weight: 600;
+        wrap: word-wrap;
+        min-width: 0px;
+    }
+    if PresetsData.card.plugin != "": Text {
+        text: PresetsData.card.plugin;
+        color: Theme.muted;
+        font-size: Type.body;
+        wrap: word-wrap;
+        min-width: 0px;
+    }
+    CardActions {
+        actions: PresetsData.actions;
+        chosen(id) => { PresetsData.menu-chosen(id); }
+    }
+    if PresetsData.message != "": Text {
+        text: PresetsData.message;
+        color: Theme.muted;
+        font-size: Type.meta;
+        wrap: word-wrap;
+        min-width: 0px;
+    }
+    VerticalLayout {
+        spacing: Space.xs;
+        Caps { text: PresetsData.card.fixed != "" ? "PART (YOU SET IT)" : "PART"; }
+        HorizontalLayout {
+            spacing: Space.sm;
+            alignment: start;
+            VerticalLayout {
+                alignment: center;
+                Dot { tint: Theme.sound-type(PresetsData.card.colour); }
+            }
+            Text {
+                text: PresetsData.card.part;
+                color: PresetsData.card.colour < 0 ? Theme.muted : Theme.sound-type(PresetsData.card.colour);
+                font-size: Type.row-title;
+                font-weight: 600;
+            }
+        }
+        Text {
+            text: PresetsData.card.reason;
+            color: Theme.muted;
+            font-size: Type.meta;
+            wrap: word-wrap;
+            min-width: 0px;
+        }
+    }
+    if PresetsData.card.fixable: VerticalLayout {
+        spacing: Space.xs;
+        Caps { text: "IT'S REALLY"; }
+        FlexboxLayout {
+            spacing: Space.xs;
+            for p in PresetsData.parts: ToggleChip {
+                text: p.text;
+                on: p.on;
+                clicked => { PresetsData.menu-chosen(p.id); }
+            }
+        }
+    }
+    for f in PresetsData.facts: VerticalLayout {
+        spacing: 2px;
+        Caps { text: f.name; }
+        Text {
+            text: f.value;
+            color: Theme.text;
+            font-size: Type.meta;
+            wrap: word-wrap;
+            min-width: 0px;
+        }
+    }
+    if PresetsData.card.hint != "": Text {
+        text: PresetsData.card.hint;
+        color: Theme.muted;
+        font-size: Type.meta;
+        wrap: word-wrap;
+        min-width: 0px;
+    }
+    Text {
+        text: PresetsData.card.path;
+        color: Theme.faint;
+        font-size: Type.small;
+        wrap: word-wrap;
+        min-width: 0px;
+    }
+    Rectangle { vertical-stretch: 1; }
+}
+
+// The picked curve: its shape large, its name (rename in place), what can be done with it and where it was found.
+component CurvePanel inherits SidePanel {
+    close => { PresetsData.curve-select(-1); }
+    Caps { text: PresetsData.curve-card.hidden ? "CURVE · HIDDEN" : "CURVE"; }
+    if !PresetsData.renaming: Text {
+        text: PresetsData.curve-card.name;
+        color: Theme.text;
+        font-size: Type.panel-title;
+        font-weight: 600;
+        wrap: word-wrap;
+        min-width: 0px;
+    }
+    if PresetsData.renaming: rename := SearchBox {
+        hint: "A name for this curve";
+        text <=> PresetsData.rename-text;
+        init => { self.focus(); }
+        key(k) => {
+            if (k == Key.Return) {
+                PresetsData.rename-done(PresetsData.rename-text);
+                return true;
+            }
+            if (k == Key.Escape) {
+                PresetsData.renaming = false;
+                return true;
+            }
+            false
+        }
+    }
+    Well {
+        height: 140px;
+        CurveShape {
+            x: Space.md;
+            y: Space.md;
+            width: parent.width - 2 * Space.md;
+            height: parent.height - 2 * Space.md;
+            shape: PresetsData.curve-card.shape;
+            line: 2px;
+        }
+    }
+    CardActions {
+        actions: PresetsData.curve-actions;
+        chosen(id) => { PresetsData.curve-chosen(id); }
+    }
+    if PresetsData.curve-message != "": Text {
+        text: PresetsData.curve-message;
+        color: Theme.muted;
+        font-size: Type.meta;
+        wrap: word-wrap;
+        min-width: 0px;
+    }
+    HorizontalLayout {
+        spacing: Space.md;
+        for f in PresetsData.curve-facts: VerticalLayout {
+            spacing: 2px;
+            horizontal-stretch: 1;
+            Caps { text: f.name; }
+            Text {
+                text: f.value;
+                color: Theme.text;
+                font-size: Type.meta;
+                wrap: word-wrap;
+                min-width: 0px;
+            }
+        }
+    }
+    Caps { text: "FOUND IN"; }
+    for p in PresetsData.curve-places: VerticalLayout {
+        spacing: 2px;
+        Text {
+            text: p.title;
+            color: Theme.text;
+            font-size: Type.body;
+            wrap: word-wrap;
+            min-width: 0px;
+        }
+        Text {
+            text: p.about;
+            color: Theme.muted;
+            font-size: Type.meta;
+            wrap: word-wrap;
+            min-width: 0px;
+        }
+    }
+    Text {
+        text: "Drag the curve file onto an automation lane in Bitwig, or save it to Bitwig's curves to find it in its browser.";
+        color: Theme.faint;
+        font-size: Type.small;
+        wrap: word-wrap;
+        min-width: 0px;
+    }
+    Rectangle { vertical-stretch: 1; }
+}
+
+export component PresetsPage inherits Rectangle {
+    forward-focus: search-box;
+
+    VerticalLayout {
+        padding: Space.xl;
+        padding-bottom: Space.lg;
+        spacing: Space.md;
+        PageHeader {
+            title: "Presets";
+            summary: PresetsData.summary;
+            busy: PresetsData.busy;
+            done: PresetsData.done;
+        }
+        HorizontalLayout {
+            spacing: Space.sm;
+            vertical-stretch: 0;
+            VerticalLayout {
+                alignment: center;
+                Segmented {
+                    choices: ["Sounds", "Curves"];
+                    current: PresetsData.section;
+                    picked(i) => { PresetsData.section-picked(i); }
+                }
+            }
+            // One box for both sections: the page keeps each section's words and puts them back on a switch.
+            search-box := SearchBox {
+                horizontal-stretch: 1;
+                min-width: 320px;
+                max-width: 480px;
+                hint: PresetsData.section == 0 ? "Search sounds, plugins, songs and parts" : "Search curves, songs and settings";
+                text <=> PresetsData.search;
+                edited(t) => { PresetsData.search-edited(t); }
+                key(k) => {
+                    if (k == Key.Escape && PresetsData.search != "") {
+                        PresetsData.search = "";
+                        PresetsData.search-edited("");
+                        return true;
+                    }
+                    if (k == Key.DownArrow) {
+                        keys.focus();
+                        if (PresetsData.section == 0) {
+                            PresetsData.step(1);
+                        } else {
+                            PresetsData.curve-step(1);
+                        }
+                        return true;
+                    }
+                    false
+                }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            if PresetsData.section == 0: VerticalLayout {
+                alignment: center;
+                StudioButton {
+                    text: "Export these";
+                    main: true;
+                    enabled: PresetsData.shown > 0 && !PresetsData.exporting;
+                    tip: PresetsData.export-shown-key.what;
+                    key: PresetsData.export-shown-key.key;
+                    clicked => { PresetsData.export-shown(); }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                OptionsButton {
+                    if PresetsData.section == 0: TickBox {
+                        text: "Show synths that play nothing";
+                        checked: PresetsData.unused;
+                        changed checked => { PresetsData.unused-toggled(self.checked); }
+                    }
+                    if PresetsData.section == 1: TickBox {
+                        text: "Show the curves I hid";
+                        checked: PresetsData.curve-hidden;
+                        changed checked => { PresetsData.curve-hidden-toggled(self.checked); }
+                    }
+                }
+            }
+        }
+        // The chips.
+        if PresetsData.section == 0: HorizontalLayout {
+            spacing: Space.sm;
+            alignment: start;
+            vertical-stretch: 0;
+            MenuChip {
+                name: "Part";
+                value: PresetsData.part;
+                choices: PresetsData.part-choices;
+                picked(v) => { PresetsData.pick("part", v); }
+            }
+            MenuChip {
+                name: "Made by";
+                value: PresetsData.maker;
+                choices: PresetsData.maker-choices;
+                picked(v) => { PresetsData.pick("maker", v); }
+            }
+            MenuChip {
+                name: "Type";
+                value: PresetsData.type;
+                choices: PresetsData.type-choices;
+                picked(v) => { PresetsData.pick("type", v); }
+            }
+            if PresetsData.plugin-choices.length > 0: MenuChip {
+                name: "Plugin";
+                value: PresetsData.plugin;
+                choices: PresetsData.plugin-choices;
+                picked(v) => { PresetsData.pick("plugin", v); }
+            }
+            MenuChip {
+                name: "From";
+                value: PresetsData.from;
+                choices: PresetsData.from-choices;
+                picked(v) => { PresetsData.pick("from", v); }
+            }
+            if PresetsData.song != "": ToggleChip {
+                text: "Song: " + PresetsData.song + "  ×";
+                on: true;
+                clicked => { PresetsData.clear-song(); }
+            }
+            if PresetsData.any-filter: ToggleChip {
+                text: "Clear";
+                clicked => { PresetsData.clear(); }
+            }
+        }
+        if PresetsData.section == 1: HorizontalLayout {
+            spacing: Space.sm;
+            alignment: start;
+            vertical-stretch: 0;
+            MenuChip {
+                name: "Found in";
+                value: PresetsData.curve-kind;
+                choices: PresetsData.curve-kinds;
+                picked(v) => { PresetsData.curve-pick(v); }
+            }
+        }
+        // The list, the year strip beside it, and the picked line's card.
+        area := Rectangle {
+            vertical-stretch: 1;
+            property <bool> panel: PresetsData.section == 0 ? PresetsData.panel-shown : PresetsData.curve-panel-shown;
+            property <length> list-width: self.panel
+                ? max(380px, self.width - PresetsData.panel-width - divider.width)
+                : self.width;
+            property <length> years-width: PresetsData.section == 0 && PresetsData.years.length > 1 && PresetsData.empty-title == "" ? 56px : 0px;
+            if area.years-width > 0: YearRange {
+                x: area.list-width - area.years-width;
+                y: 0;
+                height: area.height;
+                years: PresetsData.years;
+                picked(a, b) => { PresetsData.years-picked(a, b); }
+                cleared => { PresetsData.years-cleared(); }
+            }
+            keys := FocusScope {
+                x: 0;
+                width: area.list-width - area.years-width;
+                key-pressed(event) => {
+                    if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
+                        return reject;
+                    }
+                    if (event.text == Key.UpArrow) {
+                        if (PresetsData.section == 0) {
+                            PresetsData.step(-1);
+                        } else {
+                            PresetsData.curve-step(-1);
+                        }
+                        return accept;
+                    }
+                    if (event.text == Key.DownArrow) {
+                        if (PresetsData.section == 0) {
+                            PresetsData.step(1);
+                        } else {
+                            PresetsData.curve-step(1);
+                        }
+                        return accept;
+                    }
+                    reject
+                }
+                Well {
+                    if PresetsData.section == 0 && PresetsData.empty-title != "": EmptyState {
+                        title: PresetsData.empty-title;
+                        text: PresetsData.empty-text;
+                        action: PresetsData.any-filter && PresetsData.shown == 0 ? "Clear the filters" : "";
+                        act => { PresetsData.clear(); }
+                    }
+                    if PresetsData.section == 0 && PresetsData.empty-title == "": VerticalLayout {
+                        PresetHeading { }
+                        list := ListView {
+                            property <int> show-ask: PresetsData.show-ask;
+                            changed show-ask => {
+                                if (PresetsData.show-row * 48px < -self.content-y
+                                    || (PresetsData.show-row + 1) * 48px > -self.content-y + self.visible-height) {
+                                    self.content-y = -clamp(PresetsData.show-row * 48px - self.visible-height / 3, 0px,
+                                        max(0px, self.content-height - self.visible-height));
+                                }
+                            }
+                            for l in PresetsData.lines: PresetLineView {
+                                line: l;
+                                chosen => { keys.focus(); }
+                                right-clicked(x, y) => {
+                                    keys.focus();
+                                    menu.open-at(x, y);
+                                }
+                            }
+                        }
+                        if PresetsData.format-note != "": Text {
+                            height: 28px;
+                            x: Space.md;
+                            text: PresetsData.format-note;
+                            color: Theme.faint;
+                            font-size: Type.small;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                    }
+                    if PresetsData.section == 1 && PresetsData.curve-empty-title != "": EmptyState {
+                        title: PresetsData.curve-empty-title;
+                        text: PresetsData.curve-empty-text;
+                    }
+                    if PresetsData.section == 1 && PresetsData.curve-empty-title == "": ListView {
+                        property <int> show-ask: PresetsData.curve-show-ask;
+                        changed show-ask => {
+                            if (PresetsData.curve-show-row * 48px < -self.content-y
+                                || (PresetsData.curve-show-row + 1) * 48px > -self.content-y + self.visible-height) {
+                                self.content-y = -clamp(PresetsData.curve-show-row * 48px - self.visible-height / 3, 0px,
+                                    max(0px, self.content-height - self.visible-height));
+                            }
+                        }
+                        for l in PresetsData.curve-lines: CurveLineView {
+                            line: l;
+                            chosen => { keys.focus(); }
+                            right-clicked(x, y) => {
+                                keys.focus();
+                                curve-menu.open-at(x, y);
+                            }
+                        }
+                    }
+                }
+            }
+            divider := PanelDivider {
+                visible: area.panel;
+                x: area.list-width;
+                height: parent.height;
+                panel-width: PresetsData.panel-width;
+                room: area.width;
+                resizing(w) => { PresetsData.panel-width = w; }
+                resized(w) => { PresetsData.panel-resized(w); }
+            }
+            if PresetsData.section == 0 && PresetsData.panel-shown: PresetPanel {
+                x: area.list-width + divider.width;
+                width: area.width - self.x;
+                height: parent.height;
+            }
+            if PresetsData.section == 1 && PresetsData.curve-panel-shown: CurvePanel {
+                x: area.list-width + divider.width;
+                width: area.width - self.x;
+                height: parent.height;
+            }
+            menu := RightClickMenu {
+                items: PresetsData.menu;
+                chosen(id) => { PresetsData.menu-chosen(id); }
+            }
+            curve-menu := RightClickMenu {
+                items: PresetsData.curve-menu;
+                chosen(id) => { PresetsData.curve-chosen(id); }
+            }
+        }
+    }
+}

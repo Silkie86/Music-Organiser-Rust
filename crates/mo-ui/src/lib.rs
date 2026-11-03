@@ -15,6 +15,7 @@ pub mod cards;
 pub mod files;
 pub mod gpu;
 pub mod note;
+pub mod presets;
 pub mod songs;
 pub mod sounds;
 pub mod watchdog;
@@ -70,6 +71,7 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> R
     app.set_songs_place(Place::Songs.index() as i32);
     app.set_sounds_place(Place::Sounds.index() as i32);
     app.set_backup_place(Place::Backup.index() as i32);
+    app.set_presets_place(Place::Presets.index() as i32);
     KEYS.with(|k| *k.borrow_mut() = Some(shortcuts.clone()));
     show_button_keys(&app, &shortcuts);
     go_to(&app, start.index() as i32);
@@ -99,6 +101,13 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> R
             && songs::has_pick()
         {
             return repeat || songs::run_action(&app, id);
+        }
+        if let Some(app) = weak.upgrade()
+            && app.get_place() == Place::Presets.index() as i32
+            && let Some(id) = shortcuts.page_action_for(&key, presets::page_actions())
+            && (repeat || presets::run_action(&app, id))
+        {
+            return true;
         }
         if let Some(app) = weak.upgrade()
             && app.get_place() == Place::Sounds.index() as i32
@@ -140,6 +149,9 @@ fn go_to(app: &AppWindow, index: i32) {
     if place == Place::Backup {
         backup::shown();
     }
+    if place == Place::Presets {
+        presets::shown(app);
+    }
     KEYS.with(|k| {
         if let Some(shortcuts) = k.borrow().as_ref() {
             app.set_key_rows(ModelRc::new(VecModel::from(key_rows(shortcuts, place))));
@@ -153,6 +165,7 @@ fn key_rows(shortcuts: &Shortcuts, place: Place) -> Vec<KeyRow> {
     let page: &[Action] = match place {
         Place::Songs => SONGS_ACTIONS,
         Place::Sounds => SOUNDS_ACTIONS,
+        Place::Presets => presets::page_actions(),
         _ => &[],
     };
     let mut rows: Vec<KeyRow> =

@@ -44,6 +44,8 @@ fn main() -> Result<(), slint::PlatformError> {
     );
     // Space, Backup: the backup settings live in a file of their own; the library is only read.
     mo_ui::backup::connect(&app, mo_app::paths::data_dir().join("library.db"), feed.clone());
+    // Presets: the library is only read; part fixes and curves go in the app's own presets.db and curves.db.
+    mo_ui::presets::connect(&app, mo_app::paths::data_dir().join("library.db"), feed.clone(), &shortcuts);
     app.window().set_maximized(true);
     // The watchdog starts once the window is up, so opening it doesn't count as a freeze.
     let watched = feed.clone();
