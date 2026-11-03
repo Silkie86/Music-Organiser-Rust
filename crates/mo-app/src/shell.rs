@@ -105,6 +105,20 @@ pub fn folder_of(path: &str) -> &str {
     }
 }
 
+/// A path as a card shows it, with a break allowed after each slash (a zero-width space, which isn't drawn), so a long
+/// path wraps at its folders instead of in the middle of a name or past the card's edge. Only for showing: copying
+/// or opening uses the path itself.
+pub fn wrappable_path(path: &str) -> String {
+    let mut shown = String::with_capacity(path.len() + path.len() / 4);
+    for c in path.chars() {
+        shown.push(c);
+        if matches!(c, '\\' | '/') {
+            shown.push('\u{200B}');
+        }
+    }
+    shown
+}
+
 /// Starts it with nothing tying it to this app, so a DAW keeps running when the app closes or the launcher restarts
 /// it (the C# app's lesson: a DAW started otherwise went down with the app, losing unsaved work). A launcher is
 /// waited for, so call this from a background thread; a DAW is left running.
@@ -194,5 +208,15 @@ mod tests {
         assert_eq!(folder_of("/song.flp"), "/");
         assert_eq!(folder_of("/m/s/a.flp"), "/m/s");
         assert_eq!(folder_of("a.flp"), "");
+    }
+
+    #[test]
+    fn a_shown_path_may_wrap_after_each_slash_only() {
+        let wrap = "\u{200B}";
+        assert_eq!(wrappable_path(r"J:\Samples\Kick.wav"), format!(r"J:\{wrap}Samples\{wrap}Kick.wav"));
+        assert_eq!(wrappable_path("/m/s/a.wav"), format!("/{wrap}m/{wrap}s/{wrap}a.wav"));
+        assert_eq!(wrappable_path("Boom Kick.wav"), "Boom Kick.wav");
+        // Taking the marks out gives the path back.
+        assert_eq!(wrappable_path(SONG).replace(wrap, ""), SONG);
     }
 }

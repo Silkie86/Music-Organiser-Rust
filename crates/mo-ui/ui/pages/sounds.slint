@@ -3,7 +3,7 @@
 // and filters over them and the picked sound's panel beside them. Agreed mock-up: the design canvas, 2026-11-01.
 // Read-only for now (favourites, tags and types are shown, not changed), like the C# app's sounds.db until it's trusted.
 import { ListView } from "std-widgets.slint";
-import { Theme, Type, Space, Well, StudioSlider, SearchBox, ToggleChip, MenuChip, ListLine, Caps, Heart, StudioButton, CloseButton, HoverNote, PointerPad, Segmented, MoreButton, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
+import { Theme, Type, Space, Well, StudioSlider, SearchBox, ToggleChip, MenuChip, ListLine, Caps, Heart, StudioButton, CloseButton, HoverNote, PointerPad, Segmented, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
 
 // One type chip: the type, how many sounds have it, its colour (a place in Theme.sound-types) and whether it's on.
 export struct TypeChipInfo {
@@ -336,10 +336,13 @@ export global SoundsData {
     callback play();
     callback seek(float);
     callback close-panel();
-    // The picked sound's menu (the More button and a right click), and what was chosen.
+    // The picked sound's right-click menu, and what was chosen (from it or a button on the card).
     in property <[MenuItem]> menu;
     callback menu-chosen(string);
+    // The same, as the card's buttons after Play.
+    in property <[CardAction]> actions;
     in property <string> play-tip;
+    in property <string> play-key;
 }
 
 // A tile's width at least; as many as fit go in a row.
@@ -694,7 +697,8 @@ component FoldersCard inherits Rectangle {
     }
 }
 
-// The picked sound: what it is, its waveform (click to play from there), Play and its menu, its facts and tags.
+// The picked sound: what it is, its waveform (click to play from there), Play and what else it can do, its facts and
+// tags. Nothing in it may be wider than the card: long names and paths wrap, and so do the buttons and tags.
 component SoundPanel inherits SidePanel {
     close => { SoundsData.close-panel(); }
     HorizontalLayout {
@@ -718,6 +722,7 @@ component SoundPanel inherits SidePanel {
     }
     HorizontalLayout {
         spacing: Space.sm;
+        // A name with no spaces breaks where it must, rather than making the card wider.
         Text {
             text: SoundsData.picked.name;
             color: Theme.text;
@@ -725,17 +730,20 @@ component SoundPanel inherits SidePanel {
             font-weight: 600;
             wrap: word-wrap;
             horizontal-stretch: 1;
+            min-width: 0px;
         }
         if SoundsData.picked.favourite: VerticalLayout {
             alignment: center;
             Heart { }
         }
     }
+    // The path breaks after its slashes (the Rust side marks them), or anywhere in a folder name too long for a line.
     Text {
         text: SoundsData.picked.path;
         color: Theme.muted;
         font-size: Type.meta;
         wrap: word-wrap;
+        min-width: 0px;
     }
     Well {
         height: 88px;
@@ -752,19 +760,15 @@ component SoundPanel inherits SidePanel {
             seek(at) => { SoundsData.seek(at); }
         }
     }
-    HorizontalLayout {
-        spacing: Space.sm;
-        alignment: start;
+    CardActions {
+        actions: SoundsData.actions;
+        chosen(id) => { SoundsData.menu-chosen(id); }
         StudioButton {
             text: SoundsData.playing ? "Stop" : "Play";
             main: true;
             tip: SoundsData.play-tip;
-            key: "Space";
+            key: SoundsData.play-key;
             clicked => { SoundsData.play(); }
-        }
-        MoreButton {
-            items: SoundsData.menu;
-            chosen(id) => { SoundsData.menu-chosen(id); }
         }
     }
     HorizontalLayout {
@@ -800,9 +804,8 @@ component SoundPanel inherits SidePanel {
     if SoundsData.picked.tags.length > 0: VerticalLayout {
         spacing: Space.xs;
         Caps { text: "TAGS"; }
-        HorizontalLayout {
+        FlexboxLayout {
             spacing: Space.xs;
-            alignment: start;
             for t in SoundsData.picked.tags: ToggleChip {
                 text: t;
                 on: SoundsData.tag == t;
@@ -1492,7 +1495,9 @@ export component SoundsPage inherits Rectangle {
                             room-width: sky.width;
                             room-height: sky.height;
                         }
-                        if SoundsData.galaxy-note != "": EmptyState {
+                        // Only with stars to show: when the filters leave none, the list's own word says so in the
+                        // same place, and the two would sit on top of each other.
+                        if SoundsData.galaxy-note != "" && SoundsData.shown > 0: EmptyState {
                             title: SoundsData.galaxy-busy ? "Making the galaxy" : "";
                             text: SoundsData.galaxy-note;
                         }
