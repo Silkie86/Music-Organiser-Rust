@@ -649,7 +649,7 @@ pub struct Verdict {
     pub name: String,
     /// A gate (weights that break it aren't shipped), or a target (tracked until it's met).
     pub gate: bool,
-    /// A gate the design holds out (G\*): the tests check it, the fit never sees it.
+    /// A case the design holds out (G\*), a gate or a target: the tests check it, the fit never sees it.
     pub held_out: bool,
     /// What isn't as the case wants: nothing when it holds.
     pub wrong: Vec<String>,
@@ -725,7 +725,7 @@ pub fn named_verdicts(model: &Model, targets: bool) -> Result<Vec<Verdict>, Stri
             }
             None => (vec!["nothing read".to_owned()], String::new()),
         };
-        let held_out = !targets && held_out(name);
+        let held_out = held_out(name);
         let (gate, name) = (!targets, name.to_owned());
         out.push(Verdict { step: Step::Named, name, gate, held_out, wrong, read, music });
     }
@@ -754,9 +754,9 @@ impl Book {
         self.verdicts.iter().filter(|v| v.gate && !v.holds()).collect()
     }
 
-    /// The targets, and how many of them are met.
+    /// The targets the fit looks at (not those held out): how many are met, and how many there are.
     pub fn targets(&self) -> (usize, usize) {
-        let targets = self.verdicts.iter().filter(|v| !v.gate);
+        let targets = self.verdicts.iter().filter(|v| !v.gate && !v.held_out);
         targets.fold((0, 0), |(met, all), v| (met + usize::from(v.holds()), all + 1))
     }
 }
@@ -777,11 +777,12 @@ pub struct FitCase {
 /// The hand cases the fit learns from: every case read whole that isn't held out, with a label for each stretch its
 /// gates say what to read: what it must read ([`Check::Reads`]: the cases only a whole read decides, and each stretch
 /// case's first reading), or what must come among its best two ([`Check::Top`]: the label accepts either, so the fit
-/// makes them likelier together). A gate that only asks for readings to be kept ([`Check::Kept`]) says nothing about
-/// what's read, so it isn't learned from (only checked), and nor is a label that allows no chord. The labels are in
-/// the music's ticks, from the start of the units they cover. Cases on the same music (a whole case and the stretch
-/// cases cut from it) are one piece with all their labels, so each music counts once. A case with no label is left
-/// out.
+/// makes the two likelier between them; that's less than the gate asks, as one of them may still be starved, and
+/// `chordfit --hold` can't hold such a gate once its label is as likely as it asks). A gate that only asks for readings
+/// to be kept ([`Check::Kept`]) says nothing about what's read, so it isn't learned from (only checked), and nor is a
+/// label that allows no chord. The labels are in the music's ticks, from the start of the units they cover. Cases on
+/// the same music (a whole case and the stretch cases cut from it) are one piece with all their labels, so each music
+/// counts once. A case with no label is left out.
 pub fn fit_cases() -> Result<Vec<FitCase>, String> {
     let mut out: Vec<FitCase> = Vec::new();
     for (name, music, checks) in read_whole_cases()? {

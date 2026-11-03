@@ -26,9 +26,11 @@ impl Plane {
 }
 
 /// The nearest numbers to `x` that keep every bound and plane, with the numbers `fixed` holds kept as they are in `x`
-/// (Dykstra's method: each rule in turn, carrying what each took away, until nothing moves). When the planes and
-/// bounds leave no numbers that keep them all, it never settles: after its last sweep the bounds are put right, and
-/// some plane is broken, by any amount. Ask [`can_keep`] first.
+/// (Dykstra's method: each rule in turn, carrying what each took away, until nothing moves), then numbers a rounding
+/// error past a bound put back on it. That last step only ever lowers the larger number of an order, so a number whose
+/// floor comes only through orders (x1 ≥ 0 and x1 ≤ x0, so x0 ≥ 0) needs that floor as a bound of its own. When the
+/// planes and bounds leave no numbers that keep them all, it never settles, and its last point breaks some plane or
+/// bound, by any amount. Ask [`can_keep`] first.
 pub fn project(x: &[f64], bounds: &[Bound], planes: &[Plane], fixed: &[bool]) -> Vec<f64> {
     let n = x.len();
     let is_fixed = |i: usize| fixed.get(i).copied().unwrap_or(false);
@@ -102,17 +104,20 @@ pub fn project(x: &[f64], bounds: &[Bound], planes: &[Plane], fixed: &[bool]) ->
     y
 }
 
-/// Whether some numbers keep every bound and plane together: the nearest to `x` that keep the bounds keep every plane
-/// too, to within a rounding error. (Where none do, Dykstra's method never settles, and its last point breaks one.)
+/// Whether some numbers keep every bound and plane together: the point [`project`] reaches from `x` over them all
+/// keeps every bound, and every plane to within a rounding error. (Where none do, Dykstra's method never settles, and
+/// its last point breaks one.)
 pub fn can_keep(x: &[f64], bounds: &[Bound], planes: &[Plane], fixed: &[bool]) -> bool {
     let p = project(x, bounds, planes, fixed);
-    planes.iter().all(|plane| {
-        let scale = plane.a.iter().zip(&p).map(|(a, v)| (a * v).abs()).sum::<f64>().max(plane.b.abs()).max(1.0);
-        plane.room(&p) >= -1e-9 * scale
-    })
+    bounds.iter().all(|bound| bound.holds(&p))
+        && planes.iter().all(|plane| {
+            let scale = plane.a.iter().zip(&p).map(|(a, v)| (a * v).abs()).sum::<f64>().max(plane.b.abs()).max(1.0);
+            plane.room(&p) >= -1e-9 * scale
+        })
 }
 
-/// Moves numbers a rounding error past a bound back onto it, until every bound holds.
+/// Moves numbers a rounding error past a bound back onto it, until every bound holds (an order by lowering its larger
+/// number, unless that one is held fixed), or a thousand sweeps have gone by.
 fn settle(y: &mut [f64], bounds: &[Bound], fixed: &[bool]) {
     let is_fixed = |i: usize| fixed.get(i).copied().unwrap_or(false);
     for _ in 0..1000 {
@@ -475,6 +480,15 @@ mod tests {
         assert!(can_keep(&[0.0, 5.0], &[], &[on_x0], &none));
         // With bounds alone (no planes) there is always a way.
         assert!(can_keep(&[3.0, -1.0], &[AtLeast0(1), AtMost(0, 1)], &[], &none));
+        // A floor that comes only through an order (x1 ≥ 0 and x1 ≤ x0, so x0 ≥ 0): a plane asking x0 below 0 leaves
+        // no numbers, whether x0's floor is said as a bound of its own or not; x0 at 0, with x1, can be kept.
+        let x0_at_most = |most: f64| Plane { a: vec![-1.0, 0.0], b: -most };
+        let through_order = [AtLeast0(1), AtMost(1, 0)];
+        let said = [AtLeast0(1), AtMost(1, 0), AtLeast0(0)];
+        assert!(!can_keep(&[1.0, 0.5], &through_order, &[x0_at_most(-0.1)], &none));
+        assert!(!can_keep(&[1.0, 0.5], &said, &[x0_at_most(-0.1)], &none));
+        assert!(can_keep(&[1.0, 0.5], &said, &[x0_at_most(0.0)], &none));
+        assert_eq!(project(&[1.0, 0.5], &said, &[x0_at_most(0.0)], &none), [0.0, 0.0]);
     }
 
     #[test]

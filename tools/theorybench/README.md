@@ -400,22 +400,26 @@ w_N, what a stretch read as no chord scores. The counted tables stay as `tables`
   it started from and the fitted ones, one stretch at a time, read whole and named: the report gives how many gates
   break at each step, every gate the fitted numbers break (with what they read), and how many of the design's
   targets are met; the `--out` file says which gates break ("gates"), as weights that break one aren't shipped. The
-  gates the design holds out (G\*: cases 6, 15, 32, 34 and 35) are never learned from nor looked at here; the tests
-  check them.
+  cases the design holds out (G\*: 6, 15, 32, 34 and 35, gates and the target 15e) are never learned from nor looked
+  at here, nor counted among the targets; the tests check them.
 - **Learning from the hand cases.** `--hand μ` adds the hand cases to the aim: each music the cases read whole (but
   the held-out ones) is one piece, labelled where its gates say what to read: what a stretch must read (the cases
-  only a whole read decides, and each stretch case's first reading), or the two readings that must come first
-  (accepting either, so they grow likelier together). A gate that only asks for readings to be kept says nothing
-  about what's read, so it's checked but not learned from. The aim adds μ times the pieces' mean −ln P(labels) to the
-  data's loss per bar, its slope and curvature added the same way. `--hold n` keeps the gates as straight-line rules
-  instead: at the start, each piece's labels must keep at least half their chance (or what they have, if less) as
-  the slope there sees it (a half-space, kept by the projection with the signs and orders). After each fit, for at
-  most n more rounds, every rule is drawn again where the fit got to: a piece whose gates still break (found by its
-  music, whichever way the gate reads it) must get likelier, at 0.75, then 0.875 of its chance, but never more than
-  it had at the start, where every gate holds; every other keeps that chance, or what it has if less. The rounds stop
-  early when every gate holds, when no gate that breaks reads music the fit learns from (8 named cases have music of
-  their own), when the pieces whose gates break are already as likely as they're asked to be, or when the rules leave
-  no numbers that keep them all. Each round takes at most `--steps` steps. The two can go together.
+  only a whole read decides, and each stretch case's first reading), or the two readings that must come first (one
+  label accepting either: it makes the two likelier between them, which is less than the gate asks, as one of them
+  may still be starved). A gate that only asks for readings to be kept says nothing about what's read, so it's
+  checked but not learned from. The aim adds μ times the pieces' mean −ln P(labels) to the data's loss per bar, its
+  slope and curvature added the same way. `--hold n` keeps the gates as straight-line rules instead: at the start,
+  each piece's labels must keep a chance of at least 0.5 (or what they have, if less) as the slope there sees it (a
+  half-space, kept by the projection with the signs and orders). After each fit, for at most n more rounds, every
+  rule is drawn again where the fit got to: a piece whose gates still break (found by its music, whichever way the
+  gate reads it) must get likelier, to a chance of 0.75, then 0.875, but never more than it had at the start (from
+  the hand-set weights every gate holds there; starting `--from` numbers that break gates, it says so, as those may
+  stay broken); every other keeps that chance, or what it has if less. The rounds stop early when every gate holds,
+  when no gate that breaks reads music the fit learns from (8 named cases have music of their own, and cases 12, 13
+  and 20 only ask for readings to be kept: their gates are checked, never held), when the pieces whose gates break
+  are already as likely as they're asked to be (a gate wanting two readings on top can break that way), or when the
+  rules leave no numbers that keep them all. Each round takes at most `--steps` steps; the `--out` file says how
+  many rounds were fitted and why they stopped. The two can go together.
 
 ## Charts played as music (`convert/voice.py`)
 

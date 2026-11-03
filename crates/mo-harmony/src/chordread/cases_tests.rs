@@ -19,8 +19,14 @@ fn the_built_in_reader_keeps_every_gate() {
     assert_eq!(read_whole_cases().unwrap().len(), stretches + super::cases::whole_cases().unwrap().len());
     assert_eq!(count(Step::Named, true), named_cases().unwrap().len());
     assert_eq!(count(Step::Named, false), named_targets().unwrap().len());
-    // The design's targets met so far (harmony/design/chord-reader-design.md, "As built (reader PR)"): 36, 39, 46.
-    assert_eq!(book.targets(), (3, named_targets().unwrap().len()));
+    // The design's targets met so far (harmony/design/chord-reader-design.md, "As built (namer PR)"): 36, 39, 46. The
+    // one the design holds out (15e) isn't counted.
+    let targets = named_targets().unwrap();
+    assert_eq!(book.targets(), (3, targets.iter().filter(|(name, ..)| !held_out(name)).count()));
+    assert_eq!(
+        targets.iter().filter(|(name, ..)| held_out(name)).map(|(name, ..)| *name).collect::<Vec<_>>(),
+        ["15e G*, not yet"]
+    );
     let met: Vec<&str> = book.verdicts.iter().filter(|v| !v.gate && v.holds()).map(|v| v.name.as_str()).collect();
     assert_eq!(met, ["36 T: Dm7", "39 T: bar 1 Cmaj7", "46 T: Fmaj7 pushed from the loop's end | G7"]);
 }
@@ -64,7 +70,7 @@ fn the_fit_learns_the_readings_the_gates_want_and_never_a_held_out_case() {
             assert!(!label.accepts.is_empty() && 0 <= label.start && label.start < label.end, "{}", case.name);
             assert!(label.end <= (end + 1919) / 1920 * 1920, "{}: {label:?}", case.name);
         }
-        // The built-in reader allows the labelled ways and finds them likely: it keeps every gate.
+        // The built-in reader allows the labelled ways: their chance is above 0.
         let read = fitter
             .read(&case.music.parts(), case.music.grid, case.music.span, &case.labels, SHIPPED.weights, SHIPPED.tables)
             .unwrap();
