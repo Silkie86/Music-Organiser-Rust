@@ -1,9 +1,11 @@
 //! MIDI files from the MIDI library (loop packs, sketches): read only, never changed. Standard MIDI Files are read
 //! here as the C# app's `MidiFileReader` reads them; each track (or each channel of a track holding several) becomes
-//! a part. MIDI 2.0's Clip Files are read too ([`clip`]), a part for each channel with notes.
+//! a part. MIDI 2.0's Clip Files are read too ([`clip`]), a part for each channel with notes. [`write`] makes new
+//! Standard MIDI Files from the same notes (for export), cutting MIDI 2.0's values down to MIDI 1.0's only there.
 
 pub mod clip;
 pub mod smf;
+pub mod write;
 
 use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;

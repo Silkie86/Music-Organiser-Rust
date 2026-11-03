@@ -1,7 +1,5 @@
 //! An FL channel's clips as another DAW's track holds them (the C# `FlClips`).
 
-use std::collections::HashMap;
-
 use mo_formats::NoteEvent;
 use mo_formats::fl::song::{FlAudioClip, FlChannel, FlClip};
 
@@ -109,35 +107,8 @@ pub fn on_muted_tracks<C: PlaylistClip>(clips: &[C], track_muted: bool) -> Vec<C
 /// sound ends. Here that's until the next note on the same key or the end of the clip, and no longer than `longest`
 /// gives for the key (how long its sample plays), when it knows.
 pub fn lengthen(notes: Vec<NoteEvent>, clip_length: i64, longest: Option<&dyn Fn(u8) -> i64>) -> Vec<NoteEvent> {
-    if !notes.iter().any(|n| n.step) {
-        return notes;
-    }
-    // Each key's starts in order, so the next is found by halves: a whole song's steps can all be on one key.
-    // A muted note plays nothing, so it doesn't cut a step short.
-    let mut starts: HashMap<u8, Vec<i64>> = HashMap::new();
-    for n in notes.iter().filter(|n| !n.muted) {
-        starts.entry(n.key).or_default().push(n.start);
-    }
-    for on in starts.values_mut() {
-        on.sort_unstable();
-        on.dedup();
-    }
-    notes
-        .into_iter()
-        .map(|n| {
-            if !n.step {
-                return n;
-            }
-            let on = starts.get(&n.key).map(Vec::as_slice).unwrap_or_default();
-            let next = on.partition_point(|&s| s <= n.start);
-            let next = on.get(next).copied().unwrap_or(clip_length);
-            let mut length = next.min(clip_length).saturating_sub(n.start);
-            if let Some(most) = longest {
-                length = length.min(most(n.key));
-            }
-            NoteEvent { length: n.length.max(length), ..n }
-        })
-        .collect()
+    // One copy of the rule, shared with the MIDI writer (which lengthens steps the same way when it writes a clip).
+    mo_formats::midi::write::lengthen_steps(notes, clip_length, longest)
 }
 
 #[cfg(test)]
