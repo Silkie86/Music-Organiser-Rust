@@ -134,19 +134,25 @@ impl Filters {
     }
 }
 
+/// What every list made from the same sounds shares: the sounds and what's worked out once from them.
+#[derive(Default)]
+struct Shared {
+    sounds: Vec<Sound>,
+    /// Lower-cased path, type, tags and character, one per line: what the search words are looked for in.
+    hay: Vec<String>,
+    /// Lower-cased names, for the name order and every order's tie-break.
+    names: Vec<String>,
+}
+
 /// Every sound the page can show (hidden copies left out: they only hide in the app, rule 2), with what's worked out
 /// once per sound for searching and sorting.
 ///
-/// The sounds and what's worked out from them are shared, not copied, by a clone: a big library's list is most of a
-/// gigabyte, and the page makes a second list once it knows how your songs use each sound. Only what that adds (use,
-/// Most liked) is each clone's own.
+/// The sounds and what's worked out from them ([`Shared`]) are shared, not copied, by a clone: a big library's list is
+/// most of a gigabyte, and the page makes a second list once it knows how your songs use each sound. Only what that
+/// adds (use, Most liked) is each list's own.
 #[derive(Clone, Default)]
 pub struct SoundList {
-    sounds: Arc<Vec<Sound>>,
-    /// Lower-cased path, type, tags and character, one per line: what the search words are looked for in.
-    hay: Arc<Vec<String>>,
-    /// Lower-cased names, for the name order and every order's tie-break.
-    names: Arc<Vec<String>>,
+    shared: Arc<Shared>,
     /// How your projects use each sound, by sound id, once known (sounds no project uses are left out).
     used: Option<HashMap<i64, Usage>>,
     /// Each sound's Most liked score, in `sounds` order, once known.
@@ -161,9 +167,20 @@ impl SoundList {
         let mut sounds: Vec<Sound> = sounds.into_iter().filter(|s| !s.hidden).collect();
         // Leaving out the hidden copies keeps the room they took: give it back.
         sounds.shrink_to_fit();
-        let hay = Arc::new(sounds.par_iter().map(hay_of).collect());
-        let names = Arc::new(sounds.par_iter().map(|s| s.name().to_lowercase()).collect());
-        SoundList { sounds: Arc::new(sounds), hay, names, ..SoundList::default() }
+        let hay = sounds.par_iter().map(hay_of).collect();
+        let names = sounds.par_iter().map(|s| s.name().to_lowercase()).collect();
+        SoundList { shared: Arc::new(Shared { sounds, hay, names }), ..SoundList::default() }
+    }
+
+    /// A list of the same sounds, sharing them, without this one's use or Most liked yet: what a list with the use
+    /// counted in starts from.
+    pub fn sharing(&self) -> SoundList {
+        SoundList { shared: self.shared.clone(), ..SoundList::default() }
+    }
+
+    /// Whether `other` shares this list's sounds (it was cloned from it, or made with [`SoundList::sharing`]).
+    pub fn shares_with(&self, other: &SoundList) -> bool {
+        Arc::ptr_eq(&self.shared, &other.shared)
     }
 
     /// How your projects use each sound (by id, as [`mo_sounds::usage::usage`] gives it), for the Used chips and
@@ -174,22 +191,22 @@ impl SoundList {
 
     /// Each sound's Most liked score, from `score`.
     pub fn set_liked(&mut self, score: impl Fn(&Sound) -> f64 + Sync + Send) {
-        let liked: Vec<f64> = self.sounds.par_iter().map(&score).collect();
+        let liked: Vec<f64> = self.shared.sounds.par_iter().map(&score).collect();
         self.liked_best = liked.iter().copied().fold(0.0, f64::max);
         self.liked = Some(liked);
     }
 
     pub fn len(&self) -> usize {
-        self.sounds.len()
+        self.shared.sounds.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.sounds.is_empty()
+        self.shared.sounds.is_empty()
     }
 
     /// Every sound in the list, in its order.
     pub fn sounds(&self) -> &[Sound] {
-        &self.sounds
+        &self.shared.sounds
     }
 
     /// How your projects use every sound (by id; ones no project uses are left out), if that's known yet.
@@ -199,22 +216,22 @@ impl SoundList {
 
     /// How your projects use the sound at `i`, if that's known yet (`None` too when none do).
     pub fn usage(&self, i: usize) -> Option<&Usage> {
-        self.used.as_ref()?.get(&self.sounds.get(i)?.id)
+        self.used.as_ref()?.get(&self.shared.sounds.get(i)?.id)
     }
 
     pub fn sound(&self, i: usize) -> Option<&Sound> {
-        self.sounds.get(i)
+        self.shared.sounds.get(i)
     }
 
     /// The place in the list of the sound with this id.
     pub fn find(&self, id: i64) -> Option<usize> {
-        self.sounds.iter().position(|s| s.id == id)
+        self.shared.sounds.iter().position(|s| s.id == id)
     }
 
     /// How many projects use a sound, if that's known yet.
     pub fn used_in(&self, i: usize) -> Option<u32> {
         let used = self.used.as_ref()?;
-        Some(self.sounds.get(i).and_then(|s| used.get(&s.id)).map_or(0, |u| u.projects))
+        Some(self.shared.sounds.get(i).and_then(|s| used.get(&s.id)).map_or(0, |u| u.projects))
     }
 
     /// The Most liked score, from 0 to 1 against the best liked, if scores are known yet.
@@ -237,11 +254,12 @@ impl SoundList {
     /// same seed gives the same order, and the page takes a new one each time it opens or Shuffle is pressed.
     pub fn view(&self, filters: &Filters, order: Order, seed: u64) -> Vec<usize> {
         let test = Test::new(filters);
-        let mut shown: Vec<usize> = (0..self.sounds.len()).into_par_iter().filter(|&i| self.allows(i, &test)).collect();
+        let mut shown: Vec<usize> =
+            (0..self.shared.sounds.len()).into_par_iter().filter(|&i| self.allows(i, &test)).collect();
         if order == Order::Shuffled {
             // Each sound's place worked out once, not on every comparison.
             let mut keyed: Vec<(u64, usize)> =
-                shown.par_iter().map(|&i| (shuffle_key(seed, self.sounds[i].id), i)).collect();
+                shown.par_iter().map(|&i| (shuffle_key(seed, self.shared.sounds[i].id), i)).collect();
             keyed.par_sort_unstable();
             return keyed.into_iter().map(|(_, i)| i).collect();
         }
@@ -252,7 +270,7 @@ impl SoundList {
     /// Each type and how many sounds have it, most first (the type chips), counting every sound the list holds.
     pub fn type_counts(&self) -> Vec<(String, usize)> {
         let mut counts: HashMap<&str, usize> = HashMap::new();
-        for s in self.sounds.iter() {
+        for s in self.shared.sounds.iter() {
             *counts.entry(s.sound_type.as_str()).or_default() += 1;
         }
         let mut counts: Vec<(String, usize)> = counts.into_iter().map(|(t, n)| (t.to_string(), n)).collect();
@@ -265,14 +283,14 @@ impl SoundList {
 
     /// Every tag on a sound, sorted, for the Tag menu.
     pub fn tags(&self) -> Vec<String> {
-        let mut tags: Vec<String> = self.sounds.iter().flat_map(|s| s.tags.iter().cloned()).collect();
+        let mut tags: Vec<String> = self.shared.sounds.iter().flat_map(|s| s.tags.iter().cloned()).collect();
         tags.sort_by_key(|t| t.to_lowercase());
         tags.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
         tags
     }
 
     fn allows(&self, i: usize, t: &Test) -> bool {
-        let s = &self.sounds[i];
+        let s = &self.shared.sounds[i];
         let analysis = s.analysis.as_ref();
         let is_loop = analysis.is_some_and(|a| a.is_loop);
         if (!t.sound_types.is_empty() && !t.sound_types.contains(&s.sound_type))
@@ -317,7 +335,7 @@ impl SoundList {
                 return false;
             }
         }
-        t.words.iter().all(|w| self.hay[i].contains(w.as_str()))
+        t.words.iter().all(|w| self.shared.hay[i].contains(w.as_str()))
     }
 
     /// How many sounds there are in each year, newest first, as the year filter reads them: by the years of the songs
@@ -326,7 +344,7 @@ impl SoundList {
         let mut counts: std::collections::BTreeMap<i32, usize> = std::collections::BTreeMap::new();
         match (&self.used, by_use) {
             (Some(used), true) => {
-                for s in self.sounds.iter() {
+                for s in self.shared.sounds.iter() {
                     let mut years = used.get(&s.id).map(|u| u.years.clone()).unwrap_or_default();
                     years.dedup();
                     for y in years {
@@ -335,7 +353,7 @@ impl SoundList {
                 }
             }
             _ => {
-                for s in self.sounds.iter() {
+                for s in self.shared.sounds.iter() {
                     *counts.entry(s.added.year()).or_default() += 1;
                 }
             }
@@ -345,7 +363,7 @@ impl SoundList {
     }
 
     fn compare(&self, a: usize, b: usize, order: Order) -> std::cmp::Ordering {
-        let (sa, sb) = (&self.sounds[a], &self.sounds[b]);
+        let (sa, sb) = (&self.shared.sounds[a], &self.shared.sounds[b]);
         let by = match order {
             Order::Shuffled => std::cmp::Ordering::Equal,
             Order::MostLiked => match &self.liked {
@@ -357,7 +375,7 @@ impl SoundList {
             Order::Key => key_order(sa).cmp(&key_order(sb)),
             Order::Newest => sb.added.cmp(&sa.added),
         };
-        by.then_with(|| self.names[a].cmp(&self.names[b])).then(a.cmp(&b))
+        by.then_with(|| self.shared.names[a].cmp(&self.shared.names[b])).then(a.cmp(&b))
     }
 }
 
@@ -755,5 +773,17 @@ mod tests {
         assert!(Filters { favourites: true, ..Filters::default() }.any());
         assert_eq!(Order::from_name("Most liked"), Order::MostLiked);
         assert_eq!(Order::from_name("whatever"), Order::Shuffled);
+    }
+
+    #[test]
+    fn a_list_with_the_use_shares_the_sounds_rather_than_copying_them() {
+        let mut list = SoundList::new((1..=3).map(|i| sound(i, &format!("{i}.wav"), "Kick", None)).collect());
+        list.set_liked(|s| s.id as f64);
+        let used = list.sharing();
+        assert!(used.shares_with(&list) && list.clone().shares_with(&list));
+        assert!(std::ptr::eq(used.sounds().as_ptr(), list.sounds().as_ptr()));
+        // Only the sounds: what the first list worked out from its use isn't carried over.
+        assert!(!used.knows_liked() && list.knows_liked());
+        assert!(!SoundList::new(Vec::new()).shares_with(&list));
     }
 }

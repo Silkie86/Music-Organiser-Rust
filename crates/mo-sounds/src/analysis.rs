@@ -88,3 +88,24 @@ impl SoundAnalysis {
         self.pitch.filter(|p| p.is_finite()).map(|p| music::note_name(p.round_ties_even() as i32))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_read_analysis_keeps_no_spare_room() {
+        let points: Vec<String> = (0..160).map(|i| format!("{}", f64::from(i) / 160.0)).collect();
+        let json = format!(
+            r#"{{"Waveform":[{}],"Chroma":[0,0,0,0,0,0,0,0,0,0,0,0.5],"Character":["dark","wide","soft"],
+                "Chords":[{{"Name":"Cm"}},{{"Name":"Fm"}},{{"Name":"G"}}]}}"#,
+            points.join(",")
+        );
+        let a = SoundAnalysis::from_json(&json).unwrap();
+        assert_eq!((a.waveform.len(), a.chroma.len(), a.character.len(), a.chords.len()), (160, 12, 3, 3));
+        assert_eq!(a.waveform.capacity(), a.waveform.len());
+        assert_eq!(a.chroma.capacity(), a.chroma.len());
+        assert_eq!(a.character.capacity(), a.character.len());
+        assert_eq!(a.chords.capacity(), a.chords.len());
+    }
+}
