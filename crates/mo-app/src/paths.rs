@@ -3,9 +3,6 @@
 
 use std::path::PathBuf;
 
-/// The name of the app's own folder in the system's temp folder ([`temp_dir`]).
-pub const TEMP_FOLDER: &str = "MusicOrganiser-Rust";
-
 /// The app's data folder. Falls back to a folder beside the current one if the system gives no home at all.
 pub fn data_dir() -> PathBuf {
     let base = if cfg!(windows) {
@@ -23,11 +20,4 @@ pub fn data_dir() -> PathBuf {
 /// The diagnostics folder: session logs, crash logs and F12 notes' neighbours.
 pub fn logs_dir() -> PathBuf {
     data_dir().join("logs")
-}
-
-/// The app's own folder in the system's temp folder, for files it makes for a moment (a MIDI clip dragged out to a
-/// DAW). Rule 28: the start-up sweep ([`crate::tidy`]) clears what has been in it a week. A DAW takes a dragged MIDI
-/// file's notes in, but keeps a link to a dragged audio file, so audio is dragged from where it is, never from here.
-pub fn temp_dir() -> PathBuf {
-    std::env::temp_dir().join(TEMP_FOLDER)
 }

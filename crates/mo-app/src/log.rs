@@ -7,14 +7,14 @@
 //! is written three times and then only counted (at 10, 100, 1000…), and a run stops writing at 5 MB, so a runaway
 //! warning can't fill the disk. The newest 30 runs' logs are kept.
 //!
-//! A crash also gets a log of its own ([`write_crash_file`]), at most [`CRASH_FILES_PER_RUN`] a run; the start-up
-//! sweep ([`crate::tidy`]) keeps the newest 30 of those.
+//! A crash also gets a log of its own ([`write_crash_file`]): one for each place in the code that crashed, up to
+//! [`CRASH_FILES_PER_RUN`] places a run, and always one for the crash that ends the app; the start-up sweep
+//! ([`crate::tidy`]) keeps the newest 30 of those.
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Mutex, OnceLock};
 use std::thread::JoinHandle;
@@ -37,10 +37,41 @@ const RECENT: usize = 60;
 /// How a crash's own log is named: `crash-<seconds since 1970>.log`, or `crash-<seconds>-2.log` for the next crash in
 /// the same second. The C# app writes none of these, so the start-up sweep knows them as this app's.
 pub const CRASH_PREFIX: &str = "crash-";
-/// The most crash logs one run writes. A crash that keeps happening (one bad file hit over and over on every
-/// background thread) still goes in the session log each time, counted once it repeats, but can't fill the folder
-/// with files of its own.
+/// The most places in the code a run writes crash logs for, besides the crash that ends the app. A crash that keeps
+/// happening (one bad file hit over and over on every background thread) gets one file, and still goes in the session
+/// log each time, counted once it repeats, but can't fill the folder with files of its own.
 pub const CRASH_FILES_PER_RUN: usize = 10;
+
+/// The places in the code this run has written a crash log for ([`write_crash_file`]).
+pub struct CrashFiles {
+    places: Mutex<Vec<String>>,
+}
+
+impl Default for CrashFiles {
+    fn default() -> Self {
+        CrashFiles::new()
+    }
+}
+
+impl CrashFiles {
+    pub const fn new() -> CrashFiles {
+        CrashFiles { places: Mutex::new(Vec::new()) }
+    }
+
+    /// Whether a crash at `place` gets a file: always when it ends the app (`fatal`); otherwise only the first crash at
+    /// each place, and only while fewer than [`CRASH_FILES_PER_RUN`] places have one.
+    fn take(&self, place: &str, fatal: bool) -> bool {
+        if fatal {
+            return true;
+        }
+        let mut places = self.places.lock().unwrap_or_else(|e| e.into_inner());
+        if places.len() >= CRASH_FILES_PER_RUN || places.iter().any(|p| p == place) {
+            return false;
+        }
+        places.push(place.to_owned());
+        true
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Level {
@@ -133,7 +164,7 @@ impl SessionLog {
             }
             None => (None, None),
         };
-        prune(folder, KEPT);
+        prune(folder, KEPT, path.as_deref());
         let log = SessionLog {
             path,
             tx: Mutex::new(tx),
@@ -263,17 +294,38 @@ fn write_queued(file: File, rx: Receiver<Msg>) {
     let _ = out.flush();
 }
 
-/// Deletes all but the newest `keep` of this app's session logs, newest by when they were last written.
-fn prune(folder: &Path, keep: usize) {
-    crate::tidy::keep_newest(folder, |n| n.starts_with(PREFIX) && n.ends_with(".log"), keep);
+/// Deletes all but the newest `keep` of this app's session logs, newest by when they were last written, never
+/// `just_made` (this run's), and only ones named exactly as [`create_file`] names them.
+fn prune(folder: &Path, keep: usize, just_made: Option<&Path>) {
+    crate::tidy::keep_newest(folder, is_session_log, keep, std::time::SystemTime::now(), just_made);
+}
+
+/// Whether `name` is a session log as [`create_file`] names them, and nothing else: `rust-session-`, the time
+/// (`2026-11-02_14-30-05`), perhaps `-` and a number, then `.log`. A copy ("… - Copy.log") isn't one.
+pub fn is_session_log(name: &str) -> bool {
+    const STAMP: &[u8; 19] = b"0000-00-00_00-00-00";
+    let Some(rest) = name.strip_prefix(PREFIX).and_then(|r| r.strip_suffix(".log")) else { return false };
+    let (Some(stamp), Some(tail)) = (rest.get(..STAMP.len()), rest.get(STAMP.len()..)) else { return false };
+    let stamp_fits = stamp.bytes().zip(STAMP).all(|(b, t)| if *t == b'0' { b.is_ascii_digit() } else { b == *t });
+    let number = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    stamp_fits && (tail.is_empty() || tail.strip_prefix('-').is_some_and(number))
 }
 
 /// Writes a crash's own log into `folder` (`logs\`), in case the session log couldn't be written (rule 17), and says
-/// where. `written` counts this run's crash logs: once there have been [`CRASH_FILES_PER_RUN`], nothing more is
-/// written (the session log still has each crash). A second crash in the same second gets a name of its own rather
-/// than writing over the first. Called from the crash handler, so it never panics and never waits.
-pub fn write_crash_file(folder: &Path, text: &str, secs: u64, written: &AtomicUsize) -> Option<PathBuf> {
-    if written.fetch_add(1, Ordering::Relaxed) >= CRASH_FILES_PER_RUN {
+/// where. `place` is where in the code it crashed (`file:line`) and `fatal` whether it ends the app (the window's
+/// thread crashed). The crash that ends the app always gets a file; others get one for the first crash at each place,
+/// for up to [`CRASH_FILES_PER_RUN`] places a run (`files` keeps count; the session log still has every crash). A
+/// second crash in the same second gets a name of its own rather than writing over the first. Called from the crash
+/// handler, so it never panics.
+pub fn write_crash_file(
+    folder: &Path,
+    text: &str,
+    secs: u64,
+    place: &str,
+    fatal: bool,
+    files: &CrashFiles,
+) -> Option<PathBuf> {
+    if !files.take(place, fatal) {
         return None;
     }
     std::fs::create_dir_all(folder).ok()?;
@@ -368,11 +420,75 @@ mod tests {
         for i in 0..5 {
             std::fs::write(dir.join(format!("session-2000-01-01_00-00-{i:02}.log")), "c#").expect("writable");
         }
-        prune(&dir, KEPT);
+        // Nor are files that are only named like this app's logs: a copy, or one renamed by hand.
+        let copies = [
+            format!("{PREFIX}2000-01-01_00-00-00 - Copy.log"),
+            format!("{PREFIX}2000-01-01_00-00-00 (2).log"),
+            format!("{PREFIX}notes.log"),
+            format!("{PREFIX}2000-01-01_00-00-00-2.log.bak"),
+        ];
+        for name in &copies {
+            std::fs::write(dir.join(name), "yours").expect("writable");
+            let f = File::options().write(true).open(dir.join(name)).expect("openable");
+            f.set_modified(long_ago).expect("settable");
+        }
+        prune(&dir, KEPT, None);
         let left = std::fs::read_dir(&dir).expect("listable").count();
-        assert_eq!(left, KEPT + 5);
+        assert_eq!(left, KEPT + 5 + copies.len());
         assert!(a.path().is_some_and(|p| p.exists()), "the newest logs stay");
+        for name in &copies {
+            assert!(dir.join(name).exists(), "{name} stays");
+        }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_log_just_made_always_stays_and_one_dated_after_now_goes_first() {
+        let dir = temp_folder("future");
+        let _ = std::fs::create_dir_all(&dir);
+        let set = |name: &str, when: std::time::SystemTime| {
+            std::fs::write(dir.join(name), "old").expect("writable");
+            File::options().write(true).open(dir.join(name)).expect("openable").set_modified(when).expect("settable");
+        };
+        let now = std::time::SystemTime::now();
+        // Others of this app's logs dated years after now (a clock that was wrong once): without care they'd hold
+        // every place, and the log just made would be the oldest.
+        for i in 0..KEPT + 3 {
+            set(&format!("{PREFIX}2099-01-01_00-00-{i:02}.log"), now + std::time::Duration::from_secs(1_000_000_000));
+        }
+        set(&format!("{PREFIX}2001-01-01_00-00-00.log"), now - std::time::Duration::from_secs(1_000_000));
+        // Started with a clock set years back, so its own time is the oldest of all.
+        let start = DateTime::parse_from_rfc3339("1999-01-01T00:00:00+00:00").expect("a time").with_timezone(&Local);
+        let log = SessionLog::new(&dir, start, "start");
+        log.close();
+        let mine = log.path().expect("a file").to_owned();
+        assert!(mine.exists(), "the log just made stays");
+        let left: Vec<String> = std::fs::read_dir(&dir)
+            .expect("listable")
+            .map(|e| e.expect("listed").file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(left.len(), KEPT);
+        assert!(left.contains(&format!("{PREFIX}2001-01-01_00-00-00.log")), "the rightly dated one isn't pushed out");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn session_logs_are_known_by_their_whole_name() {
+        assert!(is_session_log("rust-session-2026-11-02_14-30-05.log"));
+        assert!(is_session_log("rust-session-2026-11-02_14-30-05-12.log"));
+        for name in [
+            "rust-session-2026-11-02_14-30-05 - Copy.log",
+            "rust-session-2026-11-02_14-30-05-.log",
+            "rust-session-2026-11-02_14-30-05-2-3.log",
+            "rust-session-2026-11-02 14-30-05.log",
+            "rust-session-2026-11-02_14-30.log",
+            "rust-session-2026-11-02_14-30-05.log.txt",
+            "session-2026-11-02_14-30-05.log",
+            "rust-session-.log",
+            "rust-session-２０２６-11-02_14-30-05.log",
+        ] {
+            assert!(!is_session_log(name), "{name}");
+        }
     }
 
     #[test]
@@ -390,20 +506,38 @@ mod tests {
     }
 
     #[test]
-    fn crash_files_get_their_own_names_and_stop_at_the_runs_limit() {
+    fn crash_files_get_their_own_names_one_for_each_place() {
         let dir = temp_folder("crash");
-        let written = AtomicUsize::new(0);
-        let first = write_crash_file(&dir, "first", 1_700_000_000, &written).expect("written");
-        let second = write_crash_file(&dir, "second", 1_700_000_000, &written).expect("written");
+        let files = CrashFiles::new();
+        let first = write_crash_file(&dir, "first", 1_700_000_000, "src/a.rs:1", false, &files).expect("written");
+        let second = write_crash_file(&dir, "second", 1_700_000_000, "src/b.rs:2", false, &files).expect("written");
         assert_eq!(first, dir.join("crash-1700000000.log"));
         assert_eq!(second, dir.join("crash-1700000000-2.log"));
         assert_eq!(std::fs::read_to_string(&first).expect("readable"), "first", "a second crash doesn't write over it");
         assert!(is_crash_log("crash-1700000000.log") && is_crash_log("crash-1700000000-2.log"));
-        for n in 2..CRASH_FILES_PER_RUN {
-            assert!(write_crash_file(&dir, "more", 1_700_000_100 + n as u64, &written).is_some());
+        // The same place crashing again and again (a bad file on every thread) gets no more files…
+        for n in 0..50 {
+            assert_eq!(write_crash_file(&dir, "again", 1_700_000_010 + n, "src/a.rs:1", false, &files), None);
         }
-        assert_eq!(write_crash_file(&dir, "one too many", 1_700_000_999, &written), None);
-        assert_eq!(std::fs::read_dir(&dir).expect("listable").count(), CRASH_FILES_PER_RUN);
+        // …so other places still get theirs.
+        assert!(write_crash_file(&dir, "third", 1_700_000_100, "src/c.rs:3", false, &files).is_some());
+        assert_eq!(std::fs::read_dir(&dir).expect("listable").count(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_crash_that_ends_the_app_always_gets_its_file() {
+        let dir = temp_folder("fatal");
+        let files = CrashFiles::new();
+        // Twelve crashes caught at twelve places (a decoder, a reader…) use up the run's files.
+        let caught: Vec<Option<PathBuf>> = (0..12u64)
+            .map(|n| write_crash_file(&dir, "caught", 1_700_000_000 + n, &format!("src/r{n}.rs:9"), false, &files))
+            .collect();
+        assert_eq!(caught.iter().filter(|f| f.is_some()).count(), CRASH_FILES_PER_RUN);
+        let fatal = write_crash_file(&dir, "the end", 1_700_000_100, "src/main.rs:5", true, &files);
+        let fatal = fatal.expect("the crash that ends the app is written");
+        assert_eq!(std::fs::read_to_string(fatal).expect("readable"), "the end");
+        assert_eq!(std::fs::read_dir(&dir).expect("listable").count(), CRASH_FILES_PER_RUN + 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

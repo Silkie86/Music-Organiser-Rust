@@ -2,8 +2,10 @@
 //! up my PC as I use it"). Every file the app writes for itself has a limit or goes once it's done with, and this
 //! sweep, a little after each start, clears what a crash or a stopped tool left behind.
 //!
-//! It only removes plain files it can tell the app made, by the folder they're in and their whole name, never by a
-//! guess: never a folder of yours, never through a link, and never anything with another name. What it clears:
+//! It only removes plain files whose whole name the app gives them, right in the folders it writes them to: never a
+//! file by its folder alone, never anything in a folder inside those, never through a link (a folder on the way that
+//! is a link, or a Windows junction, is passed over, and so is a file that is one), and never anything with another
+//! name. What it clears:
 //!
 //! - `logs\` in the app's data folder: crash logs (`crash-<time>.log`) past the newest 30, and each tool's reports
 //!   (the twin test's, the MIDI twin test's, the galaxy check's) past the newest 10 of that kind. The session logs keep
@@ -13,16 +15,20 @@
 //! - `Curves\`: a curve file whose writing a crash cut short (`… .mo-part-<number>-<number>`), an hour old.
 //! - `twin\cs\`: the twin test's copy of your library (`library-copy.db`), left when the test was stopped, a day old.
 //! - Your Temp folder: the Space page's lists for the administrator step (`mo-admin-<n>-<n>-<n>.txt`), a day old.
-//! - The app's own folder in your Temp folder ([`crate::paths::temp_dir`]): anything that's been there a week.
+//!
+//! A file's age runs from the later of when it was made and when it was last changed: a copy keeps the changed time of
+//! what it was copied from, so a file from 2019 copied in today is a day old tomorrow, not seven years old.
 //!
 //! Never touched: samples (rule 2), projects, "(fixed)" copies (rule 3), converts and exports, F12 notes with their
 //! pictures and drafts (rule 17), Playground ideas, settings, the databases (library.db, sounds.db and midi.db are the
-//! C# app's too, and opened read-only), the C# app's own logs and reports, and everything else in those folders.
+//! C# app's too, and opened read-only), the C# app's own logs and reports, the launcher's folders (`run-latest-rust\`
+//! and its build folders, which it keeps in bounds itself), and everything else in those folders.
 //!
-//! Nor the launcher's folders: `run-latest-rust\` and its build folders (beside the code, or a `MusicOrganiser-build`
-//! wherever `-BuildDir` puts it) are the launcher's to keep in bounds (`tools/dev/run-latest.ps1`). The sweep never
-//! goes into a folder inside the data folder at all, and in its own temp folder it never goes into a folder called
-//! either of those names, nor any folder cargo marked as a build folder of its own (it holds a `CACHEDIR.TAG`).
+//! **A feature that writes temp files later** (a MIDI clip dragged out to a DAW) gives each a name of its own: its own
+//! start, the app's process id and a count, such as `mo-clip-<pid>-<n>.mid`, right in the Temp folder (not in a folder
+//! of its own: a folder's name proves nothing, since the system or the user can point Temp anywhere, even at the home
+//! folder). It removes each one when it's done with it, and adds that exact name here, cleared at the top of the Temp
+//! folder only, by the later of when it was made and changed. Never a whole folder by its name or by age alone.
 
 use std::fs::{self, Metadata};
 use std::io::ErrorKind;
@@ -54,20 +60,9 @@ const LIBRARY_COPY: &str = "library-copy.db";
 /// How long a file being written may take before what's left of it counts as a crash's leftover.
 const WRITING: Duration = Duration::from_secs(60 * 60);
 const DAY: Duration = Duration::from_secs(24 * 60 * 60);
-const WEEK: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// How long after start the sweep waits, so it never competes with the first page for the disk (rule 12).
 const WAIT: Duration = Duration::from_secs(20);
-
-/// How deep the sweep goes in the app's own temp folder.
-const DEEPEST: usize = 8;
-
-/// The launcher's own folders (`tools/dev/run-latest.ps1`): its home in the data folder, and the build folder it makes
-/// inside the folder `-BuildDir` names. The sweep never goes into a folder with one of these names.
-pub const LAUNCHER_FOLDERS: [&str; 2] = ["run-latest-rust", "MusicOrganiser-build"];
-
-/// The file cargo puts in a build folder it made (and other programs in caches they keep): such a folder is theirs.
-const CACHE_TAG: &str = "CACHEDIR.TAG";
 
 /// What a sweep removed, and what it couldn't (in use, or read-only), which is tried again next time.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -145,45 +140,87 @@ fn report(done: Tidied) {
 /// never on the window's thread.
 pub fn sweep(places: &Places, now: SystemTime) -> Tidied {
     let mut done = Tidied::default();
-    let logs = places.data.join("logs");
-    done.add(keep_newest(&logs, is_crash_log, CRASH_LOGS_KEPT));
-    for start in REPORTS {
-        done.add(keep_newest(&logs, |n| is_report(n, start), REPORTS_KEPT));
+    if let Some(logs) = real_folder(&places.data, &["logs"]) {
+        done.add(keep_newest(&logs, is_crash_log, CRASH_LOGS_KEPT, now, None));
+        for start in REPORTS {
+            done.add(keep_newest(&logs, |n| is_report(n, start), REPORTS_KEPT, now, None));
+        }
     }
     done.add(remove_older(&places.data, is_cut_short, WRITING, now));
-    done.add(remove_older(&places.data.join(CURVES), is_curve_cut_short, WRITING, now));
-    done.add(remove_older(&places.data.join("twin").join("cs"), is_library_copy, DAY, now));
+    if let Some(curves) = real_folder(&places.data, &[CURVES]) {
+        done.add(remove_older(&curves, is_curve_cut_short, WRITING, now));
+    }
+    if let Some(twin) = real_folder(&places.data, &["twin", "cs"]) {
+        done.add(remove_older(&twin, is_library_copy, DAY, now));
+    }
     done.add(remove_older(&places.temp, mo_space::admin::is_temp_file, DAY, now));
-    done.add(clear_own_folder(&places.temp.join(paths::TEMP_FOLDER), WEEK, now));
     done
 }
 
+/// `base` with the folders `inside` it, when each of those really is a folder there: not a link, nor a Windows
+/// junction, to somewhere else. `base` itself (the data folder, or the system's temp folder) may be reached through a
+/// link of the system's own (`/var` on a Mac), as every file the app writes there is.
+fn real_folder(base: &Path, inside: &[&str]) -> Option<PathBuf> {
+    let mut at = base.to_path_buf();
+    for name in inside {
+        at.push(name);
+        // `symlink_metadata` looks at the link itself: a link or a junction is not a folder here.
+        if !fs::symlink_metadata(&at).is_ok_and(|m| m.is_dir()) {
+            return None;
+        }
+    }
+    Some(at)
+}
+
 /// Deletes all but the newest `keep` of the plain files in `folder` whose names `is_kind` knows, newest by when they
-/// were last written. Nothing else in the folder is looked at.
-pub(crate) fn keep_newest(folder: &Path, is_kind: impl Fn(&str) -> bool, keep: usize) -> Tidied {
+/// were last written. A time after `now` (a clock that was wrong once) would hold its place for ever, so it counts as
+/// the oldest. `spare`, the file just made, is never deleted, and counts as one of the newest. Nothing else in the
+/// folder is looked at.
+pub(crate) fn keep_newest(
+    folder: &Path,
+    is_kind: impl Fn(&str) -> bool,
+    keep: usize,
+    now: SystemTime,
+    spare: Option<&Path>,
+) -> Tidied {
     let mut done = Tidied::default();
     let mut files = own_files(folder, is_kind);
+    let before = files.len();
+    if let Some(spare) = spare {
+        files.retain(|(p, _)| p != spare);
+    }
+    let keep = if files.len() < before { keep.saturating_sub(1) } else { keep };
     if files.len() <= keep {
         return done;
     }
     // Names alone put "…-05-2.log" before "…-05.log", so the time each was last written decides.
-    files.sort_by_cached_key(|(p, m)| (m.modified().ok(), p.clone()));
+    files.sort_by_cached_key(|(p, m)| (m.modified().ok().filter(|t| *t <= now), p.clone()));
     for (old, meta) in &files[..files.len() - keep] {
         done.remove(old, meta.len());
     }
     done
 }
 
-/// Deletes the plain files in `folder` whose names `is_kind` knows, once they were last written at least `age` before
-/// `now`. One whose time can't be read, or is after `now`, stays.
-fn remove_older(folder: &Path, is_kind: impl Fn(&str) -> bool, age: Duration, now: SystemTime) -> Tidied {
+/// Deletes the plain files in `folder` whose names `is_kind` knows, once they're at least `age` old at `now` (see
+/// [`age`]). One whose times can't be read, or are after `now`, stays.
+fn remove_older(folder: &Path, is_kind: impl Fn(&str) -> bool, old_at: Duration, now: SystemTime) -> Tidied {
     let mut done = Tidied::default();
     for (path, meta) in own_files(folder, is_kind) {
-        if is_old(&meta, age, now) {
+        if age(&meta, now).is_some_and(|a| a >= old_at) {
             done.remove(&path, meta.len());
         }
     }
     done
+}
+
+/// How old a file is at `now`: from the later of when it was made and when it was last changed (a copy keeps the
+/// changed time of the file it was copied from). `None` when neither can be read, or the later one is after `now`.
+fn age(meta: &Metadata, now: SystemTime) -> Option<Duration> {
+    let latest = match (meta.created().ok(), meta.modified().ok()) {
+        (Some(made), Some(changed)) => made.max(changed),
+        (made, changed) => made.or(changed)?,
+    };
+    now.duration_since(latest).ok()
 }
 
 /// The plain files right in `folder` (not in folders inside it) whose names `is_kind` knows, with what the folder's
@@ -197,57 +234,6 @@ fn own_files(folder: &Path, is_kind: impl Fn(&str) -> bool) -> Vec<(PathBuf, Met
         .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
         .filter_map(|e| Some((e.path(), e.metadata().ok()?)))
         .collect()
-}
-
-fn is_old(meta: &Metadata, age: Duration, now: SystemTime) -> bool {
-    meta.modified().ok().and_then(|t| now.duration_since(t).ok()).is_some_and(|d| d >= age)
-}
-
-/// Deletes everything in the app's own temp folder that was last written at least `age` before `now`, then the
-/// folders inside it that are empty by then and had nothing new put in them for as long. The folder must really be
-/// there, not a link to somewhere else; and links inside it are only ever left as they are, as are the launcher's
-/// folders and cargo's build folders ([`LAUNCHER_FOLDERS`], [`CACHE_TAG`]).
-fn clear_own_folder(folder: &Path, age: Duration, now: SystemTime) -> Tidied {
-    let mut done = Tidied::default();
-    if fs::symlink_metadata(folder).is_ok_and(|m| m.is_dir()) {
-        clear_inside(folder, age, now, 0, &mut done);
-    }
-    done
-}
-
-/// Whether a folder is another program's to keep: one cargo made as a build folder (or another program as a cache),
-/// marked with a [`CACHE_TAG`] file.
-fn is_marked_cache(folder: &Path) -> bool {
-    fs::symlink_metadata(folder.join(CACHE_TAG)).is_ok()
-}
-
-/// Whether a folder's name is one of the launcher's own ([`LAUNCHER_FOLDERS`]), letter case aside.
-fn is_launchers(name: &std::ffi::OsStr) -> bool {
-    let name = name.to_string_lossy();
-    LAUNCHER_FOLDERS.iter().any(|l| l.eq_ignore_ascii_case(&name))
-}
-
-fn clear_inside(folder: &Path, age: Duration, now: SystemTime, depth: usize, done: &mut Tidied) {
-    if is_marked_cache(folder) {
-        return;
-    }
-    let Ok(entries) = fs::read_dir(folder) else { return };
-    for entry in entries.flatten() {
-        // From the listing: a link (to a file or a folder, or a Windows junction) is neither a file nor a folder here.
-        let (Ok(kind), Ok(meta)) = (entry.file_type(), entry.metadata()) else { continue };
-        let path = entry.path();
-        if kind.is_file() && is_old(&meta, age, now) {
-            done.remove(&path, meta.len());
-        } else if kind.is_dir() && depth < DEEPEST && !is_launchers(&entry.file_name()) {
-            // Whether anything was put in it lately, before its old files go (that changes its time).
-            let quiet = is_old(&meta, age, now);
-            clear_inside(&path, age, now, depth + 1, done);
-            if quiet {
-                // Only an empty folder can be removed this way: one with anything left in it stays.
-                let _ = fs::remove_dir(&path);
-            }
-        }
-    }
 }
 
 /// A tool's report named as it names them: `start`, then the time it ran (digits, `-` and `_`, starting with a
@@ -301,26 +287,16 @@ mod tests {
         dir
     }
 
-    /// Writes `path` (and its folders), last changed `ago` before `now`.
-    fn file(path: &Path, ago: Duration, now: SystemTime) {
+    /// Writes `path` (and its folders) now.
+    fn fresh(path: &Path) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, b"x").unwrap();
-        File::options().write(true).open(path).unwrap().set_modified(now - ago).unwrap();
     }
 
-    /// Sets when a folder was last changed.
-    fn folder_time(folder: &Path, when: SystemTime) {
-        let mut options = File::options();
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::OpenOptionsExt;
-            // Leave to change its times (FILE_WRITE_ATTRIBUTES), and the flag without which Windows won't open a folder
-            // (FILE_FLAG_BACKUP_SEMANTICS).
-            options.access_mode(0x100).custom_flags(0x0200_0000);
-        }
-        #[cfg(not(windows))]
-        options.read(true);
-        options.open(folder).unwrap().set_modified(when).unwrap();
+    /// Writes `path` (and its folders), last changed at `when`.
+    fn changed_at(path: &Path, when: SystemTime) {
+        fresh(path);
+        File::options().write(true).open(path).unwrap().set_modified(when).unwrap();
     }
 
     fn names(folder: &Path) -> Vec<String> {
@@ -339,11 +315,13 @@ mod tests {
         let logs = places.data.join("logs");
         let now = SystemTime::now();
         for i in 0..35u32 {
-            file(&logs.join(format!("crash-{}.log", 1_700_000_000 + i)), MINUTE * (100 - i), now);
+            changed_at(&logs.join(format!("crash-{}.log", 1_700_000_000 + i)), now - MINUTE * (100 - i));
         }
+        // Dated after now: it counts as the oldest, rather than holding a place for ever.
+        changed_at(&logs.join("crash-4000000000.log"), now + DAY * 3650);
         for i in 0..12u32 {
-            file(&logs.join(format!("twin-report-2026-10-{:02}-1200.txt", i + 1)), MINUTE * (50 - i), now);
-            file(&logs.join(format!("midi-twin-2026-10-{:02}-1200.txt", i + 1)), MINUTE * (50 - i), now);
+            changed_at(&logs.join(format!("twin-report-2026-10-{:02}-1200.txt", i + 1)), now - MINUTE * (50 - i));
+            changed_at(&logs.join(format!("midi-twin-2026-10-{:02}-1200.txt", i + 1)), now - MINUTE * (50 - i));
         }
         // Not the app's, or not named as the app names them: all stay, however many and however old.
         let theirs = [
@@ -358,19 +336,18 @@ mod tests {
             "rust-session-notes.txt",
         ];
         for name in theirs {
-            file(&logs.join(name), DAY * 400, now);
+            changed_at(&logs.join(name), now - DAY * 400);
         }
         // A folder named like a crash log is never removed.
         fs::create_dir_all(logs.join("crash-1600000000.log")).unwrap();
 
         let done = sweep(&places, now);
-        assert_eq!(done.removed, 5 + 2 + 2);
+        assert_eq!(done.removed, 6 + 2 + 2);
         assert_eq!(done.failed, 0);
         let left = names(&logs);
         assert_eq!(left.iter().filter(|n| is_crash_log(n)).count(), CRASH_LOGS_KEPT + 1, "30 files and the folder");
-        assert!(
-            left.contains(&"crash-1700000034.log".to_owned()) && !left.contains(&"crash-1700000004.log".to_owned())
-        );
+        assert!(left.contains(&"crash-1700000034.log".to_owned()) && !left.contains(&"crash-1700000004.log".to_owned()));
+        assert!(!left.contains(&"crash-4000000000.log".to_owned()), "the one dated after now went first");
         assert_eq!(left.iter().filter(|n| is_report(n, "twin-report-")).count(), REPORTS_KEPT);
         assert_eq!(left.iter().filter(|n| is_report(n, "midi-twin-")).count(), REPORTS_KEPT);
         assert!(!left.contains(&"twin-report-2026-10-01-1200.txt".to_owned()), "the oldest goes");
@@ -384,26 +361,22 @@ mod tests {
     fn leftovers_go_once_old_enough_and_the_users_files_never() {
         let dir = test_folder("leftovers");
         let places = Places { data: dir.join("data"), temp: dir.join("temp") };
-        let now = SystemTime::now();
         let data = &places.data;
-        let old = [
+        // Gone an hour after they were written: what's left of a write.
+        let writes = [
             data.join("backup.txt.mo-part"),
             data.join("backup-songs.txt.mo-part"),
             data.join("presets.db.new-4120"),
             data.join("curves.db.new-77-journal"),
             data.join("Curves").join("Rise abcd1234.bwcurve.mo-part-4120-3"),
+        ];
+        // Gone a day after: they may be in use for a while.
+        let days = [
             data.join("twin").join("cs").join("library-copy.db"),
             data.join("twin").join("cs").join("library-copy.db-wal"),
             places.temp.join("mo-admin-4120-1730000000000000000-0.txt"),
             places.temp.join("mo-admin-4120-1730000000000000000-0-result.txt"),
         ];
-        for path in &old {
-            file(path, DAY * 2, now);
-        }
-        // Too new: may be being written or used right now (an hour for a write, a day for the rest).
-        file(&data.join("presets.db.new-9"), MINUTE * 10, now);
-        file(&data.join("Curves").join("Fall 0000ffff.bwcurve.mo-part-9-1"), MINUTE * 10, now);
-        file(&places.temp.join("mo-admin-9-9-9.txt"), Duration::from_secs(60 * 60 * 20), now);
         // The user's and the C# app's: every one stays, however old.
         let kept = [
             data.join("library.db"),
@@ -433,110 +406,147 @@ mod tests {
             places.temp.join("mo-admin-1-2.txt"),
             places.temp.join("someone else's.mid"),
             places.temp.join("presets.db.new-12"),
+            places.temp.join("MusicOrganiser-Rust").join("Bass line.mid"),
         ];
-        for path in &kept {
-            file(path, DAY * 400, now);
+        for path in writes.iter().chain(&days).chain(&kept) {
+            fresh(path);
         }
-
-        let done = sweep(&places, now);
-        assert_eq!(done, Tidied { removed: old.len(), bytes: old.len() as u64, failed: 0 });
-        for path in &old {
+        // Ages run from when each was made, so the sweep is run as if later on.
+        let made = SystemTime::now();
+        assert_eq!(sweep(&places, made + MINUTE * 10), Tidied::default(), "all too new");
+        let done = sweep(&places, made + MINUTE * 61);
+        assert_eq!(done, Tidied { removed: writes.len(), bytes: writes.len() as u64, failed: 0 });
+        assert!(writes.iter().all(|p| !p.exists()) && days.iter().all(|p| p.exists()), "only the hour's go");
+        let done = sweep(&places, made + DAY + MINUTE);
+        assert_eq!(done, Tidied { removed: days.len(), bytes: days.len() as u64, failed: 0 });
+        for path in writes.iter().chain(&days) {
             assert!(!path.exists(), "{} goes", path.display());
         }
+        assert_eq!(sweep(&places, made + DAY * 4000), Tidied::default());
         for path in &kept {
             assert!(path.exists(), "{} stays", path.display());
         }
-        assert!(data.join("presets.db.new-9").exists(), "an hour hasn't passed");
-        assert!(data.join("Curves").join("Fall 0000ffff.bwcurve.mo-part-9-1").exists());
-        assert!(places.temp.join("mo-admin-9-9-9.txt").exists(), "a day hasn't passed");
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn the_apps_own_temp_folder_keeps_a_weeks_files_and_leaves_links_alone() {
-        let dir = test_folder("temp");
+    fn a_copy_keeps_its_old_changed_time_but_is_as_old_as_when_it_was_made() {
+        let dir = test_folder("copied");
         let places = Places { data: dir.join("data"), temp: dir.join("temp") };
-        let own = places.temp.join(paths::TEMP_FOLDER);
         let now = SystemTime::now();
-        file(&own.join("Bass line.mid"), DAY * 8, now);
-        file(&own.join("drag 1").join("Chords.mid"), DAY * 8, now);
-        file(&own.join("Lead.mid"), DAY * 2, now);
-        file(&own.join("drag 2").join("Pad.mid"), DAY * 2, now);
-        // Outside the app's own folder, in the temp folder itself: not the app's, so it stays.
-        file(&places.temp.join("Bass line.mid"), DAY * 400, now);
-        let elsewhere = dir.join("yours");
-        file(&elsewhere.join("Song.flp"), DAY * 400, now);
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&elsewhere, own.join("a link")).unwrap();
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(elsewhere.join("Song.flp"), own.join("a file link.flp")).unwrap();
-        // Folders' own times, once their files are in: one quiet for a week, one with a file put in lately.
-        folder_time(&own.join("drag 1"), now - DAY * 8);
-
-        let done = sweep(&places, now);
-        assert_eq!(done.removed, 2);
-        assert!(!own.join("Bass line.mid").exists() && !own.join("drag 1").exists(), "a week old, and emptied");
-        assert!(own.join("Lead.mid").exists() && own.join("drag 2").join("Pad.mid").exists(), "newer stays");
-        assert!(places.temp.join("Bass line.mid").exists());
-        assert!(elsewhere.join("Song.flp").exists(), "nothing is removed through a link");
-        #[cfg(unix)]
-        assert!(
-            fs::symlink_metadata(own.join("a link")).is_ok()
-                && fs::symlink_metadata(own.join("a file link.flp")).is_ok()
-        );
+        let list = places.temp.join("mo-admin-1-2-3.txt");
+        // As a copy is: made now, last changed long ago.
+        changed_at(&list, now - DAY * 2500);
+        let made_is_known = fs::metadata(&list).unwrap().created().is_ok();
+        let done = sweep(&places, now + MINUTE);
+        if made_is_known {
+            assert_eq!(done, Tidied::default());
+            assert!(list.exists(), "made a minute ago, so not a day old");
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn the_launchers_folders_and_cargos_build_folders_are_never_gone_into() {
+    fn the_launchers_folders_and_folders_inside_are_never_gone_into() {
         let dir = test_folder("launcher");
         let places = Places { data: dir.join("data"), temp: dir.join("temp") };
-        let own = places.temp.join(paths::TEMP_FOLDER);
-        let now = SystemTime::now();
-        let old = DAY * 400;
-        // Files named as the sweep clears them elsewhere, inside the launcher's folders: beside the code, and wherever
-        // -BuildDir put a build folder (the data folder, its logs, the Temp folder, the app's own temp folder).
-        let launchers = [
+        // Files named as the sweep clears them, but inside folders: the launcher's, beside the code, and wherever
+        // -BuildDir put a build folder (the data folder, its logs, the Temp folder), and a folder the app might once
+        // have used in Temp.
+        let inside = [
             places.data.join("run-latest-rust").join("run").join("20261101-120000").join("music-organiser.exe"),
             places.data.join("run-latest-rust").join("app").join("target").join("debug").join("crash-1.log"),
             places.data.join("run-latest-rust").join("backup.txt.mo-part"),
             places.data.join("MusicOrganiser-build").join("debug").join("presets.db.new-1"),
             places.data.join("logs").join("MusicOrganiser-build").join("crash-1700000000.log"),
+            places.data.join("twin").join("backup.txt.mo-part"),
             places.temp.join("MusicOrganiser-build").join("mo-admin-1-2-3.txt"),
-            own.join("MusicOrganiser-build").join("debug").join("deps").join("libmo_app.rlib"),
-            own.join("musicorganiser-BUILD").join("CACHEDIR.TAG"),
-            own.join("Run-Latest-Rust").join("last-branch.txt"),
-            // A build folder cargo made under another name: its CACHEDIR.TAG says so.
-            own.join("Builds").join("target").join("CACHEDIR.TAG"),
-            own.join("Builds").join("target").join("debug").join("music-organiser"),
+            places.temp.join("MusicOrganiser-Rust").join("mo-admin-1-2-3.txt"),
         ];
-        for path in &launchers {
-            file(path, old, now);
+        for path in &inside {
+            fresh(path);
         }
         // Something of the sweep's own beside them, so it's seen to run.
-        file(&own.join("Bass line.mid"), old, now);
+        fresh(&places.temp.join("mo-admin-9-9-9.txt"));
 
-        let done = sweep(&places, now);
+        let done = sweep(&places, SystemTime::now() + DAY * 4000);
         assert_eq!(done, Tidied { removed: 1, bytes: 1, failed: 0 });
-        assert!(!own.join("Bass line.mid").exists());
-        for path in &launchers {
+        for path in &inside {
             assert!(path.exists(), "{} stays", path.display());
         }
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// Links named as the app names its files, and folders that are links: nothing goes, here or where they lead.
     #[cfg(unix)]
     #[test]
-    fn an_own_temp_folder_that_is_a_link_is_left_alone() {
-        let dir = test_folder("linked");
+    fn nothing_is_removed_through_a_link() {
+        use std::os::unix::fs::symlink;
+        let dir = test_folder("links");
         let places = Places { data: dir.join("data"), temp: dir.join("temp") };
-        let now = SystemTime::now();
         let yours = dir.join("yours");
-        file(&yours.join("Old song.flp"), DAY * 400, now);
+        let song = yours.join("Song.flp");
+        fresh(&song);
+        for name in ["library-copy.db", "x.mo-part-1-2", "backup.txt.mo-part"] {
+            fresh(&yours.join("cs").join(name));
+            fresh(&yours.join(name));
+        }
+        fs::create_dir_all(places.data.join("logs")).unwrap();
         fs::create_dir_all(&places.temp).unwrap();
-        std::os::unix::fs::symlink(&yours, places.temp.join(paths::TEMP_FOLDER)).unwrap();
-        assert_eq!(sweep(&places, now), Tidied::default());
-        assert!(yours.join("Old song.flp").exists());
+        symlink(&song, places.data.join("logs").join("crash-1700000000.log")).unwrap();
+        for i in 0..40 {
+            symlink(&song, places.data.join("logs").join(format!("twin-test-2026-10-01-{i:04}.txt"))).unwrap();
+        }
+        symlink(&song, places.data.join("backup.txt.mo-part")).unwrap();
+        symlink(&song, places.temp.join("mo-admin-1-2-3.txt")).unwrap();
+        symlink(&yours, places.data.join("twin")).unwrap();
+        symlink(&yours, places.data.join(CURVES)).unwrap();
+
+        assert_eq!(sweep(&places, SystemTime::now() + DAY * 4000), Tidied::default());
+        assert!(song.exists());
+        for name in ["library-copy.db", "x.mo-part-1-2", "backup.txt.mo-part"] {
+            assert!(yours.join("cs").join(name).exists() && yours.join(name).exists(), "{name}");
+        }
+        assert!(fs::symlink_metadata(places.temp.join("mo-admin-1-2-3.txt")).is_ok(), "the link itself stays too");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The same with Windows junctions (`mklink /J`, which needs no administrator rights).
+    #[cfg(windows)]
+    #[test]
+    fn nothing_is_removed_through_a_junction() {
+        let dir = test_folder("junctions");
+        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let yours = dir.join("yours");
+        let junction = |at: &Path, to: &Path| {
+            let made = std::process::Command::new("cmd").arg("/C").arg("mklink").arg("/J").arg(at).arg(to).output();
+            assert!(made.is_ok_and(|o| o.status.success()), "mklink /J {}", at.display());
+        };
+        for name in ["library-copy.db", "x.mo-part-1-2"] {
+            fresh(&yours.join("cs").join(name));
+            fresh(&yours.join(name));
+        }
+        fs::create_dir_all(places.data.join("logs")).unwrap();
+        fs::create_dir_all(&places.temp).unwrap();
+        junction(&places.data.join("twin"), &yours);
+        junction(&places.data.join(CURVES), &yours);
+        junction(&places.data.join("logs").join("crash-1700000000.log"), &yours);
+        junction(&places.temp.join("mo-admin-1-2-3.txt"), &yours);
+
+        assert_eq!(sweep(&places, SystemTime::now() + DAY * 4000), Tidied::default());
+        for name in ["library-copy.db", "x.mo-part-1-2"] {
+            assert!(yours.join("cs").join(name).exists() && yours.join(name).exists(), "{name}");
+        }
+        assert!(fs::symlink_metadata(places.temp.join("mo-admin-1-2-3.txt")).is_ok(), "the junction itself stays too");
+        // Junctions first, so removing the test folder never reaches through them.
+        for at in [
+            places.data.join("twin"),
+            places.data.join(CURVES),
+            places.data.join("logs").join("crash-1700000000.log"),
+            places.temp.join("mo-admin-1-2-3.txt"),
+        ] {
+            let _ = fs::remove_dir(at);
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 
