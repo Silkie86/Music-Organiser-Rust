@@ -3,7 +3,8 @@ resolver = "3"
 members = ["crates/*", "tools/formatlab", "tools/miditwin", "tools/theorybench", "tools/twin"]
 # The galaxy check is a workspace of its own, so its wgpu never gets mixed into the app's build.
 # The fuzzer (fuzz/) is one too: it's built with nightly Rust by cargo-fuzz.
-exclude = ["tools/galaxycheck", "fuzz"]
+# vendor/femtovg is a patched copy of a library (below), not one of the app's own crates.
+exclude = ["tools/galaxycheck", "fuzz", "vendor/femtovg"]
 
 [workspace.package]
 version = "0.1.0"
@@ -21,6 +22,11 @@ thread-priority = "3.1"
 rayon = "1.11"
 # Draws the custom views (arrangement, later the piano roll and waveforms) on the CPU.
 tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
+
+# Slint's drawing library, with one fix: it kept rebuilding its graphics card steps on every frame
+# (vendor/femtovg/PATCHED.md says what and when to remove it).
+[patch.crates-io]
+femtovg = { path = "vendor/femtovg" }
 
 [workspace.lints.rust]
 # Deny, not forbid: the code Slint generates allows it locally.
