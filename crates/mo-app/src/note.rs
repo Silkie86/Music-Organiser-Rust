@@ -14,8 +14,8 @@ use chrono::{DateTime, Local};
 pub const DRAFT_FILE: &str = "draft.txt";
 /// What the draft is written as first ([`keep_draft`]): made new beside `draft.txt`, written whole, then renamed over
 /// it, so a write cut short (a crash that ends the app, a full disk, a power cut) leaves the draft from before whole,
-/// not an empty file. A crash between the writing and the renaming leaves this behind; the next draft written removes
-/// it first, so at most one small file stays. The start-up sweep never touches it (rule 17: it may hold the newest
+/// not an empty file. A crash between the writing and the renaming leaves this behind; the next draft written this
+/// way removes it first, so at most one small file stays. The start-up sweep never touches it (rule 17: it may hold the newest
 /// words), and it's never read back as the draft: it may be cut short.
 pub const DRAFT_PART: &str = "draft.txt.mo-part";
 /// The same, for a draft written without its turn ([`keep_draft_alone`]): a crash, or the app closing, while the
@@ -117,7 +117,7 @@ pub fn read_draft(folder: &Path) -> Option<String> {
 
 /// Keeps what's typed so far, through [`DRAFT_PART`], so the draft from before stays whole until the new one is. Says
 /// whether it was kept. Failing to keep it is not worth stopping the typing for: the caller keeps the words for
-/// another try.
+/// another try, or, as the app ends, somewhere else.
 pub fn keep_draft(folder: &Path, text: &str) -> bool {
     write_draft(folder, text, DRAFT_PART)
 }
@@ -317,6 +317,16 @@ mod tests {
             .is_err()
         );
         assert_eq!(tries.get(), 1);
+        // A file another program has open (Windows' error 32, which std gives no kind of its own) is held too.
+        tries.set(0);
+        assert!(
+            tried_while_held(|| {
+                tries.set(tries.get() + 1);
+                Err(std::io::Error::from_raw_os_error(32))
+            })
+            .is_err()
+        );
+        assert_eq!(tries.get(), if cfg!(windows) { RENAME_TRIES } else { 1 });
     }
 
     #[cfg(unix)]
