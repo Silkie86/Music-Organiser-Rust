@@ -20,6 +20,7 @@ use mo_app::galaxy_picture::{Drawn, Picture};
 use mo_app::galaxy_view::{Hold, Moved, View, most_zoom_for};
 use mo_app::log;
 use mo_app::sounds as list;
+use mo_app::{frame_timing, sweep_timing};
 use mo_sounds::galaxy::{self, Placing, Step};
 use mo_sounds::{SoundsDb, StarPoint};
 use slint::{ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, Timer, TimerMode, VecModel};
@@ -257,6 +258,7 @@ fn fly(app: &AppWindow) {
     FLIGHT.with(|t| {
         t.start(TimerMode::Repeated, FRAME, move || {
             let Some(app) = weak.upgrade() else { return };
+            let _doing = crate::watchdog::doing(frame_timing::GLIDING);
             let now = Instant::now();
             let dt = LAST_FRAME.with(|l| l.borrow_mut().replace(now).map_or(FRAME, |was| now - was));
             let going = PAGE.with(|p| p.borrow_mut().galaxy.view.glide(dt.min(Duration::from_millis(100))));
@@ -342,6 +344,7 @@ pub(super) fn wire(app: &AppWindow) {
     let weak = app.as_weak();
     data.on_galaxy_move(move |x, y| {
         let Some(app) = weak.upgrade() else { return };
+        let _doing = crate::watchdog::doing("Galaxy: mouse move");
         let moved = PAGE.with(|p| {
             let g = &mut p.borrow_mut().galaxy;
             g.inside = true;
@@ -350,6 +353,7 @@ pub(super) fn wire(app: &AppWindow) {
         let data = app.global::<SoundsData>();
         match moved {
             Moved::Panned => {
+                let _doing = crate::watchdog::doing(frame_timing::DRAGGING);
                 data.set_galaxy_hover_text("".into());
                 data.set_galaxy_hover_shown(false);
                 draw(&app);
@@ -516,8 +520,10 @@ fn warm(paths: Vec<String>) {
     use std::io::Read;
     let mut buffer = vec![0u8; AHEAD_BYTES];
     for path in paths {
-        if let Ok(mut f) = std::fs::File::open(&path) {
-            let _ = f.read(&mut buffer);
+        if let Ok(mut f) = std::fs::File::open(&path)
+            && f.read(&mut buffer).is_ok()
+        {
+            sweep_timing::read_ahead(&path);
         }
     }
 }
@@ -577,13 +583,17 @@ fn read_ahead(from: (f32, f32), to: (f32, f32), dt: Duration, passed: &[usize]) 
 /// The mouse swept from `from` to `to`: every star along the way, not just where it landed (a quick sweep moves many
 /// points between two moves), plays in turn.
 fn swept(app: &AppWindow, from: (f32, f32), to: (f32, f32)) {
+    let _doing = crate::watchdog::doing(frame_timing::SWEEPING);
     let steps = ((to.0 - from.0).hypot(to.1 - from.1) / SWEEP_STEP).ceil().max(1.0) as usize;
     let mut passed: Vec<usize> = Vec::new();
+    // Whether the first star passed is the one under the last mouse point.
+    let mut from_a_star = false;
     for i in 0..=steps {
         let t = i as f32 / steps as f32;
         if let Some(at) = star_at(from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t)
             && passed.last() != Some(&at)
         {
+            from_a_star |= i == 0;
             passed.push(at);
         }
     }
@@ -595,6 +605,18 @@ fn swept(app: &AppWindow, from: (f32, f32), to: (f32, f32)) {
     if let Some(was) = was {
         read_ahead(from, to, now - was, &passed);
     }
+    // Timed from here: Slint doesn't say when the move happened, so how late the window heard of it isn't known. The
+    // star under the last mouse point was reached on an earlier move (as C#'s HitPath, which starts past it), so its
+    // wait isn't started again; on the sweep's first move it's reached now.
+    let skip = usize::from(was.is_some() && from_a_star);
+    PAGE.with(|p| {
+        let p = p.borrow();
+        for &at in passed.iter().skip(skip) {
+            if let Some(s) = p.list.sound(at) {
+                sweep_timing::reached(&s.path, None);
+            }
+        }
+    });
     for at in passed {
         reached(app, at);
     }
@@ -650,7 +672,13 @@ fn reached(app: &AppWindow, at: usize) {
 /// Plays a star the sweep reached, and names it beside the mouse. It isn't picked: a sweep is for listening along.
 /// It goes on the trail.
 fn sweep_play(app: &AppWindow, at: usize) {
-    let name = PAGE.with(|p| p.borrow().list.sound(at).map(|s| format!("{}  ·  {}", s.name(), s.sound_type)));
+    let _doing = crate::watchdog::doing("Galaxy: play a swept sound");
+    let name = PAGE.with(|p| {
+        let p = p.borrow();
+        let s = p.list.sound(at)?;
+        sweep_timing::asked(&s.path);
+        Some(format!("{}  ·  {}", s.name(), s.sound_type))
+    });
     app.global::<SoundsData>().set_galaxy_hover_text(name.unwrap_or_default().into());
     on_trail(app, at, true);
     super::play_sound(app, at, 0.0, SWEEP_SECONDS);
@@ -698,6 +726,7 @@ fn go_to_swept(app: &AppWindow, i: usize) {
 
 /// The trail on the map (a line through the swept stars and a dot on each, fainter with age) and on the Swept card.
 fn show_trail(app: &AppWindow) {
+    let _doing = crate::watchdog::doing("Galaxy: show the trail");
     let (path, dots, lines) = PAGE.with(|p| {
         let p = p.borrow();
         let g = &p.galaxy;
@@ -749,6 +778,7 @@ fn show_trail(app: &AppWindow) {
 /// The names over the map where the view is now; the neighbourhoods are found again (on the pool) when the stars on
 /// show have changed.
 fn show_names(app: &AppWindow) {
+    let _doing = crate::watchdog::doing("Galaxy: show the names");
     let ask = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         let shown = p.shown.clone();
@@ -763,6 +793,7 @@ fn show_names(app: &AppWindow) {
     if let Some((stars, kinds, shown)) = ask {
         let find = move || background::on_pool(|| names::find(&stars, &kinds.of, &kinds.names, &kinds.colours, &shown));
         let take = |app: &AppWindow, found: Vec<Region>, shown: &Arc<Vec<usize>>| {
+            let _doing = crate::watchdog::doing("Galaxy: take the names found");
             let current = PAGE.with(|p| {
                 let g = &mut p.borrow_mut().galaxy;
                 let current = g.regions_for.as_ref().is_some_and(|f| Arc::ptr_eq(f, shown));
@@ -798,6 +829,7 @@ fn show_names(app: &AppWindow) {
 
 /// Puts the names found where they are on the view now.
 fn place_names(app: &AppWindow) {
+    let _doing = crate::watchdog::doing("Galaxy: place the names (property updates)");
     let labels = PAGE.with(|p| {
         let g = &p.borrow().galaxy;
         // About a capital's width with its letter spacing, and the line with its padding (the names are Type.meta,
@@ -820,6 +852,7 @@ fn place_names(app: &AppWindow) {
 
 /// Names the star under the mouse and rings it, so it's plain which one a click picks.
 fn hover(app: &AppWindow) {
+    let _doing = crate::watchdog::doing("Galaxy: hover");
     let data = app.global::<SoundsData>();
     // While a button is held, the ring stays away and a sweep's name stays as it is.
     if PAGE.with(|p| p.borrow().galaxy.view.pressed()) {
@@ -893,6 +926,7 @@ pub(super) fn forget(g: &mut Galaxy) {
 
 /// The view came on show (or a new library did while it was): reads the map the first time.
 pub(super) fn shown(app: &AppWindow) {
+    let _doing = crate::watchdog::doing("Galaxy: came on show");
     let start = PAGE.with(|p| {
         let p = p.borrow();
         p.galaxy.stars.is_none() && p.galaxy.loading.is_none()
@@ -919,6 +953,7 @@ pub(super) fn index_known(app: &AppWindow) {
 /// Reads the saved map for the Placed by choice and brings it up to date, or lays it out afresh when `fresh`, on the
 /// low-priority pool, with a card showing how far it's got. A newer ask stops an older one.
 fn load(app: &AppWindow, fresh: bool) {
+    let _doing = crate::watchdog::doing("Galaxy: ask for the map");
     let ask = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         let index = p.index.clone();
@@ -986,6 +1021,7 @@ fn load(app: &AppWindow, fresh: bool) {
         stars.map(|s| (s.0, colours, kinds))
     };
     let arrive = move |app: &AppWindow, stars: Arrived, cancel: &Arc<AtomicBool>| {
+        let _doing = crate::watchdog::doing("Galaxy: the map arrived");
         let current = PAGE.with(|p| {
             let mut p = p.borrow_mut();
             let g = &mut p.galaxy;
@@ -1056,6 +1092,7 @@ fn kinds_of(list: &list::SoundList) -> Kinds {
 }
 
 fn show_note(app: &AppWindow) {
+    let _doing = crate::watchdog::doing("Galaxy: show the note");
     let data = app.global::<SoundsData>();
     PAGE.with(|p| {
         let g = &p.borrow().galaxy;
@@ -1067,6 +1104,7 @@ fn show_note(app: &AppWindow) {
 /// Draws the stars again (the map, the view, the filters or the window's size changed): on the graphics card at
 /// once, or without one off the window's thread.
 pub(super) fn draw(app: &AppWindow) {
+    let _doing = crate::watchdog::doing("Galaxy: draw");
     let on_show = PAGE.with(|p| {
         let p = p.borrow();
         p.view == super::GALAXY && p.galaxy.stars.is_some()
@@ -1125,7 +1163,10 @@ pub(super) fn draw(app: &AppWindow) {
     };
     place_picture(app);
     if HERE.with(|h| *h.borrow()) {
-        let (d, px) = to_image(ask.draw());
+        let (d, px) = {
+            let _doing = crate::watchdog::doing("Galaxy: CPU picture");
+            to_image(ask.draw())
+        };
         drawn(app, d, px);
         return;
     }
@@ -1155,6 +1196,7 @@ pub(super) fn draw(app: &AppWindow) {
 /// Sorts the shown stars onto the grid (and packs them for the card) again when the map, the filters or the colours
 /// have changed, off the window's thread. Until they come, the last ones stay in use.
 fn pack(app: &AppWindow, palette: &[[u8; 3]], for_card: bool) {
+    let _doing = crate::watchdog::doing("Galaxy: ask for the stars to be sorted");
     let ask = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         let shown = p.shown.clone();
@@ -1209,6 +1251,7 @@ fn pack(app: &AppWindow, palette: &[[u8; 3]], for_card: bool) {
 
 /// The grid (and the packed stars) came: newer than the ones in use, they're used, and the galaxy is drawn again.
 fn packed(app: &AppWindow, done: Packed) {
+    let _doing = crate::watchdog::doing("Galaxy: take the sorted stars");
     let newer = PAGE.with(|p| {
         let g = &mut p.borrow_mut().galaxy;
         if done.version <= g.set_got || done.version > g.set_asked {
@@ -1229,6 +1272,7 @@ fn packed(app: &AppWindow, done: Packed) {
 
 /// The whole map in miniature for the mini-map, as it is with the filters now; drawn off the window's thread.
 fn draw_mini(app: &AppWindow) {
+    let _doing = crate::watchdog::doing("Galaxy: ask for the mini-map");
     let types = app.global::<Theme>().get_sound_types();
     let mut palette: Vec<[u8; 3]> = types.iter().map(|c| [c.red(), c.green(), c.blue()]).collect();
     palette.push([110, 110, 110]);
@@ -1251,6 +1295,7 @@ fn draw_mini(app: &AppWindow) {
     });
     let Some(ask) = ask else { return };
     let show = |app: &AppWindow, d: Drawn, px: SharedPixelBuffer<Rgba8Pixel>| {
+        let _doing = crate::watchdog::doing("Galaxy: show the mini-map picture");
         // Only the newest map's miniature.
         if PAGE.with(|p| p.borrow().galaxy.set_got) == d.id {
             app.global::<SoundsData>().set_galaxy_mini_image(Image::from_rgba8_premultiplied(px));
@@ -1293,6 +1338,7 @@ fn mini_view() -> View {
 
 /// Shows the mini-map once the view has flown in (and there's room for it), with a box round the part on show.
 fn show_mini(app: &AppWindow) {
+    let _doing = crate::watchdog::doing("Galaxy: show the mini-map");
     let mini = PAGE.with(|p| {
         let g = &p.borrow().galaxy;
         let v = &g.view;
@@ -1365,6 +1411,8 @@ fn draw_on_card(app: &AppWindow, gpu: &gpu::Gpu, generation: u64) -> Result<bool
     let texture = CARD.with(|c| -> Result<Option<_>, String> {
         let mut c = c.borrow_mut();
         if c.as_ref().is_none_or(|on| on.generation != generation) {
+            // The first time, the card builds the shader and its steps, which can take a while.
+            let _doing = crate::watchdog::doing("Galaxy: set up the GPU painter");
             let sky = gpu::checked(&gpu.device, || Sky::new(&gpu.device, &gpu.queue))?;
             *c = Some(OnCard { generation, sky, stars: 0 });
         }
@@ -1372,15 +1420,18 @@ fn draw_on_card(app: &AppWindow, gpu: &gpu::Gpu, generation: u64) -> Result<bool
         if on.stars != version
             && let Some(bytes) = &packed
         {
+            let _doing = crate::watchdog::doing("Galaxy: upload the stars to the GPU");
             gpu::checked(&gpu.device, || on.sky.set_stars(bytes))?;
             on.stars = version;
         }
         if !on.sky.has_stars() {
             return Ok(None);
         }
+        let _doing = crate::watchdog::doing("Galaxy: draw on the GPU");
         gpu::checked(&gpu.device, || on.sky.draw(&view, scale, &look, background)).map(Some)
     })?;
     let Some(texture) = texture else { return Ok(false) };
+    let _doing = crate::watchdog::doing("Galaxy: show the GPU picture (property updates)");
     let image = Image::try_from(texture).map_err(|e| format!("Slint wouldn't show the picture: {e}"))?;
     PAGE.with(|p| {
         let g = &mut p.borrow_mut().galaxy;
@@ -1408,6 +1459,7 @@ fn to_image(mut d: Drawn) -> (Drawn, SharedPixelBuffer<Rgba8Pixel>) {
 /// A picture came. Any newer than the one on show is shown, even when a newer one still is on its way: while the wheel
 /// keeps turning, each picture that's done is placed where its stars are now, instead of the first one stretching on.
 fn drawn(app: &AppWindow, d: Drawn, px: SharedPixelBuffer<Rgba8Pixel>) {
+    let _doing = crate::watchdog::doing("Galaxy: show the CPU picture");
     let current = PAGE.with(|p| {
         let g = &mut p.borrow_mut().galaxy;
         if d.id <= g.drawn_id || d.id > g.asked {
@@ -1429,6 +1481,7 @@ fn drawn(app: &AppWindow, d: Drawn, px: SharedPixelBuffer<Rgba8Pixel>) {
 /// Moves and stretches the last picture to where its stars are on the view now, at once, so the wheel and a drag
 /// answer straight away; the sharp picture for the new view replaces it when it's drawn.
 fn place_picture(app: &AppWindow) {
+    let _doing = crate::watchdog::doing("Galaxy: move the picture (property updates)");
     let place = PAGE.with(|p| {
         let g = &p.borrow().galaxy;
         g.drawn.map(|drawn| g.view.place_of(&drawn))
