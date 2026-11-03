@@ -9,6 +9,7 @@ pub mod backup;
 pub mod backup_gone;
 pub mod backup_older;
 pub mod bitwig_convert;
+pub mod finder;
 pub mod frame_timing;
 pub mod galaxy_grid;
 pub mod galaxy_look;

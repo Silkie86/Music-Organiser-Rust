@@ -20,6 +20,8 @@ use std::time::{Duration, Instant};
 use chrono::{Local, NaiveDateTime};
 use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
+use mo_app::finder::{self, Kind};
+use mo_app::places::Place;
 use mo_app::shortcuts::{Shortcuts, what_of};
 use mo_app::sounds::{self as list, Filters, Length, Order, SoundList};
 use mo_app::{log, sweep_timing, to_bitwig, year_strip};
@@ -33,6 +35,7 @@ use mo_sounds::usage::{self, Usage};
 use mo_sounds::{Sound, SoundsDb, music};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, Timer, TimerMode, VecModel};
 
+use crate::finder::How;
 use crate::{
     AlikeLine, AppWindow, CardAction, FolderLine, MenuItem, PickedSound, SoundFact, SoundLine, SoundTile, SoundsData,
     TileRow, TypeChipInfo, YearBar,
@@ -54,7 +57,8 @@ const GALAXY: i32 = 2;
 const HISTORY: i32 = 3;
 const REDISCOVER: i32 = 4;
 const KITS: i32 = 5;
-const VIEWS: [&str; 6] = ["Tiles", "List", "Galaxy", "History", "Rediscover", "Kits"];
+/// The views, in the switch's order. Ctrl+K offers each one as a page of its own.
+pub const VIEWS: [&str; 6] = ["Tiles", "List", "Galaxy", "History", "Rediscover", "Kits"];
 /// The C# app's export folder setting in `library.db` (kits go in its Kits folder).
 const EXPORT_FOLDER_KEY: &str = "export_folder";
 
@@ -94,6 +98,8 @@ struct Page {
     columns: usize,
     /// The picked sound, as its place in `list`.
     picked: Option<usize>,
+    /// A sound Ctrl+K jumped to that the filters hid: picked once the list without them arrives.
+    to_pick: Option<usize>,
     autoplay: bool,
     /// Counts the asks for a new list, so an older answer that arrives late is dropped.
     asked: u64,
@@ -137,6 +143,7 @@ impl Default for Page {
             history: Vec::new(),
             columns: 4,
             picked: None,
+            to_pick: None,
             autoplay: false,
             asked: 0,
             read: false,
@@ -411,6 +418,20 @@ pub fn graphics_gone(app: &AppWindow) {
 /// `feed`'s cards.
 pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: Feed, shortcuts: &Shortcuts) {
     wire(app, feed, shortcuts);
+    crate::finder::on_open(Kind::Sound, |app, hit, how| {
+        let Some(at) = hit.id.parse::<i64>().ok().and_then(|id| PAGE.with(|p| p.borrow().places.get(&id).copied()))
+        else {
+            return false;
+        };
+        match how {
+            How::Play => play_sound(app, at, 0.0, mo_audio::MAX_SECONDS),
+            How::Open | How::InDaw => {
+                crate::go_to(app, Place::Sounds.index() as i32);
+                show_sound(app, at);
+            }
+        }
+        true
+    });
     PAGE.with(|p| p.borrow_mut().galaxy.db = Some(sounds_db.clone()));
     reading(app);
     let here = HERE.with(|h| *h.borrow());
@@ -757,10 +778,12 @@ fn use_known(app: &AppWindow, list: Arc<SoundList>) {
         if p.list.len() != list.len() {
             return None;
         }
-        p.list = list;
+        p.list = list.clone();
         Some(p.picked)
     });
     let Some(picked) = picked else { return };
+    // Ctrl+K now knows which sounds you use most.
+    crate::finder::add_source(app, "sounds", Arc::new(finder::Sounds(list)));
     refresh(app);
     // What Rediscover dug out didn't know your taste yet.
     if PAGE.with(|p| p.borrow().re_started) {
@@ -814,6 +837,7 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
         p.read = true;
         p.history = library.played;
         p.list = library.list;
+        p.to_pick = None;
         p.places = library.places;
         p.types = library.types;
         p.view = view.and_then(|v| VIEWS.iter().position(|n| *n == v)).map_or(TILES, |i| i as i32);
@@ -826,6 +850,8 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
         // An answer still on its way was for the old list: it's dropped.
         p.re_asked += 1;
     });
+    let list = PAGE.with(|p| p.borrow().list.clone());
+    crate::finder::add_source(app, "sounds", Arc::new(finder::Sounds(list)));
     refresh(app);
     show_rediscover_chips(app);
     kit::show(app);
@@ -1401,7 +1427,38 @@ fn listed(app: &AppWindow, id: u64, shown: Vec<usize>, years: YearCounts) {
         }
         // The filters dim the stars they leave out.
         galaxy::draw(app);
+        if let Some(at) = PAGE.with(|p| p.borrow_mut().to_pick.take()) {
+            pick(app, at);
+        }
     }
+}
+
+/// Shows one of the views by its name (Ctrl+K's "Sounds › Galaxy"), as the view switch does.
+pub fn show_view(app: &AppWindow, name: &str) {
+    if let Some(v) = VIEWS.iter().position(|n| *n == name) {
+        app.global::<SoundsData>().invoke_pick_view(v as i32);
+    }
+}
+
+/// Picks the sound at `at` in the list and brings it into view (Ctrl+K). A view that only shows some sounds (History,
+/// Rediscover, Kits) gives way to Tiles, and filters that hide it are cleared; the search box with them.
+fn show_sound(app: &AppWindow, at: usize) {
+    let view = PAGE.with(|p| p.borrow().view);
+    if matches!(view, HISTORY | REDISCOVER | KITS) {
+        show_view(app, VIEWS[TILES as usize]);
+    }
+    let hidden = PAGE.with(|p| !p.borrow().shown.contains(&at));
+    if !hidden {
+        pick(app, at);
+        return;
+    }
+    PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.filters = Filters::default();
+        p.to_pick = Some(at);
+    });
+    app.global::<SoundsData>().set_search(SharedString::new());
+    refresh(app);
 }
 
 /// The year strip: each year, how full it is, and whether the filter has it.
