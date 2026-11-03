@@ -727,16 +727,24 @@ pub(crate) fn remove_marked(folder: &Path, stop: &AtomicBool) -> Result<(), NotR
     finish(folder)
 }
 
-/// How many times [`finish`] tries the folder itself, a tenth of a second apart.
+/// How many times [`finish`] looks at the folder, and tries it, a tenth of a second apart.
 const LAST_TRIES: usize = 5;
 
 /// Takes the marker out of a copy that's empty but for it, then the folder. Something put in it meanwhile keeps it, and
-/// its marker, but the files Explorer and Finder write by themselves into a folder open in a window: those go too. The
-/// folder is tried a few times (a virus checker or the indexer can hold a file that's been removed for a moment); if it
-/// still won't go, the marker goes back as it was, so the folder is still known for the half copy it is, and cleared
-/// the next time.
+/// its marker, but the files Explorer and Finder write by themselves into a folder open in a window: those go too. A
+/// virus checker or the indexer can hold a file that's been removed for a moment, so it's looked at, and the folder
+/// tried, a few times; if it still won't go, the marker goes back as it was, so the folder is still known for the half
+/// copy it is, and cleared the next time.
 fn finish(folder: &Path) -> Result<(), NotRemoved> {
-    if let Some(name) = put_in(folder) {
+    let mut left = put_in(folder);
+    for _ in 1..LAST_TRIES {
+        if left.is_none() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+        left = put_in(folder);
+    }
+    if let Some(name) = left {
         return Err(NotRemoved::Failed(format!(
             "{name} was put in {} while it was cleared, so the rest of it stays: it's looked at again next time.",
             text(folder)
