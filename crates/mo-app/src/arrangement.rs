@@ -4,19 +4,19 @@
 //! about the mouse, dragging moves around and a double-click fits it all in (again to go back). Ported from the C#
 //! app's `ArrangementView`.
 //!
-//! [`View`] keeps where the view is and answers the mouse; [`View::frame`] draws it: the shapes as a picture (on the
-//! CPU with tiny-skia, away from the window's thread), and the words as labels for the window to lay on top, so they
-//! use the app's own fonts.
+//! [`View`] keeps where the view is and answers the mouse; [`View::frame`] works out what to draw, away from the window's
+//! thread: the shapes, as a [`Scene`] the graphics card draws (or the processor, where there's no card: see
+//! [`crate::shapes`]), and the words as labels for the window to lay on top, so they use the app's own fonts.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use mo_formats::arrangement::{Arrangement, AudioPart, LaneKind, PreviewClip, PreviewLane};
-use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
 
 use mo_library::songs::thousands;
 
+use crate::shapes::{Colour, Scene};
 use crate::themes::Look;
 
 /// A project's arrangement views, read and with its audio files looked for: what [`read`] gives.
@@ -224,12 +224,11 @@ pub struct Hover {
     pub text: String,
 }
 
-/// A drawn view: the picture (RGBA, premultiplied, `scale` pixels to a point) and the words to lay on it.
+/// A view worked out for drawing: its shapes (in points, for the graphics card or [`Scene::paint`]) and the words to lay
+/// on them.
 #[derive(Clone, Debug)]
 pub struct Frame {
-    pub pixel_width: u32,
-    pub pixel_height: u32,
-    pub rgba: Vec<u8>,
+    pub scene: Scene,
     pub labels: Vec<Label>,
     pub hover: Option<Hover>,
     pub header_width: f64,
@@ -486,15 +485,13 @@ impl View {
         out
     }
 
-    /// Draws the view at `scale` pixels to a point. Away from the window's thread: a big song has millions of notes.
+    /// Works out what to draw for the view at `scale` pixels to a point (a waveform has a column for each pixel). Away
+    /// from the window's thread: a big song has millions of notes.
     pub fn frame(&self, palette: &Palette, scale: f64) -> Frame {
         let mut d = Draw::new(self, palette, scale);
         d.draw();
-        let (pixel_width, pixel_height) = (d.pixmap.width(), d.pixmap.height());
         Frame {
-            pixel_width,
-            pixel_height,
-            rgba: d.pixmap.take(),
+            scene: d.scene,
             labels: d.labels,
             hover: self.hover(),
             header_width: self.header_width(),
@@ -537,9 +534,8 @@ impl Box2 {
 }
 
 /// A colour with `alpha` (0 to 1).
-fn colour(rgb: u32, alpha: f64) -> Color {
-    let a = (alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
-    Color::from_rgba8((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8, a)
+fn colour(rgb: u32, alpha: f64) -> Colour {
+    Colour::rgb(rgb, alpha)
 }
 
 /// Moves a colour `amount` of the way to black.
@@ -557,11 +553,13 @@ fn lighten(rgb: u32, amount: f64) -> u32 {
     ch(16) << 16 | ch(8) << 8 | ch(0)
 }
 
+/// Works out a view's shapes and words.
 struct Draw<'a> {
     v: &'a View,
     p: &'a Palette,
-    pixmap: Pixmap,
-    transform: Transform,
+    /// Pixels to a point.
+    scale: f64,
+    scene: Scene,
     labels: Vec<Label>,
     clip_labels: usize,
 }
@@ -569,51 +567,16 @@ struct Draw<'a> {
 impl<'a> Draw<'a> {
     fn new(v: &'a View, p: &'a Palette, scale: f64) -> Draw<'a> {
         let scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
-        let size = |points: f64| ((points * scale).ceil().clamp(1.0, 16384.0)) as u32;
-        let pixmap = Pixmap::new(size(v.width), size(v.height)).unwrap_or_else(|| {
-            // 1 by 1 is always possible.
-            Pixmap::new(1, 1).unwrap_or_else(|| unreachable!())
-        });
-        Draw {
-            v,
-            p,
-            pixmap,
-            transform: Transform::from_scale(scale as f32, scale as f32),
-            labels: Vec::new(),
-            clip_labels: 0,
-        }
+        Draw { v, p, scale, scene: Scene::new(v.width, v.height, p.surface), labels: Vec::new(), clip_labels: 0 }
     }
 
-    fn rect(&mut self, r: Box2, c: Color) {
-        let paint = Paint { shader: tiny_skia::Shader::SolidColor(c), anti_alias: false, ..Paint::default() };
-        if let Some(r) = Rect::from_xywh(r.x as f32, r.y as f32, r.w as f32, r.h as f32) {
-            self.pixmap.fill_rect(r, &paint, self.transform, None);
-        }
+    fn rect(&mut self, r: Box2, c: Colour) {
+        self.scene.rect((r.x, r.y, r.w, r.h), c);
     }
 
     /// A rectangle with rounded corners, filled and (when `edge` is some) outlined.
-    fn rounded(&mut self, r: Box2, radius: f64, fill: Color, edge: Option<Color>) {
-        let rad = radius.min(r.w / 2.0).min(r.h / 2.0).max(0.0) as f32;
-        let (x, y, w, h) = (r.x as f32, r.y as f32, r.w as f32, r.h as f32);
-        let mut pb = PathBuilder::new();
-        pb.move_to(x + rad, y);
-        pb.line_to(x + w - rad, y);
-        pb.quad_to(x + w, y, x + w, y + rad);
-        pb.line_to(x + w, y + h - rad);
-        pb.quad_to(x + w, y + h, x + w - rad, y + h);
-        pb.line_to(x + rad, y + h);
-        pb.quad_to(x, y + h, x, y + h - rad);
-        pb.line_to(x, y + rad);
-        pb.quad_to(x, y, x + rad, y);
-        pb.close();
-        let Some(path) = pb.finish() else { return };
-        let mut paint = Paint { shader: tiny_skia::Shader::SolidColor(fill), anti_alias: true, ..Paint::default() };
-        self.pixmap.fill_path(&path, &paint, FillRule::Winding, self.transform, None);
-        if let Some(e) = edge {
-            paint.shader = tiny_skia::Shader::SolidColor(e);
-            let stroke = Stroke { width: 1.0, ..Stroke::default() };
-            self.pixmap.stroke_path(&path, &paint, &stroke, self.transform, None);
-        }
+    fn rounded(&mut self, r: Box2, radius: f64, fill: Colour, edge: Option<Colour>) {
+        self.scene.rounded((r.x, r.y, r.w, r.h), radius, fill, edge);
     }
 
     fn label(&mut self, area: Area, r: Box2, text: impl Into<String>, style: Style) {
@@ -624,7 +587,6 @@ impl<'a> Draw<'a> {
         let v = self.v;
         let a = v.arrangement.clone();
         let (w, h) = (v.width, v.height);
-        self.pixmap.fill(colour(self.p.surface, 1.0));
         if w < 60.0 || h < 40.0 {
             return;
         }
@@ -806,27 +768,20 @@ impl<'a> Draw<'a> {
     }
 
     /// Draws a clip's notes as a little piano roll, spread over the lane's lowest to highest key.
-    fn notes(&mut self, clip: &PreviewClip, inner: Box2, visible: Box2, fill: Color, keys: (u8, u8)) {
+    fn notes(&mut self, clip: &PreviewClip, inner: Box2, visible: Box2, fill: Colour, keys: (u8, u8)) {
         let v = self.v;
         let (lo, hi) = (keys.0 as f64, keys.1 as f64);
         let rows = (hi - lo + 1.0).max(1.0);
         let row_h = (inner.h / rows).clamp(1.2, 5.0);
         let span = inner.h - row_h;
         let zoom = v.zoom();
-        let paint = Paint { shader: tiny_skia::Shader::SolidColor(fill), anti_alias: false, ..Paint::default() };
-        let mut pb = PathBuilder::new();
         for n in clip.notes.iter().filter(|n| !n.muted) {
             let x = v.x(clip.start + n.start);
             let nw = (n.length * zoom - 0.5).max(1.2);
             let ny = inner.y + if rows <= 1.0 { span / 2.0 } else { span * (1.0 - (n.key as f64 - lo) / (rows - 1.0)) };
-            if let Some(b) = Box2::new(x, ny, nw, row_h).intersect(&visible)
-                && let Some(r) = Rect::from_xywh(b.x as f32, b.y as f32, b.w as f32, b.h as f32)
-            {
-                pb.push_rect(r);
+            if let Some(b) = Box2::new(x, ny, nw, row_h).intersect(&visible) {
+                self.rect(b, fill);
             }
-        }
-        if let Some(path) = pb.finish() {
-            self.pixmap.fill_path(&path, &paint, FillRule::Winding, self.transform, None);
         }
     }
 
@@ -863,7 +818,7 @@ impl<'a> Draw<'a> {
         }
     }
 
-    /// Draws an audio part's waveform, a thin bar a column, mirrored about the clip's middle. False when the file's
+    /// Draws an audio part's waveform, a thin bar a pixel, mirrored about the clip's middle. False when the file's
     /// speed in the song can't be told, so the caller draws the plain band.
     #[allow(clippy::too_many_arguments)]
     fn waveform(
@@ -891,46 +846,35 @@ impl<'a> Draw<'a> {
             part.from + (if part.reversed { part.length - into } else { into }) * rate
         };
         let fill = colour(if self.p.light { darken(c, 0.35) } else { lighten(c, 0.25) }, 0.9 * fade);
-        let paint = Paint { shader: tiny_skia::Shader::SolidColor(fill), anti_alias: false, ..Paint::default() };
-        let mut pb = PathBuilder::new();
-        let mut x = x0.floor();
-        while x < x1 {
-            let (b0, b1) = (v.beat(x), v.beat(x + 1.0));
+        // A column for each pixel, on the pixel grid.
+        let column = 1.0 / self.scale;
+        let (first, last) = ((x0 * self.scale).floor() as i64, (x1 * self.scale).ceil() as i64);
+        for i in first..last {
+            let x = i as f64 * column;
+            let (b0, b1) = (v.beat(x), v.beat(x + column));
             if let Some(loud) = peaks.loudest(at(b0), at(b1)) {
                 let h = (f64::from(loud) * half).max(0.5);
-                if let Some(b) = Box2::new(x, mid - h, 1.0, 2.0 * h).intersect(&visible)
-                    && let Some(r) = Rect::from_xywh(b.x as f32, b.y as f32, b.w as f32, b.h as f32)
-                {
-                    pb.push_rect(r);
+                if let Some(b) = Box2::new(x, mid - h, column, 2.0 * h).intersect(&visible) {
+                    self.rect(b, fill);
                 }
             }
-            x += 1.0;
-        }
-        if let Some(path) = pb.finish() {
-            self.pixmap.fill_path(&path, &paint, FillRule::Winding, self.transform, None);
         }
         true
     }
 
-    fn curve(&mut self, clip: &PreviewClip, inner: Box2, visible: Box2, fill: Color) {
+    fn curve(&mut self, clip: &PreviewClip, inner: Box2, visible: Box2, fill: Colour) {
         let v = self.v;
         let points: Vec<(f64, f64)> = clip
             .points
             .iter()
             .map(|p| (v.x(clip.start + p.beat), inner.bottom() - p.value.clamp(0.0, 1.0) * inner.h))
             .collect();
-        let mut pb = PathBuilder::new();
         for pair in points.windows(2) {
             let [a, b] = pair else { continue };
-            if let Some(((x0, y0), (x1, y1))) = clip_segment(*a, *b, &visible) {
-                pb.move_to(x0 as f32, y0 as f32);
-                pb.line_to(x1 as f32, y1 as f32);
+            if let Some((from, to)) = clip_segment(*a, *b, &visible) {
+                self.scene.line(from, to, 1.5, fill);
             }
         }
-        let Some(path) = pb.finish() else { return };
-        let paint = Paint { shader: tiny_skia::Shader::SolidColor(fill), anti_alias: true, ..Paint::default() };
-        let stroke = Stroke { width: 1.5, ..Stroke::default() };
-        self.pixmap.stroke_path(&path, &paint, &stroke, self.transform, None);
     }
 }
 
@@ -1062,9 +1006,9 @@ mod tests {
         v
     }
 
-    fn pixel(f: &Frame, x: u32, y: u32) -> [u8; 4] {
-        let i = ((y * f.pixel_width + x) * 4) as usize;
-        [f.rgba[i], f.rgba[i + 1], f.rgba[i + 2], f.rgba[i + 3]]
+    fn pixel(p: &tiny_skia::Pixmap, x: u32, y: u32) -> [u8; 4] {
+        let c = p.pixel(x, y).expect("inside the picture");
+        [c.red(), c.green(), c.blue(), c.alpha()]
     }
 
     fn palette() -> Palette {
@@ -1123,7 +1067,8 @@ mod tests {
         let mut v = view(800.0, 200.0);
         v.moved(300.0, 50.0);
         let f = v.frame(&palette(), 2.0);
-        assert_eq!((f.pixel_width, f.pixel_height), (1600, 400));
+        let picture = f.scene.paint(2.0);
+        assert_eq!((picture.width(), picture.height()), (1600, 400));
         let names: Vec<_> = f.labels.iter().map(|l| (l.area, l.text.as_str())).collect();
         for expected in [
             (Area::Header, "Keys"),
@@ -1140,7 +1085,7 @@ mod tests {
         }
         // The Verse clip's title bar is the lane's blue, over the surface.
         let x = v.x(2.0);
-        let px = pixel(&f, (x * 2.0) as u32, ((v.ruler_height() + 6.0) * 2.0) as u32);
+        let px = pixel(&picture, (x * 2.0) as u32, ((v.ruler_height() + 6.0) * 2.0) as u32);
         assert!(px[2] > px[0] && px[2] > px[1], "{px:?}");
         assert_eq!(f.hover, v.hover(), "the window asks the view itself between pictures");
         let hover = f.hover.expect("the mouse is over a clip");
@@ -1162,7 +1107,8 @@ mod tests {
     fn a_tiny_view_draws_nothing_but_its_background() {
         let f = view(30.0, 20.0).frame(&palette(), 1.0);
         assert!(f.labels.is_empty());
-        assert_eq!((f.pixel_width, f.pixel_height), (30, 20));
+        assert!(f.scene.shapes.is_empty());
+        assert_eq!(f.scene.pixel_size(1.0), (30, 20));
     }
 
     #[test]

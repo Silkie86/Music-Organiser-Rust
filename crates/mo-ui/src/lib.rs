@@ -11,6 +11,7 @@ pub use screens::*;
 
 pub mod arrangement;
 pub mod backup;
+mod canvas;
 pub mod cards;
 pub mod files;
 pub mod gpu;

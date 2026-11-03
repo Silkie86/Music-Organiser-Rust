@@ -1,11 +1,13 @@
 //! Fills the arrangement on a song's Overview. Picking a song asks a background thread to read its newest save
 //! (newest ask wins, rule 12); the mouse then moves the view here on the window's thread, and each change asks a
-//! second background thread to draw it. The picture and its words come back and are put on the page, unless another
-//! song has been picked meanwhile.
+//! second background thread to work out what to draw. The graphics card draws it (`canvas`), or where there's no card
+//! the processor does, on that thread (`mo_app::shapes`); the picture and its words are put on the page, unless
+//! another song has been picked meanwhile.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -14,8 +16,10 @@ use mo_app::background::{self, Newest};
 use mo_app::log;
 use mo_app::themes::Look;
 use rayon::prelude::*;
-use slint::{ComponentHandle, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
+use slint::{ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
 
+use crate::canvas::Canvas;
+use crate::gpu;
 use crate::{AppWindow, ArrKind, ArrLabel, ArrangementData};
 
 /// What the page says when there's no save to read.
@@ -23,8 +27,9 @@ const NOT_HERE: &str = "This save isn't on this computer, so its arrangement can
 const READING: &str = "Reading the arrangement…";
 const NOT_YET: &str = "Arrangements can be drawn for FL Studio, Bitwig and Studio One projects.";
 
-/// A picture to draw: for which song, the view as it is, its colours and pixels to a point.
-type DrawJob = (u64, View, Palette, f64);
+/// A picture to work out: for which song, the view as it is, its colours, pixels to a point, and whether the graphics
+/// card draws it (else the processor does, on the drawing thread).
+type DrawJob = (u64, View, Palette, f64, bool);
 
 #[derive(Default)]
 struct State {
@@ -41,13 +46,33 @@ struct State {
     here: bool,
 }
 
+/// The words on the picture: one list for each strip, kept and changed line by line, so moving the view doesn't make
+/// the window build every word again.
+#[derive(Default)]
+struct Words {
+    header: Rc<VecModel<ArrLabel>>,
+    timeline: Rc<VecModel<ArrLabel>>,
+    ruler: Rc<VecModel<ArrLabel>>,
+}
+
+/// The painter on the card it was made on (which card, as `gpu::generation` counts).
+struct OnCard {
+    generation: u64,
+    canvas: Canvas,
+}
+
 /// The song shown last, so the reading thread can stop reading an older song's audio files.
 static SHOWN: AtomicU64 = AtomicU64::new(0);
 
 thread_local! {
     static STATE: RefCell<State> = RefCell::default();
+    static WORDS: Words = Words::default();
     static READER: RefCell<Option<Newest<(u64, PathBuf)>>> = const { RefCell::new(None) };
     static DRAWER: RefCell<Option<Newest<DrawJob>>> = const { RefCell::new(None) };
+    static CARD: RefCell<Option<OnCard>> = const { RefCell::new(None) };
+    /// The card (as `gpu::generation` counts) that refused to draw the arrangement: on that one the processor draws it
+    /// from then on, and a new card is tried again.
+    static CARD_FAILED: Cell<Option<u64>> = const { Cell::new(None) };
 }
 
 /// Wires the preview's mouse and view chips, and starts its reading and drawing threads.
@@ -122,10 +147,15 @@ pub fn connect(app: &AppWindow) {
         Ok(r) => READER.with(|slot| *slot.borrow_mut() = Some(r)),
         Err(e) => log::error("Arrangement", &format!("Couldn't start the arrangement's reader: {e}")),
     }
+    WORDS.with(|w| {
+        data.set_header_labels(ModelRc::from(w.header.clone()));
+        data.set_timeline_labels(ModelRc::from(w.timeline.clone()));
+        data.set_ruler_labels(ModelRc::from(w.ruler.clone()));
+    });
     let weak = app.as_weak();
-    let drawer = Newest::start("Arrangement drawing", move |(asked, view, palette, scale): DrawJob| {
-        // The picture is copied into the window's kind of buffer here, so the window's thread only puts it up.
-        let picture = Picture::from(view.frame(&palette, scale));
+    let drawer = Newest::start("Arrangement drawing", move |(asked, view, palette, scale, on_card): DrawJob| {
+        // Worked out here, and for the processor drawn here too, so the window's thread only puts it up.
+        let picture = Picture::new(view.frame(&palette, scale), scale, on_card);
         let _ = weak.upgrade_in_event_loop(move |app| drawn(&app, asked, picture));
     });
     match drawer {
@@ -194,9 +224,11 @@ fn clear(data: &ArrangementData) {
     data.set_summary(SharedString::new());
     data.set_notes(ModelRc::default());
     data.set_picture(Image::default());
-    data.set_header_labels(ModelRc::default());
-    data.set_timeline_labels(ModelRc::default());
-    data.set_ruler_labels(ModelRc::default());
+    WORDS.with(|w| {
+        for model in [&w.header, &w.timeline, &w.ruler] {
+            model.clear();
+        }
+    });
     data.set_hover_text(SharedString::new());
     data.set_dragging(false);
     data.set_message(SharedString::new());
@@ -335,7 +367,7 @@ fn show_hover(data: &ArrangementData, hover: Option<Hover>) {
     }
 }
 
-/// Asks for a picture of the view as it is now.
+/// Asks for a picture of the view as it is now: for the graphics card when there's one to draw on.
 fn redraw(app: &AppWindow) {
     let scale = f64::from(app.window().scale_factor());
     let job = STATE.with(|s| {
@@ -346,19 +378,83 @@ fn redraw(app: &AppWindow) {
     });
     let Some((asked, view, palette, scale, here)) = job else { return };
     if here {
-        drawn(app, asked, Picture::from(view.frame(&palette, scale)));
+        drawn(app, asked, Picture::new(view.frame(&palette, scale), scale, false));
         return;
     }
+    let on_card = usable_card().is_some();
     DRAWER.with(|slot| {
         if let Some(drawer) = slot.borrow().as_ref() {
-            drawer.ask((asked, view, palette, scale));
+            drawer.ask((asked, view, palette, scale, on_card));
         }
     });
 }
 
-/// A drawn view, ready for the window: made on the drawing thread.
+/// The graphics card to draw the arrangement on, when there's one it can draw on: not the card that refused to
+/// (`CARD_FAILED`). The screenshots never ask (they draw here, on the processor).
+fn usable_card() -> Option<(gpu::Gpu, u64)> {
+    let failed = CARD_FAILED.with(Cell::get);
+    gpu::current().filter(|(_, generation)| failed != Some(*generation))
+}
+
+/// A graphics card was handed over (the window opened, or the card was reset): the arrangement is drawn again on it.
+pub fn graphics_ready(app: &AppWindow) {
+    redraw(app);
+}
+
+/// The card went (the window closed, or the card was reset): the painter goes, and the picture made on it isn't shown
+/// any more. It's drawn again on the next card, or on the processor.
+pub fn graphics_gone(app: &AppWindow) {
+    CARD.with(|c| *c.borrow_mut() = None);
+    let weak = app.as_weak();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(app) = weak.upgrade() {
+            app.global::<ArrangementData>().set_picture(Image::default());
+            redraw(&app);
+        }
+    });
+}
+
+/// Draws the shapes on the card, now, and gives the picture for Slint to show; `None` when there's no card to draw on
+/// any more (it went since the shapes were asked for).
+fn draw_on_card(shapes: &Shapes) -> Result<Option<Image>, String> {
+    let Some((gpu, generation)) = usable_card() else { return Ok(None) };
+    let texture = CARD.with(|c| -> Result<_, String> {
+        let mut c = c.borrow_mut();
+        if c.as_ref().is_none_or(|on| on.generation != generation) {
+            // The first time, the card builds the shader, which can take a moment.
+            let _doing = crate::watchdog::doing("Arrangement: set up the GPU painter");
+            let canvas = gpu::checked(&gpu.device, || Canvas::new(&gpu.device, &gpu.queue))?;
+            *c = Some(OnCard { generation, canvas });
+        }
+        let Some(on) = c.as_mut() else { unreachable!("made just above") };
+        let _doing = crate::watchdog::doing("Arrangement: draw on the GPU");
+        gpu::checked(&gpu.device, || on.canvas.draw(shapes.size, shapes.scale, shapes.background, &shapes.bytes))
+    });
+    let texture = texture.inspect_err(|_| {
+        // The processor draws it from now on, on this card.
+        CARD_FAILED.with(|f| f.set(Some(generation)));
+        CARD.with(|c| *c.borrow_mut() = None);
+    })?;
+    Image::try_from(texture).map(Some).map_err(|e| {
+        CARD_FAILED.with(|f| f.set(Some(generation)));
+        format!("Slint wouldn't show the picture: {e}")
+    })
+}
+
+/// The shapes of a view for the graphics card, packed on the drawing thread.
+struct Shapes {
+    bytes: Vec<u8>,
+    /// The picture's size in pixels, and pixels to a point.
+    size: (u32, u32),
+    scale: f32,
+    background: u32,
+}
+
+/// A worked out view, ready for the window: made on the drawing thread. Its picture is drawn there already (on the
+/// processor), or its shapes are ready for the card.
 struct Picture {
     pixels: Option<SharedPixelBuffer<Rgba8Pixel>>,
+    shapes: Option<Shapes>,
     header: Vec<ArrLabel>,
     timeline: Vec<ArrLabel>,
     ruler: Vec<ArrLabel>,
@@ -366,11 +462,20 @@ struct Picture {
     ruler_height: f32,
 }
 
-impl From<Frame> for Picture {
-    fn from(frame: Frame) -> Picture {
-        let Frame { pixel_width, pixel_height, rgba, labels, header_width, ruler_height, .. } = frame;
-        let pixels = (rgba.len() == (pixel_width as usize) * (pixel_height as usize) * 4)
-            .then(|| SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&rgba, pixel_width, pixel_height));
+impl Picture {
+    fn new(frame: Frame, scale: f64, on_card: bool) -> Picture {
+        let Frame { scene, labels, header_width, ruler_height, .. } = frame;
+        let (pixels, shapes) = if on_card {
+            let shapes = Shapes {
+                bytes: scene.pack(),
+                size: scene.pixel_size(scale),
+                scale: scale as f32,
+                background: scene.background,
+            };
+            (None, Some(shapes))
+        } else {
+            (Some(paint(&scene, scale)), None)
+        };
         let (mut header, mut timeline, mut ruler) = (Vec::new(), Vec::new(), Vec::new());
         for l in labels {
             let (kind, muted) = kind(l.style);
@@ -391,6 +496,7 @@ impl From<Frame> for Picture {
         }
         Picture {
             pixels,
+            shapes,
             header,
             timeline,
             ruler,
@@ -400,22 +506,68 @@ impl From<Frame> for Picture {
     }
 }
 
-/// A picture has been drawn: put on the page with its words, unless another song has been picked since.
+/// The scene drawn on the processor, in the window's kind of buffer.
+fn paint(scene: &mo_app::shapes::Scene, scale: f64) -> SharedPixelBuffer<Rgba8Pixel> {
+    let pixmap = scene.paint(scale);
+    SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(pixmap.data(), pixmap.width(), pixmap.height())
+}
+
+/// A picture has been worked out: drawn on the card if it's for the card, and put on the page with its words, unless
+/// another song has been picked since.
 fn drawn(app: &AppWindow, asked: u64, picture: Picture) {
     if STATE.with(|s| s.borrow().asked != asked) {
         return;
     }
     let data = app.global::<ArrangementData>();
+    if let Some(shapes) = &picture.shapes {
+        match draw_on_card(shapes) {
+            Ok(Some(image)) => data.set_picture(image),
+            // The card went since this was asked for: drawn again, on the processor.
+            Ok(None) => {
+                redraw(app);
+                return;
+            }
+            Err(e) => {
+                log::error(
+                    "Arrangement",
+                    &format!("The graphics card couldn't draw the arrangement, so the processor does: {e}"),
+                );
+                redraw(app);
+                return;
+            }
+        }
+    }
     if let Some(pixels) = picture.pixels {
+        let _doing = crate::watchdog::doing("Arrangement: show the CPU picture");
         data.set_picture(Image::from_rgba8_premultiplied(pixels));
     }
+    let _doing = crate::watchdog::doing("Arrangement: place the words");
     data.set_header_width(picture.header_width);
     data.set_ruler_height(picture.ruler_height);
-    data.set_header_labels(ModelRc::new(VecModel::from(picture.header)));
-    data.set_timeline_labels(ModelRc::new(VecModel::from(picture.timeline)));
-    data.set_ruler_labels(ModelRc::new(VecModel::from(picture.ruler)));
+    WORDS.with(|w| {
+        refill(&w.header, picture.header);
+        refill(&w.timeline, picture.timeline);
+        refill(&w.ruler, picture.ruler);
+    });
     // What's under the mouse now, which may have moved on since this picture was asked for.
     show_hover(&data, STATE.with(|s| s.borrow().view.as_ref().and_then(View::hover)));
+}
+
+/// Puts `rows` in `model` in place of what's there, changing only the lines that differ, so the window keeps the words
+/// it has instead of making them all again.
+fn refill(model: &VecModel<ArrLabel>, rows: Vec<ArrLabel>) {
+    let old = model.row_count();
+    let keep = old.min(rows.len());
+    let mut rows = rows.into_iter();
+    for (i, row) in rows.by_ref().take(keep).enumerate() {
+        if model.row_data(i).as_ref() != Some(&row) {
+            model.set_row_data(i, row);
+        }
+    }
+    model.extend(rows);
+    for i in (keep..old).rev() {
+        model.remove(i);
+    }
 }
 
 /// A label's look, and whether it's greyed out.
@@ -491,21 +643,26 @@ pub fn sample_preview() -> Preview {
     ];
     let mut vox = PreviewLane::new("Vocal", LaneKind::Audio);
     vox.colour = Some(0x4ACB8B);
-    vox.clips = vec![PreviewClip {
-        name: "Vocal take 3".into(),
-        start: beat(16.0),
-        length: beat(8.0),
+    let take = |name: &str, path: &str, start: f64, length: f64| PreviewClip {
+        name: name.into(),
+        start,
+        length,
         audio: vec![AudioPart {
-            path: r"C:\Made up\Vocal take 3.wav".into(),
+            path: path.into(),
             start: 0.0,
-            length: beat(8.0),
+            length,
             from: 0.0,
             seconds_per_beat: Some(0.5),
             whole_file_beats: None,
             reversed: false,
         }],
         ..PreviewClip::default()
-    }];
+    };
+    // The first take's file is on this computer (its waveform is `sample_peaks`); the second's isn't.
+    vox.clips = vec![
+        take("Vocal take 3", SAMPLE_TAKE, beat(16.0), beat(8.0)),
+        take("Vocal take 1", r"C:\Made up\Vocal take 1.wav", beat(26.0), beat(6.0)),
+    ];
     let mut cutoff = PreviewLane::new("Filter cutoff", LaneKind::Automation);
     cutoff.colour = Some(0xF2B33D);
     cutoff.clips = vec![PreviewClip {
@@ -535,5 +692,138 @@ pub fn sample_preview() -> Preview {
     };
     let mut bitwig = playlist.clone();
     bitwig.view = "As it opens in Bitwig";
-    Preview { views: vec![Arc::new(playlist), Arc::new(bitwig)], found: Arc::default() }
+    let found = HashMap::from([(SAMPLE_TAKE.to_owned(), PathBuf::from(SAMPLE_TAKE))]);
+    Preview { views: vec![Arc::new(playlist), Arc::new(bitwig)], found: Arc::new(found) }
+}
+
+/// The made-up song's vocal take that's on this computer.
+const SAMPLE_TAKE: &str = r"C:\Made up\Vocal take 3.wav";
+
+/// A made-up waveform for the made-up song's vocal take (rule 4: no real sound): sixteen seconds of phrases that swell
+/// and fade, as `Peaks::of` would boil a file down.
+pub fn sample_peaks() -> Arc<HashMap<String, Arc<Peaks>>> {
+    let step = 0.005;
+    let values = (0..3200)
+        .map(|i| {
+            let t = f64::from(i) * step;
+            // A phrase every two seconds, louder in the middle of each, with a little wobble.
+            let phrase = (t % 2.0) / 2.0;
+            let swell = (phrase * std::f64::consts::PI).sin().powf(0.7);
+            let wobble = 0.75 + 0.25 * (t * 37.0).sin() * (t * 11.0).cos();
+            (swell * wobble * if phrase > 0.9 { 0.1 } else { 0.95 }) as f32
+        })
+        .collect();
+    let peaks = Peaks { file_seconds: 16.0, step, values };
+    Arc::new(HashMap::from([(SAMPLE_TAKE.to_owned(), Arc::new(peaks))]))
+}
+
+/// Shows waveforms already worked out: for the screenshots.
+pub fn show_peaks(app: &AppWindow, peaks: Arc<HashMap<String, Arc<Peaks>>>) {
+    let asked = STATE.with(|s| s.borrow().asked);
+    waves_arrived(app, asked, peaks);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::canvas::testing::{card, read_back};
+    use mo_app::themes::Look;
+    use slint::wgpu_30::wgpu;
+
+    #[test]
+    fn the_words_change_line_by_line() {
+        let label = |text: &str| ArrLabel { text: text.into(), ..ArrLabel::default() };
+        let model = VecModel::from(vec![label("a"), label("b"), label("c")]);
+        refill(&model, vec![label("a"), label("x")]);
+        assert_eq!(model.iter().map(|l| l.text.to_string()).collect::<Vec<_>>(), ["a", "x"]);
+        refill(&model, vec![label("a"), label("x"), label("y"), label("z")]);
+        assert_eq!(model.iter().map(|l| l.text.to_string()).collect::<Vec<_>>(), ["a", "x", "y", "z"]);
+        refill(&model, Vec::new());
+        assert_eq!(model.row_count(), 0);
+    }
+
+    /// Draws the made-up song on whatever graphics card there is (a software one will do) and on the processor, in a
+    /// few views (fitted, zoomed in on the vocal's waveform, every lane squeezed in, on Paper, at 1, 1.5 and 2 pixels
+    /// to a point), and checks the two pictures agree: the same shapes in the same places, differing only a little at
+    /// soft edges. With ARRANGEMENT_GPU_LOOK set to a folder, writes both pictures and their difference there, to judge
+    /// by eye. With ARRANGEMENT_GPU_TIME set, times the card's frames too (a software card's time is the processor's).
+    #[test]
+    #[ignore]
+    fn the_card_draws_what_the_processor_draws() {
+        let Some((device, queue)) = card() else {
+            eprintln!("No graphics card here, not even a software one: nothing to compare");
+            return;
+        };
+        let out = std::env::var("ARRANGEMENT_GPU_LOOK").ok();
+        let timed = std::env::var("ARRANGEMENT_GPU_TIME").is_ok();
+        let mut canvas = Canvas::new(&device, &queue);
+        let preview = sample_preview();
+        let peaks = sample_peaks();
+        let graphite = Palette::from_look(&Look::from_settings(None, None));
+        let paper = Palette::from_look(&Look::from_settings(Some("Paper"), None));
+        type Setup = fn(&mut View);
+        let views: [(&str, Palette, f64, Setup); 6] = [
+            ("fitted", graphite, 1.0, |_| {}),
+            ("fitted-2x", graphite, 2.0, |_| {}),
+            ("zoomed-1.5x", graphite, 1.5, |v| v.wheel(560.0, 0.0, 6.0, true, false)),
+            ("squeezed", graphite, 1.0, |v| v.double_click()),
+            ("paper", paper, 1.0, |_| {}),
+            ("paper-zoomed-2x", paper, 2.0, |v| v.wheel(560.0, 0.0, 6.0, true, false)),
+        ];
+        for (name, palette, scale, setup) in views {
+            let mut view = View::new(preview.views[0].clone(), preview.found.clone());
+            view.set_peaks(peaks.clone());
+            view.resize(900.0, 300.0);
+            setup(&mut view);
+            let frame = view.frame(&palette, scale);
+            let size = frame.scene.pixel_size(scale);
+            let cpu = frame.scene.paint(scale);
+            let bytes = frame.scene.pack();
+            let picture = canvas.draw(size, scale as f32, frame.scene.background, &bytes);
+            let gpu = read_back(&device, &queue, &picture);
+            assert_eq!((gpu.width(), gpu.height()), (cpu.width(), cpu.height()), "{name}");
+            // How far apart each pixel is: the most any of its colours differs.
+            let mut diff = image::RgbaImage::new(gpu.width(), gpu.height());
+            let (mut off, mut far, mut most) = (0usize, 0usize, 0u8);
+            for (x, y, g) in gpu.enumerate_pixels() {
+                let c = cpu.pixel(x, y).expect("inside");
+                let d = [g[0].abs_diff(c.red()), g[1].abs_diff(c.green()), g[2].abs_diff(c.blue())];
+                let d = d.into_iter().max().unwrap_or(0);
+                most = most.max(d);
+                off += usize::from(d > 8);
+                far += usize::from(d > 64);
+                diff.put_pixel(x, y, image::Rgba([d.saturating_mul(4), d.saturating_mul(4), d.saturating_mul(4), 255]));
+            }
+            let pixels = (gpu.width() * gpu.height()) as usize;
+            eprintln!(
+                "{name}: {} shapes, {off} of {pixels} pixels differ by more than 8, {far} by more than 64, at most {most}",
+                frame.scene.shapes.len()
+            );
+            if let Some(out) = &out {
+                gpu.save(format!("{out}/arrangement-{name}-card.png")).expect("saved");
+                let cpu_png =
+                    image::RgbaImage::from_raw(cpu.width(), cpu.height(), cpu.data().to_vec()).expect("same size");
+                cpu_png.save(format!("{out}/arrangement-{name}-processor.png")).expect("saved");
+                diff.save(format!("{out}/arrangement-{name}-difference.png")).expect("saved");
+            }
+            if timed {
+                let started = std::time::Instant::now();
+                for _ in 0..20 {
+                    let _ = canvas.draw(size, scale as f32, frame.scene.background, &bytes);
+                    device.poll(wgpu::PollType::wait_indefinitely()).expect("the card finishes");
+                }
+                let card = started.elapsed().as_secs_f64() * 1000.0 / 20.0;
+                let started = std::time::Instant::now();
+                for _ in 0..20 {
+                    let _ = frame.scene.paint(scale);
+                }
+                let processor = started.elapsed().as_secs_f64() * 1000.0 / 20.0;
+                eprintln!("TIMING {name}: {card:.2} ms on the card, {processor:.2} ms on the processor");
+            }
+            // Soft edges are worked out a little differently by each, so a few pixels along them differ; anything
+            // more is a shape in the wrong place or the wrong colour.
+            assert!(far * 1000 <= pixels, "{name}: {far} pixels differ by more than 64");
+            assert!(off * 50 <= pixels, "{name}: {off} pixels differ by more than 8");
+        }
+    }
 }

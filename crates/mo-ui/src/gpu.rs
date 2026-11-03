@@ -1,4 +1,4 @@
-//! The graphics card, for the views the app draws itself (the galaxy, then the arrangement and the waveforms). Slint
+//! The graphics card, for the views the app draws itself (the galaxy, the arrangement, then the waveforms). Slint
 //! draws the window with wgpu, and once the window is up it hands over the same device; each view draws into a
 //! picture on the card that Slint shows like any other image. Where there's no card to draw with (an old driver,
 //! the screenshots, the tests, or `MO_DRAW_CPU=1` to compare), the views draw on the processor instead, as before.
@@ -80,6 +80,7 @@ pub fn connect(app: &AppWindow) {
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(app) = weak.upgrade() {
                     crate::sounds::graphics_ready(&app);
+                    crate::arrangement::graphics_ready(&app);
                 }
             });
         }
@@ -101,6 +102,7 @@ pub fn connect(app: &AppWindow) {
             // What the views made on the card goes with it, pictures on show included.
             if let Some(app) = weak.upgrade() {
                 crate::sounds::graphics_gone(&app);
+                crate::arrangement::graphics_gone(&app);
             }
         }
         _ => {}

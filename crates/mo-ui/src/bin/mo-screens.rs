@@ -145,6 +145,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for tab in [Tab::Overview, Tab::Plugins, Tab::Saves] {
         mo_ui::songs::show_picked(&app, 0, sample_detail(), tab);
         mo_ui::arrangement::show_preview(&app, mo_ui::arrangement::sample_preview());
+        mo_ui::arrangement::show_peaks(&app, mo_ui::arrangement::sample_peaks());
         shots.push((format!("song-panel-{}.png", slug(tab.name())), capture(&window)));
     }
     // The arrangement: the mouse on a clip, zoomed in about the mouse, the Bitwig view, and in a light theme.
@@ -160,6 +161,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     shots.push(("arrangement-bitwig-view.png".into(), capture(&window)));
     mo_ui::apply_look(&app, &Look::from_settings(Some("Paper"), None));
     mo_ui::arrangement::show_preview(&app, mo_ui::arrangement::sample_preview());
+    mo_ui::arrangement::show_peaks(&app, mo_ui::arrangement::sample_peaks());
     shots.push(("arrangement-light.png".into(), capture(&window)));
     mo_ui::apply_look(&app, &graphite);
     // A song with things to look at, its Health strip open.
@@ -195,6 +197,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Tooltips: the mouse resting on a rail line, the song panel's Show in folder button and a song's date.
     mo_ui::songs::show_picked(&app, 0, sample_detail(), Tab::Overview);
     mo_ui::arrangement::show_preview(&app, mo_ui::arrangement::sample_preview());
+    mo_ui::arrangement::show_peaks(&app, mo_ui::arrangement::sample_peaks());
     for (name, x, y) in [
         ("tip-rail.png", 60.0, 125.0),
         ("tip-button.png", SHOW_BUTTON.0, SHOW_BUTTON.1),
