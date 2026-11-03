@@ -10,6 +10,12 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Local};
 
 pub const DRAFT_FILE: &str = "draft.txt";
+/// What the draft is written as first ([`keep_draft`]): made new beside `draft.txt`, written whole, then renamed over
+/// it, so a write cut short (a crash that ends the app, a full disk, a power cut) leaves the draft from before whole,
+/// not an empty file. A crash between the writing and the renaming leaves this behind; the next draft written removes
+/// it first, so at most one small file stays. The start-up sweep never touches it (rule 17: it may hold the newest
+/// words), and it's never read back as the draft: it may be cut short.
+pub const DRAFT_PART: &str = "draft.txt.mo-part";
 pub const WRITING_FILE: &str = "writing.lock";
 /// The notes' folder in the app's data folder (the C# app's notes are there too).
 pub const FOLDER: &str = "notes";
@@ -26,11 +32,13 @@ pub struct Note<'a> {
     pub version: &'a str,
     pub log_path: Option<&'a Path>,
     pub recent_log: &'a [String],
-    /// The window as a PNG, if it could be drawn and the picture is wanted.
-    pub picture: Option<&'a [u8]>,
+    /// What makes the window's picture into a PNG, if it could be drawn and the picture is wanted. It's called only
+    /// once the words are on disk, as a big window takes a moment; it says why when the picture can't be made.
+    pub picture: Option<&'a dyn Fn() -> Result<Vec<u8>, String>>,
 }
 
-/// Writes `note-<time>.md`, and a `.png` beside it when there's a picture. Returns the note's path.
+/// Writes `note-<time>.md`, and then a `.png` beside it when there's a picture: the words are on disk before the
+/// picture is made. Returns the note's path.
 pub fn save(folder: &Path, note: &Note, now: DateTime<Local>) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(folder)?;
     let stamp = now.format("%Y-%m-%d_%H-%M-%S");
@@ -71,12 +79,14 @@ pub fn save(folder: &Path, note: &Note, now: DateTime<Local>) -> std::io::Result
         }
         md += "```\n";
     }
-    // The words go down first, so a save cut short (the app closing, a full disk) still leaves them, not an empty file.
+    // The words go down first, so a save cut short (the app closing, a full disk, a crash while the picture is made)
+    // still leaves them, not an empty file.
     std::io::Write::write_all(&mut file, md.as_bytes())?;
     file.sync_all()?;
-    if let Some(png) = note.picture {
+    if let Some(make_png) = note.picture {
         let picture = folder.join(format!("{name}.png"));
-        if let Err(e) = std::fs::write(&picture, png) {
+        let made = make_png().and_then(|png| std::fs::write(&picture, png).map_err(|e| e.to_string()));
+        if let Err(e) = made {
             // The note stands without its picture: say so in it rather than name a file that isn't there.
             let _ = std::fs::remove_file(&picture);
             let without =
@@ -93,11 +103,22 @@ pub fn read_draft(folder: &Path) -> Option<String> {
     std::fs::read_to_string(folder.join(DRAFT_FILE)).ok().filter(|t| !t.trim().is_empty())
 }
 
-/// Keeps what's typed so far. Failing to keep it is not worth stopping the typing for.
-pub fn keep_draft(folder: &Path, text: &str) {
-    if std::fs::create_dir_all(folder).is_ok() {
-        let _ = std::fs::write(folder.join(DRAFT_FILE), text);
+/// Keeps what's typed so far, through [`DRAFT_PART`], so the draft from before stays whole until the new one is. Says
+/// whether it was kept. Failing to keep it is not worth stopping the typing for: the words wait to be tried again.
+pub fn keep_draft(folder: &Path, text: &str) -> bool {
+    let part = folder.join(DRAFT_PART);
+    // One a crash left goes first. Made new, so nothing there (a link included) is ever written through.
+    let _ = std::fs::remove_file(&part);
+    let written = std::fs::create_dir_all(folder).and_then(|()| {
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&part)?;
+        std::io::Write::write_all(&mut f, text.as_bytes())?;
+        f.sync_all()
+    });
+    let kept = written.and_then(|()| std::fs::rename(&part, folder.join(DRAFT_FILE)));
+    if kept.is_err() {
+        let _ = std::fs::remove_file(&part);
     }
+    kept.is_ok()
 }
 
 /// Saved or cancelled on purpose: either way the draft has done its job.
@@ -139,7 +160,7 @@ mod tests {
             version: "0.1.0 (abc1234)",
             log_path: Some(Path::new("C:/logs/session.log")),
             recent_log: &recent,
-            picture: Some(b"png"),
+            picture: Some(&|| Ok(b"png".to_vec())),
         };
         let now = Local::now();
         let path = save(&dir, &note, now).expect("saved");
@@ -155,11 +176,87 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A note with these words and this picture.
+    fn note_with<'a>(text: &'a str, picture: &'a dyn Fn() -> Result<Vec<u8>, String>) -> Note<'a> {
+        Note { text, page: "Songs", version: "1", log_path: None, recent_log: &[], picture: Some(picture) }
+    }
+
+    #[test]
+    fn the_words_are_on_disk_before_the_picture_is_made() {
+        let dir = temp_folder("words-first");
+        // What a crash while the picture is made would leave behind.
+        let on_disk_then = std::cell::RefCell::new(String::new());
+        let make_png = || {
+            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                *on_disk_then.borrow_mut() += &std::fs::read_to_string(entry.path()).unwrap_or_default();
+            }
+            Ok(b"png".to_vec())
+        };
+        let path = save(&dir, &note_with("Words first", &make_png), Local::now()).expect("saved");
+        assert!(on_disk_then.borrow().contains("\nWords first\n"), "{}", on_disk_then.borrow());
+        assert!(path.with_extension("png").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_picture_that_cant_be_made_leaves_the_note_with_its_words() {
+        let dir = temp_folder("no-picture");
+        let make_png = || Err("the window was too big".to_owned());
+        let path = save(&dir, &note_with("Still here", &make_png), Local::now()).expect("saved");
+        let md = std::fs::read_to_string(&path).expect("readable");
+        assert!(md.contains("\nStill here\n"));
+        assert!(md.contains("- Picture: couldn't be saved (the window was too big)\n"), "{md}");
+        assert!(!path.with_extension("png").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_draft_from_before_stays_whole_until_the_new_one_is_written() {
+        use std::io::Read;
+        let dir = temp_folder("whole");
+        assert!(keep_draft(&dir, "the words from before"));
+        // Someone reading the draft as the new one is written (the next F12, say).
+        let mut reading = std::fs::File::open(dir.join(DRAFT_FILE)).expect("there");
+        assert!(keep_draft(&dir, "newer words"));
+        let mut read = String::new();
+        reading.read_to_string(&mut read).expect("readable");
+        // Written beside it and then put in its place: the draft from before was never emptied to make room.
+        assert_eq!(read, "the words from before");
+        assert_eq!(read_draft(&dir).as_deref(), Some("newer words"));
+        assert!(!dir.join(DRAFT_PART).exists(), "nothing is left beside it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_draft_that_cant_be_written_says_so_and_the_one_from_before_stays() {
+        let dir = temp_folder("unwritable");
+        assert!(keep_draft(&dir, "the words from before"));
+        // Something in the way of the new draft that isn't a file (as bad as a full disk): it can't be written.
+        std::fs::create_dir_all(dir.join(DRAFT_PART).join("in the way")).expect("made");
+        assert!(!keep_draft(&dir, "newer words"), "it says the words weren't kept");
+        assert_eq!(read_draft(&dir).as_deref(), Some("the words from before"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn what_a_crash_left_beside_the_draft_goes_with_the_next_draft() {
+        let dir = temp_folder("leftover");
+        std::fs::create_dir_all(&dir).expect("made");
+        // A crash between writing and renaming: the words in it may be cut short, so they're never offered back.
+        std::fs::write(dir.join(DRAFT_PART), "cut sh").expect("writable");
+        assert_eq!(read_draft(&dir), None);
+        assert!(keep_draft(&dir, "the next words"));
+        assert_eq!(read_draft(&dir).as_deref(), Some("the next words"));
+        assert!(!dir.join(DRAFT_PART).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_draft_survives_until_saved_or_cancelled() {
         let dir = temp_folder("draft");
         assert_eq!(read_draft(&dir), None);
-        keep_draft(&dir, "half a tho");
+        assert!(keep_draft(&dir, "half a tho"));
         assert_eq!(read_draft(&dir).as_deref(), Some("half a tho"));
         clear_draft(&dir);
         assert_eq!(read_draft(&dir), None);

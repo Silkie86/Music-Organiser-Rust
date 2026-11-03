@@ -55,7 +55,8 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     let ran = app.run();
     if let Err(e) = &ran {
-        log::error("App", &format!("The window stopped with an error: {e}"));
+        // A line of how the run ends: it shows even once the log is full.
+        log::last(log::Level::Error, "App", &format!("The window stopped with an error: {e}"));
     }
     // A note left open keeps its draft for next time, but the launcher shouldn't wait on it any more.
     mo_ui::note::wait_for_saves();
@@ -75,7 +76,7 @@ fn main() -> Result<(), slint::PlatformError> {
 fn log_crashes() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        on_crash(info, &mo_app::paths::logs_dir(), &mo_ui::note::after_crash);
+        on_crash(info, &mo_app::paths::logs_dir(), &mo_ui::note::after_crash, &flush_the_log);
         // Then std's own report of it, on the console when there is one.
         default(info);
     }));
@@ -84,12 +85,20 @@ fn log_crashes() {
 /// The places in the code this run has written a crash log for.
 static CRASH_FILES: log::CrashFiles = log::CrashFiles::new();
 
-/// What the app does with a crash, before std's own report of it: the crash goes into the session log and into a crash
-/// log of its own in `logs`, and the words of an open F12 note are kept (`keep_note`, told whether the crash ends the
-/// app). What the crash says goes to disk first, everywhere, and its backtrace only after: taking a backtrace waits for
-/// a lock of std's that std holds while it reports another thread's crash on the console, and that can wait for ever
-/// (a console that's paused, or a pipe nobody reads). Nothing else in here waits long.
-fn on_crash(info: &std::panic::PanicHookInfo<'_>, logs: &Path, keep_note: &dyn Fn(bool)) {
+/// Waits until what the session log was given so far is on disk (a moment at most).
+fn flush_the_log() {
+    if let Some(l) = log::current() {
+        l.flush();
+    }
+}
+
+/// What the app does with a crash, before std's own report of it: the crash goes into the session log (`flush` waits
+/// for it to be on disk) and into a crash log of its own in `logs`, and the words of an open F12 note are kept
+/// (`keep_note`, told whether the crash ends the app). What the crash says goes to disk first, everywhere, and its
+/// backtrace only after: taking a backtrace waits for a lock of std's that std holds while it reports another thread's
+/// crash on the console, and that can wait for ever (a console that's paused, or a pipe nobody reads). Nothing else in
+/// here waits long.
+fn on_crash(info: &std::panic::PanicHookInfo<'_>, logs: &Path, keep_note: &dyn Fn(bool), flush: &dyn Fn()) {
     let current = std::thread::current();
     let thread = current.name().unwrap_or("unnamed");
     let place = info.location().map_or_else(|| "unknown".to_owned(), |l| format!("{}:{}", l.file(), l.line()));
@@ -98,14 +107,12 @@ fn on_crash(info: &std::panic::PanicHookInfo<'_>, logs: &Path, keep_note: &dyn F
     let text = format!("Music Organiser {} crashed on thread {thread}\n{info}\n", mo_app::version::version());
     log::crash(&place, &text, fatal);
     // Out to disk now. The log's own writer can't wait for itself to write the crash out.
-    let flush = || {
-        if thread != log::WRITER_THREAD
-            && let Some(l) = log::current()
-        {
-            l.flush();
+    let on_disk = || {
+        if thread != log::WRITER_THREAD {
+            flush();
         }
     };
-    flush();
+    on_disk();
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     let file = log::write_crash_file(logs, &text, secs, &place, fatal, &CRASH_FILES);
     keep_note(fatal);
@@ -117,7 +124,7 @@ fn on_crash(info: &std::panic::PanicHookInfo<'_>, logs: &Path, keep_note: &dyn F
         log::add_to_crash_file(file, &format!("\n{trace}\n"));
     }
     log::crash_backtrace(&place, &format!("Backtrace of the crash on thread {thread}:\n{trace}"), fatal);
-    flush();
+    on_disk();
 }
 
 #[cfg(test)]
@@ -131,12 +138,28 @@ mod tests {
 
     /// Set for the copy of this test program that crashes while the console is blocked: the folder it logs into.
     const IN_THE_COPY: &str = "MO_TEST_CRASH_WHILE_THE_CONSOLE_WAITS";
-    /// The file the copy's stand-in for keeping an F12 note writes a line in, for each crash.
-    const NOTES_KEPT: &str = "notes kept.txt";
+    /// The file the copy writes what its crash handler did in, a line each time, in order: "<thread> flushed" once the
+    /// session log is on disk, and "<thread> kept the note, ends the app: <true or false>" from its stand-in for
+    /// keeping an F12 note.
+    const DONE: &str = "what the crash handler did.txt";
+
+    /// Adds `line` to [`DONE`] in `folder`, in one go, so two threads crashing at once can't mix their lines.
+    fn did(folder: &Path, line: &str) {
+        use std::io::Write;
+        let file = std::fs::OpenOptions::new().create(true).append(true).open(folder.join(DONE));
+        if let Ok(mut f) = file {
+            let _ = f.write_all(format!("{line}\n").as_bytes());
+        }
+    }
+
+    /// The name of the thread this runs on.
+    fn this_thread() -> String {
+        std::thread::current().name().unwrap_or("unnamed").to_owned()
+    }
 
     /// Only in the copy that the test below runs; in an ordinary run it does nothing. The console (a pipe the test
     /// never reads) is filled, so std's report of a first crash waits there for ever, holding its backtrace lock; then
-    /// a second thread crashes.
+    /// two more threads crash, one of them called "main" as the window's thread is, so its crash ends the app.
     #[test]
     fn crash_while_the_console_waits_in_a_copy() {
         use std::io::Write;
@@ -146,12 +169,13 @@ mod tests {
         let default = std::panic::take_hook();
         let logs = dir.clone();
         std::panic::set_hook(Box::new(move |info| {
-            on_crash(info, &logs, &|_: bool| {
-                let kept = std::fs::OpenOptions::new().create(true).append(true).open(logs.join(NOTES_KEPT));
-                if let Ok(mut f) = kept {
-                    let _ = writeln!(f, "kept");
-                }
-            });
+            let keep_note =
+                |fatal: bool| did(&logs, &format!("{} kept the note, ends the app: {fatal}", this_thread()));
+            let flush = || {
+                flush_the_log();
+                did(&logs, &format!("{} flushed", this_thread()));
+            };
+            on_crash(info, &logs, &keep_note, &flush);
             HANDLED.fetch_add(1, Ordering::SeqCst);
             default(info);
         }));
@@ -166,6 +190,7 @@ mod tests {
         }
         std::thread::sleep(Duration::from_millis(300));
         let _ = std::thread::Builder::new().name("Crash B".into()).spawn(|| panic!("the second crash"));
+        let _ = std::thread::Builder::new().name("main".into()).spawn(|| panic!("the crash that ends the app"));
         // The test ends this copy once it has seen what it needs to; if it doesn't, the copy ends by itself.
         std::thread::sleep(Duration::from_secs(180));
     }
@@ -193,8 +218,8 @@ mod tests {
             }
         }
         let mut copy = Ends(copy);
-        // The session log's text, the crash logs' text, and how many times an F12 note was kept.
-        let read = |dir: &Path| -> (String, String, usize) {
+        // The session log's text, the crash logs' text, and what the crash handler did, in order.
+        let read = |dir: &Path| -> (String, String, Vec<String>) {
             let (mut session, mut crashes) = (String::new(), String::new());
             for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
                 let name = entry.file_name().to_string_lossy().into_owned();
@@ -205,18 +230,25 @@ mod tests {
                     crashes += &text;
                 }
             }
-            (session, crashes, std::fs::read_to_string(dir.join(NOTES_KEPT)).unwrap_or_default().lines().count())
+            let done = std::fs::read_to_string(dir.join(DONE)).unwrap_or_default();
+            (session, crashes, done.lines().map(str::to_owned).collect())
         };
+        // The crashes, and whether each ends the app.
+        let threads = [("Crash A", false), ("Crash B", false), ("main", true)];
         let until = Instant::now() + Duration::from_secs(120);
-        let (seen, (session, crashes, kept)) = loop {
+        let (seen, (session, crashes, done)) = loop {
             let found = read(&dir);
-            let (session, crashes, kept) = &found;
-            // The first crash was handled in full, and std's report of it waits on the console: the second crash is
-            // written, and its note kept, though its backtrace waits.
+            let (session, crashes, done) = &found;
+            // The first crash was handled in full, and std's report of it waits on the console: the other two are
+            // written, and their notes kept, though their backtraces wait.
+            let written = |t: &str| {
+                let said = format!("crashed on thread {t}\n");
+                session.contains(&said) && crashes.contains(&said)
+            };
             let seen = session.contains("[Crash] Backtrace of the crash on thread Crash A:")
-                && session.contains("crashed on thread Crash B")
-                && crashes.contains("crashed on thread Crash B")
-                && *kept == 2;
+                && written("Crash B")
+                && written("main")
+                && threads.iter().all(|(t, _)| done.iter().any(|l| l.starts_with(&format!("{t} kept the note"))));
             let ended = copy.0.try_wait().ok().flatten().is_some();
             if seen || ended || Instant::now() >= until {
                 break (seen, found);
@@ -225,6 +257,14 @@ mod tests {
         };
         drop(copy);
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(seen, "the second crash is written before its backtrace is taken:\n{session}\n---\n{crashes}\n{kept}");
+        assert!(seen, "the later crashes are written before their backtraces are taken:\n{session}\n---\n{crashes}");
+        // Each crash was on disk in the session log before its note was kept, and the note was told whether the crash
+        // ends the app.
+        for (thread, ends) in threads {
+            let at = |line: String| done.iter().position(|l| *l == line);
+            let (flushed, kept) =
+                (at(format!("{thread} flushed")), at(format!("{thread} kept the note, ends the app: {ends}")));
+            assert!(matches!((flushed, kept), (Some(f), Some(k)) if f < k), "{thread}: {done:?}");
+        }
     }
 }

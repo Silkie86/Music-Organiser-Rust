@@ -6,9 +6,10 @@
 //! Writing never waits on the disk: lines go to a writer thread of their own. A message that keeps coming
 //! is written three times and then only counted (at 10, 100, 1000…), and a run stops writing at 5 MB, so a runaway
 //! warning can't fill the disk; only a crash is still written after that, up to 1 MB more (rule 17: crashes always
-//! log), and the crash that ends the app and the run's last line ("Closed") always are. A crash is counted by where in
-//! the code it happened, whichever thread it was on, and so is its backtrace, a line of its own after it; the crash
-//! that ends the app is always written in full. At each start, a low-priority thread keeps the folder in bounds
+//! log), and then the crash that ends the app and the lines of how the run ended ("Closed"), up to 256 KB more (one
+//! that doesn't fit is cut short, saying so). A crash is counted by where in the code it happened, whichever thread it
+//! was on, and so is its backtrace, a line of its own after it; the crash that ends the app is never only counted.
+//! At each start, a low-priority thread keeps the folder in bounds
 //! ([`crate::tidy::prune_logs`]): the newest 30 runs' logs, the newest 30 crash logs and each tool's newest 10 reports.
 //! A run's log can't be removed while it's written: on Windows nobody can remove it while it's open, and on a Mac or
 //! Linux it's locked (a lock that only says so, for another copy of the app keeping the folder in bounds to see).
@@ -43,10 +44,18 @@ const MAX_BYTES: u64 = 5 * 1024 * 1024;
 /// How much more a run writes for crashes, once it has stopped writing everything else: a crash always reaches the
 /// log (rule 17), but a crash that keeps happening can't fill the disk either.
 const CRASH_ROOM: u64 = 1024 * 1024;
-/// How much more again the crash that ends the app and the run's last line ("Closed") may use, past [`CRASH_ROOM`].
-/// Each comes once a run, so they always show; and if a crash were taken for the app's end again and again, they
-/// still couldn't fill the disk.
+/// How much more again the crash that ends the app and the lines of how the run ended ("Closed") may use, past
+/// [`CRASH_ROOM`]. Each comes once a run, so they show; and if a crash were taken for the app's end again and again,
+/// they still couldn't fill the disk. One that doesn't fit is cut short, saying so.
 const LAST_ROOM: u64 = 256 * 1024;
+/// When a line is cut short to fit in [`LAST_ROOM`], this much is still kept for the lines after it, so "Closed"
+/// shows.
+const KEPT_FOR_THE_END: u64 = 1024;
+/// What the crash that ends the app says when it's cut short to fit (it's whole in its own crash log, which the crash
+/// that ends the app always gets).
+const CUT_CRASH: &str = "(cut short: the log is full; the whole crash is in its crash-….log)";
+/// What another line of how the run ended says when it's cut short to fit.
+const CUT_LINE: &str = "(cut short: the log is full)";
 /// The same message more often than this is counted, not written again.
 const REPEATS_WRITTEN: u32 = 3;
 /// How many different messages are counted for repeats before the count starts again, so it can't grow all day.
@@ -155,9 +164,9 @@ enum Msg {
     Line(String),
     /// A crash: written even once the log has stopped writing other lines, up to [`CRASH_ROOM`] more.
     Crash(String),
-    /// The crash that ends the app, or the run's last line: written past the room for crashes too, up to
-    /// [`LAST_ROOM`] more.
-    Last(String),
+    /// The crash that ends the app, or a line of how the run ended: written past the room for crashes too, up to
+    /// [`LAST_ROOM`] more, and cut short to fit, with what it then says ([`CUT_CRASH`], [`CUT_LINE`]).
+    Last(String, &'static str),
     /// Write out everything so far, then say so on the channel.
     Flush(Sender<()>),
     Close,
@@ -170,9 +179,9 @@ enum Kind<'a> {
     Plain,
     /// A crash's line, or its backtrace (`backtrace`): counted by `place`, where in the code it crashed, the two with
     /// a count each, and written into the extra room for crashes. The crash that ends the app (`ends_the_app`) is
-    /// always written in full, however many came before it.
+    /// never only counted, however many came before it, and goes into the room for how the run ended.
     Crash { place: &'a str, backtrace: bool, ends_the_app: bool },
-    /// The run's last line: written into the extra room too, so a clean end always shows.
+    /// A line of how the run ended ("Closed"): written into the room for that too ([`LAST_ROOM`]), so it shows.
     Last,
 }
 
@@ -237,6 +246,14 @@ pub fn warning(area: &str, message: &str) {
 pub fn error(area: &str, message: &str) {
     if let Some(log) = current() {
         log.write(Level::Error, area, message);
+    }
+}
+
+/// A line of how the run ended (the window stopping with an error, a note still being saved as the app closed): written
+/// past the log's limit as "Closed" is, so it shows even once the log is full (see [`LAST_ROOM`]).
+pub fn last(level: Level, area: &str, message: &str) {
+    if let Some(log) = current() {
+        log.put(level, area, message, Kind::Last);
     }
 }
 
@@ -364,7 +381,8 @@ impl SessionLog {
         let msg = match kind {
             Kind::Plain => Msg::Line(line),
             Kind::Crash { ends_the_app: false, .. } => Msg::Crash(line),
-            Kind::Crash { ends_the_app: true, .. } | Kind::Last => Msg::Last(line),
+            Kind::Crash { ends_the_app: true, .. } => Msg::Last(line, CUT_CRASH),
+            Kind::Last => Msg::Last(line, CUT_LINE),
         };
         // This lock is only ever held to hand a line over (or take the writer away as the log closes), which can't
         // crash or wait, so even a crash's line waits for it rather than be lost.
@@ -397,7 +415,8 @@ impl SessionLog {
         }
     }
 
-    /// Writes "Closed" and stops the writer. Later lines are kept in memory only. It waits a little for the logs
+    /// Writes "Closed" (into the room for how the run ended, so a clean end shows even once the log is full) and stops
+    /// the writer. Later lines are kept in memory only. It waits a little for the logs
     /// folder to be kept in bounds first, so a crash doing that still reaches this log, and then for the last lines
     /// to be written; never long, as a folder on a drive that's asleep mustn't hold the app open.
     pub fn close(&self) {
@@ -535,6 +554,7 @@ fn write_queued(file: File, rx: Receiver<Msg>) {
     let mut written: u64 = 0;
     let mut full = false;
     let mut no_room_for_crashes = false;
+    let mut no_room_at_the_end = false;
     while let Ok(msg) = rx.recv() {
         let mut next = Some(msg);
         while let Some(msg) = next.take() {
@@ -565,18 +585,29 @@ fn write_queued(file: File, rx: Receiver<Msg>) {
                         no_room_for_crashes = true;
                         let _ = writeln!(
                             out,
-                            "(no room for more crashes in this log; the first crash at each place has a crash-….log \
-                             file of its own)"
+                            "(no room for more crashes in this log; the first crash at each of the first \
+                             {CRASH_FILES_PER_RUN} places in the code to crash has a crash-….log file of its own, and \
+                             the crash that ends the app always has one)"
                         );
                     }
                 }
-                // The crash that ends the app, and the run's last line: each comes once a run, so they're written past
-                // the room for crashes too (up to LAST_ROOM more), and always show.
-                Msg::Last(line) => {
+                // The crash that ends the app, and the lines of how the run ended: each comes once a run, so they're
+                // written past the room for crashes too (up to LAST_ROOM more). One that doesn't fit is cut short,
+                // saying so (`cut`): how a line starts says the most. Some room is kept for the lines after it.
+                Msg::Last(line, cut) => {
                     let size = line.len() as u64 + 1;
-                    if written + size <= MAX_BYTES + CRASH_ROOM + LAST_ROOM {
+                    let room = (MAX_BYTES + CRASH_ROOM + LAST_ROOM).saturating_sub(written);
+                    if size <= room {
                         written += size;
                         let _ = writeln!(out, "{line}");
+                    } else if !no_room_at_the_end {
+                        let fits = room.saturating_sub(KEPT_FOR_THE_END + cut.len() as u64 + 2);
+                        let start = &line[..line.floor_char_boundary(usize::try_from(fits).unwrap_or(usize::MAX))];
+                        // Once not even a line's start fits, that's said once, and nothing more is written.
+                        no_room_at_the_end = start.is_empty();
+                        let short = if start.is_empty() { cut.to_owned() } else { format!("{start} {cut}") };
+                        written += short.len() as u64 + 1;
+                        let _ = writeln!(out, "{short}");
                     }
                 }
                 Msg::Flush(done) => {
@@ -989,6 +1020,32 @@ mod tests {
         assert!(text.contains("(no room for more crashes in this log;"), "the room for crashes was used up");
         assert!(text.contains("[Crash] Music Organiser crashed on thread main"), "the crash that ends the app");
         assert!(text.trim_end().ends_with("[App] Closed"), "a clean end shows");
+        let size = std::fs::metadata(&path).expect("there").len();
+        assert!(size <= MAX_BYTES + CRASH_ROOM + LAST_ROOM, "{size}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_line_of_how_the_run_ended_too_long_for_the_room_left_is_cut_short_saying_so() {
+        let dir = temp_folder("cut-short");
+        let log = SessionLog::new(&dir, Local::now(), "start");
+        let filler = "x".repeat(200);
+        for i in 0..(MAX_BYTES / 200 + 100) {
+            log.write(Level::Warning, "Scan", &format!("{i} {filler}"));
+        }
+        // How the run ended shows even once the log is full.
+        log.put(Level::Error, "App", "The window stopped with an error: no graphics", Kind::Last);
+        // The crash that ends the app, longer than all the room left: how it starts is written, and that it was cut.
+        let fatal = Kind::Crash { place: "src/main.rs:5", backtrace: false, ends_the_app: true };
+        let long = format!("Music Organiser crashed on thread main {}", "z".repeat((CRASH_ROOM + LAST_ROOM) as usize));
+        log.put(Level::Error, "Crash", &long, fatal);
+        log.close();
+        let path = log.path().expect("a file").to_owned();
+        let text = std::fs::read_to_string(&path).expect("readable");
+        assert!(text.contains("[App] The window stopped with an error: no graphics"));
+        assert!(text.contains("[Crash] Music Organiser crashed on thread main zzz"), "how it starts");
+        assert!(text.contains(&format!("z {CUT_CRASH}\n")), "that it was cut short");
+        assert!(text.trim_end().ends_with("[App] Closed"), "a clean end still shows");
         let size = std::fs::metadata(&path).expect("there").len();
         assert!(size <= MAX_BYTES + CRASH_ROOM + LAST_ROOM, "{size}");
         let _ = std::fs::remove_dir_all(&dir);
