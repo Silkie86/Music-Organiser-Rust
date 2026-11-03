@@ -94,6 +94,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     scroll(&window, 700.0, 500.0, -PAGE_DOWN);
     shots.push(("backup-remove-older.png".into(), capture(&window)));
     scroll(&window, 700.0, 500.0, PAGE_DOWN);
+    // The warning about files gone from your folders, folded to its line, then opened.
+    mo_ui::backup::show_older(&app, mo_ui::backup::sample_older(false));
+    mo_ui::backup::show_gone(&app, &mo_ui::backup::sample_gone());
+    capture(&window);
+    shots.push(("backup-gone.png".into(), capture(&window)));
+    app.global::<mo_ui::BackupData>().set_gone_open(true);
+    capture(&window);
+    shots.push(("backup-gone-open.png".into(), capture(&window)));
+    app.global::<mo_ui::BackupData>().set_gone_open(false);
+    mo_ui::backup::show_gone(&app, &mo_app::backup_gone::Warning::default());
     app.set_place(Place::Songs.index() as i32);
     for theme in THEMES.iter().skip(1) {
         mo_ui::apply_look(&app, &Look::from_settings(Some(theme.name), None));

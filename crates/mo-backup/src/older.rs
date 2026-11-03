@@ -193,7 +193,7 @@ fn walk(folder: &Path, shared: bool, stop: &AtomicBool) -> io::Result<Walked> {
     let mut todo: Vec<(PathBuf, usize)> = vec![(folder.to_path_buf(), 0)];
     while let Some((dir, depth)) = todo.pop() {
         if stop.load(Ordering::Relaxed) {
-            return Err(io::Error::new(io::ErrorKind::Interrupted, "Stopped"));
+            return Err(crate::stopped());
         }
         let entries = match fs::read_dir(&dir) {
             Ok(entries) => entries,

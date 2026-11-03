@@ -1281,6 +1281,42 @@ export component MenuItems inherits MenuCard {
     }
 }
 
+// A strip that warns about something, folded to its line until opened (Show, Hide), in the warning colour; `quiet`
+// for news that needs no care, in the page's own colours. What it shows when opened goes inside it, after its line.
+export component NoticeStrip inherits Rectangle {
+    in property <string> text;
+    in property <bool> quiet;
+    in-out property <bool> open;
+    vertical-stretch: 0;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: root.quiet ? Theme.stroke : Theme.warning.transparentize(60%);
+    background: root.quiet ? Theme.surface : Theme.warning.transparentize(92%);
+    height: strip.preferred-height;
+    strip := VerticalLayout {
+        padding: Space.sm;
+        padding-left: Space.md;
+        spacing: Space.sm;
+        HorizontalLayout {
+            spacing: Space.sm;
+            Text {
+                text: root.text;
+                color: root.quiet ? Theme.muted : Theme.warning;
+                font-size: Type.body;
+                font-weight: 500;
+            }
+            Rectangle { horizontal-stretch: 1; }
+            LinkText {
+                text: root.open ? "Hide" : "Show";
+                tint: Theme.muted;
+                font-size: Type.meta;
+                clicked => { root.open = !root.open; }
+            }
+        }
+        @children
+    }
+}
+
 // A button that opens a menu of lines under it, like "Remove older versions…". The menu lines up with the button's
 // left edge, or with its right edge (`menu-at-right`, for a button at the right of a row, like the small "more" one).
 export component MenuButton inherits StudioButton {
