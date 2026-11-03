@@ -45,8 +45,19 @@ impl Default for Rows {
 }
 
 /// Every half-precision number as a float, looked up rather than worked out: 256 KB, made once.
-static HALVES: LazyLock<Vec<f32>> =
-    LazyLock::new(|| (0..=u16::MAX).map(|b| half::f16::from_bits(b).to_f32()).collect());
+static HALVES: LazyLock<Box<[f32; 1 << 16]>> = LazyLock::new(|| {
+    let mut all = Box::new([0f32; 1 << 16]);
+    for (b, x) in (0..=u16::MAX).zip(all.iter_mut()) {
+        *x = half::f16::from_bits(b).to_f32();
+    }
+    all
+});
+
+/// A half-precision number's bits as a float, from [`HALVES`] (a table exactly as long as there are bit patterns, so
+/// there's nothing to check).
+fn from_half(halves: &[f32; 1 << 16], bits: u16) -> f32 {
+    halves[usize::from(bits)]
+}
 
 /// `x` at half precision (rounded to the nearest), as its bits.
 fn to_half(x: f32) -> u16 {
@@ -73,7 +84,7 @@ const BLOCK: usize = 100;
 pub struct Gathered {
     ids: Vec<i64>,
     /// Where each vector is: its block, where it starts in it and how long it is.
-    places: Vec<(u32, u32, u32)>,
+    places: Vec<(usize, usize, usize)>,
     blocks: Vec<Vec<f32>>,
 }
 
@@ -105,10 +116,7 @@ impl Gathered {
         }
         let at = self.blocks.len() - 1;
         let block = &mut self.blocks[at];
-        let place = (u32::try_from(at), u32::try_from(block.len()), u32::try_from(len));
-        if let (Ok(b), Ok(start), Ok(len)) = place {
-            self.places.push((b, start, len));
-        }
+        self.places.push((at, block.len(), len));
         block
     }
 
@@ -125,7 +133,7 @@ impl Gathered {
     fn common_length(&self) -> (usize, usize) {
         let mut lengths: HashMap<usize, usize> = HashMap::new();
         for &(_, _, len) in &self.places {
-            *lengths.entry(len as usize).or_default() += 1;
+            *lengths.entry(len).or_default() += 1;
         }
         lengths.into_iter().max_by_key(|(len, n)| (*n, *len)).unwrap_or((0, 0))
     }
@@ -133,8 +141,7 @@ impl Gathered {
     /// The vector at `i` (in the order they were added).
     fn at(&self, i: usize) -> &[f32] {
         let (b, start, len) = self.places[i];
-        let start = start as usize;
-        &self.blocks[b as usize][start..start + len as usize]
+        &self.blocks[b][start..start + len]
     }
 
     /// Each id with its vector, in the order they were added.
@@ -218,7 +225,7 @@ impl VectorIndex {
         }
         // The vectors of that length, in id order. Read in stored order they already are (the ids are the table's row
         // ids); otherwise sorted, a later one for the same id winning, as a map of them keeps it.
-        let mut order: Vec<usize> = (0..g.len()).filter(|&i| g.places[i].2 as usize == dim).collect();
+        let mut order: Vec<usize> = (0..g.len()).filter(|&i| g.places[i].2 == dim).collect();
         if !order.is_sorted_by(|&a, &b| g.ids[a] < g.ids[b]) {
             order.sort_by_key(|&i| (g.ids[i], std::cmp::Reverse(i)));
             order.dedup_by_key(|i| g.ids[*i]);
@@ -281,7 +288,7 @@ impl VectorIndex {
                 full.push(rows.into_boxed_slice());
             }
             if in_place_order && let Some(&last) = part.last() {
-                let block = g.places[last].0 as usize;
+                let block = g.places[last].0;
                 for b in &mut g.blocks[taken_to..block] {
                     *b = Vec::new();
                 }
@@ -293,7 +300,9 @@ impl VectorIndex {
         VectorIndex { dim, ids, rows }
     }
 
-    /// The same index with its numbers at half precision: half the room, each number to about 3 significant digits.
+    /// The same index with its numbers at half precision (the app makes it with [`VectorIndex::from_gathered_halved`]
+    /// instead, never holding the full one whole): half the room, each number to about 3 significant digits.
+    #[cfg(test)]
     pub fn halved(self) -> VectorIndex {
         let rows = match self.rows {
             Rows::Full(full) => Rows::Half(full.par_iter().map(|p| p.iter().map(|x| to_half(*x)).collect()).collect()),
@@ -347,7 +356,22 @@ impl VectorIndex {
         let at = at..at + self.dim;
         Some(match &self.rows {
             Rows::Full(parts) => Cow::Borrowed(&parts[part][at]),
-            Rows::Half(parts) => Cow::Owned(parts[part][at].iter().map(|b| HALVES[usize::from(*b)]).collect()),
+            Rows::Half(parts) => Cow::Owned(parts[part][at].iter().map(|b| from_half(&HALVES, *b)).collect()),
+        })
+    }
+
+    /// [`dot`] of a sound's unit vector with `other`, if the index has it: as `dot(&get(id)?, other)`, worked out
+    /// where the numbers lie, so a loop over many sounds makes no copy of each at half precision.
+    pub fn dot_with(&self, id: i64, other: &[f32]) -> Option<f64> {
+        let i = self.ids.binary_search(&id).ok()?;
+        let (part, at) = (i / CHUNK, (i % CHUNK) * self.dim);
+        let at = at..at + self.dim;
+        Some(match &self.rows {
+            Rows::Full(parts) => dot(&parts[part][at], other),
+            Rows::Half(parts) => {
+                let halves = &*HALVES;
+                parts[part][at].iter().zip(other).map(|(x, y)| f64::from(from_half(halves, *x) * y)).sum()
+            }
         })
     }
 
@@ -365,7 +389,7 @@ impl VectorIndex {
             Rows::Full(rows) => self.best_of(rows, max, |v| v.iter().zip(&q).map(|(a, b)| a * b).sum::<f32>()),
             Rows::Half(rows) => {
                 let halves = &*HALVES;
-                self.best_of(rows, max, |v| v.iter().zip(&q).map(|(a, b)| halves[usize::from(*a)] * b).sum::<f32>())
+                self.best_of(rows, max, |v| v.iter().zip(&q).map(|(a, b)| from_half(halves, *a) * b).sum::<f32>())
             }
         };
         keep_best(&mut best, max);
@@ -711,10 +735,15 @@ mod tests {
         let full = VectorIndex::clap(&v);
         let half = full.clone().halved();
         assert!(half.is_halved() && !full.is_halved());
+        assert_eq!(half.dot_with(5000, &[1.0]), None);
         assert_eq!((half.len(), half.dim()), (full.len(), full.dim()));
         for id in [1, 500, 1999] {
             let (a, b) = (full.get(id).unwrap(), half.get(id).unwrap());
             assert!(a.iter().zip(b.iter()).all(|(x, y)| (x - y).abs() <= x.abs() / 1024.0 + 1e-7));
+            // Worked out where the numbers lie: the same as taking a copy first.
+            let q = v[&999].as_slice();
+            assert_eq!(full.dot_with(id, q), Some(dot(&a, q)));
+            assert_eq!(half.dot_with(id, q), Some(dot(&b, q)));
             let (want, got) = (full.nearest(&a, 8), half.nearest(&b, 8));
             assert_eq!(want[0].0, id);
             assert_eq!(got[0].0, id);

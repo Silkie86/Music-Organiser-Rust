@@ -121,8 +121,8 @@ pub fn suggest(sounds: &[Sound], usage: &HashMap<i64, Usage>, index: &SoundIndex
         .zip(&noise)
         .map(|(c, noise)| {
             let centroid = centroids.get(c.sound_type.as_str()).or(overall.as_ref());
-            let v = index.get(c.id).unwrap_or_default();
-            let fit = centroid.map_or(0.5, |m| (dot(&v, m) + 1.0) / 2.0);
+            // A sound the index doesn't have counts as all noughts, as before.
+            let fit = centroid.map_or(0.5, |m| (index.dot_with(c.id, m).unwrap_or(0.0) + 1.0) / 2.0);
             let fresh = if c.plays == 0 { 1.0 } else { 1.0 / f64::from(1 + c.plays) };
             (*c, (1.0 - o.adventure) * fit + 0.15 * fresh + o.adventure * noise)
         })
@@ -210,8 +210,7 @@ fn reason(index: &VectorIndex, usage: &HashMap<i64, Usage>, s: &Sound, v: &[f32]
         if t.sound_type != s.sound_type || t.id == s.id {
             continue;
         }
-        let Some(tv) = index.get(t.id) else { continue };
-        let sim = dot(v, &tv);
+        let Some(sim) = index.dot_with(t.id, v) else { continue };
         // The first of the closest, as C#'s stable sort keeps it.
         if nearest.is_none_or(|(_, best)| sim > best) {
             nearest = Some((t, sim));
