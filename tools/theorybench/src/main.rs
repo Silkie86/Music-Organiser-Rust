@@ -37,7 +37,7 @@ theorybench chords <labelled.jsonl>... [--answers <name>=<answers.jsonl>]... [--
                    [--per-segment] [--by <tag>]... [--dump <file>]
 theorybench chordfit <labelled.jsonl>... [--inputs <kinds>] [--weigh <source>=<w>]... [--train <folds>]
                    [--test <folds>] [--lambda <x>] [--steps <n>] [--from <weights.json>] [--fix <numbers>]
-                   [--out <weights.json>]
+                   [--hand <mu>] [--hold <rounds>] [--out <weights.json>]
 theorybench candidates <labelled.jsonl>... [--inputs <kinds>] [--misses <file>]
 theorybench tables <labelled.jsonl>... [--write <tables.rs>]
 
@@ -93,10 +93,14 @@ theorybench tables <labelled.jsonl>... [--write <tables.rs>]
              pop909cl/upper=0
   --train    the folds learned from (2,3,4); --test the folds measured (1). Fold 0 is kept back
   --lambda   how hard the numbers are pulled towards the ones the fit starts from (1e-3)
-  --steps    the most steps the fit takes (40)
+  --steps    the most steps the fit takes (40), in each round of --hold
   --from     starts from the weights a fit wrote; the hand-set ones when left out
   --fix      holds these numbers where they start (their codes, such as P1,P2,pair)
-  --out      writes the fitted numbers to a file, for chords --weights and chordfit --from
+  --hand     how much the hand cases' gates count in the aim (0: left out), against the data's loss per bar
+  --hold     keeps the hand cases' gates on music it learns from as straight-line rules, refitting at most this many
+             more rounds while some break, each rule drawn again where the fit got to
+  --out      writes the fitted numbers to a file, for chords --weights and chordfit --from; after a fit, it and the
+             report say which hand cases' gates break
   candidates how often mo-harmony's chord reader has the labelled chord among the readings it scores (its ceiling),
              with the labelled ends, and moved by up to a unit
   --inputs   the parts heard: piano (all but the tune), full, upper (the accompaniment without its bass line); piano,full

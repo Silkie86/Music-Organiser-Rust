@@ -187,6 +187,16 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
     wire(app);
 }
 
+/// A key was changed in Settings: the buttons, card and menu show the new keys at once.
+pub fn show_keys(app: &AppWindow, shortcuts: &Shortcuts) {
+    PAGE.with(|p| p.borrow_mut().shortcuts = shortcuts.clone());
+    let key = shortcuts.key_of(act::EXPORT_SHOWN).to_owned();
+    app.global::<PresetsData>()
+        .set_export_shown_key(ActionKey { what: what_of(act::EXPORT_SHOWN).into(), key: key.into() });
+    show_card(app);
+    show_curve_card(app);
+}
+
 fn wire(app: &AppWindow) {
     APP.with(|a| *a.borrow_mut() = Some(app.as_weak()));
     let data = app.global::<PresetsData>();
