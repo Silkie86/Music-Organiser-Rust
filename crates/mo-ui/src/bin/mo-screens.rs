@@ -193,6 +193,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     hover(&window, -1.0, -1.0);
     app.global::<mo_ui::SongsData>().invoke_close_panel();
 
+    finder_shots(&app, &window, &mut shots);
+
     app.set_sheet_open(true);
     shots.push(("key-sheet.png".into(), capture(&window)));
     app.set_sheet_open(false);
@@ -210,6 +212,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("{}", path.display());
     }
     Ok(())
+}
+
+/// Ctrl+K: opened from the Songs page with nothing typed, a search that finds a song and a sound, only the sounds
+/// (Tab), and an action with its key.
+fn finder_shots(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, shots: &mut Vec<(String, Vec<u8>)>) {
+    use mo_ui::finder;
+    finder::search_here();
+    let songs = mo_app::finder::songs(&sample_songs(), chrono::Local::now().naive_local());
+    finder::add_source(app, "songs", std::sync::Arc::new(songs));
+    app.set_place(Place::Songs.index() as i32);
+    let data = app.global::<mo_ui::FinderData>();
+    let typed = |text: &str| {
+        data.set_query(text.into());
+        data.invoke_edited(text.into());
+    };
+    finder::toggle(app);
+    shots.push(("finder-open.png".into(), capture(window)));
+    typed("glass");
+    shots.push(("finder-search.png".into(), capture(window)));
+    typed("");
+    data.invoke_key("\t".into(), false, false);
+    data.invoke_key("\t".into(), false, false);
+    data.invoke_key(char::from(slint::platform::Key::DownArrow).to_string().into(), false, false);
+    shots.push(("finder-sounds.png".into(), capture(window)));
+    data.invoke_key("\t".into(), false, false);
+    data.invoke_key("\t".into(), false, false);
+    data.invoke_key("\t".into(), false, false);
+    typed("full");
+    shots.push(("finder-action.png".into(), capture(window)));
+    finder::close(app);
 }
 
 /// The Sounds page: a sound picked and playing in its panel, a filter on, the List and History views, and the tiles in

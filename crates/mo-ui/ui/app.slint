@@ -9,6 +9,7 @@ import { SongsPage, SongsData, SongLine, PanelSong, CountLine, PluginLine, Sampl
 import { ArrangementData, ArrLabel, ArrKind } from "pages/arrangement.slint";
 import { BackupPage, BackupData, BackupFolderLine, LeftOutLine } from "pages/backup.slint";
 import { ActivityCards, CardInfo, KeySheet, KeyRow, NoteDialog } from "shell.slint";
+import { Finder, FinderData, FinderLine } from "finder.slint";
 
 import "../fonts/IBMPlexSans-400.ttf";
 import "../fonts/IBMPlexSans-500.ttf";
@@ -25,6 +26,7 @@ import "../fonts/SpaceGrotesk-700.ttf";
 import "../fonts/SpaceMono-400.ttf";
 import "../fonts/SpaceMono-700.ttf";
 
+export { FinderData, FinderLine }
 export { Theme, Icons, ActionKey, MenuItem, CardAction, YearBar, SoundsData, GalaxyLabel, SweptLine, TrailDot, AlikeLine, FolderLine, PadLine, TypeChipInfo, SoundTile, TileRow, SoundLine, SoundFact, PickedSound, BackupData, BackupFolderLine, LeftOutLine, ArrangementData, ArrLabel, ArrKind, CardInfo, KeyRow, SongsData, SongLine, PanelSong, CountLine, PluginLine, SampleLine, SaveLine, DetailPair, HealthLine, OlderLine }
 
 export struct PlaceInfo {
@@ -86,6 +88,13 @@ export component AppWindow inherits Window {
     callback note-put-aside();
 
     forward-focus: keys;
+    // Keys go back to the window once the Ctrl+K finder closes.
+    property <bool> finder-open: FinderData.open;
+    changed finder-open => {
+        if (!self.finder-open) {
+            keys.focus();
+        }
+    }
     keys := FocusScope {
         // Tab moves between the note's parts and never lands on this invisible scope, where typing would vanish.
         focus-on-tab-navigation: false;
@@ -222,6 +231,11 @@ export component AppWindow inherits Window {
                 keys.focus();
             }
             init => { self.focus(); }
+        }
+        // Ctrl+K: jump to anything, over the page.
+        if FinderData.open: Finder {
+            width: 100%;
+            height: 100%;
         }
         // The tooltip, over everything.
         TipLayer { width: 100%; height: 100%; }
