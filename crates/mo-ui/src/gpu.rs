@@ -24,6 +24,8 @@ thread_local! {
     static GPU: RefCell<Option<Gpu>> = const { RefCell::new(None) };
     /// Counts the devices handed over, so a view knows when what it made on the card belongs to an old one.
     static GENERATION: Cell<u64> = const { Cell::new(0) };
+    /// When Slint began drawing the frame it's drawing now.
+    static DRAWING_SINCE: Cell<Option<std::time::Instant>> = const { Cell::new(None) };
 }
 
 /// Asks Slint to draw the window with wgpu, before any window is made, on the fastest card there is. When that can't
@@ -63,7 +65,7 @@ pub fn choose() {
 }
 
 /// Takes the card from Slint once the window is up, and lets it go when the window does. Each time a card is handed
-/// over, the views draw again on it.
+/// over, the views draw again on it. It also times each frame Slint draws, for the `[Frames]` lines.
 pub fn connect(app: &AppWindow) {
     let weak = app.as_weak();
     let set = app.window().set_rendering_notifier(move |state, api| match state {
@@ -80,6 +82,18 @@ pub fn connect(app: &AppWindow) {
                     crate::sounds::graphics_ready(&app);
                 }
             });
+        }
+        // Frame timing (the `[Frames]` lines): how long Slint takes to lay out and draw the window, marked for the
+        // freeze watchdog too. Only measures; it changes nothing that's drawn.
+        RenderingState::BeforeRendering => {
+            DRAWING_SINCE.with(|d| d.set(Some(std::time::Instant::now())));
+            crate::watchdog::drawing(true);
+        }
+        RenderingState::AfterRendering => {
+            crate::watchdog::drawing(false);
+            if let Some(since) = DRAWING_SINCE.with(Cell::take) {
+                mo_app::frame_timing::drawn(since.elapsed(), crate::page_name());
+            }
         }
         RenderingState::RenderingTeardown => {
             GPU.with(|g| *g.borrow_mut() = None);
