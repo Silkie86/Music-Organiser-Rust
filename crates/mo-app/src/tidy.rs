@@ -33,9 +33,10 @@
 //! network drive or USB stick, or where the Recycle Bin is off or too small), and makes room in a full one by removing
 //! the oldest things in it for good; nobody is there to answer, or to lose those. A Mac keeps them for now (its Trash
 //! is reached through Finder, which can ask too). The app never empties the Recycle Bin itself (Solomon, 2026-11-03:
-//! "leave it to me"; the Space page says what's there). If Windows doesn't move a note and doesn't say why (it may have
-//! asked all the same), or the first file a start sends isn't in the Recycle Bin afterwards, no more notes go by
-//! themselves (until the "Stopped" line in [`NOTES_DONE_FILE`] is taken out), and the session log warns of it.
+//! "leave it to me"; the Space page says what's there). If Windows doesn't move a note (it may have asked all the same,
+//! or its Recycle Bin couldn't take it), or says it moved one that's still there, or one is gone though it wasn't
+//! moved, or the first file a start sends isn't in the Recycle Bin afterwards, no more notes go by themselves (until
+//! the "Stopped" line in [`NOTES_DONE_FILE`] is taken out), and the session log warns of it.
 //!
 //! A note's age comes from the time in its name, when it was saved, and runs to now or to the newest note, whichever is
 //! earlier, so a clock that jumps months on (a flat battery, a date set by hand) makes no note old by itself.
@@ -170,26 +171,16 @@ impl Tidied {
         }
     }
 
-    /// Puts one of your files in the bin, counting it: whether it went now (`false` when it was gone already); says
-    /// why when it didn't go.
+    /// Puts one of your files in the bin, counting it: whether it went now (`false` when it was gone before it was
+    /// sent: you removed it meanwhile, say); says why when it didn't go.
     fn send(&mut self, bin: &dyn Bin, path: &Path, bytes: u64) -> Result<bool, String> {
-        match bin.send(path) {
-            Ok(()) => {
-                self.to_bin += 1;
-                self.to_bin_bytes = self.to_bin_bytes.saturating_add(bytes);
-                Ok(true)
-            }
-            // Gone already (another copy of the app sent it first): nothing to do. Not when the bin says Windows
-            // didn't move it, or said it did and it was still there: then, gone, it may have been removed for good.
-            Err(why)
-                if why != KEPT_BY_YOU
-                    && why != STILL_THERE
-                    && fs::symlink_metadata(path).is_err_and(|e| e.kind() == ErrorKind::NotFound) =>
-            {
-                Ok(false)
-            }
-            Err(why) => Err(why),
+        if is_gone(path) {
+            return Ok(false);
         }
+        bin.send(path)?;
+        self.to_bin += 1;
+        self.to_bin_bytes = self.to_bin_bytes.saturating_add(bytes);
+        Ok(true)
     }
 }
 
@@ -513,32 +504,24 @@ fn old_notes_to_bin(folder: &Path, done_file: &Path, kept_for: Duration, now: Sy
                     }
                     unchecked = !problems.is_empty();
                 }
-                // It went, or another copy of the app sent it first.
+                // It went, or it was gone before its turn (you removed it meanwhile, say).
                 Ok(_) => {}
-                // Windows didn't move it and didn't say why, or said it did but it's still there: it may have asked
-                // first after all, so the Recycle Bin may not take notes quietly here. None go by themselves from now
-                // on.
-                Err(why) if why == KEPT_BY_YOU || why == STILL_THERE => {
-                    let why = if why == KEPT_BY_YOU {
-                        format!(
-                            "Windows didn't put {name} in the Recycle Bin, and didn't say why (it may have asked \
-                             first, and been told no)"
-                        )
-                    } else {
-                        format!(
-                            "Windows said it put {name} in the Recycle Bin, but it's still in the notes folder (it may \
-                             have asked first)"
-                        )
-                    };
-                    return stop(tidied, done_file, *saved, &why);
-                }
                 Err(why) => {
-                    // The first one the bin won't take ends this sweep's notes. It stays, and isn't tried again; the
-                    // notes after it wait for the next start, so at most one is tried and fails at each start.
+                    // Windows didn't move it (it may have asked first and been told no, or its Recycle Bin couldn't
+                    // take it), or said it did but it's still there, or it's gone though it didn't go to the bin (it
+                    // may have been removed for good): the Recycle Bin may not take notes quietly here. None go by
+                    // themselves from now on.
+                    let gone = is_gone(path);
+                    if gone || why == KEPT_BY_YOU || why == STILL_THERE {
+                        return stop(tidied, done_file, *saved, &stop_reason(&name, &why, gone));
+                    }
+                    // Otherwise it's the first one the bin won't take, which ends this sweep's notes. It stays, and
+                    // isn't tried again; the notes after it wait for the next start, so at most one is tried and
+                    // fails at each start.
                     let why = if why == IN_USE { "a program is using it" } else { why.trim_end_matches('.') };
                     tidied.notes_stay = Some(format!(
-                        "{name} couldn't go to the Recycle Bin ({why}); it stays for good (put it in the Recycle Bin \
-                         yourself if you like), and the notes after it wait for the next start"
+                        "{name} stays for good: {why}. Put it in the Recycle Bin yourself if you like. The notes \
+                         after it wait for the next start"
                     ));
                     return tidied;
                 }
@@ -567,15 +550,51 @@ fn old_notes_to_bin(folder: &Path, done_file: &Path, kept_for: Duration, now: Sy
     tidied
 }
 
+/// Whether `path` is gone from its folder.
+fn is_gone(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_err_and(|e| e.kind() == ErrorKind::NotFound)
+}
+
+/// Why no more notes go by themselves, said of `name`, the note file Windows didn't put in the Recycle Bin (`why` is
+/// what the bin said), or that's `gone` though it didn't go there.
+fn stop_reason(name: &str, why: &str, gone: bool) -> String {
+    match (gone, why == STILL_THERE) {
+        (true, true) => format!(
+            "Windows said it put {name} in the Recycle Bin, but it was still in the notes folder after, and is gone now \
+             (it may have asked first, and removed it for good)"
+        ),
+        (true, false) => format!(
+            "{name} is gone from the notes folder, but Windows said it couldn't put it in the Recycle Bin (it may have \
+             asked first, and removed it for good)"
+        ),
+        (false, true) => format!(
+            "Windows said it put {name} in the Recycle Bin, but it's still in the notes folder (it may have asked \
+             first)"
+        ),
+        (false, false) => format!(
+            "Windows didn't put {name} in the Recycle Bin (it may have asked first and been told no, or its Recycle \
+             Bin couldn't take it)"
+        ),
+    }
+}
+
 /// Takes the lock on [`NOTES_LOCK_FILE`] at `path` (making it, empty, the first time), held until what's returned is
 /// dropped; or says why the notes stay: another copy of the app is going through them now, or the lock can't be had.
 /// A link or a folder of that name is never opened. Nothing is ever written in it: it's opened for writing only
 /// because some network drives give a lock only on a file opened so.
 fn hold_notes_lock(path: &Path) -> Result<fs::File, String> {
     let cant_open = |e: std::io::Error| format!("{NOTES_LOCK_FILE} in the data folder couldn't be opened ({e})");
+    let open = |create_new: bool| {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(create_new);
+        // Windows: while it's held, nobody can remove it (another copy could then make a new one and lock that too).
+        #[cfg(windows)]
+        std::os::windows::fs::OpenOptionsExt::share_mode(&mut options, 0x1 | 0x2);
+        options.open(path)
+    };
     // Made new, so nothing there (a link included) is ever opened through; one already there (another copy may have
     // made it a moment ago) is opened only when it's a plain file.
-    let file = match fs::OpenOptions::new().write(true).create_new(true).open(path) {
+    let file = match open(true) {
         Err(e) if e.kind() == ErrorKind::AlreadyExists => {
             if !fs::symlink_metadata(path).is_ok_and(|m| m.is_file()) {
                 return Err(format!(
@@ -583,7 +602,7 @@ fn hold_notes_lock(path: &Path) -> Result<fs::File, String> {
                      left as it is"
                 ));
             }
-            fs::OpenOptions::new().write(true).open(path).map_err(cant_open)?
+            open(false).map_err(cant_open)?
         }
         made => made.map_err(cant_open)?,
     };
@@ -611,15 +630,7 @@ fn start_again(done_file: &Path, until: NaiveDateTime, why: &str) -> Tidied {
 /// No more notes go to the Recycle Bin by themselves (`why` says what the Recycle Bin did): [`NOTES_DONE_FILE`] says
 /// so from now on, with every note saved up to `up_to` looked at.
 fn stop(mut tidied: Tidied, done_file: &Path, up_to: NaiveDateTime, why: &str) -> Tidied {
-    let mut written = write_notes_done(done_file, up_to, Some(why));
-    for _ in 1..STOP_TRIES {
-        if written.is_ok() {
-            break;
-        }
-        std::thread::sleep(STOP_RETRY);
-        written = write_notes_done(done_file, up_to, Some(why));
-    }
-    tidied.notes_stay = Some(match written {
+    tidied.notes_stay = Some(match tried(|| write_notes_done(done_file, up_to, Some(why))) {
         Ok(()) => format!(
             "{why}, so no more go by themselves. To let them go again, take out the line starting \"Stopped:\" in \
              {NOTES_DONE_FILE} in the data folder (don't delete the file: it remembers the notes you put back)"
@@ -631,6 +642,19 @@ fn stop(mut tidied: Tidied, done_file: &Path, up_to: NaiveDateTime, why: &str) -
     });
     tidied.notes_stopped = true;
     tidied
+}
+
+/// Runs `write` until it works, at most [`STOP_TRIES`] times, [`STOP_RETRY`] apart; says how the last try went.
+fn tried(mut write: impl FnMut() -> std::io::Result<()>) -> std::io::Result<()> {
+    let mut written = write();
+    for _ in 1..STOP_TRIES {
+        if written.is_ok() {
+            break;
+        }
+        std::thread::sleep(STOP_RETRY);
+        written = write();
+    }
+    written
 }
 
 /// What's said while [`NOTES_DONE_FILE`] says no more notes go by themselves (`why` is its reason).
@@ -923,7 +947,7 @@ mod tests {
         odd: Odd,
     }
 
-    #[derive(Clone, Copy, PartialEq)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
     enum Odd {
         Asks,
         Loses,
@@ -1117,17 +1141,64 @@ mod tests {
         }
     }
 
-    /// A test's bin that finds each file already gone (another copy of the app sent it a moment before).
-    struct TooLateBin;
+    /// A test's bin that says each file couldn't go, though it's gone afterwards (Windows may have removed it for good).
+    struct GoneAfterAnError;
 
-    impl Bin for TooLateBin {
+    impl Bin for GoneAfterAnError {
         fn send(&self, path: &Path) -> Result<(), String> {
             fs::remove_file(path).map_err(|e| e.to_string())?;
-            Err("it isn't there".to_owned())
+            Err("It couldn't go to the Recycle Bin (Os { code: -2147024891 }).".to_owned())
         }
 
-        fn find(&self, removed: &mut [Removed]) -> Vec<Problem> {
-            removed.iter().map(|r| Problem { path: r.path.clone(), why: NOT_IN_BIN.to_owned() }).collect()
+        fn find(&self, _: &mut [Removed]) -> Vec<Problem> {
+            Vec::new()
+        }
+
+        fn put_back(&self, _: &[Removed]) -> Vec<Problem> {
+            Vec::new()
+        }
+    }
+
+    /// A test's bin beside which you remove the note after the one being sent, as the sweep goes (in Explorer, say).
+    struct YouRemoveTheNext {
+        bin: TestBin,
+        next: PathBuf,
+    }
+
+    impl Bin for YouRemoveTheNext {
+        fn send(&self, path: &Path) -> Result<(), String> {
+            let _ = fs::remove_file(&self.next);
+            self.bin.send(path)
+        }
+
+        fn find(&self, _: &mut [Removed]) -> Vec<Problem> {
+            Vec::new()
+        }
+
+        fn put_back(&self, _: &[Removed]) -> Vec<Problem> {
+            Vec::new()
+        }
+    }
+
+    /// A test's bin that looks, as each file is sent, whether the lock on going through the notes is held then:
+    /// another copy of the app trying it would be refused.
+    struct ChecksTheLock {
+        bin: TestBin,
+        lock: PathBuf,
+        held: std::cell::Cell<usize>,
+    }
+
+    impl Bin for ChecksTheLock {
+        fn send(&self, path: &Path) -> Result<(), String> {
+            let other = File::open(&self.lock).map_err(|e| e.to_string())?;
+            if matches!(other.try_lock(), Err(fs::TryLockError::WouldBlock)) {
+                self.held.set(self.held.get() + 1);
+            }
+            self.bin.send(path)
+        }
+
+        fn find(&self, _: &mut [Removed]) -> Vec<Problem> {
+            Vec::new()
         }
 
         fn put_back(&self, _: &[Removed]) -> Vec<Problem> {
@@ -1781,6 +1852,7 @@ mod tests {
         let odd = OddBin { bin: TestBin(dir.join("bin")), odd: Odd::GoneButKept };
         let done = sweep(&places, local("2026-11-03_12-00-00"), &odd);
         assert!(done.notes_stopped && done.to_bin == 0);
+        assert!(done.notes_stay.is_some_and(|why| why.contains("is gone from the notes folder")));
         assert!(!first.exists() && second.exists() && third.exists());
         assert_eq!(how_far(&done_file), ("2026-07-01_10-00-00".to_owned(), true));
         let _ = fs::remove_dir_all(&dir);
@@ -1914,11 +1986,18 @@ mod tests {
         other.lock().unwrap();
         let done = sweep(&places, now, &bin);
         let busy = Some("another copy of the app is going through them now".to_owned());
-        assert_eq!(done, Tidied { notes_stay: busy, ..Tidied::default() });
+        assert_eq!(done, Tidied { notes_stay: busy.clone(), ..Tidied::default() });
         assert!(first.exists() && second.exists() && third.exists() && !done_file.exists());
-        // Once it's done, they go, and the lock stays as it was, empty.
+        // Not even what says how far the sweep went, when it can't be read (it would be written anew otherwise).
+        fs::write(&done_file, "2026-0").unwrap();
+        assert_eq!(sweep(&places, now, &bin), Tidied { notes_stay: busy, ..Tidied::default() });
+        assert_eq!(fs::read_to_string(&done_file).unwrap(), "2026-0");
+        fs::remove_file(&done_file).unwrap();
+        // Once it's done, they go, holding the lock while each goes; and the lock stays as it was, empty.
         drop(other);
-        assert_eq!(sweep(&places, now, &bin), Tidied { to_bin: 3, to_bin_bytes: 3, ..Tidied::default() });
+        let checks = ChecksTheLock { bin: TestBin(dir.join("bin")), lock: lock.clone(), held: std::cell::Cell::new(0) };
+        assert_eq!(sweep(&places, now, &checks), Tidied { to_bin: 3, to_bin_bytes: 3, ..Tidied::default() });
+        assert_eq!(checks.held.get(), 3, "the lock is held while each note goes");
         assert_eq!(fs::metadata(&lock).unwrap().len(), 0);
         let _ = fs::remove_dir_all(&dir);
 
@@ -2001,12 +2080,35 @@ mod tests {
             // gone a moment later.
             let done = sweep(&places, now, &OddBin { bin: TestBin(dir.join("bin")), odd });
             assert!(done.notes_stopped && done.to_bin == 0);
-            assert!(done.notes_stay.is_some_and(|why| why.contains("but it's still in the notes folder")));
+            let said = if odd == Odd::StillThere { "but it's still in the notes folder" } else { "and is gone now" };
+            assert!(done.notes_stay.is_some_and(|why| why.contains(said)), "{odd:?}");
             assert_eq!(first.exists(), odd == Odd::StillThere);
             assert!(second.exists() && third.exists());
             assert_eq!(how_far(&done_file), ("2026-07-01_10-00-00".to_owned(), true));
             let _ = fs::remove_dir_all(&dir);
         }
+    }
+
+    #[test]
+    fn writing_down_a_stop_is_tried_again_a_moment_later() {
+        let tries = std::cell::Cell::new(0);
+        let fails_twice = || {
+            tries.set(tries.get() + 1);
+            if tries.get() < 3 { Err(std::io::Error::other("a virus scanner has it")) } else { Ok(()) }
+        };
+        assert!(tried(fails_twice).is_ok());
+        assert_eq!(tries.get(), 3);
+        // Once it works, it isn't written again; and it gives up after the third try.
+        tries.set(0);
+        let works = || {
+            tries.set(tries.get() + 1);
+            Ok(())
+        };
+        assert!(tried(works).is_ok());
+        assert_eq!(tries.get(), 1);
+        tries.set(0);
+        assert!(tried(|| Err(std::io::Error::other(format!("try {}", tries.replace(tries.get() + 1))))).is_err());
+        assert_eq!(tries.get(), STOP_TRIES);
     }
 
     #[test]
@@ -2104,18 +2206,35 @@ mod tests {
     }
 
     #[test]
-    fn a_note_gone_already_is_neither_counted_nor_a_reason_to_stop() {
-        let dir = test_folder("gone-already");
+    fn a_note_gone_before_its_turn_is_neither_counted_nor_a_reason_to_stop() {
+        let dir = test_folder("gone-before");
         let places = Places { data: dir.join("data"), temp: dir.join("temp") };
         let notes = places.data.join("notes");
-        let note = notes.join("note-2026-07-01_10-00-00.md");
-        fresh(&note);
-        fresh(&notes.join("note-2026-10-30_09-00-00.md"));
+        let [first, second, third] = three_old_notes(&notes);
         let done_file = places.data.join(NOTES_DONE_FILE);
-        // Another copy of the app put it in the bin a moment before.
-        assert_eq!(sweep(&places, local("2026-11-03_12-00-00"), &TooLateBin), Tidied::default());
-        assert!(!note.exists());
+        // You remove the second while the first goes: it's passed over, and the third goes.
+        let bin = YouRemoveTheNext { bin: TestBin(dir.join("bin")), next: second.clone() };
+        let done = sweep(&places, local("2026-11-03_12-00-00"), &bin);
+        assert_eq!(done, Tidied { to_bin: 2, to_bin_bytes: 2, ..Tidied::default() });
+        assert!(!first.exists() && !second.exists() && !third.exists());
         assert_eq!(how_far(&done_file), ("2026-08-01_09-00-00".to_owned(), false));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_note_gone_after_windows_said_it_couldnt_go_stops_them_all() {
+        let dir = test_folder("gone-after");
+        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let notes = places.data.join("notes");
+        let [first, second, third] = three_old_notes(&notes);
+        let done_file = places.data.join(NOTES_DONE_FILE);
+        // Only one copy of the app goes through the notes at a time, so it wasn't another copy that sent it: Windows
+        // may have removed it for good.
+        let done = sweep(&places, local("2026-11-03_12-00-00"), &GoneAfterAnError);
+        assert!(done.notes_stopped && done.to_bin == 0);
+        assert!(done.notes_stay.is_some_and(|why| why.contains("is gone from the notes folder")));
+        assert!(!first.exists() && second.exists() && third.exists());
+        assert_eq!(how_far(&done_file), ("2026-07-01_10-00-00".to_owned(), true));
         let _ = fs::remove_dir_all(&dir);
     }
 

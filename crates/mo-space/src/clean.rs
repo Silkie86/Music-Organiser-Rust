@@ -566,7 +566,8 @@ pub const NOT_IN_BIN: &str = "It isn't in the Recycle Bin, so it may have been r
 /// What [`Bin::send`] says when Windows didn't put it in the Recycle Bin and didn't say why: it asked first and was
 /// told no, or something stopped it that the app can't see (with nobody to answer, Windows lets an error pass in
 /// silence, and says the same as for a no). A file a program has open, or one that needs administrator rights, is told
-/// apart from this (see [`why_kept`]).
+/// apart from this (see [`why_kept`]). Also what's said when Windows did say why, and it was that: the question was
+/// cancelled, or its Recycle Bin couldn't take it (see [`bin_problem`]); that isn't looked into further.
 pub const KEPT_BY_YOU: &str = "It stays: Windows asked first and was told no, or couldn't move it.";
 
 /// What [`Bin::send`] says of a file a program is using.
@@ -762,10 +763,7 @@ impl Bin for SystemBin {
         match sent {
             Ok(()) if fs::symlink_metadata(path).is_ok() => Err(STILL_THERE.to_owned()),
             Ok(()) => Ok(()),
-            Err(e) => Err(match bin_problem(&e) {
-                why if why == KEPT_BY_YOU => why_kept(path).map_or(why, str::to_owned),
-                why => why,
-            }),
+            Err(e) => Err(problem_with(&e, path)),
         }
     }
 
@@ -1027,11 +1025,23 @@ fn why_kept(_path: &Path) -> Option<&'static str> {
     None
 }
 
+/// What stopped `path` going to the Recycle Bin (`e`, from `trash`). When Windows didn't say why, the file may tell
+/// ([`why_kept`]); when it did (the question was cancelled, or its Recycle Bin couldn't take it), that stands, even if
+/// a program has the file open too.
+fn problem_with(e: &trash::Error, path: &Path) -> String {
+    let why = bin_problem(e);
+    if why == KEPT_BY_YOU && matches!(e, trash::Error::Unknown { .. }) {
+        return why_kept(path).map_or(why, str::to_owned);
+    }
+    why
+}
+
 /// What an error from `trash` means here. Windows' own errors (HRESULTs) are told apart by their whole number, as
 /// which part of Windows a code comes from counts too.
 fn bin_problem(e: &trash::Error) -> String {
-    /// Access denied (and what Windows' older file operations said for it).
-    const ACCESS_DENIED: [u32; 2] = [0x8007_0005, 0x8007_0078];
+    /// Access denied. (`trash` asks Windows' newer file operations, whose errors are all HRESULTs: the bare 0x78
+    /// that its older one gave for access denied never comes.)
+    const ACCESS_DENIED: [u32; 1] = [0x8007_0005];
     /// A program has it open and won't let it go (the sharing violation, and the copy engine's own word for it).
     const SHARING_VIOLATION: [u32; 2] = [0x8007_0020, 0x8027_0027];
     /// Windows didn't move it: it was told no or cancelled (ERROR_CANCELLED, E_ABORT, COPYENGINE_E_USER_CANCELLED,
@@ -1232,8 +1242,8 @@ mod tests {
         assert_eq!(os(0x8007_0020), IN_USE);
         assert_eq!(os(0x8027_0027), IN_USE);
         assert_eq!(os(0x8007_0005), NEEDS_ADMIN);
-        // The same last digits from another part of Windows are something else.
-        for code in [0x8027_0005, 0x8027_0020, 0x8004_0005, 0x8007_0001] {
+        // The same last digits from another part of Windows are something else, and so is "not implemented".
+        for code in [0x8027_0005, 0x8027_0020, 0x8004_0005, 0x8007_0001, 0x8007_0078] {
             let said = os(code);
             assert!(said != KEPT_BY_YOU && said != IN_USE && said != NEEDS_ADMIN, "{code:#x}: {said}");
         }
@@ -1246,7 +1256,7 @@ mod tests {
     fn a_file_a_program_holds_is_told_apart() {
         use std::os::windows::fs::OpenOptionsExt;
 
-        use super::why_kept;
+        use super::{problem_with, why_kept};
         let dir = std::env::temp_dir().join(format!("mo-space-why-kept-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("note-2026-07-01_10-00-00.png");
@@ -1254,6 +1264,11 @@ mod tests {
         // Held as an image viewer may hold it: others may read it, but not remove it.
         let held = std::fs::OpenOptions::new().read(true).share_mode(0x1).open(&file).unwrap();
         assert_eq!(why_kept(&file), Some(IN_USE));
+        // Only looked into when Windows didn't say why: a cancelled question stays a no, held or not.
+        let unknown = trash::Error::Unknown { description: "Some operations were aborted".to_owned() };
+        let cancelled = trash::Error::Os { code: 0x8007_04C7_u32.cast_signed(), description: String::new() };
+        assert_eq!(problem_with(&unknown, &file), IN_USE);
+        assert_eq!(problem_with(&cancelled, &file), KEPT_BY_YOU);
         drop(held);
         // Let go of: nothing tells why, so it counts as Windows having been told no.
         assert_eq!(why_kept(&file), None);
