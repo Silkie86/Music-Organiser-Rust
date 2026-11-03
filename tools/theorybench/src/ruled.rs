@@ -27,7 +27,8 @@ impl Plane {
 
 /// The nearest numbers to `x` that keep every bound and plane, with the numbers `fixed` holds kept as they are in `x`
 /// (Dykstra's method: each rule in turn, carrying what each took away, until nothing moves). When the planes and
-/// bounds leave no numbers that keep them all, the bounds are kept and the planes as nearly as they can be.
+/// bounds leave no numbers that keep them all, it never settles: after its last sweep the bounds are put right, and
+/// some plane is broken, by any amount. Ask [`can_keep`] first.
 pub fn project(x: &[f64], bounds: &[Bound], planes: &[Plane], fixed: &[bool]) -> Vec<f64> {
     let n = x.len();
     let is_fixed = |i: usize| fixed.get(i).copied().unwrap_or(false);
@@ -186,8 +187,9 @@ pub struct Fitted {
     pub why: &'static str,
 }
 
-/// Finds the numbers that keep every bound with the least loss, from `x0` (moved onto the rules first), the numbers
-/// `fixed` holds kept as they are. `read` gives the loss and its slope at any numbers; `say` hears a line for each step.
+/// Finds the numbers that keep every bound and plane with the least loss, from `x0` (moved onto the rules first), the
+/// numbers `fixed` holds kept as they are. Some numbers must keep them all ([`can_keep`]). `read` gives the loss and
+/// its slope at any numbers; `say` hears a line for each step.
 pub fn minimise(
     x0: &[f64],
     bounds: &[Bound],

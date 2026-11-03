@@ -402,17 +402,20 @@ w_N, what a stretch read as no chord scores. The counted tables stay as `tables`
   targets are met; the `--out` file says which gates break ("gates"), as weights that break one aren't shipped. The
   gates the design holds out (G\*: cases 6, 15, 32, 34 and 35) are never learned from nor looked at here; the tests
   check them.
-- **Learning from the hand cases.** `--hand μ` adds the hand cases to the aim: each case read whole (but the held-out
-  ones) is a piece labelled where its gates name readings: what a stretch must read (the cases only a whole read
-  decides, and each stretch case's first reading), or the readings that must come among its best two or be kept
-  (accepting any of them, so they grow likelier together), and the aim adds μ times their mean −ln P(labels) to the data's loss per bar, its
-  slope and curvature added the same way. `--hold n` keeps the gates as straight-line rules instead: from the start,
-  each case's labels must keep at least half their chance (or what they have, if less) as the slope at the start
-  sees it (a half-space, kept by the projection with the signs and orders); after each fit, the cases whose gates
-  still break are held again where the fit got to, tighter (at 0.75, then 0.875 of their chance), for at most n more
-  rounds. The rounds stop early when every gate holds, when no gate that breaks is one of the cases learned from (a
-  named case's number that no case read whole has), or when the new rules and the old ones leave no numbers that keep
-  them all (rules drawn at different numbers can). The two can go together.
+- **Learning from the hand cases.** `--hand μ` adds the hand cases to the aim: each music the cases read whole (but
+  the held-out ones) is one piece, labelled where its gates say what to read: what a stretch must read (the cases
+  only a whole read decides, and each stretch case's first reading), or the two readings that must come first
+  (accepting either, so they grow likelier together). A gate that only asks for readings to be kept says nothing
+  about what's read, so it's checked but not learned from. The aim adds μ times the pieces' mean −ln P(labels) to the
+  data's loss per bar, its slope and curvature added the same way. `--hold n` keeps the gates as straight-line rules
+  instead: at the start, each piece's labels must keep at least half their chance (or what they have, if less) as
+  the slope there sees it (a half-space, kept by the projection with the signs and orders). After each fit, for at
+  most n more rounds, every rule is drawn again where the fit got to: a piece whose gates still break (found by its
+  music, whichever way the gate reads it) must get likelier, at 0.75, then 0.875 of its chance, but never more than
+  it had at the start, where every gate holds; every other keeps that chance, or what it has if less. The rounds stop
+  early when every gate holds, when no gate that breaks reads music the fit learns from (8 named cases have music of
+  their own), when the pieces whose gates break are already as likely as they're asked to be, or when the rules leave
+  no numbers that keep them all. Each round takes at most `--steps` steps. The two can go together.
 
 ## Charts played as music (`convert/voice.py`)
 

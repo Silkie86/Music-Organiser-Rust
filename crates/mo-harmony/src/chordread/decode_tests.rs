@@ -7,7 +7,8 @@
 use std::ops::Range;
 
 use super::cases::{
-    Check, Read, Whole, Writer, dense_on, holds, read_whole_cases, render_whole as render, whole_verdicts,
+    Check, Read, Whole, Writer, dense_on, holds, name_of as name, read_whole_cases, render_whole as render,
+    whole_verdicts,
 };
 use super::decode::{Kind, Lattice, Reading};
 use super::hear_tests::{BAR, BEAT, Dice, Music, line, notes, random_music};
@@ -22,11 +23,6 @@ use crate::pitch::PitchClass;
 
 /// Bars of 4/4 counted in units: bar k is units 8k to 8k + 8, and its third beat is unit 8k + 4.
 const B: usize = 8;
-
-/// A reading's name: its label, or N for no chord.
-fn name(label: Option<Label>) -> String {
-    label.map_or_else(|| "N".to_owned(), |l| l.to_string())
-}
 
 impl Whole {
     /// Some music read whole on the counted tables, as the reader reads it.

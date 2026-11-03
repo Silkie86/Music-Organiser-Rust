@@ -4,7 +4,7 @@
 
 use std::ops::Range;
 
-use super::cases::{Writer, label_named, ranked, stretch_verdicts};
+use super::cases::{Writer, all_labels, bar, label_named, ranked, stretch_verdicts};
 use super::hear_tests::{BAR, BEAT, Dice, Music, keys_only, line, notes, random_music, with_bass};
 use super::{
     COUNTED, COUNTED_FROM, Candidate, Core, EVEN, Evidence, Feature, Group, HAND, Hearing, Label, Mass, PerFeature,
@@ -22,16 +22,6 @@ pub(super) fn bars(text: &str) -> Vec<Note> {
     let out = w.bars(text);
     w.done().unwrap();
     out
-}
-
-/// The units of bar `k` (a bar of 4/4 is 8 units).
-fn bar(k: usize) -> Range<usize> {
-    8 * k..8 * k + 8
-}
-
-/// Every label: 12 roots, 16 cores.
-fn all_labels() -> impl Iterator<Item = Label> {
-    PitchClass::ALL.into_iter().flat_map(|root| Core::ALL.map(|core| Label::new(root, core)))
 }
 
 /// A label by its name, as it's written: "C", "F#m7b5", "Bb7sus4".

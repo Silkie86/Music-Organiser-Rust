@@ -84,11 +84,12 @@ theorybench tables <labelled.jsonl>... [--write <tables.rs>]
              pop909cl/upper=0
   --train    the folds learned from (2,3,4); --test the folds measured (1). Fold 0 is kept back
   --lambda   how hard the numbers are pulled towards the ones the fit starts from (1e-3)
-  --steps    the most steps the fit takes (40)
+  --steps    the most steps the fit takes (40), in each round of --hold
   --from     starts from the weights a fit wrote; the hand-set ones when left out
   --fix      holds these numbers where they start (their codes, such as P1,P2,pair)
   --hand     how much the hand cases' gates count in the aim (0: left out), against the data's loss per bar
-  --hold     keeps the hand cases' gates as straight-line rules, refitting at most this many rounds while some break
+  --hold     keeps the hand cases' gates as straight-line rules, refitting at most this many more rounds while some
+             break, each rule drawn again where the fit got to
   --out      writes the fitted numbers to a file, for chords --weights and chordfit --from; after a fit, it and the
              report say which hand cases' gates break
   candidates how often mo-harmony's chord reader has the labelled chord among the readings it scores (its ceiling),

@@ -35,7 +35,7 @@ pub(crate) const VELOCITY: u16 = 1 << 15;
 const B: usize = 8;
 
 /// Some music: parts with their roles, on a grid, heard as a loop, a song or a stretch.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Music {
     pub parts: Vec<(Role, Vec<Note>)>,
     pub grid: Grid,
@@ -183,7 +183,7 @@ impl Writer {
 }
 
 /// Every label: 12 roots, 16 cores.
-fn all_labels() -> impl Iterator<Item = Label> {
+pub(crate) fn all_labels() -> impl Iterator<Item = Label> {
     PitchClass::ALL.into_iter().flat_map(|root| Core::ALL.map(|core| Label::new(root, core)))
 }
 
@@ -257,7 +257,7 @@ pub(crate) fn kept(ranked: &[Scored], these: &[&str]) -> bool {
 // ---- Read whole.
 
 /// A reading's name: its label, or N for no chord.
-fn name_of(label: Option<Label>) -> String {
+pub(crate) fn name_of(label: Option<Label>) -> String {
     label.map_or_else(|| "N".to_owned(), |l| l.to_string())
 }
 
@@ -655,6 +655,8 @@ pub struct Verdict {
     pub wrong: Vec<String>,
     /// What was read, as text.
     pub read: String,
+    /// The music read (as a loop): the fit finds the case it learns from for the same music by it.
+    pub music: Music,
 }
 
 impl Verdict {
@@ -668,7 +670,8 @@ impl Verdict {
 pub fn stretch_verdicts(model: &Model) -> Result<Vec<Verdict>, String> {
     let mut out = Vec::new();
     for (name, music, units, want) in hand_cases()? {
-        let (wrong, read) = match music.looped().heard() {
+        let music = music.looped();
+        let (wrong, read) = match music.heard() {
             Some(hearing) => {
                 let ranked = ranked(&facts_on(&hearing, units, None), model.weights, model.tables);
                 let read: Vec<String> = ranked.iter().take(8).map(|s| format!("{} {:.2}", s.label, s.score)).collect();
@@ -684,6 +687,7 @@ pub fn stretch_verdicts(model: &Model) -> Result<Vec<Verdict>, String> {
             held_out: held_out(name),
             wrong,
             read,
+            music,
         });
     }
     Ok(out)
@@ -693,7 +697,8 @@ pub fn stretch_verdicts(model: &Model) -> Result<Vec<Verdict>, String> {
 pub fn whole_verdicts(model: &Model) -> Result<Vec<Verdict>, String> {
     let mut out = Vec::new();
     for (name, music, checks) in read_whole_cases()? {
-        let (wrong, read) = match Whole::of(&music.looped(), model.weights, model.tables, &[]) {
+        let music = music.looped();
+        let (wrong, read) = match Whole::of(&music, model.weights, model.tables, &[]) {
             Some(whole) => {
                 let spans = whole.spans();
                 (checks.iter().filter_map(|c| holds(c, &whole, &spans).err()).collect(), render_whole(&spans))
@@ -701,7 +706,7 @@ pub fn whole_verdicts(model: &Model) -> Result<Vec<Verdict>, String> {
             None => (vec!["nothing read".to_owned()], String::new()),
         };
         let held_out = held_out(&name);
-        out.push(Verdict { step: Step::Whole, name, gate: true, held_out, wrong, read });
+        out.push(Verdict { step: Step::Whole, name, gate: true, held_out, wrong, read, music });
     }
     Ok(out)
 }
@@ -712,7 +717,8 @@ pub fn named_verdicts(model: &Model, targets: bool) -> Result<Vec<Verdict>, Stri
     let cases = if targets { named_targets()? } else { named_cases()? };
     let mut out = Vec::new();
     for (name, music, wants) in cases {
-        let (wrong, read) = match Named::of(&music.looped(), model.weights, model.tables, &[], 6) {
+        let music = music.looped();
+        let (wrong, read) = match Named::of(&music, model.weights, model.tables, &[], 6) {
             Some(named) => {
                 let spans = named.spans();
                 (wants.iter().filter_map(|w| named_holds(w, &spans).err()).collect(), render_named(&spans))
@@ -720,7 +726,8 @@ pub fn named_verdicts(model: &Model, targets: bool) -> Result<Vec<Verdict>, Stri
             None => (vec!["nothing read".to_owned()], String::new()),
         };
         let held_out = !targets && held_out(name);
-        out.push(Verdict { step: Step::Named, name: name.to_owned(), gate: !targets, held_out, wrong, read });
+        let (gate, name) = (!targets, name.to_owned());
+        out.push(Verdict { step: Step::Named, name, gate, held_out, wrong, read, music });
     }
     Ok(out)
 }
@@ -756,22 +763,27 @@ impl Book {
 
 // ---- What the fit learns from.
 
-/// A hand case as the fit learns from it: the music, as a loop, and the stretches its gates say how to read.
+/// Some music the fit learns from, as a loop, with the stretches the gates on it say how to read, and the names of
+/// the cases read on it (several cases may read the same music, each over its own stretch).
 #[derive(Clone, Debug)]
 pub struct FitCase {
+    /// The first case's name: the one the report goes by.
     pub name: String,
+    pub names: Vec<String>,
     pub music: Music,
     pub labels: Vec<FitLabel>,
 }
 
-/// The hand cases the fit learns from: every case read whole that isn't held out, each with a label for each stretch
-/// its gates name readings for: what it must read ([`Check::Reads`]: the cases only a whole read decides, and each
-/// stretch case's first reading), or what must come among its best or be kept ([`Check::Top`], [`Check::Kept`]: the
-/// label accepts any of them, so the fit makes them likelier together). The labels are in the music's ticks, from the
-/// start of the units they cover; one that allows no chord leaves its stretch free. A case with no such stretch is
-/// left out.
+/// The hand cases the fit learns from: every case read whole that isn't held out, with a label for each stretch its
+/// gates say what to read: what it must read ([`Check::Reads`]: the cases only a whole read decides, and each stretch
+/// case's first reading), or what must come among its best two ([`Check::Top`]: the label accepts either, so the fit
+/// makes them likelier together). A gate that only asks for readings to be kept ([`Check::Kept`]) says nothing about
+/// what's read, so it isn't learned from (only checked), and nor is a label that allows no chord. The labels are in
+/// the music's ticks, from the start of the units they cover. Cases on the same music (a whole case and the stretch
+/// cases cut from it) are one piece with all their labels, so each music counts once. A case with no label is left
+/// out.
 pub fn fit_cases() -> Result<Vec<FitCase>, String> {
-    let mut out = Vec::new();
+    let mut out: Vec<FitCase> = Vec::new();
     for (name, music, checks) in read_whole_cases()? {
         if held_out(&name) {
             continue;
@@ -781,7 +793,7 @@ pub fn fit_cases() -> Result<Vec<FitCase>, String> {
         let first = hearing.reported().start;
         let mut labels = Vec::new();
         for check in &checks {
-            let (Check::Reads(units, names) | Check::Top(units, _, names) | Check::Kept(units, names)) = check else {
+            let (Check::Reads(units, names) | Check::Top(units, _, names)) = check else {
                 continue;
             };
             if names.contains(&"N") {
@@ -794,8 +806,19 @@ pub fn fit_cases() -> Result<Vec<FitCase>, String> {
             let (start, end) = (hearing.start(first + units.start), hearing.start(first + units.end));
             labels.push(FitLabel { start, end, accepts });
         }
-        if !labels.is_empty() {
-            out.push(FitCase { name, music, labels });
+        if labels.is_empty() {
+            continue;
+        }
+        match out.iter_mut().find(|case| case.music == music) {
+            Some(case) => {
+                case.names.push(name);
+                for label in labels {
+                    if !case.labels.contains(&label) {
+                        case.labels.push(label);
+                    }
+                }
+            }
+            None => out.push(FitCase { name: name.clone(), names: vec![name], music, labels }),
         }
     }
     Ok(out)
@@ -811,7 +834,7 @@ pub type WholeCase = (&'static str, Music, Vec<Check>);
 pub type NamedCase = (&'static str, Music, Vec<NameWant>);
 
 /// The units of bar `k` (a bar of 4/4 is 8 units).
-fn bar(k: usize) -> Range<usize> {
+pub(crate) fn bar(k: usize) -> Range<usize> {
     B * k..B * k + B
 }
 

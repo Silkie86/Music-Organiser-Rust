@@ -51,11 +51,14 @@ fn the_held_out_cases_are_the_designs_g_star_ones() {
 #[test]
 fn the_fit_learns_the_readings_the_gates_want_and_never_a_held_out_case() {
     let cases = fit_cases().unwrap();
-    assert!(cases.len() > 70, "{} cases", cases.len());
+    assert!(cases.len() > 40, "{} cases", cases.len());
     let mut fitter = ChordFitter::new();
-    for case in &cases {
-        assert!(!held_out(&case.name), "{}", case.name);
+    for (k, case) in cases.iter().enumerate() {
+        assert_eq!(case.names.first(), Some(&case.name));
+        assert!(case.names.iter().all(|n| !held_out(n)), "{:?}", case.names);
         assert!(!case.labels.is_empty(), "{}", case.name);
+        // Each music is one piece, however many cases read it.
+        assert!(cases.iter().skip(k + 1).all(|other| other.music != case.music), "{}", case.name);
         let end = case.music.parts.iter().flat_map(|(_, n)| n).map(|n| n.start + n.length).max().unwrap();
         for label in &case.labels {
             assert!(!label.accepts.is_empty() && 0 <= label.start && label.start < label.end, "{}", case.name);
@@ -68,21 +71,28 @@ fn the_fit_learns_the_readings_the_gates_want_and_never_a_held_out_case() {
         let (lab, all) = (read.sums.ln_z_labelled, read.sums.ln_z);
         assert!(lab.is_finite() && lab <= all + 1e-9, "{}: {lab} against {all}", case.name);
     }
-    // Case 4 (C C/B | Am): its two bars, C or Cmaj7 then Am, from the loop's own first tick.
+    // Case 4 (C C/B | Am): its two bars, C or Cmaj7 then Am, from the loop's own first tick. Its stretch cases read
+    // whole ("w4 C C/B" over the first bar, "w4 Am" over the second) are the same music: one piece, the same labels.
     let four = cases.iter().find(|c| c.name.starts_with("4 C C/B")).unwrap();
     let labels: Vec<(i64, i64, Vec<String>)> =
         four.labels.iter().map(|l| (l.start, l.end, l.accepts.iter().map(|a| a.to_string()).collect())).collect();
     assert_eq!(labels, [(0, 1920, vec!["C".to_owned(), "Cmaj7".to_owned()]), (1920, 3840, vec!["Am".to_owned()])]);
-    // A stretch case read whole is labelled over its stretch: "w4 Am" over the second bar.
-    let w4 = cases.iter().find(|c| c.name == "w4 Am").unwrap();
-    assert_eq!((w4.labels.len(), w4.labels[0].start, w4.labels[0].end), (1, 1920, 3840));
-    // A stretch that must have two readings on top, or keep some, accepts any of them.
+    assert_eq!(four.names, ["4 C C/B | Am", "w4 C C/B", "w4 Am"]);
+    // A stretch case on music of its own: "w22 Am7" over its bar.
+    let am7 = cases.iter().find(|c| c.name == "w22 Am7").unwrap();
+    assert_eq!((am7.names.len(), am7.labels.len(), am7.labels[0].start, am7.labels[0].end), (1, 1, 0, 1920));
+    // A stretch that must have two readings on top accepts either.
     let accepts = |name: &str| -> Vec<String> {
-        let case = cases.iter().find(|c| c.name == name).unwrap();
+        let case = cases.iter().find(|c| c.names.iter().any(|n| n == name)).unwrap();
         case.labels.iter().flat_map(|l| l.accepts.iter().map(|a| a.to_string())).collect()
     };
     assert_eq!(accepts("w22 no bass"), ["C6", "Am7"]);
-    assert_eq!(accepts("w13 G13 rootless"), ["G7"]);
+    // A gate that only asks for readings to be kept says nothing about what's read: never learned from.
+    let learned = |name: &str| cases.iter().any(|c| c.names.iter().any(|n| n == name));
+    for kept in ["12 rootless, no bass", "13 G13 rootless, no bass", "20 G7alt or Db13, no bass", "w13 G13 rootless"] {
+        assert!(!learned(kept), "{kept}");
+    }
+    assert!(learned("w4 Am") && learned("h1 C6 held 8 bars"));
 }
 
 #[test]
