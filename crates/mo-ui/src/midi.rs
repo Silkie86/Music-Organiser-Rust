@@ -443,19 +443,20 @@ fn show_kinds(app: &AppWindow) {
 }
 
 fn show_years(app: &AppWindow) {
-    let bars = PAGE.with(|p| {
+    let (bars, (from, to)) = PAGE.with(|p| {
         let p = p.borrow();
         let most = p.years.iter().map(|y| y.1).max().unwrap_or(1).max(1) as f32;
-        p.years
+        let bars = p
+            .years
             .iter()
-            .map(|&(year, n)| YearBar {
-                year: year.to_string().into(),
-                share: n as f32 / most,
-                picked: p.filters.years.is_some_and(|(a, b)| (a..=b).contains(&year)),
-            })
-            .collect::<Vec<_>>()
+            .map(|&(year, n)| YearBar { year: year.to_string().into(), share: n as f32 / most })
+            .collect::<Vec<_>>();
+        (bars, mo_app::year_strip::picked_places(&p.years, p.filters.years).unwrap_or((-1, -1)))
     });
-    app.global::<MidiData>().set_years(ModelRc::new(VecModel::from(bars)));
+    let data = app.global::<MidiData>();
+    data.set_years(ModelRc::new(VecModel::from(bars)));
+    data.set_years_from(from);
+    data.set_years_to(to);
 }
 
 /// Works the list out again for the filters now: off the window's thread, newest ask first.

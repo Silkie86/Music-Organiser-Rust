@@ -100,6 +100,9 @@ export global MidiData {
     in property <string> result;
 
     in property <[YearBar]> years;
+    // The picked years, as places in `years` (-1 for none).
+    in property <int> years-from: -1;
+    in property <int> years-to: -1;
     callback years-picked(int, int);
     callback years-cleared();
 
@@ -571,6 +574,8 @@ export component MidiPage inherits Rectangle {
                 y: 0;
                 height: area.height;
                 years: MidiData.years;
+                picked-from: MidiData.years-from;
+                picked-to: MidiData.years-to;
                 picked(a, b) => { MidiData.years-picked(a, b); }
                 cleared => { MidiData.years-cleared(); }
             }
