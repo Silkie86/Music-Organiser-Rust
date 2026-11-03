@@ -54,7 +54,11 @@ fn shape_vertex(@builtin(vertex_index) v: u32, @location(0) at: vec4<f32>, @loca
     let px = at * s;
     let c = corner(v);
     var p = mix(px.xy, px.zw, c);
-    if (kind == LINE) {
+    if (kind == RECT) {
+        // Its edges on whole pixels, taking the pixels whose middles are inside (one on the left or top edge in, one on
+        // the right or bottom edge out), as mo_app::shapes::crisp works them out for the processor.
+        p = mix(ceil(px.xy - vec2(0.5)), ceil(px.zw - vec2(0.5)), c);
+    } else if (kind == LINE) {
         // A strip along the line, a pixel longer at each end and wider each side for its soft edges.
         let d = along(px.xy, px.zw);
         let across = vec2(-d.y, d.x);
@@ -80,7 +84,7 @@ fn shape_vertex(@builtin(vertex_index) v: u32, @location(0) at: vec4<f32>, @loca
 
 @fragment
 fn shape_fragment(in: Shape) -> @location(0) vec4<f32> {
-    // A crisp rectangle fills the pixels whose middles are inside it, as the triangles cover them.
+    // A crisp rectangle fills the whole pixels its triangles cover.
     if (in.kind == RECT) {
         return in.fill;
     }

@@ -820,9 +820,9 @@ mod tests {
                 let processor = started.elapsed().as_secs_f64() * 1000.0 / 20.0;
                 eprintln!("TIMING {name}: {card:.2} ms on the card, {processor:.2} ms on the processor");
             }
-            // Soft edges are worked out a little differently by each, so a few pixels along them differ; anything
-            // more is a shape in the wrong place or the wrong colour.
-            assert!(far * 1000 <= pixels, "{name}: {far} pixels differ by more than 64");
+            // Sharp shapes fill the same pixels on both. Soft edges are worked out a little differently by each, so a
+            // few pixels along them differ a little; a pixel far out is a shape in the wrong place or colour.
+            assert_eq!(far, 0, "{name}: {far} pixels differ by more than 64");
             assert!(off * 50 <= pixels, "{name}: {off} pixels differ by more than 8");
         }
     }

@@ -142,22 +142,26 @@ impl Scene {
         // 1 by 1 is always possible.
         let mut pixmap = Pixmap::new(w, h).unwrap_or_else(|| Pixmap::new(1, 1).unwrap_or_else(|| unreachable!()));
         pixmap.fill(Colour::rgb(self.background, 1.0).skia());
-        let transform = Transform::from_scale(scale as f32, scale as f32);
         let mut i = 0;
         while i < self.shapes.len() {
             // The run of shapes that are drawn together with this one.
             let run = self.shapes[i..].iter().take_while(|s| together(&self.shapes[i], s)).count().max(1);
-            paint_run(&mut pixmap, &self.shapes[i..i + run], transform, (TIE / scale) as f32);
+            paint_run(&mut pixmap, &self.shapes[i..i + run], scale as f32);
             i += run;
         }
         pixmap
     }
 }
 
-/// How far up and left the processor moves a crisp rectangle, in pixels, so it fills the same pixels as the card. The
-/// card fills a pixel whose middle is on a rectangle's left or top edge, and not one on its right or bottom edge;
-/// tiny-skia does the other way round. Moved this little, only a middle exactly on an edge changes sides.
-const TIE: f64 = 1.0 / 4096.0;
+/// The pixels a crisp rectangle (left, top, right, bottom, in points) fills at `scale` pixels to a point, as whole-pixel
+/// edges: the pixels whose middles are inside it, counting a middle on its left or top edge in and one on its right or
+/// bottom edge out. `None` when that's no pixels. The card's shader works the edges out the same way (mo-ui's
+/// `canvas`), so both painters fill the same pixels, however close an edge comes to a pixel's middle.
+pub fn crisp([left, top, right, bottom]: [f32; 4], scale: f32) -> Option<[f32; 4]> {
+    let edge = |v: f32| (v * scale - 0.5).ceil();
+    let (l, t, r, b) = (edge(left), edge(top), edge(right), edge(bottom));
+    (r > l && b > t).then_some([l, t, r, b])
+}
 
 fn usable(x: f64, y: f64, w: f64, h: f64) -> bool {
     [x, y, w, h].iter().all(|v| v.is_finite()) && w > 0.0 && h > 0.0
@@ -176,15 +180,17 @@ fn together(first: &Shape, s: &Shape) -> bool {
     }
 }
 
-/// Draws shapes drawn together (see [`together`]); `tie` is [`TIE`] in points.
-fn paint_run(pixmap: &mut Pixmap, run: &[Shape], transform: Transform, tie: f32) {
+/// Draws shapes drawn together (see [`together`]) at `scale` pixels to a point.
+fn paint_run(pixmap: &mut Pixmap, run: &[Shape], scale: f32) {
+    let transform = Transform::from_scale(scale, scale);
     match run {
-        // Always as a path: tiny-skia's own way to fill a rectangle cuts it to whole pixels differently from the card.
+        // In pixels, with edges on whole pixels (see `crisp`), so no middle of a pixel is ever on an edge.
         [Shape::Rect { fill, .. }, ..] => {
             let mut pb = PathBuilder::new();
             for s in run {
                 if let Shape::Rect { x, y, w, h, .. } = *s
-                    && let Some(r) = Rect::from_xywh(x - tie, y - tie, w, h)
+                    && let Some([l, t, r, b]) = crisp([x, y, x + w, y + h], scale)
+                    && let Some(r) = Rect::from_ltrb(l, t, r, b)
                 {
                     pb.push_rect(r);
                 }
@@ -192,7 +198,7 @@ fn paint_run(pixmap: &mut Pixmap, run: &[Shape], transform: Transform, tie: f32)
             if let Some(path) = pb.finish() {
                 let paint =
                     Paint { shader: tiny_skia::Shader::SolidColor(fill.skia()), anti_alias: false, ..Paint::default() };
-                pixmap.fill_path(&path, &paint, FillRule::Winding, transform, None);
+                pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
             }
         }
         [Shape::Rounded { x, y, w, h, radius, fill, edge }] => {
@@ -308,6 +314,23 @@ mod tests {
         assert_eq!(pixel(&p, 35, 10), [0, 255, 0, 255]);
         // Outside every shape: the background.
         assert_eq!(pixel(&p, 39, 0), [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn a_crisp_rectangle_fills_the_pixels_whose_middles_are_inside() {
+        assert_eq!(crisp([0.0, 0.0, 1.0, 1.0], 1.0), Some([0.0, 0.0, 1.0, 1.0]));
+        // A middle on the left or top edge is in, one on the right or bottom edge out.
+        assert_eq!(crisp([0.5, 0.5, 1.5, 2.5], 1.0), Some([0.0, 0.0, 1.0, 2.0]));
+        // Narrower than a pixel and over no pixel's middle: nothing.
+        assert_eq!(crisp([0.6, 0.0, 1.4, 1.0], 1.0), None);
+        // At 150%: 1.5 to 3 pixels across (the middles of pixels 1 and 2), 0 to 1.5 down (only row 0's middle).
+        assert_eq!(crisp([1.0, 0.0, 2.0, 1.0], 1.5), Some([1.0, 0.0, 3.0, 1.0]));
+        // The processor fills just those pixels.
+        let mut s = Scene::new(4.0, 2.0, 0x000000);
+        s.rect((0.5, 0.0, 1.0, 2.0), Colour::rgb(0xFFFFFF, 1.0));
+        let p = s.paint(1.0);
+        let row: Vec<_> = (0..4).map(|x| pixel(&p, x, 1)[0]).collect();
+        assert_eq!(row, [255, 0, 0, 0]);
     }
 
     #[test]
