@@ -250,3 +250,168 @@ fn a_damaged_row_reads_as_the_csharp_app_reads_it() {
     assert!(db.vectors("features").unwrap().is_empty());
     assert_eq!(db.matches().unwrap()[0].kind, "Converted");
 }
+
+/// A library of `n` sounds with all the C# app's kinds of rows: analyses, vectors, tags, plays, hidden copies, gaps
+/// in the ids and a few damaged rows.
+fn big(name: &str, n: i64) -> PathBuf {
+    let path = make(name, SCHEMA);
+    let mut c = Connection::open(&path).unwrap();
+    let tx = c.transaction().unwrap();
+    for id in 1..=n {
+        let analysis = match id % 7 {
+            0 => None,
+            1 => Some("not json".to_owned()),
+            _ => Some(format!(
+                r#"{{"Seconds":{},"IsLoop":{},"Bpm":{},"KeyTonic":{},"Waveform":[0.5,{}],"Chroma":[0.1,0.2],"Character":["dark"],"Features":[1,2]}}"#,
+                id as f64 / 10.0,
+                id % 2 == 0,
+                100 + id % 60,
+                id % 12,
+                (id % 10) as f64 / 10.0
+            )),
+        };
+        let floats =
+            |k: usize, at: i64| -> Vec<u8> { (0..k).flat_map(|i| (at as f32 + i as f32).to_le_bytes()).collect() };
+        let features = (id % 5 != 0).then(|| floats(4, id));
+        let clap = (id % 3 == 0).then(|| floats(8, -id));
+        // Mixed case, so the order is SQLite's NOCASE one and not the stored one.
+        let path = if id % 2 == 0 {
+            format!("D:\\Samples\\Pack {}\\kick {id}.wav", id % 13)
+        } else {
+            format!("d:\\samples\\PACK {}\\Snare {id}.wav", id % 13)
+        };
+        tx.execute(
+            "INSERT INTO sounds (id, path, size, mtime, analysis, features, clap, name_type, type, type_source,
+                 type_conf, favourite, rating, plays)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'Kick', ?8, 'name', 0.5, ?9, ?10, ?11)",
+            rusqlite::params![
+                id,
+                path,
+                id * 10,
+                at(2025, 1, 1) + id,
+                analysis,
+                features,
+                clap,
+                if id % 4 == 0 { "Kick" } else { "Snare" },
+                id % 11 == 0,
+                id % 6,
+                id % 9
+            ],
+        )
+        .unwrap();
+        if id % 17 == 0 {
+            tx.execute(
+                "INSERT INTO sound_tags VALUES (?1, 'warm', 'you'), (?1, 'Big', 'learned'), (?1, 'airy', 'you')",
+                [id],
+            )
+            .unwrap();
+        }
+        if id % 23 == 0 {
+            tx.execute(
+                "INSERT INTO sound_events VALUES (?1, 'play', ?2), (?1, 'drag', ?3)",
+                rusqlite::params![id, at(2026, 1, 1), at(2024, 1, 1)],
+            )
+            .unwrap();
+        }
+        if id % 29 == 0 {
+            tx.execute("INSERT INTO sound_hidden VALUES (?1, 'b', 0)", [id]).unwrap();
+        }
+    }
+    // Gaps where sounds were forgotten.
+    tx.execute("DELETE FROM sounds WHERE id % 37 = 0 OR id BETWEEN 1000 AND 1500", []).unwrap();
+    // Damaged values the C# app reads as none.
+    tx.execute(
+        "UPDATE sounds SET rating = 'five', favourite = 'yes', type = 7, features = 'not a blob' WHERE id % 41 = 0",
+        [],
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    path
+}
+
+#[test]
+fn everything_is_what_all_and_vectors_read() {
+    for path in [full("everything.db"), big("everything-big.db", 600)] {
+        let db = SoundsDb::open_read_only(&path).unwrap();
+        let e = db.everything(now()).unwrap();
+        assert_eq!(e.sounds, db.all(now()).unwrap());
+        assert_eq!(e.features, db.vectors("features").unwrap());
+        assert_eq!(e.clap, db.vectors("clap").unwrap());
+    }
+}
+
+#[test]
+fn a_big_library_reads_as_the_csharp_app_lists_it() {
+    let path = big("big.db", 5000);
+    let e = SoundsDb::open_read_only(&path).unwrap().everything(now()).unwrap();
+    // Every sound once, in SQLite's own path order, with its tags, plays and hidden mark.
+    let c = Connection::open(&path).unwrap();
+    let mut st = c.prepare("SELECT id FROM sounds ORDER BY path").unwrap();
+    let ids: Vec<i64> = st.query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
+    assert_eq!(e.sounds.iter().map(|s| s.id).collect::<Vec<_>>(), ids);
+    let sound = |id: i64| e.sounds.iter().find(|s| s.id == id).unwrap();
+    assert_eq!(sound(17).tags, ["Big", "airy", "warm"], "as ORDER BY tag sorts them: byte by byte");
+    // One dated play this year and 5 counted: the 4 undated count as recent. One drag, before the year.
+    assert_eq!((sound(23).activity.plays, sound(23).activity.older_drags), (5, 1));
+    assert!(sound(29).hidden);
+    let damaged = sound(41);
+    assert_eq!((damaged.rating, damaged.favourite, damaged.sound_type.as_str()), (0, false, "7"));
+    assert!(!e.features.contains_key(&41));
+    assert!(sound(7).analysis.is_none());
+    assert_eq!(sound(2).analysis.as_ref().unwrap().waveform, [0.5, 0.2]);
+    assert_eq!(e.features.get(&2), Some(&vec![2.0, 3.0, 4.0, 5.0]));
+    assert_eq!(e.clap.get(&3).map(Vec::len), Some(8));
+}
+
+#[test]
+fn an_empty_library_reads_as_empty() {
+    let path = make("empty-everything.db", SCHEMA);
+    let e = SoundsDb::open_read_only(&path).unwrap().everything(now()).unwrap();
+    assert!(e.sounds.is_empty() && e.features.is_empty() && e.clap.is_empty());
+}
+
+#[test]
+fn the_list_sees_the_library_at_one_moment_while_the_csharp_app_saves() {
+    let path = big("saving.db", 4000);
+    let c = Connection::open(&path).unwrap();
+    let last: i64 = c.query_row("SELECT MAX(id) FROM sounds", [], |r| r.get(0)).unwrap();
+    // Plenty of tags, so reading them takes a while: they're read between the plays and the sounds.
+    c.execute_batch(
+        "WITH RECURSIVE n(k) AS (SELECT 0 UNION ALL SELECT k + 1 FROM n WHERE k < 19)
+         INSERT OR IGNORE INTO sound_tags SELECT id, 'tag ' || k, 'learned' FROM sounds, n;",
+    )
+    .unwrap();
+    drop(c);
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // The C# app sending a sound into a DAW and giving it 5 stars in one save, then taking both back in the next. The
+    // sends are read first and the stars last, so only one moment for the whole read keeps the two together.
+    let writer = {
+        let (path, stop) = (path.clone(), stop.clone());
+        std::thread::spawn(move || {
+            let mut c = Connection::open(&path).unwrap();
+            c.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+            let mut saves = 0u64;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let tx = c.transaction().unwrap();
+                if saves.is_multiple_of(2) {
+                    tx.execute("INSERT INTO sound_events VALUES (?1, 'send', ?2)", [last, at(2026, 1, 1)]).unwrap();
+                    tx.execute("UPDATE sounds SET rating = 5 WHERE id = ?1", [last]).unwrap();
+                } else {
+                    tx.execute("DELETE FROM sound_events WHERE sound_id = ?1 AND kind = 'send'", [last]).unwrap();
+                    tx.execute("UPDATE sounds SET rating = 0 WHERE id = ?1", [last]).unwrap();
+                }
+                tx.commit().unwrap();
+                saves += 1;
+            }
+            saves
+        })
+    };
+    let db = SoundsDb::open_read_only(&path).unwrap();
+    for _ in 0..40 {
+        let e = db.everything(now()).unwrap();
+        let s = e.sounds.iter().find(|s| s.id == last).unwrap();
+        assert_eq!(s.activity.sends > 0, s.rating == 5, "the sends and the stars came from different moments");
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(writer.join().unwrap() > 0);
+}
