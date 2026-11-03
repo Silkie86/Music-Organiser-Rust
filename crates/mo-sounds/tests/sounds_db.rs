@@ -329,14 +329,6 @@ fn big(name: &str, n: i64) -> PathBuf {
     path
 }
 
-/// Reads the library on a pool of `threads`, so on that many connections (up to 16).
-fn read_on(path: &std::path::Path, threads: usize) -> mo_sounds::Everything {
-    let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
-    let db = SoundsDb::open_read_only(path).unwrap();
-    // The library goes to the pool: its own connection may only be used on one thread at a time.
-    pool.install(move || db.everything(now()).unwrap())
-}
-
 #[test]
 fn everything_is_what_all_and_vectors_read() {
     for path in [full("everything.db"), big("everything-big.db", 600)] {
@@ -349,82 +341,72 @@ fn everything_is_what_all_and_vectors_read() {
 }
 
 #[test]
-fn many_readers_read_what_one_reads() {
-    let path = big("many-readers.db", 5000);
-    let one = read_on(&path, 1);
-    let many = read_on(&path, 8);
-    assert_eq!(one.readers, 1);
-    assert_eq!(many.readers, 8);
-    assert_eq!(many.sounds, one.sounds);
-    assert_eq!(many.features, one.features);
-    assert_eq!(many.clap, one.clap);
-
-    // And what that is: every sound once, in SQLite's own path order, with its tags, plays and hidden mark.
+fn a_big_library_reads_as_the_csharp_app_lists_it() {
+    let path = big("big.db", 5000);
+    let e = SoundsDb::open_read_only(&path).unwrap().everything(now()).unwrap();
+    // Every sound once, in SQLite's own path order, with its tags, plays and hidden mark.
     let c = Connection::open(&path).unwrap();
     let mut st = c.prepare("SELECT id FROM sounds ORDER BY path").unwrap();
     let ids: Vec<i64> = st.query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
-    assert_eq!(many.sounds.iter().map(|s| s.id).collect::<Vec<_>>(), ids);
-    let tagged = many.sounds.iter().find(|s| s.id == 17).unwrap();
-    assert_eq!(tagged.tags, ["Big", "airy", "warm"], "as ORDER BY tag sorts them: byte by byte");
+    assert_eq!(e.sounds.iter().map(|s| s.id).collect::<Vec<_>>(), ids);
+    let sound = |id: i64| e.sounds.iter().find(|s| s.id == id).unwrap();
+    assert_eq!(sound(17).tags, ["Big", "airy", "warm"], "as ORDER BY tag sorts them: byte by byte");
     // One dated play this year and 5 counted: the 4 undated count as recent. One drag, before the year.
-    let played = many.sounds.iter().find(|s| s.id == 23).unwrap();
-    assert_eq!((played.activity.plays, played.activity.older_drags), (5, 1));
-    assert!(many.sounds.iter().find(|s| s.id == 29).unwrap().hidden);
-    let damaged = many.sounds.iter().find(|s| s.id == 41).unwrap();
+    assert_eq!((sound(23).activity.plays, sound(23).activity.older_drags), (5, 1));
+    assert!(sound(29).hidden);
+    let damaged = sound(41);
     assert_eq!((damaged.rating, damaged.favourite, damaged.sound_type.as_str()), (0, false, "7"));
-    assert!(!many.features.contains_key(&41));
-    assert!(many.sounds.iter().find(|s| s.id == 7).unwrap().analysis.is_none());
-    assert_eq!(many.sounds.iter().find(|s| s.id == 2).unwrap().analysis.as_ref().unwrap().waveform, [0.5, 0.2]);
+    assert!(!e.features.contains_key(&41));
+    assert!(sound(7).analysis.is_none());
+    assert_eq!(sound(2).analysis.as_ref().unwrap().waveform, [0.5, 0.2]);
+    assert_eq!(e.features.get(&2), Some(&vec![2.0, 3.0, 4.0, 5.0]));
+    assert_eq!(e.clap.get(&3).map(Vec::len), Some(8));
 }
 
 #[test]
 fn an_empty_library_reads_as_empty() {
     let path = make("empty-everything.db", SCHEMA);
-    let e = read_on(&path, 4);
+    let e = SoundsDb::open_read_only(&path).unwrap().everything(now()).unwrap();
     assert!(e.sounds.is_empty() && e.features.is_empty() && e.clap.is_empty());
 }
 
 #[test]
-fn every_reader_sees_the_same_moment_while_the_csharp_app_saves() {
+fn the_list_sees_the_library_at_one_moment_while_the_csharp_app_saves() {
     let path = big("saving.db", 4000);
     let c = Connection::open(&path).unwrap();
     let last: i64 = c.query_row("SELECT MAX(id) FROM sounds", [], |r| r.get(0)).unwrap();
-    c.execute_batch(&format!("UPDATE sounds SET rating = 0 WHERE id = 2; UPDATE sounds SET rating = 3 WHERE id = 2002; UPDATE sounds SET rating = 6 WHERE id = {last};")).unwrap();
     drop(c);
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    // The C# app saving: three sounds far apart, each save keeping their stars adding up to 9.
+    // The C# app hiding and showing a copy again, giving it 5 stars whenever it's hidden: the hidden mark is read
+    // before the sounds, the stars with them, so only one moment for both keeps the two together.
     let writer = {
         let (path, stop) = (path.clone(), stop.clone());
         std::thread::spawn(move || {
             let mut c = Connection::open(&path).unwrap();
             c.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
-            let mut k = 0i64;
-            let mut saves = 0;
+            let mut saves = 0u64;
             while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                k = (k + 1) % 4;
                 let tx = c.transaction().unwrap();
-                tx.execute("UPDATE sounds SET rating = ?1 WHERE id = 2", [k]).unwrap();
-                tx.execute("UPDATE sounds SET rating = 3 WHERE id = 2002", []).unwrap();
-                tx.execute("UPDATE sounds SET rating = ?2 - ?1 WHERE id = ?3", rusqlite::params![k, 6, last]).unwrap();
+                if saves.is_multiple_of(2) {
+                    tx.execute("INSERT OR REPLACE INTO sound_hidden VALUES (?1, 'b', 0)", [last]).unwrap();
+                    tx.execute("UPDATE sounds SET rating = 5 WHERE id = ?1", [last]).unwrap();
+                } else {
+                    tx.execute("DELETE FROM sound_hidden WHERE sound_id = ?1", [last]).unwrap();
+                    tx.execute("UPDATE sounds SET rating = 0 WHERE id = ?1", [last]).unwrap();
+                }
                 tx.commit().unwrap();
                 saves += 1;
-                // Now and then, as a scan saves: mostly while the readers read, sometimes while they start.
-                std::thread::sleep(std::time::Duration::from_millis(2 + (saves * 7) % 19));
+                std::thread::sleep(std::time::Duration::from_millis(1 + saves % 3));
             }
             saves
         })
     };
-    let mut shared = 0;
-    for _ in 0..60 {
-        let e = read_on(&path, 8);
-        let stars = |id: i64| e.sounds.iter().find(|s| s.id == id).unwrap().rating;
-        assert_eq!(stars(2) + stars(2002) + stars(last), 9, "the readers saw the library at different moments");
-        if e.readers > 1 {
-            shared += 1;
-        }
+    let db = SoundsDb::open_read_only(&path).unwrap();
+    for _ in 0..40 {
+        let e = db.everything(now()).unwrap();
+        let s = e.sounds.iter().find(|s| s.id == last).unwrap();
+        assert_eq!(s.hidden, s.rating == 5, "the hidden mark and the stars came from different moments");
     }
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     assert!(writer.join().unwrap() > 0);
-    // Not every read can share: some start just as a save lands, and then try again or read on one connection.
-    assert!(shared > 0, "no read shared the work between connections");
 }

@@ -526,12 +526,9 @@ fn read_all(sounds_db: &Path, library_db: &Path, send: impl Fn(Step)) {
         }
     };
     let began = Instant::now();
-    // The sounds and their fingerprints in one pass over the library, on several connections at once, on the
-    // low-priority pool (rule 21). The connection goes there and back: it can only be used on one thread at a time.
-    let (db, everything) = background::on_pool(move || {
-        let everything = db.everything(now);
-        (db, everything)
-    });
+    // The sounds and their fingerprints in one pass over the library: reading the fingerprints apart meant reading
+    // the whole file twice more.
+    let everything = db.everything(now);
     let read_in = began.elapsed();
     let mut fingerprints = None;
     let read = everything.map_err(|e| e.to_string()).map(|e| {
@@ -541,10 +538,9 @@ fn read_all(sounds_db: &Path, library_db: &Path, send: impl Fn(Step)) {
         log::info(
             "Sounds",
             &format!(
-                "{} sounds (read in {:.1} s on {} connections, listed in {:.1} s)",
+                "{} sounds (read in {:.1} s, listed in {:.1} s)",
                 library.list.len(),
                 read_in.as_secs_f32(),
-                e.readers,
                 (began.elapsed() - read_in).as_secs_f32()
             ),
         );

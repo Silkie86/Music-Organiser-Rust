@@ -3,12 +3,9 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use chrono::{Local, NaiveDateTime};
-use rayon::prelude::*;
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
 
@@ -89,28 +86,26 @@ pub struct Everything {
     pub features: Vectors,
     /// Each sound's vector from CLAP, as [`SoundsDb::vectors`] gives them for "clap".
     pub clap: Vectors,
-    /// How many connections read the sounds at once: 1 when the C# app kept saving while they started.
-    pub readers: usize,
 }
 
-/// The most connections one read of the whole library uses at once: enough to keep a fast disk busy.
-const MOST_READERS: usize = 16;
+/// The most room made for the list before reading it: plenty for any library, however far apart its ids are.
+const MOST_ROOM: usize = 1 << 21;
 
-/// How many stretches of ids each reader gets on average: enough that they all finish at about the same time.
-const STRETCHES_PER_READER: usize = 32;
+/// A sound's columns, in the order [`sound_at`] takes them: one list for both reads below, so they can't drift apart.
+macro_rules! sound_columns {
+    () => {
+        "id, path, mtime, error, analysis, name_type, user_type, type, type_source, type_conf, favourite, rating, plays"
+    };
+}
 
-/// How many times the readers are started again when the C# app saves while they start, before one reads it all.
-const TRIES: usize = 3;
+/// How many columns [`sound_columns`] lists: the vectors come straight after them.
+const SOUND_COLUMNS: usize = 13;
 
-/// A sound's columns, as [`sound_at`] takes them.
-const SOUND_SQL: &str = "SELECT id, path, mtime, error, analysis, name_type, user_type, type, type_source, type_conf,
-        favourite, rating, plays
-    FROM sounds WHERE id BETWEEN ?1 AND ?2";
+/// Every sound, in the order the rows are stored.
+const SOUND_SQL: &str = concat!("SELECT ", sound_columns!(), " FROM sounds");
 
-/// The same with its two vectors after them, the analyser's and CLAP's.
-const SOUND_AND_VECTORS_SQL: &str = "SELECT id, path, mtime, error, analysis, name_type, user_type, type, type_source,
-        type_conf, favourite, rating, plays, features, clap
-    FROM sounds WHERE id BETWEEN ?1 AND ?2";
+/// The same with each one's two vectors after its columns, the analyser's and CLAP's.
+const SOUND_AND_VECTORS_SQL: &str = concat!("SELECT ", sound_columns!(), ", features, clap FROM sounds");
 
 /// The sound library, open for reading only: SQLite itself refuses any change, so the C# app's data is safe.
 ///
@@ -182,9 +177,6 @@ impl SoundsDb {
 
     /// Every sound, ordered by path ignoring letter case (as the C# app lists them), with its tags, activity and
     /// whether you've hidden it as a duplicate. `now` sets what counts as recent activity: the year before it.
-    ///
-    /// Read on several connections at once (one for each thread of the rayon pool it's called on, up to 16), all
-    /// seeing the library at the same moment, so call it on a low-priority pool (rule 21).
     pub fn all(&self, now: NaiveDateTime) -> Result<Vec<Sound>, SoundsError> {
         Ok(self.read_sounds(now, false)?.sounds)
     }
@@ -197,112 +189,62 @@ impl SoundsDb {
     }
 
     fn read_sounds(&self, now: NaiveDateTime, vectors: bool) -> Result<Everything, SoundsError> {
-        // Each connection reads one page at a time and waits for the disk in between; several at once keep the disk
-        // busy (a cold read of 453,885 sounds took minutes on one) and parse the analyses on every core.
-        let mut readers = self.readers(rayon::current_num_threads().clamp(1, MOST_READERS))?.into_iter();
-        let count = readers.len();
-        let Some(first) = readers.next() else { return Ok(Everything::default()) };
-        // Two lookups, each going straight to an end of the table. Asked together in one query, SQLite reads every
-        // id to find them both.
-        let (low, high): (Option<i64>, Option<i64>) =
-            first.query_row("SELECT (SELECT MIN(id) FROM sounds), (SELECT MAX(id) FROM sounds)", [], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })?;
-        let stretches = match (low, high) {
-            (Some(low), Some(high)) => stretches(low, high, count * STRETCHES_PER_READER),
-            _ => Vec::new(),
+        // One read transaction, so every query below sees the library as it was at one moment, even while the C# app
+        // saves a scan or hides a batch of copies in between.
+        let snapshot = self.conn.unchecked_transaction()?;
+        let Side { mut activity, mut tags, hidden } = Side::read(&self.conn, &self.tables, now)?;
+        // Room for the whole list made at once: a big library's list is hundreds of megabytes, and growing it a step
+        // at a time copies it each time, holding two copies meanwhile.
+        let room = self.id_span()?.min(MOST_ROOM);
+        let mut out = Everything {
+            sounds: Vec::with_capacity(room),
+            features: if vectors { Vectors::with_capacity(room) } else { Vectors::new() },
+            clap: Vectors::new(),
         };
-        let next = AtomicUsize::new(0);
-        let failed = AtomicBool::new(false);
-        let read: Mutex<Vec<StretchRead>> = Mutex::new(Vec::new());
-        // Each reader takes the next stretch until there are none left (or one went wrong).
-        let work = |conn: &Connection| {
-            while !failed.load(Ordering::Relaxed) {
-                let k = next.fetch_add(1, Ordering::Relaxed);
-                let Some(&(first, last)) = stretches.get(k) else { break };
-                let got = read_stretch(conn, first, last, vectors);
-                if got.is_err() {
-                    failed.store(true, Ordering::Relaxed);
-                }
-                read.lock().unwrap_or_else(PoisonError::into_inner).push((k, got));
-            }
-        };
-        // Only what can go to other threads: not `self`, whose connection stays on this one.
-        let (work, failed, tables) = (&work, &failed, &self.tables);
-        // The small tables on the first reader, while the others start on the sounds; then it joins them.
-        let mine = move || {
-            let side = Side::read(&first, tables, now);
-            if side.is_err() {
-                failed.store(true, Ordering::Relaxed);
-            }
-            work(&first);
-            side
-        };
-        let side = rayon::scope(move |scope| {
-            for conn in readers {
-                scope.spawn(move |_| work(&conn));
-            }
-            mine()
-        });
-        let Side { mut activity, mut tags, hidden } = side?;
-        let mut read = read.into_inner().unwrap_or_else(PoisonError::into_inner);
-        // In id order, so the first error is always the same one.
-        read.sort_unstable_by_key(|(k, _)| *k);
-        let mut out = Everything { readers: count, ..Everything::default() };
-        for (_, rows) in read {
-            for found in rows? {
-                let mut s = found.sound;
-                s.tags = tags.remove(&s.id).unwrap_or_default();
-                s.hidden = hidden.contains(&s.id);
-                let mut a = activity.remove(&s.id).unwrap_or_default();
-                add_undated_plays(&mut a, s.plays);
-                s.activity = a;
-                if let Some(v) = found.features {
-                    out.features.insert(s.id, v);
-                }
-                if let Some(v) = found.clap {
-                    out.clap.insert(s.id, v);
-                }
-                out.sounds.push(s);
-            }
-        }
         // Read in the order the rows are stored, then sorted here. Asking SQLite for `ORDER BY path` walks the path
         // index and fetches each row from wherever it sits, and every row carries its fingerprints (`features`,
         // `clap`), which come before the type and rating columns, so each one meant reading several kilobytes from a
         // random place in a file of gigabytes: minutes on a cold disk with a big library. In stored order the same
-        // read goes straight through the file once. Paths that tie come in id order, as SQLite gives them, so the
-        // order never depends on the readers' timing (and sorting in place needs no second copy of the list).
-        out.sounds.par_sort_unstable_by(|a, b| by_path(&a.path, &b.path).then(a.id.cmp(&b.id)));
+        // read goes straight through the file once. On one connection: several at once were no faster on a slow
+        // disk, and they held up the other pages reading from it (Solomon's PC, 2026-11-03).
+        let mut st = self.conn.prepare(if vectors { SOUND_AND_VECTORS_SQL } else { SOUND_SQL })?;
+        let mut rows = st.query([])?;
+        while let Some(r) = rows.next()? {
+            let mut s = sound_at(r)?;
+            s.tags = tags.remove(&s.id).unwrap_or_default();
+            s.hidden = hidden.contains(&s.id);
+            let mut a = activity.remove(&s.id).unwrap_or_default();
+            add_undated_plays(&mut a, s.plays);
+            s.activity = a;
+            if vectors {
+                if let Some(v) = vector_at(r, SOUND_COLUMNS) {
+                    out.features.insert(s.id, v);
+                }
+                if let Some(v) = vector_at(r, SOUND_COLUMNS + 1) {
+                    out.clap.insert(s.id, v);
+                }
+            }
+            out.sounds.push(s);
+        }
+        drop(rows);
+        drop(st);
+        snapshot.finish()?;
+        // Paths that tie come in id order, as SQLite gives them.
+        out.sounds.sort_unstable_by(|a, b| by_path(&a.path, &b.path).then(a.id.cmp(&b.id)));
         Ok(out)
     }
 
-    /// Up to `n` connections to the library, each in a read transaction of its own, all seeing the library as it
-    /// was at one moment. When the C# app saves while they start, they start again; if it keeps saving, one
-    /// connection does it all.
-    fn readers(&self, n: usize) -> Result<Vec<Connection>, SoundsError> {
-        if n > 1 {
-            for _ in 0..TRIES {
-                let before = data_version(&self.conn)?;
-                let readers = (0..n).map(|_| self.reader()).collect::<Result<Vec<_>, _>>()?;
-                // A save that landed while they started would show here as a new data version; without one, every
-                // reader took its picture of the library as it was when `before` was read.
-                if data_version(&self.conn)? == before {
-                    return Ok(readers);
-                }
-            }
-        }
-        Ok(vec![self.reader()?])
-    }
-
-    /// Another read-only connection to the library, already looking at it: it sees the library as it is now until
-    /// it's dropped, whatever the C# app saves meanwhile.
-    fn reader(&self) -> Result<Connection, SoundsError> {
-        let conn =
-            connect(&self.path).map_err(|e| SoundsError::Open { path: self.path.clone(), why: e.to_string() })?;
-        conn.execute_batch("BEGIN")?;
-        // A read transaction takes its picture of the library at its first read.
-        conn.query_row("SELECT COUNT(*) FROM sqlite_schema", [], |r| r.get::<_, i64>(0))?;
-        Ok(conn)
+    /// How many ids lie from the lowest to the highest: about how many sounds there are. Two lookups, each going
+    /// straight to an end of the table (asked together in one query, SQLite reads every id to find them both).
+    fn id_span(&self) -> Result<usize, SoundsError> {
+        let ends: (Option<i64>, Option<i64>) =
+            self.conn.query_row("SELECT (SELECT MIN(id) FROM sounds), (SELECT MAX(id) FROM sounds)", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?;
+        Ok(match ends {
+            (Some(low), Some(high)) => usize::try_from(i128::from(high) - i128::from(low) + 1).unwrap_or(0),
+            _ => 0,
+        })
     }
 
     /// What's been done with each sound in the year before `now` and before that: deliberate plays, drags out of the
@@ -358,10 +300,7 @@ impl SoundsDb {
         let mut rows = st.query([])?;
         let mut out = HashMap::new();
         while let Some(r) = rows.next()? {
-            // Anything but a blob of whole floats is left out, as the C# app leaves it out.
-            if let ValueRef::Blob(blob) = r.get_ref(1)?
-                && let Some(v) = floats(blob)
-            {
+            if let Some(v) = vector_at(r, 1) {
                 out.insert(r.get::<_, i64>(0)?, v);
             }
         }
@@ -504,45 +443,6 @@ fn connect(path: &Path) -> Result<Connection, rusqlite::Error> {
     conn.busy_timeout(Duration::from_secs(2))?;
     conn.pragma_update(None, "query_only", true)?;
     Ok(conn)
-}
-
-/// A number SQLite changes whenever another connection has saved since `conn` last looked.
-fn data_version(conn: &Connection) -> Result<i64, rusqlite::Error> {
-    conn.query_row("PRAGMA data_version", [], |r| r.get(0))
-}
-
-/// `[low, high]` cut into `n` stretches of ids (fewer when there aren't that many ids), in order, with no gaps.
-fn stretches(low: i64, high: i64, n: usize) -> Vec<(i64, i64)> {
-    if high < low {
-        return Vec::new();
-    }
-    let span = i128::from(high) - i128::from(low) + 1;
-    let n = i128::try_from(n).unwrap_or(i128::MAX).clamp(1, span);
-    let at = |k: i128| i128::from(low) + span * k / n;
-    // Every bound lies between `low` and `high + 1`, so each fits back into an id.
-    (0..n).filter_map(|k| Some((i64::try_from(at(k)).ok()?, i64::try_from(at(k + 1) - 1).ok()?))).collect()
-}
-
-/// One sound as a stretch reads it, with its vectors when they were asked for.
-struct Found {
-    sound: Sound,
-    features: Option<Vec<f32>>,
-    clap: Option<Vec<f32>>,
-}
-
-/// One stretch's sounds (or what went wrong reading them), with the stretch's place in line.
-type StretchRead = (usize, Result<Vec<Found>, SoundsError>);
-
-/// The sounds with ids from `first` to `last`, in id order.
-fn read_stretch(conn: &Connection, first: i64, last: i64, vectors: bool) -> Result<Vec<Found>, SoundsError> {
-    let mut st = conn.prepare_cached(if vectors { SOUND_AND_VECTORS_SQL } else { SOUND_SQL })?;
-    let mut rows = st.query([first, last])?;
-    let mut found = Vec::new();
-    while let Some(r) = rows.next()? {
-        let (features, clap) = if vectors { (vector_at(r, 13), vector_at(r, 14)) } else { (None, None) };
-        found.push(Found { sound: sound_at(r)?, features, clap });
-    }
-    Ok(found)
 }
 
 /// A sound from a row of [`SOUND_SQL`], without its tags, activity or hidden mark yet.
@@ -760,18 +660,6 @@ mod tests {
         let mut ours: Vec<&str> = paths.to_vec();
         ours.sort_unstable_by(|a, b| by_path(a, b));
         assert_eq!(ours, sqlite);
-    }
-
-    #[test]
-    fn stretches_cover_every_id_once() {
-        assert_eq!(stretches(1, 10, 3), [(1, 3), (4, 6), (7, 10)]);
-        assert_eq!(stretches(5, 7, 100), [(5, 5), (6, 6), (7, 7)], "never more stretches than ids");
-        assert_eq!(stretches(-3, 2, 2), [(-3, -1), (0, 2)]);
-        assert_eq!(stretches(4, 4, 0), [(4, 4)]);
-        assert!(stretches(5, 4, 3).is_empty());
-        let whole = stretches(i64::MIN, i64::MAX, 7);
-        assert_eq!((whole[0].0, whole[6].1), (i64::MIN, i64::MAX));
-        assert!(whole.windows(2).all(|w| w[0].1.checked_add(1) == Some(w[1].0)));
     }
 
     #[test]
