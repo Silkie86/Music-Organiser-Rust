@@ -19,7 +19,9 @@ use mo_library::Library;
 use slint::platform::WindowEvent;
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
-use crate::{AccentInfo, AppWindow, FolderGroupInfo, KeyLineInfo, SettingsData, SettingsFact, ThemeCardInfo};
+use crate::{
+    AccentInfo, AppWindow, DawRowInfo, FolderGroupInfo, KeyLineInfo, SettingsData, SettingsFact, ThemeCardInfo,
+};
 
 /// What the page knows, on the window's thread.
 struct Page {
@@ -42,6 +44,11 @@ struct Page {
     listening: Option<&'static str>,
     /// What the last key change did.
     keys_message: String,
+    /// How Bitwig's link stood when last checked, whether a check is running, and how many were asked for (newest
+    /// wins).
+    bitwig: page::DawStatus,
+    daws_checking: bool,
+    daws_asked: u64,
     feed: Feed,
 }
 
@@ -145,6 +152,9 @@ pub fn connect(app: &AppWindow, setup: Setup) {
             folders_asked: 0,
             listening: None,
             keys_message: String::new(),
+            bitwig: page::bitwig_checking(),
+            daws_checking: false,
+            daws_asked: 0,
             feed: setup.feed,
         })
     });
@@ -162,6 +172,7 @@ pub fn connect(app: &AppWindow, setup: Setup) {
     data.set_credit(page::SLINT_CREDIT.into());
     data.set_folders_note(page::FOLDERS_NOTE.into());
     data.set_keys_note(page::KEYS_NOTE.into());
+    data.set_daws_note(page::DAWS_NOTE.into());
     data.set_kept_note(
         format!("Your changes are kept in {}; the C# app's settings are only read", app_settings::FILE).into(),
     );
@@ -173,6 +184,15 @@ pub fn connect(app: &AppWindow, setup: Setup) {
         change(TAB_KEY, tab.name());
         if let Some(app) = weak.upgrade() {
             show(&app);
+            if tab == Tab::Daws {
+                check_daws(&app);
+            }
+        }
+    });
+    let weak = app.as_weak();
+    data.on_check_daws(move || {
+        if let Some(app) = weak.upgrade() {
+            check_daws(&app);
         }
     });
     let weak = app.as_weak();
@@ -441,6 +461,12 @@ pub fn shown(app: &AppWindow) {
         return;
     }
     list_outputs(app);
+    // Bitwig is only asked while its tab is on show.
+    let on_daws =
+        PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| Tab::from_setting(p.settings.get(TAB_KEY)) == Tab::Daws));
+    if on_daws {
+        check_daws(app);
+    }
     let weak = app.as_weak();
     let started = background::spawn("Settings folders", move || {
         let groups = read_folders(&library);
@@ -456,6 +482,57 @@ pub fn shown(app: &AppWindow) {
     if let Err(e) = started {
         log::error("Settings", &format!("Couldn't start reading the folders: {e}"));
     }
+}
+
+/// Asks the link in Bitwig how it stands, away from the window (it may wait a few seconds for a busy Bitwig). Only
+/// reads: nothing goes into the project. A check asked for while one runs replaces its answer (newest wins).
+fn check_daws(app: &AppWindow) {
+    let asked = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let p = p.as_mut().filter(|p| p.live)?;
+        p.daws_asked += 1;
+        p.daws_checking = true;
+        Some(p.daws_asked)
+    });
+    let Some(asked) = asked else { return };
+    show(app);
+    let weak = app.as_weak();
+    let started = background::spawn("Settings Bitwig check", move || {
+        let status = page::bitwig_status(&mo_dawlink::bitwig::Bitwig::default().check());
+        let _ = slint::invoke_from_event_loop(move || {
+            let newest = PAGE.with(|p| {
+                let mut p = p.borrow_mut();
+                let Some(p) = p.as_mut().filter(|p| p.daws_asked == asked) else { return false };
+                p.bitwig = status;
+                p.daws_checking = false;
+                true
+            });
+            if let Some(app) = weak.upgrade()
+                && newest
+            {
+                show(&app);
+            }
+        });
+    });
+    if let Err(e) = started {
+        log::error("Settings", &format!("Couldn't start checking Bitwig: {e}"));
+        PAGE.with(|p| {
+            if let Some(p) = p.borrow_mut().as_mut() {
+                p.daws_checking = false;
+            }
+        });
+        show(app);
+    }
+}
+
+/// Shows how Bitwig's link stands, for the screenshots.
+pub fn show_bitwig(app: &AppWindow, status: page::DawStatus) {
+    PAGE.with(|p| {
+        if let Some(p) = p.borrow_mut().as_mut() {
+            p.bitwig = status;
+        }
+    });
+    show(app);
 }
 
 /// The folders as the C# app keeps them, read-only.
@@ -621,6 +698,21 @@ fn show(app: &AppWindow) {
         data.set_listening(p.listening.unwrap_or_default().into());
         data.set_keys_message(p.keys_message.clone().into());
         data.set_keys_changed(keys.any_changed());
+
+        let row = |d: page::DawStatus| DawRowInfo {
+            bitwig: d.daw == p.bitwig.daw,
+            daw: d.daw.into(),
+            state: d.state.into(),
+            ok: d.ok,
+            facts: ModelRc::new(VecModel::from(
+                d.facts
+                    .into_iter()
+                    .map(|f| SettingsFact { what: f.what.into(), value: f.value.into(), button: SharedString::new() })
+                    .collect::<Vec<_>>(),
+            )),
+        };
+        data.set_daws(ModelRc::new(VecModel::from(vec![row(p.bitwig.clone()), row(page::fl_status())])));
+        data.set_daws_checking(p.daws_checking);
     });
 }
 

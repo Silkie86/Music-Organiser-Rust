@@ -687,6 +687,24 @@ fn settings_shots(
     data.invoke_tab_picked(1);
     capture(window);
     shots.push(("settings-folders.png".into(), capture(window)));
+    data.invoke_tab_picked(2);
+    mo_ui::settings::show_bitwig(
+        app,
+        mo_app::settings::bitwig_status(&Ok(mo_dawlink::bitwig::Hello {
+            link: 3,
+            product: "Bitwig Studio".into(),
+            version: "6.1.5".into(),
+            project: "Night drive".into(),
+            modified: true,
+            changes: true,
+            runtime: "java".into(),
+            extension: "3.18".into(),
+            loopback: Some(true),
+            ..Default::default()
+        })),
+    );
+    capture(window);
+    shots.push(("settings-daws.png".into(), capture(window)));
     data.invoke_tab_picked(3);
     capture(window);
     shots.push(("settings-shortcuts.png".into(), capture(window)));

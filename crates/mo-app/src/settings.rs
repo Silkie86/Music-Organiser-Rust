@@ -403,6 +403,116 @@ pub const KEYS_NOTE: &str = "Keys that work on every page come first, then each 
                              stays the note for Claude, and F1 or ? on a page shows its keys.";
 
 /// The credit Slint's royalty-free licence asks for (decided 2026-10-30), with what it means.
+/// How a DAW's link stands, for a row on the DAWs tab: a short state, whether it's working, and the facts under it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DawStatus {
+    pub daw: &'static str,
+    pub state: String,
+    /// Whether the link answers and the app could send to it now.
+    pub ok: bool,
+    pub facts: Vec<Fact>,
+}
+
+/// Bitwig's row before it's been checked.
+pub fn bitwig_checking() -> DawStatus {
+    DawStatus { daw: "Bitwig Studio", state: "Checking\u{2026}".to_owned(), ok: false, facts: Vec::new() }
+}
+
+/// Bitwig's row from what the link said when the app connected (`mo_dawlink::bitwig::Bitwig::check`). Only reads:
+/// nothing is sent to the project.
+pub fn bitwig_status(checked: &Result<mo_dawlink::bitwig::Hello, mo_dawlink::bitwig::Error>) -> DawStatus {
+    use mo_dawlink::bitwig::Error;
+    let fact = |what, value: String| Fact { what, value, button: None };
+    let hello = match checked {
+        Ok(hello) => hello,
+        Err(Error::NotRunning) => {
+            return DawStatus {
+                daw: "Bitwig Studio",
+                state: "Not answering".to_owned(),
+                ok: false,
+                facts: vec![fact("What to check", Error::NotRunning.to_string())],
+            };
+        }
+        Err(e) => {
+            return DawStatus {
+                daw: "Bitwig Studio",
+                state: "Not linked".to_owned(),
+                ok: false,
+                facts: vec![fact("What happened", e.to_string())],
+            };
+        }
+    };
+    let mut facts = Vec::new();
+    let product = if hello.product.is_empty() { "Bitwig Studio" } else { hello.product.as_str() };
+    facts.push(fact("Bitwig", format!("{product} {}", hello.version).trim_end().to_owned()));
+    let mut answering = hello.answering();
+    if let Some(first) = answering.get(..1) {
+        answering = first.to_uppercase() + &answering[1..];
+    }
+    facts.push(fact("Answering", answering));
+    if hello.error.is_none() {
+        let project = if hello.project.is_empty() { "A new project, not saved yet" } else { hello.project.as_str() };
+        let unsaved = if hello.modified { " \u{b7} unsaved changes" } else { "" };
+        facts.push(fact("Open project", format!("{project}{unsaved}")));
+        facts.push(fact(
+            "Changes from the app",
+            if hello.changes {
+                "Allowed".to_owned()
+            } else {
+                "Off: turn on \u{201c}Let the app make changes\u{201d} in Bitwig (Settings > Controllers > Music \
+                 Organiser) to send sounds and kits"
+                    .to_owned()
+            },
+        ));
+        if let Some(back) = hello.loopback {
+            facts.push(fact(
+                "Loopback MIDI",
+                if back {
+                    "Working".to_owned()
+                } else {
+                    format!(
+                        "Not coming back: set the controller's MIDI in and out to \u{201c}{}\u{201d}",
+                        mo_dawlink::bitwig::LOOPBACK_PORT
+                    )
+                },
+            ));
+        }
+    }
+    let (state, ok) = match hello.can_send() {
+        Ok(()) => ("Linked".to_owned(), true),
+        Err(Error::NotStarted(_)) => ("Linked, but not working fully".to_owned(), false),
+        Err(Error::OldLink) => ("Linked, but too old to send to".to_owned(), false),
+        Err(_) => ("Linked, reading only".to_owned(), false),
+    };
+    if let Err(why) = hello.can_send()
+        && !matches!(why, Error::ChangesOff)
+    {
+        facts.push(fact("Sending", why.to_string()));
+    }
+    DawStatus { daw: "Bitwig Studio", state, ok, facts }
+}
+
+/// FL Studio's row: its link comes later in phase 5.
+pub fn fl_status() -> DawStatus {
+    DawStatus {
+        daw: "FL Studio",
+        state: "Comes later".to_owned(),
+        ok: false,
+        facts: vec![Fact {
+            what: "For now",
+            value: "The Rust app's FL Studio link comes later in phase 5. The old app's Settings > DAW links still \
+                    installs and checks FL's script."
+                .to_owned(),
+            button: None,
+        }],
+    }
+}
+
+/// Under the DAW rows: where the scripts are installed from for now.
+pub const DAWS_NOTE: &str = "The app talks to Bitwig through the Music Organiser extension. Installing it, and the \
+    live tests, stay in the old app's Settings > DAW links for now; this tab checks that the link answers, and only \
+    reads.";
+
 pub const SLINT_CREDIT: &str = "Music Organiser's screens are made with Slint, under its royalty-free licence.";
 
 #[cfg(test)]
@@ -524,5 +634,43 @@ mod tests {
         let chosen =
             folder_groups(vec![], vec![], vec![], vec!["D:\\VST".to_owned()], vec!["C:\\VST3".to_owned()], &[]);
         assert_eq!(chosen[3].folders, vec!["D:\\VST".to_owned()]);
+    }
+
+    #[test]
+    fn bitwig_rows_say_how_the_link_stands() {
+        use mo_dawlink::bitwig::{Error, Hello};
+        let off = bitwig_status(&Err(Error::NotRunning));
+        assert_eq!((off.state.as_str(), off.ok), ("Not answering", false));
+        let hello = Hello {
+            link: 3,
+            product: "Bitwig Studio".into(),
+            version: "6.1.5".into(),
+            project: "Night drive".into(),
+            modified: true,
+            changes: true,
+            runtime: "java".into(),
+            extension: "3.18".into(),
+            loopback: Some(true),
+            ..Hello::default()
+        };
+        let row = bitwig_status(&Ok(hello.clone()));
+        assert_eq!((row.state.as_str(), row.ok), ("Linked", true));
+        let values: Vec<&str> = row.facts.iter().map(|f| f.value.as_str()).collect();
+        assert_eq!(
+            values,
+            [
+                "Bitwig Studio 6.1.5",
+                "The Music Organiser extension 3.18",
+                "Night drive \u{b7} unsaved changes",
+                "Allowed",
+                "Working"
+            ]
+        );
+        let reading = bitwig_status(&Ok(Hello { changes: false, ..hello.clone() }));
+        assert_eq!((reading.state.as_str(), reading.ok), ("Linked, reading only", false));
+        let broken = bitwig_status(&Ok(Hello { error: Some("no MIDI".into()), ..hello }));
+        assert_eq!(broken.state, "Linked, but not working fully");
+        assert!(broken.facts.iter().all(|f| f.what != "Open project"));
+        assert!(broken.facts.last().is_some_and(|f| f.value.ends_with("Bitwig said: no MIDI")));
     }
 }
