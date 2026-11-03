@@ -1,6 +1,6 @@
 // Every shared part on one page, for the screenshots (mo-screens): each new part shows here in every theme before any
 // page uses it, so its look can be judged on its own.
-import { Theme, Type, Space, Caps, Well, StudioButton, Dot, PageHeader, Segmented, MoreButton, MenuButton, OptionsButton, MenuItem, MenuItems, SidePanel, PanelDivider, EmptyState, Waveform, FolderRow, TickBox, ToggleChip, ListLine, RightClickMenu, NoticeStrip } from "../studio.slint";
+import { Theme, Type, Space, Caps, Well, StudioButton, Dot, PageHeader, Segmented, MoreButton, MenuButton, OptionsButton, MenuItem, MenuItems, CardAction, CardActions, SidePanel, PanelDivider, EmptyState, Waveform, FolderRow, TickBox, ToggleChip, ListLine, RightClickMenu, NoticeStrip } from "../studio.slint";
 
 export component PartsGallery inherits Rectangle {
     background: Theme.background;
@@ -14,6 +14,12 @@ export component PartsGallery inherits Rectangle {
         { what: "", key: "", id: "", enabled: true },
         { what: "Show in folder", key: "Ctrl+Shift+E", id: "reveal", enabled: true },
         { what: "Copy path", key: "Ctrl+Shift+C", id: "copy", enabled: false },
+    ];
+    // A side card's buttons after its main one (they wrap when the card is narrow).
+    property <[CardAction]> card-actions: [
+        { text: "To Bitwig", tip: "Put the picked sound into Bitwig", key: "Ctrl+B", id: "bitwig", enabled: true },
+        { text: "Show in folder", tip: "Show the sound's file in Explorer", key: "Ctrl+Shift+E", id: "reveal", enabled: true },
+        { text: "Copy path", tip: "Copy where the sound's file is", key: "Ctrl+Shift+C", id: "copy", enabled: false },
     ];
     property <length> panel-width: 380px;
     VerticalLayout {
@@ -179,6 +185,13 @@ export component PartsGallery inherits Rectangle {
                     color: Theme.muted;
                     font-size: Type.body;
                     wrap: word-wrap;
+                }
+                CardActions {
+                    actions: root.card-actions;
+                    StudioButton {
+                        text: "Play";
+                        main: true;
+                    }
                 }
                 Rectangle { vertical-stretch: 1; }
             }
