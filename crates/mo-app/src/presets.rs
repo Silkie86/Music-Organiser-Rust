@@ -558,7 +558,7 @@ pub fn part_reason(i: &Item) -> String {
         (Some(f), Some(g)) if f != g => {
             format!("You set this to {}. The guess was {}: {}", f.label(), g.label().to_lowercase(), i.row.guess.reason)
         }
-        (Some(f), Some(_)) => format!("You set this to {}, as the guess was: {}", f.label(), i.row.guess.reason),
+        (Some(f), Some(_)) => format!("You set this to {}. The guess said the same: {}", f.label(), i.row.guess.reason),
         (Some(f), None) => format!("You set this to {}. There was no guess: {}", f.label(), i.row.guess.reason),
         (None, _) => i.row.guess.reason.clone(),
     }
@@ -570,7 +570,13 @@ pub fn line(i: &Item) -> Line {
     let under = [i.row.plugin.as_str(), i.row.place.as_str()]
         .into_iter()
         .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case(&i.row.name))
-        .collect::<Vec<_>>()
+        .fold(Vec::<&str>::new(), |mut out, s| {
+            // A preset file's folder is often named after its plugin: "Vital · Vital" says it once.
+            if !out.iter().any(|o| o.eq_ignore_ascii_case(s)) {
+                out.push(s);
+            }
+            out
+        })
         .join(" · ");
     Line {
         name: i.row.name.clone(),
@@ -833,10 +839,18 @@ pub fn export_summary(done: &[Exported], without: &[String], failed_saves: &[Str
     text
 }
 
-/// The words while sounds are sent into a running Bitwig, and when it isn't linked yet (the Bitwig link comes in
-/// with `mo-dawlink`, PR #182): the preset is made and shown, to drag onto a track.
-pub const NOT_LINKED: &str = "Made the Bitwig preset. Sending straight into Bitwig comes with the Bitwig link; for \
-                              now drag it from the folder onto a track.";
+/// The card's line once a preset is in Bitwig.
+pub fn sent_words(name: &str) -> String {
+    format!("{name} is in Bitwig, on a new track.")
+}
+
+/// The card's line when a preset couldn't go into Bitwig: why, and that it's shown to drag in instead.
+pub fn send_failed(why: &str) -> String {
+    let why = why.trim_end_matches('.');
+    let mut c = why.chars();
+    let why: String = c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default();
+    format!("Couldn't put it into Bitwig: {why}. The Bitwig preset is shown in its folder: drag it onto a track.")
+}
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The Curves section
@@ -917,7 +931,7 @@ pub struct CurveLine {
     /// How long it was: "4 bars", "3 beats".
     pub length: String,
     pub hidden: bool,
-    /// Its shape as path commands in a 100 by 100 box (see [`curve_path`]).
+    /// Its shape as path commands in a box three times as wide as high, 300 by 100 (see [`curve_path`], [`SHAPE_BOX`]).
     pub shape: String,
 }
 
@@ -963,9 +977,13 @@ pub fn curve_line(c: &Curve) -> CurveLine {
         found: found_words(c),
         length: beats_words(c.length_beats),
         hidden: c.hidden,
-        shape: curve_path(&c.points, 100.0, 100.0),
+        shape: curve_path(&c.points, SHAPE_BOX.0, SHAPE_BOX.1),
     }
 }
+
+/// The box the page draws curves in: a Slint path keeps its shape when it's fitted to its place, so the page's
+/// boxes for curves are this shape too (three wide to one high).
+pub const SHAPE_BOX: (f64, f64) = (300.0, 100.0);
 
 /// A curve's shape as path commands (for a Slint `Path` with a `w` by `h` viewbox, 0,0 at the top left), value 1 at
 /// the top. A bent line between two points is drawn as a quadratic curve leaning toward one corner of the box the
@@ -1045,7 +1063,13 @@ pub fn curve_card(c: &Curve) -> CurveCard {
             (title, about.join(" · "))
         })
         .collect();
-    CurveCard { name: c.name.clone(), shape: curve_path(&c.points, 100.0, 100.0), facts, places, hidden: c.hidden }
+    CurveCard {
+        name: c.name.clone(),
+        shape: curve_path(&c.points, SHAPE_BOX.0, SHAPE_BOX.1),
+        facts,
+        places,
+        hidden: c.hidden,
+    }
 }
 
 /// What the picked curve offers, in the card's order.
@@ -1292,6 +1316,16 @@ mod tests {
             s,
             "Exported 2 presets. For a Bitwig preset of Serum, save any preset of that plugin once in Bitwig, then \
              export again."
+        );
+    }
+
+    #[test]
+    fn send_words() {
+        assert_eq!(sent_words("Sub"), "Sub is in Bitwig, on a new track.");
+        assert_eq!(
+            send_failed("bitwig isn't open."),
+            "Couldn't put it into Bitwig: Bitwig isn't open. The Bitwig preset is shown in its folder: drag it onto a \
+             track."
         );
     }
 

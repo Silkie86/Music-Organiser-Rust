@@ -10,8 +10,8 @@
 //! The lists are models that make each line only when the list asks for it, so a long list costs nothing to show
 //! (rule 12: virtualised lists).
 //!
-//! Sending straight into a running Bitwig waits for the Bitwig link (`mo-dawlink`, PR #182): [`send_to_bitwig`] is
-//! the one place it joins. Until then Send to Bitwig makes the Bitwig preset and shows it in its folder.
+//! Send to Bitwig makes the sound's Bitwig preset and puts it into the project open in Bitwig through the Bitwig link
+//! (`mo-dawlink`, [`send_to_bitwig`]); when Bitwig isn't there, the preset is shown in its folder to drag in.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -25,9 +25,7 @@ use mo_app::activity::Feed;
 use mo_app::background;
 use mo_app::bitwig_convert as bitwig;
 use mo_app::log;
-use mo_app::presets::{
-    self as logic, CurveFilters, Filters, From, Item, PartPick, Section, act, curve_act,
-};
+use mo_app::presets::{self as logic, CurveFilters, Filters, From, Item, PartPick, Section, act, curve_act};
 use mo_app::shortcuts::{CURVES_ACTIONS, PRESETS_ACTIONS, Shortcuts, what_of};
 use mo_app::year_strip;
 use mo_library::Library;
@@ -438,8 +436,7 @@ fn show_all(app: &AppWindow) {
         data.set_unused(f.unused);
         data.set_shown(p.shown.len() as i32);
         let reading = p.reading.is_some();
-        let (title, text) =
-            logic::empty_words(p.items.len(), p.shown.len(), reading, f.any(), p.failed.as_deref());
+        let (title, text) = logic::empty_words(p.items.len(), p.shown.len(), reading, f.any(), p.failed.as_deref());
         data.set_empty_title(title.into());
         data.set_empty_text(text.into());
         data.set_format_note(logic::format_note(&p.items, &p.shown).into());
@@ -447,13 +444,12 @@ fn show_all(app: &AppWindow) {
         let bars: Vec<YearBar> = p
             .years
             .iter()
-            .map(|&(year, n)| YearBar {
-                year: year.to_string().into(),
-                share: n as f32 / most,
-                picked: f.years.is_some_and(|(a, b)| year >= a && year <= b),
-            })
+            .map(|&(year, n)| YearBar { year: year.to_string().into(), share: n as f32 / most })
             .collect();
         data.set_years(ModelRc::new(VecModel::from(bars)));
+        let (from, to) = year_strip::picked_places(&p.years, f.years).unwrap_or((-1, -1));
+        data.set_years_from(from);
+        data.set_years_to(to);
         data.set_exporting(p.exporting);
 
         // The curves.
@@ -577,10 +573,7 @@ fn show_curve_card(app: &AppWindow) {
             card.facts.into_iter().map(|(n, v)| PresetFact { name: n.into(), value: v.into() }).collect::<Vec<_>>(),
         )));
         data.set_curve_places(ModelRc::new(VecModel::from(
-            card.places
-                .into_iter()
-                .map(|(t, a)| CurvePlace { title: t.into(), about: a.into() })
-                .collect::<Vec<_>>(),
+            card.places.into_iter().map(|(t, a)| CurvePlace { title: t.into(), about: a.into() }).collect::<Vec<_>>(),
         )));
         let offers = logic::curve_offers(c, logic::bitwig_curves_folder(&p.bitwig).is_some());
         let key = |id: &str| SharedString::from(p.shortcuts.key_of(id));
@@ -726,8 +719,10 @@ fn read_all(at: &Where) -> Result<(), String> {
     let lib = Library::open_read_only(&at.library).map_err(|e| format!("Couldn't open your library: {e}"))?;
     let saves = lib.saves().map_err(|e| format!("Couldn't read your library: {e}"))?;
     let choices = lib.song_choices().unwrap_or_default();
-    let export_root =
-        bitwig::export_root(lib.setting(bitwig::EXPORT_FOLDER_KEY).ok().flatten().as_deref(), bitwig::home().as_deref());
+    let export_root = bitwig::export_root(
+        lib.setting(bitwig::EXPORT_FOLDER_KEY).ok().flatten().as_deref(),
+        bitwig::home().as_deref(),
+    );
     drop(lib);
     let songs = mo_library::songs::group_songs(&saves, &choices);
     let newest = logic::newest_saves(&songs, export_root.as_deref());
@@ -787,10 +782,7 @@ fn read_all(at: &Where) -> Result<(), String> {
     });
     let years: HashMap<String, Option<i32>> = background::on_pool(|| {
         use rayon::prelude::*;
-        found
-            .par_iter()
-            .map(|f| (f.path.clone(), file_year(&f.path)))
-            .collect()
+        found.par_iter().map(|f| (f.path.clone(), file_year(&f.path))).collect()
     });
     let items: Vec<Item> = plib::rows(&[], &found)
         .into_iter()
@@ -879,7 +871,8 @@ fn run_sound_action(app: &AppWindow, id: &str) -> bool {
         set_fix(app, &item, Some(role));
         return true;
     }
-    let enabled = |id: &str| logic::offers(&item, PAGE.with(|p| p.borrow().exporting)).iter().any(|o| o.id == id && o.enabled);
+    let enabled =
+        |id: &str| logic::offers(&item, PAGE.with(|p| p.borrow().exporting)).iter().any(|o| o.id == id && o.enabled);
     match id {
         act::USE_GUESS if item.row.fixed.is_some() => set_fix(app, &item, None),
         act::REVEAL => crate::files::reveal(&feed, item.path(), mo_app::shell::folder_of(item.path())),
@@ -978,14 +971,22 @@ fn export_one(app: &AppWindow, item: Item, send: bool) {
     let started = background::spawn("Preset export", move || {
         let templates = templates_now(templates, &bitwig_folders);
         let done = background::on_pool(|| {
-            export::export_from_save(&save, Choice::default(), Some(std::slice::from_ref(&key)), &root, Some(&templates))
+            export::export_from_save(
+                &save,
+                Choice::default(),
+                Some(std::slice::from_ref(&key)),
+                &root,
+                Some(&templates),
+            )
         });
         match done {
             Ok(e) => {
                 let without = without_template(&[&item], &templates);
                 let mut text = logic::export_summary(std::slice::from_ref(&e), &without, &[]);
-                let bwpreset = e.files.iter().find(|f| f.to_lowercase().ends_with(".bwpreset")).map(|f| e.folder.join(f));
-                let shown = if send { bwpreset.clone() } else { None }.or_else(|| e.files.first().map(|f| e.folder.join(f)));
+                let bwpreset =
+                    e.files.iter().find(|f| f.to_lowercase().ends_with(".bwpreset")).map(|f| e.folder.join(f));
+                let shown =
+                    if send { bwpreset.clone() } else { None }.or_else(|| e.files.first().map(|f| e.folder.join(f)));
                 if send {
                     text = match &bwpreset {
                         Some(p) => match send_to_bitwig(p) {
@@ -1041,7 +1042,8 @@ fn export_shown(app: &AppWindow) -> bool {
     let (plan, files, items) = PAGE.with(|p| {
         let p = p.borrow();
         let (plan, files) = logic::export_plan(&p.items, &p.shown);
-        let items: Vec<Item> = p.shown.iter().filter_map(|&i| p.items.get(i).cloned()).filter(|i| !i.is_file()).collect();
+        let items: Vec<Item> =
+            p.shown.iter().filter_map(|&i| p.items.get(i).cloned()).filter(|i| !i.is_file()).collect();
         (plan, files, items)
     });
     if plan.is_empty() || PAGE.with(|p| p.borrow().exporting) {
@@ -1063,7 +1065,9 @@ fn export_shown(app: &AppWindow) -> bool {
         let (mut done, mut failed) = (Vec::new(), Vec::new());
         let total = plan.len();
         for (n, (save, keys)) in plan.iter().enumerate() {
-            match background::on_pool(|| export::export_from_save(save, Choice::default(), Some(keys), &root, Some(&templates))) {
+            match background::on_pool(|| {
+                export::export_from_save(save, Choice::default(), Some(keys), &root, Some(&templates))
+            }) {
                 Ok(e) => done.push(e),
                 Err(e) => failed.push(format!("{}: {e}", mo_formats::paths::stem(save))),
             }
@@ -1072,7 +1076,10 @@ fn export_shown(app: &AppWindow) -> bool {
         let refs: Vec<&Item> = items.iter().collect();
         let mut text = logic::export_summary(&done, &without_template(&refs, &templates), &failed);
         if files > 0 {
-            text += &format!(" The {} preset files shown are files already, so they were left as they are.", logic::thousands(files));
+            text += &format!(
+                " The {} preset files shown are files already, so they were left as they are.",
+                logic::thousands(files)
+            );
         }
         job.done(&text);
         let folder = if done.len() == 1 { done[0].folder.clone() } else { root.clone() };
@@ -1092,7 +1099,7 @@ fn set_message(app: &AppWindow, text: &str) {
     show_card(app);
 }
 
-/// A Bitwig preset file sent into Bitwig: until the link is in, it's shown in its folder to drag onto a track.
+/// A Bitwig preset file sent into Bitwig; when it can't go, it's shown in its folder to drag onto a track.
 fn send_file(path: String) {
     let feed = PAGE.with(|p| p.borrow().feed.clone());
     let started = background::spawn("Send to Bitwig", move || {
@@ -1110,12 +1117,24 @@ fn send_file(path: String) {
     }
 }
 
-/// THE HOOK for the Bitwig link: sends a Bitwig preset into the running Bitwig, on a thread away from the window (it
-/// waits for Bitwig). `Ok` says what happened there; `Err` says why it wasn't sent, and the caller shows the file
-/// instead, to drag onto a track. When `mo-dawlink` lands (PR #182), call its Bitwig send here (as the Sounds card's
-/// Send to Bitwig does with `send_sound`) and word its result with its card words; nothing else on the page changes.
-fn send_to_bitwig(_preset: &Path) -> Result<String, String> {
-    Err(logic::NOT_LINKED.to_owned())
+/// Sends a Bitwig preset into the project open in Bitwig, through the Bitwig link (`mo-dawlink`): a new track named
+/// after the preset, with the preset loaded on it, as if it were dropped there. Waits for Bitwig, so only ever on a
+/// thread away from the window. `Ok` says what happened in Bitwig; `Err` says why it didn't go, and the caller shows
+/// the file in its folder instead, to drag onto a track.
+fn send_to_bitwig(preset: &Path) -> Result<String, String> {
+    use mo_dawlink::bitwig::{Bitwig, Inserted};
+    let name = preset.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let path = preset.to_string_lossy().into_owned();
+    let failed = |e: &dyn std::fmt::Display| logic::send_failed(&e.to_string());
+    let mut link = Bitwig::default().connect().map_err(|e| failed(&e))?;
+    link.stay_in_open_project();
+    link.hello().can_send().map_err(|e| failed(&e))?;
+    let track = link.new_track(&name).map_err(|e| failed(&e))?;
+    match link.insert_file(track.index, &path) {
+        Ok(Inserted { added: true, .. }) => Ok(logic::sent_words(&name)),
+        Ok(_) => Err(logic::send_failed(&format!("Bitwig didn't load {name}; its new track is empty"))),
+        Err(e) => Err(failed(&format!("the track is in Bitwig, but the preset may not be on it: {e}"))),
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1162,7 +1181,8 @@ fn set_curves(p: &mut Page, list: Vec<Curve>) {
 
 /// Shows what `curves.db` holds at once, then reads the saves that changed and gives the list as it is now.
 fn scan_curves(at: &Where) -> Result<Vec<Curve>, String> {
-    let mut db = CurvesDb::open(&at.data_dir.join(curves::FILE_NAME)).map_err(|e| format!("Couldn't open the curves: {}", e.0))?;
+    let mut db = CurvesDb::open(&at.data_dir.join(curves::FILE_NAME))
+        .map_err(|e| format!("Couldn't open the curves: {}", e.0))?;
     let first = db.list().map_err(|e| format!("Couldn't read the curves: {}", e.0))?;
     on_window(move |app| {
         PAGE.with(|p| set_curves(&mut p.borrow_mut(), first));
@@ -1170,8 +1190,10 @@ fn scan_curves(at: &Where) -> Result<Vec<Curve>, String> {
     });
     let lib = Library::open_read_only(&at.library).map_err(|e| format!("Couldn't open your library: {e}"))?;
     let saves = lib.saves().map_err(|e| format!("Couldn't read your library: {e}"))?;
-    let export_root =
-        bitwig::export_root(lib.setting(bitwig::EXPORT_FOLDER_KEY).ok().flatten().as_deref(), bitwig::home().as_deref());
+    let export_root = bitwig::export_root(
+        lib.setting(bitwig::EXPORT_FOLDER_KEY).ok().flatten().as_deref(),
+        bitwig::home().as_deref(),
+    );
     drop(lib);
     let mut paths = logic::curve_saves(&saves, export_root.as_deref());
     let bitwig_folders = logic::bitwig_folders(&plib::default_folders(), saves.iter().map(|s| s.path.as_str()));
@@ -1229,7 +1251,9 @@ fn run_curve_action(app: &AppWindow, id: &str) -> bool {
             curve_db_change(curve.id.clone(), move |db, id| db.set_hidden(id, hidden));
         }
         curve_act::OPEN_SONG => {
-            let Some(s) = curve.sources.iter().find(|s| s.kind != curves::SourceKind::BitwigCurve) else { return false };
+            let Some(s) = curve.sources.iter().find(|s| s.kind != curves::SourceKind::BitwigCurve) else {
+                return false;
+            };
             crate::files::reveal(&feed, &s.path, mo_app::shell::folder_of(&s.path));
         }
         curve_act::REVEAL => {
@@ -1238,7 +1262,9 @@ fn run_curve_action(app: &AppWindow, id: &str) -> bool {
                 Ok(path) => {
                     let path = path.to_string_lossy().into_owned();
                     crate::files::reveal(&feed, &path, mo_app::shell::folder_of(&path));
-                    curve_message("The curve file is in the app's Curves folder: drag it onto an automation lane.".into());
+                    curve_message(
+                        "The curve file is in the app's Curves folder: drag it onto an automation lane.".into(),
+                    );
                 }
                 Err(e) => {
                     feed.start("Couldn't make the curve file", "").failed(&e);
@@ -1323,7 +1349,7 @@ fn curve_db_change(
 
 /// Shows made-up sounds and curves, for mo-screens (no library, nothing read).
 pub fn show_sample(app: &AppWindow) {
-    APP.with(|a| *a.borrow_mut() = Some(app.as_weak()));
+    wire(app);
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
         p.started = true;
@@ -1373,21 +1399,22 @@ fn sample_items() -> Vec<Item> {
         octave_checked: true,
         weak,
     };
-    let song = |name: &str, plugin: &str, place: &str, kind: PluginKind, native: bool, ext: &str, g: Guess, save: &str| {
-        PresetRow {
-            source: Source::Song { save: save.into(), key: format!("{place}|{plugin}").to_lowercase() },
-            name: name.into(),
-            plugin: plugin.into(),
-            kind,
-            native,
-            place: place.into(),
-            extension: ext.into(),
-            guess: g,
-            plays_nothing: false,
-            hash: format!("{save}{name}{plugin}"),
-            fixed: None,
-        }
-    };
+    let song =
+        |name: &str, plugin: &str, place: &str, kind: PluginKind, native: bool, ext: &str, g: Guess, save: &str| {
+            PresetRow {
+                source: Source::Song { save: save.into(), key: format!("{place}|{plugin}").to_lowercase() },
+                name: name.into(),
+                plugin: plugin.into(),
+                kind,
+                native,
+                place: place.into(),
+                extension: ext.into(),
+                guess: g,
+                plays_nothing: false,
+                hash: format!("{save}{name}{plugin}"),
+                fixed: None,
+            }
+        };
     let d = r"I:\Fl Studio Data\FL Studio\Projects\Didums\Didums_77.flp";
     let s = r"I:\Fl Studio Data\FL Studio\Projects\Sly\sly_17.flp";
     let b = r"K:\Bitwig Studio\Projects\Night Bus\Night Bus.bwproject";
@@ -1395,49 +1422,134 @@ fn sample_items() -> Vec<Item> {
     let fx = PluginKind::Effect;
     let low = "Plays low (around C2), one note at a time";
     let rows = vec![
-        (song("Sub", "Serum", "Sub", synth, false, ".fxp", guess(Some(Role::Bass), Basis::Notes, low, false), d), "Didums", 2026),
         (
-            song("Hook", "Serum", "Hook", synth, false, ".fxp", guess(Some(Role::Lead), Basis::Notes, "One note at a time, high (around C5), moving in steps", false), d),
+            song("Sub", "Serum", "Sub", synth, false, ".fxp", guess(Some(Role::Bass), Basis::Notes, low, false), d),
             "Didums",
             2026,
         ),
         (
-            song("Keys", "FL Keys", "Keys", synth, true, ".flstate", guess(Some(Role::Chords), Basis::Notes, "Three or more notes together most of the time", false), d),
+            song(
+                "Hook",
+                "Serum",
+                "Hook",
+                synth,
+                false,
+                ".fxp",
+                guess(Some(Role::Lead), Basis::Notes, "One note at a time, high (around C5), moving in steps", false),
+                d,
+            ),
             "Didums",
             2026,
         ),
         (
-            song("Atmos", "Vital", "Atmos", synth, false, ".vstpreset", guess(Some(Role::Pad), Basis::Name, "Its name says pad (\"atmos\"); its notes are long", true), d),
+            song(
+                "Keys",
+                "FL Keys",
+                "Keys",
+                synth,
+                true,
+                ".flstate",
+                guess(Some(Role::Chords), Basis::Notes, "Three or more notes together most of the time", false),
+                d,
+            ),
             "Didums",
             2026,
         ),
         (
-            song("Fruity Limiter", "Fruity Limiter", "Master", fx, true, ".flstate", guess(None, Basis::Track, "A master effect plays no part of its own", false), d),
+            song(
+                "Atmos",
+                "Vital",
+                "Atmos",
+                synth,
+                false,
+                ".vstpreset",
+                guess(Some(Role::Pad), Basis::Name, "Its name says pad (\"atmos\"); its notes are long", true),
+                d,
+            ),
             "Didums",
             2026,
         ),
         (
-            song("Arp", "Sylenth1", "Arp", synth, false, ".fxp", guess(Some(Role::Arp), Basis::Notes, "Even steps through the notes of a chord", false), s),
+            song(
+                "Fruity Limiter",
+                "Fruity Limiter",
+                "Master",
+                fx,
+                true,
+                ".flstate",
+                guess(None, Basis::Track, "A master effect plays no part of its own", false),
+                d,
+            ),
+            "Didums",
+            2026,
+        ),
+        (
+            song(
+                "Arp",
+                "Sylenth1",
+                "Arp",
+                synth,
+                false,
+                ".fxp",
+                guess(Some(Role::Arp), Basis::Notes, "Even steps through the notes of a chord", false),
+                s,
+            ),
             "Sly",
             2025,
         ),
         (
-            song("Drums", "FPC", "Drums", synth, true, ".flstate", guess(Some(Role::Drums), Basis::Notes, "A few fixed pitches on the grid, played together", false), s),
+            song(
+                "Drums",
+                "FPC",
+                "Drums",
+                synth,
+                true,
+                ".flstate",
+                guess(Some(Role::Drums), Basis::Notes, "A few fixed pitches on the grid, played together", false),
+                s,
+            ),
             "Sly",
             2025,
         ),
         (
-            song("Valhalla Room", "ValhallaRoom", "Insert 3 · Vocals", fx, false, ".fxp", guess(Some(Role::Lead), Basis::Track, "On the insert the Hook channel feeds", false), s),
+            song(
+                "Valhalla Room",
+                "ValhallaRoom",
+                "Insert 3 · Vocals",
+                fx,
+                false,
+                ".fxp",
+                guess(Some(Role::Lead), Basis::Track, "On the insert the Hook channel feeds", false),
+                s,
+            ),
             "Sly",
             2025,
         ),
         (
-            song("Reese", "Phase Plant", "Bass", synth, false, ".vstpreset", guess(Some(Role::Bass), Basis::Notes, low, false), b),
+            song(
+                "Reese",
+                "Phase Plant",
+                "Bass",
+                synth,
+                false,
+                ".vstpreset",
+                guess(Some(Role::Bass), Basis::Notes, low, false),
+                b,
+            ),
             "Night Bus",
             2024,
         ),
         (
-            song("Polysynth", "Polysynth", "Stabs", synth, true, ".bwpreset", guess(Some(Role::Stabs), Basis::Notes, "Short chords on the off-beats", false), b),
+            song(
+                "Polysynth",
+                "Polysynth",
+                "Stabs",
+                synth,
+                true,
+                ".bwpreset",
+                guess(Some(Role::Stabs), Basis::Notes, "Short chords on the off-beats", false),
+                b,
+            ),
             "Night Bus",
             2024,
         ),
@@ -1459,7 +1571,12 @@ fn sample_items() -> Vec<Item> {
                 place: folder.into(),
                 extension: ext.into(),
                 guess: match role {
-                    Some(r) => guess(Some(r), Basis::Name, &format!("A preset file: its name says {}", r.label().to_lowercase()), true),
+                    Some(r) => guess(
+                        Some(r),
+                        Basis::Name,
+                        &format!("A preset file: its name says {}", r.label().to_lowercase()),
+                        true,
+                    ),
                     None => Guess::none("A preset file: it never played in a song"),
                 },
                 plays_nothing: false,
@@ -1515,7 +1632,13 @@ fn sample_curves() -> Vec<Curve> {
         ),
         curve(
             "Wobble",
-            vec![point(0.0, 0.5, 0.0), point(0.25, 1.0, -0.5), point(0.5, 0.5, 0.0), point(0.75, 0.0, 0.5), point(1.0, 0.5, 0.0)],
+            vec![
+                point(0.0, 0.5, 0.0),
+                point(0.25, 1.0, -0.5),
+                point(0.5, 0.5, 0.0),
+                point(0.75, 0.0, 0.5),
+                point(1.0, 0.5, 0.0),
+            ],
             4.0,
             vec![source(SourceKind::BitwigCurve, "Wobble", "", "", 0.0, 10)],
         ),
