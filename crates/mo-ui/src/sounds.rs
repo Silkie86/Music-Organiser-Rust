@@ -211,6 +211,8 @@ static PLAYER: OnceLock<Player> = OnceLock::new();
 /// Counts the plays and stops asked for, so a sound that finishes reading after a newer play or a stop stays quiet
 /// (newest wins, rule 12).
 static PLAYS: AtomicU64 = AtomicU64::new(0);
+/// The newest play's number (not a stop's), so a read cut short can tell a newer sound from a stop.
+static NEWEST_PLAY: AtomicU64 = AtomicU64::new(0);
 
 /// The tile rows, made from the page's list one row at a time as the list draws them.
 struct TileRows {
@@ -1533,16 +1535,18 @@ fn play_sound(app: &AppWindow, at: usize, from: f64, most: f64) {
         return;
     }
     let ask = PLAYS.fetch_add(1, Ordering::SeqCst) + 1;
+    NEWEST_PLAY.fetch_max(ask, Ordering::SeqCst);
     let weak = app.as_weak();
-    let key = path.clone();
-    // The sweep's timings (`mo_app::sweep_timing`) hear when it's being opened, and when it's handed to the output
-    // or dropped; for a sound the sweep didn't ask for they count nothing.
+    // The sweep's timings (`mo_app::sweep_timing`) hear when it's being opened, and when it's handed to the output,
+    // overtaken by a newer sound or dropped, by this play's number; for a sound the sweep didn't ask for they count
+    // nothing.
     let started = background::spawn("Read sound", move || {
-        sweep_timing::opening(&path);
+        sweep_timing::opening(&path, ask);
         let read = mo_audio::read(Path::new(&path), most);
         match read {
-            // A newer play or a stop came while this one was reading.
-            _ if PLAYS.load(Ordering::SeqCst) != ask => sweep_timing::dropped(&path),
+            // A newer play came while this one was reading: overtaken. A stop (the mouse let go, say): dropped.
+            _ if NEWEST_PLAY.load(Ordering::SeqCst) != ask => sweep_timing::overtaken(&path, ask),
+            _ if PLAYS.load(Ordering::SeqCst) != ask => sweep_timing::dropped(&path, ask),
             Ok(audio) => {
                 let player = PLAYER.get_or_init(|| {
                     Player::new(|key| {
@@ -1553,10 +1557,10 @@ fn play_sound(app: &AppWindow, at: usize, from: f64, most: f64) {
                 player.play(Arc::new(audio), path.clone(), from * seconds);
                 let output = player.info();
                 sweep_timing::output(output.mix_every_ms.map(|m| m / 2.0), output.delay_ms);
-                sweep_timing::started(&path);
+                sweep_timing::started(&path, ask);
             }
             Err(e) => {
-                sweep_timing::dropped(&path);
+                sweep_timing::dropped(&path, ask);
                 log::warning("Sounds", &format!("Couldn't play {path}: {e}"));
                 let why = e.to_string();
                 let _ = slint::invoke_from_event_loop(move || {
@@ -1571,7 +1575,7 @@ fn play_sound(app: &AppWindow, at: usize, from: f64, most: f64) {
         }
     });
     if let Err(e) = started {
-        sweep_timing::dropped(&key);
+        // Never opened: the sweep's timings forget it by themselves.
         log::error("Sounds", &format!("Couldn't start reading the sound: {e}"));
     }
 }

@@ -20,7 +20,7 @@ use mo_app::galaxy_picture::{Drawn, Picture};
 use mo_app::galaxy_view::{Hold, Moved, View, most_zoom_for};
 use mo_app::log;
 use mo_app::sounds as list;
-use mo_app::sweep_timing;
+use mo_app::{frame_timing, sweep_timing};
 use mo_sounds::galaxy::{self, Placing, Step};
 use mo_sounds::{SoundsDb, StarPoint};
 use slint::{ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, Timer, TimerMode, VecModel};
@@ -315,7 +315,7 @@ fn fly(app: &AppWindow) {
     FLIGHT.with(|t| {
         t.start(TimerMode::Repeated, FRAME, move || {
             let Some(app) = weak.upgrade() else { return };
-            let _doing = crate::watchdog::doing("Galaxy: glide a frame");
+            let _doing = crate::watchdog::doing(frame_timing::GLIDING);
             let now = Instant::now();
             let dt = LAST_FRAME.with(|l| l.borrow_mut().replace(now).map_or(FRAME, |was| now - was));
             let going = PAGE.with(|p| p.borrow_mut().galaxy.view.glide(dt.min(Duration::from_millis(100))));
@@ -410,6 +410,7 @@ pub(super) fn wire(app: &AppWindow) {
         let data = app.global::<SoundsData>();
         match moved {
             Moved::Panned => {
+                let _doing = crate::watchdog::doing(frame_timing::DRAGGING);
                 data.set_galaxy_hover_text("".into());
                 data.set_galaxy_hover_shown(false);
                 draw(&app);
@@ -639,14 +640,17 @@ fn read_ahead(from: (f32, f32), to: (f32, f32), dt: Duration, passed: &[usize]) 
 /// The mouse swept from `from` to `to`: every star along the way, not just where it landed (a quick sweep moves many
 /// points between two moves), plays in turn.
 fn swept(app: &AppWindow, from: (f32, f32), to: (f32, f32)) {
-    let _doing = crate::watchdog::doing("Galaxy: find the swept stars");
+    let _doing = crate::watchdog::doing(frame_timing::SWEEPING);
     let steps = ((to.0 - from.0).hypot(to.1 - from.1) / SWEEP_STEP).ceil().max(1.0) as usize;
     let mut passed: Vec<usize> = Vec::new();
+    // Whether the first star passed is the one under the last mouse point.
+    let mut from_a_star = false;
     for i in 0..=steps {
         let t = i as f32 / steps as f32;
         if let Some(at) = star_at(from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t)
             && passed.last() != Some(&at)
         {
+            from_a_star |= i == 0;
             passed.push(at);
         }
     }
@@ -658,10 +662,13 @@ fn swept(app: &AppWindow, from: (f32, f32), to: (f32, f32)) {
     if let Some(was) = was {
         read_ahead(from, to, now - was, &passed);
     }
-    // Timed from here: Slint doesn't say when the move happened, so how late the window heard of it isn't known.
+    // Timed from here: Slint doesn't say when the move happened, so how late the window heard of it isn't known. The
+    // star under the last mouse point was reached on an earlier move (as C#'s HitPath, which starts past it), so its
+    // wait isn't started again; on the sweep's first move it's reached now.
+    let skip = usize::from(was.is_some() && from_a_star);
     PAGE.with(|p| {
         let p = p.borrow();
-        for &at in &passed {
+        for &at in passed.iter().skip(skip) {
             if let Some(s) = p.list.sound(at) {
                 sweep_timing::reached(&s.path, None);
             }

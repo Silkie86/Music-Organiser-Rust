@@ -371,3 +371,15 @@ fn dropping_the_player_when_a_sound_ends_doesnt_hang() {
     outputs.pull(20);
     assert!(rx.recv_timeout(Duration::from_secs(5)).is_ok());
 }
+
+#[test]
+fn how_often_the_output_mixes_comes_from_its_buffers_length() {
+    use super::output::period_us;
+    // The 10 ms buffer the player asks for, stereo at 48 kHz and at 44.1 kHz.
+    assert_eq!(period_us(480 * 2, 2, 48_000), Some(10_000));
+    assert_eq!(period_us(441 * 2, 2, 44_100), Some(10_000));
+    // An output that chose its own: 1024 frames of 8 channels at 48 kHz.
+    assert_eq!(period_us(1024 * 8, 8, 48_000), Some(21_333));
+    assert_eq!(period_us(512, 0, 48_000), Some(10_666));
+    assert_eq!(period_us(480, 1, 0), None);
+}
