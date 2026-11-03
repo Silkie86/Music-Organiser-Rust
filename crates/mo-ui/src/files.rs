@@ -1,5 +1,5 @@
-//! Show in folder and Copy path, shared by every page that lists files (songs, sounds, presets…), each reporting on
-//! the activity cards.
+//! Show in folder and Copy path, shared by every page that lists files (songs, sounds, presets…), and opening a
+//! folder or the Recycle Bin, each reporting on the activity cards.
 
 use std::cell::RefCell;
 
@@ -15,16 +15,45 @@ thread_local! {
 
 /// Shows the file at `path` in its folder (`folder`), or the folder when the file has gone. Off the window's thread.
 pub fn reveal(feed: &Feed, path: &str, folder: &str) {
-    let (feed, path, folder) = (feed.clone(), path.to_owned(), folder.to_owned());
-    let started = background::spawn("Show in folder", move || {
-        let launch = shell::reveal(&path, &folder, shell::exists(&path), shell::Os::THIS);
-        if let Err(e) = shell::run(&launch) {
-            log::warning("Show in folder", &format!("{path}: {e}"));
-            feed.start("Couldn't show the file", "").failed(&e.to_string());
+    let (path, folder) = (path.to_owned(), folder.to_owned());
+    let named = path.clone();
+    launch(feed, "Show in folder", "Couldn't show the file", named, move || {
+        shell::reveal(&path, &folder, shell::exists(&path), shell::Os::THIS)
+    });
+}
+
+/// Opens a folder (the app's own, say) in Explorer. Off the window's thread.
+pub fn open_folder(feed: &Feed, folder: &str) {
+    let folder = folder.to_owned();
+    let named = folder.clone();
+    launch(feed, "Open folder", "Couldn't open the folder", named, move || shell::open(&folder, None, shell::Os::THIS));
+}
+
+/// Opens the Recycle Bin, where everything the app removes goes first. Off the window's thread.
+pub fn open_recycle_bin(feed: &Feed) {
+    launch(feed, "Recycle Bin", "Couldn't open the Recycle Bin", "the Recycle Bin".to_owned(), || {
+        shell::recycle_bin(&std::env::var("HOME").unwrap_or_default(), shell::Os::THIS)
+    });
+}
+
+/// Runs what `make` makes (Explorer, Finder or the file manager) off the window's thread. If it can't, the log says
+/// so under `job` with `what` it was for, and a card says `failed`.
+fn launch(
+    feed: &Feed,
+    job: &'static str,
+    failed: &'static str,
+    what: String,
+    make: impl FnOnce() -> shell::Launch + Send + 'static,
+) {
+    let feed = feed.clone();
+    let started = background::spawn(job, move || {
+        if let Err(e) = shell::run(&make()) {
+            log::warning(job, &format!("{what}: {e}"));
+            feed.start(failed, "").failed(&e.to_string());
         }
     });
     if let Err(e) = started {
-        log::error("Show in folder", &format!("Couldn't start: {e}"));
+        log::error(job, &format!("Couldn't start: {e}"));
     }
 }
 
