@@ -375,10 +375,16 @@ fn the_list_sees_the_library_at_one_moment_while_the_csharp_app_saves() {
     let path = big("saving.db", 4000);
     let c = Connection::open(&path).unwrap();
     let last: i64 = c.query_row("SELECT MAX(id) FROM sounds", [], |r| r.get(0)).unwrap();
+    // Plenty of tags, so reading them takes a while: they're read between the plays and the sounds.
+    c.execute_batch(
+        "WITH RECURSIVE n(k) AS (SELECT 0 UNION ALL SELECT k + 1 FROM n WHERE k < 19)
+         INSERT OR IGNORE INTO sound_tags SELECT id, 'tag ' || k, 'learned' FROM sounds, n;",
+    )
+    .unwrap();
     drop(c);
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    // The C# app hiding and showing a copy again, giving it 5 stars whenever it's hidden: the hidden mark is read
-    // before the sounds, the stars with them, so only one moment for both keeps the two together.
+    // The C# app sending a sound into a DAW and giving it 5 stars in one save, then taking both back in the next. The
+    // sends are read first and the stars last, so only one moment for the whole read keeps the two together.
     let writer = {
         let (path, stop) = (path.clone(), stop.clone());
         std::thread::spawn(move || {
@@ -388,15 +394,14 @@ fn the_list_sees_the_library_at_one_moment_while_the_csharp_app_saves() {
             while !stop.load(std::sync::atomic::Ordering::Relaxed) {
                 let tx = c.transaction().unwrap();
                 if saves.is_multiple_of(2) {
-                    tx.execute("INSERT OR REPLACE INTO sound_hidden VALUES (?1, 'b', 0)", [last]).unwrap();
+                    tx.execute("INSERT INTO sound_events VALUES (?1, 'send', ?2)", [last, at(2026, 1, 1)]).unwrap();
                     tx.execute("UPDATE sounds SET rating = 5 WHERE id = ?1", [last]).unwrap();
                 } else {
-                    tx.execute("DELETE FROM sound_hidden WHERE sound_id = ?1", [last]).unwrap();
+                    tx.execute("DELETE FROM sound_events WHERE sound_id = ?1 AND kind = 'send'", [last]).unwrap();
                     tx.execute("UPDATE sounds SET rating = 0 WHERE id = ?1", [last]).unwrap();
                 }
                 tx.commit().unwrap();
                 saves += 1;
-                std::thread::sleep(std::time::Duration::from_millis(1 + saves % 3));
             }
             saves
         })
@@ -405,7 +410,7 @@ fn the_list_sees_the_library_at_one_moment_while_the_csharp_app_saves() {
     for _ in 0..40 {
         let e = db.everything(now()).unwrap();
         let s = e.sounds.iter().find(|s| s.id == last).unwrap();
-        assert_eq!(s.hidden, s.rating == 5, "the hidden mark and the stars came from different moments");
+        assert_eq!(s.activity.sends > 0, s.rating == 5, "the sends and the stars came from different moments");
     }
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     assert!(writer.join().unwrap() > 0);

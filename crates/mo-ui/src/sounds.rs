@@ -530,23 +530,24 @@ fn read_all(sounds_db: &Path, library_db: &Path, send: impl Fn(Step)) {
     // the whole file twice more.
     let everything = db.everything(now);
     let read_in = began.elapsed();
-    let mut fingerprints = None;
-    let read = everything.map_err(|e| e.to_string()).map(|e| {
-        let analysed = e.sounds.iter().filter(|s| s.analysis.is_some()).count();
-        let history = db.history(500).unwrap_or_default();
-        let library = Library::new(e.sounds, history, &settings.weights);
-        log::info(
-            "Sounds",
-            &format!(
-                "{} sounds (read in {:.1} s, listed in {:.1} s)",
-                library.list.len(),
-                read_in.as_secs_f32(),
-                (began.elapsed() - read_in).as_secs_f32()
-            ),
-        );
-        fingerprints = Some((e.features, e.clap, analysed));
-        library
-    });
+    let (read, fingerprints) = match everything {
+        Ok(e) => {
+            let analysed = e.analysed();
+            let history = db.history(500).unwrap_or_default();
+            let library = Library::new(e.sounds, history, &settings.weights);
+            log::info(
+                "Sounds",
+                &format!(
+                    "{} sounds (read in {:.1} s, listed in {:.1} s)",
+                    library.list.len(),
+                    read_in.as_secs_f32(),
+                    (began.elapsed() - read_in).as_secs_f32()
+                ),
+            );
+            (Ok(library), Some((e.features, e.clap, analysed)))
+        }
+        Err(e) => (Err(e.to_string()), None),
+    };
     drop(db);
     let list = read.as_ref().ok().map(|l: &Library| l.list.clone());
     send(Step::Read(read.map(|library| Read {
