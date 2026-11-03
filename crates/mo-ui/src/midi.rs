@@ -23,8 +23,9 @@ use mo_harmony::KeyFact;
 use mo_library::songs::thousands;
 use mo_midi::store::MidiStore;
 use mo_midi::{Catalogue, Hit, MidiIndex, Role, StoredPhrase};
-use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel};
+use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, VecModel};
 
+use crate::sounds::{new_seed, strings};
 use crate::{AppWindow, CardAction, KindChip, MenuItem, MidiData, MidiFact, MidiLine, PickedPart, RollNote, YearBar};
 
 /// Where a part's notes are read from.
@@ -44,6 +45,19 @@ pub struct Loaded {
     /// From the C# app's `midi.db`: the list's keys are the old app's.
     pub old: bool,
     pub notes: NotesFrom,
+    /// Worked out with the reading, off the window's thread: the summary, the year strip and the kind chips' counts.
+    pub summary: String,
+    pub years: Vec<(i32, usize)>,
+    pub counts: HashMap<Role, usize>,
+}
+
+impl Loaded {
+    pub fn new(cat: Catalogue, old: bool, notes: NotesFrom) -> Loaded {
+        let summary = page::summary(&cat, old);
+        let years = page::year_counts(&cat);
+        let counts = cat.role_counts();
+        Loaded { cat, old, notes, summary, years, counts }
+    }
 }
 
 #[derive(Default)]
@@ -57,8 +71,11 @@ struct Page {
     target: Option<Target>,
     shown: Arc<Vec<Hit>>,
     years: Vec<(i32, usize)>,
-    /// The picked part, as its place in the catalogue's entries.
+    counts: HashMap<Role, usize>,
+    /// The picked part, as its place in the catalogue's entries, and its row in the list on show (kept, so stepping
+    /// down a long list never searches it).
     picked: Option<usize>,
+    picked_row: Option<usize>,
     asked: u64,
     notes_asked: u64,
     /// The index is being read, or has been: it's read once, the first time the page is shown.
@@ -66,12 +83,6 @@ struct Page {
     library: PathBuf,
     feed: Option<Feed>,
     shortcuts: Shortcuts,
-}
-
-impl Page {
-    fn row_of(&self, at: usize) -> Option<usize> {
-        self.shown.iter().position(|h| h.entry == at)
-    }
 }
 
 struct Ask {
@@ -96,9 +107,14 @@ struct NotesAsk {
 }
 
 struct NotesRead {
+    /// How many notes the index gave (the roll leaves out muted ones).
+    read: usize,
     roll: Roll,
     fact: Option<KeyFact>,
 }
+
+/// The card's key while the part's notes are read.
+const READING: &str = "Reading…";
 
 thread_local! {
     static PAGE: Rc<RefCell<Page>> = Rc::default();
@@ -282,6 +298,7 @@ fn wire(app: &AppWindow) {
                 let mut p = p.borrow_mut();
                 p.filters = Filters::default();
                 p.target = None;
+                p.seed = None;
             });
             let data = app.global::<MidiData>();
             data.set_search("".into());
@@ -310,21 +327,12 @@ fn wire(app: &AppWindow) {
             pick(&app, None);
         }
     });
-    data.on_panel_resized(|_| {});
     let weak = app.as_weak();
     data.on_menu_chosen(move |id| {
         if let Some(app) = weak.upgrade() {
             run_action(&app, &id);
         }
     });
-}
-
-fn strings<S: Into<SharedString>>(list: impl IntoIterator<Item = S>) -> ModelRc<SharedString> {
-    ModelRc::new(VecModel::from(list.into_iter().map(Into::into).collect::<Vec<SharedString>>()))
-}
-
-fn new_seed() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(7, |d| d.as_nanos() as u64)
 }
 
 /// The page is on show: the first time, the index is read.
@@ -356,7 +364,11 @@ pub fn shown(app: &AppWindow) {
 /// Reads the index beside the library: the Rust app's when it holds parts, else the C# app's. Both read-only.
 pub fn load(library: &Path) -> Result<Loaded, String> {
     let old_path = MidiIndex::path_beside(library);
-    let old = old_path.exists().then(|| MidiIndex::open_read_only(&old_path)).transpose().map_err(|e| e.to_string())?;
+    // The C# index only gives your corrections when the Rust one holds the parts: one that won't open (damaged, or
+    // being saved) is passed by, not the end of the page.
+    let old = old_path.exists().then(|| MidiIndex::open_read_only(&old_path)).and_then(|opened| {
+        opened.map_err(|e| log::warning("MIDI", &format!("The old app's MIDI index couldn't be opened: {e}"))).ok()
+    });
     let store_path = MidiStore::path_beside(library);
     if store_path.exists() {
         match MidiStore::open_read_only(&store_path) {
@@ -367,18 +379,21 @@ pub fn load(library: &Path) -> Result<Loaded, String> {
                 let phrases = store.all(&roles, &octaves).map_err(|e| e.to_string())?;
                 if !phrases.is_empty() {
                     let cat = background::on_pool(|| Catalogue::new(phrases));
-                    return Ok(Loaded { cat, old: false, notes: NotesFrom::Store(store_path) });
+                    return Ok(Loaded::new(cat, false, NotesFrom::Store(store_path)));
                 }
             }
             Err(e) => log::warning("MIDI", &format!("The Rust MIDI index couldn't be opened: {e}")),
         }
     }
     let Some(old) = old else {
-        return Ok(Loaded { cat: Catalogue::default(), old: true, notes: NotesFrom::Old(old_path) });
+        if old_path.exists() {
+            return Err("the old app's MIDI index couldn't be opened (the log says why)".to_owned());
+        }
+        return Ok(Loaded::new(Catalogue::default(), true, NotesFrom::Old(old_path)));
     };
     let phrases = old.all().map_err(|e| e.to_string())?;
     let cat = background::on_pool(|| Catalogue::new(phrases));
-    Ok(Loaded { cat, old: true, notes: NotesFrom::Old(old_path) })
+    Ok(Loaded::new(cat, true, NotesFrom::Old(old_path)))
 }
 
 /// The index has been read: the page shows it.
@@ -394,16 +409,18 @@ pub fn show(app: &AppWindow, loaded: Result<Loaded, String>) {
             return;
         }
     };
-    let summary = page::summary(&loaded.cat, loaded.old);
+    let summary = loaded.summary;
     let empty = loaded.cat.entries.is_empty();
     log::info("MIDI", &format!("{summary} ({})", if loaded.old { "the C# app's midi.db" } else { "midi-index.db" }));
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        p.years = page::year_counts(&loaded.cat);
+        p.years = loaded.years;
+        p.counts = loaded.counts;
         p.cat = Arc::new(loaded.cat);
         p.old = loaded.old;
         p.notes = Some(loaded.notes);
         p.picked = None;
+        p.picked_row = None;
         p.target = None;
     });
     data.set_summary(summary.into());
@@ -426,7 +443,7 @@ pub fn show(app: &AppWindow, loaded: Result<Loaded, String>) {
 fn show_kinds(app: &AppWindow) {
     let (chips, any) = PAGE.with(|p| {
         let p = p.borrow();
-        let counts = p.cat.role_counts();
+        let counts = &p.counts;
         let chips: Vec<KindChip> = Role::ALL
             .iter()
             .map(|r| {
@@ -504,11 +521,13 @@ fn relist(app: &AppWindow) {
 }
 
 fn listed(app: &AppWindow, id: u64, hits: Vec<Hit>) {
-    let (shown, all, result, target) = PAGE.with(|p| {
+    let (shown, result, target) = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         if p.asked != id {
-            return (None, 0, String::new(), String::new());
+            return (None, String::new(), String::new());
         }
+        // The picked part's row in the new list: one look, here, rather than at every step.
+        p.picked_row = p.picked.and_then(|at| hits.iter().position(|h| h.entry == at));
         p.shown = Arc::new(hits);
         let target = p.target.and_then(|t| {
             let at = match t {
@@ -523,7 +542,7 @@ fn listed(app: &AppWindow, id: u64, hits: Vec<Hit>) {
         };
         let shown = p.shown.len();
         let all = p.cat.entries.len();
-        (Some(shown), all, page::result_text(shown, all, p.order, p.target, p.seed.is_some()), target_text)
+        (Some(shown), page::result_text(shown, all, p.order, p.target, p.seed.is_some()), target_text)
     });
     let Some(shown) = shown else { return };
     LINES.with(|l| l.notify.reset());
@@ -531,13 +550,12 @@ fn listed(app: &AppWindow, id: u64, hits: Vec<Hit>) {
     data.set_shown(shown as i32);
     data.set_result(result.into());
     data.set_target(target.into());
-    let _ = all;
 }
 
 fn select_row(app: &AppWindow, row: usize) {
     let at = PAGE.with(|p| p.borrow().shown.get(row).map(|h| h.entry));
     if let Some(at) = at {
-        pick(app, Some(at));
+        pick(app, Some((at, row)));
     }
 }
 
@@ -547,8 +565,7 @@ fn step(app: &AppWindow, by: i32) {
         if p.shown.is_empty() {
             return None;
         }
-        let row = p.picked.and_then(|at| p.row_of(at));
-        let next = match row {
+        let next = match p.picked_row {
             None => 0,
             Some(r) => (r as i64 + i64::from(by)).clamp(0, p.shown.len() as i64 - 1) as usize,
         };
@@ -563,17 +580,18 @@ fn step(app: &AppWindow, by: i32) {
 }
 
 /// Picks a part (or none): its card, then its notes for the roll and its key.
-fn pick(app: &AppWindow, at: Option<usize>) {
-    let before = PAGE.with(|p| std::mem::replace(&mut p.borrow_mut().picked, at));
-    // Only the lines that changed are drawn again.
-    PAGE.with(|p| {
-        let p = p.borrow();
-        for r in [before, at].into_iter().flatten().filter_map(|a| p.row_of(a)) {
-            LINES.with(|l| l.notify.row_changed(r));
-        }
+fn pick(app: &AppWindow, picked: Option<(usize, usize)>) {
+    let before = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.picked = picked.map(|(at, _)| at);
+        std::mem::replace(&mut p.picked_row, picked.map(|(_, row)| row))
     });
+    // Only the lines that changed are drawn again.
+    for r in [before, picked.map(|(_, row)| row)].into_iter().flatten() {
+        LINES.with(|l| l.notify.row_changed(r));
+    }
     let data = app.global::<MidiData>();
-    let Some(at) = at else {
+    let Some((at, _)) = picked else {
         data.set_panel_shown(false);
         return;
     };
@@ -668,7 +686,7 @@ fn read_notes(ask: &NotesAsk, open: &mut Option<(PathBuf, Reader)>) -> Result<No
     } else {
         None
     };
-    Ok(NotesRead { roll: page::roll(&notes, ask.bars), fact })
+    Ok(NotesRead { read: notes.len(), roll: page::roll(&notes, ask.bars), fact })
 }
 
 fn notes_read(app: &AppWindow, id: u64, read: Result<NotesRead, String>) {
@@ -682,8 +700,10 @@ fn notes_read(app: &AppWindow, id: u64, read: Result<NotesRead, String>) {
             let roll = &read.roll;
             let notes: Vec<RollNote> =
                 roll.notes.iter().map(|n| RollNote { x: n.x, y: n.y, w: n.w, h: n.h, strength: n.strength }).collect();
-            if notes.is_empty() {
+            if read.read == 0 {
                 picked.roll_note = "Its notes aren't in the index any more.".into();
+            } else if notes.is_empty() {
+                picked.roll_note = "Every note in it is muted.".into();
             } else {
                 picked.roll_low = page::note_name(roll.low).into();
                 picked.roll_high = page::note_name(roll.high).into();
@@ -700,18 +720,27 @@ fn notes_read(app: &AppWindow, id: u64, read: Result<NotesRead, String>) {
             }
             data.set_roll(ModelRc::new(VecModel::from(notes)));
             data.set_roll_bars(ModelRc::new(VecModel::from(roll.bars.clone())));
+            let drums = picked.kind == page::role_label(Role::Drums);
             if let Some(fact) = read.fact {
-                let drums = picked.kind == page::role_label(Role::Drums);
                 let words = page::key_card(Some(&fact), drums);
                 picked.key = words.answer.into();
                 picked.key_sure = words.sure.into();
                 picked.key_why = words.why.into();
                 picked.key_from = "Read just now from its notes by the new key finder.".into();
+            } else if picked.key == READING {
+                // No pitched notes to read: the card says so, rather than reading for ever.
+                let words = page::key_card(None, drums);
+                picked.key = words.answer.into();
+                picked.key_why = words.why.into();
             }
         }
         Err(e) => {
             log::warning("MIDI", &format!("A part's notes couldn't be read: {e}"));
             picked.roll_note = format!("Its notes couldn't be read: {e}").into();
+            if picked.key == READING {
+                picked.key = "Not read".into();
+                picked.key_why = "Its notes couldn't be read, so neither could its key.".into();
+            }
         }
     }
     data.set_picked(picked);
@@ -724,7 +753,7 @@ fn card(e: &mo_midi::Entry, old: bool) -> PickedPart {
     let (key, sure, why, from) = if p.key_fact.is_some() || p.drums || e.role() == Role::Drums {
         (words.answer, words.sure, words.why, if p.key_fact.is_some() { "From the new key finder." } else { "" })
     } else {
-        ("Reading…".to_owned(), String::new(), String::new(), "")
+        (READING.to_owned(), String::new(), String::new(), "")
     };
     let old_key = match (old, p.key) {
         (true, Some(k)) => format!("The old app said {} ({:.0}% sure).", k.name(), k.confidence * 100.0),
@@ -808,7 +837,11 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
             true
         }
         ("midi.within", Some((at, _))) => {
-            PAGE.with(|p| p.borrow_mut().target = Some(Target::Within(at)));
+            PAGE.with(|p| {
+                let mut p = p.borrow_mut();
+                p.target = Some(Target::Within(at));
+                p.seed = None;
+            });
             relist(app);
             true
         }
@@ -826,11 +859,6 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
         }
         _ => false,
     }
-}
-
-/// Whether a part is picked, so the page's keys have something to act on.
-pub fn has_pick() -> bool {
-    PAGE.with(|p| p.borrow().picked.is_some())
 }
 
 /// For the screenshots: everything is worked out in place.
@@ -1019,7 +1047,7 @@ pub fn sample() -> Loaded {
             ..first
         });
     }
-    Loaded { cat: Catalogue::new(phrases), old: true, notes: NotesFrom::Made(Arc::new(notes)) }
+    Loaded::new(Catalogue::new(phrases), true, NotesFrom::Made(Arc::new(notes)))
 }
 
 #[cfg(test)]

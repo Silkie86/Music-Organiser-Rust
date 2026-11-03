@@ -140,7 +140,8 @@ pub fn view(cat: &Catalogue, f: &Filters, order: Order, target: Option<Target>, 
     if target.is_none() {
         sort(cat, &mut hits, order);
     }
-    if let Some(seed) = seed {
+    // A shuffle is of the plain list: likeness and length are the order a ranked list is for.
+    if let Some(seed) = seed.filter(|_| target.is_none()) {
         shuffle(&mut hits, seed);
     }
     hits
@@ -190,7 +191,13 @@ pub struct ShownKey {
 
 fn key_of(e: &Entry) -> Option<ShownKey> {
     if let Some(fact) = &e.phrase.key_fact {
-        let k = fact.answer()?.leaning_key()?;
+        // The key the line shows: one key, the likelier of a pair, or a home note (as major unless it leans minor);
+        // never the key a "no clear key" answer only leans to, which the line doesn't show.
+        let k = match fact.answer()? {
+            KeyAnswer::Key(k) | KeyAnswer::OrRelative(k) => k,
+            KeyAnswer::HomeNote { tonic, leaning } => KeyName { tonic, mode: leaning.unwrap_or(Mode::Major) },
+            KeyAnswer::Unclear { .. } => return None,
+        };
         return Some(ShownKey { tonic: k.tonic.number(), minor: k.mode == Mode::Minor });
     }
     e.phrase.key.filter(|k| k.is_sure()).map(|k| ShownKey { tonic: k.tonic, minor: k.minor })
@@ -355,11 +362,10 @@ pub struct KeyCard {
 
 /// The card's words for a reading; `None` (no pitched notes, or drums): there's no key to read.
 pub fn key_card(fact: Option<&KeyFact>, drums: bool) -> KeyCard {
-    let Some(answer) = fact.and_then(KeyFact::answer) else {
+    let Some((fact, answer)) = fact.and_then(|f| Some((f, f.answer()?))) else {
         let why = if drums { "Drums have no key." } else { "There are no pitched notes to read a key from." };
         return KeyCard { answer: "No key".to_owned(), sure: String::new(), why: why.to_owned() };
     };
-    let fact = fact.copied().unwrap_or(KeyFact([0; 8]));
     let sure = format!("{:.0}% sure", fact.shown_chance() * 100.0);
     // The next likeliest key, unless it's the other half of the pair the answer already names.
     let next = fact
@@ -635,6 +641,10 @@ mod tests {
         let one = view(&cat, &f, Order::Newest, None, Some(7));
         assert_eq!(one, view(&cat, &f, Order::Newest, None, Some(7)));
         assert_eq!(one.len(), 3);
+        // A ranked list keeps its ranking, shuffled or not.
+        let at = cat.find("A").unwrap();
+        let ranked = view(&cat, &f, Order::Newest, Some(Target::Like(at)), None);
+        assert_eq!(view(&cat, &f, Order::Newest, Some(Target::Like(at)), Some(7)), ranked);
         for o in Order::ALL {
             assert_eq!(Order::from_name(o.name()), o);
         }
