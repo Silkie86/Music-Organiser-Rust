@@ -753,7 +753,7 @@ of itself three steps running: the same fit, bit for bit, then stops at its 24th
 | | plain | `--hand 1` | `--hand 1 --hold 3` |
 |---|---|---|---|
 | gates that break (of 229) | 58 (16, 24 and 18) | 3 (1, 1 and 1) | none (3 after its first round) |
-| targets met (of 14) | 3, as by hand | 4 (and 41, Cadd9 arpeggiated) | 5 (and 13, G not yet, and 41) |
+| targets met (of 14) | 3: 22, 41 and 46 (the hand-set numbers meet 36, 39 and 46) | 4: the hand-set 3 and 41 (Cadd9 arpeggiated) | 5: those 4 and 13 (G not yet) |
 | loss per bar held out: POP909-CL piano, set A | 0.883, 0.417 | 0.960, 0.413 | 0.979, 0.444 |
 | the hand cases' mean −ln P | 0.34 to 1.83 | 0.34 to 0.079 | 0.34 to 0.073 |
 
