@@ -12,12 +12,19 @@
 //!   files whose bytes are already on the backup share them.
 //! - [`older`]: the older versions a backup keeps, kept for ever, and removed only when you choose.
 //! - [`record`]: the backup's own record of what it holds, kept on the backup drive.
+//! - [`gone`]: the files it keeps that are gone from your folders (deleted or moved), which it keeps, with a warning.
 //! - [`pack`]: the other format, one zip per song.
 //! - [`folders`]: backing up a list of folders in one go, each whole or slimmed.
 
 pub mod copy;
 pub mod folders;
+pub mod gone;
 pub mod older;
 pub mod pack;
 pub mod plan;
 pub mod record;
+
+/// The error a job gives back when you stop it.
+pub(crate) fn stopped() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::Interrupted, "Stopped")
+}

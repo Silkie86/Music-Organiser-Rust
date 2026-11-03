@@ -449,7 +449,7 @@ fn share(source: &Source<'_>, part: &Path, key: &str, ctx: &Ctx<'_>) -> io::Resu
         // not used.
         let Ok(Some((hash, seen))) = same_bytes(source.path, &there, ctx.stop) else {
             if ctx.stop.load(Ordering::Relaxed) {
-                return Err(io::Error::new(io::ErrorKind::Interrupted, "Stopped"));
+                return Err(crate::stopped());
             }
             continue;
         };
@@ -648,7 +648,7 @@ fn buffer_for(size: u64) -> usize {
 pub(crate) fn read_some(file: &mut File, buf: &mut [u8], stop: &AtomicBool) -> io::Result<Option<usize>> {
     loop {
         if stop.load(Ordering::Relaxed) {
-            return Err(io::Error::new(io::ErrorKind::Interrupted, "Stopped"));
+            return Err(crate::stopped());
         }
         match file.read(buf) {
             Ok(0) => return Ok(None),
