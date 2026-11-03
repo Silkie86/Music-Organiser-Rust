@@ -57,6 +57,9 @@ fn main() -> Result<(), slint::PlatformError> {
     // A note left open keeps its draft for next time, but the launcher shouldn't wait on it any more.
     mo_ui::note::wait_for_saves();
     mo_ui::note::finish_up();
+    // The sweep's and the frames' last few seconds, before the log closes.
+    mo_app::sweep_timing::finish();
+    mo_app::frame_timing::finish();
     session.close();
     ran
 }

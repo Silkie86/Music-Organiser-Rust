@@ -52,6 +52,7 @@ impl Outputs for FakeOutputs {
             sample_rate: f.rate,
             channels: 2,
             delay: Arc::new(AtomicU64::new(12_000)),
+            period: Arc::new(AtomicU64::new(10_000)),
             stream: Box::new(()),
         })
     }
@@ -138,6 +139,7 @@ fn nothing_opens_until_a_sound_plays_and_then_it_plays_to_the_end() {
     let info = player.info();
     assert_eq!(info.name.as_deref(), Some("Speakers"));
     assert_eq!(info.delay_ms, Some(12.0));
+    assert_eq!(info.mix_every_ms, Some(10.0));
     assert_eq!(outputs.pull(100), vec![0.5; 100]);
     assert_eq!(player.position(), Some(0.1));
     outputs.pull(300);
@@ -368,4 +370,16 @@ fn dropping_the_player_when_a_sound_ends_doesnt_hang() {
     *lock(&slot) = Some(player);
     outputs.pull(20);
     assert!(rx.recv_timeout(Duration::from_secs(5)).is_ok());
+}
+
+#[test]
+fn how_often_the_output_mixes_comes_from_its_buffers_length() {
+    use super::output::period_us;
+    // The 10 ms buffer the player asks for, stereo at 48 kHz and at 44.1 kHz.
+    assert_eq!(period_us(480 * 2, 2, 48_000), Some(10_000));
+    assert_eq!(period_us(441 * 2, 2, 44_100), Some(10_000));
+    // An output that chose its own: 1024 frames of 8 channels at 48 kHz.
+    assert_eq!(period_us(1024 * 8, 8, 48_000), Some(21_333));
+    assert_eq!(period_us(512, 0, 48_000), Some(10_666));
+    assert_eq!(period_us(480, 1, 0), None);
 }
