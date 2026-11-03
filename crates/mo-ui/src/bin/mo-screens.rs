@@ -102,6 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     shots.push(("backup-gone-open.png".into(), capture(&window)));
     app.global::<mo_ui::BackupData>().set_gone_open(false);
     mo_ui::backup::show_gone(&app, &mo_app::backup_gone::Warning::default());
+    presets_shots(&app, &window, &mut shots);
     app.set_place(Place::Songs.index() as i32);
     for theme in THEMES.iter().skip(1) {
         mo_ui::apply_look(&app, &Look::from_settings(Some(theme.name), None));
@@ -210,6 +211,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("{}", path.display());
     }
     Ok(())
+}
+
+/// The Presets page: made-up sounds with one picked, then the Curves section with a curve picked.
+fn presets_shots(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, shots: &mut Vec<(String, Vec<u8>)>) {
+    use mo_app::presets::Section;
+    app.set_place(Place::Presets.index() as i32);
+    mo_ui::presets::show_sample(app);
+    shots.push(("presets-list.png".into(), capture(window)));
+    mo_ui::presets::pick_row(app, 3);
+    shots.push(("presets-picked.png".into(), capture(window)));
+    mo_ui::presets::show_section(app, Section::Curves);
+    shots.push(("presets-curves.png".into(), capture(window)));
+    mo_ui::presets::pick_row(app, 0);
+    shots.push(("presets-curve-picked.png".into(), capture(window)));
+    mo_ui::presets::show_section(app, Section::Sounds);
+    mo_ui::presets::pick_row(app, usize::MAX);
 }
 
 /// The Sounds page: a sound picked and playing in its panel, a filter on, the List and History views, and the tiles in
