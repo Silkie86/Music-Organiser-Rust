@@ -92,6 +92,16 @@ pub fn reveal(path: &str, folder: &str, exists: bool, os: Os) -> Launch {
     }
 }
 
+/// Opens the Recycle Bin (the Trash on a Mac or Linux), where everything the app removes goes, as the C# app's
+/// `Shell.OpenRecycleBin` does. `home` is your home folder, where a Mac keeps the Trash.
+pub fn recycle_bin(home: &str, os: Os) -> Launch {
+    match os {
+        Os::Windows => launch("explorer.exe", &["shell:RecycleBinFolder"], Check::Ends),
+        Os::Mac => launch("open", &[&format!("{}/.Trash", home.trim_end_matches('/'))], Check::ExitCode),
+        Os::Linux => launch("xdg-open", &["trash:///"], Check::ExitCode),
+    }
+}
+
 /// The folder part of a path: everything before its file name, whichever way its slashes lean. A drive's own folder
 /// keeps its slash ("C:\\", "/").
 pub fn folder_of(path: &str) -> &str {
@@ -199,6 +209,13 @@ mod tests {
         assert_eq!(reveal(SONG, folder, false, Os::Windows), launch("explorer.exe", &[folder], Check::Ends));
         assert_eq!(reveal("/m/s/a.flp", "/m/s", true, Os::Mac), launch("open", &["-R", "/m/s/a.flp"], Check::ExitCode));
         assert_eq!(reveal("/m/s/a.flp", "/m/s", true, Os::Linux), launch("xdg-open", &["/m/s"], Check::ExitCode));
+    }
+
+    #[test]
+    fn the_recycle_bin_opens_where_each_system_keeps_it() {
+        assert_eq!(recycle_bin("", Os::Windows), launch("explorer.exe", &["shell:RecycleBinFolder"], Check::Ends));
+        assert_eq!(recycle_bin("/Users/me/", Os::Mac), launch("open", &["/Users/me/.Trash"], Check::ExitCode));
+        assert_eq!(recycle_bin("/home/me", Os::Linux), launch("xdg-open", &["trash:///"], Check::ExitCode));
     }
 
     #[test]

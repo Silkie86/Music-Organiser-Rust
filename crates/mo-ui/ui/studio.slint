@@ -742,7 +742,8 @@ export component ListLine inherits Rectangle {
         width: root.selected ? 2px : 0;
         background: Theme.accent;
     }
-    @children
+    // Under the line's own parts, so a button or chip on the line takes its own click; a click anywhere else on
+    // the line still picks it.
     touch := TouchArea {
         clicked => { root.clicked(); }
         double-clicked => { root.double-clicked(); }
@@ -754,6 +755,7 @@ export component ListLine inherits Rectangle {
             }
         }
     }
+    @children
     Tip {
         text: root.tip;
         hovering: touch.has-hover && !touch.pressed && touch.mouse-x >= root.tip-from && touch.mouse-y >= root.tip-below;
