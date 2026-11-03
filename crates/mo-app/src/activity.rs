@@ -16,6 +16,9 @@ use crate::log;
 pub const PROGRESS_EVERY: Duration = Duration::from_millis(250);
 /// How long a finished card stays before it goes by itself.
 pub const DONE_STAYS: Duration = Duration::from_secs(6);
+/// How long a failed card stays: three times as long, as in the C# app, so there's time to read why (Send to Bitwig's
+/// "Bitwig isn't answering" says what to check).
+pub const FAILED_STAYS: Duration = Duration::from_secs(18);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
@@ -37,6 +40,14 @@ pub struct Card {
     pub put_away: bool,
     pub started: Instant,
     pub ended: Option<Instant>,
+}
+
+impl Card {
+    /// Whether it finished long enough ago to go: [`DONE_STAYS`] after it was done, [`FAILED_STAYS`] after it failed.
+    fn gone_by(&self, now: Instant) -> bool {
+        let stays = if self.state == State::Failed { FAILED_STAYS } else { DONE_STAYS };
+        self.ended.is_some_and(|e| now.duration_since(e) >= stays)
+    }
 }
 
 type Notify = Box<dyn Fn() + Send + Sync>;
@@ -97,12 +108,7 @@ impl Feed {
 
     /// The cards to show now, oldest first: put-away ones and finished ones past their time are left out.
     pub fn visible(&self, now: Instant) -> Vec<Card> {
-        self.lock()
-            .cards
-            .iter()
-            .filter(|c| !c.put_away && c.ended.is_none_or(|e| now.duration_since(e) < DONE_STAYS))
-            .cloned()
-            .collect()
+        self.lock().cards.iter().filter(|c| !c.put_away && !c.gone_by(now)).cloned().collect()
     }
 
     /// How many jobs are running, put away or not.
@@ -147,7 +153,7 @@ impl Feed {
     pub fn tidy(&self, now: Instant) -> bool {
         let mut inner = self.lock();
         let before = inner.cards.len();
-        inner.cards.retain(|c| c.ended.is_none_or(|e| now.duration_since(e) < DONE_STAYS));
+        inner.cards.retain(|c| !c.gone_by(now));
         before != inner.cards.len()
     }
 
@@ -228,6 +234,23 @@ impl Job {
 
     pub fn failed(mut self, why: &str) {
         self.end(State::Failed, why);
+    }
+
+    /// Done, with a headline that says what came of it ("Kick is in Bitwig" where it said "Putting Kick into
+    /// Bitwig").
+    pub fn done_as(mut self, title: &str, detail: &str) {
+        self.retitle(title);
+        self.end(State::Done, detail);
+    }
+
+    /// Failed, with a headline that says what came of it.
+    pub fn failed_as(mut self, title: &str, why: &str) {
+        self.retitle(title);
+        self.end(State::Failed, why);
+    }
+
+    fn retitle(&self, title: &str) {
+        self.feed.update(self.id, |c| c.title = title.to_owned());
     }
 
     fn end(&mut self, state: State, detail: &str) {
@@ -312,6 +335,26 @@ mod tests {
         job.failed("The folder went away");
         // Ending brings a put-away card back, so a failure is never hidden.
         assert_eq!(feed.visible(Instant::now())[0].state, State::Failed);
+        // And it stays longer than a card that's done, so there's time to read why.
+        assert_eq!(feed.visible(Instant::now() + DONE_STAYS).len(), 1);
+        assert!(feed.visible(Instant::now() + FAILED_STAYS).is_empty());
+        assert!(feed.tidy(Instant::now() + FAILED_STAYS));
+    }
+
+    #[test]
+    fn a_job_can_end_with_a_headline_that_says_how_it_went() {
+        let feed = Feed::default();
+        feed.start("Putting Kick into Bitwig", "On a Sampler, on a new track").done_as("Kick is in Bitwig", "");
+        feed.start("Putting Snare into Bitwig", "").failed_as("Couldn't put it into Bitwig", "Bitwig isn't answering.");
+        let cards = feed.visible(Instant::now());
+        let shown: Vec<_> = cards.iter().map(|c| (c.title.as_str(), c.detail.as_str(), c.state)).collect();
+        assert_eq!(
+            shown,
+            [
+                ("Kick is in Bitwig", "On a Sampler, on a new track", State::Done),
+                ("Couldn't put it into Bitwig", "Bitwig isn't answering.", State::Failed),
+            ]
+        );
     }
 
     #[test]

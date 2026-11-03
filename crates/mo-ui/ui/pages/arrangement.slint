@@ -1,6 +1,7 @@
-// The arrangement at the top of a song's Overview: the project drawn as its DAW shows it. mo-app draws the shapes into
-// a picture on a background thread (mo-ui's arrangement.rs); the words are laid on top here, in the app's own fonts,
-// each clipped to its strip: track names on the left, the ruler along the top, clip names on the timeline.
+// The arrangement at the top of a song's Overview: the project drawn as its DAW shows it. mo-app works out the shapes
+// on a background thread, and the graphics card draws them into a picture (mo-ui's arrangement.rs and canvas.rs; the
+// processor where there's no card); the words are laid on top here, in the app's own fonts, each clipped to its strip:
+// track names on the left, the ruler along the top, clip names on the timeline.
 import { Theme, Type, Space, ToggleChip, PointerPad, HoverNote } from "../studio.slint";
 
 // How a label on the picture looks.
