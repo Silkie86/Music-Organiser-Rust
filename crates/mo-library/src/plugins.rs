@@ -2,7 +2,7 @@
 //! C# app's plugin scanner read, and how much room each installed plugin takes as the C# app last measured it.
 //! Read-only, like the rest of this crate: nothing here can change `library.db`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::NaiveDateTime;
 use serde::Deserialize;
@@ -25,8 +25,6 @@ pub struct PluginUse {
     pub installed: bool,
     /// The save's DAW: "FL Studio", "Bitwig" …
     pub daw: String,
-    /// When the save was last written, as Unix seconds.
-    pub mtime: i64,
 }
 
 /// One plugin inside an installed plugin file, as the C# app's plugin scanner read it.
@@ -105,9 +103,23 @@ impl Library {
             return Ok(Vec::new());
         }
         let present = if self.columns.contains("file_missing") { "COALESCE(p.file_missing, 0) = 0" } else { "1" };
+        // An older app's plugins table may lack some columns (name_key came later); those read as empty.
+        let have: HashSet<String> = self
+            .conn
+            .prepare("SELECT name FROM pragma_table_info('plugins')")?
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<Result<_, _>>()?;
+        if !have.contains("project_id") || !have.contains("name") {
+            return Ok(Vec::new());
+        }
+        let picked: Vec<String> = ["project_id", "name", "name_key", "vendor", "kind", "format", "installed"]
+            .into_iter()
+            .filter(|c| have.contains(*c))
+            .map(|c| format!("pl.{c}"))
+            .collect();
         let mut st = self.conn.prepare(&format!(
-            "SELECT pl.project_id, pl.name, pl.name_key, pl.vendor, pl.kind, pl.format, pl.installed, p.daw, p.mtime
-             FROM plugins pl JOIN projects p ON p.id = pl.project_id WHERE {present}"
+            "SELECT {}, p.daw FROM plugins pl JOIN projects p ON p.id = pl.project_id WHERE {present}",
+            picked.join(", ")
         ))?;
         let rows = st.query_map([], |r| {
             let name = text(r, "name");
@@ -125,7 +137,6 @@ impl Library {
                 format: text(r, "format"),
                 installed: int(r, "installed") == Some(1),
                 daw: text(r, "daw"),
-                mtime: int(r, "mtime").unwrap_or(0),
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)

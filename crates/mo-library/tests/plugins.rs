@@ -41,6 +41,24 @@ INSERT INTO plugin_space VALUES ('fabfilterproq3', 'FabFilter Pro-Q 3', 'FabFilt
 INSERT INTO settings VALUES ('space_unused_years', '3');
 "#;
 
+/// A plugins table from before the app stored name keys, makers and formats.
+const EARLY: &str = "
+CREATE TABLE projects (id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL COLLATE NOCASE, name TEXT NOT NULL,
+    daw TEXT NOT NULL, folder TEXT, size INTEGER, mtime INTEGER);
+CREATE TABLE plugins (project_id INTEGER, name TEXT, installed INTEGER);
+INSERT INTO projects VALUES (1, 'C:\\a.flp', 'a', 'FL Studio', 'C:\\', 1, 1500000000);
+INSERT INTO plugins VALUES (1, 'Serum 2', 1);
+";
+
+#[test]
+fn reads_an_early_plugins_table() {
+    let lib = Library::open_read_only(&make("early.db", EARLY)).unwrap();
+    let uses = lib.plugin_uses().unwrap();
+    assert_eq!(uses.len(), 1);
+    assert_eq!((uses[0].name.as_str(), uses[0].key.as_str(), uses[0].installed), ("Serum 2", "serum2", true));
+    assert_eq!((uses[0].vendor.as_str(), uses[0].format.as_str()), ("", ""));
+}
+
 fn make(name: &str, sql: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mo-library-plugins");
     std::fs::create_dir_all(&dir).unwrap();
@@ -57,7 +75,7 @@ fn reads_what_the_plugins_page_needs() {
     // The save whose file has gone is left out.
     assert_eq!(uses.len(), 2);
     assert_eq!((uses[0].name.as_str(), uses[0].kind, uses[0].installed), ("Pro-Q 3", PluginKind::Effect, true));
-    assert_eq!((uses[0].daw.as_str(), uses[0].mtime), ("FL Studio", 1500000000));
+    assert_eq!(uses[0].daw, "FL Studio");
     // A row stored without its key gets one.
     assert_eq!(uses[1].key, "gonesynth");
 

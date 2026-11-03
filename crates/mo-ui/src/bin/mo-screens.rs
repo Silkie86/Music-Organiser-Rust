@@ -692,7 +692,6 @@ fn sample_plugins() -> (mo_app::plugins::Plugins, Vec<mo_library::plugins::Scann
                     format: format.into(),
                     installed,
                     daw: s.daw.clone(),
-                    mtime: 0,
                 });
             }
         }

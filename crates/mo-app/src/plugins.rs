@@ -15,10 +15,11 @@ use chrono::{Datelike, Months, NaiveDateTime};
 use mo_formats::case;
 use mo_formats::plugins::format_from_path;
 use mo_library::plugins::{
-    NEEDED_COUNT_KEY, PluginUse, ScanCounts, ScannedPlugin, StoredFolder, StoredSpace, UNUSED_YEARS_KEY,
+    NEEDED_COUNT_KEY, PluginUse, ScanCounts, ScannedPlugin, StoredSpace, UNUSED_YEARS_KEY,
 };
 use mo_library::songs::group_songs;
 use mo_library::{Library, LibraryError, PluginKind};
+use mo_space::plugin_space::{PluginSpace, SpaceFolder, SpaceKind};
 use mo_space::plugins::{family, is_waves};
 use mo_space::size::size_text;
 
@@ -107,39 +108,27 @@ pub fn read(lib: &Library) -> Result<Read, LibraryError> {
     })
 }
 
-/// A plugin's room on disk, from the C# app's last measure.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Room {
-    /// The measured plugin's name key and name (the plugin file's, which may differ from the projects' name).
-    pub key: String,
-    pub name: String,
-    pub program: u64,
-    pub presets: u64,
-    pub sounds: u64,
-    /// Folders it shares with other plugins from its maker, left out of its own room.
-    pub shared: u64,
-    pub folders: Vec<StoredFolder>,
-}
-
-impl Room {
-    fn of(s: &StoredSpace) -> Room {
-        let sum = |kind: u8| {
-            s.folders.iter().filter(|f| f.shared_with.is_empty() && f.kind == kind).map(|f| f.bytes).sum::<u64>()
-        };
-        Room {
-            key: s.key.clone(),
-            name: s.name.clone(),
-            program: sum(0),
-            presets: sum(1),
-            sounds: sum(2),
-            shared: s.folders.iter().filter(|f| !f.shared_with.is_empty()).map(|f| f.bytes).sum(),
-            folders: s.folders.clone(),
-        }
-    }
-
-    /// Its own room: plugin files, presets and settings, and sounds.
-    pub fn bytes(&self) -> u64 {
-        self.program + self.presets + self.sounds
+/// A plugin's room on disk, from the C# app's last measure, in the Space engine's own shape.
+fn space_of(s: &StoredSpace) -> PluginSpace {
+    PluginSpace {
+        key: s.key.clone(),
+        name: s.name.clone(),
+        vendor: s.vendor.clone(),
+        folders: s
+            .folders
+            .iter()
+            .map(|f| SpaceFolder {
+                path: f.path.clone(),
+                kind: match f.kind {
+                    0 => SpaceKind::Program,
+                    1 => SpaceKind::Presets,
+                    _ => SpaceKind::Sounds,
+                },
+                bytes: f.bytes,
+                shared_with: f.shared_with.clone(),
+                added: f.added,
+            })
+            .collect(),
     }
 }
 
@@ -166,19 +155,21 @@ pub struct PluginRow {
     pub songs: usize,
     /// The songs whose newest save uses it.
     pub songs_now: usize,
+    /// The songs whose newest save uses it and is missing it here (what "Install these" counts).
+    pub missing_now: usize,
     /// The songs whose newest save misses only this plugin: installing it opens them with nothing missing.
     pub opens: usize,
     pub last_used: Option<NaiveDateTime>,
     /// The years its saves were made in, newest first.
     pub years: Vec<i32>,
-    pub room: Option<Room>,
+    pub room: Option<PluginSpace>,
     /// Installed, measured, and no song has used it in the years asked about (or ever).
     pub unused: bool,
 }
 
 impl PluginRow {
     pub fn bytes(&self) -> u64 {
-        self.room.as_ref().map_or(0, Room::bytes)
+        self.room.as_ref().map_or(0, PluginSpace::bytes)
     }
 
     /// Installed, and no song uses it.
@@ -311,8 +302,13 @@ impl Filters {
     /// Picks a chip; picking the one that's on goes back to All. The space chips sort the biggest first, as the C#
     /// page does.
     pub fn pick(&mut self, chip: Chip) {
-        self.chip = if self.chip == chip { Chip::All } else { chip };
-        if matches!(self.chip, Chip::BigUnused | Chip::NeverUsed) {
+        self.show(if self.chip == chip { Chip::All } else { chip });
+    }
+
+    /// Turns a chip on, even when it's on already (the "Show them" link).
+    pub fn show(&mut self, chip: Chip) {
+        self.chip = chip;
+        if matches!(chip, Chip::BigUnused | Chip::NeverUsed) {
             self.sort = Sort::Biggest;
         }
     }
@@ -412,8 +408,11 @@ impl Plugins {
             .into_iter()
             .filter_map(|k| groups.remove(&k).map(|g| row(k, &g, &song_of, &saves, &newest, &missing_by_save)))
             .collect();
-        // The C# order: the most used first, then by name.
-        rows.sort_by(|a, b| b.saves.len().cmp(&a.saves.len()).then_with(|| a.name.cmp(&b.name)));
+        // The most used first: by songs (the C# page counted saves, so a song saved 40 times came first), then saves,
+        // then by name.
+        rows.sort_by(|a, b| {
+            (b.songs, b.saves.len()).cmp(&(a.songs, a.saves.len())).then_with(|| a.name.cmp(&b.name))
+        });
 
         let measured = spaces.iter().filter_map(|s| s.measured).min();
         let cutoff = now.checked_sub_months(Months::new(unused_years * 12)).unwrap_or(now);
@@ -495,11 +494,11 @@ impl Plugins {
     /// (they open those songs completely), then the ones the most songs' newest saves use.
     pub fn needed(&self) -> Vec<Needed> {
         let mut missing: Vec<usize> =
-            (0..self.rows.len()).filter(|&i| !self.rows[i].installed && self.rows[i].songs_now > 0).collect();
+            (0..self.rows.len()).filter(|&i| !self.rows[i].installed && self.rows[i].missing_now > 0).collect();
         let rows = &self.rows;
         missing.sort_by(|&a, &b| {
-            (rows[b].opens, rows[b].songs_now)
-                .cmp(&(rows[a].opens, rows[a].songs_now))
+            (rows[b].opens, rows[b].missing_now)
+                .cmp(&(rows[a].opens, rows[a].missing_now))
                 .then_with(|| case::to_lower(&rows[a].name).cmp(&case::to_lower(&rows[b].name)))
         });
         missing
@@ -510,11 +509,11 @@ impl Plugins {
                 let (count, label) = if r.opens > 0 {
                     (r.opens, if r.opens == 1 { "song it opens" } else { "songs it opens" })
                 } else {
-                    (r.songs_now, if r.songs_now == 1 { "song needs it" } else { "songs need it" })
+                    (r.missing_now, if r.missing_now == 1 { "song needs it" } else { "songs need it" })
                 };
                 let mut parts = Vec::new();
-                if r.opens > 0 && r.songs_now > r.opens {
-                    parts.push(format!("needed by {}", r.songs_now));
+                if r.opens > 0 && r.missing_now > r.opens {
+                    parts.push(format!("needed by {}", r.missing_now));
                 }
                 parts.extend([r.format_text(), r.vendor.clone()].into_iter().filter(|s| !s.is_empty()));
                 if let Some(t) = r.last_used {
@@ -733,12 +732,12 @@ impl Plugins {
         };
         let total = room.bytes().max(1) as f32;
         let parts =
-            [("Plugin files", room.program, 0), ("Presets and settings", room.presets, 1), ("Sounds", room.sounds, 2)]
+            [("Plugin files", room.program(), 0), ("Presets and settings", room.presets(), 1), ("Sounds", room.sounds(), 2)]
                 .into_iter()
                 .filter(|p| p.1 > 0)
                 .map(|(name, bytes, kind)| RoomPart { name, size: size_text(bytes), share: bytes as f32 / total, kind })
                 .collect();
-        let mut folders: Vec<&StoredFolder> = room.folders.iter().collect();
+        let mut folders: Vec<&SpaceFolder> = room.folders.iter().collect();
         folders.sort_by_key(|a| std::cmp::Reverse(a.bytes));
         let names = |keys: &[String]| -> String {
             keys.iter()
@@ -753,8 +752,8 @@ impl Plugins {
         };
         RoomLines {
             summary: format!("{} on disk · {last}", size_text(room.bytes())),
-            shared: if room.shared > 0 {
-                format!("{} more in folders it shares with other plugins", size_text(room.shared))
+            shared: if room.shared_bytes() > 0 {
+                format!("{} more in folders it shares with other plugins", size_text(room.shared_bytes()))
             } else {
                 String::new()
             },
@@ -763,9 +762,9 @@ impl Plugins {
                 .into_iter()
                 .map(|f| FolderLine {
                     kind: match f.kind {
-                        0 => "Plugin file",
-                        1 => "Presets and settings",
-                        _ => "Sounds",
+                        SpaceKind::Program => "Plugin file",
+                        SpaceKind::Presets => "Presets and settings",
+                        SpaceKind::Sounds => "Sounds",
                     },
                     path: f.path.clone(),
                     size: size_text(f.bytes),
@@ -1009,6 +1008,7 @@ fn row(
 
     let songs: HashSet<usize> = ids.iter().filter_map(|id| song_of.get(id).copied()).collect();
     let now: Vec<i64> = ids.iter().filter(|id| newest.contains(id)).copied().collect();
+    let missing_now = now.iter().filter(|id| missing_by_save.get(id).is_some_and(|m| m.contains(&key))).count();
     let opens = if installed {
         0
     } else {
@@ -1025,6 +1025,7 @@ fn row(
         installed,
         songs: songs.len(),
         songs_now: now.len(),
+        missing_now,
         opens,
         saves: ids,
         formats,
@@ -1070,14 +1071,17 @@ fn with_room(rows: &mut Vec<PluginRow>, spaces: &[StoredSpace], cutoff: NaiveDat
     }
     let mut claimed: HashSet<String> = HashSet::new();
     let give = |rows: &mut Vec<PluginRow>, claimed: &mut HashSet<String>, at: usize, s: &StoredSpace| {
-        rows[at].room = Some(Room::of(s));
+        rows[at].room = Some(space_of(s));
         rows[at].unused = unused(&rows[at], cutoff);
         claimed.insert(rows[at].key.clone());
     };
-    // Same names first ("Serum 2" is Serum2's), then close ones for what's left.
+    // Same names first ("Serum 2" is Serum2's), then close ones for what's left. Only an installed row gets a size: a
+    // plugin the library says is missing takes no room here, even when the old measure found a folder named like it
+    // (that measure is still "used", so it's never offered for removal either).
     let mut rest: Vec<&StoredSpace> = Vec::new();
     for s in spaces {
         match by_key.get(&s.key) {
+            Some(&at) if !rows[at].installed => {}
             Some(&at) if !claimed.contains(&s.key) => give(rows, &mut claimed, at, s),
             _ => rest.push(s),
         }
@@ -1112,16 +1116,18 @@ fn with_room(rows: &mut Vec<PluginRow>, spaces: &[StoredSpace], cutoff: NaiveDat
                 formats: Vec::new(),
                 songs: 0,
                 songs_now: 0,
+                missing_now: 0,
                 opens: 0,
                 last_used: None,
                 years: Vec::new(),
-                room: Some(Room::of(s)),
+                room: Some(space_of(s)),
                 unused: false,
             };
             r.unused = unused(&r, cutoff);
             rows.push(r);
-        } else if let Some(&at) = close.iter().find(|&&i| !claimed.contains(&rows[i].key)) {
-            // A row that already has its own size keeps it; this one counts as used either way, so it's never offered.
+        } else if let Some(&at) = close.iter().find(|&&i| rows[i].installed && !claimed.contains(&rows[i].key)) {
+            // A row that already has its own size keeps it; this one counts as used either way, so it's never offered
+            // (as the C# page: a second Kontakt measured beside a sized Kontakt row shows no size of its own).
             give(rows, &mut claimed, at, s);
         }
     }

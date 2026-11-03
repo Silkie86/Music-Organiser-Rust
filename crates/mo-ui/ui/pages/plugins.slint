@@ -135,6 +135,8 @@ export global PluginsData {
 
     callback search-edited(string);
     callback chip-picked(string);
+    /// "Show them": turns Big and unused on (never off).
+    callback show-unused();
     callback sort-picked(string);
     callback clear();
     callback select(int);
@@ -634,7 +636,7 @@ export component PluginsPage inherits Rectangle {
             LinkText {
                 text: "Show them";
                 font-size: Type.meta;
-                clicked => { PluginsData.chip-picked("Big and unused"); }
+                clicked => { PluginsData.show-unused(); }
             }
         }
         // The list, the year strip and the picked plugin's card.

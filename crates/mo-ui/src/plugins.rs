@@ -99,6 +99,8 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
     let weak = app.as_weak();
     data.on_search_edited(move |t| change(&weak, |f| f.search = t.to_string()));
     let weak = app.as_weak();
+    data.on_show_unused(move || change(&weak, |f| f.show(Chip::BigUnused)));
+    let weak = app.as_weak();
     data.on_chip_picked(move |c| {
         if let Some(chip) = Chip::from_name(&c) {
             change(&weak, |f| f.pick(chip));
@@ -217,9 +219,22 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
     let mut lib: Option<(PathBuf, Library)> = None;
     let copies = Newest::start("Plugin copies", move |(asked, path, name): CopiesJob| {
         if lib.as_ref().is_none_or(|(p, _)| *p != path) {
-            lib = Library::open_read_only(&path).ok().map(|l| (path.clone(), l));
+            lib = match Library::open_read_only(&path) {
+                Ok(l) => Some((path.clone(), l)),
+                Err(e) => {
+                    log::warning("Plugins", &format!("Couldn't open the library for installed copies: {e}"));
+                    None
+                }
+            };
         }
-        let found: Vec<ScannedPlugin> = lib.as_ref().and_then(|(_, l)| l.scanned_named(&name).ok()).unwrap_or_default();
+        let found: Vec<ScannedPlugin> = match lib.as_ref().map(|(_, l)| l.scanned_named(&name)) {
+            Some(Ok(found)) => found,
+            Some(Err(e)) => {
+                log::warning("Plugins", &format!("Couldn't read the installed copies of {name}: {e}"));
+                Vec::new()
+            }
+            None => Vec::new(),
+        };
         let weak = weak.clone();
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(app) = weak.upgrade() {
@@ -312,6 +327,8 @@ fn arrived(app: &AppWindow, built: Result<Plugins, String>) {
                 let mut p = p.borrow_mut();
                 p.years = fresh.year_counts();
                 p.plugins = Some(fresh);
+                // The same plugin at its new place, so its tab, DAW and "Every save" stay as they were.
+                p.picked = picked;
             });
             data.set_message(
                 if empty { "No plugins yet: the old app reads them when it scans your projects." } else { "" }.into(),

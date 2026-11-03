@@ -2,6 +2,7 @@
 
 use super::*;
 use chrono::NaiveDate;
+use mo_library::plugins::StoredFolder;
 
 fn at(y: i32, m: u32) -> NaiveDateTime {
     NaiveDate::from_ymd_opt(y, m, 1).unwrap().and_hms_opt(12, 0, 0).unwrap()
@@ -25,7 +26,6 @@ fn uses(save: i64, name: &str, format: &str, kind: PluginKind, installed: bool, 
         format: format.into(),
         installed,
         daw: daw.into(),
-        mtime: 0,
     }
 }
 
@@ -307,4 +307,36 @@ fn nothing_read_shows_nothing() {
     let p = Plugins::new(Read::default(), now());
     assert!(p.rows.is_empty() && p.summary().is_empty() && p.needed().is_empty() && p.freeable().is_empty());
     assert!(!p.all_installed());
+}
+
+#[test]
+fn review_fixes_hold() {
+    use PluginKind::*;
+    let mut read = library();
+    // Many saves of one song don't beat two songs: Arp is in Didums' three saves, Serum in two songs.
+    for id in [1, 2, 3] {
+        read.uses.push(uses(id, "Arp", "VST3", NoteEffect, true, "FL Studio"));
+    }
+    // Late (Bitwig) uses Nexus installed, Didums' newest misses it: one song needs it, not two.
+    read.uses.push(uses(5, "Nexus", "VST2", Instrument, true, "Bitwig"));
+    // A measure for a plugin the library says is missing gives it no size, and adds no "never used" row.
+    read.spaces.push(space("Massive", &[(r"C:\VST\Massive.dll", 0, 9_000_000)]));
+    let p = Plugins::new(read, now());
+
+    let serum = p.rows.iter().position(|r| r.name == "Serum").unwrap();
+    let arp = p.rows.iter().position(|r| r.name == "Arp").unwrap();
+    assert!(serum < arp, "two songs come before one song's three saves");
+
+    let nexus = row(&p, "Nexus");
+    assert_eq!((nexus.songs_now, nexus.missing_now), (2, 1));
+
+    let massive = row(&p, "Massive");
+    assert!(massive.room.is_none() && !massive.unused);
+    assert_eq!(p.rows.iter().filter(|r| r.name == "Massive").count(), 1);
+
+    // "Show them" turns Big and unused on, and keeps it on.
+    let mut f = Filters::default();
+    f.show(Chip::BigUnused);
+    f.show(Chip::BigUnused);
+    assert_eq!((f.chip, f.sort), (Chip::BigUnused, Sort::Biggest));
 }

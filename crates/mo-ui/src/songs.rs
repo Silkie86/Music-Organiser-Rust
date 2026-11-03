@@ -392,7 +392,12 @@ fn change(weak: &slint::Weak<AppWindow>, f: impl FnOnce(&mut Filters)) {
 /// Shows only the songs with one of `saves` (the Plugins page's Show in Songs), under a chip called `label`. The other
 /// filters go, archived songs included, so every song counted on the plugin's card is there.
 pub fn show_only(app: &AppWindow, label: &str, saves: HashSet<i64>) {
-    PAGE.with(|p| p.borrow_mut().filters = Filters { only: Some((label.to_owned(), saves)), ..Filters::default() });
+    // Every other filter goes, but "hide archived" is a choice the user keeps.
+    PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let hide_archived = p.filters.hide_archived;
+        p.filters = Filters { only: Some((label.to_owned(), saves)), hide_archived, ..Filters::default() };
+    });
     pick(app, None);
     refresh(app);
 }
