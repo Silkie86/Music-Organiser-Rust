@@ -71,7 +71,7 @@ pub fn years(sounds: &[Sound]) -> Vec<i32> {
 }
 
 /// Suggests unused sounds you might like, best first. `sounds` is the whole library (hidden copies are left out
-/// here), `usage` comes from [`crate::usage::usage`], `index` from [`SoundIndex::read`].
+/// here), `usage` comes from [`crate::usage::usage`], `index` from [`SoundIndex::build`].
 pub fn suggest(sounds: &[Sound], usage: &HashMap<i64, Usage>, index: &SoundIndex, o: &Options) -> Vec<Suggestion> {
     let mut rng = DotnetRandom::new(if o.seed == 0 { fresh_seed() } else { o.seed });
     let index = index.active();

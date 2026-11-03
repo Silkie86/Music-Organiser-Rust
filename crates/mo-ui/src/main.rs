@@ -46,6 +46,8 @@ fn main() -> Result<(), slint::PlatformError> {
     mo_ui::midi::connect(&app, mo_app::paths::data_dir().join("library.db"), feed.clone(), &shortcuts);
     // Space, Backup: the backup settings live in a file of their own; the library is only read.
     mo_ui::backup::connect(&app, mo_app::paths::data_dir().join("library.db"), feed.clone());
+    // Space: the drives your folders are on and the app's own files, looked at once the page shows.
+    mo_ui::space::connect(&app, mo_app::paths::data_dir().join("library.db"), feed.clone(), &shortcuts);
     app.window().set_maximized(true);
     // The watchdog starts once the window is up, so opening it doesn't count as a freeze.
     let watched = feed.clone();
