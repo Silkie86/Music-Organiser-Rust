@@ -60,8 +60,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     mo_ui::sounds::reading(&app);
     app.global::<mo_ui::SoundsData>().invoke_pick_view(2);
     let sounds_reading = capture(&window);
-    // As the app does once the sounds are read.
-    app.global::<mo_ui::SoundsData>().set_busy("".into());
     mo_ui::sounds::show(&app, sample_sounds(), None, Some("1"));
     mo_ui::sounds::index_known(&app, std::sync::Arc::new(sample_fingerprints()));
     // Once to lay the page out (the tiles' width tells the page how many fit in a row), then for real.
@@ -270,6 +268,13 @@ fn sounds_shots(
     data.invoke_select(3);
     capture(window);
     shots.push(("sounds-galaxy.png".into(), capture(window)));
+    // A search that leaves no stars: the list's word says so over the dimmed galaxy, once.
+    data.set_search("Nothing called this".into());
+    data.invoke_search_edited("Nothing called this".into());
+    capture(window);
+    shots.push(("sounds-galaxy-none.png".into(), capture(window)));
+    data.set_search("".into());
+    data.invoke_search_edited("".into());
     // Lit by length: long sounds big and bright, one-shots small; then all alike, to compare.
     data.invoke_galaxy_light_by("Length".into());
     capture(window);

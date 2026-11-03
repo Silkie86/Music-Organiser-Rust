@@ -78,6 +78,11 @@ pub const SOUNDS_ACTIONS: &[Action] = &[
 /// Every page's own list. A page's keys only work on that page, so two pages may share a key.
 pub const PAGE_ACTIONS: &[&[Action]] = &[SONGS_ACTIONS, SOUNDS_ACTIONS];
 
+/// What an action does, in the words its tooltip and the key list use, or "" for an id in no list.
+pub fn what_of(id: &str) -> &'static str {
+    APP_ACTIONS.iter().chain(PAGE_ACTIONS.iter().copied().flatten()).find(|a| a.id == id).map_or("", |a| a.what)
+}
+
 /// The keys in use: the defaults with your changes on top.
 #[derive(Clone, Debug)]
 pub struct Shortcuts {
@@ -279,6 +284,14 @@ mod tests {
         ids.sort();
         ids.dedup();
         assert_eq!(ids.len(), all.len());
+    }
+
+    #[test]
+    fn what_an_action_does_is_found_in_any_list() {
+        assert_eq!(what_of("app.play"), "Play or stop the picked sound or MIDI part");
+        assert_eq!(what_of("projects.reveal"), "Show the picked song's file in its folder");
+        assert_eq!(what_of("sounds.copyPath"), "Copy where the sound's file is");
+        assert_eq!(what_of("no.such.action"), "");
     }
 
     #[test]

@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use chrono::{Local, NaiveDateTime};
 use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
-use mo_app::shortcuts::{SOUNDS_ACTIONS, Shortcuts};
+use mo_app::shortcuts::{Shortcuts, what_of};
 use mo_app::sounds::{self as list, Filters, Length, Order, SoundList};
 use mo_app::{log, sweep_timing, year_strip};
 use mo_audio::play::Player;
@@ -96,6 +96,8 @@ struct Page {
     autoplay: bool,
     /// Counts the asks for a new list, so an older answer that arrives late is dropped.
     asked: u64,
+    /// The sounds have been read and handed to the page ([`show`]): the next list shown is of them.
+    read: bool,
     /// The type chips' types with their counts, in chip order, then the rest (the More types menu).
     types: Vec<(String, usize)>,
     now: NaiveDateTime,
@@ -136,6 +138,7 @@ impl Default for Page {
             picked: None,
             autoplay: false,
             asked: 0,
+            read: false,
             types: Vec::new(),
             now: Local::now().naive_local(),
             playing: None,
@@ -394,16 +397,18 @@ pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: F
         return;
     }
     if let Err(e) = background::spawn("Sounds library", move || read_all(&sounds_db, &library_db, send)) {
-        log::error("Sounds", &format!("Couldn't start reading the library: {e}"));
+        // The sounds would never come: the page says why, rather than reading for ever.
+        loaded(app, Err(format!("its reader couldn't start ({e})")));
     }
 }
 
 /// While the sounds are read, every view shows one word in the list's place: not "No sounds match" (nothing is
-/// filtered out yet), and not the galaxy's own word on top of it (Solomon's F12 note, 2026-11-02 04:25). The list
-/// takes its place once the sounds arrive ([`show`]), or why they couldn't be read does.
+/// filtered out yet), and not the galaxy's own word on top of it (Solomon's F12 note, 2026-11-02 04:25). Said once,
+/// as the Songs page says it, not again in the page's header. The first list of the sounds takes its place once they
+/// arrive ([`listed`]), or why they couldn't be read does ([`loaded`]).
 pub fn reading(app: &AppWindow) {
+    PAGE.with(|p| p.borrow_mut().read = false);
     let data = app.global::<SoundsData>();
-    data.set_busy("Reading your sounds".into());
     data.set_empty_title("Reading your sounds…".into());
     data.set_empty_text("".into());
 }
@@ -722,7 +727,6 @@ fn use_known(app: &AppWindow, list: Arc<SoundList>) {
 fn loaded(app: &AppWindow, read: Result<Read, String>) {
     let _doing = crate::watchdog::doing("Sounds: the sounds were read");
     let data = app.global::<SoundsData>();
-    data.set_busy("".into());
     let read = match read {
         Ok(read) => read,
         Err(why) => {
@@ -753,10 +757,12 @@ fn loaded(app: &AppWindow, read: Result<Read, String>) {
 /// Shows a `library` on the page, opening on the view and autoplay setting given.
 pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Option<&str>) {
     let data = app.global::<SoundsData>();
-    data.set_empty_title("".into());
     data.set_tags(strings(&library.tags));
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
+        // "Reading your sounds…" stays until the list of them is worked out, so "No sounds match" never flashes up
+        // in between ([`listed`]).
+        p.read = true;
         p.history = library.played;
         p.list = library.list;
         p.places = library.places;
@@ -786,30 +792,24 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
 /// one list so the two can't drift apart. Send to Bitwig joins once the DAW link is in.
 const CARD_ACTIONS: &[(&str, &str)] = &[("Show in folder", "sounds.reveal"), ("Copy path", "sounds.copyPath")];
 
-/// The card's buttons and the right-click menu, with each one's key from the shortcut list (rule 15).
+/// The card's buttons and the right-click menu, with each one's key and tooltip from the shortcut list (rule 15).
 fn show_actions(data: &SoundsData, shortcuts: &Shortcuts) {
-    let what = |id: &str| SOUNDS_ACTIONS.iter().find(|a| a.id == id).map_or("", |a| a.what);
-    let item = |text: &str, id: &str| MenuItem {
-        what: text.into(),
-        key: shortcuts.key_of(id).into(),
-        id: id.into(),
+    // Play has the app-wide key, but the page plays it itself (`on_menu_chosen`). A line with no words is the rule
+    // under it.
+    let play = MenuItem {
+        what: "Play or stop".into(),
+        key: shortcuts.key_of("app.play").into(),
+        id: "play".into(),
         enabled: true,
     };
-    // Play has the app-wide key, but the page plays it itself (`on_menu_chosen`).
-    let play = MenuItem { id: "play".into(), ..item("Play or stop", "app.play") };
-    let mut menu = vec![play, item("", "")];
-    menu.extend(CARD_ACTIONS.iter().map(|&(text, id)| item(text, id)));
+    let mut menu = vec![play, MenuItem { enabled: true, ..MenuItem::default() }];
+    let mut actions = Vec::new();
+    for &(text, id) in CARD_ACTIONS {
+        let key = SharedString::from(shortcuts.key_of(id));
+        menu.push(MenuItem { what: text.into(), key: key.clone(), id: id.into(), enabled: true });
+        actions.push(CardAction { text: text.into(), tip: what_of(id).into(), key, id: id.into(), enabled: true });
+    }
     data.set_menu(ModelRc::new(VecModel::from(menu)));
-    let actions: Vec<CardAction> = CARD_ACTIONS
-        .iter()
-        .map(|&(text, id)| CardAction {
-            text: text.into(),
-            tip: what(id).into(),
-            key: shortcuts.key_of(id).into(),
-            id: id.into(),
-            enabled: true,
-        })
-        .collect();
     data.set_actions(ModelRc::new(VecModel::from(actions)));
     data.set_play_tip("Play or stop the picked sound".into());
     data.set_play_key(shortcuts.key_of("app.play").into());
@@ -1330,6 +1330,10 @@ fn listed(app: &AppWindow, id: u64, shown: Vec<usize>, years: Vec<(i32, usize)>)
     if current {
         show_years(app);
         show_lists(app);
+        // Once the sounds are read, the list (or "No sounds match") takes the place of the word saying so.
+        if PAGE.with(|p| p.borrow().read) {
+            app.global::<SoundsData>().set_empty_title("".into());
+        }
         // The filters dim the stars they leave out.
         galaxy::draw(app);
     }
@@ -1852,7 +1856,7 @@ mod tests {
     #[test]
     fn every_card_button_is_in_the_shortcut_list() {
         for (text, id) in CARD_ACTIONS {
-            let action = SOUNDS_ACTIONS.iter().find(|a| a.id == *id);
+            let action = mo_app::shortcuts::SOUNDS_ACTIONS.iter().find(|a| a.id == *id);
             assert!(action.is_some_and(|a| !a.what.is_empty() && !a.default_key.is_empty()), "{text}");
         }
     }

@@ -1249,6 +1249,8 @@ export component SoundsPage inherits Rectangle {
                 }
                 Well {
                     if SoundsData.empty-title != "" || (SoundsData.shown == 0 && SoundsData.view != 5): EmptyState {
+                        // On top of the galaxy, whose picture from the graphics card covers whatever is under it.
+                        z: 1;
                         title: SoundsData.empty-title != "" ? SoundsData.empty-title
                             : SoundsData.view == 4 ? SoundsData.re-empty-title : "No sounds match";
                         text: SoundsData.empty-title != "" ? SoundsData.empty-text
