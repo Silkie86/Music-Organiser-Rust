@@ -28,5 +28,6 @@ pub mod sounds;
 pub mod space;
 pub mod sweep_timing;
 pub mod themes;
+pub mod to_bitwig;
 pub mod version;
 pub mod year_strip;

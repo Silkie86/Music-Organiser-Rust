@@ -21,7 +21,7 @@ use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
 use mo_app::shortcuts::{Shortcuts, what_of};
 use mo_app::sounds::{self as list, Filters, Length, Order, SoundList};
-use mo_app::{log, sweep_timing, year_strip};
+use mo_app::{log, sweep_timing, to_bitwig, year_strip};
 use mo_audio::play::Player;
 use mo_library::UsageRules;
 use mo_library::songs::thousands;
@@ -436,6 +436,7 @@ struct Read {
     view: Option<String>,
     count: Option<String>,
     export_folder: Option<String>,
+    drum_machine: Option<String>,
     autoplay: Option<String>,
 }
 
@@ -491,6 +492,8 @@ struct Settings {
     count: Option<String>,
     /// Where exports (kits) go.
     export_folder: Option<String>,
+    /// The Drum Machine's ID the C# app read from Bitwig's files, for kits sent to Bitwig.
+    drum_machine: Option<String>,
     autoplay: Option<String>,
     rules: UsageRules,
     weights: LikedWeights,
@@ -513,6 +516,7 @@ impl Settings {
             view: get(VIEW_KEY),
             count: get(COUNT_KEY),
             export_folder: get(EXPORT_FOLDER_KEY),
+            drum_machine: get(to_bitwig::DRUM_MACHINE_KEY),
             autoplay: get(AUTOPLAY_KEY),
             rules: UsageRules { needs_notes: on(USED_NEEDS_NOTES_KEY), not_muted_in_newest: on(USED_NOT_MUTED_KEY) },
             weights: LikedWeights::from_json(get(LIKED_WEIGHTS_KEY).as_deref()),
@@ -563,6 +567,7 @@ fn read_all(sounds_db: &Path, library_db: &Path, send: impl Fn(Step)) {
         view: settings.view.clone(),
         count: settings.count.clone(),
         export_folder: settings.export_folder.clone(),
+        drum_machine: settings.drum_machine.clone(),
         autoplay: settings.autoplay.clone(),
     })));
     let Some(list) = list else { return };
@@ -750,6 +755,7 @@ fn loaded(app: &AppWindow, read: Result<Read, String>) {
         let mut p = p.borrow_mut();
         p.re.count = count;
         p.kit.export_folder = read.export_folder;
+        p.kit.drum_machine = read.drum_machine;
     });
     show(app, read.library, read.view.as_deref(), read.autoplay.as_deref());
 }
@@ -789,8 +795,9 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
 
 /// What the picked sound offers besides Play: (its words, its id in the shortcut list). The card shows them as
 /// buttons after Play (Solomon's F12 note, 2026-11-02 03:28) and the right-click menu lists them under Play, from this
-/// one list so the two can't drift apart. Send to Bitwig joins once the DAW link is in.
-const CARD_ACTIONS: &[(&str, &str)] = &[("Show in folder", "sounds.reveal"), ("Copy path", "sounds.copyPath")];
+/// one list so the two can't drift apart.
+const CARD_ACTIONS: &[(&str, &str)] =
+    &[("Send to Bitwig", "sounds.toBitwig"), ("Show in folder", "sounds.reveal"), ("Copy path", "sounds.copyPath")];
 
 /// The card's buttons and the right-click menu, with each one's key and tooltip from the shortcut list (rule 15).
 fn show_actions(data: &SoundsData, shortcuts: &Shortcuts) {
@@ -1696,7 +1703,7 @@ fn playing_changed(app: &AppWindow) {
 pub fn run_action(app: &AppWindow, id: &str) -> bool {
     let picked = PAGE.with(|p| {
         let p = p.borrow();
-        p.picked.and_then(|at| p.list.sound(at)).map(|s| (s.path.clone(), mo_app::shell::folder_of(&s.path).to_owned()))
+        p.picked.and_then(|at| p.list.sound(at)).map(|s| (s.path.clone(), s.name().to_owned()))
     });
     let feed = FEED.with(|f| f.borrow().clone());
     match (id, picked, feed) {
@@ -1706,11 +1713,27 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
             }
             stop(app);
         }
-        ("sounds.reveal", Some((path, folder)), Some(feed)) => crate::files::reveal(&feed, &path, &folder),
+        ("sounds.toBitwig", Some((path, name)), Some(feed)) => send_to_bitwig(&feed, path, name),
+        ("sounds.reveal", Some((path, _)), Some(feed)) => {
+            crate::files::reveal(&feed, &path, mo_app::shell::folder_of(&path));
+        }
         ("sounds.copyPath", Some((path, _)), Some(feed)) => crate::files::copy_path(&feed, &path),
         _ => return false,
     }
     true
+}
+
+/// Puts a sound on a Sampler on a new track in the project open in Bitwig, on a thread of its own, as its file name
+/// (without the extension) names it. Its card shows at once and says how it went.
+fn send_to_bitwig(feed: &Feed, path: String, name: String) {
+    let job = to_bitwig::sound_card(feed, &name);
+    let sent = background::spawn("Send to Bitwig", move || {
+        to_bitwig::send_sound(job, &to_bitwig::Bitwig::default(), &path, &name)
+    });
+    // Its card was taken into the thread, so it fails by itself ("It stopped before it finished").
+    if let Err(e) = sent {
+        log::error("Sounds", &format!("Couldn't start sending to Bitwig: {e}"));
+    }
 }
 
 #[cfg(test)]

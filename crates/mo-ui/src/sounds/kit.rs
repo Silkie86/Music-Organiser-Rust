@@ -1,6 +1,7 @@
-//! The Sounds page's kit builder: random kits that still make sense (`mo_sounds::kits`), rolled and exported off the
-//! window's thread. Rolling only reads the library; exporting copies the pads' samples into a new folder of its own
-//! (the samples themselves are only read, rule 2).
+//! The Sounds page's kit builder: random kits that still make sense (`mo_sounds::kits`), rolled, exported and sent to
+//! Bitwig off the window's thread. Rolling only reads the library; exporting copies the pads' samples into a new
+//! folder of its own (the samples themselves are only read, rule 2); sending puts them on a Drum Machine in the project
+//! open in Bitwig.
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -10,8 +11,8 @@ use std::sync::Arc;
 
 use chrono::Local;
 use mo_app::background::{self, Newest};
-use mo_app::log;
 use mo_app::sounds::{self as list, SoundList};
+use mo_app::{log, to_bitwig};
 use mo_sounds::index::SoundIndex;
 use mo_sounds::kits::{self, ExportOptions, KitSlot};
 use mo_sounds::music::NOTE_NAMES;
@@ -41,6 +42,10 @@ pub(super) struct Kit {
     pub(super) status: String,
     /// The C# app's export folder setting, read from `library.db` (kits go in its Kits folder).
     pub(super) export_folder: Option<String>,
+    /// The kit is on its way to Bitwig: Send to Bitwig waits meanwhile, as in the C# app.
+    pub(super) sending: bool,
+    /// The Drum Machine's ID the C# app kept in `library.db`, if it kept one.
+    pub(super) drum_machine: Option<String>,
 }
 
 impl Default for Kit {
@@ -59,9 +64,15 @@ impl Default for Kit {
             busy: false,
             status: "Roll a kit to fill the pads.".to_owned(),
             export_folder: None,
+            sending: false,
+            drum_machine: None,
         }
     }
 }
+
+/// Where kits go in Bitwig while the app runs: a new Drum Machine, or the one selected in Bitwig once Bitwig didn't add
+/// one for the ID.
+static TO_BITWIG: to_bitwig::Kits = to_bitwig::Kits::new();
 
 thread_local! {
     static PADS: Rc<VecModel<PadLine>> = Rc::new(VecModel::default());
@@ -250,6 +261,12 @@ pub(super) fn wire(app: &AppWindow) {
             export(&app);
         }
     });
+    let weak = app.as_weak();
+    data.on_kit_to_bitwig(move || {
+        if let Some(app) = weak.upgrade() {
+            send_to_bitwig(&app);
+        }
+    });
 }
 
 /// The place in the list of the sound on pad `i`.
@@ -417,6 +434,68 @@ fn export(app: &AppWindow) {
     }
 }
 
+/// Puts the kit on a Drum Machine in the project open in Bitwig, off the window's thread: on a new track named after
+/// the kit ("Kit #12"), each sound on the pad General MIDI drum parts play (kick on C1, snare on D1, closed hat on F#1)
+/// and the rest on the free pads. A card and the line under the buttons say how it went. The button waits while it
+/// goes.
+fn send_to_bitwig(app: &AppWindow) {
+    let ready = PAGE.with(|p| {
+        let p = p.borrow();
+        let k = &p.kit;
+        if k.sending {
+            return Err(None);
+        }
+        let pads = to_bitwig::kit_pads(&to_bitwig::kit_sounds(&k.slots, &p.list));
+        if pads.is_empty() {
+            return Err(Some("Roll a kit first."));
+        }
+        Ok((pads, to_bitwig::kit_name(k.seed), k.drum_machine.clone()))
+    });
+    let (pads, name, setting) = match ready {
+        Ok(ready) => ready,
+        Err(why) => {
+            if let Some(why) = why {
+                PAGE.with(|p| p.borrow_mut().kit.status = why.to_owned());
+                show(app);
+            }
+            return;
+        }
+    };
+    let feed = FEED.with(|f| f.borrow().clone()).unwrap_or_default();
+    let job = to_bitwig::kit_card(&feed, pads.len());
+    PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.kit.sending = true;
+        p.kit.status = "Sending the kit to Bitwig…".to_owned();
+    });
+    show(app);
+    let weak = app.as_weak();
+    let started = background::spawn("Kit to Bitwig", move || {
+        let to = to_bitwig::Bitwig::default();
+        let line = to_bitwig::send_kit(job, &to, &TO_BITWIG, &name, &pads, setting.as_deref());
+        let _ = slint::invoke_from_event_loop(move || {
+            PAGE.with(|p| {
+                let mut p = p.borrow_mut();
+                p.kit.sending = false;
+                p.kit.status = line;
+            });
+            if let Some(app) = weak.upgrade() {
+                show(&app);
+            }
+        });
+    });
+    // Its card was taken into the thread, so it fails by itself.
+    if let Err(e) = started {
+        log::error("Sounds", &format!("Couldn't start sending the kit to Bitwig: {e}"));
+        PAGE.with(|p| {
+            let mut p = p.borrow_mut();
+            p.kit.sending = false;
+            p.kit.status = "The kit couldn't be sent: see the log.".to_owned();
+        });
+        show(app);
+    }
+}
+
 /// Where kits go: the export folder (the C# app's setting, else Documents\Music Organiser Exports), then Kits.
 fn kits_folder(setting: Option<&str>) -> PathBuf {
     let root = match setting.filter(|f| !f.trim().is_empty()) {
@@ -444,6 +523,7 @@ pub(super) fn show(app: &AppWindow) {
         let k = &p.kit;
         data.set_kit_status(k.status.clone().into());
         data.set_kit_busy(k.busy);
+        data.set_kit_sending(k.sending);
         data.set_kit_unused(k.options.prefer_unused);
         data.set_kit_pack(k.options.same_pack);
         data.set_kit_elektron(k.export.elektron_ready);

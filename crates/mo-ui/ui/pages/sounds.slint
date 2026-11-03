@@ -248,10 +248,12 @@ export global SoundsData {
     in property <length> galaxy-picked-x;
     in property <length> galaxy-picked-y;
 
-    // The kit builder: its pads, and how it rolls and exports.
+    // The kit builder: its pads, and how it rolls, exports and goes to Bitwig.
     in property <[PadLine]> pads;
     in property <string> kit-status;
     in property <bool> kit-busy;
+    // The kit is on its way to Bitwig.
+    in property <bool> kit-sending;
     // "unused", "pack", "elektron", "mono" or "normalise", and whether each is on.
     callback kit-toggle(string);
     in property <bool> kit-unused;
@@ -270,6 +272,7 @@ export global SoundsData {
     callback kit-add(string);
     callback kit-roll();
     callback kit-export();
+    callback kit-to-bitwig();
     // A pad, by its place: pick its sound, play it, lock it, roll it again or take it out.
     callback pad-pick(int);
     callback pad-play(int);
@@ -1013,6 +1016,16 @@ export component SoundsPage inherits Rectangle {
                     text: "Export kit";
                     tip: "Copy the pads into a folder of their own, ready for a sampler";
                     clicked => { SoundsData.kit-export(); }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                StudioButton {
+                    horizontal-stretch: 0;
+                    text: SoundsData.kit-sending ? "Sending…" : "Send to Bitwig";
+                    enabled: !SoundsData.kit-sending;
+                    tip: "Put the kit on a Drum Machine on a new track in the project open in Bitwig: kick on C1, snare on D1, closed hat on F#1, and the rest on the free pads";
+                    clicked => { SoundsData.kit-to-bitwig(); }
                 }
             }
             ToggleChip {
