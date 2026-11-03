@@ -1050,31 +1050,48 @@ export struct YearBar {
 
 // A strip of years beside a list, newest at the top, each with a bar for how much of the list is in it. Press on a
 // year and drag over others to show only those years; a click picks just one; a double-click or All years shows
-// every year again. The page says which are picked.
+// every year again. The page says which are picked. In a short window the years' lines get shorter, so every year
+// and All years still fit: the bars go when they'd run into the names, and when the lines are too short for every
+// year's name, only every second (or third...) one is named, and the one under the mouse.
 export component YearRange inherits VerticalLayout {
     in property <[YearBar]> years;
     // Places in `years` from the first to the last picked (either way round).
     callback picked(int, int);
     callback cleared();
-    property <length> line: 20px;
+    // Each year's line: 20px, or what the room leaves each year when that's less.
+    property <length> line: min(20px, strip.height / max(1, root.years.length));
+    // A year's bar runs under its name: shorter than this, the two would touch, so the bars are left out.
+    property <length> bar-room: 14px;
+    // A year's name needs this much room for its figures not to touch the next year's.
+    property <length> name-room: 10px;
+    // Every how many years one is named.
+    property <int> named-every: root.line >= root.name-room ? 1 : ceil(root.name-room / max(1px, root.line));
+    // The year under the mouse, as its place in `years` (-1 when the mouse isn't on the strip).
+    property <int> hovered: touch.has-hover ? clamp(floor(touch.mouse-y / root.line), 0, root.years.length - 1) : -1;
     // The drag going on, as places in `years` (-1 when there's none).
     property <int> from: -1;
     property <int> to: -1;
-    property <bool> any: false;
     width: 56px;
     padding: Space.xs;
     spacing: Space.xs;
     alignment: start;
     strip := Rectangle {
-        height: root.years.length * root.line;
+        // 20px a year, but it gives way when the room is short, so All years is never pushed off the bottom.
+        preferred-height: root.years.length * 20px;
+        min-height: 0px;
         for y[i] in root.years: Rectangle {
             property <bool> lit: root.from >= 0 ? (i >= min(root.from, root.to) && i <= max(root.from, root.to)) : y.picked;
-            property <bool> under: touch.has-hover && touch.mouse-y >= self.y && touch.mouse-y < self.y + self.height;
+            property <bool> under: root.hovered == i;
+            // Named when there's room, or when it's under the mouse; then the names too close to it make way.
+            property <bool> named: self.under
+                || (mod(i, root.named-every) == 0 && (root.hovered < 0 || abs(i - root.hovered) * root.line >= root.name-room));
             y: i * root.line;
             height: root.line;
-            border-radius: Theme.radius;
+            // Less round on a short line: full corners there would leave notches down a picked span's edges.
+            border-radius: min(Theme.radius, root.line / 5);
             background: self.lit ? Theme.accent.transparentize(80%) : self.under ? Theme.hover : transparent;
             Rectangle {
+                visible: root.line >= root.bar-room;
                 x: Space.xs;
                 y: parent.height - 3px;
                 width: (parent.width - 2 * Space.xs) * y.share;
@@ -1083,9 +1100,11 @@ export component YearRange inherits VerticalLayout {
                 background: parent.lit ? Theme.accent : Theme.stroke;
             }
             Text {
+                // Never shorter than its figures, centred on the line, so a short line doesn't cut them off.
                 width: parent.width;
-                height: parent.height;
-                text: y.year;
+                height: max(parent.height, self.preferred-height);
+                y: (parent.height - self.height) / 2;
+                text: parent.named ? y.year : "";
                 color: parent.lit || parent.under ? Theme.text : Theme.faint;
                 font-family: Theme.number-font;
                 font-size: Type.caps;
