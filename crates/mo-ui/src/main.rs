@@ -1,7 +1,7 @@
 // No console window behind the app on Windows.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use mo_app::activity::Feed;
 use mo_app::log;
@@ -74,10 +74,22 @@ fn main() -> Result<(), slint::PlatformError> {
 /// folder; the crash that ends the app always gets its file; rule 28). Nothing in here may crash itself: std would end
 /// the app on the spot.
 fn log_crashes() {
+    set_crash_hook(mo_app::paths::logs_dir, mo_ui::note::after_crash, flush_the_log, || {});
+}
+
+/// Puts in the crash handler: what the app does with a crash ([`on_crash`], into the logs folder `logs` gives, with
+/// `keep_note` and `flush`), then `after` (nothing in the app; a test counts the crashes), then std's own report of it,
+/// on the console when there is one. Std's report comes last: it can wait for ever on a console nobody reads.
+fn set_crash_hook(
+    logs: impl Fn() -> PathBuf + Send + Sync + 'static,
+    keep_note: impl Fn(bool) + Send + Sync + 'static,
+    flush: impl Fn() + Send + Sync + 'static,
+    after: impl Fn() + Send + Sync + 'static,
+) {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        on_crash(info, &mo_app::paths::logs_dir(), &mo_ui::note::after_crash, &flush_the_log);
-        // Then std's own report of it, on the console when there is one.
+        on_crash(info, &logs(), &keep_note, &flush);
+        after();
         default(info);
     }));
 }
@@ -138,9 +150,10 @@ mod tests {
 
     /// Set for the copy of this test program that crashes while the console is blocked: the folder it logs into.
     const IN_THE_COPY: &str = "MO_TEST_CRASH_WHILE_THE_CONSOLE_WAITS";
-    /// The file the copy writes what its crash handler did in, a line each time, in order: "<thread> flushed" once the
-    /// session log is on disk, and "<thread> kept the note, ends the app: <true or false>" from its stand-in for
-    /// keeping an F12 note.
+    /// The file the copy writes what its crash handler did in, a line each time, in order: "<thread> flushed, on disk:
+    /// <true or false>" once the session log was flushed (whether it then held that thread's crash), and "<thread> kept
+    /// the note, ends the app: <true or false>, crash log: <true or false>" from its stand-in for keeping an F12 note
+    /// (whether that thread's crash log was there by then).
     const DONE: &str = "what the crash handler did.txt";
 
     /// Adds `line` to [`DONE`] in `folder`, in one go, so two threads crashing at once can't mix their lines.
@@ -157,6 +170,15 @@ mod tests {
         std::thread::current().name().unwrap_or("unnamed").to_owned()
     }
 
+    /// A file in `folder` that `is_it` names, and that says the crash on the thread this runs on is in it.
+    fn holds_this_crash(folder: &Path, is_it: fn(&str) -> bool) -> bool {
+        let said = format!("crashed on thread {}\n", this_thread());
+        std::fs::read_dir(folder).into_iter().flatten().flatten().any(|entry| {
+            is_it(&entry.file_name().to_string_lossy())
+                && std::fs::read_to_string(entry.path()).is_ok_and(|text| text.contains(&said))
+        })
+    }
+
     /// Only in the copy that the test below runs; in an ordinary run it does nothing. The console (a pipe the test
     /// never reads) is filled, so std's report of a first crash waits there for ever, holding its backtrace lock; then
     /// two more threads crash, one of them called "main" as the window's thread is, so its crash ends the app.
@@ -166,19 +188,25 @@ mod tests {
         let Some(dir) = std::env::var_os(IN_THE_COPY).map(PathBuf::from) else { return };
         let _log = log::start(&dir, "A copy of the test program, to crash in");
         static HANDLED: AtomicUsize = AtomicUsize::new(0);
-        let default = std::panic::take_hook();
-        let logs = dir.clone();
-        std::panic::set_hook(Box::new(move |info| {
-            let keep_note =
-                |fatal: bool| did(&logs, &format!("{} kept the note, ends the app: {fatal}", this_thread()));
-            let flush = || {
-                flush_the_log();
-                did(&logs, &format!("{} flushed", this_thread()));
-            };
-            on_crash(info, &logs, &keep_note, &flush);
-            HANDLED.fetch_add(1, Ordering::SeqCst);
-            default(info);
-        }));
+        // The app's own crash handler, with stand-ins that write down what it did, and when.
+        let (logs, kept, flushed) = (dir.clone(), dir.clone(), dir.clone());
+        let keep_note = move |fatal: bool| {
+            let crash_log = holds_this_crash(&kept, log::is_crash_log);
+            did(&kept, &format!("{} kept the note, ends the app: {fatal}, crash log: {crash_log}", this_thread()));
+        };
+        let flush = move || {
+            flush_the_log();
+            let on_disk = holds_this_crash(&flushed, log::is_session_log);
+            did(&flushed, &format!("{} flushed, on disk: {on_disk}", this_thread()));
+        };
+        set_crash_hook(
+            move || logs.clone(),
+            keep_note,
+            flush,
+            || {
+                HANDLED.fetch_add(1, Ordering::SeqCst);
+            },
+        );
         // Fills the console, and waits there for ever.
         std::thread::spawn(|| std::io::stderr().write_all("x".repeat(4 * 1024 * 1024).as_bytes()));
         std::thread::sleep(Duration::from_millis(300));
@@ -258,12 +286,12 @@ mod tests {
         drop(copy);
         let _ = std::fs::remove_dir_all(&dir);
         assert!(seen, "the later crashes are written before their backtraces are taken:\n{session}\n---\n{crashes}");
-        // Each crash was on disk in the session log before its note was kept, and the note was told whether the crash
-        // ends the app.
+        // Each crash was on disk in the session log, and in its crash log, before its note was kept, and the note was
+        // told whether the crash ends the app.
         for (thread, ends) in threads {
             let at = |line: String| done.iter().position(|l| *l == line);
-            let (flushed, kept) =
-                (at(format!("{thread} flushed")), at(format!("{thread} kept the note, ends the app: {ends}")));
+            let flushed = at(format!("{thread} flushed, on disk: true"));
+            let kept = at(format!("{thread} kept the note, ends the app: {ends}, crash log: true"));
             assert!(matches!((flushed, kept), (Some(f), Some(k)) if f < k), "{thread}: {done:?}");
         }
     }

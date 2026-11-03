@@ -5,7 +5,9 @@
 //! Rule 17: what's typed is kept in `draft.txt` as it's typed, so if the app closes with a note open, the next F12
 //! offers it back. While a note is open, `writing.lock` says so, and the launcher waits before restarting the app.
 
+use std::io::{ErrorKind, Write as _};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use chrono::{DateTime, Local};
 
@@ -16,6 +18,15 @@ pub const DRAFT_FILE: &str = "draft.txt";
 /// it first, so at most one small file stays. The start-up sweep never touches it (rule 17: it may hold the newest
 /// words), and it's never read back as the draft: it may be cut short.
 pub const DRAFT_PART: &str = "draft.txt.mo-part";
+/// The same, for a draft written without its turn ([`keep_draft_alone`]): a crash, or the app closing, while the
+/// writer whose turn it is is stuck part way through [`DRAFT_PART`]. A name of its own, so neither writer ever removes
+/// or renames the other's half-written file. The next draft written without its turn removes one left behind, so at
+/// most one small file stays; the start-up sweep never touches it either.
+pub const DRAFT_PART_ALONE: &str = "draft.txt.mo-part-2";
+/// How many times a draft's renaming is tried on Windows while another program holds the file a moment
+/// ([`tried_while_held`]), and how long apart: about 100 ms at most, so a crash's write stays quick.
+const RENAME_TRIES: u32 = 6;
+const RENAME_GAP: Duration = Duration::from_millis(20);
 pub const WRITING_FILE: &str = "writing.lock";
 /// The notes' folder in the app's data folder (the C# app's notes are there too).
 pub const FOLDER: &str = "notes";
@@ -81,18 +92,19 @@ pub fn save(folder: &Path, note: &Note, now: DateTime<Local>) -> std::io::Result
     }
     // The words go down first, so a save cut short (the app closing, a full disk, a crash while the picture is made)
     // still leaves them, not an empty file.
-    std::io::Write::write_all(&mut file, md.as_bytes())?;
+    file.write_all(md.as_bytes())?;
     file.sync_all()?;
     if let Some(make_png) = note.picture {
         let picture = folder.join(format!("{name}.png"));
         let made = make_png().and_then(|png| std::fs::write(&picture, png).map_err(|e| e.to_string()));
         if let Err(e) = made {
-            // The note stands without its picture: say so in it rather than name a file that isn't there.
+            // The note stands without its picture, and says so at its end: added to what's on disk, never written
+            // again from the start, so its words stay whole whatever happens now. It's saved either way.
             let _ = std::fs::remove_file(&picture);
-            let without =
-                md.replace(&format!("- Picture: {name}.png\n"), &format!("- Picture: couldn't be saved ({e})\n"));
-            std::fs::write(folder.join(format!("{name}.md")), without)?;
-            crate::log::warning("Note", &format!("Saved {name}.md without its picture: {e}"));
+            let said = format!("\nThe picture ({name}.png) couldn't be saved: {e}\n");
+            let told = file.write_all(said.as_bytes()).and_then(|()| file.sync_all());
+            let also = told.err().map_or_else(String::new, |t| format!(" (nor could the note say so: {t})"));
+            crate::log::warning("Note", &format!("Saved {name}.md without its picture: {e}{also}"));
         }
     }
     Ok(folder.join(format!("{name}.md")))
@@ -104,21 +116,56 @@ pub fn read_draft(folder: &Path) -> Option<String> {
 }
 
 /// Keeps what's typed so far, through [`DRAFT_PART`], so the draft from before stays whole until the new one is. Says
-/// whether it was kept. Failing to keep it is not worth stopping the typing for: the words wait to be tried again.
+/// whether it was kept. Failing to keep it is not worth stopping the typing for: the caller keeps the words for
+/// another try.
 pub fn keep_draft(folder: &Path, text: &str) -> bool {
-    let part = folder.join(DRAFT_PART);
+    write_draft(folder, text, DRAFT_PART)
+}
+
+/// [`keep_draft`] for a draft written without its turn, through [`DRAFT_PART_ALONE`], so it never touches the part
+/// file the writer whose turn it is may be writing.
+pub fn keep_draft_alone(folder: &Path, text: &str) -> bool {
+    write_draft(folder, text, DRAFT_PART_ALONE)
+}
+
+/// Writes `text` as the draft in `folder`: made new as `part`, written whole and synced, then renamed over the draft.
+fn write_draft(folder: &Path, text: &str, part: &str) -> bool {
+    let part = folder.join(part);
     // One a crash left goes first. Made new, so nothing there (a link included) is ever written through.
     let _ = std::fs::remove_file(&part);
     let written = std::fs::create_dir_all(folder).and_then(|()| {
         let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&part)?;
-        std::io::Write::write_all(&mut f, text.as_bytes())?;
+        f.write_all(text.as_bytes())?;
         f.sync_all()
     });
-    let kept = written.and_then(|()| std::fs::rename(&part, folder.join(DRAFT_FILE)));
+    let kept = written.and_then(|()| tried_while_held(|| std::fs::rename(&part, folder.join(DRAFT_FILE))));
     if kept.is_err() {
         let _ = std::fs::remove_file(&part);
     }
     kept.is_ok()
+}
+
+/// Does `step` (a renaming), trying it again a few times, a moment apart ([`RENAME_TRIES`], [`RENAME_GAP`]), while
+/// another program holds the file a moment without letting it be replaced (on Windows, a virus scanner or a backup
+/// tool looking at a file just written). A crash's write and the app closing write once, so a moment's hold mustn't
+/// lose their words.
+fn tried_while_held(mut step: impl FnMut() -> std::io::Result<()>) -> std::io::Result<()> {
+    let mut tries = 1;
+    loop {
+        match step() {
+            Err(e) if tries < RENAME_TRIES && held_a_moment(&e) => {
+                tries += 1;
+                std::thread::sleep(RENAME_GAP);
+            }
+            done => return done,
+        }
+    }
+}
+
+/// On Windows, what another program holding the file says: access denied, or the file in use (error 32). Elsewhere a
+/// renaming isn't held up like that, so it isn't tried again.
+fn held_a_moment(e: &std::io::Error) -> bool {
+    cfg!(windows) && (e.kind() == ErrorKind::PermissionDenied || e.raw_os_error() == Some(32))
 }
 
 /// Saved or cancelled on purpose: either way the draft has done its job.
@@ -204,10 +251,72 @@ mod tests {
         let make_png = || Err("the window was too big".to_owned());
         let path = save(&dir, &note_with("Still here", &make_png), Local::now()).expect("saved");
         let md = std::fs::read_to_string(&path).expect("readable");
-        assert!(md.contains("\nStill here\n"));
-        assert!(md.contains("- Picture: couldn't be saved (the window was too big)\n"), "{md}");
+        let name = path.file_stem().expect("named").to_string_lossy().into_owned();
+        // Said at its end, added to what was on disk: the words before it are as they were written.
+        assert!(md.starts_with("# Note for Claude, ") && md.contains("\nStill here\n"), "{md}");
+        let end =
+            format!("- Picture: {name}.png\n\nThe picture ({name}.png) couldn't be saved: the window was too big\n");
+        assert!(md.ends_with(&end), "{md}");
         assert!(!path.with_extension("png").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_draft_written_without_its_turn_never_touches_the_part_file_being_written() {
+        let dir = temp_folder("alone");
+        assert!(keep_draft(&dir, "the words from before"));
+        // The writer whose turn it is, stuck part way through its part file.
+        std::fs::write(dir.join(DRAFT_PART), "half wri").expect("writable");
+        // What a crash written without its turn left once before.
+        std::fs::write(dir.join(DRAFT_PART_ALONE), "cut sh").expect("writable");
+        assert!(keep_draft_alone(&dir, "the newest words"));
+        assert_eq!(read_draft(&dir).as_deref(), Some("the newest words"));
+        assert_eq!(std::fs::read_to_string(dir.join(DRAFT_PART)).ok().as_deref(), Some("half wri"), "left alone");
+        assert!(!dir.join(DRAFT_PART_ALONE).exists(), "nothing of its own is left beside it");
+        // And the writer whose turn it is never touches what a write without its turn is writing.
+        std::fs::write(dir.join(DRAFT_PART_ALONE), "being writ").expect("writable");
+        assert!(keep_draft(&dir, "in its turn"));
+        assert_eq!(read_draft(&dir).as_deref(), Some("in its turn"));
+        assert_eq!(std::fs::read_to_string(dir.join(DRAFT_PART_ALONE)).ok().as_deref(), Some("being writ"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_renaming_another_program_holds_a_moment_is_tried_again_on_windows() {
+        let held = || std::io::Error::from(ErrorKind::PermissionDenied);
+        let tries = std::cell::Cell::new(0_u32);
+        // Held for the first two tries.
+        let done = tried_while_held(|| {
+            tries.set(tries.get() + 1);
+            if tries.get() <= 2 { Err(held()) } else { Ok(()) }
+        });
+        if cfg!(windows) {
+            assert!(done.is_ok());
+            assert_eq!(tries.get(), 3);
+        } else {
+            assert!(done.is_err(), "elsewhere a renaming isn't held up like that");
+            assert_eq!(tries.get(), 1);
+        }
+        // Held for good: tried a few times only, then it says so.
+        tries.set(0);
+        assert!(
+            tried_while_held(|| {
+                tries.set(tries.get() + 1);
+                Err(held())
+            })
+            .is_err()
+        );
+        assert_eq!(tries.get(), if cfg!(windows) { RENAME_TRIES } else { 1 });
+        // Any other trouble isn't tried again.
+        tries.set(0);
+        assert!(
+            tried_while_held(|| {
+                tries.set(tries.get() + 1);
+                Err(std::io::Error::from(ErrorKind::NotFound))
+            })
+            .is_err()
+        );
+        assert_eq!(tries.get(), 1);
     }
 
     #[cfg(unix)]

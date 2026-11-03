@@ -51,9 +51,9 @@ const LAST_ROOM: u64 = 256 * 1024;
 /// When a line is cut short to fit in [`LAST_ROOM`], this much is still kept for the lines after it, so "Closed"
 /// shows.
 const KEPT_FOR_THE_END: u64 = 1024;
-/// What the crash that ends the app says when it's cut short to fit (it's whole in its own crash log, which the crash
-/// that ends the app always gets).
-const CUT_CRASH: &str = "(cut short: the log is full; the whole crash is in its crash-….log)";
+/// What the crash that ends the app says when it's cut short to fit (the crash that ends the app always gets a crash
+/// log of its own, with the whole crash, unless that can't be written either).
+const CUT_CRASH: &str = "(cut short: the log is full; the whole crash goes in a crash-….log of its own)";
 /// What another line of how the run ended says when it's cut short to fit.
 const CUT_LINE: &str = "(cut short: the log is full)";
 /// The same message more often than this is counted, not written again.
@@ -565,8 +565,8 @@ fn write_queued(file: File, rx: Receiver<Msg>) {
                         full = true;
                         let _ = writeln!(
                             out,
-                            "(the log is full at 5 MB; this run writes no more, except crashes and the line it closes \
-                             with)"
+                            "(this log is full: a run writes up to 5 MB, and the next line didn't fit; from here it \
+                             writes only crashes and the lines of how the run ends)"
                         );
                     } else {
                         written += size;
@@ -585,9 +585,10 @@ fn write_queued(file: File, rx: Receiver<Msg>) {
                         no_room_for_crashes = true;
                         let _ = writeln!(
                             out,
-                            "(no room for more crashes in this log; the first crash at each of the first \
-                             {CRASH_FILES_PER_RUN} places in the code to crash has a crash-….log file of its own, and \
-                             the crash that ends the app always has one)"
+                            "(a crash didn't fit in the room this log keeps for crashes, so it isn't here, nor is a \
+                             later one that doesn't fit; the first crash at each of the first {CRASH_FILES_PER_RUN} \
+                             places in the code to crash has a crash-….log file of its own, and the crash that ends \
+                             the app always gets one)"
                         );
                     }
                 }
@@ -603,7 +604,8 @@ fn write_queued(file: File, rx: Receiver<Msg>) {
                     } else if !no_room_at_the_end {
                         let fits = room.saturating_sub(KEPT_FOR_THE_END + cut.len() as u64 + 2);
                         let start = &line[..line.floor_char_boundary(usize::try_from(fits).unwrap_or(usize::MAX))];
-                        // Once not even a line's start fits, that's said once, and nothing more is written.
+                        // Once not even a line's start fits, that's said once; after that a line that doesn't fit
+                        // whole is dropped, and one that fits ("Closed") is still written.
                         no_room_at_the_end = start.is_empty();
                         let short = if start.is_empty() { cut.to_owned() } else { format!("{start} {cut}") };
                         written += short.len() as u64 + 1;
@@ -983,7 +985,8 @@ mod tests {
         log.close();
         let path = log.path().expect("a file").to_owned();
         let text = std::fs::read_to_string(&path).expect("readable");
-        let full = "(the log is full at 5 MB; this run writes no more, except crashes and the line it closes with)";
+        let full = "(this log is full: a run writes up to 5 MB, and the next line didn't fit; from here it writes only \
+                    crashes and the lines of how the run ends)";
         assert!(text.contains(full));
         assert!(!text.contains("not written: the log is full"));
         assert!(text.contains("[Crash] Music Organiser crashed on thread Scan 1"));
@@ -991,9 +994,12 @@ mod tests {
         let size = std::fs::metadata(&path).expect("there").len();
         assert!(size <= MAX_BYTES + CRASH_ROOM + 1024, "{size}");
         assert!(!text.contains("[Crash] crash 29 "), "the crashes past the extra room aren't written");
-        assert_eq!(text.matches("(no room for more crashes in this log;").count(), 1, "and it says so, once");
+        assert_eq!(text.matches(NO_ROOM_FOR_A_CRASH).count(), 1, "and it says so, once");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// How the notice that a crash didn't fit starts.
+    const NO_ROOM_FOR_A_CRASH: &str = "(a crash didn't fit in the room this log keeps for crashes,";
 
     #[test]
     fn the_crash_that_ends_the_app_and_the_last_line_show_even_once_the_log_is_full() {
@@ -1017,7 +1023,7 @@ mod tests {
         log.close();
         let path = log.path().expect("a file").to_owned();
         let text = std::fs::read_to_string(&path).expect("readable");
-        assert!(text.contains("(no room for more crashes in this log;"), "the room for crashes was used up");
+        assert!(text.contains(NO_ROOM_FOR_A_CRASH), "the room for crashes was used up");
         assert!(text.contains("[Crash] Music Organiser crashed on thread main"), "the crash that ends the app");
         assert!(text.trim_end().ends_with("[App] Closed"), "a clean end shows");
         let size = std::fs::metadata(&path).expect("there").len();
@@ -1027,28 +1033,41 @@ mod tests {
 
     #[test]
     fn a_line_of_how_the_run_ended_too_long_for_the_room_left_is_cut_short_saying_so() {
-        let dir = temp_folder("cut-short");
-        let log = SessionLog::new(&dir, Local::now(), "start");
-        let filler = "x".repeat(200);
-        for i in 0..(MAX_BYTES / 200 + 100) {
-            log.write(Level::Warning, "Scan", &format!("{i} {filler}"));
+        // Shifted by 0, 1 and 2 bytes, so in one of them the cut falls inside a character three bytes long.
+        for shift in 0..3 {
+            let dir = temp_folder(&format!("cut-short-{shift}"));
+            let log = SessionLog::new(&dir, Local::now(), "start");
+            let filler = "x".repeat(200);
+            for i in 0..(MAX_BYTES / 200 + 100) {
+                log.write(Level::Warning, "Scan", &format!("{i} {filler}"));
+            }
+            // How the run ended shows even once the log is full.
+            log.put(Level::Error, "App", "The window stopped with an error: no graphics", Kind::Last);
+            // The crash that ends the app, far longer than all the room left: how it starts is written, cut at a whole
+            // character, and that it was cut short.
+            let fatal = Kind::Crash { place: "src/main.rs:5", backtrace: false, ends_the_app: true };
+            let euros = "€".repeat(usize::try_from((CRASH_ROOM + LAST_ROOM) / 3 + 64 * 1024).expect("small"));
+            let long = format!("Music Organiser crashed on thread main {}{euros}", "a".repeat(shift));
+            log.put(Level::Error, "Crash", &long, fatal);
+            // Then two more lines of how it ended, each longer than the room kept for the end: the first says only
+            // that it was cut short, the second isn't written at all.
+            let more = "y".repeat(usize::try_from(2 * KEPT_FOR_THE_END).expect("small"));
+            log.put(Level::Warning, "Note", &format!("first {more}"), Kind::Last);
+            log.put(Level::Warning, "Note", &format!("second {more}"), Kind::Last);
+            log.close();
+            let path = log.path().expect("a file").to_owned();
+            let text = std::fs::read_to_string(&path).expect("readable: only whole characters");
+            assert!(text.contains("[App] The window stopped with an error: no graphics"));
+            assert!(text.contains("[Crash] Music Organiser crashed on thread main "), "how it starts");
+            assert!(text.contains(&format!("€ {CUT_CRASH}\n")), "that it was cut short, after a whole character");
+            assert!(text.contains(&format!("\n{CUT_LINE}\n")), "a line whose start doesn't fit says only that");
+            assert_eq!(text.matches(CUT_LINE).count(), 1, "once");
+            assert!(!text.contains("first y") && !text.contains("second y"), "nothing of the lines that didn't fit");
+            assert!(text.trim_end().ends_with("[App] Closed"), "a clean end still shows");
+            let size = std::fs::metadata(&path).expect("there").len();
+            assert!(size <= MAX_BYTES + CRASH_ROOM + LAST_ROOM, "{size}");
+            let _ = std::fs::remove_dir_all(&dir);
         }
-        // How the run ended shows even once the log is full.
-        log.put(Level::Error, "App", "The window stopped with an error: no graphics", Kind::Last);
-        // The crash that ends the app, longer than all the room left: how it starts is written, and that it was cut.
-        let fatal = Kind::Crash { place: "src/main.rs:5", backtrace: false, ends_the_app: true };
-        let long = format!("Music Organiser crashed on thread main {}", "z".repeat((CRASH_ROOM + LAST_ROOM) as usize));
-        log.put(Level::Error, "Crash", &long, fatal);
-        log.close();
-        let path = log.path().expect("a file").to_owned();
-        let text = std::fs::read_to_string(&path).expect("readable");
-        assert!(text.contains("[App] The window stopped with an error: no graphics"));
-        assert!(text.contains("[Crash] Music Organiser crashed on thread main zzz"), "how it starts");
-        assert!(text.contains(&format!("z {CUT_CRASH}\n")), "that it was cut short");
-        assert!(text.trim_end().ends_with("[App] Closed"), "a clean end still shows");
-        let size = std::fs::metadata(&path).expect("there").len();
-        assert!(size <= MAX_BYTES + CRASH_ROOM + LAST_ROOM, "{size}");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
