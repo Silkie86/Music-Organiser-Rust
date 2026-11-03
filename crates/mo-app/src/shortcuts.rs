@@ -75,8 +75,14 @@ pub const SOUNDS_ACTIONS: &[Action] = &[
     action("sounds.copyPath", "Copy where the sound's file is", "Ctrl+Shift+C"),
 ];
 
+/// The Plugins page's own actions, with the C# ids. Clean up and Uninstall join with the page's second part.
+pub const PLUGINS_ACTIONS: &[Action] = &[
+    action("plugins.projects", "Show the songs that use the picked plugin", "Ctrl+O"),
+    action("plugins.searchOnline", "Search the web for the picked plugin", "Ctrl+Shift+O"),
+];
+
 /// Every page's own list. A page's keys only work on that page, so two pages may share a key.
-pub const PAGE_ACTIONS: &[&[Action]] = &[SONGS_ACTIONS, SOUNDS_ACTIONS];
+pub const PAGE_ACTIONS: &[&[Action]] = &[SONGS_ACTIONS, SOUNDS_ACTIONS, PLUGINS_ACTIONS];
 
 /// What an action does, in the words its tooltip and the key list use, or "" for an id in no list.
 pub fn what_of(id: &str) -> &'static str {

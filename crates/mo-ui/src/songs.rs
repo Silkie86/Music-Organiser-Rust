@@ -154,6 +154,7 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
             "favourites" => f.favourites = !f.favourites,
             "missing" => f.missing = !f.missing,
             "hide-archived" => f.hide_archived = !f.hide_archived,
+            "only" => f.only = None,
             _ => {}
         });
     });
@@ -388,6 +389,29 @@ fn change(weak: &slint::Weak<AppWindow>, f: impl FnOnce(&mut Filters)) {
     refresh(&app);
 }
 
+/// Shows only the songs with one of `saves` (the Plugins page's Show in Songs), under a chip called `label`. The other
+/// filters go, archived songs included, so every song counted on the plugin's card is there.
+pub fn show_only(app: &AppWindow, label: &str, saves: HashSet<i64>) {
+    PAGE.with(|p| p.borrow_mut().filters = Filters { only: Some((label.to_owned(), saves)), ..Filters::default() });
+    pick(app, None);
+    refresh(app);
+}
+
+/// Picks the song with this save and brings it into view (the Plugins page's song lines). Returns whether the list has
+/// it (not while the library is still being read).
+pub fn show_save(app: &AppWindow, save: i64) -> bool {
+    let row = PAGE.with(|p| {
+        p.borrow().songs.rows.iter().position(|r| r.song.saves().chain(&r.song.copies).any(|s| s.id == save))
+    });
+    match row {
+        Some(row) => {
+            show_song(app, row);
+            true
+        }
+        None => false,
+    }
+}
+
 /// Picks the song at `row` and brings it into view in the list, clearing the filters first when they hide it.
 fn show_song(app: &AppWindow, row: usize) {
     let _doing = crate::watchdog::doing("Songs: show a song");
@@ -443,6 +467,7 @@ fn refresh(app: &AppWindow) {
         data.set_missing(f.missing);
         data.set_hide_archived(f.hide_archived);
         data.set_any_filter(f.any());
+        data.set_only(f.only.as_ref().map(|o| o.0.as_str()).unwrap_or_default().into());
         if data.get_search().as_str() != f.search {
             data.set_search(f.search.as_str().into());
         }

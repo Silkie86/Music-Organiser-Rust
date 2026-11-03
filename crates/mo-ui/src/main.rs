@@ -44,6 +44,8 @@ fn main() -> Result<(), slint::PlatformError> {
     );
     // Space, Backup: the backup settings live in a file of their own; the library is only read.
     mo_ui::backup::connect(&app, mo_app::paths::data_dir().join("library.db"), feed.clone());
+    // Plugins: read from the C# app's library, read-only.
+    mo_ui::plugins::connect(&app, mo_app::paths::data_dir().join("library.db"), feed.clone(), &shortcuts);
     app.window().set_maximized(true);
     // The watchdog starts once the window is up, so opening it doesn't count as a freeze.
     let watched = feed.clone();

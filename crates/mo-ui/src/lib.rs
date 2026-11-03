@@ -15,6 +15,7 @@ pub mod cards;
 pub mod files;
 pub mod gpu;
 pub mod note;
+pub mod plugins;
 pub mod songs;
 pub mod sounds;
 pub mod watchdog;
@@ -25,7 +26,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use mo_app::activity::Feed;
 use mo_app::log;
 use mo_app::places::Place;
-use mo_app::shortcuts::{APP_ACTIONS, Action, SONGS_ACTIONS, SOUNDS_ACTIONS, Shortcuts, repeats, what_of};
+use mo_app::shortcuts::{
+    APP_ACTIONS, Action, PLUGINS_ACTIONS, SONGS_ACTIONS, SOUNDS_ACTIONS, Shortcuts, repeats, what_of,
+};
 use mo_app::themes::Look;
 use note::open_note;
 use slint::platform::Key;
@@ -70,6 +73,7 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> R
     app.set_songs_place(Place::Songs.index() as i32);
     app.set_sounds_place(Place::Sounds.index() as i32);
     app.set_backup_place(Place::Backup.index() as i32);
+    app.set_plugins_place(Place::Plugins.index() as i32);
     KEYS.with(|k| *k.borrow_mut() = Some(shortcuts.clone()));
     show_button_keys(&app, &shortcuts);
     go_to(&app, start.index() as i32);
@@ -101,6 +105,13 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> R
             return repeat || songs::run_action(&app, id);
         }
         if let Some(app) = weak.upgrade()
+            && app.get_place() == Place::Plugins.index() as i32
+            && let Some(id) = shortcuts.page_action_for(&key, PLUGINS_ACTIONS)
+            && plugins::has_pick()
+        {
+            return repeat || plugins::run_action(&app, id);
+        }
+        if let Some(app) = weak.upgrade()
             && app.get_place() == Place::Sounds.index() as i32
             && let Some(id) = shortcuts.page_action_for(&key, SOUNDS_ACTIONS)
             && (repeat || sounds::run_action(&app, id))
@@ -130,7 +141,7 @@ fn show_button_keys(app: &AppWindow, shortcuts: &Shortcuts) {
 }
 
 /// Shows a place, and notes it for the log and the watchdog.
-fn go_to(app: &AppWindow, index: i32) {
+pub(crate) fn go_to(app: &AppWindow, index: i32) {
     let Some(place) = usize::try_from(index).ok().and_then(Place::from_index) else { return };
     let _doing = watchdog::doing("go to a page");
     if PAGE.swap(place.index(), Ordering::Relaxed) != place.index() || app.get_place() != index {
@@ -139,6 +150,9 @@ fn go_to(app: &AppWindow, index: i32) {
     app.set_place(index);
     if place == Place::Backup {
         backup::shown();
+    }
+    if place == Place::Plugins {
+        plugins::shown();
     }
     KEYS.with(|k| {
         if let Some(shortcuts) = k.borrow().as_ref() {
@@ -153,6 +167,7 @@ fn key_rows(shortcuts: &Shortcuts, place: Place) -> Vec<KeyRow> {
     let page: &[Action] = match place {
         Place::Songs => SONGS_ACTIONS,
         Place::Sounds => SOUNDS_ACTIONS,
+        Place::Plugins => PLUGINS_ACTIONS,
         _ => &[],
     };
     let mut rows: Vec<KeyRow> =

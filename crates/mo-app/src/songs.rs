@@ -5,7 +5,7 @@
 //! Reading the library and grouping happen once per load, off the window's thread; searching and filtering then only
 //! walk the rows already made, so typing in the search box stays quick over 16,000 songs (rule 12).
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use chrono::{Datelike, Days, NaiveDateTime};
 use mo_formats::case;
@@ -434,6 +434,9 @@ pub struct Filters {
     pub hide_archived: bool,
     /// Only songs last saved in these years, first to last (the year strip).
     pub years: Option<(i32, i32)>,
+    /// Only the songs with a save among these, and what the chip calls them ("Using Serum"): the Plugins page's
+    /// Show in Songs.
+    pub only: Option<(String, HashSet<i64>)>,
 }
 
 impl Filters {
@@ -459,6 +462,11 @@ impl Filters {
         }
         if let Some((first, last)) = self.years
             && !(first..=last).contains(&r.saved.year())
+        {
+            return false;
+        }
+        if let Some((_, saves)) = &self.only
+            && !r.song.saves().chain(&r.song.copies).any(|s| saves.contains(&s.id))
         {
             return false;
         }
@@ -548,6 +556,30 @@ mod tests {
             })
             .collect();
         assert_eq!(names, ["Bravo", "Charlie", "Delta"]);
+    }
+
+    #[test]
+    fn show_in_songs_keeps_the_songs_with_one_of_its_saves() {
+        let now = day(2026, 10, 31);
+        let mut saves =
+            [save("Alpha", day(2026, 6, 1)), save("Bravo_2", day(2024, 5, 1)), save("Bravo", day(2023, 4, 1))];
+        for (i, s) in saves.iter_mut().enumerate() {
+            s.id = i as i64 + 1;
+        }
+        let s = songs(&saves);
+        // Only Bravo's older save uses the plugin: the song shows.
+        let only = Filters { only: Some(("Using Serum".into(), HashSet::from([3]))), ..Filters::default() };
+        assert!(only.any());
+        let v = s.view(&only, now);
+        let names: Vec<&str> = v
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Song(i) => Some(s.rows[*i].song.name.as_str()),
+                Entry::Heading(_) => None,
+            })
+            .collect();
+        assert_eq!(names, ["Bravo"]);
     }
 
     #[test]

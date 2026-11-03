@@ -1,0 +1,752 @@
+// The Plugins page (spec 3.6): every plugin your songs use, what to install to open more of them, the plugins taking
+// room that no song has used for years, and the picked plugin's card beside the list: the songs using it, its room on
+// disk and its installed copies. The same list and side card as every page (Solomon, 1 Nov 2026), the card always
+// there. Only shared parts from studio.slint; mo-app decides every word (mo_app::plugins), mo-ui/src/plugins.rs
+// fills it. Read-only for now: Clean up, Uninstall and Move join in the page's second part.
+import { ListView } from "std-widgets.slint";
+import { Theme, Type, Space, Well, SearchBox, ToggleChip, MenuChip, ListLine, Caps, StudioButton, LinkText, Segmented, CardAction, CardActions, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, TabBar, OptionsButton } from "../studio.slint";
+
+// One line of the list.
+export struct PluginListLine {
+    // Where the plugin is in mo-app's rows, for picking it.
+    row: int,
+    name: string,
+    // "VST3 · Instrument · Xfer Records · FL Studio, Bitwig".
+    details: string,
+    // "12 songs", or "No songs".
+    songs: string,
+    // "Mar 2024", or "Never".
+    last: string,
+    size: string,
+    // 0 installed, 1 missing, 2 installed but unused.
+    state: int,
+}
+
+// An "Install these" card: a missing plugin and how many songs it helps open.
+export struct NeededCard {
+    row: int,
+    count: string,
+    label: string,
+    name: string,
+    details: string,
+    // "You have Ozone 11, which may open them".
+    other: string,
+}
+
+// One part of the picked plugin's room on disk, for the bar.
+export struct RoomBar {
+    name: string,
+    size: string,
+    share: float,
+    // 0 plugin files, 1 presets and settings, 2 sounds.
+    kind: int,
+}
+
+export struct RoomFolder {
+    kind: string,
+    path: string,
+    size: string,
+    // "Shared with Kontakt 7".
+    shared: string,
+    added: bool,
+}
+
+// A song (or a save) using the picked plugin.
+export struct UseRow {
+    name: string,
+    daw: string,
+    date: string,
+    saves: string,
+    // Its line in the card's list, for opening it on the Songs page.
+    at: int,
+}
+
+// One installed copy of the picked plugin, as the plugin scanner read it.
+export struct CopyRow {
+    format: string,
+    name: string,
+    details: string,
+    id: string,
+    path: string,
+    note: string,
+}
+
+export global PluginsData {
+    in property <string> summary;
+    // Shown instead of the list while it loads, or when the library can't be read.
+    in property <string> message: "Reading your plugins…";
+    in property <string> count;
+    in property <[PluginListLine]> lines;
+    in property <int> selected: -1;
+    in-out property <string> search;
+    in property <[string]> chips;
+    in property <string> chip;
+    in property <bool> any-filter;
+    in property <[string]> sorts;
+    in property <string> sort;
+    // The year strip beside the list: the years plugins were used in.
+    in property <[YearBar]> years;
+    callback years-picked(int, int);
+    callback years-cleared();
+
+    // The Install these cards, what they'd open, or that every song has what it needs.
+    in property <[NeededCard]> cards;
+    in property <string> cards-summary;
+    in property <bool> all-installed;
+    // "46.7 GB in 2 plugins none of your songs have used in over 2 years."
+    in property <string> freeable;
+
+    // The page's options.
+    in property <[string]> card-counts;
+    in property <int> card-count;
+    in property <[string]> unused-choices;
+    in property <int> unused-index;
+    callback card-count-picked(int);
+    callback unused-picked(int);
+
+    // The side card.
+    in-out property <length> panel-width: 420px;
+    in property <bool> has-pick;
+    in property <string> name;
+    in property <string> facts;
+    in property <string> state-text;
+    in property <int> state;
+    in property <string> other;
+    in property <[CardAction]> actions;
+    in property <[MenuItem]> menu;
+    in property <[string]> tabs;
+    in-out property <int> tab;
+    in property <string> uses-note;
+    in property <[UseRow]> uses;
+    in property <[string]> use-daws;
+    in property <string> use-daw;
+    in property <bool> every-save;
+    in property <string> room-summary;
+    in property <string> room-shared;
+    in property <[RoomBar]> room-bars;
+    in property <[RoomFolder]> room-folders;
+    in property <string> sizes-note;
+    in property <[CopyRow]> copies;
+    in property <string> copies-note;
+    in property <string> scanner-note;
+
+    callback search-edited(string);
+    callback chip-picked(string);
+    callback sort-picked(string);
+    callback clear();
+    callback select(int);
+    callback close-panel();
+    callback menu-chosen(string);
+    callback use-daw-picked(string);
+    callback every-save-toggled();
+    callback open-use(int);
+    callback panel-resized(length);
+}
+
+// A plugin's state as a small word in its colour.
+component StatePill inherits Rectangle {
+    in property <int> state;
+    in property <string> text;
+    property <color> tint: state == 1 ? Theme.missing : state == 2 ? Theme.warning : Theme.ok;
+    width: label.preferred-width + 2 * Space.sm;
+    height: 20px;
+    border-radius: 10px;
+    background: tint.transparentize(85%);
+    label := Text {
+        text: root.text;
+        color: root.tint;
+        font-size: Type.tiny;
+        font-weight: 600;
+    }
+}
+
+// A missing plugin worth installing: the big number, the plugin, what it is. A click picks it.
+component NeededTile inherits Rectangle {
+    in property <NeededCard> card;
+    in property <bool> picked;
+    callback clicked;
+    width: 188px;
+    height: col.preferred-height;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: picked ? Theme.accent : Theme.edge;
+    background: Theme.surface;
+    // The list line's look: lit under the mouse, raised when picked.
+    ListLine {
+        selected: root.picked;
+        clicked => { root.clicked(); }
+    }
+    col := VerticalLayout {
+        padding: Space.md;
+        spacing: Space.xs;
+        alignment: start;
+        HorizontalLayout {
+            spacing: Space.sm;
+            Text {
+                text: root.card.count;
+                color: Theme.text;
+                font-family: Theme.number-font;
+                font-size: Type.heading;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+            Text {
+                text: root.card.label;
+                color: Theme.muted;
+                font-size: Type.meta;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                overflow: elide;
+            }
+        }
+        Text {
+            text: root.card.name;
+            color: Theme.text;
+            font-size: Type.body;
+            font-weight: 600;
+            overflow: elide;
+        }
+        Text {
+            text: root.card.details;
+            color: Theme.muted;
+            font-size: Type.small;
+            overflow: elide;
+        }
+        if root.card.other != "": Text {
+            text: root.card.other;
+            color: Theme.ok;
+            font-size: Type.small;
+            wrap: word-wrap;
+            min-width: 0px;
+        }
+    }
+}
+
+// The picked plugin. Nothing in it may be wider than the card: long names and paths wrap.
+component PluginPanel inherits SidePanel {
+    close => { PluginsData.close-panel(); }
+    if !PluginsData.has-pick: EmptyState {
+        vertical-stretch: 1;
+        title: "Pick a plugin";
+        text: "The songs using it show here, newest first, with its room on disk and its installed copies.";
+    }
+    if PluginsData.has-pick: HorizontalLayout {
+        spacing: Space.sm;
+        alignment: start;
+        StatePill {
+            state: PluginsData.state;
+            text: PluginsData.state-text;
+        }
+    }
+    if PluginsData.has-pick: Text {
+        text: PluginsData.name;
+        color: Theme.text;
+        font-size: Type.panel-title;
+        font-weight: 600;
+        wrap: word-wrap;
+        min-width: 0px;
+    }
+    if PluginsData.has-pick: Text {
+        text: PluginsData.facts;
+        color: Theme.muted;
+        font-size: Type.meta;
+        wrap: word-wrap;
+        min-width: 0px;
+    }
+    if PluginsData.has-pick && PluginsData.other != "": Text {
+        text: PluginsData.other;
+        color: Theme.ok;
+        font-size: Type.meta;
+        wrap: word-wrap;
+        min-width: 0px;
+    }
+    if PluginsData.has-pick: CardActions {
+        actions: PluginsData.actions;
+        chosen(id) => { PluginsData.menu-chosen(id); }
+    }
+    if PluginsData.has-pick: TabBar {
+        tabs: PluginsData.tabs;
+        current <=> PluginsData.tab;
+    }
+    // The songs using it.
+    if PluginsData.has-pick && PluginsData.tab == 0: VerticalLayout {
+        spacing: Space.sm;
+        vertical-stretch: 1;
+        HorizontalLayout {
+            spacing: Space.sm;
+            alignment: start;
+            if PluginsData.use-daws.length > 0: MenuChip {
+                name: "DAW";
+                value: PluginsData.use-daw;
+                choices: PluginsData.use-daws;
+                picked(v) => { PluginsData.use-daw-picked(v); }
+            }
+            ToggleChip {
+                text: "Every save";
+                on: PluginsData.every-save;
+                clicked => { PluginsData.every-save-toggled(); }
+            }
+        }
+        if PluginsData.uses-note != "": Text {
+            text: PluginsData.uses-note;
+            color: Theme.muted;
+            font-size: Type.meta;
+            wrap: word-wrap;
+            min-width: 0px;
+        }
+        Well {
+            min-height: 220px;
+            vertical-stretch: 1;
+            ListView {
+                for u in PluginsData.uses: ListLine {
+                    height: 36px;
+                    tip: "Open it on the Songs page";
+                    clicked => { PluginsData.open-use(u.at); }
+                    HorizontalLayout {
+                        padding-left: Space.md;
+                        padding-right: Space.md;
+                        spacing: Space.sm;
+                        VerticalLayout {
+                            alignment: center;
+                            Dot { tint: Theme.daw(u.daw); }
+                        }
+                        Text {
+                            text: u.name;
+                            color: Theme.text;
+                            font-size: Type.body;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            overflow: elide;
+                        }
+                        if u.saves != "": Text {
+                            text: u.saves;
+                            color: Theme.faint;
+                            font-size: Type.small;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: u.date;
+                            color: Theme.muted;
+                            font-family: Theme.number-font;
+                            font-size: Type.small;
+                            vertical-alignment: center;
+                            horizontal-alignment: right;
+                            width: 96px;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Its room on disk.
+    if PluginsData.has-pick && PluginsData.tab == 1: VerticalLayout {
+        spacing: Space.md;
+        Text {
+            text: PluginsData.room-summary;
+            color: Theme.text;
+            font-size: Type.body;
+            wrap: word-wrap;
+            min-width: 0px;
+        }
+        if PluginsData.room-bars.length > 0: Rectangle {
+            height: 10px;
+            border-radius: 5px;
+            clip: true;
+            background: Theme.well;
+            HorizontalLayout {
+                for b in PluginsData.room-bars: Rectangle {
+                    horizontal-stretch: max(0.01, b.share);
+                    background: b.kind == 0 ? Theme.fl-studio : b.kind == 1 ? Theme.sound-type(5) : Theme.warning;
+                }
+            }
+        }
+        for b in PluginsData.room-bars: HorizontalLayout {
+            spacing: Space.sm;
+            VerticalLayout {
+                alignment: center;
+                Dot { tint: b.kind == 0 ? Theme.fl-studio : b.kind == 1 ? Theme.sound-type(5) : Theme.warning; }
+            }
+            Text {
+                text: b.name;
+                color: Theme.text;
+                font-size: Type.meta;
+                horizontal-stretch: 1;
+            }
+            Text {
+                text: b.size;
+                color: Theme.muted;
+                font-family: Theme.number-font;
+                font-size: Type.meta;
+            }
+        }
+        if PluginsData.room-shared != "": Text {
+            text: PluginsData.room-shared;
+            color: Theme.muted;
+            font-size: Type.meta;
+            wrap: word-wrap;
+            min-width: 0px;
+        }
+        if PluginsData.room-folders.length > 0: Caps { text: "FILES AND FOLDERS"; }
+        for f in PluginsData.room-folders: VerticalLayout {
+            spacing: Space.xs;
+            HorizontalLayout {
+                spacing: Space.sm;
+                Text {
+                    text: f.kind + (f.added ? " (added by you)" : "");
+                    color: Theme.text;
+                    font-size: Type.meta;
+                    horizontal-stretch: 1;
+                }
+                Text {
+                    text: f.size;
+                    color: Theme.muted;
+                    font-family: Theme.number-font;
+                    font-size: Type.meta;
+                }
+            }
+            Text {
+                text: f.path;
+                color: Theme.faint;
+                font-size: Type.small;
+                wrap: word-wrap;
+                min-width: 0px;
+            }
+            if f.shared != "": Text {
+                text: f.shared;
+                color: Theme.warning;
+                font-size: Type.small;
+                wrap: word-wrap;
+                min-width: 0px;
+            }
+        }
+        Text {
+            text: PluginsData.sizes-note;
+            color: Theme.faint;
+            font-size: Type.small;
+            wrap: word-wrap;
+            min-width: 0px;
+        }
+    }
+    // Its installed copies.
+    if PluginsData.has-pick && PluginsData.tab == 2: VerticalLayout {
+        spacing: Space.md;
+        if PluginsData.copies-note != "": Text {
+            text: PluginsData.copies-note;
+            color: Theme.muted;
+            font-size: Type.meta;
+            wrap: word-wrap;
+            min-width: 0px;
+        }
+        for c in PluginsData.copies: Well {
+            height: copy.preferred-height;
+            copy := VerticalLayout {
+                padding: Space.md;
+                spacing: Space.xs;
+                HorizontalLayout {
+                    spacing: Space.sm;
+                    alignment: start;
+                    Text {
+                        text: c.format;
+                        color: Theme.muted;
+                        font-size: Type.tiny;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: c.name;
+                        color: Theme.text;
+                        font-size: Type.body;
+                        font-weight: 600;
+                        wrap: word-wrap;
+                        min-width: 0px;
+                        horizontal-stretch: 1;
+                    }
+                }
+                if c.details != "": Text {
+                    text: c.details;
+                    color: Theme.muted;
+                    font-size: Type.meta;
+                    wrap: word-wrap;
+                    min-width: 0px;
+                }
+                if c.id != "": Text {
+                    text: c.id;
+                    color: Theme.faint;
+                    font-family: Theme.number-font;
+                    font-size: Type.small;
+                    wrap: word-wrap;
+                    min-width: 0px;
+                }
+                Text {
+                    text: c.path;
+                    color: Theme.faint;
+                    font-size: Type.small;
+                    wrap: word-wrap;
+                    min-width: 0px;
+                }
+                if c.note != "": Text {
+                    text: c.note;
+                    color: Theme.muted;
+                    font-size: Type.small;
+                    wrap: word-wrap;
+                    min-width: 0px;
+                }
+            }
+        }
+        Text {
+            text: PluginsData.scanner-note;
+            color: Theme.faint;
+            font-size: Type.small;
+            wrap: word-wrap;
+            min-width: 0px;
+        }
+    }
+    // The spare room goes here, not between the parts.
+    Rectangle { vertical-stretch: 1; }
+}
+
+export component PluginsPage inherits Rectangle {
+    forward-focus: search-box;
+
+    VerticalLayout {
+        padding: Space.xl;
+        padding-bottom: Space.lg;
+        spacing: Space.md;
+        HorizontalLayout {
+            spacing: Space.md;
+            vertical-stretch: 0;
+            PageHeader {
+                horizontal-stretch: 1;
+                title: "Plugins";
+                summary: PluginsData.summary;
+            }
+            VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 0;
+                OptionsButton {
+                    width: 32px;
+                    card-width: 340px;
+                    Caps { text: "INSTALL THESE CARDS"; }
+                    Segmented {
+                        choices: PluginsData.card-counts;
+                        current: PluginsData.card-count;
+                        picked(i) => { PluginsData.card-count-picked(i); }
+                    }
+                    Caps { text: "UNUSED WHEN NO SONG HAS USED IT FOR"; }
+                    Segmented {
+                        choices: PluginsData.unused-choices;
+                        current: PluginsData.unused-index;
+                        picked(i) => { PluginsData.unused-picked(i); }
+                    }
+                }
+            }
+        }
+        HorizontalLayout {
+            spacing: Space.sm;
+            vertical-stretch: 0;
+            search-box := SearchBox {
+                horizontal-stretch: 1;
+                hint: "Search plugins or makers";
+                text <=> PluginsData.search;
+                edited(t) => { PluginsData.search-edited(t); }
+                key(k) => {
+                    if (k == Key.Escape && PluginsData.search != "") {
+                        PluginsData.search = "";
+                        PluginsData.search-edited("");
+                        return true;
+                    }
+                    false
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                MenuChip {
+                    name: "Sort";
+                    value: PluginsData.sort;
+                    choices: PluginsData.sorts;
+                    has-any: false;
+                    picked(v) => { PluginsData.sort-picked(v); }
+                }
+            }
+        }
+        FlexboxLayout {
+            spacing: Space.sm;
+            vertical-stretch: 0;
+            for c in PluginsData.chips: ToggleChip {
+                text: c;
+                on: PluginsData.chip == c;
+                clicked => { PluginsData.chip-picked(c); }
+            }
+            if PluginsData.any-filter: ToggleChip {
+                text: "Clear";
+                on: false;
+                clicked => { PluginsData.clear(); }
+            }
+        }
+        // What to install to open more of your songs.
+        if PluginsData.cards.length > 0: VerticalLayout {
+            spacing: Space.sm;
+            vertical-stretch: 0;
+            HorizontalLayout {
+                spacing: Space.md;
+                Caps {
+                    text: "INSTALL THESE TO OPEN MORE OF YOUR SONGS";
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: PluginsData.cards-summary;
+                    color: Theme.muted;
+                    font-size: Type.meta;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+            }
+            HorizontalLayout {
+                spacing: Space.sm;
+                alignment: start;
+                for c in PluginsData.cards: NeededTile {
+                    card: c;
+                    picked: c.row == PluginsData.selected;
+                    clicked => { PluginsData.select(c.row); }
+                }
+            }
+        }
+        if PluginsData.all-installed: Text {
+            text: "Every song has the plugins it needs on this computer.";
+            color: Theme.ok;
+            font-size: Type.meta;
+        }
+        if PluginsData.freeable != "": HorizontalLayout {
+            spacing: Space.sm;
+            alignment: start;
+            vertical-stretch: 0;
+            Text {
+                text: "Room to free: " + PluginsData.freeable;
+                color: Theme.muted;
+                font-size: Type.meta;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            LinkText {
+                text: "Show them";
+                font-size: Type.meta;
+                clicked => { PluginsData.chip-picked("Big and unused"); }
+            }
+        }
+        // The list, the year strip and the picked plugin's card.
+        area := Rectangle {
+            vertical-stretch: 1;
+            property <length> list-width: max(380px, self.width - PluginsData.panel-width - divider.width);
+            property <length> years-width: PluginsData.years.length > 1 && PluginsData.message == "" ? 56px : 0px;
+            property <bool> wide: self.list-width > 640px;
+            Well {
+                x: 0;
+                width: area.list-width - area.years-width;
+                height: parent.height;
+                if PluginsData.message != "": EmptyState {
+                    x: Space.xl;
+                    width: parent.width - 2 * Space.xl;
+                    title: PluginsData.message;
+                }
+                if PluginsData.message == "" && PluginsData.lines.length == 0: EmptyState {
+                    x: Space.xl;
+                    width: parent.width - 2 * Space.xl;
+                    title: "No plugins like that";
+                    text: "Try fewer filters, or another search.";
+                }
+                if PluginsData.message == "": ListView {
+                    for line in PluginsData.lines: ListLine {
+                        height: 56px;
+                        selected: line.row == PluginsData.selected;
+                        clicked => { PluginsData.select(line.row); }
+                        right-clicked(x, y) => { menu.open-at(x, y); }
+                        HorizontalLayout {
+                            padding-left: Space.md;
+                            padding-right: Space.md;
+                            spacing: Space.md;
+                            VerticalLayout {
+                                alignment: center;
+                                Dot { tint: line.state == 1 ? Theme.missing : line.state == 2 ? Theme.warning : Theme.ok; }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: Space.xs;
+                                horizontal-stretch: 1;
+                                Text {
+                                    text: line.name;
+                                    color: Theme.text;
+                                    font-size: Type.row-title;
+                                    font-weight: 500;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: line.details;
+                                    color: Theme.muted;
+                                    font-size: Type.meta;
+                                    overflow: elide;
+                                }
+                            }
+                            Text {
+                                width: 80px;
+                                text: line.songs;
+                                color: Theme.text;
+                                font-size: Type.meta;
+                                vertical-alignment: center;
+                                horizontal-alignment: right;
+                            }
+                            if area.wide: Text {
+                                width: 76px;
+                                text: line.last;
+                                color: Theme.muted;
+                                font-family: Theme.number-font;
+                                font-size: Type.meta;
+                                vertical-alignment: center;
+                                horizontal-alignment: right;
+                            }
+                            Text {
+                                width: 72px;
+                                text: line.size;
+                                color: line.state == 2 ? Theme.warning : Theme.muted;
+                                font-family: Theme.number-font;
+                                font-size: Type.meta;
+                                vertical-alignment: center;
+                                horizontal-alignment: right;
+                            }
+                        }
+                    }
+                }
+            }
+            if area.years-width > 0: YearRange {
+                x: area.list-width - area.years-width;
+                width: area.years-width;
+                height: parent.height;
+                years: PluginsData.years;
+                picked(a, b) => { PluginsData.years-picked(a, b); }
+                cleared => { PluginsData.years-cleared(); }
+            }
+            divider := PanelDivider {
+                x: area.list-width;
+                height: parent.height;
+                panel-width: PluginsData.panel-width;
+                room: area.width;
+                resizing(w) => { PluginsData.panel-width = w; }
+                resized(w) => { PluginsData.panel-resized(w); }
+            }
+            PluginPanel {
+                x: area.list-width + divider.width;
+                width: area.width - self.x;
+                height: parent.height;
+            }
+            menu := RightClickMenu {
+                items: PluginsData.menu;
+                chosen(id) => { PluginsData.menu-chosen(id); }
+            }
+        }
+        if PluginsData.count != "": Text {
+            text: PluginsData.count;
+            color: Theme.faint;
+            font-size: Type.small;
+        }
+    }
+}
