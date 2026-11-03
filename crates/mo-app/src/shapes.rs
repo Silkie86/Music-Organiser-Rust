@@ -106,11 +106,14 @@ impl Scene {
         (size(self.width), size(self.height))
     }
 
-    /// The shapes as the graphics card reads them, [`SHAPE_BYTES`] each: where (four f32, in points: a rectangle's
-    /// left, top, right and bottom, or a line's two ends), the fill and the edge colours (as [`Colour::packed`]; a line's
-    /// colour is its fill, and no edge is 0), the corner radius or the line's width (f32, in points) and the kind
-    /// ([`RECT`], [`ROUNDED`] or [`LINE`], u32).
-    pub fn pack(&self) -> Vec<u8> {
+    /// The shapes as the graphics card reads them for a picture at `scale` pixels to a point, [`SHAPE_BYTES`] each:
+    /// where (four f32: a crisp rectangle's left, top, right and bottom in whole pixels, as [`crisp`] puts them, so the
+    /// card fills the very pixels the processor does; a rounded one's in points, or a line's two ends), the fill and
+    /// the edge colours (as [`Colour::packed`]; a line's colour is its fill, and no edge is 0), the corner radius or the
+    /// line's width (f32, in points) and the kind ([`RECT`], [`ROUNDED`] or [`LINE`], u32). A crisp rectangle that
+    /// fills no pixel is left out.
+    pub fn pack(&self, scale: f64) -> Vec<u8> {
+        let scale = usable_scale(scale) as f32;
         let mut out = Vec::with_capacity(self.shapes.len() * SHAPE_BYTES);
         let mut put = |at: [f32; 4], fill: Colour, edge: Option<Colour>, size: f32, kind: u32| {
             for v in at {
@@ -123,7 +126,11 @@ impl Scene {
         };
         for s in &self.shapes {
             match *s {
-                Shape::Rect { x, y, w, h, fill } => put([x, y, x + w, y + h], fill, None, 0.0, RECT),
+                Shape::Rect { x, y, w, h, fill } => {
+                    if let Some(pixels) = crisp([x, y, x + w, y + h], scale) {
+                        put(pixels, fill, None, 0.0, RECT);
+                    }
+                }
                 Shape::Rounded { x, y, w, h, radius, fill, edge } => {
                     put([x, y, x + w, y + h], fill, edge, radius, ROUNDED);
                 }
@@ -155,8 +162,8 @@ impl Scene {
 
 /// The pixels a crisp rectangle (left, top, right, bottom, in points) fills at `scale` pixels to a point, as whole-pixel
 /// edges: the pixels whose middles are inside it, counting a middle on its left or top edge in and one on its right or
-/// bottom edge out. `None` when that's no pixels. The card's shader works the edges out the same way (mo-ui's
-/// `canvas`), so both painters fill the same pixels, however close an edge comes to a pixel's middle.
+/// bottom edge out. `None` when that's no pixels. Both painters fill these pixels (the card gets them from
+/// [`Scene::pack`]), however close an edge comes to a pixel's middle.
 pub fn crisp([left, top, right, bottom]: [f32; 4], scale: f32) -> Option<[f32; 4]> {
     let edge = |v: f32| (v * scale - 0.5).ceil();
     let (l, t, r, b) = (edge(left), edge(top), edge(right), edge(bottom));
@@ -167,7 +174,9 @@ fn usable(x: f64, y: f64, w: f64, h: f64) -> bool {
     [x, y, w, h].iter().all(|v| v.is_finite()) && w > 0.0 && h > 0.0
 }
 
-fn usable_scale(scale: f64) -> f64 {
+/// `scale` pixels to a point, or 1 when it's no use (not a number, or not more than 0): the one check both painters
+/// and the views that work out their shapes make.
+pub fn usable_scale(scale: f64) -> f64 {
     if scale.is_finite() && scale > 0.0 { scale } else { 1.0 }
 }
 
@@ -283,12 +292,14 @@ mod tests {
         s.rect((1.0, 2.0, 3.0, 4.0), Colour::rgb(0x102030, 1.0));
         s.rounded((1.0, 1.0, 6.0, 6.0), 2.0, Colour::rgb(0xFFFFFF, 0.5), Some(Colour::rgb(0, 1.0)));
         s.line((0.0, 0.0), (5.0, 5.0), 1.5, Colour::rgb(0xFF0000, 1.0));
-        let bytes = s.pack();
+        // Too thin to cover a pixel's middle at 1.5 pixels to a point: left out.
+        s.rect((0.4, 0.0, 0.2, 5.0), Colour::rgb(0x102030, 1.0));
+        let bytes = s.pack(1.5);
         assert_eq!(bytes.len(), 3 * SHAPE_BYTES);
         let f32_at = |i: usize| f32::from_le_bytes(bytes[i..i + 4].try_into().unwrap());
         let u32_at = |i: usize| u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap());
-        // The rectangle: left, top, right, bottom.
-        assert_eq!([f32_at(0), f32_at(4), f32_at(8), f32_at(12)], [1.0, 2.0, 4.0, 6.0]);
+        // The rectangle: left, top, right and bottom on whole pixels (1.5, 3, 6 and 9 pixels go to 1, 3, 6 and 9).
+        assert_eq!([f32_at(0), f32_at(4), f32_at(8), f32_at(12)], [1.0, 3.0, 6.0, 9.0]);
         assert_eq!(u32_at(16), Colour::rgb(0x102030, 1.0).packed());
         assert_eq!((u32_at(20), u32_at(28)), (0, RECT));
         // The rounded one has an edge and a radius.

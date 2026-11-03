@@ -100,7 +100,11 @@ pub fn connect(app: &AppWindow) {
         RenderingState::RenderingTeardown => {
             GPU.with(|g| *g.borrow_mut() = None);
             GENERATION.with(|n| n.set(n.get() + 1));
-            // What the views made on the card goes with it, pictures on show included.
+            // What the views made on the card goes with it, now, while wgpu is still here: even as the window itself
+            // goes, when there's no window left to show anything on.
+            crate::sounds::card_gone();
+            crate::arrangement::card_gone();
+            // The pictures on show go too, and are drawn again on the next card or the processor.
             if let Some(app) = weak.upgrade() {
                 crate::sounds::graphics_gone(&app);
                 crate::arrangement::graphics_gone(&app);
@@ -171,10 +175,12 @@ impl<T> Painter<T> {
         self.made.as_mut().map(|(_, painter)| painter)
     }
 
-    /// Card `on` refused to draw the view: the painter goes, and the processor draws the view while that card lasts.
+    /// Card `on` refused to draw the view: its painter goes, and the processor draws the view while that card lasts.
     pub fn refused(&mut self, on: u64) {
         self.refused = Some(on);
-        self.made = None;
+        if self.made.as_ref().is_some_and(|(made_on, _)| *made_on == on) {
+            self.made = None;
+        }
     }
 
     /// The card went: the painter goes with it.
@@ -192,17 +198,6 @@ impl<T> Painter<T> {
 impl<T> Default for Painter<T> {
     fn default() -> Painter<T> {
         Painter::new()
-    }
-}
-
-impl<T> Drop for Painter<T> {
-    /// A painter is only let go of here when the window's thread ends, as the app closes. One still made then (if the
-    /// window went without letting the card go first) is left for the system to free with the app: wgpu can't free it
-    /// that late, as what it needs has gone already, and in a debug build it would stop the app on the way out.
-    fn drop(&mut self) {
-        if let Some(made) = self.made.take() {
-            std::mem::forget(made);
-        }
     }
 }
 
@@ -236,7 +231,9 @@ pub fn prepare<T: Send + 'static>(
                 }
                 match made {
                     Ok(painter) if p.wants(on) => p.made = Some((on, painter)),
+                    // Not wanted any more (the card went meanwhile), or the card that said no has gone already.
                     Ok(_) => {}
+                    Err(_) if on != generation() => {}
                     Err(e) => {
                         log::error(
                             name,
@@ -308,6 +305,10 @@ mod tests {
         assert!(p.made().is_none());
         assert!(!p.wants(now) && !p.draws_on(now), "not on a card that refused");
         assert!(p.draws_on(now + 1), "the next card is tried again");
+        // A card that's gone refusing late leaves the next card's painter be.
+        p.made = Some((now + 1, "next"));
+        p.refused(now);
+        assert_eq!(p.made().copied(), Some("next"));
     }
 
     /// While a painter is being made away from the window's thread, the processor draws the view.

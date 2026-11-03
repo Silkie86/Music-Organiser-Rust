@@ -9,10 +9,11 @@ use slint::wgpu_30::wgpu;
 
 pub(crate) const SHADER: &str = r#"
 struct Frame {
-    // The picture's size in pixels, and pixels to a point.
+    // The picture's size in pixels, pixels to a point, and how much a picture too big for the card was shrunk to fit
+    // (1 for one that fits).
     size: vec2<f32>,
     scale: f32,
-    _a: f32,
+    fit: f32,
 };
 @group(0) @binding(0) var<uniform> frame: Frame;
 
@@ -26,7 +27,7 @@ struct Shape {
     // The fill (a line's colour) and the edge, premultiplied.
     @location(0) @interpolate(flat) fill: vec4<f32>,
     @location(1) @interpolate(flat) edge: vec4<f32>,
-    // A rectangle's left, top, right and bottom, or a line's two ends, in pixels.
+    // A rounded rectangle's left, top, right and bottom, or a line's two ends, in pixels.
     @location(2) @interpolate(flat) at: vec4<f32>,
     // A rounded rectangle's corner radius, or half a line's width, in pixels.
     @location(3) @interpolate(flat) size: f32,
@@ -55,9 +56,8 @@ fn shape_vertex(@builtin(vertex_index) v: u32, @location(0) at: vec4<f32>, @loca
     let c = corner(v);
     var p = mix(px.xy, px.zw, c);
     if (kind == RECT) {
-        // Its edges on whole pixels, taking the pixels whose middles are inside (one on the left or top edge in, one on
-        // the right or bottom edge out), as mo_app::shapes::crisp works them out for the processor.
-        p = mix(ceil(px.xy - vec2(0.5)), ceil(px.zw - vec2(0.5)), c);
+        // Packed in whole pixels already (mo_app::shapes::crisp, as the processor fills them).
+        p = mix(at.xy, at.zw, c) * frame.fit;
     } else if (kind == LINE) {
         // A strip along the line, a pixel longer at each end and wider each side for its soft edges.
         let d = along(px.xy, px.zw);
@@ -250,7 +250,7 @@ impl Canvas {
         self.pictures.get_or_insert_with(|| unreachable!("made just above"))
     }
 
-    /// Draws `shapes` (as `mo_app::shapes::Scene::pack` packed them) at `scale` pixels to a point, on a picture
+    /// Draws `shapes` (as `mo_app::shapes::Scene::pack` packed them for `scale`) at `scale` pixels to a point, on a picture
     /// `width` by `height` pixels, over `background` (0xRRGGBB), and gives the picture for Slint to show. A picture
     /// bigger than the card can hold is drawn as big as it can, at a scale to fit, and Slint stretches it.
     pub(crate) fn draw(
@@ -270,7 +270,7 @@ impl Canvas {
         } else {
             (width.max(1), height.max(1))
         };
-        let frame = [width as f32, height as f32, scale * fit, 0.0];
+        let frame = [width as f32, height as f32, scale * fit, fit];
         let bytes: Vec<u8> = frame.iter().flat_map(|v| v.to_le_bytes()).collect();
         self.queue.write_buffer(&self.frame, 0, &bytes);
         let shapes = &shapes[..shapes.len() / SHAPE_BYTES * SHAPE_BYTES];
@@ -418,7 +418,7 @@ mod tests {
             scene.line(((at * 4.1) % 300.0, 0.0), ((at * 6.7) % 300.0, 120.0), 1.5, tint);
         }
         assert_eq!(scene.shapes.len(), 1200);
-        let bytes = scene.pack();
+        let bytes = scene.pack(1.5);
         let size = scene.pixel_size(1.5);
         let mut canvas = Canvas::new(&device, &queue);
         let whole = read_back(&device, &queue, &canvas.draw(size, 1.5, scene.background, &bytes));
@@ -445,21 +445,6 @@ mod tests {
         for (name, value) in [("RECT", shapes::RECT), ("ROUNDED", shapes::ROUNDED), ("LINE", shapes::LINE)] {
             assert!(SHADER.contains(&format!("const {name}: u32 = {value}u;")), "{name} isn't {value} in the shader");
         }
-    }
-
-    /// The card puts a sharp shape's edges on whole pixels by the processor's rule (`mo_app::shapes::crisp`), or the
-    /// two pictures would differ by a pixel along the edges. The look test checks the pictures, but needs a card; this
-    /// checks the shader still has the rule where there's none (as on the computers that check each pull request).
-    #[test]
-    fn the_shader_puts_sharp_edges_on_pixels_as_the_processor_does() {
-        // crisp: an edge at v points goes to ceil(v * scale - 0.5) pixels.
-        assert_eq!(shapes::crisp([0.5, 0.5, 1.5, 2.5], 1.0), Some([0.0, 0.0, 1.0, 2.0]));
-        assert!(SHADER.contains("let s = frame.scale;\n    let px = at * s;"), "the shader's edges aren't in pixels");
-        assert!(
-            SHADER.contains("if (kind == RECT) {")
-                && SHADER.contains("p = mix(ceil(px.xy - vec2(0.5)), ceil(px.zw - vec2(0.5)), c);"),
-            "the shader's sharp edges aren't on whole pixels as shapes::crisp puts them"
-        );
     }
 
     /// Slint makes its card with WebGL 2's limits (raised only for the size of a picture), so what a shape takes must

@@ -27,14 +27,16 @@ const NOT_HERE: &str = "This save isn't on this computer, so its arrangement can
 const READING: &str = "Reading the arrangement…";
 const NOT_YET: &str = "Arrangements can be drawn for FL Studio, Bitwig and Studio One projects.";
 
-/// A picture to work out: for which song, the view as it is, its colours, pixels to a point, and whether the graphics
-/// card draws it (else the processor does, on the drawing thread).
-type DrawJob = (u64, View, Palette, f64, bool);
+/// A picture to work out: for which song, which picture (they're counted), the view as it is, its colours, pixels to a
+/// point, and whether the graphics card draws it (else the processor does, on the drawing thread).
+type DrawJob = (u64, u64, View, Palette, f64, bool);
 
 #[derive(Default)]
 struct State {
     /// Counts the songs shown, so a read or a picture that arrives after another song was picked is dropped.
     asked: u64,
+    /// Counts the pictures asked for.
+    pictures: u64,
     preview: Option<Preview>,
     /// The audio clips' waveforms, once their files have been read.
     peaks: Arc<HashMap<String, Arc<Peaks>>>,
@@ -57,6 +59,10 @@ struct Words {
 
 /// The song shown last, so the reading thread can stop reading an older song's audio files.
 static SHOWN: AtomicU64 = AtomicU64::new(0);
+
+/// The newest picture the drawing thread has sent the window (as `State::pictures` counts them): one older than that
+/// is passed over when it gets there, as it would only be drawn over at once.
+static SENT: AtomicU64 = AtomicU64::new(0);
 
 thread_local! {
     static STATE: RefCell<State> = RefCell::default();
@@ -145,11 +151,13 @@ pub fn connect(app: &AppWindow) {
         data.set_ruler_labels(ModelRc::from(w.ruler.clone()));
     });
     let weak = app.as_weak();
-    let drawer = Newest::start("Arrangement drawing", move |(asked, view, palette, scale, on_card): DrawJob| {
-        // Worked out here, and for the processor drawn here too, so the window's thread only puts it up.
-        let picture = Picture::new(view.frame(&palette, scale), scale, on_card);
-        let _ = weak.upgrade_in_event_loop(move |app| drawn(&app, asked, picture));
-    });
+    let drawer =
+        Newest::start("Arrangement drawing", move |(asked, number, view, palette, scale, on_card): DrawJob| {
+            // Worked out here, and for the processor drawn here too, so the window's thread only puts it up.
+            let picture = Picture::new(view.frame(&palette, scale), scale, on_card);
+            SENT.fetch_max(number, Ordering::Relaxed);
+            let _ = weak.upgrade_in_event_loop(move |app| drawn(&app, asked, Some(number), picture));
+        });
     match drawer {
         Ok(d) => DRAWER.with(|slot| *slot.borrow_mut() = Some(d)),
         Err(e) => log::error("Arrangement", &format!("Couldn't start drawing the arrangement: {e}")),
@@ -363,20 +371,21 @@ fn show_hover(data: &ArrangementData, hover: Option<Hover>) {
 fn redraw(app: &AppWindow) {
     let scale = f64::from(app.window().scale_factor());
     let job = STATE.with(|s| {
-        let s = s.borrow();
+        let mut s = s.borrow_mut();
         let view = s.view.clone()?;
         (view.width >= 1.0 && view.height >= 1.0).then_some(())?;
-        Some((s.asked, view, s.palette?, scale, s.here))
+        s.pictures += 1;
+        Some((s.asked, s.pictures, view, s.palette?, scale, s.here))
     });
-    let Some((asked, view, palette, scale, here)) = job else { return };
+    let Some((asked, number, view, palette, scale, here)) = job else { return };
     if here {
-        drawn(app, asked, Picture::new(view.frame(&palette, scale), scale, false));
+        drawn(app, asked, None, Picture::new(view.frame(&palette, scale), scale, false));
         return;
     }
     let on_card = usable_card().is_some();
     DRAWER.with(|slot| {
         if let Some(drawer) = slot.borrow().as_ref() {
-            drawer.ask((asked, view, palette, scale, on_card));
+            drawer.ask((asked, number, view, palette, scale, on_card));
         }
     });
 }
@@ -394,10 +403,14 @@ pub fn graphics_ready(app: &AppWindow) {
     redraw(app);
 }
 
-/// The card went (the window closed, or the card was reset): the painter goes, and the picture made on it isn't shown
-/// any more. It's drawn again on the next card, or on the processor.
-pub fn graphics_gone(app: &AppWindow) {
+/// The card went (the window closed, or the card was reset): the painter goes with it, at once, even as the window
+/// itself goes.
+pub fn card_gone() {
     CARD.with(|c| c.borrow_mut().gone());
+}
+
+/// The card went: the picture made on it isn't shown any more. It's drawn again on the next card, or on the processor.
+pub fn graphics_gone(app: &AppWindow) {
     let weak = app.as_weak();
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(app) = weak.upgrade() {
@@ -456,9 +469,10 @@ struct Picture {
 impl Picture {
     fn new(frame: Frame, scale: f64, on_card: bool) -> Picture {
         let Frame { scene, labels, header_width, ruler_height, .. } = frame;
+        let scale = mo_app::shapes::usable_scale(scale);
         let drawing = if on_card {
             Drawing::Shapes(Shapes {
-                bytes: scene.pack(),
+                bytes: scene.pack(scale),
                 size: scene.pixel_size(scale),
                 scale: scale as f32,
                 background: scene.background,
@@ -501,10 +515,10 @@ fn paint(scene: &mo_app::shapes::Scene, scale: f64) -> SharedPixelBuffer<Rgba8Pi
     SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(pixmap.data(), pixmap.width(), pixmap.height())
 }
 
-/// A picture has been worked out: drawn on the card if it's for the card, and put on the page with its words, unless
-/// another song has been picked since.
-fn drawn(app: &AppWindow, asked: u64, picture: Picture) {
-    if STATE.with(|s| s.borrow().asked != asked) {
+/// A picture has been worked out (picture `number`, or here and now): drawn on the card if it's for the card, and put
+/// on the page with its words, unless another song has been picked since or a newer picture is on its way already.
+fn drawn(app: &AppWindow, asked: u64, number: Option<u64>, picture: Picture) {
+    if STATE.with(|s| s.borrow().asked != asked) || number.is_some_and(|n| n < SENT.load(Ordering::Relaxed)) {
         return;
     }
     let data = app.global::<ArrangementData>();
@@ -767,7 +781,7 @@ mod tests {
             let frame = view.frame(&palette, scale);
             let size = frame.scene.pixel_size(scale);
             let cpu = frame.scene.paint(scale);
-            let bytes = frame.scene.pack();
+            let bytes = frame.scene.pack(scale);
             let picture = canvas.draw(size, scale as f32, frame.scene.background, &bytes);
             let gpu = read_back(&device, &queue, &picture);
             assert_eq!((gpu.width(), gpu.height()), (cpu.width(), cpu.height()), "{name}");

@@ -393,7 +393,13 @@ pub fn graphics_ready(app: &AppWindow) {
     galaxy::draw(app);
 }
 
-/// The graphics card went (the window closed, or the card was reset): what the galaxy made on it goes too.
+/// The graphics card went (the window closed, or the card was reset): the galaxy's painter goes too, at once, even as
+/// the window itself goes.
+pub fn card_gone() {
+    galaxy::painter_gone();
+}
+
+/// The graphics card went: the galaxy's picture on show goes too.
 pub fn graphics_gone(app: &AppWindow) {
     galaxy::card_gone(app);
 }

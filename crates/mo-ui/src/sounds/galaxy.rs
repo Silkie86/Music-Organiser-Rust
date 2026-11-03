@@ -1516,11 +1516,15 @@ fn show_mini(app: &AppWindow) {
     }
 }
 
-/// The card went: the painter goes, and the picture made on it isn't shown any more (it's drawn again, on the next
-/// card or the processor, when the galaxy next is).
-pub(super) fn card_gone(app: &AppWindow) {
+/// The card went: the painter goes with it, now.
+pub(super) fn painter_gone() {
     CARD.with(|c| c.borrow_mut().gone());
     TWINKLE_SHOWS.with(|t| t.set(false));
+}
+
+/// The card went: the picture made on it isn't shown any more (it's drawn again, on the next card or the processor,
+/// when the galaxy next is).
+pub(super) fn card_gone(app: &AppWindow) {
     let weak = app.as_weak();
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(app) = weak.upgrade() {
