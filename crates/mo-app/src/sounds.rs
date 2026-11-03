@@ -150,13 +150,28 @@ pub struct SoundList {
     liked_best: f64,
 }
 
+/// A list of at least this many sounds is freed off the thread that lets it go ([`crate::background::free_later`]):
+/// freeing a few thousand takes a few milliseconds, half a million over a second.
+const FREE_LATER_FROM: usize = 2_000;
+
+impl Drop for SoundList {
+    /// The last copy of an old list is often let go on the window's thread (when the use counts arrive, the page swaps
+    /// its list for one that has them, and whichever part of the page held the old one last lets it go there), so a
+    /// big one goes to the freeing thread whole, all it holds with it, and is freed there.
+    fn drop(&mut self) {
+        if self.sounds.len() >= FREE_LATER_FROM && !crate::background::freeing_here() {
+            crate::background::free_later(std::mem::take(self));
+        }
+    }
+}
+
 impl SoundList {
     /// The list from the library's sounds.
     pub fn new(sounds: Vec<Sound>) -> SoundList {
         let sounds: Vec<Sound> = sounds.into_iter().filter(|s| !s.hidden).collect();
         let hay = sounds.par_iter().map(hay_of).collect();
         let names = sounds.par_iter().map(|s| s.name().to_lowercase()).collect();
-        SoundList { sounds, hay, names, ..SoundList::default() }
+        SoundList { sounds, hay, names, used: None, liked: None, liked_best: 0.0 }
     }
 
     /// How your projects use each sound (by id, as [`mo_sounds::usage::usage`] gives it), for the Used chips and
@@ -570,6 +585,26 @@ mod tests {
 
     fn ids(list: &SoundList, shown: &[usize]) -> Vec<i64> {
         shown.iter().filter_map(|&i| list.sound(i)).map(|s| s.id).collect()
+    }
+
+    #[test]
+    fn a_big_list_is_freed_off_the_thread_that_lets_it_go() {
+        let sounds = |n: usize| (0..n as i64).map(|i| sound(i, &format!(r"I:\S\{i}.wav"), "Kick", None)).collect();
+        let (big, small) = (SoundList::new(sounds(FREE_LATER_FROM)), SoundList::new(sounds(10)));
+        // A copy still in use keeps the list: only the last copy's going frees it.
+        let shared = std::sync::Arc::new(big);
+        let copy = shared.clone();
+        let before = crate::background::handed_over();
+        drop(small);
+        drop(shared);
+        assert_eq!(
+            crate::background::handed_over(),
+            before,
+            "a small list is freed here; one still in use isn't freed"
+        );
+        assert_eq!(copy.len(), FREE_LATER_FROM);
+        drop(copy);
+        assert_eq!(crate::background::handed_over(), before + 1, "the big one goes to the freeing thread");
     }
 
     #[test]
