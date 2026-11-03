@@ -586,11 +586,14 @@ fn swept(app: &AppWindow, from: (f32, f32), to: (f32, f32)) {
     let _doing = crate::watchdog::doing(frame_timing::SWEEPING);
     let steps = ((to.0 - from.0).hypot(to.1 - from.1) / SWEEP_STEP).ceil().max(1.0) as usize;
     let mut passed: Vec<usize> = Vec::new();
+    // Whether the first star passed is the one under the last mouse point.
+    let mut from_a_star = false;
     for i in 0..=steps {
         let t = i as f32 / steps as f32;
         if let Some(at) = star_at(from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t)
             && passed.last() != Some(&at)
         {
+            from_a_star |= i == 0;
             passed.push(at);
         }
     }
@@ -605,10 +608,10 @@ fn swept(app: &AppWindow, from: (f32, f32), to: (f32, f32)) {
     // Timed from here: Slint doesn't say when the move happened, so how late the window heard of it isn't known. The
     // star under the last mouse point was reached on an earlier move (as C#'s HitPath, which starts past it), so its
     // wait isn't started again; on the sweep's first move it's reached now.
-    let before = was.and_then(|_| star_at(from.0, from.1));
+    let skip = usize::from(was.is_some() && from_a_star);
     PAGE.with(|p| {
         let p = p.borrow();
-        for &at in passed.iter().filter(|&&at| Some(at) != before) {
+        for &at in passed.iter().skip(skip) {
             if let Some(s) = p.list.sound(at) {
                 sweep_timing::reached(&s.path, None);
             }

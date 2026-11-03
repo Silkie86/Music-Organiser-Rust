@@ -178,12 +178,13 @@ impl SweepTiming {
         }
     }
 
-    /// The reading thread is opening it now, as its read number `read`.
+    /// The reading thread is opening it now, as its read number `read`. A newer read for the same sound takes over
+    /// (the older one's thread may only now be getting going); an older one never does.
     pub fn opening(&mut self, path: &str, read: u64, now: Instant) {
         let ahead = self.read_ahead.iter().any(|p| p == path);
         if let Some(p) = self.pending.get_mut(path)
             && p.asked.is_some()
-            && p.opening.is_none()
+            && p.opening.is_none_or(|o| read > o.read)
         {
             p.opening = Some(Opening { at: now, read, ahead });
         }
@@ -551,6 +552,24 @@ mod tests {
         assert_eq!(t.waiting(), 1, "read 1 leaves the newer ask alone");
         t.opening("/a.wav", 2, at(t0, 601));
         t.started("/a.wav", 2, at(t0, 611));
+        assert!(t.note(at(t0, 10_000)).contains("opening the file 10.0 ms"));
+    }
+
+    #[test]
+    fn an_old_read_getting_going_late_doesnt_take_a_newer_reads_place() {
+        let t0 = Instant::now();
+        let mut t = SweepTiming::new();
+        t.reached("/a.wav", None, at(t0, 0));
+        t.asked("/a.wav", at(t0, 0));
+        // Swept back over it before read 1's thread got going: read 1 opens late, then read 2.
+        t.asked("/a.wav", at(t0, 50));
+        t.opening("/a.wav", 1, at(t0, 60));
+        t.opening("/a.wav", 2, at(t0, 61));
+        t.overtaken("/a.wav", 1, at(t0, 70));
+        assert_eq!(t.waiting(), 1, "read 1 leaves read 2's ask alone");
+        // And the other way round: read 2 first, then read 1 late, which doesn't take over.
+        t.opening("/a.wav", 1, at(t0, 62));
+        t.started("/a.wav", 2, at(t0, 71));
         assert!(t.note(at(t0, 10_000)).contains("opening the file 10.0 ms"));
     }
 

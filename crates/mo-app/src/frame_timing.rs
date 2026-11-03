@@ -112,6 +112,8 @@ impl FrameTiming {
     /// A marked step on the window's thread ended at `now`, having taken `own` (its time less the steps inside it).
     pub fn step(&mut self, what: &'static str, own: Duration, now: Instant) {
         let began = now.checked_sub(own).unwrap_or(now);
+        // No frame came for a while after the steps waiting: they ran between frames, and this one starts afresh.
+        self.flush_between(began);
         self.first_step = Some(self.first_step.map_or(began, |f| f.min(began)));
         self.moving |= [SWEEPING, GLIDING, DRAGGING].contains(&what);
         let t = ms(own);
@@ -130,28 +132,30 @@ impl FrameTiming {
         self.draw_total += draw;
         self.draw_most = self.draw_most.max(draw);
         // Steps that began well before this frame did ran while no frame was being drawn: they're not this frame's.
-        let between = self.first_step.is_some_and(|f| began.saturating_duration_since(f) > BETWEEN);
-        let mut total = draw;
-        if between {
-            for &(what, t) in &self.this_frame {
-                add(&mut self.between_parts, what, t);
-            }
-        } else {
-            total += self.this_frame.iter().map(|(_, t)| t).sum::<f64>();
-        }
+        self.flush_between(began);
+        let total = draw + self.this_frame.iter().map(|(_, t)| t).sum::<f64>();
         if total >= ms(SLOW) {
             self.slow += 1;
             self.slowest = self.slowest.max(total);
             add(&mut self.slow_parts, DRAWING, draw);
-            if !between {
-                for &(what, t) in &self.this_frame {
-                    add(&mut self.slow_parts, what, t);
-                }
+            for &(what, t) in &self.this_frame {
+                add(&mut self.slow_parts, what, t);
             }
         }
         self.this_frame.clear();
         self.first_step = None;
         self.due(now)
+    }
+
+    /// The steps waiting for a frame began over [`BETWEEN`] before `at` with no frame drawn: they ran between frames,
+    /// so they're counted there and not put on the next frame. Only those; steps from the last [`BETWEEN`] stay.
+    fn flush_between(&mut self, at: Instant) {
+        if self.first_step.is_some_and(|f| at.saturating_duration_since(f) > BETWEEN) {
+            for (what, t) in self.this_frame.drain(..) {
+                add(&mut self.between_parts, what, t);
+            }
+            self.first_step = None;
+        }
     }
 
     /// The watchdog's knock waited `waited` for an answer, on `page`, while the window was in the marked step `busy`
@@ -371,18 +375,18 @@ mod tests {
     fn steps_while_no_frame_is_drawn_are_counted_between_frames_not_as_one_huge_frame() {
         let t0 = Instant::now();
         let mut f = FrameTiming::new(t0);
-        // Ten seconds of steps with no frame (the window showing nothing that changes), then one quick frame.
+        // Ten seconds of steps with no frame (the window showing nothing that changes), then one quick frame. Only the
+        // step just before the frame is the frame's; the rest are counted between frames, in batches of 100 ms.
         for i in 0..10_000 {
             f.step("Sounds: the library arrived", d(1), at(t0, i + 1));
         }
         assert_eq!(f.this_frame.len(), 1, "steps merge by name, so the list can't grow without frames");
-        f.drawn(d(2), "Sounds", at(t0, 10_005));
-        let line = f.note(at(t0, 10_010)).expect("steps between frames are worth a line");
+        let line = f.drawn(d(2), "Sounds", at(t0, 10_005)).expect("steps between frames are worth a line");
         assert!(line.contains("no frame over 33 ms"), "{line}");
         assert!(
             line.contains(
                 "Between frames (no frame drawn for over 100 ms), marked steps took: Sounds: the library arrived \
-                 10000 ms (in 1, longest 10000)."
+                 9999 ms (in 99, longest 101)."
             ),
             "{line}"
         );
@@ -397,6 +401,20 @@ mod tests {
         let line = f.note(at(t0, 10_000)).expect("a slow frame");
         assert!(line.contains("1 over 33 ms (slowest 45 ms)"), "{line}");
         assert!(!line.contains("Between frames"), "{line}");
+    }
+
+    #[test]
+    fn a_step_long_before_a_frame_is_between_frames_but_one_just_before_is_the_frames() {
+        let t0 = Instant::now();
+        let mut f = FrameTiming::new(t0);
+        // A job's results arrived with nothing to draw; seconds later the galaxy draws a slow frame.
+        f.step("Sounds: the library arrived", d(20), at(t0, 20));
+        f.step("Galaxy: draw", d(40), at(t0, 3_000));
+        f.drawn(d(5), "Sounds", at(t0, 3_010));
+        let line = f.note(at(t0, 10_000)).expect("a slow frame");
+        assert!(line.contains("1 over 33 ms (slowest 45 ms), their time went to: Galaxy: draw 40 ms"), "{line}");
+        assert!(!line.contains("went to: Sounds"), "{line}");
+        assert!(line.contains("marked steps took: Sounds: the library arrived 20 ms (in 1, longest 20)"), "{line}");
     }
 
     #[test]
