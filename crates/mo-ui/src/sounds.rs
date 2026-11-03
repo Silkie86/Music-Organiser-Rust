@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use chrono::{Local, NaiveDateTime};
 use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
-use mo_app::shortcuts::Shortcuts;
+use mo_app::shortcuts::{Shortcuts, what_of};
 use mo_app::sounds::{self as list, Filters, Length, Order, SoundList};
 use mo_app::{log, sweep_timing, year_strip};
 use mo_audio::play::Player;
@@ -33,8 +33,8 @@ use mo_sounds::{Sound, SoundsDb, music};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, Timer, TimerMode, VecModel};
 
 use crate::{
-    AlikeLine, AppWindow, FolderLine, MenuItem, PickedSound, SoundFact, SoundLine, SoundTile, SoundsData, TileRow,
-    TypeChipInfo, YearBar,
+    AlikeLine, AppWindow, CardAction, FolderLine, MenuItem, PickedSound, SoundFact, SoundLine, SoundTile, SoundsData,
+    TileRow, TypeChipInfo, YearBar,
 };
 
 /// The C# app's settings in `library.db` for the view shown last and autoplay, read (not written: it's read-only).
@@ -96,6 +96,8 @@ struct Page {
     autoplay: bool,
     /// Counts the asks for a new list, so an older answer that arrives late is dropped.
     asked: u64,
+    /// The sounds have been read and handed to the page ([`show`]): the next list shown is of them.
+    read: bool,
     /// The type chips' types with their counts, in chip order, then the rest (the More types menu).
     types: Vec<(String, usize)>,
     now: NaiveDateTime,
@@ -136,6 +138,7 @@ impl Default for Page {
             picked: None,
             autoplay: false,
             asked: 0,
+            read: false,
             types: Vec::new(),
             now: Local::now().naive_local(),
             playing: None,
@@ -372,7 +375,7 @@ pub fn graphics_gone(app: &AppWindow) {
 pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: Feed, shortcuts: &Shortcuts) {
     wire(app, feed, shortcuts);
     PAGE.with(|p| p.borrow_mut().galaxy.db = Some(sounds_db.clone()));
-    app.global::<SoundsData>().set_busy("Reading your sounds".into());
+    reading(app);
     let here = HERE.with(|h| *h.borrow());
     let weak = app.as_weak();
     let send = move |step: Step| {
@@ -394,8 +397,20 @@ pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: F
         return;
     }
     if let Err(e) = background::spawn("Sounds library", move || read_all(&sounds_db, &library_db, send)) {
-        log::error("Sounds", &format!("Couldn't start reading the library: {e}"));
+        // The sounds would never come: the page says why, rather than reading for ever.
+        loaded(app, Err(format!("its reader couldn't start ({e})")));
     }
+}
+
+/// While the sounds are read, every view shows one word in the list's place: not "No sounds match" (nothing is
+/// filtered out yet), and not the galaxy's own word on top of it (Solomon's F12 note, 2026-11-02 04:25). Said once,
+/// as the Songs page says it, not again in the page's header. The first list of the sounds takes its place once they
+/// arrive ([`listed`]), or why they couldn't be read does ([`loaded`]).
+pub fn reading(app: &AppWindow) {
+    PAGE.with(|p| p.borrow_mut().read = false);
+    let data = app.global::<SoundsData>();
+    data.set_empty_title("Reading your sounds…".into());
+    data.set_empty_text("".into());
 }
 
 /// What reading brings back, in two steps: the sounds first, then the list again with how your songs use them.
@@ -712,7 +727,6 @@ fn use_known(app: &AppWindow, list: Arc<SoundList>) {
 fn loaded(app: &AppWindow, read: Result<Read, String>) {
     let _doing = crate::watchdog::doing("Sounds: the sounds were read");
     let data = app.global::<SoundsData>();
-    data.set_busy("".into());
     let read = match read {
         Ok(read) => read,
         Err(why) => {
@@ -743,10 +757,12 @@ fn loaded(app: &AppWindow, read: Result<Read, String>) {
 /// Shows a `library` on the page, opening on the view and autoplay setting given.
 pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Option<&str>) {
     let data = app.global::<SoundsData>();
-    data.set_empty_title("".into());
     data.set_tags(strings(&library.tags));
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
+        // "Reading your sounds…" stays until the list of them is worked out, so "No sounds match" never flashes up
+        // in between ([`listed`]).
+        p.read = true;
         p.history = library.played;
         p.list = library.list;
         p.places = library.places;
@@ -771,6 +787,34 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
     }
 }
 
+/// What the picked sound offers besides Play: (its words, its id in the shortcut list). The card shows them as
+/// buttons after Play (Solomon's F12 note, 2026-11-02 03:28) and the right-click menu lists them under Play, from this
+/// one list so the two can't drift apart. Send to Bitwig joins once the DAW link is in.
+const CARD_ACTIONS: &[(&str, &str)] = &[("Show in folder", "sounds.reveal"), ("Copy path", "sounds.copyPath")];
+
+/// The card's buttons and the right-click menu, with each one's key and tooltip from the shortcut list (rule 15).
+fn show_actions(data: &SoundsData, shortcuts: &Shortcuts) {
+    // Play has the app-wide key, but the page plays it itself (`on_menu_chosen`). A line with no words is the rule
+    // under it.
+    let play = MenuItem {
+        what: "Play or stop".into(),
+        key: shortcuts.key_of("app.play").into(),
+        id: "play".into(),
+        enabled: true,
+    };
+    let mut menu = vec![play, MenuItem { enabled: true, ..MenuItem::default() }];
+    let mut actions = Vec::new();
+    for &(text, id) in CARD_ACTIONS {
+        let key = SharedString::from(shortcuts.key_of(id));
+        menu.push(MenuItem { what: text.into(), key: key.clone(), id: id.into(), enabled: true });
+        actions.push(CardAction { text: text.into(), tip: what_of(id).into(), key, id: id.into(), enabled: true });
+    }
+    data.set_menu(ModelRc::new(VecModel::from(menu)));
+    data.set_actions(ModelRc::new(VecModel::from(actions)));
+    data.set_play_tip("Play or stop the picked sound".into());
+    data.set_play_key(shortcuts.key_of("app.play").into());
+}
+
 fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     FEED.with(|f| *f.borrow_mut() = Some(feed));
     let data = app.global::<SoundsData>();
@@ -781,16 +825,7 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     data.set_lengths(strings([Length::Hits.name(), Length::Loops.name()]));
     data.set_keys(strings(key_choices()));
     data.set_bpms(strings(TEMPOS.map(|t| t.0)));
-    let key = |id: &str| shortcuts.key_of(id);
-    let item =
-        |what: &str, key: &str, id: &str| MenuItem { what: what.into(), key: key.into(), id: id.into(), enabled: true };
-    data.set_menu(ModelRc::new(VecModel::from(vec![
-        item("Play or stop", key("app.play"), "play"),
-        item("", "", ""),
-        item("Show in folder", key("sounds.reveal"), "sounds.reveal"),
-        item("Copy path", key("sounds.copyPath"), "sounds.copyPath"),
-    ])));
-    data.set_play_tip("Play or stop the picked sound".into());
+    show_actions(&data, shortcuts);
 
     let weak = app.as_weak();
     data.on_search_edited(move |text| change(&weak, |f| f.search = text.to_string()));
@@ -1298,6 +1333,10 @@ fn listed(app: &AppWindow, id: u64, shown: Vec<usize>, years: YearCounts) {
     if current {
         show_years(app);
         show_lists(app);
+        // Once the sounds are read, the list (or "No sounds match") takes the place of the word saying so.
+        if PAGE.with(|p| p.borrow().read) {
+            app.global::<SoundsData>().set_empty_title("".into());
+        }
         // The filters dim the stars they leave out.
         galaxy::draw(app);
     }
@@ -1460,7 +1499,7 @@ fn picked_sound(p: &Page, at: usize) -> PickedSound {
         sound_type: s.sound_type.clone().into(),
         colour: list::type_colour(&s.sound_type),
         type_from: type_from.into(),
-        path: s.path.clone().into(),
+        path: mo_app::shell::wrappable_path(&s.path).into(),
         wave: wave(s).into(),
         points: points(s),
         seconds: a.map_or(0.0, |a| a.seconds.min(mo_audio::MAX_SECONDS)) as f32,
@@ -1814,5 +1853,15 @@ mod tests {
         assert_eq!(when(now - chrono::Duration::days(2), now), "Fri");
         assert_eq!(when(now - chrono::Duration::days(30), now), "2 Oct");
         assert_eq!(key_choices().len(), 24);
+    }
+
+    /// Each button on the card is a page action in the shortcut list, so it has a tooltip and a key, and its key and
+    /// its line on the right-click menu run the same thing.
+    #[test]
+    fn every_card_button_is_in_the_shortcut_list() {
+        for (text, id) in CARD_ACTIONS {
+            let action = mo_app::shortcuts::SOUNDS_ACTIONS.iter().find(|a| a.id == *id);
+            assert!(action.is_some_and(|a| !a.what.is_empty() && !a.default_key.is_empty()), "{text}");
+        }
     }
 }

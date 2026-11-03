@@ -1383,6 +1383,34 @@ export component MenuButton inherits StudioButton {
     }
 }
 
+// One thing a side card offers, as a button: its words, what it does and its key (both from the shortcut list, for
+// its tooltip, rule 15), and the id the page acts on.
+export struct CardAction {
+    text: string,
+    tip: string,
+    key: string,
+    id: string,
+    enabled: bool,
+}
+
+// A side card's buttons: everything you can do with what's picked, in sight rather than behind a "more" menu
+// (Solomon's F12 note, 2026-11-02 03:28: "theres enough space just put them there"). The card's main button goes
+// first, as a child; the rest follow and wrap onto another line when the card is narrow. The right-click menu on a
+// line offers the same.
+export component CardActions inherits FlexboxLayout {
+    in property <[CardAction]> actions;
+    callback chosen(string);
+    spacing: Space.sm;
+    @children
+    for a in root.actions: StudioButton {
+        text: a.text;
+        tip: a.tip;
+        key: a.key;
+        enabled: a.enabled;
+        clicked => { root.chosen(a.id); }
+    }
+}
+
 // The menu of things to do with what's picked: a small "more" button, the same lines as the right-click menu.
 export component MoreButton inherits MenuButton {
     icon: Icons.more;
@@ -1452,10 +1480,14 @@ export component SidePanel inherits Rectangle {
     border-radius: Theme.radius;
     border-width: 1px;
     border-color: Theme.edge;
-    // Scrolls when what it holds is taller than the panel; fills it otherwise, so a stretch at the end works.
+    // Scrolls when what it holds is taller than the panel; fills it otherwise, so a stretch at the end works. Never
+    // wider than the panel: something too wide inside (a long path once) made the whole card slide right and lose its
+    // right side (Solomon's F12 note, 2026-11-02 03:28), so it's cut at the edge instead, and the parts wrap.
     flick := Flickable {
+        content-width: flick.width;
         content-height: content.height;
         content := VerticalLayout {
+            x: 0;
             width: flick.width;
             height: max(flick.height, self.preferred-height);
             padding: Space.xl;
