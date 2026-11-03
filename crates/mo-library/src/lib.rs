@@ -1,11 +1,13 @@
 //! The library: every project save the app knows, your own fields on them (status, rating, key, notes, tags), and the
 //! saves grouped into songs.
 //!
-//! For now this reads the C# app's `library.db` (in `%LOCALAPPDATA%\MusicOrganiser`) and never writes to it: the
-//! database is opened read-only, so nothing here can change it. Writing comes once the twin test says the Rust app
-//! reads your library as the C# one does (CLAUDE.md, "How work is done").
+//! This reads the C# app's `library.db` (in `%LOCALAPPDATA%\MusicOrganiser`) read-only, so nothing that reads can
+//! change it. The one exception is [`folders`], which adds and removes the folders the app looks in (Solomon's OK,
+//! 2026-11-03), one checked transaction at a time. Other writing comes once the twin test says the Rust app reads your
+//! library as the C# one does (CLAUDE.md, "How work is done").
 
 mod db;
+pub mod folders;
 pub mod read;
 pub mod samples;
 pub mod scan;
