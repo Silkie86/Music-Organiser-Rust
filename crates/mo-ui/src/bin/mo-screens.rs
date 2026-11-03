@@ -65,6 +65,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Once to lay the page out (the tiles' width tells the page how many fit in a row), then for real.
     capture(&window);
 
+    // Settings, from made-up settings: nothing is read from this computer or written.
+    mo_ui::settings::connect(
+        &app,
+        mo_ui::settings::Setup {
+            settings: mo_app::app_settings::AppSettings::default(),
+            folder: out.join("no settings"),
+            library: out.join("no library.db"),
+            running_pace: mo_app::background::Pace::Fast,
+            live: false,
+            feed: feed.clone(),
+        },
+    );
+
     let mut shots = Vec::new();
     for place in Place::ALL {
         app.set_place(place.index() as i32);
@@ -102,6 +115,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     shots.push(("backup-gone-open.png".into(), capture(&window)));
     app.global::<mo_ui::BackupData>().set_gone_open(false);
     mo_ui::backup::show_gone(&app, &mo_app::backup_gone::Warning::default());
+    settings_shots(&app, &window, &graphite, &mut shots);
     app.set_place(Place::Songs.index() as i32);
     for theme in THEMES.iter().skip(1) {
         mo_ui::apply_look(&app, &Look::from_settings(Some(theme.name), None));
@@ -567,6 +581,65 @@ fn hover(window: &MinimalSoftwareWindow, x: f32, y: f32) {
 }
 
 /// The mouse wheel turned over a point: a negative `dy` moves the page up, to show what's below.
+/// Settings' tabs, from made-up folders and sound outputs: General in Graphite and Paper, then smaller, then Folders
+/// and Developer.
+fn settings_shots(
+    app: &mo_ui::AppWindow,
+    window: &MinimalSoftwareWindow,
+    graphite: &Look,
+    shots: &mut Vec<(String, Vec<u8>)>,
+) {
+    app.set_place(Place::Settings.index() as i32);
+    let outputs = ["Speakers (Realtek)".to_owned(), "Focusrite USB".to_owned()];
+    mo_ui::settings::show_outputs(app, &outputs, "Sounds play through Speakers (Realtek).");
+    let data = app.global::<mo_ui::SettingsData>();
+    data.invoke_tab_picked(0);
+    capture(window);
+    shots.push(("settings-general.png".into(), capture(window)));
+    scroll(window, 900.0, 500.0, -PAGE_DOWN);
+    shots.push(("settings-general-lower.png".into(), capture(window)));
+    scroll(window, 900.0, 500.0, -PAGE_DOWN);
+    shots.push(("settings-about.png".into(), capture(window)));
+    scroll(window, 900.0, 500.0, 2.0 * PAGE_DOWN);
+    data.invoke_theme_picked(4);
+    data.invoke_accent_picked(2);
+    shots.push(("settings-general-paper.png".into(), capture(window)));
+    data.invoke_back_to_normal();
+    mo_ui::apply_look(app, graphite);
+    data.invoke_size_picked(1);
+    capture(window);
+    shots.push(("settings-general-80.png".into(), capture(window)));
+    data.invoke_size_picked(3);
+    let moved = mo_space::folder_move::MovedFolder {
+        from: "C:\\Users\\Solomon\\Documents\\Native Instruments".into(),
+        to: "I:\\Plugin data\\Native Instruments".into(),
+        old_copy: String::new(),
+        bytes: 0,
+        moved: String::new(),
+        key: String::new(),
+        kind: 2,
+        shared_with: Vec::new(),
+    };
+    mo_ui::settings::show_folders(
+        app,
+        Ok(mo_app::settings::folder_groups(
+            vec!["I:\\Fl Studio Data\\FL Studio\\Projects".into(), "K:\\Bitwig Studio\\Projects".into()],
+            vec!["I:\\Samples".into(), "G:\\Splice".into()],
+            vec!["L:\\New Midi".into()],
+            vec![],
+            vec!["C:\\Program Files\\Common Files\\VST3".into(), "C:\\Program Files\\Common Files\\CLAP".into()],
+            &[moved],
+        )),
+    );
+    data.invoke_tab_picked(1);
+    capture(window);
+    shots.push(("settings-folders.png".into(), capture(window)));
+    data.invoke_tab_picked(4);
+    capture(window);
+    shots.push(("settings-developer.png".into(), capture(window)));
+    data.invoke_tab_picked(0);
+}
+
 fn scroll(window: &MinimalSoftwareWindow, x: f32, y: f32, dy: f32) {
     let position = slint::LogicalPosition::new(x, y);
     window.dispatch_event(slint::platform::WindowEvent::PointerScrolled { position, delta_x: 0.0, delta_y: dy });

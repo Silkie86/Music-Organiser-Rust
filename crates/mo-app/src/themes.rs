@@ -4,6 +4,33 @@
 /// The settings that choose the look. Same names as the C# app.
 pub const THEME_KEY: &str = "appearance_theme";
 pub const ACCENT_KEY: &str = "appearance_accent";
+/// The font picked over the theme's own, by one of [`FONTS`]' names. The C# app's name.
+pub const FONT_KEY: &str = "appearance_font";
+/// The size of everything, in percent of normal, one of [`SIZES`]. The C# app's name.
+pub const SIZE_KEY: &str = "appearance_size";
+
+/// The fonts to pick, as the C# app names them: the first follows the theme. The C# app's "Inter" isn't built into
+/// this app, so a saved "Inter" follows the theme too.
+pub const FONTS: [&str; 4] = ["Theme's font", "IBM Plex", "Space (retro)", "Mono (all)"];
+
+/// How big everything can be, in percent of normal (the C# app's steps): smaller fits more on a big screen, bigger is
+/// easier to read on a small one.
+pub const SIZES: [u32; 7] = [70, 80, 90, 100, 110, 125, 150];
+
+/// The size of everything from its setting: 100 unless it's one of [`SIZES`].
+pub fn size_from_setting(value: Option<&str>) -> u32 {
+    value.and_then(|v| v.trim().parse().ok()).filter(|n| SIZES.contains(n)).unwrap_or(100)
+}
+
+/// The font a [`FONTS`] name stands for, or `None` for the theme's own (and for anything unknown).
+pub fn font_named(name: &str) -> Option<ThemeFont> {
+    match name {
+        "IBM Plex" => Some(ThemeFont::Plex),
+        "Space (retro)" => Some(ThemeFont::Space),
+        "Mono (all)" => Some(ThemeFont::Mono),
+        _ => None,
+    }
+}
 
 /// The font family a theme uses for its text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -195,6 +222,14 @@ impl Look {
             None => Look { theme, accent: theme.accent, accent_text: theme.accent_text },
         }
     }
+
+    /// The look with the font setting on top: one of [`FONTS`]' names, or the theme's own font for anything else.
+    pub fn with_font(mut self, font: Option<&str>) -> Look {
+        if let Some(f) = font.and_then(font_named) {
+            self.theme.font = f;
+        }
+        self
+    }
 }
 
 pub fn theme_named(name: &str) -> Option<Theme> {
@@ -239,6 +274,24 @@ mod tests {
         assert_eq!(Look::from_settings(None, Some("")).accent, 0x3DDC97);
         assert_eq!(Look::from_settings(None, Some("#+12345")).accent, 0x3DDC97);
         assert_eq!(Look::from_settings(None, Some("aéééb")).accent, 0x3DDC97);
+    }
+
+    #[test]
+    fn a_picked_font_wins_and_unknown_ones_follow_the_theme() {
+        let retro = Look::from_settings(Some("Retro"), None);
+        assert_eq!(retro.with_font(Some("IBM Plex")).theme.font, ThemeFont::Plex);
+        assert_eq!(retro.with_font(Some("Theme's font")).theme.font, ThemeFont::Space);
+        assert_eq!(retro.with_font(Some("Inter")).theme.font, ThemeFont::Space);
+        assert_eq!(retro.with_font(None).theme.font, ThemeFont::Space);
+        assert_eq!(Look::from_settings(None, None).with_font(Some("Mono (all)")).theme.font, ThemeFont::Mono);
+    }
+
+    #[test]
+    fn sizes_are_read_like_the_csharp_app() {
+        assert_eq!(size_from_setting(Some("125")), 125);
+        assert_eq!(size_from_setting(Some("123")), 100);
+        assert_eq!(size_from_setting(Some("x")), 100);
+        assert_eq!(size_from_setting(None), 100);
     }
 
     #[test]

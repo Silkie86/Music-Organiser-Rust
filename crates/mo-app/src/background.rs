@@ -21,6 +21,8 @@ pub fn spawn<T: Send + 'static>(name: &str, work: impl FnOnce() -> T + Send + 's
 pub fn on_pool<T: Send>(work: impl FnOnce() -> T + Send) -> T {
     static POOL: std::sync::LazyLock<Option<rayon::ThreadPool>> = std::sync::LazyLock::new(|| {
         rayon::ThreadPoolBuilder::new()
+            // 0 is rayon's own choice: one per core.
+            .num_threads(POOL_THREADS.load(std::sync::atomic::Ordering::Relaxed))
             .thread_name(|i| format!("Background {i}"))
             .start_handler(|_| lower_priority())
             .build()
@@ -31,6 +33,59 @@ pub fn on_pool<T: Send>(work: impl FnOnce() -> T + Send) -> T {
         // The system wouldn't start the threads: done here instead, still away from the window.
         None => work(),
     }
+}
+
+/// How many threads the pool gets, from Settings' pace; 0 for one per core. Read once, when the pool starts.
+static POOL_THREADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// How hard background work may push the computer (Settings › General › Pace; the C# app's `performance` setting).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pace {
+    /// Half the processor's threads, so the window, the galaxy and playback stay smooth even on a busy computer.
+    Gentle,
+    /// All but two.
+    Balanced,
+    /// Every thread, still at low priority. This app's default (it always ran this way), where the C# app's is Gentle.
+    Fast,
+}
+
+impl Pace {
+    pub const ALL: [Pace; 3] = [Pace::Gentle, Pace::Balanced, Pace::Fast];
+
+    /// Its name, as the setting keeps it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Pace::Gentle => "Gentle",
+            Pace::Balanced => "Balanced",
+            Pace::Fast => "Fast",
+        }
+    }
+
+    /// The pace from its setting; Fast when it isn't set or isn't known.
+    pub fn from_setting(value: Option<&str>) -> Pace {
+        Pace::ALL.into_iter().find(|p| Some(p.name()) == value).unwrap_or(Pace::Fast)
+    }
+
+    /// How many threads it gives background work on a computer with `cores` of them (at least one).
+    pub fn threads(self, cores: usize) -> usize {
+        let cores = cores.max(1);
+        match self {
+            Pace::Gentle => (cores / 2).max(1),
+            Pace::Balanced => cores.saturating_sub(2).max(1),
+            Pace::Fast => cores,
+        }
+    }
+}
+
+/// The processor's threads, as the system tells them (1 if it won't).
+pub fn cores() -> usize {
+    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+}
+
+/// Sets the pool's size from the pace. Call it once in `main`, before any work goes to the pool: the pool starts at
+/// the first job and keeps its size after that, so a pace changed later takes over at the next start.
+pub fn set_pace(pace: Pace) {
+    POOL_THREADS.store(pace.threads(cores()), std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Lowers the priority of the thread it's called on. Where the system won't (some Linux set-ups), the thread runs on
@@ -101,6 +156,19 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
     use std::time::Duration;
+
+    #[test]
+    fn paces_share_the_threads_like_the_csharp_app() {
+        assert_eq!(Pace::Gentle.threads(16), 8);
+        assert_eq!(Pace::Balanced.threads(16), 14);
+        assert_eq!(Pace::Fast.threads(16), 16);
+        // Never none, on the smallest computer.
+        assert_eq!(Pace::Gentle.threads(1), 1);
+        assert_eq!(Pace::Balanced.threads(2), 1);
+        assert_eq!(Pace::from_setting(Some("Balanced")), Pace::Balanced);
+        assert_eq!(Pace::from_setting(Some("?")), Pace::Fast);
+        assert_eq!(Pace::from_setting(None), Pace::Fast);
+    }
 
     #[test]
     fn only_the_newest_waiting_job_is_done() {

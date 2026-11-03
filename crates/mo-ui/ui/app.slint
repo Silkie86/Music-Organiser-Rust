@@ -9,6 +9,9 @@ import { SongsPage, SongsData, SongLine, PanelSong, CountLine, PluginLine, Sampl
 import { ArrangementData, ArrLabel, ArrKind } from "pages/arrangement.slint";
 import { BackupPage, BackupData, BackupFolderLine, LeftOutLine } from "pages/backup.slint";
 import { ActivityCards, CardInfo, KeySheet, KeyRow, NoteDialog } from "shell.slint";
+import { SettingsPage, SettingsData, ThemeCardInfo, AccentInfo, SettingsFact, FolderGroupInfo } from "pages/settings.slint";
+// std-widgets' colours follow the theme (light or dark), for its scroll bars and the About part's Slint logo.
+import { Palette } from "std-widgets.slint";
 
 import "../fonts/IBMPlexSans-400.ttf";
 import "../fonts/IBMPlexSans-500.ttf";
@@ -25,6 +28,7 @@ import "../fonts/SpaceGrotesk-700.ttf";
 import "../fonts/SpaceMono-400.ttf";
 import "../fonts/SpaceMono-700.ttf";
 
+export { Palette, SettingsData, ThemeCardInfo, AccentInfo, SettingsFact, FolderGroupInfo }
 export { Theme, Icons, ActionKey, MenuItem, CardAction, YearBar, SoundsData, GalaxyLabel, SweptLine, TrailDot, AlikeLine, FolderLine, PadLine, TypeChipInfo, SoundTile, TileRow, SoundLine, SoundFact, PickedSound, BackupData, BackupFolderLine, LeftOutLine, ArrangementData, ArrLabel, ArrKind, CardInfo, KeyRow, SongsData, SongLine, PanelSong, CountLine, PluginLine, SampleLine, SaveLine, DetailPair, HealthLine, OlderLine }
 
 export struct PlaceInfo {
@@ -55,6 +59,8 @@ export component AppWindow inherits Window {
     in property <int> sounds-place: 1;
     // Backup: a lean copy of your music on another drive.
     in property <int> backup-place: -1;
+    // Settings: General, Folders, DAWs, Shortcuts and Developer.
+    in property <bool> settings-built: false;
     // The shared parts on one page instead of the places, for the screenshots only.
     in property <bool> parts-gallery;
     in-out property <int> place: 0;
@@ -170,7 +176,10 @@ export component AppWindow inherits Window {
             if root.place == root.backup-place: BackupPage {
                 horizontal-stretch: 1;
             }
-            if root.place != root.songs-place && root.place != root.sounds-place && root.place != root.backup-place: ComingPage {
+            if root.place == root.settings-place && root.settings-built: SettingsPage {
+                horizontal-stretch: 1;
+            }
+            if root.place != root.songs-place && root.place != root.sounds-place && root.place != root.backup-place && !(root.place == root.settings-place && root.settings-built): ComingPage {
                 horizontal-stretch: 1;
                 title: root.places[root.place].name;
                 coming: root.places[root.place].coming;

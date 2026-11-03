@@ -4,10 +4,9 @@
 use std::io::Write;
 
 use mo_app::activity::Feed;
+use mo_app::background::Pace;
 use mo_app::log;
-use mo_app::places::Place;
 use mo_app::shortcuts::Shortcuts;
-use mo_app::themes::Look;
 use slint::ComponentHandle;
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -19,11 +18,23 @@ fn main() -> Result<(), slint::PlatformError> {
     let session = log::start_session();
     log_crashes();
     let feed = Feed::default();
-    // The settings come from library.db once mo-library exists (phase 2); until then the app opens in its defaults.
-    let shortcuts = Shortcuts::from_setting(None);
+    // This app's own settings over the C# app's, which library.db keeps and the app only reads.
+    let data = mo_app::paths::data_dir();
+    let library = data.join("library.db");
+    let settings = mo_ui::settings::load(&data, &library);
+    let shortcuts = Shortcuts::from_setting(settings.get(mo_app::shortcuts::SETTING_KEY));
+    // Settings' pace: how many low-priority threads background work gets, from now until the app closes.
+    let pace = Pace::from_setting(settings.get(mo_app::app_settings::PACE_KEY));
+    mo_app::background::set_pace(pace);
+    log::info(
+        "Settings",
+        &format!("Pace {}: {} background threads", pace.name(), pace.threads(mo_app::background::cores())),
+    );
     // The graphics card draws the window and the galaxy; without one, the processor does.
     mo_ui::gpu::choose();
-    let app = match mo_ui::new_app(&Look::from_settings(None, None), shortcuts.clone(), Place::Songs, feed.clone()) {
+    let look = mo_ui::settings::look_of(&settings);
+    let start = mo_app::app_settings::start_place(&settings);
+    let app = match mo_ui::new_app(&look, shortcuts.clone(), start, feed.clone()) {
         Ok(app) => app,
         Err(e) => {
             // Rule 17: the reason the window couldn't open reaches the log too.
@@ -44,10 +55,24 @@ fn main() -> Result<(), slint::PlatformError> {
     );
     // Space, Backup: the backup settings live in a file of their own; the library is only read.
     mo_ui::backup::connect(&app, mo_app::paths::data_dir().join("library.db"), feed.clone());
+    // Settings: changes are kept in the app's own file, never in library.db.
+    mo_ui::settings::connect(
+        &app,
+        mo_ui::settings::Setup { settings, folder: data, library, running_pace: pace, live: true, feed: feed.clone() },
+    );
     app.window().set_maximized(true);
     // The watchdog starts once the window is up, so opening it doesn't count as a freeze.
     let watched = feed.clone();
-    if slint::invoke_from_event_loop(move || mo_ui::watchdog::start(watched)).is_err() {
+    let sized = app.as_weak();
+    if slint::invoke_from_event_loop(move || {
+        // The size of everything, once the window knows the screen's own scale.
+        if let Some(app) = sized.upgrade() {
+            mo_ui::settings::apply_size(&app);
+        }
+        mo_ui::watchdog::start(watched);
+    })
+    .is_err()
+    {
         log::warning("Freeze", "Couldn't start the freeze watchdog");
     }
     let ran = app.run();

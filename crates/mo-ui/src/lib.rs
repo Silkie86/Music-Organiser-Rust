@@ -15,6 +15,7 @@ pub mod cards;
 pub mod files;
 pub mod gpu;
 pub mod note;
+pub mod settings;
 pub mod songs;
 pub mod sounds;
 pub mod watchdog;
@@ -137,8 +138,12 @@ fn go_to(app: &AppWindow, index: i32) {
         log::info("Page", place.name());
     }
     app.set_place(index);
+    settings::page_shown(place);
     if place == Place::Backup {
         backup::shown();
+    }
+    if place == Place::Settings {
+        settings::shown(app);
     }
     KEYS.with(|k| {
         if let Some(shortcuts) = k.borrow().as_ref() {
@@ -185,6 +190,11 @@ pub fn apply_look(app: &AppWindow, look: &Look) {
     t.set_square(th.square);
     t.set_text_font(th.font.text_family().into());
     t.set_number_font(th.font.number_family().into());
+    app.global::<Palette>().set_color_scheme(if th.light {
+        slint::language::ColorScheme::Light
+    } else {
+        slint::language::ColorScheme::Dark
+    });
     arrangement::set_look(app, look);
 }
 
