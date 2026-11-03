@@ -46,8 +46,8 @@
 //! part way (the app closed) goes on from there next time. Two copies of the app never go through the notes at once:
 //! the one that does holds a lock on [`NOTES_LOCK_FILE`] (an empty file beside it, which stays), and the other leaves
 //! them be. Never the draft (`draft.txt`, nor `draft.txt.mo-part` and `draft.txt.mo-part-2`, what it's written as
-//! first: they may hold the newest words, and the next draft written clears one left behind), the words of a save
-//! that failed (`unsaved.txt`) or the lock (`writing.lock`) (rule 17).
+//! first: they may hold the newest words, and the next draft written the same way clears one left behind), the words
+//! of a save that failed (`unsaved.txt`) or the lock (`writing.lock`) (rule 17).
 //!
 //! Never touched: samples (rule 2), projects, "(fixed)" copies (rule 3), converts and exports, F12 notes under 3 months
 //! old and the drafts (rule 17), Playground ideas, settings, the databases (library.db, sounds.db and midi.db are the

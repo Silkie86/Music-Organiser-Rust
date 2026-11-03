@@ -504,7 +504,10 @@ fn keep_at_the_end(folder: &Path, turn: Turn) {
     if words.trim().is_empty() {
         return;
     }
+    // In the draft's turn if it's free now (see `KeepFailed`), and all the same if it isn't: this waited for it once.
+    let mine = draft_turn(Turn::Never);
     keep_failed_words(folder, &words);
+    drop(mine);
     // A line of how the run ends: it shows even once the log is full.
     let said = format!(
         "As the app ended, a note's words couldn't be put in its draft for sure (it couldn't be written, or an older \
@@ -531,23 +534,37 @@ fn wait_for_saves_in(folder: &Path, wait: Duration) {
     while SAVING.load(Ordering::Acquire) > 0 && Instant::now() < until {
         std::thread::sleep(Duration::from_millis(20));
     }
-    if SAVING.load(Ordering::Acquire) > 0 && keep_saves_at_the_end(folder) == 0 {
-        // A line of how the run ends: it shows even once the log is full. Its words were in a file before they stopped
-        // being kept for the end of the run (in the note, or with the words of failed saves, and in this log).
-        let said =
-            "A note was still being saved when the app closed, after its words were kept; its picture may not be.";
+    if SAVING.load(Ordering::Acquire) > 0 {
+        // A line of how the run ends: it shows even once the log is full. Words kept here are in it already, each.
+        let said = match keep_saves_at_the_end(folder) {
+            // Its words were in a file before they stopped being kept for the end of the run (in the note, or with the
+            // words of failed saves, and in this log).
+            Some(0) => {
+                "A note was still being saved when the app closed, after its words were kept; its picture may not be."
+            }
+            Some(_) => return,
+            None => "A note was still being saved when the app closed, and its words couldn't be looked at in time.",
+        };
         log::last(log::Level::Warning, "Note", said);
     }
 }
 
 /// As the app ends (it closes, or a crash ends it), the words of notes being saved that aren't on disk yet are kept
 /// for the next F12, as saves that failed, and go in the session log: shown twice if a save ends after all, rather
-/// than lost. Waits a moment at most. Gives how many there were.
-fn keep_saves_at_the_end(folder: &Path) -> usize {
-    let waiting = lock_within(&BEING_SAVED, DRAFT_MOMENT).map(|mut saves| std::mem::take(&mut *saves));
-    let waiting = waiting.unwrap_or_default();
+/// than lost. Each wait is a moment at most. Gives how many there were (`None` when they couldn't be looked at).
+fn keep_saves_at_the_end(folder: &Path) -> Option<usize> {
+    let waiting = lock_within(&BEING_SAVED, DRAFT_MOMENT).map(|mut saves| std::mem::take(&mut *saves))?;
+    if waiting.is_empty() {
+        return Some(0);
+    }
+    // All kept first, then all in the log: in the draft's turn when it comes within a moment (see `KeepFailed`), and
+    // all the same when it doesn't.
+    let mine = draft_turn(Turn::Moment);
     for (_, words) in &waiting {
         keep_failed_words(folder, words);
+    }
+    drop(mine);
+    for (_, words) in &waiting {
         // A line of how the run ends: it shows even once the log is full.
         let said = format!(
             "A note was still being saved as the app ended, and its words weren't on disk yet. They're kept for the \
@@ -555,7 +572,7 @@ fn keep_saves_at_the_end(folder: &Path) -> usize {
         );
         log::last(log::Level::Warning, "Note", &said);
     }
-    waiting.len()
+    Some(waiting.len())
 }
 
 /// For the app closing: the words typed are kept as the draft for next time (or, when it can't be written, with the
@@ -582,8 +599,10 @@ fn finish_up_in(folder: &Path, send: &dyn Fn(FileJob)) {
 /// before it returns: std may end the app straight after one the handler can't tell will (a crash in a thread's own
 /// data as the thread ends). They're written in the draft's turn, waiting only a moment for it. When the crash ends the
 /// app (`ends_the_app`), the lock comes down too (see [`ENDING`]), and words written without the turn go with the
-/// words of failed saves too ([`keep_at_the_end`]). After any other crash the app goes on, perhaps with the note still
-/// open: the "Note files" thread puts the lock as it should be, in order with its other jobs.
+/// words of failed saves too ([`keep_at_the_end`]), and so do the words of notes being saved that aren't on disk yet
+/// ([`keep_saves_at_the_end`]). After any other crash the app goes on, perhaps with the note still open: the "Note
+/// files" thread puts the lock as it should be, in order with its other jobs, and a save's own thread keeps its words
+/// if it stops part way ([`save_ended`]).
 pub fn after_crash(ends_the_app: bool) {
     keep_after_crash(&note::notes_dir(), ends_the_app, &update_lock_after_crash);
 }
@@ -649,13 +668,13 @@ impl Drop for SaveDone {
     }
 }
 
-/// A save (`save`) is over: if its words weren't on disk yet (it stopped part way), they go in the session log and are
-/// kept for the next F12, as a save that failed, through `keep`, before they stop being kept for the end of the run:
-/// so they're always in one or the other.
+/// A save (`save`) is over: if its words weren't on disk yet (it stopped part way), they're kept for the next F12, as a
+/// save that failed, through `keep`, and go in the session log, before they stop being kept for the end of the run: so
+/// they're always in one or the other.
 fn save_ended(save: SaveOf, keep: &dyn Fn(FileJob)) {
     if let Some(words) = still_being_saved(save.number) {
+        keep(FileJob::KeepFailed { words: words.clone(), shown: save.shown });
         log::error("Note", &format!("A note's save stopped part way: its words are kept for the next F12.\n{words}"));
-        keep(FileJob::KeepFailed { words, shown: save.shown });
         words_on_disk(save.number);
     }
 }
@@ -747,8 +766,8 @@ fn save_in_background(feed: &Feed, save: SaveOf, text: String, picture: Option<P
 
 /// A save (`save`): the words `text`, typed on the page `page`, saved as a note in `folder`, with `picture` made into a
 /// PNG by `make_png` only once the words are on disk (a big window takes a moment). Gives the note's file name, or why
-/// it couldn't be saved: then its words go in the session log and are kept for the next F12, as a save that failed,
-/// through `keep`. Either way they're in a file before they stop being kept for the end of the run ([`BEING_SAVED`]),
+/// it couldn't be saved: then its words are kept for the next F12, as a save that failed, through `keep`, and go in
+/// the session log. Either way they're in a file before they stop being kept for the end of the run ([`BEING_SAVED`]),
 /// so they're always in one or the other.
 fn save_note(
     folder: &Path,
@@ -784,8 +803,8 @@ fn save_note(
             Ok(name)
         }
         Err(e) => {
-            log::error("Note", &format!("Couldn't save the note: {e}\n{text}"));
             keep(FileJob::KeepFailed { words: text.to_owned(), shown: save.shown });
+            log::error("Note", &format!("Couldn't save the note: {e}\n{text}"));
             words_on_disk(save.number);
             Err(e.to_string())
         }
@@ -1205,6 +1224,40 @@ mod tests {
     }
 
     #[test]
+    fn the_close_keeps_the_words_itself_when_the_note_files_thread_doesnt_answer() {
+        let _one = one_at_a_time();
+        let dir = temp_folder("close-alone");
+        OPEN.store(true, Ordering::Release);
+        do_file_job(&dir, FileJob::Lock, Turn::Wait);
+        typed("last words");
+        // The "Note files" thread is gone: the job, and its way of saying it's done, are dropped.
+        finish_up_in(&dir, &|_job| {});
+        assert_eq!(note::read_draft(&dir).as_deref(), Some("last words"));
+        assert!(!dir.join(note::WRITING_FILE).exists(), "down as the app closes");
+        assert!(!dir.join(FAILED_FILE).exists(), "written in its turn: kept once");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_close_waits_for_a_save_still_going() {
+        let _one = one_at_a_time();
+        let dir = temp_folder("close-waits");
+        std::fs::create_dir_all(&dir).expect("made");
+        let save = being_saved("words being saved");
+        SAVING.store(1, Ordering::Release);
+        // The save ends a moment after the app starts closing.
+        let ends = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            words_on_disk(save);
+            SAVING.store(0, Ordering::Release);
+        });
+        wait_for_saves_in(&dir, Duration::from_secs(30));
+        ends.join().expect("ended");
+        assert!(!dir.join(FAILED_FILE).exists(), "it ended within the wait, so its words weren't kept twice");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_crash_never_starts_the_note_files_thread() {
         let _one = one_at_a_time();
         // No test hands a job to the real "Note files" thread (it works in the app's own notes folder), so it was
@@ -1253,6 +1306,18 @@ mod tests {
         being_saved("crash words");
         keep_after_crash(&dir, true, &|| {});
         assert_eq!(std::fs::read_to_string(&failed).ok().as_deref(), Some("crash words\n\n"));
+        // In the draft's turn, when it comes within a moment: the words of failed saves a note showed may be let go
+        // in it (only while that file holds just those), so these are never added in the middle of that.
+        let _ = std::fs::remove_file(&failed);
+        being_saved("words in turn");
+        let turn = DRAFT_TURN.lock().unwrap_or_else(PoisonError::into_inner);
+        let folder = dir.clone();
+        let keeps = std::thread::spawn(move || keep_saves_at_the_end(&folder));
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!failed.exists(), "it waits for its turn");
+        drop(turn);
+        assert_eq!(keeps.join().expect("kept"), Some(1));
+        assert_eq!(std::fs::read_to_string(&failed).ok().as_deref(), Some("words in turn\n\n"));
         // A save that stops part way (a crash on its thread) keeps its words too, while they're still kept for the end
         // of the run, so they're always in one or the other; and one that ended doesn't.
         let _ = std::fs::remove_file(&failed);

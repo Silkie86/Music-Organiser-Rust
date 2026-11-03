@@ -145,7 +145,7 @@ fn on_crash(info: &std::panic::PanicHookInfo<'_>, logs: &Path, keep_note: &dyn F
 mod tests {
     use std::path::PathBuf;
     use std::process::Stdio;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
     use super::*;
@@ -183,7 +183,8 @@ mod tests {
 
     /// Only in the copy that the test below runs; in an ordinary run it does nothing. The console (a pipe the test
     /// never reads) is filled, so std's report of a first crash waits there for ever, holding its backtrace lock; then
-    /// two more threads crash, one of them called "main" as the window's thread is, so its crash ends the app.
+    /// two more threads crash, one of them called "main" as the window's thread is, so it's taken for a crash that ends
+    /// the app. Last, it writes down whether a backtrace can be taken then (it can't, while that lock is held).
     #[test]
     fn crash_while_the_console_waits_in_a_copy() {
         use std::io::Write;
@@ -221,6 +222,15 @@ mod tests {
         std::thread::sleep(Duration::from_millis(300));
         let _ = std::thread::Builder::new().name("Crash B".into()).spawn(|| panic!("the second crash"));
         let _ = std::thread::Builder::new().name("main".into()).spawn(|| panic!("the crash that ends the app"));
+        // What the test stands on: a backtrace can't be taken while std's report of the first crash waits.
+        std::thread::sleep(Duration::from_secs(1));
+        static TAKEN: AtomicBool = AtomicBool::new(false);
+        std::thread::spawn(|| {
+            let _ = std::backtrace::Backtrace::force_capture();
+            TAKEN.store(true, Ordering::SeqCst);
+        });
+        std::thread::sleep(Duration::from_secs(2));
+        did(&dir, &format!("a backtrace could be taken: {}", TAKEN.load(Ordering::SeqCst)));
         // The test ends this copy once it has seen what it needs to; if it doesn't, the copy ends by itself.
         std::thread::sleep(Duration::from_secs(180));
     }
@@ -261,7 +271,9 @@ mod tests {
                 }
             }
             let done = std::fs::read_to_string(dir.join(DONE)).unwrap_or_default();
-            (session, crashes, done.lines().map(str::to_owned).collect())
+            // Only whole lines: one may be read as it's being added.
+            let whole = done.split_inclusive('\n').filter(|l| l.ends_with('\n'));
+            (session, crashes, whole.map(|l| l.trim_end_matches('\n').to_owned()).collect())
         };
         // The crashes, and whether each ends the app.
         let threads = [("Crash A", false), ("Crash B", false), ("main", true)];
@@ -278,7 +290,8 @@ mod tests {
             let seen = session.contains("[Crash] Backtrace of the crash on thread Crash A:")
                 && written("Crash B")
                 && written("main")
-                && threads.iter().all(|(t, _)| done.iter().any(|l| l.starts_with(&format!("{t} kept the note"))));
+                && threads.iter().all(|(t, _)| done.iter().any(|l| l.starts_with(&format!("{t} kept the note"))))
+                && done.iter().any(|l| l.starts_with("a backtrace could be taken"));
             let ended = copy.0.try_wait().ok().flatten().is_some();
             if seen || ended || Instant::now() >= until {
                 break (seen, found);
@@ -288,6 +301,8 @@ mod tests {
         drop(copy);
         let _ = std::fs::remove_dir_all(&dir);
         assert!(seen, "the later crashes are written before their backtraces are taken:\n{session}\n---\n{crashes}");
+        // Otherwise nothing waited, and the test shows nothing.
+        assert!(done.iter().any(|l| l == "a backtrace could be taken: false"), "the console held std's lock: {done:?}");
         // Each crash was on disk in the session log, and in its crash log, before its note was kept, and the note was
         // told whether the crash ends the app.
         for (thread, ends) in threads {

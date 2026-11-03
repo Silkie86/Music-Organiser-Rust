@@ -83,7 +83,8 @@ const WRITER_WAIT: Duration = Duration::from_secs(5);
 /// that's null or not lined up, an enum with no such value, or a broken promise to an unsafe function.
 ///
 /// A crash in a thread's own data as the thread ends (a thread-local's `Drop`) ends the app too, but says nothing of
-/// the kind, so the crash handler keeps the F12 note's words whatever this says.
+/// the kind, so the crash handler keeps the words typed in an open F12 note whatever this says (the words of a note
+/// being saved that aren't on disk yet are kept only for a crash it knows ends the app).
 const ENDS_THE_APP: [&str; 6] = [
     "panic in a destructor during cleanup",
     "panic in a function that cannot unwind",
@@ -327,17 +328,19 @@ impl SessionLog {
         self.put(level, area, message, Kind::Plain);
     }
 
-    /// Writes a line, counted and kept within the log's limits as its `kind` says (see [`Kind`]). A crash's line never
-    /// waits long for the log's lock.
+    /// Writes a line, counted and kept within the log's limits as its `kind` says (see [`Kind`]). A crash's line, and
+    /// any line written while a thread is crashing, never waits long for the log's lock.
     fn put(&self, level: Level, area: &str, message: &str, kind: Kind<'_>) {
         // Trailing spaces only make the log wide.
         let message: String = message.lines().map(str::trim_end).collect::<Vec<_>>().join("\n");
-        let crash = matches!(kind, Kind::Crash { .. });
+        // A crash's line, and any line written while a thread is crashing (from the crash handler, or by a drop as the
+        // thread unwinds), mustn't crash or wait long: a crash there ends the app at once.
+        let crash = matches!(kind, Kind::Crash { .. }) || std::thread::panicking();
         // The time and the key the line is counted by are made before the lock is taken: nothing that could crash
         // runs while it's held (see the top of this file).
         let time = if crash {
             // Asking the computer for its time zone can fail, and a failure in the crash handler would end the app
-            // at once: a crash's line uses the zone the last line found.
+            // at once: such a line uses the zone the last line found.
             time_of_day(SystemTime::now(), self.offset.load(Ordering::Relaxed))
         } else {
             let now = Local::now();
@@ -375,7 +378,8 @@ impl SessionLog {
                 }
                 line
             }
-            // Only a crash gets here, when the lock stays busy: its line is written, just not counted.
+            // Only a crash's line (or one written while a thread crashes) gets here, when the lock stays busy: it's
+            // written, just not counted.
             None => whole(&message),
         };
         let msg = match kind {
@@ -401,7 +405,8 @@ impl SessionLog {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).recent.iter().cloned().collect()
     }
 
-    /// Waits until everything written so far is on disk. Used before the app closes, and by a crash.
+    /// Waits until everything written so far is on disk (2 seconds at most). Used by the crash handler, and by the
+    /// freeze watchdog when the window stays stuck.
     pub fn flush(&self) {
         let (done, wait) = channel();
         let sent = self
@@ -1345,6 +1350,55 @@ mod tests {
         ] {
             assert!(!is_crash_log(name), "{name}");
         }
+    }
+
+    #[test]
+    fn a_flush_waits_until_the_lines_written_so_far_are_on_disk() {
+        let dir = temp_folder("flush");
+        let log = SessionLog::new(&dir, Local::now(), "start");
+        // A long line first, so the log's writer takes a while to reach the crash after it.
+        log.write(Level::Info, "Test", &"x".repeat(3 * 1024 * 1024));
+        crash_at(&log, "src/x.rs:1", "the crash");
+        log.flush();
+        // Looked at straight away: a flush that didn't wait would return long before the writer got there.
+        let path = log.path().expect("a file").to_path_buf();
+        let size = usize::try_from(std::fs::metadata(&path).expect("there").len()).expect("small");
+        log.close();
+        let bytes = std::fs::read(&path).expect("readable");
+        let on_disk = String::from_utf8_lossy(&bytes[..size.min(bytes.len())]);
+        assert!(on_disk.contains("[Crash] the crash"), "on disk by the time the flush returned");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_line_written_while_a_thread_crashes_never_waits_long_for_the_log() {
+        let dir = temp_folder("unwinding");
+        let log = std::sync::Arc::new(SessionLog::new(&dir, Local::now(), "start"));
+        // Writes a line as the thread it's on unwinds after a crash (as a save's end does).
+        struct WritesAsItGoes(std::sync::Arc<SessionLog>);
+        impl Drop for WritesAsItGoes {
+            fn drop(&mut self) {
+                self.0.write(Level::Error, "Note", "written as the thread unwinds");
+            }
+        }
+        // Something else holds the log's counts the whole time.
+        let held = log.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let (done, finished) = channel();
+        let writer = std::sync::Arc::clone(&log);
+        std::thread::spawn(move || {
+            let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _writes = WritesAsItGoes(writer);
+                panic!("a crash in a test, on purpose");
+            }));
+            let _ = done.send(crashed.is_err());
+        });
+        let returned = finished.recv_timeout(Duration::from_secs(20));
+        drop(held);
+        log.close();
+        assert_eq!(returned, Ok(true), "it didn't wait for the lock");
+        let text = std::fs::read_to_string(log.path().expect("a file")).expect("readable");
+        assert!(text.contains("[Note] written as the thread unwinds"), "and it was written: {text}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
