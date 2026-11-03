@@ -812,26 +812,23 @@ mod tests {
         }
     }
 
-    /// Draws 450,000 made-up stars in clumps on whatever graphics card there is (a software one will do) to PNGs in
-    /// the folder GALAXY_GPU_LOOK names, at a few zooms (GALAXY_GPU_SCALE pixels per point, 1 if not set), lit by a
-    /// measure every sound has (as Length), by one only a few have (as Liked) and by nothing, over a dark page and a
-    /// light one (as Paper), to judge the look by eye and to check the card takes every step. With GALAXY_GPU_TIME set
-    /// it also times each view: whole frames, and a twinkle's frames, which only draw the stars again (on a software
-    /// card that's the processor's time, far slower than a real card, but fine for before and after).
+    /// Draws 450,000 made-up stars in clumps on whatever graphics card there is (a software one will do), made the way
+    /// Slint makes the window's, to PNGs in the folder GALAXY_GPU_LOOK names, at a few zooms (GALAXY_GPU_SCALE pixels
+    /// per point, 1 if not set), lit by a measure every sound has (as Length), by one only a few have (as Liked) and by
+    /// nothing, over a dark page and a light one (as Paper), to judge the look by eye and to check the card takes every
+    /// step. With GALAXY_GPU_TIME set it also times each view: whole frames, and a twinkle's frames, which only draw the
+    /// stars again (on a software card that's the processor's time, far slower than a real card, but fine for before
+    /// and after).
     #[test]
     #[ignore]
     fn render() {
+        use crate::canvas::testing::{card, read_back};
         use mo_app::galaxy_look::{lit_order, lit_share, look, pack};
         use mo_sounds::StarPoint;
         let Ok(out) = std::env::var("GALAXY_GPU_LOOK") else { return };
         let scale: f32 = std::env::var("GALAXY_GPU_SCALE").ok().and_then(|s| s.parse().ok()).unwrap_or(1.0);
         let timed = std::env::var("GALAXY_GPU_TIME").is_ok();
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
-        let adapter =
-            crate::gpu::wait(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).expect("a card");
-        eprintln!("{:?}", adapter.get_info());
-        let (device, queue) =
-            crate::gpu::wait(adapter.request_device(&wgpu::DeviceDescriptor::default())).expect("a device");
+        let (device, queue) = card().expect("a graphics card, a software one at least");
         let mut seed = 12345u64;
         let mut rnd = || {
             seed ^= seed << 13;
@@ -912,37 +909,10 @@ mod tests {
                 }
                 for (page, background) in pages {
                     let picture = sky.draw(&view, scale, &lk, shine, background);
-                    let (w, h) = (picture.width(), picture.height());
-                    let row = (w * 4).div_ceil(256) * 256;
-                    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                        label: None,
-                        size: u64::from(row * h),
-                        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                        mapped_at_creation: false,
-                    });
-                    let mut encoder = device.create_command_encoder(&Default::default());
-                    encoder.copy_texture_to_buffer(
-                        picture.as_image_copy(),
-                        wgpu::TexelCopyBufferInfo {
-                            buffer: &buffer,
-                            layout: wgpu::TexelCopyBufferLayout {
-                                offset: 0,
-                                bytes_per_row: Some(row),
-                                rows_per_image: None,
-                            },
-                        },
-                        picture.size(),
-                    );
-                    queue.submit(Some(encoder.finish()));
-                    buffer.slice(..).map_async(wgpu::MapMode::Read, |r| r.expect("read back"));
-                    device.poll(wgpu::PollType::wait_indefinitely()).expect("the card finishes");
-                    let data = buffer.slice(..).get_mapped_range().expect("mapped");
-                    let mut img = image::RgbaImage::new(w, h);
-                    for y in 0..h {
-                        for x in 0..w {
-                            let at = (y * row + x * 4) as usize;
-                            img.put_pixel(x, y, image::Rgba([data[at], data[at + 1], data[at + 2], 255]));
-                        }
+                    let mut img = read_back(&device, &queue, &picture);
+                    // Saved solid, as the window shows it.
+                    for pixel in img.pixels_mut() {
+                        pixel[3] = 255;
                     }
                     img.save(format!("{out}/galaxy-gpu-{lit_by}-{page}-{zoom}.png")).expect("saved");
                 }

@@ -21,6 +21,7 @@ pub mod note;
 pub mod paths;
 pub mod places;
 pub mod settings;
+pub mod shapes;
 pub mod shell;
 pub mod shortcuts;
 pub mod song_panel;
