@@ -421,48 +421,21 @@ fn as_listed(path: &Path, listed: &Version) -> bool {
     })
 }
 
-/// Removes one older version, a read-only one too (Windows won't otherwise); the mark goes back if it can't be removed.
-/// Windows keeps the mark on the file, not on each of its names, so a file with other names (`shared`) gets it back
-/// once this name has gone, through a handle opened before: the other names stay as they were.
+/// Removes one older version, a read-only one too. On Windows, Rust removes a read-only file by itself where the drive
+/// allows it (NTFS), leaving the read-only mark alone: the mark belongs to the file, not the name, so a file with other
+/// names (`shared`) keeps it for them. On a FAT or exFAT stick (where no file has two names) that fails: there the mark
+/// is cleared and it's tried again, and the mark goes back if the file still can't be removed.
 fn remove_version(path: &Path, shared: bool) -> io::Result<()> {
-    if !set_read_only(path, false) {
-        return fs::remove_file(path);
+    let first = match fs::remove_file(path) {
+        Ok(()) => return Ok(()),
+        Err(e) => e,
+    };
+    if shared || first.kind() != io::ErrorKind::PermissionDenied || !set_read_only(path, false) {
+        return Err(first);
     }
-    let held = if shared { open_for_marks(path) } else { None };
-    match fs::remove_file(path) {
-        Ok(()) => {
-            if let Some(file) = held
-                && let Ok(meta) = file.metadata()
-            {
-                let mut marks = meta.permissions();
-                marks.set_readonly(true);
-                let _ = file.set_permissions(marks);
-            }
-            Ok(())
-        }
-        Err(e) => {
-            drop(held);
-            set_read_only(path, true);
-            Err(e)
-        }
-    }
-}
-
-/// A file opened only to read and change its marks (not its bytes), and not through a link. Windows only: elsewhere a
-/// name is removed without changing the file's marks.
-#[cfg(windows)]
-fn open_for_marks(path: &Path) -> Option<fs::File> {
-    use std::os::windows::fs::OpenOptionsExt;
-    /// FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES.
-    const MARKS: u32 = 0x0080 | 0x0100;
-    /// FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT.
-    const JUST_THIS: u32 = 0x0200_0000 | 0x0020_0000;
-    fs::OpenOptions::new().access_mode(MARKS).custom_flags(JUST_THIS).open(path).ok()
-}
-
-#[cfg(not(windows))]
-fn open_for_marks(_path: &Path) -> Option<fs::File> {
-    None
+    fs::remove_file(path).inspect_err(|_| {
+        set_read_only(path, true);
+    })
 }
 
 /// Removes the folders files went from once they're empty, and the folders above them up to the run's own (which goes
