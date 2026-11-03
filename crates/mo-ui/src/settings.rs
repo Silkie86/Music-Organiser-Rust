@@ -17,7 +17,7 @@ use mo_app::themes::{
 };
 use mo_library::Library;
 use slint::platform::WindowEvent;
-use slint::{Color, ComponentHandle, ModelRc, SharedString, VecModel};
+use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
 use crate::{AccentInfo, AppWindow, FolderGroupInfo, SettingsData, SettingsFact, ThemeCardInfo};
 
@@ -32,6 +32,12 @@ struct Page {
     outputs: Outputs,
     /// Whether to look at the computer's sound outputs and the library (not for the screenshots).
     live: bool,
+    /// Whether changes are written to the file (not when it couldn't be read, nor for the screenshots).
+    writable: bool,
+    /// A change not yet handed to the writer's finished save, for the last write as the app closes.
+    unsaved: bool,
+    /// Counts the reads of the folders, so an older one finishing late is dropped (newest wins).
+    folders_asked: u64,
     feed: Feed,
 }
 
@@ -43,11 +49,14 @@ thread_local! {
     static SIZED: Cell<f32> = const { Cell::new(1.0) };
     /// The system's own scale when the size was last applied (0 before that).
     static SYSTEM: Cell<f32> = const { Cell::new(0.0) };
+    /// Checks the size of everything is still on, every second.
+    static SIZE_CHECK: slint::Timer = slint::Timer::default();
 }
 
 /// Reads the settings before the window opens: this app's file in `folder` and the C# app's choices from `library`,
-/// opened read-only. What went wrong goes to the log; the app opens whatever happens.
-pub fn load(folder: &Path, library: &Path) -> AppSettings {
+/// opened read-only. What went wrong goes to the log; the app opens whatever happens. Also whether changes may be
+/// saved this run (not when the file is there but couldn't be read).
+pub fn load(folder: &Path, library: &Path) -> (AppSettings, bool) {
     let lib = match Library::open_read_only(library) {
         Ok(lib) => Some(lib),
         // No library yet (a new computer): only this app's own settings.
@@ -64,7 +73,7 @@ pub fn load(folder: &Path, library: &Path) -> AppSettings {
     for p in &loaded.problems {
         log::warning("Settings", p);
     }
-    loaded.settings
+    (loaded.settings, loaded.writable)
 }
 
 /// The look the settings choose.
@@ -80,12 +89,28 @@ pub struct Setup {
     pub running_pace: Pace,
     /// Look at the computer's sound outputs and the library when the page shows (off for the screenshots).
     pub live: bool,
+    /// Write changes to the file (see [`load`]).
+    pub writable: bool,
     pub feed: Feed,
 }
 
 pub fn connect(app: &AppWindow, setup: Setup) {
+    let setup_live = setup.live;
     let writer = Newest::start("Save settings", |(folder, json): (PathBuf, String)| {
-        if let Err(e) = app_settings::save(&folder, &json) {
+        let saved = app_settings::save(&folder, &json);
+        if saved.is_ok() {
+            let _ = slint::invoke_from_event_loop(move || {
+                PAGE.with(|p| {
+                    // Only if nothing changed since: the newer change has its own save on the way.
+                    if let Some(p) = p.borrow_mut().as_mut()
+                        && p.settings.to_json() == json
+                    {
+                        p.unsaved = false;
+                    }
+                });
+            });
+        }
+        if let Err(e) = saved {
             log::error("Settings", &format!("Couldn't save {}: {e}", app_settings::FILE));
             let why = e.to_string();
             let _ = slint::invoke_from_event_loop(move || {
@@ -111,6 +136,9 @@ pub fn connect(app: &AppWindow, setup: Setup) {
             library: setup.library,
             running_pace: setup.running_pace,
             live: setup.live,
+            writable: setup.live && setup.writable,
+            unsaved: false,
+            folders_asked: 0,
             feed: setup.feed,
         })
     });
@@ -186,6 +214,8 @@ pub fn connect(app: &AppWindow, setup: Setup) {
     data.on_start_picked(move |name| {
         if let Some(choice) = page::start_choices().into_iter().find(|c| *c == name.as_str()) {
             change(START_PAGE_KEY, choice);
+            // "Last page I used" starts from here, Settings.
+            page_shown(Place::Settings);
             if let Some(app) = weak.upgrade() {
                 show(&app);
             }
@@ -227,18 +257,28 @@ pub fn connect(app: &AppWindow, setup: Setup) {
             app.invoke_try_job();
         }
     });
-    // The app opened on Settings (its start page) before the page was ready.
-    if app.get_place() == Place::Settings.index() as i32 {
-        shown(app);
+    // The page the app opened on, for "Last page I used" (it was shown before Settings was ready).
+    if let Some(place) = usize::try_from(app.get_place()).ok().and_then(Place::from_index) {
+        page_shown(place);
+        if place == Place::Settings {
+            shown(app);
+        }
+    }
+    // The system may set its own scale (the window moved to another screen): the size picked goes back on it.
+    if setup_live {
+        let weak = app.as_weak();
+        SIZE_CHECK.with(|t| {
+            t.start(slint::TimerMode::Repeated, std::time::Duration::from_secs(1), move || {
+                if let Some(app) = weak.upgrade() {
+                    apply_size(&app);
+                }
+            })
+        });
     }
 }
 
 fn strings<S: Into<SharedString>>(items: impl IntoIterator<Item = S>) -> ModelRc<SharedString> {
     ModelRc::new(VecModel::from(items.into_iter().map(Into::into).collect::<Vec<SharedString>>()))
-}
-
-fn colour(c: u32) -> Color {
-    Color::from_rgb_u8((c >> 16) as u8, (c >> 8) as u8, c as u8)
 }
 
 /// Changes a setting and writes the file in the background, when it changed.
@@ -247,7 +287,9 @@ fn change(key: &str, value: &str) {
         let mut p = p.borrow_mut();
         let p = p.as_mut()?;
         // The screenshots change their made-up settings, and never write a file.
-        (p.settings.set(key, value) && p.live).then(|| (p.folder.clone(), p.settings.to_json()))
+        let save = p.settings.set(key, value) && p.writable;
+        p.unsaved |= save;
+        save.then(|| (p.folder.clone(), p.settings.to_json()))
     });
     if let Some(job) = save {
         WRITER.with(|w| {
@@ -258,9 +300,29 @@ fn change(key: &str, value: &str) {
     }
 }
 
-/// Remembers the page on show, for "Last page I used".
+/// Remembers the page on show, for "Last page I used": only while that's the start page, so other clicks on the rail
+/// write nothing.
 pub fn page_shown(place: Place) {
-    change(app_settings::LAST_PAGE_KEY, place.name());
+    let wanted = PAGE.with(|p| {
+        p.borrow().as_ref().is_some_and(|p| p.settings.get(START_PAGE_KEY) == Some(mo_app::places::LAST_PAGE_CHOICE))
+    });
+    if wanted {
+        change(app_settings::LAST_PAGE_KEY, place.name());
+    }
+}
+
+/// As the app closes: a change the writer hasn't saved yet is saved now, so the last one isn't lost.
+pub fn finish_up() {
+    let job = PAGE.with(|p| {
+        let p = p.borrow();
+        let p = p.as_ref()?;
+        (p.unsaved && p.writable).then(|| (p.folder.clone(), p.settings.to_json()))
+    });
+    if let Some((folder, json)) = job
+        && let Err(e) = app_settings::save(&folder, &json)
+    {
+        log::error("Settings", &format!("Couldn't save {} as the app closed: {e}", app_settings::FILE));
+    }
 }
 
 /// Puts the look the settings now choose on the whole window, and on this page.
@@ -276,8 +338,13 @@ fn relook(weak: &slint::Weak<AppWindow>) {
 /// The page is on show: the folders are read from the library, and the sound outputs listed, each time (a drive or an
 /// audio interface may have been plugged in).
 pub fn shown(app: &AppWindow) {
-    let live = PAGE.with(|p| p.borrow().as_ref().map(|p| (p.live, p.library.clone())));
-    let Some((live, library)) = live else { return };
+    let live = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let p = p.as_mut()?;
+        p.folders_asked += 1;
+        Some((p.live, p.library.clone(), p.folders_asked))
+    });
+    let Some((live, library, asked)) = live else { return };
     show(app);
     if !live {
         return;
@@ -287,7 +354,10 @@ pub fn shown(app: &AppWindow) {
     let started = background::spawn("Settings folders", move || {
         let groups = read_folders(&library);
         let _ = slint::invoke_from_event_loop(move || {
-            if let Some(app) = weak.upgrade() {
+            let newest = PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| p.folders_asked == asked));
+            if let Some(app) = weak.upgrade()
+                && newest
+            {
                 show_folders(&app, groups);
             }
         });
@@ -397,12 +467,12 @@ fn show(app: &AppWindow) {
             .map(|c| ThemeCardInfo {
                 name: c.name.into(),
                 description: c.description.into(),
-                background: colour(c.background),
-                sidebar: colour(c.sidebar),
-                surface: colour(c.surface),
-                text: colour(c.text),
-                muted: colour(c.muted),
-                accent: colour(c.accent),
+                background: crate::rgb(c.background),
+                sidebar: crate::rgb(c.sidebar),
+                surface: crate::rgb(c.surface),
+                text: crate::rgb(c.text),
+                muted: crate::rgb(c.muted),
+                accent: crate::rgb(c.accent),
                 square: c.square,
                 picked: c.picked,
             })
@@ -413,7 +483,7 @@ fn show(app: &AppWindow) {
         let theme = s.get(THEME_KEY).and_then(theme_named).unwrap_or(THEMES[0]);
         let accents: Vec<AccentInfo> = page::accent_choices(&theme, s.get(ACCENT_KEY))
             .into_iter()
-            .map(|a| AccentInfo { name: a.name.into(), colour: colour(a.colour), picked: a.picked })
+            .map(|a| AccentInfo { name: a.name.into(), colour: crate::rgb(a.colour), picked: a.picked })
             .collect();
         data.set_accents(ModelRc::new(VecModel::from(accents)));
         data.set_font(page::font_index(s.get(FONT_KEY)) as i32);
@@ -463,27 +533,12 @@ fn open_fact(i: i32) {
     });
     let Some((feed, fact)) = found else { return };
     match fact.button {
-        Some(page::FactButton::Open) => open_folder(&feed, Path::new(&fact.value)),
+        Some(page::FactButton::Open) => crate::files::open_folder(&feed, &fact.value),
         Some(page::FactButton::Show) => {
             let dir = Path::new(&fact.value).parent().map(|d| d.display().to_string()).unwrap_or_default();
             crate::files::reveal(&feed, &fact.value, &dir);
         }
         None => {}
-    }
-}
-
-/// Opens a folder in the system's file browser, off the window's thread.
-fn open_folder(feed: &Feed, folder: &Path) {
-    let (feed, folder) = (feed.clone(), folder.display().to_string());
-    let started = background::spawn("Open folder", move || {
-        let launch = mo_app::shell::open(&folder, None, mo_app::shell::Os::THIS);
-        if let Err(e) = mo_app::shell::run(&launch) {
-            log::warning("Settings", &format!("Couldn't open {folder}: {e}"));
-            feed.start("Couldn't open the folder", "").failed(&e.to_string());
-        }
-    });
-    if let Err(e) = started {
-        log::error("Settings", &format!("Couldn't start opening a folder: {e}"));
     }
 }
 

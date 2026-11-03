@@ -214,7 +214,7 @@ pub fn apply_look(app: &AppWindow, look: &Look) {
     arrangement::set_look(app, look);
 }
 
-fn rgb(c: u32) -> Color {
+pub(crate) fn rgb(c: u32) -> Color {
     Color::from_rgb_u8((c >> 16) as u8, (c >> 8) as u8, c as u8)
 }
 

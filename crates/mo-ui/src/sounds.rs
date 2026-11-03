@@ -217,12 +217,17 @@ static OUTPUT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 /// The one player, made on first use, playing through the output Settings chose.
 pub fn player() -> &'static Player {
+    if let Some(player) = PLAYER.get() {
+        return player;
+    }
+    // The choice stays locked until the player is made, so one changed meanwhile waits and then reaches it.
+    let output = OUTPUT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     PLAYER.get_or_init(|| {
         let player = Player::new(|key| {
             let key = key.to_owned();
             let _ = slint::invoke_from_event_loop(move || ended(&key));
         });
-        player.choose(OUTPUT.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone());
+        player.choose(output.clone());
         player
     })
 }
@@ -230,7 +235,8 @@ pub fn player() -> &'static Player {
 /// Plays through this output from now on (`None`: the computer's default), as Settings › Sound output chose. Before
 /// the player is made it's only remembered.
 pub fn choose_output(name: Option<String>) {
-    *OUTPUT.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = name.clone();
+    let mut output = OUTPUT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    *output = name.clone();
     if let Some(player) = PLAYER.get() {
         player.choose(name);
     }

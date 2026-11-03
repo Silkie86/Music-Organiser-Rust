@@ -63,6 +63,9 @@ pub struct Loaded {
     pub settings: AppSettings,
     /// Why the app's own file couldn't be used (it was put aside), or why the C# app's couldn't be read.
     pub problems: Vec<String>,
+    /// Whether changes may be saved. Not when the file is there but couldn't be read and is still in its place
+    /// (locked by another program, say): saving would write over your settings with only this run's changes.
+    pub writable: bool,
 }
 
 impl AppSettings {
@@ -93,27 +96,45 @@ impl AppSettings {
             }
         }
         let path = folder.join(FILE);
-        let text = match fs::read_to_string(&path) {
-            Ok(text) => Some(text),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        // Bytes, so a file with a broken character counts as unreadable (and is put aside) rather than as missing.
+        let text = match fs::read(&path) {
+            Ok(bytes) => Ok(Some(String::from_utf8(bytes).map_err(|e| e.to_string()))),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        };
+        let parsed = match text {
+            Ok(None) => Ok(AppSettings { own: BTreeMap::new(), csharp: csharp.clone() }),
+            Ok(Some(Ok(text))) => AppSettings::from_parts(Some(&text), csharp.clone()),
+            Ok(Some(Err(why))) => Err(why),
+            // There, but couldn't be opened (another program has it): left alone, and nothing is saved this run.
             Err(e) => {
-                problems.push(format!("Couldn't read {}: {e}", path.display()));
-                None
+                problems.push(format!(
+                    "Couldn't read {} ({e}): the app opened in the C# app's settings, and won't save changes until it \
+                     starts again",
+                    path.display()
+                ));
+                return Loaded { settings: AppSettings { own: BTreeMap::new(), csharp }, problems, writable: false };
             }
         };
-        let settings = match AppSettings::from_parts(text.as_deref(), csharp.clone()) {
-            Ok(s) => s,
+        match parsed {
+            Ok(settings) => Loaded { settings, problems, writable: true },
             Err(why) => {
-                let aside = folder.join(format!("{FILE}.unreadable"));
+                let aside = free_name(folder);
                 let kept = fs::rename(&path, &aside);
+                let writable = kept.is_ok();
                 problems.push(match kept {
-                    Ok(()) => format!("{FILE} couldn't be read ({why}), so it was kept as {} and the app opened in the C# app's settings", aside.display()),
-                    Err(e) => format!("{FILE} couldn't be read ({why}), and couldn't be put aside either ({e})"),
+                    Ok(()) => format!(
+                        "{FILE} couldn't be read ({why}), so it was kept as {} and the app opened in the C# app's settings",
+                        aside.display()
+                    ),
+                    Err(e) => format!(
+                        "{FILE} couldn't be read ({why}) or put aside ({e}): it's left as it is, and the app won't save \
+                         changes until it starts again"
+                    ),
                 });
-                AppSettings { own: BTreeMap::new(), csharp }
+                Loaded { settings: AppSettings { own: BTreeMap::new(), csharp }, problems, writable }
             }
-        };
-        Loaded { settings, problems }
+        }
     }
 
     /// A setting: this app's own, else the C# app's. A value of "" counts as set (the C# app writes "" for "none").
@@ -142,17 +163,37 @@ impl AppSettings {
     }
 }
 
-/// Writes the file's text into `folder` the safe way: a `.mo-part` file beside it, flushed to the disk, then renamed
-/// over the old file. Slow (it waits for the disk): call it off the window's thread.
+/// Where an unreadable file is kept: `rust-settings.json.unreadable`, or `.unreadable-2`, `-3`… so one kept before
+/// is never written over.
+fn free_name(folder: &Path) -> PathBuf {
+    let first = folder.join(format!("{FILE}.unreadable"));
+    if !first.exists() {
+        return first;
+    }
+    (2..).map(|n| folder.join(format!("{FILE}.unreadable-{n}"))).find(|p| !p.exists()).unwrap_or(first)
+}
+
+/// Writes the file's text into `folder` the safe way (copy, check, then rename): a `.mo-part` file beside it, flushed
+/// to the disk and read back to check it, then renamed over the old file. The part file never stays behind. Slow (it
+/// waits for the disk): call it off the window's thread.
 pub fn save(folder: &Path, json: &str) -> io::Result<PathBuf> {
     fs::create_dir_all(folder)?;
     let path = folder.join(FILE);
     let part = folder.join(format!("{FILE}.mo-part"));
-    let mut f = fs::File::create(&part)?;
-    f.write_all(json.as_bytes())?;
-    f.sync_all()?;
-    drop(f);
-    fs::rename(&part, &path)?;
+    let written = (|| {
+        let mut f = fs::File::create(&part)?;
+        f.write_all(json.as_bytes())?;
+        f.sync_all()?;
+        drop(f);
+        if fs::read(&part)? != json.as_bytes() {
+            return Err(io::Error::other("the copy written didn't read back the same"));
+        }
+        fs::rename(&part, &path)
+    })();
+    if let Err(e) = written {
+        let _ = fs::remove_file(&part);
+        return Err(e);
+    }
     Ok(path)
 }
 
@@ -219,6 +260,7 @@ mod tests {
         assert!(!dir.join(format!("{FILE}.mo-part")).exists());
         let loaded = AppSettings::load(&dir, None);
         assert!(loaded.problems.is_empty(), "{:?}", loaded.problems);
+        assert!(loaded.writable);
         assert_eq!(loaded.settings.get("start_page"), Some("Sounds"));
         assert_eq!(loaded.settings.get("sound_output"), Some(""));
         assert_eq!(start_place(&loaded.settings), places::Place::Sounds);
@@ -234,6 +276,13 @@ mod tests {
         assert_eq!(loaded.problems.len(), 1);
         assert!(!dir.join(FILE).exists());
         assert_eq!(fs::read_to_string(dir.join(format!("{FILE}.unreadable"))).unwrap(), "{broken");
+        assert!(loaded.writable, "put aside, so saving can't lose it");
+        // A second bad file is kept beside the first, never over it.
+        fs::write(dir.join(FILE), [0xFF, 0xFE]).unwrap();
+        let again = AppSettings::load(&dir, None);
+        assert_eq!(again.problems.len(), 1);
+        assert_eq!(fs::read_to_string(dir.join(format!("{FILE}.unreadable"))).unwrap(), "{broken");
+        assert_eq!(fs::read(dir.join(format!("{FILE}.unreadable-2"))).unwrap(), vec![0xFF, 0xFE]);
         let _ = fs::remove_dir_all(&dir);
     }
 }

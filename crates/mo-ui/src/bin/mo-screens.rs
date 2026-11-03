@@ -74,6 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             library: out.join("no library.db"),
             running_pace: mo_app::background::Pace::Fast,
             live: false,
+            writable: false,
             feed: feed.clone(),
         },
     );
@@ -633,7 +634,6 @@ fn hover(window: &MinimalSoftwareWindow, x: f32, y: f32) {
     window.dispatch_event(event);
 }
 
-/// The mouse wheel turned over a point: a negative `dy` moves the page up, to show what's below.
 /// Settings' tabs, from made-up folders and sound outputs: General in Graphite and Paper, then smaller, then Folders
 /// and Developer.
 fn settings_shots(
@@ -693,6 +693,7 @@ fn settings_shots(
     data.invoke_tab_picked(0);
 }
 
+/// The mouse wheel turned over a point: a negative `dy` moves the page up, to show what's below.
 fn scroll(window: &MinimalSoftwareWindow, x: f32, y: f32, dy: f32) {
     let position = slint::LogicalPosition::new(x, y);
     window.dispatch_event(slint::platform::WindowEvent::PointerScrolled { position, delta_x: 0.0, delta_y: dy });
