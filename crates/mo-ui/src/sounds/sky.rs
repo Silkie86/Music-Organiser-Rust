@@ -11,10 +11,12 @@
 //! 5. draw the stars as stars over it: a core in the star's colour, white-hot in its very middle, in a soft glow.
 //!    On a dark page their light is screened on (as the processor's picture does), so a cluster glows where they crowd
 //!    but keeps its colour; on a light page (Paper) they're laid over it, as the processor's picture is laid over the
-//!    page. Close up every star is drawn so, the left-out ones as faint dust; far out only the stars "Light by" lights
-//!    most, each a bright point of its own with a short, faint glow, so they stand out at every zoom. The very
-//!    brightest get faint four-point spikes, and every star twinkles very slightly (only in brightness, and not while
-//!    the mouse sweeps, drags or glides, so it never gets in the way of picking a sound).
+//!    page. Once the stars are far enough apart to tell apart every star is drawn so, the left-out ones as faint dust:
+//!    first as small and bright as the painted dot under it, growing and brightening as the view flies in
+//!    (`mo_app::galaxy_look::look`). Far out only the stars "Light by" lights most are, each a bright point of its own
+//!    with a short, faint glow, so they stand out at every zoom. The very brightest get faint four-point spikes, and
+//!    every star twinkles very slightly (only in brightness, and not while the mouse sweeps, drags or glides, so it
+//!    never gets in the way of picking a sound).
 //!
 //! A twinkle only changes step 5, so for a twinkle the card keeps the picture of steps 1 to 4 and draws the stars
 //! over it again.
@@ -58,8 +60,10 @@ struct Camera {
     count: f32,
     // Pixels per point.
     scale: f32,
-    _a: f32,
-    _b: f32,
+    // Crisp stars: how far they've gone from looking like the painted dots they took over from (0) to how they look
+    // close up (1), and how quickly the painted picture's brightness squeezes (to start them as bright as its dots).
+    bright: f32,
+    gain: f32,
     _c: f32,
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -144,29 +148,41 @@ fn crisp_vertex(@builtin(vertex_index) v: u32, @builtin(instance_index) star: u3
     let shown = c.a > 0.5 / 255.0;
     let lighting = camera.light_on > 0.5;
     let lit = select(0.0, max(c.a * 255.0 - 1.0, 0.0) / 254.0, lighting);
-    // Close up every star shows; far out, where the stars are only painted, the best lit still show as points. By rank:
-    // the light byte can't tell the top few hundred of a big library apart. It rises along the ones that glint, and
-    // the last, the best lit, shows fully, even when it's the only one (mo_app::galaxy_look::glint_at).
+    // Once the stars have come apart every star shows; far out, where the stars are only painted, the best lit still
+    // show as points. By rank: the light byte can't tell the top few hundred of a big library apart. It rises along
+    // the ones that glint, and the last, the best lit, shows fully, even when it's the only one
+    // (mo_app::galaxy_look::glint_at).
     let rank = f32(star);
     let glint = select(0.0, smoothstep(0.0, 1.0, (rank - camera.glint_start + 1.0) / max(camera.count - camera.glint_start, 1.0)),
                        lighting && rank >= camera.glint_start);
-    // A left-out star is faint dust, fainter still with Light by on, when the unlit stars on show are dimmed too.
-    let show = select(0.15 * camera.strength * select(1.0, DUST_LIT, lighting), max(camera.strength, camera.painted * glint),
-                      shown);
+    // How bright its core is close up: with Light by on, as bright as it's lit, with its steady variety (its weight,
+    // as `pack` made it; the processor's picture does the same). A left-out star is faint dust, fainter still with
+    // Light by on, when the unlit stars on show are dimmed too.
+    let close = select(0.15 * select(1.0, DUST_LIT, lighting), select(1.0, weight / LIT_BRIGHTEST, lighting), shown);
+    // Where the stars have only just come apart, as bright as the painted dot it takes over from (its light squeezed
+    // as the painted picture's is, its colour's brightest part heading for 1), going to its close-up brightness as
+    // the view flies in, so it neither jumps nor dips.
+    let most = max(c.r, max(c.g, c.b));
+    let painted_dot = (1.0 - exp(-camera.gain * weight * most)) / max(most, 0.001);
+    let core = camera.strength * mix(painted_dot, close, camera.bright);
+    // Far out a star that glints shows as brightly as close up, as much as it glints, and as the view flies in it
+    // never gets dimmer.
+    let show = select(core, max(core, glint * close), shown);
     // A well lit star is up to nearly three times as big (mo_app::galaxy_look::lit_size, the same curve); with Light by
-    // on, an unlit one is smaller than an all-alike star, so the lit ones stand out.
-    let size = (1.0 + 1.8 * sqrt(lit)) * select(1.0, UNLIT_SIZE, lighting);
+    // on, an unlit one is smaller than an all-alike star, so the lit ones stand out. Where the stars have only just
+    // come apart they're all as small as the painted dots, and grow into their sizes as the view flies in.
+    let size = mix(1.0, (1.0 + 1.8 * sqrt(lit)) * select(1.0, UNLIT_SIZE, lighting), camera.bright);
     let near = camera.size * size;
-    // With Light by on, far out a star that glints is a small bright point, never smaller than one you can see, and it
-    // goes to its close-up size as the view flies in. The others shrink towards such a point with it, though never
-    // past their own size, so a star that glints is never smaller than a less lit one beside it. (Far out only the
-    // ones that glint are drawn; the processor's picture draws every star at every zoom, so there the ones that glint
-    // keep at least their own size instead: mo_app::galaxy_look::glint_point.)
-    let point = select(min(near, MIN_LIT * camera.scale), MIN_LIT * camera.scale * (1.0 + 0.6 * glint), glint > 0.0);
-    let radius = select(camera.dust, select(near, mix(point, near, camera.strength), lighting), shown);
+    // With Light by on, far out a star that glints is a small bright point, never smaller than one you can see, and as
+    // the view flies in it stays so until its own size is bigger, so it never shrinks, and is never smaller than a less
+    // lit one beside it. (Far out only the ones that glint are drawn; the processor's picture draws every star at
+    // every zoom, so there the ones that glint keep at least their own size instead: mo_app::galaxy_look::glint_point.)
+    // A left-out star is a faint dot, never bigger than a shown one.
+    let point = MIN_LIT * camera.scale * (1.0 + 0.6 * glint);
+    let radius = select(min(camera.dust, camera.size), select(near, max(point, near), glint > 0.0), shown);
     // A shown star's glow reaches 2.8 times its core close up, a well lit one's up to twice that; far out, where
     // only a little of the glow shows, it's kept short.
-    let halo = select(radius * 1.5, radius * mix(FAR_HALO, HALO + HALO * lit, camera.strength), shown);
+    let halo = select(radius * 1.5, radius * mix(FAR_HALO, HALO + HALO * lit, camera.bright), shown);
     // The brightest few get faint four-point spikes, growing along them as the glints do.
     let spiky = smoothstep(0.0, 1.0, (rank - camera.spike_start + 1.0) / max(camera.count - camera.spike_start, 1.0));
     let spikes = select(0.0, spiky * max(radius * 7.0, SPIKE_MIN * camera.scale),
@@ -184,9 +200,7 @@ fn crisp_vertex(@builtin(vertex_index) v: u32, @builtin(instance_index) star: u3
     out.position = select(vec4((at - camera.centre) * camera.unit + local * camera.pixel, 0.0, 1.0),
                           vec4(2.0, 2.0, 0.0, 1.0), show < 0.004);
     out.local = local;
-    // With Light by on, a shown star's core is as bright as it's lit, with its steady variety (its weight, as `pack`
-    // made it; the processor's picture does the same); a left-out one stays faint dust.
-    let strength = show * twinkle * select(1.0, weight / LIT_BRIGHTEST, lighting && shown);
+    let strength = show * twinkle;
     out.colour = c.rgb * strength;
     out.strength = strength;
     out.radius = radius;
@@ -194,7 +208,7 @@ fn crisp_vertex(@builtin(vertex_index) v: u32, @builtin(instance_index) star: u3
     out.spikes = spikes;
     out.shown = select(0.0, 1.0, shown);
     out.lit = lit;
-    out.glow = mix(FAR_GLOW, 1.0, camera.strength);
+    out.glow = mix(FAR_GLOW, 1.0, camera.bright);
     return out;
 }
 
@@ -677,8 +691,8 @@ impl Sky {
                 spike_start as f32,
                 count as f32,
                 scale,
-                0.0,
-                0.0,
+                look.bright,
+                look.gain,
                 0.0,
             ]);
             self.queue.write_buffer(&self.cameras[i].0, 0, &look::bytes(&numbers));
@@ -818,6 +832,12 @@ mod tests {
     /// light one (as Paper), to judge the look by eye and to check the card takes every step. With GALAXY_GPU_TIME set
     /// it also times each view: whole frames, and a twinkle's frames, which only draw the stars again (on a software
     /// card that's the processor's time, far slower than a real card, but fine for before and after).
+    ///
+    /// To look at one thing closely, these narrow it: GALAXY_GPU_ZOOMS (the zooms, as "1,6,12,60,400"),
+    /// GALAXY_GPU_VIEW (the view's size in points, as "1100x800"), GALAXY_GPU_LIT ("length,liked,nothing") and
+    /// GALAXY_GPU_PAGES ("dark,paper"). GALAXY_GPU_MAP=blob lays the stars out as a big library's map is, most of them
+    /// in one crowded blob, with the view in its middle. Each picture's line in the output (`LOOK ...`) says how many
+    /// stars were on it and how bright it is on average (0 to 255 over the page), to see brightness change with zoom.
     #[test]
     #[ignore]
     fn render() {
@@ -826,6 +846,18 @@ mod tests {
         let Ok(out) = std::env::var("GALAXY_GPU_LOOK") else { return };
         let scale: f32 = std::env::var("GALAXY_GPU_SCALE").ok().and_then(|s| s.parse().ok()).unwrap_or(1.0);
         let timed = std::env::var("GALAXY_GPU_TIME").is_ok();
+        let listed = |name: &str, all: &str| -> Vec<String> {
+            std::env::var(name).unwrap_or_else(|_| all.to_owned()).split(',').map(|s| s.trim().to_owned()).collect()
+        };
+        let zooms: Vec<f32> =
+            listed("GALAXY_GPU_ZOOMS", "1,6,12,60,400").iter().filter_map(|z| z.parse().ok()).collect();
+        let size: Vec<f32> =
+            listed("GALAXY_GPU_VIEW", "1100x800")[0].split('x').filter_map(|v| v.parse().ok()).collect();
+        let (view_width, view_height) =
+            (size.first().copied().unwrap_or(1100.0), size.get(1).copied().unwrap_or(800.0));
+        let lit_kinds = listed("GALAXY_GPU_LIT", "length,liked,nothing");
+        let page_kinds = listed("GALAXY_GPU_PAGES", "dark,paper");
+        let blob = std::env::var("GALAXY_GPU_MAP").is_ok_and(|m| m == "blob");
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let adapter =
             crate::gpu::wait(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).expect("a card");
@@ -839,8 +871,19 @@ mod tests {
             seed ^= seed << 17;
             (seed % 1_000_000) as f32 / 1_000_000.0
         };
-        let clumps: Vec<(f32, f32, f32, i32)> =
+        let mut clumps: Vec<(f32, f32, f32, i32)> =
             (0..40).map(|i| (0.1 + rnd() * 0.8, 0.1 + rnd() * 0.8, 0.01 + rnd() * 0.08, i % 8)).collect();
+        if blob {
+            // Most of the stars in one blob in the middle (a sixth of the map across), crowded clumps of sound-alikes
+            // inside it, the rest scattered round it. Its middle is about as crowded as Solomon's library is: about
+            // 13,000 stars on a 4K view (1830 by 1171 points) at 44 times.
+            clumps = (0..40)
+                .map(|i| {
+                    let (a, r) = (rnd() * std::f32::consts::TAU, rnd().sqrt() * if i < 30 { 0.08 } else { 0.3 });
+                    (0.5 + a.cos() * r, 0.5 + a.sin() * r, if i < 30 { 0.02 + rnd() * 0.04 } else { 0.05 }, i % 8)
+                })
+                .collect();
+        }
         let (mut stars, mut colours) = (Vec::new(), Vec::new());
         for i in 0..450_000 {
             let c = clumps[i % clumps.len()];
@@ -872,18 +915,25 @@ mod tests {
         let liked: Vec<f32> = (0..stars.len()).map(|_| if rnd() < 0.005 { rnd().max(0.01) } else { 0.0 }).collect();
         // The page's well behind the map: Graphite's and Paper's.
         let pages = [("dark", [18.0 / 255.0; 3]), ("paper", [241.0 / 255.0, 239.0 / 255.0, 235.0 / 255.0])];
+        let pages: Vec<(&str, [f32; 3])> =
+            pages.into_iter().filter(|(p, _)| page_kinds.iter().any(|k| k == p)).collect();
         for (lit_by, light) in [("length", length), ("liked", liked), ("nothing", Vec::new())] {
+            if !lit_kinds.iter().any(|k| k == lit_by) {
+                continue;
+            }
             let order = lit_order(&stars, &shown, &light);
             let share = lit_share(&stars, &shown, &light);
             let shine = Shine { light_on: share > 0.0, ..Shine::default() };
             let (packed, lit) = pack(&stars, &colours, &palette, &shown, &light, &order);
             sky.set_stars(&packed, lit);
-            for zoom in [1.0f32, 6.0, 12.0, 60.0, 400.0] {
+            for &zoom in &zooms {
                 let mut view = View::default();
-                (view.width, view.height, view.zoom) = (1100.0, 800.0, zoom);
-                (view.cx, view.cy) = (clumps[3].0, clumps[3].1);
+                (view.width, view.height, view.zoom) = (view_width, view_height, zoom);
+                (view.cx, view.cy) = if blob { (0.5, 0.5) } else { (clumps[3].0, clumps[3].1) };
                 let (l, t, r, b) = mo_app::galaxy_look::on_view(&view);
-                let lk = look(&view, grid.count_in(l, t, r, b), share);
+                let crowd = grid.crowd(l, t, r, b);
+                let in_view = crowd.in_view;
+                let lk = look(&view, crowd, share);
                 eprintln!("{lit_by}, zoom {zoom}: {lk:?}");
                 if timed {
                     // Each drawn 5 times and waited for, taking turns with a twinkle's frames, so what else the
@@ -894,7 +944,7 @@ mod tests {
                         }
                         let started = std::time::Instant::now();
                         let twinkle = Shine { time: t, twinkle: 0.07, ..shine };
-                        let _ = sky.draw(&view, scale, &lk, twinkle, pages[0].1);
+                        let _ = sky.draw(&view, scale, &lk, twinkle, pages.first().map_or([0.07; 3], |p| p.1));
                         device.poll(wgpu::PollType::wait_indefinitely()).expect("the card finishes");
                         started.elapsed().as_secs_f64() * 1000.0
                     };
@@ -910,7 +960,7 @@ mod tests {
                         twinkle / 5.0
                     );
                 }
-                for (page, background) in pages {
+                for &(page, background) in &pages {
                     let picture = sky.draw(&view, scale, &lk, shine, background);
                     let (w, h) = (picture.width(), picture.height());
                     let row = (w * 4).div_ceil(256) * 256;
@@ -938,12 +988,19 @@ mod tests {
                     device.poll(wgpu::PollType::wait_indefinitely()).expect("the card finishes");
                     let data = buffer.slice(..).get_mapped_range().expect("mapped");
                     let mut img = image::RgbaImage::new(w, h);
+                    let mut sum = 0u64;
                     for y in 0..h {
                         for x in 0..w {
                             let at = (y * row + x * 4) as usize;
                             img.put_pixel(x, y, image::Rgba([data[at], data[at + 1], data[at + 2], 255]));
+                            sum += u64::from(data[at].max(data[at + 1]).max(data[at + 2]));
                         }
                     }
+                    let mean = sum as f64 / f64::from(w * h).max(1.0);
+                    eprintln!(
+                        "LOOK {lit_by} {page} zoom {zoom} in view {in_view} apart {:.2} pt mean {mean:.2}",
+                        crowd.apart * view.unit()
+                    );
                     img.save(format!("{out}/galaxy-gpu-{lit_by}-{page}-{zoom}.png")).expect("saved");
                 }
             }

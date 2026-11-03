@@ -5,9 +5,10 @@
 //! - a quarter-size copy of that layer, blurred, is the glow round the crowded places;
 //! - one last step squeezes the brightness, so a crowd stays vivid and keeps its colour instead of burning white.
 //!
-//! How many stars are on the view decides the rest. Far out they're only painted that way. Close up each one is also
-//! drawn as a star, a white-hot core in a soft glow, with the stars the filters leave out kept as faint dust. In
-//! between the two blend.
+//! How crowded the stars on the view are decides the rest ([`Crowd`]). While they're too close to tell apart they're
+//! only painted that way. Once they come apart each one is also drawn as a star, a white-hot core in a soft glow, with
+//! the stars the filters leave out kept as faint dust: first as small and as bright as the painted dot it takes over
+//! from, then growing and brightening as the view flies in, so the galaxy's brightness changes smoothly all the way in.
 //!
 //! With Light by on, the unlit stars are dimmer and smaller, and the best lit ones are drawn as stars even far out
 //! (never smaller than [`MIN_LIT`] points), each a bright point with a short, faint glow; on the card the very
@@ -20,6 +21,7 @@ use std::time::Duration;
 use mo_sounds::StarPoint;
 use rayon::prelude::*;
 
+use crate::galaxy_grid::Crowd;
 use crate::galaxy_view::View;
 use crate::sounds::SoundList;
 
@@ -233,9 +235,20 @@ pub fn glint_point(near: f32, glint: f32, crisp: f32, min_lit: f32) -> f32 {
     far + (near - far) * crisp.clamp(0.0, 1.0)
 }
 
-/// Below this many stars on the view each is drawn crisply; above the upper one they're only painted (as C#).
-const CRISP: f32 = 1_500.0;
-const PAINTED: f32 = 5_000.0;
+/// Once the stars are this many points apart where they crowd ([`Crowd`]), far enough apart to tell apart, they start
+/// to be drawn as stars, over the painted dots; a doubling further apart, they're only drawn as stars.
+pub const STARS_FROM: f32 = 2.5;
+/// Where the stars have only just come apart, a star's core reaches this share of the gap to the stars round it: as
+/// small as the painted dot it takes over from. From there its light (how big it is times how bright) grows with the
+/// room round it, so the view's brightness holds steady as the stars spread apart and brighten, until they're as big
+/// as they get close up; and a crowd of them never runs together (C#'s room).
+const ROOM: f32 = 0.22;
+/// About how bright a painted dot is, against a star close up (an all-alike star's, squeezed as the painted picture
+/// squeezes it): what a star brightens from as the view flies in.
+const DOT: f32 = 0.45;
+/// Over this many doublings of the gap between the stars past [`STARS_FROM`], a star goes from as bright as the
+/// painted dot it takes over from to as bright as it is close up (and, with Light by on, to its size by how lit it is).
+const BRIGHT_BY: f32 = 3.0;
 /// Stamps are stored at a fraction of their brightness, so a crowd can pile onto one pixel before the layer runs
 /// out of room; the last step scales back up.
 pub const STAMP: f32 = 1.0 / 6.0;
@@ -256,6 +269,9 @@ pub struct Look {
     pub gain: f32,
     /// A crisp star's core radius, in points.
     pub radius: f32,
+    /// How far the stars drawn as stars have gone from looking like the painted dots they took over from (0) to how
+    /// they look close up (1): as bright as close up and, with Light by on, as big as how lit they are.
+    pub bright: f32,
     /// How far up the lit stars' rank order (0 to 1, [`lit_order`]) they show as points of their own far out, and from
     /// where they get spikes: the top `1 - glint_from` of them glint ([`glinting`]).
     pub glint_from: f32,
@@ -268,29 +284,52 @@ fn smooth(a: f32, b: f32, v: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// The look for `view` with `in_view` shown stars on it, `lit_share` of which have the Light by measure (see
-/// [`lit_share`]; 0 with nothing lit).
-pub fn look(view: &View, in_view: usize, lit_share: f32) -> Look {
-    let n = in_view as f32;
+/// The look for `view` with `crowd` on it, the shown stars on the view, `lit_share` of which have the Light by measure
+/// (see [`lit_share`]; 0 with nothing lit).
+///
+/// Every part of it changes smoothly with the zoom (the C# app's look switched over by how many stars were on the
+/// view, so on a big screen, with thousands of stars on it well apart, they stayed tiny painted dots, then big bright
+/// stars faded in all at once): the stars come in as stars where they're far enough apart to tell apart, as small and
+/// bright as the painted dots, and grow and brighten from there.
+pub fn look(view: &View, crowd: Crowd, lit_share: f32) -> Look {
+    let n = crowd.in_view as f32;
     // Light ranks the sounds that have the measure, so the top ones are a share of those on the view.
     let lit_on_view = (n * lit_share.clamp(0.0, 1.0)).max(1.0);
-    let painted = smooth(CRISP, PAINTED, n);
+    // How far apart the stars are where they crowd, in points, and how many doublings that's past STARS_FROM.
+    let apart = crowd.apart.max(0.0) * view.unit();
+    let past = (apart / STARS_FROM).max(f32::MIN_POSITIVE).log2();
+    let painted = 1.0 - smooth(0.0, 1.0, past);
     let area = (view.width * view.height).max(1.0);
     // The more stars per point, the gentler the squeeze, so a busy view isn't all white.
     let gain = (1.7 / (n * 9.0 / area).max(1.0)).clamp(0.35, 1.7);
     // Stars grow as the view flies in, but never so big that a crowd of them runs together.
     let grow = 0.75 + 0.25 * view.zoom.min(30.0).sqrt();
-    let room = ((area / n.max(1.0)).sqrt() * 0.22).clamp(1.6, 9.0);
+    let bright = smooth(0.0, BRIGHT_BY, past);
     Look {
         painted,
         core: painted / STAMP,
         // A quarter-size stamp covers a sixteenth of the pixels; the 0.9 is C#'s.
         glow: (0.35 + 0.65 * painted) / STAMP * 0.9,
         gain,
-        radius: (1.9 * grow).clamp(1.6, room),
+        // As a star brightens and its glow grows, it takes less of the room round it, so its light grows only with
+        // the room.
+        radius: (ROOM * (star_light(0.0) / star_light(bright)).sqrt() * apart).min(1.9 * grow),
+        bright,
         glint_from: (1.0 - GLINTS / lit_on_view).clamp(0.6, 0.995),
         spikes_from: (1.0 - SPIKY / lit_on_view).clamp(SPIKES_FROM, 0.9995),
     }
+}
+
+/// How much light an all-alike star drawn as a star gives for its core's size (its core and its glow together), as
+/// far as it has gone (`bright`, 0 to 1) from looking like the painted dot it took over from (as bright as one, with
+/// the faint, short glow of a star far out) to how it looks close up. The shaders draw its glow so: from the core's
+/// edge to [`FAR_HALO`] times its radius, as strong as [`FAR_GLOW`], going to [`HALO`] and all of it.
+fn star_light(bright: f32) -> f32 {
+    // A glow's falloff, (1 - its distance over its reach) to the power FALLOFF, over its disc: 2 / ((F + 1)(F + 2)).
+    let falloff = 2.0 / ((FALLOFF + 1.0) * (FALLOFF + 2.0));
+    let glow = FAR_GLOW + (1.0 - FAR_GLOW) * bright;
+    let halo = FAR_HALO + (HALO - FAR_HALO) * bright;
+    (DOT + (1.0 - DOT) * bright) * (1.0 + GLOW * glow * falloff * halo * halo)
 }
 
 /// The part of the map on show: left, top, right, bottom.
@@ -442,6 +481,7 @@ pub fn bytes(values: &[f32]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::galaxy_view::most_zoom_for as most_zoom;
 
     fn view() -> View {
         let mut v = View::default();
@@ -449,27 +489,96 @@ mod tests {
         v
     }
 
+    /// The look with `n` shown stars spread evenly over `v`.
+    fn even(v: &View, n: usize, lit_share: f32) -> Look {
+        look(v, Crowd::even(v, n), lit_share)
+    }
+
     #[test]
     fn far_out_is_painted_and_close_up_is_crisp() {
         let v = view();
-        assert_eq!(look(&v, 450_000, 0.0).painted, 1.0);
-        assert_eq!(look(&v, 200, 0.0).painted, 0.0);
-        let between = look(&v, 3_000, 0.0).painted;
-        assert!(between > 0.0 && between < 1.0);
+        // 450,000 on an 800 by 600 view are about a point apart: only painted. 200 are drawn as stars.
+        assert_eq!(even(&v, 450_000, 0.0).painted, 1.0);
+        assert_eq!(even(&v, 200, 0.0).painted, 0.0);
+        // 40,000 are about 3.5 points apart: on their way from painted dots to stars.
+        let between = even(&v, 40_000, 0.0).painted;
+        assert!(between > 0.0 && between < 1.0, "{between}");
         // A crowded view squeezes gently, a sparse one fully.
-        assert!(look(&v, 450_000, 0.0).gain < look(&v, 2_000, 0.0).gain);
-        assert_eq!(look(&v, 10, 0.0).gain, 1.7);
+        assert!(even(&v, 450_000, 0.0).gain < even(&v, 2_000, 0.0).gain);
+        assert_eq!(even(&v, 10, 0.0).gain, 1.7);
+    }
+
+    #[test]
+    fn it_goes_by_how_crowded_the_stars_are_not_how_many_are_on_the_view() {
+        let v = view();
+        // 1,000 stars crowded into one small clump, half a point apart: painted, though there are few.
+        let clump = look(&v, Crowd { in_view: 1_000, apart: 0.5 / v.unit() }, 0.0);
+        assert_eq!(clump.painted, 1.0);
+        // 20,000 well apart (on a big screen, say), 10 points: drawn as stars, though there are many.
+        let apart = look(&v, Crowd { in_view: 20_000, apart: 10.0 / v.unit() }, 0.0);
+        assert_eq!(apart.painted, 0.0);
     }
 
     #[test]
     fn stars_grow_as_the_view_flies_in_but_keep_their_room() {
         let mut v = view();
-        let far = look(&v, 100, 0.0).radius;
+        let far = even(&v, 100, 0.0).radius;
         v.zoom = 20.0;
-        let near = look(&v, 100, 0.0).radius;
+        let near = even(&v, 100, 0.0).radius;
         assert!(near > far);
-        // Very crowded: they shrink to keep apart, never below 1.6 points.
-        assert_eq!(look(&v, 1_000_000, 0.0).radius, 1.6);
+        // Where they've only just come apart they're as small as the painted dots, a share of the gap between them.
+        let just = look(&v, Crowd { in_view: 50_000, apart: STARS_FROM / v.unit() }, 0.0);
+        assert!((just.radius - ROOM * STARS_FROM).abs() < 1e-5, "{just:?}");
+        assert_eq!((just.painted, just.bright), (1.0, 0.0));
+        // Very crowded: only painted (a star drawn as a star would be a tiny share of a point).
+        let crowded = even(&v, 1_000_000, 0.0);
+        assert_eq!(crowded.painted, 1.0);
+        assert!(crowded.radius < 0.2, "{crowded:?}");
+    }
+
+    #[test]
+    fn the_look_changes_smoothly_all_the_way_in() {
+        // Solomon's library on his 4K screen (the galaxy about 1830 by 1171 points), flying into its crowded middle:
+        // there 13,009 stars were on the view at 44 times. Step by step, a percent of zoom at a time, from the whole
+        // map to as far as it goes in, nothing jumps: the stars are painted less and less and never more, and once
+        // drawn as stars they only grow and brighten.
+        let mut v = View::default();
+        (v.width, v.height) = (1830.0, 1171.0);
+        let area_at = |v: &View| v.width * v.height / (v.unit() * v.unit());
+        v.zoom = 44.0;
+        let crowded = 13_009.0 / area_at(&v);
+        let apart = 1.0 / crowded.sqrt();
+        let mut was: Option<Look> = None;
+        v.zoom = 1.0;
+        while v.zoom <= most_zoom(453_885) {
+            let in_view = ((crowded * area_at(&v)) as usize).min(453_885);
+            let lk = look(&v, Crowd { in_view, apart }, 0.0);
+            if let Some(was) = was {
+                let at = v.zoom;
+                assert!(lk.painted <= was.painted && was.painted - lk.painted < 0.03, "painted at {at}: {lk:?}");
+                assert!(lk.bright >= was.bright && lk.bright - was.bright < 0.01, "bright at {at}: {lk:?}");
+                assert!(lk.radius >= was.radius && lk.radius < was.radius * 1.02, "radius at {at}: {lk:?}");
+                assert!((lk.gain - was.gain).abs() < 0.04, "gain at {at}: {lk:?}");
+            }
+            was = Some(lk);
+            v.zoom *= 1.01;
+        }
+        // At 44 times (13,009 on the view, about 13 points apart) the stars are drawn as stars, nearly as bright as
+        // close up. By 69 times (where they were dim painted dots before) they're as bright as close up, and from
+        // there they only grow with the room round them: still growing at 87 times (where they suddenly brightened
+        // before), and as big as they get close up by 130.
+        let at = |zoom: f32| {
+            let mut v = v;
+            v.zoom = zoom;
+            look(&v, Crowd { in_view: (crowded * area_at(&v)) as usize, apart }, 0.0)
+        };
+        let at44 = at(44.0);
+        assert_eq!(at44.painted, 0.0);
+        assert!(at44.bright > 0.8 && at44.bright < 1.0, "{at44:?}");
+        let (at69, at87, at130) = (at(69.0), at(87.0), at(130.0));
+        assert_eq!((at69.painted, at69.bright), (0.0, 1.0), "{at69:?}");
+        assert!(at44.radius < at69.radius && at69.radius < at87.radius && at87.radius < at130.radius);
+        assert!((at130.radius - 1.9 * (0.75 + 0.25 * 30.0f32.sqrt())).abs() < 1e-4, "{at130:?}");
     }
 
     #[test]
@@ -513,7 +622,7 @@ mod tests {
     #[test]
     fn of_450000_lit_stars_exactly_the_top_250_get_spikes_and_2500_glint() {
         let count = 450_000u32;
-        let lk = look(&view(), count as usize, 1.0);
+        let lk = even(&view(), count as usize, 1.0);
         assert_eq!(glinting(&lk, count), (2_500, 250));
         // They're the last ones the card holds (by rank: their light bytes would be one value for all of them); none
         // with nothing lit.
@@ -531,30 +640,30 @@ mod tests {
     fn a_few_lit_stars_still_glint_far_out_and_the_best_lit_fully() {
         let v = view();
         // One liked sound among 450,000: it glints, fully.
-        let one = look(&v, 450_000, 1.0 / 450_000.0);
+        let one = even(&v, 450_000, 1.0 / 450_000.0);
         assert_eq!(glinting(&one, 1), (1, 0));
         assert_eq!(glint_at(0, 1), 1.0);
         // Two or three: the best one glints fully. Four: two glint, the best fully, the other half way.
-        assert_eq!(glinting(&look(&v, 450_000, 2.0 / 450_000.0), 2), (1, 0));
-        assert_eq!(glinting(&look(&v, 450_000, 3.0 / 450_000.0), 3), (1, 0));
-        assert_eq!(glinting(&look(&v, 450_000, 4.0 / 450_000.0), 4), (2, 0));
+        assert_eq!(glinting(&even(&v, 450_000, 2.0 / 450_000.0), 2), (1, 0));
+        assert_eq!(glinting(&even(&v, 450_000, 3.0 / 450_000.0), 3), (1, 0));
+        assert_eq!(glinting(&even(&v, 450_000, 4.0 / 450_000.0), 4), (2, 0));
         assert_eq!((glint_at(0, 2), glint_at(1, 2)), (0.5, 1.0));
         // Nothing lit: nothing glints.
         assert_eq!(glinting(&one, 0), (0, 0));
         // Spikes only from a few dozen lit, the first one at full length.
-        assert_eq!(glinting(&look(&v, 450_000, 34.0 / 450_000.0), 34).1, 1);
-        assert_eq!(glinting(&look(&v, 450_000, 30.0 / 450_000.0), 30).1, 0);
+        assert_eq!(glinting(&even(&v, 450_000, 34.0 / 450_000.0), 34).1, 1);
+        assert_eq!(glinting(&even(&v, 450_000, 30.0 / 450_000.0), 30).1, 0);
     }
 
     #[test]
     fn far_out_only_the_best_lit_few_thousand_glint_and_a_few_hundred_get_spikes() {
         let v = view();
         // Length: every sound has the measure. 450,000 on the view: the top 2,500 show as points, 250 get spikes.
-        let all = look(&v, 450_000, 1.0);
+        let all = even(&v, 450_000, 1.0);
         assert!((all.glint_from - (1.0 - 2_500.0 / 450_000.0)).abs() < 1e-6);
         assert!((all.spikes_from - (1.0 - 250.0 / 450_000.0)).abs() < 1e-6);
         // Liked: 2,000 liked sounds. Their top 40 in a hundred glint; spikes for the top 1.5 in a hundred at most.
-        let liked = look(&v, 450_000, 2_000.0 / 450_000.0);
+        let liked = even(&v, 450_000, 2_000.0 / 450_000.0);
         assert_eq!(liked.glint_from, 0.6);
         assert_eq!(liked.spikes_from, 0.985);
         assert_eq!(glinting(&liked, 2_000), (800, 30));
@@ -636,12 +745,12 @@ mod tests {
     fn only_a_picture_with_stars_drawn_as_stars_twinkles() {
         let v = view();
         // Close up every star is drawn as a star.
-        assert!(twinkles(&look(&v, 200, 0.0), false, 0));
+        assert!(twinkles(&even(&v, 200, 0.0), false, 0));
         // Far out with nothing lit, none is: there's nothing to draw again.
-        let far = look(&v, 450_000, 0.0);
+        let far = even(&v, 450_000, 0.0);
         assert!(!twinkles(&far, false, 0));
         // Far out with Light by on, the ones that glint are, even a single one.
-        assert!(twinkles(&look(&v, 450_000, 1.0 / 450_000.0), true, 1));
+        assert!(twinkles(&even(&v, 450_000, 1.0 / 450_000.0), true, 1));
         assert!(!twinkles(&far, true, 0));
     }
 
@@ -659,7 +768,7 @@ mod tests {
         assert_eq!(flags, [0, 1, 1 + 51, 1 + 76, 1 + 127, 255]);
         // Four of the five shown have the measure.
         assert_eq!(lit_share(&stars, &shown, &light), 0.8);
-        let mut lk = look(&view(), 5, 0.8);
+        let mut lk = even(&view(), 5, 0.8);
         (lk.glint_from, lk.spikes_from) = (0.5, 0.75);
         // The top half of the four lit glint (2), the top quarter (1) gets spikes: the last stars on the card.
         assert_eq!(glinting(&lk, lit), (2, 1));

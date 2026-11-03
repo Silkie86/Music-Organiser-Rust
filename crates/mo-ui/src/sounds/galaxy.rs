@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use mo_app::background::{self, Newest};
-use mo_app::galaxy_grid::Grid;
+use mo_app::galaxy_grid::{Crowd, Grid};
 use mo_app::galaxy_look::{self, LightBy};
 use mo_app::galaxy_names::{self as names, NO_KIND, Region};
 use mo_app::galaxy_picture::{Drawn, Picture};
@@ -287,14 +287,15 @@ fn usable_card() -> Option<(gpu::Gpu, u64)> {
     gpu::current().filter(|(_, generation)| !HERE.with(|h| *h.borrow()) && failed != Some(*generation))
 }
 
-/// How many shown stars are on the view, as the grid counts them (all of them until the grid comes).
-fn in_view(g: &Galaxy) -> usize {
+/// How many shown stars are on the view and how crowded they are, as the grid finds them (until the grid comes, all of
+/// them, spread over the view).
+fn crowd(g: &Galaxy) -> Crowd {
     match &g.grid {
         Some(grid) => {
             let (l, t, r, b) = galaxy_look::on_view(&g.view);
-            grid.count_in(l, t, r, b)
+            grid.crowd(l, t, r, b)
         }
-        None => g.count,
+        None => Crowd::even(&g.view, g.count),
     }
 }
 
@@ -1282,7 +1283,7 @@ pub(super) fn draw(app: &AppWindow) {
         let lit = g.light_for(&list);
         let light = lit.map(|l| l.light.clone()).unwrap_or_default();
         let order = lit.map(|l| l.order.clone()).unwrap_or_default();
-        let in_view = in_view(g);
+        let crowd = crowd(g);
         g.asked += 1;
         let moving = g.view.flying() || g.view.panning();
         let scale = if moving { g.scale.min(MOVING_SCALE) } else { g.scale };
@@ -1297,7 +1298,7 @@ pub(super) fn draw(app: &AppWindow) {
             palette,
             view: g.view,
             scale,
-            in_view,
+            crowd,
             glows: true,
         })
     });
@@ -1439,7 +1440,7 @@ fn draw_mini(app: &AppWindow) {
             view: mini_view(),
             scale,
             // The whole map is on show.
-            in_view: key.shown.len(),
+            crowd: Crowd::even(&mini_view(), key.shown.len()),
             glows: false,
         })
     });
@@ -1553,7 +1554,7 @@ fn draw_on_card(app: &AppWindow, gpu: &gpu::Gpu, generation: u64, whole: bool) -
             time: (TWINKLE_CLOCK.with(Instant::elapsed).as_secs_f64() % 3600.0) as f32,
             twinkle: twinkle_now(!g.view.pressed() && !g.view.flying()),
         };
-        (g.view, g.scale, galaxy_look::look(&g.view, in_view(g), share), shine, g.packed.clone(), g.set_got)
+        (g.view, g.scale, galaxy_look::look(&g.view, crowd(g), share), shine, g.packed.clone(), g.set_got)
     });
     let (view, scale, look, shine, packed, version) = ask;
     let lit = packed.as_ref().map_or(0, |p| p.1);
