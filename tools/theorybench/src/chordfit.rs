@@ -459,6 +459,18 @@ fn print_gates(start: &Book, fitted: &Book) -> Vec<String> {
     }
     let ((met_before, targets), (met_after, _)) = (start.targets(), fitted.targets());
     println!("  Targets met: {met_before} of {targets} at the start, {met_after} fitted.");
+    let met = |book: &Book| -> Vec<String> {
+        book.verdicts.iter().filter(|v| !v.gate && !v.held_out && v.holds()).map(|v| v.name.clone()).collect()
+    };
+    let (was, now) = (met(start), met(fitted));
+    let gained: Vec<&str> = now.iter().filter(|n| !was.contains(n)).map(String::as_str).collect();
+    let lost: Vec<&str> = was.iter().filter(|n| !now.contains(n)).map(String::as_str).collect();
+    if !gained.is_empty() {
+        println!("  Now met: {}.", gained.join("; "));
+    }
+    if !lost.is_empty() {
+        println!("  No longer met: {}.", lost.join("; "));
+    }
     after.iter().map(|v| format!("{} ({})", v.name, v.step.about())).collect()
 }
 

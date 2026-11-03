@@ -396,12 +396,12 @@ w_N, what a stretch read as no chord scores. The counted tables stay as `tables`
   held out; and a `SET=` line that reads the hand cases with the fitted numbers (`cargo test -p mo-harmony --release
   show_the_cases_read_whole -- --ignored --nocapture`, and `show_the_grid`). `--out` writes the numbers, by name, for
   `chords --weights` and `chordfit --from`.
-- **The hand cases' gates.** After every fit, mo-harmony's hand cases (`chordread::cases`) are read with the numbers
-  it started from and the fitted ones, one stretch at a time, read whole and named: the report gives how many gates
-  break at each step, every gate the fitted numbers break (with what they read), and how many of the design's
-  targets are met; the `--out` file says which gates break ("gates"), as weights that break one aren't shipped. The
-  cases the design holds out (G\*: 6, 15, 32, 34 and 35, gates and the target 15e) are never learned from nor looked
-  at here, nor counted among the targets; the tests check them.
+- **The hand cases' gates.** After every fit, mo-harmony's hand cases (`chordread::cases`) are read with the numbers it
+  started from and the fitted ones, one stretch at a time, read whole and named: the report gives how many gates break
+  at each step, every gate the fitted numbers break (with what they read), and how many of the design's targets are met
+  (naming those the fit newly meets or loses); the `--out` file says which gates break ("gates"), as weights that break
+  one aren't shipped. The cases the design holds out (G\*: 6, 15, 32, 34 and 35, gates and the target 15e) are never
+  learned from nor looked at here, nor counted among the targets; the tests check them.
 - **Learning from the hand cases.** `--hand μ` adds the hand cases to the aim: each music the cases read whole (but
   the held-out ones) is one piece, labelled where its gates say what to read: what a stretch must read (the cases
   only a whole read decides, and each stretch case's first reading), or the two readings that must come first (one
