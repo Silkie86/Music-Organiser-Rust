@@ -196,11 +196,16 @@ impl Places {
 }
 
 /// Starts the sweep on a low-priority thread of its own, a little after the app opens, and says in the log what it
-/// cleared. Never on the window's thread (rules 12 and 21).
+/// cleared, with what keeping the logs folder in bounds did as the app opened. Never on the window's thread (rules 12
+/// and 21).
 pub fn start() {
     let started = crate::background::spawn("Tidy up", || {
         std::thread::sleep(WAIT);
-        report(&sweep(&Places::this_pc(), SystemTime::now(), &mo_space::clean::SystemBin));
+        let mut done = sweep(&Places::this_pc(), SystemTime::now(), &mo_space::clean::SystemBin);
+        if let Some(pruned) = crate::log::current().and_then(crate::log::SessionLog::take_pruned) {
+            done.add(pruned);
+        }
+        report(&done);
     });
     if let Err(e) = started {
         crate::log::warning("Tidy up", &format!("Couldn't start clearing the app's leftovers: {e}"));
