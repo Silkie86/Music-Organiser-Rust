@@ -56,6 +56,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     app.set_place(Place::Sounds.index() as i32);
     let sounds_empty = capture(&window);
+    // While the sounds are still being read, on the galaxy: one word in the list's place, not the galaxy's own on top.
+    mo_ui::sounds::reading(&app);
+    app.global::<mo_ui::SoundsData>().invoke_pick_view(2);
+    let sounds_reading = capture(&window);
     mo_ui::sounds::show(&app, sample_sounds(), None, Some("1"));
     mo_ui::sounds::index_known(&app, std::sync::Arc::new(sample_fingerprints()));
     // Once to lay the page out (the tiles' width tells the page how many fit in a row), then for real.
@@ -69,7 +73,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The Backup page, filled with made-up folders.
     app.set_place(Place::Backup.index() as i32);
     mo_ui::backup::show_lines(&app, mo_ui::backup::sample_lines());
+    mo_ui::backup::show_older(&app, mo_ui::backup::sample_older(false));
     shots.push(("backup.png".into(), capture(&window)));
+    // The Remove older versions menu, opened.
+    let before = capture(&window);
+    click(&window, REMOVE_OLDER_BUTTON.0, REMOVE_OLDER_BUTTON.1);
+    let after = capture(&window);
+    if before == after {
+        return Err("backup-older-menu.png: the menu didn't open; has the Remove older versions button moved?".into());
+    }
+    shots.push(("backup-older-menu.png".into(), after));
+    // A click beside the menu closes it. Then the question asked before any go, the page turned down to show it.
+    click(&window, 600.0, 20.0);
+    mo_ui::backup::show_older(&app, mo_ui::backup::sample_older(true));
+    // Drawn twice first, so the page is laid out with the question's wrapped lines before it's turned down.
+    capture(&window);
+    capture(&window);
+    scroll(&window, 700.0, 500.0, -PAGE_DOWN);
+    shots.push(("backup-remove-older.png".into(), capture(&window)));
+    scroll(&window, 700.0, 500.0, PAGE_DOWN);
+    // The warning about files gone from your folders, folded to its line, then opened.
+    mo_ui::backup::show_older(&app, mo_ui::backup::sample_older(false));
+    mo_ui::backup::show_gone(&app, &mo_ui::backup::sample_gone());
+    capture(&window);
+    shots.push(("backup-gone.png".into(), capture(&window)));
+    app.global::<mo_ui::BackupData>().set_gone_open(true);
+    capture(&window);
+    shots.push(("backup-gone-open.png".into(), capture(&window)));
+    app.global::<mo_ui::BackupData>().set_gone_open(false);
+    mo_ui::backup::show_gone(&app, &mo_app::backup_gone::Warning::default());
     app.set_place(Place::Songs.index() as i32);
     for theme in THEMES.iter().skip(1) {
         mo_ui::apply_look(&app, &Look::from_settings(Some(theme.name), None));
@@ -78,6 +110,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     mo_ui::apply_look(&app, &graphite);
     shots.push(("sounds-empty.png".into(), sounds_empty));
+    shots.push(("sounds-reading.png".into(), sounds_reading));
     sounds_shots(&app, &window, &graphite, &mut shots);
 
     // The song panel, on the first song, on Overview and on Plugins.
@@ -197,6 +230,21 @@ fn sounds_shots(
     data.invoke_select(6);
     data.set_played(0.35);
     shots.push(("sounds-panel.png".into(), capture(window)));
+    // A sound deep in a pack, with folder names too long for a line, and six tags: its card wraps them, at the usual
+    // width and as narrow as it goes, with nothing cut off on the right. Found by name, as the shuffled order changes
+    // with every run.
+    data.set_search("Boom Kick".into());
+    data.invoke_search_edited("Boom Kick".into());
+    data.invoke_select(0);
+    capture(window);
+    shots.push(("sounds-panel-long.png".into(), capture(window)));
+    let wide = data.get_panel_width();
+    data.set_panel_width(320.0);
+    capture(window);
+    shots.push(("sounds-panel-narrow.png".into(), capture(window)));
+    data.set_panel_width(wide);
+    data.set_search("".into());
+    data.invoke_search_edited("".into());
     // Two types at once, with the Clear types chip.
     data.invoke_pick_type(0);
     data.invoke_pick_type(1);
@@ -220,6 +268,13 @@ fn sounds_shots(
     data.invoke_select(3);
     capture(window);
     shots.push(("sounds-galaxy.png".into(), capture(window)));
+    // A search that leaves no stars: the list's word says so over the dimmed galaxy, once.
+    data.set_search("Nothing called this".into());
+    data.invoke_search_edited("Nothing called this".into());
+    capture(window);
+    shots.push(("sounds-galaxy-none.png".into(), capture(window)));
+    data.set_search("".into());
+    data.invoke_search_edited("".into());
     // Lit by length: long sounds big and bright, one-shots small; then all alike, to compare.
     data.invoke_galaxy_light_by("Length".into());
     capture(window);
@@ -270,6 +325,9 @@ fn sounds_shots(
     data.invoke_pick_view(5);
     data.invoke_kit_roll();
     data.invoke_pad_lock(0);
+    capture(window);
+    // The Snare pad's Lock, clicked as you would: the pad's own buttons take their click, not the line under them.
+    click(window, SNARE_LOCK.0, SNARE_LOCK.1);
     shots.push(("sounds-kits.png".into(), capture(window)));
     data.invoke_pick_view(0);
     mo_ui::apply_look(app, &Look::from_settings(Some("Paper"), None));
@@ -350,9 +408,17 @@ fn sample_sounds() -> mo_ui::sounds::Library {
                     (shape * wobble).clamp(0.02, 1.0)
                 })
                 .collect();
+            // The picked one sits deep in a pack, with folder names too long for a line: its card must wrap them.
+            let path = if name == "Boom Kick" {
+                format!(
+                    r"D:\Samples\Packs\Vintage_Drum_Machines_Collection_Vol_2\Kicks_And_Bass_Drums\Processed\{name}.wav"
+                )
+            } else {
+                format!(r"D:\Samples\{folder}\{name}.wav")
+            };
             Sound {
                 id: i as i64 + 1,
-                path: format!(r"D:\Samples\{folder}\{name}.wav"),
+                path,
                 error: None,
                 analysis: Some(SoundAnalysis {
                     seconds,
@@ -368,7 +434,13 @@ fn sample_sounds() -> mo_ui::sounds::Library {
                 type_confidence: 0.9,
                 user_type: None,
                 name_type: None,
-                tags: if i % 4 == 0 { vec!["Dark".into()] } else { Vec::new() },
+                tags: if name == "Boom Kick" {
+                    ["Dark", "Punchy", "Live set", "Sub heavy", "Analog", "Long tail"].map(String::from).to_vec()
+                } else if i % 4 == 0 {
+                    vec!["Dark".into()]
+                } else {
+                    Vec::new()
+                },
                 favourite: i % 6 == 1,
                 hidden: false,
                 rating: 0,
@@ -479,7 +551,12 @@ fn sample_detail() -> mo_library::SaveDetail {
 /// Where the song panel's Show in folder and Older saves buttons are in the shots. If the panel's layout moves them,
 /// the tooltip and menu shots come out the same as the plain panel, and mo-screens stops with an error.
 const SHOW_BUTTON: (f32, f32) = (1140.0, 328.0);
+/// The Backup page's Remove older versions button, and how far the page is turned down to show the question it asks.
+const REMOVE_OLDER_BUTTON: (f32, f32) = (1127.0, 820.0);
+const PAGE_DOWN: f32 = 300.0;
 const OLDER_BUTTON: (f32, f32) = (1005.0, 328.0);
+/// The Lock chip on the kit's second pad (Snare).
+const SNARE_LOCK: (f32, f32) = (846.0, 333.0);
 /// A point on a clip in the arrangement, from the view's top left, for the hover and zoom shots.
 const ARRANGEMENT_CLIP: (f32, f32) = (480.0, 180.0);
 
@@ -492,6 +569,12 @@ fn hover(window: &MinimalSoftwareWindow, x: f32, y: f32) {
         slint::platform::WindowEvent::PointerMoved { position }
     };
     window.dispatch_event(event);
+}
+
+/// The mouse wheel turned over a point: a negative `dy` moves the page up, to show what's below.
+fn scroll(window: &MinimalSoftwareWindow, x: f32, y: f32, dy: f32) {
+    let position = slint::LogicalPosition::new(x, y);
+    window.dispatch_event(slint::platform::WindowEvent::PointerScrolled { position, delta_x: 0.0, delta_y: dy });
 }
 
 /// A left click at a point in the window.

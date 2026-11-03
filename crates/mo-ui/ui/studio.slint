@@ -251,10 +251,12 @@ export component Caps inherits Text {
     letter-spacing: 0.8px;
 }
 
-// The shaded, top-lit button. `main` is the page's main action, in the accent colour.
+// The shaded, top-lit button. `main` is the page's main action, in the accent colour; `danger` says in red that it
+// removes something for good (only ever the yes of a question that said what goes).
 export component StudioButton inherits Rectangle {
     in property <string> text;
     in property <bool> main: false;
+    in property <bool> danger: false;
     in property <bool> enabled: true;
     // The tooltip and the key from the shortcut list, if it has one.
     in property <string> tip;
@@ -286,7 +288,7 @@ export component StudioButton inherits Rectangle {
         // A button with an icon shows only the icon; its words go in `tip`.
         visible: root.icon == "";
         text: root.text;
-        color: !root.enabled ? Theme.faint : root.main ? Theme.accent-text : Theme.text;
+        color: !root.enabled ? Theme.faint : root.main ? Theme.accent-text : root.danger ? Theme.missing : Theme.text;
         font-size: Type.body;
         font-weight: 500;
         vertical-alignment: center;
@@ -740,7 +742,8 @@ export component ListLine inherits Rectangle {
         width: root.selected ? 2px : 0;
         background: Theme.accent;
     }
-    @children
+    // Under the line's own parts, so a button or chip on the line takes its own click; a click anywhere else on
+    // the line still picks it.
     touch := TouchArea {
         clicked => { root.clicked(); }
         double-clicked => { root.double-clicked(); }
@@ -752,6 +755,7 @@ export component ListLine inherits Rectangle {
             }
         }
     }
+    @children
     Tip {
         text: root.tip;
         hovering: touch.has-hover && !touch.pressed && touch.mouse-x >= root.tip-from && touch.mouse-y >= root.tip-below;
@@ -1038,41 +1042,82 @@ export component MapInset inherits Rectangle {
     }
 }
 
-// A year on a year strip: its name, how much of the list is in it (0 to 1 of the biggest year) and whether it's
-// picked.
+// A year on a year strip: its name and how much of the list is in it (0 to 1 of the biggest year).
 export struct YearBar {
     year: string,
     share: float,
-    picked: bool,
 }
 
 // A strip of years beside a list, newest at the top, each with a bar for how much of the list is in it. Press on a
 // year and drag over others to show only those years; a click picks just one; a double-click or All years shows
-// every year again. The page says which are picked.
+// every year again. The page says which are picked. In a short window the years' lines get shorter, so every year
+// and All years still fit: the bars go when they'd run into the names, and when the lines are too short for every
+// year's name, only every second (or third...) one is named, plus the one under the mouse and the first and last
+// picked.
 export component YearRange inherits VerticalLayout {
     in property <[YearBar]> years;
+    // The places in `years` of the first and the last year picked, top first (-1 when none are).
+    in property <int> picked-from: -1;
+    in property <int> picked-to: -1;
     // Places in `years` from the first to the last picked (either way round).
     callback picked(int, int);
     callback cleared();
-    property <length> line: 20px;
+    // A year's line when there's room for every year at it.
+    property <length> full-line: 20px;
+    // Each year's line: the full line, or what the room leaves each year when that's less.
+    property <length> line: min(root.full-line, strip.height / max(1, root.years.length));
+    // A year's bar runs under its name: shorter than this, the two would touch, so the bars are left out.
+    property <length> bar-room: 14px;
+    // A year's name needs this much room for its figures not to touch the next year's.
+    property <length> name-room: 10px;
+    // Every how many years one is named.
+    property <int> named-every: root.line >= root.name-room ? 1 : ceil(root.name-room / max(1px, root.line));
+    // The year under the mouse, as its place in `years` (-1 when the mouse isn't on the strip).
+    property <int> hovered: touch.has-hover ? clamp(floor(touch.mouse-y / root.line), 0, root.years.length - 1) : -1;
     // The drag going on, as places in `years` (-1 when there's none).
     property <int> from: -1;
     property <int> to: -1;
-    property <bool> any: false;
+    // The years lit, top first: the ones being dragged over, or else the ones picked (-1 when none are).
+    property <int> lit-top: root.from >= 0 ? min(root.from, root.to) : root.picked-from;
+    property <int> lit-bottom: root.from >= 0 ? max(root.from, root.to) : root.picked-to;
+    // The first and the last year lit are always named, so where they start and end can be read when not every year
+    // is: unless a name that comes first is too close (the one under the mouse, then the first).
+    property <bool> top-named: root.lit-top >= 0 && !root.crowds(root.lit-top, root.hovered);
+    property <bool> bottom-named: root.lit-bottom > root.lit-top && !root.crowds(root.lit-bottom, root.hovered)
+        && !(root.top-named && root.crowds(root.lit-bottom, root.lit-top));
     width: 56px;
     padding: Space.xs;
     spacing: Space.xs;
     alignment: start;
+    // Whether a name at place `a` would come too close to the one at place `b` (when there is one, -1 when not).
+    pure function crowds(a: int, b: int) -> bool {
+        return b >= 0 && a != b && abs(a - b) * root.line < root.name-room;
+    }
     strip := Rectangle {
-        height: root.years.length * root.line;
+        // Every year at its full line, but it gives way when the room is short, so All years is never pushed off the
+        // bottom.
+        preferred-height: root.years.length * root.full-line;
+        min-height: 0px;
         for y[i] in root.years: Rectangle {
-            property <bool> lit: root.from >= 0 ? (i >= min(root.from, root.to) && i <= max(root.from, root.to)) : y.picked;
-            property <bool> under: touch.has-hover && touch.mouse-y >= self.y && touch.mouse-y < self.y + self.height;
+            property <bool> lit: root.lit-top >= 0 && i >= root.lit-top && i <= root.lit-bottom;
+            property <bool> under: root.hovered == i;
+            // Named when it's under the mouse or the first or last lit; else when there's room for it (every year,
+            // or every second or third...) and none of those is too close.
+            property <bool> named: self.under
+                || (i == root.lit-top && root.top-named)
+                || (i == root.lit-bottom && root.bottom-named)
+                || (mod(i, root.named-every) == 0
+                    && !root.crowds(i, root.hovered)
+                    && !(root.top-named && root.crowds(i, root.lit-top))
+                    && !(root.bottom-named && root.crowds(i, root.lit-bottom)));
             y: i * root.line;
             height: root.line;
-            border-radius: Theme.radius;
+            // Less round on a shorter line, and square once the bars are left out: round corners there would leave
+            // little notches down a picked span's edges.
+            border-radius: root.line >= root.bar-room ? min(Theme.radius, root.line / 5) : 0px;
             background: self.lit ? Theme.accent.transparentize(80%) : self.under ? Theme.hover : transparent;
             Rectangle {
+                visible: root.line >= root.bar-room;
                 x: Space.xs;
                 y: parent.height - 3px;
                 width: (parent.width - 2 * Space.xs) * y.share;
@@ -1081,9 +1126,11 @@ export component YearRange inherits VerticalLayout {
                 background: parent.lit ? Theme.accent : Theme.stroke;
             }
             Text {
+                // Never shorter than its figures, centred on the line, so a short line doesn't cut them off.
                 width: parent.width;
-                height: parent.height;
-                text: y.year;
+                height: max(parent.height, self.preferred-height);
+                y: (parent.height - self.height) / 2;
+                text: parent.named ? y.year : "";
                 color: parent.lit || parent.under ? Theme.text : Theme.faint;
                 font-family: Theme.number-font;
                 font-size: Type.caps;
@@ -1279,26 +1326,100 @@ export component MenuItems inherits MenuCard {
     }
 }
 
-// The menu of things to do with what's picked: a small "more" button, the same lines as the right-click menu.
-export component MoreButton inherits StudioButton {
+// A strip that warns about something, folded to its line until opened (Show, Hide), in the warning colour; `quiet`
+// for news that needs no care, in the page's own colours. What it shows when opened goes inside it, after its line.
+export component NoticeStrip inherits Rectangle {
+    in property <string> text;
+    in property <bool> quiet;
+    in-out property <bool> open;
+    vertical-stretch: 0;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: root.quiet ? Theme.stroke : Theme.warning.transparentize(60%);
+    background: root.quiet ? Theme.surface : Theme.warning.transparentize(92%);
+    height: strip.preferred-height;
+    strip := VerticalLayout {
+        padding: Space.sm;
+        padding-left: Space.md;
+        spacing: Space.sm;
+        HorizontalLayout {
+            spacing: Space.sm;
+            Text {
+                text: root.text;
+                color: root.quiet ? Theme.muted : Theme.warning;
+                font-size: Type.body;
+                font-weight: 500;
+            }
+            Rectangle { horizontal-stretch: 1; }
+            LinkText {
+                text: root.open ? "Hide" : "Show";
+                tint: Theme.muted;
+                font-size: Type.meta;
+                clicked => { root.open = !root.open; }
+            }
+        }
+        @children
+    }
+}
+
+// A button that opens a menu of lines under it, like "Remove older versions…". The menu lines up with the button's
+// left edge, or with its right edge (`menu-at-right`, for a button at the right of a row, like the small "more" one).
+export component MenuButton inherits StudioButton {
     in property <[MenuItem]> items;
+    in property <bool> menu-at-right: false;
     callback chosen(string);
-    icon: Icons.more;
-    tip: "More";
-    clicked => { more-menu.show(); }
-    more-menu := PopupWindow {
-        x: root.width - self.width;
+    menu: true;
+    clicked => { button-menu.show(); }
+    button-menu := PopupWindow {
+        x: root.menu-at-right ? root.width - self.width : 0;
         y: root.height + Space.xs;
-        width: 280px;
+        width: max(root.width, 280px);
         close-policy: close-on-click-outside;
         MenuItems {
             items: root.items;
             chosen(id) => {
-                more-menu.close();
+                button-menu.close();
                 root.chosen(id);
             }
         }
     }
+}
+
+// One thing a side card offers, as a button: its words, what it does and its key (both from the shortcut list, for
+// its tooltip, rule 15), and the id the page acts on.
+export struct CardAction {
+    text: string,
+    tip: string,
+    key: string,
+    id: string,
+    enabled: bool,
+}
+
+// A side card's buttons: everything you can do with what's picked, in sight rather than behind a "more" menu
+// (Solomon's F12 note, 2026-11-02 03:28: "theres enough space just put them there"). The card's main button goes
+// first, as a child; the rest follow and wrap onto another line when the card is narrow. The right-click menu on a
+// line offers the same.
+export component CardActions inherits FlexboxLayout {
+    in property <[CardAction]> actions;
+    callback chosen(string);
+    spacing: Space.sm;
+    @children
+    for a in root.actions: StudioButton {
+        text: a.text;
+        tip: a.tip;
+        key: a.key;
+        enabled: a.enabled;
+        clicked => { root.chosen(a.id); }
+    }
+}
+
+// The menu of things to do with what's picked: a small "more" button, the same lines as the right-click menu.
+export component MoreButton inherits MenuButton {
+    icon: Icons.more;
+    tip: "More";
+    // The icon says it opens a menu: no arrow.
+    menu: false;
+    menu-at-right: true;
 }
 
 // A right-click menu: put one on the page and call `open-at` with the mouse's place in the window (as `ListLine`'s
@@ -1361,10 +1482,14 @@ export component SidePanel inherits Rectangle {
     border-radius: Theme.radius;
     border-width: 1px;
     border-color: Theme.edge;
-    // Scrolls when what it holds is taller than the panel; fills it otherwise, so a stretch at the end works.
+    // Scrolls when what it holds is taller than the panel; fills it otherwise, so a stretch at the end works. Never
+    // wider than the panel: something too wide inside (a long path once) made the whole card slide right and lose its
+    // right side (Solomon's F12 note, 2026-11-02 03:28), so it's cut at the edge instead, and the parts wrap.
     flick := Flickable {
+        content-width: flick.width;
         content-height: content.height;
         content := VerticalLayout {
+            x: 0;
             width: flick.width;
             height: max(flick.height, self.preferred-height);
             padding: Space.xl;

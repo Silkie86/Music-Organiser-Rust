@@ -20,7 +20,7 @@ use std::sync::atomic::AtomicBool;
 use chrono::{Local, NaiveDateTime};
 use mo_backup::copy::{self, Outcome};
 use mo_backup::folders::{self, Folder, Mode};
-use mo_backup::pack::{Packed, Packer, pack_names};
+use mo_backup::pack::{Packed, Packer, lists, owners, pack_names};
 use mo_backup::plan::{self, Folders, LeftOut, Level, Plan, Rules, SongInfo, Used};
 use mo_formats::case;
 use mo_formats::paths::{file_name, stem};
@@ -552,35 +552,44 @@ pub struct Ran {
     pub last: LastRun,
     /// Each song's id and the time of its newest save that went (or was already there and checked).
     pub went: Vec<(u64, NaiveDateTime)>,
+    /// How many replaced files were kept in Older versions (the Older versions card is read again only when some were).
+    pub kept_older: usize,
 }
 
 /// Copies the plan to the drive (or, for the zip format, packs each song and copies the whole folders), and says how
 /// it went. Never on the window's thread. A run that stops part way still says which songs went before it stopped.
 pub fn run(prepared: &Prepared, settings: &Settings, stop: &AtomicBool, progress: &dyn Fn(Progress)) -> Ran {
     let mut there: HashSet<String> = HashSet::new();
-    let last = run_on(prepared, settings, stop, progress, &mut there);
+    let mut kept_older = 0;
+    let last = run_on(prepared, settings, stop, progress, &mut there, &mut kept_older);
     let went = prepared
         .newest
         .iter()
         .filter(|(_, path, _)| there.contains(&case::key(&path.to_string_lossy())))
         .map(|(id, _, time)| (*id, *time))
         .collect();
-    Ran { last, went }
+    Ran { last, went, kept_older }
 }
 
-/// The run itself; `there` gathers the files now safely on the drive.
+/// The most of a run's problems the log names one by one.
+const LOGGED_PROBLEMS: usize = 50;
+
+/// The run itself; `there` gathers the files now safely on the drive, and `kept_older` counts the replaced files kept
+/// in Older versions.
 fn run_on(
     prepared: &Prepared,
     settings: &Settings,
     stop: &AtomicBool,
     progress: &dyn Fn(Progress),
     there: &mut HashSet<String>,
+    kept_older: &mut usize,
 ) -> LastRun {
     let when = Local::now().naive_local();
     let Some(backup) = settings.drive.as_deref() else {
         return LastRun { when, ok: false, line: "No backup drive picked".to_owned() };
     };
-    let options = copy::Options::new(when.format("%Y-%m-%d %H.%M").to_string());
+    // This run's older versions go in a folder named after the minute it began, as the Older versions card reads them.
+    let options = copy::Options::new(mo_backup::older::stamp(when));
     let copy_list: Vec<FileEntry> = match settings.format {
         Format::Folders => prepared.plan.copy.clone(),
         // Everything that isn't in a song's zip still goes, as plain folders: whole folders, and files no song owns
@@ -599,6 +608,8 @@ fn run_on(
     };
     let mut record_note = None;
     let mut problems: Vec<String> = Vec::new();
+    // Files gone from your folders that are damaged in a song's zip.
+    let mut damaged = 0usize;
     let mut new_or_changed = 0usize;
     let mut checked = 0usize;
     if !copy_list.is_empty() {
@@ -608,6 +619,9 @@ fn run_on(
             Err(_) => return LastRun { when, ok: false, line: "The backup drive isn't there".to_owned() },
             Ok(report) => {
                 for l in &report.lines {
+                    if l.outcome == (Outcome::Updated { kept_older: true }) {
+                        *kept_older += 1;
+                    }
                     match &l.outcome {
                         Outcome::New | Outcome::Updated { .. } => {
                             new_or_changed += 1;
@@ -643,7 +657,32 @@ fn run_on(
         let Ok(packer) = Packer::new(backup) else {
             return LastRun { when, ok: false, line: "The backup drive isn't there".to_owned() };
         };
-        let names = pack_names(&prepared.songs.iter().map(|s| (s.title.as_str(), s.id)).collect::<Vec<_>>());
+        // The zips already there, so no song takes the name of another's (one gone from your folders, say).
+        let on_backup = match lists(backup, stop) {
+            Ok(found) => {
+                for zip in found.iter().filter(|l| l.song.is_none()) {
+                    crate::log::warning(
+                        "Backup",
+                        &format!(
+                            "{} isn't one of the app's song zips, or is damaged: it's left as it is, and no song is \
+                             packed in its place",
+                            zip.zip.display()
+                        ),
+                    );
+                }
+                owners(&found)
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {
+                return LastRun { when, ok: false, line: format!("Stopped · {} checked", thousands(checked)) };
+            }
+            Err(e) => {
+                // Each zip is still only packed over when it's the song's own.
+                crate::log::warning("Backup", &format!("Couldn't read the song zips already on the backup: {e}"));
+                HashMap::new()
+            }
+        };
+        let titles: Vec<(&str, u64)> = prepared.songs.iter().map(|s| (s.title.as_str(), s.id)).collect();
+        let names = pack_names(&titles, &on_backup);
         for (i, (song, name)) in prepared.songs.iter().zip(&names).enumerate() {
             progress(Progress::Packing { done: i, of: prepared.songs.len() });
             let packed = packer.pack_song(&song.files, name, song.id, stop);
@@ -651,11 +690,22 @@ fn run_on(
                 there.extend(song.files.iter().map(|p| case::key(&p.to_string_lossy())));
             }
             match packed {
-                Ok(Packed::Written { .. }) => {
+                Ok(Packed::Written { damaged: found, .. }) => {
                     new_or_changed += 1;
                     checked += 1;
+                    for d in &found {
+                        let what = match d.kept {
+                            true => "is damaged in the song's zip: it's kept as it was, but may not open",
+                            false => "was on the song's zip's list but isn't in the zip, so there's nothing to keep",
+                        };
+                        crate::log::warning(
+                            "Backup",
+                            &format!("{}: {}, gone from your folders, {what}", song.title, d.inside),
+                        );
+                    }
+                    damaged += found.len();
                 }
-                Ok(Packed::UpToDate) => checked += 1,
+                Ok(Packed::UpToDate { .. }) => checked += 1,
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {
                     return LastRun { when, ok: false, line: format!("Stopped · {} checked", thousands(checked)) };
                 }
@@ -672,6 +722,20 @@ fn run_on(
     let mut line = format!("{} checked · {} new or changed", thousands(checked), thousands(new_or_changed));
     if !problems.is_empty() {
         line.push_str(&format!(" · {} couldn't go", thousands(problems.len())));
+        // Why, in the app's log.
+        for why in problems.iter().take(LOGGED_PROBLEMS) {
+            crate::log::warning("Backup", &format!("Couldn't go: {why}"));
+        }
+        if problems.len() > LOGGED_PROBLEMS {
+            crate::log::warning("Backup", &format!("…and {} more couldn't go", problems.len() - LOGGED_PROBLEMS));
+        }
+    }
+    if damaged > 0 {
+        let verb = if damaged == 1 { "is" } else { "are" };
+        line.push_str(&format!(
+            " · {} gone from your folders {verb} damaged in a song zip",
+            crate::songs::plural(damaged, "file")
+        ));
     }
     if !prepared.missing.is_empty() {
         line.push_str(&format!(" · {} folders not plugged in", prepared.missing.len()));
@@ -680,7 +744,7 @@ fn run_on(
         // Everything was still copied and checked; the next run just reads every file again.
         line.push_str(" · the backup's own list couldn't be saved, so next time takes longer");
     }
-    LastRun { when, ok: problems.is_empty() && prepared.missing.is_empty(), line }
+    LastRun { when, ok: problems.is_empty() && prepared.missing.is_empty() && damaged == 0, line }
 }
 
 /// Your DAWs' project folders (the library's roots) and your sample folders, for "Add my DAW and sample folders".
@@ -883,7 +947,7 @@ pub fn level_note(level: Level) -> &'static str {
 pub fn format_note(format: Format) -> &'static str {
     match format {
         Format::Folders => {
-            "Open it in Explorer without the app. Only new or changed files are copied; small replaced files keep older versions."
+            "Open it in Explorer without the app. Only new or changed files are copied, and the small files a backup replaces are kept as older versions."
         }
         Format::Zips => {
             "One zip per song in Songs, with every sample it uses. Easy to move or send. Whole folders, and files that aren't any song's, go as plain folders."

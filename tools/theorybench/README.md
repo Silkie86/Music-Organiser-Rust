@@ -143,7 +143,8 @@ with a mode read from its chords, so the home note is the fairer score), and mo-
 - **Hand cases.** Every model fitted (each fold's, the one `--final` tests, the one `--write` writes) is read on the
   design's hand cases (`keyfind::cases`: a relative-key loop, a blues, a Dorian vamp, whole-tone scales and so on).
   The report says how many models keep each case's gate and meet its target, and what broke a gate. `--write` won't
-  write weights that break one.
+  write weights that break one. A rescale's models are pulled back until they keep every gate (see Solomon's packs,
+  below), so they're read as pulled back.
 - **What `--write` writes.** The weights and the calibration; the thresholds, fitted on every fold's held-out
   chances; the share of notes in one scale a key needs, as built in (0.75); and a hash of every number with the
   finder version those numbers were first given with. When any number changed, that's the next version, so the tests
@@ -213,13 +214,49 @@ cargo run -p mo-theorybench --release -- keyfit D:\Bench\packs.jsonl --inputs fu
     pay for it.
   - It stops if his pieces fall in fewer than two of folds 1 to 4. The ranges draw a pack's files again together, as
     one, since they're alike.
-  - `--write` keeps the credits of the weights it scales, adds the rescale and its scales after them, and adds
-    `packs` to `LEARNED_FROM`. A `--dump` of a run that read his pieces names his files, so it can't be written inside
-    a copy of this repository either.
+  - **Pulled back.** Every finder a rescale scores or writes (each fold's in a choosing run, the one `--final` scores,
+    the one `--write` writes, and each fold's in `--write`'s report) is pulled back toward the finder built in: each
+    weight and calibration number goes a share t of the way from its built-in value to the one fitted, the same t for
+    all of them, and the thresholds stay as built in. t is the largest of 1, 0.95, 0.9 and so on down to 0 at which
+    every hand case keeps its gate, so a fit that keeps every gate stays as it is (t = 1). The run prints t for each
+    finder, with the scales it was pulled back to and the gates it broke one step further, then scores the pieces held
+    out with the numbers pulled back. A calibration is fitted on scores of the fits, as before, then pulled back with
+    the weights it goes with: the one a choosing run prints for all four folds is as fitted, before the pull-back, as
+    `--write` fits the one it writes, and the answers printed are the thresholds built in as they come out on the
+    chances the pieces were scored with, pulled back. Why: on his packs (2026-11-03, folds 1 to 4), nearly all minor
+    (81% of the whole loops), the plain rescale moved the minor weight from -0.49 to between 1.6 and 1.9 and the scales
+    of the tune, harmony, bass and chord streams to between 0.25 and 0.64, and broke the gates of 12 of the 29 hand
+    cases that have one (mostly a major key pushed below a minor one, C major below A or D minor, Eb major below F
+    minor, and the answer turned to no clear key). Pulled back (t 0.50 or 0.55 in each fold), every gate held, and the
+    whole loops were right 56.0% of the time, against 53.3% for the plain rescale and 46.1% for the finder built in;
+    every set got better beyond its range. Each number pulled back lies between its built-in value and the one fitted on
+    his packs, so it's still one of the numbers rule 5's exception allows.
+  - What to watch for. t is found from the fit back, so a finder can keep every gate at t and break one again further
+    back, nearer the finder built in: the run says so ("but further back, at 0.40, nearer the finder built in, a gate
+    breaks again"), and the finder it stopped at still keeps every gate. How sure a reading is comes from the weights
+    and the calibration multiplied, so a finder part of the way can be surer than either end; the held-out report
+    measures each finder as pulled back, so it would show there (in that trial, the whole loops' calibration error was
+    0.037 pulled back, against 0.107 for the plain rescale and 0.119 for the finder built in). Pulled back part of the
+    way, the numbers written are a step from breaking a gate, so a later change to the finder or to a hand case may
+    break one: mo-harmony's tests say which, and the rescale is run again.
+  - `--write` keeps the credits of the weights it scales, adds the rescale, how far it was pulled back and the scales
+    of the numbers written after them, and adds `packs` to `LEARNED_FROM`. Pulled back all the way (t = 0), it writes
+    nothing, since only the numbers built in keep every gate. A `--dump` of a run that read his pieces names his
+    files, so it can't be written inside a copy of this repository either.
 - **Keep rule**, as for a design change: on folds 1 to 4 against `--shipped`, the whole loops' accuracy rises with its
-  range above 0, or their log-loss falls by 0.01 or more; no set gets worse beyond its range; no gate breaks. Then
-  `--final` once, and `--write`. Back in the cloud, the public sets are scored with `--shipped` before and after the
-  new weights, to see what the rescale costs songs.
+  range above 0, or their log-loss falls by 0.01 or more; no set gets worse beyond its range; no gate breaks (the
+  pull-back sees to that one). Then `--final` once, and `--write`. Back in the cloud, the public sets are scored with
+  `--shipped` before and after the new weights, to see what the rescale costs songs.
+- **Shipped as version 5** (2026-11-03): whole loops 46.1% to 56.0% right on folds 1 to 4, every set better beyond its
+  range, though the loops labelled major fell from 45.9% to 29.9%. On the public songs, whole songs lose little
+  (POP909-CL nothing, RS200 1.2 points, Billboard 4.4), but stretches of 1 to 16 bars lose 3 to 22 points, and a tune
+  alone more. The numbers, and who pays, are in `docs/harmony/key-finder-experiments.md`.
+- **Rescaling again.** `--rescale` won't start while the weights built in were rescaled already: it would scale the
+  scales, and `--final` would spend a look at fold 0 on weights `--write` won't write. So a later rescale starts from
+  version 4's, the plain fit: put them back first (`git show 3be3d26:crates/mo-harmony/src/keyfind/weights.rs >
+  crates/mo-harmony/src/keyfind/weights.rs`), build, then run the steps above. The runs then name the finder built in
+  "version 5, with version 4's numbers", in the report and in `test-runs.md`. Their `--shipped` scores version 4; to
+  compare with what ships, make the dump before putting version 4's weights back.
 
 ## Chords
 

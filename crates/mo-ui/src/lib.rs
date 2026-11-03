@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use mo_app::activity::Feed;
 use mo_app::log;
 use mo_app::places::Place;
-use mo_app::shortcuts::{APP_ACTIONS, Action, SONGS_ACTIONS, SOUNDS_ACTIONS, Shortcuts, repeats};
+use mo_app::shortcuts::{APP_ACTIONS, Action, SONGS_ACTIONS, SOUNDS_ACTIONS, Shortcuts, repeats, what_of};
 use mo_app::themes::Look;
 use note::open_note;
 use slint::platform::Key;
@@ -37,6 +37,11 @@ static PAGE: AtomicUsize = AtomicUsize::new(0);
 thread_local! {
     /// The keys in use, for the key sheet, which changes with the page.
     static KEYS: RefCell<Option<Shortcuts>> = const { RefCell::new(None) };
+}
+
+/// The place on show, safe to read from any thread.
+pub fn place() -> Option<Place> {
+    Place::from_index(PAGE.load(Ordering::Relaxed))
 }
 
 /// The name of the place on show, safe to read from any thread.
@@ -117,10 +122,7 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> R
 
 /// The Songs page's buttons' tooltips: what each does and its key, from the one shortcut list (rule 15).
 fn show_button_keys(app: &AppWindow, shortcuts: &Shortcuts) {
-    let action = |id: &str| ActionKey {
-        what: SONGS_ACTIONS.iter().find(|a| a.id == id).map_or("", |a| a.what).into(),
-        key: shortcuts.key_of(id).into(),
-    };
+    let action = |id: &str| ActionKey { what: what_of(id).into(), key: shortcuts.key_of(id).into() };
     let data = app.global::<SongsData>();
     data.set_open_key(action("projects.open"));
     data.set_reveal_key(action("projects.reveal"));
