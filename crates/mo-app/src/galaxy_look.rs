@@ -128,6 +128,12 @@ pub const WHITE: f32 = 0.4;
 pub const FAR_GLOW: f32 = 0.2;
 /// How far a star's glow reaches far out, as a share of its core's radius (close up it's 2.8, up to twice that lit).
 pub const FAR_HALO: f32 = 2.2;
+/// Close up, how far a star's glow reaches, as a share of its core's radius (a well lit one's up to twice that), and
+/// how softly it falls off (the power of its edge).
+pub const HALO: f32 = 2.8;
+pub const FALLOFF: f32 = 1.3;
+/// How bright the best lit star is ([`lit_weight`] of 1): with Light by on, a star's core is its weight over this.
+pub const LIT_BRIGHTEST: f32 = 1.5;
 /// About how many of the best lit stars on the view show as points of their own when it's far out, and how many get
 /// spikes: a few thousand points read as "these", more would fill the map.
 const GLINTS: f32 = 2_500.0;
@@ -135,12 +141,14 @@ const SPIKY: f32 = 250.0;
 /// Spikes only ever go to the top 1.5 in a hundred.
 const SPIKES_FROM: f32 = 0.985;
 
-/// How much of the list has the Light by measure (0 to 1): the share of `light` above 0. 0 with nothing lit.
-pub fn lit_share(light: &[f32]) -> f32 {
-    if light.is_empty() {
+/// How much of what's on show has the Light by measure (0 to 1): the share of the `shown` sounds whose `light` is
+/// above 0. 0 with nothing lit or nothing shown. Only the shown ones count: with a filter for loops and Light by Tempo,
+/// every loop on show has a tempo, whatever share of the whole list does.
+pub fn lit_share(light: &[f32], shown: &[usize]) -> f32 {
+    if light.is_empty() || shown.is_empty() {
         return 0.0;
     }
-    light.par_iter().filter(|&&l| l > 0.0).count() as f32 / light.len() as f32
+    shown.par_iter().filter(|&&at| light.get(at).is_some_and(|&l| l > 0.0)).count() as f32 / shown.len() as f32
 }
 
 /// How strongly a star this lit shows as a point of its own when the view is painted (0 to 1), with `from` from
@@ -281,9 +289,21 @@ pub fn lit_counts(bytes: &[u8]) -> [u32; 256] {
     counts
 }
 
-/// How many stars are lit more than `from` (0 to 1), by their light bytes' `counts`: the last that many of [`pack`]'s.
-pub fn lit_more_than(counts: &[u32; 256], from: f32) -> u32 {
-    (1..256).filter(|&f| (f - 1) as f32 / 254.0 > from).map(|f| counts[f]).sum()
+/// How much of what [`pack`] made, by its light bytes' `counts`, has the Light by measure (as [`lit_share`]).
+pub fn lit_share_of(counts: &[u32; 256]) -> f32 {
+    let shown: u32 = counts[1..].iter().sum();
+    let lit: u32 = counts[2..].iter().sum();
+    if shown == 0 { 0.0 } else { lit as f32 / shown as f32 }
+}
+
+/// Where in what [`pack`] made (by its light bytes' `counts`; `count` stars in all) the stars that show as points of
+/// their own far out start, and the ones with spikes, for `look`: the last stars, as `pack` sorts them, so it's their
+/// rank that counts and not their light byte, which can't tell the top 250 of 450,000 apart. Both are `count` (none)
+/// with nothing lit.
+pub fn glint_starts(look: &Look, counts: &[u32; 256], count: u32) -> (u32, u32) {
+    let lit: u32 = counts[2..].iter().sum::<u32>().min(count);
+    let top = |from: f32| count - ((lit as f32 * (1.0 - from)).round() as u32).min(lit);
+    (top(look.glint_from), top(look.spikes_from))
 }
 
 /// The camera as the star shaders read it (8 f32, 32 bytes) for a layer `width` by `height` pixels that shows `view`
@@ -371,6 +391,22 @@ mod tests {
     }
 
     #[test]
+    fn of_450000_lit_stars_exactly_the_top_250_get_spikes_and_2500_glint() {
+        let mut counts = [0u32; 256];
+        // Ranks spread evenly over the light bytes, as Length gives them; 255 alone holds about 1,770 stars.
+        for c in counts.iter_mut().skip(2) {
+            *c = 450_000 / 254;
+        }
+        let count: u32 = counts.iter().sum();
+        let lit = count;
+        let lk = look(&view(), count as usize, 1.0);
+        let (glints, spikes) = glint_starts(&lk, &counts, count);
+        assert_eq!(count - spikes, ((lit as f32) * (1.0 - lk.spikes_from)).round() as u32);
+        assert!((count - spikes).abs_diff(250) <= 1, "{}", count - spikes);
+        assert!((count - glints).abs_diff(2_500) <= 2, "{}", count - glints);
+    }
+
+    #[test]
     fn far_out_only_the_best_lit_few_thousand_glint_and_a_few_hundred_get_spikes() {
         let v = view();
         // Length: every sound has the measure. 450,000 on the view: the top 2,500 show as points, 250 get spikes.
@@ -397,8 +433,12 @@ mod tests {
         };
         let alike = weight(&[]);
         assert!(weight(&[0.0]) < alike && weight(&[1.0]) > alike);
-        assert_eq!(lit_share(&[0.0, 0.5, 1.0, 0.0]), 0.5);
-        assert_eq!(lit_share(&[]), 0.0);
+        assert_eq!(lit_weight(1.0), LIT_BRIGHTEST);
+        assert_eq!(lit_share(&[0.0, 0.5, 1.0, 0.0], &[0, 1, 2, 3]), 0.5);
+        // Only what's on show counts.
+        assert_eq!(lit_share(&[0.0, 0.5, 1.0, 0.0], &[1, 2]), 1.0);
+        assert_eq!(lit_share(&[], &[0]), 0.0);
+        assert_eq!(lit_share(&[1.0], &[]), 0.0);
     }
 
     #[test]
@@ -411,9 +451,13 @@ mod tests {
         assert_eq!(flags, [0, 1, 1 + 51, 1 + 127, 255]);
         let counts = lit_counts(&bytes);
         assert_eq!(counts[0], 1);
-        assert_eq!(lit_more_than(&counts, 0.6), 1);
-        assert_eq!(lit_more_than(&counts, 0.4), 2);
-        assert_eq!(lit_more_than(&counts, -1.0), 4);
+        // Three of the four shown have the measure.
+        assert_eq!(lit_share_of(&counts), 0.75);
+        let mut lk = look(&view(), 4, 0.75);
+        (lk.glint_from, lk.spikes_from) = (0.6, 0.9);
+        // The top 40 in a hundred of the three lit glint (1), the top tenth (0) get spikes.
+        assert_eq!(glint_starts(&lk, &counts, 5), (4, 5));
+        assert_eq!(glint_starts(&lk, &[0; 256], 5), (5, 5));
     }
 
     #[test]

@@ -86,8 +86,9 @@ pub(super) struct Galaxy {
     asked: u64,
     /// The shown stars on a grid over the map, to find the one under the mouse and count the ones on the view.
     grid: Option<Arc<Grid>>,
-    /// The stars as the graphics card reads them, kept to send again to a new card.
-    packed: Option<Arc<Vec<u8>>>,
+    /// The stars as the graphics card reads them, kept to send again to a new card, with how many have each light
+    /// byte.
+    packed: Option<Arc<(Vec<u8>, [u32; 256])>>,
     /// What the grid (and the card's stars) were last asked for, how many times they've been asked, and which ask
     /// the ones in hand are from.
     set_for: Option<SetKey>,
@@ -152,7 +153,7 @@ struct Lit {
     list: Arc<list::SoundList>,
     by: LightBy,
     light: Arc<Vec<f32>>,
-    /// How much of the list has the measure (`galaxy_look::lit_share`).
+    /// How much of what's on show has the measure (`galaxy_look::lit_share`).
     share: f32,
 }
 
@@ -212,6 +213,8 @@ struct Packed {
     version: u64,
     grid: Grid,
     bytes: Option<Vec<u8>>,
+    /// How many of `bytes`' stars have each light byte (`galaxy_look::lit_counts`), counted here, off the window.
+    lit_counts: [u32; 256],
     light: Lit,
 }
 
@@ -230,9 +233,10 @@ impl SetAsk {
                 },
             )
         });
-        let share = galaxy_look::lit_share(&light);
+        let share = galaxy_look::lit_share(&light, &k.shown);
+        let lit_counts = bytes.as_deref().map_or([0; 256], galaxy_look::lit_counts);
         let light = Lit { list: k.list.clone(), by: k.light_by, light, share };
-        Packed { version: self.version, grid, bytes, light }
+        Packed { version: self.version, grid, bytes, lit_counts, light }
     }
 }
 
@@ -1332,7 +1336,7 @@ fn packed(app: &AppWindow, done: Packed) {
         }
         g.set_got = done.version;
         g.grid = Some(Arc::new(done.grid));
-        g.packed = done.bytes.map(Arc::new);
+        g.packed = done.bytes.map(|b| Arc::new((b, done.lit_counts)));
         g.light = Some(done.light);
         true
     });
@@ -1479,7 +1483,8 @@ fn draw_on_card(app: &AppWindow, gpu: &gpu::Gpu, generation: u64, whole: bool) -
         let still = !g.view.pressed() && !g.view.flying();
         let shine = Shine {
             light_on: share > 0.0,
-            time: TWINKLE_CLOCK.with(Instant::elapsed).as_secs_f32(),
+            // Wrapped every hour, so after days open it still has the precision a smooth twinkle needs.
+            time: (TWINKLE_CLOCK.with(Instant::elapsed).as_secs_f64() % 3600.0) as f32,
             twinkle: if still { TWINKLE } else { 0.0 },
         };
         (g.view, g.scale, galaxy_look::look(&g.view, in_view, share), shine, g.packed.clone(), g.set_got)
@@ -1502,10 +1507,11 @@ fn draw_on_card(app: &AppWindow, gpu: &gpu::Gpu, generation: u64, whole: bool) -
         }
         let Some(on) = c.as_mut() else { return Ok(None) };
         if on.stars != version
-            && let Some(bytes) = &packed
+            && let Some(packed) = &packed
         {
             let _doing = crate::watchdog::doing("Galaxy: upload the stars to the GPU");
-            gpu::checked(&gpu.device, || on.sky.set_stars(bytes))?;
+            let (bytes, lit_counts) = &**packed;
+            gpu::checked(&gpu.device, || on.sky.set_stars(bytes, lit_counts))?;
             on.stars = version;
         }
         if !on.sky.has_stars() {

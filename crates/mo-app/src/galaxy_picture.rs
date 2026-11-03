@@ -14,7 +14,8 @@ use mo_sounds::StarPoint;
 use rayon::prelude::*;
 
 use crate::galaxy_look::{
-    self as gl, FAR_GLOW, FAR_HALO, GLOW, GLOW_LIT, HOT, MIN_LIT_PX, UNLIT_SIZE, WHITE, lit_size, lit_weight,
+    self as gl, FALLOFF, FAR_GLOW, FAR_HALO, GLOW, GLOW_LIT, HALO, HOT, LIT_BRIGHTEST, MIN_LIT_PX, UNLIT_SIZE, WHITE,
+    lit_size, lit_weight,
 };
 use crate::galaxy_view::View;
 
@@ -111,7 +112,7 @@ impl Picture {
         // glows: every star close up, only the best lit far out (the graphics card's look).
         let lighting = !self.light.is_empty();
         let in_view = (self.shown.len() as f32 / (self.view.zoom * self.view.zoom)).round() as usize;
-        let lk = gl::look(&self.view, in_view, gl::lit_share(&self.light));
+        let lk = gl::look(&self.view, in_view, gl::lit_share(&self.light, &self.shown));
         let crisp = 1.0 - lk.painted;
         let lit = |at: usize| -> (f32, f32, f32, f32) {
             if !lighting {
@@ -119,12 +120,20 @@ impl Picture {
             }
             let l = self.light.get(at).copied().unwrap_or(0.0);
             let glint = gl::glint(l, lk.glint_from);
-            let size = (r * UNLIT_SIZE * lit_size(l)).max(MIN_LIT_PX * self.scale * glint * lk.painted);
-            (size, lit_weight(l) / lit_weight(1.0), crisp.max(lk.painted * glint), l)
+            // As the card: far out a star that glints is a small bright point (in pixels), growing to its close-up
+            // size as the view flies in.
+            let near = r * UNLIT_SIZE * lit_size(l);
+            let size = if glint > 0.0 {
+                let far = MIN_LIT_PX * (1.0 + 0.6 * glint);
+                far + (near - far) * crisp
+            } else {
+                near
+            };
+            (size, lit_weight(l) / LIT_BRIGHTEST, crisp.max(lk.painted * glint), l)
         };
-        // A glow reaches 2.8 times its star's core, a well lit one's up to twice that.
+        // A glow reaches HALO times its star's core, a well lit one's up to twice that.
         let biggest =
-            if lighting { (r * UNLIT_SIZE * lit_size(1.0)).max(MIN_LIT_PX * self.scale) * 5.6 } else { r * 2.8 };
+            if lighting { (r * UNLIT_SIZE * lit_size(1.0)).max(MIN_LIT_PX * 1.6) * 2.0 * HALO } else { r * HALO };
         let band_rows = BAND.max((2.0 * biggest + 4.0).ceil() as usize);
         let bands = h.div_ceil(band_rows).max(1);
         // The nebula's squares, lined up with the map so its light holds still as the map is dragged, and the stars
@@ -157,7 +166,7 @@ impl Picture {
                 let shown = on[at];
                 let (radius, strength, glow, l) = if shown { lit(at) } else { (r * 0.8, 0.16, 0.0, 0.0) };
                 let alpha = bright * strength;
-                let halo = radius * (FAR_HALO + (2.8 + 2.8 * l - FAR_HALO) * crisp);
+                let halo = radius * (FAR_HALO + (HALO + HALO * l - FAR_HALO) * crisp);
                 let dot = Dot {
                     x,
                     y,
@@ -221,7 +230,7 @@ fn disc(rows: &mut [Rgba], w: usize, y0: usize, d: &Dot) {
                 let d2 = (px as f32 + 0.5 - x).powi(2) + dy;
                 let edge = (1.0 - d2.sqrt() / reach).max(0.0);
                 // The graphics card's falloff: soft from the core, gone by the glow's edge.
-                let a = (GLOW + GLOW_LIT * d.lit) * d.glow * edge.powf(1.3);
+                let a = (GLOW + GLOW_LIT * d.lit) * d.glow * edge.powf(FALLOFF);
                 if a > 0.004 {
                     screen(&mut rows[py * w + px], d.colour, a);
                 }

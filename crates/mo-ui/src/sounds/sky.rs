@@ -46,10 +46,11 @@ struct Camera {
     // The twinkle: the time in seconds, and how much (0 for none).
     time: f32,
     twinkle: f32,
-    // From how lit a star shows as a point of its own far out, and gets spikes (mo_app::galaxy_look::look).
-    glint_from: f32,
-    spikes_from: f32,
-    _a: f32,
+    // From which star (in the order mo_app::galaxy_look::pack sorts them, the best lit last) they show as points of
+    // their own far out, and get spikes; and how many stars there are (mo_app::galaxy_look::glint_starts).
+    glint_start: f32,
+    spike_start: f32,
+    count: f32,
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 
@@ -93,6 +94,9 @@ const HOT: f32 = 0.08;
 const WHITE: f32 = 0.4;
 const FAR_GLOW: f32 = 0.2;
 const FAR_HALO: f32 = 2.2;
+const HALO: f32 = 2.8;
+const FALLOFF: f32 = 1.3;
+const LIT_BRIGHTEST: f32 = 1.5;
 
 struct Crisp {
     @builtin(position) position: vec4<f32>,
@@ -126,8 +130,11 @@ fn crisp_vertex(@builtin(vertex_index) v: u32, @builtin(instance_index) star: u3
     let shown = c.a > 0.5 / 255.0;
     let lighting = camera.light_on > 0.5;
     let lit = select(0.0, max(c.a * 255.0 - 1.0, 0.0) / 254.0, lighting);
-    // Close up every star shows; far out, where the stars are only painted, the best lit still show as points.
-    let glint = smoothstep(camera.glint_from, 1.0, lit);
+    // Close up every star shows; far out, where the stars are only painted, the best lit still show as points. By rank:
+    // the light byte can't tell the top few hundred of a big library apart.
+    let rank = f32(star);
+    let glint = select(0.0, smoothstep(0.0, 1.0, (rank - camera.glint_start) / max(camera.count - camera.glint_start, 1.0)),
+                       lighting && rank >= camera.glint_start);
     let show = select(0.15 * camera.strength, max(camera.strength, camera.painted * glint), shown);
     // A well lit star is up to nearly three times as big (mo_app::galaxy_look::lit_size, the same curve); with Light by
     // on, an unlit one is smaller than an all-alike star, so the lit ones stand out.
@@ -138,18 +145,22 @@ fn crisp_vertex(@builtin(vertex_index) v: u32, @builtin(instance_index) star: u3
     let radius = select(camera.dust, mix(far, camera.size * size, camera.strength), shown);
     // A shown star's glow reaches 2.8 times its core close up, a well lit one's up to twice that; far out, where
     // only a little of the glow shows, it's kept short.
-    let halo = select(radius * 1.5, radius * mix(FAR_HALO, 2.8 + 2.8 * lit, camera.strength), shown);
+    let halo = select(radius * 1.5, radius * mix(FAR_HALO, HALO + HALO * lit, camera.strength), shown);
     // The brightest few get faint four-point spikes.
-    let spikes = select(0.0, smoothstep(camera.spikes_from, 1.0, lit) * max(radius * 7.0, 10.0), shown);
-    // A very slight twinkle, only in brightness, each star at its own pace.
-    let twinkle = 1.0 + camera.twinkle * sin(camera.time * (1.1 + 1.6 * hash(star)) + 6.2832 * hash(star ^ 0x9e3779b9u));
+    let spiky = smoothstep(0.0, 1.0, (rank - camera.spike_start) / max(camera.count - camera.spike_start, 1.0));
+    let spikes = select(0.0, spiky * max(radius * 7.0, 10.0), shown && lighting && rank >= camera.spike_start);
+    // A very slight twinkle, only in brightness, each star at its own pace: by where it is on the map, so it keeps its
+    // pace when the stars are packed again in another order.
+    let id = bitcast<u32>(at.x) * 73856093u ^ bitcast<u32>(at.y) * 19349663u;
+    let twinkle = 1.0 + camera.twinkle * sin(camera.time * (1.1 + 1.6 * hash(id)) + 6.2832 * hash(id ^ 0x9e3779b9u));
     let local = corner(v) * (max(halo, spikes) + 1.0);
     var out: Crisp;
     // A star that doesn't show costs nothing: its corners all fall on one point, off the picture.
     out.position = select(vec4((at - camera.centre) * camera.unit + local * camera.pixel, 0.0, 1.0),
                           vec4(2.0, 2.0, 0.0, 1.0), show < 0.004);
     out.local = local;
-    out.colour = c.rgb * show * twinkle;
+    // With Light by on, a star's core is as bright as it's lit (the processor's picture does the same).
+    out.colour = c.rgb * show * twinkle * select(1.0, weight / LIT_BRIGHTEST, lighting);
     out.radius = radius;
     out.halo = halo;
     out.spikes = spikes;
@@ -168,7 +179,7 @@ fn crisp_fragment(in: Crisp) -> @location(0) vec4<f32> {
     let hot = exp(-d * d / (HOT * r * r + 0.15));
     // The glow: light falling off softly from the core, gone by the halo's edge.
     let edge = clamp(1.0 - d / in.halo, 0.0, 1.0);
-    let glow = (GLOW + GLOW_LIT * in.lit) * pow(edge, 1.3) * in.glow;
+    let glow = (GLOW + GLOW_LIT * in.lit) * pow(edge, FALLOFF) * in.glow;
     // The spikes: two thin lines through the middle, fading along their length.
     var spike = 0.0;
     if (in.spikes > 0.0) {
@@ -459,8 +470,9 @@ impl Sky {
         }
     }
 
-    /// Sends the stars to the card (as `mo_app::galaxy_look::pack` made them).
-    pub(super) fn set_stars(&mut self, bytes: &[u8]) {
+    /// Sends the stars to the card (as `mo_app::galaxy_look::pack` made them, with `lit_counts` of them, worked out
+    /// off the window's thread).
+    pub(super) fn set_stars(&mut self, bytes: &[u8], lit_counts: &[u32; 256]) {
         let count = (bytes.len() / look::STAR_BYTES) as u32;
         if count == 0 {
             (self.stars, self.count) = (None, 0);
@@ -479,7 +491,7 @@ impl Sky {
             self.queue.write_buffer(b, 0, bytes);
         }
         self.count = count;
-        self.lit_counts = look::lit_counts(bytes);
+        self.lit_counts = *lit_counts;
     }
 
     /// Forgets the stars (a new library is coming).
@@ -565,6 +577,10 @@ impl Sky {
         // The quarter-size stamps hold a sixteenth of the light, as C#'s, spread over the bigger blur.
         let small = STAMP * (SIGMA * SIGMA) / (SIGMA_SMALL * SIGMA_SMALL) / 16.0;
         let crisp = 1.0 - look.painted;
+        let count = self.count;
+        // Which stars glint far out and get spikes, by rank (see `glint_starts`); none with nothing lit.
+        let (glint_start, spike_start) =
+            if shine.light_on { look::glint_starts(look, &self.lit_counts, count) } else { (count, count) };
         let cameras = [
             look::camera(view, scale, width, height, SIGMA, STAMP),
             look::camera(view, scale, sw, sh, SIGMA_SMALL, small),
@@ -578,9 +594,9 @@ impl Sky {
                 if shine.light_on { 1.0 } else { 0.0 },
                 shine.time,
                 shine.twinkle,
-                look.glint_from,
-                look.spikes_from,
-                0.0,
+                glint_start as f32,
+                spike_start as f32,
+                count as f32,
             ]);
             self.queue.write_buffer(&self.cameras[i].0, 0, &look::bytes(&numbers));
         }
@@ -593,13 +609,9 @@ impl Sky {
 
         self.make_layers(width, height);
         let Some(layers) = self.layers.as_mut() else { unreachable!("made just above") };
-        let (count, stars) = (self.count, &self.stars);
+        let stars = &self.stars;
         // Far out, only the stars lit enough to glint are drawn as stars: the last ones, as `pack` sorts them.
-        let as_stars = if crisp > 0.01 {
-            0..count
-        } else {
-            count - look::lit_more_than(&self.lit_counts, look.glint_from).min(count)..count
-        };
+        let as_stars = if crisp > 0.01 { 0..count } else { glint_start..count };
         let (stamp, crisp_pipeline, blur_across, blur_down, shade) =
             (&self.stamp, &self.crisp, &self.blur_across, &self.blur_down, &self.shade);
         let groups = [&self.cameras[0].1, &self.cameras[1].1, &self.cameras[2].1];
@@ -696,6 +708,9 @@ mod tests {
             ("WHITE", look::WHITE),
             ("FAR_GLOW", look::FAR_GLOW),
             ("FAR_HALO", look::FAR_HALO),
+            ("HALO", look::HALO),
+            ("FALLOFF", look::FALLOFF),
+            ("LIT_BRIGHTEST", look::LIT_BRIGHTEST),
         ] {
             assert!(SHADER.contains(&format!("const {name}: f32 = {value:?};")), "{name} isn't {value} in the shader");
         }
@@ -755,13 +770,14 @@ mod tests {
         let ranks: Vec<f32> = (0..stars.len()).map(|_| rnd()).collect();
         for (lit_by, light) in [("length", ranks), ("nothing", Vec::new())] {
             let shine = Shine { light_on: !light.is_empty(), ..Shine::default() };
-            sky.set_stars(&pack(&stars, &colours, &palette, &shown, &light));
+            let packed = pack(&stars, &colours, &palette, &shown, &light);
+            sky.set_stars(&packed, &mo_app::galaxy_look::lit_counts(&packed));
             for zoom in [1.0f32, 6.0, 60.0, 400.0] {
                 let mut view = View::default();
                 (view.width, view.height, view.zoom) = (1100.0, 800.0, zoom);
                 (view.cx, view.cy) = (clumps[3].0, clumps[3].1);
                 let (l, t, r, b) = mo_app::galaxy_look::on_view(&view);
-                let lk = look(&view, grid.count_in(l, t, r, b), mo_app::galaxy_look::lit_share(&light));
+                let lk = look(&view, grid.count_in(l, t, r, b), mo_app::galaxy_look::lit_share(&light, &shown));
                 eprintln!("zoom {zoom}: {lk:?}");
                 // Timed: each drawn 10 times and waited for, taking turns with Light by's stars left off (so far
                 // out the stars pass doesn't run at all), so what else the computer is doing hits both alike.
