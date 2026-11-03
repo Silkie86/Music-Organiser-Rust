@@ -274,7 +274,7 @@ impl VectorIndex {
             for &i in part {
                 rows.extend_from_slice(g.at(i));
             }
-            rows.par_chunks_mut(dim).for_each(&finish);
+            rows.par_chunks_mut(dim).for_each(finish);
             if half {
                 halves.push(rows.iter().map(|x| to_half(*x)).collect());
             } else {
