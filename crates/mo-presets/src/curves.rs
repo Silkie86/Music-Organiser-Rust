@@ -625,18 +625,24 @@ pub fn save_to_bitwig(c: &Curve, folder: &Path) -> Result<PathBuf, String> {
 /// file can be a second name of your saved curve, whose read-only mark isn't the app's to take off).
 fn clear_staged(folder: &Path, now: SystemTime) {
     let Ok(entries) = std::fs::read_dir(folder) else { return };
+    // A plain file (the entry itself, never followed: a link of that name is a link) left long enough ago.
+    let left = |meta: &std::fs::Metadata| {
+        meta.is_file()
+            && meta
+                .modified()
+                .ok()
+                .and_then(|t| now.duration_since(t).ok())
+                .is_some_and(|age| age >= STAGED_LEFT_BEHIND)
+    };
     for entry in entries.flatten() {
-        // The entry itself, never followed: a link of that name is a link, not a plain file.
-        let plain = entry.file_type().is_ok_and(|t| t.is_file());
-        let ours = entry.file_name().to_str().is_some_and(is_staged);
-        let old = entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| now.duration_since(t).ok())
-            .is_some_and(|age| age >= STAGED_LEFT_BEHIND);
-        if plain && ours && old {
-            let _ = std::fs::remove_file(entry.path());
+        // Only a name a save gives its files is looked at any further, so a big library costs one listing.
+        if !entry.file_name().to_str().is_some_and(is_staged) {
+            continue;
+        }
+        let path = entry.path();
+        // Looked at again just before it goes: another copy of the app may be saving that name now.
+        if std::fs::symlink_metadata(&path).is_ok_and(|meta| left(&meta)) {
+            let _ = std::fs::remove_file(&path);
         }
     }
 }
