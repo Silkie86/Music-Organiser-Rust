@@ -135,6 +135,35 @@ impl LibraryIndex {
     }
 }
 
+/// The project folders under `roots` that hold a Bitwig project and a `multi-samples` folder, each once, in the order
+/// of their paths: the folders [`LibraryIndex::copies_in`] looks in. A root moved to another drive with a link in its
+/// place is read where it really is, and its folders keep the paths you know, as for the Library. Folders in an
+/// "… (old copy)" folder that a move left behind are left out: that goes as a whole. Call it off the window's thread.
+pub fn project_folders(roots: &[PathBuf], stop: &AtomicBool) -> Result<Vec<PathBuf>, Stopped> {
+    let mut found = Vec::new();
+    for root in roots {
+        let real = really(root);
+        found.extend(walk(&real, false, stop, |path, meta| {
+            let project = meta.is_file() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("bwproject"));
+            let folder = path.parent()?;
+            if !project || in_a_project(folder) || !folder.join(PROJECT_FOLDER).is_dir() {
+                return None;
+            }
+            let inside = folder.strip_prefix(&real).ok()?;
+            let shown = if inside.as_os_str().is_empty() { root.clone() } else { root.join(inside) };
+            (!in_old_copy(&shown)).then_some(shown)
+        })?);
+    }
+    found.sort_unstable();
+    found.dedup();
+    Ok(found)
+}
+
+/// Whether a folder is in (or is) a folder a move left behind as "… (old copy)".
+fn in_old_copy(folder: &Path) -> bool {
+    folder.components().any(|c| c.as_os_str().to_string_lossy().ends_with(crate::folder_move::OLD_SUFFIX))
+}
+
 /// Fingerprints of files once read, used again only while each file's size and time are as they were.
 #[derive(Default)]
 struct Prints {

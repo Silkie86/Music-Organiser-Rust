@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, SystemTime};
 
-use mo_space::bitwig::{FixedProject, LibraryCopy, LibraryIndex, remove_copies};
+use mo_space::bitwig::{FixedProject, LibraryCopy, LibraryIndex, project_folders, remove_copies};
 use mo_space::clean::{Bin, Problem, Removed, What, undo};
 use mo_space::key;
 
@@ -189,6 +189,49 @@ fn a_library_folder_moved_away_with_a_link_in_its_place_is_still_read() {
             bytes: 256,
         })]
     );
+}
+
+#[test]
+fn the_project_folders_are_the_ones_with_a_bitwig_project_and_its_copies() {
+    let dir = fixtures("mo-space-bitwig-project-folders");
+    let projects = dir.join("Projects");
+    // A project with copies, and its "(fixed)" save beside it: the folder is listed once.
+    write(&projects, "Night Drive/Night Drive.bwproject", b"project");
+    write(&projects, "Night Drive/Night Drive (fixed).bwproject", b"project");
+    write(&projects, "Night Drive/multi-samples/Kicks-2.multisample", b"kicks");
+    // Deeper down, and a project kept straight in the folder you gave.
+    write(&projects, "2024/Garage/Garage.BWPROJECT", b"project");
+    write(&projects, "2024/Garage/multi-samples/Pads.multisample", b"pads");
+    write(&dir, "Loose/Loose.bwproject", b"project");
+    write(&dir, "Loose/multi-samples/Bass.multisample", b"bass");
+    // Not these: a project without copies, a multi-samples folder with no project, an FL Studio save beside one, a
+    // project inside a project's copies, and a project in a folder a move left behind.
+    write(&projects, "Sketch/Sketch.bwproject", b"project");
+    write(&projects, "Stems/multi-samples/Lead.multisample", b"lead");
+    write(&projects, "Beat/Beat.flp", b"flp");
+    write(&projects, "Beat/multi-samples/Hat.multisample", b"hat");
+    write(&projects, "Night Drive/multi-samples/Inner/Inner.bwproject", b"project");
+    write(&projects, "Inner/multi-samples/x.multisample", b"x");
+    write(&dir, "Old (old copy)/Song/Song.bwproject", b"project");
+    write(&dir, "Old (old copy)/Song/multi-samples/Kicks.multisample", b"kicks");
+    let stop = AtomicBool::new(false);
+    let roots = [projects.clone(), dir.join("Loose"), dir.join("Old (old copy)"), dir.join("Not there")];
+    let found: Vec<String> = project_folders(&roots, &stop).unwrap().iter().map(|p| key(&s(p))).collect();
+    let mut wanted =
+        [projects.join("2024/Garage"), projects.join("Night Drive"), dir.join("Loose")].map(|p| key(&s(&p))).to_vec();
+    wanted.sort();
+    assert_eq!(found, wanted);
+
+    // A folder of projects moved to another drive with a link in its place keeps the paths you know.
+    let (moved, linked) = (dir.join("D/Moved"), dir.join("Linked"));
+    write(&moved, "Song/Song.bwproject", b"project");
+    write(&moved, "Song/multi-samples/Kicks.multisample", b"kicks");
+    folder_link(&moved, &linked);
+    let found = project_folders(std::slice::from_ref(&linked), &stop).unwrap();
+    assert_eq!(found.iter().map(|p| key(&s(p))).collect::<Vec<_>>(), [key(&s(&linked.join("Song")))]);
+
+    // A stop stops it.
+    assert!(project_folders(&roots, &AtomicBool::new(true)).is_err());
 }
 
 #[test]
