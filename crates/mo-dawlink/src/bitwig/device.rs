@@ -84,3 +84,20 @@ pub fn drum_machine(stored: Option<&str>) -> DeviceId {
 /// The name Bitwig gives its Drum Machine, which the app checks the new device has: an ID read wrongly adds some
 /// other device.
 pub const DRUM_MACHINE_NAME: &str = "Drum Machine";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_ids_are_the_format_registrys() {
+        // What's known about Bitwig's files is kept in the format registry (CLAUDE.md): field 0x99 lists these.
+        let registry: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../tools/formatlab/registry/bitwig.json")).unwrap();
+        let field = registry["fields"].as_array().unwrap().iter().find(|f| f["id"] == "0x99").unwrap();
+        let about = field["about"].as_str().unwrap();
+        for id in [DeviceId::DRUM_MACHINE, DeviceId::SAMPLER, DeviceId::NOTE_TRANSPOSE] {
+            assert!(about.contains(&id.to_string()), "{id} isn't in the registry's field 0x99");
+        }
+    }
+}

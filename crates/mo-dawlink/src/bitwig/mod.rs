@@ -14,8 +14,8 @@
 //! - [`Bitwig::check`]: what Bitwig has open, and whether a send would go in now.
 //!
 //! Each waits for Bitwig, so a screen calls them on a background thread (`mo_app::background::spawn`), never the
-//! window's. Sends asked for at the same time each go in, one after the other, in the order they were asked for.
-//! Every error, and every result, has words to show as they are.
+//! window's. Sends asked for at the same time go in one after the other, in the order they came. Every error, and
+//! every result, has words to show as they are.
 
 mod device;
 mod error;

@@ -14,7 +14,7 @@ workspace = true
 fake-bitwig = []
 
 [dependencies]
-# Paths as .NET reads them (file names and stems, whichever way the folders are written).
+# File names as the C# app reads them, whichever way the folders are written (`paths::file_name`).
 mo-formats = { path = "../mo-formats" }
 serde_json = "1"
 

@@ -55,10 +55,17 @@ fn reads_messages_that_come_without_their_length() {
 
 #[test]
 fn says_when_nothing_answers() {
-    // A port nothing listens on: one the system had free, let go again.
-    let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-    let err = Link::connect(port, Duration::from_millis(500)).unwrap_err();
-    assert_eq!(err, Error::NotRunning);
+    // A port nothing listens on: one the system had free, let go again. Another test's stand-in may be given it
+    // meanwhile, so another is tried then.
+    let mut answered = Vec::new();
+    let err = loop {
+        let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        match Link::connect(port, Duration::from_millis(500)) {
+            Err(Error::NotRunning) => break Error::NotRunning,
+            other => answered.push(other.map(|link| link.hello().project.clone())),
+        }
+        assert!(answered.len() < 10, "something answered on every port tried: {answered:?}");
+    };
     assert!(err.to_string().starts_with("Bitwig isn't answering. Check that Bitwig Studio is open"), "{err}");
     assert!(err.to_string().contains("\u{201c}Music Organiser Bitwig\u{201d}"), "{err}");
 }
@@ -169,6 +176,11 @@ fn requests_are_laid_out_as_the_link_reads_them() {
             }),
         ]
     );
+    // A pad given no name has its sample's, as in Bitwig, whichever way the path's folders are written.
+    link.fill_pads(&[pad(42, "/Users/solomon/Kit/Hat.wav", "")], Some((track.index, 0))).unwrap();
+    let world = bitwig.world();
+    let names: Vec<&str> = world.pads(track.index).unwrap().values().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["Kick", "Snare", "Hat"]);
 }
 
 #[test]

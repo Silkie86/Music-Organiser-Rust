@@ -113,11 +113,11 @@ fn a_project_brought_to_the_front_stops_the_send_there() {
     let bitwig = with(|w| w.switch_during = Some(("newtrack".into(), "Other Song".into())));
     let sent = bitwig.bitwig().send_sound(&kick, "Kick").unwrap();
     assert_eq!((sent.track, sent.went_in()), (None, false));
-    assert_eq!(sent.title(), "Kick didn't go in cleanly");
+    assert_eq!(sent.title(), "Kick didn't go into Bitwig");
     assert_eq!(
         sent.detail(),
-        "Bitwig may have added an empty track for it: Bitwig has \"Other Song\" open, not \"Night Drive\", so the link \
-         stopped before changing anything there."
+        "Bitwig has \"Other Song\" open, not \"Night Drive\", so the link stopped before changing anything there. \
+         There may be an empty track for it in Bitwig."
     );
     assert_eq!(bitwig.world().commands(), ["newtrack"]);
     // Part way through putting the sound on its track: the track is in Bitwig, and the words say so.
@@ -161,7 +161,8 @@ fn wont_send_through_an_old_script_or_with_changes_off() {
         w.hello.insert("changes".into(), json!(true));
     });
     let sent = bitwig.bitwig().send_sound(&kick, "Kick").unwrap();
-    assert_eq!(sent.detail(), format!("Bitwig may have added an empty track for it: {CHANGES_OFF}"));
+    assert_eq!(sent.detail(), format!("{CHANGES_OFF} There may be an empty track for it in Bitwig."));
+    assert_eq!(sent.title(), "Kick didn't go into Bitwig");
     assert_eq!(bitwig.world().tracks.len(), 4);
 }
 
@@ -339,11 +340,11 @@ fn a_kit_cut_short_says_what_may_have_happened() {
     let bitwig = with(|w| w.switch_during = Some(("newtrack".into(), "Other Song".into())));
     let kit = bitwig.bitwig().send_kit("Kit #7", &pads, target).unwrap();
     assert_eq!((kit.track, kit.went_in()), (None, false));
-    assert_eq!(kit.title(), "Kit #7 didn't go in cleanly");
+    assert_eq!(kit.title(), "Kit #7 didn't go into Bitwig");
     assert_eq!(
         kit.detail(),
-        "Bitwig may have added an empty track for the kit: Bitwig has \"Other Song\" open, not \"Night Drive\", so \
-         the link stopped before changing anything there."
+        "Bitwig has \"Other Song\" open, not \"Night Drive\", so the link stopped before changing anything there. \
+         There may be an empty track for the kit in Bitwig."
     );
 
     let bitwig = with(|w| w.hang_up_on = vec!["insert".into()]);
@@ -521,6 +522,37 @@ fn a_drum_machine_bitwig_hasnt_named_yet_takes_the_kit() {
     let kit = bitwig.bitwig().send_kit("Kit #12", &pads, KitTarget::NewDrumMachine(DeviceId::SAMPLER)).unwrap();
     assert!(!kit.drum_machine && !kit.went_in());
     assert_eq!(notes(&kit.failed), [36]);
+    assert_eq!(kit.title(), "Bitwig didn't add a Drum Machine");
+}
+
+#[test]
+fn a_drum_machine_bitwig_is_slow_to_show_stays_a_drum_machine() {
+    let dir = fixtures("dawlink-kit-slow");
+    let pads = kit_pads(&[
+        kit_sound("Kick", "Kick", &sound(&dir, "Kick.wav")),
+        kit_sound("Snare", "Snare", &sound(&dir, "Snare.wav")),
+    ]);
+    let target = KitTarget::NewDrumMachine(DeviceId::DRUM_MACHINE);
+    // Bitwig named the new device Drum Machine, then didn't show its pads in time: it's still one, so the next kit
+    // goes on a new Drum Machine again.
+    let bitwig = with(|w| w.slow_pads = true);
+    let kit = bitwig.bitwig().send_kit("Kit #13", &pads, target).unwrap();
+    assert!(kit.drum_machine && !kit.went_in());
+    assert_eq!((kit.track, notes(&kit.failed)), (Some(3), vec![36, 38]));
+    assert!(kit.filled.is_empty());
+    assert_eq!(kit.title(), "Kit #13 didn't go into Bitwig");
+    assert_eq!(
+        kit.detail(),
+        "Bitwig added the Drum Machine but didn't show its pads in time, so the sounds didn't go on it."
+    );
+    assert_eq!(bitwig.world().tracks[3].devices[0].name, "Drum Machine");
+    // One Bitwig hadn't named either: the app can't tell it from a device that isn't a Drum Machine.
+    let bitwig = with(|w| {
+        w.slow_pads = true;
+        w.unnamed_devices = true;
+    });
+    let kit = bitwig.bitwig().send_kit("Kit #14", &pads, target).unwrap();
+    assert!(!kit.drum_machine);
     assert_eq!(kit.title(), "Bitwig didn't add a Drum Machine");
 }
 

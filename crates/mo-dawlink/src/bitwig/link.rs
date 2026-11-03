@@ -17,7 +17,7 @@ use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use super::{DeviceId, Error, Pad};
 
@@ -226,7 +226,7 @@ pub struct Link {
 }
 
 /// Why reading from Bitwig stopped.
-enum Failure {
+pub(super) enum Failure {
     TimedOut,
     Closed,
     /// What came isn't the link's messages.
@@ -285,7 +285,7 @@ impl Link {
     /// Asks the link again what Bitwig has open (`hello`), and keeps the answer. The link doesn't note these in its
     /// reports, so asking every couple of seconds (to show whether Bitwig is there) costs nothing.
     pub fn refresh(&mut self) -> Result<&Hello, Error> {
-        let answer = self.request(json!({ "cmd": "hello" }), self.timeout)?;
+        let answer = self.request(ask("hello", []), self.timeout)?;
         if !answer.is_object() {
             return Err(Error::Unexpected);
         }
@@ -325,17 +325,17 @@ impl Link {
     pub fn command(&mut self, cmd: &str, fields: Value) -> Result<Value, Error> {
         let mut request = match fields {
             Value::Object(map) => map,
-            Value::Null => serde_json::Map::new(),
+            Value::Null => Map::new(),
             _ => return Err(Error::Invalid(format!("A request's fields are a JSON object, not {fields}."))),
         };
         request.insert("cmd".into(), cmd.into());
         let timeout = if PROJECT_COMMANDS.contains(&cmd) { self.change_timeout } else { self.timeout };
-        self.request(Value::Object(request), timeout)
+        self.request(request, timeout)
     }
 
     /// Adds an instrument track after the project's last track (before the effect tracks), names it and selects it.
     pub fn new_track(&mut self, name: &str) -> Result<NewTrack, Error> {
-        let answer = self.change(json!({ "cmd": "newtrack", "name": name }))?;
+        let answer = self.change(ask("newtrack", [("name", name.into())]))?;
         let index = index(answer.get("index")).ok_or(Error::Unexpected)?;
         let id = answer.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()).map(str::to_owned);
         Ok(NewTrack { index, name: text(&answer, "name"), id })
@@ -345,14 +345,15 @@ impl Link {
     /// a sample loads into a new Sampler, a preset loads its device. `path` is the file's full path, as this computer
     /// writes it.
     pub fn insert_file(&mut self, track: usize, path: &str) -> Result<Inserted, Error> {
-        let answer = self.change(json!({ "cmd": "insert", "track": track, "kind": "file", "path": path }))?;
+        let answer =
+            self.change(ask("insert", [("track", track.into()), ("kind", "file".into()), ("path", path.into())]))?;
         inserted(&answer)
     }
 
     /// Adds one of Bitwig's own devices to the end of a track's chain, by its ID.
     pub fn insert_device(&mut self, track: usize, device: DeviceId) -> Result<Inserted, Error> {
-        let answer =
-            self.change(json!({ "cmd": "insert", "track": track, "kind": "bitwig", "device": device.to_string() }))?;
+        let fields = [("track", track.into()), ("kind", "bitwig".into()), ("device", device.to_string().into())];
+        let answer = self.change(ask("insert", fields))?;
         inserted(&answer)
     }
 
@@ -368,10 +369,10 @@ impl Link {
                 json!({ "note": p.note, "path": p.path, "name": name })
             })
             .collect();
-        let mut request = json!({ "cmd": "pads", "pads": list });
-        if let (Some((track, device)), Some(map)) = (drum_machine, request.as_object_mut()) {
-            map.insert("track".into(), track.into());
-            map.insert("device".into(), device.into());
+        let mut request = ask("pads", [("pads", list.into())]);
+        if let Some((track, device)) = drum_machine {
+            request.insert("track".into(), track.into());
+            request.insert("device".into(), device.into());
         }
         let answer = self.change(request)?;
         if !answer.is_object() {
@@ -405,16 +406,15 @@ impl Link {
 
     /// A request that changes something: the link waits for Bitwig to make it. Refused here, before anything is sent,
     /// when the link is too old to make changes.
-    fn change(&mut self, request: Value) -> Result<Value, Error> {
+    fn change(&mut self, request: Map<String, Value>) -> Result<Value, Error> {
         if self.hello.link < LINK_VERSION {
             return Err(Error::OldLink);
         }
         self.request(request, self.change_timeout)
     }
 
-    /// Sends `request` (a JSON object with its `cmd`) and waits up to `timeout` for its answer.
-    fn request(&mut self, request: Value, timeout: Duration) -> Result<Value, Error> {
-        let Value::Object(mut request) = request else { return Err(Error::Unexpected) };
+    /// Sends `request` (with its `cmd`) and waits up to `timeout` for its answer.
+    fn request(&mut self, mut request: Map<String, Value>, timeout: Duration) -> Result<Value, Error> {
         if !self.open {
             return Err(Error::NotConnected);
         }
@@ -518,7 +518,7 @@ impl Link {
 /// its newline. Blank space between messages is passed over: as a length, it would be far over the limit anyway.
 /// `scanned` is how far such a message has been searched for its newline already, so a long one that comes in many
 /// reads is searched once.
-fn take_message(pending: &mut Vec<u8>, scanned: &mut usize) -> Result<Option<Vec<u8>>, Failure> {
+pub(super) fn take_message(pending: &mut Vec<u8>, scanned: &mut usize) -> Result<Option<Vec<u8>>, Failure> {
     let blank = pending.iter().take_while(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n')).count();
     if blank > 0 {
         pending.drain(..blank);
@@ -552,6 +552,13 @@ fn take_message(pending: &mut Vec<u8>, scanned: &mut usize) -> Result<Option<Vec
     }
     let message = pending.drain(..4 + length).skip(4).collect();
     Ok(Some(message))
+}
+
+/// A request: its command, and the fields that go with it.
+fn ask<const N: usize>(cmd: &str, fields: [(&str, Value); N]) -> Map<String, Value> {
+    let mut request: Map<String, Value> = fields.into_iter().map(|(field, value)| (field.to_owned(), value)).collect();
+    request.insert("cmd".into(), cmd.into());
+    request
 }
 
 /// A request as JSON in plain ASCII, anything else as `\u` escapes, as the C# app sent them: the extension and the

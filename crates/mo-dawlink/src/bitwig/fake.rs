@@ -25,7 +25,7 @@ use std::time::Duration;
 use mo_formats::paths::{file_name, stem};
 use serde_json::{Map, Value, json};
 
-use super::link::{MAX_MESSAGE, ascii_json};
+use super::link::{ascii_json, take_message};
 use super::{Bitwig, DRUM_MACHINE_NAME, DeviceId, PORT};
 
 /// The extension's words when "Let the app make changes" is off.
@@ -158,6 +158,9 @@ pub struct World {
     pub switch_while_filling: Option<String>,
     /// Whether the link answers before Bitwig has named a device it added (its name "" in the answer).
     pub unnamed_devices: bool,
+    /// Whether Bitwig is too slow to show a Drum Machine's pads to the link, which waits 5 seconds for them when it's
+    /// given the Drum Machine's place: it then says the device isn't a Drum Machine, and puts nothing on it.
+    pub slow_pads: bool,
     /// Messages sent once, before the next answer: events, or answers to requests long gone.
     pub before_answer: Vec<Value>,
     /// Every request the app sent, as it came (one that wasn't JSON as its text).
@@ -206,6 +209,7 @@ impl Default for World {
             switch_during: None,
             switch_while_filling: None,
             unnamed_devices: false,
+            slow_pads: false,
             before_answer: Vec::new(),
             requests: Vec::new(),
             made: 0,
@@ -456,7 +460,7 @@ impl World {
                 let path = given(request.get("path"), "file")?;
                 self.loads(path).then(|| FakeDevice {
                     name: self.sample_device.clone(),
-                    preset: stem(path).to_owned(),
+                    preset: sample_name(path).to_owned(),
                     ..FakeDevice::sampler(path)
                 })
             }
@@ -520,7 +524,7 @@ impl World {
                 self.selected_track = Some(track);
                 self.selected_device = Some((track, device));
                 self.next_step("pads", request)?;
-                if !self.device(track, device).is_some_and(|d| d.pads.is_some()) {
+                if self.slow_pads || !self.device(track, device).is_some_and(|d| d.pads.is_some()) {
                     return Err(format!("Device {device} on track {track} isn't a Drum Machine."));
                 }
                 (track, device)
@@ -556,7 +560,7 @@ impl World {
                 }
                 if free {
                     // Bitwig names a pad after the sample dropped on it.
-                    pad.name = stem(path).to_owned();
+                    pad.name = sample_name(path).to_owned();
                     pad.devices.push(FakeDevice::sampler(path));
                 } else {
                     replaced.push(note);
@@ -674,7 +678,7 @@ fn serve(mut stream: TcpStream, world: &Mutex<World>) {
     if greeted.is_err() {
         return;
     }
-    let mut pending = Vec::new();
+    let (mut pending, mut scanned) = (Vec::new(), 0);
     let mut chunk = [0u8; 16 * 1024];
     loop {
         let n = match stream.read(&mut chunk) {
@@ -682,16 +686,16 @@ fn serve(mut stream: TcpStream, world: &Mutex<World>) {
             Ok(n) => n,
         };
         pending.extend_from_slice(chunk.get(..n).unwrap_or_default());
-        while let Some(&[a, b, c, d]) = pending.first_chunk::<4>() {
-            let length = u32::from_be_bytes([a, b, c, d]) as usize;
-            if length > MAX_MESSAGE {
-                let _ = stream.shutdown(Shutdown::Both);
-                return;
-            }
-            if pending.len() < 4 + length {
-                break;
-            }
-            let body: Vec<u8> = pending.drain(..4 + length).skip(4).collect();
+        loop {
+            // Read as the app reads Bitwig's messages.
+            let body = match take_message(&mut pending, &mut scanned) {
+                Ok(Some(body)) => body,
+                Ok(None) => break,
+                Err(_) => {
+                    let _ = stream.shutdown(Shutdown::Both);
+                    return;
+                }
+            };
             let (reply, wait) = handle(&mut lock(world), &String::from_utf8_lossy(&body));
             match reply {
                 Reply::Answer(messages) => {
@@ -751,6 +755,12 @@ fn write_message(stream: &mut TcpStream, message: &Value, lengths: bool) -> io::
     }
     frame.extend_from_slice(&body);
     stream.write_all(&frame)
+}
+
+/// The name Bitwig gives a sample dropped on a pad, or a Sampler it loads: the file's name without its ending, whichever
+/// way the path's folders are written.
+fn sample_name(path: &str) -> &str {
+    stem(file_name(path))
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {

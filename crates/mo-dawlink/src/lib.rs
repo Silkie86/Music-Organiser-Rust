@@ -3,7 +3,7 @@
 //! Sampler, or a kit on a Drum Machine, in the project open there. The FL Studio link, watching both DAWs, the checks
 //! and the live tests come later in phase 5.
 //!
-//! Every call here waits for Bitwig (up to half a minute for a change), so the screens make them on a background
-//! thread (`mo_app::background::spawn`), never on the window's thread.
+//! Every call here waits for Bitwig (up to half a minute for each change, and a send for the sends before it), so the
+//! screens make them on a background thread (`mo_app::background::spawn`), never on the window's thread.
 
 pub mod bitwig;
