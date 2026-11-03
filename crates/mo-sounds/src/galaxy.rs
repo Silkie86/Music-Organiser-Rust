@@ -90,7 +90,7 @@ impl<'a> Fingerprints<'a> {
     /// One sound's fingerprint; empty for a sound the features index doesn't have.
     pub fn get(&self, id: i64) -> Cow<'a, [f32]> {
         let Some(f) = self.index.features.get(id) else { return Cow::Borrowed(&[]) };
-        let Some((clap_dim, clap_only)) = self.clap else { return Cow::Borrowed(f) };
+        let Some((clap_dim, clap_only)) = self.clap else { return f };
         let mut v = vec![0f32; clap_dim + f.len()];
         let c = self.index.clap.as_ref().and_then(|c| c.get(id)).filter(|c| c.len() == clap_dim);
         let (wc, wf) = match c {
@@ -99,11 +99,11 @@ impl<'a> Fingerprints<'a> {
             Some(_) => (0.8, 0.6),
         };
         if let Some(c) = c {
-            for (out, x) in v.iter_mut().zip(c) {
+            for (out, x) in v.iter_mut().zip(c.iter()) {
                 *out = x * wc;
             }
         }
-        for (out, x) in v[clap_dim..].iter_mut().zip(f) {
+        for (out, x) in v[clap_dim..].iter_mut().zip(f.iter()) {
             *out = x * wf;
         }
         unit(&mut v);
@@ -937,7 +937,7 @@ mod tests {
         assert!((joined.iter().map(|x| x * x).sum::<f32>() - 1.0).abs() < 1e-5);
         // The measurements alone are lent, not copied.
         assert!(matches!(fingerprints(&deep, "features").get(3), Cow::Borrowed(_)));
-        assert_eq!(&*fingerprints(&deep, "features").get(3), deep.features.get(3).unwrap());
+        assert_eq!(fingerprints(&deep, "features").get(3), deep.features.get(3).unwrap());
     }
 
     #[test]

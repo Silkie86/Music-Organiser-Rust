@@ -56,7 +56,7 @@ fn rust_side(c: &Case) -> Value {
     c.queries
         .iter()
         .map(|q| {
-            let found = index.get(*q).map(|v| index.nearest(v, c.max)).unwrap_or_default();
+            let found = index.get(*q).map(|v| index.nearest(&v, c.max)).unwrap_or_default();
             found.into_iter().map(|(id, score)| json!({ "Id": id, "Score": score })).collect::<Value>()
         })
         .collect()
