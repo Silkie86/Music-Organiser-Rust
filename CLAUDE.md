@@ -44,11 +44,15 @@ This repo is the Rust rebuild of the C# app. The plan, the inventory of today's 
 21. Highly multithreaded where it helps (rayon), at low priority, never on the UI thread.
 22. MIDI 2.0 ready: notes and controllers keep MIDI 2.0 resolution (16-bit velocity, 32-bit controllers, per-note
     controllers, MIDI Clip Files, UMP ports); only a MIDI 1.0 file, port or DAW gets 7-bit values (spec section 4.4).
+
+Rules 23 to 27 are Solomon's later rules in `docs/handover/memory/rust-rebuild-rules.md` (code already cites rule 23).
+
 28. The app cleans up after itself: every cache, temp file and report it writes has a limit or is removed when done,
-    and a start-up sweep clears leftovers; it never deletes what the user made (Solomon, 2026-11-02). The sweep is
-    `mo_app::tidy`. It removes only plain files whose whole name the app gives them, in the folders it writes them to;
-    never by folder alone, never through a link, never what the user made.
-    (Rules 23 to 27 are in `docs/handover/memory/rust-rebuild-rules.md`; code already cites rule 23.)
+    and a start-up sweep (`mo_app::tidy`) clears leftovers (Solomon, 2026-11-02). It removes only plain files whose
+    whole name the app gives them, in the folders it writes them to; never by folder alone, never through a link (the
+    logs folder is the one it follows: the app writes its logs through it), never what the user made. The one
+    exception: F12 notes and their pictures older than about 3 months go to the Recycle Bin, never the drafts, and the
+    app never empties the Recycle Bin itself (Solomon, 2026-11-03).
 
 ## How work is done
 

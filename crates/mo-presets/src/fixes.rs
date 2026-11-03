@@ -223,11 +223,10 @@ pub(crate) fn make_new(path: &Path, schema: &str, table: &str) -> Result<(), Fix
 fn remove_old_half_made(path: &Path) {
     let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) else { return };
     let dir = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
-    let prefix = format!("{name}.new-");
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for e in entries.flatten() {
         let plain = e.file_type().is_ok_and(|t| t.is_file());
-        let ours = e.file_name().to_str().is_some_and(|n| is_half_made(n, &prefix));
+        let ours = e.file_name().to_str().is_some_and(|n| is_half_made(n, name));
         let old = e.metadata().ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok());
         if plain && ours && old.is_some_and(|o| o.as_secs() >= 60) {
             let _ = std::fs::remove_file(e.path());
@@ -235,9 +234,11 @@ fn remove_old_half_made(path: &Path) {
     }
 }
 
-/// `prefix` (`presets.db.new-`), a number, and perhaps SQLite's `-journal`, `-wal` or `-shm`: nothing else.
-fn is_half_made(name: &str, prefix: &str) -> bool {
-    let Some(rest) = name.strip_prefix(prefix) else { return false };
+/// Whether `name` is a half-made copy of the database called `database` ([`FILE_NAME`], or the curves' own) that
+/// `make_new` left: `<database>.new-`, a number, and perhaps SQLite's `-journal`, `-wal` or `-shm`, and nothing else.
+/// The app's start-up sweep (rule 28) uses this too, to clear one a crash left.
+pub fn is_half_made(name: &str, database: &str) -> bool {
+    let Some(rest) = name.strip_prefix(database).and_then(|r| r.strip_prefix(".new-")) else { return false };
     let number = ["-journal", "-wal", "-shm"].iter().find_map(|end| rest.strip_suffix(end)).unwrap_or(rest);
     !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit())
 }
@@ -262,13 +263,22 @@ mod tests {
 
     #[test]
     fn only_half_made_databases_named_exactly_so_are_ours() {
-        let p = "presets.db.new-";
+        let p = FILE_NAME;
         assert!(is_half_made("presets.db.new-4120", p) && is_half_made("presets.db.new-77-journal", p));
         assert!(is_half_made("presets.db.new-1-wal", p) && is_half_made("presets.db.new-1-shm", p));
-        for name in ["presets.db.new-", "presets.db.new-12.bak", "presets.db.new-old copy", "presets.db.new-1-wal2"] {
+        for name in [
+            "presets.db.new-",
+            "presets.db.new-12.bak",
+            "presets.db.new-old copy",
+            "presets.db.new-1-wal2",
+            "presets.db",
+            "presets.dbx.new-1",
+            "my presets.db.new-1",
+        ] {
             assert!(!is_half_made(name, p), "{name}");
         }
         assert!(!is_half_made("curves.db.new-1", p));
+        assert!(is_half_made("curves.db.new-1", crate::curves::FILE_NAME));
     }
 
     #[test]

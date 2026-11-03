@@ -5,11 +5,12 @@
 //!
 //! Writing never waits on the disk: lines go to a writer thread of their own. A message that keeps coming
 //! is written three times and then only counted (at 10, 100, 1000…), and a run stops writing at 5 MB, so a runaway
-//! warning can't fill the disk. The newest 30 runs' logs are kept.
+//! warning can't fill the disk; only a crash is still written after that, up to 1 MB more (rule 17: crashes always
+//! log). At each start, a low-priority thread keeps the folder in bounds ([`crate::tidy::prune_logs`]): the newest 30
+//! runs' logs, the newest 30 crash logs and each tool's newest 10 reports.
 //!
 //! A crash also gets a log of its own ([`write_crash_file`]): one for each place in the code that crashed, up to
-//! [`CRASH_FILES_PER_RUN`] places a run, and always one for the crash that ends the app; the start-up sweep
-//! ([`crate::tidy`]) keeps the newest 30 of those.
+//! [`CRASH_FILES_PER_RUN`] places a run, and always one for the crash that ends the app.
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
@@ -28,6 +29,9 @@ pub const PREFIX: &str = "rust-session-";
 pub const KEPT: usize = 30;
 /// A run that writes this much stops writing (and says so).
 const MAX_BYTES: u64 = 5 * 1024 * 1024;
+/// How much more a run writes for crashes, once it has stopped writing everything else: a crash always reaches the
+/// log (rule 17), but a crash that keeps happening can't fill the disk either.
+const CRASH_ROOM: u64 = 1024 * 1024;
 /// The same message more often than this is counted, not written again.
 const REPEATS_WRITTEN: u32 = 3;
 /// How many different messages are counted for repeats before the count starts again, so it can't grow all day.
@@ -59,22 +63,23 @@ impl CrashFiles {
     }
 
     /// Whether a crash at `place` gets a file: always when it ends the app (`fatal`); otherwise only the first crash at
-    /// each place, and only while fewer than [`CRASH_FILES_PER_RUN`] places have one.
-    fn allowed(&self, place: &str, fatal: bool) -> bool {
+    /// each place, and only while fewer than [`CRASH_FILES_PER_RUN`] places have one. A place is taken here, in one
+    /// go, so threads crashing at one place at the same moment get one file between them, not one each.
+    fn take(&self, place: &str, fatal: bool) -> bool {
         if fatal {
             return true;
         }
-        let places = self.places.lock().unwrap_or_else(|e| e.into_inner());
-        places.len() < CRASH_FILES_PER_RUN && !places.iter().any(|p| p == place)
+        let mut places = self.places.lock().unwrap_or_else(|e| e.into_inner());
+        if places.len() >= CRASH_FILES_PER_RUN || places.iter().any(|p| p == place) {
+            return false;
+        }
+        places.push(place.to_owned());
+        true
     }
 
-    /// A file was written for a crash at `place`. Counted only once it's there, so a write that failed (a full disk)
-    /// doesn't use up the place's file.
-    fn wrote(&self, place: &str) {
-        let mut places = self.places.lock().unwrap_or_else(|e| e.into_inner());
-        if !places.iter().any(|p| p == place) {
-            places.push(place.to_owned());
-        }
+    /// The file for a crash at `place` couldn't be written (a full disk): the place is free again for the next crash.
+    fn give_back(&self, place: &str) {
+        self.places.lock().unwrap_or_else(|e| e.into_inner()).retain(|p| p != place);
     }
 }
 
@@ -97,6 +102,8 @@ impl Level {
 
 enum Msg {
     Line(String),
+    /// A crash: written even once the log has stopped writing other lines, up to [`CRASH_ROOM`] more.
+    Crash(String),
     /// Write out everything so far, then say so on the channel.
     Flush(Sender<()>),
     Close,
@@ -113,7 +120,7 @@ pub struct SessionLog {
     tx: Mutex<Option<Sender<Msg>>>,
     state: Mutex<State>,
     writer: Mutex<Option<JoinHandle<()>>>,
-    /// Clearing old session and crash logs, off the window's thread; [`SessionLog::close`] waits for it.
+    /// Keeping the logs folder in bounds, off the window's thread; [`SessionLog::close`] waits for it.
     pruning: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -153,6 +160,14 @@ pub fn error(area: &str, message: &str) {
     }
 }
 
+/// A crash, as an error in the "Crash" area: written even once this run's log has stopped writing other lines (rule
+/// 17), up to [`CRASH_ROOM`] more.
+pub fn crash(text: &str) {
+    if let Some(log) = current() {
+        log.put(Level::Error, "Crash", text, true);
+    }
+}
+
 impl SessionLog {
     /// Opens a new log file for a run that started at `start`. If the folder can't be written, the log only keeps its
     /// recent lines in memory: no log is better than no app.
@@ -171,20 +186,15 @@ impl SessionLog {
             }
             None => (None, None),
         };
-        // Old logs are cleared on a thread of their own, so the window never waits on the disk for it (rules 12 and
-        // 21). Crash logs too, here rather than only in the sweep 20 s on, so an app that crashes sooner (a crash
-        // loop) still keeps them in bounds.
+        // The folder is kept in bounds at every start, so an app that crashes soon after it opens (a crash loop)
+        // still keeps it so, on a low-priority thread of its own: the window never waits on the disk for it (rules
+        // 12 and 21).
         let pruning = {
             let (folder, just_made) = (folder.to_path_buf(), path.clone());
-            std::thread::Builder::new()
-                .name("Prune logs".into())
-                .spawn(move || {
-                    let now = std::time::SystemTime::now();
-                    prune(&folder, KEPT, just_made.as_deref(), now);
-                    let young = crate::tidy::YOUNG;
-                    crate::tidy::keep_newest(&folder, is_crash_log, crate::tidy::CRASH_LOGS_KEPT, now, None, young);
-                })
-                .ok()
+            crate::background::spawn("Prune logs", move || {
+                crate::tidy::prune_logs(&folder, just_made.as_deref(), std::time::SystemTime::now());
+            })
+            .ok()
         };
         let log = SessionLog {
             path,
@@ -203,6 +213,11 @@ impl SessionLog {
     }
 
     pub fn write(&self, level: Level, area: &str, message: &str) {
+        self.put(level, area, message, false);
+    }
+
+    /// Writes a line; a `crash` one even once the log has stopped writing other lines (see [`crash`]).
+    fn put(&self, level: Level, area: &str, message: &str, crash: bool) {
         // Trailing spaces only make the log wide.
         let message: String = message.lines().map(str::trim_end).collect::<Vec<_>>().join("\n");
         let key = format!("{}\u{1}{area}\u{1}{message}", level.name());
@@ -230,7 +245,7 @@ impl SessionLog {
             line
         };
         if let Some(tx) = self.tx.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-            let _ = tx.send(Msg::Line(line));
+            let _ = tx.send(if crash { Msg::Crash(line) } else { Msg::Line(line) });
         }
     }
 
@@ -294,15 +309,24 @@ fn write_queued(file: File, rx: Receiver<Msg>) {
         while let Some(msg) = next.take() {
             match msg {
                 Msg::Line(line) if !full => {
-                    written += line.len() as u64 + 1;
-                    if written > MAX_BYTES {
+                    let size = line.len() as u64 + 1;
+                    if written + size > MAX_BYTES {
                         full = true;
-                        let _ = writeln!(out, "(the log is full at 5 MB; this run writes no more)");
+                        let _ = writeln!(out, "(the log is full at 5 MB; this run writes no more, except crashes)");
                     } else {
+                        written += size;
                         let _ = writeln!(out, "{line}");
                     }
                 }
                 Msg::Line(_) => {}
+                // Rule 17: a crash is written even once the log has stopped writing other lines, up to CRASH_ROOM more.
+                Msg::Crash(line) => {
+                    let size = line.len() as u64 + 1;
+                    if written + size <= MAX_BYTES + CRASH_ROOM {
+                        written += size;
+                        let _ = writeln!(out, "{line}");
+                    }
+                }
                 Msg::Flush(done) => {
                     let _ = out.flush();
                     let _ = done.send(());
@@ -319,21 +343,20 @@ fn write_queued(file: File, rx: Receiver<Msg>) {
     let _ = out.flush();
 }
 
-/// Deletes all but the newest `keep` of this app's session logs, newest by when they were last written, never
-/// `just_made` (this run's), and only ones named exactly as [`create_file`] names them.
-fn prune(folder: &Path, keep: usize, just_made: Option<&Path>, now: std::time::SystemTime) {
-    crate::tidy::keep_newest(folder, is_session_log, keep, now, just_made, crate::tidy::YOUNG);
-}
-
 /// Whether `name` is a session log as [`create_file`] names them, and nothing else: `rust-session-`, the time
 /// (`2026-11-02_14-30-05`), perhaps `-` and a number, then `.log`. A copy ("… - Copy.log") isn't one.
 pub fn is_session_log(name: &str) -> bool {
+    name.strip_prefix(PREFIX).and_then(|r| r.strip_suffix(".log")).is_some_and(is_name_time)
+}
+
+/// Whether `s` is a time as the app puts it in a file's name (`2026-11-02_14-30-05`, from `%Y-%m-%d_%H-%M-%S`),
+/// perhaps followed by `-` and a number (a second file in the same second), and nothing else. Session logs and F12
+/// notes are named so (the C# app names its notes the same way).
+pub(crate) fn is_name_time(s: &str) -> bool {
     const STAMP: &[u8; 19] = b"0000-00-00_00-00-00";
-    let Some(rest) = name.strip_prefix(PREFIX).and_then(|r| r.strip_suffix(".log")) else { return false };
-    let (Some(stamp), Some(tail)) = (rest.get(..STAMP.len()), rest.get(STAMP.len()..)) else { return false };
+    let (Some(stamp), Some(tail)) = (s.get(..STAMP.len()), s.get(STAMP.len()..)) else { return false };
     let stamp_fits = stamp.bytes().zip(STAMP).all(|(b, t)| if *t == b'0' { b.is_ascii_digit() } else { b == *t });
-    let number = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
-    stamp_fits && (tail.is_empty() || tail.strip_prefix('-').is_some_and(number))
+    stamp_fits && (tail.is_empty() || tail.strip_prefix('-').is_some_and(crate::tidy::is_number))
 }
 
 /// Writes a crash's own log into `folder` (`logs\`), in case the session log couldn't be written (rule 17), and says
@@ -350,9 +373,20 @@ pub fn write_crash_file(
     fatal: bool,
     files: &CrashFiles,
 ) -> Option<PathBuf> {
-    if !files.allowed(place, fatal) {
+    if !files.take(place, fatal) {
         return None;
     }
+    let written = new_crash_file(folder, text, secs);
+    if written.is_none() {
+        files.give_back(place);
+    }
+    written
+}
+
+/// Writes `text` into a crash log of its own in `folder`, under the first free name for `secs`. `None` when no file
+/// could be made; once one is made it's the crash's, even if the disk filled part way (part of a crash is more than
+/// none, and a full disk then can't be handed a new empty file for every crash).
+fn new_crash_file(folder: &Path, text: &str, secs: u64) -> Option<PathBuf> {
     std::fs::create_dir_all(folder).ok()?;
     for n in 1..100 {
         let name = if n == 1 { format!("{CRASH_PREFIX}{secs}.log") } else { format!("{CRASH_PREFIX}{secs}-{n}.log") };
@@ -360,7 +394,6 @@ pub fn write_crash_file(
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(mut f) => {
                 let _ = f.write_all(text.as_bytes());
-                files.wrote(place);
                 return Some(path);
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -374,7 +407,7 @@ pub fn write_crash_file(
 /// second number, then `.log`, and nothing else.
 pub fn is_crash_log(name: &str) -> bool {
     let Some(stamp) = name.strip_prefix(CRASH_PREFIX).and_then(|r| r.strip_suffix(".log")) else { return false };
-    let number = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let number = crate::tidy::is_number;
     match stamp.split_once('-') {
         Some((secs, n)) => number(secs) && number(n),
         None => number(stamp),
@@ -455,16 +488,19 @@ mod tests {
             f.set_modified(long_ago).expect("settable");
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
+        let made_is_known = std::fs::metadata(dir.join(&copies[0])).and_then(|m| m.created()).is_ok();
         let now = Local::now();
         let a = SessionLog::new(&dir, now, "a");
         let b = SessionLog::new(&dir, now, "b");
         assert_ne!(a.path(), b.path());
         a.close();
         b.close();
-        // Every log was made a moment ago, so none is a day old yet: nothing went.
-        assert_eq!(std::fs::read_dir(&dir).expect("listable").count(), 42 + 5 + copies.len());
+        if made_is_known {
+            // Every log was made a moment ago, so each may be another copy's, still being written: nothing went.
+            assert_eq!(std::fs::read_dir(&dir).expect("listable").count(), 42 + 5 + copies.len());
+        }
         // Three days on, the oldest go.
-        prune(&dir, KEPT, None, std::time::SystemTime::now() + 3 * crate::tidy::DAY);
+        crate::tidy::prune_logs(&dir, None, std::time::SystemTime::now() + 3 * crate::tidy::DAY);
         let left = std::fs::read_dir(&dir).expect("listable").count();
         assert_eq!(left, KEPT + 5 + copies.len());
         assert!(a.path().is_some_and(|p| p.exists()) && b.path().is_some_and(|p| p.exists()), "the newest stay");
@@ -499,7 +535,7 @@ mod tests {
         for i in 0..KEPT + 2 {
             set(&format!("{PREFIX}2001-01-01_00-00-{i:02}.log"), None);
         }
-        prune(&dir, KEPT, Some(&dir.join(&mine)), later);
+        crate::tidy::prune_logs(&dir, Some(&dir.join(&mine)), later);
         let left = names(&dir);
         assert_eq!(left.len(), KEPT);
         assert!(left.contains(&mine), "the log just made stays");
@@ -512,7 +548,7 @@ mod tests {
         for i in 0..KEPT + 3 {
             set(&format!("{PREFIX}2099-01-01_00-00-{i:02}.log"), Some(later + 10_000 * crate::tidy::DAY));
         }
-        prune(&dir, KEPT, None, later);
+        crate::tidy::prune_logs(&dir, None, later);
         let left = names(&dir);
         assert_eq!(left.len(), KEPT);
         assert!(left.contains(&rightly), "the rightly dated one isn't pushed out");
@@ -585,6 +621,72 @@ mod tests {
         let fatal = fatal.expect("the crash that ends the app is written");
         assert_eq!(std::fs::read_to_string(fatal).expect("readable"), "the end");
         assert_eq!(std::fs::read_dir(&dir).expect("listable").count(), CRASH_FILES_PER_RUN + 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn threads_crashing_at_one_place_at_once_get_one_file() {
+        let dir = temp_folder("crash-race");
+        let files = CrashFiles::new();
+        let start = std::sync::Barrier::new(16);
+        let written: Vec<Option<PathBuf>> = std::thread::scope(|s| {
+            let threads: Vec<_> = (0..16u64)
+                .map(|n| {
+                    let (dir, files, start) = (&dir, &files, &start);
+                    s.spawn(move || {
+                        start.wait();
+                        write_crash_file(dir, "the same bad file", 1_700_000_000 + n, "src/x.rs:42", false, files)
+                    })
+                })
+                .collect();
+            threads.into_iter().map(|t| t.join().expect("no panic")).collect()
+        });
+        assert_eq!(written.iter().filter(|w| w.is_some()).count(), 1);
+        assert_eq!(std::fs::read_dir(&dir).expect("listable").count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_place_whose_file_couldnt_be_made_gets_the_next_crash_its_file() {
+        let dir = temp_folder("crash-blocked");
+        let _ = std::fs::create_dir_all(&dir);
+        // A file where the logs folder should be: no crash file can be made in it.
+        let logs = dir.join("logs");
+        std::fs::write(&logs, "in the way").expect("writable");
+        let files = CrashFiles::new();
+        assert_eq!(write_crash_file(&logs, "first", 1_700_000_000, "src/a.rs:1", false, &files), None);
+        std::fs::remove_file(&logs).expect("removable");
+        let second = write_crash_file(&logs, "second", 1_700_000_001, "src/a.rs:1", false, &files);
+        assert_eq!(std::fs::read_to_string(second.expect("written")).expect("readable"), "second");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_crash_is_written_even_once_the_log_is_full() {
+        let dir = temp_folder("full");
+        let log = SessionLog::new(&dir, Local::now(), "start");
+        // Different lines (repeats are only counted), more than the 5 MB a run may write.
+        let filler = "x".repeat(200);
+        for i in 0..(MAX_BYTES / 200 + 100) {
+            log.write(Level::Warning, "Scan", &format!("{i} {filler}"));
+        }
+        log.write(Level::Warning, "Scan", "not written: the log is full");
+        log.put(Level::Error, "Crash", "Music Organiser crashed on thread Scan 1", true);
+        // A crash that keeps happening still can't fill the disk: at most 1 MB more of them.
+        let big = "y".repeat(100 * 1024);
+        for i in 0..30 {
+            log.put(Level::Error, "Crash", &format!("crash {i} {big}"), true);
+        }
+        log.close();
+        let path = log.path().expect("a file").to_owned();
+        let text = std::fs::read_to_string(&path).expect("readable");
+        assert!(text.contains("(the log is full at 5 MB; this run writes no more, except crashes)"));
+        assert!(!text.contains("not written: the log is full"));
+        assert!(text.contains("[Crash] Music Organiser crashed on thread Scan 1"));
+        assert!(text.contains("[Crash] crash 0 "));
+        let size = std::fs::metadata(&path).expect("there").len();
+        assert!(size <= MAX_BYTES + CRASH_ROOM + 1024, "{size}");
+        assert!(!text.contains("[Crash] crash 29 "), "the crashes past the extra room aren't written");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

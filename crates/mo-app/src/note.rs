@@ -11,10 +11,12 @@ use chrono::{DateTime, Local};
 
 pub const DRAFT_FILE: &str = "draft.txt";
 pub const WRITING_FILE: &str = "writing.lock";
+/// The notes' folder in the app's data folder (the C# app's notes are there too).
+pub const FOLDER: &str = "notes";
 
 /// `notes\` in the app's data folder.
 pub fn notes_dir() -> PathBuf {
-    crate::paths::data_dir().join("notes")
+    crate::paths::data_dir().join(FOLDER)
 }
 
 /// What a saved note is made of.

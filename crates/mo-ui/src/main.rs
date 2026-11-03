@@ -76,7 +76,7 @@ fn log_crashes() {
         let trace = std::backtrace::Backtrace::force_capture();
         let text =
             format!("Music Organiser {} crashed on thread {thread}\n{info}\n\n{trace}\n", mo_app::version::version());
-        log::error("Crash", &text);
+        log::crash(&text);
         // The window runs on the main thread: only a crash there ends the app.
         let fatal = std::thread::current().name() == Some("main");
         mo_ui::note::after_crash(fatal);
