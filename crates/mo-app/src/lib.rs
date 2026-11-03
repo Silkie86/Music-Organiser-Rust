@@ -5,6 +5,7 @@ pub mod activity;
 pub mod arrangement;
 pub mod background;
 pub mod backup;
+pub mod backup_older;
 pub mod bitwig_convert;
 pub mod frame_timing;
 pub mod galaxy_grid;

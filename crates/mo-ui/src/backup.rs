@@ -1,8 +1,9 @@
 //! Fills the Backup page from `mo_app::backup` and answers its buttons. Everything slow (walking the folders,
-//! reading the library, the backup itself) runs on low-priority threads (rule 21); the window only ever shows what
-//! they send back (rule 12). Working out what goes is redone after every change, newest ask first.
+//! reading the library, the backup itself, reading and removing older versions) runs on low-priority threads (rule
+//! 21); the window only ever shows what they send back (rule 12). Working out what goes is redone after every change,
+//! newest ask first; the drive's older versions are read again when the drive changes and after each run or removal.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,12 +14,14 @@ use mo_app::backup::{
     self, BackedUp, DriveRoom, PageLines, PlanState, Prepared, Progress, Settings, level_at, library_folders,
     page_lines,
 };
+use mo_app::backup_older::{self, KeptState};
 use mo_app::log;
 use mo_backup::folders::Mode;
+use mo_backup::older::{self, Kept, Run};
 use mo_library::Library;
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel, Weak};
 
-use crate::{AppWindow, BackupData, BackupFolderLine, LeftOutLine};
+use crate::{AppWindow, BackupData, BackupFolderLine, LeftOutLine, MenuItem};
 
 /// What the page knows, on the window's thread.
 #[derive(Default)]
@@ -40,14 +43,30 @@ struct Section {
     plan_stop: Arc<AtomicBool>,
     /// The page has been shown, so its folders are walked (not before: nobody may open it).
     shown: bool,
+    /// The older versions on the drive as last read, and the drive they were read from; or why they couldn't be.
+    kept: Option<(PathBuf, Result<Arc<Kept>, String>)>,
+    /// Counts the reads of the older versions, so one for a drive picked before is dropped.
+    older_asked: u64,
+    /// Stops the read of the older versions when a newer one is asked for.
+    older_stop: Arc<AtomicBool>,
+    /// The question asked before older versions go: the drive, and exactly what goes on a yes.
+    older_ask: Option<(PathBuf, backup_older::Ask)>,
+    /// What the last removal did.
+    older_done: String,
+    /// The removal of older versions running now: what stops it.
+    removing: Option<Arc<AtomicBool>>,
 }
 
 /// A job for the planner: the ask's number, the settings then, the library's file, and what stops it.
 type Job = (u64, Settings, PathBuf, Arc<AtomicBool>);
 
+/// A job for the older versions' reader: the ask's number, the drive, and what stops it.
+type OlderJob = (u64, PathBuf, Arc<AtomicBool>);
+
 thread_local! {
     static SECTION: RefCell<Section> = RefCell::default();
     static PLANNER: RefCell<Option<Newest<Job>>> = const { RefCell::new(None) };
+    static OLDER: RefCell<Option<Newest<OlderJob>>> = const { RefCell::new(None) };
 }
 
 pub fn connect(app: &AppWindow, library: PathBuf) {
@@ -102,6 +121,30 @@ pub fn connect(app: &AppWindow, library: PathBuf) {
         Ok(p) => PLANNER.with(|slot| *slot.borrow_mut() = Some(p)),
         Err(e) => log::error("Backup", &format!("Couldn't start the backup planner: {e}")),
     }
+    // The older versions on the drive, and the drive's room (which a removal changes).
+    let weak = app.as_weak();
+    let reader = Newest::start("Backup older versions", move |(asked, drive, stop): OlderJob| {
+        let room = mo_space::app_files::drive_space(&drive).map(|r| DriveRoom { free: r.free, total: r.total });
+        let read = background::on_pool(|| older::read(&drive, &stop));
+        let weak = weak.clone();
+        let _ = slint::invoke_from_event_loop(move || {
+            SECTION.with(|s| {
+                let mut s = s.borrow_mut();
+                if s.older_asked != asked {
+                    return;
+                }
+                if let Some(room) = room {
+                    s.room = Some((drive.clone(), room));
+                }
+                s.kept = Some((drive, read.map(Arc::new).map_err(|e| kept_error(&e))));
+            });
+            show(&weak);
+        });
+    });
+    match reader {
+        Ok(r) => OLDER.with(|slot| *slot.borrow_mut() = Some(r)),
+        Err(e) => log::error("Backup", &format!("Couldn't start reading the older versions: {e}")),
+    }
 
     let data = app.global::<BackupData>();
     let weak = app.as_weak();
@@ -128,7 +171,16 @@ pub fn connect(app: &AppWindow, library: PathBuf) {
     let weak = app.as_weak();
     data.on_pick_drive(move || {
         let weak = weak.clone();
-        pick_folder("Pick the backup drive (or a folder on it)", move |path| change(&weak, |s| s.drive = Some(path)));
+        pick_folder("Pick the backup drive (or a folder on it)", move |path| {
+            // A question asked about the old drive's older versions isn't for this one.
+            SECTION.with(|s| {
+                let mut s = s.borrow_mut();
+                s.older_ask = None;
+                s.older_done.clear();
+            });
+            change(&weak, |s| s.drive = Some(path));
+            reread_older();
+        });
     });
     let weak = app.as_weak();
     data.on_add_library_folders(move || {
@@ -149,11 +201,37 @@ pub fn connect(app: &AppWindow, library: PathBuf) {
     data.on_run(move || start_run(&weak));
     data.on_stop(|| {
         SECTION.with(|s| {
-            if let Some(stop) = &s.borrow().running {
+            let s = s.borrow();
+            for stop in [&s.running, &s.removing].into_iter().flatten() {
                 stop.store(true, Ordering::Relaxed);
             }
         });
     });
+    let weak = app.as_weak();
+    data.on_older_picked(move |id| {
+        let now = Local::now().naive_local();
+        SECTION.with(|s| {
+            let mut s = s.borrow_mut();
+            if s.running.is_some() || s.removing.is_some() {
+                return;
+            }
+            let Some(drive) = s.settings.drive.clone() else { return };
+            let ask = match &s.kept {
+                Some((d, Ok(kept))) if *d == drive => backup_older::ask(kept, &id, now),
+                _ => None,
+            };
+            s.older_ask = ask.map(|a| (drive, a));
+            s.older_done.clear();
+        });
+        show(&weak);
+    });
+    let weak = app.as_weak();
+    data.on_older_cancel(move || {
+        SECTION.with(|s| s.borrow_mut().older_ask = None);
+        show(&weak);
+    });
+    let weak = app.as_weak();
+    data.on_older_remove(move || start_removal(&weak));
     show(&app.as_weak());
     // The app opened on the page.
     if app.get_place() == mo_app::places::Place::Backup.index() as i32 {
@@ -161,11 +239,46 @@ pub fn connect(app: &AppWindow, library: PathBuf) {
     }
 }
 
-/// The page is on show: the first time, its folders are walked to work out what goes.
+/// The page is on show: the first time, its folders are walked to work out what goes, and the drive's older versions
+/// are read. They're read again each time it's shown after a read that failed (the drive may be plugged in now).
 pub fn shown() {
-    let first = SECTION.with(|s| !std::mem::replace(&mut s.borrow_mut().shown, true));
+    let (first, failed) = SECTION.with(|s| {
+        let mut s = s.borrow_mut();
+        (!std::mem::replace(&mut s.shown, true), matches!(s.kept, Some((_, Err(_)))))
+    });
     if first {
         replan();
+    }
+    if first || failed {
+        reread_older();
+    }
+}
+
+/// Asks for the drive's older versions (and its room) to be read again.
+fn reread_older() {
+    let job = SECTION.with(|s| {
+        let mut s = s.borrow_mut();
+        s.older_asked += 1;
+        // A read still going is for a drive picked before, or is out of date: it stops.
+        s.older_stop.store(true, Ordering::Relaxed);
+        s.older_stop = Arc::new(AtomicBool::new(false));
+        s.settings.drive.clone().map(|d| (s.older_asked, d, s.older_stop.clone()))
+    });
+    if let Some(job) = job {
+        OLDER.with(|r| {
+            if let Some(r) = r.borrow().as_ref() {
+                r.ask(job);
+            }
+        });
+    }
+}
+
+/// Why the older versions couldn't be read, as the card says it.
+fn kept_error(e: &std::io::Error) -> String {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        "The backup drive isn't plugged in, so its older versions can't be seen.".to_owned()
+    } else {
+        format!("Couldn't read the older versions on the backup drive: {e}")
     }
 }
 
@@ -224,12 +337,15 @@ fn replan() {
 fn start_run(weak: &Weak<AppWindow>) {
     let Some((prepared, settings, stop)) = SECTION.with(|s| {
         let mut s = s.borrow_mut();
-        if s.running.is_some() {
+        // Not while older versions are being removed: one job on the drive at a time.
+        if s.running.is_some() || s.removing.is_some() {
             return None;
         }
         let prepared = s.prepared.clone()?;
         let stop = Arc::new(AtomicBool::new(false));
         s.running = Some(stop.clone());
+        // The run changes the drive: a question about its older versions would be out of date.
+        s.older_ask = None;
         Some((prepared, s.settings.clone(), stop))
     }) else {
         return;
@@ -239,6 +355,8 @@ fn start_run(weak: &Weak<AppWindow>) {
         &Progress::Copying { files: prepared.plan.copy.len(), bytes: prepared.plan.copy_bytes() }.line(),
         0.0,
     );
+    // The question about older versions goes from the page at once.
+    show(weak);
     let run_weak = weak.clone();
     let started = background::spawn("Backup", move || {
         let weak = run_weak;
@@ -254,9 +372,13 @@ fn start_run(weak: &Weak<AppWindow>) {
             if !last.ok {
                 log::warning("Backup", &last.line);
             }
-            let (saved, backed_saved) = SECTION.with(|s| {
+            let (saved, backed_saved, reread) = SECTION.with(|s| {
                 let mut s = s.borrow_mut();
                 s.running = None;
+                // The older versions as read are still right unless the run kept more, or they weren't read from
+                // this drive (or couldn't be).
+                let read = matches!(&s.kept, Some((d, Ok(_))) if Some(d) == s.settings.drive.as_ref());
+                let reread = ran.kept_older > 0 || !read;
                 // The drive the run went to, which may not be the one picked now.
                 let backed_saved = match &drive {
                     Some(d) if !ran.went.is_empty() => {
@@ -266,7 +388,7 @@ fn start_run(weak: &Weak<AppWindow>) {
                     _ => Ok(()),
                 };
                 s.settings.last_run = Some(last);
-                (s.settings.save(&s.settings_file), backed_saved)
+                (s.settings.save(&s.settings_file), backed_saved, reread)
             });
             if let Err(e) = saved {
                 log::warning("Backup", &format!("Couldn't keep the backup settings: {e}"));
@@ -275,8 +397,11 @@ fn start_run(weak: &Weak<AppWindow>) {
                 log::warning("Backup", &format!("Couldn't keep which songs are backed up: {e}"));
             }
             set_busy(&weak, "", 0.0);
-            // The drive's room and what's new have changed.
+            // The drive's room and what's new have changed (the planner measures the room again).
             replan();
+            if reread {
+                reread_older();
+            }
             show(&weak);
         });
     });
@@ -284,6 +409,85 @@ fn start_run(weak: &Weak<AppWindow>) {
         log::error("Backup", &format!("Couldn't start the backup: {e}"));
         SECTION.with(|s| s.borrow_mut().running = None);
         set_busy(weak, "", 0.0);
+        show(weak);
+    }
+}
+
+/// The most removals the log lists one by one.
+const LOGGED_LEFT: usize = 20;
+
+/// Yes to the question: removes exactly what it named, on a low-priority thread, then reads the older versions again.
+fn start_removal(weak: &Weak<AppWindow>) {
+    let Some((drive, ask, stop)) = SECTION.with(|s| {
+        let mut s = s.borrow_mut();
+        if s.running.is_some() || s.removing.is_some() {
+            return None;
+        }
+        let (drive, ask) = s.older_ask.take()?;
+        // Only on the drive it was asked about, which is still the one picked.
+        if s.settings.drive.as_ref() != Some(&drive) {
+            return None;
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        s.removing = Some(stop.clone());
+        s.older_done.clear();
+        Some((drive, ask, stop))
+    }) else {
+        show(weak);
+        return;
+    };
+    let total: usize = ask.runs().iter().map(|r| r.versions.len()).sum();
+    set_busy(weak, &backup_older::removing_line(0, total), 0.0);
+    show(weak);
+    let run_weak = weak.clone();
+    let started = background::spawn("Backup remove older versions", move || {
+        let weak = run_weak;
+        let progress_weak = weak.clone();
+        // The window hears each hundredth of the way, not every file.
+        let heard = Cell::new(usize::MAX);
+        let progress = move |done: usize, of: usize| {
+            let step = done.saturating_mul(100) / of.max(1);
+            if heard.replace(step) != step {
+                let weak = progress_weak.clone();
+                let part = done as f32 / of.max(1) as f32;
+                let _ = slint::invoke_from_event_loop(move || {
+                    set_busy(&weak, &backup_older::removing_line(done, of), part);
+                });
+            }
+        };
+        let removed = older::remove(&drive, &ask.runs(), &stop, &progress);
+        let line = match &removed {
+            Ok(r) => {
+                for (path, why) in r.left.iter().take(LOGGED_LEFT) {
+                    log::warning("Backup", &format!("Kept an older version: {}: {why}", path.display()));
+                }
+                if r.left.len() > LOGGED_LEFT {
+                    log::warning("Backup", &format!("…and {} more kept", r.left.len() - LOGGED_LEFT));
+                }
+                backup_older::removed_line(r)
+            }
+            Err(_) => "The backup drive isn't there, so nothing was removed".to_owned(),
+        };
+        log::info("Backup", &format!("Older versions on {}: {line}", drive.display()));
+        let _ = slint::invoke_from_event_loop(move || {
+            SECTION.with(|s| {
+                let mut s = s.borrow_mut();
+                s.removing = None;
+                s.older_done = line;
+                // The listing from before is out of date: the card says it's looking until the new one is read, so
+                // nothing in it can be asked about again.
+                s.kept = None;
+            });
+            set_busy(&weak, "", 0.0);
+            reread_older();
+            show(&weak);
+        });
+    });
+    if let Err(e) = started {
+        log::error("Backup", &format!("Couldn't start removing older versions: {e}"));
+        SECTION.with(|s| s.borrow_mut().removing = None);
+        set_busy(weak, "", 0.0);
+        show(weak);
     }
 }
 
@@ -298,7 +502,8 @@ fn set_busy(weak: &Weak<AppWindow>, text: &str, done: f32) {
 /// Puts the words on the page.
 fn show(weak: &Weak<AppWindow>) {
     let Some(app) = weak.upgrade() else { return };
-    let lines: PageLines = SECTION.with(|s| {
+    let now = Local::now().naive_local();
+    let (lines, older): (PageLines, OlderCard) = SECTION.with(|s| {
         let s = s.borrow();
         let state = match (&s.prepared, &s.failed) {
             (Some(p), _) => PlanState::Ready(p),
@@ -308,11 +513,47 @@ fn show(weak: &Weak<AppWindow>) {
         };
         // The room of the drive picked now, not of one picked before.
         let room = s.room.as_ref().filter(|(d, _)| Some(d) == s.settings.drive.as_ref()).map(|(_, r)| *r);
-        page_lines(&s.settings, room, state, Local::now().naive_local())
+        // And its older versions, not another drive's.
+        let kept = match (&s.kept, &s.settings.drive) {
+            (Some((d, Ok(kept))), Some(drive)) if d == drive => KeptState::Ready(kept),
+            (Some((d, Err(why))), Some(drive)) if d == drive => KeptState::Failed(why),
+            _ => KeptState::Waiting,
+        };
+        let older = OlderCard {
+            lines: backup_older::lines(s.settings.drive.is_some(), kept, now),
+            ask: s.older_ask.as_ref().map(|(_, a)| a.question.clone()).unwrap_or_default(),
+            done: s.older_done.clone(),
+        };
+        (page_lines(&s.settings, room, state, now), older)
     });
     show_lines(&app, lines);
+    show_older(&app, older);
     // The song panel's "Backed up" line follows the drive and the last run.
     crate::songs::backup_changed(&app);
+}
+
+/// What the Older versions card shows: its words, the question being asked (or none) and the last removal's line.
+pub struct OlderCard {
+    pub lines: backup_older::Lines,
+    pub ask: String,
+    pub done: String,
+}
+
+/// Puts the Older versions card's words on the page.
+pub fn show_older(app: &AppWindow, card: OlderCard) {
+    let data = app.global::<BackupData>();
+    data.set_older_size(card.lines.size.into());
+    data.set_older_count(card.lines.count.into());
+    data.set_older_note(card.lines.note.into());
+    let choices: Vec<MenuItem> = card
+        .lines
+        .choices
+        .into_iter()
+        .map(|c| MenuItem { what: c.what.into(), key: SharedString::new(), id: c.id.into(), enabled: c.enabled })
+        .collect();
+    data.set_older_choices(ModelRc::new(VecModel::from(choices)));
+    data.set_older_ask(card.ask.into());
+    data.set_older_done(card.done.into());
 }
 
 /// The song panel's "Backed up" line for a song (empty until a backup drive is picked).
@@ -396,4 +637,28 @@ pub fn sample_lines() -> PageLines {
     };
     let room = Some(DriveRoom { free: 1100 * GB, total: 1862 * GB });
     page_lines(&settings, room, PlanState::Ready(&prepared), now)
+}
+
+/// Made-up older versions for the screenshots: 38 backups' worth over the past year, and (with `asking`) the question
+/// asked before the ones more than 6 months old go.
+pub fn sample_older(asking: bool) -> OlderCard {
+    use mo_backup::older::Version;
+    let now = Local::now().naive_local();
+    let runs: Vec<Run> = (0..38u32)
+        .rev()
+        .map(|i| {
+            let when = now - chrono::Duration::days(i64::from(10 * i + 1));
+            let versions = (0..20 + i)
+                .map(|n| Version { path: PathBuf::from(format!("x{n}")), size: 700_000, modified: None, shared: None })
+                .collect();
+            Run { stamp: older::stamp(when), when, versions }
+        })
+        .collect();
+    let kept = Arc::new(Kept { runs, others: 0 });
+    let ask = if asking { backup_older::ask(&kept, "older-6", now).map(|a| a.question) } else { None };
+    OlderCard {
+        lines: backup_older::lines(true, KeptState::Ready(&kept), now),
+        ask: ask.unwrap_or_default(),
+        done: String::new(),
+    }
 }

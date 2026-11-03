@@ -1,6 +1,6 @@
 // Every shared part on one page, for the screenshots (mo-screens): each new part shows here in every theme before any
 // page uses it, so its look can be judged on its own.
-import { Theme, Type, Space, Caps, Well, StudioButton, Dot, PageHeader, Segmented, MoreButton, OptionsButton, MenuItem, MenuItems, SidePanel, PanelDivider, EmptyState, Waveform, FolderRow, TickBox, ToggleChip, ListLine, RightClickMenu } from "../studio.slint";
+import { Theme, Type, Space, Caps, Well, StudioButton, Dot, PageHeader, Segmented, MoreButton, MenuButton, OptionsButton, MenuItem, MenuItems, SidePanel, PanelDivider, EmptyState, Waveform, FolderRow, TickBox, ToggleChip, ListLine, RightClickMenu } from "../studio.slint";
 
 export component PartsGallery inherits Rectangle {
     background: Theme.background;
@@ -34,9 +34,9 @@ export component PartsGallery inherits Rectangle {
                 keys: ["", "", "", ""];
                 current: 0;
             }
-            StudioButton {
+            MenuButton {
                 text: "Order: Shuffled";
-                menu: true;
+                items: root.menu;
             }
             ToggleChip {
                 text: "Autoplay";
@@ -53,6 +53,10 @@ export component PartsGallery inherits Rectangle {
             StudioButton {
                 text: "Play";
                 main: true;
+            }
+            StudioButton {
+                text: "Remove them";
+                danger: true;
             }
         }
         area := HorizontalLayout {

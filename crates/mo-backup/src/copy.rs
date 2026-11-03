@@ -7,7 +7,8 @@
 //! taking room again; on a drive that can't (exFAT, FAT32) it's copied as usual. When a
 //! file has changed since the last backup, the copy it replaces is kept in `<backup>\Older versions\<stamp>\…` if it's
 //! small (Solomon, 31 Oct 2026: big files don't pile up old copies), so a small file you overwrote by mistake can still
-//! be found. An old copy that's byte for byte the new one (only its time changed) isn't kept twice.
+//! be found. An old copy that's byte for byte the new one (only its time changed) isn't kept twice. Older versions are
+//! kept for ever (Solomon, 3 Nov 2026); nothing here removes one, only [`crate::older::remove`] when you choose to.
 //!
 //! The small file helpers here (the 2-second time window, keeping a time on a read-only file, replacing a read-only
 //! file) follow mo-space's folder move, which keeps its own private; they behave the same.
@@ -50,7 +51,8 @@ pub(crate) const BUFFER: usize = 1 << 20;
 pub struct Options {
     /// Replaced copies smaller than this are kept in [`OLDER_VERSIONS`]; bigger ones are not.
     pub keep_older_below: u64,
-    /// The folder name this run's older versions go under ("2026-10-31 22.40").
+    /// The folder name this run's older versions go under: [`crate::older::stamp`] of the time the run began
+    /// ("2026-10-31 22.40"). Another name works too, but [`crate::older`] only lists and removes folders named so.
     pub stamp: String,
 }
 
@@ -684,7 +686,7 @@ pub(crate) fn remove_part(part: &Path) {
 
 /// Windows only (elsewhere a read-only file can be replaced or removed anyway): makes a file read-only or not, and
 /// says whether it changed.
-fn set_read_only(path: &Path, read_only: bool) -> bool {
+pub(crate) fn set_read_only(path: &Path, read_only: bool) -> bool {
     #[cfg(windows)]
     {
         let Ok(meta) = fs::symlink_metadata(path) else { return false };
