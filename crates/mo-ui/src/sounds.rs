@@ -854,6 +854,11 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
 /// one list so the two can't drift apart. Send to Bitwig joins once the DAW link is in.
 const CARD_ACTIONS: &[(&str, &str)] = &[("Show in folder", "sounds.reveal"), ("Copy path", "sounds.copyPath")];
 
+/// The card's buttons and menu again, with keys changed in Settings.
+pub fn show_keys(app: &AppWindow, shortcuts: &Shortcuts) {
+    show_actions(&app.global::<SoundsData>(), shortcuts);
+}
+
 /// The card's buttons and the right-click menu, with each one's key and tooltip from the shortcut list (rule 15).
 fn show_actions(data: &SoundsData, shortcuts: &Shortcuts) {
     // Play has the app-wide key, but the page plays it itself (`on_menu_chosen`). A line with no words is the rule

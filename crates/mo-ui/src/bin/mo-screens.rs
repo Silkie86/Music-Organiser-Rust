@@ -719,6 +719,9 @@ fn settings_shots(
     data.invoke_tab_picked(1);
     capture(window);
     shots.push(("settings-folders.png".into(), capture(window)));
+    data.invoke_tab_picked(3);
+    capture(window);
+    shots.push(("settings-shortcuts.png".into(), capture(window)));
     data.invoke_tab_picked(4);
     capture(window);
     shots.push(("settings-developer.png".into(), capture(window)));
