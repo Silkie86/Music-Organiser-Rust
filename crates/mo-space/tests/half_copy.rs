@@ -65,18 +65,31 @@ fn s(p: &Path) -> String {
     p.to_string_lossy().into_owned()
 }
 
-/// Every folder is on its own drive, with this much room.
+/// Each folder in a test's own folder stands for a drive (C, D, E, F…), with this much room.
 struct OtherDrive {
     free: Option<u64>,
 }
 
 impl Drives for OtherDrive {
-    fn same(&self, _a: &Path, _b: &Path) -> bool {
-        false
+    fn same(&self, a: &Path, b: &Path) -> bool {
+        matches!((stand_in_drive(a), stand_in_drive(b)), (Some(a), Some(b)) if a == b)
     }
     fn free(&self, _path: &Path) -> Option<u64> {
         self.free
     }
+}
+
+/// The stand-in drive a path is on: the test's own folder and the one in it, as [`mo_space::key`] gives them. A path
+/// outside them is on a drive of its own.
+fn stand_in_drive(path: &Path) -> Option<String> {
+    let tests = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let path = mo_space::key(&s(path));
+    let rest = [Some(tests.clone()), fs::canonicalize(&tests).ok()]
+        .into_iter()
+        .flatten()
+        .find_map(|tests| path.strip_prefix(&format!("{}/", mo_space::key(&s(&tests)))).map(str::to_owned))?;
+    let mut parts = rest.split('/');
+    Some(format!("{}/{}", parts.next()?, parts.next()?))
 }
 
 const ROOMY: OtherDrive = OtherDrive { free: None };
@@ -187,11 +200,11 @@ fn a_move_the_computer_stopped_leaves_a_marked_half_copy_that_the_next_try_clear
     assert!(!is_link(&steam) && !c.join("Spectrasonics/STEAM (old copy)").exists());
     let said = fs::read_to_string(half.join(MARKER)).unwrap();
     assert!(said.starts_with("Music Organiser is copying a folder into this one."), "{said}");
-    let found = find(&half, &[], &stop).unwrap().unwrap();
+    let found = find(&half, &[], &ROOMY, &stop).unwrap().unwrap();
     assert_eq!(found.state, State::CutOff);
     assert_eq!((found.path.as_str(), found.from.as_str()), (s(&half).as_str(), from.as_str()));
     assert!(found.bytes >= 10, "{}", found.bytes);
-    assert_eq!(half_copies(&[], &[s(&d)], &stop).unwrap(), std::slice::from_ref(&found));
+    assert_eq!(half_copies(&[], &[s(&d)], &ROOMY, &stop).unwrap(), std::slice::from_ref(&found));
 
     // It isn't in the way: the move clears it first, so the room it takes counts as free.
     assert_eq!(problem(&from, &s(&d), 35, &ROOMY, &[], &stop), None);
@@ -208,7 +221,7 @@ fn a_move_the_computer_stopped_leaves_a_marked_half_copy_that_the_next_try_clear
     assert_eq!(fs::read_dir(half.join("Sounds")).unwrap().count(), 6);
     assert!(moved.has_old_copy());
     assert!(only_in_old_copy(&moved, std::slice::from_ref(&moved), &stop).unwrap().is_empty());
-    assert!(half_copies(std::slice::from_ref(&moved), &[s(&d)], &stop).unwrap().is_empty());
+    assert!(half_copies(std::slice::from_ref(&moved), &[s(&d)], &ROOMY, &stop).unwrap().is_empty());
 }
 
 #[test]
@@ -227,7 +240,7 @@ fn a_half_copy_holding_what_isnt_in_the_folder_stays_and_says_what() {
     write(&half, "Mine.fxp", "mine");
     // A folder of yours in it, with a big file, counts in its size too.
     write(&half, "Mine/big.bin", &"x".repeat(100_000));
-    let found = find(&half, &[], &stop).unwrap().unwrap();
+    let found = find(&half, &[], &ROOMY, &stop).unwrap().unwrap();
     let State::Stays(why) = &found.state else { panic!("{found:?}") };
     assert!(why.contains("Mine.fxp"), "{why}");
     assert!(found.bytes > 100_000, "{}", found.bytes);
@@ -238,14 +251,14 @@ fn a_half_copy_holding_what_isnt_in_the_folder_stays_and_says_what() {
     assert!(said.unwrap().text().contains("Mine.fxp"));
     let tried = move_folder(&from, &s(&d), 35, whose(), &ROOMY, &[], &nothing, &stop);
     assert!(matches!(tried, Err(CantMove::HalfCopy { .. })), "{tried:?}");
-    assert!(clear(&half, &[], &stop).is_err());
+    assert!(clear(&half, &[], &ROOMY, &stop).is_err());
     assert!(half.join("Mine.fxp").exists() && half.join(MARKER).exists() && !is_link(&presets));
 
     // So does a folder where the folder being moved has a file, and a file where it has a folder.
     fs::remove_file(half.join("Mine.fxp")).unwrap();
     let _ = fs::remove_file(half.join("Patch.prt"));
     fs::create_dir_all(half.join("Patch.prt")).unwrap();
-    let State::Stays(why) = find(&half, &[], &stop).unwrap().unwrap().state else { panic!() };
+    let State::Stays(why) = find(&half, &[], &ROOMY, &stop).unwrap().unwrap().state else { panic!() };
     assert!(why.contains("Patch.prt"), "{why}");
     fs::remove_dir(half.join("Patch.prt")).unwrap();
     let sounds = half.join("Sounds");
@@ -253,35 +266,35 @@ fn a_half_copy_holding_what_isnt_in_the_folder_stays_and_says_what() {
         fs::remove_dir_all(&sounds).unwrap();
     }
     fs::write(&sounds, "a file").unwrap();
-    let State::Stays(why) = find(&half, &[], &stop).unwrap().unwrap().state else { panic!() };
+    let State::Stays(why) = find(&half, &[], &ROOMY, &stop).unwrap().unwrap().state else { panic!() };
     assert!(why.contains("Sounds"), "{why}");
     fs::remove_file(&sounds).unwrap();
 
     // A file newer than its twin and bigger isn't a copy: it was changed in there since.
     let patch = half.join("Patch.prt");
     same_as(&patch, &presets.join("Patch.prt"));
-    assert_eq!(find(&half, &[], &stop).unwrap().unwrap().state, State::CutOff);
+    assert_eq!(find(&half, &[], &ROOMY, &stop).unwrap().unwrap().state, State::CutOff);
     rewrite(&patch, "patch, changed since");
-    let State::Stays(why) = find(&half, &[], &stop).unwrap().unwrap().state else { panic!() };
+    let State::Stays(why) = find(&half, &[], &ROOMY, &stop).unwrap().unwrap().state else { panic!() };
     assert!(why.contains("Patch.prt") && why.contains("newer"), "{why}");
     // Newer but no bigger, it's the file the copy was writing when it stopped; but only one file can be that.
     rewrite(&patch, "pat");
-    assert_eq!(find(&half, &[], &stop).unwrap().unwrap().state, State::CutOff);
+    assert_eq!(find(&half, &[], &ROOMY, &stop).unwrap().unwrap().state, State::CutOff);
     let sound = half.join("Sounds").join("0.db");
     fs::create_dir_all(half.join("Sounds")).unwrap();
     rewrite(&sound, "so");
-    let State::Stays(why) = find(&half, &[], &stop).unwrap().unwrap().state else { panic!() };
+    let State::Stays(why) = find(&half, &[], &ROOMY, &stop).unwrap().unwrap().state else { panic!() };
     assert!(why.contains("0.db") || why.contains("Patch.prt"), "{why}");
     fs::remove_file(&sound).unwrap();
     // Older than its twin, it's a copy from before the folder changed.
     fs::write(&patch, "an older patch").unwrap();
     let older = fs::metadata(presets.join("Patch.prt")).unwrap().modified().unwrap() - Duration::from_secs(3600);
     fs::File::options().write(true).open(&patch).unwrap().set_modified(older).unwrap();
-    assert_eq!(find(&half, &[], &stop).unwrap().unwrap().state, State::CutOff);
+    assert_eq!(find(&half, &[], &ROOMY, &stop).unwrap().unwrap().state, State::CutOff);
 
     // Once it holds only copies again, it's cleared, for good, with all the room it took.
-    let bytes = find(&half, &[], &stop).unwrap().unwrap().bytes;
-    assert_eq!(clear(&half, &[], &stop), Ok(Cleared::Copy(bytes)));
+    let bytes = find(&half, &[], &ROOMY, &stop).unwrap().unwrap().bytes;
+    assert_eq!(clear(&half, &[], &ROOMY, &stop), Ok(Cleared::Copy(bytes)));
     assert!(!half.exists());
     assert_eq!(fs::read_dir(presets.join("Sounds")).unwrap().count(), 6);
 }
@@ -308,7 +321,7 @@ fn a_half_copy_goes_with_its_read_only_files_and_its_links_but_never_what_they_l
     assert!(is_link(&half.join("Linked")));
     assert!(fs::metadata(half.join("Samples/b.wav")).unwrap().permissions().readonly());
 
-    assert!(matches!(clear(&half, &[], &stop), Ok(Cleared::Copy(_))));
+    assert!(matches!(clear(&half, &[], &ROOMY, &stop), Ok(Cleared::Copy(_))));
     assert!(!half.exists());
     assert_eq!(fs::read_to_string(dir.join("Elsewhere/keep.wav")).unwrap(), "keep");
     assert_eq!(fs::read_to_string(library.join("Samples/b.wav")).unwrap(), "bbbb");
@@ -328,12 +341,12 @@ fn a_marker_left_in_a_copy_in_use_is_all_that_goes() {
     plant_marker(&copy, &presets, &copy, &copy, true);
     let all = std::slice::from_ref(&moved);
 
-    let found = half_copies(all, &[], &stop).unwrap();
+    let found = half_copies(all, &[], &ROOMY, &stop).unwrap();
     assert_eq!(found.len(), 1);
     assert_eq!((found[0].state.clone(), found[0].bytes), (State::MarkerOnly, 0));
     // Without the move's record too: the folder it copies leads here.
-    assert_eq!(find(&copy, &[], &stop).unwrap().unwrap().state, State::MarkerOnly);
-    assert_eq!(clear(&copy, all, &stop), Ok(Cleared::Marker));
+    assert_eq!(find(&copy, &[], &ROOMY, &stop).unwrap().unwrap().state, State::MarkerOnly);
+    assert_eq!(clear(&copy, all, &ROOMY, &stop), Ok(Cleared::Marker));
     assert!(!copy.join(MARKER).exists());
     assert_eq!(fs::read_to_string(presets.join("Patch.prt")).unwrap(), "patch");
     assert_eq!(fs::read_dir(copy.join("Sounds")).unwrap().count(), 6);
@@ -345,9 +358,9 @@ fn a_marker_left_in_a_copy_in_use_is_all_that_goes() {
     unlink(&presets);
     folder_link(&elsewhere, &presets);
     plant_marker(&copy, &presets, &copy, &copy, true);
-    let State::Stays(why) = find(&copy, &[], &stop).unwrap().unwrap().state else { panic!() };
+    let State::Stays(why) = find(&copy, &[], &ROOMY, &stop).unwrap().unwrap().state else { panic!() };
     assert!(why.contains("went into use"), "{why}");
-    assert!(clear(&copy, &[], &stop).is_err());
+    assert!(clear(&copy, &[], &ROOMY, &stop).is_err());
     assert_eq!(fs::read_dir(copy.join("Sounds")).unwrap().count(), 6);
     unlink(&presets);
     folder_link(&copy, &presets);
@@ -356,13 +369,13 @@ fn a_marker_left_in_a_copy_in_use_is_all_that_goes() {
     unlink(&presets);
     library(&presets);
     plant_marker(&copy, &presets, &copy, &copy, true);
-    assert_eq!(find(&copy, all, &stop).unwrap().unwrap().state, State::MarkerOnly);
+    assert_eq!(find(&copy, all, &ROOMY, &stop).unwrap().unwrap().state, State::MarkerOnly);
     // And moving back takes such a marker out first, so the copy left for you never looks like a half copy.
     unlink_or_skip(&presets);
     folder_link(&copy, &presets);
     move_back(&moved, &ROOMY, &nothing, &stop).unwrap();
     assert!(!copy.join(MARKER).exists() && !presets.join(MARKER).exists());
-    assert!(find(&copy, &[], &stop).unwrap().is_none());
+    assert!(find(&copy, &[], &ROOMY, &stop).unwrap().is_none());
 }
 
 /// Removes the real folder an update put where the link was, to put the link back.
@@ -386,8 +399,8 @@ fn a_marker_in_a_folder_renamed_since_is_all_that_goes() {
     // You renamed the half copy: it isn't where the copy was being made, so it's yours now.
     let renamed = d.join("Presets kept");
     fs::rename(d.join("Presets"), &renamed).unwrap();
-    assert_eq!(find(&renamed, &[], &stop).unwrap().unwrap().state, State::MarkerOnly);
-    assert_eq!(clear(&renamed, &[], &stop), Ok(Cleared::Marker));
+    assert_eq!(find(&renamed, &[], &ROOMY, &stop).unwrap().unwrap().state, State::MarkerOnly);
+    assert_eq!(clear(&renamed, &[], &ROOMY, &stop), Ok(Cleared::Marker));
     assert!(renamed.join("Patch.prt").exists() || renamed.join("Sounds").exists());
 }
 
@@ -411,20 +424,20 @@ fn a_half_copy_of_another_folder_or_with_a_broken_marker_is_left_alone() {
 
     // A marker that isn't as the app writes it isn't one: the folder isn't known for a half copy.
     fs::write(half.join(MARKER), "nonsense").unwrap();
-    assert_eq!(find(&half, &[], &stop).unwrap(), None);
+    assert_eq!(find(&half, &[], &ROOMY, &stop).unwrap(), None);
     assert_eq!(problem(&s(&a), &s(&d), 35, &ROOMY, &[], &stop), Some(CantMove::TargetThere(s(&half))));
-    assert!(clear(&half, &[], &stop).is_err());
+    assert!(clear(&half, &[], &ROOMY, &stop).is_err());
     assert!(half.exists());
     // Nor is a marker that's a folder, or a folder that's a link to a half copy.
     fs::remove_file(half.join(MARKER)).unwrap();
     fs::create_dir(half.join(MARKER)).unwrap();
-    assert_eq!(find(&half, &[], &stop).unwrap(), None);
+    assert_eq!(find(&half, &[], &ROOMY, &stop).unwrap(), None);
     fs::remove_dir(half.join(MARKER)).unwrap();
     plant_marker(&half, &a, &half, &half, false);
     let link = d.join("Presets link");
     folder_link(&half, &link);
-    assert_eq!(find(&link, &[], &stop).unwrap(), None);
-    assert!(clear(&link, &[], &stop).is_err());
+    assert_eq!(find(&link, &[], &ROOMY, &stop).unwrap(), None);
+    assert!(clear(&link, &[], &ROOMY, &stop).is_err());
     assert!(half.join(MARKER).exists());
 }
 
@@ -441,17 +454,17 @@ fn a_swap_the_computer_stopped_says_what_to_rename() {
     // Cut off before its swap: with an "(old copy)" beside the folder from elsewhere, it's still only a half copy.
     let aside = c.join("Presets (old copy)");
     library(&aside);
-    assert_eq!(find(&half, &[], &stop).unwrap().unwrap().state, State::CutOff);
+    assert_eq!(find(&half, &[], &ROOMY, &stop).unwrap().unwrap().state, State::CutOff);
     fs::remove_dir_all(&aside).unwrap();
     // Stopped just after the swap renamed the folder, before its link was made: the marker said it was going into use.
     plant_marker(&half, &presets, &half, &half, true);
     fs::rename(&presets, &aside).unwrap();
-    let State::Stays(why) = find(&half, &[], &stop).unwrap().unwrap().state else { panic!() };
+    let State::Stays(why) = find(&half, &[], &ROOMY, &stop).unwrap().unwrap().state else { panic!() };
     assert!(why.contains("Rename it back to \"Presets\""), "{why}");
-    assert!(clear(&half, &[], &stop).is_err());
+    assert!(clear(&half, &[], &ROOMY, &stop).is_err());
     // Renamed back, it still stays: the plugin may have saved into it (you may have undone a swap that went through).
     fs::rename(&aside, &presets).unwrap();
-    let State::Stays(why) = find(&half, &[], &stop).unwrap().unwrap().state else { panic!() };
+    let State::Stays(why) = find(&half, &[], &ROOMY, &stop).unwrap().unwrap().state else { panic!() };
     assert!(why.contains("went into use"), "{why}");
     let tried = move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], &nothing, &stop);
     assert!(matches!(tried, Err(CantMove::HalfCopy { .. })), "{tried:?}");
@@ -473,9 +486,9 @@ fn moving_back_the_computer_stopped_leaves_a_half_copy_the_next_try_clears() {
     let back = c.join("Presets (moving back)");
     let all = std::slice::from_ref(&moved);
     assert!(back.join(MARKER).exists() && is_link(&presets));
-    assert_eq!(find(&back, all, &stop).unwrap().unwrap().state, State::CutOff);
+    assert_eq!(find(&back, all, &ROOMY, &stop).unwrap().unwrap().state, State::CutOff);
     // Found beside the moved folder too.
-    assert_eq!(half_copies(all, &[], &stop).unwrap().len(), 1);
+    assert_eq!(half_copies(all, &[], &ROOMY, &stop).unwrap().len(), 1);
 
     // Tried again, moving back clears it first and goes through; in place, the folder has no marker.
     move_back(&moved, &ROOMY, &nothing, &stop).unwrap();
@@ -500,18 +513,18 @@ fn moving_back_cut_off_as_it_swapped_says_what_to_rename() {
     // An update put a real folder in the link's place while it copied: the copy may be in use.
     unlink(&presets);
     library(&presets);
-    let State::Stays(why) = find(&back, all, &stop).unwrap().unwrap().state else { panic!() };
+    let State::Stays(why) = find(&back, all, &ROOMY, &stop).unwrap().unwrap().state else { panic!() };
     assert!(why.contains("isn't the link"), "{why}");
     let tried = move_back(&moved, &ROOMY, &nothing, &stop);
     assert!(tried.is_err() && back.join(MARKER).exists(), "{tried:?}");
     // Stopped after the link went, before the copy took its name: the marker said it was going into use.
     fs::remove_dir_all(&presets).unwrap();
     plant_marker(&back, Path::new(&moved.to), &back, &presets, true);
-    let State::Stays(why) = find(&back, all, &stop).unwrap().unwrap().state else { panic!() };
+    let State::Stays(why) = find(&back, all, &ROOMY, &stop).unwrap().unwrap().state else { panic!() };
     assert!(why.contains("rename \"Presets (moving back)\" to \"Presets\""), "{why}");
     // A folder in the link's place by then: the plugin may have saved into the copy.
     library(&presets);
-    let State::Stays(why) = find(&back, all, &stop).unwrap().unwrap().state else { panic!() };
+    let State::Stays(why) = find(&back, all, &ROOMY, &stop).unwrap().unwrap().state else { panic!() };
     assert!(why.contains("went into use"), "{why}");
 }
 
@@ -530,7 +543,7 @@ fn the_plugin_data_folder_moving_to_another_drive_stopped_part_way_is_cleared_by
     stopped_part_way(10, |progress| move_home(&s(&home), &s(&e), all, &[], 35, &ROOMY, progress, &stop));
     let half = e.join("Plugin Data");
     assert!(half.join(MARKER).exists());
-    assert_eq!(find(&half, all, &stop).unwrap().unwrap().state, State::CutOff);
+    assert_eq!(find(&half, all, &ROOMY, &stop).unwrap().unwrap().state, State::CutOff);
 
     let now = move_home(&s(&home), &s(&e), all, &[], 35, &ROOMY, &nothing, &stop).unwrap();
     assert_eq!(now.moved[0].to, s(&half.join("Presets")));
@@ -578,10 +591,11 @@ fn half_copies_are_looked_for_where_moves_go() {
     });
     let all = std::slice::from_ref(&one);
 
-    let mut found: Vec<String> = half_copies(all, &[s(&e)], &stop).unwrap().into_iter().map(|h| h.path).collect();
+    let mut found: Vec<String> =
+        half_copies(all, &[s(&e)], &ROOMY, &stop).unwrap().into_iter().map(|h| h.path).collect();
     found.sort();
     assert_eq!(found, [s(&d.join("Two")), s(&e.join("Three"))]);
-    assert!(half_copies(all, &[], &stop).unwrap().iter().all(|h| h.state == State::CutOff));
+    assert!(half_copies(all, &[], &ROOMY, &stop).unwrap().iter().all(|h| h.state == State::CutOff));
 }
 
 #[test]
@@ -603,9 +617,9 @@ fn a_copy_a_move_is_making_is_never_cleared_nor_made_twice() {
         let said = thread::scope(|scope| {
             scope
                 .spawn(|| {
-                    let found = find(&half, &[], &stop).unwrap().unwrap().state;
-                    let listed = half_copies(&[], &[s(&d)], &stop).unwrap().len();
-                    let cleared = clear(&half, &[], &stop);
+                    let found = find(&half, &[], &ROOMY, &stop).unwrap().unwrap().state;
+                    let listed = half_copies(&[], &[s(&d)], &ROOMY, &stop).unwrap().len();
+                    let cleared = clear(&half, &[], &ROOMY, &stop);
                     let looked_first = problem(&s(&presets), &s(&d), 35, &ROOMY, &[], &stop);
                     let again = move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], &nothing, &stop);
                     vec![
@@ -651,11 +665,11 @@ fn a_half_copy_whose_folder_moved_elsewhere_since_is_still_cleared() {
     let moved = move_folder(&s(&presets), &s(&e), 35, whose(), &ROOMY, &[], &nothing, &stop).unwrap();
     let half = d.join("Presets");
     let all = std::slice::from_ref(&moved);
-    let found = half_copies(all, &[s(&d)], &stop).unwrap();
+    let found = half_copies(all, &[s(&d)], &ROOMY, &stop).unwrap();
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].state, State::CutOff);
     assert!(found[0].bytes >= 10, "{:?}", found[0]);
-    assert_eq!(clear(&half, all, &stop), Ok(Cleared::Copy(found[0].bytes)));
+    assert_eq!(clear(&half, all, &ROOMY, &stop), Ok(Cleared::Copy(found[0].bytes)));
     assert!(!half.exists());
     assert_eq!(fs::read_dir(e.join("Presets").join("Sounds")).unwrap().count(), 6);
 }
@@ -672,14 +686,54 @@ fn a_half_copy_on_a_drive_with_another_letter_now_is_still_cleared_by_the_next_t
     // Plugged in again, the drive got another letter: its folder is called F here.
     fs::rename(&d, &f).unwrap();
     let half = f.join("Presets");
-    assert_eq!(find(&half, &[], &stop).unwrap().unwrap().state, State::CutOff);
+    assert_eq!(find(&half, &[], &ROOMY, &stop).unwrap().unwrap().state, State::CutOff);
     // Another drive has its old letter now: it's still the same half copy.
     fs::create_dir_all(&d).unwrap();
-    assert_eq!(find(&half, &[], &stop).unwrap().unwrap().state, State::CutOff);
+    assert_eq!(find(&half, &[], &ROOMY, &stop).unwrap().unwrap().state, State::CutOff);
+    // Also when that drive has a folder at the same place, or can't be looked at (a card reader with no card in it).
+    fs::create_dir_all(d.join("Presets")).unwrap();
+    assert_eq!(find(&half, &[], &ROOMY, &stop).unwrap().unwrap().state, State::CutOff);
+    fs::remove_dir(d.join("Presets")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&d, fs::Permissions::from_mode(0o000)).unwrap();
+        let found = find(&half, &[], &ROOMY, &stop).unwrap().unwrap().state;
+        fs::set_permissions(&d, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(found, State::CutOff);
+    }
     assert_eq!(problem(&s(&presets), &s(&f), 35, &ROOMY, &[], &stop), None);
     move_folder(&s(&presets), &s(&f), 35, whose(), &ROOMY, &[], &nothing, &stop).unwrap();
     assert!(is_link(&presets) && !half.join(MARKER).exists());
     assert_eq!(fs::read_dir(half.join("Sounds")).unwrap().count(), 6);
+}
+
+#[test]
+fn a_half_copy_you_moved_elsewhere_on_its_drive_keeps_everything_but_its_marker() {
+    let dir = fixtures("mo-space-half-moved-by-you");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    let presets = c.join("Presets");
+    library(&presets);
+    let data = d.join("Plugin Data");
+    fs::create_dir_all(&data).unwrap();
+    let stop = AtomicBool::new(false);
+    stopped_part_way(10, |progress| move_folder(&s(&presets), &s(&data), 35, whose(), &ROOMY, &[], progress, &stop));
+    let files = |folder: &Path| fs::read_dir(folder.join("Sounds")).map_or(0, |sounds| sounds.count());
+    let copied = files(&data.join("Presets"));
+    assert!(copied > 0);
+    // You moved it beside the folder it was made in, to look at it: the same name, as deep, on the same drive.
+    let beside = d.join("Kept").join("Presets");
+    fs::create_dir_all(d.join("Kept")).unwrap();
+    fs::rename(data.join("Presets"), &beside).unwrap();
+    assert_eq!(find(&beside, &[], &ROOMY, &stop).unwrap().unwrap().state, State::MarkerOnly);
+    // Then to the top of the drive.
+    let top = d.join("Presets");
+    fs::rename(&beside, &top).unwrap();
+    assert_eq!(find(&top, &[], &ROOMY, &stop).unwrap().unwrap().state, State::MarkerOnly);
+    assert_eq!(half_copies(&[], &[s(&d)], &ROOMY, &stop).unwrap()[0].state, State::MarkerOnly);
+    assert_eq!(clear(&top, &[], &ROOMY, &stop), Ok(Cleared::Marker));
+    assert!(!top.join(MARKER).exists());
+    assert_eq!(files(&top), copied);
 }
 
 #[test]
@@ -703,8 +757,8 @@ fn a_file_link_copied_as_its_file_is_still_a_copy() {
         fs::remove_file(&copied).unwrap();
     }
     same_as(&copied, &dir.join("Shared").join("Init.fxp"));
-    assert_eq!(find(&half, &[], &stop).unwrap().unwrap().state, State::CutOff);
-    assert!(matches!(clear(&half, &[], &stop), Ok(Cleared::Copy(_))));
+    assert_eq!(find(&half, &[], &ROOMY, &stop).unwrap().unwrap().state, State::CutOff);
+    assert!(matches!(clear(&half, &[], &ROOMY, &stop), Ok(Cleared::Copy(_))));
     assert_eq!(fs::read_to_string(dir.join("Shared").join("Init.fxp")).unwrap(), "init");
     assert!(is_link(&presets.join("Init.fxp")));
 }
@@ -736,7 +790,7 @@ fn a_copy_whose_swap_failed_goes_and_what_couldnt_go_is_cleared_by_the_next_try(
     if held.holds {
         // The swap didn't happen, so the copy never went into use: what's left of it is a half copy like any other.
         assert!(copy.join("Sounds").join("0.db").exists() && copy.join(MARKER).exists());
-        assert_eq!(find(&copy, &[], &stop).unwrap().unwrap().state, State::CutOff);
+        assert_eq!(find(&copy, &[], &ROOMY, &stop).unwrap().unwrap().state, State::CutOff);
     } else {
         // Run as root, nothing holds the file, so all of the copy went: what's left can't be checked.
         assert!(!copy.exists());
@@ -775,10 +829,10 @@ fn a_link_where_the_copy_goes_is_in_the_way_as_anything_is() {
 
     // The renamed half copy isn't where the copy was made, though the link of that name leads to it: it's yours now,
     // so only its marker goes, and the link stays.
-    let found = half_copies(&[], &[s(&d)], &stop).unwrap();
+    let found = half_copies(&[], &[s(&d)], &ROOMY, &stop).unwrap();
     assert_eq!(found.len(), 1, "{found:?}");
     assert_eq!((found[0].path.as_str(), &found[0].state), (s(&renamed).as_str(), &State::MarkerOnly));
-    assert_eq!(clear(&renamed, &[], &stop), Ok(Cleared::Marker));
+    assert_eq!(clear(&renamed, &[], &ROOMY, &stop), Ok(Cleared::Marker));
     assert!(!renamed.join(MARKER).exists());
     assert!(renamed.join("Patch.prt").exists() || renamed.join("Sounds").exists());
     assert!(is_link(&half) && fs::canonicalize(&half).unwrap() == fs::canonicalize(&renamed).unwrap());

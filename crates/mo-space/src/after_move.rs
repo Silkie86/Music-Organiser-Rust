@@ -406,7 +406,7 @@ pub fn move_home(
     // Nothing else in the app makes or clears a copy there until this one is in use.
     let mine = claim(&to).ok_or_else(|| busy_now(&to))?;
     // A half copy an earlier try left, cut off part way (the app or the computer stopped), goes first.
-    clear_own(&to, home, moved, &mine, stop)?;
+    clear_own(&to, home, moved, &mine, drives, stop)?;
     if let Some(why) = destination_problem(home, destination, (bytes, &[]), moved, drives, true, Some(&mine), stop) {
         return Err(why);
     }

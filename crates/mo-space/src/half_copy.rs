@@ -11,8 +11,8 @@
 //! the move made. And only while all of this holds, looked at again just before:
 //!
 //! - nothing in this app is making or clearing a copy there now ([`claim`]);
-//! - the marker is a plain file in the folder it names (the same name, when that place is gone: a drive with another
-//!   letter now), and the folder is a real folder, not a link;
+//! - the marker is a plain file in the folder it names (or at the same place on the folder's own drive, when the drive
+//!   was called something else then: it has another letter now), and the folder is a real folder, not a link;
 //! - the copy never started going into use: the plugin can't have saved into it;
 //! - the folder it copies from is there, and doesn't lead to the copy;
 //! - no moved folder's link leads to it or into it, and no moved folder's copy is it or inside it;
@@ -23,8 +23,8 @@
 //!   its temporary name, and the files Explorer and Finder make by themselves.
 //!
 //! Otherwise it stays, and says why. A marker in a copy that's in use (the app stopped between the swap and taking the
-//! marker out), or in a folder renamed since (a link at its old name, leading to it, doesn't make it the copy), is the
-//! only thing that goes then: the folder is left as it is.
+//! marker out), or in a folder renamed or moved since on its drive (a link at its old name, leading to it, doesn't make
+//! it the copy), is the only thing that goes then: the folder is left as it is.
 //!
 //! Clearing stops when you press Stop, between the things it removes; the marker goes last, so what's left is still a
 //! half copy, cleared the next time. A file Explorer or Finder writes into the emptied folder just then goes too; if
@@ -52,8 +52,8 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::folder_move::{
-    CantMove, MovedFolder, OLD_SUFFIX, PART_SUFFIX, Tree, csharp_time, leads_to, listed, newer, remove_link, same_file,
-    set_read_only,
+    CantMove, Drives, MovedFolder, OLD_SUFFIX, PART_SUFFIX, Tree, csharp_time, leads_to, listed, newer, remove_link,
+    same_file, set_read_only,
 };
 use crate::plugin_clean::made_by_the_system;
 use crate::size::{self, DEEPEST, Stopped, is_link};
@@ -111,7 +111,8 @@ pub struct HalfCopy {
 pub enum State {
     /// Cut off part way: nothing uses it and everything in it is a copy, so it can be cleared.
     CutOff,
-    /// It's in use (the move went through), or was renamed since: only its marker is left over, and only that goes.
+    /// It's in use (the move went through), or was renamed or moved since: only its marker is left over, and only that
+    /// goes.
     MarkerOnly,
     /// It stays, and why.
     Stays(String),
@@ -122,7 +123,7 @@ pub enum State {
 pub enum Cleared {
     /// The half copy went, and this much room with it.
     Copy(u64),
-    /// Only its marker went: the folder is in use, or was renamed.
+    /// Only its marker went: the folder is in use, or was renamed or moved.
     Marker,
 }
 
@@ -277,10 +278,16 @@ pub(crate) fn unmark(folder: &Path) -> bool {
     false
 }
 
-/// The half copy `folder` is, if it holds a marker the app wrote. `moved` is every moved folder. Reads all of it and
-/// measures it: call it away from the window's thread.
-pub fn find(folder: &Path, moved: &[MovedFolder], stop: &AtomicBool) -> Result<Option<HalfCopy>, Stopped> {
-    let Some((marker, state, counted)) = judged(folder, moved, None, stop)? else { return Ok(None) };
+/// The half copy `folder` is, if it holds a marker the app wrote. `moved` is every moved folder; `drives` tells the
+/// drives apart (the app's own, [`crate::folder_move::SystemDrives`]). Reads all of it and measures it: call it away
+/// from the window's thread.
+pub fn find(
+    folder: &Path,
+    moved: &[MovedFolder],
+    drives: &dyn Drives,
+    stop: &AtomicBool,
+) -> Result<Option<HalfCopy>, Stopped> {
+    let Some((marker, state, counted)) = judged(folder, moved, None, drives, stop)? else { return Ok(None) };
     let bytes = match (&state, counted) {
         (State::MarkerOnly, _) => 0,
         (_, Some(bytes)) => bytes,
@@ -293,7 +300,12 @@ pub fn find(folder: &Path, moved: &[MovedFolder], stop: &AtomicBool) -> Result<O
 /// is in (moving back makes its copy there), and `also` (the folders the app remembers moves going to, such as the one
 /// picked last). Each folder in them holding a marker, once; not one a move is making now. Measures them: call it away
 /// from the window's thread.
-pub fn half_copies(moved: &[MovedFolder], also: &[String], stop: &AtomicBool) -> Result<Vec<HalfCopy>, Stopped> {
+pub fn half_copies(
+    moved: &[MovedFolder],
+    also: &[String],
+    drives: &dyn Drives,
+    stop: &AtomicBool,
+) -> Result<Vec<HalfCopy>, Stopped> {
     let mut places: Vec<String> = also.to_vec();
     places.extend(moved.iter().flat_map(|m| [parent_of(&m.to), parent_of(&m.from)]).flatten());
     let mut found: Vec<HalfCopy> = Vec::new();
@@ -302,7 +314,7 @@ pub fn half_copies(moved: &[MovedFolder], also: &[String], stop: &AtomicBool) ->
         if !entry.file_type().is_ok_and(|t| t.is_dir()) || not_there(&path.join(MARKER)) || busy(&path, None) {
             continue;
         }
-        if let Some(half) = find(&path, moved, stop)?
+        if let Some(half) = find(&path, moved, drives, stop)?
             && !found.iter().any(|h| same_place(&h.path, &half.path))
         {
             found.push(half);
@@ -312,13 +324,14 @@ pub fn half_copies(moved: &[MovedFolder], also: &[String], stop: &AtomicBool) ->
 }
 
 /// Clears a half copy: looked at again first, then removed for good when it was cut off, or only its marker taken out
-/// when the folder is in use or was renamed. Nothing else in this app makes or clears a copy there meanwhile. The
-/// marker goes last, so a clear that stops part way (you press Stop, or a file in it is open) is tried again next time.
-/// `Err` says why it stays. Call it away from the window's thread.
-pub fn clear(folder: &Path, moved: &[MovedFolder], stop: &AtomicBool) -> Result<Cleared, String> {
+/// when the folder is in use or was renamed or moved. Nothing else in this app makes or clears a copy there meanwhile.
+/// The marker goes last, so a clear that stops part way (you press Stop, or a file in it is open) is tried again next
+/// time. `Err` says why it stays. Call it away from the window's thread.
+pub fn clear(folder: &Path, moved: &[MovedFolder], drives: &dyn Drives, stop: &AtomicBool) -> Result<Cleared, String> {
     let Some(mine) = claim(folder) else { return Err(BUSY.to_owned()) };
     let stopped = || "Stopped before it was all checked, so it stays.".to_owned();
-    let Some((_, state, counted)) = judged(folder, moved, Some(&mine), stop).map_err(|Stopped| stopped())? else {
+    let Some((_, state, counted)) = judged(folder, moved, Some(&mine), drives, stop).map_err(|Stopped| stopped())?
+    else {
         return Err(format!("{} holds no marker, so it isn't a half copy the app made: it stays.", text(folder)));
     };
     match state {
@@ -339,16 +352,17 @@ pub fn clear(folder: &Path, moved: &[MovedFolder], stop: &AtomicBool) -> Result<
 
 /// Before a move copies into `copy` (a new folder of that name, claimed by `mine`): clears the half copy an earlier
 /// try at the same copy left there, cut off part way (its marker says it copies `from`), so it isn't in the way. A
-/// marker left in a copy that's in use, or in a folder renamed since, is taken out. Anything else there is left as it
-/// is, for the move's own checks to name; one that's this copy's but stays says why.
+/// marker left in a copy that's in use, or in a folder renamed or moved since, is taken out. Anything else there is
+/// left as it is, for the move's own checks to name; one that's this copy's but stays says why.
 pub(crate) fn clear_own(
     copy: &Path,
     from: &str,
     moved: &[MovedFolder],
     mine: &Claim,
+    drives: &dyn Drives,
     stop: &AtomicBool,
 ) -> Result<(), CantMove> {
-    match own(copy, from, moved, Some(mine), stop)? {
+    match own(copy, from, moved, Some(mine), drives, stop)? {
         Some((State::CutOff, _)) => remove_half(copy, stop).map_err(|not| match not {
             NotRemoved::Stopped => CantMove::Stopped,
             NotRemoved::Failed(why) => CantMove::HalfCopy { path: text(copy), why },
@@ -369,9 +383,10 @@ pub(crate) fn own_room(
     from: &str,
     moved: &[MovedFolder],
     mine: Option<&Claim>,
+    drives: &dyn Drives,
     stop: &AtomicBool,
 ) -> Result<Option<u64>, CantMove> {
-    match own(copy, from, moved, mine, stop)? {
+    match own(copy, from, moved, mine, drives, stop)? {
         Some((State::CutOff, bytes)) => Ok(bytes),
         Some((State::Stays(why), _)) => Err(CantMove::HalfCopy { path: text(copy), why }),
         _ => Ok(None),
@@ -385,6 +400,7 @@ fn own(
     from: &str,
     moved: &[MovedFolder],
     mine: Option<&Claim>,
+    drives: &dyn Drives,
     stop: &AtomicBool,
 ) -> Result<Option<(State, Option<u64>)>, CantMove> {
     // A link, or a file, is never a half copy: it's left for the move's own checks to name.
@@ -396,7 +412,7 @@ fn own(
             if busy(copy, mine) {
                 return Err(busy_now(copy));
             }
-            let judged = judged(copy, moved, mine, stop).map_err(|Stopped| CantMove::Stopped)?;
+            let judged = judged(copy, moved, mine, drives, stop).map_err(|Stopped| CantMove::Stopped)?;
             Ok(judged.map(|(_, state, bytes)| (state, bytes)))
         }
         _ => Ok(None),
@@ -429,13 +445,14 @@ fn judged(
     folder: &Path,
     moved: &[MovedFolder],
     mine: Option<&Claim>,
+    drives: &dyn Drives,
     stop: &AtomicBool,
 ) -> Result<Option<Judged>, Stopped> {
     if !real_folder(&text(folder)) {
         return Ok(None);
     }
     let Some(marker) = read_marker(folder) else { return Ok(None) };
-    let (state, bytes) = judge(folder, &marker, moved, mine, stop)?;
+    let (state, bytes) = judge(folder, &marker, moved, mine, drives, stop)?;
     Ok(Some((marker, state, bytes)))
 }
 
@@ -446,6 +463,7 @@ fn judge(
     marker: &Marker,
     moved: &[MovedFolder],
     mine: Option<&Claim>,
+    drives: &dyn Drives,
     stop: &AtomicBool,
 ) -> Result<(State, Option<u64>), Stopped> {
     let stays = |why: String| Ok((State::Stays(why), None));
@@ -453,8 +471,8 @@ fn judge(
         return stays(BUSY.to_owned());
     }
     let Some(here) = real_path(&text(folder)) else { return stays(gone(folder)) };
-    // Renamed since it was marked: into place (moving back), or by you. It isn't where the copy was being made.
-    if !in_place(folder, marker, &here) {
+    // Renamed or moved since it was marked: into place (moving back), or by you. It isn't where the copy was made.
+    if !in_place(marker, &here, drives) {
         return Ok((State::MarkerOnly, None));
     }
     let from = marker.from.as_str();
@@ -489,16 +507,67 @@ fn judge(
     Ok((State::CutOff, Some(bytes)))
 }
 
-/// Whether the folder is where its marker says the copy was made, by what's at that place now: a real folder, when
-/// it's this one as it really is; nothing at all (the drive it's on has another letter now, maybe another drive's old
-/// one, or a Mac gave it another name), when this one has the same name. A link there (left at the name of a half copy
-/// renamed since, leading to it), a file, or what can't be looked at isn't this folder.
-fn in_place(folder: &Path, marker: &Marker, here: &str) -> bool {
-    match fs::symlink_metadata(&marker.to) {
-        Ok(meta) if meta.is_dir() => real_path(&marker.to).is_some_and(|to| key(&to) == key(here)),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            folder.file_name().is_some_and(|name| key(&name.to_string_lossy()) == key(file_name(&marker.to)))
+/// Whether the folder (`here` is where it really is) is where its marker says the copy was made: that place is a real
+/// folder, and it's this one as it really is; or this folder is at that place on its own drive, and the drive was
+/// called something else then ([`on_another_drive`]). A link at that place (left at the name of a half copy renamed
+/// since, leading to it) isn't this folder, and nor is a folder renamed or moved since on its own drive.
+fn in_place(marker: &Marker, here: &str, drives: &dyn Drives) -> bool {
+    let to = marker.to.as_str();
+    let real_there = fs::symlink_metadata(to).is_ok_and(|meta| meta.is_dir());
+    (real_there && real_path(to).is_some_and(|to| key(&to) == key(here))) || on_another_drive(here, to, drives)
+}
+
+/// Whether `here` (where a folder really is) is the place `to` names, but on a drive that was called something else
+/// then: the same folders, down from the top of the drive `here` is on, where `to` has another drive's top. That's a
+/// drive letter or a network share (`E:`, when the drive has another letter now, maybe after another drive took its
+/// old one), or a place as deep as the top of `here`'s drive (a Mac's `/Volumes/Samples`, called `Samples 1` once
+/// another drive had that name). What's at `to` now doesn't matter then, nor whether it can be looked at: that's
+/// another drive. A folder renamed or moved since on its own drive isn't at the same place on it, so it isn't taken
+/// for the copy (one you moved to the same place on another drive would be: it only goes if it only holds copies).
+fn on_another_drive(here: &str, to: &str, drives: &dyn Drives) -> bool {
+    let (here_parts, to_parts) = (parts(here), parts(to));
+    // Most folders that aren't where their copy was made are told by their name.
+    if here_parts.last() != to_parts.last() {
+        return false;
+    }
+    let top = parts(&text(drive_top(Path::new(here), drives)));
+    let Some(inside) = here_parts.strip_prefix(top.as_slice()).filter(|inside| !inside.is_empty()) else {
+        return false;
+    };
+    let Some(drive) = to_parts.strip_suffix(inside) else { return false };
+    drive != top.as_slice() && (drive.len() == top.len() || drive_named(drive))
+}
+
+/// The top of the drive a folder is on, as `drives` tells drives apart: the furthest folder up from it that's on the
+/// same drive (`E:\`, a network share, where a disk is mounted).
+fn drive_top<'a>(folder: &'a Path, drives: &dyn Drives) -> &'a Path {
+    let mut top = folder;
+    while let Some(up) = top.parent()
+        && drives.same(top, up)
+    {
+        top = up;
+    }
+    top
+}
+
+/// A path's names, from the top down, as [`key`] gives them: "" for the top of a Mac or Linux computer, and for each
+/// of the two slashes a network share's path starts with.
+fn parts(path: &str) -> Vec<String> {
+    match key(path).as_str() {
+        "/" => vec![String::new()],
+        whole => whole.split('/').map(str::to_owned).collect(),
+    }
+}
+
+/// Whether the names at the top of a path name a drive by themselves: a drive letter (`E:`) or a network share
+/// (`\\server\share`).
+fn drive_named(drive: &[String]) -> bool {
+    match drive {
+        [letter] => {
+            let mut chars = letter.chars();
+            matches!((chars.next(), chars.next(), chars.next()), (Some(l), Some(':'), None) if l.is_ascii_alphabetic())
         }
+        [a, b, server, share] => a.is_empty() && b.is_empty() && !server.is_empty() && !share.is_empty(),
         _ => false,
     }
 }

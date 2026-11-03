@@ -457,6 +457,68 @@ fn the_room_a_move_needs_is_counted_as_the_other_drive_keeps_files() {
 }
 
 #[test]
+fn a_file_link_counts_as_its_file_where_windows_may_copy_it_as_that() {
+    let dir = fixtures("mo-space-move-link-room");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    write(&c, "Presets/Patch.fxp", "patch");
+    write(&dir, "Shared/Init.fxp", &"x".repeat(1000));
+    // Where a file link can't be made (Windows without Developer Mode), there's nothing to count.
+    if !common::file_link(&dir.join("Shared").join("Init.fxp"), &c.join("Presets").join("Init.fxp")) {
+        return;
+    }
+    fs::create_dir_all(&d).unwrap();
+    let stop = AtomicBool::new(false);
+    let presets = s(&c.join("Presets"));
+    // Windows makes the link again only with Developer Mode on, and copies its file otherwise: room is kept for that.
+    let needs = if cfg!(windows) { 1005 } else { 5 };
+    let short = OtherDrive { free: Some(HEADROOM + needs - 1) };
+    assert_eq!(
+        problem(&presets, &s(&d), 5, &short, &[], &stop),
+        Some(CantMove::NoRoom { free: HEADROOM + needs - 1, needs })
+    );
+    assert_eq!(problem(&presets, &s(&d), 5, &OtherDrive { free: Some(HEADROOM + needs) }, &[], &stop), None);
+}
+
+#[test]
+fn moving_back_puts_many_files_into_the_old_copy_together_and_none_when_you_press_stop() {
+    let dir = fixtures("mo-space-move-back-many");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    for n in 0..300 {
+        write(&c, &format!("Presets/{n}.fxp"), "old");
+    }
+    fs::create_dir_all(&d).unwrap();
+    let stop = AtomicBool::new(false);
+    let presets = c.join("Presets");
+    let moved = move_folder(&s(&presets), &s(&d), 900, whose(), &ROOMY, &[], &nothing, &stop).unwrap();
+    // The plugin saved over every one of them through the link.
+    let later = SystemTime::now() + Duration::from_secs(3600);
+    for n in 0..300 {
+        let file = presets.join(format!("{n}.fxp"));
+        fs::write(&file, "new").unwrap();
+        set_time(&file, later);
+    }
+    let all = |folder: &Path, text: &str| {
+        (0..300).all(|n| fs::read_to_string(folder.join(format!("{n}.fxp"))).unwrap() == text)
+    };
+    // Stopped part way: none of them went into the old copy, and nothing's left half way there.
+    let stopping = |bytes: u64| {
+        if bytes >= 300 {
+            stop.store(true, Ordering::Relaxed);
+        }
+    };
+    let stopped = move_back(&moved, &ROOMY, &stopping, &stop);
+    assert!(matches!(stopped, Err(CantMove::LeftHalfway(_))), "{stopped:?}");
+    stop.store(false, Ordering::Relaxed);
+    let old = Path::new(&moved.old_copy);
+    assert!(part_files(old).is_empty());
+    assert!(all(old, "old"));
+    // Then all of them: more than go in together at once.
+    move_back(&moved, &ROOMY, &nothing, &stop).unwrap();
+    assert!(!is_link(&presets) && all(&presets, "new"));
+    assert!(part_files(&presets).is_empty());
+}
+
+#[test]
 fn a_big_file_is_copied_a_piece_at_a_time_so_stop_doesnt_wait_for_its_end() {
     let dir = fixtures("mo-space-move-big-file");
     let (c, d) = (dir.join("C"), dir.join("D"));
