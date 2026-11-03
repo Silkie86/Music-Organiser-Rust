@@ -16,6 +16,7 @@ pub mod files;
 pub mod finder;
 pub mod gpu;
 pub mod note;
+pub mod settings;
 pub mod songs;
 pub mod sounds;
 pub mod space;
@@ -193,8 +194,12 @@ fn go_to(app: &AppWindow, index: i32) {
     }
     app.set_place(index);
     finder::close(app);
+    settings::page_shown(place);
     if place == Place::Backup {
         backup::shown();
+    }
+    if place == Place::Settings {
+        settings::shown(app);
     }
     if place == Place::Space {
         space::shown(app);
@@ -246,10 +251,15 @@ pub fn apply_look(app: &AppWindow, look: &Look) {
     t.set_square(th.square);
     t.set_text_font(th.font.text_family().into());
     t.set_number_font(th.font.number_family().into());
+    app.global::<Palette>().set_color_scheme(if th.light {
+        slint::language::ColorScheme::Light
+    } else {
+        slint::language::ColorScheme::Dark
+    });
     arrangement::set_look(app, look);
 }
 
-fn rgb(c: u32) -> Color {
+pub(crate) fn rgb(c: u32) -> Color {
     Color::from_rgb_u8((c >> 16) as u8, (c >> 8) as u8, c as u8)
 }
 

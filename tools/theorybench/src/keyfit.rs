@@ -1407,7 +1407,7 @@ fn version_named(version: u32, numbers: u32) -> String {
 }
 
 /// [`version_named`] for the finder built into this bench.
-fn built_in_version() -> String {
+pub(crate) fn built_in_version() -> String {
     version_named(KEY_FINDER_VERSION, keyfind::SHIPPED_HASH.1)
 }
 
