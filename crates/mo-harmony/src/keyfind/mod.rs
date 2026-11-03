@@ -123,7 +123,9 @@ pub const STREAMS: usize = 8;
 /// for minor keys as a whole.
 pub const FEATURES: usize = STREAMS * 24 + 1;
 
-/// The feature minor keys have as a whole: the music the finder learned from has fewer minor keys.
+/// The feature minor keys have as a whole: one weight added to every minor key's score, which the fit sets by how
+/// often the music it learned from is in a minor key (below 0 on the public songs, fewer of them minor; above 0 since
+/// the rescale on Solomon's packs, most of them minor).
 pub const MINOR: usize = STREAMS * 24;
 
 /// Knots of the calibration curves: 1, 2, 4, 8 and 16 bars heard (flat past 16 bars).

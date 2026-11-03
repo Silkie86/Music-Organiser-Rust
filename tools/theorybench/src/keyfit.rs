@@ -1386,7 +1386,36 @@ fn fitted_per_fold(
         .collect()
 }
 
+/// A rescale scales the plain fit built in. Refused when the weights built in were rescaled already: it would scale
+/// the scales, and `--final` would use up a look at the kept-back fold on weights `--write` won't write.
+fn check_rescalable(learned_from: &[&str]) -> Result<(), String> {
+    if learned_from.contains(&crate::packs::SOURCE) {
+        return Err(format!(
+            "--rescale: the weights built in were rescaled on {} already, and a rescale starts from the plain fit. Put \
+             back the weights fitted before, build, then run again (tools/theorybench/README.md, \"Rescaling again\").",
+            crate::packs::SOURCE
+        ));
+    }
+    Ok(())
+}
+
+/// The finder built in, as the report and the run log name it: its version, and the version its numbers were first
+/// given with when that's older (the plain fit's numbers put back to rescale them again, or a change to the code
+/// alone).
+fn version_named(version: u32, numbers: u32) -> String {
+    if numbers == version { version.to_string() } else { format!("{version}, with version {numbers}'s numbers") }
+}
+
+/// [`version_named`] for the finder built into this bench.
+fn built_in_version() -> String {
+    version_named(KEY_FINDER_VERSION, keyfind::SHIPPED_HASH.1)
+}
+
 pub fn run(args: &[String]) -> Result<(), String> {
+    // Before anything is read: a rescale of weights rescaled already is refused at once.
+    if args.iter().any(|a| a == "--rescale") {
+        check_rescalable(keyfind::LEARNED_FROM)?;
+    }
     let mut setup = keys::setup(
         args,
         &["--lambda-delta", "--write", "--picks", "--inputs", "--dump", "--against", "--hand", "--weigh"],
@@ -1572,12 +1601,13 @@ pub fn run(args: &[String]) -> Result<(), String> {
     println!();
     match opts.lambda_delta {
         _ if shipped_run => println!(
-            "Scoring the finder built in (version {KEY_FINDER_VERSION}), as it is: nothing fitted, its own calibration \
-             and thresholds."
+            "Scoring the finder built in (version {}), as it is: nothing fitted, its own calibration and thresholds.",
+            built_in_version()
         ),
         _ if rescale => println!(
-            "Rescaling the finder built in (version {KEY_FINDER_VERSION}): one scale for each of its {STREAMS} streams \
-             and the minor weight (penalty {LAMBDA_W}), then the calibration; its thresholds kept."
+            "Rescaling the finder built in (version {}): one scale for each of its {STREAMS} streams and the minor \
+             weight (penalty {LAMBDA_W}), then the calibration; its thresholds kept.",
+            built_in_version()
         ),
         Some(ld) => println!(
             "Fitting {STREAMS} trust weights and the minor weight (penalty {LAMBDA_W}) and {MINOR} corrections \
@@ -2383,8 +2413,9 @@ fn log_run(run: &str, summary: &Summary, opts: &Options) -> Result<(), String> {
     };
     let _ = writeln!(
         text,
-        "| {} | {run} | {KEY_FINDER_VERSION} | {commit} | {penalty} | {} |",
+        "| {} | {run} | {} | {commit} | {penalty} | {} |",
         today(),
+        built_in_version(),
         results.join("; ")
     );
     std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -3443,5 +3474,24 @@ mod tests {
         assert_eq!(pulled_range(&[0.5, 0.5, 0.5]), "0.50");
         assert_eq!(pulled_range(&[0.55, 0.5, 0.5, 0.55, 0.5]), "0.50 to 0.55");
         assert_eq!(pulled_range(&[1.0]), "1.00");
+    }
+
+    #[test]
+    fn a_rescale_of_weights_rescaled_already_is_refused_before_anything_is_read() {
+        assert!(check_rescalable(&["pop909cl", "billboard"]).is_ok());
+        let error = check_rescalable(&["pop909cl", "billboard", "packs"]).err().unwrap_or_default();
+        assert!(error.contains("rescaled on packs already") && error.contains("Rescaling again"), "{error}");
+        // The finder built in now is a rescale, so no rescale run gets as far as reading its files.
+        let refused = run(&["no such file.jsonl".to_owned(), "--rescale".to_owned(), "--final".to_owned()]);
+        assert_eq!(
+            refused.is_err_and(|e| e.contains("rescaled on packs already")),
+            keyfind::LEARNED_FROM.contains(&"packs")
+        );
+    }
+
+    #[test]
+    fn the_finder_built_in_is_named_with_the_version_of_its_numbers_when_older() {
+        assert_eq!(version_named(5, 5), "5");
+        assert_eq!(version_named(5, 4), "5, with version 4's numbers");
     }
 }

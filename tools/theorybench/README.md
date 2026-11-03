@@ -248,12 +248,15 @@ cargo run -p mo-theorybench --release -- keyfit D:\Bench\packs.jsonl --inputs fu
   pull-back sees to that one). Then `--final` once, and `--write`. Back in the cloud, the public sets are scored with
   `--shipped` before and after the new weights, to see what the rescale costs songs.
 - **Shipped as version 5** (2026-11-03): whole loops 46.1% to 56.0% right on folds 1 to 4, every set better beyond its
-  range; on the public songs, whole songs hold but stretches of 1 to 16 bars lose 3 to 22 points, and a tune alone
-  more. The numbers, and who pays, are in `docs/harmony/key-finder-experiments.md`.
-- **Rescaling again.** `--write` refuses weights rescaled already, so a later rescale starts from version 4's, the
-  plain fit: put them back first (`git show 3be3d26:crates/mo-harmony/src/keyfind/weights.rs`), build, then run the
-  steps above. Its `--shipped` then scores version 4; to compare with what ships, make the dump with the weights that
-  ship.
+  range, though the loops labelled major fell from 45.9% to 29.9%. On the public songs, whole songs lose little
+  (POP909-CL nothing, RS200 1.2 points, Billboard 4.4), but stretches of 1 to 16 bars lose 3 to 22 points, and a tune
+  alone more. The numbers, and who pays, are in `docs/harmony/key-finder-experiments.md`.
+- **Rescaling again.** `--rescale` won't start while the weights built in were rescaled already: it would scale the
+  scales, and `--final` would spend a look at fold 0 on weights `--write` won't write. So a later rescale starts from
+  version 4's, the plain fit: put them back first (`git show 3be3d26:crates/mo-harmony/src/keyfind/weights.rs >
+  crates/mo-harmony/src/keyfind/weights.rs`), build, then run the steps above. The runs then name the finder built in
+  "version 5, with version 4's numbers", in the report and in `test-runs.md`. Their `--shipped` scores version 4; to
+  compare with what ships, make the dump before putting version 4's weights back.
 
 ## Chords
 

@@ -128,6 +128,29 @@ mod tests {
         assert_eq!(read(&mut reader, &[], Role::Melody, false), (None, None), "nothing pitched");
     }
 
+    /// Chords held a bar each, the progression played twice.
+    fn chords(progression: &[&[u8]]) -> Vec<NoteEvent> {
+        let bar = 4 * PPQ;
+        (0..2)
+            .flat_map(|round| {
+                progression.iter().enumerate().map(move |(i, chord)| (round * progression.len() + i, *chord))
+            })
+            .flat_map(|(at, chord)| chord.iter().map(move |&k| NoteEvent { length: bar, ..note(at as i64 * bar, k) }))
+            .collect()
+    }
+
+    #[test]
+    fn a_part_the_finder_is_sure_of_gives_the_key_to_show() {
+        let mut reader = KeyReader::new();
+        // Am Dm E Am: A minor for sure, the key the page shows and searches by.
+        let notes = chords(&[&[69, 72, 76], &[62, 65, 69], &[64, 68, 71], &[69, 72, 76]]);
+        let (_, fact) = read(&mut reader, &notes, Role::Chords, false);
+        let fact = fact.unwrap();
+        assert!(matches!(fact.answer(), Some(KeyAnswer::Key(_))), "{fact:?}");
+        let shown = sure_key(&fact).expect("a key to show");
+        assert_eq!((shown.tonic, shown.minor), (9, true), "{fact:?}");
+    }
+
     #[test]
     fn reading_again_gives_what_analysing_gave() {
         let mut reader = KeyReader::new();
