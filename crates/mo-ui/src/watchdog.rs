@@ -240,6 +240,7 @@ mod tests {
     fn each_step_counts_only_its_own_time_not_the_steps_inside_it() {
         let _turn = TURN.lock();
         REPORTED.with(|r| r.borrow_mut().clear());
+        let began = Instant::now();
         let outer = doing("outer");
         std::thread::sleep(Duration::from_millis(30));
         {
@@ -248,13 +249,16 @@ mod tests {
         }
         std::thread::sleep(Duration::from_millis(10));
         drop(outer);
+        let whole = began.elapsed();
         let reported = REPORTED.with(|r| r.borrow().clone());
         let own = |what| reported.iter().find(|(w, _)| *w == what).map(|(_, t)| *t).expect("reported");
         assert_eq!(reported.len(), 2);
         assert!(own("inner") >= Duration::from_millis(60));
-        // The outer step's own 40 ms, not its whole 100.
+        // The outer step's own 40 ms or so, not its whole 100: its time less the inner one's. (Sleeps can overrun a
+        // lot on a busy machine, so it's checked against what was measured, not against fixed times.)
         assert!(own("outer") >= Duration::from_millis(40), "{:?}", own("outer"));
-        assert!(own("outer") < Duration::from_millis(90), "{:?}", own("outer"));
+        assert!(own("outer") + own("inner") <= whole, "{:?} + {:?} > {whole:?}", own("outer"), own("inner"));
+        assert!(whole.saturating_sub(own("outer") + own("inner")) < Duration::from_millis(5), "{whole:?}");
     }
 
     #[test]
