@@ -1172,6 +1172,7 @@ mod tests {
         // The drive's own maximum size (1024 MB), so up to 0.9 GB.
         let own = BinFacts { max_mb: Some(1024), ..fixed };
         assert_eq!(bin_decides(&own, GB / 2, || Some(0)), None);
+        assert_eq!(bin_decides(&own, 950_000_000, || Some(0)), None, "a MB is 1024 * 1024 bytes");
         assert_eq!(bin_decides(&own, GB, || Some(0)), Some(NO_ROOM));
         // A policy's share of the drive comes first (1%: 10 GB), and is never more than the whole drive.
         assert_eq!(bin_decides(&BinFacts { policy_percent: Some(1), ..own }, 8 * GB, || Some(0)), None);

@@ -1426,6 +1426,25 @@ mod tests {
         assert_eq!(done, Tidied { notes_stay: Some("it's full now".to_owned()), ..Tidied::default() });
         assert!(words.exists() && picture.exists() && other.exists() && !done_file.exists());
 
+        // Only online in OneDrive, and then the Recycle Bin fills up: the first note is looked at (and stays), and the
+        // second waits for the next start.
+        let online_then_full = PickyBin {
+            bin: TestBin(dir.join("bin")),
+            refuses: |path, _| {
+                let name = path.file_name()?.to_str()?;
+                if name.ends_with(".png") {
+                    Some(ONLINE_ONLY.into())
+                } else {
+                    name.starts_with("note-2026-07-02").then(|| "it's full now".into())
+                }
+            },
+        };
+        let done = sweep(&places, now, &online_then_full);
+        assert_eq!(done, Tidied { notes_stay: Some("it's full now".to_owned()), ..Tidied::default() });
+        assert!(words.exists() && picture.exists() && other.exists());
+        assert_eq!(how_far(&done_file).0, "2026-07-01_10-00-00");
+        fs::remove_file(&done_file).unwrap();
+
         // A picture that's only online in OneDrive: that note stays whole, for good; the other goes.
         let online = PickyBin {
             bin: TestBin(dir.join("bin")),
@@ -1755,6 +1774,8 @@ mod tests {
         let done_file = places.data.join(NOTES_DONE_FILE);
         // Written in March next year: the clock is wrong now (put back), or was then.
         fs::write(&done_file, "2027-03-01_08-00-00\n").unwrap();
+        // While no note is old enough, there's nothing to say.
+        assert_eq!(sweep(&places, local("2026-09-15_12-00-00"), &bin), Tidied::default());
         let done = sweep(&places, local("2026-11-03_12-00-00"), &bin);
         assert_eq!(done.to_bin, 0);
         assert!(done.notes_stay.is_some_and(|why| why.contains("clock may be wrong")));
