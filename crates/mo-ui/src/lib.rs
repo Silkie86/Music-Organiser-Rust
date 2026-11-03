@@ -152,6 +152,12 @@ fn go_to(app: &AppWindow, index: i32) {
     if place == Place::Presets {
         presets::shown(app);
     }
+    refresh_keys(app);
+}
+
+/// Fills the key sheet for the place on show (and, on Presets, the section on show).
+pub(crate) fn refresh_keys(app: &AppWindow) {
+    let Some(place) = usize::try_from(app.get_place()).ok().and_then(Place::from_index) else { return };
     KEYS.with(|k| {
         if let Some(shortcuts) = k.borrow().as_ref() {
             app.set_key_rows(ModelRc::new(VecModel::from(key_rows(shortcuts, place))));

@@ -2897,6 +2897,7 @@ dependencies = [
  "mo-convert",
  "mo-formats",
  "mo-library",
+ "mo-presets",
  "mo-sounds",
  "mo-space",
  "rayon",
@@ -2963,6 +2964,18 @@ dependencies = [
  "serde",
  "serde_json",
  "thread-priority",
+]
+
+[[package]]
+name = "mo-presets"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "mo-formats",
+ "rayon",
+ "rusqlite",
+ "sha2",
+ "zip",
 ]
 
 [[package]]

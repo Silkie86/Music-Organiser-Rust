@@ -83,6 +83,14 @@ pub const PRESETS_ACTIONS: &[Action] = &[
     action("presets.reveal", "Show the picked sound's song or file in its folder", "Ctrl+Shift+E"),
     action("presets.copyPath", "Copy where the picked sound's song or file is", "Ctrl+Shift+C"),
     action("presets.useGuess", "Take your part fix away and use the guess again", "Ctrl+Backspace"),
+    action("presets.part.bass", "The picked sound is really a bass", "Alt+1"),
+    action("presets.part.lead", "The picked sound is really a lead", "Alt+2"),
+    action("presets.part.chords", "The picked sound is really chords", "Alt+3"),
+    action("presets.part.pad", "The picked sound is really a pad", "Alt+4"),
+    action("presets.part.stabs", "The picked sound is really stabs or plucks", "Alt+5"),
+    action("presets.part.arp", "The picked sound is really an arp", "Alt+6"),
+    action("presets.part.drums", "The picked sound is really drums", "Alt+7"),
+    action("presets.part.fx", "The picked sound is really FX", "Alt+8"),
 ];
 
 /// The Presets page's Curves section's own actions (a list of its own: its keys are the Sounds section's).

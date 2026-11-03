@@ -59,8 +59,6 @@ struct Page {
     plugins: Vec<String>,
     songs: usize,
     files: usize,
-    /// The search box's words for the section not on show.
-    other_search: String,
     started: bool,
     reading: Option<(usize, usize)>,
     failed: Option<String>,
@@ -87,6 +85,9 @@ struct Page {
     shortcuts: Shortcuts,
     /// The last time the list was shown afresh while sounds are still coming in.
     shown_at: Option<Instant>,
+    /// Part fixes made since the sounds started being read, by fingerprint (None: the fix was taken away), so the
+    /// sounds read after one was made get it too.
+    fixed_now: HashMap<String, Option<Role>>,
 }
 
 thread_local! {
@@ -350,28 +351,19 @@ pub fn show_song(app: &AppWindow, save: &str) {
 }
 
 fn pick_section(app: &AppWindow, s: Section) {
+    // The search box is shared, but each section's filters keep their own words (the box always edits the section on
+    // show), so a switch only puts the other section's words in the box (`show_all`).
     let first_curves = PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        if p.section != s {
-            p.section = s;
-            // The search box is shared: each section keeps its own words.
-            let words = std::mem::take(&mut p.other_search);
-            let now = match s {
-                Section::Sounds => std::mem::replace(&mut p.filters.search, words.clone()),
-                Section::Curves => std::mem::replace(&mut p.curve_filters.search, words.clone()),
-            };
-            match s {
-                Section::Sounds => p.curve_filters.search = now.clone(),
-                Section::Curves => p.filters.search = now.clone(),
-            }
-            p.other_search = now;
-        }
+        p.section = s;
         s == Section::Curves && !std::mem::replace(&mut p.curves_started, true)
     });
     if first_curves {
         read_curves(app);
     }
     show_all(app);
+    // The key sheet lists the section's own keys.
+    crate::refresh_keys(app);
 }
 
 /// Changes the sounds' filters and shows the list again.
@@ -464,7 +456,20 @@ fn show_all(app: &AppWindow) {
         );
         data.set_curve_empty_title(title.into());
         data.set_curve_empty_text(text.into());
+    });
+    show_header(app);
+    show_card(app);
+    show_curve_card(app);
+    LINES.with(|m| m.notify.reset());
+    CURVE_LINES.with(|m| m.notify.reset());
+}
 
+/// The page's header: the line under the title and the work going on, for the section on show.
+fn show_header(app: &AppWindow) {
+    let data = app.global::<PresetsData>();
+    PAGE.with(|p| {
+        let p = p.borrow();
+        let reading = p.reading.is_some();
         // The header, for the section on show.
         let hidden = p.curves.iter().filter(|c| c.hidden).count();
         let (summary, busy, done) = match p.section {
@@ -483,10 +488,6 @@ fn show_all(app: &AppWindow) {
         data.set_busy(busy.into());
         data.set_done(done);
     });
-    show_card(app);
-    show_curve_card(app);
-    LINES.with(|m| m.notify.reset());
-    CURVE_LINES.with(|m| m.notify.reset());
 }
 
 /// The picked sound's card, its buttons and its right-click menu (the same lines, with their keys: rule 15).
@@ -815,24 +816,34 @@ fn add(items: Vec<Item>, songs: usize, files: usize, reading: Option<(usize, usi
     on_window(move |app| {
         let show = PAGE.with(|p| {
             let mut p = p.borrow_mut();
+            let mut items = items;
+            for i in &mut items {
+                if let Some(fix) = p.fixed_now.get(&i.row.hash) {
+                    i.row.fixed = *fix;
+                }
+            }
             p.items.extend(items);
             p.songs += songs;
             p.files += files;
             if reading.is_some() {
                 p.reading = reading;
             }
-            let mut names: Vec<String> = logic::plugins(&p.items).into_iter().map(|(n, _)| n).collect();
-            names.truncate(200);
-            p.plugins = names;
+            // At most four times a second while reading: the plugin list and the filtering go over every line.
             let due = p.shown_at.is_none_or(|t| t.elapsed() >= Duration::from_millis(250)) || reading.is_none();
             if due {
                 p.shown_at = Some(Instant::now());
+                let mut names: Vec<String> = logic::plugins(&p.items).into_iter().map(|(n, _)| n).collect();
+                names.truncate(200);
+                p.plugins = names;
                 refilter(&mut p);
             }
             due
         });
         if show {
             show_all(app);
+        } else {
+            // The header's count still moves on.
+            show_header(app);
         }
     });
 }
@@ -923,6 +934,7 @@ fn apply(app: &AppWindow, hash: &str, role: Option<Role>) {
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
         logic::apply_fix(&mut p.items, hash, role);
+        p.fixed_now.insert(hash.to_owned(), role);
         // A part filter may drop it from the list; the card stays on it.
         refilter(&mut p);
     });
@@ -985,22 +997,32 @@ fn export_one(app: &AppWindow, item: Item, send: bool) {
                 let mut text = logic::export_summary(std::slice::from_ref(&e), &without, &[]);
                 let bwpreset =
                     e.files.iter().find(|f| f.to_lowercase().ends_with(".bwpreset")).map(|f| e.folder.join(f));
-                let shown =
-                    if send { bwpreset.clone() } else { None }.or_else(|| e.files.first().map(|f| e.folder.join(f)));
+                // What's shown in its folder after: the file exported; for a send, the Bitwig preset only when it
+                // didn't go into Bitwig (to drag in by hand).
+                let mut shown = e.files.first().map(|f| e.folder.join(f));
+                let mut went = true;
                 if send {
-                    text = match &bwpreset {
+                    (text, went) = match &bwpreset {
                         Some(p) => match send_to_bitwig(p) {
-                            Ok(words) => words,
-                            Err(words) => words,
+                            Ok(words) => (words, true),
+                            Err(words) => (words, false),
                         },
-                        None => format!(
-                            "No Bitwig preset could be made for {}: save any preset of it once in Bitwig, then try \
-                             again.",
-                            item.row.plugin
+                        None => (
+                            format!(
+                                "No Bitwig preset could be made for {}: save any preset of it once in Bitwig, then \
+                                 try again.",
+                                item.row.plugin
+                            ),
+                            false,
                         ),
                     };
+                    shown = if went { None } else { bwpreset.clone().or(shown) };
                 }
-                job.done(&text);
+                if went {
+                    job.done(&text);
+                } else {
+                    job.failed(&text);
+                }
                 if let Some(path) = shown {
                     let path = path.to_string_lossy().into_owned();
                     crate::files::reveal(&feed, &path, mo_app::shell::folder_of(&path));
@@ -1101,7 +1123,13 @@ fn set_message(app: &AppWindow, text: &str) {
 
 /// A Bitwig preset file sent into Bitwig; when it can't go, it's shown in its folder to drag onto a track.
 fn send_file(path: String) {
-    let feed = PAGE.with(|p| p.borrow().feed.clone());
+    // One send or export at a time from this page: the button is off until it's done.
+    let feed = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.exporting = true;
+        p.feed.clone()
+    });
+    on_window(show_all);
     let started = background::spawn("Send to Bitwig", move || {
         let text = match send_to_bitwig(Path::new(&path)) {
             Ok(words) => words,
@@ -1126,6 +1154,9 @@ fn send_to_bitwig(preset: &Path) -> Result<String, String> {
     let name = preset.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let path = preset.to_string_lossy().into_owned();
     let failed = |e: &dyn std::fmt::Display| logic::send_failed(&e.to_string());
+    if !preset.is_file() {
+        return Err(logic::send_failed(&format!("{name} isn't where it was any more")));
+    }
     let mut link = Bitwig::default().connect().map_err(|e| failed(&e))?;
     link.stay_in_open_project();
     link.hello().can_send().map_err(|e| failed(&e))?;
@@ -1218,7 +1249,7 @@ fn scan_curves(at: &Where) -> Result<Vec<Curve>, String> {
                 let (d, t) = (progress.done.load(Ordering::Relaxed), progress.total.load(Ordering::Relaxed));
                 on_window(move |app| {
                     PAGE.with(|p| p.borrow_mut().curves_reading = Some((d, t)));
-                    show_all(app);
+                    show_header(app);
                 });
                 std::thread::sleep(Duration::from_millis(400));
             }

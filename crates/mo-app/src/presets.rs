@@ -126,8 +126,7 @@ fn is_bitwig_folder(p: &Path) -> bool {
 }
 
 fn same_folder(a: &Path, b: &Path) -> bool {
-    a.to_string_lossy().to_lowercase().trim_end_matches(['\\', '/'])
-        == b.to_string_lossy().to_lowercase().trim_end_matches(['\\', '/'])
+    is_inside(a, b) && is_inside(b, a)
 }
 
 /// The folders preset files are looked for in: the plugins' and Bitwig's usual ones, and every Bitwig folder found.
@@ -144,9 +143,8 @@ pub fn preset_folders(defaults: &[PathBuf], bitwig: &[PathBuf]) -> Vec<PathBuf> 
 
 /// Whether `inner` is `outer` or a folder inside it.
 fn is_inside(inner: &Path, outer: &Path) -> bool {
-    let (i, o) = (inner.to_string_lossy().to_lowercase(), outer.to_string_lossy().to_lowercase());
-    let o = o.trim_end_matches(['\\', '/']);
-    i == o || (i.starts_with(o) && i[o.len()..].starts_with(['\\', '/']))
+    // The library's own test, whichever way the slashes lean.
+    mo_library::scan::is_inside(&inner.to_string_lossy(), &outer.to_string_lossy())
 }
 
 /// Where a curve goes in Bitwig's curves library: `<Bitwig Studio>\Library\Curves` in the first Bitwig folder found.
@@ -802,11 +800,24 @@ pub fn export_plan(items: &[Item], shown: &[usize]) -> (Vec<(String, Vec<String>
 /// plugins could get a Bitwig preset after one save in Bitwig (the C# `ExportSummary`). `without` is those plugins.
 pub fn export_summary(done: &[Exported], without: &[String], failed_saves: &[String]) -> String {
     let files: Vec<&String> = done.iter().flat_map(|e| &e.files).collect();
-    let bitwig = files.iter().filter(|f| f.to_lowercase().ends_with(".bwpreset")).count();
+    // A .bwpreset made beside a sound's own file (same name, another ending) is the extra; a Bitwig device's sound is
+    // a .bwpreset on its own, and counts as a preset.
+    let is_bw = |f: &str| f.to_lowercase().ends_with(".bwpreset");
+    let stem = |f: &str| f.rsplit_once('.').map_or(f, |(s, _)| s).to_lowercase();
+    let own: HashSet<String> = done
+        .iter()
+        .flat_map(|e| e.files.iter().filter(|f| !is_bw(f)).map(move |f| (e.folder.clone(), stem(f))))
+        .map(|(folder, s)| format!("{}|{s}", folder.display()))
+        .collect();
+    let bitwig = done
+        .iter()
+        .flat_map(|e| e.files.iter().filter(|f| is_bw(f)).map(move |f| format!("{}|{}", e.folder.display(), stem(f))))
+        .filter(|k| own.contains(k))
+        .count();
     let plain = files.len() - bitwig;
     let mut text = if files.is_empty() {
         "Nothing was exported.".to_owned()
-    } else if plain == 1 && bitwig == 0 {
+    } else if files.len() == 1 {
         format!("Exported {}.", files[0])
     } else {
         format!("Exported {} preset{}", thousands(plain), if plain == 1 { "" } else { "s" })
@@ -1311,12 +1322,33 @@ mod tests {
             export_summary(&[e(&["Sub.fxp", "Sub.bwpreset"])], &[], &[]),
             "Exported 1 preset, all also as Bitwig presets (.bwpreset) that load in Bitwig with their settings."
         );
+        // A Bitwig device's own sound is a .bwpreset, not an extra.
+        assert_eq!(export_summary(&[e(&["Polysynth.bwpreset"])], &[], &[]), "Exported Polysynth.bwpreset.");
+        assert_eq!(
+            export_summary(&[e(&["Polysynth.bwpreset", "Sub.fxp", "Sub.bwpreset"])], &[], &[]),
+            "Exported 2 presets, 1 also as Bitwig presets (.bwpreset) that load in Bitwig with their settings."
+        );
         let s = export_summary(&[e(&["A.fxp", "B.fxp"])], &["Serum".into()], &[]);
         assert_eq!(
             s,
             "Exported 2 presets. For a Bitwig preset of Serum, save any preset of that plugin once in Bitwig, then \
              export again."
         );
+    }
+
+    #[test]
+    fn every_part_fix_is_on_the_shortcut_list() {
+        // Rule 15: each menu line's action has a key that can be changed.
+        for r in Role::ALL {
+            let id = format!("{}{}", act::PART, r.key());
+            assert!(crate::shortcuts::PRESETS_ACTIONS.iter().any(|a| a.id == id), "{id}");
+        }
+        for id in [act::EXPORT, act::TO_BITWIG, act::EXPORT_SHOWN, act::REVEAL, act::COPY_PATH, act::USE_GUESS] {
+            assert!(crate::shortcuts::PRESETS_ACTIONS.iter().any(|a| a.id == id), "{id}");
+        }
+        for id in [curve_act::TO_BITWIG, curve_act::REVEAL, curve_act::RENAME, curve_act::HIDE, curve_act::OPEN_SONG] {
+            assert!(crate::shortcuts::CURVES_ACTIONS.iter().any(|a| a.id == id), "{id}");
+        }
     }
 
     #[test]
