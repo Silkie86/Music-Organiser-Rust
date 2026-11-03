@@ -390,7 +390,8 @@ w_N, what a stretch read as no chord scores. The counted tables stay as `tables`
   among the numbers that keep every rule the weights keep (`chordread::RULES`: signs and orders, such as T2 between 0
   and T1), and moves towards it as far as the loss falls enough. Every point it reads keeps the rules. The pieces'
   sums are added in their order, so a run gives the same bits on any number of threads. At most 40 steps
-  (`--steps`); `--fix P1,P2` holds numbers where they start; `--from` starts from a file a fit wrote.
+  (`--steps`), fewer when the loss falls by less than a hundred-thousandth of itself three steps running;
+  `--fix P1,P2` holds numbers where they start; `--from` starts from a file a fit wrote.
 - **The report.** The loss at each step; each number at the start and fitted, and which sit on a rule's bound; the
   loss per bar of each source and way of hearing, at the start and fitted, on the pieces learned from and on those
   held out; and a `SET=` line that reads the hand cases with the fitted numbers (`cargo test -p mo-harmony --release

@@ -744,7 +744,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
         );
     }
     let bounds = fit_bounds();
-    let plan = Plan { steps: o.steps, slope: 1e-6, fall: 1e-7 };
+    // A round stops when the loss falls by less than a hundred-thousandth of itself three steps running: by then each
+    // step's line search reads every piece many times over for almost nothing (a --hold round can crawl so for hours).
+    let plan = Plan { steps: o.steps, slope: 1e-6, fall: 1e-5 };
     println!(
         "Starting from {}; the pull towards it {}.",
         o.from.as_ref().map_or("the hand-set weights".to_owned(), |p| p.display().to_string()),
