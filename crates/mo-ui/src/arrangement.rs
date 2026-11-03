@@ -4,7 +4,7 @@
 //! the processor does, on that thread (`mo_app::shapes`); the picture and its words are put on the page, unless
 //! another song has been picked meanwhile.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -55,12 +55,6 @@ struct Words {
     ruler: Rc<VecModel<ArrLabel>>,
 }
 
-/// The painter on the card it was made on (which card, as `gpu::generation` counts).
-struct OnCard {
-    generation: u64,
-    canvas: Canvas,
-}
-
 /// The song shown last, so the reading thread can stop reading an older song's audio files.
 static SHOWN: AtomicU64 = AtomicU64::new(0);
 
@@ -69,10 +63,8 @@ thread_local! {
     static WORDS: Words = Words::default();
     static READER: RefCell<Option<Newest<(u64, PathBuf)>>> = const { RefCell::new(None) };
     static DRAWER: RefCell<Option<Newest<DrawJob>>> = const { RefCell::new(None) };
-    static CARD: RefCell<Option<OnCard>> = const { RefCell::new(None) };
-    /// The card (as `gpu::generation` counts) that refused to draw the arrangement: on that one the processor draws it
-    /// from then on, and a new card is tried again.
-    static CARD_FAILED: Cell<Option<u64>> = const { Cell::new(None) };
+    /// The painter on the graphics card.
+    static CARD: RefCell<gpu::Painter<Canvas>> = const { RefCell::new(gpu::Painter::new()) };
 }
 
 /// Wires the preview's mouse and view chips, and starts its reading and drawing threads.
@@ -389,22 +381,23 @@ fn redraw(app: &AppWindow) {
     });
 }
 
-/// The graphics card to draw the arrangement on, when there's one it can draw on: not the card that refused to
-/// (`CARD_FAILED`). The screenshots never ask (they draw here, on the processor).
+/// The graphics card to draw the arrangement on, when there's one it can draw on: not one that refused to. The
+/// screenshots never ask (they draw here, on the processor).
 fn usable_card() -> Option<(gpu::Gpu, u64)> {
-    let failed = CARD_FAILED.with(Cell::get);
-    gpu::current().filter(|(_, generation)| failed != Some(*generation))
+    CARD.with(|c| c.borrow().card())
 }
 
-/// A graphics card was handed over (the window opened, or the card was reset): the arrangement is drawn again on it.
+/// A graphics card was handed over (the window opened, or the card was reset): the painter is set up on it, away from
+/// the window's thread, and the arrangement is drawn again on it once it's ready (by the processor until then).
 pub fn graphics_ready(app: &AppWindow) {
+    gpu::prepare(app, "Arrangement", &CARD, |gpu| Canvas::new(&gpu.device, &gpu.queue), redraw);
     redraw(app);
 }
 
 /// The card went (the window closed, or the card was reset): the painter goes, and the picture made on it isn't shown
 /// any more. It's drawn again on the next card, or on the processor.
 pub fn graphics_gone(app: &AppWindow) {
-    CARD.with(|c| *c.borrow_mut() = None);
+    CARD.with(|c| c.borrow_mut().gone());
     let weak = app.as_weak();
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(app) = weak.upgrade() {
@@ -418,27 +411,21 @@ pub fn graphics_gone(app: &AppWindow) {
 /// any more (it went since the shapes were asked for).
 fn draw_on_card(shapes: &Shapes) -> Result<Option<Image>, String> {
     let Some((gpu, generation)) = usable_card() else { return Ok(None) };
-    let texture = CARD.with(|c| -> Result<_, String> {
+    let image = CARD.with(|c| -> Result<_, String> {
         let mut c = c.borrow_mut();
-        if c.as_ref().is_none_or(|on| on.generation != generation) {
-            // The first time, the card builds the shader, which can take a moment.
+        let canvas = c.on(&gpu, generation, |gpu| {
+            // Set up when the card was handed over (`graphics_ready`), so only if that couldn't start does the card
+            // build the shader here, which can take a moment.
             let _doing = crate::watchdog::doing("Arrangement: set up the GPU painter");
-            let canvas = gpu::checked(&gpu.device, || Canvas::new(&gpu.device, &gpu.queue))?;
-            *c = Some(OnCard { generation, canvas });
-        }
-        let Some(on) = c.as_mut() else { unreachable!("made just above") };
+            Canvas::new(&gpu.device, &gpu.queue)
+        })?;
         let _doing = crate::watchdog::doing("Arrangement: draw on the GPU");
-        gpu::checked(&gpu.device, || on.canvas.draw(shapes.size, shapes.scale, shapes.background, &shapes.bytes))
+        let texture =
+            gpu::checked(&gpu.device, || canvas.draw(shapes.size, shapes.scale, shapes.background, &shapes.bytes))?;
+        Image::try_from(texture).map_err(|e| format!("Slint wouldn't show the picture: {e}"))
     });
-    let texture = texture.inspect_err(|_| {
-        // The processor draws it from now on, on this card.
-        CARD_FAILED.with(|f| f.set(Some(generation)));
-        CARD.with(|c| *c.borrow_mut() = None);
-    })?;
-    Image::try_from(texture).map(Some).map_err(|e| {
-        CARD_FAILED.with(|f| f.set(Some(generation)));
-        format!("Slint wouldn't show the picture: {e}")
-    })
+    // If the card or Slint said no, the processor draws it from now on, on this card.
+    image.map(Some).inspect_err(|_| CARD.with(|c| c.borrow_mut().refused(generation)))
 }
 
 /// The shapes of a view for the graphics card, packed on the drawing thread.
@@ -450,11 +437,15 @@ struct Shapes {
     background: u32,
 }
 
-/// A worked out view, ready for the window: made on the drawing thread. Its picture is drawn there already (on the
-/// processor), or its shapes are ready for the card.
+/// What's drawn of a view on the drawing thread: the picture itself (by the processor), or the shapes for the card.
+enum Drawing {
+    Pixels(SharedPixelBuffer<Rgba8Pixel>),
+    Shapes(Shapes),
+}
+
+/// A worked out view, ready for the window: made on the drawing thread.
 struct Picture {
-    pixels: Option<SharedPixelBuffer<Rgba8Pixel>>,
-    shapes: Option<Shapes>,
+    drawing: Drawing,
     header: Vec<ArrLabel>,
     timeline: Vec<ArrLabel>,
     ruler: Vec<ArrLabel>,
@@ -465,16 +456,15 @@ struct Picture {
 impl Picture {
     fn new(frame: Frame, scale: f64, on_card: bool) -> Picture {
         let Frame { scene, labels, header_width, ruler_height, .. } = frame;
-        let (pixels, shapes) = if on_card {
-            let shapes = Shapes {
+        let drawing = if on_card {
+            Drawing::Shapes(Shapes {
                 bytes: scene.pack(),
                 size: scene.pixel_size(scale),
                 scale: scale as f32,
                 background: scene.background,
-            };
-            (None, Some(shapes))
+            })
         } else {
-            (Some(paint(&scene, scale)), None)
+            Drawing::Pixels(paint(&scene, scale))
         };
         let (mut header, mut timeline, mut ruler) = (Vec::new(), Vec::new(), Vec::new());
         for l in labels {
@@ -495,8 +485,7 @@ impl Picture {
             }
         }
         Picture {
-            pixels,
-            shapes,
+            drawing,
             header,
             timeline,
             ruler,
@@ -519,8 +508,8 @@ fn drawn(app: &AppWindow, asked: u64, picture: Picture) {
         return;
     }
     let data = app.global::<ArrangementData>();
-    if let Some(shapes) = &picture.shapes {
-        match draw_on_card(shapes) {
+    match picture.drawing {
+        Drawing::Shapes(shapes) => match draw_on_card(&shapes) {
             Ok(Some(image)) => data.set_picture(image),
             // The card went since this was asked for: drawn again, on the processor.
             Ok(None) => {
@@ -535,11 +524,11 @@ fn drawn(app: &AppWindow, asked: u64, picture: Picture) {
                 redraw(app);
                 return;
             }
+        },
+        Drawing::Pixels(pixels) => {
+            let _doing = crate::watchdog::doing("Arrangement: show the CPU picture");
+            data.set_picture(Image::from_rgba8_premultiplied(pixels));
         }
-    }
-    if let Some(pixels) = picture.pixels {
-        let _doing = crate::watchdog::doing("Arrangement: show the CPU picture");
-        data.set_picture(Image::from_rgba8_premultiplied(pixels));
     }
     let _doing = crate::watchdog::doing("Arrangement: place the words");
     data.set_header_width(picture.header_width);

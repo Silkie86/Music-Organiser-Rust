@@ -6,8 +6,9 @@
 use std::cell::{Cell, RefCell};
 use std::future::Future;
 use std::task::{Context, Poll, Waker};
+use std::thread::LocalKey;
 
-use mo_app::log;
+use mo_app::{background, log};
 use slint::wgpu_30::{WGPUConfiguration, WGPUSettings, wgpu};
 use slint::{ComponentHandle, GraphicsAPI, RenderingState};
 
@@ -122,6 +123,141 @@ pub fn generation() -> u64 {
     GENERATION.with(Cell::get)
 }
 
+/// A view's painter on the graphics card (the galaxy's, the arrangement's): made on a card when the card is handed
+/// over ([`prepare`]) or the first time the view is drawn on it, gone with that card, and not made again on a card that
+/// refused to draw the view. On that card the processor draws the view; the next card is tried again. Each view keeps
+/// one, on the window's thread, for as long as the app is open.
+pub struct Painter<T> {
+    /// The painter, and which card it was made on (as [`generation`] counts).
+    made: Option<(u64, T)>,
+    /// The card that refused to draw the view.
+    refused: Option<u64>,
+    /// The card a painter is being made on away from the window's thread ([`prepare`]).
+    preparing: Option<u64>,
+}
+
+impl<T> Painter<T> {
+    pub const fn new() -> Painter<T> {
+        Painter { made: None, refused: None, preparing: None }
+    }
+
+    /// The card to draw the view on now: the one there is, unless it refused to, or its painter is still being made away
+    /// from the window's thread (the processor draws the view until it's ready).
+    pub fn card(&self) -> Option<(Gpu, u64)> {
+        current().filter(|(_, on)| self.draws_on(*on))
+    }
+
+    /// Whether the view is drawn on card `on` now (see [`Painter::card`]).
+    fn draws_on(&self, on: u64) -> bool {
+        self.refused != Some(on) && self.preparing != Some(on)
+    }
+
+    /// The painter on card `on` (`gpu`): the one made on it already, or one `make` makes now. `Err` says why the card
+    /// wouldn't make it.
+    pub fn on(&mut self, gpu: &Gpu, on: u64, make: impl FnOnce(&Gpu) -> T) -> Result<&mut T, String> {
+        let made = match self.made.take() {
+            Some((made_on, painter)) if made_on == on => (on, painter),
+            old => {
+                // None made yet, or one made on a card that's gone, which goes first.
+                drop(old);
+                (on, checked(&gpu.device, || make(gpu))?)
+            }
+        };
+        Ok(&mut self.made.insert(made).1)
+    }
+
+    /// The painter, if one has been made.
+    pub fn made(&mut self) -> Option<&mut T> {
+        self.made.as_mut().map(|(_, painter)| painter)
+    }
+
+    /// Card `on` refused to draw the view: the painter goes, and the processor draws the view while that card lasts.
+    pub fn refused(&mut self, on: u64) {
+        self.refused = Some(on);
+        self.made = None;
+    }
+
+    /// The card went: the painter goes with it.
+    pub fn gone(&mut self) {
+        self.made = None;
+    }
+
+    /// Whether a painter for card `on` is still wanted: it's the card there is now, it hasn't refused, and no painter has
+    /// been made on it yet.
+    fn wants(&self, on: u64) -> bool {
+        on == generation() && self.refused != Some(on) && self.made.as_ref().is_none_or(|(made_on, _)| *made_on != on)
+    }
+}
+
+impl<T> Default for Painter<T> {
+    fn default() -> Painter<T> {
+        Painter::new()
+    }
+}
+
+impl<T> Drop for Painter<T> {
+    /// A painter is only let go of here when the window's thread ends, as the app closes. One still made then (if the
+    /// window went without letting the card go first) is left for the system to free with the app: wgpu can't free it
+    /// that late, as what it needs has gone already, and in a debug build it would stop the app on the way out.
+    fn drop(&mut self) {
+        if let Some(made) = self.made.take() {
+            std::mem::forget(made);
+        }
+    }
+}
+
+/// Makes a view's painter (with `make`) on the card there is now, away from the window's thread: building its shader
+/// can take the card a moment, which the window shouldn't wait for. Meanwhile the processor draws the view; once the
+/// painter is in `slot` (the view's), `ready` draws the view again, on the card. If the card says no, the processor
+/// goes on drawing the view while that card lasts, as when it refuses to draw. `name` is the view's, for the log.
+pub fn prepare<T: Send + 'static>(
+    app: &AppWindow,
+    name: &'static str,
+    slot: &'static LocalKey<RefCell<Painter<T>>>,
+    make: impl FnOnce(&Gpu) -> T + Send + 'static,
+    ready: fn(&AppWindow),
+) {
+    let Some((gpu, on)) = current() else { return };
+    if slot.with(|p| {
+        let p = p.borrow();
+        !p.wants(on) || p.preparing == Some(on)
+    }) {
+        return;
+    }
+    let weak = app.as_weak();
+    let started = background::spawn(&format!("{name} painter"), move || {
+        let made = checked(&gpu.device, || make(&gpu));
+        // Kept on the window's thread, where the view draws, if it's still wanted there.
+        let _ = slint::invoke_from_event_loop(move || {
+            slot.with(|p| {
+                let mut p = p.borrow_mut();
+                if p.preparing == Some(on) {
+                    p.preparing = None;
+                }
+                match made {
+                    Ok(painter) if p.wants(on) => p.made = Some((on, painter)),
+                    Ok(_) => {}
+                    Err(e) => {
+                        log::error(
+                            name,
+                            &format!("The graphics card couldn't set up its painter, so the processor draws it: {e}"),
+                        );
+                        p.refused(on);
+                    }
+                }
+            });
+            if let Some(app) = weak.upgrade() {
+                ready(&app);
+            }
+        });
+    });
+    match started {
+        Ok(_) => slot.with(|p| p.borrow_mut().preparing = Some(on)),
+        // The view makes it itself, when it's first drawn on the card.
+        Err(e) => log::info(name, &format!("Couldn't set up the graphics card's painter ahead of time: {e}")),
+    }
+}
+
 /// Runs `work` on the card, and says what went wrong if the card refused it (a mistake in a shader, or no memory left
 /// on the card), instead of the app stopping.
 pub fn checked<T>(device: &wgpu::Device, work: impl FnOnce() -> T) -> Result<T, String> {
@@ -145,5 +281,71 @@ pub(crate) fn wait<T>(f: impl Future<Output = T>) -> T {
             return v;
         }
         std::thread::yield_now();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What a view keeps of its painter, here without a card (the tests have none): the painter made on a card stays
+    /// until that card goes or refuses, and none is wanted for a card that isn't here, already has one, or refused.
+    #[test]
+    fn a_painter_goes_with_its_card() {
+        let mut p: Painter<&str> = Painter::new();
+        assert!(p.card().is_none(), "no card in the tests");
+        let now = generation();
+        assert!(p.wants(now) && p.draws_on(now));
+        assert!(!p.wants(now + 1), "not for a card that isn't here");
+        p.made = Some((now, "painter"));
+        assert!(!p.wants(now), "one made already");
+        assert_eq!(p.made().copied(), Some("painter"));
+        p.gone();
+        assert!(p.made().is_none());
+        assert!(p.wants(now), "wanted again once the card comes back");
+        p.made = Some((now, "painter"));
+        p.refused(now);
+        assert!(p.made().is_none());
+        assert!(!p.wants(now) && !p.draws_on(now), "not on a card that refused");
+        assert!(p.draws_on(now + 1), "the next card is tried again");
+    }
+
+    /// While a painter is being made away from the window's thread, the processor draws the view.
+    #[test]
+    fn the_processor_draws_until_the_painter_is_ready() {
+        let mut p: Painter<&str> = Painter::new();
+        let now = generation();
+        p.preparing = Some(now);
+        assert!(!p.draws_on(now));
+        assert!(p.wants(now), "the painter being made is still wanted when it comes");
+        p.preparing = None;
+        p.made = Some((now, "painter"));
+        assert!(p.draws_on(now));
+    }
+
+    /// A painter is made once on a card, and again on the next one. Needs a graphics card (a software one will do), so
+    /// it's run by hand.
+    #[test]
+    #[ignore]
+    fn a_painter_is_made_once_a_card() {
+        let Some((device, queue)) = crate::canvas::testing::card() else {
+            eprintln!("No graphics card here, not even a software one: nothing to make a painter on");
+            return;
+        };
+        let gpu = Gpu { device, queue };
+        let mut p: Painter<u32> = Painter::new();
+        let mut made = 0;
+        for _ in 0..3 {
+            let painter = p.on(&gpu, 1, |_| {
+                made += 1;
+                made
+            });
+            assert_eq!(painter.copied(), Ok(1));
+        }
+        let painter = p.on(&gpu, 2, |_| {
+            made += 1;
+            made
+        });
+        assert_eq!(painter.copied(), Ok(2), "made again on the next card");
     }
 }

@@ -447,6 +447,21 @@ mod tests {
         }
     }
 
+    /// The card puts a sharp shape's edges on whole pixels by the processor's rule (`mo_app::shapes::crisp`), or the
+    /// two pictures would differ by a pixel along the edges. The look test checks the pictures, but needs a card; this
+    /// checks the shader still has the rule where there's none (as on the computers that check each pull request).
+    #[test]
+    fn the_shader_puts_sharp_edges_on_pixels_as_the_processor_does() {
+        // crisp: an edge at v points goes to ceil(v * scale - 0.5) pixels.
+        assert_eq!(shapes::crisp([0.5, 0.5, 1.5, 2.5], 1.0), Some([0.0, 0.0, 1.0, 2.0]));
+        assert!(SHADER.contains("let s = frame.scale;\n    let px = at * s;"), "the shader's edges aren't in pixels");
+        assert!(
+            SHADER.contains("if (kind == RECT) {")
+                && SHADER.contains("p = mix(ceil(px.xy - vec2(0.5)), ceil(px.zw - vec2(0.5)), c);"),
+            "the shader's sharp edges aren't on whole pixels as shapes::crisp puts them"
+        );
+    }
+
     /// Slint makes its card with WebGL 2's limits (raised only for the size of a picture), so what a shape takes must
     /// fit them, or the card would refuse to draw on Solomon's PC.
     #[test]
