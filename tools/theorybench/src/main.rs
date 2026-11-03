@@ -57,7 +57,8 @@ theorybench tables <labelled.jsonl>... [--write <tables.rs>]
   --write    fits on every song and writes the weights file
   --shipped  scores the finder built in, as it is (folds 1 to 4; nothing fitted), to compare a refit with
   --rescale  fits only each stream's scale, the minor weight and the calibration of the finder built in, on Solomon's
-             own pieces alone (rule 5's exception); its thresholds are kept
+             own pieces alone (rule 5's exception); its thresholds are kept. Each fit is pulled back toward the
+             finder built in, to the last point where every hand case keeps its gate
   packs      Solomon's MIDI packs as labelled music, on his computer: each part of each file whose name gives one key
   --out      where to write them: a .jsonl outside this repository
   chords     how often each chord reader names the labelled chord, scored as mir_eval scores it, then the whole

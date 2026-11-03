@@ -47,7 +47,9 @@
 //!   sound, a calibration term they use, and for the minor weight, 30 labelled major and 30 minor. Pieces with the same
 //!   notes in other keys count once, and share one piece's weight in a fit. The calibration's curve over bars moves
 //!   only with full mixes among them, since a part heard alone adds its own offset to it. The ranges draw a pack's
-//!   files again together.
+//!   files again together. Every rescaled finder a run scores or writes is pulled back toward the one built in
+//!   ([`pull_back`]): its weights and calibration together, to the largest share of the way to the fit at which every
+//!   hand case keeps its gate.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -90,6 +92,9 @@ const LAMBDA_DELTA: f64 = 1e-4;
 /// `--rescale` fits a stream's scale, or a calibration number, only when at least this many pieces sound it; with
 /// fewer, it's held at its built-in number (a few pieces would push it anywhere).
 const SUPPORT: usize = answerfit::MIN_SONGS;
+/// How finely a rescaled finder is pulled back ([`pull_back`]): the way from the numbers built in to the fitted ones
+/// is cut into this many steps, of 0.05 each.
+const PULL_STEPS: u32 = 20;
 
 /// FNV-1a, 64 bits: the fold hash, the same on every computer. The finder hashes bars with FNV-1a too, but this is
 /// its own copy: the folds must never move, even if how the finder tells bars apart changes.
@@ -994,6 +999,124 @@ fn scales_line(model: &Model) -> String {
     format!("{}; minor weight {minor:.3}{kept}", each.join(", "))
 }
 
+/// A rescaled finder pulled back toward the one built in ([`pull_back`]).
+struct Pulled {
+    /// How far its numbers went from the built-in ones toward the fitted ones: 1 is the fit itself, 0 the finder
+    /// built in.
+    t: f64,
+    model: Model,
+    calibration: Calibration,
+    /// The gates broken one step further toward the fit, which stopped it there, and that step (none at 1).
+    stopped_by: Option<(f64, Vec<String>)>,
+}
+
+/// The number `t` of the way from `from` to `to`: `from` itself at 0 and `to` itself at 1, to the last bit.
+fn toward(from: f64, to: f64, t: f64) -> f64 {
+    if t <= 0.0 {
+        from
+    } else if t >= 1.0 {
+        to
+    } else {
+        from + t * (to - from)
+    }
+}
+
+/// A rescaled finder's weights and calibration with each number `t` of the way from its built-in value to the fitted
+/// one.
+fn pulled_to(model: &Model, calibration: &Calibration, t: f64) -> (Model, Calibration) {
+    let mut weights = model.weights;
+    for (w, built_in) in weights.iter_mut().zip(keyfind::SHIPPED.weights) {
+        *w = toward(*built_in, *w, t);
+    }
+    let mut calibration = *calibration;
+    for (c, built_in) in calibration.0.iter_mut().zip(keyfind::SHIPPED.calibration.0) {
+        *c = toward(built_in, *c, t);
+    }
+    (Model { weights }, calibration)
+}
+
+/// Pulls a rescaled finder back toward the one built in, as little as the hand cases allow: to the largest share of
+/// the way from the built-in numbers to the fitted ones (1, 0.95, 0.9 and so on down to 0: [`PULL_STEPS`]) at which
+/// every hand case keeps its gate, its weights and calibration pulled back together and read with the thresholds
+/// built in (a rescale keeps them). Solomon's packs can teach a lean the gates forbid: nearly all minor, they pushed
+/// the minor weight up until plain major cases read as unclear or minor. Pulled back, the finder keeps as much of
+/// what they teach as the gates allow. At 0 it's the finder built in, which keeps every gate (mo-harmony's tests
+/// check that), so only a build whose tests fail finds no share.
+fn pull_back(model: &Model, calibration: &Calibration) -> Result<Pulled, String> {
+    let mut stopped_by = None;
+    for step in (0..=PULL_STEPS).rev() {
+        let t = f64::from(step) / f64::from(PULL_STEPS);
+        let (model, calibration) = pulled_to(model, calibration, t);
+        let finder = keyfind::Model {
+            weights: &model.weights,
+            calibration: &calibration,
+            thresholds: keyfind::SHIPPED.thresholds,
+            not_tonal_below: keyfind::SHIPPED.not_tonal_below,
+        };
+        let verdicts = Book::read(&finder)?.verdicts();
+        if verdicts.iter().all(Verdict::passes_gate) {
+            return Ok(Pulled { t, model, calibration, stopped_by });
+        }
+        stopped_by = Some((t, verdicts.iter().flat_map(|v| v.broken().iter().cloned()).collect()));
+    }
+    Err("pulled back all the way, the finder built in breaks a hand case's gate (mo-harmony's tests say which)".into())
+}
+
+/// How far a rescaled finder was pulled back, and what stopped it going further, as a run prints it under the scales
+/// it was pulled back to.
+fn print_pulled(pulled: &Pulled, indent: &str) {
+    if let Some((t, broken)) = &pulled.stopped_by {
+        println!("{indent}one step further, at {t:.2}, it broke:");
+        for gate in broken {
+            println!("{indent}  {gate}");
+        }
+    }
+}
+
+/// Pulls each fold's rescaled finder back ([`pull_back`]), with the calibration that fold is scored with, prints how
+/// far, and scores the fold's cases again with what it was pulled back to. Gives how far each fold was pulled back.
+fn pull_back_folds(
+    cases: &[Case],
+    songs: &[Song],
+    held: &mut Held,
+    models: &mut [(usize, Model)],
+    calibrations: &mut HashMap<usize, Calibration>,
+) -> Result<Vec<f64>, String> {
+    let mut shares = Vec::with_capacity(models.len());
+    for (f, model) in models.iter_mut() {
+        let f = *f;
+        let calibration =
+            calibrations.get_mut(&f).ok_or_else(|| format!("fold {f} has no calibration to pull back"))?;
+        let pulled = pull_back(model, calibration)?;
+        println!(
+            "  fold {f}: pulled back to {:.2} of the way to its fit; scales: {}",
+            pulled.t,
+            scales_line(&pulled.model)
+        );
+        print_pulled(&pulled, "    ");
+        shares.push(pulled.t);
+        *calibration = pulled.calibration;
+        *model = pulled.model;
+        let model = &*model;
+        held.par_iter_mut()
+            .zip(cases)
+            .filter(|(_, c)| songs.get(c.song).is_some_and(|s| s.fold == f))
+            .for_each(|(h, c)| *h = Some(model.scores(&c.ev)));
+    }
+    Ok(shares)
+}
+
+/// How far some finders were pulled back, as the run log says it: "0.50", or "0.50 to 0.55".
+fn pulled_range(shares: &[f64]) -> String {
+    let low = shares.iter().copied().fold(f64::INFINITY, f64::min);
+    let high = shares.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    match (low.is_finite(), high > low) {
+        (false, _) => "(no folds)".to_owned(),
+        (true, false) => format!("{low:.2}"),
+        (true, true) => format!("{low:.2} to {high:.2}"),
+    }
+}
+
 /// The average surprise (negative log-likelihood) of the labelled keys under scores, weighted.
 fn weighted_surprise(cases: &[Case], scores: &[Option<[f64; 24]>], weights: &[f64]) -> f64 {
     let (mut total, mut loss) = (0.0, 0.0);
@@ -1447,9 +1570,22 @@ pub fn run(args: &[String]) -> Result<(), String> {
             fitted.steps,
             if measured > 0 { format!(", and the {measured} songs only measured") } else { String::new() }
         );
-        if rescale {
+        // A rescale scores fold 0 with its fit pulled back, the weights and the calibration together.
+        let (model, calibration, run) = if rescale {
             println!("Scales: {}.", scales_line(&model));
-        }
+            let pulled = pull_back(&model, &calibration)?;
+            println!(
+                "Pulled back to {:.2} of the way to the fit, the last point where every hand case keeps its gate; \
+                 scales: {}.",
+                pulled.t,
+                scales_line(&pulled.model)
+            );
+            print_pulled(&pulled, "  ");
+            print_calibration("Calibration, pulled back with it", &pulled.calibration);
+            (pulled.model, pulled.calibration, format!("--final, pulled back to {:.2}", pulled.t))
+        } else {
+            (model, calibration, "--final".to_owned())
+        };
         let unseen = |c: &Case| songs.get(c.song).is_some_and(Song::unseen_by_final);
         let chances: Held =
             cases.par_iter().map(|c| unseen(c).then(|| chances_of(c, &model.scores(&c.ev), &calibration))).collect();
@@ -1458,18 +1594,29 @@ pub fn run(args: &[String]) -> Result<(), String> {
         for (g, source) in sources.iter().enumerate().skip(1) {
             source_report(source, &cases, &chances, |c| unseen(c) && group(c) == g, &inputs);
         }
-        log_run(&label("--final"), &summary, &opts)?;
+        log_run(&label(&run), &summary, &opts)?;
         let finder = finder(&model.weights, &calibration, &fitted_answers);
         hand_cases(&[("fitted on folds 1 to 4".to_owned(), finder)], &show)?;
     } else if let Some(path) = write {
         // A rescale keeps the credits of the weights it scales: read them first, so a wrong file stops the run now.
         let earlier = if rescale { Some(earlier_credits(&path)?) } else { None };
         println!("Every fold held out in turn (fold {FROZEN} included: these weights are the ones that ship):");
-        let (held, _) = cross_validate(&cases, &songs, &every, &opts)?;
+        let (mut held, mut models) = cross_validate(&cases, &songs, &every, &opts)?;
         let calibration = calibrate(&cases, &songs, &held, |_| true, &opts)?;
         print_calibration("Calibration", &calibration);
-        let chances: Held =
-            cases.par_iter().zip(&held).map(|(c, h)| h.as_ref().map(|s| chances_of(c, s, &calibration))).collect();
+        // Every fold is scored with that calibration. A rescale pulls each fold's fit back with it, as it pulls back
+        // what it writes.
+        let mut calibrations: HashMap<usize, Calibration> = every.iter().map(|&f| (f, calibration)).collect();
+        let mut run = "--write".to_owned();
+        if rescale {
+            let shares = pull_back_folds(&cases, &songs, &mut held, &mut models, &mut calibrations)?;
+            run = format!("--write, its folds pulled back to {}", pulled_range(&shares));
+        }
+        let chances: Held = cases
+            .par_iter()
+            .zip(&held)
+            .map(|(c, h)| h.as_ref().map(|s| chances_of(c, s, calibrations.get(&fold(c)).unwrap_or(&calibration))))
+            .collect();
         let fitted_answers = fit_answers(&cases, &chances, taught, &opts);
         print_answers(
             "Answers (the ones written; each fold below is graded with those fitted on the others)",
@@ -1483,13 +1630,32 @@ pub fn run(args: &[String]) -> Result<(), String> {
         for (g, source) in sources.iter().enumerate().skip(1) {
             source_report(source, &cases, &chances, |c| group(c) == g, &inputs);
         }
-        log_run(&label("--write"), &summary, &opts)?;
+        log_run(&label(&run), &summary, &opts)?;
         let (model, fitted, n) = fit_model(&cases, &songs, &learn, &opts)?;
         println!();
         println!("Fitted on every song: {n} cases, {} Newton steps.", fitted.steps);
-        if rescale {
-            println!("Scales: {}.", scales_line(&model));
-        }
+        // A rescale writes its fit pulled back, the weights and the calibration together.
+        let (model, calibration, rescaled) = match &earlier {
+            Some(earlier) => {
+                println!("Scales: {}.", scales_line(&model));
+                let pulled = pull_back(&model, &calibration)?;
+                println!(
+                    "Pulled back to {:.2} of the way to the fit, the last point where every hand case keeps its \
+                     gate; scales: {}.",
+                    pulled.t,
+                    scales_line(&pulled.model)
+                );
+                print_pulled(&pulled, "  ");
+                print_calibration("Calibration, pulled back with it (the one written)", &pulled.calibration);
+                if pulled.t <= 0.0 {
+                    return Err("pulled back all the way, only the numbers built in keep every hand case's gate: \
+                                nothing to write"
+                        .into());
+                }
+                (pulled.model, pulled.calibration, Some(Rescaled { earlier, pulled: pulled.t }))
+            }
+            None => (model, calibration, None),
+        };
         let shipped = finder(&model.weights, &calibration, &fitted_answers);
         if !hand_cases(&[("fitted on every song".to_owned(), shipped)], &show)? {
             return Err("these weights break a hand case's gate (above), so they aren't written".into());
@@ -1501,22 +1667,32 @@ pub fn run(args: &[String]) -> Result<(), String> {
             &opts,
             &learned_from,
             (scored, &summary),
-            earlier.as_deref(),
+            rescaled.as_ref(),
         );
         std::fs::write(&path, file).map_err(|e| format!("{}: {e}", path.display()))?;
         println!("Written to {}.", path.display());
     } else {
         println!("Folds 1 to 4, each held out in turn (fold {FROZEN} isn't touched):");
-        let (held, models) = cross_validate(&cases, &songs, &design, &opts)?;
+        let (mut held, mut models) = cross_validate(&cases, &songs, &design, &opts)?;
         // Each fold's chances come from a calibration fitted on the other folds' held-out scores.
         let mut calibrations = HashMap::new();
         for &f in &design {
             let c = calibrate(&cases, &songs, &held, |c| fold(c) != f && in_design(c), &opts)?;
             calibrations.insert(f, c);
         }
+        // A rescale pulls each fold's fit back, its weights and that calibration together, and scores the fold with
+        // what it was pulled back to.
+        if rescale {
+            pull_back_folds(&cases, &songs, &mut held, &mut models, &mut calibrations)?;
+        }
         let all = calibrate(&cases, &songs, &held, in_design, &opts)?;
         print_calibration(
-            "Calibration (on all four folds; each fold is scored with one fitted on the other three)",
+            if rescale {
+                "Calibration (on all four folds' scores after the pull-back; each fold is scored with one fitted on \
+                 the other three and pulled back with its fit)"
+            } else {
+                "Calibration (on all four folds; each fold is scored with one fitted on the other three)"
+            },
             &all,
         );
         let chances: Held = cases
@@ -2196,8 +2372,16 @@ fn credits_in(text: &str, path: &std::path::Path) -> Result<Vec<String>, String>
     Ok(lines)
 }
 
-/// The weights file. `earlier` holds, for a rescale, the lines of the file it scales that say what that was fitted on
-/// and credit its sources ([`earlier_credits`]): they stay, and the rescale is told after them.
+/// What a rescale's weights file says beyond a plain fit's.
+struct Rescaled<'a> {
+    /// The lines of the file it scales that say what that was fitted on and credit its sources ([`earlier_credits`]):
+    /// they stay, and the rescale is told after them.
+    earlier: &'a [String],
+    /// How far its numbers were pulled back toward the built-in ones ([`pull_back`]): 1 is the fit itself.
+    pulled: f64,
+}
+
+/// The weights file; `rescaled` for a rescale.
 fn weights_file(
     model: &Model,
     calibration: &Calibration,
@@ -2205,9 +2389,10 @@ fn weights_file(
     opts: &Options,
     learned: &[Learned],
     (scored, summary): (&str, &Summary),
-    earlier: Option<&[String]>,
+    rescaled: Option<&Rescaled>,
 ) -> String {
     let penalty = opts.lambda_delta.map_or("none fitted".to_owned(), |l| format!("penalty {l}"));
+    let earlier = rescaled.map(|r| r.earlier);
     let mut out = String::new();
     out.push_str(
         "//! The key finder's weights. Made by `theorybench keyfit`; don't edit by hand, except the last two lines when\n\
@@ -2232,7 +2417,7 @@ fn weights_file(
     }
     // A paragraph of its own: right after the list, it would be read as part of its last line.
     out.push_str("//!\n//! Only these numbers come from them.\n");
-    let (pieces, by) = if earlier.is_some() {
+    let (pieces, how) = if let Some(rescaled) = rescaled {
         let _ = writeln!(
             out,
             "//!\n//! Then rescaled on {}: each stream's weights scaled by one number, and the minor weight and the\n\
@@ -2240,15 +2425,18 @@ fn weights_file(
             learned.iter().map(|l| l.how.as_str()).collect::<Vec<_>>().join(", "),
             learned.iter().map(|l| l.credit.as_str()).collect::<Vec<_>>().join("; ")
         );
+        let _ = writeln!(
+            out,
+            "//! Pulled back to {:.2} of the way to the fit, the last point where every hand case keeps its gate: each\n\
+             //! weight and calibration number is its built-in value moved that share of the way to the fitted one.",
+            rescaled.pulled
+        );
         let _ = writeln!(out, "//! Scales: {}.", scales_line(model));
-        ("pieces", "pack")
+        ("pieces", "cross-validation by pack, every fold, each fold's fit pulled back the same way")
     } else {
-        ("songs", "song")
+        ("songs", "cross-validation by song, every fold")
     };
-    let _ = writeln!(
-        out,
-        "//!\n//! Right on {scored} {pieces} held out of the fit (cross-validation by {by}, every fold):"
-    );
+    let _ = writeln!(out, "//!\n//! Right on {scored} {pieces} held out of the fit ({how}):");
     for line in &summary.lines {
         let _ = writeln!(out, "//! - {line}");
     }
@@ -2930,21 +3118,155 @@ mod tests {
             &opts,
             &[packs],
             ("packs", &summary),
-            Some(&credits),
+            Some(&Rescaled { earlier: &credits, pulled: 0.55 }),
         );
         assert!(
             written.contains(
                 "//! - B: CC0\n//!\n//! Only these numbers come from them.\n//!\n//! Then rescaled on packs:"
             )
         );
-        assert!(written.contains("//! Scales: Tune 1.500, Harmony 1.000"), "{written}");
+        // How far it was pulled back, then the scales of the numbers written.
         assert!(
-            written.contains("//! Right on packs pieces held out of the fit (cross-validation by pack, every fold):")
+            written.contains(
+                "nothing else comes from them. Solomon's own MIDI packs, on his computer: only the stream scales, the \
+                 minor weight and the calibration, by his leave (2026-11-01, rule 5).\n//! Pulled back to 0.55 of \
+                 the way to the fit, the last point where every hand case keeps its gate: each\n//! weight and \
+                 calibration number is its built-in value moved that share of the way to the fitted one.\n//! \
+                 Scales: Tune 1.500, Harmony 1.000"
+            ),
+            "{written}"
+        );
+        assert!(
+            written.contains(
+                "//! Right on packs pieces held out of the fit (cross-validation by pack, every fold, each fold's fit \
+                 pulled back the same way):\n"
+            ),
+            "{written}"
         );
         let mut names: Vec<String> = keyfind::LEARNED_FROM.iter().map(|n| format!("{n:?}")).collect();
         names.push("\"packs\"".into());
         assert!(written.contains(&format!("LEARNED_FROM: &[&str] = &[{}];", names.join(", "))), "{written}");
         assert!(written.contains("kept as they were\n/// fitted before the rescale"), "{written}");
         assert!(written.contains(&format!("HASH_VERSION: u32 = {};", KEY_FINDER_VERSION + 1)));
+    }
+
+    /// The finder built in with its minor weight moved by `push` and its first calibration number by a tenth of it, as
+    /// a rescale on loops nearly all minor moves them.
+    fn pushed(push: f64) -> (Model, Calibration) {
+        let mut weights = *keyfind::SHIPPED.weights;
+        weights[MINOR] += push;
+        let mut calibration = *keyfind::SHIPPED.calibration;
+        calibration.0[0] += push / 10.0;
+        (Model { weights }, calibration)
+    }
+
+    /// Whether two finders' numbers are the same, to the last bit.
+    fn same_numbers((a, ac): (&Model, &Calibration), (b, bc): (&Model, &Calibration)) -> bool {
+        let bits = |x: &[f64], y: &[f64]| x.iter().zip(y).all(|(x, y)| x.to_bits() == y.to_bits());
+        bits(&a.weights, &b.weights) && bits(&ac.0, &bc.0)
+    }
+
+    /// Whether every hand case keeps its gate with these weights and calibration, and the thresholds built in.
+    fn keeps_every_gate(model: &Model, calibration: &Calibration) -> bool {
+        let finder = keyfind::Model { weights: &model.weights, calibration, ..keyfind::SHIPPED };
+        Book::read(&finder).unwrap().verdicts().iter().all(Verdict::passes_gate)
+    }
+
+    #[test]
+    fn a_pulled_back_number_is_part_of_the_way_from_the_built_in_one_and_exactly_at_the_ends() {
+        assert_eq!(toward(0.1, 0.3, 0.0).to_bits(), 0.1f64.to_bits());
+        assert_eq!(toward(0.1, 0.3, 1.0).to_bits(), 0.3f64.to_bits());
+        assert_eq!(toward(1.0, 3.0, 0.5), 2.0);
+        assert_eq!(toward(-2.0, 2.0, 0.25), -1.0);
+        // Every number moves the same share of its way, the weights and the calibration together; those the fit
+        // didn't move stay as built in.
+        let (fit, calibration) = pushed(4.0);
+        let (model, pulled) = pulled_to(&fit, &calibration, 0.5);
+        let (weights, built_in) = (keyfind::SHIPPED.weights, keyfind::SHIPPED.calibration.0);
+        for i in (0..FEATURES).filter(|&i| i != MINOR) {
+            assert_eq!(model.weights[i].to_bits(), weights[i].to_bits(), "weight {i}");
+        }
+        assert!((model.weights[MINOR] - (weights[MINOR] + 2.0)).abs() < 1e-12);
+        assert!((pulled.0[0] - (built_in[0] + 0.2)).abs() < 1e-12);
+        assert!(pulled.0.iter().zip(built_in).skip(1).all(|(a, b)| a.to_bits() == b.to_bits()));
+        // At the ends, the numbers built in and the fit's, to the last bit.
+        let shipped = Model { weights: *weights };
+        assert!(same_numbers(
+            (&pulled_to(&fit, &calibration, 0.0).0, &pulled_to(&fit, &calibration, 0.0).1),
+            (&shipped, keyfind::SHIPPED.calibration)
+        ));
+        assert!(same_numbers(
+            (&pulled_to(&fit, &calibration, 1.0).0, &pulled_to(&fit, &calibration, 1.0).1),
+            (&fit, &calibration)
+        ));
+    }
+
+    #[test]
+    fn a_rescale_is_pulled_back_to_the_last_step_where_every_hand_case_keeps_its_gate() {
+        // A fit that keeps every gate stays where it is: the finder built in, for one.
+        let shipped = Model { weights: *keyfind::SHIPPED.weights };
+        let same = pull_back(&shipped, keyfind::SHIPPED.calibration).unwrap();
+        assert_eq!(same.t, 1.0);
+        assert!(same.stopped_by.is_none());
+        assert!(same_numbers((&same.model, &same.calibration), (&shipped, keyfind::SHIPPED.calibration)));
+        // The minor weight pushed further and further up: the gates hold up to some point on the way to the fit.
+        let mut part_way = 0;
+        for push in [0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0] {
+            let (fit, calibration) = pushed(push);
+            let pulled = pull_back(&fit, &calibration).unwrap();
+            // Its numbers are that share of the way to the fit, and every gate holds there...
+            let (model, c) = pulled_to(&fit, &calibration, pulled.t);
+            assert!(same_numbers((&pulled.model, &pulled.calibration), (&model, &c)), "{push}");
+            assert!(keeps_every_gate(&pulled.model, &pulled.calibration), "{push}");
+            // ... but not one step further toward the fit, where what broke is said.
+            match &pulled.stopped_by {
+                None => assert_eq!(pulled.t, 1.0, "{push}"),
+                Some((next, broken)) => {
+                    assert!((next - pulled.t - 0.05).abs() < 1e-12, "{push}: {next} after {}", pulled.t);
+                    let (model, c) = pulled_to(&fit, &calibration, *next);
+                    assert!(!broken.is_empty() && !keeps_every_gate(&model, &c), "{push}");
+                }
+            }
+            part_way += usize::from(pulled.t > 0.0 && pulled.t < 1.0);
+        }
+        assert!(part_way > 0, "no push was pulled back part of the way");
+        // Pushed so far that no step toward the fit keeps every gate: pulled back all the way, to the numbers built in.
+        let (fit, calibration) = pushed(1e6);
+        let pulled = pull_back(&fit, &calibration).unwrap();
+        assert_eq!((pulled.t, pulled.stopped_by.as_ref().map(|s| s.0)), (0.0, Some(0.05)));
+        assert!(same_numbers((&pulled.model, &pulled.calibration), (&shipped, keyfind::SHIPPED.calibration)));
+    }
+
+    #[test]
+    fn each_folds_rescale_is_pulled_back_and_its_fold_scored_again() {
+        // Tunes in folds 1, 2 and 3. Fold 1's fit is pushed so far it's pulled back all the way; fold 2's is the
+        // finder built in, which isn't pulled back; no fit scores fold 3.
+        let cases = tune_cases(Cut::Loop);
+        let songs: Vec<Song> =
+            learned_songs(60).into_iter().enumerate().map(|(i, s)| Song { fold: 1 + i % 3, ..s }).collect();
+        let (far, far_calibration) = pushed(1e6);
+        let shipped = Model { weights: *keyfind::SHIPPED.weights };
+        let mut models = vec![(1, far), (2, Model { weights: *keyfind::SHIPPED.weights })];
+        let mut calibrations = HashMap::from([(1, far_calibration), (2, *keyfind::SHIPPED.calibration)]);
+        let mut held: Held = vec![Some([0.0; 24]); cases.len()];
+        let shares = pull_back_folds(&cases, &songs, &mut held, &mut models, &mut calibrations).unwrap();
+        assert_eq!(shares, [0.0, 1.0]);
+        for (f, model) in &models {
+            assert!(same_numbers((model, &calibrations[f]), (&shipped, keyfind::SHIPPED.calibration)), "fold {f}");
+        }
+        for (case, h) in cases.iter().zip(&held) {
+            let want = if songs[case.song].fold == 3 { [0.0; 24] } else { shipped.scores(&case.ev) };
+            assert_eq!(*h, Some(want), "song {}", case.song);
+        }
+        // A fold with no calibration to pull back with stops the run.
+        let mut models = vec![(3, Model { weights: *keyfind::SHIPPED.weights })];
+        assert!(pull_back_folds(&cases, &songs, &mut held, &mut models, &mut calibrations).is_err());
+    }
+
+    #[test]
+    fn the_run_log_says_how_far_the_folds_were_pulled_back() {
+        assert_eq!(pulled_range(&[0.5, 0.5, 0.5]), "0.50");
+        assert_eq!(pulled_range(&[0.55, 0.5, 0.5, 0.55, 0.5]), "0.50 to 0.55");
+        assert_eq!(pulled_range(&[1.0]), "1.00");
     }
 }
