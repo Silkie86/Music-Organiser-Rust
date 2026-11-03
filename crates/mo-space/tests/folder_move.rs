@@ -414,6 +414,70 @@ fn moving_back_brings_the_right_files_when_the_copy_holds_temporary_files_a_try_
     for n in 0..12 {
         assert_eq!(fs::read_to_string(presets.join(format!("{n}.fxp"))).unwrap(), "new", "{n}.fxp");
     }
+    // The temporary files aren't the plugin's: they aren't brought back with its files.
+    assert!(part_files(&presets).is_empty(), "{:?}", part_files(&presets));
+}
+
+#[test]
+fn moving_back_puts_your_newer_file_back_when_the_one_replacing_it_cant_go_in() {
+    let dir = fixtures("mo-space-move-back-put-back");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    write(&c, "Presets/Lead.fxp", "first");
+    fs::create_dir_all(&d).unwrap();
+    let stop = AtomicBool::new(false);
+    let from = s(&c.join("Presets"));
+    let moved = move_folder(&from, &s(&d), 5, whose(), &ROOMY, &[], &nothing, &stop).unwrap();
+    // The other drive's file changes, but keeps an older time than the old copy's: the old copy's is newer, so it's
+    // kept aside as the other drive's goes in.
+    let (copy, old) = (d.join("Presets"), PathBuf::from(&moved.old_copy));
+    fs::write(copy.join("Lead.fxp"), "update").unwrap();
+    set_time(&copy.join("Lead.fxp"), time(&old.join("Lead.fxp")) - Duration::from_secs(3600));
+
+    // Something takes the file copied into the old copy away before it goes in.
+    let taken = |_: u64| {
+        let _ = fs::remove_file(old.join("Lead.fxp.mo-copying"));
+    };
+    let result = move_back(&moved, &ROOMY, &taken, &stop);
+    // Yours is back where it was, with no folder of kept files left beside it: nothing was moved.
+    let Err(CantMove::Failed(why)) = &result else { panic!("{result:?}") };
+    assert!(why.contains("Lead.fxp"), "{why}");
+    assert_eq!(fs::read_to_string(old.join("Lead.fxp")).unwrap(), "first");
+    assert!(!Path::new(&format!("{from}{KEPT_SUFFIX}")).exists());
+    assert!(is_link(Path::new(&from)));
+    assert!(part_files(&old).is_empty());
+
+    // Tried again, it finishes, keeping yours.
+    let back = move_back(&moved, &ROOMY, &nothing, &stop).unwrap();
+    assert_eq!(back.kept, ["Lead.fxp"]);
+    assert_eq!(fs::read_to_string(Path::new(&back.kept_in).join("Lead.fxp")).unwrap(), "first");
+    assert_eq!(fs::read_to_string(Path::new(&from).join("Lead.fxp")).unwrap(), "update");
+}
+
+#[test]
+fn two_names_that_differ_only_in_capitals_both_come_back_where_the_drive_tells_them_apart() {
+    let dir = fixtures("mo-space-move-back-twins");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    write(&c, "Presets/Lead.fxp", "first");
+    write(&c, "Presets/lead.fxp", "second");
+    // Where the drive doesn't tell them apart (Windows, a Mac), there can't be two.
+    if fs::read_to_string(c.join("Presets").join("Lead.fxp")).unwrap() != "first" {
+        return;
+    }
+    fs::create_dir_all(&d).unwrap();
+    let stop = AtomicBool::new(false);
+    let from = s(&c.join("Presets"));
+    let moved = move_folder(&from, &s(&d), 11, whose(), &ROOMY, &[], &nothing, &stop).unwrap();
+    // The plugin saved over both through the link.
+    let later = SystemTime::now() + Duration::from_secs(3600);
+    for (name, text) in [("Lead.fxp", "first, saved"), ("lead.fxp", "second, saved")] {
+        let file = Path::new(&from).join(name);
+        fs::write(&file, text).unwrap();
+        set_time(&file, later);
+    }
+    let back = move_back(&moved, &ROOMY, &nothing, &stop).unwrap();
+    assert!(back.kept.is_empty(), "{:?}", back.kept);
+    assert_eq!(fs::read_to_string(Path::new(&from).join("Lead.fxp")).unwrap(), "first, saved");
+    assert_eq!(fs::read_to_string(Path::new(&from).join("lead.fxp")).unwrap(), "second, saved");
 }
 
 #[test]
@@ -541,18 +605,32 @@ fn moving_back_puts_many_files_into_the_old_copy_together_and_none_when_you_pres
     let all = |folder: &Path, text: &str| {
         (0..300).all(|n| fs::read_to_string(folder.join(format!("{n}.fxp"))).unwrap() == text)
     };
-    // Stopped part way: none of them went into the old copy, and nothing's left half way there.
+    // Stopped part way: none of them went into the old copy, nothing's left half way there, and it says nothing was
+    // moved.
     let stopping = |bytes: u64| {
         if bytes >= 300 {
             stop.store(true, Ordering::Relaxed);
         }
     };
-    let stopped = move_back(&moved, &ROOMY, &stopping, &stop);
-    assert!(matches!(stopped, Err(CantMove::LeftHalfway(_))), "{stopped:?}");
+    assert_eq!(move_back(&moved, &ROOMY, &stopping, &stop), Err(CantMove::Stopped));
     stop.store(false, Ordering::Relaxed);
     let old = Path::new(&moved.old_copy);
     assert!(part_files(old).is_empty());
     assert!(all(old, "old"));
+    // Stopped once a first lot is in (256 files of three bytes), as the next one is copied: it says the old copy
+    // changed, and those are in.
+    let later = |bytes: u64| {
+        if bytes > 256 * 3 {
+            stop.store(true, Ordering::Relaxed);
+        }
+    };
+    let stopped = move_back(&moved, &ROOMY, &later, &stop);
+    let Err(CantMove::LeftHalfway(said)) = &stopped else { panic!("{stopped:?}") };
+    assert!(said.starts_with("Stopped. The old copy"), "{said}");
+    stop.store(false, Ordering::Relaxed);
+    let new = (0..300).filter(|n| fs::read_to_string(old.join(format!("{n}.fxp"))).unwrap() == "new").count();
+    assert_eq!(new, 256);
+    assert!(part_files(old).is_empty());
     // Then all of them: more than go in together at once.
     move_back(&moved, &ROOMY, &nothing, &stop).unwrap();
     assert!(!is_link(&presets) && all(&presets, "new"));

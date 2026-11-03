@@ -520,9 +520,12 @@ fn judge(
 fn in_place(marker: &Marker, here: &str, drives: &dyn Drives) -> bool {
     let (to, real) = (marker.to.as_str(), marker.real.as_str());
     let real_there = fs::symlink_metadata(to).is_ok_and(|meta| meta.is_dir());
+    // Where it really was is looked at on its own drive only when it isn't the place the move named.
+    let also_real = !real.is_empty() && key(real) != key(to);
     (!real.is_empty() && key(real) == key(here))
         || (real_there && real_path(to).is_some_and(|to| key(&to) == key(here)))
-        || [to, real].into_iter().any(|place| !place.is_empty() && on_another_drive(here, place, drives))
+        || !to.is_empty() && on_another_drive(here, to, drives)
+        || also_real && on_another_drive(here, real, drives)
 }
 
 /// Whether `here` (where a folder really is) is the place `to` names, but on a drive that was called something else
