@@ -42,8 +42,10 @@ use crate::notes::{Grid, Part};
 /// giving the answer), so the answers the app keeps (the MIDI page's index) know to be worked out again. Version 2 gives
 /// the graded answer with its colours and checks hints; version 3 counts every major and minor chord heard, not only
 /// those standing on the bass; version 4 has the first fitted weights (POP909-CL, and the Billboard charts at a quarter
-/// weight), where before every key scored the same.
-pub const KEY_FINDER_VERSION: u32 = 4;
+/// weight), where before every key scored the same; version 5 has those weights rescaled on Solomon's own MIDI packs
+/// (each stream's scale, the minor weight and the calibration, as rule 5's exception allows), pulled back to the last
+/// point where every hand case keeps its gate.
+pub const KEY_FINDER_VERSION: u32 = 5;
 
 /// What the notes are, as cut from the music: it says what their first and last bass mean.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

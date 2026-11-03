@@ -3268,8 +3268,11 @@ mod tests {
             .collect();
         let error = credits_in(&built_in.join("\n"), path).err().unwrap_or_default();
         assert!(error.contains("rescaled already"), "{error}");
+        // The sources built in, then the packs, named once (the weights built in may have been rescaled on them).
         let mut names: Vec<String> = keyfind::LEARNED_FROM.iter().map(|n| format!("{n:?}")).collect();
-        names.push("\"packs\"".into());
+        if !names.iter().any(|n| n == "\"packs\"") {
+            names.push("\"packs\"".into());
+        }
         assert!(written.contains(&format!("LEARNED_FROM: &[&str] = &[{}];", names.join(", "))), "{written}");
         assert!(written.contains("kept as they were\n/// fitted before the rescale"), "{written}");
         assert!(written.contains(&format!("HASH_VERSION: u32 = {};", KEY_FINDER_VERSION + 1)));

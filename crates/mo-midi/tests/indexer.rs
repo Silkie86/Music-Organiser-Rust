@@ -265,7 +265,9 @@ fn keeps_the_key_and_reads_it_again_when_the_finder_gets_better() {
     let all = store.all(&HashMap::new(), &HashMap::new()).unwrap();
     let tune_part = all.iter().find(|p| p.clip == "Tune").unwrap();
     let fact = tune_part.key_fact.expect("the reading is kept");
-    assert_eq!(fact.tonic().map(|t| t.number()), Some(0), "{fact:?}");
+    // It leans to C major, whether or not the finder is sure enough to give it as the key (a tune alone seldom is).
+    let leaning = fact.answer().and_then(|answer| answer.leaning_key());
+    assert_eq!(leaning.map(|k| k.tonic.number()), Some(0), "{fact:?}");
     assert!(all.iter().all(|p| p.key_fact.is_some()));
 
     // An older finder's readings: read again from the stored notes, to the same answer, without opening the files.

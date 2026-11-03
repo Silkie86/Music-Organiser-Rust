@@ -247,6 +247,13 @@ cargo run -p mo-theorybench --release -- keyfit D:\Bench\packs.jsonl --inputs fu
   range above 0, or their log-loss falls by 0.01 or more; no set gets worse beyond its range; no gate breaks (the
   pull-back sees to that one). Then `--final` once, and `--write`. Back in the cloud, the public sets are scored with
   `--shipped` before and after the new weights, to see what the rescale costs songs.
+- **Shipped as version 5** (2026-11-03): whole loops 46.1% to 56.0% right on folds 1 to 4, every set better beyond its
+  range; on the public songs, whole songs hold but stretches of 1 to 16 bars lose 3 to 22 points, and a tune alone
+  more. The numbers, and who pays, are in `docs/harmony/key-finder-experiments.md`.
+- **Rescaling again.** `--write` refuses weights rescaled already, so a later rescale starts from version 4's, the
+  plain fit: put them back first (`git show 3be3d26:crates/mo-harmony/src/keyfind/weights.rs`), build, then run the
+  steps above. Its `--shipped` then scores version 4; to compare with what ships, make the dump with the weights that
+  ship.
 
 ## Chords
 

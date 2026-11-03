@@ -186,3 +186,82 @@ threshold below an even chance (an answer names something likelier than not). On
 drops the few pairs below 0.5, all from a part heard alone (about 0.2% of the cases from 5 bars up), and the pairs
 given are wrong a little less often (5 to 8 bars 7.4% to 7.3%, songs 4.3% to 4.1%). Shipped pair thresholds: never at
 1 and 2 bars, 0.61 at 4, 0.5 from 8. A threshold of 1 now means never even when the chances add up to exactly 1.
+
+## Rescaled on Solomon's packs: version 5 (2026-11-03)
+
+Rule 5's exception (Solomon, 2026-11-01): only each stream's scale, the minor weight and the calibration may be fitted
+on his own MIDI. The runs were made on his computer from main 3be3d26 (finder version 4), as
+`tools/theorybench/README.md` says under "Solomon's packs": `--shipped --dump`, the choosing run
+`--rescale --against`, `--final` once, then `--write`. His packs gave 51,655 pieces keyed by their file or folder
+names, and 81% of the whole loops are labelled minor. Every finder the rescale scored or wrote was pulled back to 0.50
+or 0.55 of the way from version 4 to its fit, the last step where every hand case keeps its gate. One step further,
+case 16 broke in every one ("a bass alone: C Ab Eb Bb" gave no clear key where its gate needs "C minor or Eb major").
+
+Choosing run, folds 1 to 4, each case paired with version 4's reading of it (full mix: each piece as the MIDI page
+hears it):
+
+| Set | Version 4 | Rescaled | Difference (range) |
+|---|---|---|---|
+| Whole loops | 46.1% | 56.0% | +9.9 (+8.2 to +14.2) |
+| Pieces cut from longer parts | 29.9% | 41.4% | +11.5 (+10.2 to +16.9) |
+| 1 / 2 / 4 / 8 / 16-bar windows | 25.3 / 31.4 / 36.0 / 36.5 / 36.3% | 40.5 / 45.4 / 47.9 / 48.5 / 48.6% | +15.1 / +14.1 / +11.9 / +12.0 / +12.3 |
+| 1 / 2 / 4 / 8 / 16-bar openings | 47.5 / 43.3 / 44.0 / 41.8 / 40.4% | 59.8 / 55.9 / 54.3 / 52.2 / 50.8% | +12.3 / +12.6 / +10.3 / +10.5 / +10.4 |
+
+Every set got better beyond its range, and its log-loss fell (whole loops 2.875 to 2.127); the whole loops'
+calibration error fell from 0.119 to 0.037. The gain is the minor keys': whole loops labelled minor went from 46.1% to
+62.3% right, and those labelled major fell from 45.9% to 29.9%. One key is given for fewer whole loops (10.7% to 7.1%)
+and is right more often when it is (78.5% to 83.1%).
+
+The final check (`--final`: fold 0, 10 packs and 4,734 pieces no run had looked at), pulled back to 0.50: whole loops
+46.9% right against the C# app's 38.4% (+8.5, +0.2 to +13.8), calibration error 0.030. Every set is ahead of the C#
+app, though for the 4, 8 and 16-bar windows and the 8 and 16-bar openings the range crosses 0. That lead is under half
+of folds 1 to 4's (+19.7 on whole loops), and with 10 packs its range is wide; how version 4 does on fold 0 isn't known,
+since only `--final` and `--write` look at it.
+
+`--write` fitted on every piece and pulled back to 0.55 (case 16 breaks at 0.60). Its report, each fold held out in
+turn and pulled back to 0.50 or 0.55: whole loops 55.0% (C# app 36.5%). Shipped as KEY_FINDER_VERSION 5:
+
+- Stream scales: tune 0.673, harmony 0.656, bass 0.612, major chords 0.725, minor chords 0.748, a loop's first bass
+  0.982; a song's first and last bass 1 (packs have no songs).
+- Minor weight: -0.488 to 0.621.
+- Calibration: melody only +0.612 to +0.485, bass only +0.342 to +0.372, accompaniment +0.377 to +0.330; what a loop
+  adds at 1, 2, 4, 8 and 16 bars +0.394, +0.196, +0.029, -0.059, +0.018 to +0.422, +0.181, -0.059, -0.163, -0.173. The
+  curve over bars and a song's offset stay (only full mixes may move the curve, and packs have none), and so do the
+  answers' thresholds and the share of notes in one scale.
+
+Hand cases: every gate holds. Case 8's target ("a blues-scale tune alone, ending on C") is met again and case 13's ("a
+tune alone in C minor with no sixth") no longer is; targets 6, 7, 9, 12, 13 and 14 are unmet.
+
+### What it costs songs
+
+The public sets scored with `--shipped` (folds 1 to 4, nothing fitted) by version 4, then by version 5, each case paired
+with itself. Version 4 learned from POP909-CL and Billboard, but its POP909-CL scores here are within a point of its
+held-out ones (`--write`'s report, each fold held out in turn), and RS200 was never learned from. Full mix; Billboard
+and RS200 by the key (a chart's tonic, with a mode read from its chords):
+
+| Set | POP909-CL | Billboard | RS200 |
+|---|---|---|---|
+| Whole songs with one key | 91.3% to 91.3% (+0.0) | 86.1% to 81.7% (-4.4) | 91.0% to 89.8% (-1.2, -4.8 to +2.4) |
+| 1-bar windows | 41.3% to 38.2% (-3.1) | 43.9% to 25.6% (-18.3) | 53.4% to 32.1% (-21.3) |
+| 4-bar windows | 71.5% to 63.5% (-8.0) | 59.1% to 47.4% (-11.7) | 70.7% to 53.5% (-17.2) |
+| 8-bar windows | 81.4% to 72.0% (-9.5) | 66.7% to 51.6% (-15.1) | 74.2% to 54.1% (-20.1) |
+| 16-bar windows | 85.1% to 76.3% (-8.8) | 70.9% to 56.3% (-14.6) | 75.6% to 53.4% (-22.2) |
+| 4-bar openings | 80.6% to 78.4% (-2.2) | 78.0% to 73.8% (-4.2) | 84.5% to 85.1% (+0.5) |
+
+A part alone pays most. POP909-CL's tune alone: whole songs 86.6% to 63.1% (-23.5; the C# app 86.4%), 8-bar windows
+74.4% to 56.1% (-18.2; C# 68.8%). On POP909-CL every set of windows is worse beyond its range for every kind of input,
+and so are most openings; whole songs as a full mix, the piano or the bass keep their accuracy within its range, a
+little less sure (full mix log-loss 0.399 to 0.433). On 8-bar windows version 5 is now behind the C# app (72.0%
+against 75.2%), and on 16-bar windows too (76.3% against 81.2%).
+
+Why: about 42% of these songs' keys are minor, against 81% of the packs' loops. The minor weight now favours a minor
+key in everything, and every stream's weights are about a third smaller, so a stretch's notes count for less against
+it. Most of the new wrong answers are a major key's relative minor: on 8-bar windows the relative, either way, went
+from 11.7% to 20.3% of the cases, major keys from 85.1% to 60.3% right and minor keys from 76.3% to 88.0%. Two of
+mo-midi's tests show it on a tune alone: a plain C major tune of six bars went from "C major" (87% sure) to no clear
+key leaning C major (42%, A minor second), and an A minor tune from "A minor or C major" to no clear key leaning A
+minor.
+
+Who pays: today only the MIDI page reads keys, from his packs, where version 5 is better. The Projects page and the
+Playground will read keys of songs; before they do, version 5 should be measured on his own songs, and songs given
+version 4's numbers (a second set beside the packs') if those suit them better.
