@@ -6,9 +6,12 @@
 //! Writing never waits on the disk: lines go to a writer thread of their own. A message that keeps coming
 //! is written three times and then only counted (at 10, 100, 1000…), and a run stops writing at 5 MB, so a runaway
 //! warning can't fill the disk; only a crash is still written after that, up to 1 MB more (rule 17: crashes always
-//! log). A crash is counted by where in the code it happened, whichever thread it was on. At each start, a
-//! low-priority thread keeps the folder in bounds ([`crate::tidy::prune_logs`]): the newest 30 runs' logs, the newest
-//! 30 crash logs and each tool's newest 10 reports.
+//! log), and the crash that ends the app and the run's last line ("Closed") always are. A crash is counted by where in
+//! the code it happened, whichever thread it was on, and so is its backtrace, a line of its own after it; the crash
+//! that ends the app is always written in full. At each start, a low-priority thread keeps the folder in bounds
+//! ([`crate::tidy::prune_logs`]): the newest 30 runs' logs, the newest 30 crash logs and each tool's newest 10 reports.
+//! A run's log can't be removed while it's written: on Windows nobody can remove it while it's open, and on a Mac or
+//! Linux it's locked (a lock that only says so, for another copy of the app keeping the folder in bounds to see).
 //!
 //! A crash also gets a log of its own ([`write_crash_file`]): one for each place in the code that crashed, up to
 //! [`CRASH_FILES_PER_RUN`] places a run, and always one for the crash that ends the app.
@@ -28,6 +31,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Local};
 
+use crate::tidy::Tidied;
+
 /// This app's logs start with this. The C# app's are `session-…` and it prunes those by itself, so each app keeps
 /// its own 30 and the launcher's many restarts never push out the C# app's logs (or a C# log still being written).
 pub const PREFIX: &str = "rust-session-";
@@ -38,6 +43,10 @@ const MAX_BYTES: u64 = 5 * 1024 * 1024;
 /// How much more a run writes for crashes, once it has stopped writing everything else: a crash always reaches the
 /// log (rule 17), but a crash that keeps happening can't fill the disk either.
 const CRASH_ROOM: u64 = 1024 * 1024;
+/// How much more again the crash that ends the app and the run's last line ("Closed") may use, past [`CRASH_ROOM`].
+/// Each comes once a run, so they always show; and if a crash were taken for the app's end again and again, they
+/// still couldn't fill the disk.
+const LAST_ROOM: u64 = 256 * 1024;
 /// The same message more often than this is counted, not written again.
 const REPEATS_WRITTEN: u32 = 3;
 /// How many different messages are counted for repeats before the count starts again, so it can't grow all day.
@@ -58,9 +67,28 @@ pub const WRITER_THREAD: &str = "Session log";
 /// written: a folder on a drive that's asleep mustn't hold it open (the launcher stops it after 10 seconds).
 const PRUNE_WAIT: Duration = Duration::from_secs(2);
 const WRITER_WAIT: Duration = Duration::from_secs(5);
-/// What std says of a crash it can't recover from (a second crash while one is being cleaned up, or one inside code
-/// that mustn't crash): it ends the app straight after, on whichever thread it was (checked on Rust 1.99).
-const ENDS_THE_APP: [&str; 2] = ["panic in a destructor during cleanup", "panic in a function that cannot unwind"];
+/// What std says of a crash it can't recover from: it ends the app straight after, on whichever thread it was
+/// (checked in Rust 1.99's own code, `core::panicking`, `core::ub_checks` and `std::sys::exit`). In any build: a
+/// second crash while one is being cleaned up, a crash inside code that mustn't crash, or the app's end started again
+/// while it's ending. In debug builds (the launcher's), also the checks that stop unsafe code going wrong: a pointer
+/// that's null or not lined up, an enum with no such value, or a broken promise to an unsafe function.
+///
+/// A crash in a thread's own data as the thread ends (a thread-local's `Drop`) ends the app too, but says nothing of
+/// the kind, so the crash handler keeps the F12 note's words whatever this says.
+const ENDS_THE_APP: [&str; 6] = [
+    "panic in a destructor during cleanup",
+    "panic in a function that cannot unwind",
+    "std::process::exit called re-entrantly",
+    "null pointer dereference occurred",
+    "null reference produced",
+    "is_nonoverlapping: `size_of::<T>() * count` overflows a usize",
+];
+/// The same, for those that go on to say more (which check, which address): they're known by how they start.
+const ENDS_THE_APP_STARTS: [&str; 3] = [
+    "unsafe precondition(s) violated: ",
+    "misaligned pointer dereference: ",
+    "trying to construct an enum from an invalid value ",
+];
 
 /// The places in the code this run has written a crash log for ([`write_crash_file`]).
 pub struct CrashFiles {
@@ -102,7 +130,8 @@ impl CrashFiles {
 /// Whether a crash ends the app: one on the window's thread (`main`), or one std can't recover from, on any thread
 /// (`message` is what the crash says). `thread` is the crashing thread's name.
 pub fn crash_ends_the_app(thread: Option<&str>, message: Option<&str>) -> bool {
-    thread == Some("main") || message.is_some_and(|m| ENDS_THE_APP.contains(&m))
+    let std_ends_it = |m: &str| ENDS_THE_APP.contains(&m) || ENDS_THE_APP_STARTS.iter().any(|s| m.starts_with(s));
+    thread == Some("main") || message.is_some_and(std_ends_it)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -126,14 +155,39 @@ enum Msg {
     Line(String),
     /// A crash: written even once the log has stopped writing other lines, up to [`CRASH_ROOM`] more.
     Crash(String),
+    /// The crash that ends the app, or the run's last line: written past the room for crashes too, up to
+    /// [`LAST_ROOM`] more.
+    Last(String),
     /// Write out everything so far, then say so on the channel.
     Flush(Sender<()>),
     Close,
 }
 
+/// What a line is: how it's counted, and how far past the log's limit it's still written.
+#[derive(Clone, Copy)]
+enum Kind<'a> {
+    /// Counted by its words, and not written once the log is full.
+    Plain,
+    /// A crash's line, or its backtrace (`backtrace`): counted by `place`, where in the code it crashed, the two with
+    /// a count each, and written into the extra room for crashes. The crash that ends the app (`ends_the_app`) is
+    /// always written in full, however many came before it.
+    Crash { place: &'a str, backtrace: bool, ends_the_app: bool },
+    /// The run's last line: written into the extra room too, so a clean end always shows.
+    Last,
+}
+
 struct State {
     seen: HashMap<String, u32>,
     recent: VecDeque<String>,
+}
+
+/// The start's look at the logs folder ([`crate::tidy::prune_logs`]).
+enum Pruning {
+    Going(JoinHandle<Tidied>),
+    /// Finished, and what it did, until [`SessionLog::take_pruned`] takes it.
+    Done(Tidied),
+    /// Taken already, or there's nothing to take: the thread couldn't start, or it crashed (the crash is in the log).
+    Over,
 }
 
 /// One run's log.
@@ -142,8 +196,9 @@ pub struct SessionLog {
     tx: Mutex<Option<Sender<Msg>>>,
     state: Mutex<State>,
     writer: Mutex<Option<JoinHandle<()>>>,
-    /// Keeping the logs folder in bounds, off the window's thread; [`SessionLog::close`] waits a little for it.
-    pruning: Mutex<Option<JoinHandle<()>>>,
+    /// Keeping the logs folder in bounds, off the window's thread, and then what it did; [`SessionLog::close`] waits a
+    /// little for it.
+    pruning: Mutex<Pruning>,
     /// How far the computer's clock is from UTC, in seconds, as the last line found it: a crash's line tells its time
     /// with it, without asking the computer for its time zone (see [`time_of_day`]).
     offset: AtomicI32,
@@ -187,11 +242,22 @@ pub fn error(area: &str, message: &str) {
 
 /// A crash at `place` in the code (`file:line`), as an error in the "Crash" area: written even once this run's log has
 /// stopped writing other lines (rule 17), up to [`CRASH_ROOM`] more. Crashes are counted by their place: the same
-/// bug hit on every background thread has another thread's name and backtrace each time, but one place. Called from
-/// the crash handler, so it never waits long and never crashes itself.
-pub fn crash(place: &str, text: &str) {
+/// bug hit on every background thread has another thread's name each time, but one place. The crash that ends the app
+/// (`ends_the_app`) is always written, in full, however many came before it. Called from the crash handler, so it
+/// never waits long and never crashes itself.
+pub fn crash(place: &str, text: &str, ends_the_app: bool) {
     if let Some(log) = current() {
-        log.put(Level::Error, "Crash", text, Some(place));
+        log.put(Level::Error, "Crash", text, Kind::Crash { place, backtrace: false, ends_the_app });
+    }
+}
+
+/// The backtrace of a crash at `place` (where in the code it came from), as a line of its own after the crash's own
+/// line ([`crash`]): the crash handler writes the crash first, as taking its backtrace can wait. Counted by its place
+/// as the crash's line is, with a count of its own, so each crash counts once; past the third at a place, the crash's
+/// line says how many there were. Called from the crash handler, so it never waits long and never crashes itself.
+pub fn crash_backtrace(place: &str, text: &str, ends_the_app: bool) {
+    if let Some(log) = current() {
+        log.put(Level::Error, "Crash", text, Kind::Crash { place, backtrace: true, ends_the_app });
     }
 }
 
@@ -219,9 +285,9 @@ impl SessionLog {
         let pruning = {
             let (folder, just_made) = (folder.to_path_buf(), path.clone());
             crate::background::spawn("Prune logs", move || {
-                crate::tidy::prune_logs(&folder, just_made.as_deref(), std::time::SystemTime::now());
+                crate::tidy::prune_logs(&folder, just_made.as_deref(), SystemTime::now())
             })
-            .ok()
+            .map_or(Pruning::Over, Pruning::Going)
         };
         let log = SessionLog {
             path,
@@ -241,32 +307,33 @@ impl SessionLog {
     }
 
     pub fn write(&self, level: Level, area: &str, message: &str) {
-        self.put(level, area, message, None);
+        self.put(level, area, message, Kind::Plain);
     }
 
-    /// Writes a line. `crash` is where in the code a crash happened (see [`crash`]): its line is written even once the
-    /// log has stopped writing other lines, it's counted by its place, and it never waits long for the log's lock.
-    fn put(&self, level: Level, area: &str, message: &str, crash: Option<&str>) {
+    /// Writes a line, counted and kept within the log's limits as its `kind` says (see [`Kind`]). A crash's line never
+    /// waits long for the log's lock.
+    fn put(&self, level: Level, area: &str, message: &str, kind: Kind<'_>) {
         // Trailing spaces only make the log wide.
         let message: String = message.lines().map(str::trim_end).collect::<Vec<_>>().join("\n");
+        let crash = matches!(kind, Kind::Crash { .. });
         // The time and the key the line is counted by are made before the lock is taken: nothing that could crash
         // runs while it's held (see the top of this file).
-        let time = match crash {
+        let time = if crash {
             // Asking the computer for its time zone can fail, and a failure in the crash handler would end the app
             // at once: a crash's line uses the zone the last line found.
-            Some(_) => time_of_day(SystemTime::now(), self.offset.load(Ordering::Relaxed)),
-            None => {
-                let now = Local::now();
-                self.offset.store(now.offset().local_minus_utc(), Ordering::Relaxed);
-                now.format("%H:%M:%S%.3f").to_string()
-            }
+            time_of_day(SystemTime::now(), self.offset.load(Ordering::Relaxed))
+        } else {
+            let now = Local::now();
+            self.offset.store(now.offset().local_minus_utc(), Ordering::Relaxed);
+            now.format("%H:%M:%S%.3f").to_string()
         };
-        let key = match crash {
-            Some(place) => format!("Crash\u{1}{place}"),
-            None => format!("{}\u{1}{area}\u{1}{message}", level.name()),
+        let key = match kind {
+            Kind::Crash { place, backtrace: false, .. } => format!("Crash\u{1}{place}"),
+            Kind::Crash { place, backtrace: true, .. } => format!("Backtrace\u{1}{place}"),
+            Kind::Plain | Kind::Last => format!("{}\u{1}{area}\u{1}{message}", level.name()),
         };
         let whole = |message: &str| format!("{time} {:<7} [{area}] {message}", level.name());
-        let line = match self.state_for(crash.is_some()) {
+        let line = match self.state_for(crash) {
             Some(mut st) => {
                 if st.seen.len() >= SEEN_MAX && !st.seen.contains_key(&key) {
                     st.seen.clear();
@@ -274,17 +341,16 @@ impl SessionLog {
                 let times = st.seen.entry(key).or_insert(0);
                 *times = times.saturating_add(1);
                 let times = *times;
-                let line = if times > REPEATS_WRITTEN {
-                    if !is_power_of_ten(times) {
-                        return;
-                    }
-                    let first = message.lines().next().unwrap_or_default();
-                    match crash {
-                        Some(place) => whole(&format!("(crashed at {place} {times} times now) {first}")),
-                        None => whole(&format!("(said {times} times now) {first}")),
-                    }
-                } else {
-                    whole(&message)
+                let first = message.lines().next().unwrap_or_default();
+                let line = match kind {
+                    _ if times <= REPEATS_WRITTEN => whole(&message),
+                    // Rule 17: the crash that ends the app is always written, never only counted.
+                    Kind::Crash { ends_the_app: true, .. } => whole(&message),
+                    _ if !is_power_of_ten(times) => return,
+                    // The crash's own line says how many times by now.
+                    Kind::Crash { backtrace: true, .. } => return,
+                    Kind::Crash { place, .. } => whole(&format!("(crashed at {place} {times} times now) {first}")),
+                    Kind::Plain | Kind::Last => whole(&format!("(said {times} times now) {first}")),
                 };
                 st.recent.push_back(line.clone());
                 while st.recent.len() > RECENT {
@@ -295,10 +361,15 @@ impl SessionLog {
             // Only a crash gets here, when the lock stays busy: its line is written, just not counted.
             None => whole(&message),
         };
+        let msg = match kind {
+            Kind::Plain => Msg::Line(line),
+            Kind::Crash { ends_the_app: false, .. } => Msg::Crash(line),
+            Kind::Crash { ends_the_app: true, .. } | Kind::Last => Msg::Last(line),
+        };
         // This lock is only ever held to hand a line over (or take the writer away as the log closes), which can't
         // crash or wait, so even a crash's line waits for it rather than be lost.
         if let Some(tx) = self.tx.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
-            let _ = tx.send(if crash.is_some() { Msg::Crash(line) } else { Msg::Line(line) });
+            let _ = tx.send(msg);
         }
     }
 
@@ -331,7 +402,8 @@ impl SessionLog {
     /// to be written; never long, as a folder on a drive that's asleep mustn't hold the app open.
     pub fn close(&self) {
         self.wait_for_pruning(PRUNE_WAIT);
-        self.write(Level::Info, "App", "Closed");
+        // Into the extra room, as a crash's line goes, so a clean end shows even once the log is full.
+        self.put(Level::Info, "App", "Closed", Kind::Last);
         if let Some(tx) = self.tx.lock().unwrap_or_else(|e| e.into_inner()).take() {
             let _ = tx.send(Msg::Close);
         }
@@ -340,25 +412,56 @@ impl SessionLog {
         }
     }
 
-    /// Waits up to `limit` for the start's look at the logs folder to finish; says whether it has.
+    /// Waits up to `limit` for the start's look at the logs folder to finish; says whether it has. What it did is kept
+    /// for [`SessionLog::take_pruned`].
     pub(crate) fn wait_for_pruning(&self, limit: Duration) -> bool {
         let mut pruning = self.pruning.lock().unwrap_or_else(|e| e.into_inner());
-        match pruning.take() {
-            None => true,
-            Some(h) => match wait_for(h, limit) {
-                Ok(()) => true,
+        match std::mem::replace(&mut *pruning, Pruning::Over) {
+            Pruning::Going(h) => match wait_for(h, limit) {
+                Ok(done) => {
+                    if let Some(done) = done {
+                        *pruning = Pruning::Done(done);
+                    }
+                    true
+                }
                 // Still going: it's put back, so a later wait (or the app's end) still finds it.
                 Err(h) => {
-                    *pruning = Some(h);
+                    *pruning = Pruning::Going(h);
                     false
                 }
             },
+            finished => {
+                *pruning = finished;
+                true
+            }
+        }
+    }
+
+    /// What the start's look at the logs folder did (the logs it removed, and those it couldn't), once it has
+    /// finished: given once, and then `None`. It never waits: while the look is still going, or someone is waiting for
+    /// it, it's `None`, and what it did is kept for a later call.
+    pub fn take_pruned(&self) -> Option<Tidied> {
+        let mut pruning = match self.pruning.try_lock() {
+            Ok(pruning) => pruning,
+            Err(TryLockError::Poisoned(e)) => e.into_inner(),
+            Err(TryLockError::WouldBlock) => return None,
+        };
+        match std::mem::replace(&mut *pruning, Pruning::Over) {
+            Pruning::Going(h) if !h.is_finished() => {
+                *pruning = Pruning::Going(h);
+                None
+            }
+            // Finished, so this doesn't wait.
+            Pruning::Going(h) => h.join().ok(),
+            Pruning::Done(done) => Some(done),
+            Pruning::Over => None,
         }
     }
 }
 
-/// Waits up to `limit` for a thread to finish. Gives it back if it hasn't.
-fn wait_for(thread: JoinHandle<()>, limit: Duration) -> Result<(), JoinHandle<()>> {
+/// Waits up to `limit` for a thread to finish, and gives what it returned (`None` if it crashed). Gives the thread
+/// back if it hasn't finished.
+fn wait_for<T>(thread: JoinHandle<T>, limit: Duration) -> Result<Option<T>, JoinHandle<T>> {
     let until = Instant::now() + limit;
     while !thread.is_finished() {
         if Instant::now() >= until {
@@ -366,8 +469,7 @@ fn wait_for(thread: JoinHandle<()>, limit: Duration) -> Result<(), JoinHandle<()
         }
         std::thread::sleep(Duration::from_millis(5));
     }
-    let _ = thread.join();
-    Ok(())
+    Ok(thread.join().ok())
 }
 
 /// Takes a lock for the crash handler: it tries for a moment (another thread may have it for a line of its own), and
@@ -410,7 +512,16 @@ fn create_file(folder: &Path, start: DateTime<Local>) -> Option<(PathBuf, File)>
             options.share_mode(0x1 | 0x2);
         }
         match options.open(&path) {
-            Ok(f) => return Some((path, f)),
+            Ok(f) => {
+                // On a Mac or Linux an open file can be removed all the same, so the log is locked while this run
+                // writes it (until the file closes): another copy of the app keeping the folder in bounds as it starts
+                // passes over a locked log. The lock only says so; anyone can still read the log. It never waits:
+                // nobody else can have locked a file just made. Not on Windows, where the share mode above already
+                // stops the removal, and a lock would stop others reading the log.
+                #[cfg(unix)]
+                let _ = f.try_lock();
+                return Some((path, f));
+            }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(_) => return None,
         }
@@ -432,7 +543,11 @@ fn write_queued(file: File, rx: Receiver<Msg>) {
                     let size = line.len() as u64 + 1;
                     if written + size > MAX_BYTES {
                         full = true;
-                        let _ = writeln!(out, "(the log is full at 5 MB; this run writes no more, except crashes)");
+                        let _ = writeln!(
+                            out,
+                            "(the log is full at 5 MB; this run writes no more, except crashes and the line it closes \
+                             with)"
+                        );
                     } else {
                         written += size;
                         let _ = writeln!(out, "{line}");
@@ -453,6 +568,15 @@ fn write_queued(file: File, rx: Receiver<Msg>) {
                             "(no room for more crashes in this log; the first crash at each place has a crash-….log \
                              file of its own)"
                         );
+                    }
+                }
+                // The crash that ends the app, and the run's last line: each comes once a run, so they're written past
+                // the room for crashes too (up to LAST_ROOM more), and always show.
+                Msg::Last(line) => {
+                    let size = line.len() as u64 + 1;
+                    if written + size <= MAX_BYTES + CRASH_ROOM + LAST_ROOM {
+                        written += size;
+                        let _ = writeln!(out, "{line}");
                     }
                 }
                 Msg::Flush(done) => {
@@ -488,11 +612,11 @@ pub(crate) fn is_name_time(s: &str) -> bool {
 }
 
 /// Writes a crash's own log into `folder` (`logs\`), in case the session log couldn't be written (rule 17), and says
-/// where. `place` is where in the code it crashed (`file:line`) and `fatal` whether it ends the app (the window's
-/// thread crashed). The crash that ends the app always gets a file; others get one for the first crash at each place,
-/// for up to [`CRASH_FILES_PER_RUN`] places a run (`files` keeps count; the session log still has every crash). A
-/// second crash in the same second gets a name of its own rather than writing over the first. Called from the crash
-/// handler, so it never panics.
+/// where. `place` is where in the code it crashed (`file:line`) and `fatal` whether it ends the app (see
+/// [`crash_ends_the_app`]). The crash that ends the app always gets a file; others get one for the first crash at each
+/// place, for up to [`CRASH_FILES_PER_RUN`] places a run (`files` keeps count; the session log still has every crash).
+/// A second crash in the same second gets a name of its own rather than writing over the first. The crash's backtrace
+/// is added to it afterwards ([`add_to_crash_file`]). Called from the crash handler, so it never panics.
 pub fn write_crash_file(
     folder: &Path,
     text: &str,
@@ -510,6 +634,15 @@ pub fn write_crash_file(
         files.give_back(place);
     }
     written
+}
+
+/// Adds `text` (the crash's backtrace, taken once the crash was safely written) to the end of the crash log that
+/// [`write_crash_file`] just wrote at `path`. A file that's gone meanwhile stays gone. Called from the crash handler,
+/// so it never panics.
+pub fn add_to_crash_file(path: &Path, text: &str) {
+    if let Ok(mut f) = OpenOptions::new().append(true).open(path) {
+        let _ = f.write_all(text.as_bytes());
+    }
 }
 
 /// Writes `text` into a crash log of its own in `folder`, under the first free name for `secs`. `None` when no file
@@ -558,6 +691,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("mo-log-test-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
+    }
+
+    /// A crash at `place` that the app goes on after, as the crash handler writes it.
+    fn crash_at(log: &SessionLog, place: &str, text: &str) {
+        log.put(Level::Error, "Crash", text, Kind::Crash { place, backtrace: false, ends_the_app: false });
     }
 
     #[test]
@@ -617,11 +755,16 @@ mod tests {
             f.set_modified(long_ago).expect("settable");
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
-        let made_is_known = std::fs::metadata(dir.join(&copies[0])).and_then(|m| m.created()).is_ok();
+        // Each log was made a moment ago: Windows knows when a file was made, and a Mac or Linux knows when its entry
+        // last changed (setting its time just now changed it).
+        let made_is_known = cfg!(unix) || std::fs::metadata(dir.join(&copies[0])).and_then(|m| m.created()).is_ok();
         let now = Local::now();
         let a = SessionLog::new(&dir, now, "a");
         let b = SessionLog::new(&dir, now, "b");
         assert_ne!(a.path(), b.path());
+        // Both starts' looks at the folder finish before the folder is counted (closing waits only 2 seconds).
+        assert!(a.wait_for_pruning(Duration::from_secs(60)), "the first start's look at the folder finishes");
+        assert!(b.wait_for_pruning(Duration::from_secs(60)), "the second start's look at the folder finishes");
         a.close();
         b.close();
         if made_is_known {
@@ -800,16 +943,17 @@ mod tests {
             log.write(Level::Warning, "Scan", &format!("{i} {filler}"));
         }
         log.write(Level::Warning, "Scan", "not written: the log is full");
-        log.put(Level::Error, "Crash", "Music Organiser crashed on thread Scan 1", Some("src/scan.rs:1"));
+        crash_at(&log, "src/scan.rs:1", "Music Organiser crashed on thread Scan 1");
         // Crashes at many places still can't fill the disk: at most 1 MB more of them.
         let big = "y".repeat(100 * 1024);
         for i in 0..30 {
-            log.put(Level::Error, "Crash", &format!("crash {i} {big}"), Some(&format!("src/read.rs:{i}")));
+            crash_at(&log, &format!("src/read.rs:{i}"), &format!("crash {i} {big}"));
         }
         log.close();
         let path = log.path().expect("a file").to_owned();
         let text = std::fs::read_to_string(&path).expect("readable");
-        assert!(text.contains("(the log is full at 5 MB; this run writes no more, except crashes)"));
+        let full = "(the log is full at 5 MB; this run writes no more, except crashes and the line it closes with)";
+        assert!(text.contains(full));
         assert!(!text.contains("not written: the log is full"));
         assert!(text.contains("[Crash] Music Organiser crashed on thread Scan 1"));
         assert!(text.contains("[Crash] crash 0 "));
@@ -821,13 +965,66 @@ mod tests {
     }
 
     #[test]
+    fn the_crash_that_ends_the_app_and_the_last_line_show_even_once_the_log_is_full() {
+        let dir = temp_folder("full-end");
+        let log = SessionLog::new(&dir, Local::now(), "start");
+        let filler = "x".repeat(200);
+        for i in 0..(MAX_BYTES / 200 + 100) {
+            log.write(Level::Warning, "Scan", &format!("{i} {filler}"));
+        }
+        // Crashes at many places use up the extra room for crashes, to its last few bytes…
+        let big = "y".repeat(100 * 1024);
+        for i in 0..30 {
+            crash_at(&log, &format!("src/read.rs:{i}"), &format!("crash {i} {big}"));
+        }
+        for i in 0..4000 {
+            crash_at(&log, &format!("src/tiny.rs:{i}"), &format!("c{i}"));
+        }
+        // …and still the crash that ends the app is written, and so is how the run ended.
+        let fatal = Kind::Crash { place: "src/main.rs:5", backtrace: false, ends_the_app: true };
+        log.put(Level::Error, "Crash", "Music Organiser crashed on thread main", fatal);
+        log.close();
+        let path = log.path().expect("a file").to_owned();
+        let text = std::fs::read_to_string(&path).expect("readable");
+        assert!(text.contains("(no room for more crashes in this log;"), "the room for crashes was used up");
+        assert!(text.contains("[Crash] Music Organiser crashed on thread main"), "the crash that ends the app");
+        assert!(text.trim_end().ends_with("[App] Closed"), "a clean end shows");
+        let size = std::fs::metadata(&path).expect("there").len();
+        assert!(size <= MAX_BYTES + CRASH_ROOM + LAST_ROOM, "{size}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_crash_that_ends_the_app_is_always_written_never_only_counted() {
+        let dir = temp_folder("fatal-counted");
+        let log = SessionLog::new(&dir, Local::now(), "start");
+        let place = "src/x.rs:42";
+        // A bad file crashes every background thread at one place (only counted after the third)…
+        for i in 0..5 {
+            crash_at(&log, place, &format!("Music Organiser crashed on thread Background {i}"));
+            let backtrace = Kind::Crash { place, backtrace: true, ends_the_app: false };
+            log.put(Level::Error, "Crash", &format!("Backtrace of the crash on thread Background {i}:"), backtrace);
+        }
+        // …and then the window's thread, at the same place, which ends the app.
+        let fatal = |backtrace| Kind::Crash { place, backtrace, ends_the_app: true };
+        log.put(Level::Error, "Crash", "Music Organiser crashed on thread main", fatal(false));
+        log.put(Level::Error, "Crash", "Backtrace of the crash on thread main:\n   0: main", fatal(true));
+        log.close();
+        let text = std::fs::read_to_string(log.path().expect("a file")).expect("readable");
+        assert!(!text.contains("Background 4"), "the crashes the app went on after are only counted: {text}");
+        assert!(text.contains("[Crash] Music Organiser crashed on thread main\n"), "{text}");
+        assert!(text.contains("[Crash] Backtrace of the crash on thread main:\n   0: main"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_crash_while_this_thread_holds_the_logs_lock_is_still_written() {
         let dir = temp_folder("busy");
         let log = SessionLog::new(&dir, Local::now(), "start");
         {
             // As if this thread had crashed in the middle of writing a line: the lock is still taken.
             let _held = log.state.lock().expect("not poisoned");
-            log.put(Level::Error, "Crash", "Music Organiser crashed on thread Scan 1", Some("src/a.rs:1"));
+            crash_at(&log, "src/a.rs:1", "Music Organiser crashed on thread Scan 1");
         }
         log.close();
         let text = std::fs::read_to_string(log.path().expect("a file")).expect("readable");
@@ -841,16 +1038,35 @@ mod tests {
         let log = SessionLog::new(&dir, Local::now(), "start");
         // The same bad file on every background thread: another thread's name and backtrace each time.
         for i in 0..12 {
-            let text = format!("Music Organiser crashed on thread Background {i}\nat src/x.rs:42\n\n{i}: backtrace");
-            log.put(Level::Error, "Crash", &text, Some("src/x.rs:42"));
+            crash_at(&log, "src/x.rs:42", &format!("Music Organiser crashed on thread Background {i}\nat src/x.rs:42"));
+            let backtrace = Kind::Crash { place: "src/x.rs:42", backtrace: true, ends_the_app: false };
+            let trace = format!("Backtrace of the crash on thread Background {i}:\n   {i}: a frame");
+            log.put(Level::Error, "Crash", &trace, backtrace);
         }
-        log.put(Level::Error, "Crash", "Music Organiser crashed on thread Scan 1", Some("src/y.rs:7"));
+        crash_at(&log, "src/y.rs:7", "Music Organiser crashed on thread Scan 1");
         log.close();
         let text = std::fs::read_to_string(log.path().expect("a file")).expect("readable");
+        // Each crash counts once: its backtrace's line has a count of its own.
         assert_eq!(text.matches("[Crash] Music Organiser crashed on thread Background").count(), 3, "{text}");
+        assert_eq!(text.matches("[Crash] Backtrace of the crash on thread Background").count(), 3, "{text}");
         assert!(text.contains("[Crash] (crashed at src/x.rs:42 10 times now) Music Organiser crashed on thread"));
+        assert!(!text.contains("times now) Backtrace"), "the crash's own line says how many");
         assert!(!text.contains("Background 11"), "the later ones are only counted");
         assert!(text.contains("[Crash] Music Organiser crashed on thread Scan 1"), "another place is written");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_crash_files_backtrace_is_added_after_it() {
+        let dir = temp_folder("crash-added");
+        let files = CrashFiles::new();
+        let file = write_crash_file(&dir, "crashed\n", 1_700_000_000, "src/a.rs:1", false, &files).expect("written");
+        add_to_crash_file(&file, "\n   0: a frame\n");
+        assert_eq!(std::fs::read_to_string(&file).expect("readable"), "crashed\n\n   0: a frame\n");
+        // One that's gone meanwhile stays gone.
+        std::fs::remove_file(&file).expect("removable");
+        add_to_crash_file(&file, "\n   0: a frame\n");
+        assert!(!file.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -874,6 +1090,9 @@ mod tests {
         }
         let log = SessionLog::new(&dir, Local::now(), "start");
         assert!(log.wait_for_pruning(Duration::from_secs(60)), "the start's look at the folder finishes");
+        // The 5 over the 30 went, and one more to make room for this run's own: what it did is kept, for the report of
+        // what was tidied.
+        assert_eq!(log.take_pruned().map(|done| done.removed), Some(5 + 1));
         log.close();
         let logs: Vec<String> = std::fs::read_dir(&dir)
             .expect("listable")
@@ -886,12 +1105,139 @@ mod tests {
     }
 
     #[test]
+    fn what_the_start_pruned_is_given_once_and_never_waited_for() {
+        let dir = temp_folder("pruned");
+        let log = SessionLog::new(&dir, Local::now(), "start");
+        assert!(log.wait_for_pruning(Duration::from_secs(60)));
+        assert_eq!(log.take_pruned(), Some(Tidied::default()), "a new folder has nothing to remove");
+        assert_eq!(log.take_pruned(), None, "it's given once");
+        // A look at the folder that's still going (on a drive that's asleep): nothing yet, and no waiting for it.
+        let (go, wait) = channel::<()>();
+        let going = std::thread::spawn(move || {
+            let _ = wait.recv_timeout(Duration::from_secs(10));
+            Tidied { removed: 3, ..Tidied::default() }
+        });
+        *log.pruning.lock().expect("not poisoned") = Pruning::Going(going);
+        let asked = Instant::now();
+        assert_eq!(log.take_pruned(), None);
+        assert!(asked.elapsed() < Duration::from_secs(5), "it didn't wait for the look to finish");
+        go.send(()).expect("the look is still going");
+        assert!(log.wait_for_pruning(Duration::from_secs(60)));
+        assert_eq!(log.take_pruned().map(|done| done.removed), Some(3), "once it's done, what it did");
+        assert_eq!(log.take_pruned(), None);
+        log.close();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_crash_that_ends_the_app_is_known_on_any_thread() {
         assert!(crash_ends_the_app(Some("main"), Some("index out of bounds")));
         assert!(crash_ends_the_app(Some("Scan 1"), Some("panic in a destructor during cleanup")));
         assert!(crash_ends_the_app(None, Some("panic in a function that cannot unwind")));
+        // A debug build's checks on unsafe code, as Rust 1.99 words them: the details after the start vary.
+        for said in [
+            "unsafe precondition(s) violated: slice::from_raw_parts requires the pointer to be aligned and non-null, \
+             and the total size of the slice not to exceed `isize::MAX`\n\nThis indicates a bug in the program. This \
+             Undefined Behavior check is optional, and cannot be relied on for safety.",
+            "misaligned pointer dereference: address must be a multiple of 0x4 but is 0x1001",
+            "null pointer dereference occurred",
+            "null reference produced",
+            "trying to construct an enum from an invalid value 0x7",
+            "is_nonoverlapping: `size_of::<T>() * count` overflows a usize",
+            "std::process::exit called re-entrantly",
+        ] {
+            assert!(crash_ends_the_app(Some("Background 2"), Some(said)), "{said}");
+        }
         assert!(!crash_ends_the_app(Some("Scan 1"), Some("index out of bounds")));
+        // Known by how they start, or by the whole of what they say.
+        assert!(!crash_ends_the_app(Some("Scan 1"), Some("bad header: unsafe precondition(s) violated: ")));
+        assert!(!crash_ends_the_app(Some("Scan 1"), Some("null pointer dereference occurred twice")));
         assert!(!crash_ends_the_app(Some("Background 3"), None));
+    }
+
+    /// Set for the copy of this test program that crashes in a `Drop` (see the test below).
+    const IN_THE_COPY: &str = "MO_TEST_CRASH_IN_A_DROP";
+    /// What the copy prints before each crash's message, so they're known among the test program's own lines.
+    const SAID: &str = "The crash said: ";
+
+    /// Only in the copy that the test below runs; in an ordinary run it does nothing. A crash in a `Drop` while an
+    /// earlier crash is being cleaned up, which std can't recover from: each crash's message is printed, and then std
+    /// ends the copy.
+    #[test]
+    fn crash_in_a_drop_while_unwinding_in_a_copy() {
+        if std::env::var_os(IN_THE_COPY).is_none() {
+            return;
+        }
+        std::panic::set_hook(Box::new(|info| {
+            let mut out = std::io::stdout().lock();
+            let _ = writeln!(out, "{SAID}{}", info.payload_as_str().unwrap_or("(nothing)"));
+            let _ = out.flush();
+        }));
+        struct CrashesWhileUnwinding;
+        impl Drop for CrashesWhileUnwinding {
+            fn drop(&mut self) {
+                if std::thread::panicking() {
+                    panic!("the second crash, in a drop");
+                }
+            }
+        }
+        let _crashes = CrashesWhileUnwinding;
+        panic!("the first crash");
+    }
+
+    /// What std says when it ends the app, checked on the Rust that builds it (the list above is only words): a copy of
+    /// this test program crashes in a `Drop` while unwinding, and prints what each crash said.
+    #[test]
+    fn what_std_says_as_a_crash_in_a_drop_ends_the_app_is_known() {
+        let copy = std::process::Command::new(std::env::current_exe().expect("this test program"))
+            .args(["--exact", "log::tests::crash_in_a_drop_while_unwinding_in_a_copy", "--nocapture"])
+            .arg("--test-threads=1")
+            .env(IN_THE_COPY, "1")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("the copy ran");
+        let out = String::from_utf8_lossy(&copy.stdout);
+        assert!(!copy.status.success(), "std ended the copy: {out}");
+        // The first may follow the test program's own "test … " on its line.
+        let said: Vec<&str> = out.lines().filter_map(|l| l.split_once(SAID).map(|(_, said)| said)).collect();
+        assert!(said.contains(&"the first crash") && said.contains(&"the second crash, in a drop"), "{out}");
+        let ending = said.iter().filter(|m| crash_ends_the_app(Some("Scan 1"), Some(m))).count();
+        assert_eq!(ending, 1, "std's own words as it ends the app are known, and only those: {said:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_open_session_log_is_locked_on_a_mac_or_linux() {
+        let dir = temp_folder("locked");
+        let log = SessionLog::new(&dir, Local::now(), "start");
+        let path = log.path().expect("a file").to_owned();
+        let other = File::open(&path).expect("readable while it's written");
+        assert!(matches!(other.try_lock(), Err(std::fs::TryLockError::WouldBlock)), "locked while it's written");
+        log.close();
+        assert!(other.try_lock().is_ok(), "free once it's closed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_open_session_log_cant_be_removed_on_windows() {
+        let dir = temp_folder("in-use");
+        let log = SessionLog::new(&dir, Local::now(), "start");
+        let path = log.path().expect("a file").to_owned();
+        assert!(std::fs::remove_file(&path).is_err(), "nobody can remove it while it's written");
+        assert!(std::fs::read_to_string(&path).is_ok(), "anyone can read it");
+        log.close();
+        // A virus scanner may still be looking at the file for a moment.
+        let until = Instant::now() + Duration::from_secs(5);
+        let removed = loop {
+            match std::fs::remove_file(&path) {
+                Ok(()) => break Ok(()),
+                Err(_) if Instant::now() < until => std::thread::sleep(Duration::from_millis(50)),
+                Err(e) => break Err(e),
+            }
+        };
+        assert!(removed.is_ok(), "removable once it's closed: {removed:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

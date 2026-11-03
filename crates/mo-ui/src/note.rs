@@ -10,12 +10,14 @@
 //!
 //! The window's thread never touches the note's files (rule 12): the draft, the lock and the words of failed saves are
 //! read and written in turn by one "Note files" thread, which always writes the newest draft and the lock as it is
-//! now.
+//! now. A crash, and the app closing with that thread stuck, write the draft themselves, straight away, but in its
+//! turn ([`DRAFT_TURN`]): never two writers at once.
 
 use std::cell::RefCell;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 
 use mo_app::activity::Feed;
@@ -31,9 +33,19 @@ struct Picture {
     rgba: Vec<u8>,
 }
 
-/// Typed but not yet in the draft file.
+/// Typed but not yet in the draft file. The words stay here until they're on disk, so a crash meanwhile still finds
+/// them.
 static UNSAVED: Mutex<Option<String>> = Mutex::new(None);
 const DRAFT_PAUSE: Duration = Duration::from_millis(300);
+/// Taken while the draft is written or cleared, from reading the words in `UNSAVED` until they're on disk, so it's
+/// written by one thread at a time. Writing empties the file first: a crash that ends the app while another thread
+/// was part way would lose the note, and two writers at once could leave older words over newer ones. The "Note
+/// files" thread waits for its turn. A crash, and the app closing with that thread stuck, wait only a moment
+/// ([`DRAFT_MOMENT`]) and then write anyway: the thread whose turn it is may be the one that crashed, or stuck on a
+/// slow disk. The window's thread never waits for it: it only touches `UNSAVED`.
+static DRAFT_TURN: Mutex<()> = Mutex::new(());
+/// How long a crash, or the app closing, waits for the draft's turn.
+const DRAFT_MOMENT: Duration = Duration::from_secs(1);
 /// A note is open in the window.
 static OPEN: AtomicBool = AtomicBool::new(false);
 /// Saves still going.
@@ -66,6 +78,42 @@ enum FileJob {
 
 static FILES: OnceLock<Mutex<Option<Sender<FileJob>>>> = OnceLock::new();
 
+/// How long writing or clearing the draft waits for its turn ([`DRAFT_TURN`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Turn {
+    /// As long as it takes: the "Note files" thread.
+    Wait,
+    /// A moment ([`DRAFT_MOMENT`]), and then it goes ahead anyway: a crash, or the app closing with the "Note files"
+    /// thread stuck.
+    Moment,
+    /// Not at all: a job done on the thread that asked (the window's, perhaps), as the "Note files" thread couldn't
+    /// start. When it isn't its turn, the words wait in `UNSAVED` for the next try.
+    Never,
+}
+
+/// The draft's turn, waiting as `turn` says; `None` when it didn't come.
+fn draft_turn(turn: Turn) -> Option<MutexGuard<'static, ()>> {
+    match turn {
+        Turn::Wait => Some(DRAFT_TURN.lock().unwrap_or_else(PoisonError::into_inner)),
+        Turn::Moment => lock_within(&DRAFT_TURN, DRAFT_MOMENT),
+        Turn::Never => lock_within(&DRAFT_TURN, Duration::ZERO),
+    }
+}
+
+/// Takes `lock`, trying for up to `limit`; `None` if it's still taken then. A crash mustn't wait for ever on a lock the
+/// thread that crashed may hold.
+fn lock_within<T>(lock: &Mutex<T>, limit: Duration) -> Option<MutexGuard<'_, T>> {
+    let start = Instant::now();
+    loop {
+        match lock.try_lock() {
+            Ok(guard) => return Some(guard),
+            Err(TryLockError::Poisoned(e)) => return Some(e.into_inner()),
+            Err(TryLockError::WouldBlock) if start.elapsed() >= limit => return None,
+            Err(TryLockError::WouldBlock) => std::thread::sleep(Duration::from_millis(1)),
+        }
+    }
+}
+
 /// Hands a job to the "Note files" thread, started the first time. If that thread can't be started (or has
 /// stopped), the job is done here instead: late is better than lost.
 fn on_files(job: FileJob) {
@@ -84,29 +132,41 @@ fn on_files(job: FileJob) {
         },
         None => job,
     };
-    do_file_job(job);
+    // This may be the window's thread, which never waits for the draft's turn.
+    do_file_job(job, Turn::Never);
 }
 
 fn do_file_jobs(jobs: &Receiver<FileJob>) {
     for job in jobs {
         // One job going wrong (it's logged as a crash) mustn't lose the jobs after it.
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| do_file_job(job)));
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| do_file_job(job, Turn::Wait)));
     }
 }
 
-fn do_file_job(job: FileJob) {
+/// Does `job`, waiting for the draft's turn as `turn` says.
+fn do_file_job(job: FileJob, turn: Turn) {
+    let folder = note::notes_dir();
     match job {
-        FileJob::KeepDraft => keep_unsaved(),
+        FileJob::KeepDraft => keep_unsaved(&folder, turn),
         // A draft from before that wasn't shown yet wasn't seen, so it isn't thrown away.
-        FileJob::ClearDraft if FILLED.load(Ordering::Acquire) => note::clear_draft(&note::notes_dir()),
+        FileJob::ClearDraft if FILLED.load(Ordering::Acquire) => {
+            // When it isn't its turn here, the draft stays: offered again next time, rather than lost.
+            if let Some(_mine) = draft_turn(turn) {
+                note::clear_draft(&folder);
+            }
+        }
         FileJob::ClearDraft => {}
         FileJob::Lock => {
             let busy = OPEN.load(Ordering::Acquire) || SAVING.load(Ordering::Acquire) > 0;
-            note::writing(&note::notes_dir(), busy);
+            note::writing(&folder, busy);
         }
-        FileJob::KeepFailed(text) => keep_failed_words(&text),
+        FileJob::KeepFailed(text) => keep_failed_words(&folder, &text),
         FileJob::Fill(weak, opening) => {
-            let text = starting_text();
+            // In its turn, so it never reads a draft that's half written.
+            let text = {
+                let _mine = draft_turn(turn);
+                starting_text(&folder)
+            };
             if text.is_empty() {
                 FILLED.store(true, Ordering::Release);
                 return;
@@ -127,11 +187,12 @@ fn do_file_job(job: FileJob) {
             });
         }
         FileJob::ForgetFailed => {
-            let _ = std::fs::remove_file(note::notes_dir().join(FAILED_FILE));
+            let _ = std::fs::remove_file(folder.join(FAILED_FILE));
         }
         FileJob::Finish(done) => {
-            keep_unsaved();
-            note::writing(&note::notes_dir(), false);
+            // The app is closing and its window has gone, so even done here it may wait a moment for the turn.
+            keep_unsaved(&folder, if turn == Turn::Never { Turn::Moment } else { turn });
+            note::writing(&folder, false);
             let _ = done.send(());
         }
     }
@@ -199,29 +260,37 @@ pub fn connect(app: &AppWindow, feed: &Feed) {
     });
 }
 
-/// Writes what's typed but not yet kept. Safe from any thread, and from a crash: it never waits for the lock.
-fn keep_unsaved() {
-    let text = match UNSAVED.try_lock() {
-        Ok(mut t) => t.take(),
-        Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner().take(),
-        Err(std::sync::TryLockError::WouldBlock) => None,
-    };
-    let Some(text) = text else { return };
-    let folder = note::notes_dir();
-    if FILLED.load(Ordering::Acquire) {
-        note::keep_draft(&folder, &text);
+/// Writes what's typed but not yet kept into the draft in `folder`, in the draft's turn, waiting for it as `turn` says
+/// (see [`DRAFT_TURN`]). The words leave `UNSAVED` once they're on disk, unless newer ones came meanwhile. Safe from
+/// any thread, and from a crash: it never waits longer than `turn` says.
+fn keep_unsaved(folder: &Path, turn: Turn) {
+    let mine = draft_turn(turn);
+    if mine.is_none() && turn == Turn::Never {
         return;
     }
-    // Typed before the text from before was shown: kept with it, not over it, and from now on it's all one draft.
-    let before = starting_text();
-    let whole = match (before.is_empty(), text.is_empty()) {
-        (true, _) => text,
-        (false, true) => before,
-        (false, false) => format!("{before}\n\n{text}"),
-    };
-    note::keep_draft(&folder, &whole);
-    let _ = std::fs::remove_file(folder.join(FAILED_FILE));
-    FILLED.store(true, Ordering::Release);
+    // Only a look: the words stay in `UNSAVED` until they're on disk. The window's thread holds it only a moment.
+    let Some(text) = lock_within(&UNSAVED, DRAFT_MOMENT).and_then(|unsaved| (*unsaved).clone()) else { return };
+    if FILLED.load(Ordering::Acquire) {
+        note::keep_draft(folder, &text);
+    } else {
+        // Typed before the text from before was shown: kept with it, not over it, and from now on it's all one draft.
+        let before = starting_text(folder);
+        let whole = match (before.is_empty(), text.is_empty()) {
+            (true, _) => text.clone(),
+            (false, true) => before,
+            (false, false) => format!("{before}\n\n{text}"),
+        };
+        note::keep_draft(folder, &whole);
+        let _ = std::fs::remove_file(folder.join(FAILED_FILE));
+        FILLED.store(true, Ordering::Release);
+    }
+    if let Some(mut unsaved) = lock_within(&UNSAVED, DRAFT_MOMENT)
+        && unsaved.as_ref() == Some(&text)
+    {
+        *unsaved = None;
+    }
+    // The turn ends once the words are on disk.
+    drop(mine);
 }
 
 /// `writing.lock` is up while a note is open or still being saved.
@@ -247,23 +316,31 @@ pub fn finish_up() {
     let (done, finished) = channel();
     on_files(FileJob::Finish(done));
     if finished.recv_timeout(Duration::from_secs(2)).is_err() {
-        // The files' thread is stuck or gone: done here, so the draft and the lock are still right.
-        keep_unsaved();
-        note::writing(&note::notes_dir(), false);
+        // The files' thread is stuck or gone: done here, so the draft and the lock are still right. If it's stuck in
+        // the middle of the draft, this waits only a moment for it.
+        let folder = note::notes_dir();
+        keep_unsaved(&folder, Turn::Moment);
+        note::writing(&folder, false);
     }
 }
 
-/// For a crash. When it ends the app (`ends_the_app`), the words typed are kept straight away on this thread and the
-/// lock comes down, as there's no time to hand them to anyone. After any other crash the app goes on with the note
-/// still open: the "Note files" thread keeps the words and puts the lock as it should be, as it does everything with
-/// the note's files, so two threads never write the draft at once.
+/// For a crash, from the crash handler. Whatever the crash, the words typed are kept straight away, on this thread,
+/// before it returns: std may end the app straight after one the handler can't tell will (a crash in a thread's own
+/// data as the thread ends). They're written in the draft's turn, waiting only a moment for it. When the crash ends the
+/// app (`ends_the_app`), the lock comes down too. After any other crash the app goes on, perhaps with the note still
+/// open: the "Note files" thread puts the lock as it should be, in order with its other jobs.
 pub fn after_crash(ends_the_app: bool) {
-    if ends_the_app {
-        keep_unsaved();
-        note::writing(&note::notes_dir(), false);
-    } else {
-        on_files(FileJob::KeepDraft);
+    keep_after_crash(&note::notes_dir(), ends_the_app);
+    if !ends_the_app {
         update_lock();
+    }
+}
+
+/// What [`after_crash`] does in the notes folder, `folder`, before it returns.
+fn keep_after_crash(folder: &Path, ends_the_app: bool) {
+    keep_unsaved(folder, Turn::Moment);
+    if ends_the_app {
+        note::writing(folder, false);
     }
 }
 
@@ -297,11 +374,10 @@ impl Drop for SaveDone {
 /// is written and cleared as usual) can't overwrite them.
 const FAILED_FILE: &str = "unsaved.txt";
 
-/// A save that fails keeps its words for the next F12 (and they're in the log too).
-fn keep_failed_words(text: &str) {
+/// A save that fails keeps its words for the next F12, in `folder` (and they're in the log too).
+fn keep_failed_words(folder: &Path, text: &str) {
     use std::io::Write;
-    let folder = note::notes_dir();
-    let kept = std::fs::create_dir_all(&folder).and_then(|()| {
+    let kept = std::fs::create_dir_all(folder).and_then(|()| {
         let mut f = std::fs::OpenOptions::new().create(true).append(true).open(folder.join(FAILED_FILE))?;
         writeln!(f, "{}\n", text.trim_end())
     });
@@ -310,11 +386,11 @@ fn keep_failed_words(text: &str) {
     }
 }
 
-/// The note's starting text: words from saves that failed, then the draft. Only read: the files change once it's shown.
-fn starting_text() -> String {
-    let folder = note::notes_dir();
+/// The note's starting text in `folder`: words from saves that failed, then the draft. Only read: the files change
+/// once it's shown.
+fn starting_text(folder: &Path) -> String {
     let failed = std::fs::read_to_string(folder.join(FAILED_FILE)).unwrap_or_default();
-    let draft = note::read_draft(&folder).unwrap_or_default();
+    let draft = note::read_draft(folder).unwrap_or_default();
     match (failed.trim().is_empty(), draft.is_empty()) {
         (true, _) => draft,
         (false, true) => failed.trim_end().to_owned(),
@@ -378,4 +454,88 @@ fn encode_png(p: &Picture) -> image::ImageResult<Vec<u8>> {
         image::ExtendedColorType::Rgba8,
     )?;
     Ok(png)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    /// The words typed and the draft's turn are the app's own, one of each, so these tests take turns too.
+    static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
+    /// A notes folder of the test's own: tests never touch the app's data folder.
+    fn temp_folder(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("mo-ui-note-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// As the window's thread does when the words change.
+    fn typed(words: &str) {
+        FILLED.store(true, Ordering::Release);
+        *UNSAVED.lock().unwrap_or_else(PoisonError::into_inner) = Some(words.to_owned());
+    }
+
+    #[test]
+    fn a_crash_keeps_the_words_before_it_returns_waiting_only_a_moment_for_its_turn() {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+        let dir = temp_folder("crash");
+        typed("half a thought");
+        // The "Note files" thread is part way through the draft, stuck on a disk that's asleep: it's its turn.
+        let stuck = DRAFT_TURN.lock().unwrap_or_else(PoisonError::into_inner);
+        // A crash the handler can't tell will end the app (std may end it straight after).
+        let (done, finished) = channel();
+        let folder = dir.clone();
+        std::thread::spawn(move || {
+            keep_after_crash(&folder, false);
+            let _ = done.send(());
+        });
+        let returned = finished.recv_timeout(Duration::from_secs(30));
+        let kept = note::read_draft(&dir);
+        drop(stuck);
+        assert!(returned.is_ok(), "it waits only a moment for its turn");
+        assert_eq!(kept.as_deref(), Some("half a thought"), "the words are on disk before it returns");
+        assert_eq!(*UNSAVED.lock().unwrap_or_else(PoisonError::into_inner), None, "and kept, so they're done with");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn two_writers_take_turns_so_the_newest_words_stay() {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+        let dir = temp_folder("turns");
+        typed("the newest words");
+        // The "Note files" thread has its turn, and is writing the words from before.
+        let turn = DRAFT_TURN.lock().unwrap_or_else(PoisonError::into_inner);
+        // Meanwhile another thread crashes, and keeps the newest words.
+        let folder = dir.clone();
+        let crash = std::thread::spawn(move || keep_after_crash(&folder, false));
+        std::thread::sleep(Duration::from_millis(50));
+        note::keep_draft(&dir, "the words from before");
+        drop(turn);
+        crash.join().expect("no crash in keeping the words");
+        assert_eq!(note::read_draft(&dir).as_deref(), Some("the newest words"), "written in its turn, last");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_job_that_cant_wait_for_its_turn_leaves_the_words_for_the_next_write() {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+        let dir = temp_folder("never");
+        typed("first words");
+        keep_unsaved(&dir, Turn::Wait);
+        assert_eq!(note::read_draft(&dir).as_deref(), Some("first words"));
+        assert_eq!(*UNSAVED.lock().unwrap_or_else(PoisonError::into_inner), None, "on disk, so done with");
+        // When it isn't its turn, a job done on the window's thread leaves the words for the next try.
+        typed("more words");
+        let turn = DRAFT_TURN.lock().unwrap_or_else(PoisonError::into_inner);
+        keep_unsaved(&dir, Turn::Never);
+        drop(turn);
+        assert_eq!(note::read_draft(&dir).as_deref(), Some("first words"));
+        assert_eq!(UNSAVED.lock().unwrap_or_else(PoisonError::into_inner).as_deref(), Some("more words"));
+        keep_unsaved(&dir, Turn::Wait);
+        assert_eq!(note::read_draft(&dir).as_deref(), Some("more words"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

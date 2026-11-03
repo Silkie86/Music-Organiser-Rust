@@ -1,6 +1,8 @@
 // No console window behind the app on Windows.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::path::Path;
+
 use mo_app::activity::Feed;
 use mo_app::log;
 use mo_app::places::Place;
@@ -71,28 +73,158 @@ fn main() -> Result<(), slint::PlatformError> {
 /// folder; the crash that ends the app always gets its file; rule 28). Nothing in here may crash itself: std would end
 /// the app on the spot.
 fn log_crashes() {
-    static CRASH_FILES: log::CrashFiles = log::CrashFiles::new();
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let current = std::thread::current();
-        let thread = current.name().unwrap_or("unnamed");
-        let trace = std::backtrace::Backtrace::force_capture();
-        let text =
-            format!("Music Organiser {} crashed on thread {thread}\n{info}\n\n{trace}\n", mo_app::version::version());
-        let place = info.location().map_or_else(|| "unknown".to_owned(), |l| format!("{}:{}", l.file(), l.line()));
-        log::crash(&place, &text);
-        // A crash on the window's thread ends the app, and so does one std can't recover from, on any thread.
-        let fatal = log::crash_ends_the_app(current.name(), info.payload_as_str());
-        // The log's own writer can't wait for itself to write the crash out.
+        on_crash(info, &mo_app::paths::logs_dir(), &mo_ui::note::after_crash);
+        // Then std's own report of it, on the console when there is one.
+        default(info);
+    }));
+}
+
+/// The places in the code this run has written a crash log for.
+static CRASH_FILES: log::CrashFiles = log::CrashFiles::new();
+
+/// What the app does with a crash, before std's own report of it: the crash goes into the session log and into a crash
+/// log of its own in `logs`, and the words of an open F12 note are kept (`keep_note`, told whether the crash ends the
+/// app). What the crash says goes to disk first, everywhere, and its backtrace only after: taking a backtrace waits for
+/// a lock of std's that std holds while it reports another thread's crash on the console, and that can wait for ever
+/// (a console that's paused, or a pipe nobody reads). Nothing else in here waits long.
+fn on_crash(info: &std::panic::PanicHookInfo<'_>, logs: &Path, keep_note: &dyn Fn(bool)) {
+    let current = std::thread::current();
+    let thread = current.name().unwrap_or("unnamed");
+    let place = info.location().map_or_else(|| "unknown".to_owned(), |l| format!("{}:{}", l.file(), l.line()));
+    // A crash on the window's thread ends the app, and so does one std can't recover from, on any thread.
+    let fatal = log::crash_ends_the_app(current.name(), info.payload_as_str());
+    let text = format!("Music Organiser {} crashed on thread {thread}\n{info}\n", mo_app::version::version());
+    log::crash(&place, &text, fatal);
+    // Out to disk now. The log's own writer can't wait for itself to write the crash out.
+    let flush = || {
         if thread != log::WRITER_THREAD
             && let Some(l) = log::current()
         {
             l.flush();
         }
-        let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        let _ = log::write_crash_file(&mo_app::paths::logs_dir(), &text, secs, &place, fatal, &CRASH_FILES);
-        // The words of an open F12 note are kept for next time; after the crash itself is safely written.
-        mo_ui::note::after_crash(fatal);
-        default(info);
-    }));
+    };
+    flush();
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let file = log::write_crash_file(logs, &text, secs, &place, fatal, &CRASH_FILES);
+    keep_note(fatal);
+    // Then where in the code it came from. Written out rather than formatted: a backtrace that can't be written in
+    // full mustn't crash the crash handler.
+    let mut trace = String::new();
+    let _ = std::fmt::Write::write_fmt(&mut trace, format_args!("{}", std::backtrace::Backtrace::force_capture()));
+    if let Some(file) = &file {
+        log::add_to_crash_file(file, &format!("\n{trace}\n"));
+    }
+    log::crash_backtrace(&place, &format!("Backtrace of the crash on thread {thread}:\n{trace}"), fatal);
+    flush();
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::process::Stdio;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    /// Set for the copy of this test program that crashes while the console is blocked: the folder it logs into.
+    const IN_THE_COPY: &str = "MO_TEST_CRASH_WHILE_THE_CONSOLE_WAITS";
+    /// The file the copy's stand-in for keeping an F12 note writes a line in, for each crash.
+    const NOTES_KEPT: &str = "notes kept.txt";
+
+    /// Only in the copy that the test below runs; in an ordinary run it does nothing. The console (a pipe the test
+    /// never reads) is filled, so std's report of a first crash waits there for ever, holding its backtrace lock; then
+    /// a second thread crashes.
+    #[test]
+    fn crash_while_the_console_waits_in_a_copy() {
+        use std::io::Write;
+        let Some(dir) = std::env::var_os(IN_THE_COPY).map(PathBuf::from) else { return };
+        let _log = log::start(&dir, "A copy of the test program, to crash in");
+        static HANDLED: AtomicUsize = AtomicUsize::new(0);
+        let default = std::panic::take_hook();
+        let logs = dir.clone();
+        std::panic::set_hook(Box::new(move |info| {
+            on_crash(info, &logs, &|_: bool| {
+                let kept = std::fs::OpenOptions::new().create(true).append(true).open(logs.join(NOTES_KEPT));
+                if let Ok(mut f) = kept {
+                    let _ = writeln!(f, "kept");
+                }
+            });
+            HANDLED.fetch_add(1, Ordering::SeqCst);
+            default(info);
+        }));
+        // Fills the console, and waits there for ever.
+        std::thread::spawn(|| std::io::stderr().write_all("x".repeat(4 * 1024 * 1024).as_bytes()));
+        std::thread::sleep(Duration::from_millis(300));
+        let _ = std::thread::Builder::new().name("Crash A".into()).spawn(|| panic!("the first crash"));
+        // Once the first crash is handled, std's report of it waits on the console, holding the backtrace lock.
+        let until = Instant::now() + Duration::from_secs(100);
+        while HANDLED.load(Ordering::SeqCst) == 0 && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        let _ = std::thread::Builder::new().name("Crash B".into()).spawn(|| panic!("the second crash"));
+        // The test ends this copy once it has seen what it needs to; if it doesn't, the copy ends by itself.
+        std::thread::sleep(Duration::from_secs(180));
+    }
+
+    #[test]
+    fn a_crash_is_written_before_its_backtrace_is_taken() {
+        let dir = std::env::temp_dir().join(format!("mo-ui-crash-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("made");
+        let copy = std::process::Command::new(std::env::current_exe().expect("this test program"))
+            .args(["--exact", "tests::crash_while_the_console_waits_in_a_copy", "--nocapture", "--test-threads=1"])
+            .env(IN_THE_COPY, &dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            // Never read, so it fills up.
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the copy started");
+        // The copy is ended however this test ends, so it never runs on.
+        struct Ends(std::process::Child);
+        impl Drop for Ends {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut copy = Ends(copy);
+        // The session log's text, the crash logs' text, and how many times an F12 note was kept.
+        let read = |dir: &Path| -> (String, String, usize) {
+            let (mut session, mut crashes) = (String::new(), String::new());
+            for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let text = std::fs::read_to_string(entry.path()).unwrap_or_default();
+                if log::is_session_log(&name) {
+                    session += &text;
+                } else if log::is_crash_log(&name) {
+                    crashes += &text;
+                }
+            }
+            (session, crashes, std::fs::read_to_string(dir.join(NOTES_KEPT)).unwrap_or_default().lines().count())
+        };
+        let until = Instant::now() + Duration::from_secs(120);
+        let (seen, (session, crashes, kept)) = loop {
+            let found = read(&dir);
+            let (session, crashes, kept) = &found;
+            // The first crash was handled in full, and std's report of it waits on the console: the second crash is
+            // written, and its note kept, though its backtrace waits.
+            let seen = session.contains("[Crash] Backtrace of the crash on thread Crash A:")
+                && session.contains("crashed on thread Crash B")
+                && crashes.contains("crashed on thread Crash B")
+                && *kept == 2;
+            let ended = copy.0.try_wait().ok().flatten().is_some();
+            if seen || ended || Instant::now() >= until {
+                break (seen, found);
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        drop(copy);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(seen, "the second crash is written before its backtrace is taken:\n{session}\n---\n{crashes}\n{kept}");
+    }
 }
