@@ -472,10 +472,11 @@ impl Library {
     }
 }
 
-/// A copy of `list` with each sound's use in your songs, and Most liked scored with it.
+/// `list` again, sharing its sounds rather than copying them, with each sound's use in your songs and Most liked
+/// scored with it.
 fn with_usage(list: &SoundList, usage: HashMap<i64, Usage>, weights: &LikedWeights) -> SoundList {
     background::on_pool(|| {
-        let mut list = list.clone();
+        let mut list = list.sharing();
         list.set_liked(|s| weights.score(s, usage.get(&s.id)));
         list.set_used(usage);
         list
