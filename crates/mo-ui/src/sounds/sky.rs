@@ -8,11 +8,12 @@
 //! 2. stamp them again onto a quarter-size layer;
 //! 3. blur that layer, across and then down, into the glow;
 //! 4. squeeze the brightness of the stamps and the glow into the picture, over the page's background;
-//! 5. draw the stars as stars over it, their light added on: a white-hot core in a soft glow, so a cluster glows
-//!    where they crowd. Close up every star is drawn so, the left-out ones as faint dust; far out only the stars "Light
-//!    by" lights most, each a point of its own with a bigger halo, so they stand out at every zoom. The very brightest
-//!    get faint four-point spikes, and every star twinkles very slightly (only in brightness, and not while the mouse
-//!    sweeps, drags or glides, so it never gets in the way of picking a sound).
+//! 5. draw the stars as stars over it, their light screened on (as the processor's picture does): a white-hot core
+//!    in a soft glow, so a cluster glows where they crowd but keeps its colour. Close up every star is drawn so, the
+//!    left-out ones as faint dust; far out only the stars "Light by" lights most, each a point of its own with a
+//!    bigger halo, so they stand out at every zoom. The very brightest get faint four-point spikes, and every star
+//!    twinkles very slightly (only in brightness, and not while the mouse sweeps, drags or glides, so it never gets in
+//!    the way of picking a sound).
 
 use mo_app::galaxy_look::{self as look, Look, STAMP};
 use mo_app::galaxy_view::View;
@@ -178,8 +179,9 @@ fn crisp_fragment(in: Crisp) -> @location(0) vec4<f32> {
     let shown = in.shown > 0.5;
     let light = select(core, core + glow + spike, shown);
     let white = select(0.0, WHITE * hot * core * in.glow, shown) * max(in.colour.r, max(in.colour.g, in.colour.b));
-    // Added to what's there: where stars crowd, their glows add up.
-    return vec4(in.colour * light + vec3(white), 0.0);
+    // Screened over what's there (as the processor's picture does): where stars crowd their glows build up, but a
+    // crowd keeps its colour longer than if the light were simply added, which burns a dense cluster to white.
+    return vec4(min(in.colour * light + vec3(white), vec3(1.0)), 0.0);
 }
 
 // A triangle over the whole picture, for the steps that work pixel by pixel.
@@ -396,7 +398,11 @@ impl Sky {
             "crisp_fragment",
             PICTURE,
             Some(wgpu::BlendState {
-                color: add,
+                color: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::One,
+                    dst_factor: wgpu::BlendFactor::OneMinusSrc,
+                    operation: wgpu::BlendOperation::Add,
+                },
                 alpha: wgpu::BlendComponent {
                     src_factor: wgpu::BlendFactor::Zero,
                     dst_factor: wgpu::BlendFactor::One,

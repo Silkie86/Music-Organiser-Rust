@@ -261,6 +261,9 @@ thread_local! {
 /// slight shimmer, never so much that it gets in the way of looking or picking.
 const TWINKLE: f32 = 0.07;
 const TWINKLE_EVERY: Duration = Duration::from_millis(80);
+/// The twinkle stops this long after the galaxy was last drawn for anything else (a move, a filter, a hover), so a
+/// window left open on the galaxy doesn't keep the graphics card busy all day.
+const TWINKLE_FOR: Duration = Duration::from_secs(30);
 
 thread_local! {
     /// Draws the galaxy again now and then while its stars twinkle.
@@ -269,12 +272,16 @@ thread_local! {
     static TWINKLE_CLOCK: Instant = Instant::now();
     /// Whether the last picture had stars drawn as stars, the ones that twinkle (far out with nothing lit, none do).
     static TWINKLE_SHOWS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Until when the stars twinkle (see [`TWINKLE_FOR`]).
+    static TWINKLE_UNTIL: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
 }
 
 /// Keeps the stars twinkling on the graphics card while the galaxy is on show. Each beat draws only the picture again;
 /// while a button is held or the view glides, the picture is being drawn anyway and doesn't twinkle (see
-/// [`draw_on_card`]), and once the galaxy is off show the beat stops.
+/// [`draw_on_card`]), and once the galaxy is off show (another page, the window minimised) or [`TWINKLE_FOR`] after
+/// it was last drawn for anything else, the beat stops.
 fn keep_twinkling(app: &AppWindow) {
+    TWINKLE_UNTIL.with(|u| u.set(Some(Instant::now() + TWINKLE_FOR)));
     if TWINKLING.with(Timer::running) {
         return;
     }
@@ -282,10 +289,16 @@ fn keep_twinkling(app: &AppWindow) {
     TWINKLING.with(|t| {
         t.start(TimerMode::Repeated, TWINKLE_EVERY, move || {
             let Some(app) = weak.upgrade() else { return };
+            // On show: the Sounds page in front, its galaxy with stars, the window not minimised, and drawn lately.
+            let lately = TWINKLE_UNTIL.with(std::cell::Cell::get).is_some_and(|u| Instant::now() < u);
+            let in_front = crate::place() == Some(mo_app::places::Place::Sounds) && !app.window().is_minimized();
             let (on_show, moving) = PAGE.with(|p| {
                 let p = p.borrow();
                 let g = &p.galaxy;
-                (p.view == super::GALAXY && g.stars.is_some(), g.view.pressed() || g.view.flying())
+                (
+                    p.view == super::GALAXY && g.stars.is_some() && in_front && lately,
+                    g.view.pressed() || g.view.flying(),
+                )
             });
             let card =
                 gpu::current().filter(|(_, generation)| CARD_FAILED.with(std::cell::Cell::get) != Some(*generation));
