@@ -14,7 +14,7 @@
 
 use std::fmt::Write as _;
 use std::io::{self, Read, Write};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -37,7 +37,7 @@ pub const TIMEOUT: Duration = Duration::from_secs(10);
 pub const CHANGE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The longest message the app takes, as the C# app and the extension do: anything longer is a broken stream.
-const MAX_MESSAGE: usize = 64 << 20;
+pub(super) const MAX_MESSAGE: usize = 64 << 20;
 
 /// The longest wait for anything, so a deadline never runs past what the clock can count.
 const LONGEST_WAIT: Duration = Duration::from_secs(3600);
@@ -205,12 +205,16 @@ pub struct PadContents {
 }
 
 /// A connection to the Music Organiser link in Bitwig. Dropping it closes the connection; a change still waiting in
-/// Bitwig behind others is then left out (extension 3.18), while one Bitwig has started goes on to the end.
+/// Bitwig behind others is then left out (extension 3.18), while one Bitwig has started goes on to the end. An answer
+/// that doesn't come in time closes it too: on Windows, a read that ran out of time leaves a connection in a state it
+/// mustn't be used in (it can lose what comes next), so a link that gave up waiting connects again.
 #[derive(Debug)]
 pub struct Link {
     stream: TcpStream,
     /// What Bitwig has sent that doesn't make a whole message yet.
     pending: Vec<u8>,
+    /// How far into `pending` a message that came without its length has been searched for its end.
+    scanned: usize,
     last_id: u64,
     hello: Hello,
     open: bool,
@@ -245,6 +249,7 @@ impl Link {
         let mut link = Link {
             stream,
             pending: Vec::new(),
+            scanned: 0,
             last_id: 0,
             hello: Hello::default(),
             open: true,
@@ -307,11 +312,11 @@ impl Link {
     }
 
     /// Keeps every change from now on to the project Bitwig had open when the link last greeted the app (see
-    /// [`Link::only_in`]), when the link can do that and Bitwig named the project.
+    /// [`Link::only_in`]), when the link can do that and Bitwig named the project; otherwise changes go to whichever
+    /// project is open, as they did before the link could keep them to one.
     pub fn stay_in_open_project(&mut self) {
-        if self.hello.only_in && !self.hello.project.is_empty() {
-            self.only_in = Some(self.hello.project.clone());
-        }
+        let pinned = self.hello.only_in && !self.hello.project.is_empty();
+        self.only_in = pinned.then(|| self.hello.project.clone());
     }
 
     /// Sends any command, with `fields` (a JSON object, or null for none) added to it, and returns Bitwig's answer as
@@ -321,7 +326,7 @@ impl Link {
         let mut request = match fields {
             Value::Object(map) => map,
             Value::Null => serde_json::Map::new(),
-            _ => return Err(Error::Bitwig(format!("A request's fields are a JSON object, not {fields}."))),
+            _ => return Err(Error::Invalid(format!("A request's fields are a JSON object, not {fields}."))),
         };
         request.insert("cmd".into(), cmd.into());
         let timeout = if PROJECT_COMMANDS.contains(&cmd) { self.change_timeout } else { self.timeout };
@@ -411,7 +416,7 @@ impl Link {
     fn request(&mut self, request: Value, timeout: Duration) -> Result<Value, Error> {
         let Value::Object(mut request) = request else { return Err(Error::Unexpected) };
         if !self.open {
-            return Err(Error::Closed);
+            return Err(Error::NotConnected);
         }
         let changes_project = request.get("cmd").and_then(Value::as_str).is_some_and(|c| PROJECT_COMMANDS.contains(&c));
         if changes_project && let Some(project) = &self.only_in {
@@ -426,13 +431,17 @@ impl Link {
         loop {
             let message = match self.next_message(deadline) {
                 Ok(message) => message,
-                Err(Failure::TimedOut) => return Err(Error::TimedOut),
+                // See the type's notes: a read that ran out of time leaves the connection unusable on Windows.
+                Err(Failure::TimedOut) => {
+                    self.close();
+                    return Err(Error::TimedOut);
+                }
                 Err(Failure::Closed) => {
-                    self.open = false;
+                    self.close();
                     return Err(Error::Closed);
                 }
                 Err(Failure::Garbled(why) | Failure::Broken(why)) => {
-                    self.open = false;
+                    self.close();
                     return Err(Error::Lost(why));
                 }
             };
@@ -462,16 +471,23 @@ impl Link {
             .and_then(|()| self.stream.write_all(&frame))
             .and_then(|()| self.stream.flush());
         written.map_err(|e| {
-            self.open = false;
+            self.close();
             Error::Lost(e.to_string())
         })
+    }
+
+    /// Closes the connection, which also tells the extension to leave out any change of this connection's still
+    /// waiting behind others (3.18).
+    fn close(&mut self) {
+        self.open = false;
+        let _ = self.stream.shutdown(Shutdown::Both);
     }
 
     /// The next whole message from Bitwig, waiting until `deadline` for it. Messages that aren't JSON objects are
     /// passed over, as the C# app did: the request they answer then runs out of time.
     fn next_message(&mut self, deadline: Instant) -> Result<Value, Failure> {
         loop {
-            while let Some(bytes) = take_message(&mut self.pending)? {
+            while let Some(bytes) = take_message(&mut self.pending, &mut self.scanned)? {
                 if let Ok(message @ Value::Object(_)) = serde_json::from_slice::<Value>(&bytes) {
                     return Ok(message);
                 }
@@ -500,20 +516,30 @@ impl Link {
 /// Takes the first whole message off what's come in, if there is one. Bitwig puts a 4-byte big-endian length in front
 /// of each; a message that starts straight away with `{` came without it (as the script once sent them) and ends at
 /// its newline. Blank space between messages is passed over: as a length, it would be far over the limit anyway.
-fn take_message(pending: &mut Vec<u8>) -> Result<Option<Vec<u8>>, Failure> {
+/// `scanned` is how far such a message has been searched for its newline already, so a long one that comes in many
+/// reads is searched once.
+fn take_message(pending: &mut Vec<u8>, scanned: &mut usize) -> Result<Option<Vec<u8>>, Failure> {
     let blank = pending.iter().take_while(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n')).count();
-    pending.drain(..blank);
+    if blank > 0 {
+        pending.drain(..blank);
+        *scanned = 0;
+    }
     let Some(&first) = pending.first() else { return Ok(None) };
     if first == b'{' {
-        return match pending.iter().position(|&b| b == b'\n') {
-            Some(end) => {
-                let message = pending.drain(..=end).collect();
+        let from = (*scanned).min(pending.len());
+        return match pending.get(from..).and_then(|rest| rest.iter().position(|&b| b == b'\n')) {
+            Some(at) => {
+                *scanned = 0;
+                let message = pending.drain(..=from + at).collect();
                 Ok(Some(message))
             }
             None if pending.len() > MAX_MESSAGE => {
                 Err(Failure::Garbled("Bitwig sent a message that never ends".into()))
             }
-            None => Ok(None),
+            None => {
+                *scanned = pending.len();
+                Ok(None)
+            }
         };
     }
     let Some(&[a, b, c, d]) = pending.first_chunk::<4>() else { return Ok(None) };
@@ -617,11 +643,11 @@ mod tests {
         stream.extend_from_slice(b"{\"id\":2}\n");
         stream.extend(framed("{\"id\":3}"));
         // A byte at a time: nothing until a message is whole.
-        let mut pending = Vec::new();
+        let (mut pending, mut scanned) = (Vec::new(), 0);
         let mut got = Vec::new();
         for &b in &stream {
             pending.push(b);
-            while let Some(m) = take_message(&mut pending).ok().flatten() {
+            while let Some(m) = take_message(&mut pending, &mut scanned).ok().flatten() {
                 got.push(String::from_utf8(m).unwrap());
             }
         }
@@ -629,23 +655,34 @@ mod tests {
         assert!(pending.is_empty());
 
         // All at once.
-        let mut pending = stream.clone();
+        let (mut pending, mut scanned) = (stream.clone(), 0);
         let mut count = 0;
-        while take_message(&mut pending).ok().flatten().is_some() {
+        while take_message(&mut pending, &mut scanned).ok().flatten().is_some() {
             count += 1;
         }
         assert_eq!(count, 3);
+
+        // One without its length, in pieces, then one with: each piece is searched once, and the next message starts
+        // its search afresh.
+        let (mut pending, mut scanned) = (b"{\"long\":\"".to_vec(), 0);
+        assert!(matches!(take_message(&mut pending, &mut scanned), Ok(None)));
+        assert_eq!(scanned, pending.len());
+        pending.extend_from_slice(b"abc\"}\n");
+        pending.extend(framed("{\"id\":4}"));
+        assert_eq!(take_message(&mut pending, &mut scanned).ok().flatten().unwrap(), b"{\"long\":\"abc\"}\n");
+        assert_eq!(scanned, 0);
+        assert_eq!(take_message(&mut pending, &mut scanned).ok().flatten().unwrap(), b"{\"id\":4}");
     }
 
     #[test]
     fn a_length_past_the_limit_is_a_broken_stream() {
         let mut pending = b"HTTP/1.1 400 Bad Request\r\n".to_vec();
-        assert!(matches!(take_message(&mut pending), Err(Failure::Garbled(_))));
+        assert!(matches!(take_message(&mut pending, &mut 0), Err(Failure::Garbled(_))));
         let mut pending = ((64u32 << 20) + 1).to_be_bytes().to_vec();
-        assert!(matches!(take_message(&mut pending), Err(Failure::Garbled(_))));
+        assert!(matches!(take_message(&mut pending, &mut 0), Err(Failure::Garbled(_))));
         // The longest allowed is only waited for.
         let mut pending = (64u32 << 20).to_be_bytes().to_vec();
-        assert!(matches!(take_message(&mut pending), Ok(None)));
+        assert!(matches!(take_message(&mut pending, &mut 0), Ok(None)));
     }
 
     #[test]

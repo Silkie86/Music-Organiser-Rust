@@ -24,16 +24,23 @@ pub enum Error {
     NotStarted(String),
     /// Bitwig said no, in the link's own words (they're written to be shown as they are).
     Bitwig(String),
-    /// Bitwig didn't answer in time.
+    /// Bitwig didn't answer in time. The app closes the connection then (see [`super::Link`]).
     TimedOut,
     /// Bitwig closed the connection (it quit, or the controller was turned off).
     Closed,
+    /// The connection was closed before: Bitwig closed it, it broke, or an answer didn't come in time.
+    NotConnected,
     /// The connection broke; the system's words for why.
     Lost(String),
     /// Bitwig's answer wasn't laid out the way the link's are.
     Unexpected,
+    /// The app asked for something the link doesn't take (a mistake in the app, not Bitwig's answer), and sent
+    /// nothing: why, in words.
+    Invalid(String),
     /// The sound to send isn't where the app last saw it.
     Missing { file: String, path: String },
+    /// None of a kit's sounds are where the app last saw them: how many, and the first of them.
+    KitMissing { sounds: usize, file: String, path: String },
     /// A kit with no sounds on it: nothing to send.
     NoPads,
 }
@@ -72,13 +79,20 @@ impl fmt::Display for Error {
             Error::Bitwig(words) => f.write_str(words),
             Error::TimedOut => f.write_str("Bitwig didn't answer in time."),
             Error::Closed => f.write_str("Bitwig closed the connection."),
+            Error::NotConnected => f.write_str("The connection to Bitwig is closed."),
             Error::Lost(why) if why.is_empty() => f.write_str("Lost the connection to Bitwig."),
             Error::Lost(why) => write!(f, "Lost the connection to Bitwig ({why})."),
             Error::Unexpected => f.write_str(
                 "Bitwig's answer wasn't what the app expected. Install the extension again from the old app's \
                  Settings > DAW links, in case Bitwig has an older version.",
             ),
+            Error::Invalid(why) => f.write_str(why),
             Error::Missing { file, path } => write!(f, "{file} isn't at {path} any more."),
+            Error::KitMissing { sounds, file, path } => write!(
+                f,
+                "None of the kit's {sounds} sounds are where the app last saw them ({file} was at {path}), so nothing \
+                 was sent."
+            ),
             Error::NoPads => f.write_str("Roll a kit first."),
         }
     }

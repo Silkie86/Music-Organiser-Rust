@@ -22,9 +22,10 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use mo_formats::paths::{file_name, stem};
 use serde_json::{Map, Value, json};
 
-use super::link::ascii_json;
+use super::link::{MAX_MESSAGE, ascii_json};
 use super::{Bitwig, DRUM_MACHINE_NAME, DeviceId, PORT};
 
 /// The extension's words when "Let the app make changes" is off.
@@ -33,9 +34,6 @@ pub const CHANGES_OFF: &str = "Changes are turned off. To let the app change thi
 
 /// How long the app waits for the stand-in: it answers at once, unless a test makes it wait.
 const WAIT: Duration = Duration::from_secs(2);
-
-/// The longest request the stand-in takes, as the extension: anything longer is a broken stream.
-const MAX_MESSAGE: usize = 64 << 20;
 
 /// The tracks and the devices on each that the extension can reach.
 const MAX_TRACKS: usize = 128;
@@ -119,9 +117,9 @@ pub enum OnConnect {
 /// The stand-in's Bitwig: the project it has open, what the link says when it greets, and what the app asked for.
 #[derive(Clone, Debug)]
 pub struct World {
-    /// The greeting, but for `project`, `modified` and `changes` (those come from the fields below). Set "link" to 1
-    /// or 2 to be an older script, take out "onlyIn" to be one that doesn't honour it, or add an "error" to greet as
-    /// an extension part of which didn't start.
+    /// The greeting, but for `project`, `modified` and `changes`, which come from the fields below unless they're
+    /// here (to greet with something else than is so). Set "link" to 1 or 2 to be an older script, take out "onlyIn"
+    /// to be one that doesn't honour it, or add an "error" to greet as an extension part of which didn't start.
     pub hello: Map<String, Value>,
     /// The project open, by the name Bitwig shows.
     pub project: String,
@@ -155,6 +153,13 @@ pub struct World {
     /// Brings another project to the front part way through the next request with this command, as if someone
     /// brought their own to the front just after the change began: (command, the project).
     pub switch_during: Option<(String, String)>,
+    /// Brings this project to the front once the next kit's samples are on their pads, before they're named: the link
+    /// stops there, with the samples in.
+    pub switch_while_filling: Option<String>,
+    /// Whether the link answers before Bitwig has named a device it added (its name "" in the answer).
+    pub unnamed_devices: bool,
+    /// Messages sent once, before the next answer: events, or answers to requests long gone.
+    pub before_answer: Vec<Value>,
     /// Every request the app sent, as it came (one that wasn't JSON as its text).
     pub requests: Vec<Value>,
     /// How many tracks have been made, for their IDs.
@@ -199,6 +204,9 @@ impl Default for World {
             hang_up_on: Vec::new(),
             late: Vec::new(),
             switch_during: None,
+            switch_while_filling: None,
+            unnamed_devices: false,
+            before_answer: Vec::new(),
             requests: Vec::new(),
             made: 0,
         };
@@ -299,9 +307,9 @@ impl World {
         let mut hello = self.hello.clone();
         // A link that couldn't start says only what it knew.
         if !hello.contains_key("error") {
-            hello.insert("project".into(), self.project.clone().into());
-            hello.insert("modified".into(), self.modified.into());
-            hello.insert("changes".into(), self.changes.into());
+            hello.entry("project").or_insert_with(|| self.project.clone().into());
+            hello.entry("modified").or_insert(self.modified.into());
+            hello.entry("changes").or_insert(self.changes.into());
         }
         Value::Object(hello)
     }
@@ -448,7 +456,7 @@ impl World {
                 let path = given(request.get("path"), "file")?;
                 self.loads(path).then(|| FakeDevice {
                     name: self.sample_device.clone(),
-                    preset: stem(file_name(path)).to_owned(),
+                    preset: stem(path).to_owned(),
                     ..FakeDevice::sampler(path)
                 })
             }
@@ -470,7 +478,13 @@ impl World {
         self.modified = true;
         self.next_step("insert", request)?;
         Ok(match given_track {
-            Some(_) => json!({ "added": true, "index": index, "device": device.described(index) }),
+            Some(_) => {
+                let mut shown = device.described(index);
+                if self.unnamed_devices {
+                    shown["name"] = "".into();
+                }
+                json!({ "added": true, "index": index, "device": shown })
+            }
             None => json!({}),
         })
     }
@@ -523,46 +537,60 @@ impl World {
             }
         };
         let loads: Vec<bool> = pads.iter().map(|&(_, path, _)| self.loads(path)).collect();
-        let machine = self
-            .tracks
+        let (mut filled, mut replaced, mut skipped, mut failed, mut taken) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        {
+            let machine = self.pads_of(track, device)?;
+            for (&(note, path, _), loads) in pads.iter().zip(loads) {
+                let pad = machine.entry(note).or_default();
+                let free = pad.devices.is_empty();
+                if !free && !pad.holds_only_an_empty_sampler() {
+                    skipped.push(note);
+                    taken.push(pad.contents(note));
+                    continue;
+                }
+                // A file Bitwig can't load never shows on the pad: the link gives up waiting for it.
+                if !loads {
+                    failed.push(note);
+                    continue;
+                }
+                if free {
+                    // Bitwig names a pad after the sample dropped on it.
+                    pad.name = stem(path).to_owned();
+                    pad.devices.push(FakeDevice::sampler(path));
+                } else {
+                    replaced.push(note);
+                    if let Some(first) = pad.devices.first_mut() {
+                        *first = FakeDevice::sampler(path);
+                    }
+                }
+                filled.push(note);
+            }
+            // Pads nothing went on stay as they were: empty.
+            machine.retain(|_, pad| !pad.devices.is_empty());
+        }
+        self.modified = true;
+        // The link waits for the pads to take their samples, and checks again before it names them.
+        if let Some(project) = self.switch_while_filling.take() {
+            self.project = project;
+        }
+        self.check_allowed(request, true)?;
+        let machine = self.pads_of(track, device)?;
+        for &(note, _, name) in &pads {
+            if let Some(pad) = machine.get_mut(&note).filter(|_| !name.is_empty() && filled.contains(&note)) {
+                pad.name = name.to_owned();
+            }
+        }
+        Ok(json!({ "filled": filled, "replaced": replaced, "skipped": skipped, "failed": failed, "taken": taken }))
+    }
+
+    /// The pads of the Drum Machine at `device` on `track`.
+    fn pads_of(&mut self, track: usize, device: usize) -> Result<&mut BTreeMap<u8, FakePad>, String> {
+        self.tracks
             .get_mut(track)
             .and_then(|t| t.devices.get_mut(device))
             .and_then(|d| d.pads.as_mut())
-            .ok_or("The selected device isn't a Drum Machine. Select one and send the kit again.")?;
-        let (mut filled, mut replaced, mut skipped, mut failed, mut taken) =
-            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
-        for (&(note, path, name), loads) in pads.iter().zip(loads) {
-            let pad = machine.entry(note).or_default();
-            let free = pad.devices.is_empty();
-            if !free && !pad.holds_only_an_empty_sampler() {
-                skipped.push(note);
-                taken.push(pad.contents(note));
-                continue;
-            }
-            // A file Bitwig can't load never shows on the pad: the link gives up waiting for it.
-            if !loads {
-                failed.push(note);
-                continue;
-            }
-            if free {
-                // Bitwig names a pad after the sample dropped on it.
-                pad.name = stem(file_name(path)).to_owned();
-                pad.devices.push(FakeDevice::sampler(path));
-            } else {
-                replaced.push(note);
-                if let Some(first) = pad.devices.first_mut() {
-                    *first = FakeDevice::sampler(path);
-                }
-            }
-            if !name.is_empty() {
-                pad.name = name.to_owned();
-            }
-            filled.push(note);
-        }
-        // Pads nothing went on stay as they were: empty.
-        machine.retain(|_, pad| !pad.devices.is_empty());
-        self.modified = true;
-        Ok(json!({ "filled": filled, "replaced": replaced, "skipped": skipped, "failed": failed, "taken": taken }))
+            .ok_or_else(|| "The selected device isn't a Drum Machine. Select one and send the kit again.".to_owned())
     }
 
     /// One of Bitwig's own devices, by its ID: the stand-in knows the Drum Machine, the Sampler and Note Transpose.
@@ -622,7 +650,8 @@ fn accept(listener: &TcpListener, world: &Arc<Mutex<World>>, stop: &AtomicBool, 
 
 /// What the stand-in does with one request.
 enum Reply {
-    Answer(Value),
+    /// The answer, after any messages a test asked to come first.
+    Answer(Vec<Value>),
     Nothing,
     HangUp,
 }
@@ -665,11 +694,11 @@ fn serve(mut stream: TcpStream, world: &Mutex<World>) {
             let body: Vec<u8> = pending.drain(..4 + length).skip(4).collect();
             let (reply, wait) = handle(&mut lock(world), &String::from_utf8_lossy(&body));
             match reply {
-                Reply::Answer(message) => {
+                Reply::Answer(messages) => {
                     if let Some(wait) = wait {
                         thread::sleep(wait);
                     }
-                    if write_message(&mut stream, &message, lengths).is_err() {
+                    if messages.iter().any(|m| write_message(&mut stream, m, lengths).is_err()) {
                         return;
                     }
                 }
@@ -689,7 +718,7 @@ fn handle(world: &mut World, text: &str) -> (Reply, Option<Duration>) {
         world.requests.push(Value::String(text.to_owned()));
         let start: String = text.chars().take(80).collect();
         let error = format!("The request isn't JSON: {start}");
-        return (Reply::Answer(json!({ "id": null, "ok": false, "error": error })), None);
+        return (Reply::Answer(vec![json!({ "id": null, "ok": false, "error": error })]), None);
     };
     world.requests.push(request.clone());
     let cmd = request.get("cmd").and_then(Value::as_str).unwrap_or_default();
@@ -705,7 +734,9 @@ fn handle(world: &mut World, text: &str) -> (Reply, Option<Duration>) {
         Ok(result) => json!({ "id": id, "ok": true, "result": result }),
         Err(error) => json!({ "id": id, "ok": false, "error": error }),
     };
-    (Reply::Answer(answer), wait)
+    let mut messages = std::mem::take(&mut world.before_answer);
+    messages.push(answer);
+    (Reply::Answer(messages), wait)
 }
 
 /// A message as the extension sends it: the JSON in plain ASCII and a newline, with the length in front (as Bitwig
@@ -758,14 +789,4 @@ fn js(value: Option<&Value>) -> String {
             items.iter().map(|i| if i.is_null() { String::new() } else { js(Some(i)) }).collect::<Vec<_>>().join(",")
         }
     }
-}
-
-/// The last part of a path, whichever way its folders are written.
-fn file_name(path: &str) -> &str {
-    path.rsplit(['/', '\\']).next().unwrap_or(path)
-}
-
-/// A file's name without its extension, as Bitwig names a pad after a sample.
-fn stem(file: &str) -> &str {
-    file.rsplit_once('.').map_or(file, |(stem, _)| stem)
 }

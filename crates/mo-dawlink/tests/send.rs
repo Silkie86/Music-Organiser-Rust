@@ -57,7 +57,7 @@ fn puts_a_sound_on_a_sampler_on_a_new_track() {
     assert_eq!(sending_sound("Kick 909"), "Putting Kick 909 into Bitwig");
 
     let world = bitwig.world();
-    let track = &world.tracks[sent.track];
+    let track = &world.tracks[sent.track.unwrap()];
     assert_eq!((track.name.as_str(), track.kind.as_str()), ("Kick 909", "Instrument"));
     assert_eq!(track.devices.len(), 1);
     assert_eq!((track.devices[0].name.as_str(), track.devices[0].sample.as_str()), ("Sampler", text(&kick).as_str()));
@@ -77,7 +77,7 @@ fn says_when_the_sound_didnt_go_on_a_sampler() {
     assert!(!sent.went_in());
     assert_eq!(sent.title(), "Kick 909 didn't go in cleanly");
     assert_eq!(sent.detail(), "Bitwig didn't load Kick 909.wav.");
-    assert!(bitwig.world().tracks[sent.track].devices.is_empty());
+    assert!(bitwig.world().tracks[sent.track.unwrap()].devices.is_empty());
 
     // It went on something else.
     let bitwig = with(|w| w.sample_device = "Polymer".into());
@@ -89,7 +89,7 @@ fn says_when_the_sound_didnt_go_on_a_sampler() {
     let sent = bitwig.bitwig().send_sound(&kick, "Kick 909").unwrap();
     assert_eq!(sent.title(), "Kick 909 didn't go in cleanly");
     assert_eq!(sent.detail(), "The track is in Bitwig, but the sound may not be on it: Bitwig closed the connection.");
-    assert_eq!(bitwig.world().tracks[sent.track].name, "Kick 909");
+    assert_eq!(bitwig.world().tracks[sent.track.unwrap()].name, "Kick 909");
 }
 
 #[test]
@@ -108,18 +108,18 @@ fn a_sound_that_isnt_there_any_more_isnt_sent() {
 fn a_project_brought_to_the_front_stops_the_send_there() {
     let dir = fixtures("dawlink-sound-switch");
     let kick = sound(&dir, "Kick.wav");
-    // Part way through making the track: nothing goes in the other project, and no track index is known.
+    // Part way through making the track: nothing goes in the other project, but Bitwig had made the track in this
+    // one, and the words say it may be there.
     let bitwig = with(|w| w.switch_during = Some(("newtrack".into(), "Other Song".into())));
-    let err = bitwig.bitwig().send_sound(&kick, "Kick").unwrap_err();
-    assert!(err.is_elsewhere());
-    assert!(!Error::Bitwig("Bitwig has \"x\" open.".into()).is_elsewhere() && !Error::TimedOut.is_elsewhere());
+    let sent = bitwig.bitwig().send_sound(&kick, "Kick").unwrap();
+    assert_eq!((sent.track, sent.went_in()), (None, false));
+    assert_eq!(sent.title(), "Kick didn't go in cleanly");
     assert_eq!(
-        err,
-        Error::Bitwig(
-            "Bitwig has \"Other Song\" open, not \"Night Drive\", so the link stopped before changing anything there."
-                .into()
-        )
+        sent.detail(),
+        "Bitwig may have added an empty track for it: Bitwig has \"Other Song\" open, not \"Night Drive\", so the link \
+         stopped before changing anything there."
     );
+    assert_eq!(bitwig.world().commands(), ["newtrack"]);
     // Part way through putting the sound on its track: the track is in Bitwig, and the words say so.
     let bitwig = with(|w| w.switch_during = Some(("insert".into(), "Other Song".into())));
     let sent = bitwig.bitwig().send_sound(&kick, "Kick").unwrap();
@@ -155,12 +155,14 @@ fn wont_send_through_an_old_script_or_with_changes_off() {
         "Bitwig isn't letting the app make changes. Turn on \"Let the app make changes\" in Bitwig (Settings > \
          Controllers > Music Organiser), then send it again."
     );
-    // A link that turned changes off after greeting says so in its words.
-    let bitwig = FakeBitwig::start().unwrap();
-    let mut link = bitwig.bitwig().connect().unwrap();
-    bitwig.world().changes = false;
-    let err = mo_dawlink::bitwig::sound(&mut link, &kick, "Kick").unwrap_err();
-    assert_eq!(err, Error::Bitwig(CHANGES_OFF.into()));
+    // Changes turned off after the greeting: the link says so in its words, and the app can't tell how far it got.
+    let bitwig = with(|w| {
+        w.changes = false;
+        w.hello.insert("changes".into(), json!(true));
+    });
+    let sent = bitwig.bitwig().send_sound(&kick, "Kick").unwrap();
+    assert_eq!(sent.detail(), format!("Bitwig may have added an empty track for it: {CHANGES_OFF}"));
+    assert_eq!(bitwig.world().tracks.len(), 4);
 }
 
 /// The C# app's `PutsAKitOnADrumMachine`, on the stand-in: a new Drum Machine on a new track, then the same kit and
@@ -300,6 +302,18 @@ fn a_kit_says_which_pads_didnt_go_on() {
     let bitwig = FakeBitwig::start().unwrap();
     let err = bitwig.bitwig().send_kit("Kit #6", &gone, KitTarget::Selected).unwrap_err();
     assert_eq!(err.to_string(), format!("Gone.wav isn't at {} any more.", text(&dir.join("Gone.wav"))));
+    let all_gone = kit_pads(&[
+        kit_sound("Kick", "Kick", &dir.join("Gone.wav")),
+        kit_sound("Snare", "Snare", &dir.join("Gone 2.wav")),
+    ]);
+    let err = bitwig.bitwig().send_kit("Kit #6", &all_gone, KitTarget::Selected).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "None of the kit's 2 sounds are where the app last saw them (Gone.wav was at {}), so nothing was sent.",
+            text(&dir.join("Gone.wav"))
+        )
+    );
     assert!(bitwig.world().requests.is_empty());
     assert_eq!(bitwig.bitwig().send_kit("Kit", &[], KitTarget::Selected).unwrap_err(), Error::NoPads);
     assert_eq!(Error::NoPads.to_string(), "Roll a kit first.");
@@ -319,6 +333,17 @@ fn a_kit_cut_short_says_what_may_have_happened() {
     assert_eq!(
         kit.detail(),
         "The Drum Machine is in Bitwig, but the sounds may not be on it: Bitwig closed the connection."
+    );
+
+    // Part way through making the track: Bitwig had made it, and the words say it may be there.
+    let bitwig = with(|w| w.switch_during = Some(("newtrack".into(), "Other Song".into())));
+    let kit = bitwig.bitwig().send_kit("Kit #7", &pads, target).unwrap();
+    assert_eq!((kit.track, kit.went_in()), (None, false));
+    assert_eq!(kit.title(), "Kit #7 didn't go in cleanly");
+    assert_eq!(
+        kit.detail(),
+        "Bitwig may have added an empty track for the kit: Bitwig has \"Other Song\" open, not \"Night Drive\", so \
+         the link stopped before changing anything there."
     );
 
     let bitwig = with(|w| w.hang_up_on = vec!["insert".into()]);
@@ -359,8 +384,12 @@ fn sends_made_at_once_each_go_in() {
     let mut names: Vec<&str> = world.tracks.iter().map(|t| t.name.as_str()).filter(|n| n.starts_with("Hit")).collect();
     names.sort_unstable();
     assert_eq!(names, ["Hit 1", "Hit 2", "Hit 3", "Hit 4"]);
-    // Each on its own track.
-    assert!(world.tracks.iter().filter(|t| t.name.starts_with("Hit")).all(|t| t.devices.len() == 1));
+    // Each on its own track, and each send's two changes went in together, never another's between them.
+    for track in world.tracks.iter().filter(|t| t.name.starts_with("Hit")) {
+        assert_eq!(track.devices.len(), 1);
+        assert!(track.devices[0].sample.ends_with(&format!("{}.wav", track.name)), "{track:?}");
+    }
+    assert_eq!(world.commands(), ["newtrack", "insert"].repeat(4));
 }
 
 /// The C# app's `PlacesAKitTheGeneralMidiWay`.
@@ -443,4 +472,71 @@ fn picks_the_drum_machine_the_csharp_app_found() {
     assert_eq!(DeviceId::parse("d7d7d7d7-0000-4000-8000-00000000000"), None);
     assert_eq!(DeviceId::parse(&DeviceId::SAMPLER.to_string()), Some(DeviceId::SAMPLER));
     assert_eq!(DeviceId::from_bytes(DeviceId::SAMPLER.bytes()), DeviceId::SAMPLER);
+}
+
+#[test]
+fn a_kit_stopped_after_its_sounds_went_on_says_they_may_be_there() {
+    let dir = fixtures("dawlink-kit-stopped");
+    let pads = kit_pads(&[
+        kit_sound("Kick", "Kick", &sound(&dir, "BD 01.wav")),
+        kit_sound("Snare", "Snare", &sound(&dir, "SD 02.wav")),
+    ]);
+    // Another project came to the front once the sounds were on their pads: the link stopped before naming them.
+    let bitwig = with(|w| w.switch_while_filling = Some("Other Song".into()));
+    let kit = bitwig.bitwig().send_kit("Kit #9", &pads, KitTarget::NewDrumMachine(DeviceId::DRUM_MACHINE)).unwrap();
+    assert!(kit.drum_machine && !kit.went_in());
+    assert_eq!(kit.title(), "Kit #9 didn't go in cleanly");
+    assert_eq!(
+        kit.detail(),
+        "The Drum Machine is in Bitwig, but the sounds may not be on it: Bitwig has \"Other Song\" open, not \"Night \
+         Drive\", so the link stopped before changing anything there."
+    );
+    {
+        let world = bitwig.world();
+        let on = world.pads(kit.track.unwrap()).unwrap();
+        assert_eq!(on.iter().map(|(n, p)| (*n, p.name.as_str())).collect::<Vec<_>>(), [(36, "BD 01"), (38, "SD 02")]);
+    }
+
+    // On the selected Drum Machine it says the same, rather than that the kit couldn't be sent.
+    bitwig.world().project = "Night Drive".into();
+    bitwig.world().switch_while_filling = Some("Other Song".into());
+    let crash = [Pad { note: 49, path: text(&sound(&dir, "Crash.wav")), name: "Cymbal".into() }];
+    let again = bitwig.bitwig().send_kit("Kit #10", &crash, KitTarget::Selected).unwrap();
+    assert_eq!(again.track, None);
+    assert_eq!(
+        again.detail(),
+        "The sounds may not be on the Drum Machine selected in Bitwig: Bitwig has \"Other Song\" open, not \"Night \
+         Drive\", so the link stopped before changing anything there."
+    );
+}
+
+#[test]
+fn a_drum_machine_bitwig_hasnt_named_yet_takes_the_kit() {
+    let dir = fixtures("dawlink-kit-unnamed");
+    let pads = kit_pads(&[kit_sound("Kick", "Kick", &sound(&dir, "Kick.wav"))]);
+    let bitwig = with(|w| w.unnamed_devices = true);
+    let kit = bitwig.bitwig().send_kit("Kit #11", &pads, KitTarget::NewDrumMachine(DeviceId::DRUM_MACHINE)).unwrap();
+    assert!(kit.went_in(), "{}", kit.detail());
+    // An ID that adds something else, which Bitwig hasn't named yet either: the pads step tells.
+    let kit = bitwig.bitwig().send_kit("Kit #12", &pads, KitTarget::NewDrumMachine(DeviceId::SAMPLER)).unwrap();
+    assert!(!kit.drum_machine && !kit.went_in());
+    assert_eq!(notes(&kit.failed), [36]);
+    assert_eq!(kit.title(), "Bitwig didn't add a Drum Machine");
+}
+
+#[test]
+fn a_kit_takes_one_sound_to_a_note() {
+    let dir = fixtures("dawlink-kit-notes");
+    let kick = text(&sound(&dir, "Kick.wav"));
+    let bitwig = FakeBitwig::start().unwrap();
+    let two = [
+        Pad { note: 36, path: kick.clone(), name: "Kick".into() },
+        Pad { note: 36, path: kick.clone(), name: "Kick 2".into() },
+    ];
+    let err = bitwig.bitwig().send_kit("Kit", &two, KitTarget::Selected).unwrap_err();
+    assert_eq!(err, Error::Invalid("Two sounds for the pad on C1: a pad takes one.".into()));
+    let high = [Pad { note: 200, path: kick, name: "Kick".into() }];
+    let err = bitwig.bitwig().send_kit("Kit", &high, KitTarget::Selected).unwrap_err();
+    assert_eq!(err.to_string(), "A pad's note is a MIDI note from 0 to 127, not 200.");
+    assert!(bitwig.world().requests.is_empty());
 }

@@ -14,8 +14,8 @@
 //! - [`Bitwig::check`]: what Bitwig has open, and whether a send would go in now.
 //!
 //! Each waits for Bitwig, so a screen calls them on a background thread (`mo_app::background::spawn`), never the
-//! window's. Sends made at the same time each go in, one after the other: the link in Bitwig makes changes one at a
-//! time, in the order they came. Every error, and every result, has words to show as they are.
+//! window's. Sends asked for at the same time each go in, one after the other, in the order they were asked for.
+//! Every error, and every result, has words to show as they are.
 
 mod device;
 mod error;
@@ -31,6 +31,6 @@ pub use link::{
     PadsFilled, TIMEOUT,
 };
 pub use send::{
-    Bitwig, KIT_FAILED, KitSound, KitTarget, Pad, SOUND_FAILED, SOUND_PLACE, SentKit, SentSound, kit, kit_name,
-    kit_pads, note_name, send_kit, send_sound, sending_kit, sending_sound, sound,
+    Bitwig, KIT_FAILED, KitSound, KitTarget, Pad, SOUND_FAILED, SOUND_PLACE, SentKit, SentSound, kit_name, kit_pads,
+    note_name, send_kit, send_sound, sending_kit, sending_sound,
 };

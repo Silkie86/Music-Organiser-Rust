@@ -90,23 +90,39 @@ fn a_connection_bitwig_closed_stays_closed() {
     assert_eq!(link.refresh().unwrap_err(), Error::Closed);
     assert!(!link.is_open());
     // From then on it says so at once, without sending anything.
-    assert_eq!(link.new_track("Kick").unwrap_err(), Error::Closed);
+    let err = link.new_track("Kick").unwrap_err();
+    assert_eq!((err.clone(), err.to_string()), (Error::NotConnected, "The connection to Bitwig is closed.".to_owned()));
     assert_eq!(bitwig.world().commands(), ["hello"]);
 }
 
 #[test]
-fn an_answer_that_comes_too_late_is_passed_over() {
+fn a_link_that_gave_up_waiting_is_closed() {
     let bitwig = with(|w| w.late = vec![("hello".into(), Duration::from_millis(700))]);
     let mut link = connect(&bitwig);
     link.timeout = Duration::from_millis(200);
     assert_eq!(link.refresh().unwrap_err(), Error::TimedOut);
     assert_eq!(Error::TimedOut.to_string(), "Bitwig didn't answer in time.");
-    // The connection is still good, and the next answer is the next request's, not the late one (which still says
-    // the project that was open when it was asked).
-    assert!(link.is_open());
-    link.timeout = Duration::from_secs(2);
+    // On Windows a read that ran out of time can lose what comes next, so the link isn't used again.
+    assert!(!link.is_open());
+    assert_eq!(link.refresh().unwrap_err(), Error::NotConnected);
+    // A new one works.
+    assert_eq!(connect(&bitwig).refresh().unwrap().project, "Night Drive");
+}
+
+#[test]
+fn messages_that_arent_the_answer_are_passed_over() {
+    // A greeting again, an answer to a request long gone, and something that isn't for the app, before the answer.
+    let bitwig = with(|w| {
+        w.before_answer = vec![
+            json!({ "event": "hello", "result": { "link": 3, "project": "Stale" } }),
+            json!({ "id": 99, "ok": true, "result": { "project": "Gone" } }),
+            json!({ "something": "else" }),
+        ];
+    });
+    let mut link = connect(&bitwig);
     bitwig.world().project = "Later".into();
     assert_eq!(link.refresh().unwrap().project, "Later");
+    assert!(link.is_open());
 }
 
 #[test]
@@ -122,7 +138,8 @@ fn bitwigs_own_words_come_back_as_they_are() {
     let err = link.fill_pads(&[pad(36, "C:\\Kit\\Kick.wav", "Kick")], Some((2, 0))).unwrap_err();
     assert_eq!(err.to_string(), "Device 0 on track 2 isn't a Drum Machine.");
     // A request's fields are a JSON object, which the app checks before sending.
-    assert!(matches!(link.command("hello", json!([1])), Err(Error::Bitwig(_))));
+    let err = link.command("hello", json!([1])).unwrap_err();
+    assert_eq!(err, Error::Invalid("A request's fields are a JSON object, not [1].".into()));
     // A command this crate has no call for yet comes back as Bitwig answered it.
     assert_eq!(link.command("hello", json!({})).unwrap()["project"], "Night Drive");
     assert!(link.is_open());
@@ -205,6 +222,8 @@ fn changes_stay_in_the_project_they_began_in() {
         err.to_string(),
         "Bitwig has \"Someone Else's\" open, not \"Night Drive\", so the link stopped before changing anything there."
     );
+    assert!(err.is_elsewhere());
+    assert!(!Error::Bitwig("Bitwig has \"x\" open.".into()).is_elsewhere() && !Error::TimedOut.is_elsewhere());
     assert!(bitwig.world().track("Snare").is_none());
 
     // And when it comes to the front part way through a change.

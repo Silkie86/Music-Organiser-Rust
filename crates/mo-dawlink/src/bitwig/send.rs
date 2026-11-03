@@ -4,14 +4,24 @@
 //!
 //! Each send connects, checks the link's greeting, and keeps every change in the project Bitwig had open as it began
 //! ([`Link::stay_in_open_project`]): if another project comes to the front part way, the send stops there rather
-//! than going on in that one. Nothing is ever taken out of a project: the link can't delete.
+//! than going on in that one. The app makes one send at a time, in the order they were asked for, so one send's new
+//! track never lands in the middle of another's. Nothing is ever taken out of a project: the link can't delete.
+//!
+//! A send fails, with nothing changed, when Bitwig can't take it; once it may have changed something, it gives back
+//! what happened instead, with words for what may not have (Bitwig may have added a track all the same).
 
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
+
+use mo_formats::paths::file_name;
 
 use super::link::{CHANGE_TIMEOUT, CONNECT_TIMEOUT, TIMEOUT};
 use super::{DRUM_MACHINE_NAME, DeviceId, Error, Hello, Inserted, Link, PORT};
+
+/// Held for each send, so the app's sends go in one at a time.
+static SENDS: Mutex<()> = Mutex::new(());
 
 /// Where to find the link in Bitwig, and how long to wait for it. [`Bitwig::default`] is the link's own port on this
 /// computer; tests point it at a stand-in.
@@ -48,15 +58,21 @@ impl Bitwig {
         Ok(self.connect()?.hello().clone())
     }
 
-    /// Puts one sound into the project open in Bitwig: a new track named `name`, with the sound on a Sampler.
+    /// Puts one sound into the project open in Bitwig: a new track named `name`, with the sound on a Sampler. Waits
+    /// for any send before it to finish first.
     pub fn send_sound(&self, path: impl AsRef<Path>, name: &str) -> Result<SentSound, Error> {
+        let _one_at_a_time = SENDS.lock().unwrap_or_else(PoisonError::into_inner);
         let mut link = self.connect()?;
         link.stay_in_open_project();
         sound(&mut link, path.as_ref(), name)
     }
 
-    /// Puts a kit's pads ([`kit_pads`]) on a Drum Machine in the project open in Bitwig (see [`kit`]).
+    /// Puts a kit's pads ([`kit_pads`]) on a Drum Machine in the project open in Bitwig: a new Drum Machine on a new
+    /// track named `name`, or the one selected in Bitwig, where pads that already have something on them are left
+    /// alone. A pad whose sound isn't where the app last saw it is left out. Waits for any send before it to finish
+    /// first.
     pub fn send_kit(&self, name: &str, pads: &[Pad], target: KitTarget) -> Result<SentKit, Error> {
+        let _one_at_a_time = SENDS.lock().unwrap_or_else(PoisonError::into_inner);
         let mut link = self.connect()?;
         link.stay_in_open_project();
         kit(&mut link, name, pads, target)
@@ -80,8 +96,8 @@ pub fn send_kit(name: &str, pads: &[Pad], target: KitTarget) -> Result<SentKit, 
 pub struct SentSound {
     /// The sound's name, which its track has.
     pub name: String,
-    /// The new track's place in Bitwig's project listing.
-    pub track: usize,
+    /// The new track's place in Bitwig's project listing; none when Bitwig didn't say it made one (see `problem`).
+    pub track: Option<usize>,
     /// What didn't go to plan, in words without a full stop ("Bitwig didn't load Kick.wav"), or none.
     pub problem: Option<String>,
 }
@@ -120,19 +136,29 @@ pub fn sending_sound(name: &str) -> String {
 /// The card's headline when a sound couldn't be sent at all; the line under it is the error.
 pub const SOUND_FAILED: &str = "Couldn't put it into Bitwig";
 
-/// Puts one sound into the project open in Bitwig, through `link`: a new track named `name`, with the sound on a
-/// Sampler, as if it were dropped there. Fails before changing anything when Bitwig can't take it (see
-/// [`Hello::can_send`]) or the sound isn't there any more; once the track is made, what goes wrong is the result's
-/// problem instead, since the track stays.
-pub fn sound(link: &mut Link, path: &Path, name: &str) -> Result<SentSound, Error> {
+/// Puts one sound into the project open in Bitwig, through `link`, as if it were dropped on a new track.
+fn sound(link: &mut Link, path: &Path, name: &str) -> Result<SentSound, Error> {
     link.hello().can_send()?;
+    if !link.is_open() {
+        return Err(Error::NotConnected);
+    }
     let shown = path.to_string_lossy().into_owned();
     let file = file_name(&shown).to_owned();
     if !path.is_file() {
         return Err(Error::Missing { file, path: shown });
     }
-    let track = link.new_track(name)?;
-    let problem = match link.insert_file(track.index, &shown) {
+    let mut sent = SentSound { name: name.to_owned(), track: None, problem: None };
+    let track = match link.new_track(name) {
+        Ok(track) => track,
+        // The link may have stopped after Bitwig added the track (another project came to the front, say), or its
+        // answer didn't come.
+        Err(e) => {
+            sent.problem = Some(format!("Bitwig may have added an empty track for it: {}", sentence(&e)));
+            return Ok(sent);
+        }
+    };
+    sent.track = Some(track.index);
+    sent.problem = match link.insert_file(track.index, &shown) {
         Ok(Inserted { added: false, .. }) => Some(format!("Bitwig didn't load {file}")),
         Ok(Inserted { device: Some(device), .. })
             if !device.name.is_empty() && !device.name.to_lowercase().contains("sampler") =>
@@ -143,7 +169,7 @@ pub fn sound(link: &mut Link, path: &Path, name: &str) -> Result<SentSound, Erro
         // Bitwig may have put it on all the same: the link gave up waiting, or the connection went.
         Err(e) => Some(format!("The track is in Bitwig, but the sound may not be on it: {}", sentence(&e))),
     };
-    Ok(SentSound { name: name.to_owned(), track: track.index, problem })
+    Ok(sent)
 }
 
 /// A sound for a kit, from the kit builder.
@@ -160,7 +186,7 @@ pub struct KitSound {
 /// A sample for one of a Drum Machine's pads: the MIDI note the pad plays on, the sample, and the pad's name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pad {
-    /// 36 is C1 (Bitwig's name for it), the kick's.
+    /// 36 is C1 (Bitwig's name for it), the kick's; 0 to 127, one sound to a note.
     pub note: u8,
     pub path: String,
     /// The name to give the pad; empty leaves Bitwig's (the sample's).
@@ -227,7 +253,8 @@ pub enum KitTarget {
     /// A new Drum Machine, by Bitwig's ID for it ([`super::drum_machine`]), on a new track named after the kit.
     NewDrumMachine(DeviceId),
     /// The Drum Machine selected in Bitwig, leaving pads that already have sounds alone: what's left once Bitwig
-    /// didn't add a Drum Machine for the ID ([`SentKit::drum_machine`]), until the app restarts.
+    /// didn't add a Drum Machine for the ID ([`SentKit::drum_machine`]), until the app restarts. It's what's
+    /// selected when the kit's turn comes: a send just before it selects its own new track.
     Selected,
 }
 
@@ -236,7 +263,10 @@ pub enum KitTarget {
 pub struct SentKit {
     /// The kit's name, which its track has.
     pub name: String,
-    /// Its new track's place in the project listing; none when it went on the selected Drum Machine.
+    /// Where it was sent.
+    pub target: KitTarget,
+    /// Its new track's place in the project listing; none when it went on the selected Drum Machine, or Bitwig
+    /// didn't say it made the track (see `problem`).
     pub track: Option<usize>,
     /// False when Bitwig didn't add a Drum Machine to the new track for the ID: send to [`KitTarget::Selected`]
     /// from then on.
@@ -246,11 +276,11 @@ pub struct SentKit {
     /// Pads that already had something on them, left alone.
     pub skipped: Vec<Pad>,
     /// Pads Bitwig didn't fill (all of them when it didn't add a Drum Machine). When the link couldn't say how the
-    /// pads went, they're in none of these lists, and [`SentKit::problem`] says why.
+    /// pads went, they're in none of these lists, and `problem` says why.
     pub failed: Vec<Pad>,
     /// Pads whose sound isn't where the app last saw it, left out.
     pub missing: Vec<Pad>,
-    /// What stopped it part way, once its track was made, in words without a full stop, or none.
+    /// What stopped it part way, in words without a full stop, or none.
     pub problem: Option<String>,
 }
 
@@ -287,10 +317,9 @@ impl SentKit {
         let on = |pads: &[Pad]| pads.iter().map(|p| format!("{} on {}", p.name, note_name(p.note))).collect::<Vec<_>>();
         let named =
             |pads: &[Pad]| pads.iter().map(|p| format!("{} ({})", p.name, note_name(p.note))).collect::<Vec<_>>();
-        let place = if self.track.is_none() {
-            "the Drum Machine selected in Bitwig"
-        } else {
-            "a Drum Machine on a new track in Bitwig"
+        let place = match self.target {
+            KitTarget::Selected => "the Drum Machine selected in Bitwig",
+            KitTarget::NewDrumMachine(_) => "a Drum Machine on a new track in Bitwig",
         };
         let mut parts = Vec::new();
         if !self.filled.is_empty() {
@@ -328,24 +357,37 @@ pub fn sending_kit(pads: usize) -> (String, String) {
 /// The card's headline when a kit couldn't be sent at all; the line under it is the error.
 pub const KIT_FAILED: &str = "Couldn't send the kit";
 
-/// Puts a kit's pads on a Drum Machine in the project open in Bitwig, through `link`: a new Drum Machine on a new
-/// track named `name`, or the Drum Machine selected in Bitwig, where pads that already have something on them are
-/// left alone. A pad whose sound isn't where the app last saw it is left out. Fails before changing anything when
-/// Bitwig can't take it, there are no pads, or none of their sounds is there any more; once the track is made, what
-/// goes wrong is in the result instead, since the track stays.
-pub fn kit(link: &mut Link, name: &str, pads: &[Pad], target: KitTarget) -> Result<SentKit, Error> {
+/// What the link says, in the extension's and the script's words, when the selected device can't take a kit, before
+/// it puts anything on it.
+const NOT_ON_THE_SELECTED: [&str; 3] = [
+    "No device is selected in Bitwig. Select a Drum Machine and send the kit again.",
+    "The selected device isn't a Drum Machine. Select one and send the kit again.",
+    "Bitwig didn't show the Drum Machine's pads from the lowest note.",
+];
+
+/// Puts a kit's pads on a Drum Machine in the project open in Bitwig, through `link` (see [`Bitwig::send_kit`]).
+fn kit(link: &mut Link, name: &str, pads: &[Pad], target: KitTarget) -> Result<SentKit, Error> {
     link.hello().can_send()?;
+    if !link.is_open() {
+        return Err(Error::NotConnected);
+    }
     if pads.is_empty() {
         return Err(Error::NoPads);
     }
+    check_pads(pads)?;
     let (pads, missing): (Vec<Pad>, Vec<Pad>) = pads.iter().cloned().partition(|p| Path::new(&p.path).is_file());
     if pads.is_empty()
         && let Some(gone) = missing.first()
     {
-        return Err(Error::Missing { file: file_name(&gone.path).to_owned(), path: gone.path.clone() });
+        let (file, path) = (file_name(&gone.path).to_owned(), gone.path.clone());
+        return Err(match missing.len() {
+            1 => Error::Missing { file, path },
+            sounds => Error::KitMissing { sounds, file, path },
+        });
     }
     let mut sent = SentKit {
         name: name.to_owned(),
+        target,
         track: None,
         drum_machine: true,
         filled: Vec::new(),
@@ -357,12 +399,20 @@ pub fn kit(link: &mut Link, name: &str, pads: &[Pad], target: KitTarget) -> Resu
     let on = match target {
         KitTarget::Selected => None,
         KitTarget::NewDrumMachine(id) => {
-            let track = link.new_track(name)?;
+            let track = match link.new_track(name) {
+                Ok(track) => track,
+                // The link may have stopped after Bitwig added the track, or its answer didn't come.
+                Err(e) => {
+                    sent.problem = Some(format!("Bitwig may have added an empty track for the kit: {}", sentence(&e)));
+                    return Ok(sent);
+                }
+            };
             sent.track = Some(track.index);
             match link.insert_device(track.index, id) {
-                // An ID Bitwig doesn't know adds nothing; one read wrongly adds some other device.
+                // An ID Bitwig doesn't know adds nothing; one read wrongly adds some other device. One Bitwig hasn't
+                // named yet goes ahead: the link says when it isn't a Drum Machine (below).
                 Ok(Inserted { added: true, index: Some(at), device })
-                    if device.as_ref().is_none_or(|d| d.name == DRUM_MACHINE_NAME) =>
+                    if device.as_ref().is_none_or(|d| d.name.is_empty() || d.name == DRUM_MACHINE_NAME) =>
                 {
                     Some((track.index, at))
                 }
@@ -388,18 +438,44 @@ pub fn kit(link: &mut Link, name: &str, pads: &[Pad], target: KitTarget) -> Resu
             sent.skipped = of(&filled.skipped);
             sent.failed = of(&filled.failed);
         }
-        // Bitwig said no before changing anything: on the selected Drum Machine, its words say why (it isn't one, say).
-        Err(e @ Error::Bitwig(_)) if sent.track.is_none() => return Err(e),
-        // Some of the sounds may have gone on all the same.
+        // Nothing went on the selected device: Bitwig's words say why (it isn't a Drum Machine, say).
+        Err(Error::Bitwig(words)) if on.is_none() && NOT_ON_THE_SELECTED.contains(&words.as_str()) => {
+            return Err(Error::Bitwig(words));
+        }
+        // The new device took the Drum Machine's ID, but isn't one.
+        Err(Error::Bitwig(words))
+            if on.is_some_and(|(t, d)| words == format!("Device {d} on track {t} isn't a Drum Machine.")) =>
+        {
+            sent.drum_machine = false;
+            sent.failed = pads;
+        }
+        // Some of the sounds may have gone on all the same: the link can stop after it put them on their pads.
         Err(e) => {
             let why = sentence(&e);
-            sent.problem = Some(match sent.track {
-                Some(_) => format!("The Drum Machine is in Bitwig, but the sounds may not be on it: {why}"),
-                None => format!("The sounds may not be on the Drum Machine selected in Bitwig: {why}"),
+            sent.problem = Some(match target {
+                KitTarget::NewDrumMachine(_) => {
+                    format!("The Drum Machine is in Bitwig, but the sounds may not be on it: {why}")
+                }
+                KitTarget::Selected => format!("The sounds may not be on the Drum Machine selected in Bitwig: {why}"),
             });
         }
     }
     Ok(sent)
+}
+
+/// Pads the link takes: each on a MIDI note of its own, from 0 to 127, as [`kit_pads`] gives them.
+fn check_pads(pads: &[Pad]) -> Result<(), Error> {
+    let mut notes = BTreeSet::new();
+    for pad in pads {
+        if pad.note > 127 {
+            return Err(Error::Invalid(format!("A pad's note is a MIDI note from 0 to 127, not {}.", pad.note)));
+        }
+        if !notes.insert(pad.note) {
+            let note = note_name(pad.note);
+            return Err(Error::Invalid(format!("Two sounds for the pad on {note}: a pad takes one.")));
+        }
+    }
+    Ok(())
 }
 
 /// A MIDI note's name as Bitwig shows it, middle C (60) being C3: 36 is "C1", 39 "D#1".
@@ -407,11 +483,6 @@ pub fn note_name(note: u8) -> String {
     const NAMES: [&str; 12] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
     let name = NAMES.get(usize::from(note % 12)).copied().unwrap_or("C");
     format!("{name}{}", i32::from(note / 12) - 2)
-}
-
-/// The last part of a path, whichever way its folders are written ("Kick.wav").
-fn file_name(path: &str) -> &str {
-    path.rsplit(['/', '\\']).find(|part| !part.is_empty()).unwrap_or(path)
 }
 
 /// An error's words to go inside a sentence: without the full stop.
