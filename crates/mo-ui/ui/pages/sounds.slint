@@ -192,6 +192,9 @@ export global SoundsData {
     callback galaxy-place-by(string);
     // The year strip beside the list: each year with how much is in it; drag over years to show only those.
     in property <[YearBar]> years;
+    // The places in `years` of the first and last years picked, top first (-1 when none are).
+    in property <int> years-from: -1;
+    in property <int> years-to: -1;
     callback years-picked(int, int);
     callback years-cleared();
     // What makes a star bigger and brighter.
@@ -1213,6 +1216,8 @@ export component SoundsPage inherits Rectangle {
                 y: 0;
                 height: area.height;
                 years: SoundsData.years;
+                picked-from: SoundsData.years-from;
+                picked-to: SoundsData.years-to;
                 picked(a, b) => { SoundsData.years-picked(a, b); }
                 cleared => { SoundsData.years-cleared(); }
             }

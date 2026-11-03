@@ -93,6 +93,9 @@ export global SongsData {
     in property <[SongLine]> lines;
     // The year strip beside the list: each year with how many songs; drag over years to show only those.
     in property <[YearBar]> years;
+    // The places in `years` of the first and last years picked, top first (-1 when none are).
+    in property <int> years-from: -1;
+    in property <int> years-to: -1;
     callback years-picked(int, int);
     callback years-cleared();
     in property <string> count;
@@ -815,6 +818,8 @@ export component SongsPage inherits Rectangle {
                     if SongsData.years.length > 1: YearRange {
                         width: 56px;
                         years: SongsData.years;
+                        picked-from: SongsData.years-from;
+                        picked-to: SongsData.years-to;
                         picked(a, b) => { SongsData.years-picked(a, b); }
                         cleared => { SongsData.years-cleared(); }
                     }

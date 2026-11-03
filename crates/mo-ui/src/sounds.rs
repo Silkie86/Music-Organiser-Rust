@@ -1300,19 +1300,20 @@ fn listed(app: &AppWindow, id: u64, shown: Vec<usize>, years: YearCounts) {
 
 /// The year strip: each year, how full it is, and whether the filter has it.
 fn show_years(app: &AppWindow) {
-    let bars = PAGE.with(|p| {
+    let (bars, (from, to)) = PAGE.with(|p| {
         let p = p.borrow();
         let most = p.years.iter().map(|y| y.1).max().unwrap_or(1).max(1) as f32;
-        p.years
+        let bars = p
+            .years
             .iter()
-            .map(|&(year, n)| YearBar {
-                year: year.to_string().into(),
-                share: n as f32 / most,
-                picked: p.filters.years.is_some_and(|(a, b)| year >= a && year <= b),
-            })
-            .collect::<Vec<_>>()
+            .map(|&(year, n)| YearBar { year: year.to_string().into(), share: n as f32 / most })
+            .collect::<Vec<_>>();
+        (bars, year_strip::picked_places(&p.years, p.filters.years).unwrap_or((-1, -1)))
     });
-    app.global::<SoundsData>().set_years(ModelRc::new(VecModel::from(bars)));
+    let data = app.global::<SoundsData>();
+    data.set_years(ModelRc::new(VecModel::from(bars)));
+    data.set_years_from(from);
+    data.set_years_to(to);
 }
 
 fn show_lists(app: &AppWindow) {
