@@ -95,6 +95,14 @@ pub const SPACE_ACTIONS: &[Action] = &[
 /// Every page's own list. A page's keys only work on that page, so two pages may share a key.
 pub const PAGE_ACTIONS: &[&[Action]] = &[SONGS_ACTIONS, SOUNDS_ACTIONS, MIDI_ACTIONS, SPACE_ACTIONS];
 
+/// Every page's own list with the page's name, in the order Settings › Shortcuts shows them (after the keys that work
+/// everywhere).
+pub const PAGES: &[(&str, &[Action])] =
+    &[("Songs", SONGS_ACTIONS), ("Sounds", SOUNDS_ACTIONS), ("MIDI", MIDI_ACTIONS), ("Space", SPACE_ACTIONS)];
+
+/// The name Settings › Shortcuts gives the keys that work on every page.
+pub const EVERYWHERE: &str = "Everywhere";
+
 /// What an action does, in the words its tooltip and the key list use, or "" for an id in no list.
 pub fn what_of(id: &str) -> &'static str {
     APP_ACTIONS.iter().chain(PAGE_ACTIONS.iter().copied().flatten()).find(|a| a.id == id).map_or("", |a| a.what)
@@ -157,6 +165,78 @@ impl Shortcuts {
         Shortcuts { changed, by_key, page_keys }
     }
 
+    /// The `shortcuts` setting's text: only the keys changed from where they started, as the C# app keeps them (its
+    /// own ids that this app has no action for yet are kept too, so nothing it saved is lost).
+    pub fn to_setting(&self) -> String {
+        let sorted: std::collections::BTreeMap<&String, &String> = self.changed.iter().collect();
+        serde_json::to_string(&sorted).unwrap_or_else(|_| "{}".to_owned())
+    }
+
+    /// Whether any of this app's actions has a key other than the one it started with.
+    pub fn any_changed(&self) -> bool {
+        all_actions().any(|(_, a)| self.is_changed(a.id))
+    }
+
+    /// Whether an action's key isn't the one it started with.
+    pub fn is_changed(&self, id: &str) -> bool {
+        all_actions()
+            .find(|(_, a)| a.id == id)
+            .is_some_and(|(_, a)| normalise(self.key_of(id)) != normalise(a.default_key))
+    }
+
+    /// Gives an action a key ("" for none), as the C# app does: a key kept for the app (F12, Tab) can't be given; an
+    /// action on the same page that had the key is left with none, so one key never does two things on a page; a
+    /// page's key may also work everywhere, and the page's job wins there. Returns what happened, in words, for under
+    /// the list ("" when there's nothing to say).
+    pub fn set(&mut self, id: &str, key: &str) -> String {
+        let Some((page, action)) = all_actions().find(|(_, a)| a.id == id) else { return String::new() };
+        let key = written(key);
+        if KEPT.iter().any(|k| normalise(k) == normalise(&key)) {
+            return if key == "F12" {
+                "F12 is kept for writing a note to Claude.".to_owned()
+            } else {
+                format!("{key} is kept for moving between boxes and buttons.")
+            };
+        }
+        let same = |k: &str| !key.is_empty() && normalise(k) == normalise(&key);
+        let mut message = String::new();
+        if let Some((_, taken)) = all_actions().find(|(p, a)| a.id != id && *p == page && same(self.key_of(a.id))) {
+            self.changed.insert(taken.id.to_owned(), String::new());
+            message = format!("{key} was \"{}\", which has no key now. Default puts it back.", taken.what);
+        } else if page != EVERYWHERE
+            && let Some((_, wide)) = all_actions().find(|(p, a)| *p == EVERYWHERE && same(self.key_of(a.id)))
+        {
+            message = format!("{key} is also \"{}\" everywhere else; on {page} it does this instead.", wide.what);
+        } else if page == EVERYWHERE {
+            let mut pages: Vec<&str> =
+                all_actions().filter(|(p, a)| *p != EVERYWHERE && same(self.key_of(a.id))).map(|(p, _)| p).collect();
+            pages.dedup();
+            if !pages.is_empty() {
+                let one = pages.len() == 1;
+                message = format!(
+                    "{} keep{} {key} for a job of {} own.",
+                    pages.join(" and "),
+                    if one { "s" } else { "" },
+                    if one { "its" } else { "their" }
+                );
+            }
+        }
+        if normalise(&key) == normalise(action.default_key) {
+            self.changed.remove(id);
+        } else {
+            self.changed.insert(id.to_owned(), key);
+        }
+        *self = Shortcuts::with_changes(std::mem::take(&mut self.changed));
+        message
+    }
+
+    /// Every key back to the one it started with (the C# app's own ids that this app doesn't have yet stay as saved).
+    pub fn reset_all(&mut self) {
+        let mut changed = std::mem::take(&mut self.changed);
+        changed.retain(|id, _| !all_actions().any(|(_, a)| a.id == id));
+        *self = Shortcuts::with_changes(changed);
+    }
+
     /// The key an action has now, or "" for none.
     pub fn key_of(&self, id: &str) -> &str {
         if let Some(k) = self.changed.get(id) {
@@ -199,6 +279,25 @@ impl Shortcuts {
             _ => "",
         };
         [key.as_str(), other].into_iter().find_map(|k| self.by_key.get(k).copied())
+    }
+}
+
+/// Every action with its page's name ([`EVERYWHERE`] for the app-wide ones), in the order Settings shows them.
+pub fn all_actions() -> impl Iterator<Item = (&'static str, &'static Action)> {
+    APP_ACTIONS
+        .iter()
+        .map(|a| (EVERYWHERE, a))
+        .chain(PAGES.iter().flat_map(|(p, list)| list.iter().map(move |a| (*p, a))))
+}
+
+/// A key as it's kept: in the list's spelling, with "?" on its own (however the keyboard says it's typed).
+pub fn written(key: &str) -> String {
+    if key.is_empty() {
+        return String::new();
+    }
+    match normalise(key).as_str() {
+        "Shift+?" | "Shift+/" | "?" => "?".to_owned(),
+        k => k.to_owned(),
     }
 }
 
@@ -409,5 +508,62 @@ mod tests {
         assert_eq!(s.action_for("Shift+F11"), None);
         assert_eq!(s.action_for("Shift+F1"), None);
         assert_eq!(s.action_for("Ctrl+Shift+PageDown"), None);
+    }
+
+    #[test]
+    fn every_page_list_is_named_once() {
+        assert_eq!(PAGES.len(), PAGE_ACTIONS.len());
+        for (list, (_, named)) in PAGE_ACTIONS.iter().zip(PAGES) {
+            assert_eq!(list, named);
+        }
+    }
+
+    #[test]
+    fn a_new_key_takes_over_and_says_who_lost_it() {
+        let mut keys = Shortcuts::default();
+        let said = keys.set("app.goSounds", "Ctrl+1");
+        assert_eq!(keys.key_of("app.goSounds"), "Ctrl+1");
+        assert_eq!(keys.key_of("app.goProjects"), "");
+        assert_eq!(keys.action_for("Ctrl+1"), Some("app.goSounds"));
+        assert!(said.contains("Go to Songs"), "{said}");
+        assert!(keys.is_changed("app.goProjects") && keys.any_changed());
+        // Back to its own: the other stays without, until Default puts it back.
+        assert_eq!(keys.set("app.goSounds", "Ctrl+2"), "");
+        assert!(!keys.is_changed("app.goSounds"));
+        keys.reset_all();
+        assert!(!keys.any_changed());
+        assert_eq!(keys.key_of("app.goProjects"), "Ctrl+1");
+    }
+
+    #[test]
+    fn kept_keys_cant_be_given_and_question_marks_are_one_key() {
+        let mut keys = Shortcuts::default();
+        assert!(keys.set("app.search", "F12").contains("note to Claude"));
+        assert!(keys.set("app.search", "Tab").contains("kept"));
+        assert_eq!(keys.key_of("app.search"), "Ctrl+F");
+        keys.set("app.help", "Shift+?");
+        assert_eq!(keys.key_of("app.help"), "?");
+        assert!(!keys.is_changed("app.help"));
+    }
+
+    #[test]
+    fn page_keys_and_everywhere_keys_say_which_wins() {
+        let mut keys = Shortcuts::default();
+        let said = keys.set("sounds.copyPath", "Ctrl+F");
+        assert!(said.contains("on Sounds it does this instead"), "{said}");
+        assert_eq!(keys.page_action_for("Ctrl+F", SOUNDS_ACTIONS), Some("sounds.copyPath"));
+        assert_eq!(keys.action_for("Ctrl+F"), Some("app.search"));
+        let said = keys.set("app.fullScreen", "Ctrl+Shift+E");
+        assert!(said.starts_with("Songs and Sounds and MIDI and Space keep"), "{said}");
+    }
+
+    #[test]
+    fn the_setting_keeps_the_csharp_apps_other_ids() {
+        let mut keys = Shortcuts::from_setting(Some(r#"{"playground.loop":"Ctrl+J","app.search":"Ctrl+G"}"#));
+        keys.set("app.search", "Ctrl+F");
+        assert_eq!(keys.to_setting(), r#"{"playground.loop":"Ctrl+J"}"#);
+        keys.set("app.rescan", "F6");
+        keys.reset_all();
+        assert_eq!(keys.to_setting(), r#"{"playground.loop":"Ctrl+J"}"#);
     }
 }

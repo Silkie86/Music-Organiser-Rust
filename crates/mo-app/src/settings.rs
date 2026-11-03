@@ -356,6 +356,52 @@ pub fn developer_facts(version: &str, debug: bool, data: &Path, logs: &Path, log
     ]
 }
 
+/// One line of the Shortcuts tab: a page's heading (only `page` set) or an action with its key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyLine {
+    /// The page's name on a heading line; empty on an action's line.
+    pub page: &'static str,
+    pub id: &'static str,
+    pub what: &'static str,
+    /// Its key now, or "None".
+    pub key: String,
+    /// Not the key it started with, so Default can put that back.
+    pub changed: bool,
+    /// The key it starts with, for the Default button's tooltip.
+    pub starts: String,
+}
+
+/// The Shortcuts tab's lines: the keys that work everywhere, then each page's own, each under its page's name.
+pub fn key_lines(keys: &crate::shortcuts::Shortcuts) -> Vec<KeyLine> {
+    let mut out = Vec::new();
+    let mut last = "";
+    for (page, a) in crate::shortcuts::all_actions() {
+        if page != last {
+            out.push(KeyLine { page, id: "", what: "", key: String::new(), changed: false, starts: String::new() });
+            last = page;
+        }
+        let key = keys.key_of(a.id);
+        out.push(KeyLine {
+            page: "",
+            id: a.id,
+            what: a.what,
+            key: if key.is_empty() { "None".to_owned() } else { key.to_owned() },
+            changed: keys.is_changed(a.id),
+            starts: if a.default_key.is_empty() {
+                "It starts with no key".to_owned()
+            } else {
+                format!("It starts as {}", a.default_key)
+            },
+        });
+    }
+    out
+}
+
+/// The Shortcuts tab's words above the list.
+pub const KEYS_NOTE: &str = "Keys that work on every page come first, then each page's own. Click a key and press the \
+                             one you want (Esc stops listening); the same idea has the same key on every page. F12 \
+                             stays the note for Claude, and F1 or ? on a page shows its keys.";
+
 /// The credit Slint's royalty-free licence asks for (decided 2026-10-30), with what it means.
 pub const SLINT_CREDIT: &str = "Music Organiser's screens are made with Slint, under its royalty-free licence.";
 
@@ -453,6 +499,21 @@ mod tests {
         let written = developer_facts("v", false, Path::new("D"), Path::new("L"), Some(Path::new("L/r.log")));
         assert_eq!(written[4].button, Some(FactButton::Show));
         assert_eq!(written[1].value, "Release");
+    }
+
+    #[test]
+    fn key_lines_come_under_their_pages() {
+        let mut keys = crate::shortcuts::Shortcuts::default();
+        keys.set("app.fullRescan", "F6");
+        let lines = key_lines(&keys);
+        assert_eq!(lines[0].page, crate::shortcuts::EVERYWHERE);
+        let heads: Vec<&str> = lines.iter().filter(|l| !l.page.is_empty()).map(|l| l.page).collect();
+        assert_eq!(heads, vec!["Everywhere", "Songs", "Sounds", "MIDI", "Space"]);
+        let rescan = lines.iter().find(|l| l.id == "app.fullRescan").unwrap();
+        assert_eq!((rescan.key.as_str(), rescan.changed), ("F6", true));
+        assert_eq!(rescan.starts, "It starts with no key");
+        let search = lines.iter().find(|l| l.id == "app.search").unwrap();
+        assert_eq!((search.key.as_str(), search.changed), ("Ctrl+F", false));
     }
 
     #[test]
