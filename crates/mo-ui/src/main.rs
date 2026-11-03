@@ -4,10 +4,9 @@
 use std::io::Write;
 
 use mo_app::activity::Feed;
+use mo_app::background::Pace;
 use mo_app::log;
-use mo_app::places::Place;
 use mo_app::shortcuts::Shortcuts;
-use mo_app::themes::Look;
 use slint::ComponentHandle;
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -19,11 +18,23 @@ fn main() -> Result<(), slint::PlatformError> {
     let session = log::start_session();
     log_crashes();
     let feed = Feed::default();
-    // The settings come from library.db once mo-library exists (phase 2); until then the app opens in its defaults.
-    let shortcuts = Shortcuts::from_setting(None);
+    // This app's own settings over the C# app's, which library.db keeps and the app only reads.
+    let data = mo_app::paths::data_dir();
+    let library = data.join("library.db");
+    let (settings, writable) = mo_ui::settings::load(&data, &library);
+    let shortcuts = Shortcuts::from_setting(settings.get(mo_app::shortcuts::SETTING_KEY));
+    // Settings' pace: how many low-priority threads background work gets, from now until the app closes.
+    let pace = Pace::from_setting(settings.get(mo_app::app_settings::PACE_KEY));
+    mo_app::background::set_pace(pace);
+    log::info(
+        "Settings",
+        &format!("Pace {}: {} background threads", pace.name(), pace.threads(mo_app::background::cores())),
+    );
     // The graphics card draws the window and the galaxy; without one, the processor does.
     mo_ui::gpu::choose();
-    let app = match mo_ui::new_app(&Look::from_settings(None, None), shortcuts.clone(), Place::Songs, feed.clone()) {
+    let look = mo_ui::settings::look_of(&settings);
+    let start = mo_app::app_settings::start_place(&settings);
+    let app = match mo_ui::new_app(&look, shortcuts.clone(), start, feed.clone()) {
         Ok(app) => app,
         Err(e) => {
             // Rule 17: the reason the window couldn't open reaches the log too.
@@ -34,30 +45,54 @@ fn main() -> Result<(), slint::PlatformError> {
     };
     mo_ui::gpu::connect(&app);
     // The Songs page reads the C# app's library, read-only (CLAUDE.md: until the Rust page is trusted).
-    mo_ui::songs::connect(&app, mo_app::paths::data_dir().join("library.db"), feed.clone());
+    mo_ui::songs::connect(&app, library.clone(), feed.clone());
     mo_ui::sounds::connect(
         &app,
         mo_app::paths::data_dir().join("sounds.db"),
-        mo_app::paths::data_dir().join("library.db"),
+        library.clone(),
         feed.clone(),
         &shortcuts,
     );
     // MIDI: the MIDI index beside the library, read-only (the C# app's midi.db until the Rust one holds parts).
     mo_ui::midi::connect(&app, mo_app::paths::data_dir().join("library.db"), feed.clone(), &shortcuts);
     // Space, Backup: the backup settings live in a file of their own; the library is only read.
-    mo_ui::backup::connect(&app, mo_app::paths::data_dir().join("library.db"), feed.clone());
+    mo_ui::backup::connect(&app, library.clone(), feed.clone());
+    // Settings: changes are kept in the app's own file, never in library.db.
+    mo_ui::settings::connect(
+        &app,
+        mo_ui::settings::Setup {
+            settings,
+            folder: data,
+            library: library.clone(),
+            running_pace: pace,
+            live: true,
+            writable,
+            feed: feed.clone(),
+        },
+    );
     // Space: the drives your folders are on and the app's own files, looked at once the page shows.
-    mo_ui::space::connect(&app, mo_app::paths::data_dir().join("library.db"), feed.clone(), &shortcuts);
+    mo_ui::space::connect(&app, library.clone(), feed.clone(), &shortcuts);
     app.window().set_maximized(true);
     // The watchdog starts once the window is up, so opening it doesn't count as a freeze.
     let watched = feed.clone();
-    if slint::invoke_from_event_loop(move || mo_ui::watchdog::start(watched)).is_err() {
+    let sized = app.as_weak();
+    if slint::invoke_from_event_loop(move || {
+        // The size of everything, once the window knows the screen's own scale.
+        if let Some(app) = sized.upgrade() {
+            mo_ui::settings::apply_size(&app);
+        }
+        mo_ui::watchdog::start(watched);
+    })
+    .is_err()
+    {
         log::warning("Freeze", "Couldn't start the freeze watchdog");
     }
     let ran = app.run();
     if let Err(e) = &ran {
         log::error("App", &format!("The window stopped with an error: {e}"));
     }
+    // A settings change still waiting to be written goes now.
+    mo_ui::settings::finish_up();
     // A note left open keeps its draft for next time, but the launcher shouldn't wait on it any more.
     mo_ui::note::wait_for_saves();
     mo_ui::note::finish_up();

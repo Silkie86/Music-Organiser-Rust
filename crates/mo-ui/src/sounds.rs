@@ -209,8 +209,38 @@ thread_local! {
     static HERE: RefCell<bool> = const { RefCell::new(false) };
 }
 
-/// The one player, made the first time something plays (nothing opens before).
+/// The one player, made the first time something plays or Settings lists the outputs (nothing opens before a sound
+/// plays).
 static PLAYER: OnceLock<Player> = OnceLock::new();
+/// The output Settings chose (`None`: the computer's default), for the player once it's made.
+static OUTPUT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// The one player, made on first use, playing through the output Settings chose.
+pub fn player() -> &'static Player {
+    if let Some(player) = PLAYER.get() {
+        return player;
+    }
+    // The choice stays locked until the player is made, so one changed meanwhile waits and then reaches it.
+    let output = OUTPUT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    PLAYER.get_or_init(|| {
+        let player = Player::new(|key| {
+            let key = key.to_owned();
+            let _ = slint::invoke_from_event_loop(move || ended(&key));
+        });
+        player.choose(output.clone());
+        player
+    })
+}
+
+/// Plays through this output from now on (`None`: the computer's default), as Settings › Sound output chose. Before
+/// the player is made it's only remembered.
+pub fn choose_output(name: Option<String>) {
+    let mut output = OUTPUT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    *output = name.clone();
+    if let Some(player) = PLAYER.get() {
+        player.choose(name);
+    }
+}
 /// Counts the plays and stops asked for, so a sound that finishes reading after a newer play or a stop stays quiet
 /// (newest wins, rule 12).
 static PLAYS: AtomicU64 = AtomicU64::new(0);
@@ -472,10 +502,11 @@ impl Library {
     }
 }
 
-/// A copy of `list` with each sound's use in your songs, and Most liked scored with it.
+/// `list` again, sharing its sounds rather than copying them, with each sound's use in your songs and Most liked
+/// scored with it.
 fn with_usage(list: &SoundList, usage: HashMap<i64, Usage>, weights: &LikedWeights) -> SoundList {
     background::on_pool(|| {
-        let mut list = list.clone();
+        let mut list = list.sharing();
         list.set_liked(|s| weights.score(s, usage.get(&s.id)));
         list.set_used(usage);
         list
@@ -1596,12 +1627,7 @@ fn play_sound(app: &AppWindow, at: usize, from: f64, most: f64) {
             _ if NEWEST_PLAY.load(Ordering::SeqCst) != ask => sweep_timing::overtaken(&path, ask),
             _ if PLAYS.load(Ordering::SeqCst) != ask => sweep_timing::dropped(&path, ask),
             Ok(audio) => {
-                let player = PLAYER.get_or_init(|| {
-                    Player::new(|key| {
-                        let key = key.to_owned();
-                        let _ = slint::invoke_from_event_loop(move || ended(&key));
-                    })
-                });
+                let player = player();
                 player.play(Arc::new(audio), path.clone(), from * seconds);
                 let output = player.info();
                 sweep_timing::output(output.mix_every_ms.map(|m| m / 2.0), output.delay_ms);

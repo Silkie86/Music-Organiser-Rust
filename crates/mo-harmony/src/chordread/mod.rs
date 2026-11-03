@@ -38,10 +38,16 @@
 //!   where the bass comes from, and the evidence that tells the first reading from the runner-up ([`Explanation`]),
 //!   told in plain words ([`Words`]);
 //! - the version ([`CHORD_READER_VERSION`]), with the hash of every number the reader is built from
-//!   ([`numbers_hash`]).
+//!   ([`numbers_hash`]);
+//! - the design's hand cases and what each must read, judged for any weights (`cases`, with the `hand-cases` feature,
+//!   for `theorybench chordfit`).
 
 mod answer;
 mod candidates;
+#[cfg(any(test, feature = "hand-cases"))]
+pub mod cases;
+#[cfg(test)]
+mod cases_tests;
 mod cores;
 mod decode;
 #[cfg(test)]
