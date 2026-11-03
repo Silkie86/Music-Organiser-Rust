@@ -150,6 +150,11 @@ pub trait Drives: Sync {
     fn piece(&self, _path: &Path) -> u64 {
         0
     }
+    /// Whether a drive holds links (junctions, symbolic links): an exFAT or FAT32 one (a USB stick, a memory card,
+    /// many an external drive) doesn't, so a link inside a folder can't be made again there. Yes when it can't be told.
+    fn holds_links(&self, _path: &Path) -> bool {
+        true
+    }
     /// Windows' administrator question, for a folder or link it guards: the app's drives ask it; by default nothing is
     /// asked.
     fn admin(&self) -> &dyn Admin {
@@ -172,9 +177,60 @@ impl Drives for SystemDrives {
     fn piece(&self, path: &Path) -> u64 {
         fs4::allocation_granularity(really(path)).unwrap_or(0)
     }
+    fn holds_links(&self, path: &Path) -> bool {
+        !NO_LINKS.contains(&file_system(&really(path)).to_ascii_lowercase().as_str())
+    }
     fn admin(&self) -> &dyn Admin {
         &AsAdmin
     }
+}
+
+/// The kinds of drive that hold no links, as [`file_system`] names them (small letters): FAT32 and older FAT, and
+/// exFAT.
+const NO_LINKS: [&str; 4] = ["fat", "fat32", "exfat", "msdos"];
+
+/// The kind of drive a folder (where it really is) is on, as the system names it ("NTFS", "exFAT"), or nothing when it
+/// can't be told. Windows: the innermost drive holding it, from the system's list of drives.
+#[cfg(windows)]
+fn file_system(real: &Path) -> String {
+    let real = text(real);
+    let Ok(disks) = sysinfo::Disks::new_with_refreshed_list_specifics(sysinfo::DiskRefreshKind::nothing()) else {
+        return String::new();
+    };
+    disks
+        .iter()
+        .filter(|d| is_inside(&real, &text(d.mount_point())))
+        .max_by_key(|d| d.mount_point().as_os_str().len())
+        .map(|d| d.file_system().to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// Linux says what kind of drive a folder is on by a number: exFAT's, or FAT's ("msdos", which FAT32 is too). Any
+/// other is named by nothing here.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn file_system(real: &Path) -> String {
+    use rustix::fs::FsWord;
+    const EXFAT: u32 = 0x2011_BAB0;
+    const MSDOS: u32 = 0x4D44;
+    match rustix::fs::statfs(real) {
+        Ok(s) if s.f_type == EXFAT as FsWord => "exfat".to_owned(),
+        Ok(s) if s.f_type == MSDOS as FsWord => "msdos".to_owned(),
+        _ => String::new(),
+    }
+}
+
+/// A Mac names the kind of drive a folder is on ("apfs", "exfat", "msdos").
+#[cfg(target_os = "macos")]
+fn file_system(real: &Path) -> String {
+    let Ok(s) = rustix::fs::statfs(real) else { return String::new() };
+    let name: Vec<u8> = s.f_fstypename.iter().take_while(|&&c| c != 0).map(|&c| c as u8).collect();
+    String::from_utf8_lossy(&name).into_owned()
+}
+
+/// Elsewhere it can't be told.
+#[cfg(not(any(windows, target_os = "linux", target_os = "android", target_os = "macos")))]
+fn file_system(_real: &Path) -> String {
+    String::new()
 }
 
 /// Unix: the same device. Windows: the same drive letter or network share, where the folders really are.
@@ -245,9 +301,11 @@ pub enum CantMove {
     NetworkDrive,
     /// Some of its files are only online in OneDrive.
     OnlineOnly,
-    /// A file link in it leads to a file that's only online in OneDrive, and Windows won't make the link again, so
-    /// the file would be copied: the link, and the file.
+    /// A file link in it leads to a file that's only online in OneDrive, and the link can't be made again where it
+    /// goes, so the file would be copied: the link, and the file.
     LinkOnlineOnly { link: String, file: String },
+    /// A link in it would be made again as a link where it goes, on a drive that holds none (exFAT, FAT32): the link.
+    NoLinksThere(String),
     /// The drive hasn't room: what it has free, and what's needed.
     NoRoom { free: u64, needs: u64 },
     /// Windows said no (access denied): something has the folder open, or it needs administrator rights.
@@ -297,10 +355,14 @@ impl CantMove {
                                      Always keep on this device. Once they've downloaded, try again."
                 .to_owned(),
             CantMove::LinkOnlineOnly { link, file } => format!(
-                "{link} is a link to {file}, which is only online in OneDrive. Windows won't make that link again \
-                 (that takes Developer Mode), so the file would be copied, and copying it would download it first. In \
-                 File Explorer, right-click {file} and pick Always keep on this device. Once it's downloaded, try \
-                 again. Nothing was moved."
+                "{link} is a link to {file}, which is only online in OneDrive. The link can't be made again where it's \
+                 going (that takes Developer Mode, and a drive that holds links: an exFAT or FAT32 one doesn't), so \
+                 the file would be copied, and copying it would download it first. In File Explorer, right-click \
+                 {file} and pick Always keep on this device. Once it's downloaded, try again. Nothing was moved."
+            ),
+            CantMove::NoLinksThere(link) => format!(
+                "{link} is a link, and the drive it would be copied to can't hold links (an exFAT or FAT32 drive \
+                 can't), so it couldn't be made again there. Nothing was moved."
             ),
             CantMove::NoRoom { free, needs } => format!(
                 "That drive has {} free; this needs {} and some room to spare.",
@@ -387,7 +449,8 @@ fn destination_inside(from: &str, destination: &str) -> bool {
 /// Why a folder (a real one, there) can't be copied into `destination`, or `None` when it can: the folder picked is
 /// inside it, on a network drive or not there; the name is taken there (by anything but a half copy an earlier try at
 /// this copy left, cut off part way, which the copy clears first: its room counts as free); some of its files are only
-/// online; or there isn't room for what's copied (counted, each file and folder as the drive keeps it, leaving out
+/// online (or a file a link in it leads to is, and would be copied); a link in it can't be made again there (the drive
+/// holds none); or there isn't room for what's copied (counted, each file and folder as the drive keeps it, leaving out
 /// `leave_out`; `bytes`, its measured size, when it can't be counted) and some to spare. On the same drive it's
 /// [`CantMove::SameDrive`], or, when `rename` (it'll be renamed rather than copied), only the checks before the copying
 /// ones count. `moved` is every moved folder; `mine`, the claim the move holds on the copy's place, if any.
@@ -438,16 +501,19 @@ pub(crate) fn destination_problem(
     }
     // Counted again here, as the drive it goes to keeps files; `bytes` (measured earlier) only when it can't be. All
     // of it, when a half copy there goes first. Counted even when the drive's room can't be told: it also finds a link
-    // to a file that's only online.
+    // to a file that's only online, and a link the drive can't hold.
     let tree = Tree {
         piece: drives.piece(Path::new(destination)),
+        links: drives.holds_links(Path::new(destination)),
         leave_out,
         as_new: freed > 0,
         ..Tree::new(from_path, &to, &to)
     };
     let needs = match copy_tree(&tree, Fill::Count, &|_| {}, stop) {
         Ok(counted) => counted.bytes,
-        Err(why @ (CantMove::Stopped | CantMove::LinkOnlineOnly { .. })) => return Some(why),
+        Err(why @ (CantMove::Stopped | CantMove::LinkOnlineOnly { .. } | CantMove::NoLinksThere(_))) => {
+            return Some(why);
+        }
         Err(_) => bytes,
     };
     let free = drives.free(Path::new(destination))?.saturating_add(freed);
@@ -655,9 +721,11 @@ pub(crate) fn part_way(why: &CantMove) -> String {
 
 /// Whether the drive `here` is on has room for what freshening `tree` copies, and some to spare (when the drive's room
 /// can be told). Counting it also finds, before anything changes, what would stop the copy part way: two names that
-/// differ only in capitals, a file where a folder goes, a link to a file that's only online.
+/// differ only in capitals (when one of them is in the copy already), a file where a folder goes, a link to a file
+/// that's only online, a link the drive can't hold.
 pub(crate) fn room_for(tree: &Tree, here: &Path, drives: &dyn Drives, stop: &AtomicBool) -> Result<(), CantMove> {
-    let needs = copy_tree(&Tree { piece: drives.piece(here), ..*tree }, Fill::Count, &|_| {}, stop)?.bytes;
+    let counting = Tree { piece: drives.piece(here), links: drives.holds_links(here), ..*tree };
+    let needs = copy_tree(&counting, Fill::Count, &|_| {}, stop)?.bytes;
     match drives.free(here) {
         Some(free) if free < needs.saturating_add(HEADROOM) => Err(CantMove::NoRoom { free, needs }),
         _ => Ok(()),
@@ -863,18 +931,19 @@ fn differences(
                 continue;
             };
             let path = entry.path();
+            let name = entry.file_name();
             // A half copy's marker (left at the top when moving back couldn't take it out) is the app's, not yours.
-            if skip.contains(&key(&path.to_string_lossy())) || top && entry.file_name() == MARKER {
+            if skip.contains(&key(&path.to_string_lossy())) || top && name == MARKER {
                 continue;
             }
-            let there = copy_dir.join(entry.file_name());
+            let there = copy_dir.join(&name);
             let Ok(kind) = entry.file_type() else {
                 only.push(show(&path));
                 continue;
             };
             // Nor is a temporary file a copy cut off part way left (moving back writes them into the old copy): it's
             // never copied on.
-            if kind.is_file() && own_name(&entry.file_name().to_string_lossy()).is_some() {
+            if kind.is_file() && own_name(&name.to_string_lossy()).is_some() {
                 continue;
             }
             let in_copy = if kind.is_symlink() {
@@ -1275,6 +1344,9 @@ pub(crate) struct Tree<'a> {
     pub(crate) piece: u64,
     /// Counting: as for a copy not made yet, whatever is at `to` now (a half copy, cleared before copying).
     pub(crate) as_new: bool,
+    /// Counting: whether the drive it goes to holds links ([`Drives::holds_links`]). Where it doesn't, a link inside
+    /// that would be made again as a link stops the count, and a file link counts as the file it leads to.
+    pub(crate) links: bool,
     /// Set once anything in `to` has changed: a folder or a link made, or a file put in (a temporary one that goes
     /// again isn't a change). So moving back can say whether the old copy changed before it stopped.
     pub(crate) changed: Option<&'a AtomicBool>,
@@ -1293,6 +1365,7 @@ impl<'a> Tree<'a> {
             leave_out: &[],
             piece: 0,
             as_new: false,
+            links: true,
             changed: None,
         }
     }
@@ -1337,7 +1410,8 @@ pub(crate) fn copy_tree(
     let mut copied = Copied::default();
     let mut recent: VecDeque<(Instant, PathBuf)> = VecDeque::new();
     let mut waiting = Waiting::default();
-    // Whether Windows makes file links where the copy goes, once it's asked ([`makes_file_links`]).
+    // Whether a file link can be made again where the copy goes, once it's asked: the drive holds links, and Windows
+    // makes file links for the app ([`makes_file_links`]).
     let mut file_links = None;
     // Counting for a copy not made yet: the folder it's made in takes a piece of the drive too.
     if fill == Fill::Count && (tree.as_new || fs::symlink_metadata(tree.to).is_err()) {
@@ -1346,7 +1420,9 @@ pub(crate) fn copy_tree(
     let mut folders = vec![(tree.from.to_path_buf(), tree.to.to_path_buf())];
     while let Some((source_dir, copy_dir)) = folders.pop() {
         let top = source_dir.as_path() == tree.from;
-        let entries = match fs::read_dir(&source_dir) {
+        // Listed once. (A file's size and time in the listing can be old by the time its turn comes: it's looked at
+        // again just before it's copied, [`as_now`].)
+        let entries: Vec<fs::DirEntry> = match fs::read_dir(&source_dir).and_then(Iterator::collect) {
             Ok(entries) => entries,
             Err(_) if gone(&source_dir) => continue,
             Err(e) => return Err(failed(&source_dir, &e)),
@@ -1355,16 +1431,16 @@ pub(crate) fn copy_tree(
         let copy_dir_there = fill != Fill::Count || !tree.as_new && fs::symlink_metadata(&copy_dir).is_ok();
         // Names here that differ only in capitals, where something may be in the copy already (a copy just made has
         // nothing else in it); and the names in the copy's folder, capitals and all, once one of them is asked about.
-        let twins = if fill != Fill::New && copy_dir_there { twins(&source_dir) } else { HashSet::new() };
+        let twins = if fill != Fill::New && copy_dir_there { twins(&entries) } else { HashSet::new() };
         let mut names_there = None;
         for entry in entries {
             if stop.load(Ordering::Relaxed) {
                 return Err(CantMove::Stopped);
             }
-            let entry = entry.map_err(|e| failed(&source_dir, &e))?;
             let source = entry.path();
+            let name = entry.file_name();
             // A half copy's marker, left in a copy that's in use now, is never copied on (into the old copy, say).
-            if tree.leave_out.contains(&key(&source.to_string_lossy())) || top && entry.file_name() == MARKER {
+            if tree.leave_out.contains(&key(&source.to_string_lossy())) || top && name == MARKER {
                 continue;
             }
             let kind = match entry.file_type() {
@@ -1374,10 +1450,10 @@ pub(crate) fn copy_tree(
             };
             // Nor is a temporary file an earlier try left, cut off before it went in (the copy on the other drive can
             // hold one): it isn't the plugin's.
-            if kind.is_file() && own_name(&entry.file_name().to_string_lossy()).is_some() {
+            if kind.is_file() && own_name(&name.to_string_lossy()).is_some() {
                 continue;
             }
-            let copy = copy_dir.join(entry.file_name());
+            let copy = copy_dir.join(&name);
             // One that would meet a file waiting to go in (a name that differs only in capitals, on a drive that
             // doesn't tell them apart) waits until those are in, so it finds what's there then.
             if waiting.meets(&copy) {
@@ -1386,10 +1462,8 @@ pub(crate) fn copy_tree(
             let there = if copy_dir_there { fs::symlink_metadata(&copy).ok() } else { None };
             // Two names in a folder that differ only in capitals can't both go where the drive finds something for one
             // under another name: it doesn't tell them apart. (A copy just made has nothing else in it.)
-            let twin = !twins.is_empty() && twins.contains(&key(&entry.file_name().to_string_lossy()));
-            if there.is_some()
-                && (fill == Fill::New || twin && !named_in(&copy_dir, &mut names_there, &entry.file_name()))
-            {
+            let twin = !twins.is_empty() && twins.contains(&key(&name.to_string_lossy()));
+            if there.is_some() && (fill == Fill::New || twin && !named_in(&copy_dir, &mut names_there, &name)) {
                 return Err(CantMove::Failed(format!(
                     "{} has a twin whose name differs only in capitals, and the drive it goes to doesn't tell them \
                      apart: rename one of them.",
@@ -1444,17 +1518,18 @@ pub(crate) fn copy_tree(
                 folders.push((source, copy));
                 continue;
             }
-            let meta = match if kind.is_symlink() { fs::metadata(file) } else { entry.metadata() } {
+            let listed = match if kind.is_symlink() { fs::metadata(file) } else { entry.metadata() } {
                 Ok(meta) => meta,
                 Err(_) if gone(file) => continue,
                 Err(e) => return Err(failed(file, &e)),
             };
             // Never downloaded to be copied (one that went online-only after the check): it stops before the swap. A
-            // file a link leads to is copied only where Windows won't make the link again: counting asks Windows
-            // whether it makes file links where the copy goes, so a copy into a folder of yours stops before anything
-            // there changes.
-            if is_online_only(&meta)
-                && (!kind.is_symlink() || fill != Fill::Count || !*file_links.get_or_insert_with(|| links_here(tree)))
+            // file a link leads to is copied only where the link can't be made again: counting asks whether it can
+            // be, so a copy into a folder of yours stops before anything there changes.
+            if is_online_only(&listed)
+                && (!kind.is_symlink()
+                    || fill != Fill::Count
+                    || !*file_links.get_or_insert_with(|| tree.links && makes_file_links()))
             {
                 return Err(if kind.is_symlink() {
                     // Where the link leads, as a plain path.
@@ -1471,12 +1546,25 @@ pub(crate) fn copy_tree(
                         copy.to_string_lossy()
                     )));
                 }
-                if same_file(m, &meta) {
+                if same_file(m, &listed) {
                     continue;
                 }
             }
             if fill == Fill::Count {
-                copied.bytes = copied.bytes.saturating_add(rounded_up(meta.len(), tree.piece));
+                copied.bytes = copied.bytes.saturating_add(rounded_up(listed.len(), tree.piece));
+                continue;
+            }
+            // About to be copied: looked at again as it is now ([`as_now`]). The file a link leads to was just now.
+            let meta = if kind.is_symlink() {
+                listed
+            } else {
+                let Some(meta) = as_now(file)? else { continue };
+                if is_online_only(&meta) {
+                    return Err(CantMove::OnlineOnly);
+                }
+                meta
+            };
+            if there.as_ref().is_some_and(|m| same_file(m, &meta)) {
                 continue;
             }
             let put = match (fill, tree.keep_in) {
@@ -1532,8 +1620,10 @@ pub(crate) fn copy_tree(
 }
 
 /// A link inside the folder being copied, with nothing at its place in the copy: made again there as a link
-/// ([`copy_link`]). `Some` is the file it leads to, to be copied as a file instead: Windows wouldn't make the file link
-/// again, or, counting, may not (without Developer Mode), so its file is counted. Something at its place in the copy
+/// ([`copy_link`]). `Some` is the file it leads to, to be copied as a file instead: the file link couldn't be made
+/// again, or, counting, may not be (Windows doesn't make one without Developer Mode, and a drive that holds no links
+/// can't take one), so its file is counted. Counting for a drive that holds no links ([`Tree::links`]), any other link
+/// that would be made again as a link stops the count ([`CantMove::NoLinksThere`]). Something at its place in the copy
 /// already (a file copied for it before, say) stays as it is.
 fn linked_file(
     source: &Path,
@@ -1548,30 +1638,46 @@ fn linked_file(
         return Ok(None);
     }
     if fill == Fill::Count {
-        let may_be_copied = cfg!(windows) && fs::metadata(source).is_ok_and(|m| m.is_file());
-        return Ok(may_be_copied.then(|| source.to_path_buf()));
+        let leads_to = fs::metadata(source).ok();
+        if leads_to.as_ref().is_some_and(fs::Metadata::is_file) {
+            return Ok((cfg!(windows) || !tree.links).then(|| source.to_path_buf()));
+        }
+        if !tree.links && remade_as_link(kind, leads_to.as_ref()) {
+            return Err(CantMove::NoLinksThere(text(source)));
+        }
+        return Ok(None);
     }
     copy_link(source, kind, copy, tree, source_real)
 }
 
-/// Whether Windows makes file links where `tree` is copied to: in the copy, or the folder it's made in when it isn't
-/// there yet ([`makes_file_links`]).
-fn links_here(tree: &Tree) -> bool {
-    let there = fs::symlink_metadata(tree.to).is_ok_and(|m| m.is_dir());
-    makes_file_links(if there { tree.to } else { tree.to.parent().unwrap_or(tree.to) })
+/// Whether a link that doesn't lead to a file (`leads_to`: what it leads to now, if anything) is made again as a link
+/// ([`copy_link`]): one to a folder always is, and one that leads nowhere now is too, but on Windows only a folder link
+/// (a file link there that Windows won't make again is left out).
+fn remade_as_link(kind: &fs::FileType, leads_to: Option<&fs::Metadata>) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileTypeExt;
+        leads_to.map_or_else(|| kind.is_symlink_dir(), fs::Metadata::is_dir)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (kind, leads_to);
+        true
+    }
 }
 
-/// Whether Windows makes file links in a folder now: that takes Developer Mode (or administrator rights), and a drive
-/// that holds links (not exFAT or FAT32, say). Tried by making one there and removing it again. Elsewhere it always
-/// does.
-fn makes_file_links(folder: &Path) -> bool {
+/// Whether Windows makes file links for the app now: that takes Developer Mode (or administrator rights). Tried by
+/// making one in the system's temporary folder and removing it again, never in a folder of yours. (The drive it's
+/// copied to must hold links too: [`Tree::links`].) Elsewhere it always does.
+fn makes_file_links() -> bool {
     #[cfg(windows)]
     {
         use std::sync::atomic::AtomicU64;
         static TRIES: AtomicU64 = AtomicU64::new(0);
         let n = TRIES.fetch_add(1, Ordering::Relaxed);
-        let probe = folder.join(format!("Music Organiser link check {} {n}", std::process::id()));
-        let made = std::os::windows::fs::symlink_file(folder.join("Music Organiser link check"), &probe).is_ok();
+        let temp = std::env::temp_dir();
+        let probe = temp.join(format!("Music Organiser link check {} {n}", std::process::id()));
+        let made = std::os::windows::fs::symlink_file(temp.join("Music Organiser link check"), &probe).is_ok();
         if made {
             let _ = fs::remove_file(&probe);
         }
@@ -1579,8 +1685,19 @@ fn makes_file_links(folder: &Path) -> bool {
     }
     #[cfg(not(windows))]
     {
-        let _ = folder;
         true
+    }
+}
+
+/// A file about to be copied, as it is now: a folder's listing on Windows gives each file's size and time as they
+/// were when it was listed (or, for one something has open, when it was last closed), and a big folder takes a long
+/// while to copy, so a file that changed meanwhile would seem not to copy whole. `None` when it's gone, or isn't a file
+/// any more (a folder or a link took its name): it's passed over, and the next look at the folder finds what it is.
+fn as_now(file: &Path) -> Result<Option<fs::Metadata>, CantMove> {
+    match fs::symlink_metadata(file) {
+        Ok(meta) => Ok(meta.is_file().then_some(meta)),
+        Err(_) if gone(file) => Ok(None),
+        Err(e) => Err(failed(file, &e)),
     }
 }
 
@@ -1590,12 +1707,11 @@ pub(crate) fn own_name(name: &str) -> Option<&str> {
     name.strip_suffix(PART_SUFFIX).filter(|own| !own.is_empty())
 }
 
-/// The names in a folder that differ only in capitals from another there, as [`key`] gives them. Only the names are
-/// read (a folder that can't be read has none).
-fn twins(folder: &Path) -> HashSet<String> {
-    let mut seen = HashSet::new();
+/// The names in a folder's listing that differ only in capitals from another in it, as [`key`] gives them.
+fn twins(entries: &[fs::DirEntry]) -> HashSet<String> {
+    let mut seen = HashSet::with_capacity(entries.len());
     let mut twins = HashSet::new();
-    for entry in fs::read_dir(folder).into_iter().flatten().flatten() {
+    for entry in entries {
         let name = key(&entry.file_name().to_string_lossy());
         if seen.contains(&name) {
             twins.insert(name);

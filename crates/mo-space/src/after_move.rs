@@ -196,22 +196,15 @@ pub fn link_again(
     // there's known to be room: not after an hour of copying, and not for nothing.
     check_rename_or_ask(from, drives.admin())?;
     // From here on the copy changes: a stop or a failure once it has says so. Before that, nothing was moved.
+    let unchanged = || !changed.load(Ordering::Relaxed) && !kept_in.exists();
+    // A folder took the name it was to be set aside under meanwhile.
+    let taken = || format!("There's a folder called {} beside it now: rename or delete it.", file_name(&aside));
     let partly = |why: CantMove| match why {
         CantMove::LeftHalfway(_) => why,
+        CantMove::OldCopyThere if unchanged() => CantMove::Failed(taken()),
+        other if unchanged() => other,
         other => {
-            let said = match &other {
-                // A folder took the name it was to be set aside under meanwhile.
-                CantMove::OldCopyThere => {
-                    format!("There's a folder called {} beside it now: rename or delete it.", file_name(&aside))
-                }
-                other => part_way(other),
-            };
-            if !changed.load(Ordering::Relaxed) && !kept_in.exists() {
-                return match other {
-                    CantMove::OldCopyThere => CantMove::Failed(said),
-                    other => other,
-                };
-            }
+            let said = if other == CantMove::OldCopyThere { taken() } else { part_way(&other) };
             let kept = if kept_in.exists() {
                 format!(", and the ones they replaced are kept in {}", text(&kept_in))
             } else {

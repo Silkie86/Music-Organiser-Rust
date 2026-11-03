@@ -111,6 +111,23 @@ impl Drives for SameDrive {
     }
 }
 
+/// Every folder is on its own drive, with this much room, and the drives hold no links (exFAT ones, say).
+struct NoLinks {
+    free: Option<u64>,
+}
+
+impl Drives for NoLinks {
+    fn same(&self, _a: &Path, _b: &Path) -> bool {
+        false
+    }
+    fn free(&self, _path: &Path) -> Option<u64> {
+        self.free
+    }
+    fn holds_links(&self, _path: &Path) -> bool {
+        false
+    }
+}
+
 fn whose() -> (&'static str, SpaceKind, &'static [String]) {
     ("omnisphere", SpaceKind::Sounds, &[])
 }
@@ -665,6 +682,50 @@ fn a_file_link_counts_as_its_file_where_windows_may_copy_it_as_that() {
         Some(CantMove::NoRoom { free: HEADROOM + needs - 1, needs })
     );
     assert_eq!(problem(&presets, &s(&d), 5, &OtherDrive { free: Some(HEADROOM + needs) }, &[], &stop), None);
+    // A drive that holds no links (exFAT) can't take the link on any system, so its file is copied: room is kept for
+    // it everywhere.
+    let short = NoLinks { free: Some(HEADROOM + 1004) };
+    assert_eq!(
+        problem(&presets, &s(&d), 5, &short, &[], &stop),
+        Some(CantMove::NoRoom { free: HEADROOM + 1004, needs: 1005 })
+    );
+    assert_eq!(problem(&presets, &s(&d), 5, &NoLinks { free: Some(HEADROOM + 1005) }, &[], &stop), None);
+}
+
+#[test]
+fn a_link_inside_stops_a_move_to_a_drive_that_cant_hold_links_before_anything_is_copied() {
+    let dir = fixtures("mo-space-move-no-links");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    let steam = c.join("STEAM");
+    write(&steam, "Pad.db", "pad");
+    write(&steam, "Keys/Rhodes.db", "rhodes");
+    write(&dir, "Elsewhere/big.wav", "big");
+    fs::create_dir_all(&d).unwrap();
+    let stop = AtomicBool::new(false);
+    let from = s(&steam);
+    let exfat = NoLinks { free: None };
+    let refused = |link: &Path| {
+        let why = CantMove::NoLinksThere(s(link));
+        assert_eq!(problem(&from, &s(&d), 9, &exfat, &[], &stop).as_ref(), Some(&why));
+        assert_eq!(move_folder(&from, &s(&d), 9, whose(), &exfat, &[], &nothing, &stop), Err(why));
+        // Nothing was copied, and the folder is as it was.
+        assert!(!d.join("STEAM").exists());
+        assert!(!is_link(&steam) && is_link(link));
+    };
+    // A link to a folder is made again as a link, which the drive can't hold.
+    let linked = steam.join("Keys/Linked");
+    folder_link(&dir.join("Elsewhere"), &linked);
+    refused(&linked);
+    unlink(&linked);
+    // So is a folder link that leads nowhere now (a drive that isn't plugged in).
+    let unplugged = steam.join("Keys/Unplugged");
+    folder_link(&dir.join("Unplugged"), &unplugged);
+    refused(&unplugged);
+    unlink(&unplugged);
+    // Without them it moves.
+    let moved = move_folder(&from, &s(&d), 9, whose(), &exfat, &[], &nothing, &stop).unwrap();
+    assert!(is_link(&steam) && moved.has_old_copy());
+    assert_eq!(fs::read_to_string(d.join("STEAM/Keys/Rhodes.db")).unwrap(), "rhodes");
 }
 
 #[test]
@@ -785,6 +846,34 @@ fn a_file_that_goes_while_the_folder_copies_is_passed_over() {
         assert!(d.join("Library").join(format!("{n}.wav")).exists());
     }
     assert!(moved.has_old_copy());
+}
+
+#[test]
+fn a_file_that_changes_while_the_folder_copies_is_copied_as_it_is_by_its_turn() {
+    let dir = fixtures("mo-space-move-changed-meanwhile");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    let library = c.join("Library");
+    let names: Vec<String> = (0..10).map(|n| format!("{n}.db")).collect();
+    for name in &names {
+        write(&library, name, "short");
+    }
+    fs::create_dir_all(&d).unwrap();
+    let stop = AtomicBool::new(false);
+    // As the first file copies, something rewrites them all, longer: the rest change after the folder was listed (on
+    // Windows the listing still gives their old sizes then).
+    let rewritten = AtomicBool::new(false);
+    let progress = |_| {
+        if !rewritten.swap(true, Ordering::Relaxed) {
+            for name in &names {
+                write(&library, name, "rewritten, and longer");
+            }
+        }
+    };
+    move_folder(&s(&library), &s(&d), 50, whose(), &ROOMY, &[], &progress, &stop).unwrap();
+    assert!(is_link(&library));
+    for name in &names {
+        assert_eq!(fs::read_to_string(d.join("Library").join(name)).unwrap(), "rewritten, and longer");
+    }
 }
 
 #[test]
