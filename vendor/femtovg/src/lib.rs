@@ -2,8 +2,8 @@
 #![warn(missing_debug_implementations)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 // Music Organiser patch (see PATCHED.md): built here as a local crate, so under the app's `-D warnings`. Upstream's own
-// warnings for the features Slint picks (an unused import, an unused method) mustn't stop the app's build.
-#![allow(warnings)]
+// two warnings for the features Slint picks (an unused import, an unused method) mustn't stop the app's build.
+#![allow(unused_imports, dead_code)]
 
 /*!
  * The femtovg API is (like [NanoVG](https://github.com/memononen/nanovg))

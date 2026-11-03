@@ -257,11 +257,12 @@ struct CachedPipeline {
     accessed: bool,
 }
 
-// Music Organiser patch (see vendor/femtovg/PATCHED.md): the pipeline cache is cleaned once every this many renders,
-// dropping the pipelines that weren't bound since the last clean. femtovg 0.27.0 cleaned it after every render, so a
-// render that drew nothing (Slint's first one of each frame, when the app has a rendering notifier) dropped them all,
-// and every pipeline was built again on every frame.
-const PIPELINE_CLEAN_EVERY: u32 = 64;
+// Music Organiser patch (see vendor/femtovg/PATCHED.md): the pipeline cache is only cleaned once it holds more than
+// this many pipelines, and then drops the ones not bound since the last clean. femtovg 0.27.0 cleaned it after every
+// render, so the render Slint makes first in each frame to clear the window (when the app has a rendering notifier)
+// kept only the clearing pipeline, and every other one was built again on every frame. A pipeline is one combination
+// of a few settings (shader, blending, stencil, format, topology), so the cache stays far below this.
+const PIPELINE_CACHE_MOST: usize = 256;
 
 /// WGPU renderer.
 #[derive(Debug)]
@@ -285,8 +286,6 @@ pub struct WGPURenderer {
     viewport_bind_group_layout: wgpu::BindGroupLayout,
     pipeline_layout: wgpu::PipelineLayout,
     pipeline_cache: Rc<RefCell<HashMap<PipelineState, CachedPipeline>>>,
-    // Music Organiser patch: renders since the pipeline cache was last cleaned.
-    renders_since_clean: u32,
 }
 
 /// Rasterizes an image element into an offscreen canvas at the given size.
@@ -495,7 +494,6 @@ impl WGPURenderer {
             viewport_bind_group_layout,
             pipeline_layout,
             pipeline_cache: Default::default(),
-            renders_since_clean: 0,
         }
     }
 }
@@ -724,14 +722,12 @@ impl Renderer for WGPURenderer {
 
         let command_buffer = encoder.finish();
 
-        // Music Organiser patch: cleaned every PIPELINE_CLEAN_EVERY renders instead of after each one.
-        self.renders_since_clean += 1;
-        if self.renders_since_clean >= PIPELINE_CLEAN_EVERY {
-            self.renders_since_clean = 0;
-            self.pipeline_cache
-                .borrow_mut()
-                .retain(|_, cached_pipeline| std::mem::replace(&mut cached_pipeline.accessed, false));
+        // Music Organiser patch: cleaned only once the cache holds more than PIPELINE_CACHE_MOST, not after each render.
+        let mut pipeline_cache = self.pipeline_cache.borrow_mut();
+        if pipeline_cache.len() > PIPELINE_CACHE_MOST {
+            pipeline_cache.retain(|_, cached_pipeline| std::mem::replace(&mut cached_pipeline.accessed, false));
         }
+        drop(pipeline_cache);
 
         Some(command_buffer)
     }
