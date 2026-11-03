@@ -775,7 +775,30 @@ pub fn run(args: &[String]) -> Result<(), String> {
         let again: Vec<usize> =
             (0..hand.len()).filter(|&k| hand.get(k).is_some_and(|p| broken.contains(&case_key(&p.source)))).collect();
         let reads = read_all(&hand, &numbers);
-        planes.extend(again.iter().filter_map(|&k| hold(reads.get(k).and_then(Option::as_ref), &x, tighter, false)));
+        let new: Vec<Plane> =
+            again.iter().filter_map(|&k| hold(reads.get(k).and_then(Option::as_ref), &x, tighter, false)).collect();
+        if new.is_empty() {
+            println!(
+                "Round {}: {gates} gates break (cases {}), but none of them is a case the fit learns from: stopping.",
+                round + 1,
+                broken.join(", ")
+            );
+            break;
+        }
+        // Rules drawn at different numbers may leave no numbers that keep them all: then the fit would never find a
+        // point it may read, so it stops where it is.
+        let mut tried = planes.clone();
+        tried.extend(new);
+        if !ruled::can_keep(&x, &bounds, &tried, &fixed) {
+            println!(
+                "Round {}: {gates} gates break (cases {}); holding them again would leave no numbers that keep every \
+                 rule, so the fit stops here.",
+                round + 1,
+                broken.join(", ")
+            );
+            break;
+        }
+        planes = tried;
         println!(
             "Round {}: {gates} gates break (cases {}); holding the {} of their cases the fit learns from again, at \
              {:.3} of their chance, and fitting on.",

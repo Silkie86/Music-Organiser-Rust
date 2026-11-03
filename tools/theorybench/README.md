@@ -410,7 +410,9 @@ w_N, what a stretch read as no chord scores. The counted tables stay as `tables`
   each case's labels must keep at least half their chance (or what they have, if less) as the slope at the start
   sees it (a half-space, kept by the projection with the signs and orders); after each fit, the cases whose gates
   still break are held again where the fit got to, tighter (at 0.75, then 0.875 of their chance), for at most n more
-  rounds. The two can go together.
+  rounds. The rounds stop early when every gate holds, when no gate that breaks is one of the cases learned from (a
+  named case's number that no case read whole has), or when the new rules and the old ones leave no numbers that keep
+  them all (rules drawn at different numbers can). The two can go together.
 
 ## Charts played as music (`convert/voice.py`)
 

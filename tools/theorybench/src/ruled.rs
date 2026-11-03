@@ -101,6 +101,16 @@ pub fn project(x: &[f64], bounds: &[Bound], planes: &[Plane], fixed: &[bool]) ->
     y
 }
 
+/// Whether some numbers keep every bound and plane together: the nearest to `x` that keep the bounds keep every plane
+/// too, to within a rounding error. (Where none do, Dykstra's method never settles, and its last point breaks one.)
+pub fn can_keep(x: &[f64], bounds: &[Bound], planes: &[Plane], fixed: &[bool]) -> bool {
+    let p = project(x, bounds, planes, fixed);
+    planes.iter().all(|plane| {
+        let scale = plane.a.iter().zip(&p).map(|(a, v)| (a * v).abs()).sum::<f64>().max(plane.b.abs()).max(1.0);
+        plane.room(&p) >= -1e-9 * scale
+    })
+}
+
 /// Moves numbers a rounding error past a bound back onto it, until every bound holds.
 fn settle(y: &mut [f64], bounds: &[Bound], fixed: &[bool]) {
     let is_fixed = |i: usize| fixed.get(i).copied().unwrap_or(false);
@@ -447,6 +457,22 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn rules_that_leave_no_numbers_to_keep_them_all_are_found() {
+        // x0 + x1 ≥ 2 and x1 ≥ 0 can hold together; with x0 + x1 ≤ 1 too, nothing keeps them all.
+        let at_least_2 = Plane { a: vec![1.0, 1.0], b: 2.0 };
+        let at_most_1 = Plane { a: vec![-1.0, -1.0], b: -1.0 };
+        let none = [false; 2];
+        assert!(can_keep(&[0.0, 0.0], &[AtLeast0(1)], std::slice::from_ref(&at_least_2), &none));
+        assert!(!can_keep(&[0.0, 0.0], &[AtLeast0(1)], &[at_least_2.clone(), at_most_1], &none));
+        // A plane on numbers held fixed can't be met by moving the others.
+        let on_x0 = Plane { a: vec![1.0, 0.0], b: 1.0 };
+        assert!(!can_keep(&[0.0, 5.0], &[], std::slice::from_ref(&on_x0), &[true, false]));
+        assert!(can_keep(&[0.0, 5.0], &[], &[on_x0], &none));
+        // With bounds alone (no planes) there is always a way.
+        assert!(can_keep(&[3.0, -1.0], &[AtLeast0(1), AtMost(0, 1)], &[], &none));
     }
 
     #[test]
