@@ -20,7 +20,7 @@ use std::sync::atomic::AtomicBool;
 use chrono::{Local, NaiveDateTime};
 use mo_backup::copy::{self, Outcome};
 use mo_backup::folders::{self, Folder, Mode};
-use mo_backup::pack::{Packed, Packer, pack_names};
+use mo_backup::pack::{Packed, Packer, lists, owners, pack_names};
 use mo_backup::plan::{self, Folders, LeftOut, Level, Plan, Rules, SongInfo, Used};
 use mo_formats::case;
 use mo_formats::paths::{file_name, stem};
@@ -571,6 +571,9 @@ pub fn run(prepared: &Prepared, settings: &Settings, stop: &AtomicBool, progress
     Ran { last, went, kept_older }
 }
 
+/// The most of a run's problems the log names one by one.
+const LOGGED_PROBLEMS: usize = 50;
+
 /// The run itself; `there` gathers the files now safely on the drive, and `kept_older` counts the replaced files kept
 /// in Older versions.
 fn run_on(
@@ -605,7 +608,7 @@ fn run_on(
     };
     let mut record_note = None;
     let mut problems: Vec<String> = Vec::new();
-    // Files gone from your folders that a song's zip couldn't keep, because they were damaged in its zip before.
+    // Files gone from your folders that are damaged in a song's zip.
     let mut damaged = 0usize;
     let mut new_or_changed = 0usize;
     let mut checked = 0usize;
@@ -654,7 +657,32 @@ fn run_on(
         let Ok(packer) = Packer::new(backup) else {
             return LastRun { when, ok: false, line: "The backup drive isn't there".to_owned() };
         };
-        let names = pack_names(&prepared.songs.iter().map(|s| (s.title.as_str(), s.id)).collect::<Vec<_>>());
+        // The zips already there, so no song takes the name of another's (one gone from your folders, say).
+        let on_backup = match lists(backup, stop) {
+            Ok(found) => {
+                for zip in found.iter().filter(|l| l.song.is_none()) {
+                    crate::log::warning(
+                        "Backup",
+                        &format!(
+                            "{} isn't one of the app's song zips, or is damaged: it's left as it is, and no song is \
+                             packed in its place",
+                            zip.zip.display()
+                        ),
+                    );
+                }
+                owners(&found)
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {
+                return LastRun { when, ok: false, line: format!("Stopped · {} checked", thousands(checked)) };
+            }
+            Err(e) => {
+                // Each zip is still only packed over when it's the song's own.
+                crate::log::warning("Backup", &format!("Couldn't read the song zips already on the backup: {e}"));
+                HashMap::new()
+            }
+        };
+        let titles: Vec<(&str, u64)> = prepared.songs.iter().map(|s| (s.title.as_str(), s.id)).collect();
+        let names = pack_names(&titles, &on_backup);
         for (i, (song, name)) in prepared.songs.iter().zip(&names).enumerate() {
             progress(Progress::Packing { done: i, of: prepared.songs.len() });
             let packed = packer.pack_song(&song.files, name, song.id, stop);
@@ -662,19 +690,20 @@ fn run_on(
                 there.extend(song.files.iter().map(|p| case::key(&p.to_string_lossy())));
             }
             match packed {
-                Ok(Packed::Written { damaged: lost, .. }) => {
+                Ok(Packed::Written { damaged: found, .. }) => {
                     new_or_changed += 1;
                     checked += 1;
-                    for inside in &lost {
+                    for d in &found {
+                        let what = match d.kept {
+                            true => "is damaged in the song's zip: it's kept as it was, but may not open",
+                            false => "was on the song's zip's list but isn't in the zip, so there's nothing to keep",
+                        };
                         crate::log::warning(
                             "Backup",
-                            &format!(
-                                "{}: {inside}, gone from your folders, was damaged in the song's zip, so it isn't kept",
-                                song.title
-                            ),
+                            &format!("{}: {}, gone from your folders, {what}", song.title, d.inside),
                         );
                     }
-                    damaged += lost.len();
+                    damaged += found.len();
                 }
                 Ok(Packed::UpToDate { .. }) => checked += 1,
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {
@@ -693,11 +722,18 @@ fn run_on(
     let mut line = format!("{} checked · {} new or changed", thousands(checked), thousands(new_or_changed));
     if !problems.is_empty() {
         line.push_str(&format!(" · {} couldn't go", thousands(problems.len())));
+        // Why, in the app's log.
+        for why in problems.iter().take(LOGGED_PROBLEMS) {
+            crate::log::warning("Backup", &format!("Couldn't go: {why}"));
+        }
+        if problems.len() > LOGGED_PROBLEMS {
+            crate::log::warning("Backup", &format!("…and {} more couldn't go", problems.len() - LOGGED_PROBLEMS));
+        }
     }
     if damaged > 0 {
-        let verb = if damaged == 1 { "was" } else { "were" };
+        let verb = if damaged == 1 { "is" } else { "are" };
         line.push_str(&format!(
-            " · {} gone from your folders {verb} damaged in a song zip, so no longer kept",
+            " · {} gone from your folders {verb} damaged in a song zip",
             crate::songs::plural(damaged, "file")
         ));
     }

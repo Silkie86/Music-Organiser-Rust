@@ -23,3 +23,8 @@ pub mod older;
 pub mod pack;
 pub mod plan;
 pub mod record;
+
+/// The error a job gives back when you stop it.
+pub(crate) fn stopped() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::Interrupted, "Stopped")
+}

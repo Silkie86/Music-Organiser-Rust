@@ -8,7 +8,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::{Duration, SystemTime};
 
 use mo_backup::copy::{Options, run};
-use mo_backup::gone::{Gone, Kept, find};
+use mo_backup::gone::{Gone, Holdings, Kept, find};
 use mo_backup::pack::{Packer, SONGS};
 use mo_backup::plan::place_on_backup;
 use mo_space::size::{FileEntry, files};
@@ -44,9 +44,19 @@ fn back_up(list: &[FileEntry], backup: &Path) {
 
 /// What's gone, with `music` walked for the files in your folders now.
 fn gone_from(backup: &Path, music: &Path) -> Vec<Gone> {
+    gone_with(backup, music, &[], &mut Holdings::default())
+}
+
+/// The same, with folders on the list that aren't there and what the last look read.
+fn gone_with(backup: &Path, music: &Path, missing: &[&Path], holdings: &mut Holdings) -> Vec<Gone> {
     let now: Vec<PathBuf> = files(music, &AtomicBool::new(false)).unwrap().into_iter().map(|f| f.path).collect();
     let present: Vec<&Path> = now.iter().map(PathBuf::as_path).collect();
-    find(backup, &present, &AtomicBool::new(false)).unwrap()
+    find(backup, &present, missing, holdings, &AtomicBool::new(false)).unwrap()
+}
+
+/// What's gone with nothing in your folders now.
+fn gone_without(backup: &Path, stop: bool) -> std::io::Result<Vec<Gone>> {
+    find(backup, &[], &[], &mut Holdings::default(), &AtomicBool::new(stop))
 }
 
 /// Where each gone file was, as its place on the backup (a path in a test folder can be written two ways on Windows,
@@ -98,9 +108,9 @@ fn a_file_still_there_is_never_gone() {
     write(&music.join("Samples/Kick.wav"), &[1u8; 3000], 100);
     back_up(&files(&music, &AtomicBool::new(false)).unwrap(), &backup);
     // Not among the files walked (its folder taken off the list, say), but still there.
-    assert!(find(&backup, &[], &AtomicBool::new(false)).unwrap().is_empty());
+    assert!(gone_without(&backup, false).unwrap().is_empty());
     // Nothing backed up at all, or no backup there: nothing to warn about.
-    assert!(find(&root.join("empty backup"), &[], &AtomicBool::new(false)).unwrap().is_empty());
+    assert!(gone_without(&root.join("empty backup"), false).unwrap().is_empty());
 }
 
 #[test]
@@ -121,7 +131,7 @@ fn a_file_behind_a_link_whose_place_has_gone_is_not_counted() {
 
     // The link's place is gone (a drive unplugged, a folder moved): what was behind it can't be told from gone.
     fs::remove_dir_all(&elsewhere).unwrap();
-    assert!(find(&backup, &[], &AtomicBool::new(false)).unwrap().is_empty());
+    assert!(gone_without(&backup, false).unwrap().is_empty());
 }
 
 #[test]
@@ -160,6 +170,100 @@ fn a_stopped_look_says_so() {
     fs::create_dir_all(&backup).unwrap();
     write(&music.join("Samples/Kick.wav"), &[1u8; 3000], 100);
     back_up(&files(&music, &AtomicBool::new(false)).unwrap(), &backup);
-    let err = find(&backup, &[], &AtomicBool::new(true)).unwrap_err();
+    let err = gone_without(&backup, true).unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::Interrupted);
+}
+
+#[test]
+fn a_folder_on_the_list_that_isnt_there_is_never_gone() {
+    let root = fixtures("backup-gone-not-there");
+    let music = root.join("music");
+    let old = music.join("Old projects");
+    let backup = root.join("backup");
+    fs::create_dir_all(&backup).unwrap();
+    write(&music.join("Samples/Kick.wav"), &[1u8; 3000], 100);
+    write(&old.join("Song.flp"), &[3u8; 500], 100);
+    back_up(&files(&music, &AtomicBool::new(false)).unwrap(), &backup);
+
+    // The folder on the list isn't there now: unplugged, or deleted, it can't be told, and the page says it's not
+    // plugged in.
+    fs::remove_dir_all(&old).unwrap();
+    assert!(gone_with(&backup, &music, &[old.as_path()], &mut Holdings::default()).is_empty());
+    // Once it's off the list, what was in it is gone.
+    assert_eq!(gone_from(&backup, &music).len(), 1);
+}
+
+/// On Windows a drive letter can go to another drive: a drive where a folder on the list was, and none of your files
+/// are now, isn't told about.
+#[cfg(windows)]
+#[test]
+fn a_drive_whose_letter_another_drive_may_have_is_never_gone() {
+    let root = fixtures("backup-gone-swapped");
+    let music = root.join("music");
+    let backup = root.join("backup");
+    fs::create_dir_all(&backup).unwrap();
+    write(&music.join("Samples/Kick.wav"), &[1u8; 3000], 100);
+    back_up(&files(&music, &AtomicBool::new(false)).unwrap(), &backup);
+    fs::remove_dir_all(&music).unwrap();
+    let listed = music.join("Samples");
+    let swapped = find(&backup, &[], &[listed.as_path()], &mut Holdings::default(), &AtomicBool::new(false));
+    assert!(swapped.unwrap().is_empty());
+    assert_eq!(gone_without(&backup, false).unwrap().len(), 1);
+}
+
+#[test]
+fn the_newest_version_kept_is_the_one_named() {
+    let root = fixtures("backup-gone-newest");
+    let music = root.join("music");
+    let backup = root.join("backup");
+    fs::create_dir_all(&backup).unwrap();
+    let save = music.join("Song/Song.flp");
+    let kick = music.join("Samples/Kick.wav");
+    write(&save, &[7u8; 500], 100);
+    let stop = AtomicBool::new(false);
+    let packer = Packer::new(&backup).unwrap();
+    // The older kick in the zip whose name comes first, the newer one in the other.
+    write(&kick, &[1u8; 3000], 5000);
+    packer.pack_song(&[save.clone(), kick.clone()], "A.zip", 1, &stop).unwrap();
+    write(&kick, &[2u8; 4000], 100);
+    packer.pack_song(&[save.clone(), kick.clone()], "B.zip", 2, &stop).unwrap();
+    fs::remove_file(&kick).unwrap();
+    let gone = gone_from(&backup, &music);
+    assert_eq!(gone.len(), 1);
+    assert_eq!(gone[0].size, 4000);
+    let songs = backup.join(SONGS);
+    assert_eq!(gone[0].kept, [Kept::InZip(songs.join("A.zip")), Kept::InZip(songs.join("B.zip"))]);
+}
+
+#[test]
+fn a_look_reads_again_only_what_changed() {
+    let root = fixtures("backup-gone-holdings");
+    let music = root.join("music");
+    let backup = root.join("backup");
+    fs::create_dir_all(&backup).unwrap();
+    write(&music.join("Samples/Kick.wav"), &[1u8; 3000], 100);
+    write(&music.join("Samples/Snare.wav"), &[2u8; 3000], 100);
+    back_up(&files(&music, &AtomicBool::new(false)).unwrap(), &backup);
+    fs::remove_file(music.join("Samples/Kick.wav")).unwrap();
+    let mut holdings = Holdings::default();
+    assert_eq!(gone_with(&backup, &music, &[], &mut holdings).len(), 1);
+    assert_eq!(gone_with(&backup, &music, &[], &mut holdings).len(), 1, "the same, from what was read");
+
+    // A song zip comes along: it's read.
+    let save = music.join("Song/Song.flp");
+    let hat = music.join("Samples/Hat.wav");
+    write(&save, &[7u8; 500], 100);
+    write(&hat, &[3u8; 3000], 100);
+    let stop = AtomicBool::new(false);
+    Packer::new(&backup).unwrap().pack_song(&[save.clone(), hat.clone()], "Song.zip", 1, &stop).unwrap();
+    fs::remove_file(&hat).unwrap();
+    assert_eq!(gone_with(&backup, &music, &[], &mut holdings).len(), 2);
+    // The record changes with another backup: it's read again.
+    write(&music.join("Samples/Clap.wav"), &[4u8; 3000], 100);
+    back_up(&files(&music, &AtomicBool::new(false)).unwrap(), &backup);
+    fs::remove_file(music.join("Samples/Clap.wav")).unwrap();
+    assert_eq!(gone_with(&backup, &music, &[], &mut holdings), gone_from(&backup, &music));
+    assert_eq!(gone_from(&backup, &music).len(), 3);
+    // Another backup is another drive's holdings.
+    assert!(gone_with(&root.join("empty backup"), &music, &[], &mut holdings).is_empty());
 }

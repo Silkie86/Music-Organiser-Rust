@@ -16,12 +16,15 @@
 //!
 //! A file the zip holds that's gone from your folders (deleted, moved, or on a drive that isn't plugged in) stays in
 //! it when the song is packed again (Solomon, 3 Nov 2026: deleted from your music isn't deleted from the backup;
-//! [`crate::gone`] finds them for the page's warning). One that's still in your folders but no longer the song's (a
-//! sample swapped for another, an autosave the level leaves out) goes from the zip: you still have it.
+//! [`crate::gone`] finds them for the page's warning). Its bytes are copied over exactly as they are, never unpacked
+//! and packed again, so one damaged in the zip stays as it was (and is named), never dropped. One that's still in your
+//! folders but no longer the song's (a sample swapped for another, an autosave the level leaves out) goes from the
+//! zip: you still have it. So a zip on the backup is only ever packed over when its list can be read and names this
+//! song: one that can't be read may keep files gone from your folders, and stays as it is.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -29,13 +32,16 @@ use chrono::{Datelike, Local, TimeZone, Timelike};
 use mo_formats::textscan::{safe_file_name, unsafe_in_file_name};
 use mo_space::size::is_sound;
 use rayon::prelude::*;
+use sha2::{Digest, Sha256};
 use zip::result::ZipError;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, DateTime, ZipArchive, ZipWriter};
 
 use crate::copy::{BUFFER, CantStart, Drive, FAT32_LARGEST, PART, put_in_place, read_some, remove_part};
+use crate::gone::{Places, Stamp, stamp};
 use crate::plan::{from_backup, place_on_backup};
-use crate::record::nanos;
+use crate::record::{nanos, safe_rel};
+use crate::stopped;
 
 /// The folder on the backup that holds the song zips.
 pub const SONGS: &str = "Songs";
@@ -55,9 +61,8 @@ pub enum Packed {
         bytes: u64,
         /// The files it kept from the zip before that aren't in your folders now.
         kept: usize,
-        /// Files it would have kept from the zip before but couldn't, because they were damaged in it (their places
-        /// inside the zip).
-        damaged: Vec<String>,
+        /// Files kept from the zip before that are damaged in it.
+        damaged: Vec<Damaged>,
     },
     /// Nothing in it changed since it was made.
     UpToDate {
@@ -66,26 +71,46 @@ pub enum Packed {
     },
 }
 
+/// A kept file found damaged in its song's zip when the song was packed again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Damaged {
+    /// Its place inside the zip.
+    pub inside: String,
+    /// Copied over as it was, as its bytes don't read back right (nothing more is lost, but it may not open). `false`:
+    /// the zip's list named it, but the zip doesn't have it, so there was nothing to keep.
+    pub kept: bool,
+}
+
 /// A zip name for each song, in the order given: its title made safe for every system (and cut short), and a
 /// number for a song whose name another song already has, letter case aside. Songs are named in the order of their
-/// ids, so a song keeps its name when a newer song of the same title comes along.
-pub fn pack_names(songs: &[(&str, u64)]) -> Vec<String> {
+/// ids, so a song keeps its name when a newer song of the same title comes along. A name a zip on the backup has for
+/// another song (one gone from your folders, say) or that isn't one of the app's is never given: `on_backup` is each
+/// zip there, by its name in small letters, and the song it belongs to ([`owners`]).
+pub fn pack_names(songs: &[(&str, u64)], on_backup: &HashMap<String, Option<u64>>) -> Vec<String> {
     let mut order: Vec<usize> = (0..songs.len()).collect();
     order.sort_by_key(|&i| songs[i].1);
     let mut taken: HashSet<String> = HashSet::new();
     let mut names = vec![String::new(); songs.len()];
     for i in order {
-        let base: String = safe_file_name(songs[i].0).chars().take(LONGEST_TITLE).collect();
+        let (title, song) = songs[i];
+        let base: String = safe_file_name(title).chars().take(LONGEST_TITLE).collect();
         let base = base.trim_end_matches([' ', '.']).to_owned();
+        let free = |name: &str| on_backup.get(&name.to_lowercase()).is_none_or(|owner| *owner == Some(song));
         let mut name = format!("{base}.zip");
         let mut n = 2;
-        while !taken.insert(name.to_lowercase()) {
+        while !free(&name) || !taken.insert(name.to_lowercase()) {
             name = format!("{base} ({n}).zip");
             n += 1;
         }
         names[i] = name;
     }
     names
+}
+
+/// Each song zip on the backup by its name in small letters, and the song it belongs to (`None`: it isn't one of the
+/// app's, or is damaged, so whose it is can't be told), for [`pack_names`].
+pub fn owners(lists: &[ZipList]) -> HashMap<String, Option<u64>> {
+    lists.iter().filter_map(|l| Some((l.zip.file_name()?.to_string_lossy().to_lowercase(), l.song))).collect()
 }
 
 /// Whether a zip name is one plain, safe file name (as [`pack_names`] makes them).
@@ -131,13 +156,15 @@ pub struct Packer<'a> {
     backup: &'a Path,
     drive: Drive<'a>,
     ignores_case: bool,
+    /// Asks whether a kept file is back in your folders, each drive once a run.
+    places: Places,
 }
 
 impl<'a> Packer<'a> {
     /// Ready to pack onto `backup`, which must already be there (nothing is created in its place).
     pub fn new(backup: &'a Path) -> Result<Packer<'a>, CantStart> {
         let drive = Drive::find(backup).ok_or_else(|| CantStart::NoBackupFolder(backup.to_path_buf()))?;
-        Ok(Packer { backup, drive, ignores_case: cfg!(any(windows, target_os = "macos")) })
+        Ok(Packer { backup, drive, ignores_case: cfg!(any(windows, target_os = "macos")), places: Places::default() })
     }
 
     fn drive_there(&self) -> io::Result<()> {
@@ -152,7 +179,7 @@ impl<'a> Packer<'a> {
     /// unless the zip there already holds them as they are now. A file the zip there holds that isn't among them stays
     /// in it while it isn't in your folders (deleted, moved, or on a drive that isn't plugged in). A file that can't be
     /// read or placed fails the whole zip (a song pack missing a sample would look whole and not be), and so does a zip
-    /// of that name that belongs to another song; the zip already there stays as it was.
+    /// of that name that belongs to another song, or whose list can't be read; the zip already there stays as it was.
     pub fn pack_song(&self, files: &[PathBuf], name: &str, song: u64, stop: &AtomicBool) -> io::Result<Packed> {
         if !good_name(name) {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("\"{name}\" isn't a zip name")));
@@ -177,7 +204,12 @@ impl<'a> Packer<'a> {
 
         let folder = self.backup.join(SONGS);
         let dest = folder.join(name);
-        let old = if fs::metadata(&dest).is_ok_and(|m| m.is_file()) { read_old(&dest, song)? } else { None };
+        let old = match fs::symlink_metadata(&dest) {
+            Ok(meta) if meta.is_file() => Some(read_old(&dest, song)?),
+            Ok(_) => return Err(io::Error::other(format!("{} isn't a zip, so it's left as it is", dest.display()))),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => return Err(about(&dest, e)),
+        };
         // What the zip before holds that isn't in the list now stays, while it isn't in your folders (the system is
         // only asked about those). One it can't tell about (a drive that isn't plugged in) stays too.
         let mut kept = 0;
@@ -186,8 +218,7 @@ impl<'a> Packer<'a> {
             if seen.contains(&key) {
                 continue;
             }
-            let there = from_backup(inside).is_some_and(|p| fs::metadata(p).is_ok_and(|m| m.is_file()));
-            if !there {
+            if !from_backup(inside).is_some_and(|p| self.places.there(&p)) {
                 seen.insert(key);
                 items.push(Item { source: Source::Kept, inside: inside.clone(), size: *size, time: *time });
                 kept += 1;
@@ -208,10 +239,23 @@ impl<'a> Packer<'a> {
         }
         let total: u64 = items.iter().map(|i| i.size).sum();
         let written = write_zip(&items, song, &dest, &part, stop)
-            .and_then(|damaged| check_zip(&part, &items, &damaged, stop).map(|bytes| (bytes, damaged)))
-            .and_then(|done| self.drive_there().map(|()| done));
-        match written.and_then(|done| put_in_place(&part, &dest).map(|()| done)) {
-            Ok((bytes, damaged)) => Ok(Packed::Written { bytes, kept: kept.saturating_sub(damaged.len()), damaged }),
+            .and_then(|missing| {
+                check_zip(&part, &items, &dest, &missing, stop).map(|(bytes, bad)| (bytes, missing, bad))
+            })
+            .and_then(|done| self.drive_there().map(|()| done))
+            .and_then(|done| put_in_place(&part, &dest).map(|()| done))
+            // Reading the zip before notices Stop as some other error.
+            .map_err(|e| if stop.load(Ordering::Relaxed) { stopped() } else { e });
+        match written {
+            Ok((bytes, missing, bad)) => {
+                let kept = kept.saturating_sub(missing.len());
+                let damaged = bad
+                    .into_iter()
+                    .map(|inside| Damaged { inside, kept: true })
+                    .chain(missing.into_iter().map(|inside| Damaged { inside, kept: false }))
+                    .collect();
+                Ok(Packed::Written { bytes, kept, damaged })
+            }
             Err(e) => {
                 remove_part(&part);
                 if e.kind() == io::ErrorKind::StorageFull && total > FAT32_LARGEST {
@@ -241,8 +285,9 @@ fn list_text<'a>(song: u64, items: impl Iterator<Item = &'a Item>) -> String {
     text
 }
 
-/// One line of a zip's list: a file's size, its time, and its place inside the zip.
-type Line = (u64, i128, String);
+/// One line of a zip's list (or the backup's record): a file's size, its time (nanoseconds since 1970) and its place
+/// inside the zip (or on the backup), with forward slashes.
+pub type Line = (u64, i128, String);
 
 /// The list in the zip already on the backup.
 struct Old {
@@ -251,13 +296,37 @@ struct Old {
     lines: Vec<Line>,
 }
 
-/// The song id and list in a zip, or `None` when it can't be read (or isn't one of the app's).
-fn open_list(zip: &Path) -> Option<(u64, String)> {
-    let mut archive = ZipArchive::new(File::open(zip).ok()?).ok()?;
+/// Why a zip's list can't be had.
+enum Unlisted {
+    /// The zip couldn't be read now (a program holding it, a drive problem): tried again next time.
+    CantRead(io::Error),
+    /// It isn't a whole zip with the app's list in it: damaged, or not one of the app's. Why, in words.
+    NotOurs(&'static str),
+}
+
+/// The song id and list in a zip.
+fn open_list(zip: &Path) -> Result<(u64, String), Unlisted> {
+    let damaged = |e: &io::Error| {
+        matches!(e.kind(), io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput | io::ErrorKind::UnexpectedEof)
+    };
+    let file = File::open(zip).map_err(Unlisted::CantRead)?;
+    let mut archive = ZipArchive::new(file).map_err(|e| match e {
+        ZipError::Io(e) if !damaged(&e) => Unlisted::CantRead(e),
+        _ => Unlisted::NotOurs("isn't a whole zip"),
+    })?;
+    let mut entry = archive.by_name(LIST).map_err(|e| match e {
+        ZipError::Io(e) if !damaged(&e) => Unlisted::CantRead(e),
+        ZipError::FileNotFound => Unlisted::NotOurs("has no list of the app's in it"),
+        _ => Unlisted::NotOurs("has a damaged list"),
+    })?;
     let mut text = String::new();
-    archive.by_name(LIST).ok()?.read_to_string(&mut text).ok()?;
-    let song = text.lines().next()?.strip_prefix("song\t")?.parse().ok()?;
-    Some((song, text))
+    entry.read_to_string(&mut text).map_err(|e| match damaged(&e) {
+        true => Unlisted::NotOurs("has a damaged list"),
+        false => Unlisted::CantRead(e),
+    })?;
+    let song = text.lines().next().and_then(|l| l.strip_prefix("song\t")).and_then(|id| id.parse().ok());
+    let song = song.ok_or(Unlisted::NotOurs("has a list that isn't the app's"))?;
+    Ok((song, text))
 }
 
 /// A file's line in a list; `None` for one that doesn't make sense.
@@ -271,22 +340,31 @@ fn parse_line(line: &str) -> Option<Line> {
 
 /// Whether a place inside a zip is plain names under a drive's folder, as [`inside`] makes them.
 fn inside_ok(inside: &str) -> bool {
-    inside != LIST
-        && inside.split('/').all(|part| {
-            let mut c = Path::new(part).components();
-            matches!((c.next(), c.next()), (Some(Component::Normal(_)), None))
-        })
+    inside != LIST && safe_rel(inside)
 }
 
-/// The list of the zip already at `zip`. `None` when it can't be read: the song is packed again, whole. An error when
-/// it's another song's.
-fn read_old(zip: &Path, song: u64) -> io::Result<Option<Old>> {
-    let Some((owner, text)) = open_list(zip) else { return Ok(None) };
+/// The list of the zip already at `zip`. An error when it's another song's, or its list can't be read: it may keep files
+/// gone from your folders, so it's never packed over.
+fn read_old(zip: &Path, song: u64) -> io::Result<Old> {
+    let (owner, text) = open_list(zip).map_err(|why| match why {
+        Unlisted::CantRead(e) => io::Error::new(
+            e.kind(),
+            format!("{} couldn't be read ({e}), so it's left as it is: it's tried again next time", zip.display()),
+        ),
+        Unlisted::NotOurs(why) => io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{} {why}, so it's left as it is (it may keep files gone from your folders): move it out of the \
+                 Songs folder to pack this song again",
+                zip.display()
+            ),
+        ),
+    })?;
     if owner != song {
         return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{} belongs to another song", zip.display())));
     }
     let lines = text.lines().skip(1).filter_map(parse_line).collect();
-    Ok(Some(Old { text, lines }))
+    Ok(Old { text, lines })
 }
 
 /// Whether the zip already there holds the files as they are now: the same list, or the same files at the same sizes
@@ -321,43 +399,67 @@ fn same(old: &Old, zip: &Path, list: &str, items: &[Item], stop: &AtomicBool) ->
     Ok(true)
 }
 
-/// One song zip on the backup: the zip, and each file its list names.
+/// One song zip on the backup: the zip, the song it belongs to, and each file its list names.
 #[derive(Clone, Debug)]
 pub struct ZipList {
     pub zip: PathBuf,
-    /// Each file's size, its time when packed (nanoseconds since 1970) and its place inside the zip.
-    pub files: Vec<(u64, i128, String)>,
+    /// The song's id; `None` for a zip that isn't one of the app's, or is damaged (it names no files then).
+    pub song: Option<u64>,
+    pub files: Vec<Line>,
+    /// The zip's size and time when its list was read.
+    stamp: Option<Stamp>,
 }
 
-/// The lists of every song zip on the backup, several read at a time on the current rayon pool. A zip that can't be
-/// read is left out (what's in it can't be told); no Songs folder, none.
+/// The lists of every song zip on the backup, in order of the zips, several read at a time on the current rayon pool.
+/// A zip that can't be read now is left out; no Songs folder, none. Stopped, an `Interrupted` error.
 pub fn lists(backup: &Path, stop: &AtomicBool) -> io::Result<Vec<ZipList>> {
+    let lists = lists_reusing(backup, Vec::new(), stop)?;
+    if stop.load(Ordering::Relaxed) {
+        return Err(stopped());
+    }
+    Ok(lists)
+}
+
+/// As [`lists`], reusing each list in `before` whose zip is the same size and time as when it was read. Stopped part
+/// way, it gives the lists it has (each one whole), and the rest are read next time.
+pub(crate) fn lists_reusing(backup: &Path, before: Vec<ZipList>, stop: &AtomicBool) -> io::Result<Vec<ZipList>> {
     let entries = match fs::read_dir(backup.join(SONGS)) {
         Ok(entries) => entries,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e),
     };
-    let zips: Vec<PathBuf> = entries
+    let mut before: HashMap<PathBuf, ZipList> = before.into_iter().map(|l| (l.zip.clone(), l)).collect();
+    let zips: Vec<(PathBuf, Option<Stamp>, Option<ZipList>)> = entries
         .filter_map(Result::ok)
         // Not through links: only the zips really in the Songs folder.
         .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("zip")))
-        .collect();
-    let lists: Vec<ZipList> = zips
-        .into_par_iter()
-        .filter_map(|zip| {
-            if stop.load(Ordering::Relaxed) {
-                return None;
-            }
-            let (_, text) = open_list(&zip)?;
-            let files = text.lines().skip(1).filter_map(parse_line).collect();
-            Some(ZipList { zip, files })
+        .filter(|e| Path::new(&e.file_name()).extension().is_some_and(|x| x.eq_ignore_ascii_case("zip")))
+        .map(|e| {
+            let zip = e.path();
+            let now = e.metadata().ok().and_then(|m| stamp(&m));
+            let had = before.remove(&zip).filter(|l| now.is_some() && l.stamp == now);
+            (zip, now, had)
         })
         .collect();
-    if stop.load(Ordering::Relaxed) {
-        return Err(io::Error::new(io::ErrorKind::Interrupted, "Stopped"));
-    }
+    let mut lists: Vec<ZipList> = zips
+        .into_par_iter()
+        .filter_map(|(zip, now, had)| {
+            if had.is_some() || stop.load(Ordering::Relaxed) {
+                return had;
+            }
+            match open_list(&zip) {
+                Ok((song, text)) => {
+                    let files = text.lines().skip(1).filter_map(parse_line).collect();
+                    Some(ZipList { zip, song: Some(song), files, stamp: now })
+                }
+                // Looked at again each time, as cheap as it is rare.
+                Err(Unlisted::NotOurs(_)) => Some(ZipList { zip, song: None, files: Vec::new(), stamp: None }),
+                // Read again next time.
+                Err(Unlisted::CantRead(_)) => None,
+            }
+        })
+        .collect();
+    lists.sort_by(|a, b| a.zip.cmp(&b.zip));
     Ok(lists)
 }
 
@@ -376,51 +478,90 @@ fn zip_time(time: i128) -> Option<DateTime> {
     .ok()
 }
 
+/// The zip before, read for its kept files' bytes. Stop is noticed between reads (a raw copy can't be told), as an
+/// error that isn't `Interrupted`, which readers try again on: the packer says it stopped.
+struct Stoppable<'a> {
+    file: File,
+    stop: &'a AtomicBool,
+}
+
+impl Read for Stoppable<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.stop.load(Ordering::Relaxed) {
+            return Err(io::Error::other("Stopped"));
+        }
+        self.file.read(buf)
+    }
+}
+
+impl Seek for Stoppable<'_> {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        self.file.seek(pos)
+    }
+}
+
 /// Writes the zip under its temporary name: each file from your folders, each kept one from the zip before (`old`),
-/// then the list. A kept file that's damaged in the zip before (its bytes don't match its check number, say) is left
-/// out, and its place inside is given back; anything else that goes wrong fails the zip.
+/// then the list. A kept file's bytes are copied as they are in the zip before (not unpacked and packed again), so
+/// nothing about them changes, damaged or not. Gives the kept files the zip before's list names but that aren't in it
+/// at all, which are left out of the new list; anything else that goes wrong fails the zip, and the zip before stays.
 fn write_zip(items: &[Item], song: u64, old: &Path, part: &Path, stop: &AtomicBool) -> io::Result<Vec<String>> {
     let file = File::create_new(part)?;
     let mut zip = ZipWriter::new(io::BufWriter::new(file));
     let mut buf = vec![0u8; BUFFER];
     // The zip before, when a file is kept from it.
     let mut before = match items.iter().any(|i| i.source == Source::Kept) {
-        true => Some(ZipArchive::new(File::open(old)?)?),
+        true => Some(ZipArchive::new(Stoppable { file: File::open(old)?, stop })?),
         false => None,
     };
-    let mut damaged: Vec<String> = Vec::new();
+    let mut missing: Vec<String> = Vec::new();
     for item in items {
-        // Sounds (audio, sample-library files, anything big) barely shrink: stored as they are. Projects, presets and
-        // MIDI shrink a lot.
-        let method =
-            if is_sound(&item.inside, item.size) { CompressionMethod::Stored } else { CompressionMethod::Deflated };
-        let mut options = SimpleFileOptions::default().compression_method(method).large_file(item.size >= LARGE);
-        if let Some(when) = zip_time(item.time) {
-            options = options.last_modified_time(when);
-        }
-        zip.start_file(item.inside.as_str(), options)?;
         match &item.source {
-            Source::File(source) => copy_file(source, item, &mut zip, &mut buf, stop)?,
+            Source::File(source) => {
+                // Sounds (audio, sample-library files, anything big) barely shrink: stored as they are. Projects,
+                // presets and MIDI shrink a lot.
+                let method = match is_sound(&item.inside, item.size) {
+                    true => CompressionMethod::Stored,
+                    false => CompressionMethod::Deflated,
+                };
+                let mut options =
+                    SimpleFileOptions::default().compression_method(method).large_file(item.size >= LARGE);
+                if let Some(when) = zip_time(item.time) {
+                    options = options.last_modified_time(when);
+                }
+                zip.start_file(item.inside.as_str(), options)?;
+                copy_file(source, item, &mut zip, &mut buf, stop)?;
+            }
             Source::Kept => {
                 let Some(archive) = before.as_mut() else {
                     return Err(io::Error::other("The zip before couldn't be opened"));
                 };
-                match copy_kept(archive, item, &mut zip, &mut buf, stop) {
-                    Ok(()) => {}
-                    Err(e) if is_damage(&e) => {
-                        zip.abort_file()?;
-                        damaged.push(item.inside.clone());
-                    }
-                    Err(e) => return Err(e),
-                }
+                let Some(index) = archive.index_for_name(&item.inside) else {
+                    missing.push(item.inside.clone());
+                    continue;
+                };
+                // Its place in the zip before can't be found (damage where it starts): it can't be copied, and the
+                // zip isn't packed over without it.
+                let entry = archive.by_index_raw(index).map_err(|e| match e {
+                    ZipError::Io(e) => e,
+                    e => io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "{} is damaged where it keeps {} ({e}), a file gone from your folders, so it's left as it \
+                             is: move it out of the Songs folder to pack this song again",
+                            old.display(),
+                            item.inside
+                        ),
+                    ),
+                })?;
+                zip.raw_copy_file(entry)?;
             }
         }
     }
     zip.start_file(LIST, SimpleFileOptions::default())?;
-    zip.write_all(list_text(song, items.iter().filter(|i| !damaged.contains(&i.inside))).as_bytes())?;
+    zip.write_all(list_text(song, items.iter().filter(|i| !missing.contains(&i.inside))).as_bytes())?;
     let out = zip.finish()?;
     out.into_inner().map_err(io::IntoInnerError::into_error)?.sync_all()?;
-    Ok(damaged)
+    Ok(missing)
 }
 
 /// Copies a file from your folders into the zip, and checks it didn't change while it was read.
@@ -447,80 +588,95 @@ fn copy_file(
     Ok(())
 }
 
-/// Copies a kept file out of the zip before into the new one, reading it to the end so its bytes are checked against
-/// its check number on the way. Damaged there, or not in it after all: an error [`is_damage`] knows.
-fn copy_kept(
-    archive: &mut ZipArchive<File>,
-    item: &Item,
-    zip: &mut ZipWriter<io::BufWriter<File>>,
-    buf: &mut [u8],
-    stop: &AtomicBool,
-) -> io::Result<()> {
-    let damage = |why: String| io::Error::new(io::ErrorKind::InvalidData, format!("{}: {why}", item.inside));
-    let mut entry = match archive.by_name(&item.inside) {
-        Ok(entry) => entry,
-        Err(ZipError::Io(e)) => return Err(e),
-        Err(e) => return Err(damage(e.to_string())),
-    };
-    let mut total: u64 = 0;
-    loop {
-        if stop.load(Ordering::Relaxed) {
-            return Err(io::Error::new(io::ErrorKind::Interrupted, "Stopped"));
-        }
-        let n = match entry.read(buf) {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e),
-        };
-        zip.write_all(&buf[..n])?;
-        total = total.saturating_add(n as u64);
-    }
-    if total != item.size {
-        return Err(damage("not the size its list says".to_owned()));
-    }
-    Ok(())
-}
-
-/// Whether reading a kept file failed because it's damaged in the zip before (rather than the drive failing).
-fn is_damage(e: &io::Error) -> bool {
-    matches!(e.kind(), io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput | io::ErrorKind::UnexpectedEof)
-}
-
 /// Reads every entry of the new zip back to the end (the zip checks each one's bytes against the check number it
-/// stored) and checks each is the size it should be. Gives the zip's size.
-fn check_zip(part: &Path, items: &[Item], damaged: &[String], stop: &AtomicBool) -> io::Result<u64> {
+/// stored) and checks each is the size it should be. A kept file that doesn't read back right is only let through when
+/// its bytes are exactly those in the zip before (`old`): it was damaged there already, and is kept as it was. Gives the
+/// zip's size and those files' places. `missing` is the kept files left out because the zip before doesn't have them.
+fn check_zip(
+    part: &Path,
+    items: &[Item],
+    old: &Path,
+    missing: &[String],
+    stop: &AtomicBool,
+) -> io::Result<(u64, Vec<String>)> {
     let mut archive = ZipArchive::new(File::open(part)?)?;
-    let items: Vec<&Item> = items.iter().filter(|i| !damaged.contains(&i.inside)).collect();
+    let items: Vec<&Item> = items.iter().filter(|i| !missing.contains(&i.inside)).collect();
     if archive.len() != items.len() + 1 {
         return Err(io::Error::other("The zip read back with the wrong number of files"));
     }
     let mut buf = vec![0u8; BUFFER];
+    let mut before: Option<ZipArchive<File>> = None;
+    let mut damaged = Vec::new();
     for item in items {
-        let mut entry = archive.by_name(&item.inside)?;
-        let mut total: u64 = 0;
-        loop {
-            if stop.load(Ordering::Relaxed) {
-                return Err(io::Error::new(io::ErrorKind::Interrupted, "Stopped"));
-            }
-            let n = match entry.read(&mut buf) {
-                Ok(n) => n,
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Err(e) => {
-                    return Err(io::Error::other(format!(
-                        "{} read back wrongly ({e}): the backup drive may be failing",
-                        item.inside
-                    )));
-                }
-            };
-            if n == 0 {
-                break;
-            }
-            total = total.saturating_add(n as u64);
+        let Err(e) = read_back(&mut archive, item, &mut buf, stop) else { continue };
+        if e.kind() == io::ErrorKind::Interrupted {
+            return Err(e);
         }
-        if total != item.size {
-            return Err(io::Error::other(format!("{} read back at the wrong size", item.inside)));
+        if item.source == Source::Kept {
+            let before = match &mut before {
+                Some(before) => before,
+                None => before.insert(ZipArchive::new(File::open(old)?)?),
+            };
+            if raw_bytes_sum(before, &item.inside, &mut buf, stop)?
+                == raw_bytes_sum(&mut archive, &item.inside, &mut buf, stop)?
+            {
+                damaged.push(item.inside.clone());
+                continue;
+            }
+        }
+        return Err(io::Error::other(format!(
+            "{} read back wrongly ({e}): the backup drive may be failing",
+            item.inside
+        )));
+    }
+    Ok((fs::metadata(part)?.len(), damaged))
+}
+
+/// Reads one entry of a zip to the end, which checks its bytes against its check number, and checks its size.
+fn read_back(archive: &mut ZipArchive<File>, item: &Item, buf: &mut [u8], stop: &AtomicBool) -> io::Result<()> {
+    let mut entry = archive.by_name(&item.inside)?;
+    let mut total: u64 = 0;
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return Err(stopped());
+        }
+        match entry.read(buf) {
+            Ok(0) => break,
+            Ok(n) => total = total.saturating_add(n as u64),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
         }
     }
-    fs::metadata(part).map(|m| m.len())
+    if total != item.size {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{total} bytes, not {}", item.size)));
+    }
+    Ok(())
+}
+
+/// The SHA-256 of an entry's bytes as they're stored in a zip (not unpacked), and how many there are.
+fn raw_bytes_sum(
+    archive: &mut ZipArchive<File>,
+    inside: &str,
+    buf: &mut [u8],
+    stop: &AtomicBool,
+) -> io::Result<([u8; 32], u64)> {
+    let index = archive.index_for_name(inside).ok_or_else(|| io::Error::other(format!("{inside} isn't in the zip")))?;
+    let mut entry = archive.by_index_raw(index)?;
+    let mut hash = Sha256::new();
+    let mut total: u64 = 0;
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return Err(stopped());
+        }
+        match entry.read(buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                hash.update(&buf[..n]);
+                total = total.saturating_add(n as u64);
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok((hash.finalize().into(), total))
 }

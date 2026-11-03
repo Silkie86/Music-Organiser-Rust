@@ -41,6 +41,11 @@ pub struct Record {
     changed: bool,
 }
 
+/// Where the record is on a backup.
+pub(crate) fn file_on(backup: &Path) -> PathBuf {
+    backup.join(FOLDER).join(FILE)
+}
+
 /// A time as the record keeps it.
 pub fn nanos(t: SystemTime) -> i128 {
     match t.duration_since(UNIX_EPOCH) {
@@ -53,7 +58,7 @@ impl Record {
     /// Reads the record from a backup. None there yet: an empty record. One that can't be read (a failing drive, a
     /// program holding it): an error, and the run goes on without one and leaves it as it is.
     pub fn load(backup: &Path, ignores_case: bool) -> io::Result<Record> {
-        let bytes = match fs::read(backup.join(FOLDER).join(FILE)) {
+        let bytes = match fs::read(file_on(backup)) {
             Ok(b) => b,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Record::default()),
             Err(e) => return Err(e),
@@ -183,8 +188,9 @@ pub fn place(backup: &Path, rel: &str) -> Option<PathBuf> {
     safe_rel(rel).then(|| rel.split('/').fold(backup.to_path_buf(), |p, part| p.join(part)))
 }
 
-/// Only plain names, so a place never leads outside the backup ("..", a drive, a leading slash).
-fn safe_rel(rel: &str) -> bool {
+/// Only plain names, so a place never leads outside the backup ("..", a drive, a leading slash). The one check for
+/// places written in the backup's own files: its record, and the lists in song zips.
+pub(crate) fn safe_rel(rel: &str) -> bool {
     !rel.is_empty()
         && rel.split('/').all(|part| {
             !part.is_empty() && {

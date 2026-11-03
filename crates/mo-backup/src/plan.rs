@@ -448,16 +448,11 @@ fn file_name(path: &str) -> &str {
 /// the backup's record names it, relative and with forward slashes (`I/Fl Studio Data/x.flp` came from
 /// `I:\Fl Studio Data\x.flp`). `None` for a place no file of yours would have (a damaged line, say).
 pub fn from_backup(rel: &str) -> Option<PathBuf> {
-    use std::path::Component;
-    let mut parts: Vec<&str> = rel.split('/').collect();
     // Only plain names, so the path can't climb or jump anywhere.
-    let plain = |p: &&str| {
-        let mut c = Path::new(p).components();
-        matches!((c.next(), c.next()), (Some(Component::Normal(_)), None))
-    };
-    if parts.is_empty() || !parts.iter().all(plain) {
+    if !crate::record::safe_rel(rel) {
         return None;
     }
+    let mut parts: Vec<&str> = rel.split('/').collect();
     let mut out = if cfg!(windows) {
         let first = parts.remove(0);
         match first.as_bytes() {

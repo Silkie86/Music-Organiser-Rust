@@ -10,16 +10,17 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
 use chrono::{Local, NaiveDateTime, TimeZone};
-use mo_backup::gone::{self, Gone, Kept};
+use mo_backup::gone::{self, Gone, Holdings, Kept};
 use mo_formats::paths::file_name;
-use mo_library::scan::{is_autosave_dir, is_autosave_file};
+use mo_library::scan::{daw_of, is_autosave_dir, is_autosave_file};
 use mo_space::size::size_text;
 
 use crate::backup::Prepared;
 use crate::songs::{plural, thousands};
 
-/// The files the backup at `backup` keeps that are gone from the folders this plan walked. Reads the backup drive.
-pub fn find(prepared: &Prepared, backup: &Path, stop: &AtomicBool) -> io::Result<Vec<Gone>> {
+/// The files the backup at `backup` keeps that are gone from the folders this plan walked. Reads the backup drive,
+/// only what changed since the look that filled `holdings` (keep one between looks).
+pub fn find(prepared: &Prepared, backup: &Path, holdings: &mut Holdings, stop: &AtomicBool) -> io::Result<Vec<Gone>> {
     let present: Vec<&Path> = prepared
         .plan
         .copy
@@ -27,15 +28,18 @@ pub fn find(prepared: &Prepared, backup: &Path, stop: &AtomicBool) -> io::Result
         .map(|f| f.path.as_path())
         .chain(prepared.plan.left_out.iter().map(|s| s.file.path.as_path()))
         .collect();
-    gone::find(backup, &present, stop)
+    let missing: Vec<&Path> = prepared.missing.iter().map(PathBuf::as_path).collect();
+    gone::find(backup, &present, &missing, holdings, stop)
 }
 
-/// Whether one of your DAWs made the file, and clears such files away itself: an autosave, or a file straight in an
-/// autosave folder (FL Studio's Backup, Ableton's Backup, Studio One's History…). Only the folder it's in counts: a
-/// folder of yours called "Backups" further up doesn't make your songs in it autosaves.
+/// Whether one of your DAWs made the file, and clears such files away itself: a project file that's an autosave, or
+/// one straight in an autosave folder (FL Studio's Backup, Bitwig's auto-backups, Studio One's History…). Only project
+/// files count, as on the Space page: a sample or a bounce kept in a "Backup" folder is yours. And only the folder it's
+/// in: a folder of yours called "Backups" further up doesn't make your songs in it autosaves.
 pub fn daw_made(path: &Path) -> bool {
     let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    is_autosave_file(&name(path)) || path.parent().is_some_and(|folder| is_autosave_dir(&name(folder)))
+    daw_of(&path.to_string_lossy()).is_some()
+        && (is_autosave_file(&name(path)) || path.parent().is_some_and(|folder| is_autosave_dir(&name(folder))))
 }
 
 /// One gone file's line in the list.
@@ -165,6 +169,10 @@ mod tests {
         // Only the folder a file is in counts: not one further up, and not the file's own name.
         assert!(!daw_made(Path::new("/m/Backups/Old songs/Song.flp")));
         assert!(!daw_made(Path::new("/m/Songs/backup")));
+        // Only project files: audio, stems or anything else kept in a "Backup" folder is yours.
+        assert!(!daw_made(Path::new("/m/Samples/Backup/Kick 01.wav")));
+        assert!(!daw_made(Path::new("/m/Stems/History/Bass.flac")));
+        assert!(daw_made(Path::new("/m/Song/auto-backups/Song (2).bwproject")));
     }
 
     #[test]

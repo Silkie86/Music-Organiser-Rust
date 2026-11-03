@@ -1,8 +1,9 @@
 //! Fills the Backup page from `mo_app::backup` and answers its buttons. Everything slow (walking the folders,
 //! reading the library, the backup itself, reading and removing older versions) runs on low-priority threads (rule
 //! 21); the window only ever shows what they send back (rule 12). Working out what goes is redone after every change,
-//! newest ask first, and then the files the backup keeps that are gone from your folders are looked for; the drive's
-//! older versions are read again when the drive changes and after a run that kept some, or a removal.
+//! newest ask first, and then the files the backup keeps that are gone from your folders are looked for (not while a
+//! backup runs: it's writing what's looked at); the drive's older versions are read again when the drive changes and
+//! after a run that kept some, or a removal.
 
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
@@ -20,6 +21,7 @@ use mo_app::backup_gone::{self, Warning};
 use mo_app::backup_older::{self, KeptState};
 use mo_app::log;
 use mo_backup::folders::Mode;
+use mo_backup::gone::Holdings;
 use mo_backup::older::{self, Kept, Run};
 use mo_library::Library;
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel, Weak};
@@ -42,7 +44,10 @@ struct Section {
     /// Counts the asks, so a plan made for an older folder list is dropped.
     asked: u64,
     running: Option<Arc<AtomicBool>>,
-    /// Stops the plan being worked out when a newer one is asked for.
+    /// Set while a backup runs, so the planner doesn't look for gone files on the drive it's writing.
+    drive_busy: Arc<AtomicBool>,
+    /// Stops the plan being worked out (and the look for gone files after it) when a newer one is asked for, or a
+    /// backup starts.
     plan_stop: Arc<AtomicBool>,
     /// The page has been shown, so its folders are walked (not before: nobody may open it).
     shown: bool,
@@ -81,6 +86,7 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed) {
     let settings = Settings::load(&settings_file);
     let backed_file = mo_app::paths::data_dir().join(backup::SONGS_FILE);
     let backed = BackedUp::load(&backed_file);
+    let drive_busy = Arc::new(AtomicBool::new(false));
     SECTION.with(|s| {
         let mut s = s.borrow_mut();
         s.settings = settings;
@@ -89,8 +95,11 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed) {
         s.backed_file = backed_file;
         s.library = library;
         s.feed = feed;
+        s.drive_busy = drive_busy.clone();
     });
     let weak = app.as_weak();
+    // What the backup holds as last read, so each look only reads again what changed on the drive.
+    let mut holdings = Holdings::default();
     let planner = Newest::start("Backup plan", move |(asked, settings, library, stop): Job| {
         let room = settings.drive.as_ref().and_then(|d| {
             mo_space::app_files::drive_space(d).map(|r| (d.clone(), DriveRoom { free: r.free, total: r.total }))
@@ -134,9 +143,13 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed) {
             show(&plan_weak);
         });
         // Then the files the backup keeps that are gone from the folders just walked: slower (the backup's record and
-        // every song zip are read), so the plan is shown first.
+        // every song zip are read), so the plan is shown first. Not while a backup is writing them: the plan asked for
+        // after it looks.
         let (Some(prepared), Some(drive)) = (ready, settings.drive.clone()) else { return };
-        let warning = match background::on_pool(|| backup_gone::find(&prepared, &drive, &stop)) {
+        if drive_busy.load(Ordering::Relaxed) {
+            return;
+        }
+        let warning = match background::on_pool(|| backup_gone::find(&prepared, &drive, &mut holdings, &stop)) {
             Ok(gone) => backup_gone::warning(&gone),
             // A newer plan is on its way, and looks again.
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => return,
@@ -393,8 +406,11 @@ fn start_run(weak: &Weak<AppWindow>) {
         let prepared = s.prepared.clone()?;
         let stop = Arc::new(AtomicBool::new(false));
         s.running = Some(stop.clone());
-        // The run changes the drive: a question about its older versions would be out of date.
+        // The run changes the drive: a question about its older versions would be out of date, and a look for gone
+        // files still going stops.
         s.older_ask = None;
+        s.drive_busy.store(true, Ordering::Relaxed);
+        s.plan_stop.store(true, Ordering::Relaxed);
         Some((prepared, s.settings.clone(), stop))
     }) else {
         return;
@@ -424,6 +440,7 @@ fn start_run(weak: &Weak<AppWindow>) {
             let (saved, backed_saved, reread) = SECTION.with(|s| {
                 let mut s = s.borrow_mut();
                 s.running = None;
+                s.drive_busy.store(false, Ordering::Relaxed);
                 // The older versions as read are still right unless the run kept more, or they weren't read from
                 // this drive (or couldn't be).
                 let read = matches!(&s.kept, Some((d, Ok(_))) if Some(d) == s.settings.drive.as_ref());
@@ -456,8 +473,14 @@ fn start_run(weak: &Weak<AppWindow>) {
     });
     if let Err(e) = started {
         log::error("Backup", &format!("Couldn't start the backup: {e}"));
-        SECTION.with(|s| s.borrow_mut().running = None);
+        SECTION.with(|s| {
+            let mut s = s.borrow_mut();
+            s.running = None;
+            s.drive_busy.store(false, Ordering::Relaxed);
+        });
         set_busy(weak, "", 0.0);
+        // The look for gone files that was stopped is asked for again.
+        replan();
         show(weak);
     }
 }
@@ -606,17 +629,20 @@ pub fn show_older(app: &AppWindow, card: OlderCard) {
 }
 
 /// Keeps the files gone from your folders that were found on a drive (or none), and puts them on the page when that's
-/// the drive picked now. Only when they change, as the list can be long.
+/// the drive picked now. Only when they change, as the list can be long (and a new list goes back to its top).
 fn put_gone(weak: &Weak<AppWindow>, gone: Option<(PathBuf, Warning)>) {
     let shown = SECTION.with(|s| {
         let mut s = s.borrow_mut();
+        if s.gone == gone {
+            return None;
+        }
         s.gone = gone;
-        match (&s.gone, &s.settings.drive) {
+        Some(match (&s.gone, &s.settings.drive) {
             (Some((d, w)), Some(drive)) if d == drive => w.clone(),
             _ => Warning::default(),
-        }
+        })
     });
-    if let Some(app) = weak.upgrade() {
+    if let (Some(shown), Some(app)) = (shown, weak.upgrade()) {
         show_gone(&app, &shown);
     }
 }
