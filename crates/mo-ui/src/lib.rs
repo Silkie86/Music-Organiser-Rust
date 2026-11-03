@@ -39,6 +39,11 @@ thread_local! {
     static KEYS: RefCell<Option<Shortcuts>> = const { RefCell::new(None) };
 }
 
+/// The place on show, safe to read from any thread.
+pub fn place() -> Option<Place> {
+    Place::from_index(PAGE.load(Ordering::Relaxed))
+}
+
 /// The name of the place on show, safe to read from any thread.
 pub fn page_name() -> &'static str {
     Place::from_index(PAGE.load(Ordering::Relaxed)).map_or("?", Place::name)

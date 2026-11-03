@@ -25,7 +25,7 @@ use mo_sounds::galaxy::{self, Placing, Step};
 use mo_sounds::{SoundsDb, StarPoint};
 use slint::{ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, Timer, TimerMode, VecModel};
 
-use super::sky::Sky;
+use super::sky::{Shine, Sky};
 use super::{FEED, HERE, PAGE, pick, play_picked, strings};
 use crate::gpu;
 use crate::{AppWindow, GalaxyLabel, SoundsData, SweptLine, Theme, TrailDot};
@@ -86,8 +86,9 @@ pub(super) struct Galaxy {
     asked: u64,
     /// The shown stars on a grid over the map, to find the one under the mouse and count the ones on the view.
     grid: Option<Arc<Grid>>,
-    /// The stars as the graphics card reads them, kept to send again to a new card.
-    packed: Option<Arc<Vec<u8>>>,
+    /// The stars as the graphics card reads them, kept to send again to a new card, with how many at their end are lit
+    /// by the measure (`galaxy_look::pack`).
+    packed: Option<Arc<(Vec<u8>, u32)>>,
     /// What the grid (and the card's stars) were last asked for, how many times they've been asked, and which ask
     /// the ones in hand are from.
     set_for: Option<SetKey>,
@@ -146,24 +147,29 @@ impl Default for Galaxy {
     }
 }
 
-/// How lit each star is (see [`galaxy_look::light`]) for one list of sounds and one Light by.
+/// How lit each star is (see [`galaxy_look::light`]) for one list of sounds and one Light by, and for the stars shown
+/// when it came: how much of them has the measure and their order by it.
 #[derive(Clone)]
 struct Lit {
     list: Arc<list::SoundList>,
     by: LightBy,
     light: Arc<Vec<f32>>,
+    /// How much of what's on show has the measure (`galaxy_look::lit_share`).
+    share: f32,
+    /// The shown stars with the measure, least lit first (`galaxy_look::lit_order`).
+    order: Arc<Vec<u32>>,
 }
 
 impl Lit {
-    fn of(&self, list: &Arc<list::SoundList>, by: LightBy) -> Option<Arc<Vec<f32>>> {
-        (Arc::ptr_eq(&self.list, list) && self.by == by).then(|| self.light.clone())
+    fn of(&self, list: &Arc<list::SoundList>, by: LightBy) -> bool {
+        Arc::ptr_eq(&self.list, list) && self.by == by
     }
 }
 
 impl Galaxy {
     /// The kept light for the page's list and the Light by chosen now, if it's been worked out.
-    fn light_for(&self, list: &Arc<list::SoundList>) -> Option<Arc<Vec<f32>>> {
-        self.light.as_ref()?.of(list, self.light_by)
+    fn light_for(&self, list: &Arc<list::SoundList>) -> Option<&Lit> {
+        self.light.as_ref().filter(|l| l.of(list, self.light_by))
     }
 }
 
@@ -203,26 +209,31 @@ struct SetAsk {
 struct Packed {
     version: u64,
     grid: Grid,
-    bytes: Option<Vec<u8>>,
+    /// The stars for the card, and how many at their end are lit by the measure.
+    bytes: Option<(Vec<u8>, u32)>,
     light: Lit,
 }
 
 impl SetAsk {
     fn work(self) -> Packed {
         let k = &self.key;
-        let (grid, (light, bytes)) = background::on_pool(|| {
+        // All of it on the app's low-priority pool, spread over its cores (rule 21).
+        let (grid, (light, share, order, bytes)) = background::on_pool(|| {
             rayon::join(
                 || Grid::new(&k.stars, &k.shown),
                 || {
                     // Ranked only when the list or Light by has changed; a new search reuses it.
                     let light = k.light.clone().unwrap_or_else(|| Arc::new(galaxy_look::light(&k.list, k.light_by)));
-                    let bytes =
-                        self.for_card.then(|| galaxy_look::pack(&k.stars, &k.colours, &k.palette, &k.shown, &light));
-                    (light, bytes)
+                    let share = galaxy_look::lit_share(&k.stars, &k.shown, &light);
+                    let order = Arc::new(galaxy_look::lit_order(&k.stars, &k.shown, &light));
+                    let bytes = self
+                        .for_card
+                        .then(|| galaxy_look::pack(&k.stars, &k.colours, &k.palette, &k.shown, &light, &order));
+                    (light, share, order, bytes)
                 },
             )
         });
-        let light = Lit { list: k.list.clone(), by: k.light_by, light };
+        let light = Lit { list: k.list.clone(), by: k.light_by, light, share, order };
         Packed { version: self.version, grid, bytes, light }
     }
 }
@@ -246,6 +257,110 @@ thread_local! {
     /// Moves a glide on a frame at a time, and when it last did.
     static FLIGHT: Timer = Timer::default();
     static LAST_FRAME: RefCell<Option<Instant>> = const { RefCell::new(None) };
+}
+
+/// How often the picture is drawn again while the stars twinkle (how much they do, and the rules for when, are
+/// `galaxy_look`'s: `TWINKLE`, `twinkle_amount`, `twinkles` and `beat`).
+const TWINKLE_EVERY: Duration = Duration::from_millis(80);
+/// The twinkle stops this long after the galaxy was last drawn for anything else (a move, a filter) or the mouse last
+/// moved over it, so a window left open on the galaxy doesn't keep the graphics card busy all day.
+const TWINKLE_FOR: Duration = Duration::from_secs(30);
+
+thread_local! {
+    /// Draws the galaxy again now and then while its stars twinkle.
+    static TWINKLING: Timer = Timer::default();
+    /// The twinkle's clock.
+    static TWINKLE_CLOCK: Instant = Instant::now();
+    /// Whether the last picture drawn on the card had stars drawn as stars, the ones that twinkle
+    /// (`galaxy_look::twinkles`: far out with nothing lit, none do).
+    static TWINKLE_SHOWS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Until when the stars twinkle (see [`TWINKLE_FOR`]).
+    static TWINKLE_UNTIL: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+    /// Since when the view has been still (no button held, no glide), for the twinkle to come back in.
+    static STILL_SINCE: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// The graphics card to draw the galaxy on, when there's one it can draw on: not for the screenshots (drawn on the
+/// processor), and not the card that refused to (`CARD_FAILED`).
+fn usable_card() -> Option<(gpu::Gpu, u64)> {
+    let failed = CARD_FAILED.with(std::cell::Cell::get);
+    gpu::current().filter(|(_, generation)| !HERE.with(|h| *h.borrow()) && failed != Some(*generation))
+}
+
+/// How many shown stars are on the view, as the grid counts them (all of them until the grid comes).
+fn in_view(g: &Galaxy) -> usize {
+    match &g.grid {
+        Some(grid) => {
+            let (l, t, r, b) = galaxy_look::on_view(&g.view);
+            grid.count_in(l, t, r, b)
+        }
+        None => g.count,
+    }
+}
+
+/// How much the stars twinkle now: not at all while a button is held or the view glides (`still` is false), so a
+/// sweep or a glide never has them flicker; once it's still, the twinkle comes back in (`galaxy_look::twinkle_amount`).
+fn twinkle_now(still: bool) -> f32 {
+    STILL_SINCE.with(|since| {
+        if !still {
+            since.set(None);
+            return 0.0;
+        }
+        let from = since.get().unwrap_or_else(Instant::now);
+        since.set(Some(from));
+        galaxy_look::twinkle_amount(Some(from.elapsed()))
+    })
+}
+
+/// Keeps the stars twinkling on the graphics card while the galaxy is on show and its picture has stars drawn as stars.
+/// Each beat draws only the stars again (the card keeps the painted picture under them). While a button is held or the
+/// view glides the beat leaves the picture as it is (a glide draws it anyway), and once the view is still the twinkle
+/// comes back in from nothing. Once the galaxy is off show (another page, the window minimised), nothing in its picture
+/// twinkles, or [`TWINKLE_FOR`] after it was last drawn for anything else or the mouse last moved over it, the beat
+/// stops (`galaxy_look::beat`).
+fn keep_twinkling(app: &AppWindow) {
+    TWINKLE_UNTIL.with(|u| u.set(Some(Instant::now() + TWINKLE_FOR)));
+    if TWINKLING.with(Timer::running) {
+        return;
+    }
+    let weak = app.as_weak();
+    TWINKLING.with(|t| {
+        t.start(TimerMode::Repeated, TWINKLE_EVERY, move || {
+            let Some(app) = weak.upgrade() else { return };
+            // On show: the Sounds page in front, its galaxy with stars, the window not minimised, and drawn lately.
+            let lately = TWINKLE_UNTIL.with(std::cell::Cell::get).is_some_and(|u| Instant::now() < u);
+            let in_front = crate::place() == Some(mo_app::places::Place::Sounds) && !app.window().is_minimized();
+            let (on_show, moving) = PAGE.with(|p| {
+                let p = p.borrow();
+                let g = &p.galaxy;
+                (
+                    p.view == super::GALAXY && g.stars.is_some() && in_front && lately,
+                    g.view.pressed() || g.view.flying(),
+                )
+            });
+            let card = usable_card();
+            let twinkles = TWINKLE_SHOWS.with(std::cell::Cell::get);
+            match galaxy_look::beat(on_show && card.is_some(), twinkles, moving) {
+                galaxy_look::Beat::Stop => {
+                    TWINKLING.with(Timer::stop);
+                    STILL_SINCE.with(|s| s.set(None));
+                    return;
+                }
+                // The stars hold still; once the view is still again the twinkle comes back in from nothing.
+                galaxy_look::Beat::Hold => {
+                    STILL_SINCE.with(|s| s.set(None));
+                    return;
+                }
+                galaxy_look::Beat::Draw => {}
+            }
+            let Some((gpu, generation)) = card else { return };
+            let _doing = crate::watchdog::doing("Galaxy: twinkle");
+            if let Err(e) = draw_on_card(&app, &gpu, generation, false) {
+                log::warning("Sounds", &format!("The graphics card couldn't draw the galaxy's twinkle: {e}"));
+                TWINKLING.with(Timer::stop);
+            }
+        });
+    });
 }
 
 /// Starts moving a glide on, if it isn't already.
@@ -859,6 +974,10 @@ fn hover(app: &AppWindow) {
         data.set_galaxy_hover_shown(false);
         return;
     }
+    // Someone's looking: the stars keep twinkling while the mouse moves over them (when the card drew some as stars).
+    if TWINKLE_SHOWS.with(std::cell::Cell::get) && PAGE.with(|p| p.borrow().galaxy.inside) {
+        keep_twinkling(app);
+    }
     let found = PAGE.with(|p| {
         let p = p.borrow();
         let g = &p.galaxy;
@@ -907,6 +1026,7 @@ pub(super) fn forget(g: &mut Galaxy) {
     g.view.most = most_zoom_for(0);
     g.grid = None;
     g.packed = None;
+    g.light = None;
     // The old library's stars on the card aren't drawn over the new one's.
     CARD.with(|c| {
         if let Some(on) = c.borrow_mut().as_mut() {
@@ -915,7 +1035,9 @@ pub(super) fn forget(g: &mut Galaxy) {
         }
     });
     g.set_for = None;
-    // Stars still being packed for the old library are too old to use.
+    // Stars still being packed for the old library are too old to use, and so is a mini-map still being drawn of it
+    // (it's shown only if it's of the newest stars, `set_got`).
+    g.set_asked += 1;
     g.set_got = g.set_asked;
     g.drawn = None;
     // A picture of the old library still on its way is too old to show.
@@ -1116,13 +1238,17 @@ pub(super) fn draw(app: &AppWindow) {
     let types = app.global::<Theme>().get_sound_types();
     let mut palette: Vec<[u8; 3]> = types.iter().map(|c| [c.red(), c.green(), c.blue()]).collect();
     palette.push([110, 110, 110]);
-    let failed = CARD_FAILED.with(std::cell::Cell::get);
-    let card = gpu::current().filter(|(_, generation)| !HERE.with(|h| *h.borrow()) && failed != Some(*generation));
+    let card = usable_card();
     pack(app, &palette, card.is_some());
     if let Some((gpu, generation)) = &card {
         let (gpu, generation) = (gpu, *generation);
-        match draw_on_card(app, gpu, generation) {
-            Ok(true) => return,
+        match draw_on_card(app, gpu, generation, true) {
+            Ok(true) => {
+                if TWINKLE_SHOWS.with(std::cell::Cell::get) {
+                    keep_twinkling(app);
+                }
+                return;
+            }
             // The stars aren't on the card yet: the picture on show stays until they are.
             Ok(false) => {
                 place_picture(app);
@@ -1136,6 +1262,8 @@ pub(super) fn draw(app: &AppWindow) {
                 );
                 CARD_FAILED.with(|f| f.set(Some(generation)));
                 CARD.with(|c| *c.borrow_mut() = None);
+                // The processor's picture doesn't twinkle.
+                TWINKLE_SHOWS.with(|t| t.set(false));
             }
         }
     }
@@ -1151,11 +1279,27 @@ pub(super) fn draw(app: &AppWindow) {
         }
         // Until the light for a new list or Light by has been worked out, the stars are drawn alike; the packing
         // that works it out asks for the picture again.
-        let light = g.light_for(&list).unwrap_or_default();
+        let lit = g.light_for(&list);
+        let light = lit.map(|l| l.light.clone()).unwrap_or_default();
+        let order = lit.map(|l| l.order.clone()).unwrap_or_default();
+        let in_view = in_view(g);
         g.asked += 1;
         let moving = g.view.flying() || g.view.panning();
         let scale = if moving { g.scale.min(MOVING_SCALE) } else { g.scale };
-        Some(Picture { id: g.asked, stars, count: g.count, colours, shown, light, palette, view: g.view, scale })
+        Some(Picture {
+            id: g.asked,
+            stars,
+            count: g.count,
+            colours,
+            shown,
+            light,
+            order,
+            palette,
+            view: g.view,
+            scale,
+            in_view,
+            glows: true,
+        })
     });
     let Some(ask) = ask else {
         show_picked(app);
@@ -1202,7 +1346,7 @@ fn pack(app: &AppWindow, palette: &[[u8; 3]], for_card: bool) {
         let shown = p.shown.clone();
         let list = p.list.clone();
         let g = &mut p.galaxy;
-        let light = g.light_for(&list);
+        let light = g.light_for(&list).map(|l| l.light.clone());
         let key = SetKey {
             stars: g.stars.clone()?,
             colours: g.colours.clone()?,
@@ -1287,10 +1431,16 @@ fn draw_mini(app: &AppWindow) {
             count: g.count,
             colours: key.colours.clone(),
             shown: key.shown.clone(),
-            light: g.light_for(&p.list).unwrap_or_default(),
+            // It only shows the map's shape, and where the view is on it: plain dots, all alike (Light by would dim
+            // nearly all of them, the unlit ones).
+            light: Arc::default(),
+            order: Arc::default(),
             palette,
             view: mini_view(),
             scale,
+            // The whole map is on show.
+            in_view: key.shown.len(),
+            glows: false,
         })
     });
     let Some(ask) = ask else { return };
@@ -1374,6 +1524,7 @@ fn show_mini(app: &AppWindow) {
 /// card or the processor, when the galaxy next is).
 pub(super) fn card_gone(app: &AppWindow) {
     CARD.with(|c| *c.borrow_mut() = None);
+    TWINKLE_SHOWS.with(|t| t.set(false));
     let weak = app.as_weak();
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(app) = weak.upgrade() {
@@ -1388,20 +1539,25 @@ pub(super) fn card_gone(app: &AppWindow) {
     });
 }
 
-/// Draws the galaxy on the card, now: `false` when its stars aren't there yet.
-fn draw_on_card(app: &AppWindow, gpu: &gpu::Gpu, generation: u64) -> Result<bool, String> {
+/// Draws the galaxy on the card, now: `false` when its stars aren't there yet. `whole`: what's over the picture is
+/// placed again too (not for a twinkle, where only the stars' brightness changes).
+fn draw_on_card(app: &AppWindow, gpu: &gpu::Gpu, generation: u64, whole: bool) -> Result<bool, String> {
     let ask = PAGE.with(|p| {
         let g = &p.borrow().galaxy;
-        let in_view = match &g.grid {
-            Some(grid) => {
-                let (l, t, r, b) = galaxy_look::on_view(&g.view);
-                grid.count_in(l, t, r, b)
-            }
-            None => g.count,
+        // Lit as the stars in hand were packed, even while newer ones (another Light by, say) are on their way: the
+        // stars on the card are always drawn the way they were lit.
+        let share = g.light.as_ref().map_or(0.0, |l| l.share);
+        let shine = Shine {
+            light_on: share > 0.0,
+            // Wrapped every hour, so after days open it still has the precision a smooth twinkle needs.
+            time: (TWINKLE_CLOCK.with(Instant::elapsed).as_secs_f64() % 3600.0) as f32,
+            twinkle: twinkle_now(!g.view.pressed() && !g.view.flying()),
         };
-        (g.view, g.scale, galaxy_look::look(&g.view, in_view), g.packed.clone(), g.set_got)
+        (g.view, g.scale, galaxy_look::look(&g.view, in_view(g), share), shine, g.packed.clone(), g.set_got)
     });
-    let (view, scale, look, packed, version) = ask;
+    let (view, scale, look, shine, packed, version) = ask;
+    let lit = packed.as_ref().map_or(0, |p| p.1);
+    TWINKLE_SHOWS.with(|t| t.set(galaxy_look::twinkles(&look, shine.light_on, lit)));
     if view.width < 1.0 || view.height < 1.0 {
         return Ok(false);
     }
@@ -1418,17 +1574,18 @@ fn draw_on_card(app: &AppWindow, gpu: &gpu::Gpu, generation: u64) -> Result<bool
         }
         let Some(on) = c.as_mut() else { return Ok(None) };
         if on.stars != version
-            && let Some(bytes) = &packed
+            && let Some(packed) = &packed
         {
             let _doing = crate::watchdog::doing("Galaxy: upload the stars to the GPU");
-            gpu::checked(&gpu.device, || on.sky.set_stars(bytes))?;
+            let (bytes, lit) = &**packed;
+            gpu::checked(&gpu.device, || on.sky.set_stars(bytes, *lit))?;
             on.stars = version;
         }
         if !on.sky.has_stars() {
             return Ok(None);
         }
         let _doing = crate::watchdog::doing("Galaxy: draw on the GPU");
-        gpu::checked(&gpu.device, || on.sky.draw(&view, scale, &look, background)).map(Some)
+        gpu::checked(&gpu.device, || on.sky.draw(&view, scale, &look, shine, background)).map(Some)
     })?;
     let Some(texture) = texture else { return Ok(false) };
     let _doing = crate::watchdog::doing("Galaxy: show the GPU picture (property updates)");
@@ -1441,8 +1598,10 @@ fn draw_on_card(app: &AppWindow, gpu: &gpu::Gpu, generation: u64) -> Result<bool
         g.drawn = Some(view);
     });
     app.global::<SoundsData>().set_galaxy_image(image);
-    place_picture(app);
-    show_picked(app);
+    if whole {
+        place_picture(app);
+        show_picked(app);
+    }
     Ok(true)
 }
 
