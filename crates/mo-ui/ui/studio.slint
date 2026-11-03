@@ -251,10 +251,12 @@ export component Caps inherits Text {
     letter-spacing: 0.8px;
 }
 
-// The shaded, top-lit button. `main` is the page's main action, in the accent colour.
+// The shaded, top-lit button. `main` is the page's main action, in the accent colour; `danger` says in red that it
+// removes something for good (only ever the yes of a question that said what goes).
 export component StudioButton inherits Rectangle {
     in property <string> text;
     in property <bool> main: false;
+    in property <bool> danger: false;
     in property <bool> enabled: true;
     // The tooltip and the key from the shortcut list, if it has one.
     in property <string> tip;
@@ -286,7 +288,7 @@ export component StudioButton inherits Rectangle {
         // A button with an icon shows only the icon; its words go in `tip`.
         visible: root.icon == "";
         text: root.text;
-        color: !root.enabled ? Theme.faint : root.main ? Theme.accent-text : Theme.text;
+        color: !root.enabled ? Theme.faint : root.main ? Theme.accent-text : root.danger ? Theme.missing : Theme.text;
         font-size: Type.body;
         font-weight: 500;
         vertical-alignment: center;
@@ -1295,6 +1297,27 @@ export component MoreButton inherits StudioButton {
             items: root.items;
             chosen(id) => {
                 more-menu.close();
+                root.chosen(id);
+            }
+        }
+    }
+}
+
+// A button with words that opens a menu of lines under it, like "Remove older versions…".
+export component MenuButton inherits StudioButton {
+    in property <[MenuItem]> items;
+    callback chosen(string);
+    menu: true;
+    clicked => { button-menu.show(); }
+    button-menu := PopupWindow {
+        x: 0;
+        y: root.height + Space.xs;
+        width: max(root.width, 280px);
+        close-policy: close-on-click-outside;
+        MenuItems {
+            items: root.items;
+            chosen(id) => {
+                button-menu.close();
                 root.chosen(id);
             }
         }

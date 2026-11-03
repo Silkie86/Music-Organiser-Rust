@@ -69,7 +69,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The Backup page, filled with made-up folders.
     app.set_place(Place::Backup.index() as i32);
     mo_ui::backup::show_lines(&app, mo_ui::backup::sample_lines());
+    mo_ui::backup::show_older(&app, mo_ui::backup::sample_older(false));
     shots.push(("backup.png".into(), capture(&window)));
+    // The Remove older versions menu, opened.
+    let before = capture(&window);
+    click(&window, REMOVE_OLDER_BUTTON.0, REMOVE_OLDER_BUTTON.1);
+    let after = capture(&window);
+    if before == after {
+        return Err("backup-older-menu.png: the menu didn't open; has the Remove older versions button moved?".into());
+    }
+    shots.push(("backup-older-menu.png".into(), after));
+    // A click beside the menu closes it. Then the question asked before any go, the page turned down to show it.
+    click(&window, 600.0, 20.0);
+    mo_ui::backup::show_older(&app, mo_ui::backup::sample_older(true));
+    // Drawn twice first, so the page is laid out with the question's wrapped lines before it's turned down.
+    capture(&window);
+    capture(&window);
+    scroll(&window, 700.0, 500.0, -PAGE_DOWN);
+    shots.push(("backup-remove-older.png".into(), capture(&window)));
+    scroll(&window, 700.0, 500.0, PAGE_DOWN);
     app.set_place(Place::Songs.index() as i32);
     for theme in THEMES.iter().skip(1) {
         mo_ui::apply_look(&app, &Look::from_settings(Some(theme.name), None));
@@ -479,6 +497,9 @@ fn sample_detail() -> mo_library::SaveDetail {
 /// Where the song panel's Show in folder and Older saves buttons are in the shots. If the panel's layout moves them,
 /// the tooltip and menu shots come out the same as the plain panel, and mo-screens stops with an error.
 const SHOW_BUTTON: (f32, f32) = (1140.0, 328.0);
+/// The Backup page's Remove older versions button, and how far the page is turned down to show the question it asks.
+const REMOVE_OLDER_BUTTON: (f32, f32) = (1127.0, 820.0);
+const PAGE_DOWN: f32 = 300.0;
 const OLDER_BUTTON: (f32, f32) = (1005.0, 328.0);
 /// A point on a clip in the arrangement, from the view's top left, for the hover and zoom shots.
 const ARRANGEMENT_CLIP: (f32, f32) = (480.0, 180.0);
@@ -492,6 +513,12 @@ fn hover(window: &MinimalSoftwareWindow, x: f32, y: f32) {
         slint::platform::WindowEvent::PointerMoved { position }
     };
     window.dispatch_event(event);
+}
+
+/// The mouse wheel turned over a point: a negative `dy` moves the page up, to show what's below.
+fn scroll(window: &MinimalSoftwareWindow, x: f32, y: f32, dy: f32) {
+    let position = slint::LogicalPosition::new(x, y);
+    window.dispatch_event(slint::platform::WindowEvent::PointerScrolled { position, delta_x: 0.0, delta_y: dy });
 }
 
 /// A left click at a point in the window.

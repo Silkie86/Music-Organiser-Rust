@@ -20,3 +20,7 @@ sha2 = "0.10"
 crc32fast = "1.5"
 # The one-zip-per-song format.
 zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
+
+# Folder links in the tests, made the way Windows has them (a junction: no administrator rights needed).
+[target.'cfg(windows)'.dev-dependencies]
+junction = "1.4.1"

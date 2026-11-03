@@ -580,7 +580,8 @@ fn run_on(
     let Some(backup) = settings.drive.as_deref() else {
         return LastRun { when, ok: false, line: "No backup drive picked".to_owned() };
     };
-    let options = copy::Options::new(when.format("%Y-%m-%d %H.%M").to_string());
+    // This run's older versions go in a folder named after the minute it began, as the Older versions card reads them.
+    let options = copy::Options::new(mo_backup::older::stamp(when));
     let copy_list: Vec<FileEntry> = match settings.format {
         Format::Folders => prepared.plan.copy.clone(),
         // Everything that isn't in a song's zip still goes, as plain folders: whole folders, and files no song owns
@@ -883,7 +884,7 @@ pub fn level_note(level: Level) -> &'static str {
 pub fn format_note(format: Format) -> &'static str {
     match format {
         Format::Folders => {
-            "Open it in Explorer without the app. Only new or changed files are copied; small replaced files keep older versions."
+            "Open it in Explorer without the app. Only new or changed files are copied, and the small files a backup replaces are kept as older versions."
         }
         Format::Zips => {
             "One zip per song in Songs, with every sample it uses. Easy to move or send. Whole folders, and files that aren't any song's, go as plain folders."
