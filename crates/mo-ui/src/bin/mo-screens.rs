@@ -338,6 +338,9 @@ fn sounds_shots(
     data.invoke_pick_view(5);
     data.invoke_kit_roll();
     data.invoke_pad_lock(0);
+    capture(window);
+    // The Snare pad's Lock, clicked as you would: the pad's own buttons take their click, not the line under them.
+    click(window, SNARE_LOCK.0, SNARE_LOCK.1);
     shots.push(("sounds-kits.png".into(), capture(window)));
     data.invoke_pick_view(0);
     mo_ui::apply_look(app, &Look::from_settings(Some("Paper"), None));
@@ -565,6 +568,8 @@ const SHOW_BUTTON: (f32, f32) = (1140.0, 328.0);
 const REMOVE_OLDER_BUTTON: (f32, f32) = (1127.0, 820.0);
 const PAGE_DOWN: f32 = 300.0;
 const OLDER_BUTTON: (f32, f32) = (1005.0, 328.0);
+/// The Lock chip on the kit's second pad (Snare).
+const SNARE_LOCK: (f32, f32) = (846.0, 333.0);
 /// A point on a clip in the arrangement, from the view's top left, for the hover and zoom shots.
 const ARRANGEMENT_CLIP: (f32, f32) = (480.0, 180.0);
 
