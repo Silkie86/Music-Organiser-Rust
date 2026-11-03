@@ -42,8 +42,10 @@
 //! [`NOTES_DONE_FILE`] in the data folder says how far the sweep has gone, note by note: it looks at each note once, so
 //! a note put back from the Recycle Bin stays, and so does one the Recycle Bin wouldn't take (it's never tried again,
 //! and the notes after it wait for the next start, so at most one is tried and fails at each start). A sweep cut off
-//! part way (the app closed) goes on from there next time. Never the draft (`draft.txt`), the words of a save that
-//! failed (`unsaved.txt`) or the lock (`writing.lock`) (rule 17).
+//! part way (the app closed) goes on from there next time. Two copies of the app never go through the notes at once:
+//! the one that does holds a lock on [`NOTES_LOCK_FILE`] (an empty file beside it, which stays), and the other leaves
+//! them be. Never the draft (`draft.txt`), the words of a save that failed (`unsaved.txt`) or the lock
+//! (`writing.lock`) (rule 17).
 //!
 //! Never touched: samples (rule 2), projects, "(fixed)" copies (rule 3), converts and exports, F12 notes under 3 months
 //! old and the drafts (rule 17), Playground ideas, settings, the databases (library.db, sounds.db and midi.db are the
@@ -63,7 +65,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use chrono::{NaiveDateTime, TimeDelta};
-use mo_space::clean::{Bin, CANT_LOOK, KEPT_BY_YOU, NOT_IN_BIN, ONLINE_ONLY, Removed, What};
+use mo_space::clean::{Bin, CANT_LOOK, IN_USE, KEPT_BY_YOU, NOT_IN_BIN, ONLINE_ONLY, Removed, STILL_THERE, What};
 
 use crate::backup::{PART_ENDING, SETTINGS_FILE, SONGS_FILE};
 use crate::log::{is_crash_log, is_name_time, is_session_log};
@@ -85,6 +87,14 @@ pub const NOTES_KEPT_FOR: Duration = Duration::from_secs(90 * 24 * 60 * 60);
 pub const NOTES_DONE_FILE: &str = "tidy-notes.txt";
 /// How [`NOTES_DONE_FILE`]'s line saying notes no longer go by themselves starts.
 const STOPPED: &str = "Stopped: ";
+/// The empty file beside [`NOTES_DONE_FILE`] that a copy of the app holds a lock on while it goes through the F12
+/// notes, so that two copies never do at once: one that finds it held leaves the notes to the other. It stays, as it
+/// is: were it removed, two copies could each hold a lock, one on the old file and one on a new one.
+pub const NOTES_LOCK_FILE: &str = "tidy-notes.lock";
+/// How often writing down that no more notes go by themselves is tried, and how long apart: a virus scanner can hold a
+/// new file for a moment, and without that line notes go again at the next start.
+const STOP_TRIES: usize = 3;
+const STOP_RETRY: Duration = Duration::from_millis(200);
 
 /// The tools' reports in `logs\`, by how their names start. Each name is this, then the time it ran (digits, `-` and
 /// `_`), then `.txt`: `twin-test-2026-11-02-1430.txt`. Written by `tools/dev/twin-test.ps1`, `tools/dev/MIDI twin
@@ -170,9 +180,11 @@ impl Tidied {
                 Ok(true)
             }
             // Gone already (another copy of the app sent it first): nothing to do. Not when the bin says Windows
-            // didn't move it: then, gone, it may have been removed for good.
+            // didn't move it, or said it did and it was still there: then, gone, it may have been removed for good.
             Err(why)
-                if why != KEPT_BY_YOU && fs::symlink_metadata(path).is_err_and(|e| e.kind() == ErrorKind::NotFound) =>
+                if why != KEPT_BY_YOU
+                    && why != STILL_THERE
+                    && fs::symlink_metadata(path).is_err_and(|e| e.kind() == ErrorKind::NotFound) =>
             {
                 Ok(false)
             }
@@ -331,11 +343,12 @@ fn keep_newest(
 }
 
 /// Mac, Linux: whether a session log is being written by a copy of the app that's still running, however long since
-/// its last line: it holds a lock on its log while it writes it (see [`crate::log`]). On Windows a log being written
-/// can't be removed at all, so there's nothing to look for.
+/// its last line: it holds a lock on its log while it writes it (see [`crate::log`]). Asked for a shared lock, which
+/// needs only reading (an exclusive one needs writing on a network drive) and is refused all the same while the writer
+/// holds its own. On Windows a log being written can't be removed at all, so there's nothing to look for.
 #[cfg(unix)]
 fn being_written(path: &Path) -> bool {
-    fs::File::open(path).is_ok_and(|f| matches!(f.try_lock(), Err(fs::TryLockError::WouldBlock)))
+    fs::File::open(path).is_ok_and(|f| matches!(f.try_lock_shared(), Err(fs::TryLockError::WouldBlock)))
 }
 
 #[cfg(not(unix))]
@@ -390,6 +403,15 @@ fn old_notes_to_bin(folder: &Path, done_file: &Path, kept_for: Duration, now: Sy
     if !notes.values().any(|(saved, _)| *saved <= until) {
         return tidied;
     }
+    // One copy of the app at a time from here on, until this returns: another going through the notes now leaves them
+    // to that one. Everything below that writes `done_file` does so holding this.
+    let _held = match hold_notes_lock(&done_file.with_file_name(NOTES_LOCK_FILE)) {
+        Ok(held) => held,
+        Err(why) => {
+            tidied.notes_stay = Some(why);
+            return tidied;
+        }
+    };
     let since = match notes_done(done_file) {
         NotesDone::NotYet => None,
         // Never after now, unless the computer's clock is wrong now (put back), or was when it was written. Which isn't
@@ -425,8 +447,22 @@ fn old_notes_to_bin(folder: &Path, done_file: &Path, kept_for: Duration, now: Sy
     }
     let mut looked_in_bin = false;
     for (saved, parts) in old {
-        // Read again before each note: another copy of the app going through the notes at the same time may have
-        // stopped since, or got past this one.
+        // The picture first, so that if it can't go, its words stay with it.
+        let mut parts: Vec<&(PathBuf, Metadata)> = parts.iter().collect();
+        parts.sort_by_key(|(path, _)| path.extension().is_none_or(|end| end != "png"));
+        // Only online in OneDrive, or it couldn't be looked at: the note's own reason, so it stays (looked at, below,
+        // so it isn't tried again) and the notes after it go on. Any other reason is the Recycle Bin's (it has filled
+        // up since the sweep began, say): this note and the ones after it wait for the next start.
+        let own_reason = match parts.iter().find_map(|(path, meta)| bin.refuses_quietly(path, meta.len())) {
+            Some(why) if why == ONLINE_ONLY || why == CANT_LOOK => Some(why),
+            Some(why) => {
+                tidied.notes_stay = Some(why);
+                return tidied;
+            }
+            None => None,
+        };
+        // Read again just before this note is written down: something else may have changed it since (you, stopping
+        // the notes), or got past this one.
         match notes_done(done_file) {
             NotesDone::Stopped(why) => return Tidied { notes_stay: stopped_already(&why).notes_stay, ..tidied },
             NotesDone::UpTo(at) if at > *saved => continue,
@@ -435,29 +471,15 @@ fn old_notes_to_bin(folder: &Path, done_file: &Path, kept_for: Duration, now: Sy
                 return Tidied { notes_stay: cant_read_done_file().notes_stay, ..tidied };
             }
         }
-        // The picture first, so that if it can't go, its words stay with it.
-        let mut parts: Vec<&(PathBuf, Metadata)> = parts.iter().collect();
-        parts.sort_by_key(|(path, _)| path.extension().is_none_or(|end| end != "png"));
-        if let Some(why) = parts.iter().find_map(|(path, meta)| bin.refuses_quietly(path, meta.len())) {
-            // Only online in OneDrive, or it couldn't be looked at: the note's own reason. It stays, looked at, so it
-            // isn't tried again, and the notes after it go on.
-            if why == ONLINE_ONLY || why == CANT_LOOK {
-                if let Err(e) = write_notes_done(done_file, *saved, None) {
-                    return Tidied { notes_stay: cant_write_done_file(&e).notes_stay, ..tidied };
-                }
-                tidied.notes_stay.get_or_insert(why);
-                continue;
-            }
-            // Any other is the Recycle Bin's (it has filled up since the sweep began, say): this note and the ones
-            // after it wait for the next start.
-            tidied.notes_stay = Some(why);
-            return tidied;
-        }
         // Written before the note goes, so each is looked at once: one put back from the bin later, or one the bin
         // wouldn't take, stays, and is never tried again. The notes after it aren't counted yet, so if the app closes
         // part way, they go at the next start.
         if let Err(e) = write_notes_done(done_file, *saved, None) {
             return Tidied { notes_stay: cant_write_done_file(&e).notes_stay, ..tidied };
+        }
+        if let Some(why) = own_reason {
+            tidied.notes_stay.get_or_insert(why);
+            continue;
         }
         // The Recycle Bin couldn't be read to see the first file is in it: this note's other file goes too, and the
         // notes after it wait for the next start.
@@ -493,21 +515,30 @@ fn old_notes_to_bin(folder: &Path, done_file: &Path, kept_for: Duration, now: Sy
                 }
                 // It went, or another copy of the app sent it first.
                 Ok(_) => {}
-                // Windows didn't move it, and didn't say why: it may have asked first after all, so the Recycle Bin
-                // may not take notes quietly here. None go by themselves from now on.
-                Err(why) if why == KEPT_BY_YOU => {
-                    let why = format!(
-                        "Windows didn't put {name} in the Recycle Bin, and didn't say why (it may have asked first, and \
-                         been told no)"
-                    );
+                // Windows didn't move it and didn't say why, or said it did but it's still there: it may have asked
+                // first after all, so the Recycle Bin may not take notes quietly here. None go by themselves from now
+                // on.
+                Err(why) if why == KEPT_BY_YOU || why == STILL_THERE => {
+                    let why = if why == KEPT_BY_YOU {
+                        format!(
+                            "Windows didn't put {name} in the Recycle Bin, and didn't say why (it may have asked \
+                             first, and been told no)"
+                        )
+                    } else {
+                        format!(
+                            "Windows said it put {name} in the Recycle Bin, but it's still in the notes folder (it may \
+                             have asked first)"
+                        )
+                    };
                     return stop(tidied, done_file, *saved, &why);
                 }
                 Err(why) => {
                     // The first one the bin won't take ends this sweep's notes. It stays, and isn't tried again; the
                     // notes after it wait for the next start, so at most one is tried and fails at each start.
+                    let why = if why == IN_USE { "a program is using it" } else { why.trim_end_matches('.') };
                     tidied.notes_stay = Some(format!(
-                        "{name} couldn't go to the Recycle Bin ({why}); it stays, and the notes after it wait for the \
-                         next start"
+                        "{name} couldn't go to the Recycle Bin ({why}); it stays for good (put it in the Recycle Bin \
+                         yourself if you like), and the notes after it wait for the next start"
                     ));
                     return tidied;
                 }
@@ -522,13 +553,47 @@ fn old_notes_to_bin(folder: &Path, done_file: &Path, kept_for: Duration, now: Sy
             return tidied;
         }
     }
-    // Every note saved up to `until` has been looked at now. Unless another copy of the app stopped them meanwhile:
-    // its "Stopped" line stays.
-    if let NotesDone::Stopped(why) = notes_done(done_file) {
-        return Tidied { notes_stay: stopped_already(&why).notes_stay, ..tidied };
+    // Every note saved up to `until` has been looked at now. Unless something else stopped them meanwhile (its
+    // "Stopped" line stays), or has written a later time (it stays: going back would let a note you put back go again).
+    match notes_done(done_file) {
+        NotesDone::Stopped(why) => return Tidied { notes_stay: stopped_already(&why).notes_stay, ..tidied },
+        NotesDone::UpTo(at) if at >= until => {}
+        // A folder or a link of that name now: left as it is.
+        NotesDone::CantLook => {}
+        NotesDone::NotYet | NotesDone::UpTo(_) | NotesDone::Unreadable => {
+            let _ = write_notes_done(done_file, until, None);
+        }
     }
-    let _ = write_notes_done(done_file, until, None);
     tidied
+}
+
+/// Takes the lock on [`NOTES_LOCK_FILE`] at `path` (making it, empty, the first time), held until what's returned is
+/// dropped; or says why the notes stay: another copy of the app is going through them now, or the lock can't be had.
+/// A link or a folder of that name is never opened. Nothing is ever written in it: it's opened for writing only
+/// because some network drives give a lock only on a file opened so.
+fn hold_notes_lock(path: &Path) -> Result<fs::File, String> {
+    let cant_open = |e: std::io::Error| format!("{NOTES_LOCK_FILE} in the data folder couldn't be opened ({e})");
+    // Made new, so nothing there (a link included) is ever opened through; one already there (another copy may have
+    // made it a moment ago) is opened only when it's a plain file.
+    let file = match fs::OpenOptions::new().write(true).create_new(true).open(path) {
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+            if !fs::symlink_metadata(path).is_ok_and(|m| m.is_file()) {
+                return Err(format!(
+                    "{NOTES_LOCK_FILE} in the data folder isn't the app's (a folder or a link of that name), so it's \
+                     left as it is"
+                ));
+            }
+            fs::OpenOptions::new().write(true).open(path).map_err(cant_open)?
+        }
+        made => made.map_err(cant_open)?,
+    };
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(fs::TryLockError::WouldBlock) => Err("another copy of the app is going through them now".to_owned()),
+        Err(fs::TryLockError::Error(e)) => {
+            Err(format!("{NOTES_LOCK_FILE} in the data folder couldn't be locked ({e})"))
+        }
+    }
 }
 
 /// Starts [`NOTES_DONE_FILE`] again from `until`, when what it held can't be read: every note old now counts as looked
@@ -546,12 +611,23 @@ fn start_again(done_file: &Path, until: NaiveDateTime, why: &str) -> Tidied {
 /// No more notes go to the Recycle Bin by themselves (`why` says what the Recycle Bin did): [`NOTES_DONE_FILE`] says
 /// so from now on, with every note saved up to `up_to` looked at.
 fn stop(mut tidied: Tidied, done_file: &Path, up_to: NaiveDateTime, why: &str) -> Tidied {
-    tidied.notes_stay = Some(match write_notes_done(done_file, up_to, Some(why)) {
+    let mut written = write_notes_done(done_file, up_to, Some(why));
+    for _ in 1..STOP_TRIES {
+        if written.is_ok() {
+            break;
+        }
+        std::thread::sleep(STOP_RETRY);
+        written = write_notes_done(done_file, up_to, Some(why));
+    }
+    tidied.notes_stay = Some(match written {
         Ok(()) => format!(
             "{why}, so no more go by themselves. To let them go again, take out the line starting \"Stopped:\" in \
              {NOTES_DONE_FILE} in the data folder (don't delete the file: it remembers the notes you put back)"
         ),
-        Err(e) => format!("{why}, and {NOTES_DONE_FILE} in the data folder couldn't be written ({e})"),
+        Err(e) => format!(
+            "{why}, so no more go by themselves for now; but {NOTES_DONE_FILE} in the data folder couldn't be written \
+             to say so ({e}), so they may go again at the next start"
+        ),
     });
     tidied.notes_stopped = true;
     tidied
@@ -630,8 +706,11 @@ fn write_notes_done(path: &Path, up_to: NaiveDateTime, stopped: Option<&str>) ->
     part.push(PART_ENDING);
     let part = PathBuf::from(part);
     let _ = fs::remove_file(&part);
-    let written =
-        fs::OpenOptions::new().write(true).create_new(true).open(&part).and_then(|mut f| f.write_all(text.as_bytes()));
+    let written = fs::OpenOptions::new().write(true).create_new(true).open(&part).and_then(|mut f| {
+        f.write_all(text.as_bytes())?;
+        // On the disk before it's put in place, so a power cut just after leaves it whole, not empty.
+        f.sync_all()
+    });
     written.and_then(|()| fs::rename(&part, path)).inspect_err(|_| {
         let _ = fs::remove_file(&part);
     })
@@ -851,6 +930,11 @@ mod tests {
         CantBeRead,
         /// Says Windows didn't move it, but it's gone (removed for good after all).
         GoneButKept,
+        /// Says Windows moved it, but it's still there.
+        StillThere,
+        /// Says Windows moved it but it was still there, and it's gone a moment later (removed for good while a
+        /// program had it open).
+        Lingers,
     }
 
     impl Bin for OddBin {
@@ -860,6 +944,11 @@ mod tests {
                 Odd::GoneButKept => {
                     fs::remove_file(path).map_err(|e| e.to_string())?;
                     Err(KEPT_BY_YOU.to_owned())
+                }
+                Odd::StillThere => Err(STILL_THERE.to_owned()),
+                Odd::Lingers => {
+                    fs::remove_file(path).map_err(|e| e.to_string())?;
+                    Err(STILL_THERE.to_owned())
                 }
                 _ => self.bin.send(path),
             }
@@ -942,6 +1031,59 @@ mod tests {
                 fs::write(&self.done_file, format!("{}\n", self.ahead_to)).map_err(|e| e.to_string())?;
             }
             self.bin.send(path)
+        }
+
+        fn find(&self, _: &mut [Removed]) -> Vec<Problem> {
+            Vec::new()
+        }
+
+        fn put_back(&self, _: &[Removed]) -> Vec<Problem> {
+            Vec::new()
+        }
+    }
+
+    /// A test's bin with something else beside it (you, in an editor) that stops notes going by themselves while this
+    /// copy is looking at whether the Recycle Bin can take its first note.
+    struct StopsWhileLooking {
+        bin: TestBin,
+        done_file: PathBuf,
+        folder: PathBuf,
+    }
+
+    impl Bin for StopsWhileLooking {
+        fn send(&self, path: &Path) -> Result<(), String> {
+            self.bin.send(path)
+        }
+
+        fn find(&self, _: &mut [Removed]) -> Vec<Problem> {
+            Vec::new()
+        }
+
+        fn put_back(&self, _: &[Removed]) -> Vec<Problem> {
+            Vec::new()
+        }
+
+        fn refuses_quietly(&self, path: &Path, _bytes: u64) -> Option<String> {
+            // Asked about a note, not the folder: the "Stopped" line goes in, once.
+            let text = fs::read_to_string(&self.done_file).unwrap_or_default();
+            if path != self.folder && !text.contains(STOPPED) {
+                let first = text.lines().next().unwrap_or("2026-06-01_10-00-00").to_owned();
+                fs::write(&self.done_file, format!("{first}\n{STOPPED}your reason\n")).unwrap();
+            }
+            None
+        }
+    }
+
+    /// A test's bin that Windows asks about the first file it's sent (and is told no), after which what says how far
+    /// the sweep went can't be written: a folder is where it's written first.
+    struct AsksAndCantBeWritten {
+        part: PathBuf,
+    }
+
+    impl Bin for AsksAndCantBeWritten {
+        fn send(&self, _: &Path) -> Result<(), String> {
+            fs::create_dir_all(self.part.join("in the way")).map_err(|e| e.to_string())?;
+            Err(KEPT_BY_YOU.to_owned())
         }
 
         fn find(&self, _: &mut [Removed]) -> Vec<Problem> {
@@ -1231,6 +1373,7 @@ mod tests {
             data.join("backup.txt"),
             data.join("backup-songs.txt"),
             data.join("tidy-notes.txt"),
+            data.join("tidy-notes.lock"),
             data.join("presets.db.new-"),
             data.join("presets.db.new-12.bak"),
             data.join("notes").join("draft.txt"),
@@ -1715,6 +1858,176 @@ mod tests {
     }
 
     #[test]
+    fn how_far_the_sweep_went_never_goes_back() {
+        let dir = test_folder("never-back");
+        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let notes = places.data.join("notes");
+        let [first, second, third] = three_old_notes(&notes);
+        let done_file = places.data.join(NOTES_DONE_FILE);
+        // While this copy sends its first note, the other gets past every note this one would send, and further: it
+        // saw a newer note (one saved since, say). That later time stays, so a note you put back meanwhile stays too.
+        let other = OtherCopyAhead {
+            bin: TestBin(dir.join("bin")),
+            done_file: done_file.clone(),
+            ahead_to: "2026-08-05_09-00-00",
+            said: std::cell::Cell::new(false),
+        };
+        let done = sweep(&places, local("2026-11-03_12-00-00"), &other);
+        assert_eq!(done, Tidied { to_bin: 1, to_bin_bytes: 1, ..Tidied::default() });
+        assert!(!first.exists() && second.exists() && third.exists());
+        assert_eq!(how_far(&done_file).0, "2026-08-05_09-00-00");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stop_written_while_a_note_is_looked_at_holds() {
+        let dir = test_folder("stop-while-looking");
+        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let notes = places.data.join("notes");
+        let [first, second, third] = three_old_notes(&notes);
+        let done_file = places.data.join(NOTES_DONE_FILE);
+        // The "Stopped" line goes in while this copy asks whether the Recycle Bin can take its first note quietly
+        // (on Windows that reads the registry, the drive and the bin, so it takes a moment): nothing goes, and the
+        // line stays.
+        let bin = StopsWhileLooking { bin: TestBin(dir.join("bin")), done_file: done_file.clone(), folder: notes };
+        let done = sweep(&places, local("2026-11-03_12-00-00"), &bin);
+        assert_eq!(done.to_bin, 0);
+        assert!(done.notes_stay.is_some_and(|why| why.contains("your reason")));
+        assert!(first.exists() && second.exists() && third.exists());
+        assert!(how_far(&done_file).1, "the line is still there");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn notes_wait_while_another_copy_of_the_app_goes_through_them() {
+        let dir = test_folder("lock");
+        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let bin = TestBin(dir.join("bin"));
+        let notes = places.data.join("notes");
+        let [first, second, third] = three_old_notes(&notes);
+        let now = local("2026-11-03_12-00-00");
+        let done_file = places.data.join(NOTES_DONE_FILE);
+        let lock = places.data.join(NOTES_LOCK_FILE);
+
+        // Another copy holds the lock: this one leaves the notes to it, and writes nothing down.
+        let other = File::create(&lock).unwrap();
+        other.lock().unwrap();
+        let done = sweep(&places, now, &bin);
+        let busy = Some("another copy of the app is going through them now".to_owned());
+        assert_eq!(done, Tidied { notes_stay: busy, ..Tidied::default() });
+        assert!(first.exists() && second.exists() && third.exists() && !done_file.exists());
+        // Once it's done, they go, and the lock stays as it was, empty.
+        drop(other);
+        assert_eq!(sweep(&places, now, &bin), Tidied { to_bin: 3, to_bin_bytes: 3, ..Tidied::default() });
+        assert_eq!(fs::metadata(&lock).unwrap().len(), 0);
+        let _ = fs::remove_dir_all(&dir);
+
+        // A folder of that name isn't the app's: it's left as it is, and so are the notes.
+        let dir = test_folder("lock-folder");
+        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let [first, ..] = three_old_notes(&places.data.join("notes"));
+        fs::create_dir_all(places.data.join(NOTES_LOCK_FILE)).unwrap();
+        let done = sweep(&places, now, &TestBin(dir.join("bin")));
+        assert!(done.to_bin == 0 && first.exists() && places.data.join(NOTES_LOCK_FILE).is_dir());
+        assert!(done.notes_stay.is_some_and(|why| why.contains(NOTES_LOCK_FILE)));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Mac, Linux: a link of the lock's name is never opened through.
+    #[cfg(unix)]
+    #[test]
+    fn the_lock_is_never_taken_through_a_link() {
+        use std::os::unix::fs::symlink;
+        let dir = test_folder("lock-link");
+        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let [first, ..] = three_old_notes(&places.data.join("notes"));
+        let lock = places.data.join(NOTES_LOCK_FILE);
+        let now = local("2026-11-03_12-00-00");
+        // A link to a file of yours: the notes stay, and your file is never opened.
+        let yours = dir.join("yours.txt");
+        fs::write(&yours, "yours").unwrap();
+        symlink(&yours, &lock).unwrap();
+        let done = sweep(&places, now, &TestBin(dir.join("bin")));
+        assert!(done.to_bin == 0 && first.exists());
+        assert!(done.notes_stay.is_some_and(|why| why.contains(NOTES_LOCK_FILE)));
+        assert_eq!(fs::read_to_string(&yours).unwrap(), "yours");
+        // A link to nothing: the same, and nothing is made where it leads.
+        let nowhere = dir.join("nowhere.txt");
+        fs::remove_file(&lock).unwrap();
+        symlink(&nowhere, &lock).unwrap();
+        let done = sweep(&places, now, &TestBin(dir.join("bin")));
+        assert!(done.to_bin == 0 && first.exists());
+        assert!(done.notes_stay.is_some_and(|why| why.contains(NOTES_LOCK_FILE)));
+        assert!(!nowhere.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_note_that_cant_be_looked_at_stays_and_the_rest_go() {
+        let dir = test_folder("cant-look");
+        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let notes = places.data.join("notes");
+        let [first, second, third] = three_old_notes(&notes);
+        let now = local("2026-11-03_12-00-00");
+        // Whether the first is all on this computer couldn't be read: its own reason. It stays, looked at, and the
+        // others go.
+        let picky = PickyBin {
+            bin: TestBin(dir.join("bin")),
+            refuses: |path, _| path.file_name()?.to_str()?.starts_with("note-2026-07-01").then(|| CANT_LOOK.into()),
+        };
+        let done = sweep(&places, now, &picky);
+        assert_eq!(
+            done,
+            Tidied { to_bin: 2, to_bin_bytes: 2, notes_stay: Some(CANT_LOOK.to_owned()), ..Tidied::default() }
+        );
+        assert!(first.exists() && !second.exists() && !third.exists());
+        // It was looked at once, so it isn't tried again.
+        assert_eq!(sweep(&places, now, &TestBin(dir.join("bin"))), Tidied::default());
+        assert!(first.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_more_notes_go_by_themselves_once_one_is_still_there_after_windows_moved_it() {
+        let now = local("2026-11-03_12-00-00");
+        for odd in [Odd::StillThere, Odd::Lingers] {
+            let dir = test_folder("still-there");
+            let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+            let notes = places.data.join("notes");
+            let [first, second, third] = three_old_notes(&notes);
+            let done_file = places.data.join(NOTES_DONE_FILE);
+            // Windows said it moved the first, but it was still there (it may have asked, and been told yes, while a
+            // program had it open): not counted as in the bin, and none go by themselves from then on, even when it's
+            // gone a moment later.
+            let done = sweep(&places, now, &OddBin { bin: TestBin(dir.join("bin")), odd });
+            assert!(done.notes_stopped && done.to_bin == 0);
+            assert!(done.notes_stay.is_some_and(|why| why.contains("but it's still in the notes folder")));
+            assert_eq!(first.exists(), odd == Odd::StillThere);
+            assert!(second.exists() && third.exists());
+            assert_eq!(how_far(&done_file), ("2026-07-01_10-00-00".to_owned(), true));
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn a_stop_that_cant_be_written_down_says_notes_may_go_again() {
+        let dir = test_folder("stop-unwritten");
+        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let notes = places.data.join("notes");
+        let [first, second, third] = three_old_notes(&notes);
+        let done_file = places.data.join(NOTES_DONE_FILE);
+        let part = places.data.join(format!("{NOTES_DONE_FILE}{PART_ENDING}"));
+        // Windows asks about the first, and from then on the stop can't be written down, however often it's tried.
+        let done = sweep(&places, local("2026-11-03_12-00-00"), &AsksAndCantBeWritten { part: part.clone() });
+        assert!(done.notes_stopped && done.to_bin == 0);
+        assert!(done.notes_stay.is_some_and(|why| why.contains("so they may go again at the next start")));
+        assert!(first.exists() && second.exists() && third.exists());
+        assert_eq!(how_far(&done_file), ("2026-07-01_10-00-00".to_owned(), false));
+        assert!(part.is_dir(), "what was in the way is left as it is");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn notes_wait_for_the_next_start_while_the_bin_cant_be_read() {
         let dir = test_folder("unread-bin");
         let places = Places { data: dir.join("data"), temp: dir.join("temp") };
@@ -1851,6 +2164,30 @@ mod tests {
         assert_eq!(held, "2026-06-01_00-00-00\n", "the old one was never written into");
         assert_eq!(how_far(&done_file).0, "2026-08-01_09-00-00");
         assert!(!part.exists(), "nothing is left beside it");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Mac, Linux: writing what says how far the sweep went never writes through a link of its name, or of the name
+    /// it's first written to: the link is replaced, and what it leads to stays as it was.
+    #[cfg(unix)]
+    #[test]
+    fn what_says_how_far_the_sweep_went_is_written_beside_and_never_through_a_link() {
+        use std::os::unix::fs::symlink;
+        let dir = test_folder("write-links");
+        fs::create_dir_all(&dir).unwrap();
+        let yours = dir.join("yours.txt");
+        let also_yours = dir.join("also yours.txt");
+        fs::write(&yours, "yours").unwrap();
+        fs::write(&also_yours, "also yours").unwrap();
+        let done_file = dir.join(NOTES_DONE_FILE);
+        symlink(&yours, &done_file).unwrap();
+        symlink(&also_yours, dir.join(format!("{NOTES_DONE_FILE}{PART_ENDING}"))).unwrap();
+        let up_to = NaiveDateTime::parse_from_str("2026-08-01_09-00-00", NAME_TIME).unwrap();
+        write_notes_done(&done_file, up_to, Some("a reason")).unwrap();
+        assert_eq!(fs::read_to_string(&yours).unwrap(), "yours");
+        assert_eq!(fs::read_to_string(&also_yours).unwrap(), "also yours");
+        assert!(fs::symlink_metadata(&done_file).unwrap().is_file());
+        assert_eq!(how_far(&done_file), ("2026-08-01_09-00-00".to_owned(), true));
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -621,8 +621,9 @@ pub fn save_to_bitwig(c: &Curve, folder: &Path) -> Result<PathBuf, String> {
 /// Clears what [`save_to_bitwig`] leaves in Bitwig's curves folder when it's stopped part way (the app closed by force,
 /// or a power cut), once it's [`STAGED_LEFT_BEHIND`] older than `now` (the time by the clock that stamps this
 /// folder's files). Only plain files right in this folder with a name [`is_staged`] knows (rule 28): never a folder or
-/// a link of that name, nor anything else in your Bitwig library. One in use stays; a read-only one goes too, which
-/// takes away only that name (a staged file can be a second name of your saved curve): your curve keeps its own.
+/// a link of that name, nor anything else in your Bitwig library. One in use stays; on most drives a read-only one goes
+/// too, which takes away only that name (a staged file can be a second name of your saved curve): your curve keeps
+/// its own.
 fn clear_staged(folder: &Path, now: SystemTime) {
     let Ok(entries) = std::fs::read_dir(folder) else { return };
     // A plain file (the entry itself, never followed: a link of that name is a link) left long enough ago.

@@ -570,7 +570,13 @@ pub const NOT_IN_BIN: &str = "It isn't in the Recycle Bin, so it may have been r
 pub const KEPT_BY_YOU: &str = "It stays: Windows asked first and was told no, or couldn't move it.";
 
 /// What [`Bin::send`] says of a file a program is using.
-const IN_USE: &str = "A program is using it. Close your DAW and try again.";
+pub const IN_USE: &str = "A program is using it. Close your DAW and try again.";
+
+/// What [`Bin::send`] says when Windows said it moved something to the Recycle Bin but it's still there: a program is
+/// using some of it (a folder), or Windows asked first and was told no, or, told yes, removed it for good while a
+/// program still had it open, so that it lingers for a moment. The start-up sweep's notes stop going by themselves on
+/// it, as on [`KEPT_BY_YOU`].
+pub const STILL_THERE: &str = "It's still there: you chose to keep it, or a program is using some of it.";
 
 /// Sends checked things to the bin one at a time. Anything Windows guards waits, and all of it goes in one
 /// administrator step ([`Sending::flush`]), so Windows asks once. [`Sending::finish`] sends what waits and then finds
@@ -754,9 +760,7 @@ impl Bin for SystemBin {
         let sent = catch_unwind(AssertUnwindSafe(|| trash::delete(path)))
             .map_err(|_| "Windows wouldn't start moving it to the Recycle Bin.".to_owned())?;
         match sent {
-            Ok(()) if fs::symlink_metadata(path).is_ok() => {
-                Err("It's still there: you chose to keep it, or a program is using some of it.".to_owned())
-            }
+            Ok(()) if fs::symlink_metadata(path).is_ok() => Err(STILL_THERE.to_owned()),
             Ok(()) => Ok(()),
             Err(e) => Err(match bin_problem(&e) {
                 why if why == KEPT_BY_YOU => why_kept(path).map_or(why, str::to_owned),
@@ -1023,14 +1027,37 @@ fn why_kept(_path: &Path) -> Option<&'static str> {
     None
 }
 
+/// What an error from `trash` means here. Windows' own errors (HRESULTs) are told apart by their whole number, as
+/// which part of Windows a code comes from counts too.
 fn bin_problem(e: &trash::Error) -> String {
+    /// Access denied (and what Windows' older file operations said for it).
+    const ACCESS_DENIED: [u32; 2] = [0x8007_0005, 0x8007_0078];
+    /// A program has it open and won't let it go (the sharing violation, and the copy engine's own word for it).
+    const SHARING_VIOLATION: [u32; 2] = [0x8007_0020, 0x8027_0027];
+    /// Windows didn't move it: it was told no or cancelled (ERROR_CANCELLED, E_ABORT, COPYENGINE_E_USER_CANCELLED,
+    /// COPYENGINE_E_CANCELLED), or the Recycle Bin couldn't take it (COPYENGINE_E_RECYCLE_UNKNOWN_ERROR, _FORCE_NUKE,
+    /// _SIZE_TOO_BIG, _PATH_TOO_LONG, _BIN_NOT_FOUND). The start-up sweep's notes stop going by themselves on these, the
+    /// safe side when it may have asked.
+    const NOT_MOVED: [u32; 4] = [0x8007_04C7, 0x8000_4004, 0x8027_0000, 0x8027_0001];
+    const RECYCLE_BIN_COULDNT: std::ops::RangeInclusive<u32> = 0x8027_0035..=0x8027_003A;
     match e {
-        // HRESULTs from Windows: access denied, file in use.
-        trash::Error::Os { code, .. } if code & 0xFFFF == 5 || code & 0xFFFF == 0x78 => NEEDS_ADMIN.to_owned(),
-        trash::Error::Os { code, .. } if code & 0xFFFF == 32 => IN_USE.to_owned(),
-        // What `trash` (5.2.9) says when Windows didn't move something and didn't say why ("Some operations were
-        // aborted"): the start-up sweep's notes stop going by themselves on it, so mind it when `trash` is updated.
-        trash::Error::Unknown { description } if description.contains("aborted") => KEPT_BY_YOU.to_owned(),
+        trash::Error::Os { code, .. } => {
+            let code = code.cast_unsigned();
+            if ACCESS_DENIED.contains(&code) {
+                NEEDS_ADMIN.to_owned()
+            } else if SHARING_VIOLATION.contains(&code) {
+                IN_USE.to_owned()
+            } else if NOT_MOVED.contains(&code) || RECYCLE_BIN_COULDNT.contains(&code) {
+                KEPT_BY_YOU.to_owned()
+            } else {
+                format!("It couldn't go to the Recycle Bin ({e:?}).")
+            }
+        }
+        // What `trash` says when Windows didn't move something and didn't say why (5.2.9: "Some operations were
+        // aborted"). On Windows it says `Unknown` for nothing else, so the kind of error decides, not its words. The
+        // start-up sweep's notes stop going by themselves on it, so `trash` is held at that version (mo-space's
+        // Cargo.toml): check this before updating it.
+        trash::Error::Unknown { .. } if cfg!(windows) => KEPT_BY_YOU.to_owned(),
         trash::Error::CouldNotAccess { .. } => "It couldn't be reached.".to_owned(),
         _ => format!("It couldn't go to the Recycle Bin ({e:?})."),
     }
@@ -1150,7 +1177,7 @@ fn put_back_from_system_bin(removed: &[Removed]) -> Vec<Problem> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Bin, KEPT_BY_YOU, SystemBin, bin_problem, on_network, text};
+    use super::{Bin, IN_USE, KEPT_BY_YOU, NEEDS_ADMIN, SystemBin, bin_problem, on_network, text};
 
     #[test]
     fn the_recycle_bin_takes_notes_quietly_only_when_its_on_and_has_room() {
@@ -1186,16 +1213,54 @@ mod tests {
         assert_eq!(bin_decides(&BinFacts { kind: 2, ..fixed }, 1, unread), Some(NOT_OWN_DRIVE));
     }
 
-    /// The start-up sweep's notes stop going by themselves when Windows didn't move one and didn't say why: what
-    /// `trash` says then has to come out as [`KEPT_BY_YOU`].
+    /// The start-up sweep's notes stop going by themselves when Windows didn't move one and didn't say why, or was
+    /// told no, or its Recycle Bin couldn't take it: what `trash` says then has to come out as [`KEPT_BY_YOU`]; a file
+    /// in use, or one that needs administrator rights, is told apart by Windows' whole number.
     #[test]
     fn windows_not_saying_why_is_told_apart() {
+        let os = |code: u32| bin_problem(&trash::Error::Os { code: code.cast_signed(), description: String::new() });
+        // What `trash` 5.2.9 says then on Windows, whatever its words (elsewhere it means something else).
         let aborted = trash::Error::Unknown { description: "Some operations were aborted".to_owned() };
-        assert_eq!(bin_problem(&aborted), KEPT_BY_YOU);
-        let other = trash::Error::Unknown { description: "something else".to_owned() };
-        assert_ne!(bin_problem(&other), KEPT_BY_YOU);
-        let in_use = trash::Error::Os { code: 0x8007_0020_u32 as i32, description: String::new() };
-        assert_ne!(bin_problem(&in_use), KEPT_BY_YOU);
+        let reworded = trash::Error::Unknown { description: "Not every file was moved".to_owned() };
+        for unknown in [aborted, reworded] {
+            assert_eq!(bin_problem(&unknown) == KEPT_BY_YOU, cfg!(windows), "{unknown:?}");
+        }
+        // Told no, or cancelled; or the Recycle Bin couldn't take it.
+        for code in [0x8007_04C7, 0x8000_4004, 0x8027_0000, 0x8027_0001, 0x8027_0035, 0x8027_0036, 0x8027_003A] {
+            assert_eq!(os(code), KEPT_BY_YOU, "{code:#x}");
+        }
+        assert_eq!(os(0x8007_0020), IN_USE);
+        assert_eq!(os(0x8027_0027), IN_USE);
+        assert_eq!(os(0x8007_0005), NEEDS_ADMIN);
+        // The same last digits from another part of Windows are something else.
+        for code in [0x8027_0005, 0x8027_0020, 0x8004_0005, 0x8007_0001] {
+            let said = os(code);
+            assert!(said != KEPT_BY_YOU && said != IN_USE && said != NEEDS_ADMIN, "{code:#x}: {said}");
+        }
+    }
+
+    /// Windows: a file a program holds without letting it be removed is told apart from one Windows was told no about,
+    /// and so is one this account may not remove. Only opened to see: nothing is sent to the bin (rule 11).
+    #[cfg(windows)]
+    #[test]
+    fn a_file_a_program_holds_is_told_apart() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        use super::why_kept;
+        let dir = std::env::temp_dir().join(format!("mo-space-why-kept-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("note-2026-07-01_10-00-00.png");
+        std::fs::write(&file, b"x").unwrap();
+        // Held as an image viewer may hold it: others may read it, but not remove it.
+        let held = std::fs::OpenOptions::new().read(true).share_mode(0x1).open(&file).unwrap();
+        assert_eq!(why_kept(&file), Some(IN_USE));
+        drop(held);
+        // Let go of: nothing tells why, so it counts as Windows having been told no.
+        assert_eq!(why_kept(&file), None);
+        // A folder can't be told about this way.
+        assert_eq!(why_kept(&dir), None);
+        assert!(file.exists(), "it was only looked at");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
