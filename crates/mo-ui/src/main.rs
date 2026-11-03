@@ -46,6 +46,8 @@ fn main() -> Result<(), slint::PlatformError> {
     mo_ui::backup::connect(&app, mo_app::paths::data_dir().join("library.db"), feed.clone());
     // Plugins: read from the C# app's library, read-only.
     mo_ui::plugins::connect(&app, mo_app::paths::data_dir().join("library.db"), feed.clone(), &shortcuts);
+    // Space: the drives your folders are on and the app's own files, looked at once the page shows.
+    mo_ui::space::connect(&app, mo_app::paths::data_dir().join("library.db"), feed.clone(), &shortcuts);
     app.window().set_maximized(true);
     // The watchdog starts once the window is up, so opening it doesn't count as a freeze.
     let watched = feed.clone();

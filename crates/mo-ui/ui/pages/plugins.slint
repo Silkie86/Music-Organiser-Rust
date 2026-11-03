@@ -86,6 +86,9 @@ export global PluginsData {
     in property <string> sort;
     // The year strip beside the list: the years plugins were used in.
     in property <[YearBar]> years;
+    // The picked years' places on the strip (-1 for none).
+    in property <int> years-from: -1;
+    in property <int> years-to: -1;
     callback years-picked(int, int);
     callback years-cleared();
 
@@ -722,6 +725,8 @@ export component PluginsPage inherits Rectangle {
                 width: area.years-width;
                 height: parent.height;
                 years: PluginsData.years;
+                picked-from: PluginsData.years-from;
+                picked-to: PluginsData.years-to;
                 picked(a, b) => { PluginsData.years-picked(a, b); }
                 cleared => { PluginsData.years-cleared(); }
             }

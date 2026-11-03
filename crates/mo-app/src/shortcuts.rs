@@ -81,8 +81,15 @@ pub const PLUGINS_ACTIONS: &[Action] = &[
     action("plugins.searchOnline", "Search the web for the picked plugin", "Ctrl+Shift+O"),
 ];
 
+/// The Space page's own actions (new: the C# app had no Space page). F5 measures again on this page; elsewhere it
+/// looks for new and changed projects. Show in folder has the key it has on the other pages.
+pub const SPACE_ACTIONS: &[Action] = &[
+    action("space.measure", "Look at the drives and measure the app's files again", "F5"),
+    action("space.reveal", "Show the picked line's folder", "Ctrl+Shift+E"),
+];
+
 /// Every page's own list. A page's keys only work on that page, so two pages may share a key.
-pub const PAGE_ACTIONS: &[&[Action]] = &[SONGS_ACTIONS, SOUNDS_ACTIONS, PLUGINS_ACTIONS];
+pub const PAGE_ACTIONS: &[&[Action]] = &[SONGS_ACTIONS, SOUNDS_ACTIONS, SPACE_ACTIONS, PLUGINS_ACTIONS];
 
 /// What an action does, in the words its tooltip and the key list use, or "" for an id in no list.
 pub fn what_of(id: &str) -> &'static str {
@@ -297,6 +304,7 @@ mod tests {
         assert_eq!(what_of("app.play"), "Play or stop the picked sound or MIDI part");
         assert_eq!(what_of("projects.reveal"), "Show the picked song's file in its folder");
         assert_eq!(what_of("sounds.copyPath"), "Copy where the sound's file is");
+        assert_eq!(what_of("space.reveal"), "Show the picked line's folder");
         assert_eq!(what_of("no.such.action"), "");
     }
 
