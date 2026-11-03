@@ -1110,8 +1110,9 @@ export component YearRange inherits VerticalLayout {
                     && !(root.bottom-named && root.crowds(i, root.lit-bottom)));
             y: i * root.line;
             height: root.line;
-            // Less round on a short line: full corners there would leave notches down a picked span's edges.
-            border-radius: min(Theme.radius, root.line / 5);
+            // Less round on a shorter line, and square once the bars are left out: round corners there would leave
+            // little notches down a picked span's edges.
+            border-radius: root.line >= root.bar-room ? min(Theme.radius, root.line / 5) : 0px;
             background: self.lit ? Theme.accent.transparentize(80%) : self.under ? Theme.hover : transparent;
             Rectangle {
                 visible: root.line >= root.bar-room;
