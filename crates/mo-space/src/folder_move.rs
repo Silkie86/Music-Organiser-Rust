@@ -151,7 +151,8 @@ pub trait Drives: Sync {
         0
     }
     /// Whether a drive holds links (junctions, symbolic links): an exFAT or FAT32 one (a USB stick, a memory card,
-    /// many an external drive) doesn't, so a link inside a folder can't be made again there. Yes when it can't be told.
+    /// many an external drive) doesn't, so a link inside a folder can't be made again there, nor can the link a moved
+    /// folder leaves in its place. Yes when it can't be told.
     fn holds_links(&self, _path: &Path) -> bool {
         true
     }
@@ -178,59 +179,42 @@ impl Drives for SystemDrives {
         fs4::allocation_granularity(really(path)).unwrap_or(0)
     }
     fn holds_links(&self, path: &Path) -> bool {
-        !NO_LINKS.contains(&file_system(&really(path)).to_ascii_lowercase().as_str())
+        drive_holds_links(&really(path))
     }
     fn admin(&self) -> &dyn Admin {
         &AsAdmin
     }
 }
 
-/// The kinds of drive that hold no links, as [`file_system`] names them (small letters): FAT32 and older FAT, and
-/// exFAT.
-const NO_LINKS: [&str; 4] = ["fat", "fat32", "exfat", "msdos"];
-
-/// The kind of drive a folder (where it really is) is on, as the system names it ("NTFS", "exFAT"), or nothing when it
-/// can't be told. Windows: the innermost drive holding it, from the system's list of drives.
+/// Whether the drive a folder (where it really is) is on holds links, by its kind in Windows' list of drives
+/// ([`kind_holds_links`]). One that isn't in the list can't be told, and counts as holding them.
 #[cfg(windows)]
-fn file_system(real: &Path) -> String {
-    let real = text(real);
-    let Ok(disks) = sysinfo::Disks::new_with_refreshed_list_specifics(sysinfo::DiskRefreshKind::nothing()) else {
-        return String::new();
-    };
-    disks
-        .iter()
-        .filter(|d| is_inside(&real, &text(d.mount_point())))
-        .max_by_key(|d| d.mount_point().as_os_str().len())
-        .map(|d| d.file_system().to_string_lossy().into_owned())
-        .unwrap_or_default()
+fn drive_holds_links(real: &Path) -> bool {
+    crate::clean::volume_of(&text(real)).is_none_or(|v| kind_holds_links(&v.kind))
 }
 
-/// Linux says what kind of drive a folder is on by a number: exFAT's, or FAT's ("msdos", which FAT32 is too). Any
-/// other is named by nothing here.
+/// Whether a kind of drive, as Windows names it, holds links: NTFS and ReFS do; FAT, FAT32, exFAT and UDF have nowhere
+/// to keep them. One with no name can't be told, and counts as holding them.
+#[cfg(windows)]
+fn kind_holds_links(kind: &str) -> bool {
+    kind.is_empty() || kind.eq_ignore_ascii_case("NTFS") || kind.eq_ignore_ascii_case("ReFS")
+}
+
+/// Linux says what kind of drive a folder is on by a number: an exFAT or FAT one (FAT32 is FAT's) holds no links. Any
+/// other, or one that can't be told, counts as holding them.
 #[cfg(any(target_os = "linux", target_os = "android"))]
-fn file_system(real: &Path) -> String {
+fn drive_holds_links(real: &Path) -> bool {
     use rustix::fs::FsWord;
     const EXFAT: u32 = 0x2011_BAB0;
-    const MSDOS: u32 = 0x4D44;
-    match rustix::fs::statfs(real) {
-        Ok(s) if s.f_type == EXFAT as FsWord => "exfat".to_owned(),
-        Ok(s) if s.f_type == MSDOS as FsWord => "msdos".to_owned(),
-        _ => String::new(),
-    }
+    const FAT: u32 = 0x4D44;
+    !rustix::fs::statfs(real).is_ok_and(|s| s.f_type == EXFAT as FsWord || s.f_type == FAT as FsWord)
 }
 
-/// A Mac names the kind of drive a folder is on ("apfs", "exfat", "msdos").
-#[cfg(target_os = "macos")]
-fn file_system(real: &Path) -> String {
-    let Ok(s) = rustix::fs::statfs(real) else { return String::new() };
-    let name: Vec<u8> = s.f_fstypename.iter().take_while(|&&c| c != 0).map(|&c| c as u8).collect();
-    String::from_utf8_lossy(&name).into_owned()
-}
-
-/// Elsewhere it can't be told.
-#[cfg(not(any(windows, target_os = "linux", target_os = "android", target_os = "macos")))]
-fn file_system(_real: &Path) -> String {
-    String::new()
+/// Elsewhere it isn't asked: a Mac keeps links even on a FAT drive (as small files), and what its exFAT drives do
+/// isn't known here, so every drive counts as holding them.
+#[cfg(not(any(windows, target_os = "linux", target_os = "android")))]
+fn drive_holds_links(_real: &Path) -> bool {
+    true
 }
 
 /// Unix: the same device. Windows: the same drive letter or network share, where the folders really are.
@@ -306,6 +290,8 @@ pub enum CantMove {
     LinkOnlineOnly { link: String, file: String },
     /// A link in it would be made again as a link where it goes, on a drive that holds none (exFAT, FAT32): the link.
     NoLinksThere(String),
+    /// It's on a drive that holds no links, so the link that would take its place couldn't be made.
+    NoLinksHere,
     /// The drive hasn't room: what it has free, and what's needed.
     NoRoom { free: u64, needs: u64 },
     /// Windows said no (access denied): something has the folder open, or it needs administrator rights.
@@ -364,6 +350,10 @@ impl CantMove {
                 "{link} is a link, and the drive it would be copied to can't hold links (an exFAT or FAT32 drive \
                  can't), so it couldn't be made again there. Nothing was moved."
             ),
+            CantMove::NoLinksHere => "The folder is on a drive that can't hold links (an exFAT or FAT32 drive can't), \
+                                      so the link that takes its place when it moves couldn't be made there. Nothing \
+                                      was moved."
+                .to_owned(),
             CantMove::NoRoom { free, needs } => format!(
                 "That drive has {} free; this needs {} and some room to spare.",
                 size_text(*free),
@@ -429,6 +419,10 @@ fn problem_with(
     }
     if fs::symlink_metadata(format!("{from}{OLD_SUFFIX}")).is_ok() {
         return Some(CantMove::OldCopyThere);
+    }
+    // The link that takes its place is made where it is: found now, not once it's all copied.
+    if !drives.holds_links(from_path.parent().unwrap_or(from_path)) {
+        return Some(CantMove::NoLinksHere);
     }
     destination_problem(from, destination, (bytes, &left_out(from, moved)), moved, drives, false, mine, stop)
 }
@@ -1422,21 +1416,31 @@ pub(crate) fn copy_tree(
         let top = source_dir.as_path() == tree.from;
         // Listed once. (A file's size and time in the listing can be old by the time its turn comes: it's looked at
         // again just before it's copied, [`as_now`].)
-        let entries: Vec<fs::DirEntry> = match fs::read_dir(&source_dir).and_then(Iterator::collect) {
-            Ok(entries) => entries,
+        let listing = match fs::read_dir(&source_dir) {
+            Ok(listing) => listing,
             Err(_) if gone(&source_dir) => continue,
             Err(e) => return Err(failed(&source_dir, &e)),
         };
         // Counting for a copy not made yet: nothing is there, so the other drive isn't asked about each name.
         let copy_dir_there = fill != Fill::Count || !tree.as_new && fs::symlink_metadata(&copy_dir).is_ok();
-        // Names here that differ only in capitals, where something may be in the copy already (a copy just made has
-        // nothing else in it); and the names in the copy's folder, capitals and all, once one of them is asked about.
-        let twins = if fill != Fill::New && copy_dir_there { twins(&entries) } else { HashSet::new() };
+        // Where something may be in the copy already (a copy just made has nothing else in it), the names here that
+        // differ only in capitals are found first, so the folder is listed whole before anything is copied from it;
+        // otherwise it's listed as it's copied. The names in the copy's folder, capitals and all, are read once one of
+        // them is asked about.
+        let (entries, twins): (Box<dyn Iterator<Item = io::Result<fs::DirEntry>>>, _) =
+            if fill != Fill::New && copy_dir_there {
+                let whole = listed_whole(listing, &source_dir, stop)?;
+                let twins = twins(&whole);
+                (Box::new(whole.into_iter().map(Ok)), twins)
+            } else {
+                (Box::new(listing), HashSet::new())
+            };
         let mut names_there = None;
         for entry in entries {
             if stop.load(Ordering::Relaxed) {
                 return Err(CantMove::Stopped);
             }
+            let entry = entry.map_err(|e| failed(&source_dir, &e))?;
             let source = entry.path();
             let name = entry.file_name();
             // A half copy's marker, left in a copy that's in use now, is never copied on (into the old copy, say).
@@ -1554,11 +1558,11 @@ pub(crate) fn copy_tree(
                 copied.bytes = copied.bytes.saturating_add(rounded_up(listed.len(), tree.piece));
                 continue;
             }
-            // About to be copied: looked at again as it is now ([`as_now`]). The file a link leads to was just now.
+            // About to be copied: as it is now ([`as_now`]). The file a link leads to was looked at just now.
             let meta = if kind.is_symlink() {
                 listed
             } else {
-                let Some(meta) = as_now(file)? else { continue };
+                let Some(meta) = as_now(file, listed)? else { continue };
                 if is_online_only(&meta) {
                     return Err(CantMove::OnlineOnly);
                 }
@@ -1689,16 +1693,41 @@ fn makes_file_links() -> bool {
     }
 }
 
-/// A file about to be copied, as it is now: a folder's listing on Windows gives each file's size and time as they
-/// were when it was listed (or, for one something has open, when it was last closed), and a big folder takes a long
-/// while to copy, so a file that changed meanwhile would seem not to copy whole. `None` when it's gone, or isn't a file
-/// any more (a folder or a link took its name): it's passed over, and the next look at the folder finds what it is.
-fn as_now(file: &Path) -> Result<Option<fs::Metadata>, CantMove> {
-    match fs::symlink_metadata(file) {
-        Ok(meta) => Ok(meta.is_file().then_some(meta)),
-        Err(_) if gone(file) => Ok(None),
-        Err(e) => Err(failed(file, &e)),
+/// A file about to be copied, as it is now; `listed` is how its folder's listing found it. On Windows that's how it was
+/// when the folder was listed (or, for a file something has open, when it was last closed), and a big folder takes a
+/// long while to copy, so it's looked at again: a file that changed meanwhile would seem not to copy whole. (Elsewhere
+/// the listing looks at each file as it's asked.) `None` when it's gone: it's passed over, as a plugin's lock file is.
+/// One that's a folder or a link now stops the copy: it would be missing from the copy.
+fn as_now(file: &Path, listed: fs::Metadata) -> Result<Option<fs::Metadata>, CantMove> {
+    let now = if cfg!(windows) {
+        match fs::symlink_metadata(file) {
+            Ok(meta) => meta,
+            Err(_) if gone(file) => return Ok(None),
+            Err(e) => return Err(failed(file, &e)),
+        }
+    } else {
+        listed
+    };
+    if !now.is_file() {
+        return Err(CantMove::Failed(format!(
+            "{} turned into a folder or a link as it was about to be copied: something is changing the folder. Close \
+             your DAW and the plugin, then try again.",
+            text(file)
+        )));
     }
+    Ok(Some(now))
+}
+
+/// A folder's listing, whole, looking at Stop between names.
+fn listed_whole(listing: fs::ReadDir, folder: &Path, stop: &AtomicBool) -> Result<Vec<fs::DirEntry>, CantMove> {
+    let mut whole = Vec::new();
+    for entry in listing {
+        if stop.load(Ordering::Relaxed) {
+            return Err(CantMove::Stopped);
+        }
+        whole.push(entry.map_err(|e| failed(folder, &e))?);
+    }
+    Ok(whole)
 }
 
 /// The file a temporary file ([`part_of`]) was written for, by name, when `name` is one: what a copy writes over an
@@ -2173,7 +2202,22 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use super::{CantMove, Copied, Tree, Wait, Waiting, rest_after, write_through};
+    use super::{CantMove, Copied, Drives, SystemDrives, Tree, Wait, Waiting, rest_after, write_through};
+
+    #[test]
+    fn the_drive_the_temporary_folder_is_on_holds_links() {
+        assert!(SystemDrives.holds_links(&std::env::temp_dir()));
+        // Windows names its kind (NTFS, or ReFS on a Dev Drive), from its list of drives: a lookup that found no drive
+        // would count every drive as holding links.
+        #[cfg(windows)]
+        {
+            let kind = crate::clean::volume_of(&crate::text(&crate::really(&std::env::temp_dir()))).map(|v| v.kind);
+            assert!(kind.as_deref().is_some_and(|k| !k.is_empty() && super::kind_holds_links(k)), "{kind:?}");
+            for kind in ["FAT", "FAT32", "exFAT", "UDF"] {
+                assert!(!super::kind_holds_links(kind), "{kind}");
+            }
+        }
+    }
 
     #[test]
     fn writing_a_copy_through_to_the_disk_stops_when_you_press_stop() {

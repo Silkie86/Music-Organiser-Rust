@@ -111,20 +111,21 @@ impl Drives for SameDrive {
     }
 }
 
-/// Every folder is on its own drive, with this much room, and the drives hold no links (exFAT ones, say).
-struct NoLinks {
+/// Every folder is on its own drive, with this much room; the ones in `exfat` hold no links (exFAT drives, say).
+struct NoLinks<'a> {
     free: Option<u64>,
+    exfat: &'a Path,
 }
 
-impl Drives for NoLinks {
+impl Drives for NoLinks<'_> {
     fn same(&self, _a: &Path, _b: &Path) -> bool {
         false
     }
     fn free(&self, _path: &Path) -> Option<u64> {
         self.free
     }
-    fn holds_links(&self, _path: &Path) -> bool {
-        false
+    fn holds_links(&self, path: &Path) -> bool {
+        !path.starts_with(self.exfat)
     }
 }
 
@@ -684,12 +685,12 @@ fn a_file_link_counts_as_its_file_where_windows_may_copy_it_as_that() {
     assert_eq!(problem(&presets, &s(&d), 5, &OtherDrive { free: Some(HEADROOM + needs) }, &[], &stop), None);
     // A drive that holds no links (exFAT) can't take the link on any system, so its file is copied: room is kept for
     // it everywhere.
-    let short = NoLinks { free: Some(HEADROOM + 1004) };
+    let short = NoLinks { free: Some(HEADROOM + 1004), exfat: &d };
     assert_eq!(
         problem(&presets, &s(&d), 5, &short, &[], &stop),
         Some(CantMove::NoRoom { free: HEADROOM + 1004, needs: 1005 })
     );
-    assert_eq!(problem(&presets, &s(&d), 5, &NoLinks { free: Some(HEADROOM + 1005) }, &[], &stop), None);
+    assert_eq!(problem(&presets, &s(&d), 5, &NoLinks { free: Some(HEADROOM + 1005), exfat: &d }, &[], &stop), None);
 }
 
 #[test]
@@ -703,7 +704,7 @@ fn a_link_inside_stops_a_move_to_a_drive_that_cant_hold_links_before_anything_is
     fs::create_dir_all(&d).unwrap();
     let stop = AtomicBool::new(false);
     let from = s(&steam);
-    let exfat = NoLinks { free: None };
+    let exfat = NoLinks { free: None, exfat: &d };
     let refused = |link: &Path| {
         let why = CantMove::NoLinksThere(s(link));
         assert_eq!(problem(&from, &s(&d), 9, &exfat, &[], &stop).as_ref(), Some(&why));
@@ -713,15 +714,20 @@ fn a_link_inside_stops_a_move_to_a_drive_that_cant_hold_links_before_anything_is
         assert!(!is_link(&steam) && is_link(link));
     };
     // A link to a folder is made again as a link, which the drive can't hold.
-    let linked = steam.join("Keys/Linked");
+    let linked = steam.join("Keys").join("Linked");
     folder_link(&dir.join("Elsewhere"), &linked);
     refused(&linked);
     unlink(&linked);
     // So is a folder link that leads nowhere now (a drive that isn't plugged in).
-    let unplugged = steam.join("Keys/Unplugged");
+    let unplugged = steam.join("Keys").join("Unplugged");
     folder_link(&dir.join("Unplugged"), &unplugged);
     refused(&unplugged);
     unlink(&unplugged);
+    // A folder on a drive that holds no links can't move at all: the link that takes its place couldn't be made.
+    let here = NoLinks { free: None, exfat: &c };
+    assert_eq!(problem(&from, &s(&d), 9, &here, &[], &stop), Some(CantMove::NoLinksHere));
+    assert_eq!(move_folder(&from, &s(&d), 9, whose(), &here, &[], &nothing, &stop), Err(CantMove::NoLinksHere));
+    assert!(!d.join("STEAM").exists() && !is_link(&steam));
     // Without them it moves.
     let moved = move_folder(&from, &s(&d), 9, whose(), &exfat, &[], &nothing, &stop).unwrap();
     assert!(is_link(&steam) && moved.has_old_copy());
@@ -874,6 +880,37 @@ fn a_file_that_changes_while_the_folder_copies_is_copied_as_it_is_by_its_turn() 
     for name in &names {
         assert_eq!(fs::read_to_string(d.join("Library").join(name)).unwrap(), "rewritten, and longer");
     }
+}
+
+#[test]
+fn a_file_that_turns_into_a_folder_as_the_last_pass_copies_stops_the_move() {
+    let dir = fixtures("mo-space-move-file-to-folder");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    let library = c.join("Library");
+    let files: Vec<PathBuf> = (0..10).map(|n| library.join(format!("{n}.db"))).collect();
+    for file in &files {
+        write(file.parent().unwrap(), &file.file_name().unwrap().to_string_lossy(), "x");
+    }
+    fs::create_dir_all(&d).unwrap();
+    let stop = AtomicBool::new(false);
+    // Once the first pass has copied them all (a byte each), the plugin saves them again, so the second pass copies
+    // them too; as it copies the first, the plugin makes folders of their names.
+    let progress = |bytes: u64| {
+        if bytes == 10 {
+            files.iter().for_each(|file| fs::write(file, "xx").unwrap());
+        } else if bytes == 12 {
+            for file in &files {
+                fs::remove_file(file).unwrap();
+                write(file, "Inner.db", "inner");
+            }
+        }
+    };
+    let result = move_folder(&s(&library), &s(&d), 10, whose(), &ROOMY, &[], &progress, &stop);
+    let Err(CantMove::Failed(why)) = &result else { panic!("{result:?}") };
+    assert!(why.contains("turned into a folder or a link"), "{why}");
+    // Nothing moved: the copy, which would have gone into use without those folders, went.
+    assert!(!d.join("Library").exists() && !is_link(&library));
+    assert!(files.iter().all(|file| file.join("Inner.db").exists()));
 }
 
 #[test]

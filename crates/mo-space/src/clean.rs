@@ -202,28 +202,46 @@ fn network_mount(_path: &str) -> bool {
 }
 
 /// Whether a file or folder (where it really is) is on a USB stick or memory card. Windows keeps no Recycle Bin on
-/// one, so removing from it deletes for good. (A Mac and Linux keep a Trash on each drive.) The list of drives is read
-/// at most every few seconds, as one look at hundreds of plugins asks about each.
+/// one, so removing from it deletes for good. (A Mac and Linux keep a Trash on each drive.)
 #[cfg(windows)]
 pub(crate) fn on_removable(real: &str) -> bool {
+    // A list that can't be read says nothing is removable: as it was before this check.
+    volume_of(real).is_some_and(|v| v.removable)
+}
+
+/// A drive in Windows' list of drives: where it is, whether it's a USB stick or memory card, and its kind ("NTFS",
+/// "exFAT").
+#[cfg(windows)]
+#[derive(Clone)]
+pub(crate) struct Volume {
+    at: String,
+    pub(crate) removable: bool,
+    pub(crate) kind: String,
+}
+
+/// The drive a file or folder (where it really is) is on, from Windows' list of drives: the innermost one holding it
+/// (a drive can sit in a folder of another), or none when it isn't in the list (or the list can't be read). The list
+/// is read at most every few seconds, as one look at hundreds of plugins asks about each.
+#[cfg(windows)]
+pub(crate) fn volume_of(real: &str) -> Option<Volume> {
     use std::sync::{Mutex, PoisonError};
     use std::time::{Duration, Instant};
-    /// The drives as last read: where each is, and whether it's removable.
-    type Drives = Vec<(String, bool)>;
-    static READ: Mutex<Option<(Instant, Drives)>> = Mutex::new(None);
+    static READ: Mutex<Option<(Instant, Vec<Volume>)>> = Mutex::new(None);
     let mut read = READ.lock().unwrap_or_else(PoisonError::into_inner);
-    let (_, drives) = match read.take() {
-        Some((at, drives)) if at.elapsed() < Duration::from_secs(5) => read.insert((at, drives)),
+    let (_, volumes) = match read.take() {
+        Some((at, volumes)) if at.elapsed() < Duration::from_secs(5) => read.insert((at, volumes)),
         _ => {
-            // A list that can't be read says nothing is removable: as it was before this check.
             let disks = sysinfo::Disks::new_with_refreshed_list_specifics(sysinfo::DiskRefreshKind::nothing());
-            let drives = disks
-                .map_or_else(|_| Vec::new(), |d| d.iter().map(|d| (text(d.mount_point()), d.is_removable())).collect());
-            read.insert((Instant::now(), drives))
+            let volume = |d: &sysinfo::Disk| Volume {
+                at: text(d.mount_point()),
+                removable: d.is_removable(),
+                kind: d.file_system().to_string_lossy().into_owned(),
+            };
+            let volumes = disks.map_or_else(|_| Vec::new(), |d| d.iter().map(volume).collect());
+            read.insert((Instant::now(), volumes))
         }
     };
-    // The innermost drive holding it decides: a drive can sit in a folder of another.
-    drives.iter().filter(|(at, _)| is_inside(real, at)).max_by_key(|(at, _)| at.len()).is_some_and(|(_, r)| *r)
+    volumes.iter().filter(|v| is_inside(real, &v.at)).max_by_key(|v| v.at.len()).cloned()
 }
 
 /// A Mac and Linux keep a Trash on each drive, a USB stick too.

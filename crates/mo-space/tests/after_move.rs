@@ -87,18 +87,20 @@ impl Drives for SameDrive {
     }
 }
 
-/// Every folder is on its own drive, and the drives hold no links (exFAT ones, say).
-struct NoLinks;
+/// Every folder is on its own drive; the ones in `exfat` hold no links (exFAT drives, say).
+struct NoLinks<'a> {
+    exfat: &'a Path,
+}
 
-impl Drives for NoLinks {
+impl Drives for NoLinks<'_> {
     fn same(&self, _a: &Path, _b: &Path) -> bool {
         false
     }
     fn free(&self, _path: &Path) -> Option<u64> {
         None
     }
-    fn holds_links(&self, _path: &Path) -> bool {
-        false
+    fn holds_links(&self, path: &Path) -> bool {
+        !path.starts_with(self.exfat)
     }
 }
 
@@ -563,7 +565,7 @@ fn linking_again_finds_a_link_the_copys_drive_cant_hold_before_the_copy_changes(
     folder_link(&dir.join("Shared"), &steam.join("Shared"));
     // The copy's drive holds no links (exFAT): that's found while the room is counted, before anything changes.
     let stop = AtomicBool::new(false);
-    let result = link_again(&moved, &all, 5, false, &NoLinks, &nothing, &stop);
+    let result = link_again(&moved, &all, 5, false, &NoLinks { exfat: &d }, &nothing, &stop);
     assert_eq!(result.as_ref().err(), Some(&CantMove::NoLinksThere(s(&steam.join("Shared")))), "{result:?}");
     let copy = d.join("STEAM");
     assert_eq!(read(&copy.join("Pad.db")), "pad");
