@@ -2,7 +2,7 @@
 //! first.
 
 use std::io;
-use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, PoisonError, mpsc};
 use std::thread::JoinHandle;
 
 /// Starts `work` on a thread of its own called `name`, at low priority. Only the watchdog, which must notice the
@@ -37,6 +37,36 @@ pub fn on_pool<T: Send>(work: impl FnOnce() -> T + Send) -> T {
 /// as it is.
 pub fn lower_priority() {
     let _ = thread_priority::set_current_thread_priority(thread_priority::ThreadPriority::Min);
+}
+
+/// Lets go of `value` on a low-priority thread instead of here (rule 12, no UI waits). Something made of millions of
+/// small parts, as half a million sounds each with their own names, tags and analysis are, takes long enough to free
+/// that letting it go on the window's thread freezes the window: on Solomon's PC an old list of 453,885 sounds took
+/// 1.4 s. One thread frees for the whole app, one thing at a time, in the order they come; where it can't be started,
+/// `value` is freed here after all.
+pub fn free_later<T: Send + 'static>(value: T) {
+    static FREEING: LazyLock<Option<mpsc::Sender<Box<dyn Send>>>> = LazyLock::new(|| {
+        let (to_free, freeing) = mpsc::channel::<Box<dyn Send>>();
+        spawn("Freeing", move || freeing.into_iter().for_each(drop)).ok().map(|_| to_free)
+    });
+    #[cfg(test)]
+    HANDED_OVER.with(|h| h.set(h.get() + 1));
+    if let Some(to_free) = FREEING.as_ref() {
+        // Only if the thread has gone (it never ends by itself) does the value come back here, to be freed here.
+        let _ = to_free.send(Box::new(value));
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many things this thread has handed to [`free_later`], for the tests.
+    static HANDED_OVER: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many things this thread has handed to [`free_later`].
+#[cfg(test)]
+pub(crate) fn handed_over() -> usize {
+    HANDED_OVER.with(std::cell::Cell::get)
 }
 
 /// A low-priority thread that does one job at a time. Asking while it's busy replaces the job still waiting, so after
@@ -127,6 +157,20 @@ mod tests {
         drop(worker);
         // The thread stops and its sender goes with it.
         assert!(done.recv_timeout(Duration::from_secs(5)).is_err());
+    }
+
+    #[test]
+    fn what_is_let_go_later_is_freed_on_the_freeing_thread() {
+        // Says which thread it was freed on.
+        struct Noted(mpsc::Sender<Option<String>>);
+        impl Drop for Noted {
+            fn drop(&mut self) {
+                let _ = self.0.send(std::thread::current().name().map(str::to_owned));
+            }
+        }
+        let (noted, freed_on) = mpsc::channel();
+        free_later(Noted(noted));
+        assert_eq!(freed_on.recv_timeout(Duration::from_secs(5)).unwrap().as_deref(), Some("Freeing"));
     }
 
     #[test]
