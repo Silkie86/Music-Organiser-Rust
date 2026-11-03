@@ -10,9 +10,10 @@ mod sky;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
@@ -21,7 +22,7 @@ use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
 use mo_app::shortcuts::{Shortcuts, what_of};
 use mo_app::sounds::{self as list, Filters, Length, Order, SoundList};
-use mo_app::{log, sweep_timing, year_strip};
+use mo_app::{log, sweep_timing, to_bitwig, year_strip};
 use mo_audio::play::Player;
 use mo_library::UsageRules;
 use mo_library::songs::thousands;
@@ -472,6 +473,7 @@ struct Read {
     view: Option<String>,
     count: Option<String>,
     export_folder: Option<String>,
+    drum_machine: Option<String>,
     autoplay: Option<String>,
 }
 
@@ -528,6 +530,8 @@ struct Settings {
     count: Option<String>,
     /// Where exports (kits) go.
     export_folder: Option<String>,
+    /// The Drum Machine's ID the C# app read from Bitwig's files, for kits sent to Bitwig.
+    drum_machine: Option<String>,
     autoplay: Option<String>,
     rules: UsageRules,
     weights: LikedWeights,
@@ -550,6 +554,7 @@ impl Settings {
             view: get(VIEW_KEY),
             count: get(COUNT_KEY),
             export_folder: get(EXPORT_FOLDER_KEY),
+            drum_machine: get(to_bitwig::DRUM_MACHINE_KEY),
             autoplay: get(AUTOPLAY_KEY),
             rules: UsageRules { needs_notes: on(USED_NEEDS_NOTES_KEY), not_muted_in_newest: on(USED_NOT_MUTED_KEY) },
             weights: LikedWeights::from_json(get(LIKED_WEIGHTS_KEY).as_deref()),
@@ -607,6 +612,7 @@ fn read_all(sounds_db: &Path, library_db: &Path, send: impl Fn(Step)) {
         view: settings.view.clone(),
         count: settings.count.clone(),
         export_folder: settings.export_folder.clone(),
+        drum_machine: settings.drum_machine.clone(),
         autoplay: settings.autoplay.clone(),
     })));
     let (Some(list), Some((features, clap, analysed))) = (list, fingerprints) else { return };
@@ -792,6 +798,7 @@ fn loaded(app: &AppWindow, read: Result<Read, String>) {
         let mut p = p.borrow_mut();
         p.re.count = count;
         p.kit.export_folder = read.export_folder;
+        p.kit.drum_machine = read.drum_machine;
     });
     show(app, read.library, read.view.as_deref(), read.autoplay.as_deref());
 }
@@ -831,8 +838,16 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
 
 /// What the picked sound offers besides Play: (its words, its id in the shortcut list). The card shows them as
 /// buttons after Play (Solomon's F12 note, 2026-11-02 03:28) and the right-click menu lists them under Play, from this
-/// one list so the two can't drift apart. Send to Bitwig joins once the DAW link is in.
-const CARD_ACTIONS: &[(&str, &str)] = &[("Show in folder", "sounds.reveal"), ("Copy path", "sounds.copyPath")];
+/// one list so the two can't drift apart.
+const CARD_ACTIONS: &[(&str, &str)] =
+    &[("Send to Bitwig", TO_BITWIG), ("Show in folder", "sounds.reveal"), ("Copy path", "sounds.copyPath")];
+
+/// Send to Bitwig's id in the shortcut list (the C# app's).
+const TO_BITWIG: &str = "sounds.toBitwig";
+
+/// A sound is on its way to Bitwig: Send to Bitwig waits meanwhile, as it did in the C# app, so a second press doesn't
+/// put a second track into the project.
+static SENDING: AtomicBool = AtomicBool::new(false);
 
 /// The card's buttons and menu again, with keys changed in Settings.
 pub fn show_keys(app: &AppWindow, shortcuts: &Shortcuts) {
@@ -1738,7 +1753,7 @@ fn playing_changed(app: &AppWindow) {
 pub fn run_action(app: &AppWindow, id: &str) -> bool {
     let picked = PAGE.with(|p| {
         let p = p.borrow();
-        p.picked.and_then(|at| p.list.sound(at)).map(|s| (s.path.clone(), mo_app::shell::folder_of(&s.path).to_owned()))
+        p.picked.and_then(|at| p.list.sound(at)).map(|s| (s.path.clone(), s.name().to_owned()))
     });
     let feed = FEED.with(|f| f.borrow().clone());
     match (id, picked, feed) {
@@ -1748,11 +1763,59 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
             }
             stop(app);
         }
-        ("sounds.reveal", Some((path, folder)), Some(feed)) => crate::files::reveal(&feed, &path, &folder),
+        (TO_BITWIG, Some((path, name)), Some(feed)) => send_to_bitwig(app, &feed, path, name),
+        ("sounds.reveal", Some((path, _)), Some(feed)) => {
+            crate::files::reveal(&feed, &path, mo_app::shell::folder_of(&path));
+        }
         ("sounds.copyPath", Some((path, _)), Some(feed)) => crate::files::copy_path(&feed, &path),
         _ => return false,
     }
     true
+}
+
+/// Puts a sound on a Sampler on a new track in the project open in Bitwig, on a thread of its own, as its file name
+/// (without the extension) names it. Its card shows at once and says how it went. While it goes, Send to Bitwig waits.
+fn send_to_bitwig(app: &AppWindow, feed: &Feed, path: String, name: String) {
+    if SENDING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    show_sending(app, true);
+    let job = to_bitwig::sound_card(feed, &name);
+    let weak = app.as_weak();
+    let sent = background::spawn("Send to Bitwig", move || {
+        // A panic in it is logged as a crash and fails the card as it goes; Send to Bitwig still comes back.
+        let to = to_bitwig::Bitwig::default();
+        let _ = std::panic::catch_unwind(AssertUnwindSafe(|| to_bitwig::send_sound(job, &to, &path, &name)));
+        SENDING.store(false, Ordering::Release);
+        let _ = weak.upgrade_in_event_loop(|app| show_sending(&app, false));
+    });
+    // Its card was taken into the thread, so it fails by itself ("It stopped before it finished").
+    if let Err(e) = sent {
+        log::error("Sounds", &format!("Couldn't start sending to Bitwig: {e}"));
+        SENDING.store(false, Ordering::Release);
+        show_sending(app, false);
+    }
+}
+
+/// Send to Bitwig on the card and on the right-click menu: greyed, saying "Sending…", while a sound is on its way.
+fn show_sending(app: &AppWindow, sending: bool) {
+    let data = app.global::<SoundsData>();
+    let text = CARD_ACTIONS.iter().find(|a| a.1 == TO_BITWIG).map_or("", |a| a.0);
+    let actions = data.get_actions();
+    for i in 0..actions.row_count() {
+        if let Some(mut a) = actions.row_data(i).filter(|a| a.id == TO_BITWIG) {
+            a.enabled = !sending;
+            a.text = if sending { "Sending…".into() } else { text.into() };
+            actions.set_row_data(i, a);
+        }
+    }
+    let menu = data.get_menu();
+    for i in 0..menu.row_count() {
+        if let Some(mut m) = menu.row_data(i).filter(|m| m.id == TO_BITWIG) {
+            m.enabled = !sending;
+            menu.set_row_data(i, m);
+        }
+    }
 }
 
 #[cfg(test)]
