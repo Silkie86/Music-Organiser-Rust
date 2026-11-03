@@ -638,8 +638,8 @@ mod tests {
         // 450,000 stars in 40 clumps of all sizes, as the render tests lay them out. Flying in a percent of zoom at a
         // time, to the middle, into a clump, and to a corner where clumps' edges leave the view, nothing jumps. Where
         // the view's stars change quickly (into the corner, the crowded edges leave it as it flies in), the stars come
-        // apart over a tenth of a doubling of zoom instead of a whole one; but each starts as bright as the painted
-        // dot it takes over from, so the view's brightness holds (on the card it changed by under 0.3 of 255 a step).
+        // apart within about a tenth more zoom instead of twice the zoom; but each starts as bright as the painted dot
+        // it takes over from, so the view's brightness holds (on the card it changed by under 0.3 of 255 a step).
         let mut seed = 12345u64;
         let mut rnd = || {
             seed ^= seed << 13;
