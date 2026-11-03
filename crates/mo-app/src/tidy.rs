@@ -346,7 +346,9 @@ mod tests {
         assert_eq!(done.failed, 0);
         let left = names(&logs);
         assert_eq!(left.iter().filter(|n| is_crash_log(n)).count(), CRASH_LOGS_KEPT + 1, "30 files and the folder");
-        assert!(left.contains(&"crash-1700000034.log".to_owned()) && !left.contains(&"crash-1700000004.log".to_owned()));
+        assert!(
+            left.contains(&"crash-1700000034.log".to_owned()) && !left.contains(&"crash-1700000004.log".to_owned())
+        );
         assert!(!left.contains(&"crash-4000000000.log".to_owned()), "the one dated after now went first");
         assert_eq!(left.iter().filter(|n| is_report(n, "twin-report-")).count(), REPORTS_KEPT);
         assert_eq!(left.iter().filter(|n| is_report(n, "midi-twin-")).count(), REPORTS_KEPT);

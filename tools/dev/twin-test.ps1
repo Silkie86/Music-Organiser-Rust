@@ -40,9 +40,14 @@ if ($LASTEXITCODE -ne 0) { throw 'The C# half did not build.' }
 $Dll = Join-Path $Helper 'twin-cs.dll'
 # A copy of library.db left by a twin test that was stopped part way (Ctrl+C, or the window closed) holds the
 # library's song names and paths, and would stop the songs step ("a file is already there"): it goes first. Only that
-# file and SQLite's own files beside it, in this script's own folder (rule 28).
+# file and SQLite's own files beside it, in this script's own folder, and only when each is a plain file: never a
+# folder, a link or a junction of that name (rule 28).
 foreach ($end in @('', '-wal', '-shm', '-journal')) {
-  Remove-Item -LiteralPath (Join-Path $Helper "library-copy.db$end") -Force -ErrorAction SilentlyContinue
+  $Left = Join-Path $Helper "library-copy.db$end"
+  $Item = Get-Item -LiteralPath $Left -Force -ErrorAction SilentlyContinue
+  if ($Item -and -not $Item.PSIsContainer -and -not ($Item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+    Remove-Item -LiteralPath $Left -Force -ErrorAction SilentlyContinue
+  }
 }
 
 if (-not $Folders) {

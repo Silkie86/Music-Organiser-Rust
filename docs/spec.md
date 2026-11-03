@@ -726,6 +726,9 @@ Each phase ends with something you can open and try. The C# app stays your daily
 
 ## 14. Rules carried over (one list)
 
+These are the first 22, as the rebuild began. The rules in force, with the later ones (23 on), are in `CLAUDE.md` and
+`docs/handover/memory/rust-rebuild-rules.md`; where they differ, those win.
+
 1. Offline, native, no web UI. Windows first, Mac and Linux ready.
 2. Never move or delete samples. Duplicates only hide in the app.
 3. Never change an original project: Fix writes "(fixed)" beside it.
