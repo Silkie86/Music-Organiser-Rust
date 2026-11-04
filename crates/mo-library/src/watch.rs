@@ -29,6 +29,9 @@ pub struct Changes {
     pub files: Vec<String>,
     /// Watched folders where too much changed to name each file, or a folder moved or went: walk these again.
     pub overflowed: Vec<String>,
+    /// Paths that went without the system saying whether each was a file or a folder (Windows never says), and that
+    /// may have been a folder: the saves listed inside one are looked at again, with no walk.
+    pub went: Vec<String>,
 }
 
 /// The most project files a folder moved in is listed by; past that the watched folder is walked instead.
@@ -38,9 +41,10 @@ const MOVED_IN_LIMIT: usize = 5000;
 /// past that the watched folder is walked instead, by the scan's own threads.
 const MOVED_IN_LOOK: usize = 20_000;
 
-/// File types that are often there in music folders and are never folders: a path of one of these that went without
-/// the system saying what it was is taken for a file. Any other name that went ("Beat.v2", "Mix.old") may have been a
-/// folder, and its watched folder is walked again (Windows never says which, so a folder can only be told by its name).
+/// File types that are often there in music folders and are never folders: a path of one of these (or any audio) that
+/// went without the system saying what it was is taken for a file. Any other name that went ("Beat.v2", "Mix.old") may
+/// have been a folder: the saves listed inside it are looked at again (Windows never says which, and a folder that's
+/// gone can't be asked).
 const FILE_TYPES: [&str; 44] = [
     "7z",
     "aif",
@@ -87,6 +91,9 @@ const FILE_TYPES: [&str; 44] = [
     "wav",
     "zip",
 ];
+
+/// The most paths that went kept for a look; past that, their watched folder is walked instead.
+const MOST_WENT: usize = 1000;
 
 /// How long changes wait at most while the folders stay busy (a long recording, a big unzip): a save made meanwhile
 /// is reported after this, not only once everything stops.
@@ -168,20 +175,25 @@ struct Pending {
     /// By each path's [`path_key`], so one file named in two cases or with other slashes is one change.
     files: BTreeMap<String, String>,
     overflowed: BTreeSet<String>,
+    went: BTreeMap<String, String>,
 }
 
 impl Pending {
     fn is_empty(&self) -> bool {
-        self.files.is_empty() && self.overflowed.is_empty()
+        self.files.is_empty() && self.overflowed.is_empty() && self.went.is_empty()
     }
 
     fn len(&self) -> usize {
-        self.files.len() + self.overflowed.len()
+        self.files.len() + self.overflowed.len() + self.went.len()
     }
 
     fn take(&mut self) -> Changes {
         let p = std::mem::take(self);
-        Changes { files: p.files.into_values().collect(), overflowed: p.overflowed.into_iter().collect() }
+        Changes {
+            files: p.files.into_values().collect(),
+            overflowed: p.overflowed.into_iter().collect(),
+            went: p.went.into_values().collect(),
+        }
     }
 }
 
@@ -339,10 +351,16 @@ impl Gather {
     fn gone(&mut self, path: &str) {
         if (self.wanted)(path) {
             self.file(path);
-        } else if may_be_folder(path) {
+        } else if may_be_folder(path) && self.root_of(path).is_some() && !is_ignored(&format!("{path}/x"), &self.roots)
+        {
             // Perhaps a folder: its files aren't named one by one, and it can't be told from a file any more except
-            // by its name. A hidden file (".DS_Store") is never taken for one.
-            self.overflow(Some(path));
+            // by its name. A hidden file (".DS_Store") is never taken for one, nor one in a folder the scan skips.
+            if self.changes.went.len() >= MOST_WENT {
+                self.overflow(Some(path));
+            } else {
+                self.changes.went.entry(path_key(path)).or_insert_with(|| path.to_owned());
+                self.touched = true;
+            }
         }
     }
 }
@@ -355,7 +373,7 @@ fn may_be_folder(path: &str) -> bool {
     }
     looks_like_folder(path) || {
         let ext = mo_formats::paths::extension(name).get(1..).unwrap_or_default();
-        !FILE_TYPES.iter().any(|t| t.eq_ignore_ascii_case(ext))
+        !FILE_TYPES.iter().any(|t| t.eq_ignore_ascii_case(ext)) && !mo_formats::textscan::is_audio_path(path)
     }
 }
 
@@ -433,7 +451,8 @@ mod tests {
         g.take_in(event(EventKind::Remove(RemoveKind::Any), &["/m/.DS_Store"]));
         let c = g.changes.take();
         assert_eq!(c.files, ["/m/a.flp", "/m/b.flp", "/m/Song_2.flp"]);
-        assert_eq!(c.overflowed, ["/m/inner"]);
+        assert!(c.overflowed.is_empty());
+        assert_eq!(c.went, ["/m/inner/Old songs"]);
         assert!(g.changes.is_empty());
         g.take_in(Err(notify::Error::generic("too many changes")));
         assert_eq!(g.changes.take().overflowed, ["/m"]);
@@ -465,11 +484,21 @@ mod tests {
         let mut g = gather(&["/m"]);
         for gone in ["/m/Beat.v2", "/m/Mix.old", "/m/Song.wip", "/m/Drums"] {
             g.take_in(event(EventKind::Remove(RemoveKind::Any), &[gone]));
-            assert_eq!(g.changes.take().overflowed, ["/m"], "{gone}");
+            let c = g.changes.take();
+            assert_eq!((c.went.as_slice(), c.overflowed.len()), ([gone.to_owned()].as_slice(), 0), "{gone}");
         }
-        for file in ["/m/kick.wav", "/m/Song.flp.tmp", "/m/notes.TXT", "/m/.DS_Store", "/m/Kick.asd"] {
+        for file in [
+            "/m/kick.wav",
+            "/m/Loop.flac",
+            "/m/Song.flp.tmp",
+            "/m/notes.TXT",
+            "/m/.DS_Store",
+            "/m/Kick.asd",
+            "/m/Song/Backup/Old.v2",
+            "/elsewhere/Beat.v2",
+        ] {
             g.take_in(event(EventKind::Remove(RemoveKind::Any), &[file]));
-            assert!(g.changes.take().overflowed.is_empty(), "{file}");
+            assert!(g.changes.is_empty(), "{file}");
         }
     }
 }

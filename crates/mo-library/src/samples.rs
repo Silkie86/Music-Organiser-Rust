@@ -145,7 +145,12 @@ impl SampleLocator {
             // A sample saved as a bare file name has no folder to match: those folders hold thousands of sounds, so
             // the name alone counts only when one file in them has it.
             None => {
-                let mut all = content.iter().flat_map(|c| self.all_in(c, name));
+                // Each file once, across every folder: they can hold one another (Bitwig Studio and its Library).
+                let mut seen = HashSet::new();
+                let mut all = content
+                    .iter()
+                    .flat_map(|c| self.named_in(c, name))
+                    .filter(|f| seen.insert(case::key(f)) && Path::new(f.as_str()).is_file());
                 match (all.next(), all.next()) {
                     (Some(only), None) => Some(only),
                     _ => None,
@@ -161,19 +166,10 @@ impl SampleLocator {
         self.tree(root, depth).get()?.find(name, folder)
     }
 
-    /// Every file called `name` that's still there in the tree under `root` (each one once).
-    fn all_in(&self, root: &str, name: &str) -> Vec<String> {
+    /// Every file called `name` the tree under `root` had when it was read.
+    fn named_in(&self, root: &str, name: &str) -> Vec<String> {
         let tree = self.tree(root, usize::MAX);
-        let Some(index) = tree.get() else { return Vec::new() };
-        let mut seen = HashSet::new();
-        index
-            .by_name
-            .get(&case::key(name))
-            .into_iter()
-            .flatten()
-            .filter(|f| seen.insert(case::key(f)) && Path::new(f.as_str()).is_file())
-            .cloned()
-            .collect()
+        tree.get().and_then(|index| index.by_name.get(&case::key(name)).cloned()).unwrap_or_default()
     }
 
     fn tree(&self, folder: &str, depth: usize) -> Tree {

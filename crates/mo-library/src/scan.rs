@@ -267,10 +267,11 @@ fn list(dir: &str, wanted: &(dyn Fn(&str) -> bool + Sync), skip: &(dyn Fn(&str, 
             };
             if meta.is_dir() {
                 if !skip(file_name(&path), parent) {
-                    match fs::canonicalize(&path).ok().and_then(|r| r.to_str().map(path_key)) {
-                        Some(real) => out.links.push((path, real)),
-                        None => out.unreadable.push(path),
-                    }
+                    // One that works but can't be worked out (some virtual drives) is walked as it's written: the
+                    // depth limit still stops a link back up its own tree.
+                    let real = fs::canonicalize(&path).ok().and_then(|r| r.to_str().map(path_key));
+                    let real = real.unwrap_or_else(|| path_key(&path));
+                    out.links.push((path, real));
                 }
             } else if wanted(&path) {
                 out.files.push(FoundFile { size: size(&meta), mtime: mtime(&meta), path });
