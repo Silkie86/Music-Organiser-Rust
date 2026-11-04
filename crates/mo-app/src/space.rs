@@ -353,7 +353,7 @@ impl Opens {
 }
 
 /// One part on a card: its name, what it holds and its size; and for a part you can act on, its tick, what happened to
-/// it, a file it opens and a link that shows more.
+/// it, a file it opens, a link that shows more, and one that puts back what a clean-up sent to the Recycle Bin.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Part {
     pub name: String,
@@ -361,8 +361,11 @@ pub struct Part {
     pub size: String,
     /// Listed under the part above it (a save under its project), a step in.
     pub under: bool,
-    /// What its tick is for (a save) and whether it's ticked; None when it has no tick.
-    pub tick: Option<(PathBuf, bool)>,
+    /// What its tick is for (a save, a spare copy, or every copy of a format that can go) and whether it's ticked;
+    /// None when it has no tick.
+    pub tick: Option<(Vec<PathBuf>, bool)>,
+    /// Some of what its tick is for are ticked, not all: its tick shows a dash, and ticking it ticks them all.
+    pub partly: bool,
     /// What happened to it, or what to know about it; "" for nothing. `problem` shows it as a problem.
     pub status: String,
     pub problem: bool,
@@ -371,6 +374,8 @@ pub struct Part {
     pub open: Option<(Opens, PathBuf)>,
     /// Its link that shows or hides more under it: its words, and what it's for (a project's folder).
     pub more: Option<(String, PathBuf)>,
+    /// Its Put back link, for a clean-up whose files are in the Recycle Bin: which clean-up (its kind, and when it ran).
+    pub put_back: Option<(String, i64)>,
 }
 
 /// The picked line's card.

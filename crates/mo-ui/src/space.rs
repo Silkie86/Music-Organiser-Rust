@@ -1,10 +1,12 @@
 //! The Space page: the drives your projects, samples, backup and the app's own files are on, how full each is, what
 //! the app's own files take (part 1), Bitwig's copies of Library multisamples in your projects (part 2), with Fix for
 //! the saves you tick, the old copies moving plugin folders to another drive left (part 3), and the spare plugin copies
-//! (part 4). mo_app's `space`, `space_bitwig`, `space_old` and `space_spare` decide every word. It looks the first time
-//! the page shows, on low-priority threads, and again when it shows after five minutes or on Measure again, so nothing
-//! on the window's thread waits for a disk (rule 12). Only Fix writes, and only new "(fixed)" projects beside the saves
-//! you ticked; the library is only read.
+//! (part 4), with Remove for the ones you tick, and the Recycle Bin, with Put back for what the app put there. mo_app's
+//! `space`, `space_bitwig`, `space_old`, `space_spare` and `space_bin` decide every word. It looks the first time the
+//! page shows, on low-priority threads, and again when it shows after five minutes or on Measure again, so nothing on
+//! the window's thread waits for a disk (rule 12). Fix only writes new "(fixed)" projects beside the saves you ticked;
+//! Remove sends the spare copies you ticked to the Recycle Bin, each checked again first, and Put back returns them
+//! (`mo_app::binned` keeps what went, so Put back works after a restart too). The library is only read.
 
 use std::cell::RefCell;
 use std::panic::AssertUnwindSafe;
@@ -15,17 +17,21 @@ use std::time::{Duration, Instant};
 
 use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
+use mo_app::binned::{self, Kept};
 use mo_app::places::Place;
 use mo_app::shortcuts::what_of;
 use mo_app::space::{self, Drive, Fill, Holds, Opens, Part};
+use mo_app::space_bin::{self, BIN, CAN_PUT_BACK, PutBacks};
 use mo_app::space_bitwig::{self, BITWIG_COPIES, Copies, Fixes, Fixing, ToFix};
 use mo_app::space_old::{self, Found, OLD_COPIES};
-use mo_app::space_spare::{self, SPARE_COPIES};
+use mo_app::space_spare::{self, Removing, SPARE_COPIES, Stage};
 use mo_app::{backup, log, paths, shell};
 use mo_catch::catch_crash;
 use mo_library::folders::FolderList;
 use mo_space::app_files::{self, AppFilesPart};
 use mo_space::bitwig::{self, LibraryIndex};
+use mo_space::clean::{self, Done, Problem, SystemBin};
+use mo_space::spare::{SpareCopy, Used};
 use mo_space::{plugin_space, plugins};
 use slint::{ComponentHandle, ModelRc, VecModel};
 
@@ -38,11 +44,14 @@ const FRESH: Duration = Duration::from_secs(5 * 60);
 /// How often a look for Bitwig copies tells the window how far it is, at most (rule 12).
 const PROGRESS_EVERY: Duration = Duration::from_millis(100);
 
-/// The buttons' ids, from the one shortcut list (rule 15): Measure again, Show in folder and Fix are the page's own
-/// (`mo_app::shortcuts::SPACE_ACTIONS`); the Recycle Bin is the app-wide action, so its button shows the same key.
+/// The buttons' ids, from the one shortcut list (rule 15): Measure again, Show in folder, Fix, Remove and Put back are
+/// the page's own (`mo_app::shortcuts::SPACE_ACTIONS`); the Recycle Bin is the app-wide action, so its button shows
+/// the same key.
 const MEASURE: &str = "space.measure";
 const REVEAL: &str = "space.reveal";
 const FIX: &str = "space.fix";
+const REMOVE: &str = "space.remove";
+const PUT_BACK: &str = "space.putBack";
 const RECYCLE_BIN: &str = "app.recycleBin";
 
 /// The name the library knows Bitwig by ("Bitwig Studio"), for the program picked for it in Settings.
@@ -88,7 +97,8 @@ struct SpareAsk {
 /// from the look for Bitwig copies, how far it is, then what it found; and what the looks for old copies and spare
 /// plugin copies found. A look that crashed (the crash is logged) says so, so the page doesn't wait for it for ever;
 /// so does a look for spare copies that couldn't read the library (said in the log). Fix brings back how each save
-/// went, then that it has finished, always, even when it crashed.
+/// went, then that it has finished, always, even when it crashed; so do Remove and Put back, once each is done. What
+/// the app put in the Recycle Bin that's still there comes after a look, a removal or a put back.
 enum Step {
     Drives(u64, Vec<Drive>),
     AppFiles(u64, Vec<AppFilesPart>),
@@ -102,6 +112,13 @@ enum Step {
     SpareNone(u64),
     Fixed(PathBuf, Fixing),
     FixDone,
+    Kept(Kept),
+    /// Remove has finished: when it ran (as the list of what the app put in the Recycle Bin keeps it), what went and
+    /// what stayed, and that list with it now (none when keeping it stopped with an error, which is logged).
+    SpareSent(i64, Done, Option<Kept>),
+    /// A put back has finished: which clean-up (its kind and when it ran), what couldn't come back, and what the app put
+    /// in the bin that's still there, looked at once it was done (none when that stopped with an error).
+    PutBack(String, i64, Vec<Problem>, Option<Kept>),
 }
 
 /// One of the page's looks: its low-priority thread (started the first time a look is asked for), how many looks were
@@ -173,6 +190,13 @@ struct Page {
     spare_look: Looks<SpareAsk>,
     spare: Option<space_spare::Found>,
     spare_looking: bool,
+    /// Remove for spare copies: the ones you unticked, and how a removal went.
+    removing: Removing,
+    /// What the app's clean-ups put in the Recycle Bin that's still there: none until the bin has been looked in. Of
+    /// two that arrive, the later change wins ([`Kept::seq`]).
+    kept: Option<Kept>,
+    /// Put back, from the Recycle Bin card or the spare copies card: the one on, and what couldn't come back.
+    put_backs: PutBacks,
     /// The picked line's id, or "" when none is.
     picked: String,
     /// The parts on the card on show, for its ticks and links (they say which part by its place). The card's rows
@@ -188,6 +212,11 @@ enum Changed {
     Wins,
     /// Fix has finished: the page looks for copies again, to see what Fix wrote as it is on disk.
     LookAgain,
+    /// Also taking room and the card: what the app put in the Recycle Bin that's still there.
+    Also,
+    /// Biggest wins first, Also taking room and the card: a removal or a put back has finished, with what's in the
+    /// Recycle Bin now. After a put back of spare copies, the page looks for them again (`look`).
+    Bin { look: bool },
     /// Nothing: an older look's step, or how far a later look for Bitwig copies is while the last one's stay on show.
     Nothing,
 }
@@ -229,8 +258,15 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed) {
         let Some(app) = weak.upgrade() else { return };
         PAGE.with(|p| {
             let mut p = p.borrow_mut();
-            if let Some((save, _)) = part_at(&p, at).and_then(|part| part.tick.clone()) {
-                p.fixes.ticks.insert(save, ticked);
+            // A save's tick, a spare copy's, or a format's for all its copies that can go.
+            if let Some((paths, _)) = part_at(&p, at).and_then(|part| part.tick.clone()) {
+                if p.picked == SPARE_COPIES {
+                    p.removing.tick(&paths, ticked);
+                } else {
+                    for save in paths {
+                        p.fixes.ticks.insert(save, ticked);
+                    }
+                }
             }
             // The tick box ticked itself, which undoes its tie to the card's rows: made again, they tie it again.
             p.card_parts.clear();
@@ -238,12 +274,18 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed) {
         show_card(&app);
     });
     // A fixed project's link opens it in Bitwig; an old copy's or a spare copy's shows it in its folder; a format's
-    // opens the folder its spare copies are all in.
+    // opens the folder its spare copies are all in; a clean-up's on the Recycle Bin card puts it back.
+    let weak = app.as_weak();
     data.on_open_part(move |at| {
-        let (open, feed) = PAGE.with(|p| {
+        let (open, put_back, feed) = PAGE.with(|p| {
             let p = p.borrow();
-            (part_at(&p, at).and_then(|part| part.open.clone()), p.feed.clone())
+            let part = part_at(&p, at);
+            (part.and_then(|part| part.open.clone()), part.and_then(|part| part.put_back.clone()), p.feed.clone())
         });
+        if let (Some((kind, when)), Some(feed), Some(app)) = (put_back, feed.clone(), weak.upgrade()) {
+            put_back_kept(&app, feed, &kind, when);
+            return;
+        }
         match (open, feed) {
             (Some((Opens::InBitwig, file)), _) => open_in_bitwig(file),
             (Some((Opens::InFolder, path)), Some(feed)) => {
@@ -277,13 +319,14 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed) {
 /// The page came on show: it looks the first time, and again once what it shows is five minutes old, old copies too,
 /// so the reminder of them keeps up with what's there. It looks for Bitwig copies and spare plugin copies the first
 /// time, and again only while no look for them has finished: one reads every project, the other every plugin file.
+/// Spare copies aren't looked for while some are going to the Recycle Bin or coming back.
 pub fn shown(app: &AppWindow) {
     let (stale, bitwig, old, spare) = PAGE.with(|p| {
         let p = p.borrow();
         let wired = p.feed.is_some();
         let stale = wired && p.looked.is_none_or(|at| at.elapsed() >= FRESH);
         let bitwig = wired && p.bitwig.is_none() && p.bitwig_looking.is_none();
-        let spare = wired && p.spare.is_none() && !p.spare_looking;
+        let spare = wired && p.spare.is_none() && !p.spare_looking && !busy(&p);
         (stale, bitwig, wired && !p.old_looking && (stale || p.old.is_none()), spare)
     });
     if stale {
@@ -303,18 +346,40 @@ pub fn shown(app: &AppWindow) {
 /// Runs one of the page's own shortcuts ([`mo_app::shortcuts::SPACE_ACTIONS`]). Returns whether it did anything,
 /// so an unused key goes on.
 pub fn run_action(app: &AppWindow, id: &str) -> bool {
-    let (measuring, picked, can_fix) = PAGE.with(|p| {
+    // Only the key's own button is worked out: as the card shows it now.
+    let can = PAGE.with(|p| {
         let p = p.borrow();
-        let can_fix = p.fixes.button(p.bitwig.as_ref()).is_some_and(|(_, enabled)| enabled);
-        (p.measuring, p.picked.clone(), can_fix)
+        let enabled = |button: Option<(String, bool)>| button.is_some_and(|(_, enabled)| enabled);
+        match id {
+            MEASURE => !p.measuring,
+            REVEAL => p.picked == space::APP_FILES,
+            FIX => p.picked == BITWIG_COPIES && enabled(p.fixes.button(p.bitwig.as_ref())),
+            REMOVE => {
+                p.picked == SPARE_COPIES
+                    && enabled(p.removing.remove_button(p.spare.as_ref(), p.spare_looking, &p.put_backs))
+            }
+            PUT_BACK => match p.picked.as_str() {
+                SPARE_COPIES => enabled(p.removing.put_back_button(CAN_PUT_BACK, &p.put_backs)),
+                space_bin::RECYCLE_BIN => newest_put_back(&p).is_some(),
+                _ => false,
+            },
+            _ => false,
+        }
     });
-    match id {
-        MEASURE if !measuring => chosen(app, MEASURE),
-        REVEAL if picked == space::APP_FILES => chosen(app, REVEAL),
-        FIX if picked == BITWIG_COPIES && can_fix => chosen(app, FIX),
-        _ => return false,
+    if can {
+        chosen(app, id);
     }
-    true
+    can
+}
+
+/// The newest clean-up the Recycle Bin card can put back now (Put back's key there), by its kind and when it ran.
+fn newest_put_back(p: &Page) -> Option<(String, i64)> {
+    space_bin::newest_put_back(p.kept.as_ref(), &p.put_backs, CAN_PUT_BACK, p.removing.busy())
+}
+
+/// Whether something is going to the Recycle Bin or coming back from it: one at a time.
+fn busy(p: &Page) -> bool {
+    p.removing.busy() || p.put_backs.going.is_some()
 }
 
 /// The part at `at` on the card on show.
@@ -330,45 +395,98 @@ fn chosen(app: &AppWindow, id: &str) {
             look_again(app);
             look_for_copies(app);
             // A look for old copies or spare copies that's on goes on: it read the library just now, and nothing it
-            // measured is kept for a new one.
+            // measured is kept for a new one. Spare copies aren't looked for while some are being removed or put back;
+            // once a removal's result is on show, the card goes back to picking, from what the new look finds.
             let (old, spare) = PAGE.with(|p| {
-                let p = p.borrow();
-                (p.old_looking, p.spare_looking)
+                let mut p = p.borrow_mut();
+                let spare = !p.spare_looking && !busy(&p);
+                if spare && p.removing.shows_result() {
+                    p.spare = None;
+                }
+                if spare {
+                    p.removing.again();
+                }
+                (p.old_looking, spare)
             });
             if !old {
                 look_for_old(app);
             }
-            if !spare {
+            if spare {
                 look_for_spare(app);
             }
         }
         (REVEAL, Some(feed)) => crate::files::open_folder(&feed, &paths::data_dir().to_string_lossy()),
         (FIX, Some(feed)) => fix_ticked(app, feed),
+        (REMOVE, Some(feed)) => remove_ticked(app, feed),
+        (PUT_BACK, Some(feed)) => {
+            // The spare copies card's: the removal on show. The Recycle Bin card's: its newest clean-up.
+            let job = PAGE.with(|p| {
+                let p = p.borrow();
+                match p.picked.as_str() {
+                    SPARE_COPIES => p.removing.to_put_back().map(|sent| (SPARE_COPIES.to_owned(), sent.when)),
+                    space_bin::RECYCLE_BIN => newest_put_back(&p),
+                    _ => None,
+                }
+            });
+            if let Some((kind, when)) = job {
+                put_back_kept(app, feed, &kind, when);
+            }
+        }
         (RECYCLE_BIN, Some(feed)) => crate::files::open_recycle_bin(&feed),
         _ => {}
     }
 }
 
-/// The buttons: each one's id, words and whether it can be pressed now, with its tooltip and key from the shortcut
-/// list as it is now (rule 15).
-fn actions(buttons: Vec<(&str, String, bool)>) -> ModelRc<CardAction> {
+/// A button: its id, words and whether it can be pressed now; the card's main one is in the accent colour (Put back),
+/// and one that removes things in the colour for missing things (Remove), as the mock-up has them.
+struct Button {
+    id: &'static str,
+    text: String,
+    enabled: bool,
+    main: bool,
+    danger: bool,
+}
+
+impl Button {
+    fn new(id: &'static str, text: impl Into<String>, enabled: bool) -> Button {
+        Button { id, text: text.into(), enabled, main: false, danger: false }
+    }
+
+    fn main(self) -> Button {
+        Button { main: true, ..self }
+    }
+
+    fn danger(self) -> Button {
+        Button { danger: true, ..self }
+    }
+}
+
+/// The buttons, each with its tooltip and key from the shortcut list as it is now (rule 15).
+fn actions(buttons: Vec<Button>) -> ModelRc<CardAction> {
     let keys = crate::shortcuts();
     let actions: Vec<CardAction> = buttons
         .into_iter()
-        .map(|(id, text, enabled)| CardAction {
-            text: text.into(),
-            tip: what_of(id).into(),
-            key: keys.key_of(id).into(),
-            id: id.into(),
-            enabled,
+        .map(|b| CardAction {
+            text: b.text.into(),
+            tip: what_of(b.id).into(),
+            key: keys.key_of(b.id).into(),
+            id: b.id.into(),
+            enabled: b.enabled,
+            main: b.main,
+            danger: b.danger,
         })
         .collect();
     ModelRc::new(VecModel::from(actions))
 }
 
 /// Measure again, which waits while the drives and the app's files are being measured.
-fn measure_button(p: &Page) -> (&'static str, String, bool) {
-    (MEASURE, "Measure again".to_owned(), !p.measuring)
+fn measure_button(p: &Page) -> Button {
+    Button::new(MEASURE, "Measure again", !p.measuring)
+}
+
+/// Opens the Recycle Bin (the Trash on a Mac or Linux).
+fn bin_button() -> Button {
+    Button::new(RECYCLE_BIN, format!("Open {BIN}"), true)
 }
 
 /// Fix: writes a "(fixed)" project beside each ticked save, one after another on a low-priority thread, with an
@@ -468,6 +586,148 @@ fn open_in_bitwig(file: PathBuf) {
     }
 }
 
+/// Remove: sends the ticked spare copies to the Recycle Bin on a low-priority thread, with an activity card saying how
+/// it went. Each is checked again just before it goes (`space_spare::remove`), against your plugin folders and saves
+/// as the library has them now; then what went is kept (`mo_app::binned`), so Put back works after a restart too, and
+/// the card shows what went and what stayed. Not while a look for spare copies is on, nor while anything goes to the
+/// bin or comes back.
+fn remove_ticked(app: &AppWindow, feed: Feed) {
+    let job = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        if busy(&p) || p.spare_looking {
+            return None;
+        }
+        let picked = p.removing.ticked_copies(p.spare.as_ref());
+        if picked.is_empty() {
+            return None;
+        }
+        p.removing.start(picked.clone());
+        Some((picked, p.library.clone()))
+    });
+    let Some((picked, library)) = job else { return };
+    let weak = app.as_weak();
+    let folder = paths::data_dir();
+    let (when, sending) = (binned::now(), picked.clone());
+    let started = background::spawn("Space remove", move || {
+        let card = feed.start(space_spare::REMOVING, &space_spare::removing_words());
+        // A crash (logged as one) still finishes Remove, so the page isn't busy for ever: what went before it is in the
+        // bin, but which isn't known.
+        let done = catch_crash(AssertUnwindSafe(|| remove_now(&sending, &library)))
+            .unwrap_or_else(|_| space_spare::stayed(&sending, &space_spare::crashed_words()));
+        for r in &done.removed {
+            log::info("Space", &format!("Sent a spare plugin copy to the {BIN}: {}", r.path));
+        }
+        for problem in &done.problems {
+            log::warning("Space", &format!("A spare plugin copy stayed: {}: {}", problem.path, problem.why));
+        }
+        match space_spare::removed_words(&done) {
+            Ok(words) => card.done(&words),
+            Err(words) => card.failed(&words),
+        }
+        // Kept before the page shows it, so Put back has it after a restart too, and the page shows both at once.
+        let kept =
+            catch_crash(AssertUnwindSafe(|| binned::record(&folder, &SystemBin, SPARE_COPIES, when, &done))).ok();
+        let when = kept.as_ref().map_or(when, |(_, at)| *at);
+        arrive(&weak, Step::SpareSent(when, done, kept.map(|(kept, _)| kept)));
+    });
+    if let Err(e) = started {
+        log::error("Space", &format!("Couldn't start removing spare plugin copies: {e}"));
+        let why = format!("Remove couldn't start ({e}), so it stays.");
+        PAGE.with(|p| p.borrow_mut().removing.sent(when, space_spare::stayed(&picked, &why)));
+    }
+    show_wins(app);
+}
+
+/// Remove's own work, off the window's thread: your plugin folders and which plugins your saves use, from the library
+/// (read-only, and closed again first), then each picked copy checked again and sent. When those can't be read, every
+/// copy stays (said in the log): what's spare can't be checked.
+fn remove_now(picked: &[SpareCopy], library: &Path) -> Done {
+    let Some((folders, used)) = plugin_folders_and_uses(library) else {
+        return space_spare::stayed(picked, space_spare::CANT_CHECK);
+    };
+    let pro_tools = plugins::pro_tools_installed();
+    // On the pool for long work that waits on a disk, as the look is (rule 21). Nothing stops it once it's on: each
+    // copy is checked just before it goes, and the one administrator step asks Windows once, at the end.
+    background::on_bulk_pool(|| {
+        space_spare::remove(picked, &folders, &used, pro_tools, &SystemBin, &AtomicBool::new(false))
+    })
+}
+
+/// Put back of the clean-up of `kind` that ran at `when`, put back where it was ([`put_back`]): for the removal on show
+/// on the spare copies card, all it sent that was found in the bin, so its card can say what came back of it (Put
+/// back says which aren't there any more); for another, what the bin still holds of it, as `mo_app::binned` keeps it.
+fn put_back_kept(app: &AppWindow, feed: Feed, kind: &str, when: i64) {
+    let done = PAGE.with(|p| {
+        let p = p.borrow();
+        match p.removing.to_put_back() {
+            Some(sent) if kind == SPARE_COPIES && sent.when == when => Some(sent.coming_back()),
+            _ => p.kept.as_ref()?.list.iter().find(|b| b.kind == kind && b.when == when).map(|b| b.done.clone()),
+        }
+    });
+    if let Some(done) = done {
+        put_back(app, feed, kind.to_owned(), when, done);
+    }
+}
+
+/// Put back: returns what a clean-up sent to the Recycle Bin to where it was, on a low-priority thread, with an
+/// activity card saying how it went; then the bin is looked in again, so what came back leaves its line. One at a
+/// time, and not while something is being removed.
+fn put_back(app: &AppWindow, feed: Feed, kind: String, when: i64, done: Done) {
+    let started = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        if busy(&p) || done.removed.is_empty() {
+            return false;
+        }
+        p.put_backs.start(&kind, when);
+        if kind == SPARE_COPIES {
+            p.removing.putting_back(when);
+        }
+        true
+    });
+    if !started {
+        return;
+    }
+    let weak = app.as_weak();
+    let folder = paths::data_dir();
+    let job = (kind.clone(), done.clone());
+    let spawned = background::spawn("Space put back", move || {
+        let (kind, done) = job;
+        let card = feed.start(space_bin::putting_back_title(&kind), "");
+        let problems = catch_crash(AssertUnwindSafe(|| clean::undo(&done, &SystemBin))).unwrap_or_else(|_| {
+            let why = space_bin::put_back_crashed();
+            done.removed.iter().map(|r| Problem { path: r.path.clone(), why: why.clone() }).collect()
+        });
+        for r in done.removed.iter().filter(|r| !problems.iter().any(|p| p.path == r.path)) {
+            log::info("Space", &format!("Put back from the {BIN}: {}", r.path));
+        }
+        for problem in &problems {
+            log::warning("Space", &format!("Couldn't put back {}: {}", problem.path, problem.why));
+        }
+        match space_bin::put_back_words(done.removed.len(), &problems) {
+            Ok(words) => card.done(&words),
+            Err(words) => card.failed(&words),
+        }
+        // What came back isn't in the bin any more: looked at before the page hears Put back is done, so its line and
+        // card never show it there with Put back on again.
+        let kept = catch_crash(AssertUnwindSafe(|| binned::refresh(&folder, &SystemBin))).ok();
+        arrive(&weak, Step::PutBack(kind, when, problems, kept));
+    });
+    if let Err(e) = spawned {
+        log::error("Space", &format!("Couldn't start putting back: {e}"));
+        let why = format!("Put back couldn't start ({e}).");
+        let problems: Vec<Problem> =
+            done.removed.iter().map(|r| Problem { path: r.path.clone(), why: why.clone() }).collect();
+        PAGE.with(|p| {
+            let mut p = p.borrow_mut();
+            if kind == SPARE_COPIES {
+                p.removing.put_back(when, problems.clone());
+            }
+            p.put_backs.done(&kind, when, problems);
+        });
+    }
+    show_wins(app);
+}
+
 /// Asks for a new look at the drives and the app's files, on the page's own low-priority thread. One still measuring
 /// stops: the newest wins (rule 12).
 fn look_again(app: &AppWindow) {
@@ -511,6 +771,9 @@ fn look(ask: Ask, weak: &slint::Weak<AppWindow>) {
     if let Ok(parts) = background::on_pool(|| app_files::measure(data, &databases, &ask.stop)) {
         arrive(weak, Step::AppFiles(ask.id, parts));
     }
+    // What the app put in the Recycle Bin that's still there, for its line under Also taking room. The bin is only
+    // looked in when the app has put something there.
+    arrive(weak, Step::Kept(binned::refresh(data, &SystemBin)));
 }
 
 /// Asks for a new look for Bitwig copies, on the page's second low-priority thread. One still looking stops: the
@@ -668,12 +931,22 @@ fn look_for_spare(app: &AppWindow) {
 /// be read (said in the log): without what your saves use, every copy would look unused, and the page would say none
 /// are spare. The page looks again the next time it shows.
 fn look_for_spare_now(ask: &SpareAsk) -> Option<space_spare::Found> {
-    let lib = open_library(&ask.library)?;
+    let (folders, used) = plugin_folders_and_uses(&ask.library)?;
+    let pro_tools = plugins::pro_tools_installed();
+    // On the pool for long work that waits on a disk (a plugin bundle can hold thousands of files), so the pages'
+    // quick jobs don't wait for it (rule 21).
+    background::on_bulk_pool(|| space_spare::look(&folders, &used, pro_tools, &ask.stop)).ok()
+}
+
+/// The folders to look for spare copies in and which formats your saves use, from the library (read-only, and closed
+/// again before it returns). None when there's no library, or either can't be read (said in the log).
+fn plugin_folders_and_uses(library: &Path) -> Option<(Vec<PathBuf>, Used)> {
+    let lib = open_library(library)?;
     let chosen = match FolderList::Plugins.setting_key().map(|key| lib.list_setting(key)) {
         Some(Ok(chosen)) => chosen,
         None => Vec::new(),
         Some(Err(e)) => {
-            log::warning("Space", &format!("Couldn't read your plugin folders, so no look for spare copies: {e}"));
+            log::warning("Space", &format!("Couldn't read your plugin folders, so spare copies aren't looked at: {e}"));
             return None;
         }
     };
@@ -682,17 +955,13 @@ fn look_for_spare_now(ask: &SpareAsk) -> Option<space_spare::Found> {
         Err(e) => {
             log::warning(
                 "Space",
-                &format!("Couldn't read which plugins your saves use, so no look for spare copies: {e}"),
+                &format!("Couldn't read which plugins your saves use, so spare copies aren't looked at: {e}"),
             );
             return None;
         }
     };
     drop(lib);
-    let folders = space_spare::plugin_folders(&chosen, plugins::default_folders(), plugins::aax_folders());
-    let pro_tools = plugins::pro_tools_installed();
-    // On the pool for long work that waits on a disk (a plugin bundle can hold thousands of files), so the pages'
-    // quick jobs don't wait for it (rule 21).
-    background::on_bulk_pool(|| space_spare::look(&folders, &used, pro_tools, &ask.stop)).ok()
+    Some((space_spare::plugin_folders(&chosen, plugins::default_folders(), plugins::aax_folders()), used))
 }
 
 /// The library, opened read-only for the folders it knows; None when there's none yet or it can't be read (said in
@@ -803,6 +1072,29 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                     p.fixes.finished();
                     Changed::LookAgain
                 }
+                Step::Kept(kept) => {
+                    if keep(&mut p, Some(kept)) {
+                        Changed::Also
+                    } else {
+                        Changed::Nothing
+                    }
+                }
+                Step::SpareSent(when, done, kept) => {
+                    keep(&mut p, kept);
+                    p.removing.sent(when, done);
+                    Changed::Bin { look: false }
+                }
+                Step::PutBack(kind, when, problems, kept) => {
+                    keep(&mut p, kept);
+                    if kind == SPARE_COPIES {
+                        p.removing.put_back(when, problems.clone());
+                    }
+                    p.put_backs.done(&kind, when, problems);
+                    // What came back is in your plugin folders again: a look on meanwhile may have read half of it,
+                    // and while you're picking, what came back is spare again.
+                    let look = kind == SPARE_COPIES && (p.spare_looking || *p.removing.stage() == Stage::Picking);
+                    Changed::Bin { look }
+                }
                 _ => Changed::Nothing,
             }
         });
@@ -810,9 +1102,32 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
             Changed::All => show(&app),
             Changed::Wins => show_wins(&app),
             Changed::LookAgain => look_for_copies(&app),
+            Changed::Also => {
+                show_also(&app);
+                show_card(&app);
+            }
+            Changed::Bin { look } => {
+                show_also(&app);
+                show_wins(&app);
+                if look {
+                    look_for_spare(&app);
+                }
+            }
             Changed::Nothing => {}
         }
     });
+}
+
+/// What the app put in the Recycle Bin that's still there, as `kept` says now, unless what's on show is newer: of two
+/// that arrive out of turn (a look's and a removal's, say), the later change wins ([`Kept::seq`]). Whether it's kept.
+fn keep(p: &mut Page, kept: Option<Kept>) -> bool {
+    match kept {
+        Some(kept) if p.kept.as_ref().is_none_or(|k| kept.seq > k.seq) => {
+            p.kept = Some(kept);
+            true
+        }
+        _ => false,
+    }
 }
 
 fn room_line(line: space::Line) -> RoomLine {
@@ -844,12 +1159,27 @@ pub fn show(app: &AppWindow) {
             })
             .collect();
         data.set_drives(ModelRc::new(VecModel::from(cards)));
-        let app_drive = space::app_drive(&p.drives);
-        let also = vec![room_line(space::app_files_line(p.parts.as_deref(), app_drive.map(|d| d.name.as_str())))];
-        data.set_also(ModelRc::new(VecModel::from(also)));
-        data.set_actions(actions(vec![measure_button(&p), (RECYCLE_BIN, "Open Recycle Bin".to_owned(), true)]));
+        data.set_actions(actions(vec![measure_button(&p), bin_button()]));
     });
+    show_also(app);
     show_wins(app);
+}
+
+/// Shows Also taking room: the app's own files, then what the app put in the Recycle Bin that's still there. A picked
+/// Recycle Bin line that's gone (nothing of the app's is left there) has its card closed.
+fn show_also(app: &AppWindow) {
+    let data = app.global::<SpaceData>();
+    PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let app_drive = space::app_drive(&p.drives);
+        let files = space::app_files_line(p.parts.as_deref(), app_drive.map(|d| d.name.as_str()));
+        let bin = space_bin::line(p.kept.as_ref());
+        if bin.is_none() && p.picked == space_bin::RECYCLE_BIN {
+            p.picked.clear();
+        }
+        let also: Vec<RoomLine> = std::iter::once(files).chain(bin).map(room_line).collect();
+        data.set_also(ModelRc::new(VecModel::from(also)));
+    });
 }
 
 /// Shows Biggest wins first and the picked line's card: all that changes while a look for Bitwig copies, old copies or
@@ -860,7 +1190,7 @@ fn show_wins(app: &AppWindow) {
         let mut p = p.borrow_mut();
         let bitwig = space_bitwig::line(p.bitwig.as_ref(), p.bitwig_looking);
         let old = space_old::line(p.old.as_ref());
-        let spare = space_spare::line(p.spare.as_ref(), p.spare_looking);
+        let spare = space_spare::line(p.spare.as_ref(), p.spare_looking, &p.removing);
         if (bitwig.is_none() && p.picked == BITWIG_COPIES)
             || (old.is_none() && p.picked == OLD_COPIES)
             || (spare.is_none() && p.picked == SPARE_COPIES)
@@ -885,22 +1215,45 @@ fn show_card(app: &AppWindow) {
         let (card, buttons) = match p.picked.as_str() {
             space::APP_FILES => (
                 space::app_files_card(p.parts.as_deref(), space::app_drive(&p.drives)),
-                vec![(REVEAL, "Show in folder".to_owned(), true), measure_button(&p)],
+                vec![Button::new(REVEAL, "Show in folder", true), measure_button(&p)],
             ),
             BITWIG_COPIES => {
-                let fix = p.fixes.button(p.bitwig.as_ref()).map(|(words, enabled)| (FIX, words, enabled));
+                let fix = p.fixes.button(p.bitwig.as_ref()).map(|(words, enabled)| Button::new(FIX, words, enabled));
                 let card = space_bitwig::card(p.bitwig.as_ref(), p.bitwig_looking, &p.fixes);
                 (card, fix.into_iter().chain([measure_button(&p)]).collect())
             }
             // Measure again waits while old copies or spare copies are being measured too, which shows a look is on.
             OLD_COPIES => {
-                let (id, words, enabled) = measure_button(&p);
-                (space_old::card(p.old.as_ref()), vec![(id, words, enabled && !p.old_looking)])
+                let measure = measure_button(&p);
+                let enabled = measure.enabled && !p.old_looking;
+                (space_old::card(p.old.as_ref()), vec![Button { enabled, ..measure }])
             }
+            // Remove first (it removes, so in the colour for that), or once it has run, Put back (the main button) and
+            // the Recycle Bin; Measure again waits while a look is on or something goes or comes back.
             SPARE_COPIES => {
-                let (id, words, enabled) = measure_button(&p);
-                let card = space_spare::card(p.spare.as_ref(), p.spare_looking);
-                (card, vec![(id, words, enabled && !p.spare_looking)])
+                let guarded = |path: &str| plugin_space::is_install_folder(path);
+                let card = space_spare::card(p.spare.as_ref(), p.spare_looking, &p.removing, CAN_PUT_BACK, guarded);
+                let mut buttons = Vec::new();
+                if let Some((words, enabled)) =
+                    p.removing.remove_button(p.spare.as_ref(), p.spare_looking, &p.put_backs)
+                {
+                    buttons.push(Button::new(REMOVE, words, enabled).danger());
+                }
+                if let Some((words, enabled)) = p.removing.put_back_button(CAN_PUT_BACK, &p.put_backs) {
+                    buttons.push(Button::new(PUT_BACK, words, enabled).main());
+                }
+                if p.removing.shows_result() {
+                    buttons.push(bin_button());
+                }
+                let measure = measure_button(&p);
+                let enabled = measure.enabled && !p.spare_looking && !busy(&p);
+                buttons.push(Button { enabled, ..measure });
+                (card, buttons)
+            }
+            // Each clean-up's Put back is a link on its line; the bin itself opens from here.
+            space_bin::RECYCLE_BIN => {
+                let card = space_bin::card(p.kept.as_ref(), &p.put_backs, CAN_PUT_BACK, p.removing.busy());
+                (card, vec![bin_button(), measure_button(&p)])
             }
             _ => return,
         };
@@ -924,6 +1277,12 @@ fn show_card(app: &AppWindow) {
 }
 
 fn card_part(part: &Part) -> CardPart {
+    // A clean-up's Put back is its link that opens: the page knows which by the part.
+    let open = match (&part.put_back, &part.open) {
+        (Some(_), _) => space_bin::PUT_BACK,
+        (None, Some((opens, _))) => opens.words(),
+        (None, None) => "",
+    };
     CardPart {
         name: part.name.as_str().into(),
         what: part.what.as_str().into(),
@@ -931,14 +1290,16 @@ fn card_part(part: &Part) -> CardPart {
         under: part.under,
         can_tick: part.tick.is_some(),
         ticked: part.tick.as_ref().is_some_and(|(_, ticked)| *ticked),
+        partly: part.partly,
         status: part.status.as_str().into(),
         problem: part.problem,
-        open: part.open.as_ref().map(|(opens, _)| opens.words()).unwrap_or_default().into(),
+        open: open.into(),
         more: part.more.as_ref().map(|(words, _)| words.as_str()).unwrap_or_default().into(),
     }
 }
 
-/// Made-up finds for the screenshots: what each of the page's looks would have found, and what Fix did.
+/// Made-up finds for the screenshots: what each of the page's looks would have found, what Fix did, how Remove went
+/// (and the copies unticked), and what the app put in the Recycle Bin.
 #[derive(Default)]
 pub struct Sample {
     pub drives: Vec<Drive>,
@@ -947,10 +1308,14 @@ pub struct Sample {
     pub fixes: Fixes,
     pub old: Found,
     pub spare: space_spare::Found,
+    pub removing: Removing,
+    pub kept: Option<Kept>,
+    pub put_backs: PutBacks,
 }
 
-/// Shows made-up drives, app files, Bitwig copies (with what Fix did to them), old copies and spare plugin copies,
-/// with the line `picked` picked, without reading any disk: for the screenshots.
+/// Shows made-up drives, app files, Bitwig copies (with what Fix did to them), old copies, spare plugin copies (with
+/// how Remove went) and what's in the Recycle Bin, with the line `picked` picked, without reading any disk: for the
+/// screenshots.
 pub fn show_sample(app: &AppWindow, sample: Sample, picked: &str) {
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
@@ -960,6 +1325,9 @@ pub fn show_sample(app: &AppWindow, sample: Sample, picked: &str) {
         p.fixes = sample.fixes;
         p.old = Some(sample.old);
         p.spare = Some(sample.spare);
+        p.removing = sample.removing;
+        p.kept = sample.kept;
+        p.put_backs = sample.put_backs;
         p.picked = picked.to_owned();
         // Shown now, so showing the page doesn't look at the real drives or projects.
         p.looked = Some(Instant::now());
@@ -973,7 +1341,7 @@ mod tests {
 
     #[test]
     fn every_button_is_in_the_shortcut_list() {
-        for id in [MEASURE, REVEAL, FIX, RECYCLE_BIN] {
+        for id in [MEASURE, REVEAL, FIX, REMOVE, PUT_BACK, RECYCLE_BIN] {
             assert_ne!(what_of(id), "", "{id} isn't in the shortcut list");
         }
         let keys = mo_app::shortcuts::Shortcuts::default();

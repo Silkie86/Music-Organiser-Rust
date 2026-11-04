@@ -201,6 +201,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     shots.push(("space-spare-down.png".into(), down));
+    // Back to the card's top, for the shots that follow.
+    scroll(&window, x, y, -turn);
+    hover(&window, -1.0, -1.0);
+    // One AAX copy unticked: its format's tick shows a dash, and Remove frees the rest.
+    let spare = mo_app::space_spare::SPARE_COPIES;
+    let mut removing = mo_app::space_spare::Removing::default();
+    removing.tick(&[PathBuf::from(SAMPLE_UNTICKED)], false);
+    mo_ui::space::show_sample(&app, mo_ui::space::Sample { removing, ..sample_space() }, spare);
+    capture(&window);
+    shots.push(("space-spare-ticks.png".into(), capture(&window)));
+    // After Remove: what was freed, each copy in the Trash (the Recycle Bin on Windows) or why it stayed, and Put back.
+    // The Recycle Bin line under Also taking room shows what the app put there.
+    let (removing, kept) = sample_removed(&sample_spare_copies());
+    let removed = mo_ui::space::Sample { removing, kept: Some(kept.clone()), ..sample_space() };
+    mo_ui::space::show_sample(&app, removed, spare);
+    capture(&window);
+    shots.push(("space-spare-removed.png".into(), capture(&window)));
+    // The Recycle Bin card: each clean-up still there, newest first, with its Put back; the older one's put back left
+    // a copy behind, which says why.
+    let mut put_backs = mo_app::space_bin::PutBacks::default();
+    let stuck = mo_space::clean::Problem {
+        path: kept.list[0].done.removed[0].path.clone(),
+        why: "It couldn't be put back; it's still in the Recycle Bin.".to_owned(),
+    };
+    put_backs.done(spare, kept.list[0].when, vec![stuck]);
+    let (removing, _) = sample_removed(&sample_spare_copies());
+    let bin = mo_ui::space::Sample { removing, kept: Some(kept), put_backs, ..sample_space() };
+    mo_ui::space::show_sample(&app, bin, mo_app::space_bin::RECYCLE_BIN);
+    capture(&window);
+    shots.push(("space-bin.png".into(), capture(&window)));
     mo_ui::space::show_sample(&app, sample_space(), "");
     presets_shots(&app, &window, &mut shots)?;
     app.set_place(Place::Songs.index() as i32);
@@ -742,6 +772,64 @@ fn sample_spare_copies() -> mo_app::space_spare::Found {
     ];
     copies.sort_by_key(|c| std::cmp::Reverse(c.bytes));
     mo_app::space_spare::Found { copies }
+}
+
+/// The made-up AAX copy unticked in the ticks shot.
+const SAMPLE_UNTICKED: &str = r"C:\Program Files\Common Files\Avid\Audio\Plug-Ins\FabFilter Pro-Q 3.aaxplugin";
+
+/// What Remove did with the made-up spare copies, at 15:20 on 4 Nov 2026 (UTC): every copy that can go was ticked, and
+/// all went but Omnisphere's AAX copy, which changed since it was found. Then what the app keeps of what it put in the
+/// Recycle Bin: that, and one copy an older removal sent the evening before.
+fn sample_removed(found: &mo_app::space_spare::Found) -> (mo_app::space_spare::Removing, mo_app::binned::Kept) {
+    use mo_app::binned::{Binned, Kept};
+    use mo_space::clean::{Done, Problem, Removed, What};
+    use mo_space::in_bin::InBin;
+    use mo_space::plugin_space::SpaceKind;
+    const WHEN: i64 = 1_793_805_600;
+    const BEFORE: i64 = 1_793_743_500;
+    let removed = |path: &str, bytes: u64, when: i64| Removed {
+        path: path.to_owned(),
+        real: path.to_owned(),
+        bytes,
+        what: What::Plugin(SpaceKind::Program),
+        when,
+        bin_id: Some(String::new()),
+        binned: None,
+        binned_zone: None,
+    };
+    let mut removing = mo_app::space_spare::Removing::default();
+    let picked = removing.ticked_copies(Some(found));
+    removing.start(picked.clone());
+    let stays = |c: &&mo_space::spare::SpareCopy| c.name == "Omnisphere" && c.format == "AAX";
+    let done = Done {
+        removed: picked.iter().filter(|c| !stays(c)).map(|c| removed(&c.path, c.bytes, WHEN)).collect(),
+        problems: picked
+            .iter()
+            .filter(stays)
+            .map(|c| Problem {
+                path: c.path.clone(),
+                why: "It changed since it was found (an update?), so it stays.".into(),
+            })
+            .collect(),
+        went_with: Vec::new(),
+    };
+    removing.sent(WHEN, done.clone());
+    let older = Done {
+        removed: vec![removed(r"C:\Program Files\Steinberg\VSTPlugins\Massive.dll", 96 << 20, BEFORE)],
+        ..Done::default()
+    };
+    let list = vec![
+        Binned { kind: mo_app::space_spare::SPARE_COPIES.to_owned(), when: BEFORE, done: older },
+        Binned {
+            kind: mo_app::space_spare::SPARE_COPIES.to_owned(),
+            when: WHEN,
+            done: Done { problems: Vec::new(), ..done },
+        },
+    ];
+    let items = list.iter().map(|b| b.done.removed.len()).sum();
+    let bytes = list.iter().map(Binned::bytes).sum();
+    let in_bin = InBin { items, bytes, since: Some(BEFORE), drives: vec![("C:".to_owned(), bytes)], looked: true };
+    (removing, Kept { seq: 1, list, in_bin, noted: true })
 }
 
 /// Made-up old copies left after moving plugin folders to I:, written as on Windows, biggest first: two that can go,

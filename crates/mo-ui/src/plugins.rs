@@ -104,6 +104,8 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
             key: shortcuts.key_of(a.id).into(),
             id: a.id.into(),
             enabled: true,
+            main: false,
+            danger: false,
         })
         .collect();
     data.set_actions(ModelRc::new(VecModel::from(actions)));

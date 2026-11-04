@@ -824,11 +824,12 @@ fn is_report(name: &str, start: &str) -> bool {
 /// A file in the data folder whose writing was cut short, named as the code that writes it names it: the Backup
 /// settings' (`backup.txt.mo-part`, `backup-songs.txt.mo-part`, see [`crate::backup`]), the app's own settings'
 /// (`rust-settings.json.mo-part`, [`crate::app_settings::save`]), the sweep's own (`tidy-notes.txt.mo-part`,
-/// [`write_notes_done`]), or a side database being made (`presets.db.new-<number>`, `curves.db.new-<number>`, with
+/// [`write_notes_done`]), the list of what the Space page put in the Recycle Bin (`space-binned.json.mo-part`,
+/// [`crate::binned::write`]), or a side database being made (`presets.db.new-<number>`, `curves.db.new-<number>`, with
 /// SQLite's own files beside it; `mo_presets::fixes`; the same for `preset-sounds.db.new-<number>`), or the saves
 /// list's copy being made (`library-list-rust.db.new-<number>`, `mo_library::list_copy`).
 fn is_cut_short(name: &str) -> bool {
-    [SETTINGS_FILE, SONGS_FILE, crate::app_settings::FILE, NOTES_DONE_FILE]
+    [SETTINGS_FILE, SONGS_FILE, crate::app_settings::FILE, NOTES_DONE_FILE, crate::binned::FILE]
         .iter()
         .any(|f| name.strip_prefix(f) == Some(PART_ENDING))
         || [
@@ -2578,6 +2579,7 @@ mod tests {
         assert!(is_cut_short("presets.db.new-12-wal") && is_cut_short("curves.db.new-3-shm"));
         assert!(is_cut_short("backup.txt.mo-part") && is_cut_short("backup-songs.txt.mo-part"));
         assert!(is_cut_short("rust-settings.json.mo-part") && !is_cut_short("rust-settings.json"));
+        assert!(is_cut_short("space-binned.json.mo-part") && !is_cut_short("space-binned.json"));
         assert!(!is_cut_short("rust-settings.json.unreadable") && !is_cut_short("rust-settings.json.mo-part-2"));
         assert!(!is_cut_short("presets.db.new-12-old") && !is_cut_short("presets.db") && !is_cut_short("backup.txt"));
         assert!(!is_cut_short("library.db.new-12") && !is_cut_short("backup.txt.mo-part.2"));

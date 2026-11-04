@@ -75,10 +75,16 @@ impl InBin {
 pub fn remind(done: &[Done], bin: &dyn Bin) -> InBin {
     let removed: Vec<Removed> = done.iter().flat_map(|d| d.removed.iter().cloned()).collect();
     let held = bin.holds(&removed);
+    remind_held(&removed, held.as_deref())
+}
+
+/// What's still in the bin of `removed` ([`remind`]), from a look in the bin already made: `held` says which of them
+/// the bin holds, in the same order, or is `None` when it couldn't be looked in (then it's all of them, emptied or not).
+pub fn remind_held<'a>(removed: impl IntoIterator<Item = &'a Removed>, held: Option<&[bool]>) -> InBin {
     let mut found = InBin { looked: held.is_some(), ..InBin::default() };
     let mut drives: BTreeMap<String, u64> = BTreeMap::new();
-    for (i, r) in removed.iter().enumerate() {
-        if held.as_ref().is_some_and(|held| !held.get(i).copied().unwrap_or(false)) {
+    for (i, r) in removed.into_iter().enumerate() {
+        if held.is_some_and(|held| !held.get(i).copied().unwrap_or(false)) {
             continue;
         }
         found.items += 1;
