@@ -1,6 +1,6 @@
 // Ctrl+K: one box, from anywhere, that jumps to a song, a sound, a page or an action. What it finds and every word on
 // it come from mo-app's `finder`; this only shows them and passes keys and clicks back.
-import { Theme, Type, Space, Caps, Groove, ListLine, Segmented } from "studio.slint";
+import { Theme, Type, Space, Caps, Groove, ListLine, Segmented, StudioButton } from "studio.slint";
 
 // One line of the list: a group's heading, a thing found, a "12 more songs" line or a quiet note.
 export struct FinderLine {
@@ -12,6 +12,9 @@ export struct FinderLine {
     key: string,
     // The kind's or place's icon, from Icons ("" for none).
     icon: string,
+    // Whether it has a Play button (sounds) and an Open in its DAW button (songs), shown on the line itself.
+    plays: bool,
+    daw: bool,
 }
 
 export global FinderData {
@@ -27,6 +30,10 @@ export global FinderData {
     in property <string> note;
     // The keys line at the foot.
     in property <string> hints;
+    // Ctrl+K's key now, for the rail button's tooltip and the line buttons'.
+    in property <string> jump-key;
+    in property <string> play-key: "Space";
+    in property <string> daw-key: "Ctrl+Enter";
     // Where the picked line is, so the list can scroll it into view when the arrows move it.
     in property <length> show-y;
     in property <int> show-ask;
@@ -40,6 +47,10 @@ export global FinderData {
     // A line clicked (its place in `lines`), with Ctrl held or not.
     callback chosen(int, bool);
     callback kind-picked(int);
+    // A line's Play button.
+    callback play(int);
+    // The rail's "Jump to anything" button.
+    callback open-asked();
     callback close();
 }
 
@@ -218,6 +229,25 @@ export component Finder inherits Rectangle {
                                         font-size: Type.meta;
                                         overflow: elide;
                                     }
+                                }
+                                if line.plays: StudioButton {
+                                    y: (parent.height - self.height) / 2;
+                                    text: "Play";
+                                    width: self.min-width;
+                                    tip: "Play it here, without leaving";
+                                    key: FinderData.play-key;
+                                    clicked => {
+                                        FinderData.play(i);
+                                        input.focus();
+                                    }
+                                }
+                                if line.daw: StudioButton {
+                                    y: (parent.height - self.height) / 2;
+                                    text: "Open in its DAW";
+                                    width: self.min-width;
+                                    tip: "Open the song in its DAW (FL Studio songs go to Bitwig)";
+                                    key: FinderData.daw-key;
+                                    clicked => { FinderData.chosen(i, true); }
                                 }
                                 if line.key != "": Text {
                                     text: line.key;
