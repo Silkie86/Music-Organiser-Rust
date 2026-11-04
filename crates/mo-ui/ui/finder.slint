@@ -1,6 +1,6 @@
 // Ctrl+K: one box, from anywhere, that jumps to a song, a sound, a page or an action. What it finds and every word on
 // it come from mo-app's `finder`; this only shows them and passes keys and clicks back.
-import { Theme, Type, Space, Caps, Groove, ListLine, Segmented, StudioButton } from "studio.slint";
+import { Theme, Type, Space, Caps, Groove, ListLine, Segmented, StudioButton, Icons } from "studio.slint";
 
 // One line of the list: a group's heading, a thing found, a "12 more songs" line or a quiet note.
 export struct FinderLine {
@@ -92,7 +92,7 @@ export component Finder inherits Rectangle {
                     y: (parent.height - self.height) / 2;
                     viewbox-width: 16;
                     viewbox-height: 16;
-                    commands: "M 11.5 6.5 A 5 5 0 1 1 1.5 6.5 A 5 5 0 1 1 11.5 6.5 M 10.2 10.2 L 14.5 14.5";
+                    commands: Icons.search;
                     stroke: Theme.muted;
                     stroke-width: 1.6px;
                 }
