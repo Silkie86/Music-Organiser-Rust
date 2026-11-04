@@ -1513,7 +1513,10 @@ fn show_lists(app: &AppWindow) {
         let total = p.list.len();
         let summary = if p.list.is_empty() {
             String::new()
-        } else if p.view == HISTORY && p.history.len() < p.played.len() {
+        } else if p.view == HISTORY
+            && (Filters { years: None, ..p.filters.clone() }.any() || !p.filters.search.trim().is_empty())
+        {
+            // The years picked on the year strip don't narrow History, so they don't count here either.
             format!("{} of {} played", thousands(p.history.len()), thousands(p.played.len()))
         } else if p.view != HISTORY && p.view != REDISCOVER && (p.filters.any() || !p.filters.search.trim().is_empty())
         {
