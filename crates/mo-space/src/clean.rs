@@ -14,7 +14,7 @@
 //! the same, and only things inside your project folders are touched at all. Paths are checked as written and as they
 //! really are on disk, so a link can't lead a clean-up out of your project folders or into a sample folder.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, Metadata};
 use std::io::Read;
 use std::panic::AssertUnwindSafe;
@@ -26,7 +26,7 @@ use chrono::NaiveDateTime;
 use mo_formats::case;
 use mo_formats::paths::file_name;
 use mo_formats::textscan::is_audio_path;
-use mo_library::scan::{daw_of, is_autosave_dir, is_autosave_file, is_inside, is_project_file};
+use mo_library::scan::{daw_of, is_inside, is_project_file};
 use serde::{Deserialize, Serialize};
 
 use crate::admin::{Admin, AsAdmin, NoAdmin, Step, ask_for, real_spot, reason, stamp};
@@ -250,7 +250,25 @@ pub(crate) fn on_removable(_real: &str) -> bool {
     false
 }
 
-impl Guard<'_> {
+/// A guard with where its folders really are worked out once, for one preview or one clean-up: each line would
+/// otherwise look up every project and sample folder again (slow with thousands of lines and a folder on the network).
+/// A project or sample folder swapped for a link part way through isn't seen; each line's own place still is, and a
+/// line reached through a link that leads out of its project folder still stays.
+struct Prepared<'g> {
+    guard: &'g Guard<'g>,
+    roots: Vec<(&'g str, String)>,
+    samples: Vec<(&'g str, String)>,
+}
+
+impl<'g> Prepared<'g> {
+    fn new(guard: &'g Guard<'g>) -> Self {
+        Prepared {
+            guard,
+            roots: guard.project_roots.iter().map(|r| both(r)).collect(),
+            samples: guard.sample_folders.iter().map(|f| both(f)).collect(),
+        }
+    }
+
     /// Whether a line may go, and what it looks like now.
     fn check(&self, item: &CompactItem) -> Result<Checked, Refused> {
         let path = item.path.as_str();
@@ -266,7 +284,7 @@ impl Guard<'_> {
         if on_removable(&real) {
             return Err(Refused::RemovableDrive);
         }
-        let roots: Vec<(&str, String)> = self.project_roots.iter().map(|r| both(r)).collect();
+        let roots = &self.roots;
         if roots.iter().any(|(r, real_r)| is_inside(r, path) || is_inside(real_r, &real)) {
             return Err(Refused::ProjectFolder);
         }
@@ -279,13 +297,13 @@ impl Guard<'_> {
         if !is_inside(&real, real_root) {
             return Err(Refused::ThroughLink);
         }
-        let in_samples = self.sample_folders.iter().map(|f| both(f)).any(|(f, real_f)| {
-            is_inside(path, f) || is_inside(f, path) || is_inside(&real, &real_f) || is_inside(&real_f, &real)
+        let in_samples = self.samples.iter().any(|(f, real_f)| {
+            is_inside(path, f) || is_inside(f, path) || is_inside(&real, real_f) || is_inside(real_f, &real)
         });
         if in_samples {
             return Err(Refused::InSampleFolder);
         }
-        if self.keep.contains(&key(path)) || self.keep.contains(&key(&real)) {
+        if self.guard.keep.contains(&key(path)) || self.guard.keep.contains(&key(&real)) {
             return Err(Refused::KeptSave);
         }
         let name = file_name(path);
@@ -296,12 +314,13 @@ impl Guard<'_> {
                 }
             }
             CompactKind::Backup => {
-                // Only the folders below the project folder count: a project folder called "Backup" doesn't make every
-                // song in it an autosave.
+                // Only the folders below the project folder count: a project folder called "auto-backups" doesn't make
+                // every song in it an autosave. And only what the DAW made by itself, as the measure lists them: a save
+                // of yours in a folder called "Backup" is yours.
                 let all: Vec<&str> = parts(path).collect();
                 let below_root = all.get(parts(root).count()..all.len().saturating_sub(1)).unwrap_or_default();
-                let autosave = is_autosave_file(name) || below_root.iter().any(|d| is_autosave_dir(d));
-                if !meta.is_file() || daw_of(path).is_none() || !autosave {
+                let below_root: Vec<String> = below_root.iter().map(|d| (*d).to_owned()).collect();
+                if !meta.is_file() || daw_of(path).is_none() || !crate::song::is_daws_autosave(&below_root, name) {
                     return Err(Refused::NotAnAutosave);
                 }
             }
@@ -317,7 +336,7 @@ impl Guard<'_> {
                 if !meta.is_file() || !is_audio_path(path) {
                     return Err(Refused::NotAudio);
                 }
-                if (self.sample_in_use)(name) {
+                if (self.guard.sample_in_use)(name) {
                     return Err(Refused::SampleInUse);
                 }
             }
@@ -402,6 +421,7 @@ impl Plan {
 /// Checks what you picked and says what would go. Nothing on disk changes. A line picked twice counts once, and a line
 /// inside a folder that's going anyway goes with it.
 pub fn preview(picked: &[CompactItem], guard: &Guard<'_>) -> Plan {
+    let guard = Prepared::new(guard);
     let mut plan = Plan::default();
     let mut seen: HashSet<String> = HashSet::new();
     for item in picked {
@@ -523,6 +543,8 @@ pub trait Bin {
 /// refuses, stays. A copy only goes while the save it copies is still there and still the same. Once you press Stop,
 /// what hasn't gone yet stays.
 pub fn apply(plan: &Plan, guard: &Guard<'_>, bin: &dyn Bin, stop: &AtomicBool) -> Done {
+    let guard = Prepared::new(guard);
+    let guard = &guard;
     let mut done = Done::default();
     let mut sending = Sending::new(bin, stop);
     for line in &plan.lines {
@@ -619,6 +641,9 @@ pub(crate) struct Sending<'a> {
     /// Stop: what isn't sent yet stays.
     stop: &'a AtomicBool,
     waiting: Vec<(Removed, Again<'a>)>,
+    /// What was sent or is waiting for the administrator step, where it really is (as [`key`]s), and as it was shown:
+    /// to send the same thing reached another way only once, without comparing it with every line before it.
+    sent: HashMap<String, String>,
     /// Where things the administrator step sent were (keys), for what's said when the bin doesn't have them.
     by_admin: Vec<String>,
     /// Set once Windows has been asked (it asks at most once in a clean-up): why anything else Windows guards stays.
@@ -641,7 +666,7 @@ pub(crate) enum Sent {
 
 impl<'a> Sending<'a> {
     pub(crate) fn new(bin: &'a dyn Bin, stop: &'a AtomicBool) -> Self {
-        Sending { bin, stop, waiting: Vec::new(), by_admin: Vec::new(), not_asked: None }
+        Sending { bin, stop, waiting: Vec::new(), sent: HashMap::new(), by_admin: Vec::new(), not_asked: None }
     }
 
     /// Sends one checked thing to the bin and notes how it went in `done`. One Windows guards waits for the
@@ -665,9 +690,9 @@ impl<'a> Sending<'a> {
             return stays(done, Refused::Link.text().to_owned());
         }
         // The same thing reached another way goes once (it may be waiting for the administrator step).
-        let same = |r: &Removed| key(&r.real) == key(&real);
-        if let Some(first) = done.removed.iter().chain(self.waiting.iter().map(|(r, _)| r)).find(|r| same(r)) {
-            let why = format!("It's the same as {}, reached another way, so it's only sent once.", first.path);
+        let real_key = key(&real);
+        if let Some(first) = self.sent.get(&real_key) {
+            let why = format!("It's the same as {first}, reached another way, so it's only sent once.");
             return stays(done, why);
         }
         // What the Recycle Bin can't keep stays, as removing it would delete it for good.
@@ -689,12 +714,14 @@ impl<'a> Sending<'a> {
         };
         let why = match self.bin.send(Path::new(path)) {
             Ok(()) => {
+                self.sent.insert(real_key, removed.path.clone());
                 done.removed.push(removed);
                 return Sent::Went;
             }
             Err(why) if why == NEEDS_ADMIN && self.bin.admin().can_ask() => match &self.not_asked {
                 Some(no) => no.clone(),
                 None => {
+                    self.sent.insert(real_key, removed.path.clone());
                     self.waiting.push((removed, Box::new(again)));
                     return Sent::Waits;
                 }
@@ -738,7 +765,11 @@ impl<'a> Sending<'a> {
                     lines.push(vec![r.real.clone(), stamp]);
                     sent.push(r);
                 }
-                Err(why) => done.problems.push(Problem { path: r.path, why }),
+                Err(why) => {
+                    // It didn't go: the same thing reached another way may still try.
+                    self.sent.remove(&key(&r.real));
+                    done.problems.push(Problem { path: r.path, why });
+                }
             }
         }
         if sent.is_empty() {
@@ -759,6 +790,7 @@ impl<'a> Sending<'a> {
                 done.removed.push(Removed { when, ..r });
             } else {
                 let why = reason(&said, n, "It's still there: a program may be using some of it.");
+                self.sent.remove(&key(&r.real));
                 done.problems.push(Problem { path: r.path, why });
             }
         }
@@ -958,37 +990,46 @@ struct Drive {
     size: u64,
 }
 
+/// Windows: where the drive holding `real` starts ("C:\", or the folder a drive is mounted in, ending in a 0 as Windows
+/// reads it), and its id (the `{…}` of `\\?\Volume{…}\`): the same id is the same drive, whatever letter or folder it's
+/// reached by. `None` when Windows can't say.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+pub(crate) fn volume_of_path(real: &Path) -> Option<(Vec<u16>, String)> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{GetVolumeNameForVolumeMountPointW, GetVolumePathNameW};
+    let path: Vec<u16> = real.as_os_str().encode_wide().chain([0]).collect();
+    // The drive's root is never longer than the path inside it.
+    let mut root = vec![0u16; path.len().max(261)];
+    let room = u32::try_from(root.len()).ok()?;
+    // SAFETY: `path` ends in a 0, and `root` has room for `room` characters, as the call is told.
+    if unsafe { GetVolumePathNameW(path.as_ptr(), root.as_mut_ptr(), room) } == 0 {
+        return None;
+    }
+    let end = root.iter().position(|&c| c == 0)?;
+    root.truncate(end + 1);
+    // "\\?\Volume{…}\" is 49 characters and the 0 after them.
+    let mut name = [0u16; 64];
+    // SAFETY: `root` ends in a 0, and `name` has room for the 64 characters the call is told.
+    if unsafe { GetVolumeNameForVolumeMountPointW(root.as_ptr(), name.as_mut_ptr(), 64) } == 0 {
+        return None;
+    }
+    let end = name.iter().position(|&c| c == 0)?;
+    let name = String::from_utf16(name.get(..end)?).ok()?;
+    let id = name.strip_prefix(r"\\?\Volume")?.strip_suffix('\\')?;
+    if !(id.starts_with('{') && id.ends_with('}')) {
+        return None;
+    }
+    Some((root, id.to_owned()))
+}
+
 #[cfg(windows)]
 impl Drive {
     /// The drive holding `real`; `None` when Windows can't say.
     #[allow(unsafe_code)]
     fn of(real: &Path) -> Option<Drive> {
-        use std::os::windows::ffi::OsStrExt;
-        use windows_sys::Win32::Storage::FileSystem::{
-            GetDiskFreeSpaceExW, GetDriveTypeW, GetVolumeNameForVolumeMountPointW, GetVolumePathNameW,
-        };
-        let path: Vec<u16> = real.as_os_str().encode_wide().chain([0]).collect();
-        // The drive's root is never longer than the path inside it.
-        let mut root = vec![0u16; path.len().max(261)];
-        let room = u32::try_from(root.len()).ok()?;
-        // SAFETY: `path` ends in a 0, and `root` has room for `room` characters, as the call is told.
-        if unsafe { GetVolumePathNameW(path.as_ptr(), root.as_mut_ptr(), room) } == 0 {
-            return None;
-        }
-        let end = root.iter().position(|&c| c == 0)?;
-        root.truncate(end + 1);
-        // "\\?\Volume{…}\" is 49 characters and the 0 after them.
-        let mut name = [0u16; 64];
-        // SAFETY: `root` ends in a 0, and `name` has room for the 64 characters the call is told.
-        if unsafe { GetVolumeNameForVolumeMountPointW(root.as_ptr(), name.as_mut_ptr(), 64) } == 0 {
-            return None;
-        }
-        let end = name.iter().position(|&c| c == 0)?;
-        let name = String::from_utf16(name.get(..end)?).ok()?;
-        let id = name.strip_prefix(r"\\?\Volume")?.strip_suffix('\\')?;
-        if !(id.starts_with('{') && id.ends_with('}')) {
-            return None;
-        }
+        use windows_sys::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetDriveTypeW};
+        let (root, id) = volume_of_path(real)?;
         // SAFETY: `root` ends in a 0.
         let kind = unsafe { GetDriveTypeW(root.as_ptr()) };
         let mut size = 0u64;
@@ -996,7 +1037,7 @@ impl Drive {
         if unsafe { GetDiskFreeSpaceExW(root.as_ptr(), std::ptr::null_mut(), &mut size, std::ptr::null_mut()) } == 0 {
             return None;
         }
-        Some(Drive { root, id: id.to_owned(), kind, size })
+        Some(Drive { root, id, kind, size })
     }
 
     /// How much is in the Recycle Bin on this drive now (this account's), when Windows says. Read again at most every
@@ -1084,11 +1125,13 @@ fn problem_with(e: &trash::Error, path: &Path) -> String {
 /// What an error from `trash` means here. Windows' own errors (HRESULTs) are told apart by their whole number, as
 /// which part of Windows a code comes from counts too.
 fn bin_problem(e: &trash::Error) -> String {
-    /// Access denied. (`trash` asks Windows' newer file operations, whose errors are all HRESULTs: the bare 0x78
-    /// that its older one gave for access denied never comes.)
-    const ACCESS_DENIED: [u32; 1] = [0x8007_0005];
-    /// A program has it open and won't let it go (the sharing violation, and the copy engine's own word for it).
-    const SHARING_VIOLATION: [u32; 2] = [0x8007_0020, 0x8027_0027];
+    /// Access denied, or it needs administrator rights: Windows' own word, and the copy engine's
+    /// (COPYENGINE_E_ACCESS_DENIED_SRC, COPYENGINE_E_REQUIRES_ELEVATION), so these go to the administrator step.
+    /// (`trash` asks Windows' newer file operations, whose errors are all HRESULTs: the bare 0x78 that its older one
+    /// gave for access denied never comes.)
+    const ACCESS_DENIED: [u32; 3] = [0x8007_0005, 0x8027_0021, 0x8027_0002];
+    /// A program has it open and won't let it go (the sharing and lock violations, and the copy engine's own word).
+    const SHARING_VIOLATION: [u32; 3] = [0x8007_0020, 0x8007_0021, 0x8027_0027];
     /// Windows didn't move it: it was told no or cancelled (ERROR_CANCELLED, E_ABORT, COPYENGINE_E_USER_CANCELLED,
     /// COPYENGINE_E_CANCELLED), or the Recycle Bin couldn't take it (COPYENGINE_E_RECYCLE_UNKNOWN_ERROR, _FORCE_NUKE,
     /// _SIZE_TOO_BIG, _PATH_TOO_LONG, _BIN_NOT_FOUND). The start-up sweep's notes stop going by themselves on these, the
@@ -1236,15 +1279,58 @@ fn put_back_from_system_bin(removed: &[Removed]) -> Vec<Problem> {
         if let Some(name) = Path::new(&r.real).file_name().filter(|_| same_name(&item, Path::new(&r.real))) {
             item.name = name.to_owned();
         }
+        let spot = item.original_path();
+        let was_there = fs::symlink_metadata(&spot).is_ok();
+        let in_bin = in_bin_path(&item);
         match mo_catch::catch(AssertUnwindSafe(|| trash::os_limited::restore_all([item]))) {
             Ok(Ok(())) => {}
             Ok(Err(trash::Error::RestoreCollision { .. })) => {
                 problems.push(problem(r, "Something new has its name now, so it's left in the Recycle Bin."))
             }
-            _ => problems.push(problem(r, "It couldn't be put back; it's still in the Recycle Bin.")),
+            _ => {
+                // Only while it's still in the bin: one that came back (and only the bin's own note of it couldn't
+                // be cleared) is the thing itself, however empty.
+                if !was_there && in_bin.as_deref().is_some_and(|b| fs::symlink_metadata(b).is_ok()) {
+                    remove_placeholder(&spot);
+                }
+                problems.push(problem(r, "It couldn't be put back; it's still in the Recycle Bin."))
+            }
         }
     }
     problems
+}
+
+/// On Linux, putting something back first makes an empty file or folder in its place, then moves it there from the
+/// Trash: when that move fails (the Trash was on another drive), the empty one stays, and every later Undo would find
+/// "something new" there. One that wasn't there before and is still empty is taken away again. Windows makes none.
+#[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+fn remove_placeholder(spot: &Path) {
+    match fs::symlink_metadata(spot) {
+        Ok(meta) if meta.is_file() && meta.len() == 0 => {
+            let _ = fs::remove_file(spot);
+        }
+        // Only an empty folder can be removed this way.
+        Ok(meta) if meta.is_dir() => {
+            let _ = fs::remove_dir(spot);
+        }
+        _ => {}
+    }
+}
+
+#[cfg(windows)]
+fn remove_placeholder(_spot: &Path) {}
+
+/// Linux: where a Trash item itself is kept, from its note (`…/Trash/info/Name.trashinfo` keeps
+/// `…/Trash/files/Name`), as the trash crate finds it.
+#[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+fn in_bin_path(item: &trash::TrashItem) -> Option<std::path::PathBuf> {
+    let info = Path::new(&item.id);
+    Some(info.parent()?.parent()?.join("files").join(info.file_stem()?))
+}
+
+#[cfg(windows)]
+fn in_bin_path(_item: &trash::TrashItem) -> Option<std::path::PathBuf> {
+    None
 }
 
 /// A Mac's Trash can't be read by a program: nothing to check.
@@ -1326,6 +1412,30 @@ fn put_back_from_system_bin(removed: &[Removed]) -> Vec<Problem> {
 mod tests {
     use super::{Bin, IN_USE, KEPT_BY_YOU, NEEDS_ADMIN, SystemBin, bin_problem, on_network, text};
 
+    /// A failed Undo on Linux takes away the empty file or folder it made, and nothing else.
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+    #[test]
+    fn an_empty_placeholder_is_taken_away_and_nothing_else() {
+        use super::remove_placeholder;
+        use std::fs;
+        let dir = std::env::temp_dir().join("mo-space-unit-placeholder");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let (empty_file, empty_dir) = (dir.join("Song.bwproject"), dir.join("Folder"));
+        let (full_file, full_dir) = (dir.join("Other.bwproject"), dir.join("Full"));
+        fs::write(&empty_file, b"").unwrap();
+        fs::create_dir(&empty_dir).unwrap();
+        fs::write(&full_file, b"song").unwrap();
+        fs::create_dir(&full_dir).unwrap();
+        fs::write(full_dir.join("a.wav"), b"a").unwrap();
+        for spot in [&empty_file, &empty_dir, &full_file, &full_dir, &dir.join("Never there")] {
+            remove_placeholder(spot);
+        }
+        assert!(!empty_file.exists() && !empty_dir.exists());
+        assert!(full_file.exists() && full_dir.join("a.wav").exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn the_recycle_bin_takes_notes_quietly_only_when_its_on_and_has_room() {
         use super::{BIN_OFF, BinFacts, CANT_SEE_ROOM, DRIVE_FIXED, NO_ROOM, NOT_OWN_DRIVE, bin_decides};
@@ -1376,9 +1486,12 @@ mod tests {
         for code in [0x8007_04C7, 0x8000_4004, 0x8027_0000, 0x8027_0001, 0x8027_0035, 0x8027_0036, 0x8027_003A] {
             assert_eq!(os(code), KEPT_BY_YOU, "{code:#x}");
         }
-        assert_eq!(os(0x8007_0020), IN_USE);
-        assert_eq!(os(0x8027_0027), IN_USE);
-        assert_eq!(os(0x8007_0005), NEEDS_ADMIN);
+        for code in [0x8007_0020, 0x8007_0021, 0x8027_0027] {
+            assert_eq!(os(code), IN_USE, "{code:#x}");
+        }
+        for code in [0x8007_0005, 0x8027_0021, 0x8027_0002] {
+            assert_eq!(os(code), NEEDS_ADMIN, "{code:#x}");
+        }
         // The same last digits from another part of Windows are something else, and so is "not implemented".
         for code in [0x8027_0005, 0x8027_0020, 0x8004_0005, 0x8007_0001, 0x8007_0078] {
             let said = os(code);

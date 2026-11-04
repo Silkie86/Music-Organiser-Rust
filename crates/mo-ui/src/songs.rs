@@ -154,6 +154,16 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
     });
     data.on_reveal(|| with_picked(|_, r| reveal(&r.song.latest)));
     data.on_copy_path(|| with_picked(|_, r| copy_path(&r.song.latest.path)));
+    let weak = app.as_weak();
+    data.on_show_presets(move || {
+        let Some(app) = weak.upgrade() else { return };
+        let mut save = None;
+        with_picked(|_, r| save = Some(r.song.latest.path.clone()));
+        if let Some(save) = save {
+            crate::go_to(&app, Place::Presets.index() as i32);
+            crate::presets::show_song(&app, &save);
+        }
+    });
     data.set_statuses(strings(STATUSES.iter().copied()));
     let weak = app.as_weak();
     data.on_search_edited(move |text| {
