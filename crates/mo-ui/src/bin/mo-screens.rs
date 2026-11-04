@@ -846,6 +846,12 @@ fn settings_shots(
             ..Default::default()
         })),
     );
+    mo_ui::settings::show_bitwig_extension(
+        app,
+        mo_dawlink::scripts::ScriptState::Outdated,
+        "3.19",
+        vec![std::path::PathBuf::from(r"K:\Bitwig Studio\Extensions")],
+    );
     mo_ui::settings::show_fl(
         app,
         mo_dawlink::scripts::ScriptState::Outdated,
