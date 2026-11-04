@@ -9,6 +9,10 @@
 
 use super::format::{Document, ObjId};
 
+/// Goes up by one whenever the clips read from the same files change (rule 7), so the curves library reads every
+/// Bitwig project again.
+pub const VERSION: u32 = 1;
+
 const CLIP: u32 = 0xd90;
 const LANE: u32 = 0x23d;
 

@@ -217,21 +217,30 @@ pub(crate) fn make_new(path: &Path, schema: &str, table: &str) -> Result<(), Fix
     placed
 }
 
-/// Removes half-made databases that a copy of the app left when it stopped part way (`presets.db.new-<number>`), once
-/// they're a minute old, so one being made right now by another copy is left alone.
-fn remove_old_half_made(path: &Path) {
-    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else { return };
+/// Removes half-made databases that a copy of the app left when it stopped part way (`presets.db.new-<number>`, and
+/// SQLite's `-journal`, `-wal` and `-shm` beside one), once they're a minute old, so one being made right now by
+/// another copy is left alone. Only plain files with exactly that name are touched, never a link or a folder.
+pub(crate) fn remove_old_half_made(path: &Path) {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) else { return };
     let dir = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
-    let mut prefix = name.to_os_string();
-    prefix.push(".new-");
-    let prefix = prefix.to_string_lossy().into_owned();
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for e in entries.flatten() {
+        let plain = e.file_type().is_ok_and(|t| t.is_file());
         let old = e.metadata().ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok());
-        if e.file_name().to_string_lossy().starts_with(&prefix) && old.is_some_and(|o| o.as_secs() >= 60) {
+        if plain
+            && e.file_name().to_str().is_some_and(|n| is_half_made(n, name))
+            && old.is_some_and(|o| o.as_secs() >= 60)
+        {
             let _ = std::fs::remove_file(e.path());
         }
     }
+}
+
+/// A half-made database's name for `db`: `<db>.new-<digits>`, perhaps with SQLite's `-journal`, `-wal` or `-shm`.
+fn is_half_made(name: &str, db: &str) -> bool {
+    let Some(rest) = name.strip_prefix(db).and_then(|r| r.strip_prefix(".new-")) else { return false };
+    let digits = ["-journal", "-wal", "-shm"].iter().find_map(|end| rest.strip_suffix(end)).unwrap_or(rest);
+    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Makes the tables in a new file at `temp` and checks them. The file is closed again when this returns, so it can be
@@ -257,5 +266,17 @@ mod tests {
         assert_eq!(sound_hash(b"abc"), "ba7816bf8f01cfea414140de5dae2223");
         assert_ne!(sound_hash(b"abc"), sound_hash(b"abd"));
         assert_eq!(sound_hash(&[]).len(), 32);
+    }
+
+    #[test]
+    fn only_the_whole_half_made_name_is_taken_for_one() {
+        for name in ["presets.db.new-1234", "presets.db.new-1-wal", "presets.db.new-77-journal", "presets.db.new-9-shm"]
+        {
+            assert!(is_half_made(name, "presets.db"), "{name}");
+        }
+        for name in ["presets.db.new-backup", "presets.db.new-", "presets.db.new-12x", "curves.db.new-1", "presets.db"]
+        {
+            assert!(!is_half_made(name, "presets.db"), "{name}");
+        }
     }
 }

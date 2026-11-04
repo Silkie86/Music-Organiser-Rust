@@ -101,6 +101,9 @@ pub fn folder_for(export_root: &Path, save: &str) -> PathBuf {
 /// preset beside it when `templates` has one for its plugin ([`bitwig::templates`]; `None` when Send to Bitwig is
 /// off). A preset that can't be written is listed in
 /// [`Exported::failed`] and the rest still go; it's an error when none could be.
+///
+/// `presets` must be all of the save's sounds, as names are worked out among them: to export only some, use
+/// [`export_picked`] (or [`export_from_save`]), so the second "Serum" is still "Serum 2".
 pub fn export(
     presets: &[PresetBlob],
     save: &str,
@@ -108,6 +111,20 @@ pub fn export(
     templates: Option<&Templates>,
 ) -> io::Result<Exported> {
     write_all(presets.iter().zip(file_names(presets)).collect(), Vec::new(), save, export_root, templates)
+}
+
+/// [`export`] of only the sounds at `picked` (places in `all`, the save's sounds), each named among all of them.
+pub fn export_picked(
+    all: &[PresetBlob],
+    picked: &[usize],
+    save: &str,
+    export_root: &Path,
+    templates: Option<&Templates>,
+) -> io::Result<Exported> {
+    let picked: HashSet<usize> = picked.iter().copied().collect();
+    let chosen =
+        all.iter().zip(file_names(all)).enumerate().filter(|(i, _)| picked.contains(i)).map(|(_, c)| c).collect();
+    write_all(chosen, Vec::new(), save, export_root, templates)
 }
 
 /// Writes each preset under its name, after `failed` (what was missed before writing). An export that wrote nothing
@@ -199,13 +216,13 @@ const PART: &str = ".mo-part-";
 
 /// How old a half-written file must be before it's taken as left behind by a crash: no export takes this long to
 /// write one file, so one another export is still writing is left alone.
-const LEFT_BEHIND: Duration = Duration::from_secs(10 * 60);
+pub(crate) const LEFT_BEHIND: Duration = Duration::from_secs(10 * 60);
 
 /// Clears half-written files ([`write_checked`]'s, named with [`PART`]) a crash left in an export folder, once
 /// they're [`LEFT_BEHIND`] older than `now` (the time by the clock that stamps this folder's files). Only names of
 /// exactly that shape are touched, in this folder only (not inside others); one that can't be cleared is left for
 /// next time.
-fn clear_half_written(folder: &Path, now: SystemTime) {
+pub(crate) fn clear_half_written(folder: &Path, now: SystemTime) {
     let Ok(entries) = std::fs::read_dir(folder) else { return };
     for entry in entries.flatten() {
         let Ok(kind) = entry.file_type() else { continue };
@@ -250,6 +267,9 @@ fn is_half_written(name: &str) -> bool {
     !before.is_empty() && digits(app) && digits(write)
 }
 
+/// Which write [`write_checked`] is on in this copy of the app, for its own names.
+static NEXT: AtomicU64 = AtomicU64::new(0);
+
 /// Writes `data` to `path` under a name of its own first, makes sure it's on the disk, reads it back, checks it's the
 /// same (and, for a plugin preset, that it still reads as one), then renames it into place over any older export.
 pub fn write_checked(path: &Path, data: &[u8]) -> io::Result<()> {
@@ -257,7 +277,6 @@ pub fn write_checked(path: &Path, data: &[u8]) -> io::Result<()> {
     // into one file and put the other's half-written bytes in place.
     // A name already taken (a crash's leftover from an earlier run that had this one's process number, or another
     // computer's export into a shared folder) is passed over for the next, and never touched.
-    static NEXT: AtomicU64 = AtomicU64::new(0);
     let mut tries = 0;
     let (temp, mut file) = loop {
         let mut temp = path.as_os_str().to_owned();
@@ -342,6 +361,27 @@ pub fn export_from_save(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_taken_part_name_is_passed_over_and_left_as_it_was() {
+        let dir = std::env::temp_dir().join(format!("mo-presets-taken-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Not a preset's ending, so the bytes needn't read back as one.
+        let path = dir.join("Lead.txt");
+        // The next names this run will try, from where its counter is now (other tests move it on too, so plenty).
+        let next = NEXT.load(Ordering::Relaxed);
+        let taken: Vec<PathBuf> = (next..next + 50)
+            .map(|n| PathBuf::from(format!("{}{PART}{}-{n}", path.display(), std::process::id())))
+            .collect();
+        for p in &taken {
+            std::fs::write(p, b"someone else's").unwrap();
+        }
+        write_checked(&path, b"mine").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"mine");
+        assert!(taken.iter().all(|p| std::fs::read(p).unwrap() == b"someone else's"));
+        assert!(NEXT.load(Ordering::Relaxed) > next, "the retry moved on");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn knows_a_half_written_name() {
