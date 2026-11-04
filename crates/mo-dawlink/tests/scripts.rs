@@ -47,8 +47,10 @@ fn installs_and_keeps_the_users_changes_setting() {
     let a = fs::read_to_string(folders[0].join(FL_SCRIPT_NAME)).unwrap();
     let b = fs::read_to_string(folders[1].join(FL_SCRIPT_NAME)).unwrap();
     assert_eq!(a, FL_SCRIPT);
-    assert!(b.contains("\nLET_THE_APP_MAKE_CHANGES = True\n"));
+    // The script's own line endings stay (a Windows checkout has CRLF), with their setting in place of the app's.
+    assert!(b.lines().any(|l| l.trim_end_matches('\r') == "LET_THE_APP_MAKE_CHANGES = True"));
     assert!(!b.contains("LET_THE_APP_MAKE_CHANGES = False"));
+    assert_eq!(b.lines().count(), FL_SCRIPT.lines().count());
     // No part file is left behind, and nothing else is written.
     let names: Vec<_> = fs::read_dir(&folders[1]).unwrap().map(|e| e.unwrap().file_name()).collect();
     assert_eq!(names, [FL_SCRIPT_NAME]);
