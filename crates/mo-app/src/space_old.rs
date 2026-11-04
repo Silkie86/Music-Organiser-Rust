@@ -205,6 +205,7 @@ mod tests {
             now_in: r"I:\Plugins\Spitfire".to_owned(),
             since: NaiveDateTime::parse_from_str("2026-10-26 14:03:12", "%Y-%m-%d %H:%M:%S").ok(),
             stays: stays.map(str::to_owned),
+            only: stays.is_none().then(Vec::new),
         }
     }
 

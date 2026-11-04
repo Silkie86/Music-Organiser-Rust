@@ -5,8 +5,10 @@
 //!
 //! The moves and folders left behind come from the app's records. An old copy no move was kept for (the app stopped
 //! between swapping the folder for its link and keeping the move, say) is found too, beside its link, in the folders
-//! the app hands in: it's taken in as a move, so it goes the same guarded way as any other once you say. Nothing here
-//! removes anything: [`crate::folder_move::remove_old_copy`] and [`crate::after_move::remove_old_home`] do that.
+//! the app hands in: it's taken in as a move, but it stays until the app keeps that move, as once it's gone nothing
+//! would show the link was a move's. Each one that can go says what's only in it (by sizes and times), so the page can
+//! show that list before anything goes. [`remove`] sends the ones you pick, together, each checked again first;
+//! [`crate::folder_move::remove_old_copy`] and [`crate::after_move::remove_old_home`] send one.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,8 +16,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use chrono::NaiveDateTime;
 use mo_formats::paths::file_name;
 
-use crate::after_move::{OldHome, kept_beside, old_home_stays, real_place};
-use crate::folder_move::{MovedFolder, OLD_SUFFIX, csharp_time, leads_into, old_copy_stays};
+use crate::admin::real_spot;
+use crate::after_move::{OldHome, kept_beside, old_home_check, old_home_stays, only_in_old_home, real_place};
+use crate::clean::{Bin, Done, Problem, Sending, What};
+use crate::folder_move::{
+    MovedFolder, OLD_SUFFIX, csharp_time, leads_into, old_copy_check, old_copy_stays, only_in_old_copy,
+};
 use crate::size::{self, Stopped, is_link, size_text};
 use crate::{in_places, is_dir, key, not_there, parent_of, real_folder, real_path, text};
 
@@ -34,6 +40,19 @@ pub struct Leftover {
     pub since: Option<NaiveDateTime>,
     /// Why it can't go yet, when it can't. One that can still goes only once nothing is only in it, or you're sure.
     pub stays: Option<String>,
+    /// What's only in it as the look found it, as paths inside it: not in the copy its files went to, or newer here.
+    /// Sizes and times only: what the files hold is compared just before it goes. `None` when there's nothing to check
+    /// it against (files kept aside, or a folder left behind whose record doesn't say where its files went), and for
+    /// one that stays anyway.
+    pub only: Option<Vec<String>>,
+}
+
+impl Leftover {
+    /// Whether it can go: nothing keeps it, and the look found nothing only in it (or nothing to check it against: then
+    /// it goes once you're sure).
+    pub fn can_go(&self) -> bool {
+        self.stays.is_none() && self.only.as_ref().is_none_or(Vec::is_empty)
+    }
 }
 
 /// What a [`Leftover`] is.
@@ -66,13 +85,13 @@ impl Reminder {
         self.leftovers.is_empty()
     }
 
-    /// The ones that can go (once nothing is only in them, or you're sure).
+    /// The ones that can go ([`Leftover::can_go`]).
     pub fn can_go(&self) -> impl Iterator<Item = &Leftover> {
-        self.leftovers.iter().filter(|l| l.stays.is_none())
+        self.leftovers.iter().filter(|l| l.can_go())
     }
 
     /// How much room the ones that can go take together: what deleting them frees. One that stays isn't counted (the
-    /// plugin may be using it).
+    /// plugin may be using it), nor one with something only in it.
     pub fn bytes(&self) -> u64 {
         self.can_go().fold(0, |sum, l| sum.saturating_add(l.bytes))
     }
@@ -97,9 +116,10 @@ impl Reminder {
 }
 
 /// Every old copy and folder left behind that's still there, each measured now, biggest first, with why one can't go
-/// yet. `moved` and `homes` are the app's records. `look_in` is the folders the plugins' data folders are in (where
-/// the app found them), to find old copies no move was kept for; the folder each moved folder is in is looked in too.
-/// Reads and measures every one: call it away from the window's thread.
+/// yet, and what's only in each one that can. `moved` and `homes` are the app's records. `look_in` is the folders the
+/// plugins' data folders are in (where the app found them), to find old copies no move was kept for; the folder each
+/// moved folder is in is looked in too. Reads and measures every one, and the copies their files went to: call it away
+/// from the window's thread.
 pub fn remind(
     moved: &[MovedFolder],
     homes: &[OldHome],
@@ -113,32 +133,45 @@ pub fn remind(
         if !m.has_old_copy() {
             continue;
         }
+        let stays = old_copy_stays(m, moved);
+        let only = match stays {
+            None => Some(only_in_old_copy(m, moved, stop).map_err(|_| Stopped)?),
+            Some(_) => None,
+        };
         leftovers.push(Leftover {
             path: real_place(&m.old_copy, moved),
             bytes: measure(&m.old_copy)?,
             what: Left::OldCopy(i),
             now_in: m.to.clone(),
             since: moved_at(&m.moved),
-            stays: old_copy_stays(m, moved),
+            stays,
+            only,
         });
     }
     for (i, h) in homes.iter().enumerate() {
         if !real_folder(&h.path) {
             continue;
         }
+        let stays = old_home_stays(h, moved);
+        let only = match stays {
+            None => only_in_old_home(h, stop).map_err(|_| Stopped)?,
+            Some(_) => None,
+        };
         leftovers.push(Leftover {
             path: h.path.clone(),
             bytes: measure(&h.path)?,
             what: Left::Behind(i),
             now_in: h.copy.clone(),
             since: None,
-            stays: old_home_stays(h, moved),
+            stays,
+            only,
         });
     }
     for h in kept_beside(moved, homes, stop) {
         if stop.load(Ordering::Relaxed) {
             return Err(Stopped);
         }
+        // Kept aside, they say nothing of where their files went: there's nothing to check them against.
         let stays = old_home_stays(&h, moved);
         leftovers.push(Leftover {
             path: h.path.clone(),
@@ -147,6 +180,7 @@ pub fn remind(
             now_in: String::new(),
             since: None,
             stays,
+            only: None,
         });
     }
     for found in not_kept(moved, homes, look_in, &leftovers, stop)? {
@@ -207,6 +241,7 @@ fn not_kept(
             now_in: String::new(),
             since: None,
             stays: Some(why),
+            only: None,
         };
         let Some(to) = (is_link(Path::new(&base)) && is_dir(&base)).then(|| real_path(&base)).flatten() else {
             found.push(unknown(unknown_stays(&base)));
@@ -231,16 +266,132 @@ fn not_kept(
             continue;
         }
         adopted.push(m.clone());
-        found.push(Leftover { path, bytes, now_in: m.to.clone(), since: None, stays: None, what: Left::NotKept(m) });
+        let now_in = m.to.clone();
+        found.push(Leftover { path, bytes, now_in, since: None, stays: None, only: None, what: Left::NotKept(m) });
     }
-    // Checked against every move, the ones taken in too: an old copy can hold another's.
+    // Checked against every move, the ones taken in too: an old copy can hold another's. One that could go stays
+    // anyway, until the app keeps its move.
     let all: Vec<MovedFolder> = moved.iter().chain(&adopted).cloned().collect();
     for f in &mut found {
         if let Left::NotKept(m) = &f.what {
-            f.stays = old_copy_stays(m, &all);
+            f.stays = Some(old_copy_stays(m, &all).unwrap_or_else(|| not_kept_stays(&m.from)));
         }
     }
     Ok(found)
+}
+
+/// Why an old copy no move was kept for stays, even when it could go: once it's gone, nothing would show the app that
+/// the folder beside it was moved (to remind you of its link, or to move it back).
+pub fn not_kept_stays(from: &str) -> String {
+    let name = file_name(from);
+    format!(
+        "No move was kept for it (the app found it beside {name}, a link to its copy), so it stays for now: without \
+         it, the app couldn't tell {name} was moved. You can delete it yourself once the plugin opens fine."
+    )
+}
+
+/// Why a picked old copy stays when the app's records don't have its move now.
+pub const MOVE_GONE: &str = "Its move isn't in the app's records now (it may have moved back since), so it stays. \
+    Measure again to see what's there.";
+
+/// Why a picked folder left behind stays when the app's records don't list it now.
+pub const HOME_GONE: &str = "It isn't in the app's records now, so it stays. Measure again to see what's there.";
+
+/// Why a picked old copy stays when it isn't where it was when the page looked.
+pub const MOVED_SINCE: &str = "It isn't where it was when the page looked (a folder around it moved since), so it \
+    stays. Measure again to see where it is.";
+
+/// Why a folder called "… (old copy)" that no move was kept for stays, when the look said nothing more.
+const UNKNOWN: &str = "No move was kept for it, so the app can't tell whether anything is only in it. Look in it \
+    before deleting it yourself.";
+
+/// What a picked one is, as the app's records have it now.
+#[derive(Clone, Copy)]
+enum Going<'a> {
+    /// The old copy of this move.
+    OldCopy(&'a MovedFolder),
+    /// This folder left behind, or files kept aside.
+    Home(&'a OldHome),
+}
+
+/// A picked one, found again in the records as they are now (`now`): an old copy by its move (`then`, the records the
+/// look had, says which), a folder left behind by its place. Files kept aside aren't in the records yet, so they're as
+/// the look found them, unless the records list them now. Why it stays when it can't be found there.
+fn found_again<'a>(
+    l: &'a Leftover,
+    then: (&[MovedFolder], &[OldHome]),
+    now: (&'a [MovedFolder], &'a [OldHome]),
+) -> Result<Going<'a>, String> {
+    let move_now =
+        |m: &MovedFolder| now.0.iter().find(|n| key(&n.from) == key(&m.from) && key(&n.old_copy) == key(&m.old_copy));
+    let home_now = |path: &str| now.1.iter().find(|n| key(&n.path) == key(path));
+    let old_copy = |m: &'a MovedFolder| {
+        // Where it really is now must be where the page showed it: that's what goes, and what its line says.
+        if key(&real_place(&m.old_copy, now.0)) == key(&l.path) {
+            Ok(Going::OldCopy(m))
+        } else {
+            Err(MOVED_SINCE.to_owned())
+        }
+    };
+    match &l.what {
+        Left::OldCopy(at) => then.0.get(*at).and_then(move_now).ok_or_else(|| MOVE_GONE.to_owned()).and_then(old_copy),
+        // Kept since (by the C# app, say), it's a move like any other.
+        Left::NotKept(m) => move_now(m).ok_or_else(|| not_kept_stays(&m.from)).and_then(old_copy),
+        Left::Behind(at) => {
+            then.1.get(*at).and_then(|h| home_now(&h.path)).map(Going::Home).ok_or_else(|| HOME_GONE.to_owned())
+        }
+        Left::Kept(h) => Ok(Going::Home(home_now(&h.path).unwrap_or(h))),
+        Left::Unknown => Err(l.stays.clone().unwrap_or_else(|| UNKNOWN.to_owned())),
+    }
+}
+
+/// Sends the old copies and folders left behind you picked (`picked`, as [`remind`] found them: their [`Left`]s count
+/// into `then`, the records the look had) to the Recycle Bin, together. Each is found again in the app's records as
+/// they are now (`now`), and checked again: it goes only while nothing keeps it
+/// ([`crate::folder_move::old_copy_stays`], [`crate::after_move::old_home_stays`]) and nothing is only in it, what its
+/// files hold compared too. One with nothing to check it against goes as it is: the page ticks those only when you do,
+/// once you've looked in it. One Windows guards waits, and all of those go in one administrator step at the end, Windows
+/// asking once, each checked again just before. Reads and changes the disk, and waits for Windows' question: call it
+/// away from the window's thread. [`crate::clean::undo`] puts them back.
+pub fn remove(
+    picked: &[Leftover],
+    then: (&[MovedFolder], &[OldHome]),
+    now: (&[MovedFolder], &[OldHome]),
+    bin: &dyn Bin,
+    stop: &AtomicBool,
+) -> Done {
+    let moved = now.0;
+    let mut done = Done::default();
+    let mut sending = Sending::new(bin, stop);
+    for l in picked {
+        let checked = found_again(l, then, now).and_then(|going| {
+            match going {
+                Going::OldCopy(m) => old_copy_check(m, moved, false, stop),
+                Going::Home(h) => old_home_check(h, moved, h.copy.is_empty(), stop),
+            }
+            .map(|()| going)
+        });
+        let going = match checked {
+            Ok(going) => going,
+            Err(why) => {
+                done.problems.push(Problem { path: l.path.clone(), why });
+                continue;
+            }
+        };
+        // Just before Windows asks, only what keeps it is checked again: what's only in it was, just now.
+        let again = move || match going {
+            Going::OldCopy(m) => old_copy_check(m, moved, true, stop),
+            Going::Home(h) => old_home_check(h, moved, true, stop),
+        };
+        let kind = match going {
+            Going::OldCopy(m) => m.space_kind(),
+            Going::Home(h) => h.space_kind(),
+        };
+        // The folder itself (it was checked not to be a link), not where a link would lead.
+        sending.send(&l.path, real_spot(&l.path), l.bytes, What::Plugin(kind), &mut done, again);
+    }
+    sending.finish(&mut done);
+    done
 }
 
 /// Adds a place to those known, as written and as it really is.

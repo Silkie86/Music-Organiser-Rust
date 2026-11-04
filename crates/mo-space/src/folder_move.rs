@@ -1201,10 +1201,11 @@ fn old_copy_only(
     Ok(only)
 }
 
-/// What's in `old` but not in `copy`, or newer in `old`, as paths inside it.
-pub(crate) fn only_in(old: &Path, copy: &Path, stop: &AtomicBool) -> Result<Vec<String>, CantMove> {
+/// What's in `old` but not in `copy`, or newer in `old`, as paths inside it; with `bytes`, also the files that look the
+/// same in both but whose bytes differ (slow: only just before `old` goes).
+pub(crate) fn only_in(old: &Path, copy: &Path, bytes: bool, stop: &AtomicBool) -> Result<Vec<String>, CantMove> {
     let mut only = Vec::new();
-    differences((old, copy), None, (&[], false), Path::new(""), &mut only, stop)?;
+    differences((old, copy), None, (&[], bytes), Path::new(""), &mut only, stop)?;
     only.sort();
     Ok(only)
 }
@@ -1385,25 +1386,8 @@ fn same_inside(a: &Path, b: &Path, stop: &AtomicBool) -> Result<bool, CantMove> 
 /// only in the old copy ([`only_in_old_copy`]): the app shows that list first. `all` is every moved folder.
 /// [`crate::clean::undo`] puts it back.
 pub fn remove_old_copy(moved: &MovedFolder, all: &[MovedFolder], sure: bool, bin: &dyn Bin, stop: &AtomicBool) -> Done {
-    if let Some(why) = old_copy_stays(moved, all) {
+    if let Err(why) = old_copy_check(moved, all, sure, stop) {
         return stays(moved, &why);
-    }
-    if !sure {
-        match old_copy_only(moved, all, true, stop) {
-            Err(_) => return stays(moved, "Stopped before it was all checked, so it stays."),
-            Ok(only) if !only.is_empty() => {
-                return stays(
-                    moved,
-                    &format!(
-                        "Some of it is only in the old copy, newer there, or not the same as on the other drive: {}. \
-                         It may have been saved while the move ran, deleted from the other drive since, gone bad on \
-                         the way, or open in a program now. Look before deleting it.",
-                        listed(&only)
-                    ),
-                );
-            }
-            Ok(_) => {}
-        }
     }
     let mut done = Done::default();
     // The folder itself (it was checked not to be a link), not where a link would lead.
@@ -1413,6 +1397,36 @@ pub fn remove_old_copy(moved: &MovedFolder, all: &[MovedFolder], sure: bool, bin
     sending.send(&moved.old_copy, real, moved.bytes, What::Plugin(moved.space_kind()), &mut done, || Ok(()));
     sending.finish(&mut done);
     done
+}
+
+/// Why it stays when checking what's only in it was stopped part way.
+pub(crate) const UNCHECKED: &str = "Stopped before it was all checked, so it stays.";
+
+/// Why the old copy can't go now, checked just before it goes: [`old_copy_stays`], then, unless you're `sure`, whether
+/// anything is only in it, newer there or not the same as on the other drive (what the files hold is compared too, so
+/// it reads every file that looks the same in both: slow). `all` is every moved folder.
+pub(crate) fn old_copy_check(
+    moved: &MovedFolder,
+    all: &[MovedFolder],
+    sure: bool,
+    stop: &AtomicBool,
+) -> Result<(), String> {
+    if let Some(why) = old_copy_stays(moved, all) {
+        return Err(why);
+    }
+    if sure {
+        return Ok(());
+    }
+    match old_copy_only(moved, all, true, stop) {
+        Err(_) => Err(UNCHECKED.to_owned()),
+        Ok(only) if !only.is_empty() => Err(format!(
+            "Some of it is only in the old copy, newer there, or not the same as on the other drive: {}. It may have \
+             been saved while the move ran, deleted from the other drive since, gone bad on the way, or open in a \
+             program now. Look before deleting it.",
+            listed(&only)
+        )),
+        Ok(_) => Ok(()),
+    }
 }
 
 /// Why the old copy can't go now, when it can't: it's a link now, it's the only copy the plugin could use

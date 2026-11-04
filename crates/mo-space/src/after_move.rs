@@ -14,9 +14,10 @@ use serde::{Deserialize, Serialize};
 use crate::admin::{Admin, Outcome, Step, ask_for, real_spot, reason};
 use crate::clean::{Bin, Done, Problem, Sending, What};
 use crate::folder_move::{
-    CantMove, Drives, Fill, KEPT_SUFFIX, MovedFolder, Tree, check_rename, check_rename_or_ask, clear_failed_link,
-    copy_fresh, copy_tree, denied, destination_problem, failed, fresh_name, inside_moved, leads_to, link, link_reaches,
-    listed, not_noted, only_in, part_way, remove_link, rest_after, room_for, shown, swap_or_ask, target, write_through,
+    CantMove, Drives, Fill, KEPT_SUFFIX, MovedFolder, Tree, UNCHECKED, check_rename, check_rename_or_ask,
+    clear_failed_link, copy_fresh, copy_tree, denied, destination_problem, failed, fresh_name, inside_moved, leads_to,
+    link, link_reaches, listed, not_noted, only_in, part_way, remove_link, rest_after, room_for, shown, swap_or_ask,
+    target, write_through,
 };
 use crate::half_copy::{busy_now, claim, clear_own, going_into_use, unmark};
 use crate::plugin_space::{PluginSpace, SpaceKind};
@@ -66,7 +67,8 @@ fn is_sounds(kind: &u8) -> bool {
 }
 
 impl OldHome {
-    fn space_kind(&self) -> SpaceKind {
+    /// What it holds.
+    pub(crate) fn space_kind(&self) -> SpaceKind {
         match self.kind {
             0 => SpaceKind::Program,
             1 => SpaceKind::Presets,
@@ -336,43 +338,57 @@ pub fn old_home_stays(home: &OldHome, moved: &[MovedFolder]) -> Option<String> {
 /// doesn't say where its files went (the C# app's, or the files linking again replaced), so it can't be told. Reads
 /// both folders: call it away from the window's thread.
 pub fn only_in_old_home(home: &OldHome, stop: &AtomicBool) -> Result<Option<Vec<String>>, CantMove> {
+    home_only(home, false, stop)
+}
+
+/// [`only_in_old_home`], and with `bytes`, also the files that look the same in both but whose bytes differ (slow: only
+/// just before it goes).
+fn home_only(home: &OldHome, bytes: bool, stop: &AtomicBool) -> Result<Option<Vec<String>>, CantMove> {
     if home.copy.is_empty() {
         return Ok(None);
     }
     if !is_dir(&home.copy) {
         return Ok(Some(vec![home.copy.clone()]));
     }
-    only_in(Path::new(&home.path), Path::new(&home.copy), stop).map(Some)
+    only_in(Path::new(&home.path), Path::new(&home.copy), bytes, stop).map(Some)
+}
+
+/// Why a folder left behind can't go now, checked just before it goes: [`old_home_stays`], then, unless you're `sure`,
+/// whether anything in it isn't where its files went, is newer here or isn't the same there (what the files hold is
+/// compared too: slow). One that doesn't say where its files went goes only once you're sure.
+pub(crate) fn old_home_check(
+    home: &OldHome,
+    moved: &[MovedFolder],
+    sure: bool,
+    stop: &AtomicBool,
+) -> Result<(), String> {
+    if let Some(why) = old_home_stays(home, moved) {
+        return Err(why);
+    }
+    if sure {
+        return Ok(());
+    }
+    match home_only(home, true, stop) {
+        Err(_) => Err(UNCHECKED.to_owned()),
+        Ok(None) => {
+            Err("There's nothing to check it against, so it goes only once you've looked in it and say you're sure."
+                .to_owned())
+        }
+        Ok(Some(only)) if !only.is_empty() => Err(format!(
+            "Some of it isn't where its files went, is newer here, or isn't the same there: {}. Look before deleting \
+             it.",
+            listed(&only)
+        )),
+        Ok(Some(_)) => Ok(()),
+    }
 }
 
 /// Sends a folder left behind to the Recycle Bin, once [`old_home_can_go`] says it may, and, unless you're `sure`, only
-/// when nothing is only in it ([`only_in_old_home`]: the app shows that list first; one it can't tell goes only once
-/// you're sure). [`crate::clean::undo`] puts it back.
+/// when nothing is only in it ([`only_in_old_home`], what its files hold compared too: the app shows that list first;
+/// one it can't tell goes only once you're sure). [`crate::clean::undo`] puts it back.
 pub fn remove_old_home(home: &OldHome, moved: &[MovedFolder], sure: bool, bin: &dyn Bin, stop: &AtomicBool) -> Done {
-    let stays = |why: &str| Done {
-        problems: vec![Problem { path: home.path.clone(), why: why.to_owned() }],
-        ..Done::default()
-    };
-    if let Some(why) = old_home_stays(home, moved) {
-        return stays(&why);
-    }
-    if !sure {
-        match only_in_old_home(home, stop) {
-            Err(_) => return stays("Stopped before it was all checked, so it stays."),
-            Ok(None) => {
-                return stays(
-                    "There's nothing to check it against, so it goes only once you've looked in it and say you're \
-                     sure.",
-                );
-            }
-            Ok(Some(only)) if !only.is_empty() => {
-                return stays(&format!(
-                    "Some of it isn't where its files went, or is newer here: {}. Look before deleting it.",
-                    listed(&only)
-                ));
-            }
-            Ok(Some(_)) => {}
-        }
+    if let Err(why) = old_home_check(home, moved, sure, stop) {
+        return Done { problems: vec![Problem { path: home.path.clone(), why }], ..Done::default() };
     }
     let mut done = Done::default();
     // The folder itself, not where a link would lead (it was checked not to be one).

@@ -848,6 +848,7 @@ fn sample_old_copies() -> mo_app::space_old::Found {
         now_in: now_in.to_owned(),
         since: day.and_then(moved),
         stays: stays.map(str::to_owned),
+        only: stays.is_none().then(Vec::new),
     };
     let stays = "It's the only copy the plugin could use now (the link or the copy on the other drive isn't as the move \
                  left it), so it stays.";
