@@ -86,15 +86,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     // The Space page, from made-up drives: it only reads the real ones when it's shown in the app.
     mo_ui::space::connect(&app, out.join("no library.db"), feed.clone());
-    mo_ui::space::show_sample(
-        &app,
-        sample_drives(),
-        sample_app_files(),
-        sample_bitwig_copies(),
-        Default::default(),
-        sample_old_copies(),
-        "",
-    );
+    mo_ui::space::show_sample(&app, sample_space(), "");
 
     let mut shots = Vec::new();
     for place in Place::ALL {
@@ -174,15 +166,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     settings_shots(&app, &window, &graphite, &mut shots);
     // Space with the App files card open: what each part of the app's folder takes, and C: nearly full.
     app.set_place(Place::Space.index() as i32);
-    mo_ui::space::show_sample(
-        &app,
-        sample_drives(),
-        sample_app_files(),
-        sample_bitwig_copies(),
-        Default::default(),
-        sample_old_copies(),
-        mo_app::space::APP_FILES,
-    );
+    mo_ui::space::show_sample(&app, sample_space(), mo_app::space::APP_FILES);
     capture(&window);
     shots.push(("space-app-files.png".into(), capture(&window)));
     mo_ui::apply_look(&app, &Look::from_settings(Some("Paper"), None));
@@ -192,25 +176,74 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The Bitwig copies card: each project's copies of Library multisamples, biggest first, with Fix's ticks: one
     // project fixed with its other saves on show (one of them ticked), one that couldn't be fixed.
     let bitwig = mo_app::space_bitwig::BITWIG_COPIES;
-    let (copies, fixes) = (sample_bitwig_copies(), sample_fixes());
-    mo_ui::space::show_sample(&app, sample_drives(), sample_app_files(), copies, fixes, sample_old_copies(), bitwig);
+    mo_ui::space::show_sample(&app, mo_ui::space::Sample { fixes: sample_fixes(), ..sample_space() }, bitwig);
     capture(&window);
     shots.push(("space-bitwig.png".into(), capture(&window)));
-    // The old copies card: what moving plugin folders to another drive left, biggest first, with one that can't go yet.
-    let (copies, old) = (sample_bitwig_copies(), sample_old_copies());
-    let old_copies = mo_app::space_old::OLD_COPIES;
-    mo_ui::space::show_sample(&app, sample_drives(), sample_app_files(), copies, Default::default(), old, old_copies);
+    // The old copies card: what moving plugin folders to another drive left, biggest first, with ticks: one that can't
+    // go yet, files a try kept aside that wait for your tick, and one with presets saved since its move, which stays
+    // until you look.
+    let old = mo_app::space_old::OLD_COPIES;
+    mo_ui::space::show_sample(&app, sample_space(), old);
     capture(&window);
-    shots.push(("space-old.png".into(), capture(&window)));
-    mo_ui::space::show_sample(
-        &app,
-        sample_drives(),
-        sample_app_files(),
-        sample_bitwig_copies(),
-        Default::default(),
-        sample_old_copies(),
-        "",
-    );
+    let top = capture(&window);
+    shots.push(("space-old.png".into(), top.clone()));
+    // The card turned down to its end: the one that can't go yet, the kept files with their tick off, and the one with
+    // presets saved since, with no tick.
+    shots.push(("space-old-down.png".into(), card_down(&window, &top, "space-old-down.png")?));
+    // While Remove compares the ticked ones with their copies (a big sound library takes a while): Stop, which leaves
+    // what isn't checked yet where it is.
+    let found = sample_old_copies();
+    let mut old_removing = mo_app::space_old::Removing::default();
+    old_removing.start(old_removing.ticked_copies(Some(&found)));
+    mo_ui::space::show_sample(&app, mo_ui::space::Sample { old_removing, ..sample_space() }, old);
+    capture(&window);
+    shots.push(("space-old-removing.png".into(), capture(&window)));
+    // After Remove: what was freed, each old copy in the Trash (the Recycle Bin on Windows) or why it stayed, and Put
+    // back.
+    let (old_removing, old_binned) = sample_old_removed(&sample_old_copies());
+    let kept = Some(sample_kept(old_binned.clone()));
+    mo_ui::space::show_sample(&app, mo_ui::space::Sample { old_removing, kept, ..sample_space() }, old);
+    capture(&window);
+    shots.push(("space-old-removed.png".into(), capture(&window)));
+    // The spare copies card: AAX copies (Pro Tools isn't installed) and VST2 copies whose VST3 your saves use, by
+    // format, with one that can't go.
+    mo_ui::space::show_sample(&app, sample_space(), mo_app::space_spare::SPARE_COPIES);
+    capture(&window);
+    let top = capture(&window);
+    shots.push(("space-spare.png".into(), top.clone()));
+    // The card turned down to its end: the VST2 copies, in two folders, each with its own, and the one that can't go
+    // (its last lines once couldn't be scrolled to).
+    shots.push(("space-spare-down.png".into(), card_down(&window, &top, "space-spare-down.png")?));
+    // One AAX copy unticked: its format's tick shows a dash, and Remove frees the rest.
+    let spare = mo_app::space_spare::SPARE_COPIES;
+    let mut removing = mo_app::space_spare::Removing::default();
+    removing.tick(&[PathBuf::from(SAMPLE_UNTICKED)], false);
+    mo_ui::space::show_sample(&app, mo_ui::space::Sample { removing, ..sample_space() }, spare);
+    capture(&window);
+    shots.push(("space-spare-ticks.png".into(), capture(&window)));
+    // After Remove: what was freed, each copy in the Trash (the Recycle Bin on Windows) or why it stayed, and Put back.
+    // The Recycle Bin line under Also taking room shows what the app put there.
+    let (removing, spare_binned) = sample_removed(&sample_spare_copies());
+    let removed = mo_ui::space::Sample { removing, kept: Some(sample_kept(spare_binned.clone())), ..sample_space() };
+    mo_ui::space::show_sample(&app, removed, spare);
+    capture(&window);
+    shots.push(("space-spare-removed.png".into(), capture(&window)));
+    // The Recycle Bin card: each clean-up still there, newest first, with its Put back: the old copies, then the spare
+    // copies; the oldest one's put back left a copy behind, which says why.
+    let kept = sample_kept([spare_binned, old_binned].concat());
+    let mut put_backs = mo_app::space_bin::PutBacks::default();
+    let stuck = mo_space::clean::Problem {
+        path: kept.list[0].done.removed[0].path.clone(),
+        why: "It couldn't be put back; it's still in the Recycle Bin.".to_owned(),
+    };
+    put_backs.done(spare, kept.list[0].when, vec![stuck]);
+    let (removing, _) = sample_removed(&sample_spare_copies());
+    let (old_removing, _) = sample_old_removed(&sample_old_copies());
+    let bin = mo_ui::space::Sample { removing, old_removing, kept: Some(kept), put_backs, ..sample_space() };
+    mo_ui::space::show_sample(&app, bin, mo_app::space_bin::RECYCLE_BIN);
+    capture(&window);
+    shots.push(("space-bin.png".into(), capture(&window)));
+    mo_ui::space::show_sample(&app, sample_space(), "");
     presets_shots(&app, &window, &mut shots)?;
     app.set_place(Place::Songs.index() as i32);
     for theme in THEMES.iter().skip(1) {
@@ -326,8 +359,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.set_parts_gallery(false);
 
     // Activity cards: one going, one that can't say how far it is yet, one done and one failed, plus one put away.
-    let going = feed.start("Reading new FL saves", "");
-    going.progress(0.4, Some("212 of 540"));
+    // The one going has a title too long for a line, so its card must wrap it.
+    let going = feed.start(mo_app::space_bitwig::LOOKING, "");
+    going.progress(0.4, Some("148 of 371 projects"));
     let _starting = feed.start("Analysing sounds", "Getting ready");
     feed.start("Finding missing samples", "").done("All 31 found");
     feed.start("Copying Bitwig template", "").failed("The template folder isn't there any more");
@@ -697,8 +731,182 @@ fn sample_bitwig_copies() -> mo_app::space_bitwig::Copies {
     }
 }
 
+/// The Space page's made-up finds: the drives, the app's files, Bitwig copies, old copies and spare plugin copies.
+fn sample_space() -> mo_ui::space::Sample {
+    mo_ui::space::Sample {
+        drives: sample_drives(),
+        parts: sample_app_files(),
+        bitwig: sample_bitwig_copies(),
+        old: sample_old_copies(),
+        spare: sample_spare_copies(),
+        ..Default::default()
+    }
+}
+
+/// Made-up spare plugin copies, written as on Windows, biggest first: AAX copies in Avid's folder (Pro Tools isn't
+/// installed), and VST2 copies in two folders whose VST3 or CLAP your saves use, one of them a link that can't go.
+fn sample_spare_copies() -> mo_app::space_spare::Found {
+    use mo_space::spare::{SpareCopy, Why};
+    const MB: u64 = 1 << 20;
+    let avid = r"C:\Program Files\Common Files\Avid\Audio\Plug-Ins";
+    let aax = |name: &str, mb: u64| SpareCopy {
+        name: name.to_owned(),
+        format: "AAX".to_owned(),
+        path: format!(r"{avid}\{name}.aaxplugin"),
+        bytes: mb * MB,
+        stamp: Some(String::new()),
+        why: Why::NoProTools,
+    };
+    let vst2 = |name: &str, file: &str, folder: &str, mb: u64, used: &[&str], saves: u32| SpareCopy {
+        name: name.to_owned(),
+        format: "VST2".to_owned(),
+        path: format!(r"{folder}\{file}"),
+        bytes: mb * MB,
+        stamp: Some(String::new()),
+        why: Why::OtherFormatsUsed {
+            used: used.iter().map(|u| (*u).to_owned()).collect(),
+            projects: saves,
+            used_copies: Vec::new(),
+        },
+    };
+    let plugins = r"C:\Program Files\VSTPlugins";
+    let steinberg = r"C:\Program Files\Steinberg\VSTPlugins";
+    let mut copies = vec![
+        aax("Kontakt 7", 212),
+        aax("Pigments", 148),
+        aax("Omnisphere", 64),
+        aax("Serum", 58),
+        aax("FabFilter Pro-Q 3", 31),
+        aax("Valhalla VintageVerb", 12),
+        vst2("Kontakt 7", "Kontakt 7.dll", plugins, 186, &["VST3"], 212),
+        vst2("Pigments", "Pigments.dll", steinberg, 139, &["VST3", "CLAP"], 64),
+        vst2("Serum", "Serum_x64.dll", plugins, 24, &["VST3"], 412),
+        SpareCopy { stamp: None, ..vst2("Diva", "Diva(x64).dll", steinberg, 21, &["VST3"], 37) },
+    ];
+    copies.sort_by_key(|c| std::cmp::Reverse(c.bytes));
+    mo_app::space_spare::Found { copies }
+}
+
+/// The made-up AAX copy unticked in the ticks shot.
+const SAMPLE_UNTICKED: &str = r"C:\Program Files\Common Files\Avid\Audio\Plug-Ins\FabFilter Pro-Q 3.aaxplugin";
+
+/// One made-up thing a clean-up sent to the Recycle Bin at `when`: a plugin's folder or file of `kind`.
+fn sample_binned(
+    path: &str,
+    bytes: u64,
+    kind: mo_space::plugin_space::SpaceKind,
+    when: i64,
+) -> mo_space::clean::Removed {
+    mo_space::clean::Removed {
+        path: path.to_owned(),
+        real: path.to_owned(),
+        bytes,
+        what: mo_space::clean::What::Plugin(kind),
+        when,
+        bin_id: Some(String::new()),
+        binned: None,
+        binned_zone: None,
+        stamp: None,
+    }
+}
+
+/// What the app keeps of what the made-up clean-ups in `list` (oldest first) put in the Recycle Bin, all of it on C:.
+fn sample_kept(list: Vec<mo_app::binned::Binned>) -> mo_app::binned::Kept {
+    use mo_app::binned::{Binned, Kept};
+    let items = list.iter().map(|b| b.done.removed.len()).sum();
+    let bytes = list.iter().map(Binned::bytes).sum();
+    let since = list.iter().map(|b| b.when).min();
+    let in_bin = mo_space::in_bin::InBin { items, bytes, since, drives: vec![("C:".to_owned(), bytes)], looked: true };
+    Kept { seq: 1, list, in_bin, noted: true }
+}
+
+/// What Remove did with the made-up spare copies, at 15:20 on 4 Nov 2026 (UTC): every copy that can go was ticked, and
+/// all went but Omnisphere's AAX copy, which changed since it was found. Then what it put in the Recycle Bin, with one
+/// copy an older removal sent the evening before, oldest first.
+fn sample_removed(found: &mo_app::space_spare::Found) -> (mo_app::space_spare::Removing, Vec<mo_app::binned::Binned>) {
+    use mo_app::binned::Binned;
+    use mo_space::clean::{Done, Problem};
+    use mo_space::plugin_space::SpaceKind;
+    const WHEN: i64 = 1_793_805_600;
+    const BEFORE: i64 = 1_793_743_500;
+    let mut removing = mo_app::space_spare::Removing::default();
+    let picked = removing.ticked_copies(Some(found));
+    removing.start(picked.clone());
+    let stays = |c: &&mo_space::spare::SpareCopy| c.name == "Omnisphere" && c.format == "AAX";
+    let done = Done {
+        removed: picked
+            .iter()
+            .filter(|c| !stays(c))
+            .map(|c| sample_binned(&c.path, c.bytes, SpaceKind::Program, WHEN))
+            .collect(),
+        problems: picked
+            .iter()
+            .filter(stays)
+            .map(|c| Problem {
+                path: c.path.clone(),
+                why: "It changed since it was found (an update?), so it stays.".into(),
+            })
+            .collect(),
+        went_with: Vec::new(),
+    };
+    removing.sent(WHEN, done.clone());
+    let older = Done {
+        removed: vec![sample_binned(
+            r"C:\Program Files\Steinberg\VSTPlugins\Massive.dll",
+            96 << 20,
+            SpaceKind::Program,
+            BEFORE,
+        )],
+        ..Done::default()
+    };
+    let spare = mo_app::space_spare::SPARE_COPIES;
+    let list = vec![
+        Binned { kind: spare.to_owned(), when: BEFORE, done: older },
+        Binned { kind: spare.to_owned(), when: WHEN, done: Done { problems: Vec::new(), ..done } },
+    ];
+    (removing, list)
+}
+
+/// What Remove did with the made-up old copies, at 15:40 on 4 Nov 2026 (UTC): the ones ticked out of the box went, but
+/// Kontakt's factory library, which an instrument was saved into since the look, stayed. Then what it put in the
+/// Recycle Bin.
+fn sample_old_removed(found: &mo_app::space_old::Found) -> (mo_app::space_old::Removing, Vec<mo_app::binned::Binned>) {
+    use mo_app::binned::Binned;
+    use mo_space::clean::{Done, Problem};
+    use mo_space::old_copies::Leftover;
+    use mo_space::plugin_space::SpaceKind;
+    const WHEN: i64 = 1_793_806_800;
+    let mut removing = mo_app::space_old::Removing::default();
+    let picked = removing.ticked_copies(Some(found));
+    removing.start(picked.clone());
+    let stays = |l: &&Leftover| l.path.contains("Kontakt");
+    let done = Done {
+        removed: picked
+            .iter()
+            .filter(|l| !stays(l))
+            .map(|l| sample_binned(&l.path, l.bytes, SpaceKind::Sounds, WHEN))
+            .collect(),
+        problems: picked
+            .iter()
+            .filter(stays)
+            .map(|l| Problem {
+                path: l.path.clone(),
+                why: "Some of it is only in the old copy, newer there, or not the same as on the other drive: \
+                      Instruments\\My Grand.nki. It may have been saved while the move ran, deleted from the other \
+                      drive since, gone bad on the way, or open in a program now. Look before deleting it."
+                    .into(),
+            })
+            .collect(),
+        went_with: Vec::new(),
+    };
+    removing.sent(WHEN, done.clone());
+    let old = mo_app::space_old::OLD_COPIES;
+    (removing, vec![Binned { kind: old.to_owned(), when: WHEN, done: Done { problems: Vec::new(), ..done } }])
+}
+
 /// Made-up old copies left after moving plugin folders to I:, written as on Windows, biggest first: two that can go,
-/// the old place of the folder the moved folders live in, and one that can't go yet.
+/// the old place of the folder the moved folders live in, one that can't go yet, files a try kept aside (nothing to
+/// check them against, so not ticked), and one with presets saved since the move (so it stays until you look).
 fn sample_old_copies() -> mo_app::space_old::Found {
     use mo_space::after_move::OldHome;
     use mo_space::old_copies::{Left, Leftover, Reminder};
@@ -711,9 +919,18 @@ fn sample_old_copies() -> mo_app::space_old::Found {
         now_in: now_in.to_owned(),
         since: day.and_then(moved),
         stays: stays.map(str::to_owned),
+        only: stays.is_none().then(Vec::new),
     };
     let stays = "It's the only copy the plugin could use now (the link or the copy on the other drive isn't as the move \
                  left it), so it stays.";
+    let kept = OldHome {
+        path: r"I:\Plugin Data\Spitfire Audio (kept from before)".to_owned(),
+        bytes: 1_240 * MB,
+        note: "replaced by linking again".to_owned(),
+        copy: String::new(),
+        kind: 2,
+    };
+    let saved = [r"Diva.data\Presets\Diva\Bass\Sub Wobble.h2p", r"Diva.data\Presets\Diva\Pads\Night Pad.h2p"];
     let leftovers = vec![
         left(
             r"C:\Program Files\Common Files\Spitfire Audio (old copy)",
@@ -740,6 +957,18 @@ fn sample_old_copies() -> mo_app::space_old::Found {
             Some(31),
             Some(stays),
         ),
+        Leftover { only: None, ..left(&kept.path, 1_240, Left::Kept(kept.clone()), "", None, None) },
+        Leftover {
+            only: Some(saved.map(str::to_owned).to_vec()),
+            ..left(
+                r"C:\Users\Public\Documents\u-he (old copy)",
+                717,
+                Left::OldCopy(3),
+                r"I:\Plugin Data\u-he",
+                Some(30),
+                None,
+            )
+        },
     ];
     let home = OldHome {
         path: r"C:\Plugin Data".to_owned(),
@@ -1162,6 +1391,8 @@ const PAGE_DOWN: f32 = 300.0;
 /// doesn't scroll on its own, as the lists and the arrangement in it do.
 const NARROW_PANEL_WHEEL: (f32, f32, f32) = (760.0, 404.0, -2.0 * PAGE_DOWN);
 const OLDER_BUTTON: (f32, f32) = (1005.0, 368.0);
+/// Where the wheel turns the Space page's card down to its end, and by more than enough: on its list of parts.
+const SPACE_CARD_WHEEL: (f32, f32, f32) = (1240.0, 600.0, -10.0 * PAGE_DOWN);
 /// The Lock chip on the kit's second pad (Snare).
 const SNARE_LOCK: (f32, f32) = (846.0, 333.0);
 /// The first tile's liked bar on Sounds, under the Order line and the three lines of filters.
@@ -1275,6 +1506,21 @@ fn settings_shots(
 fn scroll(window: &MinimalSoftwareWindow, x: f32, y: f32, dy: f32) {
     let position = slint::LogicalPosition::new(x, y);
     window.dispatch_event(slint::platform::WindowEvent::PointerScrolled { position, delta_x: 0.0, delta_y: dy });
+}
+
+/// The Space page's card turned down to its end (`top` is how it looked before; `name` names the shot), then back to its
+/// top for the shots that follow. Err when the wheel moved nothing: is it still on the card?
+fn card_down(window: &MinimalSoftwareWindow, top: &[u8], name: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let (x, y, turn) = SPACE_CARD_WHEEL;
+    scroll(window, x, y, turn);
+    let down = capture(window);
+    hover(window, -1.0, -1.0);
+    scroll(window, x, y, -turn);
+    hover(window, -1.0, -1.0);
+    if down == top {
+        return Err(format!("{name}: the wheel at {x}, {y} moved nothing; is it still on the card?").into());
+    }
+    Ok(down)
 }
 
 /// A left click at a point in the window.

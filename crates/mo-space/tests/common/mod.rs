@@ -1,11 +1,19 @@
-//! Folder links for the tests, made and removed the way each system has them. One copy, shared by every test file
-//! (`mod common;`), so a change to how tests make links is made once.
+//! Folder links for the tests, made and removed the way each system has them, and where the tests' folder bins keep
+//! what went. One copy, shared by every test file (`mod common;`), so a change to how tests make links is made once.
 
 // Each test file uses only some of these.
 #![allow(dead_code)]
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use mo_space::clean::Removed;
+
+/// Where a test's folder bin keeps something that went, while it's there: what the bin calls it is where it is in the
+/// bin's folder.
+pub fn kept_at(r: &Removed) -> Option<PathBuf> {
+    r.bin_id.as_deref().map(PathBuf::from).filter(|at| fs::symlink_metadata(at).is_ok())
+}
 
 /// A folder link, as Windows has them (a junction, as Space makes) or a symbolic link elsewhere.
 pub fn folder_link(target: &Path, at: &Path) {
@@ -33,4 +41,32 @@ pub fn file_link(target: &Path, at: &Path) -> bool {
     #[cfg(not(windows))]
     let made = std::os::unix::fs::symlink(target, at);
     made.is_ok()
+}
+
+/// Makes the read-only files a test left writable again, and on a Mac or Linux opens again the folders it locked (also
+/// when it stopped before it could), so its folder can be cleared. Never through a link.
+pub fn writable(dir: &Path) {
+    // A link (or nothing) isn't looked in: only a real folder is.
+    if !fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir()) {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o755));
+    }
+    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+        let Ok(kind) = entry.file_type() else { continue };
+        if kind.is_dir() {
+            writable(&entry.path());
+        } else if kind.is_file()
+            && let Ok(meta) = entry.metadata()
+            && meta.permissions().readonly()
+        {
+            let mut permissions = meta.permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            permissions.set_readonly(false);
+            let _ = fs::set_permissions(entry.path(), permissions);
+        }
+    }
 }

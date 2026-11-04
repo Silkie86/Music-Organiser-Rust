@@ -21,7 +21,7 @@ use mo_space::size::size_text;
 use mo_space::{Stopped, key};
 
 use crate::songs::{plural, thousands};
-use crate::space::{Card, Line, Opens, Part};
+use crate::space::{Card, Line, Opens, Part, and_list};
 
 /// The Bitwig copies line's id.
 pub const BITWIG_COPIES: &str = "bitwig-copies";
@@ -206,31 +206,23 @@ pub fn line(found: Option<&Copies>, looking: Option<(usize, usize)>) -> Option<(
     }
 }
 
-/// What can still be freed, as the page says it under Biggest wins first.
-pub const STILL_TO_COME: &str = "Still to come: spare plugin copies, then songs, then plugins you haven't used.";
-
-/// What the page says under Biggest wins first: why there's no Bitwig line when a look found none, and what's still
-/// to come.
-pub fn wins_note(found: Option<&Copies>) -> String {
-    let none = match found {
+/// What the page says under Biggest wins first about Bitwig copies: why there's no Bitwig line when a look found
+/// none, or nothing.
+pub fn none_note(found: Option<&Copies>) -> &'static str {
+    match found {
         Some(c) if c.folders > 0 && c.library.is_empty() => {
             "Bitwig's Library folder wasn't found (the Library folder in Bitwig Studio), so its copies in your projects \
              can't be compared with it. "
         }
         Some(c) if c.projects.is_empty() => "No Bitwig project has copies of your Library's multisamples. ",
         _ => "",
-    };
-    format!("{none}{STILL_TO_COME}")
+    }
 }
 
 /// The Library folders, as a sentence says them: "K:\Bitwig Studio\Library", "A and B", "A, B and C".
 fn library_words(library: &[PathBuf]) -> String {
     let names: Vec<String> = library.iter().map(|l| l.to_string_lossy().into_owned()).collect();
-    match names.as_slice() {
-        [] => "your Bitwig Library".to_owned(),
-        [one] => one.clone(),
-        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
-    }
+    if names.is_empty() { "your Bitwig Library".to_owned() } else { and_list(&names) }
 }
 
 /// What Fix did to a save.
@@ -476,7 +468,7 @@ pub fn card(found: Option<&Copies>, looking: Option<(usize, usize)>, fixes: &Fix
         if let Some(newest) = p.newest() {
             let state = fixes.state(newest);
             (line.status, line.problem) = state_words(p, newest, &state, true);
-            line.tick = fixes.tick(p, newest).map(|t| (newest.path.clone(), t));
+            line.tick = fixes.tick(p, newest).map(|t| (vec![newest.path.clone()], t));
             if let State::Fixed(f) = state {
                 line.open = Some((Opens::InBitwig, f.to_path_buf()));
             }
@@ -504,7 +496,7 @@ pub fn card(found: Option<&Copies>, looking: Option<(usize, usize)>, fixes: &Fix
                 name: save_name(p, save),
                 what: saved_words(save.modified),
                 under: true,
-                tick: fixes.tick(p, save).map(|t| (save.path.clone(), t)),
+                tick: fixes.tick(p, save).map(|t| (vec![save.path.clone()], t)),
                 status,
                 problem,
                 open: if let State::Fixed(f) = state { Some((Opens::InBitwig, f.to_path_buf())) } else { None },
@@ -633,13 +625,13 @@ mod tests {
 
     #[test]
     fn the_note_says_why_there_is_no_line() {
-        assert_eq!(wins_note(None), STILL_TO_COME);
-        assert_eq!(wins_note(Some(&sample())), STILL_TO_COME);
+        assert_eq!(none_note(None), "");
+        assert_eq!(none_note(Some(&sample())), "");
         let none = Copies { library: sample().library, folders: 3, projects: Vec::new() };
-        assert!(wins_note(Some(&none)).starts_with("No Bitwig project has copies of your Library's multisamples. "));
-        assert!(wins_note(Some(&Copies::default())).starts_with("No Bitwig project"));
+        assert_eq!(none_note(Some(&none)), "No Bitwig project has copies of your Library's multisamples. ");
+        assert!(none_note(Some(&Copies::default())).starts_with("No Bitwig project"));
         let no_library = Copies { library: Vec::new(), folders: 3, projects: Vec::new() };
-        assert!(wins_note(Some(&no_library)).starts_with("Bitwig's Library folder wasn't found"));
+        assert!(none_note(Some(&no_library)).starts_with("Bitwig's Library folder wasn't found"));
     }
 
     #[test]
@@ -684,7 +676,7 @@ mod tests {
         // The project's own line speaks for its newest save; its other saves are a link away.
         assert_eq!(card.parts.len(), 1);
         let line = &card.parts[0];
-        assert_eq!(line.tick, Some((p.saves[0].path.clone(), true)));
+        assert_eq!(line.tick, Some((vec![p.saves[0].path.clone()], true)));
         assert_eq!(
             line.status,
             "The tick is for its newest save, \"GARAGE FOR BW 1.bwproject\". Its 2 other saves may use these copies too."
@@ -699,7 +691,7 @@ mod tests {
         let names: Vec<&str> = card.parts.iter().map(|l| l.name.as_str()).collect();
         assert_eq!(names, ["GARAGE FOR BW 1", "GARAGE v1.bwproject", r"auto-backups\GARAGE FOR BW 1-3.bwproject"]);
         assert_eq!(card.parts[0].more.as_ref().map(|m| m.0.as_str()), Some("Hide its other saves"));
-        assert!(card.parts[1].under && card.parts[1].tick == Some((p.saves[1].path.clone(), false)));
+        assert!(card.parts[1].under && card.parts[1].tick == Some((vec![p.saves[1].path.clone()], false)));
         assert_eq!(
             card.parts[1].status,
             "Saved again since \"GARAGE v1 (fixed).bwproject\" was written: fix it again for this save."
@@ -759,7 +751,7 @@ mod tests {
         assert_eq!(fixes.button(Some(&found(&p))), Some(("Fixing…".to_owned(), false)));
         // Unless it found that very file older than the save: saved again meanwhile.
         p.saves[0].fixed = Some((fixed.clone(), false));
-        assert_eq!(status(&p, &fixes).tick, Some((newest.clone(), true)));
+        assert_eq!(status(&p, &fixes).tick, Some((vec![newest.clone()], true)));
 
         // Finished, the look after it finds the fixed project on disk: that counts from now on.
         fixes.finished();
@@ -773,7 +765,7 @@ mod tests {
         // Saved again since: it can be fixed again, and is ticked again.
         p.saves[0].fixed = Some((fixed.clone(), false));
         let line = status(&p, &fixes);
-        assert_eq!((line.tick, line.open), (Some((newest.clone(), true)), None));
+        assert_eq!((line.tick, line.open), (Some((vec![newest.clone()], true)), None));
         assert_eq!(
             line.status,
             "Saved again since \"GARAGE FOR BW 1 (fixed 2).bwproject\" was written: fix it again for this save."
@@ -788,11 +780,11 @@ mod tests {
         fixes.finished();
         let line = status(&p, &fixes);
         assert_eq!(line.status, "Not fixed: every copy is still needed, so nothing was written");
-        assert!(line.problem && line.tick == Some((newest.clone(), false)));
+        assert!(line.problem && line.tick == Some((vec![newest.clone()], false)));
         fixes.looked();
         assert!(status(&p, &fixes).problem, "a look keeps why it couldn't be fixed");
         fixes.ticks.insert(newest.clone(), true);
-        assert_eq!(status(&p, &fixes).tick, Some((newest.clone(), true)));
+        assert_eq!(status(&p, &fixes).tick, Some((vec![newest.clone()], true)));
 
         // A save Fix didn't get to, because it stopped with an error, says so.
         fixes.start(&fixes.to_fix(&found(&p)));

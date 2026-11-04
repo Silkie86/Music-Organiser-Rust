@@ -24,13 +24,13 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::admin::{Admin, AsAdmin, NoAdmin, Outcome, Step, ask_for, real_spot, reason};
-use crate::clean::{Bin, Done, Problem, Sending, What, on_network};
+use crate::clean::{Bin, Done, on_network};
 use crate::half_copy::{
     self, Claim, MARKER, busy_now, claim, clear_own, going_into_use, not_in_use, own_room, remove_marked, unmark,
 };
 use crate::plugin_space::SpaceKind;
 use crate::size::{self, is_link, is_online_only, size_text};
-use crate::{key, not_there, real_folder, real_path, really, text};
+use crate::{is_dir, key, not_there, real_folder, real_path, really, text};
 
 /// What the original is called while its link stands in for it.
 pub const OLD_SUFFIX: &str = " (old copy)";
@@ -639,23 +639,31 @@ pub struct MovedBack {
     pub kept: Vec<String>,
     /// The folder they're kept in, beside the plugin's folder.
     pub kept_in: String,
-    /// Links in the old copy where the other drive has a file or folder now (paths inside the folder): left as they
-    /// were.
+    /// Links in the old copy where the other drive has a file or folder now, or a link leading somewhere else (the
+    /// plugin pointed it elsewhere since, or just before the move's swap), and files and folders in it where the other
+    /// drive has a link now, as paths inside the folder: left as they were, for you to look at. So is the link of a
+    /// folder moved from inside it before that Windows wouldn't let be pointed where that folder is now.
     pub links_left: Vec<String>,
 }
 
 /// Undoes a move: the link goes and the old copy takes its place again, with what changed on the other drive since the
 /// move copied into it first (presets the plugin wrote through the link live only there). The old copy's own newer
-/// files are kept aside, never replaced. Once the old copy is deleted, the folder is copied back instead. Either way
-/// only with room to spare on this drive, and only while the link still leads to the copy the move made. Close the DAW
-/// first: what it saves meanwhile is caught by a second pass, but not after the swap. Stopped or failing part way, it
-/// says what's where ([`CantMove::LeftHalfway`]); the copy it makes when the old copy is gone holds a marker until it's
-/// in place, so one the app or the computer stopped is cleared by the next try ([`crate::half_copy`]). Once it returns
-/// `Ok`, the move is over: the app lists the folders of kept files beside it ([`crate::after_move::kept_beside`], which
-/// finds those a stopped try left too) as folders left behind, then drops its record; the copy on the other drive is
-/// left for you to remove. Call it away from the window's thread.
+/// files are kept aside, never replaced, and its links stay as they are: one that leads somewhere else than the other
+/// drive's is named ([`MovedBack::links_left`]), as is a file or folder of its where the other drive has a link now
+/// (it stays too). But the links of folders moved from inside it before (`all` is every moved folder) are the app's
+/// own: once both passes are done, one whose twin on the other drive leads where its folder is now is pointed there
+/// too (the old copy's may lead where it was before the folder the moved folders live in moved). Once the old copy is
+/// deleted, the folder is copied back instead.
+/// Either way only with room to spare on this drive, and only while the link still leads to the copy the move made.
+/// Close the DAW first: what it saves meanwhile is caught by a second pass, but not after the swap. Stopped or failing
+/// part way, it says what's where ([`CantMove::LeftHalfway`]); the copy it makes when the old copy is gone holds a
+/// marker until it's in place, so one the app or the computer stopped is cleared by the next try
+/// ([`crate::half_copy`]). Once it returns `Ok`, the move is over: the app lists the folders of kept files beside it
+/// ([`crate::after_move::kept_beside`], which finds those a stopped try left too) as folders left behind, then drops
+/// its record; the copy on the other drive is left for you to remove. Call it away from the window's thread.
 pub fn move_back(
     moved: &MovedFolder,
+    all: &[MovedFolder],
     drives: &dyn Drives,
     progress: &(dyn Fn(u64) + Sync),
     stop: &AtomicBool,
@@ -725,8 +733,11 @@ pub fn move_back(
         )
         .map_err(partly)?;
         write_through(&[&first, &again], stop).map_err(partly)?;
-        // The copying took a while: a plugin update may have put a real folder where the link was meanwhile.
-        if let Some(now) = not_the_link_now(moved) {
+        let mut links_left = [first.links_left, again.links_left].concat();
+        // The copying took a while: a plugin update may have put a real folder where the link was meanwhile. That's
+        // looked at before the old copy's links are pointed (Windows may ask you about those, for nothing then), and
+        // again just before the swap.
+        let not_swapped = |found: NotTheLink| {
             let kept = if kept_in.exists() {
                 format!(" Its own newer files are kept in {}.", text(&kept_in))
             } else {
@@ -740,17 +751,20 @@ pub fn move_back(
             } else {
                 format!("The old copy ({}) stays beside it, as it was.", moved.old_copy)
             };
-            return Err(CantMove::LeftHalfway(format!(
-                "{now} {updated}{kept} {} still has all the folder's files. Look at what's in {from} now, then link it \
-                 again from the Space page.",
-                moved.to
-            )));
+            CantMove::LeftHalfway(format!("{} {updated}{kept} {}", found.now, found.files))
+        };
+        if let Some(found) = not_the_link_now(moved) {
+            return Err(not_swapped(found));
+        }
+        point_inner_links(moved, all, &mut links_left, &changed, drives.admin()).map_err(partly)?;
+        if let Some(found) = not_the_link_now(moved) {
+            return Err(not_swapped(found));
         }
         unswap_or_ask(from, &moved.old_copy, to, drives.admin()).map_err(partly)?;
         return Ok(MovedBack {
             kept: shown(&[first.kept, again.kept].concat()),
             kept_in: kept_in.to_string_lossy().into_owned(),
-            links_left: shown(&[first.links_left, again.links_left].concat()),
+            links_left: shown(&links_left),
         });
     }
     let back = format!("{from}{BACK_SUFFIX}");
@@ -768,29 +782,44 @@ pub fn move_back(
     room_for(&tree, here, drives, stop)?;
     let (first, again) = copy_fresh(&tree, progress, stop)?;
     // The copying took a while: a plugin update may have put a real folder where the link was meanwhile. The copy
-    // made to come back is only a copy of what's still on the other drive, so it goes.
-    if let Some(now) = not_the_link_now(moved) {
-        remove_copy(Path::new(&back));
-        return Err(CantMove::Failed(format!(
-            "{now} The copy made to bring it back was removed; {} still has all the folder's files. Look at what's in \
-             {from} now, then link it again from the Space page.",
-            moved.to
-        )));
+    // made to come back is only a copy of what's still on the other drive, so it goes; but not while the other drive
+    // can't be reached (its drive went just now, say): then it's the only copy that can be. It stays a half copy then,
+    // its marker saying it isn't going into use, which the next try clears first, once the other drive can be reached
+    // again ([`clear_own`]).
+    let not_swapped = |found: NotTheLink| {
+        if found.reached {
+            remove_copy(Path::new(&back));
+            return CantMove::Failed(format!(
+                "{} The copy made to bring it back was removed; {}",
+                found.now, found.files
+            ));
+        }
+        not_in_use(Path::new(&back));
+        CantMove::LeftHalfway(format!(
+            "{} The copy made to bring it back stays beside it, as {back}: it has all the folder's files, as they were \
+             when it was made. {}",
+            found.now, found.files
+        ))
+    };
+    if let Some(found) = not_the_link_now(moved) {
+        return Err(not_swapped(found));
     }
     going_into_use(Path::new(&back)).then_some(()).ok_or_else(|| not_noted(Path::new(&back)))?;
     if let Err(why) = unswap_or_ask(from, &back, to, drives.admin()) {
-        // As it was (the plugin still uses the other drive), or a real folder is there now and the other drive still
-        // has everything: either way the copy made to come back is only a copy, so it goes.
-        if link_reaches(moved) || (real_folder(from) && fs::metadata(to).is_ok_and(|m| m.is_dir())) {
-            remove_copy(Path::new(&back));
+        // While the link is there (as it was, or put back) or a real folder is (a plugin update put it there just
+        // now), nothing leads to the copy made to come back: the swap didn't happen, so it's only a copy, as above.
+        // When the link still leads to the other drive, it goes, and `why` says why it didn't swap. Anything else (the
+        // link went, and the copy didn't take its name) is said in `why` (what to rename, say), and the copy stays as
+        // it is, still noted as going into use.
+        if !is_link(Path::new(from)) && !real_folder(from) {
+            return Err(why);
         }
         return Err(match not_the_link_now(moved) {
-            Some(now) if real_folder(from) => CantMove::Failed(format!(
-                "{now} {} still has all the folder's files. Look at what's in {from} now, then link it again from the \
-                 Space page.",
-                moved.to
-            )),
-            _ => why,
+            Some(found) => not_swapped(found),
+            None => {
+                remove_copy(Path::new(&back));
+                why
+            }
         });
     }
     // In place now, as the plugin's own folder: it's no half copy.
@@ -798,24 +827,162 @@ pub fn move_back(
     Ok(MovedBack { links_left: shown(&[first.links_left, again.links_left].concat()), ..MovedBack::default() })
 }
 
-/// Why the place a moved folder was isn't its link to the copy any more, if it isn't: a real folder is there (a plugin
-/// update may have made it), or the link leads somewhere else, or nothing is there.
-fn not_the_link_now(moved: &MovedFolder) -> Option<String> {
-    let from = &moved.from;
-    if link_reaches(moved) {
-        None
-    } else if real_folder(from) {
-        Some(format!(
-            "While it was moving back, {from} became a real folder again (a plugin update may have put it there), so it \
-             wasn't swapped."
-        ))
-    } else if is_link(Path::new(from)) {
-        Some(format!(
-            "While it was moving back, the link at {from} was changed to lead somewhere else, so it wasn't swapped."
-        ))
-    } else {
-        Some(format!("While it was moving back, the link at {from} went, so it wasn't swapped."))
+/// Moving back into the old copy, once both passes are done: the links of folders moved from inside it before
+/// (Reaktor 6 inside Native Instruments) are the app's own, and the old copy's may lead where such a folder was before
+/// the folder the moved folders live in moved (the app points the live ones elsewhere then, never these). Each one the
+/// copy's leads where its folder is now is pointed there too, so the plugin finds that folder once the old copy is back,
+/// and isn't named in `links_left` (the passes named it, as it led elsewhere than the copy's). It leads to the place the
+/// app noted for that folder, never to one read through the copy. Only a link in the old copy itself, with no link on
+/// the way, is changed. The ones Windows guards are changed as administrator, Windows asking you once for all of them
+/// (`admin`: the app passes [`crate::admin::AsAdmin`]), as when pointing links again. One that still won't change stays
+/// as it was, and is named; one that went and couldn't be put back stops moving back, before the old copy is in use,
+/// and is named.
+fn point_inner_links(
+    moved: &MovedFolder,
+    all: &[MovedFolder],
+    links_left: &mut Vec<PathBuf>,
+    changed: &AtomicBool,
+    admin: &dyn Admin,
+) -> Result<(), CantMove> {
+    let (old, copy) = (Path::new(&moved.old_copy), Path::new(&moved.to));
+    let mut guarded = Vec::new();
+    for (rest, inner) in inner_links(moved, all) {
+        let (mine, theirs, now) = (old.join(&rest), copy.join(&rest), PathBuf::from(&inner.to));
+        if !in_itself(old, &rest) || !is_link(&mine) || leads_to(&text(&mine), &now) || !leads_to(&text(&theirs), &now)
+        {
+            continue;
+        }
+        match crate::after_move::relink(&text(&mine), &now, true) {
+            Ok(()) => {
+                changed.store(true, Ordering::Relaxed);
+                unname(links_left, &rest);
+            }
+            Err(not) if not.gone => {
+                changed.store(true, Ordering::Relaxed);
+                return Err(CantMove::Failed(not.why));
+            }
+            // Changed as administrator, below, with the others Windows guards.
+            Err(not) if not.guarded && admin.can_ask() => guarded.push((rest, mine, now)),
+            // It stays as it was, and named: the passes named it already, as it leads elsewhere than the copy's.
+            Err(_) => name_once(links_left, rest),
+        }
     }
+    if guarded.is_empty() {
+        return Ok(());
+    }
+    let asked: Vec<(String, PathBuf)> = guarded.iter().map(|(_, mine, now)| (text(mine), now.clone())).collect();
+    for ((rest, mine, _), done) in guarded.into_iter().zip(crate::after_move::relink_as_admin(admin, &asked)) {
+        match done {
+            Ok(()) => {
+                changed.store(true, Ordering::Relaxed);
+                unname(links_left, &rest);
+            }
+            // Still there (as it was, or something the plugin put in its place meanwhile): it stays, and is named.
+            Err(_) if fs::symlink_metadata(&mine).is_ok() => name_once(links_left, rest),
+            Err(why) => {
+                changed.store(true, Ordering::Relaxed);
+                return Err(CantMove::Failed(why));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Names `rest` in what moving back left, once: by its name in the copy, as the passes named it, maybe in other
+/// capitals than the move noted.
+fn name_once(links_left: &mut Vec<PathBuf>, rest: PathBuf) {
+    if !links_left.iter().any(|p| key(&text(p)) == key(&text(&rest))) {
+        links_left.push(rest);
+    }
+}
+
+/// Takes `rest` out of what moving back left, whatever capitals the passes named it in.
+fn unname(links_left: &mut Vec<PathBuf>, rest: &Path) {
+    links_left.retain(|p| key(&text(p)) != key(&text(rest)));
+}
+
+/// Whether `rest` (a path inside `folder`, by names only: never "..") is in `folder` itself: `folder` is a real folder,
+/// and so is every one on the way to it ([`not_real_on_the_way`]), so changing what's at `rest` changes nothing
+/// anywhere else. Looked at before anything at `rest` is, so a link on the way (to a network drive that's asleep, say)
+/// is never followed.
+fn in_itself(folder: &Path, rest: &Path) -> bool {
+    let parts: Vec<Component> = rest.components().collect();
+    fs::symlink_metadata(folder).is_ok_and(|m| m.is_dir())
+        && parts.iter().all(|part| matches!(part, Component::Normal(_)))
+        && parts.split_last().is_some_and(|(_, up)| not_real_on_the_way(folder, up.iter().copied()).is_none())
+}
+
+/// The first folder on the way down `parts` from `folder`, looked at name by name, that isn't a real folder now: a link,
+/// a file, or nothing there. Never through a link: each is looked at only once every one above it is a real folder.
+fn not_real_on_the_way<'a>(folder: &Path, parts: impl IntoIterator<Item = Component<'a>>) -> Option<PathBuf> {
+    let mut at = folder.to_path_buf();
+    parts.into_iter().find_map(|part| {
+        at.push(part);
+        (!fs::symlink_metadata(&at).is_ok_and(|m| m.is_dir())).then(|| at.clone())
+    })
+}
+
+/// Why the place a moved folder was isn't its link to the copy any more, if it isn't, and then where the folder's files
+/// are and what to do (the end of what the app says): a real folder is there (a plugin update may have made it), which
+/// linking it again from the Space page puts right; or the copy can't be reached now while the link is still worded as
+/// the move made it (the copy's drive went, or a link of yours the copy is leads nowhere), which trying again once it's
+/// back does; or the link leads somewhere else (it was pointed at another place); or nothing is there. Only a real
+/// folder can be linked again ([`crate::after_move::link_again`]). The copy is said to have all the folder's files only
+/// while it can be reached.
+fn not_the_link_now(moved: &MovedFolder) -> Option<NotTheLink> {
+    if link_reaches(moved) {
+        return None;
+    }
+    let (from, to) = (&moved.from, &moved.to);
+    let link = Path::new(from);
+    let reached = is_dir(to);
+    let files = if reached {
+        format!("{to} still has all the folder's files.")
+    } else {
+        format!("The folder's files on {to} were left as they are, but it can't be reached now.")
+    };
+    // The link's own words still name the copy (in whatever capitals): it leads nowhere only by the way there.
+    let names_copy = || {
+        fs::read_link(link)
+            .is_ok_and(|words| key(&text(&worded_place(link, &words))) == key(&text(&plainly(&tidy(Path::new(to))))))
+    };
+    let (now, files) = if real_folder(from) {
+        (
+            format!(
+                "While it was moving back, {from} became a real folder again (a plugin update may have put it there), \
+                 so it wasn't swapped."
+            ),
+            format!("{files} Look at what's in {from} now, then link it again from the Space page."),
+        )
+    } else if is_link(link) && !reached && names_copy() {
+        (
+            format!(
+                "While it was moving back, {to} couldn't be reached any more (its drive may have gone), so it wasn't \
+                 swapped."
+            ),
+            format!("{files} Once it can be reached again, try again."),
+        )
+    } else if is_link(link) {
+        (
+            format!(
+                "While it was moving back, the link at {from} was changed to lead somewhere else, so it wasn't swapped."
+            ),
+            format!("{files} Look at where the link at {from} leads now."),
+        )
+    } else {
+        (format!("While it was moving back, the link at {from} went, so it wasn't swapped."), files)
+    };
+    Some(NotTheLink { now, files, reached })
+}
+
+/// What [`not_the_link_now`] found: why the place a moved folder was isn't its link to the copy any more (`now`), where
+/// the folder's files are and what to do (`files`, the end of what the app says), and whether the copy can be reached
+/// now. That's looked at once, so what's done with the copy made to come back goes by what's said, also on a drive
+/// that's slow to wake up.
+struct NotTheLink {
+    now: String,
+    files: String,
+    reached: bool,
 }
 
 /// A copy whose marker couldn't be told it's going into use goes (it isn't in use), and nothing has moved: a copy whose
@@ -985,6 +1152,12 @@ fn inner_moves<'a>(moved: &'a MovedFolder, all: &'a [MovedFolder]) -> impl Itera
     all.iter().filter(move |m| key(&m.from) != key(&moved.from) && is_inside(&m.from, &moved.from))
 }
 
+/// The links of folders moved from inside this one before (Reaktor 6 inside Native Instruments), by their paths inside
+/// it, with their moves: the app's own, which those moves made.
+fn inner_links<'a>(moved: &'a MovedFolder, all: &'a [MovedFolder]) -> Vec<(PathBuf, &'a MovedFolder)> {
+    inner_moves(moved, all).filter_map(|m| Some((rest_after(&m.from, &moved.from)?, m))).collect()
+}
+
 /// The old copies of folders moved from inside this one before, as they sit in `old` (where its own old copy is now),
 /// with their moves. Only the ones there: an old copy inside an inner one's old copy is that one's.
 fn held<'a>(old: &Path, moved: &'a MovedFolder, all: &'a [MovedFolder]) -> Vec<(PathBuf, &'a MovedFolder)> {
@@ -1003,8 +1176,11 @@ fn all_held<'a>(old: &Path, moved: &'a MovedFolder, all: &'a [MovedFolder], foun
 }
 
 /// What's in the old copy but not in the copy on the other drive, or newer in the old copy, as paths inside it: files
-/// saved there while the move ran, or deleted from the other drive since. The old copies of folders moved from inside
-/// it before are checked against their own copies. Reads both folders: call it away from the window's thread.
+/// saved there while the move ran, or deleted from the other drive since, and links that lead somewhere else from the
+/// old copy than from the copy ([`same_lead`]: the plugin pointed one elsewhere just before the swap, or in the copy
+/// since). The old copies of folders moved from inside it before are checked against their own copies; their links in
+/// it are the app's own, so any link at their place in the copy counts (one that isn't there is named). Reads both
+/// folders: call it away from the window's thread.
 pub fn only_in_old_copy(moved: &MovedFolder, all: &[MovedFolder], stop: &AtomicBool) -> Result<Vec<String>, CantMove> {
     old_copy_only(moved, all, false, stop)
 }
@@ -1020,31 +1196,41 @@ fn old_copy_only(
 ) -> Result<Vec<String>, CantMove> {
     let mut only = Vec::new();
     let old = Path::new(&moved.old_copy);
-    differences((old, Path::new(&moved.to)), held(old, moved, all), (all, bytes), Path::new(""), &mut only, stop)?;
+    differences((old, Path::new(&moved.to)), Some(moved), (all, bytes), Path::new(""), &mut only, stop)?;
     only.sort();
     Ok(only)
 }
 
-/// What's in `old` but not in `copy`, or newer in `old`, as paths inside it.
-pub(crate) fn only_in(old: &Path, copy: &Path, stop: &AtomicBool) -> Result<Vec<String>, CantMove> {
+/// What's in `old` but not in `copy`, or newer in `old`, as paths inside it; with `bytes`, also the files that look the
+/// same in both but whose bytes differ (slow: only just before `old` goes).
+pub(crate) fn only_in(old: &Path, copy: &Path, bytes: bool, stop: &AtomicBool) -> Result<Vec<String>, CantMove> {
     let mut only = Vec::new();
-    differences((old, copy), Vec::new(), (&[], false), Path::new(""), &mut only, stop)?;
+    differences((old, copy), None, (&[], bytes), Path::new(""), &mut only, stop)?;
     only.sort();
     Ok(only)
 }
 
-/// Adds what's in `old` but not in `copy`, or newer in `old`, as paths under `shown_as`. `inner` holds the old copies
-/// of folders moved from inside it before, as they sit in `old`: each is checked against its own copy.
+/// Adds what's in `old` but not in `copy`, or newer in `old`, as paths under `shown_as`. With `moved` (whose old copy
+/// `old` is, or holds), the old copies of folders moved from inside it before, as they sit in `old`, are each checked
+/// against their own copy, and their links in it aren't compared with the copy's: they're the app's own, which it
+/// points elsewhere as those folders move on (moving the folder the moved folders live in does), the live ones, never
+/// these. Any link at their place in the copy counts; one that isn't there is named.
 fn differences(
     (old, copy): (&Path, &Path),
-    inner: Vec<(PathBuf, &MovedFolder)>,
+    moved: Option<&MovedFolder>,
     (all, bytes): (&[MovedFolder], bool),
     shown_as: &Path,
     only: &mut Vec<String>,
     stop: &AtomicBool,
 ) -> Result<(), CantMove> {
+    let inner = moved.map_or_else(Vec::new, |moved| held(old, moved, all));
     let skip: Vec<String> = inner.iter().map(|(at, _)| key(&at.to_string_lossy())).collect();
+    let links: Vec<String> = moved.map_or_else(Vec::new, |moved| {
+        inner_links(moved, all).into_iter().map(|(rest, _)| key(&text(&old.join(rest)))).collect()
+    });
     let show = |p: &Path| shown_as.join(p.strip_prefix(old).unwrap_or(p)).to_string_lossy().into_owned();
+    // Where the two really are, for where links in them lead ([`same_lead`]).
+    let roots = [fs::canonicalize(old).ok(), fs::canonicalize(copy).ok()];
     let mut folders = vec![(old.to_path_buf(), copy.to_path_buf())];
     while let Some((old_dir, copy_dir)) = folders.pop() {
         let top = old_dir.as_path() == old;
@@ -1077,8 +1263,22 @@ fn differences(
                 continue;
             }
             let in_copy = if kind.is_symlink() {
-                // A link to a pipe or a socket is passed over too, by a copy that couldn't make it again.
-                fs::symlink_metadata(&there).is_ok() || fs::metadata(&path).is_ok_and(|m| special(&m.file_type()))
+                match fs::symlink_metadata(&there) {
+                    // A link there too, leading to the same place. One the plugin pointed elsewhere just before the
+                    // swap, after the copy had made it again, leads there only from the old copy. So does one pointed
+                    // elsewhere in the copy since, through the folder's link: which of the two was pointed elsewhere
+                    // last can't be told (the app makes links again with new times: moving the folder the moved
+                    // folders live in does), so it's named, to look at before the old copy goes. But the link of a
+                    // folder moved from inside it before is the app's own, which it points elsewhere as that folder
+                    // moves on (the live one, never the old copy's): any link there counts.
+                    Ok(m) if m.file_type().is_symlink() => {
+                        links.contains(&key(&path.to_string_lossy())) || same_lead(&path, &there, &roots)
+                    }
+                    // Something else there: the plugin saved over its link since.
+                    Ok(_) => true,
+                    // A link to a pipe or a socket is passed over too, by a copy that couldn't make it again.
+                    Err(_) => fs::metadata(&path).is_ok_and(|m| special(&m.file_type())),
+                }
             } else if kind.is_dir() {
                 let is_dir = fs::metadata(&there).is_ok_and(|m| m.is_dir());
                 if is_dir {
@@ -1102,9 +1302,57 @@ fn differences(
     }
     for (at, m) in inner {
         let rest = at.strip_prefix(old).unwrap_or(&at).to_path_buf();
-        differences((&at, Path::new(&m.to)), held(&at, m, all), (all, bytes), &shown_as.join(rest), only, stop)?;
+        differences((&at, Path::new(&m.to)), Some(m), (all, bytes), &shown_as.join(rest), only, stop)?;
     }
     Ok(())
+}
+
+/// Whether two links lead to the same place: worded with the same whole path, or by where they lead
+/// ([`where_it_leads`]); two whose places can't be told (a link that can't be read) aren't the same. A place inside
+/// either folder of `roots` (where the two folders really are: the old copy and the copy, say) counts by its path
+/// inside it: an old copy's link into the folder leads into the old copy, or by the folder's own path into the copy,
+/// as the copy's does.
+fn same_lead(a: &Path, b: &Path, roots: &[Option<PathBuf>]) -> bool {
+    let (x, y) = (fs::read_link(a).ok(), fs::read_link(b).ok());
+    // Worded with the same whole path, they lead to the same place wherever they are, without asking where (a network
+    // drive that's asleep can take a while to say). A copy makes a link again worded with a whole path ([`copy_link`]).
+    if let (Some(x), Some(y)) = (&x, &y)
+        && x.is_absolute()
+        && plainly(x) == plainly(y)
+    {
+        return true;
+    }
+    let place = |link: &Path, words: Option<&Path>| {
+        where_it_leads(link, words).map(|real| {
+            let inside = roots.iter().flatten().find_map(|root| real.strip_prefix(root).ok().map(Path::to_path_buf));
+            inside.map_or((false, real), |rest| (true, rest))
+        })
+    };
+    // One whose place can't be told isn't the same as any: the other isn't asked about then.
+    place(a, x.as_deref()).is_some_and(|p| place(b, y.as_deref()).is_some_and(|q| q == p))
+}
+
+/// Where a link leads: where it really does ([`fs::canonicalize`]), or, leading nowhere now (a drive that isn't plugged
+/// in), where it would by its wording (`words`, as [`fs::read_link`] gave it: [`worded_place`]), as far as that place
+/// is there, where it really is, and the rest by its words. So two that lead nowhere now are told apart by where they
+/// would lead. Where it leads can't always be asked (a network drive that doesn't answer): then it's by its words
+/// alone. So the system is asked as few times as can be, as each can take a while to say no: the place is looked up
+/// from the top down, as far as it's there.
+fn where_it_leads(link: &Path, words: Option<&Path>) -> Option<PathBuf> {
+    let nowhere = match fs::canonicalize(link) {
+        Ok(real) => return Some(real),
+        Err(e) => e.kind() == io::ErrorKind::NotFound,
+    };
+    let place = worded_place(link, words?);
+    if !nowhere {
+        return Some(place);
+    }
+    let mut there = None;
+    for up in place.ancestors().collect::<Vec<_>>().into_iter().rev() {
+        let Ok(real) = fs::canonicalize(up) else { break };
+        there = Some((real, up));
+    }
+    Some(there.and_then(|(real, up)| Some(real.join(place.strip_prefix(up).ok()?))).unwrap_or(place))
 }
 
 /// Whether two files that look the same (size and time) hold the same bytes, read side by side in pieces, stopping when
@@ -1138,34 +1386,45 @@ fn same_inside(a: &Path, b: &Path, stop: &AtomicBool) -> Result<bool, CantMove> 
 /// only in the old copy ([`only_in_old_copy`]): the app shows that list first. `all` is every moved folder.
 /// [`crate::clean::undo`] puts it back.
 pub fn remove_old_copy(moved: &MovedFolder, all: &[MovedFolder], sure: bool, bin: &dyn Bin, stop: &AtomicBool) -> Done {
+    crate::old_copies::send_one(
+        &moved.old_copy,
+        moved.bytes,
+        crate::old_copies::Going::OldCopy(moved),
+        all,
+        sure,
+        bin,
+        stop,
+    )
+}
+
+/// Why it stays when checking what's only in it was stopped part way.
+pub(crate) const UNCHECKED: &str = "Stopped before it was all checked, so it stays.";
+
+/// Why the old copy can't go now, checked just before it goes: [`old_copy_stays`], then, unless you're `sure`, whether
+/// anything is only in it, newer there or not the same as on the other drive (what the files hold is compared too, so
+/// it reads every file that looks the same in both: slow). `all` is every moved folder.
+pub(crate) fn old_copy_check(
+    moved: &MovedFolder,
+    all: &[MovedFolder],
+    sure: bool,
+    stop: &AtomicBool,
+) -> Result<(), String> {
     if let Some(why) = old_copy_stays(moved, all) {
-        return stays(moved, &why);
+        return Err(why);
     }
-    if !sure {
-        match old_copy_only(moved, all, true, stop) {
-            Err(_) => return stays(moved, "Stopped before it was all checked, so it stays."),
-            Ok(only) if !only.is_empty() => {
-                return stays(
-                    moved,
-                    &format!(
-                        "Some of it is only in the old copy, newer there, or not the same as on the other drive: {}. \
-                         It may have been saved while the move ran, deleted from the other drive since, gone bad on \
-                         the way, or open in a program now. Look before deleting it.",
-                        listed(&only)
-                    ),
-                );
-            }
-            Ok(_) => {}
-        }
+    if sure {
+        return Ok(());
     }
-    let mut done = Done::default();
-    // The folder itself (it was checked not to be a link), not where a link would lead.
-    let real = real_spot(&moved.old_copy);
-    // Checked just now; one Windows guards is checked again by the administrator step, against what it held now.
-    let mut sending = Sending::new(bin, stop);
-    sending.send(&moved.old_copy, real, moved.bytes, What::Plugin(moved.space_kind()), &mut done, || Ok(()));
-    sending.finish(&mut done);
-    done
+    match old_copy_only(moved, all, true, stop) {
+        Err(_) => Err(UNCHECKED.to_owned()),
+        Ok(only) if !only.is_empty() => Err(format!(
+            "Some of it is only in the old copy, newer there, or not the same as on the other drive: {}. It may have \
+             been saved while the move ran, deleted from the other drive since, gone bad on the way, or open in a \
+             program now. Look before deleting it.",
+            listed(&only)
+        )),
+        Ok(_) => Ok(()),
+    }
 }
 
 /// Why the old copy can't go now, when it can't: it's a link now, it's the only copy the plugin could use
@@ -1207,11 +1466,6 @@ pub(crate) fn leads_into(moved: &MovedFolder) -> bool {
     let link_in = real_path(&moved.from).is_some_and(|f| is_inside(&f, &old));
     let copy_in = real_path(&moved.to).is_some_and(|t| is_inside(&t, &old) || is_inside(&old, &t));
     link_in || copy_in
-}
-
-/// The old copy stays, and why.
-fn stays(moved: &MovedFolder, why: &str) -> Done {
-    Done { problems: vec![Problem { path: moved.old_copy.clone(), why: why.to_owned() }], ..Done::default() }
 }
 
 /// Whether Windows said no because of rights (access denied), rather than something having the folder open.
@@ -1516,7 +1770,9 @@ pub(crate) enum Fill {
     /// drive that doesn't tell them apart: the copy stops.
     New,
     /// The copy has most of it: files that are new, or differ in size or time, are copied, each under a temporary name
-    /// first; nothing is removed, and links there stay as they are.
+    /// first; nothing is removed, and links there stay as they are, but in a copy the move made, where the folder's
+    /// link is worded otherwise by now, or the folder has a file or a folder in its place: the link the pass before
+    /// made goes then, and what's there is copied as it is now ([`copy_tree`]).
     Freshen,
     /// Nothing is copied: only the bytes [`Fill::Freshen`] would copy are added up.
     Count,
@@ -1537,8 +1793,10 @@ pub(crate) struct Tree<'a> {
     pub(crate) keep_in: Option<&'a Path>,
     /// With `keep_in`: every file in `to` that's replaced is kept there first, not only newer ones.
     pub(crate) keep_all: bool,
-    /// With `keep_in`: files an earlier pass wrote into `to` (paths inside it, sorted). They're the copy's own work,
-    /// not yours, so they're replaced without being kept.
+    /// With `keep_in`: files an earlier pass wrote into `to`, and links it made there (paths inside it, sorted).
+    /// They're the copy's own work, not yours, so they're replaced without being kept: such a link is made again where
+    /// the folder's is worded otherwise by then, or goes for the file or folder the folder has in its place, as in a
+    /// copy the move made.
     pub(crate) ours: &'a [PathBuf],
     /// Folders not copied (keys).
     pub(crate) leave_out: &'a [String],
@@ -1604,7 +1862,8 @@ pub(crate) struct Copied {
     pub(crate) bytes: u64,
     pub(crate) kept: Vec<PathBuf>,
     pub(crate) links_left: Vec<PathBuf>,
-    /// With `keep_in`, freshening: the files it wrote (paths inside the copy), for [`Tree::ours`] in the next pass.
+    /// With `keep_in`, freshening: the files it wrote and the links it made (paths inside the copy), for
+    /// [`Tree::ours`] in the next pass.
     pub(crate) written: Vec<PathBuf>,
     /// File links it copied as the file they lead to (paths inside the copy, sorted), for [`Tree::as_files`] in the
     /// next pass.
@@ -1631,18 +1890,24 @@ pub(crate) fn copy_tree(
 ) -> Result<Copied, CantMove> {
     let source_real = fs::canonicalize(tree.from).map_err(|e| failed(tree.from, &e))?;
     // The folder itself turned into a link since the first pass began (or, a link itself, leads somewhere else now):
-    // nothing is copied from where it leads now into a copy of what it was.
-    if tree.real_from.is_some_and(|real| real != source_real) {
+    // nothing is copied from where it leads now into a copy of what it was. Renamed in other capitals only, on a drive
+    // that doesn't tell them apart, it's the same folder ([`same_place`]).
+    if tree.real_from.is_some_and(|real| !same_place(&source_real, real)) {
         return Err(changing(tree.from, "turned into a link or led somewhere else"));
     }
-    // A folder that turned into a link (or a file) as the copy went, or one above it that did, is never read through:
-    // what a link leads to isn't the plugin's ([`not_real_now`]). Its folder in the copy is made already, so the copy
-    // can't take it as it is now, and it stops, whichever pass it is. Counting only adds up: it doesn't look.
+    // A folder that turned into a link (or a file) as the copy went, one above it that did, or the folder itself
+    // pointed somewhere else (moving back, the copy can be a link of yours), is never read through: what's there now
+    // isn't the plugin's ([`led_elsewhere`]). Its folder in the copy is made already, so the copy can't take it as it
+    // is now, and it stops, whichever pass it is. Counting only adds up: it doesn't look.
     let from_was_link = is_link(tree.from);
-    let still_real = |dir: &Path| match (fill != Fill::Count).then(|| not_real_now(dir, tree, from_was_link)) {
-        Some(Some(at)) => Err(changing(&at, "turned into a link or a file")),
-        _ => Ok(()),
-    };
+    let still_real =
+        |dir: &Path| match (fill != Fill::Count).then(|| led_elsewhere(dir, tree, &source_real, from_was_link)) {
+            Some(Some(why)) => Err(why),
+            _ => Ok(()),
+        };
+    // Where the folder and the copy really are, for where links at the same place in both lead, freshening a folder of
+    // yours ([`same_lead`]). Looked up once a pass: the copy's drive is awake anyway, as each name is looked for in it.
+    let roots = [Some(source_real.clone()), tree.keep_in.and_then(|_| fs::canonicalize(tree.to).ok())];
     let inside = |copy: &Path| copy.strip_prefix(tree.to).unwrap_or(copy).to_path_buf();
     let mut copied = Copied::default();
     let mut recent: VecDeque<(Instant, PathBuf)> = VecDeque::new();
@@ -1727,16 +1992,36 @@ pub(crate) fn copy_tree(
                     source.to_string_lossy()
                 )));
             }
-            // A link there stays as it is: nothing is written through it (it could lead into another plugin's folder).
-            // But in a copy the move made, where the folder has a file or a folder now in place of a link the pass
-            // before made again (a plugin saved over its link), the link goes, and what's there now is copied: the
-            // link is the move's own, and the copy is to be as the folder is.
+            // A link there stays as it is but in a copy the move made: nothing is written through it (it could lead
+            // into another plugin's folder).
             if there.as_ref().is_some_and(|m| m.file_type().is_symlink()) {
-                if kind.is_symlink() {
-                    continue;
-                }
-                if fill != Fill::Freshen || tree.keep_in.is_some() {
-                    copied.links_left.push(inside(&copy));
+                // In a copy the move made, the link is the move's own, and the copy is to be as the folder is: where
+                // the link the pass before made isn't worded as the folder's would be now (the plugin pointed it
+                // elsewhere), or the folder has a file or a folder in its place (a plugin saved over its link), it
+                // goes, and what's there now is copied. Where what the folder had there went just now (a link
+                // deleted to be made again, say), it stays: nothing is removed, as for a file that goes.
+                let own_goes = || {
+                    let as_it_was = kind.is_symlink() && made_as_worded(&source, &copy, tree, &source_real);
+                    !as_it_was && !went(&source, tree)
+                };
+                let goes = match (fill, tree.keep_in) {
+                    (Fill::Freshen, None) => own_goes(),
+                    // So does one an earlier pass made in a folder of yours ([`Tree::ours`]): it's the copy's own too.
+                    (Fill::Freshen, Some(_)) if tree.ours.binary_search(&inside(&copy)).is_ok() => own_goes(),
+                    // In a folder of yours, one where the folder has a file or a folder, or a link leading somewhere
+                    // else (the plugin pointed it elsewhere since), is named ([`Copied::links_left`]): which is the one
+                    // to keep can't be told. Not one whose link in the folder went just now (deleted to be made
+                    // again, say): nothing is said of what goes, as for a file.
+                    (Fill::Freshen, Some(_)) => {
+                        if (!kind.is_symlink() || !same_lead(&source, &copy, &roots)) && !went(&source, tree) {
+                            copied.links_left.push(inside(&copy));
+                        }
+                        false
+                    }
+                    // Counting: nothing is copied over it. (A new copy has nothing in it.)
+                    (Fill::Count | Fill::New, _) => false,
+                };
+                if !goes {
                     continue;
                 }
                 remove_link(&copy).map_err(|e| failed(&copy, &e))?;
@@ -1747,7 +2032,7 @@ pub(crate) fn copy_tree(
             let as_file = kind.is_symlink() && there.is_some() && tree.as_files.binary_search(&inside(&copy)).is_ok();
             // Any other link where a copy the move made has a real file or folder: the pass before copied a real one
             // there, which turned into a link since. The copy can't take it as it is now, as for a folder above. (In a
-            // folder of yours, what's there stays.)
+            // folder of yours, what's there stays, and is named.)
             if kind.is_symlink() && there.is_some() && !as_file && fill == Fill::Freshen && tree.keep_in.is_none() {
                 return Err(changing(&source, "turned into a link"));
             }
@@ -1758,8 +2043,17 @@ pub(crate) fn copy_tree(
                 let leads = match (&there, as_file) {
                     (None, _) => linked_file(&source, &kind, &copy, fill, tree, &source_real),
                     (Some(_), true) => as_file_now(&source),
-                    // Something at its place already (in a folder of yours, a file of yours, say) stays as it is.
-                    (Some(_), false) => Ok(None),
+                    // Something at its place already (in a folder of yours, a file or a folder of yours) stays as it
+                    // is. Freshening, it's named, as a link of yours is where the folder has a file or a folder (the
+                    // plugin, or you, put a link in its place since): which is the one to keep can't be told. Not
+                    // when the folder's link went just now (deleted to be made again, say): the other drive has
+                    // nothing there then, and nothing is said of what goes, as for a file.
+                    (Some(_), false) => {
+                        if fill == Fill::Freshen && !went(&source, tree) {
+                            copied.links_left.push(inside(&copy));
+                        }
+                        Ok(None)
+                    }
                 };
                 match leads {
                     Ok(Some(real)) => {
@@ -1770,17 +2064,36 @@ pub(crate) fn copy_tree(
                         linked.as_path()
                     }
                     Ok(None) => {
-                        // Made again as a link. In a folder of yours, only while its folder is still a real one once
-                        // the link was read, as for files waiting to go in: one read through a link that took the
-                        // folder's place goes again.
+                        // Made again as a link (or left out: a file link that leads nowhere, which Windows won't
+                        // make again). In a folder of yours, only while its folder still leads where it did once the
+                        // link was read, as for files waiting to go in: one read through a link that took the folder's
+                        // place goes again. One that can't is named, as it's in a folder of yours now.
                         if there.is_none() && fill != Fill::Count {
                             if tree.keep_in.is_some()
                                 && let Err(e) = still_real(&source_dir)
                             {
-                                let _ = remove_link(&copy);
-                                return Err(e);
+                                return Err(match remove_link(&copy) {
+                                    Ok(()) => e,
+                                    // Nothing was made there (left out).
+                                    Err(why) if why.kind() == io::ErrorKind::NotFound => e,
+                                    Err(why) => {
+                                        tree.has_changed();
+                                        CantMove::Failed(format!(
+                                            "{} The link made at {} as it was read couldn't be taken away again \
+                                             ({why}): it isn't the plugin's, so delete it.",
+                                            part_way(&e),
+                                            text(&copy)
+                                        ))
+                                    }
+                                });
                             }
-                            tree.has_changed();
+                            if is_link(&copy) {
+                                tree.has_changed();
+                                // The copy's own, for the next pass ([`Tree::ours`]).
+                                if tree.keep_in.is_some() && fill == Fill::Freshen {
+                                    copied.written.push(inside(&copy));
+                                }
+                            }
                         }
                         continue;
                     }
@@ -1920,23 +2233,61 @@ pub(crate) fn copy_tree(
     Ok(copied)
 }
 
-/// The topmost folder from `tree.from` down to `dir` that isn't a real folder now: it turned into a link (or a file) as
-/// the copy went, so what's read from it may not be the plugin's. `tree.from` itself only when it was a real folder as
-/// the pass began (moving back, the copy on the other drive can be a link of yours: [`Tree::real_from`] looks at
-/// where that leads). One that's gone isn't counted: what goes is passed over ([`went`]). Looked at name by name, from
-/// the top: never through a link, and a name in other capitals on a drive that doesn't tell them apart is the same
-/// folder.
-fn not_real_now(dir: &Path, tree: &Tree, from_was_link: bool) -> Option<PathBuf> {
-    let not_real = |at: &Path| fs::symlink_metadata(at).is_ok_and(|m| !m.is_dir());
-    if !from_was_link && not_real(tree.from) {
-        return Some(tree.from.to_path_buf());
-    }
+/// Whether a folder the copy reads (`dir`: `tree.from`, or a folder in it) leads somewhere else now than as the pass
+/// began, so what's read from it may not be the plugin's: why the copy stops, if it does. While nothing changes, each
+/// folder is the same place in where `tree.from` really was then (`source_real`), and a folder: one look at where it
+/// really is and what it is. When it isn't, `tree.from` is named if it changed (it turned into a link or a file, or, a
+/// link itself, or reached through one, leads somewhere else now: moving back, the copy on the other drive can be a
+/// link of yours); otherwise the topmost folder in it that turned into a link or a file, looked for name by name from
+/// the top, never through a link. `None` while it's the same folder, renamed in other capitals or not ([`same_place`]),
+/// and when it's gone: what goes is passed over, while `tree.from` is there ([`went`]). One that can't be looked at
+/// (not gone: the system says no) stops it, as whether it changed can't be told, saying what the system said. When
+/// `tree.from` leads nowhere now, a real folder as the pass began (`from_was_link` says) that's a link now changed
+/// (pointed at nothing, after something was read through it). Otherwise its drive went (unplugged), or the link it is
+/// leads nowhere now, and where what was read came from can't be told: into a folder of yours nothing goes then, and
+/// the copy stops. A copy the move made goes when what's still to be read can't be, and moving back looks first that
+/// the copy is where it was ([`not_the_link_now`]).
+fn led_elsewhere(dir: &Path, tree: &Tree, source_real: &Path, from_was_link: bool) -> Option<CantMove> {
+    const ELSEWHERE: &str = "turned into a link or a file, or led somewhere else";
     let rest = dir.strip_prefix(tree.from).ok()?;
-    let mut at = tree.from.to_path_buf();
-    rest.components().find_map(|part| {
-        at.push(part);
-        not_real(&at).then(|| at.clone())
-    })
+    let now = fs::canonicalize(dir);
+    if now.as_ref().is_ok_and(|now| same_place(now, &source_real.join(rest)) && now.is_dir()) {
+        return None;
+    }
+    match fs::canonicalize(tree.from) {
+        Ok(now) if same_place(&now, source_real) && now.is_dir() => {}
+        Ok(_) => return Some(changing(tree.from, ELSEWHERE)),
+        Err(_) if !from_was_link && is_link(tree.from) => return Some(changing(tree.from, "turned into a link")),
+        Err(e) => return tree.keep_in.is_some().then(|| failed(tree.from, &e)),
+    }
+    // The topmost one that isn't a real folder now, if it's there: it turned into a link or a file.
+    let turned = not_real_on_the_way(tree.from, rest.components()).filter(|at| fs::symlink_metadata(at).is_ok());
+    match (turned, now) {
+        (Some(at), _) => Some(changing(&at, "turned into a link or a file")),
+        (None, _) if not_there(dir) => None,
+        // It can't be looked at (the system says no, or the drive doesn't answer): what it says is why it stops.
+        (None, Err(e)) if e.kind() != io::ErrorKind::NotFound => Some(failed(dir, &e)),
+        // It changed just now, or in a way the app can't tell: it stops all the same.
+        (None, _) => Some(changing(dir, ELSEWHERE)),
+    }
+}
+
+/// Whether two places where things really are ([`fs::canonicalize`]) are the same: the very same, or but for capitals
+/// where the drive doesn't tell them apart (a folder renamed in other capitals meanwhile). That's when `then` still
+/// leads to `now`, with no link on the way: `then` had none, being where something really was, so one there now (put
+/// in the place of a folder renamed in other capitals, where the drive tells them apart) leads to another folder. A
+/// drive mounted in a folder, which Windows takes for a link, is where it really is itself: it's no link put there.
+fn same_place(now: &Path, then: &Path) -> bool {
+    // Without a separator at the end (`then` for the folder itself is where it was joined to nothing): through one,
+    // the system follows a link, so a link put in the folder's place would pass for a folder.
+    let then: PathBuf = then.components().collect();
+    let then = then.as_path();
+    now == then
+        || key(&text(now)) == key(&text(then))
+            && then
+                .ancestors()
+                .all(|at| at.file_name().is_none() || !is_link(at) || fs::canonicalize(at).is_ok_and(|real| real == at))
+            && fs::canonicalize(then).is_ok_and(|real| real == now)
 }
 
 /// The file a link the pass before copied as its file ([`Tree::as_files`]) leads to now, to bring its copy up to date.
@@ -2533,30 +2884,46 @@ fn copy_link(
         clear_failed_link(copy);
         couldnt(e)
     };
-    // Where it leads by its own wording, worked out from the folder it's in, not where it ends up: a link into another
-    // moved folder (C:\B, on D: now) keeps leading to C:\B, which that folder's own link keeps reaching, moved back or
-    // moved again. Only a place inside the folder being copied changes ([`lead`]).
-    // One worded from where it sits ("..\Shared") is worked out as the system does: from where its folder really is.
-    let points = fs::read_link(link_path).map_err(couldnt)?;
-    let base = || link_path.parent().map(|p| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()));
-    let place = plainly(&tidy(&if points.is_absolute() {
-        points.clone()
-    } else {
-        base().map_or(points.clone(), |p| p.join(&points))
-    }));
-    let within = |place: PathBuf| {
-        let from = plainly(&tidy(tree.from));
-        if place.starts_with(&from) { lead(place, &from, tree) } else { lead(place, &plainly(source_real), tree) }
-    };
+    let to = lead_in_copy(worded_place(link_path, &fs::read_link(link_path).map_err(couldnt)?), tree, source_real);
     let Ok(real) = fs::canonicalize(link_path) else {
         // It leads nowhere now (a drive that isn't plugged in): made again as it's worded.
-        return copy_dangling(kind, &within(place), copy).map(|()| None).map_err(didnt_take);
+        return copy_dangling(kind, &to, copy).map(|()| None).map_err(didnt_take);
     };
-    let to = within(place);
     if real.is_dir() {
         return link(copy, &to).map(|()| None).map_err(didnt_take);
     }
     Ok(file_link(&to, copy).is_err().then_some(real))
+}
+
+/// Where a link leads by its wording (`words`, as [`fs::read_link`] gives it), worked out from the folder it's in, not
+/// where it ends up: a link into another moved folder (C:\B, on D: now) keeps leading to C:\B, which that folder's
+/// own link keeps reaching, moved back or moved again. One worded from where it sits ("..\Shared") is worked out as
+/// the system does: from where its folder really is.
+fn worded_place(link: &Path, words: &Path) -> PathBuf {
+    let base = || link.parent().map(|p| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()));
+    plainly(&tidy(&if words.is_absolute() {
+        words.to_path_buf()
+    } else {
+        base().map_or_else(|| words.to_path_buf(), |p| p.join(words))
+    }))
+}
+
+/// Where a link in the folder being copied leads in the copy, from where it leads by its wording ([`worded_place`]):
+/// the same place, but for a place inside the folder ([`lead`]), as [`copy_link`] makes it.
+fn lead_in_copy(place: PathBuf, tree: &Tree, source_real: &Path) -> PathBuf {
+    let from = plainly(&tidy(tree.from));
+    if place.starts_with(&from) { lead(place, &from, tree) } else { lead(place, &plainly(source_real), tree) }
+}
+
+/// Whether the link at `copy`, which the pass before made again from the folder's link at `source`, is still worded
+/// as that one would be made now ([`copy_link`]): one the plugin pointed elsewhere since isn't.
+fn made_as_worded(source: &Path, copy: &Path, tree: &Tree, source_real: &Path) -> bool {
+    match (fs::read_link(source), fs::read_link(copy)) {
+        (Ok(words), Ok(made)) => {
+            plainly(&made) == plainly(&lead_in_copy(worded_place(source, &words), tree, source_real))
+        }
+        _ => false,
+    }
 }
 
 /// A path with its "." and ".." worked out from the words alone.
@@ -2597,10 +2964,87 @@ fn copy_dangling(kind: &fs::FileType, to: &Path, copy: &Path) -> io::Result<()> 
 mod tests {
     use std::collections::VecDeque;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use super::{CantMove, Copied, Drives, SystemDrives, Tree, Wait, Waiting, rest_after, write_through};
+    use super::{
+        CantMove, Copied, Drives, SystemDrives, Tree, Wait, Waiting, in_itself, rest_after, same_lead, same_place,
+        write_through,
+    };
+
+    /// A folder renamed in other capitals is the same place only where the drive doesn't tell capitals apart (Windows
+    /// and a Mac): where it does, a folder named the same but for capitals is another folder.
+    #[test]
+    fn a_folder_in_other_capitals_is_the_same_place_only_where_the_drive_doesnt_tell_them_apart() {
+        let dir = std::env::temp_dir().join("mo-space-unit-same-place");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("Caps")).unwrap();
+        fs::create_dir(dir.join("Other")).unwrap();
+        let then = fs::canonicalize(dir.join("Caps")).unwrap();
+        assert!(same_place(&then, &then));
+        assert!(!same_place(&fs::canonicalize(dir.join("Other")).unwrap(), &then));
+        if dir.join("caps").exists() {
+            // Looked up by the name it had, as the copy does: where it really is now is in its new capitals (on
+            // Windows), and the old name still leads there.
+            fs::rename(dir.join("Caps"), dir.join("caps")).unwrap();
+            assert!(same_place(&fs::canonicalize(dir.join("Caps")).unwrap(), &then));
+        } else {
+            fs::create_dir(dir.join("caps")).unwrap();
+            assert!(!same_place(&fs::canonicalize(dir.join("caps")).unwrap(), &then));
+            // Nor is a link put in the place of the folder renamed in other capitals, under its old name: it leads
+            // there, in other capitals, but through a link.
+            #[cfg(unix)]
+            {
+                fs::rename(dir.join("Caps"), dir.join("CAPS")).unwrap();
+                std::os::unix::fs::symlink("CAPS", dir.join("Caps")).unwrap();
+                assert!(!same_place(&fs::canonicalize(dir.join("Caps")).unwrap(), &then));
+            }
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Two links whose places can't be told (nothing that can be read is there) aren't taken for the same; two that
+    /// lead to the same place are, worded with a whole path or from where they sit.
+    #[test]
+    fn links_are_the_same_only_when_where_they_lead_can_be_told() {
+        let dir = std::env::temp_dir().join("mo-space-unit-same-lead");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("Target")).unwrap();
+        assert!(!same_lead(&dir.join("one"), &dir.join("two"), &[]));
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(dir.join("Target"), dir.join("whole")).unwrap();
+            std::os::unix::fs::symlink("Target", dir.join("near")).unwrap();
+            assert!(same_lead(&dir.join("whole"), &dir.join("near"), &[]));
+            assert!(!same_lead(&dir.join("whole"), &dir.join("one"), &[]));
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A path inside a folder is in that folder itself only by names, every folder on the way a real one: never by
+    /// "..", which leads out, nor through a link.
+    #[test]
+    fn a_path_is_in_a_folder_itself_only_by_names_with_no_link_on_the_way() {
+        let dir = std::env::temp_dir().join("mo-space-unit-in-itself");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("Folder/Sub")).unwrap();
+        let folder = dir.join("Folder");
+        assert!(in_itself(&folder, Path::new("x")));
+        assert!(in_itself(&folder, Path::new("Sub/x")));
+        assert!(!in_itself(&folder, Path::new("../x")));
+        assert!(!in_itself(&folder, Path::new("Sub/../../x")));
+        assert!(!in_itself(&folder, Path::new("Gone/x")));
+        assert!(!in_itself(&folder, Path::new("")));
+        assert!(!in_itself(&dir.join("Gone"), Path::new("x")));
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(dir.join("Folder/Sub"), dir.join("Folder/Link")).unwrap();
+            assert!(!in_itself(&folder, Path::new("Link/x")));
+            std::os::unix::fs::symlink(&folder, dir.join("Through")).unwrap();
+            assert!(!in_itself(&dir.join("Through"), Path::new("x")));
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn the_drive_the_temporary_folder_is_on_holds_links() {

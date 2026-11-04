@@ -21,7 +21,7 @@ use mo_space::plugin_space::SpaceKind;
 
 mod common;
 
-use common::{folder_link, is_link, unlink};
+use common::{folder_link, is_link, unlink, writable};
 
 fn fixtures(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
@@ -29,30 +29,6 @@ fn fixtures(name: &str) -> PathBuf {
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     dir
-}
-
-/// Makes the read-only files (and, on a Mac or Linux, folders) a test left writable again, so its folder can be
-/// cleared.
-fn writable(dir: &Path) {
-    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
-        let Ok(kind) = entry.file_type() else { continue };
-        if kind.is_dir() {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = fs::set_permissions(entry.path(), fs::Permissions::from_mode(0o755));
-            }
-            writable(&entry.path());
-        } else if kind.is_file()
-            && let Ok(meta) = entry.metadata()
-            && meta.permissions().readonly()
-        {
-            let mut permissions = meta.permissions();
-            #[allow(clippy::permissions_set_readonly_false)]
-            permissions.set_readonly(false);
-            let _ = fs::set_permissions(entry.path(), permissions);
-        }
-    }
 }
 
 fn write(dir: &Path, rel: &str, text: &str) {
@@ -374,7 +350,7 @@ fn a_marker_left_in_a_copy_in_use_is_all_that_goes() {
     // And moving back takes such a marker out first, so the copy left for you never looks like a half copy.
     unlink_or_skip(&presets);
     folder_link(&copy, &presets);
-    move_back(&moved, &ROOMY, &nothing, &stop).unwrap();
+    move_back(&moved, &[], &ROOMY, &nothing, &stop).unwrap();
     assert!(!copy.join(MARKER).exists() && !presets.join(MARKER).exists());
     assert!(find(&copy, &[], &ROOMY, &stop).unwrap().is_none());
 }
@@ -483,7 +459,7 @@ fn moving_back_the_computer_stopped_leaves_a_half_copy_the_next_try_clears() {
     let moved = move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], &[], &nothing, &stop).unwrap();
     // The old copy was deleted once the plugin opened fine, so moving back copies the folder back.
     fs::remove_dir_all(&moved.old_copy).unwrap();
-    stopped_part_way(10, |progress| move_back(&moved, &ROOMY, progress, &stop));
+    stopped_part_way(10, |progress| move_back(&moved, &[], &ROOMY, progress, &stop));
     let back = c.join("Presets (moving back)");
     let all = std::slice::from_ref(&moved);
     assert!(back.join(MARKER).exists() && is_link(&presets));
@@ -492,7 +468,7 @@ fn moving_back_the_computer_stopped_leaves_a_half_copy_the_next_try_clears() {
     assert_eq!(half_copies(all, &[], &ROOMY, &stop).unwrap().len(), 1);
 
     // Tried again, moving back clears it first and goes through; in place, the folder has no marker.
-    move_back(&moved, &ROOMY, &nothing, &stop).unwrap();
+    move_back(&moved, &[], &ROOMY, &nothing, &stop).unwrap();
     assert!(!is_link(&presets) && !back.exists());
     assert!(!presets.join(MARKER).exists());
     assert_eq!(fs::read_dir(presets.join("Sounds")).unwrap().count(), 6);
@@ -508,7 +484,7 @@ fn moving_back_cut_off_as_it_swapped_says_what_to_rename() {
     let stop = AtomicBool::new(false);
     let moved = move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], &[], &nothing, &stop).unwrap();
     fs::remove_dir_all(&moved.old_copy).unwrap();
-    stopped_part_way(35, |progress| move_back(&moved, &ROOMY, progress, &stop));
+    stopped_part_way(35, |progress| move_back(&moved, &[], &ROOMY, progress, &stop));
     let back = c.join("Presets (moving back)");
     let all = std::slice::from_ref(&moved);
     // An update put a real folder in the link's place while it copied: the copy may be in use.
@@ -516,7 +492,7 @@ fn moving_back_cut_off_as_it_swapped_says_what_to_rename() {
     library(&presets);
     let State::Stays(why) = find(&back, all, &ROOMY, &stop).unwrap().unwrap().state else { panic!() };
     assert!(why.contains("isn't the link"), "{why}");
-    let tried = move_back(&moved, &ROOMY, &nothing, &stop);
+    let tried = move_back(&moved, &[], &ROOMY, &nothing, &stop);
     assert!(tried.is_err() && back.join(MARKER).exists(), "{tried:?}");
     // Stopped after the link went, before the copy took its name: the marker said it was going into use.
     fs::remove_dir_all(&presets).unwrap();

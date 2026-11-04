@@ -1354,7 +1354,15 @@ fn show_actions(data: &SoundsData, shortcuts: &Shortcuts) {
     for &(text, id) in CARD_ACTIONS {
         let key = SharedString::from(shortcuts.key_of(id));
         menu.push(MenuItem { what: text.into(), key: key.clone(), id: id.into(), enabled: true });
-        actions.push(CardAction { text: text.into(), tip: what_of(id).into(), key, id: id.into(), enabled: true });
+        actions.push(CardAction {
+            text: text.into(),
+            tip: what_of(id).into(),
+            key,
+            id: id.into(),
+            enabled: true,
+            main: false,
+            danger: false,
+        });
     }
     data.set_menu(ModelRc::new(VecModel::from(menu)));
     data.set_actions(ModelRc::new(VecModel::from(actions)));

@@ -475,6 +475,9 @@ export component Chip inherits Rectangle {
 export component TickBox inherits Rectangle {
     in property <string> text;
     in-out property <bool> checked;
+    // Some of what it's for are ticked, but not all (a format whose copies you've ticked some of): a dash instead of
+    // the tick. Clicking it ticks them all.
+    in property <bool> partly;
     width: label.preferred-width + 26px;
     Rectangle {
         x: 0;
@@ -483,7 +486,7 @@ export component TickBox inherits Rectangle {
         border-radius: Theme.radius;
         border-width: 1px;
         border-color: Theme.stroke;
-        background: root.checked ? Theme.accent : Theme.well;
+        background: root.checked || root.partly ? Theme.accent : Theme.well;
         // The tick is drawn, as the app's fonts have no ✓.
         if root.checked: Path {
             width: 16px;
@@ -491,6 +494,15 @@ export component TickBox inherits Rectangle {
             viewbox-width: 16;
             viewbox-height: 16;
             commands: "M 4 8.5 L 7 11.5 L 12.5 5";
+            stroke: Theme.accent-text;
+            stroke-width: 2px;
+        }
+        if root.partly && !root.checked: Path {
+            width: 16px;
+            height: 16px;
+            viewbox-width: 16;
+            viewbox-height: 16;
+            commands: "M 4.5 8 L 11.5 8";
             stroke: Theme.accent-text;
             stroke-width: 2px;
         }
@@ -1797,6 +1809,10 @@ export struct CardAction {
     key: string,
     id: string,
     enabled: bool,
+    // The card's main button, in the accent colour (Put back), or one that removes things, in the colour for missing
+    // things (Remove).
+    main: bool,
+    danger: bool,
 }
 
 // A side card's buttons: everything you can do with what's picked, in sight rather than behind a "more" menu
@@ -1813,6 +1829,8 @@ export component CardActions inherits FlexboxLayout {
         tip: a.tip;
         key: a.key;
         enabled: a.enabled;
+        main: a.main;
+        danger: a.danger;
         clicked => { root.chosen(a.id); }
     }
 }
@@ -1882,6 +1900,10 @@ export component OptionsButton inherits StudioButton {
 // The picked thing's panel beside a page's list: a raised card with a × to put it away (Esc does too).
 export component SidePanel inherits Rectangle {
     callback close;
+    // Back to its top: for a page whose one panel shows another card (it would open scrolled as far as the last one).
+    public function to-top() {
+        flick.content-y = 0;
+    }
     background: Theme.surface;
     border-radius: Theme.radius;
     border-width: 1px;
@@ -1891,17 +1913,29 @@ export component SidePanel inherits Rectangle {
     // right side (Solomon's F12 note, 2026-11-02 03:28), so it's cut at the edge instead, and the parts wrap.
     flick := Flickable {
         content-width: flick.width;
-        content-height: content.height;
+        // To where what it holds really ends: `end`, less the gap before it (see `end` below).
+        content-height: max(flick.height, end.y - Space.md + Space.xl);
         // The wheel scrolls it (and a finger on a touch screen); a drag with the mouse is for what's in it, such as a
         // sound dragged out to a DAW, as in the app's lists.
         mouse-drag-pan-enabled: false;
+        // At the top, as the scroll room isn't always as tall as it (it would sit in the middle of it otherwise).
         content := VerticalLayout {
             x: 0;
+            y: 0;
             width: flick.width;
-            height: max(flick.height, self.preferred-height);
+            // Taller than the panel by the gap before `end`: so what's above `end` gets the same room as without it
+            // (a "Pick a plugin" note in the middle stays in the middle).
+            height: max(flick.height + Space.md, self.preferred-height);
             padding: Space.xl;
             spacing: Space.md;
             @children
+            // Where what the panel holds really ends, a gap below its last part. Slint measures a part inside an `if`
+            // or a `for` as if none of its lines wrapped, so where they do the content's own height falls short, and
+            // the panel stopped scrolling before its last lines (a long Space card's last parts). Laid out, each part
+            // gets its real height, so `end` lands below the last one.
+            end := Rectangle {
+                height: 0px;
+            }
         }
     }
     CloseButton {

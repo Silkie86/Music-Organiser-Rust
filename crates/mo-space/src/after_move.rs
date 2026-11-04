@@ -11,17 +11,19 @@ use mo_formats::paths::file_name;
 use mo_library::scan::is_inside;
 use serde::{Deserialize, Serialize};
 
-use crate::admin::{Admin, Step, ask_for, real_spot, reason};
-use crate::clean::{Bin, Done, Problem, Sending, What};
+use crate::admin::{Admin, Outcome, Step, ask_for, real_spot, reason};
+use crate::clean::{Bin, Done, Problem};
 use crate::folder_move::{
-    CantMove, Drives, Fill, KEPT_SUFFIX, MovedFolder, Tree, check_rename, check_rename_or_ask, clear_failed_link,
-    copy_fresh, copy_tree, denied, destination_problem, failed, fresh_name, inside_moved, leads_to, link, link_reaches,
-    listed, not_noted, only_in, part_way, remove_link, rest_after, room_for, shown, swap_or_ask, target, write_through,
+    CantMove, Drives, Fill, KEPT_SUFFIX, MovedFolder, Tree, UNCHECKED, check_rename, check_rename_or_ask,
+    clear_failed_link, copy_fresh, copy_tree, denied, destination_problem, failed, fresh_name, inside_moved, leads_to,
+    link, link_reaches, listed, not_noted, only_in, part_way, remove_link, rest_after, room_for, shown, swap_or_ask,
+    target, write_through,
 };
 use crate::half_copy::{busy_now, claim, clear_own, going_into_use, unmark};
+use crate::old_copies::{Going, send_one};
 use crate::plugin_space::{PluginSpace, SpaceKind};
 use crate::size::{self, is_link};
-use crate::{is_dir, key, real_folder, text};
+use crate::{is_dir, key, not_there, real_folder, text};
 
 /// The folder a plugin update made where the link was, once it's set aside and the link is back.
 pub const UPDATE_SUFFIX: &str = " (after update)";
@@ -66,7 +68,8 @@ fn is_sounds(kind: &u8) -> bool {
 }
 
 impl OldHome {
-    fn space_kind(&self) -> SpaceKind {
+    /// What it holds.
+    pub(crate) fn space_kind(&self) -> SpaceKind {
         match self.kind {
             0 => SpaceKind::Program,
             1 => SpaceKind::Presets,
@@ -159,7 +162,8 @@ pub struct LinkedAgain {
     pub replaced: Vec<String>,
     /// Where they're kept, beside the copy, when any were: for you to look at, and delete once you're happy.
     pub kept: Option<OldHome>,
-    /// Links in the copy where the folder had a file or folder (paths inside it): left as they were.
+    /// Links in the copy where the folder had a file or folder, or a link leading somewhere else, and files and folders
+    /// in the copy where the folder had a link (paths inside it): left as they were, for you to look at.
     pub links_left: Vec<String>,
 }
 
@@ -191,6 +195,8 @@ pub fn link_again(
     let kept_in = PathBuf::from(fresh_name(&moved.to, KEPT_BEFORE_SUFFIX));
     let changed = AtomicBool::new(false);
     // Where the folder really is as linking again begins: both passes copy from there, or stop ([`Tree::real_from`]).
+    // Checking it can be renamed (below) gives it back the name the move noted, maybe in other capitals than an update
+    // gave it: it's the same folder all the same.
     let real_from = fs::canonicalize(from).map_err(|e| failed(Path::new(from), &e))?;
     let tree = Tree {
         keep_in: Some(&kept_in),
@@ -316,8 +322,9 @@ pub fn old_home_can_go(home: &OldHome, moved: &[MovedFolder]) -> bool {
     real_folder(&home.path) && !moved.iter().any(|m| is_inside(&m.to, &home.path) || is_inside(&m.from, &home.path))
 }
 
-/// Why a folder left behind can't go now, when it can't: it isn't there, it's a link now (removing it frees nothing), or
-/// a moved folder (or its link) is still in it ([`old_home_can_go`]). What's only in it is looked at when it goes
+/// Why a folder left behind can't go now, when it can't: it isn't there, it's a link now (removing it frees nothing),
+/// where its files went isn't there (a drive that isn't plugged in, say: it may hold the only copy of them now), or a
+/// moved folder (or its link) is still in it ([`old_home_can_go`]). What's only in it is looked at when it goes
 /// ([`remove_old_home`]).
 pub fn old_home_stays(home: &OldHome, moved: &[MovedFolder]) -> Option<String> {
     if !is_dir(&home.path) {
@@ -326,6 +333,13 @@ pub fn old_home_stays(home: &OldHome, moved: &[MovedFolder]) -> Option<String> {
     if is_link(Path::new(&home.path)) {
         return Some("It's a link now, so removing it frees nothing.".to_owned());
     }
+    if !home.copy.is_empty() && !is_dir(&home.copy) {
+        return Some(format!(
+            "Where its files went ({}) isn't there now (is its drive plugged in?), so it stays: it may be the only \
+             copy of them.",
+            home.copy
+        ));
+    }
     (!old_home_can_go(home, moved)).then(|| "A moved folder, or its link, is still in it, so it stays.".to_owned())
 }
 
@@ -333,52 +347,57 @@ pub fn old_home_stays(home: &OldHome, moved: &[MovedFolder]) -> Option<String> {
 /// doesn't say where its files went (the C# app's, or the files linking again replaced), so it can't be told. Reads
 /// both folders: call it away from the window's thread.
 pub fn only_in_old_home(home: &OldHome, stop: &AtomicBool) -> Result<Option<Vec<String>>, CantMove> {
+    home_only(home, false, stop)
+}
+
+/// [`only_in_old_home`], and with `bytes`, also the files that look the same in both but whose bytes differ (slow: only
+/// just before it goes).
+fn home_only(home: &OldHome, bytes: bool, stop: &AtomicBool) -> Result<Option<Vec<String>>, CantMove> {
     if home.copy.is_empty() {
         return Ok(None);
     }
     if !is_dir(&home.copy) {
         return Ok(Some(vec![home.copy.clone()]));
     }
-    only_in(Path::new(&home.path), Path::new(&home.copy), stop).map(Some)
+    only_in(Path::new(&home.path), Path::new(&home.copy), bytes, stop).map(Some)
+}
+
+/// Why one that doesn't say where its files went stays, unless you're sure.
+pub const NOTHING_TO_CHECK: &str =
+    "There's nothing to check it against now, so it stays: Measure again, then tick it once you've looked in it.";
+
+/// Why a folder left behind can't go now, checked just before it goes: [`old_home_stays`], then, unless you're `sure`,
+/// whether anything in it isn't where its files went, is newer here or isn't the same there (what the files hold is
+/// compared too: slow). One that doesn't say where its files went goes only once you're sure.
+pub(crate) fn old_home_check(
+    home: &OldHome,
+    moved: &[MovedFolder],
+    sure: bool,
+    stop: &AtomicBool,
+) -> Result<(), String> {
+    if let Some(why) = old_home_stays(home, moved) {
+        return Err(why);
+    }
+    if sure {
+        return Ok(());
+    }
+    match home_only(home, true, stop) {
+        Err(_) => Err(UNCHECKED.to_owned()),
+        Ok(None) => Err(NOTHING_TO_CHECK.to_owned()),
+        Ok(Some(only)) if !only.is_empty() => Err(format!(
+            "Some of it isn't where its files went, is newer here, or isn't the same there: {}. Look before deleting \
+             it.",
+            listed(&only)
+        )),
+        Ok(Some(_)) => Ok(()),
+    }
 }
 
 /// Sends a folder left behind to the Recycle Bin, once [`old_home_can_go`] says it may, and, unless you're `sure`, only
-/// when nothing is only in it ([`only_in_old_home`]: the app shows that list first; one it can't tell goes only once
-/// you're sure). [`crate::clean::undo`] puts it back.
+/// when nothing is only in it ([`only_in_old_home`], what its files hold compared too: the app shows that list first;
+/// one it can't tell goes only once you're sure). [`crate::clean::undo`] puts it back.
 pub fn remove_old_home(home: &OldHome, moved: &[MovedFolder], sure: bool, bin: &dyn Bin, stop: &AtomicBool) -> Done {
-    let stays = |why: &str| Done {
-        problems: vec![Problem { path: home.path.clone(), why: why.to_owned() }],
-        ..Done::default()
-    };
-    if let Some(why) = old_home_stays(home, moved) {
-        return stays(&why);
-    }
-    if !sure {
-        match only_in_old_home(home, stop) {
-            Err(_) => return stays("Stopped before it was all checked, so it stays."),
-            Ok(None) => {
-                return stays(
-                    "There's nothing to check it against, so it goes only once you've looked in it and say you're \
-                     sure.",
-                );
-            }
-            Ok(Some(only)) if !only.is_empty() => {
-                return stays(&format!(
-                    "Some of it isn't where its files went, or is newer here: {}. Look before deleting it.",
-                    listed(&only)
-                ));
-            }
-            Ok(Some(_)) => {}
-        }
-    }
-    let mut done = Done::default();
-    // The folder itself, not where a link would lead (it was checked not to be one).
-    let real = real_spot(&home.path);
-    // Checked just now; one Windows guards is checked again by the administrator step, against what it held now.
-    let mut sending = Sending::new(bin, stop);
-    sending.send(&home.path, real, home.bytes, What::Plugin(home.space_kind()), &mut done, || Ok(()));
-    sending.finish(&mut done);
-    done
+    send_one(&home.path, home.bytes, Going::Home(home), moved, sure, bin, stop)
 }
 
 /// What moving the folder the moved folders live in (or pointing links at it after you moved it) did.
@@ -649,20 +668,14 @@ pub fn repoint(
         if guarded.is_empty() {
             continue;
         }
-        let lines: Vec<Vec<String>> =
-            guarded.iter().map(|&n| vec![real_spot(&moved[links[n].0].from), text(&links[n].1)]).collect();
-        let said = ask_for(admin, Step::Relink, &lines);
-        for (k, &n) in guarded.iter().enumerate() {
+        let asked: Vec<(String, PathBuf)> =
+            guarded.iter().map(|&n| (moved[links[n].0].from.clone(), links[n].1.clone())).collect();
+        for (&n, done) in guarded.iter().zip(relink_as_admin(admin, &asked)) {
             let (i, new_to) = &links[n];
-            let from = &moved[*i].from;
-            // What's there now decides, whatever the step said.
-            if leads_to(from, new_to) {
-                now[*i].to = text(new_to);
-                continue;
+            match done {
+                Ok(()) => now[*i].to = text(new_to),
+                Err(why) => problems.push(Problem { path: moved[*i].from.clone(), why }),
             }
-            let otherwise = format!("After the administrator step, the link still doesn't lead to {}.", text(new_to));
-            let why = reason(&said, k, &otherwise);
-            problems.push(Problem { path: from.clone(), why });
         }
     }
     HomeMoved { moved: now, old_homes: follow_homes(old_home, new_home, homes), problems, old_home: None }
@@ -743,4 +756,33 @@ pub(crate) fn relink(at: &str, target: &Path, check: bool) -> Result<(), NotReli
         gone: true,
         guarded: false,
     })
+}
+
+/// Points links Windows guards at where they're to lead as administrator, Windows asking you once for all of them:
+/// each of `links` is a link's place and where it's to lead. What's there afterwards decides, whatever the step said:
+/// `Ok` for each that leads there now, or else why not, as the step said it, or that it still doesn't lead there when
+/// what the step said doesn't explain it. For one that's gone (the step was cut off as it made it again, say), that
+/// ends with which link to make yourself, unless the step said so already (it does when it couldn't make it again).
+pub(crate) fn relink_as_admin(admin: &dyn Admin, links: &[(String, PathBuf)]) -> Vec<Result<(), String>> {
+    let lines: Vec<Vec<String>> = links.iter().map(|(at, to)| vec![real_spot(at), text(to)]).collect();
+    let said = ask_for(admin, Step::Relink, &lines);
+    links
+        .iter()
+        .enumerate()
+        .map(|(k, (at, to))| {
+            if leads_to(at, to) {
+                return Ok(());
+            }
+            let why = reason(
+                &said,
+                k,
+                &format!("After the administrator step, the link still doesn't lead to {}.", text(to)),
+            );
+            let told = said.as_ref().is_ok_and(|s| matches!(s.get(k), Some(Outcome::Halfway(_))));
+            if !told && not_there(Path::new(at)) {
+                return Err(format!("{why} There's no link at {at} now: make one there to {} yourself.", text(to)));
+            }
+            Err(why)
+        })
+        .collect()
 }

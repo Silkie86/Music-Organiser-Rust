@@ -1,6 +1,7 @@
 // The Space page (phase 4): the drives your projects, samples, backup and the app's own files are on, how full each
 // is, what the app's own files take, (part 2) Bitwig's copies of Library multisamples, with Fix for the saves you
-// tick, and (part 3) the old copies moving plugin folders left. Agreed layout: the design canvas's Space board
+// tick, (part 3) the old copies moving plugin folders left, and (part 4) spare plugin copies, with Remove for the ones
+// you tick and the Recycle Bin's Put back. Agreed layout: the design canvas's Space board
 // (2026-11-03): the drives across the top, Biggest wins first, Also taking room, and the picked line's card beside
 // them. Only shared parts from studio.slint; mo-app decides every word (mo_app::space), mo-ui/src/space.rs fills it.
 import { Theme, Type, Space, Caps, Well, PageHeader, ListLine, SidePanel, PanelDivider, CardAction, CardActions, TickBox, LinkText, Meter } from "../studio.slint";
@@ -31,8 +32,8 @@ export struct RoomLine {
 }
 
 // One part on the picked line's card: its name, what it holds and its size. A part can also have a tick, a line saying
-// how it's doing, and links to open it (a fixed project in Bitwig, an old copy in its folder) or show more; a save
-// under its project is a step in.
+// how it's doing, and links to open it (a fixed project in Bitwig, an old copy in its folder), put it back from the
+// Recycle Bin or show more; a save under its project is a step in.
 export struct CardPart {
     name: string,
     what: string,
@@ -40,10 +41,13 @@ export struct CardPart {
     under: bool,
     can-tick: bool,
     ticked: bool,
+    // Some of what its tick is for are ticked, not all (a format's tick for its spare copies): it shows a dash.
+    partly: bool,
     status: string,
     // Shows `status` as a problem.
     problem: bool,
-    // The words of its link that opens it ("Open in Bitwig", "Show in folder"); "" for none.
+    // The words of its link that opens it ("Open in Bitwig", "Show in folder") or puts it back ("Put back"); "" for
+    // none.
     open: string,
     // The words of its link that shows or hides more under it; "" for none.
     more: string,
@@ -181,6 +185,11 @@ component RoomLineView inherits ListLine {
 
 // The picked line's card: what it is, its size in big figures, its parts, the room on its drive, and what to do.
 component SpaceCard inherits SidePanel {
+    // Where the parts really end, from where the last one is laid out (see `parts-end` below).
+    property <length> parts-end;
+    // Another line's card starts at its top, not as far down as the last one was scrolled.
+    property <string> picked: SpaceData.picked;
+    changed picked => { self.to-top(); }
     close => { SpaceData.close-card(); }
     Caps { text: SpaceData.card-kind; }
     Text {
@@ -225,10 +234,18 @@ component SpaceCard inherits SidePanel {
         actions: SpaceData.card-actions;
         chosen(id) => { SpaceData.chosen(id); }
     }
+    // The parts are measured as if none of their lines wrapped (Slint measures what's in a `for` so), but each is laid
+    // out at its real height: so the box is at least as tall as where the last one ends, or the card's own height (and
+    // what follows the parts) fell short of it, and a long card's last parts couldn't be scrolled to. `alignment:
+    // start` keeps the parts at the top of the box, so where the last one ends doesn't move with the box's height.
     if SpaceData.card-parts.length > 0: VerticalLayout {
-        spacing: Space.md;
+        alignment: start;
+        min-height: root.parts-end;
         for part[i] in SpaceData.card-parts: HorizontalLayout {
             spacing: Space.sm;
+            // The gap above each part but the first: a gap between them in the box would come before the marker below
+            // too, and make the box a gap taller than its parts.
+            padding-top: i == 0 ? 0px : Space.md;
             padding-left: part.under ? Space.xl : 0px;
             // Room for a tick, ticked or not, so the names line up. Ticking re-lists the parts from mo-app.
             if SpaceData.card-ticks: VerticalLayout {
@@ -237,6 +254,7 @@ component SpaceCard inherits SidePanel {
                 if part.can-tick: TickBox {
                     height: 20px;
                     checked: part.ticked;
+                    partly: part.partly;
                     changed checked => { SpaceData.tick-part(i, self.checked); }
                 }
             }
@@ -285,6 +303,14 @@ component SpaceCard inherits SidePanel {
                 font-family: Theme.number-font;
                 font-size: Type.meta;
             }
+        }
+        // Where the last part ends. It takes none of the card's spare room (a Rectangle would, unlike a Text), so the
+        // parts' box stays as tall as the parts.
+        Rectangle {
+            height: 0px;
+            vertical-stretch: 0;
+            init => { root.parts-end = self.y; }
+            changed y => { root.parts-end = self.y; }
         }
     }
     if SpaceData.card-room != "": Text {

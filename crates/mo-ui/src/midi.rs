@@ -1002,6 +1002,8 @@ fn actions(e: &mo_midi::Entry, shortcuts: &Shortcuts) -> (Vec<CardAction>, Vec<M
             key: shortcuts.key_of(id).into(),
             id: id.into(),
             enabled,
+            main: false,
+            danger: false,
         })
         .collect();
     let menu = list

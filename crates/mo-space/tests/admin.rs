@@ -12,32 +12,16 @@ use mo_space::admin::{MOVE_FOLDER, RECYCLE_BIN, run_step, write_list};
 
 mod common;
 
-use common::{folder_link, is_link, unlink};
+use common::{folder_link, is_link, unlink, writable};
 
 fn fixtures(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     if dir.exists() {
-        unlock_all(&dir);
+        writable(&dir);
         fs::remove_dir_all(&dir).unwrap();
     }
     fs::create_dir_all(&dir).unwrap();
     dir
-}
-
-/// Makes every folder in a fixture writable again, so the next run can clear it.
-fn unlock_all(dir: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir()) {
-            let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o755));
-            for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
-                unlock_all(&entry.path());
-            }
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = dir;
 }
 
 fn s(p: &Path) -> String {
@@ -255,10 +239,11 @@ mod guarded {
     use std::sync::{Arc, Mutex};
 
     use mo_space::admin::{Admin, NoAdmin, run_step_with};
-    use mo_space::clean::{Bin, NEEDS_ADMIN, Problem, Removed};
+    use mo_space::clean::{BACK_NEEDS_ADMIN, Bin, Check, NEEDS_ADMIN, Problem, Removed, undo};
     use mo_space::folder_move::{CantMove, Drives};
     use mo_space::key;
 
+    use super::common::kept_at;
     use super::{fixtures, folder_link, real, s, unlink};
 
     fn write(dir: &Path, rel: &str, text: &str) {
@@ -268,7 +253,7 @@ mod guarded {
     }
 
     /// A Recycle Bin that's a folder in the fixtures. A file it isn't allowed to move (in a locked folder) needs
-    /// administrator rights, as Windows says of one it guards.
+    /// administrator rights, as Windows says of one it guards, both to go and to come back.
     struct FolderBin {
         dir: PathBuf,
         held: Arc<Mutex<Vec<(String, PathBuf)>>>,
@@ -312,8 +297,34 @@ mod guarded {
             }
             Vec::new()
         }
-        fn put_back(&self, _removed: &[Removed]) -> Vec<Problem> {
-            Vec::new()
+        fn put_back(&self, removed: &[Removed]) -> Vec<Problem> {
+            let mut problems = Vec::new();
+            self.put_back_checked(removed, &|_, _| Ok(()), &mut |n, why| {
+                problems.extend(why.map(|why| Problem { path: removed[n].path.clone(), why }));
+            });
+            problems
+        }
+        fn put_back_checked(
+            &self,
+            removed: &[Removed],
+            check: &Check<'_>,
+            each: &mut dyn FnMut(usize, Option<String>),
+        ) {
+            for (n, r) in removed.iter().enumerate() {
+                let back = match kept_at(r) {
+                    None => Err("It isn't in the bin.".to_owned()),
+                    Some(at) => check(r, &at).and_then(|()| {
+                        fs::rename(at, &r.real).map_err(|e| match e.kind() {
+                            std::io::ErrorKind::PermissionDenied => BACK_NEEDS_ADMIN.to_owned(),
+                            _ => e.to_string(),
+                        })
+                    }),
+                };
+                each(n, back.err());
+            }
+        }
+        fn holds(&self, removed: &[Removed]) -> Option<Vec<bool>> {
+            Some(removed.iter().map(|r| kept_at(r).is_some()).collect())
         }
     }
 
@@ -480,7 +491,7 @@ mod guarded {
 
         // Saved through the link since; moving back asks again.
         write(&d, "Spectrasonics/User.db", "mine");
-        let back = mo_space::folder_move::move_back(&moved, &drives, &nothing, &stop).unwrap();
+        let back = mo_space::folder_move::move_back(&moved, &[], &drives, &nothing, &stop).unwrap();
         assert!(back.kept.is_empty());
         assert_eq!(unlock.asked(), 3);
         assert!(!fs::symlink_metadata(&from).unwrap().file_type().is_symlink());
@@ -734,6 +745,223 @@ mod guarded {
         assert_eq!(now.moved[1].to, s(&by_hand.join("Toontrack")));
     }
 
+    /// Reaktor 6 moved first, then Native Instruments around it, then the folder the moved folders live in to another
+    /// drive (E): the old copy's link to Reaktor 6 still leads to its old place. The old copy is locked then, as Windows
+    /// guards it (it's in Program Files, say). Gives the moves and the folders C and E.
+    fn inner_moved_home(dir: &Path) -> (Vec<mo_space::folder_move::MovedFolder>, PathBuf, PathBuf) {
+        let (c, d, e) = (dir.join("C"), dir.join("D"), dir.join("E"));
+        write(&c, "NI/Reaktor 6/r.ens", "r");
+        write(&c, "NI/k.nki", "k");
+        let data = d.join("Plugin Data");
+        fs::create_dir_all(&data).unwrap();
+        fs::create_dir_all(&e).unwrap();
+        let stop = AtomicBool::new(false);
+        let drives = OtherDrive(&NoAdmin);
+        let mut all = Vec::new();
+        for from in [c.join("NI").join("Reaktor 6"), c.join("NI")] {
+            let whose = ("omnisphere", mo_space::plugin_space::SpaceKind::Sounds, &[] as &[String]);
+            let moved =
+                mo_space::folder_move::move_folder(&s(&from), &s(&data), 1, whose, &drives, &all, &[], &nothing, &stop);
+            all.push(moved.unwrap());
+        }
+        let home = mo_space::after_move::move_home(&s(&data), &s(&e), &all, &[], 2, &drives, &nothing, &stop);
+        let moved = home.unwrap().moved;
+        lock(Path::new(&moved[1].old_copy), true);
+        (moved, c, e)
+    }
+
+    /// Moving back that folder: the old copy's link to Reaktor 6 is made again as administrator, to lead where Reaktor 6
+    /// is now, Windows asking once. When you say no, it stays as it was, and is named. When it went as administrator and
+    /// wasn't made again, moving back stops before the old copy is in use.
+    #[test]
+    fn moving_back_points_an_inner_moved_folders_link_windows_guards_again_as_administrator() {
+        let dir = fixtures("mo-space-admin-inner-link-back");
+        if !locking_works(&dir) {
+            return;
+        }
+        let stop = AtomicBool::new(false);
+        let back = |moved: &[mo_space::folder_move::MovedFolder], admin: &dyn Admin| {
+            mo_space::folder_move::move_back(&moved[1], moved, &OtherDrive(admin), &nothing, &stop)
+        };
+
+        // You say yes.
+        let (moved, c, e) = inner_moved_home(&dir.join("yes"));
+        let unlock = Unlock::new(&[Path::new(&moved[1].old_copy)]);
+        let done = back(&moved, &unlock).unwrap();
+        lock(&c.join("NI"), false);
+        assert!(done.links_left.is_empty(), "{:?}", done.links_left);
+        assert_eq!(unlock.asked(), 1);
+        let inner = c.join("NI").join("Reaktor 6");
+        assert!(fs::symlink_metadata(&inner).unwrap().file_type().is_symlink());
+        assert_eq!(real(&inner), real(&e.join("Plugin Data").join("Reaktor 6")));
+        assert_eq!(fs::read_to_string(inner.join("r.ens")).unwrap(), "r");
+
+        // You say no.
+        let (moved, c, _) = inner_moved_home(&dir.join("no"));
+        let was = fs::read_link(Path::new(&moved[1].old_copy).join("Reaktor 6")).unwrap();
+        let unlock = Unlock { yes_to: 0, ..Unlock::new(&[Path::new(&moved[1].old_copy)]) };
+        let done = back(&moved, &unlock).unwrap();
+        lock(&c.join("NI"), false);
+        assert_eq!(done.links_left, ["Reaktor 6"]);
+        assert_eq!(unlock.asked(), 1);
+        assert_eq!(fs::read_link(c.join("NI").join("Reaktor 6")).unwrap(), was);
+
+        // The step takes the link away, and is cut off before it makes it again: it says which link to make.
+        let (moved, c, _) = inner_moved_home(&dir.join("gone"));
+        let old = PathBuf::from(&moved[1].old_copy);
+        let takes_it = Meanwhile(|_: &[String]| {
+            lock(&old, false);
+            unlink(&old.join("Reaktor 6"));
+            lock(&old, true);
+        });
+        let stopped = back(&moved, &takes_it);
+        lock(&old, false);
+        let Err(CantMove::LeftHalfway(why)) = &stopped else { panic!("{stopped:?}") };
+        let make = format!(
+            "There's no link at {} now: make one there to {} yourself.",
+            s(&old.join("Reaktor 6")),
+            moved[0].to
+        );
+        assert!(why.contains("didn't finish") && why.contains(&make), "{why}");
+        assert!(fs::symlink_metadata(c.join("NI")).unwrap().file_type().is_symlink());
+        assert!(old.join("k.nki").exists() && fs::symlink_metadata(old.join("Reaktor 6")).is_err());
+    }
+
+    /// Moving back that folder, as a plugin update puts a real folder where the link was while it copies: it isn't
+    /// swapped, and Windows isn't asked about the old copy's links for nothing: they stay as they were.
+    #[test]
+    fn moving_back_doesnt_ask_about_an_inner_moved_folders_link_when_it_wont_swap() {
+        let dir = fixtures("mo-space-admin-inner-link-back-update");
+        if !locking_works(&dir) {
+            return;
+        }
+        let stop = AtomicBool::new(false);
+        let (moved, c, _) = inner_moved_home(&dir);
+        let old = PathBuf::from(&moved[1].old_copy);
+        let was = fs::read_link(old.join("Reaktor 6")).unwrap();
+        // Something saved through the link since, in a folder of the old copy Windows doesn't guard, so the first pass
+        // copies something.
+        lock(&old, false);
+        fs::create_dir(old.join("Sub")).unwrap();
+        lock(&old, true);
+        write(Path::new(&moved[1].to), "Sub/new.nki", "n");
+        let ni = c.join("NI");
+        let once = AtomicBool::new(false);
+        let progress = |_: u64| {
+            if !once.swap(true, Ordering::SeqCst) {
+                unlink(&ni);
+                write(&c, "NI/Update.db", "new");
+            }
+        };
+        let unlock = Unlock::new(&[old.as_path()]);
+        let result = mo_space::folder_move::move_back(&moved[1], &moved, &OtherDrive(&unlock), &progress, &stop);
+        lock(&old, false);
+        let Err(CantMove::LeftHalfway(why)) = &result else { panic!("{result:?}") };
+        assert!(why.contains("became a real folder again") && why.contains("brought up to date"), "{why}");
+        assert_eq!(unlock.asked(), 0);
+        assert_eq!(fs::read_link(old.join("Reaktor 6")).unwrap(), was);
+        assert_eq!(fs::read_to_string(old.join("Sub/new.nki")).unwrap(), "n");
+        assert_eq!(fs::read_to_string(ni.join("Update.db")).unwrap(), "new");
+    }
+
+    /// A folder moved to D, with its old copy deleted since. Gives the move, and the folders C and D.
+    fn moved_without_old_copy(dir: &Path) -> (mo_space::folder_move::MovedFolder, PathBuf, PathBuf) {
+        let (c, d) = (dir.join("C"), dir.join("D"));
+        let library = c.join("Library");
+        write(&library, "0.db", "x");
+        fs::create_dir_all(&d).unwrap();
+        let whose = ("omnisphere", mo_space::plugin_space::SpaceKind::Sounds, &[] as &[String]);
+        let (drives, stop) = (OtherDrive(&NoAdmin), AtomicBool::new(false));
+        let moved =
+            mo_space::folder_move::move_folder(&s(&library), &s(&d), 1, whose, &drives, &[], &[], &nothing, &stop);
+        let moved = moved.unwrap();
+        fs::remove_dir_all(&moved.old_copy).unwrap();
+        (moved, c, d)
+    }
+
+    /// Moving back that folder: the copy made to come back is made as you, then Windows guards the link (its folder is
+    /// locked as it copies), so Windows asks about the swap. You say no: the copy made to come back goes, as the other
+    /// drive still has everything. The other drive goes as Windows asks: the swap didn't happen, so the copy made to
+    /// come back is only a copy, but the only one that can be reached then. It stays, its marker saying it isn't going
+    /// into use, and it says so; once the drive is back, trying again clears it first and moves the folder back. The
+    /// link goes as Windows asks: the copy made to come back stays too, for you to rename.
+    #[test]
+    fn what_moving_back_leaves_when_windows_asks_about_the_swap_with_the_old_copy_deleted() {
+        let dir = fixtures("mo-space-admin-back-drive-gone-at-swap");
+        if !locking_works(&dir) {
+            return;
+        }
+        let stop = AtomicBool::new(false);
+
+        // You say no.
+        let (moved, c, _) = moved_without_old_copy(&dir.join("no"));
+        let library = c.join("Library");
+        let kept = c.join("Library (moving back)");
+        let progress = |_: u64| {
+            if kept.exists() {
+                lock(&c, true);
+            }
+        };
+        let no = Unlock { yes_to: 0, ..Unlock::new(&[c.as_path()]) };
+        let result = mo_space::folder_move::move_back(&moved, &[], &OtherDrive(&no), &progress, &stop);
+        lock(&c, false);
+        assert_eq!(result.unwrap_err().text(), "You said no to Windows' administrator question. Nothing was moved.");
+        assert_eq!(no.asked(), 1);
+        assert!(fs::symlink_metadata(&library).unwrap().file_type().is_symlink());
+        // What's in the copy made to come back goes. The folder itself stays here, empty but for its marker, as the
+        // test's lock on the link's folder keeps every name in it; the marker says it isn't in use, so the next try
+        // clears it.
+        assert!(!kept.join("0.db").exists());
+        mo_space::folder_move::move_back(&moved, &[], &OtherDrive(&NoAdmin), &nothing, &stop).unwrap();
+        assert!(!fs::symlink_metadata(&library).unwrap().file_type().is_symlink() && !kept.exists());
+        assert_eq!(fs::read_to_string(library.join("0.db")).unwrap(), "x");
+
+        // The other drive goes.
+        let (moved, c, d) = moved_without_old_copy(&dir.join("drive"));
+        let library = c.join("Library");
+        let kept = c.join("Library (moving back)");
+        let progress = |_: u64| {
+            if kept.exists() {
+                lock(&c, true);
+            }
+        };
+        let unplugged = d.with_file_name("D unplugged");
+        let asks = Meanwhile(|_: &[String]| fs::rename(&d, &unplugged).unwrap());
+        let result = mo_space::folder_move::move_back(&moved, &[], &OtherDrive(&asks), &progress, &stop);
+        lock(&c, false);
+        let Err(CantMove::LeftHalfway(why)) = &result else { panic!("{result:?}") };
+        assert!(why.contains(&format!("{} couldn't be reached any more", moved.to)), "{why}");
+        assert!(why.contains(&format!("stays beside it, as {}", s(&kept))) && !why.contains("still has all"), "{why}");
+        assert!(fs::symlink_metadata(&library).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read_to_string(kept.join("0.db")).unwrap(), "x");
+        // The drive is back: trying again clears the copy that stayed first (it never went into use), and moves the
+        // folder back.
+        fs::rename(&unplugged, &d).unwrap();
+        mo_space::folder_move::move_back(&moved, &[], &OtherDrive(&NoAdmin), &nothing, &stop).unwrap();
+        assert!(!fs::symlink_metadata(&library).unwrap().file_type().is_symlink() && !kept.exists());
+        assert_eq!(fs::read_to_string(library.join("0.db")).unwrap(), "x");
+
+        // The link goes as Windows asks (the step is cut off once it took it away).
+        let (moved, c, _) = moved_without_old_copy(&dir.join("link"));
+        let library = c.join("Library");
+        let kept = c.join("Library (moving back)");
+        let progress = |_: u64| {
+            if kept.exists() {
+                lock(&c, true);
+            }
+        };
+        let takes_it = Meanwhile(|_: &[String]| {
+            lock(&c, false);
+            unlink(&library);
+            lock(&c, true);
+        });
+        let result = mo_space::folder_move::move_back(&moved, &[], &OtherDrive(&takes_it), &progress, &stop);
+        lock(&c, false);
+        assert!(matches!(result, Err(CantMove::LeftHalfway(_))), "{result:?}");
+        assert!(fs::symlink_metadata(&library).is_err());
+        assert_eq!(fs::read_to_string(kept.join("0.db")).unwrap(), "x");
+    }
+
     #[test]
     fn what_windows_guards_goes_to_the_bin_in_one_step_and_stays_when_you_say_no() {
         let dir = fixtures("mo-space-admin-bin");
@@ -930,12 +1158,26 @@ mod guarded {
         let mut bin = FolderBin::new(&dir);
         bin.admin = Some(Box::new(Unlock { bin: Some(bin.twin()), ..Unlock::new(&[&vst2]) }));
         let done = remove(&picked, &picked, &bin, &AtomicBool::new(false));
-        lock(&vst2, false);
         assert!(done.problems.is_empty(), "{:?}", done.problems);
         assert_eq!(done.removed.len(), 2);
-        assert!(done.removed.iter().all(|r| r.bin_id.is_some()));
+        assert!(done.removed.iter().all(|r| r.bin_id.is_some() && r.stamp.is_some()));
         assert_eq!(bin.admin.as_deref().map(Unlock::asked), Some(1));
         assert!(!vst2.join("Serum_x64.dll").exists() && !vst2.join("Massive.dll").exists());
+
+        // Put back where nothing can ask Windows: they stay in the bin, as Windows needs administrator rights for them.
+        let problems = undo(&done, &bin.twin());
+        assert_eq!(problems.len(), 2);
+        assert!(problems.iter().all(|p| p.why == BACK_NEEDS_ADMIN), "{problems:?}");
+        assert!(!vst2.join("Serum_x64.dll").exists() && !vst2.join("Massive.dll").exists());
+
+        // Put back asks Windows once, and both come back as they went.
+        bin.admin = Some(Box::new(Unlock { bin: Some(bin.twin()), ..Unlock::new(&[&vst2]) }));
+        let problems = undo(&done, &bin);
+        lock(&vst2, false);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(bin.admin.as_deref().map(Unlock::asked), Some(1));
+        assert_eq!(fs::read_to_string(vst2.join("Serum_x64.dll")).unwrap(), "serum");
+        assert_eq!(fs::read_to_string(vst2.join("Massive.dll")).unwrap(), "massive");
     }
 
     #[test]

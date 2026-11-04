@@ -9,6 +9,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+# What the Space page's clean-ups put in the Recycle Bin, kept in a small file so Put back works after a restart.
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono.workspace = true
 # Catching a panic on purpose: a damaged file tripping a reader is a warning, not a crash.
@@ -34,6 +36,10 @@ tiny-skia.workspace = true
 # The words on the card that follows a drag out of the app (drawn outside Slint, in the app's own fonts). Slint already
 # brings it in.
 swash = "0.2"
+
+# Long work over a disk is put low in the system's memory (background::on_bulk_pool).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Threading"] }
 
 [dev-dependencies]
 # A small library made by the backup test.
