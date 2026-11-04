@@ -627,14 +627,10 @@ pub fn filter_chips(c: &ChoiceCounts, plugins: &[(String, usize)], f: &Filters) 
         PartPick::choices().into_iter().zip(&c.parts).map(|(l, n)| (l.to_owned(), thousands(*n))).collect();
     // The most used first, as `plugins` has them: an order the other filters don't change, so a line doesn't move
     // under the mouse when they do.
-    let mut by_plugin: Vec<(String, usize)> = plugins
+    let by_plugin: Vec<(String, usize)> = plugins
         .iter()
         .map(|(name, _)| (name.clone(), c.plugins.get(&name.to_ascii_lowercase()).copied().unwrap_or(0)))
         .collect();
-    // One picked that no line has any more (after a new look at the songs) stays, to be unpicked.
-    for gone in f.plugins.iter().filter(|p| !plugins.iter().any(|(name, _)| name.eq_ignore_ascii_case(p))) {
-        by_plugin.push((gone.clone(), 0));
-    }
     FilterChips {
         maker: chips::show(&maker_choices(c), &one(maker_label(f.choice.maker))),
         kind: chips::show(&type_choices(c), &one(type_label(f.choice.kind))),

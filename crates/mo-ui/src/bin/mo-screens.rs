@@ -20,6 +20,8 @@ use slint::{ComponentHandle, PhysicalSize, Rgb8Pixel};
 
 const WIDTH: u32 = 1440;
 const HEIGHT: u32 = 900;
+/// The app's narrowest window (app.slint's min-width).
+const NARROW: u32 = 900;
 
 struct Headless(Rc<MinimalSoftwareWindow>);
 
@@ -44,7 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let feed = Feed::default();
     let app = mo_ui::new_app(&graphite, Shortcuts::default(), Place::Songs, feed.clone())?;
     app.show()?;
-    mo_ui::songs::show(&app, sample_songs());
+    mo_ui::songs::show_sample(&app, sample_songs());
     // The Sounds page, worked out in place too, from made-up sounds.
     mo_ui::sounds::compute_here();
     mo_ui::sounds::connect(
@@ -210,6 +212,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     mo_ui::apply_look(&app, &graphite);
+    // The filters with more than one pick: FL Studio, and two statuses at once.
+    let songs = app.global::<mo_ui::SongsData>();
+    let before = capture(&window);
+    for (chip, choice) in [("daw", "FL Studio"), ("status", "Idea"), ("status", "Finished")] {
+        songs.invoke_toggle_choice(chip.into(), choice.into());
+    }
+    let after = capture(&window);
+    if before == after {
+        return Err("songs-filters.png: picking FL Studio, Idea and Finished changed nothing; are they wired?".into());
+    }
+    shots.push(("songs-filters.png".into(), after));
+    songs.invoke_clear();
+    // The narrowest window the app allows: a filter too long for a line of its own wraps inside, so every chip stays
+    // in sight. Saved here, at its own width.
+    window.set_size(PhysicalSize::new(NARROW, HEIGHT));
+    let narrow = capture(&window);
+    window.set_size(PhysicalSize::new(WIDTH, HEIGHT));
+    let row = WIDTH as usize * 3;
+    let narrow: Vec<u8> = narrow.chunks(row).flat_map(|line| &line[..NARROW as usize * 3]).copied().collect();
+    let path = out.join("songs-narrow.png");
+    image::save_buffer(&path, &narrow, NARROW, HEIGHT, image::ExtendedColorType::Rgb8)?;
+    println!("{}", path.display());
     shots.push(("sounds-empty.png".into(), sounds_empty));
     shots.push(("sounds-reading.png".into(), sounds_reading));
     sounds_shots(&app, &window, &graphite, &mut shots)?;
@@ -294,7 +318,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (name, x, y) in [
         ("tip-rail.png", 60.0, 125.0),
         ("tip-button.png", SHOW_BUTTON.0, SHOW_BUTTON.1),
-        ("tip-date.png", 530.0, 246.0),
+        ("tip-date.png", 530.0, 286.0),
     ] {
         hover(&window, x, y);
         // Before the tip's wait is over, then after: if nothing came up, the mouse missed what it was meant to rest on.
@@ -856,12 +880,18 @@ fn sample_songs() -> mo_app::songs::Songs {
             tempo: Some(122.0),
             missing_samples: 3,
             status: "Mixing".into(),
+            tags: vec!["dark".into(), "live set".into()],
             ..save("Glass Harbour", "Bitwig Studio", 4)
         },
         save("Glass Harbor", "Bitwig Studio", 300),
         Save { tempo: Some(92.5), musical_key: "D major".into(), rating: 3, ..save("Slow Orbit v3", "Studio One", 12) },
         save("Slow Orbit v2", "Studio One", 20),
-        Save { tempo: Some(128.0), missing_plugins: 1, ..save("Copper Lines", "FL Studio", 70) },
+        Save {
+            tempo: Some(128.0),
+            missing_plugins: 1,
+            tags: vec!["dark".into()],
+            ..save("Copper Lines", "FL Studio", 70)
+        },
         Save { tempo: Some(174.0), rating: 5, status: "Finished".into(), ..save("Paper Moons_31", "FL Studio", 200) },
         Save { tempo: Some(110.0), ..save("Low Tide", "Bitwig Studio", 420) },
         Save {
@@ -908,9 +938,10 @@ fn sample_detail() -> mo_library::SaveDetail {
     }
 }
 
-/// Where the song panel's Show in folder and Older saves buttons are in the shots. If the panel's layout moves them,
-/// the tooltip and menu shots come out the same as the plain panel, and mo-screens stops with an error.
-const SHOW_BUTTON: (f32, f32) = (1140.0, 328.0);
+/// Where the song panel's Show in folder and Older saves buttons are in the shots, below the two lines of filters. If
+/// the page's layout moves them, the tooltip and menu shots come out the same as the plain panel, and mo-screens stops
+/// with an error.
+const SHOW_BUTTON: (f32, f32) = (1140.0, 368.0);
 /// Made-up songs and plugins for the Plugins page: some missing, some unused for years, one measured library.
 fn sample_plugins() -> (mo_app::plugins::Plugins, Vec<mo_library::plugins::ScannedPlugin>) {
     use mo_app::plugins::{Plugins, Read, SaveBrief, SongBrief};
@@ -1082,7 +1113,7 @@ const REMOVE_OLDER_BUTTON: (f32, f32) = (1127.0, 820.0);
 /// The Presets page's Plugin chip: the first in its filter row, so the other chips' words don't move it.
 const PLUGIN_CHIP: (f32, f32) = (262.0, 156.0);
 const PAGE_DOWN: f32 = 300.0;
-const OLDER_BUTTON: (f32, f32) = (1005.0, 328.0);
+const OLDER_BUTTON: (f32, f32) = (1005.0, 368.0);
 /// The Lock chip on the kit's second pad (Snare).
 const SNARE_LOCK: (f32, f32) = (846.0, 333.0);
 /// A point on a clip in the arrangement, from the view's top left, for the hover and zoom shots.
