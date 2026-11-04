@@ -129,14 +129,10 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
     });
     data.on_save_menu_chosen(|id| {
         let path = MENU_SAVE.with(|m| m.borrow().clone());
-        with_save(&path, |p, s| match id.as_str() {
-            "open" => open_save(p, s),
-            "bitwig" => open_in_bitwig(p, s),
-            "reveal" => reveal(s),
-            "copy" => copy_path(&s.path),
-            _ => {}
-        });
+        do_to_save(&path, &id);
     });
+    // The same, from the buttons on the save's line.
+    data.on_save_chosen(|path, id| do_to_save(&path, &id));
     crate::finder::on_open(Kind::Song, |app, hit, how| {
         let Some(row) = PAGE.with(|p| p.borrow().songs.rows.iter().position(|r| r.song.key == hit.id)) else {
             return false;
@@ -630,7 +626,7 @@ fn fill_panel(app: &AppWindow) {
             PanelSaveLine::Run { label, details } => {
                 SaveLine { run: label.into(), details: details.into(), ..SaveLine::default() }
             }
-            PanelSaveLine::Save { name, date, path, missing, newest } => SaveLine {
+            PanelSaveLine::Save { name, date, path, missing, newest, daw } => SaveLine {
                 run: SharedString::new(),
                 details: SharedString::new(),
                 name: name.into(),
@@ -638,6 +634,7 @@ fn fill_panel(app: &AppWindow) {
                 path: path.into(),
                 missing,
                 newest,
+                daw: daw.into(),
             },
         })));
     });
@@ -759,6 +756,18 @@ fn with_save(path: &str, f: impl FnOnce(&Page, &mo_library::Save)) {
         if let Some(s) = r.song.saves().find(|s| s.path == path) {
             f(p, s);
         }
+    });
+}
+
+/// Does `what` to the save at `path`: "open" (in its own DAW), "bitwig" (an FL Studio save in Bitwig), "reveal" or
+/// "copy" (its path), from its right-click menu or the buttons on its line.
+fn do_to_save(path: &str, what: &str) {
+    with_save(path, |p, s| match what {
+        "open" => open_save(p, s),
+        "bitwig" => open_in_bitwig(p, s),
+        "reveal" => reveal(s),
+        "copy" => copy_path(&s.path),
+        _ => {}
     });
 }
 

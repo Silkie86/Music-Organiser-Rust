@@ -237,9 +237,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     shots.push(("sounds-empty.png".into(), sounds_empty));
     shots.push(("sounds-reading.png".into(), sounds_reading));
     sounds_shots(&app, &window, &graphite, &mut shots)?;
-    // The Sounds filters in the narrowest window, every one in sight.
+    // The Sounds filters in the narrowest window, every one in sight, and each view's own choices too.
     app.set_place(Place::Sounds.index() as i32);
     save_narrow(&window, &out, "sounds-narrow.png")?;
+    let sounds = app.global::<mo_ui::SoundsData>();
+    for (view, name) in
+        [(2, "sounds-galaxy-narrow.png"), (4, "sounds-rediscover-narrow.png"), (5, "sounds-kits-narrow.png")]
+    {
+        sounds.invoke_pick_view(view);
+        save_narrow(&window, &out, name)?;
+    }
+    sounds.invoke_pick_view(0);
     app.set_place(Place::Songs.index() as i32);
 
     // The song panel, on the first song, on Overview and on Plugins.
@@ -249,6 +257,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         mo_ui::arrangement::show_peaks(&app, mo_ui::arrangement::sample_peaks());
         shots.push((format!("song-panel-{}.png", slug(tab.name())), capture(&window)));
     }
+    // Saves in the narrowest window: each line's buttons only show with room for them and the save's name.
+    save_narrow(&window, &out, "song-panel-saves-narrow.png")?;
     // The arrangement: the mouse on a clip, zoomed in about the mouse, the Bitwig view, and in a light theme.
     app.global::<mo_ui::SongsData>().set_tab(Tab::Overview.index() as i32);
     let arrangement = app.global::<mo_ui::ArrangementData>();
@@ -1139,8 +1149,8 @@ const PAGE_DOWN: f32 = 300.0;
 const OLDER_BUTTON: (f32, f32) = (1005.0, 368.0);
 /// The Lock chip on the kit's second pad (Snare).
 const SNARE_LOCK: (f32, f32) = (846.0, 333.0);
-/// The first tile's liked bar on Sounds, under the three lines of filters.
-const LIKED_BAR: (f32, f32) = (350.0, 370.0);
+/// The first tile's liked bar on Sounds, under the Order line and the three lines of filters.
+const LIKED_BAR: (f32, f32) = (350.0, 414.0);
 /// A point on a clip in the arrangement, from the view's top left, for the hover and zoom shots.
 const ARRANGEMENT_CLIP: (f32, f32) = (480.0, 180.0);
 

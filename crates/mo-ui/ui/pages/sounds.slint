@@ -145,18 +145,17 @@ export global SoundsData {
     in property <int> view;
     callback pick-view(int);
 
-    // Rediscover: what it digs out (type, year, how adventurous, how many) and whether sounds used once count.
-    in property <string> re-type;
-    in property <[string]> re-types;
-    in property <string> re-year;
-    in property <[string]> re-years;
+    // Rediscover: what it digs out (type, year, how adventurous, how many) and whether sounds used once count. Each
+    // choice is on show, as the filters' are (one type and one year at most, and one of the counts).
+    in property <FilterView> re-type-filter;
+    in property <FilterView> re-year-filter;
     // 0 (close to what you use) to 1 (further afield).
     in-out property <float> re-adventure;
     callback re-adventure-set(float);
-    in property <string> re-count;
-    in property <[string]> re-counts;
+    in property <FilterView> re-count-filter;
     in property <bool> re-rarely;
-    // "type", "year" or "count", and the value ("" for any).
+    // "type", "year" or "count", and the choice clicked: the type or year picked already is unpicked, and "" is any;
+    // or "more-types" for the More types menu's Any, which keeps a type picked on its chip.
     callback re-pick(string, string);
     callback re-toggle-rarely();
     callback re-shuffle();
@@ -178,8 +177,8 @@ export global SoundsData {
     in property <length> galaxy-image-height;
     in property <string> galaxy-note;
     in property <bool> galaxy-busy;
-    in property <string> galaxy-placing;
-    in property <[string]> galaxy-placings;
+    // What the stars are placed by, each choice on show.
+    in property <FilterView> placing-filter;
     callback galaxy-place-by(string);
     // The year strip beside the list: each year with how much is in it; drag over years to show only those.
     in property <[YearBar]> years;
@@ -188,9 +187,8 @@ export global SoundsData {
     in property <int> years-to: -1;
     callback years-picked(int, int);
     callback years-cleared();
-    // What makes a star bigger and brighter.
-    in property <string> galaxy-light;
-    in property <[string]> galaxy-lights;
+    // What makes a star bigger and brighter, each choice on show.
+    in property <FilterView> light-filter;
     callback galaxy-light-by(string);
     callback galaxy-lay-out();
     callback galaxy-reset();
@@ -302,8 +300,8 @@ export global SoundsData {
     callback toggle(string);
     callback clear();
 
-    in property <string> order;
-    in property <[string]> orders;
+    // The order Tiles and List are in, each on show (one is always picked).
+    in property <FilterView> order-filter;
     callback pick-order(string);
     callback shuffle();
     in property <bool> autoplay;
@@ -982,8 +980,8 @@ export component SoundsPage inherits Rectangle {
             busy: SoundsData.busy;
             done: SoundsData.done;
         }
-        // The search, the views and each view's own choices. They wrap onto another line when there isn't room (a
-        // narrow window, or the galaxy's choices), so nothing runs off the page and the filters under them wrap too.
+        // The search, the views and Autoplay. They wrap onto another line when there isn't room (a narrow window), so
+        // nothing runs off the page and the rows under them wrap too.
         FlexboxLayout {
             spacing: Space.sm;
             vertical-stretch: 0;
@@ -1016,63 +1014,6 @@ export component SoundsPage inherits Rectangle {
                     picked(i) => { SoundsData.pick-view(i); }
                 }
             }
-            if SoundsData.view < 2: VerticalLayout {
-                alignment: center;
-                MenuChip {
-                    name: "Order";
-                    value: SoundsData.order;
-                    choices: SoundsData.orders;
-                    picked(v) => { SoundsData.pick-order(v); }
-                }
-            }
-            if SoundsData.view < 2: VerticalLayout {
-                alignment: center;
-                StudioButton {
-                    horizontal-stretch: 0;
-                    text: "Shuffle";
-                    tip: "A new order";
-                    clicked => { SoundsData.shuffle(); }
-                }
-            }
-            // The galaxy's own choices, where Tiles and List have their order.
-            if SoundsData.view == 2: VerticalLayout {
-                alignment: center;
-                MenuChip {
-                    name: "Placed by";
-                    value: SoundsData.galaxy-placing;
-                    choices: SoundsData.galaxy-placings;
-                    has-any: false;
-                    picked(v) => { SoundsData.galaxy-place-by(v); }
-                }
-            }
-            if SoundsData.view == 2: VerticalLayout {
-                alignment: center;
-                MenuChip {
-                    name: "Light by";
-                    value: SoundsData.galaxy-light;
-                    choices: SoundsData.galaxy-lights;
-                    has-any: false;
-                    picked(v) => { SoundsData.galaxy-light-by(v); }
-                }
-            }
-            if SoundsData.view == 2: VerticalLayout {
-                alignment: center;
-                StudioButton {
-                    horizontal-stretch: 0;
-                    text: "Lay out again";
-                    tip: "Work the map out afresh from every sound's fingerprint";
-                    clicked => { SoundsData.galaxy-lay-out(); }
-                }
-            }
-            if SoundsData.view == 2: VerticalLayout {
-                alignment: center;
-                StudioButton {
-                    horizontal-stretch: 0;
-                    text: "Whole map";
-                    tip: "Zoom out to see every star";
-                    clicked => { SoundsData.galaxy-reset(); }
-                }
-            }
             VerticalLayout {
                 alignment: center;
                 ToggleChip {
@@ -1082,22 +1023,71 @@ export component SoundsPage inherits Rectangle {
                 }
             }
         }
-        // Rediscover's own choices, in place of the filters.
-        if SoundsData.view == 4: HorizontalLayout {
-            spacing: Space.sm;
-            alignment: start;
+        // Each view's own choices, every one on show rather than in a menu (Solomon, 4 Nov 2026: "makes sure things
+        // that are useful arent hidden away"). Each row is a FlexboxLayout in an `if`, with its filters in it always:
+        // a filter in an `if` inside a FlexboxLayout is measured as if it wrapped, and leaves a gap under the row.
+        if SoundsData.view < 2: FlexboxLayout {
+            spacing: Space.md;
+            cross-axis-alignment: center;
             vertical-stretch: 0;
-            MenuChip {
-                name: "Type";
-                value: SoundsData.re-type;
-                choices: SoundsData.re-types;
-                picked(v) => { SoundsData.re-pick("type", v); }
+            FilterPicks {
+                name: "Order";
+                filter: SoundsData.order-filter;
+                toggled(text) => { SoundsData.pick-order(text); }
             }
-            if SoundsData.re-years.length > 0: MenuChip {
+            StudioButton {
+                horizontal-stretch: 0;
+                text: "Shuffle";
+                tip: "A new order";
+                clicked => { SoundsData.shuffle(); }
+            }
+        }
+        if SoundsData.view == 2: FlexboxLayout {
+            spacing: Space.md;
+            cross-axis-alignment: center;
+            vertical-stretch: 0;
+            FilterPicks {
+                name: "Placed by";
+                filter: SoundsData.placing-filter;
+                toggled(text) => { SoundsData.galaxy-place-by(text); }
+            }
+            FilterPicks {
+                name: "Light by";
+                filter: SoundsData.light-filter;
+                toggled(text) => { SoundsData.galaxy-light-by(text); }
+            }
+            StudioButton {
+                horizontal-stretch: 0;
+                text: "Lay out again";
+                tip: "Work the map out afresh from every sound's fingerprint";
+                clicked => { SoundsData.galaxy-lay-out(); }
+            }
+            StudioButton {
+                horizontal-stretch: 0;
+                text: "Whole map";
+                tip: "Zoom out to see every star";
+                clicked => { SoundsData.galaxy-reset(); }
+            }
+        }
+        // Rediscover's own choices, in place of the filters: the types as the Type filter shows them (the most used as
+        // chips, the rest in a menu), the years, and how many, each on show.
+        if SoundsData.view == 4: FlexboxLayout {
+            spacing: Space.md;
+            cross-axis-alignment: center;
+            vertical-stretch: 0;
+            FilterPicks {
+                name: "Type";
+                more-name: "More types";
+                filter: SoundsData.re-type-filter;
+                toggled(text) => { SoundsData.re-pick("type", text); }
+                cleared => { SoundsData.re-pick("more-types", ""); }
+            }
+            // With no years (before the first answer) it shows nothing, and leaves one gap in the row.
+            FilterPicks {
                 name: "Year";
-                value: SoundsData.re-year;
-                choices: SoundsData.re-years;
-                picked(v) => { SoundsData.re-pick("year", v); }
+                filter: SoundsData.re-year-filter;
+                toggled(text) => { SoundsData.re-pick("year", text); }
+                cleared => { SoundsData.re-pick("year", ""); }
             }
             StudioSlider {
                 low: "Safe";
@@ -1106,62 +1096,48 @@ export component SoundsPage inherits Rectangle {
                 value <=> SoundsData.re-adventure;
                 released(v) => { SoundsData.re-adventure-set(v); }
             }
-            MenuChip {
+            FilterPicks {
                 name: "How many";
-                value: SoundsData.re-count;
-                choices: SoundsData.re-counts;
-                has-any: false;
-                picked(v) => { SoundsData.re-pick("count", v); }
+                filter: SoundsData.re-count-filter;
+                toggled(text) => { SoundsData.re-pick("count", text); }
             }
             ToggleChip {
                 text: "Include sounds used once";
                 on: SoundsData.re-rarely;
                 clicked => { SoundsData.re-toggle-rarely(); }
             }
-            VerticalLayout {
-                alignment: center;
-                StudioButton {
-                    horizontal-stretch: 0;
-                    text: SoundsData.re-busy ? "Shuffling…" : "Shuffle";
-                    main: true;
-                    tip: "Dig out a new set";
-                    clicked => { SoundsData.re-shuffle(); }
-                }
+            StudioButton {
+                horizontal-stretch: 0;
+                text: SoundsData.re-busy ? "Shuffling…" : "Shuffle";
+                main: true;
+                tip: "Dig out a new set";
+                clicked => { SoundsData.re-shuffle(); }
             }
         }
-        // The kit builder's choices, in place of the filters.
-        if SoundsData.view == 5: HorizontalLayout {
+        // The kit builder's choices, in place of the filters. They wrap in a narrow window, as the other rows do.
+        if SoundsData.view == 5: FlexboxLayout {
             spacing: Space.sm;
-            alignment: start;
+            cross-axis-alignment: center;
             vertical-stretch: 0;
-            VerticalLayout {
-                alignment: center;
-                StudioButton {
-                    horizontal-stretch: 0;
-                    text: SoundsData.kit-busy ? "Rolling…" : "Roll a kit";
-                    main: true;
-                    tip: "Fill every pad that isn't locked";
-                    clicked => { SoundsData.kit-roll(); }
-                }
+            StudioButton {
+                horizontal-stretch: 0;
+                text: SoundsData.kit-busy ? "Rolling…" : "Roll a kit";
+                main: true;
+                tip: "Fill every pad that isn't locked";
+                clicked => { SoundsData.kit-roll(); }
             }
-            VerticalLayout {
-                alignment: center;
-                StudioButton {
-                    horizontal-stretch: 0;
-                    text: "Export kit";
-                    tip: "Copy the pads into a folder of their own, ready for a sampler";
-                    clicked => { SoundsData.kit-export(); }
-                }
+            StudioButton {
+                horizontal-stretch: 0;
+                text: "Export kit";
+                tip: "Copy the pads into a folder of their own, ready for a sampler";
+                clicked => { SoundsData.kit-export(); }
             }
-            VerticalLayout {
-                alignment: center;
-                StudioButton {
-                    horizontal-stretch: 0;
-                    text: SoundsData.kit-sending ? "Sending…" : "Send to Bitwig";
-                    enabled: !SoundsData.kit-sending && !SoundsData.kit-busy;
-                    tip: "Put the kit on a Drum Machine on a new track in the project open in Bitwig: kick on C1, snare on D1, closed hat on F#1, and the rest on the free pads";
-                    clicked => { SoundsData.kit-to-bitwig(); }
-                }
+            StudioButton {
+                horizontal-stretch: 0;
+                text: SoundsData.kit-sending ? "Sending…" : "Send to Bitwig";
+                enabled: !SoundsData.kit-sending && !SoundsData.kit-busy;
+                tip: "Put the kit on a Drum Machine on a new track in the project open in Bitwig: kick on C1, snare on D1, closed hat on F#1, and the rest on the free pads";
+                clicked => { SoundsData.kit-to-bitwig(); }
             }
             ToggleChip {
                 text: "Favour sounds I haven't used";

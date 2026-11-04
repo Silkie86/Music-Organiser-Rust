@@ -70,6 +70,18 @@ pub fn show_split(choices: &[(String, String)], picked: &[String], up_to: usize)
     Filter { more_picked: picked_words(&on), chips: all.more, more }
 }
 
+/// A choice where one is always picked, such as the order a list is in: each choice as a chip of its own, with the
+/// picked one on, and nothing counted. It's for a short list ([`CHIPS_UP_TO`] or fewer): all of it stays on show
+/// (Solomon, 4 Nov 2026: "makes sure things that are useful arent hidden away"). The page keeps the pick when the
+/// picked chip is clicked again, so there's always one.
+pub fn one_of<S: AsRef<str>>(choices: &[S], picked: &str) -> Filter {
+    let chips = choices
+        .iter()
+        .map(|c| Shown { text: c.as_ref().to_owned(), count: String::new(), on: c.as_ref() == picked })
+        .collect();
+    Filter { chips, ..Filter::default() }
+}
+
 /// What a menu's chip says is picked: the one, "Bass + 2" for more, or "" for none.
 pub fn picked_words(picked: &[&str]) -> String {
     match picked {
@@ -154,6 +166,19 @@ mod tests {
         // A short list is all chips.
         let short = show_split(&types[..CHIPS_UP_TO], &[], 3);
         assert_eq!((short.chips.len(), short.more.len()), (CHIPS_UP_TO, 0));
+    }
+
+    #[test]
+    fn one_of_a_few_shows_every_choice_with_the_picked_one_on() {
+        let order = one_of(&["Shuffled", "Name", "Newest"], "Name");
+        assert_eq!(
+            order.chips.iter().map(|c| (c.text.as_str(), c.count.as_str(), c.on)).collect::<Vec<_>>(),
+            [("Shuffled", "", false), ("Name", "", true), ("Newest", "", false)]
+        );
+        assert!(order.more.is_empty() && order.more_picked.is_empty());
+        // Words of any kind, such as numbers made as text.
+        let counts = one_of(&[30, 60].map(|n: i32| n.to_string()), "60");
+        assert_eq!(counts.chips.iter().filter(|c| c.on).count(), 1);
     }
 
     #[test]
