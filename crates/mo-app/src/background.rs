@@ -264,6 +264,32 @@ mod tests {
     }
 
     #[test]
+    fn long_disk_work_leaves_the_main_pool_free() {
+        use rayon::prelude::*;
+        let (release_tx, release) = mpsc::channel::<()>();
+        let release = Mutex::new(release);
+        let (started_tx, started) = mpsc::channel::<()>();
+        // A long par_iter on the disk pool, held until the main pool's job has answered.
+        let long = std::thread::spawn(move || {
+            on_bulk_pool(|| {
+                let _ = started_tx.send(());
+                (0..64).into_par_iter().for_each(|_| {
+                    let r = release.lock().unwrap_or_else(PoisonError::into_inner);
+                    let _ = r.recv_timeout(Duration::from_secs(10));
+                });
+            });
+        });
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (answer_tx, answer) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = answer_tx.send(on_pool(|| (0..1000).into_par_iter().sum::<u64>()));
+        });
+        assert_eq!(answer.recv_timeout(Duration::from_secs(5)).unwrap(), 499_500);
+        drop(release_tx);
+        long.join().unwrap();
+    }
+
+    #[test]
     fn only_the_newest_waiting_job_is_done() {
         let (done_tx, done) = mpsc::channel();
         let (gate_tx, gate) = mpsc::channel::<()>();

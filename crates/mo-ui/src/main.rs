@@ -97,6 +97,8 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     // A settings change still waiting to be written goes now.
     mo_ui::settings::finish_up();
+    // A backup still running stops tidily, and its settings and songs list waiting to be written go now.
+    mo_ui::backup::finish_up();
     // A note left open keeps its draft for next time, but the launcher shouldn't wait on it any more.
     mo_ui::note::wait_for_saves();
     mo_ui::note::finish_up();
