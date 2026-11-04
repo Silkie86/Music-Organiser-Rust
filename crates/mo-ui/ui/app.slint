@@ -1,6 +1,6 @@
 // The window shell: the rail on the left and the page on show. Agreed map (2026-10-29): Songs, Sounds, Presets, MIDI,
 // Plugins and Space, with Settings at the bottom.
-import { Theme, Type, Space, Icons, RailItem, Groove, Caps, ActionKey, TipLayer, TipState, StudioButton } from "studio.slint";
+import { Theme, Type, Space, Motion, Icons, RailItem, Groove, Caps, ActionKey, TipLayer, TipState, StudioButton } from "studio.slint";
 import { ComingPage } from "pages/coming.slint";
 import { PartsGallery } from "pages/parts.slint";
 import { SoundsPage, SoundsData, GalaxyLabel, SweptLine, TrailDot, AlikeLine, FolderLine, PadLine, TypeChipInfo, SoundTile, TileRow, SoundLine, SoundFact, PickedSound, TileGrid, TileGridAt, TileLook } from "pages/sounds.slint";
@@ -109,6 +109,10 @@ export component AppWindow inherits Window {
     callback note-cancel();
     callback note-put-aside();
 
+    // The place's colour follows the place on show (the rail's light, the mark by the page's name).
+    init => { Theme.here = root.place; }
+    changed place => { Theme.here = root.place; }
+
     forward-focus: keys;
     // Keys go back to the window once the Ctrl+K finder closes.
     property <bool> finder-open: FinderData.open;
@@ -149,10 +153,13 @@ export component AppWindow inherits Window {
                     padding: Space.sm;
                     padding-top: Space.lg;
                     spacing: Space.xs;
+                    // The app's name in its own title face.
                     Text {
                         text: "Music Organiser";
+                        font-family: Theme.title-font;
                         font-size: Type.row-title;
-                        font-weight: 600;
+                        font-weight: 700;
+                        letter-spacing: -0.2px;
                         color: Theme.text;
                         height: 40px;
                         x: 10px;
@@ -166,12 +173,17 @@ export component AppWindow inherits Window {
                     }
                     Rectangle { height: 4px; }
                     // The rail's places are the first ones in `places`; Settings sits apart at the bottom.
-                    for p[i] in root.rail: RailItem {
-                        text: p.name;
-                        icon: p.icon;
-                        key: p.key;
-                        selected: root.place == i;
-                        clicked => { root.place-chosen(i); }
+                    places-list := VerticalLayout {
+                        spacing: Space.xs;
+                        for p[i] in root.rail: RailItem {
+                            text: p.name;
+                            icon: p.icon;
+                            key: p.key;
+                            tint: Theme.place(i);
+                            lit-bar: false;
+                            selected: root.place == i;
+                            clicked => { root.place-chosen(i); }
+                        }
                     }
                     Rectangle { height: 10px; }
                     Groove { }
@@ -185,12 +197,27 @@ export component AppWindow inherits Window {
                     }
                     Rectangle { }
                     RailItem {
+                        tint: Theme.place(root.settings-place);
                         text: root.places[root.settings-place].name;
                         icon: root.places[root.settings-place].icon;
                         key: root.places[root.settings-place].key;
                         selected: root.place == root.settings-place;
                         clicked => { root.place-chosen(root.settings-place); }
                     }
+                }
+                // The light on the picked place, in its colour. One light for the whole list, so it slides from the
+                // place you were on to the one you picked: you see where you went. Settings lights its own.
+                Rectangle {
+                    property <bool> on-list: root.place >= 0 && root.place < root.rail.length;
+                    property <length> line: 40px;
+                    x: Space.sm;
+                    width: 3px;
+                    height: self.on-list ? self.line - 2 * Space.sm : 0;
+                    y: places-list.y + max(0, root.place) * (self.line + Space.xs) + (self.line - self.height) / 2;
+                    border-radius: 1.5px;
+                    background: Theme.here-colour;
+                    animate y { duration: Motion.move; easing: ease-out; }
+                    animate height { duration: Motion.move; easing: ease-out; }
                 }
                 // The seam between the rail and the page.
                 Rectangle {

@@ -353,6 +353,9 @@ pub fn apply_look(app: &AppWindow, look: &Look) {
     t.set_square(th.square);
     t.set_text_font(th.font.text_family().into());
     t.set_number_font(th.font.number_family().into());
+    t.set_title_font(th.font.title_family().into());
+    let places: Vec<Color> = mo_app::themes::place_colours(look).iter().map(|c| rgb(*c)).collect();
+    t.set_places(ModelRc::new(VecModel::from(places)));
     app.global::<Palette>().set_color_scheme(if th.light {
         slint::language::ColorScheme::Light
     } else {
