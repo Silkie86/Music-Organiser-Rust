@@ -79,10 +79,8 @@ enum Found {
     Card(Box<WGPUConfiguration>),
     /// Only a software card: the views draw on the processor.
     Software,
-    /// No card at all, and why.
-    None(String),
-    /// A card, but it wouldn't give a device (why): Slint looks for one itself, as it did before.
-    NoDevice(String),
+    /// None found here (why): Slint looks for one itself, as it did before.
+    NoCard(String),
 }
 
 /// Starts looking for the graphics card on a thread of its own, the first thing the app does. Finding one and making
@@ -95,45 +93,38 @@ pub fn look_ahead() {
     }
 }
 
-/// Looks for the fastest card there is and makes its device, once, for Slint to draw the window with. The card's own
-/// interfaces (Vulkan, DirectX 12, Metal) are tried first and OpenGL only when none of them answers: making an OpenGL
-/// one on Windows opens a hidden window of its own, and wgpu only picks it when there's nothing else anyway. Debug builds don't turn the
+/// Looks for the fastest card there is and makes its device, once, for Slint to draw the window with (before, wgpu
+/// was started three times: here, and twice by Slint). Only the card's own interfaces (Vulkan, DirectX 12, Metal) are
+/// tried, not OpenGL: making an OpenGL one on Windows opens a hidden window of its own, and Slint avoids it for this
+/// renderer anyway. Where none of them answers, Slint looks itself, as before. The device stays for the whole run. Debug builds don't turn the
 /// drivers' own checks on (`WGPU_VALIDATION=1` still does): those slow every start and frame, and wgpu checks what
 /// the app asks of the card itself either way.
 fn find() -> Found {
     if std::env::var_os("MO_DRAW_CPU").is_some() {
         return Found::Asked;
     }
-    // OpenGL only on a computer whose card has none of the others (an old one), as wgpu would have picked it there.
-    let mut found = Found::None("no card answered".to_owned());
-    let mut card = None;
-    for backends in [wgpu::Backends::PRIMARY, wgpu::Backends::SECONDARY] {
-        let mut asked = wgpu::InstanceDescriptor::new_without_display_handle();
-        asked.backends = backends;
-        asked.flags = wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL;
-        let instance = wgpu::Instance::new(asked.with_env());
-        let options = wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            ..Default::default()
-        };
-        match wait(instance.request_adapter(&options)) {
-            // A software card only when asked (`SLINT_WGPU_CPU`, as Slint itself takes it): the benches draw with one.
-            Ok(adapter)
-                if adapter.get_info().device_type != wgpu::DeviceType::Cpu
-                    || std::env::var_os("SLINT_WGPU_CPU").is_some() =>
-            {
-                card = Some((instance, adapter));
-                break;
-            }
-            Ok(_) => found = Found::Software,
-            Err(e) => {
-                if !matches!(found, Found::Software) {
-                    found = Found::None(e.to_string());
-                }
-            }
-        }
+    // Slint's own way when a card is named (`WGPU_ADAPTER_NAME`): it picks that one.
+    if std::env::var_os("WGPU_ADAPTER_NAME").is_some() {
+        return Found::NoCard("a card is named in WGPU_ADAPTER_NAME".to_owned());
     }
-    let Some((instance, adapter)) = card else { return found };
+    let mut asked = wgpu::InstanceDescriptor::new_without_display_handle();
+    asked.backends = wgpu::Backends::PRIMARY;
+    asked.flags = wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL;
+    let instance = wgpu::Instance::new(asked.with_env());
+    let options =
+        wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() };
+    let adapter = match wait(instance.request_adapter(&options)) {
+        // A software card only when asked (`SLINT_WGPU_CPU`, as Slint itself takes it): the benches draw with one.
+        Ok(adapter)
+            if adapter.get_info().device_type != wgpu::DeviceType::Cpu
+                || std::env::var_os("SLINT_WGPU_CPU").is_some() =>
+        {
+            adapter
+        }
+        Ok(_) => return Found::Software,
+        // None of them (an old card, with only OpenGL): Slint looks, as it did before.
+        Err(e) => return Found::NoCard(e.to_string()),
+    };
     // What Slint itself asks for (its default settings): no extra features, and pictures as big as the screen.
     let settings = WGPUSettings::default();
     let wanted = wgpu::DeviceDescriptor {
@@ -146,7 +137,7 @@ fn find() -> Found {
     };
     match wait(adapter.request_device(&wanted)) {
         Ok((device, queue)) => Found::Card(Box::new(WGPUConfiguration::Manual { instance, adapter, device, queue })),
-        Err(e) => Found::NoDevice(e.to_string()),
+        Err(e) => Found::NoCard(format!("the card wouldn't give a device ({e})")),
     }
 }
 
@@ -165,16 +156,9 @@ pub fn choose() {
             log::warning("Graphics", "Only a software graphics card here, so the views draw on the processor");
             return;
         }
-        Found::None(e) => {
-            log::warning(
-                "Graphics",
-                &format!("No graphics card to draw with, so the views draw on the processor: {e}"),
-            );
-            return;
-        }
         Found::Card(config) => *config,
-        Found::NoDevice(e) => {
-            log::warning("Graphics", &format!("The graphics card wouldn't give a device ({e}): Slint looks for one"));
+        Found::NoCard(why) => {
+            log::info("Graphics", &format!("Slint looks for the graphics card itself: {why}"));
             let mut settings = WGPUSettings::default();
             settings.power_preference = wgpu::PowerPreference::HighPerformance;
             WGPUConfiguration::Automatic(settings)

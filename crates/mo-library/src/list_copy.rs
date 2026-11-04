@@ -15,7 +15,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::UNIX_EPOCH;
+use std::time::{Instant, UNIX_EPOCH};
 
 use rusqlite::types::ToSqlOutput;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, Statement};
@@ -32,8 +32,9 @@ const FORMAT: &str = "1";
 static KEPT: OnceLock<(PathBuf, PathBuf)> = OnceLock::new();
 
 /// One list read or copy made at a time: pages that ask for the list together at start wait for the first one, then
-/// read its copy, rather than each reading the whole library at once (which only slows them all on one disk).
-static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+/// read its copy, rather than each reading the whole library at once (which only slows them all on one disk). It
+/// holds when the last copy made here began to be read, and the library's stamp then.
+static ONE_AT_A_TIME: Mutex<Option<(Instant, String)>> = Mutex::new(None);
 
 /// Keeps a copy of `library`'s saves list at `copy`, from now on. Only the first call counts.
 pub fn keep(library: &Path, copy: &Path) {
@@ -56,12 +57,18 @@ pub(crate) fn saves(
     from_copy: impl FnOnce(&mut Statement<'_>) -> rusqlite::Result<Vec<Save>>,
 ) -> Result<Vec<Save>, LibraryError> {
     let Some(copy) = copy_for(library) else { return read(&mut |_| {}) };
-    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let asked = Instant::now();
+    let mut last = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    // A copy made by a read that began after this was asked for is as new as a read now would be, even though the
+    // library has changed again since (the C# app scanning): pages asking together share one read.
+    let fresh = last.as_ref().filter(|(began, _)| *began >= asked).map(|(_, stamp)| stamp.clone());
     // Before the read: a write during it makes the files differ from this, so the copy made is read again next time.
-    let Some(stamp) = stamp_of(library) else { return read(&mut |_| {}) };
+    let Some(stamp) = fresh.or_else(|| stamp_of(library)) else { return read(&mut |_| {}) };
     if let Ok(Some(saves)) = read_copy(copy, &stamp, query, from_copy) {
         return Ok(saves);
     }
+    let began = Instant::now();
+    let Some(stamp) = stamp_of(library) else { return read(&mut |_| {}) };
     let mut making = NewCopy::start(copy).ok();
     let saves = read(&mut |row| {
         // A row that can't be added (the disk is full) ends the copy, not the read.
@@ -69,8 +76,10 @@ pub(crate) fn saves(
             making = None;
         }
     })?;
-    if let Some(m) = making {
-        let _ = m.finish(copy, &stamp, query);
+    if let Some(m) = making
+        && m.finish(copy, &stamp, query).is_ok()
+    {
+        *last = Some((began, stamp));
     }
     Ok(saves)
 }
@@ -130,8 +139,8 @@ fn read_copy(
 struct NewCopy {
     conn: Option<Connection>,
     temp: PathBuf,
-    /// How many columns the list has, once the first row has made its table.
-    columns: Option<usize>,
+    /// How many columns the list has and the statement that adds a row, once the first row has made the table.
+    columns: Option<(usize, String)>,
 }
 
 impl NewCopy {
@@ -154,18 +163,18 @@ impl NewCopy {
 
     /// Adds one row of the library's list, as the library gave it. The first row makes the table, with its columns.
     fn add(&mut self, row: &Row<'_>) -> rusqlite::Result<()> {
-        let count = match self.columns {
-            Some(n) => n,
-            None => {
-                let quoted: Vec<String> =
-                    row.as_ref().column_names().map(|n| format!("\"{}\"", n.replace('"', "\"\""))).collect();
-                self.conn()?.execute_batch(&format!("CREATE TABLE list ({});", quoted.join(", ")))?;
-                self.columns = Some(quoted.len());
-                quoted.len()
-            }
+        if self.columns.is_none() {
+            let quoted: Vec<String> =
+                row.as_ref().column_names().map(|n| format!("\"{}\"", n.replace('"', "\"\""))).collect();
+            self.conn()?.execute_batch(&format!("CREATE TABLE list ({});", quoted.join(", ")))?;
+            let insert = format!("INSERT INTO list VALUES ({})", vec!["?"; quoted.len()].join(", "));
+            self.columns = Some((quoted.len(), insert));
+        }
+        let (Some((count, insert)), Some(conn)) = (&self.columns, &self.conn) else {
+            return Err(rusqlite::Error::InvalidQuery);
         };
-        let conn = self.conn()?;
-        let mut st = conn.prepare_cached(&format!("INSERT INTO list VALUES ({})", vec!["?"; count].join(", ")))?;
+        let count = *count;
+        let mut st = conn.prepare_cached(insert)?;
         let values: Vec<ToSqlOutput<'_>> =
             (0..count).map(|i| row.get_ref(i).map(ToSqlOutput::Borrowed)).collect::<Result<_, _>>()?;
         st.execute(rusqlite::params_from_iter(values))?;
@@ -206,14 +215,6 @@ impl Drop for NewCopy {
 fn remove_with_journal(temp: &Path) {
     let _ = std::fs::remove_file(temp);
     let _ = std::fs::remove_file(with_ending(temp, "-journal"));
-}
-
-/// Whether `name` is a half-made copy that a run stopped part way through left: `<FILE_NAME>.new-`, a number, and
-/// perhaps SQLite's `-journal`, and nothing else. The app's start-up sweep (rule 28) clears these.
-pub fn is_half_made(name: &str) -> bool {
-    let Some(rest) = name.strip_prefix(FILE_NAME).and_then(|r| r.strip_prefix(".new-")) else { return false };
-    let number = rest.strip_suffix("-journal").unwrap_or(rest);
-    !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit())
 }
 
 #[cfg(test)]
@@ -299,13 +300,5 @@ mod tests {
         Library::open_read_only(&other).unwrap().saves().unwrap();
         assert!(!other_dir.join(FILE_NAME).exists());
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn a_half_made_copy_is_named_so() {
-        assert!(is_half_made("library-list-rust.db.new-412") && is_half_made("library-list-rust.db.new-1-journal"));
-        for name in ["library-list-rust.db", "library-list-rust.db.new-", "library-list-rust.db.new-1-wal", "x.new-1"] {
-            assert!(!is_half_made(name), "{name}");
-        }
     }
 }

@@ -831,10 +831,9 @@ fn is_cut_short(name: &str) -> bool {
     [SETTINGS_FILE, SONGS_FILE, crate::app_settings::FILE, NOTES_DONE_FILE]
         .iter()
         .any(|f| name.strip_prefix(f) == Some(PART_ENDING))
-        || [mo_presets::fixes::FILE_NAME, mo_presets::curves::FILE_NAME]
+        || [mo_presets::fixes::FILE_NAME, mo_presets::curves::FILE_NAME, mo_library::list_copy::FILE_NAME]
             .iter()
             .any(|database| mo_presets::fixes::is_half_made(name, database))
-        || mo_library::list_copy::is_half_made(name)
 }
 
 /// The twin test's copy of the library, or SQLite's own files beside it.
