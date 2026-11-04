@@ -95,7 +95,7 @@ mod windows_memory {
 mod windows_x64 {
     use std::sync::OnceLock;
 
-    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, HMODULE};
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, HMODULE};
     use windows_sys::Win32::System::Diagnostics::Debug::{
         CONTEXT, CONTEXT_FULL_AMD64, GetThreadContext, IMAGEHLP_LINEW64, RtlLookupFunctionEntry, RtlVirtualUnwind,
         SYMBOL_INFOW, SYMOPT_DEFERRED_LOADS, SYMOPT_LOAD_LINES, SYMOPT_UNDNAME, SymFromAddrW, SymGetLineFromAddrW64,
@@ -311,16 +311,26 @@ mod windows_x64 {
             if WaitForSingleObject(lock as HANDLE, INFINITE) != 0 {
                 return frames.iter().map(|&at| module_offset(at)).collect();
             }
-            static SET_UP: OnceLock<()> = OnceLock::new();
             SET_UP.get_or_init(|| {
                 SymSetOptions(SymGetOptions() | SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES);
-                SymInitializeW(GetCurrentProcess(), std::ptr::null(), 1);
+                let ok = SymInitializeW(GetCurrentProcess(), std::ptr::null(), 1) != 0;
+                (ok, if ok { 0 } else { GetLastError() })
             });
             let process = GetCurrentProcess();
             let named = frames.iter().map(|&at| name(process, at)).collect();
             ReleaseMutex(lock as HANDLE);
             named
         }
+    }
+
+    /// Whether this app set the symbol helper up, and Windows' error number if it couldn't.
+    static SET_UP: OnceLock<(bool, u32)> = OnceLock::new();
+    /// Windows' error number from the last name that couldn't be found.
+    static LAST_MISS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+    /// How the symbol helper is doing, for a test that fails: "set up: (true, 0), last miss: 126".
+    pub fn symbol_state() -> String {
+        format!("set up: {:?}, last miss: {}", SET_UP.get(), LAST_MISS.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     /// Room for a name of up to 500 UTF-16 units after SYMBOL_INFOW's own fields.
@@ -346,6 +356,7 @@ mod windows_x64 {
                 let name = std::slice::from_raw_parts(start, len);
                 Some(String::from_utf16_lossy(name))
             } else {
+                LAST_MISS.store(GetLastError(), std::sync::atomic::Ordering::Relaxed);
                 None
             };
             let mut line: IMAGEHLP_LINEW64 = std::mem::zeroed();
@@ -435,6 +446,10 @@ mod tests {
         STOP.store(true, Ordering::Relaxed);
         worker.join().unwrap();
         let frames = frames.expect("the thread was looked at");
-        assert!(frames.iter().any(|f| f.contains("spin_here_for_the_test")), "{frames:#?}");
+        assert!(
+            frames.iter().any(|f| f.contains("spin_here_for_the_test")),
+            "{frames:#?} ({})",
+            windows_x64::symbol_state()
+        );
     }
 }
