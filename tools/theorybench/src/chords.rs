@@ -59,9 +59,11 @@ fn cs_chord(name: &str, root: u8, bass: u8, pcs: u16) -> (Chord, PcSet) {
     by_name(name, root, bass).unwrap_or((Chord::new(root, PcSet::from_bits(pcs).with(root), bass), PcSet::EMPTY))
 }
 
-/// A chord as mo-harmony's chart shows it, scored as the C# app's are ([`cs_chord`]): by its name, as mo-harmony's
-/// names stand for notes too (its `every_note_is_in_the_name` test). So a shell voiced C E Bb, shown as "C7", is right
-/// for a C7 label. A name that doesn't read back (none should) falls back to the notes read, nothing left out.
+/// A chord mo-harmony reads, scored as the C# app's are ([`cs_chord`]): by its name, as mo-harmony's names stand for
+/// notes too (its `every_note_is_in_the_name` test). The name is written as the datasets' labels are, its bass after a
+/// slash ([`Chord::slash_name`]: D/C, where the app writes D7 from all its notes), so the bench tells D over C from D7
+/// over C as the labels do. So a shell voiced C E Bb, named "C7", is right for a C7 label. A name that doesn't read
+/// back (none should) falls back to the notes read, nothing left out.
 fn shown_by_name(name: &str, read: Chord) -> (Chord, PcSet) {
     by_name(name, read.root(), read.bass()).unwrap_or((read, PcSet::EMPTY))
 }
@@ -400,7 +402,7 @@ fn read_rust(
 }
 
 /// One piece read by mo-harmony with a model (its weights, tables and thresholds), and how long the read took (the
-/// notes made ready and the chart spelled left out); none when nothing was heard.
+/// notes made ready and the names written left out); none when nothing was heard.
 fn read_piece(
     reader: &mut ChordReader,
     item: &Item,
@@ -417,16 +419,15 @@ fn read_piece(
     let reading = reader.read_with(&heard, keys::grid_of(item, false), &cx, model);
     let took = started.elapsed();
     let Some(reading) = reading else { return (Vec::new(), None) };
-    let chart = reading.names(None);
     let chords = reading
         .spans
         .iter()
-        .zip(&chart)
-        .filter_map(|(span, name)| {
+        .filter_map(|span| {
             let first = span.shown()?;
-            let name = name.map_or_else(|| first.chord.name(), |n| n.name());
+            let name = first.chord.slash_name();
             let (chord, optional) = shown_by_name(&name, first.chord);
-            let others = span.readings.iter().skip(1).map(|r| shown_by_name(&r.chord.name(), r.chord).0).collect();
+            let others =
+                span.readings.iter().skip(1).map(|r| shown_by_name(&r.chord.slash_name(), r.chord).0).collect();
             Some(Read { start: span.start, end: span.end, chord, name, optional, others })
         })
         .collect();
@@ -959,14 +960,14 @@ mod tests {
         let rows: Vec<(i64, i64, &str)> = read.iter().map(|r| (r.start, r.end, r.name.as_str())).collect();
         assert_eq!(rows, [(0, 384, "C"), (384, 768, "G7"), (768, 1152, "Am7"), (1152, 1536, "C7"), (1536, 1920, "F")]);
         for r in &read {
-            // Each is scored by the name the chart shows, as the C# app's are: the notes it says, those it stands for
-            // without saying they sound counting only where the label has them. The other readings are the lists'
-            // next two, each another chord.
+            // Each is scored by its name as a label writes it, as the C# app's are by theirs: the notes it says, those
+            // it stands for without saying they sound counting only where the label has them. The other readings are
+            // the lists' next two, each another chord.
             assert_eq!(Chord::parse(&r.name), Some(r.chord), "{}", r.name);
             assert_eq!(r.optional, naming::may_leave_out(r.chord), "{}", r.name);
             assert!(r.others.len() < usize::from(READINGS) && !r.others.contains(&r.chord), "{}", r.name);
             // The other readings are scored by their names too.
-            assert!(r.others.iter().all(|o| Chord::parse(&o.name()) == Some(*o)), "{:?}", r.others);
+            assert!(r.others.iter().all(|o| Chord::parse(&o.slash_name()) == Some(*o)), "{:?}", r.others);
         }
         assert!(read.iter().any(|r| !r.others.is_empty()));
         // The shell's C7 stands for the G it hasn't.

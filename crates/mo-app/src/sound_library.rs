@@ -1,40 +1,112 @@
-//! The Sounds library as the sample locator sees it (rule 13's last place to look): read from `sounds.db` once and
-//! kept for a minute, so clicking through songs or saving every minute doesn't read the database each time.
+//! The Sounds library as the sample locator sees it (rule 13's last place to look): read from `sounds.db` the first
+//! time a sample isn't in its project's or its DAW's folders, then kept while `sounds.db` stays as it is, so clicking
+//! through songs or saving every minute doesn't read the database each time.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use mo_library::samples::{SampleLocator, SoundLibrary};
+use mo_sounds::SoundsDb;
 
-/// How long a library read stays fresh: sounds added on the Sounds page are seen after this.
+/// How long a read is kept at least, even while the C# app keeps saving `sounds.db` (a scan for new sounds saves every
+/// few seconds): sounds added on the Sounds page are seen after this.
 const FRESH: Duration = Duration::from_secs(60);
 
-static SHARED: Mutex<Option<(PathBuf, Instant, Arc<SoundLibrary>)>> = Mutex::new(None);
+/// The last read: of which database, what it looked like just before, and when the read was done.
+struct Kept {
+    db: PathBuf,
+    stamp: String,
+    at: Instant,
+    library: Arc<SoundLibrary>,
+}
 
-/// The sounds in `sounds_db`, read again when the last read is over a minute old. Reads the disk, so never on the
-/// window's thread.
+impl Kept {
+    /// Whether this read still stands for `db`, which looks like `stamp` now: this read is `age` old, under a minute,
+    /// or it read every sound and the database hasn't changed since. One that couldn't read them all (the database
+    /// missing, or busy beyond waiting for) is tried again after a minute, as before.
+    fn still_good(&self, db: &Path, stamp: &str, age: Duration) -> bool {
+        self.db == db && (age < FRESH || (self.library.is_complete() && self.stamp == stamp))
+    }
+}
+
+static SHARED: Mutex<Option<Kept>> = Mutex::new(None);
+
+/// The sounds in `sounds_db`: the last read while `sounds_db` hasn't changed since or that read is under a minute old,
+/// otherwise read again. Reads the disk, so never on the window's thread.
 pub fn shared(sounds_db: &Path) -> Arc<SoundLibrary> {
+    // Looked at before reading, so a save made while it reads counts as a change next time.
+    let stamp = SoundsDb::stamp(sounds_db);
     if let Ok(slot) = SHARED.lock()
-        && let Some((path, at, library)) = slot.as_ref()
-        && path == sounds_db
-        && at.elapsed() < FRESH
+        && let Some(kept) = slot.as_ref()
+        && kept.still_good(sounds_db, &stamp, kept.at.elapsed())
     {
-        return library.clone();
+        return kept.library.clone();
     }
     // Read outside the lock: two threads may both read once, which is cheaper than one waiting on the other.
     let library = Arc::new(SoundLibrary::read(sounds_db));
     if let Ok(mut slot) = SHARED.lock() {
-        *slot = Some((sounds_db.to_path_buf(), Instant::now(), library.clone()));
+        *slot = Some(Kept { db: sounds_db.to_path_buf(), stamp, at: Instant::now(), library: library.clone() });
     }
     library
 }
 
-/// A sample locator that also looks in the Sounds library at `sounds_db`, when one is given.
+/// A sample locator that also looks in the Sounds library at `sounds_db`, when one is given. The library is read only
+/// when a sample isn't in its project's or its DAW's folders.
 pub fn locator(sounds_db: Option<&Path>) -> SampleLocator {
     let locator = SampleLocator::default();
     match sounds_db {
-        Some(db) => locator.with_library(shared(db)),
+        Some(db) => {
+            let db = db.to_path_buf();
+            locator.with_library_from(move || shared(&db))
+        }
         None => locator,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::*;
+
+    fn stamp(db: &Path) -> String {
+        SoundsDb::stamp(db)
+    }
+
+    #[test]
+    fn a_read_is_kept_until_the_database_changes() {
+        let dir = std::env::temp_dir().join(format!("mo-app-sound-library-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("sounds.db");
+        fs::write(&db, b"one").unwrap();
+        let before = stamp(&db);
+        assert_eq!(stamp(&db), before);
+        let library = Arc::new(SoundLibrary::from_files(Vec::<(String, i64)>::new()));
+        let kept = Kept { db: db.clone(), stamp: before.clone(), at: Instant::now(), library };
+        let old = FRESH * 10;
+        // Kept for as long as the database stays as it is, however long that is.
+        assert!(kept.still_good(&db, &stamp(&db), old));
+        // Unless that read couldn't read every sound: then tried again after a minute.
+        let failed = Kept { library: Arc::new(SoundLibrary::read(&dir.join("no such.db"))), ..kept };
+        assert!(!failed.library.is_complete());
+        assert!(failed.still_good(&db, &stamp(&db), Duration::from_secs(5)));
+        assert!(!failed.still_good(&db, &stamp(&db), old));
+        let kept = Kept { library: Arc::new(SoundLibrary::from_files(Vec::<(String, i64)>::new())), ..failed };
+        // A save written into the log beside it, or into the database itself: read again, once a minute at most.
+        let mut wal = db.as_os_str().to_owned();
+        wal.push("-wal");
+        fs::write(&wal, b"a save").unwrap();
+        let saved = stamp(&db);
+        assert_ne!(saved, before);
+        assert!(!kept.still_good(&db, &saved, old));
+        assert!(kept.still_good(&db, &saved, Duration::from_secs(5)));
+        fs::remove_file(&wal).unwrap();
+        fs::write(&db, b"one more").unwrap();
+        assert!(!kept.still_good(&db, &stamp(&db), old));
+        // Another database is another library.
+        assert!(!kept.still_good(&dir.join("other.db"), &before, Duration::ZERO));
+        let _ = fs::remove_dir_all(&dir);
     }
 }

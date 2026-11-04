@@ -2,6 +2,7 @@
 //! folder or the Recycle Bin, each reporting on the activity cards.
 
 use std::cell::RefCell;
+use std::path::{Path, PathBuf};
 
 use mo_app::activity::Feed;
 use mo_app::background;
@@ -13,11 +14,12 @@ thread_local! {
     static CLIPBOARD: RefCell<Option<arboard::Clipboard>> = const { RefCell::new(None) };
 }
 
-/// Shows the file at `path` in its folder (`folder`), or the folder when the file has gone. Off the window's thread.
+/// Shows the file or folder at `path` in its folder (`folder`), or the folder when it has gone. Off the window's
+/// thread.
 pub fn reveal(feed: &Feed, path: &str, folder: &str) {
     let (path, folder) = (path.to_owned(), folder.to_owned());
     let named = path.clone();
-    launch(feed, "Show in folder", "Couldn't show the file", named, move || {
+    launch(feed, "Show in folder", "Couldn't show it in its folder", named, move || {
         shell::reveal(&path, &folder, shell::exists(&path), shell::Os::THIS)
     });
 }
@@ -76,4 +78,14 @@ pub fn copy_path(feed: &Feed, path: &str) {
             feed.start("Couldn't copy the path", "").failed(&e.to_string());
         }
     }
+}
+
+/// The Documents folder, where Windows really keeps it (it may have moved, to OneDrive say).
+pub(crate) fn documents() -> PathBuf {
+    #[cfg(windows)]
+    if let Some(d) = known_folders::get_known_folder_path(known_folders::KnownFolder::Documents) {
+        return d;
+    }
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
+    home.map_or_else(|| Path::new(".").to_owned(), |h| h.join("Documents"))
 }

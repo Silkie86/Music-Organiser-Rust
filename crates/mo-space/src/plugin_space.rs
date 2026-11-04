@@ -227,6 +227,12 @@ pub fn name_matches(folder_name: &str, family: &str) -> bool {
     ENDINGS.contains(&rest.trim_start_matches(|c: char| c.is_ascii_digit()))
 }
 
+/// Folder names too plain to be taken for the start of a maker's name.
+const GENERIC_STARTS: [&str; 14] = [
+    "audio", "loop", "loops", "music", "plugin", "plugins", "sample", "samples", "sound", "sounds", "studio", "synth",
+    "user", "virtual",
+];
+
 /// Whether a folder is the maker's: its name is the maker's name ("UVI", "Toontrack"), or the start of it ("Xfer" for
 /// Xfer Records, "Arturia" for "Arturia SA").
 fn maker_matches(folder_name: &str, maker: &str) -> bool {
@@ -236,6 +242,11 @@ fn maker_matches(folder_name: &str, maker: &str) -> bool {
     }
     if name == maker {
         return true;
+    }
+    // A plain word is the start of many makers' names ("Sound" of Soundtoys, "Loop" of Loopmasters): only the
+    // maker's whole name counts then.
+    if GENERIC_STARTS.contains(&name.as_str()) {
+        return false;
     }
     name.chars().count() >= 4
         && maker.strip_prefix(name.as_str()).is_some_and(|rest| rest.chars().next().is_some_and(|c| !c.is_numeric()))
@@ -383,10 +394,25 @@ pub fn measure(
     // Folders you added are the plugin's as well as its guessed ones. One another plugin's guess takes too, or another
     // plugin has added too (Kontakt 7 and Kontakt 8 using one library), is shared, so it stays on one's clean-up card
     // while the other is used; rule it out for the other to make it this one's alone. The ones you ruled out are left
-    // out of every guess for it.
+    // out of every guess for it. One that is, holds or is inside a project or sample folder of yours is left out too,
+    // as the guesses leave them out: it would be offered for a move, and its old copy for the Recycle Bin (rule 2).
+    let protected: Vec<(&str, String)> = protected_roots
+        .iter()
+        .filter(|r| !r.trim().is_empty())
+        .map(|r| (r.as_str(), real_path(r).unwrap_or_else(|| r.clone())))
+        .collect();
+    let yours = |a: &str| {
+        let real_a = real_path(a).unwrap_or_else(|| a.to_owned());
+        protected.iter().any(|(r, real_r)| {
+            is_inside(r, a) || is_inside(a, r) || is_inside(real_r, &real_a) || is_inside(&real_a, real_r)
+        })
+    };
     let added: HashMap<&str, Vec<String>> = plugins
         .iter()
-        .map(|p| (p.key.as_str(), (choices.added)(&p.key).into_iter().filter(|a| Path::new(a).is_dir()).collect()))
+        .map(|p| {
+            let added = (choices.added)(&p.key).into_iter().filter(|a| Path::new(a).is_dir() && !yours(a));
+            (p.key.as_str(), added.collect())
+        })
         .collect();
     let mut claimed: HashMap<&str, (Vec<String>, Vec<String>)> = HashMap::new();
     for p in plugins {
@@ -575,6 +601,10 @@ mod tests {
         // "Arturia" for "Arturia SA", but not "Spit" for "Spitfire"'s digit-led neighbour.
         assert!(maker_matches("Arturia", "arturiasa"));
         assert!(!maker_matches("Korg", "korg2"));
+        // A plain word is no maker's name, but a maker called that is.
+        assert!(!maker_matches("Sound", "soundtoys"));
+        assert!(!maker_matches("Loops", "loopmasters"));
+        assert!(maker_matches("Output", "output"));
     }
 
     #[test]

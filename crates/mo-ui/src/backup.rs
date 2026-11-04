@@ -7,14 +7,15 @@
 
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::time::Duration;
 
 use chrono::Local;
 use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
 use mo_app::backup::{
-    self, BackedUp, DriveRoom, PageLines, PlanState, Prepared, Progress, Settings, level_at, library_folders,
+    self, BackedUp, DriveRoom, PageLines, PlanState, Prepared, Progress, Ran, Settings, level_at, library_folders,
     page_lines,
 };
 use mo_app::backup_gone::{self, Warning};
@@ -79,6 +80,75 @@ thread_local! {
     static SECTION: RefCell<Section> = RefCell::default();
     static PLANNER: RefCell<Option<Newest<Job>>> = const { RefCell::new(None) };
     static OLDER: RefCell<Option<Newest<OlderJob>>> = const { RefCell::new(None) };
+    static WRITER: RefCell<Option<Newest<()>>> = const { RefCell::new(None) };
+}
+
+/// Backup's own files waiting to be written, newest wins: `backup.txt`, then `backup-songs.txt`. Written on the
+/// "Backup files" thread (rule 12: no waiting on the disk on the window's thread), and whatever is still waiting as
+/// the app closes is written then.
+static FILES: Mutex<[Option<(PathBuf, String)>; 2]> = Mutex::new([None, None]);
+
+/// Held while files are written, so a newer text never lands before an older one.
+static WRITING: Mutex<()> = Mutex::new(());
+
+const SETTINGS_SLOT: usize = 0;
+const SONGS_SLOT: usize = 1;
+
+/// Hands a file's text to the writer: only the newest text of each file is written.
+fn write_later(slot: usize, path: PathBuf, text: String) {
+    FILES.lock().unwrap_or_else(PoisonError::into_inner)[slot] = Some((path, text));
+    let asked = WRITER.with(|w| w.borrow().as_ref().map(|w| w.ask(())).is_some());
+    if !asked {
+        // No writer thread (the system wouldn't start one): written here, so nothing is lost.
+        write_waiting();
+    }
+}
+
+/// Writes every file waiting, the safe way.
+fn write_waiting() {
+    let _writing = WRITING.lock().unwrap_or_else(PoisonError::into_inner);
+    let waiting = std::mem::take(&mut *FILES.lock().unwrap_or_else(PoisonError::into_inner));
+    for (i, (path, text)) in waiting.into_iter().enumerate().filter_map(|(i, f)| Some((i, f?))) {
+        if let Err(e) = backup::write_whole(&path, &text) {
+            let what = if i == SETTINGS_SLOT { "the backup settings" } else { "which songs are backed up" };
+            log::warning("Backup", &format!("Couldn't keep {what}: {e}"));
+        }
+    }
+}
+
+/// A run's end, handed from its thread: what it did and the drive it went to. The window's thread takes it; as the
+/// app closes, [`finish_up`] does.
+static FINISHED: Mutex<Option<(Ran, Option<PathBuf>)>> = Mutex::new(None);
+static FINISHED_READY: Condvar = Condvar::new();
+
+/// The longest the app waits, as it closes, for a backup it stopped to end tidily (its record and lists saved).
+const CLOSE_WAIT: Duration = Duration::from_secs(20);
+
+/// As the app closes: a backup still running is stopped and given a little time to end tidily (the backup's record,
+/// the run's line and which songs went are kept), then every file still waiting is written.
+pub fn finish_up() {
+    let running = SECTION.with(|s| s.borrow().running.clone());
+    if let Some(stop) = running {
+        log::warning("Backup", "The app closed during a backup: the backup stops (what it copied stays)");
+        stop.store(true, Ordering::Relaxed);
+        let deadline = std::time::Instant::now() + CLOSE_WAIT;
+        let mut finished = FINISHED.lock().unwrap_or_else(PoisonError::into_inner);
+        while finished.is_none() {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            finished = FINISHED_READY.wait_timeout(finished, left).unwrap_or_else(PoisonError::into_inner).0;
+        }
+        match finished.take() {
+            Some((ran, drive)) => {
+                drop(finished);
+                ended(ran, drive);
+            }
+            None => log::warning("Backup", "The backup didn't stop in time: its record may be a run behind"),
+        }
+    }
+    write_waiting();
 }
 
 pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed) {
@@ -106,7 +176,7 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed) {
         });
         // Nothing to walk yet: only the drive's room is wanted.
         let result = (!settings.folders.is_empty()).then(|| {
-            background::on_pool(|| {
+            background::on_bulk_pool(|| {
                 let lib = Library::open_read_only(&library).map_err(|e| e.to_string())?;
                 backup::prepare(&lib, &settings, &stop).map(Arc::new)
             })
@@ -149,7 +219,7 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed) {
         if drive_busy.load(Ordering::Relaxed) {
             return;
         }
-        let warning = match background::on_pool(|| backup_gone::find(&prepared, &drive, &mut holdings, &stop)) {
+        let warning = match background::on_bulk_pool(|| backup_gone::find(&prepared, &drive, &mut holdings, &stop)) {
             Ok(gone) => backup_gone::warning(&gone),
             // A newer plan is on its way, and looks again.
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => return,
@@ -174,7 +244,7 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed) {
     let weak = app.as_weak();
     let reader = Newest::start("Backup older versions", move |(asked, drive, stop): OlderJob| {
         let room = mo_space::app_files::drive_space(&drive).map(|r| DriveRoom { free: r.free, total: r.total });
-        let read = background::on_pool(|| older::read(&drive, &stop));
+        let read = background::on_bulk_pool(|| older::read(&drive, &stop));
         let weak = weak.clone();
         let _ = slint::invoke_from_event_loop(move || {
             SECTION.with(|s| {
@@ -193,6 +263,10 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed) {
     match reader {
         Ok(r) => OLDER.with(|slot| *slot.borrow_mut() = Some(r)),
         Err(e) => log::error("Backup", &format!("Couldn't start reading the older versions: {e}")),
+    }
+    match Newest::start("Backup files", |()| write_waiting()) {
+        Ok(w) => WRITER.with(|slot| *slot.borrow_mut() = Some(w)),
+        Err(e) => log::error("Backup", &format!("Couldn't start the backup files' writer: {e}")),
     }
 
     let data = app.global::<BackupData>();
@@ -295,8 +369,13 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed) {
         }
     });
     show(&app.as_weak());
-    // The app opened on the page.
-    if app.get_place() == mo_app::places::Place::Backup.index() as i32 {
+    // The app opened on the page. It may have been shown already, before the settings were read and the planner
+    // started (when nothing could be worked out): worked out now, for the settings as read.
+    let already = SECTION.with(|s| s.borrow().shown);
+    if already {
+        replan();
+        reread_older();
+    } else if app.get_place() == mo_app::places::Place::Backup.index() as i32 {
         shown();
     }
 }
@@ -345,7 +424,7 @@ fn kept_error(e: &std::io::Error) -> String {
 }
 
 /// Opens the system's folder picker without holding up the window, and hands on the folder picked.
-fn pick_folder(title: &'static str, then: impl FnOnce(PathBuf) + 'static) {
+pub(crate) fn pick_folder(title: &'static str, then: impl FnOnce(PathBuf) + 'static) {
     let asked = slint::spawn_local(async move {
         if let Some(folder) = rfd::AsyncFileDialog::new().set_title(title).pick_folder().await {
             then(folder.path().to_path_buf());
@@ -358,14 +437,12 @@ fn pick_folder(title: &'static str, then: impl FnOnce(PathBuf) + 'static) {
 
 /// Changes the settings and keeps them. A backup already running goes on with the settings it started with.
 fn keep(edit: impl FnOnce(&mut Settings)) {
-    let saved = SECTION.with(|s| {
+    let (path, text) = SECTION.with(|s| {
         let mut s = s.borrow_mut();
         edit(&mut s.settings);
-        s.settings.save(&s.settings_file)
+        (s.settings_file.clone(), s.settings.to_text())
     });
-    if let Err(e) = saved {
-        log::warning("Backup", &format!("Couldn't keep the backup settings: {e}"));
-    }
+    write_later(SETTINGS_SLOT, path, text);
 }
 
 /// Changes the settings, keeps them, and works out what goes again.
@@ -430,38 +507,18 @@ fn start_run(weak: &Weak<AppWindow>) {
             let weak = progress_weak.clone();
             let _ = slint::invoke_from_event_loop(move || set_busy(&weak, &p.line(), p.done()));
         };
-        let ran = background::on_pool(|| backup::run(&prepared, &settings, &stop, &progress));
-        let drive = settings.drive.clone();
+        // A run that breaks part way still ends here, so the page lets go of it and says so, instead of staying busy
+        // with Run and Stop doing nothing (the panic hook has logged what broke).
+        let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            background::on_copy_pool(|| backup::run(&prepared, &settings, &stop, &progress))
+        }))
+        .unwrap_or_else(|_| backup::Ran::broke(Local::now().naive_local()));
+        *FINISHED.lock().unwrap_or_else(PoisonError::into_inner) = Some((ran, settings.drive.clone()));
+        FINISHED_READY.notify_all();
         let _ = slint::invoke_from_event_loop(move || {
-            let last = ran.last;
-            if !last.ok {
-                log::warning("Backup", &last.line);
-            }
-            let (saved, backed_saved, reread) = SECTION.with(|s| {
-                let mut s = s.borrow_mut();
-                s.running = None;
-                s.drive_busy.store(false, Ordering::Relaxed);
-                // The older versions as read are still right unless the run kept more, or they weren't read from
-                // this drive (or couldn't be).
-                let read = matches!(&s.kept, Some((d, Ok(_))) if Some(d) == s.settings.drive.as_ref());
-                let reread = ran.kept_older > 0 || !read;
-                // The drive the run went to, which may not be the one picked now.
-                let backed_saved = match &drive {
-                    Some(d) if !ran.went.is_empty() => {
-                        s.backed.add(d, &ran.went, last.when);
-                        s.backed.save(&s.backed_file)
-                    }
-                    _ => Ok(()),
-                };
-                s.settings.last_run = Some(last);
-                (s.settings.save(&s.settings_file), backed_saved, reread)
-            });
-            if let Err(e) = saved {
-                log::warning("Backup", &format!("Couldn't keep the backup settings: {e}"));
-            }
-            if let Err(e) = backed_saved {
-                log::warning("Backup", &format!("Couldn't keep which songs are backed up: {e}"));
-            }
+            // Taken here, unless the app is closing and took it first.
+            let Some((ran, drive)) = FINISHED.lock().unwrap_or_else(PoisonError::into_inner).take() else { return };
+            let reread = ended(ran, drive);
             set_busy(&weak, "", 0.0);
             // The drive's room and what's new have changed (the planner measures the room again).
             replan();
@@ -483,6 +540,40 @@ fn start_run(weak: &Weak<AppWindow>) {
         replan();
         show(weak);
     }
+}
+
+/// A run has ended: its line and the songs that went are kept (written on the writer's thread). Whether the older
+/// versions should be read again.
+fn ended(ran: Ran, drive: Option<PathBuf>) -> bool {
+    let last = ran.last;
+    if !last.ok {
+        log::warning("Backup", &last.line);
+    }
+    let (settings, songs, reread) = SECTION.with(|s| {
+        let mut s = s.borrow_mut();
+        s.running = None;
+        s.drive_busy.store(false, Ordering::Relaxed);
+        // The older versions as read are still right unless the run kept more, or they weren't read from this drive
+        // (or couldn't be).
+        let read = matches!(&s.kept, Some((d, Ok(_))) if Some(d) == s.settings.drive.as_ref());
+        // A run that broke may have kept some before it stopped.
+        let reread = ran.kept_older > 0 || !last.ok || !read;
+        // The drive the run went to, which may not be the one picked now.
+        let songs = match &drive {
+            Some(d) if !ran.went.is_empty() => {
+                s.backed.add(d, &ran.went, last.when);
+                Some((s.backed_file.clone(), s.backed.to_text()))
+            }
+            _ => None,
+        };
+        s.settings.last_run = Some(last);
+        ((s.settings_file.clone(), s.settings.to_text()), songs, reread)
+    });
+    if let Some((path, text)) = songs {
+        write_later(SONGS_SLOT, path, text);
+    }
+    write_later(SETTINGS_SLOT, settings.0, settings.1);
+    reread
 }
 
 /// The most removals the log lists one by one.

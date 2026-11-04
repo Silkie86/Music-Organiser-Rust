@@ -5,23 +5,27 @@
 //! Rediscover (unused sounds that fit your taste) is dug out on its own low-priority thread too.
 
 mod galaxy;
+mod grid;
 mod kit;
 mod sky;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use chrono::{Local, NaiveDateTime};
 use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
+use mo_app::finder::{self, Kind};
+use mo_app::places::Place;
 use mo_app::shortcuts::{Shortcuts, what_of};
 use mo_app::sounds::{self as list, Filters, Length, Order, SoundList};
-use mo_app::{log, sweep_timing, year_strip};
+use mo_app::{log, sweep_timing, to_bitwig, year_strip};
 use mo_audio::play::Player;
 use mo_library::UsageRules;
 use mo_library::songs::thousands;
@@ -32,6 +36,7 @@ use mo_sounds::usage::{self, Usage};
 use mo_sounds::{Sound, SoundsDb, music};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, Timer, TimerMode, VecModel};
 
+use crate::finder::How;
 use crate::{
     AlikeLine, AppWindow, CardAction, FolderLine, MenuItem, PickedSound, SoundFact, SoundLine, SoundTile, SoundsData,
     TileRow, TypeChipInfo, YearBar,
@@ -53,7 +58,8 @@ const GALAXY: i32 = 2;
 const HISTORY: i32 = 3;
 const REDISCOVER: i32 = 4;
 const KITS: i32 = 5;
-const VIEWS: [&str; 6] = ["Tiles", "List", "Galaxy", "History", "Rediscover", "Kits"];
+/// The views, in the switch's order. Ctrl+K offers each one as a page of its own.
+pub const VIEWS: [&str; 6] = ["Tiles", "List", "Galaxy", "History", "Rediscover", "Kits"];
 /// The C# app's export folder setting in `library.db` (kits go in its Kits folder).
 const EXPORT_FOLDER_KEY: &str = "export_folder";
 
@@ -87,13 +93,20 @@ struct Page {
     shown: Arc<Vec<usize>>,
     /// The year strip's years, newest first, with how many sounds each holds.
     years: YearCounts,
-    /// What History shows: the sounds played, newest first, as places in `list`, with when.
+    /// Every sound played, newest first, as places in `list`, with when.
+    played: Arc<Vec<(usize, NaiveDateTime)>>,
+    /// What History shows: the sounds played that the filters let through (the year strip's years aside).
     history: Vec<(usize, NaiveDateTime)>,
     /// How many tiles fit side by side.
     columns: usize,
     /// The picked sound, as its place in `list`.
     picked: Option<usize>,
+    /// A sound Ctrl+K jumped to that the filters hid: picked once the list without them arrives.
+    to_pick: Option<usize>,
     autoplay: bool,
+    /// How long each sound plays while a held arrow key steps through them, and when the pick last moved.
+    step: Duration,
+    stepping: list::Stepping,
     /// Counts the asks for a new list, so an older answer that arrives late is dropped.
     asked: u64,
     /// The sounds have been read and handed to the page ([`show`]): the next list shown is of them.
@@ -133,10 +146,14 @@ impl Default for Page {
             view: TILES,
             shown: Arc::default(),
             years: Vec::new(),
+            played: Arc::default(),
             history: Vec::new(),
             columns: 4,
             picked: None,
+            to_pick: None,
             autoplay: false,
+            step: Duration::from_millis(list::STEP_MS),
+            stepping: list::Stepping::default(),
             asked: 0,
             read: false,
             types: Vec::new(),
@@ -193,6 +210,7 @@ struct Ask {
     filters: Filters,
     order: Order,
     seed: u64,
+    played: Arc<Vec<(usize, NaiveDateTime)>>,
 }
 
 thread_local! {
@@ -209,8 +227,38 @@ thread_local! {
     static HERE: RefCell<bool> = const { RefCell::new(false) };
 }
 
-/// The one player, made the first time something plays (nothing opens before).
+/// The one player, made the first time something plays or Settings lists the outputs (nothing opens before a sound
+/// plays).
 static PLAYER: OnceLock<Player> = OnceLock::new();
+/// The output Settings chose (`None`: the computer's default), for the player once it's made.
+static OUTPUT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// The one player, made on first use, playing through the output Settings chose.
+pub fn player() -> &'static Player {
+    if let Some(player) = PLAYER.get() {
+        return player;
+    }
+    // The choice stays locked until the player is made, so one changed meanwhile waits and then reaches it.
+    let output = OUTPUT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    PLAYER.get_or_init(|| {
+        let player = Player::new(|key| {
+            let key = key.to_owned();
+            let _ = slint::invoke_from_event_loop(move || ended(&key));
+        });
+        player.choose(output.clone());
+        player
+    })
+}
+
+/// Plays through this output from now on (`None`: the computer's default), as Settings › Sound output chose. Before
+/// the player is made it's only remembered.
+pub fn choose_output(name: Option<String>) {
+    let mut output = OUTPUT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    *output = name.clone();
+    if let Some(player) = PLAYER.get() {
+        player.choose(name);
+    }
+}
 /// Counts the plays and stops asked for, so a sound that finishes reading after a newer play or a stop stays quiet
 /// (newest wins, rule 12).
 static PLAYS: AtomicU64 = AtomicU64::new(0);
@@ -340,11 +388,11 @@ fn points(s: &Sound) -> i32 {
     s.analysis.as_ref().map_or(0, |a| a.waveform.len() as i32)
 }
 
-fn new_seed() -> u64 {
+pub(crate) fn new_seed() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64)
 }
 
-fn strings<S: AsRef<str>>(items: impl IntoIterator<Item = S>) -> ModelRc<SharedString> {
+pub(crate) fn strings<S: AsRef<str>>(items: impl IntoIterator<Item = S>) -> ModelRc<SharedString> {
     ModelRc::new(VecModel::from(items.into_iter().map(|s| SharedString::from(s.as_ref())).collect::<Vec<_>>()))
 }
 
@@ -361,11 +409,20 @@ pub fn compute_here() {
 /// A graphics card came (the window is up, or came back): the galaxy is drawn on it.
 pub fn graphics_ready(app: &AppWindow) {
     galaxy::draw(app);
+    grid::graphics_ready(app);
 }
 
-/// The graphics card went (the window closed, or the card was reset): what the galaxy made on it goes too.
+/// The graphics card went (the window closed, or the card was reset): the galaxy's and the tiles' painters go too, at
+/// once, even as the window itself goes.
+pub fn card_gone() {
+    galaxy::painter_gone();
+    grid::card_gone();
+}
+
+/// The graphics card went: the galaxy's picture on show goes too, and the tiles draw their own shapes.
 pub fn graphics_gone(app: &AppWindow) {
     galaxy::card_gone(app);
+    grid::graphics_gone(app);
 }
 
 /// Wires the page and starts reading the sound library at `sounds_db` in the background, then how much your songs use
@@ -374,6 +431,20 @@ pub fn graphics_gone(app: &AppWindow) {
 /// `feed`'s cards.
 pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: Feed, shortcuts: &Shortcuts) {
     wire(app, feed, shortcuts);
+    crate::finder::on_open(Kind::Sound, |app, hit, how| {
+        let Some(at) = hit.id.parse::<i64>().ok().and_then(|id| PAGE.with(|p| p.borrow().places.get(&id).copied()))
+        else {
+            return false;
+        };
+        match how {
+            How::Play => play_sound(app, at, 0.0, mo_audio::MAX_SECONDS),
+            How::Open | How::InDaw => {
+                crate::go_to(app, Place::Sounds.index() as i32);
+                show_sound(app, at);
+            }
+        }
+        true
+    });
     PAGE.with(|p| p.borrow_mut().galaxy.db = Some(sounds_db.clone()));
     reading(app);
     let here = HERE.with(|h| *h.borrow());
@@ -415,7 +486,7 @@ pub fn reading(app: &AppWindow) {
 
 /// What reading brings back, in two steps: the sounds first, then the list again with how your songs use them.
 enum Step {
-    Read(Result<Read, String>),
+    Read(Result<Box<Read>, String>),
     Used(Arc<SoundList>),
     /// Every sound's fingerprint, for Sounds like this.
     Index(Arc<SoundIndex>),
@@ -436,7 +507,9 @@ struct Read {
     view: Option<String>,
     count: Option<String>,
     export_folder: Option<String>,
+    drum_machine: Option<String>,
     autoplay: Option<String>,
+    step_ms: Option<String>,
 }
 
 /// The sounds made ready to list, off the window's thread: the list itself, the types with their counts, the tags,
@@ -472,10 +545,11 @@ impl Library {
     }
 }
 
-/// A copy of `list` with each sound's use in your songs, and Most liked scored with it.
+/// `list` again, sharing its sounds rather than copying them, with each sound's use in your songs and Most liked
+/// scored with it.
 fn with_usage(list: &SoundList, usage: HashMap<i64, Usage>, weights: &LikedWeights) -> SoundList {
     background::on_pool(|| {
-        let mut list = list.clone();
+        let mut list = list.sharing();
         list.set_liked(|s| weights.score(s, usage.get(&s.id)));
         list.set_used(usage);
         list
@@ -491,7 +565,11 @@ struct Settings {
     count: Option<String>,
     /// Where exports (kits) go.
     export_folder: Option<String>,
+    /// The Drum Machine's ID the C# app read from Bitwig's files, for kits sent to Bitwig.
+    drum_machine: Option<String>,
     autoplay: Option<String>,
+    /// How long each sound plays while a held arrow key steps through them.
+    step_ms: Option<String>,
     rules: UsageRules,
     weights: LikedWeights,
 }
@@ -513,7 +591,9 @@ impl Settings {
             view: get(VIEW_KEY),
             count: get(COUNT_KEY),
             export_folder: get(EXPORT_FOLDER_KEY),
+            drum_machine: get(to_bitwig::DRUM_MACHINE_KEY),
             autoplay: get(AUTOPLAY_KEY),
+            step_ms: get(list::STEP_KEY),
             rules: UsageRules { needs_notes: on(USED_NEEDS_NOTES_KEY), not_muted_in_newest: on(USED_NOT_MUTED_KEY) },
             weights: LikedWeights::from_json(get(LIKED_WEIGHTS_KEY).as_deref()),
         }
@@ -565,17 +645,20 @@ fn read_all(sounds_db: &Path, library_db: &Path, send: impl Fn(Step)) {
     };
     drop(db);
     let list = read.as_ref().ok().map(|l: &Library| l.list.clone());
-    send(Step::Read(read.map(|library| Read {
-        library,
-        view: settings.view.clone(),
-        count: settings.count.clone(),
-        export_folder: settings.export_folder.clone(),
-        autoplay: settings.autoplay.clone(),
+    send(Step::Read(read.map(|library| {
+        Box::new(Read {
+            library,
+            view: settings.view.clone(),
+            count: settings.count.clone(),
+            export_folder: settings.export_folder.clone(),
+            drum_machine: settings.drum_machine.clone(),
+            autoplay: settings.autoplay.clone(),
+            step_ms: settings.step_ms.clone(),
+        })
     })));
     let (Some(list), Some((features, clap, analysed))) = (list, fingerprints) else { return };
-    // Sounds like this: every sound's fingerprint, read with the sounds.
-    let index = background::on_pool(|| SoundIndex::build(&features, &clap, analysed));
-    drop((features, clap));
+    // Sounds like this: every sound's fingerprint, read with the sounds; their blocks become the index.
+    let index = background::on_pool(move || SoundIndex::from_gathered(features, clap, analysed));
     send(Step::Index(Arc::new(index)));
     let Some(lib) = lib else { return };
     let year_ago = now.checked_sub_months(chrono::Months::new(12)).unwrap_or(now);
@@ -714,10 +797,12 @@ fn use_known(app: &AppWindow, list: Arc<SoundList>) {
         if p.list.len() != list.len() {
             return None;
         }
-        p.list = list;
+        p.list = list.clone();
         Some(p.picked)
     });
     let Some(picked) = picked else { return };
+    // Ctrl+K now knows which sounds you use most.
+    crate::finder::add_source(app, "sounds", Arc::new(finder::Sounds(list)));
     refresh(app);
     // What Rediscover dug out didn't know your taste yet.
     if PAGE.with(|p| p.borrow().re_started) {
@@ -729,11 +814,11 @@ fn use_known(app: &AppWindow, list: Arc<SoundList>) {
     }
 }
 
-fn loaded(app: &AppWindow, read: Result<Read, String>) {
+fn loaded(app: &AppWindow, read: Result<Box<Read>, String>) {
     let _doing = crate::watchdog::doing("Sounds: the sounds were read");
     let data = app.global::<SoundsData>();
     let read = match read {
-        Ok(read) => read,
+        Ok(read) => *read,
         Err(why) => {
             if !why.is_empty() {
                 log::warning("Sounds", &format!("Couldn't read the sound library: {why}"));
@@ -755,6 +840,8 @@ fn loaded(app: &AppWindow, read: Result<Read, String>) {
         let mut p = p.borrow_mut();
         p.re.count = count;
         p.kit.export_folder = read.export_folder;
+        p.kit.drum_machine = read.drum_machine;
+        p.step = Duration::from_millis(list::step_ms(read.step_ms.as_deref()));
     });
     show(app, read.library, read.view.as_deref(), read.autoplay.as_deref());
 }
@@ -768,8 +855,11 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
         // "Reading your sounds…" stays until the list of them is worked out, so "No sounds match" never flashes up
         // in between ([`listed`]).
         p.read = true;
-        p.history = library.played;
+        // History lists them once the filters have been through them ([`listed`]).
+        p.played = Arc::new(library.played);
+        p.history.clear();
         p.list = library.list;
+        p.to_pick = None;
         p.places = library.places;
         p.types = library.types;
         p.view = view.and_then(|v| VIEWS.iter().position(|n| *n == v)).map_or(TILES, |i| i as i32);
@@ -782,6 +872,8 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
         // An answer still on its way was for the old list: it's dropped.
         p.re_asked += 1;
     });
+    let list = PAGE.with(|p| p.borrow().list.clone());
+    crate::finder::add_source(app, "sounds", Arc::new(finder::Sounds(list)));
     refresh(app);
     show_rediscover_chips(app);
     kit::show(app);
@@ -794,8 +886,21 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
 
 /// What the picked sound offers besides Play: (its words, its id in the shortcut list). The card shows them as
 /// buttons after Play (Solomon's F12 note, 2026-11-02 03:28) and the right-click menu lists them under Play, from this
-/// one list so the two can't drift apart. Send to Bitwig joins once the DAW link is in.
-const CARD_ACTIONS: &[(&str, &str)] = &[("Show in folder", "sounds.reveal"), ("Copy path", "sounds.copyPath")];
+/// one list so the two can't drift apart.
+const CARD_ACTIONS: &[(&str, &str)] =
+    &[("Send to Bitwig", TO_BITWIG), ("Show in folder", "sounds.reveal"), ("Copy path", "sounds.copyPath")];
+
+/// Send to Bitwig's id in the shortcut list (the C# app's).
+const TO_BITWIG: &str = "sounds.toBitwig";
+
+/// A sound is on its way to Bitwig: Send to Bitwig waits meanwhile, as it did in the C# app, so a second press doesn't
+/// put a second track into the project.
+static SENDING: AtomicBool = AtomicBool::new(false);
+
+/// The card's buttons and menu again, with keys changed in Settings.
+pub fn show_keys(app: &AppWindow, shortcuts: &Shortcuts) {
+    show_actions(&app.global::<SoundsData>(), shortcuts);
+}
 
 /// The card's buttons and the right-click menu, with each one's key and tooltip from the shortcut list (rule 15).
 fn show_actions(data: &SoundsData, shortcuts: &Shortcuts) {
@@ -922,6 +1027,7 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
         }
     });
     wire_rediscover(app);
+    grid::connect(app);
     kit::wire(app);
     galaxy::wire(app);
     let weak = app.as_weak();
@@ -931,6 +1037,7 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
         let changed = PAGE.with(|p| std::mem::replace(&mut p.borrow_mut().columns, n) != n);
         if changed {
             TILE_ROWS.with(|m| m.notify.reset());
+            grid::changed();
             bring_picked_into_view(&app);
         }
     });
@@ -964,9 +1071,9 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
         play_picked(&app, 0.0);
     });
     let weak = app.as_weak();
-    data.on_step(move |d| {
+    data.on_step(move |d, held| {
         if let Some(app) = weak.upgrade() {
-            step(&app, d);
+            step(&app, d, held);
         }
     });
     let weak = app.as_weak();
@@ -1276,12 +1383,20 @@ fn refresh(app: &AppWindow) {
     let ask = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         p.asked += 1;
-        Ask { id: p.asked, list: p.list.clone(), filters: p.filters.clone(), order: p.order, seed: p.seed }
+        Ask {
+            id: p.asked,
+            list: p.list.clone(),
+            filters: p.filters.clone(),
+            order: p.order,
+            seed: p.seed,
+            played: p.played.clone(),
+        }
     });
     if HERE.with(|h| *h.borrow()) {
         let shown = ask.list.view(&ask.filters, ask.order, ask.seed);
         let years = ask.list.year_counts(ask.filters.used);
-        listed(app, ask.id, shown, years);
+        let history = ask.list.played(&ask.played, &ask.filters);
+        listed(app, ask.id, Listed { shown, years, history });
         return;
     }
     WORKER.with(|w| {
@@ -1301,15 +1416,16 @@ fn refresh(app: &AppWindow) {
                         std::ptr::eq(list.as_ptr(), Arc::as_ptr(&ask.list)) && *used == ask.filters.used
                     })
                     .map(|(_, _, years)| years.clone());
-                let (shown, years) = background::on_pool(|| {
+                let new = background::on_pool(|| {
                     let years = kept.unwrap_or_else(|| ask.list.year_counts(ask.filters.used));
-                    (ask.list.view(&ask.filters, ask.order, ask.seed), years)
+                    let history = ask.list.played(&ask.played, &ask.filters);
+                    Listed { shown: ask.list.view(&ask.filters, ask.order, ask.seed), years, history }
                 });
-                counted = Some((Arc::downgrade(&ask.list), ask.filters.used, years.clone()));
+                counted = Some((Arc::downgrade(&ask.list), ask.filters.used, new.years.clone()));
                 let weak = weak.clone();
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(app) = weak.upgrade() {
-                        listed(&app, ask.id, shown, years);
+                        listed(&app, ask.id, new);
                     }
                 });
             }) {
@@ -1323,16 +1439,27 @@ fn refresh(app: &AppWindow) {
     });
 }
 
+/// What the filters let through, worked out off the window's thread.
+struct Listed {
+    /// For Tiles, List and the galaxy, as places in the page's list, in order.
+    shown: Vec<usize>,
+    /// The year strip's years.
+    years: YearCounts,
+    /// For History: the sounds played, newest first, with when.
+    history: Vec<(usize, NaiveDateTime)>,
+}
+
 /// A new list has been worked out: shows it, unless a newer one has been asked for since.
-fn listed(app: &AppWindow, id: u64, shown: Vec<usize>, years: YearCounts) {
+fn listed(app: &AppWindow, id: u64, new: Listed) {
     let _doing = crate::watchdog::doing("Sounds: show the filtered list");
     let current = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         if p.asked != id {
             return false;
         }
-        p.shown = Arc::new(shown);
-        p.years = years;
+        p.shown = Arc::new(new.shown);
+        p.years = new.years;
+        p.history = new.history;
         true
     });
     if current {
@@ -1344,7 +1471,38 @@ fn listed(app: &AppWindow, id: u64, shown: Vec<usize>, years: YearCounts) {
         }
         // The filters dim the stars they leave out.
         galaxy::draw(app);
+        if let Some(at) = PAGE.with(|p| p.borrow_mut().to_pick.take()) {
+            pick(app, at);
+        }
     }
+}
+
+/// Shows one of the views by its name (Ctrl+K's "Sounds › Galaxy"), as the view switch does.
+pub fn show_view(app: &AppWindow, name: &str) {
+    if let Some(v) = VIEWS.iter().position(|n| *n == name) {
+        app.global::<SoundsData>().invoke_pick_view(v as i32);
+    }
+}
+
+/// Picks the sound at `at` in the list and brings it into view (Ctrl+K). A view that only shows some sounds (History,
+/// Rediscover, Kits) gives way to Tiles, and filters that hide it are cleared; the search box with them.
+fn show_sound(app: &AppWindow, at: usize) {
+    let view = PAGE.with(|p| p.borrow().view);
+    if matches!(view, HISTORY | REDISCOVER | KITS) {
+        show_view(app, VIEWS[TILES as usize]);
+    }
+    let hidden = PAGE.with(|p| !p.borrow().shown.contains(&at));
+    if !hidden {
+        pick(app, at);
+        return;
+    }
+    PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.filters = Filters::default();
+        p.to_pick = Some(at);
+    });
+    app.global::<SoundsData>().set_search(SharedString::new());
+    refresh(app);
 }
 
 /// The year strip: each year, how full it is, and whether the filter has it.
@@ -1374,6 +1532,11 @@ fn show_lists(app: &AppWindow) {
         let total = p.list.len();
         let summary = if p.list.is_empty() {
             String::new()
+        } else if p.view == HISTORY
+            && (Filters { years: None, ..p.filters.clone() }.any() || !p.filters.search.trim().is_empty())
+        {
+            // The years picked on the year strip don't narrow History, so they don't count here either.
+            format!("{} of {} played", thousands(p.history.len()), thousands(p.played.len()))
         } else if p.view != HISTORY && p.view != REDISCOVER && (p.filters.any() || !p.filters.search.trim().is_empty())
         {
             format!("{} of {} sounds", thousands(p.shown.len()), thousands(total))
@@ -1388,6 +1551,7 @@ fn show_lists(app: &AppWindow) {
 /// The tiles and lines again (a pick or what's playing changed what they show).
 fn redraw() {
     TILE_ROWS.with(|m| m.notify.reset());
+    grid::changed();
     LINES.with(|m| m.notify.reset());
     kit::redraw();
 }
@@ -1517,9 +1681,14 @@ fn picked_sound(p: &Page, at: usize) -> PickedSound {
 }
 
 /// The arrow keys: across a row of tiles (-1, 1) or down and up the list (-2, 2), a row of tiles at a time.
-fn step(app: &AppWindow, d: i32) {
+fn step(app: &AppWindow, d: i32, held: bool) {
     let next = PAGE.with(|p| {
-        let p = p.borrow();
+        let mut p = p.borrow_mut();
+        // A held key's repeats wait for the sound they're on to have played (with Autoplay on).
+        let (autoplay, step) = (p.autoplay, p.step);
+        if !p.stepping.may_step(autoplay, held, step, Instant::now()) {
+            return None;
+        }
         let n = p.entries();
         if n == 0 {
             return None;
@@ -1584,48 +1753,133 @@ fn play_sound(app: &AppWindow, at: usize, from: f64, most: f64) {
     }
     let ask = PLAYS.fetch_add(1, Ordering::SeqCst) + 1;
     NEWEST_PLAY.fetch_max(ask, Ordering::SeqCst);
-    let weak = app.as_weak();
-    // The sweep's timings (`mo_app::sweep_timing`) hear when it's being opened, and when it's handed to the output,
-    // overtaken by a newer sound or dropped, by this play's number; for a sound the sweep didn't ask for they count
-    // nothing.
-    let started = background::spawn("Read sound", move || {
-        sweep_timing::opening(&path, ask);
-        let read = mo_audio::read(Path::new(&path), most);
-        match read {
-            // A newer play came while this one was reading: overtaken. A stop (the mouse let go, say): dropped.
-            _ if NEWEST_PLAY.load(Ordering::SeqCst) != ask => sweep_timing::overtaken(&path, ask),
-            _ if PLAYS.load(Ordering::SeqCst) != ask => sweep_timing::dropped(&path, ask),
-            Ok(audio) => {
-                let player = PLAYER.get_or_init(|| {
-                    Player::new(|key| {
-                        let key = key.to_owned();
-                        let _ = slint::invoke_from_event_loop(move || ended(&key));
-                    })
-                });
-                player.play(Arc::new(audio), path.clone(), from * seconds);
-                let output = player.info();
-                sweep_timing::output(output.mix_every_ms.map(|m| m / 2.0), output.delay_ms);
-                sweep_timing::started(&path, ask);
-            }
-            Err(e) => {
-                sweep_timing::dropped(&path, ask);
-                log::warning("Sounds", &format!("Couldn't play {path}: {e}"));
-                let why = e.to_string();
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(feed) = FEED.with(|f| f.borrow().clone()) {
-                        feed.start("Couldn't play the sound", "").failed(&why);
-                    }
-                    if let Some(app) = weak.upgrade() {
-                        stop(&app);
-                    }
-                });
-            }
-        }
+    let job = PlayJob { ask, path, from, seconds, most, window: app.as_weak(), held: Arc::default() };
+    ask_reader(job);
+}
+
+/// How many sounds may be read at once. Plays asked while every reader is busy replace each other (rule 12), so
+/// after a held arrow key or a fast sweep only the newest is read next and the ones passed over are never opened;
+/// a second reader means one slow read (a sleeping drive, a long file) never holds up the next sound.
+const READERS: usize = 2;
+
+thread_local! {
+    /// The threads that read each sound before it plays, each with how many of its jobs are still held (reading or
+    /// waiting); started as they're needed (and tried again at the next play if the system wouldn't start one).
+    static SOUND_READERS: RefCell<Vec<(Newest<PlayJob>, Arc<AtomicUsize>)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Gives `job` to a reader that's free, or else to the last one, in place of the read it has waiting.
+fn ask_reader(mut job: PlayJob) {
+    SOUND_READERS.with(|r| {
+        let mut readers = r.borrow_mut();
+        let free = readers.iter().position(|(_, held)| held.load(Ordering::SeqCst) == 0);
+        let at = match free {
+            Some(at) => at,
+            None if readers.len() < READERS => match Newest::start("Read sound", read_and_play) {
+                Ok(reader) => {
+                    readers.push((reader, Arc::default()));
+                    readers.len() - 1
+                }
+                Err(e) if readers.is_empty() => {
+                    // Never opened: the sweep's timings forget it by themselves.
+                    log::error("Sounds", &format!("Couldn't start reading the sound: {e}"));
+                    return;
+                }
+                Err(_) => readers.len() - 1,
+            },
+            None => readers.len() - 1,
+        };
+        let (reader, held) = &readers[at];
+        held.fetch_add(1, Ordering::SeqCst);
+        job.held = held.clone();
+        reader.ask(job);
     });
-    if let Err(e) = started {
-        // Never opened: the sweep's timings forget it by themselves.
-        log::error("Sounds", &format!("Couldn't start reading the sound: {e}"));
+}
+
+/// A sound to read and play: play number `ask`, `from` this far through its `seconds`, reading at most `most`.
+struct PlayJob {
+    ask: u64,
+    path: String,
+    from: f64,
+    seconds: f64,
+    most: f64,
+    window: slint::Weak<AppWindow>,
+    /// How many of its reader's jobs are held: one more while this one is, so the reader is free once it's none.
+    held: Arc<AtomicUsize>,
+}
+
+impl Drop for PlayJob {
+    // Done, passed over (replaced while waiting) or broken: no longer held by its reader.
+    fn drop(&mut self) {
+        self.held.fetch_sub(1, Ordering::SeqCst);
     }
+}
+
+/// Reads one sound and plays it, if it's still the newest play when the read ends. The sweep's timings
+/// (`mo_app::sweep_timing`) hear when it's being opened, and when it's handed to the output, overtaken by a newer sound
+/// or dropped, by this play's number; for a sound the sweep didn't ask for they count nothing.
+fn read_and_play(job: PlayJob) {
+    let PlayJob { ask, ref path, from, seconds, most, ref window, .. } = job;
+    let (path, window) = (path.clone(), window.clone());
+    let overtaken = || NEWEST_PLAY.load(Ordering::SeqCst) != ask;
+    let stopped = || PLAYS.load(Ordering::SeqCst) != ask;
+    // Passed over since it was asked for (it waited behind another read): never opened, so the sweep's timings
+    // forget it by themselves.
+    if overtaken() || stopped() {
+        return;
+    }
+    sweep_timing::opening(&path, ask);
+    let read = mo_audio::read(Path::new(&path), most);
+    match read {
+        // A newer play came while this one was reading: overtaken. A stop (the mouse let go, say): dropped.
+        _ if overtaken() => sweep_timing::overtaken(&path, ask),
+        _ if stopped() => sweep_timing::dropped(&path, ask),
+        Ok(audio) => {
+            let player = player();
+            player.play(Arc::new(audio), path.clone(), from * seconds);
+            let output = player.info();
+            sweep_timing::output(output.mix_every_ms.map(|m| m / 2.0), output.delay_ms);
+            sweep_timing::started(&path, ask);
+        }
+        Err(e) => {
+            sweep_timing::dropped(&path, ask);
+            log::warning("Sounds", &format!("Couldn't play {path}: {e}"));
+            let why = e.to_string();
+            let _ = slint::invoke_from_event_loop(move || {
+                // Only while this is still the sound asked for: a newer one asked meanwhile keeps playing.
+                if PLAYS.load(Ordering::SeqCst) != ask {
+                    return;
+                }
+                // Stepping or sweeping over many sounds that won't play for the same reason (a drive unplugged)
+                // says so once; the log has each of them.
+                let now = Instant::now();
+                let new_card = FAILED_CARD.with(|c| {
+                    let mut c = c.borrow_mut();
+                    let fresh = c
+                        .as_ref()
+                        .is_none_or(|(at, before)| *before != why || now.duration_since(*at) >= FAILED_CARD_GAP);
+                    if fresh {
+                        *c = Some((now, why.clone()));
+                    }
+                    fresh
+                });
+                if new_card && let Some(feed) = FEED.with(|f| f.borrow().clone()) {
+                    feed.start("Couldn't play the sound", "").failed(&why);
+                }
+                if let Some(app) = window.upgrade() {
+                    stop(&app);
+                }
+            });
+        }
+    }
+}
+
+/// The least time between two "Couldn't play the sound" cards for the same reason: as long as one stays.
+const FAILED_CARD_GAP: Duration = mo_app::activity::FAILED_STAYS;
+
+thread_local! {
+    /// When the last "Couldn't play the sound" card went up, and why the sound couldn't play.
+    static FAILED_CARD: RefCell<Option<(Instant, String)>> = const { RefCell::new(None) };
 }
 
 fn stop(app: &AppWindow) {
@@ -1701,7 +1955,7 @@ fn playing_changed(app: &AppWindow) {
 pub fn run_action(app: &AppWindow, id: &str) -> bool {
     let picked = PAGE.with(|p| {
         let p = p.borrow();
-        p.picked.and_then(|at| p.list.sound(at)).map(|s| (s.path.clone(), mo_app::shell::folder_of(&s.path).to_owned()))
+        p.picked.and_then(|at| p.list.sound(at)).map(|s| (s.path.clone(), s.name().to_owned()))
     });
     let feed = FEED.with(|f| f.borrow().clone());
     match (id, picked, feed) {
@@ -1711,11 +1965,59 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
             }
             stop(app);
         }
-        ("sounds.reveal", Some((path, folder)), Some(feed)) => crate::files::reveal(&feed, &path, &folder),
+        (TO_BITWIG, Some((path, name)), Some(feed)) => send_to_bitwig(app, &feed, path, name),
+        ("sounds.reveal", Some((path, _)), Some(feed)) => {
+            crate::files::reveal(&feed, &path, mo_app::shell::folder_of(&path));
+        }
         ("sounds.copyPath", Some((path, _)), Some(feed)) => crate::files::copy_path(&feed, &path),
         _ => return false,
     }
     true
+}
+
+/// Puts a sound on a Sampler on a new track in the project open in Bitwig, on a thread of its own, as its file name
+/// (without the extension) names it. Its card shows at once and says how it went. While it goes, Send to Bitwig waits.
+fn send_to_bitwig(app: &AppWindow, feed: &Feed, path: String, name: String) {
+    if SENDING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    show_sending(app, true);
+    let job = to_bitwig::sound_card(feed, &name);
+    let weak = app.as_weak();
+    let sent = background::spawn("Send to Bitwig", move || {
+        // A panic in it is logged as a crash and fails the card as it goes; Send to Bitwig still comes back.
+        let to = to_bitwig::Bitwig::default();
+        let _ = std::panic::catch_unwind(AssertUnwindSafe(|| to_bitwig::send_sound(job, &to, &path, &name)));
+        SENDING.store(false, Ordering::Release);
+        let _ = weak.upgrade_in_event_loop(|app| show_sending(&app, false));
+    });
+    // Its card was taken into the thread, so it fails by itself ("It stopped before it finished").
+    if let Err(e) = sent {
+        log::error("Sounds", &format!("Couldn't start sending to Bitwig: {e}"));
+        SENDING.store(false, Ordering::Release);
+        show_sending(app, false);
+    }
+}
+
+/// Send to Bitwig on the card and on the right-click menu: greyed, saying "Sending…", while a sound is on its way.
+fn show_sending(app: &AppWindow, sending: bool) {
+    let data = app.global::<SoundsData>();
+    let text = CARD_ACTIONS.iter().find(|a| a.1 == TO_BITWIG).map_or("", |a| a.0);
+    let actions = data.get_actions();
+    for i in 0..actions.row_count() {
+        if let Some(mut a) = actions.row_data(i).filter(|a| a.id == TO_BITWIG) {
+            a.enabled = !sending;
+            a.text = if sending { "Sending…".into() } else { text.into() };
+            actions.set_row_data(i, a);
+        }
+    }
+    let menu = data.get_menu();
+    for i in 0..menu.row_count() {
+        if let Some(mut m) = menu.row_data(i).filter(|m| m.id == TO_BITWIG) {
+            m.enabled = !sending;
+            menu.set_row_data(i, m);
+        }
+    }
 }
 
 #[cfg(test)]

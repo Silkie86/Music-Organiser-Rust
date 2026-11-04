@@ -187,10 +187,46 @@ jobs:
         run: |
           python -c "import ast, sys; ast.parse(open(sys.argv[1], encoding='utf-8').read(), feature_version=(3, 9))" extensions/fl-studio/device_MusicOrganiser.py
           python -m unittest discover -s extensions/fl-studio/test -v
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Bitwig script passes its checks
+        working-directory: extensions/bitwig
+        run: |
+          npm ci
+          npm test
       - name: Bitwig scripts parse and are plain ASCII
         run: |
-          for f in tools/formatlab/daw/bitwig/*.js; do node --check "$f"; done
+          for f in tools/formatlab/daw/bitwig/*.js extensions/bitwig/MusicOrganiser.control.js; do node --check "$f"; done
           # grep finds nothing (1) is the pass; a missing file (2) fails too.
           set +e
-          LC_ALL=C grep -nP '[^\x00-\x7F]' tools/formatlab/daw/bitwig/*.js extensions/fl-studio/device_MusicOrganiser.py
+          LC_ALL=C grep -nP '[^\x00-\x7F]' tools/formatlab/daw/bitwig/*.js extensions/bitwig/MusicOrganiser.control.js \
+            extensions/bitwig-java/src/main/java/org/musicorganiser/bitwig/*.java extensions/fl-studio/device_MusicOrganiser.py
           test $? -eq 1
+
+  # The Bitwig extension (Java), moved here from the C# repo: built and tested with Maven, which gets Bitwig's API from
+  # Bitwig's own repository (maven.bitwig.com; nothing of Bitwig's is kept here). Each run keeps
+  # MusicOrganiser.bwextension as a download. Cheap enough to always run.
+  bitwig-extension:
+    name: Bitwig extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+          cache-dependency-path: extensions/bitwig-java/pom.xml
+      # For ParityTest, which runs the JavaScript script beside the extension and compares their answers.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build and test
+        working-directory: extensions/bitwig-java
+        run: mvn -B package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: music-organiser-bitwig-extension
+          path: extensions/bitwig-java/target/MusicOrganiser.bwextension
+          if-no-files-found: error

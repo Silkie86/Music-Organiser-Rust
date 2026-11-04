@@ -67,10 +67,10 @@ pub const SONGS_ACTIONS: &[Action] = &[
     action("projects.copyPath", "Copy where the picked song's file is", "Ctrl+Shift+C"),
 ];
 
-/// The Sounds page's own actions, with the C# Sound Lab's ids. Favourite, tag and To Bitwig join once the page may
-/// write and the DAW link is in.
+/// The Sounds page's own actions, with the C# Sound Lab's ids. Favourite and tag join once the page may write.
 pub const SOUNDS_ACTIONS: &[Action] = &[
     action("sounds.stop", "Stop the sound playing", "Esc"),
+    action("sounds.toBitwig", "Put the picked sound into Bitwig", "Ctrl+B"),
     action("sounds.reveal", "Show the sound's file in Explorer", "Ctrl+Shift+E"),
     action("sounds.copyPath", "Copy where the sound's file is", "Ctrl+Shift+C"),
 ];
@@ -81,15 +81,70 @@ pub const PLUGINS_ACTIONS: &[Action] = &[
     action("plugins.searchOnline", "Search the web for the picked plugin", "Ctrl+Shift+O"),
 ];
 
+/// The Presets page's own actions on its Sounds section. Send to Bitwig takes the C# Sound Lab's key.
+pub const PRESETS_ACTIONS: &[Action] = &[
+    action("presets.export", "Export the picked sound as a preset file", "Ctrl+E"),
+    action("presets.toBitwig", "Make the picked sound a Bitwig preset and send it to Bitwig", "Ctrl+B"),
+    action("presets.exportShown", "Export every sound in the list as it's filtered now", "Ctrl+Shift+S"),
+    action("presets.reveal", "Show the picked sound's song or file in its folder", "Ctrl+Shift+E"),
+    action("presets.copyPath", "Copy where the picked sound's song or file is", "Ctrl+Shift+C"),
+    action("presets.useGuess", "Take your part fix away and use the guess again", "Ctrl+Backspace"),
+    action("presets.part.bass", "The picked sound is really a bass", "Alt+1"),
+    action("presets.part.lead", "The picked sound is really a lead", "Alt+2"),
+    action("presets.part.chords", "The picked sound is really chords", "Alt+3"),
+    action("presets.part.pad", "The picked sound is really a pad", "Alt+4"),
+    action("presets.part.stabs", "The picked sound is really stabs or plucks", "Alt+5"),
+    action("presets.part.arp", "The picked sound is really an arp", "Alt+6"),
+    action("presets.part.drums", "The picked sound is really drums", "Alt+7"),
+    action("presets.part.fx", "The picked sound is really FX", "Alt+8"),
+];
+
+/// The Presets page's Curves section's own actions (a list of its own: its keys are the Sounds section's).
+pub const CURVES_ACTIONS: &[Action] = &[
+    action("curves.toBitwig", "Save the picked curve into Bitwig's curves library", "Ctrl+B"),
+    action("curves.reveal", "Show the picked curve's file, to drag onto a Bitwig lane", "Ctrl+Shift+E"),
+    action("curves.rename", "Rename the picked curve", "F2"),
+    action("curves.hide", "Hide the picked curve, or show it again", "Delete"),
+    action("curves.revealSong", "Show the song the picked curve came from", "Ctrl+Shift+O"),
+];
+
+/// The MIDI page's own actions, with the C# MIDI page's ids where it had them. What goes with this (midi.fit),
+/// the playground, Send to Bitwig, Save as and the octave keys join as those parts are built.
+pub const MIDI_ACTIONS: &[Action] = &[
+    action("midi.moreLike", "Parts shaped like the picked one", "Ctrl+L"),
+    action("midi.within", "The longer phrases the picked part is in", ""),
+    action("midi.source", "Show the picked part's file in its folder", "Ctrl+Shift+E"),
+    action("midi.copyPath", "Copy where the picked part's file is", "Ctrl+Shift+C"),
+    action("midi.back", "Back to the whole list", "Esc"),
+];
+
 /// The Space page's own actions (new: the C# app had no Space page). F5 measures again on this page; elsewhere it
-/// looks for new and changed projects. Show in folder has the key it has on the other pages.
+/// looks for new and changed projects. Show in folder has the key it has on the other pages. Fix writes new files, so
+/// it has no key until you give it one.
 pub const SPACE_ACTIONS: &[Action] = &[
     action("space.measure", "Look at the drives and measure the app's files again", "F5"),
     action("space.reveal", "Show the picked line's folder", "Ctrl+Shift+E"),
+    action("space.fix", "Write a \"(fixed)\" Bitwig project beside each ticked save", ""),
 ];
 
 /// Every page's own list. A page's keys only work on that page, so two pages may share a key.
-pub const PAGE_ACTIONS: &[&[Action]] = &[SONGS_ACTIONS, SOUNDS_ACTIONS, SPACE_ACTIONS, PLUGINS_ACTIONS];
+pub const PAGE_ACTIONS: &[&[Action]] =
+    &[SONGS_ACTIONS, SOUNDS_ACTIONS, PRESETS_ACTIONS, CURVES_ACTIONS, MIDI_ACTIONS, PLUGINS_ACTIONS, SPACE_ACTIONS];
+
+/// Every page's own list with the page's name, in the order Settings › Shortcuts shows them (after the keys that work
+/// everywhere).
+pub const PAGES: &[(&str, &[Action])] = &[
+    ("Songs", SONGS_ACTIONS),
+    ("Sounds", SOUNDS_ACTIONS),
+    ("Presets", PRESETS_ACTIONS),
+    ("Curves", CURVES_ACTIONS),
+    ("MIDI", MIDI_ACTIONS),
+    ("Plugins", PLUGINS_ACTIONS),
+    ("Space", SPACE_ACTIONS),
+];
+
+/// The name Settings › Shortcuts gives the keys that work on every page.
+pub const EVERYWHERE: &str = "Everywhere";
 
 /// What an action does, in the words its tooltip and the key list use, or "" for an id in no list.
 pub fn what_of(id: &str) -> &'static str {
@@ -153,6 +208,78 @@ impl Shortcuts {
         Shortcuts { changed, by_key, page_keys }
     }
 
+    /// The `shortcuts` setting's text: only the keys changed from where they started, as the C# app keeps them (its
+    /// own ids that this app has no action for yet are kept too, so nothing it saved is lost).
+    pub fn to_setting(&self) -> String {
+        let sorted: std::collections::BTreeMap<&String, &String> = self.changed.iter().collect();
+        serde_json::to_string(&sorted).unwrap_or_else(|_| "{}".to_owned())
+    }
+
+    /// Whether any of this app's actions has a key other than the one it started with.
+    pub fn any_changed(&self) -> bool {
+        all_actions().any(|(_, a)| self.is_changed(a.id))
+    }
+
+    /// Whether an action's key isn't the one it started with.
+    pub fn is_changed(&self, id: &str) -> bool {
+        all_actions()
+            .find(|(_, a)| a.id == id)
+            .is_some_and(|(_, a)| normalise(self.key_of(id)) != normalise(a.default_key))
+    }
+
+    /// Gives an action a key ("" for none), as the C# app does: a key kept for the app (F12, Tab) can't be given; an
+    /// action on the same page that had the key is left with none, so one key never does two things on a page; a
+    /// page's key may also work everywhere, and the page's job wins there. Returns what happened, in words, for under
+    /// the list ("" when there's nothing to say).
+    pub fn set(&mut self, id: &str, key: &str) -> String {
+        let Some((page, action)) = all_actions().find(|(_, a)| a.id == id) else { return String::new() };
+        let key = written(key);
+        if KEPT.iter().any(|k| normalise(k) == normalise(&key)) {
+            return if key == "F12" {
+                "F12 is kept for writing a note to Claude.".to_owned()
+            } else {
+                format!("{key} is kept for moving between boxes and buttons.")
+            };
+        }
+        let same = |k: &str| !key.is_empty() && normalise(k) == normalise(&key);
+        let mut message = String::new();
+        if let Some((_, taken)) = all_actions().find(|(p, a)| a.id != id && *p == page && same(self.key_of(a.id))) {
+            self.changed.insert(taken.id.to_owned(), String::new());
+            message = format!("{key} was \"{}\", which has no key now. Default puts it back.", taken.what);
+        } else if page != EVERYWHERE
+            && let Some((_, wide)) = all_actions().find(|(p, a)| *p == EVERYWHERE && same(self.key_of(a.id)))
+        {
+            message = format!("{key} is also \"{}\" everywhere else; on {page} it does this instead.", wide.what);
+        } else if page == EVERYWHERE {
+            let mut pages: Vec<&str> =
+                all_actions().filter(|(p, a)| *p != EVERYWHERE && same(self.key_of(a.id))).map(|(p, _)| p).collect();
+            pages.dedup();
+            if !pages.is_empty() {
+                let one = pages.len() == 1;
+                message = format!(
+                    "{} keep{} {key} for a job of {} own.",
+                    pages.join(" and "),
+                    if one { "s" } else { "" },
+                    if one { "its" } else { "their" }
+                );
+            }
+        }
+        if normalise(&key) == normalise(action.default_key) {
+            self.changed.remove(id);
+        } else {
+            self.changed.insert(id.to_owned(), key);
+        }
+        *self = Shortcuts::with_changes(std::mem::take(&mut self.changed));
+        message
+    }
+
+    /// Every key back to the one it started with (the C# app's own ids that this app doesn't have yet stay as saved).
+    pub fn reset_all(&mut self) {
+        let mut changed = std::mem::take(&mut self.changed);
+        changed.retain(|id, _| !all_actions().any(|(_, a)| a.id == id));
+        *self = Shortcuts::with_changes(changed);
+    }
+
     /// The key an action has now, or "" for none.
     pub fn key_of(&self, id: &str) -> &str {
         if let Some(k) = self.changed.get(id) {
@@ -195,6 +322,25 @@ impl Shortcuts {
             _ => "",
         };
         [key.as_str(), other].into_iter().find_map(|k| self.by_key.get(k).copied())
+    }
+}
+
+/// Every action with its page's name ([`EVERYWHERE`] for the app-wide ones), in the order Settings shows them.
+pub fn all_actions() -> impl Iterator<Item = (&'static str, &'static Action)> {
+    APP_ACTIONS
+        .iter()
+        .map(|a| (EVERYWHERE, a))
+        .chain(PAGES.iter().flat_map(|(p, list)| list.iter().map(move |a| (*p, a))))
+}
+
+/// A key as it's kept: in the list's spelling, with "?" on its own (however the keyboard says it's typed).
+pub fn written(key: &str) -> String {
+    if key.is_empty() {
+        return String::new();
+    }
+    match normalise(key).as_str() {
+        "Shift+?" | "Shift+/" | "?" => "?".to_owned(),
+        k => k.to_owned(),
     }
 }
 
@@ -305,6 +451,7 @@ mod tests {
         assert_eq!(what_of("projects.reveal"), "Show the picked song's file in its folder");
         assert_eq!(what_of("sounds.copyPath"), "Copy where the sound's file is");
         assert_eq!(what_of("space.reveal"), "Show the picked line's folder");
+        assert_eq!(what_of("sounds.toBitwig"), "Put the picked sound into Bitwig");
         assert_eq!(what_of("no.such.action"), "");
     }
 
@@ -405,5 +552,62 @@ mod tests {
         assert_eq!(s.action_for("Shift+F11"), None);
         assert_eq!(s.action_for("Shift+F1"), None);
         assert_eq!(s.action_for("Ctrl+Shift+PageDown"), None);
+    }
+
+    #[test]
+    fn every_page_list_is_named_once() {
+        assert_eq!(PAGES.len(), PAGE_ACTIONS.len());
+        for (list, (_, named)) in PAGE_ACTIONS.iter().zip(PAGES) {
+            assert_eq!(list, named);
+        }
+    }
+
+    #[test]
+    fn a_new_key_takes_over_and_says_who_lost_it() {
+        let mut keys = Shortcuts::default();
+        let said = keys.set("app.goSounds", "Ctrl+1");
+        assert_eq!(keys.key_of("app.goSounds"), "Ctrl+1");
+        assert_eq!(keys.key_of("app.goProjects"), "");
+        assert_eq!(keys.action_for("Ctrl+1"), Some("app.goSounds"));
+        assert!(said.contains("Go to Songs"), "{said}");
+        assert!(keys.is_changed("app.goProjects") && keys.any_changed());
+        // Back to its own: the other stays without, until Default puts it back.
+        assert_eq!(keys.set("app.goSounds", "Ctrl+2"), "");
+        assert!(!keys.is_changed("app.goSounds"));
+        keys.reset_all();
+        assert!(!keys.any_changed());
+        assert_eq!(keys.key_of("app.goProjects"), "Ctrl+1");
+    }
+
+    #[test]
+    fn kept_keys_cant_be_given_and_question_marks_are_one_key() {
+        let mut keys = Shortcuts::default();
+        assert!(keys.set("app.search", "F12").contains("note to Claude"));
+        assert!(keys.set("app.search", "Tab").contains("kept"));
+        assert_eq!(keys.key_of("app.search"), "Ctrl+F");
+        keys.set("app.help", "Shift+?");
+        assert_eq!(keys.key_of("app.help"), "?");
+        assert!(!keys.is_changed("app.help"));
+    }
+
+    #[test]
+    fn page_keys_and_everywhere_keys_say_which_wins() {
+        let mut keys = Shortcuts::default();
+        let said = keys.set("sounds.copyPath", "Ctrl+F");
+        assert!(said.contains("on Sounds it does this instead"), "{said}");
+        assert_eq!(keys.page_action_for("Ctrl+F", SOUNDS_ACTIONS), Some("sounds.copyPath"));
+        assert_eq!(keys.action_for("Ctrl+F"), Some("app.search"));
+        let said = keys.set("app.fullScreen", "Ctrl+Shift+E");
+        assert!(said.starts_with("Songs and Sounds and Presets and Curves and MIDI and Space keep"), "{said}");
+    }
+
+    #[test]
+    fn the_setting_keeps_the_csharp_apps_other_ids() {
+        let mut keys = Shortcuts::from_setting(Some(r#"{"playground.loop":"Ctrl+J","app.search":"Ctrl+G"}"#));
+        keys.set("app.search", "Ctrl+F");
+        assert_eq!(keys.to_setting(), r#"{"playground.loop":"Ctrl+J"}"#);
+        keys.set("app.rescan", "F6");
+        keys.reset_all();
+        assert_eq!(keys.to_setting(), r#"{"playground.loop":"Ctrl+J"}"#);
     }
 }

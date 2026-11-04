@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use mo_app::background::{self, Newest};
-use mo_app::galaxy_grid::Grid;
+use mo_app::galaxy_grid::{Crowd, Grid};
 use mo_app::galaxy_look::{self, LightBy};
 use mo_app::galaxy_names::{self as names, NO_KIND, Region};
 use mo_app::galaxy_picture::{Drawn, Picture};
@@ -238,10 +238,8 @@ impl SetAsk {
     }
 }
 
-/// The galaxy's painter on the card it was made on (which card, as `gpu::generation` counts), and which packed stars
-/// it holds.
+/// The galaxy's painter on the graphics card, and which packed stars it holds.
 struct OnCard {
-    generation: u64,
     sky: Sky,
     stars: u64,
 }
@@ -250,10 +248,7 @@ thread_local! {
     static DRAWING: RefCell<Option<Newest<Picture>>> = const { RefCell::new(None) };
     static PACKING: RefCell<Option<Newest<SetAsk>>> = const { RefCell::new(None) };
     static MINI_DRAWING: RefCell<Option<Newest<Picture>>> = const { RefCell::new(None) };
-    static CARD: RefCell<Option<OnCard>> = const { RefCell::new(None) };
-    /// The card (as `gpu::generation` counts) that refused to draw the galaxy: on that one it's drawn on the
-    /// processor from then on, and a new card is tried again.
-    static CARD_FAILED: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    static CARD: RefCell<gpu::Painter<OnCard>> = const { RefCell::new(gpu::Painter::new()) };
     /// Moves a glide on a frame at a time, and when it last did.
     static FLIGHT: Timer = Timer::default();
     static LAST_FRAME: RefCell<Option<Instant>> = const { RefCell::new(None) };
@@ -281,20 +276,23 @@ thread_local! {
 }
 
 /// The graphics card to draw the galaxy on, when there's one it can draw on: not for the screenshots (drawn on the
-/// processor), and not the card that refused to (`CARD_FAILED`).
+/// processor), and not one that refused to.
 fn usable_card() -> Option<(gpu::Gpu, u64)> {
-    let failed = CARD_FAILED.with(std::cell::Cell::get);
-    gpu::current().filter(|(_, generation)| !HERE.with(|h| *h.borrow()) && failed != Some(*generation))
+    if HERE.with(|h| *h.borrow()) {
+        return None;
+    }
+    CARD.with(|c| c.borrow().card())
 }
 
-/// How many shown stars are on the view, as the grid counts them (all of them until the grid comes).
-fn in_view(g: &Galaxy) -> usize {
+/// How many shown stars are on the view and how crowded they are, as the grid finds them (until the grid comes, all of
+/// them, spread over the view).
+fn crowd(g: &Galaxy) -> Crowd {
     match &g.grid {
         Some(grid) => {
             let (l, t, r, b) = galaxy_look::on_view(&g.view);
-            grid.count_in(l, t, r, b)
+            grid.crowd(l, t, r, b)
         }
-        None => g.count,
+        None => Crowd::even(&g.view, g.count),
     }
 }
 
@@ -598,8 +596,12 @@ pub(super) fn wire(app: &AppWindow) {
 }
 
 /// How long each star of a sweep plays before the next one may start, so a sweep over a crowded part isn't cut to
-/// clicks (the C# app's 90 ms).
-const SWEEP_GAP: Duration = Duration::from_millis(90);
+/// clicks. The C# app's 90 ms was most of the wait between the mouse reaching a star and hearing it, and skipped many
+/// of the stars a quick sweep passes (Solomon, 2026-11-04): 40 ms still lets each sound start cleanly.
+const SWEEP_GAP: Duration = Duration::from_millis(40);
+/// How often a star waiting its turn looks whether its turn has come: a small part of [`SWEEP_GAP`], so it doesn't
+/// add much to the wait.
+const SWEEP_LOOK: Duration = Duration::from_millis(5);
 /// How much of a swept sound is read and played: its start is what a sweep hears, and a whole loop would take a
 /// moment to read.
 const SWEEP_SECONDS: f64 = 4.0;
@@ -762,7 +764,7 @@ fn reached(app: &AppWindow, at: usize) {
     let weak = app.as_weak();
     SWEEP_TIMER.with(|t| {
         if !t.running() {
-            t.start(TimerMode::Repeated, Duration::from_millis(15), move || {
+            t.start(TimerMode::Repeated, SWEEP_LOOK, move || {
                 let Some(app) = weak.upgrade() else { return };
                 let due = PAGE.with(|p| {
                     let g = &mut p.borrow_mut().galaxy;
@@ -1029,7 +1031,7 @@ pub(super) fn forget(g: &mut Galaxy) {
     g.light = None;
     // The old library's stars on the card aren't drawn over the new one's.
     CARD.with(|c| {
-        if let Some(on) = c.borrow_mut().as_mut() {
+        if let Some(on) = c.borrow_mut().made() {
             on.sky.clear_stars();
             on.stars = 0;
         }
@@ -1260,8 +1262,7 @@ pub(super) fn draw(app: &AppWindow) {
                     "Sounds",
                     &format!("The graphics card couldn't draw the galaxy, so the processor does: {e}"),
                 );
-                CARD_FAILED.with(|f| f.set(Some(generation)));
-                CARD.with(|c| *c.borrow_mut() = None);
+                CARD.with(|c| c.borrow_mut().refused(generation));
                 // The processor's picture doesn't twinkle.
                 TWINKLE_SHOWS.with(|t| t.set(false));
             }
@@ -1282,7 +1283,7 @@ pub(super) fn draw(app: &AppWindow) {
         let lit = g.light_for(&list);
         let light = lit.map(|l| l.light.clone()).unwrap_or_default();
         let order = lit.map(|l| l.order.clone()).unwrap_or_default();
-        let in_view = in_view(g);
+        let crowd = crowd(g);
         g.asked += 1;
         let moving = g.view.flying() || g.view.panning();
         let scale = if moving { g.scale.min(MOVING_SCALE) } else { g.scale };
@@ -1297,7 +1298,7 @@ pub(super) fn draw(app: &AppWindow) {
             palette,
             view: g.view,
             scale,
-            in_view,
+            crowd,
             glows: true,
         })
     });
@@ -1439,7 +1440,7 @@ fn draw_mini(app: &AppWindow) {
             view: mini_view(),
             scale,
             // The whole map is on show.
-            in_view: key.shown.len(),
+            crowd: Crowd::even(&mini_view(), key.shown.len()),
             glows: false,
         })
     });
@@ -1520,11 +1521,15 @@ fn show_mini(app: &AppWindow) {
     }
 }
 
-/// The card went: the painter goes, and the picture made on it isn't shown any more (it's drawn again, on the next
-/// card or the processor, when the galaxy next is).
-pub(super) fn card_gone(app: &AppWindow) {
-    CARD.with(|c| *c.borrow_mut() = None);
+/// The card went: the painter goes with it, now.
+pub(super) fn painter_gone() {
+    CARD.with(|c| c.borrow_mut().gone());
     TWINKLE_SHOWS.with(|t| t.set(false));
+}
+
+/// The card went: the picture made on it isn't shown any more (it's drawn again, on the next card or the processor,
+/// when the galaxy next is).
+pub(super) fn card_gone(app: &AppWindow) {
     let weak = app.as_weak();
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(app) = weak.upgrade() {
@@ -1553,7 +1558,7 @@ fn draw_on_card(app: &AppWindow, gpu: &gpu::Gpu, generation: u64, whole: bool) -
             time: (TWINKLE_CLOCK.with(Instant::elapsed).as_secs_f64() % 3600.0) as f32,
             twinkle: twinkle_now(!g.view.pressed() && !g.view.flying()),
         };
-        (g.view, g.scale, galaxy_look::look(&g.view, in_view(g), share), shine, g.packed.clone(), g.set_got)
+        (g.view, g.scale, galaxy_look::look(&g.view, crowd(g), share), shine, g.packed.clone(), g.set_got)
     });
     let (view, scale, look, shine, packed, version) = ask;
     let lit = packed.as_ref().map_or(0, |p| p.1);
@@ -1566,13 +1571,11 @@ fn draw_on_card(app: &AppWindow, gpu: &gpu::Gpu, generation: u64, whole: bool) -
     let background = [bg.red(), bg.green(), bg.blue()].map(|c| f32::from(c) / 255.0);
     let texture = CARD.with(|c| -> Result<Option<_>, String> {
         let mut c = c.borrow_mut();
-        if c.as_ref().is_none_or(|on| on.generation != generation) {
+        let on = c.on(gpu, generation, |gpu| {
             // The first time, the card builds the shader and its steps, which can take a while.
             let _doing = crate::watchdog::doing("Galaxy: set up the GPU painter");
-            let sky = gpu::checked(&gpu.device, || Sky::new(&gpu.device, &gpu.queue))?;
-            *c = Some(OnCard { generation, sky, stars: 0 });
-        }
-        let Some(on) = c.as_mut() else { return Ok(None) };
+            OnCard { sky: Sky::new(&gpu.device, &gpu.queue), stars: 0 }
+        })?;
         if on.stars != version
             && let Some(packed) = &packed
         {

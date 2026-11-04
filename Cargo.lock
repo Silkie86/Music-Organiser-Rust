@@ -1317,8 +1317,6 @@ dependencies = [
 [[package]]
 name = "femtovg"
 version = "0.27.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "31eebf3ab1b76359ccd5f850c07a7c6b2722c64d9127c40e02358e83f3ff9b1a"
 dependencies = [
  "bitflags 2.13.2",
  "bytemuck",
@@ -2990,10 +2988,16 @@ name = "mo-app"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "flate2",
+ "junction",
  "mo-backup",
  "mo-convert",
+ "mo-dawlink",
  "mo-formats",
+ "mo-harmony",
  "mo-library",
+ "mo-midi",
+ "mo-presets",
  "mo-sounds",
  "mo-space",
  "rayon",
@@ -3048,6 +3052,7 @@ dependencies = [
  "mo-formats",
  "mo-sounds",
  "serde_json",
+ "zip",
 ]
 
 [[package]]
@@ -3069,6 +3074,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "flate2",
+ "indexmap",
  "proptest",
  "regex",
  "roxmltree",
@@ -3084,6 +3090,7 @@ name = "mo-library"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "known-folders",
  "mo-formats",
  "notify",
  "rayon",
@@ -3136,6 +3143,7 @@ name = "mo-sounds"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "half",
  "mo-audio",
  "mo-formats",
  "mo-library",
@@ -3165,6 +3173,7 @@ dependencies = [
  "sysinfo",
  "trash",
  "windows-registry",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3202,13 +3211,18 @@ version = "0.1.0"
 dependencies = [
  "arboard",
  "chrono",
+ "femtovg",
  "image",
  "known-folders",
  "mo-app",
  "mo-audio",
  "mo-backup",
+ "mo-dawlink",
  "mo-formats",
+ "mo-harmony",
  "mo-library",
+ "mo-midi",
+ "mo-presets",
  "mo-sounds",
  "mo-space",
  "rayon",
@@ -3216,6 +3230,7 @@ dependencies = [
  "rusqlite",
  "slint",
  "slint-build",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4806,6 +4821,7 @@ dependencies = [
  "i-slint-backend-android-activity",
  "i-slint-backend-linuxkms",
  "i-slint-backend-selector",
+ "i-slint-backend-winit",
  "i-slint-common",
  "i-slint-core",
  "i-slint-core-macros",

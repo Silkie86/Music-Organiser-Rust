@@ -5,7 +5,8 @@
 //! worth keeping go (the same rules as the Space page's Compact and Thin).
 //!
 //! Nothing here ever changes, moves or deletes anything in your music folders: they're only read. On the backup drive,
-//! the only things ever removed are the older versions you choose to remove ([`older::remove`]).
+//! the only things ever removed are the older versions you choose to remove ([`older::remove`]), and the half-done
+//! files a run that was cut off left (`parts`).
 //!
 //! - [`plan`]: what goes, what's left out and why, and how big each is.
 //! - [`copy`]: copying it, each file under a temporary name, checked, then renamed; older versions of small files;
@@ -13,6 +14,7 @@
 //! - [`older`]: the older versions a backup keeps, kept for ever, and removed only when you choose.
 //! - [`record`]: the backup's own record of what it holds, kept on the backup drive.
 //! - [`gone`]: the files it keeps that are gone from your folders (deleted or moved), which it keeps, with a warning.
+//! - `parts`: clearing away the half-done files a run that was cut off left.
 //! - [`pack`]: the other format, one zip per song.
 //! - [`folders`]: backing up a list of folders in one go, each whole or slimmed.
 
@@ -21,6 +23,7 @@ pub mod folders;
 pub mod gone;
 pub mod older;
 pub mod pack;
+pub(crate) mod parts;
 pub mod plan;
 pub mod record;
 

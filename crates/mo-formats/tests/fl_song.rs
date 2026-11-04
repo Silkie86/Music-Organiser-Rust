@@ -331,11 +331,14 @@ fn fl_8_5_notes_are_24_bytes_and_8_0_notes_20() {
     // Five 24-byte notes make 120 bytes, as six 20-byte ones would: the version says which (a census of 17,316 of
     // Solomon's saves: FL 3.5 to 8.0 write 20 bytes, 8.5 on 24).
     let notes: Vec<u8> = (0..5u32).flat_map(|i| common::note(i * 96, 0, 96, 60, 100)).collect();
-    let read = |version: &str| {
-        let bytes = Flp::new().ascii(199, version).word(64, 0).ascii(192, "Kick").word(65, 1).data(224, &notes).build();
-        read_song(&bytes).channels[0].clips.iter().map(|c| c.notes.len()).sum::<usize>()
+    let read = |version: &str, notes: &[u8]| {
+        let bytes = Flp::new().ascii(199, version).word(64, 0).ascii(192, "Kick").word(65, 1).data(224, notes).build();
+        read_song(&bytes).channels[0].clips.iter().flat_map(|c| c.notes.iter().map(|n| n.start)).collect::<Vec<_>>()
     };
-    assert_eq!(read("8.5.2"), 5);
+    assert_eq!(read("8.5.2", &notes), [0, 96, 192, 288, 384]);
+    // Six 20-byte notes in the same 120 bytes, read from the version's "8.0".
+    let old: Vec<u8> = (0..6u32).flat_map(|i| common::note(i * 96, 0, 96, 60, 100)[..20].to_vec()).collect();
+    assert_eq!(read("8.0.0", &old), [0, 96, 192, 288, 384, 480]);
 }
 
 #[test]

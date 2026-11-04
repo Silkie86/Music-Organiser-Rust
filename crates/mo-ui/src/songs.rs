@@ -7,15 +7,17 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::{LazyLock, Mutex, mpsc};
+use std::sync::{Arc, LazyLock, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use chrono::{Local, NaiveDateTime};
 use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
 use mo_app::bitwig_convert::{self as bitwig, Converted};
+use mo_app::finder::{self, Kind};
 use mo_app::live::{Live, LiveDetails};
 use mo_app::log;
+use mo_app::places::Place;
 use mo_app::shell;
 use mo_app::song_panel::{self as panel, Go, SaveLine as PanelSaveLine, Tab};
 use mo_app::songs::{Entry, Filters, SongRow, Songs, View};
@@ -26,6 +28,7 @@ use mo_library::watch::{Changes, FolderWatch};
 use mo_library::{Library, STATUSES, SaveDetail};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel};
 
+use crate::finder::How;
 use crate::{
     AppWindow, CountLine, DetailPair, HealthLine, MenuItem, OlderLine, PanelSong, PluginLine, SampleLine, SaveLine,
     SongLine, SongsData, YearBar,
@@ -131,8 +134,36 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
             _ => {}
         });
     });
+    crate::finder::on_open(Kind::Song, |app, hit, how| {
+        let Some(row) = PAGE.with(|p| p.borrow().songs.rows.iter().position(|r| r.song.key == hit.id)) else {
+            return false;
+        };
+        match how {
+            How::InDaw => PAGE.with(|p| {
+                let p = p.borrow();
+                if let Some(r) = p.songs.rows.get(row) {
+                    open_main(&p, &r.song.latest);
+                }
+            }),
+            How::Open | How::Play => {
+                crate::go_to(app, Place::Songs.index() as i32);
+                show_song(app, row);
+            }
+        }
+        true
+    });
     data.on_reveal(|| with_picked(|_, r| reveal(&r.song.latest)));
     data.on_copy_path(|| with_picked(|_, r| copy_path(&r.song.latest.path)));
+    let weak = app.as_weak();
+    data.on_show_presets(move || {
+        let Some(app) = weak.upgrade() else { return };
+        let mut save = None;
+        with_picked(|_, r| save = Some(r.song.latest.path.clone()));
+        if let Some(save) = save {
+            crate::go_to(&app, Place::Presets.index() as i32);
+            crate::presets::show_song(&app, &save);
+        }
+    });
     data.set_statuses(strings(STATUSES.iter().copied()));
     let weak = app.as_weak();
     data.on_search_edited(move |text| {
@@ -244,6 +275,7 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
         };
         let read_in = began.elapsed();
         let songs = live.songs();
+        let found = Arc::new(finder::songs(&songs, Local::now().naive_local()));
         log::info(
             "Songs",
             &format!(
@@ -254,7 +286,10 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
                 (began.elapsed() - read_in).as_secs_f32()
             ),
         );
-        let _ = weak.upgrade_in_event_loop(move |app| show(&app, songs));
+        let _ = weak.upgrade_in_event_loop(move |app| {
+            show(&app, songs);
+            crate::finder::add_source(&app, "songs", found);
+        });
         watch(&mut live, &weak);
     });
     if let Err(e) = started {
@@ -314,8 +349,10 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
             ),
         );
         let songs = live.songs();
+        let found = Arc::new(finder::songs(&songs, Local::now().naive_local()));
         let _ = weak.upgrade_in_event_loop(move |app| {
             show_again(&app, songs);
+            crate::finder::add_source(&app, "songs", found);
             let (title, line) = updated.card();
             FEED.with(|f| {
                 if let Some(feed) = f.borrow().as_ref() {
@@ -426,12 +463,11 @@ fn show_song(app: &AppWindow, row: usize) {
         refresh(app);
     }
     let data = app.global::<SongsData>();
-    let (heading, song) = (data.get_heading_height(), data.get_song_height());
+    // Every line is one height, so the song's place is its line number times that (as the list itself works it out).
+    let line = data.get_line_height();
     let y = PAGE.with(|p| {
-        let p = p.borrow();
-        let at = p.view.entries.iter().position(|e| *e == Entry::Song(row))?;
-        let before = p.view.entries.get(..at).unwrap_or_default();
-        Some(before.iter().map(|e| if matches!(e, Entry::Heading(_)) { heading } else { song }).sum::<f32>())
+        let at = p.borrow().view.entries.iter().position(|e| *e == Entry::Song(row))?;
+        Some(at as f32 * line)
     });
     if let Some(y) = y {
         data.set_show_y(y);
@@ -783,9 +819,11 @@ fn open_save(page: &Page, save: &mo_library::Save) {
     }
 }
 
-/// The library's names for the two DAWs Open in Bitwig is about.
+/// The library's names for the two DAWs Open in Bitwig is about. Bitwig's saves are named "Bitwig Studio" (as the
+/// Settings' program for it is kept, `daw_exe:Bitwig Studio`); `BITWIG` is what every one of them starts with.
 const FL: &str = "FL Studio";
 const BITWIG: &str = "Bitwig";
+const BITWIG_STUDIO: &str = mo_formats::bitwig::reader::DAW;
 
 /// The names converted and opened in Bitwig while the app runs: Bitwig only brings an open project forward, so a new
 /// convert of the same song takes the next name.
@@ -800,7 +838,8 @@ fn open_main(page: &Page, save: &mo_library::Save) {
 /// thread; the card says how it went. The FL project and the template are only read.
 fn open_in_bitwig(page: &Page, save: &mo_library::Save) {
     let Some(feed) = FEED.with(|f| f.borrow().clone()) else { return };
-    let exe = page.songs.daw_exes.get(BITWIG).cloned();
+    // The Bitwig program picked in Settings, kept under the library's own name for Bitwig.
+    let exe = page.songs.daw_exes.get(BITWIG_STUDIO).cloned();
     let (db, path, name) = (page.db.clone(), save.path.clone(), save.name.clone());
     let started = background::spawn("Convert", move || {
         if !shell::exists(&path) {
@@ -885,5 +924,12 @@ mod tests {
         assert_eq!(ids(FL), ["open", "bitwig", "", "reveal", "copy"]);
         assert_eq!(ids("Bitwig Studio"), ["open", "", "reveal", "copy"]);
         assert_eq!(save_menu(FL)[0].what, "Open in FL Studio");
+    }
+
+    #[test]
+    fn open_in_bitwig_looks_up_the_program_by_the_library_s_name_for_bitwig() {
+        // Settings keep the program as `daw_exe:Bitwig Studio`, the name Bitwig's saves carry in the library.
+        assert_eq!(BITWIG_STUDIO, "Bitwig Studio");
+        assert!(BITWIG_STUDIO.starts_with(BITWIG));
     }
 }

@@ -572,3 +572,24 @@ fn a_kit_takes_one_sound_to_a_note() {
     assert_eq!(err.to_string(), "A pad's note is a MIDI note from 0 to 127, not 200.");
     assert!(bitwig.world().requests.is_empty());
 }
+
+#[test]
+fn puts_a_preset_on_a_new_track_in_turn() {
+    let dir = fixtures("dawlink-preset");
+    let lead = sound(&dir, "Glass Lead.bwpreset");
+    let bitwig = FakeBitwig::start().unwrap();
+    let sent = bitwig.bitwig().send_preset(&lead, "Glass Lead").unwrap();
+    assert!(sent.went_in(), "{:?}", sent.problem);
+    assert_eq!(sent.title(), "Glass Lead is in Bitwig");
+    let world = bitwig.world();
+    let track = &world.tracks[sent.track.unwrap()];
+    assert_eq!(track.name, "Glass Lead");
+    assert_eq!((track.devices[0].name.as_str(), track.devices[0].preset.as_str()), ("Polymer", "Glass Lead"));
+    assert_eq!(world.commands(), ["newtrack", "insert"]);
+    assert!(world.requests.iter().all(|r| r["onlyIn"] == "Night Drive"));
+    drop(world);
+
+    // A preset that isn't there any more isn't sent, and nothing changes in Bitwig.
+    let gone = dir.join("Gone.bwpreset");
+    assert!(matches!(bitwig.bitwig().send_preset(&gone, "Gone").unwrap_err(), Error::Missing { .. }));
+}

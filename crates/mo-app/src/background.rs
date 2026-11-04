@@ -16,21 +16,120 @@ pub fn spawn<T: Send + 'static>(name: &str, work: impl FnOnce() -> T + Send + 's
 }
 
 /// Runs `work` on the app's pool of low-priority threads, one per core (rule 21), so what it spreads over every core
-/// (rayon's `par_iter`: walking folders, reading many projects) runs there rather than on rayon's own pool at normal
-/// priority. Waits for it, so never call it on the window's thread.
+/// (rayon's `par_iter`: reading many projects, drawing a picture, filtering a list) runs there rather than on rayon's
+/// own pool at normal priority. Waits for it, so never call it on the window's thread.
+///
+/// The pool takes on a new job only once the jobs it's on have nothing left to share out (rayon finishes what it
+/// started first), so long work that waits on a disk (a backup, walking a whole drive) goes to [`on_bulk_pool`]
+/// instead: here it would hold up every page's quick asks until it ended.
 pub fn on_pool<T: Send>(work: impl FnOnce() -> T + Send) -> T {
-    static POOL: std::sync::LazyLock<Option<rayon::ThreadPool>> = std::sync::LazyLock::new(|| {
-        rayon::ThreadPoolBuilder::new()
-            .thread_name(|i| format!("Background {i}"))
-            .start_handler(|_| lower_priority())
-            .build()
-            .ok()
+    install(pool(), work)
+}
+
+/// The app's pool of low-priority threads itself, for work that hands jobs to a pool of its own choosing (the MIDI
+/// reader). `None` when the system wouldn't start the threads.
+pub fn pool() -> Option<&'static rayon::ThreadPool> {
+    static POOL: LazyLock<Option<rayon::ThreadPool>> =
+        LazyLock::new(|| build_pool("Background", POOL_THREADS.load(std::sync::atomic::Ordering::Relaxed)));
+    POOL.as_ref()
+}
+
+/// Runs long work that mostly waits on a disk (a backup's plan and copy, its look at the drive) on a small pool of its
+/// own, at low priority, so the pages' quick jobs on [`on_pool`] still come back at once while it runs. A few threads
+/// keep a drive busy without making a USB drive jump between many files. Waits for it, so never on the window's thread.
+pub fn on_bulk_pool<T: Send>(work: impl FnOnce() -> T + Send) -> T {
+    static BULK: LazyLock<Option<rayon::ThreadPool>> = LazyLock::new(|| {
+        let threads = POOL_THREADS.load(std::sync::atomic::Ordering::Relaxed);
+        let threads = if threads == 0 { cores() } else { threads };
+        build_pool("Bulk", threads.clamp(1, BULK_THREADS))
     });
-    match POOL.as_ref() {
+    install(BULK.as_ref(), work)
+}
+
+/// [`on_bulk_pool`] for a backup's copy, which can run for hours: a pool of its own again, so working out the next
+/// plan (or reading the drive's older versions) while it copies isn't held up behind it either.
+pub fn on_copy_pool<T: Send>(work: impl FnOnce() -> T + Send) -> T {
+    static COPY: LazyLock<Option<rayon::ThreadPool>> = LazyLock::new(|| {
+        let threads = POOL_THREADS.load(std::sync::atomic::Ordering::Relaxed);
+        let threads = if threads == 0 { cores() } else { threads };
+        build_pool("Backup copy", threads.clamp(1, BULK_THREADS))
+    });
+    install(COPY.as_ref(), work)
+}
+
+/// The most threads [`on_bulk_pool`] (and [`on_copy_pool`]) gets.
+const BULK_THREADS: usize = 4;
+
+/// A pool of `threads` low-priority threads called `name 0`, `name 1`...; 0 is rayon's own choice, one per core.
+fn build_pool(name: &'static str, threads: usize) -> Option<rayon::ThreadPool> {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .thread_name(move |i| format!("{name} {i}"))
+        .start_handler(|_| lower_priority())
+        .build()
+        .ok()
+}
+
+fn install<T: Send>(pool: Option<&rayon::ThreadPool>, work: impl FnOnce() -> T + Send) -> T {
+    match pool {
         Some(pool) => pool.install(work),
         // The system wouldn't start the threads: done here instead, still away from the window.
         None => work(),
     }
+}
+
+/// How many threads the pool gets, from Settings' pace; 0 for one per core. Read once, when the pool starts (the bulk
+/// pool takes no more than this either).
+static POOL_THREADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// How hard background work may push the computer (Settings › General › Pace; the C# app's `performance` setting).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pace {
+    /// Half the processor's threads, so the window, the galaxy and playback stay smooth even on a busy computer.
+    Gentle,
+    /// All but two.
+    Balanced,
+    /// Every thread, still at low priority. This app's default (it always ran this way), where the C# app's is Gentle.
+    Fast,
+}
+
+impl Pace {
+    pub const ALL: [Pace; 3] = [Pace::Gentle, Pace::Balanced, Pace::Fast];
+
+    /// Its name, as the setting keeps it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Pace::Gentle => "Gentle",
+            Pace::Balanced => "Balanced",
+            Pace::Fast => "Fast",
+        }
+    }
+
+    /// The pace from its setting; Fast when it isn't set or isn't known.
+    pub fn from_setting(value: Option<&str>) -> Pace {
+        Pace::ALL.into_iter().find(|p| Some(p.name()) == value).unwrap_or(Pace::Fast)
+    }
+
+    /// How many threads it gives background work on a computer with `cores` of them (at least one).
+    pub fn threads(self, cores: usize) -> usize {
+        let cores = cores.max(1);
+        match self {
+            Pace::Gentle => (cores / 2).max(1),
+            Pace::Balanced => cores.saturating_sub(2).max(1),
+            Pace::Fast => cores,
+        }
+    }
+}
+
+/// The processor's threads, as the system tells them (1 if it won't).
+pub fn cores() -> usize {
+    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+}
+
+/// Sets the pool's size from the pace. Call it once in `main`, before any work goes to the pool: the pool starts at
+/// the first job and keeps its size after that, so a pace changed later takes over at the next start.
+pub fn set_pace(pace: Pace) {
+    POOL_THREADS.store(pace.threads(cores()), std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Lowers the priority of the thread it's called on. Where the system won't (some Linux set-ups), the thread runs on
@@ -99,7 +198,8 @@ pub(crate) fn handed_over() -> usize {
 
 /// A low-priority thread that does one job at a time. Asking while it's busy replaces the job still waiting, so after
 /// a burst of asks (clicking down a list) only the newest is done next (rule 12: newest wins). The thread stops once
-/// this is dropped and its current job ends.
+/// this is dropped and its current job ends. A job that panics is logged (the panic hook does that) and the thread goes
+/// on to the next one, so one damaged file never leaves a page waiting for good.
 pub struct Newest<J: Send + 'static> {
     slot: Arc<Slot<J>>,
 }
@@ -134,7 +234,8 @@ impl<J: Send + 'static> Newest<J> {
                         state = theirs.ready.wait(state).unwrap_or_else(PoisonError::into_inner);
                     }
                 };
-                work(job);
+                // `work` keeps nothing half-changed that the next job relies on: each job starts from its own ask.
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(job)));
             }
         })?;
         Ok(Newest { slot })
@@ -161,6 +262,45 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn paces_share_the_threads_like_the_csharp_app() {
+        assert_eq!(Pace::Gentle.threads(16), 8);
+        assert_eq!(Pace::Balanced.threads(16), 14);
+        assert_eq!(Pace::Fast.threads(16), 16);
+        // Never none, on the smallest computer.
+        assert_eq!(Pace::Gentle.threads(1), 1);
+        assert_eq!(Pace::Balanced.threads(2), 1);
+        assert_eq!(Pace::from_setting(Some("Balanced")), Pace::Balanced);
+        assert_eq!(Pace::from_setting(Some("?")), Pace::Fast);
+        assert_eq!(Pace::from_setting(None), Pace::Fast);
+    }
+
+    #[test]
+    fn long_disk_work_leaves_the_main_pool_free() {
+        use rayon::prelude::*;
+        let (release_tx, release) = mpsc::channel::<()>();
+        let release = Mutex::new(release);
+        let (started_tx, started) = mpsc::channel::<()>();
+        // A long par_iter on the disk pool, held until the main pool's job has answered.
+        let long = std::thread::spawn(move || {
+            on_bulk_pool(|| {
+                let _ = started_tx.send(());
+                (0..64).into_par_iter().for_each(|_| {
+                    let r = release.lock().unwrap_or_else(PoisonError::into_inner);
+                    let _ = r.recv_timeout(Duration::from_secs(10));
+                });
+            });
+        });
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (answer_tx, answer) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = answer_tx.send(on_pool(|| (0..1000).into_par_iter().sum::<u64>()));
+        });
+        assert_eq!(answer.recv_timeout(Duration::from_secs(5)).unwrap(), 499_500);
+        drop(release_tx);
+        long.join().unwrap();
+    }
+
+    #[test]
     fn only_the_newest_waiting_job_is_done() {
         let (done_tx, done) = mpsc::channel();
         let (gate_tx, gate) = mpsc::channel::<()>();
@@ -185,6 +325,56 @@ mod tests {
         drop(worker);
         // The thread stops and its sender goes with it.
         assert!(done.recv_timeout(Duration::from_secs(5)).is_err());
+    }
+
+    #[test]
+    fn a_job_that_panics_leaves_the_thread_working() {
+        let (done_tx, done) = mpsc::channel();
+        let (started_tx, started) = mpsc::channel();
+        let worker = Newest::start("Test panics", move |n: u32| {
+            let _ = started_tx.send(n);
+            assert!(n != 1, "a job that breaks (the test means it)");
+            let _ = done_tx.send(n);
+        })
+        .unwrap();
+        worker.ask(1);
+        // Asked once the first is breaking: still done.
+        assert_eq!(started.recv_timeout(Duration::from_secs(5)).unwrap(), 1);
+        worker.ask(2);
+        assert_eq!(done.recv_timeout(Duration::from_secs(5)).unwrap(), 2);
+    }
+
+    #[test]
+    fn quick_jobs_come_back_while_long_bulk_work_runs() {
+        use rayon::prelude::*;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let hold = Arc::new(AtomicBool::new(true));
+        let held = hold.clone();
+        let (started_tx, started) = mpsc::channel::<()>();
+        // Long work that keeps every bulk thread busy until it's let go.
+        let long = spawn("Test bulk", move || {
+            on_bulk_pool(|| {
+                (0..64).into_par_iter().for_each(|_| {
+                    let _ = started_tx.send(());
+                    while held.load(Ordering::Relaxed) {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                });
+            });
+        })
+        .unwrap();
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        // A quick job on the app's pool still comes straight back.
+        let (quick_tx, quick) = mpsc::channel();
+        let _quick = spawn("Test quick", move || {
+            let sum: u64 = on_pool(|| (0..1000u64).into_par_iter().sum());
+            let _ = quick_tx.send(sum);
+        })
+        .unwrap();
+        let answer = quick.recv_timeout(Duration::from_secs(5));
+        hold.store(false, Ordering::Relaxed);
+        long.join().unwrap();
+        assert_eq!(answer.unwrap(), 499_500);
     }
 
     #[test]

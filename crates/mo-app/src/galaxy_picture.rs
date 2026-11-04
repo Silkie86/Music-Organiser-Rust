@@ -13,9 +13,10 @@ use std::sync::{Arc, LazyLock};
 use mo_sounds::StarPoint;
 use rayon::prelude::*;
 
+use crate::galaxy_grid::Crowd;
 use crate::galaxy_look::{
-    self as gl, DUST_LIT, FALLOFF, FAR_GLOW, FAR_HALO, GLOW, GLOW_LIT, HALO, HOT, LIT_BRIGHTEST, MIN_LIT, UNLIT_SIZE,
-    WHITE, lit_size, lit_weight,
+    self as gl, DUST_LIT, FALLOFF, FAR_GLOW, FAR_HALO, GLOW, GLOW_LIT, HALO, HOT, LIT_BRIGHTEST, Look, MIN_LIT,
+    UNLIT_SIZE, WHITE, lit_size, lit_weight,
 };
 use crate::galaxy_view::View;
 
@@ -29,6 +30,11 @@ const CLOUD_LIGHT: f32 = 0.3;
 const CLOUD_THICK: f32 = 6.0;
 /// Up to about this many stars on show, each shines fully; more and each is dimmed.
 const BRIGHT_CROWD: f32 = 30_000.0;
+/// Each star's glow costs the processor many times its dot, so glows only come in as the stars on the view get few
+/// enough: from this many (none) to the lower one (all of it), evenly in doublings so they come in smoothly. With more
+/// on the view the picture would take too long to draw, for glows too faint to see.
+const GLOWS_FROM: f32 = 8_000.0;
+const GLOWS_FULL: f32 = 1_500.0;
 
 /// One pixel, its colour premultiplied by its alpha.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -67,9 +73,9 @@ pub struct Picture {
     pub palette: Vec<[u8; 3]>,
     pub view: View,
     pub scale: f32,
-    /// How many shown stars are on the view (as the map's grid counts them, as for the graphics card), which decides
-    /// how painted the view is and how bright each star can be.
-    pub in_view: usize,
+    /// How many shown stars are on the view and how crowded they are (as the map's grid finds them, as for the
+    /// graphics card), which decides how bright each star can be and when the glows come in.
+    pub crowd: Crowd,
     /// Each star drawn as a star, with a glow, and the best lit as points of their own far out (the graphics card's
     /// look). Off for the mini-map, which only shows the map's shape: there the glows would run into one blob.
     pub glows: bool,
@@ -121,20 +127,21 @@ impl Picture {
         let grey = self.palette.last().copied().unwrap_or([128, 128, 128]);
         // Light adds up, so when a great many stars are on show each gives off less, or the crowds would all burn
         // white; zoomed in, or with the filters leaving few, fewer are on show and each shines fully.
-        let on_show = self.in_view.max(1) as f32;
+        let on_show = self.crowd.in_view.max(1) as f32;
         let bright = (0.9 * (BRIGHT_CROWD / on_show).sqrt()).clamp(0.3, 0.9);
         // How big and bright each shown star is for how lit it is (all alike with nothing on show lit), and how
         // strongly it glows: every star close up, only the best lit far out (the graphics card's look).
         let share = gl::lit_share(&self.stars, &self.shown, &self.light);
         let lighting = share > 0.0;
-        let lk = gl::look(&self.view, self.in_view, share);
-        let crisp = 1.0 - lk.painted;
+        let lk = gl::look(&self.view, self.crowd, share);
+        let crisp = glows_in(&lk, on_show);
+        let painted = 1.0 - crisp;
         // How strongly each of the best lit shows as a point of its own far out: by its rank, as on the card.
         let glint = {
             let lit = u32::try_from(self.order.len()).unwrap_or(u32::MAX);
             let (glinting, _) = gl::glinting(&lk, lit);
             let mut glint = Vec::new();
-            if self.glows && lighting && lk.painted > 0.0 && glinting > 0 {
+            if self.glows && lighting && painted > 0.0 && glinting > 0 {
                 glint = vec![0.0f32; self.stars.len()];
                 let first = (lit - glinting) as usize;
                 for (k, &at) in self.order[first..].iter().enumerate() {
@@ -155,7 +162,7 @@ impl Picture {
             // As the card: far out a star that glints is a bright point, going to its close-up size as the view flies
             // in. Its core is as bright as it's lit, with the same steady variety as on the card.
             let size = gl::glint_point(r * UNLIT_SIZE * lit_size(l), glint, crisp, MIN_LIT * self.scale);
-            (size, lit_weight(l) * gl::variety(at) / LIT_BRIGHTEST, crisp.max(lk.painted * glint), l)
+            (size, lit_weight(l) * gl::variety(at) / LIT_BRIGHTEST, crisp.max(painted * glint), l)
         };
         // The biggest a star gets, and how far it reaches: a glow reaches HALO times its star's core, a well lit
         // one's up to twice that.
@@ -231,6 +238,14 @@ impl Picture {
         });
         Drawn { id: self.id, view: self.view, width: w, height: h, pixels }
     }
+}
+
+/// How strongly the stars glow on the processor's picture with `look`, with `on_show` stars on the view (0 to 1): as
+/// they're drawn as stars on the card, but only from [`GLOWS_FROM`] stars on the view down, all of it by
+/// [`GLOWS_FULL`]. The card's stars come in as soon as they're far enough apart to tell apart, many thousands of them;
+/// on the processor the glows of so many would take too long to draw.
+fn glows_in(look: &Look, on_show: f32) -> f32 {
+    (1.0 - look.painted).min(gl::smooth(GLOWS_FROM.ln(), GLOWS_FULL.ln(), on_show.max(1.0).ln()))
 }
 
 /// Draws a star over what's there (colours premultiplied by their alpha), on the rows in `rows`: a band of the
@@ -496,7 +511,7 @@ mod tests {
             palette: vec![[200, 100, 50], [110, 110, 110]],
             view,
             scale: 1.0,
-            in_view: n,
+            crowd: Crowd::even(&view, n),
             glows: true,
         };
         let d = picture.draw();
@@ -525,7 +540,7 @@ mod tests {
             palette: vec![[200, 100, 50], [110, 110, 110]],
             view,
             scale: 4.0,
-            in_view: 2,
+            crowd: Crowd::even(&view, 2),
             glows: true,
         };
         let d = picture.draw();
@@ -562,7 +577,7 @@ mod tests {
         let light: Vec<f32> = (0..1_000).map(|i| (i + 1) as f32 / 1_000.0).collect();
         let shown: Vec<usize> = (0..1_000).collect();
         let order = gl::lit_order(&stars, &shown, &light);
-        let lk = gl::look(&view, 450_000, 1.0);
+        let lk = gl::look(&view, Crowd::even(&view, 450_000), 1.0);
         let (glinting, _) = gl::glinting(&lk, 1_000);
         assert!(glinting > 1 && glinting < 7, "{glinting}");
         let d = Picture {
@@ -576,7 +591,7 @@ mod tests {
             palette: vec![[200, 100, 50], [110, 110, 110]],
             view,
             scale: 1.0,
-            in_view: 450_000,
+            crowd: Crowd::even(&view, 450_000),
             glows: true,
         }
         .draw();
@@ -600,7 +615,7 @@ mod tests {
             palette: vec![[200, 100, 50], [110, 110, 110]],
             view,
             scale: 1.0,
-            in_view: 1,
+            crowd: Crowd::even(&view, 1),
             glows,
         };
         let (star, dot) = (picture(true).draw(), picture(false).draw());
@@ -628,7 +643,7 @@ mod tests {
             palette: vec![[200, 100, 50], [110, 110, 110]],
             view,
             scale: 8.0,
-            in_view: 1,
+            crowd: Crowd::even(&view, 1),
             glows: true,
         };
         let d = picture.draw();
@@ -656,7 +671,7 @@ mod tests {
             palette: vec![[200, 100, 50], [110, 110, 110]],
             view,
             scale: 8.0,
-            in_view: 1,
+            crowd: Crowd::even(&view, 1),
             glows: true,
         }
         .draw();
@@ -688,7 +703,7 @@ mod tests {
             palette: vec![[200, 100, 50], [110, 110, 110]],
             view,
             scale: 1.0,
-            in_view: 1,
+            crowd: Crowd::even(&view, 1),
             glows: true,
         };
         let dust = |d: &Drawn| {
@@ -749,6 +764,8 @@ mod look {
         ];
         let (l, t, r, b) = gl::on_view(&view);
         let in_view = stars.iter().flatten().filter(|p| p.x >= l && p.x <= r && p.y >= t && p.y <= b).count();
+        let crowd = crate::galaxy_grid::Grid::new(&stars, &(0..n).collect::<Vec<_>>()).crowd(l, t, r, b);
+        assert_eq!(crowd.in_view, in_view);
         let p = Picture {
             id: 1,
             stars: Arc::new(stars),
@@ -760,7 +777,7 @@ mod look {
             palette,
             view,
             scale: 1.0,
-            in_view,
+            crowd,
             glows: true,
         };
         let t = std::time::Instant::now();

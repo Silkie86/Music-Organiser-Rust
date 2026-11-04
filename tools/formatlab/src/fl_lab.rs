@@ -5,8 +5,8 @@
 use std::collections::{HashMap, HashSet};
 
 use mo_formats::fl::events::{
-    self, EV_CHANNEL_NEW, EV_INSERT_FLAGS, EV_INSERT_NAME, EV_MIXER_SLOT, EV_PATTERN_NEW, EV_PLAYLIST,
-    EV_PLUGIN_INTERNAL, EV_PLUGIN_STATE, Event,
+    self, EV_CHANNEL_NEW, EV_INSERT_FLAGS, EV_INSERT_NAME, EV_MIXER_SLOT, EV_PATTERN_NEW, EV_PATTERN_NOTES,
+    EV_PLAYLIST, EV_PLUGIN_INTERNAL, EV_PLUGIN_STATE, Event,
 };
 
 use crate::lab::{self, Data, Format, Item, LabFile};
@@ -31,6 +31,8 @@ pub fn read(raw: &[u8], name: &str) -> Result<LabFile, String> {
     let mut counts: HashMap<(&str, u8), usize> = HashMap::new();
     let mut plugin_types: HashMap<&str, String> = HashMap::new();
     let mut last = None;
+    // The song's channels, which pattern notes are sized by (as the reader does), found at the first.
+    let mut known = None;
     for (e, scope) in in_file.iter().zip(&scopes) {
         let scope = scope.as_str();
         if last != Some(scope) {
@@ -75,7 +77,14 @@ pub fn read(raw: &[u8], name: &str) -> Result<LabFile, String> {
 
         let mut parts = Vec::new();
         if let Some(entry) = entry {
-            layout(entry, data, flp.major, &key, &path, &mut parts)?;
+            // Pattern notes are 20 or 24 bytes by FL's version (major and minor, rule 9): sized as the reader does.
+            let size = if e.id == EV_PATTERN_NOTES {
+                let known = known.get_or_insert_with(|| mo_formats::fl::channels(&flp));
+                Some(mo_formats::fl::notes::note_size(data, (flp.major, flp.minor), false, Some(known)))
+            } else {
+                entry.record_size(flp.major)
+            };
+            layout(entry, data, size, &key, &path, &mut parts)?;
         }
         if e.id == EV_PLUGIN_STATE && plugin_types.get(scope).is_some_and(|t| t == "Fruity Wrapper") {
             wrapper(data, &key, &path, &mut parts);
@@ -169,8 +178,15 @@ fn number_text(n: Number) -> (String, Data) {
     }
 }
 
-/// The numbers the registry's layout names, and the data's records with theirs.
-fn layout(entry: &Entry, data: &[u8], major: u32, key: &str, path: &str, parts: &mut Vec<Item>) -> Result<(), String> {
+/// The numbers the registry's layout names, and the data's records (`size` bytes each) with theirs.
+fn layout(
+    entry: &Entry,
+    data: &[u8],
+    size: Option<usize>,
+    key: &str,
+    path: &str,
+    parts: &mut Vec<Item>,
+) -> Result<(), String> {
     for f in LayoutField::parse(entry.layout.as_deref())? {
         if let Some(v) = f.read(data) {
             let (shown, d) = number_text(v);
@@ -180,7 +196,7 @@ fn layout(entry: &Entry, data: &[u8], major: u32, key: &str, path: &str, parts: 
             parts.push(item);
         }
     }
-    let (Some(size), Some(record_layout)) = (entry.record_size(major), entry.record_layout.as_deref()) else {
+    let (Some(size), Some(record_layout)) = (size, size.and_then(|size| entry.record_layout_for(size))) else {
         return Ok(());
     };
     if size == 0 {

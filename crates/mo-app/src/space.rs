@@ -1,8 +1,9 @@
 //! The Space page's words, and the drives it shows (phase 4). Part 1: the drives your projects, samples, backup and
 //! the app's own files are on, how full each one is, and what the app's own files take. Every word is decided here so
 //! it can be tested without a window; mo-ui's `space.rs` reads the disks (never on the window's thread) and fills the
-//! page. What can be freed (old copies, spare plugin copies, Bitwig copies, then songs, then plugins) comes a part at a
-//! time after this one, as agreed in the page's question round (2026-11-03). Nothing here changes a file.
+//! page. What can be freed comes a part at a time, as agreed in the page's question round (2026-11-03): Bitwig copies
+//! first ([`crate::space_bitwig`], whose Fix writes new "(fixed)" projects), then old copies, spare plugin copies,
+//! songs and plugins. Nothing here changes a file.
 
 use std::path::{Path, PathBuf};
 
@@ -274,17 +275,20 @@ pub fn summary(drives: &[Drive], app_bytes: u64) -> String {
     }
 }
 
-/// What the page will list under Biggest wins first, while it lists nothing yet.
-pub const WINS_COMING: &str = "What can be freed comes next: old copies left after moving folders, spare plugin \
-    copies and Bitwig copies first, then songs, then plugins you haven't used.";
-
-/// A line under Also taking room: what it is, why it's there, and its size.
+/// A line under Biggest wins first or Also taking room: what it is, why it's there, and its size.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Line {
     pub id: &'static str,
     pub title: &'static str,
     pub why: String,
     pub size: String,
+}
+
+/// Biggest wins first: the lines that free room, each with the room it frees, biggest first. Lines that free the same
+/// keep their order.
+pub fn biggest_first(mut lines: Vec<(u64, Line)>) -> Vec<Line> {
+    lines.sort_by_key(|(bytes, _)| std::cmp::Reverse(*bytes));
+    lines.into_iter().map(|(_, line)| line).collect()
 }
 
 /// The App files line's id.
@@ -307,6 +311,46 @@ pub fn app_bytes(parts: &[AppFilesPart]) -> u64 {
     parts.iter().fold(0u64, |sum, p| sum.saturating_add(p.bytes))
 }
 
+/// What a part's link that opens something does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Opens {
+    /// Opens a fixed project in Bitwig.
+    InBitwig,
+    /// Shows it (an old copy) in its folder.
+    InFolder,
+}
+
+impl Opens {
+    /// The link's words.
+    pub fn words(self) -> &'static str {
+        match self {
+            Opens::InBitwig => "Open in Bitwig",
+            Opens::InFolder => "Show in folder",
+        }
+    }
+}
+
+/// One part on a card: its name, what it holds and its size; and for a part you can act on, its tick, what happened to
+/// it, a file it opens and a link that shows more.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Part {
+    pub name: String,
+    pub what: String,
+    pub size: String,
+    /// Listed under the part above it (a save under its project), a step in.
+    pub under: bool,
+    /// What its tick is for (a save) and whether it's ticked; None when it has no tick.
+    pub tick: Option<(PathBuf, bool)>,
+    /// What happened to it, or what to know about it; "" for nothing. `problem` shows it as a problem.
+    pub status: String,
+    pub problem: bool,
+    /// Its link that opens something: what it does, and the file or folder it's for (a fixed project, opened in
+    /// Bitwig; an old copy, shown in its folder).
+    pub open: Option<(Opens, PathBuf)>,
+    /// Its link that shows or hides more under it: its words, and what it's for (a project's folder).
+    pub more: Option<(String, PathBuf)>,
+}
+
 /// The picked line's card.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Card {
@@ -315,9 +359,13 @@ pub struct Card {
     /// Its size in big figures, and what they mean.
     pub big: String,
     pub big_note: String,
-    pub lead: &'static str,
-    /// Each part: its name, what it holds and its size, biggest first.
-    pub parts: Vec<(String, String, String)>,
+    pub lead: String,
+    /// Whether its parts can be ticked: each keeps room for its tick, so their names line up.
+    pub ticks: bool,
+    /// Each part, biggest first.
+    pub parts: Vec<Part>,
+    /// What to know about the parts and what the buttons do, shown above them; "" when there's nothing more to say.
+    pub note: String,
     /// The drive's room, in a sentence.
     pub room: String,
     /// Why the drive needs room, when it's nearly full.
@@ -337,12 +385,20 @@ pub fn app_files_card(parts: Option<&[AppFilesPart]>, drive: Option<&Drive>) -> 
             (Some(_), None) => "in all".to_owned(),
             (None, _) => String::new(),
         },
-        lead: "The app's own folder: the libraries every scan fills, the search models, the logs and your F12 notes.",
+        lead: "The app's own folder: the libraries every scan fills, the search models, the logs and your F12 notes."
+            .to_owned(),
+        ticks: false,
         parts: parts
             .unwrap_or_default()
             .iter()
-            .map(|p| (p.name.to_owned(), p.what.to_owned(), size_text(p.bytes)))
+            .map(|p| Part {
+                name: p.name.to_owned(),
+                what: p.what.to_owned(),
+                size: size_text(p.bytes),
+                ..Part::default()
+            })
             .collect(),
+        note: String::new(),
         room: drive
             .filter(|d| d.here)
             .map(|d| format!("{} has {} free of {}.", d.name, size_text(d.free), size_text(d.total)))
@@ -504,11 +560,25 @@ mod tests {
         let d = sample_drives();
         let card = app_files_card(Some(&parts), app_drive(&d));
         assert_eq!((card.big.as_str(), card.big_note.as_str()), ("6.1 GB", "in all, on C:"));
-        assert_eq!(card.parts[1], ("Logs".to_owned(), "What the app did".to_owned(), "100 MB".to_owned()));
+        let logs = &card.parts[1];
+        assert_eq!(
+            (logs.name.as_str(), logs.what.as_str(), logs.size.as_str()),
+            ("Logs", "What the app did", "100 MB")
+        );
+        assert!(!card.ticks && logs.tick.is_none());
         assert_eq!(card.room, "C: has 8 GB free of 500 GB.");
         assert!(card.warning.starts_with("Nearly full: 8 GB left."));
         let measuring = app_files_card(None, None);
         assert_eq!((measuring.big.as_str(), measuring.big_note.as_str()), ("Measuring…", ""));
         assert!(measuring.parts.is_empty() && measuring.room.is_empty());
+    }
+
+    #[test]
+    fn the_biggest_win_comes_first() {
+        let line = |id: &'static str| Line { id, title: "", why: String::new(), size: String::new() };
+        let lines = biggest_first(vec![(2 * GB, line("small")), (60 * GB, line("big")), (2 * GB, line("also small"))]);
+        let ids: Vec<&str> = lines.iter().map(|l| l.id).collect();
+        // The two that free the same stay in the order they came.
+        assert_eq!(ids, ["big", "small", "also small"]);
     }
 }

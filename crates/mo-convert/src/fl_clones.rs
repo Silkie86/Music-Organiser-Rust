@@ -303,7 +303,11 @@ fn records(data: &[u8], offset: usize, size: usize) -> Option<Vec<Record>> {
         let (base, index, at, length) = (u16_at(r, 4), u16_at(r, 6), u32_at(r, 0), u32_at(r, 8));
         let slot = slot_of(r);
         let (kind, pattern, slot) = match (base, index) {
-            (0, 0x5000 | 0x6000) if (1..=998).contains(&slot) => (Kind::Row, 999 - slot as u32, None),
+            // Rows come from FL 11.1 and older, whose 28- and 32-byte records end with the part played; in any other
+            // size that's somewhere else, so a row there is a layout this doesn't know.
+            (0, 0x5000 | 0x6000) if (1..=998).contains(&slot) && matches!(size, 28 | 32) => {
+                (Kind::Row, 999 - slot as u32, None)
+            }
             (PATTERN_BASE, i) if i > PATTERN_BASE => (Kind::Pattern, (i - PATTERN_BASE) as u32, Some(slot)),
             (PATTERN_BASE, _) => (Kind::Channel, 0, Some(slot)),
             // A layout this doesn't know: change nothing.
@@ -474,7 +478,8 @@ pub fn line_up(raw: &[u8]) -> Result<Lineup, String> {
                 lineup.patches.extend([(r.offset + 4, 0x00), (r.offset + 5, 0x50)]);
                 lineup.patches.extend(index.to_le_bytes().into_iter().enumerate().map(|(i, b)| (r.offset + 6 + i, b)));
                 // The part played: "all of it" (-1, -1), as FL writes it there. Rows say so as two -1.0 floats or
-                // as -1 and 0x7FFFFFFF; no pattern clip in Solomon's saves has the second.
+                // as -1 and 0x7FFFFFFF; no pattern clip in Solomon's saves has the second. Rows are only ever 28- or
+                // 32-byte records (see `records`), where it's the last 8 bytes.
                 let tail = size - 8;
                 lineup.patches.extend((0..8).map(|i| (r.offset + tail + i, 0xFF)));
             }
@@ -562,5 +567,21 @@ mod tests {
         assert!(default_name("Pattern 12"));
         assert!(!default_name("Pattern"));
         assert!(!default_name("Patterns 1"));
+    }
+
+    #[test]
+    fn a_row_is_only_read_in_the_record_sizes_rows_come_in() {
+        // A row on slot 998 (pattern 1): 0, then 0x5000, at bytes 4 to 8, and the slot at 12.
+        let row = |size: usize| {
+            let mut r = vec![0u8; size];
+            r[6..8].copy_from_slice(&0x5000u16.to_le_bytes());
+            r[12..14].copy_from_slice(&998u16.to_le_bytes());
+            r
+        };
+        assert!(records(&row(32), 0, 32).is_some_and(|r| r.len() == 1 && r[0].kind == Kind::Row));
+        // FL 20.99 and later: a layout this doesn't know, so nothing's changed.
+        for size in [60, 80, 88] {
+            assert!(records(&row(size), 0, size).is_none(), "{size}");
+        }
     }
 }

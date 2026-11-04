@@ -22,7 +22,12 @@ pub const DAW: &str = "Bitwig Studio";
 /// Bitwig project again (rule 7). 2 is the C# reader's: Bitwig 6.1's Sampler analysis decoded, and a collected sample
 /// counted once. 3 is what the Rust reader finds differently (DIFFERENCES.md): damaged files read further, and a
 /// plugin state too big to be real left out.
-pub const VERSION: u32 = 3;
+/// 4 warns when the plugin settings stored at the end of the file are missing or damaged.
+pub const VERSION: u32 = 4;
+
+/// Said when the plugin settings stored at the end of a project are missing or can't be opened.
+pub const ZIP_DAMAGED: &str = "The plugin settings stored in this project can't be read: the end of the file is \
+     missing or damaged, so each plugin's sound isn't known.";
 pub const EXTENSIONS: [&str; 1] = ["bwproject"];
 
 // Classes.
@@ -338,7 +343,13 @@ fn read_decoded(project: &Project, collected: &HashSet<String>, info: &mut Proje
     info.details.insert("Notes".into(), notes.to_string());
     info.can_extract_midi = notes > 0;
 
-    let states = zip_entries(doc).map_or(0, |z| z.names.iter().filter(|n| n.starts_with(STATES)).count());
+    let zip = zip_entries(doc);
+    // The header says plugin settings are stored after the body, but they're missing or won't open (a save
+    // interrupted while Bitwig wrote them, or a file cut short).
+    if doc.has_zip && zip.is_none() {
+        info.warnings.push(ZIP_DAMAGED.to_owned());
+    }
+    let states = zip.map_or(0, |z| z.names.iter().filter(|n| n.starts_with(STATES)).count());
     if states > 0 {
         info.details.insert("Stored plugin states".into(), states.to_string());
     }

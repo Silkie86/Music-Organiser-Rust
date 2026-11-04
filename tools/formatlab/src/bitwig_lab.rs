@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::Read;
 
 use mo_formats::bitwig::{Document, ObjId, Slot, Value, decode, is_bitwig};
+use mo_formats::zipped::MOST;
 
 use crate::lab::{self, Data, Format, Item, LabFile};
 use crate::registry;
@@ -277,17 +278,15 @@ fn zip(doc: &Document, items: &mut Vec<Item>) {
         let Ok(mut file) = archive.by_index(i) else { continue };
         let name =
             file.name().map_or_else(|_| String::from_utf8_lossy(file.name_raw()).into_owned(), |n| n.into_owned());
+        // At most what the app takes (256 MB), so a damaged zip can't fill the memory; what came out of a damaged
+        // entry is kept, to see where it broke.
         let mut bytes = Vec::new();
-        if file.read_to_end(&mut bytes).is_err() {
-            bytes.clear();
-        }
-        items.push(Item::new(
-            format!("zip/{name}"),
-            format!("zip › {name}"),
-            1,
-            name,
-            lab::bytes(&bytes),
-            Data::Bytes(bytes),
-        ));
+        let read = (&mut file).take(MOST + 1).read_to_end(&mut bytes);
+        let (shown, bytes) = match read {
+            _ if bytes.len() as u64 > MOST => (format!("too big (over {} MB)", MOST >> 20), Vec::new()),
+            Ok(_) => (lab::bytes(&bytes), bytes),
+            Err(e) => (format!("damaged after {} ({e})", lab::bytes(&bytes)), bytes),
+        };
+        items.push(Item::new(format!("zip/{name}"), format!("zip › {name}"), 1, name, shown, Data::Bytes(bytes)));
     }
 }

@@ -65,15 +65,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Once to lay the page out (the tiles' width tells the page how many fit in a row), then for real.
     capture(&window);
 
+    // The MIDI page, from made-up parts with their notes, worked out in place.
+    mo_ui::midi::work_here();
+    mo_ui::midi::connect(&app, out.join("no library.db"), feed.clone(), &Shortcuts::default());
+    mo_ui::midi::show(&app, Ok(mo_ui::midi::sample()));
+    // Settings, from made-up settings: nothing is read from this computer or written.
+    mo_ui::settings::connect(
+        &app,
+        mo_ui::settings::Setup {
+            settings: mo_app::app_settings::AppSettings::default(),
+            folder: out.join("no settings"),
+            library: out.join("no library.db"),
+            running_pace: mo_app::background::Pace::Fast,
+            live: false,
+            writable: false,
+            feed: feed.clone(),
+        },
+    );
     // The Space page, from made-up drives: it only reads the real ones when it's shown in the app.
-    mo_ui::space::connect(&app, out.join("no library.db"), feed.clone(), &Shortcuts::default());
-    mo_ui::space::show_sample(&app, sample_drives(), sample_app_files(), "");
+    mo_ui::space::connect(&app, out.join("no library.db"), feed.clone());
+    mo_ui::space::show_sample(
+        &app,
+        sample_drives(),
+        sample_app_files(),
+        sample_bitwig_copies(),
+        Default::default(),
+        sample_old_copies(),
+        "",
+    );
 
     let mut shots = Vec::new();
     for place in Place::ALL {
         app.set_place(place.index() as i32);
         shots.push((format!("{}-graphite.png", slug(place.name())), capture(&window)));
     }
+    // The MIDI page with a part picked: its card, piano roll and key; then parts shaped like it.
+    app.set_place(Place::Midi.index() as i32);
+    mo_ui::midi::pick_row(&app, 0);
+    shots.push(("midi-picked.png".into(), capture(&window)));
+    // The roll with each note's name on it (it grows so each row has room).
+    app.global::<mo_ui::MidiData>().set_roll_names(true);
+    shots.push(("midi-note-names.png".into(), capture(&window)));
+    app.global::<mo_ui::MidiData>().set_roll_names(false);
+    mo_ui::midi::run_action(&app, "midi.moreLike");
+    shots.push(("midi-more-like.png".into(), capture(&window)));
+    mo_ui::midi::run_action(&app, "midi.back");
+
     // The Backup page, filled with made-up folders.
     app.set_place(Place::Backup.index() as i32);
     mo_ui::backup::show_lines(&app, mo_ui::backup::sample_lines());
@@ -125,16 +162,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     mo_ui::plugins::show_sample(&app, plugins, massive, 0, &[]);
     capture(&window);
     shots.push(("plugins-missing.png".into(), capture(&window)));
+    settings_shots(&app, &window, &graphite, &mut shots);
     // Space with the App files card open: what each part of the app's folder takes, and C: nearly full.
     app.set_place(Place::Space.index() as i32);
-    mo_ui::space::show_sample(&app, sample_drives(), sample_app_files(), mo_app::space::APP_FILES);
+    mo_ui::space::show_sample(
+        &app,
+        sample_drives(),
+        sample_app_files(),
+        sample_bitwig_copies(),
+        Default::default(),
+        sample_old_copies(),
+        mo_app::space::APP_FILES,
+    );
     capture(&window);
     shots.push(("space-app-files.png".into(), capture(&window)));
     mo_ui::apply_look(&app, &Look::from_settings(Some("Paper"), None));
     capture(&window);
     shots.push(("space-paper.png".into(), capture(&window)));
     mo_ui::apply_look(&app, &graphite);
-    mo_ui::space::show_sample(&app, sample_drives(), sample_app_files(), "");
+    // The Bitwig copies card: each project's copies of Library multisamples, biggest first, with Fix's ticks: one
+    // project fixed with its other saves on show (one of them ticked), one that couldn't be fixed.
+    let bitwig = mo_app::space_bitwig::BITWIG_COPIES;
+    let (copies, fixes) = (sample_bitwig_copies(), sample_fixes());
+    mo_ui::space::show_sample(&app, sample_drives(), sample_app_files(), copies, fixes, sample_old_copies(), bitwig);
+    capture(&window);
+    shots.push(("space-bitwig.png".into(), capture(&window)));
+    // The old copies card: what moving plugin folders to another drive left, biggest first, with one that can't go yet.
+    let (copies, old) = (sample_bitwig_copies(), sample_old_copies());
+    let old_copies = mo_app::space_old::OLD_COPIES;
+    mo_ui::space::show_sample(&app, sample_drives(), sample_app_files(), copies, Default::default(), old, old_copies);
+    capture(&window);
+    shots.push(("space-old.png".into(), capture(&window)));
+    mo_ui::space::show_sample(
+        &app,
+        sample_drives(),
+        sample_app_files(),
+        sample_bitwig_copies(),
+        Default::default(),
+        sample_old_copies(),
+        "",
+    );
+    presets_shots(&app, &window, &mut shots);
     app.set_place(Place::Songs.index() as i32);
     for theme in THEMES.iter().skip(1) {
         mo_ui::apply_look(&app, &Look::from_settings(Some(theme.name), None));
@@ -150,6 +218,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for tab in [Tab::Overview, Tab::Plugins, Tab::Saves] {
         mo_ui::songs::show_picked(&app, 0, sample_detail(), tab);
         mo_ui::arrangement::show_preview(&app, mo_ui::arrangement::sample_preview());
+        mo_ui::arrangement::show_peaks(&app, mo_ui::arrangement::sample_peaks());
         shots.push((format!("song-panel-{}.png", slug(tab.name())), capture(&window)));
     }
     // The arrangement: the mouse on a clip, zoomed in about the mouse, the Bitwig view, and in a light theme.
@@ -165,6 +234,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     shots.push(("arrangement-bitwig-view.png".into(), capture(&window)));
     mo_ui::apply_look(&app, &Look::from_settings(Some("Paper"), None));
     mo_ui::arrangement::show_preview(&app, mo_ui::arrangement::sample_preview());
+    mo_ui::arrangement::show_peaks(&app, mo_ui::arrangement::sample_peaks());
     shots.push(("arrangement-light.png".into(), capture(&window)));
     mo_ui::apply_look(&app, &graphite);
     // A song with things to look at, its Health strip open.
@@ -200,10 +270,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Tooltips: the mouse resting on a rail line, the song panel's Show in folder button and a song's date.
     mo_ui::songs::show_picked(&app, 0, sample_detail(), Tab::Overview);
     mo_ui::arrangement::show_preview(&app, mo_ui::arrangement::sample_preview());
+    mo_ui::arrangement::show_peaks(&app, mo_ui::arrangement::sample_peaks());
     for (name, x, y) in [
         ("tip-rail.png", 60.0, 125.0),
         ("tip-button.png", SHOW_BUTTON.0, SHOW_BUTTON.1),
-        ("tip-date.png", 530.0, 222.0),
+        ("tip-date.png", 530.0, 246.0),
     ] {
         hover(&window, x, y);
         // Before the tip's wait is over, then after: if nothing came up, the mouse missed what it was meant to rest on.
@@ -226,6 +297,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     hover(&window, -1.0, -1.0);
     app.global::<mo_ui::SongsData>().invoke_close_panel();
 
+    finder_shots(&app, &window, &mut shots);
+
     app.set_sheet_open(true);
     shots.push(("key-sheet.png".into(), capture(&window)));
     app.set_sheet_open(false);
@@ -243,6 +316,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("{}", path.display());
     }
     Ok(())
+}
+
+/// The Presets page: made-up sounds with one picked, then the Curves section with a curve picked.
+fn presets_shots(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, shots: &mut Vec<(String, Vec<u8>)>) {
+    use mo_app::presets::Section;
+    app.set_place(Place::Presets.index() as i32);
+    mo_ui::presets::show_sample(app);
+    shots.push(("presets-list.png".into(), capture(window)));
+    mo_ui::presets::pick_row(app, 3);
+    shots.push(("presets-picked.png".into(), capture(window)));
+    mo_ui::presets::show_section(app, Section::Curves);
+    shots.push(("presets-curves.png".into(), capture(window)));
+    mo_ui::presets::pick_row(app, 0);
+    shots.push(("presets-curve-picked.png".into(), capture(window)));
+    mo_ui::presets::show_section(app, Section::Sounds);
+    mo_ui::presets::pick_row(app, usize::MAX);
+}
+
+/// Ctrl+K: opened from the Songs page with nothing typed, a search that finds a song and a sound, only the sounds
+/// (Tab), and an action with its key.
+fn finder_shots(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, shots: &mut Vec<(String, Vec<u8>)>) {
+    use mo_ui::finder;
+    finder::search_here();
+    let songs = mo_app::finder::songs(&sample_songs(), chrono::Local::now().naive_local());
+    finder::add_source(app, "songs", std::sync::Arc::new(songs));
+    app.set_place(Place::Songs.index() as i32);
+    let data = app.global::<mo_ui::FinderData>();
+    let typed = |text: &str| {
+        data.set_query(text.into());
+        data.invoke_edited(text.into());
+    };
+    finder::toggle(app);
+    shots.push(("finder-open.png".into(), capture(window)));
+    typed("glass");
+    shots.push(("finder-search.png".into(), capture(window)));
+    typed("");
+    data.invoke_key("\t".into(), false, false);
+    data.invoke_key("\t".into(), false, false);
+    data.invoke_key(char::from(slint::platform::Key::DownArrow).to_string().into(), false, false);
+    shots.push(("finder-sounds.png".into(), capture(window)));
+    data.invoke_key("\t".into(), false, false);
+    data.invoke_key("\t".into(), false, false);
+    data.invoke_key("\t".into(), false, false);
+    typed("full");
+    shots.push(("finder-action.png".into(), capture(window)));
+    finder::close(app);
 }
 
 /// The Sounds page: a sound picked and playing in its panel, a filter on, the List and History views, and the tiles in
@@ -403,6 +522,124 @@ fn sample_app_files() -> Vec<mo_space::app_files::AppFilesPart> {
         part(part_of("notes", true), 21 * MB),
         part(part_of("bitwig template", false), 4 * MB),
     ]
+}
+
+/// Made-up Bitwig projects on the Bitwig drive with copies of Library multisamples, written as on Windows (the page
+/// splits them the same way here). Each has its own save; GARAGE FOR BW 1 is fixed and has an older save and an
+/// auto-backup, Night Drive has three more saves.
+fn sample_bitwig_copies() -> mo_app::space_bitwig::Copies {
+    use mo_app::space_bitwig::{Copies, Project};
+    use mo_space::bitwig::{LibraryCopy, Save};
+    const MB: u64 = 1 << 20;
+    // Saved `days` after 1 Oct 2026, at 20:15.
+    let save = |folder: &str, name: &str, days: u64| Save {
+        path: format!(r"{folder}\{name}.bwproject").into(),
+        modified: Some(std::time::UNIX_EPOCH + Duration::from_secs(1_790_799_300 + days * 86_400)),
+        below: name.contains('\\'),
+        fixed: None,
+    };
+    let project = |name: &str, copies: &[(&str, u64)], others: &[(&str, u64)]| {
+        let folder = format!(r"K:\Bitwig Studio\Projects\{name}");
+        let copies = copies
+            .iter()
+            .map(|&(sound, mb)| LibraryCopy {
+                in_project: format!(r"{folder}\multi-samples\{sound}-3-2-2.multisample"),
+                library_file: format!(r"K:\Bitwig Studio\Library\{sound}.multisample"),
+                bytes: mb * MB,
+            })
+            .collect();
+        let saves = std::iter::once(save(&folder, name, 33)).chain(others.iter().map(|&(n, d)| save(&folder, n, d)));
+        Project { folder: folder.clone().into(), copies, saves: saves.collect() }
+    };
+    let mut garage = project(
+        "GARAGE FOR BW 1",
+        &[("Kicks 1 Select", 96), ("OHH 1 Select", 74), ("Snares 2 Select", 72)],
+        &[("GARAGE FOR BW 1 v2", 20), (r"auto-backups\GARAGE FOR BW 1-14", 32)],
+    );
+    garage.saves[0].fixed =
+        Some((r"K:\Bitwig Studio\Projects\GARAGE FOR BW 1\GARAGE FOR BW 1 (fixed).bwproject".into(), true));
+    Copies {
+        library: vec![r"K:\Bitwig Studio\Library".into()],
+        folders: 31,
+        projects: vec![
+            garage,
+            project(
+                "Night Drive",
+                &[("Kicks 1 Select", 96), ("Pads Warm", 41)],
+                &[("Night Drive v3", 30), ("Night Drive v2", 12), ("Night Drive v1", 4)],
+            ),
+            project("Bounce 2", &[("OHH 1 Select", 74)], &[]),
+            project("Sketch 14", &[("Bass Mono", 12), ("Keys Soft", 9)], &[]),
+        ],
+    }
+}
+
+/// Made-up old copies left after moving plugin folders to I:, written as on Windows, biggest first: two that can go,
+/// the old place of the folder the moved folders live in, and one that can't go yet.
+fn sample_old_copies() -> mo_app::space_old::Found {
+    use mo_space::after_move::OldHome;
+    use mo_space::old_copies::{Left, Leftover, Reminder};
+    const MB: u64 = 1 << 20;
+    let moved = |day: u32| chrono::NaiveDate::from_ymd_opt(2026, 10, day).and_then(|d| d.and_hms_opt(14, 3, 0));
+    let left = |path: &str, mb: u64, what: Left, now_in: &str, day: Option<u32>, stays: Option<&str>| Leftover {
+        path: path.to_owned(),
+        bytes: mb * MB,
+        what,
+        now_in: now_in.to_owned(),
+        since: day.and_then(moved),
+        stays: stays.map(str::to_owned),
+    };
+    let stays = "It's the only copy the plugin could use now (the link or the copy on the other drive isn't as the move \
+                 left it), so it stays.";
+    let leftovers = vec![
+        left(
+            r"C:\Program Files\Common Files\Spitfire Audio (old copy)",
+            62_870,
+            Left::OldCopy(0),
+            r"I:\Plugin Data\Spitfire Audio",
+            Some(26),
+            None,
+        ),
+        left(
+            r"C:\Users\Public\Documents\Native Instruments\Kontakt Factory Library (old copy)",
+            9_420,
+            Left::OldCopy(1),
+            r"I:\Plugin Data\Kontakt Factory Library",
+            Some(29),
+            None,
+        ),
+        left(r"C:\Plugin Data", 5_210, Left::Behind(0), r"I:\Plugin Data", None, None),
+        left(
+            r"C:\ProgramData\Arturia (old copy)",
+            4_300,
+            Left::OldCopy(2),
+            r"I:\Plugin Data\Arturia",
+            Some(31),
+            Some(stays),
+        ),
+    ];
+    let home = OldHome {
+        path: r"C:\Plugin Data".to_owned(),
+        bytes: 5_210 * MB,
+        note: "its old place".to_owned(),
+        copy: r"I:\Plugin Data".to_owned(),
+        kind: 2,
+    };
+    mo_app::space_old::Found { reminder: Reminder { leftovers }, moved: Vec::new(), homes: vec![home] }
+}
+
+/// What Fix did to the made-up projects: GARAGE FOR BW 1's other saves on show with its older save ticked, and
+/// Sketch 14's save not fixed (which takes its tick off, so Fix isn't pressed again for it by mistake).
+fn sample_fixes() -> mo_app::space_bitwig::Fixes {
+    use mo_app::space_bitwig::{Fixes, Fixing};
+    let garage = r"K:\Bitwig Studio\Projects\GARAGE FOR BW 1";
+    let sketch = r"K:\Bitwig Studio\Projects\Sketch 14\Sketch 14.bwproject";
+    let mut fixes = Fixes::default();
+    fixes.shown.insert(garage.into());
+    fixes.ticks.insert(format!(r"{garage}\GARAGE FOR BW 1 v2.bwproject").into(), true);
+    let why = "nothing was written: the project uses none of the other copies";
+    fixes.done(sketch.into(), Fixing::Failed(why.to_owned()));
+    fixes
 }
 
 /// Made-up fingerprints for the made-up sounds: sounds of a type, and of a length, sit near each other.
@@ -803,6 +1040,97 @@ fn hover(window: &MinimalSoftwareWindow, x: f32, y: f32) {
         slint::platform::WindowEvent::PointerMoved { position }
     };
     window.dispatch_event(event);
+}
+
+/// Settings' tabs, from made-up folders and sound outputs: General in Graphite and Paper, then smaller, then Folders
+/// and Developer.
+fn settings_shots(
+    app: &mo_ui::AppWindow,
+    window: &MinimalSoftwareWindow,
+    graphite: &Look,
+    shots: &mut Vec<(String, Vec<u8>)>,
+) {
+    app.set_place(Place::Settings.index() as i32);
+    let outputs = ["Speakers (Realtek)".to_owned(), "Focusrite USB".to_owned()];
+    mo_ui::settings::show_outputs(app, &outputs, "Sounds play through Speakers (Realtek).");
+    let data = app.global::<mo_ui::SettingsData>();
+    data.invoke_tab_picked(0);
+    capture(window);
+    shots.push(("settings-general.png".into(), capture(window)));
+    scroll(window, 900.0, 500.0, -PAGE_DOWN);
+    shots.push(("settings-general-lower.png".into(), capture(window)));
+    scroll(window, 900.0, 500.0, -PAGE_DOWN);
+    shots.push(("settings-about.png".into(), capture(window)));
+    scroll(window, 900.0, 500.0, 2.0 * PAGE_DOWN);
+    data.invoke_theme_picked(4);
+    data.invoke_accent_picked(2);
+    shots.push(("settings-general-paper.png".into(), capture(window)));
+    data.invoke_back_to_normal();
+    mo_ui::apply_look(app, graphite);
+    data.invoke_size_picked(1);
+    capture(window);
+    shots.push(("settings-general-80.png".into(), capture(window)));
+    data.invoke_size_picked(3);
+    let moved = mo_space::folder_move::MovedFolder {
+        from: "C:\\Users\\Solomon\\Documents\\Native Instruments".into(),
+        to: "I:\\Plugin data\\Native Instruments".into(),
+        old_copy: String::new(),
+        bytes: 0,
+        moved: String::new(),
+        key: String::new(),
+        kind: 2,
+        shared_with: Vec::new(),
+    };
+    mo_ui::settings::show_folders(
+        app,
+        Ok(mo_app::settings::folder_groups(
+            vec!["I:\\Fl Studio Data\\FL Studio\\Projects".into(), "K:\\Bitwig Studio\\Projects".into()],
+            vec!["I:\\Samples".into(), "G:\\Splice".into()],
+            vec!["L:\\New Midi".into()],
+            vec![],
+            vec!["C:\\Program Files\\Common Files\\VST3".into(), "C:\\Program Files\\Common Files\\CLAP".into()],
+            &[moved],
+        )),
+    );
+    data.invoke_tab_picked(1);
+    capture(window);
+    shots.push(("settings-folders.png".into(), capture(window)));
+    data.invoke_tab_picked(2);
+    mo_ui::settings::show_bitwig(
+        app,
+        mo_app::settings::bitwig_status(&Ok(mo_dawlink::bitwig::Hello {
+            link: 3,
+            product: "Bitwig Studio".into(),
+            version: "6.1.5".into(),
+            project: "Night drive".into(),
+            modified: true,
+            changes: true,
+            runtime: "java".into(),
+            extension: "3.18".into(),
+            loopback: Some(true),
+            ..Default::default()
+        })),
+    );
+    mo_ui::settings::show_bitwig_extension(
+        app,
+        mo_dawlink::scripts::ScriptState::Outdated,
+        "3.19",
+        vec![std::path::PathBuf::from(r"K:\Bitwig Studio\Extensions")],
+    );
+    mo_ui::settings::show_fl(
+        app,
+        mo_dawlink::scripts::ScriptState::Outdated,
+        vec![std::path::PathBuf::from(r"I:\Fl Studio Data\FL Studio\Settings\Hardware\Music Organiser")],
+    );
+    capture(window);
+    shots.push(("settings-daws.png".into(), capture(window)));
+    data.invoke_tab_picked(3);
+    capture(window);
+    shots.push(("settings-shortcuts.png".into(), capture(window)));
+    data.invoke_tab_picked(4);
+    capture(window);
+    shots.push(("settings-developer.png".into(), capture(window)));
+    data.invoke_tab_picked(0);
 }
 
 /// The mouse wheel turned over a point: a negative `dy` moves the page up, to show what's below.
