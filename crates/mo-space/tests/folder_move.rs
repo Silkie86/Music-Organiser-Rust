@@ -1480,7 +1480,9 @@ fn a_pipe_or_a_socket_in_the_folder_is_passed_over() {
 }
 
 /// Unplugging a drive is a folder going all at once, with what's in it: a folder renamed away stands in for it (a
-/// Mac and Linux let a folder that's being read be renamed).
+/// Mac and Linux let a folder that's being read be renamed). What came back stays, as it may be the only copy of some
+/// of the files that can be reached then; once the drive is back, trying again clears it first and moves the folder
+/// back.
 #[cfg(unix)]
 #[test]
 fn moving_back_stops_when_the_other_drive_goes_part_way() {
@@ -1506,12 +1508,21 @@ fn moving_back_stops_when_the_other_drive_goes_part_way() {
         }
     };
     let result = move_back(&moved, &[], &ROOMY, &progress, &stop);
-    let Err(CantMove::Failed(why)) = &result else { panic!("{result:?}") };
+    let Err(CantMove::LeftHalfway(why)) = &result else { panic!("{result:?}") };
     assert!(why.contains("Copying stopped at"), "{why}");
-    // The rest wasn't taken for deleted: the plugin still uses the link, and nothing came back half.
+    // The rest wasn't taken for deleted: the plugin still uses the link. What came back stays, and it says so.
     assert!(is_link(&library));
-    assert!(!c.join("Library (moving back)").exists());
+    let kept = c.join("Library (moving back)");
+    assert!(why.contains(&format!("stays, as {}: {} can't be reached now", s(&kept), moved.to)), "{why}");
+    assert!((0..10).all(|n| kept.join(format!("{n}.db")).exists()));
     assert_eq!(fs::read_dir(dir.join("D unplugged").join("Library")).unwrap().count(), 10);
+    // The drive is back: trying again clears what stayed first, and moves the folder back.
+    fs::rename(dir.join("D unplugged"), &d).unwrap();
+    move_back(&moved, &[], &ROOMY, &nothing, &stop).unwrap();
+    assert!(!is_link(&library) && !kept.exists());
+    for n in 0..10 {
+        assert_eq!(fs::read_to_string(library.join(format!("{n}.db"))).unwrap(), "yy");
+    }
 }
 
 /// As above, with the copy moved on to a third drive since, and a link in its place (another tool did that): the
@@ -1542,11 +1553,44 @@ fn moving_back_stops_when_the_drive_the_copys_link_leads_to_goes_part_way() {
         }
     };
     let result = move_back(&moved, &[], &ROOMY, &progress, &stop);
-    let Err(CantMove::Failed(why)) = &result else { panic!("{result:?}") };
+    let Err(CantMove::LeftHalfway(why)) = &result else { panic!("{result:?}") };
     assert!(why.contains("Copying stopped at"), "{why}");
     assert!(is_link(&library));
-    assert!(!c.join("Library (moving back)").exists());
+    let kept = c.join("Library (moving back)");
+    assert!(why.contains(&format!("stays, as {}", s(&kept))), "{why}");
+    assert!((0..10).all(|n| kept.join(format!("{n}.db")).exists()));
     assert_eq!(fs::read_dir(dir.join("E unplugged").join("Library")).unwrap().count(), 10);
+}
+
+/// Moving a folder whose own drive goes part way (unplugged): what was copied stays, as it may be the only copy of some
+/// of its files that can be reached then; once the drive is back, trying again clears it first and moves the folder.
+#[cfg(unix)]
+#[test]
+fn a_move_keeps_what_was_copied_when_the_folders_own_drive_goes_part_way() {
+    let dir = fixtures("mo-space-move-own-drive-gone");
+    let (e, d) = (dir.join("E"), dir.join("D"));
+    let library = e.join("Library");
+    for n in 0..4 {
+        write(&library, &format!("{n}.db"), "x");
+    }
+    fs::create_dir_all(&d).unwrap();
+    let stop = AtomicBool::new(false);
+    let unplugged = dir.join("E unplugged");
+    let progress = |bytes: u64| {
+        if bytes == 2 {
+            fs::rename(&e, &unplugged).unwrap();
+        }
+    };
+    let result = move_folder(&s(&library), &s(&d), 4, whose(), &ROOMY, &[], &[], &progress, &stop);
+    let Err(CantMove::LeftHalfway(why)) = &result else { panic!("{result:?}") };
+    let copy = d.join("Library");
+    assert!(why.contains(&format!("stays, as {}: {} can't be reached now", s(&copy), s(&library))), "{why}");
+    assert!(fs::read_dir(&copy).unwrap().count() >= 2);
+    // The drive is back: trying again clears what stayed first, and moves the folder.
+    fs::rename(&unplugged, &e).unwrap();
+    let moved = move_folder(&s(&library), &s(&d), 4, whose(), &ROOMY, &[], &[], &nothing, &stop).unwrap();
+    assert!(is_link(&library) && moved.has_old_copy());
+    assert!((0..4).all(|n| copy.join(format!("{n}.db")).exists()));
 }
 
 /// As above, with the drive going just as the last file of the last pass has come back: everything was read, so the
