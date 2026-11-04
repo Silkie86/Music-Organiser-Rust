@@ -267,29 +267,18 @@ fn clip(doc: &Document, clip: ObjId, budget: &mut NoteBudget) -> Option<PreviewC
     let name = content.map(|o| doc.obj(o).str(F_CONTENT_NAME)).unwrap_or_default();
 
     // Where a moment of the content falls in the clip: each pass of the loop after the first starts at the loop start.
-    let placements = |at: f64| -> Vec<f64> {
-        let mut out = Vec::new();
-        if !looping {
-            if at >= offset && at < offset + length {
-                out.push(at - offset);
-            }
-            return out;
-        }
-        let pass_length = loop_end - loop_start;
-        if at >= offset && at < loop_end && at - offset < length {
-            out.push(at - offset);
-        }
-        if at < loop_start || at >= loop_end {
-            return out;
-        }
-        let mut pass = loop_end - offset + (at - loop_start);
+    // Worked out one at a time (as the C# app's iterator did), so a note stops as soon as the budget runs out.
+    let pass_length = loop_end - loop_start;
+    let placements = |at: f64| {
+        let in_first = at >= offset && at - offset < length && (!looping || at < loop_end);
+        let first = in_first.then_some(at - offset);
+        let passes = (looping && at >= loop_start && at < loop_end).then_some(loop_end - offset + (at - loop_start));
         // However short the loop, no more passes than the notes an arrangement holds (and one more, so the budget
-        // sees it ran out).
-        while pass < length && out.len() <= MOST_NOTES {
-            out.push(pass);
-            pass += pass_length;
-        }
-        out
+        // sees it ran out); a loop too short to move a huge start on ends there.
+        let later = std::iter::successors(passes, move |&p| Some(p + pass_length).filter(|&next| next > p))
+            .take_while(move |&p| p < length)
+            .take(MOST_NOTES + 1);
+        first.into_iter().chain(later)
     };
 
     if c.class == CLS_AUDIO_CLIP {
@@ -349,6 +338,9 @@ fn clip(doc: &Document, clip: ObjId, budget: &mut NoteBudget) -> Option<PreviewC
     for &lane in &key_lanes {
         let Some(key) = doc.obj(lane).num(F_PITCH) else { continue };
         for n in doc.field_list(lane, F_ITEMS) {
+            if budget.ran_out {
+                break;
+            }
             let n = doc.obj(n);
             if n.class != CLS_NOTE {
                 continue;

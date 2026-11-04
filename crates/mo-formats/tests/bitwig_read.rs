@@ -54,6 +54,19 @@ fn reads_tempo_version_plugins_and_hardware() {
 }
 
 #[test]
+fn plugin_settings_cut_off_the_end_of_the_file_are_warned_about() {
+    let path = bitwig_project(&test_dir("bitwig-read-zip-cut"), "Loop Idea");
+    let raw = std::fs::read(&path).expect("read the file");
+    // A save interrupted while Bitwig wrote the plugin settings: the zip is cut short, or gone.
+    for end in [raw.len() - 30, raw.len() - 300.min(raw.len() / 4)] {
+        let info = bitwig::read_from(&raw[..end], &path);
+        assert!(info.warnings.contains(&bitwig::ZIP_DAMAGED.to_owned()), "{end}: {:?}", info.warnings);
+        assert!(!info.can_extract_presets);
+    }
+    assert!(bitwig::read_from(&raw, &path).warnings.is_empty());
+}
+
+#[test]
 fn uses_bitwigs_display_names_for_tracks() {
     let path = bitwig_project(&test_dir("bitwig-read-tracks"), "Loop Idea");
     assert_eq!(bitwig::read(&path).expect("read").tracks, ["Keys Display", "FX 1"]);
