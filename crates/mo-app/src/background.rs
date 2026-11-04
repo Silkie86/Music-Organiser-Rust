@@ -46,7 +46,18 @@ pub fn on_bulk_pool<T: Send>(work: impl FnOnce() -> T + Send) -> T {
     install(BULK.as_ref(), work)
 }
 
-/// The most threads [`on_bulk_pool`] gets.
+/// [`on_bulk_pool`] for a backup's copy, which can run for hours: a pool of its own again, so working out the next
+/// plan (or reading the drive's older versions) while it copies isn't held up behind it either.
+pub fn on_copy_pool<T: Send>(work: impl FnOnce() -> T + Send) -> T {
+    static COPY: LazyLock<Option<rayon::ThreadPool>> = LazyLock::new(|| {
+        let threads = POOL_THREADS.load(std::sync::atomic::Ordering::Relaxed);
+        let threads = if threads == 0 { cores() } else { threads };
+        build_pool("Backup copy", threads.clamp(1, BULK_THREADS))
+    });
+    install(COPY.as_ref(), work)
+}
+
+/// The most threads [`on_bulk_pool`] (and [`on_copy_pool`]) gets.
 const BULK_THREADS: usize = 4;
 
 /// A pool of `threads` low-priority threads called `name 0`, `name 1`...; 0 is rayon's own choice, one per core.
@@ -65,6 +76,14 @@ fn install<T: Send>(pool: Option<&rayon::ThreadPool>, work: impl FnOnce() -> T +
         // The system wouldn't start the threads: done here instead, still away from the window.
         None => work(),
     }
+}
+
+/// Runs `work`, and if it panics (the panic hook has already logged what broke, as a crash: `mo_catch::catch_crash`)
+/// gives the words to show instead, so a page that asked for it hears back rather than staying busy. For work that
+/// may trip on a damaged file or an odd database row; never for work that leaves something half-changed.
+pub fn guarded<T>(work: impl FnOnce() -> T) -> Result<T, String> {
+    mo_catch::catch_crash(std::panic::AssertUnwindSafe(work))
+        .map_err(|_| "it stopped on something it didn't expect (the log says what)".to_owned())
 }
 
 /// How many threads the pool gets, from Settings' pace; 0 for one per core. Read once, when the pool starts (the bulk
@@ -140,7 +159,7 @@ pub fn free_later<T: Send + 'static>(value: T) {
             for value in freeing {
                 // A part that panics as it's let go is logged (the panic hook does that) and the thread goes on, so
                 // what comes after is still freed here, not on the window's thread.
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(value)));
+                let _ = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| drop(value)));
             }
         })
         .ok()
@@ -224,7 +243,7 @@ impl<J: Send + 'static> Newest<J> {
                     }
                 };
                 // `work` keeps nothing half-changed that the next job relies on: each job starts from its own ask.
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(job)));
+                let _ = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| work(job)));
             }
         })?;
         Ok(Newest { slot })
@@ -264,6 +283,32 @@ mod tests {
     }
 
     #[test]
+    fn long_disk_work_leaves_the_main_pool_free() {
+        use rayon::prelude::*;
+        let (release_tx, release) = mpsc::channel::<()>();
+        let release = Mutex::new(release);
+        let (started_tx, started) = mpsc::channel::<()>();
+        // A long par_iter on the disk pool, held until the main pool's job has answered.
+        let long = std::thread::spawn(move || {
+            on_bulk_pool(|| {
+                let _ = started_tx.send(());
+                (0..64).into_par_iter().for_each(|_| {
+                    let r = release.lock().unwrap_or_else(PoisonError::into_inner);
+                    let _ = r.recv_timeout(Duration::from_secs(10));
+                });
+            });
+        });
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (answer_tx, answer) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = answer_tx.send(on_pool(|| (0..1000).into_par_iter().sum::<u64>()));
+        });
+        assert_eq!(answer.recv_timeout(Duration::from_secs(5)).unwrap(), 499_500);
+        drop(release_tx);
+        long.join().unwrap();
+    }
+
+    #[test]
     fn only_the_newest_waiting_job_is_done() {
         let (done_tx, done) = mpsc::channel();
         let (gate_tx, gate) = mpsc::channel::<()>();
@@ -288,6 +333,13 @@ mod tests {
         drop(worker);
         // The thread stops and its sender goes with it.
         assert!(done.recv_timeout(Duration::from_secs(5)).is_err());
+    }
+
+    #[test]
+    fn guarded_work_says_when_it_broke() {
+        assert_eq!(guarded(|| 2 + 2), Ok(4));
+        let broke: Result<(), String> = guarded(|| panic!("a job that breaks (the test means it)"));
+        assert!(broke.unwrap_err().contains("didn't expect"));
     }
 
     #[test]

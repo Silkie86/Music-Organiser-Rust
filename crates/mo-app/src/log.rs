@@ -9,6 +9,8 @@
 //! log), and then the crash that ends the app and the lines of how the run ended ("Closed"), up to 256 KB more (one
 //! that doesn't fit is cut short, saying so). A crash is counted by where in the code it happened, whichever thread it
 //! was on, and so is its backtrace, a line of its own after it; the crash that ends the app is never only counted.
+//! A panic the app catches on purpose (`mo_catch::catch`: a damaged file tripped a reader) isn't a crash: it's one
+//! warning line ([`caught`]), counted by its place too.
 //! At each start, a low-priority thread keeps the folder in bounds
 //! ([`crate::tidy::prune_logs`]): the newest 30 runs' logs, the newest 30 crash logs and each tool's newest 10 reports.
 //! A run's log can't be removed while it's written: on Windows nobody can remove it while it's open, and on a Mac or
@@ -77,16 +79,18 @@ pub const WRITER_THREAD: &str = "Session log";
 const PRUNE_WAIT: Duration = Duration::from_secs(2);
 const WRITER_WAIT: Duration = Duration::from_secs(5);
 /// What std says of a crash it can't recover from: it ends the app straight after, on whichever thread it was
-/// (checked in Rust 1.99's own code, `core::panicking`, `core::ub_checks` and `std::sys::exit`). In any build: a
-/// second crash while one is being cleaned up, a crash inside code that mustn't crash, or the app's end started again
-/// while it's ending. In debug builds (the launcher's), also the checks that stop unsafe code going wrong: a pointer
-/// that's null or not lined up, an enum with no such value, or a broken promise to an unsafe function.
+/// (checked in Rust 1.99's own code, `core::panicking`, `core::ub_checks` and `std::sys::exit`, and in the checks the
+/// compiler puts in `mem::zeroed` and `mem::uninitialized`). In any build: a second crash while one is being cleaned
+/// up, a crash inside code that mustn't crash, the app's end started again while it's ending, or a value made of
+/// zeroes (or left unset) that its type doesn't allow. In debug builds (the launcher's), also the checks that stop
+/// unsafe code going wrong: a pointer that's null or not lined up, an enum with no such value, or a broken promise to
+/// an unsafe function. Each of these also can't unwind ([`cannot_unwind`]), which the crash handler checks first.
 ///
 /// A crash in a thread's own data as the thread ends (a thread-local's `Drop`) ends the app too, but says nothing of
 /// the kind. So does a second crash while one is being cleaned up, on Windows: there the system ends the app as soon
-/// as the second crash leaves its `Drop`, before std can say anything. So the crash handler keeps the words typed in
-/// an open F12 note whatever this says (the words of a note being saved that aren't on disk yet are kept only for a
-/// crash it knows ends the app).
+/// as the second crash leaves its `Drop`, before std can say anything. So for every crash (not a panic caught on
+/// purpose: see `mo_catch`), the crash handler keeps the words typed in an open F12 note whatever this says (the words
+/// of a note being saved that aren't on disk yet are kept only for a crash it knows ends the app).
 const ENDS_THE_APP: [&str; 6] = [
     "panic in a destructor during cleanup",
     "panic in a function that cannot unwind",
@@ -96,10 +100,13 @@ const ENDS_THE_APP: [&str; 6] = [
     "is_nonoverlapping: `size_of::<T>() * count` overflows a usize",
 ];
 /// The same, for those that go on to say more (which check, which address): they're known by how they start.
-const ENDS_THE_APP_STARTS: [&str; 3] = [
+const ENDS_THE_APP_STARTS: [&str; 6] = [
     "unsafe precondition(s) violated: ",
     "misaligned pointer dereference: ",
     "trying to construct an enum from an invalid value ",
+    "attempted to zero-initialize type `",
+    "attempted to leave type `",
+    "attempted to instantiate uninhabited type `",
 ];
 
 /// The places in the code this run has written a crash log for ([`write_crash_file`]).
@@ -139,11 +146,25 @@ impl CrashFiles {
     }
 }
 
-/// Whether a crash ends the app: one on the window's thread (`main`), or one std can't recover from, on any thread
-/// (`message` is what the crash says). `thread` is the crashing thread's name.
+/// Whether a crash that nothing catches ends the app: one on the window's thread (`main`), or one std can't recover
+/// from, on any thread (`message` is what the crash says, see [`std_ends_the_app`]). `thread` is the crashing thread's
+/// name.
 pub fn crash_ends_the_app(thread: Option<&str>, message: Option<&str>) -> bool {
-    let std_ends_it = |m: &str| ENDS_THE_APP.contains(&m) || ENDS_THE_APP_STARTS.iter().any(|s| m.starts_with(s));
-    thread == Some("main") || message.is_some_and(std_ends_it)
+    thread == Some("main") || std_ends_the_app(message)
+}
+
+/// Whether `message` (what a panic says) is std's own as it ends the app ([`ENDS_THE_APP`]): nothing can catch such a
+/// panic, whatever was to catch it.
+pub fn std_ends_the_app(message: Option<&str>) -> bool {
+    message.is_some_and(|m| ENDS_THE_APP.contains(&m) || ENDS_THE_APP_STARTS.iter().any(|s| m.starts_with(s)))
+}
+
+/// Whether the panic the crash handler was given can't unwind: nothing can catch it, and std ends the app as soon as
+/// the handler is done, whatever it says ([`ENDS_THE_APP`] are the words of those known). Std doesn't let a program ask
+/// yet (`PanicHookInfo::can_unwind` isn't stable in Rust 1.99), but shows it when the panic is printed for debugging,
+/// so it's read from there; a test says so if that ever changes. Called from the crash handler, so it never panics.
+pub fn cannot_unwind(info: &std::panic::PanicHookInfo<'_>) -> bool {
+    format!("{info:?}").contains("can_unwind: false")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -184,6 +205,9 @@ enum Kind<'a> {
     /// a count each, and written into the extra room for crashes. The crash that ends the app (`ends_the_app`) is
     /// never only counted, however many came before it, and goes into the room for how the run ended.
     Crash { place: &'a str, backtrace: bool, ends_the_app: bool },
+    /// A panic the app caught on purpose ([`caught`]): counted by `place`, as a crash is, but not written once the log
+    /// is full, as it isn't a crash.
+    Caught { place: &'a str },
     /// A line of how the run ended ("Closed"): written into the room for that too ([`LAST_ROOM`]), so it shows.
     Last,
 }
@@ -271,6 +295,17 @@ pub fn crash(place: &str, text: &str, ends_the_app: bool) {
     }
 }
 
+/// A panic the app caught on purpose at `place` in the code (`file:line`), with `mo_catch::catch`: a damaged file
+/// tripped a reader, and the work it was part of gives an error instead. A warning in the "Caught" area, counted by its
+/// place as crashes are, so a folder of damaged files, or one read again and again, is written three times and then
+/// only counted. Not written once this run's log is full: it isn't a crash. Called from the crash handler, so it never
+/// waits long and never crashes itself.
+pub fn caught(place: &str, text: &str) {
+    if let Some(log) = current() {
+        log.put(Level::Warning, "Caught", text, Kind::Caught { place });
+    }
+}
+
 /// The backtrace of a crash at `place` (where in the code it came from), as a line of its own after the crash's own
 /// line ([`crash`]): the crash handler writes the crash first, as taking its backtrace can wait. Counted by its place
 /// as the crash's line is, with a count of its own, so each crash counts once; past the third at a place, the crash's
@@ -337,7 +372,7 @@ impl SessionLog {
         let message: String = message.lines().map(str::trim_end).collect::<Vec<_>>().join("\n");
         // A crash's line, and any line written while a thread is crashing (from the crash handler, or by a drop as the
         // thread unwinds), mustn't crash or wait long: a crash there ends the app at once.
-        let crash = matches!(kind, Kind::Crash { .. }) || std::thread::panicking();
+        let crash = matches!(kind, Kind::Crash { .. } | Kind::Caught { .. }) || std::thread::panicking();
         // The time and the key the line is counted by are made before the lock is taken: nothing that could crash
         // runs while it's held (see the top of this file).
         let time = if crash {
@@ -352,6 +387,7 @@ impl SessionLog {
         let key = match kind {
             Kind::Crash { place, backtrace: false, .. } => format!("Crash\u{1}{place}"),
             Kind::Crash { place, backtrace: true, .. } => format!("Backtrace\u{1}{place}"),
+            Kind::Caught { place } => format!("Caught\u{1}{place}"),
             Kind::Plain | Kind::Last => format!("{}\u{1}{area}\u{1}{message}", level.name()),
         };
         let whole = |message: &str| format!("{time} {:<7} [{area}] {message}", level.name());
@@ -372,6 +408,7 @@ impl SessionLog {
                     // The crash's own line says how many times by now.
                     Kind::Crash { backtrace: true, .. } => return,
                     Kind::Crash { place, .. } => whole(&format!("(crashed at {place} {times} times now) {first}")),
+                    Kind::Caught { place } => whole(&format!("(caught at {place} {times} times now) {first}")),
                     Kind::Plain | Kind::Last => whole(&format!("(said {times} times now) {first}")),
                 };
                 st.recent.push_back(line.clone());
@@ -385,7 +422,7 @@ impl SessionLog {
             None => whole(&message),
         };
         let msg = match kind {
-            Kind::Plain => Msg::Line(line),
+            Kind::Plain | Kind::Caught { .. } => Msg::Line(line),
             Kind::Crash { ends_the_app: false, .. } => Msg::Crash(line),
             Kind::Crash { ends_the_app: true, .. } => Msg::Last(line, CUT_CRASH),
             Kind::Last => Msg::Last(line, CUT_LINE),
@@ -1140,6 +1177,35 @@ mod tests {
     }
 
     #[test]
+    fn panics_caught_on_purpose_are_warnings_counted_by_place_and_not_written_once_the_log_is_full() {
+        let dir = temp_folder("caught");
+        let log = SessionLog::new(&dir, Local::now(), "start");
+        let caught = |place: &str, said: &str| log.put(Level::Warning, "Caught", said, Kind::Caught { place });
+        // A folder of damaged files: each says which, but all trip the reader at one place.
+        for i in 0..12 {
+            caught("src/read.rs:9", &format!("damaged file {i} (at src/read.rs:9, on thread Scan {i})"));
+        }
+        caught("src/other.rs:3", "another place");
+        // Counted apart from a crash at the same place.
+        crash_at(&log, "src/read.rs:9", "Music Organiser crashed on thread Scan 1");
+        // Once the log is full, only crashes go on being written.
+        let filler = "x".repeat(200);
+        for i in 0..(MAX_BYTES / 200 + 100) {
+            log.write(Level::Info, "Scan", &format!("{i} {filler}"));
+        }
+        caught("src/late.rs:1", "not written: the log is full");
+        log.close();
+        let text = std::fs::read_to_string(log.path().expect("a file")).expect("readable");
+        assert_eq!(text.matches("Warning [Caught] damaged file ").count(), 3, "{text}");
+        assert!(text.contains("Warning [Caught] (caught at src/read.rs:9 10 times now) damaged file 9 (at "), "{text}");
+        assert!(!text.contains("damaged file 10"), "the later ones are only counted");
+        assert!(text.contains("Warning [Caught] another place"));
+        assert!(text.contains("[Crash] Music Organiser crashed on thread Scan 1"));
+        assert!(!text.contains("not written: the log is full"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_crash_files_backtrace_is_added_after_it() {
         let dir = temp_folder("crash-added");
         let files = CrashFiles::new();
@@ -1228,6 +1294,10 @@ mod tests {
             "trying to construct an enum from an invalid value 0x7",
             "is_nonoverlapping: `size_of::<T>() * count` overflows a usize",
             "std::process::exit called re-entrantly",
+            // The compiler's own checks in `mem::zeroed` and `mem::uninitialized`, in every build.
+            "attempted to zero-initialize type `&u8`, which is invalid",
+            "attempted to leave type `&u8` uninitialized, which is invalid",
+            "attempted to instantiate uninhabited type `core::convert::Infallible`",
         ] {
             assert!(crash_ends_the_app(Some("Background 2"), Some(said)), "{said}");
         }
@@ -1292,6 +1362,64 @@ mod tests {
             "std's own words as it ends the app are known, and only those: {said:?}, {}",
             copy.status
         );
+    }
+
+    /// Set for the copy of this test program that panics where nothing can catch it (see the test below): how.
+    const CANT_UNWIND_IN_THE_COPY: &str = "MO_TEST_PANIC_THAT_CANT_UNWIND";
+
+    /// Only in the copy that the test below runs; in an ordinary run it does nothing. A panic std can't go on from: out
+    /// of an `extern "C"` function, or a value of zeroes its type doesn't allow. What each panic said, and whether it
+    /// could unwind, is printed, and then std ends the copy.
+    #[test]
+    #[allow(unsafe_code, invalid_value)]
+    fn a_panic_that_cant_unwind_in_a_copy() {
+        let Some(how) = std::env::var_os(CANT_UNWIND_IN_THE_COPY) else { return };
+        std::panic::set_hook(Box::new(|info| {
+            let mut out = std::io::stdout().lock();
+            let said = info.payload_as_str().unwrap_or("(nothing)");
+            let _ = writeln!(out, "{SAID}{}: {said}", if cannot_unwind(info) { "can't unwind" } else { "unwinds" });
+            let _ = out.flush();
+        }));
+        extern "C" fn crashes() {
+            panic!("a crash in an extern \"C\" function");
+        }
+        if how == "extern" {
+            crashes();
+        } else {
+            // A reference is never all zeroes: the compiler checks for that.
+            let _zeroes: &u8 = unsafe { std::mem::zeroed() };
+        }
+    }
+
+    /// A panic that can't unwind is known as one, as Rust prints it for debugging (see [`cannot_unwind`]), and by its
+    /// words too: checked on the Rust that builds the app, in a copy of this test program that std then ends.
+    #[test]
+    fn a_panic_that_cant_unwind_is_known() {
+        for how in ["extern", "zeroed"] {
+            let copy = std::process::Command::new(std::env::current_exe().expect("this test program"))
+                .args(["--exact", "log::tests::a_panic_that_cant_unwind_in_a_copy", "--nocapture"])
+                .arg("--test-threads=1")
+                .env(CANT_UNWIND_IN_THE_COPY, how)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .expect("the copy ran");
+            let out = String::from_utf8_lossy(&copy.stdout);
+            assert!(!copy.status.success(), "std ended the copy: {out}");
+            let said: Vec<&str> = out.lines().filter_map(|l| l.split_once(SAID).map(|(_, said)| said)).collect();
+            if how == "extern" {
+                // The crash itself can unwind; it's std's panic as it reaches the function that can't.
+                let ends = [
+                    "unwinds: a crash in an extern \"C\" function",
+                    "can't unwind: panic in a function that cannot unwind",
+                ];
+                assert_eq!(said, ends, "{out}");
+            } else {
+                let [last] = said[..] else { panic!("one panic: {out}") };
+                let words = last.strip_prefix("can't unwind: ");
+                assert!(words.is_some_and(|w| std_ends_the_app(Some(w))), "known both ways: {out}");
+                assert!(last.contains("zero-initialize type `&u8`"), "{out}");
+            }
+        }
     }
 
     #[cfg(unix)]
@@ -1419,7 +1547,7 @@ mod tests {
         let (done, finished) = channel();
         let writer = std::sync::Arc::clone(&log);
         std::thread::spawn(move || {
-            let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let crashed = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| {
                 let _writes = WritesAsItGoes(writer);
                 panic!("a crash in a test, on purpose");
             }));

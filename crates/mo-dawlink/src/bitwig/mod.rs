@@ -32,6 +32,6 @@ pub use link::{
 };
 pub use send::{
     Bitwig, KIT_FAILED, KitSound, KitTarget, PART_FAILED, PART_IN, PART_PLACE, Pad, SOUND_FAILED, SOUND_PLACE, SentKit,
-    SentPart, SentSound, kit_name, kit_pads, note_name, send_kit, send_part, send_sound, sending_kit, sending_part,
-    sending_sound,
+    SentPart, SentSound, kit_name, kit_pads, note_name, send_kit, send_part, send_preset, send_sound, sending_kit,
+    sending_part, sending_sound,
 };

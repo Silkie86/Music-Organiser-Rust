@@ -7,6 +7,7 @@ use mo_app::activity::Feed;
 use mo_app::background::Pace;
 use mo_app::log;
 use mo_app::shortcuts::Shortcuts;
+use mo_catch::Catcher;
 use slint::ComponentHandle;
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -47,6 +48,8 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     };
     mo_ui::gpu::connect(&app);
+    // The window's moves, resizes and hiding, for the freeze lines.
+    mo_ui::watchdog::watch_window(&app);
     // The Songs page reads the C# app's library, read-only (CLAUDE.md: until the Rust page is trusted).
     mo_ui::songs::connect(&app, library.clone(), feed.clone());
     mo_ui::sounds::connect(
@@ -73,6 +76,10 @@ fn main() -> Result<(), slint::PlatformError> {
             feed: feed.clone(),
         },
     );
+    // Presets: the library is only read; part fixes and curves go in the app's own presets.db and curves.db.
+    mo_ui::presets::connect(&app, library.clone(), feed.clone(), &shortcuts);
+    // Plugins: read from the C# app's library, read-only.
+    mo_ui::plugins::connect(&app, library.clone(), feed.clone(), &shortcuts);
     // Space: the drives your folders are on and the app's own files, looked at once the page shows.
     mo_ui::space::connect(&app, library.clone(), feed.clone());
     app.window().set_maximized(true);
@@ -97,6 +104,8 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     // A settings change still waiting to be written goes now.
     mo_ui::settings::finish_up();
+    // A backup still running stops tidily, and its settings and songs list waiting to be written go now.
+    mo_ui::backup::finish_up();
     // A note left open keeps its draft for next time, but the launcher shouldn't wait on it any more.
     mo_ui::note::wait_for_saves();
     mo_ui::note::finish_up();
@@ -110,15 +119,17 @@ fn main() -> Result<(), slint::PlatformError> {
 /// Rule 17, crashes always log: a panic anywhere goes into the session log, with where it happened, and is written out
 /// before the app closes. It also gets its own `logs\crash-<time>.log`, in case the session log couldn't be written
 /// (one for each place in the code that crashed, a few places a run, so a crash that keeps happening can't fill the
-/// folder; the crash that ends the app always gets its file; rule 28). Nothing in here may crash itself: std would end
-/// the app on the spot.
+/// folder; the crash that ends the app always gets its file; rule 28). A panic the app catches on purpose
+/// (`mo_catch::catch`: a damaged file tripped a reader) isn't a crash: it's one warning line ([`caught`]). Nothing in
+/// here may crash itself: std would end the app on the spot.
 fn log_crashes() {
     set_crash_hook(mo_app::paths::logs_dir, mo_ui::note::after_crash, flush_the_log, || {});
 }
 
-/// Puts in the crash handler: what the app does with a crash ([`on_crash`], into the logs folder `logs` gives, with
-/// `keep_note` and `flush`), then `after` (nothing in the app; a test counts the crashes), then std's own report of it,
-/// on the console when there is one. Std's report comes last: it can wait for ever on a console nobody reads.
+/// Puts in the crash handler. A panic a [`mo_catch::catch`] catches is only a warning line ([`caught`]). Anything else
+/// is a crash: what the app does with it ([`on_crash`], into the logs folder `logs` gives, with `keep_note` and
+/// `flush`), then `after` (nothing in the app; a test counts the crashes), then std's own report of it, on the console
+/// when there is one. Std's report comes last: it can wait for ever on a console nobody reads.
 fn set_crash_hook(
     logs: impl Fn() -> PathBuf + Send + Sync + 'static,
     keep_note: impl Fn(bool) + Send + Sync + 'static,
@@ -127,10 +138,57 @@ fn set_crash_hook(
 ) {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        on_crash(info, &logs(), &keep_note, &flush);
+        let current = std::thread::current();
+        let (catcher, fatal) =
+            what_it_is(log::cannot_unwind(info), info.payload_as_str(), current.name(), mo_catch::panic_starting);
+        if catcher == Catcher::Catch {
+            caught(info, current.name());
+            return;
+        }
+        on_crash(info, fatal, &logs(), &keep_note, &flush);
         after();
         default(info);
     }));
+}
+
+/// What a panic that's starting is: what catches it, and whether it ends the app. `cannot_unwind` and `message` are
+/// the panic's ([`log::cannot_unwind`], what it says), `thread` the name of the thread it's on, and `catcher` asks what
+/// was to catch it (`mo_catch::panic_starting`, asked only when something can).
+fn what_it_is(
+    cannot_unwind: bool,
+    message: Option<&str>,
+    thread: Option<&str>,
+    catcher: impl FnOnce() -> Catcher,
+) -> (Catcher, bool) {
+    // Std ends the app straight after a panic that can't unwind, and after its own words, whatever was to catch it.
+    let std_ends_it = cannot_unwind || log::std_ends_the_app(message);
+    let catcher = if std_ends_it { Catcher::Nothing } else { catcher() };
+    // One on the window's thread ends the app too, unless a catch there lets the window go on.
+    (catcher, std_ends_it || catcher == Catcher::Nothing && log::crash_ends_the_app(thread, message))
+}
+
+/// How much of what a caught panic said goes in its line, in characters.
+const MOST_SAID: usize = 1000;
+
+/// Where in the code a panic happened: `file:line`.
+fn place_of(info: &std::panic::PanicHookInfo<'_>) -> String {
+    info.location().map_or_else(|| "unknown".to_owned(), |l| format!("{}:{}", l.file(), l.line()))
+}
+
+/// What the app does with a panic a [`mo_catch::catch`] catches on purpose (a damaged file tripped a reader): a warning
+/// line in the session log, counted by where in the code it happened, and nothing more. The work it was part of gives
+/// an error and the app goes on, so there's no backtrace to take, no crash log, no F12 note to keep and no report from
+/// std (which could wait on a console nobody reads).
+fn caught(info: &std::panic::PanicHookInfo<'_>, thread: Option<&str>) {
+    let place = place_of(info);
+    let said = info.payload_as_str().unwrap_or("(it said nothing)");
+    // A reader's own words can hold a whole buffer: a line that big would fill the log for the rest of the run.
+    let said = match said.char_indices().nth(MOST_SAID) {
+        Some((cut, _)) => format!("{}… (cut short)", &said[..cut]),
+        None => said.to_owned(),
+    };
+    let thread = thread.unwrap_or("unnamed");
+    log::caught(&place, &format!("{said} (at {place}, on thread {thread}; caught there, and the app went on)"));
 }
 
 /// The places in the code this run has written a crash log for.
@@ -145,16 +203,20 @@ fn flush_the_log() {
 
 /// What the app does with a crash, before std's own report of it: the crash goes into the session log (`flush` waits
 /// for it to be on disk) and into a crash log of its own in `logs`, and the words of an open F12 note are kept
-/// (`keep_note`, told whether the crash ends the app). What the crash says goes to disk first, everywhere, and its
-/// backtrace only after: taking a backtrace waits for a lock of std's that std holds while it reports another thread's
-/// crash on the console, and that can wait for ever (a console that's paused, or a pipe nobody reads). Nothing else in
-/// here waits long.
-fn on_crash(info: &std::panic::PanicHookInfo<'_>, logs: &Path, keep_note: &dyn Fn(bool), flush: &dyn Fn()) {
+/// (`keep_note`, told whether the crash ends the app: `fatal`). What the crash says goes to disk first, everywhere, and
+/// its backtrace only after: taking a backtrace waits for a lock of std's that std holds while it reports another
+/// thread's crash on the console, and that can wait for ever (a console that's paused, or a pipe nobody reads). Nothing
+/// else in here waits long.
+fn on_crash(
+    info: &std::panic::PanicHookInfo<'_>,
+    fatal: bool,
+    logs: &Path,
+    keep_note: &dyn Fn(bool),
+    flush: &dyn Fn(),
+) {
     let current = std::thread::current();
     let thread = current.name().unwrap_or("unnamed");
-    let place = info.location().map_or_else(|| "unknown".to_owned(), |l| format!("{}:{}", l.file(), l.line()));
-    // A crash on the window's thread ends the app, and so does one std can't recover from, on any thread.
-    let fatal = log::crash_ends_the_app(current.name(), info.payload_as_str());
+    let place = place_of(info);
     let text = format!("Music Organiser {} crashed on thread {thread}\n{info}\n", mo_app::version::version());
     log::crash(&place, &text, fatal);
     // Out to disk now. The log's own writer can't wait for itself to write the crash out.
@@ -217,6 +279,35 @@ mod tests {
             is_it(&entry.file_name().to_string_lossy())
                 && std::fs::read_to_string(entry.path()).is_ok_and(|text| text.contains(&said))
         })
+    }
+
+    /// A copy of this test program, ended however the test that started it ends, so it never runs on.
+    struct Ends(std::process::Child);
+
+    impl Drop for Ends {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// What a copy wrote in `dir`: the session log's text, the crash logs' text, and what the crash handler did, in
+    /// order ([`DONE`]).
+    fn logs_in(dir: &Path) -> (String, String, Vec<String>) {
+        let (mut session, mut crashes) = (String::new(), String::new());
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let text = std::fs::read_to_string(entry.path()).unwrap_or_default();
+            if log::is_session_log(&name) {
+                session += &text;
+            } else if log::is_crash_log(&name) {
+                crashes += &text;
+            }
+        }
+        let done = std::fs::read_to_string(dir.join(DONE)).unwrap_or_default();
+        // Only whole lines: one may be read as it's being added.
+        let whole = done.split_inclusive('\n').filter(|l| l.ends_with('\n'));
+        (session, crashes, whole.map(|l| l.trim_end_matches('\n').to_owned()).collect())
     }
 
     /// Only in the copy that the test below runs; in an ordinary run it does nothing. The console (a pipe the test
@@ -287,37 +378,12 @@ mod tests {
             .stderr(Stdio::piped())
             .spawn()
             .expect("the copy started");
-        // The copy is ended however this test ends, so it never runs on.
-        struct Ends(std::process::Child);
-        impl Drop for Ends {
-            fn drop(&mut self) {
-                let _ = self.0.kill();
-                let _ = self.0.wait();
-            }
-        }
         let mut copy = Ends(copy);
-        // The session log's text, the crash logs' text, and what the crash handler did, in order.
-        let read = |dir: &Path| -> (String, String, Vec<String>) {
-            let (mut session, mut crashes) = (String::new(), String::new());
-            for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                let text = std::fs::read_to_string(entry.path()).unwrap_or_default();
-                if log::is_session_log(&name) {
-                    session += &text;
-                } else if log::is_crash_log(&name) {
-                    crashes += &text;
-                }
-            }
-            let done = std::fs::read_to_string(dir.join(DONE)).unwrap_or_default();
-            // Only whole lines: one may be read as it's being added.
-            let whole = done.split_inclusive('\n').filter(|l| l.ends_with('\n'));
-            (session, crashes, whole.map(|l| l.trim_end_matches('\n').to_owned()).collect())
-        };
         // The crashes, and whether each ends the app.
         let threads = [("Crash A", false), ("Crash B", false), ("main", true)];
         let until = Instant::now() + Duration::from_secs(120);
         let (seen, (session, crashes, done)) = loop {
-            let found = read(&dir);
+            let found = logs_in(&dir);
             let (session, crashes, done) = &found;
             // The first crash was handled in full, and std's report of it waits on the console: the other two are
             // written, and their notes kept, though their backtraces wait.
@@ -349,5 +415,234 @@ mod tests {
             let kept = at(format!("{thread} kept the note, ends the app: {ends}, crash log: true"));
             assert!(matches!((flushed, kept), (Some(f), Some(k)) if f < k), "{thread}: {done:?}");
         }
+    }
+
+    #[test]
+    fn what_catches_a_panic_and_whether_it_ends_the_app() {
+        let asked = &std::cell::Cell::new(0);
+        let catcher = |c: Catcher| {
+            move || {
+                asked.set(asked.get() + 1);
+                c
+            }
+        };
+        let is =
+            |cant: bool, said: &str, thread: &str, c: Catcher| what_it_is(cant, Some(said), Some(thread), catcher(c));
+        assert_eq!(is(false, "index out of bounds", "Scan 1", Catcher::Catch), (Catcher::Catch, false));
+        assert_eq!(is(false, "index out of bounds", "main", Catcher::Catch), (Catcher::Catch, false));
+        assert_eq!(is(false, "index out of bounds", "Scan 1", Catcher::CatchCrash), (Catcher::CatchCrash, false));
+        assert_eq!(is(false, "index out of bounds", "main", Catcher::CatchCrash), (Catcher::CatchCrash, false));
+        assert_eq!(is(false, "index out of bounds", "Scan 1", Catcher::Nothing), (Catcher::Nothing, false));
+        assert_eq!(is(false, "index out of bounds", "main", Catcher::Nothing), (Catcher::Nothing, true));
+        assert_eq!(asked.get(), 6, "asked each time");
+        // Std ends the app over these whatever was to catch them, and isn't asked: nothing is marked.
+        assert_eq!(
+            is(true, "words of a check std has added since", "Scan 1", Catcher::Catch),
+            (Catcher::Nothing, true)
+        );
+        assert_eq!(
+            is(false, "panic in a destructor during cleanup", "Scan 1", Catcher::Catch),
+            (Catcher::Nothing, true)
+        );
+        assert_eq!(asked.get(), 6, "not asked");
+        assert_eq!(what_it_is(false, None, None, catcher(Catcher::Catch)), (Catcher::Catch, false), "said nothing");
+    }
+
+    /// Set for the copy of this test program that panics in each way the app catches a panic (see the test below): the
+    /// folder it logs into.
+    const CATCHING_IN_THE_COPY: &str = "MO_TEST_CAUGHT_PANICS";
+
+    /// A reader tripping over a damaged file, always at this one place in the code.
+    fn damaged(said: &str) {
+        panic!("{said}");
+    }
+
+    /// Only in the copy that the test below runs; in an ordinary run it does nothing. A panic caught each way the app
+    /// catches them, each on a thread of its own, one after another, with the app's own crash handler and stand-ins
+    /// that write down what it did ([`DONE`]). Last, a panic in a `Drop` as a caught one goes out, which std ends the
+    /// copy over.
+    #[test]
+    fn panics_caught_in_a_copy() {
+        use mo_catch::{catch, catch_crash};
+        let Some(dir) = std::env::var_os(CATCHING_IN_THE_COPY).map(PathBuf::from) else { return };
+        let _log = log::start(&dir, "A copy of the test program, to catch panics in");
+        let (logs, kept, flushed) = (dir.clone(), dir.clone(), dir.clone());
+        set_crash_hook(
+            move || logs.clone(),
+            move |fatal| did(&kept, &format!("{} kept the note, ends the app: {fatal}", this_thread())),
+            move || {
+                flush_the_log();
+                did(&flushed, &format!("{} flushed", this_thread()));
+            },
+            || {},
+        );
+        let on = |thread: &str, work: fn()| {
+            let ran = std::thread::Builder::new().name(thread.into()).spawn(work).expect("started").join();
+            did(&dir, &format!("{thread} went on: {}", ran.is_ok()));
+        };
+        // A folder of damaged files, all tripping the reader at one place.
+        on("Reader", || {
+            for n in 0..12 {
+                assert!(catch(|| damaged(&format!("damaged file {n}"))).is_err());
+            }
+        });
+        // On the window's thread too, where a crash nothing catches ends the app.
+        on("main", || assert!(catch(|| panic!("damaged file on the window's thread")).is_err()));
+        // Words too long for one line.
+        on("Long", || assert!(catch(|| panic!("damaged file {}", "x".repeat(5000))).is_err()));
+        on("Worker", || assert!(catch_crash(|| panic!("a bug the worker lives through")).is_err()));
+        on("main", || assert!(catch_crash(|| panic!("a bug the window lives through")).is_err()));
+        on("Inner catch", || {
+            let _ = catch_crash(|| assert!(catch(|| panic!("damaged file inside a catch for crashes")).is_err()));
+        });
+        on("Inner crash", || {
+            let _ = catch(|| assert!(catch_crash(|| panic!("a bug inside a catch")).is_err()));
+        });
+        on("Uncaught", || panic!("a bug nothing catches"));
+        // What std says as it ends the app is taken at its word, even in a catch.
+        on("Std", || assert!(catch(|| panic!("std::process::exit called re-entrantly")).is_err()));
+        // Only std's own words, not a caught panic's that hold them.
+        on("Not std", || assert!(catch(|| panic!("damaged file: panic in a function that cannot unwind")).is_err()));
+        struct CatchesItsOwn;
+        impl Drop for CatchesItsOwn {
+            fn drop(&mut self) {
+                let _ = catch(|| panic!("damaged file read in a drop"));
+            }
+        }
+        on("Drop", || {
+            let first = catch(|| {
+                let _drops = CatchesItsOwn;
+                panic!("damaged file, and a drop catches its own");
+            });
+            assert!(first.is_err());
+        });
+        struct PanicsAsItGoes;
+        impl Drop for PanicsAsItGoes {
+            fn drop(&mut self) {
+                if std::thread::panicking() {
+                    panic!("a bug in a drop as a caught panic goes out");
+                }
+            }
+        }
+        on("Cleanup", || {
+            let _ = catch(|| {
+                let _drops = PanicsAsItGoes;
+                panic!("damaged file, then a bug in a drop");
+            });
+        });
+        did(&dir, "the copy went on");
+    }
+
+    #[test]
+    fn a_panic_caught_on_purpose_is_a_warning_and_a_crash_is_still_a_crash() {
+        use std::io::Read;
+        let dir = std::env::temp_dir().join(format!("mo-ui-caught-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("made");
+        let copy = std::process::Command::new(std::env::current_exe().expect("this test program"))
+            .args(["--exact", "tests::panics_caught_in_a_copy", "--nocapture", "--test-threads=1"])
+            .env(CATCHING_IN_THE_COPY, &dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the copy started");
+        let mut copy = Ends(copy);
+        // Std's own reports, read as they come so the pipe never fills.
+        let mut console = copy.0.stderr.take().expect("piped");
+        let reading = std::thread::spawn(move || {
+            let mut text = String::new();
+            let _ = console.read_to_string(&mut text);
+            text
+        });
+        let until = Instant::now() + Duration::from_secs(120);
+        let ended = loop {
+            match copy.0.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                _ if Instant::now() >= until => break None,
+                _ => std::thread::sleep(Duration::from_millis(50)),
+            }
+        };
+        drop(copy);
+        let console = reading.join().unwrap_or_default();
+        let (session, crashes, done) = logs_in(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        let all = format!("{session}\n---\n{crashes}\n---\n{done:?}\n---\n{console}");
+        assert!(ended.is_some_and(|status| !status.success()), "std ended the copy: {ended:?}\n{all}");
+        // What the crash handler did for each thread in turn: its lines up to the one saying whether it went on.
+        let mut on_each: Vec<Vec<&str>> = vec![Vec::new()];
+        for line in &done {
+            on_each.last_mut().expect("one").push(line.as_str());
+            if line.contains(" went on: ") {
+                on_each.push(Vec::new());
+            }
+        }
+        let thread_did = |n: usize| on_each.get(n).cloned().unwrap_or_default();
+        let caught = |said: &str| session.contains(&format!("Warning [Caught] {said} (at "));
+        let crashed = |thread: &str, said: &str| {
+            let text = format!("crashed on thread {thread}\npanicked at ");
+            let both = |log: &str| log.split(&text).skip(1).any(|after| after.lines().nth(1) == Some(said));
+            both(&session) && both(&crashes)
+        };
+
+        // Damaged files: a warning each, three times at one place and then only counted; nothing more.
+        for n in 0..3 {
+            assert!(caught(&format!("damaged file {n}")), "{n}: {all}");
+        }
+        assert!(!caught("damaged file 3") && !caught("damaged file 11"), "counted, not written: {all}");
+        assert!(session.contains("times now) damaged file 9 (at "), "the tenth says how many: {all}");
+        assert!(session.contains("[Caught] (caught at ") && session.contains(" 10 times now) "), "{all}");
+        assert!(caught("damaged file on the window's thread"), "{all}");
+        assert!(caught("damaged file inside a catch for crashes"), "{all}");
+        assert!(caught("damaged file, and a drop catches its own") && caught("damaged file read in a drop"), "{all}");
+        assert!(caught("damaged file, then a bug in a drop"), "{all}");
+        assert!(
+            !crashes.contains("damaged file") && !console.contains("damaged file"),
+            "no crash log, no report: {all}"
+        );
+        assert!(!session.contains("crashed on thread Reader") && !session.contains("crashed on thread Drop"), "{all}");
+        // Nor flushed, nor a note kept for them, on any thread (the window's too), nor taken as the app's end.
+        for (n, thread) in [(0, "Reader"), (1, "main"), (2, "Long"), (5, "Inner catch"), (9, "Not std"), (10, "Drop")] {
+            assert_eq!(thread_did(n), [format!("{thread} went on: true")], "{thread}: {all}");
+        }
+        let long = format!("damaged file {}… (cut short) (at ", "x".repeat(MOST_SAID - "damaged file ".len()));
+        assert!(session.contains(&format!("Warning [Caught] {long}")), "only so much of what it said: {all}");
+        assert!(caught("damaged file: panic in a function that cannot unwind"), "{all}");
+
+        // Bugs: crashes, in full, whatever catches them; only one nothing catches ends its thread.
+        for (thread, said) in [
+            ("Worker", "a bug the worker lives through"),
+            ("main", "a bug the window lives through"),
+            ("Inner crash", "a bug inside a catch"),
+            ("Uncaught", "a bug nothing catches"),
+            ("Std", "std::process::exit called re-entrantly"),
+            ("Cleanup", "a bug in a drop as a caught panic goes out"),
+        ] {
+            assert!(crashed(thread, said), "{thread}: {all}");
+            assert!(console.contains(said), "std's report of it: {all}");
+        }
+        // Each written out, its note kept, and told whether it ends the app: a bug a catch lets the window go on
+        // after doesn't; std's own words do.
+        for (n, thread, ends, went_on) in [
+            (3, "Worker", false, true),
+            (4, "main", false, true),
+            (6, "Inner crash", false, true),
+            (7, "Uncaught", false, false),
+            (8, "Std", true, true),
+        ] {
+            let flushed = format!("{thread} flushed");
+            let kept = format!("{thread} kept the note, ends the app: {ends}");
+            let went = format!("{thread} went on: {went_on}");
+            assert_eq!(thread_did(n), [&flushed, &kept, &flushed, &went], "{thread}: {all}");
+        }
+
+        // A panic in a drop as a caught one goes out: no catch can stop std ending the app (on Windows at once,
+        // elsewhere once it has said so, a crash that ends the app).
+        let mut cleanup = vec!["Cleanup flushed", "Cleanup kept the note, ends the app: false", "Cleanup flushed"];
+        if !cfg!(target_env = "msvc") {
+            cleanup.extend(["Cleanup flushed", "Cleanup kept the note, ends the app: true", "Cleanup flushed"]);
+        }
+        assert_eq!(thread_did(11), cleanup, "{all}");
+        assert_eq!(on_each.len(), 12, "the copy went no further: {all}");
     }
 }

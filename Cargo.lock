@@ -2989,7 +2989,9 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "flate2",
+ "junction",
  "mo-backup",
+ "mo-catch",
  "mo-convert",
  "mo-dawlink",
  "mo-formats",
@@ -3011,6 +3013,7 @@ name = "mo-audio"
 version = "0.1.0"
 dependencies = [
  "cpal",
+ "mo-catch",
  "symphonia",
  "windows",
 ]
@@ -3029,6 +3032,10 @@ dependencies = [
  "winapi-util",
  "zip",
 ]
+
+[[package]]
+name = "mo-catch"
+version = "0.1.0"
 
 [[package]]
 name = "mo-convert"
@@ -3059,6 +3066,7 @@ name = "mo-formatlab"
 version = "0.1.0"
 dependencies = [
  "flate2",
+ "mo-catch",
  "mo-formats",
  "rayon",
  "serde",
@@ -3090,6 +3098,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "known-folders",
+ "mo-catch",
  "mo-formats",
  "notify",
  "rayon",
@@ -3104,6 +3113,7 @@ dependencies = [
 name = "mo-midi"
 version = "0.1.0"
 dependencies = [
+ "mo-catch",
  "mo-formats",
  "mo-harmony",
  "mo-library",
@@ -3130,6 +3140,7 @@ name = "mo-presets"
 version = "0.1.0"
 dependencies = [
  "flate2",
+ "mo-catch",
  "mo-formats",
  "rayon",
  "rusqlite",
@@ -3142,6 +3153,7 @@ name = "mo-sounds"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "fs4",
  "half",
  "mo-audio",
  "mo-formats",
@@ -3161,6 +3173,7 @@ dependencies = [
  "fs4",
  "junction",
  "known-folders",
+ "mo-catch",
  "mo-formats",
  "mo-library",
  "rayon",
@@ -3210,16 +3223,19 @@ version = "0.1.0"
 dependencies = [
  "arboard",
  "chrono",
+ "femtovg",
  "image",
  "known-folders",
  "mo-app",
  "mo-audio",
  "mo-backup",
+ "mo-catch",
  "mo-dawlink",
  "mo-formats",
  "mo-harmony",
  "mo-library",
  "mo-midi",
+ "mo-presets",
  "mo-sounds",
  "mo-space",
  "rayon",
@@ -3227,6 +3243,7 @@ dependencies = [
  "rusqlite",
  "slint",
  "slint-build",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4817,6 +4834,7 @@ dependencies = [
  "i-slint-backend-android-activity",
  "i-slint-backend-linuxkms",
  "i-slint-backend-selector",
+ "i-slint-backend-winit",
  "i-slint-common",
  "i-slint-core",
  "i-slint-core-macros",

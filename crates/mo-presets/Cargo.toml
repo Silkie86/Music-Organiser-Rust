@@ -9,6 +9,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+mo-catch = { path = "../mo-catch" }
 mo-formats = { path = "../mo-formats" }
 # Serum keeps its settings zlib-packed (the same crate as mo-formats).
 flate2 = "1"

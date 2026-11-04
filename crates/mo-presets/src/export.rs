@@ -155,7 +155,7 @@ fn write_all(
                             .map_err(|e| e.clone());
                         // A template changed since it was found could trip the reader: that's this one's failure.
                         let built = raw.and_then(|raw| {
-                            std::panic::catch_unwind(|| bitwig::build(raw, &template.path, p, &p.name))
+                            mo_catch::catch(|| bitwig::build(raw, &template.path, p, &p.name))
                                 .unwrap_or_else(|_| Err("its template stopped the reader".into()))
                         });
                         Some(built.map_err(io::Error::other).and_then(|b| write_checked(&folder.join(&bw), &b)))

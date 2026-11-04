@@ -11,6 +11,8 @@ workspace = true
 [dependencies]
 serde_json = "1"
 chrono.workspace = true
+# Catching a panic on purpose: a damaged file tripping a reader is a warning, not a crash.
+mo-catch = { path = "../mo-catch" }
 # The backup engine (Space page, Backup) and the sizes and song measures it uses.
 mo-backup = { path = "../mo-backup" }
 # FL Studio songs converted for Bitwig ("Open in Bitwig").
@@ -21,8 +23,8 @@ mo-formats = { path = "../mo-formats" }
 mo-harmony = { path = "../mo-harmony" }
 mo-library = { path = "../mo-library" }
 mo-midi = { path = "../mo-midi" }
-# The names the presets and curves files are written under while being made, so the start-up sweep (rule 28) knows
-# the half-made ones a crash left (one rule, kept where they're written).
+# The Presets page's engine (sounds in songs, preset files, part guesses, export and curves), and the names its files
+# are written under while being made, so the start-up sweep (rule 28) knows the half-made ones a crash left.
 mo-presets = { path = "../mo-presets" }
 mo-sounds = { path = "../mo-sounds" }
 mo-space = { path = "../mo-space" }
@@ -37,3 +39,7 @@ rusqlite = { version = "0.41", features = ["bundled"] }
 mo-dawlink = { path = "../mo-dawlink", features = ["fake-bitwig"] }
 # The made-up Bitwig projects the Space Fix test writes (mo-formats' test projects pack a part with it).
 flate2 = "1"
+
+# Folder links in the backup tests, made the way Windows has them (a junction: no administrator rights needed).
+[target.'cfg(windows)'.dev-dependencies]
+junction = "1.4.1"

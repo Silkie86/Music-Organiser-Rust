@@ -36,7 +36,7 @@ pub mod types;
 pub mod usage;
 
 pub use analysis::{ChordSpan, SoundAnalysis};
-pub use db::{Everything, KnownSound, SoundMatch, SoundsDb, SoundsError, StarPoint, TagCount};
+pub use db::{Everything, KnownSound, SoundMatch, SoundsDb, SoundsError, StarPoint, TagCount, count_analysed};
 
 use chrono::NaiveDateTime;
 pub(crate) use mo_formats::paths::file_name;

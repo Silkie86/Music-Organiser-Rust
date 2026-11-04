@@ -18,11 +18,15 @@ pub mod finder;
 pub mod gpu;
 pub mod midi;
 pub mod note;
+pub mod plugins;
+pub mod presets;
 pub mod settings;
 pub mod songs;
 pub mod sounds;
 pub mod space;
+mod stuck;
 pub mod watchdog;
+mod waves;
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -31,7 +35,8 @@ use mo_app::activity::Feed;
 use mo_app::log;
 use mo_app::places::Place;
 use mo_app::shortcuts::{
-    APP_ACTIONS, Action, MIDI_ACTIONS, SONGS_ACTIONS, SOUNDS_ACTIONS, SPACE_ACTIONS, Shortcuts, repeats, what_of,
+    APP_ACTIONS, Action, MIDI_ACTIONS, PLUGINS_ACTIONS, SONGS_ACTIONS, SOUNDS_ACTIONS, SPACE_ACTIONS, Shortcuts,
+    repeats, what_of,
 };
 use mo_app::themes::Look;
 use note::open_note;
@@ -60,12 +65,15 @@ pub fn page_name() -> &'static str {
 pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> Result<AppWindow, slint::PlatformError> {
     let app = AppWindow::new()?;
     arrangement::connect(&app);
+    waves::connect(&app);
     apply_look(&app, look);
     show_places(&app, &shortcuts);
     app.set_settings_place(Place::Settings.index() as i32);
     app.set_songs_place(Place::Songs.index() as i32);
     app.set_sounds_place(Place::Sounds.index() as i32);
     app.set_backup_place(Place::Backup.index() as i32);
+    app.set_plugins_place(Place::Plugins.index() as i32);
+    app.set_presets_place(Place::Presets.index() as i32);
     app.set_midi_place(Place::Midi.index() as i32);
     app.set_space_place(Place::Space.index() as i32);
     KEYS.with(|k| *k.borrow_mut() = Some(std::rc::Rc::new(shortcuts.clone())));
@@ -107,6 +115,20 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> R
             && songs::has_pick()
         {
             return repeat || songs::run_action(&app, id);
+        }
+        if let Some(app) = weak.upgrade()
+            && app.get_place() == Place::Plugins.index() as i32
+            && let Some(id) = shortcuts.page_action_for(&key, PLUGINS_ACTIONS)
+            && plugins::has_pick()
+        {
+            return repeat || plugins::run_action(&app, id);
+        }
+        if let Some(app) = weak.upgrade()
+            && app.get_place() == Place::Presets.index() as i32
+            && let Some(id) = shortcuts.page_action_for(&key, presets::page_actions())
+            && (repeat || presets::run_action(&app, id))
+        {
+            return true;
         }
         if let Some(app) = weak.upgrade()
             && app.get_place() == Place::Sounds.index() as i32
@@ -194,13 +216,14 @@ pub fn shortcuts() -> Shortcuts {
 }
 
 /// A key was changed in Settings: everything that shows or runs a key takes the new list at once (the rail's tooltips,
-/// the key sheet, the Songs buttons, the Sounds card and menu, the Space buttons). Every page's keys run from this one
-/// list.
+/// the key sheet, the Songs buttons, the Sounds and Presets cards and menus, the Space buttons). Every page's keys run
+/// from this one list.
 pub fn keys_changed(app: &AppWindow, shortcuts: &Shortcuts) {
     KEYS.with(|k| *k.borrow_mut() = Some(std::rc::Rc::new(shortcuts.clone())));
     show_places(app, shortcuts);
     show_button_keys(app, shortcuts);
     sounds::show_keys(app, shortcuts);
+    presets::show_keys(app, shortcuts);
     space::show(app);
     if let Some(place) = place() {
         app.set_key_rows(ModelRc::new(VecModel::from(key_rows(shortcuts, place))));
@@ -223,6 +246,7 @@ fn show_places(app: &AppWindow, shortcuts: &Shortcuts) {
     let settings = Place::Settings.index();
     app.set_rail(ModelRc::new(VecModel::from(places[..settings].to_vec())));
     app.set_places(ModelRc::new(VecModel::from(places)));
+    app.global::<FinderData>().set_jump_key(shortcuts.key_of("app.jump").into());
 }
 
 /// The Songs page's buttons' tooltips: what each does and its key, from the one shortcut list (rule 15).
@@ -235,7 +259,7 @@ fn show_button_keys(app: &AppWindow, shortcuts: &Shortcuts) {
 }
 
 /// Shows a place, and notes it for the log and the watchdog.
-fn go_to(app: &AppWindow, index: i32) {
+pub(crate) fn go_to(app: &AppWindow, index: i32) {
     let Some(place) = usize::try_from(index).ok().and_then(Place::from_index) else { return };
     let _doing = watchdog::doing("go to a page");
     if PAGE.swap(place.index(), Ordering::Relaxed) != place.index() || app.get_place() != index {
@@ -247,6 +271,9 @@ fn go_to(app: &AppWindow, index: i32) {
     if place == Place::Backup {
         backup::shown();
     }
+    if place == Place::Plugins {
+        plugins::shown();
+    }
     if place == Place::Midi {
         midi::shown(app);
     }
@@ -256,6 +283,15 @@ fn go_to(app: &AppWindow, index: i32) {
     if place == Place::Space {
         space::shown(app);
     }
+    if place == Place::Presets {
+        presets::shown(app);
+    }
+    refresh_keys(app);
+}
+
+/// Fills the key sheet for the place on show (and, on Presets, the section on show).
+pub(crate) fn refresh_keys(app: &AppWindow) {
+    let Some(place) = usize::try_from(app.get_place()).ok().and_then(Place::from_index) else { return };
     KEYS.with(|k| {
         if let Some(shortcuts) = k.borrow().as_ref() {
             app.set_key_rows(ModelRc::new(VecModel::from(key_rows(shortcuts, place))));
@@ -270,6 +306,8 @@ fn key_rows(shortcuts: &Shortcuts, place: Place) -> Vec<KeyRow> {
     let page: &[Action] = match place {
         Place::Songs => SONGS_ACTIONS,
         Place::Sounds => SOUNDS_ACTIONS,
+        Place::Plugins => PLUGINS_ACTIONS,
+        Place::Presets => presets::page_actions(),
         Place::Midi => MIDI_ACTIONS,
         Place::Space => SPACE_ACTIONS,
         _ => &[],

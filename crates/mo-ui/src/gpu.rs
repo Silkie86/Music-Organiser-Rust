@@ -1,4 +1,4 @@
-//! The graphics card, for the views the app draws itself (the galaxy, the arrangement, then the waveforms). Slint
+//! The graphics card, for the views the app draws itself (the galaxy, the arrangement, the sounds' waveforms). Slint
 //! draws the window with wgpu, and once the window is up it hands over the same device; each view draws into a
 //! picture on the card that Slint shows like any other image. Where there's no card to draw with (an old driver,
 //! the screenshots, the tests, or `MO_DRAW_CPU=1` to compare), the views draw on the processor instead, as before.
@@ -82,14 +82,17 @@ pub fn connect(app: &AppWindow) {
                 if let Some(app) = weak.upgrade() {
                     crate::sounds::graphics_ready(&app);
                     crate::arrangement::graphics_ready(&app);
+                    crate::waves::graphics_ready(&app);
                 }
             });
         }
         // Frame timing (the `[Frames]` lines): how long Slint takes to lay out and draw the window, marked for the
-        // freeze watchdog too. Only measures; it changes nothing that's drawn.
+        // freeze watchdog too. Only measures; it changes nothing that's drawn. The waveforms' time to draw new
+        // pictures in starts again with each frame.
         RenderingState::BeforeRendering => {
             DRAWING_SINCE.with(|d| d.set(Some(std::time::Instant::now())));
             crate::watchdog::drawing(true);
+            crate::waves::frame_starts();
         }
         RenderingState::AfterRendering => {
             crate::watchdog::drawing(false);
@@ -104,10 +107,12 @@ pub fn connect(app: &AppWindow) {
             // goes, when there's no window left to show anything on.
             crate::sounds::card_gone();
             crate::arrangement::card_gone();
+            crate::waves::card_gone();
             // The pictures on show go too, and are drawn again on the next card or the processor.
             if let Some(app) = weak.upgrade() {
                 crate::sounds::graphics_gone(&app);
                 crate::arrangement::graphics_gone(&app);
+                crate::waves::graphics_gone(&app);
             }
         }
         _ => {}
@@ -127,10 +132,10 @@ pub fn generation() -> u64 {
     GENERATION.with(Cell::get)
 }
 
-/// A view's painter on the graphics card (the galaxy's, the arrangement's): made on a card when the card is handed
-/// over ([`prepare`]) or the first time the view is drawn on it, gone with that card, and not made again on a card that
-/// refused to draw the view. On that card the processor draws the view; the next card is tried again. Each view keeps
-/// one, on the window's thread, for as long as the app is open.
+/// A view's painter on the graphics card (the galaxy's, the arrangement's, the waveforms'): made on a card when the
+/// card is handed over ([`prepare`]) or the first time the view is drawn on it, gone with that card, and not made again
+/// on a card that refused to draw the view. On that card the processor draws the view; the next card is tried again.
+/// Each view keeps one, on the window's thread, for as long as the app is open.
 pub struct Painter<T> {
     /// The painter, and which card it was made on (as [`generation`] counts).
     made: Option<(u64, T)>,
@@ -175,10 +180,15 @@ impl<T> Painter<T> {
         self.made.as_mut().map(|(_, painter)| painter)
     }
 
+    /// Whether the painter has been made on card `on`.
+    pub fn made_on(&self, on: u64) -> bool {
+        self.made.as_ref().is_some_and(|(made_on, _)| *made_on == on)
+    }
+
     /// Card `on` refused to draw the view: its painter goes, and the processor draws the view while that card lasts.
     pub fn refused(&mut self, on: u64) {
         self.refused = Some(on);
-        if self.made.as_ref().is_some_and(|(made_on, _)| *made_on == on) {
+        if self.made_on(on) {
             self.made = None;
         }
     }
@@ -191,7 +201,7 @@ impl<T> Painter<T> {
     /// Whether a painter for card `on` is still wanted: it's the card there is now, it hasn't refused, and no painter has
     /// been made on it yet.
     fn wants(&self, on: u64) -> bool {
-        on == generation() && self.refused != Some(on) && self.made.as_ref().is_none_or(|(made_on, _)| *made_on != on)
+        on == generation() && self.refused != Some(on) && !self.made_on(on)
     }
 }
 
@@ -221,9 +231,11 @@ pub fn prepare<T: Send + 'static>(
     }
     let weak = app.as_weak();
     let started = background::spawn(&format!("{name} painter"), move || {
-        let made = checked(&gpu.device, || make(&gpu));
+        let on_its_way = OnItsWay(Some(checked(&gpu.device, || make(&gpu))));
         // Kept on the window's thread, where the view draws, if it's still wanted there.
         let _ = slint::invoke_from_event_loop(move || {
+            let mut on_its_way = on_its_way;
+            let Some(made) = on_its_way.0.take() else { return };
             slot.with(|p| {
                 let mut p = p.borrow_mut();
                 if p.preparing == Some(on) {
@@ -252,6 +264,21 @@ pub fn prepare<T: Send + 'static>(
         Ok(_) => slot.with(|p| p.borrow_mut().preparing = Some(on)),
         // The view makes it itself, when it's first drawn on the card.
         Err(e) => log::info(name, &format!("Couldn't set up the graphics card's painter ahead of time: {e}")),
+    }
+}
+
+/// A painter (or why there's none) on its way to the window's thread. If the window has closed and its event loop
+/// ended by then, the message is never run: Slint keeps it, and lets it go only as the app's thread ends, along with
+/// that thread's own stores, after wgpu's (in a debug build, wgpu then stops the app with an error). So a painter that
+/// never arrives isn't dropped, just left for the system to clear away with the rest of the app, which is ending.
+struct OnItsWay<T>(Option<T>);
+
+impl<T> Drop for OnItsWay<T> {
+    fn drop(&mut self) {
+        // Taken out when it arrives; still here only if it never did.
+        if let Some(never_arrived) = self.0.take() {
+            std::mem::forget(never_arrived);
+        }
     }
 }
 
@@ -309,6 +336,26 @@ mod tests {
         p.made = Some((now + 1, "next"));
         p.refused(now);
         assert_eq!(p.made().copied(), Some("next"));
+    }
+
+    /// A painter that reaches the window's thread is taken and used (dropped as usual when it's let go); one that
+    /// never gets there (the window closed first) isn't dropped at all.
+    #[test]
+    fn a_painter_that_never_arrives_is_left_alone() {
+        struct Painter(std::rc::Rc<Cell<bool>>);
+        impl Drop for Painter {
+            fn drop(&mut self) {
+                self.0.set(true);
+            }
+        }
+        let dropped = std::rc::Rc::new(Cell::new(false));
+        let mut arrived = OnItsWay(Some(Painter(dropped.clone())));
+        drop(arrived.0.take());
+        drop(arrived);
+        assert!(dropped.get(), "used and let go");
+        let dropped = std::rc::Rc::new(Cell::new(false));
+        drop(OnItsWay(Some(Painter(dropped.clone()))));
+        assert!(!dropped.get(), "never arrived, so never dropped");
     }
 
     /// While a painter is being made away from the window's thread, the processor draws the view.

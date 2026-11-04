@@ -154,6 +154,16 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
     });
     data.on_reveal(|| with_picked(|_, r| reveal(&r.song.latest)));
     data.on_copy_path(|| with_picked(|_, r| copy_path(&r.song.latest.path)));
+    let weak = app.as_weak();
+    data.on_show_presets(move || {
+        let Some(app) = weak.upgrade() else { return };
+        let mut save = None;
+        with_picked(|_, r| save = Some(r.song.latest.path.clone()));
+        if let Some(save) = save {
+            crate::go_to(&app, Place::Presets.index() as i32);
+            crate::presets::show_song(&app, &save);
+        }
+    });
     data.set_statuses(strings(STATUSES.iter().copied()));
     let weak = app.as_weak();
     data.on_search_edited(move |text| {
@@ -175,6 +185,7 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
             "favourites" => f.favourites = !f.favourites,
             "missing" => f.missing = !f.missing,
             "hide-archived" => f.hide_archived = !f.hide_archived,
+            "only" => f.only = None,
             _ => {}
         });
     });
@@ -232,9 +243,14 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
         };
         let read = match opened {
             Ok(lib) => {
-                let read = lib.detail(id).map_err(|e| e.to_string());
-                library = Some(lib);
-                read
+                // A row that trips the reader says so in the panel; the library is opened again at the next pick.
+                match background::guarded(|| lib.detail(id).map_err(|e| e.to_string())) {
+                    Ok(read) => {
+                        library = Some(lib);
+                        read
+                    }
+                    Err(broke) => Err(broke),
+                }
             }
             Err(e) => Err(format!("the library can't be opened ({e})")),
         };
@@ -415,6 +431,34 @@ fn change(weak: &slint::Weak<AppWindow>, f: impl FnOnce(&mut Filters)) {
     refresh(&app);
 }
 
+/// Shows only the songs with one of `saves` (the Plugins page's Show in Songs), under a chip called `label`. The other
+/// filters go, archived songs included, so every song counted on the plugin's card is there.
+pub fn show_only(app: &AppWindow, label: &str, saves: HashSet<i64>) {
+    // Every other filter goes, but "hide archived" is a choice the user keeps.
+    PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let hide_archived = p.filters.hide_archived;
+        p.filters = Filters { only: Some((label.to_owned(), saves)), hide_archived, ..Filters::default() };
+    });
+    pick(app, None);
+    refresh(app);
+}
+
+/// Picks the song with this save and brings it into view (the Plugins page's song lines). Returns whether the list has
+/// it (not while the library is still being read).
+pub fn show_save(app: &AppWindow, save: i64) -> bool {
+    let row = PAGE.with(|p| {
+        p.borrow().songs.rows.iter().position(|r| r.song.saves().chain(&r.song.copies).any(|s| s.id == save))
+    });
+    match row {
+        Some(row) => {
+            show_song(app, row);
+            true
+        }
+        None => false,
+    }
+}
+
 /// Picks the song at `row` and brings it into view in the list, clearing the filters first when they hide it.
 fn show_song(app: &AppWindow, row: usize) {
     let _doing = crate::watchdog::doing("Songs: show a song");
@@ -424,12 +468,11 @@ fn show_song(app: &AppWindow, row: usize) {
         refresh(app);
     }
     let data = app.global::<SongsData>();
-    let (heading, song) = (data.get_heading_height(), data.get_song_height());
+    // Every line is one height, so the song's place is its line number times that (as the list itself works it out).
+    let line = data.get_line_height();
     let y = PAGE.with(|p| {
-        let p = p.borrow();
-        let at = p.view.entries.iter().position(|e| *e == Entry::Song(row))?;
-        let before = p.view.entries.get(..at).unwrap_or_default();
-        Some(before.iter().map(|e| if matches!(e, Entry::Heading(_)) { heading } else { song }).sum::<f32>())
+        let at = p.borrow().view.entries.iter().position(|e| *e == Entry::Song(row))?;
+        Some(at as f32 * line)
     });
     if let Some(y) = y {
         data.set_show_y(y);
@@ -469,6 +512,7 @@ fn refresh(app: &AppWindow) {
         data.set_missing(f.missing);
         data.set_hide_archived(f.hide_archived);
         data.set_any_filter(f.any());
+        data.set_only(f.only.as_ref().map(|o| o.0.as_str()).unwrap_or_default().into());
         if data.get_search().as_str() != f.search {
             data.set_search(f.search.as_str().into());
         }
@@ -780,9 +824,11 @@ fn open_save(page: &Page, save: &mo_library::Save) {
     }
 }
 
-/// The library's names for the two DAWs Open in Bitwig is about.
+/// The library's names for the two DAWs Open in Bitwig is about. Bitwig's saves are named "Bitwig Studio" (as the
+/// Settings' program for it is kept, `daw_exe:Bitwig Studio`); `BITWIG` is what every one of them starts with.
 const FL: &str = "FL Studio";
 const BITWIG: &str = "Bitwig";
+const BITWIG_STUDIO: &str = mo_formats::bitwig::reader::DAW;
 
 /// The names converted and opened in Bitwig while the app runs: Bitwig only brings an open project forward, so a new
 /// convert of the same song takes the next name.
@@ -797,7 +843,8 @@ fn open_main(page: &Page, save: &mo_library::Save) {
 /// thread; the card says how it went. The FL project and the template are only read.
 fn open_in_bitwig(page: &Page, save: &mo_library::Save) {
     let Some(feed) = FEED.with(|f| f.borrow().clone()) else { return };
-    let exe = page.songs.daw_exes.get(BITWIG).cloned();
+    // The Bitwig program picked in Settings, kept under the library's own name for Bitwig.
+    let exe = page.songs.daw_exes.get(BITWIG_STUDIO).cloned();
     let (db, path, name) = (page.db.clone(), save.path.clone(), save.name.clone());
     let started = background::spawn("Convert", move || {
         if !shell::exists(&path) {
@@ -882,5 +929,12 @@ mod tests {
         assert_eq!(ids(FL), ["open", "bitwig", "", "reveal", "copy"]);
         assert_eq!(ids("Bitwig Studio"), ["open", "", "reveal", "copy"]);
         assert_eq!(save_menu(FL)[0].what, "Open in FL Studio");
+    }
+
+    #[test]
+    fn open_in_bitwig_looks_up_the_program_by_the_library_s_name_for_bitwig() {
+        // Settings keep the program as `daw_exe:Bitwig Studio`, the name Bitwig's saves carry in the library.
+        assert_eq!(BITWIG_STUDIO, "Bitwig Studio");
+        assert!(BITWIG_STUDIO.starts_with(BITWIG));
     }
 }

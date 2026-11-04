@@ -5,7 +5,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use mo_formats::paths::file_name;
 use mo_library::scan::is_inside;
@@ -15,9 +15,10 @@ use crate::admin::{Admin, Step, ask_for, real_spot, reason};
 use crate::clean::{Bin, Done, Problem, Sending, What};
 use crate::folder_move::{
     CantMove, Drives, Fill, KEPT_SUFFIX, MovedFolder, Tree, check_rename, check_rename_or_ask, clear_failed_link,
-    copy_fresh, copy_tree, denied, destination_problem, fresh_name, inside_moved, leads_to, link, link_reaches, listed,
-    only_in, part_way, remove_link, rest_after, room_for, shown, swap_or_ask, target,
+    copy_fresh, copy_tree, denied, destination_problem, failed, fresh_name, inside_moved, leads_to, link, link_reaches,
+    listed, not_noted, only_in, part_way, remove_link, rest_after, room_for, shown, swap_or_ask, target, write_through,
 };
+use crate::half_copy::{busy_now, claim, clear_own, going_into_use, unmark};
 use crate::plugin_space::{PluginSpace, SpaceKind};
 use crate::size::{self, is_link};
 use crate::{is_dir, key, real_folder, text};
@@ -89,10 +90,11 @@ pub fn home_of(moved: &MovedFolder) -> String {
     Path::new(&moved.to).parent().map_or_else(|| moved.to.clone(), |p| p.to_string_lossy().into_owned())
 }
 
-/// The moved folders whose link leads nowhere: their folder on the other drive was moved or renamed, or the drive isn't
-/// plugged in.
+/// The moved folders whose link doesn't reach their copy: their folder on the other drive was moved or renamed, or the
+/// drive isn't plugged in; or the link leads somewhere else (a move of their home cut off after the links were pointed
+/// at the new place, before the folder went there). Pointing the links at where the copies are puts it right.
 pub fn lost(moved: &[MovedFolder]) -> Vec<&MovedFolder> {
-    moved.iter().filter(|m| is_link(Path::new(&m.from)) && !is_dir(&m.to)).collect()
+    moved.iter().filter(|m| is_link(Path::new(&m.from)) && !link_reaches(m)).collect()
 }
 
 /// The moved folders a plugin update put a real folder back in place of (some installers delete the folder and make it
@@ -187,22 +189,31 @@ pub fn link_again(
     }
     let aside = fresh_name(from, if second { SECOND_SUFFIX } else { UPDATE_SUFFIX });
     let kept_in = PathBuf::from(fresh_name(&moved.to, KEPT_BEFORE_SUFFIX));
-    let tree = Tree { keep_in: Some(&kept_in), keep_all: true, ..Tree::new(Path::new(from), to, to) };
+    let changed = AtomicBool::new(false);
+    // Where the folder really is as linking again begins: both passes copy from there, or stop ([`Tree::real_from`]).
+    let real_from = fs::canonicalize(from).map_err(|e| failed(Path::new(from), &e))?;
+    let tree = Tree {
+        keep_in: Some(&kept_in),
+        keep_all: true,
+        changed: Some(&changed),
+        real_from: Some(&real_from),
+        links_lead: Some(Path::new(from)),
+        ..Tree::new(Path::new(from), to, to)
+    };
     room_for(&tree, to, drives, stop)?;
     // Find out before copying whether Windows lets the folder be renamed (asking you, when it guards the folder), once
     // there's known to be room: not after an hour of copying, and not for nothing.
     check_rename_or_ask(from, drives.admin())?;
-    // From here on the copy changes: a stop or a failure says so.
+    // From here on the copy changes: a stop or a failure once it has says so. Before that, nothing was moved.
+    let unchanged = || !changed.load(Ordering::Relaxed) && !kept_in.exists();
+    // A folder took the name it was to be set aside under meanwhile.
+    let taken = || format!("There's a folder called {} beside it now: rename or delete it.", file_name(&aside));
     let partly = |why: CantMove| match why {
         CantMove::LeftHalfway(_) => why,
+        CantMove::OldCopyThere if unchanged() => CantMove::Failed(taken()),
+        other if unchanged() => other,
         other => {
-            let said = match other {
-                // A folder took the name it was to be set aside under meanwhile.
-                CantMove::OldCopyThere => {
-                    format!("There's a folder called {} beside it now: rename or delete it.", file_name(&aside))
-                }
-                other => part_way(&other),
-            };
+            let said = if other == CantMove::OldCopyThere { taken() } else { part_way(&other) };
             let kept = if kept_in.exists() {
                 format!(", and the ones they replaced are kept in {}", text(&kept_in))
             } else {
@@ -215,13 +226,23 @@ pub fn link_again(
             ))
         }
     };
-    let first = copy_tree(&tree, Fill::Freshen, progress, stop).map_err(partly)?;
+    let first = copy_tree(&Tree { last: false, ..tree }, Fill::Freshen, progress, stop).map_err(partly)?;
     // What the plugin saved meanwhile. What the first pass wrote is the update's, not yours: it isn't kept again.
     let mut ours = first.written.clone();
     ours.sort();
-    let again =
-        copy_tree(&Tree { ours: &ours, ..tree }, Fill::Freshen, &|n| progress(first.bytes.saturating_add(n)), stop)
-            .map_err(partly)?;
+    let again = copy_tree(
+        &Tree { ours: &ours, as_files: &first.as_files, last: true, ..tree },
+        Fill::Freshen,
+        &|n| progress(first.bytes.saturating_add(n)),
+        stop,
+    )
+    .map_err(partly)?;
+    write_through(&[&first, &again], stop).map_err(partly)?;
+    // Still the real folder that was copied: one that turned into a link meanwhile would be set aside as a link, with
+    // the update's files somewhere else.
+    if !real_folder(from) {
+        return Err(partly(CantMove::Failed(format!("{from} isn't a real folder now, so it was left alone."))));
+    }
     swap_or_ask(from, to, &aside, drives.admin()).map_err(partly)?;
     let replaced = shown(&[first.kept, again.kept].concat());
     let kept = (!replaced.is_empty()).then(|| OldHome {
@@ -295,6 +316,19 @@ pub fn old_home_can_go(home: &OldHome, moved: &[MovedFolder]) -> bool {
     real_folder(&home.path) && !moved.iter().any(|m| is_inside(&m.to, &home.path) || is_inside(&m.from, &home.path))
 }
 
+/// Why a folder left behind can't go now, when it can't: it isn't there, it's a link now (removing it frees nothing), or
+/// a moved folder (or its link) is still in it ([`old_home_can_go`]). What's only in it is looked at when it goes
+/// ([`remove_old_home`]).
+pub fn old_home_stays(home: &OldHome, moved: &[MovedFolder]) -> Option<String> {
+    if !is_dir(&home.path) {
+        return Some("It isn't there any more.".to_owned());
+    }
+    if is_link(Path::new(&home.path)) {
+        return Some("It's a link now, so removing it frees nothing.".to_owned());
+    }
+    (!old_home_can_go(home, moved)).then(|| "A moved folder, or its link, is still in it, so it stays.".to_owned())
+}
+
 /// What's in a folder left behind but not where its files went, or newer in it, as paths inside it; `None` when it
 /// doesn't say where its files went (the C# app's, or the files linking again replaced), so it can't be told. Reads
 /// both folders: call it away from the window's thread.
@@ -316,14 +350,8 @@ pub fn remove_old_home(home: &OldHome, moved: &[MovedFolder], sure: bool, bin: &
         problems: vec![Problem { path: home.path.clone(), why: why.to_owned() }],
         ..Done::default()
     };
-    if !is_dir(&home.path) {
-        return stays("It isn't there any more.");
-    }
-    if is_link(Path::new(&home.path)) {
-        return stays("It's a link now, so removing it frees nothing.");
-    }
-    if !old_home_can_go(home, moved) {
-        return stays("A moved folder, or its link, is still in it, so it stays.");
+    if let Some(why) = old_home_stays(home, moved) {
+        return stays(&why);
     }
     if !sure {
         match only_in_old_home(home, stop) {
@@ -369,9 +397,11 @@ pub struct HomeMoved {
 
 /// Moves the folder the moved folders live in (all of it, other files too) and points every link at the new place. On
 /// the same drive it's one rename, with the links pointed at the new place just before (if any won't change, or the
-/// rename fails, they're put back and nothing moves); not while a moved folder's own link is in it. To another drive it's copied and checked, and the old one stays
-/// for you to delete. `homes` is every folder left behind. The app keeps the moves and homes it returns. Close the DAW
-/// first. Call it away from the window's thread.
+/// rename fails, they're put back and nothing moves); not while a moved folder's own link is in it. To another drive
+/// it's copied and checked, and the old one stays for you to delete; the copy holds a marker until the links are
+/// pointed at it, so one the app or the computer stopped is cleared by the next try ([`crate::half_copy`]). `homes` is
+/// every folder left behind. The app keeps the moves and homes it returns. Close the DAW first. Call it away from the
+/// window's thread.
 #[allow(clippy::too_many_arguments)]
 pub fn move_home(
     home: &str,
@@ -391,10 +421,14 @@ pub fn move_home(
     if !is_dir(home) {
         return Err(CantMove::Gone);
     }
-    if let Some(why) = destination_problem(home, destination, (bytes, &[]), drives, true, stop) {
+    let to = target(home, destination);
+    // Nothing else in the app makes or clears a copy there until this one is in use.
+    let mine = claim(&to).ok_or_else(|| busy_now(&to))?;
+    // A half copy an earlier try left, cut off part way (the app or the computer stopped), goes first.
+    clear_own(&to, home, moved, &mine, drives, stop)?;
+    if let Some(why) = destination_problem(home, destination, (bytes, &[]), moved, drives, true, Some(&mine), stop) {
         return Err(why);
     }
-    let to = target(home, destination);
     let new_home = text(&to);
     if drives.same(home_path, Path::new(destination)) {
         // A moved folder's link (or old copy) in it would go with the rename, and its record would be wrong.
@@ -410,7 +444,10 @@ pub fn move_home(
         return rename_home(home, &to, moved, homes).map_err(rename_it_yourself);
     }
     copy_fresh(&Tree::new(home_path, &to, &to), progress, stop)?;
+    going_into_use(&to).then_some(()).ok_or_else(|| not_noted(&to))?;
     let now = repoint(home, &new_home, moved, homes, drives.admin());
+    // The links lead into it now: it's no half copy.
+    unmark(&to);
     let old_home = OldHome { path: home.to_owned(), bytes, note: its_old_place(), copy: new_home, kind: 2 };
     Ok(HomeMoved { old_home: Some(old_home), ..now })
 }

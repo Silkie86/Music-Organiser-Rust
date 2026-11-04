@@ -75,6 +75,39 @@ pub const SOUNDS_ACTIONS: &[Action] = &[
     action("sounds.copyPath", "Copy where the sound's file is", "Ctrl+Shift+C"),
 ];
 
+/// The Plugins page's own actions, with the C# ids. Clean up and Uninstall join with the page's second part.
+pub const PLUGINS_ACTIONS: &[Action] = &[
+    action("plugins.projects", "Show the songs that use the picked plugin", "Ctrl+O"),
+    action("plugins.searchOnline", "Search the web for the picked plugin", "Ctrl+Shift+O"),
+];
+
+/// The Presets page's own actions on its Sounds section. Send to Bitwig takes the C# Sound Lab's key.
+pub const PRESETS_ACTIONS: &[Action] = &[
+    action("presets.export", "Export the picked sound as a preset file", "Ctrl+E"),
+    action("presets.toBitwig", "Make the picked sound a Bitwig preset and send it to Bitwig", "Ctrl+B"),
+    action("presets.exportShown", "Export every sound in the list as it's filtered now", "Ctrl+Shift+S"),
+    action("presets.reveal", "Show the picked sound's song or file in its folder", "Ctrl+Shift+E"),
+    action("presets.copyPath", "Copy where the picked sound's song or file is", "Ctrl+Shift+C"),
+    action("presets.useGuess", "Take your part fix away and use the guess again", "Ctrl+Backspace"),
+    action("presets.part.bass", "The picked sound is really a bass", "Alt+1"),
+    action("presets.part.lead", "The picked sound is really a lead", "Alt+2"),
+    action("presets.part.chords", "The picked sound is really chords", "Alt+3"),
+    action("presets.part.pad", "The picked sound is really a pad", "Alt+4"),
+    action("presets.part.stabs", "The picked sound is really stabs or plucks", "Alt+5"),
+    action("presets.part.arp", "The picked sound is really an arp", "Alt+6"),
+    action("presets.part.drums", "The picked sound is really drums", "Alt+7"),
+    action("presets.part.fx", "The picked sound is really FX", "Alt+8"),
+];
+
+/// The Presets page's Curves section's own actions (a list of its own: its keys are the Sounds section's).
+pub const CURVES_ACTIONS: &[Action] = &[
+    action("curves.toBitwig", "Save the picked curve into Bitwig's curves library", "Ctrl+B"),
+    action("curves.reveal", "Show the picked curve's file, to drag onto a Bitwig lane", "Ctrl+Shift+E"),
+    action("curves.rename", "Rename the picked curve", "F2"),
+    action("curves.hide", "Hide the picked curve, or show it again", "Delete"),
+    action("curves.revealSong", "Show the song the picked curve came from", "Ctrl+Shift+O"),
+];
+
 /// The MIDI page's own actions, with the C# MIDI page's ids where it had them. What goes with this (midi.fit),
 /// the playground, Save as and the octave keys join as those parts are built.
 pub const MIDI_ACTIONS: &[Action] = &[
@@ -96,12 +129,20 @@ pub const SPACE_ACTIONS: &[Action] = &[
 ];
 
 /// Every page's own list. A page's keys only work on that page, so two pages may share a key.
-pub const PAGE_ACTIONS: &[&[Action]] = &[SONGS_ACTIONS, SOUNDS_ACTIONS, MIDI_ACTIONS, SPACE_ACTIONS];
+pub const PAGE_ACTIONS: &[&[Action]] =
+    &[SONGS_ACTIONS, SOUNDS_ACTIONS, PRESETS_ACTIONS, CURVES_ACTIONS, MIDI_ACTIONS, PLUGINS_ACTIONS, SPACE_ACTIONS];
 
 /// Every page's own list with the page's name, in the order Settings › Shortcuts shows them (after the keys that work
 /// everywhere).
-pub const PAGES: &[(&str, &[Action])] =
-    &[("Songs", SONGS_ACTIONS), ("Sounds", SOUNDS_ACTIONS), ("MIDI", MIDI_ACTIONS), ("Space", SPACE_ACTIONS)];
+pub const PAGES: &[(&str, &[Action])] = &[
+    ("Songs", SONGS_ACTIONS),
+    ("Sounds", SOUNDS_ACTIONS),
+    ("Presets", PRESETS_ACTIONS),
+    ("Curves", CURVES_ACTIONS),
+    ("MIDI", MIDI_ACTIONS),
+    ("Plugins", PLUGINS_ACTIONS),
+    ("Space", SPACE_ACTIONS),
+];
 
 /// The name Settings › Shortcuts gives the keys that work on every page.
 pub const EVERYWHERE: &str = "Everywhere";
@@ -558,7 +599,7 @@ mod tests {
         assert_eq!(keys.page_action_for("Ctrl+F", SOUNDS_ACTIONS), Some("sounds.copyPath"));
         assert_eq!(keys.action_for("Ctrl+F"), Some("app.search"));
         let said = keys.set("app.fullScreen", "Ctrl+Shift+E");
-        assert!(said.starts_with("Songs and Sounds and MIDI and Space keep"), "{said}");
+        assert!(said.starts_with("Songs and Sounds and Presets and Curves and MIDI and Space keep"), "{said}");
     }
 
     #[test]

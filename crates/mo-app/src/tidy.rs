@@ -488,7 +488,16 @@ fn old_notes_to_bin(folder: &Path, done_file: &Path, kept_for: Duration, now: Sy
                 let shown = path.to_string_lossy().into_owned();
                 let real = mo_space::real_path(&shown).unwrap_or_else(|| shown.clone());
                 let when = unix_seconds(SystemTime::now());
-                Removed { path: shown, real, bytes: meta.len(), what: What::Note, when, bin_id: None }
+                Removed {
+                    path: shown,
+                    real,
+                    bytes: meta.len(),
+                    what: What::Note,
+                    when,
+                    bin_id: None,
+                    binned: None,
+                    binned_zone: None,
+                }
             });
             match tidied.send(bin, path, meta.len()) {
                 // The first file to go is looked for in the bin. Not there, Windows removed it for good (it asks
@@ -2181,7 +2190,7 @@ mod tests {
 
         // The app closes as the second note is being put in the bin.
         let closing = ClosingBin { bin: TestBin(dir.join("bin")), sent: std::cell::Cell::new(0) };
-        let cut_off = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sweep(&places, now, &closing)));
+        let cut_off = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| sweep(&places, now, &closing)));
         assert!(cut_off.is_err());
         assert!(!first.exists() && second.exists() && third.exists());
         // The second may have gone (and been put back since), so it counts as looked at; the third doesn't.

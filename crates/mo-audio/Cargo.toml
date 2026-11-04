@@ -9,6 +9,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+# Catching a panic on purpose: a damaged file tripping a reader is a warning, not a crash.
+mo-catch = { path = "../mo-catch" }
 # Sound output on every system (WASAPI on Windows, Core Audio on a Mac, ALSA on Linux). Apache-2.0.
 cpal = { version = "0.18", optional = true }
 # MP3, FLAC, M4A (AAC), OGG (Vorbis) and AAC, decoded in Rust on every system (the C# app needed Windows for these).

@@ -90,6 +90,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sample_app_files(),
         sample_bitwig_copies(),
         Default::default(),
+        sample_old_copies(),
         "",
     );
 
@@ -142,6 +143,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     shots.push(("backup-gone-open.png".into(), capture(&window)));
     app.global::<mo_ui::BackupData>().set_gone_open(false);
     mo_ui::backup::show_gone(&app, &mo_app::backup_gone::Warning::default());
+    // The Plugins page, from made-up songs: a plugin picked, on each of its card's tabs.
+    mo_ui::plugins::connect(&app, out.join("no library.db"), feed.clone(), &Shortcuts::default());
+    app.set_place(Place::Plugins.index() as i32);
+    let (plugins, copies) = sample_plugins();
+    let serum = plugins.find("serum", "");
+    let kontakt = plugins.find("kontakt7", "");
+    let massive = plugins.find("massive", "");
+    mo_ui::plugins::show_sample(&app, plugins.clone(), serum, 0, &copies);
+    capture(&window);
+    shots.push(("plugins.png".into(), capture(&window)));
+    mo_ui::plugins::show_sample(&app, plugins.clone(), kontakt, 1, &[]);
+    capture(&window);
+    shots.push(("plugins-on-disk.png".into(), capture(&window)));
+    mo_ui::plugins::show_sample(&app, plugins.clone(), serum, 2, &copies);
+    capture(&window);
+    shots.push(("plugins-copies.png".into(), capture(&window)));
+    mo_ui::plugins::show_sample(&app, plugins, massive, 0, &[]);
+    capture(&window);
+    shots.push(("plugins-missing.png".into(), capture(&window)));
     settings_shots(&app, &window, &graphite, &mut shots);
     // Space with the App files card open: what each part of the app's folder takes, and C: nearly full.
     app.set_place(Place::Space.index() as i32);
@@ -151,6 +171,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sample_app_files(),
         sample_bitwig_copies(),
         Default::default(),
+        sample_old_copies(),
         mo_app::space::APP_FILES,
     );
     capture(&window);
@@ -163,17 +184,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // project fixed with its other saves on show (one of them ticked), one that couldn't be fixed.
     let bitwig = mo_app::space_bitwig::BITWIG_COPIES;
     let (copies, fixes) = (sample_bitwig_copies(), sample_fixes());
-    mo_ui::space::show_sample(&app, sample_drives(), sample_app_files(), copies, fixes, bitwig);
+    mo_ui::space::show_sample(&app, sample_drives(), sample_app_files(), copies, fixes, sample_old_copies(), bitwig);
     capture(&window);
     shots.push(("space-bitwig.png".into(), capture(&window)));
+    // The old copies card: what moving plugin folders to another drive left, biggest first, with one that can't go yet.
+    let (copies, old) = (sample_bitwig_copies(), sample_old_copies());
+    let old_copies = mo_app::space_old::OLD_COPIES;
+    mo_ui::space::show_sample(&app, sample_drives(), sample_app_files(), copies, Default::default(), old, old_copies);
+    capture(&window);
+    shots.push(("space-old.png".into(), capture(&window)));
     mo_ui::space::show_sample(
         &app,
         sample_drives(),
         sample_app_files(),
         sample_bitwig_copies(),
         Default::default(),
+        sample_old_copies(),
         "",
     );
+    presets_shots(&app, &window, &mut shots);
     app.set_place(Place::Songs.index() as i32);
     for theme in THEMES.iter().skip(1) {
         mo_ui::apply_look(&app, &Look::from_settings(Some(theme.name), None));
@@ -245,7 +274,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (name, x, y) in [
         ("tip-rail.png", 60.0, 125.0),
         ("tip-button.png", SHOW_BUTTON.0, SHOW_BUTTON.1),
-        ("tip-date.png", 530.0, 222.0),
+        ("tip-date.png", 530.0, 246.0),
     ] {
         hover(&window, x, y);
         // Before the tip's wait is over, then after: if nothing came up, the mouse missed what it was meant to rest on.
@@ -287,6 +316,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("{}", path.display());
     }
     Ok(())
+}
+
+/// The Presets page: made-up sounds with one picked, then the Curves section with a curve picked.
+fn presets_shots(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, shots: &mut Vec<(String, Vec<u8>)>) {
+    use mo_app::presets::Section;
+    app.set_place(Place::Presets.index() as i32);
+    mo_ui::presets::show_sample(app);
+    shots.push(("presets-list.png".into(), capture(window)));
+    mo_ui::presets::pick_row(app, 3);
+    shots.push(("presets-picked.png".into(), capture(window)));
+    mo_ui::presets::show_section(app, Section::Curves);
+    shots.push(("presets-curves.png".into(), capture(window)));
+    mo_ui::presets::pick_row(app, 0);
+    shots.push(("presets-curve-picked.png".into(), capture(window)));
+    mo_ui::presets::show_section(app, Section::Sounds);
+    mo_ui::presets::pick_row(app, usize::MAX);
 }
 
 /// Ctrl+K: opened from the Songs page with nothing typed, a search that finds a song and a sound, only the sounds
@@ -529,6 +574,60 @@ fn sample_bitwig_copies() -> mo_app::space_bitwig::Copies {
     }
 }
 
+/// Made-up old copies left after moving plugin folders to I:, written as on Windows, biggest first: two that can go,
+/// the old place of the folder the moved folders live in, and one that can't go yet.
+fn sample_old_copies() -> mo_app::space_old::Found {
+    use mo_space::after_move::OldHome;
+    use mo_space::old_copies::{Left, Leftover, Reminder};
+    const MB: u64 = 1 << 20;
+    let moved = |day: u32| chrono::NaiveDate::from_ymd_opt(2026, 10, day).and_then(|d| d.and_hms_opt(14, 3, 0));
+    let left = |path: &str, mb: u64, what: Left, now_in: &str, day: Option<u32>, stays: Option<&str>| Leftover {
+        path: path.to_owned(),
+        bytes: mb * MB,
+        what,
+        now_in: now_in.to_owned(),
+        since: day.and_then(moved),
+        stays: stays.map(str::to_owned),
+    };
+    let stays = "It's the only copy the plugin could use now (the link or the copy on the other drive isn't as the move \
+                 left it), so it stays.";
+    let leftovers = vec![
+        left(
+            r"C:\Program Files\Common Files\Spitfire Audio (old copy)",
+            62_870,
+            Left::OldCopy(0),
+            r"I:\Plugin Data\Spitfire Audio",
+            Some(26),
+            None,
+        ),
+        left(
+            r"C:\Users\Public\Documents\Native Instruments\Kontakt Factory Library (old copy)",
+            9_420,
+            Left::OldCopy(1),
+            r"I:\Plugin Data\Kontakt Factory Library",
+            Some(29),
+            None,
+        ),
+        left(r"C:\Plugin Data", 5_210, Left::Behind(0), r"I:\Plugin Data", None, None),
+        left(
+            r"C:\ProgramData\Arturia (old copy)",
+            4_300,
+            Left::OldCopy(2),
+            r"I:\Plugin Data\Arturia",
+            Some(31),
+            Some(stays),
+        ),
+    ];
+    let home = OldHome {
+        path: r"C:\Plugin Data".to_owned(),
+        bytes: 5_210 * MB,
+        note: "its old place".to_owned(),
+        copy: r"I:\Plugin Data".to_owned(),
+        kind: 2,
+    };
+    mo_app::space_old::Found { reminder: Reminder { leftovers }, moved: Vec::new(), homes: vec![home] }
+}
+
 /// What Fix did to the made-up projects: GARAGE FOR BW 1's other saves on show with its older save ticked, and
 /// Sketch 14's save not fixed (which takes its tick off, so Fix isn't pressed again for it by mistake).
 fn sample_fixes() -> mo_app::space_bitwig::Fixes {
@@ -757,6 +856,172 @@ fn sample_detail() -> mo_library::SaveDetail {
 /// Where the song panel's Show in folder and Older saves buttons are in the shots. If the panel's layout moves them,
 /// the tooltip and menu shots come out the same as the plain panel, and mo-screens stops with an error.
 const SHOW_BUTTON: (f32, f32) = (1140.0, 328.0);
+/// Made-up songs and plugins for the Plugins page: some missing, some unused for years, one measured library.
+fn sample_plugins() -> (mo_app::plugins::Plugins, Vec<mo_library::plugins::ScannedPlugin>) {
+    use mo_app::plugins::{Plugins, Read, SaveBrief, SongBrief};
+    use mo_library::PluginKind::{Effect, Instrument};
+    use mo_library::plugins::{PluginUse, ScanCounts, StoredFolder, StoredSpace};
+    let day = |y: i32, m: u32| {
+        chrono::NaiveDate::from_ymd_opt(y, m, 12).and_then(|d| d.and_hms_opt(20, 0, 0)).unwrap_or_default()
+    };
+    let songs: [(&str, &str, i32, u32, u32); 8] = [
+        ("Didums", "FL Studio", 2026, 10, 14),
+        ("Night Drive", "Bitwig", 2026, 9, 6),
+        ("garage sept", "FL Studio", 2025, 9, 9),
+        ("Odd One", "FL Studio", 2024, 3, 3),
+        ("Lowlands", "Studio One", 2023, 6, 4),
+        ("Basement 4", "FL Studio", 2021, 2, 2),
+        ("Tape Loops", "FL Studio", 2019, 11, 5),
+        ("Old Rave", "FL Studio", 2017, 5, 1),
+    ];
+    let mut saves = Vec::new();
+    let mut song_of = std::collections::HashMap::new();
+    let mut briefs = Vec::new();
+    let mut id = 0i64;
+    for (i, (name, daw, y, m, n)) in songs.iter().enumerate() {
+        let first = id + 1;
+        for k in 0..*n {
+            id += 1;
+            let save_name = if k == 0 { (*name).to_owned() } else { format!("{name}_{}", n - k) };
+            saves.push(SaveBrief {
+                id,
+                name: save_name.clone(),
+                path: format!(r"I:\Projects\{name}\{save_name}.flp"),
+                daw: (*daw).into(),
+                modified: day(*y - i32::from(k > 2), m.saturating_sub(k).max(1)),
+            });
+            song_of.insert(id, i);
+        }
+        briefs.push(SongBrief { name: (*name).into(), latest: first });
+    }
+    // Which songs use which plugin: (name, vendor, format, kind, installed, songs by number).
+    type Uses<'a> = (&'a str, &'a str, &'a str, mo_library::PluginKind, bool, &'a [usize]);
+    let table: [Uses; 18] = [
+        ("Serum", "Xfer Records", "VST3", Instrument, true, &[0, 1, 2, 3, 5, 6]),
+        ("Pro-Q 3", "FabFilter", "VST3", Effect, true, &[0, 1, 2, 3, 4, 5, 6, 7]),
+        ("Valhalla VintageVerb", "Valhalla DSP", "VST3", Effect, true, &[0, 2, 3, 5]),
+        ("Kontakt 7", "Native Instruments", "VST3", Instrument, true, &[7]),
+        ("Massive", "Native Instruments", "VST2", Instrument, false, &[6]),
+        ("Nexus", "reFX", "VST2", Instrument, false, &[3, 5, 7]),
+        ("Ozone 9", "iZotope", "VST3", Effect, false, &[3, 5]),
+        ("Sylenth1", "LennarDigital", "VST2", Instrument, false, &[7]),
+        ("Diva", "u-he", "CLAP", Instrument, true, &[1]),
+        ("Phase Plant", "Kilohearts", "CLAP", Instrument, true, &[0, 1]),
+        ("Decapitator", "Soundtoys", "VST3", Effect, true, &[0, 2, 3]),
+        ("Fruity Reverb 2", "Image-Line", "Native", Effect, true, &[0, 2, 3, 5, 6, 7]),
+        ("Sytrus", "Image-Line", "Native", Instrument, true, &[2, 6]),
+        ("Polymer", "Bitwig", "Native", Instrument, true, &[1]),
+        ("Pro Compressor", "PreSonus", "Native", Effect, true, &[4]),
+        ("CLA-76 Stereo", "Waves", "VST3", Effect, true, &[4, 5]),
+        ("RC-20 Retro Color", "XLN Audio", "VST3", Effect, false, &[5]),
+        ("Omnisphere", "Spectrasonics", "VST2", Instrument, true, &[6, 7]),
+    ];
+    let mut uses = Vec::new();
+    for (name, vendor, format, kind, installed, used) in table {
+        for &song in used {
+            for s in saves.iter().filter(|s| song_of.get(&s.id) == Some(&song)) {
+                uses.push(PluginUse {
+                    save: s.id,
+                    name: name.into(),
+                    key: mo_library::read::name_key(name),
+                    vendor: vendor.into(),
+                    kind,
+                    format: format.into(),
+                    installed,
+                    daw: s.daw.clone(),
+                });
+            }
+        }
+    }
+    const MB: u64 = 1 << 20;
+    const GB: u64 = 1 << 30;
+    let space = |name: &str, folders: &[(&str, u8, u64, &[&str])]| StoredSpace {
+        key: mo_library::read::name_key(name),
+        name: name.into(),
+        vendor: String::new(),
+        folders: folders
+            .iter()
+            .map(|(p, k, b, w)| StoredFolder {
+                path: (*p).into(),
+                kind: *k,
+                bytes: *b,
+                shared_with: w.iter().map(|s| (*s).to_owned()).collect(),
+                added: false,
+            })
+            .collect(),
+        measured: Some(day(2026, 10)),
+    };
+    let spaces = vec![
+        space(
+            "Serum",
+            &[
+                (r"C:\Program Files\Common Files\VST3\Serum.vst3", 0, 40 * MB, &[]),
+                (r"C:\Users\silki\Documents\Xfer\Serum Presets", 1, 2 * GB, &[]),
+            ],
+        ),
+        space("FabFilter Pro-Q 3", &[(r"C:\Program Files\Common Files\VST3\FabFilter Pro-Q 3.vst3", 0, 60 * MB, &[])]),
+        space(
+            "Kontakt 7",
+            &[
+                (r"C:\Program Files\Common Files\VST3\Kontakt 7.vst3", 0, 600 * MB, &[]),
+                (r"K:\Native Instruments\Kontakt Libraries", 2, 182 * GB, &[]),
+                (r"C:\Users\Public\Documents\Native Instruments", 1, 3 * GB, &["kontakt8"]),
+            ],
+        ),
+        space(
+            "Omnisphere",
+            &[
+                (r"C:\Program Files\VSTPlugins\Omnisphere.dll", 0, 300 * MB, &[]),
+                (r"C:\ProgramData\Spectrasonics\STEAM", 2, 64 * GB, &[]),
+            ],
+        ),
+        space(
+            "Arturia Pigments",
+            &[
+                (r"C:\Program Files\Common Files\VST3\Pigments.vst3", 0, 200 * MB, &[]),
+                (r"C:\ProgramData\Arturia\Presets", 1, 4 * GB, &[]),
+            ],
+        ),
+    ];
+    let read = Read {
+        uses,
+        saves,
+        song_of,
+        songs: briefs,
+        spaces,
+        installed_names: vec!["Ozone 11".into(), "Serum".into(), "Kontakt 7".into(), "Arturia Pigments".into()],
+        scans: ScanCounts { files: 214, plugins: 380, failed: 3 },
+        looked_for_installed: true,
+        unused_years: 2,
+        needed_count: 6,
+    };
+    let copies = vec![
+        mo_library::plugins::ScannedPlugin {
+            path: r"C:\Program Files\Common Files\VST3\Serum.vst3".into(),
+            format: "VST3".into(),
+            id: "56535458667358736572756D00000000".into(),
+            name: "Serum".into(),
+            vendor: "Xfer Records".into(),
+            version: "1.368".into(),
+            kind: "instrument".into(),
+            shell: String::new(),
+            parameters: Some(2623),
+            error: String::new(),
+        },
+        mo_library::plugins::ScannedPlugin {
+            path: r"C:\Program Files\VSTPlugins\Serum_x64.dll".into(),
+            format: "VST2".into(),
+            id: "XfsX".into(),
+            name: "Serum_x64".into(),
+            vendor: "Xfer Records".into(),
+            version: "1368".into(),
+            kind: "instrument".into(),
+            ..Default::default()
+        },
+    ];
+    (Plugins::new(read, day(2026, 11)), copies)
+}
+
 /// The Backup page's Remove older versions button, and how far the page is turned down to show the question it asks.
 const REMOVE_OLDER_BUTTON: (f32, f32) = (1127.0, 820.0);
 const PAGE_DOWN: f32 = 300.0;

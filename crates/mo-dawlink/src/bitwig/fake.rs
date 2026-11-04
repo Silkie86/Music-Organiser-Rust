@@ -490,11 +490,19 @@ impl World {
             }
             Some("file") => {
                 let path = given(request.get("path"), "file")?;
-                self.loads(path).then(|| FakeDevice {
-                    name: self.sample_device.clone(),
-                    preset: sample_name(path).to_owned(),
-                    ..FakeDevice::sampler(path)
-                })
+                if self.loads_preset(path) {
+                    // A preset loads as the device it was saved from; the stand-in calls it "Polymer".
+                    Some(FakeDevice {
+                        preset: sample_name(path).to_owned(),
+                        ..FakeDevice::new("Polymer", "instrument")
+                    })
+                } else {
+                    self.loads(path).then(|| FakeDevice {
+                        name: self.sample_device.clone(),
+                        preset: sample_name(path).to_owned(),
+                        ..FakeDevice::sampler(path)
+                    })
+                }
             }
             _ => {
                 let kind = js(request.get("kind"));
@@ -653,6 +661,13 @@ impl World {
             ["wav", "aif", "aiff", "flac", "mp3", "ogg"].iter().any(|a| ext.eq_ignore_ascii_case(a))
         });
         audio && !self.unloadable.iter().any(|u| u == file)
+    }
+
+    /// Whether Bitwig loads this file as a preset: a `.bwpreset` a test didn't say it doesn't.
+    fn loads_preset(&self, path: &str) -> bool {
+        let file = file_name(path);
+        let preset = file.rsplit_once('.').is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("bwpreset"));
+        preset && !self.unloadable.iter().any(|u| u == file)
     }
 
     fn device(&self, track: usize, device: usize) -> Option<&FakeDevice> {

@@ -107,8 +107,9 @@ the next PR step by step). Solomon wants the highest effort here.
 - Bench data is gone with the old container; rebuild it with `tools/theorybench/README.md`.
 
 **Sounds backend** (`mo-sounds`, `mo-audio`): finished. Left: streaming long files while they play; sounds.db
-writes once trusted; a decoder panic caught by catch_unwind still trips mo-ui's crash hook (fix in mo-ui). Never
-`ORDER BY` on the sounds table for whole-table reads; sort in Rust. Notes: `memory/sounds-backend-status.md`.
+writes once trusted. A decoder panic on a damaged file is caught with `mo_catch::catch`: one warning line in the log,
+not a crash. Never `ORDER BY` on the sounds table for whole-table reads; sort in Rust. Notes:
+`memory/sounds-backend-status.md`.
 
 **MIDI backend** (`mo-midi`): index, analyser and key hookup are merged. Left: folder walk via
 `mo_library::scan::find_files`, PhraseJoiner (the arrangement readers it needs now exist), chords once the chord

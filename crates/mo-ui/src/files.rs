@@ -14,11 +14,12 @@ thread_local! {
     static CLIPBOARD: RefCell<Option<arboard::Clipboard>> = const { RefCell::new(None) };
 }
 
-/// Shows the file at `path` in its folder (`folder`), or the folder when the file has gone. Off the window's thread.
+/// Shows the file or folder at `path` in its folder (`folder`), or the folder when it has gone. Off the window's
+/// thread.
 pub fn reveal(feed: &Feed, path: &str, folder: &str) {
     let (path, folder) = (path.to_owned(), folder.to_owned());
     let named = path.clone();
-    launch(feed, "Show in folder", "Couldn't show the file", named, move || {
+    launch(feed, "Show in folder", "Couldn't show it in its folder", named, move || {
         shell::reveal(&path, &folder, shell::exists(&path), shell::Os::THIS)
     });
 }
