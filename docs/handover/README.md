@@ -12,7 +12,7 @@ else any more.
 2. This file.
 3. `memory/` = the project's shared notes, copied as they were on 2026-11-02 (Solomon's drive paths replaced by
    placeholders such as `<FL projects folder>`, because this repo is public). `[[name]]` in them means `memory/name.md`.
-   Start with `rust-rebuild-rules.md` (Solomon's rules 1-27), `rust-rebuild-status.md`, `rust-app-design-decisions.md`,
+   Start with `rust-rebuild-rules.md` (Solomon's rules 1-28), `rust-rebuild-status.md`, `rust-app-design-decisions.md`,
    `app-screens-handover.md`, `app-screens-ui.md`, then `harmony-handoff.md`. The others are per-crate notes; read one
    when you touch that crate.
 4. `docs/harmony/` = the harmony engine's design and experiment notes (they used to live outside the repo).

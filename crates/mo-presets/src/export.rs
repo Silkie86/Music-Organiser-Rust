@@ -242,8 +242,9 @@ fn remove_part(path: &Path) {
     let _ = std::fs::remove_file(path);
 }
 
-/// A half-written file's name: something, then [`PART`], digits, "-", digits, and nothing after.
-fn is_half_written(name: &str) -> bool {
+/// A half-written file's name: something, then [`PART`], digits, "-", digits, and nothing after. The app's start-up
+/// sweep (rule 28) uses this too, to clear one a crash left among the curve files.
+pub fn is_half_written(name: &str) -> bool {
     let Some((before, tail)) = name.rsplit_once(PART) else { return false };
     let Some((app, write)) = tail.split_once('-') else { return false };
     let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());

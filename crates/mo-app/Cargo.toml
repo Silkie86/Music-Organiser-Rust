@@ -23,6 +23,9 @@ mo-library = { path = "../mo-library" }
 # The Presets page's engine: sounds in songs, preset files, part guesses, export and curves.
 mo-presets = { path = "../mo-presets" }
 mo-midi = { path = "../mo-midi" }
+# The names the presets and curves files are written under while being made, so the start-up sweep (rule 28) knows
+# the half-made ones a crash left (one rule, kept where they're written).
+mo-presets = { path = "../mo-presets" }
 mo-sounds = { path = "../mo-sounds" }
 mo-space = { path = "../mo-space" }
 thread-priority.workspace = true
