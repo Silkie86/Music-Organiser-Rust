@@ -65,6 +65,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Once to lay the page out (the tiles' width tells the page how many fit in a row), then for real.
     capture(&window);
 
+    // The MIDI page, from made-up parts with their notes, worked out in place.
+    mo_ui::midi::work_here();
+    mo_ui::midi::connect(&app, out.join("no library.db"), feed.clone(), &Shortcuts::default());
+    mo_ui::midi::show(&app, Ok(mo_ui::midi::sample()));
     // Settings, from made-up settings: nothing is read from this computer or written.
     mo_ui::settings::connect(
         &app,
@@ -87,6 +91,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         app.set_place(place.index() as i32);
         shots.push((format!("{}-graphite.png", slug(place.name())), capture(&window)));
     }
+    // The MIDI page with a part picked: its card, piano roll and key; then parts shaped like it.
+    app.set_place(Place::Midi.index() as i32);
+    mo_ui::midi::pick_row(&app, 0);
+    shots.push(("midi-picked.png".into(), capture(&window)));
+    mo_ui::midi::run_action(&app, "midi.moreLike");
+    shots.push(("midi-more-like.png".into(), capture(&window)));
+    mo_ui::midi::run_action(&app, "midi.back");
+
     // The Backup page, filled with made-up folders.
     app.set_place(Place::Backup.index() as i32);
     mo_ui::backup::show_lines(&app, mo_ui::backup::sample_lines());

@@ -16,6 +16,7 @@ pub mod cards;
 pub mod files;
 pub mod finder;
 pub mod gpu;
+pub mod midi;
 pub mod note;
 pub mod settings;
 pub mod songs;
@@ -30,7 +31,7 @@ use mo_app::activity::Feed;
 use mo_app::log;
 use mo_app::places::Place;
 use mo_app::shortcuts::{
-    APP_ACTIONS, Action, SONGS_ACTIONS, SOUNDS_ACTIONS, SPACE_ACTIONS, Shortcuts, repeats, what_of,
+    APP_ACTIONS, Action, MIDI_ACTIONS, SONGS_ACTIONS, SOUNDS_ACTIONS, SPACE_ACTIONS, Shortcuts, repeats, what_of,
 };
 use mo_app::themes::Look;
 use note::open_note;
@@ -65,6 +66,7 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> R
     app.set_songs_place(Place::Songs.index() as i32);
     app.set_sounds_place(Place::Sounds.index() as i32);
     app.set_backup_place(Place::Backup.index() as i32);
+    app.set_midi_place(Place::Midi.index() as i32);
     app.set_space_place(Place::Space.index() as i32);
     KEYS.with(|k| *k.borrow_mut() = Some(std::rc::Rc::new(shortcuts.clone())));
     show_button_keys(&app, &shortcuts);
@@ -110,6 +112,13 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> R
             && app.get_place() == Place::Sounds.index() as i32
             && let Some(id) = shortcuts.page_action_for(&key, SOUNDS_ACTIONS)
             && (repeat || sounds::run_action(&app, id))
+        {
+            return true;
+        }
+        if let Some(app) = weak.upgrade()
+            && app.get_place() == Place::Midi.index() as i32
+            && let Some(id) = shortcuts.page_action_for(&key, MIDI_ACTIONS)
+            && (repeat || midi::run_action(&app, id))
         {
             return true;
         }
@@ -237,6 +246,9 @@ fn go_to(app: &AppWindow, index: i32) {
     if place == Place::Backup {
         backup::shown();
     }
+    if place == Place::Midi {
+        midi::shown(app);
+    }
     if place == Place::Settings {
         settings::shown(app);
     }
@@ -257,6 +269,7 @@ fn key_rows(shortcuts: &Shortcuts, place: Place) -> Vec<KeyRow> {
     let page: &[Action] = match place {
         Place::Songs => SONGS_ACTIONS,
         Place::Sounds => SOUNDS_ACTIONS,
+        Place::Midi => MIDI_ACTIONS,
         Place::Space => SPACE_ACTIONS,
         _ => &[],
     };
