@@ -9,7 +9,6 @@
 //! when a later try finds one that a crash cut off ([`crate::half_copy`]: each new copy holds a marker until it's in
 //! use).
 
-use std::cell::OnceCell;
 use std::collections::{HashSet, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -775,8 +774,16 @@ pub fn move_back(
     room_for(&tree, here, drives, stop)?;
     let (first, again) = copy_fresh(&tree, progress, stop)?;
     // The copying took a while: a plugin update may have put a real folder where the link was meanwhile. The copy
-    // made to come back is only a copy of what's still on the other drive, so it goes.
+    // made to come back is only a copy of what's still on the other drive, so it goes; but not while the other drive
+    // can't be reached (its drive went just now, say): then it's the only copy that can be. It stays a half copy,
+    // which the next try clears first, once the other drive can be reached again ([`clear_own`]).
     if let Some((now, files)) = not_the_link_now(moved) {
+        if !is_dir(&moved.to) {
+            return Err(CantMove::LeftHalfway(format!(
+                "{now} The copy made to bring it back stays beside it, as {back}: it has all the folder's files, as \
+                 they were when it was made. {files}"
+            )));
+        }
         remove_copy(Path::new(&back));
         return Err(CantMove::Failed(format!("{now} The copy made to bring it back was removed; {files}")));
     }
@@ -840,25 +847,25 @@ fn point_inner_links(
     if guarded.is_empty() {
         return Ok(());
     }
-    let lines: Vec<Vec<String>> =
-        guarded.iter().map(|(_, mine, now)| vec![real_spot(&text(mine)), text(now)]).collect();
-    let said = ask_for(admin, Step::Relink, &lines);
-    // What's there now decides, whatever the step said.
-    for (k, (rest, mine, now)) in guarded.into_iter().enumerate() {
-        if leads_to(&text(&mine), &now) {
-            changed.store(true, Ordering::Relaxed);
-            unname(links_left, &rest);
-        } else if fs::symlink_metadata(&mine).is_ok() {
+    let asked: Vec<(String, PathBuf)> = guarded.iter().map(|(_, mine, now)| (text(mine), now.clone())).collect();
+    let went = |at: &str, to: &Path| {
+        format!(
+            "The link at {at} went as administrator, and wasn't made again: make a link there to {} yourself.",
+            text(to)
+        )
+    };
+    for ((rest, mine, _), done) in guarded.into_iter().zip(crate::after_move::relink_as_admin(admin, &asked, &went)) {
+        match done {
+            Ok(()) => {
+                changed.store(true, Ordering::Relaxed);
+                unname(links_left, &rest);
+            }
             // Still there (as it was, or something the plugin put in its place meanwhile): it stays, and is named.
-            name_once(links_left, rest);
-        } else {
-            changed.store(true, Ordering::Relaxed);
-            let otherwise = format!(
-                "The link at {} went as administrator, and wasn't made again: make a link there to {} yourself.",
-                text(&mine),
-                text(&now)
-            );
-            return Err(CantMove::Failed(reason(&said, k, &otherwise)));
+            Err(_) if fs::symlink_metadata(&mine).is_ok() => name_once(links_left, rest),
+            Err(why) => {
+                changed.store(true, Ordering::Relaxed);
+                return Err(CantMove::Failed(why));
+            }
         }
     }
     Ok(())
@@ -900,41 +907,54 @@ fn not_real_on_the_way<'a>(folder: &Path, parts: impl IntoIterator<Item = Compon
 
 /// Why the place a moved folder was isn't its link to the copy any more, if it isn't, and then where the folder's files
 /// are and what to do (the end of what the app says): a real folder is there (a plugin update may have made it), which
-/// linking it again from the Space page puts right; or the copy can't be reached now (its drive went, or a link of
-/// yours it is leads nowhere: the link may be just as the move made it), which trying again once it's back does; or
-/// the link leads somewhere else; or nothing is there. Only a real folder can be linked again
-/// ([`crate::after_move::link_again`]).
+/// linking it again from the Space page puts right; or the copy can't be reached now while the link is still worded as
+/// the move made it (the copy's drive went, or a link of yours the copy is leads nowhere), which trying again once it's
+/// back does; or the link leads somewhere else (it was pointed at another place); or nothing is there. Only a real
+/// folder can be linked again ([`crate::after_move::link_again`]). The copy is said to have all the folder's files only
+/// while it can be reached.
 fn not_the_link_now(moved: &MovedFolder) -> Option<(String, String)> {
-    let (from, to) = (&moved.from, &moved.to);
-    let files = format!("{to} still has all the folder's files.");
     if link_reaches(moved) {
-        None
-    } else if real_folder(from) {
-        Some((
+        return None;
+    }
+    let (from, to) = (&moved.from, &moved.to);
+    let link = Path::new(from);
+    let reached = is_dir(to);
+    let files = if reached {
+        format!("{to} still has all the folder's files.")
+    } else {
+        format!("The folder's files on {to} were left as they are, but it can't be reached now.")
+    };
+    // The link's own words still name the copy (in whatever capitals): it leads nowhere only by the way there.
+    let names_copy = || {
+        fs::read_link(link)
+            .is_ok_and(|words| key(&text(&worded_place(link, &words))) == key(&text(&plainly(&tidy(Path::new(to))))))
+    };
+    Some(if real_folder(from) {
+        (
             format!(
                 "While it was moving back, {from} became a real folder again (a plugin update may have put it there), \
                  so it wasn't swapped."
             ),
             format!("{files} Look at what's in {from} now, then link it again from the Space page."),
-        ))
-    } else if is_link(Path::new(from)) && !is_dir(to) {
-        Some((
+        )
+    } else if is_link(link) && !reached && names_copy() {
+        (
             format!(
                 "While it was moving back, {to} couldn't be reached any more (its drive may have gone), so it wasn't \
                  swapped."
             ),
             format!("{files} Once it can be reached again, try again."),
-        ))
-    } else if is_link(Path::new(from)) {
-        Some((
+        )
+    } else if is_link(link) {
+        (
             format!(
                 "While it was moving back, the link at {from} was changed to lead somewhere else, so it wasn't swapped."
             ),
             format!("{files} Look at where the link at {from} leads now."),
-        ))
+        )
     } else {
-        Some((format!("While it was moving back, the link at {from} went, so it wasn't swapped."), files))
-    }
+        (format!("While it was moving back, the link at {from} went, so it wasn't swapped."), files)
+    })
 }
 
 /// A copy whose marker couldn't be told it's going into use goes (it isn't in use), and nothing has moved: a copy whose
@@ -1850,9 +1870,9 @@ pub(crate) fn copy_tree(
             Some(Some(why)) => Err(why),
             _ => Ok(()),
         };
-    // Where the folder and the copy really are, for where links in them lead ([`same_lead`]): looked up once there's a
-    // link at the same place in both, freshening a folder of yours (the other drive isn't woken for nothing).
-    let roots = OnceCell::new();
+    // Where the folder and the copy really are, for where links at the same place in both lead, freshening a folder of
+    // yours ([`same_lead`]). Looked up once a pass: the copy's drive is awake anyway, as each name is looked for in it.
+    let roots = [Some(source_real.clone()), tree.keep_in.and_then(|_| fs::canonicalize(tree.to).ok())];
     let inside = |copy: &Path| copy.strip_prefix(tree.to).unwrap_or(copy).to_path_buf();
     let mut copied = Copied::default();
     let mut recent: VecDeque<(Instant, PathBuf)> = VecDeque::new();
@@ -1958,12 +1978,7 @@ pub(crate) fn copy_tree(
                     // to keep can't be told. Not one whose link in the folder went just now (deleted to be made
                     // again, say): nothing is said of what goes, as for a file.
                     (Fill::Freshen, Some(_)) => {
-                        let elsewhere = || {
-                            let roots =
-                                roots.get_or_init(|| [Some(source_real.clone()), fs::canonicalize(tree.to).ok()]);
-                            !same_lead(&source, &copy, roots)
-                        };
-                        if (!kind.is_symlink() || elsewhere()) && !went(&source, tree) {
+                        if (!kind.is_symlink() || !same_lead(&source, &copy, &roots)) && !went(&source, tree) {
                             copied.links_left.push(inside(&copy));
                         }
                         false
@@ -2028,7 +2043,7 @@ pub(crate) fn copy_tree(
                                         tree.has_changed();
                                         CantMove::Failed(format!(
                                             "{} The link made at {} as it was read couldn't be taken away again \
-                                             ({why}): delete it before you try again.",
+                                             ({why}): it isn't the plugin's, so delete it.",
                                             part_way(&e),
                                             text(&copy)
                                         ))
@@ -2867,7 +2882,9 @@ fn lead_in_copy(place: PathBuf, tree: &Tree, source_real: &Path) -> PathBuf {
 /// as that one would be made now ([`copy_link`]): one the plugin pointed elsewhere since isn't.
 fn made_as_worded(source: &Path, copy: &Path, tree: &Tree, source_real: &Path) -> bool {
     match (fs::read_link(source), fs::read_link(copy)) {
-        (Ok(words), Ok(made)) => plainly(&made) == lead_in_copy(worded_place(source, &words), tree, source_real),
+        (Ok(words), Ok(made)) => {
+            plainly(&made) == plainly(&lead_in_copy(worded_place(source, &words), tree, source_real))
+        }
         _ => false,
     }
 }

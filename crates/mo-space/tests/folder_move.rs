@@ -1551,7 +1551,8 @@ fn moving_back_stops_when_the_drive_the_copys_link_leads_to_goes_part_way() {
 
 /// As above, with the drive going just as the last file of the last pass has come back: everything was read, so the
 /// copying doesn't take it for something changing the folder. The look before the swap finds the link doesn't reach
-/// the copy now, and the copy made to bring it back goes.
+/// the copy now, so it isn't swapped. The copy made to bring it back stays, as it's the only one that can be reached
+/// then; once the drive is back, trying again clears it first and moves the folder back.
 #[cfg(unix)]
 #[test]
 fn the_drive_the_copys_link_leads_to_going_once_all_of_it_came_back_isnt_taken_for_a_change_as_it_copied() {
@@ -1578,13 +1579,64 @@ fn the_drive_the_copys_link_leads_to_going_once_all_of_it_came_back_isnt_taken_f
         }
     };
     let result = move_back(&moved, &[], &ROOMY, &progress, &stop);
-    let Err(CantMove::Failed(why)) = &result else { panic!("{result:?}") };
+    let Err(CantMove::LeftHalfway(why)) = &result else { panic!("{result:?}") };
     assert!(why.contains("wasn't swapped") && !why.contains("while it was being copied"), "{why}");
     // Its link wasn't changed: the copy can't be reached now, and linking again wouldn't take a link.
     assert!(why.contains(&format!("{} couldn't be reached any more", moved.to)), "{why}");
     assert!(why.contains("Once it can be reached again, try again.") && !why.contains("link it again"), "{why}");
-    assert!(is_link(&library) && !c.join("Library (moving back)").exists());
+    // Nor is the copy said to have the files: that can't be told now.
+    assert!(!why.contains("still has all the folder's files"), "{why}");
+    let kept = c.join("Library (moving back)");
+    assert!(why.contains(&format!("stays beside it, as {}", s(&kept))), "{why}");
+    assert!(is_link(&library));
+    for n in 0..10 {
+        assert_eq!(fs::read_to_string(kept.join(format!("{n}.db"))).unwrap(), "yy");
+    }
     assert_eq!(fs::read_dir(dir.join("E unplugged").join("Library")).unwrap().count(), 10);
+    // The drive is back: trying again clears the copy that stayed first, and moves the folder back.
+    fs::rename(dir.join("E unplugged"), &e).unwrap();
+    move_back(&moved, &[], &ROOMY, &nothing, &stop).unwrap();
+    assert!(!is_link(&library) && !kept.exists());
+    for n in 0..10 {
+        assert_eq!(fs::read_to_string(library.join(format!("{n}.db"))).unwrap(), "yy");
+    }
+}
+
+/// As above, as the plugin's folder's link is also pointed at another folder: that's what it says, not that the copy
+/// can't be reached (trying again once it can wouldn't help), and the copy made to bring it back stays all the same.
+#[cfg(unix)]
+#[test]
+fn moving_back_as_the_link_is_pointed_elsewhere_while_the_copy_cant_be_reached_says_the_link_was_changed() {
+    let dir = fixtures("mo-space-move-back-linked-drive-gone-link-changed");
+    let (c, d, e) = (dir.join("C"), dir.join("D"), dir.join("E"));
+    let library = c.join("Library");
+    for n in 0..10 {
+        write(&library, &format!("{n}.db"), "x");
+    }
+    fs::create_dir_all(&d).unwrap();
+    fs::create_dir_all(&e).unwrap();
+    fs::create_dir_all(dir.join("Other")).unwrap();
+    let stop = AtomicBool::new(false);
+    let moved = move_folder(&s(&library), &s(&d), 10, whose(), &ROOMY, &[], &[], &nothing, &stop).unwrap();
+    fs::remove_dir_all(&moved.old_copy).unwrap();
+    fs::rename(d.join("Library"), e.join("Library")).unwrap();
+    folder_link(&e.join("Library"), &d.join("Library"));
+    let progress = |bytes: u64| {
+        if bytes == 10 {
+            (0..10).for_each(|n| fs::write(library.join(format!("{n}.db")), "yy").unwrap());
+        } else if bytes == 30 {
+            fs::rename(&e, dir.join("E unplugged")).unwrap();
+            unlink(&library);
+            folder_link(&dir.join("Other"), &library);
+        }
+    };
+    let result = move_back(&moved, &[], &ROOMY, &progress, &stop);
+    let Err(CantMove::LeftHalfway(why)) = &result else { panic!("{result:?}") };
+    assert!(why.contains(&format!("the link at {} was changed to lead somewhere else", s(&library))), "{why}");
+    assert!(!why.contains("couldn't be reached any more") && !why.contains("still has all"), "{why}");
+    assert!(why.contains("can't be reached now"), "{why}");
+    assert!(c.join("Library (moving back)").join("9.db").exists());
+    assert_eq!(real(&library), real(&dir.join("Other")));
 }
 
 /// With the old copy there: as the first file comes back, the copy on the other drive is put aside, with a link to
@@ -2106,6 +2158,30 @@ fn moving_back_doesnt_name_a_link_deleted_just_before_its_turn_in_the_last_pass(
         assert_eq!(real(&link), real(&dir.join("KitsA")), "{name}");
         assert_eq!(fs::read_to_string(library.join("Sub").join(file.file_name().unwrap())).unwrap(), "yy", "{name}");
     }
+}
+
+/// Moving back with the old copy there, with a link in the folder worded from where it sits, into the folder ("Sub"):
+/// the copy's leads into the copy (through the folder's link), and the old copy's into the old copy, which is the same
+/// place in each, so it isn't named, and stays as it was (a Mac and Linux: a junction on Windows is never worded that
+/// way).
+#[cfg(unix)]
+#[test]
+fn moving_back_doesnt_name_a_link_into_the_folder_worded_from_where_it_sits() {
+    let dir = fixtures("mo-space-move-back-inner-worded-link");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    let library = c.join("Library");
+    write(&library, "Sub/f.db", "x");
+    std::os::unix::fs::symlink("Sub", library.join("Inner")).unwrap();
+    fs::create_dir_all(&d).unwrap();
+    let stop = AtomicBool::new(false);
+    let moved = move_folder(&s(&library), &s(&d), 1, whose(), &ROOMY, &[], &[], &nothing, &stop).unwrap();
+    // Saved through the folder's link since, to bring back.
+    write(&library, "Sub/g.db", "g");
+    let back = move_back(&moved, &[], &ROOMY, &nothing, &stop).unwrap();
+    assert!(back.links_left.is_empty(), "{:?}", back.links_left);
+    assert!(!is_link(&library));
+    assert_eq!(fs::read_link(library.join("Inner")).unwrap(), Path::new("Sub"));
+    assert_eq!(fs::read_to_string(library.join("Inner/g.db")).unwrap(), "g");
 }
 
 /// Moving back with the old copy there, after a folder in it was put somewhere else with a link in its place (by you,

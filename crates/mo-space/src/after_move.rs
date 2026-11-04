@@ -652,20 +652,16 @@ pub fn repoint(
         if guarded.is_empty() {
             continue;
         }
-        let lines: Vec<Vec<String>> =
-            guarded.iter().map(|&n| vec![real_spot(&moved[links[n].0].from), text(&links[n].1)]).collect();
-        let said = ask_for(admin, Step::Relink, &lines);
-        for (k, &n) in guarded.iter().enumerate() {
+        let asked: Vec<(String, PathBuf)> =
+            guarded.iter().map(|&n| (moved[links[n].0].from.clone(), links[n].1.clone())).collect();
+        let still =
+            |_: &str, to: &Path| format!("After the administrator step, the link still doesn't lead to {}.", text(to));
+        for (&n, done) in guarded.iter().zip(relink_as_admin(admin, &asked, &still)) {
             let (i, new_to) = &links[n];
-            let from = &moved[*i].from;
-            // What's there now decides, whatever the step said.
-            if leads_to(from, new_to) {
-                now[*i].to = text(new_to);
-                continue;
+            match done {
+                Ok(()) => now[*i].to = text(new_to),
+                Err(why) => problems.push(Problem { path: moved[*i].from.clone(), why }),
             }
-            let otherwise = format!("After the administrator step, the link still doesn't lead to {}.", text(new_to));
-            let why = reason(&said, k, &otherwise);
-            problems.push(Problem { path: from.clone(), why });
         }
     }
     HomeMoved { moved: now, old_homes: follow_homes(old_home, new_home, homes), problems, old_home: None }
@@ -746,4 +742,22 @@ pub(crate) fn relink(at: &str, target: &Path, check: bool) -> Result<(), NotReli
         gone: true,
         guarded: false,
     })
+}
+
+/// Points links Windows guards at where they're to lead as administrator, Windows asking you once for all of them:
+/// each of `links` is a link's place and where it's to lead. What's there afterwards decides, whatever the step said:
+/// `Ok` for each that leads there now, or else why not, as the step said it, or `otherwise` (given the link's place and
+/// where it was to lead) when what it said doesn't explain it.
+pub(crate) fn relink_as_admin(
+    admin: &dyn Admin,
+    links: &[(String, PathBuf)],
+    otherwise: &dyn Fn(&str, &Path) -> String,
+) -> Vec<Result<(), String>> {
+    let lines: Vec<Vec<String>> = links.iter().map(|(at, to)| vec![real_spot(at), text(to)]).collect();
+    let said = ask_for(admin, Step::Relink, &lines);
+    links
+        .iter()
+        .enumerate()
+        .map(|(k, (at, to))| if leads_to(at, to) { Ok(()) } else { Err(reason(&said, k, &otherwise(at, to))) })
+        .collect()
 }
