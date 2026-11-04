@@ -56,6 +56,8 @@ pub(super) enum Stage {
     Pick {
         intro: String,
         found: Vec<Uninstaller>,
+        /// Which of them look like another version's.
+        others: Vec<bool>,
         files: Vec<String>,
         picked: Option<usize>,
     },
@@ -110,7 +112,7 @@ fn kept() -> Vec<String> {
 pub(super) fn start(app: &AppWindow) {
     let started = PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        if p.clean.as_ref().is_some_and(Cleaning::busy) {
+        if held(&p) {
             return None;
         }
         let ask = p.plugins.as_ref()?.clean_ask(p.picked?)?;
@@ -192,19 +194,11 @@ pub(super) fn tick(app: &AppWindow, at: usize, on: bool) {
         let Some(c) = p.clean.as_mut() else { return false };
         match &mut c.stage {
             Stage::Ready { lines, ticks, .. } => {
-                if let Some(t) = ticks.get_mut(at)
-                    && lines.get(at).is_some_and(|l| l.stays.is_none())
-                {
-                    *t = on;
-                }
+                set_tick(ticks, at, on, lines.get(at).is_some_and(|l| l.stays.is_none()));
                 false
             }
             Stage::Files { lines, ticks, .. } => {
-                if let Some(t) = ticks.get_mut(at)
-                    && lines.get(at).is_some_and(|l| l.stays.is_none())
-                {
-                    *t = on;
-                }
+                set_tick(ticks, at, on, lines.get(at).is_some_and(|l| l.stays.is_none()));
                 false
             }
             // One at a time: the others untick.
@@ -235,6 +229,13 @@ pub(super) fn tick(app: &AppWindow, at: usize, on: bool) {
     });
 }
 
+/// Ticks or unticks line `at`, when it may go.
+fn set_tick(ticks: &mut [bool], at: usize, on: bool, may_go: bool) {
+    if let Some(t) = ticks.get_mut(at).filter(|_| may_go) {
+        *t = on;
+    }
+}
+
 /// The words under the lines and whether the main button may be pressed, for a card with lines.
 fn go_state(stage: &Stage) -> Option<(String, bool)> {
     match stage {
@@ -242,8 +243,7 @@ fn go_state(stage: &Stage) -> Option<(String, bool)> {
             Some((clean::freed_text(lines, ticks), !clean::picked(lines, ticks).is_empty()))
         }
         Stage::Files { lines, ticks, .. } => {
-            let picked = uninstall::picked_files(lines, ticks);
-            Some((uninstall::files_freed_text(lines, ticks), !picked.is_empty()))
+            Some((uninstall::files_freed_text(lines, ticks), uninstall::ticked_files(lines, ticks).next().is_some()))
         }
         Stage::Pick { picked, .. } => Some((String::new(), picked.is_some())),
         _ => None,
@@ -309,12 +309,7 @@ pub(super) fn confirm(app: &AppWindow) {
                 }
             }
         };
-        match &outcome {
-            Outcome::Done(d) if !d.removed.is_empty() => card.done(&clean::done_text(d).0),
-            Outcome::Done(d) => card.failed(d.problems.first().map_or("Nothing was removed.", |p| p.why.as_str())),
-            Outcome::NotChecked(why) => card.failed(why),
-            Outcome::Stopped(_) => card.failed(clean::STOPPED_PART_WAY),
-        }
+        report(card, &outcome);
         back(&weak, move |app| removed(app, id, row_key, outcome));
     });
     if let Err(e) = spawned {
@@ -322,6 +317,26 @@ pub(super) fn confirm(app: &AppWindow) {
         PAGE.with(|p| p.borrow_mut().clean = None);
         fill(app);
     }
+}
+
+/// Says on its activity card how sending to the Recycle Bin went.
+pub(super) fn report(card: mo_app::activity::Job, outcome: &Outcome) {
+    match outcome {
+        Outcome::Done(d) if !d.removed.is_empty() => card.done(&clean::done_text(d).0),
+        Outcome::Done(d) => card.failed(d.problems.first().map_or("Nothing was removed.", |p| p.why.as_str())),
+        Outcome::NotChecked(why) => card.failed(why),
+        Outcome::Stopped(_) => card.failed(clean::STOPPED_PART_WAY),
+    }
+}
+
+/// Whether a card that's working (sending, putting back, waiting for an uninstaller) holds the page: then nothing new
+/// starts, and an activity card says why.
+pub(super) fn held(p: &super::Page) -> bool {
+    let Some(c) = p.clean.as_ref().filter(|c| c.busy()) else { return false };
+    p.feed
+        .start(&format!("{} is still under way", c.title.trim_end_matches('?')), "")
+        .failed("One clean-up or uninstall at a time: this starts once it's done (or once you press Stop on it).");
+    true
 }
 
 pub(super) fn removed(app: &AppWindow, id: u64, row_key: (String, String), outcome: Outcome) {
@@ -365,7 +380,7 @@ pub(super) fn removed(app: &AppWindow, id: u64, row_key: (String, String), outco
 pub(super) fn put_back(app: &AppWindow) {
     let job = PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        if p.clean.as_ref().is_some_and(Cleaning::busy) {
+        if held(&p) {
             return None;
         }
         let r = p.plugins.as_ref()?.rows.get(p.picked?)?;
@@ -381,13 +396,13 @@ pub(super) fn put_back(app: &AppWindow) {
         p.clean = Some(Cleaning {
             row_key: row_key.clone(),
             name: name.clone(),
-            title: format!("Put back {name}'s folders"),
+            title: format!("Put back what went from {name}"),
             warning: String::new(),
             id: p.clean_asked,
             stop: Arc::new(AtomicBool::new(false)),
             stage: Stage::PuttingBack,
         });
-        let card = p.feed.start(&format!("Putting back {name}'s folders"), "From the Recycle Bin");
+        let card = p.feed.start(&format!("Putting back what went from {name}"), "From the Recycle Bin");
         Some((done, row_key, p.clean_asked, card))
     });
     let Some((done, row_key, id, card)) = job else { return };
@@ -490,12 +505,15 @@ pub(super) fn picked_now(key: Option<(String, String)>) {
     });
 }
 
-/// Leaves out of a fresh read what this session's clean-ups sent to the Recycle Bin.
+/// Leaves out of a fresh read what this session's clean-ups sent to the Recycle Bin, and the plugin files this
+/// session's uninstalls removed.
 pub(super) fn forget_binned(plugins: &mut mo_app::plugins::Plugins) {
     PAGE.with(|p| {
-        for b in &p.borrow().binned {
+        let p = p.borrow();
+        for b in &p.binned {
             plugins.forget_removed(&b.done);
         }
+        plugins.forget_paths(&p.uninstalled);
     });
 }
 
@@ -567,7 +585,7 @@ pub(super) fn fill(app: &AppWindow) {
                 data.set_clean_go_text("Send to the Recycle Bin".into());
                 data.set_clean_keep_text("Keep it".into());
             }
-            Stage::Pick { intro, found, picked, .. } => {
+            Stage::Pick { intro, found, others, picked, .. } => {
                 data.set_clean_intro(intro.as_str().into());
                 let rows: Vec<CleanRow> = found
                     .iter()
@@ -579,7 +597,11 @@ pub(super) fn fill(app: &AppWindow) {
                             path: detail.into(),
                             kind: name.into(),
                             size: SharedString::new(),
-                            why: SharedString::new(),
+                            why: if others.get(i).copied().unwrap_or(false) {
+                                uninstall::OTHER_VERSION.into()
+                            } else {
+                                SharedString::new()
+                            },
                             can: true,
                             ticked: *picked == Some(i),
                         }

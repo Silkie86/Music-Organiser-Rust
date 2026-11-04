@@ -7,7 +7,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::clean::{Bin, Done, Problem, STOPPED, Sending, What};
+use crate::clean::{Bin, Done, Problem, STOPPED, Sending, Sent, What};
 use crate::plugin_space::{PluginSpace, SpaceFolder, SpaceKind};
 use crate::plugins::{format_of, is_waves};
 use crate::spare::{look as look_at, still_the_file};
@@ -27,9 +27,12 @@ pub struct FileLine {
     stamp: Option<String>,
 }
 
+/// Why a file that has gone stays on the list.
+pub const NOT_THERE: &str = "It isn't there any more.";
+
 /// Why a WaveShell stays.
-pub const WAVES: &str =
-    "Every Waves plugin lives in this one file, so it isn't removed here. Use Waves Central to remove Waves plugins.";
+pub const WAVES: &str = "Every Waves plugin lives in one WaveShell file, so it isn't removed here. Use Waves Central to remove Waves \
+     plugins.";
 
 /// Each of `space`'s plugin files, looked at now: what it takes and whether it may go. `names` gives another plugin's
 /// name from its name key (for a file it shares).
@@ -40,7 +43,8 @@ pub fn look(space: &PluginSpace, names: &dyn Fn(&str) -> String, stop: &AtomicBo
             return Err(Stopped);
         }
         let format = format_of(&f.path).unwrap_or_default();
-        let stays = why_it_stays(space, f, &format, names);
+        let there = std::fs::symlink_metadata(&f.path).is_ok();
+        let stays = if there { why_it_stays(space, f, &format, names) } else { Some(NOT_THERE.to_owned()) };
         let (bytes, stamp) = if stays.is_some() { (f.bytes, None) } else { look_at(&f.path, stop) };
         if stop.load(Ordering::Relaxed) {
             return Err(Stopped);
@@ -84,10 +88,15 @@ pub fn remove(
 ) -> Done {
     let mut done = Done::default();
     let mut sending = Sending::new(bin, stop);
-    let mut seen = std::collections::HashSet::new();
+    // Each file once, by where it really is: the first line sent for it.
+    let mut seen: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
     for line in picked {
         let real = real_path(&line.path).unwrap_or_else(|| line.path.clone());
-        if !seen.insert(key(&real)) {
+        if let Some(first) = seen.get(&key(&real)) {
+            if key(first) != key(&line.path) {
+                let why = format!("It's the same file as {first}, reached another way, so it's only sent once.");
+                done.problems.push(Problem { path: line.path.clone(), why });
+            }
             continue;
         }
         let check = move || -> Result<(), String> {
@@ -111,7 +120,14 @@ pub fn remove(
             done.problems.push(Problem { path: line.path.clone(), why });
             continue;
         }
-        sending.send(&line.path, real, line.bytes, What::Plugin(SpaceKind::Program), &mut done, check);
+        let real_key = key(&real);
+        // Only once it went (or waits for Windows): if it stayed, a line reaching it another way is still tried.
+        match sending.send(&line.path, real, line.bytes, What::Plugin(SpaceKind::Program), &mut done, check) {
+            Sent::Went | Sent::Waits => {
+                seen.insert(real_key, &line.path);
+            }
+            Sent::Stays => {}
+        }
     }
     sending.finish(&mut done);
     done
@@ -202,6 +218,19 @@ mod tests {
         assert!(!vst3.exists() && clap.exists() && shared.exists() && readme.exists());
         assert!(done.problems.iter().any(|p| p.path.ends_with("Arcade.clap") && p.why.contains("changed")));
         assert_eq!(done.problems.len(), 3);
+    }
+
+    #[test]
+    fn a_file_already_gone_says_so() {
+        let d = dir("mo-space-plugin-files-missing");
+        let space = PluginSpace {
+            key: "arcade".into(),
+            name: "Arcade".into(),
+            vendor: String::new(),
+            folders: vec![folder(&d.join("Arcade.vst3"), &[])],
+        };
+        let lines = look(&space, &|k: &str| k.to_owned(), &AtomicBool::new(false)).unwrap();
+        assert_eq!(lines[0].stays.as_deref(), Some(NOT_THERE));
     }
 
     #[test]

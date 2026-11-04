@@ -54,6 +54,8 @@ struct Page {
     /// Clean up for the picked plugin, if one is open, and what this session's clean-ups sent to the Recycle Bin.
     clean: Option<clean::Cleaning>,
     binned: Vec<clean::Binned>,
+    /// The plugin files this session's uninstalls removed: left out of every read until the old app looks again.
+    uninstalled: Vec<String>,
     clean_asked: u64,
 }
 

@@ -1,9 +1,9 @@
 //! Uninstall on the Plugins page (Solomon, 4 Nov 2026: "Yes" to running the plugin's own uninstaller, then sending
 //! the leftovers he ticks to the Recycle Bin). As the C# app's Uninstall card:
 //!
-//! - Windows lists an uninstaller for it: that runs, in its own window, asking its own questions. Many hand over to a
-//!   copy of themselves and close at once, so the app waits for the plugin's files to go (up to 20 minutes), not for
-//!   the program to close. Once they've gone, Clean up offers what it left behind (presets, sounds).
+//! - Windows lists an uninstaller for it: that runs, in its own window, asking its own questions. The app waits for
+//!   it and for what it starts (many hand over to a copy of themselves), up to 20 minutes or until you press Stop,
+//!   then for the plugin's files to go. Once they've gone, Clean up offers what it left behind (presets, sounds).
 //! - One that looks like another version's ("iZotope Ozone 11" for Ozone 9) is never picked for you: you pick it.
 //! - None, and it's a Waves plugin: every Waves plugin lives in one WaveShell file, so nothing goes here; Waves Central
 //!   removes them.
@@ -14,7 +14,6 @@
 //! looks for plugins again.
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -22,7 +21,7 @@ use mo_library::scan::is_inside;
 use mo_space::plugin_files::{self, FileLine};
 use mo_space::plugin_space::{PluginSpace, SpaceKind};
 use mo_space::plugins::is_waves;
-use mo_space::uninstallers::{Uninstaller, for_plugin, is_other_version};
+use mo_space::uninstallers::{Ran, Uninstaller, for_plugin, is_other_version};
 use mo_space::{Stopped, size_text};
 
 use super::{Plugins, unused};
@@ -66,12 +65,7 @@ impl Plugins {
             return None;
         }
         let r = self.rows.get(row)?;
-        let mut names: HashMap<String, String> = self.spaces.iter().map(|s| (s.key.clone(), s.name.clone())).collect();
-        for r in &self.rows {
-            if let Some(room) = &r.room {
-                names.insert(room.key.clone(), r.name.clone());
-            }
-        }
+        let names = self.plugin_names();
         let installed = self.rows.iter().filter(|r| r.installed).map(|r| r.name.clone()).collect();
         Some(Ask {
             row_key: (r.key.clone(), r.own.clone()),
@@ -86,11 +80,11 @@ impl Plugins {
 
     /// Leaves out these paths (and what's inside them) until the old app measures again: a plugin's files once its
     /// uninstaller removed them, or what went to the Recycle Bin.
-    pub fn forget_paths(&mut self, gone: &[String]) {
+    pub fn forget_paths<S: AsRef<str>>(&mut self, gone: &[S]) {
         if gone.is_empty() {
             return;
         }
-        let keep = |path: &str| !gone.iter().any(|g| is_inside(path, g));
+        let keep = |path: &str| !gone.iter().any(|g| is_inside(path, g.as_ref()));
         for s in &mut self.spaces {
             s.folders.retain(|f| keep(&f.path));
         }
@@ -121,6 +115,11 @@ impl Ask {
         }
         let lines = plugin_files::look(&self.space, &|k| self.name_of(k), stop)?;
         Ok(if lines.is_empty() { Plan::Nothing } else { Plan::Files(lines) })
+    }
+
+    /// Whether this uninstaller looks like another version's than the plugin's ("iZotope Ozone 11" for Ozone 9).
+    pub fn is_other(&self, u: &Uninstaller) -> bool {
+        is_other_version(&self.name, u, &self.installed)
     }
 
     /// A plugin's name from its name key (the key itself when it isn't known).
@@ -166,13 +165,38 @@ impl Ask {
             }
             Plan::Files(_) => "Its plugin files can go to the Bin:".to_owned(),
             Plan::Waves => plugin_files::WAVES.to_owned(),
-            Plan::Nothing => format!(
+            Plan::Nothing if cfg!(windows) => format!(
                 "Windows has no uninstaller for {} and the old app found none of its plugin files, so there's \
                  nothing to remove here.",
                 self.name
             ),
+            Plan::Nothing => {
+                format!("The old app found none of {}'s plugin files, so there's nothing to remove here.", self.name)
+            }
         }
     }
+}
+
+/// The plugin files ticked that may go.
+pub fn ticked_files<'a>(lines: &'a [FileLine], ticks: &'a [bool]) -> impl Iterator<Item = &'a FileLine> {
+    lines.iter().zip(ticks).filter(|(l, t)| **t && l.stays.is_none()).map(|(l, _)| l)
+}
+
+/// "Frees 40 MB", or what to do when nothing is ticked.
+pub fn files_freed_text(lines: &[FileLine], ticks: &[bool]) -> String {
+    let (n, bytes) = ticked_files(lines, ticks).fold((0usize, 0u64), |(n, b), l| (n + 1, b.saturating_add(l.bytes)));
+    if n > 0 {
+        format!("Frees {}", size_text(bytes))
+    } else if lines.iter().any(|l| l.stays.is_none()) {
+        "Tick what to send to the Recycle Bin.".to_owned()
+    } else {
+        "Nothing here can go: each line says why.".to_owned()
+    }
+}
+
+/// What a plugin file is, for its line: "VST3 plugin file".
+pub fn file_kind(line: &FileLine) -> String {
+    if line.format.is_empty() { "File".to_owned() } else { format!("{} plugin file", line.format) }
 }
 
 /// One uninstaller as the card lists it: its name, and its maker and size when Windows says them.
@@ -187,54 +211,47 @@ pub fn uninstaller_text(u: &Uninstaller) -> (String, String) {
     (u.name.clone(), detail)
 }
 
-/// The plugin files ticked (only those that may go).
-pub fn picked_files(lines: &[FileLine], ticks: &[bool]) -> Vec<FileLine> {
-    lines.iter().zip(ticks).filter(|(l, t)| **t && l.stays.is_none()).map(|(l, _)| l.clone()).collect()
-}
+/// What an uninstaller line says when it looks like another version's.
+pub const OTHER_VERSION: &str = "This looks like another version's uninstaller: pick it only if you're sure.";
 
-/// "Frees 40 MB", or what to do when nothing is ticked.
-pub fn files_freed_text(lines: &[FileLine], ticks: &[bool]) -> String {
-    let picked = picked_files(lines, ticks);
-    if picked.is_empty() {
-        if lines.iter().any(|l| l.stays.is_none()) {
-            "Tick what to send to the Recycle Bin.".to_owned()
-        } else {
-            "Nothing here can go: each line says why.".to_owned()
-        }
-    } else {
-        format!("Frees {}", size_text(picked.iter().fold(0u64, |a, l| a.saturating_add(l.bytes))))
-    }
-}
+/// How long Uninstall waits for an uninstaller (and what it starts) before it stops waiting, and how long after it
+/// ends for the plugin's files to go.
+pub const WAIT: Duration = Duration::from_secs(20 * 60);
+pub const GRACE: Duration = Duration::from_secs(10);
+pub const POLL: Duration = Duration::from_millis(500);
 
-/// What a plugin file is, for its line: "VST3 plugin file".
-pub fn file_kind(line: &FileLine) -> String {
-    if line.format.is_empty() { "File".to_owned() } else { format!("{} plugin file", line.format) }
-}
-
-/// How waiting for an uninstaller went.
+/// How it went, from the plugin's files after its uninstaller ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Waited {
-    /// The plugin's files went (or, with none to watch, the uninstaller closed).
+    /// The plugin's files went (or, with none to tell by, the uninstaller said it finished).
     Gone,
-    /// They're all still there after the wait: it's still installed.
+    /// They're all still there: it's still installed.
     StillThere,
-    /// You stopped waiting.
+    /// You stopped waiting, or the wait ran out: the uninstaller may still be open.
     Stopped,
+    /// It ended without saying it finished, and there are no files to tell by.
+    Unknown,
 }
 
-/// How long Uninstall waits for a plugin's files to go, and how often it looks.
-pub const WAIT: Duration = Duration::from_secs(20 * 60);
-pub const POLL: Duration = Duration::from_secs(2);
+/// The plugin's files that are there now, before its uninstaller runs: the ones whose going says it worked (a file
+/// already gone says nothing).
+pub fn there_now(files: &[String]) -> Vec<String> {
+    files.iter().filter(|f| std::fs::symlink_metadata(f).is_ok()).cloned().collect()
+}
 
-/// Waits until any of `files` has gone, for up to `wait`, looking every `poll` (then a moment more, so the
-/// uninstaller can finish before the list is read). With no files to watch it's over at once: the uninstaller closing
-/// is all there is to go by. Call it away from the window's thread.
-pub fn wait_for_files(files: &[String], wait: Duration, poll: Duration, stop: &AtomicBool) -> Waited {
-    if files.is_empty() {
-        return Waited::Gone;
+/// How it went, once the uninstaller ended (`ran`): `watched` are the plugin's files that were there before it ran.
+/// Its own copy may still be finishing, so the files get up to `grace` to go. Call it away from the window's thread.
+pub fn after_run(ran: &Ran, watched: &[String], grace: Duration, poll: Duration, stop: &AtomicBool) -> Waited {
+    match ran {
+        Ran::NothingChanged(_) => return Waited::StillThere,
+        Ran::StoppedWaiting => return Waited::Stopped,
+        Ran::Finished | Ran::Unclear(_) => {}
     }
-    let all_left = || files.iter().all(|f| Path::new(f).exists());
-    let until = Instant::now() + wait;
+    if watched.is_empty() {
+        return if *ran == Ran::Finished { Waited::Gone } else { Waited::Unknown };
+    }
+    let all_left = || watched.iter().all(|f| std::fs::symlink_metadata(f).is_ok());
+    let until = Instant::now() + grace;
     while all_left() {
         if stop.load(Ordering::Relaxed) {
             return Waited::Stopped;
@@ -244,46 +261,42 @@ pub fn wait_for_files(files: &[String], wait: Duration, poll: Duration, stop: &A
         }
         sleep_unless_stopped(poll, stop);
     }
-    sleep_unless_stopped(poll * 2, stop);
     Waited::Gone
 }
 
 fn sleep_unless_stopped(d: Duration, stop: &AtomicBool) {
     let until = Instant::now() + d;
     while Instant::now() < until && !stop.load(Ordering::Relaxed) {
-        std::thread::sleep(Duration::from_millis(100).min(d));
+        std::thread::sleep(Duration::from_millis(50).min(d));
     }
 }
 
-/// What the card says once the uninstaller is done: what happened, and whether Clean up may be offered next.
-pub fn ran_text(name: &str, ran: &Result<(), String>, waited: Waited) -> String {
-    match (ran, waited) {
-        (_, Waited::Gone) => format!(
+/// What the card says once the uninstaller is done.
+pub fn ran_text(name: &str, ran: &Ran, waited: Waited) -> String {
+    match waited {
+        Waited::Gone => format!(
             "{name} is uninstalled. The page still lists it as installed until the old app looks for plugins again."
         ),
-        (_, Waited::Stopped) => {
-            format!("Stopped waiting for {name}'s uninstaller. Once it's done, the old app's Rescan updates the list.")
-        }
-        (Err(why), Waited::StillThere) => format!("{name} is still installed: {why}"),
-        (Ok(()), Waited::StillThere) => {
-            format!("{name} is still installed: its files are still there, so nothing on the page changed.")
-        }
+        Waited::Stopped => format!(
+            "Stopped waiting for {name}'s uninstaller. It may still be open in its own window; once it's done, the old \
+             app's Rescan updates the list."
+        ),
+        Waited::Unknown => format!(
+            "{name}'s uninstaller ended without saying it finished ({}), and there are no plugin files to tell by. \
+             The old app's Rescan shows whether it's still installed.",
+            ran.text().trim_end_matches('.')
+        ),
+        Waited::StillThere => match ran {
+            Ran::NothingChanged(why) => format!("{name} is still installed: {why}"),
+            Ran::Unclear(why) => format!("{name} is still installed: {why} Its files are still there."),
+            _ => format!("{name} is still installed: its files are still there, so nothing on the page changed."),
+        },
     }
 }
 
-/// Whether to wait for the plugin's files after the uninstaller ended this way: not when it couldn't start, you said
-/// no to Windows, or you cancelled it (`mo_space::uninstallers::run` says the plugin list is checked again when it
-/// ended some other way).
-pub fn worth_waiting(ran: &Result<(), String>) -> bool {
-    match ran {
-        Ok(()) => true,
-        Err(why) => why.contains("checked again anyway"),
-    }
-}
-
-/// The paths of a plan's plugin files that went, from what's on disk now.
+/// Which of the plugin's files have gone now.
 pub fn gone_now(files: &[String]) -> Vec<String> {
-    files.iter().filter(|f| !Path::new(f).exists()).cloned().collect()
+    files.iter().filter(|f| std::fs::symlink_metadata(f).is_err()).cloned().collect()
 }
 
 #[cfg(test)]
@@ -291,41 +304,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn waiting_ends_when_a_file_goes_or_the_wait_runs_out() {
+    fn how_it_went_comes_from_the_files_that_were_there() {
         let stop = AtomicBool::new(false);
         let dir = std::env::temp_dir().join("mo-app-uninstall-wait");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("Arcade.vst3");
         std::fs::write(&file, b"x").unwrap();
-        let files = vec![file.to_string_lossy().into_owned()];
+        let gone_before = dir.join("Arcade.dll").to_string_lossy().into_owned();
+        let files = vec![file.to_string_lossy().into_owned(), gone_before];
+        // A file already gone before it ran says nothing.
+        let watched = there_now(&files);
+        assert_eq!(watched, files[..1]);
         let tick = Duration::from_millis(5);
-        assert_eq!(wait_for_files(&files, Duration::from_millis(30), tick, &stop), Waited::StillThere);
+        let short = Duration::from_millis(30);
+        assert_eq!(after_run(&Ran::Finished, &watched, short, tick, &stop), Waited::StillThere);
+        let said_no = Ran::NothingChanged("You said no.".into());
+        assert_eq!(after_run(&said_no, &watched, short, tick, &stop), Waited::StillThere);
+        assert_eq!(after_run(&Ran::StoppedWaiting, &watched, short, tick, &stop), Waited::Stopped);
         std::fs::remove_file(&file).unwrap();
-        assert_eq!(wait_for_files(&files, Duration::from_millis(30), tick, &stop), Waited::Gone);
+        assert_eq!(after_run(&Ran::Unclear("Code 2.".into()), &watched, short, tick, &stop), Waited::Gone);
         assert_eq!(gone_now(&files), files);
-        assert_eq!(wait_for_files(&[], WAIT, POLL, &stop), Waited::Gone);
+        // No files to tell by: only its own word.
+        assert_eq!(after_run(&Ran::Finished, &[], short, tick, &stop), Waited::Gone);
+        assert_eq!(after_run(&Ran::Unclear("Code 2.".into()), &[], short, tick, &stop), Waited::Unknown);
         std::fs::write(&file, b"x").unwrap();
         stop.store(true, Ordering::Relaxed);
-        assert_eq!(wait_for_files(&files, WAIT, POLL, &stop), Waited::Stopped);
+        assert_eq!(after_run(&Ran::Finished, &watched, WAIT, POLL, &stop), Waited::Stopped);
     }
 
     #[test]
     fn what_the_card_says_once_it_ran() {
-        assert!(ran_text("Arcade", &Ok(()), Waited::Gone).starts_with("Arcade is uninstalled."));
-        assert!(
-            ran_text("Arcade", &Err("It was cancelled.".into()), Waited::StillThere).ends_with("It was cancelled.")
-        );
-        assert!(ran_text("Arcade", &Ok(()), Waited::StillThere).contains("still there"));
-        assert!(
-            worth_waiting(&Ok(()))
-                && !worth_waiting(&Err("It was cancelled, so the plugin is still installed.".into()))
-        );
-        assert!(worth_waiting(&Err(
-            "It ended with code 2, so it may not have finished. The plugin list is checked again \
-                                    anyway."
-                .into()
-        )));
+        assert!(ran_text("Arcade", &Ran::Finished, Waited::Gone).starts_with("Arcade is uninstalled."));
+        let cancelled = Ran::NothingChanged("It was cancelled.".into());
+        assert!(ran_text("Arcade", &cancelled, Waited::StillThere).ends_with("It was cancelled."));
+        assert!(ran_text("Arcade", &Ran::Finished, Waited::StillThere).contains("still there"));
+        assert!(ran_text("Arcade", &Ran::Unclear("Code 2.".into()), Waited::Unknown).contains("(Code 2)"));
         let u = Uninstaller { name: "Arcade".into(), publisher: "Output".into(), command: "x".into(), bytes: 2048 };
         assert_eq!(uninstaller_text(&u), ("Arcade".into(), format!("Output · {}", size_text(2048))));
     }

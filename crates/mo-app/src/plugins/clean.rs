@@ -96,6 +96,17 @@ impl Plugins {
         })
     }
 
+    /// Each measured plugin's name by its name key: the page's name for it where an installed row has its room.
+    pub(super) fn plugin_names(&self) -> HashMap<String, String> {
+        let mut names: HashMap<String, String> = self.spaces.iter().map(|s| (s.key.clone(), s.name.clone())).collect();
+        for r in &self.rows {
+            if let Some(room) = r.room.as_ref().filter(|_| r.installed) {
+                names.insert(room.key.clone(), r.name.clone());
+            }
+        }
+        names
+    }
+
     /// The row with this name key and own, now.
     pub fn row_of(&self, row_key: &(String, String)) -> Option<usize> {
         self.rows.iter().position(|r| r.key == row_key.0 && r.own == row_key.1)
@@ -109,14 +120,13 @@ impl Plugins {
         let r = self.rows.get(row)?;
         let space = r.room.clone()?;
         let mut uses: HashMap<String, CleanUse> = HashMap::new();
-        let mut names: HashMap<String, String> = self.spaces.iter().map(|s| (s.key.clone(), s.name.clone())).collect();
+        let names = self.plugin_names();
         // By the measured plugin's key, which may differ from the projects' name for it. A measured plugin with no row
         // (one claimed by a row that has its own) isn't listed, so it counts as used.
         for r in &self.rows {
             if let Some(room) = r.room.as_ref().filter(|_| r.installed) {
                 let projects = u32::try_from(r.saves.len()).unwrap_or(u32::MAX);
                 uses.insert(room.key.clone(), CleanUse { projects, unused: r.unused });
-                names.insert(room.key.clone(), r.name.clone());
             }
         }
         Some(Ask {
@@ -231,7 +241,10 @@ pub fn done_text(done: &Done) -> (String, Vec<String>) {
         format!(
             "Freed {}. {} in the Recycle Bin, so you can put {} back.",
             size_text(done.bytes()),
-            if binned == 1 { "1 folder is".to_owned() } else { format!("{binned} folders are") },
+            {
+                let (one, many) = things(done.removed.iter());
+                if binned == 1 { format!("1 {one} is") } else { format!("{binned} {many} are") }
+            },
             if binned == 1 { "it" } else { "them" }
         )
     };
@@ -246,7 +259,10 @@ pub fn undone_text(done: &Done, problems: &[mo_space::clean::Problem]) -> (Strin
         if back == 0 {
             "Nothing was put back.".to_owned()
         } else {
-            format!("Put back {}.", plural(back, "folder", "folders"))
+            {
+                let (one, many) = things(done.removed.iter());
+                format!("Put back {}.", plural(back, one, many))
+            }
         },
         problems.iter().map(|p| format!("{}: {}", p.path, p.why)).collect(),
     )
@@ -282,7 +298,18 @@ pub fn binned_text(dones: &[&Done]) -> String {
         return String::new();
     }
     let bytes = dones.iter().fold(0u64, |a, d| a.saturating_add(d.bytes()));
-    format!("Clean up sent {} to the Recycle Bin ({}).", plural(n, "folder", "folders"), size_text(bytes))
+    let (one, many) = things(dones.iter().flat_map(|d| d.removed.iter()));
+    let who = if one == "plugin file" { "Uninstall" } else { "Clean up" };
+    format!("{who} sent {} to the Recycle Bin ({}).", plural(n, one, many), size_text(bytes))
+}
+
+/// What the things removed are called: plugin files when all of them are (Uninstall's), folders otherwise.
+fn things<'a>(mut removed: impl Iterator<Item = &'a Removed>) -> (&'static str, &'static str) {
+    if removed.all(|r| r.what == What::Plugin(SpaceKind::Program)) {
+        ("plugin file", "plugin files")
+    } else {
+        ("folder", "folders")
+    }
 }
 
 /// What the card says when the check couldn't be made.

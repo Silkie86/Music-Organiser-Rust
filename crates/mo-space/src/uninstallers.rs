@@ -2,8 +2,11 @@
 //! Running a plugin's uninstaller tidies its licence, registry entries and shortcuts the way its maker intended, which
 //! moving its files to the Recycle Bin can't. Only Windows keeps such a list; elsewhere there are none.
 
+use std::io::Read;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use mo_formats::case;
 use mo_formats::paths::is_rooted;
@@ -254,40 +257,102 @@ fn command_for(u: &Uninstaller) -> Command {
     cmd
 }
 
+/// How running an uninstaller went.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Ran {
+    /// It ended saying it's done (or done once Windows restarts).
+    Finished,
+    /// It ended without saying it finished (a code that isn't "done", or nothing at all): what it said. Whether the
+    /// plugin's files went says how it went.
+    Unclear(String),
+    /// Nothing changed: it didn't start, you said no to Windows' administrator question, or you cancelled it. Why.
+    NothingChanged(String),
+    /// You stopped waiting, or the wait ran out: it may still be open in its own window.
+    StoppedWaiting,
+}
+
+impl Ran {
+    /// How it went, in words ("" when it finished).
+    pub fn text(&self) -> &str {
+        match self {
+            Ran::Finished | Ran::StoppedWaiting => "",
+            Ran::Unclear(why) | Ran::NothingChanged(why) => why,
+        }
+    }
+}
+
 /// What the command says about how it went, as the app says it.
-fn outcome(said: &str) -> Result<(), String> {
+fn outcome(said: &str) -> Ran {
     let line = said.lines().rev().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default();
     if line == "said no" {
-        return Err("You said no to Windows' administrator question, so nothing changed.".to_owned());
+        return Ran::NothingChanged("You said no to Windows' administrator question, so nothing changed.".to_owned());
     }
     if let Some(why) = line.strip_prefix("not started: ") {
-        return Err(format!("It didn't start: {why}"));
+        return Ran::NothingChanged(format!("It didn't start: {why}"));
     }
     match line.strip_prefix("ended ").and_then(|c| c.trim().parse::<i64>().ok()) {
         // Done, or done once Windows restarts (Windows Installer's 3010 and 1641).
-        Some(0 | 3010 | 1641) => Ok(()),
+        Some(0 | 3010 | 1641) => Ran::Finished,
         // Windows Installer's "cancelled".
-        Some(1602) => Err("It was cancelled, so the plugin is still installed.".to_owned()),
-        Some(code) => Err(format!(
-            "It ended with code {code}, so it may not have finished. The plugin list is checked again anyway."
-        )),
-        None => Err("It didn't say how it went. The plugin list is checked again anyway.".to_owned()),
+        Some(1602) => Ran::NothingChanged("It was cancelled, so the plugin is still installed.".to_owned()),
+        Some(code) => Ran::Unclear(format!("It ended with code {code}, so it may not have finished.")),
+        None => Ran::Unclear("It didn't say how it went.".to_owned()),
     }
 }
 
 /// Runs a plugin's uninstaller and waits until it's finished (it asks its own questions in its own window). Call it
 /// away from the window's thread. Anything it leaves running (a web page it opens in a browser that wasn't open) is
-/// waited for too, so the app shouldn't hold anything else up meanwhile. Says why when it couldn't start, when you said no to Windows' administrator
-/// question, or when it ended without finishing.
+/// waited for too, so the app shouldn't hold anything else up meanwhile. Says why when it couldn't start, when you said
+/// no to Windows' administrator question, or when it ended without finishing.
 pub fn run(u: &Uninstaller) -> Result<(), String> {
+    match run_until(u, &AtomicBool::new(false), None) {
+        Ran::Finished => Ok(()),
+        Ran::StoppedWaiting => Err("It stopped being waited for.".to_owned()),
+        Ran::Unclear(why) => Err(format!("{why} The plugin list is checked again anyway.")),
+        Ran::NothingChanged(why) => Err(why),
+    }
+}
+
+/// [`run`], but waiting only until you `stop` or `until` comes (`None` for no end): then the app stops waiting and the
+/// uninstaller carries on in its own window ([`Ran::StoppedWaiting`]).
+pub fn run_until(u: &Uninstaller, stop: &AtomicBool, until: Option<Instant>) -> Ran {
     if !cfg!(windows) {
-        return Err("Only Windows lists uninstallers: on this computer, remove the plugin's files.".to_owned());
+        return Ran::NothingChanged(
+            "Only Windows lists uninstallers: on this computer, remove the plugin's files.".to_owned(),
+        );
     }
     if !can_run(&u.command) {
-        return Err("Its uninstaller isn't there any more.".to_owned());
+        return Ran::NothingChanged("Its uninstaller isn't there any more.".to_owned());
     }
-    let out = command_for(u).output().map_err(|e| format!("Windows couldn't start it: {e}"))?;
-    outcome(&String::from_utf8_lossy(&out.stdout))
+    let mut cmd = command_for(u);
+    cmd.stdout(Stdio::piped()).stderr(Stdio::null()).stdin(Stdio::null());
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => return Ran::NothingChanged(format!("Windows couldn't start it: {e}")),
+    };
+    // What PowerShell says is one short line at the end: read it on the side, so a full pipe never holds it up.
+    let out = child.stdout.take();
+    let reader = std::thread::spawn(move || {
+        let mut said = String::new();
+        if let Some(mut out) = out {
+            let _ = out.read_to_string(&mut said);
+        }
+        said
+    });
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return outcome(&reader.join().unwrap_or_default()),
+            Ok(None) => {}
+            Err(e) => return Ran::Unclear(format!("It couldn't be watched ({e}).")),
+        }
+        if stop.load(Ordering::Relaxed) || until.is_some_and(|u| Instant::now() > u) {
+            // Only PowerShell, which waits for it: the uninstaller itself carries on.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ran::StoppedWaiting;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
 }
 
 #[cfg(test)]
@@ -315,13 +380,16 @@ mod tests {
 
     #[test]
     fn how_it_went_is_told_plainly() {
-        assert_eq!(outcome("ended 0\r\n"), Ok(()));
-        assert_eq!(outcome("ended 3010"), Ok(()));
-        assert!(outcome("said no").unwrap_err().starts_with("You said no"));
-        assert!(outcome("ended 1602").unwrap_err().contains("cancelled"));
-        assert!(outcome("ended 2").unwrap_err().contains("code 2"));
-        assert_eq!(outcome("not started: Datei nicht gefunden"), Err("It didn't start: Datei nicht gefunden".into()));
-        assert!(outcome("").is_err());
+        assert_eq!(outcome("ended 0\r\n"), Ran::Finished);
+        assert_eq!(outcome("ended 3010"), Ran::Finished);
+        assert!(matches!(outcome("said no"), Ran::NothingChanged(w) if w.starts_with("You said no")));
+        assert!(matches!(outcome("ended 1602"), Ran::NothingChanged(w) if w.contains("cancelled")));
+        assert!(matches!(outcome("ended 2"), Ran::Unclear(w) if w.contains("code 2")));
+        assert_eq!(
+            outcome("not started: Datei nicht gefunden"),
+            Ran::NothingChanged("It didn't start: Datei nicht gefunden".into())
+        );
+        assert!(matches!(outcome(""), Ran::Unclear(_)));
     }
 
     #[test]

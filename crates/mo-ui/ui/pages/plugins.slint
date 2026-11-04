@@ -455,7 +455,7 @@ component PluginPanel inherits SidePanel {
                         min-width: 0px;
                     }
                     if row.why != "": Text {
-                        text: "Stays: " + row.why;
+                        text: row.can ? row.why : "Stays: " + row.why;
                         color: Theme.warning;
                         font-size: Type.small;
                         wrap: word-wrap;

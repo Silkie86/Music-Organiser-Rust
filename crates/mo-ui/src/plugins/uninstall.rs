@@ -29,7 +29,7 @@ pub(super) fn can_uninstall(row: usize) -> bool {
 pub(super) fn start(app: &AppWindow) {
     let started = PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        if p.clean.as_ref().is_some_and(Cleaning::busy) {
+        if clean::held(&p) {
             return None;
         }
         let ask = p.plugins.as_ref()?.uninstall_ask(p.picked?)?;
@@ -80,7 +80,8 @@ fn found(app: &AppWindow, id: u64, ask: uninstall::Ask, plan: Result<Result<Plan
                             &format!("Uninstall {}: {} uninstallers look like its", ask.name, found.len()),
                         );
                         let picked = (!must_pick).then_some(0);
-                        Stage::Pick { intro, found, files, picked }
+                        let others = found.iter().map(|u| ask.is_other(u)).collect();
+                        Stage::Pick { intro, found, others, files, picked }
                     }
                     Plan::Files(lines) => {
                         let ticks = lines.iter().map(|l| l.stays.is_none()).collect();
@@ -117,19 +118,19 @@ pub(super) fn confirm(app: &AppWindow) {
         log::info("Plugins", &format!("Uninstall {name}: running {} ({})", u.name, u.command));
         let weak = app.as_weak();
         let spawned = mo_app::background::spawn("Plugins uninstaller", move || {
-            let ran = mo_app::background::guarded(|| uninstallers::run(&u)).and_then(|r| r);
-            let waited = if uninstall::worth_waiting(&ran) {
-                uninstall::wait_for_files(&files, uninstall::WAIT, uninstall::POLL, &stop)
-            } else {
-                Waited::StillThere
-            };
+            // The files there before it runs: one already gone says nothing about how it went.
+            let watched = uninstall::there_now(&files);
+            let until = std::time::Instant::now() + uninstall::WAIT;
+            let ran = mo_app::background::guarded(|| uninstallers::run_until(&u, &stop, Some(until)))
+                .unwrap_or_else(uninstallers::Ran::Unclear);
+            let waited = uninstall::after_run(&ran, &watched, uninstall::GRACE, uninstall::POLL, &stop);
             let head = uninstall::ran_text(&name, &ran, waited);
             if waited == Waited::Gone {
                 card.done(&head)
             } else {
                 card.failed(&head)
             }
-            let gone = uninstall::gone_now(&files);
+            let gone = uninstall::gone_now(&watched);
             back(&weak, move |app| ran_done(app, id, row_key, head, gone, waited == Waited::Gone));
         });
         if let Err(e) = spawned {
@@ -154,7 +155,7 @@ fn remove_files(app: &AppWindow) {
         });
         let c = p.clean.as_mut()?;
         let Stage::Files { lines, ticks, .. } = &c.stage else { return None };
-        let picked = uninstall::picked_files(lines, ticks);
+        let picked: Vec<_> = uninstall::ticked_files(lines, ticks).cloned().collect();
         if picked.is_empty() {
             return None;
         }
@@ -184,12 +185,7 @@ fn remove_files(app: &AppWindow) {
                 Outcome::Stopped(bin.went_of(&lines))
             }
         };
-        match &outcome {
-            Outcome::Done(d) if !d.removed.is_empty() => card.done(&mo_app::plugins::clean::done_text(d).0),
-            Outcome::Done(d) => card.failed(d.problems.first().map_or("Nothing was removed.", |p| p.why.as_str())),
-            Outcome::NotChecked(why) => card.failed(why),
-            Outcome::Stopped(_) => card.failed(mo_app::plugins::clean::STOPPED_PART_WAY),
-        }
+        clean::report(card, &outcome);
         back(&weak, move |app| clean::removed(app, id, row_key, outcome));
     });
     if let Err(e) = spawned {
@@ -206,6 +202,7 @@ fn ran_done(app: &AppWindow, id: u64, row_key: (String, String), head: String, g
         if let Some(pl) = p.plugins.as_mut() {
             pl.forget_paths(&gone);
         }
+        p.uninstalled.extend(gone);
         let offer =
             uninstalled && p.plugins.as_ref().is_some_and(|pl| pl.row_of(&row_key).is_some_and(|r| pl.can_clean(r)));
         if let Some(c) = p.clean.as_mut().filter(|c| c.id == id) {
