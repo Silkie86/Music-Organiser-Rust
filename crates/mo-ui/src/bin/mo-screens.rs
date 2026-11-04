@@ -750,6 +750,11 @@ fn settings_shots(
             ..Default::default()
         })),
     );
+    mo_ui::settings::show_fl(
+        app,
+        mo_dawlink::scripts::ScriptState::Outdated,
+        vec![std::path::PathBuf::from(r"I:\Fl Studio Data\FL Studio\Settings\Hardware\Music Organiser")],
+    );
     capture(window);
     shots.push(("settings-daws.png".into(), capture(window)));
     data.invoke_tab_picked(3);
