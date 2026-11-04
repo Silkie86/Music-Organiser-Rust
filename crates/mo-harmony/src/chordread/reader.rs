@@ -26,16 +26,15 @@ use crate::chord::Chord;
 use crate::key::Key;
 use crate::keyfind::Span;
 use crate::notes::{Grid, Part};
-use crate::pitch::PcSet;
 use crate::spell::{Spelled, root_in_key, spell_in_key};
 
 /// The most readings a span keeps ([`ChordContext::readings`]).
 pub const MOST_READINGS: u8 = 6;
 
 /// The least chance a reading needs to be one of Chord check's choices, besides the first ([`ChordSpan::choices`]):
-/// below it are mostly the same notes written as no player would (Gsus4(add6) over C, for C). The choices are worked out
-/// from the readings each time they're shown (a Chord check answer keeps those it showed), so the floor isn't part of
-/// what the reader's version covers.
+/// below it are mostly the same notes written as no player would (Gsus4(add6) over C, for C). The choices are worked
+/// out from the readings each time they're shown (a Chord check answer keeps those it showed), so the floor isn't part
+/// of what the reader's version covers.
 pub const CHOICE_FLOOR: f64 = 0.01;
 
 /// A reader: the weights the evidence is weighed by, the counted tables the priors read, and the thresholds the
@@ -132,7 +131,7 @@ pub struct ChordSpan {
     pub label: Option<Label>,
     pub answer: ChordAnswer,
     /// Its readings, best first: the one the best way reads (when it reads a chord), then the others by their chances,
-    /// each written differently. None for a rest.
+    /// each named differently ([`Chord::name_key`]). None for a rest.
     pub readings: Vec<Reading>,
     /// The chance it's no chord, and the chance it's none of the readings kept (no chord among them).
     pub no_chord: f64,
@@ -181,16 +180,15 @@ impl ChordSpan {
         self.readings.first().filter(|_| reads && self.answer.shows_chord())
     }
 
-    /// Chord check's choices for it, at most `n`, all different: the first reading; the best reading of its same-notes
-    /// group on another root or bass (Am7 for C6), or when there's none, the first reading with its doubtful tensions
-    /// named or its tensions left out (Cmaj9 for Cmaj7); the best reading outside its group; then the other readings,
-    /// in order. Besides the first, a reading is a choice only with a chance of [`CHOICE_FLOOR`] or more.
+    /// Chord check's choices for it, at most `n`, each named differently ([`Chord::name_key`]: two choices both named
+    /// C would be one): the first reading; the best reading of its same-notes group named another way (Am7 for C6),
+    /// or when there's none, the first reading with its doubtful tensions named or its tensions left out (Cmaj9 for
+    /// Cmaj7); the best reading outside its group; then the other readings, in order. Besides the first, a reading is
+    /// a choice only with a chance of [`CHOICE_FLOOR`] or more.
     pub fn choices(&self, n: usize) -> Vec<Choice> {
         let Some(first) = self.readings.first() else { return Vec::new() };
         let rest = || self.readings.iter().skip(1).filter(|r| r.chance >= CHOICE_FLOOR);
-        let other_way = |r: &&Reading| {
-            r.group == first.group && (r.chord.root() != first.chord.root() || r.chord.bass() != first.chord.bass())
-        };
+        let other_way = |r: &&Reading| r.group == first.group && !named_the_same(r.chord, first.chord);
         let second = match rest().find(other_way) {
             Some(same) => Some(Choice { chord: same.chord, from: ChoiceFrom::SameNotes }),
             None => tensions_other_way(first).map(|chord| Choice { chord, from: ChoiceFrom::Tensions }),
@@ -199,7 +197,7 @@ impl ChordSpan {
         let others = outside.into_iter().chain(rest()).map(|r| Choice { chord: r.chord, from: ChoiceFrom::Other });
         let mut out: Vec<Choice> = Vec::new();
         for choice in [Choice { chord: first.chord, from: ChoiceFrom::First }].into_iter().chain(second).chain(others) {
-            if out.len() < n && !out.iter().any(|c| c.chord == choice.chord) {
+            if out.len() < n && !out.iter().any(|c| named_the_same(c.chord, choice.chord)) {
                 out.push(choice);
             }
         }
@@ -207,14 +205,21 @@ impl ChordSpan {
     }
 }
 
-/// A reading's chord with its doubtful tensions named, or when it has none, with its tensions left out: its core's
-/// own notes on its root (Cmaj7 for Cmaj9, G7sus4 for G9sus4). None when it has neither.
+/// Whether two chords have the same name ([`Chord::name_key`]): C over E and C over G are both C, and Bmaj13 is Bmaj13
+/// with or without its 9.
+fn named_the_same(a: Chord, b: Chord) -> bool {
+    a.name_key() == b.name_key()
+}
+
+/// A reading's chord as written, with its doubtful tensions named, or when it has none, with its tensions left out:
+/// its core's own notes on its root, and the bass (Cmaj7 for Cmaj9, G7sus4 for G9sus4, Dm7 for Fmaj7 over D written
+/// Dm9). None when it has neither.
 fn tensions_other_way(r: &Reading) -> Option<Chord> {
-    let c = r.chord;
+    let c = r.written;
     if !r.doubtful.is_empty() {
         return Some(Chord::new(c.root(), c.notes().union(r.doubtful), c.bass()));
     }
-    let own = Core::of_chord(c)?.intervals().on(c.root());
+    let own = Core::of_chord(c)?.intervals().on(c.root()).with(c.bass());
     let plain = c.notes().intersection(own);
     (plain != c.notes()).then(|| Chord::new(c.root(), plain, c.bass()))
 }
@@ -340,13 +345,12 @@ fn match_names(names: &[Chord], chart: &[&ChordSpan]) -> ((u32, u32), Vec<NameCh
     (at(&best, names.len(), chart.len()).unwrap_or_default(), checks)
 }
 
-/// Whether a chord name is a reading, both as they're written ([`ChordReading::check_names`]).
+/// Whether a chord name is a reading, both as they're written ([`ChordReading::check_names`]). A name with a bass of
+/// its own is checked by that bass as it was given (F/G has G in the bass, though it's written G9sus4).
 fn names_it(r: &Reading, name: Chord) -> bool {
-    let (written, name) = (r.chord.as_written(), name.as_written());
-    // A chord written on its bass has that one root.
-    let roots = if written.root() == r.chord.root() { r.roots } else { PcSet::EMPTY.with(written.root()) };
-    let bass = name.bass() == name.root() || name.bass() == written.bass();
-    roots.contains(name.root()) && Core::of_chord(written) == Core::of_chord(name) && bass
+    let bass = name.bass() == name.root() || name.bass() == r.written.bass();
+    let name = name.as_written();
+    r.roots.contains(name.root()) && Core::of_chord(r.written) == Core::of_chord(name) && bass
 }
 
 /// Reads the chords in some notes ([`ChordReader::read`]). Keep one and reuse it: it keeps its working space between

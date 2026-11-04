@@ -142,17 +142,14 @@ impl<'a> Teller<'a> {
             },
         };
         // A chord that repeats round the octave (a diminished seventh, an augmented triad) on each of its other roots,
-        // in root position; none when it's written on its bass (Bdim7 over G is G7b9). The other way the namer has of
-        // writing the same notes (D over C beside D7 over C) is named the same, so it isn't told.
+        // in root position ([`Reading::roots`]: none when a bass folded into it makes it one chord, as Bdim7 over G is
+        // G7b9). The other way the namer has of writing the same notes (D over C beside D7 over C) is named the same,
+        // so it isn't told.
         let first = spell(e.span, e.first.chord);
-        let root = e.first.chord.root();
+        let (root, notes) = (e.first.written.root(), e.first.written.notes());
         let mut roots: Vec<PitchClass> = e.first.roots.without(root).iter().collect();
-        if first.chord().root() != root {
-            roots.clear();
-        }
         roots.sort_by_key(|r| r.above(root));
-        let others: Vec<String> =
-            roots.into_iter().map(|r| spell(e.span, Chord::new(r, e.first.chord.notes(), r)).name()).collect();
+        let others: Vec<String> = roots.into_iter().map(|r| spell(e.span, Chord::new(r, notes, r)).name()).collect();
         let second = e.second.map(|r| spell(e.span, r.chord));
         let plain = [Some(&e.first), e.second.as_ref()].map(|r| r.map(|r| spell(e.span, plain_chord(r.label))));
         let same = |written: Option<Spelled>, plain: Option<Spelled>| match (written, plain) {

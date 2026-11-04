@@ -556,7 +556,7 @@ fn does(hearing: &Hearing, n: &HeardNote, shape: Option<&Shaped>, place: Place, 
     if n.held_over.is_some_and(|h| h <= from) {
         return NoteDoes::HeldOver;
     }
-    let (label, chord, pc) = (first.label, first.chord.as_written(), n.pitch_class());
+    let (label, chord, pc) = (first.label, first.written, n.pitch_class());
     let tones = label.tones();
     let passes = |line_is_bass: bool| {
         shape.filter(|s| (s.line == Line::Bass) == line_is_bass && s.passes_under(tones)).map(|s| s.shape)

@@ -174,8 +174,16 @@ pub const fn sus_on_bass(notes: PcSet, bass: PitchClass) -> bool {
 /// usual name has nothing added and nothing in brackets (but a minor chord's major seventh, whose brackets are its
 /// name's own), and names every note (a dominant chord's altered notes aside, which follow it: C7b9). Cmaj7, Cm7, C9,
 /// C7b9, Cm7b5, Cmaj7#5 and Cm(maj7) are; Csus2, Cdim(maj7), C(add11) and C6b9 aren't. A chord over a bass that's
-/// only a bass is written on the bass when it's one there ([`Chord::as_written`]).
+/// only a bass is written on the bass when it's one there ([`Chord::as_written`]). It's looked up: every set of
+/// intervals is worked out the first time it's needed, from the names' text ([`named_as_it_is`]).
 fn written_as_it_is(intervals: PcSet) -> bool {
+    static YES: std::sync::OnceLock<Vec<bool>> = std::sync::OnceLock::new();
+    let yes = YES.get_or_init(|| (0..4096u16).map(|bits| named_as_it_is(PcSet::from_bits(bits))).collect());
+    yes.get(usize::from(intervals.bits())).copied().unwrap_or(false)
+}
+
+/// [`written_as_it_is`], worked out from the usual name's text.
+fn named_as_it_is(intervals: PcSet) -> bool {
     let family = Family::of(intervals);
     let usual = usual_quality(intervals, family);
     let left = intervals.difference(intervals_of(&usual).unwrap_or_default());
@@ -420,6 +428,15 @@ impl Chord {
         Spelled::plain(self.as_written()).name()
     }
 
+    /// A key to the chord's name ([`Chord::name`]): two chords are named the same, however their roots are spelled,
+    /// just when their keys are the same. C over E and C over G are both C, and Bmaj13 is Bmaj13 with or without its 9
+    /// (a name stands for notes it leaves out). It's quick: the name's quality is looked up, not written out.
+    pub fn name_key(self) -> (PitchClass, u16) {
+        let written = self.as_written();
+        let quality = quality_numbers().get(usize::from(written.intervals().bits())).copied();
+        (written.root(), quality.unwrap_or(u16::MAX))
+    }
+
     /// The chord as chord datasets and labels write it, its bass after a slash: its own notes' name, then a bass that
     /// isn't its root (D/C, D7/C, C/E, F/G). Never shown in the app, whose names have no slash ([`Chord::name`]); it's
     /// for the bench and the hand cases, which tell D over C from D7 over C as the datasets do.
@@ -506,6 +523,23 @@ impl fmt::Display for Chord {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.name())
     }
+}
+
+/// A number for each set of intervals above a root (by its bits, [`PcSet::bits`]), the same for two sets just when
+/// their qualities are written the same ([`quality_of`]), for [`Chord::name_key`]. Worked out the first time it's
+/// needed.
+fn quality_numbers() -> &'static [u16] {
+    static NUMBERS: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();
+    NUMBERS.get_or_init(|| {
+        let mut seen = std::collections::HashMap::new();
+        (0..4096u16)
+            .map(|bits| {
+                let intervals = PcSet::from_bits(bits);
+                let next = u16::try_from(seen.len()).unwrap_or(u16::MAX);
+                *seen.entry(quality_of(intervals, Family::of(intervals))).or_insert(next)
+            })
+            .collect()
+    })
 }
 
 /// The quality as written after the root, for a chord of this family with these intervals above its root.
@@ -1179,6 +1213,44 @@ mod tests {
         assert_eq!(chord("G13").guide_tones().to_string(), "F B");
         assert_eq!(chord("C6/9").core_tones().to_string(), "C E G A");
         assert_eq!(chord("Dm9").core_tones().to_string(), "C D F A");
+    }
+
+    #[test]
+    fn which_chords_are_written_on_their_bass_only_changes_on_purpose() {
+        // written_as_it_is reads the usual names' text (nothing added, nothing in brackets), so a change to how a
+        // quality is written could move which chords over a bass are written on it, which readings are one, and what
+        // the app keeps. Every set of notes on a root it says yes to is counted here: a change that moves one needs
+        // the chord reader's version bumped (rule 7), then these numbers written again.
+        let mut hash = crate::fnv::Fnv::new();
+        let mut count = 0;
+        for bits in (1..4096u16).step_by(2) {
+            if written_as_it_is(PcSet::from_bits(bits)) {
+                count += 1;
+                hash.number(i128::from(bits));
+            }
+        }
+        assert_eq!((count, hash.finish()), (174, 0xf38e_d7f6_11ba_db8f), "write these numbers here once it's meant");
+    }
+
+    #[test]
+    fn two_chords_share_a_name_key_just_when_they_share_a_name() {
+        // Every set of notes on every root, over the root: the key tells names apart just as the names do.
+        let mut key_of: std::collections::HashMap<String, (PitchClass, u16)> = std::collections::HashMap::new();
+        let mut name_of: std::collections::HashMap<(PitchClass, u16), String> = std::collections::HashMap::new();
+        for root in (0..12).map(PitchClass::new) {
+            for bits in 0..4096u16 {
+                let c = Chord::new(root, PcSet::from_bits(bits).on(root), root);
+                let (name, key) = (c.name(), c.name_key());
+                assert_eq!(*key_of.entry(name.clone()).or_insert(key), key, "{name}");
+                assert_eq!(*name_of.entry(key).or_insert_with(|| name.clone()), name, "{name}");
+            }
+        }
+        // And over a bass that's only a bass, as written: D over C is D7, F over G is G9sus4.
+        assert_eq!(chord("D/C").name_key(), chord("D7").name_key());
+        assert_eq!(chord("F/G").name_key(), chord("G9sus4").name_key());
+        assert_eq!(chord("C/E").name_key(), chord("C/G").name_key());
+        assert_ne!(chord("C").name_key(), chord("Cm").name_key());
+        assert_ne!(chord("C").name_key(), chord("Db").name_key());
     }
 
     #[test]

@@ -307,8 +307,10 @@ fn chord_check_offers_the_same_notes_another_way_then_another_chord() {
                 continue;
             };
             assert_eq!((all[0].chord, all[0].from), (first.chord, First), "{}", render(&r));
+            // Each is named differently: two choices with the same name would be two buttons that look the same.
+            let names: Vec<String> = all.iter().map(|c| c.chord.name()).collect();
+            assert!(names.iter().enumerate().all(|(i, n)| !names[..i].contains(n)), "{names:?} {}", render(&r));
             for (i, c) in all.iter().enumerate().skip(1) {
-                assert!(!all[..i].iter().any(|o| o.chord == c.chord), "{all:?}");
                 let reading = s.readings.iter().skip(1).find(|x| x.chord == c.chord);
                 let likely = reading.is_some_and(|x| x.chance >= CHOICE_FLOOR);
                 match c.from {
@@ -316,7 +318,7 @@ fn chord_check_offers_the_same_notes_another_way_then_another_chord() {
                     SameNotes => assert!(likely && reading.is_some_and(|x| x.group == first.group), "{all:?}"),
                     Other => assert!(likely, "{all:?}"),
                     Tensions => {
-                        let (a, b) = (c.chord, first.chord);
+                        let (a, b) = (c.chord, first.written);
                         assert!(i == 1 && a.root() == b.root() && a.bass() == b.bass() && a.notes() != b.notes());
                     }
                 }
@@ -733,7 +735,7 @@ fn damaged_notes_are_read_without_a_panic() {
 
 /// What the hand cases, the tests' music and some music made here read at each version of the reader, as a hash
 /// ([`readings_hash`]). A change that moves any of them needs `CHORD_READER_VERSION` bumped, and a line added here.
-const READINGS: &[(u32, u64)] = &[(1, 0xe3a9_cd16_4f69_5725), (2, 0x0ec4_4d8d_5138_38e0)];
+const READINGS: &[(u32, u64)] = &[(1, 0xe3a9_cd16_4f69_5725), (2, 0x1a86_e909_00c4_7d95)];
 
 /// The music whose readings the hash covers, with its pins: every hand case, the music the rules are checked on, and
 /// music made here so every kind of answer is read (one line, one note, all twelve, a rest, chords given) and what

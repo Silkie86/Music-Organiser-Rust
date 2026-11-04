@@ -389,9 +389,10 @@ pub struct SummaryFlags(u8);
 
 impl SummaryFlags {
     pub const NONE: SummaryFlags = SummaryFlags(0);
-    /// A chord over a bass that's only a bass (D over C, written D7).
+    /// A chord read over a bass that's only a bass ([`super::BassKind::Slash`]: D over C, written D7; Fmaj7 over D,
+    /// written Dm9).
     pub const SLASH: SummaryFlags = SummaryFlags(1);
-    /// A chord over another of its notes (C over E).
+    /// A chord read over another of its notes (C over E, written C).
     pub const INVERSION: SummaryFlags = SummaryFlags(1 << 1);
     /// A chord whose root isn't heard.
     pub const ROOTLESS: SummaryFlags = SummaryFlags(1 << 2);

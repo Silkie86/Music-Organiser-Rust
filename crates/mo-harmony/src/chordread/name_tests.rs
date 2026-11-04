@@ -49,7 +49,7 @@ fn sounding_in(hearing: &Hearing, units: Range<usize>) -> PcSet {
 /// Whether a naming keeps the rules that hold for any music, and if not, why: the spans run from the first unit
 /// reported to the last, each from where the one before ends, and a span is cut in two only where the decode read one
 /// chord; a rest has no readings, and a chord at most `most`, the one the decode read first; the chances are chances,
-/// sorted after the first, adding up to at most 1 with the chance of no chord; no two readings are written the same;
+/// sorted after the first, adding up to at most 1 with the chance of no chord; no two readings are named the same;
 /// a name holds only notes that sound, and its root when it isn't rootless (over silence, it's written in full, as the
 /// decode read it); the bass kind fits the name, and is the
 /// same kind of bass on every reading of a span; and readings share a same-notes group when they hold the same notes.
@@ -108,17 +108,19 @@ fn keeps_the_rules(
         let mut groups: Vec<PcSet> = Vec::new();
         for (i, r) in readings.iter().enumerate() {
             let why = || format!("{} ({r:?}) in {}", r.chord.name(), why());
-            let c = r.chord;
-            let written = c.as_written();
-            check(!readings.get(..i).unwrap_or_default().iter().any(|o| o.chord.as_written() == written), &why)?;
+            let (c, written) = (r.chord, r.written);
+            check(written == c.as_written(), &why)?;
+            let key = written.name_key();
+            check(!readings.get(..i).unwrap_or_default().iter().any(|o| o.written.name_key() == key), &why)?;
             if silent {
                 // Over silence, written in full.
                 check(c.notes() == r.label.tones() && !r.rootless && r.also.is_none(), &why)?;
             } else {
                 check(sounding.contains_all(c.notes().union(r.doubtful)), &why)?;
-                check(r.rootless || sounding.contains(c.root()), &why)?;
+                // Rootless as written: a chord written on its bass has its root heard.
+                check(r.rootless || sounding.contains(written.root()), &why)?;
             }
-            check(r.doubtful.intersection(c.notes()).is_empty() && r.roots.contains(c.root()), &why)?;
+            check(r.doubtful.intersection(c.notes()).is_empty() && r.roots.contains(written.root()), &why)?;
             let held = match r.bass {
                 BassKind::Root => c.bass() == c.root(),
                 BassKind::Inversion => c.bass() != c.root() && c.notes().contains(c.bass()),

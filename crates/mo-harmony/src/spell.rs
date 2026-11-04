@@ -279,6 +279,11 @@ impl fmt::Display for Degree {
 
 /// A chord with its root spelled. Every other note follows from the root by its degree, so A7's third is C♯ (and so
 /// is a C♯ bass under it), D♭7's seventh is C♭, and Cdim7's is B𝄫 (shown as A).
+///
+/// It holds the chord it's given, and its root, bass, notes and Harte label are that chord's: the chart's are written
+/// already ([`spell_in_key`]), while a chord read over a bass that's only a bass keeps its own (F over G has F for its
+/// root here). Its name is always the chord as written ([`Spelled::name`]: G9sus4), and [`Spelled::as_written`] gives
+/// that chord spelled, its root and notes with it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Spelled {
     chord: Chord,
@@ -304,10 +309,12 @@ impl Spelled {
         Spelled { chord, root: Tpc::in_window(chord.root(), lowest) }
     }
 
+    /// The chord held, as given ([`Spelled`]).
     pub const fn chord(self) -> Chord {
         self.chord
     }
 
+    /// The root of the chord held, as spelled: F for F over G, though its name is G9sus4 ([`Spelled::as_written`]).
     pub const fn root(self) -> Tpc {
         self.root
     }

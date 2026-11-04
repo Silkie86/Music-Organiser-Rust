@@ -244,6 +244,11 @@ fn why_a_chord_reads_as_it_does_is_told_from_the_evidence() {
     ));
     assert!(has(&w, "Of the chords in the songs counted, 1.1% are major sixth chords and 6.6% minor seventh chords."));
     assert!(has(&case("13 G13 rootless, no bass", 0), "Fmaj7#11's fifth, C, isn't heard."));
+    // A shell with no bass part, D F C: F5 over D is written Dm7 too, so it's one reading with Dm7, and the runner-up
+    // told is the next one named another way, G7 (written G7sus4 from the notes it plays), whose third isn't heard.
+    let w = case("14 shells, the bass by the gap", 0);
+    assert!(has(&w, "The runner-up, G7sus4, is read as G7."));
+    assert!(has(&w, "G7's third, B, isn't heard."));
     // How usual its tensions are for its kind of chord.
     assert!(has(
         &case("1 C", 0),
