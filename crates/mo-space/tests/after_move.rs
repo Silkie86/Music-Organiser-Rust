@@ -191,6 +191,31 @@ fn a_folder_an_update_made_where_the_link_was_is_linked_again() {
     assert!(is_link(&steam));
 }
 
+/// The update made the folder again in other capitals ("steam" for "STEAM"), on a drive that doesn't tell them apart
+/// (Windows and a Mac; where the drive tells them apart it's another folder, so there's nothing to try). Checking it
+/// can be renamed gives it the name the move noted, in its capitals: it's the same folder, and it's linked again.
+#[test]
+fn a_folder_an_update_made_in_other_capitals_is_linked_again() {
+    let dir = fixtures("mo-space-after-update-capitals");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    let steam = c.join("STEAM");
+    write(&steam, "Pad.db", "pad");
+    fs::create_dir_all(&d).unwrap();
+    let moved = move_it(&steam, &d, &[]);
+    let all = vec![moved.clone()];
+    unlink(&steam);
+    write(&c, "steam/Pad.db", "pad 2");
+    if !steam.join("Pad.db").exists() {
+        return;
+    }
+    assert_eq!(replaced(&all), [&moved]);
+    let stop = AtomicBool::new(false);
+    let linked = link_again(&moved, &all, 5, false, &OtherDrive, &nothing, &stop).unwrap();
+    assert!(is_link(&steam) && replaced(&all).is_empty());
+    assert_eq!(read(&steam.join("Pad.db")), "pad 2");
+    assert_eq!(linked.replaced, ["Pad.db"]);
+}
+
 #[test]
 fn a_lost_link_and_a_home_moved_by_hand_are_found_and_pointed_again() {
     let dir = fixtures("mo-space-after-lost");

@@ -191,6 +191,8 @@ pub fn link_again(
     let kept_in = PathBuf::from(fresh_name(&moved.to, KEPT_BEFORE_SUFFIX));
     let changed = AtomicBool::new(false);
     // Where the folder really is as linking again begins: both passes copy from there, or stop ([`Tree::real_from`]).
+    // Checking it can be renamed (below) gives it back the name the move noted, maybe in other capitals than an update
+    // gave it: it's the same folder all the same.
     let real_from = fs::canonicalize(from).map_err(|e| failed(Path::new(from), &e))?;
     let tree = Tree {
         keep_in: Some(&kept_in),
