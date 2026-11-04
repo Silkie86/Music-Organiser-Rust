@@ -160,6 +160,28 @@ fn tree_names_fl_events_and_takes_their_data_apart() {
 }
 
 #[test]
+fn fl_4_to_8_notes_are_shown_as_20_byte_records() {
+    // Six 20-byte notes make 120 bytes, as five 24-byte ones would (Solomon's FL 7 "i dont know_8").
+    let notes: Vec<u8> = (0..6u32)
+        .flat_map(|i| {
+            let mut n = common::note(i * 96, 0, 96, 60 + i as u16, 0)[..20].to_vec();
+            n[17] = 100;
+            n
+        })
+        .collect();
+    let f = fl(&Flp::new().ascii(199, "7.0.2").word(64, 0).word(65, 1).data(224, &notes).build());
+    let item = |key: &str| f.items.iter().find(|i| i.key == key).unwrap_or_else(|| panic!("{key}"));
+    assert_eq!(item("pattern 1/224/[5]").span, Some((100, 20)));
+    assert_eq!(item("pattern 1/224/[1]/key").data, Data::Int(61));
+    assert_eq!(item("pattern 1/224/[1]/velocity").data, Data::Int(100));
+    // FL 8.5 on: 24 bytes.
+    let f = fl(&Flp::new().ascii(199, "8.5.0").word(64, 0).word(65, 1).data(224, &notes).build());
+    assert!(
+        f.items.iter().any(|i| i.key == "pattern 1/224/[4]") && !f.items.iter().any(|i| i.key == "pattern 1/224/[5]")
+    );
+}
+
+#[test]
 fn fl_scopes_follow_channels_patterns_and_mixer_slots() {
     let f = fl(&common::fl_studio_project());
     let has = |k: &str| f.items.iter().any(|i| i.key == k);

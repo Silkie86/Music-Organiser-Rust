@@ -314,8 +314,9 @@ with. The chords are scored exactly as `mir_eval.chord` scores chord recognition
 ones mean: each stretch of time weighted by its length in beats, pooled over all the songs. `--per-segment` scores
 them per labelled chord too (each counts once, right when right for more than half its time).
 
-The C# app is scored by the name it shows (and mo-harmony by the name its chart shows), read back with mo-harmony
-(`Chord::parse`, on the root and over the bass it gives), not by the notes it heard: "C7" names a G even when none
+The C# app is scored by the name it shows (and mo-harmony by its chart's chord, named as the labels write chords:
+`Chord::slash_name`, D/C where the chart writes D7), read back with mo-harmony (`Chord::parse`, on the root and over
+the bass it gives), not by the notes it heard: "C7" names a G even when none
 sounds, and "Gsus4" for C/G leaves the E out, as its page shows them. A name stands for a few notes a chord may leave
 out, as players read names and as mo-harmony's own names do: the plain fifth, the 9 under an 11 or 13, and the 11 of a
 minor 13. Those count only where the label has them, so "Cm13" is right for a minor 13 with no 11 and "Cm11" for a minor
@@ -329,8 +330,9 @@ where it would change chord. Give the bench the same `--part` as the helper, so 
 `--engine rust` runs mo-harmony's chord reader in the bench, on the same notes: the parts `--part` gives (all but
 drums when left out), each with the role its dataset gives (melody, bass, chords), as the MIDI page hears a file's
 parts. `--roles off` hears them all as one part with no role, as the C# app does. Each piece is read whole, as a song
-(or as a loop or a window: Solomon's packs), and each stretch's chord is scored by the name its chart shows, as the C#
-app's are, with its next two readings as its list. `--oracle-cuts` gives it the labelled changes (a pin at each
+(or as a loop or a window: Solomon's packs), and each stretch's chord is scored by its name as the labels write
+chords, its bass after a slash (`Chord::slash_name`: the app's names have none since 2026-11-03, so the bench still
+tells D over C from D7 over C as the labels do), as the C# app's are, with its next two readings as its list. `--oracle-cuts` gives it the labelled changes (a pin at each
 label's ends, so each label is read as one chord), as the helper's `--oracle-cuts` does for the C# app. `--timing`
 reads on one core, one piece after another, and says how long a read takes, a piece and 16 bars of it (the design's
 budget: 3 ms for a dense 16-bar part, 99 reads in 100):
@@ -843,3 +845,36 @@ scores are in the first fit's table):
   T9 −0.530, T10 −0.763, T11 −0.640, T12 −0.355, T15 0.259, R1 0.145, R2 0.448, R3 0.000, R4 0.000, L1 0.696, B1 1.098,
   B2 0.393, B3 0.163, B4 0.000, B5 −0.609, B6 −0.609, B7 1.072, B8 0.238, B9 −1.812, E1 1.436, E2 0.490, E3 −1.900, E4
   −1.901, E5 −2.934, E6 −4.478, E7 −4.478, E8 −1.545, P1 0.286, P2 0.222, pair 0.417, none −2.466.
+
+## Chord names with no slash (2026-11-04)
+
+The naming PR writes chords as Solomon chose on 2026-11-03: no slash chords (a chord is named from all its notes, the
+bass among them: D over C is D7, F over G is G9sus4), altered notes with no brackets (C7b9#11, C13#11), and no 7alt
+(C7#9#5). Readings named the same are one now, their chances added (Fmaj7 over D and Dm9 are both Dm9). The bench
+still scores each chord by its slash name, as the labels write chords. On the 15,234 stretches of the hand cases, the
+targets and 4,000 pieces made at random, the first reading's chord, bass and label are as before, and 295 answers go
+from the same notes to one chord. Scored with the hand-set numbers, before and after (`chords`, as the first fit's table:
+fold 1 of POP909-CL and Billboard, RS200 and the sweep whole; inversions read in root position are the same on every
+set):
+
+| set | majmin | name | extensions' macro F1 | the labelled chord among the first three |
+|---|---|---|---|---|
+| POP909-CL piano | 85.3 / 85.3 | 73.3 / 73.3 | - | 80.4 / 80.5 |
+| POP909-CL with the tune | 85.4 / 85.4 | 68.3 / 68.3 | - | 80.8 / 80.8 |
+| Billboard block chords | 98.1 / 98.1 | 92.4 / 92.4 | 71.0 / 71.0 | 94.8 / 94.8 |
+| Billboard set A | 92.7 / 92.7 | 84.5 / 84.5 | 56.4 / 56.5 | 90.5 / 90.1 |
+| Billboard set B | 88.0 / 88.0 | 79.2 / 79.2 | 44.8 / 45.1 | 86.8 / 86.4 |
+| RS200 block chords | 98.5 / 98.5 | 98.2 / 98.2 | 74.8 / 74.8 | 99.7 / 99.7 |
+| RS200 set A | 96.0 / 96.0 | 90.9 / 90.9 | 26.4 / 26.4 | 94.2 / 93.8 |
+| RS200 set B | 91.9 / 91.9 | 87.4 / 87.4 | 26.8 / 26.8 | 91.8 / 91.3 |
+| The sweep | 77.1 / 78.3 | 69.4 / 70.3 | 61.1 / 61.7 | 80.2 / 80.0 |
+
+- **The sweep gains** where its ninth chords with a #11 and no fifth played are written C9#11 now, not C9(b5): a name
+  stands for its fifth, so they count as the major chords they are (majmin), and #11's F1 goes from 55.8% to 69.8%.
+  Its altered dominants (labelled 7(#9,b13) and 7(b9,b13), played with no fifth) were written C7alt, which the bench
+  reads as every altered note, and are written out now (C7#9#5, C7b9#5, as Solomon chose): the altered notes they don't
+  have no longer count against them (b9's precision 84.0% to 91.9%, #9's 73.3% to 88.8%, #11's 58.9% to 76.6%), but
+  their G# is a #5 now where the labels say b13, so b13's F1 falls from 61.9% to 42.6%.
+- **The readings after the first** move where two named the same became one, so the labelled chord is among the first
+  three a little less often: the labels tell Fmaj7/D from Dm9, and the app's names don't.
+- The fits' tables above were scored before; score them again before comparing with these.

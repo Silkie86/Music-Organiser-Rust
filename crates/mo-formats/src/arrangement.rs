@@ -128,8 +128,9 @@ pub struct Arrangement {
 
 impl Arrangement {
     /// Where the last clip ends, in beats.
+    /// Where the last clip ends, in beats, but never past [`MOST_BEATS`]: a damaged project's clip can end at 1e20.
     pub fn length(&self) -> f64 {
-        self.lanes.iter().flat_map(|l| &l.clips).map(PreviewClip::end).fold(0.0, f64::max)
+        self.lanes.iter().flat_map(|l| &l.clips).map(PreviewClip::end).fold(0.0, f64::max).min(MOST_BEATS)
     }
 
     pub fn bars(&self) -> f64 {
@@ -155,6 +156,10 @@ impl Arrangement {
         if self.tempo > 0.0 { self.length() * 60.0 / self.tempo } else { 0.0 }
     }
 }
+
+/// The longest song an arrangement is drawn to, in beats: about 100 days at 120 BPM, past any real song, and far below
+/// where a bar number or a song's seconds stop fitting in a u64.
+pub const MOST_BEATS: f64 = 1.0e7;
 
 /// The most notes an arrangement holds, as the song readers' limit: a damaged file can loop a clip millions of times.
 pub const MOST_NOTES: usize = 4_000_000;

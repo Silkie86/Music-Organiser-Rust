@@ -384,14 +384,15 @@ fn keeps_the_rules(
         seen.sort_unstable();
         seen.dedup();
         check(seen.len() == e.notes.len(), &what("a note twice"))?;
-        let (chord, label) = (e.first.chord, e.first.label);
+        // The notes are told by the chord as it's written ([`Chord::as_written`]).
+        let (chord, label) = (e.first.chord.as_written(), e.first.label);
         for w in &e.notes {
             let (role, notes) = &music.parts[w.part];
             check(notes[w.note].key == w.key, &what("the key"))?;
             let pc = PitchClass::of_key(w.key);
             let interval = i32::from(pc.above(chord.root()));
-            // Only the bass walks or approaches, and only the bass is the bass, but where it doubles a bass written
-            // under the chord that's only a bass.
+            // Only the bass walks or approaches, and only the bass is the bass, but where a note doubles the root a
+            // rootless chord stands on.
             let doubles = matches!(w.does, NoteDoes::Bass(_)) && pc == chord.bass() && !chord.notes().contains(pc);
             let bass_like = matches!(w.does, NoteDoes::Bass(_) | NoteDoes::Walking | NoteDoes::Approach) && !doubles;
             let heard = match w.heard_as {
@@ -725,12 +726,12 @@ fn the_evidence_adds_up_to_what_the_decode_scored() {
 
 #[test]
 fn a_chord_held_on_from_the_stretch_before_has_no_evidence_about_where_a_chord_starts() {
-    // C C/B | Am: the C/B is the C held on, its bass moving to its seventh halfway through the bar. Nothing about where
-    // a chord starts counts for it, and the runner-up starts a chord in the middle of the bar.
+    // C C/B | Am: the C/B (written Cmaj7) is the C held on, its bass moving to its seventh halfway through the bar.
+    // Nothing about where a chord starts counts for it, and the runner-up starts a chord in the middle of the bar.
     let (r, all) = explained(&case_music("4 C C/B | Am"), &[], 2);
     assert!(r.spans[1].flags.contains(SpanFlags::SPLIT), "{:?}", r.spans[1]);
     let e = all[1].clone().unwrap();
-    assert_eq!((e.first.chord.name(), e.first.label), ("C/B".to_owned(), r.spans[0].label.unwrap()));
+    assert_eq!((e.first.chord.name(), e.first.label), ("Cmaj7".to_owned(), r.spans[0].label.unwrap()));
     assert!(e.terms.iter().filter(|t| about_the_start(t)).all(|t| t.values[0] == 0.0), "{}", render(&e));
     let mid_bar = e.terms.iter().find(|t| t.term == Term::Feature(Feature::MidBar)).expect("the runner-up's start");
     assert_eq!(mid_bar.values, [0.0, 1.0]);
@@ -761,15 +762,15 @@ pub(super) fn case_music(name: &str) -> Music {
 }
 
 #[test]
-fn the_bass_written_under_a_chord_doubled_in_the_tune_is_the_bass() {
-    // D/C with the tune's C6 struck for an eighth off the beat: it doubles the bass the name writes.
+fn the_bass_under_a_chord_doubled_in_the_tune_is_one_of_its_notes() {
+    // D over C with the tune's C6 struck for an eighth off the beat: the chord is written D7, so the C is its seventh.
     let music = Music::new().bass(notes("C2", 0, BAR)).keys(notes("D4 F#4 A4", 0, BAR)).tune(
         [notes("A5", 0, BEAT + BEAT / 2), notes("C6", BEAT + BEAT / 2, BEAT / 2), notes("A5", 2 * BEAT, 2 * BEAT)]
             .concat(),
     );
     let e = first_explained(music);
-    assert_eq!(e.first.chord.name(), "D/C", "{}", render(&e));
-    assert!(notes_of(&e).contains(&"tune C6 on b7".to_owned()), "{}", render(&e));
+    assert_eq!(e.first.chord.name(), "D7", "{}", render(&e));
+    assert!(notes_of(&e).contains(&"tune C6 b7".to_owned()), "{}", render(&e));
 }
 
 #[test]

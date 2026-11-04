@@ -2,6 +2,7 @@
 //! folder or the Recycle Bin, each reporting on the activity cards.
 
 use std::cell::RefCell;
+use std::path::{Path, PathBuf};
 
 use mo_app::activity::Feed;
 use mo_app::background;
@@ -76,4 +77,14 @@ pub fn copy_path(feed: &Feed, path: &str) {
             feed.start("Couldn't copy the path", "").failed(&e.to_string());
         }
     }
+}
+
+/// The Documents folder, where Windows really keeps it (it may have moved, to OneDrive say).
+pub(crate) fn documents() -> PathBuf {
+    #[cfg(windows)]
+    if let Some(d) = known_folders::get_known_folder_path(known_folders::KnownFolder::Documents) {
+        return d;
+    }
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
+    home.map_or_else(|| Path::new(".").to_owned(), |h| h.join("Documents"))
 }

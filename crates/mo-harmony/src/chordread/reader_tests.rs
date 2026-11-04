@@ -258,7 +258,7 @@ fn the_chart_is_spelled_in_the_key() {
     assert_eq!(names(&r, c_major), ["Dm7", "Ebdim7"]);
     let song = Music::new().bass(bars("D2 | Eb2")).keys(bars("F3 A3 C4 | Gb3 A3 C4"));
     assert_eq!(names(&read(&song, &[], 2).unwrap(), c_major), ["Dm7", "D#dim7"]);
-    // Any chord at a span is spelled as the chart spells chords there: the shown one as the chart has it.
+    // Any chord at a span is spelled as the chart spells chords there: the shown one, as it's written, is the chart's.
     let keys = [None, c_major, Some(Key::major(PitchClass::new(6))), Some(Key::minor(PitchClass::new(6)))];
     for (music, pins) in the_music_in_ticks() {
         let r = read(&music, &pins, 2).unwrap();
@@ -267,7 +267,7 @@ fn the_chart_is_spelled_in_the_key() {
             for (i, s) in r.spans.iter().enumerate() {
                 let spelled = s.shown().map(|x| r.spell(&chart, i, x.chord, key));
                 assert_eq!(spelled, chart[i], "span {i} in {key:?}: {}", render(&r));
-                assert!(chart[i].is_none_or(|c| Some(c.chord()) == s.shown().map(|x| x.chord)));
+                assert!(chart[i].is_none_or(|c| Some(c.chord()) == s.shown().map(|x| x.chord.as_written())));
             }
         }
     }
@@ -282,9 +282,9 @@ fn chord_check_offers_the_same_notes_another_way_then_another_chord() {
     let own = |list: &[(&str, ChoiceFrom)]| -> Vec<(String, ChoiceFrom)> {
         list.iter().map(|&(name, from)| (name.to_owned(), from)).collect()
     };
-    // C6 over C: Am7/C is the same notes on another root, and nothing else is likely enough to offer.
+    // C6 over C: Am7 (over C) is the same notes on another root, and nothing else is likely enough to offer.
     let r = case("22 C6");
-    assert_eq!(choices(&r.spans[0], 3), own(&[("C6", First), ("Am7/C", SameNotes)]), "{}", render(&r));
+    assert_eq!(choices(&r.spans[0], 3), own(&[("C6", First), ("Am7", SameNotes)]), "{}", render(&r));
     // Dm9: Fmaj7/D is the same notes, but under 1%; so Dm9 with its tensions left out.
     let r = case("10 Dm9 | G13 | Cmaj9");
     assert_eq!(choices(&r.spans[0], 3), own(&[("Dm9", First), ("Dm7", Tensions)]), "{}", render(&r));
@@ -307,8 +307,10 @@ fn chord_check_offers_the_same_notes_another_way_then_another_chord() {
                 continue;
             };
             assert_eq!((all[0].chord, all[0].from), (first.chord, First), "{}", render(&r));
+            // Each is named differently: two choices with the same name would be two buttons that look the same.
+            let names: Vec<String> = all.iter().map(|c| c.chord.name()).collect();
+            assert!(names.iter().enumerate().all(|(i, n)| !names[..i].contains(n)), "{names:?} {}", render(&r));
             for (i, c) in all.iter().enumerate().skip(1) {
-                assert!(!all[..i].iter().any(|o| o.chord == c.chord), "{all:?}");
                 let reading = s.readings.iter().skip(1).find(|x| x.chord == c.chord);
                 let likely = reading.is_some_and(|x| x.chance >= CHOICE_FLOOR);
                 match c.from {
@@ -316,7 +318,7 @@ fn chord_check_offers_the_same_notes_another_way_then_another_chord() {
                     SameNotes => assert!(likely && reading.is_some_and(|x| x.group == first.group), "{all:?}"),
                     Other => assert!(likely, "{all:?}"),
                     Tensions => {
-                        let (a, b) = (c.chord, first.chord);
+                        let (a, b) = (c.chord, first.written);
                         assert!(i == 1 && a.root() == b.root() && a.bass() == b.bass() && a.notes() != b.notes());
                     }
                 }
@@ -386,9 +388,11 @@ fn pins_given_in_ticks_are_read_as_given() {
     let free = read(&music, &[], 6).unwrap();
     assert_eq!(shown(&free), ["Dm9", "G13", "Cmaj9"], "{}", render(&free));
     let given = |start: i64, end: i64, name: &str| Pin { start, end, chord: Some(chord(name)) };
-    // The tritone's substitute given for the second bar: read as given, over its bass, one chord for sure.
+    // The tritone's substitute given for the second bar: read as given, over its bass, one chord for sure; Db7 over
+    // G is written from all its notes, G7b9#11.
     let r = read(&music, &[given(BAR, 2 * BAR, "Db7")], 6).unwrap();
-    assert_eq!(shown(&r), ["Dm9", "Db7/G", "Cmaj9"], "{}", render(&r));
+    assert_eq!(shown(&r), ["Dm9", "G7b9#11", "Cmaj9"], "{}", render(&r));
+    assert_eq!(r.spans[1].shown().map(|x| x.chord), Some(chord("Db7/G")), "{}", render(&r));
     let sub = &r.spans[1];
     assert!(sub.flags.contains(SpanFlags::GIVEN) && sub.answer == ChordAnswer::Chord && sub.readings.len() == 1);
     assert_eq!((sub.start, sub.end, sub.units.clone()), (BAR, 2 * BAR, 8..16));
@@ -411,7 +415,7 @@ fn pins_given_in_ticks_are_read_as_given() {
         [given(BAR + 5, BAR + 10, "E7"), given(BAR, 2 * BAR, "Db7")],
         [given(i64::MIN, -BAR, "E7"), given(BAR, 2 * BAR, "Db7")],
     ] {
-        assert_eq!(shown(&read(&music, &pins, 6).unwrap()), ["Dm9", "Db7/G", "Cmaj9"], "{pins:?}");
+        assert_eq!(shown(&read(&music, &pins, 6).unwrap()), ["Dm9", "G7b9#11", "Cmaj9"], "{pins:?}");
     }
     let past = read(&music, &[given(3 * BAR, i64::MAX, "C6")], 6).unwrap();
     assert_eq!(shown(&past), ["Dm9", "G13", "Cmaj9", "C6"], "{}", render(&past));
@@ -420,10 +424,12 @@ fn pins_given_in_ticks_are_read_as_given() {
     let r = read(&gap, &[given(BAR, 2 * BAR, "Db7")], 6).unwrap();
     assert_eq!(shown(&r), ["C", "Db7", "F"], "{}", render(&r));
     assert_eq!(answers(&r), [ChordAnswer::Chord; 3], "{}", render(&r));
-    // A chord given with a bass of its own keeps it, and the answer is one chord though one line is heard.
+    // A chord given with a bass of its own keeps it (Am7, with C in the bass), and the answer is one chord though one
+    // line is heard.
     let tune = Music::new().tune(line("C4 E4 G4 E4", 0, BEAT));
     let r = read(&tune, &[given(0, BAR, "Am7/C")], 6).unwrap();
-    assert_eq!((shown(&r), answers(&r)), (vec!["Am7/C".to_owned()], vec![ChordAnswer::Chord]), "{}", render(&r));
+    assert_eq!((shown(&r), answers(&r)), (vec!["Am7".to_owned()], vec![ChordAnswer::Chord]), "{}", render(&r));
+    assert_eq!(r.spans[0].shown().map(|x| x.chord.bass()), Some(PitchClass::C), "{}", render(&r));
 }
 
 #[test]
@@ -433,7 +439,7 @@ fn a_chord_given_over_a_loops_last_bar_is_the_chord_before_its_first() {
     let db7 = Some(chord("Db7"));
     let free = read(&music, &[], 6).unwrap();
     let r = read(&music, &[Pin { start: 3 * BAR, end: 4 * BAR, chord: db7 }], 6).unwrap();
-    assert_eq!(shown(&r), ["C", "F", "G", "Db7/G"], "{}", render(&r));
+    assert_eq!(shown(&r), ["C", "F", "G", "G7b9#11"], "{}", render(&r));
     // As the loop goes round, its first chord follows Db7, not G; and a chord starts for sure there, where the chord
     // given ends.
     let first = |r: &ChordReading| r.spans[0].readings[0].chance.to_bits();
@@ -473,8 +479,8 @@ fn a_loop_reads_the_chord_before_its_first_as_it_goes_round() {
 /// to its end, each from where the one before ends, on the units heard; each keeps at most `keep` readings, and the
 /// chance of none of them is what they leave; a rest has none; the answers follow the rules (a chord given is one
 /// chord, one line alone is implied, one chord and the same notes are likely enough); a span shows a chord when its
-/// answer gives one, and the chart spells that chord; Chord check's first choice is the first reading; and the chart
-/// read back agrees with itself.
+/// answer gives one, and the chart spells that chord as it's written; Chord check's first choice is the first reading;
+/// and the chart read back agrees with itself.
 fn keeps_the_rules(hearing: &Hearing, r: &ChordReading, keep: usize) -> Result<(), String> {
     let check = |yes: bool, why: &dyn Fn() -> String| if yes { Ok(()) } else { Err(why()) };
     let reported = hearing.reported();
@@ -515,7 +521,8 @@ fn keeps_the_rules(hearing: &Hearing, r: &ChordReading, keep: usize) -> Result<(
         check(s.label.is_none() || first.map(|x| x.label) == s.label, &why)?;
         let reads = s.label.is_some() || s.answer == ChordAnswer::Implied;
         check(s.shown().is_some() == (reads && s.answer.shows_chord() && first.is_some()), &why)?;
-        check(chart.get(i).copied().flatten().map(|c| c.chord()) == s.shown().map(|x| x.chord), &why)?;
+        let written = s.shown().map(|x| x.chord.as_written());
+        check(chart.get(i).copied().flatten().map(|c| c.chord()) == written, &why)?;
         let choices = s.choices(3);
         check(choices.first().map(|c| c.chord) == first.map(|x| x.chord) && choices.len() <= 3, &why)?;
     }
@@ -728,7 +735,7 @@ fn damaged_notes_are_read_without_a_panic() {
 
 /// What the hand cases, the tests' music and some music made here read at each version of the reader, as a hash
 /// ([`readings_hash`]). A change that moves any of them needs `CHORD_READER_VERSION` bumped, and a line added here.
-const READINGS: &[(u32, u64)] = &[(1, 0xe3a9_cd16_4f69_5725)];
+const READINGS: &[(u32, u64)] = &[(1, 0xe3a9_cd16_4f69_5725), (2, 0x1a86_e909_00c4_7d95)];
 
 /// The music whose readings the hash covers, with its pins: every hand case, the music the rules are checked on, and
 /// music made here so every kind of answer is read (one line, one note, all twelve, a rest, chords given) and what

@@ -415,7 +415,7 @@ pub fn is_cut(clip: &str) -> bool {
 }
 
 /// One note on the piano roll, each number 0 to 1 of the roll: left, top, width, height; and how hard it's played
-/// (0.4 to 1, for how strongly it's drawn).
+/// (0.4 to 1, for how strongly it's drawn); and its key (60 = C4), for its name.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RollNote {
     pub x: f32,
@@ -423,6 +423,39 @@ pub struct RollNote {
     pub w: f32,
     pub h: f32,
     pub strength: f32,
+    pub key: u8,
+}
+
+/// One key of the roll's keyboard, top to bottom: its row (top and height, 0 to 1 of the roll), whether it's a black
+/// key, and its name ("C4").
+#[derive(Clone, Debug, PartialEq)]
+pub struct RollKey {
+    pub y: f32,
+    pub h: f32,
+    pub black: bool,
+    pub name: String,
+}
+
+/// Whether `key` is a black key on a piano (Db, Eb, F#, Ab, Bb).
+pub fn is_black(key: u8) -> bool {
+    matches!(key % 12, 1 | 3 | 6 | 8 | 10)
+}
+
+/// The keyboard down the side of a roll from `low` to `high`, highest at the top, as [`roll`] lays its rows out.
+pub fn roll_keys(low: u8, high: u8) -> Vec<RollKey> {
+    if high < low {
+        return Vec::new();
+    }
+    let keys = f32::from(high - low + 1);
+    (low..=high)
+        .rev()
+        .map(|key| RollKey {
+            y: f32::from(high - key) / keys,
+            h: 1.0 / keys,
+            black: is_black(key),
+            name: note_name(key),
+        })
+        .collect()
 }
 
 /// The piano roll of a part: its notes, its bar lines (0 to 1 across), the lowest and highest key it shows, and how
@@ -464,6 +497,7 @@ pub fn roll(notes: &[NoteEvent], bars: i32) -> Roll {
             w: n.length as f32 / length,
             h: 1.0 / keys,
             strength: 0.4 + 0.6 * f32::from(n.velocity) / 65_535.0,
+            key: n.key,
         })
         .collect();
     drawn.iter_mut().for_each(|n| n.w = n.w.min(1.0 - n.x));
@@ -864,5 +898,19 @@ mod tests {
         assert!(r.notes.iter().all(|n| n.x >= 0.0 && n.x + n.w <= 1.0 && n.y >= 0.0 && n.y < 1.0));
         assert!((r.notes[0].strength - 1.0).abs() < 1e-6);
         assert_eq!(roll(&[], 4), Roll::default());
+        assert_eq!(r.notes[0].key, 60);
+    }
+
+    #[test]
+    fn the_keyboard_runs_top_down_with_its_black_keys() {
+        let keys = roll_keys(59, 63);
+        let names: Vec<&str> = keys.iter().map(|k| k.name.as_str()).collect();
+        assert_eq!(names, ["Eb4", "D4", "Db4", "C4", "B3"]);
+        let black: Vec<bool> = keys.iter().map(|k| k.black).collect();
+        assert_eq!(black, [true, false, true, false, false]);
+        assert!((keys[3].y - 0.6).abs() < 1e-6 && (keys[3].h - 0.2).abs() < 1e-6);
+        // The rows match the notes': C4 in a roll from 59 to 63 sits where roll() puts it.
+        assert!(roll_keys(5, 4).is_empty());
+        assert!(!is_black(65) && is_black(66));
     }
 }

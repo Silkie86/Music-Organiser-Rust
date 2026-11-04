@@ -25,7 +25,6 @@ use mo_backup::plan::{self, Folders, LeftOut, Level, Plan, Rules, SongInfo, Used
 use mo_formats::case;
 use mo_formats::paths::{file_name, stem};
 use mo_library::Library;
-use mo_library::scan::is_inside;
 use mo_library::songs::{Song, group_songs, marked};
 use mo_space::size::{FileEntry, size_text};
 use mo_space::song::{CompactSettings, DEFAULT_KEEP_BACKUPS, Elsewhere, SongSave, SongSpaceReport, measure};
@@ -276,8 +275,6 @@ pub struct Prepared {
     pub plan: Plan,
     /// The songs in the folders, with the files of each that go (for the zip format).
     pub songs: Vec<SongFiles>,
-    /// The whole folders.
-    pub always: Vec<PathBuf>,
     /// Folders on the list that aren't there now.
     pub missing: Vec<PathBuf>,
     /// Everything in the folders (and the samples outside them the songs use), before anything is left out.
@@ -324,7 +321,7 @@ fn shapes(saves: &[&mo_library::Save]) -> Vec<plan::SaveShape> {
 /// makes the plan. Reads only. Slow: on the app's low-priority pool, never the window's thread.
 pub fn prepare(library: &Library, settings: &Settings, stop: &AtomicBool) -> Result<Prepared, String> {
     let backup = settings.drive.clone().ok_or("Pick a backup drive first")?;
-    let gathered = folders::gather(&settings.folders, stop).map_err(|_| "Stopped".to_owned())?;
+    let gathered = folders::gather(&settings.folders, &backup, stop).map_err(|_| "Stopped".to_owned())?;
     let saves = library.saves().map_err(|e| e.to_string())?;
     let choices = library.song_choices().map_err(|e| e.to_string())?;
     let samples = library.sample_paths().map_err(|e| e.to_string())?;
@@ -442,17 +439,14 @@ pub fn prepare(library: &Library, settings: &Settings, stop: &AtomicBool) -> Res
     let infos: Vec<SongInfo<'_>> =
         measured.iter().map(|m| SongInfo { report: &m.report, saves: &m.saves, milestones: &m.milestones }).collect();
     let rules = Rules { level: settings.level, ..Rules::default() };
-    let plan = plan::plan(files, &infos, &used, Folders { backup: &backup, always: &gathered.always }, rules);
+    // A file follows the nearest folder on the list it's in (a Slimmed one inside a Whole one keeps its choice).
+    let listed = plan::Listed::new(&settings.folders);
+    let plan = plan::plan(files, &infos, &used, Folders { backup: &backup, listed: &listed }, rules);
 
     // Each song's files that go: its saves, the samples it uses, and (when it has a folder to itself) the rest of it.
     // Files in whole folders stay out of the zips: they go as plain folders.
     let going: HashMap<String, &FileEntry> =
         plan.copy.iter().map(|f| (case::key(&f.path.to_string_lossy()), f)).collect();
-    let always: Vec<String> = gathered.always.iter().map(|w| w.to_string_lossy().into_owned()).collect();
-    let in_whole = |p: &Path| {
-        let p = p.to_string_lossy();
-        always.iter().any(|w| is_inside(&p, w))
-    };
     // The files in each song's own folder, found in one pass over the plan: each file's folders, looked up.
     let own_folders: HashMap<String, usize> = measured
         .iter()
@@ -483,8 +477,8 @@ pub fn prepare(library: &Library, settings: &Settings, stop: &AtomicBool) -> Res
             let mut take = |p: &Path| {
                 let k = case::key(&p.to_string_lossy());
                 if let Some(f) = going.get(&k)
-                    && !in_whole(&f.path)
                     && seen.insert(k)
+                    && !listed.whole(&f.path)
                 {
                     list.push(f.path.clone());
                 }
@@ -505,7 +499,6 @@ pub fn prepare(library: &Library, settings: &Settings, stop: &AtomicBool) -> Res
     Ok(Prepared {
         plan,
         songs: song_files,
-        always: gathered.always,
         missing: gathered.missing,
         all_bytes,
         folder_bytes,

@@ -412,10 +412,15 @@ pub fn read_whole_cases() -> Result<Vec<(String, Music, Vec<Check>)>, String> {
 /// A reading as the cases see it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Written {
+    /// Its name, as the app writes it, from all its notes ([`Chord::name`]: D over C is D7).
     pub name: String,
+    /// The chord as datasets write it, its bass after a slash ([`Chord::slash_name`]: D/C), to tell how it stands
+    /// over its bass.
+    pub label: String,
     pub bass: BassKind,
     /// The held bass, when there is one.
     pub bass_note: Option<String>,
+    /// The other way round of writing it, as datasets write it (G9sus4, also F/G).
     pub also: Option<String>,
     pub roots: Vec<String>,
     pub intervals: Vec<i32>,
@@ -465,7 +470,6 @@ impl Named {
 
     pub fn spans(&self) -> Vec<WrittenSpan> {
         let first = self.hearing.reported().start;
-        let written = |c: Chord| c.name();
         let span = |s: &NamedSpan| WrittenSpan {
             units: s.units.start - first..s.units.end - first,
             flags: s.flags,
@@ -477,11 +481,12 @@ impl Named {
                 .readings(s)
                 .iter()
                 .map(|r| Written {
-                    name: written(r.chord),
+                    name: r.chord.name(),
+                    label: r.chord.slash_name(),
                     bass: r.bass,
                     bass_note: matches!(r.bass, BassKind::Root | BassKind::Inversion | BassKind::Slash)
                         .then(|| r.chord.bass().to_string()),
-                    also: r.also.map(written),
+                    also: r.also.map(Chord::slash_name),
                     roots: r.roots.iter().map(|pc| pc.to_string()).collect(),
                     intervals: r.chord.intervals().iter().map(|pc| i32::from(pc.number())).collect(),
                     chance: r.chance,
@@ -509,10 +514,11 @@ pub fn render_named(spans: &[WrittenSpan]) -> String {
         if on.is_empty() { String::new() } else { format!(" [{}]", on.join(", ")) }
     };
     let reading = |r: &Written| {
+        let label = if r.label == r.name { String::new() } else { format!(" ({})", r.label) };
         let also = r.also.as_ref().map_or(String::new(), |a| format!(" also {a}"));
         let rootless = if r.rootless { " rootless" } else { "" };
         let doubtful = if r.doubtful.is_empty() { String::new() } else { format!(" doubtful {:?}", r.doubtful) };
-        format!("{} {:?}{also}{rootless}{doubtful} {:.2} g{}", r.name, r.bass, r.chance, r.group)
+        format!("{}{label} {:?}{also}{rootless}{doubtful} {:.2} g{}", r.name, r.bass, r.chance, r.group)
     };
     let span = |s: &WrittenSpan| {
         let readings: Vec<String> = s.readings.iter().map(reading).collect();
@@ -529,15 +535,19 @@ pub enum NameWant {
     Writes(usize, &'static str, BassKind),
     /// The span starting at this tick (in the music's own ticks) is written so.
     WritesAt(i64, &'static str),
-    /// The span starting at this unit is written the other way so, or isn't written another way.
+    /// The span starting at this unit is written so the other way round, as datasets write it ([`Written::also`]), or
+    /// isn't written another way.
     Also(usize, Option<&'static str>),
+    /// The span starting at this unit stands so over its bass, as datasets write it ([`Written::label`]).
+    Stands(usize, &'static str),
     /// Spans start at these units, and nowhere else.
     Cuts(&'static [usize]),
     /// The span starting at this unit has these flags, and none of those.
     Flags(usize, SpanFlags, SpanFlags),
     /// Among the first so many readings of the span starting at this unit are these.
     Among(usize, usize, &'static [&'static str]),
-    /// No span is written with any of these in its name.
+    /// No span is written with any of these in its name, or in how it stands over its bass ([`Written::label`]): "/"
+    /// is a span over a bass that isn't its root.
     Never(&'static [&'static str]),
     /// The span starting at this unit is written with these notes above its root (the notes as played).
     Intervals(usize, &'static [i32]),
@@ -569,6 +579,10 @@ pub fn named_holds(want: &NameWant, spans: &[WrittenSpan]) -> Result<(), String>
             let r = first(unit)?;
             check(r.also.as_deref() == *also, format!("at {unit}: {} also {:?}", r.name, r.also))
         }
+        NameWant::Stands(unit, label) => {
+            let r = first(unit)?;
+            check(r.label == *label, format!("at {unit}: {} stands as {}", r.name, r.label))
+        }
         NameWant::Cuts(units) => {
             let starts: Vec<usize> = spans.iter().map(|s| s.units.start).collect();
             check(starts == *units, format!("cut at {starts:?}"))
@@ -582,10 +596,13 @@ pub fn named_holds(want: &NameWant, spans: &[WrittenSpan]) -> Result<(), String>
             let best: Vec<&str> = s.readings.iter().take(*most).map(|r| r.name.as_str()).collect();
             check(these.iter().all(|t| best.contains(t)), format!("best {most} at {unit}: {best:?}"))
         }
-        NameWant::Never(these) => match spans.iter().find(|s| these.iter().any(|t| s.name().contains(t))) {
-            Some(s) => Err(format!("{} at {}", s.name(), s.units.start)),
-            None => Ok(()),
-        },
+        NameWant::Never(these) => {
+            let label = |s: &WrittenSpan| s.readings.first().map_or("N", |r| r.label.as_str()).to_owned();
+            match spans.iter().find(|s| these.iter().any(|t| s.name().contains(t) || label(s).contains(t))) {
+                Some(s) => Err(format!("{} ({}) at {}", s.name(), label(s), s.units.start)),
+                None => Ok(()),
+            }
+        }
         NameWant::Intervals(unit, intervals) => {
             let r = first(unit)?;
             check(r.intervals == *intervals, format!("at {unit}: {} {:?}", r.name, r.intervals))
@@ -1166,18 +1183,19 @@ pub fn named_cases() -> Result<Vec<NamedCase>, String> {
     let dominant = |upper: &str| keys_bass("C2", &format!("E3 Bb3 {upper}"));
     let cases = vec![
         ("1 C", keys_bass("C2", "C4 E4 G4"), vec![Writes(0, "C", Root), Also(0, None)]),
-        ("2 C/E", keys_bass("E2", "C4 E4 G4"), vec![Writes(0, "C/E", Inversion), Never(&["Em"])]),
-        ("2 C/E in octaves", keys_bass("E2 E3", "C4 E4 G4"), vec![Writes(0, "C/E", Inversion)]),
-        ("2 C/G", keys_bass("G1", "C4 E4 G4"), vec![Writes(0, "C/G", Inversion)]),
-        ("2 G7/F", keys_bass("F2", "G3 B3 D4 F4"), vec![Writes(0, "G7/F", Inversion), Also(0, None)]),
-        ("3 D/C", keys_bass("C2", "D4 F#4 A4"), vec![Writes(0, "D/C", Slash), Also(0, Some("D7/C"))]),
+        ("2 C/E", keys_bass("E2", "C4 E4 G4"), vec![Writes(0, "C", Inversion), Stands(0, "C/E"), Never(&["Em"])]),
+        ("2 C/E in octaves", keys_bass("E2 E3", "C4 E4 G4"), vec![Writes(0, "C", Inversion), Stands(0, "C/E")]),
+        ("2 C/G", keys_bass("G1", "C4 E4 G4"), vec![Writes(0, "C", Inversion), Stands(0, "C/G")]),
+        ("2 G7/F", keys_bass("F2", "G3 B3 D4 F4"), vec![Writes(0, "G7", Inversion), Stands(0, "G7/F"), Also(0, None)]),
+        ("3 D/C", keys_bass("C2", "D4 F#4 A4"), vec![Writes(0, "D7", Slash), Stands(0, "D/C"), Also(0, Some("D7/C"))]),
         (
             "4 C C/B | Am",
             keys_bass("C2 (1-2) B1 (3-4) | A1", "C4 E4 G4 | A3 C4 E4"),
             vec![
                 Cuts(&[0, 4, B]),
                 Writes(0, "C", Root),
-                Writes(4, "C/B", Slash),
+                Writes(4, "Cmaj7", Slash),
+                Stands(4, "C/B"),
                 Also(4, Some("Cmaj7/B")),
                 Flags(0, SpanFlags::SPLIT, none),
                 Flags(4, SpanFlags::SPLIT, none),
@@ -1188,7 +1206,14 @@ pub fn named_cases() -> Result<Vec<NamedCase>, String> {
         (
             "4 C7 C7/Bb | F/A, its own seventh",
             keys_bass("C2 (1-2) Bb1 (3-4) | A1", "C4 E4 G4 Bb4 | A3 C4 F4"),
-            vec![Cuts(&[0, 4, B]), Writes(0, "C7", Root), Writes(4, "C7/Bb", Inversion), Writes(B, "F/A", Inversion)],
+            vec![
+                Cuts(&[0, 4, B]),
+                Writes(0, "C7", Root),
+                Writes(4, "C7", Inversion),
+                Stands(4, "C7/Bb"),
+                Writes(B, "F", Inversion),
+                Stands(B, "F/A"),
+            ],
         ),
         (
             "4 C7, never cut where the bass plays B",
@@ -1214,10 +1239,12 @@ pub fn named_cases() -> Result<Vec<NamedCase>, String> {
             vec![
                 Cuts(&[0, 4, B, B + 4, 2 * B]),
                 Writes(0, "C", Root),
-                Writes(4, "C/E", Inversion),
+                Writes(4, "C", Inversion),
+                Stands(4, "C/E"),
                 Writes(B, "F", Root),
                 Writes(B + 4, "F#dim7", Root),
-                Writes(2 * B, "C/G", Inversion),
+                Writes(2 * B, "C", Inversion),
+                Stands(2 * B, "C/G"),
             ],
         ),
         ("7 G9sus4", keys_bass("G1", "F3 A3 C4"), vec![Writes(0, "G9sus4", Root), Also(0, Some("F/G"))]),
@@ -1235,14 +1262,16 @@ pub fn named_cases() -> Result<Vec<NamedCase>, String> {
             vec![
                 Cuts(&[0, B, 2 * B, 3 * B]),
                 Writes(0, "C", Root),
-                Writes(B, "F/C", Inversion),
-                Writes(2 * B, "G/C", Slash),
+                Writes(B, "F", Inversion),
+                Stands(B, "F/C"),
+                Writes(2 * B, "G(add11)", Slash),
+                Stands(2 * B, "G/C"),
                 Writes(3 * B, "C", Root),
                 Flags(0, none, SpanFlags::PEDAL),
                 Flags(B, SpanFlags::PEDAL, none),
                 Flags(2 * B, SpanFlags::PEDAL, none),
                 Flags(3 * B, none, SpanFlags::PEDAL),
-                Never(&["sus", "add"]),
+                Never(&["sus"]),
             ],
         ),
         (
@@ -1261,29 +1290,29 @@ pub fn named_cases() -> Result<Vec<NamedCase>, String> {
             vec![Writes(0, "Dm7", Root), Writes(B, "G7", Root), Writes(2 * B, "Cmaj7", Root)],
         ),
         ("15a C13(#11)", dominant("D4 F#4 A4"), vec![Intervals(0, &[0, 2, 4, 6, 9, 10])]),
-        ("15b C7(#9)", dominant("Eb4 G4 Bb4"), vec![Writes(0, "C7(#9)", Root)]),
-        ("15c C13(b9)", dominant("A4 C#5 E5"), vec![Writes(0, "C13(b9)", Root)]),
-        ("15d C7alt", dominant("Ab4 C5 Eb5"), vec![Writes(0, "C7alt", Root), Intervals(0, &[0, 3, 4, 8, 10])]),
-        ("16 C7(#9)", keys_bass("C2", "E3 Bb3 Eb4"), vec![Writes(0, "C7(#9)", Root)]),
-        ("16 E7(#9)", keys_bass("E2", "G#3 D4 G4"), vec![Writes(0, "E7(#9)", Root)]),
-        ("16 E7(#9) keys alone", keys("E3 G#3 D4 G4"), vec![Writes(0, "E7(#9)", BassKind::None)]),
+        ("15b C7(#9)", dominant("Eb4 G4 Bb4"), vec![Writes(0, "C7#9", Root)]),
+        ("15c C13(b9)", dominant("A4 C#5 E5"), vec![Writes(0, "C13b9", Root)]),
+        ("15d C7alt", dominant("Ab4 C5 Eb5"), vec![Writes(0, "C7#9#5", Root), Intervals(0, &[0, 3, 4, 8, 10])]),
+        ("16 C7(#9)", keys_bass("C2", "E3 Bb3 Eb4"), vec![Writes(0, "C7#9", Root)]),
+        ("16 E7(#9)", keys_bass("E2", "G#3 D4 G4"), vec![Writes(0, "E7#9", Root)]),
+        ("16 E7(#9) keys alone", keys("E3 G#3 D4 G4"), vec![Writes(0, "E7#9", BassKind::None)]),
         (
             "17 C7alt",
             keys_bass("C2", "E3 Bb3 D#4 G#4"),
-            vec![Writes(0, "C7alt", Root), Intervals(0, &[0, 3, 4, 8, 10])],
+            vec![Writes(0, "C7#9#5", Root), Intervals(0, &[0, 3, 4, 8, 10])],
         ),
-        ("18 G7alt", keys_bass("G2", "B3 F4 Ab4 Bb4 Eb5"), vec![Writes(0, "G7alt", Root)]),
+        ("18 G7alt", keys_bass("G2", "B3 F4 Ab4 Bb4 Eb5"), vec![Writes(0, "G7b9#9#5", Root), Also(0, None)]),
         ("19 Db13", keys_bass("Db2", "F3 B3 Eb4 Bb4"), vec![Writes(0, "Db13", Root)]),
-        ("19 G7alt", keys_bass("G1", "F3 B3 Eb4 Bb4"), vec![Writes(0, "G7alt", Root)]),
-        ("21 Am6", keys_bass("A1", "C4 E4 F#4 A4"), vec![Writes(0, "Am6", Root), Together(0, "Am6", "F#m7b5/A")]),
+        ("19 G7alt", keys_bass("G1", "F3 B3 Eb4 Bb4"), vec![Writes(0, "G7#9#5", Root)]),
+        ("21 Am6", keys_bass("A1", "C4 E4 F#4 A4"), vec![Writes(0, "Am6", Root), Together(0, "Am6", "F#m7b5")]),
         ("21 F#m7b5", keys_bass("F#2", "C4 E4 F#4 A4"), vec![Writes(0, "F#m7b5", Root)]),
         ("21 D9", keys_bass("D2", "C4 E4 F#4 A4"), vec![Writes(0, "D9", Root)]),
         ("21 no bass", keys("C4 E4 F#4 A4"), vec![Among(0, 2, &["Am6", "F#m7b5"]), Together(0, "Am6", "F#m7b5")]),
-        ("22 C6", keys_bass("C2", "C4 E4 G4 A4"), vec![Writes(0, "C6", Root), Together(0, "C6", "Am7/C")]),
-        ("22 Am7", keys_bass("A1", "C4 E4 G4 A4"), vec![Writes(0, "Am7", Root), Together(0, "Am7", "C6/A")]),
+        ("22 C6", keys_bass("C2", "C4 E4 G4 A4"), vec![Writes(0, "C6", Root), Together(0, "C6", "Am7")]),
+        ("22 Am7", keys_bass("A1", "C4 E4 G4 A4"), vec![Writes(0, "Am7", Root), Together(0, "Am7", "C6")]),
         ("22 Fmaj9", keys_bass("F1", "C4 E4 G4 A4"), vec![Writes(0, "Fmaj9", Root)]),
         ("22 no bass", keys("C4 E4 G4 A4"), vec![Among(0, 2, &["C6", "Am7"]), Together(0, "C6", "Am7")]),
-        ("23 Cmaj9/E or Em7(b13)", keys_bass("E2", "G3 B3 C4 D4"), vec![Among(0, 2, &["Cmaj9/E", "Em7(b13)"])]),
+        ("23 Cmaj9/E or Em7(b13)", keys_bass("E2", "G3 B3 C4 D4"), vec![Among(0, 2, &["Cmaj9", "Em7b13"])]),
         (
             "24 C#dim7 | Dm7",
             keys_bass("C#2 | D2", "E3 G3 Bb3 | F3 A3 C4"),
@@ -1292,13 +1321,9 @@ pub fn named_cases() -> Result<Vec<NamedCase>, String> {
         (
             "25 C#dim7, no bass, before Dm",
             keys("E4 G4 Bb4 C#5 | D4 F4 A4"),
-            vec![
-                Writes(0, "C#dim7", BassKind::None),
-                Roots(0, &["Db", "E", "G", "Bb"]),
-                Together(0, "C#dim7", "A7(b9)"),
-            ],
+            vec![Writes(0, "C#dim7", BassKind::None), Roots(0, &["Db", "E", "G", "Bb"]), Together(0, "C#dim7", "A7b9")],
         ),
-        ("26 C7(b9)", keys_bass("C2", "E3 G3 Bb3 Db4"), vec![Writes(0, "C7(b9)", Root)]),
+        ("26 C7(b9)", keys_bass("C2", "E3 G3 Bb3 Db4"), vec![Writes(0, "C7b9", Root)]),
         (
             "27 C C#dim7 | Dm7",
             keys_bass("C2 (1-2) C#2 (3-4) | D2", "C4 E4 G4 (1-2) E4 G4 Bb4 (3-4) | F4 A4 C5"),
@@ -1333,7 +1358,7 @@ pub fn named_cases() -> Result<Vec<NamedCase>, String> {
         ),
         ("32 C9sus4", keys_bass("C2", "Bb3 D4 F4 G4"), vec![Writes(0, "C9sus4", Root)]),
         ("32 Dm11", keys_bass("D2", "F3 A3 C4 E4 G4"), vec![Writes(0, "Dm11", Root)]),
-        ("32 C7sus4(b9)", keys_bass("C2", "Bb3 Db4 F4 G4"), vec![Writes(0, "C7sus4(b9)", Root)]),
+        ("32 C7sus4(b9)", keys_bass("C2", "Bb3 Db4 F4 G4"), vec![Writes(0, "C7sus4b9", Root)]),
         ("33 Em11", keys_bass("E2", "E3 A3 D4 G4 B4"), vec![Writes(0, "Em11", Root)]),
         ("33 Dm11", keys_bass("D2", "G3 C4 F4"), vec![Writes(0, "Dm11", Root)]),
         ("33 no bass", keys("E3 A3 D4 G4"), vec![Among(0, 2, &["A7sus4", "Em11"])]),
@@ -1430,7 +1455,7 @@ pub fn named_cases() -> Result<Vec<NamedCase>, String> {
         ("48b Cmaj7, F5 held", cmaj7(bars("F5")), vec![Writes(0, "Cmaj7", Root), Never(&["sus", "11", "F"])]),
         ("48c Cmaj7, C5 D5 E5", cmaj7(line("C5 D5 E5", 0, BEAT / 2)), vec![Writes(0, "Cmaj7", Root)]),
         ("49 Cmaj9 keys alone", keys("C2 G2 C3 E4 G4 B4 D5"), vec![Writes(0, "Cmaj9", Root)]),
-        ("50 Cmaj9/E keys alone", keys("E2 E3 C4 G4 B4 D5"), vec![Among(0, 2, &["Cmaj9/E"])]),
+        ("50 Cmaj9/E keys alone", keys("E2 E3 C4 G4 B4 D5"), vec![Among(0, 2, &["Cmaj9"])]),
         (
             "51 Cmaj7 | Fmaj7, B4 held over",
             Music::new()
@@ -1508,11 +1533,7 @@ pub fn named_targets() -> Result<Vec<NamedCase>, String> {
         (
             "12 G, not yet",
             rootless(),
-            vec![
-                Among(0, 2, &["Fmaj7", "Dm9"]),
-                Among(B, 3, &["G13", "Fmaj7(#11)"]),
-                Among(2 * B, 2, &["Em7", "Cmaj9"]),
-            ],
+            vec![Among(0, 2, &["Fmaj7", "Dm9"]), Among(B, 3, &["G13", "Fmaj7#11"]), Among(2 * B, 2, &["Em7", "Cmaj9"])],
         ),
         (
             "12 T",
@@ -1521,8 +1542,8 @@ pub fn named_targets() -> Result<Vec<NamedCase>, String> {
         ),
         ("13 G, not yet", keys("B2 E3 F3 A3"), vec![Among(0, 3, &["G13"]), NeverOver("B")]),
         ("15e G*, not yet", keys_bass("C2", "E3 Bb3 Gb4 Bb4 Db5"), vec![Intervals(0, &[0, 1, 4, 6, 10])]),
-        ("20 G, not yet", keys("F3 B3 Eb4 Bb4"), vec![Among(0, 3, &["G7alt", "Db13"])]),
-        ("20 T", keys("F3 B3 Eb4 Bb4"), vec![Among(0, 2, &["G7alt", "Db13"])]),
+        ("20 G, not yet", keys("F3 B3 Eb4 Bb4"), vec![Among(0, 3, &["G7#9#5", "Db13"])]),
+        ("20 T", keys("F3 B3 Eb4 Bb4"), vec![Among(0, 2, &["G7#9#5", "Db13"])]),
         (
             "21 T: F#m7b5 before B7",
             Music::new().keys(bars("C4 E4 F#4 A4 | D#4 F#4 A4")).bass(bars("| B1")),
@@ -1533,7 +1554,11 @@ pub fn named_targets() -> Result<Vec<NamedCase>, String> {
             Music::new().keys(bars("C4 E4 G4 A4 | C4 F#4 A4")).bass(bars("| D2")),
             vec![Writes(0, "Am7", no_bass)],
         ),
-        ("23 T: Cmaj9/E first", keys_bass("E2", "G3 B3 C4 D4"), vec![Writes(0, "Cmaj9/E", Inversion)]),
+        (
+            "23 T: Cmaj9/E first",
+            keys_bass("E2", "G3 B3 C4 D4"),
+            vec![Writes(0, "Cmaj9", Inversion), Stands(0, "Cmaj9/E")],
+        ),
         (
             "36 T: Dm7",
             Music::new().bass(line("D2 E2 F2 G2", 0, BEAT)).keys(bars("F3 A3 C4")),
@@ -1556,8 +1581,8 @@ pub fn named_targets() -> Result<Vec<NamedCase>, String> {
                 .keys([notes("F4 B4 D5", 960, 2640), notes("E4 A4 C5", 3600, 240)].concat()),
             vec![Writes(0, "Fmaj7", Root), Flags(0, SpanFlags::PUSHED, SpanFlags::NONE), Writes(4, "G7", Root)],
         ),
-        ("50 T: Cmaj9/E first", keys("E2 E3 C4 G4 B4 D5"), vec![Writes(0, "Cmaj9/E", Inversion)]),
-        ("56 T: Eb/E", keys_bass("E2", "Eb4 G4 Bb4"), vec![Writes(0, "Eb/E", Slash)]),
+        ("50 T: Cmaj9/E first", keys("E2 E3 C4 G4 B4 D5"), vec![Writes(0, "Cmaj9", Inversion), Stands(0, "Cmaj9/E")]),
+        ("56 T: Eb/E", keys_bass("E2", "Eb4 G4 Bb4"), vec![Writes(0, "Ebaddb9", Slash), Stands(0, "Eb/E")]),
     ];
     w.done()?;
     Ok(cases)

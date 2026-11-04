@@ -6,7 +6,9 @@
 //! Every word the page shows is decided here, so it's tested without a window. The choices are kept by
 //! [`crate::app_settings`]: this app's own file over the C# app's, which stays read-only.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use mo_dawlink::scripts::{Installed, ScriptState};
 
 use mo_space::folder_move::MovedFolder;
 
@@ -526,26 +528,57 @@ pub fn bitwig_status(checked: &Result<mo_dawlink::bitwig::Hello, mo_dawlink::bit
     DawStatus { daw: "Bitwig Studio", state, ok, facts }
 }
 
-/// FL Studio's row: its link comes later in phase 5.
-pub fn fl_status() -> DawStatus {
-    DawStatus {
-        daw: "FL Studio",
-        state: "Comes later".to_owned(),
-        ok: false,
-        facts: vec![Fact {
-            what: "For now",
-            value: "The Rust app's FL Studio link comes later in phase 5. The old app's Settings > DAW links still \
-                    installs and checks FL's script."
+/// FL Studio's row: whether the Music Organiser script is installed (none while it's being looked at), and where it
+/// goes. Talking to FL Studio through it comes later in phase 5.
+pub fn fl_status(state: Option<ScriptState>, folders: &[PathBuf]) -> DawStatus {
+    let fact = |what, value: String| Fact { what, value, button: None };
+    let (state, ok) = match state {
+        None => ("Looking\u{2026}", false),
+        Some(_) if folders.is_empty() => ("No FL Studio folder found", false),
+        Some(ScriptState::Installed) => ("Script installed", true),
+        Some(ScriptState::Outdated) => ("Script out of date", false),
+        Some(ScriptState::NotInstalled) => ("Script not installed", false),
+    };
+    let mut facts: Vec<Fact> = folders.iter().map(|f| fact("Goes into", f.display().to_string())).collect();
+    if folders.is_empty() {
+        facts.push(fact(
+            "Looked in",
+            "Documents\\Image-Line\\FL Studio, and above each project folder, for a folder with Settings, Presets and \
+             Projects in it"
                 .to_owned(),
-            button: None,
-        }],
+        ));
     }
+    facts.push(fact(
+        "Then",
+        "FL Studio loads the script when it starts. Its MIDI port is set in FL Studio's MIDI settings, as before; the \
+         app talking to FL Studio through it comes later in phase 5."
+            .to_owned(),
+    ));
+    DawStatus { daw: "FL Studio", state: state.to_owned(), ok, facts }
+}
+
+/// What Install did, in words.
+pub fn installed_note(done: &Installed) -> String {
+    let mut out = String::new();
+    if !done.went.is_empty() {
+        out = format!(
+            "Installed the FL Studio script in {}. Restart FL Studio to load it.",
+            done.went.iter().map(|f| f.display().to_string()).collect::<Vec<_>>().join(" and ")
+        );
+    }
+    for (folder, why) in &done.failed {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(&format!("Couldn't put it in {}: {why}", folder.display()));
+    }
+    out
 }
 
 /// Under the DAW rows: where the scripts are installed from for now.
-pub const DAWS_NOTE: &str = "The app talks to Bitwig through the Music Organiser extension. Installing it, and the \
-    live tests, stay in the old app's Settings > DAW links for now; this tab checks that the link answers, and only \
-    reads.";
+pub const DAWS_NOTE: &str = "The scripts that let the app talk to Bitwig and FL Studio. Checking Bitwig only \
+    reads; Install puts the app's FL Studio script in FL's folders, keeping your setting for letting the app make \
+    changes. Installing Bitwig's extension, and the live tests, stay in the old app's Settings > DAW links for now.";
 
 pub const SLINT_CREDIT: &str = "Music Organiser's screens are made with Slint, under its royalty-free licence.";
 
@@ -730,5 +763,20 @@ mod tests {
                 None
             ]
         );
+    }
+
+    #[test]
+    fn fl_row_says_whether_the_script_is_in() {
+        let folder = PathBuf::from(r"I:\FL Studio\Settings\Hardware\Music Organiser");
+        assert_eq!(fl_status(None, &[]).state, "Looking\u{2026}");
+        assert_eq!(fl_status(Some(ScriptState::NotInstalled), &[]).state, "No FL Studio folder found");
+        let row = fl_status(Some(ScriptState::Installed), std::slice::from_ref(&folder));
+        assert_eq!((row.state.as_str(), row.ok), ("Script installed", true));
+        assert_eq!(row.facts[0].value, folder.display().to_string());
+        assert_eq!(fl_status(Some(ScriptState::Outdated), std::slice::from_ref(&folder)).state, "Script out of date");
+        let done = Installed { went: vec![folder.clone()], failed: vec![(PathBuf::from("K:"), "not there".into())] };
+        let note = installed_note(&done);
+        assert!(note.starts_with("Installed the FL Studio script in"), "{note}");
+        assert!(note.ends_with("Couldn't put it in K:: not there"), "{note}");
     }
 }

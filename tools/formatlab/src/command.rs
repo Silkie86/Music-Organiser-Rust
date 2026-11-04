@@ -152,10 +152,17 @@ pub fn fields(r: &Registry, id: Option<&str>) -> String {
             if id.is_none() {
                 continue;
             }
+            let by_size = e.record_layout_by_size.as_ref().map(|by_size| {
+                let mut sizes: Vec<_> =
+                    by_size.iter().map(|(size, layout)| format!("{size} bytes: {layout}")).collect();
+                sizes.sort();
+                sizes.join("; ")
+            });
             let more = [
                 ("", Some(&e.about).filter(|a| !a.is_empty())),
                 ("layout: ", e.layout.as_ref()),
                 ("each record: ", e.record_layout.as_ref()),
+                ("records by size: ", by_size.as_ref()),
                 ("seen in: ", e.seen.as_ref()),
                 ("how we know: ", e.proof.as_ref()),
                 ("in the code: ", e.code.as_ref()),

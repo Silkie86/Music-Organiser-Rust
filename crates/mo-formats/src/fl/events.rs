@@ -102,6 +102,9 @@ pub struct Flp<'a> {
     pub events: Vec<Event<'a>>,
     /// Said about the project when it could still be read but something about the file was off.
     pub warning: Option<&'static str>,
+    /// The file ends before its events do (or turns to zeros), so what's after that is missing: [`CUT_SHORT`], also
+    /// when the warning is already about a garbled header.
+    pub cut_short: bool,
 }
 
 /// The file wasn't an FL Studio project (see [`DAMAGED`]).
@@ -175,11 +178,27 @@ impl Flp<'_> {
             let units: Vec<u16> = data.as_chunks::<2>().0.iter().map(|&c| u16::from_le_bytes(c)).collect();
             String::from_utf16_lossy(&units)
         } else {
-            data.iter().map(|&b| b as char).collect()
+            data.iter().map(|&b| windows_1252(b)).collect()
         };
         text.trim_end_matches('\0').to_owned()
     }
 }
+
+/// A letter of text FL wrote before 11.5, in Windows' Western code page (1252): FL was a pre-Unicode Delphi app
+/// then. Only bytes 0x80 to 0x9F differ from Latin-1 (curly quotes, dashes, the euro sign); the five that 1252 leaves
+/// out stay as they are.
+fn windows_1252(b: u8) -> char {
+    const HIGH: [char; 32] = [
+        '\u{20AC}', '\u{81}', '\u{201A}', '\u{192}', '\u{201E}', '\u{2026}', '\u{2020}', '\u{2021}', '\u{2C6}',
+        '\u{2030}', '\u{160}', '\u{2039}', '\u{152}', '\u{8D}', '\u{17D}', '\u{8F}', '\u{90}', '\u{2018}', '\u{2019}',
+        '\u{201C}', '\u{201D}', '\u{2022}', '\u{2013}', '\u{2014}', '\u{2DC}', '\u{2122}', '\u{161}', '\u{203A}',
+        '\u{153}', '\u{9D}', '\u{17E}', '\u{178}',
+    ];
+    b.checked_sub(0x80).and_then(|i| HIGH.get(usize::from(i))).copied().unwrap_or(b as char)
+}
+
+/// How many zero events in a row show the rest of the file is zeros, not FL's events.
+const MOST_ZERO_EVENTS: usize = 1024;
 
 /// Reads the events of an FL Studio project. A file cut short or damaged part-way is read up to where it goes wrong,
 /// with a warning.
@@ -199,6 +218,7 @@ pub fn load(raw: &[u8]) -> Result<Flp<'_>, Damaged> {
         utf16: true,
         events: Vec::new(),
         warning: None,
+        cut_short: false,
     };
     let dt = 8 + header_len as usize;
     let mut pos = dt + 8;
@@ -206,6 +226,7 @@ pub fn load(raw: &[u8]) -> Result<Flp<'_>, Damaged> {
         let said = pos as i64 + i32_at(raw, dt + 4) as i64;
         if said > raw.len() as i64 {
             flp.warning = Some(CUT_SHORT);
+            flp.cut_short = true;
         }
         said.clamp(pos as i64, raw.len() as i64) as usize
     } else {
@@ -216,6 +237,7 @@ pub fn load(raw: &[u8]) -> Result<Flp<'_>, Damaged> {
     };
 
     let mut major = 0;
+    let mut zeros = 0;
     while let Some(&id) = raw.get(pos).filter(|_| pos < end) {
         pos += 1;
         let size = match id {
@@ -245,9 +267,19 @@ pub fn load(raw: &[u8]) -> Result<Flp<'_>, Damaged> {
         // A file cut short or damaged: keep what's been read.
         let Some(data) = size.filter(|&s| s <= end - pos).and_then(|s| raw.get(pos..pos + s)) else {
             flp.warning.get_or_insert(CUT_SHORT);
+            flp.cut_short = true;
             break;
         };
         let size = data.len();
+        // A zero-filled stretch (an interrupted copy or sync) reads as a 2-byte event 0 after another, each kept in
+        // memory at about 24 times its size; FL never writes more than a few in a row.
+        zeros = if id == 0 && data == [0] { zeros + 1 } else { 0 };
+        if zeros > MOST_ZERO_EVENTS {
+            flp.events.truncate(flp.events.len() + 1 - zeros);
+            flp.warning.get_or_insert(CUT_SHORT);
+            flp.cut_short = true;
+            break;
+        }
         if id == EV_VERSION && major == 0 {
             major = major_of(&String::from_utf8_lossy(data));
         }
