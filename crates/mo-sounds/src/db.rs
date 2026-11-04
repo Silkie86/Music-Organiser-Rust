@@ -41,6 +41,17 @@ impl fmt::Display for SoundsError {
 
 impl std::error::Error for SoundsError {}
 
+impl SoundsError {
+    /// Whether SQLite found the file damaged (a bad sector, a file cut short): reading it again won't help.
+    pub fn damaged(&self) -> bool {
+        matches!(
+            self,
+            SoundsError::Read(rusqlite::Error::SqliteFailure(e, _))
+                if matches!(e.code, rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)
+        )
+    }
+}
+
 impl From<rusqlite::Error> for SoundsError {
     fn from(e: rusqlite::Error) -> SoundsError {
         SoundsError::Read(e)
@@ -99,11 +110,16 @@ pub struct Everything {
 }
 
 impl Everything {
-    /// How many sounds have been analysed, hidden copies too, as the C# app counts them when it decides whether deep
-    /// listening has heard enough (`SoundOrganiser.Reload`): what [`crate::index::SoundIndex::build`] takes.
+    /// How many sounds have been analysed ([`count_analysed`]).
     pub fn analysed(&self) -> usize {
-        self.sounds.iter().filter(|s| s.analysis.is_some()).count()
+        count_analysed(&self.sounds)
     }
+}
+
+/// How many of `sounds` have been analysed, hidden copies too, as the C# app counts them when it decides whether deep
+/// listening has heard enough (`SoundOrganiser.Reload`): what [`crate::index::SoundIndex::build`] takes.
+pub fn count_analysed(sounds: &[Sound]) -> usize {
+    sounds.iter().filter(|s| s.analysis.is_some()).count()
 }
 
 /// A sound's columns, in the order [`sound_at`] takes them: one list for every read of them (the copy's too, as it's

@@ -485,7 +485,8 @@ fn the_copy_follows_each_kind_of_save() {
         ),
         (0, 1, 0, 0),
     );
-    assert_eq!(s.tables, 1, "only the plays' table changed");
+    assert_eq!((s.tables, s.listed_tables), (1, 1), "only the plays' table changed");
+    assert!(s.changed_the_list());
     step("stars", &format!("UPDATE sounds SET rating = 5 WHERE id = {one}"), (0, 1, 0, 0));
     step("a favourite", &format!("UPDATE sounds SET favourite = 1 WHERE id = {one}"), (0, 1, 0, 0));
     step(
@@ -550,9 +551,16 @@ fn the_copy_follows_each_kind_of_save() {
         ),
         (0, 0, 0, 0),
     );
-    assert_eq!(s.tables, 1);
-    // A galaxy laid out again, copies hidden, the duplicate finder's prints and its copies, and a setting.
-    step("galaxy", "INSERT OR REPLACE INTO sound_maps SELECT 'clap', id, 1.0, 2.0 FROM sounds LIMIT 10;", (0, 0, 0, 0));
+    assert_eq!((s.tables, s.listed_tables), (1, 1));
+    // A galaxy laid out again, copies hidden, the duplicate finder's prints and its copies, and a setting: only
+    // hiding copies changes what the page lists.
+    let s = step(
+        "galaxy",
+        "INSERT OR REPLACE INTO sound_maps SELECT 'clap', id, 1.0, 2.0 FROM sounds LIMIT 10;",
+        (0, 0, 0, 0),
+    );
+    assert_eq!((s.tables, s.listed_tables), (1, 0));
+    assert!(s.changed_anything() && !s.changed_the_list());
     step("hidden", &format!("INSERT OR REPLACE INTO sound_hidden VALUES ({one}, 'batch 2', 99)"), (0, 0, 0, 0));
     step(
         "prints",
@@ -613,6 +621,56 @@ fn a_copy_left_half_made_goes_at_the_next_start() {
     assert_eq!(compact::sync(&old, &copy).unwrap().changed, 1);
     assert_eq!(half_made(&dir), Vec::<String>::new());
     same_answers(&old, &copy);
+}
+
+/// Where SQLite keeps `table` in the file at `db`: the first byte of its first page.
+fn page_of(db: &Path, table: &str) -> u64 {
+    let c = Connection::open(db).unwrap();
+    let root: i64 = c.query_row("SELECT rootpage FROM sqlite_master WHERE name = ?1", [table], |r| r.get(0)).unwrap();
+    let size: i64 = c.query_row("PRAGMA page_size", [], |r| r.get(0)).unwrap();
+    u64::try_from((root - 1) * size).unwrap()
+}
+
+/// Spoils the first page of `table` in the file at `db`, as a bad sector would.
+fn damage(db: &Path, table: &str) {
+    use std::io::{Seek, SeekFrom, Write};
+    let at = page_of(db, table);
+    let mut f = std::fs::File::options().write(true).open(db).unwrap();
+    f.seek(SeekFrom::Start(at)).unwrap();
+    f.write_all(&[0xEE; 64]).unwrap();
+}
+
+/// A copy damaged inside (a bad sector) is made again, not brought up to date and left damaged: where its list is,
+/// on the page's read; where its fingerprints are, once they're found damaged.
+#[test]
+fn a_copy_damaged_inside_is_made_again() {
+    let dir = folder("damaged");
+    let old = library(&dir, 80);
+    let copy = compact::copy_of(&old);
+    compact::sync(&old, &copy).unwrap();
+    damage(&copy, "sounds");
+    let listed = SoundsDb::open_read_only(&copy).unwrap().all(now()).unwrap_err();
+    assert!(listed.damaged(), "{listed}");
+    let Ok(compact::PageRead::Library { everything, made }) = compact::read_for_page(&old, now()) else {
+        panic!("a damaged copy isn't read");
+    };
+    assert!(made.unwrap().made, "made again");
+    same_everything(&everything, &read_for_page(&old));
+    same_answers(&old, &copy);
+    // Its fingerprints damaged: the list still reads, the fingerprints say they're damaged, and the copy is made again
+    // on a pass that gives them.
+    damage(&copy, "sound_features");
+    let db = SoundsDb::open_read_only(&copy).unwrap();
+    assert!(db.all(now()).is_ok());
+    let prints = db.fingerprints(everything.analysed()).unwrap_err();
+    assert!(prints.damaged(), "{prints}");
+    drop(db);
+    let (again, made) = compact::remake_reading(&old, &copy, now()).unwrap();
+    assert!(made.unwrap().made);
+    same_everything(&again, &read_for_page(&old));
+    same_answers(&old, &copy);
+    // What isn't damage isn't taken for it.
+    assert!(!SoundsError::Copy { path: copy.clone(), why: "busy".into() }.damaged());
 }
 
 #[test]

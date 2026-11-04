@@ -118,6 +118,9 @@ const INSERT_SOUND: &str = concat!(
 /// queries then read them the same way, in the same order, from either file.
 const WHOLE: [&str; 6] = ["settings", "sound_tags", "sound_events", "sound_maps", "sound_matches", "sound_hidden"];
 
+/// Of [`WHOLE`], the ones the page's list of sounds is read from: their tags, plays and hidden copies.
+const LISTED: [&str; 3] = ["sound_tags", "sound_events", "sound_hidden"];
+
 /// Of the duplicate finder's prints, the hash of each sound that has one: all that's read of them (exact copies).
 /// From the index the C# app keeps of the hashes, so not one of the prints themselves is read.
 const OLD_PRINTS: &str = "SELECT sound_id, exact FROM sound_prints WHERE exact IS NOT NULL";
@@ -166,6 +169,8 @@ pub struct Synced {
     pub removed: usize,
     /// How many of the tables copied whole (tags, plays, galaxy places…) had changed.
     pub tables: usize,
+    /// Of those, how many the page's list of sounds is read from (tags, plays, hidden copies).
+    pub listed_tables: usize,
     /// How many sounds gained, lost or changed a fingerprint (their features or CLAP's), the new and gone ones among
     /// them: while none did, fingerprints read from the copy before are still right.
     pub prints: usize,
@@ -175,6 +180,12 @@ impl Synced {
     /// Whether the copy reads any differently now.
     pub fn changed_anything(&self) -> bool {
         self.made || self.added > 0 || self.changed > 0 || self.removed > 0 || self.tables > 0
+    }
+
+    /// Whether the page's list of sounds reads any differently now: not when only what the C# app keeps for itself
+    /// changed (its settings, the galaxy's saved places, the duplicate finder's copies and prints).
+    pub fn changed_the_list(&self) -> bool {
+        self.made || self.added > 0 || self.changed > 0 || self.removed > 0 || self.listed_tables > 0
     }
 }
 
@@ -201,7 +212,7 @@ pub fn in_step(sounds_db: &Path, copy: &Path) -> bool {
 /// itself) is left as it is, and this says so. Nor is one made on a disk without room for it and
 /// [`ROOM_LEFT`] to spare.
 pub fn sync(sounds_db: &Path, copy: &Path) -> Result<Synced, SoundsError> {
-    run(sounds_db, copy, None, &mut None)
+    run(sounds_db, copy, None, &mut None, false)
 }
 
 /// The Sounds page's first read of the library: the quickest way to its sounds there is.
@@ -222,17 +233,24 @@ pub fn read_for_page(sounds_db: &Path, now: NaiveDateTime) -> Result<PageRead, S
     let copy = copy_of(sounds_db);
     // Looked at before reading, so a save the C# app makes while this reads counts as one next time.
     let behind = !in_step(sounds_db, &copy);
+    let mut damaged = false;
     if let Ok(db) = SoundsDb::open_read_only(&copy)
         && db.is_copy()
-        && let Ok(sounds) = db.all(now)
     {
-        // A copy left half made by an app closed while it made one goes now, not only the next time one is made: that
-        // may be never, and it's most of the copy's size (on a disk that was nearly full).
-        remove_parts(&copy, false);
-        return Ok(PageRead::Copy { db, sounds, behind });
+        match db.all(now) {
+            Ok(sounds) => {
+                // A copy left half made by an app closed while it made one goes now, not only the next time one is
+                // made: that may be never, and it's most of the copy's size (on a disk that was nearly full).
+                remove_parts(&copy, false);
+                return Ok(PageRead::Copy { db, sounds, behind });
+            }
+            Err(e) => damaged = e.damaged(),
+        }
     }
-    // None, or none this version can read: made (or brought up to date) on the page's own read.
-    let (everything, made) = sync_reading(sounds_db, &copy, now)?;
+    // None, or none this version can read: made (or brought up to date) on the page's own read. One damaged inside
+    // is made again: brought up to date, it would stay damaged.
+    let (everything, made) =
+        if damaged { remake_reading(sounds_db, &copy, now)? } else { sync_reading(sounds_db, &copy, now)? };
     Ok(PageRead::Library { everything, made })
 }
 
@@ -249,8 +267,29 @@ pub fn sync_reading(
     copy: &Path,
     now: NaiveDateTime,
 ) -> Result<(Everything, Result<Synced, SoundsError>), SoundsError> {
+    read_while(sounds_db, copy, now, false)
+}
+
+/// [`sync_reading`], making the copy afresh even when there's one this version can read: for a copy SQLite found
+/// damaged inside ([`SoundsError::damaged`]), which bringing up to date would leave damaged. The copy must not be
+/// open meanwhile (Windows won't remove an open file).
+pub fn remake_reading(
+    sounds_db: &Path,
+    copy: &Path,
+    now: NaiveDateTime,
+) -> Result<(Everything, Result<Synced, SoundsError>), SoundsError> {
+    read_while(sounds_db, copy, now, true)
+}
+
+/// [`sync_reading`] or [`remake_reading`].
+fn read_while(
+    sounds_db: &Path,
+    copy: &Path,
+    now: NaiveDateTime,
+    afresh: bool,
+) -> Result<(Everything, Result<Synced, SoundsError>), SoundsError> {
     let mut read = None;
-    let synced = run(sounds_db, copy, Some(now), &mut read);
+    let synced = run(sounds_db, copy, Some(now), &mut read, afresh);
     let everything = match read {
         Some(everything) => everything,
         None => SoundsDb::open_read_only(sounds_db)?.everything(now)?,
@@ -259,12 +298,14 @@ pub fn sync_reading(
 }
 
 /// What [`sync`] does, also reading the library for the page into `read` on the way when `read_for` says when "now"
-/// is ([`sync_reading`]). `read` is left as `None` if the pass stopped before every sound was read.
+/// is ([`sync_reading`]). `read` is left as `None` if the pass stopped before every sound was read. `afresh`: a copy
+/// of this version is made again rather than brought up to date ([`remake_reading`]).
 fn run(
     sounds_db: &Path,
     copy: &Path,
     read_for: Option<NaiveDateTime>,
     read: &mut Option<Everything>,
+    afresh: bool,
 ) -> Result<Synced, SoundsError> {
     let _one_at_a_time = SYNCING.lock().unwrap_or_else(PoisonError::into_inner);
     let failed = |why: String| SoundsError::Copy { path: copy.to_owned(), why };
@@ -286,10 +327,11 @@ fn run(
     remove_parts(copy, true);
     let pass = Pass { stamp: &stamp, read_for, read };
     match found {
-        Found::Copy { format: FORMAT, .. } => update(&old, copy, pass),
+        Found::Copy { format: FORMAT, .. } if !afresh => update(&old, copy, pass),
         Found::Copy { format, .. } if format > FORMAT => {
             Err(failed(format!("a newer version of the app made it (format {format}), so it's left as it is")))
         }
+        // Older, or (`afresh`) this version's made again.
         Found::Nothing | Found::Unreadable | Found::Copy { .. } => make(&old, copy, pass),
         Found::Foreign => {
             Err(failed("a database that isn't a copy of the library is there, so it's left as it is".into()))
@@ -321,7 +363,7 @@ fn make(old: &SoundsDb, copy: &Path, pass: Pass<'_>) -> Result<Synced, SoundsErr
         // What's there now and goes first counts as free.
         let going: u64 =
             ["", "-wal", "-shm"].iter().filter_map(|end| fs::metadata(side(copy, end)).ok()).map(|m| m.len()).sum();
-        room_to_make(free.saturating_add(going), library.len()).map_err(failed)?;
+        room_for(free.saturating_add(going), library.len() / 2, "making it").map_err(failed)?;
     }
     // A copy of an older format (or a file that can't be read) goes first, with SQLite's files beside it: a log left
     // beside the new one would be read into it as if it were its own.
@@ -358,16 +400,16 @@ fn make(old: &SoundsDb, copy: &Path, pass: Pass<'_>) -> Result<Synced, SoundsErr
     Ok(synced)
 }
 
-/// Whether a disk with `free` bytes free has room to make a copy of a library of `library` bytes: the copy comes to
-/// under half the library's size (0.29 of it with a library like Solomon's), and [`ROOM_LEFT`] stays free.
-fn room_to_make(free: u64, library: u64) -> Result<(), String> {
-    let takes = library / 2;
+/// Whether a disk with `free` bytes free has room for work on the copy that `takes` up to so many bytes, with
+/// [`ROOM_LEFT`] to spare. Making a copy takes under half the library's size (0.29 of it with a library like
+/// Solomon's); bringing one up to date, at most the copy's own size again (its log, when every sound changed).
+fn room_for(free: u64, takes: u64, doing: &str) -> Result<(), String> {
     if free >= takes.saturating_add(ROOM_LEFT) {
         return Ok(());
     }
     let gb = |bytes: u64| format!("{:.1} GB", bytes as f64 / 1e9);
     Err(format!(
-        "only {} is free on its disk: making it takes up to {}, and {} is always left free",
+        "only {} is free on its disk: {doing} takes up to {}, and {} is always left free",
         gb(free),
         gb(takes),
         gb(ROOM_LEFT)
@@ -377,6 +419,11 @@ fn room_to_make(free: u64, library: u64) -> Result<(), String> {
 /// The copy brought up to date in place, in one transaction.
 fn update(old: &SoundsDb, copy: &Path, pass: Pass<'_>) -> Result<Synced, SoundsError> {
     let failed = |Failed(why)| SoundsError::Copy { path: copy.to_owned(), why };
+    let dir = copy.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    if let (Ok(free), Ok(size)) = (fs4::available_space(dir), fs::metadata(copy)) {
+        // Its log grows by each page that changes, until the end: up to the copy again when every sound changed.
+        room_for(free, size.len(), "bringing it up to date").map_err(|why| failed(Failed(why)))?;
+    }
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let conn = open_for_writing(copy, flags).map_err(|e| failed(e.into()))?;
     conn.busy_timeout(WAIT).map_err(|e| failed(e.into()))?;
@@ -419,7 +466,8 @@ fn known(conn: &Connection) -> rusqlite::Result<HashMap<i64, Hashes>> {
 
 /// Writes into the copy at `conn` what's changed in `old` since the copy was last brought up to date, all in one
 /// transaction, reading `old` at one moment. `made`: `conn` is a new, empty copy. The page's read, when the pass is
-/// for it too, is handed over as soon as the last sound is read, whatever happens to the copy after.
+/// for it too, is kept from the moment the last sound is read, whatever happens to the copy after: the page has it
+/// once the pass ends (a new copy's last few seconds, its indexes and its trip to the disk, come first).
 fn fill(old: &SoundsDb, conn: &Connection, made: bool, pass: Pass<'_>) -> Result<Synced, Failed> {
     let mut synced = Synced { made, ..Synced::default() };
     let snapshot = old.conn.unchecked_transaction()?;
@@ -499,6 +547,9 @@ fn fill(old: &SoundsDb, conn: &Connection, made: bool, pass: Pass<'_>) -> Result
     for table in WHOLE {
         if copy_whole(&old.conn, &tx, table)? {
             synced.tables += 1;
+            if LISTED.contains(&table) {
+                synced.listed_tables += 1;
+            }
         }
     }
     if copy_prints(old, &tx)? {
@@ -1292,11 +1343,14 @@ mod tests {
     #[test]
     fn a_copy_is_made_only_with_room_to_spare() {
         let gb = 1_000_000_000u64;
-        // Solomon's C:, 2026-11-03: 12 GB free, a 4.6 GB library.
-        assert!(room_to_make(12 * gb, 4_560_000_000).is_ok());
-        assert!(room_to_make(2 * gb + ROOM_LEFT, 4 * gb).is_ok());
-        let why = room_to_make(2 * gb + ROOM_LEFT - 1, 4 * gb).unwrap_err();
-        assert!(why.starts_with("only 3.1 GB is free on its disk"), "{why}");
+        // Solomon's C:, 2026-11-03: 12 GB free, a 4.6 GB library, a 1.5 GB copy.
+        assert!(room_for(12 * gb, 4_560_000_000 / 2, "making it").is_ok());
+        assert!(room_for(12 * gb, 1_510_000_000, "bringing it up to date").is_ok());
+        assert!(room_for(2 * gb + ROOM_LEFT, 2 * gb, "making it").is_ok());
+        let why = room_for(2 * gb + ROOM_LEFT - 1, 2 * gb, "making it").unwrap_err();
+        assert!(why.starts_with("only 3.1 GB is free on its disk: making it takes up to 2.0 GB"), "{why}");
+        let why = room_for(gb, 1_510_000_000, "bringing it up to date").unwrap_err();
+        assert!(why.contains("bringing it up to date takes up to 1.5 GB, and 1.1 GB is always left free"), "{why}");
     }
 
     #[test]

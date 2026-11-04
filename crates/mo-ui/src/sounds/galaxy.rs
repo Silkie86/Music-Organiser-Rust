@@ -1043,6 +1043,14 @@ pub(super) fn forget(g: &mut Galaxy) {
     g.note = String::new();
 }
 
+/// The page's list was read again with the same sounds in the same places: the stars stay, and what was worked out
+/// from the old list (how lit each star is, what the stars were packed for) is let go, and the old list with it. It's
+/// worked out again for the new one when the galaxy's next drawn.
+pub(super) fn list_changed(g: &mut Galaxy) {
+    g.light = None;
+    g.set_for = None;
+}
+
 /// The view came on show (or a new library did while it was): reads the map the first time.
 pub(super) fn shown(app: &AppWindow) {
     let _doing = crate::watchdog::doing("Galaxy: came on show");

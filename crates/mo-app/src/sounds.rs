@@ -593,10 +593,14 @@ pub fn copy_synced_line(s: &Synced) -> String {
         .filter(|(n, _)| *n > 0)
         .map(|(n, what)| format!("{} {what}", crate::songs::thousands(n)))
         .collect();
-    match (parts.is_empty(), s.tables > 0) {
-        (false, _) => parts.join(", "),
-        (true, true) => "Tags, plays or galaxy places changed".to_owned(),
-        (true, false) => "Nothing had changed".to_owned(),
+    if !parts.is_empty() {
+        parts.join(", ")
+    } else if s.listed_tables > 0 {
+        "Tags, plays or hidden copies changed".to_owned()
+    } else if s.tables > 0 {
+        "Galaxy places, copies or settings changed".to_owned()
+    } else {
+        "Nothing had changed".to_owned()
     }
 }
 
@@ -897,20 +901,22 @@ mod tests {
             copy_made_line(1_621_000_000, 4_896_000_000),
             "1.51 GB beside sounds.db's 4.56 GB. Sounds opens from it from now on."
         );
-        let synced = |made, added, changed, removed, tables| Synced {
+        let synced = |made, added, changed, removed, (tables, listed_tables)| Synced {
             made,
             sounds: 453_885,
             added,
             changed,
             removed,
             tables,
+            listed_tables,
             prints: 0,
         };
-        assert_eq!(copy_synced_line(&synced(false, 1, 3, 2, 1)), "3 changed, 1 new, 2 gone");
-        assert_eq!(copy_synced_line(&synced(false, 0, 1_204, 0, 0)), "1,204 changed");
-        assert_eq!(copy_synced_line(&synced(false, 0, 0, 0, 2)), "Tags, plays or galaxy places changed");
-        assert_eq!(copy_synced_line(&synced(false, 0, 0, 0, 0)), "Nothing had changed");
-        assert_eq!(copy_synced_line(&synced(true, 453_885, 0, 0, 7)), "Made afresh from 453,885 sounds");
+        assert_eq!(copy_synced_line(&synced(false, 1, 3, 2, (1, 1))), "3 changed, 1 new, 2 gone");
+        assert_eq!(copy_synced_line(&synced(false, 0, 1_204, 0, (0, 0))), "1,204 changed");
+        assert_eq!(copy_synced_line(&synced(false, 0, 0, 0, (2, 1))), "Tags, plays or hidden copies changed");
+        assert_eq!(copy_synced_line(&synced(false, 0, 0, 0, (2, 0))), "Galaxy places, copies or settings changed");
+        assert_eq!(copy_synced_line(&synced(false, 0, 0, 0, (0, 0))), "Nothing had changed");
+        assert_eq!(copy_synced_line(&synced(true, 453_885, 0, 0, (7, 3))), "Made afresh from 453,885 sounds");
         let full = SoundsError::Copy {
             path: "C:\\Users\\Solomon\\AppData\\Local\\MusicOrganiser\\sounds-rust.db".into(),
             why: "only 3.1 GB is free on its disk".into(),
