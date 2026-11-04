@@ -275,9 +275,8 @@ fn builds_tracks_from_the_template_with_sampler_root_keys_and_transposed_plugins
     let tempo: Vec<_> = all.iter().filter(|&&o| doc.obj(o).str(0x2bd) == "TEMPO").collect();
     assert_eq!(tempo.len(), 1);
     assert_eq!(doc.obj(*tempo[0]).num(0x2c8), Some(128.0));
-    // The files it uses are its own samples, never the template's.
-    let used = doc.meta_strings("used_files");
-    assert!(used.len() == 1 && used[0].ends_with("Snare 01.wav"), "{used:?}");
+    // None of the template's files are listed as collected into it.
+    assert!(doc.meta_strings("used_files").is_empty());
 
     // The snare's volume automation as a lane of points on its fader, in the fader's units; the template's
     // automation clips and points don't come along.

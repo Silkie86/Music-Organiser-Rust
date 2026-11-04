@@ -241,7 +241,6 @@ pub fn bitwig_from_fl(
         Ok(doc) => doc.body_error,
         Err(_) => Some("not a Bitwig project".to_owned()),
     })?;
-    let written = written(project, &file).map_err(|e| e.to_string())?;
     // This convert's own folder: an older list would be wrong now. The project is saved, so a list that can't be put
     // in place (or removed) is said, and an older one goes rather than stay beside a project it doesn't describe.
     let list_put = match notes {
@@ -253,6 +252,7 @@ pub fn bitwig_from_fl(
         let _ = std::fs::remove_file(&notes_file);
         converted.notes.push(format!("This list couldn't be saved beside the Bitwig project ({e})"));
     }
+    let written = written(project, &file).map_err(|e| e.to_string())?;
     Ok(Saved { file, notes: converted.notes, taken, found, written })
 }
 

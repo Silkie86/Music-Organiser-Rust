@@ -19,7 +19,7 @@ use mo_formats::paths;
 pub use mo_formats::presets::fxp_to_bank;
 
 use crate::plan::{
-    AudioClip, Device, Lane, LanePart, LanePoint, Plan, Role, SampleFile, Target, Track, TrackKind, TrackRef,
+    AudioClip, Device, Lane, LanePart, LanePoint, MIN_BPM, Plan, Role, SampleFile, Target, Track, TrackKind, TrackRef,
 };
 
 const SAMPLER_ID: &str = "468bc14b-b2e7-45a1-9666-e83117fe404e";
@@ -132,23 +132,13 @@ pub fn write(plan: &Plan, template: &[u8]) -> Result<Converted, String> {
         }
     }
 
-    // The project's own tempo has the same floor as its lane.
-    let tempo = plan.tempo.max(MIN_BPM);
-    if tempo > plan.tempo {
-        w.notes.push(format!(
-            "Song: its tempo is {} BPM and Bitwig's goes down to {MIN_BPM} BPM, so it plays at {MIN_BPM} BPM",
-            plan.tempo
-        ));
-    }
     let made: Vec<ObjId> = tracks.iter().flatten().map(|(t, _)| *t).collect();
-    let bytes = t.finish(&made, tempo, &plan.title, &w.states)?;
+    // The plan keeps the project's own tempo to what Bitwig plays (with a note); this is only a guard.
+    let bytes = t.finish(&made, plan.tempo.max(MIN_BPM), &plan.title, &w.states)?;
     let mut seen = HashSet::new();
     let notes = w.notes.into_iter().filter(|n| seen.insert(n.clone())).collect();
     Ok(Converted { bytes, notes })
 }
-
-/// The slowest tempo Bitwig takes, in BPM.
-const MIN_BPM: f64 = 20.0;
 
 /// A lane's points kept at `min` or above, with a point put in where the straight line between two points crosses
 /// `min`; and whether any point was raised.
@@ -1215,7 +1205,8 @@ impl Template {
     ) -> Result<Vec<u8>, String> {
         self.doc.obj_mut(self.group).set(0x4de, Value::List(tracks.iter().map(|&t| Slot::Obj(t)).collect()));
         let root = self.doc.root.ok_or("no project")?;
-        for o in reachable(&self.doc, root) {
+        let all = reachable(&self.doc, root);
+        for &o in &all {
             if self.doc.obj(o).str(0x2bd) == "TEMPO" && self.doc.obj(o).has(0x2c8) {
                 self.doc.obj_mut(o).set(0x2c8, Value::F64(tempo));
             }
@@ -1225,27 +1216,17 @@ impl Template {
         if let Some(summary) = self.summary(tracks) {
             self.set_meta("structure", Value::Blob(Box::new(Blob::new(&summary))));
         }
-        // The FL song's title, and the files this project uses (its samples, and any the template's master keeps),
-        // never the template's own: the library reads both from here.
+        // The FL song's title, never the template's. Bitwig lists the files it collected into the project's folder
+        // under "used_files"; a convert collects none (its samples stay where FL has them), so the template's list,
+        // naming its own samples, is emptied. The library reads both from here.
         self.set_meta("title", text(title));
-        let mut used: Vec<String> = Vec::new();
-        for o in reachable(&self.doc, root) {
-            let path = self
-                .doc
-                .field_obj(o, 0x129e)
-                .and_then(|file| self.doc.field_obj(file, 0xd3b))
-                .map(|location| self.doc.obj(location).str(0x3b));
-            if let Some(path) = path.filter(|p| !p.is_empty() && !used.iter().any(|u| u == p)) {
-                used.push(path.to_owned());
-            }
-        }
-        self.set_meta("used_files", Value::Strings(used.iter().map(|u| Text::new(u)).collect()));
+        self.set_meta("used_files", Value::Strings(Vec::new()));
 
         // The template's own plugins still in the project (on its master) keep their settings from its zip.
         let made: HashSet<&str> = states.iter().map(|(n, _)| n.as_str()).collect();
-        let kept: HashSet<String> = reachable(&self.doc, root)
-            .into_iter()
-            .map(|o| self.doc.obj(o).str(0xbe5).to_owned())
+        let kept: HashSet<String> = all
+            .iter()
+            .map(|&o| self.doc.obj(o).str(0xbe5).to_owned())
             .filter(|n| !n.is_empty() && !made.contains(n.as_str()))
             .collect();
         let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
@@ -1275,8 +1256,6 @@ impl Template {
         bitwig::encode(&self.doc, Some(if any { &zip } else { &[] }))
     }
 
-    /// The project's summary (metadata "structure", a document of its own) listing the new tracks, or `None` when the
-    /// template's can't be read, so it's left as it was.
     /// Sets a metadata entry the template has (the last one, as [`Document::meta`] reads it); one it hasn't is left out.
     fn set_meta(&mut self, key: &str, value: Value) {
         let at = self.doc.meta.iter().rposition(|(k, _)| k.as_str() == key);
@@ -1285,6 +1264,8 @@ impl Template {
         }
     }
 
+    /// The project's summary (metadata "structure", a document of its own) listing the new tracks, or `None` when the
+    /// template's can't be read, so it's left as it was.
     fn summary(&self, tracks: &[ObjId]) -> Option<Vec<u8>> {
         let Some(Value::Blob(blob)) = self.doc.meta("structure") else { return None };
         let mut summary = bitwig::decode(blob.bytes()).ok()?;

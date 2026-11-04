@@ -111,7 +111,21 @@ fn wav(head: &[u8], size: u64, beyond: &mut dyn FnMut(u64, usize) -> Option<Vec<
     if head.get(8..12)? != b"WAVE" {
         return None;
     }
-    let chunk_id = |b: Option<Vec<u8>>| b.is_some_and(|b| b.iter().all(|c| (0x20..=0x7e).contains(c)));
+    // What starts at a place: a chunk this needs, another plausible chunk (a printable id and a size that fits in
+    // the file), or neither.
+    let looks = |get: &mut dyn FnMut(u64, usize) -> Option<Vec<u8>>, at: u64| -> u8 {
+        let Some(h) = get(at, 8) else { return 0 };
+        let (Some(id), Some(chunk)) = (h.get(..4), le32(&h, 4)) else { return 0 };
+        if matches!(id, b"data" | b"fmt ") {
+            2
+        } else if id.iter().all(|c| (0x20..=0x7e).contains(c))
+            && at.saturating_add(8).saturating_add(u64::from(chunk)) <= size
+        {
+            1
+        } else {
+            0
+        }
+    };
     let (mut at, mut format, mut data, mut long_data) = (12u64, None, None, None);
     for _ in 0..MOST_CHUNKS {
         if format.is_some() && data.is_some() {
@@ -138,7 +152,7 @@ fn wav(head: &[u8], size: u64, beyond: &mut dyn FnMut(u64, usize) -> Option<Vec<
         }
         let next = at.checked_add(8)?.checked_add(chunk)?;
         let padded = next.checked_add(chunk & 1)?;
-        at = if padded != next && !chunk_id(get(padded, 4)) && chunk_id(get(next, 4)) { next } else { padded };
+        at = if padded != next && looks(&mut get, next) > looks(&mut get, padded) { next } else { padded };
     }
     let (tag, channels, rate, block) = format?;
     if !matches!(tag, 1 | 3 | 6 | 7) {
@@ -295,6 +309,12 @@ mod tests {
         b.resize(b.len() + 0x4f, b'x');
         b.extend_from_slice(data);
         assert_eq!(wav_of(&b, b.len() as u64), Some((44100, 2, 1.0)));
+        // The same with a data size whose low byte reads as a letter ("ataP" where the pad byte would be).
+        let mut odd = b.clone();
+        let size_at = odd.len() - data.len() + 4;
+        odd.get_mut(size_at..size_at + 4).unwrap().copy_from_slice(&0x0001_5F50u32.to_le_bytes());
+        odd.truncate(size_at + 4 + 0x0001_5F50);
+        assert_eq!(wav_of(&odd, odd.len() as u64).map(|w| w.2), Some(0x0001_5F50 as f64 / 176_400.0));
         // Padded as it should be, it's read as before.
         let at = b.len() - data.len();
         b.insert(at, 0);

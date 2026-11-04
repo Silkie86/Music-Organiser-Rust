@@ -155,8 +155,10 @@ fn an_earlier_convert_saved_in_bitwig_while_samples_are_read_keeps_its_own_list(
     // Converted again, this time with the snare not found; while that's looked for, the first is saved in Bitwig.
     let project = std::fs::read(&first.file).unwrap();
     let saved_in_bitwig = |_: &str| {
-        std::thread::sleep(std::time::Duration::from_millis(20));
         std::fs::write(&first.file, &project).unwrap();
+        // A time of its own, so a disk that keeps whole seconds sees the change too.
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::File::options().write(true).open(&first.file).unwrap().set_modified(later).unwrap();
         None
     };
     let again = bitwig_from_fl(
