@@ -204,3 +204,33 @@ fn settings_are_written_whole_and_old_half_written_ones_are_cleared() {
         fs::read_dir(&root).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
     assert!(!names.iter().any(|n| n.starts_with("backup.txt.") && n.ends_with(".mo-part")), "{names:?}");
 }
+
+#[test]
+fn a_sample_named_where_it_really_is_matches_a_listed_link() {
+    // The other way round: the folder on the list is the link, and the project names where the sample really is.
+    let root = fixtures("backup-screen-listed-link");
+    let music = root.join("music");
+    let save1 = music.join("Song").join("Song.flp");
+    let save2 = music.join("Song").join("Song_2.flp");
+    let real = root.join("I").join("Samples");
+    write(&save1, b"save1");
+    write(&save2, b"save2");
+    write(&real.join("Kick.wav"), b"kick");
+    let linked = root.join("Samples");
+    folder_link(&real, &linked);
+    let backup = root.join("backup");
+    fs::create_dir_all(&backup).unwrap();
+    let lib = library(&root, &save1, &save2, &real.join("Kick.wav"));
+    let settings = Settings {
+        drive: Some(backup),
+        folders: vec![
+            Folder { path: music.clone(), mode: Mode::Slimmed },
+            Folder { path: linked.clone(), mode: Mode::Slimmed },
+        ],
+        ..Settings::default()
+    };
+    let prepared = prepare(&lib, &settings, &AtomicBool::new(false)).unwrap();
+    let kicks: Vec<&Path> =
+        prepared.plan.copy.iter().map(|f| f.path.as_path()).filter(|p| p.ends_with("Kick.wav")).collect();
+    assert_eq!(kicks.len(), 1, "{kicks:?}");
+}

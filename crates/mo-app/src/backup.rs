@@ -168,7 +168,8 @@ impl Settings {
 /// the app saving at once never share one), is flushed to the disk, then renamed over the old file. A crash or power
 /// cut part way leaves the old file whole, and the temporary one never stays behind on an error.
 ///
-/// Temporary files of the same file that a crash left (a minute old or more: a save takes far less) are cleared first,
+/// Temporary files of the same file that a crash left (ten minutes old or more: a save takes far less, even on a busy
+/// disk, so another copy of the app's live one is left alone) are cleared first,
 /// so they never pile up.
 pub fn write_whole(path: &Path, text: &str) -> io::Result<()> {
     use std::io::Write;
@@ -176,13 +177,15 @@ pub fn write_whole(path: &Path, text: &str) -> io::Result<()> {
     static SAVES: AtomicU64 = AtomicU64::new(0);
     let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
     clear_left_parts(path, &name);
+    let mut tries = 0;
     let (mut f, part) = loop {
+        tries += 1;
         let n = SAVES.fetch_add(1, Ordering::Relaxed);
         let part = path.with_file_name(format!("{name}.{}-{n}.mo-part", std::process::id()));
         match fs::File::create_new(&part) {
             Ok(f) => break (f, part),
             // Left by an earlier app with the same process number: the next name.
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists && n < 1000 => {}
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists && tries < 100 => {}
             Err(e) => return Err(e),
         }
     };
@@ -198,7 +201,7 @@ pub fn write_whole(path: &Path, text: &str) -> io::Result<()> {
     written
 }
 
-/// Removes temporary files of `path` (named `<name>.mo-part` or `<name>.<…>.mo-part`) a minute old or more.
+/// Removes temporary files of `path` (named `<name>.mo-part` or `<name>.<…>.mo-part`) ten minutes old or more.
 fn clear_left_parts(path: &Path, name: &str) {
     let Some(folder) = path.parent() else { return };
     let Ok(dir) = fs::read_dir(folder) else { return };
@@ -209,7 +212,7 @@ fn clear_left_parts(path: &Path, name: &str) {
             continue;
         }
         let old = entry.metadata().ok().filter(fs::Metadata::is_file).and_then(|m| m.modified().ok());
-        if old.and_then(|t| t.elapsed().ok()).is_some_and(|age| age >= std::time::Duration::from_secs(60)) {
+        if old.and_then(|t| t.elapsed().ok()).is_some_and(|age| age >= std::time::Duration::from_secs(10 * 60)) {
             let _ = fs::remove_file(entry.path());
         }
     }
@@ -432,7 +435,7 @@ pub fn prepare(library: &Library, settings: &Settings, stop: &AtomicBool) -> Res
         used: Vec<PathBuf>,
         id: u64,
     }
-    let measured: Vec<Measured> = songs
+    let mut measured: Vec<Measured> = songs
         .par_iter()
         .map(|song| {
             // The song's own saves, or (when only copies of them are in the folders) the copies.
@@ -471,11 +474,27 @@ pub fn prepare(library: &Library, settings: &Settings, stop: &AtomicBool) -> Res
     // Each is looked up once (a sample on a drive that isn't there is asked about once, not once per save that names
     // it). One reached through a link (a folder Space moved, a project still naming its old place) that is already
     // in the folders where it really is goes once, from there: the song's list names that place instead.
-    let mut measured = measured;
     // Keyed as mo-space keys paths, so a real place (with no `\\?\` in front on Windows) matches the walk's spelling.
     let mut by_key: HashMap<String, usize> =
         files.iter().enumerate().map(|(i, f)| (mo_space::key(&f.path.to_string_lossy()), i)).collect();
     let mut not_there: HashSet<String> = HashSet::new();
+    // A listed folder that is a link (walked under its listed spelling): where it really is, so a project naming
+    // that real place finds the walked file.
+    let linked: Vec<(String, String)> = settings
+        .folders
+        .iter()
+        .filter_map(|f| {
+            let listed = mo_space::key(&f.path.to_string_lossy());
+            let real = mo_space::key(&mo_space::real_path(&f.path.to_string_lossy())?);
+            (real != listed).then_some((real, listed))
+        })
+        .collect();
+    let through_listed = |k: &str| {
+        linked.iter().find_map(|(real, listed)| {
+            let rest = k.strip_prefix(real.as_str())?;
+            rest.starts_with('/').then(|| format!("{listed}{rest}"))
+        })
+    };
     for m in &mut measured {
         if stop.load(std::sync::atomic::Ordering::Relaxed) {
             return Err("Stopped".to_owned());
@@ -485,7 +504,7 @@ pub fn prepare(library: &Library, settings: &Settings, stop: &AtomicBool) -> Res
         for p in &mut m.used {
             let k = mo_space::key(&p.to_string_lossy());
             // Named as the plan names it, so the song's own list finds it (whatever slashes the project used).
-            if let Some(&i) = by_key.get(&k) {
+            if let Some(&i) = by_key.get(&k).or_else(|| through_listed(&k).and_then(|l| by_key.get(&l))) {
                 *p = files[i].path.clone();
                 continue;
             }
@@ -513,7 +532,6 @@ pub fn prepare(library: &Library, settings: &Settings, stop: &AtomicBool) -> Res
             });
         }
     }
-    drop(by_key);
     let all_bytes = files.iter().map(|f| f.size).fold(0, u64::saturating_add);
     let used = Used::new(samples.values().flatten().map(String::as_str));
     let infos: Vec<SongInfo<'_>> =
@@ -794,7 +812,9 @@ fn run_on(
                 tally.problems.push(format!("{}: not there now (renamed or deleted since the plan)", f.path.display()));
             }
             plain_songs = unzipped.len();
-            if let Some(end) = tally.copy(&list, backup, &options, stop, progress) {
+            if !list.is_empty()
+                && let Some(end) = tally.copy(&list, backup, &options, stop, progress)
+            {
                 return LastRun { when, ok: false, line: end };
             }
         }
@@ -891,9 +911,8 @@ impl Tally<'_> {
         if report.gone {
             return Some("The backup drive went away part way".to_owned());
         }
-        if report.record_not_saved.is_some() {
-            self.record_note = report.record_not_saved;
-        }
+        // The latest copy's word on the record is the one that counts: it holds everything before it too.
+        self.record_note = report.record_not_saved;
         None
     }
 }
