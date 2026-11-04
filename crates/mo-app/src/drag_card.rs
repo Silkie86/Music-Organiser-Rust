@@ -16,7 +16,7 @@
 //! window only follows the mouse. Everything is drawn on the processor with tiny-skia, the words with swash in the
 //! theme's own font.
 
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::AssertUnwindSafe;
 use std::time::{Duration, Instant};
 
 use swash::FontRef;
@@ -1262,7 +1262,7 @@ struct Font {
 impl Font {
     /// The font in a file's bytes, or None when they don't hold one (or swash trips over them: see [`Writer`]).
     fn new(bytes: &'static [u8]) -> Option<Font> {
-        catch_unwind(|| Font::read(bytes)).ok().flatten()
+        mo_catch::catch(|| Font::read(bytes)).ok().flatten()
     }
 
     fn read(bytes: &'static [u8]) -> Option<Font> {
@@ -1332,8 +1332,8 @@ struct Words {
 ///
 /// swash can trip over a rare run of letters: a Korean syllable with a loose vowel after it makes it overflow (swash
 /// 0.2.10, `text/compose.rs`), and with the app's overflow checks on that would stop the thread. So, as the app's file
-/// readers do, each name is shaped and drawn inside `catch_unwind`: one swash trips over is left off the card (the
-/// crash log still says where), and the rest of the card is drawn as usual.
+/// readers do, each name is shaped and drawn inside `mo_catch::catch`: one swash trips over is left off the card (the
+/// log says where, in one warning line), and the rest of the card is drawn as usual.
 struct Writer {
     shaping: ShapeContext,
     scaling: ScaleContext,
@@ -1347,7 +1347,7 @@ impl Writer {
     /// `text` laid out on one line, cut short with "…" when it's wider than `room` pixels (and never ending on a
     /// space before the dots); nothing when swash trips over it.
     fn fit(&mut self, style: &Style, text: &str, room: f32) -> Words {
-        let words = catch_unwind(AssertUnwindSafe(|| self.cut_to_fit(style, text, room)));
+        let words = mo_catch::catch(AssertUnwindSafe(|| self.cut_to_fit(style, text, room)));
         words.unwrap_or_else(|_| {
             self.start_again();
             Words::default()
@@ -1356,7 +1356,7 @@ impl Writer {
 
     /// Draws laid-out words with their start at `x` and their baseline at `baseline` (pixels).
     fn draw(&mut self, pm: &mut Pixmap, words: &Words, style: &Style, x: f32, baseline: f32) {
-        if catch_unwind(AssertUnwindSafe(|| self.draw_glyphs(pm, words, style, x, baseline))).is_err() {
+        if mo_catch::catch(AssertUnwindSafe(|| self.draw_glyphs(pm, words, style, x, baseline))).is_err() {
             self.start_again();
         }
     }
