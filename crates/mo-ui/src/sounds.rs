@@ -1080,7 +1080,7 @@ struct Refreshed {
 
 /// The sounds were brought up to date with what the C# app changed while the page showed them as they were: they
 /// take the place of the ones on show, with nothing moving that needn't. The view, filters, order and scroll stay;
-/// what the page holds by place in the list (what's shown, picked, playing, dug out by Rediscover, Sounds like this)
+/// what the page holds by place in the list (what's shown, History, picked, playing, Rediscover, Sounds like this)
 /// moves with its sound to its new place. A sound gone from the library goes from all of these: the panel closes if
 /// it was picked, and it stops if it was playing. Rediscover keeps the sounds it dug out (it isn't asked again unless
 /// its answer was still on its way, for the old places).
@@ -1157,7 +1157,8 @@ fn take_refreshed(p: &mut Page, library: Library, moved: Option<&[Option<usize>]
     p.list = library.list;
     p.places = library.places;
     p.types = library.types;
-    p.history = library.played;
+    // History lists them once the filters have been through them again ([`listed`], asked for by the page next).
+    p.played = Arc::new(library.played);
     let gone = moved.map(|moved| move_places(p, moved)).unwrap_or_default();
     let anew = moved.is_some() || retyped;
     if anew {
@@ -1188,6 +1189,7 @@ struct Gone {
 fn move_places(p: &mut Page, moved: &[Option<usize>]) -> Gone {
     let to = |at: usize| moved.get(at).copied().flatten();
     p.shown = Arc::new(p.shown.iter().filter_map(|&at| to(at)).collect());
+    p.history = std::mem::take(&mut p.history).into_iter().filter_map(|(at, when)| Some((to(at)?, when))).collect();
     p.rediscover = std::mem::take(&mut p.rediscover).into_iter().filter_map(|(at, why)| Some((to(at)?, why))).collect();
     p.to_pick = p.to_pick.and_then(to);
     let gone = Gone {
@@ -2713,8 +2715,10 @@ mod tests {
     fn what_the_page_holds_moves_with_its_sound() {
         // Sounds at places 0..5, read again with the sound at 2 gone and one new at the front.
         let moved = [Some(1), Some(2), None, Some(3), Some(4)];
+        let at = NaiveDateTime::default();
         let mut p = Page {
             shown: Arc::new(vec![4, 2, 0]),
+            history: vec![(2, at), (0, at)],
             rediscover: vec![(3, "forgotten".into()), (2, "gone".into())],
             picked: Some(3),
             to_pick: Some(1),
@@ -2723,6 +2727,7 @@ mod tests {
         };
         assert_eq!(move_places(&mut p, &moved), Gone::default());
         assert_eq!(*p.shown, [4, 1]);
+        assert_eq!(p.history, [(1, at)]);
         assert_eq!(p.rediscover, [(3, "forgotten".to_owned())]);
         assert_eq!((p.picked, p.to_pick, p.playing), (Some(3), Some(2), Some((4, 2.5))));
         // The picked and playing sounds gone: nothing is left pointing at the places they had.
