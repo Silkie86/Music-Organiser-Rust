@@ -825,19 +825,23 @@ fn point_inner_links(
     let (old, copy) = (Path::new(&moved.old_copy), Path::new(&moved.to));
     for (rest, inner) in inner_links(moved, all) {
         let (mine, theirs, now) = (old.join(&rest), copy.join(&rest), Path::new(&inner.to));
+        // As the passes named it: by its name in the copy, maybe in other capitals than the move noted.
+        let named = |p: &PathBuf| key(&text(p)) == key(&text(&rest));
         if !is_link(&mine) || !in_itself(old, &rest) || leads_to(&text(&mine), now) || !leads_to(&text(&theirs), now) {
             continue;
         }
         match crate::after_move::relink(&text(&mine), now, true) {
             Ok(()) => {
                 changed.store(true, Ordering::Relaxed);
-                links_left.retain(|p| key(&text(p)) != key(&text(&rest)));
+                links_left.retain(|p| !named(p));
             }
             Err(not) if not.gone => {
                 changed.store(true, Ordering::Relaxed);
                 return Err(CantMove::Failed(not.why));
             }
-            Err(_) => links_left.push(rest),
+            // It stays as it was, and named: the passes named it already, as it leads elsewhere than the copy's.
+            Err(_) if !links_left.iter().any(named) => links_left.push(rest),
+            Err(_) => {}
         }
     }
     Ok(())
@@ -1220,7 +1224,8 @@ fn same_lead(a: &Path, b: &Path, roots: &[Option<PathBuf>]) -> bool {
             inside.map_or((false, real), |rest| (true, rest))
         })
     };
-    matches!((place(a, x.as_deref()), place(b, y.as_deref())), (Some(p), Some(q)) if p == q)
+    // One whose place can't be told isn't the same as any: the other isn't asked about then.
+    place(a, x.as_deref()).is_some_and(|p| place(b, y.as_deref()).is_some_and(|q| q == p))
 }
 
 /// Where a link leads: where it really does ([`fs::canonicalize`]), or, leading nowhere now (a drive that isn't plugged
@@ -2108,16 +2113,17 @@ pub(crate) fn copy_tree(
 /// link of yours); otherwise the topmost folder in it that turned into a link or a file, looked for name by name from
 /// the top, never through a link. `None` while it's the same folder, renamed in other capitals or not ([`same_place`]),
 /// and when it's gone: what goes is passed over, while `tree.from` is there ([`went`]). One that can't be looked at
-/// (not gone: the system says no) stops it, as whether it changed can't be told. When `tree.from` leads nowhere now, a
-/// real folder as the pass began (`from_was_link` says) that's a link now changed (pointed at nothing, after something
-/// was read through it). Otherwise its drive went (unplugged), or the link it is leads nowhere now, and where what was
-/// read came from can't be told: into a folder of yours nothing goes then, and the copy stops. A copy the move made
-/// goes when what's still to be read can't be, and moving back looks first that the copy is where it was
-/// ([`not_the_link_now`]).
+/// (not gone: the system says no) stops it, as whether it changed can't be told, saying what the system said. When
+/// `tree.from` leads nowhere now, a real folder as the pass began (`from_was_link` says) that's a link now changed
+/// (pointed at nothing, after something was read through it). Otherwise its drive went (unplugged), or the link it is
+/// leads nowhere now, and where what was read came from can't be told: into a folder of yours nothing goes then, and
+/// the copy stops. A copy the move made goes when what's still to be read can't be, and moving back looks first that
+/// the copy is where it was ([`not_the_link_now`]).
 fn led_elsewhere(dir: &Path, tree: &Tree, source_real: &Path, from_was_link: bool) -> Option<CantMove> {
     const ELSEWHERE: &str = "turned into a link or a file, or led somewhere else";
     let rest = dir.strip_prefix(tree.from).ok()?;
-    if fs::canonicalize(dir).is_ok_and(|now| same_place(&now, &source_real.join(rest)) && now.is_dir()) {
+    let now = fs::canonicalize(dir);
+    if now.as_ref().is_ok_and(|now| same_place(now, &source_real.join(rest)) && now.is_dir()) {
         return None;
     }
     match fs::canonicalize(tree.from) {
@@ -2131,11 +2137,13 @@ fn led_elsewhere(dir: &Path, tree: &Tree, source_real: &Path, from_was_link: boo
         at.push(part);
         fs::symlink_metadata(&at).is_ok_and(|m| !m.is_dir()).then(|| at.clone())
     });
-    match turned {
-        Some(at) => Some(changing(&at, "turned into a link or a file")),
-        None if not_there(dir) => None,
+    match (turned, now) {
+        (Some(at), _) => Some(changing(&at, "turned into a link or a file")),
+        (None, _) if not_there(dir) => None,
+        // It can't be looked at (the system says no, or the drive doesn't answer): what it says is why it stops.
+        (None, Err(e)) if e.kind() != io::ErrorKind::NotFound => Some(failed(dir, &e)),
         // It changed just now, or in a way the app can't tell: it stops all the same.
-        None => Some(changing(dir, ELSEWHERE)),
+        (None, _) => Some(changing(dir, ELSEWHERE)),
     }
 }
 

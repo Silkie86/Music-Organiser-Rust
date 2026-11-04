@@ -1019,6 +1019,36 @@ fn a_file_that_turns_into_a_folder_as_the_last_pass_copies_stops_the_move() {
     assert!(files.iter().all(|file| file.join("Inner.db").exists()));
 }
 
+/// A folder in it that can be listed but not opened (its permissions say so): the move stops, saying what the system
+/// said, not that something is changing the folder (there's no DAW to close for it). Locking only keeps an ordinary
+/// user out, as CI runs.
+#[cfg(unix)]
+#[test]
+fn a_folder_that_cant_be_opened_stops_the_move_saying_why() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = fixtures("mo-space-move-folder-cant-open");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    let library = c.join("Library");
+    write(&library, "a.db", "a");
+    write(&library, "Shut/Inner/b.db", "b");
+    fs::create_dir_all(&d).unwrap();
+    let shut = library.join("Shut");
+    let lock = |mode: u32| fs::set_permissions(&shut, fs::Permissions::from_mode(mode)).unwrap();
+    lock(0o644);
+    if fs::metadata(shut.join("Inner")).is_ok() {
+        // Running as root: nothing stops it.
+        lock(0o755);
+        return;
+    }
+    let stop = AtomicBool::new(false);
+    let result = move_folder(&s(&library), &s(&d), 2, whose(), &ROOMY, &[], &[], &nothing, &stop);
+    lock(0o755);
+    let Err(CantMove::Failed(why)) = &result else { panic!("{result:?}") };
+    assert!(why.starts_with(&format!("Copying stopped at {} (", s(&shut.join("Inner")))), "{why}");
+    assert!(!is_link(&library) && !d.join("Library").exists());
+}
+
 /// The other way round, for a folder: as the last pass copies its file, the plugin puts it aside and a file of its
 /// name in its place.
 #[test]
