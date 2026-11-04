@@ -787,15 +787,19 @@ fn read_all(at: &Where) -> Result<(), String> {
     let mut from_files = 0;
     for batch in newest.chunks(BATCH) {
         let paths: Vec<String> = batch.iter().map(|s| s.path.clone()).collect();
-        let kept = store.as_mut().map(|st| st.saves(&paths, read_now));
+        let kept = store.as_mut().map(|st| background::on_pool(|| st.saves(&paths, |p| plib::read_saves(p, &limits))));
         let read = match kept {
-            Some(Ok((read, from))) => {
-                from_files += from;
-                read
+            Some(Ok(batch)) => {
+                from_files += batch.read;
+                if let Some(why) = batch.not_kept {
+                    log::warning("Presets", &format!("Couldn't keep what the saves hold for next time: {why}"));
+                    store = None;
+                }
+                batch.saves
             }
             other => {
                 if let Some(Err(e)) = other {
-                    log::warning("Presets", &format!("Couldn't keep what the saves hold, so all are read: {}", e.0));
+                    log::warning("Presets", &format!("Couldn't read what the saves held last time: {}", e.0));
                     store = None;
                 }
                 from_files += paths.len();

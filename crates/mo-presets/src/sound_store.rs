@@ -14,6 +14,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use mo_formats::PluginKind;
 use mo_formats::presets::PresetBlob;
+use rayon::prelude::*;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::fixes::{FixesError, is_there, make_new};
@@ -29,8 +30,9 @@ pub const FILE_NAME: &str = "preset-sounds.db";
 pub const VERSION: i64 = 1;
 
 const SCHEMA: &str = "
+    CREATE TABLE IF NOT EXISTS sound_meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS sound_reads (id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL, modified INTEGER NOT NULL,
-        size INTEGER NOT NULL, version TEXT NOT NULL, warning TEXT);
+        size INTEGER NOT NULL, warning TEXT);
     CREATE TABLE IF NOT EXISTS sounds (save INTEGER NOT NULL, at INTEGER NOT NULL, name TEXT NOT NULL,
         plugin TEXT NOT NULL, extension TEXT NOT NULL, size INTEGER NOT NULL, kind INTEGER NOT NULL,
         native INTEGER NOT NULL, place TEXT NOT NULL, channel INTEGER, program INTEGER NOT NULL, track TEXT NOT NULL,
@@ -38,11 +40,19 @@ const SCHEMA: &str = "
         octave_checked INTEGER NOT NULL, weak INTEGER NOT NULL, hash TEXT NOT NULL, PRIMARY KEY (save, at))
         WITHOUT ROWID;";
 
+/// One batch of saves from [`SoundStore::saves`].
+pub struct Batch {
+    /// The saves, in the order asked for.
+    pub saves: Vec<SaveSounds>,
+    /// How many were read from their files.
+    pub read: usize,
+    /// Why what was read couldn't be kept for next time, when it couldn't (the saves are still all here).
+    pub not_kept: Option<String>,
+}
+
 /// The saves' sounds kept between runs.
 pub struct SoundStore {
     conn: Connection,
-    /// What reads a save now, as kept beside each one.
-    version: String,
 }
 
 /// A save's file as it is now: its last-written time (nanoseconds since 1970) and size; None when it can't be looked
@@ -88,74 +98,108 @@ fn basis_of(n: i64) -> Basis {
 }
 
 impl SoundStore {
-    /// Opens the store at `path`, making it first if it isn't there. `limits` are the guessing limits the page uses:
-    /// saves kept with others are read again.
+    /// Opens the store at `path`, making it first if it isn't there. `limits` are the guessing limits the page uses.
+    /// A store kept by another reader (or other limits) is emptied, so every save is read again. A store that's
+    /// damaged is only what was found before: it's made again, empty.
     pub fn open(path: &Path, limits: &Thresholds) -> Result<SoundStore, FixesError> {
+        match Self::open_as_is(path, limits) {
+            Ok(store) => Ok(store),
+            Err(_) if is_there(path)? => {
+                for end in ["", "-wal", "-shm", "-journal"] {
+                    let mut p = path.as_os_str().to_owned();
+                    p.push(end);
+                    let _ = std::fs::remove_file(std::path::PathBuf::from(p));
+                }
+                Self::open_as_is(path, limits)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn open_as_is(path: &Path, limits: &Thresholds) -> Result<SoundStore, FixesError> {
+        let err = |e: rusqlite::Error| FixesError(e.to_string());
         if !is_there(path)? {
             make_new(path, SCHEMA, "sounds")?;
         }
-        let conn = Connection::open(path).map_err(|e| FixesError(e.to_string()))?;
-        conn.busy_timeout(Duration::from_secs(2)).map_err(|e| FixesError(e.to_string()))?;
-        conn.pragma_update(None, "journal_mode", "WAL").map_err(|e| FixesError(e.to_string()))?;
-        conn.execute_batch(SCHEMA).map_err(|e| FixesError(e.to_string()))?;
+        let conn = Connection::open(path).map_err(err)?;
+        conn.busy_timeout(Duration::from_secs(2)).map_err(err)?;
+        conn.pragma_update(None, "journal_mode", "WAL").map_err(err)?;
+        // Only what was found before: a write lost to a power cut is read again, so no wait for the disk at each one.
+        conn.pragma_update(None, "synchronous", "NORMAL").map_err(err)?;
+        conn.execute_batch(SCHEMA).map_err(err)?;
+        let check: String = conn.query_row("PRAGMA quick_check", [], |r| r.get(0)).map_err(err)?;
+        if check != "ok" {
+            return Err(FixesError(format!("it's damaged ({check})")));
+        }
         let version =
             format!("{VERSION}/fl {}/bitwig {}/{limits:?}", mo_formats::fl::VERSION, mo_formats::bitwig::VERSION);
-        Ok(SoundStore { conn, version })
+        let kept: Option<String> = conn
+            .query_row("SELECT value FROM sound_meta WHERE key = 'version'", [], |r| r.get(0))
+            .optional()
+            .map_err(err)?;
+        if kept.as_deref() != Some(version.as_str()) {
+            conn.execute_batch("BEGIN; DELETE FROM sounds; DELETE FROM sound_reads;").map_err(err)?;
+            conn.execute("INSERT OR REPLACE INTO sound_meta VALUES ('version', ?1)", [&version]).map_err(err)?;
+            conn.execute_batch("COMMIT;").map_err(err)?;
+        }
+        Ok(SoundStore { conn })
     }
 
     /// The saves at `paths`, in that order: those kept and unchanged from the store, the others read by `read` (over
     /// every core, as [`crate::library::read_saves`] does) and kept for next time. Like `read`, a save of a DAW whose
-    /// projects keep no settings is left out. Returns the saves, and how many of them were read from their files.
+    /// projects keep no settings is left out. Call it on a pool of low-priority threads: the files are looked at over
+    /// every core of it.
     pub fn saves(
         &mut self,
         paths: &[String],
         read: impl FnOnce(&[String]) -> Vec<SaveSounds>,
-    ) -> Result<(Vec<SaveSounds>, usize), FixesError> {
+    ) -> Result<Batch, FixesError> {
         let err = |e: rusqlite::Error| FixesError(e.to_string());
+        let mut seen = HashSet::new();
+        let paths: Vec<&String> = paths.iter().filter(|p| seen.insert(p.as_str())).collect();
+        let looked: Vec<Option<(i64, i64)>> = paths.par_iter().map(|p| stamp(p)).collect();
         let mut kept: HashMap<String, SaveSounds> = HashMap::new();
         let mut to_read = Vec::new();
         let mut stamps = HashMap::new();
         {
             let mut known = self
                 .conn
-                .prepare_cached("SELECT id, modified, size, version, warning FROM sound_reads WHERE path = ?1")
+                .prepare_cached("SELECT id, modified, size, warning FROM sound_reads WHERE path = ?1")
                 .map_err(err)?;
-            for p in paths {
-                let now = stamp(p);
+            for (p, now) in paths.iter().zip(looked) {
                 let found = known
                     .query_row([p], |r| {
                         Ok((
                             r.get::<_, i64>(0)?,
                             (r.get::<_, i64>(1)?, r.get::<_, i64>(2)?),
-                            r.get::<_, String>(3)?,
-                            r.get::<_, Option<String>>(4)?,
+                            r.get::<_, Option<String>>(3)?,
                         ))
                     })
                     .optional()
                     .map_err(err)?;
-                match (found, now) {
-                    (Some((id, was, version, warning)), Some(now)) if was == now && version == self.version => {
-                        let sounds = self.sounds_of(id).map_err(err)?;
-                        kept.insert(p.clone(), SaveSounds { path: p.clone(), sounds, error: None, warning });
-                    }
-                    _ => {
-                        if let Some(now) = now {
-                            stamps.insert(p.clone(), now);
-                        }
-                        to_read.push(p.clone());
-                    }
+                if let (Some((id, was, warning)), Some(now)) = (&found, now)
+                    && *was == now
+                    // A row that doesn't read back (written by something else) only means this save is read again.
+                    && let Ok(sounds) = self.sounds_of(*id)
+                {
+                    let warning = warning.clone();
+                    kept.insert((*p).clone(), SaveSounds { path: (*p).clone(), sounds, error: None, warning });
+                    continue;
                 }
+                if let Some(now) = now {
+                    stamps.insert((*p).clone(), now);
+                }
+                to_read.push((*p).clone());
             }
         }
         let fresh = if to_read.is_empty() { Vec::new() } else { read(&to_read) };
         let count = fresh.len();
-        self.keep(&fresh, &stamps).map_err(err)?;
+        let not_kept = self.keep(&fresh, &stamps).err().map(|e| e.to_string());
         for s in fresh {
             kept.insert(s.path.clone(), s);
         }
-        let mut seen = HashSet::new();
-        let saves = paths.iter().filter(|p| seen.insert(p.as_str())).filter_map(|p| kept.remove(p)).collect();
-        Ok((saves, count))
+        let saves = paths.iter().filter_map(|p| kept.remove(p.as_str())).collect();
+        Ok(Batch { saves, read: count, not_kept })
     }
 
     /// A kept save's sounds, in the order they were found.
@@ -192,29 +236,27 @@ impl SoundStore {
     }
 
     /// Keeps the saves just read, each with its file's stamp from before it was read (a write since makes it differ,
-    /// so it's read again next time). A save that couldn't be read, or couldn't be looked at, isn't kept.
+    /// so it's read again next time). A save that couldn't be read, or couldn't be looked at (a drive unplugged),
+    /// keeps what was found in it before, as `curves.db` does, and is tried again next time.
     fn keep(&mut self, read: &[SaveSounds], stamps: &HashMap<String, (i64, i64)>) -> rusqlite::Result<()> {
         let tx = self.conn.transaction()?;
         {
             let mut forget =
                 tx.prepare_cached("DELETE FROM sounds WHERE save = (SELECT id FROM sound_reads WHERE path = ?1)")?;
             let mut save = tx.prepare_cached(
-                "INSERT INTO sound_reads (path, modified, size, version, warning) VALUES (?1, ?2, ?3, ?4, ?5) \
+                "INSERT INTO sound_reads (path, modified, size, warning) VALUES (?1, ?2, ?3, ?4) \
                  ON CONFLICT(path) DO UPDATE SET modified = excluded.modified, size = excluded.size, \
-                 version = excluded.version, warning = excluded.warning RETURNING id",
+                 warning = excluded.warning RETURNING id",
             )?;
             let mut sound = tx.prepare_cached(
-                "INSERT INTO sounds VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
-                 ?18, ?19)",
+                "INSERT INTO sounds (save, at, name, plugin, extension, size, kind, native, place, channel, program, \
+                 track, plays_nothing, role, basis, reason, octave_checked, weak, hash) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             )?;
-            let mut drop_read = tx.prepare_cached("DELETE FROM sound_reads WHERE path = ?1")?;
             for s in read {
+                let Some(&(modified, size)) = stamps.get(&s.path).filter(|_| s.error.is_none()) else { continue };
                 forget.execute([&s.path])?;
-                let Some(&(modified, size)) = stamps.get(&s.path).filter(|_| s.error.is_none()) else {
-                    drop_read.execute([&s.path])?;
-                    continue;
-                };
-                let id: i64 = save.query_row(params![s.path, modified, size, self.version, s.warning], |r| r.get(0))?;
+                let id: i64 = save.query_row(params![s.path, modified, size, s.warning], |r| r.get(0))?;
                 for (at, p) in s.sounds.iter().enumerate() {
                     let b = &p.blob;
                     sound.execute(params![
@@ -310,15 +352,21 @@ mod tests {
                 })
                 .collect()
         };
-        let (first, read) = store.saves(&paths, reader).unwrap();
+        let first = store.saves(&paths, reader).unwrap();
+        let read = first.read;
+        let first = first.saves;
         assert_eq!(read, 2);
-        let (second, read) = store.saves(&paths, |_| panic!("nothing should be read")).unwrap();
+        let second = store.saves(&paths, |_| panic!("nothing should be read")).unwrap();
+        let read = second.read;
+        let second = second.saves;
         assert_eq!(read, 0);
         assert_eq!(second, first);
 
         // A changed save is read again; the other comes from the store.
         std::fs::write(&a, b"one, longer").unwrap();
-        let (third, read) = store.saves(&paths, reader).unwrap();
+        let third = store.saves(&paths, reader).unwrap();
+        let read = third.read;
+        let third = third.saves;
         assert_eq!(read, 1);
         assert_eq!(third, first);
 
@@ -335,8 +383,18 @@ mod tests {
                 })
                 .collect()
         };
-        assert_eq!(store.saves(&paths, broken).unwrap().1, 1);
-        assert_eq!(store.saves(&paths, reader).unwrap().1, 1);
+        assert_eq!(store.saves(&paths, broken).unwrap().read, 1);
+        assert_eq!(store.saves(&paths, reader).unwrap().read, 1);
+
+        // A save on a drive that's away keeps what was found in it.
+        let away = dir.join("away.flp").to_string_lossy().into_owned();
+        let mut stamps = HashMap::new();
+        stamps.insert(away.clone(), (1, 1));
+        store.keep(&reader(std::slice::from_ref(&away)), &stamps).unwrap();
+        let gone = store.saves(std::slice::from_ref(&away), broken).unwrap();
+        assert_eq!(gone.read, 1);
+        let rows: i64 = store.conn.query_row("SELECT count(*) FROM sounds", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows, 6);
 
         // A save no longer asked for is forgotten.
         store.keep_only(&paths[..1]).unwrap();
