@@ -31,6 +31,9 @@ mo-space = { path = "../mo-space" }
 thread-priority.workspace = true
 rayon.workspace = true
 tiny-skia.workspace = true
+# The words on the card that follows a drag out of the app (drawn outside Slint, in the app's own fonts). Slint already
+# brings it in.
+swash = "0.2"
 
 [dev-dependencies]
 # A small library made by the backup test.

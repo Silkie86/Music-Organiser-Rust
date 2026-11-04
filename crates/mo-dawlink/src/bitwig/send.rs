@@ -118,6 +118,16 @@ impl Bitwig {
         on_new_track(link, path.as_ref(), name, Load::Preset)
     }
 
+    /// Puts a MIDI part into the project open in Bitwig: a new instrument track named `name`, with the MIDI file at
+    /// `path` as a clip in its first launcher slot (the C# MIDI page's Send to Bitwig). Waits for the sends asked for
+    /// before it to finish first.
+    pub fn send_part(&self, path: impl AsRef<Path>, name: &str) -> Result<SentPart, Error> {
+        let _turn = SENDS.wait_turn();
+        let mut link = self.connect()?;
+        link.stay_in_open_project();
+        part(&mut link, path.as_ref(), name)
+    }
+
     /// Puts a kit's pads ([`kit_pads`]) on a Drum Machine in the project open in Bitwig: a new Drum Machine on a new
     /// track named `name`, or the one selected in Bitwig, where pads that already have something on them are left
     /// alone. A pad whose sound isn't where the app last saw it is left out. Waits for the sends asked for before it
@@ -134,6 +144,12 @@ impl Bitwig {
 /// Bitwig, so call it on a background thread, never the window's.
 pub fn send_sound(path: impl AsRef<Path>, name: &str) -> Result<SentSound, Error> {
     Bitwig::default().send_sound(path, name)
+}
+
+/// [`Bitwig::send_part`] through the link's own port. Waits for Bitwig, so call it on a background thread, never the
+/// window's.
+pub fn send_part(path: impl AsRef<Path>, name: &str) -> Result<SentPart, Error> {
+    Bitwig::default().send_part(path, name)
 }
 
 /// [`Bitwig::send_preset`] through the link's own port: one preset on a new track named `name`. Waits for Bitwig, so
@@ -236,6 +252,84 @@ fn on_new_track(mut link: Link, path: &Path, name: &str, load: Load) -> Result<S
             Some(format!("The track is in Bitwig, but the {what} may not be on it: {}", sentence(&e)))
         }
     };
+    Ok(sent)
+}
+
+/// What went into Bitwig for one MIDI part.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SentPart {
+    /// The part's name, which its track has.
+    pub name: String,
+    /// The new track's place in Bitwig's project listing; none when Bitwig didn't say it made one (see `problem`).
+    pub track: Option<usize>,
+    /// The launcher slot its clip is in; none when it isn't, or may not be (see `problem`).
+    pub slot: Option<usize>,
+    /// What didn't go to plan, in words without a full stop, or none.
+    pub problem: Option<String>,
+}
+
+impl SentPart {
+    /// Whether it went in as asked: a clip on its new track.
+    pub fn went_in(&self) -> bool {
+        self.problem.is_none()
+    }
+
+    /// The headline for the activity card: "Keys · Pattern 3 is in Bitwig", "… didn't go in cleanly", or (with no
+    /// track for it) "… didn't go into Bitwig".
+    pub fn title(&self) -> String {
+        match (&self.problem, self.track) {
+            (None, _) => format!("{} is in Bitwig", self.name),
+            (Some(_), Some(_)) => format!("{} didn't go in cleanly", self.name),
+            (Some(_), None) => format!("{} didn't go into Bitwig", self.name),
+        }
+    }
+
+    /// The line under it: where it went and what to do next, or what went wrong.
+    pub fn detail(&self) -> String {
+        match &self.problem {
+            None => PART_IN.to_owned(),
+            Some(problem) => format!("{problem}."),
+        }
+    }
+}
+
+/// Where a sent part goes, for the card while it's sent.
+pub const PART_PLACE: &str = "As a clip on a new track";
+/// The line under a part that went in.
+pub const PART_IN: &str =
+    "As a clip on a new track, at the project's tempo. Put an instrument on the track to hear it.";
+
+/// The card's headline while a part is sent: "Putting Keys · Pattern 3 into Bitwig".
+pub fn sending_part(name: &str) -> String {
+    format!("Putting {name} into Bitwig")
+}
+
+/// The card's headline when a part couldn't be sent at all; the line under it is the error.
+pub const PART_FAILED: &str = "Couldn't put the part into Bitwig";
+
+/// Puts one MIDI part into the project open in Bitwig, through `link`: a new track, then the file as a clip on it.
+fn part(link: &mut Link, path: &Path, name: &str) -> Result<SentPart, Error> {
+    link.hello().can_send()?;
+    let shown = path.to_string_lossy().into_owned();
+    if !path.is_file() {
+        return Err(Error::Missing { file: file_name(&shown).to_owned(), path: shown });
+    }
+    let mut sent = SentPart { name: name.to_owned(), track: None, slot: None, problem: None };
+    let track = match link.new_track(name) {
+        Ok(track) => track,
+        Err(e) => {
+            sent.problem = Some(format!("{}. There may be an empty track for it in Bitwig", sentence(&e)));
+            return Ok(sent);
+        }
+    };
+    sent.track = Some(track.index);
+    match link.add_clip(track.index, &shown) {
+        Ok(slot) => sent.slot = Some(slot),
+        // Bitwig may have made the clip all the same: the link gave up waiting, or the connection went.
+        Err(e) => {
+            sent.problem = Some(format!("The track is in Bitwig, but the clip may not be on it: {}", sentence(&e)))
+        }
+    }
     Ok(sent)
 }
 

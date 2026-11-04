@@ -308,6 +308,8 @@ impl Song<'_> {
                     key: (n("pitch", 60.0) as i32).clamp(0, 127) as u8,
                     velocity: velocity_of(Some(n("velocity", 0.8))),
                     muted: n("mute", 0.0) != 0.0,
+                    step: false,
+                    part: 0,
                 }
             })
             .collect()
@@ -333,6 +335,9 @@ impl Song<'_> {
                 key: (num(attr(n, "pitch")).unwrap_or(36.0) as i32).clamp(0, 127) as u8,
                 velocity: velocity_of(num(attr(n, "velocity"))),
                 muted: attr(n, "mute") == "1",
+                // A pattern step has its length (the step's), unlike FL Studio's.
+                step: false,
+                part: 0,
             })
             .collect();
         (notes, count * step)
@@ -363,6 +368,8 @@ fn inline_notes(part: Node<'_, '_>) -> Vec<PreviewNote> {
             key: (num(attr(n, "pitch")).unwrap_or(60.0) as i32).clamp(0, 127) as u8,
             velocity: velocity_of(num(attr(n, "velocity"))),
             muted: attr(n, "mute") == "1",
+            step: false,
+            part: 0,
         })
         .collect()
 }

@@ -109,9 +109,10 @@ pub const CURVES_ACTIONS: &[Action] = &[
 ];
 
 /// The MIDI page's own actions, with the C# MIDI page's ids where it had them. What goes with this (midi.fit),
-/// the playground, Send to Bitwig, Save as and the octave keys join as those parts are built.
+/// the playground, Save as and the octave keys join as those parts are built.
 pub const MIDI_ACTIONS: &[Action] = &[
     action("midi.moreLike", "Parts shaped like the picked one", "Ctrl+L"),
+    action("midi.toBitwig", "Put the picked part into Bitwig as a clip on a new track", "Ctrl+B"),
     action("midi.within", "The longer phrases the picked part is in", ""),
     action("midi.source", "Show the picked part's file in its folder", "Ctrl+Shift+E"),
     action("midi.copyPath", "Copy where the picked part's file is", "Ctrl+Shift+C"),

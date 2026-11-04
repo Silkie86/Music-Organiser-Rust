@@ -43,6 +43,10 @@ static WINDOW: OnceLock<ThreadId> = OnceLock::new();
 
 /// The window's last move, resize, focus change or hiding, and when (see [`window_event`]).
 static LAST_WINDOW_EVENT: Mutex<Option<(&'static str, Instant)>> = Mutex::new(None);
+/// How many [`pause`]s have begun, so a knock that waited across one isn't put down as a freeze; and how many are
+/// going on now.
+static PAUSES: AtomicU64 = AtomicU64::new(0);
+static PAUSED: AtomicU64 = AtomicU64::new(0);
 
 thread_local! {
     /// For each marked step going on (on this thread), how long the steps inside it took, so each counts only its own
@@ -64,6 +68,28 @@ pub fn doing(what: &'static str) -> Doing {
         INSIDE.with(|i| i.borrow_mut().push(Duration::ZERO));
     }
     Doing { what, since, outer, on_window }
+}
+
+/// The window's thread is held on purpose until the guard is dropped: a drag out of the app, which Windows runs on
+/// the window's thread until the files are let go. The watchdog doesn't count that wait as a freeze.
+pub fn pause() -> Paused {
+    PAUSES.fetch_add(1, Ordering::SeqCst);
+    PAUSED.fetch_add(1, Ordering::SeqCst);
+    Paused(())
+}
+
+/// A [`pause`] going on.
+pub struct Paused(());
+
+impl Drop for Paused {
+    fn drop(&mut self) {
+        PAUSED.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Whether a knock sent when `pauses` pauses had begun waited across one (or still is).
+fn paused_since(pauses: u64) -> bool {
+    PAUSED.load(Ordering::SeqCst) > 0 || PAUSES.load(Ordering::SeqCst) != pauses
 }
 
 /// Slint is drawing the window (`true`, from its "before rendering" call) or has finished (`false`). Marks it like a
@@ -246,6 +272,7 @@ fn watch(feed: &Feed) {
         let a = answered.clone();
         let sent = Instant::now();
         let memory_before = crate::stuck::memory_now();
+        let pauses = PAUSES.load(Ordering::SeqCst);
         let answer = move || {
             let waited = u64::try_from(sent.elapsed().as_micros()).unwrap_or(u64::MAX).max(1);
             a.store(waited, Ordering::Release);
@@ -276,12 +303,12 @@ fn watch(feed: &Feed) {
             if waited >= STALL && busy.is_none() {
                 busy = Some(busy_with());
             }
-            if waited >= LOOK_AT_THREAD && !looked_at_thread {
+            if waited >= LOOK_AT_THREAD && !looked_at_thread && !paused_since(pauses) {
                 looked_at_thread = true;
                 own_faults += log_thread(waited);
                 log::current().inspect(|l| l.flush());
             }
-            if waited >= STILL_STUCK && !said_still_stuck {
+            if waited >= STILL_STUCK && !said_still_stuck && !paused_since(pauses) {
                 said_still_stuck = true;
                 let now = format!("{}; {}", busy_with(), window_words(sent));
                 log::error("Freeze", &line(waited, true, crate::page_name(), &feed.running_titles(), &now));
@@ -291,6 +318,10 @@ fn watch(feed: &Feed) {
             }
         }
         let waited = Duration::from_micros(answered.load(Ordering::Acquire));
+        // Held on purpose meanwhile (a drag out): not a freeze, and not a slow frame either.
+        if paused_since(pauses) {
+            continue;
+        }
         frame_timing::late(waited, blame(&seen), crate::page_name());
         if waited >= STALL {
             let mut busy = busy.unwrap_or_else(busy_with);

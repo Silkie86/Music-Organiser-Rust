@@ -30,7 +30,13 @@ mo-presets = { path = "../mo-presets" }
 # Send to Bitwig (Presets), and Settings › DAWs checks the Bitwig link.
 mo-dawlink = { path = "../mo-dawlink" }
 # The window and the views the app draws itself (the galaxy) go through the graphics card with wgpu (spec 9.1).
-slint = { workspace = true, features = ["unstable-wgpu-30", "unstable-winit-030", "renderer-femtovg-wgpu"] }
+# Its window's handle too, so a drag out of the app can tell Windows which window it's from.
+slint = { workspace = true, features = [
+    "unstable-wgpu-30",
+    "unstable-winit-030",
+    "renderer-femtovg-wgpu",
+    "raw-window-handle-06",
+] }
 image.workspace = true
 chrono.workspace = true
 # The clipboard, for Copy path. Slint already brings it in for its text boxes.
@@ -51,10 +57,31 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_ProcessStatus",
     "Win32_System_Threading",
 ] }
+# Dragging sounds and clips out to a DAW: Windows' own drag and drop, and the card that follows the mouse.
+windows = { version = "0.62", features = [
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_SystemServices",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+] }
+# `windows`' `#[implement]` (our side of the drag, which Windows asks how it's going) names this crate itself.
+windows-core = "0.62"
+raw-window-handle = "0.6"
 
 [dev-dependencies]
 # Tests make a small song library to read the use counts from.
 rusqlite = "0.41"
+# Send to Bitwig is tested against the stand-in Bitwig, never a real one.
+mo-dawlink = { path = "../mo-dawlink", features = ["fake-bitwig"] }
 # The waveforms' look test draws a path the way the window does, with Slint's own drawing library (the patched copy in
 # vendor/femtovg): the version and features Slint uses, so nothing more is built.
 femtovg = { version = "0.27", default-features = false, features = ["wgpu"] }

@@ -11,6 +11,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::filters::{self, Filter};
 use chrono::{Datelike, Months, NaiveDateTime};
 use mo_formats::case;
 use mo_formats::plugins::format_from_path;
@@ -189,11 +190,10 @@ impl PluginRow {
     }
 }
 
-/// The chips over the list. One is on at a time, as on the C# page.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+/// A choice in one of the filters over the list (the DAWs are the fourth filter, by name). Within a filter more than
+/// one can be picked, and a plugin shows when it's any of them; across filters it must be one of each's picks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Chip {
-    #[default]
-    All,
     Missing,
     Installed,
     BigUnused,
@@ -206,9 +206,38 @@ pub enum Chip {
     Native,
 }
 
+/// The filters made of chips, as the page names them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Group {
+    /// On this computer or not, and the room it takes.
+    Show,
+    Kind,
+    Format,
+}
+
+impl Group {
+    pub const ALL: [Group; 3] = [Group::Show, Group::Kind, Group::Format];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Group::Show => "Show",
+            Group::Kind => "Kind",
+            Group::Format => "Format",
+        }
+    }
+
+    /// Its chips, in the order they show.
+    pub fn chips(self) -> &'static [Chip] {
+        match self {
+            Group::Show => &[Chip::Missing, Chip::Installed, Chip::NeverUsed, Chip::BigUnused],
+            Group::Kind => &[Chip::Instruments, Chip::Effects],
+            Group::Format => &[Chip::Vst2, Chip::Vst3, Chip::Clap, Chip::Native],
+        }
+    }
+}
+
 impl Chip {
-    pub const ALL: [Chip; 11] = [
-        Chip::All,
+    pub const ALL: [Chip; 10] = [
         Chip::Missing,
         Chip::Installed,
         Chip::BigUnused,
@@ -223,7 +252,6 @@ impl Chip {
 
     pub fn name(self) -> &'static str {
         match self {
-            Chip::All => "All",
             Chip::Missing => "Missing",
             Chip::Installed => "Installed",
             Chip::BigUnused => "Big and unused",
@@ -238,12 +266,19 @@ impl Chip {
     }
 
     pub fn from_name(name: &str) -> Option<Chip> {
-        Chip::ALL.into_iter().find(|c| c.name() == name)
+        Chip::ALL.into_iter().find(|c| c.name().eq_ignore_ascii_case(name))
+    }
+
+    pub fn group(self) -> Group {
+        match self {
+            Chip::Missing | Chip::Installed | Chip::BigUnused | Chip::NeverUsed => Group::Show,
+            Chip::Instruments | Chip::Effects => Group::Kind,
+            Chip::Vst2 | Chip::Vst3 | Chip::Clap | Chip::Native => Group::Format,
+        }
     }
 
     fn allows(self, p: &PluginRow) -> bool {
         match self {
-            Chip::All => true,
             Chip::Missing => !p.installed,
             Chip::Installed => p.installed,
             Chip::BigUnused => p.unused && p.bytes() > 0,
@@ -290,33 +325,65 @@ impl Sort {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Filters {
     pub search: String,
-    pub chip: Chip,
+    /// The chips picked, in the order picked.
+    pub chips: Vec<Chip>,
+    /// Only plugins used in songs from these DAWs.
+    pub daws: Vec<String>,
     pub sort: Sort,
     /// Only plugins used in these years, first to last (the year strip).
     pub years: Option<(i32, i32)>,
 }
 
 impl Filters {
-    /// Picks a chip; picking the one that's on goes back to All. The space chips sort the biggest first, as the C#
-    /// page does.
+    /// Picks or unpicks a chip (more than one can be on in a filter). Turning on a space chip sorts the biggest first,
+    /// as the C# page does.
     pub fn pick(&mut self, chip: Chip) {
-        self.show(if self.chip == chip { Chip::All } else { chip });
+        filters::toggle_as(&mut self.chips, chip.name(), true, Chip::name, Chip::from_name);
+        if self.chips.contains(&chip) && matches!(chip, Chip::BigUnused | Chip::NeverUsed) {
+            self.sort = Sort::Biggest;
+        }
     }
 
-    /// Turns a chip on, even when it's on already (the "Show them" link).
+    /// Shows only the big unused plugins (the "Show them" link): the Show filter's other picks go, and it stays on
+    /// when it's on already.
     pub fn show(&mut self, chip: Chip) {
-        self.chip = chip;
+        self.chips.retain(|c| c.group() != chip.group());
+        self.chips.push(chip);
         if matches!(chip, Chip::BigUnused | Chip::NeverUsed) {
             self.sort = Sort::Biggest;
         }
     }
 
+    /// Picks or unpicks a DAW.
+    pub fn pick_daw(&mut self, daw: &str) {
+        filters::toggle(&mut self.daws, daw, true);
+    }
+
+    /// Unpicks every chip in `group`.
+    pub fn clear_group(&mut self, group: Group) {
+        self.chips.retain(|c| c.group() != group);
+    }
+
     pub fn any(&self) -> bool {
-        !self.search.trim().is_empty() || self.chip != Chip::All || self.years.is_some()
+        !self.search.trim().is_empty() || !self.chips.is_empty() || !self.daws.is_empty() || self.years.is_some()
     }
 
     fn allows(&self, p: &PluginRow, search: &str) -> bool {
-        if !self.chip.allows(p) {
+        self.allows_but(p, search, None)
+    }
+
+    /// Whether `p` gets through every filter but `skip` (a group, or the DAWs for `Some(None)`), for the counts.
+    fn allows_but(&self, p: &PluginRow, search: &str, skip: Option<Option<Group>>) -> bool {
+        for g in Group::ALL {
+            if skip == Some(Some(g)) {
+                continue;
+            }
+            let mut picked = self.chips.iter().filter(|c| c.group() == g).peekable();
+            if picked.peek().is_some() && !picked.any(|c| c.allows(p)) {
+                return false;
+            }
+        }
+        if skip != Some(None) && !self.daws.is_empty() && !p.daws.iter().any(|d| self.daws.iter().any(|w| w == d)) {
             return false;
         }
         if let Some((a, b)) = self.years
@@ -448,6 +515,42 @@ impl Plugins {
             Sort::LastUsed => shown.sort_by(|&a, &b| rows[b].last_used.cmp(&rows[a].last_used)),
         }
         self.shown = shown;
+    }
+
+    /// A chip filter as the page shows it: each chip with how many plugins it would show with the other filters as
+    /// they are.
+    pub fn filter(&self, group: Group) -> Filter {
+        let search = case::to_lower(self.filters.search.trim());
+        let others: Vec<&PluginRow> =
+            self.rows.iter().filter(|r| self.filters.allows_but(r, &search, Some(Some(group)))).collect();
+        let choices: Vec<(String, String)> = group
+            .chips()
+            .iter()
+            .map(|c| (c.name().to_owned(), others.iter().filter(|r| c.allows(r)).count().to_string()))
+            .collect();
+        let picked: Vec<String> =
+            self.filters.chips.iter().filter(|c| c.group() == group).map(|c| c.name().to_owned()).collect();
+        filters::show(&choices, &picked)
+    }
+
+    /// The DAW filter: every DAW a song using a plugin comes from, with its count. A picked one no longer in the list
+    /// stays, so it can be unpicked.
+    pub fn daw_filter(&self) -> Filter {
+        let search = case::to_lower(self.filters.search.trim());
+        let others: Vec<&PluginRow> =
+            self.rows.iter().filter(|r| self.filters.allows_but(r, &search, Some(None))).collect();
+        let mut daws: Vec<String> = self.rows.iter().flat_map(|r| r.daws.iter().cloned()).collect();
+        daws.extend(self.filters.daws.iter().cloned());
+        daws.sort();
+        daws.dedup();
+        let choices: Vec<(String, String)> = daws
+            .into_iter()
+            .map(|d| {
+                let n = others.iter().filter(|r| r.daws.contains(&d)).count();
+                (d, n.to_string())
+            })
+            .collect();
+        filters::show(&choices, &self.filters.daws)
     }
 
     /// Changes how many years make a plugin unused, from what was read (nothing is read again).
