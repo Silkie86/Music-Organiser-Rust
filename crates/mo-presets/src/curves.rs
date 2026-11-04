@@ -39,16 +39,18 @@ pub const FILE_NAME: &str = "curves.db";
 /// The folder in the app's data folder that curve files are written to.
 pub const FOLDER: &str = "Curves";
 
-/// The tables, as made in a new database; only ever added to. Each fact once (rule 23): a source's kind and song come
-/// from its path, and its save's date from `curve_saves`. `version` is what read the save ([`read_version`]), so a
-/// better reader reads it again (rule 7).
+/// The tables, as made in a new database; only ever added to (rule 6). Each fact once (rule 23): a place's kind and
+/// song come from its path, and its save's date from `curve_reads`. `version` is what read the save
+/// ([`read_version`]), so a better reader reads it again (rule 7). Test builds of the Presets page kept the same
+/// facts in `curve_saves` and `curve_sources` (with the kind, song and date on every row, and no version); those
+/// tables are left as they are for those builds, and this one reads every save again into its own.
 const SCHEMA: &str = "\
-    CREATE TABLE IF NOT EXISTS curve_saves (path TEXT PRIMARY KEY NOT NULL, modified INTEGER NOT NULL, \
+    CREATE TABLE IF NOT EXISTS curve_reads (path TEXT PRIMARY KEY NOT NULL, modified INTEGER NOT NULL, \
         size INTEGER NOT NULL, version INTEGER NOT NULL);
-    CREATE TABLE IF NOT EXISTS curve_sources (id TEXT NOT NULL, path TEXT NOT NULL, name TEXT NOT NULL, \
+    CREATE TABLE IF NOT EXISTS curve_places (id TEXT NOT NULL, path TEXT NOT NULL, name TEXT NOT NULL, \
         device TEXT NOT NULL, setting TEXT NOT NULL, at REAL NOT NULL, length REAL NOT NULL, points TEXT NOT NULL);
-    CREATE INDEX IF NOT EXISTS curve_sources_path ON curve_sources (path);
-    CREATE INDEX IF NOT EXISTS curve_sources_id ON curve_sources (id);
+    CREATE INDEX IF NOT EXISTS curve_places_path ON curve_places (path);
+    CREATE INDEX IF NOT EXISTS curve_places_id ON curve_places (id);
     CREATE TABLE IF NOT EXISTS your_curves (id TEXT PRIMARY KEY NOT NULL, name TEXT, hidden INTEGER NOT NULL DEFAULT 0);";
 
 /// Where a curve was found.
@@ -81,15 +83,16 @@ impl SourceKind {
 /// Goes up by one whenever this file finds other curves in the same saves (its filters and shapes; rule 7).
 const CURVES_VERSION: i64 = 1;
 
-/// What reads a save's curves: this file's version and its DAW reader's, so a change to either reads it again.
+/// What reads a save's curves: this file's version and its DAW reader's (for Bitwig, its clip or curve reader's and
+/// the decoder's, as the project reader's version follows it), so a change to any of them reads it again.
 fn read_version(path: &str) -> i64 {
     let reader = match SourceKind::of(path) {
         Some(SourceKind::FlKnobMoves) => mo_formats::fl::VERSION,
-        Some(SourceKind::BitwigClip) => automation::VERSION,
-        Some(SourceKind::BitwigCurve) => curve::VERSION,
+        Some(SourceKind::BitwigClip) => automation::VERSION * 1000 + bitwig::VERSION,
+        Some(SourceKind::BitwigCurve) => curve::VERSION * 1000 + bitwig::VERSION,
         None => 0,
     };
-    CURVES_VERSION * 1_000_000 + i64::from(reader)
+    CURVES_VERSION * 1_000_000_000 + i64::from(reader)
 }
 
 /// The song's name a save gives, to show: its file's name without its ending.
@@ -312,7 +315,7 @@ pub struct Progress {
 enum Look {
     /// Its last change (seconds since 1970, before it for an older date) and size.
     There(i64, i64),
-    /// Not there, though the folder (or drive) it was in can be looked at: deleted or moved, so forgotten.
+    /// Not there, though the folder it was in is: deleted, moved or renamed, so forgotten.
     Gone,
     /// Can't be looked at now (a drive unplugged, a network share away, no permission): what was found in it before
     /// is kept, and it's tried again next time.
@@ -333,10 +336,13 @@ fn look(path: &Path) -> Look {
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // A drive that's unplugged has no folder left to look at: the save may be back. On Windows a drive's own
-            // root ("K:\\") is there only while the drive is; elsewhere "/" always is, so only a folder below it counts.
-            let near = path.ancestors().skip(1).filter(|a| !a.as_os_str().is_empty()).find(|a| a.exists());
-            if near.is_some_and(|a| a.parent().is_some() || cfg!(windows)) { Look::Gone } else { Look::Away }
+            // Only when its own folder is there: a drive that's unplugged (K:\\, or /Volumes/Music on a Mac, whose
+            // /Volumes stays) takes the folder with it, and the save may be back. A whole folder deleted is forgotten
+            // once the library stops listing its saves.
+            match path.parent() {
+                Some(folder) if !folder.as_os_str().is_empty() && folder.is_dir() => Look::Gone,
+                _ => Look::Away,
+            }
         }
         Err(_) => Look::Away,
     }
@@ -354,7 +360,7 @@ impl CurvesDb {
     /// Opens the database at `path`, making it first when it isn't there (made beside it, checked, then put in place).
     pub fn open(path: &Path) -> Result<CurvesDb, CurvesError> {
         if !is_there(path)? {
-            make_new(path, SCHEMA, "curve_sources")?;
+            make_new(path, SCHEMA, "curve_places")?;
         }
         let conn = Connection::open(path)?;
         conn.busy_timeout(Duration::from_secs(2))?;
@@ -365,7 +371,7 @@ impl CurvesDb {
 
     /// Each save read before: its date, size and what read it.
     fn known(&self) -> Result<HashMap<String, (i64, i64, i64)>, CurvesError> {
-        let mut st = self.conn.prepare("SELECT path, modified, size, version FROM curve_saves")?;
+        let mut st = self.conn.prepare("SELECT path, modified, size, version FROM curve_reads")?;
         let rows = st.query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?, r.get(3)?))))?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
@@ -435,18 +441,18 @@ impl CurvesDb {
         }
         let tx = self.conn.transaction()?;
         for p in gone.iter().chain(read.iter().map(|r| &r.0)) {
-            tx.execute("DELETE FROM curve_sources WHERE path = ?1", [p])?;
-            tx.execute("DELETE FROM curve_saves WHERE path = ?1", [p])?;
+            tx.execute("DELETE FROM curve_places WHERE path = ?1", [p])?;
+            tx.execute("DELETE FROM curve_reads WHERE path = ?1", [p])?;
         }
         for (path, (modified, size), found) in &read {
             tx.execute(
-                "INSERT INTO curve_saves (path, modified, size, version) VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO curve_reads (path, modified, size, version) VALUES (?1, ?2, ?3, ?4)",
                 params![path, modified, size, read_version(path)],
             )?;
             for f in found {
                 let s = &f.source;
                 tx.execute(
-                    "INSERT INTO curve_sources (id, path, name, device, setting, at, length, points) \
+                    "INSERT INTO curve_places (id, path, name, device, setting, at, length, points) \
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                     params![f.id, s.path, s.name, s.device, s.setting, s.at, f.length, points_text(&f.points)],
                 )?;
@@ -468,10 +474,10 @@ impl CurvesDb {
     }
 
     fn curves(&self, only: Option<&str>) -> Result<Vec<Curve>, CurvesError> {
-        // The save's date from curve_saves, the kind and song from the path (rule 23).
+        // The save's date from curve_reads, the kind and song from the path (rule 23).
         let mut st = self.conn.prepare(
             "SELECT c.id, c.path, c.name, c.device, c.setting, c.at, c.length, c.points, s.modified \
-             FROM curve_sources c JOIN curve_saves s ON s.path = c.path \
+             FROM curve_places c JOIN curve_reads s ON s.path = c.path \
              WHERE ?1 IS NULL OR c.id = ?1 ORDER BY s.modified DESC, c.path, c.at",
         )?;
         type Row = (String, Option<SourceKind>, CurveSource, f64, Option<String>);
@@ -553,7 +559,7 @@ impl CurvesDb {
 
     /// Whether a curve with this id is found anywhere now (for a page holding an old id).
     pub fn has(&self, id: &str) -> Result<bool, CurvesError> {
-        Ok(self.conn.query_row("SELECT 1 FROM curve_sources WHERE id = ?1", [id], |_| Ok(())).optional()?.is_some())
+        Ok(self.conn.query_row("SELECT 1 FROM curve_places WHERE id = ?1", [id], |_| Ok(())).optional()?.is_some())
     }
 }
 
@@ -610,24 +616,29 @@ fn holds(path: &Path, c: &Curve) -> bool {
 /// again when the curve has changed since (copy, check, rename, as every file the app writes); returns its path.
 /// Safe on the worker pool; never on the window's thread.
 pub fn file(c: &Curve, folder: &Path) -> Result<PathBuf, String> {
-    let id = c.id.get(..8).unwrap_or(&c.id);
+    let id = c.id.get(..ID_IN_NAME).unwrap_or(&c.id);
     let path = folder.join(format!("{} {id}.{}", names::safe_file_name(&c.name), curve::EXTENSION));
-    if !holds(&path, c) {
-        std::fs::create_dir_all(folder).map_err(|e| format!("Couldn't make the Curves folder: {e}"))?;
-        export::write_checked(&path, &curve_bytes(c)?).map_err(|e| format!("Couldn't write the curve: {e}"))?;
+    if holds(&path, c) {
+        return Ok(path);
     }
-    // The folder is a cache (rule 28): this curve's file under an older name (before it was renamed) goes.
-    let own = path.file_name().map(|n| n.to_owned());
-    for (old, _) in
-        curve_files(folder).into_iter().filter(|(name, of)| of == id && Some(name.as_os_str()) != own.as_deref())
-    {
-        let _ = std::fs::remove_file(folder.join(old));
+    std::fs::create_dir_all(folder).map_err(|e| format!("Couldn't make the Curves folder: {e}"))?;
+    export::write_checked(&path, &curve_bytes(c)?).map_err(|e| format!("Couldn't write the curve: {e}"))?;
+    // The folder is a cache (rule 28): this curve's file under an older name (before it was renamed) goes. Names
+    // that differ only in letter case are one file on Windows and a Mac, so that one stays.
+    let own = path.file_name().map(|n| n.to_string_lossy().to_lowercase());
+    for (old, of) in curve_files(folder) {
+        if of == id && Some(old.to_string_lossy().to_lowercase()) != own {
+            let _ = std::fs::remove_file(folder.join(old));
+        }
     }
     Ok(path)
 }
 
+/// How much of a curve's id its file's name ends with: 16 hex digits, so two curves never share one.
+const ID_IN_NAME: usize = 16;
+
 /// The plain curve files in the app's Curves folder, by name, each with the curve id's start its name ends with
-/// ("<name> <8 hex>.bwcurve", as [`file`] names them). Nothing else in the folder is listed.
+/// ("<name> <16 hex>.bwcurve", as [`file`] names them; 8 in the first test builds). Nothing else is listed.
 fn curve_files(folder: &Path) -> Vec<(PathBuf, String)> {
     let Ok(entries) = std::fs::read_dir(folder) else { return Vec::new() };
     entries
@@ -637,7 +648,8 @@ fn curve_files(folder: &Path) -> Vec<(PathBuf, String)> {
             let name = e.file_name().to_str()?.to_owned();
             let stem = name.strip_suffix(&format!(".{}", curve::EXTENSION))?;
             let (_, id) = stem.rsplit_once(' ')?;
-            (id.len() == 8 && id.bytes().all(|b| b.is_ascii_hexdigit())).then(|| (PathBuf::from(&name), id.to_owned()))
+            let hex = (id.len() == ID_IN_NAME || id.len() == 8) && id.bytes().all(|b| b.is_ascii_hexdigit());
+            hex.then(|| (PathBuf::from(&name), id.to_owned()))
         })
         .collect()
 }
@@ -652,16 +664,23 @@ pub fn save_to_bitwig(c: &Curve, folder: &Path) -> Result<PathBuf, String> {
     let base = names::safe_file_name(&c.name);
     let base = if base.is_empty() { "Curve".to_owned() } else { base };
     // A staged name of this save's own, so two saves of same-named curves at once never link the other's.
+    // A name taken (a crash's leftover from an earlier run with this process number) is passed over for the next.
     static NEXT: AtomicUsize = AtomicUsize::new(0);
-    let staged = folder.join(format!(
-        "{base}.{}{STAGED}{}-{}",
-        curve::EXTENSION,
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    if !new_file(&staged, &bytes).map_err(|e| format!("Couldn't write the curve: {e}"))? {
-        return Err("Couldn't write the curve: its staged name is taken".to_owned());
+    let mut staged = None;
+    for _ in 0..100 {
+        let name = format!(
+            "{base}.{}{STAGED}{}-{}",
+            curve::EXTENSION,
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        );
+        let path = folder.join(name);
+        if new_file(&path, &bytes).map_err(|e| format!("Couldn't write the curve: {e}"))? {
+            staged = Some(path);
+            break;
+        }
     }
+    let staged = staged.ok_or("Couldn't write the curve: every staged name tried was taken")?;
     let result = (|| {
         for n in 1..1000 {
             let name = if n == 1 { base.clone() } else { format!("{base} ({n})") };
@@ -686,42 +705,25 @@ pub fn save_to_bitwig(c: &Curve, folder: &Path) -> Result<PathBuf, String> {
 const STAGED: &str = ".mo-staged-";
 
 /// Clears what a crash can leave behind (rule 28), plain files of exactly the names the app gives only, never through
-/// a link: in the app's Curves folder, curve files of curves no longer in the library (`known`, the ids of every
-/// curve now) and half-written ones; in Bitwig's curves folder (`bitwig`), staged curves; and beside `db` (curves.db
-/// or presets.db), half-made databases. Half-written and staged files are left until they're 10 minutes old, so a
-/// save still being made is left alone. For the start-up sweep; never on the window's thread.
+/// a link, once they're 10 minutes old (so one being written or just made is left alone): in the app's Curves folder,
+/// curve files of curves no longer in the library (`known`, the ids of every curve now) and half-written ones; in
+/// Bitwig's curves folder (`bitwig`), staged curves; and beside each of `dbs` (curves.db, presets.db), half-made
+/// databases. For the start-up sweep; never on the window's thread.
 pub fn tidy(curves_folder: &Path, known: &HashSet<String>, bitwig: Option<&Path>, dbs: &[&Path]) {
-    let short: HashSet<&str> = known.iter().map(|id| id.get(..8).unwrap_or(id)).collect();
-    for (name, id) in curve_files(curves_folder) {
-        if !short.contains(id.as_str()) {
-            let _ = std::fs::remove_file(curves_folder.join(name));
-        }
-    }
-    export::clear_half_written(curves_folder, std::time::SystemTime::now());
+    let now = std::time::SystemTime::now();
+    let gone: HashSet<PathBuf> = curve_files(curves_folder)
+        .into_iter()
+        .filter(|(_, id)| !known.iter().any(|k| k.starts_with(id.as_str())))
+        .map(|(name, _)| name)
+        .collect();
+    export::clear_left_behind(curves_folder, now, &|name| {
+        export::is_half_written(name) || gone.contains(Path::new(name))
+    });
     if let Some(bitwig) = bitwig {
-        clear_staged(bitwig, std::time::SystemTime::now());
+        export::clear_left_behind(bitwig, now, &is_staged);
     }
     for db in dbs {
         crate::fixes::remove_old_half_made(db);
-    }
-}
-
-/// Removes staged curves ([`STAGED`]) a crash left in `folder`, once 10 minutes older than `now`.
-fn clear_staged(folder: &Path, now: std::time::SystemTime) {
-    let Ok(entries) = std::fs::read_dir(folder) else { return };
-    for e in entries.flatten() {
-        let plain = e.file_type().is_ok_and(|t| t.is_file());
-        let name = e.file_name();
-        let Some(name) = name.to_str() else { continue };
-        let old = e
-            .metadata()
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| now.duration_since(t).ok())
-            .is_some_and(|age| age >= export::LEFT_BEHIND);
-        if plain && old && is_staged(name) {
-            let _ = std::fs::remove_file(e.path());
-        }
     }
 }
 
@@ -893,7 +895,7 @@ mod tests {
         let progress = Progress::default();
         assert_eq!(db.scan(std::slice::from_ref(&a), &progress).unwrap(), 1);
         // As if an older reader had read it.
-        db.conn.execute("UPDATE curve_saves SET version = 1", []).unwrap();
+        db.conn.execute("UPDATE curve_reads SET version = 1", []).unwrap();
         assert_eq!(db.out_of_date(std::slice::from_ref(&a)).unwrap(), (vec![a.clone()], false));
         assert_eq!(db.scan(std::slice::from_ref(&a), &progress).unwrap(), 1);
         assert_eq!(db.out_of_date(std::slice::from_ref(&a)).unwrap(), (Vec::new(), false));
@@ -912,16 +914,12 @@ mod tests {
         let mut db = CurvesDb::open(&dir.join(FILE_NAME)).unwrap();
         let progress = Progress::default();
         db.scan(&[a.clone(), b.clone()], &progress).unwrap();
-        // A save on a drive that's unplugged (no folder above it is there): kept as it was.
-        let away = if cfg!(windows) {
-            r"\\mo-no-such-server-5c1e\share\c.bwcurve"
-        } else {
-            "/mo-no-such-drive-5c1e/Songs/c.bwcurve"
-        };
-        let away = away.to_owned();
+        // A save on a drive that's unplugged (its folder isn't there either): kept as it was. A folder of the test's
+        // own, never a made-up drive or network share, so nothing is asked of the network.
+        let away = dir.join("unplugged").join("Songs").join("c.bwcurve").to_string_lossy().into_owned();
         db.conn
             .execute(
-                "INSERT INTO curve_saves (path, modified, size, version) VALUES (?1, 1, 1, ?2)",
+                "INSERT INTO curve_reads (path, modified, size, version) VALUES (?1, 1, 1, ?2)",
                 params![away, read_version(&away)],
             )
             .unwrap();
@@ -965,14 +963,16 @@ mod tests {
         let second = file(&renamed, &curves).unwrap();
         assert!(!first.exists() && second.exists());
         // A curve no longer in the library, someone's own file, and a half-written one a crash left.
-        let gone = curves.join("Old curve 0123abcd.bwcurve");
+        let gone = curves.join("Old curve 0123abcd0123abcd.bwcurve");
         let yours = curves.join("My curve.bwcurve");
         let part = curves.join("x 0123abcd.bwcurve.mo-part-1-2");
         for f in [&gone, &yours, &part] {
             std::fs::write(f, b"x").unwrap();
         }
         let hour_ago = std::time::SystemTime::now() - Duration::from_secs(3600);
-        std::fs::File::options().write(true).open(&part).unwrap().set_modified(hour_ago).unwrap();
+        for f in [&gone, &part] {
+            std::fs::File::options().write(true).open(f).unwrap().set_modified(hour_ago).unwrap();
+        }
         // Bitwig's library: a staged curve a crash left (old), one being saved now, and a curve of yours.
         let library = dir.join("Library");
         std::fs::create_dir_all(&library).unwrap();

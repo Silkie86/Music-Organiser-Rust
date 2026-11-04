@@ -116,12 +116,13 @@ fn half_written_files_a_crash_left_are_cleared() {
         let outside = root.join("Outside.fxp");
         std::fs::write(&outside, b"yours").unwrap();
         std::os::unix::fs::symlink(&outside, presets.join("x.fxp.mo-part-1-2")).unwrap();
-        // The link's own time, not its target's.
-        std::process::Command::new("touch")
-            .args(["-h", "-d", "1 hour ago"])
+        // The link's own time, not its target's (GNU's and BSD's touch both take -h -t).
+        let touched = std::process::Command::new("touch")
+            .args(["-h", "-t", "202001010000"])
             .arg(presets.join("x.fxp.mo-part-1-2"))
             .status()
-            .ok();
+            .unwrap();
+        assert!(touched.success());
         outside
     };
     export::export(&[serum("Lead", "")], "Song.flp", &root, None).unwrap();

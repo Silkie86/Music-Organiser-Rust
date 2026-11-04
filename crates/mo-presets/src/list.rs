@@ -238,12 +238,14 @@ pub fn from_bitwig_parts(presets: Vec<PresetBlob>, clips: &[MidiClip], limits: &
                 }
             };
             let (Some((_, all, ppq)), Some(end)) = (tracks.get_mut(at), ends.get_mut(at)) else { continue };
-            // Saturating: a damaged project's note can last i64::MAX ticks.
+            // In 128 bits, then held within 64: a damaged project's note can last i64::MAX ticks, and later ticks
+            // must still come out later.
             let scale = |t: i64| {
                 if clip.ppq == *ppq || clip.ppq == 0 {
                     t
                 } else {
-                    t.saturating_mul(i64::from(*ppq)) / i64::from(clip.ppq)
+                    let scaled = i128::from(t) * i128::from(*ppq) / i128::from(clip.ppq);
+                    i64::try_from(scaled).unwrap_or(if scaled < 0 { i64::MIN } else { i64::MAX })
                 }
             };
             let offset = *end;
