@@ -135,6 +135,8 @@ fn a_song_whose_zip_cant_be_made_still_goes_as_plain_folders() {
     let ran = run(&prepared, &settings, &stop, &|_| {});
     assert!(ran.last.line.contains("1 song went as plain folders"), "{}", ran.last.line);
     assert_eq!(ran.went.len(), 1, "its newest save went");
+    assert!(!ran.last.ok, "not as asked, and the renamed save couldn't go");
+    assert!(ran.last.line.contains("1 couldn't go"), "{}", ran.last.line);
     for f in [&save2, &kick] {
         let place = mo_backup::plan::place_on_backup(&backup, f).unwrap();
         assert!(place.is_file(), "{} went as a plain file", f.display());
@@ -179,4 +181,26 @@ fn a_sample_named_through_a_link_goes_once_from_where_it_really_is() {
         prepared.plan.copy.iter().map(|f| f.path.as_path()).filter(|p| p.ends_with("Kick.wav")).collect();
     assert_eq!(kicks, vec![moved.join("Kick.wav").as_path()]);
     assert!(prepared.songs[0].files.contains(&moved.join("Kick.wav")), "the song's zip names where it really is");
+}
+
+#[test]
+fn settings_are_written_whole_and_old_half_written_ones_are_cleared() {
+    let root = fixtures("backup-screen-settings-file");
+    let path = root.join("backup.txt");
+    let left = root.join("backup.txt.mo-part");
+    let left_too = root.join("backup.txt.999-0.mo-part");
+    let other = root.join("backup-songs.txt.mo-part");
+    for p in [&left, &left_too, &other] {
+        write(p, b"half");
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        fs::File::options().write(true).open(p).unwrap().set_modified(old).unwrap();
+    }
+    let settings = Settings { drive: Some(root.join("drive")), ..Settings::default() };
+    settings.save(&path).unwrap();
+    assert_eq!(Settings::load(&path), settings);
+    assert!(!left.exists() && !left_too.exists(), "this file's leftovers are cleared");
+    assert!(other.exists(), "another file's are its own");
+    let names: Vec<String> =
+        fs::read_dir(&root).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    assert!(!names.iter().any(|n| n.starts_with("backup.txt.") && n.ends_with(".mo-part")), "{names:?}");
 }

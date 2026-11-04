@@ -167,15 +167,26 @@ impl Settings {
 /// Writes a file whole or not at all: the text goes to a temporary name of this save's own beside it (two copies of
 /// the app saving at once never share one), is flushed to the disk, then renamed over the old file. A crash or power
 /// cut part way leaves the old file whole, and the temporary one never stays behind on an error.
+///
+/// Temporary files of the same file that a crash left (a minute old or more: a save takes far less) are cleared first,
+/// so they never pile up.
 pub fn write_whole(path: &Path, text: &str) -> io::Result<()> {
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
     static SAVES: AtomicU64 = AtomicU64::new(0);
-    let name = path.file_name().unwrap_or_default().to_string_lossy();
-    let n = SAVES.fetch_add(1, Ordering::Relaxed);
-    let part = path.with_file_name(format!("{name}.{}-{n}.mo-part", std::process::id()));
+    let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    clear_left_parts(path, &name);
+    let (mut f, part) = loop {
+        let n = SAVES.fetch_add(1, Ordering::Relaxed);
+        let part = path.with_file_name(format!("{name}.{}-{n}.mo-part", std::process::id()));
+        match fs::File::create_new(&part) {
+            Ok(f) => break (f, part),
+            // Left by an earlier app with the same process number: the next name.
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists && n < 1000 => {}
+            Err(e) => return Err(e),
+        }
+    };
     let written = (|| {
-        let mut f = fs::File::create_new(&part)?;
         f.write_all(text.as_bytes())?;
         f.sync_all()?;
         drop(f);
@@ -185,6 +196,23 @@ pub fn write_whole(path: &Path, text: &str) -> io::Result<()> {
         let _ = fs::remove_file(&part);
     }
     written
+}
+
+/// Removes temporary files of `path` (named `<name>.mo-part` or `<name>.<…>.mo-part`) a minute old or more.
+fn clear_left_parts(path: &Path, name: &str) {
+    let Some(folder) = path.parent() else { return };
+    let Ok(dir) = fs::read_dir(folder) else { return };
+    for entry in dir.flatten() {
+        let other = entry.file_name().to_string_lossy().into_owned();
+        let Some(middle) = other.strip_prefix(name).and_then(|rest| rest.strip_suffix(".mo-part")) else { continue };
+        if !(middle.is_empty() || middle.starts_with('.')) {
+            continue;
+        }
+        let old = entry.metadata().ok().filter(fs::Metadata::is_file).and_then(|m| m.modified().ok());
+        if old.and_then(|t| t.elapsed().ok()).is_some_and(|age| age >= std::time::Duration::from_secs(60)) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// A song's id on the backup: its first save's id, which stays the same as new saves come. Its zip is known by it,
@@ -456,18 +484,26 @@ pub fn prepare(library: &Library, settings: &Settings, stop: &AtomicBool) -> Res
         m.used.retain(|p| seen.insert(mo_space::key(&p.to_string_lossy())));
         for p in &mut m.used {
             let k = mo_space::key(&p.to_string_lossy());
-            if by_key.contains_key(&k) || not_there.contains(&k) {
+            // Named as the plan names it, so the song's own list finds it (whatever slashes the project used).
+            if let Some(&i) = by_key.get(&k) {
+                *p = files[i].path.clone();
+                continue;
+            }
+            if not_there.contains(&k) {
                 continue;
             }
             let Some(meta) = fs::metadata(&*p).ok().filter(fs::Metadata::is_file) else {
                 not_there.insert(k);
                 continue;
             };
-            if let Some(real) = mo_space::real_path(&p.to_string_lossy())
-                && let Some(&i) = by_key.get(&mo_space::key(&real))
-            {
+            let real = mo_space::real_path(&p.to_string_lossy()).map(|r| mo_space::key(&r));
+            if let Some(&i) = real.as_ref().and_then(|r| by_key.get(r)) {
                 *p = files[i].path.clone();
                 continue;
+            }
+            // Known by where it really is too, so another save naming that place finds this one.
+            if let Some(real) = real {
+                by_key.insert(real, files.len());
             }
             by_key.insert(k, files.len());
             files.push(FileEntry {
@@ -656,53 +692,14 @@ fn run_on(
             )
         }
     };
-    let mut record_note = None;
-    let mut problems: Vec<String> = Vec::new();
+    let mut tally = Tally { there, kept_older, checked: 0, new_or_changed: 0, problems: Vec::new(), record_note: None };
     // Files gone from your folders that are damaged in a song's zip.
     let mut damaged = 0usize;
-    let mut new_or_changed = 0usize;
-    let mut checked = 0usize;
     let mut plain_songs = 0usize;
-    if !copy_list.is_empty() {
-        let bytes = copy_list.iter().map(|f| f.size).fold(0, u64::saturating_add);
-        progress(Progress::Copying { files: copy_list.len(), bytes });
-        match copy::run(&copy_list, backup, &options, stop) {
-            Err(_) => return LastRun { when, ok: false, line: "The backup drive isn't there".to_owned() },
-            Ok(report) => {
-                for l in &report.lines {
-                    if l.outcome == (Outcome::Updated { kept_older: true }) {
-                        *kept_older += 1;
-                    }
-                    match &l.outcome {
-                        Outcome::New | Outcome::Updated { .. } => {
-                            new_or_changed += 1;
-                            checked += 1;
-                            there.insert(case::key(&l.source.to_string_lossy()));
-                        }
-                        Outcome::UpToDate => {
-                            checked += 1;
-                            there.insert(case::key(&l.source.to_string_lossy()));
-                        }
-                        Outcome::Failed(why) => problems.push(format!("{}: {why}", l.source.display())),
-                        Outcome::NotReached => {}
-                    }
-                }
-                if report.stopped {
-                    return LastRun {
-                        when,
-                        ok: false,
-                        line: format!("Stopped · {} files checked", thousands(checked)),
-                    };
-                }
-                if report.full {
-                    return LastRun { when, ok: false, line: "The backup drive is full".to_owned() };
-                }
-                if report.gone {
-                    return LastRun { when, ok: false, line: "The backup drive went away part way".to_owned() };
-                }
-                record_note = report.record_not_saved;
-            }
-        }
+    if !copy_list.is_empty()
+        && let Some(end) = tally.copy(&copy_list, backup, &options, stop, progress)
+    {
+        return LastRun { when, ok: false, line: end };
     }
     if settings.format == Format::Zips {
         let Ok(packer) = Packer::new(backup) else {
@@ -724,7 +721,7 @@ fn run_on(
                 owners(&found)
             }
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {
-                return LastRun { when, ok: false, line: format!("Stopped · {} checked", thousands(checked)) };
+                return LastRun { when, ok: false, line: format!("Stopped · {} checked", thousands(tally.checked)) };
             }
             Err(e) => {
                 // Each zip is still only packed over when it's the song's own.
@@ -740,12 +737,12 @@ fn run_on(
             progress(Progress::Packing { done: i, of: prepared.songs.len() });
             let packed = packer.pack_song(&song.files, name, song.id, stop);
             if packed.is_ok() {
-                there.extend(song.files.iter().map(|p| case::key(&p.to_string_lossy())));
+                tally.there.extend(song.files.iter().map(|p| case::key(&p.to_string_lossy())));
             }
             match packed {
                 Ok(Packed::Written { damaged: found, .. }) => {
-                    new_or_changed += 1;
-                    checked += 1;
+                    tally.new_or_changed += 1;
+                    tally.checked += 1;
                     for d in &found {
                         let what = match d.kept {
                             true => "is damaged in the song's zip: it's kept as it was, but may not open",
@@ -758,9 +755,13 @@ fn run_on(
                     }
                     damaged += found.len();
                 }
-                Ok(Packed::UpToDate { .. }) => checked += 1,
+                Ok(Packed::UpToDate { .. }) => tally.checked += 1,
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {
-                    return LastRun { when, ok: false, line: format!("Stopped · {} checked", thousands(checked)) };
+                    return LastRun {
+                        when,
+                        ok: false,
+                        line: format!("Stopped · {} checked", thousands(tally.checked)),
+                    };
                 }
                 Err(e) if e.kind() == io::ErrorKind::StorageFull => {
                     return LastRun { when, ok: false, line: "The backup drive is full".to_owned() };
@@ -778,12 +779,27 @@ fn run_on(
             }
         }
         if !unzipped.is_empty() {
-            match copy_unzipped(&unzipped, prepared, backup, &options, stop, there, &mut problems, kept_older) {
-                Ok(()) => plain_songs = unzipped.len(),
-                Err(stopped_or_gone) => return LastRun { when, ok: false, line: stopped_or_gone },
+            // Each file of theirs still in your folders, as the plan has it; one renamed or deleted since the plan
+            // was made can't go, and says so.
+            let wanted: HashSet<String> =
+                unzipped.iter().flat_map(|s| &s.files).map(|p| case::key(&p.to_string_lossy())).collect();
+            let (list, vanished): (Vec<FileEntry>, Vec<FileEntry>) = prepared
+                .plan
+                .copy
+                .iter()
+                .filter(|f| wanted.contains(&case::key(&f.path.to_string_lossy())))
+                .cloned()
+                .partition(|f| f.path.is_file());
+            for f in &vanished {
+                tally.problems.push(format!("{}: not there now (renamed or deleted since the plan)", f.path.display()));
+            }
+            plain_songs = unzipped.len();
+            if let Some(end) = tally.copy(&list, backup, &options, stop, progress) {
+                return LastRun { when, ok: false, line: end };
             }
         }
     }
+    let Tally { checked, new_or_changed, problems, record_note, .. } = tally;
     let mut line = format!("{} checked · {} new or changed", thousands(checked), thousands(new_or_changed));
     if plain_songs > 0 {
         line.push_str(&format!(
@@ -815,57 +831,71 @@ fn run_on(
         // Everything was still copied and checked; the next run just reads every file again.
         line.push_str(" · the backup's own list couldn't be saved, so next time takes longer");
     }
-    LastRun { when, ok: problems.is_empty() && prepared.missing.is_empty() && damaged == 0, line }
+    // A song that went as plain folders is safe, but not as you asked: the run isn't all right.
+    LastRun { when, ok: problems.is_empty() && prepared.missing.is_empty() && damaged == 0 && plain_songs == 0, line }
 }
 
-/// Copies the files of songs whose zip couldn't be made as plain folders, the ones still in your folders (one renamed
-/// or deleted since the plan was made is left out). Its problems join the run's; a run stopped, or a drive full or
-/// gone, gives the line to end the run with.
-#[allow(clippy::too_many_arguments)]
-fn copy_unzipped(
-    songs: &[&SongFiles],
-    prepared: &Prepared,
-    backup: &Path,
-    options: &copy::Options,
-    stop: &AtomicBool,
-    there: &mut HashSet<String>,
-    problems: &mut Vec<String>,
-    kept_older: &mut usize,
-) -> Result<(), String> {
-    let wanted: HashSet<String> =
-        songs.iter().flat_map(|s| &s.files).map(|p| case::key(&p.to_string_lossy())).collect();
-    let list: Vec<FileEntry> = prepared
-        .plan
-        .copy
-        .iter()
-        .filter(|f| wanted.contains(&case::key(&f.path.to_string_lossy())))
-        .filter(|f| fs::symlink_metadata(&f.path).is_ok_and(|m| m.is_file()))
-        .cloned()
-        .collect();
-    let report = copy::run(&list, backup, options, stop).map_err(|_| "The backup drive isn't there".to_owned())?;
-    for l in &report.lines {
-        match &l.outcome {
-            Outcome::Updated { kept_older: true } => {
-                *kept_older += 1;
-                there.insert(case::key(&l.source.to_string_lossy()));
+/// What a run's copying has done so far.
+struct Tally<'a> {
+    /// The files now safely on the drive.
+    there: &'a mut HashSet<String>,
+    /// Replaced files kept in Older versions.
+    kept_older: &'a mut usize,
+    checked: usize,
+    new_or_changed: usize,
+    problems: Vec<String>,
+    /// Why the backup's record couldn't be saved.
+    record_note: Option<String>,
+}
+
+impl Tally<'_> {
+    /// Copies a list as plain folders and counts what happened. Gives the line to end the run with when it stopped,
+    /// or the drive filled up or went away.
+    fn copy(
+        &mut self,
+        list: &[FileEntry],
+        backup: &Path,
+        options: &copy::Options,
+        stop: &AtomicBool,
+        progress: &dyn Fn(Progress),
+    ) -> Option<String> {
+        let bytes = list.iter().map(|f| f.size).fold(0, u64::saturating_add);
+        progress(Progress::Copying { files: list.len(), bytes });
+        let Ok(report) = copy::run(list, backup, options, stop) else {
+            return Some("The backup drive isn't there".to_owned());
+        };
+        for l in &report.lines {
+            if l.outcome == (Outcome::Updated { kept_older: true }) {
+                *self.kept_older += 1;
             }
-            Outcome::New | Outcome::Updated { .. } | Outcome::UpToDate => {
-                there.insert(case::key(&l.source.to_string_lossy()));
+            match &l.outcome {
+                Outcome::New | Outcome::Updated { .. } => {
+                    self.new_or_changed += 1;
+                    self.checked += 1;
+                    self.there.insert(case::key(&l.source.to_string_lossy()));
+                }
+                Outcome::UpToDate => {
+                    self.checked += 1;
+                    self.there.insert(case::key(&l.source.to_string_lossy()));
+                }
+                Outcome::Failed(why) => self.problems.push(format!("{}: {why}", l.source.display())),
+                Outcome::NotReached => {}
             }
-            Outcome::Failed(why) => problems.push(format!("{}: {why}", l.source.display())),
-            Outcome::NotReached => {}
         }
+        if report.stopped {
+            return Some(format!("Stopped · {} files checked", thousands(self.checked)));
+        }
+        if report.full {
+            return Some("The backup drive is full".to_owned());
+        }
+        if report.gone {
+            return Some("The backup drive went away part way".to_owned());
+        }
+        if report.record_not_saved.is_some() {
+            self.record_note = report.record_not_saved;
+        }
+        None
     }
-    if report.stopped {
-        return Err("Stopped".to_owned());
-    }
-    if report.full {
-        return Err("The backup drive is full".to_owned());
-    }
-    if report.gone {
-        return Err("The backup drive went away part way".to_owned());
-    }
-    Ok(())
 }
 
 /// Your DAWs' project folders (the library's roots) and your sample folders, for "Add my DAW and sample folders".
