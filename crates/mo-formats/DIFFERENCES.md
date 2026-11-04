@@ -36,6 +36,11 @@ library.
 | FL 8.5's notes (a census of 17,316 of Solomon's saves: FL 3.5 to 8.0 write 20-byte notes, 8.5 on 24) | Told apart by version, 24 from FL 9. | 24 from FL 8.5 too; before, an 8.5 pattern whose notes divided by both sizes was read as 20-byte notes, garbled (VERSION 16). | Better |
 | FL 9.0 to 9.5 (and 11.1) playlists that mix pattern rows with clips in one event (902 of Solomon's saves) | Not read. | Each record read on its own kind: rows as pattern n on track n, clips on their own tracks (VERSION 16). | Better |
 | FL 6 to 8 pattern clips saved as newer FL's (the pattern base, then the pattern) among the rows | Not read. | Read, on their pattern's track; the row is taken from bytes 12 and 14, as the census found (VERSION 16). | Better |
+| Text in saves before FL 11.5 (names, titles, sample paths) | Each byte as the letter with the same number (Latin-1), so a curly apostrophe, dash or euro sign (bytes 0x80 to 0x9F) comes out as an invisible control character, and a sample path holding one doesn't match the file. | Read in Windows' Western code page (1252), as FL wrote it (VERSION 17). | Better |
+| "Patterns" count in FL 9 and older saves | Counts every new-pattern event, though FL 9 and older repeat it in each channel's events (an 8-channel loop in 4 patterns showed 32). | Counts the patterns named. | Better |
+| Samples in a save cut short (it ends early, perhaps before its playlist) | Listed as playing no notes. | Not listed as unplayed: the playlist that plays them may be past the cut (VERSION 17). | Better |
+| Damaged FL 3.5 to 8.0 notes whose length divides by 24 but not by 20 | Read as 24-byte notes, garbling them. | Read at the version's 20 bytes, up to the damage (rule 9; VERSION 17). | Better |
+| Notes above G10 (FL's keys 128 to 131) | The key cut to 7 bits, so they land at the bottom of the keyboard. | Left out of the notes, with a warning (VERSION 17). | Better |
 
 ## Bitwig Studio
 

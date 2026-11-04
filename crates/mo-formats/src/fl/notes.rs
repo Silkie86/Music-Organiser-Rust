@@ -9,19 +9,35 @@ use super::events::{byte_at, u16_at, u32_at};
 use crate::model::{NoteAttribute, NoteEvent, velocity};
 
 /// The size of the note records in an event, by FL's version (major, minor; rule 9): 24 bytes from FL 8.5, 20 bytes
-/// in FL 4 to 8.0. Notes the reader made from old step sequencer dots are always 24. Without a version, or in an FL 4
-/// to 8.0 save whose notes divide into 24 bytes but not 20, the size is told from the notes themselves; `channels` are
-/// the song's channels, when known, which a right reading only ever names.
+/// in FL 3.5 to 8.0, whatever the event's length (damaged notes are read at that size, up to the damage). Notes the
+/// reader made from old step sequencer dots are always 24. Without a version, or in a save from before FL 3.5 (the
+/// census has none) whose notes divide into 24 bytes but not 20, the size is told from the notes themselves;
+/// `channels` are the song's channels, when known, which a right reading only ever names.
 pub fn note_size(data: &[u8], version: (u32, u32), made_here: bool, channels: Option<&HashSet<u32>>) -> usize {
-    match version.0 {
+    match version {
         _ if made_here => 24,
-        9.. => 24,
-        8 if version.1 >= 5 => 24,
-        1.. if data.len().is_multiple_of(20) => 20,
+        (9.., _) => 24,
+        (8, 5..) => 24,
+        (4..=8, _) | (3, 5..) => 20,
+        (1.., _) if data.len().is_multiple_of(20) => 20,
         // Damaged notes that divide by neither size are read at the version's size, up to the damage.
-        1.. if !data.len().is_multiple_of(24) => 20,
+        (1.., _) if !data.len().is_multiple_of(24) => 20,
         _ => size_from_notes(data, channels),
     }
+}
+
+/// MIDI's top key, G10 in FL's names (127). FL's piano roll goes on to B10 (131).
+pub const TOP_MIDI_KEY: u16 = 127;
+
+/// How many of an event's notes are above MIDI's top key, so [`decode`] leaves them out.
+pub fn above_midi(data: &[u8], size: usize) -> usize {
+    data.chunks_exact(size).filter(|r| u16_at(r, 12) > TOP_MIDI_KEY).count()
+}
+
+/// Said about a song whose notes go above MIDI's top key.
+pub fn above_midi_warning(count: usize) -> String {
+    let notes = if count == 1 { "1 note is".to_owned() } else { format!("{count} notes are") };
+    format!("{notes} above G10, the top of MIDI's keys, so they're left out of MIDI and Bitwig.")
 }
 
 /// The record size that reads the notes in time order (as FL keeps them) on known channels, else the one that divides
@@ -44,10 +60,13 @@ fn size_from_notes(data: &[u8], channels: Option<&HashSet<u32>>) -> usize {
 }
 
 /// The notes in an event, each with its channel. A note muted in the piano roll (24-byte records: bit 0x20 of byte 19)
-/// is marked muted; a length of 0 is a step from the step sequencer, kept 1 tick long and marked.
+/// is marked muted; a length of 0 is a step from the step sequencer, kept 1 tick long and marked. A note above MIDI's
+/// top key (FL's keys 128 to 131) is left out: it can't be written to MIDI, and cutting it down to 7 bits would move it
+/// to the bottom of the keyboard (see [`above_midi`]).
 pub fn decode(data: &[u8], size: usize) -> Vec<(u32, NoteEvent)> {
     let velocity_at = size - 3;
     data.chunks_exact(size)
+        .filter(|r| u16_at(r, 12) <= TOP_MIDI_KEY)
         .map(|r| {
             let length = u32_at(r, 8);
             // FL's velocity is 0 to 128 (100 by default), kept in MIDI 2.0's 16 bits.
@@ -55,7 +74,7 @@ pub fn decode(data: &[u8], size: usize) -> Vec<(u32, NoteEvent)> {
             let note = NoteEvent {
                 start: u32_at(r, 0) as i64,
                 length: length.max(1) as i64,
-                key: (u16_at(r, 12) & 0x7F) as u8,
+                key: u16_at(r, 12) as u8,
                 velocity,
                 muted: size == 24 && byte_at(r, 19) & 0x20 != 0,
                 step: length == 0,
@@ -120,8 +139,29 @@ mod tests {
     }
 
     #[test]
+    fn fl_3_5_to_8_notes_are_20_bytes_even_when_only_24_divides_them() {
+        // 48 bytes: two 20-byte notes and 8 bytes of damage, which 24 also divides.
+        let mut data: Vec<u8> = (0..2).flat_map(|i| note(i * 96, 0, 96, 60 + i as u16, 100, 20)).collect();
+        data.extend([0; 8]);
+        for version in [(3, 5), (4, 0), (7, 0), (8, 0)] {
+            assert_eq!(note_size(&data, version, false, None), 20, "FL {version:?}");
+        }
+        let notes = decode(&data, 20);
+        assert_eq!(notes.iter().map(|(_, n)| (n.start, n.key)).collect::<Vec<_>>(), [(0, 60), (96, 61)]);
+        // Before 3.5 (no save in the census) the notes still tell.
+        assert_eq!(note_size(&data, (3, 0), false, None), 24);
+    }
+
+    #[test]
+    fn keys_above_midi_are_left_out_not_wrapped_to_the_bottom() {
+        let data: Vec<u8> = [60, 127, 128, 131].iter().flat_map(|&k| note(0, 0, 96, k, 100, 24)).collect();
+        assert_eq!(above_midi(&data, 24), 2);
+        assert_eq!(decode(&data, 24).iter().map(|(_, n)| n.key).collect::<Vec<_>>(), [60, 127]);
+    }
+
+    #[test]
     fn velocity_steps_and_muted_notes() {
-        let mut data = note(0, 2, 0, 0x80 | 64, 128, 24);
+        let mut data = note(0, 2, 0, 64, 128, 24);
         data[19] = 0x20;
         let (channel, n) = decode(&data, 24)[0];
         assert_eq!((channel, n.key, n.velocity7(), n.length, n.step, n.muted), (2, 64, 127, 1, true, true));

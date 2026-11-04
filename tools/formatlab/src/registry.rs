@@ -29,6 +29,8 @@ pub struct Entry {
     pub record_layout: Option<String>,
     /// A record size that changed with FL's version: from version (major) to size.
     pub record_by_version: Option<HashMap<String, usize>>,
+    /// The layout of records of another size than [`Entry::record`]'s, by size (FL 3.5 to 8.0's 20-byte notes).
+    pub record_layout_by_size: Option<HashMap<String, String>>,
     /// The DAW versions it has been seen in.
     pub seen: Option<String>,
     /// How it was found out or checked: a file, a test, or a confirmation.
@@ -38,6 +40,14 @@ pub struct Entry {
 }
 
 impl Entry {
+    /// The layout of records `size` bytes long.
+    pub fn record_layout_for(&self, size: usize) -> Option<&str> {
+        match self.record_layout_by_size.as_ref().and_then(|by_size| by_size.get(&size.to_string())) {
+            Some(layout) => Some(layout),
+            None => self.record_layout.as_deref(),
+        }
+    }
+
     /// The id as a number, or none when it isn't one (metadata keys).
     pub fn number(&self) -> Option<u32> {
         match self.id.get(..2) {

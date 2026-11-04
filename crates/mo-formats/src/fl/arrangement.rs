@@ -472,11 +472,12 @@ fn by_channel(song: &FlSong, pl: &Playlist, tempo: f64) -> Arrangement {
         }];
         lanes.push(lane);
     }
-    let notes = if song.channels.iter().any(|c| !c.audio_clips.is_empty() && c.sample.is_empty()) {
-        vec!["Some audio clips are left out: FL Studio didn't save which sample they play.".to_owned()]
-    } else {
-        Vec::new()
-    };
+    let mut notes = Vec::new();
+    if song.channels.iter().any(|c| !c.audio_clips.is_empty() && c.sample.is_empty()) {
+        notes.push("Some audio clips are left out: FL Studio didn't save which sample they play.".to_owned());
+    }
+    // The lanes come from the song, which stops placing notes or points at its limit.
+    notes.extend(song.warning.map(str::to_owned));
     Arrangement { view: BITWIG_VIEW, tempo, beats_per_bar: pl.beats_per_bar, lanes, markers: Vec::new(), notes }
 }
 
