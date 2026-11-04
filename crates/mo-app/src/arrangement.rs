@@ -271,16 +271,11 @@ fn lane_height(lane: &PreviewLane) -> f64 {
     }
 }
 
-/// The longest song the view shows, in beats: about 100 days at 120 BPM, past any real song, and far below where a
-/// bar number stops fitting in a u64.
-const MOST_SONG_BEATS: f64 = 1.0e7;
-
 impl View {
     pub fn new(arrangement: Arc<Arrangement>, found: Arc<HashMap<String, PathBuf>>) -> View {
-        // A damaged project's clip can end at 1e20 beats: the song is cut to a length the bar numbers can count.
-        let length = arrangement.length().min(MOST_SONG_BEATS);
-        let song_beats =
-            (arrangement.beats_per_bar.max(1) as f64).max(if length.is_finite() { length * 1.02 } else { 0.0 });
+        // Never past the readers' longest song (mo_formats::arrangement::MOST_BEATS), so the bar numbers can count it.
+        let length = arrangement.length();
+        let song_beats = (arrangement.beats_per_bar.max(1) as f64).max(length * 1.02);
         let content_height = arrangement.lanes.iter().map(lane_height).sum();
         let keys = arrangement
             .lanes
@@ -461,7 +456,7 @@ impl View {
     fn bar_step(&self) -> u64 {
         let bar = self.zoom() * self.arrangement.beats_per_bar.max(1) as f64;
         let mut step = 1;
-        while (step as f64) * bar < 44.0 && step < 4096 {
+        while (step as f64) * bar < 44.0 && step < 1 << 40 {
             step *= 2;
         }
         step

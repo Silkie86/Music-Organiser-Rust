@@ -167,14 +167,14 @@ impl<'a> Song<'a> {
                             info.tracks.push(track.to_owned());
                         }
                     }
-                    if info.tempo.is_none() {
-                        info.tempo = tempo_of(e);
-                    }
                     if tag == "NoteEvent" && e != song.root_element() {
                         notes += 1;
                     }
                 }
                 info.details.insert("Notes".into(), notes.to_string());
+                if info.tempo.is_none() {
+                    info.tempo = song_tempo(song.root_element());
+                }
             }
             _ => info.warnings.push("Song/song.xml is missing or unreadable.".into()),
         }
@@ -199,7 +199,7 @@ impl<'a> Song<'a> {
         let Some(text) = self.xml("Song/song.xml") else { return Vec::new() };
         let Ok(song) = parse(&text) else { return Vec::new() };
         // The song's tempo as the project list reads it: the metainfo's, the song's own after that, or 120.
-        let tempo = from_meta.or_else(|| elements(song.root_element()).find_map(tempo_of)).unwrap_or(120.0);
+        let tempo = from_meta.or_else(|| song_tempo(song.root_element())).unwrap_or(120.0);
         let mut clips = Vec::new();
         for track in elements(song.root_element()).filter(|e| e.tag_name().name() == "MusicTrack") {
             let track_name = match attr(track, "name") {
@@ -411,14 +411,20 @@ pub(crate) fn velocity_of(v: Option<f64>) -> u16 {
     }
 }
 
-/// The tempo an element of song.xml gives, in beats per minute. A TempoMapSegment (Studio One 6.5 on) keeps seconds
-/// per beat, as the arrangement reader reads it: 0.4615 is 130 BPM.
-fn tempo_of(e: Node<'_, '_>) -> Option<f64> {
-    let t = num(attr(e, "tempo"))?;
-    if e.tag_name().name() == "TempoMapSegment" {
-        return (t > 0.05 && t < 6.0).then(|| 60.0 / t);
-    }
-    Some(t)
+/// The song's own tempo in song.xml, in beats per minute, for when the metainfo has none: its first TempoMapSegment
+/// (Studio One 6.5 on), whose tempo is seconds per beat as the arrangement reader reads it (0.4615 is 130 BPM), else
+/// the first `tempo` any other element gives, as the C# app took it.
+fn song_tempo(song: Node<'_, '_>) -> Option<f64> {
+    let segment = |e: &Node<'_, '_>| e.tag_name().name() == "TempoMapSegment";
+    elements(song)
+        .filter(segment)
+        .filter_map(|e| num(attr(e, "tempo")))
+        .find_map(|t| match t {
+            t if t > 0.05 && t < 6.0 => Some(60.0 / t),
+            t if (10.0..=999.0).contains(&t) => Some(t),
+            _ => None,
+        })
+        .or_else(|| elements(song).filter(|e| !segment(e)).find_map(|e| num(attr(e, "tempo"))))
 }
 
 /// A media pool url as a path: `file:///C:/Samples/Kick%20A.wav` is `C:\Samples\Kick A.wav`, `file:///Users/...` is
@@ -428,12 +434,19 @@ fn url_to_path(url: &str) -> String {
     let Some(rest) = url.get(..5).filter(|s| s.eq_ignore_ascii_case("file:")).and(url.get(5..)) else {
         return unescape(url);
     };
-    let after = rest.trim_start_matches('/');
-    let slashes = rest.len() - after.len();
+    let mut after = rest.trim_start_matches('/');
+    let mut slashes = rest.len() - after.len();
+    // `file://localhost/...` is this computer, as `file:///...` is.
+    if slashes == 2
+        && let Some(local) = after.get(..10).filter(|h| h.eq_ignore_ascii_case("localhost/")).and(after.get(9..))
+    {
+        after = local.trim_start_matches('/');
+        slashes = 3;
+    }
     let p = unescape(after);
     if matches!(p.as_bytes(), [d, b':', b'/', ..] if d.is_ascii_alphabetic()) {
         p.replace('/', "\\")
-    } else if matches!(slashes, 2 | 4) && !p.is_empty() {
+    } else if slashes != 1 && slashes != 3 && !p.is_empty() {
         format!("\\\\{}", p.replace('/', "\\"))
     } else {
         format!("/{p}")
@@ -490,6 +503,9 @@ mod tests {
         // A network share keeps its server.
         assert_eq!(url_to_path("file://NAS/Samples/Kick%20A.wav"), r"\\NAS\Samples\Kick A.wav");
         assert_eq!(url_to_path("file:////NAS/Samples/Kick.wav"), r"\\NAS\Samples\Kick.wav");
+        assert_eq!(url_to_path("file://///NAS/Samples/Kick.wav"), r"\\NAS\Samples\Kick.wav");
+        assert_eq!(url_to_path("file://localhost/C:/Samples/Kick.wav"), r"C:\Samples\Kick.wav");
+        assert_eq!(url_to_path("file://localhost/Users/sol/Kick.wav"), "/Users/sol/Kick.wav");
         // An escape that isn't a whole letter stays as written.
         assert_eq!(unescape("a%FFb%2"), "a%FFb%2");
         assert_eq!(unescape("%e2%82%ac and %41"), "€ and A");
@@ -497,11 +513,11 @@ mod tests {
 
     #[test]
     fn a_tempo_map_segment_keeps_seconds_per_beat() {
-        let doc =
-            parse(r#"<Song><TempoMapSegment tempo="0.5"/><Other tempo="92"/><TempoMapSegment tempo="60"/></Song>"#)
-                .expect("XML");
-        let tempos: Vec<_> = elements(doc.root_element()).skip(1).map(tempo_of).collect();
-        assert_eq!(tempos, [Some(120.0), Some(92.0), None]);
+        let tempo = |xml: &str| song_tempo(parse(xml).expect("XML").root_element());
+        assert_eq!(tempo(r#"<Song><Other tempo="0.46"/><TempoMapSegment tempo="0.5"/></Song>"#), Some(120.0));
+        assert_eq!(tempo(r#"<Song><TempoMapSegment tempo="92"/></Song>"#), Some(92.0), "a BPM there too");
+        assert_eq!(tempo(r#"<Song><TempoMapSegment tempo="0"/><Other tempo="95"/></Song>"#), Some(95.0));
+        assert_eq!(tempo("<Song/>"), None);
     }
 
     #[test]

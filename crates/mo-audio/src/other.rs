@@ -2,16 +2,15 @@
 //! decoders for these, so a Mac or Linux left them out.
 
 use std::fs::File;
-use std::io::ErrorKind;
+use std::io::{Cursor, ErrorKind, Read, Seek, SeekFrom};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 
 use symphonia::core::codecs::audio::AudioDecoderOptions;
-use symphonia::core::common::Limit;
 use symphonia::core::errors::Error;
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, TrackType};
-use symphonia::core::io::MediaSourceStream;
+use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
 
 use crate::{AudioData, AudioError};
@@ -32,6 +31,29 @@ pub fn read_other(path: &Path, max_seconds: f64) -> Result<AudioData, AudioError
         .unwrap_or_else(|_| Err(AudioError::Format("The decoder couldn't read this file (it may be damaged)".into())))
 }
 
+/// The biggest file whose audio is read into memory to be tried past a damaged ID3v2 tag.
+const MOST_RETRIED: u64 = 256 * 1024 * 1024;
+
+/// The bytes after a file's leading ID3v2 tag, or after its 10-byte header when the tag says it's longer than the
+/// file (cut short). None when the file has no such tag, or is too big to read whole.
+fn after_id3v2(file: &File) -> Option<Vec<u8>> {
+    let len = file.metadata().ok()?.len();
+    if len > MOST_RETRIED {
+        return None;
+    }
+    let mut file = file;
+    file.seek(SeekFrom::Start(0)).ok()?;
+    let mut all = Vec::new();
+    file.read_to_end(&mut all).ok()?;
+    let header: [u8; 10] = *all.first_chunk::<10>().filter(|h| h.starts_with(b"ID3"))?;
+    // The size is synchsafe (7 bits a byte); a footer (flag 0x10) adds 10 more bytes.
+    let size = header[6..10].iter().fold(0usize, |n, &b| n << 7 | usize::from(b & 0x7F));
+    let footer = if header[5] & 0x10 != 0 { 10 } else { 0 };
+    let end = 10 + size + footer;
+    let from = if end < all.len() { end } else { 10 };
+    Some(all.split_off(from))
+}
+
 fn decode(file: File, path: &Path, max_seconds: f64) -> Result<AudioData, AudioError> {
     let format_error = |e: Error| match e {
         // symphonia gives an I/O error for a file that ends too soon or a bitstream that runs out: that's a damaged
@@ -45,11 +67,20 @@ fn decode(file: File, path: &Path, max_seconds: f64) -> Result<AudioData, AudioE
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
         hint.with_extension(ext);
     }
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-    // Tags are read past, not kept: their pictures (cover art, often megabytes) are skipped rather than loaded.
-    let metadata = MetadataOptions::default().limit_visual_bytes(Limit::Maximum(0));
-    let mut format =
-        symphonia::default::get_probe().probe(&hint, mss, FormatOptions::default(), metadata).map_err(format_error)?;
+    let probe = |source: Box<dyn MediaSource>| {
+        let mss = MediaSourceStream::new(source, Default::default());
+        symphonia::default::get_probe().probe(&hint, mss, FormatOptions::default(), MetadataOptions::default())
+    };
+    let mut format = match probe(Box::new(file.try_clone()?)) {
+        Ok(format) => format,
+        // A leading ID3v2 tag that's damaged (a version or header symphonia refuses, or a size past the end of the
+        // file) stops symphonia's tag reader. Before it had one, the probe looked past the tag for the first frame:
+        // the audio after the tag is tried that way instead.
+        Err(e) => match after_id3v2(&file) {
+            Some(rest) => probe(Box::new(Cursor::new(rest))).map_err(|_| format_error(e))?,
+            None => return Err(format_error(e)),
+        },
+    };
     let track = format
         .default_track(TrackType::Audio)
         .ok_or_else(|| AudioError::Format("The file has no audio in it".into()))?;

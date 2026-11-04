@@ -322,9 +322,11 @@ impl Song<'_> {
         };
         let step = num(attr(p, "stepLength")).filter(|s| *s > 0.0).unwrap_or(0.25);
         let count = num(attr(p, "stepCount")).unwrap_or(16.0);
+        // Steps past the pattern's length (left from when it was longer) aren't played.
         let notes = p
             .children()
             .filter(|n| n.is_element() && n.tag_name().name() == "PatternStep")
+            .filter(|n| num(attr(*n, "start")).unwrap_or(0.0) < count)
             .map(|n| PreviewNote {
                 start: num(attr(n, "start")).unwrap_or(0.0) * step,
                 length: step,

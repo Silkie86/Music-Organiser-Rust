@@ -241,6 +241,17 @@ fn an_mp3_with_a_tag_over_a_megabyte_still_decodes() {
     big.extend(&mp3[10 + tag_len..]);
     let a = read(&fixture("big tag.mp3", &big), 60.0).unwrap();
     assert!((a.seconds() - 0.5).abs() < 0.06, "{}", a.seconds());
+
+    // A damaged tag that symphonia's tag reader refuses still lets the audio after it be read: a version it doesn't
+    // know, or a size past the end of the file.
+    let mut unknown = mp3.clone();
+    unknown[3] = 9;
+    let mut too_long = mp3.clone();
+    too_long[6..10].copy_from_slice(&[0x7F; 4]);
+    for (name, bytes) in [("unknown tag.mp3", unknown), ("tag too long.mp3", too_long)] {
+        let a = read(&fixture(name, &bytes), 60.0).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!((a.seconds() - 0.5).abs() < 0.06, "{name}: {}", a.seconds());
+    }
 }
 
 #[test]
