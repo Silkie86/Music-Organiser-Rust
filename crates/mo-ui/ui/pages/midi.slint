@@ -79,6 +79,10 @@ export global MidiData {
     in property <string> summary;
     in property <string> busy;
     in property <float> done;
+    // Your MIDI being read into the Rust index.
+    in property <bool> reading;
+    callback read-again();
+    callback stop-reading();
 
     in-out property <string> search;
     callback search-edited(string);
@@ -512,6 +516,22 @@ export component MidiPage inherits Rectangle {
                 }
             }
             Rectangle { horizontal-stretch: 1; }
+            VerticalLayout {
+                alignment: center;
+                StudioButton {
+                    horizontal-stretch: 0;
+                    text: MidiData.reading ? "Stop" : "Read MIDI again";
+                    tip: MidiData.reading ? "Stop reading: it carries on from there next time"
+                        : "Look for new and changed projects and MIDI files, and try the ones that failed again. Only those are read.";
+                    clicked => {
+                        if (MidiData.reading) {
+                            MidiData.stop-reading();
+                        } else {
+                            MidiData.read-again();
+                        }
+                    }
+                }
+            }
         }
         HorizontalLayout {
             spacing: Space.xs;
