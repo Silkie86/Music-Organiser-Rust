@@ -100,6 +100,8 @@ export struct SweptLine {
     kind: string,
     colour: int,
     current: bool,
+    // The sound's place in the library, for a drag out of the app (as a "Sounds like this" line's).
+    place: int,
 }
 
 // A swept star on the view, fainter the longer ago it was swept.
@@ -322,9 +324,9 @@ export global SoundsData {
     callback select(int);
     callback play-row(int);
     // Dragging a sound out of the app, to a DAW or a folder (mo-ui's sounds/drag_out.rs): a tile or a line by its row,
-    // a pad by its place, a "Sounds like this" line by its sound's place in the library; then `drag-let-go` if the
-    // button comes up before the drag has got going. The one carried is dimmed (`lifted-…`) and glows for a moment
-    // once it has landed (`landed-…`); -1 for none.
+    // a pad by its place, a "Sounds like this" or a Galaxy's swept line by its sound's place in the library; then
+    // `drag-let-go` if the button comes up before the drag has got going. The one carried is dimmed (`lifted-…`) and
+    // glows for a moment once it has landed (`landed-…`); -1 for none.
     callback drag-row(int);
     callback drag-pad(int);
     callback drag-alike(int);
@@ -1715,6 +1717,11 @@ export component SoundsPage inherits Rectangle {
                                     height: 30px;
                                     selected: line.current;
                                     tip: line.kind;
+                                    draggable: true;
+                                    lifted: line.place == SoundsData.lifted-alike;
+                                    landed: line.place == SoundsData.landed-alike;
+                                    drag-out => { SoundsData.drag-alike(line.place); }
+                                    drag-let-go => { SoundsData.drag-let-go(); }
                                     clicked => { SoundsData.galaxy-swept-go(i); }
                                     HorizontalLayout {
                                         padding-left: Space.sm;

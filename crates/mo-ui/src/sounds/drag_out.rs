@@ -1,5 +1,5 @@
 //! Dragging sounds off the Sounds page into a DAW or a folder (`crate::drag` runs the drag): a tile, a line of any
-//! list view, a pad of the kit builder or a "Sounds like this" line. Each goes out as its own file, where it is on
+//! list view, a pad of the kit builder, a "Sounds like this" line or a line of the Galaxy's swept list. Each goes out as its own file, where it is on
 //! disk: never a copy, never moved (rule 2).
 //!
 //! The C# app counted a drag towards how liked a sound is. Here `sounds.db` is only read until the page is trusted, so
@@ -22,7 +22,7 @@ enum Spot {
     Row(i32),
     /// A pad, by its place.
     Pad(i32),
-    /// A "Sounds like this" line, by its sound's place in the library.
+    /// A "Sounds like this" line or a Galaxy's swept line, by its sound's place in the library.
     Alike(i32),
 }
 

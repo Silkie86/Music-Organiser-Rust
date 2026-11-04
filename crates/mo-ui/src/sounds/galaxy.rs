@@ -958,6 +958,7 @@ fn show_trail(app: &AppWindow) {
                     kind: s.sound_type.as_str().into(),
                     colour: list::type_colour(&s.sound_type),
                     current: i == g.trail_at,
+                    place: i32::try_from(at).unwrap_or(-1),
                 })
             })
             .collect();
