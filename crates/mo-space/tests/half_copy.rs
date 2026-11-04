@@ -5,7 +5,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::fs;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -107,7 +107,8 @@ fn stopped_part_way<T>(after: u64, job: impl FnOnce(&(dyn Fn(u64) + Sync)) -> T)
             panic!("the computer stopped");
         }
     };
-    let ran = catch_unwind(AssertUnwindSafe(|| job(&progress)));
+    // The stop stands in for a crash, so it's caught as one (`mo_catch::catch_crash`), not as a damaged file.
+    let ran = mo_catch::catch_crash(AssertUnwindSafe(|| job(&progress)));
     assert!(ran.is_err(), "the copy should have been stopped part way");
 }
 
