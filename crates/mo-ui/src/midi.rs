@@ -12,6 +12,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
@@ -20,13 +22,17 @@ use mo_app::midi::{self as page, Filters, Order, Roll, Target};
 use mo_app::shortcuts::{Shortcuts, what_of};
 use mo_formats::NoteEvent;
 use mo_harmony::KeyFact;
+use mo_library::Library;
 use mo_library::songs::thousands;
+use mo_midi::indexer;
 use mo_midi::store::MidiStore;
 use mo_midi::{Catalogue, Hit, MidiIndex, Role, StoredPhrase};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, VecModel};
 
 use crate::sounds::{new_seed, strings};
-use crate::{AppWindow, CardAction, KindChip, MenuItem, MidiData, MidiFact, MidiLine, PickedPart, RollNote, YearBar};
+use crate::{
+    AppWindow, CardAction, KindChip, MenuItem, MidiData, MidiFact, MidiLine, PickedPart, RollKey, RollNote, YearBar,
+};
 
 /// Where a part's notes are read from.
 #[derive(Clone)]
@@ -80,6 +86,10 @@ struct Page {
     notes_asked: u64,
     /// The index is being read, or has been: it's read once, the first time the page is shown.
     started: bool,
+    /// The reading of your MIDI into the Rust index running now: what stops it.
+    reading: Option<Arc<AtomicBool>>,
+    /// The index has been read once since the app opened (reading again is the Read MIDI again button's).
+    read_once: bool,
     library: PathBuf,
     feed: Option<Feed>,
     shortcuts: Shortcuts,
@@ -328,6 +338,13 @@ fn wire(app: &AppWindow) {
         }
     });
     let weak = app.as_weak();
+    data.on_read_again(move || {
+        if let Some(app) = weak.upgrade() {
+            read_midi(&app, true);
+        }
+    });
+    data.on_stop_reading(stop_reading);
+    let weak = app.as_weak();
     data.on_menu_chosen(move |id| {
         if let Some(app) = weak.upgrade() {
             run_action(&app, &id);
@@ -361,7 +378,13 @@ pub fn shown(app: &AppWindow) {
     }
 }
 
-/// Reads the index beside the library: the Rust app's when it holds parts, else the C# app's. Both read-only.
+/// The mark saved beside the library once a reading of your MIDI has got to the end.
+fn read_mark(library: &Path) -> std::path::PathBuf {
+    library.with_file_name("midi-index.read")
+}
+
+/// Reads the index beside the library: the Rust app's once a reading has got to the end (or when there's no C# one),
+/// else the C# app's. Both read-only.
 pub fn load(library: &Path) -> Result<Loaded, String> {
     let old_path = MidiIndex::path_beside(library);
     // The C# index only gives your corrections when the Rust one holds the parts: one that won't open (damaged, or
@@ -377,7 +400,8 @@ pub fn load(library: &Path) -> Result<Loaded, String> {
                 let roles = old.as_ref().and_then(|o| o.your_roles().ok()).unwrap_or_default();
                 let octaves = old.as_ref().and_then(|o| o.your_octaves().ok()).unwrap_or_default();
                 let phrases = store.all(&roles, &octaves).map_err(|e| e.to_string())?;
-                if !phrases.is_empty() {
+                // A reading stopped part way holds only some of your MIDI: the old index shows until one ends.
+                if !phrases.is_empty() && (read_mark(library).exists() || old.is_none()) {
                     let cat = background::on_pool(|| Catalogue::new(phrases));
                     return Ok(Loaded::new(cat, false, NotesFrom::Store(store_path)));
                 }
@@ -406,29 +430,48 @@ pub fn show(app: &AppWindow, loaded: Result<Loaded, String>) {
             data.set_summary("".into());
             data.set_empty_title("The MIDI couldn't be read".into());
             data.set_empty_text(format!("The index said: {e}").into());
+            // Reading your MIDI makes a new index of its own, so it still starts the first time.
+            let read_now = PAGE.with(|p| {
+                let mut p = p.borrow_mut();
+                let read_now = !p.read_once && !HERE.with(|h| *h.borrow());
+                p.read_once = true;
+                read_now
+            });
+            if read_now {
+                read_midi(app, false);
+            }
             return;
         }
     };
     let summary = loaded.summary;
     let empty = loaded.cat.entries.is_empty();
     log::info("MIDI", &format!("{summary} ({})", if loaded.old { "the C# app's midi.db" } else { "midi-index.db" }));
-    PAGE.with(|p| {
+    let (picked, read_now) = PAGE.with(|p| {
         let mut p = p.borrow_mut();
+        // The picked part stays picked when the index is read again, found by its notes.
+        let hash = p.picked.and_then(|at| p.cat.entry(at)).map(|e| e.phrase.hash.clone());
         p.years = loaded.years;
         p.counts = loaded.counts;
         p.cat = Arc::new(loaded.cat);
         p.old = loaded.old;
         p.notes = Some(loaded.notes);
-        p.picked = None;
+        p.picked = hash.and_then(|h| p.cat.find(&h));
         p.picked_row = None;
         p.target = None;
+        // The old list points into the old index: nothing shows until the new one is worked out.
+        p.shown = Arc::new(Vec::new());
+        let read_now = !p.read_once && !HERE.with(|h| *h.borrow());
+        p.read_once = true;
+        (p.picked, read_now)
     });
+    LINES.with(|l| l.notify.reset());
+    data.set_shown(0);
     data.set_summary(summary.into());
     if empty {
         data.set_empty_title("No MIDI here yet".into());
         data.set_empty_text(
-            "Once the MIDI in your projects and MIDI folders has been read, every part shows up here. Reading it in \
-             this app comes next; until then this page shows what the old app read."
+            "Every part in your projects and MIDI folders shows up here once it's been read. The files are only \
+             read, never changed. MIDI folders are the ones set in the old app's MIDI page for now."
                 .into(),
         );
     } else {
@@ -438,6 +481,166 @@ pub fn show(app: &AppWindow, loaded: Result<Loaded, String>) {
     show_kinds(app);
     show_years(app);
     relist(app);
+    match picked {
+        Some(at) => pick(app, Some((at, None))),
+        None => data.set_panel_shown(false),
+    }
+    if read_now {
+        read_midi(app, false);
+    }
+}
+
+/// Reads your MIDI into the Rust app's own index, `midi-index.db` beside the library: the newest save of each song
+/// (every save with the old app's "older saves" setting) and every MIDI file in the MIDI folders (the old app's list
+/// for now). Only new and changed files are read, newest first; `retry` reads the ones that failed before too. The
+/// files are only read. When it's done the page reads the index again, so every line has the new key finder's key.
+pub fn read_midi(app: &AppWindow, retry: bool) {
+    let Some((library, feed, stop)) = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        if p.reading.is_some() || p.library.as_os_str().is_empty() {
+            return None;
+        }
+        let feed = p.feed.clone()?;
+        let stop = Arc::new(AtomicBool::new(false));
+        p.reading = Some(stop.clone());
+        Some((p.library.clone(), feed, stop))
+    }) else {
+        return;
+    };
+    let data = app.global::<MidiData>();
+    data.set_reading(true);
+    data.set_busy("Looking for new and changed projects and MIDI files…".into());
+    data.set_done(0.0);
+    let job = feed.start("Reading MIDI", "Looking for new and changed projects and MIDI files");
+    let weak = app.as_weak();
+    let started = background::spawn("MIDI reading", move || {
+        let progress_weak = weak.clone();
+        let last = std::sync::Mutex::new(Instant::now() - Duration::from_secs(1));
+        let stage = std::sync::Mutex::new(page::ReadProgress::default());
+        let progress = |done: usize, total: usize, path: &str| {
+            let text = stage.lock().unwrap_or_else(std::sync::PoisonError::into_inner).text(done, total, path);
+            let fraction = if total == 0 { 0.0 } else { done as f32 / total as f32 };
+            job.progress(fraction, Some(&text));
+            // The page's line at most four times a second.
+            let mut last = last.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if last.elapsed() >= Duration::from_millis(250) {
+                *last = Instant::now();
+                let weak = progress_weak.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(app) = weak.upgrade() {
+                        let data = app.global::<MidiData>();
+                        if data.get_reading() {
+                            data.set_busy(text.into());
+                            data.set_done(fraction);
+                        }
+                    }
+                });
+            }
+        };
+        let ran = read_into_index(&library, retry, &stop, &progress);
+        let mut marked = false;
+        match &ran {
+            Ok(s) => {
+                let (title, detail) = page::read_done_text(s);
+                log::info("MIDI", &format!("{title}: {detail}"));
+                job.done(&format!("{title}: {detail}"));
+                // Once a reading has got to the end, the Rust index holds all your MIDI and the page uses it.
+                let mark = read_mark(&library);
+                if !s.stopped && !mark.exists() {
+                    match std::fs::write(&mark, b"read") {
+                        Ok(()) => marked = true,
+                        Err(e) => log::warning("MIDI", &format!("The MIDI index's 'read' mark couldn't be saved: {e}")),
+                    }
+                }
+            }
+            Err(e) => {
+                log::warning("MIDI", &format!("Reading MIDI failed: {e}"));
+                job.failed(e);
+            }
+        }
+        // What was read shows straight away; after a failed reading too, as it may have saved some before failing.
+        let changed = marked || ran.as_ref().map_or(true, |s| s.read > 0 || s.forgotten > 0 || s.rekeyed > 0);
+        let loaded = changed.then(|| load(&library));
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(app) = weak.upgrade() else { return };
+            PAGE.with(|p| p.borrow_mut().reading = None);
+            let data = app.global::<MidiData>();
+            data.set_reading(false);
+            data.set_busy("".into());
+            if let Some(loaded) = loaded {
+                show(&app, loaded);
+            }
+        });
+    });
+    if let Err(e) = started {
+        log::error("MIDI", &format!("The MIDI reader couldn't start: {e}"));
+        PAGE.with(|p| p.borrow_mut().reading = None);
+        data.set_reading(false);
+        data.set_busy("".into());
+    }
+}
+
+/// The reading itself, on its own thread: what to read, then the indexer on a pool of low-priority threads.
+fn read_into_index(
+    library: &Path,
+    retry: bool,
+    stop: &AtomicBool,
+    progress: &(dyn Fn(usize, usize, &str) + Sync),
+) -> Result<indexer::Summary, String> {
+    let lib = Library::open_read_only(library).map_err(|e| e.to_string())?;
+    let saves = lib.saves().map_err(|e| e.to_string())?;
+    let choices = lib.song_choices().map_err(|e| e.to_string())?;
+    // A save waiting on a fix is being changed by the app: it's read once that's done.
+    let pending = lib.pending_fixes().map_err(|e| e.to_string())?;
+    let older = lib.setting(page::OLDER_SAVES_KEY).ok().flatten().as_deref() == Some("1");
+    let listed = lib.list_setting(page::FOLDERS_KEY).unwrap_or_default();
+    drop(lib);
+    // Only a full path can be an unplugged drive; anything else in the list is never found and so never counted as away.
+    let (folders, away): (Vec<String>, Vec<String>) =
+        listed.into_iter().filter(|f| mo_formats::paths::is_absolute(f)).partition(|f| Path::new(f).is_dir());
+    let found = background::on_pool(|| {
+        mo_library::scan::find_files(
+            &folders,
+            &|path: &str| mo_formats::midi::is_midi_path(path),
+            &|name: &str, _parent: &str| mo_sounds::scan::is_hidden_folder(name),
+        )
+    });
+    // A folder that couldn't be read this time keeps what was read from it, as an unplugged drive does.
+    let away: Vec<String> = away.into_iter().chain(found.unreadable).collect();
+    let wanted = page::wanted(saves, &pending, &choices, older, &found.files);
+    let mut store = MidiStore::open(&MidiStore::path_beside(library)).map_err(|e| e.to_string())?;
+    let stamps = store.stamps().map_err(|e| e.to_string())?;
+    let plan = indexer::plan(&wanted, &stamps, &away, retry);
+    log::info(
+        "MIDI",
+        &format!("{} files wanted, {} to read, {} to forget", wanted.len(), plan.todo.len(), plan.forget.len()),
+    );
+    // Half the cores of the app's low-priority pool: reading songs is heavy, and the app and your DAW come first
+    // (rule 21).
+    let threads = std::thread::available_parallelism().map_or(2, |n| (n.get() / 2).max(1));
+    let own;
+    let pool = match background::pool() {
+        Some(pool) => pool,
+        None => {
+            own = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .thread_name(|i| format!("MIDI reader {i}"))
+                .start_handler(|_| background::lower_priority())
+                .build()
+                .map_err(|e| e.to_string())?;
+            &own
+        }
+    };
+    indexer::run(&mut store, &plan, &folders, pool, threads, stop, progress).map_err(|e| e.to_string())
+}
+
+/// Stops the reading at the next file; what's been read is kept, and the next reading carries on from there.
+fn stop_reading() {
+    PAGE.with(|p| {
+        if let Some(stop) = p.borrow().reading.as_ref() {
+            stop.store(true, Ordering::Relaxed);
+        }
+    });
 }
 
 fn show_kinds(app: &AppWindow) {
@@ -555,7 +758,7 @@ fn listed(app: &AppWindow, id: u64, hits: Vec<Hit>) {
 fn select_row(app: &AppWindow, row: usize) {
     let at = PAGE.with(|p| p.borrow().shown.get(row).map(|h| h.entry));
     if let Some(at) = at {
-        pick(app, Some((at, row)));
+        pick(app, Some((at, Some(row))));
     }
 }
 
@@ -580,14 +783,20 @@ fn step(app: &AppWindow, by: i32) {
 }
 
 /// Picks a part (or none): its card, then its notes for the roll and its key.
-fn pick(app: &AppWindow, picked: Option<(usize, usize)>) {
+/// Picks part `picked` (none closes the card). `row` is its line when that's known; when it isn't (the index was just
+/// read again) the list finds it once it has been worked out.
+fn pick(app: &AppWindow, picked: Option<(usize, Option<usize>)>) {
+    let row = picked.and_then(|(_, row)| row);
     let before = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         p.picked = picked.map(|(at, _)| at);
-        std::mem::replace(&mut p.picked_row, picked.map(|(_, row)| row))
+        match (picked, row) {
+            (Some(_), None) => None,
+            _ => std::mem::replace(&mut p.picked_row, row),
+        }
     });
     // Only the lines that changed are drawn again.
-    for r in [before, picked.map(|(_, row)| row)].into_iter().flatten() {
+    for r in [before, row].into_iter().flatten() {
         LINES.with(|l| l.notify.row_changed(r));
     }
     let data = app.global::<MidiData>();
@@ -613,6 +822,7 @@ fn pick(app: &AppWindow, picked: Option<(usize, usize)>) {
         data.set_menu(ModelRc::new(VecModel::from(menu)));
         data.set_roll(ModelRc::new(VecModel::from(Vec::<RollNote>::new())));
         data.set_roll_bars(ModelRc::new(VecModel::from(Vec::<f32>::new())));
+        data.set_roll_keys(ModelRc::new(VecModel::from(Vec::<RollKey>::new())));
         Some(NotesAsk {
             id,
             from: notes,
@@ -698,8 +908,18 @@ fn notes_read(app: &AppWindow, id: u64, read: Result<NotesRead, String>) {
     match read {
         Ok(read) => {
             let roll = &read.roll;
-            let notes: Vec<RollNote> =
-                roll.notes.iter().map(|n| RollNote { x: n.x, y: n.y, w: n.w, h: n.h, strength: n.strength }).collect();
+            let notes: Vec<RollNote> = roll
+                .notes
+                .iter()
+                .map(|n| RollNote {
+                    x: n.x,
+                    y: n.y,
+                    w: n.w,
+                    h: n.h,
+                    strength: n.strength,
+                    name: page::note_name(n.key).into(),
+                })
+                .collect();
             if read.read == 0 {
                 picked.roll_note = "Its notes aren't in the index any more.".into();
             } else if notes.is_empty() {
@@ -720,6 +940,21 @@ fn notes_read(app: &AppWindow, id: u64, read: Result<NotesRead, String>) {
             }
             data.set_roll(ModelRc::new(VecModel::from(notes)));
             data.set_roll_bars(ModelRc::new(VecModel::from(roll.bars.clone())));
+            let keys: Vec<RollKey> = if roll.notes.is_empty() {
+                Vec::new()
+            } else {
+                page::roll_keys(roll.low, roll.high)
+                    .into_iter()
+                    .map(|k| RollKey {
+                        y: k.y,
+                        h: k.h,
+                        black: k.black,
+                        c: k.name.starts_with('C'),
+                        name: k.name.into(),
+                    })
+                    .collect()
+            };
+            data.set_roll_keys(ModelRc::new(VecModel::from(keys)));
             let drums = picked.kind == page::role_label(Role::Drums);
             if let Some(fact) = read.fact {
                 let words = page::key_card(Some(&fact), drums);
@@ -1079,6 +1314,63 @@ mod tests {
         let Ok(read) = read_notes(&ask, &mut None) else { panic!("the made-up notes should read") };
         assert_eq!(read.roll.notes.len(), 12);
         assert!(read.fact.is_some());
+    }
+
+    /// A Standard MIDI File of one track: a C major scale up and down, a beat a note, at 96 ticks a beat.
+    fn scale_file() -> Vec<u8> {
+        let mut track = Vec::new();
+        for key in [60u8, 62, 64, 65, 67, 69, 71, 72, 71, 69, 67, 65, 64, 62, 60] {
+            track.extend([0x00, 0x90, key, 100, 0x60, 0x80, key, 0]);
+        }
+        track.extend([0x00, 0xFF, 0x2F, 0x00]);
+        let mut file = b"MThd".to_vec();
+        file.extend([0, 0, 0, 6, 0, 0, 0, 1, 0, 96]);
+        file.extend(b"MTrk");
+        file.extend((track.len() as u32).to_be_bytes());
+        file.extend(track);
+        file
+    }
+
+    #[test]
+    fn reading_fills_the_rust_index_and_the_page_lists_it_with_new_keys() {
+        let dir = std::env::temp_dir().join("mo-ui-midi-read-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let pack = dir.join("New Midi").join("Keys");
+        assert!(std::fs::create_dir_all(&pack).is_ok());
+        assert!(std::fs::write(pack.join("Scale in C.mid"), scale_file()).is_ok());
+        let library = dir.join("library.db");
+        let Ok(c) = rusqlite::Connection::open(&library) else { panic!("couldn't make the library") };
+        let folders = format!("[\"{}\"]", dir.join("New Midi").to_string_lossy().replace('\\', "\\\\"));
+        let made = c.execute_batch(
+            "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+             CREATE TABLE song_choices (kind TEXT, a TEXT, b TEXT, PRIMARY KEY (kind, a));
+             CREATE TABLE projects (id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL COLLATE NOCASE, name TEXT NOT NULL,
+                 daw TEXT NOT NULL, folder TEXT, size INTEGER, mtime INTEGER, file_missing INTEGER DEFAULT 0);",
+        );
+        assert!(made.is_ok(), "{made:?}");
+        assert!(c.execute("INSERT INTO settings (key, value) VALUES ('midi_folders', ?1)", [&folders]).is_ok());
+        drop(c);
+
+        let stop = AtomicBool::new(false);
+        let ran = read_into_index(&library, false, &stop, &|_, _, _| {});
+        let Ok(summary) = ran else { panic!("reading failed: {ran:?}") };
+        assert_eq!((summary.read, summary.failed), (1, 0));
+        assert!(summary.parts >= 1);
+        // Nothing new the second time.
+        let again = read_into_index(&library, false, &stop, &|_, _, _| {});
+        assert!(again.is_ok_and(|s| s.read == 0));
+
+        let Ok(loaded) = load(&library) else { panic!("the Rust index should read") };
+        assert!(!loaded.old, "the Rust index is read once it holds parts");
+        let Some(e) = loaded.cat.entries.first() else { panic!("the scale should be listed") };
+        assert!(e.phrase.key_fact.is_some(), "the new key finder's reading comes with the part");
+        // A scale alone can't say which of a pair is home: C major is named, alone or with A minor.
+        assert!(
+            page::in_key(e, mo_harmony::Key::parse("C").unwrap_or(mo_harmony::Key::ALL[0])),
+            "{}",
+            page::key_text(e)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

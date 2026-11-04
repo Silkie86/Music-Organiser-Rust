@@ -196,7 +196,8 @@ pub fn bitwig_from_fl(
     });
     let mut converted = bitwig::write(&plan, template)?;
     // A damaged save, or one too big to read whole, is converted as far as it goes, and that's said first (rule 9).
-    for warning in [song.warning, flp.warning].into_iter().flatten() {
+    let trouble = mo_formats::fl::notes::trouble(&flp);
+    for warning in trouble.iter().rev().map(String::as_str).chain([song.warning, flp.warning].into_iter().flatten()) {
         converted.notes.insert(0, format!("The FL project: {warning}"));
     }
 

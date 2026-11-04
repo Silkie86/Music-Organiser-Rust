@@ -39,6 +39,7 @@ use zip::{CompressionMethod, DateTime, ZipArchive, ZipWriter};
 
 use crate::copy::{BUFFER, CantStart, Drive, FAT32_LARGEST, PART, put_in_place, read_some, remove_part};
 use crate::gone::{Places, Stamp, stamp};
+use crate::parts::Parts;
 use crate::plan::{from_backup, place_on_backup};
 use crate::record::{nanos, safe_rel};
 use crate::stopped;
@@ -158,13 +159,17 @@ pub struct Packer<'a> {
     ignores_case: bool,
     /// Asks whether a kept file is back in your folders, each drive once a run.
     places: Places,
+    /// This run's half-done zips, cleared by a later run if this one is cut off.
+    parts: Parts,
 }
 
 impl<'a> Packer<'a> {
     /// Ready to pack onto `backup`, which must already be there (nothing is created in its place).
     pub fn new(backup: &'a Path) -> Result<Packer<'a>, CantStart> {
         let drive = Drive::find(backup).ok_or_else(|| CantStart::NoBackupFolder(backup.to_path_buf()))?;
-        Ok(Packer { backup, drive, ignores_case: cfg!(any(windows, target_os = "macos")), places: Places::default() })
+        // Names inside a zip come from your computer, so they're told apart the computer's way.
+        let ignores_case = cfg!(any(windows, target_os = "macos"));
+        Ok(Packer { backup, drive, ignores_case, places: Places::default(), parts: Parts::start(backup) })
     }
 
     fn drive_there(&self) -> io::Result<()> {
@@ -237,7 +242,9 @@ impl<'a> Packer<'a> {
             Ok(_) => return Err(io::Error::other("Something that isn't a file is in the way of the zip")),
             Err(_) => {}
         }
-        let total: u64 = items.iter().map(|i| i.size).sum();
+        self.parts.part(&part);
+        // A damaged drive can report any size: saturating, never a panic.
+        let total = items.iter().map(|i| i.size).fold(0, u64::saturating_add);
         let written = write_zip(&items, song, &dest, &part, stop)
             .and_then(|missing| {
                 check_zip(&part, &items, &dest, &missing, stop).map(|(bytes, bad)| (bytes, missing, bad))

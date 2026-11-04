@@ -84,7 +84,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     // The Space page, from made-up drives: it only reads the real ones when it's shown in the app.
     mo_ui::space::connect(&app, out.join("no library.db"), feed.clone(), &Shortcuts::default());
-    mo_ui::space::show_sample(&app, sample_drives(), sample_app_files(), "");
+    mo_ui::space::show_sample(&app, sample_drives(), sample_app_files(), sample_bitwig_copies(), "");
 
     let mut shots = Vec::new();
     for place in Place::ALL {
@@ -95,6 +95,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.set_place(Place::Midi.index() as i32);
     mo_ui::midi::pick_row(&app, 0);
     shots.push(("midi-picked.png".into(), capture(&window)));
+    // The roll with each note's name on it (it grows so each row has room).
+    app.global::<mo_ui::MidiData>().set_roll_names(true);
+    shots.push(("midi-note-names.png".into(), capture(&window)));
+    app.global::<mo_ui::MidiData>().set_roll_names(false);
     mo_ui::midi::run_action(&app, "midi.moreLike");
     shots.push(("midi-more-like.png".into(), capture(&window)));
     mo_ui::midi::run_action(&app, "midi.back");
@@ -134,14 +138,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     settings_shots(&app, &window, &graphite, &mut shots);
     // Space with the App files card open: what each part of the app's folder takes, and C: nearly full.
     app.set_place(Place::Space.index() as i32);
-    mo_ui::space::show_sample(&app, sample_drives(), sample_app_files(), mo_app::space::APP_FILES);
+    mo_ui::space::show_sample(
+        &app,
+        sample_drives(),
+        sample_app_files(),
+        sample_bitwig_copies(),
+        mo_app::space::APP_FILES,
+    );
     capture(&window);
     shots.push(("space-app-files.png".into(), capture(&window)));
     mo_ui::apply_look(&app, &Look::from_settings(Some("Paper"), None));
     capture(&window);
     shots.push(("space-paper.png".into(), capture(&window)));
     mo_ui::apply_look(&app, &graphite);
-    mo_ui::space::show_sample(&app, sample_drives(), sample_app_files(), "");
+    // The Bitwig copies card: each project's copies of Library multisamples, biggest first.
+    let bitwig = mo_app::space_bitwig::BITWIG_COPIES;
+    mo_ui::space::show_sample(&app, sample_drives(), sample_app_files(), sample_bitwig_copies(), bitwig);
+    capture(&window);
+    shots.push(("space-bitwig.png".into(), capture(&window)));
+    mo_ui::space::show_sample(&app, sample_drives(), sample_app_files(), sample_bitwig_copies(), "");
     app.set_place(Place::Songs.index() as i32);
     for theme in THEMES.iter().skip(1) {
         mo_ui::apply_look(&app, &Look::from_settings(Some(theme.name), None));
@@ -445,6 +460,36 @@ fn sample_app_files() -> Vec<mo_space::app_files::AppFilesPart> {
         part(part_of("notes", true), 21 * MB),
         part(part_of("bitwig template", false), 4 * MB),
     ]
+}
+
+/// Made-up Bitwig copies for the Space page: projects on the Bitwig drive with copies of Library multisamples.
+fn sample_bitwig_copies() -> mo_app::space_bitwig::Copies {
+    use mo_app::space_bitwig::{Copies, Project};
+    use mo_space::bitwig::LibraryCopy;
+    const MB: u64 = 1 << 20;
+    // Written as on Windows: the page splits them the same way here.
+    let project = |name: &str, copies: &[(&str, u64)]| {
+        let folder = format!(r"K:\Bitwig Studio\Projects\{name}");
+        let copies = copies
+            .iter()
+            .map(|&(sound, mb)| LibraryCopy {
+                in_project: format!(r"{folder}\multi-samples\{sound}-3-2-2.multisample"),
+                library_file: format!(r"K:\Bitwig Studio\Library\{sound}.multisample"),
+                bytes: mb * MB,
+            })
+            .collect();
+        Project { folder: folder.into(), copies }
+    };
+    Copies {
+        library: vec![r"K:\Bitwig Studio\Library".into()],
+        folders: 31,
+        projects: vec![
+            project("GARAGE FOR BW 1", &[("Kicks 1 Select", 96), ("OHH 1 Select", 74), ("Snares 2 Select", 72)]),
+            project("Night Drive", &[("Kicks 1 Select", 96), ("Pads Warm", 41)]),
+            project("Bounce 2", &[("OHH 1 Select", 74)]),
+            project("Sketch 14", &[("Bass Mono", 12), ("Keys Soft", 9)]),
+        ],
+    }
 }
 
 /// Made-up fingerprints for the made-up sounds: sounds of a type, and of a length, sit near each other.

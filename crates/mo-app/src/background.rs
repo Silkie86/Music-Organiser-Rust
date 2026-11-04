@@ -23,9 +23,15 @@ pub fn spawn<T: Send + 'static>(name: &str, work: impl FnOnce() -> T + Send + 's
 /// started first), so long work that waits on a disk (a backup, walking a whole drive) goes to [`on_bulk_pool`]
 /// instead: here it would hold up every page's quick asks until it ended.
 pub fn on_pool<T: Send>(work: impl FnOnce() -> T + Send) -> T {
+    install(pool(), work)
+}
+
+/// The app's pool of low-priority threads itself, for work that hands jobs to a pool of its own choosing (the MIDI
+/// reader). `None` when the system wouldn't start the threads.
+pub fn pool() -> Option<&'static rayon::ThreadPool> {
     static POOL: LazyLock<Option<rayon::ThreadPool>> =
-        LazyLock::new(|| pool("Background", POOL_THREADS.load(std::sync::atomic::Ordering::Relaxed)));
-    install(POOL.as_ref(), work)
+        LazyLock::new(|| build_pool("Background", POOL_THREADS.load(std::sync::atomic::Ordering::Relaxed)));
+    POOL.as_ref()
 }
 
 /// Runs long work that mostly waits on a disk (a backup's plan and copy, its look at the drive) on a small pool of its
@@ -35,7 +41,7 @@ pub fn on_bulk_pool<T: Send>(work: impl FnOnce() -> T + Send) -> T {
     static BULK: LazyLock<Option<rayon::ThreadPool>> = LazyLock::new(|| {
         let threads = POOL_THREADS.load(std::sync::atomic::Ordering::Relaxed);
         let threads = if threads == 0 { cores() } else { threads };
-        pool("Bulk", threads.clamp(1, BULK_THREADS))
+        build_pool("Bulk", threads.clamp(1, BULK_THREADS))
     });
     install(BULK.as_ref(), work)
 }
@@ -44,7 +50,7 @@ pub fn on_bulk_pool<T: Send>(work: impl FnOnce() -> T + Send) -> T {
 const BULK_THREADS: usize = 4;
 
 /// A pool of `threads` low-priority threads called `name 0`, `name 1`...; 0 is rayon's own choice, one per core.
-fn pool(name: &'static str, threads: usize) -> Option<rayon::ThreadPool> {
+fn build_pool(name: &'static str, threads: usize) -> Option<rayon::ThreadPool> {
     rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
         .thread_name(move |i| format!("{name} {i}"))

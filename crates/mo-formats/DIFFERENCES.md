@@ -36,6 +36,11 @@ library.
 | FL 8.5's notes (a census of 17,316 of Solomon's saves: FL 3.5 to 8.0 write 20-byte notes, 8.5 on 24) | Told apart by version, 24 from FL 9. | 24 from FL 8.5 too; before, an 8.5 pattern whose notes divided by both sizes was read as 20-byte notes, garbled (VERSION 16). | Better |
 | FL 9.0 to 9.5 (and 11.1) playlists that mix pattern rows with clips in one event (902 of Solomon's saves) | Not read. | Each record read on its own kind: rows as pattern n on track n, clips on their own tracks (VERSION 16). | Better |
 | FL 6 to 8 pattern clips saved as newer FL's (the pattern base, then the pattern) among the rows | Not read. | Read, on their pattern's track; the row is taken from bytes 12 and 14, as the census found (VERSION 16). | Better |
+| Text in saves before FL 11.5 (names, titles, sample paths) | Each byte as the letter with the same number (Latin-1), so a curly apostrophe, dash or euro sign (bytes 0x80 to 0x9F) comes out as an invisible control character, and a sample path holding one doesn't match the file. | Read in Windows' Western code page (1252), as FL wrote it (VERSION 17). | Better |
+| "Patterns" count in FL 9 and older saves | Counts every new-pattern event, though FL 9 and older repeat it in each channel's events (an 8-channel loop in 4 patterns showed 32). | Counts the patterns named. | Better |
+| Samples in a save cut short (it ends early, perhaps before its playlist) | Listed as playing no notes. | Not listed as unplayed: the playlist that plays them may be past the cut (VERSION 17). | Better |
+| Damaged FL 3.5 to 8.0 notes whose length divides by 24 but not by 20 | Read as 24-byte notes, garbling them. | Read at the version's 20 bytes, up to the damage (rule 9; VERSION 17). | Better |
+| Notes above G10 (FL's keys 128 to 131) | The key cut to 7 bits, so they land at the bottom of the keyboard. | Left out of the notes, with a warning (VERSION 17). | Better |
 
 ## Bitwig Studio
 
@@ -51,6 +56,7 @@ tests don't have.
 | The order of hardware names | .NET's culture-aware order (which differs between Windows and Linux). | Close to it: spaces and punctuation before digits, digits before letters, letter case aside. Only names that differ just in punctuation could come out in another order. | Same for real names |
 | A plugin state the zip says unpacks to more than 256 MB (a damaged or made-up zip) | Unpacked whole, however big, which can use up the memory. | Left out, like a state that won't come out whole. | Better |
 | A reference to object 0, or to an object not read yet (a damaged file: Bitwig defines each object where it's first used) | Kept, and looked up once the whole body is read, or skipped. | The body isn't trusted past it: the project is read by the text scan, with a warning, so it has no MIDI. | Safer: a body that's wrong there is likely wrong after it too |
+| A project whose header says it stores plugin settings, but they're missing or cut short (a save interrupted at the end) | Read as whole, with no plugin states and no warning. | The same, with a warning that the plugin settings can't be read (VERSION 4). | Better |
 | A note's velocity as a MIDI 1.0 value (0 to 127) | Bitwig's 0-to-1 velocity rounded straight to 0 to 127. | Kept at MIDI 2.0's 16 bits, then rounded to 0 to 127 when a MIDI 1.0 value is wanted. About 3 in 10,000 velocities come out 1 apart (rounding twice); Bitwig's own whole-step velocities are the same. | Better (rule 22) |
 
 ## Studio One
@@ -64,6 +70,9 @@ tests don't have.
 | A plugin state in the song's zip that won't come out whole | No presets at all from the song. | That one preset is left out; the rest are taken out. | Better |
 | An XML file in the song's zip that won't come out whole | The song can't be read. | The rest is read, with a warning naming the file left out. | Better |
 | A file in the song's zip that unpacks to more than 256 MB (a damaged or made-up zip) | Unpacked whole, however big. | Left out, as a file that won't come out whole is. | Better |
+| A song whose metainfo.xml has no tempo (or won't come out of the zip), from Studio One 6.5 on | Takes the first `tempo` in song.xml, a TempoMapSegment's seconds per beat, as the BPM (0.46 for 130), and squashes the MIDI of parts timed in seconds by the same. | Turns seconds per beat into BPM, as the arrangement reader does (VERSION 4). | Better |
+| A network-share sample in the media pool (`file://NAS/Samples/Kick.wav`) | `/NAS/Samples/Kick.wav`: the server is lost. | `\\NAS\Samples\Kick.wav` (VERSION 4). | Better |
+| A note's velocity saved as "NaN" | MIDI 1.0's 1, the quietest. | The same, in the MIDI and the arrangement preview alike (the MIDI had a 16-bit 0). | Same |
 | XML whose DOCTYPE declares its own entities (`<!ENTITY`; Studio One never writes them) | Expanded, up to 10 million letters. | The file is refused as unreadable: a few KB of entities can stand for gigabytes. | Safer |
 | A damaged zip that names two files the same | Reads the first of them, and lists (and counts) every copy's presets. | The zip reader keeps only the last one's bytes, and the song says so in a warning. | Same for real songs |
 | A note's velocity | Rounded to MIDI 1.0's 0 to 127 as it's read. | Kept at MIDI 2.0's 16 bits (a 0-to-127 velocity from an older song by MIDI 2.0's own scaling), rounded to 0 to 127 only when a MIDI 1.0 value is wanted. As with Bitwig, a few in 10,000 of the 0-to-1 velocities come out 1 apart. | Better (rule 22) |
