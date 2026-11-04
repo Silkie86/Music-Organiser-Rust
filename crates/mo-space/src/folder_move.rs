@@ -24,7 +24,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::admin::{Admin, AsAdmin, NoAdmin, Outcome, Step, ask_for, real_spot, reason};
-use crate::clean::{Bin, Done, Problem, Sending, What, on_network};
+use crate::clean::{Bin, Done, on_network};
 use crate::half_copy::{
     self, Claim, MARKER, busy_now, claim, clear_own, going_into_use, not_in_use, own_room, remove_marked, unmark,
 };
@@ -1201,10 +1201,11 @@ fn old_copy_only(
     Ok(only)
 }
 
-/// What's in `old` but not in `copy`, or newer in `old`, as paths inside it.
-pub(crate) fn only_in(old: &Path, copy: &Path, stop: &AtomicBool) -> Result<Vec<String>, CantMove> {
+/// What's in `old` but not in `copy`, or newer in `old`, as paths inside it; with `bytes`, also the files that look the
+/// same in both but whose bytes differ (slow: only just before `old` goes).
+pub(crate) fn only_in(old: &Path, copy: &Path, bytes: bool, stop: &AtomicBool) -> Result<Vec<String>, CantMove> {
     let mut only = Vec::new();
-    differences((old, copy), None, (&[], false), Path::new(""), &mut only, stop)?;
+    differences((old, copy), None, (&[], bytes), Path::new(""), &mut only, stop)?;
     only.sort();
     Ok(only)
 }
@@ -1385,34 +1386,45 @@ fn same_inside(a: &Path, b: &Path, stop: &AtomicBool) -> Result<bool, CantMove> 
 /// only in the old copy ([`only_in_old_copy`]): the app shows that list first. `all` is every moved folder.
 /// [`crate::clean::undo`] puts it back.
 pub fn remove_old_copy(moved: &MovedFolder, all: &[MovedFolder], sure: bool, bin: &dyn Bin, stop: &AtomicBool) -> Done {
+    crate::old_copies::send_one(
+        &moved.old_copy,
+        moved.bytes,
+        crate::old_copies::Going::OldCopy(moved),
+        all,
+        sure,
+        bin,
+        stop,
+    )
+}
+
+/// Why it stays when checking what's only in it was stopped part way.
+pub(crate) const UNCHECKED: &str = "Stopped before it was all checked, so it stays.";
+
+/// Why the old copy can't go now, checked just before it goes: [`old_copy_stays`], then, unless you're `sure`, whether
+/// anything is only in it, newer there or not the same as on the other drive (what the files hold is compared too, so
+/// it reads every file that looks the same in both: slow). `all` is every moved folder.
+pub(crate) fn old_copy_check(
+    moved: &MovedFolder,
+    all: &[MovedFolder],
+    sure: bool,
+    stop: &AtomicBool,
+) -> Result<(), String> {
     if let Some(why) = old_copy_stays(moved, all) {
-        return stays(moved, &why);
+        return Err(why);
     }
-    if !sure {
-        match old_copy_only(moved, all, true, stop) {
-            Err(_) => return stays(moved, "Stopped before it was all checked, so it stays."),
-            Ok(only) if !only.is_empty() => {
-                return stays(
-                    moved,
-                    &format!(
-                        "Some of it is only in the old copy, newer there, or not the same as on the other drive: {}. \
-                         It may have been saved while the move ran, deleted from the other drive since, gone bad on \
-                         the way, or open in a program now. Look before deleting it.",
-                        listed(&only)
-                    ),
-                );
-            }
-            Ok(_) => {}
-        }
+    if sure {
+        return Ok(());
     }
-    let mut done = Done::default();
-    // The folder itself (it was checked not to be a link), not where a link would lead.
-    let real = real_spot(&moved.old_copy);
-    // Checked just now; one Windows guards is checked again by the administrator step, against what it held now.
-    let mut sending = Sending::new(bin, stop);
-    sending.send(&moved.old_copy, real, moved.bytes, What::Plugin(moved.space_kind()), &mut done, || Ok(()));
-    sending.finish(&mut done);
-    done
+    match old_copy_only(moved, all, true, stop) {
+        Err(_) => Err(UNCHECKED.to_owned()),
+        Ok(only) if !only.is_empty() => Err(format!(
+            "Some of it is only in the old copy, newer there, or not the same as on the other drive: {}. It may have \
+             been saved while the move ran, deleted from the other drive since, gone bad on the way, or open in a \
+             program now. Look before deleting it.",
+            listed(&only)
+        )),
+        Ok(_) => Ok(()),
+    }
 }
 
 /// Why the old copy can't go now, when it can't: it's a link now, it's the only copy the plugin could use
@@ -1454,11 +1466,6 @@ pub(crate) fn leads_into(moved: &MovedFolder) -> bool {
     let link_in = real_path(&moved.from).is_some_and(|f| is_inside(&f, &old));
     let copy_in = real_path(&moved.to).is_some_and(|t| is_inside(&t, &old) || is_inside(&old, &t));
     link_in || copy_in
-}
-
-/// The old copy stays, and why.
-fn stays(moved: &MovedFolder, why: &str) -> Done {
-    Done { problems: vec![Problem { path: moved.old_copy.clone(), why: why.to_owned() }], ..Done::default() }
 }
 
 /// Whether Windows said no because of rights (access denied), rather than something having the folder open.

@@ -12,6 +12,7 @@ use mo_space::size::size_text;
 use crate::binned::{Binned, Kept};
 use crate::songs::thousands;
 use crate::space::{Card, Line, Part};
+use crate::space_old::OLD_COPIES;
 use crate::space_spare::SPARE_COPIES;
 
 /// The line's id.
@@ -74,6 +75,7 @@ pub fn line(kept: Option<&Kept>) -> Option<Line> {
 pub fn kind_title(kind: &str) -> &'static str {
     match kind {
         SPARE_COPIES => "Spare plugin copies",
+        OLD_COPIES => "Old copies after moving folders",
         _ => "A clean-up",
     }
 }
@@ -82,6 +84,7 @@ pub fn kind_title(kind: &str) -> &'static str {
 pub fn putting_back_title(kind: &str) -> &'static str {
     match kind {
         SPARE_COPIES => "Putting back spare plugin copies",
+        OLD_COPIES => "Putting back old copies",
         _ => "Putting back what a clean-up removed",
     }
 }
@@ -97,6 +100,8 @@ fn things(b: &Binned) -> String {
     match b.kind.as_str() {
         SPARE_COPIES if n == 1 => "1 plugin copy".to_owned(),
         SPARE_COPIES => format!("{} plugin copies", thousands(n)),
+        OLD_COPIES if n == 1 => "1 old copy".to_owned(),
+        OLD_COPIES => format!("{} old copies", thousands(n)),
         _ if n == 1 => "1 file or folder".to_owned(),
         _ => format!("{} files and folders", thousands(n)),
     }
@@ -332,6 +337,21 @@ mod tests {
         // A list that couldn't be saved says what that means.
         let unkept = Kept { noted: false, ..k.clone() };
         assert!(super::card(Some(&unkept), &PutBacks::default(), true, false).note.ends_with(&unkept_words()));
+    }
+
+    #[test]
+    fn old_copies_are_named_as_their_card_has_them() {
+        let old = |n: usize| {
+            let paths: Vec<String> = (0..n).map(|i| format!(r"C:\Plugins\{i} (old copy)")).collect();
+            let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
+            Binned { kind: OLD_COPIES.to_owned(), ..binned(1_762_000_000, &paths) }
+        };
+        assert_eq!(kind_title(OLD_COPIES), "Old copies after moving folders");
+        assert_eq!(putting_back_title(OLD_COPIES), "Putting back old copies");
+        assert_eq!((things(&old(1)).as_str(), things(&old(3)).as_str()), ("1 old copy", "3 old copies"));
+        let card = card(Some(&kept(vec![old(3)], true)), &PutBacks::default(), true, false);
+        assert_eq!(card.parts[0].name, "Old copies after moving folders");
+        assert!(card.parts[0].what.starts_with("3 old copies, removed "), "{}", card.parts[0].what);
     }
 
     #[test]

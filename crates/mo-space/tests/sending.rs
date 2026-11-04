@@ -18,6 +18,7 @@ use mo_space::clean::{
     apply, preview, undo,
 };
 use mo_space::key;
+use mo_space::old_copies::{self, remind};
 use mo_space::song::{CompactItem, CompactKind};
 
 mod common;
@@ -473,4 +474,40 @@ fn the_put_back_step_checks_each_line_again_before_it_happens() {
     let said = step(&[line(&caches[0], a), line(&caches[1], gone(&done, &caches[1]))]);
     assert_eq!(said, format!("{}\tdone\t\n{}\tdone\t\n", s(&caches[0]), s(&caches[1])));
     assert!(caches[0].join("a.peak").exists() && caches[1].join("a.peak").exists());
+}
+
+#[test]
+fn old_copies_windows_guards_go_in_one_step_and_come_back_in_one_more() {
+    let dir = fixtures("mo-space-sending-old-copies");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    // Two folders left behind whose files are on the other drive now: Windows guards both.
+    let homes: Vec<OldHome> = ["STEAM", "Kontakt"]
+        .iter()
+        .map(|name| {
+            write(&c, &format!("{name} (after update)/a.db"), "a");
+            write(&d, &format!("{name}/a.db"), "a");
+            OldHome {
+                path: s(&c.join(format!("{name} (after update)"))),
+                bytes: 1,
+                note: "left by an update".to_owned(),
+                copy: s(&d.join(name)),
+                kind: 2,
+            }
+        })
+        .collect();
+    let stop = AtomicBool::new(false);
+    let look = remind(&[], &homes, &[], &stop).unwrap();
+    assert!(look.leftovers.iter().all(|l| l.can_go()), "{:?}", look.leftovers);
+    let bin = GuardedBin::new(&dir, |_| {});
+
+    let done = old_copies::remove(&look.leftovers, (&[], &homes), (&[], &homes), &bin, &stop);
+    assert!(done.problems.is_empty(), "{:?}", done.problems);
+    assert_eq!(done.removed.len(), 2);
+    assert!(done.removed.iter().all(|r| r.stamp.is_some() && kept_at(r).is_some()), "{:?}", done.removed);
+    assert_eq!(bin.asked(), 1);
+    assert!(homes.iter().all(|h| !Path::new(&h.path).exists()));
+    // Put back asks once more, for both.
+    assert!(undo(&done, &bin).is_empty());
+    assert_eq!(bin.asked(), 2);
+    assert!(homes.iter().all(|h| Path::new(&h.path).join("a.db").exists()));
 }

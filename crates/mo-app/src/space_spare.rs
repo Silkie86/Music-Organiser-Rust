@@ -8,14 +8,13 @@
 //! question 5). As agreed in the mock-up, every copy that can go is ticked out of the box, as in the C# app, and Remove
 //! asks nothing more: the Recycle Bin and Put back are the way back.
 
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use mo_formats::{case, paths};
 use mo_library::plugins::PluginUse;
 use mo_space::Stopped;
-use mo_space::clean::{Bin, Done, Problem, Removed};
+use mo_space::clean::{Bin, Done};
 use mo_space::plugins::scan_files;
 use mo_space::size::size_text;
 use mo_space::spare::{self, SpareCopy, Used, Why};
@@ -23,7 +22,11 @@ use mo_space::spare::{self, SpareCopy, Used, Why};
 use crate::shell::{folder_of, wrappable_path};
 use crate::songs::{plural, thousands};
 use crate::space::{Card, Line, Opens, Part, and_list};
-use crate::space_bin::{BIN, PutBacks, yourself_words};
+use crate::space_bin::BIN;
+use crate::space_removing::{
+    self, Looked, Removable, back_words, free_bytes, freed_words, gone, result_figures, result_words, sent_words,
+    stayed,
+};
 
 /// The spare copies line's id.
 pub const SPARE_COPIES: &str = "spare-copies";
@@ -34,13 +37,7 @@ pub const LOOKING: &str = "Looking through your plugin folders…";
 /// What the page says under Biggest wins first when a look found none.
 pub const NONE_FOUND: &str = "No spare plugin copies were found. ";
 
-/// What the card says, above Remove, about the copies in Program Files (Windows guards them).
-pub const ADMIN: &str = "The ones in Program Files go together at the end, so Windows asks once for administrator \
-    rights.";
-
-/// What the card says, once they went, of putting back the copies from Program Files: Put back asks Windows once for
-/// all of them, as Remove did.
-pub const ADMIN_BACK: &str = "For the ones from Program Files, Windows asks once for administrator rights.";
+pub use crate::space_removing::{ADMIN, ADMIN_BACK};
 
 /// The activity card's title while Remove is on.
 pub const REMOVING: &str = "Removing spare plugin copies";
@@ -67,10 +64,34 @@ impl Found {
     }
 }
 
-/// The room the copies that can go take, of `copies`.
-fn free_bytes<'a>(copies: impl IntoIterator<Item = &'a SpareCopy>) -> u64 {
-    copies.into_iter().filter(|c| c.can_remove()).fold(0u64, |sum, c| sum.saturating_add(c.bytes))
+impl Looked for Found {
+    type Item = SpareCopy;
+    fn items(&self) -> &[SpareCopy] {
+        &self.copies
+    }
 }
+
+/// Every copy that can go is ticked out of the box, as in the C# app.
+impl Removable for SpareCopy {
+    fn path(&self) -> &str {
+        &self.path
+    }
+    fn bytes(&self) -> u64 {
+        self.bytes
+    }
+    fn can_go(&self) -> bool {
+        self.can_remove()
+    }
+}
+
+/// How removing spare copies goes while the app runs: the copies you unticked, and where Remove has got to.
+pub type Removing = space_removing::Removing<SpareCopy>;
+
+/// Where removing spare copies has got to.
+pub type Stage = space_removing::Stage<SpareCopy>;
+
+/// A removal of spare copies that ran.
+pub type Sent = space_removing::Sent<SpareCopy>;
 
 /// Each plugin your saves use (a DAW's own devices left out), with the saves that use each format: what
 /// [`spare::find`] takes, as the C# app worked it out for its spare copies (`PluginFormatsUsed`). A save whose
@@ -125,219 +146,6 @@ pub fn remove(
             spare::remove(picked, &now, bin, stop)
         }
         Err(Stopped) => stayed(picked, "Remove stopped before it went."),
-    }
-}
-
-/// Why every ticked copy is said to have stayed when Remove stopped with an error (logged as a crash): what went before
-/// it stopped is in the bin, but which isn't known.
-pub fn crashed_words() -> String {
-    format!("Remove stopped with an error (the log says which). Anything that went before it stopped is in the {BIN}.")
-}
-
-/// Every copy picked stays, for `why`: what Remove says when it couldn't check them again (your saves couldn't be
-/// read, say).
-pub fn stayed(picked: &[SpareCopy], why: &str) -> Done {
-    let problems = picked.iter().map(|c| Problem { path: c.path.clone(), why: why.to_owned() }).collect();
-    Done { problems, ..Done::default() }
-}
-
-/// A removal that ran: the copies picked, when it ran (as the list of what the app put in the Recycle Bin keeps it),
-/// and what went and what stayed, with why.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Sent {
-    pub picked: Vec<SpareCopy>,
-    pub when: i64,
-    pub done: Done,
-}
-
-impl Sent {
-    /// Whether `copy` went: to the bin, or for good.
-    fn went(&self, copy: &SpareCopy) -> bool {
-        self.done.removed.iter().any(|r| r.path == copy.path)
-    }
-
-    /// Why `copy` stayed, or why it isn't in the bin though it went.
-    fn why(&self, copy: &SpareCopy) -> Option<&str> {
-        self.done.problems.iter().find(|p| p.path == copy.path).map(|p| p.why.as_str())
-    }
-
-    /// Whether `copy` is in the bin: it went, and was found there.
-    fn in_bin(&self, copy: &SpareCopy) -> bool {
-        self.went(copy) && self.why(copy).is_none()
-    }
-
-    /// What went that was found in the bin: what Put back puts back.
-    fn binned(&self) -> impl Iterator<Item = &Removed> {
-        self.done.removed.iter().filter(|r| !self.done.problems.iter().any(|p| p.path == r.path))
-    }
-
-    /// How many went but weren't found in the bin: Windows removed them for good (too big for it), they went to
-    /// another account's bin, or the bin couldn't be read to check.
-    fn lost(&self) -> usize {
-        self.done.removed.len() - self.binned().count()
-    }
-
-    /// How many picked copies stayed.
-    fn stayed(&self) -> usize {
-        self.picked.iter().filter(|c| !self.went(c)).count()
-    }
-
-    /// What Put back puts back of this removal: what went that was found in the bin. Put back says which of those
-    /// aren't there any more (put back already, or emptied from the bin since).
-    pub fn coming_back(&self) -> Done {
-        let removed: Vec<Removed> = self.binned().cloned().collect();
-        let went_with =
-            self.done.went_with.iter().filter(|(_, with)| removed.iter().any(|r| &r.path == with)).cloned().collect();
-        Done { removed, problems: Vec::new(), went_with }
-    }
-}
-
-/// Where removing has got to.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub enum Stage {
-    /// Picking which to remove: out of the box, and again after Measure again.
-    #[default]
-    Picking,
-    /// The ticked copies are being checked again and sent to the Recycle Bin.
-    Sending(Vec<SpareCopy>),
-    /// They were sent: the card shows what went and what stayed.
-    Sent(Sent),
-    /// What went is being put back.
-    PuttingBack(Sent),
-    /// What went was put back: what couldn't come back, and why.
-    PutBack(Sent, Vec<Problem>),
-}
-
-/// How removing spare copies goes while the app runs: the copies you unticked, and where Remove has got to.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Removing {
-    /// By path. Every copy that can go is ticked out of the box; an untick stays through a new look.
-    unticked: HashSet<String>,
-    stage: Stage,
-}
-
-impl Removing {
-    pub fn stage(&self) -> &Stage {
-        &self.stage
-    }
-
-    fn ticked(&self, copy: &SpareCopy) -> bool {
-        copy.can_remove() && !self.unticked.contains(&copy.path)
-    }
-
-    /// Ticks or unticks the copies at `paths` (a copy's own tick, or a format's for all its copies), while picking.
-    pub fn tick(&mut self, paths: &[PathBuf], ticked: bool) {
-        if self.stage != Stage::Picking {
-            return;
-        }
-        for path in paths {
-            let path = path.to_string_lossy().into_owned();
-            if ticked {
-                self.unticked.remove(&path);
-            } else {
-                self.unticked.insert(path);
-            }
-        }
-    }
-
-    /// The ticked copies, biggest first: what Remove sends.
-    pub fn ticked_copies(&self, found: Option<&Found>) -> Vec<SpareCopy> {
-        self.each_ticked(found).cloned().collect()
-    }
-
-    /// Each ticked copy, biggest first, as it was found.
-    fn each_ticked<'a>(&'a self, found: Option<&'a Found>) -> impl Iterator<Item = &'a SpareCopy> {
-        found.into_iter().flat_map(|f| &f.copies).filter(|c| self.ticked(c))
-    }
-
-    /// Whether Remove or Put back is on: neither can start again, and Measure again waits.
-    pub fn busy(&self) -> bool {
-        matches!(self.stage, Stage::Sending(_) | Stage::PuttingBack(_))
-    }
-
-    /// Remove starts on `picked` ([`ticked_copies`](Self::ticked_copies)).
-    pub fn start(&mut self, picked: Vec<SpareCopy>) {
-        if self.stage == Stage::Picking {
-            self.stage = Stage::Sending(picked);
-        }
-    }
-
-    /// Remove has finished: it ran at `when`, and `done` says what went and what stayed.
-    pub fn sent(&mut self, when: i64, done: Done) {
-        if let Stage::Sending(picked) = &mut self.stage {
-            let picked = std::mem::take(picked);
-            self.stage = Stage::Sent(Sent { picked, when, done });
-        }
-    }
-
-    /// What the card's Put back puts back: the removal on show, once something it sent is in the bin.
-    pub fn to_put_back(&self) -> Option<&Sent> {
-        match &self.stage {
-            Stage::Sent(sent) if sent.binned().next().is_some() => Some(sent),
-            _ => None,
-        }
-    }
-
-    /// Put back starts on the removal that ran at `when` (from this card, or the Recycle Bin card's): when it's the one
-    /// on show, its card says so.
-    pub fn putting_back(&mut self, when: i64) {
-        if let Stage::Sent(sent) = &self.stage
-            && sent.when == when
-        {
-            self.stage = Stage::PuttingBack(sent.clone());
-        }
-    }
-
-    /// Put back of the removal that ran at `when` has finished: `problems` says what couldn't come back.
-    pub fn put_back(&mut self, when: i64, problems: Vec<Problem>) {
-        if let Stage::Sent(sent) | Stage::PuttingBack(sent) = &self.stage
-            && sent.when == when
-        {
-            self.stage = Stage::PutBack(sent.clone(), problems);
-        }
-    }
-
-    /// Measure again: the card goes back to picking, for what the new look finds. Not while Remove or Put back is on.
-    pub fn again(&mut self) {
-        if !self.busy() {
-            self.stage = Stage::Picking;
-        }
-    }
-
-    /// Whether the card shows how a removal went (then it has Open Recycle Bin too).
-    pub fn shows_result(&self) -> bool {
-        matches!(self.stage, Stage::Sent(_) | Stage::PuttingBack(_) | Stage::PutBack(..))
-    }
-
-    /// Remove's button: its words and whether it can be pressed now (not while a look is on, nor while something is
-    /// put back: one thing goes or comes back at a time). None when no copy can go, and once a removal's result is on
-    /// show.
-    pub fn remove_button(&self, found: Option<&Found>, looking: bool, put_backs: &PutBacks) -> Option<(String, bool)> {
-        match &self.stage {
-            Stage::Sending(_) => Some(("Removing…".to_owned(), false)),
-            Stage::Picking if found.is_some_and(|f| f.copies.iter().any(SpareCopy::can_remove)) => {
-                let mut ticked = self.each_ticked(found).peekable();
-                if ticked.peek().is_none() {
-                    Some(("Nothing ticked".to_owned(), false))
-                } else {
-                    let can = !looking && put_backs.going.is_none();
-                    Some((format!("Remove {}", size_text(free_bytes(ticked))), can))
-                }
-            }
-            _ => None,
-        }
-    }
-
-    /// Put back's button, once something went to the bin: None where the app can't put things back (`can_put_back`: a
-    /// Mac). It waits while another clean-up is put back from the Recycle Bin card.
-    pub fn put_back_button(&self, can_put_back: bool, put_backs: &PutBacks) -> Option<(String, bool)> {
-        match &self.stage {
-            Stage::Sent(sent) if can_put_back && sent.binned().next().is_some() => {
-                Some(("Put back".to_owned(), put_backs.going.is_none()))
-            }
-            Stage::PuttingBack(_) => Some(("Putting back…".to_owned(), false)),
-            _ => None,
-        }
     }
 }
 
@@ -421,7 +229,7 @@ fn count_words(found: &Found) -> String {
 pub fn line(found: Option<&Found>, looking: bool, removing: &Removing) -> Option<(u64, Line)> {
     let line = |why: String, size: String| Line { id: SPARE_COPIES, title: "Spare plugin copies", why, size };
     match removing.stage() {
-        Stage::Sent(sent) => return Some((0, line(sent_words(sent), freed_words(sent)))),
+        Stage::Sent(sent) => return Some((0, line(sent_words(sent, &spare_copies), freed_words(sent)))),
         Stage::PuttingBack(sent) => return Some((0, line("Putting them back…".to_owned(), freed_words(sent)))),
         Stage::PutBack(sent, problems) => return Some((0, line(back_words(sent, problems), String::new()))),
         Stage::Picking | Stage::Sending(_) => {}
@@ -610,75 +418,9 @@ fn picking_card(
 const LEAD: &str = "Plugin installers often put each plugin in every format: VST2, VST3, CLAP and AAX. These copies are \
     in a format none of your saves use; the copies your saves do use stay.";
 
-/// "Freed 9.1 GB" once something went; "" when nothing did.
-fn freed_words(sent: &Sent) -> String {
-    if sent.done.removed.is_empty() { String::new() } else { format!("Freed {}", size_text(sent.done.bytes())) }
-}
-
-/// How a removal went, as the card's big figures' note and the line say it: "10 spare copies are in the Recycle Bin",
-/// "8 spare copies are in the Recycle Bin, 1 went but wasn't found there, and 2 stayed".
-fn sent_words(sent: &Sent) -> String {
-    let (in_bin, lost, stayed) = (sent.binned().count(), sent.lost(), sent.stayed());
-    if in_bin + lost == 0 {
-        return if stayed == 0 { String::new() } else { "None could go: each one's line says why".to_owned() };
-    }
-    let copies = |n: usize| if n == 1 { "1 spare copy".to_owned() } else { format!("{} spare copies", thousands(n)) };
-    let mut said = Vec::new();
-    if in_bin > 0 {
-        said.push(format!("{} {} in the {BIN}", copies(in_bin), if in_bin == 1 { "is" } else { "are" }));
-    }
-    if lost > 0 {
-        let (who, there) =
-            if in_bin > 0 { (thousands(lost), "there".to_owned()) } else { (copies(lost), format!("in the {BIN}")) };
-        said.push(format!("{who} went but {} found {there}", if lost == 1 { "wasn't" } else { "weren't" }));
-    }
-    if stayed > 0 {
-        said.push(format!("{} stayed", thousands(stayed)));
-    }
-    clauses(&said)
-}
-
-/// Parts of a sentence, each saying something of its own, as one sentence: "A", "A, and B", "A, B, and C".
-fn clauses(said: &[String]) -> String {
-    match said {
-        [] => String::new(),
-        [one] => one.clone(),
-        [rest @ .., last] => format!("{}, and {last}", rest.join(", ")),
-    }
-}
-
-/// How a put back went: "All 10 are back where they were", "8 are back where they were, and 2 couldn't come back".
-/// Of what went, only what was found in the bin is put back.
-fn back_words(sent: &Sent, problems: &[Problem]) -> String {
-    let went = sent.binned().count();
-    let stuck = problems.len().min(went);
-    match (went - stuck, stuck) {
-        (0, 0) => String::new(),
-        (1, 0) => "It's back where it was".to_owned(),
-        (n, 0) => format!("All {} are back where they were", thousands(n)),
-        (0, _) => "None could come back: each one's line says why".to_owned(),
-        (1, m) => format!("1 is back where it was, and {} couldn't come back", thousands(m)),
-        (n, m) => format!("{} are back where they were, and {} couldn't come back", thousands(n), thousands(m)),
-    }
-}
-
-/// What a picked copy's line says once Remove has run: why it stayed, that it's in the bin (or why it isn't, though
-/// it went), and once Put back has run, whether it's back.
-fn result_words(copy: &SpareCopy, sent: &Sent, stage: &Stage) -> (String, bool) {
-    if let Some(why) = sent.why(copy) {
-        return (why.to_owned(), true);
-    }
-    if !sent.went(copy) {
-        return (String::new(), false);
-    }
-    match stage {
-        Stage::PuttingBack(_) => ("Putting back…".to_owned(), false),
-        Stage::PutBack(_, problems) => match problems.iter().find(|p| p.path == copy.path) {
-            Some(p) => (format!("It couldn't come back: {}", p.why), true),
-            None => ("Back where it was.".to_owned(), false),
-        },
-        _ => (format!("In the {BIN}."), false),
-    }
+/// "1 spare copy", "10 spare copies".
+fn spare_copies(n: usize) -> String {
+    if n == 1 { "1 spare copy".to_owned() } else { format!("{} spare copies", thousands(n)) }
 }
 
 /// The card once Remove has run: what was freed, what went and what stayed (each copy picked, by format, with how it
@@ -692,11 +434,9 @@ fn result_card(sent: &Sent, stage: &Stage, can_put_back: bool) -> Card {
         let went = g.copies.iter().filter(|c| sent.went(c)).fold(0u64, |sum, c| sum.saturating_add(c.bytes));
         parts.push(group_part(g, went));
         for copy in &g.copies {
-            let (status, problem) = result_words(copy, sent, stage);
+            let (status, problem) = result_words(*copy, sent, stage);
             // Where it is, with a link that shows it there, only while it's there: not once it went, until it's back.
-            let back = sent.in_bin(copy)
-                && matches!(stage, Stage::PutBack(_, problems) if !problems.iter().any(|p| p.path == copy.path));
-            let gone = sent.went(copy) && !back;
+            let gone = gone(*copy, sent, stage);
             parts.push(Part {
                 name: copy.name.clone(),
                 what: copy_what(copy, folder, gone),
@@ -709,41 +449,7 @@ fn result_card(sent: &Sent, stage: &Stage, can_put_back: bool) -> Card {
             });
         }
     }
-    let went = !sent.done.removed.is_empty();
-    let in_bin = sent.binned().next().is_some();
-    let (big, big_note, note) = match stage {
-        Stage::PutBack(_, problems) => (
-            "Put back".to_owned(),
-            back_words(sent, problems),
-            if problems.is_empty() { String::new() } else { yourself_words() },
-        ),
-        _ => {
-            // What went as administrator comes back the same way (it has the stamp the step checked).
-            let from_guarded = sent.binned().any(|r| r.stamp.is_some());
-            let note = match (in_bin, can_put_back) {
-                (false, _) => String::new(),
-                (true, true) if from_guarded => format!(
-                    "They're in the {BIN}. Put back returns each one to where it was, until you empty the {BIN}. \
-                     {ADMIN_BACK} The app never empties it for you."
-                ),
-                (true, true) => format!(
-                    "They're in the {BIN}. Put back returns each one to where it was, until you empty the {BIN}. The \
-                     app never empties it for you."
-                ),
-                (true, false) => format!(
-                    "They're in the {BIN}. Until you empty it, Finder's Put Back returns each one to where it was: \
-                     select them there and choose Put Back. The app never empties it for you."
-                ),
-            };
-            let big = if went { freed_words(sent) } else { "Nothing freed".to_owned() };
-            let big_note = if matches!(stage, Stage::PuttingBack(_)) {
-                "Putting them back…".to_owned()
-            } else {
-                sent_words(sent)
-            };
-            (big, big_note, note)
-        }
-    };
+    let (big, big_note, note) = result_figures(sent, stage, can_put_back, &spare_copies);
     Card {
         kind: "SPARE COPIES",
         title: "Spare plugin copies",
@@ -766,37 +472,18 @@ pub fn removing_words() -> String {
 /// The activity card's line once Remove is done: what was freed, what's in the bin, what went but wasn't found there,
 /// and what stayed. Err when nothing went (the card then fails).
 pub fn removed_words(done: &Done) -> Result<String, String> {
-    let found = |path: &str| !done.problems.iter().any(|p| p.path == path);
-    let in_bin = done.removed.iter().filter(|r| found(&r.path)).count();
-    let lost = done.removed.len() - in_bin;
-    let stayed = done.problems.iter().filter(|p| !done.removed.iter().any(|r| r.path == p.path)).count();
-    match (done.removed.len(), stayed) {
-        (0, 0) => return Err("Nothing was removed.".to_owned()),
-        (0, 1) => return Err("It couldn't go: the Space page says why.".to_owned()),
-        (0, _) => return Err("None could go: the Space page says why.".to_owned()),
-        _ => {}
-    }
-    let copies = |n: usize| if n == 1 { "1 copy".to_owned() } else { format!("{} copies", thousands(n)) };
-    let mut said = Vec::new();
-    if in_bin > 0 {
-        said.push(format!("{} {} in the {BIN}", copies(in_bin), if in_bin == 1 { "is" } else { "are" }));
-    }
-    if lost > 0 {
-        let (who, there) =
-            if in_bin > 0 { (thousands(lost), "there".to_owned()) } else { (copies(lost), format!("in the {BIN}")) };
-        said.push(format!("{who} went but {} found {there}", if lost == 1 { "wasn't" } else { "weren't" }));
-    }
-    let stayed = match stayed {
-        0 => String::new(),
-        m => format!("; {} stayed (the Space page says why)", thousands(m)),
-    };
-    Ok(format!("Freed {}: {}{stayed}.", size_text(done.bytes()), clauses(&said)))
+    space_removing::removed_words(done, &|n| {
+        if n == 1 { "1 copy".to_owned() } else { format!("{} copies", thousands(n)) }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::space_bin::{PutBacks, yourself_words};
+    use crate::space_removing::crashed_words;
     use mo_library::PluginKind;
+    use mo_space::clean::Problem;
     use std::collections::{HashMap, HashSet};
 
     const MB: u64 = 1 << 20;
@@ -1103,7 +790,7 @@ mod tests {
         let card = picking(Some(&stuck), false);
         assert!(!card.ticks && card.parts.iter().all(|p| p.tick.is_none()) && card.note.is_empty());
         assert_eq!(Removing::default().remove_button(Some(&stuck), false, &PutBacks::default()), None);
-        assert_eq!(Removing::default().remove_button(None, true, &PutBacks::default()), None);
+        assert_eq!(Removing::default().remove_button(None::<&Found>, true, &PutBacks::default()), None);
     }
 
     #[test]
