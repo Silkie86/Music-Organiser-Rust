@@ -1,9 +1,9 @@
 //! The Space page: the drives your projects, samples, backup and the app's own files are on, how full each is, what
-//! the app's own files take (part 1), and Bitwig's copies of Library multisamples in your projects (part 2), with Fix
-//! for the saves you tick. mo_app's `space` and `space_bitwig` decide every word. It looks the first time the page
-//! shows, on low-priority threads, and again when it shows after five minutes or on Measure again, so nothing on the
-//! window's thread waits for a disk (rule 12). Only Fix writes, and only new "(fixed)" projects beside the saves you
-//! ticked; the library is only read.
+//! the app's own files take (part 1), Bitwig's copies of Library multisamples in your projects (part 2), with Fix for
+//! the saves you tick, and the old copies moving plugin folders to another drive left (part 3). mo_app's `space`,
+//! `space_bitwig` and `space_old` decide every word. It looks the first time the page shows, on low-priority threads,
+//! and again when it shows after five minutes or on Measure again, so nothing on the window's thread waits for a disk
+//! (rule 12). Only Fix writes, and only new "(fixed)" projects beside the saves you ticked; the library is only read.
 
 use std::cell::RefCell;
 use std::panic::AssertUnwindSafe;
@@ -16,12 +16,14 @@ use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
 use mo_app::places::Place;
 use mo_app::shortcuts::what_of;
-use mo_app::space::{self, Drive, Fill, Holds, Part};
+use mo_app::space::{self, Drive, Fill, Holds, Opens, Part};
 use mo_app::space_bitwig::{self, BITWIG_COPIES, Copies, Fixes, Fixing, ToFix};
+use mo_app::space_old::{self, Found, OLD_COPIES};
 use mo_app::{backup, log, paths, shell};
 use mo_catch::catch_crash;
 use mo_space::app_files::{self, AppFilesPart};
 use mo_space::bitwig::{self, LibraryIndex};
+use mo_space::plugin_space;
 use slint::{ComponentHandle, ModelRc, VecModel};
 
 use crate::{AppWindow, CardAction, CardPart, DriveCard, RoomLine, SpaceData};
@@ -61,10 +63,19 @@ struct BitwigAsk {
     feed: Feed,
 }
 
+/// One look for old copies. It measures each one, which can take a while for a big sound library, so it has a thread
+/// of its own. It's asked for with the page's own looks (the first, the five-minute one and Measure again), unless one
+/// is still on.
+struct OldAsk {
+    id: u64,
+    library: PathBuf,
+    stop: Arc<AtomicBool>,
+}
+
 /// What a look brings back, a step at a time: the drives first (quick), then the app's files once they're measured;
-/// and from the look for Bitwig copies, how far it is, then what it found. A look that crashed (the crash is logged)
-/// says so, so the page doesn't wait for it for ever. Fix brings back how each save went, then that it has finished,
-/// always, even when it crashed.
+/// from the look for Bitwig copies, how far it is, then what it found; and what the look for old copies found. A look
+/// that crashed (the crash is logged) says so, so the page doesn't wait for it for ever. Fix brings back how each save
+/// went, then that it has finished, always, even when it crashed.
 enum Step {
     Drives(u64, Vec<Drive>),
     AppFiles(u64, Vec<AppFilesPart>),
@@ -72,6 +83,8 @@ enum Step {
     BitwigLooking(u64, (usize, usize)),
     Bitwig(u64, Copies),
     BitwigCrashed(u64),
+    Old(u64, Found),
+    OldCrashed(u64),
     Fixed(PathBuf, Fixing),
     FixDone,
 }
@@ -135,6 +148,11 @@ struct Page {
     bitwig_looking: Option<(usize, usize)>,
     /// What Fix did this time, the saves you ticked or unticked, and the projects whose other saves are on show.
     fixes: Fixes,
+    /// The look for old copies, what the last one found (it stays on show while the next one looks), and whether one
+    /// is on.
+    old_look: Looks<OldAsk>,
+    old: Option<Found>,
+    old_looking: bool,
     /// The picked line's id, or "" when none is.
     picked: String,
     /// The parts on the card on show, for its ticks and links (they say which part by its place). The card's rows
@@ -199,9 +217,19 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed) {
         });
         show_card(&app);
     });
+    // A fixed project's link opens it in Bitwig; an old copy's shows it in its folder.
     data.on_open_part(move |at| {
-        if let Some(file) = PAGE.with(|p| part_at(&p.borrow(), at).and_then(|part| part.open.clone())) {
-            open_in_bitwig(file);
+        let (open, feed) = PAGE.with(|p| {
+            let p = p.borrow();
+            (part_at(&p, at).and_then(|part| part.open.clone()), p.feed.clone())
+        });
+        match (open, feed) {
+            (Some((Opens::InBitwig, file)), _) => open_in_bitwig(file),
+            (Some((Opens::InFolder, path)), Some(feed)) => {
+                let path = path.to_string_lossy();
+                crate::files::reveal(&feed, &path, shell::folder_of(&path));
+            }
+            _ => {}
         }
     });
     let weak = app.as_weak();
@@ -224,20 +252,25 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed) {
     }
 }
 
-/// The page came on show: it looks the first time, and again once what it shows is five minutes old. It looks for
-/// Bitwig copies the first time, and again only while no look for them has finished.
+/// The page came on show: it looks the first time, and again once what it shows is five minutes old, old copies too,
+/// so the reminder of them keeps up with what's there. It looks for Bitwig copies the first time, and again only while
+/// no look for them has finished: it reads every project.
 pub fn shown(app: &AppWindow) {
-    let (stale, bitwig) = PAGE.with(|p| {
+    let (stale, bitwig, old) = PAGE.with(|p| {
         let p = p.borrow();
         let wired = p.feed.is_some();
         let stale = wired && p.looked.is_none_or(|at| at.elapsed() >= FRESH);
-        (stale, wired && p.bitwig.is_none() && p.bitwig_looking.is_none())
+        let bitwig = wired && p.bitwig.is_none() && p.bitwig_looking.is_none();
+        (stale, bitwig, wired && !p.old_looking && (stale || p.old.is_none()))
     });
     if stale {
         look_again(app);
     }
     if bitwig {
         look_for_copies(app);
+    }
+    if old {
+        look_for_old(app);
     }
 }
 
@@ -270,6 +303,11 @@ fn chosen(app: &AppWindow, id: &str) {
         (MEASURE, _) => {
             look_again(app);
             look_for_copies(app);
+            // A look for old copies that's on goes on: it read the moves just now, and nothing it measured is kept
+            // for a new one.
+            if !PAGE.with(|p| p.borrow().old_looking) {
+                look_for_old(app);
+            }
         }
         (REVEAL, Some(feed)) => crate::files::open_folder(&feed, &paths::data_dir().to_string_lossy()),
         (FIX, Some(feed)) => fix_ticked(app, feed),
@@ -479,7 +517,7 @@ fn look_for_copies(app: &AppWindow) {
 fn look_for_copies_now(ask: BitwigAsk, index: &mut Option<LibraryIndex>, weak: &slint::Weak<AppWindow>) {
     let roots: Vec<PathBuf> = project_roots(&ask.library).into_iter().map(PathBuf::from).collect();
     let documents = bitwig::documents();
-    let job = ask.feed.start(space_bitwig::LOOKING, "");
+    let job = ask.feed.start(space_bitwig::LOOKING, space_bitwig::LOOKING_WHY);
     // How far it is reaches the window at most every PROGRESS_EVERY, and always at the start and the end.
     let mut told: Option<Instant> = None;
     // Spread over the low-priority pool's threads (rule 21).
@@ -496,12 +534,68 @@ fn look_for_copies_now(ask: BitwigAsk, index: &mut Option<LibraryIndex>, weak: &
     });
     match found {
         Ok(copies) => {
-            job.done(&space_bitwig::found_words(&copies));
+            let (headline, words) = space_bitwig::found_words(&copies);
+            job.done_as(headline, &words);
             arrive(weak, Step::Bitwig(ask.id, copies));
         }
         // Stopped for a newer look, whose own card follows.
-        Err(_) => job.done_as("Stopped looking for Bitwig copies", "A newer look took its place"),
+        Err(_) => job.done_as(space_bitwig::LOOK_STOPPED.0, space_bitwig::LOOK_STOPPED.1),
     }
+}
+
+/// Asks for a new look for old copies, on the page's third low-priority thread. One still looking stops: the newest
+/// wins (rule 12).
+fn look_for_old(app: &AppWindow) {
+    let ask = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.feed.as_ref()?;
+        let (id, stop) = p.old_look.next();
+        p.old_looking = true;
+        Some(OldAsk { id, library: p.library.clone(), stop })
+    });
+    let Some(ask) = ask else { return };
+    let weak = app.as_weak();
+    // A crash in a look (logged as one) leaves the thread for the next look. A look stopped for a newer one says
+    // nothing: the newer one's finds follow.
+    let work = move |ask: OldAsk| {
+        let id = ask.id;
+        match catch_crash(AssertUnwindSafe(|| look_for_old_now(&ask))) {
+            Ok(Some(found)) => arrive(&weak, Step::Old(id, found)),
+            Ok(None) => {}
+            Err(_) => arrive(&weak, Step::OldCrashed(id)),
+        }
+    };
+    let started = PAGE.with(|p| p.borrow_mut().old_look.ask("Space old copies", work, ask));
+    if let Err(e) = started {
+        log::error("Space", &format!("Couldn't start looking for old copies: {e}"));
+        // Measure again can try again, and so can the page the next time it shows.
+        PAGE.with(|p| p.borrow_mut().old_looking = false);
+    }
+    // The old copies card's Measure again waits for it.
+    show_card(app);
+}
+
+/// One look for old copies, off the window's thread: the moves as the library keeps them (read-only, and closed
+/// again before anything is measured), then each old copy still there, measured, and any other "… (old copy)" folder
+/// in the folders plugins keep their data in. None when it was stopped for a newer look.
+fn look_for_old_now(ask: &OldAsk) -> Option<Found> {
+    let (moved, homes) = match open_library(&ask.library) {
+        Some(lib) => {
+            let setting = |key: &str| {
+                lib.setting(key).unwrap_or_else(|e| {
+                    log::warning("Space", &format!("Couldn't read the moved folders ({key}): {e}"));
+                    None
+                })
+            };
+            (setting(space_old::MOVED_FOLDERS), setting(space_old::OLD_HOMES))
+        }
+        None => (None, None),
+    };
+    let look_in: Vec<String> =
+        plugin_space::data_roots().iter().map(|root| root.to_string_lossy().into_owned()).collect();
+    // On the pool for long work that waits on a disk (an old copy can be a whole sound library), so the pages' quick
+    // jobs don't wait for it (rule 21).
+    background::on_bulk_pool(|| space_old::look(moved.as_deref(), homes.as_deref(), &look_in, &ask.stop)).ok()
 }
 
 /// The library, opened read-only for the folders it knows; None when there's none yet or it can't be read (said in
@@ -584,6 +678,16 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                     p.bitwig_looking = None;
                     Changed::Wins
                 }
+                Step::Old(id, found) if id == p.old_look.asked => {
+                    p.old = Some(found);
+                    p.old_looking = false;
+                    Changed::Wins
+                }
+                // Shown again, the page looks again; what the last look found stays on show.
+                Step::OldCrashed(id) if id == p.old_look.asked => {
+                    p.old_looking = false;
+                    Changed::Wins
+                }
                 Step::Fixed(save, fixing) => {
                     p.fixes.done(save, fixing);
                     Changed::Wins
@@ -641,17 +745,19 @@ pub fn show(app: &AppWindow) {
     show_wins(app);
 }
 
-/// Shows Biggest wins first and the picked line's card: all that changes while a look for Bitwig copies goes on. A
-/// picked line that's gone from the list (no copies found this time) has its card closed.
+/// Shows Biggest wins first and the picked line's card: all that changes while a look for Bitwig copies or old copies
+/// goes on. A picked line that's gone from the list (none found this time) has its card closed.
 fn show_wins(app: &AppWindow) {
     let data = app.global::<SpaceData>();
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        let line = space_bitwig::line(p.bitwig.as_ref(), p.bitwig_looking);
-        if line.is_none() && p.picked == BITWIG_COPIES {
+        let bitwig = space_bitwig::line(p.bitwig.as_ref(), p.bitwig_looking);
+        let old = space_old::line(p.old.as_ref());
+        if (bitwig.is_none() && p.picked == BITWIG_COPIES) || (old.is_none() && p.picked == OLD_COPIES) {
             p.picked.clear();
         }
-        let wins: Vec<RoomLine> = line.into_iter().map(room_line).collect();
+        let lines = space::biggest_first(bitwig.into_iter().chain(old).collect());
+        let wins: Vec<RoomLine> = lines.into_iter().map(room_line).collect();
         data.set_wins(ModelRc::new(VecModel::from(wins)));
         data.set_wins_note(space_bitwig::wins_note(p.bitwig.as_ref()).into());
     });
@@ -673,6 +779,11 @@ fn show_card(app: &AppWindow) {
                 let fix = p.fixes.button(p.bitwig.as_ref()).map(|(words, enabled)| (FIX, words, enabled));
                 let card = space_bitwig::card(p.bitwig.as_ref(), p.bitwig_looking, &p.fixes);
                 (card, fix.into_iter().chain([measure_button(&p)]).collect())
+            }
+            // Measure again waits while old copies are being measured too, which shows a look is on.
+            OLD_COPIES => {
+                let (id, words, enabled) = measure_button(&p);
+                (space_old::card(p.old.as_ref()), vec![(id, words, enabled && !p.old_looking)])
             }
             _ => return,
         };
@@ -705,19 +816,20 @@ fn card_part(part: &Part) -> CardPart {
         ticked: part.tick.as_ref().is_some_and(|(_, ticked)| *ticked),
         status: part.status.as_str().into(),
         problem: part.problem,
-        can_open: part.open.is_some(),
+        open: part.open.as_ref().map(|(opens, _)| opens.words()).unwrap_or_default().into(),
         more: part.more.as_ref().map(|(words, _)| words.as_str()).unwrap_or_default().into(),
     }
 }
 
-/// Shows made-up drives, app files and Bitwig copies (with what Fix did to them), without reading any disk: for the
-/// screenshots.
+/// Shows made-up drives, app files, Bitwig copies (with what Fix did to them) and old copies, without reading any
+/// disk: for the screenshots.
 pub fn show_sample(
     app: &AppWindow,
     drives: Vec<Drive>,
     parts: Vec<AppFilesPart>,
     bitwig: Copies,
     fixes: Fixes,
+    old: Found,
     picked: &str,
 ) {
     PAGE.with(|p| {
@@ -726,6 +838,7 @@ pub fn show_sample(
         p.parts = Some(parts);
         p.bitwig = Some(bitwig);
         p.fixes = fixes;
+        p.old = Some(old);
         p.picked = picked.to_owned();
         // Shown now, so showing the page doesn't look at the real drives or projects.
         p.looked = Some(Instant::now());
