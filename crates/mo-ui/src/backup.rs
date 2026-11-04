@@ -510,7 +510,7 @@ fn start_run(weak: &Weak<AppWindow>) {
         // A run that breaks part way still ends here, so the page lets go of it and says so, instead of staying busy
         // with Run and Stop doing nothing (the panic hook has logged what broke).
         let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            background::on_bulk_pool(|| backup::run(&prepared, &settings, &stop, &progress))
+            background::on_copy_pool(|| backup::run(&prepared, &settings, &stop, &progress))
         }))
         .unwrap_or_else(|_| backup::Ran::broke(Local::now().naive_local()));
         *FINISHED.lock().unwrap_or_else(PoisonError::into_inner) = Some((ran, settings.drive.clone()));

@@ -46,7 +46,18 @@ pub fn on_bulk_pool<T: Send>(work: impl FnOnce() -> T + Send) -> T {
     install(BULK.as_ref(), work)
 }
 
-/// The most threads [`on_bulk_pool`] gets.
+/// [`on_bulk_pool`] for a backup's copy, which can run for hours: a pool of its own again, so working out the next
+/// plan (or reading the drive's older versions) while it copies isn't held up behind it either.
+pub fn on_copy_pool<T: Send>(work: impl FnOnce() -> T + Send) -> T {
+    static COPY: LazyLock<Option<rayon::ThreadPool>> = LazyLock::new(|| {
+        let threads = POOL_THREADS.load(std::sync::atomic::Ordering::Relaxed);
+        let threads = if threads == 0 { cores() } else { threads };
+        build_pool("Backup copy", threads.clamp(1, BULK_THREADS))
+    });
+    install(COPY.as_ref(), work)
+}
+
+/// The most threads [`on_bulk_pool`] (and [`on_copy_pool`]) gets.
 const BULK_THREADS: usize = 4;
 
 /// A pool of `threads` low-priority threads called `name 0`, `name 1`...; 0 is rayon's own choice, one per core.
