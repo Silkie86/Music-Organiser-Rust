@@ -15,7 +15,7 @@ use mo_space::after_move::{
     old_home_can_go, old_homes_json, only_in_old_home, parse_old_homes, real_place, remove_old_home, replaced, repoint,
 };
 use mo_space::clean::{Bin, Problem, Removed};
-use mo_space::folder_move::{CantMove, Drives, MovedFolder, move_back, move_folder, only_in_old_copy};
+use mo_space::folder_move::{CantMove, Drives, MovedFolder, move_back, move_folder, only_in_old_copy, remove_old_copy};
 use mo_space::key;
 use mo_space::plugin_space::{PluginSpace, SpaceFolder, SpaceKind};
 
@@ -365,6 +365,203 @@ fn moving_back_makes_an_inner_moved_folders_link_lead_where_it_is_now() {
     assert!(is_link(&inner) && !is_link(&c.join("NI")));
     assert_eq!(real(&inner), real(&e.join("Plugin Data").join("Reaktor 6")));
     assert_eq!(read(&inner.join("r.ens")), "r-new");
+}
+
+/// The link of a moved folder inside another (Reaktor 6 first, then Native Instruments around it) is the app's own, but
+/// one gone from the copy (an uninstaller deleted it through the folder's link, say) is only in the old copy: it's the
+/// last link to Reaktor 6's copy, so the old copy stays until you say you're sure.
+#[test]
+fn an_inner_moved_folders_link_gone_from_the_copy_is_only_in_the_old_copy() {
+    let dir = fixtures("mo-space-after-inner-link-gone");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    write(&c, "NI/Reaktor 6/r.ens", "r");
+    write(&c, "NI/k.nki", "k");
+    let data = d.join("Plugin Data");
+    fs::create_dir_all(&data).unwrap();
+    let mut all = vec![move_it(&c.join("NI").join("Reaktor 6"), &data, &[])];
+    all.push(move_it(&c.join("NI"), &data, &all));
+    let stop = AtomicBool::new(false);
+    // Reaktor 6's old copy (in Native Instruments' one) was deleted, then its link, through the folder's link.
+    let old = PathBuf::from(&all[1].old_copy);
+    fs::remove_dir_all(old.join("Reaktor 6 (old copy)")).unwrap();
+    assert!(only_in_old_copy(&all[1], &all, &stop).unwrap().is_empty());
+    unlink(&c.join("NI").join("Reaktor 6"));
+    assert_eq!(only_in_old_copy(&all[1], &all, &stop).unwrap(), ["Reaktor 6"]);
+    let done = remove_old_copy(&all[1], &all, false, &bin(&dir), &stop);
+    assert!(done.removed.is_empty() && done.problems.len() == 1, "{done:?}");
+    assert!(is_link(&old.join("Reaktor 6")));
+}
+
+/// Moving back a folder with a moved folder inside it (Reaktor 6 first, then Native Instruments around it), once the
+/// folder the moved folders live in has moved to another drive: as the first file comes back, the copy is put aside,
+/// with a link in its place to another folder that has a Reaktor 6 link of its own. Moving back stops, and the old
+/// copy's link to Reaktor 6 is as it was: it's pointed where Reaktor 6 is now only once both passes are done.
+#[cfg(unix)]
+#[test]
+fn moving_back_stopped_part_way_leaves_an_inner_moved_folders_link_as_it_was() {
+    let dir = fixtures("mo-space-after-home-inner-back-stopped");
+    let (c, d, e) = (dir.join("C"), dir.join("D"), dir.join("E"));
+    write(&c, "NI/Reaktor 6/r.ens", "r");
+    write(&c, "NI/k.nki", "k");
+    write(&dir, "Other/k.nki", "other");
+    write(&dir, "Elsewhere/r.ens", "elsewhere");
+    folder_link(&dir.join("Elsewhere"), &dir.join("Other").join("Reaktor 6"));
+    let data = d.join("Plugin Data");
+    fs::create_dir_all(&data).unwrap();
+    fs::create_dir_all(&e).unwrap();
+    let mut all = vec![move_it(&c.join("NI").join("Reaktor 6"), &data, &[])];
+    all.push(move_it(&c.join("NI"), &data, &all));
+    let stop = AtomicBool::new(false);
+    let done = move_home(&s(&data), &s(&e), &all, &[], 2, &OtherDrive, &nothing, &stop).unwrap();
+    let copy = e.join("Plugin Data").join("NI");
+    // The plugin saves through the links, so the first pass brings that file back.
+    fs::write(c.join("NI/k.nki"), "k-new").unwrap();
+    let progress = |bytes: u64| {
+        if bytes == 5 {
+            fs::rename(&copy, e.join("Plugin Data").join("NI aside")).unwrap();
+            folder_link(&dir.join("Other"), &copy);
+        }
+    };
+    let result = move_back(&done.moved[1], &done.moved, &OtherDrive, &progress, &stop);
+    let Err(CantMove::Failed(why)) = &result else { panic!("{result:?}") };
+    assert!(why.starts_with(&s(&copy)) && why.contains("led somewhere else"), "{why}");
+    let old = PathBuf::from(&done.moved[1].old_copy);
+    assert!(is_link(&old.join("Reaktor 6")));
+    assert_eq!(real(&old.join("Reaktor 6")), real(&data.join("Reaktor 6")));
+    assert_eq!(read(&old.join("k.nki")), "k");
+}
+
+/// As above, but the copy's link to Reaktor 6 was pointed somewhere else than where the app has it (by hand, say):
+/// which of the two is right can't be told, so moving back leaves the old copy's link as it was, and names it.
+#[test]
+fn moving_back_names_an_inner_moved_folders_link_the_copy_has_pointed_elsewhere() {
+    let dir = fixtures("mo-space-after-home-inner-back-elsewhere");
+    let (c, d, e) = (dir.join("C"), dir.join("D"), dir.join("E"));
+    write(&c, "NI/Reaktor 6/r.ens", "r");
+    write(&c, "NI/k.nki", "k");
+    write(&dir, "Elsewhere/r.ens", "elsewhere");
+    let data = d.join("Plugin Data");
+    fs::create_dir_all(&data).unwrap();
+    fs::create_dir_all(&e).unwrap();
+    let mut all = vec![move_it(&c.join("NI").join("Reaktor 6"), &data, &[])];
+    all.push(move_it(&c.join("NI"), &data, &all));
+    let stop = AtomicBool::new(false);
+    let done = move_home(&s(&data), &s(&e), &all, &[], 2, &OtherDrive, &nothing, &stop).unwrap();
+    let inner = c.join("NI").join("Reaktor 6");
+    unlink(&inner);
+    folder_link(&dir.join("Elsewhere"), &inner);
+    let back = move_back(&done.moved[1], &done.moved, &OtherDrive, &nothing, &stop).unwrap();
+    assert_eq!(back.links_left, ["Reaktor 6"]);
+    assert!(is_link(&inner) && !is_link(&c.join("NI")));
+    assert_eq!(real(&inner), real(&data.join("Reaktor 6")));
+}
+
+/// Moves Reaktor 6, then Native Instruments around it, then (with `home_moves`) the folder the moved folders live in, to
+/// another drive; then moves Native Instruments back with its old copy's folder locked (as Windows guards one, say).
+/// What moving back says, and where Native Instruments is; `None` run as root, which locking doesn't keep out.
+#[cfg(unix)]
+fn moved_back_locked(
+    name: &str,
+    home_moves: bool,
+) -> Option<(Result<mo_space::folder_move::MovedBack, CantMove>, PathBuf, PathBuf)> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = fixtures(name);
+    let (c, d, e) = (dir.join("C"), dir.join("D"), dir.join("E"));
+    write(&c, "NI/Reaktor 6/r.ens", "r");
+    write(&c, "NI/k.nki", "k");
+    let data = d.join("Plugin Data");
+    fs::create_dir_all(&data).unwrap();
+    fs::create_dir_all(&e).unwrap();
+    let mut all = vec![move_it(&c.join("NI").join("Reaktor 6"), &data, &[])];
+    all.push(move_it(&c.join("NI"), &data, &all));
+    let stop = AtomicBool::new(false);
+    if home_moves {
+        all = move_home(&s(&data), &s(&e), &all, &[], 2, &OtherDrive, &nothing, &stop).unwrap().moved;
+    }
+    let lock = |at: &Path, mode: u32| fs::set_permissions(at, fs::Permissions::from_mode(mode)).unwrap();
+    let old = PathBuf::from(&all[1].old_copy);
+    lock(&old, 0o555);
+    if fs::write(old.join("probe"), "x").is_ok() {
+        let _ = fs::remove_file(old.join("probe"));
+        lock(&old, 0o755);
+        return None;
+    }
+    let back = move_back(&all[1], &all, &OtherDrive, &nothing, &stop);
+    let ni = c.join("NI");
+    lock(if old.exists() { &old } else { &ni }, 0o755);
+    Some((back, ni, data))
+}
+
+/// Once the folder the moved folders live in has moved, the old copy's link to Reaktor 6 can't be pointed where
+/// Reaktor 6 is now, as its folder is locked: it stays as it was, and is named.
+#[cfg(unix)]
+#[test]
+fn moving_back_names_an_inner_moved_folders_link_that_cant_be_pointed_where_it_is_now() {
+    let Some((back, ni, data)) = moved_back_locked("mo-space-after-home-inner-back-locked", true) else { return };
+    assert_eq!(back.unwrap().links_left, ["Reaktor 6"]);
+    assert!(is_link(&ni.join("Reaktor 6")) && !is_link(&ni));
+    assert_eq!(real(&ni.join("Reaktor 6")), real(&data.join("Reaktor 6")));
+}
+
+/// As above, but the folder the moved folders live in didn't move, so the old copy's link to Reaktor 6 leads where it
+/// is already: it's let be, so there's nothing to name.
+#[cfg(unix)]
+#[test]
+fn moving_back_lets_an_inner_moved_folders_link_be_where_it_leads_there_already() {
+    let Some((back, ni, data)) = moved_back_locked("mo-space-after-inner-back-locked", false) else { return };
+    assert!(back.unwrap().links_left.is_empty());
+    assert_eq!(real(&ni.join("Reaktor 6")), real(&data.join("Reaktor 6")));
+}
+
+/// Reaktor 6 moved, then Native Instruments around it, and the old copy has a real folder where the copy has Reaktor
+/// 6's link (Reaktor 6's files, copied following the link, as the C# app's older move did): moving back leaves that
+/// folder as it is, and has nothing to name.
+#[test]
+fn moving_back_leaves_a_real_folder_where_the_copy_has_an_inner_moved_folders_link() {
+    let dir = fixtures("mo-space-after-inner-real-in-old-copy");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    write(&c, "NI/Reaktor 6/r.ens", "r");
+    write(&c, "NI/k.nki", "k");
+    let data = d.join("Plugin Data");
+    fs::create_dir_all(&data).unwrap();
+    let mut all = vec![move_it(&c.join("NI").join("Reaktor 6"), &data, &[])];
+    all.push(move_it(&c.join("NI"), &data, &all));
+    let old = PathBuf::from(&all[1].old_copy);
+    unlink(&old.join("Reaktor 6"));
+    copy_all(&data.join("Reaktor 6"), &old.join("Reaktor 6"));
+    let stop = AtomicBool::new(false);
+    let back = move_back(&all[1], &all, &OtherDrive, &nothing, &stop).unwrap();
+    assert!(back.links_left.is_empty(), "{:?}", back.links_left);
+    let inner = c.join("NI").join("Reaktor 6");
+    assert!(!is_link(&inner) && !is_link(&c.join("NI")));
+    assert_eq!(read(&inner.join("r.ens")), "r");
+}
+
+/// As above, with Reaktor 6 in a folder in Native Instruments that the old copy has a link of yours in the place of
+/// now, leading to a folder with a link to Reaktor 6's old place: moving back names that link, and never changes what's
+/// reached through it.
+#[test]
+fn moving_back_never_points_an_inner_moved_folders_link_through_a_link_in_the_old_copy() {
+    let dir = fixtures("mo-space-after-home-inner-back-through-link");
+    let (c, d, e) = (dir.join("C"), dir.join("D"), dir.join("E"));
+    write(&c, "NI/Sub/Reaktor 6/r.ens", "r");
+    write(&c, "NI/k.nki", "k");
+    let data = d.join("Plugin Data");
+    fs::create_dir_all(&data).unwrap();
+    fs::create_dir_all(&e).unwrap();
+    let mut all = vec![move_it(&c.join("NI").join("Sub").join("Reaktor 6"), &data, &[])];
+    all.push(move_it(&c.join("NI"), &data, &all));
+    let stop = AtomicBool::new(false);
+    let done = move_home(&s(&data), &s(&e), &all, &[], 2, &OtherDrive, &nothing, &stop).unwrap();
+    let old = PathBuf::from(&done.moved[1].old_copy);
+    let elsewhere = dir.join("Elsewhere");
+    fs::rename(old.join("Sub"), &elsewhere).unwrap();
+    folder_link(&elsewhere, &old.join("Sub"));
+    let back = move_back(&done.moved[1], &done.moved, &OtherDrive, &nothing, &stop).unwrap();
+    assert_eq!(back.links_left, ["Sub"]);
+    assert!(is_link(&elsewhere.join("Reaktor 6")));
+    assert_eq!(real(&elsewhere.join("Reaktor 6")), real(&data.join("Reaktor 6")));
 }
 
 /// As the last pass copies the folder the moved folders live in, it's put aside, with a link to another folder in its
