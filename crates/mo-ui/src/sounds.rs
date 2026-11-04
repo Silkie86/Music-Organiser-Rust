@@ -10,6 +10,7 @@ mod sky;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fs;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -28,11 +29,12 @@ use mo_app::{log, sweep_timing, to_bitwig, year_strip};
 use mo_audio::play::Player;
 use mo_library::UsageRules;
 use mo_library::songs::thousands;
-use mo_sounds::index::SoundIndex;
+use mo_sounds::compact::{self, PageRead};
+use mo_sounds::index::{Gathered, SoundIndex};
 use mo_sounds::liking::{self, LIKED_WEIGHTS_KEY, LikedWeights};
 use mo_sounds::rediscover::{self, FolderUse};
 use mo_sounds::usage::{self, Usage};
-use mo_sounds::{Sound, SoundsDb, music};
+use mo_sounds::{Sound, SoundsDb, SoundsError, music};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, Timer, TimerMode, VecModel};
 
 use crate::finder::How;
@@ -415,8 +417,9 @@ pub fn graphics_gone(app: &AppWindow) {
 /// Wires the page and starts reading the sound library at `sounds_db` in the background, then how much your songs use
 /// each sound from the song library at `library_db` (both read-only). The sounds show as soon as they're read; the use
 /// counts and Most liked follow when they're worked out, as in the C# app. Show in folder and Copy path report on
-/// `feed`'s cards.
+/// `feed`'s cards, and so does the app's own copy of the sound library as it's made or brought up to date.
 pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: Feed, shortcuts: &Shortcuts) {
+    let cards = feed.clone();
     wire(app, feed, shortcuts);
     crate::finder::on_open(Kind::Sound, |app, hit, how| {
         let Some(at) = hit.id.parse::<i64>().ok().and_then(|id| PAGE.with(|p| p.borrow().places.get(&id).copied()))
@@ -451,10 +454,11 @@ pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: F
         });
     };
     if here {
-        read_all(&sounds_db, &library_db, send);
+        // The screenshots read their fixture as it is: nothing is written beside it.
+        read_all(&sounds_db, &library_db, None, send);
         return;
     }
-    if let Err(e) = background::spawn("Sounds library", move || read_all(&sounds_db, &library_db, send)) {
+    if let Err(e) = background::spawn("Sounds library", move || read_all(&sounds_db, &library_db, Some(cards), send)) {
         // The sounds would never come: the page says why, rather than reading for ever.
         loaded(app, Err(format!("its reader couldn't start ({e})")));
     }
@@ -471,12 +475,14 @@ pub fn reading(app: &AppWindow) {
     data.set_empty_text("".into());
 }
 
-/// What reading brings back, in two steps: the sounds first, then the list again with how your songs use them.
+/// What reading brings back, in steps: the sounds first, then the list again with how your songs use them.
 enum Step {
     Read(Result<Read, String>),
     Used(Arc<SoundList>),
     /// Every sound's fingerprint, for Sounds like this.
     Index(Arc<SoundIndex>),
+    /// The sounds again, once the app's copy of the library was brought up to date with what the C# app changed.
+    Refreshed(Refreshed),
 }
 
 fn arrive(app: &AppWindow, step: Step) {
@@ -485,12 +491,15 @@ fn arrive(app: &AppWindow, step: Step) {
         Step::Read(read) => loaded(app, read),
         Step::Used(list) => use_known(app, list),
         Step::Index(index) => index_known(app, index),
+        Step::Refreshed(refreshed) => brought_up_to_date(app, refreshed),
     }
 }
 
 /// What reading the library gives: the sounds ready to list, what was played, and the view and autoplay you had last.
 struct Read {
     library: Library,
+    /// Where the galaxy's saved maps are read from: the app's copy of the library, or `sounds.db` without one.
+    source: PathBuf,
     view: Option<String>,
     count: Option<String>,
     export_folder: Option<String>,
@@ -583,9 +592,14 @@ impl Settings {
     }
 }
 
-/// Reads the sounds and sends them, then works out how your songs use them and sends that. Without a song library
-/// the use stays unknown (the Used chips stay hidden).
-fn read_all(sounds_db: &Path, library_db: &Path, send: impl Fn(Step)) {
+/// Reads the sounds and sends them, then their fingerprints, then works out how your songs use them and sends that.
+/// Without a song library the use stays unknown (the Used chips stay hidden).
+///
+/// With `cards` (not for the screenshots, which read their fixture as it is), the sounds come from the app's own copy
+/// of the library beside `sounds.db` ([`compact`]): a fraction of the reading. With no copy yet, it's made on the
+/// same pass that reads `sounds.db` for the page. A copy that's behind (the C# app changed `sounds.db` since) is shown
+/// at once, then brought up to date, and the page takes the sounds again from it ([`Step::Refreshed`]).
+fn read_all(sounds_db: &Path, library_db: &Path, cards: Option<Feed>, send: impl Fn(Step)) {
     if !sounds_db.exists() {
         send(Step::Read(Err(String::new())));
         return;
@@ -596,67 +610,230 @@ fn read_all(sounds_db: &Path, library_db: &Path, send: impl Fn(Step)) {
     });
     let settings = lib.as_ref().map(Settings::read).unwrap_or_default();
     let now = Local::now().naive_local();
-    let db = match SoundsDb::open_read_only(sounds_db) {
-        Ok(db) => db,
+    let began = Instant::now();
+    let first = match &cards {
+        Some(cards) => read_through_copy(sounds_db, now, cards),
+        None => read_in_place(sounds_db, now),
+    };
+    let mut first = match first {
+        Ok(first) => first,
         Err(e) => {
             send(Step::Read(Err(e.to_string())));
             return;
         }
     };
-    let began = Instant::now();
-    // The sounds and their fingerprints in one pass over the library: reading the fingerprints apart meant reading
-    // the whole file twice more.
-    let everything = db.everything(now);
     let read_in = began.elapsed();
-    let (read, fingerprints) = match everything {
-        Ok(e) => {
-            let analysed = e.analysed();
-            let history = db.history(500).unwrap_or_default();
-            let library = Library::new(e.sounds, history, &settings.weights);
-            log::info(
-                "Sounds",
-                &format!(
-                    "{} sounds (read in {:.1} s, listed in {:.1} s)",
-                    library.list.len(),
-                    read_in.as_secs_f32(),
-                    (began.elapsed() - read_in).as_secs_f32()
-                ),
-            );
-            (Ok(library), Some((e.features, e.clap, analysed)))
-        }
-        Err(e) => (Err(e.to_string()), None),
-    };
-    drop(db);
-    let list = read.as_ref().ok().map(|l: &Library| l.list.clone());
-    send(Step::Read(read.map(|library| Read {
+    let sounds = std::mem::take(&mut first.sounds);
+    let analysed = count_analysed(&sounds);
+    let library = Library::new(sounds, std::mem::take(&mut first.played), &settings.weights);
+    log::info(
+        "Sounds",
+        &format!(
+            "{} sounds (read from {} in {:.1} s, listed in {:.1} s)",
+            library.list.len(),
+            first.source.file_name().unwrap_or_default().to_string_lossy(),
+            read_in.as_secs_f32(),
+            (began.elapsed() - read_in).as_secs_f32()
+        ),
+    );
+    let list = library.list.clone();
+    send(Step::Read(Ok(Read {
         library,
+        source: first.source.clone(),
         view: settings.view.clone(),
         count: settings.count.clone(),
         export_folder: settings.export_folder.clone(),
         drum_machine: settings.drum_machine.clone(),
         autoplay: settings.autoplay.clone(),
     })));
-    let (Some(list), Some((features, clap, analysed))) = (list, fingerprints) else { return };
-    // Sounds like this: every sound's fingerprint, read with the sounds; their blocks become the index.
-    let index = background::on_pool(move || SoundIndex::from_gathered(features, clap, analysed));
-    send(Step::Index(Arc::new(index)));
-    let Some(lib) = lib else { return };
+    // Sounds like this: every sound's fingerprint, read with the sounds or from the copy after them; their blocks
+    // become the index.
+    let prints = match first.prints.take() {
+        Some(prints) => Ok(prints),
+        None => first.db.fingerprints(analysed),
+    };
+    send_index(prints, analysed, &send);
     let year_ago = now.checked_sub_months(chrono::Months::new(12)).unwrap_or(now);
-    match count_usage(&lib, &list, year_ago, settings.rules) {
-        Ok(usage) => send(Step::Used(Arc::new(with_usage(&list, usage, &settings.weights)))),
-        Err(e) => log::warning("Sounds", &format!("Couldn't count how your songs use sounds: {e}")),
+    // How your songs use samples, read once: counted again for the sounds read again after an update.
+    let uses = lib.and_then(|lib| {
+        lib.sample_usage(year_ago, settings.rules)
+            .map_err(|e| log::warning("Sounds", &format!("Couldn't count how your songs use sounds: {e}")))
+            .ok()
+    });
+    if let Some(uses) = &uses {
+        send(Step::Used(Arc::new(with_usage(&list, usage_of(&list, uses), &settings.weights))));
+    }
+    if !first.behind {
+        return;
+    }
+    // The copy isn't held open while it's brought up to date.
+    let FirstRead { db, source: copy, .. } = first;
+    drop(db);
+    let Some(synced) = bring_up_to_date(sounds_db, &copy, cards.as_ref()) else { return };
+    if !synced.changed_anything() {
+        return;
+    }
+    let again = SoundsDb::open_read_only(&copy).and_then(|db| {
+        let sounds = db.all(now)?;
+        Ok((db.history(HISTORY_LENGTH).unwrap_or_default(), sounds, db))
+    });
+    let (played, sounds, db) = match again {
+        Ok(again) => again,
+        Err(e) => {
+            log::warning("Sounds", &format!("Couldn't read the sounds again once they were brought up to date: {e}"));
+            return;
+        }
+    };
+    let analysed_now = count_analysed(&sounds);
+    let mut library = Library::new(sounds, played, &settings.weights);
+    if let Some(uses) = &uses {
+        library.list = Arc::new(with_usage(&library.list, usage_of(&library.list, uses), &settings.weights));
+    }
+    // Worked out here, off the window's thread: half a million sounds to compare.
+    let same = list.same_sounds_as(&library.list);
+    send(Step::Refreshed(Refreshed { library, same, was: list }));
+    // The fingerprints read before stay right unless a sound gained, lost or changed one (or the count that says
+    // whether CLAP has heard enough changed).
+    if synced.prints > 0 || analysed_now != analysed {
+        send_index(db.fingerprints(analysed_now), analysed_now, &send);
     }
 }
 
-/// How your songs use each sound in `list` (by sound id), counting songs saved since `recent_since` as recent.
-fn count_usage(
-    lib: &mo_library::Library,
-    list: &SoundList,
-    recent_since: NaiveDateTime,
-    rules: UsageRules,
-) -> Result<HashMap<i64, Usage>, mo_library::LibraryError> {
-    let uses = lib.sample_usage(recent_since, rules)?;
-    Ok(background::on_pool(|| usage::usage(list.sounds(), &uses)))
+/// How many plays History lists.
+const HISTORY_LENGTH: usize = 500;
+
+/// How many sounds the analyser has been through.
+fn count_analysed(sounds: &[Sound]) -> usize {
+    sounds.iter().filter(|s| s.analysis.is_some()).count()
+}
+
+/// Makes the index of the fingerprints read, and sends it.
+fn send_index(prints: Result<(Gathered, Gathered), SoundsError>, analysed: usize, send: &impl Fn(Step)) {
+    match prints {
+        Ok((features, clap)) => {
+            let index = background::on_pool(move || SoundIndex::from_gathered(features, clap, analysed));
+            send(Step::Index(Arc::new(index)));
+        }
+        Err(e) => log::warning("Sounds", &format!("Couldn't read the sounds' fingerprints: {e}")),
+    }
+}
+
+/// The page's first read of the sound library, wherever it came from.
+struct FirstRead {
+    sounds: Vec<Sound>,
+    /// What was played (sound id, when), newest first.
+    played: Vec<(i64, NaiveDateTime)>,
+    /// What the rest is read from: the app's copy of the library, or `sounds.db` without one ...
+    db: SoundsDb,
+    /// ... and where it is.
+    source: PathBuf,
+    /// The fingerprints, when they came on the same pass as the sounds; else they're read from `db` after them.
+    prints: Option<(Gathered, Gathered)>,
+    /// The sounds came from a copy that's behind `sounds.db`: it's brought up to date once the page has them.
+    behind: bool,
+}
+
+/// The sounds read straight from `sounds_db`, fingerprints and all, writing nothing beside it (the screenshots).
+fn read_in_place(sounds_db: &Path, now: NaiveDateTime) -> Result<FirstRead, SoundsError> {
+    let db = SoundsDb::open_read_only(sounds_db)?;
+    // The sounds and their fingerprints in one pass over the library: reading the fingerprints apart meant reading
+    // the whole file twice more.
+    let everything = db.everything(now)?;
+    Ok(FirstRead {
+        sounds: everything.sounds,
+        played: db.history(HISTORY_LENGTH).unwrap_or_default(),
+        db,
+        source: sounds_db.to_owned(),
+        prints: Some((everything.features, everything.clap)),
+        behind: false,
+    })
+}
+
+/// The sounds read from the app's own copy of the library beside `sounds_db`, or (with no copy it can read yet) from
+/// `sounds_db` while the copy is made on the same pass ([`compact::read_for_page`]). Making it goes on `cards`.
+fn read_through_copy(sounds_db: &Path, now: NaiveDateTime, cards: &Feed) -> Result<FirstRead, SoundsError> {
+    let copy = compact::copy_of(sounds_db);
+    match compact::read_for_page(sounds_db, now)? {
+        PageRead::Copy { db, sounds, behind } => Ok(FirstRead {
+            sounds,
+            played: db.history(HISTORY_LENGTH).unwrap_or_default(),
+            db,
+            source: copy,
+            prints: None,
+            behind,
+        }),
+        PageRead::Library { everything, made } => {
+            let made = match made {
+                Ok(synced) if synced.made => {
+                    let size = |path: &Path| fs::metadata(path).map_or(0, |m| m.len());
+                    let line = list::copy_made_line(size(&copy), size(sounds_db));
+                    log::info("Sounds", &format!("Made the app's own copy of the sound library: {line}"));
+                    cards.start("Made the app's own copy of your sound library", "").done(&line);
+                    true
+                }
+                // One there that couldn't be read just then, brought up to date instead.
+                Ok(synced) => {
+                    log::info("Sounds", &format!("Brought the app's copy of the sound library up to date: {synced:?}"));
+                    true
+                }
+                Err(e) => {
+                    log::warning("Sounds", &format!("{e}"));
+                    cards
+                        .start("Couldn't make the app's own copy of your sound library", "")
+                        .failed(&list::copy_failed_line(&e));
+                    false
+                }
+            };
+            // What was played, from the copy made at the moment the sounds were read, or else from `sounds.db`.
+            let (db, source) = match made.then(|| SoundsDb::open_read_only(&copy)) {
+                Some(Ok(db)) => (db, copy),
+                _ => (SoundsDb::open_read_only(sounds_db)?, sounds_db.to_owned()),
+            };
+            Ok(FirstRead {
+                sounds: everything.sounds,
+                played: db.history(HISTORY_LENGTH).unwrap_or_default(),
+                db,
+                source,
+                prints: Some((everything.features, everything.clap)),
+                behind: false,
+            })
+        }
+    }
+}
+
+/// Brings the app's copy of the library up to date with `sounds_db` after the C# app changed it, saying so on
+/// `cards`. What changed, or `None` when it couldn't be done (it's tried again at the next start).
+fn bring_up_to_date(sounds_db: &Path, copy: &Path, cards: Option<&Feed>) -> Option<compact::Synced> {
+    let job = cards.map(|c| c.start("Bringing your sound library up to date", "With what the C# app changed in it"));
+    let began = Instant::now();
+    match compact::sync(sounds_db, copy) {
+        Ok(synced) => {
+            let line = list::copy_synced_line(&synced);
+            log::info(
+                "Sounds",
+                &format!(
+                    "Brought the app's copy of the sound library up to date in {:.1} s: {line}",
+                    began.elapsed().as_secs_f32()
+                ),
+            );
+            if let Some(job) = job {
+                job.done_as("Brought your sound library up to date", &line);
+            }
+            Some(synced)
+        }
+        Err(e) => {
+            log::warning("Sounds", &format!("{e}"));
+            if let Some(job) = job {
+                job.failed_as("Couldn't bring your sound library up to date", &list::copy_failed_line(&e));
+            }
+            None
+        }
+    }
+}
+
+/// How your songs use each sound in `list` (by sound id), from how they use samples (`uses`).
+fn usage_of(list: &SoundList, uses: &[mo_library::SampleUse]) -> HashMap<i64, Usage> {
+    background::on_pool(|| usage::usage(list.sounds(), uses))
 }
 
 /// How many sounds Sounds like this shows.
@@ -685,7 +862,11 @@ impl AlikeAsk {
 pub fn index_known(app: &AppWindow, index: Arc<SoundIndex>) {
     let picked = PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        p.index = Some(index);
+        // New ones in place of those the galaxy was laid out from (sounds new since, or heard again once the library
+        // was brought up to date): it's laid out again from these.
+        if p.index.replace(index).is_some() {
+            galaxy::forget(&mut p.galaxy);
+        }
         p.picked
     });
     if let Some(at) = picked {
@@ -794,6 +975,64 @@ fn use_known(app: &AppWindow, list: Arc<SoundList>) {
     }
 }
 
+/// The sounds read again once the app's copy of the library was brought up to date: a [`Library`] to show in place of
+/// the one on show, and whether it holds the same sounds in the same order (`same`) as the list it was compared with
+/// (`was`).
+struct Refreshed {
+    library: Library,
+    same: bool,
+    was: Arc<SoundList>,
+}
+
+/// The sounds were brought up to date with what the C# app changed while the page showed them as they were: shown
+/// now in their place. The same sounds in the same order (a play, stars, tags) go in with nothing on show moving: the
+/// view, filters, picked sound and the galaxy's stars stay as they are. Any other change (a sound new or gone) shows
+/// the library again, as it does when it's first read, keeping the view and picking the sound picked before.
+fn brought_up_to_date(app: &AppWindow, r: Refreshed) {
+    let _doing = crate::watchdog::doing("Sounds: the sounds were brought up to date");
+    let Refreshed { library, same, was } = r;
+    // Compared with the list on show, or one sharing its sounds (the same list with your songs' use counted in).
+    let in_place = PAGE.with(|p| {
+        let p = p.borrow();
+        same && p.read && p.list.shares_with(&was)
+    });
+    if !in_place {
+        let (view, autoplay, picked) = PAGE.with(|p| {
+            let p = p.borrow();
+            let picked = p.picked.and_then(|at| p.list.sound(at)).map(|s| s.id);
+            (VIEWS.get(p.view as usize).copied(), p.autoplay, picked)
+        });
+        show(app, library, view, Some(if autoplay { "1" } else { "0" }));
+        // Picked again once the list arrives ([`listed`]), wherever it is now.
+        PAGE.with(|p| {
+            let mut p = p.borrow_mut();
+            p.to_pick = picked.and_then(|id| p.places.get(&id).copied());
+        });
+        return;
+    }
+    app.global::<SoundsData>().set_tags(strings(&library.tags));
+    let picked = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.list = library.list.clone();
+        p.history = library.played;
+        p.types = library.types;
+        p.places = library.places;
+        p.picked
+    });
+    crate::finder::add_source(app, "sounds", Arc::new(finder::Sounds(library.list)));
+    refresh(app);
+    show_rediscover_chips(app);
+    kit::show(app);
+    // What Rediscover dug out may have been played since.
+    if PAGE.with(|p| p.borrow().re_started) {
+        rediscover_now(app);
+    }
+    if let Some(at) = picked {
+        let sound = PAGE.with(|p| picked_sound(&p.borrow(), at));
+        app.global::<SoundsData>().set_picked(sound);
+    }
+}
+
 fn loaded(app: &AppWindow, read: Result<Read, String>) {
     let _doing = crate::watchdog::doing("Sounds: the sounds were read");
     let data = app.global::<SoundsData>();
@@ -818,6 +1057,7 @@ fn loaded(app: &AppWindow, read: Result<Read, String>) {
     let count = read.count.and_then(|c| c.parse().ok()).filter(|c| COUNTS.contains(c)).unwrap_or(COUNT);
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
+        p.galaxy.db = Some(read.source);
         p.re.count = count;
         p.kit.export_folder = read.export_folder;
         p.kit.drum_machine = read.drum_machine;
@@ -1928,6 +2168,144 @@ mod tests {
         }
     }
 
+    /// A sound library made as the C# app makes it, with five sounds (each with the analyser's fingerprint) in a
+    /// folder of its own, made afresh each run.
+    fn sound_library(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join("mo-ui-sounds-test").join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(std::fs::create_dir_all(&dir).is_ok());
+        let path = dir.join("sounds.db");
+        let made = c_sharp(&path).execute_batch(
+            "PRAGMA journal_mode = WAL;
+             CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+             CREATE TABLE sounds (id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL COLLATE NOCASE, size INTEGER,
+                 mtime INTEGER, error TEXT, analysis TEXT, features BLOB, clap BLOB, name_type TEXT, user_type TEXT,
+                 type TEXT, type_source TEXT, type_conf REAL, favourite INTEGER DEFAULT 0, rating INTEGER DEFAULT 0,
+                 plays INTEGER DEFAULT 0, last_played INTEGER);
+             CREATE TABLE sound_tags (sound_id INTEGER REFERENCES sounds(id) ON DELETE CASCADE, tag TEXT NOT NULL,
+                 source TEXT NOT NULL DEFAULT 'you', UNIQUE(sound_id, tag));
+             CREATE TABLE sound_events (sound_id INTEGER REFERENCES sounds(id) ON DELETE CASCADE,
+                 kind TEXT NOT NULL, at INTEGER NOT NULL);
+             CREATE TABLE sound_hidden (sound_id INTEGER PRIMARY KEY REFERENCES sounds(id) ON DELETE CASCADE,
+                 batch TEXT NOT NULL, at INTEGER NOT NULL);",
+        );
+        assert!(made.is_ok(), "{made:?}");
+        for (id, name) in [(1, "kick"), (2, "pad"), (3, "hat"), (4, "snare"), (5, "clap")] {
+            add_sound(&path, id, name);
+        }
+        path
+    }
+
+    /// The C# app's connection to its library: foreign keys on, as it has them.
+    fn c_sharp(db: &Path) -> rusqlite::Connection {
+        let Ok(c) = rusqlite::Connection::open(db) else { panic!("couldn't open {}", db.display()) };
+        assert!(c.execute_batch("PRAGMA foreign_keys = ON;").is_ok());
+        c
+    }
+
+    /// The C# app's scan finding `C:\s\{name}.wav`, with a fingerprint of its own.
+    fn add_sound(db: &Path, id: i64, name: &str) {
+        let features: Vec<u8> = (0..73).flat_map(|i| ((id * 31 + i) as f32 / 97.0).sin().to_le_bytes()).collect();
+        let added = c_sharp(db).execute(
+            "INSERT INTO sounds (id, path, size, mtime, features, name_type, type, type_source, type_conf)
+             VALUES (?1, ?2, 1000, 1780000000, ?3, 'Kick', 'Kick', 'name', 1)",
+            rusqlite::params![id, format!("C:\\s\\{name}.wav"), features],
+        );
+        assert!(added.is_ok(), "{added:?}");
+    }
+
+    /// What one start of the page brings back from `sounds_db`, in order, in words.
+    fn one_start(sounds_db: &Path, library_db: &Path, cards: &Feed) -> Vec<String> {
+        let got = std::sync::Mutex::new(Vec::new());
+        read_all(sounds_db, library_db, Some(cards.clone()), |step| {
+            let said = match step {
+                Step::Read(Ok(read)) => {
+                    let plays: i64 = read.library.list.sounds().iter().map(|s| i64::from(s.plays)).sum();
+                    let from = read.source.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                    format!("{} sounds from {from}, {plays} plays", read.library.list.len())
+                }
+                Step::Read(Err(why)) => format!("couldn't read: {why}"),
+                Step::Index(index) => format!("{} fingerprints", index.features.len()),
+                Step::Used(list) => format!("used: {}", list.used_in(0).is_some()),
+                Step::Refreshed(r) => {
+                    let plays: i64 = r.library.list.sounds().iter().map(|s| i64::from(s.plays)).sum();
+                    let same = if r.same { "the same sounds" } else { "other sounds" };
+                    format!(
+                        "again: {same}, {} sounds, {plays} plays, used: {}",
+                        r.library.list.len(),
+                        r.library.list.knows_use()
+                    )
+                }
+            };
+            if let Ok(mut got) = got.lock() {
+                got.push(said);
+            }
+        });
+        got.into_inner().unwrap_or_default()
+    }
+
+    /// The cards' titles and lines, as the feed shows them now.
+    fn cards_said(cards: &Feed) -> Vec<String> {
+        cards.visible(Instant::now()).iter().map(|c| format!("{}: {}", c.title, c.detail)).collect()
+    }
+
+    #[test]
+    fn the_page_reads_the_apps_copy_and_brings_it_up_to_date() {
+        let sounds_db = sound_library("copy");
+        let library_db = song_library("copy-songs.db", &[]);
+        let copy = sounds_db.with_file_name("sounds-rust.db");
+        // The first start: sounds.db is read once, and the copy made on the same pass.
+        let cards = Feed::default();
+        let first = one_start(&sounds_db, &library_db, &cards);
+        assert_eq!(first, ["5 sounds from sounds-rust.db, 0 plays", "5 fingerprints", "used: true"]);
+        assert!(copy.exists());
+        let said = cards_said(&cards);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].starts_with("Made the app's own copy of your sound library: "), "{said:?}");
+        // The next start reads the copy, and nothing needs bringing up to date.
+        let cards = Feed::default();
+        assert_eq!(one_start(&sounds_db, &library_db, &cards), first);
+        assert_eq!(cards_said(&cards), Vec::<String>::new());
+        // The C# app plays a sound: the page shows the copy as it was at once, then the sounds again in place.
+        let played = c_sharp(&sounds_db)
+            .execute_batch("UPDATE sounds SET plays = 2, last_played = 1780000000 WHERE id = 3; INSERT INTO sound_events VALUES (3, 'play', 1780000000);");
+        assert!(played.is_ok(), "{played:?}");
+        let cards = Feed::default();
+        assert_eq!(
+            one_start(&sounds_db, &library_db, &cards),
+            [
+                "5 sounds from sounds-rust.db, 0 plays",
+                "5 fingerprints",
+                "used: true",
+                // No fingerprint changed, so they aren't read again.
+                "again: the same sounds, 5 sounds, 2 plays, used: true",
+            ]
+        );
+        assert_eq!(cards_said(&cards), ["Brought your sound library up to date: 1 changed"]);
+        assert_eq!(one_start(&sounds_db, &library_db, &Feed::default()).len(), 3, "up to date since");
+        // A scan finds a new sound: the library is shown again, with its fingerprint.
+        add_sound(&sounds_db, 9, "rim");
+        assert_eq!(
+            one_start(&sounds_db, &library_db, &Feed::default()),
+            [
+                "5 sounds from sounds-rust.db, 2 plays",
+                "5 fingerprints",
+                "used: true",
+                "again: other sounds, 6 sounds, 2 plays, used: true",
+                "6 fingerprints",
+            ]
+        );
+        // The copy can't be brought up to date (sounds.db isn't a library any more): the page keeps what it showed.
+        let cards = Feed::default();
+        assert!(c_sharp(&sounds_db).execute_batch("UPDATE sounds SET rating = 4 WHERE id = 1;").is_ok());
+        assert!(c_sharp(&sounds_db).execute_batch("ALTER TABLE sounds RENAME TO gone;").is_ok());
+        let kept = one_start(&sounds_db, &library_db, &cards);
+        assert_eq!(kept.first().map(String::as_str), Some("6 sounds from sounds-rust.db, 2 plays"));
+        assert!(!kept.iter().any(|k| k.starts_with("again")), "{kept:?}");
+        let said = cards_said(&cards);
+        assert!(said.iter().any(|c| c.starts_with("Couldn't bring your sound library up to date: ")), "{said:?}");
+    }
+
     #[test]
     fn songs_use_sounds_by_the_c_sharp_apps_settings() {
         let list =
@@ -1938,7 +2316,7 @@ mod tests {
             let path = song_library(name, settings);
             let Ok(lib) = mo_library::Library::open_read_only(&path) else { panic!("couldn't read {name}") };
             let s = Settings::read(&lib);
-            let used = count_usage(&lib, &list, since, s.rules).unwrap_or_default();
+            let used = lib.sample_usage(since, s.rules).map(|uses| usage_of(&list, &uses)).unwrap_or_default();
             (s, used)
         };
         // With nothing set: every song listing a sound uses it; autoplay is off and the weights are the C# app's.

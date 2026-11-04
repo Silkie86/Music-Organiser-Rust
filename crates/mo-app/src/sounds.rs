@@ -7,8 +7,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::Datelike;
+use mo_sounds::compact::Synced;
 use mo_sounds::usage::Usage;
-use mo_sounds::{Sound, music, types};
+use mo_sounds::{Sound, SoundsError, music, types};
+use mo_space::size::size_text;
 use rayon::prelude::*;
 
 /// Hits, loops or both (the C# Length radio buttons).
@@ -205,6 +207,14 @@ impl SoundList {
     /// Whether `other` shares this list's sounds (it was cloned from it, or made with [`SoundList::sharing`]).
     pub fn shares_with(&self, other: &SoundList) -> bool {
         Arc::ptr_eq(&self.shared, &other.shared)
+    }
+
+    /// Whether `other` lists the same sounds as this one in the same order (by id), whatever each one says now: a list
+    /// read again after the C# app changed the library (a play, stars, tags) can then take this one's place with
+    /// nothing on show moving.
+    pub fn same_sounds_as(&self, other: &SoundList) -> bool {
+        self.shares_with(other)
+            || (self.len() == other.len() && self.sounds().iter().zip(other.sounds()).all(|(a, b)| a.id == b.id))
     }
 
     /// How your projects use each sound (by id, as [`mo_sounds::usage::usage`] gives it), for the Used chips and
@@ -562,6 +572,49 @@ pub fn short_count(n: usize) -> String {
     }
 }
 
+/// What the card says once the app's own copy of the sound library ([`mo_sounds::compact`]) has been made: how big it
+/// is beside `sounds.db`.
+pub fn copy_made_line(copy_bytes: u64, library_bytes: u64) -> String {
+    format!(
+        "{} beside sounds.db's {}. Sounds opens from it from now on.",
+        size_text(copy_bytes),
+        size_text(library_bytes)
+    )
+}
+
+/// What the card says once the app's own copy of the sound library has been brought up to date with what the C# app
+/// changed: "3 changed, 1 new, 2 gone".
+pub fn copy_synced_line(s: &Synced) -> String {
+    if s.made {
+        return format!("Made afresh from {} sounds", crate::songs::thousands(s.sounds));
+    }
+    let parts: Vec<String> = [(s.changed, "changed"), (s.added, "new"), (s.removed, "gone")]
+        .into_iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, what)| format!("{} {what}", crate::songs::thousands(n)))
+        .collect();
+    match (parts.is_empty(), s.tables > 0) {
+        (false, _) => parts.join(", "),
+        (true, true) => "Tags, plays or galaxy places changed".to_owned(),
+        (true, false) => "Nothing had changed".to_owned(),
+    }
+}
+
+/// Why the app's own copy of the sound library couldn't be made or brought up to date, for a card: what went wrong,
+/// without the copy's whole path.
+pub fn copy_failed_line(e: &SoundsError) -> String {
+    match e {
+        SoundsError::Copy { why, .. } => {
+            let mut why = why.clone();
+            if let Some(first) = why.get_mut(..1) {
+                first.make_ascii_uppercase();
+            }
+            why
+        }
+        e => e.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -817,6 +870,54 @@ mod tests {
         assert!(Filters { favourites: true, ..Filters::default() }.any());
         assert_eq!(Order::from_name("Most liked"), Order::MostLiked);
         assert_eq!(Order::from_name("whatever"), Order::Shuffled);
+    }
+
+    #[test]
+    fn a_list_read_again_takes_the_old_ones_place_only_with_the_same_sounds_in_order() {
+        let list =
+            |ids: &[i64]| SoundList::new(ids.iter().map(|&i| sound(i, &format!("{i}.wav"), "Kick", None)).collect());
+        let shown = list(&[3, 1, 2]);
+        let mut played = list(&[3, 1, 2]);
+        played.set_liked(|s| s.id as f64);
+        assert!(shown.same_sounds_as(&played) && played.same_sounds_as(&shown));
+        assert!(shown.same_sounds_as(&shown.sharing()));
+        // A sound new, gone or moved in the order: the page shows the list afresh.
+        for other in [list(&[3, 1, 2, 4]), list(&[3, 1]), list(&[1, 3, 2]), list(&[3, 1, 5])] {
+            assert!(!shown.same_sounds_as(&other), "{:?}", other.sounds().iter().map(|s| s.id).collect::<Vec<_>>());
+        }
+        // A copy hidden in the C# app is left out of the list, so it counts as gone.
+        let mut hidden: Vec<Sound> = (1..=3).map(|i| sound(i, &format!("{i}.wav"), "Kick", None)).collect();
+        hidden[1].hidden = true;
+        assert!(!list(&[1, 2, 3]).same_sounds_as(&SoundList::new(hidden)));
+    }
+
+    #[test]
+    fn the_copys_cards_say_what_changed_in_plain_words() {
+        assert_eq!(
+            copy_made_line(1_621_000_000, 4_896_000_000),
+            "1.51 GB beside sounds.db's 4.56 GB. Sounds opens from it from now on."
+        );
+        let synced = |made, added, changed, removed, tables| Synced {
+            made,
+            sounds: 453_885,
+            added,
+            changed,
+            removed,
+            tables,
+            prints: 0,
+        };
+        assert_eq!(copy_synced_line(&synced(false, 1, 3, 2, 1)), "3 changed, 1 new, 2 gone");
+        assert_eq!(copy_synced_line(&synced(false, 0, 1_204, 0, 0)), "1,204 changed");
+        assert_eq!(copy_synced_line(&synced(false, 0, 0, 0, 2)), "Tags, plays or galaxy places changed");
+        assert_eq!(copy_synced_line(&synced(false, 0, 0, 0, 0)), "Nothing had changed");
+        assert_eq!(copy_synced_line(&synced(true, 453_885, 0, 0, 7)), "Made afresh from 453,885 sounds");
+        let full = SoundsError::Copy {
+            path: "C:\\Users\\Solomon\\AppData\\Local\\MusicOrganiser\\sounds-rust.db".into(),
+            why: "only 3.1 GB is free on its disk".into(),
+        };
+        assert_eq!(copy_failed_line(&full), "Only 3.1 GB is free on its disk");
+        let read = SoundsError::Open { path: "sounds.db".into(), why: "it's locked".into() };
+        assert_eq!(copy_failed_line(&read), read.to_string());
     }
 
     #[test]
