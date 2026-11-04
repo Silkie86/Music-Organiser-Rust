@@ -11,20 +11,35 @@
 use crate::midi::{Roll, is_black, note_name};
 use crate::shapes::{Colour, Scene, usable_scale};
 
-/// How far in from the roll's left the picture starts, in points (`Space.xs` in midi.slint).
-pub const LEFT: f64 = 4.0;
-/// How far in from the roll's top the picture starts, and from its right and bottom it ends (`Space.sm`).
-pub const TOP: f64 = 8.0;
-/// The size of the names (`Type.tiny`): a key's row this tall has room for one.
-const NAME: f64 = 11.0;
-/// Where the rows start across the roll: past the keyboard, or with no keyboard past the room for the highest and
-/// lowest keys' names (which the window writes there itself).
+/// Where the rows start across the roll, in points: past the keyboard, or with no keyboard past the room for the
+/// highest and lowest keys' names (which the window writes there itself).
 const SIDE_WITH_KEYBOARD: f64 = 52.0;
 const SIDE: f64 = 28.0;
 /// How much of a black key's width is black; the rest is the white keys beside it.
 const BLACK_PART: f64 = 0.6;
 /// The narrowest note with room for its name, in points.
 const NAMED_NOTE: f64 = 20.0;
+
+/// The room the window gives the roll, as midi.slint's `PianoRoll` lays it out, in points: the whole roll's size (its
+/// well, edge and margins and all), its margins, and the size of the names it lays on the picture.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Room {
+    pub width: f64,
+    pub height: f64,
+    /// How far in from the roll's left the picture starts (`Space.xs`).
+    pub left: f64,
+    /// How far in from the roll's top the picture starts, and from its right and bottom it ends (`Space.sm`).
+    pub margin: f64,
+    /// The names' size (`Type.tiny`): a key's row this tall has room for one.
+    pub name: f64,
+}
+
+impl Room {
+    /// Whether the picture has room for a point each way.
+    pub fn fits(&self) -> bool {
+        self.width - self.left - self.margin >= 1.0 && self.height - 2.0 * self.margin >= 1.0
+    }
+}
 
 /// The roll's two choices, as the window keeps them (`MidiData.roll-keyboard` and `roll-names`): a keyboard down its
 /// side, and each note's name on it (each key's too, where its row has room).
@@ -66,33 +81,35 @@ pub struct Label {
     pub key: bool,
 }
 
-/// The roll worked out: its picture, which goes [`LEFT`] and [`TOP`] points into the roll, and the names on it.
+/// The roll worked out: its picture, which goes `left` points in from the roll's left and `margin` from its top (see
+/// [`Room`]), and the names on it.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Picture {
     pub scene: Scene,
     pub labels: Vec<Label>,
 }
 
-/// The picture of `roll` on a roll `width` by `height` points (the whole well, margins and all), with `choices`, in
-/// `colours`, to be drawn at `scale` pixels to a point. A roll with no notes is the empty well.
-pub fn picture(roll: &Roll, (width, height): (f64, f64), scale: f64, choices: Choices, colours: &Colours) -> Picture {
-    let mut scene = Scene::new(width - LEFT - TOP, height - 2.0 * TOP, colours.well);
+/// The picture of `roll` in the `room` the window gives it, with `choices`, in `colours`, to be drawn at `scale` pixels
+/// to a point. A roll with no notes is the empty well.
+pub fn picture(roll: &Roll, room: Room, scale: f64, choices: Choices, colours: &Colours) -> Picture {
+    let Room { width, height, left, margin, name } = room;
+    let mut scene = Scene::new(width - left - margin, height - 2.0 * margin, colours.well);
     let mut labels = Vec::new();
     let keys = if roll.notes.is_empty() || roll.high < roll.low { 0 } else { usize::from(roll.high - roll.low) + 1 };
     if keys == 0 {
         return Picture { scene, labels };
     }
     // The rows: as tall as the roll inside its margins, each key's row as tall as the next.
-    let rows = height - 2.0 * TOP;
+    let rows = height - 2.0 * margin;
     let row = rows / keys as f64;
     // Where the edge above row `i` is, to the picture's own precision (f32), so one row's bottom is exactly the next
     // one's top there too: no pixel is left between two rows, or filled by both.
     let edge = |i: usize| f64::from((rows * i as f64 / keys as f64) as f32);
-    let names_fit = choices.names && row >= NAME;
+    let names_fit = choices.names && row >= name;
     let side = if choices.keyboard { SIDE_WITH_KEYBOARD } else { SIDE };
-    // The rows and notes start `side` across the roll, and end TOP before its right.
-    let across = side - LEFT;
-    let long = width - side - TOP;
+    // The rows and notes start `side` across the roll, and end a margin before its right.
+    let across = side - left;
+    let long = width - side - margin;
     // Each key, top to bottom: its key, its row's top and bottom (in the picture), and whether it's black.
     let each: Vec<(u8, f64, f64, bool)> = (0..keys)
         .map(|i| {
@@ -102,7 +119,7 @@ pub fn picture(roll: &Roll, (width, height): (f64, f64), scale: f64, choices: Ch
         .collect();
     // The keyboard: white keys light, black keys dark and shorter, each with a line under it.
     if choices.keyboard {
-        let wide = side - TOP;
+        let wide = side - margin;
         for black in [false, true] {
             let fill = if black { colours.black_key } else { colours.white_key };
             for &(_, top, bottom, _) in each.iter().filter(|k| k.3 == black) {
@@ -119,8 +136,8 @@ pub fn picture(roll: &Roll, (width, height): (f64, f64), scale: f64, choices: Ch
         // Each C named (where an octave starts), and every key when the names fit: a black key's on its black part.
         for &(key, top, bottom, black) in each.iter().filter(|k| names_fit || k.0 % 12 == 0) {
             labels.push(Label {
-                x: LEFT + 2.0,
-                y: TOP + top,
+                x: left + 2.0,
+                y: margin + top,
                 width: wide * if black { BLACK_PART } else { 1.0 } - 4.0,
                 height: bottom - top,
                 text: note_name(key),
@@ -155,7 +172,7 @@ pub fn picture(roll: &Roll, (width, height): (f64, f64), scale: f64, choices: Ch
         if names_fit && long * f64::from(n.w) >= NAMED_NOTE {
             labels.push(Label {
                 x: side + x + 2.0,
-                y: TOP + y,
+                y: margin + y,
                 width: w - 4.0,
                 height: h,
                 text: note_name(n.key),
@@ -167,10 +184,10 @@ pub fn picture(roll: &Roll, (width, height): (f64, f64), scale: f64, choices: Ch
     Picture { scene, labels }
 }
 
-/// `colour` showing as strongly as a note played `strength` (0 to 1) hard: as the window worked it out
-/// (`transparentize(1 - strength)`, to the nearest of its 256 steps).
+/// `colour` showing as strongly as a note played `strength` (0 to 1) hard, to the nearest of its 256 steps, as the
+/// window had it (`transparentize(1 - strength)`).
 fn strength(colour: Colour, strength: f32) -> Colour {
-    let shows = (f32::from(colour.a) / 255.0 * (1.0 - (1.0 - strength))).clamp(0.0, 1.0);
+    let shows = (f32::from(colour.a) / 255.0 * strength).clamp(0.0, 1.0);
     Colour { a: (shows * 255.0).round() as u8, ..colour }
 }
 
@@ -211,6 +228,12 @@ mod tests {
         }
     }
 
+    /// A roll `width` by `height` points with midi.slint's margins (4 points at the left, 8 round the rest) and names
+    /// 11 points high.
+    fn room(width: f64, height: f64) -> Room {
+        Room { width, height, left: 4.0, margin: 8.0, name: 11.0 }
+    }
+
     const KEYBOARD: Choices = Choices { keyboard: true, names: false };
     const NAMES: Choices = Choices { keyboard: true, names: true };
     /// A row's height on a roll 200 points tall: 184 inside the margins, for 14 keys.
@@ -239,7 +262,7 @@ mod tests {
     #[test]
     fn the_picture_fills_the_roll_inside_its_margins_row_by_row() {
         let c = colours();
-        let p = picture(&roll(), (400.0, 200.0), 1.0, KEYBOARD, &c);
+        let p = picture(&roll(), room(400.0, 200.0), 1.0, KEYBOARD, &c);
         assert_eq!((p.scene.width, p.scene.height, p.scene.background), (388.0, 184.0, 0x0E0E0E));
         // A key for each row, each one ending exactly where the next starts, in the picture's own numbers, so at any
         // scale no pixel is left between two rows or filled by both.
@@ -261,12 +284,17 @@ mod tests {
             assert_eq!(pair[0].0 + pair[0].1, pair[1].0, "{pair:?}");
         }
         assert_eq!(keys[13].0 + keys[13].1, 184.0);
+        // With other margins, the picture and the names move with them.
+        let p = picture(&roll(), Room { left: 6.0, margin: 10.0, ..room(400.0, 200.0) }, 1.0, KEYBOARD, &c);
+        assert_eq!((p.scene.width, p.scene.height), (384.0, 180.0));
+        assert_eq!((p.labels[0].text.as_str(), p.labels[0].x, p.labels[0].y), ("C5", 8.0, 10.0));
+        assert!(!Room { height: 16.5, ..room(400.0, 200.0) }.fits() && room(13.0, 17.0).fits());
     }
 
     #[test]
     fn the_keyboard_rows_and_lines_are_where_the_window_had_them() {
         let c = colours();
-        let p = picture(&roll(), (400.0, 200.0), 1.0, KEYBOARD, &c);
+        let p = picture(&roll(), room(400.0, 200.0), 1.0, KEYBOARD, &c);
         // C5, the top key, is white; Db4 (61), the 12th from the top, black, with the white keys beside it past 60%.
         let white = rects(&p, c.white_key);
         assert!(has(&white, [0.0, 0.0, 44.0, ROW]), "{white:?}");
@@ -288,7 +316,7 @@ mod tests {
 
     #[test]
     fn notes_are_as_strong_as_they_are_played_and_never_too_small_to_see() {
-        let p = picture(&roll(), (400.0, 200.0), 1.0, KEYBOARD, &colours());
+        let p = picture(&roll(), room(400.0, 200.0), 1.0, KEYBOARD, &colours());
         let notes: Vec<_> = p
             .scene
             .shapes
@@ -310,14 +338,14 @@ mod tests {
         assert_eq!(notes[1].2.a, 102);
         // A note smaller than 2 points each way is drawn 2 by 2.
         let tiny = Roll { notes: vec![RollNote { w: 0.001, h: 0.001, ..roll().notes[0] }], ..roll() };
-        let p = picture(&tiny, (400.0, 200.0), 1.0, Choices::default(), &colours());
+        let p = picture(&tiny, room(400.0, 200.0), 1.0, Choices::default(), &colours());
         assert!(matches!(p.scene.shapes.last(), Some(Shape::Rounded { w, h, .. }) if *w == 2.0 && *h == 2.0));
     }
 
     #[test]
     fn at_any_scale_a_note_fills_whole_pixels() {
         for scale in [1.0, 1.25, 1.5, 2.0, 0.8] {
-            let p = picture(&roll(), (401.3, 213.7), scale, NAMES, &colours());
+            let p = picture(&roll(), room(401.3, 213.7), scale, NAMES, &colours());
             for s in &p.scene.shapes {
                 if let Shape::Rounded { x, y, w, h, .. } = *s {
                     let pixels = [x, y, x + w, y + h].map(|v| f64::from(v) * scale);
@@ -334,14 +362,14 @@ mod tests {
     #[test]
     fn the_cs_are_named_and_every_key_and_long_note_once_names_fit() {
         let c = colours();
-        let p = picture(&roll(), (400.0, 200.0), 1.0, KEYBOARD, &c);
+        let p = picture(&roll(), room(400.0, 200.0), 1.0, KEYBOARD, &c);
         assert_eq!(p.labels.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(), ["C5", "C4"]);
         let c4 = &p.labels[1];
         assert!(near([c4.x, c4.y, c4.width, c4.height], [6.0, 8.0 + 12.0 * ROW, 40.0, ROW]), "{c4:?}");
         assert!(c4.key && c4.colour == c.black_key);
         // Names on, and a row (13.1 points) has room for one: every key, a black key's on its black part; and the note
         // long enough for its name (C4, 170 points), not the short one (3.4 points).
-        let p = picture(&roll(), (400.0, 200.0), 1.0, NAMES, &c);
+        let p = picture(&roll(), room(400.0, 200.0), 1.0, NAMES, &c);
         assert_eq!(p.labels.iter().filter(|l| l.key).count(), 14);
         let db4 = p.labels.iter().find(|l| l.text == "Db4").expect("Db4 named");
         assert!((db4.width - (44.0 * 0.6 - 4.0)).abs() < 1e-9 && db4.colour == c.white_key);
@@ -351,14 +379,14 @@ mod tests {
         assert_eq!((n.text.as_str(), n.colour), ("C4", c.accent_text));
         assert!(near([n.x, n.y, n.width, n.height], [54.0, 8.0 + 12.0 * ROW, 165.0, ROW - 1.0]), "{n:?}");
         // A roll too short for a name in each row: only the Cs, and no note's name.
-        let p = picture(&roll(), (400.0, 150.0), 1.0, NAMES, &c);
+        let p = picture(&roll(), room(400.0, 150.0), 1.0, NAMES, &c);
         assert_eq!(p.labels.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(), ["C5", "C4"]);
     }
 
     #[test]
     fn with_no_keyboard_the_rows_start_nearer_the_left_and_no_key_is_named() {
         let c = colours();
-        let p = picture(&roll(), (400.0, 200.0), 1.0, Choices { keyboard: false, names: true }, &c);
+        let p = picture(&roll(), room(400.0, 200.0), 1.0, Choices { keyboard: false, names: true }, &c);
         assert!(rects(&p, c.black_key).is_empty());
         let shine = rects(&p, c.shine);
         assert!(shine.iter().all(|r| r[0] == 24.0 && r[2] == 364.0), "{shine:?}");
@@ -369,7 +397,7 @@ mod tests {
 
     #[test]
     fn a_roll_with_no_notes_is_the_empty_well() {
-        let p = picture(&Roll::default(), (400.0, 200.0), 1.0, NAMES, &colours());
+        let p = picture(&Roll::default(), room(400.0, 200.0), 1.0, NAMES, &colours());
         assert!(p.scene.shapes.is_empty() && p.labels.is_empty());
         assert_eq!((p.scene.width, p.scene.height), (388.0, 184.0));
     }

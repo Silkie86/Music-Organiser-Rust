@@ -43,6 +43,16 @@ export struct RollLabel {
     key: bool,
 }
 
+// The room the roll has, for its picture: its whole size, its margins (at the left, and round the rest) and the size of
+// the names laid on it.
+export struct RollRoom {
+    width: length,
+    height: length,
+    left: length,
+    margin: length,
+    name: length,
+}
+
 // One of the card's facts: BARS 8.
 export struct MidiFact {
     name: string,
@@ -137,8 +147,9 @@ export global MidiData {
     in property <int> roll-keys;
     in property <image> roll-picture;
     in property <[RollLabel]> roll-labels;
-    // The roll's size, each time it or one of its choices changes, so its picture is drawn again to fit.
-    callback roll-laid-out(length, length);
+    // The roll's room, each time it, the window's scale or one of the roll's choices changes, so its picture is drawn
+    // again to fit.
+    callback roll-laid-out(RollRoom);
     // The roll's choices: a keyboard down its side, and each note's name on it.
     in-out property <bool> roll-keyboard: true;
     in-out property <bool> roll-names: false;
@@ -265,7 +276,7 @@ component MidiLineView inherits ListLine {
 // the accent colour, as strong as it's played. A keyboard down the side and the notes' names are choices; with
 // names on, the roll grows so a row has room for its name. The rows, keys, lines and notes are one picture, drawn off
 // the window's thread on the graphics card or the processor (mo-ui's piano_roll, from mo_app::piano_roll, which lays
-// it out with this roll's margins, Space.xs at the left and Space.sm round the rest); the names are laid on it here.
+// it out in the room this gives it); the names are laid on it here.
 component PianoRoll inherits Well {
     private property <length> name-row: Type.tiny + 2px;
     // The choices and the window's scale, watched, so the picture is drawn again when one changes.
@@ -276,23 +287,32 @@ component PianoRoll inherits Well {
         ? clamp(MidiData.roll-keys * self.name-row + 2 * Space.sm, 200px, 520px)
         : 200px;
     clip: true;
+    function laid-out() {
+        MidiData.roll-laid-out({
+            width: self.width,
+            height: self.height,
+            left: Space.xs,
+            margin: Space.sm,
+            name: Type.tiny,
+        });
+    }
     init => {
-        MidiData.roll-laid-out(self.width, self.height);
+        root.laid-out();
     }
     changed width => {
-        MidiData.roll-laid-out(self.width, self.height);
+        root.laid-out();
     }
     changed height => {
-        MidiData.roll-laid-out(self.width, self.height);
+        root.laid-out();
     }
     changed keyboard => {
-        MidiData.roll-laid-out(self.width, self.height);
+        root.laid-out();
     }
     changed names => {
-        MidiData.roll-laid-out(self.width, self.height);
+        root.laid-out();
     }
     changed scale => {
-        MidiData.roll-laid-out(self.width, self.height);
+        root.laid-out();
     }
     // Shown pixel for pixel, as sharp as it was drawn: it's made for the roll's size at the window's scale, a whole
     // number of pixels each way (so it may go up to a pixel into the margin, which is the well's colour too).

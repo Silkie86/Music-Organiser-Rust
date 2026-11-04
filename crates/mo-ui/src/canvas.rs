@@ -8,7 +8,7 @@
 use std::cell::RefCell;
 use std::thread::LocalKey;
 
-use mo_app::shapes::{self, SHAPE_BYTES, Scene};
+use mo_app::shapes::{self, Colour, SHAPE_BYTES, Scene};
 use slint::wgpu_30::wgpu;
 use slint::{Image, Model, Rgba8Pixel, SharedPixelBuffer, VecModel};
 
@@ -513,6 +513,16 @@ pub(crate) fn show(
     image.map(Some).inspect_err(|_| painter.with(|p| p.borrow_mut().refused(generation)))
 }
 
+/// A colour of the window's (its theme's, say) as the painters take it.
+pub(crate) fn colour(c: slint::Color) -> Colour {
+    Colour { r: c.red(), g: c.green(), b: c.blue(), a: c.alpha() }
+}
+
+/// A colour of the window's as 0xRRGGBB, for the colour under a picture (which is solid, so how much shows is left out).
+pub(crate) fn rgb(c: slint::Color) -> u32 {
+    u32::from(c.red()) << 16 | u32::from(c.green()) << 8 | u32::from(c.blue())
+}
+
 /// Puts `rows` in `model` in place of what's there, changing only the lines that differ, so the window keeps the words
 /// it has laid on a view instead of making them all again.
 pub(crate) fn refill<T: Clone + PartialEq + 'static>(model: &VecModel<T>, rows: Vec<T>) {
@@ -587,7 +597,6 @@ pub(crate) mod testing {
 mod tests {
     use super::testing::{card, read_back};
     use super::*;
-    use mo_app::shapes::{Colour, Scene};
     use wgpu::naga;
 
     /// A view with more shapes than the card takes at once is drawn a part at a time, and comes out the same as in one
@@ -622,8 +631,6 @@ mod tests {
         assert_eq!(small.shapes.as_ref().map(wgpu::Buffer::size), Some(7 * SHAPE_BYTES as u64), "room for one part");
     }
 
-    /// The card only builds the shader when the window opens, so a mistake in it would only show on Solomon's PC. This
-    /// checks it here the way wgpu does.
     #[test]
     fn the_words_change_line_by_line() {
         let words = |list: &[&str]| list.iter().map(|w| slint::SharedString::from(*w)).collect::<Vec<_>>();
@@ -636,6 +643,8 @@ mod tests {
         assert_eq!(model.row_count(), 0);
     }
 
+    /// The card only builds the shader when the window opens, so a mistake in it would only show on Solomon's PC. This
+    /// checks it here the way wgpu does.
     #[test]
     fn the_shapes_shader_is_valid() {
         let module = naga::front::wgsl::parse_str(SHADER).expect("the shader parses");

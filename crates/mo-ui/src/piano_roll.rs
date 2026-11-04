@@ -1,7 +1,7 @@
 //! Draws the MIDI page's piano roll off the window's thread (Solomon, 2026-11-04: what can slow the screens goes off
 //! it). A background thread works out its picture (`mo_app::piano_roll`), and draws it there too when the processor
 //! draws it (where there's no graphics card, or the card won't); the card draws it on the window's thread, which then
-//! puts it on the page with the names laid on it. A new part, size, choice or look asks for a new picture, and the
+//! puts it on the page with the names laid on it. A new part, size, scale, choice or look asks for a new picture, and the
 //! newest ask wins (rule 12): a picture that arrives once a newer one is on its way, or another part is shown, is
 //! passed over.
 
@@ -13,22 +13,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use mo_app::background::Newest;
 use mo_app::log;
 use mo_app::midi::Roll;
-use mo_app::piano_roll::{self, Choices, Colours};
-use mo_app::shapes::Colour;
+use mo_app::piano_roll::{self, Choices, Colours, Room};
 use slint::{Color, ComponentHandle, Image, ModelRc, VecModel};
 
-use crate::canvas::{self, Canvas, Kind};
+use crate::canvas::{self, Canvas, Kind, colour};
 use crate::gpu;
 use crate::{AppWindow, MidiData, RollLabel, Theme};
 
-/// A picture to work out: of which roll and which picture (both are counted), the roll, its size on the page in
-/// points, its choices and colours, pixels to a point, and whether the card draws it (else the processor does, on the
-/// drawing thread).
+/// A picture to work out: of which roll and which picture (both are counted), the roll, the room it has on the page,
+/// its choices and colours, pixels to a point, and whether the card draws it (else the processor does, on the drawing
+/// thread).
 struct Ask {
     shown: u64,
     number: u64,
     roll: Arc<Roll>,
-    size: (f64, f64),
+    room: Room,
     choices: Choices,
     colours: Colours,
     scale: f64,
@@ -50,8 +49,8 @@ struct State {
     pictures: u64,
     /// The roll shown, if it has notes to draw.
     roll: Option<Arc<Roll>>,
-    /// The roll's size on the page, in points.
-    size: (f64, f64),
+    /// The room the roll has on the page.
+    room: Room,
     /// Draw here and now, on the processor, instead: for the screenshots, which have no event loop to post to.
     here: bool,
 }
@@ -77,13 +76,20 @@ thread_local! {
     static CARD: RefCell<gpu::Painter<Canvas>> = const { RefCell::new(gpu::Painter::new()) };
 }
 
-/// Wires the roll to its size and choices, and starts its drawing thread.
+/// Wires the roll to its room on the page, and starts its drawing thread.
 pub fn connect(app: &AppWindow) {
     let data = app.global::<MidiData>();
     data.set_roll_labels(ModelRc::from(WORDS.with(Rc::clone)));
     let weak = app.as_weak();
-    data.on_roll_laid_out(move |w, h| {
-        STATE.with(|s| s.borrow_mut().size = (f64::from(w), f64::from(h)));
+    data.on_roll_laid_out(move |r| {
+        let room = Room {
+            width: f64::from(r.width),
+            height: f64::from(r.height),
+            left: f64::from(r.left),
+            margin: f64::from(r.margin),
+            name: f64::from(r.name),
+        };
+        STATE.with(|s| s.borrow_mut().room = room);
         if let Some(app) = weak.upgrade() {
             redraw(&app);
         }
@@ -137,11 +143,10 @@ fn redraw(app: &AppWindow) {
     let ask = STATE.with(|s| {
         let mut s = s.borrow_mut();
         let roll = s.roll.clone()?;
-        let (w, h) = s.size;
-        (w - piano_roll::LEFT - piano_roll::TOP >= 1.0 && h - 2.0 * piano_roll::TOP >= 1.0).then_some(())?;
+        s.room.fits().then_some(())?;
         s.pictures += 1;
         let ask =
-            Ask { shown: s.shown, number: s.pictures, roll, size: s.size, choices, colours, scale, on_card: false };
+            Ask { shown: s.shown, number: s.pictures, roll, room: s.room, choices, colours, scale, on_card: false };
         Some((ask, s.here))
     });
     let Some((mut ask, here)) = ask else { return };
@@ -164,9 +169,8 @@ fn colours(app: &AppWindow) -> Colours {
     // A piano's keys in either theme: white keys light and black keys dark.
     let (white_key, black_key) =
         if t.get_light() { (t.get_surface(), t.get_text()) } else { (t.get_muted(), t.get_background()) };
-    let well = t.get_well();
     Colours {
-        well: u32::from(well.red()) << 16 | u32::from(well.green()) << 8 | u32::from(well.blue()),
+        well: canvas::rgb(t.get_well()),
         shine: colour(t.get_shine()),
         edge: colour(t.get_edge()),
         white_key: colour(white_key),
@@ -176,14 +180,10 @@ fn colours(app: &AppWindow) -> Colours {
     }
 }
 
-fn colour(c: Color) -> Colour {
-    Colour { r: c.red(), g: c.green(), b: c.blue(), a: c.alpha() }
-}
-
 impl Drawn {
     fn new(ask: &Ask) -> Drawn {
         let piano_roll::Picture { scene, labels } =
-            piano_roll::picture(&ask.roll, ask.size, ask.scale, ask.choices, &ask.colours);
+            piano_roll::picture(&ask.roll, ask.room, ask.scale, ask.choices, &ask.colours);
         let labels = labels
             .into_iter()
             .map(|l| RollLabel {
@@ -253,6 +253,7 @@ mod tests {
     use super::*;
     use crate::canvas::testing::{card, read_back};
     use mo_app::midi::RollNote;
+    use mo_app::shapes::Colour;
     use mo_app::themes::Look;
 
     /// A made-up roll of four octaves: a run of notes up and down, long and short, soft and hard, some on top of each
@@ -317,7 +318,8 @@ mod tests {
                         if names { "-names" } else { "" }
                     );
                     let choices = Choices { keyboard, names };
-                    let picture = piano_roll::picture(&roll, (433.5, 520.0), scale, choices, &colours(look));
+                    let room = Room { width: 433.5, height: 520.0, left: 4.0, margin: 8.0, name: 11.0 };
+                    let picture = piano_roll::picture(&roll, room, scale, choices, &colours(look));
                     let scene = &picture.scene;
                     let cpu = scene.paint(scale);
                     let bytes = scene.pack(scale);
