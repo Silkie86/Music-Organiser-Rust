@@ -137,21 +137,36 @@ fn set_crash_hook(
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let current = std::thread::current();
-        let message = info.payload_as_str();
-        // Std ends the app straight after its own words, whatever was to catch the panic. Otherwise what catches it
-        // says what it is (asked once for each panic, before anything else: see `mo_catch::panic_starting`).
-        let catcher = if log::std_ends_the_app(message) { Catcher::Nothing } else { mo_catch::panic_starting() };
+        let (catcher, fatal) =
+            what_it_is(log::cannot_unwind(info), info.payload_as_str(), current.name(), mo_catch::panic_starting);
         if catcher == Catcher::Catch {
             caught(info, current.name());
             return;
         }
-        // One on the window's thread ends the app too, unless a catch there lets the window go on.
-        let fatal = catcher == Catcher::Nothing && log::crash_ends_the_app(current.name(), message);
         on_crash(info, fatal, &logs(), &keep_note, &flush);
         after();
         default(info);
     }));
 }
+
+/// What a panic that's starting is: what catches it, and whether it ends the app. `cannot_unwind` and `message` are
+/// the panic's ([`log::cannot_unwind`], what it says), `thread` the name of the thread it's on, and `catcher` asks what
+/// was to catch it (`mo_catch::panic_starting`, asked only when something can).
+fn what_it_is(
+    cannot_unwind: bool,
+    message: Option<&str>,
+    thread: Option<&str>,
+    catcher: impl FnOnce() -> Catcher,
+) -> (Catcher, bool) {
+    // Std ends the app straight after a panic that can't unwind, and after its own words, whatever was to catch it.
+    let std_ends_it = cannot_unwind || log::std_ends_the_app(message);
+    let catcher = if std_ends_it { Catcher::Nothing } else { catcher() };
+    // One on the window's thread ends the app too, unless a catch there lets the window go on.
+    (catcher, std_ends_it || catcher == Catcher::Nothing && log::crash_ends_the_app(thread, message))
+}
+
+/// How much of what a caught panic said goes in its line, in characters.
+const MOST_SAID: usize = 1000;
 
 /// Where in the code a panic happened: `file:line`.
 fn place_of(info: &std::panic::PanicHookInfo<'_>) -> String {
@@ -165,6 +180,11 @@ fn place_of(info: &std::panic::PanicHookInfo<'_>) -> String {
 fn caught(info: &std::panic::PanicHookInfo<'_>, thread: Option<&str>) {
     let place = place_of(info);
     let said = info.payload_as_str().unwrap_or("(it said nothing)");
+    // A reader's own words can hold a whole buffer: a line that big would fill the log for the rest of the run.
+    let said = match said.char_indices().nth(MOST_SAID) {
+        Some((cut, _)) => format!("{}… (cut short)", &said[..cut]),
+        None => said.to_owned(),
+    };
     let thread = thread.unwrap_or("unnamed");
     log::caught(&place, &format!("{said} (at {place}, on thread {thread}; caught there, and the app went on)"));
 }
@@ -395,6 +415,37 @@ mod tests {
         }
     }
 
+    #[test]
+    fn what_catches_a_panic_and_whether_it_ends_the_app() {
+        let asked = &std::cell::Cell::new(0);
+        let catcher = |c: Catcher| {
+            move || {
+                asked.set(asked.get() + 1);
+                c
+            }
+        };
+        let is =
+            |cant: bool, said: &str, thread: &str, c: Catcher| what_it_is(cant, Some(said), Some(thread), catcher(c));
+        assert_eq!(is(false, "index out of bounds", "Scan 1", Catcher::Catch), (Catcher::Catch, false));
+        assert_eq!(is(false, "index out of bounds", "main", Catcher::Catch), (Catcher::Catch, false));
+        assert_eq!(is(false, "index out of bounds", "Scan 1", Catcher::CatchCrash), (Catcher::CatchCrash, false));
+        assert_eq!(is(false, "index out of bounds", "main", Catcher::CatchCrash), (Catcher::CatchCrash, false));
+        assert_eq!(is(false, "index out of bounds", "Scan 1", Catcher::Nothing), (Catcher::Nothing, false));
+        assert_eq!(is(false, "index out of bounds", "main", Catcher::Nothing), (Catcher::Nothing, true));
+        assert_eq!(asked.get(), 6, "asked each time");
+        // Std ends the app over these whatever was to catch them, and isn't asked: nothing is marked.
+        assert_eq!(
+            is(true, "words of a check std has added since", "Scan 1", Catcher::Catch),
+            (Catcher::Nothing, true)
+        );
+        assert_eq!(
+            is(false, "panic in a destructor during cleanup", "Scan 1", Catcher::Catch),
+            (Catcher::Nothing, true)
+        );
+        assert_eq!(asked.get(), 6, "not asked");
+        assert_eq!(what_it_is(false, None, None, catcher(Catcher::Catch)), (Catcher::Catch, false), "said nothing");
+    }
+
     /// Set for the copy of this test program that panics in each way the app catches a panic (see the test below): the
     /// folder it logs into.
     const CATCHING_IN_THE_COPY: &str = "MO_TEST_CAUGHT_PANICS";
@@ -435,15 +486,21 @@ mod tests {
         });
         // On the window's thread too, where a crash nothing catches ends the app.
         on("main", || assert!(catch(|| panic!("damaged file on the window's thread")).is_err()));
+        // Words too long for one line.
+        on("Long", || assert!(catch(|| panic!("damaged file {}", "x".repeat(5000))).is_err()));
         on("Worker", || assert!(catch_crash(|| panic!("a bug the worker lives through")).is_err()));
         on("main", || assert!(catch_crash(|| panic!("a bug the window lives through")).is_err()));
-        on("Nested", || {
+        on("Inner catch", || {
             let _ = catch_crash(|| assert!(catch(|| panic!("damaged file inside a catch for crashes")).is_err()));
+        });
+        on("Inner crash", || {
             let _ = catch(|| assert!(catch_crash(|| panic!("a bug inside a catch")).is_err()));
         });
         on("Uncaught", || panic!("a bug nothing catches"));
         // What std says as it ends the app is taken at its word, even in a catch.
         on("Std", || assert!(catch(|| panic!("std::process::exit called re-entrantly")).is_err()));
+        // Only std's own words, not a caught panic's that hold them.
+        on("Not std", || assert!(catch(|| panic!("damaged file: panic in a function that cannot unwind")).is_err()));
         struct CatchesItsOwn;
         impl Drop for CatchesItsOwn {
             fn drop(&mut self) {
@@ -510,7 +567,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let all = format!("{session}\n---\n{crashes}\n---\n{done:?}\n---\n{console}");
         assert!(ended.is_some_and(|status| !status.success()), "std ended the copy: {ended:?}\n{all}");
-        let has = |line: &str| done.iter().any(|l| l == line);
+        // What the crash handler did for each thread in turn: its lines up to the one saying whether it went on.
+        let mut on_each: Vec<Vec<&str>> = vec![Vec::new()];
+        for line in &done {
+            on_each.last_mut().expect("one").push(line.as_str());
+            if line.contains(" went on: ") {
+                on_each.push(Vec::new());
+            }
+        }
+        let thread_did = |n: usize| on_each.get(n).cloned().unwrap_or_default();
         let caught = |said: &str| session.contains(&format!("Warning [Caught] {said} (at "));
         let crashed = |thread: &str, said: &str| {
             let text = format!("crashed on thread {thread}\npanicked at ");
@@ -534,36 +599,48 @@ mod tests {
             "no crash log, no report: {all}"
         );
         assert!(!session.contains("crashed on thread Reader") && !session.contains("crashed on thread Drop"), "{all}");
-        for thread in ["Reader", "Drop"] {
-            assert!(!done.iter().any(|l| l.starts_with(thread) && !l.ends_with("went on: true")), "{thread}: {all}");
+        // Nor flushed, nor a note kept for them, on any thread (the window's too), nor taken as the app's end.
+        for (n, thread) in [(0, "Reader"), (1, "main"), (2, "Long"), (5, "Inner catch"), (9, "Not std"), (10, "Drop")] {
+            assert_eq!(thread_did(n), [format!("{thread} went on: true")], "{thread}: {all}");
         }
-        assert!(!has("main kept the note, ends the app: true"), "nor does one end the app: {all}");
+        let long = format!("damaged file {}… (cut short) (at ", "x".repeat(MOST_SAID - "damaged file ".len()));
+        assert!(session.contains(&format!("Warning [Caught] {long}")), "only so much of what it said: {all}");
+        assert!(caught("damaged file: panic in a function that cannot unwind"), "{all}");
 
         // Bugs: crashes, in full, whatever catches them; only one nothing catches ends its thread.
         for (thread, said) in [
             ("Worker", "a bug the worker lives through"),
             ("main", "a bug the window lives through"),
-            ("Nested", "a bug inside a catch"),
+            ("Inner crash", "a bug inside a catch"),
             ("Uncaught", "a bug nothing catches"),
+            ("Std", "std::process::exit called re-entrantly"),
             ("Cleanup", "a bug in a drop as a caught panic goes out"),
         ] {
             assert!(crashed(thread, said), "{thread}: {all}");
             assert!(console.contains(said), "std's report of it: {all}");
         }
-        for thread in ["Worker", "main", "Nested", "Uncaught", "Cleanup"] {
-            assert!(has(&format!("{thread} flushed")), "{thread}: {all}");
-            // A bug a catch lets the window go on after doesn't end the app.
-            assert!(has(&format!("{thread} kept the note, ends the app: false")), "{thread}: {all}");
+        // Each written out, its note kept, and told whether it ends the app: a bug a catch lets the window go on
+        // after doesn't; std's own words do.
+        for (n, thread, ends, went_on) in [
+            (3, "Worker", false, true),
+            (4, "main", false, true),
+            (6, "Inner crash", false, true),
+            (7, "Uncaught", false, false),
+            (8, "Std", true, true),
+        ] {
+            let flushed = format!("{thread} flushed");
+            let kept = format!("{thread} kept the note, ends the app: {ends}");
+            let went = format!("{thread} went on: {went_on}");
+            assert_eq!(thread_did(n), [&flushed, &kept, &flushed, &went], "{thread}: {all}");
         }
-        for (thread, went_on) in [("Worker", true), ("main", true), ("Nested", true), ("Uncaught", false)] {
-            assert!(has(&format!("{thread} went on: {went_on}")), "{thread}: {all}");
-        }
-        assert!(has("Std kept the note, ends the app: true") && session.contains("crashed on thread Std"), "{all}");
 
         // A panic in a drop as a caught one goes out: no catch can stop std ending the app (on Windows at once,
         // elsewhere once it has said so, a crash that ends the app).
-        assert!(!has("Cleanup went on: true") && !has("the copy went on"), "{all}");
-        let ends = has("Cleanup kept the note, ends the app: true");
-        assert_eq!(ends, !cfg!(target_env = "msvc"), "{all}");
+        let mut cleanup = vec!["Cleanup flushed", "Cleanup kept the note, ends the app: false", "Cleanup flushed"];
+        if !cfg!(target_env = "msvc") {
+            cleanup.extend(["Cleanup flushed", "Cleanup kept the note, ends the app: true", "Cleanup flushed"]);
+        }
+        assert_eq!(thread_did(11), cleanup, "{all}");
+        assert_eq!(on_each.len(), 12, "the copy went no further: {all}");
     }
 }

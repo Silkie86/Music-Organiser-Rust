@@ -79,16 +79,18 @@ pub const WRITER_THREAD: &str = "Session log";
 const PRUNE_WAIT: Duration = Duration::from_secs(2);
 const WRITER_WAIT: Duration = Duration::from_secs(5);
 /// What std says of a crash it can't recover from: it ends the app straight after, on whichever thread it was
-/// (checked in Rust 1.99's own code, `core::panicking`, `core::ub_checks` and `std::sys::exit`). In any build: a
-/// second crash while one is being cleaned up, a crash inside code that mustn't crash, or the app's end started again
-/// while it's ending. In debug builds (the launcher's), also the checks that stop unsafe code going wrong: a pointer
-/// that's null or not lined up, an enum with no such value, or a broken promise to an unsafe function.
+/// (checked in Rust 1.99's own code, `core::panicking`, `core::ub_checks` and `std::sys::exit`, and in the checks the
+/// compiler puts in `mem::zeroed` and `mem::uninitialized`). In any build: a second crash while one is being cleaned
+/// up, a crash inside code that mustn't crash, the app's end started again while it's ending, or a value made of
+/// zeroes (or left unset) that its type doesn't allow. In debug builds (the launcher's), also the checks that stop
+/// unsafe code going wrong: a pointer that's null or not lined up, an enum with no such value, or a broken promise to
+/// an unsafe function. Each of these also can't unwind ([`cannot_unwind`]), which the crash handler checks first.
 ///
 /// A crash in a thread's own data as the thread ends (a thread-local's `Drop`) ends the app too, but says nothing of
 /// the kind. So does a second crash while one is being cleaned up, on Windows: there the system ends the app as soon
-/// as the second crash leaves its `Drop`, before std can say anything. So the crash handler keeps the words typed in
-/// an open F12 note whatever this says (the words of a note being saved that aren't on disk yet are kept only for a
-/// crash it knows ends the app).
+/// as the second crash leaves its `Drop`, before std can say anything. So for every crash (not a panic caught on
+/// purpose: see `mo_catch`), the crash handler keeps the words typed in an open F12 note whatever this says (the words
+/// of a note being saved that aren't on disk yet are kept only for a crash it knows ends the app).
 const ENDS_THE_APP: [&str; 6] = [
     "panic in a destructor during cleanup",
     "panic in a function that cannot unwind",
@@ -98,10 +100,13 @@ const ENDS_THE_APP: [&str; 6] = [
     "is_nonoverlapping: `size_of::<T>() * count` overflows a usize",
 ];
 /// The same, for those that go on to say more (which check, which address): they're known by how they start.
-const ENDS_THE_APP_STARTS: [&str; 3] = [
+const ENDS_THE_APP_STARTS: [&str; 6] = [
     "unsafe precondition(s) violated: ",
     "misaligned pointer dereference: ",
     "trying to construct an enum from an invalid value ",
+    "attempted to zero-initialize type `",
+    "attempted to leave type `",
+    "attempted to instantiate uninhabited type `",
 ];
 
 /// The places in the code this run has written a crash log for ([`write_crash_file`]).
@@ -152,6 +157,14 @@ pub fn crash_ends_the_app(thread: Option<&str>, message: Option<&str>) -> bool {
 /// panic, whatever was to catch it.
 pub fn std_ends_the_app(message: Option<&str>) -> bool {
     message.is_some_and(|m| ENDS_THE_APP.contains(&m) || ENDS_THE_APP_STARTS.iter().any(|s| m.starts_with(s)))
+}
+
+/// Whether the panic the crash handler was given can't unwind: nothing can catch it, and std ends the app as soon as
+/// the handler is done, whatever it says ([`ENDS_THE_APP`] are the words of those known). Std doesn't let a program ask
+/// yet (`PanicHookInfo::can_unwind` isn't stable in Rust 1.99), but shows it when the panic is printed for debugging,
+/// so it's read from there; a test says so if that ever changes. Called from the crash handler, so it never panics.
+pub fn cannot_unwind(info: &std::panic::PanicHookInfo<'_>) -> bool {
+    format!("{info:?}").contains("can_unwind: false")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1281,6 +1294,10 @@ mod tests {
             "trying to construct an enum from an invalid value 0x7",
             "is_nonoverlapping: `size_of::<T>() * count` overflows a usize",
             "std::process::exit called re-entrantly",
+            // The compiler's own checks in `mem::zeroed` and `mem::uninitialized`, in every build.
+            "attempted to zero-initialize type `&u8`, which is invalid",
+            "attempted to leave type `&u8` uninitialized, which is invalid",
+            "attempted to instantiate uninhabited type `core::convert::Infallible`",
         ] {
             assert!(crash_ends_the_app(Some("Background 2"), Some(said)), "{said}");
         }
@@ -1345,6 +1362,64 @@ mod tests {
             "std's own words as it ends the app are known, and only those: {said:?}, {}",
             copy.status
         );
+    }
+
+    /// Set for the copy of this test program that panics where nothing can catch it (see the test below): how.
+    const CANT_UNWIND_IN_THE_COPY: &str = "MO_TEST_PANIC_THAT_CANT_UNWIND";
+
+    /// Only in the copy that the test below runs; in an ordinary run it does nothing. A panic std can't go on from: out
+    /// of an `extern "C"` function, or a value of zeroes its type doesn't allow. What each panic said, and whether it
+    /// could unwind, is printed, and then std ends the copy.
+    #[test]
+    #[allow(unsafe_code, invalid_value)]
+    fn a_panic_that_cant_unwind_in_a_copy() {
+        let Some(how) = std::env::var_os(CANT_UNWIND_IN_THE_COPY) else { return };
+        std::panic::set_hook(Box::new(|info| {
+            let mut out = std::io::stdout().lock();
+            let said = info.payload_as_str().unwrap_or("(nothing)");
+            let _ = writeln!(out, "{SAID}{}: {said}", if cannot_unwind(info) { "can't unwind" } else { "unwinds" });
+            let _ = out.flush();
+        }));
+        extern "C" fn crashes() {
+            panic!("a crash in an extern \"C\" function");
+        }
+        if how == "extern" {
+            crashes();
+        } else {
+            // A reference is never all zeroes: the compiler checks for that.
+            let _zeroes: &u8 = unsafe { std::mem::zeroed() };
+        }
+    }
+
+    /// A panic that can't unwind is known as one, as Rust prints it for debugging (see [`cannot_unwind`]), and by its
+    /// words too: checked on the Rust that builds the app, in a copy of this test program that std then ends.
+    #[test]
+    fn a_panic_that_cant_unwind_is_known() {
+        for how in ["extern", "zeroed"] {
+            let copy = std::process::Command::new(std::env::current_exe().expect("this test program"))
+                .args(["--exact", "log::tests::a_panic_that_cant_unwind_in_a_copy", "--nocapture"])
+                .arg("--test-threads=1")
+                .env(CANT_UNWIND_IN_THE_COPY, how)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .expect("the copy ran");
+            let out = String::from_utf8_lossy(&copy.stdout);
+            assert!(!copy.status.success(), "std ended the copy: {out}");
+            let said: Vec<&str> = out.lines().filter_map(|l| l.split_once(SAID).map(|(_, said)| said)).collect();
+            if how == "extern" {
+                // The crash itself can unwind; it's std's panic as it reaches the function that can't.
+                let ends = [
+                    "unwinds: a crash in an extern \"C\" function",
+                    "can't unwind: panic in a function that cannot unwind",
+                ];
+                assert_eq!(said, ends, "{out}");
+            } else {
+                let [last] = said[..] else { panic!("one panic: {out}") };
+                let words = last.strip_prefix("can't unwind: ");
+                assert!(words.is_some_and(|w| std_ends_the_app(Some(w))), "known both ways: {out}");
+                assert!(last.contains("zero-initialize type `&u8`"), "{out}");
+            }
+        }
     }
 
     #[cfg(unix)]

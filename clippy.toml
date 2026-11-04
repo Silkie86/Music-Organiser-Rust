@@ -6,4 +6,5 @@ allow-expect-in-tests = true
 # (one warning line) from a crash.
 disallowed-methods = [
     { path = "std::panic::catch_unwind", reason = "catch with mo_catch::catch (a panic the app expects, as a damaged file tripping a reader: one warning line) or mo_catch::catch_crash (a bug the thread lives through: still a crash)" },
+    { path = "std::panic::resume_unwind", reason = "the crash handler never hears of a panic handed on, so a panic in a Drop as it goes would look caught (see mo-catch)" },
 ]

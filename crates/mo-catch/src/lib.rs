@@ -14,9 +14,14 @@
 //! forbids `std::panic::catch_unwind` everywhere else), or the handler would take a panic one catch catches for
 //! another's.
 //!
-//! A panic on another thread is that thread's, whatever runs here. So work inside a [`catch`] never waits for work on
-//! other threads (rayon's `join`, `scope` or a parallel iterator, or `std::thread::scope`): their panics are crashes,
-//! and a rayon thread that waits runs other jobs meanwhile, whose panics would be taken for this catch's.
+//! The crash handler only hears of a panic as it starts, on the thread it starts on. So work inside a [`catch`] never:
+//!
+//! - waits for work on other threads (rayon's `join`, `scope` or a parallel iterator, or `std::thread::scope`): a
+//!   rayon thread that waits runs other jobs meanwhile, whose panics would be taken for this catch's, and the panics
+//!   those hand back come without the crash handler hearing of them;
+//! - hands on a panic caught somewhere else (`std::panic::resume_unwind`, which clippy.toml forbids too): another panic
+//!   as that one goes out (in a `Drop`) would be taken for caught, though nothing can catch it;
+//! - lets a panic reach an `extern "C"` function: std ends the app there, and the panic before it is only a warning.
 
 use std::cell::Cell;
 use std::panic::UnwindSafe;
@@ -28,7 +33,8 @@ pub enum Catcher {
     Catch,
     /// A [`catch_crash`]: a crash, though the thread goes on.
     CatchCrash,
-    /// Nothing in the app: the thread ends (on the window's thread, so does the app), or std ends the app.
+    /// No catch of the app's: a crash. The thread ends (on the window's thread, so does the app), unless a library
+    /// catches the panic on its way (rayon hands a job's panic to the thread waiting for it); or std ends the app.
     Nothing,
 }
 
@@ -37,8 +43,10 @@ pub enum Catcher {
 struct Innermost {
     /// Whether it's a [`catch`], not a [`catch_crash`].
     expected: bool,
-    /// Whether a panic is on its way out to it. Another panic as it goes (in a `Drop` it runs) can't be caught by
-    /// anything: std ends the app.
+    /// Whether a panic the crash handler was told of ([`panic_starting`]) is on its way out to it. Another panic as it
+    /// goes (in a `Drop` it runs) can't be caught by anything: std ends the app. A library's own catch inside this one
+    /// would leave the mark until this one ends, and a later panic in it would be taken for a crash (no library the
+    /// app catches around has one).
     unwinding: bool,
 }
 
@@ -239,8 +247,8 @@ mod tests {
     /// What the copy prints before what was to catch each panic.
     const SAID: &str = "Caught by: ";
 
-    /// Only in the copy the test below runs; in an ordinary run it does nothing. A panic in a `catch` meets a `Drop` that
-    /// panics too as it goes out: std can't go on from that, and ends the copy. Each panic's catcher is printed.
+    /// Only in the copy the test below runs; in an ordinary run it does nothing. A panic in a `catch` meets a `Drop`
+    /// that panics too as it goes out: std can't go on from that, and ends the copy. Each panic's catcher is printed.
     #[test]
     fn a_panic_in_a_drop_as_a_caught_one_goes_out_in_a_copy() {
         if std::env::var_os(IN_THE_COPY).is_none() {
