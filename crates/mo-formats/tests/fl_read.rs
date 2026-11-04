@@ -93,7 +93,7 @@ fn reads_old_saves_with_a_garbled_data_header() {
         .ascii(192, "Kick")
         .ascii(196, r"C:\Samples\Kick.wav")
         .word(65, 1)
-        .data(224, &note(0, 0, 96, 60, 100))
+        .data(224, &note(0, 0, 96, 60, 100)[..20]) // FL 7's notes are 20-byte records (rule 9)
         .data(236, &[0; 12]) // its mixer: FL got to the end
         .build();
     let mut garbled = good.clone();
@@ -108,7 +108,6 @@ fn reads_old_saves_with_a_garbled_data_header() {
     assert_eq!((&a.tracks, &a.samples, &a.details), (&b.tracks, &b.samples, &b.details));
     assert!(a.warnings.is_empty());
     assert_eq!(b.warnings, [events::GARBLED_HEADER]);
-    // FL 7's notes are 20-byte records; this one's 24 bytes don't divide by 20, so it's read as one 24-byte note.
     assert_eq!(b.details["Notes"], "1");
 }
 
@@ -135,6 +134,88 @@ fn survives_truncated_files_and_says_so() {
     let info = read(&damaged);
     assert_eq!(info.tempo, Some(120.0));
     assert_eq!(info.warnings, [events::CUT_SHORT]);
+}
+
+#[test]
+fn a_zero_filled_stretch_ends_the_reading() {
+    // An interrupted copy: the rest of the data is zeros, which would read as millions of 2-byte events.
+    let bytes = Flp::new().ascii(199, "21.0.0").dword(156, 120_000).raw(&vec![0; 100_000]).dword(156, 90_000).build();
+    let flp = events::load(&bytes).expect("an FL project");
+    assert!(flp.events.len() < 10, "{} events", flp.events.len());
+    assert_eq!(flp.warning, Some(events::CUT_SHORT));
+    assert_eq!(read(&bytes).tempo, Some(120.0));
+    // A few zero events in a row are FL's own.
+    let few = Flp::new().ascii(199, "21.0.0").raw(&[0; 40]).dword(156, 90_000).build();
+    assert_eq!((read(&few).tempo, read(&few).warnings.len()), (Some(90.0), 0));
+}
+
+#[test]
+fn text_before_fl_11_5_is_in_windows_code_page_1252() {
+    let bytes = Flp::new()
+        .ascii(199, "9.0.0")
+        .data(194, b"Don\x92t \x96 \x80\xe9\0")
+        .word(64, 0)
+        .data(196, b"C:\\Samples\\Don\x92t Stop.wav\0")
+        .build();
+    let info = read(&bytes);
+    assert_eq!(info.title, "Don\u{2019}t \u{2013} \u{20AC}\u{e9}");
+    assert_eq!(info.samples, ["C:\\Samples\\Don\u{2019}t Stop.wav"]);
+}
+
+#[test]
+fn patterns_named_again_in_each_channel_count_once() {
+    // FL 9 names the pattern in every channel's events, before its steps.
+    let mut b = Flp::new().ascii(199, "9.0.0");
+    for channel in 0..3 {
+        b = b.word(64, channel).word(65, 1).word(65, 2);
+    }
+    assert_eq!(read(&b.build()).details["Patterns"], "2");
+}
+
+#[test]
+fn a_garbled_save_that_is_also_cut_short_says_both() {
+    let bytes =
+        Flp::new().ascii(199, "7.0.2").word(64, 0).ascii(192, "Kick").data(236, &[0; 12]).data(233, &[0; 40]).build();
+    let mut garbled = bytes[..bytes.len() - 10].to_vec();
+    garbled[14..22].copy_from_slice(&[0x60, 0xfb, 0x12, 0x00, 0xd9, 0x4a, 0x06, 0x01]);
+    assert_eq!(read(&garbled).warnings, [events::GARBLED_HEADER, events::CUT_SHORT]);
+}
+
+#[test]
+fn a_save_cut_short_lists_no_sample_as_unplayed() {
+    let song = |cut: usize| {
+        let bytes = Flp::new()
+            .ascii(199, "7.0.2")
+            .word(64, 0)
+            .ascii(192, "Vocal")
+            .ascii(196, r"C:\Samples\Vocal.wav")
+            .data(233, &[0; 40])
+            .build();
+        read(&bytes[..bytes.len() - cut])
+    };
+    assert_eq!(song(0).unplayed.len(), 1, "a whole save with no notes for it");
+    let cut = song(10);
+    assert_eq!(cut.warnings, [events::CUT_SHORT]);
+    assert!(cut.unplayed.is_empty(), "{:?}", cut.unplayed);
+}
+
+#[test]
+fn notes_above_midis_top_key_are_left_out_with_a_warning() {
+    let notes: Vec<u8> = [60, 130].iter().flat_map(|&k| note(0, 0, 96, k, 100)).collect();
+    let bytes = Flp::new().ascii(199, "21.0.0").word(64, 0).ascii(192, "Lead").word(65, 1).data(224, &notes).build();
+    let info = read(&bytes);
+    assert_eq!(info.details["Notes"], "1", "as many as are read");
+    assert_eq!(info.warnings, ["1 note is above G10, the top of MIDI's keys, so they're left out."]);
+    // A damaged note event says so too (rule 9): an FL 7 note and 8 bytes of damage.
+    let bytes = Flp::new()
+        .ascii(199, "7.0.2")
+        .word(64, 0)
+        .word(65, 1)
+        .data(224, &[&note(0, 0, 96, 60, 100)[..20], &[0; 8]].concat())
+        .build();
+    let info = read(&bytes);
+    assert_eq!(info.details["Notes"], "1");
+    assert!(info.warnings[0].starts_with("A pattern's notes end part-way"), "{:?}", info.warnings);
 }
 
 #[test]

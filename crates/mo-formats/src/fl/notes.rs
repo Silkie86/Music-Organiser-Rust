@@ -5,23 +5,57 @@
 
 use std::collections::HashSet;
 
-use super::events::{byte_at, u16_at, u32_at};
+use super::events::{EV_PATTERN_NOTES, Flp, byte_at, u16_at, u32_at};
 use crate::model::{NoteAttribute, NoteEvent, velocity};
 
 /// The size of the note records in an event, by FL's version (major, minor; rule 9): 24 bytes from FL 8.5, 20 bytes
-/// in FL 4 to 8.0. Notes the reader made from old step sequencer dots are always 24. Without a version, or in an FL 4
-/// to 8.0 save whose notes divide into 24 bytes but not 20, the size is told from the notes themselves; `channels` are
-/// the song's channels, when known, which a right reading only ever names.
+/// in FL 3.5 to 8.0, whatever the event's length (damaged notes are read at that size, up to the damage). Notes the
+/// reader made from old step sequencer dots are always 24. Without a version, or in a save from before FL 3.5 (the
+/// census has none) whose notes divide into 24 bytes but not 20, the size is told from the notes themselves;
+/// `channels` are the song's channels, when known, which a right reading only ever names.
 pub fn note_size(data: &[u8], version: (u32, u32), made_here: bool, channels: Option<&HashSet<u32>>) -> usize {
-    match version.0 {
+    match version {
         _ if made_here => 24,
-        9.. => 24,
-        8 if version.1 >= 5 => 24,
-        1.. if data.len().is_multiple_of(20) => 20,
+        (9.., _) => 24,
+        (8, 5..) => 24,
+        (4..=8, _) | (3, 5..) => 20,
+        (1.., _) if data.len().is_multiple_of(20) => 20,
         // Damaged notes that divide by neither size are read at the version's size, up to the damage.
-        1.. if !data.len().is_multiple_of(24) => 20,
+        (1.., _) if !data.len().is_multiple_of(24) => 20,
         _ => size_from_notes(data, channels),
     }
+}
+
+/// MIDI's top key, G10 in FL's names (127). FL's piano roll goes on to B10 (131).
+pub const TOP_MIDI_KEY: u16 = 127;
+/// FL's top key, B10.
+const TOP_FL_KEY: u16 = 131;
+
+/// A note on one of FL's keys above MIDI's (G#10 to B10), which [`decode`] leaves out.
+fn above_midi(r: &[u8]) -> bool {
+    (TOP_MIDI_KEY + 1..=TOP_FL_KEY).contains(&u16_at(r, 12))
+}
+
+/// What's wrong with a song's notes, for its warnings: notes above MIDI's top key, left out, and damaged note events,
+/// read up to the damage (rule 9). Empty when nothing is.
+pub fn trouble(flp: &Flp<'_>) -> Vec<String> {
+    let known = super::channels(flp);
+    let (mut above, mut damaged) = (0, 0);
+    for e in flp.events.iter().filter(|e| e.id == EV_PATTERN_NOTES) {
+        let size = note_size(&e.data, (flp.major, flp.minor), e.offset.is_none(), Some(&known));
+        above += e.data.chunks_exact(size).filter(|r| above_midi(r)).count();
+        damaged += usize::from(!e.data.len().is_multiple_of(size));
+    }
+    let mut said = Vec::new();
+    if above > 0 {
+        let notes = if above == 1 { "1 note is".to_owned() } else { format!("{above} notes are") };
+        said.push(format!("{notes} above G10, the top of MIDI's keys, so they're left out."));
+    }
+    if damaged > 0 {
+        let patterns = if damaged == 1 { "A pattern's notes end" } else { "Some patterns' notes end" };
+        said.push(format!("{patterns} part-way through a note (damaged there); the notes before that were read."));
+    }
+    said
 }
 
 /// The record size that reads the notes in time order (as FL keeps them) on known channels, else the one that divides
@@ -44,10 +78,13 @@ fn size_from_notes(data: &[u8], channels: Option<&HashSet<u32>>) -> usize {
 }
 
 /// The notes in an event, each with its channel. A note muted in the piano roll (24-byte records: bit 0x20 of byte 19)
-/// is marked muted; a length of 0 is a step from the step sequencer, kept 1 tick long and marked.
+/// is marked muted; a length of 0 is a step from the step sequencer, kept 1 tick long and marked. A note above MIDI's
+/// top key (FL's keys 128 to 131) is left out: it can't be written to MIDI, and cutting it down to 7 bits would move it
+/// to the bottom of the keyboard (see [`trouble`]). A key past FL's own is damage, cut to 7 bits as before.
 pub fn decode(data: &[u8], size: usize) -> Vec<(u32, NoteEvent)> {
     let velocity_at = size - 3;
     data.chunks_exact(size)
+        .filter(|r| !above_midi(r))
         .map(|r| {
             let length = u32_at(r, 8);
             // FL's velocity is 0 to 128 (100 by default), kept in MIDI 2.0's 16 bits.
@@ -120,8 +157,29 @@ mod tests {
     }
 
     #[test]
+    fn fl_3_5_to_8_notes_are_20_bytes_even_when_only_24_divides_them() {
+        // 48 bytes: two 20-byte notes and 8 bytes of damage, which 24 also divides.
+        let mut data: Vec<u8> = (0..2).flat_map(|i| note(i * 96, 0, 96, 60 + i as u16, 100, 20)).collect();
+        data.extend([0; 8]);
+        for version in [(3, 5), (4, 0), (7, 0), (8, 0)] {
+            assert_eq!(note_size(&data, version, false, None), 20, "FL {version:?}");
+        }
+        let notes = decode(&data, 20);
+        assert_eq!(notes.iter().map(|(_, n)| (n.start, n.key)).collect::<Vec<_>>(), [(0, 60), (96, 61)]);
+        // Before 3.5 (no save in the census) the notes still tell.
+        assert_eq!(note_size(&data, (3, 0), false, None), 24);
+    }
+
+    #[test]
+    fn keys_above_midi_are_left_out_not_wrapped_to_the_bottom() {
+        let data: Vec<u8> = [60, 127, 128, 131, 0x80 | 64].iter().flat_map(|&k| note(0, 0, 96, k, 100, 24)).collect();
+        // Past FL's B10 (131) is damage: cut to 7 bits as before.
+        assert_eq!(decode(&data, 24).iter().map(|(_, n)| n.key).collect::<Vec<_>>(), [60, 127, 64]);
+    }
+
+    #[test]
     fn velocity_steps_and_muted_notes() {
-        let mut data = note(0, 2, 0, 0x80 | 64, 128, 24);
+        let mut data = note(0, 2, 0, 64, 128, 24);
         data[19] = 0x20;
         let (channel, n) = decode(&data, 24)[0];
         assert_eq!((channel, n.key, n.velocity7(), n.length, n.step, n.muted), (2, 64, 127, 1, true, true));
