@@ -13,7 +13,7 @@ use mo_space::after_move::kept_beside;
 use mo_space::clean::{Bin, Problem, Removed, undo};
 use mo_space::folder_move::{
     CantMove, Drives, HEADROOM, KEPT_SUFFIX, MovedFolder, OLD_SUFFIX, move_back, move_folder, moved_json,
-    old_copy_can_go, only_in_old_copy, parse_moved, problem, remove_old_copy,
+    old_copy_can_go, only_in_old_copy, parse_moved, problem, put_back_checked, remove_old_copy,
 };
 use mo_space::key;
 use mo_space::plugin_space::SpaceKind;
@@ -1626,12 +1626,16 @@ fn a_folder_left_called_checking_gets_its_name_back() {
     fs::create_dir_all(&d).unwrap();
     let from = c.join("Omnisphere");
     let stop = AtomicBool::new(false);
-    assert_eq!(problem(&s(&from), &s(&d), 1, &ROOMY, &[], &[], &stop), None);
+    // Looking at it changes nothing (a move may be checking it just then)...
+    assert_eq!(problem(&s(&from), &s(&d), 1, &ROOMY, &[], &[], &stop), Some(CantMove::Gone));
+    assert!(c.join("Omnisphere (checking)").exists());
+    // ...the app gives it its name back (and so does a try at moving it).
+    assert_eq!(put_back_checked(&s(&from)), Ok(true));
     assert_eq!(fs::read_to_string(from.join("a.db")).unwrap(), "a");
     assert!(!c.join("Omnisphere (checking)").exists());
     // With the folder there, one called "… (checking)" beside it is yours: it's left alone.
     write(&c, "Omnisphere (checking)/b.db", "b");
-    assert!(problem(&s(&from), &s(&d), 1, &ROOMY, &[], &[], &stop).is_none());
+    assert_eq!(put_back_checked(&s(&from)), Ok(false));
     assert!(c.join("Omnisphere (checking)/b.db").exists() && from.join("a.db").exists());
 }
 

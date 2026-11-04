@@ -441,10 +441,6 @@ fn problem_with(
 ) -> Option<CantMove> {
     let from = from.trim_end_matches(['/', '\\']);
     let from_path = Path::new(from);
-    // The app or the computer stopped in the moment the folder was called "… (checking)": it gets its name back.
-    if let Err(why) = put_back_checked(from) {
-        return Some(why);
-    }
     if is_link(from_path) {
         return Some(CantMove::Link);
     }
@@ -581,6 +577,8 @@ pub fn move_folder(
     if protected_folder(&from, protected) {
         return Err(CantMove::Protected);
     }
+    // The app or the computer stopped in the moment the folder was called "… (checking)": it gets its name back.
+    put_back_checked(&from)?;
     let to = target(&from, destination);
     // Nothing else in the app makes or clears a copy there until this one is in use.
     let mine = claim(&to).ok_or_else(|| busy_now(&to))?;
@@ -734,9 +732,18 @@ pub fn move_back(
             } else {
                 String::new()
             };
+            let updated = if changed.load(Ordering::Relaxed) {
+                format!(
+                    "The old copy ({}) was brought up to date from {}, and stays beside it.",
+                    moved.old_copy, moved.to
+                )
+            } else {
+                format!("The old copy ({}) stays beside it, as it was.", moved.old_copy)
+            };
             return Err(CantMove::LeftHalfway(format!(
-                "{now} The old copy ({}) was brought up to date from {}, and stays beside it.{kept} {} still has all                  the folder's files. Look at what's in {from} now, then link it again from the Space page.",
-                moved.old_copy, moved.to, moved.to
+                "{now} {updated}{kept} {} still has all the folder's files. Look at what's in {from} now, then link it \
+                 again from the Space page.",
+                moved.to
             )));
         }
         unswap_or_ask(from, &moved.old_copy, to, drives.admin()).map_err(partly)?;
@@ -765,7 +772,8 @@ pub fn move_back(
     if let Some(now) = not_the_link_now(moved) {
         remove_copy(Path::new(&back));
         return Err(CantMove::Failed(format!(
-            "{now} The copy made to bring it back was removed; {} still has all the folder's files. Look at what's in              {from} now, then link it again from the Space page.",
+            "{now} The copy made to bring it back was removed; {} still has all the folder's files. Look at what's in \
+             {from} now, then link it again from the Space page.",
             moved.to
         )));
     }
@@ -778,7 +786,8 @@ pub fn move_back(
         }
         return Err(match not_the_link_now(moved) {
             Some(now) if real_folder(from) => CantMove::Failed(format!(
-                "{now} {} still has all the folder's files. Look at what's in {from} now, then link it again from the                  Space page.",
+                "{now} {} still has all the folder's files. Look at what's in {from} now, then link it again from the \
+                 Space page.",
                 moved.to
             )),
             _ => why,
@@ -797,7 +806,8 @@ fn not_the_link_now(moved: &MovedFolder) -> Option<String> {
         None
     } else if real_folder(from) {
         Some(format!(
-            "While it was moving back, {from} became a real folder again (a plugin update may have put it there), so it              wasn't swapped."
+            "While it was moving back, {from} became a real folder again (a plugin update may have put it there), so it \
+             wasn't swapped."
         ))
     } else if is_link(Path::new(from)) {
         Some(format!(
@@ -1080,8 +1090,7 @@ fn differences(
                     (Ok(mine), Ok(copy)) => {
                         copy.is_file()
                             && (newer(&copy, &mine)
-                                || same_file(&mine, &copy)
-                                    && (!bytes || crate::clean::same_bytes(&path, &there).unwrap_or(false)))
+                                || same_file(&mine, &copy) && (!bytes || same_inside(&path, &there, stop)?))
                     }
                     _ => false,
                 }
@@ -1096,6 +1105,32 @@ fn differences(
         differences((&at, Path::new(&m.to)), held(&at, m, all), (all, bytes), &shown_as.join(rest), only, stop)?;
     }
     Ok(())
+}
+
+/// Whether two files that look the same (size and time) hold the same bytes, read side by side in pieces, stopping when
+/// you press Stop. A OneDrive file that's only online, on either side, isn't read (that would download it): OneDrive
+/// keeps it, so it counts as the same. One that can't be read (a program has it open) counts as not the same, so the
+/// old copy stays.
+fn same_inside(a: &Path, b: &Path, stop: &AtomicBool) -> Result<bool, CantMove> {
+    let online = |p: &Path| fs::symlink_metadata(p).is_ok_and(|m| is_online_only(&m));
+    if online(a) || online(b) {
+        return Ok(true);
+    }
+    let (Ok(mut fa), Ok(mut fb)) = (fs::File::open(a), fs::File::open(b)) else { return Ok(false) };
+    let (mut ba, mut bb) = (vec![0u8; 1 << 20], vec![0u8; 1 << 20]);
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return Err(CantMove::Stopped);
+        }
+        let Ok(n) = fa.read(&mut ba) else { return Ok(false) };
+        if n == 0 {
+            return Ok(fb.read(&mut bb).is_ok_and(|m| m == 0));
+        }
+        let (Some(want), Some(got)) = (ba.get(..n), bb.get_mut(..n)) else { return Ok(false) };
+        if fb.read_exact(got).is_err() || want != &*got {
+            return Ok(false);
+        }
+    }
 }
 
 /// Sends the old copy to the Recycle Bin, once [`old_copy_can_go`] says it may, and the old copies of folders moved
@@ -1114,8 +1149,8 @@ pub fn remove_old_copy(moved: &MovedFolder, all: &[MovedFolder], sure: bool, bin
                     moved,
                     &format!(
                         "Some of it is only in the old copy, newer there, or not the same as on the other drive: {}. \
-                         It may have been saved while the move ran, deleted from the other drive since, or gone bad on \
-                         the way. Look before deleting it.",
+                         It may have been saved while the move ran, deleted from the other drive since, gone bad on \
+                         the way, or open in a program now. Look before deleting it.",
                         listed(&only)
                     ),
                 );
@@ -2470,10 +2505,13 @@ fn lead(place: PathBuf, inside: &Path, tree: &Tree) -> PathBuf {
 /// A path as Windows writes it for people: without the `\\?\` a link's own wording (or a real path) can start with.
 fn plainly(path: &Path) -> PathBuf {
     let shown = path.to_string_lossy();
+    // Only a drive letter's (`\\?\C:\`) or a network share's: one naming a drive by its id (`\\?\Volume{…}\`, a drive
+    // mounted in a folder) means nothing without it.
+    let lettered = |rest: &str| rest.as_bytes().get(1) == Some(&b':') && rest.as_bytes()[0].is_ascii_alphabetic();
     match (shown.strip_prefix(r"\\?\UNC\"), shown.strip_prefix(r"\\?\")) {
         (Some(network), _) => PathBuf::from(format!(r"\\{network}")),
-        (None, Some(local)) => PathBuf::from(local),
-        (None, None) => path.to_path_buf(),
+        (None, Some(local)) if lettered(local) => PathBuf::from(local),
+        _ => path.to_path_buf(),
     }
 }
 

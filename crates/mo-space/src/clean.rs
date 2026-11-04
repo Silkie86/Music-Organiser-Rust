@@ -359,7 +359,7 @@ fn still_same(item: &CompactItem, real: &str) -> bool {
 }
 
 /// Whether two files hold the same bytes, read side by side in pieces.
-pub(crate) fn same_bytes(a: &Path, b: &Path) -> std::io::Result<bool> {
+fn same_bytes(a: &Path, b: &Path) -> std::io::Result<bool> {
     let (mut fa, mut fb) = (fs::File::open(a)?, fs::File::open(b)?);
     if fa.metadata()?.len() != fb.metadata()?.len() {
         return Ok(false);

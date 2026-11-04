@@ -396,8 +396,17 @@ pub fn measure(
     // while the other is used; rule it out for the other to make it this one's alone. The ones you ruled out are left
     // out of every guess for it. One that is, holds or is inside a project or sample folder of yours is left out too,
     // as the guesses leave them out: it would be offered for a move, and its old copy for the Recycle Bin (rule 2).
-    let yours =
-        |a: &str| protected_roots.iter().filter(|r| !r.trim().is_empty()).any(|r| is_inside(r, a) || is_inside(a, r));
+    let protected: Vec<(&str, String)> = protected_roots
+        .iter()
+        .filter(|r| !r.trim().is_empty())
+        .map(|r| (r.as_str(), real_path(r).unwrap_or_else(|| r.clone())))
+        .collect();
+    let yours = |a: &str| {
+        let real_a = real_path(a).unwrap_or_else(|| a.to_owned());
+        protected.iter().any(|(r, real_r)| {
+            is_inside(r, a) || is_inside(a, r) || is_inside(real_r, &real_a) || is_inside(&real_a, real_r)
+        })
+    };
     let added: HashMap<&str, Vec<String>> = plugins
         .iter()
         .map(|p| {
