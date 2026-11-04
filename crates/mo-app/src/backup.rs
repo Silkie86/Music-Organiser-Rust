@@ -275,8 +275,6 @@ pub struct Prepared {
     pub plan: Plan,
     /// The songs in the folders, with the files of each that go (for the zip format).
     pub songs: Vec<SongFiles>,
-    /// The whole folders.
-    pub always: Vec<PathBuf>,
     /// Folders on the list that aren't there now.
     pub missing: Vec<PathBuf>,
     /// Everything in the folders (and the samples outside them the songs use), before anything is left out.
@@ -441,16 +439,14 @@ pub fn prepare(library: &Library, settings: &Settings, stop: &AtomicBool) -> Res
     let infos: Vec<SongInfo<'_>> =
         measured.iter().map(|m| SongInfo { report: &m.report, saves: &m.saves, milestones: &m.milestones }).collect();
     let rules = Rules { level: settings.level, ..Rules::default() };
-    let folders = Folders { backup: &backup, always: &gathered.always, slimmed: &gathered.slimmed };
-    let plan = plan::plan(files, &infos, &used, folders, rules);
+    // A file follows the nearest folder on the list it's in (a Slimmed one inside a Whole one keeps its choice).
+    let listed = plan::Listed::new(&settings.folders);
+    let plan = plan::plan(files, &infos, &used, Folders { backup: &backup, listed: &listed }, rules);
 
     // Each song's files that go: its saves, the samples it uses, and (when it has a folder to itself) the rest of it.
     // Files in whole folders stay out of the zips: they go as plain folders.
     let going: HashMap<String, &FileEntry> =
         plan.copy.iter().map(|f| (case::key(&f.path.to_string_lossy()), f)).collect();
-    // A file follows the nearest folder on the list it's in (a Slimmed one inside a Whole one keeps its choice).
-    let listed = plan::Listed::new(&gathered.always, &gathered.slimmed);
-    let in_whole = |p: &Path| listed.whole(p);
     // The files in each song's own folder, found in one pass over the plan: each file's folders, looked up.
     let own_folders: HashMap<String, usize> = measured
         .iter()
@@ -481,8 +477,8 @@ pub fn prepare(library: &Library, settings: &Settings, stop: &AtomicBool) -> Res
             let mut take = |p: &Path| {
                 let k = case::key(&p.to_string_lossy());
                 if let Some(f) = going.get(&k)
-                    && !in_whole(&f.path)
                     && seen.insert(k)
+                    && !listed.whole(&f.path)
                 {
                     list.push(f.path.clone());
                 }
@@ -503,7 +499,6 @@ pub fn prepare(library: &Library, settings: &Settings, stop: &AtomicBool) -> Res
     Ok(Prepared {
         plan,
         songs: song_files,
-        always: gathered.always,
         missing: gathered.missing,
         all_bytes,
         folder_bytes,

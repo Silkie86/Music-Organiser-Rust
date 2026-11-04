@@ -3,8 +3,8 @@
 //! (everything in it goes, whatever the level says) or **slimmed** (the level's rules: big unused audio and extra big
 //! saves stay out).
 //!
-//! [`gather`] walks every folder in the list (several at a time) and gives what [`crate::plan::plan`] needs: the files,
-//! and the whole folders as its "always" folders. A folder inside another one in the list is walked once, as part of
+//! [`gather`] walks every folder in the list (several at a time) and gives the files [`crate::plan::plan`] needs; give
+//! it the list as [`crate::plan::Listed`], so it knows which files are in a whole folder. A folder inside another one in the list is walked once, as part of
 //! the outer one, and still keeps its own choice. A folder that isn't there (a drive not plugged in) is listed as
 //! missing, and the rest go on. Folders are only read.
 
@@ -64,10 +64,6 @@ pub fn from_text(text: &str) -> Vec<Folder> {
 pub struct Gathered {
     /// Every file in the folders, each once.
     pub files: Vec<FileEntry>,
-    /// The whole folders: pass as [`crate::plan::Folders::always`].
-    pub always: Vec<PathBuf>,
-    /// The slimmed folders: pass as [`crate::plan::Folders::slimmed`], so one inside a whole folder keeps its choice.
-    pub slimmed: Vec<PathBuf>,
     /// Folders in the list that aren't there now.
     pub missing: Vec<PathBuf>,
 }
@@ -90,10 +86,6 @@ pub fn gather(list: &[Folder], stop: &AtomicBool) -> Result<Gathered, Stopped> {
         if !f.path.is_dir() {
             out.missing.push(f.path.clone());
             continue;
-        }
-        match f.mode {
-            Mode::Whole => out.always.push(f.path.clone()),
-            Mode::Slimmed => out.slimmed.push(f.path.clone()),
         }
         // Walked as part of another folder in the list (the first of two the same is walked).
         let covered = list.iter().enumerate().any(|(j, o)| {

@@ -2998,7 +2998,6 @@ name = "mo-sounds"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "half",
  "mo-audio",
  "mo-formats",
  "mo-library",

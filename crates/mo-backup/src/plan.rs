@@ -23,6 +23,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use crate::folders::{Folder, Mode};
 use mo_formats::case;
 use mo_formats::textscan::is_audio_path;
 use mo_space::key;
@@ -287,28 +288,22 @@ pub struct Folders<'a> {
     /// Where the backup goes. Files already in it are never planned again, so a backup inside one of your music
     /// folders doesn't copy itself into itself.
     pub backup: &'a Path,
-    /// Folders whose files always go, whatever the level says: every save, autosave and cache in them, whatever its
-    /// size and whether a project uses it (your bounces and exports folder, say, or a folder on the list set to
-    /// Whole).
-    pub always: &'a [PathBuf],
-    /// Folders on the list set to Slimmed: the level's rules decide for their files, even inside a Whole folder.
-    pub slimmed: &'a [PathBuf],
+    /// The folders on the list, Whole or Slimmed: everything in a Whole folder goes, whatever the level says (every
+    /// save, autosave and cache, whatever its size and whether a project uses it).
+    pub listed: &'a Listed,
 }
 
-/// The folders on the list, each Whole or not: a file follows the nearest one it's in, so a Slimmed folder inside a
-/// Whole one keeps its own choice (and a Whole one inside a Slimmed one too).
+/// The folders on the list, each Whole or Slimmed. A file follows the nearest one it's in, so a Slimmed folder inside
+/// a Whole one keeps its own choice (and a Whole one inside a Slimmed one too).
 #[derive(Clone, Debug, Default)]
-pub struct Listed(HashMap<String, bool>);
+pub struct Listed(HashMap<String, Mode>);
 
 impl Listed {
-    /// The Whole folders and the Slimmed ones. A folder in both lists counts as Whole.
-    pub fn new(always: &[PathBuf], slimmed: &[PathBuf]) -> Listed {
+    /// From the folder list. Of a folder listed twice, the first line counts (as [`crate::folders::gather`] walks it).
+    pub fn new(list: &[Folder]) -> Listed {
         let mut map = HashMap::new();
-        for f in slimmed {
-            map.insert(key(&f.to_string_lossy()), false);
-        }
-        for f in always {
-            map.insert(key(&f.to_string_lossy()), true);
+        for f in list {
+            map.entry(key(&f.path.to_string_lossy())).or_insert(f.mode);
         }
         Listed(map)
     }
@@ -318,8 +313,9 @@ impl Listed {
         self.whole_key(&key(&path.to_string_lossy()))
     }
 
+    /// The same for a path key (from [`mo_space::key`]).
     fn whole_key(&self, k: &str) -> bool {
-        folders_above(k).find_map(|f| self.0.get(f)).copied().unwrap_or(false)
+        folders_above(k).find_map(|f| self.0.get(f)) == Some(&Mode::Whole)
     }
 }
 
@@ -365,9 +361,18 @@ pub fn plan(files: Vec<FileEntry>, songs: &[SongInfo<'_>], used: &Used, folders:
             }
         }
     }
-    let listed = Listed::new(folders.always, folders.slimmed);
-    let ctx =
-        Context { compact, caches, newest, saves, milestone_saves, beside_saves, song_folders, listed, used, rules };
+    let ctx = Context {
+        compact,
+        caches,
+        newest,
+        saves,
+        milestone_saves,
+        beside_saves,
+        song_folders,
+        listed: folders.listed,
+        used,
+        rules,
+    };
     let backup = key(&folders.backup.to_string_lossy());
 
     let mut seen: HashSet<String> = HashSet::new();
@@ -400,7 +405,7 @@ struct Context<'a> {
     milestone_saves: HashSet<String>,
     beside_saves: HashSet<String>,
     song_folders: HashSet<String>,
-    listed: Listed,
+    listed: &'a Listed,
     used: &'a Used,
     rules: Rules,
 }

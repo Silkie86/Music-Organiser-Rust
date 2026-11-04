@@ -4,7 +4,8 @@
 use std::path::{Path, PathBuf};
 
 use chrono::NaiveDate;
-use mo_backup::plan::{BigSaves, Folders, LeftOut, Level, Rules, SongInfo, Used, place_on_backup, plan};
+use mo_backup::folders::{Folder, Mode};
+use mo_backup::plan::{BigSaves, Folders, LeftOut, Level, Listed, Rules, SongInfo, Used, place_on_backup, plan};
 use mo_space::size::FileEntry;
 use mo_space::song::{CompactItem, CompactKind, SongSave, SongSpaceReport};
 
@@ -12,7 +13,14 @@ const MB: u64 = 1 << 20;
 
 /// The backup somewhere none of the test's files are, and no folder marked "always".
 fn nowhere() -> Folders<'static> {
-    Folders { backup: Path::new("/backup"), always: &[], slimmed: &[] }
+    static NONE: std::sync::LazyLock<Listed> = std::sync::LazyLock::new(Listed::default);
+    Folders { backup: Path::new("/backup"), listed: &NONE }
+}
+
+/// A folder list, in its order.
+fn listed(list: &[(&str, Mode)]) -> Listed {
+    let list: Vec<Folder> = list.iter().map(|(p, mode)| Folder { path: PathBuf::from(p), mode: *mode }).collect();
+    Listed::new(&list)
 }
 
 /// A save, written `hours` after noon on 14 March 2026.
@@ -161,12 +169,12 @@ fn a_songs_own_audio_goes_even_when_no_project_names_it() {
     assert_eq!(why(&p, "/projects/Samples/Unused.wav"), Some(LeftOut::UnusedSound), "only right beside a save");
     assert_eq!(why(&p, "/exports/Old master.wav"), Some(LeftOut::UnusedSound));
 
-    let always = [PathBuf::from("/exports")];
+    let whole = listed(&[("/exports", Mode::Whole)]);
     let p = plan(
         files,
         &songs,
         &Used::default(),
-        Folders { backup: Path::new("/backup"), always: &always, slimmed: &[] },
+        Folders { backup: Path::new("/backup"), listed: &whole },
         Rules::default(),
     );
     assert!(goes(&p, "/exports/Old master.wav"), "a folder you mark always goes");
@@ -192,7 +200,7 @@ fn the_newest_save_goes_whatever_another_songs_list_says() {
 #[test]
 fn the_backup_never_copies_itself() {
     let files = vec![file("/music/Backup of music/music/a.wav", 10), file("/music/a.wav", 10)];
-    let folders = Folders { backup: Path::new("/music/Backup of music"), always: &[], slimmed: &[] };
+    let folders = Folders { backup: Path::new("/music/Backup of music"), ..nowhere() };
     let p = plan(files, &[], &Used::default(), folders, Rules::default());
     assert_eq!(p.copy.len(), 1);
     assert!(goes(&p, "/music/a.wav"));
@@ -361,8 +369,8 @@ fn everything_in_a_whole_folder_goes_whatever_the_level() {
         file("/bitwig/Projects/Tune/Unused take.wav", 40 * MB),
     ];
     let songs = [SongInfo { report: &report, saves: &saves, milestones: &[] }];
-    let always = [PathBuf::from("/bitwig/Projects")];
-    let whole = Folders { backup: Path::new("/backup"), always: &always, slimmed: &[] };
+    let list = listed(&[("/bitwig/Projects", Mode::Whole)]);
+    let whole = Folders { backup: Path::new("/backup"), listed: &list };
     for level in [Level::Slim, Level::Essentials] {
         let rules = Rules { level, big_saves: BigSaves::NewestOnly, ..Rules::default() };
         let p = plan(files.clone(), &songs, &Used::default(), whole, rules);
@@ -389,9 +397,15 @@ fn a_slimmed_folder_inside_a_whole_one_keeps_its_choice() {
         file("/music/Loose Stem.wav", 50 * MB),
     ];
     let songs = [SongInfo { report: &report, saves: &saves, milestones: &[] }];
-    let always = [PathBuf::from("/music"), PathBuf::from("/music/Samples/Keep")];
-    let slimmed = [PathBuf::from("/music/Backup"), PathBuf::from("/music/Samples")];
-    let folders = Folders { backup: Path::new("/backup"), always: &always, slimmed: &slimmed };
+    let list = listed(&[
+        ("/music/Backup", Mode::Slimmed),
+        ("/music", Mode::Whole),
+        ("/music/Samples", Mode::Slimmed),
+        ("/music/Samples/Keep", Mode::Whole),
+        // A folder listed twice: the first line counts, whatever its spelling.
+        ("/music/Backup/", Mode::Whole),
+    ]);
+    let folders = Folders { backup: Path::new("/backup"), listed: &list };
     let p = plan(files, &songs, &Used::default(), folders, Rules::default());
     assert_eq!(why(&p, "/music/Backup/Song overwritten at 1.flp"), Some(LeftOut::OldAutosave));
     assert_eq!(why(&p, "/music/Samples/Unused Stem.wav"), Some(LeftOut::UnusedSound), "the Whole folder above it");
@@ -402,9 +416,9 @@ fn a_slimmed_folder_inside_a_whole_one_keeps_its_choice() {
 
 #[test]
 fn a_whole_drive_counts_as_a_whole_folder() {
-    let always = [PathBuf::from(if cfg!(windows) { r"K:\" } else { "/" })];
+    let list = listed(&[(if cfg!(windows) { r"K:\" } else { "/" }, Mode::Whole)]);
     let path = if cfg!(windows) { r"K:\Stems\Unused Stem.wav" } else { "/Stems/Unused Stem.wav" };
-    let folders = Folders { backup: Path::new("/backup"), always: &always, slimmed: &[] };
+    let folders = Folders { backup: Path::new("/backup"), listed: &list };
     let p = plan(vec![file(path, 50 * MB)], &[], &Used::default(), folders, Rules::default());
     assert!(goes(&p, path));
 }
