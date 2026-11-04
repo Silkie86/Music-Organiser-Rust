@@ -58,8 +58,9 @@ struct Typed {
 /// thread waits for its turn. A crash, the app closing with that thread stuck, and a save that failed wait only a
 /// moment ([`DRAFT_MOMENT`]) and then go ahead anyway (the thread whose turn it is may be the one that crashed, or stuck
 /// on a slow disk). A draft written then leaves the words in `UNSAVED`, for a write in its turn; words added to those of
-/// failed saves then are in the session log too, as the thread whose turn it is may let that file go meanwhile. The
-/// window's thread never waits for it: it only touches `UNSAVED`.
+/// failed saves then are in the session log too, as the thread whose turn it is may let that file go meanwhile. While
+/// the app runs, the window's thread never waits for it: it only touches `UNSAVED`. As the app closes, and after a
+/// crash on that thread, it waits a moment at most ([`wait_for_saves`], [`finish_up`], [`after_crash`]).
 ///
 /// It also keeps the text from before as it was read for one note ([`Before`]): read once, by the first of the note's
 /// Fill job and a write of words typed before the note showed it, so the two always use the same text, and nothing in
@@ -598,8 +599,9 @@ fn finish_up_in(folder: &Path, send: &dyn Fn(FileJob)) {
 /// For a crash, from the crash handler. Whatever the crash, the words typed are kept straight away, on this thread,
 /// before it returns: std may end the app straight after one the handler can't tell will (a crash in a thread's own
 /// data as the thread ends). They're written in the draft's turn, waiting only a moment for it. When the crash ends the
-/// app (`ends_the_app`), the lock comes down too (see [`ENDING`]), and words written without the turn go with the
-/// words of failed saves too ([`keep_at_the_end`]), and so do the words of notes being saved that aren't on disk yet
+/// app (`ends_the_app`), the lock comes down too (see [`ENDING`]), and words that aren't surely in the draft (written
+/// without the turn, or a draft that couldn't be written) go with the words of failed saves too ([`keep_at_the_end`]),
+/// and so do the words of notes being saved that aren't on disk yet
 /// ([`keep_saves_at_the_end`]). After any other crash the app goes on, perhaps with the note still open: the "Note
 /// files" thread puts the lock as it should be, in order with its other jobs, and a save's own thread keeps its words
 /// if it stops part way ([`save_ended`]).

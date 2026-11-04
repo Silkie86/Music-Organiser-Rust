@@ -192,7 +192,8 @@ mod tests {
     /// The file the copy writes what its crash handler did in, a line each time, in order: "<thread> flushed, on disk:
     /// <true or false>" once the session log was flushed (whether it then held that thread's crash), and "<thread> kept
     /// the note, ends the app: <true or false>, crash log: <true or false>" from its stand-in for keeping an F12 note
-    /// (whether that thread's crash log was there by then).
+    /// (whether that thread's crash log was there by then). The copy itself adds "a backtrace could be taken: <true or
+    /// false>" once it has tried to take one while std's report of the first crash waits.
     const DONE: &str = "what the crash handler did.txt";
 
     /// Adds `line` to [`DONE`] in `folder`, in one go, so two threads crashing at once can't mix their lines.

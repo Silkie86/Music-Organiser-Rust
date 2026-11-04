@@ -1360,7 +1360,8 @@ mod tests {
         log.write(Level::Info, "Test", &"x".repeat(3 * 1024 * 1024));
         crash_at(&log, "src/x.rs:1", "the crash");
         log.flush();
-        // Looked at straight away: a flush that didn't wait would return long before the writer got there.
+        // Looked at straight away: a flush that didn't wait would usually return before the writer got there (the next
+        // test shows the flush waits for the writer's answer, whatever the timing).
         let path = log.path().expect("a file").to_path_buf();
         let size = usize::try_from(std::fs::metadata(&path).expect("there").len()).expect("small");
         log.close();
@@ -1368,6 +1369,30 @@ mod tests {
         let on_disk = String::from_utf8_lossy(&bytes[..size.min(bytes.len())]);
         assert!(on_disk.contains("[Crash] the crash"), "on disk by the time the flush returned");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_flush_waits_until_the_writer_says_the_lines_are_out() {
+        // A log whose writer is this test: the flush is answered only when the test answers it, whatever the timing.
+        let (tx, rx) = channel();
+        let log = SessionLog {
+            path: None,
+            tx: Mutex::new(Some(tx)),
+            state: Mutex::new(State { seen: HashMap::new(), recent: VecDeque::new() }),
+            writer: Mutex::new(None),
+            pruning: Mutex::new(Pruning::Over),
+            offset: AtomicI32::new(0),
+        };
+        std::thread::scope(|s| {
+            let flushing = s.spawn(|| log.flush());
+            let Ok(Msg::Flush(done)) = rx.recv_timeout(Duration::from_secs(20)) else {
+                panic!("no flush was asked for")
+            };
+            std::thread::sleep(Duration::from_millis(300));
+            assert!(!flushing.is_finished(), "the flush waits for the writer's answer");
+            let _ = done.send(());
+            flushing.join().expect("the flush didn't crash");
+        });
     }
 
     #[test]

@@ -55,11 +55,14 @@
 //! C# app's too, and opened read-only), the C# app's own logs and reports, the launcher's folders (`run-latest-rust\`
 //! and its build folders, which it keeps in bounds itself), and everything else in those folders.
 //!
-//! **A feature that writes temp files later** (a MIDI clip dragged out to a DAW) gives each a name of its own: its own
-//! start, the app's process id and a count, such as `mo-clip-<pid>-<n>.mid`, right in the Temp folder (not in a folder
-//! of its own: a folder's name proves nothing, since the system or the user can point Temp anywhere, even at the home
-//! folder). It removes each one when it's done with it, and adds that exact name here, cleared at the top of the Temp
-//! folder only, by its age as above. Never a whole folder by its name or by age alone.
+//! **A feature that writes temp files later** removes each one when it's done with it, and clears what a crash left
+//! only by what proves the file is the app's, never a whole folder by its name or by age alone: a folder's name proves
+//! nothing, since the system or the user can point Temp anywhere, even at the home folder. A file the app names by
+//! itself gets a name of its own (its own start, the app's process id and a count, like the Space page's
+//! `mo-admin-<pid>-<n>-<n>.txt`), right in the Temp folder, and that exact name is added here. A file that has to keep
+//! a name of its own (a MIDI clip dragged out to a DAW is named after the clip) goes in a new folder with a list the
+//! app writes first, naming each file, and only what the list names is cleared, then the list, then the folder if
+//! it's empty.
 
 use std::collections::BTreeMap;
 use std::fs::{self, Metadata};
