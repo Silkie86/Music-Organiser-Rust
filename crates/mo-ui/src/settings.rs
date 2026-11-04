@@ -15,6 +15,7 @@ use mo_app::settings::{self as page, Outputs, Tab};
 use mo_app::themes::{
     ACCENT_KEY, FONT_KEY, FONTS, Look, SIZE_KEY, SIZES, THEME_KEY, THEMES, size_from_setting, theme_named,
 };
+use mo_dawlink::scripts::{self, ScriptState};
 use mo_library::Library;
 use mo_library::folders::{self, FolderList};
 use slint::platform::WindowEvent;
@@ -55,6 +56,12 @@ struct Page {
     folders_message: String,
     daws_checking: bool,
     daws_asked: u64,
+    /// FL Studio's script: whether it's installed (none while being looked at), the folders it goes into, and whether
+    /// Install is running; what the last Install did.
+    fl_state: Option<ScriptState>,
+    fl_folders: Vec<PathBuf>,
+    daws_installing: bool,
+    daws_message: String,
     feed: Feed,
 }
 
@@ -164,6 +171,10 @@ pub fn connect(app: &AppWindow, setup: Setup) {
             folders_message: String::new(),
             daws_checking: false,
             daws_asked: 0,
+            fl_state: None,
+            fl_folders: Vec::new(),
+            daws_installing: false,
+            daws_message: String::new(),
             feed: setup.feed,
         })
     });
@@ -218,6 +229,12 @@ pub fn connect(app: &AppWindow, setup: Setup) {
     data.on_check_daws(move || {
         if let Some(app) = weak.upgrade() {
             check_daws(&app);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_install_fl(move || {
+        if let Some(app) = weak.upgrade() {
+            install_fl(&app);
         }
     });
     let weak = app.as_weak();
@@ -599,6 +616,7 @@ fn check_daws(app: &AppWindow) {
         Some(p.daws_asked)
     });
     let Some(asked) = asked else { return };
+    look_at_fl(app);
     show(app);
     let weak = app.as_weak();
     let started = background::spawn("Settings Bitwig check", move || {
@@ -627,6 +645,92 @@ fn check_daws(app: &AppWindow) {
         });
         show(app);
     }
+}
+
+/// Finds FL Studio's folders and whether the script in them is the app's own, away from the window (a project folder
+/// on a drive that's asleep may take a moment).
+fn look_at_fl(app: &AppWindow) {
+    let Some(library) = PAGE.with(|p| p.borrow().as_ref().filter(|p| p.live).map(|p| p.library.clone())) else {
+        return;
+    };
+    let weak = app.as_weak();
+    let started = background::spawn("Settings FL script", move || {
+        let roots = Library::open_read_only(&library).and_then(|l| l.roots()).unwrap_or_else(|e| {
+            log::warning("Settings", &format!("Couldn't read the project folders, to find FL Studio's: {e}"));
+            Vec::new()
+        });
+        let folders = scripts::fl_script_folders(&scripts::fl_user_data_folders(&crate::files::documents(), &roots));
+        let state = scripts::fl_state(&folders);
+        let _ = slint::invoke_from_event_loop(move || {
+            PAGE.with(|p| {
+                if let Some(p) = p.borrow_mut().as_mut() {
+                    p.fl_state = Some(state);
+                    p.fl_folders = folders;
+                }
+            });
+            if let Some(app) = weak.upgrade() {
+                show(&app);
+            }
+        });
+    });
+    if let Err(e) = started {
+        log::error("Settings", &format!("Couldn't start looking for FL Studio's folders: {e}"));
+    }
+}
+
+/// Puts the app's FL Studio script in FL's folders (Solomon's OK, 2026-11-03), away from the window, then looks again.
+fn install_fl(app: &AppWindow) {
+    let folders = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let p = p.as_mut().filter(|p| p.live && !p.daws_installing && !p.fl_folders.is_empty())?;
+        p.daws_installing = true;
+        Some(p.fl_folders.clone())
+    });
+    let Some(folders) = folders else { return };
+    show(app);
+    let weak = app.as_weak();
+    let started = background::spawn("Settings FL install", move || {
+        let done = scripts::install_fl(&folders);
+        for f in &done.went {
+            log::info("Settings", &format!("Installed the FL Studio script in {}", f.display()));
+        }
+        for (f, why) in &done.failed {
+            log::warning("Settings", &format!("Couldn't install the FL Studio script in {}: {why}", f.display()));
+        }
+        let note = page::installed_note(&done);
+        let _ = slint::invoke_from_event_loop(move || {
+            PAGE.with(|p| {
+                if let Some(p) = p.borrow_mut().as_mut() {
+                    p.daws_installing = false;
+                    p.daws_message = note;
+                }
+            });
+            if let Some(app) = weak.upgrade() {
+                look_at_fl(&app);
+                show(&app);
+            }
+        });
+    });
+    if let Err(e) = started {
+        log::error("Settings", &format!("Couldn't start installing the FL Studio script: {e}"));
+        PAGE.with(|p| {
+            if let Some(p) = p.borrow_mut().as_mut() {
+                p.daws_installing = false;
+            }
+        });
+        show(app);
+    }
+}
+
+/// Shows FL Studio's script as found, for the screenshots.
+pub fn show_fl(app: &AppWindow, state: ScriptState, folders: Vec<PathBuf>) {
+    PAGE.with(|p| {
+        if let Some(p) = p.borrow_mut().as_mut() {
+            p.fl_state = Some(state);
+            p.fl_folders = folders;
+        }
+    });
+    show(app);
 }
 
 /// Shows how Bitwig's link stands, for the screenshots.
@@ -810,7 +914,15 @@ fn show(app: &AppWindow) {
         data.set_keys_message(p.keys_message.clone().into());
         data.set_keys_changed(keys.any_changed());
 
-        let row = |d: page::DawStatus| DawRowInfo {
+        let fl = page::fl_status(p.fl_state, &p.fl_folders);
+        let fl_install = match p.fl_state {
+            Some(ScriptState::NotInstalled) if !p.fl_folders.is_empty() => "Install",
+            Some(ScriptState::Outdated) => "Update",
+            Some(ScriptState::Installed) => "Install again",
+            _ => "",
+        };
+        let row = |d: page::DawStatus, install: &str| DawRowInfo {
+            install: install.into(),
             bitwig: d.daw == p.bitwig.daw,
             daw: d.daw.into(),
             state: d.state.into(),
@@ -822,8 +934,10 @@ fn show(app: &AppWindow) {
                     .collect::<Vec<_>>(),
             )),
         };
-        data.set_daws(ModelRc::new(VecModel::from(vec![row(p.bitwig.clone()), row(page::fl_status())])));
+        data.set_daws(ModelRc::new(VecModel::from(vec![row(p.bitwig.clone(), ""), row(fl, fl_install)])));
         data.set_daws_checking(p.daws_checking);
+        data.set_daws_installing(p.daws_installing);
+        data.set_daws_message(p.daws_message.clone().into());
         data.set_folders_busy(p.folders_busy);
         data.set_folders_message(p.folders_message.clone().into());
     });
