@@ -12,32 +12,16 @@ use mo_space::admin::{MOVE_FOLDER, RECYCLE_BIN, run_step, write_list};
 
 mod common;
 
-use common::{folder_link, is_link, unlink};
+use common::{folder_link, is_link, unlink, writable};
 
 fn fixtures(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     if dir.exists() {
-        unlock_all(&dir);
+        writable(&dir);
         fs::remove_dir_all(&dir).unwrap();
     }
     fs::create_dir_all(&dir).unwrap();
     dir
-}
-
-/// Makes every folder in a fixture writable again, so the next run can clear it.
-fn unlock_all(dir: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir()) {
-            let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o755));
-            for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
-                unlock_all(&entry.path());
-            }
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = dir;
 }
 
 fn s(p: &Path) -> String {
@@ -732,6 +716,82 @@ mod guarded {
         assert_eq!(fs::read_to_string(guarded.join("Spectrasonics/Pad.db")).unwrap(), "pad");
         assert_eq!(fs::read_to_string(guarded.join("Toontrack/Kit.db")).unwrap(), "kit");
         assert_eq!(now.moved[1].to, s(&by_hand.join("Toontrack")));
+    }
+
+    /// Reaktor 6 moved first, then Native Instruments around it, then the folder the moved folders live in to another
+    /// drive (E): the old copy's link to Reaktor 6 still leads to its old place. The old copy is locked then, as Windows
+    /// guards it (it's in Program Files, say). Gives the moves and the folders C and E.
+    fn inner_moved_home(dir: &Path) -> (Vec<mo_space::folder_move::MovedFolder>, PathBuf, PathBuf) {
+        let (c, d, e) = (dir.join("C"), dir.join("D"), dir.join("E"));
+        write(&c, "NI/Reaktor 6/r.ens", "r");
+        write(&c, "NI/k.nki", "k");
+        let data = d.join("Plugin Data");
+        fs::create_dir_all(&data).unwrap();
+        fs::create_dir_all(&e).unwrap();
+        let stop = AtomicBool::new(false);
+        let drives = OtherDrive(&NoAdmin);
+        let mut all = Vec::new();
+        for from in [c.join("NI").join("Reaktor 6"), c.join("NI")] {
+            let whose = ("omnisphere", mo_space::plugin_space::SpaceKind::Sounds, &[] as &[String]);
+            let moved =
+                mo_space::folder_move::move_folder(&s(&from), &s(&data), 1, whose, &drives, &all, &[], &nothing, &stop);
+            all.push(moved.unwrap());
+        }
+        let home = mo_space::after_move::move_home(&s(&data), &s(&e), &all, &[], 2, &drives, &nothing, &stop);
+        let moved = home.unwrap().moved;
+        lock(Path::new(&moved[1].old_copy), true);
+        (moved, c, e)
+    }
+
+    /// Moving back that folder: the old copy's link to Reaktor 6 is made again as administrator, to lead where Reaktor 6
+    /// is now, Windows asking once. When you say no, it stays as it was, and is named. When it went as administrator and
+    /// wasn't made again, moving back stops before the old copy is in use.
+    #[test]
+    fn moving_back_points_an_inner_moved_folders_link_windows_guards_again_as_administrator() {
+        let dir = fixtures("mo-space-admin-inner-link-back");
+        if !locking_works(&dir) {
+            return;
+        }
+        let stop = AtomicBool::new(false);
+        let back = |moved: &[mo_space::folder_move::MovedFolder], admin: &dyn Admin| {
+            mo_space::folder_move::move_back(&moved[1], moved, &OtherDrive(admin), &nothing, &stop)
+        };
+
+        // You say yes.
+        let (moved, c, e) = inner_moved_home(&dir.join("yes"));
+        let unlock = Unlock::new(&[Path::new(&moved[1].old_copy)]);
+        let done = back(&moved, &unlock).unwrap();
+        lock(&c.join("NI"), false);
+        assert!(done.links_left.is_empty(), "{:?}", done.links_left);
+        assert_eq!(unlock.asked(), 1);
+        let inner = c.join("NI").join("Reaktor 6");
+        assert!(fs::symlink_metadata(&inner).unwrap().file_type().is_symlink());
+        assert_eq!(real(&inner), real(&e.join("Plugin Data").join("Reaktor 6")));
+        assert_eq!(fs::read_to_string(inner.join("r.ens")).unwrap(), "r");
+
+        // You say no.
+        let (moved, c, _) = inner_moved_home(&dir.join("no"));
+        let was = fs::read_link(Path::new(&moved[1].old_copy).join("Reaktor 6")).unwrap();
+        let unlock = Unlock { yes_to: 0, ..Unlock::new(&[Path::new(&moved[1].old_copy)]) };
+        let done = back(&moved, &unlock).unwrap();
+        lock(&c.join("NI"), false);
+        assert_eq!(done.links_left, ["Reaktor 6"]);
+        assert_eq!(unlock.asked(), 1);
+        assert_eq!(fs::read_link(c.join("NI").join("Reaktor 6")).unwrap(), was);
+
+        // The step takes the link away, and doesn't make it again.
+        let (moved, c, _) = inner_moved_home(&dir.join("gone"));
+        let old = PathBuf::from(&moved[1].old_copy);
+        let takes_it = Meanwhile(|_: &[String]| {
+            lock(&old, false);
+            unlink(&old.join("Reaktor 6"));
+            lock(&old, true);
+        });
+        let stopped = back(&moved, &takes_it);
+        lock(&old, false);
+        assert!(matches!(stopped, Err(CantMove::LeftHalfway(_))), "{stopped:?}");
+        assert!(fs::symlink_metadata(c.join("NI")).unwrap().file_type().is_symlink());
+        assert!(old.join("k.nki").exists() && fs::symlink_metadata(old.join("Reaktor 6")).is_err());
     }
 
     #[test]

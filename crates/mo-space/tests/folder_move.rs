@@ -20,7 +20,7 @@ use mo_space::plugin_space::SpaceKind;
 
 mod common;
 
-use common::{file_link, folder_link, is_link, unlink};
+use common::{file_link, folder_link, is_link, unlink, writable};
 
 fn fixtures(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
@@ -28,30 +28,6 @@ fn fixtures(name: &str) -> PathBuf {
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     dir
-}
-
-/// Makes the read-only files (and, on a Mac or Linux, the folders a test locked, also one that stopped before it could
-/// unlock them) a test left writable again, so its folder can be cleared.
-fn writable(dir: &Path) {
-    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
-        let Ok(kind) = entry.file_type() else { continue };
-        if kind.is_dir() {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = fs::set_permissions(entry.path(), fs::Permissions::from_mode(0o755));
-            }
-            writable(&entry.path());
-        } else if kind.is_file()
-            && let Ok(meta) = entry.metadata()
-            && meta.permissions().readonly()
-        {
-            let mut permissions = meta.permissions();
-            #[allow(clippy::permissions_set_readonly_false)]
-            permissions.set_readonly(false);
-            let _ = fs::set_permissions(entry.path(), permissions);
-        }
-    }
 }
 
 fn write(dir: &Path, rel: &str, text: &str) {
@@ -145,6 +121,36 @@ impl Drives for NoLinks<'_> {
     fn holds_links(&self, path: &Path) -> bool {
         !path.starts_with(self.exfat)
     }
+}
+
+/// A file ("x") and a link to `target` made in `folder`, named so the drive lists the file first: it's copied before the
+/// link's turn comes. Drives list names in different orders (by name, by a sum worked out from it, in the order they
+/// were made, or the newest first), so names are tried, each made in both orders, until the file comes first.
+fn listed_before_a_link(folder: &Path, target: &Path) -> (PathBuf, PathBuf) {
+    let listed_first = |file: &Path, link: &Path| {
+        let names: Vec<PathBuf> = fs::read_dir(folder).unwrap().map(|e| e.unwrap().path()).collect();
+        names.iter().position(|p| p == file) < names.iter().position(|p| p == link)
+    };
+    (0..64)
+        .find_map(|n| {
+            let (file, link) = (folder.join(format!("{n}.db")), folder.join(format!("Kits {n}")));
+            for file_first in [true, false] {
+                if file_first {
+                    fs::write(&file, "x").unwrap();
+                    folder_link(target, &link);
+                } else {
+                    folder_link(target, &link);
+                    fs::write(&file, "x").unwrap();
+                }
+                if listed_first(&file, &link) {
+                    return Some((file, link));
+                }
+                unlink(&link);
+                fs::remove_file(&file).unwrap();
+            }
+            None
+        })
+        .unwrap()
 }
 
 fn whose() -> (&'static str, SpaceKind, &'static [String]) {
@@ -1961,33 +1967,8 @@ fn a_link_deleted_just_before_its_turn_in_the_last_pass_stays_in_the_copy() {
     let sub = c.join("Library").join("Sub");
     fs::create_dir_all(&sub).unwrap();
     fs::create_dir_all(dir.join("KitsA")).unwrap();
-    // A file listed before the link, so it's copied (and the link deleted) before the link's turn comes. Drives list
-    // names in different orders (by name, by a sum worked out from it, in the order they were made, or the newest
-    // first), so names are tried, each made in both orders, until the file comes first.
-    let listed_first = |file: &Path, link: &Path| {
-        let names: Vec<PathBuf> = fs::read_dir(&sub).unwrap().map(|e| e.unwrap().path()).collect();
-        names.iter().position(|p| p == file) < names.iter().position(|p| p == link)
-    };
-    let (file, kits) = (0..64)
-        .find_map(|n| {
-            let (file, link) = (sub.join(format!("{n}.db")), sub.join(format!("Kits {n}")));
-            for file_first in [true, false] {
-                if file_first {
-                    fs::write(&file, "x").unwrap();
-                    folder_link(&dir.join("KitsA"), &link);
-                } else {
-                    folder_link(&dir.join("KitsA"), &link);
-                    fs::write(&file, "x").unwrap();
-                }
-                if listed_first(&file, &link) {
-                    return Some((file, link));
-                }
-                unlink(&link);
-                fs::remove_file(&file).unwrap();
-            }
-            None
-        })
-        .unwrap();
+    // A file listed before the link, so it's copied (and the link deleted) before the link's turn comes.
+    let (file, kits) = listed_before_a_link(&sub, &dir.join("KitsA"));
     fs::create_dir_all(&d).unwrap();
     let stop = AtomicBool::new(false);
     // The plugin saves the file again as the first pass copies it, so the last pass copies it too; as it does, the
@@ -2030,6 +2011,101 @@ fn moving_back_names_a_link_the_plugin_pointed_elsewhere_after_the_move() {
     assert!(!is_link(&library));
     assert_eq!(real(&library.join("Kits")), real(&dir.join("KitsA")));
     assert_eq!(real(&library.join("Same")), real(&dir.join("KitsA")));
+}
+
+/// Moving back with the old copy there, after the plugin made a link in the folder through the folder's link (so only
+/// the copy has it): the first pass makes it in the old copy too. When the plugin then saves a real folder over it in
+/// the copy, or points it elsewhere, before the last pass, the last pass brings it up to date, as in a copy the move
+/// made: the first pass's link is the copy's own work, not yours. So nothing is left only on the other drive, and
+/// nothing is named.
+#[test]
+fn moving_back_brings_a_link_the_first_pass_made_up_to_date_in_the_last_pass() {
+    for (name, a_folder) in
+        [("mo-space-move-back-own-link-now-a-folder", true), ("mo-space-move-back-own-link-pointed-elsewhere", false)]
+    {
+        let dir = fixtures(name);
+        let (c, d) = (dir.join("C"), dir.join("D"));
+        let library = c.join("Library");
+        write(&library, "Sub/f.db", "f");
+        write(&dir, "KitsA/a.kit", "a");
+        write(&dir, "KitsB/b.kit", "b");
+        fs::create_dir_all(&d).unwrap();
+        let stop = AtomicBool::new(false);
+        let moved = move_folder(&s(&library), &s(&d), 1, whose(), &ROOMY, &[], &[], &nothing, &stop).unwrap();
+        // Through the folder's link, the plugin makes a link in it, and saves a file again.
+        folder_link(&dir.join("KitsA"), &library.join("X"));
+        write(&library, "Sub/f.db", "f2");
+        // As the first pass copies f.db (it made the link in the old copy already: the top folder's turn comes
+        // first), the plugin saves a folder over the link in the copy, or points it at the other kits.
+        let copy = d.join("Library");
+        let once = AtomicBool::new(false);
+        let progress = |_: u64| {
+            if !once.swap(true, Ordering::Relaxed) {
+                unlink(&copy.join("X"));
+                if a_folder {
+                    write(&copy, "X/new preset.fxp", "new");
+                } else {
+                    folder_link(&dir.join("KitsB"), &copy.join("X"));
+                }
+            }
+        };
+        let back = move_back(&moved, &[], &ROOMY, &progress, &stop).unwrap();
+        assert!(back.links_left.is_empty(), "{name}: {:?}", back.links_left);
+        assert!(!is_link(&library), "{name}");
+        if a_folder {
+            assert!(!is_link(&library.join("X")));
+            assert_eq!(fs::read_to_string(library.join("X/new preset.fxp")).unwrap(), "new");
+        } else {
+            assert!(is_link(&library.join("X")));
+            assert_eq!(real(&library.join("X")), real(&dir.join("KitsB")));
+        }
+        assert_eq!(fs::read_to_string(library.join("Sub/f.db")).unwrap(), "f2", "{name}");
+        // Where the link led is as it was.
+        assert_eq!(fs::read_to_string(dir.join("KitsA/a.kit")).unwrap(), "a", "{name}");
+    }
+}
+
+/// Moving back with the old copy there, as the last pass copies: the plugin deletes a link in the folder (to make it
+/// again, say) once the folder was listed, just before the link's turn comes. The old copy's link, which led where that
+/// one did, stays, and isn't named: nothing is said of what goes, as for a file. So does one the first pass made there
+/// (the old copy didn't have it): nothing is removed.
+#[test]
+fn moving_back_doesnt_name_a_link_deleted_just_before_its_turn_in_the_last_pass() {
+    for (name, old_has_it) in
+        [("mo-space-move-back-link-deleted-last", true), ("mo-space-move-back-own-link-deleted-last", false)]
+    {
+        let dir = fixtures(name);
+        let (c, d) = (dir.join("C"), dir.join("D"));
+        let library = c.join("Library");
+        write(&library, "Patch.db", "x");
+        fs::create_dir_all(library.join("Sub")).unwrap();
+        fs::create_dir_all(dir.join("KitsA")).unwrap();
+        fs::create_dir_all(&d).unwrap();
+        let stop = AtomicBool::new(false);
+        let moved = move_folder(&s(&library), &s(&d), 1, whose(), &ROOMY, &[], &[], &nothing, &stop).unwrap();
+        // In the copy: a file saved since, listed before a link made since, which the old copy may have too.
+        let (file, kits) = listed_before_a_link(&d.join("Library").join("Sub"), &dir.join("KitsA"));
+        if old_has_it {
+            let old_sub = PathBuf::from(&moved.old_copy).join("Sub");
+            folder_link(&dir.join("KitsA"), &old_sub.join(kits.file_name().unwrap()));
+        }
+        // The plugin saves the file again as the first pass copies it, so the last pass copies it too; as it does, the
+        // plugin deletes the link.
+        let progress = |bytes: u64| {
+            if bytes == 1 {
+                fs::write(&file, "yy").unwrap();
+            } else if bytes == 3 {
+                unlink(&kits);
+            }
+        };
+        let back = move_back(&moved, &[], &ROOMY, &progress, &stop).unwrap();
+        assert!(back.links_left.is_empty(), "{name}: {:?}", back.links_left);
+        assert!(!is_link(&library), "{name}");
+        let link = library.join("Sub").join(kits.file_name().unwrap());
+        assert!(is_link(&link), "{name}");
+        assert_eq!(real(&link), real(&dir.join("KitsA")), "{name}");
+        assert_eq!(fs::read_to_string(library.join("Sub").join(file.file_name().unwrap())).unwrap(), "yy", "{name}");
+    }
 }
 
 /// Moving back with the old copy there, after a folder in it was put somewhere else with a link in its place (by you,

@@ -21,29 +21,14 @@ use mo_space::plugin_space::{PluginSpace, SpaceFolder, SpaceKind};
 
 mod common;
 
-use common::{folder_link, is_link, unlink};
+use common::{folder_link, is_link, unlink, writable};
 
 fn fixtures(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
-    unlocked(&dir);
+    writable(&dir);
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     dir
-}
-
-/// On a Mac or Linux, opens again the folders a test locked (also one that stopped before it could unlock them), so its
-/// folder can be cleared. Never through a link.
-fn unlocked(dir: &Path) {
-    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
-        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = fs::set_permissions(entry.path(), fs::Permissions::from_mode(0o755));
-            }
-            unlocked(&entry.path());
-        }
-    }
 }
 
 fn write(dir: &Path, rel: &str, text: &str) {

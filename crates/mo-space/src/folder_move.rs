@@ -735,7 +735,7 @@ pub fn move_back(
         .map_err(partly)?;
         write_through(&[&first, &again], stop).map_err(partly)?;
         let mut links_left = [first.links_left, again.links_left].concat();
-        point_inner_links(moved, all, &mut links_left, &changed).map_err(partly)?;
+        point_inner_links(moved, all, &mut links_left, &changed, drives.admin()).map_err(partly)?;
         // The copying took a while: a plugin update may have put a real folder where the link was meanwhile.
         if let Some((now, files)) = not_the_link_now(moved) {
             let kept = if kept_in.exists() {
@@ -803,37 +803,78 @@ pub fn move_back(
 /// copy's leads where its folder is now is pointed there too, so the plugin finds that folder once the old copy is back,
 /// and isn't named in `links_left` (the passes named it, as it led elsewhere than the copy's). It leads to the place the
 /// app noted for that folder, never to one read through the copy. Only a link in the old copy itself, with no link on
-/// the way, is changed. One Windows won't let change stays as it was, and is named; one that went and couldn't be put
-/// back stops moving back, before the old copy is in use, and is named.
+/// the way, is changed. The ones Windows guards are changed as administrator, Windows asking you once for all of them
+/// (`admin`: the app passes [`crate::admin::AsAdmin`]), as when pointing links again. One that still won't change stays
+/// as it was, and is named; one that went and couldn't be put back stops moving back, before the old copy is in use,
+/// and is named.
 fn point_inner_links(
     moved: &MovedFolder,
     all: &[MovedFolder],
     links_left: &mut Vec<PathBuf>,
     changed: &AtomicBool,
+    admin: &dyn Admin,
 ) -> Result<(), CantMove> {
     let (old, copy) = (Path::new(&moved.old_copy), Path::new(&moved.to));
+    let mut guarded = Vec::new();
     for (rest, inner) in inner_links(moved, all) {
-        let (mine, theirs, now) = (old.join(&rest), copy.join(&rest), Path::new(&inner.to));
-        // As the passes named it: by its name in the copy, maybe in other capitals than the move noted.
-        let named = |p: &PathBuf| key(&text(p)) == key(&text(&rest));
-        if !in_itself(old, &rest) || !is_link(&mine) || leads_to(&text(&mine), now) || !leads_to(&text(&theirs), now) {
+        let (mine, theirs, now) = (old.join(&rest), copy.join(&rest), PathBuf::from(&inner.to));
+        if !in_itself(old, &rest) || !is_link(&mine) || leads_to(&text(&mine), &now) || !leads_to(&text(&theirs), &now)
+        {
             continue;
         }
-        match crate::after_move::relink(&text(&mine), now, true) {
+        match crate::after_move::relink(&text(&mine), &now, true) {
             Ok(()) => {
                 changed.store(true, Ordering::Relaxed);
-                links_left.retain(|p| !named(p));
+                unname(links_left, &rest);
             }
             Err(not) if not.gone => {
                 changed.store(true, Ordering::Relaxed);
                 return Err(CantMove::Failed(not.why));
             }
+            // Changed as administrator, below, with the others Windows guards.
+            Err(not) if not.guarded && admin.can_ask() => guarded.push((rest, mine, now)),
             // It stays as it was, and named: the passes named it already, as it leads elsewhere than the copy's.
-            Err(_) if !links_left.iter().any(named) => links_left.push(rest),
-            Err(_) => {}
+            Err(_) => name_once(links_left, rest),
+        }
+    }
+    if guarded.is_empty() {
+        return Ok(());
+    }
+    let lines: Vec<Vec<String>> =
+        guarded.iter().map(|(_, mine, now)| vec![real_spot(&text(mine)), text(now)]).collect();
+    let said = ask_for(admin, Step::Relink, &lines);
+    // What's there now decides, whatever the step said.
+    for (k, (rest, mine, now)) in guarded.into_iter().enumerate() {
+        if leads_to(&text(&mine), &now) {
+            changed.store(true, Ordering::Relaxed);
+            unname(links_left, &rest);
+        } else if fs::symlink_metadata(&mine).is_ok() {
+            // Still there (as it was, or something the plugin put in its place meanwhile): it stays, and is named.
+            name_once(links_left, rest);
+        } else {
+            changed.store(true, Ordering::Relaxed);
+            let otherwise = format!(
+                "The link at {} went as administrator, and wasn't made again: make a link there to {} yourself.",
+                text(&mine),
+                text(&now)
+            );
+            return Err(CantMove::Failed(reason(&said, k, &otherwise)));
         }
     }
     Ok(())
+}
+
+/// Names `rest` in what moving back left, once: by its name in the copy, as the passes named it, maybe in other
+/// capitals than the move noted.
+fn name_once(links_left: &mut Vec<PathBuf>, rest: PathBuf) {
+    if !links_left.iter().any(|p| key(&text(p)) == key(&text(&rest))) {
+        links_left.push(rest);
+    }
+}
+
+/// Takes `rest` out of what moving back left, whatever capitals the passes named it in.
+fn unname(links_left: &mut Vec<PathBuf>, rest: &Path) {
+    links_left.retain(|p| key(&text(p)) != key(&text(rest)));
 }
 
 /// Whether `rest` (a path inside `folder`, by names only: never "..") is in `folder` itself: `folder` is a real folder,
@@ -1697,8 +1738,10 @@ pub(crate) struct Tree<'a> {
     pub(crate) keep_in: Option<&'a Path>,
     /// With `keep_in`: every file in `to` that's replaced is kept there first, not only newer ones.
     pub(crate) keep_all: bool,
-    /// With `keep_in`: files an earlier pass wrote into `to` (paths inside it, sorted). They're the copy's own work,
-    /// not yours, so they're replaced without being kept.
+    /// With `keep_in`: files an earlier pass wrote into `to`, and links it made there (paths inside it, sorted).
+    /// They're the copy's own work, not yours, so they're replaced without being kept: such a link is made again where
+    /// the folder's is worded otherwise by then, or goes for the file or folder the folder has in its place, as in a
+    /// copy the move made.
     pub(crate) ours: &'a [PathBuf],
     /// Folders not copied (keys).
     pub(crate) leave_out: &'a [String],
@@ -1764,7 +1807,8 @@ pub(crate) struct Copied {
     pub(crate) bytes: u64,
     pub(crate) kept: Vec<PathBuf>,
     pub(crate) links_left: Vec<PathBuf>,
-    /// With `keep_in`, freshening: the files it wrote (paths inside the copy), for [`Tree::ours`] in the next pass.
+    /// With `keep_in`, freshening: the files it wrote and the links it made (paths inside the copy), for
+    /// [`Tree::ours`] in the next pass.
     pub(crate) written: Vec<PathBuf>,
     /// File links it copied as the file they lead to (paths inside the copy, sorted), for [`Tree::as_files`] in the
     /// next pass.
@@ -1896,23 +1940,30 @@ pub(crate) fn copy_tree(
             // A link there stays as it is but in a copy the move made: nothing is written through it (it could lead
             // into another plugin's folder).
             if there.as_ref().is_some_and(|m| m.file_type().is_symlink()) {
+                // In a copy the move made, the link is the move's own, and the copy is to be as the folder is: where
+                // the link the pass before made isn't worded as the folder's would be now (the plugin pointed it
+                // elsewhere), or the folder has a file or a folder in its place (a plugin saved over its link), it
+                // goes, and what's there now is copied. Where what the folder had there went just now (a link
+                // deleted to be made again, say), it stays: nothing is removed, as for a file that goes.
+                let own_goes = || {
+                    let as_it_was = kind.is_symlink() && made_as_worded(&source, &copy, tree, &source_real);
+                    !as_it_was && !went(&source, tree)
+                };
                 let goes = match (fill, tree.keep_in) {
-                    // In a copy the move made, the link is the move's own, and the copy is to be as the folder is:
-                    // where the link the pass before made isn't worded as the folder's would be now (the plugin
-                    // pointed it elsewhere), or the folder has a file or a folder in its place (a plugin saved over
-                    // its link), it goes, and what's there now is copied. Where what the folder had there went just
-                    // now (a link deleted to be made again, say), it stays: nothing is removed, as for a file that
-                    // goes.
-                    (Fill::Freshen, None) => {
-                        let as_it_was = kind.is_symlink() && made_as_worded(&source, &copy, tree, &source_real);
-                        !as_it_was && !went(&source, tree)
-                    }
+                    (Fill::Freshen, None) => own_goes(),
+                    // So does one an earlier pass made in a folder of yours ([`Tree::ours`]): it's the copy's own too.
+                    (Fill::Freshen, Some(_)) if tree.ours.binary_search(&inside(&copy)).is_ok() => own_goes(),
                     // In a folder of yours, one where the folder has a file or a folder, or a link leading somewhere
                     // else (the plugin pointed it elsewhere since), is named ([`Copied::links_left`]): which is the one
-                    // to keep can't be told.
+                    // to keep can't be told. Not one whose link in the folder went just now (deleted to be made
+                    // again, say): nothing is said of what goes, as for a file.
                     (Fill::Freshen, Some(_)) => {
-                        let roots = roots.get_or_init(|| [Some(source_real.clone()), fs::canonicalize(tree.to).ok()]);
-                        if !kind.is_symlink() || !same_lead(&source, &copy, roots) {
+                        let elsewhere = || {
+                            let roots =
+                                roots.get_or_init(|| [Some(source_real.clone()), fs::canonicalize(tree.to).ok()]);
+                            !same_lead(&source, &copy, roots)
+                        };
+                        if (!kind.is_symlink() || elsewhere()) && !went(&source, tree) {
                             copied.links_left.push(inside(&copy));
                         }
                         false
@@ -1986,6 +2037,10 @@ pub(crate) fn copy_tree(
                             }
                             if is_link(&copy) {
                                 tree.has_changed();
+                                // The copy's own, for the next pass ([`Tree::ours`]).
+                                if tree.keep_in.is_some() && fill == Fill::Freshen {
+                                    copied.written.push(inside(&copy));
+                                }
                             }
                         }
                         continue;

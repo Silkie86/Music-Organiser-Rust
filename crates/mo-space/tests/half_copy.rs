@@ -21,7 +21,7 @@ use mo_space::plugin_space::SpaceKind;
 
 mod common;
 
-use common::{folder_link, is_link, unlink};
+use common::{folder_link, is_link, unlink, writable};
 
 fn fixtures(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
@@ -29,30 +29,6 @@ fn fixtures(name: &str) -> PathBuf {
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     dir
-}
-
-/// Makes the read-only files (and, on a Mac or Linux, folders) a test left writable again, so its folder can be
-/// cleared.
-fn writable(dir: &Path) {
-    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
-        let Ok(kind) = entry.file_type() else { continue };
-        if kind.is_dir() {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = fs::set_permissions(entry.path(), fs::Permissions::from_mode(0o755));
-            }
-            writable(&entry.path());
-        } else if kind.is_file()
-            && let Ok(meta) = entry.metadata()
-            && meta.permissions().readonly()
-        {
-            let mut permissions = meta.permissions();
-            #[allow(clippy::permissions_set_readonly_false)]
-            permissions.set_readonly(false);
-            let _ = fs::set_permissions(entry.path(), permissions);
-        }
-    }
 }
 
 fn write(dir: &Path, rel: &str, text: &str) {
