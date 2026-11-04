@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, Metadata};
 use std::io::Read;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -252,6 +252,8 @@ pub(crate) fn on_removable(_real: &str) -> bool {
 
 /// A guard with where its folders really are worked out once, for one preview or one clean-up: each line would
 /// otherwise look up every project and sample folder again (slow with thousands of lines and a folder on the network).
+/// A project or sample folder swapped for a link part way through isn't seen; each line's own place still is, and a
+/// line reached through a link that leads out of its project folder still stays.
 struct Prepared<'g> {
     guard: &'g Guard<'g>,
     roots: Vec<(&'g str, String)>,
@@ -763,7 +765,11 @@ impl<'a> Sending<'a> {
                     lines.push(vec![r.real.clone(), stamp]);
                     sent.push(r);
                 }
-                Err(why) => done.problems.push(Problem { path: r.path, why }),
+                Err(why) => {
+                    // It didn't go: the same thing reached another way may still try.
+                    self.sent.remove(&key(&r.real));
+                    done.problems.push(Problem { path: r.path, why });
+                }
             }
         }
         if sent.is_empty() {
@@ -784,6 +790,7 @@ impl<'a> Sending<'a> {
                 done.removed.push(Removed { when, ..r });
             } else {
                 let why = reason(&said, n, "It's still there: a program may be using some of it.");
+                self.sent.remove(&key(&r.real));
                 done.problems.push(Problem { path: r.path, why });
             }
         }
@@ -1265,13 +1272,16 @@ fn put_back_from_system_bin(removed: &[Removed]) -> Vec<Problem> {
         }
         let spot = item.original_path();
         let was_there = fs::symlink_metadata(&spot).is_ok();
+        let in_bin = in_bin_path(&item);
         match catch_unwind(AssertUnwindSafe(|| trash::os_limited::restore_all([item]))) {
             Ok(Ok(())) => {}
             Ok(Err(trash::Error::RestoreCollision { .. })) => {
                 problems.push(problem(r, "Something new has its name now, so it's left in the Recycle Bin."))
             }
             _ => {
-                if !was_there {
+                // Only while it's still in the bin: one that came back (and only the bin's own note of it couldn't
+                // be cleared) is the thing itself, however empty.
+                if !was_there && in_bin.as_deref().is_some_and(|b| fs::symlink_metadata(b).is_ok()) {
                     remove_placeholder(&spot);
                 }
                 problems.push(problem(r, "It couldn't be put back; it's still in the Recycle Bin."))
@@ -1300,6 +1310,19 @@ fn remove_placeholder(spot: &Path) {
 
 #[cfg(windows)]
 fn remove_placeholder(_spot: &Path) {}
+
+/// Linux: where a Trash item itself is kept, from its note (`…/Trash/info/Name.trashinfo` keeps
+/// `…/Trash/files/Name`), as the trash crate finds it.
+#[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+fn in_bin_path(item: &trash::TrashItem) -> Option<PathBuf> {
+    let info = Path::new(&item.id);
+    Some(info.parent()?.parent()?.join("files").join(info.file_stem()?))
+}
+
+#[cfg(windows)]
+fn in_bin_path(_item: &trash::TrashItem) -> Option<PathBuf> {
+    None
+}
 
 /// A Mac's Trash can't be read by a program: nothing to check.
 #[cfg(not(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))))]
