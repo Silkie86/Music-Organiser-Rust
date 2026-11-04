@@ -34,9 +34,11 @@ pub mod rediscover;
 pub mod scan;
 pub mod types;
 pub mod usage;
+pub mod word;
 
-pub use analysis::{ChordSpan, SoundAnalysis};
+pub use analysis::{ChordSpan, Peaks, SoundAnalysis};
 pub use db::{Everything, KnownSound, SoundMatch, SoundsDb, SoundsError, StarPoint, TagCount, count_analysed};
+pub use word::Word;
 
 use chrono::NaiveDateTime;
 pub(crate) use mo_formats::paths::file_name;
@@ -51,14 +53,14 @@ pub struct Sound {
     /// What the analyser found; `None` until it has run, or when the stored analysis can't be read.
     pub analysis: Option<SoundAnalysis>,
     /// The type shown: your own label, else the name's, else what the classifier learned.
-    pub sound_type: String,
+    pub sound_type: Word,
     /// Where `sound_type` came from: "you", "name", "learned" or "model" ("" when nothing said).
-    pub type_source: String,
+    pub type_source: Word,
     pub type_confidence: f64,
     /// Your own label, when you've set one. These are the strongest training examples.
-    pub user_type: Option<String>,
+    pub user_type: Option<Word>,
     /// The type the file's name or folders give, if any.
-    pub name_type: Option<String>,
+    pub name_type: Option<Word>,
     /// Sorted by name.
     pub tags: Vec<String>,
     pub favourite: bool,
@@ -81,8 +83,8 @@ impl Sound {
             path: path.to_owned(),
             error: None,
             analysis: None,
-            sound_type: types::UNKNOWN.to_owned(),
-            type_source: String::new(),
+            sound_type: Word::new(types::UNKNOWN),
+            type_source: Word::default(),
             type_confidence: 0.0,
             user_type: None,
             name_type: None,

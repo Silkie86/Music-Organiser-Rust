@@ -335,7 +335,7 @@ impl SoundList {
         let s = &self.shared.sounds[i];
         let analysis = s.analysis.as_ref();
         let is_loop = analysis.is_some_and(|a| a.is_loop);
-        if (!t.sound_types.is_empty() && !t.sound_types.contains(&s.sound_type))
+        if (!t.sound_types.is_empty() && !t.sound_types.iter().any(|w| *w == s.sound_type))
             || (t.length == Length::Hits && is_loop)
             || (t.length == Length::Loops && !is_loop)
             || (t.favourites && !s.favourite)
@@ -537,10 +537,15 @@ pub fn bpm_text(bpm: f64) -> String {
 /// `peaks.len()` wide and 100 high. Peaks are scaled so the loudest reaches the edges, and the quietest still shows as a
 /// sliver, as the old app drew them.
 pub fn wave_path(peaks: &[f32]) -> String {
+    wave_path_of(peaks.iter().copied())
+}
+
+/// [`wave_path`] for peaks given one by one (a sound's `Peaks`, with no list made of them).
+pub fn wave_path_of(peaks: impl Iterator<Item = f32> + Clone) -> String {
     use std::fmt::Write;
-    let loudest = peaks.iter().fold(0.0f32, |m, v| m.max(v.abs())).max(f32::EPSILON);
-    let mut out = String::with_capacity(peaks.len() * 16);
-    for (i, p) in peaks.iter().enumerate() {
+    let loudest = peaks.clone().fold(0.0f32, |m, v| m.max(v.abs())).max(f32::EPSILON);
+    let mut out = String::with_capacity(peaks.size_hint().0 * 16);
+    for (i, p) in peaks.enumerate() {
         let half = (p.abs() / loudest * 50.0).clamp(0.5, 50.0);
         let _ = write!(out, "M{}.5 {:.1}V{:.1}", i, 50.0 - half, 50.0 + half);
     }
@@ -549,7 +554,7 @@ pub fn wave_path(peaks: &[f32]) -> String {
 
 /// The line under a sound's name: its type, key, tempo and length, the ones it has.
 pub fn facts_line(s: &Sound) -> String {
-    let mut parts = vec![s.sound_type.clone()];
+    let mut parts = vec![s.sound_type.to_string()];
     parts.push(key_text(s));
     if let Some(a) = &s.analysis {
         if let Some(b) = a.bpm {

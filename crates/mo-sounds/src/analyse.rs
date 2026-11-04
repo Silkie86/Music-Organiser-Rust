@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use mo_audio::dsp::{self, MelFilters, MelScale};
 use mo_audio::{AudioData, AudioError};
 
-use crate::analysis::SoundAnalysis;
+use crate::analysis::{Peaks, SoundAnalysis};
 use crate::types;
 
 const N_FFT: usize = 2048;
@@ -121,7 +121,7 @@ pub fn analyse(audio: &AudioData, path: &str) -> Analysed {
     let rms = if x.is_empty() { 0.0 } else { (sum_sq / x.len() as f64).sqrt() };
     a.peak_db = round_to(db(peak), 1);
     a.rms_db = round_to(db(rms), 1);
-    a.waveform = waveform_peaks(x, 160, peak);
+    a.waveform = Peaks::new(&waveform_peaks(x, 160, peak));
 
     let env = envelope(x, sr);
     let env_peak = env.iter().copied().fold(f64::NEG_INFINITY, f64::max);
@@ -716,8 +716,8 @@ mod tests {
         assert!(a.pitch_confidence > 0.9);
         assert_eq!((a.key_tonic, a.key_minor, a.key_source.as_str()), (Some(9), false, "root note"));
         assert!(!a.is_loop);
-        assert!(a.character.contains(&"tonal".to_owned()), "{:?}", a.character);
-        assert!(a.character.contains(&"mono".to_owned()));
+        assert!(a.character.iter().any(|w| w == "tonal"), "{:?}", a.character);
+        assert!(a.character.iter().any(|w| w == "mono"));
         assert!((a.peak_db - -6.0).abs() < 0.1);
         assert!((a.rms_db - -9.0).abs() < 0.1);
         let biggest = a.chroma.iter().copied().fold(0.0, f64::max);
@@ -730,8 +730,8 @@ mod tests {
     fn noise_is_noisy_bright_and_has_no_pitch() {
         let a = analyse(&audio(44_100, vec![noise(44_100, 0.5)]), "hat.wav").analysis;
         assert!(a.noisiness > 0.5, "{}", a.noisiness);
-        assert!(a.character.contains(&"noisy".to_owned()), "{:?}", a.character);
-        assert!(a.character.contains(&"bright".to_owned()));
+        assert!(a.character.iter().any(|w| w == "noisy"), "{:?}", a.character);
+        assert!(a.character.iter().any(|w| w == "bright"));
         assert_eq!(a.pitch, None);
         assert_eq!(a.key_tonic, None);
     }
@@ -772,7 +772,7 @@ mod tests {
         let r: Vec<f32> = l.iter().map(|v| -v).collect();
         let a = analyse(&audio(22_050, vec![l, r]), "x.wav").analysis;
         assert!((a.width - 2f64.sqrt()).abs() < 1e-3, "{}", a.width);
-        assert!(a.character.contains(&"wide".to_owned()));
+        assert!(a.character.iter().any(|w| w == "wide"));
     }
 
     #[test]
