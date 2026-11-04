@@ -183,6 +183,17 @@ export component AppWindow inherits Window {
                             lit-bar: false;
                             selected: root.place == i;
                             clicked => { root.place-chosen(i); }
+                            // Tells the rail's light where the picked line is.
+                            init => { self.report(); }
+                            changed selected => { self.report(); }
+                            changed y => { self.report(); }
+                            changed height => { self.report(); }
+                            function report() {
+                                if (self.selected) {
+                                    rail-light.at-y = places-list.y + self.y;
+                                    rail-light.line = self.height;
+                                }
+                            }
                         }
                     }
                     Rectangle { height: 10px; }
@@ -207,17 +218,27 @@ export component AppWindow inherits Window {
                 }
                 // The light on the picked place, in its colour. One light for the whole list, so it slides from the
                 // place you were on to the one you picked: you see where you went. Settings lights its own.
-                Rectangle {
+                rail-light := Rectangle {
+                    // The picked line's top and height, which the line reports; kept when Settings is picked, so the
+                    // light goes out where it was instead of streaking down the rail.
+                    in-out property <length> at-y;
+                    in-out property <length> line;
                     property <bool> on-list: root.place >= 0 && root.place < root.rail.length;
-                    property <length> line: 40px;
+                    // Off until the first frame is drawn, so the light doesn't slide in from the top as the app opens.
+                    property <bool> ready;
+                    Timer {
+                        interval: 1ms;
+                        running: !rail-light.ready;
+                        triggered => { rail-light.ready = true; }
+                    }
                     x: Space.sm;
                     width: 3px;
                     height: self.on-list ? self.line - 2 * Space.sm : 0;
-                    y: places-list.y + max(0, root.place) * (self.line + Space.xs) + (self.line - self.height) / 2;
+                    y: self.at-y + (self.line - self.height) / 2;
                     border-radius: 1.5px;
                     background: Theme.here-colour;
-                    animate y { duration: Motion.move; easing: ease-out; }
-                    animate height { duration: Motion.move; easing: ease-out; }
+                    animate y { duration: self.ready ? Motion.move : 0ms; easing: ease-out; }
+                    animate height { duration: self.ready ? Motion.move : 0ms; easing: ease-out; }
                 }
                 // The seam between the rail and the page.
                 Rectangle {

@@ -275,6 +275,9 @@ pub(crate) fn go_to(app: &AppWindow, index: i32) {
     if PAGE.swap(place.index(), Ordering::Relaxed) != place.index() || app.get_place() != index {
         log::info("Page", place.name());
     }
+    // The place's colour first, so the new page's mark never shows the old place's colour for a frame (the window's
+    // own `changed place` comes a frame late).
+    app.global::<Theme>().set_here(index);
     app.set_place(index);
     finder::close(app);
     settings::page_shown(place);

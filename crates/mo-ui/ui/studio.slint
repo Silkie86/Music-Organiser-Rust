@@ -673,7 +673,6 @@ export component MenuLine inherits Rectangle {
     background: root.on
         ? Theme.accent.transparentize(touch.has-hover ? 70% : 78%)
         : touch.has-hover && root.enabled ? Theme.hover : transparent;
-    animate background { duration: Motion.tap; }
     HorizontalLayout {
         padding-left: root.tickable ? Space.sm : Space.md;
         padding-right: Space.md;
@@ -952,15 +951,14 @@ export component ListLine inherits Rectangle {
     // This press has started a drag, so letting go isn't a click.
     property <bool> dragged;
     border-radius: Theme.radius;
+    // No easing here: lists reuse their lines as they scroll, and an eased line would trail the scroll.
     background: selected ? Theme.surface-raised : touch.has-hover ? Theme.hover : transparent;
-    animate background { duration: Motion.tap; }
     opacity: root.lifted ? 0.4 : 1;
     // The accent bar on the picked line.
     Rectangle {
         x: 0;
         width: root.selected ? 2px : 0;
         background: Theme.accent;
-        animate width { duration: Motion.tap; }
     }
     // Under the line's own parts, so a button or chip on the line takes its own click; a click anywhere else on
     // the line still picks it.
@@ -1063,6 +1061,13 @@ export component TabBar inherits Rectangle {
     // Where the picked tab is, which each tab reports, so its underline slides from tab to tab.
     property <length> lit-x;
     property <length> lit-width;
+    // Off until the first frame is drawn, so a page opening on its third view doesn't slide there from the left.
+    property <bool> ready;
+    Timer {
+        interval: 1ms;
+        running: !root.ready;
+        triggered => { root.ready = true; }
+    }
     width: row.preferred-width;
     height: 36px;
     row := HorizontalLayout {
@@ -1104,7 +1109,7 @@ export component TabBar inherits Rectangle {
         visible: root.current >= 0 && root.current < root.tabs.length;
         border-radius: 1px;
         background: Theme.accent;
-        animate x, width { duration: Motion.move; easing: ease-out; }
+        animate x, width { duration: root.ready ? Motion.move : 0ms; easing: ease-out; }
     }
 }
 
@@ -1480,7 +1485,9 @@ export component Meter inherits Rectangle {
     in property <color> tint: Theme.accent;
     in property <float> warn-from: 2;
     property <int> segments: max(1, floor((self.width + 2px) / 6px));
-    property <int> lit: round(clamp(root.level, 0, 1) * root.segments);
+    // A start shows at least one lit segment, and only a finished job lights the last one.
+    property <int> lit: root.level <= 0 ? 0 : root.level >= 1 ? root.segments
+        : clamp(ceil(root.level * root.segments), 1, root.segments - 1);
     for i in root.segments: Rectangle {
         x: i * 6px;
         width: 4px;
@@ -1580,6 +1587,13 @@ export component Segmented inherits Rectangle {
     // Where the picked button is, which each button reports.
     property <length> lit-x;
     property <length> lit-width;
+    // Off until the first frame is drawn, so a page opening on its third view doesn't slide there from the left.
+    property <bool> ready;
+    Timer {
+        interval: 1ms;
+        running: !root.ready;
+        triggered => { root.ready = true; }
+    }
     width: row.preferred-width;
     height: 32px;
     border-radius: Theme.radius;
@@ -1592,7 +1606,7 @@ export component Segmented inherits Rectangle {
         width: root.lit-width;
         visible: root.current >= 0 && root.current < root.choices.length;
         background: @linear-gradient(180deg, Theme.accent.brighter(12%) 0%, Theme.accent.darker(6%) 100%);
-        animate x, width { duration: Motion.move; easing: ease-out; }
+        animate x, width { duration: root.ready ? Motion.move : 0ms; easing: ease-out; }
     }
     row := HorizontalLayout {
         for name[i] in root.choices: Rectangle {

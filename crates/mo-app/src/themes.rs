@@ -221,7 +221,7 @@ pub const ACCENTS: [(&str, Option<u32>); 7] = [
 pub fn place_colours(look: &Look) -> [u32; 8] {
     let t = &look.theme;
     if t.name == "Terminal" {
-        return [look.accent, look.accent, look.accent, look.accent, look.accent, look.accent, look.accent, t.muted];
+        return [t.accent, t.accent, t.accent, t.accent, t.accent, t.accent, t.accent, t.muted];
     }
     if t.light {
         // Songs, Sounds, Presets, MIDI, Plugins, Space, Backup, Settings.
@@ -319,7 +319,11 @@ mod tests {
             let look = Look { theme, accent: theme.accent, accent_text: theme.accent_text };
             let colours = place_colours(&look);
             assert_eq!(colours[7], theme.muted, "{}: Settings is the theme's grey", theme.name);
-            if theme.name != "Terminal" {
+            if theme.name == "Terminal" {
+                // Its own green, whatever accent is picked.
+                let pink = Look { theme, accent: 0xF28CB1, accent_text: 0 };
+                assert!(place_colours(&pink)[..7].iter().all(|c| *c == theme.accent));
+            } else {
                 for (i, c) in colours[..7].iter().enumerate() {
                     assert!(colours[i + 1..7].iter().all(|d| d != c), "{}: two places share a colour", theme.name);
                 }
