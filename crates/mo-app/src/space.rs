@@ -3,7 +3,7 @@
 //! it can be tested without a window; mo-ui's `space.rs` reads the disks (never on the window's thread) and fills the
 //! page. What can be freed comes a part at a time, as agreed in the page's question round (2026-11-03): Bitwig copies
 //! first ([`crate::space_bitwig`], whose Fix writes new "(fixed)" projects), then old copies, spare plugin copies,
-//! songs and plugins. Nothing here changes a file.
+//! songs ([`crate::space_songs`]) and plugins. Nothing here changes a file.
 
 use std::path::{Path, PathBuf};
 
@@ -300,7 +300,7 @@ pub fn biggest_first(mut lines: Vec<(u64, Line)>) -> Vec<Line> {
 }
 
 /// What can still be freed, as the page says it under Biggest wins first.
-pub const STILL_TO_COME: &str = "Still to come: songs, then plugins you haven't used.";
+pub const STILL_TO_COME: &str = "Still to come: plugins you haven't used.";
 
 /// What the page says under Biggest wins first: why a kind has no line when a look found none of it (each kind's own
 /// sentence, ending in a space; "" for one with nothing to say), then what's still to come.
