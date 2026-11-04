@@ -231,11 +231,13 @@ component SpaceCard inherits SidePanel {
     // out at its real height: so the box is at least as tall as where the last one ends, or the card's own height (and
     // what follows the parts) fell short of it, and a long card's last parts couldn't be scrolled to.
     if SpaceData.card-parts.length > 0: VerticalLayout {
-        spacing: Space.md;
         alignment: start;
         min-height: root.parts-end;
         for part[i] in SpaceData.card-parts: HorizontalLayout {
             spacing: Space.sm;
+            // The gap above each part but the first: a gap between them in the box would come before the marker below
+            // too, and make the box a gap taller than its parts.
+            padding-top: i == 0 ? 0px : Space.md;
             padding-left: part.under ? Space.xl : 0px;
             // Room for a tick, ticked or not, so the names line up. Ticking re-lists the parts from mo-app.
             if SpaceData.card-ticks: VerticalLayout {
@@ -293,11 +295,13 @@ component SpaceCard inherits SidePanel {
                 font-size: Type.meta;
             }
         }
-        // Where the last part ends: here, less the gap before this.
+        // Where the last part ends. It takes none of the card's spare room (a Rectangle would, unlike a Text), so the
+        // parts' box stays as tall as the parts.
         Rectangle {
             height: 0px;
-            init => { root.parts-end = self.y - Space.md; }
-            changed y => { root.parts-end = self.y - Space.md; }
+            vertical-stretch: 0;
+            init => { root.parts-end = self.y; }
+            changed y => { root.parts-end = self.y; }
         }
     }
     if SpaceData.card-room != "": Text {
