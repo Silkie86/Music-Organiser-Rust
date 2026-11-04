@@ -480,7 +480,7 @@ mod guarded {
 
         // Saved through the link since; moving back asks again.
         write(&d, "Spectrasonics/User.db", "mine");
-        let back = mo_space::folder_move::move_back(&moved, &drives, &nothing, &stop).unwrap();
+        let back = mo_space::folder_move::move_back(&moved, &[], &drives, &nothing, &stop).unwrap();
         assert!(back.kept.is_empty());
         assert_eq!(unlock.asked(), 3);
         assert!(!fs::symlink_metadata(&from).unwrap().file_type().is_symlink());

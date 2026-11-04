@@ -15,7 +15,7 @@ use mo_space::after_move::{
     old_home_can_go, old_homes_json, only_in_old_home, parse_old_homes, real_place, remove_old_home, replaced, repoint,
 };
 use mo_space::clean::{Bin, Problem, Removed};
-use mo_space::folder_move::{CantMove, Drives, MovedFolder, move_folder, only_in_old_copy};
+use mo_space::folder_move::{CantMove, Drives, MovedFolder, move_back, move_folder, only_in_old_copy};
 use mo_space::key;
 use mo_space::plugin_space::{PluginSpace, SpaceFolder, SpaceKind};
 
@@ -339,6 +339,32 @@ fn an_inner_moved_folders_link_isnt_only_in_the_old_copy_once_the_moved_folders_
     assert_eq!(done.moved[1].to, s(&new_home.join("NI")));
     assert_eq!(real(&new_home.join("NI").join("Reaktor 6")), real(&new_home.join("Reaktor 6")));
     assert!(only_in_old_copy(&done.moved[1], &done.moved, &stop).unwrap().is_empty());
+}
+
+/// Moving back a folder with a moved folder inside it (Reaktor 6 first, then Native Instruments around it), once the
+/// folder the moved folders live in has moved to another drive: the old copy's link to Reaktor 6 still leads to its
+/// old place, so it's made as the other drive's is, leading to where Reaktor 6 is now.
+#[test]
+fn moving_back_makes_an_inner_moved_folders_link_lead_where_it_is_now() {
+    let dir = fixtures("mo-space-after-home-inner-back");
+    let (c, d, e) = (dir.join("C"), dir.join("D"), dir.join("E"));
+    write(&c, "NI/Reaktor 6/r.ens", "r");
+    write(&c, "NI/k.nki", "k");
+    let data = d.join("Plugin Data");
+    fs::create_dir_all(&data).unwrap();
+    fs::create_dir_all(&e).unwrap();
+    let mut all = vec![move_it(&c.join("NI").join("Reaktor 6"), &data, &[])];
+    all.push(move_it(&c.join("NI"), &data, &all));
+    let stop = AtomicBool::new(false);
+    let done = move_home(&s(&data), &s(&e), &all, &[], 2, &OtherDrive, &nothing, &stop).unwrap();
+    // The plugin saves through the links, at Reaktor 6's new place.
+    fs::write(c.join("NI/Reaktor 6/r.ens"), "r-new").unwrap();
+    let back = move_back(&done.moved[1], &done.moved, &OtherDrive, &nothing, &stop).unwrap();
+    assert!(back.links_left.is_empty(), "{:?}", back.links_left);
+    let inner = c.join("NI").join("Reaktor 6");
+    assert!(is_link(&inner) && !is_link(&c.join("NI")));
+    assert_eq!(real(&inner), real(&e.join("Plugin Data").join("Reaktor 6")));
+    assert_eq!(read(&inner.join("r.ens")), "r-new");
 }
 
 /// As the last pass copies the folder the moved folders live in, it's put aside, with a link to another folder in its

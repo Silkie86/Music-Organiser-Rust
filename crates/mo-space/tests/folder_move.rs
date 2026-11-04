@@ -227,11 +227,11 @@ fn a_folder_moves_to_the_other_drive_and_back_with_what_was_saved_meanwhile() {
 
     // Moving back needs room on this drive for what changed (New.db and Pad.db).
     let full = OtherDrive { free: Some(1) };
-    assert_eq!(move_back(&moved, &full, &nothing, &stop), Err(CantMove::NoRoom { free: 1, needs: 9 }));
+    assert_eq!(move_back(&moved, &[], &full, &nothing, &stop), Err(CantMove::NoRoom { free: 1, needs: 9 }));
     assert!(is_link(&steam));
     // The move is undone: what changed on the other drive comes back, whatever its time, and the old copy's newer
     // Pad.db is kept beside the folder rather than replaced.
-    let back = move_back(&moved, &ROOMY, &nothing, &stop).unwrap();
+    let back = move_back(&moved, &[], &ROOMY, &nothing, &stop).unwrap();
     assert!(!is_link(&steam));
     assert_eq!(fs::read_to_string(steam.join("New.db")).unwrap(), "new");
     assert_eq!(fs::read_to_string(steam.join("Pad.db")).unwrap(), "pad v2");
@@ -307,9 +307,9 @@ fn moving_back_once_the_old_copy_is_gone_copies_the_folder_back() {
     assert!(!moved.has_old_copy());
     // ...and later moved back after all, but only with room for it.
     let full = OtherDrive { free: Some(1) };
-    assert_eq!(move_back(&moved, &full, &nothing, &stop), Err(CantMove::NoRoom { free: 1, needs: 2 }));
+    assert_eq!(move_back(&moved, &[], &full, &nothing, &stop), Err(CantMove::NoRoom { free: 1, needs: 2 }));
     assert!(is_link(&library));
-    move_back(&moved, &ROOMY, &nothing, &stop).unwrap();
+    move_back(&moved, &[], &ROOMY, &nothing, &stop).unwrap();
     assert_eq!(fs::read_to_string(library.join("a.nki")).unwrap(), "a");
     assert!(!is_link(&library));
     // The link inside leads inside the folder again, not to the other drive.
@@ -385,7 +385,7 @@ fn moving_back_stopped_part_way_says_so_and_where_the_old_copys_newer_files_are(
             stop.store(true, Ordering::Relaxed);
         }
     };
-    let result = move_back(&moved, &ROOMY, &stopping, &stop);
+    let result = move_back(&moved, &[], &ROOMY, &stopping, &stop);
     let kept_in = format!("{from}{KEPT_SUFFIX}");
     let Err(CantMove::LeftHalfway(said)) = result else { panic!("{result:?}") };
     assert!(said.starts_with("Stopped. The old copy"), "{said}");
@@ -402,7 +402,7 @@ fn moving_back_stopped_part_way_says_so_and_where_the_old_copys_newer_files_are(
     // Tried again, it finishes, keeping the rest in a folder of its own; before dropping the move's record, the app
     // finds both folders of kept files.
     stop.store(false, Ordering::Relaxed);
-    let back = move_back(&moved, &ROOMY, &nothing, &stop).unwrap();
+    let back = move_back(&moved, &[], &ROOMY, &nothing, &stop).unwrap();
     assert_eq!(back.kept_in, format!("{from} (newer files from the old copy 2)"));
     assert_eq!(back.kept.len(), FILES - 256);
     let mut found: Vec<String> =
@@ -443,7 +443,7 @@ fn moving_back_brings_the_right_files_when_the_copy_holds_temporary_files_a_try_
         fs::write(&left, "LEFTOVER").unwrap();
         set_time(&left, earlier);
     }
-    move_back(&moved, &ROOMY, &nothing, &stop).unwrap();
+    move_back(&moved, &[], &ROOMY, &nothing, &stop).unwrap();
     assert!(!is_link(&presets));
     for n in 0..12 {
         assert_eq!(fs::read_to_string(presets.join(format!("{n}.fxp"))).unwrap(), "new", "{n}.fxp");
@@ -471,7 +471,7 @@ fn moving_back_puts_your_newer_file_back_when_the_one_replacing_it_cant_go_in() 
     let taken = |_: u64| {
         let _ = fs::remove_file(old.join("Lead.fxp.mo-copying"));
     };
-    let result = move_back(&moved, &ROOMY, &taken, &stop);
+    let result = move_back(&moved, &[], &ROOMY, &taken, &stop);
     // Yours is back where it was, with no folder of kept files left beside it: nothing was moved.
     let Err(CantMove::Failed(why)) = &result else { panic!("{result:?}") };
     assert!(why.contains("Lead.fxp"), "{why}");
@@ -481,7 +481,7 @@ fn moving_back_puts_your_newer_file_back_when_the_one_replacing_it_cant_go_in() 
     assert!(part_files(&old).is_empty());
 
     // Tried again, it finishes, keeping yours.
-    let back = move_back(&moved, &ROOMY, &nothing, &stop).unwrap();
+    let back = move_back(&moved, &[], &ROOMY, &nothing, &stop).unwrap();
     assert_eq!(back.kept, ["Lead.fxp"]);
     assert_eq!(fs::read_to_string(Path::new(&back.kept_in).join("Lead.fxp")).unwrap(), "first");
     assert_eq!(fs::read_to_string(Path::new(&from).join("Lead.fxp")).unwrap(), "update");
@@ -508,7 +508,7 @@ fn two_names_that_differ_only_in_capitals_both_come_back_where_the_drive_tells_t
         fs::write(&file, text).unwrap();
         set_time(&file, later);
     }
-    let back = move_back(&moved, &ROOMY, &nothing, &stop).unwrap();
+    let back = move_back(&moved, &[], &ROOMY, &nothing, &stop).unwrap();
     assert!(back.kept.is_empty(), "{:?}", back.kept);
     assert_eq!(fs::read_to_string(Path::new(&from).join("Lead.fxp")).unwrap(), "first, saved");
     assert_eq!(fs::read_to_string(Path::new(&from).join("lead.fxp")).unwrap(), "second, saved");
@@ -529,7 +529,7 @@ fn moving_back_finds_what_would_stop_it_before_the_old_copy_changes_even_when_th
     fs::remove_file(copy.join("Same").join("X")).unwrap();
     write(&copy, "Same/X/b.fxp", "in a folder now");
     // The drive's room can't be told (ROOMY), and still the count finds it first: nothing in the old copy changes.
-    let result = move_back(&moved, &ROOMY, &nothing, &stop);
+    let result = move_back(&moved, &[], &ROOMY, &nothing, &stop);
     let Err(CantMove::Failed(why)) = &result else { panic!("{result:?}") };
     assert!(why.contains("is a file in the copy"), "{why}");
     let old = Path::new(&moved.old_copy);
@@ -589,7 +589,7 @@ fn twins_from_a_folder_that_tells_capitals_apart_stop_moving_back_before_the_old
     // In the old copy, that folder holds one of them already: the count stops it before anything there changes.
     let old = Path::new(&moved.old_copy);
     write(old, "Bank 2/Lead.fxp", "yours too");
-    let result = move_back(&moved, &ROOMY, &nothing, &stop);
+    let result = move_back(&moved, &[], &ROOMY, &nothing, &stop);
     let Err(CantMove::Failed(why)) = &result else { panic!("{result:?}") };
     assert!(why.contains("differs only in capitals"), "{why}");
     assert_eq!(fs::read_to_string(old.join("Bank 2").join("Lead.fxp")).unwrap(), "yours too");
@@ -673,14 +673,14 @@ fn the_room_a_move_needs_is_counted_as_the_other_drive_keeps_files() {
         problem(&presets, &s(&d), 10, &short, all, &[], &stop),
         Some(CantMove::NoRoom { free: short.free, needs: 7 * (128 << 10) })
     );
-    move_back(&bank, &ROOMY, &nothing, &stop).unwrap();
+    move_back(&bank, &[], &ROOMY, &nothing, &stop).unwrap();
 
     // Coming back, it's counted as the drive it comes back to keeps files.
     let moved = move_folder(&presets, &s(&d), 10, whose(), &ROOMY, &[], &[], &nothing, &stop).unwrap();
     fs::remove_dir_all(&moved.old_copy).unwrap();
-    let back = move_back(&moved, &drive, &nothing, &stop);
+    let back = move_back(&moved, &[], &drive, &nothing, &stop);
     assert_eq!(back, Err(CantMove::NoRoom { free: drive.free, needs }));
-    assert!(move_back(&moved, &BigPieces { free: HEADROOM + (2 << 20) }, &nothing, &stop).is_ok());
+    assert!(move_back(&moved, &[], &BigPieces { free: HEADROOM + (2 << 20) }, &nothing, &stop).is_ok());
 }
 
 #[test]
@@ -786,7 +786,7 @@ fn moving_back_puts_many_files_into_the_old_copy_together_and_none_when_you_pres
             stop.store(true, Ordering::Relaxed);
         }
     };
-    assert_eq!(move_back(&moved, &ROOMY, &stopping, &stop), Err(CantMove::Stopped));
+    assert_eq!(move_back(&moved, &[], &ROOMY, &stopping, &stop), Err(CantMove::Stopped));
     stop.store(false, Ordering::Relaxed);
     let old = Path::new(&moved.old_copy);
     assert!(part_files(old).is_empty());
@@ -798,7 +798,7 @@ fn moving_back_puts_many_files_into_the_old_copy_together_and_none_when_you_pres
             stop.store(true, Ordering::Relaxed);
         }
     };
-    let stopped = move_back(&moved, &ROOMY, &later, &stop);
+    let stopped = move_back(&moved, &[], &ROOMY, &later, &stop);
     let Err(CantMove::LeftHalfway(said)) = &stopped else { panic!("{stopped:?}") };
     assert!(said.starts_with("Stopped. The old copy"), "{said}");
     stop.store(false, Ordering::Relaxed);
@@ -806,7 +806,7 @@ fn moving_back_puts_many_files_into_the_old_copy_together_and_none_when_you_pres
     assert_eq!(new, 256);
     assert!(part_files(old).is_empty());
     // Then all of them: more than go in together at once.
-    move_back(&moved, &ROOMY, &nothing, &stop).unwrap();
+    move_back(&moved, &[], &ROOMY, &nothing, &stop).unwrap();
     assert!(!is_link(&presets) && all(&presets, "new"));
     assert!(part_files(&presets).is_empty());
 }
@@ -840,7 +840,7 @@ fn moving_back_puts_nothing_read_through_a_folder_that_turned_into_a_link_into_t
             folder_link(&dir.join("Elsewhere"), &copy_a);
         }
     };
-    let result = move_back(&moved, &ROOMY, &progress, &stop);
+    let result = move_back(&moved, &[], &ROOMY, &progress, &stop);
     let Err(CantMove::Failed(why)) = &result else { panic!("{result:?}") };
     assert!(why.starts_with(&format!("{} turned into a link or a file", s(&copy_a))), "{why}");
     // None of that lot went in: the old copy is as it was, with nothing left half way there.
@@ -881,7 +881,7 @@ fn moving_back_makes_no_link_read_through_a_folder_that_turned_into_a_link_in_th
             folder_link(&dir.join("Elsewhere"), &copy_a);
         }
     };
-    let result = move_back(&moved, &ROOMY, &progress, &stop);
+    let result = move_back(&moved, &[], &ROOMY, &progress, &stop);
     assert!(result.is_err(), "{result:?}");
     // Every link in the old copy leads where the plugin's did.
     let kits = real(&dir.join("Kits"));
@@ -1438,7 +1438,7 @@ fn moving_back_stops_when_the_other_drive_goes_part_way() {
             fs::rename(&d, dir.join("D unplugged")).unwrap();
         }
     };
-    let result = move_back(&moved, &ROOMY, &progress, &stop);
+    let result = move_back(&moved, &[], &ROOMY, &progress, &stop);
     let Err(CantMove::Failed(why)) = &result else { panic!("{result:?}") };
     assert!(why.contains("Copying stopped at"), "{why}");
     // The rest wasn't taken for deleted: the plugin still uses the link, and nothing came back half.
@@ -1474,7 +1474,7 @@ fn moving_back_stops_when_the_drive_the_copys_link_leads_to_goes_part_way() {
             fs::rename(&e, dir.join("E unplugged")).unwrap();
         }
     };
-    let result = move_back(&moved, &ROOMY, &progress, &stop);
+    let result = move_back(&moved, &[], &ROOMY, &progress, &stop);
     let Err(CantMove::Failed(why)) = &result else { panic!("{result:?}") };
     assert!(why.contains("Copying stopped at"), "{why}");
     assert!(is_link(&library));
@@ -1510,7 +1510,7 @@ fn the_drive_the_copys_link_leads_to_going_once_all_of_it_came_back_isnt_taken_f
             fs::rename(&e, dir.join("E unplugged")).unwrap();
         }
     };
-    let result = move_back(&moved, &ROOMY, &progress, &stop);
+    let result = move_back(&moved, &[], &ROOMY, &progress, &stop);
     let Err(CantMove::Failed(why)) = &result else { panic!("{result:?}") };
     assert!(why.contains("wasn't swapped") && !why.contains("while it was being copied"), "{why}");
     assert!(is_link(&library) && !c.join("Library (moving back)").exists());
@@ -1547,7 +1547,7 @@ fn moving_back_brings_nothing_into_the_old_copy_when_the_copy_leads_elsewhere_th
             folder_link(&dir.join("Nowhere"), &copy);
         }
     };
-    let result = move_back(&moved, &ROOMY, &progress, &stop);
+    let result = move_back(&moved, &[], &ROOMY, &progress, &stop);
     let Err(CantMove::Failed(why)) = &result else { panic!("{result:?}") };
     assert!(why.starts_with(&format!("{} turned into a link", s(&copy))), "{why}");
     let old = PathBuf::from(&moved.old_copy);
@@ -1585,7 +1585,7 @@ fn moving_back_brings_nothing_into_the_old_copy_when_the_copys_link_leads_nowher
             fs::rename(&e, dir.join("E unplugged")).unwrap();
         }
     };
-    let result = move_back(&moved, &ROOMY, &progress, &stop);
+    let result = move_back(&moved, &[], &ROOMY, &progress, &stop);
     let Err(CantMove::Failed(why)) = &result else { panic!("{result:?}") };
     assert!(why.starts_with(&format!("Copying stopped at {}", s(&copy))), "{why}");
     let old = PathBuf::from(&moved.old_copy);
@@ -1626,7 +1626,7 @@ fn moving_back_stops_when_the_copy_turns_into_a_link_to_a_folder_named_the_same_
             folder_link(&d.join("LIBRARY"), &copy);
         }
     };
-    let result = move_back(&moved, &ROOMY, &progress, &stop);
+    let result = move_back(&moved, &[], &ROOMY, &progress, &stop);
     let Err(CantMove::Failed(why)) = &result else { panic!("{result:?}") };
     assert!(why.starts_with(&s(&copy)) && why.contains("led somewhere else"), "{why}");
     let old = PathBuf::from(&moved.old_copy);
@@ -1662,7 +1662,7 @@ fn moving_back_stops_when_the_copys_link_is_pointed_somewhere_else_as_the_first_
             folder_link(&dir.join("Other"), &d.join("Library"));
         }
     };
-    let result = move_back(&moved, &ROOMY, &progress, &stop);
+    let result = move_back(&moved, &[], &ROOMY, &progress, &stop);
     let Err(CantMove::Failed(why)) = &result else { panic!("{result:?}") };
     assert!(why.starts_with(&s(&d.join("Library"))) && why.contains("led somewhere else"), "{why}");
     // The old copy is as it was, and the plugin still uses its link.
@@ -1711,7 +1711,7 @@ fn moving_back_stops_when_the_copys_link_is_pointed_somewhere_else_as_the_last_p
                 folder_link(&dir.join("Other"), &d.join("Library"));
             }
         };
-        let result = move_back(&moved, &ROOMY, &progress, &stop);
+        let result = move_back(&moved, &[], &ROOMY, &progress, &stop);
         let Err(CantMove::LeftHalfway(why)) = &result else { panic!("{name}: {result:?}") };
         assert!(why.starts_with(&s(&d.join("Library"))) && why.contains("led somewhere else"), "{name}: {why}");
         // The old copy has what the first pass brought, and nothing of the other folder's.
@@ -1754,7 +1754,7 @@ fn moving_back_a_copy_whose_link_is_pointed_somewhere_else_as_the_last_pass_copi
             folder_link(&dir.join("Other"), &d.join("Library"));
         }
     };
-    let result = move_back(&moved, &ROOMY, &progress, &stop);
+    let result = move_back(&moved, &[], &ROOMY, &progress, &stop);
     let Err(CantMove::Failed(why)) = &result else { panic!("{result:?}") };
     assert!(why.starts_with(&s(&d.join("Library"))) && why.contains("led somewhere else"), "{why}");
     assert!(!c.join("Library (moving back)").exists());
@@ -1799,7 +1799,7 @@ fn moving_back_stops_when_the_copys_link_is_pointed_somewhere_else_before_it_cop
     write(&dir, "Other/Patch.db", "other");
     fs::write(library.join("Patch.db"), "yy").unwrap();
     let drives = Repointing { link: &d.join("Library"), to: &dir.join("Other"), done: AtomicBool::new(false) };
-    let result = move_back(&moved, &drives, &nothing, &stop);
+    let result = move_back(&moved, &[], &drives, &nothing, &stop);
     let Err(CantMove::Failed(why)) = &result else { panic!("{result:?}") };
     assert!(why.contains("turned into a link or led somewhere else"), "{why}");
     let old = c.join(format!("Library{OLD_SUFFIX}"));
@@ -1831,7 +1831,7 @@ fn moving_back_a_copy_whose_link_is_pointed_somewhere_else_as_it_copies_brings_n
             folder_link(&dir.join("Other"), &d.join("Library"));
         }
     };
-    let result = move_back(&moved, &ROOMY, &progress, &stop);
+    let result = move_back(&moved, &[], &ROOMY, &progress, &stop);
     let Err(CantMove::Failed(why)) = &result else { panic!("{result:?}") };
     assert!(why.contains("led somewhere else"), "{why}");
     assert!(!c.join("Library (moving back)").exists());
@@ -1897,19 +1897,31 @@ fn a_link_deleted_just_before_its_turn_in_the_last_pass_stays_in_the_copy() {
     let sub = c.join("Library").join("Sub");
     fs::create_dir_all(&sub).unwrap();
     fs::create_dir_all(dir.join("KitsA")).unwrap();
-    let kits = sub.join("Kits");
-    folder_link(&dir.join("KitsA"), &kits);
-    // A file listed before the link, so it's copied before the link's turn: names are tried until one is.
-    let file = (0..64)
-        .map(|n| sub.join(format!("{n}.db")))
-        .find(|file| {
-            fs::write(file, "x").unwrap();
-            let names: Vec<PathBuf> = fs::read_dir(&sub).unwrap().map(|e| e.unwrap().path()).collect();
-            let before = names.iter().position(|p| p == file) < names.iter().position(|p| p == &kits);
-            if !before {
-                fs::remove_file(file).unwrap();
+    // A file listed before the link, so it's copied (and the link deleted) before the link's turn comes. Drives list
+    // names in different orders (by name, by a sum worked out from it, in the order they were made, or the newest
+    // first), so names are tried, each made in both orders, until the file comes first.
+    let listed_first = |file: &Path, link: &Path| {
+        let names: Vec<PathBuf> = fs::read_dir(&sub).unwrap().map(|e| e.unwrap().path()).collect();
+        names.iter().position(|p| p == file) < names.iter().position(|p| p == link)
+    };
+    let (file, kits) = (0..64)
+        .find_map(|n| {
+            let (file, link) = (sub.join(format!("{n}.db")), sub.join(format!("Kits {n}")));
+            for file_first in [true, false] {
+                if file_first {
+                    fs::write(&file, "x").unwrap();
+                    folder_link(&dir.join("KitsA"), &link);
+                } else {
+                    folder_link(&dir.join("KitsA"), &link);
+                    fs::write(&file, "x").unwrap();
+                }
+                if listed_first(&file, &link) {
+                    return Some((file, link));
+                }
+                unlink(&link);
+                fs::remove_file(&file).unwrap();
             }
-            before
+            None
         })
         .unwrap();
     fs::create_dir_all(&d).unwrap();
@@ -1925,8 +1937,9 @@ fn a_link_deleted_just_before_its_turn_in_the_last_pass_stays_in_the_copy() {
     };
     move_folder(&s(&c.join("Library")), &s(&d), 1, whose(), &ROOMY, &[], &[], &progress, &stop).unwrap();
     let copy = d.join("Library").join("Sub");
-    assert!(is_link(&copy.join("Kits")));
-    assert_eq!(real(&copy.join("Kits")), real(&dir.join("KitsA")));
+    let link = copy.join(kits.file_name().unwrap());
+    assert!(is_link(&link));
+    assert_eq!(real(&link), real(&dir.join("KitsA")));
     assert_eq!(fs::read_to_string(copy.join(file.file_name().unwrap())).unwrap(), "yy");
 }
 
@@ -1948,7 +1961,7 @@ fn moving_back_names_a_link_the_plugin_pointed_elsewhere_after_the_move() {
     let moved = move_folder(&s(&library), &s(&d), 1, whose(), &ROOMY, &[], &[], &nothing, &stop).unwrap();
     unlink(&library.join("Kits"));
     folder_link(&dir.join("KitsB"), &library.join("Kits"));
-    let back = move_back(&moved, &ROOMY, &nothing, &stop).unwrap();
+    let back = move_back(&moved, &[], &ROOMY, &nothing, &stop).unwrap();
     assert_eq!(back.links_left, ["Kits"]);
     assert!(!is_link(&library));
     assert_eq!(real(&library.join("Kits")), real(&dir.join("KitsA")));
@@ -2079,7 +2092,7 @@ fn an_old_copy_stays_while_it_is_the_only_copy_the_plugin_could_use() {
     let done = remove_old_copy(&moved, all, true, &bin, &stop);
     assert!(done.removed.is_empty() && done.problems.len() == 1);
     assert!(moved.has_old_copy());
-    assert!(move_back(&moved, &ROOMY, &nothing, &stop).is_err());
+    assert!(move_back(&moved, &[], &ROOMY, &nothing, &stop).is_err());
     fs::rename(d.join("Presets renamed"), d.join("Presets")).unwrap();
 
     // The link was pointed somewhere else: moving back leaves it alone.
@@ -2087,7 +2100,7 @@ fn an_old_copy_stays_while_it_is_the_only_copy_the_plugin_could_use() {
     unlink(&presets);
     folder_link(&dir.join("E").join("Presets"), &presets);
     assert!(!old_copy_can_go(&moved));
-    assert!(matches!(move_back(&moved, &ROOMY, &nothing, &stop), Err(CantMove::Failed(_))));
+    assert!(matches!(move_back(&moved, &[], &ROOMY, &nothing, &stop), Err(CantMove::Failed(_))));
     assert_eq!(real(&presets), real(&dir.join("E").join("Presets")));
     unlink(&presets);
     folder_link(&d.join("Presets"), &presets);
@@ -2283,7 +2296,7 @@ fn moving_back_while_an_update_puts_a_real_folder_back_says_so_and_keeps_nothing
                 write(&library, "new.nki", "new");
             }
         };
-        let said = move_back(&moved, &ROOMY, &update, &stop).unwrap_err();
+        let said = move_back(&moved, &[], &ROOMY, &update, &stop).unwrap_err();
         let text = said.text();
         assert!(text.contains("became a real folder again"), "{text}");
         // What the update made stays, and so does the copy on the other drive.
