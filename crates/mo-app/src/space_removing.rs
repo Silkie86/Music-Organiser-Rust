@@ -1,9 +1,9 @@
 //! What the Space page's clean-ups share while the app runs: which of what a look found you ticked, where Remove has
 //! got to, what went and what stayed, and what Put back brought back (the page's question 5: "every clean-up result has
-//! a Put back button"). Spare plugin copies (`crate::space_spare`) and old copies (`crate::space_old`) each say their
-//! own words around it.
+//! a Put back button"). Spare plugin copies (`crate::space_spare`), old copies (`crate::space_old`) and your songs' old
+//! autosaves and caches (`crate::space_songs`) each say their own words around it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::path::PathBuf;
 
@@ -54,17 +54,32 @@ pub struct Sent<T> {
     pub picked: Vec<T>,
     pub when: i64,
     pub done: Done,
+    /// Where each one that went was, and where each one `done` says something of is, with the first thing it says
+    /// (by where that is in `done.problems`): so a card listing thousands asks of each one quickly.
+    went: HashSet<String>,
+    why: HashMap<String, usize>,
 }
 
 impl<T: Removable> Sent<T> {
+    /// A removal of `picked` that ran at `when`, and what it did.
+    pub fn new(picked: Vec<T>, when: i64, done: Done) -> Self {
+        let went = done.removed.iter().map(|r| r.path.clone()).collect();
+        let mut why = HashMap::new();
+        for (n, p) in done.problems.iter().enumerate() {
+            why.entry(p.path.clone()).or_insert(n);
+        }
+        Sent { picked, when, done, went, why }
+    }
+
     /// Whether `item` went: to the bin, or for good.
     pub fn went(&self, item: &T) -> bool {
-        self.done.removed.iter().any(|r| r.path == item.path())
+        self.went.contains(item.path())
     }
 
     /// Why `item` stayed, or why it isn't in the bin though it went.
     pub fn why(&self, item: &T) -> Option<&str> {
-        self.done.problems.iter().find(|p| p.path == item.path()).map(|p| p.why.as_str())
+        let n = *self.why.get(item.path())?;
+        self.done.problems.get(n).map(|p| p.why.as_str())
     }
 
     /// Whether `item` is in the bin: it went, and was found there.
@@ -74,7 +89,7 @@ impl<T: Removable> Sent<T> {
 
     /// What went that was found in the bin: what Put back puts back.
     pub fn binned(&self) -> impl Iterator<Item = &Removed> {
-        self.done.removed.iter().filter(|r| !self.done.problems.iter().any(|p| p.path == r.path))
+        self.done.removed.iter().filter(|r| !self.why.contains_key(&r.path))
     }
 
     /// How many went but weren't found in the bin: Windows removed them for good (too big for it), they went to
@@ -92,8 +107,8 @@ impl<T: Removable> Sent<T> {
     /// aren't there any more (put back already, or emptied from the bin since).
     pub fn coming_back(&self) -> Done {
         let removed: Vec<Removed> = self.binned().cloned().collect();
-        let went_with =
-            self.done.went_with.iter().filter(|(_, with)| removed.iter().any(|r| &r.path == with)).cloned().collect();
+        let back: HashSet<&str> = removed.iter().map(|r| r.path.as_str()).collect();
+        let went_with = self.done.went_with.iter().filter(|(_, with)| back.contains(with.as_str())).cloned().collect();
         Done { removed, problems: Vec::new(), went_with }
     }
 }
@@ -179,7 +194,7 @@ impl<T: Removable> Removing<T> {
     pub fn sent(&mut self, when: i64, done: Done) {
         if let Stage::Sending(picked) = &mut self.stage {
             let picked = std::mem::take(picked);
-            self.stage = Stage::Sent(Sent { picked, when, done });
+            self.stage = Stage::Sent(Sent::new(picked, when, done));
         }
     }
 
@@ -353,10 +368,11 @@ pub fn gone<T: Removable>(item: &T, sent: &Sent<T>, stage: &Stage<T>) -> bool {
 /// The activity card's line once Remove is done, counting with `noun` ("1 copy", "10 copies"): what was freed, what's
 /// in the bin, what went but wasn't found there, and what stayed. Err when nothing went (the card then fails).
 pub fn removed_words(done: &Done, noun: &dyn Fn(usize) -> String) -> Result<String, String> {
-    let found = |path: &str| !done.problems.iter().any(|p| p.path == path);
-    let in_bin = done.removed.iter().filter(|r| found(&r.path)).count();
+    let said: HashSet<&str> = done.problems.iter().map(|p| p.path.as_str()).collect();
+    let went: HashSet<&str> = done.removed.iter().map(|r| r.path.as_str()).collect();
+    let in_bin = done.removed.iter().filter(|r| !said.contains(r.path.as_str())).count();
     let lost = done.removed.len() - in_bin;
-    let stayed = done.problems.iter().filter(|p| !done.removed.iter().any(|r| r.path == p.path)).count();
+    let stayed = done.problems.iter().filter(|p| !went.contains(p.path.as_str())).count();
     match (done.removed.len(), stayed) {
         (0, 0) => return Err("Nothing was removed.".to_owned()),
         (0, 1) => return Err("It couldn't go: the Space page says why.".to_owned()),

@@ -250,9 +250,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     mo_ui::space::show_sample(&app, removed, spare);
     capture(&window);
     shots.push(("space-spare-removed.png".into(), capture(&window)));
-    // The Recycle Bin card: each clean-up still there, newest first, with its Put back: the old copies, then the spare
-    // copies; the oldest one's put back left a copy behind, which says why.
-    let kept = sample_kept([spare_binned, old_binned].concat());
+    // The songs card: identical saves, old autosaves and a Studio One cache, biggest first, each with the songs it's
+    // in; then audio no save seems to use, which isn't counted.
+    mo_ui::space::show_sample(&app, sample_space(), mo_app::space_songs::COMPACT);
+    capture(&window);
+    let top = capture(&window);
+    shots.push(("space-songs.png".into(), top.clone()));
+    shots.push(("space-songs-down.png".into(), card_down(&window, &top, "space-songs-down.png")?));
+    // Night Drive's old autosaves unticked: its line's tick is off, the old autosaves' tick shows a dash, and Remove
+    // frees the rest.
+    let compact = mo_app::space_songs::COMPACT;
+    let mut songs_removing = mo_app::space_songs::Removing::default();
+    songs_removing.tick(&sample_night_drive_autosaves(), false);
+    mo_ui::space::show_sample(&app, mo_ui::space::Sample { songs_removing, ..sample_space() }, compact);
+    capture(&window);
+    shots.push(("space-songs-ticks.png".into(), capture(&window)));
+    // While Remove measures the songs again and checks each ticked one: Stop, which leaves what hasn't gone yet where
+    // it is.
+    let shown = mo_app::space_songs::Shown::of(&sample_song_room(), chrono::Local::now().date_naive());
+    let mut songs_removing = mo_app::space_songs::Removing::default();
+    songs_removing.start(songs_removing.ticked_copies(Some(&shown)));
+    mo_ui::space::show_sample(&app, mo_ui::space::Sample { songs_removing, ..sample_space() }, compact);
+    capture(&window);
+    shots.push(("space-songs-removing.png".into(), capture(&window)));
+    // After Remove: what was freed, each song's old autosaves and the cache in the Trash (the Recycle Bin on Windows),
+    // two autosaves that are among their song's newest 5 now, which stayed, and Put back.
+    let (songs_removing, songs_binned) = sample_songs_removed(&shown);
+    let kept = Some(sample_kept(songs_binned.clone()));
+    mo_ui::space::show_sample(&app, mo_ui::space::Sample { songs_removing, kept, ..sample_space() }, compact);
+    capture(&window);
+    shots.push(("space-songs-removed.png".into(), capture(&window)));
+    // The Recycle Bin card: each clean-up still there, newest first, with its Put back: your songs' old autosaves and
+    // caches, the old copies, then the spare copies; the oldest one's put back left a copy behind, which says why.
+    let kept = sample_kept([spare_binned, old_binned, songs_binned].concat());
     let mut put_backs = mo_app::space_bin::PutBacks::default();
     let stuck = mo_space::clean::Problem {
         path: kept.list[0].done.removed[0].path.clone(),
@@ -261,17 +291,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     put_backs.done(spare, kept.list[0].when, vec![stuck]);
     let (removing, _) = sample_removed(&sample_spare_copies());
     let (old_removing, _) = sample_old_removed(&sample_old_copies());
-    let bin = mo_ui::space::Sample { removing, old_removing, kept: Some(kept), put_backs, ..sample_space() };
+    let (songs_removing, _) = sample_songs_removed(&shown);
+    let bin =
+        mo_ui::space::Sample { removing, old_removing, songs_removing, kept: Some(kept), put_backs, ..sample_space() };
     mo_ui::space::show_sample(&app, bin, mo_app::space_bin::RECYCLE_BIN);
     capture(&window);
     shots.push(("space-bin.png".into(), capture(&window)));
-    // The songs card: identical saves, old autosaves and a Studio One cache, biggest first, each with the songs it's
-    // in; then audio no save seems to use, which isn't counted.
-    mo_ui::space::show_sample(&app, sample_space(), mo_app::space_songs::COMPACT);
-    capture(&window);
-    let top = capture(&window);
-    shots.push(("space-songs.png".into(), top.clone()));
-    shots.push(("space-songs-down.png".into(), card_down(&window, &top, "space-songs-down.png")?));
     // The older saves card: each song's saves from the middle of a sitting, with the days and what stays.
     mo_ui::space::show_sample(&app, sample_space(), mo_app::space_songs::THIN);
     capture(&window);
@@ -858,6 +883,59 @@ fn sample_song_room() -> mo_app::space_songs::Found {
         song("Tape Echo Idea", &format!(r"{studio_one}\Tape Echo Idea.song"), 3, studio_items),
     ];
     Found { songs, settings: CompactSettings::default() }
+}
+
+/// Where the made-up Night Drive's old autosaves are, as [`sample_song_room`] has them: unticked in the ticks shot.
+fn sample_night_drive_autosaves() -> Vec<PathBuf> {
+    let night = r"D:\Music\Projects\Night Drive";
+    (0..12).map(|i| PathBuf::from(format!(r"{night}\auto-backups\Night Drive ({i}).bwproject"))).collect()
+}
+
+/// What Remove did with the made-up songs' old autosaves and caches, at 16:00 on 4 Nov 2026 (UTC): everything ticked
+/// out of the box went, but two of GARAGE FOR BW 1's autosaves, which are among its newest 5 now (it was saved again
+/// since the look), stayed. Then what it put in the Recycle Bin.
+fn sample_songs_removed(
+    shown: &mo_app::space_songs::Shown,
+) -> (mo_app::space_songs::Removing, Vec<mo_app::binned::Binned>) {
+    use mo_app::binned::Binned;
+    use mo_space::clean::{Done, Problem, Removed, What};
+    const WHEN: i64 = 1_793_808_000;
+    let mut removing = mo_app::space_songs::Removing::default();
+    let picked = removing.ticked_copies(Some(shown));
+    removing.start(picked.clone());
+    let stays = |i: &&mo_app::space_songs::SongItem| {
+        &*i.song == "GARAGE FOR BW 1"
+            && (i.item.path.ends_with("(0).bwproject") || i.item.path.ends_with("(1).bwproject"))
+    };
+    let done = Done {
+        removed: picked
+            .iter()
+            .filter(|i| !stays(i))
+            .map(|i| Removed {
+                path: i.item.path.clone(),
+                real: i.item.path.clone(),
+                bytes: i.item.bytes,
+                what: What::Song(i.item.kind),
+                when: WHEN,
+                bin_id: Some(String::new()),
+                binned: None,
+                binned_zone: None,
+                stamp: None,
+            })
+            .collect(),
+        problems: picked
+            .iter()
+            .filter(stays)
+            .map(|i| Problem {
+                path: i.item.path.clone(),
+                why: "Measured again just now, it isn't one of its song's old autosaves any more, so it stays.".into(),
+            })
+            .collect(),
+        went_with: Vec::new(),
+    };
+    removing.sent(WHEN, done.clone());
+    let compact = mo_app::space_songs::COMPACT;
+    (removing, vec![Binned { kind: compact.to_owned(), when: WHEN, done: Done { problems: Vec::new(), ..done } }])
 }
 
 /// Made-up spare plugin copies, written as on Windows, biggest first: AAX copies in Avid's folder (Pro Tools isn't
