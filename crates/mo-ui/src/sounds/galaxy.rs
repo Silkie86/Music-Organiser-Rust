@@ -5,7 +5,7 @@
 //! the stars they leave out. Which part of the map is on show, the wheel and clicks versus drags are
 //! `mo_app::galaxy_view`'s; the star under the mouse is found on a grid over the whole map (`mo_app::galaxy_grid`).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -616,6 +616,8 @@ pub(super) struct Sweep {
     waiting: Option<usize>,
     /// When the mouse last moved in this sweep, to tell how fast it's going.
     moved: Option<Instant>,
+    /// Where the pointer is held, on the star waiting its turn, when sweeps hold the pointer.
+    held: Option<(f32, f32)>,
 }
 
 /// How far ahead of the mouse a sweep's next sounds are read (the C# app's 40 ms), at most how far in points, how
@@ -627,6 +629,8 @@ const AHEAD_BYTES: usize = 128 * 1024;
 
 thread_local! {
     static SWEEP_TIMER: Timer = Timer::default();
+    /// Whether a sweep holds the pointer to the star waiting its turn (Settings › General), so none is passed unheard.
+    static HOLD: Cell<bool> = const { Cell::new(false) };
     /// Reads the start of the sounds a sweep is about to reach, newest ask first.
     static READ_AHEAD: RefCell<Option<Newest<Vec<String>>>> = const { RefCell::new(None) };
 }
@@ -697,21 +701,39 @@ fn read_ahead(from: (f32, f32), to: (f32, f32), dt: Duration, passed: &[usize]) 
     });
 }
 
+/// Whether a Galaxy sweep holds the pointer to the star waiting its turn.
+pub(super) fn hold_sweeps(on: bool) {
+    HOLD.with(|h| h.set(on));
+}
+
 /// The mouse swept from `from` to `to`: every star along the way, not just where it landed (a quick sweep moves many
-/// points between two moves), plays in turn.
+/// points between two moves), plays in turn. When sweeps hold the pointer, a star that has to wait its turn keeps
+/// the pointer on it until it plays, and the stars past it aren't reached yet.
 fn swept(app: &AppWindow, from: (f32, f32), to: (f32, f32)) {
     let _doing = crate::watchdog::doing(frame_timing::SWEEPING);
+    let hold = HOLD.with(Cell::get);
+    // Held on a star still waiting: the pointer goes back there, and the move reaches nothing new.
+    if hold
+        && let Some(at) = PAGE.with(|p| {
+            let s = &p.borrow().galaxy.sweep;
+            s.held.filter(|_| s.waiting.is_some())
+        })
+    {
+        hold_at(app, at, to);
+        return;
+    }
     let steps = ((to.0 - from.0).hypot(to.1 - from.1) / SWEEP_STEP).ceil().max(1.0) as usize;
-    let mut passed: Vec<usize> = Vec::new();
+    let mut passed: Vec<(usize, (f32, f32))> = Vec::new();
     // Whether the first star passed is the one under the last mouse point.
     let mut from_a_star = false;
     for i in 0..=steps {
         let t = i as f32 / steps as f32;
-        if let Some(at) = star_at(from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t)
-            && passed.last() != Some(&at)
+        let point = (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t);
+        if let Some(at) = star_at(point.0, point.1)
+            && passed.last().map(|&(a, _)| a) != Some(at)
         {
             from_a_star |= i == 0;
-            passed.push(at);
+            passed.push((at, point));
         }
     }
     let data = app.global::<SoundsData>();
@@ -720,46 +742,80 @@ fn swept(app: &AppWindow, from: (f32, f32), to: (f32, f32)) {
     let now = Instant::now();
     let was = PAGE.with(|p| p.borrow_mut().galaxy.sweep.moved.replace(now));
     if let Some(was) = was {
-        read_ahead(from, to, now - was, &passed);
+        let stars: Vec<usize> = passed.iter().map(|&(at, _)| at).collect();
+        read_ahead(from, to, now - was, &stars);
     }
     // Timed from here: Slint doesn't say when the move happened, so how late the window heard of it isn't known. The
     // star under the last mouse point was reached on an earlier move (as C#'s HitPath, which starts past it), so its
     // wait isn't started again; on the sweep's first move it's reached now.
     let skip = usize::from(was.is_some() && from_a_star);
-    PAGE.with(|p| {
-        let p = p.borrow();
-        for &at in passed.iter().skip(skip) {
-            if let Some(s) = p.list.sound(at) {
-                sweep_timing::reached(&s.path, None);
-            }
+    for (i, &(at, point)) in passed.iter().enumerate() {
+        if i >= skip {
+            PAGE.with(|p| {
+                if let Some(s) = p.borrow().list.sound(at) {
+                    sweep_timing::reached(&s.path, None);
+                }
+            });
         }
-    });
-    for at in passed {
-        reached(app, at);
+        if !reached(app, at) && hold {
+            PAGE.with(|p| p.borrow_mut().galaxy.sweep.held = Some(point));
+            hold_at(app, point, to);
+            return;
+        }
     }
 }
 
-/// The sweep reached a star: it plays now if the last one has had its moment, otherwise it waits its turn.
-fn reached(app: &AppWindow, at: usize) {
+/// Holds the pointer at `at` (on the view, in points) while it's at `now`: the pointer is put back there, and the
+/// sweep goes on from there.
+fn hold_at(app: &AppWindow, at: (f32, f32), now: (f32, f32)) {
+    PAGE.with(|p| p.borrow_mut().galaxy.view.mouse = at);
+    let data = app.global::<SoundsData>();
+    data.set_galaxy_mouse_x(at.0);
+    data.set_galaxy_mouse_y(at.1);
+    // Putting it where it already is would only send another move to the same place.
+    if (now.0 - at.0).abs() + (now.1 - at.1).abs() < 0.5 {
+        return;
+    }
+    use slint::winit_030::WinitWindowAccessor;
+    use slint::winit_030::winit::dpi::PhysicalPosition;
+    let scale = app.window().scale_factor();
+    let x = f64::from((data.get_galaxy_sky_x() + at.0) * scale);
+    let y = f64::from((data.get_galaxy_sky_y() + at.1) * scale);
+    let put = app.window().with_winit_window(|w| w.set_cursor_position(PhysicalPosition::new(x, y)));
+    if let Some(Err(e)) = put {
+        // Once is enough: the sweep goes on without holding.
+        log::warning("Sounds", &format!("Couldn't hold the pointer on a swept star, so sweeps won't hold it: {e}"));
+        HOLD.with(|h| h.set(false));
+    }
+}
+
+/// The sweep reached a star: it plays now if the last one has had its moment, otherwise it waits its turn. Whether
+/// it didn't have to wait (it plays now, or it's the one playing).
+fn reached(app: &AppWindow, at: usize) -> bool {
     let now = Instant::now();
+    // None: it's the one playing, and nothing changes.
     let play = PAGE.with(|p| {
         let g = &mut p.borrow_mut().galaxy;
         let last = g.sweep.played;
         if last.is_some_and(|(was, _)| was == at) && g.sweep.waiting.is_none() {
-            return false;
+            return None;
         }
         if last.is_none_or(|(_, when)| now.duration_since(when) >= SWEEP_GAP) {
             g.sweep.waiting = None;
             g.sweep.played = Some((at, now));
-            true
+            Some(true)
         } else {
             g.sweep.waiting = Some(at);
-            false
+            Some(false)
         }
     });
-    if play {
-        sweep_play(app, at);
-        return;
+    match play {
+        None => return true,
+        Some(true) => {
+            sweep_play(app, at);
+            return true;
+        }
+        Some(false) => {}
     }
     let weak = app.as_weak();
     SWEEP_TIMER.with(|t| {
@@ -772,6 +828,7 @@ fn reached(app: &AppWindow, at: usize) {
                     let ready = g.sweep.played.is_none_or(|(_, when)| when.elapsed() >= SWEEP_GAP);
                     ready.then(|| {
                         g.sweep.waiting = None;
+                        g.sweep.held = None;
                         g.sweep.played = Some((waiting, Instant::now()));
                         waiting
                     })
@@ -784,6 +841,7 @@ fn reached(app: &AppWindow, at: usize) {
             });
         }
     });
+    false
 }
 
 /// Plays a star the sweep reached, and names it beside the mouse. It isn't picked: a sweep is for listening along.
