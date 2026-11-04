@@ -119,11 +119,70 @@ fn the_sounds_library_is_read_only_when_a_sample_is_nowhere_else() {
     assert!(locator.found("samples/kick.wav", &project));
     assert!(locator.found(r"D:\old\kick.wav", &project));
     assert_eq!(reads.load(Ordering::SeqCst), 0);
+    assert_eq!(locator.library_read(), None);
     // Nowhere else: it's read, once, however many samples it's asked about.
     assert!(locator.found(r"D:\old\Kits\snare.wav", &project));
     assert!(!locator.found(r"D:\old\Kits\gone.wav", &project));
     assert!(locator.found(r"E:\other\Kits\snare.wav", &project));
     assert_eq!(reads.load(Ordering::SeqCst), 1);
+    assert!(locator.library_read().is_some(), "how long it took is kept");
+}
+
+/// A locator says which folder trees it read, how much it looked at in each and how long that took, each once.
+#[test]
+fn a_locator_says_which_folders_it_read() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mo-library-samples-tree-reads");
+    let _ = fs::remove_dir_all(&dir);
+    for f in ["Songs/Night Drive/Bounce/vox.wav", "Content/Drums/snare.wav", "Content/Drums/hat.wav"] {
+        let p = dir.join(f);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(p, b"x").unwrap();
+    }
+    let project = dir.join("Songs/Night Drive/Night Drive.flp").to_str().unwrap().to_owned();
+    let song = dir.join("Songs/Night Drive").to_str().unwrap().to_owned();
+    let content = dir.join("Content").to_str().unwrap().to_owned();
+    let theirs = content.clone();
+    let locator = SampleLocator::new(Box::new(move |_| vec![theirs.clone()]));
+    let reads = |l: &SampleLocator| l.tree_reads().into_iter().map(|r| (r.folder, r.entries)).collect::<Vec<_>>();
+    assert_eq!(locator.trees_read(), 0);
+    // Where the project says: no tree is read.
+    assert!(locator.found("Bounce/vox.wav", &project));
+    assert!(reads(&locator).is_empty());
+    // Moved: the project's folder is read (its Bounce folder and the sound in it).
+    assert!(locator.found("/old/vox.wav", &project));
+    assert_eq!(reads(&locator), [(song.clone(), 2)]);
+    // Not in the project's folder: the DAW's is read too, once for both samples.
+    assert!(locator.found("/old/Drums/snare.wav", &project));
+    assert!(locator.found("/old/Drums/hat.wav", &project));
+    assert_eq!(reads(&locator), [(song, 2), (content, 3)]);
+    assert_eq!(locator.tree_reads().iter().map(|r| r.number).collect::<Vec<_>>(), [0, 1]);
+    assert_eq!(locator.trees_read(), 2);
+}
+
+/// FL Studio's own content is looked for where an FL Studio keeps it (the folder its packs folder is in), without
+/// reading any folder tree; where it isn't there, it's looked for as any other sample, and counts as found anyway.
+#[test]
+fn fl_studios_own_content_is_looked_for_where_fl_studio_keeps_it() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mo-library-samples-fl-factory");
+    let _ = fs::remove_dir_all(&dir);
+    let kick = dir.join("Image-Line/FL Studio 2024/Data/Patches/Packs/Drums/Kicks/Kick 01.wav");
+    fs::create_dir_all(kick.parent().unwrap()).unwrap();
+    fs::write(&kick, b"x").unwrap();
+    fs::create_dir_all(dir.join("Songs/Night Drive")).unwrap();
+    let project = dir.join("Songs/Night Drive/Night Drive.flp").to_str().unwrap().to_owned();
+    let packs = dir.join("Image-Line/FL Studio 2024/Data/Patches/Packs").to_str().unwrap().to_owned();
+    let elsewhere = dir.join("Image-Line/FL Studio 2024/Data/Other").to_str().unwrap().to_owned();
+    let locator = SampleLocator::new(Box::new(move |_| vec![elsewhere.clone(), packs.clone()]));
+    let saved = "%FLStudioFactoryData%/Data/Patches/Packs/Drums/Kicks/Kick 01.wav";
+    assert_eq!(locator.locate(saved, &project).as_deref(), kick.to_str());
+    let lower = saved.replacen("%FLStudioFactoryData%", "%flstudiofactorydata%", 1);
+    assert_eq!(locator.locate(&lower, &project).as_deref(), kick.to_str(), "the setting's name in any case");
+    assert_eq!(locator.trees_read(), 0, "no folder tree read for it");
+    // Not where FL Studio keeps it: looked for as any other sample (its folders read), and still found.
+    let gone = "%FLStudioFactoryData%/Data/Patches/Packs/Drums/Kicks/Kick 99.wav";
+    assert_eq!(locator.locate(gone, &project), None);
+    assert!(locator.trees_read() > 0);
+    assert!(locator.found(gone, &project));
 }
 
 #[test]
