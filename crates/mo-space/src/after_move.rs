@@ -90,10 +90,11 @@ pub fn home_of(moved: &MovedFolder) -> String {
     Path::new(&moved.to).parent().map_or_else(|| moved.to.clone(), |p| p.to_string_lossy().into_owned())
 }
 
-/// The moved folders whose link leads nowhere: their folder on the other drive was moved or renamed, or the drive isn't
-/// plugged in.
+/// The moved folders whose link doesn't reach their copy: their folder on the other drive was moved or renamed, or the
+/// drive isn't plugged in; or the link leads somewhere else (a move of their home cut off after the links were pointed
+/// at the new place, before the folder went there). Pointing the links at where the copies are puts it right.
 pub fn lost(moved: &[MovedFolder]) -> Vec<&MovedFolder> {
-    moved.iter().filter(|m| is_link(Path::new(&m.from)) && !is_dir(&m.to)).collect()
+    moved.iter().filter(|m| is_link(Path::new(&m.from)) && !link_reaches(m)).collect()
 }
 
 /// The moved folders a plugin update put a real folder back in place of (some installers delete the folder and make it
@@ -196,6 +197,7 @@ pub fn link_again(
         keep_all: true,
         changed: Some(&changed),
         real_from: Some(&real_from),
+        links_lead: Some(Path::new(from)),
         ..Tree::new(Path::new(from), to, to)
     };
     room_for(&tree, to, drives, stop)?;

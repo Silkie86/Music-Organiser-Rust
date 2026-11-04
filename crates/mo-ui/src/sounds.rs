@@ -5,6 +5,7 @@
 //! Rediscover (unused sounds that fit your taste) is dug out on its own low-priority thread too.
 
 mod galaxy;
+mod grid;
 mod kit;
 mod sky;
 
@@ -105,6 +106,9 @@ struct Page {
     /// A sound Ctrl+K jumped to that the filters hid: picked once the list without them arrives.
     to_pick: Option<usize>,
     autoplay: bool,
+    /// How long each sound plays while a held arrow key steps through them, and when the pick last moved.
+    step: Duration,
+    stepping: list::Stepping,
     /// Counts the asks for a new list, so an older answer that arrives late is dropped.
     asked: u64,
     /// The sounds have been read and handed to the page ([`show`]): the next list shown is of them.
@@ -150,6 +154,8 @@ impl Default for Page {
             picked: None,
             to_pick: None,
             autoplay: false,
+            step: Duration::from_millis(list::STEP_MS),
+            stepping: list::Stepping::default(),
             asked: 0,
             read: false,
             types: Vec::new(),
@@ -405,17 +411,20 @@ pub fn compute_here() {
 /// A graphics card came (the window is up, or came back): the galaxy is drawn on it.
 pub fn graphics_ready(app: &AppWindow) {
     galaxy::draw(app);
+    grid::graphics_ready(app);
 }
 
-/// The graphics card went (the window closed, or the card was reset): the galaxy's painter goes too, at once, even as
-/// the window itself goes.
+/// The graphics card went (the window closed, or the card was reset): the galaxy's and the tiles' painters go too, at
+/// once, even as the window itself goes.
 pub fn card_gone() {
     galaxy::painter_gone();
+    grid::card_gone();
 }
 
-/// The graphics card went: the galaxy's picture on show goes too.
+/// The graphics card went: the galaxy's picture on show goes too, and the tiles draw their own shapes.
 pub fn graphics_gone(app: &AppWindow) {
     galaxy::card_gone(app);
+    grid::graphics_gone(app);
 }
 
 /// Wires the page and starts reading the sound library at `sounds_db` in the background, then how much your songs use
@@ -481,7 +490,7 @@ pub fn reading(app: &AppWindow) {
 
 /// What reading brings back, in steps: the sounds first, then the list again with how your songs use them.
 enum Step {
-    Read(Result<Read, String>),
+    Read(Result<Box<Read>, String>),
     Used(Arc<SoundList>),
     /// Every sound's fingerprint, for Sounds like this.
     Index(Arc<SoundIndex>),
@@ -512,6 +521,7 @@ struct Read {
     export_folder: Option<String>,
     drum_machine: Option<String>,
     autoplay: Option<String>,
+    step_ms: Option<String>,
 }
 
 /// The sounds made ready to list, off the window's thread: the list itself, the types with their counts, the tags,
@@ -570,6 +580,8 @@ struct Settings {
     /// The Drum Machine's ID the C# app read from Bitwig's files, for kits sent to Bitwig.
     drum_machine: Option<String>,
     autoplay: Option<String>,
+    /// How long each sound plays while a held arrow key steps through them.
+    step_ms: Option<String>,
     rules: UsageRules,
     weights: LikedWeights,
 }
@@ -593,6 +605,7 @@ impl Settings {
             export_folder: get(EXPORT_FOLDER_KEY),
             drum_machine: get(to_bitwig::DRUM_MACHINE_KEY),
             autoplay: get(AUTOPLAY_KEY),
+            step_ms: get(list::STEP_KEY),
             rules: UsageRules { needs_notes: on(USED_NEEDS_NOTES_KEY), not_muted_in_newest: on(USED_NOT_MUTED_KEY) },
             weights: LikedWeights::from_json(get(LIKED_WEIGHTS_KEY).as_deref()),
         }
@@ -644,7 +657,7 @@ fn read_all(sounds_db: &Path, library_db: &Path, cards: Option<Feed>, send: impl
         ),
     );
     let list = library.list.clone();
-    send(Step::Read(Ok(Read {
+    send(Step::Read(Ok(Box::new(Read {
         library,
         source: first.source.clone(),
         view: settings.view.clone(),
@@ -652,7 +665,8 @@ fn read_all(sounds_db: &Path, library_db: &Path, cards: Option<Feed>, send: impl
         export_folder: settings.export_folder.clone(),
         drum_machine: settings.drum_machine.clone(),
         autoplay: settings.autoplay.clone(),
-    })));
+        step_ms: settings.step_ms.clone(),
+    }))));
     // Sounds like this: every sound's fingerprint, read with the sounds or from the copy after them; their blocks
     // become the index.
     let mut remade = None;
@@ -1201,11 +1215,11 @@ fn move_places(p: &mut Page, moved: &[Option<usize>]) -> Gone {
     gone
 }
 
-fn loaded(app: &AppWindow, read: Result<Read, String>) {
+fn loaded(app: &AppWindow, read: Result<Box<Read>, String>) {
     let _doing = crate::watchdog::doing("Sounds: the sounds were read");
     let data = app.global::<SoundsData>();
     let read = match read {
-        Ok(read) => read,
+        Ok(read) => *read,
         Err(why) => {
             if !why.is_empty() {
                 log::warning("Sounds", &format!("Couldn't read the sound library: {why}"));
@@ -1229,6 +1243,7 @@ fn loaded(app: &AppWindow, read: Result<Read, String>) {
         p.re.count = count;
         p.kit.export_folder = read.export_folder;
         p.kit.drum_machine = read.drum_machine;
+        p.step = Duration::from_millis(list::step_ms(read.step_ms.as_deref()));
     });
     show(app, read.library, read.view.as_deref(), read.autoplay.as_deref());
 }
@@ -1414,6 +1429,7 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
         }
     });
     wire_rediscover(app);
+    grid::connect(app);
     kit::wire(app);
     galaxy::wire(app);
     let weak = app.as_weak();
@@ -1423,6 +1439,7 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
         let changed = PAGE.with(|p| std::mem::replace(&mut p.borrow_mut().columns, n) != n);
         if changed {
             TILE_ROWS.with(|m| m.notify.reset());
+            grid::changed();
             bring_picked_into_view(&app);
         }
     });
@@ -1456,9 +1473,9 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
         play_picked(&app, 0.0);
     });
     let weak = app.as_weak();
-    data.on_step(move |d| {
+    data.on_step(move |d, held| {
         if let Some(app) = weak.upgrade() {
-            step(&app, d);
+            step(&app, d, held);
         }
     });
     let weak = app.as_weak();
@@ -1936,6 +1953,7 @@ fn show_lists(app: &AppWindow) {
 /// The tiles and lines again (a pick or what's playing changed what they show).
 fn redraw() {
     TILE_ROWS.with(|m| m.notify.reset());
+    grid::changed();
     LINES.with(|m| m.notify.reset());
     kit::redraw();
 }
@@ -2065,9 +2083,14 @@ fn picked_sound(p: &Page, at: usize) -> PickedSound {
 }
 
 /// The arrow keys: across a row of tiles (-1, 1) or down and up the list (-2, 2), a row of tiles at a time.
-fn step(app: &AppWindow, d: i32) {
+fn step(app: &AppWindow, d: i32, held: bool) {
     let next = PAGE.with(|p| {
-        let p = p.borrow();
+        let mut p = p.borrow_mut();
+        // A held key's repeats wait for the sound they're on to have played (with Autoplay on).
+        let (autoplay, step) = (p.autoplay, p.step);
+        if !p.stepping.may_step(autoplay, held, step, Instant::now()) {
+            return None;
+        }
         let n = p.entries();
         if n == 0 {
             return None;

@@ -41,8 +41,8 @@ struct Shows {
     card: u64,
 }
 
-/// A picture's width and height, its lines' width and the width of their soft edges, in pixels, to the bit: a picture
-/// is only shown again at exactly its size.
+/// A picture's width and height and its lines' width, in pixels, and the window's scale, to the bit: a picture is only
+/// shown again at exactly its size.
 type Size = [u32; 4];
 
 /// How far past a whole pixel a Waveform sits in the window, across and down, in [`PHASES`]ths of a pixel. The window
@@ -52,14 +52,15 @@ type Size = [u32; 4];
 /// shows depends on where they fall in one.
 type Phase = [u8; 2];
 
-/// A picture kept, at `size` and `phase`, taking `bytes` on the card, last asked for (at its size and phase) at ask
-/// number `asked`.
+/// A picture kept, at `size` and `phase`, taking `bytes` on the card: last asked for (at its size and phase) at ask
+/// number `asked`, and last given to a Waveform to show (as itself, or in another's place) at ask number `shown`.
 struct Picture {
     size: Size,
     phase: Phase,
     image: Image,
     bytes: u64,
     asked: u64,
+    shown: u64,
 }
 
 /// A sound's waveform's pictures, one for each place it's on show (its tile and the sound's card, say), at its size and
@@ -76,29 +77,34 @@ enum Found {
     /// Its picture.
     Itself(Image),
     /// Its picture at the same size but another phase (`phase`), to show, a hair over, until it's drawn at its own:
-    /// once it's `still` (asked for at this phase in the frame before too), now if there's time; not while it moves,
-    /// so scrolling doesn't draw a picture of every waveform on show in every frame.
+    /// once it's `still` (asked for at this phase in the last frame waveforms asked in, too), now if there's time; not
+    /// while it moves, so scrolling doesn't draw a picture of every waveform on show in every frame.
     Near { image: Image, phase: Phase, still: bool },
     /// Nothing at its size.
     Nothing,
 }
 
-/// The pictures drawn, for each sound's waveform, with when each was last asked for. A picture drawn takes the place of
-/// the waveform's pictures as high as it (in the same place: left at another width or phase, as the window is resized
-/// or the page scrolls) that haven't been asked for in this frame; pictures at other heights (the sound's tile, and its
-/// card) are kept apart. Past the room they may take, the least lately asked for go first, but never one asked for in
-/// this frame.
+/// The pictures drawn, for each sound's waveform, with when each was last asked for and shown. A picture drawn takes the
+/// place of the waveform's pictures as high as it (in the same place: left at another width or phase, as the window is
+/// resized or the page scrolls) that haven't been shown in this frame; pictures at other heights (the sound's tile, and
+/// its card) are kept apart. Past the room they may take, the least lately shown go first, but never one shown in this
+/// frame or the one before (Slint may ask for a picture between two frames, for the second). All go when the window's
+/// scale changes (moved to another screen, or the app's size changed): they'd never be shown again at the new one.
 #[derive(Default)]
 struct Kept {
     sounds: HashMap<Shows, Pictures>,
     /// How many bytes the pictures take on the card, in all.
     bytes: u64,
-    /// The asks, counted, so it's known which picture was asked for least lately.
+    /// The asks, counted, so it's known which picture was asked for, or shown, least lately.
     asks: u64,
-    /// The frames, counted, so it's known when a waveform has stopped moving.
+    /// The frames in which waveforms asked, counted, so it's known when a waveform has stopped moving.
     frames: u64,
     /// The count of asks when this frame started: a picture asked for since then is on show.
     frame_started: u64,
+    /// The count of asks when the frame before started.
+    frame_before_started: u64,
+    /// The window's scale the pictures are drawn at (its bits).
+    scale: u32,
 }
 
 impl Kept {
@@ -109,13 +115,14 @@ impl Kept {
         let Some(pictures) = self.sounds.get_mut(shows) else { return Found::Nothing };
         if let Some(kept) = pictures.kept.iter_mut().find(|p| p.size == size && p.phase == phase) {
             kept.asked = asks;
+            kept.shown = asks;
             return Found::Itself(kept.image.clone());
         }
         let Some(near) = pictures.kept.iter().filter(|p| p.size == size).max_by_key(|p| p.asked) else {
             return Found::Nothing;
         };
         let (image, near_phase) = (near.image.clone(), near.phase);
-        // Asked for at this phase in the frame before as well (asks before that go), it's still.
+        // Asked for at this phase in the last frame waveforms asked in as well (asks before that go), it's still.
         pictures.near.retain(|(_, _, at)| at + 1 >= frame);
         let still = match pictures.near.iter_mut().find(|(s, p, _)| *s == size && *p == phase) {
             Some(asked) => {
@@ -131,13 +138,26 @@ impl Kept {
         Found::Near { image, phase: near_phase, still }
     }
 
+    /// The picture of `shows` at `size` and `phase` (as [`Kept::get`] found it near) is shown in another phase's
+    /// place: on show in this frame, so it isn't let go to make room, and not taken over by a picture drawn for
+    /// another place as high.
+    fn shown_in_place(&mut self, shows: &Shows, size: Size, phase: Phase) {
+        self.asks += 1;
+        let asks = self.asks;
+        if let Some(near) =
+            self.sounds.get_mut(shows).and_then(|p| p.kept.iter_mut().find(|p| p.size == size && p.phase == phase))
+        {
+            near.shown = asks;
+        }
+    }
+
     /// Keeps the picture of `shows` at `size` and `phase`, `bytes` on the card, making room for it within `most` bytes.
     fn keep(&mut self, shows: Shows, size: Size, phase: Phase, image: Image, bytes: u64, most: u64) {
         let frame_started = self.frame_started;
         if let Some(pictures) = self.sounds.get_mut(&shows) {
             let mut freed = 0;
             pictures.kept.retain(|p| {
-                let replaced = p.size == size && p.phase == phase || p.size[1] == size[1] && p.asked <= frame_started;
+                let replaced = p.size == size && p.phase == phase || p.size[1] == size[1] && p.shown <= frame_started;
                 if replaced {
                     freed += p.bytes;
                 }
@@ -145,22 +165,22 @@ impl Kept {
             });
             self.bytes = self.bytes.saturating_sub(freed);
         }
-        while self.bytes + bytes > most && self.forget_least_lately_asked() {}
-        // Counted as asked for now, after everything kept before it.
+        while self.bytes + bytes > most && self.forget_least_lately_shown() {}
+        // Counted as asked for and shown now, after everything kept before it.
         self.asks += 1;
         self.bytes += bytes;
-        let picture = Picture { size, phase, image, bytes, asked: self.asks };
+        let picture = Picture { size, phase, image, bytes, asked: self.asks, shown: self.asks };
         self.sounds.entry(shows).or_default().kept.push(picture);
     }
 
-    /// Lets go of the picture asked for least lately, unless that was in this frame: whether one went.
-    fn forget_least_lately_asked(&mut self) -> bool {
+    /// Lets go of the picture shown least lately, unless that was in this frame or the one before: whether one went.
+    fn forget_least_lately_shown(&mut self) -> bool {
         let oldest = self
             .sounds
             .iter()
-            .flat_map(|(shows, pictures)| pictures.kept.iter().enumerate().map(move |(at, p)| (shows, at, p.asked)))
-            .filter(|(_, _, asked)| *asked <= self.frame_started)
-            .min_by_key(|(_, _, asked)| *asked)
+            .flat_map(|(shows, pictures)| pictures.kept.iter().enumerate().map(move |(at, p)| (shows, at, p.shown)))
+            .filter(|(_, _, shown)| *shown <= self.frame_before_started)
+            .min_by_key(|(_, _, shown)| *shown)
             .map(|(shows, at, _)| (shows.clone(), at));
         let Some((shows, at)) = oldest else { return false };
         if let Some(pictures) = self.sounds.get_mut(&shows) {
@@ -173,10 +193,22 @@ impl Kept {
         true
     }
 
-    /// A frame starts: what's asked for from now on is on show in it.
+    /// A frame starts: what's asked for from now on is on show in it. Only frames in which waveforms asked are counted,
+    /// so a frame drawn for something else (a sound playing) between a waveform's asks doesn't look like it moving.
     fn frame_starts(&mut self) {
-        self.frames += 1;
+        if self.asks > self.frame_started {
+            self.frames += 1;
+        }
+        self.frame_before_started = self.frame_started;
         self.frame_started = self.asks;
+    }
+
+    /// The window's scale is `scale`: if it changed, the pictures drawn at the old one go.
+    fn scale_is(&mut self, scale: f32) {
+        if self.scale != scale.to_bits() {
+            self.clear();
+            self.scale = scale.to_bits();
+        }
     }
 
     fn clear(&mut self) {
@@ -221,7 +253,7 @@ pub fn frame_starts() {
 /// How wide the window's drawing library makes the soft edges of a path's lines, in pixels, at `scale` pixels to a
 /// point: a pixel divided by the scale rounded up, which is what Slint hands femtovg as its `dpi` (in
 /// i-slint-renderer-femtovg's `set_size`), so a whole pixel at 100% and less, and half a pixel from 125% to 200%.
-fn fringe(scale: f32) -> f32 {
+pub(crate) fn fringe(scale: f32) -> f32 {
     if scale.is_finite() && scale > 0.0 { 1.0 / scale.ceil() } else { 1.0 }
 }
 
@@ -234,15 +266,23 @@ pub fn connect(app: &AppWindow) {
     });
 }
 
-/// A part of a pixel in [`PHASES`]ths, as a Waveform says it; anything past the ends is taken as the end.
-fn phase(over: i32) -> u8 {
-    u8::try_from(over.clamp(0, i32::from(PHASES) - 1)).unwrap_or(0)
+/// How far past a whole pixel a Waveform sits (from 0 to 1, as it says it), to the nearest [`PHASES`]th of a pixel: a
+/// whole pixel further is the next whole pixel, and anything that isn't a part of a pixel is a whole pixel. Nearly a
+/// whole pixel over is taken as the next one with nothing over, which holds because Slint's renderer puts a picture on
+/// the nearest whole pixel (i-slint-renderer-femtovg's `pixel_align_origin` rounds), so that one is where it goes.
+fn phase(over: f32) -> u8 {
+    let over = if over.is_finite() { over.clamp(0.0, 1.0) } else { 0.0 };
+    u8::try_from((over * f32::from(PHASES)).round() as u32 % u32::from(PHASES)).unwrap_or(0)
+}
+
+/// How far past a whole pixel `phase` is, in pixels.
+fn part_of_a_pixel(phase: u8) -> f64 {
+    f64::from(phase) / f64::from(PHASES)
 }
 
 /// What a Waveform shows of a picture drawn at `phase`: the picture, and how far back it goes, in pixels.
 fn shown(picture: Image, phase: Phase) -> WavePicture {
-    let back = |p: u8| f32::from(p) / f32::from(PHASES);
-    WavePicture { picture, x: back(phase[0]), y: back(phase[1]) }
+    WavePicture { picture, x: part_of_a_pixel(phase[0]) as f32, y: part_of_a_pixel(phase[1]) as f32 }
 }
 
 /// A graphics card was handed over: the painter is set up on it, away from the window's thread, and then every
@@ -306,22 +346,30 @@ fn picture(
 ) -> Option<WavePicture> {
     let (gpu, generation) = CARD.with(|c| c.borrow().card())?;
     // A Waveform less than a pixel wide or high is left to the window.
-    pixels(width)?;
-    pixels(height)?;
+    if pixels(width).is_none() || pixels(height).is_none() {
+        return None;
+    }
     let app_window = app.upgrade()?;
-    // The soft edges as the window would draw them (and so a new picture when the window's scale changes).
-    let fringe = fringe(app_window.window().scale_factor());
+    // The soft edges as the window would draw them, at its scale (pictures at another scale go).
+    let scale = app_window.window().scale_factor();
+    let fringe = fringe(scale);
+    KEPT.with(|k| k.borrow_mut().scale_is(scale));
     let shows = Shows { shape, points, tint: tint.as_argb_encoded(), card: generation };
-    let size = [width.to_bits(), height.to_bits(), line.to_bits(), fringe.to_bits()];
+    let size = [width.to_bits(), height.to_bits(), line.to_bits(), scale.to_bits()];
+    // A picture at another phase, shown in this one's place.
+    let in_place = |(image, at): (Image, Phase)| {
+        KEPT.with(|k| k.borrow_mut().shown_in_place(&shows, size, at));
+        Some(shown(image, at))
+    };
     let near = match KEPT.with(|k| k.borrow_mut().get(&shows, size, phase)) {
         Found::Itself(image) => return Some(shown(image, phase)),
         // Moving (or only just stopped): its picture at the phase it was at, a hair over, and every waveform asks again
         // in the next frame, which draws its own picture if it has stopped.
-        Found::Near { image, phase: near, still: false } => {
+        Found::Near { image, phase: at, still: false } => {
             leave_to_next_frame(app);
-            return Some(shown(image, near));
+            return in_place((image, at));
         }
-        Found::Near { image, phase: near, still: true } => Some(shown(image, near)),
+        Found::Near { image, phase: at, still: true } => Some((image, at)),
         Found::Nothing => None,
     };
     // The painter is set up away from the window's thread: as the card is handed over, or now, if the window draws a
@@ -330,23 +378,23 @@ fn picture(
     if !CARD.with(|c| c.borrow().made_on(generation)) {
         gpu::prepare(&app_window, "Waveforms", &CARD, painter, ask_again);
         if CARD.with(|c| c.borrow().card()).is_none() {
-            return near;
+            return near.and_then(in_place);
         }
     }
     // Enough drawn in this frame: the window shows this one's picture at another phase, or draws its path, and every
     // waveform asks again for the next.
     if !THIS_FRAME.with(|f| f.borrow().has_time()) {
         leave_to_next_frame(app);
-        return near;
+        return near.and_then(in_place);
     }
     let started = Instant::now();
     let lines = waves::lines(&shows.shape)?;
     let points = u32::try_from(points).ok().filter(|p| *p > 0)?;
     let colour = Colour { r: tint.red(), g: tint.green(), b: tint.blue(), a: tint.alpha() };
-    let over = |p: u8| f64::from(p) / f64::from(PHASES);
-    let (waveform, at) = ((f64::from(width), f64::from(height)), (over(phase[0]), over(phase[1])));
+    let waveform = (f64::from(width), f64::from(height));
+    let at = (part_of_a_pixel(phase[0]), part_of_a_pixel(phase[1]));
     let scene = waves::scene(&lines, points, waveform, at, f64::from(line), colour);
-    let pixel_size = (pixels(scene.width as f32)?, pixels(scene.height as f32)?);
+    let pixel_size = scene.pixel_size(1.0);
     let drawn = CARD.with(|c| -> Result<Image, String> {
         let mut c = c.borrow_mut();
         let canvas = c.on(&gpu, generation, |gpu| {
@@ -439,22 +487,22 @@ mod tests {
         }
     }
 
-    /// Once the pictures fill the room they may take, the least lately asked for go first, as many as the new one
-    /// needs the room of.
+    /// Once the pictures fill the room they may take, the least lately shown go first, as many as the new one needs the
+    /// room of.
     #[test]
-    fn the_pictures_kept_are_the_ones_asked_for_lately() {
+    fn the_pictures_kept_are_the_ones_shown_lately() {
         let mut kept = Kept::default();
         for n in 0..10 {
             kept.keep(shows(n), at(200.0), WHOLE, Image::default(), 100, 1000);
         }
         kept.frame_starts();
-        // The first is asked for again, so the second is the least lately asked for.
+        // The first is asked for again, so the second is the least lately shown.
         assert!(found(&mut kept, &shows(0), at(200.0)));
         kept.frame_starts();
         kept.keep(shows(99), at(200.0), WHOLE, Image::default(), 100, 1000);
         assert_eq!((kept.len(), kept.bytes), (10, 1000));
-        assert!(found(&mut kept, &shows(0), at(200.0)), "asked for lately");
-        assert!(!found(&mut kept, &shows(1), at(200.0)), "the least lately asked for went");
+        assert!(found(&mut kept, &shows(0), at(200.0)), "shown lately");
+        assert!(!found(&mut kept, &shows(1), at(200.0)), "the least lately shown went");
         assert!(found(&mut kept, &shows(99), at(200.0)));
         // A big one takes the room of several.
         kept.frame_starts();
@@ -464,9 +512,9 @@ mod tests {
         assert!(!found(&mut kept, &Shows { card: 2, ..shows(0) }, at(200.0)));
     }
 
-    /// Pictures asked for in the frame being drawn are on show, so none of them goes to make room, even with more on
-    /// show than the room holds (a screen bigger than two 4K ones): a page of tiles all asking again, in order, finds
-    /// every one, instead of each pushing out the next.
+    /// Pictures shown in the frame being drawn (or the one before) are on show, so none of them goes to make room, even
+    /// with more on show than the room holds (a screen bigger than two 4K ones): a page of tiles all asking again, in
+    /// order, finds every one, instead of each pushing out the next.
     #[test]
     fn a_picture_on_show_stays() {
         let mut kept = Kept::default();
@@ -479,7 +527,8 @@ mod tests {
         for n in 0..20 {
             assert!(found(&mut kept, &shows(n), at(200.0)), "{n} found again");
         }
-        // Once they aren't on show any more, the room counts again.
+        // Once they haven't been on show for a frame, the room counts again.
+        kept.frame_starts();
         kept.frame_starts();
         kept.keep(shows(99), at(200.0), WHOLE, Image::default(), 100, 1000);
         assert_eq!((kept.len(), kept.bytes), (10, 1000));
@@ -570,6 +619,7 @@ mod tests {
         kept.frame_starts();
         kept.keep(shows(0), at(200.0), one, Image::default(), 100, 1000);
         assert!(matches!(kept.get(&shows(0), at(200.0), two), Found::Near { still: false, .. }));
+        kept.shown_in_place(&shows(0), at(200.0), one);
         kept.frame_starts();
         assert!(matches!(kept.get(&shows(0), at(200.0), one), Found::Itself(_)));
         assert!(matches!(kept.get(&shows(0), at(200.0), two), Found::Near { still: true, .. }));
@@ -582,13 +632,71 @@ mod tests {
         }
     }
 
-    /// A Waveform says how far past a whole pixel it sits in 64ths; a picture shown goes back that far.
+    /// A Waveform says how far past a whole pixel it sits, which is taken to the nearest 64th of a pixel; a picture
+    /// shown goes back as far as it was drawn over.
     #[test]
     fn a_picture_goes_back_as_far_as_it_was_drawn_over() {
-        assert_eq!([phase(0), phase(63), phase(32)], [0, 63, 32]);
-        assert_eq!([phase(-1), phase(64), phase(i32::MAX)], [0, 63, 63], "past the ends");
+        assert_eq!([phase(0.0), phase(0.25), phase(0.5), phase(63.0 / 64.0), phase(0.51)], [0, 16, 32, 63, 33]);
+        assert_eq!(phase(0.999), 0, "nearer the next whole pixel");
+        assert_eq!([phase(-1.0), phase(2.0), phase(f32::NAN), phase(f32::INFINITY)], [0, 0, 0, 0], "not a part");
         let shown = shown(Image::default(), [16, 48]);
         assert_eq!((shown.x, shown.y), (0.25, 0.75));
+    }
+
+    /// A picture shown in another waveform's place (while that one moves) is on show in this frame, so it isn't let go
+    /// to make room, however long ago it was asked for itself; the waveform's own picture still takes its place once
+    /// it's drawn.
+    #[test]
+    fn a_picture_shown_in_anothers_place_stays_while_on_show() {
+        let mut kept = Kept::default();
+        kept.keep(shows(0), at(200.0), WHOLE, Image::default(), 100, 1000);
+        for n in 1..10 {
+            kept.frame_starts();
+            kept.keep(shows(n), at(200.0), WHOLE, Image::default(), 100, 1000);
+        }
+        // The first was asked for least lately, but it's on show in another's place in this frame.
+        kept.frame_starts();
+        assert!(matches!(kept.get(&shows(0), at(200.0), [0, 8]), Found::Near { .. }));
+        kept.shown_in_place(&shows(0), at(200.0), WHOLE);
+        kept.keep(shows(99), at(200.0), WHOLE, Image::default(), 100, 1000);
+        assert_eq!((kept.len(), kept.bytes), (10, 1000));
+        assert!(!found(&mut kept, &shows(1), at(200.0)), "the least lately shown went instead");
+        assert!(matches!(kept.get(&shows(0), at(200.0), [0, 8]), Found::Near { .. }), "still kept");
+        // Drawn at its own phase, its own picture takes that one's place.
+        kept.frame_starts();
+        kept.keep(shows(0), at(200.0), [0, 8], Image::default(), 100, 1000);
+        assert_eq!(kept.sounds[&shows(0)].kept.len(), 1);
+    }
+
+    /// Moved to a screen at another scale, or the app's size changed, every waveform's pictures would never be shown
+    /// again at the new scale (even where its soft edges are as wide, as from 125% to 150%), so they all go.
+    #[test]
+    fn pictures_at_another_scale_go() {
+        let mut kept = Kept::default();
+        kept.scale_is(1.25);
+        let card = [552f32.to_bits(), 88f32.to_bits(), 2f32.to_bits(), 1.25f32.to_bits()];
+        kept.keep(shows(0), at(200.0), WHOLE, Image::default(), 100, 1000);
+        kept.keep(shows(0), card, WHOLE, Image::default(), 100, 1000);
+        kept.keep(shows(1), at(200.0), WHOLE, Image::default(), 100, 1000);
+        kept.scale_is(1.25);
+        assert_eq!((kept.len(), kept.bytes), (3, 300), "the same scale");
+        kept.scale_is(1.5);
+        assert_eq!((kept.len(), kept.bytes), (0, 0));
+    }
+
+    /// A frame drawn for something else (a sound playing, the mouse moving), where no waveform asks, comes between a
+    /// waveform's asks without making it look as if it moved: at the same phase in the next frame it asks in, it's
+    /// still.
+    #[test]
+    fn a_frame_drawn_for_something_else_doesnt_look_like_moving() {
+        let mut kept = Kept::default();
+        kept.keep(shows(0), at(200.0), WHOLE, Image::default(), 100, 1000);
+        kept.frame_starts();
+        assert!(matches!(kept.get(&shows(0), at(200.0), [0, 8]), Found::Near { still: false, .. }));
+        kept.frame_starts();
+        kept.frame_starts();
+        kept.frame_starts();
+        assert!(matches!(kept.get(&shows(0), at(200.0), [0, 8]), Found::Near { still: true, .. }));
     }
 
     /// A frame draws new pictures while it has time; after that, waveforms are left to the next frame, and the first
@@ -616,8 +724,7 @@ mod tests {
         scale: f32,
         tint: Colour,
     ) -> image::RgbaImage {
-        let width = pixels(scene.width as f32).expect("a size");
-        let height = pixels(scene.height as f32).expect("a size");
+        let (width, height) = scene.pixel_size(1.0);
         let renderer = femtovg::renderer::WGPURenderer::new(device.clone(), queue.clone());
         let mut canvas = femtovg::Canvas::new(renderer).expect("femtovg on the card");
         canvas.set_size(width, height, scale.ceil());
@@ -680,15 +787,15 @@ mod tests {
         // A tile and the sound's card at 100% (each line as wide as the Waveform makes it, in points), at each scale,
         // on a whole pixel and at parts of a pixel over.
         let views = [("tile", (231.5f32, 40.25f32), 1.0f32), ("card", (552.0, 88.0), 2.07)];
-        let phases = [WHOLE, [32, 32], [19, 45]];
+        let phases = [WHOLE, [PHASES / 2, PHASES / 2], [19, 45]];
         for scale in [0.8f32, 1.0, 1.25, 1.5, 2.0] {
             for ((name, (width, height), line), phase) in views.into_iter().flat_map(|v| phases.map(|p| (v, p))) {
                 let name = format!("{name}-{}-at-{}-{}", (scale * 100.0).round(), phase[0], phase[1]);
                 let (width, height, line) = (width * scale, height * scale, line * scale);
-                let at = (f64::from(phase[0]) / 64.0, f64::from(phase[1]) / 64.0);
+                let at = (part_of_a_pixel(phase[0]), part_of_a_pixel(phase[1]));
                 let waveform = (f64::from(width), f64::from(height));
                 let scene = waves::scene(&lines, 160, waveform, at, f64::from(line), tint);
-                let size = (pixels(scene.width as f32).expect("a size"), pixels(scene.height as f32).expect("a size"));
+                let size = scene.pixel_size(1.0);
                 let picture = canvas.draw_new(size, 1.0, scene.background, &scene.pack(1.0), fringe(scale));
                 let card_picture = read_back(&device, &queue, &picture);
                 let window = as_the_window_draws(&device, &queue, &scene, scale, tint);

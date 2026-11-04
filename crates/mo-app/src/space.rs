@@ -284,6 +284,13 @@ pub struct Line {
     pub size: String,
 }
 
+/// Biggest wins first: the lines that free room, each with the room it frees, biggest first. Lines that free the same
+/// keep their order.
+pub fn biggest_first(mut lines: Vec<(u64, Line)>) -> Vec<Line> {
+    lines.sort_by_key(|(bytes, _)| std::cmp::Reverse(*bytes));
+    lines.into_iter().map(|(_, line)| line).collect()
+}
+
 /// The App files line's id.
 pub const APP_FILES: &str = "app-files";
 
@@ -304,6 +311,25 @@ pub fn app_bytes(parts: &[AppFilesPart]) -> u64 {
     parts.iter().fold(0u64, |sum, p| sum.saturating_add(p.bytes))
 }
 
+/// What a part's link that opens something does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Opens {
+    /// Opens a fixed project in Bitwig.
+    InBitwig,
+    /// Shows it (an old copy) in its folder.
+    InFolder,
+}
+
+impl Opens {
+    /// The link's words.
+    pub fn words(self) -> &'static str {
+        match self {
+            Opens::InBitwig => "Open in Bitwig",
+            Opens::InFolder => "Show in folder",
+        }
+    }
+}
+
 /// One part on a card: its name, what it holds and its size; and for a part you can act on, its tick, what happened to
 /// it, a file it opens and a link that shows more.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -318,8 +344,9 @@ pub struct Part {
     /// What happened to it, or what to know about it; "" for nothing. `problem` shows it as a problem.
     pub status: String,
     pub problem: bool,
-    /// A file it opens: a fixed project, in Bitwig.
-    pub open: Option<PathBuf>,
+    /// Its link that opens something: what it does, and the file or folder it's for (a fixed project, opened in
+    /// Bitwig; an old copy, shown in its folder).
+    pub open: Option<(Opens, PathBuf)>,
     /// Its link that shows or hides more under it: its words, and what it's for (a project's folder).
     pub more: Option<(String, PathBuf)>,
 }
@@ -544,5 +571,14 @@ mod tests {
         let measuring = app_files_card(None, None);
         assert_eq!((measuring.big.as_str(), measuring.big_note.as_str()), ("Measuring…", ""));
         assert!(measuring.parts.is_empty() && measuring.room.is_empty());
+    }
+
+    #[test]
+    fn the_biggest_win_comes_first() {
+        let line = |id: &'static str| Line { id, title: "", why: String::new(), size: String::new() };
+        let lines = biggest_first(vec![(2 * GB, line("small")), (60 * GB, line("big")), (2 * GB, line("also small"))]);
+        let ids: Vec<&str> = lines.iter().map(|l| l.id).collect();
+        // The two that free the same stay in the order they came.
+        assert_eq!(ids, ["big", "small", "also small"]);
     }
 }

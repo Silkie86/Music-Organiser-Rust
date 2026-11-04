@@ -438,8 +438,9 @@ fn draw_on_card(shapes: &Shapes) -> Result<Option<Image>, String> {
             Canvas::new(&gpu.device, &gpu.queue, Kind::Picture)
         })?;
         let _doing = crate::watchdog::doing("Arrangement: draw on the GPU");
-        let texture =
-            gpu::checked(&gpu.device, || canvas.draw(shapes.size, shapes.scale, shapes.background, &shapes.bytes))?;
+        let texture = gpu::checked(&gpu.device, || {
+            canvas.draw(shapes.size, shapes.scale, shapes.background, &shapes.bytes, 0.0)
+        })?;
         Image::try_from(texture).map_err(|e| format!("Slint wouldn't show the picture: {e}"))
     });
     // If the card or Slint said no, the processor draws it from now on, on this card.
@@ -787,7 +788,7 @@ mod tests {
             let size = frame.scene.pixel_size(scale);
             let cpu = frame.scene.paint(scale);
             let bytes = frame.scene.pack(scale);
-            let picture = canvas.draw(size, scale as f32, frame.scene.background, &bytes);
+            let picture = canvas.draw(size, scale as f32, frame.scene.background, &bytes, 0.0);
             let gpu = read_back(&device, &queue, &picture);
             assert_eq!((gpu.width(), gpu.height()), (cpu.width(), cpu.height()), "{name}");
             // How far apart each pixel is: the most any of its colours differs.
@@ -817,7 +818,7 @@ mod tests {
             if timed {
                 let started = std::time::Instant::now();
                 for _ in 0..20 {
-                    let _ = canvas.draw(size, scale as f32, frame.scene.background, &bytes);
+                    let _ = canvas.draw(size, scale as f32, frame.scene.background, &bytes, 0.0);
                     device.poll(wgpu::PollType::wait_indefinitely()).expect("the card finishes");
                 }
                 let card = started.elapsed().as_secs_f64() * 1000.0 / 20.0;

@@ -394,10 +394,25 @@ pub fn measure(
     // Folders you added are the plugin's as well as its guessed ones. One another plugin's guess takes too, or another
     // plugin has added too (Kontakt 7 and Kontakt 8 using one library), is shared, so it stays on one's clean-up card
     // while the other is used; rule it out for the other to make it this one's alone. The ones you ruled out are left
-    // out of every guess for it.
+    // out of every guess for it. One that is, holds or is inside a project or sample folder of yours is left out too,
+    // as the guesses leave them out: it would be offered for a move, and its old copy for the Recycle Bin (rule 2).
+    let protected: Vec<(&str, String)> = protected_roots
+        .iter()
+        .filter(|r| !r.trim().is_empty())
+        .map(|r| (r.as_str(), real_path(r).unwrap_or_else(|| r.clone())))
+        .collect();
+    let yours = |a: &str| {
+        let real_a = real_path(a).unwrap_or_else(|| a.to_owned());
+        protected.iter().any(|(r, real_r)| {
+            is_inside(r, a) || is_inside(a, r) || is_inside(real_r, &real_a) || is_inside(&real_a, real_r)
+        })
+    };
     let added: HashMap<&str, Vec<String>> = plugins
         .iter()
-        .map(|p| (p.key.as_str(), (choices.added)(&p.key).into_iter().filter(|a| Path::new(a).is_dir()).collect()))
+        .map(|p| {
+            let added = (choices.added)(&p.key).into_iter().filter(|a| Path::new(a).is_dir() && !yours(a));
+            (p.key.as_str(), added.collect())
+        })
         .collect();
     let mut claimed: HashMap<&str, (Vec<String>, Vec<String>)> = HashMap::new();
     for p in plugins {

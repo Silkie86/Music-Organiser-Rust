@@ -627,11 +627,66 @@ pub fn copy_failed_line(e: &SoundsError) -> String {
     }
 }
 
+/// The C# app's setting for how long each sound plays while a held arrow key steps through them (Settings › Sounds).
+pub const STEP_KEY: &str = "sound_step_ms";
+/// Its choices, and the C# app's default.
+pub const STEP_CHOICES: [u64; 5] = [150, 250, 400, 600, 1000];
+pub const STEP_MS: u64 = 250;
+
+/// The step time from its setting: a whole number of milliseconds above 0, else the default (as the C# app reads it).
+pub fn step_ms(setting: Option<&str>) -> u64 {
+    setting.and_then(|s| s.trim().parse().ok()).filter(|&ms: &u64| ms > 0).unwrap_or(STEP_MS)
+}
+
+/// Whether an arrow key may move the pick (the C# app's `MayStep`). A press always may; a key held down (its
+/// repeats) waits until the sound it's on has played for the step time, so what you see and what you hear stay
+/// together and no sound is skipped (Solomon's 19 Oct note). With Autoplay off nothing plays, so a held key runs
+/// through the list at the keyboard's own speed.
+#[derive(Debug, Default)]
+pub struct Stepping {
+    /// When the pick last moved.
+    stepped: Option<std::time::Instant>,
+}
+
+impl Stepping {
+    pub fn may_step(&mut self, autoplay: bool, held: bool, step: std::time::Duration, now: std::time::Instant) -> bool {
+        if !autoplay {
+            return true;
+        }
+        if held && self.stepped.is_some_and(|at| now.saturating_duration_since(at) < step) {
+            return false;
+        }
+        self.stepped = Some(now);
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::NaiveDate;
     use mo_sounds::SoundAnalysis;
+
+    #[test]
+    fn a_held_arrow_steps_no_faster_than_the_step_time_with_autoplay() {
+        use std::time::{Duration, Instant};
+        let step = Duration::from_millis(250);
+        let t = Instant::now();
+        let mut s = Stepping::default();
+        assert!(s.may_step(true, false, step, t));
+        // The key's repeats wait for the sound to have played its step time.
+        assert!(!s.may_step(true, true, step, t + Duration::from_millis(30)));
+        assert!(!s.may_step(true, true, step, t + Duration::from_millis(249)));
+        assert!(s.may_step(true, true, step, t + Duration::from_millis(250)));
+        // A fresh press always moves.
+        assert!(s.may_step(true, false, step, t + Duration::from_millis(260)));
+        // Without Autoplay a held key runs at the keyboard's speed.
+        assert!(s.may_step(false, true, step, t + Duration::from_millis(261)));
+        assert_eq!(step_ms(Some("400")), 400);
+        assert_eq!(step_ms(Some("0")), STEP_MS);
+        assert_eq!(step_ms(Some("x")), STEP_MS);
+        assert_eq!(step_ms(None), STEP_MS);
+    }
 
     fn sound(id: i64, path: &str, ty: &str, analysis: Option<SoundAnalysis>) -> Sound {
         Sound {

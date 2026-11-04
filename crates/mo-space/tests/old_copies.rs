@@ -60,7 +60,7 @@ fn nothing(_: u64) {}
 
 fn moved_folder(from: &Path, to: &Path) -> MovedFolder {
     let stop = AtomicBool::new(false);
-    move_folder(&s(from), &s(to), 1, whose(), &OtherDrive, &[], &nothing, &stop).unwrap()
+    move_folder(&s(from), &s(to), 1, whose(), &OtherDrive, &[], &[], &nothing, &stop).unwrap()
 }
 
 #[test]

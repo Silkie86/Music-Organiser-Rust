@@ -596,8 +596,12 @@ pub(super) fn wire(app: &AppWindow) {
 }
 
 /// How long each star of a sweep plays before the next one may start, so a sweep over a crowded part isn't cut to
-/// clicks (the C# app's 90 ms).
-const SWEEP_GAP: Duration = Duration::from_millis(90);
+/// clicks. The C# app's 90 ms was most of the wait between the mouse reaching a star and hearing it, and skipped many
+/// of the stars a quick sweep passes (Solomon, 2026-11-04): 40 ms still lets each sound start cleanly.
+const SWEEP_GAP: Duration = Duration::from_millis(40);
+/// How often a star waiting its turn looks whether its turn has come: a small part of [`SWEEP_GAP`], so it doesn't
+/// add much to the wait.
+const SWEEP_LOOK: Duration = Duration::from_millis(5);
 /// How much of a swept sound is read and played: its start is what a sweep hears, and a whole loop would take a
 /// moment to read.
 const SWEEP_SECONDS: f64 = 4.0;
@@ -760,7 +764,7 @@ fn reached(app: &AppWindow, at: usize) {
     let weak = app.as_weak();
     SWEEP_TIMER.with(|t| {
         if !t.running() {
-            t.start(TimerMode::Repeated, Duration::from_millis(15), move || {
+            t.start(TimerMode::Repeated, SWEEP_LOOK, move || {
                 let Some(app) = weak.upgrade() else { return };
                 let due = PAGE.with(|p| {
                     let g = &mut p.borrow_mut().galaxy;
