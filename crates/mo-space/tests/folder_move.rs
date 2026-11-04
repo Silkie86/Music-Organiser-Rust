@@ -914,6 +914,35 @@ fn a_file_that_turns_into_a_folder_as_the_last_pass_copies_stops_the_move() {
 }
 
 #[test]
+fn a_file_that_turns_into_a_folder_as_the_first_pass_copies_is_copied_as_that_folder() {
+    let dir = fixtures("mo-space-move-file-to-folder-first");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    let library = c.join("Library");
+    let names: Vec<String> = (0..10).map(|n| format!("{n}.db")).collect();
+    for name in &names {
+        write(&library, name, "x");
+    }
+    fs::create_dir_all(&d).unwrap();
+    let stop = AtomicBool::new(false);
+    // As the first pass copies the first, the plugin makes folders of the others' names: the second pass copies them
+    // as the folders they are.
+    let copy = d.join("Library");
+    let progress = |bytes: u64| {
+        if bytes == 1 {
+            for name in names.iter().filter(|name| !copy.join(name).exists()) {
+                fs::remove_file(library.join(name)).unwrap();
+                write(&library.join(name), "Inner.db", "inner");
+            }
+        }
+    };
+    move_folder(&s(&library), &s(&d), 10, whose(), &ROOMY, &[], &progress, &stop).unwrap();
+    assert!(is_link(&library));
+    let folders = names.iter().filter(|name| copy.join(name).join("Inner.db").is_file()).count();
+    let files = names.iter().filter(|name| copy.join(name).is_file()).count();
+    assert_eq!((folders, files), (9, 1));
+}
+
+#[test]
 fn an_old_copy_stays_while_it_is_the_only_copy_the_plugin_could_use() {
     let dir = fixtures("mo-space-move-old-copy");
     let (c, d) = (dir.join("C"), dir.join("D"));

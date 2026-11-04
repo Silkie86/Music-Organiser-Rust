@@ -221,27 +221,32 @@ pub(crate) struct Volume {
 
 /// The drive a file or folder (where it really is) is on, from Windows' list of drives: the innermost one holding it
 /// (a drive can sit in a folder of another), or none when it isn't in the list (or the list can't be read). The list
-/// is read at most every few seconds, as one look at hundreds of plugins asks about each.
+/// is read at most every few seconds, as one look at hundreds of plugins asks about each, and again for a drive that
+/// isn't in it (one plugged in since).
 #[cfg(windows)]
 pub(crate) fn volume_of(real: &str) -> Option<Volume> {
     use std::sync::{Mutex, PoisonError};
     use std::time::{Duration, Instant};
     static READ: Mutex<Option<(Instant, Vec<Volume>)>> = Mutex::new(None);
+    let innermost =
+        |volumes: &[Volume]| volumes.iter().filter(|v| is_inside(real, &v.at)).max_by_key(|v| v.at.len()).cloned();
     let mut read = READ.lock().unwrap_or_else(PoisonError::into_inner);
-    let (_, volumes) = match read.take() {
-        Some((at, volumes)) if at.elapsed() < Duration::from_secs(5) => read.insert((at, volumes)),
-        _ => {
-            let disks = sysinfo::Disks::new_with_refreshed_list_specifics(sysinfo::DiskRefreshKind::nothing());
-            let volume = |d: &sysinfo::Disk| Volume {
-                at: text(d.mount_point()),
-                removable: d.is_removable(),
-                kind: d.file_system().to_string_lossy().into_owned(),
-            };
-            let volumes = disks.map_or_else(|_| Vec::new(), |d| d.iter().map(volume).collect());
-            read.insert((Instant::now(), volumes))
-        }
+    if let Some((at, volumes)) = read.as_ref()
+        && at.elapsed() < Duration::from_secs(5)
+        && let Some(found) = innermost(volumes)
+    {
+        return Some(found);
+    }
+    let disks = sysinfo::Disks::new_with_refreshed_list_specifics(sysinfo::DiskRefreshKind::nothing());
+    let volume = |d: &sysinfo::Disk| Volume {
+        at: text(d.mount_point()),
+        removable: d.is_removable(),
+        kind: d.file_system().to_string_lossy().into_owned(),
     };
-    volumes.iter().filter(|v| is_inside(real, &v.at)).max_by_key(|v| v.at.len()).cloned()
+    let volumes: Vec<Volume> = disks.map_or_else(|_| Vec::new(), |d| d.iter().map(volume).collect());
+    let found = innermost(&volumes);
+    *read = Some((Instant::now(), volumes));
+    found
 }
 
 /// A Mac and Linux keep a Trash on each drive, a USB stick too.
