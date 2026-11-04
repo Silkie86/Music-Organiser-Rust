@@ -9,13 +9,17 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
 use chrono::{NaiveDate, NaiveDateTime};
-use mo_app::plugins::clean::{Inputs, done_text, freed_text, intro, picked, rows, undone_text};
+use mo_app::plugins::clean::{
+    Inputs, Watched, binned_text, check_failed_text, done_text, freed_text, intro, joined, picked, rows, still_binned,
+    undone_text,
+};
 use mo_app::plugins::{Plugins, Read, SaveBrief, SongBrief};
 use mo_library::PluginKind;
 use mo_library::plugins::{PluginUse, SampleIndex, ScanCounts, StoredFolder, StoredSpace};
-use mo_space::clean::{Bin, Problem, Removed, undo};
+use mo_space::clean::{Bin, NOT_IN_BIN, Problem, Removed, undo};
 use mo_space::key;
 use mo_space::plugin_clean::{apply, lines};
+use mo_space::size::size_text;
 
 fn at(y: i32, m: u32) -> NaiveDateTime {
     NaiveDate::from_ymd_opt(y, m, 1).unwrap().and_hms_opt(12, 0, 0).unwrap()
@@ -151,7 +155,8 @@ fn clean_up_sends_what_may_go_to_the_bin_and_puts_it_back() {
     assert_eq!(shown.len(), 1);
     assert!(!shown[0].can && shown[0].why.contains("still use Serum"), "{}", shown[0].why);
     assert_eq!(freed_text(&found, &[false]), "Nothing here can go: each line says why.");
-    assert!(intro(&inputs, &found).contains("1 project uses Serum"));
+    // Nothing can go, so it doesn't say its presets are safe to remove.
+    assert!(!intro(&inputs, &found).contains("safe"), "{}", intro(&inputs, &found));
 
     // Arcade: the library is ticked (sounds named after it), the presets wait for a tick, the kits stay.
     let ask = plugins.clean_ask(arcade).unwrap();
@@ -170,6 +175,15 @@ fn clean_up_sends_what_may_go_to_the_bin_and_puts_it_back() {
     ticks[kits] = true;
     assert_eq!(picked(&found, &ticks).len(), 2);
     assert!(freed_text(&found, &ticks).starts_with("Frees "));
+    // A clean-up that stops part way on a bug still knows what went, from the bin it went through.
+    let counting = Counting(std::sync::Mutex::new(0));
+    let watched = Watched::new(&counting);
+    watched.send(Path::new(&found[library].folder.path)).unwrap();
+    let went = watched.went(&found);
+    assert_eq!(went.removed.len(), 1);
+    assert_eq!((went.removed[0].path.as_str(), went.removed[0].bytes), (found[library].folder.path.as_str(), 5000));
+    assert!(went.removed[0].bin_id.is_some() && *counting.0.lock().unwrap() == 1);
+
     let bin = FolderBin { dir: dir.join("bin"), held: RefCell::new(Vec::new()) };
     let done = inputs.with(|lib| apply(&picked(&found, &ticks), &inputs.ask.space, &inputs.ask.all, lib, &bin, &stop));
     assert!(done.problems.is_empty(), "{:?}", done.problems);
@@ -184,10 +198,75 @@ fn clean_up_sends_what_may_go_to_the_bin_and_puts_it_back() {
     assert!(left[0].path.ends_with("Arcade Kits"));
 
     // Put back.
+    assert_eq!(binned_text(&[&done]), format!("Clean up sent 2 folders to the Recycle Bin ({}).", size_text(6000)));
     let problems = undo(&done, &bin);
     assert!(problems.is_empty());
     assert!(docs.join("Arcade Library/loop.wav").exists() && docs.join("Arcade Presets/a.fxp").exists());
     assert_eq!(undone_text(&done, &problems).0, "Put back 2 folders.");
+    assert!(still_binned(&done, &problems).is_none());
+}
+
+#[test]
+fn what_didnt_come_back_stays_to_try_again() {
+    let removed = |path: &str| Removed {
+        path: path.into(),
+        real: path.into(),
+        bytes: 10,
+        what: mo_space::clean::What::Plugin(mo_space::plugin_space::SpaceKind::Sounds),
+        when: 0,
+        bin_id: None,
+        binned: None,
+        binned_zone: None,
+    };
+    let a = mo_space::clean::Done { removed: vec![removed("D:/A")], ..Default::default() };
+    let b = mo_space::clean::Done {
+        removed: vec![removed("D:/B")],
+        went_with: vec![("D:/B/inner".into(), "D:/B".into())],
+        ..Default::default()
+    };
+    // Two clean-ups put back as one.
+    let both = joined(vec![a, b]);
+    assert_eq!(both.removed.len(), 2);
+    let problems = vec![Problem { path: "D:/B".into(), why: "Something new has its name now.".into() }];
+    let still = still_binned(&both, &problems).unwrap();
+    assert_eq!(still.removed.len(), 1);
+    assert_eq!(still.removed[0].path, "D:/B");
+    assert_eq!(still.went_with.len(), 1);
+    assert_eq!(undone_text(&both, &problems).0, "Put back 1 folder.");
+
+    // One removed for good isn't said to be in the Recycle Bin.
+    let mut gone = both.clone();
+    gone.problems = vec![Problem { path: "D:/A".into(), why: NOT_IN_BIN.into() }];
+    assert!(done_text(&gone).0.contains("1 folder is in the Recycle Bin"), "{}", done_text(&gone).0);
+
+    assert_eq!(
+        check_failed_text("Arcade", "it stopped on something it didn't expect (the log says what)"),
+        "Couldn't check Arcade's folders: it stopped on something it didn't expect (the log says what). Nothing was \
+         removed."
+    );
+    assert_eq!(
+        check_failed_text("Arcade", "Stopped."),
+        "Couldn't check Arcade's folders: Stopped. Nothing was removed."
+    );
+}
+
+/// A bin that takes nothing, and finds everything it's asked about.
+struct Counting(std::sync::Mutex<usize>);
+
+impl Bin for Counting {
+    fn send(&self, _path: &Path) -> Result<(), String> {
+        Ok(())
+    }
+    fn find(&self, removed: &mut [Removed]) -> Vec<Problem> {
+        *self.0.lock().unwrap() += removed.len();
+        for r in removed {
+            r.bin_id = Some(r.real.clone());
+        }
+        Vec::new()
+    }
+    fn put_back(&self, _removed: &[Removed]) -> Vec<Problem> {
+        Vec::new()
+    }
 }
 
 #[test]
@@ -213,4 +292,32 @@ fn a_missing_or_unmeasured_plugin_has_nothing_to_clean() {
     let plugins = Plugins::new(read, at(2026, 11));
     assert!(plugins.clean_ask(0).is_none());
     assert!(plugins.clean_ask(99).is_none());
+}
+
+#[test]
+fn a_plugin_with_only_its_plugin_files_has_nothing_to_clean() {
+    let read = Read {
+        uses: vec![uses(1, "Lone")],
+        saves: vec![SaveBrief {
+            id: 1,
+            name: "A".into(),
+            path: "a".into(),
+            daw: "FL Studio".into(),
+            modified: at(2020, 1),
+        }],
+        song_of: HashMap::from([(1, 0)]),
+        songs: vec![SongBrief { name: "A".into(), latest: 1 }],
+        spaces: vec![space("Lone", &[(Path::new("C:/VST3/Lone.vst3"), 0, 1000)])],
+        installed_names: vec!["Lone".into()],
+        scans: ScanCounts::default(),
+        looked_for_installed: true,
+        unused_years: 2,
+        needed_count: 6,
+    };
+    let plugins = Plugins::new(read, at(2026, 11));
+    let row = plugins.rows.iter().position(|r| r.name == "Lone").unwrap();
+    assert!(plugins.rows[row].room.is_some());
+    // Its plugin files are Uninstall's: the button and the key agree there's nothing here.
+    assert!(!plugins.can_clean(row) && plugins.clean_ask(row).is_none());
+    assert_eq!(plugins.row_of(&(plugins.rows[row].key.clone(), plugins.rows[row].own.clone())), Some(row));
 }

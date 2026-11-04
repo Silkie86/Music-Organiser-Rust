@@ -226,7 +226,7 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
     let weak = app.as_weak();
     data.on_clean_stop(move || {
         if let Some(app) = weak.upgrade() {
-            clean::close(&app);
+            clean::stop(&app);
         }
     });
     let weak = app.as_weak();

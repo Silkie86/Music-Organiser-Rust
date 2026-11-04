@@ -25,6 +25,9 @@ pub enum LibraryError {
     Read(rusqlite::Error),
     /// A change ([`crate::folders`]) wasn't made: why. Nothing was changed.
     Write { path: PathBuf, why: String },
+    /// A setting holds something that isn't what it should be (a folder list that isn't a list of text): what's
+    /// wrong with it. Asked of where reading it as empty could let something of yours be removed.
+    Setting { key: String, why: String },
 }
 
 impl fmt::Display for LibraryError {
@@ -33,6 +36,7 @@ impl fmt::Display for LibraryError {
             LibraryError::Open { path, why } => write!(f, "Couldn't open the library {}: {why}", path.display()),
             LibraryError::Read(e) => write!(f, "Couldn't read the library: {e}"),
             LibraryError::Write { path, why } => write!(f, "Couldn't change the library {}: {why}", path.display()),
+            LibraryError::Setting { key, why } => write!(f, "The library's {key} setting couldn't be read: {why}"),
         }
     }
 }
@@ -368,6 +372,26 @@ impl Library {
     pub fn list_setting(&self, key: &str) -> Result<Vec<String>, LibraryError> {
         let Some(json) = self.setting(key)? else { return Ok(Vec::new()) };
         Ok(serde_json::from_str::<Vec<String>>(&json).unwrap_or_default())
+    }
+
+    /// A list setting, as [`Library::list_setting`], but one that isn't a list of text is an error rather than no
+    /// folders: for where an empty list would let something of yours be removed.
+    pub fn strict_list_setting(&self, key: &str) -> Result<Vec<String>, LibraryError> {
+        if self.has("settings") {
+            let mut st = self.conn.prepare("SELECT value FROM settings WHERE key = ?1")?;
+            let mut rows = st.query([key])?;
+            if let Some(r) = rows.next()? {
+                let bad = |why: String| LibraryError::Setting { key: key.to_owned(), why };
+                return match r.get_ref("value")? {
+                    ValueRef::Null => Ok(Vec::new()),
+                    ValueRef::Text(t) => serde_json::from_str::<Option<Vec<String>>>(&String::from_utf8_lossy(t))
+                        .map(Option::unwrap_or_default)
+                        .map_err(|e| bad(format!("it isn't a list of folders ({e})"))),
+                    _ => Err(bad("it isn't text".to_owned())),
+                };
+            }
+        }
+        Ok(Vec::new())
     }
 
     /// The project folders the app scans.

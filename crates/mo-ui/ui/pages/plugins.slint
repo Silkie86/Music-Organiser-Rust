@@ -479,7 +479,7 @@ component PluginPanel inherits SidePanel {
                 font-size: Type.meta;
                 vertical-alignment: center;
             }
-            if PluginsData.clean-stage == 0: StudioButton {
+            if PluginsData.clean-stage == 0 || PluginsData.clean-stage == 2: StudioButton {
                 text: "Stop";
                 clicked => { PluginsData.clean-stop(); }
             }

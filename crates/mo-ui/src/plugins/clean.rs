@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use mo_app::log;
-use mo_app::plugins::clean::{self, Inputs};
+use mo_app::plugins::clean::{self, Inputs, Watched};
 use mo_library::Library;
 use mo_space::clean::{Done, SystemBin, undo};
 use mo_space::plugin_clean::{CleanLine, apply, lines};
@@ -48,17 +48,23 @@ impl Cleaning {
     }
 }
 
-/// Whether the plugin at `row` has anything Clean up could look at: installed, with preset or sound folders measured.
+/// How a clean-up went.
+enum Outcome {
+    Done(Done),
+    /// The library couldn't be read again just before: nothing went.
+    NotChecked(String),
+    /// It stopped part way on a bug: what had gone by then.
+    Stopped(Done),
+}
+
+/// Whether the plugin at `row` has anything Clean up could look at ([`mo_app::plugins::Plugins::can_clean`]).
 pub(super) fn can_clean(row: usize) -> bool {
-    PAGE.with(|p| {
-        let p = p.borrow();
-        p.plugins.as_ref().and_then(|pl| pl.rows.get(row)).is_some_and(|r| {
-            r.installed
-                && r.room
-                    .as_ref()
-                    .is_some_and(|s| s.folders.iter().any(|f| f.kind != mo_space::plugin_space::SpaceKind::Program))
-        })
-    })
+    PAGE.with(|p| p.borrow().plugins.as_ref().is_some_and(|pl| pl.can_clean(row)))
+}
+
+/// What Clean up looks at: the data folder is the app's own, so it never goes.
+fn kept() -> Vec<String> {
+    vec![mo_app::paths::data_dir().to_string_lossy().into_owned()]
 }
 
 /// Clean up for the picked plugin: shows the On disk tab and checks its folders on a worker.
@@ -87,10 +93,11 @@ pub(super) fn start(app: &AppWindow) {
     app.global::<PluginsData>().set_tab(1);
     fill(app);
     let weak = app.as_weak();
-    let kept = vec![mo_app::paths::data_dir().to_string_lossy().into_owned()];
+    let kept = kept();
     let spawned = mo_app::background::spawn("Plugins clean-up check", move || {
+        // A long walk of the disk: on the bulk pool, so the pages' quick jobs don't wait behind it.
         let found = mo_app::background::guarded(|| {
-            mo_app::background::on_pool(|| -> Result<(Inputs, Vec<CleanLine>), String> {
+            mo_app::background::on_bulk_pool(|| -> Result<(Inputs, Vec<CleanLine>), String> {
                 let lib = Library::open_read_only(&library).map_err(|e| e.to_string())?;
                 let inputs = ask.read(&lib, kept).map_err(|e| e.to_string())?;
                 drop(lib);
@@ -130,10 +137,7 @@ fn checked(app: &AppWindow, id: u64, found: Result<(Inputs, Vec<CleanLine>), Str
             }
             Err(why) => {
                 log::warning("Plugins", &format!("Clean up {}: couldn't check its folders: {why}", c.name));
-                c.stage = Stage::Done {
-                    head: format!("Couldn't check {}'s folders: {why} Nothing was removed.", c.name),
-                    problems: Vec::new(),
-                };
+                c.stage = Stage::Done { head: clean::check_failed_text(&c.name, &why), problems: Vec::new() };
             }
         }
     });
@@ -160,37 +164,68 @@ pub(super) fn tick(app: &AppWindow, at: usize, on: bool) {
     });
 }
 
-/// Sends the ticked lines to the Recycle Bin on a worker, each checked again just before it goes.
+/// Sends the ticked lines to the Recycle Bin on a worker. Just before, it reads again what the library knows (your
+/// folders, the samples your projects use) and takes how the page sees the plugins now (the years you picked, a
+/// new read), so each folder is checked against things as they are when it goes, not when the card opened.
 pub(super) fn confirm(app: &AppWindow) {
     let job = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         let feed = p.feed.clone();
+        let library = p.library.clone();
+        let ask = p.clean.as_ref().and_then(|c| {
+            let pl = p.plugins.as_ref()?;
+            pl.clean_ask(pl.row_of(&c.row_key)?)
+        });
         let c = p.clean.as_mut()?;
-        let Stage::Ready { inputs, lines, ticks } = &c.stage else { return None };
+        let Stage::Ready { lines, ticks, .. } = &c.stage else { return None };
         let picked = clean::picked(lines, ticks);
         if picked.is_empty() {
             return None;
         }
-        let inputs = inputs.clone();
+        let Some(ask) = ask else {
+            c.stage = Stage::Done {
+                head: format!("{} isn't on the page as it was any more. Nothing was removed.", c.name),
+                problems: Vec::new(),
+            };
+            return None;
+        };
         c.stage = Stage::Removing;
         let card = feed.start(&format!("Cleaning up {}", c.name), "Sending to the Recycle Bin");
-        Some((inputs, picked, c.id, c.stop.clone(), c.row_key.clone(), c.name.clone(), card))
+        Some((ask, library, picked, c.id, c.stop.clone(), c.row_key.clone(), c.name.clone(), card))
     });
-    let Some((inputs, picked, id, stop, row_key, name, card)) = job else { return };
     fill(app);
+    let Some((ask, library, picked, id, stop, row_key, name, card)) = job else { return };
     log::info("Plugins", &format!("Clean up {name}: sending {} folders to the Recycle Bin", picked.len()));
     let weak = app.as_weak();
+    let kept = kept();
     let spawned = mo_app::background::spawn("Plugins clean-up", move || {
-        // Not `guarded`: this changes things, so a panic part way is said as it is, not as "nothing happened".
-        let done = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| {
-            inputs.with(|l| apply(&picked, &inputs.ask.space, &inputs.ask.all, l, &SystemBin, &stop))
-        }));
-        match &done {
-            Ok(d) if !d.removed.is_empty() => card.done(&clean::done_text(d).0),
-            Ok(d) => card.failed(d.problems.first().map_or("Nothing was removed.", |p| p.why.as_str())),
-            Err(_) => card.failed("It stopped part way on something it didn't expect (the log says what)."),
+        let inputs = mo_app::background::guarded(|| {
+            Library::open_read_only(&library).and_then(|lib| ask.read(&lib, kept)).map_err(|e| e.to_string())
+        })
+        .and_then(|r| r);
+        let outcome = match inputs {
+            Err(why) => Outcome::NotChecked(clean::recheck_failed_text(&name, &why)),
+            Ok(inputs) => {
+                let bin = Watched::new(&SystemBin);
+                // Not `guarded`: this changes things, so a stop part way says what went, not "nothing happened".
+                let done = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| {
+                    mo_app::background::on_bulk_pool(|| {
+                        inputs.with(|l| apply(&picked, &inputs.ask.space, &inputs.ask.all, l, &bin, &stop))
+                    })
+                }));
+                match done {
+                    Ok(d) => Outcome::Done(d),
+                    Err(_) => Outcome::Stopped(bin.went(&picked)),
+                }
+            }
+        };
+        match &outcome {
+            Outcome::Done(d) if !d.removed.is_empty() => card.done(&clean::done_text(d).0),
+            Outcome::Done(d) => card.failed(d.problems.first().map_or("Nothing was removed.", |p| p.why.as_str())),
+            Outcome::NotChecked(why) => card.failed(why),
+            Outcome::Stopped(_) => card.failed(clean::STOPPED_PART_WAY),
         }
-        back(&weak, move |app| removed(app, id, row_key, done.ok()));
+        back(&weak, move |app| removed(app, id, row_key, outcome));
     });
     if let Err(e) = spawned {
         log::error("Plugins", &format!("Couldn't start the clean-up: {e}"));
@@ -199,30 +234,33 @@ pub(super) fn confirm(app: &AppWindow) {
     }
 }
 
-fn removed(app: &AppWindow, id: u64, row_key: (String, String), done: Option<Done>) {
+fn removed(app: &AppWindow, id: u64, row_key: (String, String), outcome: Outcome) {
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        let (head, problems) = match &done {
-            Some(d) => clean::done_text(d),
-            None => (
-                "Clean up stopped part way on something it didn't expect (the log says what). What went is in the \
-                 Recycle Bin."
-                    .to_owned(),
-                Vec::new(),
-            ),
+        let (head, problems, done) = match outcome {
+            Outcome::Done(d) => {
+                let (head, problems) = clean::done_text(&d);
+                (head, problems, d)
+            }
+            Outcome::NotChecked(why) => (why, Vec::new(), Done::default()),
+            Outcome::Stopped(d) => {
+                let problems = d.problems.iter().map(|p| format!("{}: {}", p.path, p.why)).collect();
+                (clean::STOPPED_PART_WAY.to_owned(), problems, d)
+            }
         };
+        log::info("Plugins", &format!("Clean up: {head}"));
         for line in &problems {
             log::warning("Plugins", &format!("Clean up kept {line}"));
         }
-        if let Some(d) = done.filter(|d| !d.removed.is_empty()) {
+        if !done.removed.is_empty() {
             log::info(
                 "Plugins",
-                &format!("Clean up: {} folders in the Recycle Bin, {}", d.removed.len(), size_text(d.bytes())),
+                &format!("Clean up: {} folders in the Recycle Bin, {}", done.removed.len(), size_text(done.bytes())),
             );
             if let Some(pl) = p.plugins.as_mut() {
-                pl.forget_removed(&d);
+                pl.forget_removed(&done);
             }
-            p.binned.push(Binned { row_key, done: d });
+            p.binned.push(Binned { row_key, done });
         }
         if let Some(c) = p.clean.as_mut().filter(|c| c.id == id) {
             c.stage = Stage::Done { head, problems };
@@ -232,7 +270,8 @@ fn removed(app: &AppWindow, id: u64, row_key: (String, String), done: Option<Don
     fill_panel(app);
 }
 
-/// Puts back what this session's last clean-up of the picked plugin sent to the Recycle Bin.
+/// Puts back everything this session's clean-ups of the picked plugin sent to the Recycle Bin. What doesn't come back
+/// stays listed, to try again.
 pub(super) fn put_back(app: &AppWindow) {
     let job = PAGE.with(|p| {
         let mut p = p.borrow_mut();
@@ -241,48 +280,76 @@ pub(super) fn put_back(app: &AppWindow) {
         }
         let r = p.plugins.as_ref()?.rows.get(p.picked?)?;
         let (row_key, name) = ((r.key.clone(), r.own.clone()), r.name.clone());
-        let at = p.binned.iter().rposition(|b| b.row_key == row_key)?;
-        let binned = p.binned.remove(at);
+        let (theirs, others): (Vec<Binned>, Vec<Binned>) =
+            std::mem::take(&mut p.binned).into_iter().partition(|b| b.row_key == row_key);
+        p.binned = others;
+        if theirs.is_empty() {
+            return None;
+        }
+        let done = clean::joined(theirs.into_iter().map(|b| b.done).collect());
         p.clean_asked += 1;
         p.clean = Some(Cleaning {
-            row_key,
+            row_key: row_key.clone(),
             name: name.clone(),
             id: p.clean_asked,
             stop: Arc::new(AtomicBool::new(false)),
             stage: Stage::PuttingBack,
         });
         let card = p.feed.start(&format!("Putting back {name}'s folders"), "From the Recycle Bin");
-        Some((binned, p.clean_asked, card))
+        Some((done, row_key, p.clean_asked, card))
     });
-    let Some((binned, id, card)) = job else { return };
+    let Some((done, row_key, id, card)) = job else { return };
     app.global::<PluginsData>().set_tab(1);
     fill(app);
     let weak = app.as_weak();
+    let (kept_done, kept_key) = (done.clone(), row_key.clone());
     let spawned = mo_app::background::spawn("Plugins put back", move || {
-        let problems = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| undo(&binned.done, &SystemBin)));
-        let (head, lines) = match &problems {
-            Ok(problems) => clean::undone_text(&binned.done, problems),
-            Err(_) => ("Put back stopped on something it didn't expect (the log says what).".to_owned(), Vec::new()),
+        let problems = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| undo(&done, &SystemBin)));
+        let (head, lines, still) = match &problems {
+            Ok(problems) => {
+                let (head, lines) = clean::undone_text(&done, problems);
+                (head, lines, clean::still_binned(&done, problems))
+            }
+            // What came back before it stopped isn't known: all of it stays listed, and a later Put back says which
+            // aren't in the bin any more.
+            Err(_) => (clean::PUT_BACK_STOPPED.to_owned(), Vec::new(), Some(done)),
         };
-        if lines.is_empty() && problems.is_ok() {
+        if still.is_none() {
             card.done(&head)
         } else {
             card.failed(&head)
         }
-        back(&weak, move |app| put_back_done(app, id, head, lines));
+        back(&weak, move |app| put_back_done(app, id, row_key, head, lines, still));
     });
     if let Err(e) = spawned {
         log::error("Plugins", &format!("Couldn't start putting back: {e}"));
+        PAGE.with(|p| {
+            let mut p = p.borrow_mut();
+            p.binned.push(Binned { row_key: kept_key, done: kept_done });
+            p.clean = None;
+        });
+        fill(app);
     }
 }
 
-fn put_back_done(app: &AppWindow, id: u64, head: String, problems: Vec<String>) {
+fn put_back_done(
+    app: &AppWindow,
+    id: u64,
+    row_key: (String, String),
+    head: String,
+    problems: Vec<String>,
+    still: Option<Done>,
+) {
     log::info("Plugins", &format!("Put back: {head}"));
     for line in &problems {
         log::warning("Plugins", &format!("Put back: {line}"));
     }
     PAGE.with(|p| {
-        if let Some(c) = p.borrow_mut().clean.as_mut().filter(|c| c.id == id) {
+        let mut p = p.borrow_mut();
+        if let Some(done) = still {
+            p.binned.push(Binned { row_key, done });
+        }
+        if let Some(c) = p.clean.as_mut().filter(|c| c.id == id) {
             c.stage = Stage::Done { head, problems };
         }
     });
@@ -291,7 +358,21 @@ fn put_back_done(app: &AppWindow, id: u64, head: String, problems: Vec<String>) 
     shown();
 }
 
-/// Closes the clean-up (Keep everything, Done or Stop). One under way keeps going: only its words go.
+/// Stop: a check closes; sending to the Recycle Bin stops after the folder going now (what went stays in the bin, with
+/// Put back).
+pub(super) fn stop(app: &AppWindow) {
+    let checking = PAGE.with(|p| {
+        let p = p.borrow();
+        let Some(c) = p.clean.as_ref() else { return false };
+        c.stop.store(true, Ordering::Relaxed);
+        matches!(c.stage, Stage::Checking)
+    });
+    if checking {
+        close(app);
+    }
+}
+
+/// Closes the clean-up (Keep everything, Done). One under way keeps going: only its words go.
 pub(super) fn close(app: &AppWindow) {
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
@@ -333,18 +414,7 @@ pub(super) fn fill(app: &AppWindow) {
         let p = p.borrow();
         let picked_key = p.picked.and_then(|r| p.plugins.as_ref()?.rows.get(r)).map(|r| (r.key.clone(), r.own.clone()));
         let binned: Vec<&Binned> = p.binned.iter().filter(|b| Some(&b.row_key) == picked_key.as_ref()).collect();
-        data.set_binned_text(if binned.is_empty() {
-            SharedString::new()
-        } else {
-            let n: usize = binned.iter().map(|b| b.done.removed.len()).sum();
-            let bytes = binned.iter().fold(0u64, |a, b| a.saturating_add(b.done.bytes()));
-            format!(
-                "Clean up sent {} to the Recycle Bin ({}).",
-                if n == 1 { "1 folder".to_owned() } else { format!("{n} folders") },
-                size_text(bytes)
-            )
-            .into()
-        });
+        data.set_binned_text(clean::binned_text(&binned.iter().map(|b| &b.done).collect::<Vec<_>>()).into());
         let c = p.clean.as_ref().filter(|c| Some(&c.row_key) == picked_key.as_ref());
         data.set_clean_shown(c.is_some());
         let Some(c) = c else { return };

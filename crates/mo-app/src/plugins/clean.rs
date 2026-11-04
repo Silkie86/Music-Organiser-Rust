@@ -5,11 +5,15 @@
 //! of your library and says what they found.
 
 use std::collections::HashMap;
+use std::path::Path;
+use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use mo_library::plugins::SampleIndex;
 use mo_library::scan::is_inside;
 use mo_library::{Library, LibraryError};
-use mo_space::clean::Done;
+use mo_space::admin::Admin;
+use mo_space::clean::{Bin, Done, NOT_IN_BIN, Problem, Removed, What};
 use mo_space::key;
 use mo_space::plugin_clean::{self, CleanLine, PluginUse as CleanUse};
 use mo_space::plugin_space::{PluginSpace, SpaceKind};
@@ -47,13 +51,17 @@ pub struct Inputs {
 
 impl Ask {
     /// Reads what the library knows that Clean up must respect: your folders and every sample a project uses. Slow
-    /// on a big library: call it away from the window's thread.
+    /// on a big library: call it away from the window's thread. Your MIDI folders are yours as your project and
+    /// sample folders are: nothing inside one goes either. A folder setting that can't be read is an error, never
+    /// read as no folders.
     pub fn read(self, lib: &Library, kept: Vec<String>) -> Result<Inputs, LibraryError> {
+        let mut protected = lib.protected_roots()?;
+        protected.extend(lib.strict_list_setting("midi_folders")?);
+        protected.retain(|k| !k.trim().is_empty());
         let mut kept = kept;
-        kept.extend(lib.list_setting("midi_folders")?);
-        kept.extend(lib.list_setting("plugin_folders")?);
+        kept.extend(lib.strict_list_setting("plugin_folders")?);
         kept.retain(|k| !k.trim().is_empty());
-        Ok(Inputs { protected: lib.protected_roots()?, kept, samples: lib.sample_index()?, ask: self })
+        Ok(Inputs { protected, kept, samples: lib.sample_index()?, ask: self })
     }
 }
 
@@ -81,11 +89,26 @@ impl Inputs {
 }
 
 impl Plugins {
-    /// What Clean up needs for the plugin at `row`, or `None` when there's nothing to clean: not installed, or the
-    /// old app found no folders of its own for it.
+    /// Whether the plugin at `row` has anything Clean up could look at: installed, with a preset or sound folder the
+    /// old app measured (its plugin files are Uninstall's).
+    pub fn can_clean(&self, row: usize) -> bool {
+        self.rows.get(row).is_some_and(|r| {
+            r.installed && r.room.as_ref().is_some_and(|s| s.folders.iter().any(|f| f.kind != SpaceKind::Program))
+        })
+    }
+
+    /// The row with this name key and own, now.
+    pub fn row_of(&self, row_key: &(String, String)) -> Option<usize> {
+        self.rows.iter().position(|r| r.key == row_key.0 && r.own == row_key.1)
+    }
+
+    /// What Clean up needs for the plugin at `row`, or `None` when there's nothing to clean ([`Plugins::can_clean`]).
     pub fn clean_ask(&self, row: usize) -> Option<Ask> {
+        if !self.can_clean(row) {
+            return None;
+        }
         let r = self.rows.get(row)?;
-        let space = r.room.clone().filter(|_| r.installed)?;
+        let space = r.room.clone()?;
         let mut uses: HashMap<String, CleanUse> = HashMap::new();
         let mut names: HashMap<String, String> = self.spaces.iter().map(|s| (s.key.clone(), s.name.clone())).collect();
         // By the measured plugin's key, which may differ from the projects' name for it. A measured plugin with no row
@@ -111,16 +134,12 @@ impl Plugins {
 
     /// Leaves out what a clean-up sent to the Recycle Bin (and what went inside it), until the old app measures again.
     pub fn forget_removed(&mut self, done: &Done) {
-        let gone: Vec<&str> = done
-            .removed
-            .iter()
-            .map(|r| r.path.as_str())
-            .chain(done.went_with.iter().map(|(p, _)| p.as_str()))
-            .collect();
+        // What went with another went inside it, so the folders sent cover it.
+        let gone: Vec<&str> = done.removed.iter().map(|r| r.path.as_str()).collect();
         if gone.is_empty() {
             return;
         }
-        let keep = |path: &str| !gone.iter().any(|g| key(g) == key(path) || is_inside(path, g));
+        let keep = |path: &str| !gone.iter().any(|g| is_inside(path, g));
         for s in &mut self.spaces {
             s.folders.retain(|f| keep(&f.path));
         }
@@ -197,7 +216,8 @@ pub fn intro(inputs: &Inputs, lines: &[CleanLine]) -> String {
         );
     }
     let mut s = "Tick what to remove. Everything goes to the Recycle Bin, so you can still put it back.".to_owned();
-    if inputs.ask.projects > 0 {
+    let presets_can_go = lines.iter().any(|l| l.stays.is_none() && l.folder.kind == SpaceKind::Presets);
+    if inputs.ask.projects > 0 && presets_can_go {
         s.push_str(&format!(
             " {} {}. Its presets are safe to remove: projects keep their own settings.",
             if inputs.ask.projects == 1 {
@@ -214,14 +234,20 @@ pub fn intro(inputs: &Inputs, lines: &[CleanLine]) -> String {
 /// What a clean-up did: "Freed 4.2 GB. 2 folders are in the Recycle Bin.", and each problem.
 pub fn done_text(done: &Done) -> (String, Vec<String>) {
     let went = done.removed.len();
+    // One Windows removed for good (too big for the bin, and you said yes) isn't there to put back.
+    let lost =
+        done.removed.iter().filter(|r| done.problems.iter().any(|p| p.path == r.path && p.why == NOT_IN_BIN)).count();
+    let binned = went - lost;
     let head = if went == 0 {
         "Nothing was removed.".to_owned()
+    } else if binned == 0 {
+        format!("Freed {}. None of it is in the Recycle Bin: the lines below say why.", size_text(done.bytes()))
     } else {
         format!(
             "Freed {}. {} in the Recycle Bin, so you can put {} back.",
             size_text(done.bytes()),
-            if went == 1 { "1 folder is".to_owned() } else { format!("{went} folders are") },
-            if went == 1 { "it" } else { "them" }
+            if binned == 1 { "1 folder is".to_owned() } else { format!("{binned} folders are") },
+            if binned == 1 { "it" } else { "them" }
         )
     };
     let problems = done.problems.iter().map(|p| format!("{}: {}", p.path, p.why)).collect();
@@ -239,4 +265,127 @@ pub fn undone_text(done: &Done, problems: &[mo_space::clean::Problem]) -> (Strin
         },
         problems.iter().map(|p| format!("{}: {}", p.path, p.why)).collect(),
     )
+}
+
+/// What still waits in the Recycle Bin after putting `done` back said `problems`: the folders that didn't come back,
+/// or `None` when all of them did.
+pub fn still_binned(done: &Done, problems: &[Problem]) -> Option<Done> {
+    let removed: Vec<Removed> =
+        done.removed.iter().filter(|r| problems.iter().any(|p| p.path == r.path)).cloned().collect();
+    if removed.is_empty() {
+        return None;
+    }
+    let went_with =
+        done.went_with.iter().filter(|(_, outer)| removed.iter().any(|r| &r.path == outer)).cloned().collect();
+    Some(Done { removed, problems: Vec::new(), went_with })
+}
+
+/// Several clean-ups as one, to put back together.
+pub fn joined(dones: Vec<Done>) -> Done {
+    dones.into_iter().fold(Done::default(), |mut all, d| {
+        all.removed.extend(d.removed);
+        all.problems.extend(d.problems);
+        all.went_with.extend(d.went_with);
+        all
+    })
+}
+
+/// The line on the On disk tab for what this session's clean-ups of a plugin sent to the Recycle Bin, or "" for none.
+pub fn binned_text(dones: &[&Done]) -> String {
+    let n: usize = dones.iter().map(|d| d.removed.len()).sum();
+    if n == 0 {
+        return String::new();
+    }
+    let bytes = dones.iter().fold(0u64, |a, d| a.saturating_add(d.bytes()));
+    format!("Clean up sent {} to the Recycle Bin ({}).", plural(n, "folder", "folders"), size_text(bytes))
+}
+
+/// What the card says when the check couldn't be made.
+pub fn check_failed_text(name: &str, why: &str) -> String {
+    format!("Couldn't check {name}'s folders: {} Nothing was removed.", sentence(why))
+}
+
+/// What the card says when the folders couldn't be checked again just before they'd go.
+pub fn recheck_failed_text(name: &str, why: &str) -> String {
+    format!("Couldn't check {name}'s folders again before they went: {} Nothing was removed.", sentence(why))
+}
+
+/// What the card says when Clean up stopped part way on a bug.
+pub const STOPPED_PART_WAY: &str =
+    "Clean up stopped part way on something it didn't expect (the log says what). What went is in the Recycle Bin.";
+
+/// What the card says when Put back stopped on a bug.
+pub const PUT_BACK_STOPPED: &str = "Put back stopped on something it didn't expect (the log says what). What didn't come back is still in the \
+     Recycle Bin.";
+
+/// `why` ending in a full stop.
+fn sentence(why: &str) -> String {
+    let why = why.trim();
+    if why.ends_with(['.', '!', '?']) { why.to_owned() } else { format!("{why}.") }
+}
+
+/// A bin that notes what it sent, so a clean-up that stopped on a bug part way still knows what went
+/// ([`Watched::went`]). What went in Windows' administrator step goes another way and isn't noted: after such a stop
+/// that is only found in the Recycle Bin by hand.
+pub struct Watched<'a> {
+    bin: &'a (dyn Bin + Sync),
+    sent: Mutex<Vec<(String, i64)>>,
+}
+
+impl<'a> Watched<'a> {
+    pub fn new(bin: &'a (dyn Bin + Sync)) -> Self {
+        Watched { bin, sent: Mutex::new(Vec::new()) }
+    }
+
+    /// What went to the bin, as the lines picked had it, found in the bin so it can be put back. For a clean-up that
+    /// stopped part way: one that finished says this itself.
+    pub fn went(&self, picked: &[CleanLine]) -> Done {
+        let sent = self.sent.lock().map(|s| s.clone()).unwrap_or_else(|e| e.into_inner().clone());
+        let mut removed: Vec<Removed> = sent
+            .into_iter()
+            .map(|(real, when)| {
+                let line = picked.iter().find(|l| key(&l.folder.path) == key(&real)).or_else(|| {
+                    let real = std::fs::canonicalize(Path::new(&real)).ok();
+                    picked.iter().find(|l| std::fs::canonicalize(&l.folder.path).ok() == real && real.is_some())
+                });
+                Removed {
+                    path: line.map_or_else(|| real.clone(), |l| l.folder.path.clone()),
+                    bytes: line.map_or(0, CleanLine::bytes),
+                    what: What::Plugin(line.map_or(SpaceKind::Sounds, |l| l.folder.kind)),
+                    real,
+                    when,
+                    bin_id: None,
+                    binned: None,
+                    binned_zone: None,
+                }
+            })
+            .collect();
+        let problems = self.bin.find(&mut removed);
+        Done { removed, problems, went_with: Vec::new() }
+    }
+}
+
+impl Bin for Watched<'_> {
+    fn send(&self, path: &Path) -> Result<(), String> {
+        let when = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
+        self.bin.send(path)?;
+        let mut sent = self.sent.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        sent.push((path.to_string_lossy().into_owned(), when));
+        Ok(())
+    }
+    fn admin(&self) -> &dyn Admin {
+        self.bin.admin()
+    }
+    fn find(&self, removed: &mut [Removed]) -> Vec<Problem> {
+        self.bin.find(removed)
+    }
+    fn put_back(&self, removed: &[Removed]) -> Vec<Problem> {
+        self.bin.put_back(removed)
+    }
+    fn holds(&self, removed: &[Removed]) -> Option<Vec<bool>> {
+        self.bin.holds(removed)
+    }
+    fn refuses_quietly(&self, path: &Path, bytes: u64) -> Option<String> {
+        self.bin.refuses_quietly(path, bytes)
+    }
 }

@@ -146,9 +146,9 @@ impl Library {
     /// and the sample folders, as the C# app's `ProtectedRoots`.
     pub fn protected_roots(&self) -> Result<Vec<String>, LibraryError> {
         let mut out = self.roots()?;
-        out.extend(self.list_setting("sample_folders")?);
+        out.extend(self.strict_list_setting("sample_folders")?);
         let mut seen = HashSet::new();
-        out.retain(|p| !p.trim().is_empty() && seen.insert(p.to_lowercase()));
+        out.retain(|p| !p.trim().is_empty() && seen.insert(crate::scan::path_key(p)));
         Ok(out)
     }
 
@@ -330,6 +330,8 @@ mod tests {
         assert!(index.inside("/Users/me/Sample").is_none());
         assert!(index.named("kick 1.wav") && index.named("SNARE.WAV") && !index.named("hat.wav"));
         assert!(index.inside("").is_none());
+        // Windows' long-path prefix is the same folder.
+        assert!(index.inside(r"\\?\D:\Splice\Kicks").is_some());
     }
 
     #[test]
@@ -400,14 +402,21 @@ impl SampleIndex {
 
     /// Whether any project uses a file of this name (in any letter case).
     pub fn named(&self, name: &str) -> bool {
-        self.names.contains(&name.to_lowercase())
+        self.names.contains(&mo_formats::case::key(name))
     }
 }
 
-/// A path to compare samples by: small letters, `/` between folders, no `/` at the end, and a drive letter left out
-/// (`c:/beats/kick.wav` and `k:/beats/kick.wav` are both `:/beats/kick.wav`).
+/// A path to compare samples by: as the library compares paths (`/` between folders, no `/` at the end, letter case
+/// ignored), without Windows' long-path prefix, and with a drive letter left out (`c:/beats/kick.wav` and
+/// `k:/beats/kick.wav` are both `:/beats/kick.wav`).
 fn sample_key(path: &str) -> String {
-    let mut k = path.trim().replace('\\', "/").to_lowercase();
+    let slashes = path.trim().replace('\\', "/");
+    let plain = match (slashes.strip_prefix("//?/UNC/"), slashes.strip_prefix("//?/")) {
+        (Some(network), _) => format!("//{network}"),
+        (None, Some(local)) => local.to_owned(),
+        (None, None) => slashes,
+    };
+    let mut k = mo_formats::case::key(&plain);
     while k.len() > 1 && k.ends_with('/') {
         k.pop();
     }
