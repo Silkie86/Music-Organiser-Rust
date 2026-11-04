@@ -3,13 +3,7 @@
 // its piano roll, its key as the key finder reads it, its facts, and what you can do with it. Only shared parts from
 // studio.slint; mo-app decides every word (mo_app::midi), mo-ui/src/midi.rs fills it.
 import { ListView } from "std-widgets.slint";
-import { Theme, Type, Space, Well, SearchBox, ToggleChip, MenuChip, ListLine, Caps, StudioButton, CloseButton, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar } from "../studio.slint";
-
-// A kind chip: its words ("Basslines 1,204") and whether it's picked.
-export struct KindChip {
-    text: string,
-    on: bool,
-}
+import { Theme, Type, Space, Well, SearchBox, ToggleChip, FilterPicks, FilterView, ListLine, Caps, StudioButton, CloseButton, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar } from "../studio.slint";
 
 // One part in the list.
 export struct MidiLine {
@@ -98,14 +92,15 @@ export global MidiData {
 
     in-out property <string> search;
     callback search-edited(string);
-    in property <[KindChip]> kinds;
-    callback toggle-kind(int);
-    callback clear-kinds();
-    in property <bool> any-kind;
-    in property <string> from;
-    in property <[string]> froms;
-    in property <string> key;
-    in property <[string]> keys;
+    // The filters, the same as every page's (FilterPicks): the kinds of part, where they come from (neither picked
+    // is both) and the keys, each choice with how many parts it would show.
+    in property <FilterView> kind-filter;
+    in property <FilterView> from-filter;
+    in property <FilterView> key-filter;
+    // A choice on the filter "kind", "from" or "key" was picked or unpicked: its words.
+    callback toggle(string, string);
+    // The filter's menu's Any.
+    callback clear-chip(string);
     in property <string> order;
     in property <[string]> orders;
     callback pick(string, string);
@@ -583,28 +578,6 @@ export component MidiPage inherits Rectangle {
                     false
                 }
             }
-            // Where the parts come from, each choice on show (Solomon: nothing useful hidden in a menu).
-            HorizontalLayout {
-                spacing: Space.xs;
-                alignment: center;
-                for f in MidiData.froms: VerticalLayout {
-                    alignment: center;
-                    ToggleChip {
-                        text: f;
-                        on: MidiData.from == f;
-                        clicked => { MidiData.pick("from", f); }
-                    }
-                }
-            }
-            VerticalLayout {
-                alignment: center;
-                MenuChip {
-                    name: "Key";
-                    value: MidiData.key;
-                    choices: MidiData.keys;
-                    picked(v) => { MidiData.pick("key", v); }
-                }
-            }
             Rectangle { horizontal-stretch: 1; }
             VerticalLayout {
                 alignment: center;
@@ -623,19 +596,28 @@ export component MidiPage inherits Rectangle {
                 }
             }
         }
-        HorizontalLayout {
-            spacing: Space.xs;
-            alignment: start;
+        // The filters, as on every page: a short list's choices as chips of their own, the keys in a menu that
+        // scrolls. Each says how many parts picking it would show. They wrap when the window is narrow.
+        FlexboxLayout {
+            spacing: Space.md;
             vertical-stretch: 0;
-            for k[i] in MidiData.kinds: ToggleChip {
-                text: k.text;
-                on: k.on;
-                clicked => { MidiData.toggle-kind(i); }
+            FilterPicks {
+                name: "Kind";
+                filter: MidiData.kind-filter;
+                toggled(text) => { MidiData.toggle("kind", text); }
+                cleared => { MidiData.clear-chip("kind"); }
             }
-            if MidiData.any-kind: ToggleChip {
-                text: "Clear kinds";
-                on: false;
-                clicked => { MidiData.clear-kinds(); }
+            FilterPicks {
+                name: "From";
+                filter: MidiData.from-filter;
+                toggled(text) => { MidiData.toggle("from", text); }
+                cleared => { MidiData.clear-chip("from"); }
+            }
+            FilterPicks {
+                name: "Key";
+                filter: MidiData.key-filter;
+                toggled(text) => { MidiData.toggle("key", text); }
+                cleared => { MidiData.clear-chip("key"); }
             }
         }
         HorizontalLayout {
