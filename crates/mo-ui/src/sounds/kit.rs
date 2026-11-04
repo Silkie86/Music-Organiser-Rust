@@ -318,11 +318,24 @@ pub(super) fn roll(app: &AppWindow, pad: Option<u64>) {
         if w.is_none() {
             let weak = app.as_weak();
             match Newest::start("Kit builder", move |(ask, full): (RollAsk, bool)| {
-                let rolled = Rolled { full, ..ask.answer() };
+                let id = ask.id;
+                let rolled = background::guarded(|| Rolled { full, ..ask.answer() });
                 let weak = weak.clone();
                 let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(app) = weak.upgrade() {
-                        rolled_in(&app, rolled);
+                    let Some(app) = weak.upgrade() else { return };
+                    match rolled {
+                        Ok(rolled) => rolled_in(&app, rolled),
+                        // A roll that broke lets go of Rolling… and says so, if it's still the newest ask.
+                        Err(broke) => {
+                            PAGE.with(|p| {
+                                let k = &mut p.borrow_mut().kit;
+                                if k.asked == id {
+                                    k.busy = false;
+                                    k.status = format!("The kit builder couldn't roll: {broke}.");
+                                }
+                            });
+                            show(&app);
+                        }
                     }
                 });
             }) {

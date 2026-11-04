@@ -210,6 +210,9 @@ export global SoundsData {
     // A press: the left button sweeps (plays each star it passes), the right or middle button moves the map.
     callback galaxy-down(length, length, bool);
     callback galaxy-move(length, length);
+    // Where the view is in the window, set at each press: a sweep that holds the pointer puts it back on a star.
+    in-out property <length> galaxy-sky-x;
+    in-out property <length> galaxy-sky-y;
     // A button came up: the right or middle one (true), or the left one.
     callback galaxy-up(bool);
     callback galaxy-cancelled();
@@ -1541,6 +1544,8 @@ export component SoundsPage inherits Rectangle {
                             grabbing: SoundsData.galaxy-grabbing;
                             down(x, y) => {
                                 keys.focus();
+                                SoundsData.galaxy-sky-x = sky.absolute-position.x;
+                                SoundsData.galaxy-sky-y = sky.absolute-position.y;
                                 SoundsData.galaxy-down(x, y, false);
                             }
                             side-down(x, y) => {

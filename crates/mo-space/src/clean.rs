@@ -379,10 +379,18 @@ fn still_same(item: &CompactItem, real: &str) -> bool {
 
 /// Whether two files hold the same bytes, read side by side in pieces.
 fn same_bytes(a: &Path, b: &Path) -> std::io::Result<bool> {
-    let (mut fa, mut fb) = (fs::File::open(a)?, fs::File::open(b)?);
+    let (mut fa, mut fb) = (crate::size::open_to_read_once(a)?, crate::size::open_to_read_once(b)?);
     if fa.metadata()?.len() != fb.metadata()?.len() {
         return Ok(false);
     }
+    let same = same_reads(&mut fa, &mut fb);
+    crate::size::read_once_done(&fa);
+    crate::size::read_once_done(&fb);
+    same
+}
+
+/// Whether two open files of the same size read the same, in pieces.
+fn same_reads(fa: &mut fs::File, fb: &mut fs::File) -> std::io::Result<bool> {
     let (mut ba, mut bb) = (vec![0u8; 1 << 20], vec![0u8; 1 << 20]);
     loop {
         let n = fa.read(&mut ba)?;

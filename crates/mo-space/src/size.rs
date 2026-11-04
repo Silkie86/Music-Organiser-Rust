@@ -302,10 +302,39 @@ pub(crate) fn file_id(meta: &Metadata) -> Option<(u64, u64)> {
     }
 }
 
+/// Opens a file to be read once, start to end (a look over hundreds of gigabytes, say). The system is told so, so it
+/// reads ahead and lets go of what's been read, rather than filling memory with it and pushing the app's own memory
+/// out to the disk (which froze the window for seconds on a PC short of memory, 2026-11-04). Windows: sequential
+/// scan; Linux: the same advice, and the pages are let go once read ([`read_once_done`]).
+pub fn open_to_read_once(path: &Path) -> io::Result<fs::File> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_SEQUENTIAL_SCAN;
+        fs::OpenOptions::new().read(true).custom_flags(FILE_FLAG_SEQUENTIAL_SCAN).open(path)
+    }
+    #[cfg(not(windows))]
+    {
+        let file = fs::File::open(path)?;
+        #[cfg(target_os = "linux")]
+        let _ = rustix::fs::fadvise(&file, 0, None, rustix::fs::Advice::Sequential);
+        Ok(file)
+    }
+}
+
+/// A file opened with [`open_to_read_once`] has been read: on Linux the system may let go of its pages now (Windows
+/// does that by itself for a sequential scan).
+pub fn read_once_done(file: &fs::File) {
+    #[cfg(target_os = "linux")]
+    let _ = rustix::fs::fadvise(file, 0, None, rustix::fs::Advice::DontNeed);
+    #[cfg(not(target_os = "linux"))]
+    let _ = file;
+}
+
 /// A file's SHA-256, read once in large pieces; `None` when it can't be read whole, changed while it was read, or when
 /// stopped.
 pub fn file_hash(path: &Path, stop: &AtomicBool) -> Option<[u8; 32]> {
-    let mut file = fs::File::open(path).ok()?;
+    let mut file = open_to_read_once(path).ok()?;
     let before = file.metadata().ok()?;
     let mut hash = Sha256::new();
     let mut buf = vec![0u8; 1 << 20];
@@ -324,6 +353,7 @@ pub fn file_hash(path: &Path, stop: &AtomicBool) -> Option<[u8; 32]> {
             Err(_) => return None,
         }
     }
+    read_once_done(&file);
     let after = fs::metadata(path).ok()?;
     let same = read == before.len() && after.len() == before.len() && after.modified().ok() == before.modified().ok();
     same.then(|| hash.finalize().into())
