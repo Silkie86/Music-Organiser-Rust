@@ -165,6 +165,8 @@ export global SongsData {
     callback save-menu-chosen(string);
     callback reveal();
     callback copy-path();
+    // Opens the Presets page on the picked song's sounds (its newest save's).
+    callback show-presets();
     callback close-panel();
     // Headings and songs are one height. Slint's ListView places a far jump by the average height of the lines on
     // screen, so with two heights "Show it" landed hundreds of lines away from the song in a big library; with one,
@@ -407,6 +409,15 @@ component SongPanel inherits Rectangle {
                             tint: Theme.missing;
                             clicked => { SongsData.tab = c.tab; }
                         }
+                    }
+                    if SongsData.counts.length > 0: Text {
+                        text: "·";
+                        color: Theme.faint;
+                        font-size: Type.body;
+                    }
+                    LinkText {
+                        text: "Its sounds on Presets";
+                        clicked => { SongsData.show-presets(); }
                     }
                 }
                 if SongsData.detail-message != "": Text {

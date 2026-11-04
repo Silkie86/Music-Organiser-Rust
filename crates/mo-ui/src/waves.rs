@@ -253,7 +253,7 @@ pub fn frame_starts() {
 /// How wide the window's drawing library makes the soft edges of a path's lines, in pixels, at `scale` pixels to a
 /// point: a pixel divided by the scale rounded up, which is what Slint hands femtovg as its `dpi` (in
 /// i-slint-renderer-femtovg's `set_size`), so a whole pixel at 100% and less, and half a pixel from 125% to 200%.
-fn fringe(scale: f32) -> f32 {
+pub(crate) fn fringe(scale: f32) -> f32 {
     if scale.is_finite() && scale > 0.0 { 1.0 / scale.ceil() } else { 1.0 }
 }
 

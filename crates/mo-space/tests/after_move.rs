@@ -108,7 +108,8 @@ fn nothing(_: u64) {}
 
 fn move_it(from: &Path, to: &Path, all: &[MovedFolder]) -> MovedFolder {
     let stop = AtomicBool::new(false);
-    move_folder(&s(from), &s(to), 1, ("omnisphere", SpaceKind::Sounds, &[]), &OtherDrive, all, &nothing, &stop).unwrap()
+    move_folder(&s(from), &s(to), 1, ("omnisphere", SpaceKind::Sounds, &[]), &OtherDrive, all, &[], &nothing, &stop)
+        .unwrap()
 }
 
 fn bin(dir: &Path) -> FolderBin {
@@ -215,6 +216,17 @@ fn a_lost_link_and_a_home_moved_by_hand_are_found_and_pointed_again() {
         },
         OldHome { path: s(&c.join("Old")), bytes: 1, note: "its old place".to_owned(), copy: String::new(), kind: 2 },
     ];
+
+    // A link that leads somewhere else (a home move cut off after the links were pointed at the new place, before the
+    // folder went there) is lost too, though its copy is still where the record says.
+    let elsewhere = d.join("Not yet");
+    fs::create_dir_all(&elsewhere).unwrap();
+    unlink(&c.join("STEAM"));
+    folder_link(&elsewhere, &c.join("STEAM"));
+    assert_eq!(lost(&all), [&all[0]]);
+    unlink(&c.join("STEAM"));
+    folder_link(Path::new(&all[0].to), &c.join("STEAM"));
+    assert!(lost(&all).is_empty());
 
     // Plugin Data renamed by hand: both links lead nowhere.
     let by_hand = d.join("Data");
