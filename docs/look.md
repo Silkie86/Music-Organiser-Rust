@@ -27,7 +27,7 @@ light that means something. It should feel like a rack unit on a desk, not a web
    working.
 4. **Levels are meters.** How far a job has got and how full something is show as a `Meter`: lit segments like a
    channel's LEDs, amber past a warning point. The same meter everywhere a share is shown.
-5. **One voice for titles.** Page names, the app's name and big titles are in Space Grotesk (`Theme.title-font`, mono
+5. **One voice for titles.** Page names, the app's name, side-card names, dialog and empty-page titles are in Space Grotesk (`Theme.title-font`, mono
    on Terminal); everything else in the theme's font; numbers, keys and times in its mono face so columns line up.
 
 ## Shipped
@@ -38,7 +38,12 @@ light that means something. It should feel like a rack unit on a desk, not a web
 - Step 2: Space's drive bars on `Meter`; `EmptyState` shows the place's icon in its colour (`Icons.place(i)`); Ctrl+K
   results' icons in the colour of the place they live on (`FinderLine.place`).
 
+- Step 3: the title face on every side card's name and on dialog and empty-page titles; every search box has the
+  same magnifier as Ctrl+K (`Icons.search`), lit while you type.
+
 ## Next steps
 
-- A visible focus ring (accent) for keyboard use, on every shared control.
-- Activity cards carry the colour of the place their job belongs to.
+- Left out on purpose: a focus ring on every button (the app is driven by its shortcut list, and focusable buttons
+  would take Space and Enter from it); activity cards in a place colour (a job doesn't say which place started it,
+  and guessing from the page on show would mislead); a pulsing light on running cards (a moving thing redraws the
+  window every frame).
