@@ -37,3 +37,7 @@ rusqlite = { version = "0.41", features = ["bundled"] }
 mo-dawlink = { path = "../mo-dawlink", features = ["fake-bitwig"] }
 # The made-up Bitwig projects the Space Fix test writes (mo-formats' test projects pack a part with it).
 flate2 = "1"
+
+# Folder links in the backup tests, made the way Windows has them (a junction: no administrator rights needed).
+[target.'cfg(windows)'.dev-dependencies]
+junction = "1.4.1"

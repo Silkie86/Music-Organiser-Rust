@@ -107,3 +107,76 @@ fn a_song_goes_with_the_sample_it_uses_from_outside_the_folders() {
     assert!(ran.last.line.starts_with("4 checked · 1 new or changed"), "{}", ran.last.line);
     assert_eq!(ran.kept_older, 1);
 }
+
+#[test]
+fn a_song_whose_zip_cant_be_made_still_goes_as_plain_folders() {
+    // Review 2026-11-03: when a song's zip failed (a save renamed after the plan was made), none of its files went.
+    let root = fixtures("backup-screen-unzipped");
+    let music = root.join("music");
+    let save1 = music.join("Song").join("Song.flp");
+    let save2 = music.join("Song").join("Song_2.flp");
+    let kick = root.join("elsewhere").join("Kick.wav");
+    write(&save1, b"save1");
+    write(&save2, b"save2");
+    write(&kick, b"kick");
+    let backup = root.join("backup");
+    fs::create_dir_all(&backup).unwrap();
+    let lib = library(&root, &save1, &save2, &kick);
+    let stop = AtomicBool::new(false);
+    let settings = Settings {
+        drive: Some(backup.clone()),
+        folders: vec![Folder { path: music.clone(), mode: Mode::Slimmed }],
+        format: Format::Zips,
+        ..Settings::default()
+    };
+    let prepared = prepare(&lib, &settings, &stop).unwrap();
+    fs::rename(&save1, music.join("Song").join("Song old.flp")).unwrap();
+
+    let ran = run(&prepared, &settings, &stop, &|_| {});
+    assert!(ran.last.line.contains("1 song went as plain folders"), "{}", ran.last.line);
+    assert_eq!(ran.went.len(), 1, "its newest save went");
+    for f in [&save2, &kick] {
+        let place = mo_backup::plan::place_on_backup(&backup, f).unwrap();
+        assert!(place.is_file(), "{} went as a plain file", f.display());
+    }
+}
+
+/// A folder link, as Windows has them (a junction) or a symbolic link elsewhere.
+fn folder_link(target: &Path, at: &Path) {
+    #[cfg(windows)]
+    junction::create(target, at).unwrap();
+    #[cfg(not(windows))]
+    std::os::unix::fs::symlink(target, at).unwrap();
+}
+
+#[test]
+fn a_sample_named_through_a_link_goes_once_from_where_it_really_is() {
+    // Review 2026-11-03: Space moved the samples folder and left a link; projects still name the old place, so each
+    // sample went twice (once under each path).
+    let root = fixtures("backup-screen-linked-sample");
+    let music = root.join("music");
+    let save1 = music.join("Song").join("Song.flp");
+    let save2 = music.join("Song").join("Song_2.flp");
+    let moved = root.join("I").join("Samples");
+    write(&save1, b"save1");
+    write(&save2, b"save2");
+    write(&moved.join("Kick.wav"), b"kick");
+    folder_link(&moved, &root.join("Samples"));
+    let old_place = root.join("Samples").join("Kick.wav");
+    let backup = root.join("backup");
+    fs::create_dir_all(&backup).unwrap();
+    let lib = library(&root, &save1, &save2, &old_place);
+    let settings = Settings {
+        drive: Some(backup),
+        folders: vec![
+            Folder { path: music.clone(), mode: Mode::Slimmed },
+            Folder { path: moved.clone(), mode: Mode::Slimmed },
+        ],
+        ..Settings::default()
+    };
+    let prepared = prepare(&lib, &settings, &AtomicBool::new(false)).unwrap();
+    let kicks: Vec<&Path> =
+        prepared.plan.copy.iter().map(|f| f.path.as_path()).filter(|p| p.ends_with("Kick.wav")).collect();
+    assert_eq!(kicks, vec![moved.join("Kick.wav").as_path()]);
+    assert!(prepared.songs[0].files.contains(&moved.join("Kick.wav")), "the song's zip names where it really is");
+}
