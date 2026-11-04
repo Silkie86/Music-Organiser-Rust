@@ -261,6 +261,7 @@ mod tests {
                 bin_id: None,
                 binned: None,
                 binned_zone: None,
+                stamp: None,
             })
             .collect();
         Binned { kind: SPARE_COPIES.to_owned(), when, done: Done { removed, ..Done::default() } }

@@ -309,6 +309,7 @@ mod tests {
             bin_id: Some(format!("bin:{path}")),
             binned: None,
             binned_zone: None,
+            stamp: None,
         }
     }
 

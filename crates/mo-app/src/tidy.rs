@@ -497,6 +497,7 @@ fn old_notes_to_bin(folder: &Path, done_file: &Path, kept_for: Duration, now: Sy
                     bin_id: None,
                     binned: None,
                     binned_zone: None,
+                    stamp: None,
                 }
             });
             match tidied.send(bin, path, meta.len()) {
