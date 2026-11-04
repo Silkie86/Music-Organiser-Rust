@@ -390,7 +390,7 @@ pub fn owns_folder(
 /// by the DAW's own way of naming them: FL Studio's "(autosave)" and "(overwritten at …)" copies, Bitwig's
 /// auto-backups folder, Studio One's History folder. Any other project file is yours, even in a folder called "Backup"
 /// (the C# app took every project file in a Backup(s), History or Autosave(s) folder for an autosave).
-fn is_daws_autosave(folders: &[String], name: &str) -> bool {
+pub(crate) fn is_daws_autosave(folders: &[String], name: &str) -> bool {
     let in_folder = |want: &str| folders.iter().any(|d| case::eq_ignore_case(d, want));
     let ext = case::to_lower(extension(name));
     is_autosave_file(name)

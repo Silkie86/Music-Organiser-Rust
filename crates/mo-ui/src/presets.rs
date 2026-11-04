@@ -1160,21 +1160,15 @@ fn send_file(path: String) {
 /// thread away from the window. `Ok` says what happened in Bitwig; `Err` says why it didn't go, and the caller shows
 /// the file in its folder instead, to drag onto a track.
 fn send_to_bitwig(preset: &Path) -> Result<String, String> {
-    use mo_dawlink::bitwig::{Bitwig, Inserted};
     let name = preset.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let path = preset.to_string_lossy().into_owned();
-    let failed = |e: &dyn std::fmt::Display| logic::send_failed(&e.to_string());
-    if !preset.is_file() {
-        return Err(logic::send_failed(&format!("{name} isn't where it was any more")));
-    }
-    let mut link = Bitwig::default().connect().map_err(|e| failed(&e))?;
-    link.stay_in_open_project();
-    link.hello().can_send().map_err(|e| failed(&e))?;
-    let track = link.new_track(&name).map_err(|e| failed(&e))?;
-    match link.insert_file(track.index, &path) {
-        Ok(Inserted { added: true, .. }) => Ok(logic::sent_words(&name)),
-        Ok(_) => Err(logic::send_failed(&format!("Bitwig didn't load {name}; its new track is empty"))),
-        Err(e) => Err(failed(&format!("the track is in Bitwig, but the preset may not be on it: {e}"))),
+    // The link's own send: it waits its turn behind sounds and kits sent from the Sounds page, checks the file is
+    // still there, and keeps the change to the project open as it began.
+    match mo_dawlink::bitwig::send_preset(preset, &name) {
+        Ok(sent) => match sent.problem {
+            None => Ok(logic::sent_words(&name)),
+            Some(problem) => Err(logic::send_failed(&problem)),
+        },
+        Err(e) => Err(logic::send_failed(&e.to_string())),
     }
 }
 
