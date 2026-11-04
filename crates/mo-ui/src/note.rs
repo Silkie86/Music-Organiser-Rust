@@ -14,8 +14,8 @@
 //! now. A crash, and the app closing with that thread stuck, write the draft themselves, straight away, in the
 //! draft's turn ([`DRAFT_TURN`]) when it comes within a moment, and without it when it doesn't: then through a part
 //! file of their own, so they never touch one that thread is writing. At the end of a run, words that aren't surely in
-//! the draft (written without the turn, or a draft that couldn't be written) go with the words of failed saves too,
-//! and in the session log, as nothing comes after to put the draft right.
+//! the draft (an older write still going may yet land over them, or a draft that couldn't be written) go with the
+//! words of failed saves too, and in the session log, as nothing comes after to put the draft right.
 
 use std::cell::RefCell;
 use std::path::Path;
@@ -90,14 +90,14 @@ static OPEN: AtomicBool = AtomicBool::new(false);
 static SAVING: AtomicUsize = AtomicUsize::new(0);
 /// How many times a note has been opened, so the text from before reaches only the note it was read for.
 static OPENINGS: AtomicUsize = AtomicUsize::new(0);
-/// The newest note (by `OPENINGS`) whose words were written into the draft in its turn; read and changed only in the
-/// draft's turn. A note saved or cancelled clears the draft only while no newer note's words were written into it in
-/// its turn: a crash's write, or the close's, can go ahead of the jobs still waiting for an earlier note, and the
-/// earlier note's clearing mustn't take them.
+/// The newest note (by `OPENINGS`) whose words were written into the draft in its turn, with no write without the turn
+/// going ([`ALONE`]); read and changed only in the draft's turn. A note saved or cancelled clears the draft only while
+/// no newer note's words were written into it in its turn: a crash's write, or the close's, can go ahead of the jobs
+/// still waiting for an earlier note, and the earlier note's clearing mustn't take them.
 static IN_THE_DRAFT: AtomicUsize = AtomicUsize::new(0);
 /// Draft writes without the draft's turn still going, each counted from before it reads the words in `UNSAVED` until
-/// they're on disk ([`Alone`]). Older words may yet land over a write in its turn meanwhile, so that write lets
-/// nothing go: its words stay in `UNSAVED`, and the words of failed saves it holds stay in their file.
+/// the write is done, however it ends ([`Alone`]). Older words may yet land over a write in its turn meanwhile, so
+/// that write lets nothing go: its words stay in `UNSAVED`, and the words of failed saves it holds stay in their file.
 static ALONE: AtomicUsize = AtomicUsize::new(0);
 /// The open note shows the text from before (the draft and the words of failed saves), or there was none. Until then,
 /// what's typed is kept before that text rather than over it. Only the window's thread changes it or reads it, and it
@@ -476,7 +476,7 @@ impl Alone {
 
 impl Drop for Alone {
     fn drop(&mut self) {
-        // A write in its turn that no longer finds it counted knows its words have landed by then.
+        // A write in its turn that no longer finds it counted knows nothing of this one can land after it.
         ALONE.fetch_sub(1, Ordering::AcqRel);
     }
 }
@@ -496,12 +496,12 @@ fn keep_unsaved_for(folder: &Path, turn: Turn, asked: Option<usize>) -> Kept {
     if mine.is_none() && turn == Turn::Never {
         return Kept::Nothing;
     }
-    // Without the turn, counted from before the words are read until they're on disk (see `ALONE`).
+    // Without the turn, counted from before the words are read until the write is done (see `ALONE`).
     let _alone = mine.is_none().then(Alone::start);
     // Only a look: the words stay in `UNSAVED` until they're on disk. The window's thread holds it only a moment.
     let unsaved = lock_within(&UNSAVED, unsaved_wait(turn)).and_then(|unsaved| (*unsaved).clone());
     // Looked at after the words are read: a write without the turn that read them first is counted by now, and one no
-    // longer counted has landed.
+    // longer counted is done.
     let alone_going = mine.is_some() && ALONE.load(Ordering::Acquire) > 0;
     let Some(typed) = unsaved else { return Kept::Nothing };
     // A newer note's words wait for that note's own write (see `FileJob::KeepDraft`).
@@ -528,7 +528,9 @@ fn keep_unsaved_for(folder: &Path, turn: Turn, asked: Option<usize>) -> Kept {
         return Kept::NotOnDisk(typed.words);
     }
     if alone_going {
-        // Older words may yet land over these: nothing is let go (see `ALONE`).
+        // Older words may yet land over these: nothing is let go (see `ALONE`). A write in its turn after the older one
+        // lets them go. A note saved or cancelled before that, that never showed the text from before, leaves the
+        // failed saves' words in their file, though: shown twice at the next F12, never lost.
         return Kept::Alone(typed.words);
     }
     // The draft holds this note's words now (see `IN_THE_DRAFT`), and the words of failed saves it showed.
@@ -653,13 +655,13 @@ fn finish_up_in(folder: &Path, send: &dyn Fn(FileJob)) {
 /// For a crash, from the crash handler. Whatever the crash, the words typed are kept straight away, on this thread,
 /// before it returns: std may end the app straight after one the handler can't tell will (a crash in a thread's own
 /// data as the thread ends). They're written in the draft's turn, waiting only a moment for it. When the crash ends the
-/// app (`ends_the_app`), the lock comes down too (see [`ENDING`]), and words that aren't surely in the draft (written
-/// without the turn, or a draft that couldn't be written) go with the words of failed saves too ([`keep_at_the_end`]),
-/// and so do the words of notes being saved that aren't on disk yet
+/// app (`ends_the_app`), the lock comes down too (see [`ENDING`]), and words that aren't surely in the draft (an older
+/// write still going may yet land over them, or a draft that couldn't be written) go with the words of failed saves
+/// too ([`keep_at_the_end`]), and so do the words of notes being saved that aren't on disk yet
 /// ([`keep_saves_at_the_end`]). After any other crash the app goes on, perhaps with the note still open: the "Note
 /// files" thread puts the lock as it should be, in order with its other jobs, and writes the words again in its turn
-/// when the crash had to write them without it; a save's own thread keeps its words if it stops part way
-/// ([`save_ended`]).
+/// when the crash wrote them without it, or while such a write was going; a save's own thread keeps its words if it
+/// stops part way ([`save_ended`]).
 pub fn after_crash(ends_the_app: bool) {
     keep_after_crash(&note::notes_dir(), ends_the_app, &send_after_crash);
 }
@@ -673,8 +675,8 @@ fn keep_after_crash(folder: &Path, ends_the_app: bool, send: &dyn Fn(FileJob)) {
         keep_saves_at_the_end(folder);
         note::writing(folder, false);
     } else {
-        // Written without the turn, the words still wait in `UNSAVED`: a write in its turn comes after this one, so
-        // they're surely in the draft soon, not only once the note closes.
+        // Written without the turn, or in its turn while such a write was going, the words still wait in `UNSAVED`: a
+        // write in its turn comes after this one, so they're surely in the draft soon, not only once the note closes.
         if matches!(keep_unsaved(folder, Turn::Moment), Kept::Alone(_)) {
             send(keep_draft_now());
         }
@@ -1518,6 +1520,15 @@ mod tests {
             }
             assert_eq!(ALONE.load(Ordering::Acquire), 1, "counted while it waits for the words");
             drop(unsaved);
+            // Counted until the words are on disk: the count is looked at before the draft, so a draft not there yet
+            // means it was still counted.
+            while Instant::now() < until {
+                let going = ALONE.load(Ordering::Acquire);
+                if note::read_draft(&dir).is_some() {
+                    break;
+                }
+                assert_eq!(going, 1, "counted until the words are on disk");
+            }
             crash.join().expect("no crash in keeping the words");
         });
         assert_eq!(ALONE.load(Ordering::Acquire), 0, "no longer counted once they're on disk");
@@ -1530,6 +1541,35 @@ mod tests {
         do_file_job(&dir, FileJob::KeepDraft(1), Turn::Wait);
         assert_eq!(waiting(), None);
         assert_eq!(note::read_draft(&dir).as_deref(), Some("the rail jumps"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_write_in_turn_looks_for_writes_without_the_turn_once_it_has_read_the_words() {
+        let _one = one_at_a_time();
+        let dir = temp_folder("alone-after-read");
+        OPENINGS.store(1, Ordering::Release);
+        typed("the rail jumps");
+        // The window's thread holds the words a moment as a write in its turn starts.
+        let unsaved = UNSAVED.lock().unwrap_or_else(PoisonError::into_inner);
+        std::thread::scope(|s| {
+            let write = s.spawn(|| keep_unsaved(&dir, Turn::Wait));
+            // It has the draft's turn, and waits for the words.
+            let until = Instant::now() + Duration::from_secs(30);
+            while !matches!(DRAFT_TURN.try_lock(), Err(TryLockError::WouldBlock)) && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            std::thread::sleep(Duration::from_millis(200));
+            // Meanwhile a crash's write without the turn is counted, then waits for the words too. It may read them
+            // first, and land after this write.
+            ALONE.store(1, Ordering::Release);
+            drop(unsaved);
+            let kept = write.join().expect("no crash in keeping the words");
+            assert_eq!(kept, Kept::Alone("the rail jumps".into()), "the crash's write was counted by the time it read");
+        });
+        ALONE.store(0, Ordering::Release);
+        assert_eq!(note::read_draft(&dir).as_deref(), Some("the rail jumps"), "written all the same");
+        assert_eq!(waiting().as_deref(), Some("the rail jumps"), "kept for a write in its turn after the crash's");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
