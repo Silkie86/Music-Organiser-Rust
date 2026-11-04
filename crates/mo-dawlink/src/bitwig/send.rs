@@ -105,7 +105,17 @@ impl Bitwig {
         let _turn = SENDS.wait_turn();
         let mut link = self.connect()?;
         link.stay_in_open_project();
-        sound(&mut link, path.as_ref(), name)
+        on_new_track(link, path.as_ref(), name, Load::Sound)
+    }
+
+    /// Puts one preset (a `.bwpreset`, or any file Bitwig loads as a device) into the project open in Bitwig: a new
+    /// track named `name`, with the preset's device on it. Waits for the sends asked for before it to finish first, so
+    /// presets and sounds go in one at a time, in the order they were asked for.
+    pub fn send_preset(&self, path: impl AsRef<Path>, name: &str) -> Result<SentSound, Error> {
+        let _turn = SENDS.wait_turn();
+        let mut link = self.connect()?;
+        link.stay_in_open_project();
+        on_new_track(link, path.as_ref(), name, Load::Preset)
     }
 
     /// Puts a kit's pads ([`kit_pads`]) on a Drum Machine in the project open in Bitwig: a new Drum Machine on a new
@@ -124,6 +134,12 @@ impl Bitwig {
 /// Bitwig, so call it on a background thread, never the window's.
 pub fn send_sound(path: impl AsRef<Path>, name: &str) -> Result<SentSound, Error> {
     Bitwig::default().send_sound(path, name)
+}
+
+/// [`Bitwig::send_preset`] through the link's own port: one preset on a new track named `name`. Waits for Bitwig, so
+/// call it on a background thread, never the window's.
+pub fn send_preset(path: impl AsRef<Path>, name: &str) -> Result<SentSound, Error> {
+    Bitwig::default().send_preset(path, name)
 }
 
 /// [`Bitwig::send_kit`] through the link's own port. Waits for Bitwig, so call it on a background thread, never the
@@ -180,7 +196,15 @@ pub fn sending_sound(name: &str) -> String {
 pub const SOUND_FAILED: &str = "Couldn't put it into Bitwig";
 
 /// Puts one sound into the project open in Bitwig, through `link`, as if it were dropped on a new track.
-fn sound(link: &mut Link, path: &Path, name: &str) -> Result<SentSound, Error> {
+/// What a send puts on its new track: a sound (on a Sampler) or a preset (its own device).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Load {
+    Sound,
+    Preset,
+}
+
+fn on_new_track(mut link: Link, path: &Path, name: &str, load: Load) -> Result<SentSound, Error> {
+    let link = &mut link;
     link.hello().can_send()?;
     let shown = path.to_string_lossy().into_owned();
     let file = file_name(&shown).to_owned();
@@ -201,13 +225,16 @@ fn sound(link: &mut Link, path: &Path, name: &str) -> Result<SentSound, Error> {
     sent.problem = match link.insert_file(track.index, &shown) {
         Ok(Inserted { added: false, .. }) => Some(format!("Bitwig didn't load {file}")),
         Ok(Inserted { device: Some(device), .. })
-            if !device.name.is_empty() && !device.name.to_lowercase().contains("sampler") =>
+            if load == Load::Sound && !device.name.is_empty() && !device.name.to_lowercase().contains("sampler") =>
         {
             Some(format!("Bitwig put it on {} rather than a Sampler", device.name))
         }
         Ok(_) => None,
         // Bitwig may have put it on all the same: the link gave up waiting, or the connection went.
-        Err(e) => Some(format!("The track is in Bitwig, but the sound may not be on it: {}", sentence(&e))),
+        Err(e) => {
+            let what = if load == Load::Sound { "sound" } else { "preset" };
+            Some(format!("The track is in Bitwig, but the {what} may not be on it: {}", sentence(&e)))
+        }
     };
     Ok(sent)
 }
