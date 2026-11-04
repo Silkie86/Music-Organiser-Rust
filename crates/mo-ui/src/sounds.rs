@@ -1348,6 +1348,9 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     data.set_views(strings(VIEWS));
     data.set_orders(strings(Order::ALL.map(Order::name)));
     show_actions(&data, shortcuts);
+    // The filters whose choices don't come from the sounds (length, key, tempo) show from the start, without numbers
+    // until the sounds are read, so the rows don't jump when they are.
+    show_chips(app);
 
     let weak = app.as_weak();
     data.on_search_edited(move |text| change(&weak, |f| f.search = text.to_string()));
