@@ -4,7 +4,7 @@
 // there. Only shared parts from studio.slint; mo-app decides every word (mo_app::plugins), mo-ui/src/plugins.rs
 // fills it. Read-only for now: Clean up, Uninstall and Move join in the page's second part.
 import { ListView } from "std-widgets.slint";
-import { Theme, Type, Space, Well, SearchBox, ToggleChip, FilterPicks, FilterView, ListLine, Caps, StudioButton, LinkText, Segmented, CardAction, CardActions, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, TabBar } from "../studio.slint";
+import { Theme, Type, Space, Well, SearchBox, ToggleChip, TickBox, FilterPicks, FilterView, ListLine, Caps, StudioButton, LinkText, Segmented, CardAction, CardActions, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, TabBar } from "../studio.slint";
 
 // One line of the list.
 export struct PluginListLine {
@@ -62,6 +62,16 @@ export struct UseRow {
 }
 
 // One installed copy of the picked plugin, as the plugin scanner read it.
+// One of the picked plugin's folders on its Clean up list: ticked to go, or why it stays.
+export struct CleanRow {
+    path: string,
+    kind: string,
+    size: string,
+    why: string,
+    can: bool,
+    ticked: bool,
+}
+
 export struct CopyRow {
     format: string,
     name: string,
@@ -136,6 +146,25 @@ export global PluginsData {
     in property <[RoomBar]> room-bars;
     in property <[RoomFolder]> room-folders;
     in property <string> sizes-note;
+    // Clean up, on the On disk tab: 0 checking the folders, 1 the list to tick, 2 sending to the Recycle Bin, 3 done,
+    // 4 putting back.
+    in property <bool> clean-shown;
+    in property <int> clean-stage;
+    in property <string> clean-title;
+    in property <string> clean-intro;
+    in property <[CleanRow]> clean-rows;
+    in property <string> clean-freed;
+    in property <bool> clean-can-go;
+    in property <string> clean-result;
+    in property <[string]> clean-problems;
+    in property <bool> clean-can-put-back;
+    // What this session's clean-ups sent to the Recycle Bin for the picked plugin, with Put back.
+    in property <string> binned-text;
+    callback clean-ticked(int, bool);
+    callback clean-confirm();
+    callback clean-close();
+    callback clean-stop();
+    callback put-back();
     in property <[CopyRow]> copies;
     in property <string> copies-note;
     in property <string> scanner-note;
@@ -355,8 +384,157 @@ component PluginPanel inherits SidePanel {
         }
     }
     // Its room on disk.
-    if PluginsData.has-pick && PluginsData.tab == 1: VerticalLayout {
+    // Clean up: the folders that may go, ticked or not, and why the rest stay; then what went, with Put back.
+    if PluginsData.has-pick && PluginsData.tab == 1 && PluginsData.clean-shown: VerticalLayout {
         spacing: Space.md;
+        Text {
+            text: PluginsData.clean-title;
+            color: Theme.text;
+            font-size: Type.body;
+            font-weight: 600;
+            wrap: word-wrap;
+            min-width: 0px;
+        }
+        if PluginsData.clean-intro != "": Text {
+            text: PluginsData.clean-intro;
+            color: Theme.muted;
+            font-size: Type.meta;
+            wrap: word-wrap;
+            min-width: 0px;
+        }
+        if PluginsData.clean-stage == 1: VerticalLayout {
+            spacing: Space.sm;
+            for row[i] in PluginsData.clean-rows: Well {
+                height: line.preferred-height;
+                line := VerticalLayout {
+                    padding: Space.md;
+                    spacing: Space.xs;
+                    HorizontalLayout {
+                        spacing: Space.sm;
+                        if row.can: TickBox {
+                            text: row.kind;
+                            checked: row.ticked;
+                            changed checked => { PluginsData.clean-ticked(i, self.checked); }
+                        }
+                        if !row.can: Text {
+                            text: row.kind;
+                            color: Theme.muted;
+                            font-size: Type.meta;
+                            vertical-alignment: center;
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        Text {
+                            text: row.size;
+                            color: Theme.muted;
+                            font-family: Theme.number-font;
+                            font-size: Type.meta;
+                            vertical-alignment: center;
+                        }
+                    }
+                    Text {
+                        text: row.path;
+                        color: Theme.faint;
+                        font-size: Type.small;
+                        wrap: word-wrap;
+                        min-width: 0px;
+                    }
+                    if row.why != "": Text {
+                        text: "Stays: " + row.why;
+                        color: Theme.warning;
+                        font-size: Type.small;
+                        wrap: word-wrap;
+                        min-width: 0px;
+                    }
+                }
+            }
+            Text {
+                text: PluginsData.clean-freed;
+                color: Theme.text;
+                font-size: Type.meta;
+                wrap: word-wrap;
+                min-width: 0px;
+            }
+            HorizontalLayout {
+                spacing: Space.sm;
+                alignment: start;
+                StudioButton {
+                    text: "Send to the Recycle Bin";
+                    main: true;
+                    enabled: PluginsData.clean-can-go;
+                    clicked => { PluginsData.clean-confirm(); }
+                }
+                StudioButton {
+                    text: "Keep everything";
+                    clicked => { PluginsData.clean-close(); }
+                }
+            }
+        }
+        if PluginsData.clean-stage == 0 || PluginsData.clean-stage == 2 || PluginsData.clean-stage == 4: HorizontalLayout {
+            spacing: Space.sm;
+            alignment: start;
+            Text {
+                text: PluginsData.clean-stage == 0 ? "Checking the folders for samples your songs use…"
+                    : PluginsData.clean-stage == 2 ? "Sending to the Recycle Bin…" : "Putting back…";
+                color: Theme.muted;
+                font-size: Type.meta;
+                vertical-alignment: center;
+            }
+            if PluginsData.clean-stage == 0 || PluginsData.clean-stage == 2: StudioButton {
+                text: "Stop";
+                clicked => { PluginsData.clean-stop(); }
+            }
+        }
+        if PluginsData.clean-stage == 3: VerticalLayout {
+            spacing: Space.sm;
+            Text {
+                text: PluginsData.clean-result;
+                color: Theme.text;
+                font-size: Type.meta;
+                wrap: word-wrap;
+                min-width: 0px;
+            }
+            for p in PluginsData.clean-problems: Text {
+                text: p;
+                color: Theme.warning;
+                font-size: Type.small;
+                wrap: word-wrap;
+                min-width: 0px;
+            }
+            HorizontalLayout {
+                spacing: Space.sm;
+                alignment: start;
+                if PluginsData.clean-can-put-back: StudioButton {
+                    text: "Put back";
+                    clicked => { PluginsData.put-back(); }
+                }
+                StudioButton {
+                    text: "Done";
+                    clicked => { PluginsData.clean-close(); }
+                }
+            }
+        }
+    }
+    if PluginsData.has-pick && PluginsData.tab == 1 && !PluginsData.clean-shown: VerticalLayout {
+        spacing: Space.md;
+        if PluginsData.binned-text != "": HorizontalLayout {
+            spacing: Space.sm;
+            Text {
+                text: PluginsData.binned-text;
+                color: Theme.muted;
+                font-size: Type.meta;
+                wrap: word-wrap;
+                min-width: 0px;
+                horizontal-stretch: 1;
+            }
+            VerticalLayout {
+                alignment: center;
+                LinkText {
+                    text: "Put back";
+                    font-size: Type.meta;
+                    clicked => { PluginsData.put-back(); }
+                }
+            }
+        }
         Text {
             text: PluginsData.room-summary;
             color: Theme.text;

@@ -414,6 +414,9 @@ pub struct Needed {
 #[derive(Clone, Debug, Default)]
 pub struct Plugins {
     pub rows: Vec<PluginRow>,
+    /// Every measured plugin's room, as the old app last measured it (a row's `room` is one of these), less what Clean
+    /// up has sent to the Recycle Bin since.
+    spaces: Vec<PluginSpace>,
     /// Places in `rows` the filters let through, in the sort's order.
     pub shown: Vec<usize>,
     pub filters: Filters,
@@ -480,9 +483,11 @@ impl Plugins {
         let measured = spaces.iter().filter_map(|s| s.measured).min();
         let cutoff = now.checked_sub_months(Months::new(unused_years * 12)).unwrap_or(now);
         with_room(&mut rows, &spaces, cutoff);
+        let spaces: Vec<PluginSpace> = spaces.iter().map(space_of).collect();
 
         let mut p = Plugins {
             rows,
+            spaces,
             shown: Vec::new(),
             filters: Filters::default(),
             saves,
@@ -553,10 +558,15 @@ impl Plugins {
         filters::show(&choices, &self.filters.daws)
     }
 
+    /// Before this, no song using a plugin makes it unused.
+    fn cutoff(&self) -> NaiveDateTime {
+        self.now.checked_sub_months(Months::new(self.unused_years * 12)).unwrap_or(self.now)
+    }
+
     /// Changes how many years make a plugin unused, from what was read (nothing is read again).
     pub fn set_unused_years(&mut self, years: u32) {
         self.unused_years = years;
-        let cutoff = self.now.checked_sub_months(Months::new(years * 12)).unwrap_or(self.now);
+        let cutoff = self.cutoff();
         for r in &mut self.rows {
             r.unused = unused(r, cutoff);
         }
@@ -1270,6 +1280,8 @@ fn other_version(name: &str, installed: &[String]) -> Option<String> {
 fn plural(n: usize, one: &str, many: &str) -> String {
     if n == 1 { format!("1 {one}") } else { format!("{n} {many}") }
 }
+
+pub mod clean;
 
 #[cfg(test)]
 mod tests;

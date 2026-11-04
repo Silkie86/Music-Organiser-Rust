@@ -1,7 +1,10 @@
 //! Fills the Plugins page from `mo_app::plugins` and answers its search box, chips, cards and side card. The library
 //! is read on a low-priority thread when the page is shown (rules 12 and 21), each time, so a scan the C# app made
 //! meanwhile shows; until it's back the page shows what it read before. The picked plugin's installed copies are
-//! read on a thread of their own, newest pick wins. Nothing here writes anything.
+//! read on a thread of their own, newest pick wins. Nothing here writes to library.db; Clean up (`clean`) sends
+//! folders you tick to the Recycle Bin, and nowhere else.
+
+mod clean;
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -47,6 +50,10 @@ struct Page {
     copies_asked: u64,
     shortcuts: Shortcuts,
     feed: Feed,
+    /// Clean up for the picked plugin, if one is open, and what this session's clean-ups sent to the Recycle Bin.
+    clean: Option<clean::Cleaning>,
+    binned: Vec<clean::Binned>,
+    clean_asked: u64,
 }
 
 type ReadJob = PathBuf;
@@ -87,28 +94,7 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
     data.set_unused_choices(strings(
         UNUSED_YEARS_CHOICES.iter().map(|&y| if y == 1 { "1 year".to_owned() } else { format!("{y} years") }),
     ));
-    let menu: Vec<MenuItem> = PLUGINS_ACTIONS
-        .iter()
-        .map(|a| MenuItem { what: a.what.into(), key: shortcuts.key_of(a.id).into(), id: a.id.into(), enabled: true })
-        .collect();
-    data.set_menu(ModelRc::new(VecModel::from(menu)));
-    let actions: Vec<CardAction> = PLUGINS_ACTIONS
-        .iter()
-        .map(|a| CardAction {
-            text: match a.id {
-                "plugins.projects" => "Show in Songs",
-                _ => "Search online",
-            }
-            .into(),
-            tip: a.what.into(),
-            key: shortcuts.key_of(a.id).into(),
-            id: a.id.into(),
-            enabled: true,
-            main: false,
-            danger: false,
-        })
-        .collect();
-    data.set_actions(ModelRc::new(VecModel::from(actions)));
+    fill_actions(app);
 
     let weak = app.as_weak();
     data.on_search_edited(move |t| change(&weak, |f| f.search = t.to_string()));
@@ -219,6 +205,36 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
         refresh(&app);
         fill_panel(&app);
     });
+    let weak = app.as_weak();
+    data.on_clean_ticked(move |at, on| {
+        if let (Some(app), Ok(at)) = (weak.upgrade(), usize::try_from(at)) {
+            clean::tick(&app, at, on);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_clean_confirm(move || {
+        if let Some(app) = weak.upgrade() {
+            clean::confirm(&app);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_clean_close(move || {
+        if let Some(app) = weak.upgrade() {
+            clean::close(&app);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_clean_stop(move || {
+        if let Some(app) = weak.upgrade() {
+            clean::stop(&app);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_put_back(move || {
+        if let Some(app) = weak.upgrade() {
+            clean::put_back(&app);
+        }
+    });
     data.on_panel_resized(|w| log::info("Plugins", &format!("Panel width {w:.0}")));
 
     let weak = app.as_weak();
@@ -304,6 +320,7 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
             crate::go_to(app, mo_app::places::Place::Songs.index() as i32);
             crate::songs::show_only(app, &label, saves);
         }
+        "plugins.cleanUp" => clean::start(app),
         "plugins.searchOnline" => {
             let url = search_url(&name, &vendor);
             let started = background::spawn("Search online", move || {
@@ -349,6 +366,7 @@ fn arrived(app: &AppWindow, built: Result<Plugins, String>) {
                 }
                 p.picked.and_then(|i| old.rows.get(i)).map(|r| (r.key.clone(), r.own.clone()))
             });
+            clean::forget_binned(&mut fresh);
             fresh.refilter();
             let picked = kept.and_then(|(k, o)| fresh.find(&k, &o));
             let empty = fresh.rows.is_empty();
@@ -494,6 +512,10 @@ fn pick(app: &AppWindow, row: Option<usize>) {
         }
         changed
     });
+    clean::picked_now(PAGE.with(|p| {
+        let p = p.borrow();
+        p.picked.and_then(|r| p.plugins.as_ref()?.rows.get(r)).map(|r| (r.key.clone(), r.own.clone()))
+    }));
     let data = app.global::<PluginsData>();
     data.set_selected(PAGE.with(|p| p.borrow().picked.map_or(-1, |r| r as i32)));
     if changed {
@@ -501,6 +523,42 @@ fn pick(app: &AppWindow, row: Option<usize>) {
     }
     fill_panel(app);
     ask_copies(app);
+}
+
+/// The card's buttons and the right-click menu: Clean up only for a plugin with folders it could look at.
+fn fill_actions(app: &AppWindow) {
+    let data = app.global::<PluginsData>();
+    let (shortcuts, can_clean) =
+        PAGE.with(|p| (p.borrow().shortcuts.clone(), p.borrow().picked.is_some_and(clean::can_clean)));
+    let enabled = |id: &str| id != "plugins.cleanUp" || can_clean;
+    let menu: Vec<MenuItem> = PLUGINS_ACTIONS
+        .iter()
+        .map(|a| MenuItem {
+            what: a.what.into(),
+            key: shortcuts.key_of(a.id).into(),
+            id: a.id.into(),
+            enabled: enabled(a.id),
+        })
+        .collect();
+    data.set_menu(ModelRc::new(VecModel::from(menu)));
+    let actions: Vec<CardAction> = PLUGINS_ACTIONS
+        .iter()
+        .map(|a| CardAction {
+            text: match a.id {
+                "plugins.projects" => "Show in Songs",
+                "plugins.cleanUp" => "Clean up…",
+                _ => "Search online",
+            }
+            .into(),
+            tip: a.what.into(),
+            key: shortcuts.key_of(a.id).into(),
+            id: a.id.into(),
+            enabled: enabled(a.id),
+            main: false,
+            danger: false,
+        })
+        .collect();
+    data.set_actions(ModelRc::new(VecModel::from(actions)));
 }
 
 fn fill_panel(app: &AppWindow) {
@@ -548,6 +606,8 @@ fn fill_panel(app: &AppWindow) {
     data.set_room_folders(ModelRc::new(VecModel::from(folders)));
     data.set_sizes_note(sizes.into());
     data.set_scanner_note(scanner.into());
+    fill_actions(app);
+    clean::fill(app);
     fill_uses(app);
 }
 
@@ -646,4 +706,35 @@ pub fn show_sample(app: &AppWindow, plugins: Plugins, row: Option<usize>, tab: i
     app.global::<PluginsData>().set_tab(tab);
     let asked = PAGE.with(|p| p.borrow().copies_asked);
     copies_arrived(app, asked, copies);
+}
+
+/// For the screenshots: the picked plugin's Clean up list as it would show, from made-up lines (path, kind, size, why
+/// it stays, can go, ticked).
+pub fn show_clean_sample(
+    app: &AppWindow,
+    name: &str,
+    intro: &str,
+    rows: &[(&str, &str, &str, &str, bool, bool)],
+    freed: &str,
+) {
+    let data = app.global::<PluginsData>();
+    data.set_tab(1);
+    data.set_clean_shown(true);
+    data.set_clean_stage(1);
+    data.set_clean_title(format!("Clean up {name}").into());
+    data.set_clean_intro(intro.into());
+    let rows: Vec<crate::CleanRow> = rows
+        .iter()
+        .map(|(path, kind, size, why, can, ticked)| crate::CleanRow {
+            path: shell::wrappable_path(path).into(),
+            kind: (*kind).into(),
+            size: (*size).into(),
+            why: (*why).into(),
+            can: *can,
+            ticked: *ticked,
+        })
+        .collect();
+    data.set_clean_can_go(rows.iter().any(|r| r.ticked));
+    data.set_clean_rows(ModelRc::new(VecModel::from(rows)));
+    data.set_clean_freed(freed.into());
 }

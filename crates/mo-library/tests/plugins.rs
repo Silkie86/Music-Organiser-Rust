@@ -104,3 +104,27 @@ fn a_library_from_before_the_plugin_tables_reads_as_empty() {
     assert_eq!(lib.scan_counts().unwrap(), ScanCounts::default());
     assert!(lib.plugin_spaces().unwrap().is_empty());
 }
+
+#[test]
+fn clean_up_refuses_sample_folders_it_cannot_read() {
+    let good = "CREATE TABLE projects (id INTEGER PRIMARY KEY, path TEXT, name TEXT, daw TEXT);
+        CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+        CREATE TABLE roots (path TEXT);
+        INSERT INTO roots VALUES ('C:\\Beats');
+        INSERT INTO settings VALUES ('sample_folders', '[\"D:\\\\Samples\", \"c:\\\\beats\", \"\"]');";
+    let lib = Library::open_read_only(&make("roots.db", good)).unwrap();
+    // The project folder written twice counts once; an empty line is left out.
+    assert_eq!(lib.protected_roots().unwrap(), [r"C:\Beats", r"D:\Samples"]);
+
+    let bad = "CREATE TABLE projects (id INTEGER PRIMARY KEY, path TEXT, name TEXT, daw TEXT);
+        CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+        INSERT INTO settings VALUES ('sample_folders', 'D:\\Samples');";
+    let lib = Library::open_read_only(&make("bad-roots.db", bad)).unwrap();
+    // Read as no sample folders it could let yours go, so it's an error.
+    assert!(lib.protected_roots().is_err());
+    // A setting that's NULL or missing is no folders.
+    let none = "CREATE TABLE projects (id INTEGER PRIMARY KEY, path TEXT, name TEXT, daw TEXT);
+        CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+        INSERT INTO settings VALUES ('sample_folders', NULL);";
+    assert!(Library::open_read_only(&make("no-roots.db", none)).unwrap().protected_roots().unwrap().is_empty());
+}
