@@ -16,10 +16,13 @@ use mo_app::themes::{
     ACCENT_KEY, FONT_KEY, FONTS, Look, SIZE_KEY, SIZES, THEME_KEY, THEMES, size_from_setting, theme_named,
 };
 use mo_library::Library;
+use mo_library::folders::{self, FolderList};
 use slint::platform::WindowEvent;
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
-use crate::{AccentInfo, AppWindow, FolderGroupInfo, KeyLineInfo, SettingsData, SettingsFact, ThemeCardInfo};
+use crate::{
+    AccentInfo, AppWindow, DawRowInfo, FolderGroupInfo, KeyLineInfo, SettingsData, SettingsFact, ThemeCardInfo,
+};
 
 /// What the page knows, on the window's thread.
 struct Page {
@@ -42,6 +45,16 @@ struct Page {
     listening: Option<&'static str>,
     /// What the last key change did.
     keys_message: String,
+    /// How Bitwig's link stood when last checked, whether a check is running, and how many were asked for (newest
+    /// wins).
+    bitwig: page::DawStatus,
+    /// The list each folder group changes, by its number on the tab, from the last read.
+    folder_lists: Vec<Option<FolderList>>,
+    /// Whether a folder change is being kept now.
+    folders_busy: bool,
+    folders_message: String,
+    daws_checking: bool,
+    daws_asked: u64,
     feed: Feed,
 }
 
@@ -145,6 +158,12 @@ pub fn connect(app: &AppWindow, setup: Setup) {
             folders_asked: 0,
             listening: None,
             keys_message: String::new(),
+            bitwig: page::bitwig_checking(),
+            folder_lists: Vec::new(),
+            folders_busy: false,
+            folders_message: String::new(),
+            daws_checking: false,
+            daws_asked: 0,
             feed: setup.feed,
         })
     });
@@ -162,6 +181,7 @@ pub fn connect(app: &AppWindow, setup: Setup) {
     data.set_credit(page::SLINT_CREDIT.into());
     data.set_folders_note(page::FOLDERS_NOTE.into());
     data.set_keys_note(page::KEYS_NOTE.into());
+    data.set_daws_note(page::DAWS_NOTE.into());
     data.set_kept_note(
         format!("Your changes are kept in {}; the C# app's settings are only read", app_settings::FILE).into(),
     );
@@ -173,6 +193,31 @@ pub fn connect(app: &AppWindow, setup: Setup) {
         change(TAB_KEY, tab.name());
         if let Some(app) = weak.upgrade() {
             show(&app);
+            if tab == Tab::Daws {
+                check_daws(&app);
+            }
+        }
+    });
+    let weak = app.as_weak();
+    data.on_add_folder(move |group| {
+        let Some(list) = folder_list(group) else { return };
+        let weak = weak.clone();
+        crate::backup::pick_folder(page::pick_title(list), move |folder| {
+            if let Some(app) = weak.upgrade() {
+                edit_folder(&app, list, folder.display().to_string(), true);
+            }
+        });
+    });
+    let weak = app.as_weak();
+    data.on_remove_folder(move |group, folder| {
+        if let (Some(app), Some(list)) = (weak.upgrade(), folder_list(group)) {
+            edit_folder(&app, list, folder.to_string(), false);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_check_daws(move || {
+        if let Some(app) = weak.upgrade() {
+            check_daws(&app);
         }
     });
     let weak = app.as_weak();
@@ -441,6 +486,17 @@ pub fn shown(app: &AppWindow) {
         return;
     }
     list_outputs(app);
+    // Bitwig is only asked while its tab is on show.
+    let on_daws =
+        PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| Tab::from_setting(p.settings.get(TAB_KEY)) == Tab::Daws));
+    if on_daws {
+        check_daws(app);
+    }
+    read_folders_later(app, library, asked);
+}
+
+/// Reads the folders away from the window, and shows them if no newer read was asked for since.
+fn read_folders_later(app: &AppWindow, library: PathBuf, asked: u64) {
     let weak = app.as_weak();
     let started = background::spawn("Settings folders", move || {
         let groups = read_folders(&library);
@@ -458,6 +514,131 @@ pub fn shown(app: &AppWindow) {
     }
 }
 
+/// The standard plugin folders, which an empty plugin list stands for, as the page shows them.
+fn plugin_defaults() -> Vec<String> {
+    mo_space::plugins::default_folders().iter().map(|p| p.display().to_string()).collect()
+}
+
+/// The list a folder group changes, by its number on the tab.
+fn folder_list(group: i32) -> Option<FolderList> {
+    let group = usize::try_from(group).ok()?;
+    PAGE.with(|p| p.borrow().as_ref().filter(|p| p.live).and_then(|p| p.folder_lists.get(group).copied().flatten()))
+}
+
+/// Adds a folder to a list or takes it off, in library.db, away from the window (the C# app may hold the library for
+/// a moment), then reads the folders again. One change at a time: the buttons wait while one is kept.
+fn edit_folder(app: &AppWindow, list: FolderList, folder: String, add: bool) {
+    let library = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let p = p.as_mut().filter(|p| p.live)?;
+        if p.folders_busy {
+            // A folder picked while another change was being kept: say so rather than drop it.
+            p.folders_message =
+                format!("{folder} wasn't changed: another folder change was being saved. Try it again.");
+            return None;
+        }
+        p.folders_busy = true;
+        Some(p.library.clone())
+    });
+    let Some(library) = library else {
+        show(app);
+        return;
+    };
+    show(app);
+    let weak = app.as_weak();
+    let started = background::spawn("Settings folder change", move || {
+        let defaults = if list == FolderList::Plugins { plugin_defaults() } else { Vec::new() };
+        let done = if add {
+            folders::add_folder(&library, list, &folder, &defaults)
+        } else {
+            folders::remove_folder(&library, list, &folder, &defaults)
+        };
+        match &done {
+            Ok(folders::Changed::Done(_)) => {
+                log::info("Settings", &format!("{} {folder} ({list:?} folders)", if add { "Added" } else { "Removed" }))
+            }
+            Ok(folders::Changed::AsItWas) => {}
+            Err(e) => log::warning("Settings", &format!("Couldn't change the {list:?} folders: {e}")),
+        }
+        let done = done.map(|d| matches!(d, folders::Changed::Done(_))).map_err(|e| e.to_string());
+        let note = page::folder_change_note(add, &folder, done);
+        let _ = slint::invoke_from_event_loop(move || {
+            let asked = PAGE.with(|p| {
+                let mut p = p.borrow_mut();
+                let p = p.as_mut()?;
+                p.folders_busy = false;
+                p.folders_message = note.unwrap_or_default();
+                p.folders_asked += 1;
+                Some((p.library.clone(), p.folders_asked))
+            });
+            if let (Some(app), Some((library, asked))) = (weak.upgrade(), asked) {
+                show(&app);
+                read_folders_later(&app, library, asked);
+            }
+        });
+    });
+    if let Err(e) = started {
+        log::error("Settings", &format!("Couldn't start changing the folders: {e}"));
+        PAGE.with(|p| {
+            if let Some(p) = p.borrow_mut().as_mut() {
+                p.folders_busy = false;
+            }
+        });
+        show(app);
+    }
+}
+
+/// Asks the link in Bitwig how it stands, away from the window (it may wait a few seconds for a busy Bitwig). Only
+/// reads: nothing goes into the project. A check asked for while one runs replaces its answer (newest wins).
+fn check_daws(app: &AppWindow) {
+    let asked = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let p = p.as_mut().filter(|p| p.live)?;
+        p.daws_asked += 1;
+        p.daws_checking = true;
+        Some(p.daws_asked)
+    });
+    let Some(asked) = asked else { return };
+    show(app);
+    let weak = app.as_weak();
+    let started = background::spawn("Settings Bitwig check", move || {
+        let status = page::bitwig_status(&mo_dawlink::bitwig::Bitwig::default().check());
+        let _ = slint::invoke_from_event_loop(move || {
+            let newest = PAGE.with(|p| {
+                let mut p = p.borrow_mut();
+                let Some(p) = p.as_mut().filter(|p| p.daws_asked == asked) else { return false };
+                p.bitwig = status;
+                p.daws_checking = false;
+                true
+            });
+            if let Some(app) = weak.upgrade()
+                && newest
+            {
+                show(&app);
+            }
+        });
+    });
+    if let Err(e) = started {
+        log::error("Settings", &format!("Couldn't start checking Bitwig: {e}"));
+        PAGE.with(|p| {
+            if let Some(p) = p.borrow_mut().as_mut() {
+                p.daws_checking = false;
+            }
+        });
+        show(app);
+    }
+}
+
+/// Shows how Bitwig's link stands, for the screenshots.
+pub fn show_bitwig(app: &AppWindow, status: page::DawStatus) {
+    PAGE.with(|p| {
+        if let Some(p) = p.borrow_mut().as_mut() {
+            p.bitwig = status;
+        }
+    });
+    show(app);
+}
+
 /// The folders as the C# app keeps them, read-only.
 fn read_folders(library: &Path) -> Result<Vec<page::FolderGroup>, String> {
     let lib = Library::open_read_only(library).map_err(|e| e.to_string())?;
@@ -467,7 +648,7 @@ fn read_folders(library: &Path) -> Result<Vec<page::FolderGroup>, String> {
         .map_err(|e| e.to_string())?
         .map(|json| mo_space::folder_move::parse_moved(&json))
         .unwrap_or_default();
-    let defaults = mo_space::plugins::default_folders().iter().map(|p| p.display().to_string()).collect();
+    let defaults = plugin_defaults();
     Ok(page::folder_groups(
         lib.roots().map_err(|e| e.to_string())?,
         list("sample_folders")?,
@@ -483,10 +664,17 @@ pub fn show_folders(app: &AppWindow, groups: Result<Vec<page::FolderGroup>, Stri
     let data = app.global::<SettingsData>();
     match groups {
         Ok(groups) => {
+            let lists = groups.iter().map(|g| g.list).collect();
+            PAGE.with(|p| {
+                if let Some(p) = p.borrow_mut().as_mut() {
+                    p.folder_lists = lists;
+                }
+            });
             let lines: Vec<FolderGroupInfo> = groups
                 .into_iter()
                 .map(|g| FolderGroupInfo {
                     title: g.title.into(),
+                    editable: g.list.is_some(),
                     note: g.note.into(),
                     folders: strings(g.folders),
                     empty: g.empty.into(),
@@ -621,6 +809,23 @@ fn show(app: &AppWindow) {
         data.set_listening(p.listening.unwrap_or_default().into());
         data.set_keys_message(p.keys_message.clone().into());
         data.set_keys_changed(keys.any_changed());
+
+        let row = |d: page::DawStatus| DawRowInfo {
+            bitwig: d.daw == p.bitwig.daw,
+            daw: d.daw.into(),
+            state: d.state.into(),
+            ok: d.ok,
+            facts: ModelRc::new(VecModel::from(
+                d.facts
+                    .into_iter()
+                    .map(|f| SettingsFact { what: f.what.into(), value: f.value.into(), button: SharedString::new() })
+                    .collect::<Vec<_>>(),
+            )),
+        };
+        data.set_daws(ModelRc::new(VecModel::from(vec![row(p.bitwig.clone()), row(page::fl_status())])));
+        data.set_daws_checking(p.daws_checking);
+        data.set_folders_busy(p.folders_busy);
+        data.set_folders_message(p.folders_message.clone().into());
     });
 }
 

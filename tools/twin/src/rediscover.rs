@@ -189,7 +189,8 @@ fn rust_side(db: &Path, uses: &[Value]) -> Result<Value, String> {
     let db = SoundsDb::open_read_only(db).map_err(|e| format!("Rust couldn't read the sounds.db C# saved: {e}"))?;
     // As the Sounds page reads it: the sounds and their vectors in one pass.
     let everything = db.everything(Local::now().naive_local()).map_err(|e| e.to_string())?;
-    let index = SoundIndex::build(&everything.features, &everything.clap, everything.analysed());
+    let analysed = everything.analysed();
+    let index = SoundIndex::from_gathered(everything.features, everything.clap, analysed);
     let sounds = everything.sounds;
     let uses: Vec<SampleUse> = uses
         .iter()

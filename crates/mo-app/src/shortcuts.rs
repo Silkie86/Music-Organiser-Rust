@@ -67,10 +67,10 @@ pub const SONGS_ACTIONS: &[Action] = &[
     action("projects.copyPath", "Copy where the picked song's file is", "Ctrl+Shift+C"),
 ];
 
-/// The Sounds page's own actions, with the C# Sound Lab's ids. Favourite, tag and To Bitwig join once the page may
-/// write and the DAW link is in.
+/// The Sounds page's own actions, with the C# Sound Lab's ids. Favourite and tag join once the page may write.
 pub const SOUNDS_ACTIONS: &[Action] = &[
     action("sounds.stop", "Stop the sound playing", "Esc"),
+    action("sounds.toBitwig", "Put the picked sound into Bitwig", "Ctrl+B"),
     action("sounds.reveal", "Show the sound's file in Explorer", "Ctrl+Shift+E"),
     action("sounds.copyPath", "Copy where the sound's file is", "Ctrl+Shift+C"),
 ];
@@ -102,6 +102,16 @@ pub const CURVES_ACTIONS: &[Action] = &[
     action("curves.revealSong", "Show the song the picked curve came from", "Ctrl+Shift+O"),
 ];
 
+/// The MIDI page's own actions, with the C# MIDI page's ids where it had them. What goes with this (midi.fit),
+/// the playground, Send to Bitwig, Save as and the octave keys join as those parts are built.
+pub const MIDI_ACTIONS: &[Action] = &[
+    action("midi.moreLike", "Parts shaped like the picked one", "Ctrl+L"),
+    action("midi.within", "The longer phrases the picked part is in", ""),
+    action("midi.source", "Show the picked part's file in its folder", "Ctrl+Shift+E"),
+    action("midi.copyPath", "Copy where the picked part's file is", "Ctrl+Shift+C"),
+    action("midi.back", "Back to the whole list", "Esc"),
+];
+
 /// The Space page's own actions (new: the C# app had no Space page). F5 measures again on this page; elsewhere it
 /// looks for new and changed projects. Show in folder has the key it has on the other pages.
 pub const SPACE_ACTIONS: &[Action] = &[
@@ -110,7 +120,8 @@ pub const SPACE_ACTIONS: &[Action] = &[
 ];
 
 /// Every page's own list. A page's keys only work on that page, so two pages may share a key.
-pub const PAGE_ACTIONS: &[&[Action]] = &[SONGS_ACTIONS, SOUNDS_ACTIONS, PRESETS_ACTIONS, CURVES_ACTIONS, SPACE_ACTIONS];
+pub const PAGE_ACTIONS: &[&[Action]] =
+    &[SONGS_ACTIONS, SOUNDS_ACTIONS, PRESETS_ACTIONS, CURVES_ACTIONS, MIDI_ACTIONS, SPACE_ACTIONS];
 
 /// Every page's own list with the page's name, in the order Settings › Shortcuts shows them (after the keys that work
 /// everywhere).
@@ -119,6 +130,7 @@ pub const PAGES: &[(&str, &[Action])] = &[
     ("Sounds", SOUNDS_ACTIONS),
     ("Presets", PRESETS_ACTIONS),
     ("Curves", CURVES_ACTIONS),
+    ("MIDI", MIDI_ACTIONS),
     ("Space", SPACE_ACTIONS),
 ];
 
@@ -430,6 +442,7 @@ mod tests {
         assert_eq!(what_of("projects.reveal"), "Show the picked song's file in its folder");
         assert_eq!(what_of("sounds.copyPath"), "Copy where the sound's file is");
         assert_eq!(what_of("space.reveal"), "Show the picked line's folder");
+        assert_eq!(what_of("sounds.toBitwig"), "Put the picked sound into Bitwig");
         assert_eq!(what_of("no.such.action"), "");
     }
 
@@ -576,7 +589,7 @@ mod tests {
         assert_eq!(keys.page_action_for("Ctrl+F", SOUNDS_ACTIONS), Some("sounds.copyPath"));
         assert_eq!(keys.action_for("Ctrl+F"), Some("app.search"));
         let said = keys.set("app.fullScreen", "Ctrl+Shift+E");
-        assert!(said.starts_with("Songs and Sounds and Presets and Curves and Space keep"), "{said}");
+        assert!(said.starts_with("Songs and Sounds and Presets and Curves and MIDI and Space keep"), "{said}");
     }
 
     #[test]

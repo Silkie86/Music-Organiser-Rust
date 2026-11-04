@@ -53,6 +53,8 @@ fn main() -> Result<(), slint::PlatformError> {
         feed.clone(),
         &shortcuts,
     );
+    // MIDI: the MIDI index beside the library, read-only (the C# app's midi.db until the Rust one holds parts).
+    mo_ui::midi::connect(&app, mo_app::paths::data_dir().join("library.db"), feed.clone(), &shortcuts);
     // Space, Backup: the backup settings live in a file of their own; the library is only read.
     mo_ui::backup::connect(&app, library.clone(), feed.clone());
     // Settings: changes are kept in the app's own file, never in library.db.

@@ -9,9 +9,11 @@ import { SongsPage, SongsData, SongLine, PanelSong, CountLine, PluginLine, Sampl
 import { ArrangementData, ArrLabel, ArrKind } from "pages/arrangement.slint";
 import { BackupPage, BackupData, BackupFolderLine, LeftOutLine } from "pages/backup.slint";
 import { PresetsPage, PresetsData, PresetLine, PresetFact, PartChip, PresetCard, CurveLineInfo, CurvePlace, CurveCardInfo } from "pages/presets.slint";
+import { MidiPage, MidiData, MidiLine, KindChip, RollNote, MidiFact, PickedPart } from "pages/midi.slint";
 import { SpacePage, SpaceData, DriveCard, RoomLine, CardPart } from "pages/space.slint";
 import { ActivityCards, CardInfo, KeySheet, KeyRow, NoteDialog } from "shell.slint";
-import { SettingsPage, SettingsData, ThemeCardInfo, AccentInfo, SettingsFact, FolderGroupInfo, KeyLineInfo } from "pages/settings.slint";
+import { Finder, FinderData, FinderLine } from "finder.slint";
+import { SettingsPage, SettingsData, ThemeCardInfo, AccentInfo, SettingsFact, FolderGroupInfo, KeyLineInfo, DawRowInfo } from "pages/settings.slint";
 // std-widgets' colours follow the theme (light or dark), for its scroll bars and the About part's Slint logo.
 import { Palette } from "std-widgets.slint";
 
@@ -31,7 +33,9 @@ import "../fonts/SpaceMono-400.ttf";
 import "../fonts/SpaceMono-700.ttf";
 
 export { PresetsData, PresetLine, PresetFact, PartChip, PresetCard, CurveLineInfo, CurvePlace, CurveCardInfo }
-export { Palette, SettingsData, ThemeCardInfo, AccentInfo, SettingsFact, FolderGroupInfo, KeyLineInfo }
+export { MidiData, MidiLine, KindChip, RollNote, MidiFact, PickedPart }
+export { FinderData, FinderLine }
+export { Palette, SettingsData, ThemeCardInfo, AccentInfo, SettingsFact, FolderGroupInfo, KeyLineInfo, DawRowInfo }
 export { Theme, Icons, ActionKey, MenuItem, CardAction, YearBar, SoundsData, GalaxyLabel, SweptLine, TrailDot, AlikeLine, FolderLine, PadLine, TypeChipInfo, SoundTile, TileRow, SoundLine, SoundFact, PickedSound, BackupData, BackupFolderLine, LeftOutLine, SpaceData, DriveCard, RoomLine, CardPart, ArrangementData, ArrLabel, ArrKind, CardInfo, KeyRow, SongsData, SongLine, PanelSong, CountLine, PluginLine, SampleLine, SaveLine, DetailPair, HealthLine, OlderLine }
 
 export struct PlaceInfo {
@@ -64,6 +68,8 @@ export component AppWindow inherits Window {
     in property <int> backup-place: -1;
     // Presets: the sounds in your songs and your preset files, and the curves.
     in property <int> presets-place: -1;
+    // MIDI: every MIDI part in your projects and MIDI folders.
+    in property <int> midi-place: -1;
     // Settings: General, Folders, DAWs, Shortcuts and Developer.
     in property <bool> settings-built: false;
     in property <int> space-place: -1;
@@ -98,6 +104,13 @@ export component AppWindow inherits Window {
     callback note-put-aside();
 
     forward-focus: keys;
+    // Keys go back to the window once the Ctrl+K finder closes.
+    property <bool> finder-open: FinderData.open;
+    changed finder-open => {
+        if (!self.finder-open) {
+            keys.focus();
+        }
+    }
     keys := FocusScope {
         // Tab moves between the note's parts and never lands on this invisible scope, where typing would vanish.
         focus-on-tab-navigation: false;
@@ -185,6 +198,9 @@ export component AppWindow inherits Window {
             if root.place == root.presets-place: PresetsPage {
                 horizontal-stretch: 1;
             }
+            if root.place == root.midi-place: MidiPage {
+                horizontal-stretch: 1;
+            }
             if root.place == root.settings-place && root.settings-built: SettingsPage {
                 horizontal-stretch: 1;
             }
@@ -192,7 +208,8 @@ export component AppWindow inherits Window {
                 horizontal-stretch: 1;
             }
             if root.place != root.songs-place && root.place != root.sounds-place && root.place != root.backup-place
-                && root.place != root.space-place && !(root.place == root.settings-place && root.settings-built) && root.place != root.presets-place: ComingPage {
+                && root.place != root.midi-place && root.place != root.space-place
+                && !(root.place == root.settings-place && root.settings-built) && root.place != root.presets-place: ComingPage {
                 horizontal-stretch: 1;
                 title: root.places[root.place].name;
                 coming: root.places[root.place].coming;
@@ -244,6 +261,11 @@ export component AppWindow inherits Window {
                 keys.focus();
             }
             init => { self.focus(); }
+        }
+        // Ctrl+K: jump to anything, over the page.
+        if FinderData.open: Finder {
+            width: 100%;
+            height: 100%;
         }
         // The tooltip, over everything.
         TipLayer { width: 100%; height: 100%; }

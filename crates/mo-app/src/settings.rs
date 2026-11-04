@@ -13,6 +13,7 @@ use mo_space::folder_move::MovedFolder;
 use crate::background::Pace;
 use crate::places::{LAST_PAGE_CHOICE, Place};
 use crate::themes::{ACCENTS, FONTS, SIZES, THEMES, Theme, font_named, parse_hex, size_from_setting};
+use mo_library::folders::FolderList;
 
 /// The page's tabs, left to right.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -249,6 +250,8 @@ pub fn output_note(open: Option<&str>, problem: Option<&str>) -> String {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FolderGroup {
     pub title: &'static str,
+    /// The list it changes, if it can be changed here (the moved plugin data can't: it's moved from a plugin's card).
+    pub list: Option<FolderList>,
     pub note: &'static str,
     pub folders: Vec<String>,
     /// Shown when there are none.
@@ -269,6 +272,7 @@ pub fn folder_groups(
     vec![
         FolderGroup {
             title: "PROJECTS",
+            list: Some(FolderList::Projects),
             note: "Searched for Bitwig, FL Studio and Studio One projects, subfolders too. Autosaves, backups and the \
                    demo songs that came with your DAWs are skipped.",
             folders: projects,
@@ -276,18 +280,21 @@ pub fn folder_groups(
         },
         FolderGroup {
             title: "SAMPLES",
+            list: Some(FolderList::Samples),
             note: "Your sample libraries: what Sounds shows, and where missing samples are looked for.",
             folders: samples,
             empty: "No sample folders yet.",
         },
         FolderGroup {
             title: "MIDI",
+            list: Some(FolderList::Midi),
             note: "Your MIDI packs, read for the MIDI page beside the MIDI inside your songs.",
             folders: midi,
             empty: "No MIDI folders yet.",
         },
         FolderGroup {
             title: "PLUGINS",
+            list: Some(FolderList::Plugins),
             note: if plugins_are_defaults {
                 "Where your VST3, CLAP and VST2 plugins are installed: the standard folders, as none were chosen."
             } else {
@@ -298,6 +305,7 @@ pub fn folder_groups(
         },
         FolderGroup {
             title: "PLUGIN DATA ON OTHER DRIVES",
+            list: None,
             note: "Plugin folders moved off their drive, and where they are now. Move one from its plugin's card.",
             folders: moved.iter().map(|m| format!("{}  →  {}", m.from, m.to)).collect(),
             empty: "Nothing moved yet.",
@@ -305,9 +313,35 @@ pub fn folder_groups(
     ]
 }
 
-/// The line under the Folders tab's title: they're shown, and changing them waits.
-pub const FOLDERS_NOTE: &str = "These are the folders the C# app keeps. Adding and removing them here comes once the \
-                                app may write to your library (library.db); until then, change them in the C# app.";
+/// The line under the Folders tab's title.
+pub const FOLDERS_NOTE: &str = "The folders the app looks in, shared with the C# app (library.db). Adding or removing \
+    one never moves or deletes anything on disk, and a project folder taken off keeps its songs listed. The Songs page \
+    takes up a changed project folder (one added, or one taken off) at the next start; the C# app reads new folders at \
+    its next scan.";
+
+/// The folder picker's title for a list.
+pub fn pick_title(list: FolderList) -> &'static str {
+    match list {
+        FolderList::Projects => "Choose a folder with music projects",
+        FolderList::Samples => "Choose a sample library folder",
+        FolderList::Midi => "Choose a folder of MIDI packs",
+        FolderList::Plugins => "Choose a plugin folder (VST3, CLAP or VST2)",
+    }
+}
+
+/// What a folder change did, in words: none when it changed nothing worth saying.
+pub fn folder_change_note(added: bool, folder: &str, done: Result<bool, String>) -> Option<String> {
+    match done {
+        Ok(true) => Some(if added {
+            format!("Added {folder}.")
+        } else {
+            format!("Took {folder} off the list. Nothing on disk was changed.")
+        }),
+        Ok(false) if added => Some(format!("{folder} is already on the list.")),
+        Ok(false) => None,
+        Err(e) => Some(format!("Nothing was changed: {e}")),
+    }
+}
 
 /// One line of the About part or the Developer tab: what it is and its value.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -403,6 +437,116 @@ pub const KEYS_NOTE: &str = "Keys that work on every page come first, then each 
                              stays the note for Claude, and F1 or ? on a page shows its keys.";
 
 /// The credit Slint's royalty-free licence asks for (decided 2026-10-30), with what it means.
+/// How a DAW's link stands, for a row on the DAWs tab: a short state, whether it's working, and the facts under it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DawStatus {
+    pub daw: &'static str,
+    pub state: String,
+    /// Whether the link answers and the app could send to it now.
+    pub ok: bool,
+    pub facts: Vec<Fact>,
+}
+
+/// Bitwig's row before it's been checked.
+pub fn bitwig_checking() -> DawStatus {
+    DawStatus { daw: "Bitwig Studio", state: "Checking\u{2026}".to_owned(), ok: false, facts: Vec::new() }
+}
+
+/// Bitwig's row from what the link said when the app connected (`mo_dawlink::bitwig::Bitwig::check`). Only reads:
+/// nothing is sent to the project.
+pub fn bitwig_status(checked: &Result<mo_dawlink::bitwig::Hello, mo_dawlink::bitwig::Error>) -> DawStatus {
+    use mo_dawlink::bitwig::Error;
+    let fact = |what, value: String| Fact { what, value, button: None };
+    let hello = match checked {
+        Ok(hello) => hello,
+        Err(Error::NotRunning) => {
+            return DawStatus {
+                daw: "Bitwig Studio",
+                state: "Not answering".to_owned(),
+                ok: false,
+                facts: vec![fact("What to check", Error::NotRunning.to_string())],
+            };
+        }
+        Err(e) => {
+            return DawStatus {
+                daw: "Bitwig Studio",
+                state: "Not linked".to_owned(),
+                ok: false,
+                facts: vec![fact("What happened", e.to_string())],
+            };
+        }
+    };
+    let mut facts = Vec::new();
+    let product = if hello.product.is_empty() { "Bitwig Studio" } else { hello.product.as_str() };
+    facts.push(fact("Bitwig", format!("{product} {}", hello.version).trim_end().to_owned()));
+    let mut answering = hello.answering();
+    if let Some(first) = answering.get(..1) {
+        answering = first.to_uppercase() + &answering[1..];
+    }
+    facts.push(fact("Answering", answering));
+    if hello.error.is_none() {
+        let project = if hello.project.is_empty() { "A new project, not saved yet" } else { hello.project.as_str() };
+        let unsaved = if hello.modified { " \u{b7} unsaved changes" } else { "" };
+        facts.push(fact("Open project", format!("{project}{unsaved}")));
+        facts.push(fact(
+            "Changes from the app",
+            if hello.changes {
+                "Allowed".to_owned()
+            } else {
+                "Off: turn on \u{201c}Let the app make changes\u{201d} in Bitwig (Settings > Controllers > Music \
+                 Organiser) to send sounds and kits"
+                    .to_owned()
+            },
+        ));
+        if let Some(back) = hello.loopback {
+            facts.push(fact(
+                "Loopback MIDI",
+                if back {
+                    "Working".to_owned()
+                } else {
+                    format!(
+                        "Not coming back: set the controller's MIDI in and out to \u{201c}{}\u{201d}",
+                        mo_dawlink::bitwig::LOOPBACK_PORT
+                    )
+                },
+            ));
+        }
+    }
+    let (state, ok) = match hello.can_send() {
+        Ok(()) => ("Linked".to_owned(), true),
+        Err(Error::NotStarted(_)) => ("Linked, but not working fully".to_owned(), false),
+        Err(Error::OldLink) => ("Linked, but too old to send to".to_owned(), false),
+        Err(_) => ("Linked, reading only".to_owned(), false),
+    };
+    if let Err(why) = hello.can_send()
+        && !matches!(why, Error::ChangesOff)
+    {
+        facts.push(fact("Sending", why.to_string()));
+    }
+    DawStatus { daw: "Bitwig Studio", state, ok, facts }
+}
+
+/// FL Studio's row: its link comes later in phase 5.
+pub fn fl_status() -> DawStatus {
+    DawStatus {
+        daw: "FL Studio",
+        state: "Comes later".to_owned(),
+        ok: false,
+        facts: vec![Fact {
+            what: "For now",
+            value: "The Rust app's FL Studio link comes later in phase 5. The old app's Settings > DAW links still \
+                    installs and checks FL's script."
+                .to_owned(),
+            button: None,
+        }],
+    }
+}
+
+/// Under the DAW rows: where the scripts are installed from for now.
+pub const DAWS_NOTE: &str = "The app talks to Bitwig through the Music Organiser extension. Installing it, and the \
+    live tests, stay in the old app's Settings > DAW links for now; this tab checks that the link answers, and only \
+    reads.";
+
 pub const SLINT_CREDIT: &str = "Music Organiser's screens are made with Slint, under its royalty-free licence.";
 
 #[cfg(test)]
@@ -508,7 +652,7 @@ mod tests {
         let lines = key_lines(&keys);
         assert_eq!(lines[0].page, crate::shortcuts::EVERYWHERE);
         let heads: Vec<&str> = lines.iter().filter(|l| !l.page.is_empty()).map(|l| l.page).collect();
-        assert_eq!(heads, vec!["Everywhere", "Songs", "Sounds", "Presets", "Curves", "Space"]);
+        assert_eq!(heads, vec!["Everywhere", "Songs", "Sounds", "Presets", "Curves", "MIDI", "Space"]);
         let rescan = lines.iter().find(|l| l.id == "app.fullRescan").unwrap();
         assert_eq!((rescan.key.as_str(), rescan.changed), ("F6", true));
         assert_eq!(rescan.starts, "It starts with no key");
@@ -524,5 +668,67 @@ mod tests {
         let chosen =
             folder_groups(vec![], vec![], vec![], vec!["D:\\VST".to_owned()], vec!["C:\\VST3".to_owned()], &[]);
         assert_eq!(chosen[3].folders, vec!["D:\\VST".to_owned()]);
+    }
+
+    #[test]
+    fn bitwig_rows_say_how_the_link_stands() {
+        use mo_dawlink::bitwig::{Error, Hello};
+        let off = bitwig_status(&Err(Error::NotRunning));
+        assert_eq!((off.state.as_str(), off.ok), ("Not answering", false));
+        let hello = Hello {
+            link: 3,
+            product: "Bitwig Studio".into(),
+            version: "6.1.5".into(),
+            project: "Night drive".into(),
+            modified: true,
+            changes: true,
+            runtime: "java".into(),
+            extension: "3.18".into(),
+            loopback: Some(true),
+            ..Hello::default()
+        };
+        let row = bitwig_status(&Ok(hello.clone()));
+        assert_eq!((row.state.as_str(), row.ok), ("Linked", true));
+        let values: Vec<&str> = row.facts.iter().map(|f| f.value.as_str()).collect();
+        assert_eq!(
+            values,
+            [
+                "Bitwig Studio 6.1.5",
+                "The Music Organiser extension 3.18",
+                "Night drive \u{b7} unsaved changes",
+                "Allowed",
+                "Working"
+            ]
+        );
+        let reading = bitwig_status(&Ok(Hello { changes: false, ..hello.clone() }));
+        assert_eq!((reading.state.as_str(), reading.ok), ("Linked, reading only", false));
+        let broken = bitwig_status(&Ok(Hello { error: Some("no MIDI".into()), ..hello }));
+        assert_eq!(broken.state, "Linked, but not working fully");
+        assert!(broken.facts.iter().all(|f| f.what != "Open project"));
+        assert!(broken.facts.last().is_some_and(|f| f.value.ends_with("Bitwig said: no MIDI")));
+    }
+
+    #[test]
+    fn folder_changes_are_said_plainly() {
+        assert_eq!(folder_change_note(true, r"E:\Songs", Ok(true)).as_deref(), Some(r"Added E:\Songs."));
+        assert_eq!(
+            folder_change_note(true, r"E:\Songs", Ok(false)).as_deref(),
+            Some(r"E:\Songs is already on the list.")
+        );
+        assert_eq!(folder_change_note(false, r"E:\Songs", Ok(false)), None);
+        assert!(folder_change_note(false, "x", Ok(true)).is_some_and(|n| n.contains("Nothing on disk")));
+        assert_eq!(folder_change_note(true, "x", Err("locked".into())).as_deref(), Some("Nothing was changed: locked"));
+        let groups = folder_groups(vec![], vec![], vec![], vec![], vec![], &[]);
+        let lists: Vec<_> = groups.iter().map(|g| g.list).collect();
+        assert_eq!(
+            lists,
+            [
+                Some(FolderList::Projects),
+                Some(FolderList::Samples),
+                Some(FolderList::Midi),
+                Some(FolderList::Plugins),
+                None
+            ]
+        );
     }
 }

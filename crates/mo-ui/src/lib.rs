@@ -11,9 +11,12 @@ pub use screens::*;
 
 pub mod arrangement;
 pub mod backup;
+mod canvas;
 pub mod cards;
 pub mod files;
+pub mod finder;
 pub mod gpu;
+pub mod midi;
 pub mod note;
 pub mod presets;
 pub mod settings;
@@ -29,7 +32,7 @@ use mo_app::activity::Feed;
 use mo_app::log;
 use mo_app::places::Place;
 use mo_app::shortcuts::{
-    APP_ACTIONS, Action, SONGS_ACTIONS, SOUNDS_ACTIONS, SPACE_ACTIONS, Shortcuts, repeats, what_of,
+    APP_ACTIONS, Action, MIDI_ACTIONS, SONGS_ACTIONS, SOUNDS_ACTIONS, SPACE_ACTIONS, Shortcuts, repeats, what_of,
 };
 use mo_app::themes::Look;
 use note::open_note;
@@ -65,9 +68,11 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> R
     app.set_sounds_place(Place::Sounds.index() as i32);
     app.set_backup_place(Place::Backup.index() as i32);
     app.set_presets_place(Place::Presets.index() as i32);
+    app.set_midi_place(Place::Midi.index() as i32);
     app.set_space_place(Place::Space.index() as i32);
     KEYS.with(|k| *k.borrow_mut() = Some(std::rc::Rc::new(shortcuts.clone())));
     show_button_keys(&app, &shortcuts);
+    connect_finder(&app, &shortcuts, &feed);
     go_to(&app, start.index() as i32);
 
     let weak = app.as_weak();
@@ -120,6 +125,13 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> R
             return true;
         }
         if let Some(app) = weak.upgrade()
+            && app.get_place() == Place::Midi.index() as i32
+            && let Some(id) = shortcuts.page_action_for(&key, MIDI_ACTIONS)
+            && (repeat || midi::run_action(&app, id))
+        {
+            return true;
+        }
+        if let Some(app) = weak.upgrade()
             && app.get_place() == Place::Space.index() as i32
             && let Some(id) = shortcuts.page_action_for(&key, SPACE_ACTIONS)
             && (repeat || space::run_action(&app, id))
@@ -139,6 +151,52 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> R
     Ok(app)
 }
 
+/// Ctrl+K: the pages and actions to jump to, and how to open them. Songs and sounds join from their own pages.
+fn connect_finder(app: &AppWindow, shortcuts: &Shortcuts, feed: &Feed) {
+    finder::connect(app);
+    finder_pages(app, shortcuts);
+    finder::on_open(mo_app::finder::Kind::Page, |app, hit, _| {
+        let Some((place, view)) = mo_app::finder::page_of(&hit.id) else { return false };
+        go_to(app, place.index() as i32);
+        if let Some(view) = view
+            && place == Place::Sounds
+        {
+            sounds::show_view(app, view);
+        }
+        true
+    });
+    let feed = feed.clone();
+    finder::on_open(mo_app::finder::Kind::Action, move |app, hit, _| {
+        let id = hit.id.as_str();
+        if SONGS_ACTIONS.iter().any(|a| a.id == id) {
+            return songs::run_action(app, id);
+        }
+        if SOUNDS_ACTIONS.iter().any(|a| a.id == id) {
+            return sounds::run_action(app, id);
+        }
+        run(id, &app.as_weak(), &feed)
+    });
+}
+
+/// The places Ctrl+K offers, with their keys, and the Sounds page's views.
+fn finder_pages(app: &AppWindow, shortcuts: &Shortcuts) {
+    let views: [(Place, &[&str]); 1] = [(Place::Sounds, &sounds::VIEWS)];
+    finder::add_source(app, "pages", std::sync::Arc::new(mo_app::finder::pages(shortcuts, &views)));
+}
+
+/// The actions Ctrl+K offers on a place: its page's own, then the app-wide ones that do something so far (not Ctrl+K
+/// itself, and the help key once).
+fn finder_actions(app: &AppWindow, shortcuts: &Shortcuts, place: Place) {
+    let page: &[Action] = match place {
+        Place::Songs => SONGS_ACTIONS,
+        Place::Sounds => SOUNDS_ACTIONS,
+        _ => &[],
+    };
+    let wide = APP_ACTIONS.iter().filter(|a| handles(a.id) && !matches!(a.id, "app.jump" | "app.helpF1"));
+    let actions = mo_app::finder::actions(shortcuts, page.iter().chain(wide));
+    finder::add_source(app, "actions", std::sync::Arc::new(actions));
+}
+
 /// The keys in use now.
 pub fn shortcuts() -> Shortcuts {
     KEYS.with(|k| k.borrow().as_deref().cloned()).unwrap_or_default()
@@ -155,7 +213,9 @@ pub fn keys_changed(app: &AppWindow, shortcuts: &Shortcuts) {
     presets::show_keys(app, shortcuts);
     if let Some(place) = place() {
         app.set_key_rows(ModelRc::new(VecModel::from(key_rows(shortcuts, place))));
+        finder_actions(app, shortcuts, place);
     }
+    finder_pages(app, shortcuts);
 }
 
 /// The places on the rail, with each one's key for its tooltip.
@@ -191,9 +251,13 @@ fn go_to(app: &AppWindow, index: i32) {
         log::info("Page", place.name());
     }
     app.set_place(index);
+    finder::close(app);
     settings::page_shown(place);
     if place == Place::Backup {
         backup::shown();
+    }
+    if place == Place::Midi {
+        midi::shown(app);
     }
     if place == Place::Settings {
         settings::shown(app);
@@ -213,6 +277,7 @@ pub(crate) fn refresh_keys(app: &AppWindow) {
     KEYS.with(|k| {
         if let Some(shortcuts) = k.borrow().as_ref() {
             app.set_key_rows(ModelRc::new(VecModel::from(key_rows(shortcuts, place))));
+            finder_actions(app, shortcuts, place);
         }
     });
 }
@@ -224,6 +289,7 @@ fn key_rows(shortcuts: &Shortcuts, place: Place) -> Vec<KeyRow> {
         Place::Songs => SONGS_ACTIONS,
         Place::Sounds => SOUNDS_ACTIONS,
         Place::Presets => presets::page_actions(),
+        Place::Midi => MIDI_ACTIONS,
         Place::Space => SPACE_ACTIONS,
         _ => &[],
     };
@@ -310,8 +376,16 @@ fn coming(place: Place) -> &'static str {
 }
 
 /// The app-wide actions `run` does something for so far (besides going to a place).
-const HANDLED: [&str; 7] =
-    ["app.prevPage", "app.nextPage", "app.help", "app.helpF1", "app.fullScreen", "app.play", "app.recycleBin"];
+const HANDLED: [&str; 8] = [
+    "app.jump",
+    "app.prevPage",
+    "app.nextPage",
+    "app.help",
+    "app.helpF1",
+    "app.fullScreen",
+    "app.play",
+    "app.recycleBin",
+];
 
 fn handles(id: &str) -> bool {
     HANDLED.contains(&id) || Place::ALL.iter().any(|p| p.shortcut_id() == id)
@@ -328,6 +402,7 @@ fn run(id: &str, weak: &Weak<AppWindow>, feed: &Feed) -> bool {
     match id {
         "app.prevPage" => go_to(&app, (app.get_place() + n - 1) % n),
         "app.nextPage" => go_to(&app, (app.get_place() + 1) % n),
+        "app.jump" => finder::toggle(&app),
         "app.help" | "app.helpF1" => app.set_sheet_open(!app.get_sheet_open()),
         "app.fullScreen" => {
             let w = app.window();

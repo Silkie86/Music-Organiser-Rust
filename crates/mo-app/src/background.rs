@@ -19,7 +19,17 @@ pub fn spawn<T: Send + 'static>(name: &str, work: impl FnOnce() -> T + Send + 's
 /// (rayon's `par_iter`: walking folders, reading many projects) runs there rather than on rayon's own pool at normal
 /// priority. Waits for it, so never call it on the window's thread.
 pub fn on_pool<T: Send>(work: impl FnOnce() -> T + Send) -> T {
-    static POOL: std::sync::LazyLock<Option<rayon::ThreadPool>> = std::sync::LazyLock::new(|| {
+    match pool() {
+        Some(pool) => pool.install(work),
+        // The system wouldn't start the threads: done here instead, still away from the window.
+        None => work(),
+    }
+}
+
+/// The app's pool of low-priority threads itself, for work that hands jobs to a pool of its own choosing (the MIDI
+/// reader). `None` when the system wouldn't start the threads.
+pub fn pool() -> Option<&'static rayon::ThreadPool> {
+    static POOL: LazyLock<Option<rayon::ThreadPool>> = LazyLock::new(|| {
         rayon::ThreadPoolBuilder::new()
             // 0 is rayon's own choice: one per core.
             .num_threads(POOL_THREADS.load(std::sync::atomic::Ordering::Relaxed))
@@ -28,11 +38,7 @@ pub fn on_pool<T: Send>(work: impl FnOnce() -> T + Send) -> T {
             .build()
             .ok()
     });
-    match POOL.as_ref() {
-        Some(pool) => pool.install(work),
-        // The system wouldn't start the threads: done here instead, still away from the window.
-        None => work(),
-    }
+    POOL.as_ref()
 }
 
 /// How many threads the pool gets, from Settings' pace; 0 for one per core. Read once, when the pool starts.

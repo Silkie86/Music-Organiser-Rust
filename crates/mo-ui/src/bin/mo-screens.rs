@@ -65,6 +65,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Once to lay the page out (the tiles' width tells the page how many fit in a row), then for real.
     capture(&window);
 
+    // The MIDI page, from made-up parts with their notes, worked out in place.
+    mo_ui::midi::work_here();
+    mo_ui::midi::connect(&app, out.join("no library.db"), feed.clone(), &Shortcuts::default());
+    mo_ui::midi::show(&app, Ok(mo_ui::midi::sample()));
     // Settings, from made-up settings: nothing is read from this computer or written.
     mo_ui::settings::connect(
         &app,
@@ -87,6 +91,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         app.set_place(place.index() as i32);
         shots.push((format!("{}-graphite.png", slug(place.name())), capture(&window)));
     }
+    // The MIDI page with a part picked: its card, piano roll and key; then parts shaped like it.
+    app.set_place(Place::Midi.index() as i32);
+    mo_ui::midi::pick_row(&app, 0);
+    shots.push(("midi-picked.png".into(), capture(&window)));
+    mo_ui::midi::run_action(&app, "midi.moreLike");
+    shots.push(("midi-more-like.png".into(), capture(&window)));
+    mo_ui::midi::run_action(&app, "midi.back");
+
     // The Backup page, filled with made-up folders.
     app.set_place(Place::Backup.index() as i32);
     mo_ui::backup::show_lines(&app, mo_ui::backup::sample_lines());
@@ -146,6 +158,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for tab in [Tab::Overview, Tab::Plugins, Tab::Saves] {
         mo_ui::songs::show_picked(&app, 0, sample_detail(), tab);
         mo_ui::arrangement::show_preview(&app, mo_ui::arrangement::sample_preview());
+        mo_ui::arrangement::show_peaks(&app, mo_ui::arrangement::sample_peaks());
         shots.push((format!("song-panel-{}.png", slug(tab.name())), capture(&window)));
     }
     // The arrangement: the mouse on a clip, zoomed in about the mouse, the Bitwig view, and in a light theme.
@@ -161,6 +174,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     shots.push(("arrangement-bitwig-view.png".into(), capture(&window)));
     mo_ui::apply_look(&app, &Look::from_settings(Some("Paper"), None));
     mo_ui::arrangement::show_preview(&app, mo_ui::arrangement::sample_preview());
+    mo_ui::arrangement::show_peaks(&app, mo_ui::arrangement::sample_peaks());
     shots.push(("arrangement-light.png".into(), capture(&window)));
     mo_ui::apply_look(&app, &graphite);
     // A song with things to look at, its Health strip open.
@@ -196,6 +210,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Tooltips: the mouse resting on a rail line, the song panel's Show in folder button and a song's date.
     mo_ui::songs::show_picked(&app, 0, sample_detail(), Tab::Overview);
     mo_ui::arrangement::show_preview(&app, mo_ui::arrangement::sample_preview());
+    mo_ui::arrangement::show_peaks(&app, mo_ui::arrangement::sample_peaks());
     for (name, x, y) in [
         ("tip-rail.png", 60.0, 125.0),
         ("tip-button.png", SHOW_BUTTON.0, SHOW_BUTTON.1),
@@ -221,6 +236,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     click(&window, 300.0, 880.0);
     hover(&window, -1.0, -1.0);
     app.global::<mo_ui::SongsData>().invoke_close_panel();
+
+    finder_shots(&app, &window, &mut shots);
 
     app.set_sheet_open(true);
     shots.push(("key-sheet.png".into(), capture(&window)));
@@ -255,6 +272,36 @@ fn presets_shots(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, shots: 
     shots.push(("presets-curve-picked.png".into(), capture(window)));
     mo_ui::presets::show_section(app, Section::Sounds);
     mo_ui::presets::pick_row(app, usize::MAX);
+}
+
+/// Ctrl+K: opened from the Songs page with nothing typed, a search that finds a song and a sound, only the sounds
+/// (Tab), and an action with its key.
+fn finder_shots(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, shots: &mut Vec<(String, Vec<u8>)>) {
+    use mo_ui::finder;
+    finder::search_here();
+    let songs = mo_app::finder::songs(&sample_songs(), chrono::Local::now().naive_local());
+    finder::add_source(app, "songs", std::sync::Arc::new(songs));
+    app.set_place(Place::Songs.index() as i32);
+    let data = app.global::<mo_ui::FinderData>();
+    let typed = |text: &str| {
+        data.set_query(text.into());
+        data.invoke_edited(text.into());
+    };
+    finder::toggle(app);
+    shots.push(("finder-open.png".into(), capture(window)));
+    typed("glass");
+    shots.push(("finder-search.png".into(), capture(window)));
+    typed("");
+    data.invoke_key("\t".into(), false, false);
+    data.invoke_key("\t".into(), false, false);
+    data.invoke_key(char::from(slint::platform::Key::DownArrow).to_string().into(), false, false);
+    shots.push(("finder-sounds.png".into(), capture(window)));
+    data.invoke_key("\t".into(), false, false);
+    data.invoke_key("\t".into(), false, false);
+    data.invoke_key("\t".into(), false, false);
+    typed("full");
+    shots.push(("finder-action.png".into(), capture(window)));
+    finder::close(app);
 }
 
 /// The Sounds page: a sound picked and playing in its panel, a filter on, the List and History views, and the tiles in
@@ -704,6 +751,24 @@ fn settings_shots(
     data.invoke_tab_picked(1);
     capture(window);
     shots.push(("settings-folders.png".into(), capture(window)));
+    data.invoke_tab_picked(2);
+    mo_ui::settings::show_bitwig(
+        app,
+        mo_app::settings::bitwig_status(&Ok(mo_dawlink::bitwig::Hello {
+            link: 3,
+            product: "Bitwig Studio".into(),
+            version: "6.1.5".into(),
+            project: "Night drive".into(),
+            modified: true,
+            changes: true,
+            runtime: "java".into(),
+            extension: "3.18".into(),
+            loopback: Some(true),
+            ..Default::default()
+        })),
+    );
+    capture(window);
+    shots.push(("settings-daws.png".into(), capture(window)));
     data.invoke_tab_picked(3);
     capture(window);
     shots.push(("settings-shortcuts.png".into(), capture(window)));

@@ -335,8 +335,8 @@ fn everything_is_what_all_and_vectors_read() {
         let db = SoundsDb::open_read_only(&path).unwrap();
         let e = db.everything(now()).unwrap();
         assert_eq!(e.sounds, db.all(now()).unwrap());
-        assert_eq!(e.features, db.vectors("features").unwrap());
-        assert_eq!(e.clap, db.vectors("clap").unwrap());
+        assert_eq!(e.features.to_vectors(), db.vectors("features").unwrap());
+        assert_eq!(e.clap.to_vectors(), db.vectors("clap").unwrap());
     }
 }
 
@@ -356,11 +356,12 @@ fn a_big_library_reads_as_the_csharp_app_lists_it() {
     assert!(sound(29).hidden);
     let damaged = sound(41);
     assert_eq!((damaged.rating, damaged.favourite, damaged.sound_type.as_str()), (0, false, "7"));
-    assert!(!e.features.contains_key(&41));
+    let (features, clap) = (e.features.to_vectors(), e.clap.to_vectors());
+    assert!(!features.contains_key(&41));
     assert!(sound(7).analysis.is_none());
     assert_eq!(sound(2).analysis.as_ref().unwrap().waveform, [0.5, 0.2]);
-    assert_eq!(e.features.get(&2), Some(&vec![2.0, 3.0, 4.0, 5.0]));
-    assert_eq!(e.clap.get(&3).map(Vec::len), Some(8));
+    assert_eq!(features.get(&2), Some(&vec![2.0, 3.0, 4.0, 5.0]));
+    assert_eq!(clap.get(&3).map(Vec::len), Some(8));
 }
 
 #[test]
