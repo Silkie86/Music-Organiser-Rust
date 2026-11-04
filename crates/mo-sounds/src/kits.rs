@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::dotnet_random::DotnetRandom;
-use crate::index::{SoundIndex, dot};
+use crate::index::SoundIndex;
 use crate::usage::Usage;
 use crate::{Sound, directory, types};
 
@@ -157,8 +157,8 @@ pub fn roll(
                     score += 0.2;
                 }
                 score += f64::from((c.rating - 3).max(0)) * 0.1;
-                if let (Some(vibe), Some(cv)) = (vibe, clap.and_then(|i| i.get(c.id))) {
-                    score += 3.0 * dot(vibe, cv);
+                if let Some(likeness) = vibe.and_then(|vibe| clap.and_then(|i| i.dot_with(c.id, vibe))) {
+                    score += 3.0 * likeness;
                 }
                 if let (Some(key), true, Some(p)) = (
                     o.key_tonic,

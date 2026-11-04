@@ -25,6 +25,8 @@ mo-space = { path = "../mo-space" }
 mo-sounds = { path = "../mo-sounds" }
 mo-audio = { path = "../mo-audio" }
 mo-backup = { path = "../mo-backup" }
+# Settings › DAWs checks the Bitwig link.
+mo-dawlink = { path = "../mo-dawlink" }
 # The window and the views the app draws itself (the galaxy) go through the graphics card with wgpu (spec 9.1).
 slint = { workspace = true, features = ["unstable-wgpu-30", "renderer-femtovg-wgpu"] }
 image.workspace = true

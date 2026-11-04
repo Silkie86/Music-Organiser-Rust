@@ -3139,6 +3139,7 @@ name = "mo-sounds"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "half",
  "mo-audio",
  "mo-formats",
  "mo-library",
@@ -3210,6 +3211,7 @@ dependencies = [
  "mo-app",
  "mo-audio",
  "mo-backup",
+ "mo-dawlink",
  "mo-formats",
  "mo-harmony",
  "mo-library",

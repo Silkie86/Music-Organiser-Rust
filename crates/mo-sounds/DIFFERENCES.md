@@ -71,6 +71,8 @@ nearest sounds for the same made-up vectors.
 | Two sounds exactly as alike at the cut-off (exact copies are common) | Kept whichever each worker met first, which depends on the order the dictionary holds them. | Keeps the lower id, every time. | Better (same list each time) |
 | Standardising | Sums in dictionary order. | Sums in id order, so a rebuild gives the same numbers. | Same in practice |
 | "Sounds like this" when hidden copies or other types fill the first 3 × max | Stops there, so the list can come up short. | Asks for more until the list is full or the library has no more. | Better |
+| CLAP's fingerprints once deep listening is on (Sounds like this, Rediscover, kits, the galaxy) | Held at full precision: about 0.93 GB for 450,000 sounds. | Held at half precision (about 3 significant digits a number): 0.46 GB. A likeness (512 products, rounded to 3 places) can move by about 0.001, so two nearly equal matches can swap places. The likeness twin checks the full-precision search; the app's half-precision search is checked against it in `index` tests. | Better for Solomon's PC (Solomon chose it, 2026-11-03: memory over the last digit) |
+| CLAP's fingerprints before deep listening has heard 9 in 10 sounds | Held, though nothing searches them. | Not held. | Better (less memory, same answers) |
 
 ## Rediscover
 
