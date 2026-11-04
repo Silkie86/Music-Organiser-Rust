@@ -173,10 +173,17 @@ fn fl_studios_own_content_is_looked_for_where_fl_studio_keeps_it() {
     let packs = dir.join("Image-Line/FL Studio 2024/Data/Patches/Packs").to_str().unwrap().to_owned();
     let elsewhere = dir.join("Image-Line/FL Studio 2024/Data/Other").to_str().unwrap().to_owned();
     let locator = SampleLocator::new(Box::new(move |_| vec![elsewhere.clone(), packs.clone()]));
+    // Compared as paths, so either slash counts the same on Windows.
+    let at = |sample: &str| locator.locate(sample, &project).map(PathBuf::from);
     let saved = "%FLStudioFactoryData%/Data/Patches/Packs/Drums/Kicks/Kick 01.wav";
-    assert_eq!(locator.locate(saved, &project).as_deref(), kick.to_str());
+    assert_eq!(at(saved), Some(kick.clone()));
+    assert_eq!(
+        at(&saved.replace('/', "\\")),
+        Some(kick.clone()),
+        "saved with backslashes, as FL Studio on Windows does"
+    );
     let lower = saved.replacen("%FLStudioFactoryData%", "%flstudiofactorydata%", 1);
-    assert_eq!(locator.locate(&lower, &project).as_deref(), kick.to_str(), "the setting's name in any case");
+    assert_eq!(at(&lower), Some(kick.clone()), "the setting's name in any case");
     assert_eq!(locator.trees_read(), 0, "no folder tree read for it");
     // Not where FL Studio keeps it: looked for as any other sample (its folders read), and still found.
     let gone = "%FLStudioFactoryData%/Data/Patches/Packs/Drums/Kicks/Kick 99.wav";

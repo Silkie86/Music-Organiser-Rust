@@ -213,14 +213,17 @@ impl SampleLocator {
     /// A sample of FL Studio's own content ("%FLStudioFactoryData%\Data\Patches\Packs\…"), where an FL Studio this
     /// project's DAW folders name keeps it (the folder its packs folder is in): no folder tree is read for it.
     fn fl_factory_file(&self, sample: &str, project: &str) -> Option<String> {
-        let rest = sample.get(..FL_FACTORY_DATA.len()).filter(|p| case::eq_ignore_case(p, FL_FACTORY_DATA))?;
-        let rest = sample[rest.len()..].trim_start_matches(['\\', '/']);
+        let setting = sample.get(..FL_FACTORY_DATA.len()).filter(|p| case::eq_ignore_case(p, FL_FACTORY_DATA))?;
+        // The rest of its path a folder at a time, as it's saved with either slash, so the file's path has this
+        // computer's.
+        let rest: Vec<&str> = sample[setting.len()..].split(['\\', '/']).filter(|p| !p.is_empty()).collect();
         (self.content)(project).iter().find_map(|folder| {
             let packs = Path::new(folder);
             let ends: Vec<&str> = packs.iter().rev().take(FL_PACKS.len()).filter_map(|p| p.to_str()).collect();
             let is_packs = ends.len() == FL_PACKS.len()
                 && ends.iter().rev().zip(FL_PACKS).all(|(a, b)| case::eq_ignore_case(a, b));
-            let file = packs.ancestors().nth(FL_PACKS.len()).filter(|_| is_packs)?.join(rest);
+            let fl = packs.ancestors().nth(FL_PACKS.len()).filter(|_| is_packs)?;
+            let file = rest.iter().fold(fl.to_path_buf(), |path, part| path.join(part));
             file.is_file().then(|| file.to_str().map(str::to_owned)).flatten()
         })
     }
