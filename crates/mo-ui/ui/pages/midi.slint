@@ -276,6 +276,9 @@ component PianoRoll inherits Well {
     // A piano's keys in either theme: white keys light and black keys dark.
     private property <color> white-key: Theme.light ? Theme.surface : Theme.muted;
     private property <color> black-key: Theme.light ? Theme.text : Theme.background;
+    // How tall a key's row is, and whether a name fits in it.
+    private property <length> key-row: (self.height - 2 * Space.sm) / max(1, self.keys);
+    private property <bool> names-fit: MidiData.roll-names && self.key-row >= Type.tiny;
     height: MidiData.roll-names
         ? clamp(self.keys * self.name-row + 2 * Space.sm, 200px, 520px)
         : 200px;
@@ -305,7 +308,7 @@ component PianoRoll inherits Well {
                 width: (root.side - Space.sm) * 0.4;
                 background: root.white-key;
             }
-            if MidiData.roll-keyboard && (k.c || (MidiData.roll-names && self.height >= Type.tiny)): Text {
+            if MidiData.roll-keyboard && (k.c || root.names-fit): Text {
                 // A black key's name sits on the black part, a white key's at the end of the key.
                 x: Space.xs + 2px;
                 width: (root.side - Space.sm) * (k.black ? 0.6 : 1) - 4px;
@@ -330,7 +333,7 @@ component PianoRoll inherits Well {
             }
         }
     }
-    Rectangle {
+    notes := Rectangle {
         x: root.side;
         y: Space.sm;
         width: parent.width - self.x - Space.sm;
@@ -347,7 +350,7 @@ component PianoRoll inherits Well {
             height: max(2px, parent.height * n.h - 1px);
             border-radius: 1px;
             background: Theme.accent.transparentize(1 - n.strength);
-            if MidiData.roll-names && self.height >= Type.tiny && self.width >= 20px: Text {
+            if root.names-fit && notes.width * n.w >= 20px: Text {
                 x: 2px;
                 width: parent.width - 4px;
                 text: n.name;
