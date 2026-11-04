@@ -236,6 +236,7 @@ fn show_places(app: &AppWindow, shortcuts: &Shortcuts) {
     let settings = Place::Settings.index();
     app.set_rail(ModelRc::new(VecModel::from(places[..settings].to_vec())));
     app.set_places(ModelRc::new(VecModel::from(places)));
+    app.global::<FinderData>().set_jump_key(shortcuts.key_of("app.jump").into());
 }
 
 /// The Songs page's buttons' tooltips: what each does and its key, from the one shortcut list (rule 15).
