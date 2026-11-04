@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, Metadata};
 use std::io::Read;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1314,13 +1314,13 @@ fn remove_placeholder(_spot: &Path) {}
 /// Linux: where a Trash item itself is kept, from its note (`…/Trash/info/Name.trashinfo` keeps
 /// `…/Trash/files/Name`), as the trash crate finds it.
 #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
-fn in_bin_path(item: &trash::TrashItem) -> Option<PathBuf> {
+fn in_bin_path(item: &trash::TrashItem) -> Option<std::path::PathBuf> {
     let info = Path::new(&item.id);
     Some(info.parent()?.parent()?.join("files").join(info.file_stem()?))
 }
 
 #[cfg(windows)]
-fn in_bin_path(_item: &trash::TrashItem) -> Option<PathBuf> {
+fn in_bin_path(_item: &trash::TrashItem) -> Option<std::path::PathBuf> {
     None
 }
 
