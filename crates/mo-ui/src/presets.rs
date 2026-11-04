@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use mo_app::activity::Feed;
-use mo_app::background;
+use mo_app::background::{self, Newest};
 use mo_app::bitwig_convert as bitwig;
 use mo_app::log;
 use mo_app::presets::{self as logic, CurveFilters, Filters, Item, Section, act, curve_act};
@@ -52,8 +52,15 @@ const BATCH: usize = 24;
 struct Page {
     section: Section,
     /// The Sounds section: every line, those shown (places in `items`), and the picked one (a place in `items`).
-    items: Vec<Item>,
+    /// Shared with the filtering worker, which works out what's shown off the window's thread.
+    items: Arc<Vec<Item>>,
     shown: Vec<usize>,
+    /// Counts the filterings asked for, so an older one finishing late is dropped (newest wins).
+    asked: u64,
+    /// The file types' notes for the lines shown, worked out with them.
+    format_note: String,
+    /// Filter here, not on the worker (the screenshots, which show the page at once).
+    filter_here: bool,
     filters: Filters,
     picked: Option<usize>,
     years: Vec<(i32, usize)>,
@@ -102,6 +109,38 @@ thread_local! {
     static CURVE_LINES: Rc<CurveLines> = Rc::new(CurveLines::default());
     static FILTER_MODELS: ChipModels = ChipModels::default();
     static APP: RefCell<Option<Weak<AppWindow>>> = const { RefCell::new(None) };
+    /// Works out what the filters show, off the window's thread, newest ask first.
+    static FILTERER: RefCell<Option<Newest<FilterAsk>>> = const { RefCell::new(None) };
+}
+
+/// What the filtering worker is asked: the lines, the filters, and the plugins when they're to be counted again
+/// (`None`: the ones the page has).
+struct FilterAsk {
+    id: u64,
+    items: Arc<Vec<Item>>,
+    filters: Filters,
+    plugins: Option<Vec<(String, usize)>>,
+}
+
+/// What the filters show, worked out together, so the list and its chips change at once (a click on a chip is
+/// turned back into its choice through the chips on show).
+struct FilterAnswer {
+    id: u64,
+    shown: Vec<usize>,
+    years: Vec<(i32, usize)>,
+    chips: logic::FilterChips,
+    format_note: String,
+    plugins: Vec<(String, usize)>,
+}
+
+impl FilterAsk {
+    fn answer(self) -> FilterAnswer {
+        let plugins = self.plugins.unwrap_or_else(|| logic::plugins(&self.items));
+        let found = logic::filtered(&self.items, &self.filters);
+        let chips = logic::filter_chips(&found.counts, &plugins, &self.filters);
+        let format_note = logic::format_note(&self.items, &found.shown);
+        FilterAnswer { id: self.id, shown: found.shown, years: found.years, chips, format_note, plugins }
+    }
 }
 
 /// The filters' chips and menus on screen, kept from one showing to the next.
@@ -409,11 +448,68 @@ fn change_curves(app: &AppWindow, f: impl FnOnce(&mut CurveFilters)) {
     show_all(app);
 }
 
-/// Works out what's shown from the filters. Quick (each line's search words are made once), so it runs here.
+/// Works out what's shown from the filters, off the window's thread: the list as it is stays on show until the new
+/// one is ready (a moment), and a newer ask wins over an older one still going. `count_plugins`: the lines changed,
+/// so the plugins are counted again too.
 fn refilter(p: &mut Page) {
-    p.shown = logic::shown(&p.items, &p.filters);
-    p.years = logic::year_counts(&p.items, &p.filters);
-    p.chips = logic::filter_chips(&logic::counts(&p.items, &p.filters), &p.plugins, &p.filters);
+    ask_filter(p, false);
+}
+
+fn ask_filter(p: &mut Page, count_plugins: bool) {
+    p.asked += 1;
+    let ask = FilterAsk {
+        id: p.asked,
+        items: Arc::clone(&p.items),
+        filters: p.filters.clone(),
+        plugins: (!count_plugins).then(|| p.plugins.clone()),
+    };
+    if p.filter_here || p.items.is_empty() {
+        take_filtered(p, ask.answer());
+        return;
+    }
+    let ask = FILTERER.with(|w| {
+        let mut w = w.borrow_mut();
+        if w.is_none() {
+            match Newest::start("Presets filter", |ask: FilterAsk| {
+                let answer = background::on_pool(|| ask.answer());
+                on_window(move |app| {
+                    let current = PAGE.with(|p| take_filtered(&mut p.borrow_mut(), answer));
+                    if current {
+                        show_all(app);
+                    }
+                });
+            }) {
+                Ok(worker) => *w = Some(worker),
+                Err(e) => log::error(
+                    "Presets",
+                    &format!("Couldn't start the list's filtering thread, so it filters here: {e}"),
+                ),
+            }
+        }
+        match w.as_ref() {
+            Some(worker) => {
+                worker.ask(ask);
+                None
+            }
+            None => Some(ask),
+        }
+    });
+    if let Some(ask) = ask {
+        take_filtered(p, ask.answer());
+    }
+}
+
+/// A filtering is done: the page takes it, unless a newer one has been asked for since. Whether it took it.
+fn take_filtered(p: &mut Page, a: FilterAnswer) -> bool {
+    if a.id != p.asked {
+        return false;
+    }
+    p.shown = a.shown;
+    p.years = a.years;
+    p.chips = a.chips;
+    p.format_note = a.format_note;
+    p.plugins = a.plugins;
+    true
 }
 
 /// Puts everything the page knows on screen.
@@ -452,7 +548,7 @@ fn show_all(app: &AppWindow) {
         let (title, text) = logic::empty_words(p.items.len(), p.shown.len(), reading, f.any(), p.failed.as_deref());
         data.set_empty_title(title.into());
         data.set_empty_text(text.into());
-        data.set_format_note(logic::format_note(&p.items, &p.shown).into());
+        data.set_format_note(p.format_note.as_str().into());
         let most = p.years.iter().map(|y| y.1).max().unwrap_or(1).max(1) as f32;
         let bars: Vec<YearBar> = p
             .years
@@ -805,7 +901,7 @@ fn read_all(at: &Where) -> Result<(), String> {
         use rayon::prelude::*;
         found.par_iter().map(|f| (f.path.clone(), file_year(&f.path))).collect()
     });
-    let items: Vec<Item> = plib::rows(&[], &found)
+    let mut items: Vec<Item> = plib::rows(&[], &found)
         .into_iter()
         .map(|row| {
             let year = match &row.source {
@@ -815,6 +911,8 @@ fn read_all(at: &Where) -> Result<(), String> {
             Item::new(row, String::new(), year)
         })
         .collect();
+    // In the list's order, so filtering needn't sort them.
+    logic::sort_files(&mut items);
     let files = items.len();
     let templates = Arc::new(templates);
     on_window(move |app| {
@@ -842,7 +940,9 @@ fn add(items: Vec<Item>, songs: usize, files: usize, reading: Option<(usize, usi
                     i.row.fixed = *fix;
                 }
             }
-            p.items.extend(items);
+            // While a filtering still holds the old lines, they're copied once for this (they're seldom both at once:
+            // the lines come at most four times a second, and a filtering takes a moment).
+            Arc::make_mut(&mut p.items).extend(items);
             p.songs += songs;
             p.files += files;
             if reading.is_some() {
@@ -852,9 +952,8 @@ fn add(items: Vec<Item>, songs: usize, files: usize, reading: Option<(usize, usi
             let due = p.shown_at.is_none_or(|t| t.elapsed() >= Duration::from_millis(250)) || reading.is_none();
             if due {
                 p.shown_at = Some(Instant::now());
-                // Every plugin: the menu scrolls, and only makes the lines in sight.
-                p.plugins = logic::plugins(&p.items);
-                refilter(&mut p);
+                // Every plugin, counted again with the filtering: the menu scrolls, and only makes the lines in sight.
+                ask_filter(&mut p, true);
             }
             due
         });
@@ -952,7 +1051,7 @@ fn set_fix(app: &AppWindow, item: &Item, role: Option<Role>) {
 fn apply(app: &AppWindow, hash: &str, role: Option<Role>) {
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        logic::apply_fix(&mut p.items, hash, role);
+        logic::apply_fix(Arc::make_mut(&mut p.items).as_mut_slice(), hash, role);
         p.fixed_now.insert(hash.to_owned(), role);
         // A part filter may drop it from the list; the card stays on it.
         refilter(&mut p);
@@ -1398,7 +1497,8 @@ pub fn show_sample(app: &AppWindow) {
         let mut p = p.borrow_mut();
         p.started = true;
         p.curves_started = true;
-        p.items = sample_items();
+        p.filter_here = true;
+        p.items = Arc::new(sample_items());
         p.songs = 3;
         p.files = p.items.iter().filter(|i| i.is_file()).count();
         p.plugins = logic::plugins(&p.items);
