@@ -321,7 +321,7 @@ fn shapes(saves: &[&mo_library::Save]) -> Vec<plan::SaveShape> {
 /// makes the plan. Reads only. Slow: on the app's low-priority pool, never the window's thread.
 pub fn prepare(library: &Library, settings: &Settings, stop: &AtomicBool) -> Result<Prepared, String> {
     let backup = settings.drive.clone().ok_or("Pick a backup drive first")?;
-    let gathered = folders::gather(&settings.folders, stop).map_err(|_| "Stopped".to_owned())?;
+    let gathered = folders::gather(&settings.folders, &backup, stop).map_err(|_| "Stopped".to_owned())?;
     let saves = library.saves().map_err(|e| e.to_string())?;
     let choices = library.song_choices().map_err(|e| e.to_string())?;
     let samples = library.sample_paths().map_err(|e| e.to_string())?;

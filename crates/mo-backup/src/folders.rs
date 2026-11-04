@@ -4,10 +4,11 @@
 //! saves stay out).
 //!
 //! [`gather`] walks every folder in the list (several at a time) and gives the files [`crate::plan::plan`] needs; give
-//! it the list as [`crate::plan::Listed`], so it knows which files are in a whole folder. A folder inside another one in the list is walked once, as part of
-//! the outer one, and still keeps its own choice. A folder that isn't there (a drive not plugged in) is listed as
-//! missing, and the rest go on. Folders are only read.
+//! it the list as [`crate::plan::Listed`], so it knows which files are in a whole folder. A folder inside another one
+//! in the list is walked once, as part of the outer one, and still keeps its own choice. A folder that isn't there (a
+//! drive not plugged in, a link to nowhere) is listed as missing, and the rest go on. Folders are only read.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
@@ -78,24 +79,61 @@ pub fn within(inner: &Path, outer: &Path) -> bool {
     }
 }
 
-/// Walks every folder in the list. Call it inside the app's low-priority pool, never on the window's thread.
-pub fn gather(list: &[Folder], stop: &AtomicBool) -> Result<Gathered, Stopped> {
+/// Walks every folder in the list, leaving out anything in the backup itself. Call it inside the app's low-priority
+/// pool, never on the window's thread.
+///
+/// Folders are matched by where each really is, so links don't fool the walk (Space's folder move leaves a junction
+/// where a folder was):
+///
+/// - A listed folder that is itself a link is walked where it really is. A link that leads nowhere, or whose real
+///   place can't be told, is missing: it's never walked as empty.
+/// - A listed folder inside another one is walked once, as part of the outer one, even when it's reached through a
+///   link (the outer walk leaves links alone, so the inner one is walked on its own then).
+/// - Each file takes the spelling of the nearest listed folder it's in (the first of two that are the same place), so
+///   it matches your projects' paths and that folder keeps its own choice.
+pub fn gather(list: &[Folder], backup: &Path, stop: &AtomicBool) -> Result<Gathered, Stopped> {
+    struct There<'a> {
+        listed: &'a Path,
+        real: PathBuf,
+    }
     let mut out = Gathered::default();
-    let mut walk: Vec<&Path> = Vec::new();
-    for (i, f) in list.iter().enumerate() {
-        if !f.path.is_dir() {
+    let mut there: Vec<There<'_>> = Vec::new();
+    for f in list {
+        let real = if f.path.is_dir() { fs::canonicalize(&f.path).ok() } else { None };
+        let Some(real) = real else {
             out.missing.push(f.path.clone());
             continue;
-        }
-        // Walked as part of another folder in the list (the first of two the same is walked).
-        let covered = list.iter().enumerate().any(|(j, o)| {
-            j != i && o.path.is_dir() && within(&f.path, &o.path) && (!within(&o.path, &f.path) || j < i)
-        });
-        if !covered {
-            walk.push(&f.path);
+        };
+        // The first of two listed folders that are the same place names its files.
+        if !there.iter().any(|t| t.real == real) {
+            there.push(There { listed: &f.path, real });
         }
     }
-    let found: Vec<Vec<FileEntry>> = walk.par_iter().map(|p| files(p, stop)).collect::<Result<_, _>>()?;
+    // Deepest first, so the first one a file is in is the nearest.
+    there.sort_by_key(|t| std::cmp::Reverse(t.real.components().count()));
+    let roots: Vec<&Path> = there
+        .iter()
+        .filter(|t| !there.iter().any(|o| o.real != t.real && t.real.starts_with(&o.real)))
+        .map(|t| t.real.as_path())
+        .collect();
+    let backup = fs::canonicalize(backup).ok();
+    let found: Vec<Vec<FileEntry>> = roots
+        .par_iter()
+        .map(|&root| {
+            let inside: Vec<&There<'_>> = there.iter().filter(|t| t.real.starts_with(root)).collect();
+            let mut found = files(root, stop)?;
+            found.retain_mut(|e| {
+                if backup.as_ref().is_some_and(|b| e.path.starts_with(b)) {
+                    return false;
+                }
+                if let Some((t, rest)) = inside.iter().find_map(|t| Some((t, e.path.strip_prefix(&t.real).ok()?))) {
+                    e.path = t.listed.join(rest);
+                }
+                true
+            });
+            Ok(found)
+        })
+        .collect::<Result<_, _>>()?;
     out.files = found.into_iter().flatten().collect();
     Ok(out)
 }
