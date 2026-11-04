@@ -825,7 +825,8 @@ fn is_report(name: &str, start: &str) -> bool {
 /// settings' (`backup.txt.mo-part`, `backup-songs.txt.mo-part`, see [`crate::backup`]), the app's own settings'
 /// (`rust-settings.json.mo-part`, [`crate::app_settings::save`]), the sweep's own (`tidy-notes.txt.mo-part`,
 /// [`write_notes_done`]), or a side database being made (`presets.db.new-<number>`, `curves.db.new-<number>`, with
-/// SQLite's own files beside it; `mo_presets::fixes`).
+/// SQLite's own files beside it; `mo_presets::fixes`), or the saves list's copy being made
+/// (`library-list-rust.db.new-<number>`, `mo_library::list_copy`).
 fn is_cut_short(name: &str) -> bool {
     [SETTINGS_FILE, SONGS_FILE, crate::app_settings::FILE, NOTES_DONE_FILE]
         .iter()
@@ -833,6 +834,7 @@ fn is_cut_short(name: &str) -> bool {
         || [mo_presets::fixes::FILE_NAME, mo_presets::curves::FILE_NAME]
             .iter()
             .any(|database| mo_presets::fixes::is_half_made(name, database))
+        || mo_library::list_copy::is_half_made(name)
 }
 
 /// The twin test's copy of the library, or SQLite's own files beside it.
@@ -2575,6 +2577,8 @@ mod tests {
         assert!(!is_cut_short("rust-settings.json.unreadable") && !is_cut_short("rust-settings.json.mo-part-2"));
         assert!(!is_cut_short("presets.db.new-12-old") && !is_cut_short("presets.db") && !is_cut_short("backup.txt"));
         assert!(!is_cut_short("library.db.new-12") && !is_cut_short("backup.txt.mo-part.2"));
+        assert!(is_cut_short("library-list-rust.db.new-12") && is_cut_short("library-list-rust.db.new-3-journal"));
+        assert!(!is_cut_short("library-list-rust.db") && !is_cut_short("library-list-rust.db.new-"));
         assert!(mo_presets::export::is_half_written("A.bwcurve.mo-part-1-0"));
         assert!(!mo_presets::export::is_half_written("A.bwcurve.mo-part-1-x"));
         assert!(!mo_presets::export::is_half_written("A.bwcurve.mo-part-1"));

@@ -26,6 +26,7 @@ pub mod settings;
 pub mod songs;
 pub mod sounds;
 pub mod space;
+pub mod startup;
 mod stuck;
 pub mod watchdog;
 mod waves;

@@ -6,6 +6,7 @@
 use std::cell::{Cell, RefCell};
 use std::future::Future;
 use std::rc::Rc;
+use std::sync::Mutex;
 use std::task::{Context, Poll, Waker};
 use std::thread::LocalKey;
 use std::time::Duration;
@@ -66,35 +67,120 @@ pub fn after_next_frame(latest: Duration, f: impl FnOnce() + 'static) {
     });
 }
 
-/// Asks Slint to draw the window with wgpu, before any window is made, on the fastest card there is. When that can't
-/// be done, or `MO_DRAW_CPU` is set, the window is drawn the usual way and the views draw on the processor.
-pub fn choose() {
-    if std::env::var_os("MO_DRAW_CPU").is_some() {
-        log::info("Graphics", "MO_DRAW_CPU is set: the views draw on the processor");
-        return;
+/// The card, looked for on a thread of its own from the very start (see [`look_ahead`]), while the log and the
+/// settings start.
+static AHEAD: Mutex<Option<std::thread::JoinHandle<Found>>> = Mutex::new(None);
+
+/// What looking for the card found.
+enum Found {
+    /// `MO_DRAW_CPU` is set.
+    Asked,
+    /// A card, ready for Slint: the window draws with these, not with a second set Slint would make for itself.
+    Card(Box<WGPUConfiguration>),
+    /// Only a software card: the views draw on the processor.
+    Software,
+    /// No card at all, and why.
+    None(String),
+    /// A card, but it wouldn't give a device (why): Slint looks for one itself, as it did before.
+    NoDevice(String),
+}
+
+/// Starts looking for the graphics card on a thread of its own, the first thing the app does. Finding one and making
+/// its device takes a while on Windows (loading the drivers), and nothing else needs to wait for it until the window
+/// is made ([`choose`]).
+pub fn look_ahead() {
+    let found = std::thread::Builder::new().name("Graphics card".to_owned()).spawn(find);
+    if let (Ok(found), Ok(mut ahead)) = (found, AHEAD.lock()) {
+        *ahead = Some(found);
     }
-    // Slint only finds out whether there's a card once the window is being made, too late to draw the usual way
-    // instead, so the card is looked for first.
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
-    let options =
-        wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() };
-    match wait(instance.request_adapter(&options)) {
-        Ok(adapter) if adapter.get_info().device_type != wgpu::DeviceType::Cpu => {}
-        Ok(_) => {
+}
+
+/// Looks for the fastest card there is and makes its device, once, for Slint to draw the window with. The card's own
+/// interfaces (Vulkan, DirectX 12, Metal) are tried first and OpenGL only when none of them answers: making an OpenGL
+/// one on Windows opens a hidden window of its own, and wgpu only picks it when there's nothing else anyway. Debug builds don't turn the
+/// drivers' own checks on (`WGPU_VALIDATION=1` still does): those slow every start and frame, and wgpu checks what
+/// the app asks of the card itself either way.
+fn find() -> Found {
+    if std::env::var_os("MO_DRAW_CPU").is_some() {
+        return Found::Asked;
+    }
+    // OpenGL only on a computer whose card has none of the others (an old one), as wgpu would have picked it there.
+    let mut found = Found::None("no card answered".to_owned());
+    let mut card = None;
+    for backends in [wgpu::Backends::PRIMARY, wgpu::Backends::SECONDARY] {
+        let mut asked = wgpu::InstanceDescriptor::new_without_display_handle();
+        asked.backends = backends;
+        asked.flags = wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL;
+        let instance = wgpu::Instance::new(asked.with_env());
+        let options = wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            ..Default::default()
+        };
+        match wait(instance.request_adapter(&options)) {
+            // A software card only when asked (`SLINT_WGPU_CPU`, as Slint itself takes it): the benches draw with one.
+            Ok(adapter)
+                if adapter.get_info().device_type != wgpu::DeviceType::Cpu
+                    || std::env::var_os("SLINT_WGPU_CPU").is_some() =>
+            {
+                card = Some((instance, adapter));
+                break;
+            }
+            Ok(_) => found = Found::Software,
+            Err(e) => {
+                if !matches!(found, Found::Software) {
+                    found = Found::None(e.to_string());
+                }
+            }
+        }
+    }
+    let Some((instance, adapter)) = card else { return found };
+    // What Slint itself asks for (its default settings): no extra features, and pictures as big as the screen.
+    let settings = WGPUSettings::default();
+    let wanted = wgpu::DeviceDescriptor {
+        label: None,
+        required_features: settings.device_required_features,
+        required_limits: settings.device_required_limits.clone().using_resolution(adapter.limits()),
+        experimental_features: settings.device_experimental_features,
+        memory_hints: settings.device_memory_hints.clone(),
+        trace: wgpu::Trace::default(),
+    };
+    match wait(adapter.request_device(&wanted)) {
+        Ok((device, queue)) => Found::Card(Box::new(WGPUConfiguration::Manual { instance, adapter, device, queue })),
+        Err(e) => Found::NoDevice(e.to_string()),
+    }
+}
+
+/// Asks Slint to draw the window with wgpu, before any window is made, on the card [`look_ahead`] found (or finds it
+/// now, if that didn't start). When there's no card to draw with, or `MO_DRAW_CPU` is set, the window is drawn the
+/// usual way and the views draw on the processor.
+pub fn choose() {
+    let ahead = AHEAD.lock().ok().and_then(|mut a| a.take());
+    let found = ahead.and_then(|f| f.join().ok()).unwrap_or_else(find);
+    let config = match found {
+        Found::Asked => {
+            log::info("Graphics", "MO_DRAW_CPU is set: the views draw on the processor");
+            return;
+        }
+        Found::Software => {
             log::warning("Graphics", "Only a software graphics card here, so the views draw on the processor");
             return;
         }
-        Err(e) => {
+        Found::None(e) => {
             log::warning(
                 "Graphics",
                 &format!("No graphics card to draw with, so the views draw on the processor: {e}"),
             );
             return;
         }
-    }
-    let mut settings = WGPUSettings::default();
-    settings.power_preference = wgpu::PowerPreference::HighPerformance;
-    if let Err(e) = slint::BackendSelector::new().require_wgpu_30(WGPUConfiguration::Automatic(settings)).select() {
+        Found::Card(config) => *config,
+        Found::NoDevice(e) => {
+            log::warning("Graphics", &format!("The graphics card wouldn't give a device ({e}): Slint looks for one"));
+            let mut settings = WGPUSettings::default();
+            settings.power_preference = wgpu::PowerPreference::HighPerformance;
+            WGPUConfiguration::Automatic(settings)
+        }
+    };
+    if let Err(e) = slint::BackendSelector::new().require_wgpu_30(config).select() {
         log::warning(
             "Graphics",
             &format!("Couldn't draw with the graphics card, so the views draw on the processor: {e}"),
@@ -137,6 +223,7 @@ pub fn connect(app: &AppWindow) {
                 mo_app::frame_timing::drawn(since.elapsed(), crate::page_name());
             }
             FRAMES.with(|f| f.set(f.get() + 1));
+            crate::startup::frame_drawn();
             // Not from inside Slint's drawing: at the event loop's next turn, once this frame is on screen.
             let waiting = AFTER_FRAME.with(|q| std::mem::take(&mut *q.borrow_mut()));
             if !waiting.is_empty() {
@@ -166,6 +253,9 @@ pub fn connect(app: &AppWindow) {
     });
     if let Err(e) = set {
         log::info("Graphics", &format!("No graphics card to draw the views with: {e:?}"));
+        // Nothing says when a frame is drawn then: the start-up line goes at the event loop's first turn, as near
+        // as it gets (the window is up by then).
+        slint::Timer::single_shot(Duration::ZERO, crate::startup::frame_drawn);
     }
 }
 
