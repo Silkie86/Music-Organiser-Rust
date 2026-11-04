@@ -43,6 +43,8 @@ known-folders = "1.4"
 [dev-dependencies]
 # Tests make a small song library to read the use counts from.
 rusqlite = "0.41"
+# Send to Bitwig is tested against the stand-in Bitwig, never a real one.
+mo-dawlink = { path = "../mo-dawlink", features = ["fake-bitwig"] }
 
 [build-dependencies]
 slint-build.workspace = true

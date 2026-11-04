@@ -31,6 +31,7 @@ pub use link::{
     PadsFilled, TIMEOUT,
 };
 pub use send::{
-    Bitwig, KIT_FAILED, KitSound, KitTarget, Pad, SOUND_FAILED, SOUND_PLACE, SentKit, SentSound, kit_name, kit_pads,
-    note_name, send_kit, send_sound, sending_kit, sending_sound,
+    Bitwig, KIT_FAILED, KitSound, KitTarget, PART_FAILED, PART_IN, PART_PLACE, Pad, SOUND_FAILED, SOUND_PLACE, SentKit,
+    SentPart, SentSound, kit_name, kit_pads, note_name, send_kit, send_part, send_sound, sending_kit, sending_part,
+    sending_sound,
 };

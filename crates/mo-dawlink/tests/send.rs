@@ -9,8 +9,8 @@ use std::thread;
 
 use mo_dawlink::bitwig::fake::{CHANGES_OFF, FakeBitwig, FakeDevice, World};
 use mo_dawlink::bitwig::{
-    DRUM_MACHINE_KEY, DeviceId, Error, KIT_FAILED, KitSound, KitTarget, Pad, PadContents, SOUND_FAILED, SOUND_PLACE,
-    drum_machine, kit_name, kit_pads, note_name, sending_kit, sending_sound,
+    DRUM_MACHINE_KEY, DeviceId, Error, KIT_FAILED, KitSound, KitTarget, PART_FAILED, PART_IN, Pad, PadContents,
+    SOUND_FAILED, SOUND_PLACE, drum_machine, kit_name, kit_pads, note_name, sending_kit, sending_part, sending_sound,
 };
 use serde_json::json;
 
@@ -571,4 +571,43 @@ fn a_kit_takes_one_sound_to_a_note() {
     let err = bitwig.bitwig().send_kit("Kit", &high, KitTarget::Selected).unwrap_err();
     assert_eq!(err.to_string(), "A pad's note is a MIDI note from 0 to 127, not 200.");
     assert!(bitwig.world().requests.is_empty());
+}
+
+#[test]
+fn puts_a_midi_part_as_a_clip_on_a_new_track() {
+    let dir = fixtures("dawlink-part");
+    let file = dir.join("Keys - Pattern 3.mid");
+    fs::write(&file, b"MThd\0\0\0\x06\0\x01\0\x01\x03\xc0").unwrap();
+    let bitwig = FakeBitwig::start().unwrap();
+    let sent = bitwig.bitwig().send_part(&file, "Keys · Pattern 3").unwrap();
+    assert!(sent.went_in(), "{sent:?}");
+    assert_eq!((sent.title(), sent.detail()), ("Keys · Pattern 3 is in Bitwig".to_owned(), PART_IN.to_owned()));
+    assert_eq!(sending_part("Keys · Pattern 3"), "Putting Keys · Pattern 3 into Bitwig");
+    assert_eq!(sent.slot, Some(0));
+
+    let world = bitwig.world();
+    let track = &world.tracks[sent.track.unwrap()];
+    assert_eq!((track.name.as_str(), track.kind.as_str()), ("Keys · Pattern 3", "Instrument"));
+    assert_eq!(track.clips, [text(&file)]);
+    assert_eq!(world.commands(), ["newtrack", "clip"]);
+    assert!(world.requests.iter().all(|r| r["onlyIn"] == "Night Drive"));
+}
+
+#[test]
+fn a_part_whose_clip_bitwig_didnt_make_says_so() {
+    let dir = fixtures("dawlink-part-unloadable");
+    let file = dir.join("Broken.mid");
+    fs::write(&file, b"MThd").unwrap();
+    let bitwig = with(|w| w.unloadable.push("Broken.mid".into()));
+    let sent = bitwig.bitwig().send_part(&file, "Broken").unwrap();
+    assert!(!sent.went_in());
+    assert!(sent.track.is_some() && sent.slot.is_none());
+    assert_eq!(sent.title(), "Broken didn't go in cleanly");
+    assert!(sent.detail().starts_with("The track is in Bitwig, but the clip may not be on it"), "{}", sent.detail());
+
+    // A file that's gone isn't sent at all, and nothing changes in Bitwig.
+    let gone = bitwig.bitwig().send_part(dir.join("Gone.mid"), "Gone");
+    assert!(matches!(gone, Err(Error::Missing { .. })), "{gone:?}");
+    assert_eq!(bitwig.world().commands(), ["newtrack", "clip"]);
+    let _ = PART_FAILED;
 }
