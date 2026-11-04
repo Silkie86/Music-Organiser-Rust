@@ -99,7 +99,7 @@ mod windows_x64 {
     use windows_sys::Win32::System::Diagnostics::Debug::{
         CONTEXT, CONTEXT_FULL_AMD64, GetThreadContext, IMAGEHLP_LINEW64, RtlLookupFunctionEntry, RtlVirtualUnwind,
         SYMBOL_INFOW, SYMOPT_DEFERRED_LOADS, SYMOPT_LOAD_LINES, SYMOPT_UNDNAME, SymFromAddrW, SymGetLineFromAddrW64,
-        SymGetOptions, SymInitializeW, SymSetOptions, UNW_FLAG_NHANDLER,
+        SymGetOptions, SymInitializeW, SymLoadModuleExW, SymSetOptions, UNW_FLAG_NHANDLER,
     };
     use windows_sys::Win32::System::LibraryLoader::{
         GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, GetModuleFileNameW,
@@ -350,7 +350,14 @@ mod windows_x64 {
             room.info.SizeOfStruct = std::mem::size_of::<SYMBOL_INFOW>() as u32;
             room.info.MaxNameLen = 500;
             let mut offset = 0u64;
-            let function = if SymFromAddrW(process, call, &mut offset, &mut room.info) != 0 {
+            let mut found = SymFromAddrW(process, call, &mut offset, &mut room.info) != 0;
+            if !found {
+                // The symbol helper doesn't always list every module at its set-up (it then says "invalid
+                // address"): tell it of this one and ask again.
+                load_module(process, call);
+                found = SymFromAddrW(process, call, &mut offset, &mut room.info) != 0;
+            }
+            let function = if found {
                 let len = (room.info.NameLen as usize).min(500);
                 // The name runs on past SYMBOL_INFOW's one-unit array into the room after it.
                 let start = (&raw const room).cast::<u8>().add(std::mem::offset_of!(SYMBOL_INFOW, Name)).cast::<u16>();
@@ -377,6 +384,33 @@ mod windows_x64 {
                 (Some(f), None) => f,
                 _ => module_offset(at),
             }
+        }
+    }
+
+    /// Tells the symbol helper of the module an address is in (nothing changes if it knows it already).
+    unsafe fn load_module(process: HANDLE, at: u64) {
+        // SAFETY: the documented calls; the module isn't kept (its count isn't changed), the name buffer's size is
+        // passed and the name is NUL-ended (the buffer is one longer than its size).
+        unsafe {
+            let mut module: HMODULE = std::ptr::null_mut();
+            let flags = GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
+            if GetModuleHandleExW(flags, at as usize as *const u16, &mut module) == 0 {
+                return;
+            }
+            let mut path = [0u16; 1025];
+            if GetModuleFileNameW(module, path.as_mut_ptr(), 1024) == 0 {
+                return;
+            }
+            SymLoadModuleExW(
+                process,
+                std::ptr::null_mut(),
+                path.as_ptr(),
+                std::ptr::null(),
+                module as u64,
+                0,
+                std::ptr::null(),
+                0,
+            );
         }
     }
 
