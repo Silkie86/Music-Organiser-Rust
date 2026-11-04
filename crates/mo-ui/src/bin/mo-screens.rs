@@ -797,6 +797,7 @@ fn sample_removed(found: &mo_app::space_spare::Found) -> (mo_app::space_spare::R
         bin_id: Some(String::new()),
         binned: None,
         binned_zone: None,
+        stamp: None,
     };
     let mut removing = mo_app::space_spare::Removing::default();
     let picked = removing.ticked_copies(Some(found));

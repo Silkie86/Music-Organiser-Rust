@@ -38,14 +38,9 @@ pub const NONE_FOUND: &str = "No spare plugin copies were found. ";
 pub const ADMIN: &str = "The ones in Program Files go together at the end, so Windows asks once for administrator \
     rights.";
 
-/// What the card says of the copies from Program Files until the app's Put back can ask Windows for administrator
-/// rights: the Recycle Bin's own Restore can.
-fn guarded_back() -> String {
-    format!(
-        "For now, put the ones from Program Files back from the {BIN} yourself: Windows asks there for administrator \
-         rights, which the app's Put back can't do yet."
-    )
-}
+/// What the card says, once they went, of putting back the copies from Program Files: Put back asks Windows once for
+/// all of them, as Remove did.
+pub const ADMIN_BACK: &str = "For the ones from Program Files, Windows asks once for administrator rights.";
 
 /// The activity card's title while Remove is on.
 pub const REMOVING: &str = "Removing spare plugin copies";
@@ -513,7 +508,7 @@ fn group_part(g: &Group<'_>, bytes: u64) -> Part {
 
 /// What the card says about Remove, above it: what it does, the checks, and where the copies go (`can_put_back`: the
 /// app can put them back here, which a Mac's Trash doesn't let it). Copies in Program Files (`guarded`: Windows guards
-/// them) go together, Windows asking once, and for now they're put back from the Recycle Bin itself.
+/// them) go together, Windows asking once, and come back together the same way.
 fn remove_note(can_put_back: bool, guarded: bool) -> String {
     let checks = format!(
         "Remove sends the ticked copies to the {BIN}, each checked again just before it goes: one that changed since, \
@@ -521,7 +516,9 @@ fn remove_note(can_put_back: bool, guarded: bool) -> String {
     );
     match (can_put_back, guarded) {
         (true, false) => format!("{checks} Put back returns them until you empty the {BIN}."),
-        (true, true) => format!("{checks} {ADMIN} Put back returns them until you empty the {BIN}. {}", guarded_back()),
+        (true, true) => {
+            format!("{checks} {ADMIN} Put back returns them until you empty the {BIN}, with Windows asking once again.")
+        }
         (false, _) => format!("{checks} Until you empty the {BIN}, Finder's Put Back returns them."),
     }
 }
@@ -542,7 +539,7 @@ pub fn card(
 ) -> Card {
     match removing.stage() {
         Stage::Sent(sent) | Stage::PuttingBack(sent) | Stage::PutBack(sent, _) => {
-            result_card(sent, removing.stage(), can_put_back, guarded)
+            result_card(sent, removing.stage(), can_put_back)
         }
         Stage::Picking | Stage::Sending(_) => picking_card(found, looking, removing, can_put_back, guarded),
     }
@@ -685,9 +682,9 @@ fn result_words(copy: &SpareCopy, sent: &Sent, stage: &Stage) -> (String, bool) 
 }
 
 /// The card once Remove has run: what was freed, what went and what stayed (each copy picked, by format, with how it
-/// went), and what Put back does (`guarded`: for copies from Program Files, not yet); then, once Put back has run,
-/// what came back.
-fn result_card(sent: &Sent, stage: &Stage, can_put_back: bool, guarded: impl Fn(&str) -> bool) -> Card {
+/// went), and what Put back does (for the copies that went as administrator, from Program Files, Windows asks once);
+/// then, once Put back has run, what came back.
+fn result_card(sent: &Sent, stage: &Stage, can_put_back: bool) -> Card {
     let picked = Found { copies: sent.picked.clone() };
     let mut parts = Vec::new();
     for g in &groups(&picked) {
@@ -721,13 +718,13 @@ fn result_card(sent: &Sent, stage: &Stage, can_put_back: bool, guarded: impl Fn(
             if problems.is_empty() { String::new() } else { yourself_words() },
         ),
         _ => {
-            let from_guarded = sent.binned().any(|r| guarded(&r.path));
+            // What went as administrator comes back the same way (it has the stamp the step checked).
+            let from_guarded = sent.binned().any(|r| r.stamp.is_some());
             let note = match (in_bin, can_put_back) {
                 (false, _) => String::new(),
                 (true, true) if from_guarded => format!(
-                    "They're in the {BIN}. Put back returns each one to where it was, until you empty the {BIN}. {} The \
-                     app never empties it for you.",
-                    guarded_back()
+                    "They're in the {BIN}. Put back returns each one to where it was, until you empty the {BIN}. \
+                     {ADMIN_BACK} The app never empties it for you."
                 ),
                 (true, true) => format!(
                     "They're in the {BIN}. Put back returns each one to where it was, until you empty the {BIN}. The \
@@ -1115,7 +1112,7 @@ mod tests {
         let guarded = |p: &str| p.starts_with(AVID);
         let card = card(Some(&found), false, &Removing::default(), true, guarded);
         assert_eq!(card.note, remove_note(true, true));
-        assert!(card.note.contains(ADMIN) && card.note.ends_with(&guarded_back()));
+        assert!(card.note.contains(ADMIN) && card.note.ends_with("with Windows asking once again."));
         // Only for the ticked ones.
         let mut removing = Removing::default();
         let aax: Vec<PathBuf> = found.copies.iter().filter(|c| c.format == "AAX").map(path).collect();
@@ -1123,13 +1120,21 @@ mod tests {
         assert_eq!(super::card(Some(&found), false, &removing, true, guarded).note, remove_note(true, false));
         // Where the app can't put things back (a Mac), the card says what can.
         assert!(super::card(Some(&found), false, &removing, false, guarded).note.contains("Finder's Put Back"));
-        // Once copies from Program Files went, the result says where to put those back from, for now.
-        let mut removing = Removing::default();
-        let picked = removing.ticked_copies(Some(&found));
-        removing.start(picked.clone());
-        removing.sent(1, Done { removed: picked.iter().map(removed).collect(), ..Done::default() });
-        assert!(super::card(Some(&found), false, &removing, true, guarded).note.contains(&guarded_back()));
-        assert!(!super::card(Some(&found), false, &removing, true, |_| false).note.contains(&guarded_back()));
+        // Once copies went as administrator (from Program Files), the result says Windows asks once to put those back;
+        // not when all went without asking.
+        let sent = |as_admin: bool| {
+            let mut removing = Removing::default();
+            let picked = removing.ticked_copies(Some(&found));
+            removing.start(picked.clone());
+            let went = |c: &SpareCopy| mo_space::clean::Removed {
+                stamp: (as_admin && guarded(&c.path)).then(|| "stamp".to_owned()),
+                ..removed(c)
+            };
+            removing.sent(1, Done { removed: picked.iter().map(went).collect(), ..Done::default() });
+            super::card(Some(&found), false, &removing, true, guarded).note
+        };
+        assert!(sent(true).contains(ADMIN_BACK));
+        assert!(!sent(false).contains(ADMIN_BACK));
     }
 
     fn removed(copy: &SpareCopy) -> mo_space::clean::Removed {
@@ -1142,6 +1147,7 @@ mod tests {
             bin_id: Some("1".to_owned()),
             binned: None,
             binned_zone: None,
+            stamp: None,
         }
     }
 
