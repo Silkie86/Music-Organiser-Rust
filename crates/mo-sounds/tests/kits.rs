@@ -62,5 +62,49 @@ fn exports_copies_and_converted_pads_and_never_overwrites_a_kit() {
     let err =
         export(&kit[..1], |id| gone.iter().find(|s| s.id == id), &out, "Gone", ExportOptions::default()).unwrap_err();
     assert!(err.to_string().starts_with("Couldn't read the sample"), "{err}");
-    assert_eq!(fs::read_dir(out.join("Gone")).unwrap().count(), 0);
+    // The folder the export made is taken away again, so a retry doesn't make "Gone (2)".
+    assert!(!out.join("Gone").exists());
+
+    // The third pad's sample has gone: the two pads already copied are taken away with the folder.
+    let some_gone = [sound(1, &kick), sound(2, &snare), sound(3, &samples.join("Gone too.wav"))];
+    let mut three = default_drum_kit();
+    for (i, id) in [1, 2, 3].into_iter().enumerate() {
+        three[i].sound = Some(id);
+    }
+    let err = export(&three[..3], |id| some_gone.iter().find(|s| s.id == id), &out, "Half", ExportOptions::default())
+        .unwrap_err();
+    assert!(err.to_string().contains("Gone too.wav"), "{err}");
+    assert!(!out.join("Half").exists());
+    assert!(kick.exists() && snare.exists(), "the samples themselves are never touched");
+}
+
+#[test]
+fn a_read_only_sample_exports_as_a_plain_pad() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mo-sounds-kits-read-only");
+    let _ = fs::remove_dir_all(&dir);
+    let samples = dir.join("samples");
+    fs::create_dir_all(&samples).unwrap();
+    let kick = samples.join("Locked Kick.wav");
+    let wave: Vec<f32> = (0..2205).map(|i| 0.5 * (i as f32 * 0.05).sin()).collect();
+    mo_audio::write_wav(&kick, &[wave], 44_100, 16).unwrap();
+    let mut perms = fs::metadata(&kick).unwrap().permissions();
+    perms.set_readonly(true);
+    fs::set_permissions(&kick, perms).unwrap();
+
+    let sounds = [sound(1, &kick)];
+    let mut kit = default_drum_kit();
+    kit[0].sound = Some(1);
+    let out = dir.join("kits");
+    let done = export(&kit[..1], |id| sounds.iter().find(|s| s.id == id), &out, "Locked", ExportOptions::default());
+    let done = done.unwrap();
+    assert_eq!(fs::read(&done.pads[0]).unwrap(), fs::read(&kick).unwrap());
+    // The pad is the user's to change, and the sample keeps its flag.
+    assert!(!fs::metadata(&done.pads[0]).unwrap().permissions().readonly());
+    assert!(fs::metadata(&kick).unwrap().permissions().readonly());
+
+    // Read-only flags are cleared so the test's folder can be removed next run (Windows won't delete them).
+    let mut perms = fs::metadata(&kick).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms.set_readonly(false);
+    fs::set_permissions(&kick, perms).unwrap();
 }
