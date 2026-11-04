@@ -29,7 +29,7 @@ mo-presets = { path = "../mo-presets" }
 # Send to Bitwig (Presets), and Settings › DAWs checks the Bitwig link.
 mo-dawlink = { path = "../mo-dawlink" }
 # The window and the views the app draws itself (the galaxy) go through the graphics card with wgpu (spec 9.1).
-slint = { workspace = true, features = ["unstable-wgpu-30", "renderer-femtovg-wgpu"] }
+slint = { workspace = true, features = ["unstable-wgpu-30", "unstable-winit-030", "renderer-femtovg-wgpu"] }
 image.workspace = true
 chrono.workspace = true
 # The clipboard, for Copy path. Slint already brings it in for its text boxes.
@@ -40,6 +40,16 @@ rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 [target.'cfg(windows)'.dependencies]
 # The real Documents folder (it may have moved to OneDrive), for exports.
 known-folders = "1.4"
+# The freeze watchdog looks at where the window's thread is stuck, and at the app's page faults (crate::stuck).
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Kernel",
+    "Win32_System_LibraryLoader",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 # Tests make a small song library to read the use counts from.
