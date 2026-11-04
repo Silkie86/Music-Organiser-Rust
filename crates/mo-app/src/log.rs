@@ -83,8 +83,10 @@ const WRITER_WAIT: Duration = Duration::from_secs(5);
 /// that's null or not lined up, an enum with no such value, or a broken promise to an unsafe function.
 ///
 /// A crash in a thread's own data as the thread ends (a thread-local's `Drop`) ends the app too, but says nothing of
-/// the kind, so the crash handler keeps the words typed in an open F12 note whatever this says (the words of a note
-/// being saved that aren't on disk yet are kept only for a crash it knows ends the app).
+/// the kind. So does a second crash while one is being cleaned up, on Windows: there the system ends the app as soon
+/// as the second crash leaves its `Drop`, before std can say anything. So the crash handler keeps the words typed in
+/// an open F12 note whatever this says (the words of a note being saved that aren't on disk yet are kept only for a
+/// crash it knows ends the app).
 const ENDS_THE_APP: [&str; 6] = [
     "panic in a destructor during cleanup",
     "panic in a function that cannot unwind",
@@ -1267,7 +1269,8 @@ mod tests {
     }
 
     /// What std says when it ends the app, checked on the Rust that builds it (the list above is only words): a copy of
-    /// this test program crashes in a `Drop` while unwinding, and prints what each crash said.
+    /// this test program crashes in a `Drop` while unwinding, and prints what each crash said. On Windows the system
+    /// ends the copy as the second crash leaves its `Drop`, so std says nothing more there (see [`ENDS_THE_APP`]).
     #[test]
     fn what_std_says_as_a_crash_in_a_drop_ends_the_app_is_known() {
         let copy = std::process::Command::new(std::env::current_exe().expect("this test program"))
@@ -1283,7 +1286,12 @@ mod tests {
         let said: Vec<&str> = out.lines().filter_map(|l| l.split_once(SAID).map(|(_, said)| said)).collect();
         assert!(said.contains(&"the first crash") && said.contains(&"the second crash, in a drop"), "{out}");
         let ending = said.iter().filter(|m| crash_ends_the_app(Some("Scan 1"), Some(m))).count();
-        assert_eq!(ending, 1, "std's own words as it ends the app are known, and only those: {said:?}");
+        let std_says_so = usize::from(!cfg!(target_env = "msvc"));
+        assert_eq!(
+            ending, std_says_so,
+            "std's own words as it ends the app are known, and only those: {said:?}, {}",
+            copy.status
+        );
     }
 
     #[cfg(unix)]
