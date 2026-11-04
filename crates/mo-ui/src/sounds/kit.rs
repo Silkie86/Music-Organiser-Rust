@@ -271,7 +271,7 @@ pub(super) fn wire(app: &AppWindow) {
 }
 
 /// The place in the list of the sound on pad `i`.
-fn pad_place(i: i32) -> Option<usize> {
+pub(super) fn pad_place(i: i32) -> Option<usize> {
     PAGE.with(|p| {
         let p = p.borrow();
         let id = p.kit.slots.get(usize::try_from(i).ok()?)?.sound?;

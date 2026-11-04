@@ -13,12 +13,14 @@ pub mod arrangement;
 pub mod backup;
 mod canvas;
 pub mod cards;
+pub mod drag;
 pub mod files;
 pub mod filters;
 pub mod finder;
 pub mod gpu;
 pub mod midi;
 pub mod note;
+mod piano_roll;
 pub mod plugins;
 pub mod presets;
 pub mod settings;
@@ -50,6 +52,13 @@ static PAGE: AtomicUsize = AtomicUsize::new(0);
 thread_local! {
     /// The keys in use, for the key sheet, which changes with the page.
     static KEYS: RefCell<Option<std::rc::Rc<Shortcuts>>> = const { RefCell::new(None) };
+    /// The look in use, for what's drawn outside Slint (the card that follows a drag).
+    static LOOK: std::cell::Cell<Option<Look>> = const { std::cell::Cell::new(None) };
+}
+
+/// The look in use (on the window's thread): the one last put on the window, else the default.
+pub fn look() -> Look {
+    LOOK.with(std::cell::Cell::get).unwrap_or_else(|| Look::from_settings(None, None))
 }
 
 /// The place on show, safe to read from any thread.
@@ -326,6 +335,7 @@ fn key_rows(shortcuts: &Shortcuts, place: Place) -> Vec<KeyRow> {
 
 /// Puts a look's colours and fonts into the screens' `Theme` tokens.
 pub fn apply_look(app: &AppWindow, look: &Look) {
+    LOOK.with(|l| l.set(Some(*look)));
     let t = app.global::<Theme>();
     let th = &look.theme;
     t.set_background(rgb(th.background));
@@ -349,6 +359,7 @@ pub fn apply_look(app: &AppWindow, look: &Look) {
         slint::language::ColorScheme::Dark
     });
     arrangement::set_look(app, look);
+    piano_roll::look_changed(app);
 }
 
 pub(crate) fn rgb(c: u32) -> Color {

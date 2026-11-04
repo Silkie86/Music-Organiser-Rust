@@ -4,7 +4,7 @@
 // there. Only shared parts from studio.slint; mo-app decides every word (mo_app::plugins), mo-ui/src/plugins.rs
 // fills it. Read-only for now: Clean up, Uninstall and Move join in the page's second part.
 import { ListView } from "std-widgets.slint";
-import { Theme, Type, Space, Well, SearchBox, ToggleChip, ListLine, Caps, StudioButton, LinkText, Segmented, CardAction, CardActions, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, TabBar } from "../studio.slint";
+import { Theme, Type, Space, Well, SearchBox, ToggleChip, FilterPicks, FilterView, ListLine, Caps, StudioButton, LinkText, Segmented, CardAction, CardActions, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, TabBar } from "../studio.slint";
 
 // One line of the list.
 export struct PluginListLine {
@@ -79,8 +79,11 @@ export global PluginsData {
     in property <[PluginListLine]> lines;
     in property <int> selected: -1;
     in-out property <string> search;
-    in property <[string]> chips;
-    in property <string> chip;
+    // The filters, the same as on every page: Show, Kind, Format and DAW.
+    in property <FilterView> show-filter;
+    in property <FilterView> kind-filter;
+    in property <FilterView> format-filter;
+    in property <FilterView> daw-filter;
     in property <bool> any-filter;
     in property <[string]> sorts;
     in property <string> sort;
@@ -125,7 +128,7 @@ export global PluginsData {
     in-out property <int> tab;
     in property <string> uses-note;
     in property <[UseRow]> uses;
-    in property <[string]> use-daws;
+    in property <FilterView> use-daws;
     in property <string> use-daw;
     in property <bool> every-save;
     in property <string> room-summary;
@@ -138,7 +141,9 @@ export global PluginsData {
     in property <string> scanner-note;
 
     callback search-edited(string);
-    callback chip-picked(string);
+    // A filter's choice picked or unpicked: the filter ("show", "kind", "format", "daw") and the choice's words.
+    callback toggle(string, string);
+    callback clear-filter(string);
     /// "Show them": turns Big and unused on (never off).
     callback show-unused();
     callback sort-picked(string);
@@ -285,10 +290,11 @@ component PluginPanel inherits SidePanel {
             spacing: Space.sm;
             alignment: start;
             // Each DAW its songs come from, as a chip: picking the one that's on shows every DAW again.
-            for d in PluginsData.use-daws: ToggleChip {
-                text: d;
-                on: PluginsData.use-daw == d;
-                clicked => { PluginsData.use-daw-picked(PluginsData.use-daw == d ? "" : d); }
+            if PluginsData.use-daws.chips.length > 0: FilterPicks {
+                name: "DAW";
+                filter: PluginsData.use-daws;
+                toggled(text) => { PluginsData.use-daw-picked(text); }
+                cleared => { PluginsData.use-daw-picked(PluginsData.use-daw); }
             }
             ToggleChip {
                 text: "Every save";
@@ -556,13 +562,33 @@ export component PluginsPage inherits Rectangle {
                 }
             }
         }
+        // The filters, each behind its name; more than one can be picked in each. They wrap when the window is narrow.
         FlexboxLayout {
-            spacing: Space.sm;
+            spacing: Space.md;
             vertical-stretch: 0;
-            for c in PluginsData.chips: ToggleChip {
-                text: c;
-                on: PluginsData.chip == c;
-                clicked => { PluginsData.chip-picked(c); }
+            FilterPicks {
+                name: "Show";
+                filter: PluginsData.show-filter;
+                toggled(text) => { PluginsData.toggle("show", text); }
+                cleared => { PluginsData.clear-filter("show"); }
+            }
+            FilterPicks {
+                name: "Kind";
+                filter: PluginsData.kind-filter;
+                toggled(text) => { PluginsData.toggle("kind", text); }
+                cleared => { PluginsData.clear-filter("kind"); }
+            }
+            FilterPicks {
+                name: "Format";
+                filter: PluginsData.format-filter;
+                toggled(text) => { PluginsData.toggle("format", text); }
+                cleared => { PluginsData.clear-filter("format"); }
+            }
+            FilterPicks {
+                name: "DAW";
+                filter: PluginsData.daw-filter;
+                toggled(text) => { PluginsData.toggle("daw", text); }
+                cleared => { PluginsData.clear-filter("daw"); }
             }
             if PluginsData.any-filter: ToggleChip {
                 text: "Clear";

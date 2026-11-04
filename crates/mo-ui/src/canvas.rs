@@ -1,12 +1,18 @@
-//! The graphics card's painter for the views the app draws itself (the arrangement, the sounds' waveforms): it draws
-//! the [`mo_app::shapes::Scene`] a view works out, which the processor draws the same way where there's no card
-//! (`Scene::paint`). A picture is one draw on the card: every shape is two triangles, which the card fills with its
+//! The graphics card's painter for the views the app draws itself (the arrangement, the MIDI page's piano roll, the
+//! sounds' waveforms): it draws the [`mo_app::shapes::Scene`] a view works out, which the processor draws the same way
+//! where there's no card (`Scene::paint`). A picture is one draw on the card: every shape is two triangles, which the card fills with its
 //! colour, cutting the corners round and softening the edges where the shape asks for it, each shape over the ones
 //! before. A waveform's lines are softened as the window's own drawing library softens the lines of a path instead,
 //! as that's what the window draws where there's no picture.
 
-use mo_app::shapes::{self, SHAPE_BYTES};
+use std::cell::RefCell;
+use std::thread::LocalKey;
+
+use mo_app::shapes::{self, Colour, SHAPE_BYTES, Scene};
 use slint::wgpu_30::wgpu;
+use slint::{Image, Model, Rgba8Pixel, SharedPixelBuffer, VecModel};
+
+use crate::{gpu, watchdog};
 
 pub(crate) const SHADER: &str = r#"
 struct Frame {
@@ -433,6 +439,107 @@ impl Canvas {
     }
 }
 
+/// A view's picture as its drawing thread leaves it for the window's thread to put up ([`show`]): drawn already, by the
+/// processor, or its shapes packed for the graphics card to draw.
+pub(crate) enum Drawing {
+    Pixels(SharedPixelBuffer<Rgba8Pixel>),
+    Shapes {
+        bytes: Vec<u8>,
+        /// The picture's size in pixels, and pixels to a point.
+        size: (u32, u32),
+        scale: f32,
+        background: u32,
+    },
+}
+
+impl Drawing {
+    /// `scene` at `scale` pixels to a point: packed for the card when the card draws the view (`on_card`), else drawn
+    /// now by the processor, in the window's kind of picture.
+    pub(crate) fn new(scene: &Scene, scale: f64, on_card: bool) -> Drawing {
+        let scale = shapes::usable_scale(scale);
+        if on_card {
+            Drawing::Shapes {
+                bytes: scene.pack(scale),
+                size: scene.pixel_size(scale),
+                scale: scale as f32,
+                background: scene.background,
+            }
+        } else {
+            let pixmap = scene.paint(scale);
+            Drawing::Pixels(SharedPixelBuffer::clone_from_slice(pixmap.data(), pixmap.width(), pixmap.height()))
+        }
+    }
+}
+
+/// What a view's steps on the window's thread are called in the freeze lines (`watchdog::doing`).
+pub(crate) struct Steps {
+    /// Setting its painter up on the card, which can take the card a moment: only when that couldn't be done ahead of
+    /// time, when the card was handed over (`gpu::prepare`).
+    pub(crate) set_up: &'static str,
+    /// Drawing its shapes on the card.
+    pub(crate) draw: &'static str,
+    /// Handing the processor's picture to the window.
+    pub(crate) show: &'static str,
+}
+
+/// The picture for Slint to show from `drawing`, made on the window's thread: the processor's as it is, or the shapes
+/// drawn on the card now by the view's painter in `painter` (made first if it isn't yet), into one of its two pictures
+/// in turn. `Ok(None)` when the shapes were packed for a card that has gone since, or won't draw the view any more: the
+/// view asks again. `Err` says why the card or Slint said no; the card is then marked as refusing the view, which the
+/// processor draws from then on, while that card lasts.
+pub(crate) fn show(
+    drawing: Drawing,
+    painter: &'static LocalKey<RefCell<gpu::Painter<Canvas>>>,
+    steps: &Steps,
+) -> Result<Option<Image>, String> {
+    let (bytes, size, scale, background) = match drawing {
+        Drawing::Pixels(pixels) => {
+            let _doing = watchdog::doing(steps.show);
+            return Ok(Some(Image::from_rgba8_premultiplied(pixels)));
+        }
+        Drawing::Shapes { bytes, size, scale, background } => (bytes, size, scale, background),
+    };
+    let Some((gpu, generation)) = painter.with(|p| p.borrow().card()) else { return Ok(None) };
+    let image = painter.with(|p| -> Result<_, String> {
+        let mut p = p.borrow_mut();
+        let canvas = p.on(&gpu, generation, |gpu| {
+            let _doing = watchdog::doing(steps.set_up);
+            Canvas::new(&gpu.device, &gpu.queue, Kind::Picture)
+        })?;
+        let _doing = watchdog::doing(steps.draw);
+        let texture = gpu::checked(&gpu.device, || canvas.draw(size, scale, background, &bytes, 0.0))?;
+        Image::try_from(texture).map_err(|e| format!("Slint wouldn't show the picture: {e}"))
+    });
+    image.map(Some).inspect_err(|_| painter.with(|p| p.borrow_mut().refused(generation)))
+}
+
+/// A colour of the window's (its theme's, say) as the painters take it.
+pub(crate) fn colour(c: slint::Color) -> Colour {
+    Colour { r: c.red(), g: c.green(), b: c.blue(), a: c.alpha() }
+}
+
+/// A colour of the window's as 0xRRGGBB, for the colour under a picture (which is solid, so how much shows is left out).
+pub(crate) fn rgb(c: slint::Color) -> u32 {
+    u32::from(c.red()) << 16 | u32::from(c.green()) << 8 | u32::from(c.blue())
+}
+
+/// Puts `rows` in `model` in place of what's there, changing only the lines that differ, so the window keeps the words
+/// it has laid on a view instead of making them all again.
+pub(crate) fn refill<T: Clone + PartialEq + 'static>(model: &VecModel<T>, rows: Vec<T>) {
+    let old = model.row_count();
+    let keep = old.min(rows.len());
+    let mut rows = rows.into_iter();
+    for (i, row) in rows.by_ref().take(keep).enumerate() {
+        if model.row_data(i).as_ref() != Some(&row) {
+            model.set_row_data(i, row);
+        }
+    }
+    model.extend(rows);
+    for i in (keep..old).rev() {
+        model.remove(i);
+    }
+}
+
 /// For the tests that draw on a graphics card: a card made the way Slint makes the window's, and a picture read back.
 #[cfg(test)]
 pub(crate) mod testing {
@@ -490,7 +597,6 @@ pub(crate) mod testing {
 mod tests {
     use super::testing::{card, read_back};
     use super::*;
-    use mo_app::shapes::{Colour, Scene};
     use wgpu::naga;
 
     /// A view with more shapes than the card takes at once is drawn a part at a time, and comes out the same as in one
@@ -523,6 +629,18 @@ mod tests {
         let parts = read_back(&device, &queue, &small.draw(size, 1.5, scene.background, &bytes, 0.0));
         assert!(whole == parts, "drawn a part at a time, the picture came out different");
         assert_eq!(small.shapes.as_ref().map(wgpu::Buffer::size), Some(7 * SHAPE_BYTES as u64), "room for one part");
+    }
+
+    #[test]
+    fn the_words_change_line_by_line() {
+        let words = |list: &[&str]| list.iter().map(|w| slint::SharedString::from(*w)).collect::<Vec<_>>();
+        let model = VecModel::from(words(&["a", "b", "c"]));
+        refill(&model, words(&["a", "x"]));
+        assert_eq!(model.iter().collect::<Vec<_>>(), words(&["a", "x"]));
+        refill(&model, words(&["a", "x", "y", "z"]));
+        assert_eq!(model.iter().collect::<Vec<_>>(), words(&["a", "x", "y", "z"]));
+        refill(&model, Vec::new());
+        assert_eq!(model.row_count(), 0);
     }
 
     /// The card only builds the shader when the window opens, so a mistake in it would only show on Solomon's PC. This

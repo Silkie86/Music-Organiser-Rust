@@ -3004,6 +3004,7 @@ dependencies = [
  "rayon",
  "rusqlite",
  "serde_json",
+ "swash",
  "thread-priority",
  "tiny-skia 0.12.0",
 ]
@@ -3238,11 +3239,14 @@ dependencies = [
  "mo-presets",
  "mo-sounds",
  "mo-space",
+ "raw-window-handle",
  "rayon",
  "rfd",
  "rusqlite",
  "slint",
  "slint-build",
+ "windows",
+ "windows-core",
  "windows-sys 0.61.2",
 ]
 
@@ -4843,6 +4847,7 @@ dependencies = [
  "num-traits",
  "once_cell",
  "pin-weak",
+ "raw-window-handle",
  "slint-macros",
  "unicode-segmentation",
  "vtable",

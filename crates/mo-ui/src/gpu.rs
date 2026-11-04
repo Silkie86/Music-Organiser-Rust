@@ -5,8 +5,10 @@
 
 use std::cell::{Cell, RefCell};
 use std::future::Future;
+use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 use std::thread::LocalKey;
+use std::time::Duration;
 
 use mo_app::{background, log};
 use slint::wgpu_30::{WGPUConfiguration, WGPUSettings, wgpu};
@@ -27,6 +29,41 @@ thread_local! {
     static GENERATION: Cell<u64> = const { Cell::new(0) };
     /// When Slint began drawing the frame it's drawing now.
     static DRAWING_SINCE: Cell<Option<std::time::Instant>> = const { Cell::new(None) };
+    /// What waits for the next frame to be drawn: a drag out waits until its thing is shown dimmed.
+    static AFTER_FRAME: RefCell<Vec<Once>> = const { RefCell::new(Vec::new()) };
+    /// Counts the frames drawn with the graphics card, so a drag out can tell whether one has been drawn since.
+    static FRAMES: Cell<u64> = const { Cell::new(0) };
+}
+
+/// How many frames the graphics card has drawn so far (none at all when the window isn't drawn with it).
+pub fn frames_drawn() -> u64 {
+    FRAMES.with(Cell::get)
+}
+
+/// Something to run once, by whichever comes first: the frame or the timer.
+type Once = Rc<Cell<Option<Box<dyn FnOnce()>>>>;
+
+/// Runs `f` on the window's thread once the next frame has been drawn and put on screen, or after `latest` if no
+/// frame comes before then (nothing changed on screen, or the window isn't drawn with the graphics card), whichever is
+/// first. Only once.
+pub fn after_next_frame(latest: Duration, f: impl FnOnce() + 'static) {
+    let once: Once = Rc::new(Cell::new(Some(Box::new(f))));
+    AFTER_FRAME.with(|q| {
+        let mut q = q.borrow_mut();
+        // Those their timer ran already go, in case no frames come at all (the window isn't drawn with the card).
+        q.retain(|w| {
+            let f = w.take();
+            let waiting = f.is_some();
+            w.set(f);
+            waiting
+        });
+        q.push(once.clone());
+    });
+    slint::Timer::single_shot(latest, move || {
+        if let Some(f) = once.take() {
+            f();
+        }
+    });
 }
 
 /// Asks Slint to draw the window with wgpu, before any window is made, on the fastest card there is. When that can't
@@ -82,6 +119,7 @@ pub fn connect(app: &AppWindow) {
                 if let Some(app) = weak.upgrade() {
                     crate::sounds::graphics_ready(&app);
                     crate::arrangement::graphics_ready(&app);
+                    crate::piano_roll::graphics_ready(&app);
                     crate::waves::graphics_ready(&app);
                 }
             });
@@ -99,6 +137,16 @@ pub fn connect(app: &AppWindow) {
             if let Some(since) = DRAWING_SINCE.with(Cell::take) {
                 mo_app::frame_timing::drawn(since.elapsed(), crate::page_name());
             }
+            FRAMES.with(|f| f.set(f.get() + 1));
+            // Not from inside Slint's drawing: at the event loop's next turn, once this frame is on screen.
+            let waiting = AFTER_FRAME.with(|q| std::mem::take(&mut *q.borrow_mut()));
+            if !waiting.is_empty() {
+                slint::Timer::single_shot(Duration::ZERO, move || {
+                    for f in waiting.iter().filter_map(|w| w.take()) {
+                        f();
+                    }
+                });
+            }
         }
         RenderingState::RenderingTeardown => {
             GPU.with(|g| *g.borrow_mut() = None);
@@ -107,11 +155,13 @@ pub fn connect(app: &AppWindow) {
             // goes, when there's no window left to show anything on.
             crate::sounds::card_gone();
             crate::arrangement::card_gone();
+            crate::piano_roll::card_gone();
             crate::waves::card_gone();
             // The pictures on show go too, and are drawn again on the next card or the processor.
             if let Some(app) = weak.upgrade() {
                 crate::sounds::graphics_gone(&app);
                 crate::arrangement::graphics_gone(&app);
+                crate::piano_roll::graphics_gone(&app);
                 crate::waves::graphics_gone(&app);
             }
         }
