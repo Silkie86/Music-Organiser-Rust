@@ -751,15 +751,10 @@ impl Namer {
     /// voiced as a named tension is), and the tensions doubtful.
     fn gate(&mut self, sound: &Sound, label: Label) -> (PcSet, PcSet) {
         let (tones, tensions) = (label.tones(), label.tensions());
-        let intervals = label.core.intervals();
-        let family = Family::of(intervals);
         let (mut named, mut doubtful) = (PcSet::EMPTY, PcSet::EMPTY);
         for pc in PcSet::ALL.difference(tones).iter() {
-            // The tune counts only for a tension the chord can carry there: never for a note that doesn't belong.
-            let interval = i32::from(pc.above(label.root));
             let tension = tensions.contains(pc);
-            let tune = tension && role(intervals, family, interval) != ToneRole::Avoid;
-            match self.band(sound, tones, pc, tune) {
+            match self.band(sound, tones, pc, tune_may_carry(label, pc)) {
                 Band::Named => named = named.with(pc),
                 Band::Doubtful if tension => doubtful = doubtful.with(pc),
                 Band::Doubtful | Band::Out => {}
@@ -974,6 +969,15 @@ fn roots_of(chord: Chord) -> PcSet {
         Some(core @ (Core::Diminished7 | Core::Augmented)) => core.intervals().on(chord.root()),
         _ => PcSet::EMPTY.with(chord.root()),
     }
+}
+
+/// Whether the tune counts for a note over a reading ([`Namer::gate`]): only when it's a tension the label's chord can
+/// carry there, never a note that doesn't belong or one the chord avoids. The words tell a tune note over a chord the
+/// same way ([`super::NoteDoes::TuneOver`]).
+pub(super) fn tune_may_carry(label: Label, pc: PitchClass) -> bool {
+    let intervals = label.core.intervals();
+    let interval = i32::from(pc.above(label.root));
+    label.tensions().contains(pc) && role(intervals, Family::of(intervals), interval) != ToneRole::Avoid
 }
 
 /// Whether some notes repeat round the octave, a minor or a major third up: a diminished seventh's, an augmented

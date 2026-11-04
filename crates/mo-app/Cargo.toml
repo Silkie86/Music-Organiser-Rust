@@ -35,3 +35,5 @@ tiny-skia.workspace = true
 rusqlite = { version = "0.41", features = ["bundled"] }
 # The stand-in Bitwig, for the Send to Bitwig tests: no test reaches a real Bitwig (rule 11).
 mo-dawlink = { path = "../mo-dawlink", features = ["fake-bitwig"] }
+# The made-up Bitwig projects the Space Fix test writes (mo-formats' test projects pack a part with it).
+flate2 = "1"

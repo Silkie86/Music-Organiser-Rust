@@ -7,9 +7,9 @@ use super::hear_tests::{BAR, BEAT, Dice, Music, VELOCITY, line, notes, random_mu
 use super::name_tests::named_cases;
 use super::score_tests::bars;
 use super::{
-    BassKind, CHOICE_FLOOR, CHORD_READER_VERSION, ChoiceFrom, ChordAnswer, ChordContext, ChordReader, ChordReading,
-    ChordSpan, Grading, Hearing, Label, MOST_READINGS, Model, NameCheck, NoChord, Pin, PinnedSpan, SHIPPED,
-    SHIPPED_HASH, SpanFlags, Texture, Thresholds, grade, numbers_hash, read_chords,
+    BassKind, CHOICE_FLOOR, CHORD_READER_VERSION, ChoiceFrom, ChordAnswer, ChordContext, ChordExplainer, ChordReader,
+    ChordReading, ChordSpan, Grading, Hearing, Label, MOST_READINGS, Model, NameCheck, NoChord, Pin, PinnedSpan,
+    SHIPPED, SHIPPED_HASH, SpanFlags, Texture, Thresholds, grade, numbers_hash, read_chords,
 };
 use crate::chord::Chord;
 use crate::fnv::Fnv;
@@ -727,6 +727,14 @@ fn damaged_notes_are_read_without_a_panic() {
                     assert!(r.truncated);
                     let _ =
                         (r.names(Some(Key::minor(PitchClass::new(11)))), r.check_names(&[chord("C"), chord("F#7")]));
+                    // And explained in words, in a key and in none.
+                    let all = ChordExplainer::new().explain_all(&parts, grid, &cx, &r).expect("not its reading");
+                    for key in [None, Some(Key::minor(PitchClass::new(11)))] {
+                        let chart = r.names(key);
+                        for e in &all {
+                            let _ = e.words(&r, &chart, key);
+                        }
+                    }
                 }
             }
         }
@@ -735,11 +743,13 @@ fn damaged_notes_are_read_without_a_panic() {
 
 /// What the hand cases, the tests' music and some music made here read at each version of the reader, as a hash
 /// ([`readings_hash`]). A change that moves any of them needs `CHORD_READER_VERSION` bumped, and a line added here.
-const READINGS: &[(u32, u64)] = &[(1, 0xe3a9_cd16_4f69_5725), (2, 0x1a86_e909_00c4_7d95)];
+const READINGS: &[(u32, u64)] = &[(1, 0xe3a9_cd16_4f69_5725), (2, 0x1a86_e909_00c4_7d95), (3, 0x0b75_cf69_1fba_b90d)];
 
 /// The music whose readings the hash covers, with its pins: every hand case, the music the rules are checked on, and
-/// music made here so every kind of answer is read (one line, one note, all twelve, a rest, chords given) and what
-/// is one line and what isn't (a triad in a tune part, short stabs, a double stop in a long tune).
+/// music made here so every kind of answer is read (one line, one note, all twelve, a rest, chords given), what is one
+/// line and what isn't (a triad in a tune part, short stabs, a double stop in a long tune), and a player's timing (a
+/// bass let go a little late into the next note, a bass plucked short, a tune played a little early, a 9 held into the
+/// next bar that steps down to its root).
 fn hashed_music() -> Vec<(Music, Vec<Pin>)> {
     let mut music = the_music_in_ticks();
     let given = |start: i64, end: i64, name: &str| Pin { start, end, chord: Some(chord(name)) };
@@ -756,6 +766,37 @@ fn hashed_music() -> Vec<(Music, Vec<Pin>)> {
         (
             Music::new()
                 .tune([line(&"C4 E4 G4 C5 G4 E4 C4 G3 ".repeat(3), 0, BEAT), notes("E3", 23 * BEAT, BEAT)].concat()),
+            Vec::new(),
+        ),
+        (
+            Music::new()
+                .bass(
+                    [
+                        notes("F2", 0, 3 * BEAT),
+                        notes("C2", 3 * BEAT, BEAT / 2 + 10),
+                        notes("B1", 3 * BEAT + BEAT / 2, BEAT / 2),
+                        notes("C2", BAR, BAR),
+                    ]
+                    .concat(),
+                )
+                .keys(bars("F3 A3 C4 | C4 E4 G4")),
+            Vec::new(),
+        ),
+        (
+            Music::new().bass([notes("C2", 0, 30), notes("C2", BAR, 30)].concat()).keys(bars("C4 E4 G4 | C4 E4 A4")),
+            Vec::new(),
+        ),
+        (Music::new().keys(notes("C4 E4 G4", 0, BAR)).tune(line("A5 G5", BEAT - 20, BEAT)), Vec::new()),
+        (
+            Music::new().keys(
+                [
+                    notes("G3 B3 D4", 0, BAR),
+                    notes("D5", 2 * BEAT, 4 * BEAT),
+                    notes("C4 E4 G4", BAR, BAR),
+                    notes("C5", BAR + 2 * BEAT, 2 * BEAT),
+                ]
+                .concat(),
+            ),
             Vec::new(),
         ),
     ]);

@@ -169,6 +169,41 @@ fn a_suspension_held_over_the_bar_line_passes_by() {
 }
 
 #[test]
+fn a_tension_passing_by_costs_only_where_it_counted_struck() {
+    use Feature::*;
+    // E5 D5 C5 on top of C E G held: D5 passes from E to C. Struck in the bar, the 9 would count as C's tension (T2);
+    // passing by, it comes out of that and costs as passing (T5), as a note that doesn't belong would. A note doubled
+    // in another octave counts once, so the chords sound C, E and G a bar each and D a beat.
+    let keys = [notes("C4 E4 G4", 0, BAR), line("E5 D5", 0, BEAT), notes("C5", 2 * BEAT, 2 * BEAT)].concat();
+    let hearing = Music::new().keys(keys).hear();
+    assert!(hearing.shaped().iter().any(|s| s.shape == Shape::Passing && s.pc == PitchClass::D));
+    let c = evidence(&facts_on(&hearing, bar(0), None), "C");
+    assert_eq!((c[Tensions], c[Passing]), (0.0, 480.0 / 6240.0));
+    // D5 struck on beat 3 over G B D and held to the middle of the bar of C E G, where it steps down to C5: a
+    // suspension. In the bar of C, D is a 9 carried in, which counts neither way; passing by, it doesn't cost either.
+    // Resolved up to E5, it isn't shaped, and C's evidence is the same.
+    let carried = |to: &str| {
+        let keys = [notes("G3 B3 D4", 0, BAR), notes("D5", 2 * BEAT, 4 * BEAT), notes("C4 E4 G4", BAR, BAR)];
+        Music::new().keys([keys.concat(), notes(to, BAR + 2 * BEAT, 2 * BEAT)].concat()).hear()
+    };
+    let (down, up) = (carried("C5"), carried("E5"));
+    assert!(down.shaped().iter().any(|s| s.shape == Shape::Suspension && s.pc == PitchClass::D));
+    assert!(!up.shaped().iter().any(|s| s.pc == PitchClass::D));
+    let c = evidence(&facts_on(&down, bar(1), None), "C");
+    assert_eq!((c[ChordTones], c[Tensions], c[WrongHeld], c[Passing]), (6.0 / 7.0, 0.0, 0.0, 0.0));
+    assert_eq!(c, evidence(&facts_on(&up, bar(1), None), "C"));
+    // G B D rung a beat into the bar of C, the top D stepping down to C with the rest of C on beat 2: a suspension over
+    // the bar line. The B held over is smear (T4), a beat of the chords' nine there; the D, C's 9, counts nowhere.
+    let hearing = Music::new()
+        .bass([notes("G2", 0, BAR), notes("C2", BAR, BAR)].concat())
+        .keys([notes("G3 B3 D4", 0, BAR + BEAT), notes("E3 G3 C4", BAR + BEAT, 3 * BEAT)].concat())
+        .hear();
+    assert!(hearing.shaped().iter().any(|s| s.shape == Shape::Suspension && s.pc == PitchClass::D));
+    let c = evidence(&facts_on(&hearing, bar(1), None), "C");
+    assert_eq!((c[WrongHeld], c[Passing], c[Tensions]), (1.0 / 9.0, 0.0, 0.0));
+}
+
+#[test]
 fn the_tune_counts_after_its_shapes() {
     use Feature::*;
     // The design's case 48: C2 under E3 G3 B3, with a tune.
@@ -373,6 +408,35 @@ fn a_walking_bass_note_is_no_place_a_chord_starts() {
     let again = Music::new().bass(line("D2 E2 F2 G2", 0, BEAT)).keys(keys).hear();
     let f = evidence(&facts_on(&again, 4..8, None), "F");
     assert_eq!([f[BassStrikesRoot], f[NothingStruck]], [0.0, 1.0]);
+}
+
+#[test]
+fn the_last_moment_of_a_bass_note_played_legato_is_no_bass_sounding_before() {
+    // F2, then C2 on beat 4 and B1 on its second half, then C2 on the bar line: under F A C, then C E G, the bass moves
+    // B to C, and C's root is struck where its chord starts. Played legato, the first C2 is let go 10 ticks into B1's
+    // eighth: that last moment isn't the bass sounding there, so the bass still moves from B, and E1 still counts.
+    let keys = bars("F3 A3 C4 | C4 E4 G4");
+    for overlap in [0, 10] {
+        let bass = [
+            notes("F2", 0, 3 * BEAT),
+            notes("C2", 3 * BEAT, BEAT / 2 + overlap),
+            notes("B1", 3 * BEAT + BEAT / 2, BEAT / 2),
+            notes("C2", BAR, BAR),
+        ];
+        let music = Music::new().bass(bass.concat()).keys(keys.clone()).hear();
+        let f = evidence(&facts_on(&music, bar(1), None), "C");
+        assert_eq!(f[Feature::BassStrikesRoot], 1.0, "C2 let go {overlap} ticks late");
+    }
+    // But a note struck is the bass there, however short: C2 struck on each bar line under C E G, then C E A, doesn't
+    // move, so in bar 2 it's no C chord's root struck at a change, whether it's held a beat or only plucked.
+    for length in [30, BEAT / 4, BEAT] {
+        let bass = [notes("C2", 0, length), notes("C2", BAR, length)].concat();
+        let music = Music::new().bass(bass).keys(bars("C4 E4 G4 | C4 E4 A4")).hear();
+        for label in ["C", "C6"] {
+            let f = evidence(&facts_on(&music, bar(1), None), label);
+            assert_eq!(f[Feature::BassStrikesRoot], 0.0, "{label}, C2 played for {length} ticks");
+        }
+    }
 }
 
 #[test]

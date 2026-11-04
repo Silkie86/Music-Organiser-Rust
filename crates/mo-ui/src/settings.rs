@@ -60,6 +60,14 @@ struct Page {
     /// Install is running; what the last Install did.
     fl_state: Option<ScriptState>,
     fl_folders: Vec<PathBuf>,
+    /// Bitwig's extension: the app's own copy and its version, whether Bitwig's folders have it, where it goes, the
+    /// user folders those are in, and where Bitwig said it loaded it from.
+    bw_source: Option<PathBuf>,
+    bw_version: Option<String>,
+    bw_state: Option<ScriptState>,
+    bw_folders: Vec<PathBuf>,
+    bw_users: Vec<PathBuf>,
+    bw_loaded_from: Option<String>,
     daws_installing: bool,
     daws_message: String,
     feed: Feed,
@@ -173,6 +181,12 @@ pub fn connect(app: &AppWindow, setup: Setup) {
             daws_asked: 0,
             fl_state: None,
             fl_folders: Vec::new(),
+            bw_source: None,
+            bw_version: None,
+            bw_state: None,
+            bw_folders: Vec::new(),
+            bw_users: Vec::new(),
+            bw_loaded_from: None,
             daws_installing: false,
             daws_message: String::new(),
             feed: setup.feed,
@@ -232,9 +246,13 @@ pub fn connect(app: &AppWindow, setup: Setup) {
         }
     });
     let weak = app.as_weak();
-    data.on_install_fl(move || {
+    data.on_install_daw(move |bitwig| {
         if let Some(app) = weak.upgrade() {
-            install_fl(&app);
+            if bitwig {
+                install_bitwig(&app);
+            } else {
+                install_fl(&app);
+            }
         }
     });
     let weak = app.as_weak();
@@ -616,22 +634,26 @@ fn check_daws(app: &AppWindow) {
         Some(p.daws_asked)
     });
     let Some(asked) = asked else { return };
-    look_at_fl(app);
+    look_at_scripts(app);
     show(app);
     let weak = app.as_weak();
     let started = background::spawn("Settings Bitwig check", move || {
-        let status = page::bitwig_status(&mo_dawlink::bitwig::Bitwig::default().check());
+        let checked = mo_dawlink::bitwig::Bitwig::default().check();
+        let loaded_from = checked.as_ref().ok().map(|h| h.loaded_from.clone()).filter(|f| !f.is_empty());
+        let status = page::bitwig_status(&checked);
         let _ = slint::invoke_from_event_loop(move || {
             let newest = PAGE.with(|p| {
                 let mut p = p.borrow_mut();
                 let Some(p) = p.as_mut().filter(|p| p.daws_asked == asked) else { return false };
                 p.bitwig = status;
+                p.bw_loaded_from = loaded_from;
                 p.daws_checking = false;
                 true
             });
             if let Some(app) = weak.upgrade()
                 && newest
             {
+                look_at_scripts(&app);
                 show(&app);
             }
         });
@@ -647,25 +669,41 @@ fn check_daws(app: &AppWindow) {
     }
 }
 
-/// Finds FL Studio's folders and whether the script in them is the app's own, away from the window (a project folder
+/// Finds the DAWs' folders and whether the scripts in them are the app's own, away from the window (a project folder
 /// on a drive that's asleep may take a moment).
-fn look_at_fl(app: &AppWindow) {
-    let Some(library) = PAGE.with(|p| p.borrow().as_ref().filter(|p| p.live).map(|p| p.library.clone())) else {
+fn look_at_scripts(app: &AppWindow) {
+    let Some((library, loaded_from)) =
+        PAGE.with(|p| p.borrow().as_ref().filter(|p| p.live).map(|p| (p.library.clone(), p.bw_loaded_from.clone())))
+    else {
         return;
     };
     let weak = app.as_weak();
-    let started = background::spawn("Settings FL script", move || {
-        let roots = Library::open_read_only(&library).and_then(|l| l.roots()).unwrap_or_else(|e| {
-            log::warning("Settings", &format!("Couldn't read the project folders, to find FL Studio's: {e}"));
-            Vec::new()
-        });
-        let folders = scripts::fl_script_folders(&scripts::fl_user_data_folders(&crate::files::documents(), &roots));
+    let started = background::spawn("Settings DAW scripts", move || {
+        let (roots, chosen) = match Library::open_read_only(&library) {
+            Ok(l) => (l.roots().unwrap_or_default(), l.setting("bitwig_user_folder").ok().flatten()),
+            Err(e) => {
+                log::warning("Settings", &format!("Couldn't read the library, to find the DAWs' folders: {e}"));
+                (Vec::new(), None)
+            }
+        };
+        let documents = crate::files::documents();
+        let folders = scripts::fl_script_folders(&scripts::fl_user_data_folders(&documents, &roots));
         let state = scripts::fl_state(&folders);
+        let users = scripts::bitwig_user_folders(chosen.as_deref(), std::slice::from_ref(&documents));
+        let bw_folders = scripts::bitwig_extension_folders(&users, loaded_from.as_deref());
+        let source = std::env::current_exe().ok().and_then(|exe| scripts::bitwig_extension_source(&exe));
+        let bw_version = source.as_deref().and_then(scripts::extension_version);
+        let bw_state = source.as_deref().map_or(ScriptState::NotInstalled, |s| scripts::bitwig_state(s, &bw_folders));
         let _ = slint::invoke_from_event_loop(move || {
             PAGE.with(|p| {
                 if let Some(p) = p.borrow_mut().as_mut() {
                     p.fl_state = Some(state);
                     p.fl_folders = folders;
+                    p.bw_source = source;
+                    p.bw_version = bw_version;
+                    p.bw_state = Some(bw_state);
+                    p.bw_folders = bw_folders;
+                    p.bw_users = users;
                 }
             });
             if let Some(app) = weak.upgrade() {
@@ -706,7 +744,7 @@ fn install_fl(app: &AppWindow) {
                 }
             });
             if let Some(app) = weak.upgrade() {
-                look_at_fl(&app);
+                look_at_scripts(&app);
                 show(&app);
             }
         });
@@ -720,6 +758,68 @@ fn install_fl(app: &AppWindow) {
         });
         show(app);
     }
+}
+
+/// Puts the app's own Bitwig extension in Bitwig's folders and takes out the older script (Solomon's OK, 2026-11-03),
+/// away from the window, then looks again.
+fn install_bitwig(app: &AppWindow) {
+    let job = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let p = p.as_mut().filter(|p| p.live && !p.daws_installing && !p.bw_folders.is_empty())?;
+        let source = p.bw_source.clone()?;
+        p.daws_installing = true;
+        Some((source, p.bw_folders.clone(), p.bw_users.clone()))
+    });
+    let Some((source, folders, users)) = job else { return };
+    show(app);
+    let weak = app.as_weak();
+    let started = background::spawn("Settings Bitwig install", move || {
+        let done = scripts::install_bitwig(&source, &folders, &users);
+        for f in &done.installed.went {
+            log::info("Settings", &format!("Installed the Bitwig extension in {}", f.display()));
+        }
+        for f in &done.removed {
+            log::info("Settings", &format!("Took out the older Bitwig script {}", f.display()));
+        }
+        for (f, why) in &done.installed.failed {
+            log::warning("Settings", &format!("Couldn't install the Bitwig extension in {}: {why}", f.display()));
+        }
+        let note = page::bitwig_installed_note(&done);
+        let _ = slint::invoke_from_event_loop(move || {
+            PAGE.with(|p| {
+                if let Some(p) = p.borrow_mut().as_mut() {
+                    p.daws_installing = false;
+                    p.daws_message = note;
+                }
+            });
+            if let Some(app) = weak.upgrade() {
+                look_at_scripts(&app);
+                show(&app);
+            }
+        });
+    });
+    if let Err(e) = started {
+        log::error("Settings", &format!("Couldn't start installing the Bitwig extension: {e}"));
+        PAGE.with(|p| {
+            if let Some(p) = p.borrow_mut().as_mut() {
+                p.daws_installing = false;
+            }
+        });
+        show(app);
+    }
+}
+
+/// Shows Bitwig's extension as found, for the screenshots.
+pub fn show_bitwig_extension(app: &AppWindow, state: ScriptState, version: &str, folders: Vec<PathBuf>) {
+    PAGE.with(|p| {
+        if let Some(p) = p.borrow_mut().as_mut() {
+            p.bw_source = Some(PathBuf::from(scripts::BITWIG_EXTENSION_NAME));
+            p.bw_version = Some(version.to_owned());
+            p.bw_state = Some(state);
+            p.bw_folders = folders;
+        }
+    });
+    show(app);
 }
 
 /// Shows FL Studio's script as found, for the screenshots.
@@ -915,6 +1015,10 @@ fn show(app: &AppWindow) {
         data.set_keys_changed(keys.any_changed());
 
         let fl = page::fl_status(p.fl_state, &p.fl_folders);
+        let mut bitwig = p.bitwig.clone();
+        let built = p.bw_source.as_ref().map(|_| p.bw_version.clone());
+        let (more, bw_install) = page::bitwig_extension_facts(p.bw_state, built, &p.bw_folders);
+        bitwig.facts.extend(more);
         let fl_install = match p.fl_state {
             Some(ScriptState::NotInstalled) if !p.fl_folders.is_empty() => "Install",
             Some(ScriptState::Outdated) => "Update",
@@ -934,7 +1038,7 @@ fn show(app: &AppWindow) {
                     .collect::<Vec<_>>(),
             )),
         };
-        data.set_daws(ModelRc::new(VecModel::from(vec![row(p.bitwig.clone(), ""), row(fl, fl_install)])));
+        data.set_daws(ModelRc::new(VecModel::from(vec![row(bitwig, bw_install), row(fl, fl_install)])));
         data.set_daws_checking(p.daws_checking);
         data.set_daws_installing(p.daws_installing);
         data.set_daws_message(p.daws_message.clone().into());

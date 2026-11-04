@@ -258,7 +258,8 @@ impl<'a> Teller<'a> {
     }
 
     /// The bass and what it is to the chord as written: a bass that's only a bass is one of its notes there (the C of
-    /// D over C is D7's seventh), or its root (the G of F over G is G9sus4's).
+    /// D over C is D7's seventh), or its root (the G of F over G is G9sus4's). A chord given with a bass of its own
+    /// stands on it whatever plays there, so when another bass plays, or none, it says so.
     fn bass(&self) -> String {
         let e = self.e;
         let chord = self.first.chord();
@@ -284,6 +285,19 @@ impl<'a> Teller<'a> {
             _ => {
                 let what = format!("its {}", role_word(chord.bass_degree()));
                 let bass = self.note(chord.bass());
+                let given = self.span.is_some_and(|s| s.flags.contains(SpanFlags::GIVEN));
+                if given && e.held_bass[0] != Some(chord.bass()) {
+                    let heard = match (e.bass_from, e.held_bass[0]) {
+                        (BassFrom::NoBass, _) => "no bass plays".to_owned(),
+                        (BassFrom::BassPart, Some(pc)) => format!("{} plays in the bass", self.note(pc)),
+                        (BassFrom::BassPart, None) => "the bass moves".to_owned(),
+                        (BassFrom::LowestKeys, Some(pc)) => {
+                            format!("the lowest note is {} (no bass part plays)", self.note(pc))
+                        }
+                        (BassFrom::LowestKeys, None) => "the lowest notes move (no bass part plays)".to_owned(),
+                    };
+                    return format!("it's given over {bass}, {what}, but {heard}");
+                }
                 match e.bass_from {
                     BassFrom::LowestKeys => format!("{bass}, the lowest note (no bass part plays), is {what}"),
                     _ => format!("{bass} in the bass is {what}"),
@@ -986,7 +1000,7 @@ pub(super) fn written_as_read(written: Chord, read: Chord) -> bool {
 /// early, on the and of 4.").
 pub(super) fn pushed_words(grid: Grid, start: i64, struck: i64) -> String {
     let beat = grid.beat();
-    let early = start - struck;
+    let early = start.saturating_sub(struck);
     let amount = match fraction(early, beat) {
         Some((1, 1)) => "a beat".to_owned(),
         Some((1, 2)) => "half a beat".to_owned(),
@@ -1000,7 +1014,10 @@ pub(super) fn pushed_words(grid: Grid, start: i64, struck: i64) -> String {
         _ if early < beat => "less than a beat".to_owned(),
         _ => "more than a beat".to_owned(),
     };
-    let at = (struck - grid.bar_line).rem_euclid(grid.bar());
+    // Where in its bar, worked out wider so a bar line far from the music (a damaged grid) can't overflow: within a
+    // bar, it fits back.
+    let at = (i128::from(struck) - i128::from(grid.bar_line)).rem_euclid(i128::from(grid.bar()));
+    let at = i64::try_from(at).unwrap_or(0);
     let (number, within) = (at / beat + 1, at % beat);
     let next = if number >= grid.bar_beats() { "the bar line".to_owned() } else { format!("beat {}", number + 1) };
     let place = match fraction(within, beat) {

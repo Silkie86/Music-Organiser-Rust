@@ -2947,6 +2947,7 @@ version = "0.1.0"
 dependencies = [
  "mo-formats",
  "serde_json",
+ "zip",
 ]
 
 [[package]]
