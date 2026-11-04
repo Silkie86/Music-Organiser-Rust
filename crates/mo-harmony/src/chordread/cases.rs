@@ -1582,7 +1582,8 @@ pub fn named_targets() -> Result<Vec<NamedCase>, String> {
             vec![Writes(0, "Fmaj7", Root), Flags(0, SpanFlags::PUSHED, SpanFlags::NONE), Writes(4, "G7", Root)],
         ),
         ("50 T: Cmaj9/E first", keys("E2 E3 C4 G4 B4 D5"), vec![Writes(0, "Cmaj9", Inversion), Stands(0, "Cmaj9/E")]),
-        ("56 T: Eb/E", keys_bass("E2", "Eb4 G4 Bb4"), vec![Writes(0, "Ebaddb9", Slash), Stands(0, "Eb/E")]),
+        // Its label, as the datasets would write it, spells the bass by its degree: the b9 of Eb is Fb.
+        ("56 T: Eb/E", keys_bass("E2", "Eb4 G4 Bb4"), vec![Writes(0, "Ebaddb9", Slash), Stands(0, "Eb/Fb")]),
     ];
     w.done()?;
     Ok(cases)

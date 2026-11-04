@@ -32,6 +32,8 @@
 //! octave up change nothing; and the same music at another resolution (ticks a beat) is heard the same, its counts in
 //! proportion.
 
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::ops::Range;
 
 use crate::keyfind::Span;
@@ -196,11 +198,16 @@ pub struct HeardNote {
     pub stream: Stream,
     /// Where it's heard to start: on a unit's start when it was struck just before it.
     pub start: i64,
-    /// Where it stops sounding: at least at the end of its felt beat when it's broken, and never past the end of what's
-    /// heard.
+    /// Where it stops sounding: where it was let go, at least at the end of its felt beat when it's broken, and never
+    /// past the end of what's heard.
     pub end: i64,
-    /// How long it was played, from where it's heard to start: its own length, without a broken chord's pedal.
+    /// How long it was played: its own length, without a broken chord's pedal, and not cut at the end of what's heard.
+    /// A note struck just before a unit's start and heard on it keeps the length it was played (though it still ends
+    /// where it was let go), so whether it's held a felt beat doesn't hang on whether it was played early or late.
     pub length: i64,
+    /// Where it was let go: before a broken chord's pedal, and not cut at the end of what's heard (and never before a
+    /// tick after where it's heard to start).
+    pub let_go: i64,
     /// Where its held-over end starts, when it rings a little past a bar line or the middle of a bar.
     pub held_over: Option<i64>,
     /// Struck in a felt beat where its part plays a broken chord, and held by the pedal at least to the end of the felt
@@ -243,7 +250,7 @@ pub struct Hearing {
     // Working space, kept between calls.
     raw: Vec<Raw>,
     order: Vec<usize>,
-    held: Vec<(i64, u8)>,
+    held: Ringing,
     pieces: Vec<Piece>,
     touches: Vec<Touch>,
     edges: Vec<Edge>,
@@ -279,8 +286,9 @@ impl Hearing {
                 }
                 let played = i128::from(note.start);
                 let start = layout.snap(played);
-                let end = (played + i128::from(note.duration())).max(start + 1);
-                self.raw.push(Raw { part: p, note: n, key: note.key, stream, played: note.start, start, end });
+                let length = note.duration();
+                let end = (played + i128::from(length)).max(start + 1);
+                self.raw.push(Raw { part: p, note: n, key: note.key, stream, played: note.start, length, start, end });
             }
         }
         let first = self.raw.iter().map(|r| r.start).min();
@@ -344,7 +352,8 @@ impl Hearing {
                 stream: r.stream,
                 start: ticks(start - origin),
                 end: ticks(stop.min(end) - origin),
-                length: ticks(stop - start),
+                length: r.length,
+                let_go: ticks(stop - origin),
                 held_over: None,
                 broken: false,
                 copy: false,
@@ -462,7 +471,7 @@ impl Hearing {
             if n.broken || with_another || over {
                 not_alone = not_alone.saturating_add(1);
             }
-            till[pc] = till[pc].max(n.start.saturating_add(n.length));
+            till[pc] = till[pc].max(n.let_go);
             all = all.saturating_add(1);
         }
         not_alone.saturating_mul(10) <= all
@@ -633,7 +642,9 @@ impl Hearing {
         self.layout.unit_at(from_first.max(0)).min(units)
     }
 
-    fn clamp(&self, units: Range<usize>) -> Range<usize> {
+    /// The units of a range that are heard: it stops at the last unit's end ([`Hearing::units`]), so a range from a
+    /// unit on to `usize::MAX` is the units from there to the end, and one wholly past the end is empty.
+    pub(super) fn clamp(&self, units: Range<usize>) -> Range<usize> {
         let end = units.end.min(self.units.len());
         units.start.min(end)..end
     }
@@ -711,14 +722,16 @@ impl Hearing {
             // struck at its start and sounding to its end, each to within a quarter of a unit (a player's timing).
             let through_to = to.min(*end);
             let held_through = |n: &HeardNote| n.start - from < together && through_to - n.end < together;
-            held.retain(|&(until, _)| through_to - until < together);
+            held.stop_by(through_to.saturating_sub(together));
             let struck = group.iter().filter_map(|&i| notes.get(i));
-            let through = struck.clone().filter(|n| held_through(n)).map(|n| n.key);
-            let held_pcs: PcSet = held.iter().map(|&(_, key)| key).chain(through).map(PitchClass::of_key).collect();
-            let lowest = struck.clone().map(|n| n.key).chain(held.iter().map(|&(_, key)| key)).min();
+            let through = struck.clone().filter(|n| held_through(n)).map(|n| n.pitch_class());
+            let held_pcs = through.fold(held.pitch_classes(), PcSet::with);
+            let lowest = struck.clone().map(|n| n.key).chain(held.lowest()).min();
             let free = lowest.is_none_or(|low| held_pcs.without(PitchClass::of_key(low)).is_empty());
             let broken = free && plays_broken(struck.clone(), unit, together);
-            held.extend(struck.filter(|n| n.end > to).map(|n| (n.end, n.key)));
+            for n in struck.filter(|n| n.end > to) {
+                held.add(n.end, n.key);
+            }
             if broken {
                 for &i in group {
                     if let Some(n) = notes.get_mut(i)
@@ -747,6 +760,7 @@ impl Hearing {
             self.notes.push(HeardNote {
                 start: start - length,
                 end: n.end - length,
+                let_go: n.let_go - length,
                 held_over: n.held_over.map(|h| h.max(start) - length),
                 copy: true,
                 struck: n.start >= length,
@@ -1158,8 +1172,9 @@ struct Raw {
     note: usize,
     key: u8,
     stream: Stream,
-    /// Where it was played, before the snap.
+    /// Where it was played, before the snap, and how long.
     played: i64,
+    length: i64,
     start: i128,
     end: i128,
 }
@@ -1401,6 +1416,16 @@ impl Keys {
         }
     }
 
+    fn highest(self) -> Option<u8> {
+        if self.high != 0 {
+            u8::try_from(255 - self.high.leading_zeros()).ok()
+        } else if self.low != 0 {
+            u8::try_from(127 - self.low.leading_zeros()).ok()
+        } else {
+            None
+        }
+    }
+
     fn iter(self) -> impl Iterator<Item = u8> {
         let mut rest = self;
         std::iter::from_fn(move || {
@@ -1408,5 +1433,73 @@ impl Keys {
             rest = rest.without(key);
             Some(key)
         })
+    }
+}
+
+/// Notes still sounding, each until some tick: the notes [`Hearing::find_broken`] finds a chord part holding, and those
+/// struck before that a top line hears ringing. Their keys are kept as counts, so asking which sound costs the same
+/// however many there are (a damaged file's notes may all sound to its end). Kept between hearings.
+#[derive(Debug, Default)]
+struct Ringing {
+    /// Where each note stops, and its key, the soonest first.
+    ends: BinaryHeap<Reverse<(i64, u8)>>,
+    /// How many notes of each key sound (256 keys, once cleared), and of each pitch class.
+    counts: Vec<u32>,
+    pitch_classes: PerPitch<u32>,
+    keys: Keys,
+}
+
+impl Ringing {
+    fn clear(&mut self) {
+        self.ends.clear();
+        self.counts.clear();
+        self.counts.resize(256, 0);
+        self.pitch_classes = PerPitch::default();
+        self.keys = Keys::default();
+    }
+
+    /// A note that sounds until `until`.
+    fn add(&mut self, until: i64, key: u8) {
+        if self.counts.is_empty() {
+            self.clear();
+        }
+        let Some(count) = self.counts.get_mut(usize::from(key)) else { return };
+        *count = count.saturating_add(1);
+        self.keys = self.keys.with(key);
+        let pc = PitchClass::of_key(key);
+        self.pitch_classes[pc] = self.pitch_classes[pc].saturating_add(1);
+        self.ends.push(Reverse((until, key)));
+    }
+
+    /// Lets go of the notes that stop at or before a tick.
+    fn stop_by(&mut self, tick: i64) {
+        while let Some(&Reverse((until, key))) = self.ends.peek()
+            && until <= tick
+        {
+            self.ends.pop();
+            if let Some(count) = self.counts.get_mut(usize::from(key)) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    self.keys = self.keys.without(key);
+                }
+            }
+            let pc = PitchClass::of_key(key);
+            self.pitch_classes[pc] = self.pitch_classes[pc].saturating_sub(1);
+        }
+    }
+
+    /// The pitch classes that sound.
+    fn pitch_classes(&self) -> PcSet {
+        PitchClass::ALL.into_iter().filter(|&pc| self.pitch_classes[pc] > 0).collect()
+    }
+
+    /// The lowest key that sounds.
+    fn lowest(&self) -> Option<u8> {
+        self.keys.lowest()
+    }
+
+    /// The highest key that sounds.
+    fn highest(&self) -> Option<u8> {
+        self.keys.highest()
     }
 }
