@@ -10,18 +10,21 @@ mod sky;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use chrono::{Local, NaiveDateTime};
 use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
+use mo_app::finder::{self, Kind};
+use mo_app::places::Place;
 use mo_app::shortcuts::{Shortcuts, what_of};
 use mo_app::sounds::{self as list, Filters, Length, Order, SoundList};
-use mo_app::{log, sweep_timing, year_strip};
+use mo_app::{log, sweep_timing, to_bitwig, year_strip};
 use mo_audio::play::Player;
 use mo_library::UsageRules;
 use mo_library::songs::thousands;
@@ -32,6 +35,7 @@ use mo_sounds::usage::{self, Usage};
 use mo_sounds::{Sound, SoundsDb, music};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, Timer, TimerMode, VecModel};
 
+use crate::finder::How;
 use crate::{
     AlikeLine, AppWindow, CardAction, FolderLine, MenuItem, PickedSound, SoundFact, SoundLine, SoundTile, SoundsData,
     TileRow, TypeChipInfo, YearBar,
@@ -53,7 +57,8 @@ const GALAXY: i32 = 2;
 const HISTORY: i32 = 3;
 const REDISCOVER: i32 = 4;
 const KITS: i32 = 5;
-const VIEWS: [&str; 6] = ["Tiles", "List", "Galaxy", "History", "Rediscover", "Kits"];
+/// The views, in the switch's order. Ctrl+K offers each one as a page of its own.
+pub const VIEWS: [&str; 6] = ["Tiles", "List", "Galaxy", "History", "Rediscover", "Kits"];
 /// The C# app's export folder setting in `library.db` (kits go in its Kits folder).
 const EXPORT_FOLDER_KEY: &str = "export_folder";
 
@@ -93,6 +98,8 @@ struct Page {
     columns: usize,
     /// The picked sound, as its place in `list`.
     picked: Option<usize>,
+    /// A sound Ctrl+K jumped to that the filters hid: picked once the list without them arrives.
+    to_pick: Option<usize>,
     autoplay: bool,
     /// Counts the asks for a new list, so an older answer that arrives late is dropped.
     asked: u64,
@@ -136,6 +143,7 @@ impl Default for Page {
             history: Vec::new(),
             columns: 4,
             picked: None,
+            to_pick: None,
             autoplay: false,
             asked: 0,
             read: false,
@@ -370,11 +378,11 @@ fn points(s: &Sound) -> i32 {
     s.analysis.as_ref().map_or(0, |a| a.waveform.len() as i32)
 }
 
-fn new_seed() -> u64 {
+pub(crate) fn new_seed() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64)
 }
 
-fn strings<S: AsRef<str>>(items: impl IntoIterator<Item = S>) -> ModelRc<SharedString> {
+pub(crate) fn strings<S: AsRef<str>>(items: impl IntoIterator<Item = S>) -> ModelRc<SharedString> {
     ModelRc::new(VecModel::from(items.into_iter().map(|s| SharedString::from(s.as_ref())).collect::<Vec<_>>()))
 }
 
@@ -393,7 +401,13 @@ pub fn graphics_ready(app: &AppWindow) {
     galaxy::draw(app);
 }
 
-/// The graphics card went (the window closed, or the card was reset): what the galaxy made on it goes too.
+/// The graphics card went (the window closed, or the card was reset): the galaxy's painter goes too, at once, even as
+/// the window itself goes.
+pub fn card_gone() {
+    galaxy::painter_gone();
+}
+
+/// The graphics card went: the galaxy's picture on show goes too.
 pub fn graphics_gone(app: &AppWindow) {
     galaxy::card_gone(app);
 }
@@ -404,6 +418,20 @@ pub fn graphics_gone(app: &AppWindow) {
 /// `feed`'s cards.
 pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: Feed, shortcuts: &Shortcuts) {
     wire(app, feed, shortcuts);
+    crate::finder::on_open(Kind::Sound, |app, hit, how| {
+        let Some(at) = hit.id.parse::<i64>().ok().and_then(|id| PAGE.with(|p| p.borrow().places.get(&id).copied()))
+        else {
+            return false;
+        };
+        match how {
+            How::Play => play_sound(app, at, 0.0, mo_audio::MAX_SECONDS),
+            How::Open | How::InDaw => {
+                crate::go_to(app, Place::Sounds.index() as i32);
+                show_sound(app, at);
+            }
+        }
+        true
+    });
     PAGE.with(|p| p.borrow_mut().galaxy.db = Some(sounds_db.clone()));
     reading(app);
     let here = HERE.with(|h| *h.borrow());
@@ -466,6 +494,7 @@ struct Read {
     view: Option<String>,
     count: Option<String>,
     export_folder: Option<String>,
+    drum_machine: Option<String>,
     autoplay: Option<String>,
 }
 
@@ -522,6 +551,8 @@ struct Settings {
     count: Option<String>,
     /// Where exports (kits) go.
     export_folder: Option<String>,
+    /// The Drum Machine's ID the C# app read from Bitwig's files, for kits sent to Bitwig.
+    drum_machine: Option<String>,
     autoplay: Option<String>,
     rules: UsageRules,
     weights: LikedWeights,
@@ -544,6 +575,7 @@ impl Settings {
             view: get(VIEW_KEY),
             count: get(COUNT_KEY),
             export_folder: get(EXPORT_FOLDER_KEY),
+            drum_machine: get(to_bitwig::DRUM_MACHINE_KEY),
             autoplay: get(AUTOPLAY_KEY),
             rules: UsageRules { needs_notes: on(USED_NEEDS_NOTES_KEY), not_muted_in_newest: on(USED_NOT_MUTED_KEY) },
             weights: LikedWeights::from_json(get(LIKED_WEIGHTS_KEY).as_deref()),
@@ -601,12 +633,12 @@ fn read_all(sounds_db: &Path, library_db: &Path, send: impl Fn(Step)) {
         view: settings.view.clone(),
         count: settings.count.clone(),
         export_folder: settings.export_folder.clone(),
+        drum_machine: settings.drum_machine.clone(),
         autoplay: settings.autoplay.clone(),
     })));
     let (Some(list), Some((features, clap, analysed))) = (list, fingerprints) else { return };
-    // Sounds like this: every sound's fingerprint, read with the sounds.
-    let index = background::on_pool(|| SoundIndex::build(&features, &clap, analysed));
-    drop((features, clap));
+    // Sounds like this: every sound's fingerprint, read with the sounds; their blocks become the index.
+    let index = background::on_pool(move || SoundIndex::from_gathered(features, clap, analysed));
     send(Step::Index(Arc::new(index)));
     let Some(lib) = lib else { return };
     let year_ago = now.checked_sub_months(chrono::Months::new(12)).unwrap_or(now);
@@ -745,10 +777,12 @@ fn use_known(app: &AppWindow, list: Arc<SoundList>) {
         if p.list.len() != list.len() {
             return None;
         }
-        p.list = list;
+        p.list = list.clone();
         Some(p.picked)
     });
     let Some(picked) = picked else { return };
+    // Ctrl+K now knows which sounds you use most.
+    crate::finder::add_source(app, "sounds", Arc::new(finder::Sounds(list)));
     refresh(app);
     // What Rediscover dug out didn't know your taste yet.
     if PAGE.with(|p| p.borrow().re_started) {
@@ -786,6 +820,7 @@ fn loaded(app: &AppWindow, read: Result<Read, String>) {
         let mut p = p.borrow_mut();
         p.re.count = count;
         p.kit.export_folder = read.export_folder;
+        p.kit.drum_machine = read.drum_machine;
     });
     show(app, read.library, read.view.as_deref(), read.autoplay.as_deref());
 }
@@ -801,6 +836,7 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
         p.read = true;
         p.history = library.played;
         p.list = library.list;
+        p.to_pick = None;
         p.places = library.places;
         p.types = library.types;
         p.view = view.and_then(|v| VIEWS.iter().position(|n| *n == v)).map_or(TILES, |i| i as i32);
@@ -813,6 +849,8 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
         // An answer still on its way was for the old list: it's dropped.
         p.re_asked += 1;
     });
+    let list = PAGE.with(|p| p.borrow().list.clone());
+    crate::finder::add_source(app, "sounds", Arc::new(finder::Sounds(list)));
     refresh(app);
     show_rediscover_chips(app);
     kit::show(app);
@@ -825,8 +863,21 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
 
 /// What the picked sound offers besides Play: (its words, its id in the shortcut list). The card shows them as
 /// buttons after Play (Solomon's F12 note, 2026-11-02 03:28) and the right-click menu lists them under Play, from this
-/// one list so the two can't drift apart. Send to Bitwig joins once the DAW link is in.
-const CARD_ACTIONS: &[(&str, &str)] = &[("Show in folder", "sounds.reveal"), ("Copy path", "sounds.copyPath")];
+/// one list so the two can't drift apart.
+const CARD_ACTIONS: &[(&str, &str)] =
+    &[("Send to Bitwig", TO_BITWIG), ("Show in folder", "sounds.reveal"), ("Copy path", "sounds.copyPath")];
+
+/// Send to Bitwig's id in the shortcut list (the C# app's).
+const TO_BITWIG: &str = "sounds.toBitwig";
+
+/// A sound is on its way to Bitwig: Send to Bitwig waits meanwhile, as it did in the C# app, so a second press doesn't
+/// put a second track into the project.
+static SENDING: AtomicBool = AtomicBool::new(false);
+
+/// The card's buttons and menu again, with keys changed in Settings.
+pub fn show_keys(app: &AppWindow, shortcuts: &Shortcuts) {
+    show_actions(&app.global::<SoundsData>(), shortcuts);
+}
 
 /// The card's buttons and the right-click menu, with each one's key and tooltip from the shortcut list (rule 15).
 fn show_actions(data: &SoundsData, shortcuts: &Shortcuts) {
@@ -1375,7 +1426,38 @@ fn listed(app: &AppWindow, id: u64, shown: Vec<usize>, years: YearCounts) {
         }
         // The filters dim the stars they leave out.
         galaxy::draw(app);
+        if let Some(at) = PAGE.with(|p| p.borrow_mut().to_pick.take()) {
+            pick(app, at);
+        }
     }
+}
+
+/// Shows one of the views by its name (Ctrl+K's "Sounds › Galaxy"), as the view switch does.
+pub fn show_view(app: &AppWindow, name: &str) {
+    if let Some(v) = VIEWS.iter().position(|n| *n == name) {
+        app.global::<SoundsData>().invoke_pick_view(v as i32);
+    }
+}
+
+/// Picks the sound at `at` in the list and brings it into view (Ctrl+K). A view that only shows some sounds (History,
+/// Rediscover, Kits) gives way to Tiles, and filters that hide it are cleared; the search box with them.
+fn show_sound(app: &AppWindow, at: usize) {
+    let view = PAGE.with(|p| p.borrow().view);
+    if matches!(view, HISTORY | REDISCOVER | KITS) {
+        show_view(app, VIEWS[TILES as usize]);
+    }
+    let hidden = PAGE.with(|p| !p.borrow().shown.contains(&at));
+    if !hidden {
+        pick(app, at);
+        return;
+    }
+    PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.filters = Filters::default();
+        p.to_pick = Some(at);
+    });
+    app.global::<SoundsData>().set_search(SharedString::new());
+    refresh(app);
 }
 
 /// The year strip: each year, how full it is, and whether the filter has it.
@@ -1727,7 +1809,7 @@ fn playing_changed(app: &AppWindow) {
 pub fn run_action(app: &AppWindow, id: &str) -> bool {
     let picked = PAGE.with(|p| {
         let p = p.borrow();
-        p.picked.and_then(|at| p.list.sound(at)).map(|s| (s.path.clone(), mo_app::shell::folder_of(&s.path).to_owned()))
+        p.picked.and_then(|at| p.list.sound(at)).map(|s| (s.path.clone(), s.name().to_owned()))
     });
     let feed = FEED.with(|f| f.borrow().clone());
     match (id, picked, feed) {
@@ -1737,11 +1819,59 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
             }
             stop(app);
         }
-        ("sounds.reveal", Some((path, folder)), Some(feed)) => crate::files::reveal(&feed, &path, &folder),
+        (TO_BITWIG, Some((path, name)), Some(feed)) => send_to_bitwig(app, &feed, path, name),
+        ("sounds.reveal", Some((path, _)), Some(feed)) => {
+            crate::files::reveal(&feed, &path, mo_app::shell::folder_of(&path));
+        }
         ("sounds.copyPath", Some((path, _)), Some(feed)) => crate::files::copy_path(&feed, &path),
         _ => return false,
     }
     true
+}
+
+/// Puts a sound on a Sampler on a new track in the project open in Bitwig, on a thread of its own, as its file name
+/// (without the extension) names it. Its card shows at once and says how it went. While it goes, Send to Bitwig waits.
+fn send_to_bitwig(app: &AppWindow, feed: &Feed, path: String, name: String) {
+    if SENDING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    show_sending(app, true);
+    let job = to_bitwig::sound_card(feed, &name);
+    let weak = app.as_weak();
+    let sent = background::spawn("Send to Bitwig", move || {
+        // A panic in it is logged as a crash and fails the card as it goes; Send to Bitwig still comes back.
+        let to = to_bitwig::Bitwig::default();
+        let _ = std::panic::catch_unwind(AssertUnwindSafe(|| to_bitwig::send_sound(job, &to, &path, &name)));
+        SENDING.store(false, Ordering::Release);
+        let _ = weak.upgrade_in_event_loop(|app| show_sending(&app, false));
+    });
+    // Its card was taken into the thread, so it fails by itself ("It stopped before it finished").
+    if let Err(e) = sent {
+        log::error("Sounds", &format!("Couldn't start sending to Bitwig: {e}"));
+        SENDING.store(false, Ordering::Release);
+        show_sending(app, false);
+    }
+}
+
+/// Send to Bitwig on the card and on the right-click menu: greyed, saying "Sending…", while a sound is on its way.
+fn show_sending(app: &AppWindow, sending: bool) {
+    let data = app.global::<SoundsData>();
+    let text = CARD_ACTIONS.iter().find(|a| a.1 == TO_BITWIG).map_or("", |a| a.0);
+    let actions = data.get_actions();
+    for i in 0..actions.row_count() {
+        if let Some(mut a) = actions.row_data(i).filter(|a| a.id == TO_BITWIG) {
+            a.enabled = !sending;
+            a.text = if sending { "Sending…".into() } else { text.into() };
+            actions.set_row_data(i, a);
+        }
+    }
+    let menu = data.get_menu();
+    for i in 0..menu.row_count() {
+        if let Some(mut m) = menu.row_data(i).filter(|m| m.id == TO_BITWIG) {
+            m.enabled = !sending;
+            menu.set_row_data(i, m);
+        }
+    }
 }
 
 #[cfg(test)]

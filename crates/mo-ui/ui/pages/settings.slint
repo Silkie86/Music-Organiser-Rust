@@ -2,7 +2,7 @@
 // "Made with Slint" credit in General's About part (Slint's royalty-free licence, decided 2026-10-30). Only shared
 // parts from studio.slint; mo-app decides every word (mo_app::settings), mo-ui/src/settings.rs fills it.
 import { AboutSlint } from "std-widgets.slint";
-import { Theme, Type, Space, StudioButton, Segmented, MenuChip, PageHeader, Caps, Well, TabBar, EmptyState } from "../studio.slint";
+import { Theme, Type, Space, StudioButton, Segmented, MenuChip, PageHeader, Caps, Well, TabBar, EmptyState, Dot } from "../studio.slint";
 
 // One theme to pick, drawn as a little picture of it in its own colours.
 export struct ThemeCardInfo {
@@ -30,6 +30,27 @@ export struct SettingsFact {
     value: string,
     // Its button ("Open", "Show"), or empty for none.
     button: string,
+}
+
+// A line of the Shortcuts tab: a page's heading (only `page`), or an action and its key.
+export struct KeyLineInfo {
+    page: string,
+    id: string,
+    what: string,
+    key: string,
+    changed: bool,
+    starts: string,
+}
+
+// A DAW's row on the DAWs tab: how its link stands, and the facts under that.
+export struct DawRowInfo {
+    daw: string,
+    state: string,
+    // Whether the link answers and the app could send to it now (its own colour then, grey when not).
+    ok: bool,
+    // Whether this is Bitwig (its colour, and its Check again button).
+    bitwig: bool,
+    facts: [SettingsFact],
 }
 
 export struct FolderGroupInfo {
@@ -74,8 +95,26 @@ export global SettingsData {
     in property <string> folders-note;
     in property <[FolderGroupInfo]> folder-groups;
 
+    // DAWs: each DAW's link, whether Bitwig is being checked, and the note under them.
+    in property <[DawRowInfo]> daws;
+    in property <bool> daws-checking;
+    in property <string> daws-note;
+    callback check-daws();
+
     // Developer.
     in property <[SettingsFact]> facts;
+
+    // Shortcuts: every action with its key; the one listening for a new key (its id), or empty; what the last change
+    // did; and whether any key isn't the one it started with.
+    in property <[KeyLineInfo]> key-lines;
+    in property <string> listening;
+    in property <string> keys-note;
+    in property <string> keys-message;
+    in property <bool> keys-changed;
+    callback listen(string);
+    callback clear-key(string);
+    callback default-key(string);
+    callback reset-keys();
 
     callback tab-picked(int);
     callback theme-picked(int);
@@ -249,6 +288,8 @@ component AccentDot inherits VerticalLayout {
 // A fact on a line: what it is, its value, and a button when it's a folder or file to open.
 component FactLine inherits HorizontalLayout {
     in property <SettingsFact> fact;
+    // Its value is words, not a path or a number: the page's own font then.
+    in property <bool> words;
     callback clicked();
     spacing: Space.md;
     Text {
@@ -263,7 +304,7 @@ component FactLine inherits HorizontalLayout {
         min-width: 0px;
         text: root.fact.value;
         color: Theme.text;
-        font-family: Theme.number-font;
+        font-family: root.words ? Theme.text-font : Theme.number-font;
         font-size: Type.meta;
         vertical-alignment: center;
         wrap: word-wrap;
@@ -460,13 +501,124 @@ component FoldersTab inherits VerticalLayout {
     }
 }
 
-component DawsTab inherits VerticalLayout {
+// An action and its key: click the key to give it another.
+component KeyLineRow inherits HorizontalLayout {
+    in property <KeyLineInfo> line;
+    spacing: Space.sm;
+    Text {
+        horizontal-stretch: 1;
+        min-width: 0px;
+        text: root.line.what;
+        color: Theme.text;
+        font-size: Type.body;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    StudioButton {
+        horizontal-stretch: 0;
+        width: 150px;
+        main: SettingsData.listening == root.line.id;
+        text: SettingsData.listening == root.line.id ? "Press a key…" : root.line.key;
+        tip: "Click, then press the key you want";
+        clicked => { SettingsData.listen(root.line.id); }
+    }
+    StudioButton {
+        horizontal-stretch: 0;
+        text: "No key";
+        enabled: root.line.key != "None";
+        tip: "Take its key away";
+        clicked => { SettingsData.clear-key(root.line.id); }
+    }
+    StudioButton {
+        horizontal-stretch: 0;
+        text: "Default";
+        enabled: root.line.changed;
+        tip: root.line.starts;
+        clicked => { SettingsData.default-key(root.line.id); }
+    }
+}
+
+component ShortcutsTab inherits VerticalLayout {
+    spacing: Space.lg;
     alignment: start;
-    Well {
-        height: 220px;
-        EmptyState {
-            title: "Coming with the Bitwig link";
-            text: "Installing the scripts that let the app talk to Bitwig and FL Studio, checking they answer, and the live tests, arrive here once the Bitwig link is in.";
+    Text {
+        text: SettingsData.keys-note;
+        color: Theme.muted;
+        font-size: Type.meta;
+        wrap: word-wrap;
+    }
+    HorizontalLayout {
+        spacing: Space.md;
+        Text {
+            horizontal-stretch: 1;
+            text: SettingsData.keys-message;
+            color: Theme.warning;
+            font-size: Type.meta;
+            vertical-alignment: center;
+            wrap: word-wrap;
+        }
+        StudioButton {
+            horizontal-stretch: 0;
+            text: "Every key back to the start";
+            enabled: SettingsData.keys-changed;
+            clicked => { SettingsData.reset-keys(); }
+        }
+    }
+    Rectangle {
+        background: Theme.surface;
+        border-radius: Theme.radius;
+        border-width: 1px;
+        border-color: Theme.stroke;
+        VerticalLayout {
+            padding: Space.lg;
+            spacing: Space.xs;
+            for l in SettingsData.key-lines: VerticalLayout {
+                if l.page != "": VerticalLayout {
+                    padding-top: Space.md;
+                    Caps { text: l.page; }
+                }
+                if l.page == "": KeyLineRow { line: l; }
+            }
+        }
+    }
+}
+
+component DawsTab inherits VerticalLayout {
+    spacing: Space.lg;
+    alignment: start;
+    Text {
+        text: SettingsData.daws-note;
+        color: Theme.muted;
+        font-size: Type.meta;
+        wrap: word-wrap;
+    }
+    for d in SettingsData.daws: SettingsCard {
+        title: d.daw;
+        HorizontalLayout {
+            spacing: Space.sm;
+            Dot {
+                y: (parent.height - self.height) / 2;
+                tint: !d.ok ? Theme.faint : d.bitwig ? Theme.bitwig : Theme.fl-studio;
+            }
+            Text {
+                horizontal-stretch: 1;
+                text: d.state;
+                color: Theme.text;
+                font-size: Type.body;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+            if d.bitwig: StudioButton {
+                horizontal-stretch: 0;
+                text: SettingsData.daws-checking ? "Checking\u{2026}" : "Check again";
+                tip: "Asks the link in Bitwig how it stands. Only reads: nothing goes into the project.";
+                enabled: !SettingsData.daws-checking;
+                clicked => { SettingsData.check-daws(); }
+            }
+        }
+        for f in d.facts: FactLine {
+            fact: f;
+            words: true;
         }
     }
 }
@@ -533,13 +685,7 @@ export component SettingsPage inherits Rectangle {
                 if SettingsData.tab == 0: GeneralTab { }
                 if SettingsData.tab == 1: FoldersTab { }
                 if SettingsData.tab == 2: DawsTab { }
-                if SettingsData.tab == 3: Well {
-                    height: 220px;
-                    EmptyState {
-                        title: "Coming next";
-                        text: "Every key in one list, to change any of them. Until then, press F1 or ? on a page to see its keys.";
-                    }
-                }
+                if SettingsData.tab == 3: ShortcutsTab { }
                 if SettingsData.tab == 4: DeveloperTab { }
             }
         }

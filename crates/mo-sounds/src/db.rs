@@ -9,7 +9,7 @@ use chrono::{Local, NaiveDateTime};
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
 
-use crate::learn::Vectors;
+use crate::index::Gathered;
 use crate::{Sound, SoundActivity, SoundAnalysis, event, types};
 
 /// What went wrong reading the sound library.
@@ -82,10 +82,11 @@ pub struct KnownSound {
 pub struct Everything {
     /// Every sound, as [`SoundsDb::all`] gives them.
     pub sounds: Vec<Sound>,
-    /// Each sound's vector from the analyser, as [`SoundsDb::vectors`] gives them for "features".
-    pub features: Vectors,
-    /// Each sound's vector from CLAP, as [`SoundsDb::vectors`] gives them for "clap".
-    pub clap: Vectors,
+    /// Each sound's vector from the analyser, as [`SoundsDb::vectors`] gives them for "features", gathered in one
+    /// block in the order the rows are stored.
+    pub features: Gathered,
+    /// Each sound's vector from CLAP, as [`SoundsDb::vectors`] gives them for "clap", gathered likewise.
+    pub clap: Gathered,
 }
 
 impl Everything {
@@ -234,11 +235,12 @@ impl SoundsDb {
             add_undated_plays(&mut a, s.plays);
             s.activity = a;
             if vectors {
-                if let Some(v) = vector_at(r, SOUND_COLUMNS) {
-                    out.features.insert(s.id, v);
+                // Straight from SQLite's copy of each blob into the one block: no list of its own for each sound.
+                if let Ok(ValueRef::Blob(blob)) = r.get_ref(SOUND_COLUMNS) {
+                    out.features.push_blob(s.id, blob);
                 }
-                if let Some(v) = vector_at(r, SOUND_COLUMNS + 1) {
-                    out.clap.insert(s.id, v);
+                if let Ok(ValueRef::Blob(blob)) = r.get_ref(SOUND_COLUMNS + 1) {
+                    out.clap.push_blob(s.id, blob);
                 }
             }
             out.sounds.push(s);

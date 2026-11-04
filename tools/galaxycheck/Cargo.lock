@@ -2895,8 +2895,11 @@ dependencies = [
  "chrono",
  "mo-backup",
  "mo-convert",
+ "mo-dawlink",
  "mo-formats",
+ "mo-harmony",
  "mo-library",
+ "mo-midi",
  "mo-sounds",
  "mo-space",
  "rayon",
@@ -2940,6 +2943,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mo-dawlink"
+version = "0.1.0"
+dependencies = [
+ "mo-formats",
+ "serde_json",
+]
+
+[[package]]
 name = "mo-formats"
 version = "0.1.0"
 dependencies = [
@@ -2949,6 +2960,10 @@ dependencies = [
  "roxmltree",
  "zip",
 ]
+
+[[package]]
+name = "mo-harmony"
+version = "0.1.0"
 
 [[package]]
 name = "mo-library"
@@ -2963,6 +2978,19 @@ dependencies = [
  "serde",
  "serde_json",
  "thread-priority",
+]
+
+[[package]]
+name = "mo-midi"
+version = "0.1.0"
+dependencies = [
+ "mo-formats",
+ "mo-harmony",
+ "mo-library",
+ "rayon",
+ "regex",
+ "rusqlite",
+ "sha2",
 ]
 
 [[package]]

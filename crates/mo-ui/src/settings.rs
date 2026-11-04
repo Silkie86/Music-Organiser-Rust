@@ -19,7 +19,9 @@ use mo_library::Library;
 use slint::platform::WindowEvent;
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
-use crate::{AccentInfo, AppWindow, FolderGroupInfo, SettingsData, SettingsFact, ThemeCardInfo};
+use crate::{
+    AccentInfo, AppWindow, DawRowInfo, FolderGroupInfo, KeyLineInfo, SettingsData, SettingsFact, ThemeCardInfo,
+};
 
 /// What the page knows, on the window's thread.
 struct Page {
@@ -38,6 +40,15 @@ struct Page {
     unsaved: bool,
     /// Counts the reads of the folders, so an older one finishing late is dropped (newest wins).
     folders_asked: u64,
+    /// The action Shortcuts is listening for a new key for.
+    listening: Option<&'static str>,
+    /// What the last key change did.
+    keys_message: String,
+    /// How Bitwig's link stood when last checked, whether a check is running, and how many were asked for (newest
+    /// wins).
+    bitwig: page::DawStatus,
+    daws_checking: bool,
+    daws_asked: u64,
     feed: Feed,
 }
 
@@ -139,6 +150,11 @@ pub fn connect(app: &AppWindow, setup: Setup) {
             writable: setup.live && setup.writable,
             unsaved: false,
             folders_asked: 0,
+            listening: None,
+            keys_message: String::new(),
+            bitwig: page::bitwig_checking(),
+            daws_checking: false,
+            daws_asked: 0,
             feed: setup.feed,
         })
     });
@@ -155,6 +171,8 @@ pub fn connect(app: &AppWindow, setup: Setup) {
     data.set_version(format!("Version {}", mo_app::version::version()).into());
     data.set_credit(page::SLINT_CREDIT.into());
     data.set_folders_note(page::FOLDERS_NOTE.into());
+    data.set_keys_note(page::KEYS_NOTE.into());
+    data.set_daws_note(page::DAWS_NOTE.into());
     data.set_kept_note(
         format!("Your changes are kept in {}; the C# app's settings are only read", app_settings::FILE).into(),
     );
@@ -166,6 +184,15 @@ pub fn connect(app: &AppWindow, setup: Setup) {
         change(TAB_KEY, tab.name());
         if let Some(app) = weak.upgrade() {
             show(&app);
+            if tab == Tab::Daws {
+                check_daws(&app);
+            }
+        }
+    });
+    let weak = app.as_weak();
+    data.on_check_daws(move || {
+        if let Some(app) = weak.upgrade() {
+            check_daws(&app);
         }
     });
     let weak = app.as_weak();
@@ -252,6 +279,40 @@ pub fn connect(app: &AppWindow, setup: Setup) {
     });
     data.on_open_fact(open_fact);
     let weak = app.as_weak();
+    data.on_listen(move |id| {
+        let id = mo_app::shortcuts::all_actions().map(|(_, a)| a.id).find(|a| *a == id.as_str());
+        PAGE.with(|p| {
+            if let Some(p) = p.borrow_mut().as_mut() {
+                // A second click on the one listening stops it.
+                p.listening = if p.listening == id { None } else { id };
+                p.keys_message.clear();
+            }
+        });
+        if let Some(app) = weak.upgrade() {
+            show(&app);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_clear_key(move |id| {
+        if let Some(app) = weak.upgrade() {
+            give_key(&app, id.as_str(), "");
+        }
+    });
+    let weak = app.as_weak();
+    data.on_default_key(move |id| {
+        let default = mo_app::shortcuts::all_actions().find(|(_, a)| a.id == id.as_str()).map(|(_, a)| a.default_key);
+        if let (Some(app), Some(default)) = (weak.upgrade(), default) {
+            give_key(&app, id.as_str(), default);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_reset_keys(move || {
+        let Some(app) = weak.upgrade() else { return };
+        let mut keys = crate::shortcuts();
+        keys.reset_all();
+        keys_now(&app, &keys, "All keys are back to the ones they started with.".to_owned());
+    });
+    let weak = app.as_weak();
     data.on_try_job(move || {
         if let Some(app) = weak.upgrade() {
             app.invoke_try_job();
@@ -300,9 +361,59 @@ fn change(key: &str, value: &str) {
     }
 }
 
+/// Whether Settings › Shortcuts is listening for a new key, so the next key press is that key.
+pub fn listening() -> bool {
+    PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| p.listening.is_some()))
+}
+
+/// A key pressed while listening: Esc stops listening, a modifier on its own waits for the rest, any other key is
+/// given to the action. Returns whether the press was used (always, so nothing else runs while listening).
+pub fn key_pressed(app: &AppWindow, key: &str) -> bool {
+    if key.is_empty() {
+        return true;
+    }
+    let id = PAGE.with(|p| p.borrow_mut().as_mut().and_then(|p| p.listening.take()));
+    if let Some(id) = id
+        && key != "Esc"
+    {
+        give_key(app, id, key);
+    } else {
+        show(app);
+    }
+    true
+}
+
+/// Gives an action a key (or none), keeps it and shows it everywhere.
+fn give_key(app: &AppWindow, id: &str, key: &str) {
+    let mut keys = crate::shortcuts();
+    let said = keys.set(id, key);
+    keys_now(app, &keys, said);
+}
+
+/// The keys changed: kept in the settings, put to work everywhere at once, and the tab shows them.
+fn keys_now(app: &AppWindow, keys: &mo_app::shortcuts::Shortcuts, said: String) {
+    change(mo_app::shortcuts::SETTING_KEY, &keys.to_setting());
+    crate::keys_changed(app, keys);
+    PAGE.with(|p| {
+        if let Some(p) = p.borrow_mut().as_mut() {
+            p.listening = None;
+            p.keys_message = said;
+        }
+    });
+    show(app);
+}
+
 /// Remembers the page on show, for "Last page I used": only while that's the start page, so other clicks on the rail
 /// write nothing.
 pub fn page_shown(place: Place) {
+    // Leaving Settings stops Shortcuts listening, so the next key on another page works as a key again.
+    if place != Place::Settings {
+        PAGE.with(|p| {
+            if let Some(p) = p.borrow_mut().as_mut() {
+                p.listening = None;
+            }
+        });
+    }
     let wanted = PAGE.with(|p| {
         p.borrow().as_ref().is_some_and(|p| p.settings.get(START_PAGE_KEY) == Some(mo_app::places::LAST_PAGE_CHOICE))
     });
@@ -350,6 +461,12 @@ pub fn shown(app: &AppWindow) {
         return;
     }
     list_outputs(app);
+    // Bitwig is only asked while its tab is on show.
+    let on_daws =
+        PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| Tab::from_setting(p.settings.get(TAB_KEY)) == Tab::Daws));
+    if on_daws {
+        check_daws(app);
+    }
     let weak = app.as_weak();
     let started = background::spawn("Settings folders", move || {
         let groups = read_folders(&library);
@@ -365,6 +482,57 @@ pub fn shown(app: &AppWindow) {
     if let Err(e) = started {
         log::error("Settings", &format!("Couldn't start reading the folders: {e}"));
     }
+}
+
+/// Asks the link in Bitwig how it stands, away from the window (it may wait a few seconds for a busy Bitwig). Only
+/// reads: nothing goes into the project. A check asked for while one runs replaces its answer (newest wins).
+fn check_daws(app: &AppWindow) {
+    let asked = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let p = p.as_mut().filter(|p| p.live)?;
+        p.daws_asked += 1;
+        p.daws_checking = true;
+        Some(p.daws_asked)
+    });
+    let Some(asked) = asked else { return };
+    show(app);
+    let weak = app.as_weak();
+    let started = background::spawn("Settings Bitwig check", move || {
+        let status = page::bitwig_status(&mo_dawlink::bitwig::Bitwig::default().check());
+        let _ = slint::invoke_from_event_loop(move || {
+            let newest = PAGE.with(|p| {
+                let mut p = p.borrow_mut();
+                let Some(p) = p.as_mut().filter(|p| p.daws_asked == asked) else { return false };
+                p.bitwig = status;
+                p.daws_checking = false;
+                true
+            });
+            if let Some(app) = weak.upgrade()
+                && newest
+            {
+                show(&app);
+            }
+        });
+    });
+    if let Err(e) = started {
+        log::error("Settings", &format!("Couldn't start checking Bitwig: {e}"));
+        PAGE.with(|p| {
+            if let Some(p) = p.borrow_mut().as_mut() {
+                p.daws_checking = false;
+            }
+        });
+        show(app);
+    }
+}
+
+/// Shows how Bitwig's link stands, for the screenshots.
+pub fn show_bitwig(app: &AppWindow, status: page::DawStatus) {
+    PAGE.with(|p| {
+        if let Some(p) = p.borrow_mut().as_mut() {
+            p.bitwig = status;
+        }
+    });
+    show(app);
 }
 
 /// The folders as the C# app keeps them, read-only.
@@ -513,6 +681,38 @@ fn show(app: &AppWindow) {
         })
         .collect();
         data.set_facts(ModelRc::new(VecModel::from(facts)));
+
+        let keys = crate::shortcuts();
+        let lines: Vec<KeyLineInfo> = page::key_lines(&keys)
+            .into_iter()
+            .map(|l| KeyLineInfo {
+                page: l.page.into(),
+                id: l.id.into(),
+                what: l.what.into(),
+                key: l.key.into(),
+                changed: l.changed,
+                starts: l.starts.into(),
+            })
+            .collect();
+        data.set_key_lines(ModelRc::new(VecModel::from(lines)));
+        data.set_listening(p.listening.unwrap_or_default().into());
+        data.set_keys_message(p.keys_message.clone().into());
+        data.set_keys_changed(keys.any_changed());
+
+        let row = |d: page::DawStatus| DawRowInfo {
+            bitwig: d.daw == p.bitwig.daw,
+            daw: d.daw.into(),
+            state: d.state.into(),
+            ok: d.ok,
+            facts: ModelRc::new(VecModel::from(
+                d.facts
+                    .into_iter()
+                    .map(|f| SettingsFact { what: f.what.into(), value: f.value.into(), button: SharedString::new() })
+                    .collect::<Vec<_>>(),
+            )),
+        };
+        data.set_daws(ModelRc::new(VecModel::from(vec![row(p.bitwig.clone()), row(page::fl_status())])));
+        data.set_daws_checking(p.daws_checking);
     });
 }
 
