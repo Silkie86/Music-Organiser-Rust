@@ -91,15 +91,6 @@ pub struct Filters {
 }
 
 impl Filters {
-    /// Picks a kind of part, or lets it go again.
-    pub fn toggle_role(&mut self, role: Role) {
-        if let Some(at) = self.roles.iter().position(|r| *r == role) {
-            self.roles.remove(at);
-        } else {
-            self.roles.push(role);
-        }
-    }
-
     /// Picks or unpicks `choice` (as its chip or menu line says it) on the filter `name` ([`KIND`], [`FROM`],
     /// [`KEY`]). More than one kind or key can be picked; From is one or none (none is both).
     pub fn toggle(&mut self, name: &str, choice: &str) {
@@ -176,7 +167,10 @@ fn chips_pass(f: &Filters, e: &Entry) -> [bool; 3] {
     [
         f.roles.is_empty() || f.roles.contains(&e.role()),
         f.from.is_none_or(|from| (from == From::Projects) == e.is_project()),
-        f.keys.is_empty() || f.keys.iter().any(|&k| in_key(e, k)),
+        f.keys.is_empty() || {
+            let test = key_test(e);
+            f.keys.iter().any(|&k| test(k))
+        },
     ]
 }
 
@@ -214,13 +208,17 @@ pub struct ChoiceCounts {
     pub roles: Vec<usize>,
     /// By where from, in [`FROM_CHOICES`]' order.
     pub froms: Vec<usize>,
-    /// By key, in [`key_choices`]' order.
+    /// By key, majors then minors (the Key menu's order).
     pub keys: Vec<usize>,
 }
 
 impl ChoiceCounts {
     fn empty() -> ChoiceCounts {
-        ChoiceCounts { roles: vec![0; Role::ALL.len()], froms: vec![0; FROM_CHOICES.len()], keys: vec![0; 24] }
+        ChoiceCounts {
+            roles: vec![0; Role::ALL.len()],
+            froms: vec![0; FROM_CHOICES.len()],
+            keys: vec![0; key_list().len()],
+        }
     }
 
     fn add(mut self, other: ChoiceCounts) -> ChoiceCounts {
@@ -247,11 +245,15 @@ fn counts(cat: &Catalogue, hits: &[Hit], f: &Filters) -> ChoiceCounts {
                 c.roles[at] += 1;
             }
             if counts_on(1) {
-                c.froms[usize::from(!e.is_project())] += 1;
+                let from = if e.is_project() { From::Projects } else { From::Files };
+                if let Some(at) = FROM_CHOICES.iter().position(|&w| w == from) {
+                    c.froms[at] += 1;
+                }
             }
             if counts_on(2) {
+                let test = key_test(e);
                 for (at, &k) in keys.iter().enumerate() {
-                    if in_key(e, k) {
+                    if test(k) {
                         c.keys[at] += 1;
                     }
                 }
@@ -271,7 +273,8 @@ pub struct Chips {
 
 /// The chips for these counts and picks.
 pub fn chips(c: &ChoiceCounts, f: &Filters) -> Chips {
-    let counted = |words: &str, n: Option<&usize>| (words.to_owned(), thousands(n.copied().unwrap_or(0)));
+    // Before the first list is worked out there are no counts: the chips show none rather than a row of 0s.
+    let counted = |words: &str, n: Option<&usize>| (words.to_owned(), n.map(|n| thousands(*n)).unwrap_or_default());
     let kinds: Vec<(String, String)> =
         Role::ALL.iter().enumerate().map(|(at, r)| counted(r.plural(), c.roles.get(at))).collect();
     let froms: Vec<(String, String)> =
@@ -287,7 +290,7 @@ pub fn chips(c: &ChoiceCounts, f: &Filters) -> Chips {
 
 /// The kind a chip's words ("Basslines") stand for.
 fn role_of_plural(words: &str) -> Option<Role> {
-    Role::ALL.into_iter().find(|r| r.plural() == words)
+    Role::ALL.into_iter().find(|r| r.plural().eq_ignore_ascii_case(words))
 }
 
 fn sort(cat: &Catalogue, hits: &mut [Hit], order: Order) {
@@ -348,13 +351,20 @@ fn key_of(e: &Entry) -> Option<ShownKey> {
 
 /// Whether a part is in this key: the key the reading gives, either of a pair, or a home note's tonic.
 pub fn in_key(e: &Entry, key: KeyName) -> bool {
-    if let Some(fact) = &e.phrase.key_fact {
-        return fact.answer().is_some_and(|a| a.names(key));
+    key_test(e)(key)
+}
+
+/// [`in_key`] for many keys: the key finder's answer is worked out once, not once for each key.
+fn key_test(e: &Entry) -> impl Fn(KeyName) -> bool + '_ {
+    let answer = e.phrase.key_fact.as_ref().map(|fact| fact.answer());
+    move |key| match &answer {
+        Some(answer) => answer.as_ref().is_some_and(|a| a.names(key)),
+        None => e
+            .phrase
+            .key
+            .filter(|k| k.is_sure())
+            .is_some_and(|k| k.tonic == key.tonic.number() && k.minor == (key.mode == Mode::Minor)),
     }
-    e.phrase
-        .key
-        .filter(|k| k.is_sure())
-        .is_some_and(|k| k.tonic == key.tonic.number() && k.minor == (key.mode == Mode::Minor))
 }
 
 /// Every key, majors then minors, in the Key chip's order.
@@ -369,13 +379,8 @@ fn key_words(k: KeyName) -> String {
     k.short()
 }
 
-/// The Key chip's choices: every key, majors then minors, as the list writes them ("Eb", "C#m").
-pub fn key_choices() -> Vec<String> {
-    key_list().into_iter().map(KeyName::short).collect()
-}
-
 pub fn key_of_choice(name: &str) -> Option<KeyName> {
-    KeyName::ALL.into_iter().find(|k| k.short() == name)
+    KeyName::ALL.into_iter().find(|k| k.short().eq_ignore_ascii_case(name))
 }
 
 /// The year a file was saved in, here.
@@ -924,11 +929,11 @@ mod tests {
         let cat = catalogue();
         let mut f = Filters::default();
         assert_eq!(list(&cat, &f, Order::Newest, None, None).len(), 3);
-        f.toggle_role(Role::Bass);
+        f.toggle(KIND, "Basslines");
         assert_eq!(titles(&cat, &list(&cat, &f, Order::Newest, None, None)), ["Bass"]);
-        f.toggle_role(Role::Drums);
+        f.toggle(KIND, "Drums");
         assert_eq!(titles(&cat, &list(&cat, &f, Order::Newest, None, None)), ["Bass", "Kick"]);
-        f.toggle_role(Role::Bass);
+        f.toggle(KIND, "Basslines");
         assert_eq!(f.roles, [Role::Drums]);
         assert!(f.any());
     }
@@ -1135,6 +1140,13 @@ mod tests {
         assert!(shown.from.chips.iter().any(|c| c.text == "MIDI folders" && c.on && c.count == "2"));
         f.clear(FROM);
         assert!(!f.any());
+        // Before any list is worked out: the choices, with no count rather than 0.
+        let first = chips(&ChoiceCounts::default(), &f);
+        assert_eq!(first.kind.chips.len(), Role::ALL.len());
+        assert!(first.kind.chips.iter().chain(&first.from.chips).all(|c| c.count.is_empty()));
+        // Words that differ only in capitals pick the same key.
+        f.toggle(KEY, "am");
+        assert_eq!(f.keys, key_of_choice("Am").into_iter().collect::<Vec<_>>());
     }
 
     #[test]
