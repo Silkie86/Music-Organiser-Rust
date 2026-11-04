@@ -1118,6 +1118,18 @@ pub(super) fn list_changed(g: &mut Galaxy) {
     g.set_got = g.set_asked;
 }
 
+/// The page's list was read again with sounds new or gone (`to`: each old place's new one, `None` for a sound that's
+/// gone): the star a sweep last played and the one waiting its turn move with their sounds. One that's gone isn't
+/// waited for, and the pointer isn't held to it.
+pub(super) fn places_moved(g: &mut Galaxy, to: impl Fn(usize) -> Option<usize>) {
+    let s = &mut g.sweep;
+    s.played = s.played.and_then(|(at, when)| Some((to(at)?, when)));
+    s.waiting = s.waiting.and_then(&to);
+    if s.waiting.is_none() {
+        s.held = None;
+    }
+}
+
 /// The view came on show (or a new library did while it was): reads the map the first time.
 pub(super) fn shown(app: &AppWindow) {
     let _doing = crate::watchdog::doing("Galaxy: came on show");
@@ -1759,5 +1771,26 @@ mod tests {
         assert!(g.set_for.is_none() && g.light.is_none());
         // The pack still on its way is 3: [`packed`] takes only one newer than `set_got` and no newer than asked.
         assert!(3 <= g.set_got && g.set_got == g.set_asked, "{} {}", g.set_got, g.set_asked);
+    }
+
+    #[test]
+    fn a_sweeps_stars_move_with_their_sounds() {
+        // The sound at 0 is gone, 1 is now at 0 and 2 at 3.
+        let moved = [None, Some(0), Some(3)];
+        let to = |at: usize| moved.get(at).copied().flatten();
+        let when = Instant::now();
+        let mut g = Galaxy::default();
+        g.sweep.played = Some((1, when));
+        g.sweep.waiting = Some(2);
+        g.sweep.held = Some((5.0, 6.0));
+        places_moved(&mut g, to);
+        assert_eq!(g.sweep.played, Some((0, when)));
+        assert_eq!(g.sweep.waiting, Some(3));
+        assert_eq!(g.sweep.held, Some((5.0, 6.0)));
+        // The one waiting is gone (and so is the one played): nothing's waited for, and the pointer isn't held.
+        g.sweep.played = Some((0, when));
+        g.sweep.waiting = Some(0);
+        places_moved(&mut g, to);
+        assert_eq!((g.sweep.played, g.sweep.waiting, g.sweep.held), (None, None, None));
     }
 }

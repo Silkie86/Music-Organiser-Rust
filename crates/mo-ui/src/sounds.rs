@@ -1217,6 +1217,7 @@ fn move_places(p: &mut Page, moved: &[Option<usize>]) -> Gone {
     };
     p.picked = p.picked.and_then(to);
     p.playing = p.playing.and_then(|(at, seconds)| Some((to(at)?, seconds)));
+    galaxy::places_moved(&mut p.galaxy, to);
     gone
 }
 
