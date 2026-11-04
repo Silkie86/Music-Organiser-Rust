@@ -17,7 +17,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, Metadata};
 use std::io::Read;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -839,7 +839,7 @@ impl Bin for SystemBin {
     fn send(&self, path: &Path) -> Result<(), String> {
         // The library behind this can stop the thread when Windows won't start its file operations; that's a problem
         // for this line, not a crash.
-        let sent = catch_unwind(AssertUnwindSafe(|| trash::delete(path)))
+        let sent = mo_catch::catch(AssertUnwindSafe(|| trash::delete(path)))
             .map_err(|_| "Windows wouldn't start moving it to the Recycle Bin.".to_owned())?;
         match sent {
             Ok(()) if fs::symlink_metadata(path).is_ok() => Err(STILL_THERE.to_owned()),
@@ -1230,7 +1230,7 @@ fn same_name(item: &trash::TrashItem, real: &Path) -> bool {
 
 #[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
 fn bin_items() -> Option<Vec<trash::TrashItem>> {
-    match catch_unwind(trash::os_limited::list) {
+    match mo_catch::catch(trash::os_limited::list) {
         Ok(Ok(items)) => Some(items),
         _ => None,
     }
@@ -1290,7 +1290,7 @@ fn put_back_from_system_bin(removed: &[Removed]) -> Vec<Problem> {
         let spot = item.original_path();
         let was_there = fs::symlink_metadata(&spot).is_ok();
         let in_bin = in_bin_path(&item);
-        match catch_unwind(AssertUnwindSafe(|| trash::os_limited::restore_all([item]))) {
+        match mo_catch::catch(AssertUnwindSafe(|| trash::os_limited::restore_all([item]))) {
             Ok(Ok(())) => {}
             Ok(Err(trash::Error::RestoreCollision { .. })) => {
                 problems.push(problem(r, "Something new has its name now, so it's left in the Recycle Bin."))

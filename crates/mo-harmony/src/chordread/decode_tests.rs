@@ -815,11 +815,11 @@ fn nothing_heard_reads_nothing() {
     assert!(chances.is_empty());
 }
 
-/// The hand-set weights, with any changed by SET: "E3=-2,pair=0.3", each a feature's code, "pair" for the pair term's
-/// trust, "none" for what no chord scores a beat, or "shift" to lower the four costs of starting a chord (E4 to E7) by
-/// as much.
+/// The built-in weights ([`SHIPPED`]), with any changed by SET: "E3=-2,pair=0.3", each a feature's code, "pair" for the
+/// pair term's trust, "none" for what no chord scores a beat, or "shift" to lower the four costs of starting a chord
+/// (E4 to E7) by as much.
 fn weights_set() -> Weights {
-    let mut weights = HAND;
+    let mut weights = *SHIPPED.weights;
     for (name, value) in std::env::var("SET").unwrap_or_default().split(',').filter_map(|s| s.split_once('=')) {
         set(&mut weights, name.trim(), value.trim().parse().unwrap());
     }

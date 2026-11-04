@@ -18,7 +18,8 @@ use crate::notes::{Grid, Note, Part, Role};
 use crate::pitch::PcSet;
 
 impl Named {
-    /// Some music read whole on the counted tables, as the reader reads it, and named.
+    /// Some music read whole and named with the hand-set weights, on the counted tables: the namer's tests are on
+    /// numbers a fit doesn't move (the hand cases' gates are checked with the built-in ones too).
     fn read(music: &Music, pins: &[PinnedSpan], most: usize) -> Named {
         Named::of(music, &HAND, &COUNTED, pins, most).expect("nothing read")
     }
@@ -372,16 +373,18 @@ fn show_the_targets() {
 }
 
 #[test]
-#[ignore = "prints the design's hand cases read whole and named"]
+#[ignore = "prints the design's hand cases read whole and named, with the built-in weights"]
 fn show_the_cases_named() {
+    let named =
+        |music: Music| Named::of(&music.looped(), SHIPPED.weights, SHIPPED.tables, &[], 4).expect("nothing read");
     for (name, music, _) in named_cases() {
-        println!("{name}\n{}", render(&Named::read(&music.looped(), &[], 4).spans()));
+        println!("{name}\n{}", render(&named(music).spans()));
     }
     for (name, music, _) in whole_cases() {
-        println!("{name}\n{}", render(&Named::read(&music.looped(), &[], 4).spans()));
+        println!("{name}\n{}", render(&named(music).spans()));
     }
     for (name, music, units, _) in hand_cases() {
-        let spans = Named::read(&music.looped(), &[], 4).spans();
+        let spans = named(music).spans();
         let over: Vec<Span> =
             spans.into_iter().filter(|s| s.units.start < units.end && units.start < s.units.end).collect();
         println!("{name} over {units:?}\n{}", render(&over));

@@ -1,0 +1,11 @@
+[package]
+name = "mo-catch"
+description = "Catching a panic on purpose: a damaged file that trips a reader gives an error, and the crash handler can tell it from a crash. Nothing else in it, and no dependencies, so every crate can use it."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

@@ -488,7 +488,7 @@ fn send_to_bitwig(app: &AppWindow) {
     let started = background::spawn("Kit to Bitwig", move || {
         let to = to_bitwig::Bitwig::default();
         // A panic in it is logged as a crash and fails the card as it goes; the button still comes back.
-        let line = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let line = mo_catch::catch_crash(AssertUnwindSafe(|| {
             to_bitwig::send_kit(job, &to, &KITS_TO_BITWIG, &name, &pads, setting.as_deref())
         }))
         .unwrap_or_else(|_| "The kit couldn't be sent: see the log.".to_owned());

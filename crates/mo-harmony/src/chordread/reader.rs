@@ -21,7 +21,7 @@ use super::decode::{Decoder, Decoding, PinnedSpan};
 use super::hear::{Hearing, Unit};
 use super::name::{Namer, Naming, Reading, SpanFlags};
 use super::tables::COUNTED;
-use super::weights::{HAND, THRESHOLDS, Tables, Weights};
+use super::weights::{FITTED, THRESHOLDS, Tables, Weights};
 use crate::chord::Chord;
 use crate::key::Key;
 use crate::keyfind::Span;
@@ -46,8 +46,9 @@ pub struct Model<'a> {
     pub thresholds: &'a Thresholds,
 }
 
-/// The reader built into the app: the hand-set weights and thresholds, on the counted tables.
-pub const SHIPPED: Model<'static> = Model { weights: &HAND, tables: &COUNTED, thresholds: &THRESHOLDS };
+/// The reader built into the app: the hand-set weights moved part of the way to a fit ([`FITTED`]) and the hand-set
+/// thresholds, on the counted tables.
+pub const SHIPPED: Model<'static> = Model { weights: &FITTED, tables: &COUNTED, thresholds: &THRESHOLDS };
 
 /// What a read is told besides the notes.
 #[derive(Clone, Copy, Debug)]
