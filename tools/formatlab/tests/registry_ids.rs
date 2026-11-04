@@ -80,6 +80,8 @@ const NOT_IDS: &[(&str, &str)] = &[
     // The readers' own version numbers (rule 7), not the file's.
     ("fl/mod.rs", "VERSION"),
     ("bitwig/reader.rs", "VERSION"),
+    ("bitwig/automation.rs", "VERSION"),
+    ("bitwig/curve.rs", "VERSION"),
     // FL: colours FL gives a track or channel that doesn't say.
     ("fl/arrangement.rs", "DEFAULT_TRACK_COLOUR"),
     ("fl/arrangement.rs", "DEFAULT_CHANNEL_COLOUR"),
