@@ -71,7 +71,7 @@ fn main() -> Result<(), slint::PlatformError> {
         },
     );
     // Space: the drives your folders are on and the app's own files, looked at once the page shows.
-    mo_ui::space::connect(&app, library.clone(), feed.clone(), &shortcuts);
+    mo_ui::space::connect(&app, library.clone(), feed.clone());
     app.window().set_maximized(true);
     // The watchdog starts once the window is up, so opening it doesn't count as a freeze.
     let watched = feed.clone();

@@ -2988,6 +2988,7 @@ name = "mo-app"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "flate2",
  "mo-backup",
  "mo-convert",
  "mo-dawlink",

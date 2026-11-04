@@ -2,8 +2,8 @@
 //! the app's own files are on, how full each one is, and what the app's own files take. Every word is decided here so
 //! it can be tested without a window; mo-ui's `space.rs` reads the disks (never on the window's thread) and fills the
 //! page. What can be freed comes a part at a time, as agreed in the page's question round (2026-11-03): Bitwig copies
-//! first ([`crate::space_bitwig`]), then old copies, spare plugin copies, songs and plugins. Nothing here changes a
-//! file.
+//! first ([`crate::space_bitwig`], whose Fix writes new "(fixed)" projects), then old copies, spare plugin copies,
+//! songs and plugins. Nothing here changes a file.
 
 use std::path::{Path, PathBuf};
 
@@ -304,6 +304,26 @@ pub fn app_bytes(parts: &[AppFilesPart]) -> u64 {
     parts.iter().fold(0u64, |sum, p| sum.saturating_add(p.bytes))
 }
 
+/// One part on a card: its name, what it holds and its size; and for a part you can act on, its tick, what happened to
+/// it, a file it opens and a link that shows more.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Part {
+    pub name: String,
+    pub what: String,
+    pub size: String,
+    /// Listed under the part above it (a save under its project), a step in.
+    pub under: bool,
+    /// What its tick is for (a save) and whether it's ticked; None when it has no tick.
+    pub tick: Option<(PathBuf, bool)>,
+    /// What happened to it, or what to know about it; "" for nothing. `problem` shows it as a problem.
+    pub status: String,
+    pub problem: bool,
+    /// A file it opens: a fixed project, in Bitwig.
+    pub open: Option<PathBuf>,
+    /// Its link that shows or hides more under it: its words, and what it's for (a project's folder).
+    pub more: Option<(String, PathBuf)>,
+}
+
 /// The picked line's card.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Card {
@@ -313,9 +333,11 @@ pub struct Card {
     pub big: String,
     pub big_note: String,
     pub lead: String,
-    /// Each part: its name, what it holds and its size, biggest first.
-    pub parts: Vec<(String, String, String)>,
-    /// What to know about them, under the parts; "" when there's nothing more to say.
+    /// Whether its parts can be ticked: each keeps room for its tick, so their names line up.
+    pub ticks: bool,
+    /// Each part, biggest first.
+    pub parts: Vec<Part>,
+    /// What to know about the parts and what the buttons do, shown above them; "" when there's nothing more to say.
     pub note: String,
     /// The drive's room, in a sentence.
     pub room: String,
@@ -338,10 +360,16 @@ pub fn app_files_card(parts: Option<&[AppFilesPart]>, drive: Option<&Drive>) -> 
         },
         lead: "The app's own folder: the libraries every scan fills, the search models, the logs and your F12 notes."
             .to_owned(),
+        ticks: false,
         parts: parts
             .unwrap_or_default()
             .iter()
-            .map(|p| (p.name.to_owned(), p.what.to_owned(), size_text(p.bytes)))
+            .map(|p| Part {
+                name: p.name.to_owned(),
+                what: p.what.to_owned(),
+                size: size_text(p.bytes),
+                ..Part::default()
+            })
             .collect(),
         note: String::new(),
         room: drive
@@ -505,7 +533,12 @@ mod tests {
         let d = sample_drives();
         let card = app_files_card(Some(&parts), app_drive(&d));
         assert_eq!((card.big.as_str(), card.big_note.as_str()), ("6.1 GB", "in all, on C:"));
-        assert_eq!(card.parts[1], ("Logs".to_owned(), "What the app did".to_owned(), "100 MB".to_owned()));
+        let logs = &card.parts[1];
+        assert_eq!(
+            (logs.name.as_str(), logs.what.as_str(), logs.size.as_str()),
+            ("Logs", "What the app did", "100 MB")
+        );
+        assert!(!card.ticks && logs.tick.is_none());
         assert_eq!(card.room, "C: has 8 GB free of 500 GB.");
         assert!(card.warning.starts_with("Nearly full: 8 GB left."));
         let measuring = app_files_card(None, None);

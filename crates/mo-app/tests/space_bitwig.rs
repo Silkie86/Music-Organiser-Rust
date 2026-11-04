@@ -1,12 +1,19 @@
-//! The Space page's look for Bitwig copies, from start to end, on folders made in the test build's own fixtures folder
-//! under fixed names: never a real Bitwig folder. The files are made-up bytes, not anyone's sounds.
+//! The Space page's look for Bitwig copies and its Fix, from start to end, on folders made in the test build's own
+//! fixtures folder under fixed names: never a real Bitwig folder. The files are made-up bytes and made-up projects, not
+//! anyone's sounds or songs.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+#[allow(dead_code)]
+#[path = "../../mo-formats/tests/common/bitwig.rs"]
+mod bitwig_fixtures;
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
+use std::time::{Duration, SystemTime};
 
-use mo_app::space_bitwig::{Copies, look};
+use mo_app::space_bitwig::{Copies, Fixes, Fixing, fix, look};
+use mo_formats::bitwig::{self, Field, Object, Slot, Text, Value};
 use mo_space::key;
 
 fn fixtures(name: &str) -> PathBuf {
@@ -142,4 +149,84 @@ fn a_stop_stops_it_and_the_next_look_starts_again() {
     assert!(look(&roots, None, &mut index, &AtomicBool::new(true), |_, _| {}).is_err());
     let found = look(&roots, None, &mut index, &AtomicBool::new(false), |_, _| {}).unwrap();
     assert_eq!(found.count(), 1);
+}
+
+/// A made-up Bitwig project saved `minutes` after a fixed time, naming a copy in its `multi-samples` folder the ways
+/// Bitwig does (its name, its place in the project and where the project was saved), as the converter's own tests make
+/// them.
+fn project(path: &Path, copy: &str, minutes: u64) {
+    let text = |id: u32, t: &str| Field { id, value: Value::Str(Text::new(t)) };
+    let mut doc = bitwig::decode(bitwig_fixtures::bitwig_template(bitwig_fixtures::Template::default())).unwrap();
+    let mut file = Object::new(0x7f00);
+    file.fields.push(text(0x7f03, copy));
+    file.fields.push(text(0x7f04, &format!("multi-samples/{copy}")));
+    file.fields.push(text(0x7f05, &format!(r"I:\Bitwig Studio\Projects\Song\multi-samples\{copy}")));
+    let file = doc.add(file);
+    let root = doc.root.unwrap();
+    doc.objects[file.0 as usize].parent = Some((root, 0x7f10));
+    doc.obj_mut(root).fields.push(Field { id: 0x7f10, value: Value::Obj(Slot::Obj(file)) });
+    let zip = doc.zip().map(<[u8]>::to_vec);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, bitwig::encode(&doc, zip.as_deref()).unwrap()).unwrap();
+    let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000 + minutes * 60);
+    fs::File::options().write(true).open(path).unwrap().set_modified(at).unwrap();
+}
+
+#[test]
+fn fix_writes_a_fixed_project_beside_the_ticked_saves_and_the_next_look_sees_it() {
+    let dir = fixtures("mo-app-space-bitwig-fix");
+    let studio = dir.join("Bitwig Studio");
+    let kicks = b"<multisample kicks/>";
+    write(&studio, "Library/Multisamples/Kicks.multisample", kicks);
+    let song = studio.join("Projects/Song");
+    write(&song, "multi-samples/Kicks-2.multisample", kicks);
+    project(&song.join("Song v1.bwproject"), "Kicks-2.multisample", 10);
+    project(&song.join("Song v2.bwproject"), "Kicks-2.multisample", 20);
+    let roots = [studio.join("Projects")];
+    let stop = AtomicBool::new(false);
+    let mut index = None;
+    let found = look(&roots, None, &mut index, &stop, |_, _| {}).unwrap();
+    let saves: Vec<String> = found.projects[0].saves.iter().map(|s| name(&s.path)).collect();
+    assert_eq!(saves, ["Song v2.bwproject", "Song v1.bwproject"]);
+
+    // Out of the box only the newest save is ticked.
+    let mut fixes = Fixes::default();
+    let jobs = fixes.to_fix(&found);
+    assert_eq!(jobs.iter().map(|j| name(&j.save)).collect::<Vec<_>>(), ["Song v2.bwproject"]);
+    fixes.start(&jobs);
+    let Fixing::Written(fixed) = fix(&jobs[0]) else { panic!("the newest save should be fixed") };
+    assert_eq!(fixed, song.join("Song v2 (fixed).bwproject"));
+    let back = bitwig::decode(fs::read(&fixed).unwrap()).unwrap();
+    assert_eq!(back.body_error, None);
+    // The saves and the copy are as they were.
+    assert!(song.join("multi-samples/Kicks-2.multisample").is_file());
+    fixes.done(jobs[0].save.clone(), Fixing::Written(fixed.clone()));
+    fixes.finished();
+
+    // The next look sees it fixed on disk, which counts from then on, so nothing is ticked; the older save can be
+    // ticked and fixed too.
+    let again = look(&roots, None, &mut index, &stop, |_, _| {}).unwrap();
+    fixes.looked();
+    assert!(fixes.fixing.is_empty());
+    let newest = &again.projects[0].saves[0];
+    assert_eq!((newest.is_fixed(), newest.fixed.clone().map(|f| f.0)), (true, Some(fixed.clone())));
+    assert!(fixes.to_fix(&again).is_empty());
+    fixes.ticks.insert(song.join("Song v1.bwproject"), true);
+    let jobs = fixes.to_fix(&again);
+    assert_eq!(jobs.iter().map(|j| name(&j.save)).collect::<Vec<_>>(), ["Song v1.bwproject"]);
+    assert_eq!(fix(&jobs[0]), Fixing::Written(song.join("Song v1 (fixed).bwproject")));
+
+    // A save that names none of the copies isn't fixed, and says why.
+    let other = studio.join("Projects/Other");
+    write(&other, "multi-samples/Kicks-3.multisample", kicks);
+    project(&other.join("Other.bwproject"), "Snare.multisample", 30);
+    let found = look(&roots, None, &mut index, &stop, |_, _| {}).unwrap();
+    let other = found.projects.iter().find(|p| p.name() == "Other").unwrap();
+    let job = mo_app::space_bitwig::ToFix { save: other.saves[0].path.clone(), copies: other.copies.clone() };
+    let Fixing::Failed(why) = fix(&job) else { panic!("a save that uses none of the copies isn't fixed") };
+    assert!(why.contains("nothing was written"), "{why}");
+}
+
+fn name(p: &Path) -> String {
+    p.file_name().unwrap().to_string_lossy().into_owned()
 }
