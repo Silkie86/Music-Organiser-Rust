@@ -1,0 +1,399 @@
+//! What the Space page's clean-ups share while the app runs: which of what a look found you ticked, where Remove has
+//! got to, what went and what stayed, and what Put back brought back (the page's question 5: "every clean-up result has
+//! a Put back button"). Spare plugin copies (`crate::space_spare`) and old copies (`crate::space_old`) each say their
+//! own words around it.
+
+use std::collections::HashMap;
+use std::fmt::Debug;
+use std::path::PathBuf;
+
+use mo_space::clean::{Done, Problem, Removed};
+use mo_space::size::size_text;
+
+use crate::songs::thousands;
+use crate::space_bin::{BIN, PutBacks, yourself_words};
+
+/// What a card says, above Remove, about the ones in Program Files (Windows guards them).
+pub const ADMIN: &str = "The ones in Program Files go together at the end, so Windows asks once for administrator \
+    rights.";
+
+/// What a card says, once they went, of putting back the ones from Program Files: Put back asks Windows once for all
+/// of them, as Remove did.
+pub const ADMIN_BACK: &str = "For the ones from Program Files, Windows asks once for administrator rights.";
+
+/// Something a clean-up lists, that Remove can send to the Recycle Bin.
+pub trait Removable: Clone + Debug + PartialEq + Eq {
+    /// Where it is: Remove's result says how each one went by this.
+    fn path(&self) -> &str;
+    /// The room it takes.
+    fn bytes(&self) -> u64;
+    /// Whether it can go: only one that can has a tick.
+    fn can_go(&self) -> bool;
+    /// Whether it's ticked out of the box: every one that can go, unless the clean-up wants you to look at it first.
+    fn ticked_at_first(&self) -> bool {
+        self.can_go()
+    }
+}
+
+/// What a look found, as Remove picks from it.
+pub trait Looked {
+    type Item: Removable;
+    /// Each one found, in the order the card lists them.
+    fn items(&self) -> &[Self::Item];
+}
+
+/// The room the ones that can go take, of `items`.
+pub fn free_bytes<'a, T: Removable + 'a>(items: impl IntoIterator<Item = &'a T>) -> u64 {
+    items.into_iter().filter(|c| c.can_go()).fold(0u64, |sum, c| sum.saturating_add(c.bytes()))
+}
+
+/// A removal that ran: what was picked, when it ran (as the list of what the app put in the Recycle Bin keeps it), and
+/// what went and what stayed, with why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Sent<T> {
+    pub picked: Vec<T>,
+    pub when: i64,
+    pub done: Done,
+}
+
+impl<T: Removable> Sent<T> {
+    /// Whether `item` went: to the bin, or for good.
+    pub fn went(&self, item: &T) -> bool {
+        self.done.removed.iter().any(|r| r.path == item.path())
+    }
+
+    /// Why `item` stayed, or why it isn't in the bin though it went.
+    pub fn why(&self, item: &T) -> Option<&str> {
+        self.done.problems.iter().find(|p| p.path == item.path()).map(|p| p.why.as_str())
+    }
+
+    /// Whether `item` is in the bin: it went, and was found there.
+    pub fn in_bin(&self, item: &T) -> bool {
+        self.went(item) && self.why(item).is_none()
+    }
+
+    /// What went that was found in the bin: what Put back puts back.
+    pub fn binned(&self) -> impl Iterator<Item = &Removed> {
+        self.done.removed.iter().filter(|r| !self.done.problems.iter().any(|p| p.path == r.path))
+    }
+
+    /// How many went but weren't found in the bin: Windows removed them for good (too big for it), they went to
+    /// another account's bin, or the bin couldn't be read to check.
+    pub fn lost(&self) -> usize {
+        self.done.removed.len() - self.binned().count()
+    }
+
+    /// How many picked stayed.
+    pub fn stayed(&self) -> usize {
+        self.picked.iter().filter(|c| !self.went(c)).count()
+    }
+
+    /// What Put back puts back of this removal: what went that was found in the bin. Put back says which of those
+    /// aren't there any more (put back already, or emptied from the bin since).
+    pub fn coming_back(&self) -> Done {
+        let removed: Vec<Removed> = self.binned().cloned().collect();
+        let went_with =
+            self.done.went_with.iter().filter(|(_, with)| removed.iter().any(|r| &r.path == with)).cloned().collect();
+        Done { removed, problems: Vec::new(), went_with }
+    }
+}
+
+/// Where removing has got to.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Stage<T> {
+    /// Picking which to remove: out of the box, and again after Measure again.
+    #[default]
+    Picking,
+    /// The ticked ones are being checked again and sent to the Recycle Bin.
+    Sending(Vec<T>),
+    /// They were sent: the card shows what went and what stayed.
+    Sent(Sent<T>),
+    /// What went is being put back.
+    PuttingBack(Sent<T>),
+    /// What went was put back: what couldn't come back, and why.
+    PutBack(Sent<T>, Vec<Problem>),
+}
+
+/// How removing goes while the app runs: the ticks you changed, and where Remove has got to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Removing<T> {
+    /// By path: what you ticked or unticked. The rest are as they are out of the box
+    /// ([`Removable::ticked_at_first`]). A tick you changed stays through a new look.
+    ticks: HashMap<String, bool>,
+    stage: Stage<T>,
+}
+
+impl<T> Default for Removing<T> {
+    fn default() -> Self {
+        Removing { ticks: HashMap::new(), stage: Stage::Picking }
+    }
+}
+
+impl<T: Removable> Removing<T> {
+    pub fn stage(&self) -> &Stage<T> {
+        &self.stage
+    }
+
+    /// Whether `item` is ticked: one that can go, as you left it, or as it is out of the box.
+    pub fn ticked(&self, item: &T) -> bool {
+        item.can_go() && self.ticks.get(item.path()).copied().unwrap_or_else(|| item.ticked_at_first())
+    }
+
+    /// Ticks or unticks the ones at `paths` (one's own tick, or a group's for all of its), while picking.
+    pub fn tick(&mut self, paths: &[PathBuf], ticked: bool) {
+        if self.stage != Stage::Picking {
+            return;
+        }
+        for path in paths {
+            self.ticks.insert(path.to_string_lossy().into_owned(), ticked);
+        }
+    }
+
+    /// The ticked ones, in the order they were found: what Remove sends.
+    pub fn ticked_copies<F: Looked<Item = T>>(&self, found: Option<&F>) -> Vec<T> {
+        self.each_ticked(found).cloned().collect()
+    }
+
+    /// Each ticked one, in the order it was found.
+    pub fn each_ticked<'a, F: Looked<Item = T>>(&'a self, found: Option<&'a F>) -> impl Iterator<Item = &'a T> {
+        found.into_iter().flat_map(|f| f.items()).filter(|c| self.ticked(c))
+    }
+
+    /// Whether Remove or Put back is on: neither can start again, and Measure again waits.
+    pub fn busy(&self) -> bool {
+        matches!(self.stage, Stage::Sending(_) | Stage::PuttingBack(_))
+    }
+
+    /// Remove starts on `picked` ([`ticked_copies`](Self::ticked_copies)).
+    pub fn start(&mut self, picked: Vec<T>) {
+        if self.stage == Stage::Picking {
+            self.stage = Stage::Sending(picked);
+        }
+    }
+
+    /// Remove has finished: it ran at `when`, and `done` says what went and what stayed.
+    pub fn sent(&mut self, when: i64, done: Done) {
+        if let Stage::Sending(picked) = &mut self.stage {
+            let picked = std::mem::take(picked);
+            self.stage = Stage::Sent(Sent { picked, when, done });
+        }
+    }
+
+    /// What the card's Put back puts back: the removal on show, once something it sent is in the bin.
+    pub fn to_put_back(&self) -> Option<&Sent<T>> {
+        match &self.stage {
+            Stage::Sent(sent) if sent.binned().next().is_some() => Some(sent),
+            _ => None,
+        }
+    }
+
+    /// Put back starts on the removal that ran at `when` (from this card, or the Recycle Bin card's): when it's the one
+    /// on show, its card says so.
+    pub fn putting_back(&mut self, when: i64) {
+        if let Stage::Sent(sent) = &self.stage
+            && sent.when == when
+        {
+            self.stage = Stage::PuttingBack(sent.clone());
+        }
+    }
+
+    /// Put back of the removal that ran at `when` has finished: `problems` says what couldn't come back.
+    pub fn put_back(&mut self, when: i64, problems: Vec<Problem>) {
+        if let Stage::Sent(sent) | Stage::PuttingBack(sent) = &self.stage
+            && sent.when == when
+        {
+            self.stage = Stage::PutBack(sent.clone(), problems);
+        }
+    }
+
+    /// Measure again: the card goes back to picking, for what the new look finds. Not while Remove or Put back is on.
+    pub fn again(&mut self) {
+        if !self.busy() {
+            self.stage = Stage::Picking;
+        }
+    }
+
+    /// Whether the card shows how a removal went (then it has Open Recycle Bin too).
+    pub fn shows_result(&self) -> bool {
+        matches!(self.stage, Stage::Sent(_) | Stage::PuttingBack(_) | Stage::PutBack(..))
+    }
+
+    /// Remove's button: its words and whether it can be pressed now (not while a look is on or anything else goes to
+    /// the bin, `wait`, nor while something is put back: one thing goes or comes back at a time). None when none can
+    /// go, and once a removal's result is on show.
+    pub fn remove_button<F: Looked<Item = T>>(
+        &self,
+        found: Option<&F>,
+        wait: bool,
+        put_backs: &PutBacks,
+    ) -> Option<(String, bool)> {
+        match &self.stage {
+            Stage::Sending(_) => Some(("Removing…".to_owned(), false)),
+            Stage::Picking if found.is_some_and(|f| f.items().iter().any(Removable::can_go)) => {
+                let mut ticked = self.each_ticked(found).peekable();
+                if ticked.peek().is_none() {
+                    Some(("Nothing ticked".to_owned(), false))
+                } else {
+                    let can = !wait && put_backs.going.is_none();
+                    Some((format!("Remove {}", size_text(free_bytes(ticked))), can))
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Put back's button, once something went to the bin: None where the app can't put things back (`can_put_back`: a
+    /// Mac). It waits while another clean-up is put back from the Recycle Bin card.
+    pub fn put_back_button(&self, can_put_back: bool, put_backs: &PutBacks) -> Option<(String, bool)> {
+        match &self.stage {
+            Stage::Sent(sent) if can_put_back && sent.binned().next().is_some() => {
+                Some(("Put back".to_owned(), put_backs.going.is_none()))
+            }
+            Stage::PuttingBack(_) => Some(("Putting back…".to_owned(), false)),
+            _ => None,
+        }
+    }
+}
+
+/// Parts of a sentence, each saying something of its own, as one sentence: "A", "A, and B", "A, B, and C".
+pub fn clauses(said: &[String]) -> String {
+    match said {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{}, and {last}", rest.join(", ")),
+    }
+}
+
+/// "Freed 9.1 GB" once something went; "" when nothing did.
+pub fn freed_words<T>(sent: &Sent<T>) -> String {
+    if sent.done.removed.is_empty() { String::new() } else { format!("Freed {}", size_text(sent.done.bytes())) }
+}
+
+/// How a removal went, as the card's big figures' note and the line say it, counting with `noun` ("1 spare copy", "10
+/// spare copies"): "10 spare copies are in the Recycle Bin", "8 spare copies are in the Recycle Bin, 1 went but wasn't
+/// found there, and 2 stayed".
+pub fn sent_words<T: Removable>(sent: &Sent<T>, noun: &dyn Fn(usize) -> String) -> String {
+    let (in_bin, lost, stayed) = (sent.binned().count(), sent.lost(), sent.stayed());
+    if in_bin + lost == 0 {
+        return if stayed == 0 { String::new() } else { "None could go: each one's line says why".to_owned() };
+    }
+    let mut said = Vec::new();
+    if in_bin > 0 {
+        said.push(format!("{} {} in the {BIN}", noun(in_bin), if in_bin == 1 { "is" } else { "are" }));
+    }
+    if lost > 0 {
+        let (who, there) =
+            if in_bin > 0 { (thousands(lost), "there".to_owned()) } else { (noun(lost), format!("in the {BIN}")) };
+        said.push(format!("{who} went but {} found {there}", if lost == 1 { "wasn't" } else { "weren't" }));
+    }
+    if stayed > 0 {
+        said.push(format!("{} stayed", thousands(stayed)));
+    }
+    clauses(&said)
+}
+
+/// How a put back went: "All 10 are back where they were", "8 are back where they were, and 2 couldn't come back".
+/// Of what went, only what was found in the bin is put back.
+pub fn back_words<T: Removable>(sent: &Sent<T>, problems: &[Problem]) -> String {
+    let went = sent.binned().count();
+    let stuck = problems.len().min(went);
+    match (went - stuck, stuck) {
+        (0, 0) => String::new(),
+        (1, 0) => "It's back where it was".to_owned(),
+        (n, 0) => format!("All {} are back where they were", thousands(n)),
+        (0, _) => "None could come back: each one's line says why".to_owned(),
+        (1, m) => format!("1 is back where it was, and {} couldn't come back", thousands(m)),
+        (n, m) => format!("{} are back where they were, and {} couldn't come back", thousands(n), thousands(m)),
+    }
+}
+
+/// What a picked one's line says once Remove has run: why it stayed, that it's in the bin (or why it isn't, though it
+/// went), and once Put back has run, whether it's back.
+pub fn result_words<T: Removable>(item: &T, sent: &Sent<T>, stage: &Stage<T>) -> (String, bool) {
+    if let Some(why) = sent.why(item) {
+        return (why.to_owned(), true);
+    }
+    if !sent.went(item) {
+        return (String::new(), false);
+    }
+    match stage {
+        Stage::PuttingBack(_) => ("Putting back…".to_owned(), false),
+        Stage::PutBack(_, problems) => match problems.iter().find(|p| p.path == item.path()) {
+            Some(p) => (format!("It couldn't come back: {}", p.why), true),
+            None => ("Back where it was.".to_owned(), false),
+        },
+        _ => (format!("In the {BIN}."), false),
+    }
+}
+
+/// Whether a picked one is gone from where it was: it went, and isn't back.
+pub fn gone<T: Removable>(item: &T, sent: &Sent<T>, stage: &Stage<T>) -> bool {
+    let back = sent.in_bin(item)
+        && matches!(stage, Stage::PutBack(_, problems) if !problems.iter().any(|p| p.path == item.path()));
+    sent.went(item) && !back
+}
+
+/// The activity card's line once Remove is done, counting with `noun` ("1 copy", "10 copies"): what was freed, what's
+/// in the bin, what went but wasn't found there, and what stayed. Err when nothing went (the card then fails).
+pub fn removed_words(done: &Done, noun: &dyn Fn(usize) -> String) -> Result<String, String> {
+    let found = |path: &str| !done.problems.iter().any(|p| p.path == path);
+    let in_bin = done.removed.iter().filter(|r| found(&r.path)).count();
+    let lost = done.removed.len() - in_bin;
+    let stayed = done.problems.iter().filter(|p| !done.removed.iter().any(|r| r.path == p.path)).count();
+    match (done.removed.len(), stayed) {
+        (0, 0) => return Err("Nothing was removed.".to_owned()),
+        (0, 1) => return Err("It couldn't go: the Space page says why.".to_owned()),
+        (0, _) => return Err("None could go: the Space page says why.".to_owned()),
+        _ => {}
+    }
+    let mut said = Vec::new();
+    if in_bin > 0 {
+        said.push(format!("{} {} in the {BIN}", noun(in_bin), if in_bin == 1 { "is" } else { "are" }));
+    }
+    if lost > 0 {
+        let (who, there) =
+            if in_bin > 0 { (thousands(lost), "there".to_owned()) } else { (noun(lost), format!("in the {BIN}")) };
+        said.push(format!("{who} went but {} found {there}", if lost == 1 { "wasn't" } else { "weren't" }));
+    }
+    let stayed = match stayed {
+        0 => String::new(),
+        m => format!("; {} stayed (the Space page says why)", thousands(m)),
+    };
+    Ok(format!("Freed {}: {}{stayed}.", size_text(done.bytes()), clauses(&said)))
+}
+
+/// A card's big figure, its note and the note under its list once Remove has run, counting with `noun`: what was freed
+/// and how it went, and what Put back does (`can_put_back`: the app can put things back here, which a Mac's Trash
+/// doesn't let it; for what went as administrator, Windows asks once); then, once Put back has run, what came back.
+pub fn result_figures<T: Removable>(
+    sent: &Sent<T>,
+    stage: &Stage<T>,
+    can_put_back: bool,
+    noun: &dyn Fn(usize) -> String,
+) -> (String, String, String) {
+    if let Stage::PutBack(_, problems) = stage {
+        let note = if problems.is_empty() { String::new() } else { yourself_words() };
+        return ("Put back".to_owned(), back_words(sent, problems), note);
+    }
+    // What went as administrator comes back the same way (it has the stamp the step checked).
+    let from_guarded = sent.binned().any(|r| r.stamp.is_some());
+    let note = match (sent.binned().next().is_some(), can_put_back) {
+        (false, _) => String::new(),
+        (true, true) if from_guarded => format!(
+            "They're in the {BIN}. Put back returns each one to where it was, until you empty the {BIN}. {ADMIN_BACK} \
+             The app never empties it for you."
+        ),
+        (true, true) => format!(
+            "They're in the {BIN}. Put back returns each one to where it was, until you empty the {BIN}. The app never \
+             empties it for you."
+        ),
+        (true, false) => format!(
+            "They're in the {BIN}. Until you empty it, Finder's Put Back returns each one to where it was: select them \
+             there and choose Put Back. The app never empties it for you."
+        ),
+    };
+    let big = if sent.done.removed.is_empty() { "Nothing freed".to_owned() } else { freed_words(sent) };
+    let big_note =
+        if matches!(stage, Stage::PuttingBack(_)) { "Putting them back…".to_owned() } else { sent_words(sent, noun) };
+    (big, big_note, note)
+}

@@ -41,6 +41,7 @@ pub mod space;
 pub mod space_bin;
 pub mod space_bitwig;
 pub mod space_old;
+pub mod space_removing;
 pub mod space_spare;
 pub mod sweep_timing;
 pub mod themes;
