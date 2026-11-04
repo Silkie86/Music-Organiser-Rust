@@ -196,9 +196,9 @@ pub fn measure(
             };
             if save_keys.contains(&path_key) {
                 add(&mut report.saves, f.size);
-            } else if daw_of(&path).is_some() && (folders.iter().any(|d| is_autosave_dir(d)) || is_autosave_file(name))
-            {
-                // Only project files are autosaves: audio or anything else kept in a "Backups" folder is yours.
+            } else if daw_of(&path).is_some() && is_daws_autosave(folders, name) {
+                // Only project files the DAW made are autosaves: audio or anything else kept in a "Backups" folder is
+                // yours, and so are your own versions there ("Backups\MySong v3.flp").
                 add(&mut report.backups, f.size);
                 backups.push((path, f.size, f.modified));
             } else if studio_one && folders.first().is_some_and(|d| case::eq_ignore_case(d, "Cache")) {
@@ -248,13 +248,15 @@ pub fn measure(
     if stop.load(Ordering::Relaxed) {
         return Err(Stopped);
     }
-    let same = same_saves(saves, newest, stop)?;
+    let thinned = thin(saves, settings.sitting_hours);
+    let thinned_keys: HashSet<String> = thinned.iter().map(|s| key(&s.path)).collect();
+    let same = same_saves(saves, newest, &thinned_keys, stop)?;
     // Neither a copy nor the save it's a copy of is thinned: removing both would lose what they held (the last save
     // of a sitting, kept as a later identical save).
     let copies: HashSet<String> =
         same.iter().flat_map(|i| [key(&i.path), key(i.same_as.as_deref().unwrap_or_default())]).collect();
     report.items.extend(same);
-    for s in thin(saves, settings.sitting_hours) {
+    for s in thinned {
         if !copies.contains(&key(&s.path)) {
             report.items.push(CompactItem {
                 kind: CompactKind::ThinnedSave,
@@ -382,6 +384,18 @@ pub fn owns_folder(
     Ok(others.is_empty())
 }
 
+/// Whether a project file in the song's folder (in `folders` below it, called `name`) is one its DAW made by itself,
+/// by the DAW's own way of naming them: FL Studio's "(autosave)" and "(overwritten at …)" copies, Bitwig's
+/// auto-backups folder, Studio One's History folder. Any other project file is yours, even in a folder called "Backup"
+/// (the C# app took every project file in a Backup(s), History or Autosave(s) folder for an autosave).
+fn is_daws_autosave(folders: &[String], name: &str) -> bool {
+    let in_folder = |want: &str| folders.iter().any(|d| case::eq_ignore_case(d, want));
+    let ext = case::to_lower(extension(name));
+    is_autosave_file(name)
+        || (ext == ".bwproject" && in_folder("auto-backups"))
+        || (ext == ".song" && in_folder("History"))
+}
+
 /// FL Studio's autosaves of the song: "Song (autosave).flp" and "Song (overwritten at 2213h05).flp" in a Backup folder
 /// beside the song or in a folder above it, up to your project folder. Names another song has too (`shared`) are left
 /// out: the autosaves could be that song's.
@@ -446,9 +460,16 @@ fn fl_backups(
 }
 
 /// Saves that are exact copies of another save in the same folder (a DAW saving with nothing changed). Of each set
-/// the newest stays, so the save you'd open is never on the list. Only files of the same size are read, to compare
-/// them, each once and at the same time.
-fn same_saves(saves: &[SongSave], newest: &SongSave, stop: &AtomicBool) -> Result<Vec<CompactItem>, Stopped> {
+/// the song's newest save stays when it's one of them, so the save you'd open is never on the list; otherwise the one
+/// thinning would keep (`thinned` are the ones it wouldn't: the last save of a sitting, or the first), so a later
+/// Compact can't thin the copy that's left (the newest of those, or of the set when thinning keeps none). The C# app
+/// always kept the newest. Only files of the same size are read, to compare them, each once and at the same time.
+fn same_saves(
+    saves: &[SongSave],
+    newest: &SongSave,
+    thinned: &HashSet<String>,
+    stop: &AtomicBool,
+) -> Result<Vec<CompactItem>, Stopped> {
     // By folder and size, in the order the saves come. Links aren't compared (a link to the save beside it would be
     // "the same"), and nor are OneDrive files that are only online (reading one downloads it).
     let mut sets: Vec<((String, u64), Vec<&SongSave>)> = Vec::new();
@@ -485,7 +506,8 @@ fn same_saves(saves: &[SongSave], newest: &SongSave, stop: &AtomicBool) -> Resul
             let keep = if same.iter().any(|s| key(&s.path) == key(&newest.path)) {
                 newest
             } else {
-                match newest_of(&same) {
+                let kept: Vec<&SongSave> = same.iter().copied().filter(|s| !thinned.contains(&key(&s.path))).collect();
+                match newest_of(if kept.is_empty() { &same } else { &kept }) {
                     Some(k) => k,
                     None => continue,
                 }
