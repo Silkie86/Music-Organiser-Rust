@@ -30,7 +30,9 @@ use mo_midi::{Catalogue, Hit, MidiIndex, Role, StoredPhrase};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, VecModel};
 
 use crate::sounds::{new_seed, strings};
-use crate::{AppWindow, CardAction, KindChip, MenuItem, MidiData, MidiFact, MidiLine, PickedPart, RollNote, YearBar};
+use crate::{
+    AppWindow, CardAction, KindChip, MenuItem, MidiData, MidiFact, MidiLine, PickedPart, RollKey, RollNote, YearBar,
+};
 
 /// Where a part's notes are read from.
 #[derive(Clone)]
@@ -820,6 +822,7 @@ fn pick(app: &AppWindow, picked: Option<(usize, Option<usize>)>) {
         data.set_menu(ModelRc::new(VecModel::from(menu)));
         data.set_roll(ModelRc::new(VecModel::from(Vec::<RollNote>::new())));
         data.set_roll_bars(ModelRc::new(VecModel::from(Vec::<f32>::new())));
+        data.set_roll_keys(ModelRc::new(VecModel::from(Vec::<RollKey>::new())));
         Some(NotesAsk {
             id,
             from: notes,
@@ -905,8 +908,18 @@ fn notes_read(app: &AppWindow, id: u64, read: Result<NotesRead, String>) {
     match read {
         Ok(read) => {
             let roll = &read.roll;
-            let notes: Vec<RollNote> =
-                roll.notes.iter().map(|n| RollNote { x: n.x, y: n.y, w: n.w, h: n.h, strength: n.strength }).collect();
+            let notes: Vec<RollNote> = roll
+                .notes
+                .iter()
+                .map(|n| RollNote {
+                    x: n.x,
+                    y: n.y,
+                    w: n.w,
+                    h: n.h,
+                    strength: n.strength,
+                    name: page::note_name(n.key).into(),
+                })
+                .collect();
             if read.read == 0 {
                 picked.roll_note = "Its notes aren't in the index any more.".into();
             } else if notes.is_empty() {
@@ -927,6 +940,21 @@ fn notes_read(app: &AppWindow, id: u64, read: Result<NotesRead, String>) {
             }
             data.set_roll(ModelRc::new(VecModel::from(notes)));
             data.set_roll_bars(ModelRc::new(VecModel::from(roll.bars.clone())));
+            let keys: Vec<RollKey> = if roll.notes.is_empty() {
+                Vec::new()
+            } else {
+                page::roll_keys(roll.low, roll.high)
+                    .into_iter()
+                    .map(|k| RollKey {
+                        y: k.y,
+                        h: k.h,
+                        black: k.black,
+                        c: k.name.starts_with('C'),
+                        name: k.name.into(),
+                    })
+                    .collect()
+            };
+            data.set_roll_keys(ModelRc::new(VecModel::from(keys)));
             let drums = picked.kind == page::role_label(Role::Drums);
             if let Some(fact) = read.fact {
                 let words = page::key_card(Some(&fact), drums);
