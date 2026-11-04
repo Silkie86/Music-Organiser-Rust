@@ -179,6 +179,7 @@ fn sizes_go_to_their_rows_and_unused_ones_can_free_room() {
     assert!(kontakt.never_used() && kontakt.unused);
     assert_eq!(kontakt.format, "VST3");
     assert_eq!(p.freeable(), "46.7 GB in 2 plugins none of your songs have used in over 2 years.");
+    assert!(p.has_sizes() && p.any_missing());
     assert_eq!(p.sizes_note(), "Sizes measured 1 Oct 2026.");
     assert_eq!(p.summary(), "8 plugins used, 4 not installed on this computer, 1 installed that no song uses");
 
@@ -306,6 +307,7 @@ fn search_online_asks_for_the_maker_and_name() {
 fn nothing_read_shows_nothing() {
     let p = Plugins::new(Read::default(), now());
     assert!(p.rows.is_empty() && p.summary().is_empty() && p.needed().is_empty() && p.freeable().is_empty());
+    assert!(!p.has_sizes() && !p.any_missing());
     assert!(!p.all_installed());
 }
 

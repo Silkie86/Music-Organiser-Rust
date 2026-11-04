@@ -4,7 +4,7 @@
 // there. Only shared parts from studio.slint; mo-app decides every word (mo_app::plugins), mo-ui/src/plugins.rs
 // fills it. Read-only for now: Clean up, Uninstall and Move join in the page's second part.
 import { ListView } from "std-widgets.slint";
-import { Theme, Type, Space, Well, SearchBox, ToggleChip, MenuChip, ListLine, Caps, StudioButton, LinkText, Segmented, CardAction, CardActions, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, TabBar, OptionsButton } from "../studio.slint";
+import { Theme, Type, Space, Well, SearchBox, ToggleChip, ListLine, Caps, StudioButton, LinkText, Segmented, CardAction, CardActions, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, TabBar } from "../studio.slint";
 
 // One line of the list.
 export struct PluginListLine {
@@ -84,6 +84,7 @@ export global PluginsData {
     in property <bool> any-filter;
     in property <[string]> sorts;
     in property <string> sort;
+    in property <int> sort-index;
     // The year strip beside the list: the years plugins were used in.
     in property <[YearBar]> years;
     // The picked years' places on the strip (-1 for none).
@@ -99,7 +100,10 @@ export global PluginsData {
     // "46.7 GB in 2 plugins none of your songs have used in over 2 years."
     in property <string> freeable;
 
-    // The page's options.
+    // The page's options, shown on the page beside what they change. has-missing: some song's newest save misses a
+    // plugin (so the cards' count shows even when they're off); has-sizes: the old app measured the plugins' room.
+    in property <bool> has-missing;
+    in property <bool> has-sizes;
     in property <[string]> card-counts;
     in property <int> card-count;
     in property <[string]> unused-choices;
@@ -280,11 +284,11 @@ component PluginPanel inherits SidePanel {
         HorizontalLayout {
             spacing: Space.sm;
             alignment: start;
-            if PluginsData.use-daws.length > 0: MenuChip {
-                name: "DAW";
-                value: PluginsData.use-daw;
-                choices: PluginsData.use-daws;
-                picked(v) => { PluginsData.use-daw-picked(v); }
+            // Each DAW its songs come from, as a chip: picking the one that's on shows every DAW again.
+            for d in PluginsData.use-daws: ToggleChip {
+                text: d;
+                on: PluginsData.use-daw == d;
+                clicked => { PluginsData.use-daw-picked(PluginsData.use-daw == d ? "" : d); }
             }
             ToggleChip {
                 text: "Every save";
@@ -525,26 +529,6 @@ export component PluginsPage inherits Rectangle {
                 title: "Plugins";
                 summary: PluginsData.summary;
             }
-            VerticalLayout {
-                alignment: center;
-                horizontal-stretch: 0;
-                OptionsButton {
-                    width: 32px;
-                    card-width: 340px;
-                    Caps { text: "INSTALL THESE CARDS"; }
-                    Segmented {
-                        choices: PluginsData.card-counts;
-                        current: PluginsData.card-count;
-                        picked(i) => { PluginsData.card-count-picked(i); }
-                    }
-                    Caps { text: "UNUSED WHEN NO SONG HAS USED IT FOR"; }
-                    Segmented {
-                        choices: PluginsData.unused-choices;
-                        current: PluginsData.unused-index;
-                        picked(i) => { PluginsData.unused-picked(i); }
-                    }
-                }
-            }
         }
         HorizontalLayout {
             spacing: Space.sm;
@@ -565,12 +549,10 @@ export component PluginsPage inherits Rectangle {
             }
             VerticalLayout {
                 alignment: center;
-                MenuChip {
-                    name: "Sort";
-                    value: PluginsData.sort;
+                Segmented {
                     choices: PluginsData.sorts;
-                    has-any: false;
-                    picked(v) => { PluginsData.sort-picked(v); }
+                    current: PluginsData.sort-index;
+                    picked(i) => { PluginsData.sort-picked(PluginsData.sorts[i]); }
                 }
             }
         }
@@ -589,7 +571,7 @@ export component PluginsPage inherits Rectangle {
             }
         }
         // What to install to open more of your songs.
-        if PluginsData.cards.length > 0: VerticalLayout {
+        if PluginsData.has-missing: VerticalLayout {
             spacing: Space.sm;
             vertical-stretch: 0;
             HorizontalLayout {
@@ -599,15 +581,26 @@ export component PluginsPage inherits Rectangle {
                     vertical-alignment: center;
                 }
                 Text {
-                    text: PluginsData.cards-summary;
+                    text: PluginsData.cards.length > 0 ? PluginsData.cards-summary : "Cards are off.";
                     color: Theme.muted;
                     font-size: Type.meta;
                     vertical-alignment: center;
                     horizontal-stretch: 1;
                     overflow: elide;
                 }
+                Text {
+                    text: "Cards";
+                    color: Theme.muted;
+                    font-size: Type.meta;
+                    vertical-alignment: center;
+                }
+                Segmented {
+                    choices: PluginsData.card-counts;
+                    current: PluginsData.card-count;
+                    picked(i) => { PluginsData.card-count-picked(i); }
+                }
             }
-            HorizontalLayout {
+            if PluginsData.cards.length > 0: HorizontalLayout {
                 spacing: Space.sm;
                 alignment: start;
                 for c in PluginsData.cards: NeededTile {
@@ -622,21 +615,36 @@ export component PluginsPage inherits Rectangle {
             color: Theme.ok;
             font-size: Type.meta;
         }
-        if PluginsData.freeable != "": HorizontalLayout {
+        if PluginsData.has-sizes: HorizontalLayout {
             spacing: Space.sm;
-            alignment: start;
             vertical-stretch: 0;
             Text {
-                text: "Room to free: " + PluginsData.freeable;
+                text: PluginsData.freeable != "" ? "Room to free: " + PluginsData.freeable
+                    : "No installed plugin has gone unused that long.";
                 color: Theme.muted;
                 font-size: Type.meta;
                 vertical-alignment: center;
                 overflow: elide;
             }
-            LinkText {
-                text: "Show them";
+            if PluginsData.freeable != "": VerticalLayout {
+                alignment: center;
+                LinkText {
+                    text: "Show them";
+                    font-size: Type.meta;
+                    clicked => { PluginsData.show-unused(); }
+                }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            Text {
+                text: "Unused after";
+                color: Theme.muted;
                 font-size: Type.meta;
-                clicked => { PluginsData.show-unused(); }
+                vertical-alignment: center;
+            }
+            Segmented {
+                choices: PluginsData.unused-choices;
+                current: PluginsData.unused-index;
+                picked(i) => { PluginsData.unused-picked(i); }
             }
         }
         // The list, the year strip and the picked plugin's card.

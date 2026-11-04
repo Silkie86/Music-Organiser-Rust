@@ -364,6 +364,8 @@ fn refresh(app: &AppWindow) {
         data.set_count(pl.count_text().into());
         data.set_chip(pl.filters.chip.name().into());
         data.set_sort(pl.filters.sort.name().into());
+        data.set_sort_index(Sort::ALL.iter().position(|&s| s == pl.filters.sort).map_or(-1, |i| i as i32));
+        data.set_has_sizes(pl.has_sizes());
         data.set_any_filter(pl.filters.any());
         if data.get_search().as_str() != pl.filters.search {
             data.set_search(pl.filters.search.as_str().into());
@@ -427,6 +429,7 @@ fn fill_cards(app: &AppWindow) {
         let cards = pl.needed();
         data.set_cards_summary(pl.needed_summary(&cards).into());
         data.set_all_installed(pl.needed_count > 0 && pl.all_installed());
+        data.set_has_missing(pl.any_missing());
         data.set_card_count(NEEDED_COUNT_CHOICES.iter().position(|&n| n == pl.needed_count).map_or(-1, |i| i as i32));
         let tiles: Vec<NeededCard> = cards
             .iter()

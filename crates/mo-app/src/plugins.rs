@@ -549,6 +549,16 @@ impl Plugins {
         !self.rows.is_empty() && self.missing_now.is_empty() && self.looked_for_installed
     }
 
+    /// Some song's newest save misses a plugin here.
+    pub fn any_missing(&self) -> bool {
+        !self.missing_now.is_empty()
+    }
+
+    /// The old app measured some plugin's room.
+    pub fn has_sizes(&self) -> bool {
+        self.rows.iter().any(|r| r.room.is_some())
+    }
+
     /// "You could free 71.4 GB from 12 plugins none of your songs have used in over 2 years." Empty when there's
     /// nothing to free.
     pub fn freeable(&self) -> String {
