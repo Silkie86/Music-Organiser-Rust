@@ -21,17 +21,20 @@
 //!   never: a held F over Cmaj7 in the tune is a clash, not an 11.
 //! - **The root and the bass** ([`BassKind`]). The name never claims a note that isn't heard: the root of a rootless
 //!   voicing is left out of its notes, and the name still shows it ([`Reading::rootless`]). A held bass is the root,
-//!   another of the chord's notes (an inversion: C/E, G7/F, Cmaj9/E) or only a bass (a slash chord: D/C). Over a
-//!   moving bass no slash is written.
+//!   another of the chord's notes (an inversion: C over E, G7 over F, Cmaj9 over E) or only a bass (D over C). A
+//!   chord keeps its bass, but its name has no slash (Solomon, 2026-11-03): it's named from all its notes, the bass
+//!   among them ([`Chord::as_written`]), so C over E is C, and D over C is D7.
 //! - **A seventh heard only in the bass.** When the held bass is the reading's seventh and the chords and the tune
-//!   don't play it, while they play the root, the third and the fifth, the name is the triad over its seventh, and the
-//!   seventh chord is the other way to write it ([`Reading::also`]): D/C, also D7/C. A triad over its own seventh is
-//!   written the same way: C/B, also Cmaj7/B.
+//!   don't play it, while they play the root, the third and the fifth, the chord is the triad over its seventh, and
+//!   the seventh chord is the other way to write it ([`Reading::also`]): D over C, also D7 over C, both named D7. A
+//!   triad over its own seventh is written the same way: C over B, also Cmaj7 over B, named Cmaj7.
 //! - **Sus chords over a bass.** When the bass is only a bass and the notes over it hold its 4th and its ♭7 but no
-//!   third, the name is the sus chord on the bass, and the slash chord is the other way to write it: F/G is G9sus4,
-//!   Fm9/B♭ is B♭13sus4.
+//!   third, the chord is the sus chord on the bass, and the chord over the bass is the other way to write it: F over
+//!   G is G9sus4, Fm9 over B♭ is B♭13sus4.
 //! - **Pedals.** A bass held under two chords or more, one of which it isn't a note of, is a pedal: the chords over
-//!   it that aren't rooted on it are flagged ([`SpanFlags::PEDAL`]) and keep their slash names (C | F/C | G/C | C).
+//!   it that aren't rooted on it are flagged ([`SpanFlags::PEDAL`]) and stand over it as they are (C | F over C | G
+//!   over C | C, named C | F | G(add11) | C); a sus chord over a pedal is still named on the bass (F over a G pedal is
+//!   G9sus4).
 //! - **Diminished sevenths and augmented triads** have the same notes on four and three roots, so their readings on
 //!   those roots are one reading ([`Reading::roots`] lists them). It's written on the held bass when that's one of its
 //!   notes; else, for a diminished seventh, on the note a semitone under the next chord's root (C♯dim7 before Dm), or
@@ -39,18 +42,20 @@
 //!   the next chord's root (G+ before C); else on its lowest note.
 //! - **A bass that moves to the chord's third or seventh** halfway through it, on a bar line or the middle of a bar,
 //!   each note held two felt beats or more, and steps from there into the next chord's bass, cuts the chord in two: C
-//!   C/E | F, C C/B | Am ([`SpanFlags::SPLIT`]). A bass moving to the fifth (a two-feel) never does.
+//!   then C over E, into F (named C C | F); C then C over B, into Am (C Cmaj7 | Am) ([`SpanFlags::SPLIT`]). A bass
+//!   moving to the fifth (a two-feel) never does.
 //! - **Pins** (a Chord check answer or the user's fix: [`super::PinnedSpan`]). A pinned stretch is never cut in two,
 //!   and a chord given for it is written as given, whatever is heard ([`SpanFlags::GIVEN`]): D♭7 pinned over C E G is
 //!   D♭7, rootless. Given in root position, it stands over the bass held under it, as any reading does (Am7 given over
-//!   a held C is Am7/C, and that D♭7 over a C bass D♭7/C); given with a bass of its own, it keeps it. The decode says
-//!   which spans are pinned and the chord given for each ([`DecodedSpan::given`]).
+//!   a held C stands over the C); given with a bass of its own, it keeps it. The decode says which spans are pinned
+//!   and the chord given for each ([`DecodedSpan::given`]).
 //!
 //! Over silence (a chord held on over it, or pinned there), a reading is written in full, as the decode read it. Every
-//! reading the decode gave a chance on a span is named the same way, and readings written the same are one reading,
-//! their chances added. The reading the best way reads comes first, then the others by their chances. Readings
-//! that hold the same notes over the same bass are one same-notes group ([`Reading::group`]): C6 and Am7/C, a
-//! diminished seventh and the rootless 7(♭9) it stands for.
+//! reading the decode gave a chance on a span is named the same way, and readings named the same ([`Chord::name_key`]:
+//! D over C and D7 over C are both D7, C over E and C over G both C) are one reading, their chances added. The reading
+//! the best way reads comes first, then the others by their chances. Readings that hold the same notes over the same
+//! bass are one same-notes group ([`Reading::group`]): C6 and Am7 over C, a diminished seventh and the rootless 7♭9
+//! it stands for.
 
 use std::ops::Range;
 
@@ -58,7 +63,7 @@ use super::candidates::Label;
 use super::cores::Core;
 use super::decode::{Chance, DecodedSpan, Decoder, Decoding};
 use super::hear::{BassTexture, Hearing, Level, Line, Mass, Push, Shaped, Stream, played_in};
-use crate::chord::{Chord, Family, ToneRole, role};
+use crate::chord::{Chord, Family, ToneRole, role, sus_on_bass};
 use crate::pitch::{PcSet, PerPitch, PitchClass};
 
 /// How the bass stands under a written chord.
@@ -66,11 +71,12 @@ use crate::pitch::{PcSet, PerPitch, PitchClass};
 pub enum BassKind {
     /// The held bass is the root: C, Dm9.
     Root,
-    /// The held bass is another of the chord's notes: C/E, C/G, G7/F, Cmaj9/E.
+    /// The held bass is another of the chord's notes: C over E, C over G, G7 over F, Cmaj9 over E.
     Inversion,
-    /// The held bass is only a bass, not one of the chord's notes: D/C.
+    /// The held bass is only a bass, not one of the chord's notes: D over C (named D7, from all its notes).
     Slash,
-    /// The bass moves under the chord (a walking or a busy bass): it leans towards the root, and no slash is written.
+    /// The bass moves under the chord (a walking or a busy bass): it leans towards the root, and isn't one of the
+    /// chord's notes.
     Moving,
     /// No bass sounds.
     None,
@@ -125,23 +131,30 @@ impl SpanFlags {
 /// A reading of a span, as it's written.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Reading {
-    /// What the decode read and gave the chance to: for readings written the same, the one the best way reads, or else
+    /// What the decode read and gave the chance to: for readings named the same, the one the best way reads, or else
     /// the likeliest.
     pub label: Label,
-    /// What's written: its root, the notes named (the core's notes heard, the tensions named, and the notes that don't
-    /// belong but are voiced as a named tension is), and the bass.
+    /// The chord read: its root, the notes named (the core's notes heard, the tensions named, and the notes that
+    /// don't belong but are voiced as a named tension is), and the bass. It says how the bass stands
+    /// ([`Reading::bass`]) and what each note does; its name is [`Reading::written`]'s.
     pub chord: Chord,
-    /// The same notes written the other way: F/G beside G9sus4, D7/C beside D/C.
+    /// The chord as it's written ([`Chord::as_written`]): from all its notes, the bass among them (D over C is D7,
+    /// Fmaj7 over D is Dm9). It's what the chart, Chord check, the words and the summary show, and
+    /// [`Reading::roots`] and [`Reading::rootless`] are its own.
+    pub written: Chord,
+    /// The same notes the other way round: F over G beside G9sus4, D7 over C beside D over C. Both are named the same.
     pub also: Option<Chord>,
-    /// The roots it may be written on: a diminished seventh's four, an augmented triad's three, otherwise its root.
+    /// The roots it may be written on: a diminished seventh's four, an augmented triad's three, otherwise its root as
+    /// written. A bass folded into the notes makes one chord of them, on one root (C+ over B is Cmaj7#5, Bdim7 over G
+    /// is G7b9), unless they make a diminished seventh or an augmented triad themselves (F7 over Gb is F#dim7).
     pub roots: PcSet,
     pub bass: BassKind,
-    /// Its root isn't heard in any part, while other notes are: a rootless voicing. The root is left out of the chord's
-    /// notes, and the name still shows it.
+    /// Its root as written isn't heard in any part, while other notes are: a rootless voicing. The root is left out of
+    /// the chord's notes, and the name still shows it.
     pub rootless: bool,
     /// Tensions heard too little to name: left out of the chord.
     pub doubtful: PcSet,
-    /// Its chance on the span, with the chances of the readings written the same added.
+    /// Its chance on the span, with the chances of the readings named the same added.
     pub chance: f64,
     /// Its same-notes group within the span: the readings with the same notes over the same bass share one, numbered
     /// from 0 in the order they come.
@@ -290,16 +303,27 @@ struct Piece {
     shaped: (usize, usize),
 }
 
-/// A reading being named, before the readings written the same are put together.
+/// A reading being named, before the readings named the same are put together.
 #[derive(Clone, Copy, Debug)]
 struct Draft {
     label: Label,
     chord: Chord,
+    /// The chord as it's written, and its name's key ([`Chord::name_key`]), worked out once: drafts named the same are
+    /// one reading.
+    written: Chord,
+    name: (PitchClass, u16),
     also: Option<Chord>,
     doubtful: PcSet,
     chance: f64,
     /// Whether it's (or holds) the reading the best way reads.
     decoded: bool,
+}
+
+impl Draft {
+    fn new(label: Label, chord: Chord, also: Option<Chord>, doubtful: PcSet, chance: f64, decoded: bool) -> Draft {
+        let written = chord.as_written();
+        Draft { label, chord, written, name: written.name_key(), also, doubtful, chance, decoded }
+    }
 }
 
 /// Names the chords the decode read ([`Namer::name`]). Keep one and reuse it: it keeps its working space between
@@ -491,18 +515,25 @@ impl Namer {
                         self.groups.len() - 1
                     }
                 };
+                // A bass folded into the notes makes one chord of them, unless they repeat round the octave.
+                let roots = if d.written == d.chord || repeats(d.written.notes()) {
+                    roots_of(d.written)
+                } else {
+                    PcSet::EMPTY.with(d.written.root())
+                };
                 out.readings.push(Reading {
                     label: d.label,
                     chord: d.chord,
+                    written: d.written,
                     also: d.also,
-                    roots: roots_of(d.chord),
+                    roots,
                     // A bass written under the chord is the bass it stands on (a chord given with its own bass too).
                     bass: if d.chord.bass() == d.chord.root() {
                         BassKind::of(d.chord, sound.bass)
                     } else {
                         BassKind::of(d.chord, BassTexture::Held(d.chord.bass()))
                     },
-                    rootless: !sound.heard.is_empty() && !sound.heard.contains(d.chord.root()),
+                    rootless: !sound.heard.is_empty() && !sound.heard.contains(d.written.root()),
                     doubtful: d.doubtful.difference(d.chord.notes()),
                     chance: d.chance.min(1.0),
                     group: u8::try_from(group).unwrap_or(u8::MAX),
@@ -655,7 +686,7 @@ impl Namer {
         }
     }
 
-    /// A reading named on a part, before the readings written the same are put together.
+    /// A reading named on a part, before the readings named the same are put together.
     fn draft(&mut self, sound: &Sound, part: &Part, label: Label, chance: f64) -> Draft {
         let decoded = part.label == Some(label);
         // A chord given is written as given; one given in root position stands over the bass held under it, as any
@@ -665,12 +696,12 @@ impl Namer {
                 Some(bass) if given.bass() == given.root() => Chord::new(given.root(), given.notes(), bass),
                 _ => given,
             };
-            return Draft { label, chord, also: None, doubtful: PcSet::EMPTY, chance, decoded };
+            return Draft::new(label, chord, None, PcSet::EMPTY, chance, decoded);
         }
         // Over silence (a chord held on over it, or pinned there), a reading is written in full, as the decode read it.
         if sound.heard.is_empty() {
             let chord = written_root(Chord::of(label.root, label.core.intervals()), None, part, &[], None);
-            return Draft { label, chord, also: None, doubtful: PcSet::EMPTY, chance, decoded };
+            return Draft::new(label, chord, None, PcSet::EMPTY, chance, decoded);
         }
         let (named, doubtful) = self.gate(sound, label);
         let notes = label.tones().intersection(sound.heard).union(named);
@@ -687,22 +718,30 @@ impl Namer {
             also = Some(chord);
             chord = sus;
         }
-        Draft { label, chord, also, doubtful, chance, decoded }
+        Draft::new(label, chord, also, doubtful, chance, decoded)
     }
 
-    /// Puts a draft with the drafts so far: with the one written the same, if there is one. The reading the best way
-    /// reads, or else the first (the likeliest), says what was decoded and which tensions are doubtful (they depend on
-    /// the reading); the chances add up.
+    /// Puts a draft with the drafts so far: with the one named the same ([`Chord::name_key`]: C over E and C over G
+    /// are both C, Bmaj13 with or without its 9 is Bmaj13), if there is one. The reading the best way reads, or else
+    /// the first (the likeliest), is the chord read: its label, its chord (and so how it's written) and the tensions it
+    /// doubts (they depend on the reading) are kept, and the chances add up. The other way round of writing it comes
+    /// only from a draft of the same chord (Abm over G, also Abm(maj7) over G, is written G7b9#9#5, which isn't the
+    /// other way round of G7b9#9#5).
     fn add(&mut self, draft: Draft) {
-        match self.drafts.iter_mut().find(|d| d.chord == draft.chord) {
+        match self.drafts.iter_mut().find(|d| d.name == draft.name) {
             Some(d) => {
+                let same = d.chord == draft.chord;
                 if draft.decoded && !d.decoded {
                     d.label = draft.label;
+                    d.chord = draft.chord;
+                    d.written = draft.written;
                     d.doubtful = draft.doubtful;
+                    d.also = if same { draft.also.or(d.also) } else { draft.also };
+                } else if same {
+                    d.also = d.also.or(draft.also);
                 }
                 d.chance += draft.chance;
                 d.decoded |= draft.decoded;
-                d.also = d.also.or(draft.also);
             }
             None => self.drafts.push(draft),
         }
@@ -937,9 +976,15 @@ fn roots_of(chord: Chord) -> PcSet {
     }
 }
 
+/// Whether some notes repeat round the octave, a minor or a major third up: a diminished seventh's, an augmented
+/// triad's.
+fn repeats(notes: PcSet) -> bool {
+    notes.transposed(3) == notes || notes.transposed(4) == notes
+}
+
 /// A triad over its own seventh: when the held bass is a seventh of the reading's triad (its own seventh, when it has
-/// one), the chords and the tune don't play it, and they play the root, the third and the fifth. The triad as a slash
-/// chord, and the seventh chord, to write the same notes the other way.
+/// one), the chords and the tune don't play it, and they play the root, the third and the fifth. The triad over the
+/// bass, and the seventh chord over it, the same notes the other way round (both named as the seventh chord).
 fn seventh_in_bass(label: Label, notes: PcSet, held: Option<PitchClass>, played: PcSet) -> Option<(Chord, Chord)> {
     let bass = held?;
     let third = match (label.core, bass.above(label.root)) {
@@ -955,11 +1000,9 @@ fn seventh_in_bass(label: Label, notes: PcSet, held: Option<PitchClass>, played:
     Some((Chord::new(label.root, over, bass), Chord::new(label.root, over.with(bass), bass)))
 }
 
-/// The sus chord on a bass that's only a bass, when the notes over it hold its 4th and its ♭7 and no third: G9sus4
-/// for F/G.
+/// The sus chord on a bass that's only a bass, when the notes over it hold its 4th and its ♭7 and no third
+/// ([`sus_on_bass`]): G9sus4 for F over G.
 fn sus_over_bass(chord: Chord) -> Option<Chord> {
     let bass = chord.bass();
-    let over = chord.notes().above(bass);
-    let sus = over.has(5) && over.has(10) && !over.has(3) && !over.has(4);
-    sus.then(|| Chord::new(bass, chord.notes().with(bass), bass))
+    sus_on_bass(chord.notes(), bass).then(|| Chord::new(bass, chord.notes().with(bass), bass))
 }

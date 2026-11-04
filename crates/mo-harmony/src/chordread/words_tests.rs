@@ -72,15 +72,11 @@ fn each_chord_is_told_by_its_bass_and_its_notes_degrees() {
             "G13: G in the bass is its root, and the chords play B, F, A and E, its 3, b7, 9 and 13 (a rootless \
              voicing over the root in the bass).",
         ),
-        // A bass that's only a bass, and the same notes written the other way.
-        (
-            "3 D/C",
-            0,
-            "D/C (also D7/C): C in the bass is a b7 under the chord, and the chords play D, F# and A, its root, 3 \
-             and 5.",
-        ),
-        ("2 C/E", 0, "C/E: E in the bass is its third, and the chords play C, E and G, its root, 3 and 5."),
-        ("2 G7/F", 0, "G7/F: F in the bass is its seventh, and the chords play G, B, D and F, its root, 3, 5 and b7."),
+        // A bass that's only a bass is one of the chord's notes as it's written (D over C is D7), and a bass on
+        // another of its notes is written in root position.
+        ("3 D/C", 0, "D7: C in the bass is its seventh, and the chords play D, F# and A, its root, 3 and 5."),
+        ("2 C/E", 0, "C: E in the bass is its third, and the chords play C, E and G, its root, 3 and 5."),
+        ("2 G7/F", 0, "G7: F in the bass is its seventh, and the chords play G, B, D and F, its root, 3, 5 and b7."),
         // A diminished seventh on its other roots, each spelled as the chart would.
         (
             "27 C C#dim7 | Dm7",
@@ -88,12 +84,12 @@ fn each_chord_is_told_by_its_bass_and_its_notes_degrees() {
             "C#dim7 (also Edim7, Gdim7 or A#dim7): C# in the bass is its root, and the chords play E, G and Bb, its \
              b3, b5 and bb7.",
         ),
-        // A walking bass: no slash.
+        // A walking bass.
         (
             "37 Dm7 | G13 over a walk",
             0,
-            "Dm7: the bass moves under it through D and F, its root and b3 (so no slash is written), and the chords \
-             play F, A and C, its b3, 5 and b7.",
+            "Dm7: the bass moves under it through D and F, its root and b3, and the chords play F, A and C, its b3, 5 \
+             and b7.",
         ),
         // No bass part: the lowest note, a fifth or more under the rest.
         (
@@ -115,8 +111,8 @@ fn each_chord_is_told_by_its_bass_and_its_notes_degrees() {
         (
             "15b C7(#9)",
             0,
-            "C7(#9): C in the bass is its root, and the chords play E, G, Bb and D#, its 3, 5, b7 and #9 (a \
-             rootless voicing over the root in the bass).",
+            "C7#9: C in the bass is its root, and the chords play E, G, Bb and D#, its 3, 5, b7 and #9 (a rootless \
+             voicing over the root in the bass).",
         ),
     ];
     for (name, span, want) in cases {
@@ -135,10 +131,7 @@ fn how_a_chord_is_played_is_told() {
     ));
     assert!(has(&w, "C is read as Cmaj7, whose seventh, B, isn't heard."), "{}", render(&w));
     let w = case("4 C C/B | Am", 1);
-    assert_eq!(
-        w.chord,
-        "C/B (also Cmaj7/B): B in the bass is a 7 under the chord, and the chords play C, E and G, its root, 3 and 5."
-    );
+    assert_eq!(w.chord, "Cmaj7: B in the bass is its seventh, and the chords play C, E and G, its root, 3 and 5.");
     assert_eq!(
         w.notes,
         ["With the stretch before it's one chord, Cmaj7, written in two where the bass moves to B, its seventh: no \
@@ -146,10 +139,14 @@ fn how_a_chord_is_played_is_told() {
     );
     // A loop's first chord carried round from its end.
     assert_eq!(case("1 C", 0).notes, ["As the loop goes round, C goes on here: no new chord starts."]);
-    // A chord written as another than the decode reads.
+    // A chord written as another than the decode reads: G over a pedal on C is written G(add11), from all its notes.
+    let w = case("9 C | F/C | G/C | C over a pedal", 2);
+    assert!(has(&w, "The reader reads it as G; it's written G(add11) from the notes it plays."), "{}", render(&w));
+    assert!(has(&w, "C in the bass is a note outside G and would be the root of Cmaj7sus2."), "{}", render(&w));
+    // D over C is written D7, the chord the decode reads, so that isn't said.
     let w = case("3 D/C", 0);
-    assert!(has(&w, "The reader reads it as D7; it's written D/C from the notes it plays."), "{}", render(&w));
-    assert!(has(&w, "C in the bass is the seventh of D7 and would be the third of Am6(add11)/C."), "{}", render(&w));
+    assert!(!w.notes.iter().any(|l| l.starts_with("The reader reads it as")), "{}", render(&w));
+    assert!(w.why.iter().any(|l| l.starts_with("C in the bass is the seventh of D7 and would be ")), "{}", render(&w));
     let w = case("25 C#dim7, no bass, before Dm", 0);
     assert!(has(&w, "The reader reads it as Edim7; it's written C#dim7 from the notes it plays."), "{}", render(&w));
     // Over a pedal, and pushed.
@@ -227,17 +224,17 @@ fn why_a_chord_reads_as_it_does_is_told_from_the_evidence() {
     // The bass, the chords' notes, the root and how the root moves.
     let w = case("10 Dm9 | G13 | Cmaj9", 0);
     assert_eq!(
-        w.why[..3],
+        w.why[1..4],
         [
-            "D in the bass is the root of Dm9 and would be a tension of Fmaj7/D (its 13).",
-            "Of what the chords play, 75% is Dm9's own notes and 25% tensions it can carry; for Fmaj7/D, all of it is \
-             its own notes.",
-            "Dm9's root, D, is only in the bass; the notes lean more towards F as the root than towards D.",
+            "D in the bass is the root of Dm9 and would be the sixth of F6.",
+            "Of what the chords play, 25% is tensions Dm9 can carry; for F6, 25% is notes struck that don't belong to \
+             it.",
+            "Dm9's root, D, is only in the bass.",
         ]
     );
     assert!(has(
-        &case("10 Dm9 | G13 | Cmaj9", 1),
-        "Dm9 to G13 to Cmaj9 is a more common way for the root to move than Dm9 to Fmaj7(#11)/G to Cmaj9."
+        &case("35 Cm | Cm(maj7) | Cm7 | Cm6 over a held C", 2),
+        "Cm(maj7) to Cm7 to Cm6 is a more common way for the root to move than Cm(maj7) to Eb6 to Cm6."
     ));
     // With no bass, the lowest note; how common each kind of chord is; a fifth left out.
     let w = case("22 no bass", 0);
@@ -246,18 +243,23 @@ fn why_a_chord_reads_as_it_does_is_told_from_the_evidence() {
         "C6's root, C, is the lowest note all of the time; the notes lean more towards C as the root than towards A."
     ));
     assert!(has(&w, "Of the chords in the songs counted, 1.1% are major sixth chords and 6.6% minor seventh chords."));
-    assert!(has(&case("14 shells, the bass by the gap", 0), "Dm7's fifth, A, isn't heard."));
+    assert!(has(&case("13 G13 rootless, no bass", 0), "Fmaj7#11's fifth, C, isn't heard."));
+    // A shell with no bass part, D F C: F5 over D is written Dm7 too, so it's one reading with Dm7, and the runner-up
+    // told is the next one named another way, G7 (written G7sus4 from the notes it plays), whose third isn't heard.
+    let w = case("14 shells, the bass by the gap", 0);
+    assert!(has(&w, "The runner-up, G7sus4, is read as G7."));
+    assert!(has(&w, "G7's third, B, isn't heard."));
     // How usual its tensions are for its kind of chord.
     assert!(has(
         &case("1 C", 0),
-        "As the songs counted name tensions, C is a more usual way to write a major chord than Gsus4(add6)/C is to \
-         write a sus4 chord; of the chords in the songs counted, 52% are major chords and 1.7% sus4 chords."
+        "As the songs counted name tensions, C is a more usual way to write a major chord than Gsus4(add6) is to write \
+         a sus4 chord; of the chords in the songs counted, 52% are major chords and 1.7% sus4 chords."
     ));
     // Where a chord starts, and a chord held on.
     assert!(has(
         &case("4 C C/B | Am", 1),
-        "C/B is the chord before, C, going on, so where a chord starts doesn't count for it; the bass moves to \
-         Bsus4(b9)(addb13)'s root, B, where it would start; Bsus4(b9)(addb13) would start in the middle of a bar."
+        "Cmaj7 is the chord before, C, going on, so where a chord starts doesn't count for it; the bass moves to \
+         Bsus4's root, B, where it would start; Bsus4 would start in the middle of a bar."
     ));
     assert!(has(
         &case("36 a walk under F A C", 0),
@@ -273,14 +275,14 @@ fn why_a_chord_reads_as_it_does_is_told_from_the_evidence() {
     // The tune.
     assert!(has(
         &case("48b Cmaj7, F5 held", 0),
-        "Of what the tune plays, all of it is notes that don't belong to Cmaj7; for G13/C, all of it is its own notes."
+        "Of what the tune plays, all of it is notes that don't belong to Cmaj7; for G7, all of it is its own notes."
     ));
     // A runner-up written as another chord than the decode reads is told as the one it reads.
     let w = case("7 G9sus4 with D4", 0);
     assert_eq!(
         w.why[..2],
         [
-            "The runner-up, Dm11/G, is read as D7sus4.",
+            "The runner-up, Dm11, is read as D7sus4.",
             "G in the bass is the root of G9sus4 and would be the 4th of D7sus4."
         ]
     );
@@ -507,13 +509,18 @@ fn evidence_about_two_notes_or_adding_two_shares_is_told_as_it_was_weighed() {
 
 #[test]
 fn the_runner_up_is_told_by_the_chord_it_is_read_as() {
-    // G+/C read as B+: the notes lean towards the root it's read on, B.
-    let w = case("35 Cm | Cm(maj7) | Cm7 | Cm6 over a held C", 1);
-    assert_eq!(w.why[0], "The runner-up, G+/C, is read as B+.");
+    // Fm(maj7) read as Fmaj7: the evidence tells it as Fmaj7, and the first reading as the chord it's read as, E+.
+    let w = case("30 C+ with no bass, before F", 0);
+    assert_eq!(w.why[0], "The runner-up, Fm(maj7), is read as Fmaj7.");
     assert!(has(
         &w,
-        "Cm(maj7)'s root, C, is only in the bass; the notes lean more towards B as the root than towards C."
+        "Fmaj7's root, F, isn't played at all, and no bass plays; E+'s root, E, is the lowest note all of the time."
     ));
+    // Fmaj13 read as F6: its E doesn't belong to a sixth chord, so the evidence tells it as F6.
+    assert_eq!(case("10 Dm9 | G13 | Cmaj9", 0).why[0], "The runner-up, Fmaj13, is read as F6.");
+    // G+ over C is written Cm(maj7), as the first reading is: the two are one reading, and the runner-up another.
+    let w = case("35 Cm | Cm(maj7) | Cm7 | Cm6 over a held C", 1);
+    assert!(w.why.iter().all(|l| !l.contains("G+") && !l.contains("B+")), "{}", render(&w));
     // A passing note between the notes it hangs on, the one below it first.
     assert!(has(&case("54 C | G | Am | F with a tune", 2), "B in the tune passes between A and C."));
     // What the chords carry in or hold over, told by how much.

@@ -156,7 +156,8 @@ pub enum BassTexture {
     /// One pitch class has at least three quarters of the bass's time (octave jumps and repeated notes count as it):
     /// it says where the chord stands.
     Held(PitchClass),
-    /// The bass moves (a walking or busy bass): it leans towards the root on strong beats, and never makes a slash.
+    /// The bass moves (a walking or busy bass): it leans towards the root on strong beats, and the chord over it stands
+    /// on its root.
     Moving,
     /// No bass sounds.
     None,

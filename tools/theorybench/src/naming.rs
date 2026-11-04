@@ -112,6 +112,12 @@ pub fn kind(c: Chord) -> usize {
     }
 }
 
+/// A chord's quality as a label writes it ([`Chord::slash_name`]): from its own notes, a bass that's only a bass left
+/// out, so D/C is major, where the app writes D7 from all its notes.
+fn quality(c: Chord) -> String {
+    chord::quality_of(c.intervals(), c.family())
+}
+
 /// What kind of chord it is with its tensions left out: its third (or the 4th or 2nd standing in for it), its
 /// seventh (or the 6 of a chord with no seventh) and an altered fifth. A missing fifth doesn't change it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -243,8 +249,7 @@ pub fn tally(labels: &[(i64, i64, Named)], read: &[Read], played: &[PcSet], bass
             if same_root {
                 t.same_notes[1] += length;
             } else if let Some(c) = chord {
-                *t.other_roots.entry((label.quality(), c.quality(), c.root().above(label.root()))).or_default() +=
-                    length;
+                *t.other_roots.entry((quality(label), quality(c), c.root().above(label.root()))).or_default() += length;
             }
         }
         if let Some(row) = t.kinds.get_mut(kind(label)) {
@@ -792,8 +797,10 @@ mod tests {
         assert_eq!(right("C:min7", "Cm13"), [0.0, 0.0, 4.0, 4.0]);
         assert_eq!(right("C:min9", "Cm11"), [0.0, 0.0, 4.0, 4.0]);
         assert_eq!(right("C:9", "C13"), [0.0, 0.0, 4.0, 4.0]);
-        // A 7alt doesn't say which alterations: the event, not the name.
-        assert_eq!(right("C:7(#9,b13)", "C7alt"), [0.0, 0.0, 4.0, 4.0]);
+        // A 7alt doesn't say which alterations: the event, not the name. It has no fifth, so its G# is a #5 (as
+        // players write C7#9#5), and with a fifth the label's G# is a b13: another core.
+        assert_eq!(right("C:7(*5,#9,#5)", "C7alt"), [0.0, 0.0, 4.0, 4.0]);
+        assert_eq!(right("C:7(#9,b13)", "C7alt"), [0.0; 4]);
         // The extensions it is given are the label's: the 11 of Cm13 is no false 11 on a minor 13 without one.
         let t = tally(&[(0, 4, harte::named("C:min13"))], &[named("Cm13")], &[PcSet::EMPTY], true, 1);
         assert_eq!(names(extensions(label("C:min13"))), ["9", "13"]);
