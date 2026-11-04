@@ -9,7 +9,8 @@
 //! there is, and `logs\` is followed through one, as below.) What it clears:
 //!
 //! - The data folder: a settings or database file whose writing a crash cut short (`backup.txt.mo-part`,
-//!   `presets.db.new-<number>`), once it's an hour old, so one being written right now is left alone.
+//!   `rust-settings.json.mo-part`, `presets.db.new-<number>`), once it's an hour old, so one being written right now is
+//!   left alone.
 //! - `Curves\`: a curve file whose writing a crash cut short (`… .mo-part-<number>-<number>`), an hour old.
 //! - `twin\cs\`: the twin test's copy of your library (`library-copy.db`), left when the test was stopped, a day old.
 //! - Your Temp folder: the Space page's lists for the administrator step (`mo-admin-<n>-<n>-<n>.txt`), a day old.
@@ -809,11 +810,14 @@ fn is_report(name: &str, start: &str) -> bool {
 }
 
 /// A file in the data folder whose writing was cut short, named as the code that writes it names it: the Backup
-/// settings' (`backup.txt.mo-part`, `backup-songs.txt.mo-part`, see [`crate::backup`]), the sweep's own
-/// (`tidy-notes.txt.mo-part`, [`write_notes_done`]), or a side database being made
-/// (`presets.db.new-<number>`, `curves.db.new-<number>`, with SQLite's own files beside it; `mo_presets::fixes`).
+/// settings' (`backup.txt.mo-part`, `backup-songs.txt.mo-part`, see [`crate::backup`]), the app's own settings'
+/// (`rust-settings.json.mo-part`, [`crate::app_settings::save`]), the sweep's own (`tidy-notes.txt.mo-part`,
+/// [`write_notes_done`]), or a side database being made (`presets.db.new-<number>`, `curves.db.new-<number>`, with
+/// SQLite's own files beside it; `mo_presets::fixes`).
 fn is_cut_short(name: &str) -> bool {
-    [SETTINGS_FILE, SONGS_FILE, NOTES_DONE_FILE].iter().any(|f| name.strip_prefix(f) == Some(PART_ENDING))
+    [SETTINGS_FILE, SONGS_FILE, crate::app_settings::FILE, NOTES_DONE_FILE]
+        .iter()
+        .any(|f| name.strip_prefix(f) == Some(PART_ENDING))
         || [mo_presets::fixes::FILE_NAME, mo_presets::curves::FILE_NAME]
             .iter()
             .any(|database| mo_presets::fixes::is_half_made(name, database))
@@ -1421,6 +1425,7 @@ mod tests {
         let writes = [
             data.join("backup.txt.mo-part"),
             data.join("backup-songs.txt.mo-part"),
+            data.join("rust-settings.json.mo-part"),
             data.join("presets.db.new-4120"),
             data.join("curves.db.new-77-journal"),
             data.join("Curves").join("Rise abcd1234.bwcurve.mo-part-4120-3"),
@@ -1444,6 +1449,9 @@ mod tests {
             data.join("midi-index.db"),
             data.join("backup.txt"),
             data.join("backup-songs.txt"),
+            data.join("rust-settings.json"),
+            data.join("rust-settings.json.unreadable"),
+            data.join("rust-settings.json.unreadable-2"),
             data.join("tidy-notes.txt"),
             data.join("tidy-notes.lock"),
             data.join("presets.db.new-"),
@@ -2550,6 +2558,8 @@ mod tests {
         assert!(!is_report("twin-test-.txt", "twin-test-") && !is_report("twin-test-2026 copy.txt", "twin-test-"));
         assert!(is_cut_short("presets.db.new-12-wal") && is_cut_short("curves.db.new-3-shm"));
         assert!(is_cut_short("backup.txt.mo-part") && is_cut_short("backup-songs.txt.mo-part"));
+        assert!(is_cut_short("rust-settings.json.mo-part") && !is_cut_short("rust-settings.json"));
+        assert!(!is_cut_short("rust-settings.json.unreadable") && !is_cut_short("rust-settings.json.mo-part-2"));
         assert!(!is_cut_short("presets.db.new-12-old") && !is_cut_short("presets.db") && !is_cut_short("backup.txt"));
         assert!(!is_cut_short("library.db.new-12") && !is_cut_short("backup.txt.mo-part.2"));
         assert!(mo_presets::export::is_half_written("A.bwcurve.mo-part-1-0"));

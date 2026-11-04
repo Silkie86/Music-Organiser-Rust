@@ -34,8 +34,9 @@ use rayon::prelude::*;
 /// The settings file's name, in the app's folder.
 pub const SETTINGS_FILE: &str = "backup.txt";
 
-/// What a settings file is first written as ([`Settings::save`], [`BackedUp::save`]): its name and then this, renamed
-/// once it's whole, so a crash part way leaves the old one whole. The start-up sweep (rule 28) clears one a crash left.
+/// What a settings file is first written as ([`Settings::save`], [`BackedUp::save`], and the app's own settings,
+/// [`crate::app_settings::save`]): its name and then this, renamed once it's whole, so a crash part way leaves the old
+/// one whole. The start-up sweep (rule 28) clears one a crash left.
 pub const PART_ENDING: &str = ".mo-part";
 
 /// Where `path` is written first: its name with [`PART_ENDING`] after it (`backup.txt.mo-part`).
