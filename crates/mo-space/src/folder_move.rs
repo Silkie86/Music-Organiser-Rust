@@ -24,7 +24,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::admin::{Admin, AsAdmin, NoAdmin, Outcome, Step, ask_for, real_spot, reason};
-use crate::clean::{Bin, Done, Problem, Sending, What, on_network};
+use crate::clean::{Bin, Done, on_network};
 use crate::half_copy::{
     self, Claim, MARKER, busy_now, claim, clear_own, going_into_use, not_in_use, own_room, remove_marked, unmark,
 };
@@ -1386,17 +1386,15 @@ fn same_inside(a: &Path, b: &Path, stop: &AtomicBool) -> Result<bool, CantMove> 
 /// only in the old copy ([`only_in_old_copy`]): the app shows that list first. `all` is every moved folder.
 /// [`crate::clean::undo`] puts it back.
 pub fn remove_old_copy(moved: &MovedFolder, all: &[MovedFolder], sure: bool, bin: &dyn Bin, stop: &AtomicBool) -> Done {
-    if let Err(why) = old_copy_check(moved, all, sure, stop) {
-        return stays(moved, &why);
-    }
-    let mut done = Done::default();
-    // The folder itself (it was checked not to be a link), not where a link would lead.
-    let real = real_spot(&moved.old_copy);
-    // Checked just now; one Windows guards is checked again by the administrator step, against what it held now.
-    let mut sending = Sending::new(bin, stop);
-    sending.send(&moved.old_copy, real, moved.bytes, What::Plugin(moved.space_kind()), &mut done, || Ok(()));
-    sending.finish(&mut done);
-    done
+    crate::old_copies::send_one(
+        &moved.old_copy,
+        moved.bytes,
+        crate::old_copies::Going::OldCopy(moved),
+        all,
+        sure,
+        bin,
+        stop,
+    )
 }
 
 /// Why it stays when checking what's only in it was stopped part way.
@@ -1468,11 +1466,6 @@ pub(crate) fn leads_into(moved: &MovedFolder) -> bool {
     let link_in = real_path(&moved.from).is_some_and(|f| is_inside(&f, &old));
     let copy_in = real_path(&moved.to).is_some_and(|t| is_inside(&t, &old) || is_inside(&old, &t));
     link_in || copy_in
-}
-
-/// The old copy stays, and why.
-fn stays(moved: &MovedFolder, why: &str) -> Done {
-    Done { problems: vec![Problem { path: moved.old_copy.clone(), why: why.to_owned() }], ..Done::default() }
 }
 
 /// Whether Windows said no because of rights (access denied), rather than something having the folder open.

@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::NaiveDateTime;
 use mo_formats::paths::file_name;
+use rayon::prelude::*;
 
 use crate::admin::real_spot;
 use crate::after_move::{OldHome, kept_beside, old_home_check, old_home_stays, only_in_old_home, real_place};
@@ -22,6 +23,7 @@ use crate::clean::{Bin, Done, Problem, Sending, What};
 use crate::folder_move::{
     MovedFolder, OLD_SUFFIX, csharp_time, leads_into, old_copy_check, old_copy_stays, only_in_old_copy,
 };
+use crate::plugin_space::SpaceKind;
 use crate::size::{self, Stopped, is_link, size_text};
 use crate::{in_places, is_dir, key, not_there, parent_of, real_folder, real_path, text};
 
@@ -126,19 +128,16 @@ pub fn remind(
     look_in: &[String],
     stop: &AtomicBool,
 ) -> Result<Reminder, Stopped> {
-    let mut leftovers: Vec<Leftover> = Vec::new();
     let measure = |path: &str| size::measure(Path::new(path), stop).map(|m| m.bytes);
-    for (i, m) in moved.iter().enumerate() {
-        // Gone, or a link now (it frees nothing).
-        if !m.has_old_copy() {
-            continue;
-        }
+    // Each one, and the copy its files went to, is read on its own (rule 21). One that's gone, or a link now (it frees
+    // nothing), isn't there to remind you of.
+    let old_copies = moved.par_iter().enumerate().filter(|(_, m)| m.has_old_copy()).map(|(i, m)| {
         let stays = old_copy_stays(m, moved);
         let only = match stays {
             None => Some(only_in_old_copy(m, moved, stop).map_err(|_| Stopped)?),
             Some(_) => None,
         };
-        leftovers.push(Leftover {
+        Ok(Leftover {
             path: real_place(&m.old_copy, moved),
             bytes: measure(&m.old_copy)?,
             what: Left::OldCopy(i),
@@ -146,18 +145,15 @@ pub fn remind(
             since: moved_at(&m.moved),
             stays,
             only,
-        });
-    }
-    for (i, h) in homes.iter().enumerate() {
-        if !real_folder(&h.path) {
-            continue;
-        }
+        })
+    });
+    let behind = homes.par_iter().enumerate().filter(|(_, h)| real_folder(&h.path)).map(|(i, h)| {
         let stays = old_home_stays(h, moved);
         let only = match stays {
             None => only_in_old_home(h, stop).map_err(|_| Stopped)?,
             Some(_) => None,
         };
-        leftovers.push(Leftover {
+        Ok(Leftover {
             path: h.path.clone(),
             bytes: measure(&h.path)?,
             what: Left::Behind(i),
@@ -165,8 +161,9 @@ pub fn remind(
             since: None,
             stays,
             only,
-        });
-    }
+        })
+    });
+    let mut leftovers = old_copies.chain(behind).collect::<Result<Vec<Leftover>, Stopped>>()?;
     for h in kept_beside(moved, homes, stop) {
         if stop.load(Ordering::Relaxed) {
             return Err(Stopped);
@@ -306,12 +303,74 @@ const UNKNOWN: &str = "No move was kept for it, so the app can't tell whether an
     before deleting it yourself.";
 
 /// What a picked one is, as the app's records have it now.
+/// What goes: a move's old copy, or a folder left behind (or files kept aside), as the app's records have it.
 #[derive(Clone, Copy)]
-enum Going<'a> {
+pub(crate) enum Going<'a> {
     /// The old copy of this move.
     OldCopy(&'a MovedFolder),
     /// This folder left behind, or files kept aside.
     Home(&'a OldHome),
+}
+
+impl Going<'_> {
+    /// Why it can't go now ([`old_copy_check`], [`old_home_check`]): what keeps it, then, unless you're `sure`, what's
+    /// only in it, what its files hold compared too (slow). `moved` is every moved folder.
+    fn check(self, moved: &[MovedFolder], sure: bool, stop: &AtomicBool) -> Result<(), String> {
+        match self {
+            Going::OldCopy(m) => old_copy_check(m, moved, sure, stop),
+            Going::Home(h) => old_home_check(h, moved, sure, stop),
+        }
+    }
+
+    /// Whether its record says nothing of where its files went, so there's nothing to check it against.
+    fn nothing_to_check(self) -> bool {
+        matches!(self, Going::Home(h) if h.copy.is_empty())
+    }
+
+    fn kind(self) -> SpaceKind {
+        match self {
+            Going::OldCopy(m) => m.space_kind(),
+            Going::Home(h) => h.space_kind(),
+        }
+    }
+}
+
+/// Sends one that was just checked (`going`, at `path`, `bytes` big) with the others `sending` sends. The folder itself
+/// goes (it was checked not to be a link), not where a link would lead. One Windows guards waits for the administrator
+/// step, and just before Windows asks, only what keeps it is checked again: what's only in it was, just now.
+fn send_checked<'a>(
+    sending: &mut Sending<'a>,
+    (path, bytes): (&str, u64),
+    going: Going<'a>,
+    moved: &'a [MovedFolder],
+    stop: &'a AtomicBool,
+    done: &mut Done,
+) {
+    sending
+        .send(path, real_spot(path), bytes, What::Plugin(going.kind()), done, move || going.check(moved, true, stop));
+}
+
+/// Checks one (`going`, at `path`, `bytes` big) and sends it to the Recycle Bin on its own, as [`remove`] does each one
+/// it sends: [`crate::folder_move::remove_old_copy`] and [`crate::after_move::remove_old_home`]. `moved` is every moved
+/// folder; unless you're `sure`, what's only in it keeps it.
+pub(crate) fn send_one(
+    path: &str,
+    bytes: u64,
+    going: Going<'_>,
+    moved: &[MovedFolder],
+    sure: bool,
+    bin: &dyn Bin,
+    stop: &AtomicBool,
+) -> Done {
+    let mut done = Done::default();
+    if let Err(why) = going.check(moved, sure, stop) {
+        done.problems.push(Problem { path: path.to_owned(), why });
+        return done;
+    }
+    let mut sending = Sending::new(bin, stop);
+    send_checked(&mut sending, (path, bytes), going, moved, stop, &mut done);
+    sending.finish(&mut done);
+    done
 }
 
 /// A picked one, found again in the records as they are now (`now`): an old copy by its move (`then`, the records the
@@ -365,30 +424,15 @@ pub fn remove(
     let mut sending = Sending::new(bin, stop);
     for l in picked {
         let checked = found_again(l, then, now).and_then(|going| {
-            match going {
-                Going::OldCopy(m) => old_copy_check(m, moved, false, stop),
-                Going::Home(h) => old_home_check(h, moved, h.copy.is_empty(), stop),
-            }
-            .map(|()| going)
+            // One with nothing to check it against goes as it is only when the look had nothing either: then the page
+            // ticked it only once you did. One the look could check has been ticked for you: it stays.
+            let sure = l.only.is_none() && going.nothing_to_check();
+            going.check(moved, sure, stop).map(|()| going)
         });
-        let going = match checked {
-            Ok(going) => going,
-            Err(why) => {
-                done.problems.push(Problem { path: l.path.clone(), why });
-                continue;
-            }
-        };
-        // Just before Windows asks, only what keeps it is checked again: what's only in it was, just now.
-        let again = move || match going {
-            Going::OldCopy(m) => old_copy_check(m, moved, true, stop),
-            Going::Home(h) => old_home_check(h, moved, true, stop),
-        };
-        let kind = match going {
-            Going::OldCopy(m) => m.space_kind(),
-            Going::Home(h) => h.space_kind(),
-        };
-        // The folder itself (it was checked not to be a link), not where a link would lead.
-        sending.send(&l.path, real_spot(&l.path), l.bytes, What::Plugin(kind), &mut done, again);
+        match checked {
+            Ok(going) => send_checked(&mut sending, (&l.path, l.bytes), going, moved, stop, &mut done),
+            Err(why) => done.problems.push(Problem { path: l.path.clone(), why }),
+        }
     }
     sending.finish(&mut done);
     done

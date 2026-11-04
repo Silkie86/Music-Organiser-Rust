@@ -190,6 +190,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The card turned down to its end: the one that can't go yet, the kept files with their tick off, and the one with
     // presets saved since, with no tick.
     shots.push(("space-old-down.png".into(), card_down(&window, &top, "space-old-down.png")?));
+    // While Remove compares the ticked ones with their copies (a big sound library takes a while): Stop, which leaves
+    // what isn't checked yet where it is.
+    let found = sample_old_copies();
+    let mut old_removing = mo_app::space_old::Removing::default();
+    old_removing.start(old_removing.ticked_copies(Some(&found)));
+    mo_ui::space::show_sample(&app, mo_ui::space::Sample { old_removing, ..sample_space() }, old);
+    capture(&window);
+    shots.push(("space-old-removing.png".into(), capture(&window)));
     // After Remove: what was freed, each old copy in the Trash (the Recycle Bin on Windows) or why it stayed, and Put
     // back.
     let (old_removing, old_binned) = sample_old_removed(&sample_old_copies());

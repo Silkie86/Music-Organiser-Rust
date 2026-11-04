@@ -8,7 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
-use mo_space::after_move::OldHome;
+use mo_space::after_move::{NOTHING_TO_CHECK, OldHome};
 use mo_space::clean::{Bin, Problem, Removed};
 use mo_space::folder_move::{Drives, KEPT_SUFFIX, MovedFolder, move_folder, remove_old_copy};
 use mo_space::key;
@@ -210,6 +210,51 @@ fn the_ones_you_pick_go_together_each_checked_again_against_the_records_now() {
     assert!(Path::new(&presets.old_copy).join("late.fxp").exists() && Path::new(&homes[1].path).exists());
     assert!(!Path::new(&steam.old_copy).exists());
     assert_eq!(fs::read_to_string(Path::new(&steam.from).join("a.nki")).unwrap(), "good");
+}
+
+#[test]
+fn a_folder_left_behind_goes_only_as_far_as_the_look_could_check_it() {
+    let dir = fixtures("mo-space-remind-home-copy");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    write(&c, "Home A/a.db", "same");
+    write(&d, "A/a.db", "same");
+    write(&c, "Home B/b.db", "mine");
+    fs::create_dir_all(d.join("B")).unwrap();
+    write(&c, "Home C/c.db", "only");
+    let home = |name: &str, copy: Option<&str>| OldHome {
+        path: s(&c.join(format!("Home {name}"))),
+        bytes: 4,
+        note: "left by an update".to_owned(),
+        copy: copy.map(|copy| s(&d.join(copy))).unwrap_or_default(),
+        kind: 2,
+    };
+    // A says where its files went, and they're all there; B doesn't say; C's copy isn't there (its drive is out).
+    let homes = [home("A", Some("A")), home("B", None), home("C", Some("C"))];
+    let stop = AtomicBool::new(false);
+    let look = remind(&[], &homes, &[], &stop).unwrap();
+    let at = |name: &str| look.leftovers.iter().find(|l| l.path.ends_with(&format!("Home {name}"))).unwrap();
+    assert_eq!((at("A").only.clone(), at("A").can_go()), (Some(Vec::new()), true));
+    assert_eq!((at("B").only.clone(), at("B").can_go()), (None, true));
+    // Not "C:\…\c.db is only here": where its files went isn't there to look in, and this may be all there is of them.
+    let gone = at("C");
+    assert!(gone.stays.as_deref().is_some_and(|w| w.contains("isn't there now")), "{gone:?}");
+    assert_eq!((gone.only.clone(), gone.can_go()), (None, false));
+    // By Remove, the records say A's files went nowhere, and B's went to a copy that doesn't have them.
+    let homes_now = [home("A", None), home("B", Some("B")), home("C", Some("C"))];
+    let bin = FolderBin { dir: dir.join("bin"), held: RefCell::new(Vec::new()) };
+
+    let done = old_copies::remove(&look.leftovers, (&[], &homes), (&[], &homes_now), &bin, &stop);
+    assert!(done.removed.is_empty(), "{:?}", done.removed);
+    let why =
+        |name: &str| done.problems.iter().find(|p| p.path.ends_with(&format!("Home {name}"))).unwrap().why.clone();
+    // A was ticked for you because the look could check it: with nothing to check it against now, it stays.
+    assert_eq!(why("A"), NOTHING_TO_CHECK);
+    // B was ticked by you with nothing to check it against, but there's a copy to check it against now: it's checked.
+    assert!(why("B").contains("b.db"), "{}", why("B"));
+    assert!(why("C").contains("isn't there now"), "{}", why("C"));
+    for name in ["A", "B", "C"] {
+        assert!(c.join(format!("Home {name}")).exists());
+    }
 }
 
 #[test]

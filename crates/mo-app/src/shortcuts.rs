@@ -126,7 +126,12 @@ pub const SPACE_ACTIONS: &[Action] = &[
     action("space.measure", "Look at the drives and measure the app's files again", "F5"),
     action("space.reveal", "Show the picked line's folder", "Ctrl+Shift+E"),
     action("space.fix", "Write a \"(fixed)\" Bitwig project beside each ticked save", ""),
-    action("space.remove", "Send the ticked spare plugin copies to the Recycle Bin, each checked again first", ""),
+    action(
+        "space.remove",
+        "Send the ticked old copies or spare plugin copies to the Recycle Bin, each checked again first",
+        "",
+    ),
+    action("space.stop", "Stop removing old copies: the ones not checked yet stay where they are", ""),
     action("space.putBack", "Put back what the last clean-up sent to the Recycle Bin", ""),
 ];
 

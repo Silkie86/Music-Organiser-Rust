@@ -14,7 +14,7 @@ use chrono::NaiveDateTime;
 use mo_formats::paths;
 use mo_space::Stopped;
 use mo_space::after_move::{OldHome, parse_old_homes};
-use mo_space::clean::{Bin, Done, Problem};
+use mo_space::clean::{Bin, Done};
 use mo_space::folder_move::{MovedFolder, parse_moved};
 use mo_space::old_copies::{self, Left, Leftover, Reminder};
 use mo_space::size::size_text;
@@ -113,19 +113,6 @@ pub fn remove(
     let moved = now.0.map(parse_moved).unwrap_or_default();
     let homes = now.1.map(parse_old_homes).unwrap_or_default();
     old_copies::remove(picked, (&found.moved, &found.homes), (&moved, &homes), bin, stop)
-}
-
-/// Every one picked stays, for `why`: what Remove says when it couldn't check them again (the moves couldn't be read,
-/// say).
-pub fn stayed(picked: &[Leftover], why: &str) -> Done {
-    let problems = picked.iter().map(|l| Problem { path: l.path.clone(), why: why.to_owned() }).collect();
-    Done { problems, ..Done::default() }
-}
-
-/// Why every ticked one is said to have stayed when Remove stopped with an error (logged as a crash): what went before
-/// it stopped is in the bin, but which isn't known.
-pub fn crashed_words() -> String {
-    format!("Remove stopped with an error (the log says which). Anything that went before it stopped is in the {BIN}.")
 }
 
 /// "1 old copy", "3 old copies".
@@ -315,7 +302,10 @@ fn picking_card(
         .collect();
     let can_go = leftovers.iter().any(Leftover::can_go);
     let note = match removing.stage() {
-        Stage::Sending(_) => format!("Checking each ticked one again, then sending it to the {BIN}…"),
+        Stage::Sending(_) => format!(
+            "Checking each ticked one again, then sending it to the {BIN}… Stop leaves the ones not checked yet where \
+             they are."
+        ),
         _ if can_go => remove_note(can_put_back, removing.each_ticked(found).any(|l| guarded(&l.path))),
         _ => String::new(),
     };
@@ -389,7 +379,8 @@ pub fn removed_words(done: &Done) -> Result<String, String> {
 mod tests {
     use super::*;
     use crate::space_bin::{PutBacks, yourself_words};
-    use mo_space::clean::{Removed, What};
+    use crate::space_removing::stayed;
+    use mo_space::clean::{Problem, Removed, What};
     use mo_space::plugin_space::SpaceKind;
 
     const GB: u64 = 1 << 30;
@@ -566,6 +557,27 @@ mod tests {
         );
         removing.tick(&[PathBuf::from(SPITFIRE), PathBuf::from(KEPT)], false);
         assert_eq!(button(&removing), Some(("Nothing ticked".to_owned(), false)));
+    }
+
+    #[test]
+    fn a_tick_you_gave_goes_with_remove_and_an_untick_stays() {
+        let found = every_kind();
+        let mut removing = Removing::default();
+        // You looked in the kept files and ticked them, and unticked Spitfire's old copy to keep it for now.
+        removing.tick(&[PathBuf::from(KEPT)], true);
+        removing.tick(&[PathBuf::from(SPITFIRE)], false);
+        let kept = &found.reminder.leftovers[3];
+        let spitfire = &found.reminder.leftovers[0];
+        assert!(removing.ticked(kept) && !removing.ticked(spitfire));
+        removing.start(removing.ticked_copies(Some(&found)));
+        removing.sent(7, Done { removed: vec![removed(KEPT, GB)], ..Done::default() });
+        removing.putting_back(7);
+        removing.put_back(7, Vec::new());
+        // Back from the bin and measured again, the kept files wait for your tick again; Spitfire's stays unticked.
+        removing.again();
+        assert!(!removing.ticked(kept), "the kept files would go again with nothing to check them against");
+        assert!(!removing.ticked(spitfire));
+        assert_eq!(removing.ticked_copies(Some(&found)), Vec::<Leftover>::new());
     }
 
     #[test]

@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use mo_formats::{case, paths};
 use mo_library::plugins::PluginUse;
 use mo_space::Stopped;
-use mo_space::clean::{Bin, Done, Problem};
+use mo_space::clean::{Bin, Done};
 use mo_space::plugins::scan_files;
 use mo_space::size::size_text;
 use mo_space::spare::{self, SpareCopy, Used, Why};
@@ -25,6 +25,7 @@ use crate::space::{Card, Line, Opens, Part, and_list};
 use crate::space_bin::BIN;
 use crate::space_removing::{
     self, Looked, Removable, back_words, free_bytes, freed_words, gone, result_figures, result_words, sent_words,
+    stayed,
 };
 
 /// The spare copies line's id.
@@ -146,19 +147,6 @@ pub fn remove(
         }
         Err(Stopped) => stayed(picked, "Remove stopped before it went."),
     }
-}
-
-/// Why every ticked copy is said to have stayed when Remove stopped with an error (logged as a crash): what went before
-/// it stopped is in the bin, but which isn't known.
-pub fn crashed_words() -> String {
-    format!("Remove stopped with an error (the log says which). Anything that went before it stopped is in the {BIN}.")
-}
-
-/// Every copy picked stays, for `why`: what Remove says when it couldn't check them again (your saves couldn't be
-/// read, say).
-pub fn stayed(picked: &[SpareCopy], why: &str) -> Done {
-    let problems = picked.iter().map(|c| Problem { path: c.path.clone(), why: why.to_owned() }).collect();
-    Done { problems, ..Done::default() }
 }
 
 /// The spare copies in one format.
@@ -493,7 +481,9 @@ pub fn removed_words(done: &Done) -> Result<String, String> {
 mod tests {
     use super::*;
     use crate::space_bin::{PutBacks, yourself_words};
+    use crate::space_removing::crashed_words;
     use mo_library::PluginKind;
+    use mo_space::clean::Problem;
     use std::collections::{HashMap, HashSet};
 
     const MB: u64 = 1 << 20;

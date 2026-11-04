@@ -118,7 +118,8 @@ pub enum Stage<T> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Removing<T> {
     /// By path: what you ticked or unticked. The rest are as they are out of the box
-    /// ([`Removable::ticked_at_first`]). A tick you changed stays through a new look.
+    /// ([`Removable::ticked_at_first`]). A tick you changed stays through a new look, until Remove: what you ticked
+    /// goes with it ([`start`](Self::start)), and what you unticked stays unticked.
     ticks: HashMap<String, bool>,
     stage: Stage<T>,
 }
@@ -164,9 +165,12 @@ impl<T: Removable> Removing<T> {
         matches!(self.stage, Stage::Sending(_) | Stage::PuttingBack(_))
     }
 
-    /// Remove starts on `picked` ([`ticked_copies`](Self::ticked_copies)).
+    /// Remove starts on `picked` ([`ticked_copies`](Self::ticked_copies)). The ticks you gave go with it: one that
+    /// isn't ticked out of the box (with nothing to check it against) goes another time only once you tick it again,
+    /// having looked in it again, even after Put back. The ones you unticked stay unticked.
     pub fn start(&mut self, picked: Vec<T>) {
         if self.stage == Stage::Picking {
+            self.ticks.retain(|_, ticked| !*ticked);
             self.stage = Stage::Sending(picked);
         }
     }
@@ -253,6 +257,19 @@ impl<T: Removable> Removing<T> {
             _ => None,
         }
     }
+}
+
+/// Every one picked stays, for `why`: what Remove says when it couldn't check them again (what the look read couldn't
+/// be read again, say), or couldn't start.
+pub fn stayed<T: Removable>(picked: &[T], why: &str) -> Done {
+    let problems = picked.iter().map(|t| Problem { path: t.path().to_owned(), why: why.to_owned() }).collect();
+    Done { problems, ..Done::default() }
+}
+
+/// Why every one picked is said to have stayed when Remove stopped with an error (logged as a crash): what went before
+/// it stopped is in the bin, but which isn't known.
+pub fn crashed_words() -> String {
+    format!("Remove stopped with an error (the log says which). Anything that went before it stopped is in the {BIN}.")
 }
 
 /// Parts of a sentence, each saying something of its own, as one sentence: "A", "A, and B", "A, B, and C".

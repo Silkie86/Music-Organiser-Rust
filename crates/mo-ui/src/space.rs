@@ -25,6 +25,7 @@ use mo_app::space::{self, Drive, Fill, Holds, Opens, Part};
 use mo_app::space_bin::{self, BIN, CAN_PUT_BACK, PutBacks};
 use mo_app::space_bitwig::{self, BITWIG_COPIES, Copies, Fixes, Fixing, ToFix};
 use mo_app::space_old::{self, Found, OLD_COPIES};
+use mo_app::space_removing::{self, Removable};
 use mo_app::space_spare::{self, Removing, SPARE_COPIES, Stage};
 use mo_app::{backup, log, paths, shell};
 use mo_catch::catch_crash;
@@ -46,13 +47,14 @@ const FRESH: Duration = Duration::from_secs(5 * 60);
 /// How often a look for Bitwig copies tells the window how far it is, at most (rule 12).
 const PROGRESS_EVERY: Duration = Duration::from_millis(100);
 
-/// The buttons' ids, from the one shortcut list (rule 15): Measure again, Show in folder, Fix, Remove and Put back are
-/// the page's own (`mo_app::shortcuts::SPACE_ACTIONS`); the Recycle Bin is the app-wide action, so its button shows
-/// the same key.
+/// The buttons' ids, from the one shortcut list (rule 15): Measure again, Show in folder, Fix, Remove, Stop and Put
+/// back are the page's own (`mo_app::shortcuts::SPACE_ACTIONS`); the Recycle Bin is the app-wide action, so its button
+/// shows the same key.
 const MEASURE: &str = "space.measure";
 const REVEAL: &str = "space.reveal";
 const FIX: &str = "space.fix";
 const REMOVE: &str = "space.remove";
+const STOP: &str = "space.stop";
 const PUT_BACK: &str = "space.putBack";
 const RECYCLE_BIN: &str = "app.recycleBin";
 
@@ -191,6 +193,8 @@ struct Page {
     old_looking: bool,
     /// Remove for old copies: the ticks you changed, and how a removal went.
     old_removing: space_old::Removing,
+    /// While old copies are going to the Recycle Bin: what stops their checks (Stop).
+    old_stop: Option<Arc<AtomicBool>>,
     /// The look for spare plugin copies, what the last one found (it stays on show while the next one looks), and
     /// whether one is on.
     spare_look: Looks<SpareAsk>,
@@ -203,11 +207,21 @@ struct Page {
     kept: Option<Kept>,
     /// Put back, from the Recycle Bin card or the spare copies card: the one on, and what couldn't come back.
     put_backs: PutBacks,
+    /// The looks for old copies or spare copies that stopped when something started going to the Recycle Bin or coming
+    /// back ([`hold_looks`]): each looks again once that's done.
+    look_after: LookAfter,
     /// The picked line's id, or "" when none is.
     picked: String,
     /// The parts on the card on show, for its ticks and links (they say which part by its place). The card's rows
     /// are only made again when these change.
     card_parts: Vec<Part>,
+}
+
+/// Which looks start again once something has gone to the Recycle Bin or come back.
+#[derive(Clone, Copy, Debug, Default)]
+struct LookAfter {
+    old: bool,
+    spare: bool,
 }
 
 /// What a step that arrived changes on show.
@@ -221,7 +235,8 @@ enum Changed {
     /// Also taking room and the card: what the app put in the Recycle Bin that's still there.
     Also,
     /// Biggest wins first, Also taking room and the card: a removal or a put back has finished, with what's in the
-    /// Recycle Bin now. After a put back, the page looks for spare copies or old copies again (`spare`, `old`).
+    /// Recycle Bin now. The page looks for spare copies or old copies again (`spare`, `old`): after a put back of them,
+    /// and when a look of them stopped for it ([`hold_looks`]).
     Bin { spare: bool, old: bool },
     /// Nothing: an older look's step, or how far a later look for Bitwig copies is while the last one's stay on show.
     Nothing,
@@ -368,6 +383,7 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
                 OLD_COPIES => enabled(old_remove_button(&p)),
                 _ => false,
             },
+            STOP => p.picked == OLD_COPIES && enabled(old_stop_button(&p)),
             PUT_BACK => match p.picked.as_str() {
                 SPARE_COPIES => enabled(p.removing.put_back_button(CAN_PUT_BACK, &p.put_backs)),
                 OLD_COPIES => enabled(p.old_removing.put_back_button(CAN_PUT_BACK, &p.put_backs)),
@@ -408,6 +424,15 @@ fn old_remove_button(p: &Page) -> Option<(String, bool)> {
     p.old_removing.remove_button(p.old.as_ref(), p.old_looking || p.removing.busy(), &p.put_backs)
 }
 
+/// The old copies card's Stop, while their Remove is on: what isn't checked yet stays. Pressed, it says it's stopping.
+fn old_stop_button(p: &Page) -> Option<(String, bool)> {
+    if !matches!(p.old_removing.stage(), space_old::Stage::Sending(_)) {
+        return None;
+    }
+    let stopping = p.old_stop.as_ref().is_some_and(|stop| stop.load(Ordering::Relaxed));
+    Some(if stopping { ("Stopping…".to_owned(), false) } else { ("Stop".to_owned(), true) })
+}
+
 /// The part at `at` on the card on show.
 fn part_at(p: &Page, at: i32) -> Option<&Part> {
     usize::try_from(at).ok().and_then(|at| p.card_parts.get(at))
@@ -421,10 +446,14 @@ fn chosen(app: &AppWindow, id: &str) {
             look_again(app);
             look_for_copies(app);
             // A look for old copies or spare copies that's on goes on: it read the library just now, and nothing it
-            // measured is kept for a new one. Neither is looked for while something is being removed or put back; once
-            // a removal's result is on show, its card goes back to picking, from what the new look finds.
+            // measured is kept for a new one. Neither is looked for while something is being removed or put back: they
+            // look once that's done. Once a removal's result is on show, its card goes back to picking, from what the
+            // new look finds.
             let (old, spare) = PAGE.with(|p| {
                 let mut p = p.borrow_mut();
+                if busy(&p) {
+                    p.look_after = LookAfter { old: true, spare: true };
+                }
                 let spare = !p.spare_looking && !busy(&p);
                 let old = !p.old_looking && !busy(&p);
                 if spare && p.removing.shows_result() {
@@ -450,6 +479,15 @@ fn chosen(app: &AppWindow, id: &str) {
         }
         (REVEAL, Some(feed)) => crate::files::open_folder(&feed, &paths::data_dir().to_string_lossy()),
         (FIX, Some(feed)) => fix_ticked(app, feed),
+        (STOP, _) => {
+            PAGE.with(|p| {
+                if let Some(stop) = &p.borrow().old_stop {
+                    log::info("Space", "Removing old copies: Stop pressed");
+                    stop.store(true, Ordering::Relaxed);
+                }
+            });
+            show_card(app);
+        }
         (REMOVE, Some(feed)) => {
             let picked = PAGE.with(|p| p.borrow().picked.clone());
             match picked.as_str() {
@@ -627,11 +665,57 @@ fn open_in_bitwig(file: PathBuf) {
     }
 }
 
-/// Remove: sends the ticked spare copies to the Recycle Bin on a low-priority thread, with an activity card saying how
-/// it went. Each is checked again just before it goes (`space_spare::remove`), against your plugin folders and saves
-/// as the library has them now; then what went is kept (`mo_app::binned`), so Put back works after a restart too, and
-/// the card shows what went and what stayed. Not while a look for spare copies is on, nor while anything goes to the
-/// bin or comes back.
+/// What tells one clean-up's Remove from another's: its kind (as `mo_app::binned` keeps it), its thread, its activity
+/// card, what the log calls one of them, where the page keeps how it goes, and how its result reaches the page.
+struct Clean<T: 'static> {
+    kind: &'static str,
+    thread: &'static str,
+    title: &'static str,
+    words: fn() -> String,
+    removed_words: fn(&Done) -> Result<String, String>,
+    /// What the log calls one of them, within a sentence and at its start ("a spare plugin copy", "A spare plugin
+    /// copy"), and many ("spare plugin copies").
+    one: (&'static str, &'static str),
+    many: &'static str,
+    removing: fn(&mut Page) -> &mut space_removing::Removing<T>,
+    sent: fn(i64, Done, Option<Kept>) -> Step,
+}
+
+static SPARE: Clean<SpareCopy> = Clean {
+    kind: SPARE_COPIES,
+    thread: "Space remove",
+    title: space_spare::REMOVING,
+    words: space_spare::removing_words,
+    removed_words: space_spare::removed_words,
+    one: ("a spare plugin copy", "A spare plugin copy"),
+    many: "spare plugin copies",
+    removing: spare_removing,
+    sent: Step::SpareSent,
+};
+
+static OLD: Clean<Leftover> = Clean {
+    kind: OLD_COPIES,
+    thread: "Space remove old copies",
+    title: space_old::REMOVING,
+    words: space_old::removing_words,
+    removed_words: space_old::removed_words,
+    one: ("an old copy", "An old copy"),
+    many: "old copies",
+    removing: old_removing,
+    sent: Step::OldSent,
+};
+
+fn spare_removing(p: &mut Page) -> &mut Removing {
+    &mut p.removing
+}
+
+fn old_removing(p: &mut Page) -> &mut space_old::Removing {
+    &mut p.old_removing
+}
+
+/// Remove for spare copies: sends the ticked ones to the Recycle Bin ([`send_to_bin`]), each checked again just before
+/// it goes (`space_spare::remove`), against your plugin folders and saves as the library has them now. Not while a
+/// look for spare copies is on, nor while anything goes to the bin or comes back.
 fn remove_ticked(app: &AppWindow, feed: Feed) {
     let job = PAGE.with(|p| {
         let mut p = p.borrow_mut();
@@ -643,40 +727,11 @@ fn remove_ticked(app: &AppWindow, feed: Feed) {
             return None;
         }
         p.removing.start(picked.clone());
+        hold_looks(&mut p);
         Some((picked, p.library.clone()))
     });
     let Some((picked, library)) = job else { return };
-    let weak = app.as_weak();
-    let folder = paths::data_dir();
-    let (when, sending) = (binned::now(), picked.clone());
-    let started = background::spawn("Space remove", move || {
-        let card = feed.start(space_spare::REMOVING, &space_spare::removing_words());
-        // A crash (logged as one) still finishes Remove, so the page isn't busy for ever: what went before it is in the
-        // bin, but which isn't known.
-        let done = catch_crash(AssertUnwindSafe(|| remove_now(&sending, &library)))
-            .unwrap_or_else(|_| space_spare::stayed(&sending, &space_spare::crashed_words()));
-        for r in &done.removed {
-            log::info("Space", &format!("Sent a spare plugin copy to the {BIN}: {}", r.path));
-        }
-        for problem in &done.problems {
-            log::warning("Space", &format!("A spare plugin copy stayed: {}: {}", problem.path, problem.why));
-        }
-        match space_spare::removed_words(&done) {
-            Ok(words) => card.done(&words),
-            Err(words) => card.failed(&words),
-        }
-        // Kept before the page shows it, so Put back has it after a restart too, and the page shows both at once.
-        let kept =
-            catch_crash(AssertUnwindSafe(|| binned::record(&folder, &SystemBin, SPARE_COPIES, when, &done))).ok();
-        let when = kept.as_ref().map_or(when, |(_, at)| *at);
-        arrive(&weak, Step::SpareSent(when, done, kept.map(|(kept, _)| kept)));
-    });
-    if let Err(e) = started {
-        log::error("Space", &format!("Couldn't start removing spare plugin copies: {e}"));
-        let why = format!("Remove couldn't start ({e}), so it stays.");
-        PAGE.with(|p| p.borrow_mut().removing.sent(when, space_spare::stayed(&picked, &why)));
-    }
-    show_wins(app);
+    send_to_bin(app, feed, &SPARE, picked, move |picked| remove_now(picked, &library));
 }
 
 /// Remove's own work, off the window's thread: your plugin folders and which plugins your saves use, from the library
@@ -684,7 +739,7 @@ fn remove_ticked(app: &AppWindow, feed: Feed) {
 /// copy stays (said in the log): what's spare can't be checked.
 fn remove_now(picked: &[SpareCopy], library: &Path) -> Done {
     let Some((folders, used)) = plugin_folders_and_uses(library) else {
-        return space_spare::stayed(picked, space_spare::CANT_CHECK);
+        return space_removing::stayed(picked, space_spare::CANT_CHECK);
     };
     let pro_tools = plugins::pro_tools_installed();
     // On the pool for long work that waits on a disk, as the look is (rule 21). Nothing stops it once it's on: each
@@ -694,11 +749,10 @@ fn remove_now(picked: &[SpareCopy], library: &Path) -> Done {
     })
 }
 
-/// Remove for old copies: sends the ticked ones to the Recycle Bin together on a low-priority thread, with an activity
-/// card saying how it went. Each is found again in the moves as the library keeps them now, checked again and compared
-/// file by file with its copy just before it goes (`space_old::remove`); then what went is kept (`mo_app::binned`), so
-/// Put back works after a restart too, and the card shows what went and what stayed. Not while a look for old copies is
-/// on, nor while anything goes to the bin or comes back.
+/// Remove for old copies: sends the ticked ones to the Recycle Bin together ([`send_to_bin`]), each found again in the
+/// moves as the library keeps them now, checked again and compared file by file with its copy just before it goes
+/// (`space_old::remove`). That can take a while for a big sound library, so its card has Stop. Not while a look for old
+/// copies is on, nor while anything goes to the bin or comes back.
 fn remove_old_ticked(app: &AppWindow, feed: Feed) {
     let job = PAGE.with(|p| {
         let mut p = p.borrow_mut();
@@ -711,45 +765,19 @@ fn remove_old_ticked(app: &AppWindow, feed: Feed) {
             return None;
         }
         p.old_removing.start(picked.clone());
-        Some((picked, found, p.library.clone()))
+        hold_looks(&mut p);
+        let stop = Arc::new(AtomicBool::new(false));
+        p.old_stop = Some(stop.clone());
+        Some((picked, found, p.library.clone(), stop))
     });
-    let Some((picked, found, library)) = job else { return };
-    let weak = app.as_weak();
-    let folder = paths::data_dir();
-    let (when, sending) = (binned::now(), picked.clone());
-    let started = background::spawn("Space remove old copies", move || {
-        let card = feed.start(space_old::REMOVING, &space_old::removing_words());
-        // A crash (logged as one) still finishes Remove, so the page isn't busy for ever: what went before it is in the
-        // bin, but which isn't known.
-        let done = catch_crash(AssertUnwindSafe(|| remove_old_now(&sending, &found, &library)))
-            .unwrap_or_else(|_| space_old::stayed(&sending, &space_old::crashed_words()));
-        for r in &done.removed {
-            log::info("Space", &format!("Sent an old copy to the {BIN}: {}", r.path));
-        }
-        for problem in &done.problems {
-            log::warning("Space", &format!("An old copy stayed: {}: {}", problem.path, problem.why));
-        }
-        match space_old::removed_words(&done) {
-            Ok(words) => card.done(&words),
-            Err(words) => card.failed(&words),
-        }
-        // Kept before the page shows it, so Put back has it after a restart too, and the page shows both at once.
-        let kept = catch_crash(AssertUnwindSafe(|| binned::record(&folder, &SystemBin, OLD_COPIES, when, &done))).ok();
-        let when = kept.as_ref().map_or(when, |(_, at)| *at);
-        arrive(&weak, Step::OldSent(when, done, kept.map(|(kept, _)| kept)));
-    });
-    if let Err(e) = started {
-        log::error("Space", &format!("Couldn't start removing old copies: {e}"));
-        let why = format!("Remove couldn't start ({e}), so it stays.");
-        PAGE.with(|p| p.borrow_mut().old_removing.sent(when, space_old::stayed(&picked, &why)));
-    }
-    show_wins(app);
+    let Some((picked, found, library, stop)) = job else { return };
+    send_to_bin(app, feed, &OLD, picked, move |picked| remove_old_now(picked, &found, &library, &stop));
 }
 
 /// Remove's own work for old copies, off the window's thread: the moves as the library keeps them now (read-only, and
 /// closed again first), then each picked one found again in them, checked and sent. When they can't be read, every one
-/// stays (said in the log): it can't be checked against them.
-fn remove_old_now(picked: &[Leftover], found: &Found, library: &Path) -> Done {
+/// stays (said in the log): it can't be checked against them. `stop` (Stop) leaves what isn't checked yet where it is.
+fn remove_old_now(picked: &[Leftover], found: &Found, library: &Path, stop: &AtomicBool) -> Done {
     let now = match open_library(library) {
         Some(lib) => {
             let read = |key: &str| lib.setting(key);
@@ -757,20 +785,92 @@ fn remove_old_now(picked: &[Leftover], found: &Found, library: &Path) -> Done {
                 (Ok(moved), Ok(homes)) => (moved, homes),
                 (Err(e), _) | (_, Err(e)) => {
                     log::warning("Space", &format!("Couldn't read the moved folders to check old copies again: {e}"));
-                    return space_old::stayed(picked, space_old::CANT_CHECK);
+                    return space_removing::stayed(picked, space_old::CANT_CHECK);
                 }
             }
         }
         // No library: no moves are kept, so only what isn't a move's (files kept aside) can go.
         None if !library.exists() => (None, None),
-        None => return space_old::stayed(picked, space_old::CANT_CHECK),
+        None => return space_removing::stayed(picked, space_old::CANT_CHECK),
     };
     // On the pool for long work that waits on a disk (it compares every file with its copy), as the look is (rule 21).
-    // Nothing stops it once it's on: each one is checked just before it goes, and the one administrator step asks
-    // Windows once, at the end.
+    // Each one is checked just before it goes, and the one administrator step asks Windows once, at the end.
     background::on_bulk_pool(|| {
-        space_old::remove(picked, found, (now.0.as_deref(), now.1.as_deref()), &SystemBin, &AtomicBool::new(false))
+        space_old::remove(picked, found, (now.0.as_deref(), now.1.as_deref()), &SystemBin, stop)
     })
+}
+
+/// Remove's own thread for one clean-up (`clean`): sends `picked` to the Recycle Bin with `work` on a low-priority
+/// thread, with an activity card saying how it went. Then what went is kept (`mo_app::binned`), so Put back works
+/// after a restart too, before the page hears it's done, so it shows both at once: what went and what stayed. Call it
+/// once `picked` is on its way ([`space_removing::Removing::start`]).
+fn send_to_bin<T: Removable + Send + 'static>(
+    app: &AppWindow,
+    feed: Feed,
+    clean: &'static Clean<T>,
+    picked: Vec<T>,
+    work: impl FnOnce(&[T]) -> Done + Send + 'static,
+) {
+    let weak = app.as_weak();
+    let folder = paths::data_dir();
+    let (when, sending) = (binned::now(), picked.clone());
+    let started = background::spawn(clean.thread, move || {
+        let card = feed.start(clean.title, &(clean.words)());
+        // A crash (logged as one) still finishes Remove, so the page isn't busy for ever: what went before it is in the
+        // bin, but which isn't known.
+        let done = catch_crash(AssertUnwindSafe(|| work(&sending)))
+            .unwrap_or_else(|_| space_removing::stayed(&sending, &space_removing::crashed_words()));
+        for r in &done.removed {
+            log::info("Space", &format!("Sent {} to the {BIN}: {}", clean.one.0, r.path));
+        }
+        for problem in &done.problems {
+            log::warning("Space", &format!("{} stayed: {}: {}", clean.one.1, problem.path, problem.why));
+        }
+        match (clean.removed_words)(&done) {
+            Ok(words) => card.done(&words),
+            Err(words) => card.failed(&words),
+        }
+        let kept = catch_crash(AssertUnwindSafe(|| binned::record(&folder, &SystemBin, clean.kind, when, &done))).ok();
+        let when = kept.as_ref().map_or(when, |(_, at)| *at);
+        arrive(&weak, (clean.sent)(when, done, kept.map(|(kept, _)| kept)));
+    });
+    if let Err(e) = started {
+        log::error("Space", &format!("Couldn't start removing {}: {e}", clean.many));
+        let why = format!("Remove couldn't start ({e}), so it stays.");
+        PAGE.with(|p| (clean.removing)(&mut p.borrow_mut()).sent(when, space_removing::stayed(&picked, &why)));
+        looks_after(app);
+    }
+    show_wins(app);
+}
+
+/// Before something goes to the Recycle Bin or comes back: a look for old copies or spare copies that's on stops, as
+/// what it measures may change under it (its finds would show it as it was), and looks again once that's done
+/// ([`looks_after`]). Neither starts meanwhile ([`busy`]).
+fn hold_looks(p: &mut Page) {
+    if p.old_looking {
+        p.old_look.next();
+        p.old_looking = false;
+        p.look_after.old = true;
+    }
+    if p.spare_looking {
+        p.spare_look.next();
+        p.spare_looking = false;
+        p.look_after.spare = true;
+    }
+}
+
+/// The looks [`hold_looks`] stopped look again, once nothing goes to the Recycle Bin or comes back.
+fn looks_after(app: &AppWindow) {
+    let after = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        if busy(&p) { LookAfter::default() } else { std::mem::take(&mut p.look_after) }
+    });
+    if after.old {
+        look_for_old(app);
+    }
+    if after.spare {
+        look_for_spare(app);
+    }
 }
 
 /// Put back of the clean-up of `kind` that ran at `when`, put back where it was ([`put_back`]): for the removal on show
@@ -808,6 +908,7 @@ fn put_back(app: &AppWindow, feed: Feed, kind: String, when: i64, done: Done) {
             OLD_COPIES => p.old_removing.putting_back(when),
             _ => {}
         }
+        hold_looks(&mut p);
         true
     });
     if !started {
@@ -852,6 +953,7 @@ fn put_back(app: &AppWindow, feed: Feed, kind: String, when: i64, done: Done) {
             }
             p.put_backs.done(&kind, when, problems);
         });
+        looks_after(app);
     }
     show_wins(app);
 }
@@ -1211,12 +1313,15 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                 Step::SpareSent(when, done, kept) => {
                     keep(&mut p, kept);
                     p.removing.sent(when, done);
-                    Changed::Bin { spare: false, old: false }
+                    let after = std::mem::take(&mut p.look_after);
+                    Changed::Bin { spare: after.spare, old: after.old }
                 }
                 Step::OldSent(when, done, kept) => {
                     keep(&mut p, kept);
                     p.old_removing.sent(when, done);
-                    Changed::Bin { spare: false, old: false }
+                    p.old_stop = None;
+                    let after = std::mem::take(&mut p.look_after);
+                    Changed::Bin { spare: after.spare, old: after.old }
                 }
                 Step::PutBack(kind, when, problems, kept) => {
                     keep(&mut p, kept);
@@ -1226,11 +1331,11 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                         _ => {}
                     }
                     p.put_backs.done(&kind, when, problems);
-                    // What came back is where it was again: a look on meanwhile may have read half of it, and while
-                    // you're picking, what came back is spare again, or an old copy again.
-                    let spare = kind == SPARE_COPIES && (p.spare_looking || *p.removing.stage() == Stage::Picking);
-                    let old =
-                        kind == OLD_COPIES && (p.old_looking || *p.old_removing.stage() == space_old::Stage::Picking);
+                    // What came back is where it was again: while you're picking, it's spare again, or an old copy
+                    // again. A look that stopped for it looks again too.
+                    let after = std::mem::take(&mut p.look_after);
+                    let spare = after.spare || kind == SPARE_COPIES && *p.removing.stage() == Stage::Picking;
+                    let old = after.old || kind == OLD_COPIES && *p.old_removing.stage() == space_old::Stage::Picking;
                     Changed::Bin { spare, old }
                 }
                 _ => Changed::Nothing,
@@ -1372,6 +1477,9 @@ fn show_card(app: &AppWindow) {
                 if let Some((words, enabled)) = old_remove_button(&p) {
                     buttons.push(Button::new(REMOVE, words, enabled).danger());
                 }
+                if let Some((words, enabled)) = old_stop_button(&p) {
+                    buttons.push(Button::new(STOP, words, enabled));
+                }
                 if let Some((words, enabled)) = p.old_removing.put_back_button(CAN_PUT_BACK, &p.put_backs) {
                     buttons.push(Button::new(PUT_BACK, words, enabled).main());
                 }
@@ -1496,7 +1604,7 @@ mod tests {
 
     #[test]
     fn every_button_is_in_the_shortcut_list() {
-        for id in [MEASURE, REVEAL, FIX, REMOVE, PUT_BACK, RECYCLE_BIN] {
+        for id in [MEASURE, REVEAL, FIX, REMOVE, STOP, PUT_BACK, RECYCLE_BIN] {
             assert_ne!(what_of(id), "", "{id} isn't in the shortcut list");
         }
         let keys = mo_app::shortcuts::Shortcuts::default();

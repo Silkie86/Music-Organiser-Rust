@@ -12,7 +12,7 @@ use mo_library::scan::is_inside;
 use serde::{Deserialize, Serialize};
 
 use crate::admin::{Admin, Outcome, Step, ask_for, real_spot, reason};
-use crate::clean::{Bin, Done, Problem, Sending, What};
+use crate::clean::{Bin, Done, Problem};
 use crate::folder_move::{
     CantMove, Drives, Fill, KEPT_SUFFIX, MovedFolder, Tree, UNCHECKED, check_rename, check_rename_or_ask,
     clear_failed_link, copy_fresh, copy_tree, denied, destination_problem, failed, fresh_name, inside_moved, leads_to,
@@ -20,6 +20,7 @@ use crate::folder_move::{
     target, write_through,
 };
 use crate::half_copy::{busy_now, claim, clear_own, going_into_use, unmark};
+use crate::old_copies::{Going, send_one};
 use crate::plugin_space::{PluginSpace, SpaceKind};
 use crate::size::{self, is_link};
 use crate::{is_dir, key, not_there, real_folder, text};
@@ -321,8 +322,9 @@ pub fn old_home_can_go(home: &OldHome, moved: &[MovedFolder]) -> bool {
     real_folder(&home.path) && !moved.iter().any(|m| is_inside(&m.to, &home.path) || is_inside(&m.from, &home.path))
 }
 
-/// Why a folder left behind can't go now, when it can't: it isn't there, it's a link now (removing it frees nothing), or
-/// a moved folder (or its link) is still in it ([`old_home_can_go`]). What's only in it is looked at when it goes
+/// Why a folder left behind can't go now, when it can't: it isn't there, it's a link now (removing it frees nothing),
+/// where its files went isn't there (a drive that isn't plugged in, say: it may hold the only copy of them now), or a
+/// moved folder (or its link) is still in it ([`old_home_can_go`]). What's only in it is looked at when it goes
 /// ([`remove_old_home`]).
 pub fn old_home_stays(home: &OldHome, moved: &[MovedFolder]) -> Option<String> {
     if !is_dir(&home.path) {
@@ -330,6 +332,13 @@ pub fn old_home_stays(home: &OldHome, moved: &[MovedFolder]) -> Option<String> {
     }
     if is_link(Path::new(&home.path)) {
         return Some("It's a link now, so removing it frees nothing.".to_owned());
+    }
+    if !home.copy.is_empty() && !is_dir(&home.copy) {
+        return Some(format!(
+            "Where its files went ({}) isn't there now (is its drive plugged in?), so it stays: it may be the only \
+             copy of them.",
+            home.copy
+        ));
     }
     (!old_home_can_go(home, moved)).then(|| "A moved folder, or its link, is still in it, so it stays.".to_owned())
 }
@@ -353,6 +362,10 @@ fn home_only(home: &OldHome, bytes: bool, stop: &AtomicBool) -> Result<Option<Ve
     only_in(Path::new(&home.path), Path::new(&home.copy), bytes, stop).map(Some)
 }
 
+/// Why one that doesn't say where its files went stays, unless you're sure.
+pub const NOTHING_TO_CHECK: &str =
+    "There's nothing to check it against now, so it stays: Measure again, then tick it once you've looked in it.";
+
 /// Why a folder left behind can't go now, checked just before it goes: [`old_home_stays`], then, unless you're `sure`,
 /// whether anything in it isn't where its files went, is newer here or isn't the same there (what the files hold is
 /// compared too: slow). One that doesn't say where its files went goes only once you're sure.
@@ -370,10 +383,7 @@ pub(crate) fn old_home_check(
     }
     match home_only(home, true, stop) {
         Err(_) => Err(UNCHECKED.to_owned()),
-        Ok(None) => {
-            Err("There's nothing to check it against, so it goes only once you've looked in it and say you're sure."
-                .to_owned())
-        }
+        Ok(None) => Err(NOTHING_TO_CHECK.to_owned()),
         Ok(Some(only)) if !only.is_empty() => Err(format!(
             "Some of it isn't where its files went, is newer here, or isn't the same there: {}. Look before deleting \
              it.",
@@ -387,17 +397,7 @@ pub(crate) fn old_home_check(
 /// when nothing is only in it ([`only_in_old_home`], what its files hold compared too: the app shows that list first;
 /// one it can't tell goes only once you're sure). [`crate::clean::undo`] puts it back.
 pub fn remove_old_home(home: &OldHome, moved: &[MovedFolder], sure: bool, bin: &dyn Bin, stop: &AtomicBool) -> Done {
-    if let Err(why) = old_home_check(home, moved, sure, stop) {
-        return Done { problems: vec![Problem { path: home.path.clone(), why }], ..Done::default() };
-    }
-    let mut done = Done::default();
-    // The folder itself, not where a link would lead (it was checked not to be one).
-    let real = real_spot(&home.path);
-    // Checked just now; one Windows guards is checked again by the administrator step, against what it held now.
-    let mut sending = Sending::new(bin, stop);
-    sending.send(&home.path, real, home.bytes, What::Plugin(home.space_kind()), &mut done, || Ok(()));
-    sending.finish(&mut done);
-    done
+    send_one(&home.path, home.bytes, Going::Home(home), moved, sure, bin, stop)
 }
 
 /// What moving the folder the moved folders live in (or pointing links at it after you moved it) did.
