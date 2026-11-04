@@ -39,8 +39,8 @@ const REVEAL: &str = "space.reveal";
 const FIX: &str = "space.fix";
 const RECYCLE_BIN: &str = "app.recycleBin";
 
-/// The name the library knows Bitwig by, for the program picked for it in Settings.
-const BITWIG: &str = "Bitwig";
+/// The name the library knows Bitwig by ("Bitwig Studio"), for the program picked for it in Settings.
+const BITWIG: &str = mo_formats::bitwig::reader::DAW;
 
 /// One look at the drives and the app's files.
 struct Ask {

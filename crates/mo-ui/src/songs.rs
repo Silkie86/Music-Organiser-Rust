@@ -424,12 +424,11 @@ fn show_song(app: &AppWindow, row: usize) {
         refresh(app);
     }
     let data = app.global::<SongsData>();
-    let (heading, song) = (data.get_heading_height(), data.get_song_height());
+    // Every line is one height, so the song's place is its line number times that (as the list itself works it out).
+    let line = data.get_line_height();
     let y = PAGE.with(|p| {
-        let p = p.borrow();
-        let at = p.view.entries.iter().position(|e| *e == Entry::Song(row))?;
-        let before = p.view.entries.get(..at).unwrap_or_default();
-        Some(before.iter().map(|e| if matches!(e, Entry::Heading(_)) { heading } else { song }).sum::<f32>())
+        let at = p.borrow().view.entries.iter().position(|e| *e == Entry::Song(row))?;
+        Some(at as f32 * line)
     });
     if let Some(y) = y {
         data.set_show_y(y);
@@ -780,9 +779,11 @@ fn open_save(page: &Page, save: &mo_library::Save) {
     }
 }
 
-/// The library's names for the two DAWs Open in Bitwig is about.
+/// The library's names for the two DAWs Open in Bitwig is about. Bitwig's saves are named "Bitwig Studio" (as the
+/// Settings' program for it is kept, `daw_exe:Bitwig Studio`); `BITWIG` is what every one of them starts with.
 const FL: &str = "FL Studio";
 const BITWIG: &str = "Bitwig";
+const BITWIG_STUDIO: &str = mo_formats::bitwig::reader::DAW;
 
 /// The names converted and opened in Bitwig while the app runs: Bitwig only brings an open project forward, so a new
 /// convert of the same song takes the next name.
@@ -797,7 +798,8 @@ fn open_main(page: &Page, save: &mo_library::Save) {
 /// thread; the card says how it went. The FL project and the template are only read.
 fn open_in_bitwig(page: &Page, save: &mo_library::Save) {
     let Some(feed) = FEED.with(|f| f.borrow().clone()) else { return };
-    let exe = page.songs.daw_exes.get(BITWIG).cloned();
+    // The Bitwig program picked in Settings, kept under the library's own name for Bitwig.
+    let exe = page.songs.daw_exes.get(BITWIG_STUDIO).cloned();
     let (db, path, name) = (page.db.clone(), save.path.clone(), save.name.clone());
     let started = background::spawn("Convert", move || {
         if !shell::exists(&path) {
@@ -882,5 +884,12 @@ mod tests {
         assert_eq!(ids(FL), ["open", "bitwig", "", "reveal", "copy"]);
         assert_eq!(ids("Bitwig Studio"), ["open", "", "reveal", "copy"]);
         assert_eq!(save_menu(FL)[0].what, "Open in FL Studio");
+    }
+
+    #[test]
+    fn open_in_bitwig_looks_up_the_program_by_the_library_s_name_for_bitwig() {
+        // Settings keep the program as `daw_exe:Bitwig Studio`, the name Bitwig's saves carry in the library.
+        assert_eq!(BITWIG_STUDIO, "Bitwig Studio");
+        assert!(BITWIG_STUDIO.starts_with(BITWIG));
     }
 }

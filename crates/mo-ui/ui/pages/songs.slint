@@ -166,9 +166,10 @@ export global SongsData {
     callback reveal();
     callback copy-path();
     callback close-panel();
-    // Every line is one of two heights, so a year's place in the list can be worked out.
-    out property <length> heading-height: 38px;
-    out property <length> song-height: 62px;
+    // Headings and songs are one height. Slint's ListView places a far jump by the average height of the lines on
+    // screen, so with two heights "Show it" landed hundreds of lines away from the song in a big library; with one,
+    // a song's place is simply its line number times this.
+    out property <length> line-height: 62px;
 }
 
 // The picked song: what it is, its counts and its tabs. Read-only until the Rust app's database is trusted.
@@ -715,7 +716,7 @@ export component SongsPage inherits Rectangle {
                     // Scrolls only when the line is out of sight.
                     changed show-ask => {
                         if (SongsData.show-y < -list.content-y
-                            || SongsData.show-y + SongsData.song-height > -list.content-y + list.visible-height) {
+                            || SongsData.show-y + SongsData.line-height > -list.content-y + list.visible-height) {
                             list.content-y = -clamp(SongsData.show-y - list.visible-height / 3, 0px,
                                 max(0px, list.content-height - list.visible-height));
                         }
@@ -723,7 +724,7 @@ export component SongsPage inherits Rectangle {
                     list := ListView {
                         horizontal-stretch: 1;
                         for line in SongsData.lines: Rectangle {
-                            height: line.heading != "" ? SongsData.heading-height : SongsData.song-height;
+                            height: SongsData.line-height;
                             if line.heading != "": Caps {
                                 x: Space.lg;
                                 y: parent.height - self.height - Space.sm;
