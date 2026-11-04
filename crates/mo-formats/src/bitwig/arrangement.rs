@@ -273,12 +273,14 @@ fn clip(doc: &Document, clip: ObjId, budget: &mut NoteBudget) -> Option<PreviewC
         let in_first = at >= offset && at - offset < length && (!looping || at < loop_end);
         let first = in_first.then_some(at - offset);
         let passes = (looping && at >= loop_start && at < loop_end).then_some(loop_end - offset + (at - loop_start));
-        // However short the loop, no more passes than the notes an arrangement holds (and one more, so the budget
-        // sees it ran out); a loop too short to move a huge start on ends there.
+        // A loop too short to move a huge start on ends there; passes before the clip's start (a play start after
+        // the loop's end) aren't heard. However short the loop, no more places than the notes an arrangement holds
+        // (and one more, so the budget sees it ran out).
         let later = std::iter::successors(passes, move |&p| Some(p + pass_length).filter(|&next| next > p))
-            .take_while(move |&p| p < length)
-            .take(MOST_NOTES + 1);
-        first.into_iter().chain(later)
+            .take(MOST_NOTES + 1)
+            .skip_while(|&p| p < 0.0)
+            .take_while(move |&p| p < length);
+        first.into_iter().chain(later).take(MOST_NOTES + 1)
     };
 
     if c.class == CLS_AUDIO_CLIP {
@@ -336,6 +338,9 @@ fn clip(doc: &Document, clip: ObjId, budget: &mut NoteBudget) -> Option<PreviewC
 
     let mut notes = Vec::new();
     for &lane in &key_lanes {
+        if budget.ran_out {
+            break;
+        }
         let Some(key) = doc.obj(lane).num(F_PITCH) else { continue };
         for n in doc.field_list(lane, F_ITEMS) {
             if budget.ran_out {

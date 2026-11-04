@@ -57,11 +57,13 @@ fn reads_tempo_version_plugins_and_hardware() {
 fn plugin_settings_cut_off_the_end_of_the_file_are_warned_about() {
     let path = bitwig_project(&test_dir("bitwig-read-zip-cut"), "Loop Idea");
     let raw = std::fs::read(&path).expect("read the file");
-    // A save interrupted while Bitwig wrote the plugin settings: the zip is cut short, or gone.
-    for end in [raw.len() - 30, raw.len() - 300.min(raw.len() / 4)] {
+    // A save interrupted while Bitwig wrote the plugin settings: the zip is cut short, or gone (the file ends where
+    // the header says it starts).
+    let zip_at = usize::from_str_radix(std::str::from_utf8(&raw[24..40]).unwrap(), 16).unwrap();
+    for end in [raw.len() - 30, raw.len() - 300.min(raw.len() / 4), zip_at] {
         let info = bitwig::read_from(&raw[..end], &path);
         assert!(info.warnings.contains(&bitwig::ZIP_DAMAGED.to_owned()), "{end}: {:?}", info.warnings);
-        assert!(!info.can_extract_presets);
+        assert_eq!((info.confidence, info.can_extract_presets), (Confidence::Partial, false), "{end}");
     }
     assert!(bitwig::read_from(&raw, &path).warnings.is_empty());
 }
