@@ -22,6 +22,7 @@ pub mod settings;
 pub mod songs;
 pub mod sounds;
 pub mod space;
+mod stuck;
 pub mod watchdog;
 
 use std::cell::RefCell;

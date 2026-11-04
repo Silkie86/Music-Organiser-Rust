@@ -44,6 +44,8 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     };
     mo_ui::gpu::connect(&app);
+    // The window's moves, resizes and hiding, for the freeze lines.
+    mo_ui::watchdog::watch_window(&app);
     // The Songs page reads the C# app's library, read-only (CLAUDE.md: until the Rust page is trusted).
     mo_ui::songs::connect(&app, library.clone(), feed.clone());
     mo_ui::sounds::connect(

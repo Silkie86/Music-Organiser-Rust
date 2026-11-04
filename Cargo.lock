@@ -3221,6 +3221,7 @@ dependencies = [
  "rusqlite",
  "slint",
  "slint-build",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4811,6 +4812,7 @@ dependencies = [
  "i-slint-backend-android-activity",
  "i-slint-backend-linuxkms",
  "i-slint-backend-selector",
+ "i-slint-backend-winit",
  "i-slint-common",
  "i-slint-core",
  "i-slint-core-macros",
