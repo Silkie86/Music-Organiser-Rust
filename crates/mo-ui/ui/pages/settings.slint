@@ -83,7 +83,8 @@ export global SettingsData {
     in property <string> size-note;
     // General: the start page, the pace and the sound output.
     in property <[string]> start-pages;
-    in property <string> start-page;
+    // Which of start-pages is picked.
+    in property <int> start-index;
     in property <[string]> paces: ["Gentle", "Balanced", "Fast"];
     in property <int> pace;
     in property <string> pace-note;
@@ -396,24 +397,21 @@ component GeneralTab inherits VerticalLayout {
             }
         }
     }
+    // All the start pages show at once, in a row of their own: there's room, so nothing hides in a menu.
+    SettingsCard {
+        title: "When the app opens";
+        intro: "The page you land on each time you start Music Organiser.";
+        ChoiceRow {
+            label: "START ON";
+            Segmented {
+                choices: SettingsData.start-pages;
+                current: SettingsData.start-index;
+                picked(i) => { SettingsData.start-picked(SettingsData.start-pages[i]); }
+            }
+        }
+    }
     HorizontalLayout {
         spacing: Space.lg;
-        SettingsCard {
-            horizontal-stretch: 1;
-            title: "When the app opens";
-            intro: "The page you land on each time you start Music Organiser.";
-            HorizontalLayout {
-                alignment: start;
-                MenuChip {
-                    name: "Start on";
-                    value: SettingsData.start-page;
-                    choices: SettingsData.start-pages;
-                    has-any: false;
-                    picked(c) => { SettingsData.start-picked(c); }
-                }
-            }
-            Rectangle { vertical-stretch: 1; }
-        }
         SettingsCard {
             horizontal-stretch: 1;
             title: "Pace";
