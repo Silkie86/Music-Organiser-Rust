@@ -36,6 +36,7 @@ use mo_presets::filter::Choice;
 use mo_presets::fixes::{self, RoleFixes};
 use mo_presets::library::{self as plib, Source};
 use mo_presets::role::{Role, Thresholds};
+use mo_presets::sound_store::{self, SoundStore};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel, Weak};
 
 use crate::filters::FilterModels;
@@ -868,11 +869,39 @@ fn read_all(at: &Where) -> Result<(), String> {
         }
     };
     let limits = Thresholds::default();
+    // What was found in each save last time: only new and changed saves are read from their files.
+    let mut store = match SoundStore::open(&at.data_dir.join(sound_store::FILE_NAME), &limits) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            log::warning("Presets", &format!("Couldn't open what the saves held last time, so all are read: {}", e.0));
+            None
+        }
+    };
+    let read_now = |paths: &[String]| background::on_pool(|| plib::read_saves(paths, &limits));
     let mut done = 0;
     let mut failed = 0;
+    let mut from_files = 0;
     for batch in newest.chunks(BATCH) {
         let paths: Vec<String> = batch.iter().map(|s| s.path.clone()).collect();
-        let read = background::on_pool(|| plib::read_saves(&paths, &limits));
+        let kept = store.as_mut().map(|st| background::on_pool(|| st.saves(&paths, |p| plib::read_saves(p, &limits))));
+        let read = match kept {
+            Some(Ok(batch)) => {
+                from_files += batch.read;
+                if let Some(why) = batch.not_kept {
+                    log::warning("Presets", &format!("Couldn't keep what the saves hold for next time: {why}"));
+                    store = None;
+                }
+                batch.saves
+            }
+            other => {
+                if let Some(Err(e)) = other {
+                    log::warning("Presets", &format!("Couldn't read what the saves held last time: {}", e.0));
+                    store = None;
+                }
+                from_files += paths.len();
+                read_now(&paths)
+            }
+        };
         let mut items = Vec::new();
         let mut songs = 0;
         for mut s in read {
@@ -889,6 +918,16 @@ fn read_all(at: &Where) -> Result<(), String> {
     }
     if failed > 0 {
         log::info("Presets", &format!("{failed} of {total} saves couldn't be read for their sounds"));
+    }
+    log::info(
+        "Presets",
+        &format!("{from_files} of {total} saves read from their files, the rest as they were last time"),
+    );
+    if let Some(store) = store.as_mut() {
+        let all: Vec<String> = newest.iter().map(|s| s.path.clone()).collect();
+        if let Err(e) = store.keep_only(&all) {
+            log::warning("Presets", &format!("Couldn't forget saves no longer listed: {}", e.0));
+        }
     }
     // The preset files, and the Bitwig presets among them that Send to Bitwig builds from.
     let roots = logic::preset_folders(&plib::default_folders(), &bitwig_folders);

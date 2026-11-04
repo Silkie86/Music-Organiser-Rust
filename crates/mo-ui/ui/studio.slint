@@ -869,14 +869,17 @@ export component PicksChip inherits MenuChipFace {
 
 // A filter, the same on every page (Solomon's note, 4 Nov 2026): a short list's choices as chips of their own, each
 // picked or unpicked by a click, behind the filter's name; or a longer list's in a PicksChip's menu, the chip saying
-// the name and what's picked. mo-app's `filters` decides which, what each says and whether more than one can be
-// picked. Put filters in a row `Space.md` apart, so each one's chips stay together.
+// the name and what's picked. A long list can also keep its first choices as chips, with the rest in a menu after them
+// (`more-name`: the sounds' types, the most used first). mo-app's `filters` decides which, what each says and whether
+// more than one can be picked. Put filters in a row `Space.md` apart, so each one's chips stay together.
 export component FilterPicks inherits FlexboxLayout {
     in property <string> name;
     in property <FilterView> filter;
+    // What the menu after the chips is called, when there are both.
+    in property <string> more-name: "More";
     // A choice was picked or unpicked: its words, as its chip or menu line says them.
     callback toggled(string);
-    // The menu's Any.
+    // The menu's Any: it unpicks what's picked in the menu (all of the filter, unless some choices are chips too).
     callback cleared();
     spacing: Space.sm;
     // As wide as the whole filter on one line, so the row it's in moves it to a line of its own before breaking it; it
@@ -896,7 +899,7 @@ export component FilterPicks inherits FlexboxLayout {
                 font-size: Type.meta;
                 vertical-alignment: center;
             }
-            if root.filter.more.length > 0: PicksChip {
+            if root.filter.chips.length == 0 && root.filter.more.length > 0: PicksChip {
                 name: root.name;
                 value: root.filter.more-picked;
                 choices: root.filter.more;
@@ -916,12 +919,23 @@ export component FilterPicks inherits FlexboxLayout {
                 text: c.count == "" ? c.text : c.text + "  " + c.count;
                 on: c.on;
             }
+            if root.filter.more.length > 0: MenuChipFace {
+                name: root.more-name;
+                value: root.filter.more-picked;
+            }
         }
     }
     for c in root.filter.chips: ToggleChip {
         text: c.count == "" ? c.text : c.text + "  " + c.count;
         on: c.on;
         clicked => { root.toggled(c.text); }
+    }
+    if root.filter.chips.length > 0 && root.filter.more.length > 0: PicksChip {
+        name: root.more-name;
+        value: root.filter.more-picked;
+        choices: root.filter.more;
+        toggled(text) => { root.toggled(text); }
+        cleared => { root.cleared(); }
     }
 }
 

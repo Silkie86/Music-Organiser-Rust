@@ -53,6 +53,23 @@ pub fn show(choices: &[(String, String)], picked: &[String]) -> Filter {
     Filter { more_picked: picked_words(&on), more: shown, chips: Vec::new() }
 }
 
+/// [`show`] for a long list whose first choices are picked far more than the rest (the sounds' types, the most used
+/// first): the first `up_to` as chips of their own, and the others in a menu after them, whose chip says what's
+/// picked in it. A short list ([`CHIPS_UP_TO`] or fewer) is all chips, as [`show`] makes it. One picked that isn't a
+/// choice any more goes in the menu, so the chips stay as they are.
+pub fn show_split(choices: &[(String, String)], picked: &[String], up_to: usize) -> Filter {
+    let mut all = show(choices, picked);
+    if all.more.is_empty() {
+        return all;
+    }
+    let more = all.more.split_off(up_to.min(all.more.len()));
+    let on: Vec<&str> = picked
+        .iter()
+        .filter_map(|p| more.iter().find(|s| s.text.eq_ignore_ascii_case(p)).map(|s| s.text.as_str()))
+        .collect();
+    Filter { more_picked: picked_words(&on), chips: all.more, more }
+}
+
 /// What a menu's chip says is picked: the one, "Bass + 2" for more, or "" for none.
 pub fn picked_words(picked: &[&str]) -> String {
     match picked {
@@ -78,14 +95,14 @@ pub fn toggle(picked: &mut Vec<String>, choice: &str, many: bool) {
 
 /// [`toggle`] for a filter that keeps its picks as values, not words: `words` says each value's words, and
 /// `from_words` turns words back into a value (`None` for words that aren't one of its choices).
-pub fn toggle_as<T: Copy>(
+pub fn toggle_as<T: Copy, W: AsRef<str>>(
     picked: &mut Vec<T>,
     choice: &str,
     many: bool,
-    words: impl Fn(T) -> &'static str,
+    words: impl Fn(T) -> W,
     from_words: impl Fn(&str) -> Option<T>,
 ) {
-    let mut as_words: Vec<String> = picked.iter().map(|&p| words(p).to_owned()).collect();
+    let mut as_words: Vec<String> = picked.iter().map(|&p| words(p).as_ref().to_owned()).collect();
     toggle(&mut as_words, choice, many);
     *picked = as_words.iter().filter_map(|w| from_words(w)).collect();
 }
@@ -119,6 +136,24 @@ mod tests {
         // A full row of chips with a gone one too stays chips, so the row doesn't turn into a menu and back.
         let full = show(&plugins[..CHIPS_UP_TO], &["Gone".to_owned()]);
         assert_eq!((full.chips.len(), full.more.len()), (CHIPS_UP_TO + 1, 0));
+    }
+
+    #[test]
+    fn a_long_list_can_keep_its_first_choices_as_chips() {
+        let types: Vec<(String, String)> = (0..=CHIPS_UP_TO).map(|n| (format!("Type {n}"), "1".to_owned())).collect();
+        let picked = ["Type 0".to_owned(), "Gone".to_owned(), "type 9".to_owned()];
+        let split = show_split(&types, &picked, 3);
+        assert_eq!(
+            split.chips.iter().map(|c| (c.text.as_str(), c.on)).collect::<Vec<_>>(),
+            [("Type 0", true), ("Type 1", false), ("Type 2", false)]
+        );
+        // The rest in the menu, the one no longer a choice last; its chip says what's picked in it, not on the chips.
+        assert_eq!(split.more.len(), CHIPS_UP_TO + 1 - 3 + 1);
+        assert_eq!(split.more.last(), Some(&Shown { text: "Gone".into(), count: "0".into(), on: true }));
+        assert_eq!(split.more_picked, "Gone + 1");
+        // A short list is all chips.
+        let short = show_split(&types[..CHIPS_UP_TO], &[], 3);
+        assert_eq!((short.chips.len(), short.more.len()), (CHIPS_UP_TO, 0));
     }
 
     #[test]
