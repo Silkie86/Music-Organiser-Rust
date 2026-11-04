@@ -23,12 +23,13 @@ use mo_backup::folders::{self, Folder, Mode};
 use mo_backup::pack::{Packed, Packer, lists, owners, pack_names};
 use mo_backup::plan::{self, Folders, LeftOut, Level, Plan, Rules, SongInfo, Used};
 use mo_formats::case;
-use mo_formats::paths::{file_name, stem};
 use mo_library::Library;
 use mo_library::songs::{Song, group_songs, marked};
 use mo_space::size::{FileEntry, size_text};
-use mo_space::song::{CompactSettings, DEFAULT_KEEP_BACKUPS, Elsewhere, SongSave, SongSpaceReport, measure};
+use mo_space::song::{CompactSettings, DEFAULT_KEEP_BACKUPS, SongSave, SongSpaceReport};
 use rayon::prelude::*;
+
+use crate::song_room::{Others, song_saves};
 
 /// The settings file's name, in the app's folder.
 pub const SETTINGS_FILE: &str = "backup.txt";
@@ -395,22 +396,7 @@ pub fn prepare(library: &Library, settings: &Settings, stop: &AtomicBool) -> Res
     let mut files = gathered.files;
     let have: HashSet<String> = files.iter().map(|f| case::key(&f.path.to_string_lossy())).collect();
     let all_songs = group_songs(&saves, &choices);
-    // FL Studio save names more than one song has ("Beat", "Untitled"): its shared Backup folder can't say whose an
-    // autosave of those is, so measuring leaves them alone.
-    let mut name_songs: HashMap<String, usize> = HashMap::new();
-    for song in &all_songs {
-        let names: HashSet<String> = song.saves().map(|v| case::key(stem(&v.path.replace('\\', "/")))).collect();
-        for n in names {
-            *name_songs.entry(n).or_default() += 1;
-        }
-    }
-    let shared_names: HashSet<String> = name_songs.into_iter().filter(|(_, n)| *n > 1).map(|(k, _)| k).collect();
-    let used_names: HashSet<String> = samples.values().flatten().map(|p| case::key(file_name(p))).collect();
-    let used_by_any = |names: &[String]| -> HashSet<String> {
-        names.iter().map(|n| case::key(n)).filter(|k| used_names.contains(k)).collect()
-    };
-    let elsewhere =
-        Elsewhere { sample_folders: &sample_folders, used_by_any: &used_by_any, shared_names: &shared_names };
+    let others = Others::new(&all_songs, &samples, sample_folders);
     let compact = CompactSettings {
         // Essentials leaves every autosave out: all of them go on the Compact list.
         keep_backups: if settings.level == Level::Essentials { 0 } else { DEFAULT_KEEP_BACKUPS },
@@ -436,14 +422,7 @@ pub fn prepare(library: &Library, settings: &Settings, stop: &AtomicBool) -> Res
             let own = song.saves().any(|v| have.contains(&case::key(&v.path)));
             let picked: Vec<&mo_library::Save> =
                 if own { song.saves().collect() } else { song.copies.iter().collect() };
-            let saves: Vec<SongSave> = picked
-                .iter()
-                .map(|v| SongSave {
-                    path: v.path.clone(),
-                    size: u64::try_from(v.size).unwrap_or(0),
-                    modified: v.modified,
-                })
-                .collect();
+            let saves = song_saves(picked.iter().copied());
             let mut used: Vec<PathBuf> = Vec::new();
             let mut used_text: Vec<String> = Vec::new();
             for v in song.saves().chain(&song.copies) {
@@ -454,11 +433,16 @@ pub fn prepare(library: &Library, settings: &Settings, stop: &AtomicBool) -> Res
                     }
                 }
             }
-            let report = measure(&saves, &roots, &used_text, compact, Some(&elsewhere), stop).map_err(|_| ())?;
-            // Saves you mark as milestones by their name always go, and so do saves where the song changed a lot.
+            let report =
+                others.measure(&saves, &song.latest.path, &roots, &used_text, compact, stop).map_err(|_| ())?;
+            // Saves you mark as milestones by their name always go, and so do saves where the song changed a lot, and
+            // the save the song opens (its highest-numbered one: the newest by time, which always goes, can be another).
             let mut milestones: Vec<String> =
                 picked.iter().filter(|v| marked(&v.name)).map(|v| v.path.clone()).collect();
             milestones.extend(plan::big_changes(&shapes(&picked)));
+            if own {
+                milestones.push(song.latest.path.clone());
+            }
             Ok(Measured { saves, report, milestones, used, id: song_id(song) })
         })
         .collect::<Result<_, ()>>()

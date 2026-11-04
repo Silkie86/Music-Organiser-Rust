@@ -243,6 +243,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     mo_ui::space::show_sample(&app, bin, mo_app::space_bin::RECYCLE_BIN);
     capture(&window);
     shots.push(("space-bin.png".into(), capture(&window)));
+    // The songs card: identical saves, old autosaves and a Studio One cache, biggest first, each with the songs it's
+    // in; then audio no save seems to use, which isn't counted.
+    mo_ui::space::show_sample(&app, sample_space(), mo_app::space_songs::COMPACT);
+    capture(&window);
+    let top = capture(&window);
+    shots.push(("space-songs.png".into(), top.clone()));
+    shots.push(("space-songs-down.png".into(), card_down(&window, &top, "space-songs-down.png")?));
+    // The older saves card: each song's saves from the middle of a sitting, with the days and what stays.
+    mo_ui::space::show_sample(&app, sample_space(), mo_app::space_songs::THIN);
+    capture(&window);
+    shots.push(("space-thin.png".into(), capture(&window)));
     mo_ui::space::show_sample(&app, sample_space(), "");
     presets_shots(&app, &window, &mut shots)?;
     app.set_place(Place::Songs.index() as i32);
@@ -731,7 +742,8 @@ fn sample_bitwig_copies() -> mo_app::space_bitwig::Copies {
     }
 }
 
-/// The Space page's made-up finds: the drives, the app's files, Bitwig copies, old copies and spare plugin copies.
+/// The Space page's made-up finds: the drives, the app's files, Bitwig copies, old copies, spare plugin copies and
+/// what your songs could free.
 fn sample_space() -> mo_ui::space::Sample {
     mo_ui::space::Sample {
         drives: sample_drives(),
@@ -739,8 +751,91 @@ fn sample_space() -> mo_ui::space::Sample {
         bitwig: sample_bitwig_copies(),
         old: sample_old_copies(),
         spare: sample_spare_copies(),
+        songs: sample_song_room(),
         ..Default::default()
     }
+}
+
+/// Made-up songs with room to free, written as on Windows: Bitwig songs with copies of a save, old auto-backups and
+/// saves from the middle of a sitting; FL Studio songs with old autosaves in their Backup folder and many saves in one
+/// sitting; a Studio One song's cache; and bounces no save names.
+fn sample_song_room() -> mo_app::space_songs::Found {
+    use mo_app::space_songs::{Found, SongRoom};
+    use mo_space::song::{CompactItem, CompactKind, CompactSettings, SongSpaceReport};
+    const MB: u64 = 1 << 20;
+    let at =
+        |day: u32, hour: u32| chrono::NaiveDate::from_ymd_opt(2026, 10, day).and_then(|d| d.and_hms_opt(hour, 12, 0));
+    let item = |kind: CompactKind, path: String, mb: u64, day: u32, hour: u32| CompactItem {
+        kind,
+        path,
+        bytes: mb * MB,
+        modified: at(day, hour),
+        same_as: None,
+    };
+    // `n` things of a kind in a folder, each made on one of `days` in turn.
+    let many = |folder: &str, name: &str, kind: CompactKind, n: u32, mb: u64, days: &[u32]| -> Vec<CompactItem> {
+        (0..n)
+            .map(|i| {
+                let day = days[i as usize % days.len()];
+                let path = match kind {
+                    CompactKind::Backup if name.ends_with(".flp") => {
+                        format!(
+                            r"{folder}\Backup\{} (overwritten at {:02}h{:02}).flp",
+                            &name[..name.len() - 4],
+                            20 + i % 4,
+                            i % 60
+                        )
+                    }
+                    CompactKind::Backup => format!(r"{folder}\auto-backups\{name} ({i}).bwproject"),
+                    _ => format!(
+                        r"{folder}\{name}_{}.{}",
+                        i + 2,
+                        if folder.contains("FL") { "flp" } else { "bwproject" }
+                    ),
+                };
+                item(kind, path, mb, day, 10 + i % 9)
+            })
+            .collect()
+    };
+    let song = |name: &str, opens: &str, saves: usize, items: Vec<CompactItem>| SongRoom {
+        name: name.to_owned(),
+        opens: opens.to_owned(),
+        saves,
+        report: SongSpaceReport { items, ..SongSpaceReport::default() },
+    };
+    let night = r"D:\Music\Projects\Night Drive";
+    let garage = r"D:\Music\Projects\GARAGE FOR BW 1";
+    let fl = r"D:\Music\Projects\FL";
+    let studio_one = r"D:\Music\Projects\Studio One\Tape Echo Idea";
+    let mut night_items = many(night, "Night Drive", CompactKind::SameSave, 3, 96, &[3]);
+    night_items.extend(many(night, "Night Drive", CompactKind::Backup, 12, 88, &[3, 4, 9]));
+    night_items.extend([
+        item(CompactKind::UnusedAudio, format!(r"{night}\Bounces\Night Drive bounce 3.wav"), 412, 9, 23),
+        item(CompactKind::UnusedAudio, format!(r"{night}\Recordings\Vox comp (old).wav"), 186, 4, 21),
+        item(CompactKind::UnusedAudio, format!(r"{night}\Recordings\Vox take 2.wav"), 92, 4, 21),
+    ]);
+    let mut garage_items = many(garage, "GARAGE FOR BW 1", CompactKind::Backup, 20, 21, &[12, 14]);
+    garage_items.extend(many(garage, "GARAGE FOR BW 1", CompactKind::SameSave, 2, 22, &[14]));
+    garage_items.extend(many(garage, "GARAGE FOR BW 1", CompactKind::ThinnedSave, 14, 22, &[3, 4, 9]));
+    let mut bounce_items = many(fl, "Bounce 2.flp", CompactKind::Backup, 31, 2, &[11]);
+    bounce_items.extend(many(fl, "Bounce 2", CompactKind::ThinnedSave, 31, 2, &[11]));
+    let didums_days: Vec<u32> = (2..=29).step_by(2).collect();
+    let didums_items = many(fl, "Didums", CompactKind::ThinnedSave, 46, 3, &didums_days);
+    let studio_items = vec![CompactItem {
+        kind: CompactKind::Cache,
+        path: format!(r"{studio_one}\Cache"),
+        bytes: 418 * MB,
+        modified: None,
+        same_as: None,
+    }];
+    let songs = vec![
+        song("Night Drive", &format!(r"{night}\Night Drive_7.bwproject"), 9, night_items),
+        song("GARAGE FOR BW 1", &format!(r"{garage}\GARAGE FOR BW 1_19.bwproject"), 19, garage_items),
+        song("Bounce 2", &format!(r"{fl}\Bounce 2_33.flp"), 33, bounce_items),
+        song("Didums", &format!(r"{fl}\Didums_77.flp"), 52, didums_items),
+        song("Tape Echo Idea", &format!(r"{studio_one}\Tape Echo Idea.song"), 3, studio_items),
+    ];
+    Found { songs, settings: CompactSettings::default() }
 }
 
 /// Made-up spare plugin copies, written as on Windows, biggest first: AAX copies in Avid's folder (Pro Tools isn't
