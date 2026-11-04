@@ -42,6 +42,7 @@ known-folders = "1.4"
 # The freeze watchdog looks at where the window's thread is stuck, and at the app's page faults (crate::stuck).
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Security",
     "Win32_System_Diagnostics_Debug",
     "Win32_System_Kernel",
     "Win32_System_LibraryLoader",

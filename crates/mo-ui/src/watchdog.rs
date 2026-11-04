@@ -10,8 +10,8 @@
 //!
 //! A freeze outside every marked step says more, so the next one can be pinned down: where the window's thread was
 //! (looked at once it has been stuck for [`LOOK_AT_THREAD`], and again at [`STILL_STUCK`], see [`crate::stuck`]), how
-//! much of the app's memory had to be found again while it was stuck (page faults), and the window's last move,
-//! resize, focus or hiding before it, with how long before.
+//! many pages of memory the app had to find while it was stuck (page faults, less those of the looks themselves), and
+//! the window's last move, resize, minimising or hiding before it, with how long before.
 //!
 //! The frame timing (`mo_app::frame_timing`, the `[Frames]` lines) hears from here too: each marked step's own time
 //! (less the steps inside it), and every knock answered later than 33 ms with the step the window was in.
@@ -89,15 +89,25 @@ pub fn window_event(what: &'static str) {
     }
 }
 
-/// Notes the window's moves, resizes, focus changes and hiding for the freeze lines (hidden and shown again are logged
-/// too: they're rare, and a window coming back from the page file is one cause of a long freeze). Nothing else is
-/// changed: every event goes on to Slint as before.
+/// Notes the window's moves, resizes, focus changes, minimising and hiding for the freeze lines. Minimised, restored,
+/// hidden and shown again are logged too: they're rare, and a window coming back from the page file is one cause of a
+/// long freeze. (On Windows, winit says nothing of a covered window, and a minimised one is a resize to nothing.)
+/// Nothing else is changed: every event goes on to Slint as before.
+///
+/// Slint keeps one such watcher a window, so this one is the app's: anything else that needs the window's own events
+/// must be called from here, not set up beside it.
 pub fn watch_window(app: &crate::AppWindow) {
     use slint::ComponentHandle;
     use slint::winit_030::winit::event::WindowEvent;
     use slint::winit_030::{EventResult, WinitWindowAccessor};
-    app.window().on_winit_window_event(|_, event| {
+    let mut minimised = false;
+    app.window().on_winit_window_event(move |_, event| {
         let what = match event {
+            WindowEvent::Resized(size) if size.width == 0 || size.height == 0 => {
+                minimised = true;
+                "minimised"
+            }
+            WindowEvent::Resized(_) if std::mem::take(&mut minimised) => "restored",
             WindowEvent::Resized(_) => "resized",
             WindowEvent::Moved(_) => "moved",
             WindowEvent::Focused(true) => "focused",
@@ -108,7 +118,7 @@ pub fn watch_window(app: &crate::AppWindow) {
             _ => return EventResult::Propagate,
         };
         window_event(what);
-        if matches!(event, WindowEvent::Occluded(_)) {
+        if matches!(what, "minimised" | "restored" | "hidden" | "shown again") {
             log::info("Window", &format!("The window was {what}"));
         }
         EventResult::Propagate
@@ -117,7 +127,11 @@ pub fn watch_window(app: &crate::AppWindow) {
 
 /// The window's last event before `stuck_at`, for a freeze line: "last window event: resized 40 ms before".
 fn window_words(stuck_at: Instant) -> String {
-    match LAST_WINDOW_EVENT.lock().ok().and_then(|l| *l) {
+    words_for(LAST_WINDOW_EVENT.lock().ok().and_then(|l| *l), stuck_at)
+}
+
+fn words_for(last: Option<(&'static str, Instant)>, stuck_at: Instant) -> String {
+    match last {
         Some((what, at)) if at <= stuck_at => {
             format!("last window event: {what} {} ms before", stuck_at.duration_since(at).as_millis())
         }
@@ -236,6 +250,9 @@ fn watch(feed: &Feed) {
         }
         let mut said_still_stuck = false;
         let mut looked_at_thread = false;
+        // The page faults of the watchdog's own looks at the window's thread (reading the app's symbols), left out
+        // of the freeze's count.
+        let mut own_faults = 0;
         // What the window was busy with once it had been stuck for STALL: the step the freeze is in.
         let mut busy = None;
         // The step it was in at each look, for a late answer (answered before the first, it wasn't late). Kept to the
@@ -256,13 +273,15 @@ fn watch(feed: &Feed) {
             }
             if waited >= LOOK_AT_THREAD && !looked_at_thread {
                 looked_at_thread = true;
-                log_thread(waited);
+                own_faults += log_thread(waited);
+                log::current().inspect(|l| l.flush());
             }
             if waited >= STILL_STUCK && !said_still_stuck {
                 said_still_stuck = true;
                 let now = format!("{}; {}", busy_with(), window_words(sent));
                 log::error("Freeze", &line(waited, true, crate::page_name(), &feed.running_titles(), &now));
-                log_thread(waited);
+                log::current().inspect(|l| l.flush());
+                own_faults += log_thread(waited);
                 log::current().inspect(|l| l.flush());
             }
         }
@@ -272,7 +291,7 @@ fn watch(feed: &Feed) {
             let mut busy = busy.unwrap_or_else(busy_with);
             busy.push_str("; ");
             busy.push_str(&window_words(sent));
-            if let Some(memory) = crate::stuck::memory_words(memory_before, crate::stuck::memory_now()) {
+            if let Some(memory) = crate::stuck::memory_words(memory_before, crate::stuck::memory_now(), own_faults) {
                 busy.push_str("; ");
                 busy.push_str(&memory);
             }
@@ -282,9 +301,15 @@ fn watch(feed: &Feed) {
 }
 
 /// Where the window's thread is, stuck for `waited`, as a `[Freeze]` line of its own (nothing where it can't be seen).
-fn log_thread(waited: Duration) {
+/// Gives back the page faults the look itself made.
+fn log_thread(waited: Duration) -> u64 {
+    let before = crate::stuck::memory_now();
     if let Some(frames) = crate::stuck::window_thread_now() {
         log::warning("Freeze", &thread_line(waited, &frames));
+    }
+    match (before, crate::stuck::memory_now()) {
+        (Some(b), Some(a)) => a.page_faults.saturating_sub(b.page_faults),
+        _ => 0,
     }
 }
 
@@ -384,14 +409,11 @@ mod tests {
 
     #[test]
     fn freeze_lines_say_what_the_window_last_did() {
-        let _turn = TURN.lock();
-        let before = Instant::now();
-        window_event("resized");
-        let after = Instant::now() + Duration::from_millis(40);
-        let words = window_words(after);
-        assert!(words.starts_with("last window event: resized "), "{words}");
-        assert!(words.ends_with(" ms before"), "{words}");
-        assert_eq!(window_words(before), "window event while stuck: resized");
+        let at = Instant::now();
+        let later = at + Duration::from_millis(40);
+        assert_eq!(words_for(Some(("restored", at)), later), "last window event: restored 40 ms before");
+        assert_eq!(words_for(Some(("resized", later)), at), "window event while stuck: resized");
+        assert_eq!(words_for(None, at), "no window event yet");
     }
 
     #[test]

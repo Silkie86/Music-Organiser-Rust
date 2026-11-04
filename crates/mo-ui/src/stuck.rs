@@ -1,12 +1,13 @@
 //! Where the window's thread is when it's stuck, for the freeze watchdog's lines (rule 12). A freeze "in no marked
 //! step" says only that Slint itself was busy: handling input, laying out, or handing the frame to the screen. To
-//! say which, the watchdog looks at the window's thread once a freeze has lasted [`crate::watchdog::STILL_STUCK`]:
-//! it stops the thread for a moment, notes the functions it's in (up to [`MOST`]), lets it go again, and only then
-//! looks up their names. The names go into the log as a `[Freeze]` line of their own.
+//! say which, the watchdog looks at the window's thread once a freeze has lasted [`crate::watchdog::LOOK_AT_THREAD`]
+//! (and again at [`crate::watchdog::STILL_STUCK`]):
+//! it stops the thread for a moment, copies its registers and the used part of its stack, lets it go again, and only
+//! then works out from the copy which functions it was in (up to `MOST`) and looks up their names. The names go into the log as a `[Freeze]` line of their own.
 //!
-//! Also here: how much the app's memory had to be read back from the disk while it was stuck (page faults), since a
+//! Also here: how many pages of memory the app (all its threads) had to find while it was stuck (page faults), since a
 //! window left alone on a PC short of memory has its memory written out to the page file, and then takes seconds to
-//! answer again.
+//! answer again. The count includes pages found again in RAM and every thread's, so it's a hint, not proof.
 //!
 //! Only on Windows (64-bit Intel and AMD, Solomon's PC), the one place the freezes are seen; elsewhere nothing is
 //! looked at and the lines say nothing more.
@@ -46,11 +47,16 @@ pub struct Memory {
     pub in_ram: u64,
 }
 
-/// What happened to the memory over a freeze, for its line: "41,200 page faults while stuck, 812 MB in RAM".
-pub fn memory_words(before: Option<Memory>, after: Option<Memory>) -> Option<String> {
+/// What happened to the memory over a freeze, less `own` faults (the watchdog's own looks), for its line: "41,200 page
+/// faults in the app while stuck, 812 MB in RAM".
+pub fn memory_words(before: Option<Memory>, after: Option<Memory>, own: u64) -> Option<String> {
     let (before, after) = (before?, after?);
-    let faults = after.page_faults.saturating_sub(before.page_faults);
-    Some(format!("{} page faults while stuck, {} MB in RAM", thousands(faults), after.in_ram / (1024 * 1024)))
+    let faults = after.page_faults.saturating_sub(before.page_faults).saturating_sub(own);
+    Some(format!(
+        "{} page faults in the app while stuck, {} MB in RAM",
+        thousands(faults),
+        after.in_ram / (1024 * 1024)
+    ))
 }
 
 fn thousands(n: u64) -> String {
@@ -92,29 +98,47 @@ mod windows_x64 {
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, HMODULE};
     use windows_sys::Win32::System::Diagnostics::Debug::{
         CONTEXT, CONTEXT_FULL_AMD64, GetThreadContext, IMAGEHLP_LINEW64, RtlLookupFunctionEntry, RtlVirtualUnwind,
-        SYMBOL_INFOW, SYMOPT_DEFERRED_LOADS, SYMOPT_LOAD_LINES, SYMOPT_UNDNAME, SymCleanup, SymFromAddrW,
-        SymGetLineFromAddrW64, SymInitializeW, SymSetOptions, UNW_FLAG_NHANDLER,
+        SYMBOL_INFOW, SYMOPT_DEFERRED_LOADS, SYMOPT_LOAD_LINES, SYMOPT_UNDNAME, SymFromAddrW, SymGetLineFromAddrW64,
+        SymGetOptions, SymInitializeW, SymSetOptions, UNW_FLAG_NHANDLER,
     };
     use windows_sys::Win32::System::LibraryLoader::{
         GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, GetModuleFileNameW,
         GetModuleHandleExW,
     };
     use windows_sys::Win32::System::Threading::{
-        GetCurrentProcess, GetCurrentThreadId, OpenThread, ResumeThread, SuspendThread, THREAD_GET_CONTEXT,
-        THREAD_QUERY_INFORMATION, THREAD_SUSPEND_RESUME,
+        CreateMutexA, GetCurrentProcess, GetCurrentProcessId, GetCurrentThreadId, GetCurrentThreadStackLimits,
+        INFINITE, OpenThread, ReleaseMutex, ResumeThread, SuspendThread, THREAD_GET_CONTEXT, THREAD_QUERY_INFORMATION,
+        THREAD_SUSPEND_RESUME, WaitForSingleObject,
     };
 
     use super::MOST;
 
-    /// The window's thread, opened so it can be stopped and looked at (kept open for the app's life).
-    static WINDOW: OnceLock<usize> = OnceLock::new();
+    /// The window's thread, opened so it can be stopped and looked at (kept open for the app's life), and its stack's
+    /// lowest and highest addresses.
+    struct Window {
+        thread: usize,
+        low: u64,
+        high: u64,
+    }
+
+    static WINDOW: OnceLock<Window> = OnceLock::new();
+
+    /// Room past the copied stack's top, so a step of the walk that reads a little past it reads zeros, not
+    /// whatever memory comes next.
+    const SLACK: usize = 64 * 1024;
 
     pub fn remember_this_thread() {
-        // SAFETY: the documented call for this thread's own id; the handle is checked before it's kept.
+        let (mut low, mut high) = (0usize, 0usize);
+        // SAFETY: the documented calls, for this thread's own id and stack; the handle is checked before it's kept.
         let handle = unsafe {
+            GetCurrentThreadStackLimits(&mut low, &mut high);
             OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, 0, GetCurrentThreadId())
         };
-        if !handle.is_null() && WINDOW.set(handle as usize).is_err() {
+        if handle.is_null() {
+            return;
+        }
+        let window = Window { thread: handle as usize, low: low as u64, high: high as u64 };
+        if low >= high || WINDOW.set(window).is_err() {
             // SAFETY: the handle was just opened here and is kept nowhere else.
             unsafe { CloseHandle(handle) };
         }
@@ -125,76 +149,176 @@ mod windows_x64 {
     struct Aligned(CONTEXT);
 
     pub fn window_thread_now() -> Option<Vec<String>> {
-        let thread = *WINDOW.get()? as HANDLE;
-        let (frames, count) = walk(thread)?;
+        let window = WINDOW.get()?;
+        let (frames, count) = walk(window)?;
         Some(names(&frames[..count]))
     }
 
-    /// Stops the thread, notes the return addresses on its stack and lets it go. While it's stopped nothing here
-    /// takes a lock or asks for memory (the stopped thread might hold the lock), so this can't hang the app: the
-    /// addresses go into a fixed array and only get their names after the thread runs again.
-    fn walk(thread: HANDLE) -> Option<([u64; MOST], usize)> {
-        let mut frames = [0u64; MOST];
-        let mut count = 0;
-        // SAFETY: the documented calls. The thread is a live handle opened with these rights (the window's thread
-        // lives as long as the app), and it's let go on every path below.
-        unsafe {
+    /// Stops the thread, copies its registers and the used part of its stack, and lets it go at once. Only then is
+    /// the copy walked for the return addresses: walking asks Windows for each function's unwind data, which can take
+    /// a lock (a DLL being loaded, say) that the stopped thread might hold, and that would hang it for good. While
+    /// it's stopped nothing here takes a lock or asks for memory: the room for the copy is made before.
+    fn walk(window: &Window) -> Option<([u64; MOST], usize)> {
+        let size = usize::try_from(window.high - window.low).ok()?;
+        // The stack as it was, low to high, with zeros past its top.
+        let mut copy = vec![0u8; size + SLACK];
+        let thread = window.thread as HANDLE;
+        // SAFETY: CONTEXT is plain data; all zeros is a valid start.
+        let mut context: Aligned = unsafe { std::mem::zeroed() };
+        context.0.ContextFlags = CONTEXT_FULL_AMD64;
+        // SAFETY: the documented calls on a live handle opened with these rights (the window's thread lives as long
+        // as the app), and the thread is let go on every path. The copy reads only the stack between the thread's
+        // stack pointer and its stack's top, which is all in use, so all there to read; it lands in `copy` at the
+        // same distance from its start as from the stack's lowest address, within its length.
+        let copied = unsafe {
             if SuspendThread(thread) == u32::MAX {
                 return None;
             }
-            // SAFETY: CONTEXT is plain data, all zeros is a valid start.
-            let mut context: Aligned = std::mem::zeroed();
-            context.0.ContextFlags = CONTEXT_FULL_AMD64;
             // GetThreadContext also waits for the stop to have happened (SuspendThread only asks for it).
             let got = GetThreadContext(thread, &mut context.0) != 0;
-            if got {
-                let ctx = &mut context.0;
-                while count < MOST && ctx.Rip != 0 {
-                    frames[count] = ctx.Rip;
-                    count += 1;
-                    let mut image_base = 0u64;
-                    let entry = RtlLookupFunctionEntry(ctx.Rip, &mut image_base, std::ptr::null_mut());
-                    if entry.is_null() {
-                        // A leaf function: its return address is at the top of its stack.
-                        if ctx.Rsp == 0 || !ctx.Rsp.is_multiple_of(8) {
-                            break;
-                        }
-                        ctx.Rip = *(ctx.Rsp as *const u64);
-                        ctx.Rsp += 8;
-                    } else {
-                        let mut handler_data = std::ptr::null_mut();
-                        let mut frame = 0u64;
-                        RtlVirtualUnwind(
-                            UNW_FLAG_NHANDLER,
-                            image_base,
-                            ctx.Rip,
-                            entry,
-                            ctx,
-                            &mut handler_data,
-                            &mut frame,
-                            std::ptr::null_mut(),
-                        );
-                    }
-                }
+            let rsp = context.0.Rsp;
+            let usable = got && rsp >= window.low && rsp < window.high && rsp.is_multiple_of(8);
+            if usable {
+                let from = (rsp - window.low) as usize;
+                std::ptr::copy_nonoverlapping(rsp as *const u8, copy.as_mut_ptr().add(from), size - from);
             }
             ResumeThread(thread);
-            got.then_some((frames, count))
+            usable
+        };
+        if !copied {
+            return None;
+        }
+        Some(unwind(&mut context.0, window, &copy))
+    }
+
+    /// Walks a copied stack: each register that points into the stack is moved to the same place in the copy, so
+    /// every read the walk makes lands in the copy, and each step is checked to stay in it.
+    fn unwind(ctx: &mut CONTEXT, window: &Window, copy: &[u8]) -> ([u64; MOST], usize) {
+        let start = copy.as_ptr() as u64;
+        let delta = start.wrapping_sub(window.low);
+        let used_from = ctx.Rsp.wrapping_add(delta);
+        let end = start + (window.high - window.low);
+        let in_copy = |at: u64| at >= used_from && at < end && at.is_multiple_of(8);
+        let on_stack = |at: u64| at >= window.low && at < window.high;
+        for reg in [&mut ctx.Rsp, &mut ctx.Rbp, &mut ctx.Rbx, &mut ctx.Rsi, &mut ctx.Rdi, &mut ctx.R12] {
+            if on_stack(*reg) {
+                *reg = reg.wrapping_add(delta);
+            }
+        }
+        for reg in [&mut ctx.R13, &mut ctx.R14, &mut ctx.R15] {
+            if on_stack(*reg) {
+                *reg = reg.wrapping_add(delta);
+            }
+        }
+        let mut frames = [0u64; MOST];
+        let mut count = 0;
+        while count < MOST && ctx.Rip != 0 && in_copy(ctx.Rsp) {
+            frames[count] = ctx.Rip;
+            count += 1;
+            let mut image_base = 0u64;
+            // SAFETY: the documented calls. Every stack read they make is at or above Rsp, which is in the copy (with
+            // zeros past its top); the frame register, when a function uses one, is checked to be in the copy too.
+            unsafe {
+                let entry = RtlLookupFunctionEntry(ctx.Rip, &mut image_base, std::ptr::null_mut());
+                if entry.is_null() {
+                    // A leaf function: its return address is at the top of its stack.
+                    ctx.Rip = *(ctx.Rsp as *const u64);
+                    ctx.Rsp += 8;
+                    continue;
+                }
+                // The unwind data's fourth byte: the frame register in its low four bits (0 for none).
+                let info = image_base + u64::from((*entry).Anonymous.UnwindInfoAddress);
+                let frame_register = *((info + 3) as *const u8) & 0x0F;
+                if frame_register != 0 && !in_copy(register(ctx, frame_register)) {
+                    break;
+                }
+                let mut handler_data = std::ptr::null_mut();
+                let mut frame = 0u64;
+                RtlVirtualUnwind(
+                    UNW_FLAG_NHANDLER,
+                    image_base,
+                    ctx.Rip,
+                    entry,
+                    ctx,
+                    &mut handler_data,
+                    &mut frame,
+                    std::ptr::null_mut(),
+                );
+            }
+        }
+        (frames, count)
+    }
+
+    /// A general register by its number in unwind data (0 RAX, 1 RCX, 2 RDX, 3 RBX, 4 RSP, 5 RBP, 6 RSI, 7 RDI, then
+    /// R8 to R15).
+    fn register(ctx: &CONTEXT, n: u8) -> u64 {
+        match n {
+            0 => ctx.Rax,
+            1 => ctx.Rcx,
+            2 => ctx.Rdx,
+            3 => ctx.Rbx,
+            4 => ctx.Rsp,
+            5 => ctx.Rbp,
+            6 => ctx.Rsi,
+            7 => ctx.Rdi,
+            8 => ctx.R8,
+            9 => ctx.R9,
+            10 => ctx.R10,
+            11 => ctx.R11,
+            12 => ctx.R12,
+            13 => ctx.R13,
+            14 => ctx.R14,
+            _ => ctx.R15,
         }
     }
 
+    /// Windows' symbol helper (dbghelp) works for one caller at a time in the whole process. Rust's own backtraces
+    /// (a crash log's) take a named lock for it, by this name; holding the same lock keeps the two apart.
+    fn dbghelp_lock_name() -> [u8; 33] {
+        let mut name = *b"Local\\RustBacktraceMutex00000000\0";
+        // SAFETY: the documented call.
+        let mut id = unsafe { GetCurrentProcessId() };
+        let mut index = name.len() - 1;
+        while id > 0 {
+            name[index - 1] = match (id & 0xF) as u8 {
+                h @ 0..=9 => b'0' + h,
+                h => b'A' + (h - 10),
+            };
+            id >>= 4;
+            index -= 1;
+        }
+        name
+    }
+
+    /// The symbol helper's lock, made once and kept for the app's life.
+    static DBGHELP_LOCK: OnceLock<usize> = OnceLock::new();
+
     /// Each address's function name and line, where the app's debugging info has them, else its module and offset.
     fn names(frames: &[u64]) -> Vec<String> {
-        // SAFETY: the documented dbghelp calls, from this one thread. The symbol handler is set up here and closed
-        // again before returning, so a crash log's backtrace (which sets up its own) finds it free. If something set
-        // it up already, it's used as it is and left open.
+        let lock = *DBGHELP_LOCK.get_or_init(|| {
+            let name = dbghelp_lock_name();
+            // SAFETY: the documented call with a NUL-ended name; a failure gives a null handle, checked below.
+            unsafe { CreateMutexA(std::ptr::null(), 0, name.as_ptr()) as usize }
+        });
+        if lock == 0 {
+            return frames.iter().map(|&at| module_offset(at)).collect();
+        }
+        // SAFETY: the documented dbghelp calls, under the lock Rust's backtraces take. The symbol helper is set up once
+        // and kept, as Rust's backtraces keep theirs: whichever sets it up first, the other's set-up fails harmlessly
+        // and it uses that one. Symbols load as each module is first asked about, so the app's own symbols are read
+        // once.
         unsafe {
-            let process = GetCurrentProcess();
-            SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES);
-            let ours = SymInitializeW(process, std::ptr::null(), 1) != 0;
-            let named = frames.iter().map(|&at| name(process, at)).collect();
-            if ours {
-                SymCleanup(process);
+            if WaitForSingleObject(lock as HANDLE, INFINITE) != 0 {
+                return frames.iter().map(|&at| module_offset(at)).collect();
             }
+            static SET_UP: OnceLock<()> = OnceLock::new();
+            SET_UP.get_or_init(|| {
+                SymSetOptions(SymGetOptions() | SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES);
+                SymInitializeW(GetCurrentProcess(), std::ptr::null(), 1);
+            });
+            let process = GetCurrentProcess();
+            let named = frames.iter().map(|&at| name(process, at)).collect();
+            ReleaseMutex(lock as HANDLE);
             named
         }
     }
@@ -245,7 +369,7 @@ mod windows_x64 {
     }
 
     /// "nvoglv64.dll+0x1a2b3c": the module an address is in and how far in.
-    unsafe fn module_offset(at: u64) -> String {
+    fn module_offset(at: u64) -> String {
         // SAFETY: the documented calls; the module isn't kept (its count isn't changed) and the name buffer's size
         // is passed.
         unsafe {
@@ -272,10 +396,14 @@ mod tests {
         let before = Memory { page_faults: 1_000, in_ram: 0 };
         let after = Memory { page_faults: 42_200, in_ram: 812 * 1024 * 1024 };
         assert_eq!(
-            memory_words(Some(before), Some(after)).as_deref(),
-            Some("41,200 page faults while stuck, 812 MB in RAM")
+            memory_words(Some(before), Some(after), 0).as_deref(),
+            Some("41,200 page faults in the app while stuck, 812 MB in RAM")
         );
-        assert_eq!(memory_words(None, Some(after)), None);
+        assert_eq!(
+            memory_words(Some(before), Some(after), 1_200).as_deref(),
+            Some("40,000 page faults in the app while stuck, 812 MB in RAM")
+        );
+        assert_eq!(memory_words(None, Some(after), 0), None);
         assert_eq!(thousands(0), "0");
         assert_eq!(thousands(999), "999");
         assert_eq!(thousands(1_000), "1,000");
