@@ -134,8 +134,30 @@ pub fn find_projects(paths: &[PathBuf]) -> Vec<PathBuf> {
     out
 }
 
-/// Why a file a reader stopped on (a panic) is unreadable.
-const STOPPED: &str = "the Rust reader stopped on it";
+/// Why a file a reader stopped on (a panic) is unreadable: the app's own words, then what stopped it and where in
+/// the code (never the file).
+const STOPPED: &str = "the reader stopped on something it didn't expect in this file";
+
+std::thread_local! {
+    /// Where in the code the last panic on this thread was, as the quiet hook [`Census::run`] sets saw it.
+    static PANICKED_AT: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// The reason for a reader's panic: [`STOPPED`], its message and where.
+fn stopped(payload: &(dyn std::any::Any + Send)) -> String {
+    let message = payload
+        .downcast_ref::<&str>()
+        .map(|m| (*m).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_default();
+    let at = PANICKED_AT.with(|p| std::mem::take(&mut *p.borrow_mut()));
+    match (message.is_empty(), at.is_empty()) {
+        (true, true) => STOPPED.to_owned(),
+        (false, true) => format!("{STOPPED} ({message})"),
+        (true, false) => format!("{STOPPED} (at {at})"),
+        (false, false) => format!("{STOPPED} ({message}, at {at})"),
+    }
+}
 
 impl Census {
     /// Counts every .flp and .bwproject in `files`, several at a time, saying how many are done every 100.
@@ -164,10 +186,17 @@ impl Census {
             // Counting at normal priority is still counting, so a system that won't lower it isn't stopped.
             let _ = thread_priority::set_current_thread_priority(thread_priority::ThreadPriority::Min);
         });
+        // A reader's panic is noted for the report (what and where) instead of printed over the progress lines.
+        let shown = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|info| {
+            let at = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
+            PANICKED_AT.with(|p| *p.borrow_mut() = at);
+        }));
         let census = match pool.build() {
             Ok(pool) => pool.install(count),
             Err(_) => count(),
         };
+        std::panic::set_hook(shown);
         // The last count, unless it was just said.
         let n = done.load(Ordering::Relaxed);
         if !n.is_multiple_of(100) {
@@ -181,6 +210,7 @@ impl Census {
         let result = std::fs::read(path).map_err(|e| e.to_string()).and_then(|raw| {
             // A reader that stops on one file (a panic: release builds check for overflows) counts it as unreadable,
             // as the app does, rather than stopping the whole census. What it had counted of that file is dropped.
+            // (Its message goes in the report, by [`Census::run`]'s quiet hook, not on the screen.)
             let mut mine = Census::default();
             let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 if mo_formats::bitwig::is_bitwig(&raw) { mine.add_bitwig(&raw) } else { mine.add_fl(&raw) }
@@ -191,7 +221,7 @@ impl Census {
                     Ok(())
                 }
                 Ok(Err(why)) => Err(why),
-                Err(_) => Err(STOPPED.to_owned()),
+                Err(payload) => Err(stopped(payload.as_ref())),
             }
         });
         if let Err(why) = result {
@@ -301,8 +331,13 @@ impl Census {
         let _ = writeln!(out, "Format census of {} project{}", count(files), plural(files));
         if self.unreadable_count > 0 {
             let _ = writeln!(out, "{} couldn't be read at all:", count(self.unreadable_count));
-            for (why, n) in &self.unreadable {
-                let _ = writeln!(out, "  {} x {why}", count(*n));
+            let mut reasons: Vec<_> = self.unreadable.iter().collect();
+            reasons.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+            for (why, n) in reasons.iter().take(top) {
+                let _ = writeln!(out, "  {} x {why}", count(**n));
+            }
+            if reasons.len() > top {
+                let _ = writeln!(out, "  and {} other reasons", count(reasons.len() - top));
             }
         }
 
