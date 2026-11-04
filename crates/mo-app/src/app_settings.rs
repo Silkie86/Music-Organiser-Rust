@@ -174,12 +174,13 @@ fn free_name(folder: &Path) -> PathBuf {
 }
 
 /// Writes the file's text into `folder` the safe way (copy, check, then rename): a `.mo-part` file beside it, flushed
-/// to the disk and read back to check it, then renamed over the old file. The part file never stays behind. Slow (it
-/// waits for the disk): call it off the window's thread.
+/// to the disk and read back to check it, then renamed over the old file. The part file never stays behind, but for a
+/// crash part way: the start-up sweep (rule 28) clears that one, by the same ending ([`crate::backup::PART_ENDING`]).
+/// Slow (it waits for the disk): call it off the window's thread.
 pub fn save(folder: &Path, json: &str) -> io::Result<PathBuf> {
     fs::create_dir_all(folder)?;
     let path = folder.join(FILE);
-    let part = folder.join(format!("{FILE}.mo-part"));
+    let part = folder.join(format!("{FILE}{}", crate::backup::PART_ENDING));
     let written = (|| {
         let mut f = fs::File::create(&part)?;
         f.write_all(json.as_bytes())?;

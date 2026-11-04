@@ -280,6 +280,25 @@ fn a_chord_given_over_a_loops_last_bar_is_given_for_its_copy_in_front_too() {
 }
 
 #[test]
+fn the_chances_on_units_past_the_end_are_those_on_the_units_heard() {
+    let whole = Whole::read(&two_five_one(), &HAND, &[]);
+    let (hearing, decoder) = (&whole.hearing, &whole.decoder);
+    let end = hearing.units();
+    let chances = |units: Range<usize>| {
+        let mut out = Vec::new();
+        decoder.chances(hearing, units, &mut out);
+        out
+    };
+    // From a unit on, to the end of the music however the end is given.
+    assert!(!chances(B..end).is_empty());
+    assert_eq!(chances(B..usize::MAX), chances(B..end));
+    assert_eq!(chances(0..end + 1), chances(0..end));
+    // Wholly past the end: none.
+    assert!(chances(end..end + 5).is_empty());
+    assert!(chances(usize::MAX - 1..usize::MAX).is_empty());
+}
+
+#[test]
 fn a_pushed_chords_sound_starts_where_it_is_struck() {
     // C, then F struck half a beat before the bar line and held over it.
     let music = Music::new()

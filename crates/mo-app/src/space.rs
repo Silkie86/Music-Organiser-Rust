@@ -1,8 +1,9 @@
 //! The Space page's words, and the drives it shows (phase 4). Part 1: the drives your projects, samples, backup and
 //! the app's own files are on, how full each one is, and what the app's own files take. Every word is decided here so
 //! it can be tested without a window; mo-ui's `space.rs` reads the disks (never on the window's thread) and fills the
-//! page. What can be freed (old copies, spare plugin copies, Bitwig copies, then songs, then plugins) comes a part at a
-//! time after this one, as agreed in the page's question round (2026-11-03). Nothing here changes a file.
+//! page. What can be freed comes a part at a time, as agreed in the page's question round (2026-11-03): Bitwig copies
+//! first ([`crate::space_bitwig`]), then old copies, spare plugin copies, songs and plugins. Nothing here changes a
+//! file.
 
 use std::path::{Path, PathBuf};
 
@@ -274,11 +275,7 @@ pub fn summary(drives: &[Drive], app_bytes: u64) -> String {
     }
 }
 
-/// What the page will list under Biggest wins first, while it lists nothing yet.
-pub const WINS_COMING: &str = "What can be freed comes next: old copies left after moving folders, spare plugin \
-    copies and Bitwig copies first, then songs, then plugins you haven't used.";
-
-/// A line under Also taking room: what it is, why it's there, and its size.
+/// A line under Biggest wins first or Also taking room: what it is, why it's there, and its size.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Line {
     pub id: &'static str,
@@ -315,9 +312,11 @@ pub struct Card {
     /// Its size in big figures, and what they mean.
     pub big: String,
     pub big_note: String,
-    pub lead: &'static str,
+    pub lead: String,
     /// Each part: its name, what it holds and its size, biggest first.
     pub parts: Vec<(String, String, String)>,
+    /// What to know about them, under the parts; "" when there's nothing more to say.
+    pub note: String,
     /// The drive's room, in a sentence.
     pub room: String,
     /// Why the drive needs room, when it's nearly full.
@@ -337,12 +336,14 @@ pub fn app_files_card(parts: Option<&[AppFilesPart]>, drive: Option<&Drive>) -> 
             (Some(_), None) => "in all".to_owned(),
             (None, _) => String::new(),
         },
-        lead: "The app's own folder: the libraries every scan fills, the search models, the logs and your F12 notes.",
+        lead: "The app's own folder: the libraries every scan fills, the search models, the logs and your F12 notes."
+            .to_owned(),
         parts: parts
             .unwrap_or_default()
             .iter()
             .map(|p| (p.name.to_owned(), p.what.to_owned(), size_text(p.bytes)))
             .collect(),
+        note: String::new(),
         room: drive
             .filter(|d| d.here)
             .map(|d| format!("{} has {} free of {}.", d.name, size_text(d.free), size_text(d.total)))

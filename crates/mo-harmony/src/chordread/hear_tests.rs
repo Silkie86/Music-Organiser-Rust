@@ -127,8 +127,27 @@ fn a_note_struck_just_before_a_unit_starts_is_heard_on_it() {
         assert_eq!(struck, [unit], "struck at {at}");
         let e4 = h.notes().iter().find(|n| n.key == key("E4")).unwrap();
         assert_eq!(e4.start, heard_at, "struck at {at}");
-        assert_eq!(e4.end, at + 100, "it still ends where it was let go");
+        assert_eq!((e4.end, e4.let_go), (at + 100, at + 100), "struck at {at}: it still ends where it was let go");
+        assert_eq!(e4.length, 100, "struck at {at}: and it's as long as it was played");
     }
+}
+
+#[test]
+fn a_note_played_a_little_early_is_held_as_long_as_one_played_late() {
+    // A5 for a felt beat over C E G, played 20 ticks early, on time and 20 ticks late: each is a held note of the
+    // tune (all it sounds counts, as the tune's held notes do), however the player's timing fell. Played early, it's
+    // heard from the beat to where it was let go.
+    for at in [BEAT - 20, BEAT, BEAT + 20] {
+        let h = Music::new().keys(notes("C4 E4 G4", 0, BAR)).tune(notes("A5", at, BEAT)).hear();
+        let a5 = h.notes().iter().find(|n| n.key == key("A5")).unwrap();
+        assert_eq!((a5.start, a5.end, a5.length), (at.max(BEAT), at + BEAT, BEAT), "played at {at}");
+        let sounds = u64::try_from(a5.end - a5.start).unwrap();
+        assert_eq!(h.mass(0..8, Mass::HeldMelody)[PitchClass::A], sounds, "played at {at}");
+    }
+    // The last chord of a song, struck 20 ticks early and let go on the bar line, ends there: what's heard ends with
+    // the music.
+    let h = Music::new().keys([notes("C4 E4 G4", 0, BAR), notes("F3 A3 C4", BAR - 20, BAR + 20)].concat()).hear();
+    assert_eq!((h.units(), h.tick(h.offset(h.units()))), (16, 2 * BAR));
 }
 
 #[test]

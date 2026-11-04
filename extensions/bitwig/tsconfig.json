@@ -1,0 +1,15 @@
+{
+  // Type-checks the controller script against Bitwig's API (version 18, as the script loads) and
+  // the ES5 library, so it can't use anything Bitwig's script engine lacks.
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "target": "ES5",
+    "lib": ["ES5"],
+    "types": ["typed-bitwig-api"],
+    "skipLibCheck": true,
+    "strict": false
+  },
+  "files": ["MusicOrganiser.control.js", "test/globals.d.ts"]
+}

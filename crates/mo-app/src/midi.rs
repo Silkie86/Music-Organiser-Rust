@@ -415,7 +415,7 @@ pub fn is_cut(clip: &str) -> bool {
 }
 
 /// One note on the piano roll, each number 0 to 1 of the roll: left, top, width, height; and how hard it's played
-/// (0.4 to 1, for how strongly it's drawn).
+/// (0.4 to 1, for how strongly it's drawn); and its key (60 = C4), for its name.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RollNote {
     pub x: f32,
@@ -423,6 +423,39 @@ pub struct RollNote {
     pub w: f32,
     pub h: f32,
     pub strength: f32,
+    pub key: u8,
+}
+
+/// One key of the roll's keyboard, top to bottom: its row (top and height, 0 to 1 of the roll), whether it's a black
+/// key, and its name ("C4").
+#[derive(Clone, Debug, PartialEq)]
+pub struct RollKey {
+    pub y: f32,
+    pub h: f32,
+    pub black: bool,
+    pub name: String,
+}
+
+/// Whether `key` is a black key on a piano (Db, Eb, F#, Ab, Bb).
+pub fn is_black(key: u8) -> bool {
+    matches!(key % 12, 1 | 3 | 6 | 8 | 10)
+}
+
+/// The keyboard down the side of a roll from `low` to `high`, highest at the top, as [`roll`] lays its rows out.
+pub fn roll_keys(low: u8, high: u8) -> Vec<RollKey> {
+    if high < low {
+        return Vec::new();
+    }
+    let keys = f32::from(high - low + 1);
+    (low..=high)
+        .rev()
+        .map(|key| RollKey {
+            y: f32::from(high - key) / keys,
+            h: 1.0 / keys,
+            black: is_black(key),
+            name: note_name(key),
+        })
+        .collect()
 }
 
 /// The piano roll of a part: its notes, its bar lines (0 to 1 across), the lowest and highest key it shows, and how
@@ -464,6 +497,7 @@ pub fn roll(notes: &[NoteEvent], bars: i32) -> Roll {
             w: n.length as f32 / length,
             h: 1.0 / keys,
             strength: 0.4 + 0.6 * f32::from(n.velocity) / 65_535.0,
+            key: n.key,
         })
         .collect();
     drawn.iter_mut().for_each(|n| n.w = n.w.min(1.0 - n.x));
@@ -536,6 +570,100 @@ pub fn instrument_text(e: &Entry) -> String {
 pub fn other_files(e: &Entry, most: usize) -> (Vec<String>, usize) {
     let names = e.other_sources.iter().take(most).map(|s| mo_formats::paths::file_name(&s.path).to_owned()).collect();
     (names, e.other_sources.len().saturating_sub(most))
+}
+
+/// The C# app's settings in `library.db` the reading follows: the MIDI library folders (a JSON list), and "1" to
+/// read every save of a song, not only its newest.
+pub const FOLDERS_KEY: &str = "midi_folders";
+pub const OLDER_SAVES_KEY: &str = "midi_older_saves";
+
+/// The files the index should hold: the newest save of each song (or every save, `older`) that a reader takes and
+/// that was there and readable at the last scan, grouped into songs as the Songs page groups them (Fix's copies still
+/// waiting for Keep or Delete, `pending`, and DAW autosaves left out, as there); and every MIDI file the MIDI
+/// folders' walk found.
+pub fn wanted(
+    mut saves: Vec<mo_library::Save>,
+    pending: &mo_library::PathSet,
+    choices: &mo_library::SongChoices,
+    older: bool,
+    files: &[mo_library::scan::FoundFile],
+) -> Vec<mo_midi::indexer::Wanted> {
+    use mo_midi::indexer::Wanted;
+    saves.retain(|s| {
+        !s.file_missing
+            && s.error.is_none()
+            && !pending.contains(&s.path)
+            && !mo_library::scan::is_autosave_file(mo_formats::paths::file_name(&s.path))
+            && mo_midi::extract::project_version(&s.path).is_some()
+    });
+    let readable = saves;
+    let project = |s: &mo_library::Save| Wanted {
+        path: s.path.clone(),
+        kind: mo_midi::SourceKind::Project,
+        mtime: s.mtime,
+        size: s.size,
+    };
+    let mut out: Vec<Wanted> = if older {
+        readable.iter().map(project).collect()
+    } else {
+        mo_library::songs::group_songs(&readable, choices).iter().map(|song| project(&song.latest)).collect()
+    };
+    out.extend(files.iter().map(|f| Wanted {
+        path: f.path.clone(),
+        kind: mo_midi::SourceKind::File,
+        mtime: f.mtime,
+        size: f.size,
+    }));
+    out
+}
+
+/// What the activity card says when a reading ends.
+pub fn read_done_text(s: &mo_midi::indexer::Summary) -> (String, String) {
+    if s.stopped {
+        return ("Stopped reading MIDI".to_owned(), "It carries on from there next time".to_owned());
+    }
+    if s.read == 0 {
+        let rekeyed = if s.rekeyed > 0 { format!("; {} keys read again", thousands(s.rekeyed)) } else { String::new() };
+        return ("MIDI up to date".to_owned(), format!("Nothing new to read{rekeyed}"));
+    }
+    let files = if s.read == 1 { "1 file".to_owned() } else { format!("{} files", thousands(s.read)) };
+    let parts = if s.parts == 1 { "1 part".to_owned() } else { format!("{} parts", thousands(s.parts)) };
+    let mut detail = format!("{files}, {parts}");
+    if s.failed > 0 {
+        detail.push_str(&format!("; {} couldn't be read", thousands(s.failed)));
+    }
+    ("MIDI read".to_owned(), detail)
+}
+
+/// The progress line while reading: "Reading MIDI: 1,204 of 30,112 · Dark keys 01.mid", then "Reading keys again:
+/// 500 of 8,000" once the files are done and the index reads keys again from the notes it holds. The indexer says
+/// which by its calls: the files' stage ends with a call that names no file and has every file done (or is the first
+/// call, when there were no files to read); after that, every call is about keys.
+#[derive(Clone, Debug, Default)]
+pub struct ReadProgress {
+    calls: usize,
+    keys: bool,
+}
+
+impl ReadProgress {
+    pub fn text(&mut self, done: usize, total: usize, path: &str) -> String {
+        let first = self.calls == 0;
+        self.calls += 1;
+        if self.keys || (first && path.is_empty()) {
+            self.keys = true;
+            return format!("Reading keys again: {} of {}", thousands(done), thousands(total));
+        }
+        if path.is_empty() && done >= total {
+            // The files are done; what comes next is keys.
+            self.keys = true;
+        }
+        let name = mo_formats::paths::file_name(path);
+        let mut text = format!("Reading MIDI: {} of {}", thousands(done), thousands(total));
+        if !name.is_empty() {
+            text.push_str(&format!(" · {name}"));
+        }
+        text
+    }
 }
 
 #[cfg(test)]
@@ -691,6 +819,60 @@ mod tests {
     }
 
     #[test]
+    fn the_newest_save_of_each_song_and_every_midi_file_are_wanted() {
+        let save = |path: &str, mtime: i64| mo_library::Save {
+            path: path.to_owned(),
+            name: mo_formats::paths::stem(path).to_owned(),
+            daw: "FL Studio".to_owned(),
+            folder: "C:\\Songs".to_owned(),
+            mtime,
+            ..mo_library::Save::default()
+        };
+        let saves = vec![
+            save("C:\\Songs\\Night drive_12.flp", 300),
+            save("C:\\Songs\\Night drive_11.flp", 200),
+            mo_library::Save { file_missing: true, ..save("C:\\Songs\\Gone.flp", 100) },
+            save("C:\\Songs\\notes.txt", 50),
+        ];
+        let files = vec![mo_library::scan::FoundFile { path: "L:\\New Midi\\a.mid".to_owned(), size: 99, mtime: 5 }];
+        let choices = mo_library::SongChoices::default();
+        let none = mo_library::PathSet::default();
+        let paths = |w: Vec<mo_midi::indexer::Wanted>| w.into_iter().map(|w| w.path).collect::<Vec<_>>();
+        assert_eq!(
+            paths(wanted(saves.clone(), &none, &choices, false, &files)),
+            ["C:\\Songs\\Night drive_12.flp", "L:\\New Midi\\a.mid"]
+        );
+        assert_eq!(wanted(saves.clone(), &none, &choices, true, &files).len(), 3);
+        // An autosave is never a song's newest save.
+        let mut with_autosave = saves;
+        with_autosave.insert(0, save("C:\\Songs\\Night drive_12 (autosave).flp", 400));
+        assert_eq!(paths(wanted(with_autosave, &none, &choices, false, &[]))[0], "C:\\Songs\\Night drive_12.flp");
+    }
+
+    #[test]
+    fn reading_says_how_it_went() {
+        let s = mo_midi::indexer::Summary { read: 3, parts: 12, failed: 1, ..Default::default() };
+        assert_eq!(read_done_text(&s), ("MIDI read".to_owned(), "3 files, 12 parts; 1 couldn't be read".to_owned()));
+        let s = mo_midi::indexer::Summary { stopped: true, ..Default::default() };
+        assert_eq!(read_done_text(&s).0, "Stopped reading MIDI");
+        assert_eq!(read_done_text(&Default::default()).0, "MIDI up to date");
+        let s = mo_midi::indexer::Summary { read: 3, parts: 1, ..Default::default() };
+        assert_eq!(read_done_text(&s).1, "3 files, 1 part");
+        // Files, then the files' last call, then keys.
+        let mut p = ReadProgress::default();
+        assert_eq!(p.text(5, 10, "L:\\x\\a.mid"), "Reading MIDI: 5 of 10 · a.mid");
+        assert_eq!(p.text(10, 10, ""), "Reading MIDI: 10 of 10");
+        assert_eq!(p.text(500, 800, ""), "Reading keys again: 500 of 800");
+        assert_eq!(p.text(800, 800, ""), "Reading keys again: 800 of 800");
+        // No files to read: straight to keys.
+        assert_eq!(ReadProgress::default().text(3, 9, ""), "Reading keys again: 3 of 9");
+        // A stopped run's last call names no file but isn't done: still files.
+        let mut p = ReadProgress::default();
+        p.text(1, 10, "a.mid");
+        assert_eq!(p.text(5, 10, ""), "Reading MIDI: 5 of 10");
+    }
+
+    #[test]
     fn cut_pieces_are_known_by_their_name() {
         assert!(is_cut("Pattern 3 · bars 9–16"));
         assert!(!is_cut("Pattern 3"));
@@ -716,5 +898,19 @@ mod tests {
         assert!(r.notes.iter().all(|n| n.x >= 0.0 && n.x + n.w <= 1.0 && n.y >= 0.0 && n.y < 1.0));
         assert!((r.notes[0].strength - 1.0).abs() < 1e-6);
         assert_eq!(roll(&[], 4), Roll::default());
+        assert_eq!(r.notes[0].key, 60);
+    }
+
+    #[test]
+    fn the_keyboard_runs_top_down_with_its_black_keys() {
+        let keys = roll_keys(59, 63);
+        let names: Vec<&str> = keys.iter().map(|k| k.name.as_str()).collect();
+        assert_eq!(names, ["Eb4", "D4", "Db4", "C4", "B3"]);
+        let black: Vec<bool> = keys.iter().map(|k| k.black).collect();
+        assert_eq!(black, [true, false, true, false, false]);
+        assert!((keys[3].y - 0.6).abs() < 1e-6 && (keys[3].h - 0.2).abs() < 1e-6);
+        // The rows match the notes': C4 in a roll from 59 to 63 sits where roll() puts it.
+        assert!(roll_keys(5, 4).is_empty());
+        assert!(!is_black(65) && is_black(66));
     }
 }

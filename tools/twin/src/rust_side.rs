@@ -113,7 +113,7 @@ fn info_json(i: &ProjectInfo) -> Value {
         "samples": i.samples,
         "tracks": i.tracks,
         "hardware": i.hardware,
-        "details": i.details,
+        "details": i.details.iter().map(|(k, v)| (k.clone(), json!(v))).collect::<serde_json::Map<_, _>>(),
         "created": i.created.map(|c| c.format("%Y-%m-%dT%H:%M:%S%.3f").to_string()),
         "warnings": i.warnings,
         "can_extract_midi": i.can_extract_midi,

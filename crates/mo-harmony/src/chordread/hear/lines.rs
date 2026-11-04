@@ -6,7 +6,7 @@
 //! anchors) are the chord's. Only lines are shaped: the inner notes of chords played together have no voice of their
 //! own to move in.
 
-use super::{HeardNote, Hearing, Level, Stream, uncount};
+use super::{HeardNote, Hearing, Level, Ringing, Stream, uncount};
 use crate::pitch::{PcSet, PitchClass};
 
 /// How a line note moves between the notes around it.
@@ -113,8 +113,8 @@ pub(super) struct LineSpace {
     steps: Vec<Step>,
     /// The notes a line is drawn from, by their place in the notes.
     picked: Vec<usize>,
-    /// Notes struck before, still sounding: where each stops, and its key.
-    ringing: Vec<(i64, u8)>,
+    /// Notes struck before, still sounding.
+    ringing: Ringing,
     parts: Vec<usize>,
 }
 
@@ -180,8 +180,8 @@ impl Hearing {
 
     fn step(&self, note: usize, n: &HeardNote) -> Step {
         let weight = self.strength_at(n.start).map_or(0, Level::weight);
-        let length = n.length.max(1);
-        Step { note, key: n.key, start: n.start, end: n.start.saturating_add(length), length, weight, shaped: true }
+        let end = n.let_go.max(n.start.saturating_add(1));
+        Step { note, key: n.key, start: n.start, end, length: n.length.max(1), weight, shaped: true }
     }
 
     /// Splits `picked` (in order of where the notes start) into strikes, calling `each` with each one.
@@ -238,21 +238,25 @@ impl Hearing {
         let together = self.together();
         // Where a note stops ringing: as played, before any held-over end.
         let until = |n: &HeardNote| {
-            let played = n.start.saturating_add(n.length.max(1)).min(n.end);
+            let played = n.let_go.min(n.end);
             played.min(n.held_over.unwrap_or(i64::MAX))
         };
         picked.extend(self.notes.iter().enumerate().filter(|(_, n)| take(n)).map(|(i, _)| i));
         self.strikes(picked, |strike| {
             let notes = || self.strike_notes(strike);
-            ringing.extend(notes().filter(|(_, n)| !n.struck).map(|(_, n)| (until(&n), n.key)));
+            for (_, n) in notes().filter(|(_, n)| !n.struck) {
+                ringing.add(until(&n), n.key);
+            }
             let bass = |n: &HeardNote| chords && self.in_bass(n, strike);
             if let Some((i, top)) = Self::top(notes().filter(|(_, n)| n.struck && !bass(n))) {
-                ringing.retain(|&(until, _)| until - top.start > together);
-                if !ringing.iter().any(|&(_, key)| key > top.key) {
+                ringing.stop_by(top.start.saturating_add(together));
+                if ringing.highest().is_none_or(|key| key <= top.key) {
                     steps.push(self.step(i, &top));
                 }
             }
-            ringing.extend(notes().filter(|(_, n)| n.struck).map(|(_, n)| (until(&n), n.key)));
+            for (_, n) in notes().filter(|(_, n)| n.struck) {
+                ringing.add(until(&n), n.key);
+            }
         });
     }
 

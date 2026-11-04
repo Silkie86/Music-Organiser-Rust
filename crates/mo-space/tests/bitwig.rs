@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, SystemTime};
 
-use mo_space::bitwig::{FixedProject, LibraryCopy, LibraryIndex, remove_copies};
+use mo_space::bitwig::{FixedProject, LibraryCopy, LibraryIndex, project_folders, remove_copies};
 use mo_space::clean::{Bin, Problem, Removed, What, undo};
 use mo_space::key;
 
@@ -139,6 +139,37 @@ fn a_library_file_changed_since_it_was_read_is_read_again() {
 }
 
 #[test]
+fn the_next_look_lists_the_library_again_and_reads_again_only_what_changed() {
+    let dir = fixtures("mo-space-bitwig-look-again");
+    let library = dir.join("Library");
+    let (kicks, pads) = ([1u8; 256], [3u8; 512]);
+    write(&library, "Kicks.multisample", &kicks);
+    write(&dir, "Song/multi-samples/Kicks-2.multisample", &kicks);
+    write(&dir, "Song/multi-samples/Pads-2.multisample", &pads);
+    let stop = AtomicBool::new(false);
+    let mut index = LibraryIndex::new(std::slice::from_ref(&library), &stop).unwrap();
+    assert_eq!(index.copies_in(&dir.join("Song"), &stop).unwrap().len(), 1);
+    // Added to the Library since: found on the next look.
+    write(&library, "Pads.multisample", &pads);
+    index.list_again(std::slice::from_ref(&library), &stop).unwrap();
+    assert_eq!(index.copies_in(&dir.join("Song"), &stop).unwrap().len(), 2);
+    // A copy saved again in Bitwig since (the same size, other bytes, a later time) is read again: it's its own now.
+    let copy = dir.join("Song/multi-samples/Kicks-2.multisample");
+    fs::write(&copy, [2u8; 256]).unwrap();
+    let later = SystemTime::now() + Duration::from_secs(3600);
+    fs::File::options().write(true).open(&copy).unwrap().set_modified(later).unwrap();
+    let copies = index.copies_in(&dir.join("Song"), &stop).unwrap();
+    assert_eq!(
+        copies.iter().map(|c| key(&c.library_file)).collect::<Vec<_>>(),
+        [key(&s(&library.join("Pads.multisample")))]
+    );
+    // Stopped, the Library stays as it was listed.
+    write(&library, "Kicks Again.multisample", &[2u8; 256]);
+    assert!(index.list_again(std::slice::from_ref(&library), &AtomicBool::new(true)).is_err());
+    assert_eq!(index.copies_in(&dir.join("Song"), &stop).unwrap().len(), 1);
+}
+
+#[test]
 fn a_stop_stops_it() {
     let dir = fixtures("mo-space-bitwig-stop");
     write(&dir, "Library/A.multisample", b"a");
@@ -189,6 +220,57 @@ fn a_library_folder_moved_away_with_a_link_in_its_place_is_still_read() {
             bytes: 256,
         })]
     );
+}
+
+#[test]
+fn the_project_folders_are_the_ones_with_a_bitwig_project_and_its_copies() {
+    let dir = fixtures("mo-space-bitwig-project-folders");
+    let projects = dir.join("Projects");
+    // A project with copies, and its "(fixed)" save beside it: the folder is listed once.
+    write(&projects, "Night Drive/Night Drive.bwproject", b"project");
+    write(&projects, "Night Drive/Night Drive (fixed).bwproject", b"project");
+    write(&projects, "Night Drive/multi-samples/Kicks-2.multisample", b"kicks");
+    // Deeper down, and a project kept straight in the folder you gave.
+    write(&projects, "2024/Garage/Garage.BWPROJECT", b"project");
+    write(&projects, "2024/Garage/multi-samples/Pads.multisample", b"pads");
+    write(&dir, "Loose/Loose.bwproject", b"project");
+    write(&dir, "Loose/multi-samples/Bass.multisample", b"bass");
+    // Not these: a project without copies, a multi-samples folder with no project, an FL Studio save beside one, a
+    // project inside a project's copies, and a project in a folder a move left behind.
+    write(&projects, "Sketch/Sketch.bwproject", b"project");
+    write(&projects, "Stems/multi-samples/Lead.multisample", b"lead");
+    write(&projects, "Beat/Beat.flp", b"flp");
+    write(&projects, "Beat/multi-samples/Hat.multisample", b"hat");
+    write(&projects, "Night Drive/multi-samples/Inner/Inner.bwproject", b"project");
+    write(&projects, "Inner/multi-samples/x.multisample", b"x");
+    write(&dir, "Old (old copy)/Song/Song.bwproject", b"project");
+    write(&dir, "Old (old copy)/Song/multi-samples/Kicks.multisample", b"kicks");
+    let stop = AtomicBool::new(false);
+    let roots = [projects.clone(), dir.join("Loose"), dir.join("Old (old copy)"), dir.join("Not there")];
+    let found: Vec<String> = project_folders(&roots, &stop).unwrap().iter().map(|p| key(&s(p))).collect();
+    let mut wanted =
+        [projects.join("2024/Garage"), projects.join("Night Drive"), dir.join("Loose")].map(|p| key(&s(&p))).to_vec();
+    wanted.sort();
+    assert_eq!(found, wanted);
+
+    // A folder of projects moved to another drive with a link in its place keeps the paths you know.
+    let (moved, linked) = (dir.join("D/Moved"), dir.join("Linked"));
+    write(&moved, "Song/Song.bwproject", b"project");
+    write(&moved, "Song/multi-samples/Kicks.multisample", b"kicks");
+    folder_link(&moved, &linked);
+    let found = project_folders(std::slice::from_ref(&linked), &stop).unwrap();
+    assert_eq!(found.iter().map(|p| key(&s(p))).collect::<Vec<_>>(), [key(&s(&linked.join("Song")))]);
+    // A folder reached two ways is listed once: through the link and where it really is, and through roots inside
+    // each other.
+    let twice = [moved.clone(), linked.clone(), projects.clone(), projects.join("2024")];
+    let found: Vec<String> = project_folders(&twice, &stop).unwrap().iter().map(|p| key(&s(p))).collect();
+    let mut wanted =
+        [moved.join("Song"), projects.join("2024/Garage"), projects.join("Night Drive")].map(|p| key(&s(&p))).to_vec();
+    wanted.sort();
+    assert_eq!(found, wanted);
+
+    // A stop stops it.
+    assert!(project_folders(&roots, &AtomicBool::new(true)).is_err());
 }
 
 #[test]

@@ -14,9 +14,11 @@
 //!
 //! The words say nothing the reader didn't weigh. The evidence is about the chord the decode reads (its root and its
 //! kind of chord), told by the name as written; but a note the name leaves out, as it isn't heard, is told by the
-//! chord the decode reads ("C is read as Cmaj7, whose seventh, B, isn't heard"). Each note is spelled by its degree
-//! above the chord's root, as the chart spells the chord (C7(#9)'s D#, Db7's Cb), with no double sharps or flats, and
-//! with no octave (each DAW numbers octaves its own way). The text is plain ASCII, with "b" and "#" as in chord names.
+//! chord the decode reads ("C is read as Cmaj7, whose seventh, B, isn't heard"). A chord is told as it's written, from
+//! all its notes, its bass among them ([`Chord::as_written`]: D over C is D7, and its C is its seventh). Each note is
+//! spelled by its degree above the chord's root, as the chart spells the chord (C7#9's D#, Db7's Cb), with no double
+//! sharps or flats, and with no octave (each DAW numbers octaves its own way). The text is plain ASCII, with "b" and
+//! "#" as in chord names.
 
 use super::answer::ChordAnswer;
 use super::candidates::Label;
@@ -42,7 +44,7 @@ pub struct Words {
     /// early, on the and of 4.", "E in the bass passes between D and F."
     pub notes: Vec<String>,
     /// Why it reads as this chord and not the runner-up, a line for each kind of evidence, the one that leads by most
-    /// first: "D in the bass is the root of Dm9, and would be the sixth of F6/D." With no runner-up, the first
+    /// first: "D in the bass is the root of Dm9, and would be the sixth of F6." With no runner-up, the first
     /// reading's evidence, the biggest first.
     pub why: Vec<String>,
 }
@@ -78,7 +80,8 @@ struct Teller<'a> {
     e: &'a Explanation,
     span: Option<&'a ChordSpan>,
     grid: Grid,
-    /// The first reading and the runner-up as written, spelled as the chart spells chords there.
+    /// The first reading and the runner-up as written ([`Chord::as_written`]), spelled as the chart spells chords
+    /// there.
     first: Spelled,
     second: Option<Spelled>,
     /// The chords the decode reads for each, written plainly (Cmaj7 for a C cut from it) and spelled the same way.
@@ -86,8 +89,7 @@ struct Teller<'a> {
     /// Whether each is written as the chord the decode reads ([`written_as_read`]). The evidence tells each as written
     /// where it is, else as the chord the decode reads.
     same: [bool; 2],
-    /// The same notes written other ways: the other way the namer writes them, and a chord that repeats round the
-    /// octave on its other roots.
+    /// The same notes written other ways: a chord that repeats round the octave on its other roots.
     others: Vec<String>,
     /// The chords either side, as the decode reads them: the one before (round a loop, the one before its first) and
     /// the one after.
@@ -98,9 +100,13 @@ struct Teller<'a> {
 
 impl<'a> Teller<'a> {
     fn new(e: &'a Explanation, reading: &'a ChordReading, chart: &[Option<Spelled>], key: Option<Key>) -> Teller<'a> {
-        let spell = |span: usize, chord: Chord| match chart.get(span).copied().flatten() {
-            Some(shown) if shown.chord() == chord => shown,
-            _ => reading.spell(chart, span, chord, key),
+        // A chord as written, spelled as the chart spells it.
+        let spell = |span: usize, chord: Chord| {
+            let chord = chord.as_written();
+            match chart.get(span).copied().flatten() {
+                Some(shown) if shown.chord() == chord => shown,
+                _ => reading.spell(chart, span, chord, key),
+            }
         };
         // A stretch's chord: what the decode reads there, written as the chart shows it, else as its first reading.
         let beside = |span: usize| -> Option<Beside> {
@@ -135,14 +141,15 @@ impl<'a> Teller<'a> {
                 None => half(e.span.checked_sub(1)).map(|_| Split { first: false, bass: e.first.chord.bass() }),
             },
         };
-        let mut others: Vec<String> = e.first.also.map(|also| spell(e.span, also).name()).into_iter().collect();
         // A chord that repeats round the octave (a diminished seventh, an augmented triad) on each of its other roots,
-        // in root position.
-        let root = e.first.chord.root();
+        // in root position ([`Reading::roots`]: none when a bass folded into it makes it one chord, as Bdim7 over G is
+        // G7b9). The other way the namer has of writing the same notes (D over C beside D7 over C) is named the same,
+        // so it isn't told.
+        let first = spell(e.span, e.first.chord);
+        let (root, notes) = (e.first.written.root(), e.first.written.notes());
         let mut roots: Vec<PitchClass> = e.first.roots.without(root).iter().collect();
         roots.sort_by_key(|r| r.above(root));
-        others.extend(roots.into_iter().map(|r| spell(e.span, Chord::new(r, e.first.chord.notes(), r)).name()));
-        let first = spell(e.span, e.first.chord);
+        let others: Vec<String> = roots.into_iter().map(|r| spell(e.span, Chord::new(r, notes, r)).name()).collect();
         let second = e.second.map(|r| spell(e.span, r.chord));
         let plain = [Some(&e.first), e.second.as_ref()].map(|r| r.map(|r| spell(e.span, plain_chord(r.label))));
         let same = |written: Option<Spelled>, plain: Option<Spelled>| match (written, plain) {
@@ -250,10 +257,12 @@ impl<'a> Teller<'a> {
         }
     }
 
-    /// The bass and what it is to the chord.
+    /// The bass and what it is to the chord as written: a bass that's only a bass is one of its notes there (the C of
+    /// D over C is D7's seventh), or its root (the G of F over G is G9sus4's). A chord given with a bass of its own
+    /// stands on it whatever plays there, so when another bass plays, or none, it says so.
     fn bass(&self) -> String {
         let e = self.e;
-        let chord = e.first.chord;
+        let chord = self.first.chord();
         match e.first.bass {
             BassKind::None => "no bass plays".to_owned(),
             BassKind::Moving => {
@@ -267,21 +276,28 @@ impl<'a> Teller<'a> {
                     }
                 }
                 if on.is_empty() {
-                    return "the bass moves under it (so no slash is written)".to_owned();
+                    return "the bass moves under it".to_owned();
                 }
                 let notes = list(on.iter().map(|&(pc, _)| self.note(pc)), "and");
                 let degrees = list(on.iter().map(|&(_, degree)| degree_name(degree)), "and");
-                format!("the bass moves under it through {notes}, its {degrees} (so no slash is written)")
+                format!("the bass moves under it through {notes}, its {degrees}")
             }
-            kind => {
-                let what = match kind {
-                    BassKind::Slash => {
-                        let degree = degree_name(chord.bass_degree());
-                        format!("{} {degree} under the chord", article(&degree))
-                    }
-                    _ => format!("its {}", role_word(chord.bass_degree())),
-                };
+            _ => {
+                let what = format!("its {}", role_word(chord.bass_degree()));
                 let bass = self.note(chord.bass());
+                let given = self.span.is_some_and(|s| s.flags.contains(SpanFlags::GIVEN));
+                if given && e.held_bass[0] != Some(chord.bass()) {
+                    let heard = match (e.bass_from, e.held_bass[0]) {
+                        (BassFrom::NoBass, _) => "no bass plays".to_owned(),
+                        (BassFrom::BassPart, Some(pc)) => format!("{} plays in the bass", self.note(pc)),
+                        (BassFrom::BassPart, None) => "the bass moves".to_owned(),
+                        (BassFrom::LowestKeys, Some(pc)) => {
+                            format!("the lowest note is {} (no bass part plays)", self.note(pc))
+                        }
+                        (BassFrom::LowestKeys, None) => "the lowest notes move (no bass part plays)".to_owned(),
+                    };
+                    return format!("it's given over {bass}, {what}, but {heard}");
+                }
                 match e.bass_from {
                     BassFrom::LowestKeys => format!("{bass}, the lowest note (no bass part plays), is {what}"),
                     _ => format!("{bass} in the bass is {what}"),
@@ -290,11 +306,11 @@ impl<'a> Teller<'a> {
         }
     }
 
-    /// The notes above the bass that are the chord's own or tensions it names, by their degrees; none when there are
-    /// none.
+    /// The notes above the bass that are the chord's own or tensions it names, by their degrees, the chord as written;
+    /// none when there are none.
     fn above(&self) -> Option<String> {
         let e = self.e;
-        let chord = e.first.chord;
+        let chord = self.first.chord();
         // The notes the name has, and the chord's own notes it leaves out (heard too little), each once.
         let (mut named, mut left) = (Vec::<(Degree, PitchClass)>::new(), Vec::<(Degree, PitchClass)>::new());
         let (mut chords, mut tune) = (false, false);
@@ -968,20 +984,23 @@ fn degree_in(chord: Chord, pc: PitchClass) -> Degree {
     }
 }
 
-/// Whether a chord is written as the chord read: on its root, as the same kind of chord (Dm9 for Dm7, C for Cmaj7 cut
-/// in two) or as that chord with notes it doesn't sound left out (G for G7, C5 for C); not D/C for D7, its seventh
-/// heard as a bass under it, nor C#dim7 for Edim7.
+/// Whether a chord as written ([`Chord::as_written`]) is written as the chord read: on its root, as the same kind of
+/// chord with no note that doesn't belong to the chord read (Dm9 for Dm7, C for Cmaj7 cut in two, D7 for D7 with its
+/// seventh only in the bass), or as that chord with notes it doesn't sound left out (G for G7, C5 for C); not D7 for
+/// D with a C bass under it, nor Fmaj13 for F6 (a sixth chord has no major seventh), nor C#dim7 for Edim7, nor G9sus4
+/// for F over G.
 pub(super) fn written_as_read(written: Chord, read: Chord) -> bool {
     let left_out = read.notes().difference(written.notes());
     let fewer = read.notes().contains_all(written.notes()) && !left_out.contains(written.bass());
-    written.root() == read.root() && (written.family() == read.family() || fewer)
+    let belongs = Core::of_chord(read).is_none_or(|core| written.intervals().intersection(core.others()).is_empty());
+    written.root() == read.root() && (written.family() == read.family() && belongs || fewer)
 }
 
 /// A chord pushed to `start` and struck at `struck`: how early it's struck, and where ("Pushed: struck half a beat
 /// early, on the and of 4.").
 pub(super) fn pushed_words(grid: Grid, start: i64, struck: i64) -> String {
     let beat = grid.beat();
-    let early = start - struck;
+    let early = start.saturating_sub(struck);
     let amount = match fraction(early, beat) {
         Some((1, 1)) => "a beat".to_owned(),
         Some((1, 2)) => "half a beat".to_owned(),
@@ -995,7 +1014,10 @@ pub(super) fn pushed_words(grid: Grid, start: i64, struck: i64) -> String {
         _ if early < beat => "less than a beat".to_owned(),
         _ => "more than a beat".to_owned(),
     };
-    let at = (struck - grid.bar_line).rem_euclid(grid.bar());
+    // Where in its bar, worked out wider so a bar line far from the music (a damaged grid) can't overflow: within a
+    // bar, it fits back.
+    let at = (i128::from(struck) - i128::from(grid.bar_line)).rem_euclid(i128::from(grid.bar()));
+    let at = i64::try_from(at).unwrap_or(0);
     let (number, within) = (at / beat + 1, at % beat);
     let next = if number >= grid.bar_beats() { "the bar line".to_owned() } else { format!("beat {}", number + 1) };
     let place = match fraction(within, beat) {
@@ -1027,7 +1049,7 @@ fn below_first(pc: PitchClass, anchors: PcSet) -> Vec<PitchClass> {
     all
 }
 
-/// A note's degree in a chord were it named, the bass's too: the b9 of F7/Gb, where its bass is a b2.
+/// A note's degree in a chord were it named, the bass's too: the b9 of F7 over Gb, where its bass is a b2.
 fn named_degree(chord: Chord, pc: PitchClass) -> Degree {
     Chord::new(chord.root(), chord.notes().with(pc), chord.root()).degree(i32::from(pc.above(chord.root())))
 }

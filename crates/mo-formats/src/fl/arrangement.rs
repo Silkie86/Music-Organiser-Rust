@@ -45,7 +45,13 @@ pub fn read(flp: &Flp<'_>) -> Vec<Arrangement> {
     let song = read_song_with(flp, false);
     let playlist = read_playlist(flp);
     let tempo = if song.tempo > 0.0 { song.tempo } else { 120.0 };
-    vec![playlist_view(&song, &playlist, tempo), by_channel(&song, &playlist, tempo)]
+    let mut views = [playlist_view(&song, &playlist, tempo), by_channel(&song, &playlist, tempo)];
+    // Notes left out above MIDI's keys, or damaged note events, in both views.
+    let trouble = super::notes::trouble(flp);
+    for view in &mut views {
+        view.notes.extend(trouble.iter().cloned());
+    }
+    views.into()
 }
 
 /// FL's 0x00BBGGRR colour as 0xRRGGBB.
@@ -472,11 +478,12 @@ fn by_channel(song: &FlSong, pl: &Playlist, tempo: f64) -> Arrangement {
         }];
         lanes.push(lane);
     }
-    let notes = if song.channels.iter().any(|c| !c.audio_clips.is_empty() && c.sample.is_empty()) {
-        vec!["Some audio clips are left out: FL Studio didn't save which sample they play.".to_owned()]
-    } else {
-        Vec::new()
-    };
+    let mut notes = Vec::new();
+    if song.channels.iter().any(|c| !c.audio_clips.is_empty() && c.sample.is_empty()) {
+        notes.push("Some audio clips are left out: FL Studio didn't save which sample they play.".to_owned());
+    }
+    // The lanes come from the song, which stops placing notes or points at its limit.
+    notes.extend(song.warning.map(str::to_owned));
     Arrangement { view: BITWIG_VIEW, tempo, beats_per_bar: pl.beats_per_bar, lanes, markers: Vec::new(), notes }
 }
 

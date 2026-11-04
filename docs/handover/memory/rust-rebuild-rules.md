@@ -57,5 +57,14 @@ Work through the phase plan without pausing for check-ins; message only for real
 25. (Solomon, 2026-10-31) Show every screenshot taken (mo-screens): copy the new/changed ones to
     `/mnt/project-files/screenshots/<page>/` and attach them (max 6 per message) when posting the result.
 
+Rule 26 is the effort rule in the "Effort" paragraph above.
+
 27. (Solomon, 2026-10-31) Don't wait for merges: start the next job while a PR's CI runs, as long as it won't get in
     the way (different files, branched so it can be rebased).
+28. (Solomon, 2026-11-02) The app cleans up after itself: every cache, temp file and report it writes has a limit or
+    is removed when done, and a start-up sweep clears leftovers (`mo_app::tidy`). It removes only plain files whose
+    whole name the app gives them, in the folders it writes them to; never by folder alone, never through a link in
+    them (the logs folder is the one it follows: the app writes its logs through it), never what the user made. The one
+    exception (2026-11-03): F12 notes and their pictures about 3 months old go to the Recycle Bin, only when it can
+    take them without asking, never the drafts; the app never empties the Recycle Bin itself ("leave it to me with a
+    warning": the app warns him what's in it). Also in CLAUDE.md.
