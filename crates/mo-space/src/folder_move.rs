@@ -1003,8 +1003,9 @@ fn all_held<'a>(old: &Path, moved: &'a MovedFolder, all: &'a [MovedFolder], foun
 }
 
 /// What's in the old copy but not in the copy on the other drive, or newer in the old copy, as paths inside it: files
-/// saved there while the move ran, or deleted from the other drive since. The old copies of folders moved from inside
-/// it before are checked against their own copies. Reads both folders: call it away from the window's thread.
+/// saved there while the move ran, or deleted from the other drive since, and links the plugin pointed elsewhere just
+/// before the swap (they lead there only from the old copy). The old copies of folders moved from inside it before are
+/// checked against their own copies. Reads both folders: call it away from the window's thread.
 pub fn only_in_old_copy(moved: &MovedFolder, all: &[MovedFolder], stop: &AtomicBool) -> Result<Vec<String>, CantMove> {
     old_copy_only(moved, all, false, stop)
 }
@@ -1045,6 +1046,8 @@ fn differences(
 ) -> Result<(), CantMove> {
     let skip: Vec<String> = inner.iter().map(|(at, _)| key(&at.to_string_lossy())).collect();
     let show = |p: &Path| shown_as.join(p.strip_prefix(old).unwrap_or(p)).to_string_lossy().into_owned();
+    // Where the two really are, for where links in them lead ([`same_lead`]).
+    let roots = [fs::canonicalize(old).ok(), fs::canonicalize(copy).ok()];
     let mut folders = vec![(old.to_path_buf(), copy.to_path_buf())];
     while let Some((old_dir, copy_dir)) = folders.pop() {
         let top = old_dir.as_path() == old;
@@ -1077,8 +1080,20 @@ fn differences(
                 continue;
             }
             let in_copy = if kind.is_symlink() {
-                // A link to a pipe or a socket is passed over too, by a copy that couldn't make it again.
-                fs::symlink_metadata(&there).is_ok() || fs::metadata(&path).is_ok_and(|m| special(&m.file_type()))
+                match fs::symlink_metadata(&there) {
+                    // A link there too: the newer one (the copy made it after the folder's was made, or it was pointed
+                    // elsewhere since, through the folder's link), or one leading to the same place. One the plugin
+                    // pointed elsewhere just before the swap, after the copy had made it again, leads there only from
+                    // the old copy. Looked at by time first: the copy's is nearly always the newer, and finding where a
+                    // link leads can take a while (a network drive that's asleep).
+                    Ok(m) if m.file_type().is_symlink() => {
+                        entry.metadata().is_ok_and(|mine| newer(&m, &mine)) || same_lead(&path, &there, &roots)
+                    }
+                    // Something else there: the plugin saved over its link since.
+                    Ok(_) => true,
+                    // A link to a pipe or a socket is passed over too, by a copy that couldn't make it again.
+                    Err(_) => fs::metadata(&path).is_ok_and(|m| special(&m.file_type())),
+                }
             } else if kind.is_dir() {
                 let is_dir = fs::metadata(&there).is_ok_and(|m| m.is_dir());
                 if is_dir {
@@ -1105,6 +1120,20 @@ fn differences(
         differences((&at, Path::new(&m.to)), held(&at, m, all), (all, bytes), &shown_as.join(rest), only, stop)?;
     }
     Ok(())
+}
+
+/// Whether two links lead to the same place, by where they really lead. A place inside either folder of `roots` (where
+/// the old copy and the copy really are) counts by its path inside it: an old copy's link into the folder leads into
+/// the old copy, or by the folder's own path into the copy, as the copy's does. Two that lead nowhere now (a drive
+/// that isn't plugged in) count as the same.
+fn same_lead(a: &Path, b: &Path, roots: &[Option<PathBuf>]) -> bool {
+    let place = |link: &Path| {
+        fs::canonicalize(link).ok().map(|real| {
+            let inside = roots.iter().flatten().find_map(|root| real.strip_prefix(root).ok().map(Path::to_path_buf));
+            inside.map_or((false, real), |rest| (true, rest))
+        })
+    };
+    place(a) == place(b)
 }
 
 /// Whether two files that look the same (size and time) hold the same bytes, read side by side in pieces, stopping when
@@ -1564,9 +1593,12 @@ pub(crate) struct Tree<'a> {
     /// leads to now; at another link, a file or folder in a copy the move made means the link was a real one when the
     /// pass before copied it.
     pub(crate) as_files: &'a [PathBuf],
-    /// Links the pass before made again in a copy the move made, and where the folder's links led as they were read
-    /// (paths inside `to`, sorted: [`Copied::links_made`]). One that leads elsewhere now is made again.
-    pub(crate) links_made: &'a [(PathBuf, Leads)],
+    /// Links the pass before made again in a copy the move made, and how the folder's were worded as they were read
+    /// ([`fs::read_link`]; paths inside `to`, sorted: [`Copied::links_made`]). One worded otherwise now (the plugin
+    /// pointed it elsewhere) is made again. One worded the same leads where the folder's does: the copy's is made from
+    /// its wording ([`copy_link`]), so it leads through the same links, and one of those in the folder that was
+    /// pointed elsewhere is made again in its own turn.
+    pub(crate) links_made: &'a [(PathBuf, Option<PathBuf>)],
     /// Set once anything in `to` has changed: a folder or a link made, or a file put in (a temporary one that goes
     /// again isn't a change). So moving back can say whether the old copy changed before it stopped.
     pub(crate) changed: Option<&'a AtomicBool>,
@@ -1614,9 +1646,9 @@ pub(crate) struct Copied {
     /// File links it copied as the file they lead to (paths inside the copy, sorted), for [`Tree::as_files`] in the
     /// next pass.
     pub(crate) as_files: Vec<PathBuf>,
-    /// Links it made again in a copy the move made, and where the folder's led as they were read (paths inside the
-    /// copy, sorted), for [`Tree::links_made`] in the next pass. Not in the last pass: none follows.
-    pub(crate) links_made: Vec<(PathBuf, Leads)>,
+    /// Links it made again in a copy the move made, and how the folder's were worded as they were read (paths inside
+    /// the copy, sorted), for [`Tree::links_made`] in the next pass. Not in the last pass: none follows.
+    pub(crate) links_made: Vec<(PathBuf, Option<PathBuf>)>,
     /// The small files it wrote in its last [`WRITTEN_THROUGH`], at most [`THROUGH_MOST`] of them: written through to
     /// the disk before the copy goes into use ([`write_through`]). Not those put into a folder of yours, written
     /// through before they went in ([`Put::Through`]), but for one that couldn't be then.
@@ -1766,10 +1798,10 @@ pub(crate) fn copy_tree(
             // file.
             let linked;
             let file = if kind.is_symlink() {
-                // Where it leads as it's made again in a copy the move made, for the pass after ([`Tree::links_made`]):
-                // looked at before it's read to be made, so one pointed elsewhere as it's made is made again then.
-                let leads_before = (there.is_none() && fill != Fill::Count && tree.keep_in.is_none() && !tree.last)
-                    .then(|| leads(&source));
+                // How it's worded as it's made again in a copy the move made, for the pass after ([`Tree::links_made`]):
+                // read before it's read to be made, so one pointed elsewhere as it's made is made again then.
+                let worded_before = (there.is_none() && fill != Fill::Count && tree.keep_in.is_none() && !tree.last)
+                    .then(|| fs::read_link(&source).ok());
                 let leads = match (&there, as_file) {
                     (None, _) => linked_file(&source, &kind, &copy, fill, tree, &source_real),
                     (Some(_), true) => as_file_now(&source),
@@ -1806,8 +1838,8 @@ pub(crate) fn copy_tree(
                                 });
                             }
                             tree.has_changed();
-                            if let Some(leads) = leads_before {
-                                copied.links_made.push((inside(&copy), leads));
+                            if let Some(worded) = worded_before {
+                                copied.links_made.push((inside(&copy), worded));
                             }
                         }
                         continue;
@@ -1949,21 +1981,13 @@ pub(crate) fn copy_tree(
     Ok(copied)
 }
 
-/// Where a link leads: by its own wording ([`fs::read_link`]), and where it really leads ([`fs::canonicalize`]), when
-/// it leads anywhere.
-pub(crate) type Leads = (Option<PathBuf>, Option<PathBuf>);
-
-/// Where a link leads now ([`Leads`]).
-fn leads(link: &Path) -> Leads {
-    (fs::read_link(link).ok(), fs::canonicalize(link).ok())
-}
-
 /// Whether a link the pass before made again in a copy the move made, at `rest` inside it, was read from `source`
-/// when that led elsewhere than it does now ([`Tree::links_made`]): the plugin pointed it somewhere else meanwhile.
+/// when that was worded otherwise than it is now ([`Tree::links_made`]): the plugin pointed it somewhere else
+/// meanwhile.
 fn pointed_elsewhere(tree: &Tree, rest: &Path, source: &Path) -> bool {
     tree.links_made
         .binary_search_by(|(made, _)| made.as_path().cmp(rest))
-        .is_ok_and(|n| tree.links_made[n].1 != leads(source))
+        .is_ok_and(|n| tree.links_made[n].1 != fs::read_link(source).ok())
 }
 
 /// Whether a folder the copy reads (`dir`: `tree.from`, or a folder in it) leads somewhere else now than as the pass
