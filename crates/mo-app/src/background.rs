@@ -41,7 +41,7 @@ pub fn on_bulk_pool<T: Send>(work: impl FnOnce() -> T + Send) -> T {
     static BULK: LazyLock<Option<rayon::ThreadPool>> = LazyLock::new(|| {
         let threads = POOL_THREADS.load(std::sync::atomic::Ordering::Relaxed);
         let threads = if threads == 0 { cores() } else { threads };
-        build_pool("Bulk", threads.clamp(1, BULK_THREADS))
+        build_bulk_pool("Bulk", threads.clamp(1, BULK_THREADS))
     });
     install(BULK.as_ref(), work)
 }
@@ -52,7 +52,7 @@ pub fn on_copy_pool<T: Send>(work: impl FnOnce() -> T + Send) -> T {
     static COPY: LazyLock<Option<rayon::ThreadPool>> = LazyLock::new(|| {
         let threads = POOL_THREADS.load(std::sync::atomic::Ordering::Relaxed);
         let threads = if threads == 0 { cores() } else { threads };
-        build_pool("Backup copy", threads.clamp(1, BULK_THREADS))
+        build_bulk_pool("Backup copy", threads.clamp(1, BULK_THREADS))
     });
     install(COPY.as_ref(), work)
 }
@@ -68,6 +68,44 @@ fn build_pool(name: &'static str, threads: usize) -> Option<rayon::ThreadPool> {
         .start_handler(|_| lower_priority())
         .build()
         .ok()
+}
+
+/// [`build_pool`] for long work over a disk: its threads are also low in the system's memory, so what they read
+/// (hundreds of gigabytes, for a look over every project) is the first the system lets go of when memory runs short,
+/// before the window's own. On a PC with most of its memory in use, the window froze for up to a second while the
+/// system read its memory back from the disk (2026-11-04, a look for Bitwig copies).
+fn build_bulk_pool(name: &'static str, threads: usize) -> Option<rayon::ThreadPool> {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .thread_name(move |i| format!("{name} {i}"))
+        .start_handler(|_| {
+            lower_priority();
+            lower_memory_priority();
+        })
+        .build()
+        .ok()
+}
+
+/// Puts what the thread it's called on reads and uses low in the system's memory (Windows; elsewhere nothing changes).
+#[allow(unsafe_code)]
+fn lower_memory_priority() {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentThread, MEMORY_PRIORITY_INFORMATION, MEMORY_PRIORITY_LOW, SetThreadInformation,
+            ThreadMemoryPriority,
+        };
+        let info = MEMORY_PRIORITY_INFORMATION { MemoryPriority: MEMORY_PRIORITY_LOW };
+        // SAFETY: the current thread's own pseudo-handle, and a struct of the size given, read during the call only.
+        unsafe {
+            SetThreadInformation(
+                GetCurrentThread(),
+                ThreadMemoryPriority,
+                (&raw const info).cast(),
+                std::mem::size_of::<MEMORY_PRIORITY_INFORMATION>() as u32,
+            );
+        }
+    }
 }
 
 fn install<T: Send>(pool: Option<&rayon::ThreadPool>, work: impl FnOnce() -> T + Send) -> T {

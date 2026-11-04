@@ -35,6 +35,10 @@ tiny-skia.workspace = true
 # brings it in.
 swash = "0.2"
 
+# Long work over a disk is put low in the system's memory (background::on_bulk_pool).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Threading"] }
+
 [dev-dependencies]
 # A small library made by the backup test.
 rusqlite = { version = "0.41", features = ["bundled"] }
