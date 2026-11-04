@@ -1,3 +1,5 @@
+import { ListView } from "std-widgets.slint";
+
 // The app's one shared style (rule 16): colour tokens set from the theme in use, and the few building blocks every
 // page uses. Pages never set a raw colour or their own button look; the style test in mo-ui checks that.
 
@@ -712,10 +714,15 @@ export component MenuChip inherits Rectangle {
                 on: root.value == "";
                 clicked => { root.picked(""); }
             }
-            for c in root.choices: MenuLine {
-                text: c;
-                on: root.value == c;
-                clicked => { root.picked(c); }
+            // At most 16 lines show and the rest scroll: only the lines in sight are made, so a list of thousands
+            // (every plugin maker, say) opens at once instead of the window laying out every line first.
+            ListView {
+                height: min(root.choices.length, 16) * 32px;
+                for c in root.choices: MenuLine {
+                    text: c;
+                    on: root.value == c;
+                    clicked => { root.picked(c); }
+                }
             }
         }
     }
