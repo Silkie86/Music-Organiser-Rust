@@ -13,9 +13,6 @@ use crate::bitwig_lab::class_label;
 use crate::lab::count;
 use crate::registry::{self, Registry};
 
-/// How many files that couldn't be read are kept, with why.
-const UNREADABLE_KEPT: usize = 20;
-
 /// How often one id turned up.
 #[derive(Clone, Debug, Default)]
 pub struct Tally {
@@ -53,8 +50,9 @@ pub struct Census {
     pub fl_events: HashMap<u32, Tally>,
     pub bitwig_classes: HashMap<u32, Tally>,
     pub bitwig_fields: HashMap<u32, Tally>,
-    /// Files that couldn't be read at all, with why (the first 20).
-    pub unreadable: Vec<(PathBuf, String)>,
+    /// Why files couldn't be read at all, each with how many. No file names: the report is meant for pasting, and
+    /// a project's name is often its song's title.
+    pub unreadable: BTreeMap<String, usize>,
     pub unreadable_count: usize,
 }
 
@@ -136,6 +134,9 @@ pub fn find_projects(paths: &[PathBuf]) -> Vec<PathBuf> {
     out
 }
 
+/// Why a file a reader stopped on (a panic) is unreadable.
+const STOPPED: &str = "the Rust reader stopped on it";
+
 impl Census {
     /// Counts every .flp and .bwproject in `files`, several at a time, saying how many are done every 100.
     pub fn run(files: &[PathBuf], progress: impl Fn(usize) + Sync) -> Census {
@@ -178,13 +179,24 @@ impl Census {
     /// Counts one project.
     pub fn add(&mut self, path: &Path) {
         let result = std::fs::read(path).map_err(|e| e.to_string()).and_then(|raw| {
-            if mo_formats::bitwig::is_bitwig(&raw) { self.add_bitwig(&raw) } else { self.add_fl(&raw) }
+            // A reader that stops on one file (a panic: release builds check for overflows) counts it as unreadable,
+            // as the app does, rather than stopping the whole census. What it had counted of that file is dropped.
+            let mut mine = Census::default();
+            let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if mo_formats::bitwig::is_bitwig(&raw) { mine.add_bitwig(&raw) } else { mine.add_fl(&raw) }
+            }));
+            match read {
+                Ok(Ok(())) => {
+                    self.merge(mine);
+                    Ok(())
+                }
+                Ok(Err(why)) => Err(why),
+                Err(_) => Err(STOPPED.to_owned()),
+            }
         });
         if let Err(why) = result {
             self.unreadable_count += 1;
-            if self.unreadable.len() < UNREADABLE_KEPT {
-                self.unreadable.push((path.to_owned(), why));
-            }
+            *self.unreadable.entry(why).or_default() += 1;
         }
     }
 
@@ -263,8 +275,9 @@ impl Census {
                 into.entry(k).or_default().merge(t);
             }
         }
-        let room = UNREADABLE_KEPT.saturating_sub(self.unreadable.len());
-        self.unreadable.extend(o.unreadable.into_iter().take(room));
+        for (why, n) in o.unreadable {
+            *self.unreadable.entry(why).or_default() += n;
+        }
     }
 
     /// FL events the registry doesn't have, most used first.
@@ -280,17 +293,16 @@ impl Census {
         unknown(&self.bitwig_fields, registry::bitwig(), Registry::field)
     }
 
-    /// The census as text: names and counts only, to paste into a conversation.
+    /// The census as text: ids, versions, reasons and counts only (never a project's name), to paste into a
+    /// conversation.
     pub fn report(&self, top: usize) -> String {
         let mut out = String::new();
         let files = self.fl_projects + self.bitwig_projects + self.unreadable_count;
         let _ = writeln!(out, "Format census of {} project{}", count(files), plural(files));
         if self.unreadable_count > 0 {
-            let _ = writeln!(out, "{} couldn't be read at all, for example:", count(self.unreadable_count));
-            for (file, why) in self.unreadable.iter().take(5) {
-                let name =
-                    file.file_name().map_or_else(|| file.display().to_string(), |n| n.to_string_lossy().into_owned());
-                let _ = writeln!(out, "  {name}: {why}");
+            let _ = writeln!(out, "{} couldn't be read at all:", count(self.unreadable_count));
+            for (why, n) in &self.unreadable {
+                let _ = writeln!(out, "  {} x {why}", count(*n));
             }
         }
 

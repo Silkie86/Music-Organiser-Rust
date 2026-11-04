@@ -2,7 +2,6 @@
 //! the files in its zip. An object is shown where Bitwig first wrote it; a reference elsewhere shows where that is.
 
 use std::collections::{HashMap, HashSet};
-use std::io::Read;
 
 use mo_formats::bitwig::{Document, ObjId, Slot, Value, decode, is_bitwig};
 
@@ -277,10 +276,18 @@ fn zip(doc: &Document, items: &mut Vec<Item>) {
         let Ok(mut file) = archive.by_index(i) else { continue };
         let name =
             file.name().map_or_else(|_| String::from_utf8_lossy(file.name_raw()).into_owned(), |n| n.into_owned());
-        let mut bytes = Vec::new();
-        if file.read_to_end(&mut bytes).is_err() {
-            bytes.clear();
-        }
+        // As the app reads it: at most 256 MB, so a damaged zip can't fill the memory.
+        let Some(bytes) = mo_formats::zipped::read_whole(&mut file) else {
+            items.push(Item::new(
+                format!("zip/{name}"),
+                format!("zip › {name}"),
+                1,
+                name,
+                "too big or damaged".to_owned(),
+                Data::Bytes(Vec::new()),
+            ));
+            continue;
+        };
         items.push(Item::new(
             format!("zip/{name}"),
             format!("zip › {name}"),
