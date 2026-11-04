@@ -13,6 +13,9 @@ use crate::drag_out::{self, Outgoing, Pick};
 /// out of the app, across or up and down (as far as a line on the Sounds page, `ListLine` in `studio.slint`).
 pub const DRAG_START: f64 = 4.0;
 
+/// Said for a drag with audio in it while the song's audio files are still being looked for.
+pub const STILL_LOOKING: &str = "This song's audio files are still being looked for. Try again in a moment.";
+
 /// A clip with something a DAW can take: notes (muted or not) or audio.
 fn has_something(clip: &PreviewClip) -> bool {
     !clip.notes.is_empty() || !clip.audio.is_empty()
@@ -100,7 +103,18 @@ impl View {
     /// can go on meanwhile.
     pub fn drag_out(&self, pick: Pick) -> impl FnOnce() -> Result<Outgoing, String> + Send + use<> {
         let (arrangement, found, peaks) = (self.arrangement.clone(), self.found.clone(), self.peaks.clone());
+        // Until the song's audio files have been looked for, none is found yet: audio would all count as missing.
+        let audio = |c: &PreviewClip| !c.audio.is_empty();
+        let lane = |i: usize| self.arrangement.lanes.get(i);
+        let has_audio = match pick {
+            Pick::Clip { lane: i, clip } => lane(i).and_then(|l| l.clips.get(clip)).is_some_and(audio),
+            Pick::Lane(i) => lane(i).is_some_and(|l| l.clips.iter().any(audio)),
+        };
+        let too_soon = has_audio && !self.looked;
         move || {
+            if too_soon {
+                return Err(STILL_LOOKING.to_owned());
+            }
             let waves = |saved: &str| peaks.get(saved).map(|p| p.values.clone());
             drag_out::from_arrangement(&arrangement, pick, &found, &waves)
         }

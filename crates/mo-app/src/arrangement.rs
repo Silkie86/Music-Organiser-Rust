@@ -1378,6 +1378,16 @@ mod tests {
     }
 
     #[test]
+    fn audio_waits_for_the_song_s_files_to_be_looked_for_and_notes_do_not() {
+        let mut v = View::new(Arc::new(song()), Arc::default()).looking_for_files();
+        let vox = v.arrangement.lanes.iter().position(|l| l.clips.iter().any(|c| !c.audio.is_empty())).unwrap();
+        assert_eq!(v.drag_out(Pick::Lane(vox))().err().as_deref(), Some(pick::STILL_LOOKING));
+        assert!(v.drag_out(Pick::Clip { lane: 0, clip: 0 })().is_ok(), "notes don't need the files");
+        v.set_found(Arc::default());
+        assert_ne!(v.drag_out(Pick::Lane(vox))().err().as_deref(), Some(pick::STILL_LOOKING));
+    }
+
+    #[test]
     fn dragging_moves_around_and_a_double_click_fits_everything() {
         let mut v = view(800.0, 120.0);
         v.wheel(400.0, 0.0, 3.0, true, false);
