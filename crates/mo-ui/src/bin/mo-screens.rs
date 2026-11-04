@@ -305,14 +305,17 @@ fn presets_shots(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, shots: 
     app.set_place(Place::Presets.index() as i32);
     mo_ui::presets::show_sample(app);
     shots.push(("presets-list.png".into(), capture(window)));
-    // A filter chip's menu, open, with what's picked ticked; then a click beside it closes it, and the filter goes.
+    // The Plugin filter's menu, open, with two plugins picked and ticked, and the Synths chip lit; then a click beside
+    // the menu closes it, and the filters are cleared again.
     let data = app.global::<mo_ui::PresetsData>();
-    data.invoke_pick("plugin".into(), "Serum".into());
+    data.invoke_toggle("plugin".into(), 0);
+    data.invoke_toggle("plugin".into(), 1);
+    data.invoke_toggle("type".into(), 0);
     capture(window);
     click(window, PLUGIN_CHIP.0, PLUGIN_CHIP.1);
     shots.push(("filter-menu.png".into(), capture(window)));
     click(window, 1000.0, 40.0);
-    data.invoke_pick("plugin".into(), "".into());
+    data.invoke_clear();
     mo_ui::presets::pick_row(app, 3);
     shots.push(("presets-picked.png".into(), capture(window)));
     mo_ui::presets::show_section(app, Section::Curves);
@@ -848,7 +851,7 @@ const SHOW_BUTTON: (f32, f32) = (1140.0, 328.0);
 /// The Backup page's Remove older versions button, and how far the page is turned down to show the question it asks.
 const REMOVE_OLDER_BUTTON: (f32, f32) = (1127.0, 820.0);
 /// The Presets page's Plugin chip.
-const PLUGIN_CHIP: (f32, f32) = (497.0, 156.0);
+const PLUGIN_CHIP: (f32, f32) = (1061.0, 156.0);
 const PAGE_DOWN: f32 = 300.0;
 const OLDER_BUTTON: (f32, f32) = (1005.0, 328.0);
 /// The Lock chip on the kit's second pad (Snare).

@@ -25,7 +25,7 @@ use mo_app::activity::Feed;
 use mo_app::background;
 use mo_app::bitwig_convert as bitwig;
 use mo_app::log;
-use mo_app::presets::{self as logic, CurveFilters, Filters, From, Item, PartPick, Section, act, curve_act};
+use mo_app::presets::{self as logic, CurveFilters, Filters, Item, Section, act, curve_act};
 use mo_app::shortcuts::{CURVES_ACTIONS, PRESETS_ACTIONS, Shortcuts, what_of};
 use mo_app::year_strip;
 use mo_library::Library;
@@ -56,7 +56,10 @@ struct Page {
     filters: Filters,
     picked: Option<usize>,
     years: Vec<(i32, usize)>,
-    plugins: Vec<String>,
+    /// The plugins in the list, most used first, each with how many lines it has.
+    plugins: Vec<(String, usize)>,
+    /// The filters as their chips and menus show them now, to tell which choice a click was on.
+    chips: logic::FilterChips,
     songs: usize,
     files: usize,
     started: bool,
@@ -68,6 +71,8 @@ struct Page {
     curves: Vec<Curve>,
     curve_shown: Vec<usize>,
     curve_filters: CurveFilters,
+    /// The Found in filter as its chips show it now.
+    curve_found_in: mo_app::filters::Filter,
     /// The picked curve, by its id (a rescan may move it in the list).
     curve_picked: Option<String>,
     curves_started: bool,
@@ -171,10 +176,6 @@ impl Model for CurveLines {
     }
 }
 
-fn strings<S: Into<SharedString>>(list: impl IntoIterator<Item = S>) -> ModelRc<SharedString> {
-    ModelRc::new(VecModel::from(list.into_iter().map(Into::into).collect::<Vec<SharedString>>()))
-}
-
 /// Wires the page. `library` is the C# app's `library.db`, only ever read.
 pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortcuts) {
     PAGE.with(|p| {
@@ -202,9 +203,6 @@ fn wire(app: &AppWindow) {
     let data = app.global::<PresetsData>();
     data.set_lines(ModelRc::from(LINES.with(|m| m.clone()) as Rc<dyn Model<Data = PresetLine>>));
     data.set_curve_lines(ModelRc::from(CURVE_LINES.with(|m| m.clone()) as Rc<dyn Model<Data = CurveLineInfo>>));
-    data.set_part_choices(strings(PartPick::choices()));
-    data.set_from_choices(strings([From::Songs.label(), From::Files.label()]));
-    data.set_curve_kinds(strings(logic::KINDS.map(logic::kind_label)));
     let key = PAGE.with(|p| p.borrow().shortcuts.key_of(act::EXPORT_SHOWN).to_owned());
     data.set_export_shown_key(ActionKey { what: what_of(act::EXPORT_SHOWN).into(), key: key.into() });
 
@@ -223,17 +221,28 @@ fn wire(app: &AppWindow) {
         }
     });
     let weak = app.as_weak();
-    data.on_pick(move |chip, value| {
+    // A filter's choice was picked or unpicked, by its place among the filter's chips and menu lines on show.
+    data.on_toggle(move |chip, at| {
         let Some(app) = weak.upgrade() else { return };
-        let v = value.as_str();
-        change(&app, |f| match chip.as_str() {
-            "maker" => f.choice = Choice { maker: logic::maker_from(v), ..f.choice },
-            "type" => f.choice = Choice { kind: logic::type_from(v), ..f.choice },
-            "part" => f.part = PartPick::from_label(v),
-            "from" => f.from = From::from_label(v),
-            "plugin" => f.plugin = Some(v.to_owned()).filter(|v| !v.is_empty()),
-            _ => {}
+        let choice = PAGE.with(|p| {
+            let p = p.borrow();
+            let filter = if chip == logic::FOUND_IN { &p.curve_found_in } else { p.chips.get(&chip)? };
+            mo_app::filters::choice_at(filter, usize::try_from(at).ok()?).map(str::to_owned)
         });
+        match choice {
+            Some(choice) if chip == logic::FOUND_IN => change_curves(&app, |f| f.toggle_kind(&choice)),
+            Some(choice) => change(&app, |f| f.toggle(&chip, &choice)),
+            None => {}
+        }
+    });
+    let weak = app.as_weak();
+    data.on_clear_chip(move |chip| {
+        let Some(app) = weak.upgrade() else { return };
+        if chip == logic::FOUND_IN {
+            change_curves(&app, |f| f.kinds.clear());
+        } else {
+            change(&app, |f| f.clear_chip(&chip));
+        }
     });
     let weak = app.as_weak();
     data.on_clear(move || {
@@ -299,12 +308,6 @@ fn wire(app: &AppWindow) {
         }
     });
 
-    let weak = app.as_weak();
-    data.on_curve_pick(move |v| {
-        if let Some(app) = weak.upgrade() {
-            change_curves(&app, |f| f.kind = logic::kind_from(&v));
-        }
-    });
     let weak = app.as_weak();
     data.on_curve_hidden_toggled(move |on| {
         if let Some(app) = weak.upgrade() {
@@ -390,7 +393,7 @@ fn change_curves(app: &AppWindow, f: impl FnOnce(&mut CurveFilters)) {
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
         f(&mut p.curve_filters);
-        p.curve_shown = logic::shown_curves(&p.curves, &p.curve_filters);
+        (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_filters);
     });
     show_all(app);
 }
@@ -399,6 +402,7 @@ fn change_curves(app: &AppWindow, f: impl FnOnce(&mut CurveFilters)) {
 fn refilter(p: &mut Page) {
     p.shown = logic::shown(&p.items, &p.filters);
     p.years = logic::year_counts(&p.items, &p.filters);
+    p.chips = logic::filter_chips(&logic::counts(&p.items, &p.filters), &p.plugins, &p.filters);
 }
 
 /// Puts everything the page knows on screen.
@@ -415,18 +419,11 @@ fn show_all(app: &AppWindow) {
             data.set_search(search.as_str().into());
         }
         let f = &p.filters;
-        let c = logic::counts(&p.items, f);
-        let (makers, types) = (logic::maker_choices(&c), logic::type_choices(&c));
-        data.set_maker_choices(strings(makers.iter().map(|m| m.0.clone())));
-        data.set_type_choices(strings(types.iter().map(|t| t.0.clone())));
-        // The chips show the choice as it's listed, with its count.
-        let label = |list: &[(String, &str)], v: &str| list.iter().find(|m| m.1 == v).map(|m| m.0.clone());
-        data.set_maker(label(&makers, logic::maker_label(f.choice.maker)).unwrap_or_default().into());
-        data.set_type(label(&types, logic::type_label(f.choice.kind)).unwrap_or_default().into());
-        data.set_part(f.part.label().into());
-        data.set_plugin(f.plugin.clone().unwrap_or_default().into());
-        data.set_plugin_choices(strings(p.plugins.iter().take(60).cloned()));
-        data.set_from(f.from.label().into());
+        data.set_part_filter(crate::filters::view(&p.chips.part));
+        data.set_plugin_filter(crate::filters::view(&p.chips.plugin));
+        data.set_maker_filter(crate::filters::view(&p.chips.maker));
+        data.set_type_filter(crate::filters::view(&p.chips.kind));
+        data.set_from_filter(crate::filters::view(&p.chips.from));
         data.set_song(
             f.song
                 .as_ref()
@@ -455,7 +452,7 @@ fn show_all(app: &AppWindow) {
         data.set_exporting(p.exporting);
 
         // The curves.
-        data.set_curve_kind(p.curve_filters.kind.map(logic::kind_label).unwrap_or_default().into());
+        data.set_curve_found_in(crate::filters::view(&p.curve_found_in));
         data.set_curve_hidden(p.curve_filters.hidden);
         data.set_curves_shown(p.curve_shown.len() as i32);
         let (title, text) = logic::curves_empty(
@@ -842,9 +839,8 @@ fn add(items: Vec<Item>, songs: usize, files: usize, reading: Option<(usize, usi
             let due = p.shown_at.is_none_or(|t| t.elapsed() >= Duration::from_millis(250)) || reading.is_none();
             if due {
                 p.shown_at = Some(Instant::now());
-                let mut names: Vec<String> = logic::plugins(&p.items).into_iter().map(|(n, _)| n).collect();
-                names.truncate(200);
-                p.plugins = names;
+                // Every plugin: the menu scrolls, and only makes the lines in sight.
+                p.plugins = logic::plugins(&p.items);
                 refilter(&mut p);
             }
             due
@@ -1206,7 +1202,7 @@ fn read_curves(_app: &AppWindow) {
 fn set_curves(p: &mut Page, list: Vec<Curve>) {
     p.curves = list;
     p.curves_failed = None;
-    p.curve_shown = logic::shown_curves(&p.curves, &p.curve_filters);
+    (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_filters);
     if let Some(id) = &p.curve_picked
         && !p.curves.iter().any(|c| &c.id == id)
     {
@@ -1363,7 +1359,7 @@ fn curve_db_change(
                     if let Some(old) = p.curves.iter_mut().find(|o| o.id == c.id) {
                         *old = c;
                     }
-                    p.curve_shown = logic::shown_curves(&p.curves, &p.curve_filters);
+                    (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_filters);
                 });
                 show_all(app);
             }),
@@ -1392,11 +1388,11 @@ pub fn show_sample(app: &AppWindow) {
         p.items = sample_items();
         p.songs = 3;
         p.files = p.items.iter().filter(|i| i.is_file()).count();
-        p.plugins = logic::plugins(&p.items).into_iter().map(|(n, _)| n).collect();
+        p.plugins = logic::plugins(&p.items);
         p.curves = sample_curves();
         p.bitwig = vec![PathBuf::from(r"K:\Bitwig Studio")];
         refilter(&mut p);
-        p.curve_shown = logic::shown_curves(&p.curves, &p.curve_filters);
+        (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_filters);
     });
     show_all(app);
 }
@@ -1624,6 +1620,11 @@ fn sample_items() -> Vec<Item> {
     };
     out.push(file("Warm Pad", "Vital", "Vital", ".vstpreset", Some(Role::Pad), 2023));
     out.push(file("Growl 3", "Serum", "Serum Presets", ".fxp", None, 2022));
+    // More plugins than fit as chips, so the Plugin filter is a menu that scrolls, as it is with a real library.
+    out.push(file("Glass Keys", "Pigments", "Pigments", ".vstpreset", Some(Role::Chords), 2025));
+    out.push(file("Dusty Lead", "Diva", "Diva", ".fxp", Some(Role::Lead), 2021));
+    out.push(file("Wide Choir", "Omnisphere", "Omnisphere", ".fxb", Some(Role::Pad), 2020));
+    out.push(file("Space Arp", "Massive X", "Massive X", ".vstpreset", Some(Role::Arp), 2025));
     out
 }
 

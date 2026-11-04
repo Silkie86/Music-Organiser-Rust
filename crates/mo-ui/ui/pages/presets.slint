@@ -3,7 +3,7 @@
 // to drop onto a Bitwig lane (Solomon, 2 Nov 2026). Only shared parts from studio.slint; mo-app decides every word
 // (mo_app::presets), mo-ui/src/presets.rs fills it.
 import { ListView } from "std-widgets.slint";
-import { Theme, Type, Space, Well, SearchBox, ToggleChip, MenuChip, ListLine, Caps, StudioButton, Segmented, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, OptionsButton, TickBox, ActionKey } from "../studio.slint";
+import { Theme, Type, Space, Well, SearchBox, ToggleChip, FilterPicks, FilterView, ListLine, Caps, StudioButton, Segmented, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, ActionKey } from "../studio.slint";
 
 // One line of the sounds list.
 export struct PresetLine {
@@ -92,22 +92,20 @@ export global PresetsData {
     in-out property <string> search;
     // The Sounds section.
     callback search-edited(string);
-    in property <[string]> maker-choices;
-    in property <string> maker;
-    in property <[string]> type-choices;
-    in property <string> type;
-    in property <[string]> part-choices;
-    in property <string> part;
-    in property <[string]> plugin-choices;
-    in property <string> plugin;
-    in property <[string]> from-choices;
-    in property <string> from;
+    // The filters, as chips of their own or menus (mo_app::filters).
+    in property <FilterView> part-filter;
+    in property <FilterView> maker-filter;
+    in property <FilterView> type-filter;
+    in property <FilterView> plugin-filter;
+    in property <FilterView> from-filter;
     // The song the list is cut to (a song's Presets tab), or "".
     in property <string> song;
     in property <bool> any-filter;
     in property <bool> unused;
-    // A chip's choice: which chip ("maker", "type", "part", "plugin", "from") and what was picked ("" for Any).
-    callback pick(string, string);
+    // A filter's choice was picked or unpicked: which filter ("part", "maker", "type", "plugin", "from") and the
+    // choice's place in it; or its menu's Any was.
+    callback toggle(string, int);
+    callback clear-chip(string);
     callback clear();
     callback clear-song();
     callback unused-toggled(bool);
@@ -147,10 +145,9 @@ export global PresetsData {
     callback export-shown();
 
     // The Curves section (the search box is shared: `search` holds the section's words on show).
-    in property <[string]> curve-kinds;
-    in property <string> curve-kind;
+    // Found in: its chips go through `toggle` and `clear-chip`, as "found-in".
+    in property <FilterView> curve-found-in;
     in property <bool> curve-hidden;
-    callback curve-pick(string);
     callback curve-hidden-toggled(bool);
     in property <[CurveLineInfo]> curve-lines;
     in property <int> curves-shown;
@@ -600,57 +597,48 @@ export component PresetsPage inherits Rectangle {
                     clicked => { PresetsData.export-shown(); }
                 }
             }
-            VerticalLayout {
-                alignment: center;
-                OptionsButton {
-                    horizontal-stretch: 0;
-                    if PresetsData.section == 0: TickBox {
-                        text: "Show synths that play nothing";
-                        checked: PresetsData.unused;
-                        changed checked => { PresetsData.unused-toggled(self.checked); }
-                    }
-                    if PresetsData.section == 1: TickBox {
-                        text: "Show the curves I hid";
-                        checked: PresetsData.curve-hidden;
-                        changed checked => { PresetsData.curve-hidden-toggled(self.checked); }
-                    }
-                }
-            }
         }
-        // The chips.
-        if PresetsData.section == 0: HorizontalLayout {
-            spacing: Space.sm;
-            alignment: start;
+        // The filters: each as chips of its own behind its name when it has only a few choices, or in a menu that
+        // scrolls when it has more (the plugins); more than one part or plugin can be picked, one or none of the rest.
+        // They wrap when the window is narrow.
+        if PresetsData.section == 0: FlexboxLayout {
+            spacing: Space.md;
             vertical-stretch: 0;
-            MenuChip {
+            FilterPicks {
                 name: "Part";
-                value: PresetsData.part;
-                choices: PresetsData.part-choices;
-                picked(v) => { PresetsData.pick("part", v); }
+                filter: PresetsData.part-filter;
+                toggled(at) => { PresetsData.toggle("part", at); }
+                cleared => { PresetsData.clear-chip("part"); }
             }
-            MenuChip {
-                name: "Made by";
-                value: PresetsData.maker;
-                choices: PresetsData.maker-choices;
-                picked(v) => { PresetsData.pick("maker", v); }
-            }
-            MenuChip {
-                name: "Type";
-                value: PresetsData.type;
-                choices: PresetsData.type-choices;
-                picked(v) => { PresetsData.pick("type", v); }
-            }
-            if PresetsData.plugin-choices.length > 0: MenuChip {
+            FilterPicks {
                 name: "Plugin";
-                value: PresetsData.plugin;
-                choices: PresetsData.plugin-choices;
-                picked(v) => { PresetsData.pick("plugin", v); }
+                filter: PresetsData.plugin-filter;
+                toggled(at) => { PresetsData.toggle("plugin", at); }
+                cleared => { PresetsData.clear-chip("plugin"); }
             }
-            MenuChip {
+            FilterPicks {
+                name: "Made by";
+                filter: PresetsData.maker-filter;
+                toggled(at) => { PresetsData.toggle("maker", at); }
+                cleared => { PresetsData.clear-chip("maker"); }
+            }
+            FilterPicks {
+                name: "Type";
+                filter: PresetsData.type-filter;
+                toggled(at) => { PresetsData.toggle("type", at); }
+                cleared => { PresetsData.clear-chip("type"); }
+            }
+            FilterPicks {
                 name: "From";
-                value: PresetsData.from;
-                choices: PresetsData.from-choices;
-                picked(v) => { PresetsData.pick("from", v); }
+                filter: PresetsData.from-filter;
+                toggled(at) => { PresetsData.toggle("from", at); }
+                cleared => { PresetsData.clear-chip("from"); }
+            }
+            // On the page, not in an options menu (Solomon, 4 Nov 2026: nothing useful hidden away). Clear leaves it.
+            ToggleChip {
+                text: "Show synths that play nothing";
+                on: PresetsData.unused;
+                clicked => { PresetsData.unused-toggled(!PresetsData.unused); }
             }
             if PresetsData.song != "": ToggleChip {
                 text: "Song: " + PresetsData.song + "  ×";
@@ -663,14 +651,19 @@ export component PresetsPage inherits Rectangle {
             }
         }
         if PresetsData.section == 1: HorizontalLayout {
-            spacing: Space.sm;
+            spacing: Space.md;
             alignment: start;
             vertical-stretch: 0;
-            MenuChip {
+            FilterPicks {
                 name: "Found in";
-                value: PresetsData.curve-kind;
-                choices: PresetsData.curve-kinds;
-                picked(v) => { PresetsData.curve-pick(v); }
+                filter: PresetsData.curve-found-in;
+                toggled(at) => { PresetsData.toggle("found-in", at); }
+                cleared => { PresetsData.clear-chip("found-in"); }
+            }
+            ToggleChip {
+                text: "Show the curves I hid";
+                on: PresetsData.curve-hidden;
+                clicked => { PresetsData.curve-hidden-toggled(!PresetsData.curve-hidden); }
             }
         }
         // The list, the year strip beside it, and the picked line's card.

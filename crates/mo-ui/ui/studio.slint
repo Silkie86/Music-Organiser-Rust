@@ -762,6 +762,125 @@ export component MenuChip inherits Rectangle {
     }
 }
 
+// One choice of a filter, as its chip or menu line shows it: its words, how many lines it would show ("" when it isn't
+// counted), and whether it's picked.
+export struct FilterChoice {
+    text: string,
+    count: string,
+    on: bool,
+}
+
+// A filter as mo-app's `filters` shows it: its choices as chips of their own (a short list), or in a menu (a longer
+// one), and what the menu's chip says is picked ("" for none).
+export struct FilterView {
+    chips: [FilterChoice],
+    more: [FilterChoice],
+    more-picked: string,
+}
+
+// A chip whose menu can pick more than one, like "Part: Bass + 2". Each picked line is ticked, with its count at the
+// right; a click picks or unpicks a line and the menu stays open for the next. "Any" picks none and closes it. A list
+// longer than 16 lines scrolls, and only the lines in sight are made, as in MenuChip's menu.
+export component PicksChip inherits Rectangle {
+    in property <string> name;
+    // What's picked, as the chip says it after its name; "" for none.
+    in property <string> value;
+    in property <[FilterChoice]> choices;
+    // A line was picked or unpicked (its place), or Any was.
+    callback toggled(int);
+    callback cleared();
+    width: label.preferred-width + 34px;
+    height: 28px;
+    border-radius: 14px;
+    border-width: 1px;
+    border-color: value != "" ? Theme.accent : Theme.edge;
+    background: value != "" ? Theme.accent.transparentize(80%) : touch.has-hover ? Theme.hover : Theme.surface-raised;
+    label := Text {
+        x: 12px;
+        text: root.value == "" ? root.name : root.name + ": " + root.value;
+        color: root.value != "" ? Theme.text : Theme.muted;
+        font-size: Type.meta;
+        font-weight: 500;
+        vertical-alignment: center;
+        height: parent.height;
+    }
+    Path {
+        x: parent.width - 18px;
+        y: (parent.height - 6px) / 2;
+        width: 8px;
+        height: 6px;
+        viewbox-width: 8;
+        viewbox-height: 6;
+        commands: "M 1 1 L 4 4.5 L 7 1";
+        stroke: Theme.muted;
+        stroke-width: 1.5px;
+    }
+    touch := TouchArea {
+        clicked => { menu.show(); }
+    }
+    menu := PopupWindow {
+        x: 0;
+        y: root.height + 4px;
+        width: max(root.width, 240px);
+        // Picking, scrolling or dragging its bar keeps it open; a click outside it closes it.
+        close-policy: close-on-click-outside;
+        MenuCard {
+            MenuLine {
+                text: "Any";
+                on: root.value == "";
+                tickable: true;
+                clicked => {
+                    menu.close();
+                    root.cleared();
+                }
+            }
+            if root.choices.length > 0: ListView {
+                height: min(root.choices.length, 16) * 32px;
+                for c[i] in root.choices: MenuLine {
+                    text: c.text;
+                    key: c.count;
+                    on: c.on;
+                    tickable: true;
+                    clicked => { root.toggled(i); }
+                }
+            }
+        }
+    }
+}
+
+// A filter, the same on every page (Solomon's note, 4 Nov 2026): a short list's choices as chips of their own, each
+// picked or unpicked by a click, behind the filter's name; or a longer list's in a PicksChip's menu, the chip saying
+// the name and what's picked. mo-app's `filters` decides which, what each says and whether more than one can be
+// picked. Put filters in a row `Space.md` apart, so each one's chips stay together.
+export component FilterPicks inherits HorizontalLayout {
+    in property <string> name;
+    in property <FilterView> filter;
+    // A choice was picked or unpicked: its place, the chips first, then the menu's lines.
+    callback toggled(int);
+    // The menu's Any.
+    callback cleared();
+    spacing: Space.sm;
+    alignment: start;
+    if root.filter.chips.length > 0: Text {
+        text: root.name;
+        color: Theme.muted;
+        font-size: Type.meta;
+        vertical-alignment: center;
+    }
+    for c[i] in root.filter.chips: ToggleChip {
+        text: c.count == "" ? c.text : c.text + "  " + c.count;
+        on: c.on;
+        clicked => { root.toggled(i); }
+    }
+    if root.filter.more.length > 0: PicksChip {
+        name: root.name;
+        value: root.filter.more-picked;
+        choices: root.filter.more;
+        toggled(i) => { root.toggled(root.filter.chips.length + i); }
+        cleared => { root.cleared(); }
+    }
+}
+
 // A line of a list that can be picked: the shared look for every list's rows (rule 16).
 export component ListLine inherits Rectangle {
     in property <bool> selected;
