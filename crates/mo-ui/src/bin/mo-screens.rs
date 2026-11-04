@@ -112,6 +112,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     mo_ui::midi::run_action(&app, "midi.moreLike");
     shots.push(("midi-more-like.png".into(), capture(&window)));
     mo_ui::midi::run_action(&app, "midi.back");
+    // Two kinds and a place picked on the shared filter chips, each choice with its count.
+    let midi = app.global::<mo_ui::MidiData>();
+    midi.invoke_toggle("kind".into(), "Basslines".into());
+    midi.invoke_toggle("kind".into(), "Chords".into());
+    midi.invoke_toggle("from".into(), "MIDI folders".into());
+    shots.push(("midi-filters.png".into(), capture(&window)));
+    midi.invoke_clear();
 
     // The Backup page, filled with made-up folders.
     app.set_place(Place::Backup.index() as i32);
