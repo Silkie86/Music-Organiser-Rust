@@ -49,13 +49,12 @@ const STAGED_LEFT_BEHIND: Duration = Duration::from_secs(60);
 
 /// The tables, as made in a new database; only ever added to.
 const SCHEMA: &str = "\
-    CREATE TABLE IF NOT EXISTS curve_saves (path TEXT PRIMARY KEY NOT NULL, modified INTEGER NOT NULL, \
-        size INTEGER NOT NULL);
-    CREATE TABLE IF NOT EXISTS curve_sources (id TEXT NOT NULL, path TEXT NOT NULL, kind TEXT NOT NULL, \
-        song TEXT NOT NULL, name TEXT NOT NULL, device TEXT NOT NULL, setting TEXT NOT NULL, at REAL NOT NULL, \
-        length REAL NOT NULL, modified INTEGER NOT NULL, points TEXT NOT NULL);
-    CREATE INDEX IF NOT EXISTS curve_sources_path ON curve_sources (path);
-    CREATE INDEX IF NOT EXISTS curve_sources_id ON curve_sources (id);
+    CREATE TABLE IF NOT EXISTS curve_reads (path TEXT PRIMARY KEY NOT NULL, modified INTEGER NOT NULL, \
+        size INTEGER NOT NULL, version INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS curve_places (id TEXT NOT NULL, path TEXT NOT NULL, name TEXT NOT NULL, \
+        device TEXT NOT NULL, setting TEXT NOT NULL, at REAL NOT NULL, length REAL NOT NULL, points TEXT NOT NULL);
+    CREATE INDEX IF NOT EXISTS curve_places_path ON curve_places (path);
+    CREATE INDEX IF NOT EXISTS curve_places_id ON curve_places (id);
     CREATE TABLE IF NOT EXISTS your_curves (id TEXT PRIMARY KEY NOT NULL, name TEXT, hidden INTEGER NOT NULL DEFAULT 0);";
 
 /// Where a curve was found.
@@ -70,17 +69,39 @@ pub enum SourceKind {
 }
 
 impl SourceKind {
-    fn key(self) -> &'static str {
-        match self {
-            SourceKind::FlKnobMoves => "fl-edit-events",
-            SourceKind::BitwigClip => "bitwig-clip",
-            SourceKind::BitwigCurve => "bitwig-curve",
+    /// The kind of curves a file of this name gives, by its ending; None for one that gives none.
+    pub fn of(path: &str) -> Option<SourceKind> {
+        let lower = path.to_lowercase();
+        if lower.ends_with(".flp") {
+            Some(SourceKind::FlKnobMoves)
+        } else if lower.ends_with(".bwproject") {
+            Some(SourceKind::BitwigClip)
+        } else if lower.ends_with(".bwcurve") {
+            Some(SourceKind::BitwigCurve)
+        } else {
+            None
         }
     }
+}
 
-    fn from_key(key: &str) -> Option<SourceKind> {
-        [SourceKind::FlKnobMoves, SourceKind::BitwigClip, SourceKind::BitwigCurve].into_iter().find(|k| k.key() == key)
-    }
+/// Goes up by one whenever this file finds other curves in the same saves (its filters and shapes; rule 7).
+const CURVES_VERSION: i64 = 1;
+
+/// What reads a save's curves: this file's version and its DAW reader's (for Bitwig, its clip or curve reader's and
+/// the decoder's, as the project reader's version follows it), so a change to any of them reads it again.
+fn read_version(path: &str) -> i64 {
+    let reader = match SourceKind::of(path) {
+        Some(SourceKind::FlKnobMoves) => mo_formats::fl::VERSION,
+        Some(SourceKind::BitwigClip) => automation::VERSION * 1000 + bitwig::VERSION,
+        Some(SourceKind::BitwigCurve) => curve::VERSION * 1000 + bitwig::VERSION,
+        None => 0,
+    };
+    CURVES_VERSION * 1_000_000_000 + i64::from(reader)
+}
+
+/// The song's name a save gives, to show: its file's name without its ending.
+fn song_of(path: &str) -> String {
+    Path::new(path).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
 /// One place a curve was found.
@@ -168,14 +189,10 @@ pub struct Found {
 /// The curves in one save or curve file (FL Studio, Bitwig project or Bitwig curve), from its bytes. Never panics on a
 /// damaged file: it gives what it could read, or nothing.
 pub fn found_in(path: &str, raw: Vec<u8>, modified: i64) -> Vec<Found> {
-    let place = Place {
-        path,
-        song: Path::new(path).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
-        modified,
-    };
-    let lower = path.to_lowercase();
+    let place = Place { path, song: song_of(path), modified };
+    let kind = SourceKind::of(path);
     let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if lower.ends_with(".flp") {
+        if kind == Some(SourceKind::FlKnobMoves) {
             let Ok(flp) = events::load(&raw) else { return Vec::new() };
             let song = read_song(&flp);
             let plugin_of = |channel: Option<u32>| {
@@ -185,12 +202,12 @@ pub fn found_in(path: &str, raw: Vec<u8>, modified: i64) -> Vec<Found> {
                     .unwrap_or_default()
             };
             fl_curves(&song.automation, &plugin_of, &place)
-        } else if lower.ends_with(".bwcurve") {
+        } else if kind == Some(SourceKind::BitwigCurve) {
             let Some(c) = curve::read(raw) else { return Vec::new() };
             let points: Vec<(f64, f64, f64)> = c.points.iter().map(|p| (p.x, p.y, p.bend)).collect();
             let source = place.source(SourceKind::BitwigCurve, &c.name, "", "", 0.0);
             found(shape(&points, 1.0), c.beat_length.unwrap_or(4.0), source).into_iter().collect()
-        } else if lower.ends_with(".bwproject")
+        } else if kind == Some(SourceKind::BitwigClip)
             && let Ok(doc) = bitwig::decode(raw)
             && doc.body_error.is_none()
         {
@@ -297,11 +314,42 @@ pub struct Progress {
     pub total: AtomicUsize,
 }
 
-/// A file's last change (seconds since 1970) and size, or None when it can't be looked at.
-fn stamp(path: &Path) -> Option<(i64, i64)> {
-    let m = std::fs::metadata(path).ok()?;
-    let modified = m.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_secs() as i64;
-    Some((modified, m.len() as i64))
+/// What a look at a save on the disk found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Look {
+    /// Its last change (seconds since 1970, before it for an older date) and size.
+    There(i64, i64),
+    /// Not there, though the folder it was in is: deleted, moved or renamed, so forgotten.
+    Gone,
+    /// Can't be looked at now (a drive unplugged, a network share away, no permission): what was found in it before
+    /// is kept, and it's tried again next time.
+    Away,
+}
+
+/// A save's [`Look`].
+fn look(path: &Path) -> Look {
+    match std::fs::metadata(path) {
+        Ok(m) => {
+            let since = |t: std::time::SystemTime| match t.duration_since(UNIX_EPOCH) {
+                Ok(d) => d.as_secs() as i64,
+                Err(before) => -(before.duration().as_secs() as i64),
+            };
+            match m.modified() {
+                Ok(t) => Look::There(since(t), m.len() as i64),
+                Err(_) => Look::Away,
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Only when its own folder is there: a drive that's unplugged (K:\\, or /Volumes/Music on a Mac, whose
+            // /Volumes stays) takes the folder with it, and the save may be back. A whole folder deleted is forgotten
+            // once the library stops listing its saves.
+            match path.parent() {
+                Some(folder) if !folder.as_os_str().is_empty() && folder.is_dir() => Look::Gone,
+                _ => Look::Away,
+            }
+        }
+        Err(_) => Look::Away,
+    }
 }
 
 /// A save read in a scan: its path, date and size, and its curves.
@@ -316,7 +364,7 @@ impl CurvesDb {
     /// Opens the database at `path`, making it first when it isn't there (made beside it, checked, then put in place).
     pub fn open(path: &Path) -> Result<CurvesDb, CurvesError> {
         if !is_there(path)? {
-            make_new(path, SCHEMA, "curve_sources")?;
+            make_new(path, SCHEMA, "curve_places")?;
         }
         let conn = Connection::open(path)?;
         conn.busy_timeout(Duration::from_secs(2))?;
@@ -325,37 +373,47 @@ impl CurvesDb {
         Ok(CurvesDb { conn })
     }
 
-    fn known(&self) -> Result<HashMap<String, (i64, i64)>, CurvesError> {
-        let mut st = self.conn.prepare("SELECT path, modified, size FROM curve_saves")?;
-        let rows = st.query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?))))?;
+    /// Each save read before: its date, size and what read it.
+    fn known(&self) -> Result<HashMap<String, (i64, i64, i64)>, CurvesError> {
+        let mut st = self.conn.prepare("SELECT path, modified, size, version FROM curve_reads")?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?, r.get(3)?))))?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// The saves among `paths` that changed since they were read (or were never read), each once, and whether any
-    /// read before are gone from `paths`. Quick: it only looks at each file's date and size.
+    /// The saves among `paths` that changed since they were read (or were never read, or were read by an older
+    /// reader), each once, and whether any read before are gone from `paths` or from the disk. Quick: it only looks at
+    /// each file's date and size. A save that can't be looked at now isn't counted either way.
     pub fn out_of_date(&self, paths: &[String]) -> Result<(Vec<String>, bool), CurvesError> {
         let (changed, gone) = self.changed(paths)?;
-        Ok((changed.into_iter().map(|(p, _)| p).collect(), !gone.is_empty()))
+        let gone_from_disk = changed.iter().any(|(_, now)| *now == Look::Gone);
+        let changed = changed.into_iter().filter(|(_, now)| *now != Look::Gone).map(|(p, _)| p).collect();
+        Ok((changed, !gone.is_empty() || gone_from_disk))
     }
 
-    /// The changed saves with their date and size now (None when they can't be looked at), and the saves gone.
+    /// The changed saves with what a look at them found now (never [`Look::Away`]: those are kept as they are), and
+    /// the saves no longer in `paths`.
     #[allow(clippy::type_complexity)]
-    fn changed(&self, paths: &[String]) -> Result<(Vec<(String, Option<(i64, i64)>)>, Vec<String>), CurvesError> {
+    fn changed(&self, paths: &[String]) -> Result<(Vec<(String, Look)>, Vec<String>), CurvesError> {
         let known = self.known()?;
         let mut seen = HashSet::new();
         let changed = paths
             .iter()
             .filter(|p| seen.insert(p.as_str()))
-            .map(|p| (p.clone(), stamp(Path::new(p))))
-            .filter(|(p, now)| known.get(p.as_str()).copied() != *now)
+            .map(|p| (p.clone(), look(Path::new(p))))
+            .filter(|(p, now)| match (*now, known.get(p.as_str())) {
+                (Look::Away, _) => false,
+                (Look::Gone, before) => before.is_some(),
+                (Look::There(modified, size), Some(&before)) => before != (modified, size, read_version(p)),
+                (Look::There(..), None) => true,
+            })
             .collect();
         let gone = known.into_keys().filter(|k| !seen.contains(k.as_str())).collect();
         Ok((changed, gone))
     }
 
     /// Reads the saves among `paths` that changed (over every core, at low priority as the caller's pool is), and
-    /// forgets saves no longer in `paths` or no longer there. A save that can't be read now (locked by its DAW, a
-    /// drive gone for a moment) keeps what was found in it before and is tried again next time. `progress` counts the
+    /// forgets saves no longer in `paths` or no longer there. A save that can't be read or looked at now (locked by
+    /// its DAW, a drive unplugged) keeps what was found in it before and is tried again next time. `progress` counts the
     /// saves read. Returns how many were read.
     pub fn scan(&mut self, paths: &[String], progress: &Progress) -> Result<usize, CurvesError> {
         let (changed, mut gone) = self.changed(paths)?;
@@ -364,11 +422,14 @@ impl CurvesDb {
         let results: Vec<Result<ReadSave, (String, bool)>> = changed
             .par_iter()
             .map(|(p, now)| {
-                let read = match (now, std::fs::read(p)) {
-                    (Some(now), Ok(raw)) => Ok((p.clone(), *now, found_in(p, raw, now.0))),
-                    // Not there any more: forgotten. There but not readable: kept as it was.
-                    (None, _) => Err((p.clone(), true)),
-                    (Some(_), Err(_)) => Err((p.clone(), false)),
+                let read = match now {
+                    Look::There(modified, size) => match std::fs::read(p) {
+                        Ok(raw) => Ok((p.clone(), (*modified, *size), found_in(p, raw, *modified))),
+                        // There but not readable: kept as it was.
+                        Err(_) => Err((p.clone(), false)),
+                    },
+                    // Not there any more: forgotten.
+                    Look::Gone | Look::Away => Err((p.clone(), *now == Look::Gone)),
                 };
                 progress.done.fetch_add(1, Ordering::Relaxed);
                 read
@@ -384,32 +445,20 @@ impl CurvesDb {
         }
         let tx = self.conn.transaction()?;
         for p in gone.iter().chain(read.iter().map(|r| &r.0)) {
-            tx.execute("DELETE FROM curve_sources WHERE path = ?1", [p])?;
-            tx.execute("DELETE FROM curve_saves WHERE path = ?1", [p])?;
+            tx.execute("DELETE FROM curve_places WHERE path = ?1", [p])?;
+            tx.execute("DELETE FROM curve_reads WHERE path = ?1", [p])?;
         }
         for (path, (modified, size), found) in &read {
             tx.execute(
-                "INSERT INTO curve_saves (path, modified, size) VALUES (?1, ?2, ?3)",
-                params![path, modified, size],
+                "INSERT INTO curve_reads (path, modified, size, version) VALUES (?1, ?2, ?3, ?4)",
+                params![path, modified, size, read_version(path)],
             )?;
             for f in found {
                 let s = &f.source;
                 tx.execute(
-                    "INSERT INTO curve_sources (id, path, kind, song, name, device, setting, at, length, modified, points) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                    params![
-                        f.id,
-                        s.path,
-                        s.kind.key(),
-                        s.song,
-                        s.name,
-                        s.device,
-                        s.setting,
-                        s.at,
-                        f.length,
-                        s.modified,
-                        points_text(&f.points)
-                    ],
+                    "INSERT INTO curve_places (id, path, name, device, setting, at, length, points) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    params![f.id, s.path, s.name, s.device, s.setting, s.at, f.length, points_text(&f.points)],
                 )?;
             }
         }
@@ -429,33 +478,36 @@ impl CurvesDb {
     }
 
     fn curves(&self, only: Option<&str>) -> Result<Vec<Curve>, CurvesError> {
+        // The save's date from curve_reads, the kind and song from the path (rule 23).
         let mut st = self.conn.prepare(
-            "SELECT id, path, kind, song, name, device, setting, at, length, modified, points FROM curve_sources \
-             WHERE ?1 IS NULL OR id = ?1 ORDER BY modified DESC, path, at",
+            "SELECT c.id, c.path, c.name, c.device, c.setting, c.at, c.length, c.points, s.modified \
+             FROM curve_places c JOIN curve_reads s ON s.path = c.path \
+             WHERE ?1 IS NULL OR c.id = ?1 ORDER BY s.modified DESC, c.path, c.at",
         )?;
         type Row = (String, Option<SourceKind>, CurveSource, f64, Option<String>);
         let rows = st.query_map([only], |r| {
+            let path: String = r.get(1)?;
             Ok((
                 r.get::<_, String>(0)?,
-                text_at(r, 2)?.as_deref().and_then(SourceKind::from_key),
+                SourceKind::of(&path),
                 CurveSource {
                     kind: SourceKind::BitwigClip,
-                    path: r.get(1)?,
-                    song: r.get(3)?,
-                    name: r.get(4)?,
-                    device: r.get(5)?,
-                    setting: r.get(6)?,
-                    at: r.get(7)?,
-                    modified: r.get(9)?,
+                    song: song_of(&path),
+                    path,
+                    name: r.get(2)?,
+                    device: r.get(3)?,
+                    setting: r.get(4)?,
+                    at: r.get(5)?,
+                    modified: r.get(8)?,
                 },
-                r.get::<_, f64>(8)?,
-                text_at(r, 10)?,
+                r.get::<_, f64>(6)?,
+                text_at(r, 7)?,
             ))
         })?;
         let mut by_id: BTreeMap<String, Vec<(CurveSource, f64, Option<String>)>> = BTreeMap::new();
         for row in rows {
             let (id, kind, mut source, length, points): Row = row?;
-            // A kind a newer app wrote is passed over.
+            // A file of a kind a newer app reads is passed over.
             let Some(kind) = kind else { continue };
             source.kind = kind;
             by_id.entry(id).or_default().push((source, length, points));
@@ -511,7 +563,7 @@ impl CurvesDb {
 
     /// Whether a curve with this id is found anywhere now (for a page holding an old id).
     pub fn has(&self, id: &str) -> Result<bool, CurvesError> {
-        Ok(self.conn.query_row("SELECT 1 FROM curve_sources WHERE id = ?1", [id], |_| Ok(())).optional()?.is_some())
+        Ok(self.conn.query_row("SELECT 1 FROM curve_places WHERE id = ?1", [id], |_| Ok(())).optional()?.is_some())
     }
 }
 
@@ -568,14 +620,42 @@ fn holds(path: &Path, c: &Curve) -> bool {
 /// again when the curve has changed since (copy, check, rename, as every file the app writes); returns its path.
 /// Safe on the worker pool; never on the window's thread.
 pub fn file(c: &Curve, folder: &Path) -> Result<PathBuf, String> {
-    let id = c.id.get(..8).unwrap_or(&c.id);
+    let id = c.id.get(..ID_IN_NAME).unwrap_or(&c.id);
     let path = folder.join(format!("{} {id}.{}", names::safe_file_name(&c.name), curve::EXTENSION));
     if holds(&path, c) {
         return Ok(path);
     }
     std::fs::create_dir_all(folder).map_err(|e| format!("Couldn't make the Curves folder: {e}"))?;
     export::write_checked(&path, &curve_bytes(c)?).map_err(|e| format!("Couldn't write the curve: {e}"))?;
+    // The folder is a cache (rule 28): this curve's file under an older name (before it was renamed) goes. Names
+    // that differ only in letter case are one file on Windows and a Mac, so that one stays.
+    let own = path.file_name().map(|n| n.to_string_lossy().to_lowercase());
+    for (old, of) in curve_files(folder) {
+        if of == id && Some(old.to_string_lossy().to_lowercase()) != own {
+            let _ = std::fs::remove_file(folder.join(old));
+        }
+    }
     Ok(path)
+}
+
+/// How much of a curve's id its file's name ends with: 16 hex digits, so two curves never share one.
+const ID_IN_NAME: usize = 16;
+
+/// The plain curve files in the app's Curves folder, by name, each with the curve id's start its name ends with
+/// ("<name> <16 hex>.bwcurve", as [`file`] names them; 8 in the first test builds). Nothing else is listed.
+fn curve_files(folder: &Path) -> Vec<(PathBuf, String)> {
+    let Ok(entries) = std::fs::read_dir(folder) else { return Vec::new() };
+    entries
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .filter_map(|e| {
+            let name = e.file_name().to_str()?.to_owned();
+            let stem = name.strip_suffix(&format!(".{}", curve::EXTENSION))?;
+            let (_, id) = stem.rsplit_once(' ')?;
+            let hex = (id.len() == ID_IN_NAME || id.len() == 8) && id.bytes().all(|b| b.is_ascii_hexdigit());
+            hex.then(|| (PathBuf::from(&name), id.to_owned()))
+        })
+        .collect()
 }
 
 /// Copies `curve` into Bitwig's curves library (`folder`, such as `K:\Bitwig Studio\Library\Curves`) under its name,
@@ -895,6 +975,85 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].points, [p(0.0, 0.0, 0.82), p(1.0, 1.0, 0.0)]);
         assert_eq!(made_name(&found[0].source), "Basic Sequence #1");
+    }
+
+    #[test]
+    fn a_better_reader_reads_each_save_again() {
+        let dir = temp_dir("version");
+        let a = library_curve(&dir, "a.bwcurve", "Rise", &[0.0, 1.0, 0.0]);
+        let mut db = CurvesDb::open(&dir.join(FILE_NAME)).unwrap();
+        let progress = Progress::default();
+        assert_eq!(db.scan(std::slice::from_ref(&a), &progress).unwrap(), 1);
+        // As if an older reader had read it.
+        db.conn.execute("UPDATE curve_reads SET version = 1", []).unwrap();
+        assert_eq!(db.out_of_date(std::slice::from_ref(&a)).unwrap(), (vec![a.clone()], false));
+        assert_eq!(db.scan(std::slice::from_ref(&a), &progress).unwrap(), 1);
+        assert_eq!(db.out_of_date(std::slice::from_ref(&a)).unwrap(), (Vec::new(), false));
+        // Kind and song come from the path, the date from the save.
+        let s = &db.list().unwrap()[0].sources[0];
+        assert_eq!((s.kind, s.song.as_str()), (SourceKind::BitwigCurve, "a"));
+        drop(db);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_save_on_a_drive_that_isnt_there_keeps_its_curves_and_a_deleted_one_is_forgotten() {
+        let dir = temp_dir("away");
+        let a = library_curve(&dir, "a.bwcurve", "Rise", &[0.0, 1.0, 0.0]);
+        let b = library_curve(&dir, "b.bwcurve", "Fall", &[1.0, 0.0]);
+        let mut db = CurvesDb::open(&dir.join(FILE_NAME)).unwrap();
+        let progress = Progress::default();
+        db.scan(&[a.clone(), b.clone()], &progress).unwrap();
+        // A save on a drive that's unplugged (its folder isn't there either): kept as it was. A folder of the test's
+        // own, never a made-up drive or network share, so nothing is asked of the network.
+        let away = dir.join("unplugged").join("Songs").join("c.bwcurve").to_string_lossy().into_owned();
+        db.conn
+            .execute(
+                "INSERT INTO curve_reads (path, modified, size, version) VALUES (?1, 1, 1, ?2)",
+                params![away, read_version(&away)],
+            )
+            .unwrap();
+        assert_eq!(look(Path::new(&away)), Look::Away);
+        std::fs::remove_file(&b).unwrap();
+        assert_eq!(db.out_of_date(&[a.clone(), b.clone(), away.clone()]).unwrap(), (Vec::new(), true));
+        db.scan(&[a.clone(), b.clone(), away.clone()], &progress).unwrap();
+        let saves: Vec<String> = db.known().unwrap().into_keys().collect();
+        assert!(saves.contains(&away) && saves.contains(&a) && !saves.contains(&b), "{saves:?}");
+        assert_eq!(db.list().unwrap().len(), 1);
+        drop(db);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_save_dated_before_1970_is_read_once() {
+        let dir = temp_dir("old-date");
+        let a = library_curve(&dir, "a.bwcurve", "Rise", &[0.0, 1.0, 0.0]);
+        let before = UNIX_EPOCH - Duration::from_secs(86_400);
+        std::fs::File::options().write(true).open(&a).unwrap().set_modified(before).unwrap();
+        assert!(matches!(look(Path::new(&a)), Look::There(-86_400, _)));
+        let mut db = CurvesDb::open(&dir.join(FILE_NAME)).unwrap();
+        let progress = Progress::default();
+        assert_eq!(db.scan(std::slice::from_ref(&a), &progress).unwrap(), 1);
+        assert_eq!(db.scan(std::slice::from_ref(&a), &progress).unwrap(), 0);
+        drop(db);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_curves_folder_keeps_one_file_a_curve() {
+        let dir = temp_dir("tidy");
+        let a = library_curve(&dir, "a.bwcurve", "Rise", &[0.0, 1.0, 0.0]);
+        let mut db = CurvesDb::open(&dir.join(FILE_NAME)).unwrap();
+        db.scan(std::slice::from_ref(&a), &Progress::default()).unwrap();
+        let curves = dir.join(FOLDER);
+        let rise = db.list().unwrap().remove(0);
+        let first = file(&rise, &curves).unwrap();
+        // Renamed: its file under the old name goes.
+        let renamed = db.rename(&rise.id, "Filter rise").unwrap().unwrap();
+        let second = file(&renamed, &curves).unwrap();
+        assert!(!first.exists() && second.exists());
+        drop(db);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
