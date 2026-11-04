@@ -39,6 +39,9 @@ pub const PART: &str = ".mo-part";
 /// Times this close count as the same: FAT and exFAT drives (most USB drives) keep times in 2-second or 10 ms steps.
 const SAME_TIME: Duration = Duration::from_secs(2);
 
+/// A file's time this far (in nanoseconds) from the record's means it was saved again: 1 ms.
+const SAVED_AGAIN: i128 = 1_000_000;
+
 /// Files at least this big are copied one at a time: a USB drive copes far better with one big stream than several.
 const BIG_COPY: u64 = 64 << 20;
 
@@ -71,7 +74,8 @@ pub enum Outcome {
     New,
     /// Already on the backup (same size and time, or byte for byte the same): nothing copied.
     UpToDate,
-    /// Changed since the last backup: copied again; the old copy was kept in [`OLDER_VERSIONS`] when it's small.
+    /// Changed since the last backup: copied again; the old copy was kept in [`OLDER_VERSIONS`] when it's small, or
+    /// when what replaced it is empty or under half its size.
     Updated { kept_older: bool },
     /// Not reached: the run was stopped, or the backup drive filled up, first.
     NotReached,
@@ -126,17 +130,22 @@ pub fn run(files: &[FileEntry], backup: &Path, options: &Options, stop: &AtomicB
     let Some(drive) = Drive::find(backup) else {
         return Err(CantStart::NoBackupFolder(backup.to_path_buf()));
     };
+    // This run's half-done files, cleared by a later run if this one is cut off (made first: the drive tests below
+    // make some too).
+    let parts = Parts::start(backup);
     // Two files going to one place on the backup (names that differ only in letter case, on a drive that ignores
     // it) would be written over each other: the first goes, the rest say why not. Asked of the drive itself, not the
-    // computer: an exFAT or NTFS drive on Linux ignores letter case too.
-    let ignores_case = ignores_case(backup);
+    // computer: an exFAT or NTFS drive on Linux ignores letter case too. The record keeps the computer's way, as
+    // every other part of the backup reads it.
+    let drive_ignores_case = ignores_case(backup, &parts);
+    let ignores_case = cfg!(any(windows, target_os = "macos"));
     let mut places: HashSet<String> = HashSet::new();
     let work: Vec<Work<'_>> = files
         .iter()
         .enumerate()
         .map(|(i, f)| {
             let name = f.path.to_string_lossy();
-            let part_like = if ignores_case { name.to_lowercase().ends_with(PART) } else { name.ends_with(PART) };
+            let part_like = if drive_ignores_case { name.to_lowercase().ends_with(PART) } else { name.ends_with(PART) };
             let place = if part_like {
                 Err("Named like the backup's own half-done copies (.mo-part)")
             } else {
@@ -144,7 +153,7 @@ pub fn run(files: &[FileEntry], backup: &Path, options: &Options, stop: &AtomicB
             };
             let place = place.and_then(|d| {
                 let name = d.to_string_lossy();
-                let name = if ignores_case { name.to_lowercase() } else { name.into_owned() };
+                let name = if drive_ignores_case || ignores_case { name.to_lowercase() } else { name.into_owned() };
                 if places.insert(name) { Ok(d) } else { Err("Another file goes to the same place on the backup") }
             });
             (i, f, place)
@@ -160,7 +169,6 @@ pub fn run(files: &[FileEntry], backup: &Path, options: &Options, stop: &AtomicB
     let record = Mutex::new(record);
     let cant_share = AtomicBool::new(false);
     let can_link = OnceLock::new();
-    let parts = Parts::start(backup);
     let ctx = Ctx {
         backup,
         options,
@@ -349,9 +357,10 @@ fn one(f: &FileEntry, dest: &Path, ctx: &Ctx<'_>) -> io::Result<Done> {
         }
         // The record says the file was saved again after it was copied (its time moved, the copy's didn't): only
         // its bytes can tell, however close the times are.
-        let saved_since = recorded
-            .as_ref()
-            .is_some_and(|e| e.copy_time == old_time && e.size == old.len() && e.time != record::nanos(source.time));
+        // (A millisecond apart at least: a drive remounted with other time steps doesn't count.)
+        let saved_since = recorded.as_ref().is_some_and(|e| {
+            e.copy_time == old_time && e.size == old.len() && (e.time - record::nanos(source.time)).abs() >= SAVED_AGAIN
+        });
         if !saved_since && same_file(old, &source_meta) {
             // Up to date by its time; one not yet recorded (a lost record) is read once so it can be shared. Not when
             // the record can't be saved (it would be read again every run) or the file is too small to share.
@@ -443,8 +452,7 @@ fn finish(
         if let Some(p) = keep.parent() {
             fs::create_dir_all(p)?;
         }
-        let keep = claim_free_name(&keep)?;
-        ctx.parts.placeholder(&keep, old.len());
+        let keep = claim_free_name(&keep, |candidate| ctx.parts.placeholder(candidate, old.len()))?;
         if let Err(e) = fs::rename(dest, &keep) {
             let _ = fs::remove_file(&keep);
             return Err(e);
@@ -487,7 +495,7 @@ fn share(source: &Source<'_>, part: &Path, key: &str, ctx: &Ctx<'_>) -> io::Resu
             continue;
         };
         if let Err(e) = fs::hard_link(&there, part) {
-            if cant_link_here(&e) && !*ctx.can_link.get_or_init(|| links_work(ctx.backup)) {
+            if cant_link_here(&e) && !*ctx.can_link.get_or_init(|| links_work(ctx.backup, ctx.parts)) {
                 // This drive can't share: copy as usual, and don't try again this run.
                 ctx.cant_share.store(true, Ordering::Relaxed);
                 return Ok(None);
@@ -556,49 +564,41 @@ fn cant_link_here(e: &io::Error) -> bool {
     }
 }
 
-/// Whether two names for one file can be made on the backup: tries it with two small files in the record's folder.
-fn links_work(backup: &Path) -> bool {
-    let folder = backup.join(record::FOLDER);
-    let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_nanos();
-    let a = folder.join(format!("link-test-{}-{stamp}{PART}", std::process::id()));
-    let b = folder.join(format!("link-test-{}-{stamp}-2{PART}", std::process::id()));
-    let works = fs::create_dir_all(&folder).is_ok()
-        && File::create_new(&a).is_ok()
+/// Whether two names for one file can be made on the backup: tries it with a small file in the record's folder.
+fn links_work(backup: &Path, parts: &Parts) -> bool {
+    let a = test_file(backup, parts, "link-test");
+    let b = test_file(backup, parts, "link-test");
+    let works = File::create_new(&a).is_ok()
         && fs::hard_link(&a, &b).is_ok()
-        && fs::metadata(&a).is_ok_and(|m| same_file_number(&m, &b));
+        && match (fs::metadata(&a), fs::metadata(&b)) {
+            (Ok(x), Ok(y)) => Seen::of(&x).is(&y),
+            _ => false,
+        };
     let _ = fs::remove_file(&b);
     let _ = fs::remove_file(&a);
     works
 }
 
-/// Whether `b` is the very file `a` is (on Windows, where a file's number isn't to hand, whether `b` is there).
-fn same_file_number(a: &Metadata, b: &Path) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        fs::metadata(b).is_ok_and(|m| m.dev() == a.dev() && m.ino() == a.ino())
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = a;
-        fs::metadata(b).is_ok()
-    }
-}
-
 /// Whether the backup drive ignores letter case in names: makes a small file in the record's folder and looks it up
 /// in other letters. When it can't tell (a drive it can't write to), as the computer's own drives do.
-pub(crate) fn ignores_case(backup: &Path) -> bool {
-    let guess = cfg!(any(windows, target_os = "macos"));
-    let folder = backup.join(record::FOLDER);
-    let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_nanos();
-    let name = format!("case-test-{}-{stamp}{PART}", std::process::id());
-    let probe = folder.join(&name);
-    if fs::create_dir_all(&folder).is_err() || File::create_new(&probe).is_err() {
-        return guess;
+fn ignores_case(backup: &Path, parts: &Parts) -> bool {
+    let probe = test_file(backup, parts, "case-test");
+    if File::create_new(&probe).is_err() {
+        return cfg!(any(windows, target_os = "macos"));
     }
-    let ignores = fs::symlink_metadata(folder.join(name.to_uppercase())).is_ok();
+    let upper = probe.file_name().map(|n| probe.with_file_name(n.to_string_lossy().to_uppercase()));
+    let ignores = upper.is_some_and(|u| fs::symlink_metadata(u).is_ok());
     let _ = fs::remove_file(&probe);
     ignores
+}
+
+/// A name for a drive test's file in the record's folder, noted in the run's list so a cut-off run's is cleared.
+fn test_file(backup: &Path, parts: &Parts, what: &str) -> PathBuf {
+    let folder = backup.join(record::FOLDER);
+    let _ = fs::create_dir_all(&folder);
+    let path = folder.join(format!("{}{PART}", crate::parts::run_name(what)));
+    parts.part(&path);
+    path
 }
 
 /// Whether a copy on the backup has a name of its own (changing its time changes no other file). Mac and Linux can
@@ -659,11 +659,13 @@ fn part_name(dest: &Path) -> PathBuf {
 
 /// Claims the path, or "name (2).ext", "name (3).ext"… when something is there already, by making an empty file there
 /// (only one thread or run can make it), which the kept version then replaces. So no kept version is ever replaced.
-fn claim_free_name(path: &Path) -> io::Result<PathBuf> {
+/// `noting` is told each name before it's tried, so a cut-off run's empty placeholder can be cleared.
+fn claim_free_name(path: &Path, noting: impl Fn(&Path)) -> io::Result<PathBuf> {
     let stem = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
     let ext = path.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
     for n in 1u32..10_000 {
         let candidate = if n == 1 { path.to_path_buf() } else { path.with_file_name(format!("{stem} ({n}){ext}")) };
+        noting(&candidate);
         match File::create_new(&candidate) {
             Ok(_) => return Ok(candidate),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
@@ -701,8 +703,9 @@ fn copy_checked(source: &Source<'_>, to: &Path, stop: &AtomicBool) -> io::Result
     if hash_file(to, stop)? != wrote {
         return Err(io::Error::other("The copy read back differently: the backup drive may be failing"));
     }
-    // Only a help: a drive that won't take the time (FAT before 1980 or after 2107) still has a good copy, and the
-    // record notes the time the copy has, so the next run still sees it as up to date.
+    // Only a help: a drive that won't take the time (FAT before 1980 or after 2107) still has a good copy. The record
+    // notes the time the copy has, so the next run still sees it as up to date (a file the record can't hold is read
+    // again next time instead).
     let _ = keep_time(to, source.time);
     Ok((total, wrote))
 }

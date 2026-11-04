@@ -167,7 +167,8 @@ impl<'a> Packer<'a> {
     /// Ready to pack onto `backup`, which must already be there (nothing is created in its place).
     pub fn new(backup: &'a Path) -> Result<Packer<'a>, CantStart> {
         let drive = Drive::find(backup).ok_or_else(|| CantStart::NoBackupFolder(backup.to_path_buf()))?;
-        let ignores_case = crate::copy::ignores_case(backup);
+        // Names inside a zip come from your computer, so they're told apart the computer's way.
+        let ignores_case = cfg!(any(windows, target_os = "macos"));
         Ok(Packer { backup, drive, ignores_case, places: Places::default(), parts: Parts::start(backup) })
     }
 

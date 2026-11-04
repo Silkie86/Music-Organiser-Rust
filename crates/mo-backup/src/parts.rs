@@ -3,10 +3,12 @@
 //!
 //! Before a run makes a temporary file, it writes its place in this run's list of parts
 //! (`<backup>\.mo-backup\parts-<process>-<time>.txt`, one plain line each), and the list is removed when the run
-//! ends. A list left over is a run that was cut off: the next run removes what it names that is still a leftover (a
-//! `.mo-part` copy or zip, or an empty placeholder in Older versions whose old copy never took its place), then the
-//! list. A list or file written in the last hour is left alone: another copy of the app may be using it right now.
-//! Only what a list names is ever removed, so nothing else on the drive is touched.
+//! ends, unless something it names couldn't be cleared away (a program holding it). A list left over is a run that
+//! was cut off: a later run removes what it names that is still a leftover (a `.mo-part` copy or zip, a drive test's
+//! file, or an empty placeholder in Older versions whose old copy never took its place), then the list. A list
+//! written to in the last six hours is left alone: another copy of the app may be using it right now (a part's own
+//! time can't tell: a copy takes its file's old time). Only what a list names is ever removed, so nothing else on the
+//! drive is touched.
 
 use std::fs::{self, File};
 use std::io::Write;
@@ -14,11 +16,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
-use crate::copy::PART;
+use crate::copy::{OLDER_VERSIONS, PART};
 use crate::record::{self, FOLDER};
 
-/// What a list or a leftover must be older than to be cleared: another run may be writing it otherwise.
-const QUIET_FOR: Duration = Duration::from_secs(60 * 60);
+/// What a list must be older than to be cleared: another run may be using it otherwise.
+const QUIET_FOR: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// A name no other run uses: what it's for, this process and the time now.
+pub(crate) fn run_name(what: &str) -> String {
+    let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_nanos();
+    format!("{what}-{}-{stamp}", std::process::id())
+}
 
 /// This run's list of parts. Removed when dropped (the run ended, or stopped).
 pub(crate) struct Parts {
@@ -33,13 +41,12 @@ impl Parts {
     pub(crate) fn start(backup: &Path) -> Parts {
         let folder = backup.join(FOLDER);
         sweep(backup, &folder);
-        let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_nanos();
-        let path = folder.join(format!("parts-{}-{stamp}.txt", std::process::id()));
+        let path = folder.join(format!("{}.txt", run_name("parts")));
         let file = fs::create_dir_all(&folder).and_then(|()| File::create_new(&path)).ok().map(Mutex::new);
         Parts { file, path, backup: backup.to_path_buf() }
     }
 
-    /// Notes a temporary copy or zip (`<name>.mo-part`) before it's made.
+    /// Notes a temporary copy, zip or drive test (`<name>.mo-part`) before it's made.
     pub(crate) fn part(&self, part: &Path) {
         self.note("part", part);
     }
@@ -64,9 +71,13 @@ impl Parts {
 }
 
 impl Drop for Parts {
+    /// The run ended: its list goes, unless something it names couldn't be cleared (a later run tries again).
     fn drop(&mut self) {
         if self.file.take().is_some() {
-            let _ = fs::remove_file(&self.path);
+            let none_left = fs::read_to_string(&self.path).is_ok_and(|text| clear(&self.backup, &text, false));
+            if none_left {
+                let _ = fs::remove_file(&self.path);
+            }
         }
     }
 }
@@ -89,31 +100,31 @@ fn sweep(backup: &Path, folder: &Path) {
             continue;
         }
         let Ok(text) = fs::read_to_string(&list) else { continue };
-        let mut all_cleared = true;
-        for line in text.lines() {
-            let Some((kind, rel)) = line.split_once('\t') else { continue };
-            let Some(path) = record::place(backup, rel) else { continue };
-            let Ok(meta) = fs::symlink_metadata(&path) else { continue };
-            let leftover = meta.is_file()
-                && match kind {
-                    "part" => rel.ends_with(PART),
-                    "empty" => meta.len() == 0 && rel.starts_with(&format!("{}/", crate::copy::OLDER_VERSIONS)),
-                    _ => false,
-                };
-            if !leftover {
-                continue;
-            }
-            if !quiet(&meta) {
-                all_cleared = false;
-                continue;
-            }
-            crate::copy::remove_part(&path);
-            if fs::symlink_metadata(&path).is_ok() {
-                all_cleared = false;
-            }
-        }
-        if all_cleared {
+        if clear(backup, &text, true) {
             let _ = fs::remove_file(&list);
         }
     }
+}
+
+/// Removes what a list names that is still a leftover (only looks, unless `remove`). Whether none is left.
+fn clear(backup: &Path, text: &str, remove: bool) -> bool {
+    let mut none_left = true;
+    for line in text.lines() {
+        let Some((kind, rel)) = line.split_once('\t') else { continue };
+        let Some(path) = record::place(backup, rel) else { continue };
+        let Ok(meta) = fs::symlink_metadata(&path) else { continue };
+        let leftover = meta.is_file()
+            && match kind {
+                "part" => rel.ends_with(PART),
+                "empty" => meta.len() == 0 && rel.starts_with(&format!("{OLDER_VERSIONS}/")),
+                _ => false,
+            };
+        if leftover && remove {
+            crate::copy::remove_part(&path);
+        }
+        if leftover && fs::symlink_metadata(&path).is_ok() {
+            none_left = false;
+        }
+    }
+    none_left
 }

@@ -326,7 +326,7 @@ fn half_copies_a_cut_off_run_left_are_cleared_by_the_next_run() {
     // Review 2026-11-03 (rule 28): a .mo-part left by a crash was cleared only if that same file came up again.
     let root = fixtures("backup-copy-leftovers");
     let backup = root.join("backup");
-    let old = 2 * 60 * 60;
+    let old = 7 * 60 * 60;
     let left = backup.join("I/Stems/Stem.wav.mo-part");
     let placeholder = backup.join(OLDER_VERSIONS).join("2026-11-03 22.00/I/Song (2).flp");
     let kept = backup.join(OLDER_VERSIONS).join("2026-11-03 22.00/I/Song.flp");
@@ -336,7 +336,7 @@ fn half_copies_a_cut_off_run_left_are_cleared_by_the_next_run() {
     write(&placeholder, b"", old);
     write(&kept, b"old save", old);
     write(&not_named, b"half", old);
-    write(&recent, b"half", 10);
+    write(&recent, b"half", old);
     let list = backup.join(".mo-backup/parts-1-1.txt");
     write(
         &list,
@@ -345,14 +345,14 @@ fn half_copies_a_cut_off_run_left_are_cleared_by_the_next_run() {
         old,
     );
     let busy = backup.join(".mo-backup/parts-2-2.txt");
-    write(&busy, b"part\tI/Recent.wav.mo-part\n", old);
+    write(&busy, b"part\tI/Recent.wav.mo-part\n", 10);
 
     let stop = AtomicBool::new(false);
     run(&[], &backup, &Options::new("x"), &stop).unwrap();
     assert!(!left.exists() && !placeholder.exists() && !list.exists(), "cleared");
     assert_eq!(fs::read(&kept).unwrap(), b"old save", "an older version that took its place stays");
     assert!(not_named.exists(), "only what a list names is removed");
-    assert!(recent.exists() && busy.exists(), "a part written in the last hour may be another run's");
+    assert!(recent.exists() && busy.exists(), "a list written to in the last hours may be another run's");
     let lists: Vec<String> = tree(&backup.join(".mo-backup")).into_iter().filter(|p| p.starts_with("parts-")).collect();
     assert_eq!(lists, vec!["parts-2-2.txt"], "this run's own list is removed when it ends");
 }
