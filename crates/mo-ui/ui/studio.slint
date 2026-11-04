@@ -1588,14 +1588,23 @@ export component EmptyState inherits VerticalLayout {
     }
 }
 
+// A Waveform's lines as the graphics card drew them (see `Waves`): `picture`, which holds the Waveform with its corner
+// `x` and `y` pixels in from the picture's own. An empty picture where the window draws the path instead.
+export struct WavePicture {
+    picture: image,
+    x: float,
+    y: float,
+}
+
 // Draws the waveforms on the graphics card (mo-ui's waves.rs). `picture` is the picture of a Waveform's lines (`shape`
-// and `points` as the Waveform has them) in `tint`, `width` by `height` pixels with lines `line` pixels wide: drawn
-// once on the card and kept, so the window shows a picture instead of working out every line again for each frame.
-// Where there's no card (the screenshots, an old driver, MO_DRAW_CPU) it's an empty image, and the Waveform draws its
-// path instead. `asked` changes when the card does, so every Waveform asks again.
+// and `points` as the Waveform has them) in `tint`, for a Waveform `width` by `height` pixels with lines `line` pixels
+// wide, sitting so many 64ths of a pixel (across, then down) past a whole pixel in the window: drawn once on the card
+// and kept, so the window shows a picture instead of working out every line again for each frame. Where there's no
+// card (the screenshots, an old driver, MO_DRAW_CPU) its picture is empty, and the Waveform draws its path instead.
+// `asked` changes when the card does, so every Waveform asks again.
 export global Waves {
     in property <int> asked;
-    pure callback picture(string, int, color, float, float, float, int) -> image;
+    pure callback picture(string, int, color, float, float, float, int, int, int) -> WavePicture;
 }
 
 // A sound's waveform, one thin line per stored peak, like the old app drew it. `shape` is the path the Rust side makes
@@ -1617,18 +1626,24 @@ export component Waveform inherits Rectangle {
     // Each line's width: thin enough that the lines stay apart.
     in property <length> line: max(1px, root.width / max(1, root.points) * 0.6);
     callback seek(float);
-    // The lines drawn by the graphics card, in pixels, when there's a card; empty when there isn't.
-    property <image> picture: Waves.picture(root.shape, root.points, root.tint, root.width / 1phx, root.height / 1phx,
-        root.line / 1phx, Waves.asked);
-    property <bool> on-card: root.picture.width > 0;
+    // Where the Waveform sits in the window, in pixels. The window puts a picture on a whole pixel but draws a path just
+    // where it is, so the card draws the lines as far past a whole pixel as the Waveform sits (in 64ths of a pixel), and
+    // the picture goes that far back: the lines land just where the path's would.
+    property <float> left: root.absolute-position.x / 1phx;
+    property <float> top: root.absolute-position.y / 1phx;
+    // The lines drawn by the graphics card, in pixels, when there's a card; an empty picture when there isn't.
+    property <WavePicture> drawn: Waves.picture(root.shape, root.points, root.tint, root.width / 1phx,
+        root.height / 1phx, root.line / 1phx, mod(round((root.left - floor(root.left)) * 64), 64),
+        mod(round((root.top - floor(root.top)) * 64), 64), Waves.asked);
+    property <bool> on-card: root.drawn.picture.width > 0;
     clip: true;
     // The card's picture, shown pixel for pixel: see-through where it hasn't played yet, full where it has.
     if root.on-card: Image {
-        x: 0;
-        y: 0;
-        width: root.picture.width * 1phx;
-        height: root.picture.height * 1phx;
-        source: root.picture;
+        x: -root.drawn.x * 1phx;
+        y: -root.drawn.y * 1phx;
+        width: root.drawn.picture.width * 1phx;
+        height: root.drawn.picture.height * 1phx;
+        source: root.drawn.picture;
         opacity: root.played >= 1 ? 1 : 0.45;
     }
     if root.on-card && root.played < 1: Rectangle {
@@ -1636,11 +1651,11 @@ export component Waveform inherits Rectangle {
         width: root.width * clamp(root.played, 0, 1);
         clip: true;
         Image {
-            x: 0;
-            y: 0;
-            width: root.picture.width * 1phx;
-            height: root.picture.height * 1phx;
-            source: root.picture;
+            x: -root.drawn.x * 1phx;
+            y: -root.drawn.y * 1phx;
+            width: root.drawn.picture.width * 1phx;
+            height: root.drawn.picture.height * 1phx;
+            source: root.drawn.picture;
         }
     }
     // Without a card, the path.

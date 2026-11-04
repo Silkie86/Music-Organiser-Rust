@@ -1,6 +1,6 @@
 //! A sound's waveform as the graphics card draws it (mo-ui's `waves`): the thin lines [`crate::sounds::wave_path`]
-//! makes for the window, read back and laid out the way the window lays out that path (Slint's `fit: fill`), in pixels.
-//! The window draws the path itself where there's no card.
+//! makes for the window, read back and laid out the way the window lays out that path (Slint's `fit: fill`), in pixels,
+//! just where the window would draw them. The window draws the path itself where there's no card.
 
 use crate::shapes::{Colour, Scene};
 
@@ -37,18 +37,31 @@ fn number(text: &str) -> Option<f32> {
     text.trim().parse::<f32>().ok().filter(|v| v.is_finite())
 }
 
-/// The waveform's lines, `line` pixels wide in `tint`, in a picture `width` by `height` pixels, laid out as the window
-/// lays out the path: `points` wide and 100 high, fitted into the picture less half a line all round.
-pub fn scene(lines: &[WaveLine], points: u32, (width, height): (f64, f64), line: f64, tint: Colour) -> Scene {
+/// The waveform's lines, `line` pixels wide in `tint`, laid out as the window lays out the path in a Waveform `width` by
+/// `height` pixels (`points` wide and 100 high, fitted into it less half a line all round), in a picture that holds the
+/// Waveform with its corner `at` pixels in from the picture's: from 0 to 1 each way, how far past a whole pixel the
+/// Waveform sits in the window. The window puts a picture on a whole pixel, so the lines are drawn that far over, to
+/// land just where it would draw the path's. The picture is the Waveform's size in whole pixels and one more each way,
+/// whatever `at` is.
+pub fn scene(
+    lines: &[WaveLine],
+    points: u32,
+    (width, height): (f64, f64),
+    at: (f64, f64),
+    line: f64,
+    tint: Colour,
+) -> Scene {
     let background = u32::from(tint.r) << 16 | u32::from(tint.g) << 8 | u32::from(tint.b);
-    let mut scene = Scene::new(width, height, background);
+    let room = |length: f64| if length.is_finite() { length.max(0.0).ceil() + 1.0 } else { 1.0 };
+    let mut scene = Scene::new(room(width), room(height), background);
+    let over = |v: f64| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
     let line = if line.is_finite() { line.max(0.0) } else { 0.0 };
     let across = (width - line).max(0.0) / f64::from(points.max(1));
     let down = (height - line).max(0.0) / PATH_HEIGHT;
-    let half = line / 2.0;
+    let (left, top) = (over(at.0) + line / 2.0, over(at.1) + line / 2.0);
     for l in lines {
-        let x = half + f64::from(l.x) * across;
-        scene.line((x, half + f64::from(l.top) * down), (x, half + f64::from(l.bottom) * down), line, tint);
+        let x = left + f64::from(l.x) * across;
+        scene.line((x, top + f64::from(l.top) * down), (x, top + f64::from(l.bottom) * down), line, tint);
     }
     scene
 }
@@ -86,9 +99,10 @@ mod tests {
     fn the_lines_are_laid_out_as_the_window_lays_out_the_path() {
         let read = [WaveLine { x: 0.5, top: 0.0, bottom: 100.0 }, WaveLine { x: 3.5, top: 40.0, bottom: 60.0 }];
         let tint = Colour::rgb(0x4FB3FF, 1.0);
-        // 4 peaks in 202 by 52 pixels, lines 2 pixels wide: the path fits in 200 by 50, a pixel in from each side.
-        let s = scene(&read, 4, (202.0, 52.0), 2.0, tint);
-        assert_eq!((s.width, s.height, s.background), (202.0, 52.0, 0x4FB3FF));
+        // 4 peaks in a Waveform 202 by 52 pixels on whole pixels, lines 2 pixels wide: the path fits in 200 by 50, a
+        // pixel in from each side, in a picture a pixel bigger each way.
+        let s = scene(&read, 4, (202.0, 52.0), (0.0, 0.0), 2.0, tint);
+        assert_eq!((s.width, s.height, s.background), (203.0, 53.0, 0x4FB3FF));
         assert_eq!(
             s.shapes,
             [
@@ -96,5 +110,22 @@ mod tests {
                 Shape::Line { from: (176.0, 21.0), to: (176.0, 31.0), width: 2.0, colour: tint },
             ]
         );
+    }
+
+    /// A Waveform part of a pixel over in the window has its lines drawn that far over in the picture (which the
+    /// window puts on a whole pixel), in a picture the same size as at a whole pixel.
+    #[test]
+    fn the_lines_land_where_the_path_would_past_a_whole_pixel() {
+        let read = [WaveLine { x: 0.5, top: 0.0, bottom: 100.0 }];
+        let tint = Colour::rgb(0x4FB3FF, 1.0);
+        let s = scene(&read, 4, (202.0, 52.0), (0.25, 0.75), 2.0, tint);
+        assert_eq!((s.width, s.height), (203.0, 53.0));
+        assert_eq!(s.shapes, [Shape::Line { from: (26.25, 1.75), to: (26.25, 51.75), width: 2.0, colour: tint }]);
+        // A Waveform part of a pixel wide or high has a picture big enough for it, at any part of a pixel over.
+        let s = scene(&read, 4, (201.5, 51.25), (0.984375, 0.984375), 2.0, tint);
+        assert_eq!((s.width, s.height), (203.0, 53.0));
+        // Less than none over is none, and so is anything that isn't a number.
+        let s = scene(&read, 4, (202.0, 52.0), (-3.0, f64::NAN), 2.0, tint);
+        assert_eq!(s.shapes, [Shape::Line { from: (26.0, 1.0), to: (26.0, 51.0), width: 2.0, colour: tint }]);
     }
 }
