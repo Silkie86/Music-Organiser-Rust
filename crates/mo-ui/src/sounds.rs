@@ -349,7 +349,7 @@ fn line(p: &Page, row: usize, at: usize) -> SoundLine {
     SoundLine {
         row: row as i32,
         name: s.name().into(),
-        sound_type: s.sound_type.clone().into(),
+        sound_type: s.sound_type.as_str().into(),
         colour: list::type_colour(&s.sound_type),
         key: list::key_text(s).into(),
         bpm: a.and_then(|a| a.bpm).map(list::bpm_text).unwrap_or_default().into(),
@@ -386,7 +386,7 @@ fn when(at: NaiveDateTime, now: NaiveDateTime) -> String {
 
 /// A sound's waveform for the screens: every stored peak, one thin line each.
 fn wave(s: &Sound) -> String {
-    list::wave_path(s.analysis.as_ref().map(|a| a.waveform.as_slice()).unwrap_or_default())
+    list::wave_path(&s.analysis.as_ref().map(|a| a.waveform.to_vec()).unwrap_or_default())
 }
 
 fn points(s: &Sound) -> i32 {
@@ -781,7 +781,7 @@ fn alike_found(app: &AppWindow, at: usize, found: Vec<(usize, f64)>) {
                     Some(AlikeLine {
                         place: i as i32,
                         name: s.name().into(),
-                        sound_type: s.sound_type.clone().into(),
+                        sound_type: s.sound_type.as_str().into(),
                         colour: list::type_colour(&s.sound_type),
                         likeness: format!("{:.0}%", likeness.clamp(0.0, 1.0) * 100.0).into(),
                     })
@@ -1670,7 +1670,7 @@ fn picked_sound(p: &Page, at: usize) -> PickedSound {
     };
     PickedSound {
         name: s.name().into(),
-        sound_type: s.sound_type.clone().into(),
+        sound_type: s.sound_type.as_str().into(),
         colour: list::type_colour(&s.sound_type),
         type_from: type_from.into(),
         path: mo_app::shell::wrappable_path(&s.path).into(),
@@ -2065,7 +2065,7 @@ mod tests {
             error: None,
             analysis: None,
             sound_type: "Kick".into(),
-            type_source: String::new(),
+            type_source: Default::default(),
             type_confidence: 0.0,
             user_type: None,
             name_type: None,

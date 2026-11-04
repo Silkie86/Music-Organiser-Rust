@@ -31,7 +31,7 @@ use rusqlite::{
 };
 
 use crate::db::{int_at, real_at, text_at};
-use crate::{ChordSpan, SoundAnalysis, SoundsDb, SoundsError};
+use crate::{ChordSpan, Peaks, SoundAnalysis, SoundsDb, SoundsError, Word};
 
 /// The copy's name, beside `sounds.db`.
 pub const FILE_NAME: &str = "sounds-rust.db";
@@ -702,7 +702,7 @@ fn analysis_values(a: Option<&SoundAnalysis>) -> Vec<Value> {
         packed_chords(&a.chords),
         packed(&a.chroma),
         json_list(&a.character),
-        packed(&a.waveform),
+        packed(&a.waveform.to_vec()),
     ]
 }
 
@@ -730,13 +730,13 @@ pub(crate) fn analysis_at(r: &Row<'_>, at: usize) -> Option<SoundAnalysis> {
         width: real(9).unwrap_or(0.0),
         is_loop: int(10) == Some(1),
         bpm: real(11),
-        bpm_source: text(12).unwrap_or_default(),
+        bpm_source: text(12).map(Word::from).unwrap_or_default(),
         pitch: real(13),
         pitch_confidence: real(14).unwrap_or(0.0),
         key_tonic: int(15),
         key_minor: int(16) == Some(1),
         key_confidence: real(17).unwrap_or(0.0),
-        key_source: text(18).unwrap_or_default(),
+        key_source: text(18).map(Word::from).unwrap_or_default(),
         chord: text(19),
         chords: match get(20) {
             Some(ValueRef::Blob(b)) => unpacked_chords(b),
@@ -744,7 +744,7 @@ pub(crate) fn analysis_at(r: &Row<'_>, at: usize) -> Option<SoundAnalysis> {
         },
         chroma: unpacked(blob(21)),
         character: from_json_list(text(22).as_deref()),
-        waveform: unpacked(blob(23)),
+        waveform: Peaks::new(&unpacked::<f32>(blob(23))),
     })
 }
 

@@ -110,7 +110,7 @@ fn reads_every_sound() {
     assert_eq!(kick.character(), "punchy, dark");
     let a = kick.analysis.as_ref().unwrap();
     assert_eq!(a.chords.len(), 1);
-    assert_eq!(a.waveform, [0.5, 1.0]);
+    assert_eq!(a.waveform.to_vec(), [0.5, 1.0]);
     assert_eq!(a.camelot().as_deref(), Some("2A"));
     // 5 plays counted, 2 of them dated: the 3 undated count as recent.
     assert_eq!(kick.activity, SoundActivity { plays: 4, older_plays: 1, drags: 1, ..Default::default() });
@@ -359,7 +359,7 @@ fn a_big_library_reads_as_the_csharp_app_lists_it() {
     let (features, clap) = (e.features.to_vectors(), e.clap.to_vectors());
     assert!(!features.contains_key(&41));
     assert!(sound(7).analysis.is_none());
-    assert_eq!(sound(2).analysis.as_ref().unwrap().waveform, [0.5, 0.2]);
+    assert_eq!(sound(2).analysis.as_ref().unwrap().waveform.to_vec(), [0.5, 0.2]);
     assert_eq!(features.get(&2), Some(&vec![2.0, 3.0, 4.0, 5.0]));
     assert_eq!(clap.get(&3).map(Vec::len), Some(8));
 }

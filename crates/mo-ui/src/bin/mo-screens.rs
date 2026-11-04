@@ -680,7 +680,7 @@ fn sample_sounds() -> mo_ui::sounds::Library {
         .map(|(i, &(folder, name, ty, seconds, bpm, key))| {
             let is_loop = bpm.is_some();
             // A made-up waveform: hits fall away fast, loops pulse on the beat, long sounds swell.
-            let waveform = (0..160)
+            let waveform: Vec<f32> = (0..160)
                 .map(|x| {
                     let t = x as f32 / 160.0;
                     let wobble = 0.75 + 0.25 * ((x * 7 + i * 13) % 11) as f32 / 10.0;
@@ -712,7 +712,7 @@ fn sample_sounds() -> mo_ui::sounds::Library {
                     bpm,
                     key_tonic: key.map(|k| k.0),
                     key_minor: key.is_some_and(|k| k.1),
-                    waveform,
+                    waveform: waveform.into(),
                     ..SoundAnalysis::default()
                 }),
                 sound_type: if ty.is_empty() { mo_sounds::types::UNKNOWN.into() } else { ty.into() },

@@ -325,7 +325,7 @@ impl SoundList {
         let s = &self.shared.sounds[i];
         let analysis = s.analysis.as_ref();
         let is_loop = analysis.is_some_and(|a| a.is_loop);
-        if (!t.sound_types.is_empty() && !t.sound_types.contains(&s.sound_type))
+        if (!t.sound_types.is_empty() && !t.sound_types.iter().any(|w| *w == s.sound_type))
             || (t.length == Length::Hits && is_loop)
             || (t.length == Length::Loops && !is_loop)
             || (t.favourites && !s.favourite)
@@ -539,7 +539,7 @@ pub fn wave_path(peaks: &[f32]) -> String {
 
 /// The line under a sound's name: its type, key, tempo and length, the ones it has.
 pub fn facts_line(s: &Sound) -> String {
-    let mut parts = vec![s.sound_type.clone()];
+    let mut parts = vec![s.sound_type.to_string()];
     parts.push(key_text(s));
     if let Some(a) = &s.analysis {
         if let Some(b) = a.bpm {
