@@ -1249,6 +1249,18 @@ export global Icons {
     out property <string> backup: "M 2 10 L 14 10 L 14 14.5 L 2 14.5 Z M 8 8 L 8 1.5 M 5 4.5 L 8 1.5 L 11 4.5";
     // Settings: a cog.
     out property <string> settings: "M 10.5 8 A 2.5 2.5 0 1 1 5.5 8 A 2.5 2.5 0 1 1 10.5 8 M 8 1 L 8 3.5 M 8 12.5 L 8 15 M 1 8 L 3.5 8 M 12.5 8 L 15 8 M 3 3 L 4.8 4.8 M 11.2 11.2 L 13 13 M 13 3 L 11.2 4.8 M 4.8 11.2 L 3 13";
+    // A place's icon from its place in rail order (mo-app's `Place::ALL`), "" for none.
+    public pure function place(i: int) -> string {
+        if (i == 0) { return songs; }
+        if (i == 1) { return sounds; }
+        if (i == 2) { return presets; }
+        if (i == 3) { return midi; }
+        if (i == 4) { return plugins; }
+        if (i == 5) { return space; }
+        if (i == 6) { return backup; }
+        if (i == 7) { return settings; }
+        return "";
+    }
 }
 
 // A name over a map, like a neighbourhood of the galaxy ("KICK"): it lights up under the mouse, as a click on it flies
@@ -1929,6 +1941,20 @@ export component EmptyState inherits VerticalLayout {
     callback act;
     alignment: center;
     spacing: Space.sm;
+    // The place's icon in its colour, so even an empty page says where you are.
+    if Icons.place(Theme.here) != "": HorizontalLayout {
+        alignment: center;
+        padding-bottom: Space.xs;
+        Path {
+            width: 32px;
+            height: 32px;
+            viewbox-width: 16;
+            viewbox-height: 16;
+            commands: Icons.place(Theme.here);
+            stroke: Theme.here-colour.transparentize(25%);
+            stroke-width: 2px;
+        }
+    }
     Text {
         text: root.title;
         color: Theme.text;

@@ -10,8 +10,9 @@ export struct FinderLine {
     detail: string,
     // An action's key, at the right like a menu line (rule 15).
     key: string,
-    // The kind's or place's icon, from Icons ("" for none).
+    // The kind's or place's icon, from Icons ("" for none), and that place (rail order, -1 for none) for its colour.
     icon: string,
+    place: int,
     // Whether it has a Play button (sounds) and an Open in its DAW button (songs), shown on the line itself.
     plays: bool,
     daw: bool,
@@ -209,7 +210,8 @@ export component Finder inherits Rectangle {
                                         viewbox-width: 16;
                                         viewbox-height: 16;
                                         commands: line.icon;
-                                        stroke: FinderData.selected == i ? Theme.accent : Theme.muted;
+                                        // In its place's colour, as on the rail, so you see where it lives.
+                                        stroke: FinderData.selected == i ? Theme.place(line.place) : Theme.place(line.place).transparentize(35%);
                                         stroke-width: 1.4px;
                                     }
                                 }
