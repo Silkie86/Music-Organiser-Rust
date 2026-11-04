@@ -58,3 +58,7 @@ __pycache__/
 /fuzz/corpus/
 /fuzz/artifacts/
 /fuzz/coverage/
+
+# What the Bitwig extension's build and the Bitwig script's checks make
+/extensions/bitwig-java/target/
+/extensions/bitwig/node_modules/
