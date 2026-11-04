@@ -8,7 +8,7 @@
 //! Each drag also says what the card that follows the mouse shows ([`Payload::cards`], drawn by `drag_card`): one
 //! line per thing carried, with its name, a few facts and a small picture of it.
 //!
-//! **The MIDI files** (rule 28: the app cleans up after itself). A DAW takes a MIDI file's notes into its project and
+//! **The MIDI files** (rule 28, Solomon 2026-11-02: the app cleans up after itself). A DAW takes a MIDI file's notes into its project and
 //! names the clip after the file, so each file is named after its clip ("Chords.mid"). Two drags can both carry a
 //! "Chords", so each drag gets a new folder of its own right in the system's Temp folder, `mo-drag-<process>-<count>`,
 //! never one that's there already. In it, before any MIDI file, goes `mo-drag.txt`: a first line saying it's the
@@ -31,7 +31,7 @@ use mo_formats::midi::write::write_clip;
 use mo_formats::textscan::{is_device_name, safe_file_name};
 use mo_formats::{MidiClip, NoteAttribute, NoteEvent};
 
-use crate::backup::thousands;
+use crate::songs::thousands;
 
 /// What a line on the card is: a sound file, or a MIDI clip or track.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -143,23 +143,38 @@ fn same_file_key(path: &Path) -> String {
     if cfg!(windows) { s.replace('/', "\\").to_lowercase() } else { s.into_owned() }
 }
 
-/// At most `most` peaks, each the loudest of the ones it stands for, so a short card picture keeps every click.
+/// At most `most` peaks (0 to 1), each the loudest of the ones it stands for, so a short card picture keeps every
+/// click.
 fn fewer_peaks(peaks: &[f32], most: usize) -> Vec<f32> {
-    if peaks.len() <= most || most == 0 {
-        return peaks.iter().map(|v| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }).collect();
-    }
-    (0..most)
+    let kept = if peaks.len() <= most || most == 0 {
+        peaks.iter().copied().map(loudness).collect()
+    } else {
+        loudest(peaks, most)
+    };
+    kept.into_iter().map(|v| v.min(1.0)).collect()
+}
+
+/// How loud a waveform's peak is: its size, and none for a broken number.
+pub(crate) fn loudness(peak: f32) -> f32 {
+    if peak.is_finite() { peak.abs() } else { 0.0 }
+}
+
+/// A waveform's peaks as `slots` slices, each as loud as the loudest of the peaks it stands for ([`share`]), so a
+/// click in a long sound is kept; a short one is stretched.
+pub(crate) fn loudest(peaks: &[f32], slots: usize) -> Vec<f32> {
+    (0..slots)
         .map(|i| {
-            let (a, b) = (i * peaks.len() / most, ((i + 1) * peaks.len() / most).max(i * peaks.len() / most + 1));
-            peaks
-                .get(a..b.min(peaks.len()))
-                .unwrap_or_default()
-                .iter()
-                .filter(|v| v.is_finite())
-                .fold(0.0f32, |m, &v| m.max(v))
+            let (a, b) = share(i, slots, peaks.len());
+            peaks.get(a..b).unwrap_or_default().iter().copied().map(loudness).fold(0.0, f32::max)
         })
-        .map(|v| v.clamp(0.0, 1.0))
         .collect()
+}
+
+/// The part of `len` things that slot `i` of `slots` stands for: at least one thing, so a short list is stretched.
+pub(crate) fn share(i: usize, slots: usize, len: usize) -> (usize, usize) {
+    let at = |i: usize| (i as u128 * len as u128 / slots.max(1) as u128) as usize;
+    let a = at(i).min(len.saturating_sub(1));
+    (a, at(i + 1).max(a + 1).min(len))
 }
 
 // ---- Clips and tracks from a song's arrangement ----------------------------------------------------------------
@@ -226,7 +241,8 @@ const THUMB_NOTES: usize = 400;
 /// for each instrument in it (an FL Studio pattern holds several) timed from its start (a track's from the song's
 /// start, so it lands in the same place); muted notes are left out, as MIDI has none, and so are a track's muted
 /// clips, as they don't play. FL's step-sequencer notes get the length FL plays them for. Its audio clips' samples come
-/// from `found` (the samples the arrangement found on this computer, by the path the project saved), each once.
+/// from `found` (the samples the arrangement found on this computer, by the path the project saved), each once, and
+/// only when they're still there now: each is looked for on the disk, so this is never called on the window's thread.
 /// `waves` gives a sample's waveform for its card line, when it's been read. An error is what to say instead: there's
 /// nothing to drag.
 pub fn from_arrangement(
@@ -255,19 +271,15 @@ pub fn from_arrangement(
     let gathered = gather(lane, &clips, found);
     let notes: usize = gathered.parts.iter().map(|(_, n)| n.len()).sum();
     if notes == 0 && gathered.samples.is_empty() {
-        let what = if matches!(pick, Pick::Clip { .. }) { "This clip" } else { "This track" };
-        return Err(if gathered.missing > 0 {
-            format!("{what}'s sample isn't on this computer, so there's nothing to drag.")
-        } else if lane.kind == LaneKind::Automation
-            || clips.iter().all(|(c, _)| c.notes.is_empty() && c.audio.is_empty())
-        {
-            format!("{what} has no notes or audio to drag.")
-        } else {
-            format!("{what}'s notes are all muted, so there's nothing to drag.")
-        });
+        return Err(nothing_to_carry(pick, lane, &clips, gathered.missing));
     }
 
-    let tint = lane.colour.or_else(|| clips.first().and_then(|(c, _)| c.colour)).unwrap_or(0);
+    // The colour it's drawn in on the view: a clip's own, else its track's; a track's own, else its first clip's.
+    let tint = match pick {
+        Pick::Clip { .. } => clips.first().and_then(|(c, _)| c.colour).or(lane.colour),
+        Pick::Lane(_) => lane.colour.or_else(|| clips.first().and_then(|(c, _)| c.colour)),
+    }
+    .unwrap_or(0);
     let bars = bars_text(length, arrangement.beats_per_bar);
     let mut out = Outgoing { missing: gathered.missing, ..Outgoing::default() };
     if notes > 0 {
@@ -276,7 +288,9 @@ pub fn from_arrangement(
         out.midi.push(MidiFile { name: format!("{}.mid", safe_file_name(&name)), bytes });
         for (part, part_notes) in &gathered.parts {
             out.cards.push(Card {
-                title: part.clone(),
+                // One part is the whole MIDI file, named as the DAW names the clip it makes; several are its tracks,
+                // each by its instrument.
+                title: if gathered.parts.len() == 1 { name.clone() } else { part.clone() },
                 detail: ["MIDI".to_owned(), count_of(part_notes.len(), "note", "notes"), bars.clone()]
                     .into_iter()
                     .filter(|s| !s.is_empty())
@@ -315,8 +329,31 @@ pub fn from_arrangement(
     Ok(out)
 }
 
+/// Why a clip or track (`lane` itself, or the clips of it that play) has nothing to drag, in the user's words.
+fn nothing_to_carry(pick: Pick, lane: &PreviewLane, clips: &[(&PreviewClip, f64)], missing: usize) -> String {
+    let what = if matches!(pick, Pick::Clip { .. }) { "This clip" } else { "This track" };
+    let has_something = |c: &PreviewClip| !c.notes.is_empty() || !c.audio.is_empty();
+    if missing == 1 {
+        format!("{what}'s sample isn't on this computer, so there's nothing to drag.")
+    } else if missing > 1 {
+        format!("{what}'s samples aren't on this computer, so there's nothing to drag.")
+    } else if lane.kind == LaneKind::Automation
+        || match pick {
+            Pick::Clip { .. } => !clips.iter().any(|(c, _)| has_something(c)),
+            Pick::Lane(_) => !lane.clips.iter().any(has_something),
+        }
+    {
+        format!("{what} has no notes or audio to drag.")
+    } else if !clips.iter().any(|(c, _)| has_something(c)) {
+        // A track whose clips with something in them are all muted.
+        "This track's clips are all muted, so there's nothing to drag.".to_owned()
+    } else {
+        format!("{what}'s notes are all muted, so there's nothing to drag.")
+    }
+}
+
 /// The notes and samples of `clips` (each with where its start goes, in beats from what's dragged's start), part by
-/// part.
+/// part. Looks for each sample on the disk.
 fn gather(lane: &PreviewLane, clips: &[(&PreviewClip, f64)], found: &HashMap<String, PathBuf>) -> Gathered {
     let mut parts: Vec<(String, Vec<BeatNote>)> = Vec::new();
     let mut samples: Vec<(PathBuf, String)> = Vec::new();
@@ -359,10 +396,11 @@ fn gather(lane: &PreviewLane, clips: &[(&PreviewClip, f64)], found: &HashMap<Str
     Gathered { parts, samples, missing: gone.len() }
 }
 
-/// A sample path a DAW can open: a whole path on this computer, not one in the DAW's own words
-/// ("%FLStudioFactoryData%…"), which the arrangement keeps when it knows the file is the DAW's but not where.
+/// A sample a DAW can open: a whole path (not one in a DAW's own words, "%FLStudioFactoryData%…", which the
+/// arrangement keeps when it knows the file is the DAW's but not where), to a file that's there now. It was found when
+/// the song was read, but its drive may have been unplugged or its folder renamed since.
 fn usable_sample(path: &Path) -> bool {
-    path.is_absolute() && !path.to_string_lossy().contains('%')
+    path.is_absolute() && path.is_file()
 }
 
 /// The notes as a MIDI clip `length` beats long, at the first usual ticks a beat that places them all exactly.
@@ -545,30 +583,42 @@ impl Swept {
 /// Clears the drag files in `temp` made a day or more before `now` (see the top of this file). Reads and removes
 /// files, so never on the window's thread.
 pub fn sweep(temp: &Path, now: SystemTime) -> Swept {
-    sweep_folders(temp, now, KEPT, None)
+    sweep_folders(temp, now)
 }
 
-/// Clears this run's own drag files in `temp` that are a minute old or more, as the app closes.
+/// Clears this run's own drag files in `temp` that are a minute old or more, as the app closes. Quick: it looks only
+/// at the folders this run made, by their names, and at nothing when it made none.
 pub fn finish_up(temp: &Path, now: SystemTime) -> Swept {
-    sweep_folders(temp, now, KEPT_AT_CLOSE, Some(std::process::id()))
+    let process = std::process::id();
+    let mut done = Swept::default();
+    for n in 1..FOLDERS_MADE.load(Ordering::Relaxed) {
+        let folder = temp.join(format!("{FOLDER}{process}-{n}"));
+        if real_folder(&folder) {
+            done.add(sweep_folder(&folder, now, KEPT_AT_CLOSE));
+        }
+    }
+    done
 }
 
-fn sweep_folders(temp: &Path, now: SystemTime, kept: Duration, process: Option<u32>) -> Swept {
+fn sweep_folders(temp: &Path, now: SystemTime) -> Swept {
     let mut done = Swept::default();
     let Ok(entries) = fs::read_dir(temp) else { return done };
     for entry in entries.flatten() {
         let name = entry.file_name();
-        let Some((pid, _)) = name.to_str().and_then(folder_numbers) else { continue };
-        if process.is_some_and(|p| p != pid) {
+        if name.to_str().and_then(folder_numbers).is_none() {
             continue;
         }
         let folder = entry.path();
-        // A real folder right here: not a link or a junction to one somewhere else.
-        if fs::symlink_metadata(&folder).is_ok_and(|m| m.file_type().is_dir()) {
-            done.add(sweep_folder(&folder, now, kept));
+        if real_folder(&folder) {
+            done.add(sweep_folder(&folder, now, KEPT));
         }
     }
     done
+}
+
+/// A real folder right there: not a link or a junction to one somewhere else.
+fn real_folder(folder: &Path) -> bool {
+    fs::symlink_metadata(folder).is_ok_and(|m| m.file_type().is_dir())
 }
 
 /// The process and count in a drag folder's name, `mo-drag-<process>-<count>`, both all digits; None for any other
@@ -727,7 +777,18 @@ mod tests {
         assert_eq!(fewer.len(), 10);
         assert_eq!(fewer[5], 0.9);
         assert!(fewer.iter().all(|v| (0.0..=1.0).contains(v)));
-        assert_eq!(fewer_peaks(&[0.5, 2.0, -1.0], 10), [0.5, 1.0, 0.0]);
+        // A peak's size, at most 1.
+        assert_eq!(fewer_peaks(&[0.5, 2.0, -0.25, f32::NAN], 10), [0.5, 1.0, 0.25, 0.0]);
+        // Stretched when there are fewer peaks than slices.
+        assert_eq!(loudest(&[0.5, 0.25], 4), [0.5, 0.5, 0.25, 0.25]);
+    }
+
+    #[test]
+    fn slices_share_out_what_they_stand_for() {
+        assert_eq!(share(0, 4, 2), (0, 1));
+        assert_eq!(share(3, 4, 2), (1, 2));
+        assert_eq!(share(1, 2, 10), (5, 10));
+        assert_eq!(share(5, 0, 0), (0, 0));
     }
 
     fn note(start: f64, length: f64, key: u8) -> PreviewNote {
@@ -804,12 +865,19 @@ mod tests {
         let mut got: Vec<_> = notes.iter().map(|n| (n.1, n.2, n.3)).collect();
         got.sort_unstable();
         assert_eq!(got, [(at(4.0), at(1.0), 36), (at(13.5), at(0.25), 38)]);
-        // A clip picked on its own goes even when it's muted.
+        // A clip picked on its own goes even when it's muted, named as it is: the file and its line on the card.
         let mut lane = PreviewLane::new("Bass", LaneKind::Instrument);
-        lane.clips =
-            vec![PreviewClip { muted: true, length: 4.0, notes: vec![note(0.0, 1.0, 40)], ..PreviewClip::default() }];
-        let out = from_arrangement(&song(vec![lane]), Pick::Clip { lane: 0, clip: 0 }, &HashMap::new(), &no_waves);
-        assert_eq!(out.unwrap().midi[0].name, "Bass.mid");
+        lane.clips = vec![PreviewClip {
+            name: "Bass line".into(),
+            muted: true,
+            length: 4.0,
+            notes: vec![note(0.0, 1.0, 40)],
+            ..PreviewClip::default()
+        }];
+        let out =
+            from_arrangement(&song(vec![lane]), Pick::Clip { lane: 0, clip: 0 }, &HashMap::new(), &no_waves).unwrap();
+        assert_eq!(out.midi[0].name, "Bass line.mid");
+        assert_eq!(out.cards[0].title, "Bass line");
     }
 
     #[test]
@@ -836,10 +904,18 @@ mod tests {
 
     #[test]
     fn audio_goes_out_as_the_samples_found_each_once() {
+        // Real files, as each sample is looked for on the disk; a "%" in a real name is fine.
+        let temp = test_temp("samples");
+        let (kick, odd) = (temp.join("Kick.wav"), temp.join("100% Kick.wav"));
+        fs::write(&kick, b"RIFF").unwrap();
+        fs::write(&odd, b"RIFF").unwrap();
         let mut found = HashMap::new();
-        let kick = if cfg!(windows) { r"D:\Samples\Kick.wav" } else { "/samples/Kick.wav" };
-        found.insert("Kick.wav".to_owned(), PathBuf::from(kick));
+        found.insert("Kick.wav".to_owned(), kick.clone());
+        found.insert("100% Kick.wav".to_owned(), odd.clone());
+        // In FL's own words: not a whole path, so not one a DAW can open.
         found.insert("%FLStudioFactoryData%\\Snare.wav".to_owned(), PathBuf::from("%FLStudioFactoryData%\\Snare.wav"));
+        // Found when the song was read, but gone since (an unplugged drive).
+        found.insert("Unplugged.wav".to_owned(), temp.join("Unplugged.wav"));
         let part = |path: &str| AudioPart {
             path: path.into(),
             start: 0.0,
@@ -855,26 +931,34 @@ mod tests {
         lane.clips = vec![
             clip("Kick.wav", 0.0),
             clip("Kick.wav", 4.0),
+            clip("100% Kick.wav", 6.0),
             clip("%FLStudioFactoryData%\\Snare.wav", 8.0),
             clip("Gone.wav", 12.0),
             clip("Gone.wav", 16.0),
+            clip("Unplugged.wav", 20.0),
         ];
         let waves = |p: &str| (p == "Kick.wav").then(|| vec![0.2, 0.8]);
         let out = from_arrangement(&song(vec![lane]), Pick::Lane(0), &found, &waves).unwrap();
         assert!(out.midi.is_empty());
-        assert_eq!(out.samples, [PathBuf::from(kick)]);
-        assert_eq!(out.missing, 2);
-        assert_eq!(out.caption, "1 sample · 2 samples not on this computer");
+        assert_eq!(out.samples, [kick, odd]);
+        assert_eq!(out.missing, 3);
+        assert_eq!(out.caption, "2 samples · 3 samples not on this computer");
         assert_eq!(out.cards[0].title, "Kick.wav");
         assert_eq!(out.cards[0].thumb, Thumb::Wave(vec![0.2, 0.8]));
+        assert_eq!(out.cards[1].title, "100% Kick.wav");
         // A clip whose sample isn't here has nothing to carry.
-        let missing = from_arrangement(
-            &song(vec![PreviewLane { clips: vec![clip("Gone.wav", 0.0)], ..PreviewLane::new("A", LaneKind::Audio) }]),
-            Pick::Clip { lane: 0, clip: 0 },
-            &found,
-            &waves,
+        let gone = |name: &str| {
+            let lane = PreviewLane { clips: vec![clip(name, 0.0)], ..PreviewLane::new("A", LaneKind::Audio) };
+            from_arrangement(&song(vec![lane]), Pick::Clip { lane: 0, clip: 0 }, &found, &waves).unwrap_err()
+        };
+        assert_eq!(gone("Gone.wav"), "This clip's sample isn't on this computer, so there's nothing to drag.");
+        assert_eq!(gone("Unplugged.wav"), "This clip's sample isn't on this computer, so there's nothing to drag.");
+        let mut two = PreviewLane::new("A", LaneKind::Audio);
+        two.clips = vec![clip("Gone.wav", 0.0), clip("Unplugged.wav", 4.0)];
+        assert_eq!(
+            from_arrangement(&song(vec![two]), Pick::Lane(0), &found, &waves).unwrap_err(),
+            "This track's samples aren't on this computer, so there's nothing to drag."
         );
-        assert_eq!(missing.unwrap_err(), "This clip's sample isn't on this computer, so there's nothing to drag.");
     }
 
     #[test]
@@ -886,13 +970,44 @@ mod tests {
         quiet.muted = true;
         muted.clips = vec![PreviewClip { length: 4.0, notes: vec![quiet], ..PreviewClip::default() }];
         let group = PreviewLane::new("Drums", LaneKind::Group);
-        let a = song(vec![lane, muted, group]);
+        // Every clip on it muted, though they have notes.
+        let mut off = PreviewLane::new("Pads", LaneKind::Instrument);
+        off.clips =
+            vec![PreviewClip { length: 4.0, muted: true, notes: vec![note(0.0, 1.0, 60)], ..PreviewClip::default() }];
+        let empty = PreviewLane::new("Empty", LaneKind::Instrument);
+        let a = song(vec![lane, muted, group, off, empty]);
         let pick = |p| from_arrangement(&a, p, &HashMap::new(), &no_waves).unwrap_err();
         assert_eq!(pick(Pick::Clip { lane: 0, clip: 0 }), "This clip has no notes or audio to drag.");
         assert_eq!(pick(Pick::Lane(1)), "This track's notes are all muted, so there's nothing to drag.");
+        assert_eq!(
+            pick(Pick::Clip { lane: 1, clip: 0 }),
+            "This clip's notes are all muted, so there's nothing to drag."
+        );
         assert_eq!(pick(Pick::Lane(2)), "A group's tracks are dragged one at a time.");
+        assert_eq!(pick(Pick::Lane(3)), "This track's clips are all muted, so there's nothing to drag.");
+        assert_eq!(pick(Pick::Lane(4)), "This track has no notes or audio to drag.");
         assert_eq!(pick(Pick::Lane(9)), "That track isn't in the song any more.");
         assert_eq!(pick(Pick::Clip { lane: 1, clip: 4 }), "That clip isn't in the song any more.");
+    }
+
+    #[test]
+    fn the_card_takes_the_colour_the_view_draws_it_in() {
+        let mut lane = PreviewLane::new("Track 1", LaneKind::Instrument);
+        lane.colour = Some(0xCC3333);
+        let green = PreviewClip {
+            length: 4.0,
+            notes: vec![note(0.0, 1.0, 60)],
+            colour: Some(0x33CC33),
+            ..PreviewClip::default()
+        };
+        let plain = PreviewClip { start: 4.0, colour: None, ..green.clone() };
+        lane.clips = vec![green, plain];
+        let a = song(vec![lane]);
+        let tint = |p| from_arrangement(&a, p, &HashMap::new(), &no_waves).unwrap().cards[0].tint;
+        // A clip in its own colour, else its track's; a track in its own.
+        assert_eq!(tint(Pick::Clip { lane: 0, clip: 0 }), 0x33CC33);
+        assert_eq!(tint(Pick::Clip { lane: 0, clip: 1 }), 0xCC3333);
+        assert_eq!(tint(Pick::Lane(0)), 0xCC3333);
     }
 
     #[test]

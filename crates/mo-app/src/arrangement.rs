@@ -402,6 +402,9 @@ pub struct View {
     fit_all: bool,
     hover: Option<(f64, f64)>,
     drag: Option<(f64, f64, f64, f64)>,
+    /// A left press on a clip or a track's name, and where: it's dragged out of the app once the mouse moves far
+    /// enough ([`View::left_press`]).
+    held: Option<(crate::drag_out::Pick, f64, f64)>,
     song_beats: f64,
     content_height: f64,
     /// Each lane's lowest and highest note, so the same note sits at the same height in every clip.
@@ -447,6 +450,7 @@ impl View {
             fit_all: false,
             hover: None,
             drag: None,
+            held: None,
             song_beats,
             content_height,
             keys: Arc::new(keys),
@@ -572,6 +576,7 @@ impl View {
 
     pub fn release(&mut self) {
         self.drag = None;
+        self.held = None;
     }
 
     pub fn dragging(&self) -> bool {
@@ -1340,6 +1345,36 @@ mod tests {
         let mut low = view(1000.0, 100.0);
         low.wheel(500.0, 0.0, -10.0, false, false);
         assert_eq!(low.pick_box(Pick::Lane(0)), None);
+        // A track with nothing in it: its name moves the view too.
+        let mut empty = song();
+        empty.lanes[0].clips.clear();
+        let mut v = View::new(Arc::new(empty), Arc::default());
+        v.resize(1000.0, 300.0);
+        assert_eq!(v.pick_at(50.0, keys), None);
+    }
+
+    #[test]
+    fn a_left_press_on_a_clip_drags_it_out_once_the_mouse_moves_four_points() {
+        let mut v = view(1000.0, 300.0);
+        let (x, y) = (v.x(2.0), v.ruler_height() + 20.0);
+        v.left_press(x, y);
+        // Held, not moving the view.
+        assert!(!v.dragging());
+        assert_eq!(v.moved_far(x + 4.0, y - 4.0), None, "four points isn't far enough");
+        assert_eq!(v.moved_far(x + 1.0, y + 4.5), Some(Pick::Clip { lane: 0, clip: 0 }));
+        // Given once: the press is over.
+        assert_eq!(v.moved_far(x + 30.0, y), None);
+        // Letting go before it's far enough calls it off.
+        v.left_press(x, y);
+        v.release();
+        assert_eq!(v.moved_far(x + 30.0, y), None);
+        // On empty space the left button moves the view, and nothing is dragged out.
+        let empty = (v.x(2.0), v.ruler_height() + 46.0 + 20.0);
+        v.left_press(empty.0, empty.1);
+        assert!(v.dragging());
+        assert_eq!(v.moved_far(empty.0 + 30.0, empty.1), None);
+        v.release();
+        assert!(!v.dragging());
     }
 
     #[test]

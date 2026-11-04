@@ -48,7 +48,17 @@ type Once = Rc<Cell<Option<Box<dyn FnOnce()>>>>;
 /// first. Only once.
 pub fn after_next_frame(latest: Duration, f: impl FnOnce() + 'static) {
     let once: Once = Rc::new(Cell::new(Some(Box::new(f))));
-    AFTER_FRAME.with(|q| q.borrow_mut().push(once.clone()));
+    AFTER_FRAME.with(|q| {
+        let mut q = q.borrow_mut();
+        // Those their timer ran already go, in case no frames come at all (the window isn't drawn with the card).
+        q.retain(|w| {
+            let f = w.take();
+            let waiting = f.is_some();
+            w.set(f);
+            waiting
+        });
+        q.push(once.clone());
+    });
     slint::Timer::single_shot(latest, move || {
         if let Some(f) = once.take() {
             f();

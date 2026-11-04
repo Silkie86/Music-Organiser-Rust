@@ -190,3 +190,42 @@ fn clips_on_a_muted_track_dont_play_as_it_opens_in_bitwig_either() {
     let acapella = bitwig.lanes.iter().find(|l| l.name == "Acapella").unwrap();
     assert!(acapella.clips.iter().all(|c| c.muted), "both its clips are on muted tracks");
 }
+
+#[test]
+fn a_pattern_clip_names_the_channels_it_plays_as_its_parts() {
+    // "Intro" plays Lead's notes and Kick's: one part each, in the order they first play.
+    let [playlist, _] = read(&fl_studio_project_with(Some(&playlist_item(0, 1, 384, -1))));
+    let intro = &playlist.lanes[0].clips[0];
+    assert_eq!(intro.parts, ["Lead", "Kick"]);
+    let parts: Vec<_> = intro.notes.iter().map(|n| (n.key, n.part, n.step)).collect();
+    assert_eq!(parts, [(60, 0, false), (36, 1, false), (64, 0, false)]);
+    // Two channels both called "Perc": two parts all the same, so a drag out of the app makes two MIDI tracks.
+    let notes = [note(0, 0, 24, 36, 100), note(24, 1, 24, 38, 100), note(48, 0, 24, 36, 100)].concat();
+    let flp = Flp::new()
+        .ascii(199, "21.2.3.4004")
+        .dword(156, 128_000)
+        .word(64, 0)
+        .byte(21, 0)
+        .text(203, "Perc")
+        .word(64, 1)
+        .byte(21, 0)
+        .text(203, "Perc")
+        .word(65, 1)
+        .text(193, "Beat")
+        .data(224, &notes)
+        .data(233, &playlist_item(0, 1, 384, -1))
+        .build();
+    let [playlist, _] = read(&flp);
+    let beat = &playlist.lanes[0].clips[0];
+    assert_eq!(beat.parts, ["Perc", "Perc 2"]);
+    assert_eq!(beat.notes.iter().map(|n| n.part).collect::<Vec<_>>(), [0, 1, 0]);
+}
+
+#[test]
+fn step_sequencer_notes_are_marked_as_steps() {
+    let [playlist, _] = read(&fl_studio_9_steps());
+    let clip = &playlist.lanes[0].clips[0];
+    assert_eq!(clip.parts, ["Kick"]);
+    assert_eq!(clip.notes.len(), 3);
+    assert!(clip.notes.iter().all(|n| n.step && n.part == 0));
+}

@@ -1,10 +1,22 @@
 //! What a drag out of the app picks up from the arrangement under the mouse (a clip, or a whole track by its name),
 //! where it's drawn (for the dimming while it's carried), and what it carries, made on another thread (`drag_out`).
+//!
+//! The left button does both jobs: pressed on a clip or a track's name, it drags that out once the mouse has moved a
+//! few points; pressed anywhere else, it moves the view, as the right and middle buttons do anywhere.
 
-use mo_formats::arrangement::{LaneKind, PreviewLane};
+use mo_formats::arrangement::{LaneKind, PreviewClip, PreviewLane};
 
 use super::{View, lane_height};
 use crate::drag_out::{self, Outgoing, Pick};
+
+/// How far, in points, the mouse moves with the left button down on a clip or a track's name before that's dragged
+/// out of the app, across or up and down (as far as a line on the Sounds page, `ListLine` in `studio.slint`).
+pub const DRAG_START: f64 = 4.0;
+
+/// A clip with something a DAW can take: notes (muted or not) or audio.
+fn has_something(clip: &PreviewClip) -> bool {
+    !clip.notes.is_empty() || !clip.audio.is_empty()
+}
 
 impl View {
     /// Each lane with where its top is on the view and how high it's drawn, top to bottom.
@@ -20,8 +32,9 @@ impl View {
     }
 
     /// What a drag that starts at `x`, `y` would carry out of the app: the clip there, or the whole track when it's on
-    /// a track's name. Nothing on the ruler, on empty space, on an automation clip or lane, or on a group's name:
-    /// there's nothing a DAW could take from those (a drag there moves the view instead).
+    /// a track's name. Nothing on the ruler, on empty space, on an automation clip or lane, on a group's name or on
+    /// the name of a track with nothing in it: there's nothing a DAW could take from those (a drag there moves the
+    /// view instead).
     pub fn pick_at(&self, x: f64, y: f64) -> Option<Pick> {
         let (hx, ruler) = (self.header_width(), self.ruler_height());
         if y < ruler || y >= self.height || x < 0.0 || x >= self.width || self.width < 60.0 {
@@ -32,12 +45,33 @@ impl View {
             return None;
         }
         if x < hx {
-            return Some(Pick::Lane(i));
+            // A track whose clips are all muted is still picked: the drag then says so.
+            return lane.clips.iter().any(has_something).then_some(Pick::Lane(i));
         }
         // The clip drawn last is on top.
         let clip = lane.clips.iter().rposition(|c| self.clip_box(c, top, lh).contains(x, y))?;
-        let c = lane.clips.get(clip)?;
-        (!c.notes.is_empty() || !c.audio.is_empty()).then_some(Pick::Clip { lane: i, clip })
+        has_something(lane.clips.get(clip)?).then_some(Pick::Clip { lane: i, clip })
+    }
+
+    /// The left button went down at `x`, `y`: on something [`View::pick_at`] picks, it's held, to be dragged out of
+    /// the app once the mouse moves far enough ([`View::moved_far`]); anywhere else the view starts moving, as with
+    /// [`View::press`].
+    pub fn left_press(&mut self, x: f64, y: f64) {
+        self.held = self.pick_at(x, y).map(|pick| (pick, x, y));
+        if self.held.is_none() {
+            self.press(x, y);
+        }
+    }
+
+    /// With the mouse at `x`, `y`: what's held, once the mouse is [`DRAG_START`] points or more from where it was
+    /// pressed, across or up and down. It's let go of then, so it's given once: the caller drags it out.
+    pub fn moved_far(&mut self, x: f64, y: f64) -> Option<Pick> {
+        let (pick, from_x, from_y) = self.held?;
+        if (x - from_x).abs() <= DRAG_START && (y - from_y).abs() <= DRAG_START {
+            return None;
+        }
+        self.held = None;
+        Some(pick)
     }
 
     /// Where `pick` is drawn, as (x, y, width, height) in the view's points, cut to the part of the view it's in (a
@@ -61,8 +95,9 @@ impl View {
         (bottom > top && right > left).then_some((left, top, right - left, bottom - top))
     }
 
-    /// What a drag of `pick` carries out of the app, made later on another thread: the returned maker holds only what
-    /// it shares with this view (the song, the samples found, the waveforms read), so the view can go on meanwhile.
+    /// What a drag of `pick` carries out of the app, made later on another thread (it looks at the disk): the returned
+    /// maker holds only what it shares with this view (the song, the samples found, the waveforms read), so the view
+    /// can go on meanwhile.
     pub fn drag_out(&self, pick: Pick) -> impl FnOnce() -> Result<Outgoing, String> + Send + use<> {
         let (arrangement, found, peaks) = (self.arrangement.clone(), self.found.clone(), self.peaks.clone());
         move || {

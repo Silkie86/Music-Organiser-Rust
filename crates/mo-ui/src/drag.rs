@@ -81,8 +81,13 @@ pub fn connect(feed: Feed) {
 const SWEEP_WAIT: Duration = Duration::from_secs(20);
 
 /// Clears, on a low-priority thread a little after start, the MIDI files that drags left in Temp a day or more ago
-/// (rule 28; mo-app's `drag_out::sweep`).
+/// (rule 28: the app cleans up after itself; mo-app's `drag_out::sweep`). Only on Windows, the one system that drags
+/// out of the app so far: Windows' Temp folder is the user's own. A Mac's or Linux's (often `/tmp`, shared by every
+/// account) is looked at once their drag goes in, which writes its files in a folder of the user's own.
 pub fn sweep_later() {
+    if !cfg!(windows) {
+        return;
+    }
     let started = mo_app::background::spawn("Drag files", || {
         std::thread::sleep(SWEEP_WAIT);
         say_swept(mo_app::drag_out::sweep(&std::env::temp_dir(), std::time::SystemTime::now()));
@@ -92,8 +97,12 @@ pub fn sweep_later() {
     }
 }
 
-/// As the app closes: clears this run's drags' MIDI files that are a minute old or more. Quick (a few small files).
+/// As the app closes: clears this run's drags' MIDI files that are a minute old or more. Quick: it looks only at the
+/// folders this run made, a few small files.
 pub fn finish_up() {
+    if !cfg!(windows) {
+        return;
+    }
     say_swept(mo_app::drag_out::finish_up(&std::env::temp_dir(), std::time::SystemTime::now()));
 }
 
@@ -132,10 +141,16 @@ pub fn start(app: &AppWindow, drag: Drag) -> bool {
     });
     if let Err(e) = started {
         log::warning("Drag", &format!("Couldn't start making what's dragged: {e}"));
+        tell("The app couldn't start the drag. Try again in a moment.");
         finish(app, id, Outcome::Refused);
         return false;
     }
     true
+}
+
+/// A drag is being made or carried: the page leaves what's under the mouse alone until it's over.
+pub fn busy() -> bool {
+    CARRYING.with(Cell::get) || WAITING.with(|w| w.borrow().is_some())
 }
 
 /// The mouse came up before the system's drag began: the drag is off.
@@ -241,7 +256,7 @@ fn tell(why: &str) {
 #[cfg(windows)]
 fn hand_over(app: &AppWindow, payload: &Payload) -> Result<Outcome, String> {
     let look = crate::look();
-    let flight = mo_app::drag_card::Flight::new(payload, &look, fonts(look.theme.font), std::time::Instant::now());
+    let flight = mo_app::drag_card::Flight::new(payload, &look, card_fonts(look.theme.font), std::time::Instant::now());
     ole::drag(app.window(), &payload.files, flight)
 }
 
@@ -251,8 +266,7 @@ fn hand_over(_app: &AppWindow, _payload: &Payload) -> Result<Outcome, String> {
 }
 
 /// The theme's text family for the card, at the weights the app's lines use: 400 for the facts, 600 for the names.
-#[cfg(windows)]
-fn fonts(font: mo_app::themes::ThemeFont) -> mo_app::drag_card::Fonts {
+pub fn card_fonts(font: mo_app::themes::ThemeFont) -> mo_app::drag_card::Fonts {
     use mo_app::drag_card::Fonts;
     use mo_app::themes::ThemeFont;
     match font {

@@ -98,16 +98,11 @@ pub fn connect(app: &AppWindow) {
     });
     let weak = app.as_weak();
     data.on_grab(move |x, y| {
-        let (x, y) = (f64::from(x), f64::from(y));
         // On a clip or a track's name the press may become a drag out of the app; elsewhere it moves the view.
-        let pick = STATE.with(|s| s.borrow().view.as_ref().and_then(|v| v.pick_at(x, y)));
-        PRESSED.with(|p| p.set(pick.map(|pick| (pick, x, y))));
-        if pick.is_none() {
-            with_view(&weak, |v| {
-                v.press(x, y);
-                false
-            });
-        }
+        with_view(&weak, |v| {
+            v.left_press(f64::from(x), f64::from(y));
+            false
+        });
     });
     let weak = app.as_weak();
     data.on_side_grab(move |x, y| {
@@ -120,11 +115,13 @@ pub fn connect(app: &AppWindow) {
     // itself.
     let weak = app.as_weak();
     data.on_moved(move |x, y| {
+        // While a drag out of the app is made and carried, the view stays as it is, with nothing shown under the mouse.
+        if crate::drag::busy() {
+            return;
+        }
         let (x, y) = (f64::from(x), f64::from(y));
-        if let Some((pick, from_x, from_y)) = PRESSED.with(std::cell::Cell::get)
-            && ((x - from_x).abs() > DRAG_START || (y - from_y).abs() > DRAG_START)
-        {
-            PRESSED.with(|p| p.set(None));
+        let out = STATE.with(|s| s.borrow_mut().view.as_mut().and_then(|v| v.moved_far(x, y)));
+        if let Some(pick) = out {
             if let Some(app) = weak.upgrade() {
                 drag_out(&app, pick);
             }
@@ -137,7 +134,6 @@ pub fn connect(app: &AppWindow) {
     });
     let weak = app.as_weak();
     data.on_let_go(move || {
-        PRESSED.with(|p| p.set(None));
         if let Some(app) = weak.upgrade() {
             crate::drag::let_go(&app);
         }
@@ -441,14 +437,6 @@ fn show_notes(data: &ArrangementData, a: &mo_formats::arrangement::Arrangement, 
 // samples. The left button drags those; on empty space it moves the view, and the right or middle button moves the view
 // anywhere.
 
-thread_local! {
-    /// A left press on a clip or a track's name, and where: dragged out of the app once the mouse moves far enough.
-    static PRESSED: std::cell::Cell<Option<(mo_app::drag_out::Pick, f64, f64)>> = const { std::cell::Cell::new(None) };
-}
-
-/// How far the mouse moves with the button down, in points, before a press on a clip drags it out of the app.
-const DRAG_START: f64 = 4.0;
-
 /// Drags `pick` out of the app: dims it where it is, and makes what it carries (a MIDI file in Temp for its notes)
 /// while the drag gets going.
 fn drag_out(app: &AppWindow, pick: mo_app::drag_out::Pick) {
@@ -491,20 +479,28 @@ fn lift(data: &ArrangementData, (x, y, w, h): (f64, f64, f64, f64)) {
 }
 
 /// For the screenshots: the clip or track at `x`, `y` on the view as it looks while it's dragged out, or once it has
-/// landed, without dragging anything. False when there's nothing there to drag.
-pub fn show_lifted(app: &AppWindow, x: f32, y: f32, landed: bool) -> bool {
-    let at = STATE.with(|s| {
+/// landed, without dragging anything; and what its card shows (no files: nothing is written). None when there's
+/// nothing there to drag.
+pub fn show_lifted(app: &AppWindow, x: f32, y: f32, landed: bool) -> Option<mo_app::drag_out::Payload> {
+    let found = STATE.with(|s| {
         let s = s.borrow();
         let v = s.view.as_ref()?;
-        v.pick_box(v.pick_at(f64::from(x), f64::from(y))?)
+        let pick = v.pick_at(f64::from(x), f64::from(y))?;
+        Some((v.pick_box(pick)?, v.drag_out(pick)))
     });
     let data = app.global::<ArrangementData>();
-    if let Some(at) = at {
-        lift(&data, at);
+    if let Some((at, _)) = &found {
+        lift(&data, *at);
     }
-    data.set_lifted(at.is_some() && !landed);
-    data.set_landed(at.is_some() && landed);
-    at.is_some()
+    data.set_lifted(found.is_some() && !landed);
+    data.set_landed(found.is_some() && landed);
+    let out = (found?.1)().ok()?;
+    Some(mo_app::drag_out::Payload {
+        files: Vec::new(),
+        cards: out.cards,
+        caption: out.caption,
+        numbered: out.numbered,
+    })
 }
 
 /// Changes what the view knows and draws it again.

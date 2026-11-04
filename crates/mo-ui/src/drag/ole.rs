@@ -33,7 +33,7 @@ use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION, CreateCompatibleDC,
     CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, HBITMAP, HDC, HGDIOBJ, InvalidateRect,
-    MONITOR_DEFAULTTONEAREST, MonitorFromPoint, ReleaseDC, SelectObject, ValidateRect,
+    MONITOR_DEFAULTTONEAREST, MonitorFromPoint, ReleaseDC, ScreenToClient, SelectObject, ValidateRect,
 };
 use windows::Win32::System::Com::{DVASPECT_CONTENT, FORMATETC, IDataObject, STGMEDIUM, STGMEDIUM_0, TYMED_HGLOBAL};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -44,14 +44,15 @@ use windows::Win32::System::Ole::{
 };
 use windows::Win32::System::SystemServices::{MK_LBUTTON, MK_MBUTTON, MK_RBUTTON, MODIFIERKEYS_FLAGS};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
 use windows::Win32::UI::Shell::{DROPFILES, SHCreateDataObject};
 use windows::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GA_ROOT, GWLP_WNDPROC,
-    GetAncestor, GetCursorPos, GetWindowLongPtrW, HTTRANSPARENT, HWND_TOPMOST, MA_NOACTIVATE, MSG, PM_REMOVE,
-    PeekMessageW, RegisterClassExW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOSIZE,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, ULW_ALPHA, UpdateLayeredWindow, WM_MOUSEACTIVATE,
-    WM_NCHITTEST, WM_PAINT, WNDCLASSEXW, WNDPROC, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_EX_TRANSPARENT, WS_POPUP, WindowFromPoint,
+    GetAncestor, GetCursorPos, GetSystemMetrics, GetWindowLongPtrW, HTTRANSPARENT, HWND_TOPMOST, MA_NOACTIVATE, MSG,
+    PM_REMOVE, PeekMessageW, PostMessageW, RegisterClassExW, SM_SWAPBUTTON, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
+    SWP_NOOWNERZORDER, SWP_NOSIZE, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, ULW_ALPHA,
+    UpdateLayeredWindow, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_NCHITTEST, WM_PAINT, WNDCLASSEXW, WNDPROC, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP, WindowFromPoint,
 };
 use windows::core::{BOOL, HRESULT, implement, w};
 
@@ -86,6 +87,11 @@ pub(super) fn drag(window: &slint::Window, files: &[PathBuf], flight: Flight) ->
 }
 
 fn drag_files(own: Option<HWND>, files: &[PathBuf], flight: Flight) -> Result<Outcome, String> {
+    // Let go already (the button came up while the files were made, and the page didn't hear it): Windows' drag would
+    // drop them at once, wherever the mouse is now, so the drag is off.
+    if !main_button_down() {
+        return Ok(Outcome::Cancelled);
+    }
     let data = file_list(files).map_err(|e| format!("Couldn't hand the files to Windows ({e})."))?;
     let shared = Arc::new(Shared::default());
     let source: IDropSource = Source { shared: shared.clone(), own }.into();
@@ -95,6 +101,9 @@ fn drag_files(own: Option<HWND>, files: &[PathBuf], flight: Flight) -> Result<Ou
     // SAFETY: `data` and `source` are live COM objects for the whole call, and `effect` outlives it.
     let hr = unsafe { DoDragDrop(&data, &source, DROPEFFECT_COPY, &mut effect) };
     drop(quiet);
+    if let Some(own) = own {
+        button_up(own);
+    }
     // Let go over the app's own window: nothing there takes files, though the window says it does (winit's own file
     // drop, which the app doesn't use).
     let on_own = own.is_some_and(over_window);
@@ -104,6 +113,32 @@ fn drag_files(own: Option<HWND>, files: &[PathBuf], flight: Flight) -> Result<Ou
         Ok(if landed { Outcome::Landed } else { Outcome::Cancelled })
     } else {
         Err(format!("Windows couldn't carry the files ({hr:?})."))
+    }
+}
+
+/// Whether the main mouse button (the left one, unless they're swapped in Windows' settings) is down right now.
+fn main_button_down() -> bool {
+    // SAFETY: plain calls that read a setting and the mouse buttons' state.
+    unsafe {
+        // The buttons as they are, not as they're swapped: the main one is the right when they are.
+        let main = if GetSystemMetrics(SM_SWAPBUTTON) != 0 { VK_RBUTTON } else { VK_LBUTTON };
+        GetAsyncKeyState(i32::from(main.0)) < 0
+    }
+}
+
+/// Tells the window the left button has come up: Windows' drag kept that for itself, and winit would go on thinking
+/// it's held, which stops the app hearing the mouse leave its window (what's lit under the mouse stays lit, until the
+/// next click). winit does the same after a window is moved by its title bar.
+fn button_up(own: HWND) {
+    let mut at = POINT::default();
+    // SAFETY: plain calls with a point to fill and the app's own window.
+    unsafe {
+        if GetCursorPos(&mut at).is_err() || !ScreenToClient(own, &mut at).as_bool() {
+            at = POINT::default();
+        }
+        // The point in the window, as the message carries it: x in the low 16 bits, y in the high.
+        let point = (at.x as u16 as u32) | ((at.y as u16 as u32) << 16);
+        let _ = PostMessageW(Some(own), WM_LBUTTONUP, WPARAM(0), LPARAM(point as isize));
     }
 }
 

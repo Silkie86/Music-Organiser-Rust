@@ -917,6 +917,10 @@ export component ListLine inherits Rectangle {
                 root.dragged = false;
             } else if e.kind == PointerEventKind.up && e.button == PointerEventButton.left && root.dragged {
                 root.drag-let-go();
+            } else if e.kind == PointerEventKind.cancel && root.dragged {
+                // The press was taken away before the drag got going (by what scrolls the line, or the window losing
+                // the mouse): the button's coming up won't be heard here, so the drag is off now.
+                root.drag-let-go();
             }
             if e.kind == PointerEventKind.down && e.button == PointerEventButton.right {
                 // The menu acts on what's picked, so pick this line first.
@@ -1676,6 +1680,9 @@ export component SidePanel inherits Rectangle {
     flick := Flickable {
         content-width: flick.width;
         content-height: content.height;
+        // The wheel scrolls it (and a finger on a touch screen); a drag with the mouse is for what's in it, such as a
+        // sound dragged out to a DAW, as in the app's lists.
+        mouse-drag-pan-enabled: false;
         content := VerticalLayout {
             x: 0;
             width: flick.width;

@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use mo_app::drag_out::{self, SoundItem};
+use mo_app::drag_out::{self, Payload, SoundItem};
 use mo_app::sounds as list;
 use slint::ComponentHandle;
 
@@ -58,15 +58,26 @@ pub(super) fn wire(app: &AppWindow) {
     });
 }
 
-/// Drags the sound at `at` in the library out of the app, picked up at `spot`.
-fn carry(app: &AppWindow, at: usize, spot: Spot) {
-    let item = PAGE.with(|p| {
+/// The sound at `at` in the library, as a drag carries it: its file and its line on the card.
+fn item(app: &AppWindow, at: usize) -> Option<SoundItem> {
+    PAGE.with(|p| {
         let p = p.borrow();
         let s = p.list.sound(at)?;
         let card = drag_out::sound_card(s, tint(app, list::type_colour(&s.sound_type)));
         Some(SoundItem { path: PathBuf::from(&s.path), card })
-    });
-    let Some(item) = item else { return };
+    })
+}
+
+/// For the screenshots: what dragging the tile or line at `row` of the view on show carries (its card), without
+/// looking for its file. None when there's no sound there.
+pub fn card_at_row(app: &AppWindow, row: i32) -> Option<Payload> {
+    let at = PAGE.with(|p| usize::try_from(row).ok().and_then(|r| p.borrow().entry(r)))?;
+    drag_out::sounds(vec![item(app, at)?])
+}
+
+/// Drags the sound at `at` in the library out of the app, picked up at `spot`.
+fn carry(app: &AppWindow, at: usize, spot: Spot) {
+    let Some(item) = item(app, at) else { return };
     let under_way = drag::start(
         app,
         Drag {

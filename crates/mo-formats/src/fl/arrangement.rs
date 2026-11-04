@@ -247,6 +247,34 @@ fn read_playlist(flp: &Flp<'_>) -> Playlist {
     }
 }
 
+/// Each channel's name as a pattern clip's part ([`PreviewClip::parts`]), kept apart from every other channel's: two
+/// channels named alike ("Perc" and "Perc") would otherwise go into one MIDI track when a track is dragged out of the
+/// app, so the one further down the Channel rack is "Perc 2". A channel with no name is "Channel 3", by its place.
+fn part_names(channels: &HashMap<u32, &FlChannel>, pl: &Playlist) -> HashMap<u32, String> {
+    let mut indices: Vec<u32> = channels.keys().chain(pl.channel_names.keys()).copied().collect();
+    indices.sort_unstable();
+    indices.dedup();
+    let mut used = HashSet::new();
+    let mut names = HashMap::new();
+    for ch in indices {
+        let base = channels
+            .get(&ch)
+            .map(|c| c.name.trim())
+            .filter(|n| !n.is_empty())
+            .or_else(|| pl.channel_names.get(&ch).map(|n| n.trim()).filter(|n| !n.is_empty()))
+            .map_or_else(|| format!("Channel {}", ch + 1), str::to_owned);
+        let mut name = base.clone();
+        let mut n = 2;
+        // Letter case aside, as a DAW's track names and Windows' file names go.
+        while !used.insert(name.to_lowercase()) {
+            name = format!("{base} {n}");
+            n += 1;
+        }
+        names.insert(ch, name);
+    }
+    names
+}
+
 /// A channel's place among a pattern clip's parts, adding it if it's new. A clip with more channels than a part number
 /// holds (65,535) puts the rest on the last.
 fn part_of(parts: &mut Vec<u32>, channel: u32) -> u16 {
@@ -264,6 +292,7 @@ fn channel_colour(colours: &HashMap<u32, u32>, channel: u32) -> Option<u32> {
 fn playlist_view(song: &FlSong, pl: &Playlist, tempo: f64) -> Arrangement {
     let beats = |ticks: f64| ticks / ppq(pl.ppq);
     let channels: HashMap<u32, &FlChannel> = song.channels.iter().map(|c| (c.index, c)).collect();
+    let part_names = part_names(&channels, pl);
     let mut by_track: BTreeMap<u32, Vec<&Placement>> = BTreeMap::new();
     for item in &pl.items {
         by_track.entry(item.track).or_default().push(item);
@@ -323,13 +352,7 @@ fn playlist_view(song: &FlSong, pl: &Playlist, tempo: f64) -> Arrangement {
                     colour: pattern.and_then(|pat| pat.colour),
                     parts: parts
                         .iter()
-                        .map(|ch| {
-                            channels
-                                .get(ch)
-                                .map(|c| c.name.clone())
-                                .or_else(|| pl.channel_names.get(ch).cloned())
-                                .unwrap_or_else(|| format!("Channel {}", ch + 1))
-                        })
+                        .map(|ch| part_names.get(ch).cloned().unwrap_or_else(|| format!("Channel {}", ch + 1)))
                         .collect(),
                     ..PreviewClip::default()
                 });

@@ -26,7 +26,8 @@ use swash::shape::ShapeContext;
 use swash::zeno::{Format, Vector};
 use tiny_skia::{Color, FillRule, Paint, Path, PathBuilder, Pixmap, Rect, Stroke, Transform};
 
-use crate::drag_out::{Card, Kind, Payload, Thumb, ThumbNote};
+use crate::drag_out::{Card, Kind, Payload, Thumb, ThumbNote, loudest, loudness};
+use crate::songs::thousands;
 use crate::themes::Look;
 
 // ---- The card's measures, in points (a point is `scale` pixels) ------------------------------------------------
@@ -458,18 +459,12 @@ fn hangul_join(a: char, b: char) -> Join {
 
 /// A line's little picture made safe to draw: no broken numbers, and no more of them than its box could show.
 fn tidy_thumb(thumb: &Thumb) -> Thumb {
-    let loudness = |v: &f32| if v.is_finite() { v.abs() } else { 0.0 };
     match thumb {
+        // Each kept slice is the loudest of the ones it stands for, so no click is lost.
         Thumb::Wave(peaks) if !peaks.is_empty() => Thumb::Wave(if peaks.len() <= MOST_PEAKS {
-            peaks.iter().map(loudness).collect()
+            peaks.iter().copied().map(loudness).collect()
         } else {
-            // Each kept slice is the loudest of the ones it stands for, so no click is lost.
-            (0..MOST_PEAKS)
-                .map(|i| {
-                    let (a, b) = share(i, MOST_PEAKS, peaks.len());
-                    peaks.get(a..b).unwrap_or_default().iter().map(loudness).fold(0.0, f32::max)
-                })
-                .collect()
+            loudest(peaks, MOST_PEAKS)
         }),
         Thumb::Notes(notes) => {
             let step = notes.len().div_ceil(MOST_NOTES).max(1);
@@ -487,13 +482,6 @@ fn tidy_thumb(thumb: &Thumb) -> Thumb {
         }
         _ => Thumb::None,
     }
-}
-
-/// The part of `len` things that slot `i` of `slots` stands for: at least one thing, so a short list is stretched.
-fn share(i: usize, slots: usize, len: usize) -> (usize, usize) {
-    let at = |i: usize| (i as u128 * len as u128 / slots.max(1) as u128) as usize;
-    let a = at(i).min(len.saturating_sub(1));
-    (a, at(i + 1).max(a + 1).min(len))
 }
 
 /// Where the card's parts go down it, in points, and how tall it is.
@@ -1025,14 +1013,12 @@ fn draw_thumb(pm: &mut Pixmap, line: &Line, face: &Face, area: Area, s: f32) {
 /// gets there; the loudest reaches the edges and the quietest is still a sliver (as on the Sounds page).
 fn draw_wave(pm: &mut Pixmap, peaks: &[f32], area: Area, rgb: u32, s: f32) {
     let columns = area.w.round().max(1.0) as usize;
-    let loudest = peaks.iter().fold(0.0f32, |m, &v| m.max(v)).max(f32::EPSILON);
+    let top = peaks.iter().copied().map(loudness).fold(0.0f32, f32::max).max(f32::EPSILON);
     let (middle, half) = (area.y + area.h / 2.0, area.h / 2.0);
     let sliver = (0.5 * s).max(0.5).min(half);
     let mut path = PathBuilder::new();
-    for column in 0..columns {
-        let (a, b) = share(column, columns, peaks.len());
-        let loud = peaks.get(a..b).unwrap_or_default().iter().fold(0.0f32, |m, &v| m.max(v));
-        let reach = (loud / loudest * half).clamp(sliver, half.max(sliver));
+    for (column, loud) in loudest(peaks, columns).into_iter().enumerate() {
+        let reach = (loud / top * half).clamp(sliver, half.max(sliver));
         if let Some(r) = Rect::from_xywh(area.x + column as f32, middle - reach, 1.0, 2.0 * reach) {
             path.push_rect(r);
         }
@@ -1181,19 +1167,6 @@ fn blend(under: u32, over: u32, amount: f32) -> u32 {
     let mut out = 0u32;
     for (u, o) in a.iter().zip(&b) {
         out = (out << 8) | mix(f32::from(*u), f32::from(*o), amount).round().clamp(0.0, 255.0) as u32;
-    }
-    out
-}
-
-/// "1,204": a count with a comma between each three digits.
-fn thousands(n: usize) -> String {
-    let digits = n.to_string();
-    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
     }
     out
 }
@@ -2067,15 +2040,7 @@ mod tests {
 
     #[test]
     fn helpers() {
-        assert_eq!(thousands(0), "0");
-        assert_eq!(thousands(999), "999");
-        assert_eq!(thousands(1204), "1,204");
-        assert_eq!(thousands(1_234_567), "1,234,567");
         assert_eq!(tidy("  a\nb\t "), "a b");
-        assert_eq!(share(0, 4, 2), (0, 1));
-        assert_eq!(share(3, 4, 2), (1, 2));
-        assert_eq!(share(1, 2, 10), (5, 10));
-        assert_eq!(share(5, 0, 0), (0, 0));
         assert_eq!(blend(0x000000, 0xFFFFFF, 0.5), 0x808080);
         assert_eq!(mix_pixel(0, 0xFF00_00FF, 256), 0xFF00_00FF);
         assert_eq!(scale_pixel(0xFFFF_FFFF, 128), 0x7F7F_7F7F);

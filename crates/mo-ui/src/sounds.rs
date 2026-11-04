@@ -5,6 +5,7 @@
 //! Rediscover (unused sounds that fit your taste) is dug out on its own low-priority thread too.
 
 mod drag_out;
+pub use drag_out::card_at_row;
 mod galaxy;
 mod grid;
 mod kit;
