@@ -47,6 +47,10 @@ light that means something. It should feel like a rack unit on a desk, not a web
   at the top of the rail looks like the search field it opens, its key in a keycap; Graphite's faint words a step
   brighter so second lines stay readable.
 
+- Joined filters (Solomon, 4 Nov 17:19, "the chips should be visually connected"): each filter's chips are one
+  strip behind its name (`FilterPicks`): the name in a sunken cap, the chips touching, its More menu at the end. A
+  strip that breaks onto a new line rounds again where the line starts. A chip or menu on its own stays a pill.
+
 ## Next steps
 
 - Left out on purpose: a focus ring on every button (the app is driven by its shortcut list, and focusable buttons
