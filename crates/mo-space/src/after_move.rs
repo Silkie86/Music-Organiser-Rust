@@ -15,8 +15,8 @@ use crate::admin::{Admin, Step, ask_for, real_spot, reason};
 use crate::clean::{Bin, Done, Problem, Sending, What};
 use crate::folder_move::{
     CantMove, Drives, Fill, KEPT_SUFFIX, MovedFolder, Tree, check_rename, check_rename_or_ask, clear_failed_link,
-    copy_fresh, copy_tree, denied, destination_problem, fresh_name, inside_moved, leads_to, link, link_reaches, listed,
-    not_noted, only_in, part_way, remove_link, rest_after, room_for, shown, swap_or_ask, target, write_through,
+    copy_fresh, copy_tree, denied, destination_problem, failed, fresh_name, inside_moved, leads_to, link, link_reaches,
+    listed, not_noted, only_in, part_way, remove_link, rest_after, room_for, shown, swap_or_ask, target, write_through,
 };
 use crate::half_copy::{busy_now, claim, clear_own, going_into_use, unmark};
 use crate::plugin_space::{PluginSpace, SpaceKind};
@@ -189,8 +189,15 @@ pub fn link_again(
     let aside = fresh_name(from, if second { SECOND_SUFFIX } else { UPDATE_SUFFIX });
     let kept_in = PathBuf::from(fresh_name(&moved.to, KEPT_BEFORE_SUFFIX));
     let changed = AtomicBool::new(false);
-    let tree =
-        Tree { keep_in: Some(&kept_in), keep_all: true, changed: Some(&changed), ..Tree::new(Path::new(from), to, to) };
+    // Where the folder really is as linking again begins: both passes copy from there, or stop ([`Tree::real_from`]).
+    let real_from = fs::canonicalize(from).map_err(|e| failed(Path::new(from), &e))?;
+    let tree = Tree {
+        keep_in: Some(&kept_in),
+        keep_all: true,
+        changed: Some(&changed),
+        real_from: Some(&real_from),
+        ..Tree::new(Path::new(from), to, to)
+    };
     room_for(&tree, to, drives, stop)?;
     // Find out before copying whether Windows lets the folder be renamed (asking you, when it guards the folder), once
     // there's known to be room: not after an hour of copying, and not for nothing.
@@ -222,13 +229,18 @@ pub fn link_again(
     let mut ours = first.written.clone();
     ours.sort();
     let again = copy_tree(
-        &Tree { ours: &ours, last: true, ..tree },
+        &Tree { ours: &ours, as_files: &first.as_files, last: true, ..tree },
         Fill::Freshen,
         &|n| progress(first.bytes.saturating_add(n)),
         stop,
     )
     .map_err(partly)?;
     write_through(&[&first, &again], stop).map_err(partly)?;
+    // Still the real folder that was copied: one that turned into a link meanwhile would be set aside as a link, with
+    // the update's files somewhere else.
+    if !real_folder(from) {
+        return Err(partly(CantMove::Failed(format!("{from} isn't a real folder now, so it was left alone."))));
+    }
     swap_or_ask(from, to, &aside, drives.admin()).map_err(partly)?;
     let replaced = shown(&[first.kept, again.kept].concat());
     let kept = (!replaced.is_empty()).then(|| OldHome {
