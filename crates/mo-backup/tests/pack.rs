@@ -36,6 +36,17 @@ fn names_in(zip: &Path) -> Vec<String> {
     names
 }
 
+fn read_in(zip: &Path, inside: &str) -> Vec<u8> {
+    let mut zip = zip::ZipArchive::new(fs::File::open(zip).unwrap()).unwrap();
+    let mut bytes = Vec::new();
+    zip.by_name(inside).unwrap().read_to_end(&mut bytes).unwrap();
+    bytes
+}
+
+fn list_in(zip: &Path) -> String {
+    String::from_utf8(read_in(zip, "pack.txt")).unwrap()
+}
+
 #[test]
 fn a_song_packs_once_and_again_only_when_it_changes() {
     let root = fixtures("backup-pack");
@@ -72,9 +83,17 @@ fn a_song_packs_once_and_again_only_when_it_changes() {
     drop(zip);
 
     assert_eq!(packer.pack_song(&files, name, 1, &stop).unwrap(), Packed::UpToDate { kept: 0 });
-    // Only the time moved (the clocks changed on a FAT drive): the bytes are compared, nothing is packed again.
+    // Only the time moved (the clocks changed on a FAT drive): the bytes are compared, and the zip is made again from
+    // its own bytes so its list carries the new time (the next run doesn't read every file again).
     set_time(&kick, 3700);
     assert_eq!(packer.pack_song(&files, name, 1, &stop).unwrap(), Packed::UpToDate { kept: 0 });
+    let kick_time = fs::metadata(&kick).unwrap().modified().unwrap().duration_since(SystemTime::UNIX_EPOCH).unwrap();
+    let list = list_in(&zip_path);
+    assert!(list.contains(&format!("3000\t{}\t", kick_time.as_nanos())), "{list}");
+    assert_eq!(read_in(&zip_path, &save_name), vec![7u8; 5000]);
+    assert_eq!(fs::read_dir(backup.join(SONGS)).unwrap().count(), 1);
+    assert_eq!(packer.pack_song(&files, name, 1, &stop).unwrap(), Packed::UpToDate { kept: 0 });
+    assert_eq!(list_in(&zip_path), list);
     write(&save, &[8u8; 5000], 10);
     assert!(matches!(packer.pack_song(&files, name, 1, &stop).unwrap(), Packed::Written { .. }));
     // No half-made zip is left.
