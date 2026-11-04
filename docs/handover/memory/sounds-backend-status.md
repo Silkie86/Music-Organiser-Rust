@@ -32,7 +32,8 @@ metadata:
 - PR #154 (MERGED 2026-11-02, asked via coordinator: Solomon's .wma files wouldn't play): mo_audio::wma decodes WMA on Windows via Media Foundation (only unsafe in mo-audio, module-level allow); mo_audio::can_decode(path); scan lists .wma on Windows only. Mac/Linux: no WMA decoder.
 - PR #160 (MERGED 2026-11-02): SoundsDb::all read 453k rows in 802 s on Solomon's PC because ORDER BY path fetched rows in random order and each row carries features/clap blobs before the later columns. Now reads in rowid order and sorts in memory with by_path (same as COLLATE NOCASE). Rule: never ORDER BY on the sounds table for whole-table reads; sort in Rust.
 - No .NET in the container (install denied): the twin only runs in CI. Disk is tight: clear target/incremental.
-- When mo-app calls decoders: a panic caught by catch_unwind still hits mo-ui's crash hook (logs a crash). Fix there.
+- A decoder panic on a damaged file is caught with `mo_catch::catch` (2026-11-04): one warning line in the log, not
+  a crash. Every catch goes through mo-catch (clippy.toml forbids `catch_unwind`).
 - Later: shared read-only open helper with mo-library; parallel JSON parse in mo-app on the low-priority pool.
 
 See [[rust-rebuild-status]], [[rust-rebuild-rules]].

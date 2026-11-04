@@ -6,7 +6,7 @@
 //! (rule 12). Only Fix writes, and only new "(fixed)" projects beside the saves you ticked; the library is only read.
 
 use std::cell::RefCell;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,6 +20,7 @@ use mo_app::space::{self, Drive, Fill, Holds, Opens, Part};
 use mo_app::space_bitwig::{self, BITWIG_COPIES, Copies, Fixes, Fixing, ToFix};
 use mo_app::space_old::{self, Found, OLD_COPIES};
 use mo_app::{backup, log, paths, shell};
+use mo_catch::catch_crash;
 use mo_space::app_files::{self, AppFilesPart};
 use mo_space::bitwig::{self, LibraryIndex};
 use mo_space::plugin_space;
@@ -360,7 +361,7 @@ fn fix_ticked(app: &AppWindow, feed: Feed) {
     let started = background::spawn("Space fix", move || {
         // A crash outside a save's own fix (logged as one) still finishes Fix, so the page isn't busy for ever: the
         // saves it didn't get to say so.
-        let _ = catch_unwind(AssertUnwindSafe(|| fix_each(&jobs, &feed, &weak)));
+        let _ = catch_crash(AssertUnwindSafe(|| fix_each(&jobs, &feed, &weak)));
         arrive(&weak, Step::FixDone);
     });
     if let Err(e) = started {
@@ -378,7 +379,7 @@ fn fix_each(jobs: &[ToFix], feed: &Feed, weak: &slint::Weak<AppWindow>) {
     for (n, job) in jobs.iter().enumerate() {
         card.progress(n as f32 / jobs.len() as f32, Some(&space_bitwig::fix_progress_words(n, jobs.len())));
         // A crash (logged as one) fails this save only: the rest are still tried.
-        let done = catch_unwind(AssertUnwindSafe(|| background::on_pool(|| space_bitwig::fix(job))))
+        let done = catch_crash(AssertUnwindSafe(|| background::on_pool(|| space_bitwig::fix(job))))
             .unwrap_or_else(|_| Fixing::Failed("it stopped with an error, which the log says".to_owned()));
         let save = job.save.display();
         match &done {
@@ -448,7 +449,7 @@ fn look_again(app: &AppWindow) {
     // A crash in a look (logged as one) leaves the thread for the next look, and Measure again for trying again.
     let work = move |ask: Ask| {
         let id = ask.id;
-        if catch_unwind(AssertUnwindSafe(|| look(ask, &weak))).is_err() {
+        if catch_crash(AssertUnwindSafe(|| look(ask, &weak))).is_err() {
             arrive(&weak, Step::Crashed(id));
         }
     };
@@ -497,7 +498,7 @@ fn look_for_copies(app: &AppWindow) {
     let mut index = None;
     let work = move |ask: BitwigAsk| {
         let id = ask.id;
-        if catch_unwind(AssertUnwindSafe(|| look_for_copies_now(ask, &mut index, &weak))).is_err() {
+        if catch_crash(AssertUnwindSafe(|| look_for_copies_now(ask, &mut index, &weak))).is_err() {
             index = None;
             arrive(&weak, Step::BitwigCrashed(id));
         }
@@ -558,7 +559,7 @@ fn look_for_old(app: &AppWindow) {
     // nothing: the newer one's finds follow.
     let work = move |ask: OldAsk| {
         let id = ask.id;
-        match catch_unwind(AssertUnwindSafe(|| look_for_old_now(&ask))) {
+        match catch_crash(AssertUnwindSafe(|| look_for_old_now(&ask))) {
             Ok(Some(found)) => arrive(&weak, Step::Old(id, found)),
             Ok(None) => {}
             Err(_) => arrive(&weak, Step::OldCrashed(id)),

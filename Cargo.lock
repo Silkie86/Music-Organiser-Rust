@@ -2991,6 +2991,7 @@ dependencies = [
  "flate2",
  "junction",
  "mo-backup",
+ "mo-catch",
  "mo-convert",
  "mo-dawlink",
  "mo-formats",
@@ -3012,6 +3013,7 @@ name = "mo-audio"
 version = "0.1.0"
 dependencies = [
  "cpal",
+ "mo-catch",
  "symphonia",
  "windows",
 ]
@@ -3030,6 +3032,10 @@ dependencies = [
  "winapi-util",
  "zip",
 ]
+
+[[package]]
+name = "mo-catch"
+version = "0.1.0"
 
 [[package]]
 name = "mo-convert"
@@ -3060,6 +3066,7 @@ name = "mo-formatlab"
 version = "0.1.0"
 dependencies = [
  "flate2",
+ "mo-catch",
  "mo-formats",
  "rayon",
  "serde",
@@ -3091,6 +3098,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "known-folders",
+ "mo-catch",
  "mo-formats",
  "notify",
  "rayon",
@@ -3105,6 +3113,7 @@ dependencies = [
 name = "mo-midi"
 version = "0.1.0"
 dependencies = [
+ "mo-catch",
  "mo-formats",
  "mo-harmony",
  "mo-library",
@@ -3131,6 +3140,7 @@ name = "mo-presets"
 version = "0.1.0"
 dependencies = [
  "flate2",
+ "mo-catch",
  "mo-formats",
  "rayon",
  "rusqlite",
@@ -3163,6 +3173,7 @@ dependencies = [
  "fs4",
  "junction",
  "known-folders",
+ "mo-catch",
  "mo-formats",
  "mo-library",
  "rayon",
@@ -3218,6 +3229,7 @@ dependencies = [
  "mo-app",
  "mo-audio",
  "mo-backup",
+ "mo-catch",
  "mo-dawlink",
  "mo-formats",
  "mo-harmony",

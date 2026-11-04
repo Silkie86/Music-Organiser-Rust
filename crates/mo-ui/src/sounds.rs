@@ -2395,7 +2395,7 @@ fn send_to_bitwig(app: &AppWindow, feed: &Feed, path: String, name: String) {
     let sent = background::spawn("Send to Bitwig", move || {
         // A panic in it is logged as a crash and fails the card as it goes; Send to Bitwig still comes back.
         let to = to_bitwig::Bitwig::default();
-        let _ = std::panic::catch_unwind(AssertUnwindSafe(|| to_bitwig::send_sound(job, &to, &path, &name)));
+        let _ = mo_catch::catch_crash(AssertUnwindSafe(|| to_bitwig::send_sound(job, &to, &path, &name)));
         SENDING.store(false, Ordering::Release);
         let _ = weak.upgrade_in_event_loop(|app| show_sending(&app, false));
     });

@@ -212,7 +212,7 @@ impl Census {
             // as the app does, rather than stopping the whole census. What it had counted of that file is dropped.
             // (Its message goes in the report, by [`Census::run`]'s quiet hook, not on the screen.)
             let mut mine = Census::default();
-            let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let read = mo_catch::catch(std::panic::AssertUnwindSafe(|| {
                 if mo_formats::bitwig::is_bitwig(&raw) { mine.add_bitwig(&raw) } else { mine.add_fl(&raw) }
             }));
             match read {

@@ -17,6 +17,7 @@ path = "src/bin/mo-screens.rs"
 [dependencies]
 rayon.workspace = true
 mo-app.workspace = true
+mo-catch = { path = "../mo-catch" }
 mo-library = { path = "../mo-library" }
 mo-harmony = { path = "../mo-harmony" }
 mo-midi = { path = "../mo-midi" }

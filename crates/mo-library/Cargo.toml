@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 chrono.workspace = true
+mo-catch = { path = "../mo-catch" }
 mo-formats = { path = "../mo-formats" }
 rayon.workspace = true
 # Hears about file changes from the system (ReadDirectoryChangesW, FSEvents, inotify).

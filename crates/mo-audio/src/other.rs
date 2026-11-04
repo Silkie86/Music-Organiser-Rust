@@ -3,7 +3,7 @@
 
 use std::fs::File;
 use std::io::{Cursor, ErrorKind, Read, Seek, SeekFrom};
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::AssertUnwindSafe;
 use std::path::Path;
 
 use symphonia::core::codecs::audio::AudioDecoderOptions;
@@ -27,7 +27,7 @@ pub fn is_other(path: &Path) -> bool {
 /// read there with what came before it; a decoder that falls over on a damaged file gives an error, never a crash.
 pub fn read_other(path: &Path, max_seconds: f64) -> Result<AudioData, AudioError> {
     let file = File::open(path)?;
-    catch_unwind(AssertUnwindSafe(|| decode(file, path, max_seconds)))
+    mo_catch::catch(AssertUnwindSafe(|| decode(file, path, max_seconds)))
         .unwrap_or_else(|_| Err(AudioError::Format("The decoder couldn't read this file (it may be damaged)".into())))
 }
 
