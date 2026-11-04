@@ -729,8 +729,8 @@ impl Plugins {
         out
     }
 
-    /// Each plugin your songs use (a DAW's own devices left out), with how many saves use each format: what
-    /// `mo_space::spare::find` takes as `used`, for the Space page's spare copies.
+    /// Each plugin your songs use (a DAW's own devices left out), with how many saves use each format. (The Space
+    /// page's spare copies count saves by id instead, with `mo_app::space_spare::formats_used`, so each counts once.)
     pub fn formats_used(&self) -> HashMap<String, HashMap<String, u32>> {
         let mut out: HashMap<String, HashMap<String, u32>> = HashMap::new();
         for r in self.rows.iter().filter(|r| r.format != "Native" && !r.formats.is_empty()) {

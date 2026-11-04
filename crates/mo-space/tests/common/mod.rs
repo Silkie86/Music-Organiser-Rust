@@ -34,3 +34,31 @@ pub fn file_link(target: &Path, at: &Path) -> bool {
     let made = std::os::unix::fs::symlink(target, at);
     made.is_ok()
 }
+
+/// Makes the read-only files a test left writable again, and on a Mac or Linux opens again the folders it locked (also
+/// when it stopped before it could), so its folder can be cleared. Never through a link.
+pub fn writable(dir: &Path) {
+    // A link (or nothing) isn't looked in: only a real folder is.
+    if !fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir()) {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o755));
+    }
+    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+        let Ok(kind) = entry.file_type() else { continue };
+        if kind.is_dir() {
+            writable(&entry.path());
+        } else if kind.is_file()
+            && let Ok(meta) = entry.metadata()
+            && meta.permissions().readonly()
+        {
+            let mut permissions = meta.permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            permissions.set_readonly(false);
+            let _ = fs::set_permissions(entry.path(), permissions);
+        }
+    }
+}
