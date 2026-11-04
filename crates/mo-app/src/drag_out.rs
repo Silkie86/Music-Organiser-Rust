@@ -107,13 +107,13 @@ const THUMB_PEAKS: usize = 96;
 /// A sound's line on the card: its name, the facts its tile shows ("Kick · C · 0.4 s"), its waveform, in its type's
 /// colour (`tint`, 0xRRGGBB).
 pub fn sound_card(s: &mo_sounds::Sound, tint: u32) -> Card {
-    let wave = s.analysis.as_ref().map(|a| a.waveform.as_slice()).unwrap_or_default();
+    let wave = s.analysis.as_ref().map(|a| a.waveform.to_vec()).unwrap_or_default();
     Card {
         title: s.name().to_owned(),
         detail: crate::sounds::facts_line(s),
         kind: Kind::Audio,
         tint,
-        thumb: if wave.is_empty() { Thumb::None } else { Thumb::Wave(fewer_peaks(wave, THUMB_PEAKS)) },
+        thumb: if wave.is_empty() { Thumb::None } else { Thumb::Wave(fewer_peaks(&wave, THUMB_PEAKS)) },
     }
 }
 
