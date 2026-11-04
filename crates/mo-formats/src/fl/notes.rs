@@ -5,7 +5,7 @@
 
 use std::collections::HashSet;
 
-use super::events::{byte_at, u16_at, u32_at};
+use super::events::{EV_PATTERN_NOTES, Flp, byte_at, u16_at, u32_at};
 use crate::model::{NoteAttribute, NoteEvent, velocity};
 
 /// The size of the note records in an event, by FL's version (major, minor; rule 9): 24 bytes from FL 8.5, 20 bytes
@@ -28,16 +28,34 @@ pub fn note_size(data: &[u8], version: (u32, u32), made_here: bool, channels: Op
 
 /// MIDI's top key, G10 in FL's names (127). FL's piano roll goes on to B10 (131).
 pub const TOP_MIDI_KEY: u16 = 127;
+/// FL's top key, B10.
+const TOP_FL_KEY: u16 = 131;
 
-/// How many of an event's notes are above MIDI's top key, so [`decode`] leaves them out.
-pub fn above_midi(data: &[u8], size: usize) -> usize {
-    data.chunks_exact(size).filter(|r| u16_at(r, 12) > TOP_MIDI_KEY).count()
+/// A note on one of FL's keys above MIDI's (G#10 to B10), which [`decode`] leaves out.
+fn above_midi(r: &[u8]) -> bool {
+    (TOP_MIDI_KEY + 1..=TOP_FL_KEY).contains(&u16_at(r, 12))
 }
 
-/// Said about a song whose notes go above MIDI's top key.
-pub fn above_midi_warning(count: usize) -> String {
-    let notes = if count == 1 { "1 note is".to_owned() } else { format!("{count} notes are") };
-    format!("{notes} above G10, the top of MIDI's keys, so they're left out of MIDI and Bitwig.")
+/// What's wrong with a song's notes, for its warnings: notes above MIDI's top key, left out, and damaged note events,
+/// read up to the damage (rule 9). Empty when nothing is.
+pub fn trouble(flp: &Flp<'_>) -> Vec<String> {
+    let known = super::channels(flp);
+    let (mut above, mut damaged) = (0, 0);
+    for e in flp.events.iter().filter(|e| e.id == EV_PATTERN_NOTES) {
+        let size = note_size(&e.data, (flp.major, flp.minor), e.offset.is_none(), Some(&known));
+        above += e.data.chunks_exact(size).filter(|r| above_midi(r)).count();
+        damaged += usize::from(!e.data.len().is_multiple_of(size));
+    }
+    let mut said = Vec::new();
+    if above > 0 {
+        let notes = if above == 1 { "1 note is".to_owned() } else { format!("{above} notes are") };
+        said.push(format!("{notes} above G10, the top of MIDI's keys, so they're left out."));
+    }
+    if damaged > 0 {
+        let patterns = if damaged == 1 { "A pattern's notes end" } else { "Some patterns' notes end" };
+        said.push(format!("{patterns} part-way through a note (damaged there); the notes before that were read."));
+    }
+    said
 }
 
 /// The record size that reads the notes in time order (as FL keeps them) on known channels, else the one that divides
@@ -62,11 +80,11 @@ fn size_from_notes(data: &[u8], channels: Option<&HashSet<u32>>) -> usize {
 /// The notes in an event, each with its channel. A note muted in the piano roll (24-byte records: bit 0x20 of byte 19)
 /// is marked muted; a length of 0 is a step from the step sequencer, kept 1 tick long and marked. A note above MIDI's
 /// top key (FL's keys 128 to 131) is left out: it can't be written to MIDI, and cutting it down to 7 bits would move it
-/// to the bottom of the keyboard (see [`above_midi`]).
+/// to the bottom of the keyboard (see [`trouble`]). A key past FL's own is damage, cut to 7 bits as before.
 pub fn decode(data: &[u8], size: usize) -> Vec<(u32, NoteEvent)> {
     let velocity_at = size - 3;
     data.chunks_exact(size)
-        .filter(|r| u16_at(r, 12) <= TOP_MIDI_KEY)
+        .filter(|r| !above_midi(r))
         .map(|r| {
             let length = u32_at(r, 8);
             // FL's velocity is 0 to 128 (100 by default), kept in MIDI 2.0's 16 bits.
@@ -74,7 +92,7 @@ pub fn decode(data: &[u8], size: usize) -> Vec<(u32, NoteEvent)> {
             let note = NoteEvent {
                 start: u32_at(r, 0) as i64,
                 length: length.max(1) as i64,
-                key: u16_at(r, 12) as u8,
+                key: (u16_at(r, 12) & 0x7F) as u8,
                 velocity,
                 muted: size == 24 && byte_at(r, 19) & 0x20 != 0,
                 step: length == 0,
@@ -154,9 +172,9 @@ mod tests {
 
     #[test]
     fn keys_above_midi_are_left_out_not_wrapped_to_the_bottom() {
-        let data: Vec<u8> = [60, 127, 128, 131].iter().flat_map(|&k| note(0, 0, 96, k, 100, 24)).collect();
-        assert_eq!(above_midi(&data, 24), 2);
-        assert_eq!(decode(&data, 24).iter().map(|(_, n)| n.key).collect::<Vec<_>>(), [60, 127]);
+        let data: Vec<u8> = [60, 127, 128, 131, 0x80 | 64].iter().flat_map(|&k| note(0, 0, 96, k, 100, 24)).collect();
+        // Past FL's B10 (131) is damage: cut to 7 bits as before.
+        assert_eq!(decode(&data, 24).iter().map(|(_, n)| n.key).collect::<Vec<_>>(), [60, 127, 64]);
     }
 
     #[test]

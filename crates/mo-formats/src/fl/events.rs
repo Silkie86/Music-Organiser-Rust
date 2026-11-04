@@ -102,6 +102,9 @@ pub struct Flp<'a> {
     pub events: Vec<Event<'a>>,
     /// Said about the project when it could still be read but something about the file was off.
     pub warning: Option<&'static str>,
+    /// The file ends before its events do (or turns to zeros), so what's after that is missing: [`CUT_SHORT`], also
+    /// when the warning is already about a garbled header.
+    pub cut_short: bool,
 }
 
 /// The file wasn't an FL Studio project (see [`DAMAGED`]).
@@ -215,6 +218,7 @@ pub fn load(raw: &[u8]) -> Result<Flp<'_>, Damaged> {
         utf16: true,
         events: Vec::new(),
         warning: None,
+        cut_short: false,
     };
     let dt = 8 + header_len as usize;
     let mut pos = dt + 8;
@@ -222,6 +226,7 @@ pub fn load(raw: &[u8]) -> Result<Flp<'_>, Damaged> {
         let said = pos as i64 + i32_at(raw, dt + 4) as i64;
         if said > raw.len() as i64 {
             flp.warning = Some(CUT_SHORT);
+            flp.cut_short = true;
         }
         said.clamp(pos as i64, raw.len() as i64) as usize
     } else {
@@ -262,6 +267,7 @@ pub fn load(raw: &[u8]) -> Result<Flp<'_>, Damaged> {
         // A file cut short or damaged: keep what's been read.
         let Some(data) = size.filter(|&s| s <= end - pos).and_then(|s| raw.get(pos..pos + s)) else {
             flp.warning.get_or_insert(CUT_SHORT);
+            flp.cut_short = true;
             break;
         };
         let size = data.len();
@@ -271,6 +277,7 @@ pub fn load(raw: &[u8]) -> Result<Flp<'_>, Damaged> {
         if zeros > MOST_ZERO_EVENTS {
             flp.events.truncate(flp.events.len() + 1 - zeros);
             flp.warning.get_or_insert(CUT_SHORT);
+            flp.cut_short = true;
             break;
         }
         if id == EV_VERSION && major == 0 {

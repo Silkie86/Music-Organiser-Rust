@@ -42,10 +42,11 @@ pub struct Entry {
 impl Entry {
     /// The layout of records `size` bytes long.
     pub fn record_layout_for(&self, size: usize) -> Option<&str> {
-        match self.record_layout_by_size.as_ref().and_then(|by_size| by_size.get(&size.to_string())) {
-            Some(layout) => Some(layout),
-            None => self.record_layout.as_deref(),
-        }
+        self.record_layout_by_size
+            .as_ref()
+            .and_then(|by_size| by_size.get(&size.to_string()))
+            .map(String::as_str)
+            .or(self.record_layout.as_deref())
     }
 
     /// The id as a number, or none when it isn't one (metadata keys).

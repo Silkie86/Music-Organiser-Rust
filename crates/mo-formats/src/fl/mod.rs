@@ -32,7 +32,8 @@ pub const DAW: &str = "FL Studio";
 /// 8.5's notes as 24 bytes (they were read as 20 when they divided by both), the playlists of FL 9.0 to 9.5 saves that
 /// mix pattern rows with clips (they read empty), and FL 6 to 8's pattern clips; 17 reads text before FL 11.5 in
 /// Windows' code page 1252, not Latin-1, counts the patterns named rather than new-pattern events, lists no unplayed
-/// samples in a save cut short, reads damaged FL 3.5 to 8.0 notes at 20 bytes, and leaves out notes above MIDI's top key.
+/// samples in a save cut short, reads damaged FL 3.5 to 8.0 notes at 20 bytes (with a warning), and leaves out notes
+/// above MIDI's top key.
 pub const VERSION: u32 = 17;
 pub const EXTENSIONS: [&str; 1] = ["flp"];
 
@@ -148,7 +149,7 @@ fn read_with(raw: &[u8], resolve: &mut dyn FnMut(&str) -> String) -> ProjectInfo
     let mut channel_types: BTreeMap<u32, u32> = BTreeMap::new();
     let mut rack = Rack::default();
     let mut pending_internal = String::new();
-    let (mut patterns, mut notes, mut above_midi) = (HashSet::new(), 0, 0);
+    let (mut patterns, mut notes) = (HashSet::new(), 0);
     let known = channels(&flp);
     // Plugins that saved nothing, by name; letter case aside, each once, in order.
     let mut nothing_saved: BTreeMap<String, String> = BTreeMap::new();
@@ -174,8 +175,7 @@ fn read_with(raw: &[u8], resolve: &mut dyn FnMut(&str) -> String) -> ProjectInfo
             EV_SAMPLE_PATH => info.samples.push(resolve(&flp.text(&e.data))),
             EV_PATTERN_NOTES => {
                 let size = notes::note_size(&e.data, (flp.major, flp.minor), e.offset.is_none(), Some(&known));
-                notes += e.data.len() / size;
-                above_midi += notes::above_midi(&e.data, size);
+                notes += notes::decode(&e.data, size).len();
             }
             EV_PROJECT_TIME if e.data.len() >= 16 => {
                 let (created, spent) = project_time(&e.data);
@@ -249,8 +249,9 @@ fn read_with(raw: &[u8], resolve: &mut dyn FnMut(&str) -> String) -> ProjectInfo
     }
     info.details.insert("Channels".into(), info.tracks.len().to_string());
     info.details.insert("Patterns".into(), patterns.len().to_string());
-    if above_midi > 0 {
-        info.warnings.push(notes::above_midi_warning(above_midi));
+    info.warnings.extend(notes::trouble(&flp));
+    if flp.cut_short && flp.warning != Some(CUT_SHORT) {
+        info.warnings.push(CUT_SHORT.to_owned());
     }
     info.details.insert("Notes".into(), notes.to_string());
     // Only a song with samples has any to leave unplayed.
@@ -259,9 +260,11 @@ fn read_with(raw: &[u8], resolve: &mut dyn FnMut(&str) -> String) -> ProjectInfo
         if let Some(w) = song.warning {
             info.warnings.push(w.to_owned());
         }
-        // A song cut short (too big to place, or a save that ends early, perhaps before its playlist) would list
-        // samples played only after the cut as unplayed: none are listed instead.
-        let cut_short = song.warning.is_some() || matches!(flp.warning, Some(CUT_SHORT | STOPPED_PART_WAY));
+        // A song cut short (too many notes to place, or a save that ends early, perhaps before its playlist) would
+        // list samples played only after the cut as unplayed: none are listed instead. Too many automation points
+        // leaves the notes and clips whole.
+        let cut_short =
+            song.warning == Some(song::TOO_MANY_NOTES) || flp.cut_short || flp.warning == Some(STOPPED_PART_WAY);
         if !cut_short {
             note_unplayed(&song, resolve, &mut info);
         }
@@ -333,7 +336,7 @@ impl Rack {
 }
 
 /// The song's channels, by their number in the Channel Rack.
-pub(crate) fn channels(flp: &Flp<'_>) -> HashSet<u32> {
+pub fn channels(flp: &Flp<'_>) -> HashSet<u32> {
     flp.events.iter().filter(|e| e.id == EV_CHANNEL_NEW).map(Event::int).collect()
 }
 

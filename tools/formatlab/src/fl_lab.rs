@@ -31,6 +31,8 @@ pub fn read(raw: &[u8], name: &str) -> Result<LabFile, String> {
     let mut counts: HashMap<(&str, u8), usize> = HashMap::new();
     let mut plugin_types: HashMap<&str, String> = HashMap::new();
     let mut last = None;
+    // The song's channels, which pattern notes are sized by (as the reader does), found at the first.
+    let mut known = None;
     for (e, scope) in in_file.iter().zip(&scopes) {
         let scope = scope.as_str();
         if last != Some(scope) {
@@ -77,7 +79,8 @@ pub fn read(raw: &[u8], name: &str) -> Result<LabFile, String> {
         if let Some(entry) = entry {
             // Pattern notes are 20 or 24 bytes by FL's version (major and minor, rule 9): sized as the reader does.
             let size = if e.id == EV_PATTERN_NOTES {
-                Some(mo_formats::fl::notes::note_size(data, (flp.major, flp.minor), false, None))
+                let known = known.get_or_insert_with(|| mo_formats::fl::channels(&flp));
+                Some(mo_formats::fl::notes::note_size(data, (flp.major, flp.minor), false, Some(known)))
             } else {
                 entry.record_size(flp.major)
             };
