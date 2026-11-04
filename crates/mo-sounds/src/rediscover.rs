@@ -93,7 +93,7 @@ pub fn suggest(sounds: &[Sound], usage: &HashMap<i64, Usage>, index: &SoundIndex
         .map(|s| {
             let whole = i64::from(used_in(usage, s.id))
                 + if s.favourite { 3 } else { 0 }
-                + i64::from((s.rating - 3).max(0)) * 2;
+                + i64::from(s.rating.saturating_sub(3).max(0)) * 2;
             (*s, whole as f64 + f64::from(s.plays.min(10)) * 0.2)
         })
         .collect();
@@ -123,7 +123,7 @@ pub fn suggest(sounds: &[Sound], usage: &HashMap<i64, Usage>, index: &SoundIndex
             let centroid = centroids.get(c.sound_type.as_str()).or(overall.as_ref());
             // A sound the index doesn't have counts as all noughts, as before.
             let fit = centroid.map_or(0.5, |m| (index.dot_with(c.id, m).unwrap_or(0.0) + 1.0) / 2.0);
-            let fresh = if c.plays == 0 { 1.0 } else { 1.0 / f64::from(1 + c.plays) };
+            let fresh = if c.plays == 0 { 1.0 } else { 1.0 / f64::from(c.plays.saturating_add(1)) };
             (*c, (1.0 - o.adventure) * fit + 0.15 * fresh + o.adventure * noise)
         })
         .collect();

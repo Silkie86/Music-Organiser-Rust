@@ -13,6 +13,7 @@ use mo_space::folder_move::MovedFolder;
 use crate::background::Pace;
 use crate::places::{LAST_PAGE_CHOICE, Place};
 use crate::themes::{ACCENTS, FONTS, SIZES, THEMES, Theme, font_named, parse_hex, size_from_setting};
+use mo_library::folders::FolderList;
 
 /// The page's tabs, left to right.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -249,6 +250,8 @@ pub fn output_note(open: Option<&str>, problem: Option<&str>) -> String {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FolderGroup {
     pub title: &'static str,
+    /// The list it changes, if it can be changed here (the moved plugin data can't: it's moved from a plugin's card).
+    pub list: Option<FolderList>,
     pub note: &'static str,
     pub folders: Vec<String>,
     /// Shown when there are none.
@@ -269,6 +272,7 @@ pub fn folder_groups(
     vec![
         FolderGroup {
             title: "PROJECTS",
+            list: Some(FolderList::Projects),
             note: "Searched for Bitwig, FL Studio and Studio One projects, subfolders too. Autosaves, backups and the \
                    demo songs that came with your DAWs are skipped.",
             folders: projects,
@@ -276,18 +280,21 @@ pub fn folder_groups(
         },
         FolderGroup {
             title: "SAMPLES",
+            list: Some(FolderList::Samples),
             note: "Your sample libraries: what Sounds shows, and where missing samples are looked for.",
             folders: samples,
             empty: "No sample folders yet.",
         },
         FolderGroup {
             title: "MIDI",
+            list: Some(FolderList::Midi),
             note: "Your MIDI packs, read for the MIDI page beside the MIDI inside your songs.",
             folders: midi,
             empty: "No MIDI folders yet.",
         },
         FolderGroup {
             title: "PLUGINS",
+            list: Some(FolderList::Plugins),
             note: if plugins_are_defaults {
                 "Where your VST3, CLAP and VST2 plugins are installed: the standard folders, as none were chosen."
             } else {
@@ -298,6 +305,7 @@ pub fn folder_groups(
         },
         FolderGroup {
             title: "PLUGIN DATA ON OTHER DRIVES",
+            list: None,
             note: "Plugin folders moved off their drive, and where they are now. Move one from its plugin's card.",
             folders: moved.iter().map(|m| format!("{}  →  {}", m.from, m.to)).collect(),
             empty: "Nothing moved yet.",
@@ -305,9 +313,35 @@ pub fn folder_groups(
     ]
 }
 
-/// The line under the Folders tab's title: they're shown, and changing them waits.
-pub const FOLDERS_NOTE: &str = "These are the folders the C# app keeps. Adding and removing them here comes once the \
-                                app may write to your library (library.db); until then, change them in the C# app.";
+/// The line under the Folders tab's title.
+pub const FOLDERS_NOTE: &str = "The folders the app looks in, shared with the C# app (library.db). Adding or removing \
+    one never moves or deletes anything on disk, and a project folder taken off keeps its songs listed. The Songs page \
+    takes up a changed project folder (one added, or one taken off) at the next start; the C# app reads new folders at \
+    its next scan.";
+
+/// The folder picker's title for a list.
+pub fn pick_title(list: FolderList) -> &'static str {
+    match list {
+        FolderList::Projects => "Choose a folder with music projects",
+        FolderList::Samples => "Choose a sample library folder",
+        FolderList::Midi => "Choose a folder of MIDI packs",
+        FolderList::Plugins => "Choose a plugin folder (VST3, CLAP or VST2)",
+    }
+}
+
+/// What a folder change did, in words: none when it changed nothing worth saying.
+pub fn folder_change_note(added: bool, folder: &str, done: Result<bool, String>) -> Option<String> {
+    match done {
+        Ok(true) => Some(if added {
+            format!("Added {folder}.")
+        } else {
+            format!("Took {folder} off the list. Nothing on disk was changed.")
+        }),
+        Ok(false) if added => Some(format!("{folder} is already on the list.")),
+        Ok(false) => None,
+        Err(e) => Some(format!("Nothing was changed: {e}")),
+    }
+}
 
 /// One line of the About part or the Developer tab: what it is and its value.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -672,5 +706,29 @@ mod tests {
         assert_eq!(broken.state, "Linked, but not working fully");
         assert!(broken.facts.iter().all(|f| f.what != "Open project"));
         assert!(broken.facts.last().is_some_and(|f| f.value.ends_with("Bitwig said: no MIDI")));
+    }
+
+    #[test]
+    fn folder_changes_are_said_plainly() {
+        assert_eq!(folder_change_note(true, r"E:\Songs", Ok(true)).as_deref(), Some(r"Added E:\Songs."));
+        assert_eq!(
+            folder_change_note(true, r"E:\Songs", Ok(false)).as_deref(),
+            Some(r"E:\Songs is already on the list.")
+        );
+        assert_eq!(folder_change_note(false, r"E:\Songs", Ok(false)), None);
+        assert!(folder_change_note(false, "x", Ok(true)).is_some_and(|n| n.contains("Nothing on disk")));
+        assert_eq!(folder_change_note(true, "x", Err("locked".into())).as_deref(), Some("Nothing was changed: locked"));
+        let groups = folder_groups(vec![], vec![], vec![], vec![], vec![], &[]);
+        let lists: Vec<_> = groups.iter().map(|g| g.list).collect();
+        assert_eq!(
+            lists,
+            [
+                Some(FolderList::Projects),
+                Some(FolderList::Samples),
+                Some(FolderList::Midi),
+                Some(FolderList::Plugins),
+                None
+            ]
+        );
     }
 }
