@@ -1542,7 +1542,8 @@ export component SoundsPage inherits Rectangle {
                     }
                     if SoundsData.empty-title == "" && SoundsData.shown > 0 && (SoundsData.view == 1 || SoundsData.view == 3 || SoundsData.view == 4): list-box := VerticalLayout {
                         // Two lines a sound where the columns would leave its name under about 100 px (in a
-                        // 900 px window); a big window with the panel and the year strip open keeps one line.
+                        // 900 px window); a big window with the panel and the year strip open keeps one line. The
+                        // columns take about 510 px (SoundLineView): make one wider, and raise this with it.
                         property <bool> narrow: self.width < 660px;
                         property <length> line-height: self.narrow ? 52px : 40px;
                         ListHeading {
