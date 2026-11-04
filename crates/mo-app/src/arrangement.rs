@@ -11,21 +11,29 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use mo_formats::arrangement::{Arrangement, AudioPart, LaneKind, PreviewClip, PreviewLane};
 
+use mo_library::samples::{SampleLocator, TreeRead, is_daw_content};
 use mo_library::songs::thousands;
 
 use crate::shapes::{Colour, Scene};
 use crate::themes::Look;
 
-/// A project's arrangement views, read and with its audio files looked for: what [`read`] gives.
+/// A project's arrangement views, and the audio files they play once those have been looked for: [`read`] gives the
+/// views, and [`find_samples`] the files after, as looking for them can take much longer than reading the save (it may
+/// read whole folder trees and the Sounds library).
 #[derive(Clone, Debug, Default)]
 pub struct Preview {
     pub views: Vec<Arc<Arrangement>>,
-    /// The audio files found on this computer, by the path the project saved.
-    pub found: Arc<HashMap<String, PathBuf>>,
+    /// The audio files found on this computer, by the path the project saved: `None` while they're still to be looked
+    /// for.
+    pub found: Option<Arc<HashMap<String, PathBuf>>>,
 }
+
+/// A step slower than this is written to the log, with how long it took.
+const SLOW: Duration = Duration::from_secs(1);
 
 /// An audio file's sound boiled down for drawing its waveform: the loudest a channel gets in each slice of the file.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -68,44 +76,174 @@ impl Peaks {
     }
 }
 
-/// Reads a project's arrangement and looks for its audio files the way the Samples tab does (rule 13: the project's
-/// folders first, then the DAW's own, then the Sounds library at `sounds_db` when given). Reads the disk, so never on the window's thread. An error is the message to
-/// show instead.
-pub fn read(project: &Path, sounds_db: Option<&Path>) -> Result<Preview, String> {
+/// Reads a project's arrangement views. Its audio files are looked for after, by [`find_samples`] (until then
+/// `found` is `None`; it's empty at once when no clip plays one). Reads the disk, so never on the window's thread. An
+/// error is the message to show instead.
+pub fn read(project: &Path) -> Result<Preview, String> {
+    let started = Instant::now();
     // A reader that trips on a damaged save (overflow checks stay on) says so here, as the library's scan does,
     // instead of ending the page's reader with the arrangement never shown.
-    let views = mo_catch::catch(|| mo_formats::arrangement::read(project))
+    let views: Vec<Arc<Arrangement>> = mo_catch::catch(|| mo_formats::arrangement::read(project))
         .map_err(|_| "Couldn't read the arrangement: the save holds something the reader didn't expect.".to_owned())?
-        .map_err(|e| format!("Couldn't read the arrangement: {e}."))?;
-    let locator = crate::sound_library::locator(sounds_db);
+        .map_err(|e| format!("Couldn't read the arrangement: {e}."))?
+        .into_iter()
+        .map(Arc::new)
+        .collect();
+    let took = started.elapsed();
+    if took >= SLOW {
+        let name = mo_formats::paths::file_name(&project.to_string_lossy()).to_owned();
+        crate::log::info("Arrangement", &format!("Read the arrangement of {name} in {}", seconds(took)));
+    }
+    let found = audio_parts(&views).next().is_none().then(Arc::default);
+    Ok(Preview { views, found })
+}
+
+/// Every audio part the views play, in order, the same file as often as it's played.
+fn audio_parts(views: &[Arc<Arrangement>]) -> impl Iterator<Item = &AudioPart> {
+    views.iter().flat_map(|a| parts_of(a))
+}
+
+/// Every audio part one view plays, in order.
+fn parts_of(a: &Arrangement) -> impl Iterator<Item = &AudioPart> {
+    a.lanes.iter().flat_map(|l| &l.clips).flat_map(|c| &c.audio)
+}
+
+/// Looks for the audio files a project's views play the way the Samples tab does (rule 13: the project's folders
+/// first, then the DAW's own, then the Sounds library, when `locator` has it), giving those found, by the path the
+/// project saved. The DAW's own content ("%FLStudioFactoryData%…") counts as found even where it isn't at a path of its
+/// own, as the Samples tab counts it. Gives `None`, stopping early, once `wanted` says they aren't wanted any more
+/// (another song was picked); a file being looked for then is looked for to the end first. A search slower than a
+/// second is written to the log, stopped or not, with the folder trees it read and how long each took. Reads the disk,
+/// so never on the window's thread.
+pub fn find_samples(
+    views: &[Arc<Arrangement>],
+    project: &Path,
+    locator: &SampleLocator,
+    wanted: impl Fn() -> bool,
+) -> Option<HashMap<String, PathBuf>> {
+    let started = Instant::now();
+    let (trees_before, library_before) = (locator.trees_read(), locator.library_read());
     let project_path = project.to_string_lossy();
     let mut found = HashMap::new();
     let mut looked = HashSet::new();
-    let mut views: Vec<Arrangement> = views;
-    for a in &mut views {
-        let mut missing = 0;
-        for part in a.lanes.iter().flat_map(|l| &l.clips).flat_map(|c| &c.audio) {
-            if looked.insert(part.path.clone()) {
-                if let Some(f) = locator.locate(&part.path, &project_path) {
-                    found.insert(part.path.clone(), PathBuf::from(f));
-                } else if locator.found(&part.path, &project_path) {
-                    // The DAW's own content ("%FLStudioFactoryData%…"): there, though not at a path of its own yet.
-                    found.insert(part.path.clone(), PathBuf::from(&part.path));
-                }
-            }
-            if !found.contains_key(&part.path) {
-                missing += 1;
-            }
+    let mut stopped = false;
+    for part in audio_parts(views) {
+        if looked.contains(part.path.as_str()) {
+            continue;
         }
-        if missing > 0 {
-            a.notes.push(if missing == 1 {
-                "1 audio clip's file isn't on this computer, so it's drawn without its sound.".to_owned()
-            } else {
-                format!("{missing} audio clips' files aren't on this computer, so they're drawn without their sound.")
-            });
+        if !wanted() {
+            stopped = true;
+            break;
+        }
+        looked.insert(part.path.as_str());
+        if let Some(f) = locator.locate(&part.path, &project_path) {
+            found.insert(part.path.clone(), PathBuf::from(f));
+        } else if is_daw_content(&part.path) {
+            found.insert(part.path.clone(), PathBuf::from(&part.path));
         }
     }
-    Ok(Preview { views: views.into_iter().map(Arc::new).collect(), found: Arc::new(found) })
+    let took = started.elapsed();
+    if took >= SLOW {
+        let name = mo_formats::paths::file_name(&project_path).to_owned();
+        let trees: Vec<TreeRead> = locator.tree_reads().into_iter().filter(|t| t.number >= trees_before).collect();
+        // The library is read once for a locator: by this search if it hadn't been before.
+        let library = locator.library_read().filter(|_| library_before.is_none());
+        let search = Search { name: &name, looked: looked.len(), found: found.len(), took, stopped };
+        crate::log::info("Arrangement", &search.line(&trees, library));
+    }
+    (!stopped).then_some(found)
+}
+
+/// How long the folder trees a search has read (and the Sounds library) are trusted: songs picked within a minute
+/// share them, later ones look again, so a file put back is seen, as the library's own updates do.
+const FOLDERS_FRESH: Duration = Duration::from_secs(60);
+
+/// What songs' audio files are looked for with, one search after another: the folder trees read for one song are kept
+/// for the next while they're fresh ([`FOLDERS_FRESH`]), so going through the songs of one folder, or of one DAW,
+/// doesn't read the same folders (FL Studio's, say) for each.
+pub struct SampleFinder {
+    sounds_db: Option<PathBuf>,
+    kept: Option<(Instant, Arc<SampleLocator>)>,
+}
+
+impl SampleFinder {
+    /// Looks in the Sounds library at `sounds_db` last, when given.
+    pub fn new(sounds_db: Option<PathBuf>) -> SampleFinder {
+        SampleFinder { sounds_db, kept: None }
+    }
+
+    /// The locator for a search starting `now`: the last one while what it read is fresh, otherwise a new one.
+    pub fn locator(&mut self, now: Instant) -> Arc<SampleLocator> {
+        match &self.kept {
+            Some((at, locator)) if now.saturating_duration_since(*at) < FOLDERS_FRESH => locator.clone(),
+            _ => {
+                let locator = Arc::new(crate::sound_library::locator(self.sounds_db.as_deref()));
+                self.kept = Some((now, locator.clone()));
+                locator
+            }
+        }
+    }
+}
+
+/// A search for a project's audio files, for the log: the project's file name, how many files were looked for and
+/// found, how long it took, and whether it stopped early (another song was picked).
+struct Search<'a> {
+    name: &'a str,
+    looked: usize,
+    found: usize,
+    took: Duration,
+    stopped: bool,
+}
+
+impl Search<'_> {
+    /// The log's line about a slow search: "Looked for the 52 audio files of rainforest.flp in 41.2 s, 40 found: read
+    /// K:\Projects (184,224 files and folders) in 30.1 s; the Sounds library in 6.0 s", or "Stopped looking for the
+    /// audio files of rainforest.flp after 41.2 s (another song was picked), 12 looked for and 10 found: read …".
+    fn line(&self, trees: &[TreeRead], library: Option<Duration>) -> String {
+        let (name, took, found) = (self.name, seconds(self.took), thousands(self.found));
+        let mut line = if self.stopped {
+            let looked = thousands(self.looked);
+            format!(
+                "Stopped looking for the audio files of {name} after {took} (another song was picked), {looked} looked \
+                 for and {found} found"
+            )
+        } else if self.looked == 1 {
+            format!("Looked for the audio file of {name} in {took}, {found} found")
+        } else {
+            format!("Looked for the {} audio files of {name} in {took}, {found} found", thousands(self.looked))
+        };
+        let mut reads: Vec<String> = trees
+            .iter()
+            .map(|t| format!("{} ({} files and folders) in {}", t.folder, thousands(t.entries), seconds(t.took)))
+            .collect();
+        if let Some(took) = library {
+            reads.push(format!("the Sounds library in {}", seconds(took)));
+        }
+        if !reads.is_empty() {
+            line.push_str(": read ");
+            line.push_str(&reads.join("; "));
+        }
+        line
+    }
+}
+
+fn seconds(took: Duration) -> String {
+    format!("{:.1} s", took.as_secs_f64())
+}
+
+/// What the page says under a view: the reader's notes, then how many of its audio clips' files aren't on this
+/// computer, once they've been looked for (`found`).
+pub fn notes(a: &Arrangement, found: Option<&HashMap<String, PathBuf>>) -> Vec<String> {
+    let mut notes = a.notes.clone();
+    let missing = found.map_or(0, |found| parts_of(a).filter(|p| !found.contains_key(&p.path)).count());
+    if missing == 1 {
+        notes.push("1 audio clip's file isn't on this computer, so it's drawn without its sound.".to_owned());
+    } else if missing > 1 {
+        notes.push(format!(
+            "{missing} audio clips' files aren't on this computer, so they're drawn without their sound."
+        ));
+    }
+    notes
 }
 
 /// "140 BPM · 32 bars · 0:55 · 6 tracks · 18 clips · 412 notes".
@@ -248,6 +386,9 @@ const SCROLLBAR: f64 = 5.0;
 pub struct View {
     arrangement: Arc<Arrangement>,
     found: Arc<HashMap<String, PathBuf>>,
+    /// Whether the audio files have been looked for (and so `found` holds every one that's here): until then each
+    /// clip is drawn as if its file were here, so none is called missing before that's known.
+    looked: bool,
     /// The waveforms of the audio files read so far, by the path the project saved.
     peaks: Arc<HashMap<String, Arc<Peaks>>>,
     pub width: f64,
@@ -293,6 +434,7 @@ impl View {
         View {
             arrangement,
             found,
+            looked: true,
             peaks: Arc::default(),
             width: 0.0,
             height: 0.0,
@@ -344,6 +486,24 @@ impl View {
     /// Draws the audio clips' waveforms from these (the audio files are read after the arrangement, so it shows first).
     pub fn set_peaks(&mut self, peaks: Arc<HashMap<String, Arc<Peaks>>>) {
         self.peaks = peaks;
+    }
+
+    /// The same view while its audio files are still being looked for ([`find_samples`]): until [`View::set_found`],
+    /// each clip is drawn as if its file were here, so none is called missing before that's known.
+    pub fn looking_for_files(mut self) -> View {
+        self.looked = false;
+        self
+    }
+
+    /// The audio files have been looked for: these were found.
+    pub fn set_found(&mut self, found: Arc<HashMap<String, PathBuf>>) {
+        self.found = found;
+        self.looked = true;
+    }
+
+    /// Whether the audio file the project saved as `saved` is here, as far as is known yet.
+    fn file_here(&self, saved: &str) -> bool {
+        !self.looked || self.found.contains_key(saved)
     }
 
     fn x(&self, beat: f64) -> f64 {
@@ -446,7 +606,7 @@ impl View {
                 if py >= y && py < y + lh {
                     if let Some(clip) = lane.clips.iter().rev().find(|c| self.clip_box(c, y, lh).contains(px, py)) {
                         text.push_str("  ·  ");
-                        text.push_str(&describe(lane, clip, &self.found));
+                        text.push_str(&describe(lane, clip, |saved| self.file_here(saved)));
                     }
                     break;
                 }
@@ -847,7 +1007,7 @@ impl<'a> Draw<'a> {
         {
             return;
         }
-        if v.found.contains_key(&part.path) {
+        if v.file_here(&part.path) {
             // The sound itself is drawn once its file has been read; until then (or when it can't be) a soft band.
             let band = Box2::new(x0, mid - inner.h * 0.3, x1 - x0, inner.h * 0.6);
             if let Some(b) = band.intersect(&visible) {
@@ -949,14 +1109,14 @@ fn clip_segment(a: (f64, f64), b: (f64, f64), r: &Box2) -> Option<((f64, f64), (
 }
 
 /// One line about a clip for the hover label: "Verse · 12 notes", "Vox.wav (not on this computer)", "muted".
-fn describe(lane: &PreviewLane, clip: &PreviewClip, found: &HashMap<String, PathBuf>) -> String {
+fn describe(lane: &PreviewLane, clip: &PreviewClip, file_here: impl Fn(&str) -> bool) -> String {
     let mut bits = vec![if clip.name.is_empty() { lane.name.clone() } else { clip.name.clone() }];
     if !clip.notes.is_empty() {
         bits.push(count(clip.notes.iter().filter(|n| !n.muted).count() as u64, "note"));
     }
     if let Some(part) = clip.audio.first() {
         let name = mo_formats::paths::file_name(&part.path).to_owned();
-        bits.push(if found.contains_key(&part.path) { name } else { format!("{name} (not on this computer)") });
+        bits.push(if file_here(&part.path) { name } else { format!("{name} (not on this computer)") });
     }
     if !clip.points.is_empty() {
         bits.push("automation".to_owned());
@@ -1193,6 +1353,95 @@ mod tests {
         let hover = f.hover.expect("the mouse is over a clip");
         assert!(hover.text.starts_with("Bar "), "{}", hover.text);
         assert!(hover.text.ends_with("Verse · 2 notes"), "{}", hover.text);
+    }
+
+    /// While its audio files are still being looked for, no clip is called missing: its file is drawn as a soft band
+    /// and named as it is. Once they've been looked for, a clip whose file isn't here says so.
+    #[test]
+    fn a_clip_isnt_called_missing_while_its_file_is_looked_for() {
+        let mut v = View::new(Arc::new(song()), Arc::default()).looking_for_files();
+        v.resize(800.0, 200.0);
+        // Over the Vox clip.
+        v.moved(v.x(12.0), v.ruler_height() + 46.0 + 20.0);
+        let labels = |v: &View| v.frame(&palette(), 1.0).labels.into_iter().map(|l| l.text).collect::<Vec<_>>();
+        assert!(!labels(&v).iter().any(|l| l == "file not on this computer"), "{:?}", labels(&v));
+        assert!(v.hover().expect("over a clip").text.ends_with("Vox · Vox.wav"));
+        v.set_found(Arc::default());
+        assert!(labels(&v).iter().any(|l| l == "file not on this computer"));
+        assert!(v.hover().expect("over a clip").text.ends_with("Vox · Vox.wav (not on this computer)"));
+        // Found: named as it is again.
+        v.set_found(Arc::new(HashMap::from([(r"C:\Samples\Vox.wav".to_owned(), PathBuf::from("/s/Vox.wav"))])));
+        assert!(!labels(&v).iter().any(|l| l == "file not on this computer"));
+        assert!(v.hover().expect("over a clip").text.ends_with("Vox · Vox.wav"));
+    }
+
+    /// The page says how many audio clips' files aren't here, after the reader's own notes, once they've been looked
+    /// for: each clip counted, however many play the same file.
+    #[test]
+    fn the_notes_count_the_clips_whose_files_arent_here() {
+        let mut a = song();
+        a.notes.push("Some patterns are past the song's end.".into());
+        assert_eq!(notes(&a, None), a.notes, "not looked for yet");
+        let mut gone = notes(&a, Some(&HashMap::new()));
+        assert_eq!(
+            gone.pop().as_deref(),
+            Some("1 audio clip's file isn't on this computer, so it's drawn without its sound.")
+        );
+        assert_eq!(gone, a.notes);
+        let vox = a.lanes[1].clips[0].clone();
+        a.lanes[1].clips.push(PreviewClip { start: 24.0, ..vox });
+        assert_eq!(
+            notes(&a, Some(&HashMap::new())).last().map(String::as_str),
+            Some("2 audio clips' files aren't on this computer, so they're drawn without their sound.")
+        );
+        let found = HashMap::from([(r"C:\Samples\Vox.wav".to_owned(), PathBuf::from("/s/Vox.wav"))]);
+        assert_eq!(notes(&a, Some(&found)), a.notes, "all here");
+    }
+
+    /// Songs picked within a minute share the folders read; after that they're read again.
+    #[test]
+    fn the_folders_read_are_kept_for_a_minute() {
+        let mut finder = SampleFinder::new(None);
+        let start = Instant::now();
+        let first = finder.locator(start);
+        assert!(Arc::ptr_eq(&first, &finder.locator(start + Duration::from_secs(59))));
+        let later = finder.locator(start + FOLDERS_FRESH);
+        assert!(!Arc::ptr_eq(&first, &later));
+        assert!(Arc::ptr_eq(&later, &finder.locator(start + FOLDERS_FRESH + Duration::from_secs(1))));
+    }
+
+    /// A slow search for a project's audio files says in the log how long it took, and what it read for how long;
+    /// also when it stopped because another song was picked.
+    #[test]
+    fn a_slow_search_says_what_it_read() {
+        let tree = |number, folder: &str, entries, took| TreeRead {
+            number,
+            folder: folder.into(),
+            entries,
+            took: Duration::from_secs_f64(took),
+        };
+        let trees = [
+            tree(0, r"K:\FL Projects", 184_224, 30.06),
+            tree(1, r"C:\Program Files\Image-Line\FL Studio 2024\Data\Patches\Packs", 8_423, 4.4),
+        ];
+        let search = Search {
+            name: "rainforest.flp",
+            looked: 52,
+            found: 40,
+            took: Duration::from_secs_f64(41.2),
+            stopped: false,
+        };
+        assert_eq!(
+            search.line(&trees, Some(Duration::from_secs(6))),
+            r"Looked for the 52 audio files of rainforest.flp in 41.2 s, 40 found: read K:\FL Projects (184,224 files and folders) in 30.1 s; C:\Program Files\Image-Line\FL Studio 2024\Data\Patches\Packs (8,423 files and folders) in 4.4 s; the Sounds library in 6.0 s"
+        );
+        let one = Search { name: "beat.flp", looked: 1, found: 0, took: Duration::from_millis(1260), stopped: false };
+        assert_eq!(one.line(&[], None), "Looked for the audio file of beat.flp in 1.3 s, 0 found");
+        let stopped = Search { looked: 12, found: 10, stopped: true, ..search };
+        assert_eq!(
+            stopped.line(&trees[..1], None),
+            r"Stopped looking for the audio files of rainforest.flp after 41.2 s (another song was picked), 12 looked for and 10 found: read K:\FL Projects (184,224 files and folders) in 30.1 s"
+        );
     }
 
     #[test]
