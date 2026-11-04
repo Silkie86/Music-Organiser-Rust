@@ -735,7 +735,9 @@ impl Decoder {
     }
 
     /// Each reading's chance on each of some units, averaged over them, from the last decode of `hearing` (none before
-    /// one): best first, equal chances in the readings' order from the lowest note up, no chord last.
+    /// one): best first, equal chances in the readings' order from the lowest note up, no chord last. Only the units
+    /// heard count: a range past the last unit's end stops there (`k..usize::MAX` is from unit k on), and one wholly
+    /// past it has no chances.
     pub fn chances(&self, hearing: &Hearing, units: Range<usize>, out: &mut Vec<Chance>) {
         out.clear();
         self.add_chances(hearing, units, out);
@@ -1294,6 +1296,8 @@ impl Decoder {
 
     /// Adds each reading's chance on each of some units, averaged over them, to `out`, sorted.
     fn add_chances(&self, hearing: &Hearing, units: Range<usize>, out: &mut Vec<Chance>) {
+        // Only the units heard, so the spans looked for end at most a span after the last (and nothing overflows).
+        let units = hearing.clamp(units);
         if units.is_empty() {
             return;
         }
