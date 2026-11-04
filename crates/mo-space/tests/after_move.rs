@@ -318,6 +318,29 @@ fn a_link_pointed_elsewhere_just_before_the_swap_is_still_named_once_the_moved_f
     assert_eq!(only_in_old_copy(&done.moved[0], &done.moved, &stop).unwrap(), ["Kits"]);
 }
 
+/// A moved folder inside another (Reaktor 6 first, then Native Instruments around it): once the folder the moved
+/// folders live in moves to another drive, the copy's link to Reaktor 6 leads to its new place, and the old copy's
+/// still to the old one. That link is the app's own, so it isn't taken for something only in the old copy.
+#[test]
+fn an_inner_moved_folders_link_isnt_only_in_the_old_copy_once_the_moved_folders_home_moves() {
+    let dir = fixtures("mo-space-after-home-inner-link");
+    let (c, d, e) = (dir.join("C"), dir.join("D"), dir.join("E"));
+    write(&c, "NI/Reaktor 6/r.ens", "r");
+    write(&c, "NI/k.nki", "k");
+    let data = d.join("Plugin Data");
+    fs::create_dir_all(&data).unwrap();
+    fs::create_dir_all(&e).unwrap();
+    let mut all = vec![move_it(&c.join("NI").join("Reaktor 6"), &data, &[])];
+    all.push(move_it(&c.join("NI"), &data, &all));
+    let stop = AtomicBool::new(false);
+    assert!(only_in_old_copy(&all[1], &all, &stop).unwrap().is_empty());
+    let done = move_home(&s(&data), &s(&e), &all, &[], 2, &OtherDrive, &nothing, &stop).unwrap();
+    let new_home = e.join("Plugin Data");
+    assert_eq!(done.moved[1].to, s(&new_home.join("NI")));
+    assert_eq!(real(&new_home.join("NI").join("Reaktor 6")), real(&new_home.join("Reaktor 6")));
+    assert!(only_in_old_copy(&done.moved[1], &done.moved, &stop).unwrap().is_empty());
+}
+
 /// As the last pass copies the folder the moved folders live in, it's put aside, with a link to another folder in its
 /// place, and that link is pointed at nothing just as the last file comes in: what was read through it isn't the
 /// moved folders', so the move stops, the copy goes, and the links still lead where they did.
