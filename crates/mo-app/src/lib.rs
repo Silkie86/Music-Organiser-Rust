@@ -34,6 +34,7 @@ pub mod space;
 pub mod space_bitwig;
 pub mod sweep_timing;
 pub mod themes;
+pub mod tidy;
 pub mod to_bitwig;
 pub mod version;
 pub mod year_strip;

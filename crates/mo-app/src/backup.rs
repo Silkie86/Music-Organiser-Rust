@@ -33,6 +33,18 @@ use rayon::prelude::*;
 /// The settings file's name, in the app's folder.
 pub const SETTINGS_FILE: &str = "backup.txt";
 
+/// What a settings file is first written as ([`Settings::save`], [`BackedUp::save`], and the app's own settings,
+/// [`crate::app_settings::save`]): its name and then this, renamed once it's whole, so a crash part way leaves the old
+/// one whole. The start-up sweep (rule 28) clears one a crash left.
+pub const PART_ENDING: &str = ".mo-part";
+
+/// Where `path` is written first: its name with [`PART_ENDING`] after it (`backup.txt.mo-part`).
+fn part_of(path: &Path) -> PathBuf {
+    let mut part = path.as_os_str().to_owned();
+    part.push(PART_ENDING);
+    PathBuf::from(part)
+}
+
 /// The two formats.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Format {
@@ -127,7 +139,7 @@ impl Settings {
 
     /// Writes `backup.txt`: under a temporary name first, then renamed, so a crash part way leaves the old one whole.
     pub fn save(&self, path: &Path) -> io::Result<()> {
-        let part = path.with_extension("txt.mo-part");
+        let part = part_of(path);
         fs::write(&part, self.to_text())?;
         fs::rename(&part, path).inspect_err(|_| {
             let _ = fs::remove_file(&part);
@@ -219,7 +231,7 @@ impl BackedUp {
 
     /// Writes `backup-songs.txt`: under a temporary name first, then renamed.
     pub fn save(&self, path: &Path) -> io::Result<()> {
-        let part = path.with_extension("txt.mo-part");
+        let part = part_of(path);
         fs::write(&part, self.to_text())?;
         fs::rename(&part, path).inspect_err(|_| {
             let _ = fs::remove_file(&part);

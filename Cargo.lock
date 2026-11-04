@@ -2995,6 +2995,7 @@ dependencies = [
  "mo-harmony",
  "mo-library",
  "mo-midi",
+ "mo-presets",
  "mo-sounds",
  "mo-space",
  "rayon",
@@ -3169,6 +3170,7 @@ dependencies = [
  "sysinfo",
  "trash",
  "windows-registry",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

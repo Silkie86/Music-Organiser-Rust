@@ -38,6 +38,29 @@ Write-Host 'Building the C# half...'
 dotnet build (Join-Path $Rust 'tools\twin\cs') -c Release -o $Helper "-p:MoOldRepo=$Cs" -p:MoBuildNative=false -p:MoBuildBitwig=false -v quiet -nologo
 if ($LASTEXITCODE -ne 0) { throw 'The C# half did not build.' }
 $Dll = Join-Path $Helper 'twin-cs.dll'
+# A copy of library.db left by a twin test that was stopped part way (Ctrl+C, or the window closed) holds the
+# library's song names and paths, and would stop the songs step ("a file is already there"): it goes first. Only that
+# file and SQLite's own files beside it, in this script's own folder, and only when each is a plain file: never a
+# folder, a link or a junction of that name (rule 28). And nothing at all when twin or twin\cs is itself a link or a
+# junction to somewhere else: what's there isn't only this script's.
+$OwnFolder = $true
+foreach ($Dir in @((Join-Path $Data 'twin'), $Helper)) {
+  $Item = Get-Item -LiteralPath $Dir -Force -ErrorAction SilentlyContinue
+  if (-not $Item -or -not $Item.PSIsContainer -or ($Item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+    $OwnFolder = $false
+  }
+}
+if ($OwnFolder) {
+  foreach ($end in @('', '-wal', '-shm', '-journal')) {
+    $Left = Join-Path $Helper "library-copy.db$end"
+    $Item = Get-Item -LiteralPath $Left -Force -ErrorAction SilentlyContinue
+    if ($Item -and -not $Item.PSIsContainer -and -not ($Item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+      Remove-Item -LiteralPath $Left -Force -ErrorAction SilentlyContinue
+    }
+  }
+} elseif (Test-Path -LiteralPath (Join-Path $Helper 'library-copy.db')) {
+  Write-Host "twin or twin\cs in $Data is a link or a junction, so the library-copy.db in it is left as it is. If the songs step says a file is already there, delete it by hand."
+}
 
 if (-not $Folders) {
   $Folders = @(dotnet $Dll --roots (Join-Path $Data 'library.db') | Where-Object { $_ -and (Test-Path $_) })
