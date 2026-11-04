@@ -24,10 +24,11 @@ use std::time::{Duration, Instant};
 use chrono::{Local, NaiveDateTime};
 use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
+use mo_app::filters::{Filter, Shown};
 use mo_app::finder::{self, Kind};
 use mo_app::places::Place;
 use mo_app::shortcuts::{Shortcuts, what_of};
-use mo_app::sounds::{self as list, Filters, Length, Order, SoundList};
+use mo_app::sounds::{self as list, Filters, Order, SoundCounts, SoundList};
 use mo_app::{log, sweep_timing, to_bitwig, year_strip};
 use mo_audio::play::Player;
 use mo_library::UsageRules;
@@ -37,13 +38,14 @@ use mo_sounds::index::{Gathered, SoundIndex};
 use mo_sounds::liking::{self, LIKED_WEIGHTS_KEY, LikedWeights};
 use mo_sounds::rediscover::{self, FolderUse};
 use mo_sounds::usage::{self, Usage};
-use mo_sounds::{Sound, SoundsDb, SoundsError, music};
+use mo_sounds::{Sound, SoundsDb, SoundsError};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, Timer, TimerMode, VecModel};
 
+use crate::filters::FilterModels;
 use crate::finder::How;
 use crate::{
     AlikeLine, AppWindow, CardAction, FolderLine, MenuItem, PickedSound, SoundFact, SoundLine, SoundTile, SoundsData,
-    TileRow, TypeChipInfo, YearBar,
+    TileRow, YearBar,
 };
 
 /// The C# app's settings in `library.db` for the view shown last and autoplay, read (not written: it's read-only).
@@ -72,18 +74,6 @@ const COUNTS: [usize; 4] = [30, 60, 120, 250];
 const COUNT: usize = 60;
 /// How many forgotten folders Rediscover lists, as in the C# app.
 const FOLDERS: usize = 40;
-
-/// How many type chips show; the other types go in the More types menu.
-const TYPE_CHIPS: usize = 9;
-
-/// The Tempo chip's choices, and the tempos each lets through (lowest, highest).
-const TEMPOS: [(&str, Option<f64>, Option<f64>); 5] = [
-    ("Up to 90", None, Some(90.0)),
-    ("90 to 110", Some(90.0), Some(110.0)),
-    ("110 to 130", Some(110.0), Some(130.0)),
-    ("130 to 150", Some(130.0), Some(150.0)),
-    ("150 and up", Some(150.0), None),
-];
 
 /// The page's sounds, filters and what they let through, kept on the window's thread.
 struct Page {
@@ -117,6 +107,10 @@ struct Page {
     read: bool,
     /// The type chips' types with their counts, in chip order, then the rest (the More types menu).
     types: Vec<(String, usize)>,
+    /// Every tag on a sound, for the Tag filter.
+    tags: Vec<String>,
+    /// How many sounds each filter's choices would show, from the newest list worked out (none before the first).
+    counts: Option<SoundCounts>,
     now: NaiveDateTime,
     /// The sound playing (its place in `list`) and how long the part shown in its waveform lasts.
     playing: Option<(usize, f64)>,
@@ -161,6 +155,8 @@ impl Default for Page {
             asked: 0,
             read: false,
             types: Vec::new(),
+            tags: Vec::new(),
+            counts: None,
             now: Local::now().naive_local(),
             playing: None,
             places: Arc::default(),
@@ -222,6 +218,11 @@ thread_local! {
     static TILE_ROWS: Rc<TileRows> = PAGE.with(|p| Rc::new(TileRows { page: p.clone(), notify: ModelNotify::default() }));
     static LINES: Rc<Lines> = PAGE.with(|p| Rc::new(Lines { page: p.clone(), notify: ModelNotify::default() }));
     static WORKER: RefCell<Option<Newest<Ask>>> = const { RefCell::new(None) };
+    /// The filters' chips and menu lines (type, length, key, tempo, tag), changed in place so an open menu keeps its
+    /// place.
+    static FILTER_MODELS: [FilterModels; 5] = Default::default();
+    /// The picked sound's tags on its panel.
+    static PICKED_TAGS: FilterModels = FilterModels::default();
     static ALIKE: RefCell<Option<Newest<AlikeAsk>>> = const { RefCell::new(None) };
     static REDISCOVERING: RefCell<Option<Newest<RediscoverAsk>>> = const { RefCell::new(None) };
     static FEED: RefCell<Option<Feed>> = const { RefCell::new(None) };
@@ -403,11 +404,6 @@ pub(crate) fn new_seed() -> u64 {
 
 pub(crate) fn strings<S: AsRef<str>>(items: impl IntoIterator<Item = S>) -> ModelRc<SharedString> {
     ModelRc::new(VecModel::from(items.into_iter().map(|s| SharedString::from(s.as_ref())).collect::<Vec<_>>()))
-}
-
-/// Every key the Key chip offers: the twelve major keys, then the twelve minor ones.
-fn key_choices() -> Vec<String> {
-    [false, true].iter().flat_map(|&minor| (0..12).map(move |t| music::key_name(t, minor, false))).collect()
 }
 
 /// For the screenshots: work lists out on the window's thread, as there's no event loop to send them back with.
@@ -1083,8 +1079,12 @@ fn use_known(app: &AppWindow, list: Arc<SoundList>) {
         rediscover_now(app);
     }
     if let Some(at) = picked {
-        let sound = PAGE.with(|p| picked_sound(&p.borrow(), at));
-        app.global::<SoundsData>().set_picked(sound);
+        let data = app.global::<SoundsData>();
+        PAGE.with(|p| {
+            let p = p.borrow();
+            data.set_picked(picked_sound(&p, at));
+            show_picked_tags(&data, &p);
+        });
     }
 }
 
@@ -1114,7 +1114,6 @@ fn brought_up_to_date(app: &AppWindow, r: Refreshed) {
         return;
     }
     drop(was);
-    app.global::<SoundsData>().set_tags(strings(&library.tags));
     let (after, list) = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         let after = take_refreshed(&mut p, library, moved.as_deref().map(Vec::as_slice), retyped);
@@ -1129,7 +1128,11 @@ fn brought_up_to_date(app: &AppWindow, r: Refreshed) {
         data.set_panel_shown(false);
         data.set_alike(ModelRc::default());
     } else if let Some(at) = after.picked {
-        data.set_picked(PAGE.with(|p| picked_sound(&p.borrow(), at)));
+        PAGE.with(|p| {
+            let p = p.borrow();
+            data.set_picked(picked_sound(&p, at));
+            show_picked_tags(&data, &p);
+        });
         // The lines shown move with their sounds meanwhile; an answer still on its way was for the old list.
         if let Some(moved) = moved.as_deref() {
             let lines: Vec<AlikeLine> = data
@@ -1178,6 +1181,7 @@ fn take_refreshed(p: &mut Page, library: Library, moved: Option<&[Option<usize>]
     p.list = library.list;
     p.places = library.places;
     p.types = library.types;
+    p.tags = library.tags;
     // History lists them once the filters have been through them again ([`listed`], asked for by the page next).
     p.played = Arc::new(library.played);
     let gone = moved.map(|moved| move_places(p, moved)).unwrap_or_default();
@@ -1258,8 +1262,6 @@ fn loaded(app: &AppWindow, read: Result<Box<Read>, String>) {
 
 /// Shows a `library` on the page, opening on the view and autoplay setting given.
 pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Option<&str>) {
-    let data = app.global::<SoundsData>();
-    data.set_tags(strings(&library.tags));
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
         // "Reading your sounds…" stays until the list of them is worked out, so "No sounds match" never flashes up
@@ -1272,6 +1274,9 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
         p.to_pick = None;
         p.places = library.places;
         p.types = library.types;
+        p.tags = library.tags;
+        // Counted afresh for these sounds: the choices show without numbers until then.
+        p.counts = None;
         p.view = view.and_then(|v| VIEWS.iter().position(|n| *n == v)).map_or(TILES, |i| i as i32);
         // As in the C# app: off unless it was turned on.
         p.autoplay = autoplay == Some("1");
@@ -1342,43 +1347,24 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     data.set_lines(ModelRc::from(LINES.with(|m| m.clone()) as Rc<dyn Model<Data = SoundLine>>));
     data.set_views(strings(VIEWS));
     data.set_orders(strings(Order::ALL.map(Order::name)));
-    data.set_lengths(strings([Length::Hits.name(), Length::Loops.name()]));
-    data.set_keys(strings(key_choices()));
-    data.set_bpms(strings(TEMPOS.map(|t| t.0)));
     show_actions(&data, shortcuts);
+    // The filters whose choices don't come from the sounds (length, key, tempo) show from the start, without numbers
+    // until the sounds are read, so the rows don't jump when they are.
+    show_chips(app);
 
     let weak = app.as_weak();
     data.on_search_edited(move |text| change(&weak, |f| f.search = text.to_string()));
     let weak = app.as_weak();
-    data.on_pick_type(move |i| {
-        let Some(app) = weak.upgrade() else { return };
-        let ty = PAGE.with(|p| p.borrow().types.get(i as usize).map(|t| t.0.clone()));
-        if let Some(ty) = ty {
-            change(&app.as_weak(), |f| f.toggle_type(&ty));
-        }
-    });
+    data.on_toggle_choice(move |chip, choice| change(&weak, |f| f.pick(&chip, &choice)));
     let weak = app.as_weak();
-    data.on_pick(move |kind, value| {
-        let value = value.to_string();
-        // The types on chips (not in the More types menu), read before the filters are borrowed to change.
-        let chips: Vec<String> = PAGE.with(|p| p.borrow().types.iter().take(TYPE_CHIPS).map(|t| t.0.clone()).collect());
-        change(&weak, |f| match kind.as_str() {
-            "length" => {
-                f.length = Length::ALL.into_iter().find(|l| l.name() == value).unwrap_or_default();
-            }
-            "key" => f.key = music::parse_key(&value).filter(|_| !value.is_empty()),
-            "bpm" => {
-                let t = TEMPOS.iter().find(|t| t.0 == value);
-                f.bpm_from = t.and_then(|t| t.1);
-                f.bpm_to = t.and_then(|t| t.2);
-            }
-            "tag" => f.tag = (!value.is_empty()).then_some(value),
-            // From the More types menu: a type picks or unpicks it; "Any" takes off the types the menu holds.
-            "type" if value.is_empty() => f.sound_types.retain(|t| chips.contains(t)),
-            "type" => f.toggle_type(&value),
-            "types" => f.sound_types.clear(),
-            _ => {}
-        });
+    data.on_clear_chip(move |chip| {
+        if chip == "more-types" {
+            // The More types menu's Any: the types on chips of their own stay picked.
+            let types = PAGE.with(|p| p.borrow().types.clone());
+            change(&weak, |f| f.clear_more_types(&types));
+        } else {
+            change(&weak, |f| f.clear_chip(&chip));
+        }
     });
     let weak = app.as_weak();
     data.on_toggle(move |kind| change(&weak, |f| f.toggle(&kind)));
@@ -1804,10 +1790,10 @@ fn refresh(app: &AppWindow) {
         }
     });
     if HERE.with(|h| *h.borrow()) {
-        let shown = ask.list.view(&ask.filters, ask.order, ask.seed);
+        let (shown, counts) = ask.list.view_counted(&ask.filters, ask.order, ask.seed);
         let years = ask.list.year_counts(ask.filters.used);
         let history = ask.list.played(&ask.played, &ask.filters);
-        listed(app, ask.id, Listed { shown, years, history });
+        listed(app, ask.id, Listed { shown, counts, years, history });
         return;
     }
     WORKER.with(|w| {
@@ -1830,7 +1816,8 @@ fn refresh(app: &AppWindow) {
                 let new = background::on_pool(|| {
                     let years = kept.unwrap_or_else(|| ask.list.year_counts(ask.filters.used));
                     let history = ask.list.played(&ask.played, &ask.filters);
-                    Listed { shown: ask.list.view(&ask.filters, ask.order, ask.seed), years, history }
+                    let (shown, counts) = ask.list.view_counted(&ask.filters, ask.order, ask.seed);
+                    Listed { shown, counts, years, history }
                 });
                 counted = Some((Arc::downgrade(&ask.list), ask.filters.used, new.years.clone()));
                 let weak = weak.clone();
@@ -1854,6 +1841,8 @@ fn refresh(app: &AppWindow) {
 struct Listed {
     /// For Tiles, List and the galaxy, as places in the page's list, in order.
     shown: Vec<usize>,
+    /// How many sounds each filter's choices would show.
+    counts: SoundCounts,
     /// The year strip's years.
     years: YearCounts,
     /// For History: the sounds played, newest first, with when.
@@ -1869,11 +1858,14 @@ fn listed(app: &AppWindow, id: u64, new: Listed) {
             return false;
         }
         p.shown = Arc::new(new.shown);
+        p.counts = Some(new.counts);
         p.years = new.years;
         p.history = new.history;
         true
     });
     if current {
+        // The counts beside the filters' choices, for the filters as they are now.
+        show_chips(app);
         show_years(app);
         show_lists(app);
         // Once the sounds are read, the list (or "No sounds match") takes the place of the word saying so.
@@ -1967,38 +1959,23 @@ fn redraw() {
     kit::redraw();
 }
 
+/// The filters' chips and menus as the filters are now, each choice with the counts from the newest list worked out
+/// (a pick shows at once; its counts come with the list it asked for).
 fn show_chips(app: &AppWindow) {
     let data = app.global::<SoundsData>();
     PAGE.with(|p| {
         let p = p.borrow();
         let f = &p.filters;
-        let counts = &p.types;
-        let chips: Vec<TypeChipInfo> = counts
-            .iter()
-            .take(TYPE_CHIPS)
-            .map(|(t, n)| TypeChipInfo {
-                name: t.clone().into(),
-                count: list::short_count(*n).into(),
-                colour: list::type_colour(t),
-                on: f.sound_types.contains(t),
-            })
-            .collect();
-        data.set_types(ModelRc::new(VecModel::from(chips)));
-        data.set_more_types(strings(counts.iter().skip(TYPE_CHIPS).map(|(t, _)| t.as_str())));
-        let more: Vec<&str> = counts
-            .iter()
-            .skip(TYPE_CHIPS)
-            .map(|(t, _)| t.as_str())
-            .filter(|t| f.sound_types.iter().any(|picked| picked == t))
-            .collect();
-        data.set_more_type(more.join(", ").into());
+        let chips = list::chips(f, p.counts.as_ref(), &p.types, &p.tags);
+        FILTER_MODELS.with(|m| {
+            data.set_type_filter(m[0].view(&chips.types));
+            data.set_length_filter(m[1].view(&chips.length));
+            data.set_key_filter(m[2].view(&chips.key));
+            data.set_tempo_filter(m[3].view(&chips.tempo));
+            data.set_tag_filter(m[4].view(&chips.tag));
+        });
         data.set_any_type(!f.sound_types.is_empty());
-        data.set_length(if f.length == Length::All { "" } else { f.length.name() }.into());
-        data.set_key(f.key.map(|(t, m)| music::key_name(t, m, false)).unwrap_or_default().into());
         data.set_mix_well(f.mix_well);
-        let tempo = TEMPOS.iter().find(|t| t.1 == f.bpm_from && t.2 == f.bpm_to && (t.1.is_some() || t.2.is_some()));
-        data.set_bpm(tempo.map_or("", |t| t.0).into());
-        data.set_tag(f.tag.clone().unwrap_or_default().into());
         data.set_unused(f.unused);
         data.set_used(f.used);
         data.set_knows_use(p.list.knows_use());
@@ -2006,7 +1983,23 @@ fn show_chips(app: &AppWindow) {
         data.set_any_filter(f.any());
         data.set_order(p.order.name().into());
         data.set_autoplay(p.autoplay);
+        show_picked_tags(&data, &p);
     });
+}
+
+/// The picked sound's tags on its panel, each lit while the Tag filter has it.
+fn show_picked_tags(data: &SoundsData, p: &Page) {
+    let tags = p.picked.and_then(|at| p.list.sound(at)).map(|s| s.tags.as_slice()).unwrap_or_default();
+    let shown: Vec<Shown> = tags
+        .iter()
+        .map(|t| Shown {
+            text: t.clone(),
+            count: String::new(),
+            on: p.filters.tags.iter().any(|picked| picked.eq_ignore_ascii_case(t)),
+        })
+        .collect();
+    let view = PICKED_TAGS.with(|m| m.view(&Filter { chips: shown, ..Filter::default() }));
+    data.set_picked_tags(view.chips);
 }
 
 /// Picks the sound on `row` of the view on show, opens its panel, and plays it when autoplay is on and `autoplay` asks.
@@ -2021,12 +2014,12 @@ fn select_row(app: &AppWindow, row: i32, autoplay: bool) {
 
 fn pick(app: &AppWindow, at: usize) {
     let data = app.global::<SoundsData>();
-    let picked = PAGE.with(|p| {
-        let mut p = p.borrow_mut();
-        p.picked = Some(at);
-        picked_sound(&p, at)
+    PAGE.with(|p| {
+        p.borrow_mut().picked = Some(at);
+        let p = p.borrow();
+        data.set_picked(picked_sound(&p, at));
+        show_picked_tags(&data, &p);
     });
-    data.set_picked(picked);
     data.set_panel_shown(true);
     find_alike(app, at);
     galaxy::show_picked(app);
@@ -2084,7 +2077,6 @@ fn picked_sound(p: &Page, at: usize) -> PickedSound {
         points: points(s),
         seconds: a.map_or(0.0, |a| a.seconds.min(mo_audio::MAX_SECONDS)) as f32,
         facts: ModelRc::new(VecModel::from(facts)),
-        tags: strings(&s.tags),
         favourite: s.favourite,
         character: a.map(|a| a.character.join(", ")).unwrap_or_default().into(),
         liked_why: liked_why(p, at).into(),
@@ -2853,7 +2845,6 @@ mod tests {
         assert_eq!(when(now - chrono::Duration::minutes(5), now), "11:55");
         assert_eq!(when(now - chrono::Duration::days(2), now), "Fri");
         assert_eq!(when(now - chrono::Duration::days(30), now), "2 Oct");
-        assert_eq!(key_choices().len(), 24);
     }
 
     /// Each button on the card is a page action in the shortcut list, so it has a tooltip and a key, and its key and

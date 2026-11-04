@@ -3,15 +3,7 @@
 // and filters over them and the picked sound's panel beside them. Agreed mock-up: the design canvas, 2026-11-01.
 // Read-only for now (favourites, tags and types are shown, not changed), like the C# app's sounds.db until it's trusted.
 import { ListView } from "std-widgets.slint";
-import { Theme, Type, Space, Well, StudioSlider, SearchBox, ToggleChip, MenuChip, ListLine, Caps, Heart, StudioButton, CloseButton, HoverNote, PointerPad, Segmented, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
-
-// One type chip: the type, how many sounds have it, its colour (a place in Theme.sound-types) and whether it's on.
-export struct TypeChipInfo {
-    name: string,
-    count: string,
-    colour: int,
-    on: bool,
-}
+import { Theme, Type, Space, Well, StudioSlider, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterView, FilterChoice, ListLine, Caps, Heart, StudioButton, CloseButton, HoverNote, PointerPad, Segmented, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
 
 // One tile: `row` is its place in the shown sounds, for picking it.
 export struct SoundTile {
@@ -127,7 +119,6 @@ export struct PickedSound {
     // How long the waveform lasts (the analysis reads up to the first minute).
     seconds: float,
     facts: [SoundFact],
-    tags: [string],
     favourite: bool,
     // What the analysis says it sounds like ("punchy, bright").
     character: string,
@@ -285,30 +276,28 @@ export global SoundsData {
 
     in-out property <string> search;
     callback search-edited(string);
-    in property <[TypeChipInfo]> types;
-    callback pick-type(int);
-    // Types past the first chips, in one menu.
-    in property <[string]> more-types;
-    in property <string> more-type;
+    // The filters, the same as on every page: the types (the most used as chips, the rest in More types), hits or
+    // loops, the key, the tempo and the tags, each choice with how many sounds it would show.
+    in property <FilterView> type-filter;
+    in property <FilterView> length-filter;
+    in property <FilterView> key-filter;
+    in property <FilterView> tempo-filter;
+    in property <FilterView> tag-filter;
+    // A choice was picked or unpicked: the filter ("type", "length", "key", "tempo" or "tag") and the choice's words.
+    callback toggle-choice(string, string);
+    // Picks nothing on a filter: "type" (Clear types), "more-types" (the More types menu's Any) or another filter.
+    callback clear-chip(string);
     // Whether any type is picked: shows the Clear types chip.
     in property <bool> any-type;
-    in property <string> length;
-    in property <[string]> lengths;
-    in property <string> key;
-    in property <[string]> keys;
     in property <bool> mix-well;
-    in property <string> bpm;
-    in property <[string]> bpms;
-    in property <string> tag;
-    in property <[string]> tags;
+    // The picked sound's tags, each lit while the Tag filter has it: a click picks or unpicks it there.
+    in property <[FilterChoice]> picked-tags;
     in property <bool> unused;
     in property <bool> used;
     // The use counts are in, so the Used and Unused chips can work.
     in property <bool> knows-use;
     in property <bool> favourites;
     in property <bool> any-filter;
-    // "length", "key", "bpm" or "tag", and the value ("" for any).
-    callback pick(string, string);
     // "mix-well", "unused", "used" or "favourites".
     callback toggle(string);
     callback clear();
@@ -909,15 +898,15 @@ component SoundPanel inherits SidePanel {
         font-size: Type.meta;
         wrap: word-wrap;
     }
-    if SoundsData.picked.tags.length > 0: VerticalLayout {
+    if SoundsData.picked-tags.length > 0: VerticalLayout {
         spacing: Space.xs;
         Caps { text: "TAGS"; }
         FlexboxLayout {
             spacing: Space.xs;
-            for t in SoundsData.picked.tags: ToggleChip {
-                text: t;
-                on: SoundsData.tag == t;
-                clicked => { SoundsData.pick("tag", SoundsData.tag == t ? "" : t); }
+            for t in SoundsData.picked-tags: ToggleChip {
+                text: t.text;
+                on: t.on;
+                clicked => { SoundsData.toggle-choice("tag", t.text); }
             }
         }
     }
@@ -993,14 +982,15 @@ export component SoundsPage inherits Rectangle {
             busy: SoundsData.busy;
             done: SoundsData.done;
         }
-        HorizontalLayout {
+        // The search, the views and each view's own choices. They wrap onto another line when there isn't room (a
+        // narrow window, or the galaxy's choices), so nothing runs off the page and the filters under them wrap too.
+        FlexboxLayout {
             spacing: Space.sm;
             vertical-stretch: 0;
             search-box := SearchBox {
-                horizontal-stretch: 1;
                 // Wide enough for its hint, whatever else the row holds (it showed cut short on Tiles and List).
                 min-width: 320px;
-                max-width: 480px;
+                preferred-width: 400px;
                 hint: "Search names, types, tags and folders";
                 text <=> SoundsData.search;
                 edited(t) => { SoundsData.search-edited(t); }
@@ -1044,6 +1034,45 @@ export component SoundsPage inherits Rectangle {
                     clicked => { SoundsData.shuffle(); }
                 }
             }
+            // The galaxy's own choices, where Tiles and List have their order.
+            if SoundsData.view == 2: VerticalLayout {
+                alignment: center;
+                MenuChip {
+                    name: "Placed by";
+                    value: SoundsData.galaxy-placing;
+                    choices: SoundsData.galaxy-placings;
+                    has-any: false;
+                    picked(v) => { SoundsData.galaxy-place-by(v); }
+                }
+            }
+            if SoundsData.view == 2: VerticalLayout {
+                alignment: center;
+                MenuChip {
+                    name: "Light by";
+                    value: SoundsData.galaxy-light;
+                    choices: SoundsData.galaxy-lights;
+                    has-any: false;
+                    picked(v) => { SoundsData.galaxy-light-by(v); }
+                }
+            }
+            if SoundsData.view == 2: VerticalLayout {
+                alignment: center;
+                StudioButton {
+                    horizontal-stretch: 0;
+                    text: "Lay out again";
+                    tip: "Work the map out afresh from every sound's fingerprint";
+                    clicked => { SoundsData.galaxy-lay-out(); }
+                }
+            }
+            if SoundsData.view == 2: VerticalLayout {
+                alignment: center;
+                StudioButton {
+                    horizontal-stretch: 0;
+                    text: "Whole map";
+                    tip: "Zoom out to see every star";
+                    clicked => { SoundsData.galaxy-reset(); }
+                }
+            }
             VerticalLayout {
                 alignment: center;
                 ToggleChip {
@@ -1052,7 +1081,6 @@ export component SoundsPage inherits Rectangle {
                     clicked => { SoundsData.toggle-autoplay(); }
                 }
             }
-            Rectangle { horizontal-stretch: 1; }
         }
         // Rediscover's own choices, in place of the filters.
         if SoundsData.view == 4: HorizontalLayout {
@@ -1204,60 +1232,57 @@ export component SoundsPage inherits Rectangle {
             font-size: Type.meta;
             wrap: word-wrap;
         }
-        // The type chips: every type with its count, most first.
-        if SoundsData.view < 4: HorizontalLayout {
-            spacing: Space.sm;
-            alignment: start;
+        // The filters, the same as on every page: the types first (the most used as chips, every one with how many
+        // sounds it would show), then the rest. A row moves a whole filter to the next line before it breaks one.
+        if SoundsData.view < 4: FlexboxLayout {
+            spacing: Space.md;
             vertical-stretch: 0;
-            for t[i] in SoundsData.types: ToggleChip {
-                text: t.count == "" ? t.name : t.name + "  " + t.count;
-                on: t.on;
-                clicked => { SoundsData.pick-type(i); }
-            }
-            if SoundsData.more-types.length > 0: MenuChip {
-                name: "More types";
-                value: SoundsData.more-type;
-                choices: SoundsData.more-types;
-                picked(v) => { SoundsData.pick("type", v); }
+            FilterPicks {
+                name: "Type";
+                more-name: "More types";
+                filter: SoundsData.type-filter;
+                toggled(text) => { SoundsData.toggle-choice("type", text); }
+                cleared => { SoundsData.clear-chip("more-types"); }
             }
             if SoundsData.any-type: ToggleChip {
                 text: "Clear types";
                 on: false;
-                clicked => { SoundsData.pick("types", ""); }
+                clicked => { SoundsData.clear-chip("type"); }
             }
         }
-        if SoundsData.view < 4: HorizontalLayout {
-            spacing: Space.sm;
-            alignment: start;
+        if SoundsData.view < 4: FlexboxLayout {
+            spacing: Space.md;
             vertical-stretch: 0;
-            MenuChip {
+            FilterPicks {
                 name: "Length";
-                value: SoundsData.length;
-                choices: SoundsData.lengths;
-                picked(v) => { SoundsData.pick("length", v); }
+                filter: SoundsData.length-filter;
+                toggled(text) => { SoundsData.toggle-choice("length", text); }
+                cleared => { SoundsData.clear-chip("length"); }
             }
-            MenuChip {
+            FilterPicks {
                 name: "Key";
-                value: SoundsData.key;
-                choices: SoundsData.keys;
-                picked(v) => { SoundsData.pick("key", v); }
+                filter: SoundsData.key-filter;
+                toggled(text) => { SoundsData.toggle-choice("key", text); }
+                cleared => { SoundsData.clear-chip("key"); }
             }
-            if SoundsData.key != "": ToggleChip {
+            if SoundsData.key-filter.more-picked != "": ToggleChip {
                 text: "Keys that mix well";
                 on: SoundsData.mix-well;
                 clicked => { SoundsData.toggle("mix-well"); }
             }
-            MenuChip {
+            FilterPicks {
                 name: "Tempo";
-                value: SoundsData.bpm;
-                choices: SoundsData.bpms;
-                picked(v) => { SoundsData.pick("bpm", v); }
+                filter: SoundsData.tempo-filter;
+                toggled(text) => { SoundsData.toggle-choice("tempo", text); }
+                cleared => { SoundsData.clear-chip("tempo"); }
             }
-            if SoundsData.tags.length > 0: MenuChip {
+            // Not in an `if`: a filter in one is measured as if it wrapped, and leaves a gap under the row. With no
+            // tags it shows nothing.
+            FilterPicks {
                 name: "Tag";
-                value: SoundsData.tag;
-                choices: SoundsData.tags;
-                picked(v) => { SoundsData.pick("tag", v); }
+                filter: SoundsData.tag-filter;
+                toggled(text) => { SoundsData.toggle-choice("tag", text); }
+                cleared => { SoundsData.clear-chip("tag"); }
             }
             if SoundsData.knows-use: ToggleChip {
                 text: "In my projects";
@@ -1278,45 +1303,6 @@ export component SoundsPage inherits Rectangle {
                 text: "Clear";
                 on: false;
                 clicked => { SoundsData.clear(); }
-            }
-            if SoundsData.view == 2: Rectangle { horizontal-stretch: 1; }
-            if SoundsData.view == 2: VerticalLayout {
-                alignment: center;
-                MenuChip {
-                    name: "Placed by";
-                    value: SoundsData.galaxy-placing;
-                    choices: SoundsData.galaxy-placings;
-                    has-any: false;
-                    picked(v) => { SoundsData.galaxy-place-by(v); }
-                }
-            }
-            if SoundsData.view == 2: VerticalLayout {
-                alignment: center;
-                MenuChip {
-                    name: "Light by";
-                    value: SoundsData.galaxy-light;
-                    choices: SoundsData.galaxy-lights;
-                    has-any: false;
-                    picked(v) => { SoundsData.galaxy-light-by(v); }
-                }
-            }
-            if SoundsData.view == 2: VerticalLayout {
-                alignment: center;
-                StudioButton {
-                    horizontal-stretch: 0;
-                    text: "Lay out again";
-                    tip: "Work the map out afresh from every sound's fingerprint";
-                    clicked => { SoundsData.galaxy-lay-out(); }
-                }
-            }
-            if SoundsData.view == 2: VerticalLayout {
-                alignment: center;
-                StudioButton {
-                    horizontal-stretch: 0;
-                    text: "Whole map";
-                    tip: "Zoom out to see every star";
-                    clicked => { SoundsData.galaxy-reset(); }
-                }
             }
         }
         // The sounds, and the picked one's panel beside them.

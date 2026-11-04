@@ -13,6 +13,8 @@ use mo_sounds::{Sound, SoundsError, music, types};
 use mo_space::size::size_text;
 use rayon::prelude::*;
 
+use crate::filters::{self as chips, Filter};
+
 /// Hits, loops or both (the C# Length radio buttons).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Length {
@@ -68,25 +70,44 @@ impl Order {
     }
 }
 
+/// The filters' names, as the page calls them when a choice is picked.
+pub const TYPE: &str = "type";
+pub const LENGTH: &str = "length";
+pub const KEY: &str = "key";
+pub const TEMPO: &str = "tempo";
+pub const TAG: &str = "tag";
+
+/// The Tempo chips' choices, and the tempos each lets through (lowest, highest).
+pub const TEMPOS: [(&str, Option<f64>, Option<f64>); 5] = [
+    ("Up to 90", None, Some(90.0)),
+    ("90 to 110", Some(90.0), Some(110.0)),
+    ("110 to 130", Some(110.0), Some(130.0)),
+    ("130 to 150", Some(130.0), Some(150.0)),
+    ("150 and up", Some(150.0), None),
+];
+
+/// How many types are chips of their own, the most used; the rest are in the type filter's More menu.
+pub const TYPE_CHIPS: usize = 9;
+
 /// What the page's chips and boxes ask for. Empty means everything.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Filters {
     /// The types picked ("Kick", "Snare"): a sound shows when it has any of them. Empty means every type.
     pub sound_types: Vec<String>,
     pub length: Length,
-    /// A key as tonic (0 = C) and minor.
-    pub key: Option<(i32, bool)>,
-    /// With a key: also the keys that mix well with it (Camelot neighbours).
+    /// The keys picked, each as tonic (0 = C) and minor: a sound shows when it's in any of them.
+    pub keys: Vec<(i32, bool)>,
+    /// With keys picked: also the keys that mix well with each (Camelot neighbours).
     pub mix_well: bool,
-    pub bpm_from: Option<f64>,
-    pub bpm_to: Option<f64>,
+    /// The Tempo chips picked, by their words ([`TEMPOS`]): a sound shows when its tempo is in any of them.
+    pub tempos: Vec<String>,
     /// Only sounds no project uses. Ignored until the use counts are known.
     pub unused: bool,
     /// Only sounds some project uses. Ignored until the use counts are known.
     pub used: bool,
     pub favourites: bool,
-    /// One tag, matched without caring about capitals.
-    pub tag: Option<String>,
+    /// The tags picked: a sound shows when it has any of them, capitals aside.
+    pub tags: Vec<String>,
     /// Words that must all be in the path, type, tags or character.
     pub search: String,
     /// Only sounds from these years, first to last: the years of the songs that use them when Used is on (and the
@@ -97,11 +118,51 @@ pub struct Filters {
 impl Filters {
     /// Picks a type, or takes it off again when it's already picked.
     pub fn toggle_type(&mut self, sound_type: &str) {
-        match self.sound_types.iter().position(|t| t == sound_type) {
-            Some(at) => {
-                self.sound_types.remove(at);
+        chips::toggle(&mut self.sound_types, sound_type, true);
+    }
+
+    /// Picks or unpicks `choice` (as its chip or menu line says it) on the filter `chip` ([`TYPE`], [`LENGTH`],
+    /// [`KEY`], [`TEMPO`], [`TAG`]). More than one type, key, tempo or tag can be picked; one length, as hits and loops
+    /// together are every sound.
+    pub fn pick(&mut self, chip: &str, choice: &str) {
+        match chip {
+            TYPE => self.toggle_type(choice),
+            LENGTH => {
+                let mut picked: Vec<Length> = Some(self.length).filter(|l| *l != Length::All).into_iter().collect();
+                chips::toggle_as(&mut picked, choice, false, Length::name, |w| {
+                    Length::ALL.into_iter().find(|l| *l != Length::All && l.name() == w)
+                });
+                self.length = picked.first().copied().unwrap_or_default();
             }
-            None => self.sound_types.push(sound_type.to_owned()),
+            KEY => {
+                // In the menu's own words, however it came ("Am", "a minor"), so picking it again unpicks it.
+                if let Some((tonic, minor)) = music::parse_key(choice) {
+                    let words = |(t, m): (i32, bool)| music::key_name(t, m, false);
+                    chips::toggle_as(&mut self.keys, &words((tonic, minor)), true, words, music::parse_key);
+                }
+            }
+            TEMPO if TEMPOS.iter().any(|t| t.0 == choice) => chips::toggle(&mut self.tempos, choice, true),
+            TAG => chips::toggle(&mut self.tags, choice, true),
+            _ => {}
+        }
+    }
+
+    /// The type filter's More menu's Any: unpicks the types in the menu, and keeps the ones picked on chips of their
+    /// own. `types` is [`SoundList::type_counts`], as the chips were shown from.
+    pub fn clear_more_types(&mut self, types: &[(String, usize)]) {
+        let on_chips = &types[..types.len().min(TYPE_CHIPS)];
+        self.sound_types.retain(|t| on_chips.iter().any(|(c, _)| c.eq_ignore_ascii_case(t)));
+    }
+
+    /// Picks nothing on the filter `chip`: its menu's Any, or Clear types.
+    pub fn clear_chip(&mut self, chip: &str) {
+        match chip {
+            TYPE => self.sound_types.clear(),
+            LENGTH => self.length = Length::All,
+            KEY => self.keys.clear(),
+            TEMPO => self.tempos.clear(),
+            TAG => self.tags.clear(),
+            _ => {}
         }
     }
 
@@ -129,9 +190,11 @@ impl Filters {
         }
     }
 
-    /// Whether any filter is set (for the Clear chip). The search box doesn't count: it has its own ×.
+    /// Whether any filter is set (for the Clear chip). The search box doesn't count: it has its own ×. Nor does Keys
+    /// that mix well with no key picked: it changes nothing then, and its chip isn't shown.
     pub fn any(&self) -> bool {
-        let none = Filters { search: self.search.clone(), ..Filters::default() };
+        let mix_well = self.mix_well && self.keys.is_empty();
+        let none = Filters { search: self.search.clone(), mix_well, ..Filters::default() };
         *self != none
     }
 }
@@ -288,8 +351,47 @@ impl SoundList {
     /// same seed gives the same order, and the page takes a new one each time it opens or Shuffle is pressed.
     pub fn view(&self, filters: &Filters, order: Order, seed: u64) -> Vec<usize> {
         let test = Test::new(filters);
-        let mut shown: Vec<usize> =
-            (0..self.shared.sounds.len()).into_par_iter().filter(|&i| self.allows(i, &test)).collect();
+        let shown = (0..self.shared.sounds.len()).into_par_iter().filter(|&i| self.allows(i, &test)).collect();
+        self.ordered(shown, order, seed)
+    }
+
+    /// [`SoundList::view`], and how many sounds each choice of the chips' filters would show with the other filters
+    /// as they are, counted in the same pass: a sound counts beside every chip when all five let it through, and
+    /// beside the one that doesn't when only one doesn't.
+    pub fn view_counted(&self, filters: &Filters, order: Order, seed: u64) -> (Vec<usize>, SoundCounts) {
+        let test = Test::new(filters);
+        let (shown, tally) = (0..self.shared.sounds.len())
+            .into_par_iter()
+            .fold(
+                || (Vec::new(), Tally::default()),
+                |(mut shown, mut tally), i| {
+                    let s = &self.shared.sounds[i];
+                    let ok = facets(s, &test);
+                    let fails = ok.iter().filter(|&&o| !o).count();
+                    // The chips first, as they're quick: a sound two of them leave out is neither shown nor counted,
+                    // so the search (the slow part) isn't tried on it.
+                    if fails <= 1 && self.passes_others(i, s, &test) {
+                        tally.count(s, ok, fails);
+                        if fails == 0 {
+                            shown.push(i);
+                        }
+                    }
+                    (shown, tally)
+                },
+            )
+            .reduce(
+                || (Vec::new(), Tally::default()),
+                |(mut a, mut tally), (b, other)| {
+                    a.extend(b);
+                    tally.add(other);
+                    (a, tally)
+                },
+            );
+        (self.ordered(shown, order, seed), tally.counts())
+    }
+
+    /// `shown` in `order`.
+    fn ordered(&self, mut shown: Vec<usize>, order: Order, seed: u64) -> Vec<usize> {
         if order == Order::Shuffled {
             // Each sound's place worked out once, not on every comparison.
             let mut keyed: Vec<(u64, usize)> =
@@ -309,17 +411,26 @@ impl SoundList {
         played.iter().copied().filter(|&(i, _)| i < self.shared.sounds.len() && self.allows(i, &test)).collect()
     }
 
-    /// Each type and how many sounds have it, most first (the type chips), counting every sound the list holds.
+    /// Each type and how many sounds have it, most first (the type chips), counting every sound the list holds. Types
+    /// that differ only in capitals are one, as the filter matches them, named as most of its sounds have it.
     pub fn type_counts(&self) -> Vec<(String, usize)> {
-        let mut counts: HashMap<&str, usize> = HashMap::new();
+        let mut exact: HashMap<&str, usize> = HashMap::new();
         for s in self.shared.sounds.iter() {
-            *counts.entry(s.sound_type.as_str()).or_default() += 1;
+            *exact.entry(s.sound_type.as_str()).or_default() += 1;
         }
-        let mut counts: Vec<(String, usize)> = counts.into_iter().map(|(t, n)| (t.to_string(), n)).collect();
+        // In lower case: the name most of its sounds have, how many have that name, and how many there are in all.
+        let mut by: HashMap<String, (&str, usize, usize)> = HashMap::new();
+        for (t, n) in exact {
+            let one = by.entry(t.to_ascii_lowercase()).or_insert((t, 0, 0));
+            if n > one.1 || (n == one.1 && t < one.0) {
+                (one.0, one.1) = (t, n);
+            }
+            one.2 += n;
+        }
+        let mut counts: Vec<(String, usize)> = by.into_values().map(|(t, _, n)| (t.to_owned(), n)).collect();
         // "Unknown" last, whatever its count: it isn't a type to pick for its sounds.
-        counts.sort_by(|a, b| {
-            (a.0 == types::UNKNOWN).cmp(&(b.0 == types::UNKNOWN)).then(b.1.cmp(&a.1)).then(a.0.cmp(&b.0))
-        });
+        let unknown = |t: &str| t.eq_ignore_ascii_case(types::UNKNOWN);
+        counts.sort_by(|a, b| unknown(&a.0).cmp(&unknown(&b.0)).then(b.1.cmp(&a.1)).then(a.0.cmp(&b.0)));
         counts
     }
 
@@ -333,13 +444,13 @@ impl SoundList {
 
     fn allows(&self, i: usize, t: &Test) -> bool {
         let s = &self.shared.sounds[i];
-        let analysis = s.analysis.as_ref();
-        let is_loop = analysis.is_some_and(|a| a.is_loop);
-        if (!t.sound_types.is_empty() && !t.sound_types.iter().any(|w| *w == s.sound_type))
-            || (t.length == Length::Hits && is_loop)
-            || (t.length == Length::Loops && !is_loop)
-            || (t.favourites && !s.favourite)
-        {
+        facets(s, t) == [true; FACETS] && self.passes_others(i, s, t)
+    }
+
+    /// Everything but the chips' filters lets `s` (at `i`) through: favourites, Used and Unused, the years and the
+    /// search (last, as it's the slow one).
+    fn passes_others(&self, i: usize, s: &Sound, t: &Test) -> bool {
+        if t.favourites && !s.favourite {
             return false;
         }
         if let Some(used) = &self.used {
@@ -347,25 +458,6 @@ impl SoundList {
             if (t.unused && n > 0) || (t.used && n == 0) {
                 return false;
             }
-        }
-        if let Some(tag) = &t.tag
-            && !s.tags.iter().any(|x| x.to_lowercase() == *tag)
-        {
-            return false;
-        }
-        if let Some(keys) = &t.keys {
-            let Some(tonic) = analysis.and_then(|a| a.key_tonic) else { return false };
-            let minor = analysis.is_some_and(|a| a.key_minor);
-            if !keys.contains(&(tonic, minor)) {
-                return false;
-            }
-        }
-        let bpm = analysis.and_then(|a| a.bpm);
-        // As the C# app: with a lowest tempo, a sound with none fails; with only a highest, likewise.
-        if t.bpm_from.is_some_and(|lo| bpm.unwrap_or(-1.0) < lo)
-            || t.bpm_to.is_some_and(|hi| bpm.is_none_or(|b| b > hi))
-        {
-            return false;
         }
         if let Some((first, last)) = t.years {
             let within = |y: i32| y >= first && y <= last;
@@ -428,35 +520,240 @@ struct Test<'a> {
     unused: bool,
     used: bool,
     favourites: bool,
-    tag: Option<String>,
+    tags: &'a [String],
     keys: Option<Vec<(i32, bool)>>,
-    bpm_from: Option<f64>,
-    bpm_to: Option<f64>,
+    /// The tempos picked, lowest and highest of each.
+    tempos: Vec<(Option<f64>, Option<f64>)>,
     years: Option<(i32, i32)>,
     words: Vec<String>,
 }
 
 impl<'a> Test<'a> {
     fn new(f: &'a Filters) -> Test<'a> {
-        let keys =
-            f.key.map(
-                |(tonic, minor)| {
-                    if f.mix_well { music::compatible_keys(tonic, minor).to_vec() } else { vec![(tonic, minor)] }
-                },
-            );
+        let keys = (!f.keys.is_empty()).then(|| {
+            let mut keys: Vec<(i32, bool)> = Vec::new();
+            for &(tonic, minor) in &f.keys {
+                let near =
+                    if f.mix_well { music::compatible_keys(tonic, minor).to_vec() } else { vec![(tonic, minor)] };
+                for (t, m) in near {
+                    let key = (t.rem_euclid(12), m);
+                    if !keys.contains(&key) {
+                        keys.push(key);
+                    }
+                }
+            }
+            keys
+        });
         Test {
             sound_types: &f.sound_types,
             length: f.length,
             unused: f.unused,
             used: f.used,
             favourites: f.favourites,
-            tag: f.tag.as_ref().map(|t| t.to_lowercase()),
+            tags: &f.tags,
             keys,
-            bpm_from: f.bpm_from,
-            bpm_to: f.bpm_to,
+            tempos: TEMPOS.iter().filter(|t| f.tempos.iter().any(|w| w == t.0)).map(|t| (t.1, t.2)).collect(),
             years: f.years,
             words: f.search.split_whitespace().map(str::to_lowercase).collect(),
         }
+    }
+}
+
+/// How many of the chips' filters there are, and each one's place in [`facets`]' answer.
+const FACETS: usize = 5;
+const TYPE_AT: usize = 0;
+const LENGTH_AT: usize = 1;
+const KEY_AT: usize = 2;
+const TEMPO_AT: usize = 3;
+const TAG_AT: usize = 4;
+
+/// Which of the chips' filters let `s` through: its type, its length (hit or loop), its key, its tempo and its tags.
+fn facets(s: &Sound, t: &Test) -> [bool; FACETS] {
+    let a = s.analysis.as_ref();
+    let is_loop = a.is_some_and(|a| a.is_loop);
+    let bpm = a.and_then(|a| a.bpm);
+    [
+        t.sound_types.is_empty() || t.sound_types.iter().any(|w| w.eq_ignore_ascii_case(s.sound_type.as_str())),
+        match t.length {
+            Length::All => true,
+            Length::Hits => !is_loop,
+            Length::Loops => is_loop,
+        },
+        t.keys.as_ref().is_none_or(|keys| key_of(s).is_some_and(|k| keys.contains(&k))),
+        t.tempos.is_empty() || t.tempos.iter().any(|&range| tempo_in(bpm, range)),
+        t.tags.is_empty() || t.tags.iter().any(|w| s.tags.iter().any(|own| own.eq_ignore_ascii_case(w))),
+    ]
+}
+
+/// Whether `bpm` is in `range` (lowest, highest), both ends in. As the C# app: with a lowest tempo, a sound with none
+/// is left out; with a highest, likewise.
+fn tempo_in(bpm: Option<f64>, (lo, hi): (Option<f64>, Option<f64>)) -> bool {
+    !(lo.is_some_and(|lo| bpm.unwrap_or(-1.0) < lo) || hi.is_some_and(|hi| bpm.is_none_or(|b| b > hi)))
+}
+
+/// A sound's key (tonic 0 to 11, minor), when the analysis found one.
+fn key_of(s: &Sound) -> Option<(i32, bool)> {
+    s.analysis.as_ref().and_then(|a| a.key_tonic.map(|t| (t.rem_euclid(12), a.key_minor)))
+}
+
+/// A key's place among the 24: the tonic's times two, plus one for minor.
+fn key_place(tonic: i32, minor: bool) -> usize {
+    tonic.rem_euclid(12) as usize * 2 + usize::from(minor)
+}
+
+/// Every key the Key filter offers, as tonic and minor: the twelve major keys, then the twelve minor ones.
+fn every_key() -> impl Iterator<Item = (i32, bool)> {
+    [false, true].into_iter().flat_map(|minor| (0..12).map(move |tonic| (tonic, minor)))
+}
+
+/// The Key filter's choices in words ("C major" … "B minor"), as [`Filters::pick`] reads them.
+pub fn key_choices() -> Vec<String> {
+    every_key().map(|(tonic, minor)| music::key_name(tonic, minor, false)).collect()
+}
+
+/// The counts made while the list is: how many sounds each choice of the chips' filters lets through, with the other
+/// filters as they are. Words are kept as the sounds have them, and joined in lower case at the end.
+#[derive(Default)]
+struct Tally<'a> {
+    types: HashMap<&'a str, usize>,
+    lengths: [usize; 2],
+    keys: [usize; 24],
+    tempos: [usize; TEMPOS.len()],
+    tags: HashMap<&'a str, usize>,
+}
+
+impl<'a> Tally<'a> {
+    /// Counts `s`, which the chips' filters `ok` let through, all but `fails` of them: beside every filter's choices
+    /// when they all do, and beside only the one that doesn't when one doesn't (picking another of its choices would
+    /// show it). A sound two of them leave out isn't counted.
+    fn count(&mut self, s: &'a Sound, ok: [bool; FACETS], fails: usize) {
+        let on = |facet: usize| fails == 0 || !ok[facet];
+        let a = s.analysis.as_ref();
+        if on(TYPE_AT) {
+            *self.types.entry(s.sound_type.as_str()).or_default() += 1;
+        }
+        if on(LENGTH_AT) {
+            self.lengths[usize::from(a.is_some_and(|a| a.is_loop))] += 1;
+        }
+        if on(KEY_AT)
+            && let Some((tonic, minor)) = key_of(s)
+        {
+            self.keys[key_place(tonic, minor)] += 1;
+        }
+        if on(TEMPO_AT) {
+            let bpm = a.and_then(|a| a.bpm);
+            for (n, t) in self.tempos.iter_mut().zip(TEMPOS) {
+                if tempo_in(bpm, (t.1, t.2)) {
+                    *n += 1;
+                }
+            }
+        }
+        if on(TAG_AT) {
+            for (k, t) in s.tags.iter().enumerate() {
+                // A tag the sound has twice (in other capitals) counts it once: picking it shows the sound once.
+                if !s.tags[..k].iter().any(|other| other.eq_ignore_ascii_case(t)) {
+                    *self.tags.entry(t.as_str()).or_default() += 1;
+                }
+            }
+        }
+    }
+
+    /// Adds another part of the list's counts.
+    fn add(&mut self, other: Tally<'a>) {
+        for (t, n) in other.types {
+            *self.types.entry(t).or_default() += n;
+        }
+        for (mine, theirs) in self.lengths.iter_mut().zip(other.lengths) {
+            *mine += theirs;
+        }
+        for (mine, theirs) in self.keys.iter_mut().zip(other.keys) {
+            *mine += theirs;
+        }
+        for (mine, theirs) in self.tempos.iter_mut().zip(other.tempos) {
+            *mine += theirs;
+        }
+        for (t, n) in other.tags {
+            *self.tags.entry(t).or_default() += n;
+        }
+    }
+
+    fn counts(self) -> SoundCounts {
+        let mut counts =
+            SoundCounts { lengths: self.lengths, keys: self.keys, tempos: self.tempos, ..SoundCounts::default() };
+        for (t, n) in self.types {
+            *counts.types.entry(t.to_ascii_lowercase()).or_default() += n;
+        }
+        for (t, n) in self.tags {
+            *counts.tags.entry(t.to_ascii_lowercase()).or_default() += n;
+        }
+        counts
+    }
+}
+
+/// How many sounds each choice of the chips' filters would show, with the other filters as they are
+/// ([`SoundList::view_counted`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SoundCounts {
+    /// By type, in lower case (ASCII letters only, as the filter matches).
+    pub types: HashMap<String, usize>,
+    /// Hits, then loops.
+    pub lengths: [usize; 2],
+    /// By key: its tonic (0 = C) times two, plus one for minor.
+    pub keys: [usize; 24],
+    /// In [`TEMPOS`]' order.
+    pub tempos: [usize; TEMPOS.len()],
+    /// By tag, in lower case (ASCII letters only).
+    pub tags: HashMap<String, usize>,
+}
+
+/// The page's filters as their chips and menus show them, each choice with how many sounds it would show: the types
+/// (the most used as chips of their own, the rest in a More menu), hits or loops, the key (a menu: there are 24), the
+/// tempo, and the tags (chips, or a menu when there are many).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SoundChips {
+    pub types: Filter,
+    pub length: Filter,
+    pub key: Filter,
+    pub tempo: Filter,
+    pub tag: Filter,
+}
+
+/// [`SoundChips`] for the filters `f`, with the `counts` of the list they let through (`None` until a list has been
+/// worked out: the choices show without numbers rather than with noughts). `types` is [`SoundList::type_counts`] (the
+/// most used first: an order the other filters don't change, so a chip doesn't move under the mouse when they do)
+/// and `tags` is [`SoundList::tags`]. With Keys that mix well on, a key's count is how many sounds it and the keys
+/// that mix well with it hold.
+pub fn chips(f: &Filters, counts: Option<&SoundCounts>, types: &[(String, usize)], tags: &[String]) -> SoundChips {
+    let shown = |n: &dyn Fn(&SoundCounts) -> usize| counts.map(|c| short_count(n(c))).unwrap_or_default();
+    let by_word = |map: &HashMap<String, usize>, name: &str| map.get(&name.to_ascii_lowercase()).copied().unwrap_or(0);
+    let types: Vec<(String, String)> =
+        types.iter().map(|(t, _)| (t.clone(), shown(&|c| by_word(&c.types, t)))).collect();
+    let lengths: Vec<(String, String)> = [Length::Hits, Length::Loops]
+        .iter()
+        .enumerate()
+        .map(|(i, l)| (l.name().to_owned(), shown(&|c| c.lengths[i])))
+        .collect();
+    let length: Vec<String> =
+        Some(f.length).filter(|l| *l != Length::All).map(|l| l.name().to_owned()).into_iter().collect();
+    let in_key = |c: &SoundCounts, tonic: i32, minor: bool| -> usize {
+        if f.mix_well {
+            music::compatible_keys(tonic, minor).iter().map(|&(t, m)| c.keys[key_place(t, m)]).sum()
+        } else {
+            c.keys[key_place(tonic, minor)]
+        }
+    };
+    let keys: Vec<(String, String)> =
+        every_key().map(|(t, m)| (music::key_name(t, m, false), shown(&|c| in_key(c, t, m)))).collect();
+    let keys_picked: Vec<String> = f.keys.iter().map(|&(t, m)| music::key_name(t, m, false)).collect();
+    let tempos: Vec<(String, String)> =
+        TEMPOS.iter().enumerate().map(|(i, t)| (t.0.to_owned(), shown(&|c| c.tempos[i]))).collect();
+    let tags: Vec<(String, String)> = tags.iter().map(|t| (t.clone(), shown(&|c| by_word(&c.tags, t)))).collect();
+    SoundChips {
+        types: chips::show_split(&types, &f.sound_types, TYPE_CHIPS),
+        length: chips::show(&lengths, &length),
+        key: chips::show(&keys, &keys_picked),
+        tempo: chips::show(&tempos, &f.tempos),
+        tag: chips::show(&tags, &f.tags),
     }
 }
 
@@ -842,10 +1139,14 @@ mod tests {
         assert_eq!(by(Filters { length: Length::Loops, ..Filters::default() }), vec![4, 2]);
         assert_eq!(by(Filters { length: Length::Hits, ..Filters::default() }), vec![3, 1]);
         assert_eq!(by(Filters { favourites: true, ..Filters::default() }), vec![3]);
-        assert_eq!(by(Filters { tag: Some("dark".into()), ..Filters::default() }), vec![3]);
-        assert_eq!(by(Filters { key: Some((5, true)), ..Filters::default() }), vec![3]);
-        assert_eq!(by(Filters { bpm_from: Some(100.0), ..Filters::default() }), vec![2]);
-        assert_eq!(by(Filters { bpm_to: Some(100.0), ..Filters::default() }), vec![4]);
+        assert_eq!(by(Filters { tags: vec!["dark".into()], ..Filters::default() }), vec![3]);
+        assert_eq!(by(Filters { keys: vec![(5, true)], ..Filters::default() }), vec![3]);
+        assert_eq!(by(Filters { keys: vec![(5, true), (9, true)], ..Filters::default() }), vec![3, 2]);
+        let tempos = |t: &[&str]| Filters { tempos: t.iter().map(|w| (*w).to_owned()).collect(), ..Filters::default() };
+        assert_eq!(by(tempos(&["130 to 150"])), vec![2]);
+        // Both ends are in, so 90 is up to 90 and 90 to 110; a sound with no tempo is in none.
+        assert_eq!(by(tempos(&["Up to 90"])), vec![4]);
+        assert_eq!(by(tempos(&["90 to 110", "130 to 150"])), vec![4, 2]);
         assert_eq!(by(Filters { search: "samples LOOPS".into(), ..Filters::default() }), vec![2]);
         assert_eq!(by(Filters { search: "kick pad".into(), ..Filters::default() }), Vec::<i64>::new());
     }
@@ -874,8 +1175,94 @@ mod tests {
     fn keys_that_mix_well_count_with_the_switch() {
         let list = library();
         // A minor's Camelot neighbours include C major (8A beside 8B).
-        let f = Filters { key: Some((9, true)), mix_well: true, ..Filters::default() };
+        let f = Filters { keys: vec![(9, true)], mix_well: true, ..Filters::default() };
         assert_eq!(ids(&list, &list.view(&f, Order::Name, 0)), vec![4, 2]);
+        // And the key's count is the sounds in it and the keys that mix well with it.
+        let (_, counts) = list.view_counted(&f, Order::Name, 0);
+        let keys = chips(&f, Some(&counts), &list.type_counts(), &list.tags()).key;
+        let count = |key: &str| keys.more.iter().find(|c| c.text == key).map(|c| c.count.clone());
+        assert_eq!(count("A minor").as_deref(), Some("2"));
+        assert_eq!(count("F minor").as_deref(), Some("1"));
+        assert_eq!(keys.more_picked, "A minor");
+    }
+
+    #[test]
+    fn picking_on_the_filters_chips_and_menus() {
+        let mut f = Filters::default();
+        f.pick(TYPE, "Kick");
+        f.pick(TYPE, "Vocal");
+        f.pick(KEY, "A minor");
+        f.pick(KEY, "C major");
+        f.pick(KEY, "Am");
+        f.pick(TEMPO, "90 to 110");
+        f.pick(TEMPO, "No such tempo");
+        f.pick(TAG, "Dark");
+        f.pick(TAG, "Warm");
+        f.pick(LENGTH, "Loops");
+        assert_eq!(f.sound_types, ["Kick", "Vocal"]);
+        assert_eq!(f.keys, [(0, false)]);
+        assert_eq!(f.tempos, ["90 to 110"]);
+        assert_eq!(f.tags, ["Dark", "Warm"]);
+        assert_eq!(f.length, Length::Loops);
+        // One length: hits takes the place of loops, and picking it again is both.
+        f.pick(LENGTH, "Hits");
+        assert_eq!(f.length, Length::Hits);
+        f.pick(LENGTH, "Hits");
+        assert_eq!(f.length, Length::All);
+        // The More menu's Any keeps the types picked on chips of their own.
+        let types: Vec<(String, usize)> = (0..12).map(|n| (format!("Type {n}"), 12 - n)).collect();
+        let mut more = Filters { sound_types: vec!["Type 0".into(), "Type 11".into()], ..Filters::default() };
+        more.clear_more_types(&types);
+        assert_eq!(more.sound_types, ["Type 0"]);
+        for chip in [TYPE, LENGTH, KEY, TEMPO, TAG] {
+            f.clear_chip(chip);
+        }
+        assert!(!f.any());
+        // Keys that mix well with no key picked changes nothing, so Clear doesn't show for it.
+        f.toggle("mix-well");
+        assert!(f.mix_well && !f.any());
+        f.pick(KEY, "F minor");
+        assert!(f.any());
+    }
+
+    #[test]
+    fn each_choice_counts_what_it_would_show_with_the_other_filters() {
+        let list = library();
+        let (shown, counts) = list.view_counted(&Filters::default(), Order::Name, 0);
+        assert_eq!(shown.len(), 4);
+        assert_eq!(counts.lengths, [2, 2]);
+        assert_eq!(counts.tempos, [1, 1, 0, 1, 0]);
+        assert_eq!(counts.tags.get("dark"), Some(&1));
+        // Kick picked: the other types still count (picking one shows it too), the rest count only kicks.
+        let kick = Filters { sound_types: vec!["kick".into()], ..Filters::default() };
+        let (shown, counts) = list.view_counted(&kick, Order::Name, 0);
+        assert_eq!(ids(&list, &shown), [1]);
+        assert_eq!(counts.types.values().sum::<usize>(), 4);
+        assert_eq!((counts.lengths, counts.keys.iter().sum::<usize>()), ([1, 0], 0));
+        // With Loops too, the kick (a hit) counts beside Hits only, and the loops beside their types.
+        let loops = Filters { length: Length::Loops, ..kick };
+        let (shown, counts) = list.view_counted(&loops, Order::Name, 0);
+        assert!(shown.is_empty());
+        assert_eq!(counts.lengths, [1, 0]);
+        assert_eq!(
+            (counts.types.get("bass"), counts.types.get("pad"), counts.types.get("kick")),
+            (Some(&1), Some(&1), None)
+        );
+        // The chips say so: the types as chips (four is few), the key in a menu (there are 24).
+        let shown = chips(&loops, Some(&counts), &list.type_counts(), &list.tags());
+        let words = |f: &Filter| f.chips.iter().map(|c| format!("{} {}", c.text, c.count)).collect::<Vec<_>>();
+        assert_eq!(words(&shown.types), ["Bass 1", "Kick 0", "Pad 1", "Vocal 0"]);
+        assert_eq!(words(&shown.length), ["Hits 1", "Loops 0"]);
+        assert_eq!((shown.key.chips.len(), shown.key.more.len()), (0, 24));
+        assert_eq!(words(&shown.tag), ["Dark 0"]);
+        // Before the first list is worked out, the choices show with no numbers.
+        let uncounted = chips(&loops, None, &list.type_counts(), &list.tags());
+        assert!(uncounted.types.chips.iter().chain(&uncounted.key.more).all(|c| c.count.is_empty()));
+        // A tag a sound has twice, in other capitals, counts it once.
+        let mut twice = sound(5, "x.wav", "Pad", None);
+        twice.tags = vec!["Dark".into(), "DARK".into()];
+        let list = SoundList::new(vec![twice]);
+        assert_eq!(list.view_counted(&Filters::default(), Order::Name, 0).1.tags.get("dark"), Some(&1));
     }
 
     #[test]
@@ -919,11 +1306,16 @@ mod tests {
         sounds.push(sound(4, "d.wav", types::UNKNOWN, None));
         sounds.push(sound(5, "e.wav", types::UNKNOWN, None));
         sounds.push(sound(6, "f.wav", "Pad", None));
+        // Another sound's type in other capitals is the same type, named as most of them have it.
+        sounds.push(sound(7, "g.wav", "kick", None));
         let list = SoundList::new(sounds);
         let counts = list.type_counts();
-        assert_eq!(counts[0], ("Kick".to_string(), 2));
+        assert_eq!(counts[0], ("Kick".to_string(), 3));
         assert_eq!(counts[1], ("Pad".to_string(), 1));
         assert_eq!(counts[2], (types::UNKNOWN.to_string(), 3));
+        assert_eq!(counts.len(), 3);
+        let f = Filters { sound_types: vec!["Kick".into()], ..Filters::default() };
+        assert_eq!(list.view(&f, Order::Name, 0).len(), 3);
     }
 
     #[test]
