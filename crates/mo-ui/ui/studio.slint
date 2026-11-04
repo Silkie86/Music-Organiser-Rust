@@ -1,3 +1,4 @@
+// ListView is only for a long menu's lines: it makes only the lines in sight, and its bar follows the theme.
 import { ListView } from "std-widgets.slint";
 
 // The app's one shared style (rule 16): colour tokens set from the theme in use, and the few building blocks every
@@ -616,27 +617,49 @@ export component ToggleChip inherits Rectangle {
     }
 }
 
-// One line of a drop-down or right-click menu, with its key at the right (rule 15: every menu line shows its key).
+// One line of a drop-down or right-click menu, with its key at the right (rule 15: every menu line shows its key). In
+// a menu that picks (`tickable`), each line keeps room for a tick, and the one that's picked (`on`) is ticked, in bold,
+// on a tint of the accent, so it's easy to see (Solomon's note, 4 Nov 2026).
 export component MenuLine inherits Rectangle {
     in property <string> text;
     in property <bool> on;
+    in property <bool> tickable;
     in property <string> key;
     in property <bool> enabled: true;
     callback clicked;
     height: 32px;
     border-radius: Theme.radius;
-    background: touch.has-hover && root.enabled ? Theme.hover : transparent;
+    background: root.on
+        ? Theme.accent.transparentize(touch.has-hover ? 70% : 78%)
+        : touch.has-hover && root.enabled ? Theme.hover : transparent;
     HorizontalLayout {
-        padding-left: Space.md;
+        padding-left: root.tickable ? Space.sm : Space.md;
         padding-right: Space.md;
         spacing: Space.xl;
-        Text {
-            text: root.text;
-            color: !root.enabled ? Theme.faint : root.on ? Theme.accent : Theme.text;
-            font-size: Type.body;
-            vertical-alignment: center;
+        HorizontalLayout {
+            spacing: Space.sm;
             horizontal-stretch: 1;
-            overflow: elide;
+            if root.tickable: Rectangle {
+                width: 14px;
+                if root.on: Path {
+                    width: 12px;
+                    height: 10px;
+                    viewbox-width: 12;
+                    viewbox-height: 10;
+                    commands: "M 1 5 L 4.5 8.5 L 11 1.5";
+                    stroke: Theme.accent;
+                    stroke-width: 1.75px;
+                }
+            }
+            Text {
+                text: root.text;
+                color: !root.enabled ? Theme.faint : Theme.text;
+                font-size: Type.body;
+                font-weight: root.on ? 600 : 400;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                overflow: elide;
+            }
         }
         if root.key != "": Text {
             text: root.key;
@@ -667,7 +690,8 @@ export component MenuCard inherits Rectangle {
     }
 }
 
-// A chip that picks one of a list, like "DAW: FL Studio". "Any" clears it.
+// A chip that picks one of a list, like "DAW: FL Studio". "Any" clears it. In its menu the one that's picked is
+// ticked, and a list longer than 16 lines scrolls (with the wheel over it, or its bar).
 export component MenuChip inherits Rectangle {
     in property <string> name;
     in property <string> value;
@@ -707,21 +731,31 @@ export component MenuChip inherits Rectangle {
     menu := PopupWindow {
         x: 0;
         y: root.height + 4px;
-        width: max(root.width, 180px);
+        width: max(root.width, 220px);
+        // Scrolling (or dragging its bar) keeps it open; picking a line closes it.
+        close-policy: close-on-click-outside;
         MenuCard {
             if root.has-any: MenuLine {
                 text: "Any";
                 on: root.value == "";
-                clicked => { root.picked(""); }
+                tickable: true;
+                clicked => {
+                    menu.close();
+                    root.picked("");
+                }
             }
             // At most 16 lines show and the rest scroll: only the lines in sight are made, so a list of thousands
             // (every plugin maker, say) opens at once instead of the window laying out every line first.
-            ListView {
+            if root.choices.length > 0: ListView {
                 height: min(root.choices.length, 16) * 32px;
                 for c in root.choices: MenuLine {
                     text: c;
                     on: root.value == c;
-                    clicked => { root.picked(c); }
+                    tickable: true;
+                    clicked => {
+                        menu.close();
+                        root.picked(c);
+                    }
                 }
             }
         }
