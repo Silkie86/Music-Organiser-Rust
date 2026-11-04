@@ -453,11 +453,25 @@ fn the_copy_follows_each_kind_of_save() {
         st.query_map([n as i64], |r| r.get(0)).unwrap().map(Result::unwrap).collect()
     };
     let one = some(1)[0];
-    let step = |what: &str, sql: &str, expect: (usize, usize, usize)| {
+    // How many of the sounds `sql` picks have a fingerprint (either).
+    let with_prints = |sql: &str| -> usize {
+        let n: i64 = c
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM sounds WHERE id IN ({sql}) AND (features IS NOT NULL OR clap IS NOT NULL)"
+                ),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        n as usize
+    };
+    // (added, changed, removed, how many sounds' fingerprints changed).
+    let step = |what: &str, sql: &str, expect: (usize, usize, usize, usize)| {
         c.execute_batch(sql).unwrap();
         assert!(!compact::in_step(&old, &copy), "{what}: the copy should be behind");
         let s = compact::sync(&old, &copy).unwrap();
-        assert_eq!((s.added, s.changed, s.removed), expect, "{what}: {s:?}");
+        assert_eq!((s.added, s.changed, s.removed, s.prints), expect, "{what}: {s:?}");
         assert!(compact::in_step(&old, &copy), "{what}");
         same_answers(&old, &copy);
         s
@@ -469,18 +483,18 @@ fn the_copy_follows_each_kind_of_save() {
             "UPDATE sounds SET plays = plays + 1, last_played = 1780000000 WHERE id = {one};
              INSERT INTO sound_events SELECT {one}, 'play', 1780000000 WHERE EXISTS (SELECT 1 FROM sounds WHERE id = {one});"
         ),
-        (0, 1, 0),
+        (0, 1, 0, 0),
     );
     assert_eq!(s.tables, 1, "only the plays' table changed");
-    step("stars", &format!("UPDATE sounds SET rating = 5 WHERE id = {one}"), (0, 1, 0));
-    step("a favourite", &format!("UPDATE sounds SET favourite = 1 WHERE id = {one}"), (0, 1, 0));
+    step("stars", &format!("UPDATE sounds SET rating = 5 WHERE id = {one}"), (0, 1, 0, 0));
+    step("a favourite", &format!("UPDATE sounds SET favourite = 1 WHERE id = {one}"), (0, 1, 0, 0));
     step(
         "your own type",
         &format!(
             "UPDATE sounds SET user_type = 'Clap', type = COALESCE('Clap', name_type, 'Unknown'), type_source = 'you',
                  type_conf = 1 WHERE id = {one}"
         ),
-        (0, 1, 0),
+        (0, 1, 0, 0),
     );
     let fifty: Vec<String> = some(50).iter().map(i64::to_string).collect();
     step(
@@ -489,13 +503,13 @@ fn the_copy_follows_each_kind_of_save() {
             "UPDATE sounds SET type = 'Perc', type_source = 'learned', type_conf = 0.75 WHERE id IN ({})",
             fifty.join(",")
         ),
-        (0, 50, 0),
+        (0, 50, 0, 0),
     );
     // SetClap: CLAP listened to one more.
     let clap = floats(&[0.25; 512]);
     c.execute("UPDATE sounds SET clap = ?1 WHERE id = ?2", params![clap, one]).unwrap();
     let s = compact::sync(&old, &copy).unwrap();
-    assert_eq!((s.added, s.changed, s.removed, s.tables), (0, 1, 0, 0));
+    assert_eq!((s.added, s.changed, s.removed, s.tables, s.prints), (0, 1, 0, 0, 1));
     same_answers(&old, &copy);
     // Save: a scan finds a new file, and a changed one (its CLAP kept, as the C# app's upsert keeps it).
     let save = "INSERT INTO sounds (path, size, mtime, error, analysis, features, clap, name_type, type, type_source, type_conf)
@@ -510,7 +524,8 @@ fn the_copy_follows_each_kind_of_save() {
         c.execute(save, params![path, 1234, 1_780_000_000, analysis_json(&mut dice), features]).unwrap();
     }
     let s = compact::sync(&old, &copy).unwrap();
-    assert_eq!((s.added, s.changed, s.removed), (1, 1, 0));
+    // Both have new features: the new file's, and the changed one's in place of its old ones.
+    assert_eq!((s.added, s.changed, s.removed, s.prints), (1, 1, 0, 2));
     same_answers(&old, &copy);
     // Move: a file found under a new name.
     step(
@@ -519,11 +534,12 @@ fn the_copy_follows_each_kind_of_save() {
             "UPDATE sounds SET path = 'Z:\\Moved\\here.wav', name_type = NULL WHERE path = '{}'",
             one_path.replace('\'', "''")
         ),
-        (0, 1, 0),
+        (0, 1, 0, 0),
     );
     // Remove: a file gone, and with it its tags, plays, places, print, copies and hidden mark.
     let gone: i64 = c.query_row("SELECT sound_id FROM sound_hidden LIMIT 1", [], |r| r.get(0)).unwrap();
-    let s = step("a file gone", &format!("DELETE FROM sounds WHERE id = {gone}"), (0, 0, 1));
+    let printed = with_prints(&gone.to_string());
+    let s = step("a file gone", &format!("DELETE FROM sounds WHERE id = {gone}"), (0, 0, 1, printed));
     assert!(s.tables >= 1);
     // Your tags and the app's suggestions.
     let s = step(
@@ -532,31 +548,33 @@ fn the_copy_follows_each_kind_of_save() {
             "INSERT INTO sound_tags VALUES ({one}, 'fresh', 'you') ON CONFLICT(sound_id, tag) DO UPDATE SET source = excluded.source;
              DELETE FROM sound_tags WHERE tag = 'dusty' AND source = 'learned';"
         ),
-        (0, 0, 0),
+        (0, 0, 0, 0),
     );
     assert_eq!(s.tables, 1);
     // A galaxy laid out again, copies hidden, the duplicate finder's prints and its copies, and a setting.
-    step("galaxy", "INSERT OR REPLACE INTO sound_maps SELECT 'clap', id, 1.0, 2.0 FROM sounds LIMIT 10;", (0, 0, 0));
-    step("hidden", &format!("INSERT OR REPLACE INTO sound_hidden VALUES ({one}, 'batch 2', 99)"), (0, 0, 0));
+    step("galaxy", "INSERT OR REPLACE INTO sound_maps SELECT 'clap', id, 1.0, 2.0 FROM sounds LIMIT 10;", (0, 0, 0, 0));
+    step("hidden", &format!("INSERT OR REPLACE INTO sound_hidden VALUES ({one}, 'batch 2', 99)"), (0, 0, 0, 0));
     step(
         "prints",
         "UPDATE sound_prints SET exact = x'070707' WHERE sound_id IN (SELECT sound_id FROM sound_prints LIMIT 3)",
-        (0, 0, 0),
+        (0, 0, 0, 0),
     );
-    step("copies", "UPDATE sound_matches SET apart = 2.5, typical = 1.25;", (0, 0, 0));
+    step("copies", "UPDATE sound_matches SET apart = 2.5, typical = 1.25;", (0, 0, 0, 0));
     step(
         "a setting",
         "INSERT INTO settings VALUES ('galaxy_basis', 'features') ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
-        (0, 0, 0),
+        (0, 0, 0, 0),
     );
     // A table the C# app adds later (an older library had no duplicate finder yet), and one it drops.
-    step("no prints", "DROP TABLE sound_prints;", (0, 0, 0));
+    step("no prints", "DROP TABLE sound_prints;", (0, 0, 0, 0));
     let copied = Connection::open(&copy).unwrap();
     let tables: i64 =
         copied.query_row("SELECT COUNT(*) FROM sqlite_master WHERE name = 'sound_prints'", [], |r| r.get(0)).unwrap();
     assert_eq!(tables, 0, "gone from the copy too");
     // With the damaged rows gone, every file the library knows reads the same from both, CLAP or not.
-    let s = step("the damaged rows gone", "DELETE FROM sounds WHERE path LIKE 'D:\\Damaged\\%'", (0, 0, 3));
+    let damaged = "SELECT id FROM sounds WHERE path LIKE 'D:\\Damaged\\%'";
+    let printed = with_prints(damaged);
+    let s = step("the damaged rows gone", &format!("DELETE FROM sounds WHERE id IN ({damaged})"), (0, 0, 3, printed));
     // The 600 sounds made at the start, with the one the scan added and without the one gone.
     assert_eq!(s.sounds, 600);
     let known = SoundsDb::open_read_only(&copy).unwrap().known_files().unwrap();

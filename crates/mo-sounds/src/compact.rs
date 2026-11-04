@@ -166,6 +166,9 @@ pub struct Synced {
     pub removed: usize,
     /// How many of the tables copied whole (tags, plays, galaxy places…) had changed.
     pub tables: usize,
+    /// How many sounds gained, lost or changed a fingerprint (their features or CLAP's), the new and gone ones among
+    /// them: while none did, fingerprints read from the copy before are still right.
+    pub prints: usize,
 }
 
 impl Synced {
@@ -422,6 +425,8 @@ fn fill(old: &SoundsDb, conn: &Connection, made: bool, pass: Pass<'_>) -> Result
     // From the same moment as the rows: the page gets what the copy gets.
     let mut reading =
         pass.read_for.map(|now| Reading::start(old, now, true)).transpose().map_err(|e| Failed(e.to_string()))?;
+    // A fingerprint's hash when there's none.
+    let none = hash_of(ValueRef::Null);
     let mut st = old.conn.prepare(OLD_SOUNDS)?;
     let mut rows = st.query([])?;
     while let Some(r) = rows.next()? {
@@ -435,6 +440,9 @@ fn fill(old: &SoundsDb, conn: &Connection, made: bool, pass: Pass<'_>) -> Result
             clap: hash_of(r.get_ref(OLD_CLAP)?),
         };
         let was = known.remove(&id);
+        if was.map_or((none, none), |w| (w.features, w.clap)) != (now.features, now.clap) {
+            synced.prints += 1;
+        }
         if was != Some(now) {
             if was.is_none_or(|w| w.row != now.row) {
                 let read_here;
@@ -474,12 +482,15 @@ fn fill(old: &SoundsDb, conn: &Connection, made: bool, pass: Pass<'_>) -> Result
     drop(st);
     *pass.read = reading.map(Reading::finish);
     // What's left wasn't in `sounds.db` any more.
-    for id in known.into_keys() {
+    for (id, was) in known {
         for table in ["sounds", "sound_features", "sound_clap", "sound_hashes"] {
             let key = if table == "sounds" { "id" } else { "sound_id" };
             tx.prepare_cached(&format!("DELETE FROM {table} WHERE {key} = ?1"))?.execute([id])?;
         }
         synced.removed += 1;
+        if (was.features, was.clap) != (none, none) {
+            synced.prints += 1;
+        }
     }
     for table in WHOLE {
         if copy_whole(&old.conn, &tx, table)? {
