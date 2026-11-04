@@ -193,7 +193,7 @@ fn a_move_the_computer_stopped_leaves_a_marked_half_copy_that_the_next_try_clear
     fs::create_dir_all(&d).unwrap();
     let from = s(&steam);
     let stop = AtomicBool::new(false);
-    stopped_part_way(10, |progress| move_folder(&from, &s(&d), 35, whose(), &ROOMY, &[], progress, &stop));
+    stopped_part_way(10, |progress| move_folder(&from, &s(&d), 35, whose(), &ROOMY, &[], &[], progress, &stop));
 
     // The folder is as it was; what was copied is a half copy, and its marker says so.
     let half = d.join("STEAM");
@@ -207,14 +207,14 @@ fn a_move_the_computer_stopped_leaves_a_marked_half_copy_that_the_next_try_clear
     assert_eq!(half_copies(&[], &[s(&d)], &ROOMY, &stop).unwrap(), std::slice::from_ref(&found));
 
     // It isn't in the way: the move clears it first, so the room it takes counts as free.
-    assert_eq!(problem(&from, &s(&d), 35, &ROOMY, &[], &stop), None);
+    assert_eq!(problem(&from, &s(&d), 35, &ROOMY, &[], &[], &stop), None);
     let room = |free: u64| OtherDrive { free: Some(free) };
-    assert_eq!(problem(&from, &s(&d), 35, &room(HEADROOM + 35 - found.bytes), &[], &stop), None);
-    let short = problem(&from, &s(&d), 35, &room(HEADROOM + 34 - found.bytes), &[], &stop);
+    assert_eq!(problem(&from, &s(&d), 35, &room(HEADROOM + 35 - found.bytes), &[], &[], &stop), None);
+    let short = problem(&from, &s(&d), 35, &room(HEADROOM + 34 - found.bytes), &[], &[], &stop);
     assert!(matches!(short, Some(CantMove::NoRoom { needs: 35, .. })), "{short:?}");
 
     // Tried again, the move clears it and goes through; in use, the copy has no marker.
-    let moved = move_folder(&from, &s(&d), 35, whose(), &ROOMY, &[], &nothing, &stop).unwrap();
+    let moved = move_folder(&from, &s(&d), 35, whose(), &ROOMY, &[], &[], &nothing, &stop).unwrap();
     assert!(is_link(&steam));
     assert!(!half.join(MARKER).exists());
     assert_eq!(fs::read_to_string(half.join("Patch.prt")).unwrap(), "patch");
@@ -233,7 +233,7 @@ fn a_half_copy_holding_what_isnt_in_the_folder_stays_and_says_what() {
     fs::create_dir_all(&d).unwrap();
     let from = s(&presets);
     let stop = AtomicBool::new(false);
-    stopped_part_way(10, |progress| move_folder(&from, &s(&d), 35, whose(), &ROOMY, &[], progress, &stop));
+    stopped_part_way(10, |progress| move_folder(&from, &s(&d), 35, whose(), &ROOMY, &[], &[], progress, &stop));
     let half = d.join("Presets");
 
     // Something that isn't in the folder being moved (yours, or deleted from it since) keeps the half copy.
@@ -246,10 +246,10 @@ fn a_half_copy_holding_what_isnt_in_the_folder_stays_and_says_what() {
     assert!(found.bytes > 100_000, "{}", found.bytes);
     assert_eq!(found.bytes, mo_space::size::measure(&half, &stop).unwrap().bytes);
     fs::remove_dir_all(half.join("Mine")).unwrap();
-    let said = problem(&from, &s(&d), 35, &ROOMY, &[], &stop);
+    let said = problem(&from, &s(&d), 35, &ROOMY, &[], &[], &stop);
     assert!(matches!(&said, Some(CantMove::HalfCopy { path, .. }) if *path == s(&half)), "{said:?}");
     assert!(said.unwrap().text().contains("Mine.fxp"));
-    let tried = move_folder(&from, &s(&d), 35, whose(), &ROOMY, &[], &nothing, &stop);
+    let tried = move_folder(&from, &s(&d), 35, whose(), &ROOMY, &[], &[], &nothing, &stop);
     assert!(matches!(tried, Err(CantMove::HalfCopy { .. })), "{tried:?}");
     assert!(clear(&half, &[], &ROOMY, &stop).is_err());
     assert!(half.join("Mine.fxp").exists() && half.join(MARKER).exists() && !is_link(&presets));
@@ -316,7 +316,7 @@ fn a_half_copy_goes_with_its_read_only_files_and_its_links_but_never_what_they_l
     let from = s(&library);
     let stop = AtomicBool::new(false);
     // Stopped as the last file goes in: the link and both samples are in the half copy, one of them read-only.
-    stopped_part_way(8, |progress| move_folder(&from, &s(&d), 8, whose(), &ROOMY, &[], progress, &stop));
+    stopped_part_way(8, |progress| move_folder(&from, &s(&d), 8, whose(), &ROOMY, &[], &[], progress, &stop));
     let half = d.join("Library");
     assert!(is_link(&half.join("Linked")));
     assert!(fs::metadata(half.join("Samples/b.wav")).unwrap().permissions().readonly());
@@ -335,7 +335,7 @@ fn a_marker_left_in_a_copy_in_use_is_all_that_goes() {
     library(&presets);
     fs::create_dir_all(&d).unwrap();
     let stop = AtomicBool::new(false);
-    let moved = move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], &nothing, &stop).unwrap();
+    let moved = move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], &[], &nothing, &stop).unwrap();
     let copy = d.join("Presets");
     // The app stopped between the swap and taking the marker out.
     plant_marker(&copy, &presets, &copy, &copy, true);
@@ -395,7 +395,7 @@ fn a_marker_in_a_folder_renamed_since_is_all_that_goes() {
     library(&presets);
     fs::create_dir_all(&d).unwrap();
     let stop = AtomicBool::new(false);
-    stopped_part_way(10, |progress| move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], progress, &stop));
+    stopped_part_way(10, |progress| move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], &[], progress, &stop));
     // You renamed the half copy: it isn't where the copy was being made, so it's yours now.
     let renamed = d.join("Presets kept");
     fs::rename(d.join("Presets"), &renamed).unwrap();
@@ -413,19 +413,19 @@ fn a_half_copy_of_another_folder_or_with_a_broken_marker_is_left_alone() {
     library(&b);
     fs::create_dir_all(&d).unwrap();
     let stop = AtomicBool::new(false);
-    stopped_part_way(10, |progress| move_folder(&s(&a), &s(&d), 35, whose(), &ROOMY, &[], progress, &stop));
+    stopped_part_way(10, |progress| move_folder(&s(&a), &s(&d), 35, whose(), &ROOMY, &[], &[], progress, &stop));
     let half = d.join("Presets");
 
     // B's Presets would go to the same place, but the half copy there is A's: it's in the way, as anything is.
     let there = CantMove::TargetThere(s(&half));
-    assert_eq!(problem(&s(&b), &s(&d), 35, &ROOMY, &[], &stop), Some(there.clone()));
-    assert_eq!(move_folder(&s(&b), &s(&d), 35, whose(), &ROOMY, &[], &nothing, &stop), Err(there));
+    assert_eq!(problem(&s(&b), &s(&d), 35, &ROOMY, &[], &[], &stop), Some(there.clone()));
+    assert_eq!(move_folder(&s(&b), &s(&d), 35, whose(), &ROOMY, &[], &[], &nothing, &stop), Err(there));
     assert!(half.join(MARKER).exists());
 
     // A marker that isn't as the app writes it isn't one: the folder isn't known for a half copy.
     fs::write(half.join(MARKER), "nonsense").unwrap();
     assert_eq!(find(&half, &[], &ROOMY, &stop).unwrap(), None);
-    assert_eq!(problem(&s(&a), &s(&d), 35, &ROOMY, &[], &stop), Some(CantMove::TargetThere(s(&half))));
+    assert_eq!(problem(&s(&a), &s(&d), 35, &ROOMY, &[], &[], &stop), Some(CantMove::TargetThere(s(&half))));
     assert!(clear(&half, &[], &ROOMY, &stop).is_err());
     assert!(half.exists());
     // Nor is a marker that's a folder, or a folder that's a link to a half copy.
@@ -449,7 +449,7 @@ fn a_swap_the_computer_stopped_says_what_to_rename() {
     library(&presets);
     fs::create_dir_all(&d).unwrap();
     let stop = AtomicBool::new(false);
-    stopped_part_way(35, |progress| move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], progress, &stop));
+    stopped_part_way(35, |progress| move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], &[], progress, &stop));
     let half = d.join("Presets");
     // Cut off before its swap: with an "(old copy)" beside the folder from elsewhere, it's still only a half copy.
     let aside = c.join("Presets (old copy)");
@@ -466,7 +466,7 @@ fn a_swap_the_computer_stopped_says_what_to_rename() {
     fs::rename(&aside, &presets).unwrap();
     let State::Stays(why) = find(&half, &[], &ROOMY, &stop).unwrap().unwrap().state else { panic!() };
     assert!(why.contains("went into use"), "{why}");
-    let tried = move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], &nothing, &stop);
+    let tried = move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], &[], &nothing, &stop);
     assert!(matches!(tried, Err(CantMove::HalfCopy { .. })), "{tried:?}");
     assert!(half.join("Patch.prt").exists() || half.join("Sounds").exists());
 }
@@ -479,7 +479,7 @@ fn moving_back_the_computer_stopped_leaves_a_half_copy_the_next_try_clears() {
     library(&presets);
     fs::create_dir_all(&d).unwrap();
     let stop = AtomicBool::new(false);
-    let moved = move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], &nothing, &stop).unwrap();
+    let moved = move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], &[], &nothing, &stop).unwrap();
     // The old copy was deleted once the plugin opened fine, so moving back copies the folder back.
     fs::remove_dir_all(&moved.old_copy).unwrap();
     stopped_part_way(10, |progress| move_back(&moved, &ROOMY, progress, &stop));
@@ -505,7 +505,7 @@ fn moving_back_cut_off_as_it_swapped_says_what_to_rename() {
     library(&presets);
     fs::create_dir_all(&d).unwrap();
     let stop = AtomicBool::new(false);
-    let moved = move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], &nothing, &stop).unwrap();
+    let moved = move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], &[], &nothing, &stop).unwrap();
     fs::remove_dir_all(&moved.old_copy).unwrap();
     stopped_part_way(35, |progress| move_back(&moved, &ROOMY, progress, &stop));
     let back = c.join("Presets (moving back)");
@@ -538,7 +538,7 @@ fn the_plugin_data_folder_moving_to_another_drive_stopped_part_way_is_cleared_by
     fs::create_dir_all(&home).unwrap();
     fs::create_dir_all(&e).unwrap();
     let stop = AtomicBool::new(false);
-    let moved = move_folder(&s(&presets), &s(&home), 35, whose(), &ROOMY, &[], &nothing, &stop).unwrap();
+    let moved = move_folder(&s(&presets), &s(&home), 35, whose(), &ROOMY, &[], &[], &nothing, &stop).unwrap();
     let all = std::slice::from_ref(&moved);
     stopped_part_way(10, |progress| move_home(&s(&home), &s(&e), all, &[], 35, &ROOMY, progress, &stop));
     let half = e.join("Plugin Data");
@@ -561,7 +561,7 @@ fn a_marker_at_the_top_of_a_folder_being_moved_is_never_copied_on() {
     plant_marker(&presets, &d.join("Presets"), &c.join("Presets (moving back)"), &presets, true);
     fs::create_dir_all(&d).unwrap();
     let stop = AtomicBool::new(false);
-    let moved: MovedFolder = move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], &nothing, &stop).unwrap();
+    let moved: MovedFolder = move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], &[], &nothing, &stop).unwrap();
     let copy = d.join("Presets");
     assert!(!copy.join(MARKER).exists());
     // It's the app's, not yours: it doesn't keep the old copy from going.
@@ -579,15 +579,17 @@ fn half_copies_are_looked_for_where_moves_go() {
         fs::create_dir_all(drive).unwrap();
     }
     let stop = AtomicBool::new(false);
-    let one = move_folder(&s(&c.join("One")), &s(&d), 35, whose(), &ROOMY, &[], &nothing, &stop).unwrap();
+    let one = move_folder(&s(&c.join("One")), &s(&d), 35, whose(), &ROOMY, &[], &[], &nothing, &stop).unwrap();
     // Cut off: Two to where One went, Three to a drive the app remembers.
-    stopped_part_way(10, |progress| move_folder(&s(&c.join("Two")), &s(&d), 35, whose(), &ROOMY, &[], progress, &stop));
     stopped_part_way(10, |progress| {
-        move_folder(&s(&c.join("Three")), &s(&e), 35, whose(), &ROOMY, &[], progress, &stop)
+        move_folder(&s(&c.join("Two")), &s(&d), 35, whose(), &ROOMY, &[], &[], progress, &stop)
+    });
+    stopped_part_way(10, |progress| {
+        move_folder(&s(&c.join("Three")), &s(&e), 35, whose(), &ROOMY, &[], &[], progress, &stop)
     });
     // And one where nothing says moves go.
     stopped_part_way(10, |progress| {
-        move_folder(&s(&c.join("Three")), &s(&f), 35, whose(), &ROOMY, &[], progress, &stop)
+        move_folder(&s(&c.join("Three")), &s(&f), 35, whose(), &ROOMY, &[], &[], progress, &stop)
     });
     let all = std::slice::from_ref(&one);
 
@@ -620,8 +622,8 @@ fn a_copy_a_move_is_making_is_never_cleared_nor_made_twice() {
                     let found = find(&half, &[], &ROOMY, &stop).unwrap().unwrap().state;
                     let listed = half_copies(&[], &[s(&d)], &ROOMY, &stop).unwrap().len();
                     let cleared = clear(&half, &[], &ROOMY, &stop);
-                    let looked_first = problem(&s(&presets), &s(&d), 35, &ROOMY, &[], &stop);
-                    let again = move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], &nothing, &stop);
+                    let looked_first = problem(&s(&presets), &s(&d), 35, &ROOMY, &[], &[], &stop);
+                    let again = move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], &[], &nothing, &stop);
                     vec![
                         format!("{found:?}"),
                         listed.to_string(),
@@ -635,7 +637,7 @@ fn a_copy_a_move_is_making_is_never_cleared_nor_made_twice() {
         });
         *seen.lock().unwrap() = said;
     };
-    let moved = move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], &progress, &stop).unwrap();
+    let moved = move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], &[], &progress, &stop).unwrap();
 
     let seen = seen.into_inner().unwrap();
     assert_eq!(seen.len(), 5, "{seen:?}");
@@ -660,9 +662,9 @@ fn a_half_copy_whose_folder_moved_elsewhere_since_is_still_cleared() {
     fs::create_dir_all(&d).unwrap();
     fs::create_dir_all(&e).unwrap();
     let stop = AtomicBool::new(false);
-    stopped_part_way(10, |progress| move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], progress, &stop));
+    stopped_part_way(10, |progress| move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], &[], progress, &stop));
     // Then the folder was moved to another drive, all the way: the half copy never went into use.
-    let moved = move_folder(&s(&presets), &s(&e), 35, whose(), &ROOMY, &[], &nothing, &stop).unwrap();
+    let moved = move_folder(&s(&presets), &s(&e), 35, whose(), &ROOMY, &[], &[], &nothing, &stop).unwrap();
     let half = d.join("Presets");
     let all = std::slice::from_ref(&moved);
     let found = half_copies(all, &[s(&d)], &ROOMY, &stop).unwrap();
@@ -682,7 +684,7 @@ fn a_half_copy_on_a_drive_with_another_letter_now_is_still_cleared_by_the_next_t
     library(&presets);
     fs::create_dir_all(&d).unwrap();
     let stop = AtomicBool::new(false);
-    stopped_part_way(10, |progress| move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], progress, &stop));
+    stopped_part_way(10, |progress| move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], &[], progress, &stop));
     // Plugged in again, the drive got another letter: its folder is called F here.
     fs::rename(&d, &f).unwrap();
     let half = f.join("Presets");
@@ -702,8 +704,8 @@ fn a_half_copy_on_a_drive_with_another_letter_now_is_still_cleared_by_the_next_t
         fs::set_permissions(&d, fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(found, State::CutOff);
     }
-    assert_eq!(problem(&s(&presets), &s(&f), 35, &ROOMY, &[], &stop), None);
-    move_folder(&s(&presets), &s(&f), 35, whose(), &ROOMY, &[], &nothing, &stop).unwrap();
+    assert_eq!(problem(&s(&presets), &s(&f), 35, &ROOMY, &[], &[], &stop), None);
+    move_folder(&s(&presets), &s(&f), 35, whose(), &ROOMY, &[], &[], &nothing, &stop).unwrap();
     assert!(is_link(&presets) && !half.join(MARKER).exists());
     assert_eq!(fs::read_dir(half.join("Sounds")).unwrap().count(), 6);
 }
@@ -719,14 +721,14 @@ fn a_half_copy_made_through_a_link_is_still_known_once_its_drive_has_another_let
     folder_link(&d.join("Real"), &d.join("Link"));
     let stop = AtomicBool::new(false);
     let link = s(&d.join("Link"));
-    stopped_part_way(10, |progress| move_folder(&s(&presets), &link, 35, whose(), &ROOMY, &[], progress, &stop));
+    stopped_part_way(10, |progress| move_folder(&s(&presets), &link, 35, whose(), &ROOMY, &[], &[], progress, &stop));
     assert!(d.join("Real").join("Presets").join(MARKER).exists());
     // Plugged in again, the drive got another letter: the link leads nowhere now, but the half copy is still known.
     fs::rename(&d, &f).unwrap();
     let half = f.join("Real").join("Presets");
     assert_eq!(find(&half, &[], &ROOMY, &stop).unwrap().unwrap().state, State::CutOff);
     // The next try, to where it really is, clears it first.
-    move_folder(&s(&presets), &s(&f.join("Real")), 35, whose(), &ROOMY, &[], &nothing, &stop).unwrap();
+    move_folder(&s(&presets), &s(&f.join("Real")), 35, whose(), &ROOMY, &[], &[], &nothing, &stop).unwrap();
     assert!(is_link(&presets) && !half.join(MARKER).exists());
     assert_eq!(fs::read_dir(half.join("Sounds")).unwrap().count(), 6);
 }
@@ -740,7 +742,9 @@ fn a_half_copy_you_moved_elsewhere_on_its_drive_keeps_everything_but_its_marker(
     let data = d.join("Plugin Data");
     fs::create_dir_all(&data).unwrap();
     let stop = AtomicBool::new(false);
-    stopped_part_way(10, |progress| move_folder(&s(&presets), &s(&data), 35, whose(), &ROOMY, &[], progress, &stop));
+    stopped_part_way(10, |progress| {
+        move_folder(&s(&presets), &s(&data), 35, whose(), &ROOMY, &[], &[], progress, &stop)
+    });
     let files = |folder: &Path| fs::read_dir(folder.join("Sounds")).map_or(0, |sounds| sounds.count());
     let copied = files(&data.join("Presets"));
     assert!(copied > 0);
@@ -772,7 +776,7 @@ fn a_file_link_copied_as_its_file_is_still_a_copy() {
     }
     fs::create_dir_all(&d).unwrap();
     let stop = AtomicBool::new(false);
-    stopped_part_way(10, |progress| move_folder(&s(&presets), &s(&d), 39, whose(), &ROOMY, &[], progress, &stop));
+    stopped_part_way(10, |progress| move_folder(&s(&presets), &s(&d), 39, whose(), &ROOMY, &[], &[], progress, &stop));
     let half = d.join("Presets");
     // Windows copies the file a link leads to when it won't make the link again.
     let copied = half.join("Init.fxp");
@@ -806,7 +810,7 @@ fn a_copy_whose_swap_failed_goes_and_what_couldnt_go_is_cleared_by_the_next_try(
             *held = Some(hold(&copy.join("Sounds").join("0.db")));
         }
     };
-    let tried = move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], &progress, &stop);
+    let tried = move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], &[], &progress, &stop);
     assert_eq!(tried, Err(CantMove::OldCopyThere));
     let held = held.into_inner().unwrap().expect("a file of the copy was held");
     assert!(!is_link(&presets));
@@ -823,7 +827,7 @@ fn a_copy_whose_swap_failed_goes_and_what_couldnt_go_is_cleared_by_the_next_try(
     fs::remove_dir_all(&aside).unwrap();
 
     // Tried again, the move clears it and goes through.
-    let moved = move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], &nothing, &stop).unwrap();
+    let moved = move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], &[], &nothing, &stop).unwrap();
     assert!(is_link(&presets) && moved.has_old_copy());
     assert!(!copy.join(MARKER).exists());
     assert_eq!(fs::read_dir(copy.join("Sounds")).unwrap().count(), 6);
@@ -838,16 +842,16 @@ fn a_link_where_the_copy_goes_is_in_the_way_as_anything_is() {
     library(&presets);
     fs::create_dir_all(&d).unwrap();
     let stop = AtomicBool::new(false);
-    stopped_part_way(10, |progress| move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], progress, &stop));
+    stopped_part_way(10, |progress| move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], &[], progress, &stop));
     // The half copy was renamed, and a link to it took its name.
     let half = d.join("Presets");
     let renamed = d.join("Presets kept");
     fs::rename(&half, &renamed).unwrap();
     folder_link(&renamed, &half);
     let there = CantMove::TargetThere(s(&half));
-    assert_eq!(problem(&s(&presets), &s(&d), 35, &ROOMY, &[], &stop), Some(there.clone()));
+    assert_eq!(problem(&s(&presets), &s(&d), 35, &ROOMY, &[], &[], &stop), Some(there.clone()));
     // The move says the same: its own hold on the place doesn't count as the app making a copy there.
-    assert_eq!(move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], &nothing, &stop), Err(there));
+    assert_eq!(move_folder(&s(&presets), &s(&d), 35, whose(), &ROOMY, &[], &[], &nothing, &stop), Err(there));
     assert!(renamed.join(MARKER).exists() && is_link(&half) && !is_link(&presets));
 
     // The renamed half copy isn't where the copy was made, though the link of that name leads to it: it's yours now,

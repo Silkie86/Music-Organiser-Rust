@@ -47,8 +47,13 @@ const CHECK_SUFFIX: &str = " (checking)";
 /// What a file going in over an older one is called until it's whole.
 pub(crate) const PART_SUFFIX: &str = ".mo-copying";
 
-/// How far apart two times of the same file can be: some drives (exFAT, FAT32) keep times to two seconds.
+/// How far apart two times of the same file can be when one is kept to the second: FAT32 keeps times to two seconds
+/// (and some drives to one).
 const SAME_TIME: Duration = Duration::from_secs(2);
+/// When one is kept to a hundredth of a second (exFAT).
+const SAME_TIME_EXFAT: Duration = Duration::from_millis(10);
+/// When both are kept finer (NTFS keeps a ten-millionth of a second; a Mac and Linux, a billionth).
+const SAME_TIME_FINE: Duration = Duration::from_micros(1);
 
 /// How long before a copy goes into use the small files it wrote are written through to the disk
 /// ([`write_through`]): what was written earlier is taken to be on the disk by then (Windows writes what's waiting
@@ -221,7 +226,8 @@ fn drive_holds_links(_real: &Path) -> bool {
     true
 }
 
-/// Unix: the same device. Windows: the same drive letter or network share, where the folders really are.
+/// Unix: the same device. Windows: the same drive (by its id), where the folders really are; or, when Windows can't
+/// say, the same drive letter or network share.
 #[cfg(unix)]
 fn same_drive(a: &Path, b: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
@@ -234,9 +240,19 @@ fn same_drive(a: &Path, b: &Path) -> bool {
 
 #[cfg(not(unix))]
 fn same_drive(a: &Path, b: &Path) -> bool {
-    let root = |p: &Path| {
-        let real = real_path(&p.to_string_lossy()).unwrap_or_else(|| p.to_string_lossy().into_owned());
-        let k = key(&real);
+    let real = |p: &Path| real_path(&p.to_string_lossy()).unwrap_or_else(|| p.to_string_lossy().into_owned());
+    let (a, b) = (real(a), real(b));
+    // By the drive's own id: a drive mounted in a folder of C: ("C:\Samples") is another drive, though its paths start
+    // with C:. Only when Windows can't say for both is the letter (or the network share) compared.
+    #[cfg(windows)]
+    {
+        use crate::clean::volume_of_path;
+        if let (Some((_, va)), Some((_, vb))) = (volume_of_path(Path::new(&a)), volume_of_path(Path::new(&b))) {
+            return va.eq_ignore_ascii_case(&vb);
+        }
+    }
+    let root = |real: &str| {
+        let k = key(real);
         if let Some(share) = k.strip_prefix("//") {
             // //server/share
             let mut parts = share.splitn(3, '/');
@@ -245,7 +261,7 @@ fn same_drive(a: &Path, b: &Path) -> bool {
             k.split('/').next().unwrap_or_default().to_owned()
         }
     };
-    root(a) == root(b)
+    root(a.as_str()) == root(b.as_str())
 }
 
 /// Where the folder goes in the folder you picked: a folder of the same name.
@@ -269,6 +285,8 @@ pub fn inside_moved<'a>(path: &str, moved: &'a [MovedFolder]) -> Option<&'a str>
 pub enum CantMove {
     /// It isn't there any more.
     Gone,
+    /// It's one of your project or sample folders, holds one, or is inside one: those never move (rule 2).
+    Protected,
     /// It's a link already (moved, or set up that way).
     Link,
     /// It was moved before (to there), and a real folder is back where its link was.
@@ -318,6 +336,9 @@ impl CantMove {
     pub fn text(&self) -> String {
         match self {
             CantMove::Gone => "The folder isn't there any more.".to_owned(),
+            CantMove::Protected => "It's one of your project or sample folders, holds one, or is inside one, and \
+                                    those are never moved. Nothing was moved."
+                .to_owned(),
             CantMove::Link => "It's moved already: it points to another place.".to_owned(),
             CantMove::MovedBefore(to) => format!(
                 "It was moved to {to} before, and a real folder is back where its link was (an update may have put it \
@@ -383,16 +404,28 @@ impl CantMove {
 }
 
 /// Why the folder can't move to `destination`, or `None` when it can. `bytes` is its size; `moved` is the folders moved
-/// already. Reads the folder to look for OneDrive files that are only online: call it away from the window's thread.
+/// already; `protected`, your project and sample folders (rule 2: nothing in them moves). Reads the folder to look for
+/// OneDrive files that are only online: call it away from the window's thread.
 pub fn problem(
     from: &str,
     destination: &str,
     bytes: u64,
     drives: &dyn Drives,
     moved: &[MovedFolder],
+    protected: &[String],
     stop: &AtomicBool,
 ) -> Option<CantMove> {
-    problem_with(from, destination, bytes, drives, moved, None, stop)
+    problem_with(from, destination, bytes, drives, (moved, protected), None, stop)
+}
+
+/// Whether a folder is one of your project or sample folders, holds one, or is inside one, as written or where it
+/// really is: then it never moves (its old copy would be offered for the Recycle Bin afterwards).
+fn protected_folder(from: &str, protected: &[String]) -> bool {
+    let real_from = real_path(from).unwrap_or_else(|| from.to_owned());
+    protected.iter().filter(|p| !p.trim().is_empty()).any(|p| {
+        let real_p = real_path(p).unwrap_or_else(|| p.clone());
+        is_inside(from, p) || is_inside(p, from) || is_inside(&real_from, &real_p) || is_inside(&real_p, &real_from)
+    })
 }
 
 /// [`problem`], for a move that holds `mine`, its claim on the copy it makes: its own claim doesn't count as the app
@@ -402,7 +435,7 @@ fn problem_with(
     destination: &str,
     bytes: u64,
     drives: &dyn Drives,
-    moved: &[MovedFolder],
+    (moved, protected): (&[MovedFolder], &[String]),
     mine: Option<&Claim>,
     stop: &AtomicBool,
 ) -> Option<CantMove> {
@@ -410,6 +443,9 @@ fn problem_with(
     let from_path = Path::new(from);
     if is_link(from_path) {
         return Some(CantMove::Link);
+    }
+    if protected_folder(from, protected) {
+        return Some(CantMove::Protected);
     }
     if !fs::symlink_metadata(from_path).is_ok_and(|m| m.is_dir()) {
         return Some(CantMove::Gone);
@@ -532,23 +568,31 @@ pub fn move_folder(
     (key_of, kind, shared_with): (&str, SpaceKind, &[String]),
     drives: &dyn Drives,
     already_moved: &[MovedFolder],
+    protected: &[String],
     progress: &(dyn Fn(u64) + Sync),
     stop: &AtomicBool,
 ) -> Result<MovedFolder, CantMove> {
     let from = from.trim_end_matches(['/', '\\']).to_owned();
+    // Before anything is made there (the claim, a half copy cleared).
+    if protected_folder(&from, protected) {
+        return Err(CantMove::Protected);
+    }
+    // The app or the computer stopped in the moment the folder was called "… (checking)": it gets its name back.
+    put_back_checked(&from)?;
     let to = target(&from, destination);
     // Nothing else in the app makes or clears a copy there until this one is in use.
     let mine = claim(&to).ok_or_else(|| busy_now(&to))?;
     // A half copy an earlier try left, cut off part way (the app or the computer stopped), goes first.
     clear_own(&to, &from, already_moved, &mine, drives, stop)?;
-    if let Some(why) = problem_with(&from, destination, bytes, drives, already_moved, Some(&mine), stop) {
+    if let Some(why) = problem_with(&from, destination, bytes, drives, (already_moved, protected), Some(&mine), stop) {
         return Err(why);
     }
     // Find out before copying whether Windows lets the folder be renamed, rather than after an hour of copying. One it
     // guards is checked as administrator now and swapped as administrator after the copy: Windows asks both times.
     check_rename_or_ask(&from, drives.admin())?;
     let leave_out = left_out(&from, already_moved);
-    let tree = Tree { leave_out: &leave_out, ..Tree::new(Path::new(&from), &to, &to) };
+    let tree =
+        Tree { leave_out: &leave_out, links_lead: Some(Path::new(&from)), ..Tree::new(Path::new(&from), &to, &to) };
     copy_fresh(&tree, progress, stop)?;
     // Still the real folder that was copied: one that turned into a link meanwhile would be set aside as the old copy,
     // a link, with the plugin's files somewhere else.
@@ -681,6 +725,27 @@ pub fn move_back(
         )
         .map_err(partly)?;
         write_through(&[&first, &again], stop).map_err(partly)?;
+        // The copying took a while: a plugin update may have put a real folder where the link was meanwhile.
+        if let Some(now) = not_the_link_now(moved) {
+            let kept = if kept_in.exists() {
+                format!(" Its own newer files are kept in {}.", text(&kept_in))
+            } else {
+                String::new()
+            };
+            let updated = if changed.load(Ordering::Relaxed) {
+                format!(
+                    "The old copy ({}) was brought up to date from {}, and stays beside it.",
+                    moved.old_copy, moved.to
+                )
+            } else {
+                format!("The old copy ({}) stays beside it, as it was.", moved.old_copy)
+            };
+            return Err(CantMove::LeftHalfway(format!(
+                "{now} {updated}{kept} {} still has all the folder's files. Look at what's in {from} now, then link it \
+                 again from the Space page.",
+                moved.to
+            )));
+        }
         unswap_or_ask(from, &moved.old_copy, to, drives.admin()).map_err(partly)?;
         return Ok(MovedBack {
             kept: shown(&[first.kept, again.kept].concat()),
@@ -702,17 +767,55 @@ pub fn move_back(
     let tree = Tree::new(to, Path::new(&back), settled);
     room_for(&tree, here, drives, stop)?;
     let (first, again) = copy_fresh(&tree, progress, stop)?;
+    // The copying took a while: a plugin update may have put a real folder where the link was meanwhile. The copy
+    // made to come back is only a copy of what's still on the other drive, so it goes.
+    if let Some(now) = not_the_link_now(moved) {
+        remove_copy(Path::new(&back));
+        return Err(CantMove::Failed(format!(
+            "{now} The copy made to bring it back was removed; {} still has all the folder's files. Look at what's in \
+             {from} now, then link it again from the Space page.",
+            moved.to
+        )));
+    }
     going_into_use(Path::new(&back)).then_some(()).ok_or_else(|| not_noted(Path::new(&back)))?;
     if let Err(why) = unswap_or_ask(from, &back, to, drives.admin()) {
-        if link_reaches(moved) {
-            // As it was: the plugin still uses the other drive, so the copy made to come back goes.
+        // As it was (the plugin still uses the other drive), or a real folder is there now and the other drive still
+        // has everything: either way the copy made to come back is only a copy, so it goes.
+        if link_reaches(moved) || (real_folder(from) && fs::metadata(to).is_ok_and(|m| m.is_dir())) {
             remove_copy(Path::new(&back));
         }
-        return Err(why);
+        return Err(match not_the_link_now(moved) {
+            Some(now) if real_folder(from) => CantMove::Failed(format!(
+                "{now} {} still has all the folder's files. Look at what's in {from} now, then link it again from the \
+                 Space page.",
+                moved.to
+            )),
+            _ => why,
+        });
     }
     // In place now, as the plugin's own folder: it's no half copy.
     unmark(settled);
     Ok(MovedBack { links_left: shown(&[first.links_left, again.links_left].concat()), ..MovedBack::default() })
+}
+
+/// Why the place a moved folder was isn't its link to the copy any more, if it isn't: a real folder is there (a plugin
+/// update may have made it), or the link leads somewhere else, or nothing is there.
+fn not_the_link_now(moved: &MovedFolder) -> Option<String> {
+    let from = &moved.from;
+    if link_reaches(moved) {
+        None
+    } else if real_folder(from) {
+        Some(format!(
+            "While it was moving back, {from} became a real folder again (a plugin update may have put it there), so it \
+             wasn't swapped."
+        ))
+    } else if is_link(Path::new(from)) {
+        Some(format!(
+            "While it was moving back, the link at {from} was changed to lead somewhere else, so it wasn't swapped."
+        ))
+    } else {
+        Some(format!("While it was moving back, the link at {from} went, so it wasn't swapped."))
+    }
 }
 
 /// A copy whose marker couldn't be told it's going into use goes (it isn't in use), and nothing has moved: a copy whose
@@ -903,9 +1006,21 @@ fn all_held<'a>(old: &Path, moved: &'a MovedFolder, all: &'a [MovedFolder], foun
 /// saved there while the move ran, or deleted from the other drive since. The old copies of folders moved from inside
 /// it before are checked against their own copies. Reads both folders: call it away from the window's thread.
 pub fn only_in_old_copy(moved: &MovedFolder, all: &[MovedFolder], stop: &AtomicBool) -> Result<Vec<String>, CantMove> {
+    old_copy_only(moved, all, false, stop)
+}
+
+/// [`only_in_old_copy`], and with `bytes`, also the files that look the same in both (size and time) but whose bytes
+/// differ: a copy gone bad on the way (a faulty USB cable, a stick smaller than it says). Reads every such file in
+/// both: slow, so only just before the old copy goes.
+fn old_copy_only(
+    moved: &MovedFolder,
+    all: &[MovedFolder],
+    bytes: bool,
+    stop: &AtomicBool,
+) -> Result<Vec<String>, CantMove> {
     let mut only = Vec::new();
     let old = Path::new(&moved.old_copy);
-    differences((old, Path::new(&moved.to)), held(old, moved, all), all, Path::new(""), &mut only, stop)?;
+    differences((old, Path::new(&moved.to)), held(old, moved, all), (all, bytes), Path::new(""), &mut only, stop)?;
     only.sort();
     Ok(only)
 }
@@ -913,7 +1028,7 @@ pub fn only_in_old_copy(moved: &MovedFolder, all: &[MovedFolder], stop: &AtomicB
 /// What's in `old` but not in `copy`, or newer in `old`, as paths inside it.
 pub(crate) fn only_in(old: &Path, copy: &Path, stop: &AtomicBool) -> Result<Vec<String>, CantMove> {
     let mut only = Vec::new();
-    differences((old, copy), Vec::new(), &[], Path::new(""), &mut only, stop)?;
+    differences((old, copy), Vec::new(), (&[], false), Path::new(""), &mut only, stop)?;
     only.sort();
     Ok(only)
 }
@@ -923,7 +1038,7 @@ pub(crate) fn only_in(old: &Path, copy: &Path, stop: &AtomicBool) -> Result<Vec<
 fn differences(
     (old, copy): (&Path, &Path),
     inner: Vec<(PathBuf, &MovedFolder)>,
-    all: &[MovedFolder],
+    (all, bytes): (&[MovedFolder], bool),
     shown_as: &Path,
     only: &mut Vec<String>,
     stop: &AtomicBool,
@@ -972,7 +1087,11 @@ fn differences(
                 is_dir
             } else {
                 match (entry.metadata(), fs::metadata(&there)) {
-                    (Ok(mine), Ok(copy)) => copy.is_file() && (same_file(&mine, &copy) || newer(&copy, &mine)),
+                    (Ok(mine), Ok(copy)) => {
+                        copy.is_file()
+                            && (newer(&copy, &mine)
+                                || same_file(&mine, &copy) && (!bytes || same_inside(&path, &there, stop)?))
+                    }
                     _ => false,
                 }
             };
@@ -983,9 +1102,35 @@ fn differences(
     }
     for (at, m) in inner {
         let rest = at.strip_prefix(old).unwrap_or(&at).to_path_buf();
-        differences((&at, Path::new(&m.to)), held(&at, m, all), all, &shown_as.join(rest), only, stop)?;
+        differences((&at, Path::new(&m.to)), held(&at, m, all), (all, bytes), &shown_as.join(rest), only, stop)?;
     }
     Ok(())
+}
+
+/// Whether two files that look the same (size and time) hold the same bytes, read side by side in pieces, stopping when
+/// you press Stop. A OneDrive file that's only online, on either side, isn't read (that would download it): OneDrive
+/// keeps it, so it counts as the same. One that can't be read (a program has it open) counts as not the same, so the
+/// old copy stays.
+fn same_inside(a: &Path, b: &Path, stop: &AtomicBool) -> Result<bool, CantMove> {
+    let online = |p: &Path| fs::symlink_metadata(p).is_ok_and(|m| is_online_only(&m));
+    if online(a) || online(b) {
+        return Ok(true);
+    }
+    let (Ok(mut fa), Ok(mut fb)) = (fs::File::open(a), fs::File::open(b)) else { return Ok(false) };
+    let (mut ba, mut bb) = (vec![0u8; 1 << 20], vec![0u8; 1 << 20]);
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return Err(CantMove::Stopped);
+        }
+        let Ok(n) = fa.read(&mut ba) else { return Ok(false) };
+        if n == 0 {
+            return Ok(fb.read(&mut bb).is_ok_and(|m| m == 0));
+        }
+        let (Some(want), Some(got)) = (ba.get(..n), bb.get_mut(..n)) else { return Ok(false) };
+        if fb.read_exact(got).is_err() || want != &*got {
+            return Ok(false);
+        }
+    }
 }
 
 /// Sends the old copy to the Recycle Bin, once [`old_copy_can_go`] says it may, and the old copies of folders moved
@@ -997,14 +1142,15 @@ pub fn remove_old_copy(moved: &MovedFolder, all: &[MovedFolder], sure: bool, bin
         return stays(moved, &why);
     }
     if !sure {
-        match only_in_old_copy(moved, all, stop) {
+        match old_copy_only(moved, all, true, stop) {
             Err(_) => return stays(moved, "Stopped before it was all checked, so it stays."),
             Ok(only) if !only.is_empty() => {
                 return stays(
                     moved,
                     &format!(
-                        "Some of it is only in the old copy, or newer there: {}. It may have been saved while the move \
-                         ran, or deleted from the other drive since. Look before deleting it.",
+                        "Some of it is only in the old copy, newer there, or not the same as on the other drive: {}. \
+                         It may have been saved while the move ran, deleted from the other drive since, gone bad on \
+                         the way, or open in a program now. Look before deleting it.",
                         listed(&only)
                     ),
                 );
@@ -1108,6 +1254,7 @@ pub(crate) fn check_rename_or_ask(from: &str, admin: &dyn Admin) -> Result<(), C
 /// Renames the folder and straight back, to learn whether the swap will work.
 pub(crate) fn check_rename(from: &str) -> Result<(), CantMove> {
     let check = format!("{from}{CHECK_SUFFIX}");
+    put_back_checked(from)?;
     if fs::symlink_metadata(&check).is_ok() {
         return Err(CantMove::Failed(format!("There's a folder called {} beside it.", file_name(&check))));
     }
@@ -1120,6 +1267,25 @@ pub(crate) fn check_rename(from: &str) -> Result<(), CantMove> {
         CantMove::LeftHalfway(format!(
             "Windows let the folder be renamed but not renamed back ({e}), so it's called \"{}\" for now. Rename it \
              to \"{}\" yourself. Nothing was copied.",
+            file_name(&check),
+            file_name(from)
+        ))
+    })
+}
+
+/// Gives a folder its name back when the app or the computer stopped in the moment [`check_rename`] had it called
+/// "… (checking)": nothing is at its own name, and a real folder (not a link) has that name. `Ok(true)` when it was
+/// renamed back; an error when it couldn't be (it's left as it is, and said where).
+pub fn put_back_checked(from: &str) -> Result<bool, CantMove> {
+    let from = from.trim_end_matches(['/', '\\']);
+    let check = format!("{from}{CHECK_SUFFIX}");
+    if fs::symlink_metadata(from).is_ok() || !real_folder(&check) {
+        return Ok(false);
+    }
+    rename_back(&check, from).map(|()| true).map_err(|e| {
+        CantMove::LeftHalfway(format!(
+            "The folder is called \"{}\" since an earlier try was cut off, and Windows wouldn't rename it back ({e}). \
+             Rename it to \"{}\" yourself.",
             file_name(&check),
             file_name(from)
         ))
@@ -1360,8 +1526,12 @@ pub(crate) enum Fill {
 pub(crate) struct Tree<'a> {
     pub(crate) from: &'a Path,
     pub(crate) to: &'a Path,
-    /// Where `to` ends up once everything's done: links leading inside `from` lead to the same place inside it.
+    /// Where `to` ends up once everything's done: links leading inside `from` lead to the same place inside it (unless
+    /// `links_lead`).
     pub(crate) settled: &'a Path,
+    /// Where links leading inside `from` lead in the copy, when not `settled`: a move keeps them on `from` itself,
+    /// which its link keeps reaching wherever the copy goes later (moved home, moved back), as the C# app did.
+    pub(crate) links_lead: Option<&'a Path>,
     /// Where files in `to` that are newer than the ones replacing them go first (by their paths inside `to`), when
     /// `to` is yours; without it they're replaced (a copy the move made).
     pub(crate) keep_in: Option<&'a Path>,
@@ -1405,6 +1575,7 @@ impl<'a> Tree<'a> {
             from,
             to,
             settled,
+            links_lead: None,
             keep_in: None,
             keep_all: false,
             ours: &[],
@@ -2274,18 +2445,35 @@ pub(crate) fn set_read_only(path: &Path, read_only: bool) -> bool {
     }
 }
 
-/// Whether two files look the same: the same size, and times no further apart than a drive's clock steps.
+/// Whether two files look the same: the same size, and times no further apart than the coarser drive's clock steps.
 pub(crate) fn same_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
     a.len() == b.len()
         && match (a.modified(), b.modified()) {
-            (Ok(x), Ok(y)) => x.duration_since(y).unwrap_or_else(|e| e.duration()) < SAME_TIME,
+            (Ok(x), Ok(y)) => x.duration_since(y).unwrap_or_else(|e| e.duration()) < steps(x, y),
             _ => false,
         }
 }
 
-/// Whether `a` was changed later than `b`, by more than a drive's clock steps.
+/// Whether `a` was changed later than `b`, by more than the coarser drive's clock steps.
 pub(crate) fn newer(a: &fs::Metadata, b: &fs::Metadata) -> bool {
-    matches!((a.modified(), b.modified()), (Ok(x), Ok(y)) if x.duration_since(y).is_ok_and(|d| d >= SAME_TIME))
+    matches!((a.modified(), b.modified()), (Ok(x), Ok(y)) if x.duration_since(y).is_ok_and(|d| d >= steps(x, y)))
+}
+
+/// How far apart two times of one file can be, by the coarser of the two: a time kept to the second (no fraction:
+/// FAT32, or another drive keeping seconds) may be up to two seconds off; one kept to a hundredth (exFAT), a
+/// hundredth; finer ones (NTFS, a Mac's and Linux's drives) are copied as they are, so they must match. A file written
+/// twice within two seconds, the same size, isn't taken for the copy made between the writes, as it was when every
+/// drive was given two seconds. (A fine drive's time that happens to fall on a whole second, about one in ten million,
+/// only gets the wider window.)
+fn steps(a: SystemTime, b: SystemTime) -> Duration {
+    let step = |t: SystemTime| match t.duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(d) if d.subsec_nanos() == 0 => SAME_TIME,
+        Ok(d) if d.subsec_nanos() % 10_000_000 == 0 => SAME_TIME_EXFAT,
+        Ok(_) => SAME_TIME_FINE,
+        // Before 1970: can't tell, so the widest.
+        Err(_) => SAME_TIME,
+    };
+    step(a).max(step(b))
 }
 
 /// Gives a copied file the original's time. Opened only to change its times, so a read-only file (a library's own
@@ -2309,8 +2497,21 @@ fn keep_time(copy: &Path, when: SystemTime) -> io::Result<()> {
 /// inside the folder the copy becomes.
 fn lead(place: PathBuf, inside: &Path, tree: &Tree) -> PathBuf {
     match place.strip_prefix(inside) {
-        Ok(rest) => tree.settled.join(rest),
+        Ok(rest) => tree.links_lead.unwrap_or(tree.settled).join(rest),
         Err(_) => place,
+    }
+}
+
+/// A path as Windows writes it for people: without the `\\?\` a link's own wording (or a real path) can start with.
+fn plainly(path: &Path) -> PathBuf {
+    let shown = path.to_string_lossy();
+    // Only a drive letter's (`\\?\C:\`) or a network share's: one naming a drive by its id (`\\?\Volume{…}\`, a drive
+    // mounted in a folder) means nothing without it.
+    let lettered = |rest: &str| rest.as_bytes().get(1) == Some(&b':') && rest.as_bytes()[0].is_ascii_alphabetic();
+    match (shown.strip_prefix(r"\\?\UNC\"), shown.strip_prefix(r"\\?\")) {
+        (Some(network), _) => PathBuf::from(format!(r"\\{network}")),
+        (None, Some(local)) if lettered(local) => PathBuf::from(local),
+        _ => path.to_path_buf(),
     }
 }
 
@@ -2332,13 +2533,26 @@ fn copy_link(
         clear_failed_link(copy);
         couldnt(e)
     };
-    let Ok(real) = fs::canonicalize(link_path) else {
-        // Where it would lead, worked out from its wording alone.
-        let points = fs::read_link(link_path).map_err(couldnt)?;
-        let place = tidy(&link_path.parent().map_or(points.clone(), |p| p.join(&points)));
-        return copy_dangling(kind, &lead(place, &tidy(tree.from), tree), copy).map(|()| None).map_err(didnt_take);
+    // Where it leads by its own wording, worked out from the folder it's in, not where it ends up: a link into another
+    // moved folder (C:\B, on D: now) keeps leading to C:\B, which that folder's own link keeps reaching, moved back or
+    // moved again. Only a place inside the folder being copied changes ([`lead`]).
+    // One worded from where it sits ("..\Shared") is worked out as the system does: from where its folder really is.
+    let points = fs::read_link(link_path).map_err(couldnt)?;
+    let base = || link_path.parent().map(|p| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()));
+    let place = plainly(&tidy(&if points.is_absolute() {
+        points.clone()
+    } else {
+        base().map_or(points.clone(), |p| p.join(&points))
+    }));
+    let within = |place: PathBuf| {
+        let from = plainly(&tidy(tree.from));
+        if place.starts_with(&from) { lead(place, &from, tree) } else { lead(place, &plainly(source_real), tree) }
     };
-    let to = lead(real.clone(), source_real, tree);
+    let Ok(real) = fs::canonicalize(link_path) else {
+        // It leads nowhere now (a drive that isn't plugged in): made again as it's worded.
+        return copy_dangling(kind, &within(place), copy).map(|()| None).map_err(didnt_take);
+    };
+    let to = within(place);
     if real.is_dir() {
         return link(copy, &to).map(|()| None).map_err(didnt_take);
     }
@@ -2421,6 +2635,20 @@ mod tests {
         assert_eq!(write_through(&[&first, &again], &AtomicBool::new(true)), Err(CantMove::Stopped));
         assert_eq!(fs::read_to_string(&patch).unwrap(), "patch");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn times_match_as_finely_as_the_coarser_drive_keeps_them() {
+        use super::steps;
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
+        let at = |secs: u64, nanos: u32| UNIX_EPOCH + Duration::new(secs, nanos);
+        let fine = at(1_700_000_000, 123_456_700);
+        // NTFS to NTFS: a write 1.5 seconds later is another write.
+        assert_eq!(steps(fine, fine + Duration::from_millis(1500)), Duration::from_micros(1));
+        // exFAT keeps hundredths, FAT32 even seconds.
+        assert_eq!(steps(fine, at(1_700_000_000, 120_000_000)), Duration::from_millis(10));
+        assert_eq!(steps(fine, at(1_700_000_000, 0)), Duration::from_secs(2));
+        assert_eq!(steps(SystemTime::UNIX_EPOCH - Duration::from_secs(1), fine), Duration::from_secs(2));
     }
 
     #[test]

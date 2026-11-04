@@ -990,37 +990,46 @@ struct Drive {
     size: u64,
 }
 
+/// Windows: where the drive holding `real` starts ("C:\", or the folder a drive is mounted in, ending in a 0 as Windows
+/// reads it), and its id (the `{…}` of `\\?\Volume{…}\`): the same id is the same drive, whatever letter or folder it's
+/// reached by. `None` when Windows can't say.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+pub(crate) fn volume_of_path(real: &Path) -> Option<(Vec<u16>, String)> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{GetVolumeNameForVolumeMountPointW, GetVolumePathNameW};
+    let path: Vec<u16> = real.as_os_str().encode_wide().chain([0]).collect();
+    // The drive's root is never longer than the path inside it.
+    let mut root = vec![0u16; path.len().max(261)];
+    let room = u32::try_from(root.len()).ok()?;
+    // SAFETY: `path` ends in a 0, and `root` has room for `room` characters, as the call is told.
+    if unsafe { GetVolumePathNameW(path.as_ptr(), root.as_mut_ptr(), room) } == 0 {
+        return None;
+    }
+    let end = root.iter().position(|&c| c == 0)?;
+    root.truncate(end + 1);
+    // "\\?\Volume{…}\" is 49 characters and the 0 after them.
+    let mut name = [0u16; 64];
+    // SAFETY: `root` ends in a 0, and `name` has room for the 64 characters the call is told.
+    if unsafe { GetVolumeNameForVolumeMountPointW(root.as_ptr(), name.as_mut_ptr(), 64) } == 0 {
+        return None;
+    }
+    let end = name.iter().position(|&c| c == 0)?;
+    let name = String::from_utf16(name.get(..end)?).ok()?;
+    let id = name.strip_prefix(r"\\?\Volume")?.strip_suffix('\\')?;
+    if !(id.starts_with('{') && id.ends_with('}')) {
+        return None;
+    }
+    Some((root, id.to_owned()))
+}
+
 #[cfg(windows)]
 impl Drive {
     /// The drive holding `real`; `None` when Windows can't say.
     #[allow(unsafe_code)]
     fn of(real: &Path) -> Option<Drive> {
-        use std::os::windows::ffi::OsStrExt;
-        use windows_sys::Win32::Storage::FileSystem::{
-            GetDiskFreeSpaceExW, GetDriveTypeW, GetVolumeNameForVolumeMountPointW, GetVolumePathNameW,
-        };
-        let path: Vec<u16> = real.as_os_str().encode_wide().chain([0]).collect();
-        // The drive's root is never longer than the path inside it.
-        let mut root = vec![0u16; path.len().max(261)];
-        let room = u32::try_from(root.len()).ok()?;
-        // SAFETY: `path` ends in a 0, and `root` has room for `room` characters, as the call is told.
-        if unsafe { GetVolumePathNameW(path.as_ptr(), root.as_mut_ptr(), room) } == 0 {
-            return None;
-        }
-        let end = root.iter().position(|&c| c == 0)?;
-        root.truncate(end + 1);
-        // "\\?\Volume{…}\" is 49 characters and the 0 after them.
-        let mut name = [0u16; 64];
-        // SAFETY: `root` ends in a 0, and `name` has room for the 64 characters the call is told.
-        if unsafe { GetVolumeNameForVolumeMountPointW(root.as_ptr(), name.as_mut_ptr(), 64) } == 0 {
-            return None;
-        }
-        let end = name.iter().position(|&c| c == 0)?;
-        let name = String::from_utf16(name.get(..end)?).ok()?;
-        let id = name.strip_prefix(r"\\?\Volume")?.strip_suffix('\\')?;
-        if !(id.starts_with('{') && id.ends_with('}')) {
-            return None;
-        }
+        use windows_sys::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetDriveTypeW};
+        let (root, id) = volume_of_path(real)?;
         // SAFETY: `root` ends in a 0.
         let kind = unsafe { GetDriveTypeW(root.as_ptr()) };
         let mut size = 0u64;
@@ -1028,7 +1037,7 @@ impl Drive {
         if unsafe { GetDiskFreeSpaceExW(root.as_ptr(), std::ptr::null_mut(), &mut size, std::ptr::null_mut()) } == 0 {
             return None;
         }
-        Some(Drive { root, id: id.to_owned(), kind, size })
+        Some(Drive { root, id, kind, size })
     }
 
     /// How much is in the Recycle Bin on this drive now (this account's), when Windows says. Read again at most every
