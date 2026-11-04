@@ -1,0 +1,649 @@
+// The MIDI page, the browse side (spec 3.4): every MIDI part in your projects and MIDI folders, one line per set of
+// notes ("in 20 files"), with kind chips, From, Key, Order, Shuffle and the year strip; the picked part's card with
+// its piano roll, its key as the key finder reads it, its facts, and what you can do with it. Only shared parts from
+// studio.slint; mo-app decides every word (mo_app::midi), mo-ui/src/midi.rs fills it.
+import { ListView } from "std-widgets.slint";
+import { Theme, Type, Space, Well, SearchBox, ToggleChip, MenuChip, ListLine, Caps, StudioButton, CloseButton, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar } from "../studio.slint";
+
+// A kind chip: its words ("Basslines 1,204") and whether it's picked.
+export struct KindChip {
+    text: string,
+    on: bool,
+}
+
+// One part in the list.
+export struct MidiLine {
+    // Its place in the list on show.
+    row: int,
+    title: string,
+    // "Night drive 12 · FL Studio · in 3 files".
+    from: string,
+    // "Piano · Chords · 8 bars · 64 notes".
+    details: string,
+    // "Part of a longer phrase", in the accent colour; "" for none.
+    phrase: string,
+    key: string,
+    date: string,
+    // Its kind's colour, as a place in Theme.sound-types (-1 grey).
+    colour: int,
+    // Why the app thinks it's that kind, for the tooltip.
+    why: string,
+    picked: bool,
+}
+
+// A note on the piano roll: left, top, width, height, each 0 to 1 of the roll, and how hard it's played (0.4 to 1).
+export struct RollNote {
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    strength: float,
+}
+
+// One of the card's facts: BARS 8.
+export struct MidiFact {
+    name: string,
+    value: string,
+}
+
+// The picked part, as its card shows it.
+export struct PickedPart {
+    kind: string,
+    kind-why: string,
+    colour: int,
+    title: string,
+    from: string,
+    // Marked where it may break, after its slashes.
+    path: string,
+    // The key finder's reading: "C minor or Eb major", "72% sure", and why.
+    key: string,
+    key-sure: string,
+    key-why: string,
+    // Where the reading comes from ("Read now from its notes by the key finder").
+    key-from: string,
+    // The old app's key, to compare, or "".
+    old-key: string,
+    instrument: string,
+    phrase: string,
+    // The roll's lowest and highest key: "C2", "G4".
+    roll-low: string,
+    roll-high: string,
+    // "4,000 notes shown of 5,210", or "".
+    roll-note: string,
+    // The other files with the same notes, and "and 12 more".
+    others: [string],
+    others-more: string,
+}
+
+export global MidiData {
+    in property <string> summary;
+    in property <string> busy;
+    in property <float> done;
+
+    in-out property <string> search;
+    callback search-edited(string);
+    in property <[KindChip]> kinds;
+    callback toggle-kind(int);
+    callback clear-kinds();
+    in property <bool> any-kind;
+    in property <string> from;
+    in property <[string]> froms;
+    in property <string> key;
+    in property <[string]> keys;
+    in property <string> order;
+    in property <[string]> orders;
+    callback pick(string, string);
+    callback shuffle();
+    // "Shaped most like Bass · Pattern 3 first · 500", or "" when the list isn't ranked against a part.
+    in property <string> target;
+    callback clear-target();
+    in property <string> result;
+
+    in property <[YearBar]> years;
+    // The picked years, as places in `years` (-1 for none).
+    in property <int> years-from: -1;
+    in property <int> years-to: -1;
+    callback years-picked(int, int);
+    callback years-cleared();
+
+    in property <[MidiLine]> lines;
+    in property <int> shown;
+    // The line to bring into sight, each time `show-ask` goes up.
+    in property <int> show-row;
+    in property <int> show-ask;
+    callback select(int);
+    callback step(int);
+
+    // Said instead of the list while there's nothing to show yet ("" once there is).
+    in property <string> empty-title;
+    in property <string> empty-text;
+    in property <bool> any-filter;
+    callback clear();
+
+    in property <bool> panel-shown;
+    in-out property <length> panel-width: 420px;
+    callback panel-resized(length);
+    callback close-panel();
+    in property <PickedPart> picked;
+    in property <[RollNote]> roll;
+    in property <[float]> roll-bars;
+    in property <[MidiFact]> facts;
+    in property <[CardAction]> actions;
+    in property <[MenuItem]> menu;
+    callback menu-chosen(string);
+}
+
+component ListHeading inherits HorizontalLayout {
+    padding-left: Space.md + Space.xs;
+    padding-right: Space.md + Space.xs;
+    spacing: Space.md;
+    height: 28px;
+    Rectangle { width: 8px; }
+    Caps {
+        horizontal-stretch: 1;
+        preferred-width: 0px;
+        min-width: 0px;
+        text: "PART";
+        vertical-alignment: center;
+    }
+    Caps {
+        width: 96px;
+        text: "KEY";
+        vertical-alignment: center;
+    }
+    Caps {
+        width: 96px;
+        text: "SAVED";
+        vertical-alignment: center;
+    }
+}
+
+component MidiLineView inherits ListLine {
+    in property <MidiLine> line;
+    callback chosen();
+    height: 52px;
+    selected: line.picked;
+    tip: line.why;
+    tip-below: 26px;
+    clicked => {
+        root.chosen();
+        MidiData.select(root.line.row);
+    }
+    HorizontalLayout {
+        width: 100%;
+        height: 100%;
+        padding-left: Space.md;
+        padding-right: Space.md;
+        spacing: Space.md;
+        VerticalLayout {
+            alignment: center;
+            Dot { tint: Theme.sound-type(root.line.colour); }
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            preferred-width: 0px;
+            min-width: 0px;
+            alignment: center;
+            spacing: Space.xs;
+            HorizontalLayout {
+                spacing: Space.sm;
+                Text {
+                    text: root.line.title;
+                    color: Theme.text;
+                    font-size: Type.body;
+                    font-weight: 600;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                    preferred-width: 0px;
+                    min-width: 0px;
+                }
+                Text {
+                    text: root.line.from;
+                    color: Theme.muted;
+                    font-size: Type.meta;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                    preferred-width: 0px;
+                    min-width: 0px;
+                    vertical-alignment: center;
+                }
+            }
+            HorizontalLayout {
+                spacing: Space.sm;
+                Text {
+                    text: root.line.details;
+                    color: Theme.muted;
+                    font-size: Type.meta;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                    preferred-width: 0px;
+                    min-width: 0px;
+                }
+                if root.line.phrase != "": Text {
+                    text: root.line.phrase;
+                    color: Theme.accent;
+                    font-size: Type.meta;
+                }
+            }
+        }
+        Text {
+            width: 96px;
+            text: root.line.key;
+            color: Theme.text;
+            font-family: Theme.number-font;
+            font-size: Type.meta;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        Text {
+            width: 96px;
+            text: root.line.date;
+            color: Theme.muted;
+            font-family: Theme.number-font;
+            font-size: Type.meta;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// The picked part's notes: a line at each bar, each note a bar of the accent colour, as strong as it's played.
+component PianoRoll inherits Well {
+    height: 200px;
+    clip: true;
+    Rectangle {
+        x: 28px;
+        y: Space.sm;
+        width: parent.width - self.x - Space.sm;
+        height: parent.height - 2 * Space.sm;
+        for b in MidiData.roll-bars: Rectangle {
+            x: parent.width * b;
+            width: 1px;
+            background: Theme.edge;
+        }
+        for n in MidiData.roll: Rectangle {
+            x: parent.width * n.x;
+            y: parent.height * n.y;
+            width: max(2px, parent.width * n.w - 1px);
+            height: max(2px, parent.height * n.h - 1px);
+            border-radius: 1px;
+            background: Theme.accent;
+            opacity: n.strength;
+        }
+    }
+    Text {
+        x: Space.xs;
+        y: Space.xs;
+        text: MidiData.picked.roll-high;
+        color: Theme.faint;
+        font-family: Theme.number-font;
+        font-size: Type.tiny;
+    }
+    Text {
+        x: Space.xs;
+        y: parent.height - self.height - Space.xs;
+        text: MidiData.picked.roll-low;
+        color: Theme.faint;
+        font-family: Theme.number-font;
+        font-size: Type.tiny;
+    }
+}
+
+component PartPanel inherits SidePanel {
+    close => { MidiData.close-panel(); }
+    HorizontalLayout {
+        spacing: Space.sm;
+        alignment: start;
+        VerticalLayout {
+            alignment: center;
+            Dot { tint: Theme.sound-type(MidiData.picked.colour); }
+        }
+        Text {
+            text: MidiData.picked.kind;
+            color: Theme.sound-type(MidiData.picked.colour);
+            font-size: Type.meta;
+            font-weight: 600;
+        }
+        Text {
+            text: MidiData.picked.kind-why;
+            color: Theme.muted;
+            font-size: Type.meta;
+            overflow: elide;
+            horizontal-stretch: 1;
+            min-width: 0px;
+        }
+    }
+    Text {
+        text: MidiData.picked.title;
+        color: Theme.text;
+        font-size: Type.heading;
+        font-weight: 600;
+        wrap: word-wrap;
+        min-width: 0px;
+    }
+    Text {
+        text: MidiData.picked.from;
+        color: Theme.muted;
+        font-size: Type.meta;
+        wrap: word-wrap;
+        min-width: 0px;
+    }
+    Text {
+        text: MidiData.picked.path;
+        color: Theme.faint;
+        font-size: Type.meta;
+        wrap: word-wrap;
+        min-width: 0px;
+    }
+    PianoRoll { }
+    if MidiData.picked.roll-note != "": Text {
+        text: MidiData.picked.roll-note;
+        color: Theme.muted;
+        font-size: Type.meta;
+    }
+    CardActions {
+        actions: MidiData.actions;
+        chosen(id) => { MidiData.menu-chosen(id); }
+    }
+    VerticalLayout {
+        spacing: Space.xs;
+        Caps { text: "KEY"; }
+        HorizontalLayout {
+            spacing: Space.sm;
+            alignment: start;
+            Text {
+                text: MidiData.picked.key;
+                color: Theme.text;
+                font-size: Type.row-title;
+                font-weight: 600;
+            }
+            if MidiData.picked.key-sure != "": VerticalLayout {
+                alignment: end;
+                Text {
+                    text: MidiData.picked.key-sure;
+                    color: Theme.muted;
+                    font-family: Theme.number-font;
+                    font-size: Type.meta;
+                }
+            }
+        }
+        Text {
+            text: MidiData.picked.key-why;
+            color: Theme.muted;
+            font-size: Type.meta;
+            wrap: word-wrap;
+            min-width: 0px;
+        }
+        Text {
+            text: MidiData.picked.key-from;
+            color: Theme.faint;
+            font-size: Type.meta;
+            wrap: word-wrap;
+            min-width: 0px;
+        }
+        if MidiData.picked.old-key != "": Text {
+            text: MidiData.picked.old-key;
+            color: Theme.faint;
+            font-size: Type.meta;
+            wrap: word-wrap;
+            min-width: 0px;
+        }
+    }
+    HorizontalLayout {
+        spacing: Space.md;
+        for f in MidiData.facts: VerticalLayout {
+            spacing: Space.xs;
+            horizontal-stretch: 1;
+            Caps { text: f.name; }
+            Text {
+                text: f.value;
+                color: Theme.text;
+                font-family: Theme.number-font;
+                font-size: Type.meta;
+            }
+        }
+    }
+    if MidiData.picked.instrument != "": VerticalLayout {
+        spacing: Space.xs;
+        Caps { text: "INSTRUMENT"; }
+        Text {
+            text: MidiData.picked.instrument;
+            color: Theme.muted;
+            font-size: Type.meta;
+            wrap: word-wrap;
+            min-width: 0px;
+        }
+    }
+    if MidiData.picked.phrase != "": Text {
+        text: MidiData.picked.phrase;
+        color: Theme.accent;
+        font-size: Type.meta;
+    }
+    if MidiData.picked.others.length > 0: VerticalLayout {
+        spacing: Space.xs;
+        Caps { text: "THE SAME NOTES ARE IN"; }
+        for o in MidiData.picked.others: Text {
+            text: o;
+            color: Theme.muted;
+            font-size: Type.meta;
+            overflow: elide;
+            min-width: 0px;
+        }
+        if MidiData.picked.others-more != "": Text {
+            text: MidiData.picked.others-more;
+            color: Theme.faint;
+            font-size: Type.meta;
+        }
+    }
+    Rectangle { vertical-stretch: 1; }
+}
+
+export component MidiPage inherits Rectangle {
+    forward-focus: search-box;
+
+    VerticalLayout {
+        padding: Space.xl;
+        padding-bottom: Space.lg;
+        spacing: Space.md;
+        PageHeader {
+            title: "MIDI";
+            summary: MidiData.summary;
+            busy: MidiData.busy;
+            done: MidiData.done;
+        }
+        HorizontalLayout {
+            spacing: Space.sm;
+            vertical-stretch: 0;
+            search-box := SearchBox {
+                horizontal-stretch: 1;
+                min-width: 320px;
+                max-width: 480px;
+                hint: "Search MIDI: dark, Cm, trap, piano…";
+                text <=> MidiData.search;
+                edited(t) => { MidiData.search-edited(t); }
+                key(k) => {
+                    if (k == Key.Escape && MidiData.search != "") {
+                        MidiData.search = "";
+                        MidiData.search-edited("");
+                        return true;
+                    }
+                    if (k == Key.DownArrow) {
+                        keys.focus();
+                        MidiData.step(1);
+                        return true;
+                    }
+                    false
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                MenuChip {
+                    name: "From";
+                    value: MidiData.from;
+                    choices: MidiData.froms;
+                    picked(v) => { MidiData.pick("from", v); }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                MenuChip {
+                    name: "Key";
+                    value: MidiData.key;
+                    choices: MidiData.keys;
+                    picked(v) => { MidiData.pick("key", v); }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                MenuChip {
+                    name: "Order";
+                    value: MidiData.order;
+                    choices: MidiData.orders;
+                    has-any: false;
+                    picked(v) => { MidiData.pick("order", v); }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                StudioButton {
+                    horizontal-stretch: 0;
+                    text: "Shuffle";
+                    tip: "A random order: press again for another";
+                    clicked => { MidiData.shuffle(); }
+                }
+            }
+            Rectangle { horizontal-stretch: 1; }
+        }
+        HorizontalLayout {
+            spacing: Space.xs;
+            alignment: start;
+            vertical-stretch: 0;
+            for k[i] in MidiData.kinds: ToggleChip {
+                text: k.text;
+                on: k.on;
+                clicked => { MidiData.toggle-kind(i); }
+            }
+            if MidiData.any-kind: ToggleChip {
+                text: "Clear kinds";
+                on: false;
+                clicked => { MidiData.clear-kinds(); }
+            }
+        }
+        HorizontalLayout {
+            spacing: Space.sm;
+            vertical-stretch: 0;
+            height: 24px;
+            if MidiData.target != "": Rectangle {
+                width: target-row.preferred-width + 2 * Space.sm;
+                border-radius: 12px;
+                background: Theme.surface-raised;
+                border-width: 1px;
+                border-color: Theme.accent;
+                target-row := HorizontalLayout {
+                    padding-left: Space.sm;
+                    padding-right: Space.xs;
+                    spacing: Space.xs;
+                    Text {
+                        text: MidiData.target;
+                        color: Theme.text;
+                        font-size: Type.meta;
+                        vertical-alignment: center;
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        CloseButton { clicked => { MidiData.clear-target(); } }
+                    }
+                }
+            }
+            Text {
+                text: MidiData.result;
+                color: Theme.muted;
+                font-size: Type.meta;
+                vertical-alignment: center;
+                overflow: elide;
+                horizontal-stretch: 1;
+            }
+        }
+        area := Rectangle {
+            vertical-stretch: 1;
+            property <length> list-width: MidiData.panel-shown
+                ? max(380px, self.width - MidiData.panel-width - divider.width)
+                : self.width;
+            property <length> years-width: MidiData.years.length > 1 && MidiData.empty-title == "" ? 56px : 0px;
+            if area.years-width > 0: YearRange {
+                x: area.list-width - area.years-width;
+                y: 0;
+                height: area.height;
+                years: MidiData.years;
+                picked-from: MidiData.years-from;
+                picked-to: MidiData.years-to;
+                picked(a, b) => { MidiData.years-picked(a, b); }
+                cleared => { MidiData.years-cleared(); }
+            }
+            keys := FocusScope {
+                x: 0;
+                width: area.list-width - area.years-width;
+                key-pressed(event) => {
+                    if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
+                        return reject;
+                    }
+                    if (event.text == Key.UpArrow) {
+                        MidiData.step(-1);
+                        return accept;
+                    }
+                    if (event.text == Key.DownArrow) {
+                        MidiData.step(1);
+                        return accept;
+                    }
+                    reject
+                }
+                Well {
+                    if MidiData.empty-title != "" || MidiData.shown == 0: EmptyState {
+                        title: MidiData.empty-title != "" ? MidiData.empty-title : "No parts match";
+                        text: MidiData.empty-title != "" ? MidiData.empty-text : "Try fewer filters or other words.";
+                        action: MidiData.empty-title == "" && MidiData.any-filter ? "Clear the filters" : "";
+                        act => { MidiData.clear(); }
+                    }
+                    if MidiData.empty-title == "" && MidiData.shown > 0: VerticalLayout {
+                        ListHeading { }
+                        lines := ListView {
+                            property <int> show-ask: MidiData.show-ask;
+                            changed show-ask => {
+                                if (MidiData.show-row * 52px < -self.content-y
+                                    || (MidiData.show-row + 1) * 52px > -self.content-y + self.visible-height) {
+                                    self.content-y = -clamp(MidiData.show-row * 52px - self.visible-height / 3, 0px,
+                                        max(0px, self.content-height - self.visible-height));
+                                }
+                            }
+                            for l in MidiData.lines: MidiLineView {
+                                line: l;
+                                chosen => { keys.focus(); }
+                                right-clicked(x, y) => {
+                                    keys.focus();
+                                    menu.open-at(x, y);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            divider := PanelDivider {
+                visible: MidiData.panel-shown;
+                x: area.list-width;
+                height: parent.height;
+                panel-width: MidiData.panel-width;
+                room: area.width;
+                resizing(w) => { MidiData.panel-width = w; }
+                resized(w) => { MidiData.panel-resized(w); }
+            }
+            if MidiData.panel-shown: PartPanel {
+                x: area.list-width + divider.width;
+                width: area.width - self.x;
+                height: parent.height;
+            }
+            menu := RightClickMenu {
+                items: MidiData.menu;
+                chosen(id) => { MidiData.menu-chosen(id); }
+            }
+        }
+    }
+}

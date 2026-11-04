@@ -9,7 +9,8 @@ publish.workspace = true
 workspace = true
 
 [features]
-# The key finder's hand cases (`keyfind::cases`), for `theorybench keyfit` to check the weights it fits.
+# The hand cases of the key finder (`keyfind::cases`) and the chord reader (`chordread::cases`), for `theorybench
+# keyfit` and `chordfit` to check (and learn from) the weights they fit.
 hand-cases = []
 
 [dependencies]

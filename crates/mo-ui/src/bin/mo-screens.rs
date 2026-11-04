@@ -65,6 +65,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Once to lay the page out (the tiles' width tells the page how many fit in a row), then for real.
     capture(&window);
 
+    // The MIDI page, from made-up parts with their notes, worked out in place.
+    mo_ui::midi::work_here();
+    mo_ui::midi::connect(&app, out.join("no library.db"), feed.clone(), &Shortcuts::default());
+    mo_ui::midi::show(&app, Ok(mo_ui::midi::sample()));
+    // Settings, from made-up settings: nothing is read from this computer or written.
+    mo_ui::settings::connect(
+        &app,
+        mo_ui::settings::Setup {
+            settings: mo_app::app_settings::AppSettings::default(),
+            folder: out.join("no settings"),
+            library: out.join("no library.db"),
+            running_pace: mo_app::background::Pace::Fast,
+            live: false,
+            writable: false,
+            feed: feed.clone(),
+        },
+    );
     // The Space page, from made-up drives: it only reads the real ones when it's shown in the app.
     mo_ui::space::connect(&app, out.join("no library.db"), feed.clone(), &Shortcuts::default());
     mo_ui::space::show_sample(&app, sample_drives(), sample_app_files(), "");
@@ -74,6 +91,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         app.set_place(place.index() as i32);
         shots.push((format!("{}-graphite.png", slug(place.name())), capture(&window)));
     }
+    // The MIDI page with a part picked: its card, piano roll and key; then parts shaped like it.
+    app.set_place(Place::Midi.index() as i32);
+    mo_ui::midi::pick_row(&app, 0);
+    shots.push(("midi-picked.png".into(), capture(&window)));
+    mo_ui::midi::run_action(&app, "midi.moreLike");
+    shots.push(("midi-more-like.png".into(), capture(&window)));
+    mo_ui::midi::run_action(&app, "midi.back");
+
     // The Backup page, filled with made-up folders.
     app.set_place(Place::Backup.index() as i32);
     mo_ui::backup::show_lines(&app, mo_ui::backup::sample_lines());
@@ -106,6 +131,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     shots.push(("backup-gone-open.png".into(), capture(&window)));
     app.global::<mo_ui::BackupData>().set_gone_open(false);
     mo_ui::backup::show_gone(&app, &mo_app::backup_gone::Warning::default());
+    settings_shots(&app, &window, &graphite, &mut shots);
     // Space with the App files card open: what each part of the app's folder takes, and C: nearly full.
     app.set_place(Place::Space.index() as i32);
     mo_ui::space::show_sample(&app, sample_drives(), sample_app_files(), mo_app::space::APP_FILES);
@@ -131,6 +157,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for tab in [Tab::Overview, Tab::Plugins, Tab::Saves] {
         mo_ui::songs::show_picked(&app, 0, sample_detail(), tab);
         mo_ui::arrangement::show_preview(&app, mo_ui::arrangement::sample_preview());
+        mo_ui::arrangement::show_peaks(&app, mo_ui::arrangement::sample_peaks());
         shots.push((format!("song-panel-{}.png", slug(tab.name())), capture(&window)));
     }
     // The arrangement: the mouse on a clip, zoomed in about the mouse, the Bitwig view, and in a light theme.
@@ -146,6 +173,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     shots.push(("arrangement-bitwig-view.png".into(), capture(&window)));
     mo_ui::apply_look(&app, &Look::from_settings(Some("Paper"), None));
     mo_ui::arrangement::show_preview(&app, mo_ui::arrangement::sample_preview());
+    mo_ui::arrangement::show_peaks(&app, mo_ui::arrangement::sample_peaks());
     shots.push(("arrangement-light.png".into(), capture(&window)));
     mo_ui::apply_look(&app, &graphite);
     // A song with things to look at, its Health strip open.
@@ -181,6 +209,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Tooltips: the mouse resting on a rail line, the song panel's Show in folder button and a song's date.
     mo_ui::songs::show_picked(&app, 0, sample_detail(), Tab::Overview);
     mo_ui::arrangement::show_preview(&app, mo_ui::arrangement::sample_preview());
+    mo_ui::arrangement::show_peaks(&app, mo_ui::arrangement::sample_peaks());
     for (name, x, y) in [
         ("tip-rail.png", 60.0, 125.0),
         ("tip-button.png", SHOW_BUTTON.0, SHOW_BUTTON.1),
@@ -207,6 +236,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     hover(&window, -1.0, -1.0);
     app.global::<mo_ui::SongsData>().invoke_close_panel();
 
+    finder_shots(&app, &window, &mut shots);
+
     app.set_sheet_open(true);
     shots.push(("key-sheet.png".into(), capture(&window)));
     app.set_sheet_open(false);
@@ -224,6 +255,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("{}", path.display());
     }
     Ok(())
+}
+
+/// Ctrl+K: opened from the Songs page with nothing typed, a search that finds a song and a sound, only the sounds
+/// (Tab), and an action with its key.
+fn finder_shots(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, shots: &mut Vec<(String, Vec<u8>)>) {
+    use mo_ui::finder;
+    finder::search_here();
+    let songs = mo_app::finder::songs(&sample_songs(), chrono::Local::now().naive_local());
+    finder::add_source(app, "songs", std::sync::Arc::new(songs));
+    app.set_place(Place::Songs.index() as i32);
+    let data = app.global::<mo_ui::FinderData>();
+    let typed = |text: &str| {
+        data.set_query(text.into());
+        data.invoke_edited(text.into());
+    };
+    finder::toggle(app);
+    shots.push(("finder-open.png".into(), capture(window)));
+    typed("glass");
+    shots.push(("finder-search.png".into(), capture(window)));
+    typed("");
+    data.invoke_key("\t".into(), false, false);
+    data.invoke_key("\t".into(), false, false);
+    data.invoke_key(char::from(slint::platform::Key::DownArrow).to_string().into(), false, false);
+    shots.push(("finder-sounds.png".into(), capture(window)));
+    data.invoke_key("\t".into(), false, false);
+    data.invoke_key("\t".into(), false, false);
+    data.invoke_key("\t".into(), false, false);
+    typed("full");
+    shots.push(("finder-action.png".into(), capture(window)));
+    finder::close(app);
 }
 
 /// The Sounds page: a sound picked and playing in its panel, a filter on, the List and History views, and the tiles in
@@ -618,6 +679,86 @@ fn hover(window: &MinimalSoftwareWindow, x: f32, y: f32) {
         slint::platform::WindowEvent::PointerMoved { position }
     };
     window.dispatch_event(event);
+}
+
+/// Settings' tabs, from made-up folders and sound outputs: General in Graphite and Paper, then smaller, then Folders
+/// and Developer.
+fn settings_shots(
+    app: &mo_ui::AppWindow,
+    window: &MinimalSoftwareWindow,
+    graphite: &Look,
+    shots: &mut Vec<(String, Vec<u8>)>,
+) {
+    app.set_place(Place::Settings.index() as i32);
+    let outputs = ["Speakers (Realtek)".to_owned(), "Focusrite USB".to_owned()];
+    mo_ui::settings::show_outputs(app, &outputs, "Sounds play through Speakers (Realtek).");
+    let data = app.global::<mo_ui::SettingsData>();
+    data.invoke_tab_picked(0);
+    capture(window);
+    shots.push(("settings-general.png".into(), capture(window)));
+    scroll(window, 900.0, 500.0, -PAGE_DOWN);
+    shots.push(("settings-general-lower.png".into(), capture(window)));
+    scroll(window, 900.0, 500.0, -PAGE_DOWN);
+    shots.push(("settings-about.png".into(), capture(window)));
+    scroll(window, 900.0, 500.0, 2.0 * PAGE_DOWN);
+    data.invoke_theme_picked(4);
+    data.invoke_accent_picked(2);
+    shots.push(("settings-general-paper.png".into(), capture(window)));
+    data.invoke_back_to_normal();
+    mo_ui::apply_look(app, graphite);
+    data.invoke_size_picked(1);
+    capture(window);
+    shots.push(("settings-general-80.png".into(), capture(window)));
+    data.invoke_size_picked(3);
+    let moved = mo_space::folder_move::MovedFolder {
+        from: "C:\\Users\\Solomon\\Documents\\Native Instruments".into(),
+        to: "I:\\Plugin data\\Native Instruments".into(),
+        old_copy: String::new(),
+        bytes: 0,
+        moved: String::new(),
+        key: String::new(),
+        kind: 2,
+        shared_with: Vec::new(),
+    };
+    mo_ui::settings::show_folders(
+        app,
+        Ok(mo_app::settings::folder_groups(
+            vec!["I:\\Fl Studio Data\\FL Studio\\Projects".into(), "K:\\Bitwig Studio\\Projects".into()],
+            vec!["I:\\Samples".into(), "G:\\Splice".into()],
+            vec!["L:\\New Midi".into()],
+            vec![],
+            vec!["C:\\Program Files\\Common Files\\VST3".into(), "C:\\Program Files\\Common Files\\CLAP".into()],
+            &[moved],
+        )),
+    );
+    data.invoke_tab_picked(1);
+    capture(window);
+    shots.push(("settings-folders.png".into(), capture(window)));
+    data.invoke_tab_picked(2);
+    mo_ui::settings::show_bitwig(
+        app,
+        mo_app::settings::bitwig_status(&Ok(mo_dawlink::bitwig::Hello {
+            link: 3,
+            product: "Bitwig Studio".into(),
+            version: "6.1.5".into(),
+            project: "Night drive".into(),
+            modified: true,
+            changes: true,
+            runtime: "java".into(),
+            extension: "3.18".into(),
+            loopback: Some(true),
+            ..Default::default()
+        })),
+    );
+    capture(window);
+    shots.push(("settings-daws.png".into(), capture(window)));
+    data.invoke_tab_picked(3);
+    capture(window);
+    shots.push(("settings-shortcuts.png".into(), capture(window)));
+    data.invoke_tab_picked(4);
+    capture(window);
+    shots.push(("settings-developer.png".into(), capture(window)));
+    data.invoke_tab_picked(0);
 }
 
 /// The mouse wheel turned over a point: a negative `dy` moves the page up, to show what's below.

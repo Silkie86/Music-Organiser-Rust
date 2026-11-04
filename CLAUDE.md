@@ -13,6 +13,8 @@ This repo is the Rust rebuild of the C# app. The plan, the inventory of today's 
 - **Layout (spec section 12):** one Cargo workspace, `crates/mo-*` (formats, library, space, backup, work, audio, sounds, harmony,
   midi, playground, dawlink, convert, app, ui) and `tools/` (formatlab, theorybench). UI is Slint; screen logic lives in
   `mo-app` so it can be tested without a window.
+- **`vendor/femtovg`:** a patched copy of Slint's drawing library (it rebuilt its graphics card steps every frame).
+  `vendor/femtovg/PATCHED.md` says what changed and when to delete it. Never edit it for anything else.
 
 ## Rules carried over (spec section 14)
 

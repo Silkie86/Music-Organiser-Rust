@@ -10,6 +10,8 @@ workspace = true
 
 [dependencies]
 chrono.workspace = true
+# Half-precision numbers: CLAP's fingerprints are held at half size (Solomon, 2026-11-03).
+half = "2.7"
 # Without playing sounds: reading and analysing them needs no sound output.
 mo-audio = { path = "../mo-audio", default-features = false }
 mo-formats = { path = "../mo-formats" }
