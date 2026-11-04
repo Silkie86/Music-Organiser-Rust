@@ -252,13 +252,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // The song panel, on the first song, on Overview and on Plugins.
     for tab in [Tab::Overview, Tab::Plugins, Tab::Saves] {
-        mo_ui::songs::show_picked(&app, 0, sample_detail(), tab);
-        mo_ui::arrangement::show_preview(&app, mo_ui::arrangement::sample_preview());
-        mo_ui::arrangement::show_peaks(&app, mo_ui::arrangement::sample_peaks());
+        show_song_panel(&app, 0, tab);
         shots.push((format!("song-panel-{}.png", slug(tab.name())), capture(&window)));
     }
-    // Saves in the narrowest window: each line's buttons only show with room for them and the save's name.
-    save_narrow(&window, &out, "song-panel-saves-narrow.png")?;
+    // Each tab in the narrowest window, where the panel is at its narrowest: its rows wrap, so nothing runs past its
+    // edge. On Saves, each line's buttons only show with room for them and the save's name.
+    for tab in Tab::ALL {
+        show_song_panel(&app, 0, tab);
+        save_narrow(&window, &out, &format!("song-panel-{}-narrow.png", slug(tab.name())))?;
+    }
+    // There the panel is taller than the window, so it scrolls: the Overview turned down to its arrangement, which
+    // keeps the room it needs.
+    show_song_panel(&app, 0, Tab::Overview);
+    save_narrow_scrolled(&window, &out, "song-panel-overview-narrow-down.png", Some(NARROW_PANEL_WHEEL))?;
+    opens_at_top(&app, &window)?;
     // The arrangement: the mouse on a clip, zoomed in about the mouse, the Bitwig view, and in a light theme.
     app.global::<mo_ui::SongsData>().set_tab(Tab::Overview.index() as i32);
     let arrangement = app.global::<mo_ui::ArrangementData>();
@@ -326,9 +333,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.set_put_away(0);
 
     // Tooltips: the mouse resting on a rail line, the song panel's Show in folder button and a song's date.
-    mo_ui::songs::show_picked(&app, 0, sample_detail(), Tab::Overview);
-    mo_ui::arrangement::show_preview(&app, mo_ui::arrangement::sample_preview());
-    mo_ui::arrangement::show_peaks(&app, mo_ui::arrangement::sample_peaks());
+    show_song_panel(&app, 0, Tab::Overview);
     for (name, x, y) in [
         ("tip-rail.png", 60.0, 125.0),
         ("tip-button.png", SHOW_BUTTON.0, SHOW_BUTTON.1),
@@ -1146,6 +1151,10 @@ const REMOVE_OLDER_BUTTON: (f32, f32) = (1127.0, 820.0);
 /// The Presets page's Plugin chip: the first in its filter row, so the other chips' words don't move it.
 const PLUGIN_CHIP: (f32, f32) = (262.0, 156.0);
 const PAGE_DOWN: f32 = 300.0;
+
+/// Where the wheel turns the song panel down in the narrowest window, and by how much: on its status line, which
+/// doesn't scroll on its own, as the lists and the arrangement in it do.
+const NARROW_PANEL_WHEEL: (f32, f32, f32) = (760.0, 404.0, -2.0 * PAGE_DOWN);
 const OLDER_BUTTON: (f32, f32) = (1005.0, 368.0);
 /// The Lock chip on the kit's second pad (Snare).
 const SNARE_LOCK: (f32, f32) = (846.0, 333.0);
@@ -1312,14 +1321,75 @@ fn with_card(mut pixels: Vec<u8>, payload: &mo_app::drag_out::Payload, look: &Lo
     pixels
 }
 
+/// The song panel on the song at `row` of the sample library, on `tab`, with the sample arrangement in it.
+fn show_song_panel(app: &mo_ui::AppWindow, row: usize, tab: Tab) {
+    mo_ui::songs::show_picked(app, row, sample_detail(), tab);
+    mo_ui::arrangement::show_preview(app, mo_ui::arrangement::sample_preview());
+    mo_ui::arrangement::show_peaks(app, mo_ui::arrangement::sample_peaks());
+}
+
+/// In the narrowest window, another song picked while the song panel is turned down opens at its top, at the new
+/// song's name: the wheel turned back up there moves nothing. The first song is picked again after, as it was.
+fn opens_at_top(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> Result<(), Box<dyn std::error::Error>> {
+    let (x, y, turn) = NARROW_PANEL_WHEEL;
+    window.set_size(PhysicalSize::new(NARROW, HEIGHT));
+    let top = capture(window);
+    scroll(window, x, y, turn);
+    let turned = capture(window);
+    show_song_panel(app, 1, Tab::Overview);
+    let picked = capture(window);
+    scroll(window, x, y, -turn);
+    let up = capture(window);
+    // The mouse moved away, as the wheel left it on whatever is there now (a button, whose tip would stay up).
+    hover(window, -1.0, -1.0);
+    show_song_panel(app, 0, Tab::Overview);
+    window.set_size(PhysicalSize::new(WIDTH, HEIGHT));
+    if turned == top {
+        return Err(
+            format!("song panel: the wheel at {x}, {y} moved nothing; does it still land on what scrolls?").into()
+        );
+    }
+    if up != picked {
+        return Err(
+            "song panel: another song picked while it was turned down kept its place; it should open at its top".into(),
+        );
+    }
+    Ok(())
+}
+
 /// The window at the narrowest the app allows, saved at that width as `name` in `out`; the window is set back after.
 fn save_narrow(
     window: &MinimalSoftwareWindow,
     out: &std::path::Path,
     name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    save_narrow_scrolled(window, out, name, None)
+}
+
+/// [`save_narrow`], with the mouse wheel first turned at a point of the narrow window when `wheel` says where and by
+/// how much (x, y, turn; a negative turn shows what's below), and turned back after, the mouse then moved away. It
+/// stops with an error if the turn moves nothing, so a point that no longer lands on what scrolls can't pass unseen.
+fn save_narrow_scrolled(
+    window: &MinimalSoftwareWindow,
+    out: &std::path::Path,
+    name: &str,
+    wheel: Option<(f32, f32, f32)>,
+) -> Result<(), Box<dyn std::error::Error>> {
     window.set_size(PhysicalSize::new(NARROW, HEIGHT));
-    let narrow = capture(window);
+    let mut narrow = capture(window);
+    if let Some((x, y, turn)) = wheel {
+        scroll(window, x, y, turn);
+        let turned = capture(window);
+        scroll(window, x, y, -turn);
+        hover(window, -1.0, -1.0);
+        if turned == narrow {
+            window.set_size(PhysicalSize::new(WIDTH, HEIGHT));
+            return Err(
+                format!("{name}: the wheel at {x}, {y} moved nothing; does it still land on what scrolls?").into()
+            );
+        }
+        narrow = turned;
+    }
     window.set_size(PhysicalSize::new(WIDTH, HEIGHT));
     let row = WIDTH as usize * 3;
     let narrow: Vec<u8> = narrow.chunks(row).flat_map(|line| &line[..NARROW as usize * 3]).copied().collect();

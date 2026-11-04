@@ -1081,13 +1081,19 @@ export component Heart inherits Path {
     stroke-width: 0.8px;
 }
 
-// A row of tabs over a panel: the picked one is underlined in the accent colour.
+// A row of tabs over a panel: the picked one is underlined in the accent colour. Where there isn't room for them all
+// on one line (a narrow panel), they wrap onto the next, so every tab stays in sight.
 export component TabBar inherits Rectangle {
     in property <[string]> tabs;
     in-out property <int> current;
-    // Where the picked tab is, which each tab reports, so its underline slides from tab to tab.
+    // False keeps them on one line, beside something that should shorten first (a note that can be cut short).
+    in property <bool> wrap: true;
+    // Where the picked tab is, which each tab reports, so its underline slides from tab to tab, and line to line.
     property <length> lit-x;
+    property <length> lit-y;
     property <length> lit-width;
+    // Each tab's height, which the underline sits at the foot of.
+    property <length> tab-height: 36px;
     // Off until the first frame is drawn, so a page opening on its third view doesn't slide there from the left.
     property <bool> ready;
     Timer {
@@ -1095,25 +1101,33 @@ export component TabBar inherits Rectangle {
         running: !root.ready;
         triggered => { root.ready = true; }
     }
-    width: row.preferred-width;
-    height: 36px;
-    row := HorizontalLayout {
+    // As wide as its row lets it be (never narrower than its widest tab), and as tall as its lines, never taller.
+    min-width: row.min-width;
+    preferred-width: row.preferred-width;
+    min-height: row.min-height;
+    preferred-height: row.preferred-height;
+    max-height: row.preferred-height;
+    vertical-stretch: 0;
+    row := FlexboxLayout {
+        // Set here, as Slint reads a flexbox's `flex-wrap` only where the flexbox is made, not where it's used.
+        flex-wrap: root.wrap ? FlexboxLayoutWrap.wrap : FlexboxLayoutWrap.no-wrap;
         spacing: Space.xs;
-        alignment: start;
         for name[i] in root.tabs: Rectangle {
             property <bool> is-current: i == root.current;
             width: label.preferred-width + 20px;
-            height: 36px;
+            height: root.tab-height;
             border-radius: Theme.radius;
             background: touch.has-hover && !self.is-current ? Theme.hover : transparent;
             animate background { duration: Motion.tap; }
             init => { self.report(); }
             changed is-current => { self.report(); }
             changed x => { self.report(); }
+            changed y => { self.report(); }
             changed width => { self.report(); }
             function report() {
                 if (self.is-current) {
                     root.lit-x = self.x;
+                    root.lit-y = self.y;
                     root.lit-width = self.width;
                 }
             }
@@ -1129,14 +1143,14 @@ export component TabBar inherits Rectangle {
         }
     }
     Rectangle {
-        y: root.height - 2px;
+        y: root.lit-y + root.tab-height - 2px;
         height: 2px;
         x: root.lit-x + 8px;
         width: max(0px, root.lit-width - 16px);
         visible: root.current >= 0 && root.current < root.tabs.length;
         border-radius: 1px;
         background: Theme.accent;
-        animate x, width { duration: root.ready ? Motion.move : 0ms; easing: ease-out; }
+        animate x, y, width { duration: root.ready ? Motion.move : 0ms; easing: ease-out; }
     }
 }
 

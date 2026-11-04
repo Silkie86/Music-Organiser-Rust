@@ -728,7 +728,9 @@ export component SettingsPage inherits Rectangle {
         }
         HorizontalLayout {
             spacing: Space.lg;
+            // On one line, as there's always room for them: in a narrow window the note beside them is cut short.
             TabBar {
+                wrap: false;
                 tabs: SettingsData.tabs;
                 current <=> SettingsData.tab;
                 changed current => { SettingsData.tab-picked(self.current); }
