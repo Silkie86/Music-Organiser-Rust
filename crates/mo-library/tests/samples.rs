@@ -19,6 +19,11 @@ fn finds_samples_beside_in_the_tree_and_in_the_daws_folders() {
         "Content/Drums/snare.wav",
         "Content/Other/hat.wav",
         "Content/Projects/Other Song/snare2.wav",
+        "Content/Drums/clap.wav",
+        "Content/Other/clap.wav",
+        "Home/Sounds/vox8.wav",
+        "Home/AppData/Local/Some App/vox9.wav",
+        "Home/node_modules/pack/vox9.wav",
     ] {
         let p = dir.join(f);
         fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -38,6 +43,13 @@ fn finds_samples_beside_in_the_tree_and_in_the_daws_folders() {
     assert!(locator.found("/old/Drums/snare.wav", &project));
     assert!(!locator.found("/old/Drums/hat.wav", &project));
     assert!(!locator.found("/old/Other Song/snare2.wav", &project));
+    // Saved as a bare file name: the name alone counts in the DAW's folders only when one file there has it.
+    assert!(locator.found("hat.wav", &project));
+    assert!(!locator.found("clap.wav", &project));
+    // A sketch saved in the profile folder: its tree is looked through, but not programs' own folders in it.
+    let sketch = dir.join("Home/beat.flp").to_str().unwrap().to_owned();
+    assert!(locator.found("/old/vox8.wav", &sketch));
+    assert!(!locator.found("/old/vox9.wav", &sketch));
     // FL Studio's own content always counts.
     assert!(locator.found("%FLStudioFactoryData%/Data/Patches/Packs/x.wav", &project));
     assert!(!locator.found("/old/missing.wav", &project));

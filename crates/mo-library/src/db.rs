@@ -154,7 +154,10 @@ impl Library {
         drop(copy);
         if let Err(e) = done {
             // A half-made copy holds the library's names and paths: it doesn't stay.
-            for f in [to.to_owned(), to.with_extension("db-journal")] {
+            // SQLite names the journal after the whole file name ("x.sqlite-journal"), whatever its extension.
+            let mut journal = to.as_os_str().to_owned();
+            journal.push("-journal");
+            for f in [to.to_owned(), PathBuf::from(journal)] {
                 let _ = std::fs::remove_file(f);
             }
             return Err(error(e.to_string()));
@@ -177,7 +180,7 @@ impl Library {
         // A column the library doesn't have reads as nothing, so its files are read again.
         let or_zero = |c: &str| if has(c) { format!("COALESCE({c}, 0)") } else { "0".to_owned() };
         let reread = if has("detected_key") && has("note_count") && has("file_missing") {
-            "(detected_key IS NULL OR note_count IS NULL OR file_missing = 1)"
+            "(detected_key IS NULL OR note_count IS NULL OR COALESCE(file_missing, 0) = 1)"
         } else {
             "1"
         };
@@ -261,7 +264,7 @@ impl Library {
         let Some(mut d) = row else { return Ok(None) };
         d.save = save;
         if self.has("plugins") {
-            let mut st = self.conn.prepare("SELECT * FROM plugins WHERE project_id = ?1 ORDER BY kind, name")?;
+            let mut st = self.conn.prepare("SELECT * FROM plugins WHERE project_id = ?1")?;
             d.plugins = st
                 .query_map([id], |r| {
                     Ok(ProjectPlugin {
@@ -276,7 +279,7 @@ impl Library {
                 .collect::<Result<_, _>>()?;
         }
         if self.has("samples") {
-            let mut st = self.conn.prepare("SELECT * FROM samples WHERE project_id = ?1 ORDER BY found, path")?;
+            let mut st = self.conn.prepare("SELECT * FROM samples WHERE project_id = ?1")?;
             d.samples = st
                 .query_map([id], |r| {
                     Ok(ProjectSample {
@@ -288,6 +291,10 @@ impl Library {
                 .collect::<Result<_, _>>()?;
         }
         drop(read);
+        // In the order a save read live gives them (read.rs), so the panel doesn't change order once the watch reads
+        // the save again: instruments first then the rest by name, missing samples first then by path, ignoring case.
+        d.plugins.sort_by_cached_key(|p| (p.kind != PluginKind::Instrument, case::to_lower(&p.name)));
+        d.samples.sort_by_cached_key(|s| (s.found, case::to_lower(&s.path)));
         Ok(Some(d))
     }
 
@@ -721,5 +728,55 @@ impl<'de> serde::Deserialize<'de> for InOrder {
             }
         }
         d.deserialize_map(Pairs)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    #[test]
+    fn the_librarys_own_connection_refuses_every_write() {
+        // Under a fixed name in the build's own folder, never a random temp one.
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/mo-library-db-unit");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("library.db");
+        let made = Connection::open(&path).unwrap();
+        made.execute_batch("CREATE TABLE projects (id INTEGER PRIMARY KEY, path TEXT, rating INTEGER); INSERT INTO projects (path, rating) VALUES ('K:/a.flp', 1);").unwrap();
+        drop(made);
+        let before = std::fs::read(&path).unwrap();
+
+        let lib = Library::open_read_only(&path).unwrap();
+        let query_only: i64 = lib.conn.query_row("PRAGMA query_only", [], |r| r.get(0)).unwrap();
+        assert_eq!(query_only, 1);
+        assert!(lib.conn.execute("UPDATE projects SET rating = 5", []).is_err());
+        assert!(lib.conn.execute_batch("CREATE TABLE x (y)").is_err());
+        // Even with query_only switched off again, the file was opened read-only.
+        lib.conn.pragma_update(None, "query_only", false).unwrap();
+        assert!(lib.conn.execute("UPDATE projects SET rating = 5", []).is_err());
+        drop(lib);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn a_save_with_no_missing_flag_is_known_as_not_missing() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/mo-library-db-null-missing");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("library.db");
+        let made = Connection::open(&path).unwrap();
+        made.execute_batch(
+            "CREATE TABLE projects (id INTEGER PRIMARY KEY, path TEXT, size INTEGER, mtime INTEGER, \
+             detected_key TEXT, note_count INTEGER, file_missing INTEGER DEFAULT 0);
+             INSERT INTO projects (path, size, mtime, detected_key, note_count, file_missing)
+             VALUES ('K:/a.flp', 1, 2, 'C major', 10, NULL), ('K:/b.flp', 1, 2, 'C major', 10, 1);",
+        )
+        .unwrap();
+        drop(made);
+        let known = Library::open_read_only(&path).unwrap().known_files().unwrap();
+        let flags: Vec<(bool, bool)> = known.iter().map(|k| (k.missing, k.reread)).collect();
+        assert_eq!(flags, [(false, false), (true, true)]);
     }
 }

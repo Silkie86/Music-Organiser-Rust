@@ -38,6 +38,56 @@ const MOVED_IN_LIMIT: usize = 5000;
 /// past that the watched folder is walked instead, by the scan's own threads.
 const MOVED_IN_LOOK: usize = 20_000;
 
+/// File types that are often there in music folders and are never folders: a path of one of these that went without
+/// the system saying what it was is taken for a file. Any other name that went ("Beat.v2", "Mix.old") may have been a
+/// folder, and its watched folder is walked again (Windows never says which, so a folder can only be told by its name).
+const FILE_TYPES: [&str; 44] = [
+    "7z",
+    "aif",
+    "aifc",
+    "aiff",
+    "als",
+    "asd",
+    "bak",
+    "bwclip",
+    "bwpreset",
+    "cfg",
+    "dat",
+    "db",
+    "dll",
+    "exe",
+    "fst",
+    "fxb",
+    "fxp",
+    "gif",
+    "ini",
+    "jpeg",
+    "jpg",
+    "json",
+    "lnk",
+    "log",
+    "m4a",
+    "mid",
+    "midi",
+    "mp3",
+    "multisample",
+    "nki",
+    "nmsv",
+    "ogg",
+    "part",
+    "pdf",
+    "png",
+    "rar",
+    "reapeaks",
+    "sf2",
+    "sfz",
+    "tmp",
+    "txt",
+    "vstpreset",
+    "wav",
+    "zip",
+];
+
 /// How long changes wait at most while the folders stay busy (a long recording, a big unzip): a save made meanwhile
 /// is reported after this, not only once everything stops.
 const LONGEST_WAIT: Duration = Duration::from_secs(10);
@@ -60,16 +110,27 @@ impl FolderWatch {
         report: impl FnMut(Changes) + Send + 'static,
     ) -> notify::Result<FolderWatch> {
         let (tx, rx) = mpsc::channel::<notify::Result<Event>>();
-        let mut roots: Vec<String> = Vec::new();
-        for f in folders.iter().filter(|f| Path::new(f.as_str()).is_dir()) {
-            // The same folder written twice, or one inside another, is watched once, as part of the outer one.
-            let key = path_key(f);
-            if !folders.iter().any(|o| o != f && key_inside(&key, &path_key(o)) && path_key(o) != key)
-                && !roots.iter().any(|r| path_key(r) == key)
-            {
-                roots.push(f.clone());
+        // An empty entry names no folder (as a key it would be "/", with every other folder inside it).
+        let folders: Vec<&String> =
+            folders.iter().filter(|f| !f.trim().is_empty() && Path::new(f.as_str()).is_dir()).collect();
+        // Every folder, once, to judge the files in it by: a folder inside another is still a root of its own, so a
+        // save in K:\Music\Old\Backup (a root, inside the Backup folder K:\Music's walk skips) counts, as the scan
+        // walks it on its own.
+        let mut all: Vec<String> = Vec::new();
+        for f in &folders {
+            if !all.iter().any(|r| path_key(r) == path_key(f)) {
+                all.push((*f).clone());
             }
         }
+        // The same folder written twice, or one inside another, is watched once, as part of the outer one.
+        let roots: Vec<String> = all
+            .iter()
+            .filter(|f| {
+                let key = path_key(f);
+                !all.iter().any(|o| o != *f && path_key(o) != key && key_inside(&key, &path_key(o)))
+            })
+            .cloned()
+            .collect();
         // One watcher for every folder; each event is told apart by the folder it's inside.
         let mut watcher = notify::recommended_watcher(move |e: notify::Result<Event>| {
             let _ = tx.send(e);
@@ -81,7 +142,10 @@ impl FolderWatch {
             }
         }
         let count = watched.len();
-        let gather = Gather::new(watched, wanted);
+        // The inner folders of a folder that couldn't be watched aren't heard about either.
+        let judged: Vec<String> =
+            all.into_iter().filter(|r| watched.iter().any(|w| key_inside(&path_key(r), &path_key(w)))).collect();
+        let gather = Gather::new(judged, watched, wanted);
         thread::Builder::new()
             .name("Folder watch".into())
             .spawn(move || {
@@ -122,20 +186,27 @@ impl Pending {
 }
 
 struct Gather {
+    /// Every folder files are judged by (the scan's roots, inner ones too).
     roots: Vec<String>,
+    /// The folders actually watched (the outermost): all walked again when the system loses track without saying
+    /// where.
+    watched: Vec<String>,
     /// Each root as a [`path_key`], and where it really is (a Mac names `/var/…` as `/private/var/…`).
     keys: Vec<(String, Option<String>)>,
     wanted: fn(&str) -> bool,
     changes: Pending,
+    /// Whether the event being taken in touched a file that matters, new or already waiting (a DAW writing one save
+    /// in several steps), or a folder to walk: the quiet wait then starts again.
+    touched: bool,
 }
 
 impl Gather {
-    fn new(roots: Vec<String>, wanted: fn(&str) -> bool) -> Gather {
+    fn new(roots: Vec<String>, watched: Vec<String>, wanted: fn(&str) -> bool) -> Gather {
         let keys = roots
             .iter()
             .map(|r| (path_key(r), fs::canonicalize(r).ok().and_then(|c| c.to_str().map(path_key))))
             .collect();
-        Gather { roots, keys, wanted, changes: Pending::default() }
+        Gather { roots, watched, keys, wanted, changes: Pending::default(), touched: false }
     }
 
     fn run(mut self, rx: mpsc::Receiver<notify::Result<Event>>, quiet: Duration, mut report: impl FnMut(Changes)) {
@@ -150,10 +221,12 @@ impl Gather {
             match rx.recv_timeout(wait) {
                 Ok(event) => {
                     let before = self.changes.len();
+                    self.touched = false;
                     self.take_in(event);
                     // Only a change that matters starts the quiet wait again: a folder busy with other files (a
-                    // recording, an unzip) doesn't hold a save back.
-                    if self.changes.len() != before {
+                    // recording, an unzip) doesn't hold a save back. A save still being written does, even when
+                    // it's already waiting.
+                    if self.touched {
                         if before == 0 {
                             first = Instant::now();
                         }
@@ -183,16 +256,18 @@ impl Gather {
     fn file(&mut self, path: &str) {
         if (self.wanted)(path) && !is_ignored(path, &self.roots) {
             self.changes.files.entry(path_key(path)).or_insert_with(|| path.to_owned());
+            self.touched = true;
         }
     }
 
     fn overflow(&mut self, path: Option<&str>) {
+        self.touched = true;
         match path.and_then(|p| self.root_of(p)) {
             Some(root) => {
                 self.changes.overflowed.insert(root);
             }
             // Not told where: every watched folder is walked again.
-            None => self.changes.overflowed.extend(self.roots.iter().cloned()),
+            None => self.changes.overflowed.extend(self.watched.iter().cloned()),
         }
     }
 
@@ -264,11 +339,23 @@ impl Gather {
     fn gone(&mut self, path: &str) {
         if (self.wanted)(path) {
             self.file(path);
-        } else if looks_like_folder(path) && !mo_formats::paths::file_name(path).starts_with('.') {
-            // Most likely a folder: its files aren't named one by one, and it can't be told from a file any more
-            // except by its name. A hidden file (".DS_Store") is never taken for one.
+        } else if may_be_folder(path) {
+            // Perhaps a folder: its files aren't named one by one, and it can't be told from a file any more except
+            // by its name. A hidden file (".DS_Store") is never taken for one.
             self.overflow(Some(path));
         }
+    }
+}
+
+/// Whether a path that went may have been a folder: any name but a hidden one or one of the [`FILE_TYPES`].
+fn may_be_folder(path: &str) -> bool {
+    let name = mo_formats::paths::file_name(path);
+    if name.starts_with('.') {
+        return false;
+    }
+    looks_like_folder(path) || {
+        let ext = mo_formats::paths::extension(name).get(1..).unwrap_or_default();
+        !FILE_TYPES.iter().any(|t| t.eq_ignore_ascii_case(ext))
     }
 }
 
@@ -319,8 +406,10 @@ mod tests {
     use notify::event::CreateKind;
     use std::path::PathBuf;
 
+    /// A gather judging by `roots` and watching the first.
     fn gather(roots: &[&str]) -> Gather {
-        Gather::new(roots.iter().map(|r| (*r).to_owned()).collect(), is_project_file)
+        let watched = roots.iter().take(1).map(|r| (*r).to_owned()).collect();
+        Gather::new(roots.iter().map(|r| (*r).to_owned()).collect(), watched, is_project_file)
     }
 
     fn event(kind: EventKind, paths: &[&str]) -> notify::Result<Event> {
@@ -347,12 +436,40 @@ mod tests {
         assert_eq!(c.overflowed, ["/m/inner"]);
         assert!(g.changes.is_empty());
         g.take_in(Err(notify::Error::generic("too many changes")));
-        assert_eq!(g.changes.take().overflowed, ["/m", "/m/inner"]);
+        assert_eq!(g.changes.take().overflowed, ["/m"]);
         // The system said it was a folder, whatever its name looks like.
         g.take_in(event(EventKind::Remove(RemoveKind::Folder), &["/m/Mixes.old"]));
         g.take_in(Err(notify::Error::generic("lost track").add_path(PathBuf::from("/m/inner/x"))));
         assert_eq!(g.changes.take().overflowed, ["/m", "/m/inner"]);
         g.take_in(event(EventKind::Access(notify::event::AccessKind::Any), &["/m/c.flp"]));
         assert!(g.changes.is_empty());
+    }
+
+    #[test]
+    fn a_save_still_being_written_starts_the_quiet_wait_again() {
+        let mut g = gather(&["/m"]);
+        g.take_in(event(EventKind::Create(CreateKind::File), &["/m/Song_2.flp"]));
+        assert!(g.touched);
+        // The same save written again: nothing new waits, but the quiet wait starts again.
+        g.touched = false;
+        g.take_in(event(EventKind::Modify(ModifyKind::Any), &["/m/Song_2.flp"]));
+        assert!(g.touched);
+        // Other files in a busy folder don't hold the save back.
+        g.touched = false;
+        g.take_in(event(EventKind::Modify(ModifyKind::Any), &["/m/take 3.wav"]));
+        assert!(!g.touched);
+    }
+
+    #[test]
+    fn a_folder_named_like_a_file_that_went_is_walked_again() {
+        let mut g = gather(&["/m"]);
+        for gone in ["/m/Beat.v2", "/m/Mix.old", "/m/Song.wip", "/m/Drums"] {
+            g.take_in(event(EventKind::Remove(RemoveKind::Any), &[gone]));
+            assert_eq!(g.changes.take().overflowed, ["/m"], "{gone}");
+        }
+        for file in ["/m/kick.wav", "/m/Song.flp.tmp", "/m/notes.TXT", "/m/.DS_Store", "/m/Kick.asd"] {
+            g.take_in(event(EventKind::Remove(RemoveKind::Any), &[file]));
+            assert!(g.changes.take().overflowed.is_empty(), "{file}");
+        }
     }
 }

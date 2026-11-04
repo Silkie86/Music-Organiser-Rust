@@ -2,6 +2,8 @@
 
 use std::collections::{BTreeMap, HashSet};
 
+use indexmap::IndexMap;
+
 use chrono::NaiveDateTime;
 
 /// How much of a file's format the reader understands.
@@ -65,8 +67,9 @@ pub struct ProjectInfo {
     pub tracks: Vec<String>,
     /// Outside instruments the project talks to (Bitwig's HW Instrument devices).
     pub hardware: Vec<String>,
-    /// Other facts by name ("PPQ", "Channels", "Genre"...).
-    pub details: BTreeMap<String, String>,
+    /// Other facts by name ("PPQ", "Channels", "Genre"...), in the order the reader found them, as the C# reader
+    /// lists them (and so as library.db keeps them): a save read live shows them in the same order.
+    pub details: IndexMap<String, String>,
     /// When the project was first made, as the file itself records it (FL Studio keeps this through every re-save).
     pub created: Option<NaiveDateTime>,
     pub warnings: Vec<String>,
@@ -89,7 +92,7 @@ impl ProjectInfo {
             samples: Vec::new(),
             tracks: Vec::new(),
             hardware: Vec::new(),
-            details: BTreeMap::new(),
+            details: IndexMap::new(),
             created: None,
             warnings: Vec::new(),
             can_extract_midi: false,
