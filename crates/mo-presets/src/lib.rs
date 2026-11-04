@@ -29,5 +29,6 @@ pub mod list;
 pub mod names;
 pub mod octave;
 pub mod role;
+pub mod sound_store;
 
 pub use role::{Guess, Role, Shift, Thresholds};
