@@ -384,6 +384,33 @@ fn a_folder_swapped_for_a_link_after_the_preview_stays_and_so_does_where_it_lead
 }
 
 #[test]
+fn only_what_the_daw_made_counts_as_an_autosave() {
+    let dir = fixtures("mo-space-clean-backup-yours");
+    let root = dir.join("Projects");
+    // Yours, kept in folders named like backups: they stay.
+    let yours = write(&root, "Song/Backup/Song v2.flp", b"mine");
+    let history = write(&root, "Song/History/Song old.bwproject", b"mine");
+    // What the DAWs made by themselves: FL's named copies, Bitwig's auto-backups, Studio One's History.
+    let fl = write(&root, "Song/Backup/Song (autosave).flp", b"auto");
+    let bitwig = write(&root, "Beat/auto-backups/Beat 3.bwproject", b"auto");
+    let studio = write(&root, "Tune/History/Tune 2.song", b"auto");
+    let lib = Library { roots: vec![root.to_string_lossy().into_owned()], samples: Vec::new(), keep: HashSet::new() };
+    let guard = Guard {
+        project_roots: &lib.roots,
+        sample_folders: &lib.samples,
+        keep: &lib.keep,
+        sample_in_use: &no_sample_in_use,
+    };
+    let picked: Vec<CompactItem> =
+        [&yours, &history, &fl, &bitwig, &studio].iter().map(|p| line(CompactKind::Backup, p)).collect();
+    let plan = preview(&picked, &guard);
+    let going: Vec<&str> = plan.lines.iter().map(|l| l.item.path.as_str()).collect();
+    assert_eq!(going, [fl.as_str(), bitwig.as_str(), studio.as_str()]);
+    let refused: Vec<(&str, Refused)> = plan.refused.iter().map(|(i, why)| (i.path.as_str(), *why)).collect();
+    assert_eq!(refused, [(yours.as_str(), Refused::NotAnAutosave), (history.as_str(), Refused::NotAnAutosave)]);
+}
+
+#[test]
 fn a_project_folder_called_backup_doesnt_make_its_songs_autosaves() {
     let dir = fixtures("mo-space-clean-backup-root");
     let root = dir.join("Backup");
