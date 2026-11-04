@@ -873,6 +873,16 @@ pub fn used_text(used: Option<u32>) -> String {
     }
 }
 
+/// [`used_text`] in words that make sense without the Used column's name over them, for a line of their own in a
+/// narrow list: "never used", "used in 1 project", "used in 12 projects", or "" when the counts aren't known yet.
+pub fn used_words(used: Option<u32>) -> String {
+    match used {
+        None => String::new(),
+        Some(0) => "never used".into(),
+        Some(n) => format!("used in {}", used_text(Some(n))),
+    }
+}
+
 /// A count for a type chip: "357k", "6.1k", "812".
 pub fn short_count(n: usize) -> String {
     match n {
@@ -1340,6 +1350,10 @@ mod tests {
         assert_eq!(used_text(None), "");
         assert_eq!(used_text(Some(0)), "Never");
         assert_eq!(used_text(Some(1)), "1 project");
+        assert_eq!(used_words(None), "");
+        assert_eq!(used_words(Some(0)), "never used");
+        assert_eq!(used_words(Some(1)), "used in 1 project");
+        assert_eq!(used_words(Some(12)), "used in 12 projects");
         assert_eq!(short_count(812), "812");
         assert_eq!(short_count(6_140), "6.1k");
         assert_eq!(short_count(357_412), "357k");

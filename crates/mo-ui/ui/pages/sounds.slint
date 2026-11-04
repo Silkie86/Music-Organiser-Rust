@@ -65,6 +65,8 @@ export struct SoundLine {
     bpm: string,
     length: string,
     used: string,
+    // The same, in words that make sense without the Used column's name over them: "used in 12 projects".
+    used-words: string,
     folder: string,
     // When it was played, on History.
     when: string,
@@ -508,14 +510,52 @@ component SoundTileView inherits Rectangle {
     }
 }
 
-// The List and History views' line.
+// A sound's name in a list line, lit while it plays, with a heart after it when it's a favourite. Its room starts from
+// nothing and stretches, so every line splits the room the same way.
+component SoundName inherits HorizontalLayout {
+    in property <SoundLine> line;
+    preferred-width: 0px;
+    min-width: 0px;
+    spacing: Space.sm;
+    Text {
+        horizontal-stretch: 1;
+        preferred-width: 0px;
+        min-width: 0px;
+        text: root.line.name;
+        color: root.line.playing ? Theme.accent : Theme.text;
+        font-size: Type.body;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    if root.line.favourite: VerticalLayout {
+        alignment: center;
+        Heart { }
+    }
+}
+
+// The List, History and Rediscover views' line. In a narrow list (`narrow`) it takes two lines, its name and length
+// over the rest, because the columns alone (about 510 px) are wider than the list there and the name had no room.
 component SoundLineView inherits ListLine {
     in property <SoundLine> line;
     in property <bool> history;
     in property <bool> rediscover;
+    in property <bool> narrow;
     // A click on it, so the page can take the keys (arrows, Space) from the search box.
     callback chosen();
-    height: 40px;
+    // Its columns after the name, one after another for a narrow list's second line, the empty ones left out, in
+    // words that make sense without the columns' names over them: "Bass · Am · 140 BPM · played Tue · from Loops".
+    // On Rediscover its reason comes first, as it's why the sound is there, so the line is cut short after it.
+    property <string> facts: root.rediscover ? root.then(root.line.reason, root.about)
+        : root.then(root.then(root.about, root.history ? root.labelled("played", root.line.when) : root.line.used-words),
+            root.labelled("from", root.line.folder));
+    // What it is: its type, key and tempo.
+    property <string> about: root.then(root.then(root.line.sound-type, root.line.key), root.line.bpm);
+    pure function then(first: string, next: string) -> string {
+        return first == "" ? next : next == "" ? first : first + " · " + next;
+    }
+    pure function labelled(word: string, value: string) -> string {
+        return value == "" ? "" : word + " " + value;
+    }
     selected: line.picked;
     draggable: true;
     lifted: root.line.row == SoundsData.lifted-row;
@@ -527,7 +567,7 @@ component SoundLineView inherits ListLine {
         SoundsData.select(root.line.row);
     }
     double-clicked => { SoundsData.play-row(root.line.row); }
-    HorizontalLayout {
+    if !root.narrow: HorizontalLayout {
         width: 100%;
         height: 100%;
         padding-left: Space.md;
@@ -538,25 +578,9 @@ component SoundLineView inherits ListLine {
             Dot { tint: Theme.sound-type(root.line.colour); }
         }
         // Columns that stretch start from no width, so every line splits the room the same way.
-        HorizontalLayout {
+        SoundName {
             horizontal-stretch: 2;
-            preferred-width: 0px;
-            min-width: 0px;
-            spacing: Space.sm;
-            Text {
-                horizontal-stretch: 1;
-                preferred-width: 0px;
-                min-width: 0px;
-                text: root.line.name;
-                color: root.line.playing ? Theme.accent : Theme.text;
-                font-size: Type.body;
-                vertical-alignment: center;
-                overflow: elide;
-            }
-            if root.line.favourite: VerticalLayout {
-                alignment: center;
-                Heart { }
-            }
+            line: root.line;
         }
         Text {
             width: 110px;
@@ -612,11 +636,55 @@ component SoundLineView inherits ListLine {
             overflow: elide;
         }
     }
+    if root.narrow: VerticalLayout {
+        width: 100%;
+        height: 100%;
+        padding-left: Space.md;
+        padding-right: Space.md;
+        alignment: center;
+        spacing: Space.xs;
+        HorizontalLayout {
+            spacing: Space.md;
+            VerticalLayout {
+                alignment: center;
+                Dot { tint: Theme.sound-type(root.line.colour); }
+            }
+            SoundName {
+                horizontal-stretch: 1;
+                line: root.line;
+            }
+            Text {
+                width: 56px;
+                text: root.line.length;
+                color: Theme.muted;
+                font-family: Theme.number-font;
+                font-size: Type.meta;
+                vertical-alignment: center;
+                horizontal-alignment: right;
+            }
+        }
+        // Under the name: past the dot and the room after it, as the line above has.
+        HorizontalLayout {
+            spacing: Space.md;
+            Rectangle { width: 8px; }
+            Text {
+                horizontal-stretch: 1;
+                preferred-width: 0px;
+                min-width: 0px;
+                text: root.facts;
+                color: Theme.muted;
+                font-size: Type.meta;
+                overflow: elide;
+            }
+        }
+    }
 }
 
+// The List, History and Rediscover views' column names; in a narrow list, those of a line's first line.
 component ListHeading inherits HorizontalLayout {
     in property <bool> history;
     in property <bool> rediscover;
+    in property <bool> narrow;
     padding-left: Space.md + Space.xs;
     padding-right: Space.md + Space.xs;
     spacing: Space.md;
@@ -629,17 +697,17 @@ component ListHeading inherits HorizontalLayout {
         text: "SOUND";
         vertical-alignment: center;
     }
-    Caps {
+    if !root.narrow: Caps {
         width: 110px;
         text: "TYPE";
         vertical-alignment: center;
     }
-    Caps {
+    if !root.narrow: Caps {
         width: 52px;
         text: "KEY";
         vertical-alignment: center;
     }
-    Caps {
+    if !root.narrow: Caps {
         width: 80px;
         text: "TEMPO";
         vertical-alignment: center;
@@ -650,13 +718,13 @@ component ListHeading inherits HorizontalLayout {
         vertical-alignment: center;
         horizontal-alignment: right;
     }
-    Caps {
+    if !root.narrow: Caps {
         width: root.rediscover ? 0 : 96px;
         text: root.rediscover ? "" : root.history ? "PLAYED" : SoundsData.knows-use ? "USED" : "";
         vertical-alignment: center;
         horizontal-alignment: right;
     }
-    Caps {
+    if !root.narrow: Caps {
         horizontal-stretch: root.rediscover ? 3 : 1;
         preferred-width: 0px;
         min-width: 0px;
@@ -665,11 +733,15 @@ component ListHeading inherits HorizontalLayout {
     }
 }
 
-// One pad of the kit builder.
+// One pad of the kit builder. In a narrow list the pad's name goes before its sound's, rather than in a column of its
+// own, so the sound keeps room for its name (it was cut to two letters in a 900 px window).
 component PadLineView inherits ListLine {
     in property <PadLine> pad;
     in property <int> place;
     callback chosen();
+    // Where the names' column would leave the sound under about 140 px. The line is as wide as the list, whatever is
+    // in it, so this doesn't depend on itself.
+    property <bool> narrow: root.width < 520px;
     height: 52px;
     selected: pad.picked;
     // An empty pad has nothing to drag.
@@ -689,7 +761,7 @@ component PadLineView inherits ListLine {
         padding-left: Space.md;
         padding-right: Space.md;
         spacing: Space.md;
-        Text {
+        if !root.narrow: Text {
             width: 120px;
             text: root.pad.name;
             color: Theme.text;
@@ -707,11 +779,25 @@ component PadLineView inherits ListLine {
             preferred-width: 0px;
             min-width: 0px;
             alignment: center;
-            Text {
-                text: root.pad.sound;
-                color: root.pad.playing ? Theme.accent : root.pad.filled ? Theme.text : Theme.muted;
-                font-size: Type.body;
-                overflow: elide;
+            HorizontalLayout {
+                spacing: Space.sm;
+                // Never wider than the names' column in a wide list, so a long name can't squeeze the sound out.
+                if root.narrow: Text {
+                    max-width: 120px;
+                    text: root.pad.name;
+                    color: Theme.text;
+                    font-size: Type.body;
+                    font-weight: 600;
+                    overflow: elide;
+                }
+                Text {
+                    horizontal-stretch: 1;
+                    min-width: 0px;
+                    text: root.pad.sound;
+                    color: root.pad.playing ? Theme.accent : root.pad.filled ? Theme.text : Theme.muted;
+                    font-size: Type.body;
+                    overflow: elide;
+                }
             }
             Text {
                 text: root.pad.detail;
@@ -867,8 +953,11 @@ component SoundPanel inherits SidePanel {
             clicked => { SoundsData.play(); }
         }
     }
-    HorizontalLayout {
-        spacing: Space.md;
+    // In a narrow panel the facts wrap onto a second line, rather than run past its edge.
+    FlexboxLayout {
+        alignment: stretch;
+        spacing-horizontal: Space.md;
+        spacing-vertical: Space.sm;
         for f in SoundsData.picked.facts: VerticalLayout {
             spacing: Space.xs;
             horizontal-stretch: 1;
@@ -1451,21 +1540,31 @@ export component SoundsPage inherits Rectangle {
                             }
                         }
                     }
-                    if SoundsData.empty-title == "" && SoundsData.shown > 0 && (SoundsData.view == 1 || SoundsData.view == 3 || SoundsData.view == 4): VerticalLayout {
+                    if SoundsData.empty-title == "" && SoundsData.shown > 0 && (SoundsData.view == 1 || SoundsData.view == 3 || SoundsData.view == 4): list-box := VerticalLayout {
+                        // Two lines a sound where the columns would leave its name under about 100 px (in a
+                        // 900 px window); a big window with the panel and the year strip open keeps one line. The
+                        // columns take about 510 px (SoundLineView): make one wider, and raise this with it.
+                        property <bool> narrow: self.width < 660px;
+                        property <length> line-height: self.narrow ? 52px : 40px;
                         ListHeading {
                             history: SoundsData.view == 3;
                             rediscover: SoundsData.view == 4;
+                            narrow: list-box.narrow;
                         }
                         lines := ListView {
                             property <int> show-ask: SoundsData.show-ask;
+                            // The top of the line to bring into view.
+                            property <length> show-top: SoundsData.show-row * list-box.line-height;
                             changed show-ask => {
-                                if (SoundsData.show-row * 40px < -self.content-y
-                                    || (SoundsData.show-row + 1) * 40px > -self.content-y + self.visible-height) {
-                                    self.content-y = -clamp(SoundsData.show-row * 40px - self.visible-height / 3, 0px,
+                                if (self.show-top < -self.content-y
+                                    || self.show-top + list-box.line-height > -self.content-y + self.visible-height) {
+                                    self.content-y = -clamp(self.show-top - self.visible-height / 3, 0px,
                                         max(0px, self.content-height - self.visible-height));
                                 }
                             }
                             for l in SoundsData.lines: SoundLineView {
+                                height: list-box.line-height;
+                                narrow: list-box.narrow;
                                 line: l;
                                 history: SoundsData.view == 3;
                                 rediscover: SoundsData.view == 4;
