@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
@@ -1697,14 +1697,47 @@ fn play_sound(app: &AppWindow, at: usize, from: f64, most: f64) {
     }
     let ask = PLAYS.fetch_add(1, Ordering::SeqCst) + 1;
     NEWEST_PLAY.fetch_max(ask, Ordering::SeqCst);
-    let job = PlayJob { ask, path, from, seconds, most, window: app.as_weak() };
-    match READER.get_or_init(|| Newest::start("Read sound", read_and_play)) {
-        // One reader for every play (rule 12): plays asked while it reads replace each other, so after a held arrow
-        // key or a fast sweep only the newest is read next, and the ones passed over are never opened.
-        Ok(reader) => reader.ask(job),
-        // Never opened: the sweep's timings forget it by themselves.
-        Err(e) => log::error("Sounds", &format!("Couldn't start reading the sound: {e}")),
-    }
+    let job = PlayJob { ask, path, from, seconds, most, window: app.as_weak(), held: Arc::default() };
+    ask_reader(job);
+}
+
+/// How many sounds may be read at once. Plays asked while every reader is busy replace each other (rule 12), so
+/// after a held arrow key or a fast sweep only the newest is read next and the ones passed over are never opened;
+/// a second reader means one slow read (a sleeping drive, a long file) never holds up the next sound.
+const READERS: usize = 2;
+
+thread_local! {
+    /// The threads that read each sound before it plays, each with how many of its jobs are still held (reading or
+    /// waiting); started as they're needed (and tried again at the next play if the system wouldn't start one).
+    static SOUND_READERS: RefCell<Vec<(Newest<PlayJob>, Arc<AtomicUsize>)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Gives `job` to a reader that's free, or else to the last one, in place of the read it has waiting.
+fn ask_reader(mut job: PlayJob) {
+    SOUND_READERS.with(|r| {
+        let mut readers = r.borrow_mut();
+        let free = readers.iter().position(|(_, held)| held.load(Ordering::SeqCst) == 0);
+        let at = match free {
+            Some(at) => at,
+            None if readers.len() < READERS => match Newest::start("Read sound", read_and_play) {
+                Ok(reader) => {
+                    readers.push((reader, Arc::default()));
+                    readers.len() - 1
+                }
+                Err(e) if readers.is_empty() => {
+                    // Never opened: the sweep's timings forget it by themselves.
+                    log::error("Sounds", &format!("Couldn't start reading the sound: {e}"));
+                    return;
+                }
+                Err(_) => readers.len() - 1,
+            },
+            None => readers.len() - 1,
+        };
+        let (reader, held) = &readers[at];
+        held.fetch_add(1, Ordering::SeqCst);
+        job.held = held.clone();
+        reader.ask(job);
+    });
 }
 
 /// A sound to read and play: play number `ask`, `from` this far through its `seconds`, reading at most `most`.
@@ -1715,16 +1748,23 @@ struct PlayJob {
     seconds: f64,
     most: f64,
     window: slint::Weak<AppWindow>,
+    /// How many of its reader's jobs are held: one more while this one is, so the reader is free once it's none.
+    held: Arc<AtomicUsize>,
 }
 
-/// The thread that reads each sound before it plays, started at the first play.
-static READER: OnceLock<std::io::Result<Newest<PlayJob>>> = OnceLock::new();
+impl Drop for PlayJob {
+    // Done, passed over (replaced while waiting) or broken: no longer held by its reader.
+    fn drop(&mut self) {
+        self.held.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 /// Reads one sound and plays it, if it's still the newest play when the read ends. The sweep's timings
 /// (`mo_app::sweep_timing`) hear when it's being opened, and when it's handed to the output, overtaken by a newer sound
 /// or dropped, by this play's number; for a sound the sweep didn't ask for they count nothing.
 fn read_and_play(job: PlayJob) {
-    let PlayJob { ask, path, from, seconds, most, window } = job;
+    let PlayJob { ask, ref path, from, seconds, most, ref window, .. } = job;
+    let (path, window) = (path.clone(), window.clone());
     let overtaken = || NEWEST_PLAY.load(Ordering::SeqCst) != ask;
     let stopped = || PLAYS.load(Ordering::SeqCst) != ask;
     // Passed over since it was asked for (it waited behind another read): never opened, so the sweep's timings
@@ -1754,13 +1794,16 @@ fn read_and_play(job: PlayJob) {
                 if PLAYS.load(Ordering::SeqCst) != ask {
                     return;
                 }
-                // One card at a time: stepping or sweeping over many sounds that won't play (a drive unplugged)
-                // says so once, the log has each of them.
+                // Stepping or sweeping over many sounds that won't play for the same reason (a drive unplugged)
+                // says so once; the log has each of them.
                 let now = Instant::now();
                 let new_card = FAILED_CARD.with(|c| {
-                    let fresh = c.get().is_none_or(|at| now.duration_since(at) >= FAILED_CARD_GAP);
+                    let mut c = c.borrow_mut();
+                    let fresh = c
+                        .as_ref()
+                        .is_none_or(|(at, before)| *before != why || now.duration_since(*at) >= FAILED_CARD_GAP);
                     if fresh {
-                        c.set(Some(now));
+                        *c = Some((now, why.clone()));
                     }
                     fresh
                 });
@@ -1775,12 +1818,12 @@ fn read_and_play(job: PlayJob) {
     }
 }
 
-/// The least time between two "Couldn't play the sound" cards: as long as one stays.
+/// The least time between two "Couldn't play the sound" cards for the same reason: as long as one stays.
 const FAILED_CARD_GAP: Duration = mo_app::activity::FAILED_STAYS;
 
 thread_local! {
-    /// When the last "Couldn't play the sound" card went up.
-    static FAILED_CARD: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+    /// When the last "Couldn't play the sound" card went up, and why the sound couldn't play.
+    static FAILED_CARD: RefCell<Option<(Instant, String)>> = const { RefCell::new(None) };
 }
 
 fn stop(app: &AppWindow) {

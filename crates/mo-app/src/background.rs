@@ -287,14 +287,16 @@ mod tests {
     #[test]
     fn a_job_that_panics_leaves_the_thread_working() {
         let (done_tx, done) = mpsc::channel();
+        let (started_tx, started) = mpsc::channel();
         let worker = Newest::start("Test panics", move |n: u32| {
+            let _ = started_tx.send(n);
             assert!(n != 1, "a job that breaks (the test means it)");
             let _ = done_tx.send(n);
         })
         .unwrap();
         worker.ask(1);
-        // Asked after the first broke (or while it was breaking): still done.
-        std::thread::sleep(Duration::from_millis(50));
+        // Asked once the first is breaking: still done.
+        assert_eq!(started.recv_timeout(Duration::from_secs(5)).unwrap(), 1);
         worker.ask(2);
         assert_eq!(done.recv_timeout(Duration::from_secs(5)).unwrap(), 2);
     }

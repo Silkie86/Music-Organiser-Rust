@@ -449,7 +449,8 @@ fn start_run(weak: &Weak<AppWindow>) {
                 // The older versions as read are still right unless the run kept more, or they weren't read from
                 // this drive (or couldn't be).
                 let read = matches!(&s.kept, Some((d, Ok(_))) if Some(d) == s.settings.drive.as_ref());
-                let reread = ran.kept_older > 0 || !read;
+                // A run that broke may have kept some before it stopped.
+                let reread = ran.kept_older > 0 || !last.ok || !read;
                 // The drive the run went to, which may not be the one picked now.
                 let backed_saved = match &drive {
                     Some(d) if !ran.went.is_empty() => {
