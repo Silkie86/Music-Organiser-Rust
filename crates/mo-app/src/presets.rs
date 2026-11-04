@@ -196,13 +196,19 @@ pub struct Item {
     pub year: Option<i32>,
     /// What a search looks in, in lower case, worked out once (the page searches every line on each key).
     words: String,
+    /// A preset file's path in lower case, which the list sorts the files by, worked out once; "" for a song's sound.
+    file_key: String,
 }
 
 impl Item {
     pub fn new(row: PresetRow, song: String, year: Option<i32>) -> Item {
         let [name, plugin, place, file] = row.search_texts();
         let words = [name, plugin, place, file, &song].join("\u{1f}").to_lowercase();
-        Item { row, song, year, words }
+        let file_key = match &row.source {
+            Source::File { path } => path.to_lowercase(),
+            Source::Song { .. } => String::new(),
+        };
+        Item { row, song, year, words, file_key }
     }
 
     /// Every word of a search (already in lower case) is in the line's texts or its part.
@@ -452,14 +458,7 @@ impl Filters {
 /// The lines shown, as places in `items`, in the list's order: songs newest first (as they came), each song's sounds
 /// in the order its save has them, then the preset files by folder and name.
 pub fn shown(items: &[Item], f: &Filters) -> Vec<usize> {
-    let words = f.words();
-    let mut out: Vec<usize> = (0..items.len()).filter(|&i| f.passes_with(&items[i], &words)).collect();
-    // Files after the songs; files among themselves by folder, then name. The sort is stable, so songs keep theirs.
-    out.sort_by_cached_key(|&i| {
-        let it = &items[i];
-        (it.is_file(), if it.is_file() { it.path().to_lowercase() } else { String::new() })
-    });
-    out
+    filtered(items, f).shown
 }
 
 /// How many lines each choice of each filter would show, with the other filters as they are: the numbers beside the
@@ -481,14 +480,80 @@ pub struct ChoiceCounts {
 /// Counts every filter's choices in one pass. A line counts beside every filter when all five let it through, and
 /// beside the one that doesn't when only one doesn't: picking another choice there could show it.
 pub fn counts(items: &[Item], f: &Filters) -> ChoiceCounts {
+    filtered(items, f).counts
+}
+
+/// What the filters make of the list, worked out in one pass (the page does it off the window's thread): the lines
+/// shown ([`shown`]), the year strip's counts ([`year_counts`]) and every filter's choices' counts ([`counts`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Filtered {
+    pub shown: Vec<usize>,
+    pub years: Vec<(i32, usize)>,
+    pub counts: ChoiceCounts,
+}
+
+pub fn filtered(items: &[Item], f: &Filters) -> Filtered {
     let words = f.words();
-    let no_guess = Role::ALL.len();
-    let mut c = ChoiceCounts { parts: vec![0; no_guess + 1], ..ChoiceCounts::default() };
-    let synths = Choice { kind: Type::Synths, ..Choice::default() };
-    let effects = Choice { kind: Type::Effects, ..Choice::default() };
-    let mut by_plugin: HashMap<&str, usize> = HashMap::new();
-    for i in items.iter().filter(|i| f.passes_others(i, &words)) {
+    let without_years = Filters { years: None, ..f.clone() };
+    let mut tally = Tally::new();
+    let mut shown: Vec<usize> = Vec::new();
+    let mut by_year: BTreeMap<i32, usize> = BTreeMap::new();
+    for (n, i) in items.iter().enumerate() {
+        if !without_years.passes_others(i, &words) {
+            continue;
+        }
         let ok = f.chips_pass(i);
+        let all = ok == [true; 5];
+        // The year strip counts the years with every other filter on.
+        if all && let Some(y) = i.year {
+            *by_year.entry(y).or_default() += 1;
+        }
+        if !f.years.is_none_or(|(a, b)| i.year.is_some_and(|y| y >= a && y <= b)) {
+            continue;
+        }
+        tally.add(i, ok);
+        if all {
+            shown.push(n);
+        }
+    }
+    // Files after the songs; files among themselves by folder, then name. The sort is stable, so songs keep theirs.
+    // The page keeps its lines in this order already ([`sort_files`]), so the sort is only a check then.
+    let order = |&a: &usize, &b: &usize| {
+        let (a, b) = (&items[a], &items[b]);
+        (a.is_file(), &a.file_key).cmp(&(b.is_file(), &b.file_key))
+    };
+    if !shown.is_sorted_by(|a, b| order(a, b).is_le()) {
+        shown.sort_by(order);
+    }
+    Filtered { shown, years: by_year.into_iter().rev().collect(), counts: tally.done() }
+}
+
+/// Puts preset files in the list's order (by folder, then name), so the filtering finds them in order and doesn't have
+/// to sort them each time.
+pub fn sort_files(files: &mut [Item]) {
+    files.sort_by(|a, b| a.file_key.cmp(&b.file_key));
+}
+
+/// Counts every filter's choices. A line counts beside every filter when all five let it through, and beside the one
+/// that doesn't when only one doesn't: picking another choice there could show it.
+struct Tally<'a> {
+    c: ChoiceCounts,
+    by_plugin: HashMap<&'a str, usize>,
+}
+
+impl<'a> Tally<'a> {
+    fn new() -> Tally<'a> {
+        Tally {
+            c: ChoiceCounts { parts: vec![0; Role::ALL.len() + 1], ..ChoiceCounts::default() },
+            by_plugin: HashMap::new(),
+        }
+    }
+
+    /// A line the other filters let through, with which of the five chips let it through.
+    fn add(&mut self, i: &'a Item, ok: [bool; 5]) {
+        let synths = Choice { kind: Type::Synths, ..Choice::default() };
+        let effects = Choice { kind: Type::Effects, ..Choice::default() };
+        let c = &mut self.c;
         let fails = ok.iter().filter(|&&o| !o).count();
         let counts_on = |chip: usize| fails == 0 || (fails == 1 && !ok[chip]);
         if counts_on(0) {
@@ -499,6 +564,7 @@ pub fn counts(items: &[Item], f: &Filters) -> ChoiceCounts {
             c.effects += usize::from(effects.matches(i.row.native, i.row.kind));
         }
         if counts_on(2) {
+            let no_guess = Role::ALL.len();
             let at = i.role().and_then(|r| Role::ALL.iter().position(|&x| x == r)).unwrap_or(no_guess);
             c.parts[at] += 1;
         }
@@ -506,13 +572,16 @@ pub fn counts(items: &[Item], f: &Filters) -> ChoiceCounts {
             *if i.is_file() { &mut c.files } else { &mut c.songs } += 1;
         }
         if counts_on(4) && !i.row.plugin.is_empty() {
-            *by_plugin.entry(i.row.plugin.as_str()).or_default() += 1;
+            *self.by_plugin.entry(i.row.plugin.as_str()).or_default() += 1;
         }
     }
-    for (name, n) in by_plugin {
-        *c.plugins.entry(name.to_ascii_lowercase()).or_default() += n;
+
+    fn done(mut self) -> ChoiceCounts {
+        for (name, n) in self.by_plugin {
+            *self.c.plugins.entry(name.to_ascii_lowercase()).or_default() += n;
+        }
+        self.c
     }
-    c
 }
 
 /// The filters' names, as the page calls them when one is picked.
@@ -558,14 +627,10 @@ pub fn filter_chips(c: &ChoiceCounts, plugins: &[(String, usize)], f: &Filters) 
         PartPick::choices().into_iter().zip(&c.parts).map(|(l, n)| (l.to_owned(), thousands(*n))).collect();
     // The most used first, as `plugins` has them: an order the other filters don't change, so a line doesn't move
     // under the mouse when they do.
-    let mut by_plugin: Vec<(String, usize)> = plugins
+    let by_plugin: Vec<(String, usize)> = plugins
         .iter()
         .map(|(name, _)| (name.clone(), c.plugins.get(&name.to_ascii_lowercase()).copied().unwrap_or(0)))
         .collect();
-    // One picked that no line has any more (after a new look at the songs) stays, to be unpicked.
-    for gone in f.plugins.iter().filter(|p| !plugins.iter().any(|(name, _)| name.eq_ignore_ascii_case(p))) {
-        by_plugin.push((gone.clone(), 0));
-    }
     FilterChips {
         maker: chips::show(&maker_choices(c), &one(maker_label(f.choice.maker))),
         kind: chips::show(&type_choices(c), &one(type_label(f.choice.kind))),
@@ -592,15 +657,7 @@ pub fn plugins(items: &[Item]) -> Vec<(String, usize)> {
 
 /// How many lines each year has with the other filters as they are (not the years themselves), newest first.
 pub fn year_counts(items: &[Item], f: &Filters) -> Vec<(i32, usize)> {
-    let without = Filters { years: None, ..f.clone() };
-    let words = f.words();
-    let mut by: BTreeMap<i32, usize> = BTreeMap::new();
-    for i in items.iter().filter(|i| without.passes_with(i, &words)) {
-        if let Some(y) = i.year {
-            *by.entry(y).or_default() += 1;
-        }
-    }
-    by.into_iter().rev().collect()
+    filtered(items, f).years
 }
 
 pub use crate::songs::thousands;

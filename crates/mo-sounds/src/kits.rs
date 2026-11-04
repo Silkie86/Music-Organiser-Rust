@@ -127,7 +127,7 @@ pub fn roll(
                 !s.hidden
                     && s.analysis.is_some()
                     && !is_loop(s)
-                    && slot.types.contains(&s.sound_type)
+                    && slot.types.iter().any(|t| *t == s.sound_type)
                     && !used.contains(&s.id)
             })
             .map(|s| (s, the_pack.as_ref().map(|_| pack(s))))
@@ -216,7 +216,9 @@ fn pick_pack(sounds: &[&Sound], slots: &[KitSlot], rng: &mut DotnetRandom) -> Op
     let need = 2.max(slots.len() / 2);
     let packs: Vec<&str> = groups
         .iter()
-        .filter(|(_, g)| slots.iter().filter(|sl| g.iter().any(|s| sl.types.contains(&s.sound_type))).count() >= need)
+        .filter(|(_, g)| {
+            slots.iter().filter(|sl| g.iter().any(|s| sl.types.iter().any(|t| *t == s.sound_type))).count() >= need
+        })
         .map(|(p, _)| p.as_str())
         .collect();
     if packs.is_empty() {
@@ -435,7 +437,7 @@ mod tests {
     fn one_shot(id: i64, path: &str, kind: &str) -> Sound {
         let mut s = sound(id, path);
         s.analysis = Some(SoundAnalysis::default());
-        s.sound_type = kind.to_owned();
+        s.sound_type = kind.into();
         s
     }
 
@@ -469,7 +471,7 @@ mod tests {
         let mut seen = Vec::new();
         for slot in &kit {
             if let Some(id) = slot.sound {
-                assert!(slot.types.contains(&by_id[&id].sound_type), "{slot:?}");
+                assert!(slot.types.iter().any(|t| *t == by_id[&id].sound_type), "{slot:?}");
                 assert!(!seen.contains(&id));
                 seen.push(id);
             }

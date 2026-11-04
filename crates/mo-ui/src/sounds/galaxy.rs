@@ -936,7 +936,7 @@ fn show_trail(app: &AppWindow) {
                 let s = p.list.sound(at)?;
                 Some(SweptLine {
                     name: s.name().into(),
-                    kind: s.sound_type.clone().into(),
+                    kind: s.sound_type.as_str().into(),
                     colour: list::type_colour(&s.sound_type),
                     current: i == g.trail_at,
                 })

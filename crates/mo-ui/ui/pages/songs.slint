@@ -2,7 +2,7 @@
 // scrubber, and the picked song's panel beside it. Agreed with Solomon on 2026-10-31.
 import { ListView } from "std-widgets.slint";
 import { ArrangementPreview } from "arrangement.slint";
-import { Theme, Type, Space, Well, SearchBox, ToggleChip, MenuChip, ListLine, Stars, YearRange, YearBar, Caps, Heart, CloseButton, TabBar, LinkText, StudioButton, ActionKey, MenuLine, MenuCard, Groove, MenuItem, RightClickMenu, NoticeStrip } from "../studio.slint";
+import { Theme, Type, Space, Well, SearchBox, ToggleChip, FilterPicks, FilterView, ListLine, Stars, YearRange, YearBar, Caps, Heart, CloseButton, TabBar, LinkText, StudioButton, ActionKey, MenuLine, MenuCard, Groove, MenuItem, RightClickMenu, NoticeStrip } from "../studio.slint";
 
 // One line of the list: a heading ("This week", "2019") when `heading` isn't empty, else a song.
 export struct SongLine {
@@ -102,12 +102,10 @@ export global SongsData {
     // Shown instead of the list while it loads, or when the library can't be read.
     in property <string> message: "Reading your library…";
     in-out property <string> search;
-    in property <[string]> daws;
-    in property <[string]> statuses;
-    in property <[string]> tags;
-    in property <string> daw;
-    in property <string> status;
-    in property <string> tag;
+    // The filters (mo-app's `songs::SongChips`): the DAW, the status and the tag, more than one of each.
+    in property <FilterView> daw-filter;
+    in property <FilterView> status-filter;
+    in property <FilterView> tag-filter;
     in property <bool> favourites;
     in property <bool> missing;
     in property <bool> hide-archived;
@@ -147,7 +145,10 @@ export global SongsData {
     in-out property <bool> health-open;
     callback health-go(int);
     callback search-edited(string);
-    callback pick(string, string);
+    // A filter's choice was picked or unpicked: which filter ("daw", "status", "tag") and the choice's words; or its
+    // menu's Any was.
+    callback toggle-choice(string, string);
+    callback clear-chip(string);
     callback toggle(string);
     callback clear();
     callback select(int);
@@ -662,27 +663,28 @@ export component SongsPage inherits Rectangle {
                 false
             }
         }
-        HorizontalLayout {
-            spacing: Space.sm;
-            alignment: start;
+        // The filters, the same as on every page: a short list's choices as chips of their own behind its name, a
+        // longer one's in a menu that scrolls; more than one of each can be picked. They wrap when the window is narrow.
+        FlexboxLayout {
+            spacing: Space.md;
             vertical-stretch: 0;
-            MenuChip {
+            FilterPicks {
                 name: "DAW";
-                value: SongsData.daw;
-                choices: SongsData.daws;
-                picked(v) => { SongsData.pick("daw", v); }
+                filter: SongsData.daw-filter;
+                toggled(text) => { SongsData.toggle-choice("daw", text); }
+                cleared => { SongsData.clear-chip("daw"); }
             }
-            MenuChip {
+            FilterPicks {
                 name: "Status";
-                value: SongsData.status;
-                choices: SongsData.statuses;
-                picked(v) => { SongsData.pick("status", v); }
+                filter: SongsData.status-filter;
+                toggled(text) => { SongsData.toggle-choice("status", text); }
+                cleared => { SongsData.clear-chip("status"); }
             }
-            MenuChip {
+            FilterPicks {
                 name: "Tag";
-                value: SongsData.tag;
-                choices: SongsData.tags;
-                picked(v) => { SongsData.pick("tag", v); }
+                filter: SongsData.tag-filter;
+                toggled(text) => { SongsData.toggle-choice("tag", text); }
+                cleared => { SongsData.clear-chip("tag"); }
             }
             ToggleChip {
                 text: "Favourites";

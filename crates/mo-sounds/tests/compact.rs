@@ -150,7 +150,7 @@ fn analysis_json(dice: &mut Dice) -> String {
         Vec::new()
     };
     let words = ["punchy", "soft", "bright", "dark", "wide", "tonal", "noisy", "mono"];
-    let character = (0..dice.below(4)).map(|_| dice.pick(&words).to_owned()).collect();
+    let character = (0..dice.below(4)).map(|_| dice.pick(&words).into()).collect();
     let tonic = dice.chance(60).then(|| dice.below(12) as i32);
     // A peak just under 0 dB rounds to -0.0, as Math.Round does.
     let peak_db = if dice.chance(10) { -0.0 } else { r(-dice.unit() * 30.0, 1) };
@@ -167,18 +167,18 @@ fn analysis_json(dice: &mut Dice) -> String {
         width: r(dice.unit(), 3),
         is_loop: dice.chance(30),
         bpm: dice.chance(40).then(|| r(80.0 + dice.unit() * 100.0, 2)),
-        bpm_source: if dice.chance(40) { "name".into() } else { String::new() },
+        bpm_source: if dice.chance(40) { "name".into() } else { Default::default() },
         pitch: dice.chance(50).then(|| r(24.0 + dice.unit() * 60.0, 2)),
         pitch_confidence: r(dice.unit(), 3),
         key_tonic: tonic,
         key_minor: dice.chance(50),
         key_confidence: r(dice.unit(), 3),
-        key_source: if tonic.is_some() { "chroma".into() } else { String::new() },
+        key_source: if tonic.is_some() { "chroma".into() } else { Default::default() },
         chord: dice.chance(10).then(|| "Ebm".to_owned()),
         chords,
         chroma,
         character,
-        waveform,
+        waveform: waveform.into(),
     };
     let mut json = serde_json::to_value(&a).unwrap();
     let features: Vec<f32> = (0..73).map(|_| dice.unit() as f32).collect();
