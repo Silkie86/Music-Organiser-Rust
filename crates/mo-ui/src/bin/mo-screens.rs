@@ -95,6 +95,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.set_place(Place::Midi.index() as i32);
     mo_ui::midi::pick_row(&app, 0);
     shots.push(("midi-picked.png".into(), capture(&window)));
+    // The roll with each note's name on it (it grows so each row has room).
+    app.global::<mo_ui::MidiData>().set_roll_names(true);
+    shots.push(("midi-note-names.png".into(), capture(&window)));
+    app.global::<mo_ui::MidiData>().set_roll_names(false);
     mo_ui::midi::run_action(&app, "midi.moreLike");
     shots.push(("midi-more-like.png".into(), capture(&window)));
     mo_ui::midi::run_action(&app, "midi.back");
