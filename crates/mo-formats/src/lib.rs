@@ -19,7 +19,7 @@ pub mod plugins;
 pub mod presets;
 pub mod studio_one;
 pub mod textscan;
-mod zipped;
+pub mod zipped;
 
 pub use model::{
     Confidence, MidiChannel, MidiClip, NoteAttribute, NoteEvent, PluginKind, PluginRef, ProjectInfo, SampleUse,

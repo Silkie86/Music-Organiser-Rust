@@ -13,9 +13,6 @@ use crate::bitwig_lab::class_label;
 use crate::lab::count;
 use crate::registry::{self, Registry};
 
-/// How many files that couldn't be read are kept, with why.
-const UNREADABLE_KEPT: usize = 20;
-
 /// How often one id turned up.
 #[derive(Clone, Debug, Default)]
 pub struct Tally {
@@ -53,8 +50,9 @@ pub struct Census {
     pub fl_events: HashMap<u32, Tally>,
     pub bitwig_classes: HashMap<u32, Tally>,
     pub bitwig_fields: HashMap<u32, Tally>,
-    /// Files that couldn't be read at all, with why (the first 20).
-    pub unreadable: Vec<(PathBuf, String)>,
+    /// Why files couldn't be read at all, each with how many. No file names: the report is meant for pasting, and
+    /// a project's name is often its song's title.
+    pub unreadable: BTreeMap<String, usize>,
     pub unreadable_count: usize,
 }
 
@@ -136,6 +134,31 @@ pub fn find_projects(paths: &[PathBuf]) -> Vec<PathBuf> {
     out
 }
 
+/// Why a file a reader stopped on (a panic) is unreadable: the app's own words, then what stopped it and where in
+/// the code (never the file).
+const STOPPED: &str = "the reader stopped on something it didn't expect in this file";
+
+std::thread_local! {
+    /// Where in the code the last panic on this thread was, as the quiet hook [`Census::run`] sets saw it.
+    static PANICKED_AT: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// The reason for a reader's panic: [`STOPPED`], its message and where.
+fn stopped(payload: &(dyn std::any::Any + Send)) -> String {
+    let message = payload
+        .downcast_ref::<&str>()
+        .map(|m| (*m).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_default();
+    let at = PANICKED_AT.with(|p| std::mem::take(&mut *p.borrow_mut()));
+    match (message.is_empty(), at.is_empty()) {
+        (true, true) => STOPPED.to_owned(),
+        (false, true) => format!("{STOPPED} ({message})"),
+        (true, false) => format!("{STOPPED} (at {at})"),
+        (false, false) => format!("{STOPPED} ({message}, at {at})"),
+    }
+}
+
 impl Census {
     /// Counts every .flp and .bwproject in `files`, several at a time, saying how many are done every 100.
     pub fn run(files: &[PathBuf], progress: impl Fn(usize) + Sync) -> Census {
@@ -163,10 +186,17 @@ impl Census {
             // Counting at normal priority is still counting, so a system that won't lower it isn't stopped.
             let _ = thread_priority::set_current_thread_priority(thread_priority::ThreadPriority::Min);
         });
+        // A reader's panic is noted for the report (what and where) instead of printed over the progress lines.
+        let shown = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|info| {
+            let at = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
+            PANICKED_AT.with(|p| *p.borrow_mut() = at);
+        }));
         let census = match pool.build() {
             Ok(pool) => pool.install(count),
             Err(_) => count(),
         };
+        std::panic::set_hook(shown);
         // The last count, unless it was just said.
         let n = done.load(Ordering::Relaxed);
         if !n.is_multiple_of(100) {
@@ -178,13 +208,25 @@ impl Census {
     /// Counts one project.
     pub fn add(&mut self, path: &Path) {
         let result = std::fs::read(path).map_err(|e| e.to_string()).and_then(|raw| {
-            if mo_formats::bitwig::is_bitwig(&raw) { self.add_bitwig(&raw) } else { self.add_fl(&raw) }
+            // A reader that stops on one file (a panic: release builds check for overflows) counts it as unreadable,
+            // as the app does, rather than stopping the whole census. What it had counted of that file is dropped.
+            // (Its message goes in the report, by [`Census::run`]'s quiet hook, not on the screen.)
+            let mut mine = Census::default();
+            let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if mo_formats::bitwig::is_bitwig(&raw) { mine.add_bitwig(&raw) } else { mine.add_fl(&raw) }
+            }));
+            match read {
+                Ok(Ok(())) => {
+                    self.merge(mine);
+                    Ok(())
+                }
+                Ok(Err(why)) => Err(why),
+                Err(payload) => Err(stopped(payload.as_ref())),
+            }
         });
         if let Err(why) = result {
             self.unreadable_count += 1;
-            if self.unreadable.len() < UNREADABLE_KEPT {
-                self.unreadable.push((path.to_owned(), why));
-            }
+            *self.unreadable.entry(why).or_default() += 1;
         }
     }
 
@@ -263,8 +305,9 @@ impl Census {
                 into.entry(k).or_default().merge(t);
             }
         }
-        let room = UNREADABLE_KEPT.saturating_sub(self.unreadable.len());
-        self.unreadable.extend(o.unreadable.into_iter().take(room));
+        for (why, n) in o.unreadable {
+            *self.unreadable.entry(why).or_default() += n;
+        }
     }
 
     /// FL events the registry doesn't have, most used first.
@@ -280,17 +323,21 @@ impl Census {
         unknown(&self.bitwig_fields, registry::bitwig(), Registry::field)
     }
 
-    /// The census as text: names and counts only, to paste into a conversation.
+    /// The census as text: ids, versions, reasons and counts only (never a project's name), to paste into a
+    /// conversation.
     pub fn report(&self, top: usize) -> String {
         let mut out = String::new();
         let files = self.fl_projects + self.bitwig_projects + self.unreadable_count;
         let _ = writeln!(out, "Format census of {} project{}", count(files), plural(files));
         if self.unreadable_count > 0 {
-            let _ = writeln!(out, "{} couldn't be read at all, for example:", count(self.unreadable_count));
-            for (file, why) in self.unreadable.iter().take(5) {
-                let name =
-                    file.file_name().map_or_else(|| file.display().to_string(), |n| n.to_string_lossy().into_owned());
-                let _ = writeln!(out, "  {name}: {why}");
+            let _ = writeln!(out, "{} couldn't be read at all:", count(self.unreadable_count));
+            let mut reasons: Vec<_> = self.unreadable.iter().collect();
+            reasons.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+            for (why, n) in reasons.iter().take(top) {
+                let _ = writeln!(out, "  {} x {why}", count(**n));
+            }
+            if reasons.len() > top {
+                let _ = writeln!(out, "  and {} other reasons", count(reasons.len() - top));
             }
         }
 
