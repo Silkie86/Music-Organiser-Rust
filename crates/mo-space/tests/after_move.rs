@@ -15,7 +15,7 @@ use mo_space::after_move::{
     old_home_can_go, old_homes_json, only_in_old_home, parse_old_homes, real_place, remove_old_home, replaced, repoint,
 };
 use mo_space::clean::{Bin, Problem, Removed};
-use mo_space::folder_move::{CantMove, Drives, MovedFolder, move_folder};
+use mo_space::folder_move::{CantMove, Drives, MovedFolder, move_folder, only_in_old_copy};
 use mo_space::key;
 use mo_space::plugin_space::{PluginSpace, SpaceFolder, SpaceKind};
 
@@ -281,6 +281,41 @@ fn a_lost_link_and_a_home_moved_by_hand_are_found_and_pointed_again() {
     let again = repoint(&s(&by_hand), &s(&data), &now.moved, &now.old_homes, &NoAdmin);
     assert_eq!(again.problems.len(), 2);
     assert_eq!(again.moved, now.moved);
+}
+
+/// A link the plugin points elsewhere just before a move's swap (after the last pass made it again) leads there only
+/// from the old copy, and is still named once the folder the moved folders live in has moved to another drive, where
+/// the copy's links are made again.
+#[test]
+fn a_link_pointed_elsewhere_just_before_the_swap_is_still_named_once_the_moved_folders_home_moves() {
+    let dir = fixtures("mo-space-after-home-link-repointed");
+    let (c, d, e) = (dir.join("C"), dir.join("D"), dir.join("E"));
+    let library = c.join("Library");
+    write(&library, "Sub/f.db", "x");
+    fs::create_dir_all(dir.join("KitsA")).unwrap();
+    fs::create_dir_all(dir.join("KitsB")).unwrap();
+    folder_link(&dir.join("KitsA"), &library.join("Kits"));
+    let data = d.join("Plugin Data");
+    fs::create_dir_all(&data).unwrap();
+    fs::create_dir_all(&e).unwrap();
+    let stop = AtomicBool::new(false);
+    // The plugin saves f.db again as the first pass copies it, so the last pass copies it too, after the top folder's
+    // link (its turn comes first); as it does, the plugin points the link at the other kits.
+    let progress = |bytes: u64| {
+        if bytes == 1 {
+            fs::write(library.join("Sub/f.db"), "yy").unwrap();
+        } else if bytes == 3 {
+            unlink(&library.join("Kits"));
+            folder_link(&dir.join("KitsB"), &library.join("Kits"));
+        }
+    };
+    let whose = ("omnisphere", SpaceKind::Sounds, &[] as &[String]);
+    let moved = move_folder(&s(&library), &s(&data), 1, whose, &OtherDrive, &[], &[], &progress, &stop).unwrap();
+    let all = vec![moved];
+    assert_eq!(only_in_old_copy(&all[0], &all, &stop).unwrap(), ["Kits"]);
+    let done = move_home(&s(&data), &s(&e), &all, &[], 3, &OtherDrive, &nothing, &stop).unwrap();
+    assert_eq!(done.moved[0].to, s(&e.join("Plugin Data").join("Library")));
+    assert_eq!(only_in_old_copy(&done.moved[0], &done.moved, &stop).unwrap(), ["Kits"]);
 }
 
 #[test]

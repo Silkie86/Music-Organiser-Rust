@@ -159,7 +159,8 @@ pub struct LinkedAgain {
     pub replaced: Vec<String>,
     /// Where they're kept, beside the copy, when any were: for you to look at, and delete once you're happy.
     pub kept: Option<OldHome>,
-    /// Links in the copy where the folder had a file or folder (paths inside it): left as they were.
+    /// Links in the copy where the folder had a file or folder, or a link leading somewhere else (paths inside it):
+    /// left as they were, for you to look at.
     pub links_left: Vec<String>,
 }
 
