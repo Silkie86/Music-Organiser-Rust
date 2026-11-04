@@ -1050,6 +1050,10 @@ pub(super) fn forget(g: &mut Galaxy) {
 pub(super) fn list_changed(g: &mut Galaxy) {
     g.light = None;
     g.set_for = None;
+    // Stars still being packed for the old list would bring it back (with how lit they are): too old to use. The ones
+    // in use stay until new ones come.
+    g.set_asked += 1;
+    g.set_got = g.set_asked;
 }
 
 /// The view came on show (or a new library did while it was): reads the map the first time.
@@ -1678,5 +1682,20 @@ pub(super) fn show_picked(app: &AppWindow) {
     if let Some((x, y)) = at {
         data.set_galaxy_picked_x(x);
         data.set_galaxy_picked_y(y);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stars_packed_for_a_list_read_again_are_dropped() {
+        // A pack asked for (3) while the one in use is 2.
+        let mut g = Galaxy { set_asked: 3, set_got: 2, ..Galaxy::default() };
+        list_changed(&mut g);
+        assert!(g.set_for.is_none() && g.light.is_none());
+        // The pack still on its way is 3: [`packed`] takes only one newer than `set_got` and no newer than asked.
+        assert!(3 <= g.set_got && g.set_got == g.set_asked, "{} {}", g.set_got, g.set_asked);
     }
 }

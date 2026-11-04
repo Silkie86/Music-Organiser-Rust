@@ -42,13 +42,22 @@ impl fmt::Display for SoundsError {
 impl std::error::Error for SoundsError {}
 
 impl SoundsError {
-    /// Whether SQLite found the file damaged (a bad sector, a file cut short): reading it again won't help.
+    /// Whether SQLite found the file damaged (a file cut short, a page spoilt) or the disk couldn't read part of it
+    /// (a bad sector): reading it again won't help.
     pub fn damaged(&self) -> bool {
-        matches!(
-            self,
-            SoundsError::Read(rusqlite::Error::SqliteFailure(e, _))
-                if matches!(e.code, rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)
-        )
+        matches!(self, SoundsError::Read(e) if is_damage(e))
+    }
+}
+
+/// [`SoundsError::damaged`], for an error SQLite gave.
+pub(crate) fn is_damage(e: &rusqlite::Error) -> bool {
+    use rusqlite::ffi;
+    match e {
+        rusqlite::Error::SqliteFailure(e, _) => {
+            matches!(e.code, rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)
+                || matches!(e.extended_code, ffi::SQLITE_IOERR_READ | ffi::SQLITE_IOERR_SHORT_READ)
+        }
+        _ => false,
     }
 }
 
@@ -875,6 +884,20 @@ fn year_before(t: NaiveDateTime) -> NaiveDateTime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn damage_is_a_spoilt_file_or_a_sector_the_disk_cant_read() {
+        use rusqlite::ffi;
+        let sqlite = |code| SoundsError::Read(rusqlite::Error::SqliteFailure(ffi::Error::new(code), None));
+        for code in [ffi::SQLITE_CORRUPT, ffi::SQLITE_NOTADB, ffi::SQLITE_IOERR_READ, ffi::SQLITE_IOERR_SHORT_READ] {
+            assert!(sqlite(code).damaged(), "{code}");
+        }
+        // Reading again may well work: another program holding the file, a full disk, a lock.
+        for code in [ffi::SQLITE_BUSY, ffi::SQLITE_FULL, ffi::SQLITE_IOERR_LOCK, ffi::SQLITE_CANTOPEN] {
+            assert!(!sqlite(code).damaged(), "{code}");
+        }
+        assert!(!SoundsError::Open { path: PathBuf::new(), why: String::new() }.damaged());
+    }
 
     #[test]
     fn float_blobs() {

@@ -419,7 +419,7 @@ fn the_copy_gives_every_answer_sounds_db_gives() {
     // Nothing changed since: nothing to do.
     let again = compact::sync(&old, &copy).unwrap();
     assert_eq!(again, Synced { sounds: 1503, ..Synced::default() });
-    assert!(!again.changed_anything());
+    assert!(!again.changed_the_list());
     same_answers(&old, &copy);
 }
 
@@ -560,7 +560,7 @@ fn the_copy_follows_each_kind_of_save() {
         (0, 0, 0, 0),
     );
     assert_eq!((s.tables, s.listed_tables), (1, 0));
-    assert!(s.changed_anything() && !s.changed_the_list());
+    assert!(!s.changed_the_list());
     step("hidden", &format!("INSERT OR REPLACE INTO sound_hidden VALUES ({one}, 'batch 2', 99)"), (0, 0, 0, 0));
     step(
         "prints",
@@ -671,6 +671,33 @@ fn a_copy_damaged_inside_is_made_again() {
     same_answers(&old, &copy);
     // What isn't damage isn't taken for it.
     assert!(!SoundsError::Copy { path: copy.clone(), why: "busy".into() }.damaged());
+}
+
+/// Damage only writing reaches (the copy's index of paths): the page still reads the copy, but no update could get
+/// past it, so the copy is made again. Damage in `sounds.db` instead leaves the copy as it is: it's all the page has
+/// then.
+#[test]
+fn damage_met_while_bringing_the_copy_up_to_date() {
+    let dir = folder("damaged-update");
+    let old = library(&dir, 300);
+    let copy = compact::copy_of(&old);
+    compact::sync(&old, &copy).unwrap();
+    damage(&copy, "sounds_path");
+    cs(&old).execute_batch("UPDATE sounds SET rating = 5 WHERE id = (SELECT MIN(id) FROM sounds);").unwrap();
+    // (Not seen as behind here: saved within the same tick of the file system's clock as the copy was made.)
+    let read = compact::read_for_page(&old, now());
+    assert!(matches!(read, Ok(compact::PageRead::Copy { .. })), "the copy still reads");
+    drop(read);
+    let synced = compact::sync(&old, &copy).unwrap();
+    assert!(synced.made, "made again: {synced:?}");
+    same_answers(&old, &copy);
+    // sounds.db damaged where every update reads it (its tags): the copy is left as it was, and says why it couldn't
+    // follow.
+    damage(&old, "sound_tags");
+    let before = std::fs::read(&copy).unwrap();
+    let failed = compact::sync(&old, &copy).unwrap_err();
+    assert!(failed.to_string().contains("malformed"), "{failed}");
+    assert!(std::fs::read(&copy).unwrap() == before, "the copy changed");
 }
 
 #[test]

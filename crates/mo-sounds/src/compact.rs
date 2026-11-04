@@ -141,18 +141,28 @@ const ROOM_LEFT: u64 = 1 << 30;
 /// One [`sync`] at a time in this app: two at once would make the same half-made copy.
 static SYNCING: Mutex<()> = Mutex::new(());
 
-/// Why making or updating the copy failed, in words.
-struct Failed(String);
+/// Why making or updating the copy failed, in words, and whether SQLite found a file damaged on the way (the copy or
+/// `sounds.db`: it doesn't say which).
+struct Failed {
+    why: String,
+    damaged: bool,
+}
+
+impl Failed {
+    fn new(why: impl Into<String>) -> Failed {
+        Failed { why: why.into(), damaged: false }
+    }
+}
 
 impl From<rusqlite::Error> for Failed {
     fn from(e: rusqlite::Error) -> Failed {
-        Failed(e.to_string())
+        Failed { damaged: crate::db::is_damage(&e), why: e.to_string() }
     }
 }
 
 impl From<std::io::Error> for Failed {
     fn from(e: std::io::Error) -> Failed {
-        Failed(e.to_string())
+        Failed::new(e.to_string())
     }
 }
 
@@ -177,11 +187,6 @@ pub struct Synced {
 }
 
 impl Synced {
-    /// Whether the copy reads any differently now.
-    pub fn changed_anything(&self) -> bool {
-        self.made || self.added > 0 || self.changed > 0 || self.removed > 0 || self.tables > 0
-    }
-
     /// Whether the page's list of sounds reads any differently now: not when only what the C# app keeps for itself
     /// changed (its settings, the galaxy's saved places, the duplicate finder's copies and prints).
     pub fn changed_the_list(&self) -> bool {
@@ -325,18 +330,45 @@ fn run(
     let found = look_at(copy, WAIT).map_err(|why| failed(format!("it couldn't be read just now ({why})")))?;
     // Half-made copies left by an app that stopped while making one, whatever this pass does.
     remove_parts(copy, true);
-    let pass = Pass { stamp: &stamp, read_for, read };
+    let dir = dir_of(copy);
     match found {
-        Found::Copy { format: FORMAT, .. } if !afresh => update(&old, copy, pass),
+        Found::Copy { format: FORMAT, .. } if !afresh => {
+            match update(&old, copy, Pass { stamp: &stamp, read_for, read: &mut *read, dir }) {
+                // Damaged where only writing to it reaches (an index, say): every update would stop there, so it's
+                // made again. Not when it's `sounds.db` that's damaged: the copy is all the page has then.
+                Err(Failed { damaged: true, .. }) if copy_damaged(copy) => {
+                    make(&old, copy, Pass { stamp: &stamp, read_for, read, dir })
+                }
+                done => done.map_err(|Failed { why, .. }| failed(why)),
+            }
+        }
         Found::Copy { format, .. } if format > FORMAT => {
             Err(failed(format!("a newer version of the app made it (format {format}), so it's left as it is")))
         }
         // Older, or (`afresh`) this version's made again.
-        Found::Nothing | Found::Unreadable | Found::Copy { .. } => make(&old, copy, pass),
+        Found::Nothing | Found::Unreadable | Found::Copy { .. } => {
+            make(&old, copy, Pass { stamp: &stamp, read_for, read, dir })
+        }
         Found::Foreign => {
             Err(failed("a database that isn't a copy of the library is there, so it's left as it is".into()))
         }
     }
+}
+
+/// Whether SQLite finds the copy at `copy` damaged when it looks it over, every page (as long as reading the copy
+/// takes): `false` when it can't tell (the copy can't be opened just now).
+fn copy_damaged(copy: &Path) -> bool {
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let Ok(conn) = Connection::open_with_flags(copy, flags) else { return false };
+    match conn.query_row("PRAGMA quick_check(1)", [], |r| r.get::<_, String>(0)) {
+        Ok(said) => said != "ok",
+        Err(e) => crate::db::is_damage(&e),
+    }
+}
+
+/// The folder `copy` is in (and its half-made copies).
+fn dir_of(copy: &Path) -> &Path {
+    copy.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."))
 }
 
 /// Whether `a` and `b` are one file (by two names, or two spellings of one).
@@ -348,18 +380,18 @@ fn same_file(a: &Path, b: &Path) -> bool {
 }
 
 /// What one pass over `sounds.db` is for: the copy brought up to `stamp`, and (when `read_for` says when "now" is) the
-/// page's read into `read`.
+/// page's read into `read`. `dir`: the folder the copy is written in, its disk watched for room meanwhile ([`Room`]).
 struct Pass<'a> {
     stamp: &'a str,
     read_for: Option<NaiveDateTime>,
     read: &'a mut Option<Everything>,
+    dir: &'a Path,
 }
 
 /// A new copy, made under a name of its own beside the copy's and then renamed.
 fn make(old: &SoundsDb, copy: &Path, pass: Pass<'_>) -> Result<Synced, SoundsError> {
     let failed = |why: String| SoundsError::Copy { path: copy.to_owned(), why };
-    let dir = copy.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    if let (Ok(free), Ok(library)) = (fs4::available_space(dir), fs::metadata(old.path())) {
+    if let (Ok(free), Ok(library)) = (fs4::available_space(pass.dir), fs::metadata(old.path())) {
         // What's there now and goes first counts as free.
         let going: u64 =
             ["", "-wal", "-shm"].iter().filter_map(|end| fs::metadata(side(copy, end)).ok()).map(|m| m.len()).sum();
@@ -388,7 +420,7 @@ fn make(old: &SoundsDb, copy: &Path, pass: Pass<'_>) -> Result<Synced, SoundsErr
     })();
     let synced = match made {
         Ok(synced) => synced,
-        Err(Failed(why)) => {
+        Err(Failed { why, .. }) => {
             let _ = remove_database(&part);
             return Err(failed(why));
         }
@@ -400,14 +432,13 @@ fn make(old: &SoundsDb, copy: &Path, pass: Pass<'_>) -> Result<Synced, SoundsErr
     Ok(synced)
 }
 
-/// Whether a disk with `free` bytes free has room for work on the copy that `takes` up to so many bytes, with
+/// Whether a disk with `free` bytes free has room for work on the copy that `takes` up to so many bytes more, with
 /// [`ROOM_LEFT`] to spare. Making a copy takes under half the library's size (0.29 of it with a library like
-/// Solomon's); bringing one up to date, at most the copy's own size again (its log, when every sound changed).
+/// Solomon's), known before it starts; what bringing one up to date takes is known only as it's written ([`Room`]).
 fn room_for(free: u64, takes: u64, doing: &str) -> Result<(), String> {
     if free >= takes.saturating_add(ROOM_LEFT) {
         return Ok(());
     }
-    let gb = |bytes: u64| format!("{:.1} GB", bytes as f64 / 1e9);
     Err(format!(
         "only {} is free on its disk: {doing} takes up to {}, and {} is always left free",
         gb(free),
@@ -416,19 +447,60 @@ fn room_for(free: u64, takes: u64, doing: &str) -> Result<(), String> {
     ))
 }
 
-/// The copy brought up to date in place, in one transaction.
-fn update(old: &SoundsDb, copy: &Path, pass: Pass<'_>) -> Result<Synced, SoundsError> {
-    let failed = |Failed(why)| SoundsError::Copy { path: copy.to_owned(), why };
-    let dir = copy.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    if let (Ok(free), Ok(size)) = (fs4::available_space(dir), fs::metadata(copy)) {
-        // Its log grows by each page that changes, until the end: up to the copy again when every sound changed.
-        room_for(free, size.len(), "bringing it up to date").map_err(|why| failed(Failed(why)))?;
+/// Whether a disk with `free` bytes free still has [`ROOM_LEFT`] free.
+fn room_left(free: u64) -> Result<(), String> {
+    if free >= ROOM_LEFT {
+        return Ok(());
     }
+    Err(format!("only {} is free on its disk, and {} is always left free", gb(free), gb(ROOM_LEFT)))
+}
+
+/// `bytes` in GB, for people.
+fn gb(bytes: u64) -> String {
+    format!("{:.1} GB", bytes as f64 / 1e9)
+}
+
+/// How many sounds are written between two looks at the room left on the disk ([`Room`]): a few MB of the copy, or
+/// some tens of MB of an update's log when each one changes a page of its own.
+const ROOM_EVERY: usize = 256;
+
+/// Watches the disk the copy is written on, so the work stops (and what it wrote is undone) before less than
+/// [`ROOM_LEFT`] is free there: an update's log grows by every page it changes, as far as the copy's own size again
+/// when every sound changed, and other programs fill the disk meanwhile too.
+struct Room<'a> {
+    dir: &'a Path,
+    written: usize,
+}
+
+impl Room<'_> {
+    fn new(dir: &Path) -> Room<'_> {
+        Room { dir, written: 0 }
+    }
+
+    /// One more sound written: every [`ROOM_EVERY`], the disk is looked at.
+    fn wrote(&mut self) -> Result<(), Failed> {
+        self.written += 1;
+        if self.written.is_multiple_of(ROOM_EVERY) { self.look() } else { Ok(()) }
+    }
+
+    /// Whether [`ROOM_LEFT`] is still free on the disk (taken as so when the disk can't say).
+    fn look(&self) -> Result<(), Failed> {
+        match fs4::available_space(self.dir) {
+            Ok(free) => room_left(free).map_err(Failed::new),
+            Err(_) => Ok(()),
+        }
+    }
+}
+
+/// The copy brought up to date in place, in one transaction.
+fn update(old: &SoundsDb, copy: &Path, pass: Pass<'_>) -> Result<Synced, Failed> {
+    // What it takes is known only as it's written: started with room to spare, then watched.
+    Room::new(pass.dir).look()?;
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-    let conn = open_for_writing(copy, flags).map_err(|e| failed(e.into()))?;
-    conn.busy_timeout(WAIT).map_err(|e| failed(e.into()))?;
-    conn.pragma_update(None, "synchronous", "NORMAL").map_err(|e| failed(e.into()))?;
-    let synced = fill(old, &conn, false, pass).map_err(failed)?;
+    let conn = open_for_writing(copy, flags)?;
+    conn.busy_timeout(WAIT)?;
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
+    let synced = fill(old, &conn, false, pass)?;
     // What this update wrote goes into the file itself, and the log beside it back to nothing: the disk the
     // library is on may be nearly full. Not done if the page is reading just then (without waiting for it): SQLite
     // does it with a later save.
@@ -476,9 +548,10 @@ fn fill(old: &SoundsDb, conn: &Connection, made: bool, pass: Pass<'_>) -> Result
     let mut known = if made { HashMap::new() } else { known(&tx)? };
     // From the same moment as the rows: the page gets what the copy gets.
     let mut reading =
-        pass.read_for.map(|now| Reading::start(old, now, true)).transpose().map_err(|e| Failed(e.to_string()))?;
+        pass.read_for.map(|now| Reading::start(old, now, true)).transpose().map_err(|e| Failed::new(e.to_string()))?;
     // A fingerprint's hash when there's none.
     let none = hash_of(ValueRef::Null);
+    let mut room = Room::new(pass.dir);
     let mut st = old.conn.prepare(OLD_SOUNDS)?;
     let mut rows = st.query([])?;
     while let Some(r) = rows.next()? {
@@ -525,6 +598,7 @@ fn fill(old: &SoundsDb, conn: &Connection, made: bool, pass: Pass<'_>) -> Result
             } else {
                 synced.added += 1;
             }
+            room.wrote()?;
         }
         if let (Some(reading), Some(sound)) = (reading.as_mut(), sound) {
             reading.add_read(r, sound);
@@ -543,8 +617,10 @@ fn fill(old: &SoundsDb, conn: &Connection, made: bool, pass: Pass<'_>) -> Result
         if (was.features, was.clap) != (none, none) {
             synced.prints += 1;
         }
+        room.wrote()?;
     }
     for table in WHOLE {
+        room.look()?;
         if copy_whole(&old.conn, &tx, table)? {
             synced.tables += 1;
             if LISTED.contains(&table) {
@@ -552,16 +628,21 @@ fn fill(old: &SoundsDb, conn: &Connection, made: bool, pass: Pass<'_>) -> Result
             }
         }
     }
+    room.look()?;
     if copy_prints(old, &tx)? {
         synced.tables += 1;
     }
+    room.look()?;
     if made {
         tx.execute_batch(INDEXES)?;
     }
     // Checked before it's kept: as many sounds in the copy as were read.
     let copied: i64 = tx.query_row("SELECT COUNT(*) FROM sounds", [], |r| r.get(0))?;
     if usize::try_from(copied).ok() != Some(synced.sounds) {
-        return Err(Failed(format!("the copy came out with {copied} sounds where sounds.db has {}", synced.sounds)));
+        return Err(Failed::new(format!(
+            "the copy came out with {copied} sounds where sounds.db has {}",
+            synced.sounds
+        )));
     }
     set_info(&tx, "format", FORMAT)?;
     set_info(&tx, "stamp", pass.stamp)?;
@@ -822,8 +903,8 @@ fn part_of(copy: &Path) -> PathBuf {
 /// app makes none meanwhile). Not one another copy of the app is still making (and Windows won't remove a file that's
 /// open anyway).
 fn remove_parts(copy: &Path, ours_too: bool) {
-    let (Some(dir), Some(name)) = (copy.parent(), copy.file_name()) else { return };
-    let dir = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
+    let Some(name) = copy.file_name() else { return };
+    let dir = dir_of(copy);
     let start = format!("{}.part", name.to_string_lossy());
     let own = part_of(copy);
     let Ok(entries) = fs::read_dir(dir) else { return };
@@ -1342,15 +1423,16 @@ mod tests {
 
     #[test]
     fn a_copy_is_made_only_with_room_to_spare() {
-        let gb = 1_000_000_000u64;
-        // Solomon's C:, 2026-11-03: 12 GB free, a 4.6 GB library, a 1.5 GB copy.
-        assert!(room_for(12 * gb, 4_560_000_000 / 2, "making it").is_ok());
-        assert!(room_for(12 * gb, 1_510_000_000, "bringing it up to date").is_ok());
-        assert!(room_for(2 * gb + ROOM_LEFT, 2 * gb, "making it").is_ok());
-        let why = room_for(2 * gb + ROOM_LEFT - 1, 2 * gb, "making it").unwrap_err();
+        const GB: u64 = 1_000_000_000;
+        // Solomon's C:, 2026-11-03: 12 GB free, a 4.6 GB library.
+        assert!(room_for(12 * GB, 4_560_000_000 / 2, "making it").is_ok());
+        assert!(room_for(2 * GB + ROOM_LEFT, 2 * GB, "making it").is_ok());
+        let why = room_for(2 * GB + ROOM_LEFT - 1, 2 * GB, "making it").unwrap_err();
         assert!(why.starts_with("only 3.1 GB is free on its disk: making it takes up to 2.0 GB"), "{why}");
-        let why = room_for(gb, 1_510_000_000, "bringing it up to date").unwrap_err();
-        assert!(why.contains("bringing it up to date takes up to 1.5 GB, and 1.1 GB is always left free"), "{why}");
+        // While it's written (an update's log, say), what's always left free must stay free.
+        assert!(room_left(ROOM_LEFT).is_ok());
+        assert_eq!(room_left(GB / 2).unwrap_err(), "only 0.5 GB is free on its disk, and 1.1 GB is always left free");
+        assert!(Room::new(Path::new("no such folder")).look().is_ok(), "a disk that can't say is taken to have room");
     }
 
     #[test]
