@@ -79,6 +79,7 @@ pub const SOUNDS_ACTIONS: &[Action] = &[
 pub const PLUGINS_ACTIONS: &[Action] = &[
     action("plugins.projects", "Show the songs that use the picked plugin", "Ctrl+O"),
     action("plugins.searchOnline", "Search the web for the picked plugin", "Ctrl+Shift+O"),
+    action("plugins.cleanUp", "Clean up the picked plugin's presets and sounds (asks first)", ""),
 ];
 
 /// The Presets page's own actions on its Sounds section. Send to Bitwig takes the C# Sound Lab's key.

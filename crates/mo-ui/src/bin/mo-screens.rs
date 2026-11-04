@@ -171,6 +171,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     mo_ui::plugins::show_sample(&app, plugins, massive, 0, &[]);
     capture(&window);
     shots.push(("plugins-missing.png".into(), capture(&window)));
+    // Kontakt 7's Clean up list: its sound library ticked, its presets waiting for a tick, one library kept.
+    mo_ui::plugins::show_sample(&app, sample_plugins().0, kontakt, 1, &[]);
+    mo_ui::plugins::show_clean_sample(
+        &app,
+        "Kontakt 7",
+        "Tick what to remove. Everything goes to the Recycle Bin, so you can still put it back.",
+        &[
+            (r"D:\Libraries\Kontakt Factory Library 2", "Sounds", "46.2 GB", "", true, true),
+            (
+                r"D:\Libraries\Choir Omnia",
+                "Sounds",
+                "3.10 GB",
+                "A project uses a sample in it (Choir Ah C3.wav).",
+                false,
+                false,
+            ),
+            (r"C:\Users\you\Documents\Native Instruments\Kontakt 7", "Presets and settings", "412 MB", "", true, false),
+        ],
+        "Frees 46.2 GB",
+    );
+    capture(&window);
+    shots.push(("plugins-clean-up.png".into(), capture(&window)));
     settings_shots(&app, &window, &graphite, &mut shots);
     // Space with the App files card open: what each part of the app's folder takes, and C: nearly full.
     app.set_place(Place::Space.index() as i32);
