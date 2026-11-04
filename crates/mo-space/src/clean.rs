@@ -202,28 +202,46 @@ fn network_mount(_path: &str) -> bool {
 }
 
 /// Whether a file or folder (where it really is) is on a USB stick or memory card. Windows keeps no Recycle Bin on
-/// one, so removing from it deletes for good. (A Mac and Linux keep a Trash on each drive.) The list of drives is read
-/// at most every few seconds, as one look at hundreds of plugins asks about each.
+/// one, so removing from it deletes for good. (A Mac and Linux keep a Trash on each drive.)
 #[cfg(windows)]
 pub(crate) fn on_removable(real: &str) -> bool {
+    // A list that can't be read says nothing is removable: as it was before this check.
+    volume_of(real).is_some_and(|v| v.removable)
+}
+
+/// A drive in Windows' list of drives: where it is, whether it's a USB stick or memory card, and its kind ("NTFS",
+/// "exFAT").
+#[cfg(windows)]
+#[derive(Clone)]
+pub(crate) struct Volume {
+    at: String,
+    pub(crate) removable: bool,
+    pub(crate) kind: String,
+}
+
+/// The drive a file or folder (where it really is) is on, from Windows' list of drives (the drives in the computer, and
+/// USB sticks or memory cards: not network drives, nor CDs or DVDs): the innermost one holding it (a drive can sit in
+/// a folder of another), or none when it isn't in the list (or the list can't be read). The list is read at most once a
+/// second, as one look at hundreds of plugins asks about each, and so it's never more than a second old: a USB stick
+/// plugged in where another drive was is known for what it is by the time a clean-up or a move gets to it.
+#[cfg(windows)]
+pub(crate) fn volume_of(real: &str) -> Option<Volume> {
     use std::sync::{Mutex, PoisonError};
     use std::time::{Duration, Instant};
-    /// The drives as last read: where each is, and whether it's removable.
-    type Drives = Vec<(String, bool)>;
-    static READ: Mutex<Option<(Instant, Drives)>> = Mutex::new(None);
+    static READ: Mutex<Option<(Instant, Vec<Volume>)>> = Mutex::new(None);
     let mut read = READ.lock().unwrap_or_else(PoisonError::into_inner);
-    let (_, drives) = match read.take() {
-        Some((at, drives)) if at.elapsed() < Duration::from_secs(5) => read.insert((at, drives)),
-        _ => {
-            // A list that can't be read says nothing is removable: as it was before this check.
-            let disks = sysinfo::Disks::new_with_refreshed_list_specifics(sysinfo::DiskRefreshKind::nothing());
-            let drives = disks
-                .map_or_else(|_| Vec::new(), |d| d.iter().map(|d| (text(d.mount_point()), d.is_removable())).collect());
-            read.insert((Instant::now(), drives))
-        }
-    };
-    // The innermost drive holding it decides: a drive can sit in a folder of another.
-    drives.iter().filter(|(at, _)| is_inside(real, at)).max_by_key(|(at, _)| at.len()).is_some_and(|(_, r)| *r)
+    if !read.as_ref().is_some_and(|(at, _)| at.elapsed() < Duration::from_secs(1)) {
+        let disks = sysinfo::Disks::new_with_refreshed_list_specifics(sysinfo::DiskRefreshKind::nothing());
+        let volume = |d: &sysinfo::Disk| Volume {
+            at: text(d.mount_point()),
+            removable: d.is_removable(),
+            kind: d.file_system().to_string_lossy().into_owned(),
+        };
+        let volumes = disks.map_or_else(|_| Vec::new(), |d| d.iter().map(volume).collect());
+        *read = Some((Instant::now(), volumes));
+    }
+    let volumes = read.as_ref().map_or(&[][..], |(_, volumes)| volumes.as_slice());
+    volumes.iter().filter(|v| is_inside(real, &v.at)).max_by_key(|v| v.at.len()).cloned()
 }
 
 /// A Mac and Linux keep a Trash on each drive, a USB stick too.
@@ -420,6 +438,15 @@ pub struct Removed {
     pub when: i64,
     /// What the bin calls it, once found there.
     pub bin_id: Option<String>,
+    /// When the bin says it went in (Unix seconds), once found there. Linux names a thing in the Trash after the one
+    /// before it once that's gone, so a later thing of the same name from the same place can be called the same: this
+    /// tells them apart.
+    #[serde(default)]
+    pub binned: Option<i64>,
+    /// On Linux, the computer's time zone when it was found there (seconds ahead of UTC): the Trash keeps the time as
+    /// the clock showed it, without the zone, so once the computer is in another zone it reads that much off.
+    #[serde(default)]
+    pub binned_zone: Option<i32>,
 }
 
 /// What something removed was.
@@ -478,6 +505,11 @@ pub trait Bin {
     fn find(&self, removed: &mut [Removed]) -> Vec<Problem>;
     /// Puts things back from the bin where they were; says what couldn't come back.
     fn put_back(&self, removed: &[Removed]) -> Vec<Problem>;
+    /// Which of these are in the bin now, in the same order (not once you've emptied the bin or put them back), or
+    /// `None` when the bin can't be looked in. By default it can't.
+    fn holds(&self, _removed: &[Removed]) -> Option<Vec<bool>> {
+        None
+    }
     /// Why this bin can't take `path` (`bytes` big) quietly: sending it would ask you something first, or remove it for
     /// good. `None` when it can. For what the app clears by itself, with nobody there to answer (the start-up sweep's
     /// old F12 notes); the Space page's clean-ups, which you start and watch, check what they need as they go. A bin of
@@ -645,7 +677,16 @@ impl<'a> Sending<'a> {
         if self.stop.load(Ordering::Relaxed) {
             return stays(done, STOPPED.to_owned());
         }
-        let removed = Removed { path: path.to_owned(), real, bytes, what, when: now_seconds(), bin_id: None };
+        let removed = Removed {
+            path: path.to_owned(),
+            real,
+            bytes,
+            what,
+            when: now_seconds(),
+            bin_id: None,
+            binned: None,
+            binned_zone: None,
+        };
         let why = match self.bin.send(Path::new(path)) {
             Ok(()) => {
                 done.removed.push(removed);
@@ -773,6 +814,10 @@ impl Bin for SystemBin {
 
     fn put_back(&self, removed: &[Removed]) -> Vec<Problem> {
         put_back_from_system_bin(removed)
+    }
+
+    fn holds(&self, removed: &[Removed]) -> Option<Vec<bool>> {
+        held_in_system_bin(removed)
     }
 
     fn refuses_quietly(&self, path: &Path, bytes: u64) -> Option<String> {
@@ -1077,9 +1122,46 @@ fn bin_problem(e: &trash::Error) -> String {
 /// (a couple of seconds' leeway for the clock).
 #[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
 fn is_the_one(item: &trash::TrashItem, r: &Removed) -> bool {
+    from_there(item, r) && item.time_deleted >= r.when.saturating_sub(2)
+}
+
+/// Whether a bin item is from where the thing removed was: the same folder, and the same name.
+#[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+fn from_there(item: &trash::TrashItem, r: &Removed) -> bool {
     let real = Path::new(&r.real);
-    let same_folder = real.parent().is_some_and(|f| key(&text(f)) == key(&text(&item.original_parent)));
-    same_folder && same_name(item, real) && item.time_deleted >= r.when.saturating_sub(2)
+    real.parent().is_some_and(|f| key(&text(f)) == key(&text(&item.original_parent))) && same_name(item, real)
+}
+
+/// Whether a bin item went in when the bin said, when it was found there (`binned`): Linux names a thing in the Trash
+/// after one gone before, and this tells them apart. On Linux that time is read as the Trash reads it now, in the
+/// computer's time zone now ([`read_now`]). Never found there, at or after the moment it was sent ([`is_the_one`]).
+#[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+fn went_in_then(item: &trash::TrashItem, r: &Removed) -> bool {
+    let Some(at) = r.binned else { return item.time_deleted >= r.when.saturating_sub(2) };
+    let then = r.binned_zone.map_or(at, |zone| read_now(at, zone));
+    item.time_deleted.abs_diff(then) <= 2
+}
+
+/// How the Linux Trash reads now a time it read as `at` in the time zone `zone` (seconds ahead of UTC): it keeps the
+/// clock's time without the zone, and reads that in the computer's zone now.
+#[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+fn read_now(at: i64, zone: i32) -> i64 {
+    use chrono::TimeZone;
+    let clock = chrono::DateTime::from_timestamp(at.saturating_add(i64::from(zone)), 0).map(|t| t.naive_utc());
+    clock.and_then(|clock| chrono::Local.from_local_datetime(&clock).earliest()).map_or(at, |t| t.timestamp())
+}
+
+/// The computer's time zone at a time the bin gave (seconds ahead of UTC), where the bin keeps times without it: on
+/// Linux. Windows keeps them in UTC.
+#[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+fn zone_then(at: i64) -> Option<i32> {
+    use chrono::TimeZone;
+    chrono::Local.timestamp_opt(at, 0).earliest().map(|t| t.offset().local_minus_utc())
+}
+
+#[cfg(windows)]
+fn zone_then(_at: i64) -> Option<i32> {
+    None
 }
 
 /// Whether a bin item has the name of the file removed. Windows gives the name as Explorer shows it, so with "Hide
@@ -1126,6 +1208,8 @@ fn find_in_system_bin(removed: &mut [Removed]) -> Vec<Problem> {
             Some(item) => {
                 taken.insert(item.id.as_os_str());
                 r.bin_id = item.id.to_str().map(str::to_owned);
+                r.binned = Some(item.time_deleted);
+                r.binned_zone = zone_then(item.time_deleted);
             }
             None => problems.push(Problem { path: r.path.clone(), why: NOT_IN_BIN.into() }),
         }
@@ -1140,13 +1224,9 @@ fn put_back_from_system_bin(removed: &[Removed]) -> Vec<Problem> {
         return removed.iter().map(|r| problem(r, "The Recycle Bin couldn't be read.")).collect();
     };
     let mut problems = Vec::new();
-    for r in removed {
-        // The one found when it went; only one never found then is looked for by place and time (an id that's gone
-        // means it was put back already, and anything there now from that place went later).
-        let item = match r.bin_id.as_deref() {
-            Some(id) => items.iter().find(|i| i.id.to_str() == Some(id)),
-            None => items.iter().filter(|i| is_the_one(i, r)).min_by_key(|i| i.time_deleted),
-        };
+    // An item that's gone means it was put back already, or the bin was emptied: anything there now from its place
+    // went later, so it isn't put back instead.
+    for (r, item) in removed.iter().zip(matched(&items, removed)) {
         let Some(item) = item else {
             problems.push(problem(r, "It isn't in the Recycle Bin any more."));
             continue;
@@ -1171,6 +1251,63 @@ fn put_back_from_system_bin(removed: &[Removed]) -> Vec<Problem> {
 #[cfg(not(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))))]
 fn find_in_system_bin(_removed: &mut [Removed]) -> Vec<Problem> {
     Vec::new()
+}
+
+/// Which of these are in the bin now ([`matched`]). `None` when the bin can't be read.
+#[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+fn held_in_system_bin(removed: &[Removed]) -> Option<Vec<bool>> {
+    bin_items().map(|items| held_among(&items, removed))
+}
+
+/// Which of `removed` are among the bin's `items` ([`matched`]).
+#[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+fn held_among(items: &[trash::TrashItem], removed: &[Removed]) -> Vec<bool> {
+    matched(items, removed).iter().map(Option::is_some).collect()
+}
+
+/// The bin item each of `removed` is, while it's still there: the one found when it went, by what the bin calls it,
+/// while that's still from its place and went in when the bin said then ([`went_in_then`]: on Linux a name is used
+/// again once its item has gone); one never found then, by its place and time, the first to go there after it was
+/// sent. Each item is one thing's only, and the last sent is matched first: of two from the same place with the same
+/// name, an item that went after both is the later one's.
+#[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+fn matched<'a>(items: &'a [trash::TrashItem], removed: &[Removed]) -> Vec<Option<&'a trash::TrashItem>> {
+    let mut found: Vec<Option<&trash::TrashItem>> = vec![None; removed.len()];
+    let mut taken: HashSet<&std::ffi::OsStr> = HashSet::new();
+    let mut last_first: Vec<usize> = (0..removed.len()).collect();
+    last_first.sort_by_key(|&n| std::cmp::Reverse(removed[n].when));
+    // Those found when they went first: what the bin calls them says which they are.
+    for &n in &last_first {
+        let r = &removed[n];
+        let Some(id) = r.bin_id.as_deref().map(std::ffi::OsStr::new) else { continue };
+        let item = items.iter().find(|i| i.id.as_os_str() == id && from_there(i, r) && went_in_then(i, r));
+        if let Some(item) = item
+            && taken.insert(item.id.as_os_str())
+        {
+            found[n] = Some(item);
+        }
+    }
+    for &n in &last_first {
+        let r = &removed[n];
+        if r.bin_id.is_some() {
+            continue;
+        }
+        let first = items
+            .iter()
+            .filter(|i| !taken.contains(i.id.as_os_str()) && is_the_one(i, r))
+            .min_by_key(|i| i.time_deleted);
+        if let Some(item) = first {
+            taken.insert(item.id.as_os_str());
+            found[n] = Some(item);
+        }
+    }
+    found
+}
+
+/// A Mac's Trash can't be read by a program: what's in it can't be told.
+#[cfg(not(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))))]
+fn held_in_system_bin(_removed: &[Removed]) -> Option<Vec<bool>> {
+    None
 }
 
 /// A Mac's Trash can't be asked to put things back by a program: Finder's Put Back does it.
@@ -1284,6 +1421,76 @@ mod tests {
         assert!(on_network("//nas/music/Kontakt"));
         // A folder that isn't there can't be asked about: only its path tells.
         assert!(!on_network("no such folder/Kontakt"));
+    }
+
+    #[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+    #[test]
+    fn what_is_still_in_the_bin_is_found_by_its_id_or_else_by_place_and_time() {
+        use std::path::PathBuf;
+
+        use super::{Removed, What, held_among};
+        use crate::plugin_space::SpaceKind;
+
+        let folder = PathBuf::from(if cfg!(windows) { r"C:\Presets" } else { "/presets" });
+        let item = |id: &str, name: &str, at: i64| trash::TrashItem {
+            id: id.into(),
+            name: name.into(),
+            original_parent: folder.clone(),
+            time_deleted: at,
+        };
+        let removed = |name: &str, when: i64, bin_id: Option<&str>| {
+            let path = folder.join(name).to_string_lossy().into_owned();
+            let what = What::Plugin(SpaceKind::Presets);
+            let bin_id = bin_id.map(str::to_owned);
+            let binned = bin_id.as_ref().map(|_| when);
+            Removed { real: path.clone(), path, bytes: 10, what, when, binned, binned_zone: None, bin_id }
+        };
+        let mut items = vec![item("1", "a.fxp", 100), item("2", "b.fxp", 200), item("3", "b.fxp", 300)];
+        // What the bin called one of the app's is used again for something else from another folder (Linux does
+        // that once the first is gone), and for a later thing of the same name from the same place.
+        items.push(trash::TrashItem { original_parent: folder.join("Other"), ..item("4", "d.fxp", 400) });
+        items.push(item("5", "e.fxp", 900));
+        // Something of the same name from the same place went to the bin after both of these were sent.
+        items.push(item("6", "f.fxp", 700));
+        let asked = [
+            // Found when it went, and still there.
+            removed("a.fxp", 100, Some("1")),
+            // Found when it went, but gone since: the bin was emptied, or it was put back.
+            removed("c.fxp", 100, Some("9")),
+            // Never found when it went: the first from its place since it went, then the next.
+            removed("b.fxp", 150, None),
+            removed("b.fxp", 250, None),
+            // None left for it, and the one that would do is another's.
+            removed("b.fxp", 250, None),
+            removed("a.fxp", 50, None),
+            // Its id is something else's now.
+            removed("d.fxp", 350, Some("4")),
+            // Its id is a later thing's now: the bin says that went in long after.
+            removed("e.fxp", 500, Some("5")),
+            // Of two never found, the later one's.
+            removed("f.fxp", 600, None),
+            removed("f.fxp", 650, None),
+        ];
+        let held = held_among(&items, &asked);
+        assert_eq!(held, [true, false, true, true, false, false, false, false, false, true]);
+        // Kept before the time was: found by what the bin calls it alone.
+        let older = [Removed { binned: None, ..removed("e.fxp", 500, Some("5")) }];
+        assert_eq!(held_among(&items, &older), [true]);
+
+        // Linux keeps the time without the time zone. Found when the computer was an hour ahead of where it is now,
+        // the bin reads that time an hour later now: that's when it went in, and nothing else is.
+        use chrono::TimeZone;
+        let day = 100_000;
+        let zone = chrono::Local.timestamp_opt(day, 0).earliest().map_or(0, |t| t.offset().local_minus_utc());
+        let in_bin = |at: i64| [item("20", "g.fxp", at)];
+        let asked = |zone_then: i32| [Removed { binned_zone: Some(zone_then), ..removed("g.fxp", day, Some("20")) }];
+        assert_eq!(held_among(&in_bin(day + 3600), &asked(zone + 3600)), [true]);
+        assert_eq!(held_among(&in_bin(day + 3601), &asked(zone + 3600)), [true]);
+        assert_eq!(held_among(&in_bin(day), &asked(zone + 3600)), [false]);
+        // In the same zone, something of the same name from the same place binned an hour later, called the same once
+        // the first had gone, is another thing.
+        assert_eq!(held_among(&in_bin(day), &asked(zone)), [true]);
+        assert_eq!(held_among(&in_bin(day + 3601), &asked(zone)), [false]);
     }
 
     /// Only asks: nothing is sent to the computer's bin here (rule 11).

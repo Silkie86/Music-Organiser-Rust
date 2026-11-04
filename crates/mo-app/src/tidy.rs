@@ -488,7 +488,16 @@ fn old_notes_to_bin(folder: &Path, done_file: &Path, kept_for: Duration, now: Sy
                 let shown = path.to_string_lossy().into_owned();
                 let real = mo_space::real_path(&shown).unwrap_or_else(|| shown.clone());
                 let when = unix_seconds(SystemTime::now());
-                Removed { path: shown, real, bytes: meta.len(), what: What::Note, when, bin_id: None }
+                Removed {
+                    path: shown,
+                    real,
+                    bytes: meta.len(),
+                    what: What::Note,
+                    when,
+                    bin_id: None,
+                    binned: None,
+                    binned_zone: None,
+                }
             });
             match tidied.send(bin, path, meta.len()) {
                 // The first file to go is looked for in the bin. Not there, Windows removed it for good (it asks
