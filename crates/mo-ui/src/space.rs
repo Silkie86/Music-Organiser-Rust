@@ -553,8 +553,9 @@ fn look_for_copies_now(ask: BitwigAsk, index: &mut Option<LibraryIndex>, weak: &
     let job = ask.feed.start(space_bitwig::LOOKING, space_bitwig::LOOKING_WHY);
     // How far it is reaches the window at most every PROGRESS_EVERY, and always at the start and the end.
     let mut told: Option<Instant> = None;
-    // Spread over the low-priority pool's threads (rule 21).
-    let found = background::on_pool(|| {
+    // On the pool for long work over a disk (rule 21): it reads every copy, hundreds of gigabytes, so on the shared
+    // pool it would hold up the pages' quick jobs, and its threads are low in the system's memory there.
+    let found = background::on_bulk_pool(|| {
         space_bitwig::look(&roots, documents.as_deref(), index, &ask.stop, |done, of| {
             if of > 0 {
                 job.progress(done as f32 / of as f32, Some(&space_bitwig::progress_words(done, of)));
