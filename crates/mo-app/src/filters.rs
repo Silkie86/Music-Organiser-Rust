@@ -31,10 +31,16 @@ pub struct Filter {
 /// ones, as the lists it filters match). The menu's chip names the first one picked, whatever order the menu is in.
 pub fn show(choices: &[(String, String)], picked: &[String]) -> Filter {
     let is_picked = |text: &str| picked.iter().any(|p| p.eq_ignore_ascii_case(text));
-    let shown: Vec<Shown> = choices
+    let mut shown: Vec<Shown> = choices
         .iter()
         .map(|(text, count)| Shown { text: text.clone(), count: count.clone(), on: is_picked(text) })
         .collect();
+    // One picked that isn't a choice any more (after a new look at the songs, say) stays on show, picked, to be
+    // unpicked: otherwise it would hide lines with nothing to say so.
+    let counted = choices.iter().any(|(_, count)| !count.is_empty());
+    for gone in picked.iter().filter(|p| !choices.iter().any(|(text, _)| text.eq_ignore_ascii_case(p))) {
+        shown.push(Shown { text: gone.clone(), count: if counted { "0".into() } else { String::new() }, on: true });
+    }
     if shown.len() <= CHIPS_UP_TO {
         return Filter { chips: shown, ..Filter::default() };
     }
@@ -105,6 +111,10 @@ mod tests {
         assert_eq!(long.more_picked, "Synth 3 + 1");
         // As many as there's room for: all chips.
         assert_eq!(show(&plugins[..CHIPS_UP_TO], &[]).chips.len(), CHIPS_UP_TO);
+        // One picked that's no longer a choice stays, picked, with nothing counted.
+        let counted = vec![("Bass".to_owned(), "3".to_owned())];
+        let kept = show(&counted, &["Vocal".to_owned()]);
+        assert_eq!(kept.chips.last(), Some(&Shown { text: "Vocal".into(), count: "0".into(), on: true }));
     }
 
     #[test]

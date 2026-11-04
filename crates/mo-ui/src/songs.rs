@@ -28,6 +28,7 @@ use mo_library::watch::{Changes, FolderWatch};
 use mo_library::{Library, STATUSES, SaveDetail};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel};
 
+use crate::filters::FilterModels;
 use crate::finder::How;
 use crate::{
     AppWindow, CountLine, DetailPair, HealthLine, MenuItem, OlderLine, PanelSong, PluginLine, SampleLine, SaveLine,
@@ -81,6 +82,8 @@ thread_local! {
     static FEED: RefCell<Option<Feed>> = const { RefCell::new(None) };
     /// The save last right-clicked on the Saves tab, by its path, for its menu's lines.
     static MENU_SAVE: RefCell<String> = const { RefCell::new(String::new()) };
+    /// The DAW, status and tag filters' chips and menus, kept from one showing to the next.
+    static FILTER_MODELS: [FilterModels; 3] = Default::default();
 }
 
 /// The list's lines, made from the page's view one at a time as the list draws them, so a new search doesn't build
@@ -164,44 +167,7 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
             crate::presets::show_song(&app, &save);
         }
     });
-    data.set_statuses(strings(STATUSES.iter().copied()));
-    let weak = app.as_weak();
-    data.on_search_edited(move |text| {
-        change(&weak, |f| f.search = text.to_string());
-    });
-    let weak = app.as_weak();
-    data.on_pick(move |kind, value| {
-        let value = (!value.is_empty()).then(|| value.to_string());
-        change(&weak, |f| match kind.as_str() {
-            "daw" => f.daw = value,
-            "status" => f.status = value,
-            "tag" => f.tag = value,
-            _ => {}
-        });
-    });
-    let weak = app.as_weak();
-    data.on_toggle(move |kind| {
-        change(&weak, |f| match kind.as_str() {
-            "favourites" => f.favourites = !f.favourites,
-            "missing" => f.missing = !f.missing,
-            "hide-archived" => f.hide_archived = !f.hide_archived,
-            "only" => f.only = None,
-            _ => {}
-        });
-    });
-    let weak = app.as_weak();
-    data.on_clear(move || {
-        change(&weak, |f| *f = Filters { hide_archived: f.hide_archived, ..Filters::default() });
-    });
-    let weak = app.as_weak();
-    data.on_years_picked(move |a, b| {
-        let span = PAGE.with(|p| year_strip::year_span(&p.borrow().years, a, b));
-        if let Some(span) = span {
-            change(&weak, |f| f.years = Some(span));
-        }
-    });
-    let weak = app.as_weak();
-    data.on_years_cleared(move || change(&weak, |f| f.years = None));
+    wire_filters(app);
     let weak = app.as_weak();
     data.on_select(move |row| {
         if let Some(app) = weak.upgrade() {
@@ -377,8 +343,6 @@ fn show_again(app: &AppWindow, songs: Songs) {
         let p = p.borrow();
         p.picked.and_then(|i| p.songs.rows.get(i)).map(|r| r.song.key.clone())
     });
-    data.set_daws(strings(songs.daws().iter().map(String::as_str)));
-    data.set_tags(strings(songs.tags.iter().map(String::as_str)));
     data.set_message(if songs.rows.is_empty() { NO_SONGS.into() } else { SharedString::new() });
     let row = key.and_then(|k| songs.rows.iter().position(|r| r.song.key == k));
     // Read again only when the picked song's newest save changed: a save of another song leaves its panel as it is.
@@ -404,14 +368,58 @@ fn show_again(app: &AppWindow, songs: Songs) {
     }
 }
 
+/// Wires the search box, the filters, their chips and the year strip.
+fn wire_filters(app: &AppWindow) {
+    let data = app.global::<SongsData>();
+    let weak = app.as_weak();
+    data.on_search_edited(move |text| {
+        change(&weak, |f| f.search = text.to_string());
+    });
+    let weak = app.as_weak();
+    data.on_toggle_choice(move |chip, choice| {
+        change(&weak, |f| f.toggle(&chip, &choice));
+    });
+    let weak = app.as_weak();
+    data.on_clear_chip(move |chip| {
+        change(&weak, |f| f.clear_chip(&chip));
+    });
+    let weak = app.as_weak();
+    data.on_toggle(move |kind| {
+        change(&weak, |f| match kind.as_str() {
+            "favourites" => f.favourites = !f.favourites,
+            "missing" => f.missing = !f.missing,
+            "hide-archived" => f.hide_archived = !f.hide_archived,
+            "only" => f.only = None,
+            _ => {}
+        });
+    });
+    let weak = app.as_weak();
+    data.on_clear(move || {
+        change(&weak, |f| *f = Filters { hide_archived: f.hide_archived, ..Filters::default() });
+    });
+    let weak = app.as_weak();
+    data.on_years_picked(move |a, b| {
+        let span = PAGE.with(|p| year_strip::year_span(&p.borrow().years, a, b));
+        if let Some(span) = span {
+            change(&weak, |f| f.years = Some(span));
+        }
+    });
+    let weak = app.as_weak();
+    data.on_years_cleared(move || change(&weak, |f| f.years = None));
+}
+
+/// Shows made-up songs with the filters wired, for mo-screens (no library, nothing read).
+pub fn show_sample(app: &AppWindow, songs: Songs) {
+    wire_filters(app);
+    show(app, songs);
+}
+
 /// Puts a freshly read list on the page, keeping the filters as they are.
 pub fn show(app: &AppWindow, songs: Songs) {
     let _doing = crate::watchdog::doing("Songs: show the list");
     let data = app.global::<SongsData>();
     data.set_tabs(strings(Tab::ALL.iter().map(|t| t.name())));
     data.set_saves_tab(Tab::Saves.index() as i32);
-    data.set_daws(strings(songs.daws().iter().map(String::as_str)));
-    data.set_tags(strings(songs.tags.iter().map(String::as_str)));
     data.set_message(if songs.rows.is_empty() { NO_SONGS.into() } else { SharedString::new() });
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
@@ -505,9 +513,12 @@ fn refresh(app: &AppWindow) {
         data.set_years_from(from);
         data.set_years_to(to);
         data.set_count(view.count.as_str().into());
-        data.set_daw(f.daw.clone().unwrap_or_default().into());
-        data.set_status(f.status.clone().unwrap_or_default().into());
-        data.set_tag(f.tag.clone().unwrap_or_default().into());
+        let chips = p.songs.chips(f, &view.counts);
+        FILTER_MODELS.with(|m| {
+            data.set_daw_filter(m[0].view(&chips.daw));
+            data.set_status_filter(m[1].view(&chips.status));
+            data.set_tag_filter(m[2].view(&chips.tag));
+        });
         data.set_favourites(f.favourites);
         data.set_missing(f.missing);
         data.set_hide_archived(f.hide_archived);
