@@ -274,3 +274,85 @@ fn a_record_that_cant_be_read_is_left_alone() {
     assert!(report.record_not_saved.is_some());
     assert!(backup.join(".mo-backup/record.tsv").is_dir());
 }
+
+#[test]
+fn a_big_copy_is_kept_when_an_empty_or_cut_short_save_replaces_it() {
+    // Review 2026-11-03: a save a crash left at 0 bytes replaced the only good copy of a big project.
+    let root = fixtures("backup-copy-cut-short");
+    let music = root.join("music");
+    let backup = root.join("backup");
+    fs::create_dir_all(&backup).unwrap();
+    let stop = AtomicBool::new(false);
+    let options = Options { keep_older_below: 32, stamp: "2026-11-04 01.00".into() };
+    write(&music.join("Big.bwproject"), &[1u8; 100], 300);
+    write(&music.join("Bigger.bwproject"), &[1u8; 100], 300);
+    run(&files(&music, &stop).unwrap(), &backup, &options, &stop).unwrap();
+
+    write(&music.join("Big.bwproject"), b"", 200);
+    write(&music.join("Bigger.bwproject"), &[2u8; 80], 200);
+    let lines = run(&files(&music, &stop).unwrap(), &backup, &options, &stop).unwrap().lines;
+    assert_eq!(of_lines(&lines, "Big.bwproject"), Outcome::Updated { kept_older: true }, "emptied: kept");
+    assert_eq!(of_lines(&lines, "Bigger.bwproject"), Outcome::Updated { kept_older: false }, "still most of it");
+    let rel = place_on_backup(&backup, &music.join("Big.bwproject")).unwrap();
+    let older = backup.join(OLDER_VERSIONS).join("2026-11-04 01.00").join(rel.strip_prefix(&backup).unwrap());
+    assert_eq!(fs::read(older).unwrap(), vec![1u8; 100]);
+}
+
+#[test]
+fn a_quick_save_again_of_the_same_size_is_still_copied() {
+    // Review 2026-11-03: saved again within 2 seconds of the copy, at the same size, it was taken as up to date for
+    // good. The record says the file's time moved, so its bytes are compared.
+    let root = fixtures("backup-copy-quick-resave");
+    let music = root.join("music");
+    let backup = root.join("backup");
+    fs::create_dir_all(&backup).unwrap();
+    let stop = AtomicBool::new(false);
+    let song = music.join("Song.flp");
+    write(&song, b"first", 100);
+    let options = Options::new("x");
+    run(&files(&music, &stop).unwrap(), &backup, &options, &stop).unwrap();
+    let first = fs::metadata(&song).unwrap().modified().unwrap();
+    fs::write(&song, b"other").unwrap();
+    fs::File::options().write(true).open(&song).unwrap().set_modified(first + Duration::from_secs(1)).unwrap();
+    let lines = run(&files(&music, &stop).unwrap(), &backup, &options, &stop).unwrap().lines;
+    assert_eq!(of_lines(&lines, "Song.flp"), Outcome::Updated { kept_older: true });
+    assert_eq!(fs::read(place_on_backup(&backup, &song).unwrap()).unwrap(), b"other");
+    let lines = run(&files(&music, &stop).unwrap(), &backup, &options, &stop).unwrap().lines;
+    assert_eq!(of_lines(&lines, "Song.flp"), Outcome::UpToDate);
+}
+
+#[test]
+fn half_copies_a_cut_off_run_left_are_cleared_by_the_next_run() {
+    // Review 2026-11-03 (rule 28): a .mo-part left by a crash was cleared only if that same file came up again.
+    let root = fixtures("backup-copy-leftovers");
+    let backup = root.join("backup");
+    let old = 2 * 60 * 60;
+    let left = backup.join("I/Stems/Stem.wav.mo-part");
+    let placeholder = backup.join(OLDER_VERSIONS).join("2026-11-03 22.00/I/Song (2).flp");
+    let kept = backup.join(OLDER_VERSIONS).join("2026-11-03 22.00/I/Song.flp");
+    let not_named = backup.join("I/Other.wav.mo-part");
+    let recent = backup.join("I/Recent.wav.mo-part");
+    write(&left, b"half", old);
+    write(&placeholder, b"", old);
+    write(&kept, b"old save", old);
+    write(&not_named, b"half", old);
+    write(&recent, b"half", 10);
+    let list = backup.join(".mo-backup/parts-1-1.txt");
+    write(
+        &list,
+        b"part\tI/Stems/Stem.wav.mo-part\nempty\tOlder versions/2026-11-03 22.00/I/Song (2).flp\n\
+          empty\tOlder versions/2026-11-03 22.00/I/Song.flp\npart\t../outside.mo-part\n",
+        old,
+    );
+    let busy = backup.join(".mo-backup/parts-2-2.txt");
+    write(&busy, b"part\tI/Recent.wav.mo-part\n", old);
+
+    let stop = AtomicBool::new(false);
+    run(&[], &backup, &Options::new("x"), &stop).unwrap();
+    assert!(!left.exists() && !placeholder.exists() && !list.exists(), "cleared");
+    assert_eq!(fs::read(&kept).unwrap(), b"old save", "an older version that took its place stays");
+    assert!(not_named.exists(), "only what a list names is removed");
+    assert!(recent.exists() && busy.exists(), "a part written in the last hour may be another run's");
+    let lists: Vec<String> = tree(&backup.join(".mo-backup")).into_iter().filter(|p| p.starts_with("parts-")).collect();
+    assert_eq!(lists, vec!["parts-2-2.txt"], "this run's own list is removed when it ends");
+}
