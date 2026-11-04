@@ -145,12 +145,13 @@ impl SampleLocator {
             // A sample saved as a bare file name has no folder to match: those folders hold thousands of sounds, so
             // the name alone counts only when one file in them has it.
             None => {
-                // Each file once, across every folder: they can hold one another (Bitwig Studio and its Library).
+                // Each file once, across every folder: they can hold one another (Bitwig Studio and its Library), and
+                // the same file can be reached with its slashes leaning either way.
                 let mut seen = HashSet::new();
                 let mut all = content
                     .iter()
                     .flat_map(|c| self.named_in(c, name))
-                    .filter(|f| seen.insert(case::key(f)) && Path::new(f.as_str()).is_file());
+                    .filter(|f| seen.insert(case::key(&f.replace('\\', "/"))) && Path::new(f.as_str()).is_file());
                 match (all.next(), all.next()) {
                     (Some(only), None) => Some(only),
                     _ => None,

@@ -240,12 +240,14 @@ fn a_bare_name_in_folders_inside_one_another_is_one_file() {
     // Bitwig's projects list both "Bitwig Studio" and "Bitwig Studio\Library": a file in the Library is in both.
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mo-library-samples-overlap");
     let _ = fs::remove_dir_all(&dir);
-    let kick = dir.join("Bitwig Studio/Library/Drums/Only Kick.wav");
+    // Joined part by part, as the app joins them; the inner folder is written with "/" on purpose (it may be).
+    let kick = dir.join("Bitwig Studio").join("Library").join("Drums").join("Only Kick.wav");
     fs::create_dir_all(kick.parent().unwrap()).unwrap();
     fs::write(&kick, b"x").unwrap();
     let project = dir.join("Songs/Night/Night.bwproject").to_str().unwrap().to_owned();
     let outer = dir.join("Bitwig Studio").to_str().unwrap().to_owned();
     let inner = dir.join("Bitwig Studio/Library").to_str().unwrap().to_owned();
     let locator = SampleLocator::new(Box::new(move |_| vec![outer.clone(), inner.clone()]));
-    assert_eq!(locator.locate("Only Kick.wav", &project).as_deref(), kick.to_str());
+    let found = locator.locate("Only Kick.wav", &project).unwrap();
+    assert_eq!(fs::canonicalize(found).unwrap(), fs::canonicalize(&kick).unwrap());
 }
