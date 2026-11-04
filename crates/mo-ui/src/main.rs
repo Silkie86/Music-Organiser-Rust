@@ -50,6 +50,8 @@ fn main() -> Result<(), slint::PlatformError> {
     mo_ui::gpu::connect(&app);
     // The window's moves, resizes and hiding, for the freeze lines.
     mo_ui::watchdog::watch_window(&app);
+    // Dragging sounds and clips out to a DAW says here when it can't.
+    mo_ui::drag::connect(feed.clone());
     // The Songs page reads the C# app's library, read-only (CLAUDE.md: until the Rust page is trusted).
     mo_ui::songs::connect(&app, library.clone(), feed.clone());
     mo_ui::sounds::connect(
@@ -83,6 +85,8 @@ fn main() -> Result<(), slint::PlatformError> {
     // Space: the drives your folders are on and the app's own files, looked at once the page shows.
     mo_ui::space::connect(&app, library.clone(), feed.clone());
     app.window().set_maximized(true);
+    // A little after start, the MIDI files older drags left in Temp (rule 28).
+    mo_ui::drag::sweep_later();
     // The watchdog starts once the window is up, so opening it doesn't count as a freeze.
     let watched = feed.clone();
     let sized = app.as_weak();
@@ -109,6 +113,8 @@ fn main() -> Result<(), slint::PlatformError> {
     // A note left open keeps its draft for next time, but the launcher shouldn't wait on it any more.
     mo_ui::note::wait_for_saves();
     mo_ui::note::finish_up();
+    // The MIDI files this run's drags wrote, once the DAW has long read them (rule 28).
+    mo_ui::drag::finish_up();
     // The sweep's and the frames' last few seconds, before the log closes.
     mo_app::sweep_timing::finish();
     mo_app::frame_timing::finish();

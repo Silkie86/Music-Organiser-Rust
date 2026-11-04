@@ -2904,6 +2904,7 @@ dependencies = [
  "mo-space",
  "rayon",
  "serde_json",
+ "swash",
  "thread-priority",
  "tiny-skia 0.12.0",
 ]
