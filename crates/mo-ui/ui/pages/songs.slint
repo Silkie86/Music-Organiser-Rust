@@ -2,7 +2,7 @@
 // scrubber, and the picked song's panel beside it. Agreed with Solomon on 2026-10-31.
 import { ListView } from "std-widgets.slint";
 import { ArrangementPreview } from "arrangement.slint";
-import { Theme, Type, Space, Well, SearchBox, ToggleChip, FilterPicks, FilterView, ListLine, Stars, YearRange, YearBar, Caps, Heart, CloseButton, TabBar, LinkText, StudioButton, ActionKey, MenuLine, MenuCard, Groove, MenuItem, RightClickMenu, NoticeStrip } from "../studio.slint";
+import { Theme, Type, Space, PageHeader, Well, SearchBox, ToggleChip, FilterPicks, FilterView, ListLine, Stars, YearRange, YearBar, Caps, Heart, CloseButton, TabBar, LinkText, StudioButton, ActionKey, MenuLine, MenuCard, Groove, MenuItem, RightClickMenu, NoticeStrip } from "../studio.slint";
 
 // One line of the list: a heading ("This week", "2019") when `heading` isn't empty, else a song.
 export struct SongLine {
@@ -674,23 +674,10 @@ export component SongsPage inherits Rectangle {
         padding: Space.xl;
         padding-bottom: Space.lg;
         spacing: Space.md;
-        HorizontalLayout {
-            spacing: Space.md;
-            vertical-stretch: 0;
-            Text {
-                text: "Songs";
-                font-size: Type.page-title;
-                font-weight: 600;
-                color: Theme.text;
-                vertical-alignment: center;
-            }
-            Text {
-                text: SongsData.count;
-                color: Theme.muted;
-                font-size: Type.body;
-                vertical-alignment: center;
-                horizontal-stretch: 1;
-            }
+        PageHeader {
+            title: "Songs";
+            summary: SongsData.count;
+            job-line: false;
         }
         search-box := SearchBox {
             hint: "Search songs, plugins, tags, notes, a key or a year";
