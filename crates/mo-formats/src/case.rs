@@ -16,11 +16,9 @@ pub fn upper(c: char) -> char {
 
 /// A letter's one-letter small form, as `ToLowerInvariant` gives it (no final-sigma rule).
 pub fn lower(c: char) -> char {
-    match c {
-        // A dotted capital I: its one-letter small form is i, where the full one adds a dot above.
-        '\u{130}' => 'i',
-        _ => one(c.to_lowercase()).unwrap_or(c),
-    }
+    // A dotted capital I has no one-letter small form, so it stays itself, as .NET's invariant lowering keeps it
+    // (and Windows' file names don't match it with i).
+    one(c.to_lowercase()).unwrap_or(c)
 }
 
 fn one(mut letters: impl Iterator<Item = char>) -> Option<char> {
@@ -56,7 +54,7 @@ mod tests {
         assert_eq!(key("Kick.WAV"), key("kick.wav"));
         // No final sigma: the same small sigma wherever it is.
         assert_eq!(to_lower("ΟΔΟΣ"), "οδοσ");
-        assert_eq!(to_lower("\u{130}"), "i");
+        assert_eq!(to_lower("\u{130}"), "\u{130}");
         assert!(eq_ignore_case("stra\u{df}e", "STRA\u{df}E"));
     }
 }
