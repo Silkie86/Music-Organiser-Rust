@@ -102,7 +102,7 @@ struct SpareAsk {
 
 /// One look at your songs. It measures every song's folder and compares its saves of the same size, so it has a thread
 /// of its own, and like the look for Bitwig copies it's only asked for on the page's first look, on Measure again, and
-/// while no look has finished.
+/// while no look has finished; never while one is on, as nothing it measured would be kept for the next.
 struct SongsAsk {
     id: u64,
     library: PathBuf,
@@ -127,7 +127,7 @@ enum Step {
     OldCrashed(u64),
     Spare(u64, space_spare::Found),
     SpareNone(u64),
-    Songs(u64, space_songs::Found),
+    Songs(u64, Box<space_songs::Shown>),
     SongsNone(u64),
     Fixed(PathBuf, Fixing),
     FixDone,
@@ -217,10 +217,10 @@ struct Page {
     spare_looking: bool,
     /// Remove for spare copies: the ones you unticked, and how a removal went.
     removing: Removing,
-    /// The look at your songs, what the last one found (it stays on show while the next one looks), and whether one is
-    /// on.
+    /// The look at your songs, what the last one found as the page shows it (it stays on show while the next one
+    /// looks), and whether one is on.
     songs_look: Looks<SongsAsk>,
-    songs: Option<space_songs::Found>,
+    songs: Option<space_songs::Shown>,
     songs_looking: bool,
     /// What the app's clean-ups put in the Recycle Bin that's still there: none until the bin has been looked in. Of
     /// two that arrive, the later change wins ([`Kept::seq`]).
@@ -470,11 +470,13 @@ fn chosen(app: &AppWindow, id: &str) {
         (MEASURE, _) => {
             look_again(app);
             look_for_copies(app);
-            look_for_songs(app);
-            // A look for old copies or spare copies that's on goes on: it read the library just now, and nothing it
-            // measured is kept for a new one. Neither is looked for while something is being removed or put back: they
-            // look once that's done. Once a removal's result is on show, its card goes back to picking, from what the
-            // new look finds.
+            // A look for old copies, for spare copies or at your songs that's on goes on: it read the library just now,
+            // and nothing it measured is kept for a new one. Neither copies look is asked for while something is being
+            // removed or put back: they look once that's done. Once a removal's result is on show, its card goes back
+            // to picking, from what the new look finds.
+            if !PAGE.with(|p| p.borrow().songs_looking) {
+                look_for_songs(app);
+            }
             let (old, spare) = PAGE.with(|p| {
                 let mut p = p.borrow_mut();
                 if busy(&p) {
@@ -1195,8 +1197,7 @@ fn look_for_spare_now(ask: &SpareAsk) -> Option<space_spare::Found> {
     background::on_bulk_pool(|| space_spare::look(&folders, &used, pro_tools, &ask.stop)).ok()
 }
 
-/// Asks for a new look at your songs, on the page's fifth low-priority thread. One still looking stops: the newest wins
-/// (rule 12).
+/// Asks for a new look at your songs, on the page's fifth low-priority thread, when none is on ([`SongsAsk`]).
 fn look_for_songs(app: &AppWindow) {
     let ask = PAGE.with(|p| {
         let mut p = p.borrow_mut();
@@ -1212,7 +1213,7 @@ fn look_for_songs(app: &AppWindow) {
     let work = move |ask: SongsAsk| {
         let id = ask.id;
         match catch_crash(AssertUnwindSafe(|| look_for_songs_now(&ask))) {
-            Ok(Some(found)) => arrive(&weak, Step::Songs(id, found)),
+            Ok(Some(shown)) => arrive(&weak, Step::Songs(id, Box::new(shown))),
             Ok(None) | Err(_) => arrive(&weak, Step::SongsNone(id)),
         }
     };
@@ -1227,9 +1228,10 @@ fn look_for_songs(app: &AppWindow) {
 }
 
 /// One look at your songs, off the window's thread: the saves, the samples they use and your folders, from the
-/// library (read-only, and closed again before any song is measured), then every song measured. None when it was
-/// stopped for a newer look, or the library couldn't be read (said in the log); with no library there are no songs.
-fn look_for_songs_now(ask: &SongsAsk) -> Option<space_songs::Found> {
+/// library (read-only, and closed again before any song is measured), then every song measured, and what the page
+/// shows of it. None when it was stopped, or the library couldn't be read (said in the log); with no library there are
+/// no songs.
+fn look_for_songs_now(ask: &SongsAsk) -> Option<space_songs::Shown> {
     let from = match open_library(&ask.library) {
         Some(lib) => FromLibrary::read(&lib)
             .map_err(|e| log::warning("Space", &format!("Couldn't read your songs from the library: {e}")))
@@ -1239,7 +1241,8 @@ fn look_for_songs_now(ask: &SongsAsk) -> Option<space_songs::Found> {
     };
     // On the pool for long work that waits on a disk (it walks every song's folder and compares saves of the same
     // size), so the pages' quick jobs don't wait for it (rule 21).
-    background::on_bulk_pool(|| space_songs::look(&from, CompactSettings::default(), &ask.stop)).ok()
+    let found = background::on_bulk_pool(|| space_songs::look(&from, CompactSettings::default(), &ask.stop)).ok()?;
+    Some(space_songs::Shown::of(&found, chrono::Local::now().date_naive()))
 }
 
 /// The folders to look for spare copies in and which formats your saves use, from the library (read-only, and closed
@@ -1368,8 +1371,8 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                     p.spare_looking = false;
                     Changed::Wins
                 }
-                Step::Songs(id, found) if id == p.songs_look.asked => {
-                    p.songs = Some(found);
+                Step::Songs(id, shown) if id == p.songs_look.asked => {
+                    p.songs = Some(*shown);
                     p.songs_looking = false;
                     Changed::Wins
                 }
@@ -1521,8 +1524,7 @@ fn show_wins(app: &AppWindow) {
         let bitwig = space_bitwig::line(p.bitwig.as_ref(), p.bitwig_looking);
         let old = space_old::line(p.old.as_ref(), &p.old_removing);
         let spare = space_spare::line(p.spare.as_ref(), p.spare_looking, &p.removing);
-        let compact = space_songs::compact_line(p.songs.as_ref(), p.songs_looking);
-        let thin = space_songs::thin_line(p.songs.as_ref());
+        let [compact, thin] = space_songs::lines(p.songs.as_ref(), p.songs_looking);
         if (bitwig.is_none() && p.picked == BITWIG_COPIES)
             || (old.is_none() && p.picked == OLD_COPIES)
             || (spare.is_none() && p.picked == SPARE_COPIES)
@@ -1538,7 +1540,7 @@ fn show_wins(app: &AppWindow) {
         let nones = [
             space_bitwig::none_note(p.bitwig.as_ref()),
             space_spare::none_note(p.spare.as_ref()),
-            space_songs::none_note(p.songs.as_ref()),
+            p.songs.as_ref().map_or("", |s| s.none_note),
         ];
         data.set_wins_note(space::wins_note(&nones).into());
     });
@@ -1606,11 +1608,7 @@ fn show_card(app: &AppWindow) {
             }
             // Read-only for now: Measure again waits while a look at your songs is on.
             space_songs::COMPACT | space_songs::THIN => {
-                let card = if p.picked == space_songs::COMPACT {
-                    space_songs::compact_card(p.songs.as_ref())
-                } else {
-                    space_songs::thin_card(p.songs.as_ref(), chrono::Local::now().date_naive())
-                };
+                let card = space_songs::card(p.songs.as_ref(), &p.picked);
                 let measure = measure_button(&p);
                 let enabled = measure.enabled && !p.songs_looking;
                 (card, vec![Button { enabled, ..measure }])
@@ -1694,7 +1692,7 @@ pub fn show_sample(app: &AppWindow, sample: Sample, picked: &str) {
         p.old_removing = sample.old_removing;
         p.spare = Some(sample.spare);
         p.removing = sample.removing;
-        p.songs = Some(sample.songs);
+        p.songs = Some(space_songs::Shown::of(&sample.songs, chrono::Local::now().date_naive()));
         p.kept = sample.kept;
         p.put_backs = sample.put_backs;
         p.picked = picked.to_owned();

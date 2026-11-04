@@ -48,7 +48,7 @@ impl Others {
     pub fn measure(
         &self,
         saves: &[SongSave],
-        opens: &str,
+        opens: Option<&str>,
         roots: &[String],
         used: &[String],
         settings: CompactSettings,
@@ -63,8 +63,9 @@ impl Others {
             shared_names: &self.shared_names,
         };
         let mut report = measure(saves, roots, used, settings, Some(&elsewhere), stop)?;
-        let opens = key(opens);
-        report.items.retain(|i| key(&i.path) != opens);
+        if let Some(opens) = opens.map(key) {
+            report.items.retain(|i| key(&i.path) != opens);
+        }
         Ok(report)
     }
 }

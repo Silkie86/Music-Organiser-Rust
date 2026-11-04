@@ -24,7 +24,7 @@ use mo_backup::pack::{Packed, Packer, lists, owners, pack_names};
 use mo_backup::plan::{self, Folders, LeftOut, Level, Plan, Rules, SongInfo, Used};
 use mo_formats::case;
 use mo_library::Library;
-use mo_library::songs::{Song, group_songs, marked};
+use mo_library::songs::{Song, file_id, group_songs, marked};
 use mo_space::size::{FileEntry, size_text};
 use mo_space::song::{CompactSettings, DEFAULT_KEEP_BACKUPS, SongSave, SongSpaceReport};
 use rayon::prelude::*;
@@ -353,6 +353,16 @@ fn sample_file(sample: &str, save_folder: &str) -> Option<PathBuf> {
     }
 }
 
+/// The save `song` opens, among the saves measured: its own (`own`), or when only copies of its saves are in the folders,
+/// the copy of that save (none when the library can't tell which copy it is).
+fn opens_of(song: &Song, own: bool) -> Option<&str> {
+    if own {
+        return Some(&song.latest.path);
+    }
+    let id = file_id(&song.latest)?;
+    song.copies.iter().find(|c| file_id(c).is_some_and(|c| c == id)).map(|c| c.path.as_str())
+}
+
 /// What the library knows of each save's size, for finding big changes. A save the reader couldn't read says
 /// nothing (its counts would read as everything taken away). Bars are counted as four beats.
 fn shapes(saves: &[&mo_library::Save]) -> Vec<plan::SaveShape> {
@@ -423,6 +433,7 @@ pub fn prepare(library: &Library, settings: &Settings, stop: &AtomicBool) -> Res
             let picked: Vec<&mo_library::Save> =
                 if own { song.saves().collect() } else { song.copies.iter().collect() };
             let saves = song_saves(picked.iter().copied());
+            let opens = opens_of(song, own);
             let mut used: Vec<PathBuf> = Vec::new();
             let mut used_text: Vec<String> = Vec::new();
             for v in song.saves().chain(&song.copies) {
@@ -433,16 +444,13 @@ pub fn prepare(library: &Library, settings: &Settings, stop: &AtomicBool) -> Res
                     }
                 }
             }
-            let report =
-                others.measure(&saves, &song.latest.path, &roots, &used_text, compact, stop).map_err(|_| ())?;
+            let report = others.measure(&saves, opens, &roots, &used_text, compact, stop).map_err(|_| ())?;
             // Saves you mark as milestones by their name always go, and so do saves where the song changed a lot, and
             // the save the song opens (its highest-numbered one: the newest by time, which always goes, can be another).
             let mut milestones: Vec<String> =
                 picked.iter().filter(|v| marked(&v.name)).map(|v| v.path.clone()).collect();
             milestones.extend(plan::big_changes(&shapes(&picked)));
-            if own {
-                milestones.push(song.latest.path.clone());
-            }
+            milestones.extend(opens.map(str::to_owned));
             Ok(Measured { saves, report, milestones, used, id: song_id(song) })
         })
         .collect::<Result<_, ()>>()
@@ -1216,6 +1224,33 @@ mod tests {
         // A plan made for another folder list isn't shown.
         s.add_folder(PathBuf::from("/more"));
         assert_eq!(page_lines(&s, room, PlanState::Ready(&prepared), now).goes, "");
+    }
+
+    #[test]
+    fn the_save_a_song_opens_is_its_own_or_the_copy_of_it() {
+        // Named as the library names them on Windows, whatever the slashes mean here.
+        let save = |folder: &str, name: &str, size: i64| mo_library::Save {
+            path: format!(r"{folder}\{name}.flp"),
+            name: name.to_owned(),
+            daw: "FL Studio".to_owned(),
+            size,
+            note_count: 10,
+            length_bars: 8,
+            track_count: 3,
+            ..mo_library::Save::default()
+        };
+        let song = Song {
+            name: "Night Drive".to_owned(),
+            latest: save(r"D:\Songs", "Night Drive_3", 300),
+            older: vec![save(r"D:\Songs", "Night Drive_2", 200)],
+            key: "night drive".to_owned(),
+            copies: vec![save(r"E:\Copy", "Night Drive_2", 200), save(r"E:\Copy", "Night Drive_3", 300)],
+        };
+        assert_eq!(opens_of(&song, true), Some(r"D:\Songs\Night Drive_3.flp"));
+        assert_eq!(opens_of(&song, false), Some(r"E:\Copy\Night Drive_3.flp"));
+        // A save the library can't tell apart from others has no copy it can name.
+        let unknown = Song { latest: mo_library::Save { note_count: -1, ..song.latest.clone() }, ..song };
+        assert_eq!(opens_of(&unknown, false), None);
     }
 
     #[test]

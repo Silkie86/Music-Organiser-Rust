@@ -3,7 +3,8 @@
 //! wins first: "Songs that can be compacted" (the same save twice, autosaves past the newest few, caches the DAW makes
 //! again) and "Older saves from the middle of a sitting". Each song is measured by mo-space's `song::measure` (through
 //! [`crate::song_room`], as the backup measures them), on the app's low-priority pool; this says every word of the two
-//! lines and their cards. Nothing is removed yet: sending what you pick to the Recycle Bin, with Put back, comes next.
+//! lines and their cards, worked out once on the look's thread ([`Shown`]). Nothing is removed yet: sending what you
+//! pick to the Recycle Bin, with Put back, comes next.
 //!
 //! The save a song opens always stays (see [`crate::song_room::Others::measure`]), and saves the library says have
 //! gone, or that no reader knows, aren't measured.
@@ -22,8 +23,8 @@ use mo_space::size::size_text;
 use mo_space::song::{CompactItem, CompactKind, CompactSettings, SongSpaceReport};
 use rayon::prelude::*;
 
+use crate::drag_out::count_of;
 use crate::song_room::{Others, song_saves};
-use crate::songs::thousands;
 use crate::space::{Card, Line, Opens, Part, and_list};
 
 /// The Songs that can be compacted line's id.
@@ -131,29 +132,29 @@ fn measure_song(
 ) -> Result<Option<SongRoom>, Stopped> {
     // A save that's gone can't be compacted, and one no reader knows isn't a project the app can vouch for.
     let present: Vec<&Save> = song.saves().filter(|v| !v.file_missing && is_project_file(&v.path)).collect();
-    if present.is_empty() {
-        return Ok(None);
-    }
+    // The first is the save the song opens (saves come that way), or when that one isn't a project the app knows,
+    // its highest-numbered save that is.
+    let Some(opens) = present.first() else { return Ok(None) };
     let used: Vec<String> =
         song.saves().chain(&song.copies).flat_map(|v| from.samples.get(&v.id).into_iter().flatten().cloned()).collect();
     let saves = song_saves(present.iter().copied());
-    let report = others.measure(&saves, &song.latest.path, &from.roots, &used, settings, stop)?;
+    let report = others.measure(&saves, Some(&opens.path), &from.roots, &used, settings, stop)?;
     Ok((!report.items.is_empty()).then(|| SongRoom {
         name: song.name.clone(),
-        opens: song.latest.path.clone(),
+        opens: opens.path.clone(),
         saves: present.len(),
         report,
     }))
 }
 
-/// "1 song", "12 songs".
+/// "1 song", "1,200 songs".
 fn songs_words(n: usize) -> String {
-    if n == 1 { "1 song".to_owned() } else { format!("{} songs", thousands(n)) }
+    count_of(n, "song", "songs")
 }
 
 /// "1 save", "46 saves".
 fn saves_words(n: usize) -> String {
-    if n == 1 { "1 save".to_owned() } else { format!("{} saves", thousands(n)) }
+    count_of(n, "save", "saves")
 }
 
 /// What one kind of Compact holds across your songs: how many things, their room, and each song's share, biggest
@@ -222,7 +223,7 @@ fn capitalised(words: &str) -> String {
 /// sorted by). While the first look is on (`looking`, nothing found yet) it says so; none when a look found nothing
 /// in any song, or none has finished and none is on. Audio no save seems to use frees nothing until you pick it, so
 /// with only that the line shows no size.
-pub fn compact_line(found: Option<&Found>, looking: bool) -> Option<(u64, Line)> {
+fn compact_line(found: Option<&Found>, looking: bool) -> Option<(u64, Line)> {
     let line = |why: String, size: String| Line { id: COMPACT, title: "Songs that can be compacted", why, size };
     let Some(found) = found else {
         return looking.then(|| (0, line(LOOKING.to_owned(), "Measuring…".to_owned())));
@@ -248,7 +249,7 @@ pub fn compact_line(found: Option<&Found>, looking: bool) -> Option<(u64, Line)>
 }
 
 /// The Older saves from the middle of a sitting line, with what thinning would free; none when no song has any.
-pub fn thin_line(found: Option<&Found>) -> Option<(u64, Line)> {
+fn thin_line(found: Option<&Found>) -> Option<(u64, Line)> {
     let found = found?;
     let (saves, songs) = found.songs.iter().fold((0, 0), |(saves, songs), s| {
         let n = s.items(CompactKind::ThinnedSave).count();
@@ -270,7 +271,7 @@ pub fn thin_line(found: Option<&Found>) -> Option<(u64, Line)> {
 }
 
 /// What the page says under Biggest wins first about songs: that a look found nothing to compact, or nothing.
-pub fn none_note(found: Option<&Found>) -> &'static str {
+fn none_note(found: Option<&Found>) -> &'static str {
     match found {
         Some(f) if f.songs.is_empty() => NONE_FOUND,
         _ => "",
@@ -281,23 +282,24 @@ pub fn none_note(found: Option<&Found>) -> &'static str {
 fn kind_part(k: &Kind<'_>, keep: usize) -> Part {
     let (name, what) = match k.kind {
         CompactKind::SameSave => (
-            format!("{} identical {}", thousands(k.count), if k.count == 1 { "save" } else { "saves" }),
+            count_of(k.count, "identical save", "identical saves"),
             "Byte for byte the same as a save that stays".to_owned(),
         ),
         CompactKind::Backup => (
-            format!("{} old {}", thousands(k.count), if k.count == 1 { "autosave" } else { "autosaves" }),
+            count_of(k.count, "old autosave", "old autosaves"),
             capitalised(&format!("{} of each song", past_newest(keep))),
         ),
         CompactKind::Cache => {
             ("Caches the DAW rebuilds".to_owned(), "Studio One makes them again when the song opens".to_owned())
         }
-        CompactKind::UnusedAudio | CompactKind::ThinnedSave => (
-            format!(
-                "{} audio {} no save seems to use",
-                thousands(k.count),
-                if k.count == 1 { "file" } else { "files" }
-            ),
+        CompactKind::UnusedAudio => (
+            count_of(k.count, "audio file no save seems to use", "audio files no save seems to use"),
             "Not in the figure above: listen to each first, as none goes unless you pick it".to_owned(),
+        ),
+        // On a card of their own, not this one.
+        CompactKind::ThinnedSave => (
+            format!("{} from the middle of a sitting", saves_words(k.count)),
+            "The last save of each sitting stays".to_owned(),
         ),
     };
     Part { name, what, size: size_text(k.bytes), ..Part::default() }
@@ -308,13 +310,7 @@ fn kind_part(k: &Kind<'_>, keep: usize) -> Part {
 fn song_what(song: &SongRoom, kind: CompactKind, n: usize) -> String {
     match kind {
         CompactKind::SameSave | CompactKind::ThinnedSave => saves_words(n),
-        CompactKind::Backup => {
-            if n == 1 {
-                "1 autosave".to_owned()
-            } else {
-                format!("{} autosaves", thousands(n))
-            }
-        }
+        CompactKind::Backup => count_of(n, "autosave", "autosaves"),
         CompactKind::Cache => "Its Cache folder".to_owned(),
         CompactKind::UnusedAudio => {
             let names: Vec<&str> = song.items(kind).map(|i| file_name(&i.path)).take(2).collect();
@@ -352,11 +348,7 @@ fn listed_parts<'a>(
     let rest = songs.get(listed..).unwrap_or_default();
     if !rest.is_empty() {
         parts.push(Part {
-            name: if rest.len() == 1 {
-                "And 1 more song".to_owned()
-            } else {
-                format!("And {} more songs", thousands(rest.len()))
-            },
+            name: format!("And {}", count_of(rest.len(), "more song", "more songs")),
             size: size_text(rest.iter().fold(0u64, |sum, (_, _, b)| sum.saturating_add(*b))),
             under,
             ..Part::default()
@@ -367,7 +359,7 @@ fn listed_parts<'a>(
 
 /// The Songs that can be compacted card: each kind with its room, biggest first (audio no save seems to use last, as
 /// it isn't counted), and under each the songs it's in, biggest first.
-pub fn compact_card(found: Option<&Found>) -> Card {
+fn compact_card(found: Option<&Found>) -> Card {
     let keep = found.map_or(CompactSettings::default().keep_backups, |f| f.settings.keep_backups);
     let kinds = found.map(kinds).unwrap_or_default();
     let bytes = found.map(Found::compact_bytes);
@@ -439,7 +431,7 @@ fn sittings_words(days: &BTreeSet<NaiveDate>, this_year: i32) -> String {
 
 /// The Older saves from the middle of a sitting card: each song with saves thinning would take, biggest first, with
 /// the days of those sittings and how many saves stay. `today` says which year goes without saying.
-pub fn thin_card(found: Option<&Found>, today: NaiveDate) -> Card {
+fn thin_card(found: Option<&Found>, today: NaiveDate) -> Card {
     let hours = found.map_or(CompactSettings::default().sitting_hours, |f| f.settings.sitting_hours);
     let mut songs: Vec<(&SongRoom, usize, u64)> = found
         .map(|f| {
@@ -457,8 +449,7 @@ pub fn thin_card(found: Option<&Found>, today: NaiveDate) -> Card {
     let parts = listed_parts(&songs, THIN_LISTED, false, |s, n| {
         let days: BTreeSet<NaiveDate> =
             s.items(CompactKind::ThinnedSave).filter_map(|i| i.modified).map(|m| m.date()).collect();
-        let stay = s.saves.saturating_sub(n);
-        let stay = if stay == 1 { "1 save stays".to_owned() } else { format!("{} saves stay", thousands(stay)) };
+        let stay = count_of(s.saves.saturating_sub(n), "save stays", "saves stay");
         (format!("{}: {}", s.name, saves_words(n)), format!("{}; {stay}", sittings_words(&days, today.year())))
     });
     Card {
@@ -483,6 +474,51 @@ pub fn thin_card(found: Option<&Found>, today: NaiveDate) -> Card {
         parts,
         room: String::new(),
         warning: String::new(),
+    }
+}
+
+/// What the page shows of a look at your songs: its two lines under Biggest wins first, their cards and the note under
+/// the wins. Worked out once, on the look's thread, as a library can have thousands of songs: the window's thread only
+/// puts it on show (rule 12).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Shown {
+    pub compact: Option<(u64, Line)>,
+    pub thin: Option<(u64, Line)>,
+    pub compact_card: Card,
+    pub thin_card: Card,
+    pub none_note: &'static str,
+}
+
+impl Shown {
+    /// What `found` shows. `today` says which year goes without saying on the thinning card.
+    pub fn of(found: &Found, today: NaiveDate) -> Shown {
+        Shown {
+            compact: compact_line(Some(found), false),
+            thin: thin_line(Some(found)),
+            compact_card: compact_card(Some(found)),
+            thin_card: thin_card(Some(found), today),
+            none_note: none_note(Some(found)),
+        }
+    }
+}
+
+/// The two lines under Biggest wins first, compact then thin: what the last look found (`shown`, which stays on show
+/// while the next one looks), or while the first look is on (`looking`), that it's measuring.
+pub fn lines(shown: Option<&Shown>, looking: bool) -> [Option<(u64, Line)>; 2] {
+    match shown {
+        Some(s) => [s.compact.clone(), s.thin.clone()],
+        None => [compact_line(None, looking), None],
+    }
+}
+
+/// The picked line's card ([`COMPACT`] or [`THIN`]): what the last look found, or that it's measuring.
+pub fn card(shown: Option<&Shown>, picked: &str) -> Card {
+    match (shown, picked == COMPACT) {
+        (Some(s), true) => s.compact_card.clone(),
+        (Some(s), false) => s.thin_card.clone(),
+        (None, true) => compact_card(None),
+        // With no song measured yet, there's no day to say.
+        (None, false) => thin_card(None, NaiveDate::default()),
     }
 }
 
@@ -647,6 +683,28 @@ mod tests {
         assert_eq!(card.note, NEXT);
         let none = thin_card(Some(&Found::default()), NaiveDate::default());
         assert!(none.parts.is_empty() && none.note.is_empty() && none.big == "Nothing to free");
+    }
+
+    #[test]
+    fn what_shows_is_worked_out_once_and_says_it_is_measuring_until_a_look_finishes() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 4).unwrap_or_default();
+        let found = sample();
+        let shown = Shown::of(&found, today);
+        // What the last look found stays on show while the next one looks.
+        assert_eq!(lines(Some(&shown), true), [compact_line(Some(&found), false), thin_line(Some(&found))]);
+        assert_eq!(card(Some(&shown), COMPACT), compact_card(Some(&found)));
+        assert_eq!(card(Some(&shown), THIN), thin_card(Some(&found), today));
+        assert_eq!(shown.none_note, "");
+        // Before any look has finished, the compact line says one is measuring while it is, and the cards wait for it.
+        let [compact, thin] = lines(None, true);
+        assert_eq!((compact.map(|(_, l)| l.why), thin), (Some(LOOKING.to_owned()), None));
+        assert_eq!(lines(None, false), [None, None]);
+        assert_eq!((card(None, COMPACT).big.as_str(), card(None, THIN).big.as_str()), ("Measuring…", "Measuring…"));
+        let none = Shown::of(&Found::default(), today);
+        assert_eq!((none.compact, none.thin, none.none_note), (None, None, NONE_FOUND));
+        // Saves from the middle of a sitting have their own words, should they ever be a kind on a card.
+        let thinned = Kind { kind: CompactKind::ThinnedSave, count: 2, bytes: MB, songs: Vec::new() };
+        assert_eq!(kind_part(&thinned, 5).name, "2 saves from the middle of a sitting");
     }
 
     #[test]
