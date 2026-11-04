@@ -12,7 +12,7 @@ const MB: u64 = 1 << 20;
 
 /// The backup somewhere none of the test's files are, and no folder marked "always".
 fn nowhere() -> Folders<'static> {
-    Folders { backup: Path::new("/backup"), always: &[] }
+    Folders { backup: Path::new("/backup"), always: &[], slimmed: &[] }
 }
 
 /// A save, written `hours` after noon on 14 March 2026.
@@ -166,7 +166,7 @@ fn a_songs_own_audio_goes_even_when_no_project_names_it() {
         files,
         &songs,
         &Used::default(),
-        Folders { backup: Path::new("/backup"), always: &always },
+        Folders { backup: Path::new("/backup"), always: &always, slimmed: &[] },
         Rules::default(),
     );
     assert!(goes(&p, "/exports/Old master.wav"), "a folder you mark always goes");
@@ -192,7 +192,7 @@ fn the_newest_save_goes_whatever_another_songs_list_says() {
 #[test]
 fn the_backup_never_copies_itself() {
     let files = vec![file("/music/Backup of music/music/a.wav", 10), file("/music/a.wav", 10)];
-    let folders = Folders { backup: Path::new("/music/Backup of music"), always: &[] };
+    let folders = Folders { backup: Path::new("/music/Backup of music"), always: &[], slimmed: &[] };
     let p = plan(files, &[], &Used::default(), folders, Rules::default());
     assert_eq!(p.copy.len(), 1);
     assert!(goes(&p, "/music/a.wav"));
@@ -330,4 +330,81 @@ fn big_changes_are_where_the_song_grew_or_lost_a_lot() {
     let mut unknown = [shape(0, 4, 10, None), shape(1, 9, 10, None)];
     unknown[0].tracks = None;
     assert!(big_changes(&unknown).is_empty());
+}
+
+#[test]
+fn everything_in_a_whole_folder_goes_whatever_the_level() {
+    // Review 2026-11-03 (high): a Whole folder kept only its unused sounds; its saves, autosaves and caches were still
+    // left out by the level.
+    let report = SongSpaceReport {
+        items: vec![
+            item(CompactKind::SameSave, "/bitwig/Projects/Tune/Tune copy.bwproject"),
+            item(CompactKind::ThinnedSave, "/bitwig/Projects/Tune/Tune 2.bwproject"),
+            item(CompactKind::Backup, "/bitwig/Projects/Tune/autosave/Tune 1.bwproject"),
+            item(CompactKind::Cache, "/bitwig/Projects/Tune/Cache"),
+        ],
+        ..SongSpaceReport::default()
+    };
+    let saves = [
+        save("/bitwig/Projects/Tune/Tune.bwproject", 0),
+        save("/bitwig/Projects/Tune/Tune 2.bwproject", 1),
+        save("/bitwig/Projects/Tune/Tune copy.bwproject", 2),
+        save("/bitwig/Projects/Tune/Tune 3.bwproject", 30),
+    ];
+    let files = vec![
+        file("/bitwig/Projects/Tune/Tune.bwproject", 6 * MB),
+        file("/bitwig/Projects/Tune/Tune 2.bwproject", 6 * MB),
+        file("/bitwig/Projects/Tune/Tune copy.bwproject", 6 * MB),
+        file("/bitwig/Projects/Tune/Tune 3.bwproject", 6 * MB),
+        file("/bitwig/Projects/Tune/autosave/Tune 1.bwproject", 6 * MB),
+        file("/bitwig/Projects/Tune/Cache/a.cache", 100),
+        file("/bitwig/Projects/Tune/Unused take.wav", 40 * MB),
+    ];
+    let songs = [SongInfo { report: &report, saves: &saves, milestones: &[] }];
+    let always = [PathBuf::from("/bitwig/Projects")];
+    let whole = Folders { backup: Path::new("/backup"), always: &always, slimmed: &[] };
+    for level in [Level::Slim, Level::Essentials] {
+        let rules = Rules { level, big_saves: BigSaves::NewestOnly, ..Rules::default() };
+        let p = plan(files.clone(), &songs, &Used::default(), whole, rules);
+        assert!(p.left_out.is_empty(), "{level:?}: {:?}", p.left_out);
+        assert_eq!(p.copy.len(), files.len());
+        // The same files outside a Whole folder are left out, so the test means something.
+        let p = plan(files.clone(), &songs, &Used::default(), nowhere(), rules);
+        assert!(!p.left_out.is_empty(), "{level:?}");
+    }
+}
+
+#[test]
+fn a_slimmed_folder_inside_a_whole_one_keeps_its_choice() {
+    let report = SongSpaceReport {
+        items: vec![item(CompactKind::Backup, "/music/Backup/Song overwritten at 1.flp")],
+        ..SongSpaceReport::default()
+    };
+    let saves = [save("/music/Songs/Song.flp", 0)];
+    let files = vec![
+        file("/music/Songs/Song.flp", MB),
+        file("/music/Backup/Song overwritten at 1.flp", MB),
+        file("/music/Samples/Unused Stem.wav", 50 * MB),
+        file("/music/Samples/Keep/Unused Pad.wav", 50 * MB),
+        file("/music/Loose Stem.wav", 50 * MB),
+    ];
+    let songs = [SongInfo { report: &report, saves: &saves, milestones: &[] }];
+    let always = [PathBuf::from("/music"), PathBuf::from("/music/Samples/Keep")];
+    let slimmed = [PathBuf::from("/music/Backup"), PathBuf::from("/music/Samples")];
+    let folders = Folders { backup: Path::new("/backup"), always: &always, slimmed: &slimmed };
+    let p = plan(files, &songs, &Used::default(), folders, Rules::default());
+    assert_eq!(why(&p, "/music/Backup/Song overwritten at 1.flp"), Some(LeftOut::OldAutosave));
+    assert_eq!(why(&p, "/music/Samples/Unused Stem.wav"), Some(LeftOut::UnusedSound), "the Whole folder above it");
+    assert!(goes(&p, "/music/Samples/Keep/Unused Pad.wav"), "a Whole folder inside a Slimmed one");
+    assert!(goes(&p, "/music/Loose Stem.wav"));
+    assert!(goes(&p, "/music/Songs/Song.flp"));
+}
+
+#[test]
+fn a_whole_drive_counts_as_a_whole_folder() {
+    let always = [PathBuf::from(if cfg!(windows) { r"K:\" } else { "/" })];
+    let path = if cfg!(windows) { r"K:\Stems\Unused Stem.wav" } else { "/Stems/Unused Stem.wav" };
+    let folders = Folders { backup: Path::new("/backup"), always: &always, slimmed: &[] };
+    let p = plan(vec![file(path, 50 * MB)], &[], &Used::default(), folders, Rules::default());
+    assert!(goes(&p, path));
 }

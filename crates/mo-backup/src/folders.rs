@@ -66,6 +66,8 @@ pub struct Gathered {
     pub files: Vec<FileEntry>,
     /// The whole folders: pass as [`crate::plan::Folders::always`].
     pub always: Vec<PathBuf>,
+    /// The slimmed folders: pass as [`crate::plan::Folders::slimmed`], so one inside a whole folder keeps its choice.
+    pub slimmed: Vec<PathBuf>,
     /// Folders in the list that aren't there now.
     pub missing: Vec<PathBuf>,
 }
@@ -89,8 +91,9 @@ pub fn gather(list: &[Folder], stop: &AtomicBool) -> Result<Gathered, Stopped> {
             out.missing.push(f.path.clone());
             continue;
         }
-        if f.mode == Mode::Whole {
-            out.always.push(f.path.clone());
+        match f.mode {
+            Mode::Whole => out.always.push(f.path.clone()),
+            Mode::Slimmed => out.slimmed.push(f.path.clone()),
         }
         // Walked as part of another folder in the list (the first of two the same is walked).
         let covered = list.iter().enumerate().any(|(j, o)| {

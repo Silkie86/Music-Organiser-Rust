@@ -18,7 +18,7 @@
 //!   audio beside a save or in a song's own folder (bounces, stems, recordings), anything in a folder you mark
 //!   "always", sample libraries (unless you choose to leave unused ones out), presets, MIDI and the rest.
 //!
-//! Your newest save of each song, and any save you mark as a milestone, always goes.
+//! Your newest save of each song, any save you mark as a milestone, and everything in a Whole folder always go.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -287,9 +287,40 @@ pub struct Folders<'a> {
     /// Where the backup goes. Files already in it are never planned again, so a backup inside one of your music
     /// folders doesn't copy itself into itself.
     pub backup: &'a Path,
-    /// Folders whose files always go, whatever their size and whether a project uses them (your bounces and exports
-    /// folder, say).
+    /// Folders whose files always go, whatever the level says: every save, autosave and cache in them, whatever its
+    /// size and whether a project uses it (your bounces and exports folder, say, or a folder on the list set to
+    /// Whole).
     pub always: &'a [PathBuf],
+    /// Folders on the list set to Slimmed: the level's rules decide for their files, even inside a Whole folder.
+    pub slimmed: &'a [PathBuf],
+}
+
+/// The folders on the list, each Whole or not: a file follows the nearest one it's in, so a Slimmed folder inside a
+/// Whole one keeps its own choice (and a Whole one inside a Slimmed one too).
+#[derive(Clone, Debug, Default)]
+pub struct Listed(HashMap<String, bool>);
+
+impl Listed {
+    /// The Whole folders and the Slimmed ones. A folder in both lists counts as Whole.
+    pub fn new(always: &[PathBuf], slimmed: &[PathBuf]) -> Listed {
+        let mut map = HashMap::new();
+        for f in slimmed {
+            map.insert(key(&f.to_string_lossy()), false);
+        }
+        for f in always {
+            map.insert(key(&f.to_string_lossy()), true);
+        }
+        Listed(map)
+    }
+
+    /// Whether everything at this path goes: the nearest listed folder it's in is Whole.
+    pub fn whole(&self, path: &Path) -> bool {
+        self.whole_key(&key(&path.to_string_lossy()))
+    }
+
+    fn whole_key(&self, k: &str) -> bool {
+        folders_above(k).find_map(|f| self.0.get(f)).copied().unwrap_or(false)
+    }
 }
 
 /// Sorts the walked files into what goes and what's left out. A file met twice (two folders in the list that overlap)
@@ -319,7 +350,6 @@ pub fn plan(files: Vec<FileEntry>, songs: &[SongInfo<'_>], used: &Used, folders:
             song_folders.insert(key(&song.report.folder));
         }
     }
-    song_folders.extend(folders.always.iter().map(|f| key(&f.to_string_lossy())));
     let mut compact: HashMap<String, CompactKind> = HashMap::new();
     let mut caches: HashSet<String> = HashSet::new();
     for item in songs.iter().flat_map(|s| &s.report.items) {
@@ -335,7 +365,9 @@ pub fn plan(files: Vec<FileEntry>, songs: &[SongInfo<'_>], used: &Used, folders:
             }
         }
     }
-    let ctx = Context { compact, caches, newest, saves, milestone_saves, beside_saves, song_folders, used, rules };
+    let listed = Listed::new(folders.always, folders.slimmed);
+    let ctx =
+        Context { compact, caches, newest, saves, milestone_saves, beside_saves, song_folders, listed, used, rules };
     let backup = key(&folders.backup.to_string_lossy());
 
     let mut seen: HashSet<String> = HashSet::new();
@@ -368,6 +400,7 @@ struct Context<'a> {
     milestone_saves: HashSet<String>,
     beside_saves: HashSet<String>,
     song_folders: HashSet<String>,
+    listed: Listed,
     used: &'a Used,
     rules: Rules,
 }
@@ -375,7 +408,8 @@ struct Context<'a> {
 impl Context<'_> {
     fn left_out(&self, k: &str, path: &str, size: u64) -> Option<LeftOut> {
         let rules = self.rules;
-        if rules.level == Level::Full || self.milestone_saves.contains(k) {
+        // Full, a milestone, or a file in a Whole folder: it goes, whatever the level says.
+        if rules.level == Level::Full || self.milestone_saves.contains(k) || self.listed.whole_key(k) {
             return None;
         }
         // Essentials: a song's saves are its milestones, whatever their size (a milestone that's a byte copy of

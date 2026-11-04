@@ -30,6 +30,7 @@ fn folders_are_walked_once_and_keep_their_own_choice() {
     let got = gather(&list, &AtomicBool::new(false)).unwrap();
     assert_eq!(got.files.len(), 2, "the inner folder isn't walked twice");
     assert_eq!(got.always, vec![bounces]);
+    assert_eq!(got.slimmed, vec![music]);
     assert_eq!(got.missing, vec![root.join("Unplugged")]);
 }
 
