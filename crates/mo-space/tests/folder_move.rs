@@ -943,6 +943,96 @@ fn a_file_that_turns_into_a_folder_as_the_first_pass_copies_is_copied_as_that_fo
 }
 
 #[test]
+fn a_folder_that_turns_into_a_link_as_the_folder_copies_stops_the_move_and_isnt_read_through() {
+    let dir = fixtures("mo-space-move-folder-to-link");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    let library = c.join("Library");
+    write(&library, "One/1.db", "1");
+    write(&library, "Two/2.db", "2");
+    let elsewhere = c.join("Elsewhere");
+    write(&elsewhere, "Big.wav", "not the plugin's");
+    fs::create_dir_all(&d).unwrap();
+    let stop = AtomicBool::new(false);
+    // Both folders are listed before either is copied. As the first one's file copies, the plugin puts a link to a
+    // folder elsewhere in place of the other one.
+    let copy = d.join("Library");
+    let swapped = AtomicBool::new(false);
+    let progress = |_| {
+        if !swapped.swap(true, Ordering::Relaxed) {
+            let other = library.join(if copy.join("One").join("1.db").exists() { "Two" } else { "One" });
+            fs::remove_dir_all(&other).unwrap();
+            folder_link(&elsewhere, &other);
+        }
+    };
+    let result = move_folder(&s(&library), &s(&d), 2, whose(), &ROOMY, &[], &progress, &stop);
+    let Err(CantMove::Failed(why)) = &result else { panic!("{result:?}") };
+    assert!(why.contains("turned into a link or a file"), "{why}");
+    // Nothing moved, and nothing where the link leads was copied as the plugin's.
+    assert!(!copy.exists() && !is_link(&library));
+    assert_eq!(fs::read_to_string(elsewhere.join("Big.wav")).unwrap(), "not the plugin's");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_pipe_or_a_socket_in_the_folder_is_passed_over() {
+    // Short names: a socket's path can't be long on a Mac.
+    let dir = fixtures("mo-pipes");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    let library = c.join("L");
+    write(&library, "Patch.db", "patch");
+    write(&library, "Sub/Inner.db", "inner");
+    let made = std::process::Command::new("mkfifo").arg(library.join("help.pipe")).status().unwrap();
+    assert!(made.success());
+    let _socket = std::os::unix::net::UnixListener::bind(library.join("Sub").join("s")).unwrap();
+    fs::create_dir_all(&d).unwrap();
+    let stop = AtomicBool::new(false);
+    let moved = move_folder(&s(&library), &s(&d), 20, whose(), &ROOMY, &[], &nothing, &stop).unwrap();
+    assert!(is_link(&library));
+    let copy = d.join("L");
+    assert_eq!(fs::read_to_string(copy.join("Patch.db")).unwrap(), "patch");
+    assert_eq!(fs::read_to_string(copy.join("Sub").join("Inner.db")).unwrap(), "inner");
+    assert!(fs::symlink_metadata(copy.join("help.pipe")).is_err());
+    assert!(fs::symlink_metadata(copy.join("Sub").join("s")).is_err());
+    // Nor are they taken for something only in the old copy: it can go once the plugin opens fine.
+    assert_eq!(only_in_old_copy(&moved, std::slice::from_ref(&moved), &stop), Ok(Vec::new()));
+}
+
+/// Unplugging a drive is a folder going all at once, with what's in it: a folder renamed away stands in for it (a
+/// Mac and Linux let a folder that's being read be renamed).
+#[cfg(unix)]
+#[test]
+fn moving_back_stops_when_the_other_drive_goes_part_way() {
+    let dir = fixtures("mo-space-move-back-drive-gone");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    let library = c.join("Library");
+    for n in 0..10 {
+        write(&library, &format!("{n}.db"), "x");
+    }
+    fs::create_dir_all(&d).unwrap();
+    let stop = AtomicBool::new(false);
+    let moved = move_folder(&s(&library), &s(&d), 10, whose(), &ROOMY, &[], &nothing, &stop).unwrap();
+    let bin = FolderBin { dir: dir.join("bin"), held: RefCell::new(Vec::new()) };
+    let done = remove_old_copy(&moved, std::slice::from_ref(&moved), false, &bin, &stop);
+    assert!(done.problems.is_empty(), "{:?}", done.problems);
+    // Moving back, the plugin saves them all again as the first pass ends (a byte each), so the last pass brings them
+    // too; and the other drive goes as the first of those comes back.
+    let progress = |bytes: u64| {
+        if bytes == 10 {
+            (0..10).for_each(|n| fs::write(library.join(format!("{n}.db")), "yy").unwrap());
+        } else if bytes == 12 {
+            fs::rename(&d, dir.join("D unplugged")).unwrap();
+        }
+    };
+    let result = move_back(&moved, &ROOMY, &progress, &stop);
+    let Err(CantMove::Failed(why)) = &result else { panic!("{result:?}") };
+    assert!(why.contains("Copying stopped at"), "{why}");
+    // The rest wasn't taken for deleted: the plugin still uses the link, and nothing came back half.
+    assert!(is_link(&library));
+    assert!(!c.join("Library (moving back)").exists());
+    assert_eq!(fs::read_dir(dir.join("D unplugged").join("Library")).unwrap().count(), 10);
+}
+
+#[test]
 fn an_old_copy_stays_while_it_is_the_only_copy_the_plugin_could_use() {
     let dir = fixtures("mo-space-move-old-copy");
     let (c, d) = (dir.join("C"), dir.join("D"));

@@ -217,7 +217,7 @@ pub fn link_again(
             ))
         }
     };
-    let first = copy_tree(&tree, Fill::Freshen, progress, stop).map_err(partly)?;
+    let first = copy_tree(&Tree { last: false, ..tree }, Fill::Freshen, progress, stop).map_err(partly)?;
     // What the plugin saved meanwhile. What the first pass wrote is the update's, not yours: it isn't kept again.
     let mut ours = first.written.clone();
     ours.sort();
