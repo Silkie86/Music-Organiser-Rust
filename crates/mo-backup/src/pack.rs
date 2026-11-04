@@ -147,7 +147,6 @@ enum Source {
 }
 
 /// One file in a song's zip, as it was when listed.
-#[derive(Clone)]
 struct Item {
     source: Source,
     inside: String,
@@ -242,19 +241,38 @@ impl<'a> Packer<'a> {
             Match::Bytes => {
                 // Only times moved (a FAT or exFAT drive after the clocks change, a tool that set new times): the zip
                 // is made again from its own bytes, not your files, so its list carries the new times and the next run
-                // doesn't read every file again to compare them. If that can't be done, the song is packed afresh.
-                let mut quick = items.clone();
-                for item in &mut quick {
-                    if matches!(item.source, Source::File(_)) {
-                        item.source = Source::Same;
-                    }
-                }
+                // doesn't read every file again to compare them. A drive that's full or can't be written to leaves
+                // the zip as it is (it holds the files as they are); anything else (a zip that doesn't read back
+                // right) packs the song afresh from your files.
+                let quick: Vec<Item> = items
+                    .iter()
+                    .map(|i| Item {
+                        source: match i.source {
+                            Source::File(_) => Source::Same,
+                            ref other => other.clone(),
+                        },
+                        inside: i.inside.clone(),
+                        size: i.size,
+                        time: i.time,
+                    })
+                    .collect();
                 match self.write(&quick, name, song, &dest, stop) {
                     Ok((_, missing, bad)) if missing.is_empty() && bad.is_empty() => {
                         return Ok(Packed::UpToDate { kept });
                     }
                     Ok((bytes, missing, bad)) => return Ok(written(bytes, kept, missing, bad)),
                     Err(e) if e.kind() == io::ErrorKind::Interrupted => return Err(e),
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            io::ErrorKind::StorageFull
+                                | io::ErrorKind::PermissionDenied
+                                | io::ErrorKind::ReadOnlyFilesystem
+                        ) =>
+                    {
+                        self.drive_there()?;
+                        return Ok(Packed::UpToDate { kept });
+                    }
                     Err(_) => self.drive_there()?,
                 }
             }
@@ -587,14 +605,23 @@ fn write_zip(items: &[Item], song: u64, old: &Path, part: &Path, stop: &AtomicBo
                 zip.start_file(item.inside.as_str(), options)?;
                 copy_file(source, item, &mut zip, &mut buf, stop)?;
             }
-            Source::Kept | Source::Same => {
+            Source::Same => {
+                // Its bytes as they are in the zip before (same() matched them), with its new time.
+                let archive = before.as_mut().ok_or_else(|| io::Error::other("The zip before couldn't be opened"))?;
+                let index = archive
+                    .index_for_name(&item.inside)
+                    .ok_or_else(|| io::Error::other(format!("{} isn't in the zip before", item.inside)))?;
+                let entry = archive.by_index_raw(index)?;
+                match zip_time(item.time) {
+                    Some(when) => zip.raw_copy_file_touch(entry, when, None)?,
+                    None => zip.raw_copy_file(entry)?,
+                }
+            }
+            Source::Kept => {
                 let Some(archive) = before.as_mut() else {
                     return Err(io::Error::other("The zip before couldn't be opened"));
                 };
                 let Some(index) = archive.index_for_name(&item.inside) else {
-                    if item.source == Source::Same {
-                        return Err(io::Error::other(format!("{} isn't in the zip before", item.inside)));
-                    }
                     missing.push(item.inside.clone());
                     continue;
                 };

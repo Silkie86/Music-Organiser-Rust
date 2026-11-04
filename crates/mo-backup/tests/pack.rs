@@ -85,8 +85,16 @@ fn a_song_packs_once_and_again_only_when_it_changes() {
     assert_eq!(packer.pack_song(&files, name, 1, &stop).unwrap(), Packed::UpToDate { kept: 0 });
     // Only the time moved (the clocks changed on a FAT drive): the bytes are compared, and the zip is made again from
     // its own bytes so its list carries the new time (the next run doesn't read every file again).
+    let kick_name = names.iter().find(|n| n.ends_with("Samples/Kick.wav")).unwrap().clone();
+    let kick_zip_time = || {
+        let mut zip = zip::ZipArchive::new(fs::File::open(&zip_path).unwrap()).unwrap();
+        zip.by_name(&kick_name).unwrap().last_modified().unwrap()
+    };
+    let time_before = kick_zip_time();
     set_time(&kick, 3700);
     assert_eq!(packer.pack_song(&files, name, 1, &stop).unwrap(), Packed::UpToDate { kept: 0 });
+    // The file's own time in the zip moved too, so the zip agrees with its list.
+    assert_ne!(kick_zip_time(), time_before);
     let kick_time = fs::metadata(&kick).unwrap().modified().unwrap().duration_since(SystemTime::UNIX_EPOCH).unwrap();
     let list = list_in(&zip_path);
     assert!(list.contains(&format!("3000\t{}\t", kick_time.as_nanos())), "{list}");
