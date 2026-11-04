@@ -31,6 +31,13 @@ pub fn window_thread_now() -> Option<Vec<String>> {
     None
 }
 
+/// Reads the app's debugging info (the function names a stuck thread's stack is shown with), so the first freeze
+/// doesn't wait for it. Takes a moment, or longer on a busy disk: run it away from the window.
+pub fn get_names_ready() {
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    windows_x64::get_names_ready();
+}
+
 /// How often the app has had to find a page of its memory (most found at once in memory, some read back from the
 /// disk) so far, and how much of its memory is in RAM now, in bytes. `None` where that isn't known.
 pub fn memory_now() -> Option<Memory> {
@@ -289,6 +296,11 @@ mod windows_x64 {
             index -= 1;
         }
         name
+    }
+
+    /// Looks up a name of the app's own, which reads its debugging info.
+    pub fn get_names_ready() {
+        let _ = names(&[get_names_ready as *const () as usize as u64]);
     }
 
     /// The symbol helper's lock, made once and kept for the app's life.
