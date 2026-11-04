@@ -22,6 +22,8 @@ fn main() -> Result<(), slint::PlatformError> {
     // The graphics card takes a while to wake up: it's looked for while the log and the settings start.
     mo_ui::gpu::look_ahead();
     let session = log::start_session();
+    // Programs the app opens (DAWs, folders) start at the window's priority, not a background thread's.
+    mo_app::shell::get_ready();
     // Rule 28: what an earlier run or a stopped tool left behind is cleared, a little later, at low priority.
     mo_app::tidy::start();
     mo_ui::startup::step("log");

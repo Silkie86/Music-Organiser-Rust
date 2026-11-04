@@ -22,7 +22,7 @@ use rayon::prelude::*;
 
 use crate::background::on_pool;
 use crate::shell;
-use crate::songs::{ASK_DOUBTS, DOUBTS_ACROSS_FOLDERS, Songs};
+use crate::songs::{ASK_DOUBTS, DOUBTS_ACROSS_FOLDERS, RUN_GAP, Songs, run_gap};
 
 /// The details of the saves read here, by their ids, shared with the song panel's reader.
 pub type LiveDetails = Arc<Mutex<HashMap<i64, SaveDetail>>>;
@@ -99,7 +99,8 @@ impl Updated {
 
 impl Live {
     /// Reads what the list is made from. Fix's copies still waiting for Keep or Delete are left out: until Keep, a
-    /// song opens its original. `gap_months` splits a song's saves into runs.
+    /// song opens its original. Runs of saves split at the gap picked in Settings (`version_gap_months`, shared with
+    /// the C# app), or at `gap_months` when none is picked.
     pub fn load(library: &Library, gap_months: u32, details: LiveDetails) -> Result<Live, LibraryError> {
         let pending = library.pending_fixes()?;
         let mut saves = library.saves()?;
@@ -114,6 +115,7 @@ impl Live {
         let asking = (library.setting(ASK_DOUBTS)?.as_deref() != Some("0"))
             .then(|| library.setting(DOUBTS_ACROSS_FOLDERS).map(|v| v.as_deref() == Some("1")))
             .transpose()?;
+        let gap_months = run_gap(library.setting(RUN_GAP)?.as_deref(), gap_months);
         let mut daw_exes = HashMap::new();
         let daws: BTreeSet<String> = saves.iter().map(|s| s.daw.clone()).chain(DAWS.map(String::from)).collect();
         for daw in daws {
