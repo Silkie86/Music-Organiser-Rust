@@ -972,6 +972,67 @@ fn a_folder_that_turns_into_a_link_as_the_folder_copies_stops_the_move_and_isnt_
     assert_eq!(fs::read_to_string(elsewhere.join("Big.wav")).unwrap(), "not the plugin's");
 }
 
+/// The folder above is swapped while one of its folders is being read (a Mac and Linux let such a folder be renamed;
+/// Windows doesn't).
+#[cfg(unix)]
+#[test]
+fn a_folder_whose_folder_above_turns_into_a_link_as_the_folder_copies_isnt_read_through() {
+    let dir = fixtures("mo-space-move-folder-above-to-link");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    let library = c.join("Library");
+    write(&library, "A/B/b.db", "b");
+    write(&library, "A/C/c.db", "c");
+    let elsewhere = c.join("Elsewhere");
+    write(&elsewhere, "B/b.db", "not the plugin's");
+    write(&elsewhere, "C/c.db", "not the plugin's");
+    fs::create_dir_all(&d).unwrap();
+    let stop = AtomicBool::new(false);
+    // A's folders are listed before either is copied. As the first one's file copies, the plugin puts A aside and a
+    // link to a folder elsewhere, with folders of the same names, in its place.
+    let swapped = AtomicBool::new(false);
+    let progress = |_| {
+        if !swapped.swap(true, Ordering::Relaxed) {
+            fs::rename(library.join("A"), c.join("A aside")).unwrap();
+            folder_link(&elsewhere, &library.join("A"));
+        }
+    };
+    let result = move_folder(&s(&library), &s(&d), 2, whose(), &ROOMY, &[], &progress, &stop);
+    let Err(CantMove::Failed(why)) = &result else { panic!("{result:?}") };
+    assert!(why.contains("turned into a link or a file"), "{why}");
+    assert!(!d.join("Library").exists() && !is_link(&library));
+}
+
+#[test]
+fn a_folder_the_first_pass_copied_that_is_a_link_by_the_last_pass_stops_the_move() {
+    let dir = fixtures("mo-space-move-copied-to-link");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    let library = c.join("Library");
+    write(&library, "One/1.db", "1");
+    write(&library, "Two/2.db", "2");
+    let elsewhere = c.join("Elsewhere");
+    write(&elsewhere, "1.db", "not the plugin's");
+    fs::create_dir_all(&d).unwrap();
+    let stop = AtomicBool::new(false);
+    // Once the first pass has copied both, the plugin puts a link to a folder elsewhere in place of the one copied
+    // first (it isn't being read then).
+    let copy = d.join("Library");
+    let first = Mutex::new("");
+    let progress = |bytes: u64| {
+        if bytes == 1 {
+            *first.lock().unwrap() = if copy.join("One").join("1.db").exists() { "One" } else { "Two" };
+        } else if bytes == 2 {
+            let swapped = library.join(*first.lock().unwrap());
+            fs::remove_dir_all(&swapped).unwrap();
+            folder_link(&elsewhere, &swapped);
+        }
+    };
+    let result = move_folder(&s(&library), &s(&d), 2, whose(), &ROOMY, &[], &progress, &stop);
+    let Err(CantMove::Failed(why)) = &result else { panic!("{result:?}") };
+    assert!(why.contains("changed while it was being copied"), "{why}");
+    // The copy, which would have gone into use with a real folder where the plugin has a link, went.
+    assert!(!copy.exists() && !is_link(&library));
+}
+
 #[cfg(unix)]
 #[test]
 fn a_pipe_or_a_socket_in_the_folder_is_passed_over() {
@@ -1030,6 +1091,41 @@ fn moving_back_stops_when_the_other_drive_goes_part_way() {
     assert!(is_link(&library));
     assert!(!c.join("Library (moving back)").exists());
     assert_eq!(fs::read_dir(dir.join("D unplugged").join("Library")).unwrap().count(), 10);
+}
+
+/// As above, with the copy moved on to a third drive since, and a link in its place (another tool did that): the
+/// drive the link leads to goes.
+#[cfg(unix)]
+#[test]
+fn moving_back_stops_when_the_drive_the_copys_link_leads_to_goes_part_way() {
+    let dir = fixtures("mo-space-move-back-linked-drive-gone");
+    let (c, d, e) = (dir.join("C"), dir.join("D"), dir.join("E"));
+    let library = c.join("Library");
+    for n in 0..10 {
+        write(&library, &format!("{n}.db"), "x");
+    }
+    fs::create_dir_all(&d).unwrap();
+    fs::create_dir_all(&e).unwrap();
+    let stop = AtomicBool::new(false);
+    let moved = move_folder(&s(&library), &s(&d), 10, whose(), &ROOMY, &[], &nothing, &stop).unwrap();
+    let bin = FolderBin { dir: dir.join("bin"), held: RefCell::new(Vec::new()) };
+    let done = remove_old_copy(&moved, std::slice::from_ref(&moved), false, &bin, &stop);
+    assert!(done.problems.is_empty(), "{:?}", done.problems);
+    fs::rename(d.join("Library"), e.join("Library")).unwrap();
+    folder_link(&e.join("Library"), &d.join("Library"));
+    let progress = |bytes: u64| {
+        if bytes == 10 {
+            (0..10).for_each(|n| fs::write(library.join(format!("{n}.db")), "yy").unwrap());
+        } else if bytes == 12 {
+            fs::rename(&e, dir.join("E unplugged")).unwrap();
+        }
+    };
+    let result = move_back(&moved, &ROOMY, &progress, &stop);
+    let Err(CantMove::Failed(why)) = &result else { panic!("{result:?}") };
+    assert!(why.contains("Copying stopped at"), "{why}");
+    assert!(is_link(&library));
+    assert!(!c.join("Library (moving back)").exists());
+    assert_eq!(fs::read_dir(dir.join("E unplugged").join("Library")).unwrap().count(), 10);
 }
 
 #[test]

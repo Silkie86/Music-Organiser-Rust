@@ -1428,15 +1428,15 @@ pub(crate) fn copy_tree(
     let mut folders = vec![(tree.from.to_path_buf(), tree.to.to_path_buf())];
     while let Some((source_dir, copy_dir)) = folders.pop() {
         let top = source_dir.as_path() == tree.from;
-        // A folder inside that turned into a link (or a file) since its folder was listed is never read through: what
-        // a link leads to isn't the plugin's. Its folder in the copy is made already, so the copy can't take it as it
-        // is now, and it stops, whichever pass it is.
-        if !top && fs::symlink_metadata(&source_dir).is_ok_and(|m| !m.is_dir()) {
-            return Err(CantMove::Failed(format!(
-                "{} turned into a link or a file while it was being copied: something is changing the folder. Close \
-                 your DAW and the plugin, then try again.",
-                text(&source_dir)
-            )));
+        // A folder inside that turned into a link (or a file) since its folder was listed, or one a folder above it
+        // did, is never read through: what a link leads to isn't the plugin's. Its folder in the copy is made already,
+        // so the copy can't take it as it is now, and it stops, whichever pass it is.
+        if !top {
+            let rest = source_dir.strip_prefix(tree.from).unwrap_or(&source_dir);
+            let through_a_link = fs::canonicalize(&source_dir).is_ok_and(|real| real != source_real.join(rest));
+            if through_a_link || fs::symlink_metadata(&source_dir).is_ok_and(|m| !m.is_dir()) {
+                return Err(changing(&source_dir, "turned into a link or a file"));
+            }
         }
         // Listed once. (A file's size and time in the listing can be old by the time its turn comes: it's looked at
         // again just before it's copied, [`as_now`].)
@@ -1510,6 +1510,18 @@ pub(crate) fn copy_tree(
                 }
                 continue;
             }
+            // A link where a copy the move made has a real file or folder (the pass before copied one there) turned into
+            // a link since: the copy can't take it as it is now, as for a folder above. Unless that's the link's own
+            // file, copied for it as it couldn't be made again, and that file is as it was; when it isn't, it changed
+            // meanwhile too. (In a folder of yours, what's there stays.)
+            if kind.is_symlink()
+                && fill == Fill::Freshen
+                && tree.keep_in.is_none()
+                && let Some(m) = &there
+                && !fs::metadata(&source).is_ok_and(|now| m.is_file() && now.is_file() && same_file(m, &now))
+            {
+                return Err(changing(&source, "changed"));
+            }
             // What a file is copied from: itself, or the file a link leads to, for a file link that's copied as its
             // file.
             let linked;
@@ -1556,6 +1568,10 @@ pub(crate) fn copy_tree(
                 Err(_) if went(file, tree) => continue,
                 Err(e) => return Err(failed(file, &e)),
             };
+            // Nor is a pipe or a socket a link leads to, where the link is copied as what it leads to.
+            if kind.is_symlink() && special(&listed.file_type()) {
+                continue;
+            }
             // Never downloaded to be copied (one that went online-only after the check): it stops before the swap. A
             // file a link leads to is copied only where the link can't be made again: counting asks whether it can
             // be, so a copy into a folder of yours stops before anything there changes.
@@ -1744,11 +1760,7 @@ fn as_now(file: &Path, listed: fs::Metadata, tree: &Tree) -> Result<Option<fs::M
     match (now.is_file(), tree.last) {
         (true, _) => Ok(Some(now)),
         (false, false) => Ok(None),
-        (false, true) => Err(CantMove::Failed(format!(
-            "{} turned into a folder or a link as it was about to be copied: something is changing the folder. Close \
-             your DAW and the plugin, then try again.",
-            text(file)
-        ))),
+        (false, true) => Err(changing(file, "turned into a folder or a link")),
     }
 }
 
@@ -1941,12 +1953,24 @@ fn rounded_up(len: u64, piece: u64) -> u64 {
 /// drops out, or a folder that can't be read, isn't taken for files deleted (they'd be missing from the copy, while
 /// still where they were).
 fn went(path: &Path, tree: &Tree) -> bool {
-    not_there(path) && fs::symlink_metadata(tree.from).is_ok()
+    // Where it really is: a folder that's a link itself is there only while what it leads to is.
+    not_there(path) && fs::metadata(tree.from).is_ok()
 }
 
-/// Whether a name in a folder is neither a file, a folder nor a link: a pipe or a socket (or a device), which only a
-/// Mac and Linux have. A copy passes it over: it holds nothing to copy, and reading a pipe would wait for ever for
-/// something to write into it.
+/// What a copy says when something in the folder changed in a way it can't copy as it is now (`how` says how), as the
+/// copy went: a plugin or the DAW is at work in it.
+fn changing(path: &Path, how: &str) -> CantMove {
+    CantMove::Failed(format!(
+        "{} {how} while it was being copied: something is changing the folder. Close your DAW and the plugin, then \
+         try again.",
+        text(path)
+    ))
+}
+
+/// Whether a name in a folder is neither a file, a folder nor a link: a pipe or a socket (or a device) on a Mac or
+/// Linux. A copy passes it over: it holds nothing to copy, and reading a pipe would wait for ever for something to
+/// write into it. (Windows lists its own socket files, which are rare, as files: one is copied as any file is, and the
+/// copy stops if it can't be.)
 fn special(kind: &fs::FileType) -> bool {
     !kind.is_file() && !kind.is_dir() && !kind.is_symlink()
 }
