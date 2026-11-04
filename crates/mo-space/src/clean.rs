@@ -538,6 +538,12 @@ pub trait Bin {
     fn holds(&self, _removed: &[Removed]) -> Option<Vec<bool>> {
         None
     }
+    /// Whether the bin `removed` went to can be looked in now: not while the drive it was on isn't plugged in (a USB
+    /// disk keeps its own Recycle Bin), when [`holds`](Self::holds) doesn't see it though it may still be there for when
+    /// the drive is back. By default, always.
+    fn can_look_for(&self, _removed: &Removed) -> bool {
+        true
+    }
     /// Why this bin can't take `path` (`bytes` big) quietly: sending it would ask you something first, or remove it for
     /// good. `None` when it can. For what the app clears by itself, with nobody there to answer (the start-up sweep's
     /// old F12 notes); the Space page's clean-ups, which you start and watch, check what they need as they go. A bin of
@@ -860,9 +866,22 @@ impl Bin for SystemBin {
         held_in_system_bin(removed)
     }
 
+    fn can_look_for(&self, removed: &Removed) -> bool {
+        drive_is_here(&removed.real)
+    }
+
     fn refuses_quietly(&self, path: &Path, bytes: u64) -> Option<String> {
         refuses_quietly(path, bytes).map(str::to_owned)
     }
+}
+
+/// Whether the drive `real` is on is plugged in, so its Recycle Bin can be looked in: on Windows, the drive's own top
+/// folder (I: itself); elsewhere, where drives have no letters, the folder it was in (a USB disk's folders are only
+/// there while it is).
+fn drive_is_here(real: &str) -> bool {
+    let real = Path::new(real);
+    let at = if cfg!(windows) { real.ancestors().last() } else { real.parent() };
+    at.is_some_and(|at| !at.as_os_str().is_empty() && at.exists())
 }
 
 /// Why the computer's own Recycle Bin can't take `path` (`bytes` big) without a word: what [`cant_keep`] looks for (a
@@ -1643,5 +1662,27 @@ mod tests {
         }
         assert!(file.exists(), "it was only asked about");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_drive_that_isnt_plugged_in_cant_be_looked_in() {
+        use super::{Removed, What};
+        use crate::plugin_space::SpaceKind;
+        let removed = |real: &std::path::Path| Removed {
+            path: text(real),
+            real: text(real),
+            bytes: 1,
+            what: What::Plugin(SpaceKind::Program),
+            when: 1,
+            bin_id: None,
+            binned: None,
+            binned_zone: None,
+        };
+        let dir = std::env::temp_dir();
+        assert!(SystemBin.can_look_for(&removed(&dir.join("Serum.vst3"))));
+        // A USB disk's folders are only there while it's plugged in; on Windows, its letter is.
+        let gone = dir.join("mo-space-no-such-drive").join("Serum.vst3");
+        assert_eq!(SystemBin.can_look_for(&removed(&gone)), cfg!(windows));
+        assert!(!super::drive_is_here(""));
     }
 }

@@ -177,29 +177,39 @@ fn free_name(folder: &Path) -> PathBuf {
     (2..).map(|n| folder.join(format!("{FILE}.unreadable-{n}"))).find(|p| !p.exists()).unwrap_or(first)
 }
 
-/// Writes the file's text into `folder` the safe way (copy, check, then rename): a `.mo-part` file beside it, flushed
-/// to the disk and read back to check it, then renamed over the old file. The part file never stays behind, but for a
-/// crash part way: the start-up sweep (rule 28) clears that one, by the same ending ([`crate::backup::PART_ENDING`]).
-/// Slow (it waits for the disk): call it off the window's thread.
+/// Writes the file's text into `folder` the safe way ([`write_checked`]). Slow (it waits for the disk): call it off the
+/// window's thread.
 pub fn save(folder: &Path, json: &str) -> io::Result<PathBuf> {
     fs::create_dir_all(folder)?;
     let path = folder.join(FILE);
-    let part = folder.join(format!("{FILE}{}", crate::backup::PART_ENDING));
+    write_checked(&path, json)?;
+    Ok(path)
+}
+
+/// Writes `text` to `path` the safe way (copy, check, then rename): a `.mo-part` file beside it
+/// (`<name>.mo-part`), flushed to the disk and read back to check it, then renamed over the old file, so a crash part
+/// way leaves the old one whole. The part file never stays behind, but for a crash part way: the start-up sweep
+/// (rule 28) clears that one, by its whole name, so each file written this way is on its list
+/// (`crate::tidy::is_cut_short`). The app's settings and the Space page's list of what it put in the Recycle Bin
+/// ([`crate::binned`]) are written this way. Waits for the disk: call it off the window's thread.
+pub fn write_checked(path: &Path, text: &str) -> io::Result<()> {
+    let mut part = path.as_os_str().to_owned();
+    part.push(crate::backup::PART_ENDING);
+    let part = PathBuf::from(part);
     let written = (|| {
         let mut f = fs::File::create(&part)?;
-        f.write_all(json.as_bytes())?;
+        f.write_all(text.as_bytes())?;
         f.sync_all()?;
         drop(f);
-        if fs::read(&part)? != json.as_bytes() {
+        if fs::read(&part)? != text.as_bytes() {
             return Err(io::Error::other("the copy written didn't read back the same"));
         }
-        fs::rename(&part, &path)
+        fs::rename(&part, path)
     })();
-    if let Err(e) = written {
+    if written.is_err() {
         let _ = fs::remove_file(&part);
-        return Err(e);
     }
-    Ok(path)
+    written
 }
 
 /// The place the app opens on, from the settings.

@@ -2903,6 +2903,7 @@ dependencies = [
  "mo-sounds",
  "mo-space",
  "rayon",
+ "serde",
  "serde_json",
  "swash",
  "thread-priority",

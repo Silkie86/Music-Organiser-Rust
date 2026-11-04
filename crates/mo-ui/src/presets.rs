@@ -644,6 +644,8 @@ fn show_card(app: &AppWindow) {
                     key: key(o.id),
                     id: o.id.into(),
                     enabled: o.enabled,
+                    main: false,
+                    danger: false,
                 })
                 .collect::<Vec<_>>(),
         )));
@@ -704,6 +706,8 @@ fn show_curve_card(app: &AppWindow) {
                     key: key(o.id),
                     id: o.id.into(),
                     enabled: o.enabled,
+                    main: false,
+                    danger: false,
                 })
                 .collect::<Vec<_>>(),
         )));

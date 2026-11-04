@@ -3003,6 +3003,7 @@ dependencies = [
  "mo-space",
  "rayon",
  "rusqlite",
+ "serde",
  "serde_json",
  "swash",
  "thread-priority",
